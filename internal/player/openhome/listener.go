@@ -112,6 +112,11 @@ type Seams struct {
 // Config is the surface's.
 type Config struct {
 	Device Device
+	// Engine is the player's engine, whose snapshot every read action
+	// answers from (B470 PR 5a3): nil, never a nil pointer, is no engine,
+	// and so is one whose Run has ended or whose shutdown has begun; every
+	// read is then fault 501.
+	Engine Engine
 	// SSDP is serve's shared subsystem; nil leaves discovery off.
 	SSDP *dlna.SSDPSubsystem
 	// Port is output.player.openhomePort: 0 for a port the kernel picks for
@@ -252,7 +257,7 @@ func Start(cfg Config) (*Surface, error) {
 		log = logging.Component("player")
 	}
 	lim := cfg.Limits.orDefaults()
-	s := &Surface{cfg: cfg, lim: lim, log: log, h: newHandler(cfg.Device, lim, cfg.Seams),
+	s := &Surface{cfg: cfg, lim: lim, log: log, h: newHandler(cfg.Device, cfg.Engine, lim, cfg.Seams),
 		poke: make(chan struct{}, 1), loopDone: make(chan struct{}), failed: map[lan.Address]string{},
 		changed: make(chan struct{}), ready: make(chan struct{})}
 	s.gate = newGate(lim, log, s.publish)

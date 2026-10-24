@@ -772,12 +772,14 @@
   and `refuseRewrite` refuses the rewrite about a data dir and a pair it
   could read. **Every setting it keeps holds the value Load gave it, and a
   file Load's decoder takes whole gives up Load's own block** (rounds 2 to
-  4). `priorOutput` decodes the unchanged bytes as Load does, the same
-  decoder set the same way (`KnownFields`) into `config.Config`, before
-  Load's defaults, its BRIDGE_* overrides, its paths and its checks, and
-  keeps that decode's output block (`outputAsLoadDecodes`; the
-  orchestrator's decision on round 4). So nothing the decoder reads or
-  counts differs from Load's. Round 1 decoded the block's pairs in the
+  4). `priorOutput` decodes the unchanged bytes with Load's own decode,
+  `config.DecodeFile` (the same decoder set the same way, `KnownFields`,
+  and since backlog B528 a whole number written as a fraction refused, as
+  a word there is), into `config.Config`, before Load's defaults, its
+  BRIDGE_* overrides, its paths and its checks, and keeps that decode's
+  output block (`outputAsLoadDecodes`; the orchestrator's decision on
+  round 4). So nothing the decoder reads or counts differs from Load's.
+  Round 1 decoded the block's pairs in the
   file's order and kept each value that was not zero: a merge written after
   a key overwrote it (`mpd: off` was saved `on`, a serial binding replaced
   by a merged port binding), and an explicit empty or null value let a
@@ -809,7 +811,12 @@
   (`outputAsLoaded`; what the decoder counts outside the block can only make
   it refuse more, never read a value otherwise); else, when every key is
   text with no tag (`plainKey`), each setting a key names once, decoded on
-  its own, unless refused (`outputRecovered`); a key written more than once
+  its own, unless refused (`outputRecovered`). A block or a setting that
+  writes a whole number as a fraction decodes there as its whole part, so
+  each is also asked `config.CheckWholeNumbers`, Load's check, and does not
+  decode when it says no (B528: until then Load took a file holding
+  `loopbackPort: 7795.5`, and the rewrite kept the 7795 it read); a key
+  written more than once
   and a key output does not take are left out and named by their lines (an
   unknown key went without a word until round 3). A merge key, an alias or
   a tag among the keys, or a block that is not a mapping, keeps nothing,
@@ -846,7 +853,10 @@
   kept as Load decodes it once the typo is put right, and beside Codex's
   alias-heavy block, of which nothing is kept: since round 4 gave every
   file that decodes Load's own block, its fixtures are the only ones that
-  reach that reading (the Claude API on round 4; the test, round 5).)
+  reach that reading (the Claude API on round 4; the test, round 5); and,
+  since B528, a fraction in `scanIntervalSec` beside a block kept whole,
+  and the fraction rows of the rewrite tables, a `loopbackPort: 7795.5`
+  not kept and a fraction in a merged block, which keeps nothing.)
   `TestInitRewriteKeepsTheTLSPairItsConfigNames` and its siblings run the
   real initCmd twice over one `--dir` and assert the exit code, the saved
   config and the fingerprint at the paths `resolveCertPaths` finds.

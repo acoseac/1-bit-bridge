@@ -1,0 +1,345 @@
+package config
+
+import (
+	"bytes"
+	"encoding"
+	"fmt"
+	"math"
+	"math/big"
+	"reflect"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+// A whole-number setting takes no value that yaml.v3 would change on the
+// way in (backlog B528). yaml.v3 v3.0.1 decodes a !!float into an integer
+// by dropping what follows the point (decode.go's scalar, int64(resolved)),
+// and takes -.inf and 2^63 as whatever the platform's conversion makes of
+// them, so scanIntervalSec: 2.5 loaded as 2, the manifest limit's
+// requestsPerMinute: 0.5 as 0, which turns the limit off, and
+// output.player.openhomePort: 7792.9 bound 7792, with no word said: a value
+// nobody wrote. Such a value is refused where a word on its line is: Load
+// refuses the file (DecodeFile), and the player block's reader leaves the
+// block unread (playerReader.whole). A float the integer holds exactly is
+// taken as it is: 30.0, 3e1, and 08, which yaml.v3 resolves as a float.
+// What is weighed is the value the text writes, read exactly as yaml.v3
+// reads it (writtenInteger): yaml.v3 reads a float through
+// strconv.ParseFloat, which rounds to the nearest float64, so
+// 30.0000000000000001 came out 30, 1e-400 0, and 9007199254740993.0
+// 9007199254740992, each whole and each a value nobody wrote.
+
+// DecodeFile decodes raw, a config file's bytes, into cfg as Load does
+// before its defaults, its BRIDGE_* overrides, its paths and its checks:
+// yaml.v3's decoder with unknown keys refused (the typo catcher), then, once
+// that decode succeeds, CheckWholeNumbers over the same bytes. bridge init's
+// rewrite reads a config through it, so the two refuse a file alike. An
+// error yaml.v3 returns quotes the file's text: print it through
+// ValueFreeYAMLError, as Load does.
+func DecodeFile(raw []byte, cfg *Config) error {
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true) // typo-catcher: unknown YAML keys fail the load
+	if err := dec.Decode(cfg); err != nil {
+		return err
+	}
+	return checkWholeNumbers(reflect.TypeOf(cfg), yaml.NewDecoder(bytes.NewReader(raw)).Decode)
+}
+
+// CheckWholeNumbers refuses each whole-number setting that n, decoded into
+// into (a pointer, as for Decode), writes as a value yaml.v3 would change on
+// the way in: a fraction, an infinity, NaN, or a float outside the setting's
+// range (exactInteger). It answers a *yaml.TypeError with a line for each,
+// in the words ValueFreeYAMLError gives a float yaml.v3 refuses itself
+// ("line 5: cannot unmarshal a !!float value into int"), which quote
+// nothing of the value, or nil. It looks at nothing else, so it is asked of
+// a node that decodes into into without an error.
+//
+// yaml.v3 itself maps n onto the settings, decoding it into into's type
+// with each whole number in it replaced by a check (shadowOf), so a merge
+// key, an alias, an inline field and an encoded key reach the setting they
+// reach in the decode, and none other. A map's keys are not looked at: no
+// map in the config is keyed by a number.
+func CheckWholeNumbers(n *yaml.Node, into any) error {
+	return checkWholeNumbers(reflect.TypeOf(into), n.Decode)
+}
+
+// checkWholeNumbers is CheckWholeNumbers for a value of type into (or what
+// it points to), which decode decodes into.
+func checkWholeNumbers(into reflect.Type, decode func(any) error) error {
+	if into == nil {
+		return nil
+	}
+	if into.Kind() == reflect.Pointer {
+		into = into.Elem()
+	}
+	shadow, ok := shadowOf(into)
+	if !ok {
+		return nil
+	}
+	return decode(reflect.New(shadow).Interface())
+}
+
+// exactInteger reports whether yaml.v3 decodes n, a value written for an
+// integer of type t, unchanged: anything but a !!float (an integer, a null,
+// or a value the decoder refuses itself), or a !!float whose value is whole,
+// inside t's range, and the value its text writes. Any other !!float that
+// the decoder takes, it takes changed.
+func exactInteger(n *yaml.Node, t reflect.Type) bool {
+	if n.Kind != yaml.ScalarNode || n.ShortTag() != "!!float" {
+		return true
+	}
+	var f float64
+	if n.Decode(&f) != nil {
+		return false
+	}
+	bits := t.Bits()
+	lo, hi := 0.0, math.Ldexp(1, bits)
+	switch t.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		lo, hi = -math.Ldexp(1, bits-1), math.Ldexp(1, bits-1)
+	}
+	if f != math.Trunc(f) || f < lo || f >= hi {
+		return false
+	}
+	// f is the text as yaml.v3 decodes it, rounded to a float64. The text
+	// must write f.
+	written, ok := writtenInteger(n.Value)
+	if !ok {
+		return false
+	}
+	whole, _ := big.NewFloat(f).Int(nil)
+	return written.Cmp(whole) == 0
+}
+
+// writtenInteger is the whole number a !!float's text writes, read as
+// yaml.v3's resolve reads it, and ok false when the text writes a fraction,
+// a whole number of more than 20 digits (past every 64-bit integer), a
+// number other than zero with an exponent of a million or more, or no
+// number. resolve drops the text's underscores and tries strconv.ParseInt
+// with base 0 first, so !!float 036 is 30, octal, as 036 untagged is, and
+// !!float 0x20000000000001 is 2^53+1, which the float64 rounds to 2^53;
+// then, for a binary or octal prefix base 0 refuses, ParseInt of what
+// follows it in its base, so !!float 0b+11110 is 30 too. What is left is a
+// decimal float: an optional sign, digits with at most one point, and an
+// optional exponent, read here digit by digit, so the work is linear in the
+// text, where big.Rat's is quadratic in a long mantissa's digits. Zero is
+// zero whatever its exponent, as strconv.ParseFloat reads it. Any other
+// number with an exponent of a million or more is refused unread, and is
+// never one yaml.v3 decodes unchanged: strconv stops reading an exponent
+// once it reaches 10000, so such a text overflows, and resolves as a
+// string, or decodes to another value (0. and 9,998 zeros then 3e10000000
+// decodes as 30).
+func writtenInteger(text string) (*big.Int, bool) {
+	plain := strings.ReplaceAll(text, "_", "")
+	if v, err := strconv.ParseInt(plain, 0, 64); err == nil {
+		return big.NewInt(v), true
+	}
+	for _, p := range [...]struct {
+		prefix string
+		base   int
+	}{{"0b", 2}, {"0o", 8}} {
+		rest, ok := strings.CutPrefix(plain, p.prefix)
+		if !ok {
+			if rest, ok = strings.CutPrefix(plain, "-"+p.prefix); ok {
+				rest = "-" + rest
+			}
+		}
+		if ok {
+			if v, err := strconv.ParseInt(rest, p.base, 64); err == nil {
+				return big.NewInt(v), true
+			}
+		}
+	}
+	s, negative := plain, false
+	if s != "" && (s[0] == '+' || s[0] == '-') {
+		s, negative = s[1:], s[0] == '-'
+	}
+	mantissa, exponent, scientific := s, "", false
+	if i := strings.IndexAny(s, "eE"); i >= 0 {
+		mantissa, exponent, scientific = s[:i], s[i+1:], true
+	}
+	whole, fraction, _ := strings.Cut(mantissa, ".")
+	if whole == "" && fraction == "" || !decimalDigits(whole) || !decimalDigits(fraction) {
+		return nil, false
+	}
+	var exp int64
+	var large bool
+	if scientific {
+		var ok bool
+		if exp, large, ok = decimalExponent(exponent); !ok {
+			return nil, false
+		}
+	}
+	digits := strings.TrimLeft(whole+fraction, "0")
+	if digits == "" {
+		return new(big.Int), true
+	}
+	if large {
+		return nil, false
+	}
+	significant := strings.TrimRight(digits, "0")
+	exp += int64(len(digits)-len(significant)) - int64(len(fraction))
+	if exp < 0 || int64(len(significant))+exp > 20 {
+		return nil, false
+	}
+	v, _ := new(big.Int).SetString(significant+strings.Repeat("0", int(exp)), 10)
+	if negative {
+		v.Neg(v)
+	}
+	return v, true
+}
+
+// decimalDigits reports whether s holds the digits 0 to 9 and nothing else;
+// "" does.
+func decimalDigits(s string) bool {
+	return strings.Trim(s, "0123456789") == ""
+}
+
+// decimalExponent reads s, a float's exponent: an optional sign, then at
+// least one digit. large is true, and e 0, for an exponent of a million or
+// more either way.
+func decimalExponent(s string) (e int64, large, ok bool) {
+	negative := false
+	if s != "" && (s[0] == '+' || s[0] == '-') {
+		s, negative = s[1:], s[0] == '-'
+	}
+	if s == "" || !decimalDigits(s) {
+		return 0, false, false
+	}
+	s = strings.TrimLeft(s, "0")
+	if len(s) > 6 {
+		return 0, true, true
+	}
+	if s != "" {
+		e, _ = strconv.ParseInt(s, 10, 64)
+	}
+	if negative {
+		e = -e
+	}
+	return e, false, true
+}
+
+// integerCheck stands in for a whole-number setting of type T in a shadow
+// (shadowOf). It decodes nothing.
+type integerCheck[T any] struct{}
+
+// UnmarshalYAML refuses a value yaml.v3 would decode into T changed. The
+// refusal is a *yaml.TypeError, which the decoder adds to its own and goes
+// on past, so every such setting is named. yaml.v3 asks it of every value
+// but a null, an alias's once the alias is followed, at the line of the
+// node it names.
+func (*integerCheck[T]) UnmarshalYAML(n *yaml.Node) error {
+	t := reflect.TypeFor[T]()
+	if exactInteger(n, t) {
+		return nil
+	}
+	return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: cannot unmarshal a !!float value into %s", n.Line, t)}}
+}
+
+// integerChecks is the integerCheck for each integer kind. A named integer
+// type takes its kind's, which names the kind.
+var integerChecks = map[reflect.Kind]reflect.Type{
+	reflect.Int:     reflect.TypeFor[integerCheck[int]](),
+	reflect.Int8:    reflect.TypeFor[integerCheck[int8]](),
+	reflect.Int16:   reflect.TypeFor[integerCheck[int16]](),
+	reflect.Int32:   reflect.TypeFor[integerCheck[int32]](),
+	reflect.Int64:   reflect.TypeFor[integerCheck[int64]](),
+	reflect.Uint:    reflect.TypeFor[integerCheck[uint]](),
+	reflect.Uint8:   reflect.TypeFor[integerCheck[uint8]](),
+	reflect.Uint16:  reflect.TypeFor[integerCheck[uint16]](),
+	reflect.Uint32:  reflect.TypeFor[integerCheck[uint32]](),
+	reflect.Uint64:  reflect.TypeFor[integerCheck[uint64]](),
+	reflect.Uintptr: reflect.TypeFor[integerCheck[uintptr]](),
+}
+
+// The types a value reads itself through, and the two yaml.v3 decodes
+// otherwise than by their kind.
+var (
+	yamlUnmarshaler     = reflect.TypeFor[yaml.Unmarshaler]()
+	obsoleteUnmarshaler = reflect.TypeFor[interface{ UnmarshalYAML(func(any) error) error }]()
+	textUnmarshaler     = reflect.TypeFor[encoding.TextUnmarshaler]()
+	yamlNodeType        = reflect.TypeFor[yaml.Node]()
+	durationType        = reflect.TypeFor[time.Duration]()
+)
+
+// shadowTypes holds shadowOf's answer for each type it was asked of.
+var shadowTypes sync.Map // reflect.Type → shadowType
+
+// shadowType is one of shadowOf's answers.
+type shadowType struct {
+	t  reflect.Type
+	ok bool
+}
+
+// shadowOf is t with each whole number in it replaced by its integerCheck,
+// and ok false, with t as it is, when t holds none. Every struct field it
+// rebuilds keeps its name and its tag, and every type that holds no whole
+// number is kept as it is, so yaml.v3 maps a document onto the shadow as
+// onto t and decodes the same nodes in the same order: the same keys,
+// merges, aliases and inline fields, and the same count of aliases against
+// its limit. A type that reads its own YAML (yaml.Unmarshaler, the older
+// Unmarshaler, encoding.TextUnmarshaler, yaml.Node) is not looked into: it
+// takes what it takes, as PlayerConfig does. A time.Duration decodes from
+// text alone, so it is no whole number here. An unexported field is one
+// yaml.v3 does not decode, and the shadow leaves it out.
+func shadowOf(t reflect.Type) (reflect.Type, bool) {
+	if s, ok := shadowTypes.Load(t); ok {
+		return s.(shadowType).t, s.(shadowType).ok
+	}
+	s, ok := buildShadow(t, map[reflect.Type]bool{})
+	shadowTypes.Store(t, shadowType{s, ok})
+	return s, ok
+}
+
+// buildShadow is shadowOf's walk. within holds the struct types it is
+// inside, so a type that holds itself is looked into once.
+func buildShadow(t reflect.Type, within map[reflect.Type]bool) (reflect.Type, bool) {
+	p := reflect.PointerTo(t)
+	if t == yamlNodeType || p.Implements(yamlUnmarshaler) || p.Implements(obsoleteUnmarshaler) || p.Implements(textUnmarshaler) {
+		return t, false
+	}
+	switch t.Kind() {
+	case reflect.Pointer, reflect.Slice, reflect.Array, reflect.Map:
+		e, ok := buildShadow(t.Elem(), within)
+		if !ok {
+			return t, false
+		}
+		switch t.Kind() {
+		case reflect.Pointer:
+			return reflect.PointerTo(e), true
+		case reflect.Slice:
+			return reflect.SliceOf(e), true
+		case reflect.Array:
+			return reflect.ArrayOf(t.Len(), e), true
+		}
+		return reflect.MapOf(t.Key(), e), true
+	case reflect.Struct:
+		if within[t] {
+			return t, false
+		}
+		within[t] = true
+		defer delete(within, t)
+		fields := make([]reflect.StructField, 0, t.NumField())
+		holds := false
+		for i := range t.NumField() {
+			f := t.Field(i)
+			if !f.IsExported() {
+				continue
+			}
+			ft, ok := buildShadow(f.Type, within)
+			holds = holds || ok
+			fields = append(fields, reflect.StructField{Name: f.Name, Type: ft, Tag: f.Tag})
+		}
+		if !holds {
+			return t, false
+		}
+		return reflect.StructOf(fields), true
+	}
+	if check, ok := integerChecks[t.Kind()]; ok && t != durationType {
+		return check, true
+	}
+	return t, false
+}

@@ -108,6 +108,13 @@ func (s *session) reportStep() bool {
 		}
 		o.crossed, heard = true, o
 		oid := o.id
+		// What the decoder gave of its content goes first, to an Events that
+		// takes it (B470 PR 5a3), so the engine holds it as the occurrence
+		// is heard.
+		if de, ok := s.ev.(engine.DetailsEvents); ok {
+			d := detailsOf(o.pcm)
+			evs = append(evs, func() { de.Details(id, oid, d) })
+		}
 		evs = append(evs, func() { s.ev.Audible(id, oid) })
 	}
 	// What is heard: its content played, at most what it gave the sink.

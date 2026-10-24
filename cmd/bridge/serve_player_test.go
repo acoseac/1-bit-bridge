@@ -591,6 +591,45 @@ func (w *logWatch) all() string {
 	return strings.Join(w.lines, "\n")
 }
 
+// logPark is the default logger's handler while a test holds the first
+// goroutine that logs msg in its log call: until letGo, or until the test
+// ends, since the test's context ends before its cleanups run, so a stop
+// that joins the parked goroutine never waits on it. It keeps nothing.
+// Installed through loggingtest.SetDefault.
+type logPark struct {
+	msg     string
+	once    sync.Once
+	release chan struct{}
+	ended   <-chan struct{}
+	letGo   func()
+}
+
+func parkFirstLog(t *testing.T, msg string) *logPark {
+	t.Helper()
+	p := &logPark{msg: msg, release: make(chan struct{}), ended: t.Context().Done()}
+	var released sync.Once
+	p.letGo = func() { released.Do(func() { close(p.release) }) }
+	loggingtest.SetDefault(t, slog.New(p))
+	return p
+}
+
+func (p *logPark) Enabled(context.Context, slog.Level) bool { return true }
+
+func (p *logPark) Handle(_ context.Context, r slog.Record) error {
+	if r.Message == p.msg {
+		p.once.Do(func() {
+			select {
+			case <-p.release:
+			case <-p.ended:
+			}
+		})
+	}
+	return nil
+}
+
+func (p *logPark) WithAttrs([]slog.Attr) slog.Handler { return p }
+func (p *logPark) WithGroup(string) slog.Handler      { return p }
+
 // TestServeStartsThePlayerOnlyWhenEveryGateHolds pins serve's decision at
 // boot, from the boot snapshot. The player starts only on Linux, with the
 // player enabled in a block that reads, a DAC bound, and a pause release
@@ -955,8 +994,24 @@ func TestALiveBindingChangeReportsThePlayersOutputUnavailable(t *testing.T) {
 // back gives the output back from the watcher's last snapshot of it, which
 // plays nothing until asked. The watcher published nothing after its first
 // snapshot.
+//
+// The watcher counts a publish after the feed has handed the snapshot on
+// (its mailboxes, its log line, then the count), so the engine can have the
+// first snapshot's output, and the test its Play, before that publish is
+// counted: a count read then missed it (B536, CI's "published 1 snapshots").
+// The count is read while that first publish is still held at its log
+// line, so it is exact: only the watcher's goroutine publishes here (the
+// service's disabled publish waits for the watch to stop, which the parked
+// publish holds back, and once it is let go the held reading), every publish
+// before the parked one is counted by then, and nothing else can publish
+// until the test lets it go. The test then expects that one publish and no
+// other, so a publish the watcher makes for the changed binding before it
+// reads the box is counted against it too (B536; the second review: a count
+// read once the held reading has arrived would already include such a
+// publish).
 func TestTheLiveConfigReachesThePlayersOutputWithoutAReadingOfTheBox(t *testing.T) {
 	needsDirectorySync(t)
+	first := parkFirstLog(t, "player DAC: available")
 	var held atomic.Bool
 	release, reading := make(chan struct{}), make(chan struct{}, 1)
 	standIn := newPlayerStandIn()
@@ -994,8 +1049,9 @@ func TestTheLiveConfigReachesThePlayersOutputWithoutAReadingOfTheBox(t *testing.
 	if err := eng.Play(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	publishes := ps.hotplug.Status().Stats.Publishes
 	boot := ps.holder.Load().Output.Player.Device
+	publishes := ps.hotplug.Status().Stats.Publishes + 1
+	first.letGo()
 	held.Store(true)
 	ps.livePlayer(t, func(p *config.PlayerConfig) { p.Device = goBarByModel })
 	select {

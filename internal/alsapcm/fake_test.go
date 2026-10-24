@@ -512,6 +512,15 @@ func (k *fakeKernel) revoke() {
 	k.check()
 }
 
+// hold ends free and takes back what is left of a grant: the clock moves
+// only by a grant from now on.
+func (k *fakeKernel) hold() {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.unlimited, k.budget = false, 0
+	k.check()
+}
+
 // free lets the clock move as far as every poll needs from now on.
 func (k *fakeKernel) free() {
 	k.mu.Lock()

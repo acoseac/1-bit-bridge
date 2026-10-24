@@ -6,6 +6,10 @@ paths:
   - "Makefile"
   - "Dockerfile"
   - ".goreleaser.yaml"
+  - "scripts/third-party-licenses/**"
+  - "deploy/**"
+  - "scripts/alsa-abi/check.sh"
+  - "THIRD_PARTY_LICENSES.md"
   - "compose.yaml"
   - "internal/sweeptest/**"
   - "internal/proctest/**"
@@ -26,6 +30,8 @@ How a test here is written, run and trusted, and the CI, SonarCloud and Docker r
 Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had there, so a code comment citing "CLAUDE.md <title>" or "under **<section>**" means an entry here. The record behind each rule is in `ops/engineering-log.md`: grep it by symbol, file or PR number before changing anything a rule names.
 
 ## Build, CI, and test discipline
+
+- **Every release archive and Docker image carries freshly generated third-party licences from the union of the release builds; missing licences fail the release. Never replace build-derived discovery with the go.mod list or skip the before-hook. Require a licence at each effective module root; include compiled-package ancestry and the pinned Go toolchain notices. Unknown notice suffixes fail; never synthesize module grants. Omit unneeded Tailscale webclient and debugeventbus assets with the release tags in .goreleaser.yaml; keep all builds, deploys and CI tests/vet in step through the repository-wide reviewed-site census in check-build-tags, over every operational file and every non-record Markdown file the walk reaches (records by basename: engineering-log.md, History-*, plan-* and release-notes-*). Scan all fence labels except text, plain, plaintext, txt, output, log, diff, patch, json, jsonc, yaml, yml, toml, ini, xml, html, css, sql, go, golang, swift and mermaid; recognize blockquote/list containers and end fences when their containers end, reject backtick openers with backticks in their info, and strip console/session/terminal prompts before comments. The census is the union of build/install/run/test/vet followed after optional flags by a package pattern regardless of executable spelling, unless the verb is in command position (line start; after ;, &, |, ( or !, a VAR=value assignment, or if, then, else, elif, do, while, until, sudo, exec, command, env, time, nohup, nice), where it is the command itself (coreutils install, the shell's test); the executable rule (a case-insensitive Go path or variable before a verb even without a package; includes go.exe, go1.27.3 and gotip); and the tool list (gotestsum, staticcheck and golangci-lint wherever named, its GitHub action included; dlv debug/test/exec after any flags). Match with quotes, backticks, commas and brackets as separators only on the matching copy. Keep original logical lines and multiplicities; review ambiguous matches. Static analysis cannot see a verb computed at run time, a package argument and a verb on different unjoined lines, or a tool not on the list that drives go. Discover with those same tags; refuse YAML null, boolean and numeric tag spellings. Refuse linked web packages and every non-main-module embed outside the exact module@version/package/file allowlist; exercise the real six-target graph in tests. The supplement registry is empty. Docker generates notices with the full go.mod patch toolchain and copies them into its final stage. Pin embedded-asset supplements to exact module versions and re-audit on upgrades or replacements. Discovery refuses vendor trees, a non-default GOFLAGS or workspace, and non-default architecture feature levels.** (B500) → History-rules-build-ci-tests.md
 
 - **SonarCloud's `go:S2077` follows a named const to its concatenation.** → History-rules-build-ci-tests.md
 - **A test server that redirects to the REQUEST'S OWN path is a BLOCKER for SonarCloud's gate.** → History-rules-build-ci-tests.md
@@ -61,6 +67,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 - **A window between two statements is reproduced by PARKING a goroutine in it, not by stress.** → History-rules-build-ci-tests.md
 - **A running SQLite statement is parked from INSIDE it, by a Go collation** (#998) → History-rules-build-ci-tests.md
 - **A test handler that holds a request until the client gives up must DRAIN a POST's body first** (#1003) → History-rules-build-ci-tests.md
+- **…and answers nothing once the client gives up: it aborts the handler (`panic(http.ErrAbortHandler)`) rather than return** (2026-10-24, B526). **Don't let a held test handler return once its client has hung up.** → History-rules-build-ci-tests.md
 - **A test whose request gets an answer with no body sends it on a transport of its own, never `http.DefaultTransport`** (2026-10-18, backlog B456) **Don't put such a client back on the default transport, and don't hunt the window by oversubscribing HTTP tests.** → History-rules-build-ci-tests.md
 - **A test connection recorder that an assertion reads after the client returns must record under the lock before it closes the connection** (2026-10-20, backlog B461). **Don't Close first and append after: the client's handshake fails as soon as Close lands, so the assertion can run while the append is still pending.** → History-rules-build-ci-tests.md
 - **Dependabot's github-actions ecosystem groups `github/codeql-action*` so the three CodeQL steps arrive in one PR** (2026-10-20, backlog B459). **Don't drop the `codeql-action` group: a single-step PR fails alone because `init` stamps its version into the config `autobuild`/`analyze` refuse.** → History-rules-build-ci-tests.md

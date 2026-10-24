@@ -349,7 +349,7 @@ Per PR:
    of a silently-skipped XCTest case, and the reason to compare counts rather
    than just look for reds:
    ```bash
-   go test ./internal/x/... -count=1 -v 2>&1 | tee /tmp/t.log
+   go test -tags ts_omit_webclient,ts_omit_debugeventbus ./internal/x/... -count=1 -v 2>&1 | tee /tmp/t.log
    grep -c '^=== RUN' /tmp/t.log; grep -c '^\s*--- PASS' /tmp/t.log
    grep -nE 'panic:|FAIL' /tmp/t.log | head
    ```

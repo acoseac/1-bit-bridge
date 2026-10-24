@@ -47,7 +47,7 @@ Write-Host "`n=== 2/6 Build bridge.exe ==="
 Push-Location $src
 $env:CGO_ENABLED = '0'
 $ldflags = "-s -w -X github.com/acoseac/1-bit-bridge/internal/version.ServerVersion=$head"
-go build -ldflags $ldflags -o (Join-Path $binDir 'bridge.exe') .\cmd\bridge
+go build -tags ts_omit_webclient,ts_omit_debugeventbus -ldflags $ldflags -o (Join-Path $binDir 'bridge.exe') .\cmd\bridge
 Pop-Location
 $exe = Join-Path $binDir 'bridge.exe'
 $bytes = (Get-Item $exe).Length

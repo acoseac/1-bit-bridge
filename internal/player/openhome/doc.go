@@ -63,6 +63,8 @@
 // Only /openhome/ (handler.go): the device description, built per request
 // with every URL absolute on the address and port the request arrived on;
 // the four services' descriptions, the bridge's own, generated from its
-// tables (services.go); the SOAP layer (soap.go), whose every valid request
-// is answered 602 until PRs 5a3/5a4 implement actions; and GENA's refusal, 501.
+// tables (services.go); the SOAP layer (soap.go); the actions (actions.go):
+// every read answered from one snapshot of the player's engine, fault 501
+// while no engine runs (PR 5a3), every write 602 until PR 5a4; and GENA's
+// refusal, 501.
 package openhome

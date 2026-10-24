@@ -73,11 +73,65 @@ The candidate is main's head once every fix in scope has merged. Record its sha.
 
 1. **Gate and packaging** on the candidate: `make fmt vet test build-all P=2` (restore
    the two files gofmt 1.27 rewrites, per CLAUDE.md "Build"), then
-   `goreleaser release --snapshot --clean --skip=publish`. Remove `dist/` afterwards.
+   `goreleaser release --snapshot --clean --skip=publish`. The before-hook
+   regenerates `THIRD_PARTY_LICENSES.md` from the release matrix, including
+   replacement modules and their notices. A missing licence stops the release.
+   Before removing `dist/`, run this check from the repository root; it must
+   print one matching notice file for every target archive (currently six).
+   It compares the full bytes, not just the filename:
+
+   ```sh
+   python3 - <<'PYLICENSES'
+   from pathlib import Path
+   import re, tarfile, zipfile
+   expected = Path("THIRD_PARTY_LICENSES.md").read_bytes()
+   targets = re.findall(rb"^- ([a-z0-9]+)/([a-z0-9]+): [0-9]+ modules$", expected, re.M)
+   assert targets, "no release targets in generated notices"
+   wanted = {(os.decode().replace("darwin", "macos"), arch.decode()) for os, arch in targets}
+   seen = set()
+   archives = sorted([*Path("dist").glob("*.tar.gz"), *Path("dist").glob("*.zip")])
+   for path in archives:
+       matches = [target for target in wanted if path.name.endswith(
+           "_" + "_".join(target) + (".zip" if target[0] == "windows" else ".tar.gz"))]
+       assert len(matches) == 1 and matches[0] not in seen, path
+       seen.add(matches[0])
+       if path.suffix == ".zip":
+           with zipfile.ZipFile(path) as archive:
+               names = [n for n in archive.namelist() if n == "THIRD_PARTY_LICENSES.md"]
+               assert len(names) == 1, (path, names)
+               actual = archive.read(names[0])
+       else:
+           with tarfile.open(path) as archive:
+               members = [m for m in archive.getmembers() if m.name == "THIRD_PARTY_LICENSES.md" and m.isfile()]
+               assert len(members) == 1, (path, members)
+               actual = archive.extractfile(members[0]).read()
+       assert actual == expected, "stale or incomplete notices: " + str(path)
+       print(str(path) + ": THIRD_PARTY_LICENSES.md matches")
+   assert seen == wanted, ("missing target archives", wanted - seen)
+   PYLICENSES
+   ```
+
+   Remove `dist/` after this check succeeds. Never use `--skip=before` for
+   a distributable build: dependency bumps rely on the generation hook.
 2. **Docker upgrade test** on the Docker test host (`<DOCKER-TEST-SSH>`, `sudo -n docker`):
    - **Build:** clone the repo, check out the candidate, then
      `sudo -n docker buildx build --load -t bridge-p3:rc .` (BuildKit is required; see CLAUDE.md
      on the Dockerfile).
+   - **Notices:** the native builder generates the same six-target aggregate as
+     the archive hook, using Docker's full patch toolchain pin from go.mod.
+     The final image must contain
+     `/usr/share/doc/1-bit-bridge/THIRD_PARTY_LICENSES.md`. Generate the candidate's
+     notices locally with the pinned toolchain, then compare the image bytes:
+
+     ```sh
+     go run ./scripts/third-party-licenses
+     sudo -n docker run --rm --entrypoint cat bridge-p3:rc \
+       /usr/share/doc/1-bit-bridge/THIRD_PARTY_LICENSES.md > /tmp/bridge-image-notices.md
+     cmp THIRD_PARTY_LICENSES.md /tmp/bridge-image-notices.md
+     ```
+
+     Repeat for both published image architectures when checking release images.
+     A missing or differing file fails packaging validation.
    - **Test library:** generate tagged tracks with the image's own ffmpeg (FLAC at 96/24 and
      44.1/16, an MP3), plus the repo's fixtures (`internal/manifest/testdata/m4a/*.m4a`, a DSF
      from `internal/transcode/testdata/`). Library permissions must be readable by UID 100.

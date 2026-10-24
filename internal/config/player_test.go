@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -342,6 +343,117 @@ func TestASerialInTheWrongFieldIsNeverQuoted(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestAWholeNumberOfThePlayerTakesNoFraction: the block's whole-number
+// settings (pauseReleaseSeconds, openhomePort, device.pcmDevice and
+// device.subdevice) refuse a fraction rather than read its whole part
+// (backlog B528): yaml.v3 decodes a float into an int by dropping what
+// follows the point, so openhomePort: 7792.9 bound 7792 and
+// pauseReleaseSeconds: 45.75 held the DAC for 45 s, with no word said. A
+// fraction, and any float yaml.v3 would change on the way in, leaves the
+// block unread as a word there does: the load goes on, the player is off,
+// the reason names the setting and its line and quotes nothing of the
+// value, and a save writes the block back as the file held it. What is
+// weighed is the value written, exactly, never the float64 it rounds to:
+// pauseReleaseSeconds: 45.0000000000000001 read as 45, and
+// device.pcmDevice: 1e-400 as 0. An integer
+// reads as written, and so does a float whose value is whole (45.0, and 08,
+// which yaml.v3 resolves as a float); left out, the setting is its default.
+// Each subtest is named for the kind of value, never the value.
+func TestAWholeNumberOfThePlayerTakesNoFraction(t *testing.T) {
+	const device = "    device:\n      binding: uniqueModel\n      vendorId: 20b1\n      productId: \"3009\"\n"
+	unlined := regexp.MustCompile(` \(line \d+\)`)
+	// readsAs is a value written and what the player reads it as.
+	type readsAs struct {
+		written string
+		read    int
+	}
+	for _, tc := range []struct {
+		// key is the setting below output.player, and before what the
+		// block holds ahead of it, at indent.
+		key, before, indent string
+		read                func(PlayerConfig) int
+		absent              int
+		whole               []readsAs
+		refused             []string
+	}{
+		{"pauseReleaseSeconds", "", "    ", func(p PlayerConfig) int { return int(p.PauseRelease() / time.Second) }, DefaultPauseReleaseSeconds,
+			[]readsAs{{"45", 45}, {"45.0", 45}, {"4.5e1", 45}}, []string{"45.75", "0.5", "-.inf", "45.0000000000000001"}},
+		{"openhomePort", "    openhome: true\n", "    ", PlayerConfig.EffectiveOpenHomePort, DefaultOpenHomePort,
+			[]readsAs{{"7793", 7793}, {"7793.0", 7793}}, []string{"7792.9", "7793.25", "7793.0000000000001"}},
+		{"device.pcmDevice", device, "      ", func(p PlayerConfig) int { return p.Device.PCMDevice }, 0,
+			[]readsAs{{"1", 1}, {"08", 8}, {"!!float 010", 8}}, []string{"1.5", "0.75", "1e-400"}},
+		{"device.subdevice", device, "      ", func(p PlayerConfig) int { return p.Device.Subdevice }, 0,
+			[]readsAs{{"2", 2}, {"2.0", 2}}, []string{"2.5", "0.25"}},
+	} {
+		name := tc.key[strings.LastIndex(tc.key, ".")+1:]
+		setting := tc.indent + name + ": "
+		write := func(t *testing.T, value string) string {
+			t.Helper()
+			block := "  player:\n    enabled: true\n" + tc.before
+			if value != "" {
+				block += setting + value + "\n"
+			}
+			return writePlayerConfig(t, block)
+		}
+		reads := func(t *testing.T, path string, want int) {
+			t.Helper()
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if on, why := cfg.PlayerEnabled("linux"); !on || why != nil {
+				t.Fatalf("PlayerEnabled = %v, %v; want on", on, why)
+			}
+			if got := tc.read(cfg.Output.Player); got != want {
+				t.Errorf("%s reads as %d, want %d", tc.key, got, want)
+			}
+		}
+		t.Run(tc.key+"/absent", func(t *testing.T) { reads(t, write(t, ""), tc.absent) })
+		for i, w := range tc.whole {
+			t.Run(fmt.Sprintf("%s/whole %d", tc.key, i+1), func(t *testing.T) { reads(t, write(t, w.written), w.read) })
+		}
+		for i, value := range tc.refused {
+			t.Run(fmt.Sprintf("%s/not whole %d", tc.key, i+1), func(t *testing.T) {
+				path := write(t, value)
+				written, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				line := slices.Index(strings.Split(string(written), "\n"), setting+value) + 1
+				cfg, err := Load(path)
+				if err != nil {
+					t.Fatalf("a fraction stopped the load: %v", err)
+				}
+				on, why := cfg.PlayerEnabled("linux")
+				reason := fmt.Sprintf("output.player.%s (line %d): must be a whole number", tc.key, line)
+				if on || why == nil || !strings.Contains(why.Error(), reason) {
+					t.Fatalf("PlayerEnabled = %v, %v; want off, saying %q", on, why, reason)
+				}
+				if cfg.Output.Player.Unread() == nil {
+					t.Errorf("the block read: a fraction must leave it unread, as a word does")
+				}
+				if said := unlined.ReplaceAllString(why.Error(), ""); strings.ContainsAny(said, "0123456789") || strings.Contains(said, value) {
+					t.Errorf("the reason quotes the value: %v", why)
+				}
+				if err := cfg.Save(path); err != nil {
+					t.Fatal(err)
+				}
+				if saved, _ := os.ReadFile(path); !strings.Contains(string(saved), name+": "+value+"\n") {
+					t.Errorf("a save did not write the block back as the file held it:\n%s", saved)
+				}
+				back, err := Load(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, again := back.PlayerEnabled("linux"); again == nil ||
+					unlined.ReplaceAllString(again.Error(), "") != unlined.ReplaceAllString(why.Error(), "") {
+					t.Errorf("after a save: %v; want the same refusal %v", again, why)
+				}
+			})
+		}
 	}
 }
 

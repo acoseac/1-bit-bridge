@@ -27,6 +27,19 @@ reaches a session that has not gone looking for it.
 ## Index
 - [2026-10-24 — B524 round 11: an unlisted floor the snapshot holds refuses restore, a non-file seal is kept and recorded twice, and seal-completion advice names its cause](#2026-10-24--b524-round-11-an-unlisted-floor-the-snapshot-holds-refuses-restore-a-non-file-seal-is-kept-and-recorded-twice-and-seal-completion-advice-names-its-cause)
 - [2026-10-24 — B524: a reset keeps the player floor](#2026-10-24--b524-a-reset-keeps-the-player-floor)
+- [2026-10-24 — B526 items 2 and 3, B532 and B536: four tests CI reddened at random, each red first in its losing order](#2026-10-24--b526-items-2-and-3-b532-and-b536-four-tests-ci-reddened-at-random-each-red-first-in-its-losing-order)
+- [2026-10-24 — B500 round 8: key the build-site census on the verb](#2026-10-24--b500-round-8-key-the-build-site-census-on-the-verb)
+- [2026-10-24 — B500 round 7: the build-site census fails closed](#2026-10-24--b500-round-7-the-build-site-census-fails-closed)
+- [2026-10-24 — B500 round 6: documented deploy tags and invocation census](#2026-10-24--b500-round-6-documented-deploy-tags-and-invocation-census)
+- [2026-10-24 — B500 round 5: deployed builds, embedded-file admission and image notices](#2026-10-24--b500-round-5-deployed-builds-embedded-file-admission-and-image-notices)
+- [2026-10-24 — B500 round 4: omit unused bundled UIs](#2026-10-24--b500-round-4-omit-unused-bundled-uis)
+- [2026-10-24 — B500 round 3: embedded assets and fail-closed discovery](#2026-10-24--b500-round-3-embedded-assets-and-fail-closed-discovery)
+- [2026-10-24 — B500 round 2: package ancestry, shipped grants and release environment](#2026-10-24--b500-round-2-package-ancestry-shipped-grants-and-release-environment)
+- [2026-10-24 — B500: release archives carry build-derived third-party licences](#2026-10-24--b500-release-archives-carry-build-derived-third-party-licences)
+- [2026-10-24 — B515: configured MPD file, command-line hint and named includes](#2026-10-24--b515-configured-mpd-file-command-line-hint-and-named-includes)
+- [2026-10-24 — B470 PR 5a3: the player's OpenHome read actions, each answered from one engine snapshot, and the backend's report of the decoder's length and format](#2026-10-24--b470-pr-5a3-the-players-openhome-read-actions-each-answered-from-one-engine-snapshot-and-the-backends-report-of-the-decoders-length-and-format)
+- [2026-10-24 — B529: Drop a final drain after Resume rollback Pause is refused](#2026-10-24--b529-drop-a-final-drain-after-resume-rollback-pause-is-refused)
+- [2026-10-24 — B528: a whole-number setting refuses a fraction rather than load its whole part, in the player block and across the config](#2026-10-24--b528-a-whole-number-setting-refuses-a-fraction-rather-than-load-its-whole-part-in-the-player-block-and-across-the-config)
 - [2026-10-24 — B526: three ALSA playback hangs are test sequencing defects](#2026-10-24--b526-three-alsa-playback-hangs-are-test-sequencing-defects)
 - [2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader](#2026-10-24--b525-the-players-identity-file-is-read-without-waiting-a-named-pipe-at-player-uuid-is-refused-at-once-by-every-reader)
 - [2026-10-24 — B470 PR 5a2b: shared discovery for the opt-in OpenHome Source](#2026-10-24--b470-pr-5a2b-shared-discovery-for-the-opt-in-openhome-source)
@@ -514,6 +527,811 @@ the ALAC reference corpus), cmd/bridge in 613 s. The 20 new tests and six
 revised ones pass ten race-enabled runs each. The manifest field's doc comment
 now says that a player-uuid holding no one UUID travels alone, as it always
 has, for restore to refuse.
+## 2026-10-24 — B526 items 2 and 3, B532 and B536: four tests CI reddened at random, each red first in its losing order
+
+Four tests had each failed a PR's CI once and passed on a rerun. Each was
+reproduced first by forcing its losing order with a seam or a held channel,
+never a sleep, red on every run with CI's own message (the engine's with its
+count one higher, every late goroutine held); then fixed; then run
+`-race -count=50`, and 200 times under `-race` beside 24 shell busy loops
+(`while :; do :; done`, killed by their PIDs). Every negative control puts
+the old code back under the widening and is red on every run. On legion0
+(Linux, Go 1.27.3), with TMPDIR on disk, since `/tmp` there is tmpfs, which
+the player's engine refuses.
+
+### The engine's shutdown join (`TestShutdownJoinsWithinItsBound`)
+
+CI (linux `test -race (rest)`, #1328 and #1339): "2 goroutines still running
+after Run, want only the abandoned call". Run's shutdown waits for messages:
+the writer's exit, a reservation write's result, each call's answer within
+shutdownGrace. Each goroutine posted its message from inside its function,
+and `spawn` counted it (`live`, `wg`) until it returned, after the post, so
+Run could return with a goroutine it had joined still counted. B523's
+`abandon` and `doneOnce` did not change that path. Widening: an `exiting`
+seam on every goroutine the engine starts, at its end, which the test holds
+from the shutdown on: on the old order the count read 3 every time (the
+writer and the last reservation write, held, beside the abandoned release),
+twenty runs of twenty.
+
+Which side was wrong: Run's doc says it joins every goroutine the engine
+started but an abandoned call, `player.md` says a call that never returns is
+the one thing that outlives Run, and the `live` field's doc says it counts
+goroutines not joined. So the code. The brief's form, an exit signal from
+`spawn` waited for within what is left of the bound, was rejected for one
+with no wait: the harness's `drive` fires every armed timer at once, so a
+wait bounded on the engine's clock is cut short in exactly the tests that
+pin it, and an unbounded wait waits on a return nothing can hold. f now
+returns its last message (`func() any`) and `spawn` drops `live` and then
+posts it, so the message the owner already waits for is the exit signal,
+sent once f's work and its deferred calls are done; Run's bound is what it
+was, and `wg` is still done as the goroutine returns. `writer.run` returns
+its exit, which `writer.ended` sets as its named result after a panic.
+Control: the deferred decrement put back after the post, red twenty runs of
+twenty ("3 goroutines still running after Run (2 held at their end)").
+
+### The harvest tick a shutdown stops (`TestATickStoppedByShutdownReportsNothingAndStopsThere`)
+
+CI (linux `test -race (rest)`): `tick_error phase=submit error=EOF`. A bare
+`EOF`, not a `*url.Error`, is `json.Decoder`'s answer for an empty body: Do
+had returned a response. The fake Atlas cancels the tick's context and holds
+the request until the client hangs up; once the client's close_notify ends
+the server's request context, the handler returned, net/http wrote an empty
+200, and a client between its close_notify and its TCP close takes an answer
+that races that close (`persistConn.roundTrip`: "Use the response"). The
+decision was asked on the production side first, and declined:
+`ctxerr.WithoutCancellation` quiets the cancellation alone, by design
+(its doc: the error must BE the cancellation), and a rule that quiets every
+error arriving once the loop's context has ended would hide a store write
+that fails as the shutdown begins (the cursor's, the submit stamp's, the
+booklet store's), none of which watch the context. So the fake: once its
+client has hung up it aborts (`http.ErrAbortHandler`), the server closes the
+connection with no answer, and the client reads that as the cancellation it
+recorded before hanging up. Widening: `racingHangUpClient`, a client that
+sends close_notify when the request's context ends and takes whatever the
+server sends before the connection ends, which reported CI's exact line ten
+runs of ten against the old fake; the test now runs over it and over the
+client's own transport. Control: the abort taken out, the racing subtest red
+twenty runs of twenty. Not done: against a real upstream that answers a
+request its client abandoned, the same race can put one `tick_error` line in
+the journal at a shutdown; discarding an answer that races the request's own
+cancellation would remove it, and is a production change of its own.
+
+### Retirement read while playback goes on (`TestPlaybackRetiresWhatHasPlayed`, B532)
+
+macos-latest on #1337: "ten entries in, the backend holds 3 sinks and 3
+occurrences". The test read `Stats` at one instant while the fake DAC
+free-ran, and the producer opens the next transport's sink as soon as the
+drained one has played out, before the report step that hears it, so a read
+between the two finds the sink heard last, the drained one and the new one.
+The rule bounds what a report step leaves, not every instant. Widening: the
+rig's recorder holds the reporter in the delivery of the next Submitted once
+the engine has it (`holdAfterNext`), so the engine names the successor and
+the producer drains, closes and opens with no report step between, and the
+test waits for that open's note (the recorder counts `NoteOpened`): read
+there, 3 and 3 on every run, ten of ten, CI's text. Fix: the DAC stops
+(`FakeKernel.Hold`: free ended, no grant left), the reporter is let go, and
+the count is read once the producer drains the sink it wrote last with no
+time to do it in (`DRAINING` and `Starved`). That state comes only after the
+engine named what follows the occurrence in that sink, on its Submitted,
+which a report step sends after it has retired everything before the
+occurrence heard; nothing after it adds a sink or an occurrence without DAC
+time. The test keeps the backend's real ticker. Controls: the read put back
+at the held instant, red twenty of twenty; retirement taken out of the
+reporter, red five of five with 12 sinks and 13 occurrences at the new read.
+
+### The watcher's publishes counted early (`TestTheLiveConfigReachesThePlayersOutputWithoutAReadingOfTheBox`, B536)
+
+macos-latest on #1340: "the watcher published 1 snapshots while its readings
+were held". On this host every run read Publishes 1 at the sample and 1 at
+the end; the extra one is the boot reading's own: the feed hands a snapshot
+to its subscribers, then logs it, and the watch counts it only after `offer`
+returns, so the Reporter, the engine's output, the test's queue and Play can
+all come before the count. The watcher takes one reading at a time, on the
+goroutine that counts every publish (the service's disable publish waits for
+the stop, which the held reading holds). Widening: the first "player DAC:
+available" line is parked in a default log handler (`parkFirstLog`, let go
+too when the test's context ends, before its cleanups) until the test changes
+the binding: the count read at the old place then missed it on every run,
+five of five, CI's text. The count is now read while that publish is parked,
+which is exact, and the test expects one more. Round 1 read it once the first
+held reading had arrived; the review showed that such a count already holds
+a publish the watcher makes for the changed binding before it reads the box,
+the publish the test exists to catch. Test-only. Controls: the read put back
+before the hold, red ten of ten; a source-note publish added on the binding
+poke, red three of three on the fixed test and green on round 1's;
+`-race -count=20` green on this Mac.
+
+### Runs and the gate
+
+Each test `-race -count=50` green; under the 24 busy loops `-race -count=200`
+green for the engine (9.8 s), the harvest (15.2 s) and the retirement test
+(17.1 s); the serve test, about 3.2 s a run under that load, ran 250 times
+green (50, then two runs of `-count=100`), since one run of 200 outlasts the
+ten-minute foreground limit. The gate, through the build lock: `make fmt vet
+docs-check` clean (gofmt rewrote nothing), `make build-all` built the six
+targets, and `make test P=12` passed the first 43 of 86 packages
+(`cmd/bridge` 634.9 s, `internal/admin` 778.5 s, `internal/alsapcm` 27.6 s,
+`internal/atlasharvest` 13.6 s) before the tool's twenty-minute limit
+stopped it inside `internal/manifest`, which alone needs about eighteen
+minutes here; manifest then passed as CI's four shards
+(`.github/scripts/test-shard.sh manifest 0` to `3`, 1,372 names, 270, 409,
+264 and 307 s), and the 42 packages after it in one `go test -p 12 -race
+-timeout 30m` run (`internal/player/engine` 25.6 s). With the rules note
+applied in the working tree, and taken back after, `player.md` is 97,575
+bytes (97.6%, from 98.8%: the fake kernel's entry moved to its long form),
+`verify_moves.py --base HEAD` passes with its four declared edits, and
+`TestEveryCitedTestNameExists` and `TestNoDocblockNamesAnotherDeclaration`
+pass.
+
+## 2026-10-24 — B529: Drop a final drain after Resume rollback Pause is refused
+
+Resume already compensates a sink that resumed successfully before the session
+noticed a fault. B523 round 5 left the final-drain refusal as B529: the sink's
+command gate refuses Pause while the kernel plays out its last buffer, so that
+buffer could play until the engine's fault release arrived.
+
+After the compensating Pause, Resume now checks the sink's own typed reason
+(`ReasonBadState`) and position state (`SinkDraining`). Only that pair takes
+Drop, through `s.call` with the existing detached rollback context and its
+original two-second deadline. The answer joins the fault, the refused Pause
+and any Drop failure. Other refusals and the recorded fault are unchanged; round 5 below restores the reporter's measured progress after Drop.
+No wire schema, iOS behavior, sink gate or teardown order changes.
+
+`TestPlaybackResumeRollbackDropsFinalDrain` uses B523's direct backend, real
+sink, reporter-panic gate and fake kernel command hook. The producer receives
+the end-of-queue notification after Pause; its half-second file fits within
+the lookahead plus hardware buffer. Resume's successful reply is held while
+350 ms of fake time carries that producer's Drain to its final hardware
+drain, with 150 ms still buffered, and then until the fault is recorded.
+Before any session release, rollback must Drop once and stop the sink. The
+normal case grants another 50 ms after Resume returns and requires the
+kernel to have left DRAINING, with unchanged written bytes and consumed
+frames. Its held-Drop case cancels the caller and retains the Drop's rollback
+deadline as a third error. A per-backend SinkCall seam observes both rollback
+calls: Pause and Drop must receive the same context and deadline. The test
+waits for the producer's cancelled Drain result, then releases and joins
+all backend goroutines and requires exactly the original backend fault,
+with no second fault or other event. `TestPlaybackResumeRollbackKeepsOtherRefusals`
+reaches a real xrun in that same window and requires no Drop and the original
+joined errors, with that same exact event-sequence check after joining.
+
+Red first, with only the tests on 42b4a397: both final-drain subtests failed
+with zero Drops; the normal case left the sink draining, and the held-Drop
+case had no joined deadline. The xrun preservation test already passed on
+main; it becomes red under the independent broadened-fallback control.
+Six independent controls remove the fallback, broaden its gate, discard the
+fault, discard the Pause refusal, discard the Drop failure, or attach Drop
+to the caller's context. Each compiles and fails its named regression;
+mutations are restored from saved fixed bytes, with no HEAD change.
+
+Round 1 Go 1.27.2 offline validation: Darwin and Linux `go vet ./...`,
+`make fmt`, `make docs-check`, and both new test functions twenty times
+under `-race` passed. Every player package except OpenHome, plus `internal/alsapcm`,
+passed the full race suite. The requested all-player race run was stopped
+after confirming that OpenHome's loopback listeners are refused by the
+sandbox. A focused race run of
+`TestTheSurfaceBindsEachServedAddressAndFollowsThem` fails solely on
+`listen tcp4 127.0.0.1:0: bind: operation not permitted`; the full OpenHome
+suite still requires a host that permits those listeners.
+
+Round 2 corrected three gaps in the original test evidence. Round 1 started
+a test-owned Drain while the producer was still streaming, checked only the
+reason of any fault events without their count or kinds, and granted no time
+after its frame snapshot. That unchanged-frame assertion also passed without
+the fix and did not establish that buffered sound stopped. Round 1's held
+Drop pinned detachment from caller cancellation but accepted a fresh timeout
+for Drop, so it did not pin the shared rollback deadline. The revised tests
+exercise the producer's own cancelled Drain and its exit, count and compare
+all events after release and Wait, grant time after rollback, and observe
+the two contexts directly without measuring elapsed wall time. Through round 3,
+each fault still comes from a reporter panic: that reporter delivers its
+fault and exits before Drop, so these exact-sequence assertions cover the
+producer but do not pin a live reporter's view of the dropped sink. The rollback
+branch itself is unchanged; the only production additions are the optional,
+nil-in-production call observers. Controls 1–6 are rerun on these tests;
+control 7 gives Drop a fresh detached CallTimeout, and controls 8–10 make the
+producer report its cancelled Drain as a cut fault, a second backend fault,
+or Finished. All ten compiled and failed their predicted assertions. The
+no-fallback control now advances the fake DAC from 16,800 to 19,200 consumed
+frames after Resume; the fresh-timeout control fails the context/deadline
+comparison, and each producer-event control fails the exact event sequence.
+Those controls did not isolate the state half of the fallback condition: the
+xrun case was already excluded by its reason. The command hook also still
+used fatal test helpers off the test goroutine; round 3 corrects both gaps.
+
+Round 2 Go 1.27.2 offline validation passed Darwin and Linux `go vet ./...`,
+`make fmt`, `make docs-check`, and each changed test twenty times under
+`-race`. All player packages outside OpenHome, plus `internal/alsapcm`,
+passed the full race suite. The all-player run encountered sandbox-refused
+loopback binds in `TestAHeaderPastItsBoundIsRefused`,
+`TestAPanicInTheListingStaysInTheSurface`,
+`TestAnIdleConnectionAndAStalledHeaderAreClosed` and
+`TestTheSurfaceBindsEachServedAddressAndFollowsThem`. Near its two-minute
+package cap, subsequent OpenHome waits failed immediately and
+`TestStopRefusesThenShutsDownThenCloses` panicked in cleanup with no listener
+established. A separate focused race run of
+`TestTheSurfaceBindsEachServedAddressAndFollowsThem` again reported
+`listen tcp4 127.0.0.1:0: bind: operation not permitted`. OpenHome still
+requires a host that permits those listeners; this round does not claim a
+passing all-player gate.
+
+Round 3 adds `TestPlaybackResumeRollbackKeepsACompletedDrain` for the
+producer's sink after it has played out, with the producer held at SinkCall
+before it can mark the output drained or close it. Its before-fault case
+finishes the drain while Resume's command reply is held, then records the
+fault: the real sink returns `ReasonClosed`, not `ReasonBadState`, for that
+Pause. That ordering alone cannot isolate the state check. Its
+after-pause-refusal case instead lets the final drain refuse Pause with
+`ReasonBadState`, holds that reply at SinkCall, completes the drain, then
+lets rollback check Position. The same current sink is now `SinkStopped`.
+Both cases require zero Drops, exactly one bounded sink call (Pause), and
+exactly the original fault joined with that call's Pause error. Control 11
+removes only `&& out.sink.Position().State == alsapcm.SinkDraining`: the
+before-fault case passes, and after-pause-refusal fails with two bounded
+calls and answers instead of one. Drop of a stopped sink is a no-op before
+the command hook, so counting bounded calls is essential to see that attempt.
+
+All watchdog waits and fatal checks now run on the test goroutine. The
+Resume command hook signals its arrival and holds only its reply; Resume
+runs on a separate goroutine whose answer the test receives under the
+watchdog. Every held reply is freed during cleanup and that Resume goroutine
+is joined, including after a fatal assertion. Control 12 gives the final
+kernel drain a zero timeout: the final-drain wait fails at the one-second
+watchdog and the process exits FAIL, without a test-timeout panic or a
+stranded Resume. Controls 1–10 were rerun against these tests and all twelve
+controls compile and fail their predicted assertions. Production code is
+unchanged in round 3; all temporary mutations are restored from saved bytes.
+
+Round 3 Go 1.27.2 offline validation passed Darwin and Linux `go vet ./...`,
+`make fmt`, `make docs-check`, and all three changed test functions twenty
+times each under `-race` (both completed-drain subtests included). Every
+player package outside OpenHome, plus `internal/alsapcm`, passed the full
+race suite. The requested all-player run failed on sandbox-refused loopback
+binds in `TestAHeaderPastItsBoundIsRefused`,
+`TestAPanicInTheListingStaysInTheSurface`,
+`TestAnIdleConnectionAndAStalledHeaderAreClosed` and
+`TestTheSurfaceBindsEachServedAddressAndFollowsThem`. As its two-minute
+package cap approached, later OpenHome waits failed immediately and
+`TestStopRefusesThenShutsDownThenCloses` panicked in cleanup without a
+listener. A focused run of
+`TestTheSurfaceBindsEachServedAddressAndFollowsThem` independently confirmed
+`listen tcp4 127.0.0.1:0: bind: operation not permitted`. The all-player gate
+still requires a host permitting those listeners and is not claimed passed.
+
+Round 4 adds a live-reporter subtest to
+`TestPlaybackResumeRollbackDropsFinalDrain`. With Resume's successful sink
+reply held and the producer at the final hardware drain, a second backend
+Pause meets that drain's refusal and arms the no-device pause-release timer
+through the existing `Config.AfterFunc` seam. Resume's `unpausedLocked`
+stops that timer; its stop panics once, recording the backend fault without
+ending the reporter. The reporter's Tick factory holds its first read until
+rollback has answered, so it deterministically sees `SinkStopped` with
+`Played < Written == Submitted`. The test checks the measured occurrence
+and frames on Fault, the original shared rollback context and joined errors,
+and, after round 5's correction below, the exact measured sequence before
+release and after release plus Wait.
+
+With only that subtest added on b1b289b8, the live reporter sends
+`[Audible(101), Position(101, p.Played), Fault(101, p.Played)]`, with
+`p.Played > 0`. It sends neither Finished nor a second fault. Round 4
+mistakenly treated that measured progress as a defect and added a guard in
+`reportStep` that cleared every queued callback when a recorded fault met a
+stopped sink with `Played < Written == Submitted`. Round 5 removes it for
+the reasons below. Round 4's control 13 removed that guard and recovered
+the accurate sequence; that red result supported the wrong expectation.
+Controls 1–12 were also rerun against the round-4 tests and failed their
+predicted runtime assertions. Every mutation was restored from saved bytes.
+
+Round 4 Go 1.27.2 offline validation passed Darwin and Linux `go vet ./...`,
+`make fmt`, `make docs-check`, and all three rollback test functions twenty
+times each under `-race`, including the new live-reporter subtest. Every
+player package outside OpenHome, plus `internal/alsapcm`, passed the full
+race run and the separate run excluding OpenHome. The requested all-player
+run failed on sandbox-refused loopback binds in
+`TestAHeaderPastItsBoundIsRefused`, `TestAPanicInTheListingStaysInTheSurface`,
+`TestAnIdleConnectionAndAStalledHeaderAreClosed` and
+`TestTheSurfaceBindsEachServedAddressAndFollowsThem`. Near its two-minute
+package cap, subsequent OpenHome waits failed immediately, and
+`TestStopRefusesThenShutsDownThenCloses` panicked in cleanup without an
+established listener. The full all-player gate is not claimed passed; it
+still needs a host permitting those listeners.
+
+Round 5 corrects round 4's reporter guard. Codex and the Claude API found
+it independently in their round-4 reviews: the first live report was
+accurate and measured. Position reports Played, which remains true after
+Drop. Suppressing Audible can leave the engine on A while a fault names a
+short successor B that was heard, and incorrectly fail a pending Play.
+The predicate also describes any dropped sink and erases all callbacks
+queued in that step, including Prepared, Submitted and successor refusals.
+`reporter.go` is restored byte for byte to its state before b9a169b5.
+
+The retained live-reporter subtest now requires exactly
+`[Audible(101), Position(101, p.Played), Fault(101, p.Played)]` both before
+release and after release plus Wait. Position's frames equal Fault's and
+never exceed Played; there is no Finished, second Fault, or event after
+Fault. The producer's cancelled-drain checks and rollback context/error
+assertions remain in place.
+
+The deterministic gapless-live-reporter case adds A (18,000 frames) then
+short final B (6,000). B's start is verified inside the final hardware
+buffer. Two test-only exports reuse the fake kernel's existing mechanisms:
+`ParkStatusAfterWritten` parks the first STATUS after the final write,
+and `AdvanceUnwatched` moves fake time while that call is held, before its
+reading. The next measurement crosses B's start while a tail remains
+buffered; rollback Drops that tail. No sleep, polling loop or production
+seam is added. The engine supplies B through its real successor hand-off;
+the test supplies the end notification because the held reporter has yet
+to deliver Submitted(B). After rollback, the reporter delivers Prepared(B),
+Submitted(B), Audible(A), Audible(B), Position(B, Played - B.start), then
+Fault(B, Played - B.start). The real engine must answer its pending Play
+successfully, select B, and keep one fault naming B and those measured
+frames. The complete sequence is compared again after release and Wait.
+
+Control 13 restores round 4's guard and fails both live-reporter cases:
+only Fault remains, and the real engine stays selected on A while its
+fault names B. The single-occurrence measurement is 14,400 frames; the
+gapless measurement is 19,200 total frames, so B's Position and Fault both
+carry 1,200 frames. Controls 01–12 also compile and fail their predicted
+assertions. No control reports a data race or reaches the package timeout;
+all mutations are restored from saved fixed bytes.
+
+Round 5 Go 1.27.2 offline validation passes Darwin and Linux `go vet ./...`,
+`make fmt`, `make docs-check`, and the final `-race -count 20` runs of all
+three rollback test functions. The first completed-drain repeat run had
+one before-fault watchdog failure waiting for the producer's completed
+Drain; a diagnostic 100-run check and the requested 20-run rerun passed
+without a code change to that path. The intermittent failure's cause was
+not established. All player packages outside OpenHome, plus ALSA, pass
+the race suite. The full all-player gate fails on sandbox-denied OpenHome
+loopback binds (`operation not permitted`), followed by waits and a cleanup
+panic without a listener; it is not claimed passed.
+
+Round 6 fixes the intermittent before-fault completed-drain test ordering.
+receiveIn now dumps goroutines at its watchdog before cleanup. The captured
+hang has the sink writer in idle, Resume held in the command hook, and no
+producer remaining. The first Drain can refuse the paused sink; the command
+hook signals only enqueueing, so Resume's arrival does not establish that
+the producer retried Drain. A one-second fake-time grant can consume the
+half-second file before that retry. The sink stops with an xrun, the retry
+returns xrun and the producer exits, while drainCompleted only reports a
+successful Drain. Its event can never arrive. A control holds the producer
+at SinkCall after the paused refusal until the resumed sink has run dry:
+24,000 frames consumed, zero hardware drains, and a retried Drain refused
+with xrun, followed by the same completion watchdog. The fix waits on
+Sink.Changed (subscribed before Position) for the producer's accepted
+SinkDraining state before granting time; with no fake time available that
+state cannot finish before observation. No production code, sleep or timeout
+increase is involved. The B526 ordering rule's long form records this case.
+
+Round 6 Go 1.27.3 offline validation: the fixed completed-drain test passes
+300 times under race without stress and 300 times with twelve busy loops,
+and the whole rollback family passes 100 times under race. Restoring only
+the old ordering gives 5/200 completion hangs without stress and 24/200
+with twelve busy loops, using a one-second diagnostic watchdog; the forced
+old interleaving fails 3/3 under that same stress. The same forced paused
+refusal followed by the accepted-Drain wait passes 100 times. The initial
+minute-watchdog 200-run check completes with eight hangs; its stressed peer
+records nine before the ten-minute package cap (an incomplete repetition
+run). Those first checks overlapped the peer's twelve-loop stress. Darwin
+and Linux vet, make fmt and make docs-check pass. The full player/ALSA race
+gate hits sandbox-refused OpenHome loopback binds in
+TestAHeaderPastItsBoundIsRefused, TestAPanicInTheListingStaysInTheSurface,
+TestAnIdleConnectionAndAStalledHeaderAreClosed and
+TestTheSurfaceBindsEachServedAddressAndFollowsThem, then subsequent waits
+and a cleanup panic without a listener near the package cap. Every player
+package outside OpenHome, plus ALSA, passes. The full gate is not claimed
+passed. Controls use test-file overlays, leaving production and fixed
+source bytes intact; every busy loop is stopped and reaped.
+
+Round 7 fixes the gapless-live-reporter cancellation watchdog. CI's dump
+has only the engine owner and persistence writer left: the producer and
+sink writer have already exited. A natural twelve-spinner diagnostic
+reproduces the missing answer as plain context.Canceled from session.call,
+not the sink's typed ReasonCancelled. After rollback Drops the final
+buffer, the live reporter sends its measured events and Fault; the real
+engine releases that session. Its context can win session.call's select
+before Drop's typed Drain answer is taken. The old result hook filtered
+out plain context.Canceled, so its buffered channel would never receive;
+the observer was already registered, and Drain neither completed normally
+nor remained blocked. This is permitted production behavior. The test now
+captures the producer's context before Prepare(nil), records every Drain
+answer, holds the initial paused refusal at SinkCall until Resume is
+queued, and waits for accepted SinkDraining before any draining case gets
+fake time. Its final answer assertion accepts either Drop's typed
+cancellation or the session's context cancellation. The new
+gapless-session-cancel case parks the retried Drain's sender until the engine
+release cancels the wrapper, requires plain context.Canceled, then frees
+and joins the sender. Completed drains still require success; rollback's
+error joins, call/deadline and Drop counts, measured event sequence, engine
+Play/selection/fault, and complete cleanup assertions remain. Every other
+receiveIn and waitOn in playback_rollback_test.go was audited for transient
+states and filtered outcomes; no other wait needs a change. The B526 rule
+and its long form record this case. No production code, sleep, timeout
+increase, commit or push.
+
+Round 7 Go 1.27.3 offline validation: the fixed gapless case passes under
+race 300 times isolated and 300 times with twelve busy loops; the forced
+session-cancellation case also passes 300 times with twelve loops. All
+eight rollback cases pass 100 times with twelve loops. On the round-6
+test as it stood before this round (the old test, unfixed): 300 isolated
+runs pass; its first stressed 300-run check, which briefly overlapped
+another control's twelve busy loops (so about twenty-four), had two
+minute-watchdog cancellation hangs, which is CI's failure reproduced; a
+later run of it with exactly twelve loops passed. The old test with
+result logging alone gives one plain-context-cancellation hang in 300
+runs with exactly twelve loops and a one-second diagnostic watchdog. On
+the host, on this round's committed tree (Go 1.27.3, macOS arm64):
+`go test -race` over `./internal/player/... ./internal/alsapcm/` passes,
+and `-race -count=300` of `TestPlaybackResumeRollback` passes under twelve
+busy loops (653 s) and, run on purpose, under twenty-four (653 s). The forced old ordering fails 3/3 under twelve loops; restoring
+the old plain-cancellation filter on the fixed deterministic schedule
+also fails 3/3. Every control compiles, exits at its intended watchdog,
+cleans up and avoids a package timeout or data race. Darwin and Linux vet,
+make fmt and make docs-check pass. The fresh all-player/ALSA race gate
+passes every package outside OpenHome and fails there on sandbox-denied
+loopback binds: TestAHeaderPastItsBoundIsRefused,
+TestAPanicInTheListingStaysInTheSurface,
+TestAnIdleConnectionAndAStalledHeaderAreClosed and
+TestTheSurfaceBindsEachServedAddressAndFollowsThem; later waits fail at the
+package cap and TestStopRefusesThenShutsDownThenCloses panics in cleanup
+without a listener. The full gate is not claimed passed. All final stress
+proofs use separate sets of exactly twelve spinners, all stopped and
+reaped; controls use test overlays and preserve the worktree's fixed bytes.
+
+## 2026-10-24 — B515: configured MPD file, command-line hint and named includes
+
+
+**Current design (rounds 3–5).** The reading describes the bridge's
+configured/discovered file. That file supplies `mpd.config`, config warnings,
+song mapping and the DoP veto when live `dop` is absent. The optional
+`mpd.configHint` describes only the observed command-line operand: `same`,
+`different` with a redacted logical path, `none`, or `no_config`. No operand
+file contents or process environment are read, and no MPD default is inferred.
+Argv is mutable and equal roots do not establish equal mount namespaces;
+the hint proves neither what MPD loaded nor its startup settings.
+
+MPD's include rule keeps the unresolved named directory at every level,
+including the explicit configured name when the reading reopens it after
+inspection. Physical resolution supplies confinement, cycle identity and
+nested diagnostic paths, including through an alias of the root. Hints
+compare only confined physical file identities and omit process-relative
+operands and links into them. All verdict inputs, including song lookup and the stream-open observation,
+precede a separately bounded hint step: a late or failed hint drops only hints. The configured
+file and its includes plus `output.password` redact every external string.
+The implementation detail and evidence follow in the round-3 through round-6
+records; protocol version remains 1.
+
+**Round 5.** A stalled hint previously consumed the shared reading deadline
+before song lookup, changing a known row to `source_unknown`. Every verdict
+input is now gathered first; the hint keeps its own busy flag and 500 ms bound
+within the remaining reading time. Intermediate process-relative aliases are
+checked with a confined Lstat/Readlink walk: any prefix or target through
+`/proc`, `/dev/fd`, `/dev/stdin`, `/dev/stdout` or `/dev/stderr` omits the hint,
+even when it ends at a regular file; more than 40 hops also omits it. Named
+reopen, independent config/hint bounds, confined final identity lookup and
+root-relative include diagnostics remain pinned. The slow-song/stalled-hint,
+intermediate-alias and hop-limit regressions failed on round 4 before the fix.
+A Linux-only regression holds a regular descriptor open and checks real
+`/proc/self/fd`, `/dev/fd` and cwd aliases with root `/`; macOS cannot run it.
+The round-4 host socket-capable run passed `go test -p 4 -race -count=1
+./internal/api/ ./internal/mpd/... ./internal/alsa/ ./internal/signalpath/`:
+api 111.6 s, mpd 1.8 s, mpd/conf 1.5 s, alsa 3.1 s, signalpath 1.3 s.
+Round-5 validation: all 59 prior controls and four new macOS controls are
+assertion reds, with saved bytes restored. Host/Linux/Windows vet, formatting,
+docs checks, the conf/ALSA/signalpath race suites and ten race repetitions of
+each new macOS test pass. All runnable API (286) and MPD (21) test invocations
+pass; 437 API and 17 MPD invocations are blocked by refused socket binds.
+The Linux-only test cross-compiles; its runtime and control remain pending.
+Exact gates and rebased controls are in `report-r5.md` and
+`controls-r5/manifest.json`. No new index entry is added. Protocol version
+remains 1; backward-compatible protocol change, no iOS change required.
+The protocol mirror remains a companion documentation update.
+
+**Round 6.** Round-5 host evidence is now available: on macOS arm64 with
+Go 1.27.3, `go test -p 4 -race -count=1 ./internal/api/ ./internal/mpd/...
+./internal/alsa/ ./internal/signalpath/` passes (api 100.3 s). On Linux,
+Ubuntu 26.04, Go 1.27.3, linux/amd64, the same race command passes (api
+103.0 s); `TestHintOmitsLiveProcessAliasesAtHostRoot` passes with
+`-race -count=10`, and control 70 fails its predicted assertion with the
+saved fix restored afterward. This supplies round 5's previously pending
+Linux runtime/control evidence and validates the reading order on both hosts.
+
+Two valid walker boundaries now retain hints: a parent step with no component
+left stays at canonical root `/` (every other injected root still refuses it),
+and an absolute link to exactly the injected root is inside it. Both new
+regressions fail on round 5 before the fix. Claude's review of the round found
+the reading-level test's named and canonical spellings of the root identical
+on Linux (a bare temporary directory has one spelling there), so
+`TestHintLinkToEitherSpellingOfTheRoot` reaches the root through a link,
+asserts the two spellings differ, and keeps the hint for a link to either;
+dropping the named comparison reddens it.
+
+The PR's first Windows CI run (windows-latest) failed two tests that are
+POSIX-shaped, and both now skip on Windows with the reason:
+`TestReadingHintRefusesAbsoluteLinkOutsideInjectedRoot` mirrors an absolute host
+path under the injected root by dropping its leading slash, which a Windows
+path with a volume cannot do (the hint reads MPD's command line from /proc in
+any case); `TestIncludesResolveDotDotPhysicallyAtEveryLevel` expects `..` to
+resolve physically through a directory link, which Windows normalizes
+lexically before the filesystem follows the link, so the conf reader there is
+as lexical as the OS. Every other new test passed on that run. Production hint tests additionally
+pin forty links accepted against forty-one refused, an in-root absolute link,
+and a relative `dir-link/../x` chain whose lexical clean would name the wrong
+file. Independent controls restore each boundary rejection, lower the hop
+limit, refuse all links, or clean a relative target early. Round 5's controls
+64–69 are rerun against this tree. No statfs check is added: the process-path
+exclusion recognises names only, so procfs mounted at `/host/proc` or another
+`mount -t proc` location is not recognised by filesystem type. A file replaced
+by a link between the walk and the confined stat can still yield a hint;
+the second pathname resolution retains confinement but cannot atomically
+preserve the alias exclusion. Both are documented limits of an informational
+hint already stated not to prove what MPD loaded. The configured file and
+verdict inputs remain independent. PROTOCOL.md already describes in-root
+identities, more than forty hops and the hint's lack of proof, so its text
+needs no change. Exact red/green, controls and requested gate results are in
+`report-r6.md` and `controls-r6/manifest.json`. No new index line is added.
+
+### Round 1 provenance design — superseded in round 3 (never shipped)
+
+The following paragraphs record the removed design and its checks; they
+are historical evidence, not the current selection or wire contract.
+
+The output reading previously described the configured/discovered `mpd.conf`
+even when the MPD holding the DAC started with another file. A relative
+include from a linked main file or linked include also used the resolved
+file's directory. Both affected information beside the verdict.
+
+The reading now reads `/proc/<tgid>/cmdline` only after its owner is named
+MPD and the owner thread matches one enabled live output. Proc comes from
+the existing injected snapshot root; no owner, foreign owner or ambiguous
+process identity reads no cmdline. NUL-separated argv is bounded to 64 KiB,
+regular-file opened, root-confined, and never logged. The first modeled
+non-option absolute config argument wins; with none, `conf.Locate` searches
+MPD's existing Linux default order. Unreadable, oversized, malformed,
+unmodeled, outside-root or non-file input retains the configured fallback.
+The additive optional `mpd.configProvenance` names the source and redacted
+path, including MPD's default (`mpd_default`). Both files' secrets and the
+bridge password redact every emitted string. All discovery and reads stay
+inside the existing bounded single-outstanding config step.
+
+The selected file feeds `mpd.config`, its output/chain, and config warnings.
+The configured file remains the existing song-row mapping and DoP fallback
+veto input. No signalpath judging rule changes. The include correction
+applies to both reads and other config consumers: main and nested links use
+the named parent; separate symlink-resolved stack keys stop a cycle before
+reparsing; the existing root, optional-include and read bounds remain.
+
+Sources, offline: MPD 0.24.4 `src/CommandLine.cxx` `ParseCommandLine`,
+`src/fs/glue/StandardDirectory.cxx` `GetUserConfigDir`, `doc/mpd.1`'s
+`mpd [OPTION...] [CONF_FILE]`, and `src/config/File.cxx`'s `ReadConfigFile`
+and include handling. These were not fetched. The default list is already
+recorded in this repository's search rule; the include behavior is B515's
+premise and matches source knowledge. Verify exact helper/option spellings
+against MPD before merging. MPD's own HOME/XDG environment cannot generally
+be read by the bridge user; defaults use the injected existing search
+inputs, explicitly an assumption. A second MPD with matching output names
+and edits after startup remain limitations of informational config.
+
+Red first: all ten new tests failed against the original production
+behavior. API runs used compile-only fields/seam for the final expanded
+suite, without selection behavior; the initial API suite ran directly
+against HEAD's production bytes. Main/nested links read normalization `no`
+instead of `yes`; the outside-root optional include went unreported.
+The bind-free real-handler test also lacked provenance. Exact output,
+commands, gate results and every `.claude/` OLD/NEW pair are in the task's
+`report-r1.md`; control patches and exact failing test names are in
+`controls-r1/manifest.json`. Controls save and restore fixed bytes, never
+HEAD or git restoration. No commit or push was made.
+
+Gates: host/Linux/Windows `go vet ./...` passed; `make fmt` passed. All new
+tests passed `-race -count=10`. The requested package race gate passed
+`internal/mpd/conf`, `internal/alsa` and `internal/signalpath`; API stopped
+at `TestHealthReturns200WithExpectedShape` on sandbox-refused bind, and
+MPD socket fixture tests likewise failed solely on refused TCP/Unix binds.
+The report names every observed refusal. `make docs-check` is recorded in
+the final report after all documentation edits.
+
+### Round 2 provenance design — superseded in round 3 (never shipped)
+
+The following records the second removed design, not current behavior.
+
+Round 2 (2026-10-24): the source copies of MPD 0.24.4 `CommandLine.cxx`,
+`OptionParser.cxx` and `config/File.cxx` were read, replacing round 1's
+unverified grammar assumptions. Options work anywhere, long flags accept
+`=value`, `--` is invalid, and `--no-config` loads no file. Selection is now
+per card, using the already-resolved Tgid, stable stat start time around
+cmdline, basename `mpd`, and root identity (SameFile, else mountinfo device
+and root). Defaults require the daemon's bounded environment; unreadable
+environ always falls back, even for the same uid. Thus the earlier bridge
+HOME/XDG assumption is no longer a source claim. An unread configured file
+has no provenance, correcting the attempted-file claim; verified no-config
+has its own source with empty path and null config. The earlier statement
+that every emitted string used both files' secrets was false for the DAC
+mixer and other external fields: these now share all files' redaction.
+Dot, dotdot and empty argv path segments are refused rather than cleaned
+and published raw. Cap+1 was already implemented in ReadLogical; a new
+NUL-at-cap regression and a truncating-read control pin it. The DoP test now
+removes live dop, makes configured=yes and process=no, and asserts the
+process veto; only song mapping retains the configured file. Includes now
+preserve the unresolved named parent at every level and resolve link/..
+physically for open, confinement and cycle keys, correcting both lexical
+Join/Clean and early parent resolution. Regression failures were recorded
+before the fixes; fixed tests, restored mutation controls, toolchain gates
+and sandbox socket refusals are detailed in `report-r2.md` and
+`controls-r2/manifest.json`. PROTOCOL.md remains additive at version 1.
+
+## 2026-10-24 — B500 round 8: key the build-site census on the verb
+
+The census is now the union of three branches: build/install/run/test/vet
+followed after optional flags by a package pattern regardless of executable
+spelling; a case-insensitive Go path or variable before a verb, even without
+a package (including go.exe, go1.27.3 and gotip); and gotestsum,
+golangci-lint run, staticcheck, and dlv debug/test/exec. Quotes, backticks,
+commas and brackets are normalized only on the matching copy; exact original
+logical lines and multiplicities remain the review boundary.
+
+Every non-record Markdown file reached by the walk is in scope. Records are
+excluded by basename: engineering-log.md, History-*, plan-* and release-notes-*.
+Fences close with their CommonMark containers: missing quote prefixes end
+blockquote fences; non-blank lines below list content indentation end list
+fences. Existing container fixtures now keep their content inside their
+containers; a skipped inline label pins rejection of backticks in fence info.
+Prose and explicitly non-executable fences stay out.
+
+Before implementation, the regression run on 4eb5769d failed 77 subtests:
+51 verb/package cases, 12 tool cases, five Markdown paths, five container
+endings (including both erroneous admission and omission), and four executable
+forms without package arguments. The real-tree equality check now accounts
+for 42 sites and 51 Markdown files, including zero-site files. Three sites
+were newly discovered and reviewed: Makefile's Docker build, docs/docker.md's
+Docker build, and migration text in scripts/doc-split/restructure-2026-10-18/routes.py
+that says "run all". No newly discovered Go build or test needed release tags.
+
+The rule and its long form replace round 7's scope and matching claims and
+name the remaining limits: a verb computed at run time, a package argument
+and verb on different unjoined lines, and an unlisted tool that drives go.
+Unfenced Markdown, including indented code, stays outside this fence census.
+
+Five controls restored the source from saved bytes after each run. Removing
+the verb rule failed 47 verb/package cases; removing executable case folding
+failed two package-free executable cases; removing the tool list failed ten
+tool cases; restoring round 7's Markdown scope failed five scope cases;
+removing container endings failed all five ending cases. No other test group
+failed, and every control compiled. For the verb control, the three newly
+reviewed non-Go sites were removed from the review map because that control
+makes them invisible; fixture baselines remained valid. The first verb-control
+prediction was 48; the observed 47 identified an intended overlap: the
+case-insensitive executable branch also recognizes Python's GO variable.
+The corrected prediction was rerun and matched exactly.
+
+The first full race gate hit Go's default ten-minute timeout inside the
+existing large refusal matrix, with no assertion failure. Literal substring
+prefilters now avoid path/flag regex work on lines that cannot match that
+branch; normalization cannot create any of those required words. The union
+and review semantics are unchanged. All five controls matched again, and
+all six requested gates passed on the final implementation; the full package
+race run completed in 157.31 seconds.
+
+**After review.** Codex and Claude, reviewing round 8, found three gaps. The
+verb rule counted a verb in command position as Go's, so an ordinary deploy
+line refused the census: `sudo install -m 0755 -o root -g root ./1-bit-bridge
+/usr/local/bin/1-bit-bridge`, `if test -f ./deploy.env`, `test -x ./bin/bridge`
+(seven such lines are now accepted cases). A verb at the start of a line, after
+;, &, |, ( or !, after a VAR=value assignment, or after if, then, else, elif,
+do, while, until, sudo, exec, command, env, time, nohup or nice is the command
+itself; every real Go invocation names an executable before its verb. dlv's
+subcommand may follow its flags (`dlv --headless debug ./cmd/bridge`), and
+golangci-lint is a site wherever it is named, its GitHub action included
+(`uses: golangci/golangci-lint-action@v6`, which the union missed). Red first:
+the twelve new cases; nothing else. Controls on the committed fix, each red as
+predicted and nothing else: without the command-position check, the seven
+accepted lines; without flags before dlv's subcommand, the three flagged dlv
+lines; with golangci-lint matched only before `run`, the flagged run and the
+action. The real tree's census is unchanged (42 sites).
+
+**Windows CI.** The PR's first windows-latest run failed 22 of the package's tests:
+GitHub's Windows checkout gives every text file CRLF line endings, and the release
+checks and their tests read `.goreleaser.yaml`, the Makefile, the Dockerfile and
+the build sites by `\n`-ended lines. `readRepoText` now reads a repository text
+file as its LF text wherever the checks parse it (`checkBuildTags`, the release
+config), and the tests read repository files through it; a licence text the
+generator copies is never normalised, so the notices stay byte for byte.
+`TestACRLFCheckoutReadsAsLF` converts every build-site file to CRLF (red on the
+PR's head, by the same refusal CI showed). A CRLF copy of the whole tree, made as
+autocrlf makes it (the `.gitattributes` eol=lf paths kept), reproduced CI's
+failures on the PR's head and passes on the fix; restoring the unnormalised read
+reddens the new test.
+
+## 2026-10-24 — B500 round 7: the build-site census fails closed
+
+The scope, executable-only matching, and EOF-only fence behavior described
+below are superseded by round 8 above.
+
+Round 6 still enumerated executable spellings and executable fence labels.
+The replacement recognizes build/install/run/test/vet after a possible Go
+path (including go.exe and variable suffixes) or any variable expansion,
+with optional global flags. Quotes, backticks, commas and brackets are
+separators on a matching copy; original logical lines and multiplicities
+still have to match reviewedBuildSites. Ambiguous shapes require review.
+
+Markdown scope now includes every README.md and recursive .md files under
+ops/, deploy/ and docs/, with records and the existing excluded trees kept
+out. Fences are scanned unless their language is on the explicit
+non-executable skip list in the code and rule. Container markers are stripped
+before fence detection; a backtick opener cannot have a backtick in its info.
+Console/session/terminal prompts are removed before comment filtering, so a
+root prompt is a command. The long rule names static-analysis limits, including
+runtime-computed verbs and commands assembled across unjoined lines.
+
+All concrete review examples became refusal tests before the implementation
+changed: on 36b6e617 the run failed 276 subtests (162 invocation forms,
+10 fence labels, 12 container/inline cases, 17 prompt cases, 9 scope cases,
+and 66 prose cases incorrectly admitted after a container fence). A later
+red-first check caught five expansion-in-path/repeated-suffix forms in the
+first redesign; the matcher now reuses its expansion grammar in paths and
+suffixes too. The post-change census matches 39 reviewed sites. It enumerates
+all 22 in-scope Markdown files, including the 17 with no sites; the other five each hold
+one. Three newly visible test commands now have both release tags: the
+review guide and the ALAC/DSD fixture READMEs. Three ambiguous sites were
+reviewed: Make's vet and test recurse into tagged targets, and a firewall
+command's description contains a variable/flag/install shape without running
+Go. No Markdown prose was reviewed as an exception. The walk's renamed
+function is classified in the repository tree-walk audit.
+
+Five negative controls, restored from saved bytes without a commit, all
+failed exactly the predicted subtests: executable list restored, 127
+invocation cases plus five expanded-path/suffix cases; fence allowlist restored,
+10 labels and 16 prompts; container stripping removed, 11 containers and 66 prose cases; prompt
+stripping removed, five root prompts; top-level ops scope restored, nine
+scope cases. For the executable and scope controls only, reviewed baseline
+entries made invisible by the mutation were removed with it, so baseline
+validation still reached each new-site probe. All controls compiled; none
+panicked or failed outside its predicted set. The original-line and duplicate
+site checks, exclusions and real-tree equality remain covered.
+
+Host evidence supplied after round 6: a Linux amd64 host built the Docker
+image at 36b6e617 with Docker 29.1.3, buildx 0.30.1 and
+`docker buildx build --load` in 75 s. Its
+`/usr/share/doc/1-bit-bridge/THIRD_PARTY_LICENSES.md` is 355,656 bytes,
+SHA-256 `45324dc3621413caf5f52bc302d51a302040f782e07acb905b1b90e564b15fd4`,
+byte-identical to the notices in all six GoReleaser snapshot archives. The
+image's binary records `-tags=ts_omit_webclient,ts_omit_debugeventbus`,
+`-trimpath`, CGO 0 and linux/amd64, includes no web-client module, and runs
+`bridge version`. This is host evidence for round 6, not a new image build
+in the round-7 workspace.
+
+Verification on Go 1.27.3: tagged vet of ./..., make fmt, make docs-check,
+make check-build-tags, the tagged package race suite with -count=1
+(397.922 s), and make build-all all passed; all six cross-built binaries
+were produced. The tree-walk classification test also passed. The cross-builds
+emitted nonfatal module stat-cache write warnings under the sandbox.
+The rule-line replacement is supplied separately because .claude/ is not
+writable in this workspace. No commit or push was made.
+
+## 2026-10-24 — B500: release archives carry build-derived third-party licences
+
+The release before-hook now runs the stdlib Go notice generator against
+all six configured release targets. The archives include its ignored root
+output, THIRD_PARTY_LICENSES.md. Generating after dependency resolution
+keeps weekly dependency bumps current without a checked-in notice file.
+
+Discovery uses go list's non-test package dependency closure with CGO=0:
+63 modules on each Darwin target, 67 on each Linux target and 68 on each
+Windows target. Entries record replacements and read their root files,
+including the fsnotify fork. saprobe-alac's full Apache licence and NOTICE
+are included. Round 1 incorrectly supplied Go toolchain PATENTS to x/oauth2;
+round 2 below removes that synthesized grant. UNLICENSE extends the requested
+filename patterns for mewkiz/pkg and mewpkg/term; an initial real generation
+failed loudly on mewkiz/pkg before that extension.
+
+Fixture tests were red before implementation. They exercise the actual
+build graph, exclusion of unused/test-only dependencies, target union,
+missing licences, full root texts and stable order. Negative controls
+restore saved bytes of the uncommitted files, not HEAD. Release wiring is
+pinned by a test; the release playbook now checks each snapshot archive's
+notice bytes and the complete matrix. GoReleaser itself was unavailable in
+the offline implementation environment, so the real snapshot check remains
+a required release-candidate step.
 
 ## File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)
 
@@ -60393,3 +61211,888 @@ The successor-opener test could decode its entire first track into lookahead plu
 The cut-too-late test's tick could report the removed entry audible and end the session before the second (barrier) send. Joining the backend after the first tick made that second send fail every time with no reporter alive. The first race repetition exposed the same terminal ordering at FakeKernel.Play: its grant caused the boundary stop before its waiter could observe a starved writer. Its watchdog dump again held no backend goroutines. The test now grants time directly and offers ticks while waiting on engine snapshot changes until the specified stop, and exercises the same wait after the backend is fully joined. A fourth control waits for a writer after that join and fails deterministically.
 
 The fake kernel's `when` (under `FakeKernel.Await`) checks and registers under the kernel mutex; the engine wait helper subscribes before reading its snapshot. Neither loses a wakeup. No production code, wire contract, or timeout changed. The player rules and History record the ordering requirements. Each ordering has a negative control; focused race repetition, package stress loops and validation results are recorded with the task's report.
+
+## 2026-10-24 — B528: a whole-number setting refuses a fraction rather than load its whole part, in the player block and across the config
+
+B470 PR 5a2a recorded a follow-up (its "Not in this change"): the player
+block's whole-number lines took a fraction as its whole part. Backlog B528
+took it, and the same pattern across the rest of the config.
+
+### What yaml.v3 did
+
+yaml.v3 v3.0.1 decodes a `!!float` into an int kind by dropping what
+follows the point: `decode.go`'s `scalar` sets `int64(resolved)` once the
+float is no more than `math.MaxInt64` and fits the field, and the uint kinds
+the same way. Go's conversion of a float the integer cannot hold is the
+platform's: measured on darwin/arm64, `-.inf` loaded as the smallest int64
+and 2^63 (`9223372036854775808.0`) as the largest. Measured on main
+(e263ee86) through `Load`:
+
+- The player block: `openhomePort: 7792.9` bound 7792 and the player ran;
+  `pauseReleaseSeconds: 45.75` held the DAC for 45 s, and `0.5` and `-.inf`
+  reached `Problem` as 0 and the smallest int64, refused there as out of
+  range rather than as what they were; `device.pcmDevice: 1.5` read as 1 and
+  `device.subdevice: 0.25` as 0.
+- The rest of the config: of its 44 whole-number settings (`envBindings`'
+  integer leaves outside `output.player`), 42 loaded `2.75` as 2, and
+  `enrich.coverSize` and `retention.playbackHistoryDays` refused it only
+  because 2 is outside what they take: `250.4375` loaded as 250 in both.
+  `limits.manifest.requestsPerMinute: 0.5` loaded as 0, which with the
+  default burst turns the manifest limit off, `-.inf` as the smallest int64,
+  `6.000001` as 6, and 2^63 as the largest int64. `.inf`, `.nan` and `1e19`
+  were refused already, by yaml.v3 itself, as out of range.
+- `Load` took a file holding `output.loopbackPort: 7795.5`, so `bridge
+  init`'s rewrite, which keeps the block Load's decode reads when that
+  decode takes the whole file, kept the port as the 7795 it read (from the
+  code: the new init rows failed on main at their check that `Load` refuses
+  the fixture).
+
+### The rule
+
+A whole-number setting takes no value yaml.v3 would change on the way in.
+`exactInteger` is the one test: anything but a `!!float` passes (an integer,
+a null, or a value the decoder refuses itself), and a `!!float` passes when
+its value is whole and inside the integer's range, the bounds powers of two
+(`math.Ldexp`), which a float64 holds exactly. So `30.0`, `3e1`, `-0.0`,
+`!!float 6` and `08` (which yaml.v3 resolves as a float, being no octal)
+load as written, and no value a file holds changes. Refusing every
+`!!float`, the simpler rule, was rejected: it would stop a file loading over
+values that lose nothing. A round trip through the integer as the range test
+was rejected too: arm64 saturates 2^63 to the largest int64, which converts
+back to 2^63.
+
+Each refusal follows its neighbours. The player block's reader
+(`playerReader.whole`) refuses as it refuses a word there: the block is
+unread, kept as the file holds it, the player off with
+`output.player.<setting> (line N): must be a whole number`, and the load
+goes on. The rest of the config is refused by `Load`, as a word on that
+line is, in the words `ValueFreeYAMLError` gives the out-of-range float
+yaml.v3 refuses itself: `line N: cannot unmarshal a !!float value into int`
+(or `int64`): the line, the tag and the Go type, and nothing of the value.
+`ValueFreeYAMLError` keeps such a line as it is (`valueFreeTagged`: yaml.v3's
+own lines always start with the tag), so the check's lines pass through it.
+
+### How Load finds them: a shadow the decoder maps itself
+
+`config.DecodeFile` is Load's decode: yaml.v3's decoder with `KnownFields`,
+and, once that decode succeeds, `CheckWholeNumbers` over the same bytes,
+which decodes them a second time into a shadow of `Config` (`shadowOf`):
+each integer field replaced by an `integerCheck` of its type, whose
+`UnmarshalYAML` decodes nothing and answers a `*yaml.TypeError` that the
+decoder adds to its own and goes on past, so every such value is named.
+Every struct it rebuilds keeps its fields' names and tags (`reflect.StructOf`)
+and every type that holds no integer is kept as it is, so yaml.v3 maps the
+file onto the shadow as onto `Config`: merge keys, aliases (named at the line
+of the node an alias names, once for each setting it reaches), inline fields
+and encoded keys reach the setting they reach in the decode, and the
+decoder visits the same nodes in the same order, so its alias limit judges
+the two decodes alike. A type that reads its own YAML (`PlayerConfig` among
+them) is not looked into; `time.Duration` decodes from text alone; no map
+in the config is keyed by a number, and a map's keys are not looked at.
+
+Rejected: a resolver of the config's own over the node tree, which would
+copy the decoder's merge and key rules, the copy B505's round 2 found
+disagreeing with the decoder three ways (the rewrite's rule in cli-serve.md);
+a type of its own for every whole-number field, which every consumer's
+arithmetic would have to convert, and whose `UnmarshalYAML` decodes with a
+fresh decoder, dropping `KnownFields`; and running the check when the first
+decode fails, which would mix the shadow's own mismatches into the refusal.
+So a file with a word and a fraction in it is refused for the word first,
+and for the fraction once the word is put right.
+
+`bridge init`'s rewrite reads the file through `DecodeFile`
+(`outputAsLoadDecodes`), so a file holding a fraction anywhere decodes whole
+there no more than in `Load`, and asks `CheckWholeNumbers` of the block it
+decodes on its own (`outputAsLoaded`) and of each setting it recovers
+(`outputRecovered`): a fraction there is "it does not read as that setting",
+as a word is, and one in a merged block keeps nothing, as a word there does.
+
+What changes for an operator: a config that holds a fraction in a
+whole-number setting no longer loads, where it loaded the whole part:
+`bridge serve` does not start, and serve, `bridge doctor` and init name the
+line. A release note should say so.
+
+### Red first
+
+On main with the tests in place: in `internal/config`, 62 subtests failed
+(every fraction of `TestAWholeNumberSettingTakesNoFraction`'s 44 settings,
+the four player settings' nine refused values, the edges of
+`TestAWholeNumberSettingTakesWhatDecodesUnchanged` that loaded, its merge,
+alias and three-fraction cases, and the new row of
+`TestAnOpenHomeSettingIsValidatedLikeItsNeighbours`), each because the value
+loaded truncated ("a fraction loaded, as 7", "Load took it, as a limit of
+0", "PlayerEnabled = true, <nil>"); 34 passed: every integer, whole float,
+null and absent case, `.inf`, `.nan` and `1e19`, which yaml.v3 refused in
+the same words already, and the OpenHome rows that were there before. The
+player block's values were measured through main's own decode
+(`Node.Decode` into an int, as its `whole` made it): 7792.9 as 7792, 45.75
+as 45, 0.5 as 0, `-.inf` as the smallest int64, 1.5 as 1, 0.25 as 0. In
+`cmd/bridge`, the three new init cases failed, each on its fixture loading.
+
+### Negative controls
+
+Against the committed change, each restored with `git checkout --` and the
+tests passing again after it:
+
+- **One per setting, 48 in all.** A temporary line in `buildShadow` kept the
+  original type for the one struct field `B528_SKIP` named, so that setting
+  decoded truncating again, and one in `playerReader.whole` ran main's
+  decode for the one path it named. A driver ran `go test -count=1 -run
+  '^TestAWholeNumberSettingTakesNoFraction$' -v ./internal/config/` with
+  `B528_SKIP=<struct>.<field>` for each of the 44 settings, and `-run
+  '^(TestAWholeNumberOfThePlayerTakesNoFraction|TestAnOpenHomeSettingIsValidatedLikeItsNeighbours)$'`
+  with `B528_SKIP=output.player.<setting>` for the player's four, and
+  required each run to fail that setting's refusal subtests and nothing
+  else. All 48 did. Each config setting failed
+  `TestAWholeNumberSettingTakesNoFraction/<path>` alone, "a fraction loaded,
+  as 7" (as 250 for `enrich.coverSize` and `retention.playbackHistoryDays`).
+  The player's failed `TestAWholeNumberOfThePlayerTakesNoFraction/<setting>/not_whole_N`:
+  `pauseReleaseSeconds`' three ("PlayerEnabled = true" for 45.75, and
+  `Problem`'s range refusal for 0.5 and `-.inf`), `openhomePort`'s two and
+  the OpenHome row `a_fraction_for_the_port`, and `device.pcmDevice`'s and
+  `device.subdevice`'s two each, "PlayerEnabled = true". With `B528_SKIP`
+  unset, the mutated tree passed all four tests.
+- **`outputAsLoadDecodes` back to the bare decoder** (KnownFields alone): the
+  three init rows failed, `a_loopback_port_written_as_a_fraction` (its
+  warning did not say the port does not read: the 7795 was kept),
+  `a_block_beside_a_fraction_elsewhere` ("a file Load refuses for its
+  fraction decodes whole") and `a_fraction_in_a_merged_block` (the block
+  kept).
+- **`outputAsLoaded` without `CheckWholeNumbers`**: the in-block and merged
+  rows failed, and the row with the fraction outside the block passed.
+- **`outputRecovered` without `CheckWholeNumbers`**: the in-block row alone
+  failed; the merged row stops at its merge key before a setting is read.
+- **`valueFreeTagged` without the branch that keeps a value-free line**: 52
+  subtests failed, the 44 settings, the five edges the check refuses and
+  the merge, alias and three-fraction cases, each refusal reading "cannot
+  unmarshal that value into int"; `.inf`, `.nan` and `1e19`, which yaml.v3
+  refuses itself, passed.
+- **`exactInteger` without its range bound**: `minus_infinity` and
+  `two_to_the_63rd` failed (the limit loaded as the smallest and the largest
+  int64), and so did the player's `pauseReleaseSeconds/not_whole_3`
+  (`-.inf` reaching `Problem`'s range refusal).
+
+### Runs
+
+On darwin/arm64 with Go 1.27.3 (go.mod's 1.27.2 toolchain is not in this
+host's module cache, and it is offline): `make fmt` rewrote nothing, and
+`gofmt -l internal/config cmd/bridge` lists nothing; `make vet`, and `go vet
+./...` with `GOOS=linux` and with `GOOS=windows`, clean; `make build-all`,
+the six targets built; `make docs-check`, ok; `go test -p 4 -race -timeout
+30m ./internal/config/ ./cmd/bridge/`, ok (3.4 s and 497.7 s); the four
+config tests and the three new init subtests at `-race -count 20`, every
+run passed.
+
+### Where the rule is
+
+Its lines: a new bullet in `config-lifecycle.md`, a clause in `player.md`'s
+binding bullet and in `openhome.md`'s opt-in bullet. The session that made
+this change could not write `.claude/rules`, so those three edits went to
+the owner as a patch beside the commit. Its long forms: the new entry in
+`ops/History-rules-config-lifecycle.md`, the opt-in entry in
+`ops/History-rules-openhome.md`, and the rewrite's entry in
+`ops/History-rules-cli-serve.md`, whose line, keep Load's own decode, holds
+as written.
+
+### After review: the value the text writes
+
+CodeRabbit on PR #1339 found a fraction the test let through:
+`pauseReleaseSeconds: 30.0000000000000001` loaded as 30. yaml.v3 reads a
+float through `strconv.ParseFloat`, which rounds to the nearest float64,
+and `exactInteger` weighed that float64, which is whole. Measured on the
+branch before the fix: `limits.manifest.requestsPerMinute: 6.0000000000000001`
+loaded as 6, `1e-400` and `1e-1000000000` as 0 (the limit off), and
+`9007199254740993.0` as 9007199254740992; in the player block,
+`pauseReleaseSeconds: 45.0000000000000001`, `openhomePort:
+7793.0000000000001` and `device.pcmDevice: 1e-400` each read. The round
+made a `!!float` pass only when its text, read exactly (`big.Rat`, its
+underscores dropped as yaml.v3 drops them), wrote the float64 yaml.v3
+decodes; `9007199254740992.0`, which a float64 holds, still loads.
+
+Red first: seven of the eight new cases failed on the test commit, every
+refusal (four in `TestAWholeNumberSettingTakesWhatDecodesUnchanged`, three
+in `TestAWholeNumberOfThePlayerTakesNoFraction`), and nothing else did; the
+eighth, `9007199254740992.0`, loads on both sides by design. Negative control, on the committed fix: weighing only
+whether the text is whole (`written.IsInt()`) in place of comparing it with
+the float64 turned exactly one case red, `a whole number ParseFloat rounds
+to another`, as predicted.
+
+### After review, again: the text as yaml.v3 reads it
+
+Codex and Claude, reviewing that round, each found `big.Rat` reading the
+text otherwise than yaml.v3 does. yaml.v3's resolve tries
+`strconv.ParseInt` with base 0 before any float, so `!!float 036` decodes
+as 30, octal, as `036` untagged does, while `big.Rat` read 36 and the load
+refused it; the player block left `device.pcmDevice: !!float 010` unread.
+`big.Rat` also refused texts that write a whole number,
+`0e99999999999999999999` (its exponent overflows) and `30.` with a million
+and one zeros after its point (an exponent past a million), and reads a long
+mantissa in time quadratic in its digits, measured on this host: a hundred
+thousand digits in 6.7 ms, a million in 517 ms, where `strconv.ParseFloat`,
+which yaml.v3 runs first, takes 1.4 ms.
+
+`writtenInteger` now reads the text as resolve does: its underscores
+dropped, `strconv.ParseInt` with base 0 first (`!!float 0x20000000000001`
+writes 2^53+1, which the float64 rounds to 2^53, and is refused), then a
+decimal float digit by digit, in time linear in the text (a million digits
+in 0.74 ms). Zero is zero whatever its exponent. Refused unread: a whole
+number of more than 20 digits, which no 64-bit integer holds, and a number
+other than zero with an exponent of a million or more, which yaml.v3 never
+decodes unchanged (strconv stops reading an exponent once it reaches 10000,
+so such a text overflows, and resolves as a string, or decodes to another
+value: `0.` and 9,998 zeros then `3e10000000` decodes as 30).
+
+Red first, on a stand-in with round 9's reading: four of the new behaviour
+cases (the tagged octal in both tests, the million zeros, the overflowing
+exponent of zero) and nine rows of the new
+`TestWrittenIntegerReadsTheTextAsYAMLDoes`; the tagged 2^53+1 was refused
+on both sides. Negative controls on the committed fix, each red as
+predicted and nothing else: without `ParseInt` first, the two tagged octals
+and five of the unit test's integer spellings; with the exponent bound
+raised from six digits to eighteen, the one row whose exponent is a million
+or more; with 21 digits allowed, the two 21-digit rows.
+
+Codex, reviewing that round, found one more of resolve's readings: once
+base 0 refuses a text, a binary or octal prefix followed by a sign
+(`!!float 0b+11110`, `!!float 0o-36`) is read by `strconv.ParseInt` of
+what follows the prefix, in its base, so yaml.v3 decodes 30 and -30
+where the round refused the file. `writtenInteger` now runs the same fallback, its
+`0b`, `-0b`, `0o` and `-0o` branches as resolve writes them. Red first:
+that behaviour case and four rows of the unit test, and nothing else; the
+same five went red with the fallback disabled on the committed fix.
+Claude's review corrected the reason given for the large-exponent refusal
+(it is no trade-off: yaml.v3 never decodes such a text unchanged) and the
+round-9 case's count (a million and one zeros). `0.` and 9,998 zeros then
+`3e10000000`, which yaml.v3 decodes as 30, is now a refused row; it was
+refused before this round too.
+
+### Not in this change
+
+yaml.v3 reads an integer written with a leading zero as YAML 1.1's octal:
+`output.loopbackPort: 010` loads as 8, and `0777` as 511 (measured). It is a
+value nobody wrote, but no fraction: a follow-up. The `BRIDGE_*` overrides
+parse with `strconv.ParseInt`, which refuses a fraction (warned and
+ignored), and the console's settings PATCH decodes JSON into `*int`, which
+`encoding/json` refuses with a fraction in it (400): neither truncates.
+
+## 2026-10-24 — B470 PR 5a3: the player's OpenHome read actions, each answered from one engine snapshot, and the backend's report of the decoder's length and format
+
+Every action of the Source's four services that reads state and changes
+nothing is answered (25 of the 42); the 17 writes stay 602 until 5a4, and the
+opt-in stays off by default. Each read takes one `engine.Snapshot()` and
+answers from it alone; while no engine runs every read is fault 501. The
+length and format Time and Info report come from the decoder, through an
+addition to the backend seam. Run on legion0 (Linux, Go 1.27.2), where the
+Linux-only tests ran.
+
+### What shipped
+
+- `internal/player/engine`: `Details` (the decoder's total frames, rate,
+  valid bits, channels, codec, lossless) and `DetailsEvents`, an `Events`
+  that takes them too (an addition: `Events` and `Backend` unchanged, so
+  their other implementers compile as they were); the engine's own Events
+  implements it. `Snapshot.Track` (the occurrence heard: its entry's
+  reference and metadata as it was handed off, and the Details),
+  `TrackCount` and `DetailsCount`. `hear` sets and clears the track with the
+  audible occurrence, in the three places `o.audible` was assigned; neither
+  the track nor the counts move the generation.
+- `internal/player/playback`: the reporter sends an occurrence's Details just
+  before its Audible, from the one goroutine that reports, to an Events that
+  takes them (`detailsOf`, `codecName`: FLAC, WAV, AIFF, ALAC from
+  `format.PCM.Container`, and `format.PCM.Frames`).
+- `internal/player/openhome`: `actions.go` (the `reads` table, `act`,
+  `snapshot`, `writeResponse` with a counted Content-Length, the values);
+  `Config.Engine`; `newHandler` takes the engine; `soap.go` defines 501 and
+  605 beside 401, 402 and 602, and `faultReply` carries an OpenHome code's own
+  description; `services.go`: `outs`, and `escapeTo`, the one escaper.
+- `cmd/bridge/serve_player_openhome.go`: `startOpenHome` hands the surface
+  the engine the player runs. `output_play_print.go`: `bridge output play`
+  prints the Details and forwards them.
+- `CLAUDE.md`: the rows of the four packages. The rules text (openhome.md's
+  lines, player.md's, their long forms, and the lines of both and of
+  `ops/History-rules-openhome.md` that said every action is 602) went to the
+  orchestrator in the worker's report, since the session could not edit
+  `.claude/`, and the orchestrator applied it as 0a1e7781 (three of its blocks
+  by hand: their directives sat in the sections' bodies).
+
+### The values, action by action
+
+Playlist: `TransportState` Playing, Buffering while `Starting`, Paused,
+Stopped, a release by its pending intent (stop Stopped, pause Paused, play
+Buffering), maintenance Stopped; `Id` the selection, 0 for none; `Read` the
+entry's reference and metadata byte for byte, 800 for an ID not held (the
+engine's `ReasonIDNotFound`); `ReadList` an Entry (Id, Uri, Metadata) per ID
+held, in the order and as often as asked, an ID not held left out, its IdList
+ui4s by row 9's rule separated by XML white space anywhere, a token that is no
+ui4 402, past `engine.MaxReadList` IDs or an 8 MiB TrackList 605; `IdArray`
+the token and the IDs from one snapshot, big-endian ui4s in base64, "" for an
+empty queue; `IdArrayChanged` whether the token differs; `TracksMax` 1000;
+`Repeat`; `Shuffle` 0; `ProtocolInfo`
+`http-get:*:audio/x-flac:*,http-get:*:audio/wav:*,http-get:*:audio/aiff:*,http-get:*:audio/mp4:*`,
+each type `dlna.ResolveMIMEType("", ext)`, which every renderer profile
+agrees with (they override only DSF and DFF).
+
+Time: TrackCount (occurrences heard since the engine started), Duration (the
+decoder's frames over its rate, to the nearest second, a half up), Seconds
+(the floor of the heard occurrence's position), each held to 10,000,000.
+
+Info: Counters (TrackCount, DetailsCount: one per change of the details,
+nothing heard counting as none, so a stop is a change; MetatextCount 0);
+Track (the occurrence's reference and metadata, empty while nothing is
+heard); Details (Time's Duration, rate × bits × channels, the bits, the rate,
+lossless, the codec; zeros while nothing is heard or reported); Metatext "".
+
+Product: Manufacturer (`1-bit`, `https://1-bit.app`), Model (`1-bit Bridge
+Player`, the description's modelDescription), Product (Room the friendly
+name), Standby 0, SourceCount 1, SourceXml
+`<SourceList><Source><Name>Playlist</Name><Type>Playlist</Type><Visible>true</Visible><SystemName>Playlist</SystemName></Source></SourceList>`,
+SourceIndex 0, Source(0) and 801 past it (800 until round 2), Attributes
+`Info Time`, SourceXmlChangeCount 0. Booleans are 1 and 0 (UDA 1.1, §2.5).
+
+Sources. UDA 1.1, §3.2.2, for 501 ("Action Failed: may be returned if the
+current state of the service prevents invoking that action") and 605
+("String Argument Too Long"), the same in 1.0. The engine's own mapping for
+Playlist's 800. OpenHome's reference player, ohPipeline (what the brief calls
+ohMediaPlayer), for the rest, read in round 2 at master c1047a8dc801
+(2026-10-21) from the files the orchestrator fetched (round 1 had them from
+memory: no network, no copy on the host): Read's 800 "Id not found"
+(`ProviderPlaylist.cpp` lines 23-24), Source's 801 "Source not found" past the
+last index (`FaultCode.cpp` line 21, answered at `ProviderProduct.cpp` 284;
+round 1's 800 "Source index out of range" was wrong), ReadList leaving out an
+ID it does not find (`ProviderPlaylist.cpp` 389), the SourceList form with
+SystemName (`Product.cpp` 299-317) and the space-joined Attributes
+(`Product.cpp` 209-215). 1-bit's parser taking SystemName beside the Type,
+Name and Visible it requires stays an owner check.
+
+### No engine, one fault
+
+`act` answers a write 602 before it looks at the engine. A read takes one
+snapshot; there is no engine when `Config.Engine` is nil, when `Done` is
+closed (asked after the snapshot is taken, so an engine that ended before the
+ask is never read), or when the snapshot is `Closed`. Each covers a case the
+other misses: a Run that returns publishes a Closed snapshot and then closes
+Done, and a panic on the owner closes Done (`abandon`) with no Closed
+snapshot. 501, not 602 (the reads are implemented) and not 503 (the
+surface's answer for its slots and its stop, and no SOAP fault). The fixed
+Product reads answer 501 too, so a Source whose player has gone does not
+describe a working Playlist source. In serve the surface stops before the
+engine, so a request meets no engine only after a panic in the engine's Run,
+until the supervisor stops the surface.
+
+### ReadList's bounds
+
+The brief asked for at most `MaxReadList` IDs and what past it: 605, String
+Argument Too Long. Measuring the reply raised a second bound: an entry's
+metadata is escaped twice (up to nine bytes a byte), and 1000 IDs naming one
+64 KiB entry, or the queue's 16 MiB of metadata, built replies of hundreds of
+MiB. The TrackList document is held to 8 MiB, its closing tag counted since
+round 2 (605 past it; a full queue of ordinary DIDL-Lite answers within it),
+the entries read one at a time (`Snapshot.Read`) so no copy of the next is
+taken past the bound (`Snapshot.ReadList` copies every entry first), and the
+reply is escaped as it is written after a counting pass, so no second copy of
+the TrackList exists. Truncating was rejected: a controller that read a short
+TrackList would take the IDs left out for deleted.
+
+### The escaping
+
+One escaper, `escapeTo` (xml.EscapeText), for every string of every reply,
+once per level of a value that is XML itself (SourceXml; a TrackList, and the
+DIDL-Lite inside it). A value that is XML 1.0 text reads back byte for byte;
+a character XML 1.0 cannot carry, which the engine takes through its own API,
+is sent as U+FFFD, so the reply stays well-formed. For 5a4: Insert refuses a
+Uri or Metadata that is not XML 1.0 text; what reaches it is the decoded text
+(encoding/xml refuses such a character at row 7, literal or referenced, but
+decodes `&#xD800;` to U+FFFD and a literal carriage return to a line feed).
+
+### The engine and the backend: the length and the format
+
+`DetailsEvents` is an optional interface beside `Events` rather than a new
+`Events` method: the engine, `bridge output play`'s `playEvents` and the
+backend rig's `recEvents` take it; `nopEvents` and the stand-ins need not.
+The reporter type-asserts the session's Events at each crossing and sends
+Details then Audible in one step's list, so the owner holds them as it applies
+Audible; Details that arrive after Audible update the track. The rig records
+Details apart from the events, whose sequences other tests read. The track is
+built from the occurrence as handed off (`occ.meta`, shared with the queue,
+which never writes to it), never looked up; under the engine's policy an
+entry deleted while heard stops being heard in the same step, so the copy is
+structural (control E3 below stays green).
+
+### Tests
+
+Four in `internal/player/engine` (`track_test.go`), two in `internal/alsapcm`
+(`playback_details_test.go`: every PR 1 golden that plays, its Details the
+reference tools' frame count, before its Audible; and the engine's track
+through the real backend, beside metadata claiming 599 s), fifteen in
+`internal/player/openhome` (`actions_test.go`, over a real engine and a fake
+backend in `player_test.go`: an empty queue, one entry, many, the selection
+moving, a deleted entry and a deleted audible one, a restart's token and
+counters, the release states) with `TestEveryValidActionIsAnswered602`
+rewritten for the writes (its name kept: openhome.md cites it), one SOAP-table
+row (Time with no engine, 501) and one discovery assertion (a read through the
+LOCATION, 501 with no engine) changed, `FuzzControlRequest` extended (an
+engine with every kind of metadata and a track heard, a seed per read, every
+200 parsed as its action's response, SourceXml and TrackList parsed again);
+the serve test reads IdArray and TransportState from serve's engine.
+`FuzzControlRequest` ran 440,818 inputs in 30 s with four workers and one-second
+minimization, none failing.
+
+### Red first
+
+- The engine with the types and accessors and a `Details` that did nothing:
+  the four engine tests red (no track heard, waits on the details).
+- The backend unchanged: every golden "details reported 0 times", and the
+  engine's track without details.
+- Every action still 602 (`act` answering every read as a write: `read =
+  nil`), sixteen tests run, fourteen red: the thirteen read tests of
+  `actions_test.go` written then (`TestTheProductReadsAreTheSourcesOwn`,
+  `TestTransportStateIsTheEnginesTransport`,
+  `TestIdReadAndReadListFollowTheQueue`,
+  `TestReadListTakesWhiteSpaceAndRefusesWhatIsNoID`, `TestReadListIsBounded`,
+  `TestIdArrayIsTheTokenAndTheIDsInQueueOrder`,
+  `TestTracksMaxRepeatShuffleAndProtocolInfo`,
+  `TestTimeAndInfoReadTheTrackHeard`, `TestTheTimeIsHeldForOneBit`,
+  `TestNoEngineIsOneFaultForEveryRead`, its two cases then,
+  `TestEveryValueRoundTripsThroughItsEscaping`, `TestOneBitsCastStartAndPoll`
+  and `TestTheSurfaceAnswersReadsFromItsEngine`) and `TestTheSOAPTableRowByRow`
+  (its row "9: Time's Time, a read with no engine"); the classification
+  (`TestTheReadsAndTheWritesAreEveryAction`) and the writes table
+  (`TestEveryValidActionIsAnswered602`) green. Round 1's record said "the
+  fourteen read tests and the Time row", counting the SOAP table's row twice
+  (Claude's review of round 1). `TestADeletedAudibleEntryIsNoLongerHeard`, the
+  restart's zeros in `TestTimeAndInfoReadTheTrackHeard`, and the shutting-down
+  and panic cases of `TestNoEngineIsOneFaultForEveryRead` came after, against
+  the implementation (controls E9, O2 and O2b below).
+- Serve without `Config.Engine`: "IdArray: 500", "TransportState: 500".
+
+### Negative controls
+
+Each on the staged tree, one mutation, the tests run, then restored from the
+index (`git checkout --`) and the tree checked.
+
+| NC | Mutation | Red |
+|---|---|---|
+| E1 | no track counted | two engine tests' counts, Time's TrackCount, 1-bit's poll |
+| E2 | details counted when unchanged (the first form did not build: `before` unused; rerun) | "c heard with b's details: 3 changes, want 2" |
+| E3 | the track looked up in the queue | green: not observable (above) |
+| E4 | details after Audible ignored | two engine tests |
+| E5 | a details report moves the generation | "generation .5 (was .4)" |
+| E5b | the track heard moves the generation | "the first sound moved the generation" |
+| E6 | Details sent after Audible | every golden |
+| E7 | a length rounded to whole seconds | every golden ("Frames:0") |
+| E8 | ALAC named M4A | the six ALAC goldens |
+| E9 | a release that keeps the track heard | the deleted audible entry's reads, the stop's zeros |
+| O1 | SetRepeat answered as a read | the classification, the writes table, the SOAP table's SetRepeat rows |
+| O2 | `snapshot` without the Done check | first green (a returned Run's snapshot is Closed); the panic case added; red |
+| O2b | without the Closed check | the shutting-down case |
+| O3 | without the nil check | a nil pointer panic |
+| O4 | a starting session read as Playing | the table, the engine walk, 1-bit's poll |
+| O5, O5b | a release to pause, to play, read as Stopped | the table and the engine walk |
+| O6 | ReadList faults an ID it does not hold | the queue test |
+| O7 | a token that is no ui4 skipped | the IdList rows that are no ID |
+| O8 | no MaxReadList bound | "1001 IDs: 200" |
+| O9 | no TrackList bound | "a TrackList past 8388608 bytes: 200" |
+| O10 | the TrackList's metadata unescaped | the round trip, the bound, a fuzz seed |
+| O11 | IdArray little-endian | four tests, serve's included |
+| O12 | IdArrayChanged inverted | three assertions |
+| O13 | Seconds rounded | "Seconds:62, want 61" |
+| O14 | Duration floored | "200.5 s rounded to 201", the rounding rows |
+| O15 | Time not held | both clamp checks |
+| O16 | Duration from the metadata's `duration` | "Duration:599, want 180" |
+| O17 | Source answers index 1 | "Source(1): 200" |
+| O18 | SourceXml without SystemName, Visible 1 | the Product test, 1-bit's source pick |
+| O19 | values unescaped | the tests whose values hold markup (Product's room, the queue's, the bound) |
+| O20 | an escaper that keeps what XML cannot carry | the round trip, a fuzz seed |
+| O21 | Content-Length one off | every response checked |
+| O22 | DetailsCount answered as TrackCount | "stopped: DetailsCount 2" |
+| O23 | Track reads the selection when nothing is heard | two assertions |
+| O24 | ProtocolInfo's FLAC type not internal/dlna's | the string and every profile |
+| O25 | Standby on | the Product test, 1-bit's cast start |
+| O26 | booleans as words | five tests |
+| O27 | serve does not hand the surface its engine | serve's IdArray and TransportState |
+| O28 | Room ignores the room | two rooms |
+| O29 | Read's Uri altered | 1-bit's exact match |
+| O32 | no engine answered 602 | the four no-engine cases, the Time row, the discovery read |
+
+Not controlled, no seam reaching it: one snapshot a request (a second
+snapshot differs only in a race), and the track's copy (E3).
+
+### Decided otherwise than the brief, and why
+
+- The fixed Product reads answer 501 with no engine too: one fault for every
+  read; the writes stay 602 in every state.
+- ReadList has a second bound (an 8 MiB TrackList, 605) and reads its entries
+  one at a time: the measured replies above.
+- DetailsCount counts changes of the Details the backend reported, so two
+  tracks whose lengths differ by less than a second count a change though
+  Details answers the same seconds; nothing heard counts as no details.
+- Lossless is the backend's report (true for everything it plays), false
+  while nothing is reported.
+- Info's counters are held to a ui4, Time's to 10,000,000.
+- The brief's `upnpErrorDescription` is internal/dlna's; the surface's table
+  is `faultDescription`, and an OpenHome code carries its service's own
+  description (Playlist's 800 "Id not found"; Product's 801 "Source not
+  found", which round 1 had as 800 "Source index out of range").
+- The length and format reach the engine through `DetailsEvents`, an optional
+  interface, so no implementer of `Events` changes.
+
+### Environment
+
+`/tmp` is tmpfs on legion0, which the engine refuses (`ErrVolatile`), so the
+player's serve tests and the engine-backed tests fail or skip there by
+default; every run here set `TMPDIR` to a directory on the worktree's disk.
+The host had no git identity, and `git config`, `git -c` and
+`git write-tree` need an approval the headless run could not give, so the
+session made no commit: it left the work staged, and the orchestrator
+committed it as 89812eed.
+
+### Gate
+
+On legion0, Go 1.27.2, through the build lock: `make fmt` (nothing
+rewritten), `make vet`, and `go vet` of the touched packages for Windows and
+macOS clean; `make build-all` clean; `make docs-check` clean. `make test`'s
+race run takes longer than one foreground command may here, so it ran as the
+same `go test -race -timeout 30m` over every package in shards (cmd/bridge and
+internal/manifest by their tests' initials, the rest in groups), the player's
+tests on a persistent TMPDIR: every package passes but `internal/transcode`,
+whose `TestRunSoxConcurrentSameSpecDoesNotStealTmp` fails in the package's
+full run on this host, with the default TMPDIR as with the other (its stand-in
+sox times out waiting for the second writer), and passes alone; neither that
+package nor its tests depend on a package this change touches (`go list -deps
+-test`), so its test binary is the base's: a finding about the host or the
+test, left to its own entry.
+
+### Not in this change
+
+Every write (5a4), URI confinement (5a4), GENA (501), Volume, seek, shuffle,
+DSD and DoP, `/v1/outputs` (5b), iOS, and the opt-in's default (off until 5a4
+and the owner's dogfood). Owner checks: 1-bit's parser with SystemName; a
+cast start from 1-bit to the bridge, which needs 5a4's inserts (ohPipeline's
+codes and forms were read in round 2, below).
+
+### Round 2: the reviews, and ohPipeline's own sources
+
+Codex's and Claude's reviews of round 1, and the five ohPipeline files the
+orchestrator fetched (openhome/ohPipeline master c1047a8dc801, 2026-10-21:
+`ProviderPlaylist.cpp`, `ProviderProduct.cpp`, `Product.cpp`,
+`SourcePlaylist.cpp` and `FaultCode.cpp`). Run on legion0 with Go 1.27.3, on
+the orchestrator's merge of main (f58d4587, B528 among it).
+
+- **Source's fault is 801 (the files).** Product's Source of an index it
+  does not hold is `FaultCode::kSourceNotFound`, 801 "Source not found"
+  (`FaultCode.cpp` line 21), which `ProviderProduct::Source` answers at 284
+  (`SetSourceIndex` and `SetSourceIndexByName` too, 244 and 256) when
+  `Product::GetSourceDetails` throws `AvSourceNotFound` past its last source
+  (`Product.cpp` 505-510). Round 1 answered 800 "Source index out of range",
+  from memory. `faultSourceIndex` is `faultSourceNotFound` now, and the
+  tests pin each OpenHome fault's description beside its code. The other
+  citations held, now by file and line: Read's 800 "Id not found"
+  (`ProviderPlaylist.cpp` 23-24), ReadList leaving out an ID it does not find
+  (389) and escaping each Uri and Metadata once (382, 385), the SourceList's
+  order (`Product.cpp` 299-317) and the space-joined Attributes (209-215).
+  One difference is kept, with why, in `ops/History-rules-openhome.md`:
+  ohPipeline splits the IdList on single spaces and skips a token that is
+  not a number (391), where 5a3 answers 402.
+- **The TrackList bound counts its closing tag (Codex, Low).** The check ran
+  after each entry, before `</TrackList>`: with IDs 1 and 2, Codex's
+  construction checked exactly 8,388,608 bytes and answered a TrackList of
+  8,388,620. `TestTheTrackListBoundIsItsWholeDocument` builds it over the
+  engine's own IDs, twenty-five copies of an entry of 64 KiB of ampersands
+  and one entry whose metadata fills the document to the byte: at the bound
+  it is answered whole, 8,388,608 bytes; 1 and 12 bytes past it, 605.
+- **Id after the selection is deleted (Codex, Medium): unchanged.** The
+  engine selects the entry that followed a deleted selection, or nothing
+  when none followed it, so Id reads 0 with entries still queued. ohPipeline
+  re-points a stopped source the same way (`SourcePlaylist.cpp` 443-456),
+  and 1-bit seeks off the row playing before it deletes that row.
+  `TestIdFollowsADeletedSelection` pins both cases through the SOAP layer.
+- **The restored identity (Claude, High): the policy is in place.** 5a0's
+  policy landed on main before 5a3 (#1331, e263ee86): a backup carries the
+  reservation, and a restore raises both marks past anything the snapshot's
+  identity handed out. Claude read `player.md`'s line from before it, which
+  #1331 left behind when it replaced that line's long form, and the 5a2a
+  record's sentence in `ops/History-rules-openhome.md`; the rules note
+  corrects both. `TestARestoredIdentityHandsOutValuesPastItsSnapshot` pins
+  the policy through the SOAP layer: a source on serve's file names hands
+  out IDs and tokens, `backup.Snapshot` and `backup.Restore` take it onto a
+  fresh data directory, and the restored player's first IdArray answers a
+  token above the snapshot's reservation (12,288) and no queue, the source's
+  last token reads as changed, its first Id (an entry inserted through the
+  engine, selected in the empty queue) is above the snapshot's ID mark, and
+  every ID the source handed out answers 800.
+- **This entry (Claude, Low).** "What shipped", "Red first" and
+  "Environment" above now say what happened: the orchestrator applied the
+  rules note (0a1e7781) and committed round 1's staged work (89812eed), and
+  the all-602 run had fourteen tests red, counted from round 1's own output.
+
+Red first. The Product test against round 1's code: "Source(1): 500, fault
+800 "Source index out of range", want fault 801 "Source not found"", and the
+same for 4294967295. The boundary test against round 1's check: the
+TrackLists 1 and 12 bytes past the bound answered 200, the one at it
+answered. The restore test against the restore before #1331
+(`restorePlayerReservation` writing nothing): the first token and ID 4097,
+below the snapshot's 12,288, and Read of the source's 4097 answered the new
+entry. The deleted-selection test changes no behaviour and passed at once.
+
+Negative controls, each on the committed tree (09f47bd7), the file then
+restored from git and the tree checked clean:
+
+| NC | Mutation | Red |
+|---|---|---|
+| R1a | Source's fault back to 800 "Source index out of range" | the Product test, both indexes |
+| R1b | 801 with round 1's description | the Product test's description check |
+| R2a | the bound checked without the closing tag | the TrackLists 1 and 12 bytes past it answered |
+| R2b | the bound taken as exclusive (`>=`) | the TrackList at the bound refused, 605 |
+| R3a | a deleted selection selects nothing | "a deleted selection in the middle: Id 0" |
+| R3b | the first entry follows the last, as with repeat | "with nothing after it: Id 4097, want 0" |
+| R4a | the engine ignores its reservation at start | the first token and ID 4097, Read(4097) answered |
+| R4b | the restore raises the IDs and drops the token mark | the first token, 4097, alone |
+
+Gate, on legion0 with Go 1.27.3, through the build lock: `make fmt`
+(nothing rewritten), `make vet`, and `go vet` of the touched packages for
+Windows and macOS clean; `make build-all` and `make docs-check` clean. The
+race suite, `make test`'s `go test -race -timeout 30m`, ran in shards with a
+TMPDIR on disk (cmd/bridge in four and internal/manifest in six by their
+tests' initials, the rest in groups; `internal/admin` alone took 725 s):
+every package passes but `internal/transcode`, whose
+`TestRunSoxConcurrentSameSpecDoesNotStealTmp` fails in the package's full
+run and passes alone, as in round 1, in a package that depends on none this
+change touches. `FuzzControlRequest` ran 495,073 inputs in 30 s, none
+failing.
+
+## 2026-10-24 — B515 round 3: configured MPD file and informational argv hint
+
+The reading again describes only the bridge's configured/discovered mpd.conf.
+That file supplies config, mpd_conf warnings, song mapping and the DoP veto.
+The unshipped provenance field is replaced by optional mpd.configHint:
+same/different (physical identities in the bridge's view), none (no operand),
+or no_config; only different includes a redacted logical path. The operand's
+contents are never read. Process environ and MPD default inference are removed.
+Per-card Tgid/output-thread, stable start time, argv[0], root and bounded grammar
+checks remain, now determining hint presence alone.
+
+The round-3 design change follows the reviews' counterexamples: a private
+bind mount may keep the same root inode, mutable argv may describe a later
+path, /proc/self/cwd is bridge-relative, PID reuse may precede the first stat,
+MPD's HOME fallback uses getpwuid(getuid())->pw_dir, and a different unreadable
+file left the configured fallback displayed. These checks cannot prove which
+file MPD loaded. Signal Path keeps a verifiable description of the configured
+file and makes only an explicitly limited command-line observation.
+
+Named-parent physical include resolution and combined redaction remain.
+Ordinary absent includes already worked; a dangling include reproduced the
+resolution-error defect: optional absence was reported, plain absence lacked
+not-found classification, and the raw host path appeared. Resolution absence
+now maps to not found after checking the physical missing parent is inside
+the root. Both directives and outside-root dangling targets are tested.
+PROTOCOL.md now matches takeReading: ALSA configuration then mpd.conf, after
+the MPD status bracket. The only additive shipped wire field is configHint;
+protocol version remains 1. Backward-compatible protocol change, no iOS change
+required; the protocol mirror should be copied with the next companion update.
+
+Red-first hint values and dangling-include failures, adapted parser/identity,
+include/privacy controls, repeated race tests and the exact gate results are
+recorded in report-r3.md and controls-r3/. No commit or push is part of this round.
+
+
+## 2026-10-24 — B515 round 4: independent hints and configured named paths
+
+The production Inspect-to-reading path reopened a symlink's resolved target,
+so probe and reading could follow different relative includes. The reading
+now reopens the explicit configured name. A shared config/hint deadline also
+discarded a successfully read config when process metadata stalled; config
+publication now precedes a separate hint deadline and busy flag. A late,
+failed or already-running hint omits only hints, and the next reading can
+still refresh the configured file.
+
+Process-relative operands under `/proc/` or `/dev/fd/`, `/dev/stdin`, and
+links resolving there omit hints. Identity comparison uses confined physical
+resolution with `conf.StatHost`, never a second stat of the unresolved
+operand. The static absolute-link escape was already refused by the old
+Exists check; the new path centralizes confinement and identity lookup.
+Nested include diagnostics previously compared an unresolved host name
+against a canonical root; they now use the physical cycle key. The duplicate
+configured DoP scan was replaced by the existing named-block lookup, with
+both configured values pinned when no live attribute is present.
+
+Regressions failed before the fixes; the unchanged absolute-link refusal and
+DoP behavior were green baselines, then tested with deliberate regressions.
+The task's `report-r4.md` and `controls-r4/manifest.json` hold exact red/green
+runs, controls, root behavior comparisons and gates. The original B515 index
+and entry now describe the configured file, informational hint, MPD's include
+rule and redaction; removed round-1/2 provenance designs are explicitly
+superseded in round 3. Backward-compatible protocol change, no iOS change
+required; the protocol mirror remains a companion update.
+
+## 2026-10-24 — B500 round 2: package ancestry, shipped grants and release environment
+
+The generator now collects notices from each compiled package directory up
+through its effective module root, deduplicating module-relative paths. The
+six-target union adds prometheus/client_golang's internal gddo LICENSE and
+klauspost/compress's internal/snapref/LICENSE and zstd/internal/xxhash/LICENSE.txt.
+COPYRIGHT and LICENCE spellings are accepted case-insensitively; miekg/dns's
+COPYRIGHT now ships. Text-name filtering removes tailscale's license_test.go
+and refuses a module whose only apparent licence is source code.
+
+Module PATENTS are reproduced only when shipped by that module or replacement.
+The prior x/oauth2 fallback is removed. The separate Go standard library and
+runtime section carries the go1.27.2 toolchain's LICENSE and PATENTS; missing
+or empty Go LICENSE fails. The running toolchain must match go.mod's version.
+Before listing dependencies, inherited go env values (including persisted
+settings and workspace discovery) must have default GOFLAGS, GOWORK, GOAMD64
+and GOARM64. Discovery no longer clears settings the release build inherits.
+Local replacement labels omit the version separator when no version exists.
+
+Regression tests failed on the round-1 generator before these fixes, then
+passed. Mutation controls cover the old guarantees (with the obsolete patent
+fallback control reversed to forbid synthesis), every new finding, Go notice
+requirements and environment refusal. Saved bytes are restored after each
+control; no commit or HEAD restore is used. The counts remain 63 per Darwin
+target, 67 per Linux target, 68 per Windows target, 75 modules in the union.
+The generated output is 358,063 bytes (was 355,170); two generations match.
+The requested three-platform vet, fmt, docs-check and generator race gates
+pass. Archive checks use synthetic fixtures; no release or packaging run is
+claimed.
+
+## 2026-10-24 — B500 round 3: embedded assets and fail-closed discovery
+
+The release notice generator now requires a licence-class file at each
+effective module root. A nested copied package's licence remains an additional
+notice, but cannot grant coverage to the rest of the module. Replacement roots
+follow the same rule. Notice-prefixed filenames use a three-way suffix policy:
+include known text and licence-name suffixes, skip known source extensions,
+and refuse every unknown suffix by filename even beside a valid licence.
+COPYING.LESSER, LICENSE.Apache-2.0, HTML notices and suffixed PATENTS/UNLICENSE
+are included. A vendor/ directory at the bridge root fails before discovery,
+since release builds would otherwise select different sources from go list.
+
+Checked-in supplements add the web-client bundle's preserved React, React DOM,
+scheduler, classnames and external-store-shim notices and its Inter font;
+the Tailscale supplement adds HTMX and its WebSocket extension and preserves
+the event-bus CSS reset's source notice. Both are pinned by exact module path
+and version, with replacement checks. Upgrades require another asset audit.
+The six-target EmbedFiles union and a module-wide go:embed/asset search found
+17 linked embedded files. Protobuf's edition defaults and Tailscale's own
+metadata, DNS data and resolvconf script remain covered by their module grants.
+Unlinked embed targets are excluded. The offline audit records the missing
+bundle version labels and reconstructed MIT/Zero-Clause BSD texts for upstream
+verification; it does not assert an exhaustive JavaScript component inventory
+from minified bytes whose other package notices were stripped.
+
+The four regressions failed against the round-2 generator before production
+changes, then passed. Fifty-one assertion-level mutation controls retain the
+37 round-2 guarantees and exercise the new root, suffix, vendor and embedded
+notice guards; saved bytes are restored after every mutation. The six-target
+counts remain 63 per Darwin target, 67 per Linux target, 68 per Windows target
+and 75 modules in the union. Two generations match at 370,674 bytes, up 12,611
+from round 2. Besides supplements, the Go heading advances to go1.27.3 and
+Tailscale to v1.104.2 from the merged main; their existing notice bytes are
+unchanged. The requested host/Linux/Windows vet, pinned fmt, docs-check and
+generator race gates are recorded in the round-3 report. No commit, push,
+release or deployment was performed.
+
+
+## 2026-10-24 — B500 round 4: omit unused bundled UIs
+
+The release builds now set ts_omit_webclient and ts_omit_debugeventbus. The
+bridge does not use either UI, and the minified prebuilt web client strips
+component notices that cannot be reconstructed completely offline. Omitting
+those features removes that incomplete audit from the shipped binary.
+GoReleaser's builds.tags owns the list; Make's GO_TAGS and Docker mirror it.
+check-build-tags checks all three and the build invocations, and runs through
+check-go-version in the existing CI gate and before Make builds. docs-check
+remains Python-only. The notice generator's fail-closed builds reader accepts
+only unique literal tags in a block list and supplies them to every go list.
+A tagged import fixture covers all six target invocations.
+
+The untagged six-target omission assertion failed before the change; all six
+tagged graphs pass. Counts are 61 per Darwin target, 65 per Linux target,
+66 per Windows target, 73 modules in the union. The removed modules are
+web-client-prebuilt and coder/websocket. The eventbus package remains, but
+its debugger assets do not. Both stale supplements were deleted; fixture
+components retain the registry's content, version and replacement controls.
+The remaining seven third-party embedded files are protobuf edition defaults
+and Tailscale's metadata, DNS data and resolvconf workaround; their existing
+module notices remain. Future embedded third-party assets must be omitted or
+fully covered through the exact-version registry.
+
+Two generations are byte-identical at 355,656 bytes, SHA-256
+45324dc3621413caf5f52bc302d51a302040f782e07acb905b1b90e564b15fd4.
+The Tailscale source trace keeps tsnet's tailnet listener, LocalAPI certificate
+path and netstack ListenPacket intact: the web-client stub and no-op debugger
+HTTP registration are separate surfaces. No live tailnet access was used.
+Round-4 control logs record the initial red checks, drift controls, rerun
+round-3 controls and gate results, including sandbox restrictions on tests.
+
+
+## 2026-10-24 — B500 round 5: deployed builds, embedded-file admission and image notices
+
+Red-first regressions reproduced untagged deploy and CI commands, newly added
+scripts bypassing the build guard, YAML null/boolean/numeric tags being accepted,
+an unreviewed embedded bundle admitted by its module-root licence, forbidden web
+packages with no embeds, and Docker's missing notices and partial toolchain pin.
+
+All three deploy builds and every CI test/vet site now use the release tags,
+including shard enumeration, fuzzing, the small-volume test and the ALSA ABI
+probe. The repository-wide command census compares operational command sites
+against an explicit reviewed allowlist; additions and changes require review.
+The shard flag array is pinned against a later overriding tag. YAML tags accept
+only unambiguous string names with a letter/underscore first byte, excluding
+null and boolean words in both YAML versions.
+
+Each target's real go-list output is checked for package names and embeds.
+Seven module-owned files are admitted by exact module@version, package and file
+set; upgrades, replacements and other embeds fail before notices are emitted.
+The web client and prebuilt bundle are explicitly refused. The supplement
+registry remains empty; it is not the embed admission gate. The committed
+real-graph test covers all six release targets beside the fixture tests.
+
+Docker pins Go 1.27.3, generates notices on its native builder and copies them
+into /usr/share/doc/1-bit-bridge/THIRD_PARTY_LICENSES.md in the final image.
+Both version guards require the full patch version, and the command guard also
+requires the generator and final-stage COPY. The playbook checks image bytes.
+Docker execution is unavailable in this sandbox; stage wiring was inspected,
+and actual image execution remains a host validation. The round-5 scratch report
+records gates, byte comparisons and negative-control evidence.
+
+The full-suite tree-walk audit required classifying the new census walk. Its
+otherTreeWalks table now names checkBuildSites as a source-repository walk; no
+library-root exception or traversal behavior changed. The focused audit rerun
+passes; the package still has three socket tests refused by this sandbox.
+
+
+## 2026-10-24 — B500 round 6: documented deploy tags and invocation census
+
+The canonical manual Linux deployment now supplies both release omission tags.
+The build-site census includes labelled shell fences in README.md and top-level
+ops Markdown, with prose and other code languages outside it. The deployment
+command and the release playbook's notice-generator command join the reviewed
+sites. Go executable and variable spellings (go, go.exe, $(GO), ${GO}, $GO),
+including global flags before build/install/run/test/vet, now enter the census.
+Regression cases reproduce the previously accepted commands before the fix.
+
+The Docker notice guard derives its full version from go.mod, so a coherent
+patch-version change still exercises each intended deletion. A private-copy
+control changes both pins to another supported patch, reproducing the old
+hardcoded test's mutation miss. The missing round-5 index line is restored,
+newest first. Red first, then 100 mutation controls, every one red by
+assertion and none by a compile failure: the 51 carried through round 3,
+round 4's 16, round 5's 24 and round 6's nine.
+
+Its review, on the session's own reading, found three more ways a
+documented or scripted build stayed outside the census, each fixed red
+first. A quoted executable (`"$GO" build`, `"/usr/local/go/bin/go" build`)
+did not match, since the pattern wanted white space straight after the
+name: 720 cases, three spellings by the four flag forms, five verbs and
+twelve files. An unlabelled fence, which a reader runs as shell, was left
+out with the prose; round 6 added unlabelled fences to its executable-language
+allowlist. It still skipped every label outside that allowlist, not just
+non-executable languages (`text`, `go`, `yaml`); round 7 replaces that allowlist
+with the explicit skip list. And the records were in it:
+the engineering log, the History files, plans and release-note drafts quote
+commands as they were run, before the tags existed among them, so they stay
+out, and every other top-level ops document is in. On the real tree the
+census still finds only the reviewed sites. Controls on the committed fix,
+each red as predicted and nothing else: counting only labelled fences, the
+four unlabelled-fence cases; no quote after the executable, the 720 quoted
+cases; the records counted as runbooks, the four record cases.

@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // TestACommandCancelledBeforeAdmissionDoesNotRun pins admission: a context
@@ -355,8 +357,34 @@ func TestAfterRunReturnsEveryCommandIsClosed(t *testing.T) {
 // when Run is cancelled, every mutation refused from then on, Run back
 // within ReleaseTimeout and shutdownGrace of the clock, the call that never
 // answered abandoned and logged, and every other goroutine joined.
+//
+// Run joins a goroutine by its last message, so from the shutdown on each
+// goroutine that ends (the queue file's writer, a reservation write, a call
+// that answers) is held at its end (the exiting seam) until the count has
+// been read: one still counted after the message Run joined it by is
+// counted, whatever the scheduler does (B526: a goroutine's deferred count
+// ran after Run returned, and CI read two goroutines).
 func TestShutdownJoinsWithinItsBound(t *testing.T) {
-	h := startHarness(t)
+	var holding atomic.Bool
+	var held atomic.Int64
+	ended, release := make(chan struct{}, 1), make(chan struct{})
+	h := newHarness(t)
+	h.tweak = func(c *Config) {
+		c.seams.exiting = func() {
+			if !holding.Load() {
+				return
+			}
+			held.Add(1)
+			select {
+			case ended <- struct{}{}:
+			default:
+			}
+			<-release
+		}
+	}
+	h.boot()
+	var letGo sync.Once
+	t.Cleanup(func() { letGo.Do(func() { close(release) }) })
 	_, s := h.playing(0, "a", "b")
 	h.be.script(func() {
 		h.be.onRelease = func(ctx context.Context, fs *fakeSession) error {
@@ -366,6 +394,7 @@ func TestShutdownJoinsWithinItsBound(t *testing.T) {
 	})
 	stop := async(func() error { return h.eng.Stop(bg) })
 	h.be.waitFor("the release", func() bool { return s.releaseAsked })
+	holding.Store(true)
 	start := h.clk.Now()
 	h.cancel()
 	h.waitSnap("closed", func(sn *Snapshot) bool { return sn.Closed() })
@@ -381,11 +410,19 @@ func TestShutdownJoinsWithinItsBound(t *testing.T) {
 		t.Fatalf("%d calls abandoned, want the release that never answered", n)
 	}
 	if n := h.eng.live.Load(); n != 1 {
-		t.Fatalf("%d goroutines still running after Run, want only the abandoned call", n)
+		t.Fatalf("%d goroutines still running after Run (%d held at their end), want only the abandoned call", n, held.Load())
 	}
 	if h.logs.count("abandoned") != 1 {
 		t.Fatalf("the abandoned call was not logged once: %v", h.logs.all())
 	}
+	// The writer at least ends once the shutdown has begun, and the seam
+	// holds it at its end until it is let go here.
+	select {
+	case <-ended:
+	case <-time.After(*watchdog):
+		t.Fatalf("waited %v for a goroutine to end after the shutdown began", *watchdog)
+	}
+	letGo.Do(func() { close(release) })
 	h.be.close()
 	h.joined(h.eng)
 }

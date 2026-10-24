@@ -269,6 +269,17 @@ func TestPlaybackRepeatsAOneEntryQueueAsTwoOccurrences(t *testing.T) {
 // reported, are let go, so however long the session plays it holds the
 // sink that plays and the one before it at most, and the occurrences from
 // the one heard on.
+//
+// That is what a report step leaves, not the count at every instant: once
+// a sink has drained, the producer opens the next transport's before the
+// step that hears what the drained one played, and a count read between
+// the two finds a third sink (B532, CI's "3 sinks and 3 occurrences"). So
+// the reporter is held once the engine has a Submitted until that sink is
+// open, which makes the moment certain, and the count is read where the
+// bound holds: the DAC stopped (Hold) and the producer draining the sink it
+// wrote last with no time to do it in. It drains only once the engine has
+// named what follows, which it does on the Submitted of a report step that
+// retired everything before the one heard.
 func TestPlaybackRetiresWhatHasPlayed(t *testing.T) {
 	r := newRig(t, func(o *rigOptions) { o.realTick = true })
 	r.k.Free()
@@ -280,6 +291,15 @@ func TestPlaybackRetiresWhatHasPlayed(t *testing.T) {
 	}
 	r.play()
 	evs := r.waitEvents("ten boundaries, each a change of transport", func(evs []event) bool { return count(evs, "audible", 0) >= 10 })
+	h := r.rec.holdAfterNext("submitted")
+	t.Cleanup(h.letGo)
+	receiveIn(t, h.held, "the reporter to hold once the engine has a Submitted")
+	waitOn(t, "the next transport's sink to open while no report step runs", r.rec.ch, func() bool { return r.rec.openedSinks() > h.opened })
+	r.k.Hold()
+	h.letGo()
+	r.k.Await(t, "the producer to drain the sink it wrote last, with the DAC stopped", func(v alsapcm.KernelView) bool {
+		return v.State == "DRAINING" && v.Starved
+	})
 	if st := r.be.Stats(); st.Sinks > 2 || st.Occurrences > 3 {
 		t.Errorf("ten entries in, the backend holds %d sinks and %d occurrences; want the sink that plays and the one before it at most, and the occurrences from the one heard on", st.Sinks, st.Occurrences)
 	}
@@ -672,6 +692,7 @@ func receiveIn[T any](t *testing.T, ch <-chan T, what string) T {
 	case v := <-ch:
 		return v
 	case <-timer.C:
+		alsapcm.LogGoroutines(t)
 		t.Fatalf("waited %v for %s", alsapcm.Watchdog(), what)
 	}
 	var zero T

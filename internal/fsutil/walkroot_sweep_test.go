@@ -41,16 +41,17 @@ var libraryRootWalks = map[string]string{
 // implementation behind WalkableRoot's answer; the callers above are what
 // start from WalkableRoot.
 var otherTreeWalks = map[string]string{
-	"internal/fsutil/walkroot.go WalkConfigured":           "the path WalkableRoot returned; a separator path whose chain names a directory is read there and reported under that path",
-	"internal/fsutil/walkroot.go walkResolvedChain":        "the directory a separator path's link chain names, reported under the configured path",
-	"internal/doctor/cgroup.go findCgroups":                "the cgroup2 mount",
-	"internal/trash/restore.go (*Manager).pruneEmptyStamp": "one stamp directory of a root's trash, below the root",
-	"internal/trash/restore.go (*Manager).Sweep":           "one stamp directory of a root's trash, below the root",
-	"internal/trash/trash.go (*Manager).List":              "one stamp directory of a root's trash, below the root",
-	"internal/integrity/inventory.go TakeSidecarInventory": "the variants directory, which resolveSidecarRoot resolves",
-	"cmd/bridge/artwork.go artworkCacheHasOrphans":         "the artwork cache, which artworkWalkRoot resolves",
-	"cmd/bridge/artwork.go runArtworkGC":                   "the artwork cache, which artworkWalkRoot resolves",
-	"cmd/bridge/artwork.go sweepArtworkCache":              "the artwork cache, which artworkWalkRoot resolves",
+	"scripts/third-party-licenses/tags.go discoverBuildSites": "the source repository, to census reviewed build and test commands",
+	"internal/fsutil/walkroot.go WalkConfigured":              "the path WalkableRoot returned; a separator path whose chain names a directory is read there and reported under that path",
+	"internal/fsutil/walkroot.go walkResolvedChain":           "the directory a separator path's link chain names, reported under the configured path",
+	"internal/doctor/cgroup.go findCgroups":                   "the cgroup2 mount",
+	"internal/trash/restore.go (*Manager).pruneEmptyStamp":    "one stamp directory of a root's trash, below the root",
+	"internal/trash/restore.go (*Manager).Sweep":              "one stamp directory of a root's trash, below the root",
+	"internal/trash/trash.go (*Manager).List":                 "one stamp directory of a root's trash, below the root",
+	"internal/integrity/inventory.go TakeSidecarInventory":    "the variants directory, which resolveSidecarRoot resolves",
+	"cmd/bridge/artwork.go artworkCacheHasOrphans":            "the artwork cache, which artworkWalkRoot resolves",
+	"cmd/bridge/artwork.go runArtworkGC":                      "the artwork cache, which artworkWalkRoot resolves",
+	"cmd/bridge/artwork.go sweepArtworkCache":                 "the artwork cache, which artworkWalkRoot resolves",
 }
 
 // TestEveryWalkOfALibraryRootStartsFromWalkableRoot sweeps the bridge's
