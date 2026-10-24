@@ -140,7 +140,6 @@ the partial snapshot directory. Missing optional sources still skip, and
 regular snapshot files still restore. The backup rule and tests are recorded
 in `History-rules-cli-serve.md`, under “Backup source opens”.
 
-
 **B524 round 3 (2026-10-24).** The supported reset is top-level
 `bridge reset-player`, beside restore. A missing UUID with either remaining
 player file requires reset before serve may mint a new identity. A malformed
@@ -148,3 +147,7 @@ UUID file can be reset after recording bounded canonical UUIDs from it and
 the reservation; its unlink uses os.Remove and strict directory barriers.
 Unreadable files and non-files still refuse with distinct remedies. The full
 recovery contract and tests are in History-rules-cli-serve.md.
+
+## Player test ordering (B526)
+
+- **Observe a reopen by its increasing open count; hold the producer before EOF when inserting a successor whose open must run; and wait for a terminal state while offering ticks, never require a terminal reporter to take another tick or its writer to wait again (`Grant`, not `Play`).** The three alsapcm hangs were test sequencing defects. `FakeKernel.Await` waits through the fake kernel's `when`, which checks and registers under the same mutex as state changes; it loses no wakeup, but cannot remember an open that closed before registration. `Free` remains enabled across sessions, so the replacement track in `TestPlaybackFaultsOnAPanicInTheProducer` can finish before `playsOn` observes it. Capture `Opens` before PlayID and await its increase; the regression deliberately waits for the replacement to finish and close first. In `TestPlaybackFaultsOnAPanicInASuccessorsOpen`, the 100,000-frame first track fits in the 96,000-frame lookahead plus 9,600-frame hardware buffer. The producer can reach EOF, accept Prepare(nil), set ending and start its sink drain before the insertion. Prepare(b) then answers ErrSessionEnding, the opener never starts, and no panic exists to report. Hold a content read after Start's first chunk and before EOF, insert b and require its Prepare to succeed, then release the read. The cut-too-late test's first tick can report the removed occurrence audible, causing the engine to release the session and the reporter to exit before a barrier tick. Pending producer notifications can also cause reporting before the first tick. `tickUntilStopped` subscribes before reading the snapshot and selects between snapshot changes and sending ticks until the actual stop, checking its reason. The regression calls it again after Backend.Wait joins every backend goroutine, so an already absent reporter is covered deterministically. The same stop can precede the writer becoming starved again: `FakeKernel.Play` waits for that transient state after granting time, so this terminal-boundary test uses `Grant` directly. A first race repetition found this additional wait with no backend goroutines alive; a control joins the backend before asking Play to observe its next wait. Watchdog failures dump goroutines before cleanup changes their state. No production behavior or timeout changes. **Don't raise a timeout or sleep to order these events.**

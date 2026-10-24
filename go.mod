@@ -1,6 +1,6 @@
 module github.com/acoseac/1-bit-bridge
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/dhowden/tag v0.0.0-20240417053706-3d75831295e8
@@ -27,7 +27,7 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/libc v1.79.0
 	modernc.org/sqlite v1.61.0
-	tailscale.com v1.104.1
+	tailscale.com v1.104.2
 )
 
 require (
