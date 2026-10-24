@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	_ "embed"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -26,6 +27,40 @@ type module struct {
 type notice struct {
 	name string
 	text []byte
+}
+
+// These notices are reviewed against exact module versions. An upgrade (or a
+// replacement) must re-audit the embedded assets before changing this registry.
+//
+//go:embed embedded-web-client.md
+var webClientNotices string
+
+//go:embed embedded-tailscale.md
+var tailscaleNotices string
+
+func embeddedNotices(m module) (string, error) {
+	registry := map[string]struct{ version, text string }{
+		"github.com/tailscale/web-client-prebuilt": {"v0.0.0-20260917222731-e0ed2d0d0fea", webClientNotices},
+		"tailscale.com": {"v1.104.2", tailscaleNotices},
+	}
+	original := m
+	if m.Replace != nil {
+		m = *m.Replace
+	}
+	if _, listed := registry[original.Path]; listed && original.Path != m.Path {
+		return "", fmt.Errorf("%s: embedded assets require review for replacement %s %s", original.Path, m.Path, m.Version)
+	}
+	entry, listed := registry[m.Path]
+	if !listed {
+		return "", nil
+	}
+	if m.Version != entry.version {
+		return "", fmt.Errorf("%s %s: embedded assets reviewed only for %s; recheck supplementary notices", m.Path, m.Version, entry.version)
+	}
+	if strings.TrimSpace(entry.text) == "" {
+		return "", fmt.Errorf("%s: empty embedded asset notices", m.Path)
+	}
+	return entry.text, nil
 }
 
 func main() {
@@ -145,6 +180,12 @@ func sortedKeys[V any](m map[string]V) []string {
 }
 
 func generate(root string) ([]byte, map[string]int, error) {
+	// GoReleaser would automatically use vendor, while discovery uses the cache.
+	if info, err := os.Stat(filepath.Join(root, "vendor")); err == nil && info.IsDir() {
+		return nil, nil, fmt.Errorf("vendor directory exists at module root; release discovery requires module-cache sources")
+	} else if err != nil && !os.IsNotExist(err) {
+		return nil, nil, fmt.Errorf("check vendor directory: %w", err)
+	}
 	config, err := os.ReadFile(filepath.Join(root, ".goreleaser.yaml"))
 	if err != nil {
 		return nil, nil, err
@@ -311,14 +352,20 @@ func toolchainNotices(root string) ([]notice, error) {
 	return files, nil
 }
 
-// noticeName admits text extensions and named licence suffixes, never source
-// extensions. Unknown dotted suffixes fail closed rather than copying code.
-func noticeName(name string) bool {
-	switch strings.ToLower(filepath.Ext(name)) {
-	case "", ".txt", ".md", ".rst", ".markdown", ".mit", ".apache", ".bsd", ".isc":
-		return true
+// noticeName classifies suffixes only after the caller identifies a notice
+// prefix. Unknown suffixes are errors, even beside another valid licence.
+func noticeName(name string) (bool, error) {
+	// Match the complete dotted suffix: filepath.Ext would read Apache-2.0 as .0.
+	_, suffix, _ := strings.Cut(strings.ToLower(name), ".")
+	switch suffix {
+	case "", "txt", "md", "rst", "markdown", "html", "htm", "mit", "apache", "apache-2.0", "bsd", "isc", "lesser", "gpl", "lgpl", "mpl-2.0", "bsd-2-clause", "bsd-3-clause":
+		return true, nil
 	}
-	return false
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".go", ".c", ".h", ".s", ".js", ".py", ".sh", ".rs", ".cpp", ".java", ".ts", ".cc", ".cxx", ".hpp", ".m", ".mm", ".jsx", ".tsx", ".swift", ".rb", ".php", ".cs":
+		return false, nil
+	}
+	return false, fmt.Errorf("unknown notice suffix: %s", name)
 }
 
 func notices(m module) ([]notice, error) {
@@ -346,8 +393,15 @@ func notices(m module) ([]notice, error) {
 		}
 		for _, entry := range entries {
 			name := strings.ToUpper(entry.Name())
-			license := strings.HasPrefix(name, "LICENSE") || strings.HasPrefix(name, "LICENCE") || strings.HasPrefix(name, "COPYING") || strings.HasPrefix(name, "COPYRIGHT") || name == "UNLICENSE"
-			if entry.IsDir() || !noticeName(name) || !(license || strings.HasPrefix(name, "NOTICE") || name == "PATENTS") {
+			license := strings.HasPrefix(name, "LICENSE") || strings.HasPrefix(name, "LICENCE") || strings.HasPrefix(name, "COPYING") || strings.HasPrefix(name, "COPYRIGHT") || strings.HasPrefix(name, "UNLICENSE")
+			if entry.IsDir() || !(license || strings.HasPrefix(name, "NOTICE") || strings.HasPrefix(name, "PATENTS")) {
+				continue
+			}
+			include, err := noticeName(entry.Name())
+			if err != nil {
+				return nil, fmt.Errorf("%s/%s: %w", m.Path, entry.Name(), err)
+			}
+			if !include {
 				continue
 			}
 			full := filepath.Join(current, entry.Name())
@@ -364,11 +418,18 @@ func notices(m module) ([]notice, error) {
 				return nil, fmt.Errorf("%s/%s: empty notice", m.Path, label)
 			}
 			files = append(files, notice{label, data})
-			hasLicense = hasLicense || license
+			hasLicense = hasLicense || (license && current == dir)
 		}
 	}
 	if !hasLicense {
-		return nil, fmt.Errorf("%s %s: no licence file in compiled package ancestry", m.Path, m.Version)
+		return nil, fmt.Errorf("%s %s: no licence file at module root", m.Path, m.Version)
+	}
+	supplement, err := embeddedNotices(m)
+	if err != nil {
+		return nil, err
+	}
+	if supplement != "" {
+		files = append(files, notice{"Embedded third-party assets", []byte(supplement)})
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].name < files[j].name })
 	return files, nil

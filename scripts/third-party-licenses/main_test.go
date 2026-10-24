@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -383,5 +384,100 @@ func TestDefaultDiscoveryEnvironment(t *testing.T) {
 	}
 	if _, _, err := generate(root); err != nil {
 		t.Fatalf("default environment refused: %v", err)
+	}
+}
+
+func TestRootLicenseRequired(t *testing.T) {
+	for _, replacement := range []bool{false, true} {
+		t.Run(fmt.Sprint(replacement), func(t *testing.T) {
+			root := t.TempDir()
+			put(t, root, "copied/LICENSE", "copied package only")
+			m := module{Path: "example.com/rootless", Dir: root, packageDirs: []string{filepath.Join(root, "copied")}}
+			if replacement {
+				m.Dir = t.TempDir()
+				put(t, m.Dir, "LICENSE", "original grant")
+				m.Replace = &module{Path: "example.com/fork", Dir: root}
+			}
+			if _, err := notices(m); err == nil || !strings.Contains(err.Error(), "root") {
+				t.Fatalf("nested licence must not cover module root: %v", err)
+			}
+		})
+	}
+}
+
+func TestNoticeSuffixes(t *testing.T) {
+	for _, name := range []string{"COPYING.LESSER", "LICENSE.Apache-2.0", "LICENSE.html", "NOTICE.html", "PATENTS.txt", "UNLICENSE.txt", "LICENSE.weird", "NOTICE.unknown"} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			put(t, root, "COPYING", "module terms")
+			put(t, root, name, "additional terms")
+			files, err := notices(module{Path: "example.com/suffix", Dir: root})
+			if strings.HasSuffix(name, ".weird") || strings.HasSuffix(name, ".unknown") {
+				if err == nil || !strings.Contains(err.Error(), name) {
+					t.Fatalf("unknown suffix must name refused file: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, f := range files {
+				if f.name == name && string(f.text) == "additional terms" {
+					return
+				}
+			}
+			t.Fatalf("additional notice %s silently dropped", name)
+		})
+	}
+}
+
+func TestVendorRefused(t *testing.T) {
+	root := graph(t)
+	put(t, root, "vendor/patched/NOTICE", "vendored patch terms")
+	if _, _, err := generate(root); err == nil || !strings.Contains(err.Error(), "vendor") {
+		t.Fatalf("vendor tree accepted: %v", err)
+	}
+}
+
+func TestEmbeddedNotices(t *testing.T) {
+	for _, tc := range []struct {
+		path, version string
+		wants         []string
+	}{
+		{"github.com/tailscale/web-client-prebuilt", "v0.0.0-20260917222731-e0ed2d0d0fea", []string{"React", "React DOM", "scheduler", "classnames", "use-sync-external-store", "Inter", "Permission is hereby granted", "Copyright (c) 2018 Jed Watson.", "SIL OPEN FONT LICENSE"}},
+		{"tailscale.com", "v1.104.2", []string{"htmx", "2.0.4", "htmx-ext-ws", "2.0.2", "Permission to use, copy, modify", "Josh Comeau"}},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			root := t.TempDir()
+			put(t, root, "LICENSE", "enclosing module licence")
+			m := module{Path: tc.path, Version: tc.version, Dir: root}
+			files, err := notices(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			writeNotices(&out, files)
+			for _, want := range tc.wants {
+				if !strings.Contains(out.String(), want) {
+					t.Errorf("missing embedded component notice %q", want)
+				}
+			}
+			for _, changed := range []module{
+				{Path: tc.path, Version: "v999.0.0", Dir: root},
+				{Path: tc.path, Version: tc.version, Dir: root, Replace: &module{Path: "example.com/fork", Version: tc.version, Dir: root}},
+				{Path: tc.path, Version: tc.version, Dir: root, Replace: &module{Path: tc.path, Version: "v999.0.0", Dir: root}},
+				{Path: tc.path, Version: tc.version, Dir: root, Replace: &module{Path: "./local", Dir: root}},
+			} {
+				if _, err := notices(changed); err == nil || !strings.Contains(err.Error(), "embedded") {
+					t.Errorf("unreviewed embedded assets accepted: %+v: %v", changed, err)
+				}
+			}
+		})
+	}
+	root := t.TempDir()
+	put(t, root, "LICENSE", "ordinary module")
+	files, err := notices(module{Path: "example.com/plain", Dir: root})
+	if err != nil || len(files) != 1 {
+		t.Fatalf("unlinked assets added: %v %v", files, err)
 	}
 }
