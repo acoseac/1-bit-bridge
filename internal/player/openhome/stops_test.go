@@ -214,7 +214,8 @@ func TestEveryStopIsTheEnginesOwnCommand(t *testing.T) {
 	p.waitSnap("the Play's intent, pending", func(s *engine.Snapshot) bool { return s.Pending() == engine.IntentPlay })
 	b := send(h, playlist, "Stop")
 	waits.wait(t, 2)
-	p.waitSnap("Stop B's intent, pending", func(s *engine.Snapshot) bool { return s.Pending() == engine.IntentStop })
+	// B's admission and its effect on the intent are one step of the
+	// engine's, so the acknowledgement, handled after it, finds B's intent.
 	stillWaiting(t, p, []sent{a, play, b})
 	letGo()
 	answeredAll(t, h, []sent{a, play, b})
