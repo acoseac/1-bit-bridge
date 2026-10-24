@@ -211,13 +211,13 @@ Restore loss advice includes both the permanent seal and snapshot-copy remedy.
 
 The UUID-only main-era state (valid regular UUID, no queue, floor or markers)
 upgrades without rotating identity or sealing. Round 6 wrote a zero floor;
-round 7 replaces that with restore's jump on BOTH counters, since main could
+round 7 replaced that with restore's jump on BOTH counters (superseded by round 8), since main could
 publish token 4097 without saving a queue and lose only its floor. Serve boot,
 start, bind, reset and backup adopt it; reset then removes the UUID. Backup
 serializes this write and rechecks the captured identity. Additional lifecycle
 evidence means floor loss, except the one-shot post-discard exemption below.
-The residual is an identity that handed out more than 2^24 values before losing
-its floor, the same margin as restore, not a claim that it never ran.
+Round 7 described an issuance-count bound of 2^24; round 8 below corrects it
+to a bound on counter space, including skipped reservations.
 
 Usage now names --discard-floor and the retained-floor contract exactly;
 command tests require the snapshot UUID, both counters above the pre-reset
@@ -266,6 +266,42 @@ new sandbox-runnable regressions repeated ten times all pass. Formatting and
 docs checks pass.
 Socket-bind refusals are listed separately for the host cmd/bridge rerun.
 No commit or push was performed.
+
+
+**Round 8.** The round-seven host result has not yet been supplied.
+
+Serve boot, start, bind, reset and backup now adopt UUID-only state at 2^31
+plus a random value below 2^24 on BOTH counters. A real main-era engine started
+4,097 times without edits publishes only 4,097 tokens but reaches 33,558,529:
+its reservations skip 8,192 counter values between starts. Thus the earlier
+issuance-count bound was false. Adoption covers old counter space below 2^31,
+including reserved and skipped values. The largest new floor leaves
+2,130,706,432 values before uint32 exhaustion, past the engine's 4,097-value
+startup requirement. An absent floor cannot prove a history already reaching
+the upper half; that remains unsupported. Restore's known-bound jump is unchanged.
+
+Completion now verifies a valid seal and leaves a present damaged initialized
+marker untouched, for conservative floor-loss checks and explicit discard.
+Serve records any adoption/completion/preflight failure as a player-off reason
+and continues boot, enabled or disabled. Backup logs local repair errors while
+retaining strict captured-pair checks; identity-free restore ignores a local
+completion error and restores ordinary data. A valid sealed marker without
+minted is consumed by any floor, UUID or queue evidence before completion
+returns, including reset and backup. The legacy discard → engine → upgrade →
+reset → floor-only loss sequence now refuses another mint.
+
+The starting HEAD already writes sealed:true,minted:false after the queue and
+UUID unlink barriers, floor rename and directory sync. That ordering is kept
+and stated explicitly in both long forms and the backup guide. The one-shot
+exemption remains spent until the last barrier completes.
+
+Round-eight scratch evidence records red-first regressions and 65 controls
+failing by assertion: all 54 rebased controls plus 11 new mutations. Native,
+Linux and Windows vet, formatting, docs checks and the backup/config/engine
+race suites pass. The six socket-free new regressions pass ten race-enabled
+runs each; the full live-serve regression and the updated FIFO boot assertions
+are blocked by the sandbox's socket binds. The report inventories every CLI
+test and names the restricted cases. No commit or push was performed.
 
 ## File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)
 

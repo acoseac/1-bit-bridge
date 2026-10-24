@@ -55,16 +55,19 @@ A missing floor beside a UUID, queue or initialization marker is floor loss,
 with the upgrade and one-shot post-discard exceptions below.
 The upgrade exception is a valid regular UUID with no floor, queue or either
 local marker. Serve boot, start, bind, reset and backup adopt this state without
-sealing restores. Both counters jump by 2^24 plus a random value below 2^24,
-using the same calculation as restore with a zero snapshot, before the marker
-is committed. Reset then removes the UUID; the other adopters retain it.
+sealing restores. Both counters start at 2^31 plus a random value below 2^24
+before the marker is committed. Restore keeps its smaller jump from the known
+snapshot/live bounds. Reset then removes the UUID; the other adopters retain it.
 Serve adopts at boot even when playback is disabled. Backup takes the exclusive
 server lock only if adoption or seal completion is needed; if it is busy, stop
 the service and run the backup again.
 An older engine can hand out tokens without writing a queue, so losing only
-its floor can look like this upgrade state. The margin covers fewer than 2^24
-values handed out before that loss; an identity that handed out more than 2^24
-values before losing its floor has the same residual risk as restore.
+its floor can look like this upgrade state. Adoption covers old counter space
+below 2^31, including reserved blocks skipped at restarts, not the number of
+values handed out. For example, 4,097 starts without queue edits publish only
+4,097 tokens but reach token 33,558,529. Pre-upgrade counter space reaching
+2^31 is unsupported. Even the largest adoption draw leaves over 2.13 billion
+values of counter space, well above the engine's 4,097-value startup margin.
 A queue without a UUID needs ordinary reset when the floor remains, or
 `--discard-floor` when it is missing. A UUID that is a symlink or does not match
 the floor also needs ordinary reset. A version-1 live floor names no UUID;
@@ -87,7 +90,8 @@ start creates a fresh floor, durably records `minted:true` beside `sealed:true`
 in `player-initialized`, then publishes the UUID. The missing-floor exemption
 is one-shot: ordinary reset preserves this bit, and losing only the floor
 afterwards refuses another start. A later explicit discard opens a new exemption
-only after its removals are durable. The initialization marker and seal are
+by writing `sealed:true,minted:false` after the queue and UUID unlink barriers,
+the floor rename and its directory sync. The initialization marker and seal are
 never backed up or restored as bytes. Damaged entries conservatively count as
 present. Discard renames malformed or non-file markers aside and writes fresh
 ones after establishing the seal; a well-formed newer version requires a newer
@@ -100,8 +104,12 @@ identity-bearing restore refuses before writing snapshot data and names that
 remedy.
 If `player-floor-discarded.json` exists without a seal recorded in
 `player-initialized`, the next lifecycle operation verifies the first record
-is durable and completes the second. This local repair can precede a restore
-refusal; it never imports snapshot bytes.
+is durable and completes the second. Any floor, UUID or queue entry consumes
+an unspent sealed marker, including during reset and backup, even when the
+seal bit was already set by an older version. A damaged initialization marker
+beside a valid seal is left untouched for explicit discard, after verifying
+the seal. This local repair can precede a restore refusal; it never imports
+snapshot bytes.
 For permission failures restore read access first; for a newer reservation
 format use a newer bridge. **Never copy a snapshot's older floor over the
 live floor, or delete the floor while keeping the identity.**
@@ -125,4 +133,12 @@ any one local file cannot reopen identity restores. Deleting both
 `player-floor-discarded.json` and
 `player-initialized` can reopen them; this is the smallest such deletion set.
 Whole-directory or storage rollback cannot be detected by these local files.
-The UUID-only upgrade is bounded by the issuance margin described above.
+The UUID-only upgrade is bounded by the counter space described above.
+
+Player-file adoption, completion and preflight errors turn the player off with
+a logged reason; they never stop the bridge from serving its library, even
+when playback is disabled. A damaged initialization marker does not block a
+backup or an identity-free restore. Other local seal-repair errors are logged
+by backup, which still requires a valid captured UUID/floor pair; an
+identity-free restore keeps the box's identity and floor and restores ordinary
+data.
