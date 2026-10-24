@@ -12,3 +12,11 @@ const SnapshotBusyPatience = snapshotBusyPatience
 func WithBusyObserver(ctx context.Context, observe func()) context.Context {
 	return context.WithValue(ctx, busyObserverKey{}, observe)
 }
+
+// WithBeforeConfigForTest returns opts with fn as what a restore runs just
+// before it writes the snapshot's bridge.yaml, in its turn of the file's
+// lock.
+func WithBeforeConfigForTest(opts RestoreOptions, fn func()) RestoreOptions {
+	opts.beforeConfig = fn
+	return opts
+}

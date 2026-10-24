@@ -474,6 +474,9 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 				}
 			}
 		}
+		if name == "bridge.yaml" && opts.beforeConfig != nil {
+			opts.beforeConfig()
+		}
 		if err := copyFile(srcPath, target, mode); err != nil {
 			return fmt.Errorf("restore %s: %w", name, err)
 		}

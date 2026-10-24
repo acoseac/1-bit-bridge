@@ -109,6 +109,7 @@ func lockFile(path string, try func(*os.File) error, wait time.Duration) (*FileL
 		return nil, fmt.Errorf("open the lock beside %s: %w", path, err)
 	}
 	deadline := time.Now().Add(wait)
+	waited := false
 	for {
 		err := try(f)
 		if err == nil {
@@ -119,12 +120,55 @@ func lockFile(path string, try func(*os.File) error, wait time.Duration) (*FileL
 			warnUnlocked(path, err)
 			return &FileLock{path: path, unheld: err}, nil
 		}
+		if !waited {
+			waited = true
+			noteLockWaited(lockWaitKey(path))
+		}
 		if !time.Now().Before(deadline) {
 			_ = f.Close()
 			return nil, &BusyError{Path: path, Wait: wait}
 		}
 		time.Sleep(lockRetry)
 	}
+}
+
+// lockWaitedHooks holds, by lockWaitKey, what LockWaitedForTest asked to be
+// told: nothing in production.
+var lockWaitedHooks sync.Map
+
+// lockWaitedHook is one LockWaitedForTest's channel, closed once.
+type lockWaitedHook struct {
+	once sync.Once
+	ch   chan struct{}
+}
+
+// LockWaitedForTest returns a channel that is closed the first time a writer
+// of the config file at path finds the file's lock held and starts to wait
+// for it, and what stops that. Tests only: it is how a test knows that a
+// writer reached a turn another writer holds, rather than guessing how long
+// the writer takes to get there. One hook per config file at a time.
+func LockWaitedForTest(path string) (waited <-chan struct{}, stop func()) {
+	key := lockWaitKey(path)
+	h := &lockWaitedHook{ch: make(chan struct{})}
+	lockWaitedHooks.Store(key, h)
+	return h.ch, func() { lockWaitedHooks.CompareAndDelete(key, h) }
+}
+
+// noteLockWaited closes the channel LockWaitedForTest handed out for key, if
+// any.
+func noteLockWaited(key string) {
+	v, ok := lockWaitedHooks.Load(key)
+	if !ok {
+		return
+	}
+	h := v.(*lockWaitedHook)
+	h.once.Do(func() { close(h.ch) })
+}
+
+// lockWaitKey is the key LockWaitedForTest and lockFile agree on for the
+// config file at path.
+func lockWaitKey(path string) string {
+	return filepath.Clean(path)
 }
 
 // Path is the config file this turn is at.

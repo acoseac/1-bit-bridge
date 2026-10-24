@@ -23,6 +23,11 @@ import (
 type RestoreOptions struct {
 	Random io.Reader
 	Warn   func(string)
+	// beforeConfig, when set, runs just before the restore writes the
+	// snapshot's bridge.yaml, in its turn of the file's lock: the window a
+	// test lands another writer in (WithBeforeConfigForTest). Nil in
+	// production.
+	beforeConfig func()
 }
 
 // restoreMargin is the minimum jump and the amount of running room left
