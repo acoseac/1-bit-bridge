@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B524 round 11: an unlisted floor the snapshot holds refuses restore, a non-file seal is kept and recorded twice, and seal-completion advice names its cause](#2026-10-24--b524-round-11-an-unlisted-floor-the-snapshot-holds-refuses-restore-a-non-file-seal-is-kept-and-recorded-twice-and-seal-completion-advice-names-its-cause)
 - [2026-10-24 — B524: a reset keeps the player floor](#2026-10-24--b524-a-reset-keeps-the-player-floor)
 - [2026-10-24 — B526: three ALSA playback hangs are test sequencing defects](#2026-10-24--b526-three-alsa-playback-hangs-are-test-sequencing-defects)
 - [2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader](#2026-10-24--b525-the-players-identity-file-is-read-without-waiting-a-named-pipe-at-player-uuid-is-refused-at-once-by-every-reader)
@@ -138,6 +139,91 @@ reaches a session that has not gone looking for it.
 - [The original "Things that have bitten before" list (2026-04 → 2026-08)](#the-original-things-that-have-bitten-before-list-2026-04-2026-08)
 - [DSD → PCM renditions on the bridge, B1 (PR #863, 2026-09-07)](#dsd--pcm-renditions-on-the-bridge-b1-pr-863-2026-09-07)
 - [DSD renditions B4 — the alias measurement, and why it is a differential (2026-09-07)](#dsd-renditions-b4--the-alias-measurement-and-why-it-is-a-differential-2026-09-07)
+
+---
+
+## 2026-10-24 — B524 round 11: an unlisted floor the snapshot holds refuses restore, a non-file seal is kept and recorded twice, and seal-completion advice names its cause
+
+Round 10's reviews found two Highs and a Low, and the reviews of this round's
+task a third High.
+
+**A floor the snapshot holds and its manifest does not list.** Every writer
+that captures the floor lists it beside the UUID, those from before the
+`playerFloorRequired` record included, so such a snapshot has a damaged file
+list. Restore now Lstats `<snapshot>/player-ids.json` whenever the manifest
+does not list it, never opening or following it: an entry of any kind refuses
+before anything snapshot-derived is written, the adoption included, naming the
+snapshot-copy remedy or a newer snapshot of this box; only ErrNotExist is a
+genuine absence, which takes round 10's path; any other Lstat error refuses
+with itself. Restore's own seal completion may still run first, adding local
+seal evidence only. Red first on 13744c20, through `bridge restore`: Codex's
+sequence (adopted at 2^31, 4,097 starts, captured by such a writer, the entry
+read as `player-ids.jsoo`, restored onto a pristine box at draw zero) gave a
+floor of 2,181,038,080 and a first startup token of 2,181,042,177, the
+source's last; a directory and a dangling symbolic link at the unlisted entry
+restored too, and so did the same damage onto a UUID-only box, after adopting
+it. The same damage to the `player-uuid` entry makes the restore
+identity-free and leaves the box's identity and floor byte for byte, before
+and after.
+
+**A seal that is not a regular file (B539).** `ensurePlayerMarker` refused a
+directory, symbolic link or named pipe at `player-floor-discarded.json` with
+"is not a regular file: move it aside", printed by start, a backup's
+completion and every adoption; following it dropped the box's only seal
+record, and the next start wrote an unsealed marker. It now keeps such an
+entry, never opening or following it, and completion records the seal in
+`player-initialized` beside it. Beside such an entry a damaged marker reading
+`sealed:true` gets the move-aside advice; beside a missing seal file, or one
+whose bytes do not read, the advice is still to keep the marker. Red first:
+start refused all three kinds with that advice, a backup logged it as its
+completion's failure, a lone non-file seal refused adoption, and the advice
+beside a damaged sealed marker was the sole-seal one. Discard still
+repairs the entry: `bridge reset-player --discard-floor` on that state renames
+it aside and writes a fresh regular seal.
+
+**Discard's order.** Discard renamed a damaged seal entry aside before it
+sealed `player-initialized`, so with the marker gone a crash between the
+rename and the replacement left no seal record. With the seal entry damaged,
+discard now seals `player-initialized` first. Red first: a directory seal, no
+marker and an injected failure of the replacement left identity restores
+open, and one restored.
+
+**Advice by cause.** A failed seal completion said "restore write access to
+the data directory: serve boot and start fail on it too" for every failure.
+Each step now tags its error where it happens with what it was reading or
+writing and the access that needed: a permission error names that path and
+access and says serve boot and start fail on it too when run as this user; a
+read-only data directory says so; a marker refusal keeps its remedy; an
+interrupted or refused lock or an I/O error keeps only its error. Red first:
+an injected EINTR, ENOLCK and EIO each claimed "serve boot", EROFS got the
+write advice, and a seal file this user cannot read got the write advice in a
+writable directory. `fsutil.TryLock` maps only EWOULDBLOCK (EAGAIN) and
+Windows' `ERROR_LOCK_VIOLATION` to `ErrLocked`, now through a pure function
+pinned per platform; a lock held by another process is still logged as
+deferred.
+
+**Tests changed on purpose.** Round 7's test that required a non-regular lone
+seal to refuse startup is replaced by one that completes the seal around it,
+on a box minted before and on one with no allocation evidence. Three older
+tests made their completion error from a directory seal and now use a seal a
+newer bridge wrote; one lets restore's own completion write
+`player-initialized` beside a dangling seal before its refusal.
+
+Round-eleven evidence records 126 code negative controls failing by
+assertion, each anchor count-checked, mutated in the committed tree and
+restored from git: round 10's 96, five of them rebased onto anchors this round
+moved, and 30 new ones, among them the old seal-first discard order, which
+turns the interrupted-discard test red, and a restore that adopts before its
+check, which turns the UUID-only destination test red. Twenty documentation
+mutations each fail the round's documentation contract. On the owner's Mac
+(macOS arm64, Go 1.27.3, real sockets) native, Linux and Windows vet pass,
+`make fmt` changes nothing and `make docs-check` passes. `go test -race
+-count=1` passes all 13 packages of `./cmd/bridge/ ./internal/backup/
+./internal/config/ ./internal/fsutil/ ./internal/player/...` that have tests:
+1,721 top-level cases pass and eight skip (five root or default-port CLI
+cases, two root-only fsutil cases and the ALAC reference corpus), cmd/bridge
+in 586 s. The 18 new tests and five revised ones pass ten race-enabled runs
+each; the Windows table test is type-checked by the Windows vet and not run.
 
 ---
 

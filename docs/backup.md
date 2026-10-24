@@ -26,16 +26,21 @@ again. An unreadable live floor refuses the restore before any snapshot data
 is written.
 A lone local discard seal may first be completed as described below.
 
-A snapshot whose manifest lists no floor beside its player UUID cannot bound
-what that identity handed out. One from a bridge older than this one takes
-2^31 + 2^24 as its snapshot floor: an identity below the upgrade boundary
-described below, plus a later adoption's random part, stays under it. The
-restore still warns that the snapshot carries no mark. Every snapshot this
+A snapshot whose manifest lists no floor beside its player UUID, and that holds
+none, cannot bound what that identity handed out. One from a bridge older than
+this one takes 2^31 + 2^24 as its snapshot floor: an identity below the upgrade
+boundary described below, plus a later adoption's random part, stays under it.
+The restore still warns that the snapshot carries no mark. Every snapshot this
 bridge writes lists the floor beside the UUID and records
 `playerFloorRequired` in its manifest, so one of them without its floor was
 edited: restore refuses it before writing anything and names the
 snapshot-copy remedy. A floor the manifest lists but that is missing or
-corrupt refuses too, whoever wrote the snapshot.
+corrupt refuses too, whoever wrote the snapshot. So does a snapshot that holds
+`player-ids.json` its manifest does not list: every bridge that captures the
+floor lists it, so the manifest is damaged. Restore only looks at that entry,
+never opening or following it, and refuses before writing anything, the
+adoption included, naming the snapshot-copy remedy or a newer snapshot of this
+box.
 
 A backup captures the UUID before the floor and requires the floor to name
 that UUID. A mismatched pair refuses the backup. If the floor is missing while
@@ -77,10 +82,13 @@ installs the snapshot UUID; the other adopters retain the current UUID.
 Serve adopts at boot even when playback is disabled. Backup takes the exclusive
 server lock for adoption; if adoption is busy, stop the service and run the backup
 again. Backup also takes that lock for seal completion. When the lock is busy,
-the completion is logged and left to the next lifecycle operation; any other
-failure, such as a data directory the backup cannot write, is logged with its
-error and the advice to restore write access, because the next serve boot or
-start meets it too. Backup continues either way.
+the completion is logged and left to the next lifecycle operation. Any other
+failure is logged with its error and advice by its cause: a file or directory
+this user cannot read or write names the path and the access to restore, a
+read-only data directory says so, and a marker refusal keeps its own remedy.
+Each of these meets the next serve boot or start too, a permission failure when
+it runs as the same user. An interrupted or refused lock, or an I/O error, is
+logged with its error alone. Backup continues either way.
 An older engine can hand out tokens without writing a queue, so losing only
 its floor can look like this upgrade state. Adoption covers old counter space
 below 2^31, including reserved blocks skipped at restarts, not the number of
@@ -113,18 +121,26 @@ afterwards refuses another start. A later explicit discard opens a new exemption
 by writing `sealed:true,minted:false` after the queue and UUID unlink barriers,
 the floor rename and its directory sync. The initialization marker and seal are
 never backed up or restored as bytes. Damaged entries conservatively count as
-present. Discard renames malformed or non-file markers aside and writes fresh
-ones after establishing the seal; a well-formed newer version requires a newer
-bridge. A damaged initialization marker beside a readable floor naming the UUID
-is accepted and kept as present evidence with any exemption spent. A start's
+present. A seal that is not a regular file, such as a directory, a symbolic link
+or a named pipe, is still a seal: every lifecycle operation keeps it, never
+opening or following it, and records the seal in `player-initialized` beside it.
+No advice says to move a seal record aside. Discard renames malformed or
+non-file markers aside and writes fresh ones after establishing the seal; when
+the seal file itself is damaged, it seals `player-initialized` first, so an
+interruption never leaves the box without a seal record. A well-formed newer
+version requires a newer bridge. A damaged initialization marker beside a
+readable floor naming the UUID is accepted and kept as present evidence with
+any exemption spent. A start's
 preflight warns about it once: serve's at each boot, which covers the player that
 boot starts, and a DAC bind's. The warning names the file and says to move it
-aside: start re-ensures it; beside a valid seal, completion records sealed and
+aside: start re-ensures it; beside a seal entry, completion records sealed and
 minted. When the marker's sealed bit is the only intact seal, because
-`player-floor-discarded.json` is missing or damaged, the warning says to keep the
-marker instead: moved aside, the next start would write an unsealed marker and
-reopen identity restores. `bridge reset-player --discard-floor` rewrites both seal
-records, at the cost of the current identity and its queue. Beside a missing floor
+`player-floor-discarded.json` is missing or its bytes do not read, the warning
+says to keep the marker instead: beside a missing seal file, a marker moved
+aside would let the next start write an unsealed marker and reopen identity
+restores. A seal entry that is not a regular file counts as a seal here.
+`bridge reset-player --discard-floor` rewrites both seal records, at the cost
+of the current identity and its queue. Beside a missing floor
 nothing warns, and the floor-loss refusal says not to move `player-initialized`
 aside. Discard advice is for a missing or unreadable floor. Do not delete markers
 to bypass a floor-loss refusal.
@@ -133,17 +149,17 @@ A sealed box still restores the database, tokens and configuration from a
 copy of a snapshot with `player-uuid` and `player-ids.json` removed. An
 identity-bearing restore refuses before writing snapshot data and names that
 remedy.
-If `player-floor-discarded.json` exists without a seal recorded in
-`player-initialized`, the next lifecycle operation verifies the first record
-is durable and completes the second. Any floor, UUID or queue entry consumes
-an unspent sealed marker, including during reset and backup, even when the
-seal bit was already set by an older version. A damaged initialization marker
-beside a valid seal is left untouched as spent evidence, after verifying
+If `player-floor-discarded.json` exists, of whatever kind, without a seal
+recorded in `player-initialized`, the next lifecycle operation verifies the
+first record is durable and completes the second. Any floor, UUID or queue entry
+consumes an unspent sealed marker, including during reset and backup, even when
+the seal bit was already set by an older version. A damaged initialization
+marker beside a valid seal is left untouched as spent evidence, after verifying
 the seal. With a matching readable floor it does not turn the player off. This
-local repair can precede a restore refusal; it never imports snapshot bytes.
-For permission failures restore read access first; for a newer reservation
-format use a newer bridge. **Never copy a snapshot's older floor over the
-live floor, or delete the floor while keeping the identity.**
+local repair can precede a restore refusal; it never imports snapshot bytes. For
+permission failures restore read access first; for a newer reservation format
+use a newer bridge. **Never copy a snapshot's older floor over the live floor,
+or delete the floor while keeping the identity.**
 
 Restore checks both counters for room for the largest jump plus 2^24 values
 before writing any snapshot data. An exhausted snapshot or destination can still

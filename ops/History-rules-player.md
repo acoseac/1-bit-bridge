@@ -151,7 +151,7 @@ in `History-rules-cli-serve.md`, under “Backup source opens”.
 
 ## Player floor and reset (B524 round 5, 2026-10-24)
 
-**The player floor is monotonic across identities; reset keeps it byte-identical. Only `--discard-floor` drops it after BOTH local seals; its one-shot exemption opens after the floor rename and directory sync, and any floor, UUID or queue evidence consumes it before completion returns. A damaged initialized marker stays present with its exemption spent. Only a start's preflight warns about it, once per serve boot or bind, and only beside a readable, unexhausted floor naming the UUID: move it aside, or keep it when its sealed bit is the only intact seal; never discard that floor. Beside a lost floor nothing warns, and the refusal says not to move it. Player-file errors turn the player off with a reason, never stop serve; seal-repair errors block neither backup nor identity-free restore, and only a busy one is deferred. Serve boot, start, bind, reset, backup and restore adopt UUID-only upgrades at 2^31 plus a random value below 2^24 on BOTH counters; the bound is counter space, including skipped reservations, never issuance count. Restore adopts first, from its own random source, before taking max(snapshot, live) plus its jump; a snapshot listing no floor counts as 2^31 + 2^24 from an older writer and is refused from this one. Start and backup require a matching UUID/floor; exhausted minting changes neither. Never repair a live floor from a snapshot. Two live boxes, older cross-box snapshots, pre-upgrade counter space reaching 2^31 and loss of both seals remain unsupported.**
+**The player floor is monotonic across identities; reset keeps it byte-identical. Only `--discard-floor` drops it after BOTH local seals, renaming a damaged seal entry aside only once `player-initialized` holds a durable seal; its one-shot exemption opens after the floor rename and directory sync, and any floor, UUID or queue evidence consumes it before completion returns. A seal entry that is not a regular file is still a seal: completion keeps it unopened and records the seal in `player-initialized` beside it, only discard replaces it, and no advice says to move a seal record aside. A damaged initialized marker stays present with its exemption spent. Only a start's preflight warns about it, once per serve boot or bind, and only beside a readable, unexhausted floor naming the UUID: move it aside, or keep it when its sealed bit is the only intact seal; never discard that floor. Beside a lost floor nothing warns, and the refusal says not to move it. Player-file errors turn the player off with a reason, never stop serve; seal-repair errors block neither backup nor identity-free restore, only a busy one is deferred, and a failed one's advice names its cause, claiming a recurrence only for a persistent one. Serve boot, start, bind, reset, backup and restore adopt UUID-only upgrades at 2^31 plus a random value below 2^24 on BOTH counters; the bound is counter space, including skipped reservations, never issuance count. Restore adopts first, from its own random source, before taking max(snapshot, live) plus its jump; a snapshot listing no floor and holding none counts as 2^31 + 2^24 from an older writer and is refused from this one, and one holding a floor it does not list is refused as a damaged manifest. Start and backup require a matching UUID/floor; exhausted minting changes neither. Never repair a live floor from a snapshot. Two live boxes, older cross-box snapshots, pre-upgrade counter space reaching 2^31 and loss of both seals remain unsupported.**
 
 Ordinary reset keeps the box's numeric upper bounds across all identities,
 including identities displaced by successful or interrupted restores. It needs
@@ -172,7 +172,8 @@ operations preserve their bytes except when completing a lone seal or consuming
 a sealed exemption on allocation evidence or the first mint after discard. Discard records `sealed:true` in the initialized
 marker as independent evidence, after the seal file is durable and before any
 queue, UUID or floor is removed. It renames an unparsable or non-file marker
-aside before writing a fresh one. A damaged initialization marker beside a matching floor is kept as evidence;
+aside before writing a fresh one, a damaged seal entry only once
+`player-initialized` holds a durable seal (round 11). A damaged initialization marker beside a matching floor is kept as evidence;
 its start preflight warns to move it aside, or to keep it when its sealed bit is the only intact seal, without discarding the floor (round 10). A missing floor beside a UUID, queue or initialization marker is
 loss, except the UUID-only upgrade and the unconsumed post-discard exemption
 described below.
@@ -195,7 +196,7 @@ refuses before restoring data and explains that remedy; completing a lone local
 seal and adopting a UUID-only destination may precede snapshot writes. The seal never leaves
 through backup. Ordinary reset does not free exhausted counter range.
 
-**A snapshot captures UUID then floor through bounded Windows sharing retry, refuses a captured UUID without a readable floor, and records `playerFloorRequired` in its manifest. Schema stays 2; local initialization and discard markers never travel in backups. Restore refuses that writer's UUID without its listed floor and bounds an older writer's floorless snapshot at 2^31 + 2^24, completes a lone local seal, checks the seal, adopts a UUID-only destination from restore's own random source (the adoption's draw, then the jump's), then checks the live floor and both exhaustion bounds before restoring any data, then writes max(snapshot, live) plus the jump, ensures the initialization marker, durably clears a replaced identity's queue and writes the UUID through its own durable writer.**
+**A snapshot captures UUID then floor through bounded Windows sharing retry, refuses a captured UUID without a readable floor, and records `playerFloorRequired` in its manifest. Schema stays 2; local initialization and discard markers never travel in backups. Restore refuses that writer's UUID without its listed floor, refuses a floor the snapshot holds but its manifest does not list as a damaged manifest, and bounds an older writer's floorless snapshot at 2^31 + 2^24, completes a lone local seal, checks the seal, adopts a UUID-only destination from restore's own random source (the adoption's draw, then the jump's), then checks the live floor and both exhaustion bounds before restoring any data, then writes max(snapshot, live) plus the jump, ensures the initialization marker, durably clears a replaced identity's queue and writes the UUID through its own durable writer.**
 
 The engine independently refuses unreadable or corrupt reservation data instead
 of moving it aside and starting at zero. Queue-corruption recovery is separate.
@@ -420,3 +421,94 @@ floor nothing warns, and every floor-loss refusal with the marker present says
 `TestMoveAsideWarningOncePerStart`, `TestMoveAsideAdviceNeedsTheFloorToNameTheUUID`,
 `TestADamagedMarkerHoldingTheOnlySealIsKept`, `TestServeBootRefusesALostFloorWithoutTheMoveAsideWarning`,
 `TestServeWarnsOnceEachBootBesideADamagedMarker` and `TestBindWarnsOnceBesideADamagedMarker` pin these boundaries.
+
+### Round 11: an unlisted floor, a non-file seal and completion advice by cause
+
+Every writer that captures the floor lists it beside the UUID, those from
+before the `playerFloorRequired` record included (main since 5a0, and round
+9's), so a snapshot that holds `player-ids.json` and does not list it has a
+damaged file list. On round 10's code one bad byte in that entry
+(`player-ids.json` read as `player-ids.jsoo`) sent such a snapshot down the
+older writer's path, and its intact floor gave way to the adoption ceiling.
+Codex's sequence, run through `bridge restore`: a box adopted at 2^31 starts
+4,097 times, is captured by such a writer, has that entry corrupted and is
+restored onto a pristine box at draw zero; the floor came out at
+2,181,038,080, and the restored player's first startup token, 2,181,042,177,
+was the source's last. When the manifest does not list the floor, restore now
+Lstats `<snapshot>/player-ids.json`, never opening or following it
+(`unlistedFloorError`). An entry of any kind refuses before anything
+snapshot-derived is written, the adoption included, with the snapshot-copy
+remedy or a newer snapshot of this box, never just another one. Only
+ErrNotExist is a genuine absence, which `floorlessSnapshotBound` then treats
+as round 10 does; any other Lstat error refuses with itself. Restore's own seal
+completion still runs first: it adds local seal evidence only.
+
+The manifest's word for a file's absence is taken in three other places, none
+of which can weaken the floor. An unlisted `player-uuid` makes the restore
+identity-free: the box keeps its own identity and floor byte for byte, and no
+identity the snapshot held comes back. An unlisted console account, library,
+token store, TLS pair, config or harvest file is not restored and holds no
+part of the floor. Listing, pruning and the restore preflight read manifests
+for display, retention and schema only.
+
+A seal entry that is not a regular file, a directory, a symbolic link or a
+named pipe, is still a seal, as `playerRestoresSealed` already counted it.
+`ensurePlayerMarker` refused one with "is not a regular file: move it aside",
+which start, a backup's completion and every adoption printed, and following
+that advice dropped the box's only seal record. It now keeps such an entry
+under either marker's name, never opening or following it (a sibling's
+barrier), so completion goes on to record the seal in `player-initialized`
+beside it: twice recorded. Only discard replaces it. Beside such an entry a
+damaged marker reading `sealed:true` gets the move-aside advice, since start
+seals the marker again there; beside a missing seal file, or one whose bytes do
+not read, the advice still says to keep the marker. Round 10's reason, that
+the next start would write an unsealed marker, holds beside a missing seal
+file; beside one whose bytes do not read, start seals the marker again too, and
+the advice keeps the intact record either way. No move-aside or remove text in
+`internal/backup` or `cmd/bridge` can now be printed for
+`player-floor-discarded.json`, or for `player-initialized` holding the only
+seal: the move-aside warning is given only where the marker is not the only
+seal record, and the other texts concern `player-uuid`, `player-queue.json`,
+`player-ids.json` or a copy of a snapshot.
+
+Discard repairs a damaged seal entry by renaming it aside and writing a fresh
+one, and it repaired the seal file first: with `player-initialized` gone, a
+crash between that rename and the replacement left no seal record. With the
+seal entry damaged, discard now seals `player-initialized` first, so each
+record is renamed aside only while the other holds a durable seal.
+
+A failed seal completion's advice names its cause and claims no more than it
+supports. Each step tags its error where it happens with what it was reading or
+writing and the access that needed (`accessError`): an Lstat and a barrier
+need the data directory, a marker's read needs that file, a marker's write
+needs write access to the data directory, and opening server.lock needs that
+file. A permission error names that path and access, and says serve boot and
+start fail on it too when run as this user, since a CLI backup need not run as
+serve does; a read-only data directory says so; a marker refusal keeps its own
+remedy; any other error, an interrupted or refused lock or an I/O error, keeps
+only its error. `fsutil.TryLock` maps flock's EWOULDBLOCK, the same Errno as
+EAGAIN on every unix it builds for, and Windows' `ERROR_LOCK_VIOLATION` to
+`ErrLocked`, nothing else, and retries EINTR inside; the mapping is a pure
+function now, `lockedErr`, pinned per platform.
+
+Round 7's test that required a non-regular lone seal to refuse startup is
+replaced: `TestANonFileLoneSealIsCompletedAroundIt` completes the seal around
+it, spent on a box minted before and open as the one-shot exemption on a box
+with no allocation evidence. Three older tests that made their completion
+error from a directory seal now use one a newer bridge wrote, and restore's
+own completion may write `player-initialized` beside a dangling seal before
+its refusal. `TestRestoreRefusesAFloorItsManifestDoesNotList`,
+`TestRestoreRefusesAnUnlistedFloorEntryWithoutFollowingIt`,
+`TestAnUnlistedFloorTheSnapshotDoesNotHoldIsStillAbsent`,
+`TestADamagedManifestRefusesBeforeAdoptingTheDestination`,
+`TestARefusedDamagedManifestOnlyCompletesTheLocalSeal`,
+`TestRestoreKeepsTheBoxIdentityWhenItsUUIDEntryIsDamaged`,
+`TestAnUnlistedFloorRefusesUnlessItIsGenuinelyAbsent`,
+`TestANonFileSealIsKeptAndRecordedTwice`, `TestANonFileSealIsCompletedByABackup`,
+`TestAFIFOSealIsKeptWithoutOpeningIt`, `TestMoveAsideAdviceCountsANonFileSealAsASeal`,
+`TestDiscardRecordsASecondSealBeforeRenamingADamagedOne`,
+`TestDiscardFloorRepairsANonFileSealFromTheStateItself`,
+`TestSealCompletionAdviceClaimsNothingForATransientError`,
+`TestSealCompletionAdviceNamesTheReadItLacked`,
+`TestBusySealCompletionAcrossProcesses` and `TestLockedErrMapsOnlyAHeldLock`
+pin these boundaries.
