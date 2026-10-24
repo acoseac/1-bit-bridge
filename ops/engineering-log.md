@@ -60081,7 +60081,17 @@ back from git after it; every one went red:
 lock; `go test -race` of `cmd/bridge`, `internal/config` and
 `internal/fsutil`; `GOOS=windows go vet` of `cmd/bridge`, `internal/config`,
 `internal/backup`, `internal/admin` and `internal/fsutil`. The Windows run
-itself is CI's leg. Rules: config-lifecycle.md (the lock), cli-serve.md (the
+itself is CI's leg. `make fmt` rewrote nothing (Go 1.27.3, go.mod's 1.27.2
+cannot be fetched here), vet was clean. `make test` passed 73 packages,
+`cmd/bridge` (635 s) and `internal/fsutil` among them under the race
+detector, and failed two: `internal/config`, where the race detector caught
+the lock tests' own holder giving its lock back from a goroutine beside its
+cleanup (a plain bool; it gives it back once now, and the package then passed
+under `-race`), and `internal/handshakelog`'s
+`TestAProbeOfASpecificBoundIPIsNotLogged`, whose dial to this host's
+address on a point-to-point VPN tunnel (`utun40`) times out on every
+run; that test's binary has no package this change touches. `make build-all`
+built all six targets, and `make docs-check` passed. Rules: config-lifecycle.md (the lock), cli-serve.md (the
 order and the CLI writers) and player.md's bind bullet, written by the
 orchestrator from the worker's report; long forms in
 `ops/History-rules-config-lifecycle.md`, `ops/History-rules-cli-serve.md`
