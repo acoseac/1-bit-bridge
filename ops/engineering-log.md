@@ -430,13 +430,18 @@ increase, commit or push.
 Round 7 Go 1.27.3 offline validation: the fixed gapless case passes under
 race 300 times isolated and 300 times with twelve busy loops; the forced
 session-cancellation case also passes 300 times with twelve loops. All
-eight rollback cases pass 100 times with twelve loops. The original
-isolated 300-run check passes; its initial stressed peer has two minute-
-watchdog cancellation hangs (briefly overlapping another twelve-loop
-control), while a later exact-twelve-loop 300-run check passes. The old
-test with result logging alone gives one plain-context-cancellation hang
-in 300 runs with exactly twelve loops and a one-second diagnostic
-watchdog. The forced old ordering fails 3/3 under twelve loops; restoring
+eight rollback cases pass 100 times with twelve loops. On the round-6
+test as it stood before this round (the old test, unfixed): 300 isolated
+runs pass; its first stressed 300-run check, which briefly overlapped
+another control's twelve busy loops (so about twenty-four), had two
+minute-watchdog cancellation hangs, which is CI's failure reproduced; a
+later run of it with exactly twelve loops passed. The old test with
+result logging alone gives one plain-context-cancellation hang in 300
+runs with exactly twelve loops and a one-second diagnostic watchdog. On
+the host, on this round's committed tree (Go 1.27.3, macOS arm64):
+`go test -race` over `./internal/player/... ./internal/alsapcm/` passes,
+and `-race -count=300` of `TestPlaybackResumeRollback` passes under twelve
+busy loops (653 s) and, run on purpose, under twenty-four (653 s). The forced old ordering fails 3/3 under twelve loops; restoring
 the old plain-cancellation filter on the fixed deterministic schedule
 also fails 3/3. Every control compiles, exits at its intended watchdog,
 cleans up and avoids a package timeout or data race. Darwin and Linux vet,
