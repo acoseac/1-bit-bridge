@@ -26,6 +26,8 @@ reaches a session that has not gone looking for it.
 
 ## Index
 - [2026-10-24 — B506: one lock for every bridge.yaml writer, and each reads the file again in its turn](#2026-10-24--b506-one-lock-for-every-bridgeyaml-writer-and-each-reads-the-file-again-in-its-turn)
+- [2026-10-24 — B529: Drop a final drain after Resume rollback Pause is refused](#2026-10-24--b529-drop-a-final-drain-after-resume-rollback-pause-is-refused)
+- [2026-10-24 — B528: a whole-number setting refuses a fraction rather than load its whole part, in the player block and across the config](#2026-10-24--b528-a-whole-number-setting-refuses-a-fraction-rather-than-load-its-whole-part-in-the-player-block-and-across-the-config)
 - [2026-10-24 — B526: three ALSA playback hangs are test sequencing defects](#2026-10-24--b526-three-alsa-playback-hangs-are-test-sequencing-defects)
 - [2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader](#2026-10-24--b525-the-players-identity-file-is-read-without-waiting-a-named-pipe-at-player-uuid-is-refused-at-once-by-every-reader)
 - [2026-10-24 — B470 PR 5a2b: shared discovery for the opt-in OpenHome Source](#2026-10-24--b470-pr-5a2b-shared-discovery-for-the-opt-in-openhome-source)
@@ -140,6 +142,321 @@ reaches a session that has not gone looking for it.
 - [DSD renditions B4 — the alias measurement, and why it is a differential (2026-09-07)](#dsd-renditions-b4--the-alias-measurement-and-why-it-is-a-differential-2026-09-07)
 
 ---
+
+## 2026-10-24 — B529: Drop a final drain after Resume rollback Pause is refused
+
+Resume already compensates a sink that resumed successfully before the session
+noticed a fault. B523 round 5 left the final-drain refusal as B529: the sink's
+command gate refuses Pause while the kernel plays out its last buffer, so that
+buffer could play until the engine's fault release arrived.
+
+After the compensating Pause, Resume now checks the sink's own typed reason
+(`ReasonBadState`) and position state (`SinkDraining`). Only that pair takes
+Drop, through `s.call` with the existing detached rollback context and its
+original two-second deadline. The answer joins the fault, the refused Pause
+and any Drop failure. Other refusals and the recorded fault are unchanged; round 5 below restores the reporter's measured progress after Drop.
+No wire schema, iOS behavior, sink gate or teardown order changes.
+
+`TestPlaybackResumeRollbackDropsFinalDrain` uses B523's direct backend, real
+sink, reporter-panic gate and fake kernel command hook. The producer receives
+the end-of-queue notification after Pause; its half-second file fits within
+the lookahead plus hardware buffer. Resume's successful reply is held while
+350 ms of fake time carries that producer's Drain to its final hardware
+drain, with 150 ms still buffered, and then until the fault is recorded.
+Before any session release, rollback must Drop once and stop the sink. The
+normal case grants another 50 ms after Resume returns and requires the
+kernel to have left DRAINING, with unchanged written bytes and consumed
+frames. Its held-Drop case cancels the caller and retains the Drop's rollback
+deadline as a third error. A per-backend SinkCall seam observes both rollback
+calls: Pause and Drop must receive the same context and deadline. The test
+waits for the producer's cancelled Drain result, then releases and joins
+all backend goroutines and requires exactly the original backend fault,
+with no second fault or other event. `TestPlaybackResumeRollbackKeepsOtherRefusals`
+reaches a real xrun in that same window and requires no Drop and the original
+joined errors, with that same exact event-sequence check after joining.
+
+Red first, with only the tests on 42b4a397: both final-drain subtests failed
+with zero Drops; the normal case left the sink draining, and the held-Drop
+case had no joined deadline. The xrun preservation test already passed on
+main; it becomes red under the independent broadened-fallback control.
+Six independent controls remove the fallback, broaden its gate, discard the
+fault, discard the Pause refusal, discard the Drop failure, or attach Drop
+to the caller's context. Each compiles and fails its named regression;
+mutations are restored from saved fixed bytes, with no HEAD change.
+
+Round 1 Go 1.27.2 offline validation: Darwin and Linux `go vet ./...`,
+`make fmt`, `make docs-check`, and both new test functions twenty times
+under `-race` passed. Every player package except OpenHome, plus `internal/alsapcm`,
+passed the full race suite. The requested all-player race run was stopped
+after confirming that OpenHome's loopback listeners are refused by the
+sandbox. A focused race run of
+`TestTheSurfaceBindsEachServedAddressAndFollowsThem` fails solely on
+`listen tcp4 127.0.0.1:0: bind: operation not permitted`; the full OpenHome
+suite still requires a host that permits those listeners.
+
+Round 2 corrected three gaps in the original test evidence. Round 1 started
+a test-owned Drain while the producer was still streaming, checked only the
+reason of any fault events without their count or kinds, and granted no time
+after its frame snapshot. That unchanged-frame assertion also passed without
+the fix and did not establish that buffered sound stopped. Round 1's held
+Drop pinned detachment from caller cancellation but accepted a fresh timeout
+for Drop, so it did not pin the shared rollback deadline. The revised tests
+exercise the producer's own cancelled Drain and its exit, count and compare
+all events after release and Wait, grant time after rollback, and observe
+the two contexts directly without measuring elapsed wall time. Through round 3,
+each fault still comes from a reporter panic: that reporter delivers its
+fault and exits before Drop, so these exact-sequence assertions cover the
+producer but do not pin a live reporter's view of the dropped sink. The rollback
+branch itself is unchanged; the only production additions are the optional,
+nil-in-production call observers. Controls 1–6 are rerun on these tests;
+control 7 gives Drop a fresh detached CallTimeout, and controls 8–10 make the
+producer report its cancelled Drain as a cut fault, a second backend fault,
+or Finished. All ten compiled and failed their predicted assertions. The
+no-fallback control now advances the fake DAC from 16,800 to 19,200 consumed
+frames after Resume; the fresh-timeout control fails the context/deadline
+comparison, and each producer-event control fails the exact event sequence.
+Those controls did not isolate the state half of the fallback condition: the
+xrun case was already excluded by its reason. The command hook also still
+used fatal test helpers off the test goroutine; round 3 corrects both gaps.
+
+Round 2 Go 1.27.2 offline validation passed Darwin and Linux `go vet ./...`,
+`make fmt`, `make docs-check`, and each changed test twenty times under
+`-race`. All player packages outside OpenHome, plus `internal/alsapcm`,
+passed the full race suite. The all-player run encountered sandbox-refused
+loopback binds in `TestAHeaderPastItsBoundIsRefused`,
+`TestAPanicInTheListingStaysInTheSurface`,
+`TestAnIdleConnectionAndAStalledHeaderAreClosed` and
+`TestTheSurfaceBindsEachServedAddressAndFollowsThem`. Near its two-minute
+package cap, subsequent OpenHome waits failed immediately and
+`TestStopRefusesThenShutsDownThenCloses` panicked in cleanup with no listener
+established. A separate focused race run of
+`TestTheSurfaceBindsEachServedAddressAndFollowsThem` again reported
+`listen tcp4 127.0.0.1:0: bind: operation not permitted`. OpenHome still
+requires a host that permits those listeners; this round does not claim a
+passing all-player gate.
+
+Round 3 adds `TestPlaybackResumeRollbackKeepsACompletedDrain` for the
+producer's sink after it has played out, with the producer held at SinkCall
+before it can mark the output drained or close it. Its before-fault case
+finishes the drain while Resume's command reply is held, then records the
+fault: the real sink returns `ReasonClosed`, not `ReasonBadState`, for that
+Pause. That ordering alone cannot isolate the state check. Its
+after-pause-refusal case instead lets the final drain refuse Pause with
+`ReasonBadState`, holds that reply at SinkCall, completes the drain, then
+lets rollback check Position. The same current sink is now `SinkStopped`.
+Both cases require zero Drops, exactly one bounded sink call (Pause), and
+exactly the original fault joined with that call's Pause error. Control 11
+removes only `&& out.sink.Position().State == alsapcm.SinkDraining`: the
+before-fault case passes, and after-pause-refusal fails with two bounded
+calls and answers instead of one. Drop of a stopped sink is a no-op before
+the command hook, so counting bounded calls is essential to see that attempt.
+
+All watchdog waits and fatal checks now run on the test goroutine. The
+Resume command hook signals its arrival and holds only its reply; Resume
+runs on a separate goroutine whose answer the test receives under the
+watchdog. Every held reply is freed during cleanup and that Resume goroutine
+is joined, including after a fatal assertion. Control 12 gives the final
+kernel drain a zero timeout: the final-drain wait fails at the one-second
+watchdog and the process exits FAIL, without a test-timeout panic or a
+stranded Resume. Controls 1–10 were rerun against these tests and all twelve
+controls compile and fail their predicted assertions. Production code is
+unchanged in round 3; all temporary mutations are restored from saved bytes.
+
+Round 3 Go 1.27.2 offline validation passed Darwin and Linux `go vet ./...`,
+`make fmt`, `make docs-check`, and all three changed test functions twenty
+times each under `-race` (both completed-drain subtests included). Every
+player package outside OpenHome, plus `internal/alsapcm`, passed the full
+race suite. The requested all-player run failed on sandbox-refused loopback
+binds in `TestAHeaderPastItsBoundIsRefused`,
+`TestAPanicInTheListingStaysInTheSurface`,
+`TestAnIdleConnectionAndAStalledHeaderAreClosed` and
+`TestTheSurfaceBindsEachServedAddressAndFollowsThem`. As its two-minute
+package cap approached, later OpenHome waits failed immediately and
+`TestStopRefusesThenShutsDownThenCloses` panicked in cleanup without a
+listener. A focused run of
+`TestTheSurfaceBindsEachServedAddressAndFollowsThem` independently confirmed
+`listen tcp4 127.0.0.1:0: bind: operation not permitted`. The all-player gate
+still requires a host permitting those listeners and is not claimed passed.
+
+Round 4 adds a live-reporter subtest to
+`TestPlaybackResumeRollbackDropsFinalDrain`. With Resume's successful sink
+reply held and the producer at the final hardware drain, a second backend
+Pause meets that drain's refusal and arms the no-device pause-release timer
+through the existing `Config.AfterFunc` seam. Resume's `unpausedLocked`
+stops that timer; its stop panics once, recording the backend fault without
+ending the reporter. The reporter's Tick factory holds its first read until
+rollback has answered, so it deterministically sees `SinkStopped` with
+`Played < Written == Submitted`. The test checks the measured occurrence
+and frames on Fault, the original shared rollback context and joined errors,
+and, after round 5's correction below, the exact measured sequence before
+release and after release plus Wait.
+
+With only that subtest added on b1b289b8, the live reporter sends
+`[Audible(101), Position(101, p.Played), Fault(101, p.Played)]`, with
+`p.Played > 0`. It sends neither Finished nor a second fault. Round 4
+mistakenly treated that measured progress as a defect and added a guard in
+`reportStep` that cleared every queued callback when a recorded fault met a
+stopped sink with `Played < Written == Submitted`. Round 5 removes it for
+the reasons below. Round 4's control 13 removed that guard and recovered
+the accurate sequence; that red result supported the wrong expectation.
+Controls 1–12 were also rerun against the round-4 tests and failed their
+predicted runtime assertions. Every mutation was restored from saved bytes.
+
+Round 4 Go 1.27.2 offline validation passed Darwin and Linux `go vet ./...`,
+`make fmt`, `make docs-check`, and all three rollback test functions twenty
+times each under `-race`, including the new live-reporter subtest. Every
+player package outside OpenHome, plus `internal/alsapcm`, passed the full
+race run and the separate run excluding OpenHome. The requested all-player
+run failed on sandbox-refused loopback binds in
+`TestAHeaderPastItsBoundIsRefused`, `TestAPanicInTheListingStaysInTheSurface`,
+`TestAnIdleConnectionAndAStalledHeaderAreClosed` and
+`TestTheSurfaceBindsEachServedAddressAndFollowsThem`. Near its two-minute
+package cap, subsequent OpenHome waits failed immediately, and
+`TestStopRefusesThenShutsDownThenCloses` panicked in cleanup without an
+established listener. The full all-player gate is not claimed passed; it
+still needs a host permitting those listeners.
+
+Round 5 corrects round 4's reporter guard. Codex and the Claude API found
+it independently in their round-4 reviews: the first live report was
+accurate and measured. Position reports Played, which remains true after
+Drop. Suppressing Audible can leave the engine on A while a fault names a
+short successor B that was heard, and incorrectly fail a pending Play.
+The predicate also describes any dropped sink and erases all callbacks
+queued in that step, including Prepared, Submitted and successor refusals.
+`reporter.go` is restored byte for byte to its state before b9a169b5.
+
+The retained live-reporter subtest now requires exactly
+`[Audible(101), Position(101, p.Played), Fault(101, p.Played)]` both before
+release and after release plus Wait. Position's frames equal Fault's and
+never exceed Played; there is no Finished, second Fault, or event after
+Fault. The producer's cancelled-drain checks and rollback context/error
+assertions remain in place.
+
+The deterministic gapless-live-reporter case adds A (18,000 frames) then
+short final B (6,000). B's start is verified inside the final hardware
+buffer. Two test-only exports reuse the fake kernel's existing mechanisms:
+`ParkStatusAfterWritten` parks the first STATUS after the final write,
+and `AdvanceUnwatched` moves fake time while that call is held, before its
+reading. The next measurement crosses B's start while a tail remains
+buffered; rollback Drops that tail. No sleep, polling loop or production
+seam is added. The engine supplies B through its real successor hand-off;
+the test supplies the end notification because the held reporter has yet
+to deliver Submitted(B). After rollback, the reporter delivers Prepared(B),
+Submitted(B), Audible(A), Audible(B), Position(B, Played - B.start), then
+Fault(B, Played - B.start). The real engine must answer its pending Play
+successfully, select B, and keep one fault naming B and those measured
+frames. The complete sequence is compared again after release and Wait.
+
+Control 13 restores round 4's guard and fails both live-reporter cases:
+only Fault remains, and the real engine stays selected on A while its
+fault names B. The single-occurrence measurement is 14,400 frames; the
+gapless measurement is 19,200 total frames, so B's Position and Fault both
+carry 1,200 frames. Controls 01–12 also compile and fail their predicted
+assertions. No control reports a data race or reaches the package timeout;
+all mutations are restored from saved fixed bytes.
+
+Round 5 Go 1.27.2 offline validation passes Darwin and Linux `go vet ./...`,
+`make fmt`, `make docs-check`, and the final `-race -count 20` runs of all
+three rollback test functions. The first completed-drain repeat run had
+one before-fault watchdog failure waiting for the producer's completed
+Drain; a diagnostic 100-run check and the requested 20-run rerun passed
+without a code change to that path. The intermittent failure's cause was
+not established. All player packages outside OpenHome, plus ALSA, pass
+the race suite. The full all-player gate fails on sandbox-denied OpenHome
+loopback binds (`operation not permitted`), followed by waits and a cleanup
+panic without a listener; it is not claimed passed.
+
+Round 6 fixes the intermittent before-fault completed-drain test ordering.
+receiveIn now dumps goroutines at its watchdog before cleanup. The captured
+hang has the sink writer in idle, Resume held in the command hook, and no
+producer remaining. The first Drain can refuse the paused sink; the command
+hook signals only enqueueing, so Resume's arrival does not establish that
+the producer retried Drain. A one-second fake-time grant can consume the
+half-second file before that retry. The sink stops with an xrun, the retry
+returns xrun and the producer exits, while drainCompleted only reports a
+successful Drain. Its event can never arrive. A control holds the producer
+at SinkCall after the paused refusal until the resumed sink has run dry:
+24,000 frames consumed, zero hardware drains, and a retried Drain refused
+with xrun, followed by the same completion watchdog. The fix waits on
+Sink.Changed (subscribed before Position) for the producer's accepted
+SinkDraining state before granting time; with no fake time available that
+state cannot finish before observation. No production code, sleep or timeout
+increase is involved. The B526 ordering rule's long form records this case.
+
+Round 6 Go 1.27.3 offline validation: the fixed completed-drain test passes
+300 times under race without stress and 300 times with twelve busy loops,
+and the whole rollback family passes 100 times under race. Restoring only
+the old ordering gives 5/200 completion hangs without stress and 24/200
+with twelve busy loops, using a one-second diagnostic watchdog; the forced
+old interleaving fails 3/3 under that same stress. The same forced paused
+refusal followed by the accepted-Drain wait passes 100 times. The initial
+minute-watchdog 200-run check completes with eight hangs; its stressed peer
+records nine before the ten-minute package cap (an incomplete repetition
+run). Those first checks overlapped the peer's twelve-loop stress. Darwin
+and Linux vet, make fmt and make docs-check pass. The full player/ALSA race
+gate hits sandbox-refused OpenHome loopback binds in
+TestAHeaderPastItsBoundIsRefused, TestAPanicInTheListingStaysInTheSurface,
+TestAnIdleConnectionAndAStalledHeaderAreClosed and
+TestTheSurfaceBindsEachServedAddressAndFollowsThem, then subsequent waits
+and a cleanup panic without a listener near the package cap. Every player
+package outside OpenHome, plus ALSA, passes. The full gate is not claimed
+passed. Controls use test-file overlays, leaving production and fixed
+source bytes intact; every busy loop is stopped and reaped.
+
+Round 7 fixes the gapless-live-reporter cancellation watchdog. CI's dump
+has only the engine owner and persistence writer left: the producer and
+sink writer have already exited. A natural twelve-spinner diagnostic
+reproduces the missing answer as plain context.Canceled from session.call,
+not the sink's typed ReasonCancelled. After rollback Drops the final
+buffer, the live reporter sends its measured events and Fault; the real
+engine releases that session. Its context can win session.call's select
+before Drop's typed Drain answer is taken. The old result hook filtered
+out plain context.Canceled, so its buffered channel would never receive;
+the observer was already registered, and Drain neither completed normally
+nor remained blocked. This is permitted production behavior. The test now
+captures the producer's context before Prepare(nil), records every Drain
+answer, holds the initial paused refusal at SinkCall until Resume is
+queued, and waits for accepted SinkDraining before any draining case gets
+fake time. Its final answer assertion accepts either Drop's typed
+cancellation or the session's context cancellation. The new
+gapless-session-cancel case parks the retried Drain's sender until the engine
+release cancels the wrapper, requires plain context.Canceled, then frees
+and joins the sender. Completed drains still require success; rollback's
+error joins, call/deadline and Drop counts, measured event sequence, engine
+Play/selection/fault, and complete cleanup assertions remain. Every other
+receiveIn and waitOn in playback_rollback_test.go was audited for transient
+states and filtered outcomes; no other wait needs a change. The B526 rule
+and its long form record this case. No production code, sleep, timeout
+increase, commit or push.
+
+Round 7 Go 1.27.3 offline validation: the fixed gapless case passes under
+race 300 times isolated and 300 times with twelve busy loops; the forced
+session-cancellation case also passes 300 times with twelve loops. All
+eight rollback cases pass 100 times with twelve loops. On the round-6
+test as it stood before this round (the old test, unfixed): 300 isolated
+runs pass; its first stressed 300-run check, which briefly overlapped
+another control's twelve busy loops (so about twenty-four), had two
+minute-watchdog cancellation hangs, which is CI's failure reproduced; a
+later run of it with exactly twelve loops passed. The old test with
+result logging alone gives one plain-context-cancellation hang in 300
+runs with exactly twelve loops and a one-second diagnostic watchdog. On
+the host, on this round's committed tree (Go 1.27.3, macOS arm64):
+`go test -race` over `./internal/player/... ./internal/alsapcm/` passes,
+and `-race -count=300` of `TestPlaybackResumeRollback` passes under twelve
+busy loops (653 s) and, run on purpose, under twenty-four (653 s). The forced old ordering fails 3/3 under twelve loops; restoring
+the old plain-cancellation filter on the fixed deterministic schedule
+also fails 3/3. Every control compiles, exits at its intended watchdog,
+cleans up and avoids a package timeout or data race. Darwin and Linux vet,
+make fmt and make docs-check pass. The fresh all-player/ALSA race gate
+passes every package outside OpenHome and fails there on sandbox-denied
+loopback binds: TestAHeaderPastItsBoundIsRefused,
+TestAPanicInTheListingStaysInTheSurface,
+TestAnIdleConnectionAndAStalledHeaderAreClosed and
+TestTheSurfaceBindsEachServedAddressAndFollowsThem; later waits fail at the
+package cap and TestStopRefusesThenShutsDownThenCloses panics in cleanup
+without a listener. The full gate is not claimed passed. All final stress
+proofs use separate sets of exactly twelve spinners, all stopped and
+reaped; controls use test overlays and preserve the worktree's fixed bytes.
 
 ## File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)
 
@@ -60564,3 +60881,266 @@ The successor-opener test could decode its entire first track into lookahead plu
 The cut-too-late test's tick could report the removed entry audible and end the session before the second (barrier) send. Joining the backend after the first tick made that second send fail every time with no reporter alive. The first race repetition exposed the same terminal ordering at FakeKernel.Play: its grant caused the boundary stop before its waiter could observe a starved writer. Its watchdog dump again held no backend goroutines. The test now grants time directly and offers ticks while waiting on engine snapshot changes until the specified stop, and exercises the same wait after the backend is fully joined. A fourth control waits for a writer after that join and fails deterministically.
 
 The fake kernel's `when` (under `FakeKernel.Await`) checks and registers under the kernel mutex; the engine wait helper subscribes before reading its snapshot. Neither loses a wakeup. No production code, wire contract, or timeout changed. The player rules and History record the ordering requirements. Each ordering has a negative control; focused race repetition, package stress loops and validation results are recorded with the task's report.
+
+## 2026-10-24 — B528: a whole-number setting refuses a fraction rather than load its whole part, in the player block and across the config
+
+B470 PR 5a2a recorded a follow-up (its "Not in this change"): the player
+block's whole-number lines took a fraction as its whole part. Backlog B528
+took it, and the same pattern across the rest of the config.
+
+### What yaml.v3 did
+
+yaml.v3 v3.0.1 decodes a `!!float` into an int kind by dropping what
+follows the point: `decode.go`'s `scalar` sets `int64(resolved)` once the
+float is no more than `math.MaxInt64` and fits the field, and the uint kinds
+the same way. Go's conversion of a float the integer cannot hold is the
+platform's: measured on darwin/arm64, `-.inf` loaded as the smallest int64
+and 2^63 (`9223372036854775808.0`) as the largest. Measured on main
+(e263ee86) through `Load`:
+
+- The player block: `openhomePort: 7792.9` bound 7792 and the player ran;
+  `pauseReleaseSeconds: 45.75` held the DAC for 45 s, and `0.5` and `-.inf`
+  reached `Problem` as 0 and the smallest int64, refused there as out of
+  range rather than as what they were; `device.pcmDevice: 1.5` read as 1 and
+  `device.subdevice: 0.25` as 0.
+- The rest of the config: of its 44 whole-number settings (`envBindings`'
+  integer leaves outside `output.player`), 42 loaded `2.75` as 2, and
+  `enrich.coverSize` and `retention.playbackHistoryDays` refused it only
+  because 2 is outside what they take: `250.4375` loaded as 250 in both.
+  `limits.manifest.requestsPerMinute: 0.5` loaded as 0, which with the
+  default burst turns the manifest limit off, `-.inf` as the smallest int64,
+  `6.000001` as 6, and 2^63 as the largest int64. `.inf`, `.nan` and `1e19`
+  were refused already, by yaml.v3 itself, as out of range.
+- `Load` took a file holding `output.loopbackPort: 7795.5`, so `bridge
+  init`'s rewrite, which keeps the block Load's decode reads when that
+  decode takes the whole file, kept the port as the 7795 it read (from the
+  code: the new init rows failed on main at their check that `Load` refuses
+  the fixture).
+
+### The rule
+
+A whole-number setting takes no value yaml.v3 would change on the way in.
+`exactInteger` is the one test: anything but a `!!float` passes (an integer,
+a null, or a value the decoder refuses itself), and a `!!float` passes when
+its value is whole and inside the integer's range, the bounds powers of two
+(`math.Ldexp`), which a float64 holds exactly. So `30.0`, `3e1`, `-0.0`,
+`!!float 6` and `08` (which yaml.v3 resolves as a float, being no octal)
+load as written, and no value a file holds changes. Refusing every
+`!!float`, the simpler rule, was rejected: it would stop a file loading over
+values that lose nothing. A round trip through the integer as the range test
+was rejected too: arm64 saturates 2^63 to the largest int64, which converts
+back to 2^63.
+
+Each refusal follows its neighbours. The player block's reader
+(`playerReader.whole`) refuses as it refuses a word there: the block is
+unread, kept as the file holds it, the player off with
+`output.player.<setting> (line N): must be a whole number`, and the load
+goes on. The rest of the config is refused by `Load`, as a word on that
+line is, in the words `ValueFreeYAMLError` gives the out-of-range float
+yaml.v3 refuses itself: `line N: cannot unmarshal a !!float value into int`
+(or `int64`): the line, the tag and the Go type, and nothing of the value.
+`ValueFreeYAMLError` keeps such a line as it is (`valueFreeTagged`: yaml.v3's
+own lines always start with the tag), so the check's lines pass through it.
+
+### How Load finds them: a shadow the decoder maps itself
+
+`config.DecodeFile` is Load's decode: yaml.v3's decoder with `KnownFields`,
+and, once that decode succeeds, `CheckWholeNumbers` over the same bytes,
+which decodes them a second time into a shadow of `Config` (`shadowOf`):
+each integer field replaced by an `integerCheck` of its type, whose
+`UnmarshalYAML` decodes nothing and answers a `*yaml.TypeError` that the
+decoder adds to its own and goes on past, so every such value is named.
+Every struct it rebuilds keeps its fields' names and tags (`reflect.StructOf`)
+and every type that holds no integer is kept as it is, so yaml.v3 maps the
+file onto the shadow as onto `Config`: merge keys, aliases (named at the line
+of the node an alias names, once for each setting it reaches), inline fields
+and encoded keys reach the setting they reach in the decode, and the
+decoder visits the same nodes in the same order, so its alias limit judges
+the two decodes alike. A type that reads its own YAML (`PlayerConfig` among
+them) is not looked into; `time.Duration` decodes from text alone; no map
+in the config is keyed by a number, and a map's keys are not looked at.
+
+Rejected: a resolver of the config's own over the node tree, which would
+copy the decoder's merge and key rules, the copy B505's round 2 found
+disagreeing with the decoder three ways (the rewrite's rule in cli-serve.md);
+a type of its own for every whole-number field, which every consumer's
+arithmetic would have to convert, and whose `UnmarshalYAML` decodes with a
+fresh decoder, dropping `KnownFields`; and running the check when the first
+decode fails, which would mix the shadow's own mismatches into the refusal.
+So a file with a word and a fraction in it is refused for the word first,
+and for the fraction once the word is put right.
+
+`bridge init`'s rewrite reads the file through `DecodeFile`
+(`outputAsLoadDecodes`), so a file holding a fraction anywhere decodes whole
+there no more than in `Load`, and asks `CheckWholeNumbers` of the block it
+decodes on its own (`outputAsLoaded`) and of each setting it recovers
+(`outputRecovered`): a fraction there is "it does not read as that setting",
+as a word is, and one in a merged block keeps nothing, as a word there does.
+
+What changes for an operator: a config that holds a fraction in a
+whole-number setting no longer loads, where it loaded the whole part:
+`bridge serve` does not start, and serve, `bridge doctor` and init name the
+line. A release note should say so.
+
+### Red first
+
+On main with the tests in place: in `internal/config`, 62 subtests failed
+(every fraction of `TestAWholeNumberSettingTakesNoFraction`'s 44 settings,
+the four player settings' nine refused values, the edges of
+`TestAWholeNumberSettingTakesWhatDecodesUnchanged` that loaded, its merge,
+alias and three-fraction cases, and the new row of
+`TestAnOpenHomeSettingIsValidatedLikeItsNeighbours`), each because the value
+loaded truncated ("a fraction loaded, as 7", "Load took it, as a limit of
+0", "PlayerEnabled = true, <nil>"); 34 passed: every integer, whole float,
+null and absent case, `.inf`, `.nan` and `1e19`, which yaml.v3 refused in
+the same words already, and the OpenHome rows that were there before. The
+player block's values were measured through main's own decode
+(`Node.Decode` into an int, as its `whole` made it): 7792.9 as 7792, 45.75
+as 45, 0.5 as 0, `-.inf` as the smallest int64, 1.5 as 1, 0.25 as 0. In
+`cmd/bridge`, the three new init cases failed, each on its fixture loading.
+
+### Negative controls
+
+Against the committed change, each restored with `git checkout --` and the
+tests passing again after it:
+
+- **One per setting, 48 in all.** A temporary line in `buildShadow` kept the
+  original type for the one struct field `B528_SKIP` named, so that setting
+  decoded truncating again, and one in `playerReader.whole` ran main's
+  decode for the one path it named. A driver ran `go test -count=1 -run
+  '^TestAWholeNumberSettingTakesNoFraction$' -v ./internal/config/` with
+  `B528_SKIP=<struct>.<field>` for each of the 44 settings, and `-run
+  '^(TestAWholeNumberOfThePlayerTakesNoFraction|TestAnOpenHomeSettingIsValidatedLikeItsNeighbours)$'`
+  with `B528_SKIP=output.player.<setting>` for the player's four, and
+  required each run to fail that setting's refusal subtests and nothing
+  else. All 48 did. Each config setting failed
+  `TestAWholeNumberSettingTakesNoFraction/<path>` alone, "a fraction loaded,
+  as 7" (as 250 for `enrich.coverSize` and `retention.playbackHistoryDays`).
+  The player's failed `TestAWholeNumberOfThePlayerTakesNoFraction/<setting>/not_whole_N`:
+  `pauseReleaseSeconds`' three ("PlayerEnabled = true" for 45.75, and
+  `Problem`'s range refusal for 0.5 and `-.inf`), `openhomePort`'s two and
+  the OpenHome row `a_fraction_for_the_port`, and `device.pcmDevice`'s and
+  `device.subdevice`'s two each, "PlayerEnabled = true". With `B528_SKIP`
+  unset, the mutated tree passed all four tests.
+- **`outputAsLoadDecodes` back to the bare decoder** (KnownFields alone): the
+  three init rows failed, `a_loopback_port_written_as_a_fraction` (its
+  warning did not say the port does not read: the 7795 was kept),
+  `a_block_beside_a_fraction_elsewhere` ("a file Load refuses for its
+  fraction decodes whole") and `a_fraction_in_a_merged_block` (the block
+  kept).
+- **`outputAsLoaded` without `CheckWholeNumbers`**: the in-block and merged
+  rows failed, and the row with the fraction outside the block passed.
+- **`outputRecovered` without `CheckWholeNumbers`**: the in-block row alone
+  failed; the merged row stops at its merge key before a setting is read.
+- **`valueFreeTagged` without the branch that keeps a value-free line**: 52
+  subtests failed, the 44 settings, the five edges the check refuses and
+  the merge, alias and three-fraction cases, each refusal reading "cannot
+  unmarshal that value into int"; `.inf`, `.nan` and `1e19`, which yaml.v3
+  refuses itself, passed.
+- **`exactInteger` without its range bound**: `minus_infinity` and
+  `two_to_the_63rd` failed (the limit loaded as the smallest and the largest
+  int64), and so did the player's `pauseReleaseSeconds/not_whole_3`
+  (`-.inf` reaching `Problem`'s range refusal).
+
+### Runs
+
+On darwin/arm64 with Go 1.27.3 (go.mod's 1.27.2 toolchain is not in this
+host's module cache, and it is offline): `make fmt` rewrote nothing, and
+`gofmt -l internal/config cmd/bridge` lists nothing; `make vet`, and `go vet
+./...` with `GOOS=linux` and with `GOOS=windows`, clean; `make build-all`,
+the six targets built; `make docs-check`, ok; `go test -p 4 -race -timeout
+30m ./internal/config/ ./cmd/bridge/`, ok (3.4 s and 497.7 s); the four
+config tests and the three new init subtests at `-race -count 20`, every
+run passed.
+
+### Where the rule is
+
+Its lines: a new bullet in `config-lifecycle.md`, a clause in `player.md`'s
+binding bullet and in `openhome.md`'s opt-in bullet. The session that made
+this change could not write `.claude/rules`, so those three edits went to
+the owner as a patch beside the commit. Its long forms: the new entry in
+`ops/History-rules-config-lifecycle.md`, the opt-in entry in
+`ops/History-rules-openhome.md`, and the rewrite's entry in
+`ops/History-rules-cli-serve.md`, whose line, keep Load's own decode, holds
+as written.
+
+### After review: the value the text writes
+
+CodeRabbit on PR #1339 found a fraction the test let through:
+`pauseReleaseSeconds: 30.0000000000000001` loaded as 30. yaml.v3 reads a
+float through `strconv.ParseFloat`, which rounds to the nearest float64,
+and `exactInteger` weighed that float64, which is whole. Measured on the
+branch before the fix: `limits.manifest.requestsPerMinute: 6.0000000000000001`
+loaded as 6, `1e-400` and `1e-1000000000` as 0 (the limit off), and
+`9007199254740993.0` as 9007199254740992; in the player block,
+`pauseReleaseSeconds: 45.0000000000000001`, `openhomePort:
+7793.0000000000001` and `device.pcmDevice: 1e-400` each read. The round
+made a `!!float` pass only when its text, read exactly (`big.Rat`, its
+underscores dropped as yaml.v3 drops them), wrote the float64 yaml.v3
+decodes; `9007199254740992.0`, which a float64 holds, still loads.
+
+Red first: seven of the eight new cases failed on the test commit, every
+refusal (four in `TestAWholeNumberSettingTakesWhatDecodesUnchanged`, three
+in `TestAWholeNumberOfThePlayerTakesNoFraction`), and nothing else did; the
+eighth, `9007199254740992.0`, loads on both sides by design. Negative control, on the committed fix: weighing only
+whether the text is whole (`written.IsInt()`) in place of comparing it with
+the float64 turned exactly one case red, `a whole number ParseFloat rounds
+to another`, as predicted.
+
+### After review, again: the text as yaml.v3 reads it
+
+Codex and Claude, reviewing that round, each found `big.Rat` reading the
+text otherwise than yaml.v3 does. yaml.v3's resolve tries
+`strconv.ParseInt` with base 0 before any float, so `!!float 036` decodes
+as 30, octal, as `036` untagged does, while `big.Rat` read 36 and the load
+refused it; the player block left `device.pcmDevice: !!float 010` unread.
+`big.Rat` also refused texts that write a whole number,
+`0e99999999999999999999` (its exponent overflows) and `30.` with a million
+and one zeros after its point (an exponent past a million), and reads a long
+mantissa in time quadratic in its digits, measured on this host: a hundred
+thousand digits in 6.7 ms, a million in 517 ms, where `strconv.ParseFloat`,
+which yaml.v3 runs first, takes 1.4 ms.
+
+`writtenInteger` now reads the text as resolve does: its underscores
+dropped, `strconv.ParseInt` with base 0 first (`!!float 0x20000000000001`
+writes 2^53+1, which the float64 rounds to 2^53, and is refused), then a
+decimal float digit by digit, in time linear in the text (a million digits
+in 0.74 ms). Zero is zero whatever its exponent. Refused unread: a whole
+number of more than 20 digits, which no 64-bit integer holds, and a number
+other than zero with an exponent of a million or more, which yaml.v3 never
+decodes unchanged (strconv stops reading an exponent once it reaches 10000,
+so such a text overflows, and resolves as a string, or decodes to another
+value: `0.` and 9,998 zeros then `3e10000000` decodes as 30).
+
+Red first, on a stand-in with round 9's reading: four of the new behaviour
+cases (the tagged octal in both tests, the million zeros, the overflowing
+exponent of zero) and nine rows of the new
+`TestWrittenIntegerReadsTheTextAsYAMLDoes`; the tagged 2^53+1 was refused
+on both sides. Negative controls on the committed fix, each red as
+predicted and nothing else: without `ParseInt` first, the two tagged octals
+and five of the unit test's integer spellings; with the exponent bound
+raised from six digits to eighteen, the one row whose exponent is a million
+or more; with 21 digits allowed, the two 21-digit rows.
+
+Codex, reviewing that round, found one more of resolve's readings: once
+base 0 refuses a text, a binary or octal prefix followed by a sign
+(`!!float 0b+11110`, `!!float 0o-36`) is read by `strconv.ParseInt` of
+what follows the prefix, in its base, so yaml.v3 decodes 30 and -30
+where the round refused the file. `writtenInteger` now runs the same fallback, its
+`0b`, `-0b`, `0o` and `-0o` branches as resolve writes them. Red first:
+that behaviour case and four rows of the unit test, and nothing else; the
+same five went red with the fallback disabled on the committed fix.
+Claude's review corrected the reason given for the large-exponent refusal
+(it is no trade-off: yaml.v3 never decodes such a text unchanged) and the
+round-9 case's count (a million and one zeros). `0.` and 9,998 zeros then
+`3e10000000`, which yaml.v3 decodes as 30, is now a refused row; it was
+refused before this round too.
+
+### Not in this change
+
+yaml.v3 reads an integer written with a leading zero as YAML 1.1's octal:
+`output.loopbackPort: 010` loads as 8, and `0777` as 511 (measured). It is a
+value nobody wrote, but no fraction: a follow-up. The `BRIDGE_*` overrides
+parse with `strconv.ParseInt`, which refuses a fraction (warned and
+ignored), and the console's settings PATCH decodes JSON into `*int`, which
+`encoding/json` refuses with a fraction in it (400): neither truncates.

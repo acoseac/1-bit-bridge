@@ -251,7 +251,12 @@ func (s *session) bound(ctx context.Context) (context.Context, func()) {
 // counted (Stats.Goroutines), until the kernel returns. A panic in f is
 // recovered there, logged once, and is the session's fault, and the call is
 // answered with it.
-func (s *session) call(ctx context.Context, f func() error) error {
+func (s *session) call(ctx context.Context, f func() error) (err error) {
+	if sm := s.b.cfg.Seams; sm != nil && sm.SinkCall != nil {
+		if after := sm.SinkCall(ctx); after != nil {
+			defer func() { after(err) }()
+		}
+	}
 	done := make(chan error, 1)
 	s.b.spawn(func() {
 		defer func() {
@@ -1007,6 +1012,11 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 				rollback, stop := context.WithTimeout(context.WithoutCancel(ctx), engine.CallTimeout)
 				defer stop()
 				if pauseErr := s.call(rollback, out.sink.Pause); pauseErr != nil {
+					// The kernel's final drain refuses Pause: only Drop can
+					// stop those last frames. Keep both refusals if it fails too.
+					if alsapcm.ReasonOf(pauseErr) == alsapcm.ReasonBadState && out.sink.Position().State == alsapcm.SinkDraining {
+						return 0, errors.Join(err, pauseErr, s.call(rollback, out.sink.Drop))
+					}
 					return 0, errors.Join(err, pauseErr)
 				}
 				return 0, err

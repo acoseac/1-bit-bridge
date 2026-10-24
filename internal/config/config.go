@@ -6,7 +6,6 @@
 package config
 
 import (
-	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -2819,9 +2818,9 @@ func LoadFile(path string) (*Config, []byte, error) {
 // loadData is Load over the bytes it read from path.
 func loadData(path string, data []byte) (*Config, error) {
 	var cfg Config
-	dec := yaml.NewDecoder(bytes.NewReader(data))
-	dec.KnownFields(true) // typo-catcher: unknown YAML keys fail the load
-	if err := dec.Decode(&cfg); err != nil {
+	// Unknown keys refused, and a whole number written as a fraction
+	// refused as a word there is (DecodeFile, backlog B528).
+	if err := DecodeFile(data, &cfg); err != nil {
 		// Without the file's text: yaml.v3 quotes what it cannot decode,
 		// and that is often a password or a serial on the wrong line.
 		return nil, fmt.Errorf("parse config %q: %w", path, ValueFreeYAMLError(err))

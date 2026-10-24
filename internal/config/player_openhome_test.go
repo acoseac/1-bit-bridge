@@ -96,12 +96,13 @@ func TestTheOpenHomeOptInLoadsAndRoundTrips(t *testing.T) {
 }
 
 // TestAnOpenHomeSettingIsValidatedLikeItsNeighbours: a value that does not
-// read (a word where the switch or the port goes, a list) leaves the block
-// unread, and a port outside 0 to 65535 is refused by name; either turns
-// the player off, with a reason that names the setting and quotes no value,
-// and never fails the load. (A fraction reads as its whole part, as it does
-// on every whole-number line of the block: yaml.v3 truncates a float into an
-// int.)
+// read (a word where the switch or the port goes, a list, a fraction) leaves
+// the block unread, and a port outside 0 to 65535 is refused by name; either
+// turns the player off, with a reason that names the setting and quotes no
+// value, and never fails the load. A fraction read as its whole part until
+// backlog B528, as it did on every whole-number line of the block: yaml.v3
+// decodes a float into an int by dropping what follows the point
+// (TestAWholeNumberOfThePlayerTakesNoFraction).
 func TestAnOpenHomeSettingIsValidatedLikeItsNeighbours(t *testing.T) {
 	for _, tc := range []struct {
 		name, block, reason string
@@ -109,6 +110,7 @@ func TestAnOpenHomeSettingIsValidatedLikeItsNeighbours(t *testing.T) {
 		{"a word for the switch", "    openhome: maybe\n", "output.player.openhome (line"},
 		{"a word for the port", "    openhome: true\n    openhomePort: " + pastedWord + "\n", "output.player.openhomePort (line"},
 		{"a list for the port", "    openhome: true\n    openhomePort: [7792]\n", "output.player.openhomePort (line"},
+		{"a fraction for the port", "    openhome: true\n    openhomePort: 7792.9\n", "output.player.openhomePort (line"},
 		{"a negative port", "    openhome: true\n    openhomePort: -1\n", "output.player.openhomePort: must be a port"},
 		{"a port past 65535", "    openhome: true\n    openhomePort: 65536\n", "output.player.openhomePort: must be a port"},
 		{"a serial of digits for the port", "    openhome: true\n    openhomePort: " + pastedDigits + "\n", "output.player.openhomePort: must be a port"},
@@ -131,7 +133,7 @@ func TestAnOpenHomeSettingIsValidatedLikeItsNeighbours(t *testing.T) {
 			if on || why == nil || !strings.Contains(why.Error(), tc.reason) {
 				t.Fatalf("PlayerEnabled = %v, %v; want off, naming %q", on, why, tc.reason)
 			}
-			for _, value := range []string{pastedWord, pastedDigits, "65536", "maybe"} {
+			for _, value := range []string{pastedWord, pastedDigits, "65536", "maybe", "7792.9"} {
 				if strings.Contains(why.Error(), value) {
 					t.Errorf("the reason quotes the value %s: %v", value, why)
 				}

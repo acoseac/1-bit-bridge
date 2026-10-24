@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
@@ -770,15 +771,21 @@ func (r *playerReader) optionalBool(n *yaml.Node, path string) *bool {
 	return &b
 }
 
-// whole reads a YAML integer into into; a null leaves it 0.
+// whole reads a YAML whole number into into; a null leaves it 0. A value
+// yaml.v3 would change on the way in is refused as a word is, a fraction
+// among them: it decodes a float into an int by dropping what follows the
+// point, so openhomePort: 7792.9 read as 7792 (exactInteger, backlog B528).
 func (r *playerReader) whole(n *yaml.Node, path string, into *int) {
 	n = deref(n)
-	if n.Kind != yaml.ScalarNode || n.Decode(into) != nil {
+	if n.Kind != yaml.ScalarNode || !exactInteger(n, intType) || n.Decode(into) != nil {
 		r.fail(n, path, "must be a whole number")
 	}
 }
 
-// optionalWhole reads a YAML integer, nil for a null.
+// intType is the type of the block's whole numbers.
+var intType = reflect.TypeFor[int]()
+
+// optionalWhole reads a whole number as whole does, nil for a null.
 func (r *playerReader) optionalWhole(n *yaml.Node, path string) *int {
 	if isNull(deref(n)) {
 		return nil
