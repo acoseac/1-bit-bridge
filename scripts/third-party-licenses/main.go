@@ -20,6 +20,7 @@ type module struct {
 	Path, Version, Dir string
 	Main               bool
 	Replace            *module
+	packageDirs        []string
 }
 
 type notice struct {
@@ -158,13 +159,27 @@ func generate(root string) ([]byte, map[string]int, error) {
 	if runtime.GOOS == "windows" {
 		goBin += ".exe"
 	}
+	if err := checkEnvironment(root, goBin); err != nil {
+		return nil, nil, err
+	}
+	version, err := releaseGoVersion(root)
+	if err != nil {
+		return nil, nil, err
+	}
+	if runtime.Version() != version {
+		return nil, nil, fmt.Errorf("release toolchain must be %s from go.mod; running %s", version, runtime.Version())
+	}
+	goFiles, err := toolchainNotices(runtime.GOROOT())
+	if err != nil {
+		return nil, nil, err
+	}
 	for _, target := range targets {
 		goos, arch, _ := strings.Cut(target, "/")
 		cmd := exec.Command(goBin, "list", "-mod=readonly", "-deps", "-json", "./cmd/bridge")
 		cmd.Dir = root
-		// Ignore developer build flags and workspaces. Keep GOPROXY/GOMODCACHE so
-		// an offline release can use its already populated module cache.
-		cmd.Env = append(os.Environ(), "GOOS="+goos, "GOARCH="+arch, "CGO_ENABLED=0", "GOFLAGS=", "GOWORK=off", "GOAMD64=v1", "GOARM64=v8.0")
+		// Preserve the checked build environment, including persisted go env values.
+		// Only the release matrix and its explicit CGO setting vary by target.
+		cmd.Env = append(os.Environ(), "GOOS="+goos, "GOARCH="+arch, "CGO_ENABLED=0")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		data, err := cmd.Output()
@@ -174,7 +189,10 @@ func generate(root string) ([]byte, map[string]int, error) {
 		decoder := json.NewDecoder(bytes.NewReader(data))
 		linked := map[string]bool{}
 		for {
-			var pkg struct{ Module *module }
+			var pkg struct {
+				Module *module
+				Dir    string
+			}
 			err := decoder.Decode(&pkg)
 			if err == io.EOF {
 				break
@@ -186,6 +204,7 @@ func generate(root string) ([]byte, map[string]int, error) {
 				continue
 			}
 			m := *pkg.Module
+			m.packageDirs = append(modules[m.Path].packageDirs, pkg.Dir)
 			modules[m.Path] = m
 			linked[m.Path] = true
 		}
@@ -195,78 +214,161 @@ func generate(root string) ([]byte, map[string]int, error) {
 		counts[target] = len(linked)
 	}
 	var out bytes.Buffer
-	out.WriteString("# Third-party licences\n\nDependency modules used by the bridge release builds (union of all targets).\nThe bridge's own licence is in LICENSE. Module-root licence and notice files\nare reproduced in full below.\n\n")
+	out.WriteString("# Third-party licences\n\nDependency modules used by the bridge release builds (union of all targets).\nThe bridge's own licence is in LICENSE. Licence and notice files from compiled\npackage directories and their ancestors through each module root are reproduced\nin full below, together with the release Go toolchain's notices.\n\n")
 	for _, target := range targets {
 		fmt.Fprintf(&out, "- %s: %d modules\n", target, counts[target])
 	}
+	fmt.Fprintf(&out, "\n## Go standard library and runtime (%s)\n\n", version)
+	writeNotices(&out, goFiles)
 	for _, path := range sortedKeys(modules) {
 		m := modules[path]
-		files, err := notices(m, filepath.Join(runtime.GOROOT(), "PATENTS"))
+		files, err := notices(m)
 		if err != nil {
 			return nil, nil, err
 		}
 		fmt.Fprintf(&out, "\n## %s %s\n\n", m.Path, m.Version)
 		if m.Replace != nil {
-			fmt.Fprintf(&out, "Replacement: %s %s\n\n", m.Replace.Path, m.Replace.Version)
-		}
-		for _, file := range files {
-			fmt.Fprintf(&out, "### %s\n\n", file.name)
-			// A fence longer than any run in the source preserves literal Markdown.
-			fence := "```"
-			for bytes.Contains(file.text, []byte(fence)) {
-				fence += "`"
+			fmt.Fprintf(&out, "Replacement: %s", m.Replace.Path)
+			if m.Replace.Version != "" {
+				fmt.Fprintf(&out, " %s", m.Replace.Version)
 			}
-			out.WriteString(fence + "text\n")
-			out.Write(file.text)
-			if !bytes.HasSuffix(file.text, []byte("\n")) {
-				out.WriteByte('\n')
-			}
-			out.WriteString(fence + "\n\n")
+			out.WriteString("\n\n")
 		}
+		writeNotices(&out, files)
 	}
 	return out.Bytes(), counts, nil
 }
 
-func notices(m module, goPatents string) ([]notice, error) {
+func writeNotices(out *bytes.Buffer, files []notice) {
+	for _, file := range files {
+		fmt.Fprintf(out, "### %s\n\n", file.name)
+		// A fence longer than any run in the source preserves literal Markdown.
+		fence := "```"
+		for bytes.Contains(file.text, []byte(fence)) {
+			fence += "`"
+		}
+		out.WriteString(fence + "text\n")
+		out.Write(file.text)
+		if !bytes.HasSuffix(file.text, []byte("\n")) {
+			out.WriteByte('\n')
+		}
+		out.WriteString(fence + "\n\n")
+	}
+}
+
+// checkEnvironment observes both inherited variables and go env -w settings.
+// Clearing them here would discover a different graph from GoReleaser's build.
+func checkEnvironment(root, goBin string) error {
+	cmd := exec.Command(goBin, "env", "-json", "GOFLAGS", "GOWORK", "GOAMD64", "GOARM64")
+	cmd.Dir = root
+	data, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("read release Go environment: %w", err)
+	}
+	var values map[string]string
+	if err := json.Unmarshal(data, &values); err != nil {
+		return err
+	}
+	defaults := map[string]string{"GOFLAGS": "", "GOWORK": "off", "GOAMD64": "v1", "GOARM64": "v8.0"}
+	for _, key := range sortedKeys(defaults) {
+		value, ok := values[key]
+		if !ok || (value != "" && value != defaults[key]) {
+			return fmt.Errorf("non-default %s=%q; release discovery requires default build settings", key, value)
+		}
+	}
+	return nil
+}
+
+func releaseGoVersion(root string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == "go" {
+			return "go" + fields[1], nil
+		}
+	}
+	return "", fmt.Errorf("go.mod has no release toolchain version")
+}
+
+func toolchainNotices(root string) ([]notice, error) {
+	var files []notice
+	for _, name := range []string{"LICENSE", "PATENTS"} {
+		data, err := os.ReadFile(filepath.Join(root, name))
+		if name == "PATENTS" && os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("Go toolchain %s: %w", name, err)
+		}
+		if len(bytes.TrimSpace(data)) == 0 {
+			return nil, fmt.Errorf("Go toolchain %s: empty notice", name)
+		}
+		files = append(files, notice{name, data})
+	}
+	return files, nil
+}
+
+// noticeName admits text extensions and named licence suffixes, never source
+// extensions. Unknown dotted suffixes fail closed rather than copying code.
+func noticeName(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case "", ".txt", ".md", ".rst", ".markdown", ".mit", ".apache", ".bsd", ".isc":
+		return true
+	}
+	return false
+}
+
+func notices(m module) ([]notice, error) {
 	dir := m.Dir
 	if m.Replace != nil {
 		dir = m.Replace.Dir
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, fmt.Errorf("%s %s: %w", m.Path, m.Version, err)
+	dir = filepath.Clean(dir)
+	dirs := map[string]bool{dir: true}
+	for _, pkgDir := range m.packageDirs {
+		rel, err := filepath.Rel(dir, pkgDir)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("%s: package directory outside module root: %s", m.Path, pkgDir)
+		}
+		for current := filepath.Clean(pkgDir); current != dir; current = filepath.Dir(current) {
+			dirs[current] = true
+		}
 	}
 	var files []notice
-	hasLicense, hasPatents := false, false
-	for _, entry := range entries {
-		name := strings.ToUpper(entry.Name())
-		license := strings.HasPrefix(name, "LICENSE") || strings.HasPrefix(name, "COPYING") || name == "UNLICENSE"
-		if entry.IsDir() || !(license || strings.HasPrefix(name, "NOTICE") || name == "PATENTS") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+	hasLicense := false
+	for _, current := range sortedKeys(dirs) {
+		entries, err := os.ReadDir(current)
 		if err != nil {
-			return nil, fmt.Errorf("%s/%s: %w", m.Path, entry.Name(), err)
+			return nil, fmt.Errorf("%s %s: %w", m.Path, m.Version, err)
 		}
-		if len(bytes.TrimSpace(data)) == 0 {
-			return nil, fmt.Errorf("%s/%s: empty notice", m.Path, entry.Name())
+		for _, entry := range entries {
+			name := strings.ToUpper(entry.Name())
+			license := strings.HasPrefix(name, "LICENSE") || strings.HasPrefix(name, "LICENCE") || strings.HasPrefix(name, "COPYING") || strings.HasPrefix(name, "COPYRIGHT") || name == "UNLICENSE"
+			if entry.IsDir() || !noticeName(name) || !(license || strings.HasPrefix(name, "NOTICE") || name == "PATENTS") {
+				continue
+			}
+			full := filepath.Join(current, entry.Name())
+			rel, err := filepath.Rel(dir, full)
+			if err != nil {
+				return nil, err
+			}
+			label := filepath.ToSlash(rel)
+			data, err := os.ReadFile(full)
+			if err != nil {
+				return nil, fmt.Errorf("%s/%s: %w", m.Path, label, err)
+			}
+			if len(bytes.TrimSpace(data)) == 0 {
+				return nil, fmt.Errorf("%s/%s: empty notice", m.Path, label)
+			}
+			files = append(files, notice{label, data})
+			hasLicense = hasLicense || license
 		}
-		files = append(files, notice{entry.Name(), data})
-		hasLicense = hasLicense || license
-		hasPatents = hasPatents || name == "PATENTS"
 	}
 	if !hasLicense {
-		return nil, fmt.Errorf("%s %s: no licence file in module root", m.Path, m.Version)
-	}
-	if strings.HasPrefix(m.Path, "golang.org/x/") && !hasPatents {
-		data, err := os.ReadFile(goPatents)
-		if err != nil {
-			return nil, fmt.Errorf("%s: Go PATENTS grant: %w", m.Path, err)
-		}
-		if len(bytes.TrimSpace(data)) == 0 {
-			return nil, fmt.Errorf("%s: empty Go PATENTS grant", m.Path)
-		}
-		files = append(files, notice{"PATENTS (Go project)", data})
+		return nil, fmt.Errorf("%s %s: no licence file in compiled package ancestry", m.Path, m.Version)
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].name < files[j].name })
 	return files, nil

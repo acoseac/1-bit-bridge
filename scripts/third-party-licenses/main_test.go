@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -43,8 +44,11 @@ func put(t *testing.T, root, name, data string) {
 func graph(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
+	for key, value := range map[string]string{"GOENV": "off", "GOFLAGS": "", "GOWORK": "off", "GOAMD64": "v1", "GOARM64": "v8.0"} {
+		t.Setenv(key, value)
+	}
 	put(t, root, ".goreleaser.yaml", fixtureConfig)
-	mod := "module example.com/app\n\ngo 1.25\n\nrequire (\n"
+	mod := "module example.com/app\n\ngo " + strings.TrimPrefix(runtime.Version(), "go") + "\n\nrequire (\n"
 	for _, name := range []string{"zulu", "alpha", "win", "unused", "testonly"} {
 		mod += "example.com/" + name + " v1.0.0\n"
 		put(t, root, name+"/go.mod", "module example.com/"+name+"\n\ngo 1.25\n")
@@ -60,10 +64,10 @@ func graph(t *testing.T) string {
 	put(t, root, "cmd/bridge/extra_linux.go", "package main\nimport _ \"example.com/alpha\"\n")
 	put(t, root, "cmd/bridge/extra_windows.go", "package main\nimport _ \"example.com/win\"\n")
 	put(t, root, "cmd/bridge/main_test.go", "package main\nimport _ \"example.com/testonly\"\n")
-	put(t, root, "zulu/nOtIcE.extra", "notice text\n")
+	put(t, root, "zulu/nOtIcE.rst", "notice text\n")
 	put(t, root, "zulu/PATENTS", "patent grant\n")
-	put(t, root, "zulu/COPYING.more", "copying text without final newline")
-	put(t, root, "zulu/LICENSE.second", "second licence\n```embedded fence```\n")
+	put(t, root, "zulu/COPYING.txt", "copying text without final newline")
+	put(t, root, "zulu/LICENSE.md", "second licence\n```embedded fence```\n")
 	return root
 }
 
@@ -94,7 +98,7 @@ func TestLinkedGraph(t *testing.T) {
 
 func TestNoLicenseFails(t *testing.T) {
 	root := graph(t)
-	for _, name := range []string{"LiCeNsE.txt", "COPYING.more", "LICENSE.second"} {
+	for _, name := range []string{"LiCeNsE.txt", "COPYING.txt", "LICENSE.md"} {
 		if err := os.Remove(filepath.Join(root, "zulu", name)); err != nil {
 			t.Fatal(err)
 		}
@@ -123,7 +127,7 @@ func TestStableOrder(t *testing.T) {
 		t.Fatal("modules are not sorted")
 	}
 	_, zulu, _ := bytes.Cut(first, []byte("## example.com/zulu"))
-	if bytes.Index(zulu, []byte("### COPYING.more")) > bytes.Index(zulu, []byte("### LiCeNsE.txt")) {
+	if bytes.Index(zulu, []byte("### COPYING.txt")) > bytes.Index(zulu, []byte("### LiCeNsE.txt")) {
 		t.Fatal("files are not sorted")
 	}
 }
@@ -172,21 +176,20 @@ func TestReplacementAndGoPatents(t *testing.T) {
 	put(t, root, "fork/LICENSE", "fork licence")
 	put(t, root, "PATENTS", "Go project's patent grant")
 	m := module{Path: "golang.org/x/example", Version: "v1.0.0", Dir: filepath.Join(root, "original"), Replace: &module{Path: "example.com/fork", Version: "v1.1.0", Dir: filepath.Join(root, "fork")}}
-	files, err := notices(m, filepath.Join(root, "PATENTS"))
+	files, err := notices(m)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 2 || string(files[0].text) != "fork licence" || string(files[1].text) != "Go project's patent grant" {
-		t.Fatalf("replacement licence and Go grant: %v", files)
+	if len(files) != 1 || string(files[0].text) != "fork licence" {
+		t.Fatalf("replacement must ship only its own terms: %v", files)
 	}
-	if err := os.Remove(filepath.Join(root, "PATENTS")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := notices(m, filepath.Join(root, "PATENTS")); err == nil {
-		t.Fatal("missing Go patent grant accepted")
+	plain := module{Path: "golang.org/x/plain", Dir: filepath.Join(root, "original")}
+	files, err = notices(plain)
+	if err != nil || len(files) != 1 {
+		t.Fatalf("synthesized module patent grant: %v %v", files, err)
 	}
 	put(t, root, "fork/PATENTS", "module patent grant")
-	files, err = notices(m, filepath.Join(root, "PATENTS"))
+	files, err = notices(m)
 	if err != nil || len(files) != 2 || string(files[1].text) != "module patent grant" {
 		t.Fatalf("module patent grant lost: %v %v", files, err)
 	}
@@ -195,8 +198,190 @@ func TestReplacementAndGoPatents(t *testing.T) {
 func TestUnlicense(t *testing.T) {
 	root := t.TempDir()
 	put(t, root, "UNLICENSE", "public domain dedication")
-	files, err := notices(module{Path: "example.com/public-domain", Dir: root}, "")
+	files, err := notices(module{Path: "example.com/public-domain", Dir: root})
 	if err != nil || len(files) != 1 || string(files[0].text) != "public domain dedication" {
 		t.Fatalf("UNLICENSE lost: %v %v", files, err)
+	}
+}
+
+func TestNestedLicenses(t *testing.T) {
+	root := graph(t)
+	put(t, root, "zulu/internal/embedded/sub/lib.go", "package sub\n")
+	put(t, root, "zulu/internal/embedded/sub/child/lib.go", "package child\n")
+	put(t, root, "zulu/internal/embedded/LICENSE", "distinct 2013 nested copyright\n")
+	put(t, root, "zulu/internal/embedded/sub/NOTICE.md", "nested notice\n")
+	put(t, root, "zulu/internal/embedded/sub/child/COPYRIGHT", "child copyright\n")
+	put(t, root, "zulu/unlinked/LICENSE", "unlinked terms\n")
+	put(t, root, "zulu/lib.go", "package lib\nimport ( _ \"example.com/zulu/internal/embedded/sub\"; _ \"example.com/zulu/internal/embedded/sub/child\" )\n")
+	data, _, err := generate(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"### internal/embedded/LICENSE\n", "distinct 2013 nested copyright\n", "### internal/embedded/sub/NOTICE.md\n", "nested notice\n", "### internal/embedded/sub/child/COPYRIGHT\n", "child copyright\n"} {
+		if bytes.Count(data, []byte(want)) != 1 {
+			t.Errorf("want exactly one %q", want)
+		}
+	}
+	if bytes.Contains(data, []byte("unlinked terms")) {
+		t.Fatal("unlinked subtree included")
+	}
+}
+
+func TestLicenseNames(t *testing.T) {
+	for _, name := range []string{"LiCeNcE", "licence.MD", "COPYRIGHT", "copyright.txt", "LICENSE-APACHE", "LICENSE.MIT", "COPYING.rst", "NOTICE.markdown"} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			if strings.HasPrefix(name, "NOTICE") {
+				put(t, root, "LICENSE", "licence")
+			}
+			put(t, root, name, "distinct notice bytes")
+			files, err := notices(module{Path: "example.com/names", Dir: root})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, file := range files {
+				if file.name == name && string(file.text) == "distinct notice bytes" {
+					return
+				}
+			}
+			t.Fatalf("missing %s", name)
+		})
+	}
+}
+
+func TestSourceIsNotLicense(t *testing.T) {
+	for _, name := range []string{"license.go", "license_test.go", "LICENSE.c", "LICENCE.h", "COPYING.s", "NOTICE.js", "COPYRIGHT.py", "LICENSE.sh", "LICENSE.rs", "LICENSE.cpp", "LICENSE.java", "LICENSE.ts", "LICENSE-APACHE.go"} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			put(t, root, name, "package lib\n")
+			m := module{Path: "example.com/source", Dir: root}
+			if _, err := notices(m); err == nil || !strings.Contains(err.Error(), "no licence") {
+				t.Fatalf("source accepted as licence: %v", err)
+			}
+			put(t, root, "LICENSE", "real terms")
+			files, err := notices(m)
+			if err != nil || len(files) != 1 || files[0].name != "LICENSE" {
+				t.Fatalf("source reproduced: %v %v", files, err)
+			}
+		})
+	}
+}
+
+func TestGoStandardLibrary(t *testing.T) {
+	root := graph(t)
+	data, _, err := generate(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	heading := "## Go standard library and runtime (" + runtime.Version() + ")\n"
+	if bytes.Count(data, []byte(heading)) != 1 {
+		t.Fatalf("missing fixed Go section %q", heading)
+	}
+	for _, name := range []string{"LICENSE", "PATENTS"} {
+		want, err := os.ReadFile(filepath.Join(runtime.GOROOT(), name))
+		if os.IsNotExist(err) && name == "PATENTS" {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Contains(data, want) {
+			t.Errorf("Go %s text missing", name)
+		}
+	}
+}
+
+func TestReleaseGoVersion(t *testing.T) {
+	root := graph(t)
+	path := filepath.Join(root, "go.mod")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	put(t, root, "go.mod", strings.Replace(string(data), strings.TrimPrefix(runtime.Version(), "go"), "1.25.0", 1))
+	_, _, err = generate(root)
+	if err == nil || !strings.Contains(err.Error(), "toolchain") {
+		t.Fatalf("mismatched release toolchain accepted: %v", err)
+	}
+}
+
+func TestDiscoveryEnvironment(t *testing.T) {
+	for _, key := range []string{"GOFLAGS", "GOWORK", "GOAMD64", "GOARM64", "persisted_GOFLAGS", "auto_workspace"} {
+		t.Run(key, func(t *testing.T) {
+			root := graph(t)
+			switch key {
+			case "GOFLAGS":
+				t.Setenv(key, "-tags=custom")
+			case "GOWORK":
+				put(t, root, "release.work", "go "+strings.TrimPrefix(runtime.Version(), "go")+"\nuse .\n")
+				t.Setenv(key, filepath.Join(root, "release.work"))
+			case "GOAMD64":
+				t.Setenv(key, "v2")
+			case "GOARM64":
+				t.Setenv(key, "v9.0")
+			case "persisted_GOFLAGS":
+				put(t, root, "goenv", "GOFLAGS=-tags=custom\n")
+				t.Setenv("GOENV", filepath.Join(root, "goenv"))
+			case "auto_workspace":
+				put(t, root, "go.work", "go "+strings.TrimPrefix(runtime.Version(), "go")+"\nuse .\n")
+				t.Setenv("GOWORK", "")
+			}
+			_, _, err := generate(root)
+			want := key
+			if key == "persisted_GOFLAGS" {
+				want = "GOFLAGS"
+			}
+			if key == "auto_workspace" {
+				want = "GOWORK"
+			}
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("non-default %s accepted: %v", key, err)
+			}
+		})
+	}
+}
+
+func TestReplacementFormatting(t *testing.T) {
+	data, _, err := generate(graph(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte("Replacement: ./zulu\n\n")) {
+		t.Fatal("local replacement has trailing whitespace")
+	}
+}
+
+func TestToolchainNoticeFiles(t *testing.T) {
+	root := t.TempDir()
+	if _, err := toolchainNotices(root); err == nil {
+		t.Fatal("missing Go LICENSE accepted")
+	}
+	put(t, root, "LICENSE", " \n\t")
+	if _, err := toolchainNotices(root); err == nil {
+		t.Fatal("empty Go LICENSE accepted")
+	}
+	put(t, root, "LICENSE", "Go licence bytes\n")
+	files, err := toolchainNotices(root)
+	if err != nil || len(files) != 1 || string(files[0].text) != "Go licence bytes\n" {
+		t.Fatalf("Go licence without optional PATENTS: %v %v", files, err)
+	}
+	put(t, root, "PATENTS", "toolchain patent grant\n")
+	files, err = toolchainNotices(root)
+	if err != nil || len(files) != 2 || string(files[1].text) != "toolchain patent grant\n" {
+		t.Fatalf("Go patent grant lost: %v %v", files, err)
+	}
+	put(t, root, "PATENTS", " \n")
+	if _, err := toolchainNotices(root); err == nil {
+		t.Fatal("empty Go PATENTS accepted")
+	}
+}
+
+func TestDefaultDiscoveryEnvironment(t *testing.T) {
+	root := graph(t)
+	for _, key := range []string{"GOAMD64", "GOARM64", "GOWORK"} {
+		t.Setenv(key, "")
+	}
+	if _, _, err := generate(root); err != nil {
+		t.Fatalf("default environment refused: %v", err)
 	}
 }
