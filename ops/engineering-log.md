@@ -61834,6 +61834,28 @@ The Windows reader has no control here: its test cannot run on this host.
   another name's nil check, with its control, so the allowance for the
   restore's nesting is pinned to the turn's own name.
 
+### Checks of the fifth round
+
+Through the build lock, on 04c4bdfd (its code 91ca1e85's): `make fmt vet
+docs-check build-all` passed, `make fmt` rewriting nothing (Go 1.27.3,
+`GOTOOLCHAIN=local`), `check-build-tags` OK and the six targets built.
+`GOOS=windows` and `GOOS=linux` `go vet ./...`, with the Makefile's tags,
+were clean. `go test -race -count=1 -timeout 45m` passed `internal/config`
+(11 s), `internal/fsutil` (3 s), `internal/atomicwrite` (12 s),
+`internal/backup` (36 s), `internal/admin` (699 s) and `cmd/bridge` (571 s),
+and the round's seventeen new or changed tests passed `-race -count=10`
+(170 passes). `make test` passed every package but two the branch does not
+touch: `internal/handshakelog`'s `TestAProbeOfASpecificBoundIPIsNotLogged`,
+as in the first four rounds, and `scripts/third-party-licenses`, eleven
+tests, ten reading the Go toolchain's LICENSE at `$(go env GOROOT)/LICENSE`,
+which this host's Go, Homebrew's bottle of 1.27.3, keeps beside its GOROOT,
+and `TestRealReleaseGraphEmbeds` refusing this host's `GOFLAGS=-mod=readonly`;
+nothing in `scripts/`, `go.mod` or `go.sum` changed in the round. The
+Windows tests are compiled and vetted here, for a Windows host to run.
+Rules: the config-lifecycle.md and cli-serve.md lines, given to the
+orchestrator as OLD and NEW pairs against 6e03497f; their long forms are in
+`ops/History-rules-config-lifecycle.md` and `ops/History-rules-cli-serve.md`.
+
 ## 2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader
 
 `config.ReadPlayerUUIDFile` is the UUID parser for `<dataDir>/player-uuid`
