@@ -124,6 +124,50 @@ func (e *ChangedInTurnError) Error() string {
 // Is makes a *ChangedInTurnError match ErrChangedInTurn.
 func (e *ChangedInTurnError) Is(target error) bool { return target == ErrChangedInTurn }
 
+// ErrNameMoved is what a *NameMovedError matches.
+var ErrNameMoved = errors.New("config: the config file's name opens another file than its writer's turn locked")
+
+// NameMovedError is a turn's refusal once the config's name opens another
+// file than the one the turn locked, compares and replaces: a link at the
+// name's last element, or one on the way to its directory, was repointed
+// since the turn resolved the name (a dotfiles restow, a home-manager
+// switch), so a save would write a file the name no longer opens. Nothing is
+// written. It names the config's name and nothing the file holds.
+type NameMovedError struct {
+	// Path is the config file, as its writer named it.
+	Path string
+}
+
+func (e *NameMovedError) Error() string {
+	return fmt.Sprintf("%s now opens another file than the one this writer locked (a link on its way was repointed "+
+		"while it waited for its turn or had it), so nothing was written: run it again, to work on the file the name opens now", e.Path)
+}
+
+// Is makes a *NameMovedError match ErrNameMoved.
+func (e *NameMovedError) Is(target error) bool { return target == ErrNameMoved }
+
+// ErrNameMoving is what a *NameMovingError matches.
+var ErrNameMoving = errors.New("config: the config file's name opened another file before its read than after it")
+
+// NameMovingError is LoadFileAt's refusal when, at each of its reads, the
+// config's name opened another file before the read than after it: a link on
+// the name's way kept being repointed, so no read could be said to be of the
+// file the name opens. It names the config's name and nothing the file holds.
+type NameMovingError struct {
+	// Path is the config file, as its reader named it; Reads how many times
+	// it was read.
+	Path  string
+	Reads int
+}
+
+func (e *NameMovingError) Error() string {
+	return fmt.Sprintf("%s opened another file before each of its %d reads than after it (a link on its way was being "+
+		"repointed), so it was not read: start again once the link is settled", e.Path, e.Reads)
+}
+
+// Is makes a *NameMovingError match ErrNameMoving.
+func (e *NameMovingError) Is(target error) bool { return target == ErrNameMoving }
+
 // LockFileName is the name of the lock file beside the config file at path:
 // `.bridge.yaml.lock` beside bridge.yaml. LockFile asks it of the file the
 // config's name opens, so a config named through a link is locked under its
