@@ -86,10 +86,12 @@ var docVerbs = []string{
 // 4,522 in all. Non-test files are therefore read exactly as #989 measured
 // them, and docVerbs alone recognises 48% of the test files' openers.
 var testDocVerbs = []string{
-	"asserts", "confirms", "exercises", "extends", "forces", "guards",
-	"lays", "locks", "pins", "plants", "proves", "pulls", "seeds",
-	"slices", "spins", "stages", "stands", "swaps", "synthesises",
-	"upserts",
+	"asserts", "boots", "cancels", "closes", "confirms", "exercises",
+	"extends", "fails", "forces", "gives", "guards", "has", "lays",
+	"locks", "moves", "parks", "pins", "plants", "proves", "pulls",
+	"puts", "requires", "seeds", "sets", "skips", "slices", "spins",
+	"stages", "stands", "starts", "swaps", "synthesises", "upserts",
+	"waits",
 }
 
 // openerSubject is the identifier a doc comment's first sentence opens
