@@ -210,11 +210,11 @@ func generate(root string) ([]byte, map[string]int, error) {
 	} else if err != nil && !os.IsNotExist(err) {
 		return nil, nil, fmt.Errorf("check vendor directory: %w", err)
 	}
-	config, err := os.ReadFile(filepath.Join(root, ".goreleaser.yaml"))
+	config, err := readRepoText(filepath.Join(root, ".goreleaser.yaml"))
 	if err != nil {
 		return nil, nil, err
 	}
-	build, err := releaseBuild(config)
+	build, err := releaseBuild([]byte(config))
 	if err != nil {
 		return nil, nil, err
 	}

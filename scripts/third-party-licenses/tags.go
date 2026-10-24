@@ -9,12 +9,20 @@ import (
 	"strings"
 )
 
+// readRepoText reads a repository text file as its LF text: a Windows
+// checkout's autocrlf gives every line a CRLF ending (CI's windows-latest
+// leg), and these checks read the files by their lines. Only repository files
+// the checks parse go through it; a licence text is copied byte for byte.
+func readRepoText(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	return strings.ReplaceAll(string(b), "\r\n", "\n"), err
+}
+
 // checkBuildTags deliberately accepts only the build command shapes used here.
 // GoReleaser is authoritative; a new build form needs a matching guard change.
 func checkBuildTags(root string) error {
 	read := func(name string) (string, error) {
-		b, err := os.ReadFile(filepath.Join(root, name))
-		return string(b), err
+		return readRepoText(filepath.Join(root, name))
 	}
 	config, err := read(".goreleaser.yaml")
 	if err != nil {

@@ -152,11 +152,10 @@ func TestBuildConfigFailsClosed(t *testing.T) {
 }
 
 func TestReleaseWiring(t *testing.T) {
-	data, err := os.ReadFile("../../.goreleaser.yaml")
+	s, err := readRepoText("../../.goreleaser.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := string(data)
 	before, builds, ok := strings.Cut(s, "\nbuilds:\n")
 	if !ok || !strings.Contains(before, "    - go run ./scripts/third-party-licenses\n") {
 		t.Fatal("release before-hook must regenerate licences")
