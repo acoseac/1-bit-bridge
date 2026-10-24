@@ -40,6 +40,7 @@ func provenanceRig(t *testing.T) (*readingRig, string, int) {
 		for _, d := range c.Devices {
 			for _, sub := range d.Substreams {
 				if sub.Owner != nil && sub.Owner.PID != nil && sub.Owner.Process != nil && *sub.Owner.Process == "mpd" {
+					seedProcessEvidence(t, r, *sub.Owner.PID)
 					return r, filepath.Dir(r.procRoot), *sub.Owner.PID
 				}
 			}
@@ -112,7 +113,7 @@ func wantProvenance(t *testing.T, got OutputReading, source, path, normalization
 }
 
 func TestReadingUsesMPDProcessConfig(t *testing.T) {
-	for _, args := range []string{"mpd\x00--no-daemon\x00/etc/actual.conf\x00", "mpd\x00--stderr\x00--\x00/etc/actual.conf\x00", strings.Repeat("p", (64<<10)-len("\x00/etc/actual.conf\x00")) + "\x00/etc/actual.conf\x00"} {
+	for _, args := range []string{"mpd\x00--no-daemon\x00/etc/actual.conf\x00", "mpd\x00/etc/actual.conf\x00--stderr\x00", "mpd\x00--verbose=" + strings.Repeat("p", (64<<10)-len("mpd\x00--verbose=\x00/etc/actual.conf\x00")) + "\x00/etc/actual.conf\x00"} {
 		t.Run(fmt.Sprintf("argv_%d_bytes", len(args)), func(t *testing.T) {
 			r, root, pid := provenanceRig(t)
 			writeRigFile(t, root, "etc/actual.conf", volumioConf(t, r.music)+"\nvolume_normalization \"yes\"\n")
@@ -156,7 +157,7 @@ func TestReadingUsesMPDDefaultConfig(t *testing.T) {
 
 func TestReadingFallsBackFromUnusableCmdline(t *testing.T) {
 	cases := map[string]string{
-		"unreadable": "", "oversized": strings.Repeat("p", (64<<10)+1-len("\x00/etc/actual.conf\x00")) + "\x00/etc/actual.conf\x00",
+		"unreadable": "", "oversized": "mpd\x00--verbose=" + strings.Repeat("p", (64<<10)+1-len("mpd\x00--verbose=\x00/etc/actual.conf\x00")) + "\x00/etc/actual.conf\x00",
 		"unterminated": "mpd\x00/etc/actual.conf", "empty argument": "mpd\x00\x00/etc/actual.conf\x00",
 		"unknown option": "mpd\x00--unknown\x00/etc/actual.conf\x00", "extra positional": "mpd\x00/etc/actual.conf\x00/other\x00",
 		"relative path": "mpd\x00actual.conf\x00", "outside root": "mpd\x00/etc/outside.conf\x00",
@@ -263,6 +264,7 @@ func TestReadingDefaultConfigRespectsXDGPrecedence(t *testing.T) {
 	for _, xdgExists := range []bool{false, true} {
 		t.Run(fmt.Sprint(xdgExists), func(t *testing.T) {
 			r, root, pid := provenanceRig(t)
+			writeRigFile(t, r.procRoot, filepath.Join(strconv.Itoa(pid), "environ"), "HOME=/home/pi\x00XDG_CONFIG_HOME=/xdg\x00")
 			r.cfg.Getenv = func(k string) string {
 				switch k {
 				case "HOME":
@@ -328,8 +330,7 @@ func TestReadingProcessConfigDoesNotChangeTheVerdictInputs(t *testing.T) {
 		m.outputs = volumioOutputs("1")
 		m.statuses = []mpd.Reply{withPair(capturedStatus(t, piCaptures[0].name), "audio", "dsd64:2")}
 	})
-	// The informational file deliberately disagrees about DoP and the library.
-	// The configured file's old DoP veto and row mapping remain the verdict's.
+	// With no live dop, use the process file for the veto; keep row mapping.
 	r.writeConf(regexp.MustCompile(`(?m)^\s*dop\s+"no"`).ReplaceAllString(volumioConf(t, r.music), `dop "yes"`))
 	writeRigFile(t, root, "etc/actual.conf", volumioConf(t, "/not-the-library")+"\nvolume_normalization \"yes\"\n")
 	writeRigFile(t, r.procRoot, filepath.Join(strconv.Itoa(pid), "cmdline"), "mpd\x00/etc/actual.conf\x00")
@@ -345,15 +346,11 @@ func TestReadingProcessConfigDoesNotChangeTheVerdictInputs(t *testing.T) {
 	if len(hs) != 1 {
 		t.Fatal("no holder")
 	}
-	// Derive the expected old veto from the configured bytes, not the new file.
-	var wantDoP bool
-	for _, b := range snap.configuredConf.Outputs {
-		if b.Name == hs[0].Name {
-			wantDoP, _ = signalpath.ParseBool(b.DOP)
-		}
+	if _, live := hs[0].Attribute("dop"); live {
+		t.Fatal("fixture must have no live dop")
 	}
-	if got := holderOutput(snap, hs[0]).DoP; got != wantDoP {
-		t.Errorf("DoP veto=%v want configured %v", got, wantDoP)
+	if got := holderOutput(snap, hs[0]).DoP; got {
+		t.Error("DoP veto used configured yes, want process no")
 	}
 	if snap.row == nil || snap.row.track.Codec != "FLAC" {
 		t.Errorf("process config changed row mapping: %+v", snap.row)

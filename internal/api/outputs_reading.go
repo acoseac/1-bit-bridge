@@ -239,10 +239,12 @@ type readingSnap struct {
 	conf           conf.File
 	confRead       bool
 	confProvenance *ReadingMPDConfigProvenance
-	// Keep the configured file for the existing row mapping and DoP fallback
-	// veto. Discovering a different informational file must change neither.
+	// Keep the configured file for the existing song-row mapping.
+	// Each card has its own selected config, never borrowed from another card.
 	configuredConf     conf.File
 	configuredConfRead bool
+	cardConfigs        map[pickID]readingConfig
+	readConfigs        []conf.File
 
 	// mpdCode is why MPD could not be read, "" when every command
 	// answered.
@@ -453,7 +455,7 @@ func (o *localOutputs) takeReading(ctx context.Context) (snap *readingSnap) {
 	s.gainAfter, _ = ask(gainCommand)
 	s.outputsAfter, _ = ask(outputsCommand)
 	s.before, s.mpdCode = before, code
-	o.readConf(ctx, s, opt)
+	var pcmConfig alsa.PCMConfig
 	// With no card there is nothing to resolve a device to, and the ALSA
 	// configuration is not read.
 	if s.procCode == "" && len(s.cards.Cards) > 0 {
@@ -462,10 +464,18 @@ func (o *localOutputs) takeReading(ctx context.Context) (snap *readingSnap) {
 		// GET /v1/outputs lists through that name would read as none.
 		if pcm, had := o.readALSAConfig(ctx, alsa.ConfigRoot(s.cards.ProcRoot)); had {
 			s.picks = dacsFrom(s.cards, s.rep, pcm.ResolveOutputDevice)
-			s.chains = outputChains(s, pcm)
+			pcmConfig = pcm
 		} else {
 			s.alsaCode = signalpath.ALSAConfigUnread
 		}
+	}
+	o.readConf(ctx, s, opt)
+	s.chains = outputChains(s, pcmConfig)
+	for key, c := range s.cardConfigs {
+		view := *s
+		view.conf, view.confRead = c.file, c.read
+		c.chains = outputChains(&view, pcmConfig)
+		s.cardConfigs[key] = c
 	}
 	if s.mpdCode == "" {
 		s.row = o.lookUpSong(ctx, s)
@@ -841,39 +851,60 @@ func logOutputPanic(step string, r any) {
 	logger.Error("local outputs: a step panicked", attrs...)
 }
 
+// readingConfig is one card's selected file and its resolved output chains.
+type readingConfig struct {
+	file       conf.File
+	read       bool
+	provenance *ReadingMPDConfigProvenance
+	chains     []outputChain
+}
+
 // readConf reads mpd.conf whole, its includes too, under the conf
 // deadline (boundedStep), including process discovery. A read that fails or
 // does not answer in time leaves mpd.config null and gives no config warning.
 func (o *localOutputs) readConf(ctx context.Context, s *readingSnap, opt mpd.Options) {
 	type result struct {
-		configured, selected         conf.File
-		configuredRead, selectedRead bool
-		provenance                   *ReadingMPDConfigProvenance
+		configured readingConfig
+		cards      map[pickID]readingConfig
+		files      []conf.File
 	}
 	r, late, failed := boundedStep(o, &o.reading.conf, ctx, o.limits.conf, "the mpd.conf read", func() result {
-		var r result
-		path := s.rep.ConfPath
-		r.provenance = &ReadingMPDConfigProvenance{Source: "configured_fallback", Path: path}
-		if path != "" {
+		r := result{cards: map[pickID]readingConfig{}}
+		if path := s.rep.ConfPath; path != "" {
 			f, err := o.confFile(confRoot(opt.Root, path), path, path)
-			r.configured, r.configuredRead = f, err == nil
-		}
-		r.selected, r.selectedRead = r.configured, r.configuredRead
-		root, logical, source, ok := o.processConfig(s, opt)
-		if ok {
-			host := filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(logical, "/")))
-			if f, err := o.confFile(root, logical, host); err == nil {
-				r.selected, r.selectedRead = f, true
-				r.provenance = &ReadingMPDConfigProvenance{Source: source, Path: logical}
+			if err == nil {
+				r.configured = readingConfig{file: f, read: true, provenance: &ReadingMPDConfigProvenance{Source: "configured_fallback", Path: path}}
+				r.files = append(r.files, f)
 			}
+		}
+		for i := range s.picks {
+			c := r.configured
+			root, logical, source, ok := o.processConfig(s, &s.picks[i])
+			if ok {
+				if source == "mpd_no_config" {
+					c = readingConfig{provenance: &ReadingMPDConfigProvenance{Source: source}}
+				} else {
+					host := filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(logical, "/")))
+					if f, err := o.confFile(root, logical, host); err == nil {
+						c = readingConfig{file: f, read: true, provenance: &ReadingMPDConfigProvenance{Source: source, Path: logical}}
+						r.files = append(r.files, f)
+					}
+				}
+			}
+			r.cards[pickIDOf(&s.picks[i])] = c
 		}
 		return r
 	})
 	if late || failed {
 		return
 	}
-	s.conf, s.confRead, s.confProvenance = r.selected, r.selectedRead, r.provenance
-	s.configuredConf, s.configuredConfRead = r.configured, r.configuredRead
+	s.configuredConf, s.configuredConfRead = r.configured.file, r.configured.read
+	s.cardConfigs, s.readConfigs = r.cards, r.files
+	c := r.configured
+	if len(s.picks) == 1 {
+		c = r.cards[pickIDOf(&s.picks[0])]
+	}
+	s.conf, s.confRead, s.confProvenance = c.file, c.read, c.provenance
 }
 
 // readALSAConfig reads the ALSA configuration once, under its deadline
@@ -1150,7 +1181,17 @@ func (o *localOutputs) readingView(s *readingSnap, id string) (OutputReading, bo
 	if !found {
 		return OutputReading{}, false
 	}
+	if elem.pick != nil {
+		if c, ok := s.cardConfigs[pickIDOf(elem.pick)]; ok {
+			view := *s
+			view.conf, view.confRead, view.confProvenance, view.chains = c.file, c.read, c.provenance, c.chains
+			s = &view
+		}
+	}
 	redact := func(v string) string {
+		for _, f := range s.readConfigs {
+			v = f.Redact(v)
+		}
 		if s.confRead {
 			v = s.conf.Redact(v)
 		}
@@ -1211,6 +1252,7 @@ func (o *localOutputs) readingView(s *readingSnap, id string) (OutputReading, bo
 	}
 	if elem.pick != nil && s.procCode == "" {
 		out.DAC = readingDAC(s, elem.pick, sh)
+		redactDAC(out.DAC, redact)
 	}
 	return out, true
 }
@@ -1327,7 +1369,7 @@ func namedChain(s *readingSnap, name string) (*outputChain, bool) {
 // allowed_formats where MPD reports none, and the first stage that
 // changes samples on its device's way as the ALSA files read. What the
 // block says is information: the verdict claims none of it, and only the
-// dop veto, from the configured file as before, can withhold one.
+// dop veto, from the selected file when no live dop is present, can withhold one.
 func holderOutput(s *readingSnap, h mpd.ServerOutput) signalpath.Output {
 	out := signalpath.Output{Plugin: h.Plugin}
 	liveFormats, haveFormats := h.Attribute("allowed_formats")
@@ -1338,8 +1380,8 @@ func holderOutput(s *readingSnap, h mpd.ServerOutput) signalpath.Output {
 	if haveDoP {
 		out.DoP, _ = signalpath.ParseBool(liveDoP)
 	}
-	if !haveDoP && s.configuredConfRead {
-		for _, block := range s.configuredConf.Outputs {
+	if !haveDoP && s.confRead {
+		for _, block := range s.conf.Outputs {
 			if block.Name == h.Name {
 				out.DoP, _ = signalpath.ParseBool(block.DOP)
 				break
@@ -1656,12 +1698,15 @@ func readingMPD(s *readingSnap, sh *shown, redact func(string) string) *ReadingM
 				Name:           redact(sh.block.Name),
 				Device:         redact(sh.block.Device),
 				Chain:          append([]string{}, sh.chain...),
-				MixerType:      shownMixerType(s, sh),
+				MixerType:      redact(shownMixerType(s, sh)),
 				MixerControl:   redact(sh.block.MixerControl),
 				DoP:            shownDoP(sh),
 				Format:         redact(sh.block.Format),
 				AllowedFormats: redact(shownAllowedFormats(sh)),
 				Filters:        redact(sh.block.Filters),
+			}
+			for i, stage := range m.Config.Output.Chain {
+				m.Config.Output.Chain[i] = redact(stage)
 			}
 		}
 	}
@@ -1680,7 +1725,7 @@ func readingSong(s *readingSnap, redact func(string) string) *ReadingSong {
 	if r := s.row; r != nil {
 		t := r.track
 		song.Row = &ReadingBridgeRow{
-			Path: r.path, Via: r.via, Current: r.current, Codec: t.Codec,
+			Path: redact(r.path), Via: r.via, Current: r.current, Codec: redact(t.Codec),
 			SampleRate: t.SampleRate, BitsPerSample: t.BitsPerSample, Channels: t.Channels, IsDSD: t.IsDSD,
 		}
 	}
@@ -1715,6 +1760,25 @@ func readingDAC(s *readingSnap, pick *dacPick, sh *shown) *ReadingDAC {
 		}
 	}
 	return d
+}
+
+// redactDAC applies the same combined config-secret policy to kernel and
+// mixer strings, copying pointer values so the cached snapshot stays immutable.
+func redactDAC(d *ReadingDAC, redact func(string) string) {
+	d.ID, d.State, d.Format = redact(d.ID), redact(d.State), redact(d.Format)
+	if d.Mixer != nil {
+		d.Mixer.Control = redact(d.Mixer.Control)
+	}
+	if d.Owner != nil {
+		if d.Owner.Thread != nil {
+			v := redact(*d.Owner.Thread)
+			d.Owner.Thread = &v
+		}
+		if d.Owner.Process != nil {
+			v := redact(*d.Owner.Process)
+			d.Owner.Process = &v
+		}
+	}
 }
 
 func replyInt(r mpd.Reply, key string) *int {
