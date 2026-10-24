@@ -245,8 +245,8 @@ const (
 	// FromMPD: reported by MPD over its protocol (status,
 	// replay_gain_status, an outputs attribute).
 	FromMPD = "mpd"
-	// FromMPDConf: read from the file mpd.configProvenance names. Even a
-	// process-selected file may have changed since MPD read it at startup.
+	// FromMPDConf: read from the bridge's configured mpd.conf. It does not
+	// establish which file or settings MPD loaded.
 	FromMPDConf = "mpd_conf"
 	// FromALSAConf: read from the ALSA configuration files under /etc,
 	// which may not be the ones MPD's ALSA loaded.

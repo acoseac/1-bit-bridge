@@ -186,11 +186,11 @@ func (l *loader) open(path string) (string, error) {
 		return "", errUnreadable
 	}
 	if err := staysInRoot(l.root, path); err != nil {
-		return "", err
+		return "", l.resolveError(err)
 	}
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return "", errUnreadable
+		return "", l.resolveError(err)
 	}
 	text, err := readCapped(resolved)
 	if err != nil && !errors.Is(err, errNotFound) && !errors.Is(err, errTooLong) {
@@ -260,11 +260,34 @@ func (l *loader) resolve(dir, name string) (string, error) {
 		return "", errUnreadable
 	}
 	if err := staysInRoot(l.root, host); err != nil {
-		return "", err
+		return "", l.resolveError(err)
 	}
 	// Keep the named path for the next relative include. Opening, root
 	// confinement and the cycle key each resolve it physically.
 	return host, nil
+}
+
+// resolveError maps a physically missing include to errNotFound, while
+// retaining confinement even for a dangling link to an outside target.
+// EvalSymlinks' PathError names the first missing component; its parent
+// has already been traversed. Recheck that parent before accepting absence.
+func (l *loader) resolveError(err error) error {
+	if errors.Is(err, errOutside) {
+		return errOutside
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		var pe *fs.PathError
+		if errors.As(err, &pe) {
+			parent, e := filepath.EvalSymlinks(namedDirectory(pe.Path))
+			if e == nil {
+				if !lexicalInside(l.root, parent) {
+					return errOutside
+				}
+				return errNotFound
+			}
+		}
+	}
+	return errUnreadable
 }
 
 func logicalAbs(p string) bool {

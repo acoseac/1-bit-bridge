@@ -929,6 +929,9 @@ func (p *prober) include(line int, name string, optional bool) {
 	if err != nil {
 		// A path that leaves the root is refused for either directive.
 		// include_optional only swallows a file that is not there.
+		if optional && errors.Is(err, errNotFound) {
+			return
+		}
 		p.add(line, "include %s: %s", quotePath(name), cleanErr(err))
 		return
 	}

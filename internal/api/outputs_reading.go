@@ -50,18 +50,18 @@ type OutputReading struct {
 // ReadingMPD is the MPD the bridge dialled, read around the /proc read:
 // its status after it, and the commands between.
 type ReadingMPD struct {
-	State            string                      `json:"state"`
-	SongID           *int                        `json:"songId"`
-	Elapsed          *float64                    `json:"elapsed"`
-	Audio            string                      `json:"audio"`
-	ReplayGainMode   string                      `json:"replayGainMode"`
-	Volume           *int                        `json:"volume"`
-	Xfade            *float64                    `json:"xfade"`
-	MixRampDB        *float64                    `json:"mixrampDb"`
-	MixRampDelay     *float64                    `json:"mixrampDelay"`
-	Outputs          []ReadingMPDOutput          `json:"outputs"`
-	Config           *ReadingMPDConfig           `json:"config"`
-	ConfigProvenance *ReadingMPDConfigProvenance `json:"configProvenance,omitempty"`
+	State          string                `json:"state"`
+	SongID         *int                  `json:"songId"`
+	Elapsed        *float64              `json:"elapsed"`
+	Audio          string                `json:"audio"`
+	ReplayGainMode string                `json:"replayGainMode"`
+	Volume         *int                  `json:"volume"`
+	Xfade          *float64              `json:"xfade"`
+	MixRampDB      *float64              `json:"mixrampDb"`
+	MixRampDelay   *float64              `json:"mixrampDelay"`
+	Outputs        []ReadingMPDOutput    `json:"outputs"`
+	Config         *ReadingMPDConfig     `json:"config"`
+	ConfigHint     *ReadingMPDConfigHint `json:"configHint,omitempty"`
 }
 
 // ReadingMPDOutput is one element of MPD's live outputs reply.
@@ -82,11 +82,11 @@ type ReadingMPDConfig struct {
 	Output              *ReadingMPDConfOutput `json:"output"`
 }
 
-// ReadingMPDConfigProvenance names the file the informational configuration
-// came from. It does not establish which settings MPD still runs with.
-type ReadingMPDConfigProvenance struct {
-	Source string `json:"source"`
-	Path   string `json:"path"`
+// ReadingMPDConfigHint describes the owner's command-line argument in the
+// bridge's filesystem view. It is not proof of which config MPD loaded.
+type ReadingMPDConfigHint struct {
+	Argument string `json:"argument"`
+	Path     string `json:"path,omitempty"`
 }
 
 // ReadingMPDConfOutput is the output whose thread holds this output's
@@ -232,19 +232,14 @@ var defaultReadingLimits = readingLimits{
 // between and the settings read again after it, every card, mpd.conf, what
 // the ALSA configuration says of each output's device, and the song's row.
 type readingSnap struct {
-	at             time.Time
-	rep            mpd.Report
-	endpoint       string
-	password       string
-	conf           conf.File
-	confRead       bool
-	confProvenance *ReadingMPDConfigProvenance
-	// Keep the configured file for the existing song-row mapping.
-	// Each card has its own selected config, never borrowed from another card.
-	configuredConf     conf.File
-	configuredConfRead bool
-	cardConfigs        map[pickID]readingConfig
-	readConfigs        []conf.File
+	at        time.Time
+	rep       mpd.Report
+	endpoint  string
+	password  string
+	conf      conf.File
+	confRead  bool
+	confHint  *ReadingMPDConfigHint
+	cardHints map[pickID]*ReadingMPDConfigHint
 
 	// mpdCode is why MPD could not be read, "" when every command
 	// answered.
@@ -471,12 +466,6 @@ func (o *localOutputs) takeReading(ctx context.Context) (snap *readingSnap) {
 	}
 	o.readConf(ctx, s, opt)
 	s.chains = outputChains(s, pcmConfig)
-	for key, c := range s.cardConfigs {
-		view := *s
-		view.conf, view.confRead = c.file, c.read
-		c.chains = outputChains(&view, pcmConfig)
-		s.cardConfigs[key] = c
-	}
 	if s.mpdCode == "" {
 		s.row = o.lookUpSong(ctx, s)
 	}
@@ -851,60 +840,32 @@ func logOutputPanic(step string, r any) {
 	logger.Error("local outputs: a step panicked", attrs...)
 }
 
-// readingConfig is one card's selected file and its resolved output chains.
-type readingConfig struct {
-	file       conf.File
-	read       bool
-	provenance *ReadingMPDConfigProvenance
-	chains     []outputChain
-}
-
-// readConf reads mpd.conf whole, its includes too, under the conf
-// deadline (boundedStep), including process discovery. A read that fails or
-// does not answer in time leaves mpd.config null and gives no config warning.
+// readConf reads the configured mpd.conf and its includes under the conf
+// deadline, then collects informational command-line hints. A failed or late
+// step publishes neither config nor hints and gives no config warning.
 func (o *localOutputs) readConf(ctx context.Context, s *readingSnap, opt mpd.Options) {
 	type result struct {
-		configured readingConfig
-		cards      map[pickID]readingConfig
-		files      []conf.File
+		file  conf.File
+		read  bool
+		hints map[pickID]*ReadingMPDConfigHint
 	}
 	r, late, failed := boundedStep(o, &o.reading.conf, ctx, o.limits.conf, "the mpd.conf read", func() result {
-		r := result{cards: map[pickID]readingConfig{}}
+		r := result{hints: map[pickID]*ReadingMPDConfigHint{}}
 		if path := s.rep.ConfPath; path != "" {
 			f, err := o.confFile(confRoot(opt.Root, path), path, path)
 			if err == nil {
-				r.configured = readingConfig{file: f, read: true, provenance: &ReadingMPDConfigProvenance{Source: "configured_fallback", Path: path}}
-				r.files = append(r.files, f)
+				r.file, r.read = f, true
 			}
 		}
 		for i := range s.picks {
-			c := r.configured
-			root, logical, source, ok := o.processConfig(s, &s.picks[i])
-			if ok {
-				if source == "mpd_no_config" {
-					c = readingConfig{provenance: &ReadingMPDConfigProvenance{Source: source}}
-				} else {
-					host := filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(logical, "/")))
-					if f, err := o.confFile(root, logical, host); err == nil {
-						c = readingConfig{file: f, read: true, provenance: &ReadingMPDConfigProvenance{Source: source, Path: logical}}
-						r.files = append(r.files, f)
-					}
-				}
-			}
-			r.cards[pickIDOf(&s.picks[i])] = c
+			r.hints[pickIDOf(&s.picks[i])] = o.processConfigHint(s, &s.picks[i])
 		}
 		return r
 	})
 	if late || failed {
 		return
 	}
-	s.configuredConf, s.configuredConfRead = r.configured.file, r.configured.read
-	s.cardConfigs, s.readConfigs = r.cards, r.files
-	c := r.configured
-	if len(s.picks) == 1 {
-		c = r.cards[pickIDOf(&s.picks[0])]
-	}
-	s.conf, s.confRead, s.confProvenance = c.file, c.read, c.provenance
+	s.conf, s.confRead, s.cardHints = r.file, r.read, r.hints
 }
 
 // readALSAConfig reads the ALSA configuration once, under its deadline
@@ -1027,8 +988,8 @@ func (o *localOutputs) lookUpSong(ctx context.Context, s *readingSnap) *songRow 
 		return nil
 	}
 	musicDir := s.rep.MusicDirectory
-	if s.configuredConfRead && s.configuredConf.MusicDirectory != "" {
-		musicDir = s.configuredConf.MusicDirectory
+	if s.confRead && s.conf.MusicDirectory != "" {
+		musicDir = s.conf.MusicDirectory
 	}
 	roots := o.roots()
 	base := ""
@@ -1182,21 +1143,13 @@ func (o *localOutputs) readingView(s *readingSnap, id string) (OutputReading, bo
 		return OutputReading{}, false
 	}
 	if elem.pick != nil {
-		if c, ok := s.cardConfigs[pickIDOf(elem.pick)]; ok {
-			view := *s
-			view.conf, view.confRead, view.confProvenance, view.chains = c.file, c.read, c.provenance, c.chains
-			s = &view
-		}
+		view := *s
+		view.confHint = s.cardHints[pickIDOf(elem.pick)]
+		s = &view
 	}
 	redact := func(v string) string {
-		for _, f := range s.readConfigs {
-			v = f.Redact(v)
-		}
 		if s.confRead {
 			v = s.conf.Redact(v)
-		}
-		if s.configuredConfRead {
-			v = s.configuredConf.Redact(v)
 		}
 		return conf.RedactSecrets(v, s.password)
 	}
@@ -1369,7 +1322,7 @@ func namedChain(s *readingSnap, name string) (*outputChain, bool) {
 // allowed_formats where MPD reports none, and the first stage that
 // changes samples on its device's way as the ALSA files read. What the
 // block says is information: the verdict claims none of it, and only the
-// dop veto, from the selected file when no live dop is present, can withhold one.
+// dop veto, from the configured file when no live dop is present, can withhold one.
 func holderOutput(s *readingSnap, h mpd.ServerOutput) signalpath.Output {
 	out := signalpath.Output{Plugin: h.Plugin}
 	liveFormats, haveFormats := h.Attribute("allowed_formats")
@@ -1685,8 +1638,8 @@ func readingMPD(s *readingSnap, sh *shown, redact func(string) string) *ReadingM
 			ID: lo.ID, Name: redact(lo.Name), Plugin: redact(lo.Plugin), Enabled: lo.Enabled, Attributes: attrs,
 		})
 	}
-	if p := s.confProvenance; p != nil {
-		m.ConfigProvenance = &ReadingMPDConfigProvenance{Source: p.Source, Path: redact(p.Path)}
+	if p := s.confHint; p != nil {
+		m.ConfigHint = &ReadingMPDConfigHint{Argument: p.Argument, Path: redact(p.Path)}
 	}
 	if s.confRead {
 		m.Config = &ReadingMPDConfig{

@@ -9,34 +9,35 @@ import (
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/alsa"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/mpd/conf"
 )
 
-// processConfig selects only for the card being described. Owner.PID is the
+// processConfigHint inspects argv only for the card being described. Owner.PID is the
 // Tgid resolved by alsa.Reader, not status's owner_pid (Owner.TID).
 // Every proc/config operation runs inside readConf's bounded step.
-func (o *localOutputs) processConfig(s *readingSnap, pick *dacPick) (root, logical, source string, ok bool) {
+func (o *localOutputs) processConfigHint(s *readingSnap, pick *dacPick) *ReadingMPDConfigHint {
 	if s.procCode != "" || s.mpdCode != "" || s.cards.ProcRoot == "" {
-		return
+		return nil
 	}
 	card := pickCard(s.cards, pick)
 	if card == nil || card.Partial {
-		return
+		return nil
 	}
 	sub, ambiguous := pickSubstream(s.cards, pick)
 	if ambiguous || sub == nil || len(holders(s, sub)) != 1 {
-		return
+		return nil
 	}
 	ow := sub.Owner
 	if ow == nil || ow.PID == nil || *ow.PID <= 0 || ow.Process == nil || *ow.Process != "mpd" {
-		return
+		return nil
 	}
 	pid := *ow.PID
 	// A second MPD on this card makes ownership ambiguous even on another PCM.
 	for _, dev := range card.Devices {
 		for _, other := range dev.Substreams {
 			if owner := other.Owner; owner != nil && owner.Process != nil && *owner.Process == "mpd" && (owner.PID == nil || *owner.PID != pid) {
-				return "", "", "", false
+				return nil
 			}
 		}
 	}
@@ -44,35 +45,39 @@ func (o *localOutputs) processConfig(s *readingSnap, pick *dacPick) (root, logic
 	prefix := "/" + strconv.Itoa(pid)
 	before, valid := processStart(proc, prefix)
 	if !valid {
-		return
+		return nil
 	}
 	b, err := o.cmdline(proc, prefix+"/cmdline", 64<<10)
 	after, valid := processStart(proc, prefix)
 	if err != nil || !valid || before != after {
-		return
+		return nil
 	}
-	logical, valid = mpdConfigArgument(b)
+	logical, valid := mpdConfigArgument(b)
 	if !valid || !sameProcessRoot(proc, prefix) {
-		return "", "", "", false
+		return nil
 	}
-	root = alsa.ConfigRoot(proc)
-	if logical == "--no-config" {
-		return root, "", "mpd_no_config", true
+	switch logical {
+	case "--no-config":
+		return &ReadingMPDConfigHint{Argument: "no_config"}
+	case "":
+		return &ReadingMPDConfigHint{Argument: "none"}
 	}
-	if logical != "" {
-		return root, logical, "process_cmdline", true
+	// Compare identities in the bridge's view only. Never read the operand's
+	// contents: argv and matching roots cannot prove what MPD loaded.
+	root := alsa.ConfigRoot(proc)
+	if !conf.Exists(root, logical) {
+		return nil
 	}
-	// Do not substitute the bridge's environment, even for the same uid:
-	// services commonly set a different HOME. Never retain or emit environ.
-	home, xdg, valid := processEnvironment(proc, prefix)
-	if !valid {
-		return "", "", "", false
+	host := filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(logical, "/")))
+	argument, err := os.Stat(host)
+	configured, confErr := os.Stat(s.rep.ConfPath)
+	if err != nil || confErr != nil || fsutil.NotAFile(argument.Mode()) != "" || fsutil.NotAFile(configured.Mode()) != "" {
+		return nil
 	}
-	loc := conf.Locate{Root: root, Home: home, XDGConfigHome: xdg}
-	if logical, _, found := loc.Find(); found {
-		return root, logical, "mpd_default", true
+	if os.SameFile(argument, configured) {
+		return &ReadingMPDConfigHint{Argument: "same"}
 	}
-	return "", "", "", false
+	return &ReadingMPDConfigHint{Argument: "different", Path: logical}
 }
 
 func processStart(proc, prefix string) (string, bool) {
@@ -127,41 +132,8 @@ func mountRoot(proc, logical string) (string, bool) {
 	return root, root != ""
 }
 
-func processEnvironment(proc, prefix string) (home, xdg string, ok bool) {
-	b, err := conf.ReadLogical(proc, prefix+"/environ", 64<<10)
-	if err != nil || (len(b) > 0 && b[len(b)-1] != 0) {
-		return "", "", false
-	}
-	seen := map[string]bool{}
-	for _, entry := range bytes.Split(bytes.TrimSuffix(b, []byte{0}), []byte{0}) {
-		key, value, found := strings.Cut(string(entry), "=")
-		if !found {
-			if len(entry) == 0 && len(b) == 0 {
-				continue
-			}
-			return "", "", false
-		}
-		if key != "HOME" && key != "XDG_CONFIG_HOME" {
-			continue
-		}
-		if seen[key] {
-			return "", "", false
-		}
-		seen[key] = true
-		if value != "" && !validConfigPath(value) {
-			return "", "", false
-		}
-		if key == "HOME" {
-			home = value
-		} else {
-			xdg = value
-		}
-	}
-	return home, xdg, true
-}
-
 // validConfigPath refuses ambiguous argv spellings rather than silently
-// cleaning them before opening or exposing them as provenance.
+// cleaning them before comparing identities or emitting a hint.
 func validConfigPath(p string) bool {
 	if !strings.HasPrefix(p, "/") || strings.ContainsAny(p, "\\\x00") {
 		return false

@@ -25,27 +25,28 @@ func seedProcessEvidence(t *testing.T, r *readingRig, pid int) {
 	t.Helper()
 	dir := strconv.Itoa(pid)
 	writeRigFile(t, r.procRoot, dir+"/stat", processStat(pid, "12345"))
-	writeRigFile(t, r.procRoot, dir+"/environ", "HOME=/home/pi\x00")
 	writeRigFile(t, r.procRoot, dir+"/mountinfo", "1 0 8:1 / / rw - ext4 /dev/root rw\n")
 	writeRigFile(t, r.procRoot, "self/mountinfo", "2 0 8:1 / / rw - ext4 /dev/root rw\n")
 }
 
 func TestReadingRedactsEveryConfigRead(t *testing.T) {
-	for _, secretSource := range []string{"configured", "selected", "output password"} {
+	for _, secretSource := range []string{"configured", "include", "output password"} {
 		t.Run(secretSource, func(t *testing.T) {
 			r, root, pid := provenanceRig(t)
 			secret := "old-secret"
-			selected := withOutputSetting(volumioConf(t, r.music), "mixer_control", secret)
+			configured := withOutputSetting(volumioConf(t, r.music), "mixer_control", secret)
 			switch secretSource {
 			case "configured":
-				r.writeConf("password \"" + secret + "@read\"\n" + volumioConf(t, r.music))
-			case "selected":
-				selected = "password \"" + secret + "@read\"\n" + selected
+				configured = "password \"" + secret + "@read\"\n" + configured
+			case "include":
+				writeRigFile(t, filepath.Dir(r.confPath), "secrets.conf", "password \""+secret+"@read\"\n")
+				configured = "include \"secrets.conf\"\n" + configured
 			case "output password":
 				r.cfg.Output = func() config.OutputConfig { return config.OutputConfig{MPD: "on", Password: secret} }
 			}
-			writeRigFile(t, root, "etc/actual.conf", selected)
-			writeRigFile(t, r.procRoot, strconv.Itoa(pid)+"/cmdline", "mpd\x00/etc/actual.conf\x00")
+			r.writeConf(configured)
+			writeRigFile(t, root, "etc/old-secret.conf", "volume_normalization \"yes\"\n")
+			writeRigFile(t, r.procRoot, strconv.Itoa(pid)+"/cmdline", "mpd\x00/etc/old-secret.conf\x00")
 			got := provenanceReading(t, r)
 			if got.DAC == nil || got.DAC.Mixer == nil {
 				t.Fatal("missing mixer")
@@ -53,6 +54,7 @@ func TestReadingRedactsEveryConfigRead(t *testing.T) {
 			if got.DAC.Mixer.Control != "[redacted]" {
 				t.Errorf("mixer control leaked: %q", got.DAC.Mixer.Control)
 			}
+			wantHint(t, got, "different", "/etc/[redacted].conf")
 			b, _ := json.Marshal(got)
 			if strings.Contains(string(b), secret) {
 				t.Error("reading leaked a config secret")
@@ -107,9 +109,9 @@ func TestReadingRejectsUnprovenProcess(t *testing.T) {
 				}
 			})
 			if kind == "same root inode" {
-				wantProvenance(t, got, "process_cmdline", "/etc/actual.conf", "yes")
+				wantConfigAndHint(t, got, "different", "/etc/actual.conf", "no")
 			} else {
-				wantProvenance(t, got, "configured_fallback", r.confPath, "no")
+				wantConfigAndHint(t, got, "", "", "no")
 			}
 		})
 	}
@@ -161,53 +163,9 @@ func TestReadingUsesOnlyTheBoundCardsOwner(t *testing.T) {
 			}
 			got := provenanceReading(t, r)
 			if kind == "other card also" {
-				wantProvenance(t, got, "process_cmdline", "/etc/actual.conf", "yes")
+				wantConfigAndHint(t, got, "different", "/etc/actual.conf", "no")
 			} else {
-				wantProvenance(t, got, "configured_fallback", r.confPath, "no")
-			}
-		})
-	}
-}
-
-func TestReadingDefaultNeedsTheDaemonsEnvironment(t *testing.T) {
-	for _, kind := range []string{"different home", "different xdg", "unreadable same uid", "unreadable other uid", "oversized", "empty environment"} {
-		t.Run(kind, func(t *testing.T) {
-			r, root, pid := provenanceRig(t)
-			dir := strconv.Itoa(pid)
-			writeRigFile(t, r.procRoot, dir+"/cmdline", "mpd\x00")
-			writeRigFile(t, root, "home/daemon/.mpdconf", volumioConf(t, r.music)+"\nvolume_normalization \"yes\"\n")
-			writeRigFile(t, root, "daemon-xdg/mpd/mpd.conf", volumioConf(t, r.music)+"\nvolume_normalization \"yes\"\n")
-			writeRigFile(t, root, "etc/mpd.conf", volumioConf(t, r.music)+"\nvolume_normalization \"yes\"\n")
-			env := "HOME=/home/daemon\x00"
-			switch kind {
-			case "different xdg":
-				env += "XDG_CONFIG_HOME=/daemon-xdg\x00"
-			case "oversized":
-				env += strings.Repeat("x", 64<<10) + "\x00"
-			case "empty environment":
-				env = ""
-			}
-			writeRigFile(t, r.procRoot, dir+"/environ", env)
-			if strings.HasPrefix(kind, "unreadable") {
-				if err := os.Remove(filepath.Join(r.procRoot, dir, "environ")); err != nil {
-					t.Fatal(err)
-				}
-				uid := os.Getuid()
-				if kind == "unreadable other uid" {
-					uid++
-				}
-				writeRigFile(t, r.procRoot, dir+"/status", fmt.Sprintf("Name:\tmpd\nTgid:\t%d\nUid:\t%d %d %d %d\n", pid, uid, uid, uid, uid))
-			}
-			got := provenanceReading(t, r)
-			switch kind {
-			case "different home":
-				wantProvenance(t, got, "mpd_default", "/home/daemon/.mpdconf", "yes")
-			case "different xdg":
-				wantProvenance(t, got, "mpd_default", "/daemon-xdg/mpd/mpd.conf", "yes")
-			case "empty environment":
-				wantProvenance(t, got, "mpd_default", "/etc/mpd.conf", "yes")
-			default:
-				wantProvenance(t, got, "configured_fallback", r.confPath, "no")
+				wantConfigAndHint(t, got, "", "", "no")
 			}
 		})
 	}
@@ -228,13 +186,11 @@ func TestReadingMPDOptionGrammar(t *testing.T) {
 			got := provenanceReading(t, r)
 			switch name {
 			case "no config", "no config equals":
-				if got.MPD == nil || got.MPD.Config != nil || got.MPD.ConfigProvenance == nil || got.MPD.ConfigProvenance.Source != "mpd_no_config" || got.MPD.ConfigProvenance.Path != "" {
-					t.Errorf("no-config=%+v", got.MPD)
-				}
+				wantConfigAndHint(t, got, "no_config", "", "no")
 			case "terminator", "dot", "dotdot", "double slash":
-				wantProvenance(t, got, "configured_fallback", r.confPath, "no")
+				wantConfigAndHint(t, got, "", "", "no")
 			default:
-				wantProvenance(t, got, "process_cmdline", "/etc/actual.conf", "yes")
+				wantConfigAndHint(t, got, "different", "/etc/actual.conf", "no")
 			}
 		})
 	}
@@ -246,10 +202,10 @@ func TestReadingRejectsCmdlineTruncatedAtANUL(t *testing.T) {
 	// The first cap bytes form valid argv, ending in NUL; one extra operand follows.
 	prefix := "mpd\x00--verbose=" + strings.Repeat("x", (64<<10)-len("mpd\x00--verbose=\x00/etc/actual.conf\x00")) + "\x00/etc/actual.conf\x00"
 	writeRigFile(t, r.procRoot, strconv.Itoa(pid)+"/cmdline", prefix+"/extra\x00")
-	wantProvenance(t, provenanceReading(t, r), "configured_fallback", r.confPath, "no")
+	wantConfigAndHint(t, provenanceReading(t, r), "", "", "no")
 }
 
-func TestReadingOmitsProvenanceWhenNoFileWasRead(t *testing.T) {
+func TestReadingWithoutConfigOrArgvOmitsHint(t *testing.T) {
 	for _, kind := range []string{"missing", "empty path"} {
 		t.Run(kind, func(t *testing.T) {
 			r, _, _ := provenanceRig(t)
@@ -260,13 +216,13 @@ func TestReadingOmitsProvenanceWhenNoFileWasRead(t *testing.T) {
 				r.confPath = ""
 			}
 			got := provenanceReading(t, r)
-			if got.MPD == nil || got.MPD.Config != nil || got.MPD.ConfigProvenance != nil {
+			if got.MPD == nil || got.MPD.Config != nil || got.MPD.ConfigHint != nil {
 				t.Fatalf("unread config=%+v", got.MPD)
 			}
 			b, _ := json.Marshal(got.MPD)
 			var wire map[string]json.RawMessage
 			_ = json.Unmarshal(b, &wire)
-			if _, present := wire["configProvenance"]; present {
+			if _, present := wire["configHint"]; present {
 				t.Error("unread provenance is present")
 			}
 		})
@@ -295,8 +251,9 @@ func TestReadingRedactsOtherEmittedStrings(t *testing.T) {
 	}
 }
 
-func TestReadingCachesConfigPerCardAndRedactsEverySelectedFile(t *testing.T) {
+func TestReadingCachesHintPerCard(t *testing.T) {
 	r, root, pid := provenanceRig(t)
+	r.writeConf("password \"second-secret@read\"\n" + withOutputSetting(volumioConf(t, r.music), "mixer_control", "second-secret"))
 	now := r.cfg.Now()
 	r.cfg.Now = func() time.Time { return now }
 	otherPID := pid + 100
@@ -344,14 +301,14 @@ func TestReadingCachesConfigPerCardAndRedactsEverySelectedFile(t *testing.T) {
 		if err != nil || !found {
 			t.Fatalf("reading: %v %v", found, err)
 		}
-		wantPath, wantNorm := "/etc/first.conf", "yes"
+		wantPath := "/etc/first.conf"
 		if pick.dac.Card == 9 {
-			wantPath, wantNorm = "/etc/second.conf", "no"
+			wantPath = "/etc/second.conf"
 		}
-		wantProvenance(t, got, "process_cmdline", wantPath, wantNorm)
+		wantConfigAndHint(t, got, "different", wantPath, "no")
 		b, _ := json.Marshal(got)
 		if strings.Contains(string(b), "second-secret") {
-			t.Error("other selected file's secret leaked")
+			t.Error("configured secret leaked")
 		}
 	}
 	if r.reads.Load() != 1 {

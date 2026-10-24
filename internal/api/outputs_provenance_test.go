@@ -76,26 +76,9 @@ func provenanceReading(t *testing.T, r *readingRig, configure ...func(*localOutp
 	return got
 }
 
-func wantProvenance(t *testing.T, got OutputReading, source, path, normalization string) {
+func wantConfigAndHint(t *testing.T, got OutputReading, source, path, normalization string) {
 	t.Helper()
-	b, err := json.Marshal(got)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var wire struct {
-		MPD struct {
-			Provenance struct {
-				Source string `json:"source"`
-				Path   string `json:"path"`
-			} `json:"configProvenance"`
-		} `json:"mpd"`
-	}
-	if err := json.Unmarshal(b, &wire); err != nil {
-		t.Fatal(err)
-	}
-	if wire.MPD.Provenance.Source != source || wire.MPD.Provenance.Path != path {
-		t.Errorf("configProvenance=%+v, want source=%q path=%q", wire.MPD.Provenance, source, path)
-	}
+	wantHint(t, got, source, path)
 	if got.MPD == nil || got.MPD.Config == nil || got.MPD.Config.VolumeNormalization != normalization {
 		t.Fatalf("config=%+v, want normalization=%q", got.MPD, normalization)
 	}
@@ -112,7 +95,7 @@ func wantProvenance(t *testing.T, got OutputReading, source, path, normalization
 	}
 }
 
-func TestReadingUsesMPDProcessConfig(t *testing.T) {
+func TestReadingHintsAtMPDConfigArgument(t *testing.T) {
 	for _, args := range []string{"mpd\x00--no-daemon\x00/etc/actual.conf\x00", "mpd\x00/etc/actual.conf\x00--stderr\x00", "mpd\x00--verbose=" + strings.Repeat("p", (64<<10)-len("mpd\x00--verbose=\x00/etc/actual.conf\x00")) + "\x00/etc/actual.conf\x00"} {
 		t.Run(fmt.Sprintf("argv_%d_bytes", len(args)), func(t *testing.T) {
 			r, root, pid := provenanceRig(t)
@@ -132,30 +115,12 @@ func TestReadingUsesMPDProcessConfig(t *testing.T) {
 			if calls != 1 {
 				t.Errorf("cmdline read %d times, want once", calls)
 			}
-			wantProvenance(t, got, "process_cmdline", "/etc/actual.conf", "yes")
+			wantConfigAndHint(t, got, "different", "/etc/actual.conf", "no")
 		})
 	}
 }
 
-func TestReadingUsesMPDDefaultConfig(t *testing.T) {
-	for _, selected := range []string{"home/pi/.config/mpd/mpd.conf", "home/pi/.mpdconf", "home/pi/.mpd/mpd.conf", "etc/mpd.conf"} {
-		t.Run(selected, func(t *testing.T) {
-			r, root, pid := provenanceRig(t)
-			if err := os.MkdirAll(filepath.Join(root, "home/pi/.config"), 0755); err != nil {
-				t.Fatal(err)
-			}
-			writeRigFile(t, root, selected, volumioConf(t, r.music)+"\nvolume_normalization \"yes\"\n")
-			// A later candidate must not win just because /etc is familiar.
-			if selected != "etc/mpd.conf" {
-				writeRigFile(t, root, "etc/mpd.conf", volumioConf(t, r.music))
-			}
-			writeRigFile(t, r.procRoot, filepath.Join(strconv.Itoa(pid), "cmdline"), "mpd\x00--no-daemon\x00")
-			wantProvenance(t, provenanceReading(t, r), "mpd_default", "/"+selected, "yes")
-		})
-	}
-}
-
-func TestReadingFallsBackFromUnusableCmdline(t *testing.T) {
+func TestReadingOmitsHintForUnusableCmdline(t *testing.T) {
 	cases := map[string]string{
 		"unreadable": "", "oversized": "mpd\x00--verbose=" + strings.Repeat("p", (64<<10)+1-len("mpd\x00--verbose=\x00/etc/actual.conf\x00")) + "\x00/etc/actual.conf\x00",
 		"unterminated": "mpd\x00/etc/actual.conf", "empty argument": "mpd\x00\x00/etc/actual.conf\x00",
@@ -180,12 +145,12 @@ func TestReadingFallsBackFromUnusableCmdline(t *testing.T) {
 			if args != "" {
 				writeRigFile(t, r.procRoot, filepath.Join(strconv.Itoa(pid), "cmdline"), args)
 			}
-			wantProvenance(t, provenanceReading(t, r), "configured_fallback", r.confPath, "no")
+			wantConfigAndHint(t, provenanceReading(t, r), "", "", "no")
 		})
 	}
 }
 
-func TestReadingWithoutAnMPDOwnerUsesConfiguredFallback(t *testing.T) {
+func TestReadingOmitsHintWithoutAnMPDOwner(t *testing.T) {
 	for _, owner := range []string{"foreign", "none", "unmatched thread"} {
 		t.Run(owner, func(t *testing.T) {
 			r, root, pid := provenanceRig(t)
@@ -222,7 +187,7 @@ func TestReadingWithoutAnMPDOwnerUsesConfiguredFallback(t *testing.T) {
 			if calls != 0 {
 				t.Errorf("read cmdline %d times without an MPD owner", calls)
 			}
-			wantProvenance(t, got, "configured_fallback", r.confPath, "no")
+			wantConfigAndHint(t, got, "", "", "no")
 		})
 	}
 }
@@ -255,41 +220,12 @@ func TestReadingRejectsAnUnusableProcCmdlineFile(t *testing.T) {
 				}
 				t.Cleanup(func() { _ = os.Chmod(name, 0644) })
 			}
-			wantProvenance(t, provenanceReading(t, r), "configured_fallback", r.confPath, "no")
+			wantConfigAndHint(t, provenanceReading(t, r), "", "", "no")
 		})
 	}
 }
 
-func TestReadingDefaultConfigRespectsXDGPrecedence(t *testing.T) {
-	for _, xdgExists := range []bool{false, true} {
-		t.Run(fmt.Sprint(xdgExists), func(t *testing.T) {
-			r, root, pid := provenanceRig(t)
-			writeRigFile(t, r.procRoot, filepath.Join(strconv.Itoa(pid), "environ"), "HOME=/home/pi\x00XDG_CONFIG_HOME=/xdg\x00")
-			r.cfg.Getenv = func(k string) string {
-				switch k {
-				case "HOME":
-					return "/home/pi"
-				case "XDG_CONFIG_HOME":
-					return "/xdg"
-				}
-				return ""
-			}
-			writeRigFile(t, root, "home/pi/.config/mpd/mpd.conf", volumioConf(t, r.music)+"\nvolume_normalization \"yes\"\n")
-			selected := "/home/pi/.config/mpd/mpd.conf"
-			if xdgExists {
-				if err := os.MkdirAll(filepath.Join(root, "xdg"), 0755); err != nil {
-					t.Fatal(err)
-				}
-				selected = "/home/pi/.mpdconf"
-			}
-			writeRigFile(t, root, "home/pi/.mpdconf", volumioConf(t, r.music)+"\nvolume_normalization \"yes\"\n")
-			writeRigFile(t, r.procRoot, filepath.Join(strconv.Itoa(pid), "cmdline"), "mpd\x00")
-			wantProvenance(t, provenanceReading(t, r), "mpd_default", selected, "yes")
-		})
-	}
-}
-
-func TestReadingConfigProvenanceOnTheWire(t *testing.T) {
+func TestReadingConfigHintOnTheWire(t *testing.T) {
 	r, root, pid := provenanceRig(t)
 	writeRigFile(t, root, "etc/actual.conf", volumioConf(t, r.music)+"\nvolume_normalization \"yes\"\n")
 	writeRigFile(t, r.procRoot, filepath.Join(strconv.Itoa(pid), "cmdline"), "mpd\x00/etc/actual.conf\x00")
@@ -321,24 +257,24 @@ func TestReadingConfigProvenanceOnTheWire(t *testing.T) {
 	if err := json.Unmarshal(get("/v1/outputs/"+outputs.Outputs[0].ID+"/reading").Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	wantProvenance(t, got, "process_cmdline", "/etc/actual.conf", "yes")
+	wantConfigAndHint(t, got, "different", "/etc/actual.conf", "no")
 }
 
-func TestReadingProcessConfigDoesNotChangeTheVerdictInputs(t *testing.T) {
+func TestReadingArgumentDoesNotChangeTheVerdictInputs(t *testing.T) {
 	r, root, pid := provenanceRig(t)
 	r.mpd.set(func(m *scriptedMPD) {
 		m.outputs = volumioOutputs("1")
 		m.statuses = []mpd.Reply{withPair(capturedStatus(t, piCaptures[0].name), "audio", "dsd64:2")}
 	})
-	// With no live dop, use the process file for the veto; keep row mapping.
+	// With no live dop, use the configured file for the veto and row mapping.
 	r.writeConf(regexp.MustCompile(`(?m)^\s*dop\s+"no"`).ReplaceAllString(volumioConf(t, r.music), `dop "yes"`))
 	writeRigFile(t, root, "etc/actual.conf", volumioConf(t, "/not-the-library")+"\nvolume_normalization \"yes\"\n")
 	writeRigFile(t, r.procRoot, filepath.Join(strconv.Itoa(pid), "cmdline"), "mpd\x00/etc/actual.conf\x00")
 	o := newLocalOutputs(r.cfg)
 	t.Cleanup(o.close)
 	snap := o.takeReading(context.Background())
-	if !snap.confRead || snap.conf.VolumeNormalization != "yes" {
-		t.Fatal("process config not selected")
+	if !snap.confRead || snap.conf.VolumeNormalization != "no" {
+		t.Fatal("configured config replaced")
 	}
 	pick := &snap.picks[0]
 	sub, _ := pickSubstream(snap.cards, pick)
@@ -349,8 +285,8 @@ func TestReadingProcessConfigDoesNotChangeTheVerdictInputs(t *testing.T) {
 	if _, live := hs[0].Attribute("dop"); live {
 		t.Fatal("fixture must have no live dop")
 	}
-	if got := holderOutput(snap, hs[0]).DoP; got {
-		t.Error("DoP veto used configured yes, want process no")
+	if got := holderOutput(snap, hs[0]).DoP; !got {
+		t.Error("DoP veto lost configured yes")
 	}
 	if snap.row == nil || snap.row.track.Codec != "FLAC" {
 		t.Errorf("process config changed row mapping: %+v", snap.row)
