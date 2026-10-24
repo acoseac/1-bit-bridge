@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -17,12 +16,19 @@ var buildSiteFiles = []string{
 	"internal/player/decode/testdata/alac-goldens/README.md", "internal/player/decode/testdata/dsd-goldens/README.md",
 }
 
+// readRepoBytes is os.ReadFile of a repository text file as its LF text
+// (readRepoText), so a Windows checkout's CRLF reads as any other checkout.
+func readRepoBytes(path string) ([]byte, error) {
+	s, err := readRepoText(path)
+	return []byte(s), err
+}
+
 func buildSiteFixture(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	// Include the exact reviewed census as it grows, plus the gate inputs.
 	for _, name := range append(append([]string{}, buildSiteFiles...), sortedKeys(reviewedBuildSites)...) {
-		b, err := os.ReadFile(filepath.Join("../..", name))
+		b, err := readRepoBytes(filepath.Join("../..", name))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -33,7 +39,7 @@ func buildSiteFixture(t *testing.T) string {
 
 func TestOperationalReleaseTags(t *testing.T) {
 	t.Run("documented deployment", func(t *testing.T) {
-		b, err := os.ReadFile("../../ops/deployment-runbook.md")
+		b, err := readRepoBytes("../../ops/deployment-runbook.md")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -47,7 +53,7 @@ func TestOperationalReleaseTags(t *testing.T) {
 			continue
 		}
 		t.Run(name, func(t *testing.T) {
-			b, err := os.ReadFile(filepath.Join("../..", name))
+			b, err := readRepoBytes(filepath.Join("../..", name))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -156,7 +162,7 @@ func TestWebPackagesRefusedWithoutEmbeds(t *testing.T) {
 		t.Run(pkg, func(t *testing.T) {
 			root := graph(t)
 			for _, name := range []string{"go.mod", "zulu/go.mod", "cmd/bridge/main.go"} {
-				b, err := os.ReadFile(filepath.Join(root, name))
+				b, err := readRepoBytes(filepath.Join(root, name))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -185,7 +191,7 @@ func TestRealReleaseGraphEmbeds(t *testing.T) {
 }
 
 func TestDockerNoticesAndToolchain(t *testing.T) {
-	b, err := os.ReadFile("../../Dockerfile")
+	b, err := readRepoBytes("../../Dockerfile")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +257,7 @@ func TestReviewedBuildSitesCannotLoseTags(t *testing.T) {
 			if err := checkBuildTags(root); err != nil {
 				t.Fatal(err)
 			}
-			b, err := os.ReadFile(filepath.Join(root, name))
+			b, err := readRepoBytes(filepath.Join(root, name))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -283,7 +289,7 @@ func TestDockerNoticeGuard(t *testing.T) {
 	} {
 		t.Run(line, func(t *testing.T) {
 			root := buildSiteFixture(t)
-			b, err := os.ReadFile(filepath.Join(root, "Dockerfile"))
+			b, err := readRepoBytes(filepath.Join(root, "Dockerfile"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -301,7 +307,7 @@ func TestDockerNoticeGuard(t *testing.T) {
 func TestShardFlagsCannotOverrideTags(t *testing.T) {
 	root := buildSiteFixture(t)
 	name := ".github/scripts/test-shard.sh"
-	b, err := os.ReadFile(filepath.Join(root, name))
+	b, err := readRepoBytes(filepath.Join(root, name))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +329,7 @@ func TestShardFlagsCannotOverrideTags(t *testing.T) {
 func TestACRLFCheckoutReadsAsLF(t *testing.T) {
 	root := buildSiteFixture(t)
 	for _, name := range buildSiteFiles {
-		b, err := os.ReadFile(filepath.Join(root, name))
+		b, err := readRepoBytes(filepath.Join(root, name))
 		if err != nil {
 			t.Fatal(err)
 		}

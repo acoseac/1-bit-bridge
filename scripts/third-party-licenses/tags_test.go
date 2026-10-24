@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"os"
 	"strings"
 	"testing"
 )
@@ -31,7 +30,7 @@ func TestReleaseTagsGraph(t *testing.T) {
 
 func TestReleaseTagsWiring(t *testing.T) {
 	for _, path := range []string{"../../.goreleaser.yaml", "../../Makefile", "../../Dockerfile"} {
-		data, err := os.ReadFile(path)
+		data, err := readRepoBytes(path)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -74,7 +73,7 @@ func TestBuildTagsAgree(t *testing.T) {
 		t.Run(tc.file+tc.new, func(t *testing.T) {
 			root := buildSiteFixture(t)
 			for _, name := range []string{".goreleaser.yaml", "Makefile", "Dockerfile"} {
-				b, err := os.ReadFile("../../" + name)
+				b, err := readRepoBytes("../../" + name)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -95,7 +94,7 @@ func TestBuildTagsAgree(t *testing.T) {
 }
 
 func TestBuildTagsGate(t *testing.T) {
-	b, err := os.ReadFile("../../Makefile")
+	b, err := readRepoBytes("../../Makefile")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +254,7 @@ func TestCensusOriginalLinesAndMultiplicity(t *testing.T) {
 	} {
 		t.Run(replacement, func(t *testing.T) {
 			root := buildSiteFixture(t)
-			b, err := os.ReadFile(root + "/Dockerfile")
+			b, err := readRepoBytes(root + "/Dockerfile")
 			if err != nil {
 				t.Fatal(err)
 			}
