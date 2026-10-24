@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/dlna/discovery"
@@ -284,6 +285,11 @@ type Server struct {
 	// test sets one of its own before Start.
 	served *servedAddrs
 
+	// accepting is what AcceptsOn reads while the listener is up: set by
+	// Start once the listener is bound, cleared by Stop and by a Start that
+	// fails after the bind. Nil is no listener.
+	accepting atomic.Pointer[acceptState]
+
 	// hostRefusedSeen holds the Host names ownHostOnly has refused, so
 	// each is logged once (noteForeignHost), bounded by
 	// hostRefusedSeenCap.
@@ -406,6 +412,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// backlog B48).
 	s.warnIfPinnedOffTheLAN(bound.Addr())
 	var listener net.Listener = servedOnlyListener{Listener: bound, served: s.served, log: s.log}
+	s.accepting.Store(&acceptState{served: s.served, bound: netAddrIP(bound.Addr()).Unmap()})
 
 	// Run HTTP server in a goroutine. Serve() blocks until Shutdown()
 	// is called externally; the returned ErrServerClosed is expected
@@ -460,6 +467,7 @@ func (s *Server) Start(ctx context.Context) error {
 	// device on it, stays as it was.
 	endpoints := s.advertiseEndpoints()
 	if err := s.registerSSDP(ctx, endpoints); err != nil {
+		s.accepting.Store(nil)
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = s.httpServer.Shutdown(shutdownCtx)
@@ -537,6 +545,37 @@ func (s *Server) mediaServerRegistration(endpoints []AdvertiseEndpoint) SSDPRegi
 	}
 }
 
+// acceptState is the listener AcceptsOn answers for: the addresses it serves
+// and the address it is bound to, the unspecified address for a wildcard.
+type acceptState struct {
+	served *servedAddrs
+	bound  netip.Addr
+}
+
+// AcceptsOn reports whether the DLNA listener takes a connection on the
+// local address a now: the listener is up, bound to a wildcard or to a
+// itself, and a is an address it serves (servedAddrs, the listener's own
+// check at accept: a new LAN address is served a second after it comes up,
+// and one that goes away stays served until the snapshot that held it is
+// servedMaxAge old). Loopback is served; a caller that must not take it
+// refuses it itself. The player's Insert takes an address the DLNA listener
+// accepts on as one of the bridge's own (B470 PR 5a4).
+func (s *Server) AcceptsOn(a netip.Addr) bool {
+	st := s.accepting.Load()
+	if st == nil || !a.IsValid() {
+		return false
+	}
+	a = a.Unmap()
+	switch {
+	case st.bound.IsUnspecified() && st.bound.Is4() && !a.Is4():
+		// 0.0.0.0 takes IPv4 alone; "::" takes both.
+		return false
+	case !st.bound.IsUnspecified() && a != st.bound:
+		return false
+	}
+	return st.served.serves(a)
+}
+
 // SSDP returns the subsystem the server is registered with while it runs,
 // cfg.SSDP when the wiring passed one, and nil before Start and after Stop.
 func (s *Server) SSDP() *SSDPSubsystem {
@@ -587,6 +626,7 @@ func (s *Server) advertiseEndpoints() []AdvertiseEndpoint {
 // Safe to call exactly once after Start(). Calling before Start()
 // or twice is a no-op (defensive — won't panic).
 func (s *Server) Stop(ctx context.Context) error {
+	s.accepting.Store(nil)
 	s.withdrawSSDP(ctx)
 	// Cancel any in-flight GENA initial-NOTIFY POSTs so they don't
 	// outlive the server.
