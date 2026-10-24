@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -56,6 +57,48 @@ func editConfigBesideTheConsole(t *testing.T, srv *Server, cfgPath string) []byt
 	return edited
 }
 
+// rootChangeCase is one root change from the console that changes the
+// library index before its save: arrange lays out the library and returns the
+// request to send and the track whose rendition the change would unlink.
+type rootChangeCase struct {
+	name    string
+	arrange func(t *testing.T, srv *Server, dataDir string) (method string, body map[string]string, source string)
+}
+
+// requireTheRootChangeRefused sends the root change tc arranges, which
+// another writer's change to the config refuses, and fails the test unless it
+// is refused with the library left as it was: the rendition on disk, no dates
+// saved for a flip, the config as the other writer left it (wantConfig) and
+// the scanner's roots as they were.
+func requireTheRootChangeRefused(t *testing.T, srv *Server, dataDir, cfgPath, method string, body map[string]string,
+	sidecar string, roots []string, wantConfig func() []byte) {
+	t.Helper()
+	if code := doJSON(t, srv.Handler(), method, "/api/roots", body, nil); code != http.StatusInternalServerError {
+		t.Errorf("the root change over a config another writer changed answered %d, want 500", code)
+	}
+	// The failed change's scan, which redoes the walk the change
+	// cancelled, may still be reading the library.
+	srvBgScansWait(t, srv)
+	if _, err := os.Stat(sidecar); err != nil {
+		t.Errorf("the refused root change unlinked the rendition %s: %v", sidecar, err)
+	}
+	if n := carryCount(t, dataDir); n != 0 {
+		t.Errorf("the refused root change recorded %d dates for a flip", n)
+	}
+	if got, want := readFileOrNil(cfgPath), wantConfig(); !bytes.Equal(got, want) {
+		t.Errorf("the refused root change wrote the config:\n%s", got)
+	}
+	if got := srv.deps.Scanner.Roots(); !slices.Equal(got, roots) {
+		t.Errorf("the refused root change moved the scanner's roots to %q, want %q", got, roots)
+	}
+}
+
+// readFileOrNil is the file at path, or nil when it cannot be read.
+func readFileOrNil(path string) []byte {
+	b, _ := os.ReadFile(path)
+	return b
+}
+
 // TestARootChangeTheSaveRefusesLeavesTheLibraryAlone: a root added or
 // removed from the console whose save is refused, because another writer
 // changed bridge.yaml since serve read it, leaves the library index as it
@@ -66,12 +109,56 @@ func editConfigBesideTheConsole(t *testing.T, srv *Server, cfgPath string) []byt
 // had already unlinked the renditions it covered, and did it again on every
 // retry while the refusal lasted, which is until a restart.
 func TestARootChangeTheSaveRefusesLeavesTheLibraryAlone(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		// arrange lays out the library and returns the request to send and
-		// the track whose rendition the change would unlink.
-		arrange func(t *testing.T, srv *Server, dataDir string) (method string, body map[string]string, source string)
-	}{
+	for _, tc := range rootChangeCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, dataDir, cfgPath, _, _, _ := seedSingleRootTrack(t)
+			method, body, source := tc.arrange(t, srv, dataDir)
+			sidecar := seedRendition(t, srv, dataDir, source)
+			roots := append([]string(nil), srv.deps.Scanner.Roots()...)
+			edited := editConfigBesideTheConsole(t, srv, cfgPath)
+			requireTheRootChangeRefused(t, srv, dataDir, cfgPath, method, body, sidecar, roots, func() []byte { return edited })
+		})
+	}
+}
+
+// TestARootChangeRefusedJustBeforeItsIndexChangeLeavesTheLibraryAlone: the
+// console's root change compares the config file once more, just before its
+// library index change starts, with the file its save's turn found, so a
+// config an edit (or a bridge older than the lock, which no lock keeps out)
+// changed after the turn read it refuses the change before anything is
+// unlinked. Until B506's third round nothing compared between the turn's read
+// and the save's staging, so such an edit was refused only once the wipe or
+// the prune had unlinked the renditions; that is left to an edit landing
+// during the index change itself or the staging.
+func TestARootChangeRefusedJustBeforeItsIndexChangeLeavesTheLibraryAlone(t *testing.T) {
+	for _, tc := range rootChangeCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, dataDir, cfgPath, _, _, _ := seedSingleRootTrack(t)
+			method, body, source := tc.arrange(t, srv, dataDir)
+			sidecar := seedRendition(t, srv, dataDir, source)
+			roots := append([]string(nil), srv.deps.Scanner.Roots()...)
+			raw, err := os.ReadFile(cfgPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv.deps.CfgHolder.RecordFile(cfgPath, raw)
+			edited := bytes.Replace(raw, []byte("Test Library"), []byte("Edited Library"), 1)
+			stop := config.OnTurnTakenForTest(cfgPath, func() {
+				if err := os.WriteFile(cfgPath, edited, 0o600); err != nil {
+					t.Error(err)
+				}
+			})
+			defer stop()
+			requireTheRootChangeRefused(t, srv, dataDir, cfgPath, method, body, sidecar, roots, func() []byte { return edited })
+		})
+	}
+}
+
+// rootChangeCases are the root changes that change the library index before
+// their save: an add that takes the library from one root to two, a remove
+// that leaves two, and a remove that collapses it to one.
+func rootChangeCases() []rootChangeCase {
+	return []rootChangeCase{
 		{"an add that takes the library from one root to two",
 			func(t *testing.T, srv *Server, dataDir string) (string, map[string]string, string) {
 				return http.MethodPost, map[string]string{"path": emptyExtraRoot(t, dataDir)}, singleRootSong
@@ -103,32 +190,5 @@ func TestARootChangeTheSaveRefusesLeavesTheLibraryAlone(t *testing.T) {
 				}
 				return http.MethodDelete, map[string]string{"path": extra}, source
 			}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			srv, dataDir, cfgPath, _, _, _ := seedSingleRootTrack(t)
-			method, body, source := tc.arrange(t, srv, dataDir)
-			sidecar := seedRendition(t, srv, dataDir, source)
-			roots := append([]string(nil), srv.deps.Scanner.Roots()...)
-			edited := editConfigBesideTheConsole(t, srv, cfgPath)
-
-			if code := doJSON(t, srv.Handler(), method, "/api/roots", body, nil); code != http.StatusInternalServerError {
-				t.Errorf("the root change over a config another writer changed answered %d, want 500", code)
-			}
-			// The failed change's scan, which redoes the walk the change
-			// cancelled, may still be reading the library.
-			srvBgScansWait(t, srv)
-			if _, err := os.Stat(sidecar); err != nil {
-				t.Errorf("the refused root change unlinked the rendition %s: %v", sidecar, err)
-			}
-			if n := carryCount(t, dataDir); n != 0 {
-				t.Errorf("the refused root change recorded %d dates for a flip", n)
-			}
-			if got, _ := os.ReadFile(cfgPath); !bytes.Equal(got, edited) {
-				t.Errorf("the refused root change wrote the config:\n%s", got)
-			}
-			if got := srv.deps.Scanner.Roots(); !slices.Equal(got, roots) {
-				t.Errorf("the refused root change moved the scanner's roots to %q, want %q", got, roots)
-			}
-		})
 	}
 }

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -542,21 +541,19 @@ func runDACBind(ctx context.Context, args []string, env outputBindEnv, stdout, s
 	// The binding is saved into the config as it stands under the locks,
 	// not as it was read before them: a restore, a library add, or a
 	// serve's last settings save before it stopped, that committed in
-	// between would otherwise be written over with the older copy. The path
-	// is the one resolved above, so this reads that file again. read is the
-	// bytes this read parses, or older ones: a writer that takes no lock (an
-	// edit, or a bridge older than the lock) can still save, so the save
-	// asks just before its rename whether the file still holds them
-	// (SaveIf), the second guard, which narrows that window to the instant
-	// before the rename and does not close it.
-	read, err := os.ReadFile(cfgPath)
-	if err == nil {
-		cfg, _, err = loadCLIConfig(cfgPath)
-	}
+	// between would otherwise be written over with the older copy. It is the
+	// config the turn found once it was taken (LoadFound), and read is those
+	// bytes: a writer that takes no lock (an edit, or a bridge older than the
+	// lock) can still save, so the save asks before each attempt at its
+	// rename whether the file still holds them (SaveIf), the second guard
+	// beside the turn's own, which narrows that window to the instant before
+	// the rename and does not close it.
+	cfg, err = lock.LoadFound()
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: config load: %v\n", cmd, err)
 		return 1
 	}
+	read, _ := lock.Found()
 	if cfg.DataDir != dataDir {
 		fmt.Fprintf(stderr, "%s: the config's data dir changed from %s to %s while bind took the lock on the first\n", cmd, dataDir, cfg.DataDir)
 		fmt.Fprintln(stderr, "  Run bind again: it locks the data dir the config names.")
@@ -587,7 +584,14 @@ func runDACBind(ctx context.Context, args []string, env outputBindEnv, stdout, s
 		env.beforeSave()
 	}
 	err = cfg.SaveIf(lock, func(ctx context.Context) error {
-		if now, err := config.ReadFile(ctx, cfgPath); err != nil || !bytes.Equal(now, read) {
+		// Read as the turn's own comparison reads, asked again while
+		// Windows answers that another process holds the file; a read that
+		// fails for good is that failure, never a change.
+		now, err := config.ReadFile(ctx, cfgPath)
+		switch {
+		case err != nil:
+			return fmt.Errorf("read %s again before replacing it: %w", cfgPath, err)
+		case !bytes.Equal(now, read):
 			return errBindConfigChanged
 		}
 		return nil

@@ -2759,14 +2759,16 @@ const autoInitDefaultRoot = "/library"
 // file in the config dir, which fails if the parent doesn't exist yet.
 //
 // The seed is written in a turn of bridge.yaml's lock (config.LockFile,
-// backlog B506), and only while the file is still missing once the lock is
-// held: a config another writer saved since serve looked (an init, a second
-// container start) is kept, and serve loads it. Its save asks once more just
-// before the rename, as every save in a turn does, so a config a writer that
-// takes no turns (an edit, a bridge older than the lock) put there meanwhile
-// is kept too. wrote says whether the seed was written.
+// backlog B506), and only while the turn finds no file: a config another
+// writer saved since serve looked (an init, a second container start) is
+// kept, and serve loads it. Its save asks once more before each attempt at
+// its rename, as every save in a turn does, so a config a writer that takes
+// no turns (an edit, a bridge older than the lock) put there meanwhile is
+// kept too. A name that is a link to no file is refused by the turn, so the
+// seed neither makes a file where the link points nor puts one in its place.
+// wrote says whether the seed was written.
 func writeAutoInitConfig(cfgPath string) (wrote bool, err error) {
-	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
+	if err := os.MkdirAll(configDirAsWritten(cfgPath), 0o700); err != nil {
 		return false, fmt.Errorf("create config dir: %w", err)
 	}
 	cfg := baseConfig([]string{autoInitDefaultRoot}, config.DefaultLibraryName, "data")
@@ -2778,7 +2780,7 @@ func writeAutoInitConfig(cfgPath string) (wrote bool, err error) {
 		return false, fmt.Errorf("save seed config: %w", err)
 	}
 	defer lock.Unlock()
-	if _, err := os.Stat(cfgPath); !errors.Is(err, os.ErrNotExist) {
+	if _, found := lock.Found(); found {
 		return false, nil
 	}
 	// The save asks again just before its rename, in the comparison every
@@ -2790,6 +2792,23 @@ func writeAutoInitConfig(cfgPath string) (wrote bool, err error) {
 		return false, fmt.Errorf("save seed config: %w", err)
 	}
 	return true, nil
+}
+
+// configDirAsWritten is the directory part of a config's name as written,
+// nothing cleaned: the directory the OS creates the file in, a `..` after a
+// link included, where filepath.Dir would clean the `..` away with the link.
+// On Windows it is filepath.Dir, whose cleaning is Win32's own.
+func configDirAsWritten(cfgPath string) string {
+	if filepath.Separator != '/' {
+		return filepath.Dir(cfgPath)
+	}
+	switch i := strings.LastIndexByte(cfgPath, '/'); {
+	case i > 0:
+		return cfgPath[:i]
+	case i == 0:
+		return "/"
+	}
+	return "."
 }
 
 // thumbKeyPattern bounds the cache keys ArtworkThumbPath will build a
@@ -2898,10 +2917,18 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// error — the same silently-configless snapshot this commit is
 	// fixing, reintroduced through a different door.
 	//
-	// filepath.Abs only fails when os.Getwd does; keep the relative value
+	// Made absolute AS WRITTEN (fsutil.AbsAsWritten), never cleaned: a `..`
+	// after a link climbs from where the link leads, so filepath.Abs's
+	// lexical cleaning of cfg/link/../bridge.yaml named cfg/bridge.yaml,
+	// another file than the one the OS opens for the name and every CLI
+	// writer locks and saves (B506's third round). config.Load still takes
+	// the base of the config's relative paths from the name as Abs cleans
+	// it, as it always has, so the data dir does not move.
+	//
+	// AbsAsWritten only fails when os.Getwd does; keep the relative value
 	// in that case rather than losing the path entirely.
 	resolved, _ := resolveConfigPath(*configPath)
-	if abs, absErr := filepath.Abs(resolved); absErr == nil {
+	if abs, absErr := fsutil.AbsAsWritten(resolved); absErr == nil {
 		resolved = abs
 	}
 	*configPath = resolved
@@ -5236,10 +5263,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// of library roots lands on both sides in lockstep.
 	//
 	// *configPath was already resolved AND absolutised at the top of
-	// runServe, so this is a no-op Clean rather than a second resolution.
-	// It stays as the belt-and-braces path for the one case that skips
-	// the earlier absolutise — filepath.Abs failing on a broken Getwd.
-	absCfgPath, _ := filepath.Abs(*configPath)
+	// runServe, as written: cleaning it here (filepath.Abs) would name
+	// another file than the one serve loaded for a name with a `..` after a
+	// link, and the console would lock and save that one.
+	absCfgPath := *configPath
 	// Shared instance across the admin tile AND the api server: the
 	// api layer's `/v1/health.endpoints` advertising in tsnet mode
 	// queries this same source for the embedded node's MagicDNSName +

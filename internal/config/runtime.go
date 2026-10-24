@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // RuntimeConfig is the process-wide holder for the live config
@@ -22,9 +25,12 @@ type RuntimeConfig struct {
 	mu sync.Mutex
 	// file is the config file's bytes as this holder last read them for
 	// the live snapshot (RecordFile) or wrote them (Update), and fileKnown
-	// whether it has either; both under mu.
+	// whether it has either; target is that file, as a turn resolves its
+	// name (the target of a link at its last element), "" when the name
+	// could not be resolved. All under mu.
 	file      []byte
 	fileKnown bool
+	target    string
 	// changedMu guards changed, the channel the next Store closes
 	// (Changed), nil until someone asks for it.
 	changedMu sync.Mutex
@@ -52,14 +58,21 @@ func (e *ChangedOutsideError) Error() string {
 func (e *ChangedOutsideError) Is(target error) bool { return target == ErrChangedOutside }
 
 // RecordFile tells the holder raw, the bytes the config file at path held
-// when the live snapshot was read from it (LoadFile): its first Update then
-// saves only over a file that still holds them. path is the name the holder's
-// saves give Update. A holder told nothing saves its first Update over
-// whatever the file holds, and records from then on.
+// when the live snapshot was read from it (LoadFile), and the file that name
+// opens now, as a turn resolves it: its first Update then saves only into
+// that file, and only while it still holds them. path is the name the
+// holder's saves give Update; a link at its last element repointed since
+// (a dotfiles restow, a home-manager switch) names a file the holder never
+// read, which Update refuses. A holder told nothing saves its first Update
+// over whatever the file holds, and records from then on.
 func (r *RuntimeConfig) RecordFile(path string, raw []byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.file, r.fileKnown = append([]byte(nil), raw...), true
+	r.target = ""
+	if dir, name, err := fsutil.ResolveParent(path); err == nil {
+		r.target = filepath.Join(dir, name)
+	}
 }
 
 // Changed returns a channel that the next Store closes, the Store an
@@ -132,19 +145,21 @@ func (r *RuntimeConfig) Clone() *Config {
 // The save is a turn of the config file's lock (LockFile), shared with
 // every writer outside the process (backlog B506), taken before the clone
 // and before fn runs, and in it the file is read again: the snapshot was
-// read before the turn, so it is changed and saved only over a file that
-// still holds the bytes this holder last read (RecordFile) or wrote, and
-// the save compares once more just before its rename (Save's own
-// comparison). Over a file another writer changed since (a library add,
-// init, a restore or an edit beside the running bridge), nothing is saved
-// or stored and a *ChangedOutsideError says so: the file keeps that
+// read before the turn, so it is changed and saved only into the file this
+// holder read (RecordFile: a name whose link was repointed since resolves to
+// another file), only while it still holds the bytes this holder last read or
+// wrote, and the save compares once more before each attempt at its rename
+// (Save's own comparison). Over a file another writer changed since (a
+// library add, init, a restore or an edit beside the running bridge), nothing
+// is saved or stored and a *ChangedOutsideError says so: the file keeps that
 // writer's change, which the bridge loads when it next starts, and nothing
-// reloads it now. A lock another writer holds past LockWait is a
-// *BusyError. Either refusal comes before fn runs, so a caller that changes
-// something besides the config in fn (the console's root changes change
-// the library index there) changes nothing when the save is refused before
-// it; only the comparison just before the rename, a writer that takes no
-// turns landing in the save's own staging, refuses after fn has run.
+// reloads it now. A lock another writer holds past LockWait is a *BusyError.
+// Either refusal comes before fn runs, so a caller that changes something
+// besides the config in fn (the console's root changes change the library
+// index there) changes nothing when the save is refused before it, and such a
+// caller asks the turn's comparison again just before that change
+// (UpdateChecked); only a writer that takes no turns landing during that
+// change itself, or the save's staging, is refused after it has run.
 //
 // When fn returns an error the clone is discarded: nothing is saved
 // or stored, and fn's error is returned verbatim. A Save failure
@@ -154,6 +169,17 @@ func (r *RuntimeConfig) Clone() *Config {
 // not retain the clone after returning, and holds every other writer of
 // the file off while it runs.
 func (r *RuntimeConfig) Update(path string, fn func(*Config) error) error {
+	return r.UpdateChecked(path, func(next *Config, _ func() error) error { return fn(next) })
+}
+
+// UpdateChecked is Update, handing fn as well the turn's comparison of the
+// config file, asked again when called (check, FileLock.Check): fn calls it
+// just before work of its own that a refusal of the save after it would leave
+// done, as the console's root changes do before their library index change,
+// so that a file a writer that takes no turns changed since the turn read it
+// refuses the change before that work. A check that finds the file changed is
+// a *ChangedOutsideError, which fn returns, and Update returns as it is.
+func (r *RuntimeConfig) UpdateChecked(path string, fn func(next *Config, check func() error) error) error {
 	if r == nil {
 		return errors.New("config: Update on nil RuntimeConfig")
 	}
@@ -167,11 +193,20 @@ func (r *RuntimeConfig) Update(path string, fn func(*Config) error) error {
 		return err
 	}
 	defer l.Unlock()
-	if r.fileKnown && (l.absent || !bytes.Equal(l.found, r.file)) {
+	found, ok := l.Found()
+	if r.fileKnown && ((r.target != "" && l.target != r.target) || !ok || !bytes.Equal(found, r.file)) {
 		return &ChangedOutsideError{Path: path}
 	}
 	next := Clone(r.Load())
-	if err := fn(next); err != nil {
+	check := func() error {
+		if err := l.Check(); errors.Is(err, ErrChangedInTurn) {
+			return &ChangedOutsideError{Path: path}
+		} else if err != nil {
+			return err
+		}
+		return nil
+	}
+	if err := fn(next, check); err != nil {
 		return err
 	}
 	written, err := next.save(l, nil)
@@ -181,7 +216,7 @@ func (r *RuntimeConfig) Update(path string, fn func(*Config) error) error {
 	if err != nil {
 		return err
 	}
-	r.file, r.fileKnown = written, true
+	r.file, r.fileKnown, r.target = written, true, l.target
 	r.Store(next)
 	return nil
 }

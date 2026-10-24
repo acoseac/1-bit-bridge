@@ -20,16 +20,18 @@ import (
 // a function, or a package-level variable's value, that calls the config's
 // Save or SaveIf or its turn's SaveBytes, or takes one of them as a value
 // (`save := cfg.Save`), that changes the config through config.Edit, that
-// saves through the live holder's Update (serve's console), or that writes a
-// file (fileWriteCall) while it names the config's path (configPathNames, or
-// the literal "bridge.yaml"), as restore once copied a snapshot's bridge.yaml
-// over it.
+// saves through the live holder's Update or UpdateChecked (serve's console),
+// or that writes a file (fileWriteCall) while it names the config's path
+// (configPathNames, or the literal "bridge.yaml"), as restore once copied a
+// snapshot's bridge.yaml over it.
 //
 // A new writer goes here with its lock, which the sweep then requires it to
-// call, and, for one that saves itself, to call before the read its save is
-// made from (configReadCall). The console's writers all go through
-// (*RuntimeConfig).Update, which takes the lock itself, so theirs is the
-// holder's Update, and Edit's callers' is Edit, which reads in its own turn.
+// call, and, for one that saves itself, to call before its save and to decide
+// on what that turn found (turnReadCall), reading the config in the turn
+// through nothing else. The console's writers all go through
+// (*RuntimeConfig).UpdateChecked, Update's own, which takes the lock itself,
+// so theirs is the holder's Update or UpdateChecked, and Edit's callers' is
+// Edit, which decides on its own turn's bytes.
 //
 // The sweep reads one function at a time: a helper that is handed the path
 // by a caller in another function, and writes it, is a writer it does not
@@ -43,13 +45,13 @@ var configWriters = map[string]string{
 	"cmd/bridge/main.go:writeAutoInitConfig":                             "config.LockFile",
 	"cmd/bridge/output_dac_bind.go:runDACBind":                           "config.LockFile",
 	"cmd/bridge/upnp_upstream_admin.go:upnpAdminAdapter.updateCfg":       "cfgHolder.Update",
-	"internal/admin/handlers_api.go:Server.applyRootAddition":            "CfgHolder.Update",
-	"internal/admin/handlers_api.go:Server.applyRootRemoval":             "CfgHolder.Update",
+	"internal/admin/handlers_api.go:Server.applyRootAddition":            "CfgHolder.UpdateChecked",
+	"internal/admin/handlers_api.go:Server.applyRootRemoval":             "CfgHolder.UpdateChecked",
 	"internal/admin/handlers_api.go:Server.apiSettingsPatch":             "CfgHolder.Update",
 	"internal/admin/handlers_variants_dir.go:Server.apiVariantsDirPatch": "CfgHolder.Update",
 	"internal/backup/backup.go:RestoreWithOptions":                       "config.LockFile",
 	"internal/config/lock.go:Edit":                                       "LockFile",
-	"internal/config/runtime.go:RuntimeConfig.Update":                    "LockFile",
+	"internal/config/runtime.go:RuntimeConfig.UpdateChecked":             "LockFile",
 }
 
 // configSavePrimitive is the config's own save, in internal/config: the
@@ -64,8 +66,19 @@ var configSavePrimitive = map[string][]string{
 	"internal/config/config.go:Config.SaveIf":    {"save"},
 	"internal/config/config.go:Config.save":      {"heldFor", "write"},
 	"internal/config/lock.go:FileLock.SaveBytes": {"write"},
-	"internal/config/lock.go:FileLock.write":     {"heldFor", "stillAsFound", "RenameWithRetry"},
+	"internal/config/lock.go:FileLock.write":     {"heldFor", "stillAsFound", "RenameWithRetryIf"},
 }
+
+// turnReadMethods are the names of a turn's own reads, the bytes LockFile
+// found (FileLock.Found) and the config loaded from them (FileLock.LoadFound),
+// which are what a writer that saves itself decides on.
+var turnReadMethods = map[string]bool{"Found": true, "LoadFound": true}
+
+// turnReadHelpers are this tree's functions a writer calls to decide on what
+// its turn found, each of which the sweep requires to make one of the turn's
+// own reads itself: init's comparison of the file it read at its start with
+// the one its turn found, and a restore's of the file its caller read.
+var turnReadHelpers = map[string]bool{"configChangedSinceRead": true, "configStillAsRead": true}
 
 // notConfigWriters are the functions that write a file while they name the
 // config's path and still write no config file, each with what it writes
@@ -104,10 +117,13 @@ var writeFlags = map[string]bool{"O_WRONLY": true, "O_RDWR": true, "O_CREATE": t
 // handed, as the sweep renders them; os.ReadFile, os.Open, os.Stat, os.Lstat
 // and fsutil.ReadAsFile are reads of it when they name its path, and inside
 // internal/config the package's own reads (Load, LoadFile, loadData) and any
-// os.ReadFile or fsutil.ReadAsFile are.
+// os.ReadFile or fsutil.ReadAsFile are. None of them is a turn's own read
+// (turnReadCall): a writer that saves itself reads the config in its turn
+// through the turn alone, so a Stat, a Load or any read its saved copy does
+// not come from is reported there.
 var configReadCalls = map[string]bool{
-	"config.Load": true, "config.LoadFile": true, "loadCLIConfig": true, "loadCLIConfigFile": true,
-	"readConfigAsIs": true, "configChangedSinceRead": true,
+	"config.Load": true, "config.LoadFile": true, "config.ReadFile": true, "loadCLIConfig": true,
+	"loadCLIConfigFile": true, "readConfigAsIs": true,
 }
 
 // pathReadCalls are the reads that are a read of the config when they name
@@ -120,7 +136,7 @@ var pathReadCalls = map[string]bool{
 const (
 	writesBySave   = "calls the config's Save or SaveIf"
 	writesByEdit   = "changes the config through config.Edit"
-	writesByHolder = "saves through the live config holder's Update"
+	writesByHolder = "saves through the live config holder's Update or UpdateChecked"
 	writesByFile   = "writes a file while it names the config's path"
 )
 
@@ -174,6 +190,39 @@ func TestEveryConfigWriterTakesTheConfigLock(t *testing.T) {
 			}
 		}
 	}
+	for _, p := range turnReadHelperProblems(primitive) {
+		t.Error(p)
+	}
+}
+
+// turnReadHelperProblems says which of turnReadHelpers the sweep did not
+// find, and which it found making none of a turn's own reads, so that a
+// helper the sweep counts as one cannot come to decide on a read of its own.
+func turnReadHelperProblems(found map[string]map[string]bool) []string {
+	var problems []string
+	for name := range turnReadHelpers {
+		seen, reads := false, false
+		for key, calls := range found {
+			if !strings.HasSuffix(key, ":"+name) {
+				continue
+			}
+			seen = true
+			for c := range calls {
+				if i := strings.LastIndexByte(c, '.'); i >= 0 && turnReadMethods[c[i+1:]] {
+					reads = true
+				}
+			}
+		}
+		switch {
+		case !seen:
+			problems = append(problems, fmt.Sprintf("the sweep found no %s: turnReadHelpers is out of date", name))
+		case !reads:
+			problems = append(problems, fmt.Sprintf("%s makes none of a turn's own reads (FileLock.LoadFound, FileLock.Found), "+
+				"so a writer the sweep counts as deciding on its turn's bytes may decide on a read of its own", name))
+		}
+	}
+	sort.Strings(problems)
+	return problems
 }
 
 // configWriterProblems compares what the sweep found with the writers named
@@ -236,14 +285,17 @@ func isChain(c, lock string) bool {
 
 // lockOrderProblem says what is wrong with the order of a named writer that
 // saves the config itself, and "" when nothing is: it must take its lock
-// before it saves, and the last read of the config before its first save, the
-// read that save is made from, must come after the lock (a writer may read
-// before its turn to decide, as bind and library add do, if it reads again in
-// it). A writer that saves through Edit or the holder's Update is left out:
-// the save there is made from the read Edit and Update make in their own
-// turn. Positions are the source's, not the control flow's: a read in a loop
-// after the save, or one through a helper configReadCalls does not name, is
-// not seen.
+// before it saves, decide its save on what that turn found, by one of the
+// turn's own reads (turnReadCall) between the lock and its first save, and
+// read the config there through nothing else (a writer may read before its
+// turn to decide what to ask, as bind and init do, if it decides again on
+// what its turn found). A writer that saves through Edit or the holder's
+// Update is left out: Edit and Update are named writers themselves, and
+// decide on their own turn's bytes. Positions are the source's, not the
+// control flow's: a read in a loop after the save, or one through a helper
+// configReadCalls does not name, is not seen, and nor is which bytes a save is
+// made from: a writer that makes a turn's read and saves a copy it read
+// before is not told apart.
 func lockOrderProblem(key string, site configWriteSite, lock string) string {
 	if len(site.saves) == 0 {
 		return ""
@@ -259,17 +311,31 @@ func lockOrderProblem(key string, site configWriteSite, lock string) string {
 	if lockAt > saveAt {
 		return fmt.Sprintf("%s: %s saves the config before it takes %s", site.pos, key, lock)
 	}
-	readAt := token.NoPos
+	inTurn := func(p token.Pos) bool { return p > lockAt && p < saveAt }
 	for _, r := range site.reads {
-		if r < saveAt {
-			readAt = r
+		if inTurn(r) {
+			return fmt.Sprintf("%s: %s reads the config in its turn of %s through something other than the turn: "+
+				"decide on what the turn found (FileLock.LoadFound, FileLock.Found)", site.pos, key, lock)
 		}
 	}
-	if readAt != token.NoPos && readAt < lockAt {
-		return fmt.Sprintf("%s: %s reads the config before it takes %s and saves what it read, with no read of it in "+
-			"that turn: read it again under the lock, and decide on that copy", site.pos, key, lock)
+	for _, c := range site.at {
+		if inTurn(c.pos) && turnReadCall(c.chain) {
+			return ""
+		}
 	}
-	return ""
+	return fmt.Sprintf("%s: %s saves the config without deciding on what its turn of %s found: "+
+		"a read before the turn, or a probe in it, is not the turn's (FileLock.LoadFound, FileLock.Found)", site.pos, key, lock)
+}
+
+// turnReadCall reports whether the rendered call chain is one of a turn's own
+// reads (turnReadMethods, on whatever the turn is called) or a helper that
+// decides on one (turnReadHelpers).
+func turnReadCall(chain string) bool {
+	if turnReadHelpers[chain] {
+		return true
+	}
+	i := strings.LastIndexByte(chain, '.')
+	return i >= 0 && turnReadMethods[chain[i+1:]]
 }
 
 // findConfigWriters sweeps the Go files this module builds, test files
@@ -342,6 +408,9 @@ func scanConfigWriters(name, src string) (map[string]configWriteSite, map[string
 		if _, ok := configSavePrimitive[key]; ok {
 			primitive[key] = site.calls
 			return
+		}
+		if turnReadHelpers[key[strings.LastIndexByte(key, ':')+1:]] {
+			primitive[key] = site.calls
 		}
 		if len(kinds) == 0 {
 			return
@@ -419,7 +488,7 @@ func inspectConfigWriter(body ast.Node, inConfig bool) (configWriteSite, map[str
 			case saveMethods[x.Sel.Name] || (inConfig && x.Sel.Name == "save"):
 				kinds[writesBySave] = true
 				site.saves = append(site.saves, x.Pos())
-			case x.Sel.Name == "Update":
+			case x.Sel.Name == "Update" || x.Sel.Name == "UpdateChecked":
 				if holder := callChain(x.X); strings.HasSuffix(strings.ToLower(holder), "cfgholder") {
 					kinds[writesByHolder] = true
 				}
@@ -593,7 +662,7 @@ func savesUnnamed(cfg *config.Config, l *config.FileLock) { _ = cfg.Save(l) }
 func savesNamedWithItsLock(path string) {
 	l, _ := config.LockFile(path)
 	defer l.Unlock()
-	cfg, _ := config.Load(path)
+	cfg, _ := l.LoadFound()
 	_ = cfg.SaveIf(l, nil)
 }
 
@@ -669,18 +738,46 @@ func readsAgainInItsTurn(cfgPath string) {
 	cfg, _ = config.Load(cfgPath)
 	_ = cfg.Save(l)
 }
+
+func statsInItsTurn(cfgPath string) {
+	cfg, _ := config.Load(cfgPath)
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	_, _ = os.Stat(cfgPath)
+	_ = cfg.Save(l)
+}
+
+func decidesOnWhatItsTurnFound(cfgPath string) {
+	cfg, _ := config.Load(cfgPath)
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	cfg, _ = l.LoadFound()
+	_ = cfg.Save(l)
+}
+
+func savesOnlyWhereItsTurnFoundNone(cfgPath string, cfg *config.Config) {
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	if _, ok := l.Found(); ok {
+		return
+	}
+	_ = cfg.Save(l)
+}
 `
 	sites, _, err := scanConfigWriters("x/x.go", src)
 	if err != nil {
 		t.Fatal(err)
 	}
 	named := map[string]string{
-		"x/x.go:savesNamedWithItsLock":        "config.LockFile",
-		"x/x.go:savesNamedWithoutItsLock":     "config.LockFile",
-		"x/x.go:server.savesThroughTheHolder": "CfgHolder.Update",
-		"x/x.go:gone":                         "config.LockFile",
-		"x/x.go:readsBeforeItsLock":           "config.LockFile",
-		"x/x.go:readsAgainInItsTurn":          "config.LockFile",
+		"x/x.go:savesNamedWithItsLock":          "config.LockFile",
+		"x/x.go:savesNamedWithoutItsLock":       "config.LockFile",
+		"x/x.go:server.savesThroughTheHolder":   "CfgHolder.Update",
+		"x/x.go:gone":                           "config.LockFile",
+		"x/x.go:readsBeforeItsLock":             "config.LockFile",
+		"x/x.go:readsAgainInItsTurn":            "config.LockFile",
+		"x/x.go:statsInItsTurn":                 "config.LockFile",
+		"x/x.go:decidesOnWhatItsTurnFound":      "config.LockFile",
+		"x/x.go:savesOnlyWhereItsTurnFoundNone": "config.LockFile",
 	}
 	excused := map[string]string{
 		"x/x.go:copiesThePathElsewhere": "writes the bundle",
@@ -706,7 +803,9 @@ func readsAgainInItsTurn(cfgPath string) {
 		"x/x.go:renamesOverThePath writes a file while it names the config's path, and configWriters does not name it",
 		"x/x.go:savesFromAFuncValue calls the config's Save or SaveIf, and configWriters does not name it",
 		"x/x.go:savesThroughAMethodValue calls the config's Save or SaveIf, and configWriters does not name it",
-		"x/x.go:readsBeforeItsLock reads the config before it takes config.LockFile",
+		"x/x.go:readsBeforeItsLock saves the config without deciding on what its turn of config.LockFile found",
+		"x/x.go:readsAgainInItsTurn reads the config in its turn of config.LockFile through something other than the turn",
+		"x/x.go:statsInItsTurn reads the config in its turn of config.LockFile through something other than the turn",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("the sweep reported %d problems, want %d:\n%s", len(got), len(want), strings.Join(got, "\n"))
@@ -725,6 +824,13 @@ func readsAgainInItsTurn(cfgPath string) {
 	for _, through := range []string{"writesAnotherFile", "namesThePathAndWritesNothing", "opensForReadingThroughARoot"} {
 		if _, ok := sites["x/x.go:"+through]; ok {
 			t.Errorf("the sweep took %s for a writer of the config", through)
+		}
+	}
+	for _, decided := range []string{"savesNamedWithItsLock", "decidesOnWhatItsTurnFound", "savesOnlyWhereItsTurnFoundNone"} {
+		for _, g := range got {
+			if strings.Contains(g, "x/x.go:"+decided+" ") {
+				t.Errorf("the sweep reported %s, which decides on what its turn found: %s", decided, g)
+			}
 		}
 	}
 	if site := sites["x/x.go:server.savesThroughTheHolder"]; len(site.kinds) != 1 || site.kinds[0] != writesByHolder {

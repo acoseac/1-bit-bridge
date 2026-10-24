@@ -26,6 +26,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/adminauth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/packaging"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 )
@@ -401,13 +402,30 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// service fails at start with a silent "no such file" from the
 	// daemon's log. Resolving here keeps the rest of init trust-but-
 	// verify-free.
-	if absDir, err := filepath.Abs(expandHome(cfgDir)); err == nil {
-		cfgDir = absDir
-	} else {
+	//
+	// The config file is named as written (fsutil.AbsAsWritten): it is
+	// the file the OS opens for --dir, a `..` after a link climbing from
+	// where the link leads, the file serve and every CLI writer open for
+	// that name (B506's third round). The directory init prints and puts
+	// the data dir in is that name cleaned, the base config.Load takes
+	// from it, as before.
+	cfgDirAsWritten, err := fsutil.AbsAsWritten(expandHome(cfgDir))
+	if err != nil {
 		fmt.Fprintf(stderr, "resolve --dir path: %v\n", err)
 		return 1
 	}
-	cfgPath := filepath.Join(cfgDir, "bridge.yaml")
+	cfgDir = filepath.Clean(cfgDirAsWritten)
+	cfgPath := cfgDirAsWritten + string(filepath.Separator) + "bridge.yaml"
+	if strings.HasSuffix(cfgDirAsWritten, string(filepath.Separator)) {
+		cfgPath = cfgDirAsWritten + "bridge.yaml"
+	}
+	// A config that is a link to no file is refused before anything is
+	// written: a save there would make a file where the link points or put
+	// one in its place, and the data dir and the TLS pair come first.
+	if err := config.CheckName(cfgPath); err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return 1
+	}
 	// The install already at cfgPath, as its file says (priorInstallFile). A
 	// rewrite keeps its data dir, which the header, the preflight, the
 	// credential store, the TLS pair and the service all use from here on.
@@ -690,11 +708,11 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// are non-fatal: if perms can't be tightened (e.g. the dir is on
 	// a filesystem that ignores POSIX modes, or Windows ACLs differ)
 	// we still want init to succeed — surface a warning.
-	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+	if err := os.MkdirAll(cfgDirAsWritten, 0o700); err != nil {
 		fmt.Fprintf(stderr, "mkdir config dir: %v\n", err)
 		return 1
 	}
-	if err := os.Chmod(cfgDir, 0o700); err != nil {
+	if err := os.Chmod(cfgDirAsWritten, 0o700); err != nil {
 		fmt.Fprintf(stderr, "warning: chmod config dir: %v\n", err)
 	}
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
@@ -933,7 +951,7 @@ func saveInitConfig(stderr io.Writer, cfgPath string, asRead configAsRead, cfg *
 		return 1
 	}
 	defer lock.Unlock()
-	if configChangedSinceRead(stderr, cfgPath, asRead) {
+	if configChangedSinceRead(stderr, cfgPath, asRead, lock) {
 		return 1
 	}
 	// The save asks once more just before its rename, as every save in a

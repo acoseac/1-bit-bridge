@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/netip"
 	"net/url"
@@ -2803,10 +2804,15 @@ func Load(path string) (*Config, error) {
 
 // LoadFile is Load, and the bytes it read: what serve hands its live config
 // holder (RuntimeConfig.RecordFile), so that a console save can tell the
-// file another writer changed since from the one serve read.
+// file another writer changed since from the one serve read. A name that is a
+// symbolic link to no file says so, and what to do, as a turn of the file's
+// lock refuses it.
 func LoadFile(path string) (*Config, []byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if info, lerr := os.Lstat(path); errors.Is(err, fs.ErrNotExist) && lerr == nil && info.Mode()&fs.ModeSymlink != 0 {
+			err = &linkToNothingError{path: path, err: err}
+		}
 		return nil, nil, fmt.Errorf("read config %q: %w", path, err)
 	}
 	cfg, err := loadData(path, data)

@@ -9,10 +9,12 @@ import (
 )
 
 // noLockAnswers are what flock answers where no lock can be taken at all: a
-// filesystem that keeps none (ENOLCK, EOPNOTSUPP and ENOTSUP, from some NFS
-// and SMB mounts), or a platform that has none.
+// filesystem that keeps none (EOPNOTSUPP and ENOTSUP, from some NFS, FUSE and
+// SMB mounts), or a platform that has none. ENOLCK is not one of them: it is
+// also a kernel out of lock records beside a writer that holds the lock
+// (lock_nolock_unix_test.go).
 func noLockAnswers() []error {
-	return []error{unix.ENOLCK, unix.EOPNOTSUPP, unix.ENOTSUP, errors.ErrUnsupported}
+	return []error{unix.EOPNOTSUPP, unix.ENOTSUP, errors.ErrUnsupported}
 }
 
 // otherLockFailures are failures to take the lock that say nothing about the

@@ -423,6 +423,38 @@ func RenameWithRetryCtx(ctx context.Context, src, dst string) error {
 	return nil
 }
 
+// RenameWithRetryIf is RenameWithRetryCtx for a rename that is right only
+// while a condition holds, a config save's comparison with the file its turn
+// found: before runs ahead of every attempt, the first included, and an error
+// of its ends the retries at once, returned as it is, with no rename tried
+// after it. Only the rename's own failures are tried again, on
+// RenameWithRetry's schedule: a refusal tried again could find the file put
+// back as it was between attempts, and write over the change it refused. ctx
+// bounds the whole loop, before's work, the attempts and the waits between
+// them; a ctx that ends during a wait ends the loop with the last rename's
+// failure. On success the destination's directory is synced, as
+// RenameWithRetry syncs it.
+func RenameWithRetryIf(ctx context.Context, src, dst string, before func() error) error {
+	var err error
+	for _, d := range renameBackoff {
+		if d > 0 {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("%w (stopped retrying: %w)", err, ctx.Err())
+			case <-time.After(d):
+			}
+		}
+		if refused := before(); refused != nil {
+			return refused
+		}
+		if err = renameFunc(src, dst); err == nil {
+			commitDirEntry(dst)
+			return nil
+		}
+	}
+	return err
+}
+
 // renameRetry is the rename and its retries, without the barrier: each
 // caller runs that in its own mode (commitDirEntry, or durableChain for
 // WriteBytesDurable).

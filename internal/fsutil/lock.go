@@ -47,7 +47,11 @@ func TryLock(f *os.File) error {
 // or ENOTSUP from flock; ERROR_NOT_SUPPORTED or ERROR_INVALID_FUNCTION from
 // LockFileEx), or the platform has none (errors.ErrUnsupported). Any other
 // failure is not that answer: a caller that goes on without a lock where the
-// filesystem keeps none still refuses there.
+// filesystem keeps none still refuses there. ENOLCK is weaker evidence than
+// the rest: Linux also answers it when the kernel cannot allocate a lock
+// record, on a filesystem that keeps locks and while another open holds one,
+// so a caller that must never go on beside a holder asks for it apart before
+// it asks this (the config file's lock, internal/config's noLockToGive).
 func KeepsNoLocks(err error) bool {
 	return err != nil && keepsNoLocks(err)
 }

@@ -87,9 +87,12 @@ func TestRuntimeConfigUpdate(t *testing.T) {
 			wantName:            "Home",
 		},
 		{
+			// The directory resolves through its nearest existing
+			// ancestor (fsutil.ResolveParent), and the lock cannot be
+			// made in a directory that is not there.
 			name:         "a config directory that is not there keeps live snapshot",
 			pathOverride: filepath.Join("no-such-dir", "bridge.yaml"),
-			wantErrText:  "find the directory",
+			wantErrText:  "open the lock beside",
 			wantName:     "Home",
 		},
 		{

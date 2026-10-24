@@ -209,11 +209,17 @@ func (a configAsRead) sameAs(b configAsRead) bool {
 // can follow a first install's TLS mint, which the next run loads, as it
 // loads the pair a Save that fails leaves. Since backlog B506 the check and
 // the save are one turn of bridge.yaml's lock (saveInitConfig), which every
-// writer that takes the lock waits for, and the save's own comparison just
-// before its rename leaves an edit only the rename itself, which no rename
-// can be made conditional on.
-func configChangedSinceRead(stderr io.Writer, cfgPath string, asRead configAsRead) bool {
-	if asRead.sameAs(readConfigAsIs(cfgPath)) {
+// writer that takes the lock waits for: the check compares the read with
+// what the turn found (FileLock.Found, B506's third round: the save is
+// decided on the turn's own bytes), and the save's own comparison before
+// each attempt at its rename leaves an edit only the rename itself, which no
+// rename can be made conditional on.
+func configChangedSinceRead(stderr io.Writer, cfgPath string, asRead configAsRead, lock *config.FileLock) bool {
+	found := configAsRead{err: fs.ErrNotExist}
+	if raw, ok := lock.Found(); ok {
+		found = configAsRead{raw: raw}
+	}
+	if asRead.sameAs(found) {
 		return false
 	}
 	sayConfigChangedWhileInitRan(stderr, cfgPath)
