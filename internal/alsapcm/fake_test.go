@@ -667,6 +667,7 @@ func receive[T any](t *testing.T, ch <-chan T, what string) T {
 	case v := <-ch:
 		return v
 	case <-timer.C:
+		LogGoroutines(t)
 		t.Fatalf("waited %v for %s", *watchdog, what)
 	}
 	var zero T

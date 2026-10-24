@@ -1,7 +1,9 @@
 package alsapcm
 
 import (
+	"bytes"
 	"context"
+	"runtime/pprof"
 	"slices"
 	"sync"
 	"testing"
@@ -237,3 +239,12 @@ func (tk *FakeKernel) PanicAtNextClockRead(v any) {
 // CheckClosedEach fails the test unless every open of the node was closed
 // once and nothing reached it while closed.
 func (tk *FakeKernel) CheckClosedEach(t *testing.T) { tk.k.checkClosedEach(t) }
+
+// LogGoroutines records all stacks before a watchdog failure, while the
+// stalled session still exists and before cleanup cancels it.
+func LogGoroutines(t *testing.T) {
+	t.Helper()
+	var b bytes.Buffer
+	_ = pprof.Lookup("goroutine").WriteTo(&b, 2)
+	t.Logf("goroutines at watchdog:\n%s", &b)
+}
