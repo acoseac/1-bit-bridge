@@ -1,10 +1,12 @@
 package alsapcm_test
 
 import (
+	"context"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
 )
@@ -93,9 +95,18 @@ func TestPlaybackStopsAtTheBoundaryOfAnEntryCutTooLate(t *testing.T) {
 		t.Fatalf("Cut of b, its first frames in the kernel's buffer, answered true")
 	}
 	// 150 ms is 6615 frames: past a's 5000, within what the buffer holds.
-	r.k.Play(t, 150*time.Millisecond)
-	r.tick()
-	s := r.waitStopped(engine.ReasonRemovedAudible)
+	// The boundary can stop the writer before it waits again, so grant
+	// time without Play's requirement that a live writer become starved.
+	r.k.Grant(150 * time.Millisecond)
+	s := r.tickUntilStopped(engine.ReasonRemovedAudible)
+	// Force the other ordering too: the stop and the reporter's exit can
+	// both precede the test's observation. No tick receiver remains.
+	ctx, cancel := context.WithTimeout(bg, alsapcm.Watchdog())
+	defer cancel()
+	if err := r.be.Wait(ctx); err != nil {
+		t.Fatal(err)
+	}
+	r.tickUntilStopped(engine.ReasonRemovedAudible)
 	if s.Selected() == ids[1] {
 		t.Errorf("the selection moved to the deleted entry")
 	}
