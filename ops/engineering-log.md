@@ -197,6 +197,31 @@ MPD socket fixture tests likewise failed solely on refused TCP/Unix binds.
 The report names every observed refusal. `make docs-check` is recorded in
 the final report after all documentation edits.
 
+Round 2 (2026-10-24): the source copies of MPD 0.24.4 `CommandLine.cxx`,
+`OptionParser.cxx` and `config/File.cxx` were read, replacing round 1's
+unverified grammar assumptions. Options work anywhere, long flags accept
+`=value`, `--` is invalid, and `--no-config` loads no file. Selection is now
+per card, using the already-resolved Tgid, stable stat start time around
+cmdline, basename `mpd`, and root identity (SameFile, else mountinfo device
+and root). Defaults require the daemon's bounded environment; unreadable
+environ always falls back, even for the same uid. Thus the earlier bridge
+HOME/XDG assumption is no longer a source claim. An unread configured file
+has no provenance, correcting the attempted-file claim; verified no-config
+has its own source with empty path and null config. The earlier statement
+that every emitted string used both files' secrets was false for the DAC
+mixer and other external fields: these now share all files' redaction.
+Dot, dotdot and empty argv path segments are refused rather than cleaned
+and published raw. Cap+1 was already implemented in ReadLogical; a new
+NUL-at-cap regression and a truncating-read control pin it. The DoP test now
+removes live dop, makes configured=yes and process=no, and asserts the
+process veto; only song mapping retains the configured file. Includes now
+preserve the unresolved named parent at every level and resolve link/..
+physically for open, confinement and cycle keys, correcting both lexical
+Join/Clean and early parent resolution. Regression failures were recorded
+before the fixes; fixed tests, restored mutation controls, toolchain gates
+and sandbox socket refusals are detailed in `report-r2.md` and
+`controls-r2/manifest.json`. PROTOCOL.md remains additive at version 1.
+
 ## File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)
 
 The whole-track spectrum (`1BSP`, 84 bytes = 24-byte header + 60 band bytes; `Track.bandwidthHz`; `GET /v1/spectrum`; `spectrum` health flag) answers "is this file an upsampled CD rip?". Five bridge PRs, each finding a defect only REAL data exposed — every synthetic fixture agreed with every other synthetic fixture and they were all wrong together. Invariants:

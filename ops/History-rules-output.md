@@ -97,84 +97,98 @@ unchanged; player.md and History-rules-player.md carry the operative rule.
 
 ### The reading's informational MPD config names its provenance (2026-10-24, B515)
 
-**Read cmdline only for one resolved MPD process whose owner thread matches an
-enabled live output, through the injected proc tree, bounded to 64 KiB and
-inside the config deadline. Never interpret shell text, read the thread id's
-cmdline as the process's, print argv, or follow a path outside the root. Use
-the first non-option absolute config argument, else MPD's default search with
-the injected HOME/XDG inputs; an unusable cmdline or file keeps the configured
-fallback. Keep this information and its warnings separate from the existing
-DoP veto and song mapping.**
+**Select per card from its one MPD Tgid and matching live output thread,
+never another card's owner. Require stable start time around bounded cmdline,
+argv[0] basename `mpd`, and the same filesystem root. Use MPD's bounded
+HOME/XDG environment for defaults; unreadable evidence falls back even for
+the same uid. Parse MPD's options anywhere, refuse `--`, unknown options and
+ambiguous paths, and report `--no-config` as no file. Never claim a file not
+read or expose argv/environ. Redact every external string against every
+config read and output.password. Use the selected file for the no-live-dop
+veto; retain configured song mapping.**
 
-`mpd.configProvenance` is an optional additive sibling of `mpd.config`, so it
-can name the attempted fallback even when that file could not be read. Its
-`source` is `process_cmdline`, `mpd_default` (MPD's default), or
-`configured_fallback`; `path` passes both files' password redaction and the
-bridge password's. A step abandoned at its deadline has no provenance.
-Discovery and both reads share the existing single-outstanding config step.
-The process is the owner's Tgid, never the ALSA status's owner_pid (a thread).
-No owner, a foreign process, no matching live output, missing proc root,
-unreadable MPD, or multiple MPD process ids means no cmdline read.
+Round 2 corrects round 1's global owner scan, assumed bridge environment,
+option grammar, attempted-file provenance, DoP input and incomplete
+redaction. `alsa.Owner.PID` already is the Tgid, resolved from the status of
+`Owner.TID` (ALSA's `owner_pid`). Only the output's card is eligible; a second
+MPD process on that card is ambiguous. The start time (stat field 22,
+parsing after the last `)` in comm) must agree before and after cmdline.
+The basename of argv[0] must be `mpd`. The root links under the injected
+proc tree must identify the same file, or, if they cannot be inspected,
+the two mountinfo `/` entries must agree on major:minor and root. A known
+mismatch is never overridden by the other check. Every operation stays in
+the bounded, single-outstanding config step; the ALSA configuration is read
+first, after the status bracket, so the picks already name the cards.
 
-Proc argv is NUL-separated, with one final separator, no empty arguments,
-and at most 64 KiB. Known no-value options and `--` precede the one config
-filename. Unknown options, extra operands, relative paths and backslashes
-are conservatively unmodeled and fall back. A relative filename cannot be
-resolved from the current cwd reliably after MPD daemonizes. Reads use
-`conf.ReadLogical` and `fsutil.OpenAsFile`, so a directory, pipe or device is
-refused, and a symlink outside the injected root is refused. Config paths
-are logical absolute paths under the tree beside the injected proc tree;
-the configured fallback retains its existing root and Windows-volume rule.
+Cmdline and environ use `ReadLogical`, which already reads cap+1 bytes and
+refuses overflow, including a NUL at the cap. Both caps are 64 KiB; stat is
+also 64 KiB and mountinfo 1 MiB. Environ is never retained in the snapshot,
+printed or logged. If it cannot be read, no default-source claim is made,
+regardless of uid: services can override HOME even for the same uid. There
+is deliberately no uid-based bridge-environment proxy. Empty readable
+environment means no home/XDG candidates. Duplicate or malformed relevant
+environment entries are refused. The default order remains the existing
+Linux USE_XDG `conf.Locate` order; the bridge does not model another build's
+compiled system config location.
 
-The default order is the Linux USE_XDG order already implemented by
-`conf.Locate`: the existing absolute XDG config directory's `mpd/mpd.conf`,
-else the existing home's `.config/mpd/mpd.conf`; then `.mpdconf`,
-`.mpd/mpd.conf`, and `/etc/mpd.conf`. An existing XDG directory suppresses
-the `.config` alternative even if its file is missing. The first existing
-file candidate is read. The inputs are the bridge's injected HOME/XDG
-values, not a claim to have read MPD's private environment; a daemon started
-with other variables can still select another default. This is information.
-MPD also reads config at startup only: the process path does not prove that
-today's bytes are what it loaded. The existing process-name/output-thread
-tie does not distinguish a second daemon with matching output names.
+MPD 0.24.4 `src/CommandLine.cxx` and `src/cmdline/OptionParser.cxx`, read
+from the supplied source copies in round 2, establish the flags, options
+anywhere, long `=value`, and rejection of `--`. At most one non-option
+filename is accepted; `--no-config` returns before MPD inspects remaining
+operands. Absolute file arguments reject backslashes, empty, dot and dotdot
+segments before mapping to the config root. Relative filenames remain
+unprovable because MPD can change cwd after loading them. No raw argv is
+published; validated logical paths are redacted by the same rules as the
+file's strings.
 
-The source basis is MPD 0.24.4 `src/CommandLine.cxx` `ParseCommandLine`,
-`src/fs/glue/StandardDirectory.cxx` `GetUserConfigDir`, and `doc/mpd.1`'s
-`mpd [OPTION...] [CONF_FILE]` synopsis, from source knowledge and the
-existing search rule, without network verification in this task. Exact
-option spellings and parser behavior require verification against MPD
-before merging. Tests drive the reading and the real HTTP handler with a
-recorder, so no listener or host proc/sys read is needed.
+The optional additive `configProvenance` identifies only files actually
+read: `process_cmdline`, `mpd_default`, `configured_fallback`. With no file
+read it is absent, except verified `--no-config`: `mpd_no_config`, empty
+path, null config. Config failures and expired steps never claim a file.
+Each card keeps its own selection and chains in the shared snapshot, and
+all files read supply redaction to every card's external strings, including
+DAC mixer/control, kernel names, song row and provenance. The configured
+file still supplies song mapping; selected config supplies information,
+config warnings and the no-live-dop veto. No signalpath judging algorithm
+changes. The process identity/output-thread tie still cannot prove the
+network session is this process when two daemons use identical output
+names, and current file bytes cannot prove startup settings.
 
-The configured file is retained for the existing song-row mapping and the
-DoP fallback veto when the daemon supplies no live `dop`. The selected file
-supplies the displayed config, its output/chain, and config warnings. No
-signalpath judging rule changes. The include correction below applies to
-both reads, as it does to every config consumer.
+Tests drive the production reading and real handler without listeners.
+The round-2 regression cases cover identity refusal, mountinfo root and
+device mismatches, root inode agreement/disagreement, default environments,
+option and path grammar, cap-boundary truncation, unread provenance,
+redaction and the actual no-live-dop veto. Controls and exact gate evidence
+are recorded in the task's `report-r2.md` and `controls-r2/`.
 
 ### Linked MPD files keep the named directory for includes (2026-10-24, B515)
 
 **An include is relative to the named path's directory, bounded, and not a
-glob. A linked main file or include keeps its named directory for the next
-include; only cycle keys use the symlink-resolved file. Never weaken the
-root checks or optional-include refusals to fix the directory.**
+glob. Concatenate the unresolved named directory and include name; resolve
+symlinks and `..` physically for the open, root check and cycle key at every
+level. Never lexically clean a link/.. pair or resolve the named parent
+early. Never weaken root checks or optional-include refusals.**
 
-For `/etc/mpd.conf` linked to `/opt/mpd/mpd.conf`, `include "x.conf"` names
-`/etc/x.conf`. This applies recursively to linked includes too. `ReadFile`
-keeps the named parent directory before resolving the file, resolving the
-parent itself to handle root aliases such as macOS `/var`. The include
-resolver returns the named host path after the same confinement checks;
-`prober.include` resolves its separate stack key so a link back to a file
-already being parsed is refused before its contents are parsed twice.
-Missing optional includes still pass through `open` to `errNotFound`;
-existing outside-root targets remain refusals for both directives.
+MPD 0.24.4 `src/config/File.cxx`, read in round 2, opens the named path and
+passes `path.GetDirectoryName()` to the parser. Includes use
+`AllocatedPath::Apply(directory, name)` and recurse with that named path.
+For `/etc/mpd.conf` linked to `/opt/mpd/mpd.conf`, `include "x.conf"` still
+names `/etc/x.conf`. But for `/etc/linked/child.conf` with `linked` pointing
+to `/opt/mpd/sub`, `include "../x.conf"` opens `/opt/mpd/x.conf`. A lexical
+clean would wrongly open `/etc/x.conf`.
 
-The source basis is MPD 0.24.4 `src/config/File.cxx`'s `ReadConfigFile` and
-include handling, using the named config path's parent. This task had no
-network access: the behavior is given in B515 and matches source knowledge;
-the exact helper spelling and version should be checked before merging.
-`TestLinkedConfigIncludesUseTheNamedDirectory` covers main and nested links;
-`TestLinkedConfigIncludesKeepConfinementAndCycleChecks` verifies that a cycle
-is refused before a repeat parse and that an outside-root optional include
-still produces a problem. Existing include depth, file-count and pattern
-bounds remain in place.
+Round 1 resolved the main named parent early, used filepath.Join/Clean
+for includes, and used filepath.Dir for child parents; those inconsistent
+rules are replaced by unresolved string concatenation and a lexical
+substring for the parent at every level. EvalSymlinks walks components
+before applying `..`. The physical path supplies confinement, the open and
+the cycle key; the unresolved name supplies only the next include base.
+A missing optional path is checked through its nearest existing physical
+parent and then ignored as missing; outside-root targets remain refusals.
+Existing depth, file-count, read, non-file and pattern bounds remain.
+
+`TestIncludesResolveDotDotPhysicallyAtEveryLevel` covers directory and file
+links for main and nested files, with further nested includes.
+`TestLinkedConfigIncludesUseTheNamedDirectory` and
+`TestLinkedConfigIncludesKeepConfinementAndCycleChecks` retain the round-1
+simple-link, cycle and outside-root controls.
