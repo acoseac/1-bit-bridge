@@ -29,6 +29,7 @@ func TestPlaybackResumeRollbackDropsFinalDrain(t *testing.T) {
 		t.Run(name, func(t *testing.T) { testResumeRollback(t, rollbackFinalDrain, heldDrop) })
 	}
 	t.Run("live-reporter", func(t *testing.T) { testResumeRollback(t, rollbackFinalDrainLiveReporter, false) })
+	t.Run("gapless-live-reporter", func(t *testing.T) { testResumeRollback(t, rollbackGaplessLiveReporter, false) })
 }
 
 // TestPlaybackResumeRollbackKeepsOtherRefusals leaves an xrun's refused
@@ -55,13 +56,16 @@ const (
 	rollbackCompletedBeforeFault
 	rollbackCompletedAfterRefusal
 	rollbackFinalDrainLiveReporter
+	rollbackGaplessLiveReporter
 )
 
 // testResumeRollback uses B523's reporter, timer and command seams.
-// The direct backend keeps release from hiding the rollback result.
+// Direct cases keep release from hiding rollback. The gapless case also
+// feeds the engine, pinning its pending Play answer and selection of B.
 func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 	t.Helper()
-	liveReporter := window == rollbackFinalDrainLiveReporter
+	gapless := window == rollbackGaplessLiveReporter
+	liveReporter := window == rollbackFinalDrainLiveReporter || gapless
 	var timerStops atomic.Int32
 	draining := window != rollbackXrun
 	playedOut := window == rollbackCompletedBeforeFault || window == rollbackCompletedAfterRefusal
@@ -86,13 +90,14 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 	var pauseOnce sync.Once
 	allowPause := func() { pauseOnce.Do(func() { close(pauseReply) }) }
 	drainResult := make(chan error, 1)
-	d := newDirectWith(t, func(open func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error)) func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error) {
+	openSink := func(open func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error)) func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error) {
 		return func(ctx context.Context, cfg alsapcm.SinkConfig) (*alsapcm.Sink, error) {
 			s, err := open(ctx, cfg)
 			opened <- s
 			return s, err
 		}
-	}, func(cfg *playback.Config) {
+	}
+	editConfig := func(cfg *playback.Config) {
 		cfg.Log = slog.New(logs)
 		cfg.Seams = &playback.Seams{SinkCall: func(ctx context.Context) func(error) {
 			callMu.Lock()
@@ -131,7 +136,7 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 				return func() bool { timerStops.Add(1); panic(panicValue) }
 			}
 			// Keep the reporter alive, with its first read held until Drop
-			// has stopped the final drain. It must then deliver only Fault.
+			// has stopped the final drain. It must still report what played.
 			tick := cfg.Tick
 			cfg.Tick = func() (<-chan time.Time, func()) { <-gate; return tick() }
 		} else {
@@ -140,15 +145,53 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 				panic(panicValue)
 			}
 		}
-	})
+	}
+	var d *direct
+	var r *rig
+	if gapless {
+		cfg := playback.Config{Tick: func() (<-chan time.Time, func()) { return nil, func() {} }}
+		editConfig(&cfg)
+		r = newRig(t, func(o *rigOptions) {
+			o.openSink, o.afterFunc, o.seams, o.log = openSink, cfg.AfterFunc, cfg.Seams, cfg.Log
+			o.onTick = func() { <-gate }
+		})
+		d = &direct{t: t, k: r.k, be: r.be, rec: r.rec, files: r.files}
+	} else {
+		d = newDirectWith(t, openSink, editConfig)
+	}
 	t.Cleanup(func() { d.release(1) })
 	t.Cleanup(fault)
 	t.Cleanup(allowDrain)
 	t.Cleanup(allowPause)
 	// Half a second fits in the lookahead plus hardware buffer, so the
 	// producer can reach EOF without any fake time (and without an xrun).
-	d.files.add("a", wav(48000, 24, pattern(1, 24000, 24)))
-	if err := d.start(1, "a"); err != nil {
+	firstFrames := 24000
+	if gapless {
+		// B starts within the final 9600-frame hardware buffer.
+		firstFrames = 18000
+		d.files.add("b", wav(48000, 24, pattern(2, 6000, 24)))
+	}
+	d.files.add("a", wav(48000, 24, pattern(1, firstFrames, 24)))
+	firstID, lastID := engine.OccurrenceID(101), engine.OccurrenceID(101)
+	var playAnswer chan error
+	var selectedB uint32
+	if gapless {
+		ids := r.insert("a", "b")
+		selectedB = ids[1]
+		playAnswer = make(chan error, 1)
+		playDone := make(chan struct{})
+		go func() { defer close(playDone); playAnswer <- r.eng.Play(bg) }()
+		t.Cleanup(func() {
+			r.cancel()
+			fault()
+			receiveIn(t, playDone, "the Play caller to exit")
+		})
+		c := r.waitCall("the engine's successor hand-off", func(c call) bool { return c.kind == "prepare" && c.next != nil })
+		if c.s != 1 || c.err != nil {
+			t.Fatalf("successor hand-off = %+v", c)
+		}
+		firstID, lastID = c.after, c.next.ID
+	} else if err := d.start(1, "a"); err != nil {
 		t.Fatal(err)
 	}
 	sink := receiveIn(t, opened, "the sink")
@@ -168,7 +211,15 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 	defer cancel()
 	var drops atomic.Int32
 	var before alsapcm.KernelView
+	var finalStatus <-chan struct{}
+	var allowStatus func()
+	if gapless {
+		finalStatus, allowStatus = d.k.ParkStatusAfterWritten(24000)
+		t.Cleanup(allowStatus)
+	}
 	var recorded event
+	var expected []event
+	var played alsapcm.Position
 	resumeEntered := make(chan struct{})
 	resumeReply := make(chan struct{})
 	var resumeOnce sync.Once
@@ -194,7 +245,10 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 		// Name the end as the engine does, and wait for the producer to send
 		// Drain. Starting a test-owned Drain would miss its exit path.
 		holdNextDrain.Store(playedOut)
-		if err := d.be.Prepare(bg, 1, 101, nil); err != nil {
+		// The gapless case holds the reporter from session start, including
+		// Submitted(B), so the engine cannot yet send this end notification.
+		// B itself came from the engine's real hand-off above.
+		if err := d.be.Prepare(bg, 1, lastID, nil); err != nil {
 			t.Fatal(err)
 		}
 		receiveIn(t, drainStarted, "the producer's Drain")
@@ -234,6 +288,17 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 		// The producer's Drain is already writing out its lookahead.
 		// Leave 150 ms unplayed in the final hardware buffer.
 		d.k.Grant(350 * time.Millisecond)
+		if gapless {
+			receiveIn(t, finalStatus, "the last write's STATUS")
+			v := d.k.View()
+			if start := uint64(firstFrames); start <= v.Consumed || start >= v.Appl {
+				t.Fatalf("B must start inside the final buffer: start %d, kernel %+v", start, v)
+			}
+			// The DAC keeps playing while its writer is descheduled in
+			// STATUS. Its next measurement must include the start of B.
+			d.k.AdvanceUnwatched(100 * time.Millisecond)
+			allowStatus()
+		}
 		d.k.Await(t, "the final hardware drain", func(v alsapcm.KernelView) bool { return v.State == "DRAINING" && v.Starved })
 	} else {
 		// With no Drain, running out of buffered frames is an xrun.
@@ -251,14 +316,47 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 		t.Helper()
 		waitOn(t, "the recorded fault", d.rec.ch, func() bool { return count(d.rec.events(), "fault", 0) >= 1 })
 		evs := d.rec.events()
-		if len(evs) != 1 || evs[0].kind != "fault" || evs[0].fault.Reason != playback.ReasonFailed {
-			t.Errorf("events at rollback = %+v; want exactly one backend fault", evs)
+		if count(evs, "fault", 0) != 1 {
+			t.Errorf("events at rollback = %+v; want one fault", evs)
 		}
 		for _, e := range evs {
 			if e.kind == "fault" {
 				recorded = e
 				break
 			}
+		}
+		expected = []event{recorded}
+		if liveReporter {
+			heard, frames := firstID, played.Played
+			expected = nil
+			if gapless {
+				heard, frames = lastID, played.Played-int64(firstFrames)
+				expected = append(expected,
+					event{kind: "prepared", s: 1, o: lastID, join: engine.Join{Gapless: true}},
+					event{kind: "submitted", s: 1, o: lastID})
+			}
+			expected = append(expected, event{kind: "audible", s: 1, o: firstID})
+			if gapless {
+				expected = append(expected, event{kind: "audible", s: 1, o: lastID})
+			}
+			expected = append(expected,
+				event{kind: "position", s: 1, o: heard, pos: engine.Position{Occurrence: heard, Frames: frames, RateHz: 48000, Measured: played.Measured}},
+				recorded)
+			if recorded.fault.Occurrence != heard || recorded.fault.Frames != frames {
+				t.Errorf("fault = %+v; want occurrence %d at %d measured frames", recorded.fault, heard, frames)
+			}
+			for _, e := range evs {
+				if e.kind == "position" {
+					if e.pos.Frames != recorded.fault.Frames || e.pos.Frames > frames {
+						t.Errorf("position %+v exceeds played frames %d or differs from fault %+v", e.pos, frames, recorded.fault)
+					}
+				}
+			}
+		}
+		// Exact equality excludes Finished, a second Fault, and any event
+		// after Fault, while preserving every measured Audible and Position.
+		if recorded.fault.Reason != playback.ReasonFailed || !reflect.DeepEqual(evs, expected) {
+			t.Errorf("events at rollback = %+v; want exactly %+v", evs, expected)
 		}
 	}
 	if liveReporter {
@@ -293,13 +391,24 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 			t.Errorf("Resume stopped the pause timer %d times; want one", n)
 		}
 		p := sink.Position()
+		played = p
+		t.Logf("dropped sink: played=%d written=%d, kernel consumed=%d, last occurrence=%d, first occurrence length=%d", p.Played, p.Written, before.Consumed, lastID, firstFrames)
+		if p.Played <= 0 {
+			t.Errorf("need measured content played before Drop: %+v", p)
+		}
 		if p.State != alsapcm.SinkStopped || p.Played >= p.Written || p.Written != p.Submitted {
 			t.Errorf("live reporter's sink = %+v; want a stopped final drain with unplayed frames", p)
 		}
 		fault() // Release the live reporter only after rollback answered.
 		checkFault()
-		if recorded.fault.Occurrence != 101 || recorded.fault.Frames != p.Played {
-			t.Errorf("fault = %+v; want occurrence 101 at %d measured frames", recorded.fault, p.Played)
+		if gapless {
+			if err := receiveIn(t, playAnswer, "the engine's Play answer"); err != nil {
+				t.Errorf("Play after measured Audible = %v; want success", err)
+			}
+			snap := r.waitSnap("the engine to receive B's fault", func(s *engine.Snapshot) bool { return len(s.Faults()) != 0 })
+			if fs := snap.Faults(); len(fs) != 1 || fs[0].Occurrence != lastID || fs[0].Frames != played.Played-int64(firstFrames) || snap.Selected() != selectedB {
+				t.Errorf("engine selection %d, faults %+v; want B (%d) and its measured fault", snap.Selected(), fs, selectedB)
+			}
 		}
 	}
 	how, err := got.how, got.err
@@ -386,8 +495,8 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 	if err := d.be.Wait(join); err != nil {
 		t.Fatal(err)
 	}
-	if evs := d.rec.events(); !reflect.DeepEqual(evs, []event{recorded}) {
-		t.Errorf("events after release = %+v; want exactly the original fault and nothing after it: %+v", evs, recorded)
+	if evs := d.rec.events(); !reflect.DeepEqual(evs, expected) {
+		t.Errorf("events after release = %+v; want exactly the measured sequence and nothing after its fault: %+v", evs, expected)
 	}
 	where := "the reporter"
 	if liveReporter {
