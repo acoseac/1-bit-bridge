@@ -13,6 +13,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
 func TestAdoptionBoundsReservedSpaceAcross4097Restarts(t *testing.T) {
@@ -166,15 +167,19 @@ func TestCompletionErrorDoesNotBlockBackupOrIdentityFreeRestore(t *testing.T) {
 	if err := os.Remove(filepath.Join(dir, "player-initialized")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(filepath.Join(dir, "player-floor-discarded.json")); err != nil {
+	// A seal a newer bridge wrote is one completion refuses to read. (A
+	// directory at the seal path made the error until round 11, which keeps
+	// a non-file seal and completes beside it.)
+	if err := os.WriteFile(filepath.Join(dir, "player-floor-discarded.json"), []byte(`{"version":2,"sealed":true}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(filepath.Join(dir, "player-floor-discarded.json"), 0700); err != nil {
-		t.Fatal(err)
-	}
+	rec := loggingtest.Record(t)
 	snap, err := backup.Snapshot(t.Context(), backup.Sources{DataDir: dir, PlayerUUID: filepath.Join(dir, "player-uuid")})
 	if err != nil {
 		t.Errorf("backup blocked by completion: %v", err)
+	}
+	if failed := rec.Lines("player seal completion failed"); len(failed) != 1 {
+		t.Fatalf("no completion error to go on past: %v", failed)
 	}
 	// A separate ordinary snapshot proves restore even if backup above refuses.
 	source := t.TempDir()

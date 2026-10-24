@@ -65,13 +65,15 @@ func snapshotIdentityRemedy() string {
 // decoded version decides, not the UUID alone, so a value that reads clean yet
 // is neither a v1 mark nor a matching v2 mark refuses rather than passing as a
 // zero floor. A reservation the manifest does not list is a genuine absence (a
-// snapshot from before reservations, or one an operator stripped), which
-// floorlessSnapshotBound bounds or refuses. Live reservations never come here:
-// every decodable live floor covers the box, whatever UUID or supported
-// version it names.
+// snapshot from before reservations, or one an operator stripped) only when
+// the snapshot holds no entry of that name, which floorlessSnapshotBound then
+// bounds or refuses; one it holds means a damaged file list
+// (unlistedFloorError). Live reservations never come here: every decodable
+// live floor covers the box, whatever UUID or supported version it names.
 func snapshotReservationFloor(snapshotDir, id string, m Manifest) (engine.Reservation, bool, error) {
 	if !slices.Contains(m.Files, engine.ReservationFileName) {
-		return engine.Reservation{}, false, nil
+		_, err := os.Lstat(filepath.Join(snapshotDir, engine.ReservationFileName))
+		return engine.Reservation{}, false, unlistedFloorError(err)
 	}
 	r, err := engine.ReadReservation(filepath.Join(snapshotDir, engine.ReservationFileName))
 	if err != nil {
@@ -87,6 +89,27 @@ func snapshotReservationFloor(snapshotDir, id string, m Manifest) (engine.Reserv
 	}
 }
 
+// unlistedFloorError is restore's verdict on a floor the manifest does not
+// list, from an Lstat of the entry the snapshot would hold it in, which never
+// follows a link or opens a named pipe. Every writer that captures the floor
+// lists it beside the UUID, those from before the playerFloorRequired record
+// included, so a snapshot that holds a floor its manifest does not list has a
+// damaged file list: one bad byte in the floor's entry would otherwise send an
+// intact floor to the adoption ceiling, below what the identity handed out
+// (Codex on round 10, reproduced). An entry of any kind refuses before
+// anything is written, the adoption included; only ErrNotExist is a genuine
+// absence (nil); any other error refuses with itself.
+func unlistedFloorError(err error) error {
+	switch {
+	case err == nil:
+		return fmt.Errorf("restore: the snapshot's manifest does not list %s, which the snapshot holds: the manifest is damaged; nothing was restored; %s; or restore a newer snapshot of this box", engine.ReservationFileName, snapshotIdentityRemedy())
+	case errors.Is(err, os.ErrNotExist):
+		return nil
+	default:
+		return fmt.Errorf("restore: check the snapshot for an unlisted %s: %w; nothing was restored", engine.ReservationFileName, err)
+	}
+}
+
 // floorlessSnapshotCeiling bounds an identity whose snapshot, from a writer
 // before reservation capture, lists no floor: its counter space below 2^31,
 // the documented upgrade boundary, plus an adoption's random part below 2^24
@@ -95,12 +118,13 @@ const floorlessSnapshotCeiling = 1<<31 + restoreMargin
 
 // floorlessSnapshotBound is the snapshot bound restorePlayerReservation takes
 // after snapshotReservationFloor, and its one treatment of a snapshot whose
-// manifest lists no floor (!marked), which cannot bound what its identity
-// handed out. This bridge lists the floor beside every UUID it captures and
-// says so in the manifest (Manifest.PlayerFloorRequired), so such a snapshot
-// of its making was stripped: restore refuses it. One from an older writer
-// takes the adoption ceiling. marked stays the caller's, so the missing-mark
-// warning still fires; a listed floor that will not read never comes here.
+// manifest lists no floor and that holds none (!marked), which cannot bound
+// what its identity handed out. This bridge lists the floor beside every UUID
+// it captures and says so in the manifest (Manifest.PlayerFloorRequired), so
+// such a snapshot of its making was stripped: restore refuses it. One from an
+// older writer takes the adoption ceiling. marked stays the caller's, so the
+// missing-mark warning still fires; a listed floor that will not read, and an
+// unlisted one the snapshot holds, never come here.
 func floorlessSnapshotBound(snap engine.Reservation, marked bool, m Manifest) (engine.Reservation, error) {
 	if marked {
 		return snap, nil

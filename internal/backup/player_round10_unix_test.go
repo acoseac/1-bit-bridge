@@ -15,10 +15,11 @@ import (
 )
 
 // TestFailedSealCompletionKeepsItsErrorAndNamesWriteAccess: a seal
-// completion that fails for any reason but a busy lock is not deferred: it
-// recurs at the next serve boot or start. The backup goes on and logs the
-// failure with its error and the remedy, restoring write access to the data
-// directory, never that the next lifecycle operation completes it.
+// completion that fails on a data directory this user cannot write is not
+// deferred: the failure persists, and recurs at the next start run as this
+// user. The backup goes on and logs the failure with its error and the
+// remedy, restoring write access to the data directory, never that the next
+// lifecycle operation completes it.
 func TestFailedSealCompletionKeepsItsErrorAndNamesWriteAccess(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root writes a directory whatever its mode")

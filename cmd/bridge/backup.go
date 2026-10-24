@@ -86,6 +86,11 @@ func backupCmd(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// restoreRandom is the random source bridge restore hands RestoreWithOptions:
+// nil, crypto/rand's, in production. A test fixes a restore's draws through it
+// and puts it back in t.Cleanup; nothing else sets it.
+var restoreRandom io.Reader
+
 // restoreCmd is `bridge restore [--config X] [--yes] <snapshot-dir>`
 // — copies files from `<snapshot-dir>` back into the live data dir.
 //
@@ -178,7 +183,7 @@ func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	}
 
 	targets := buildRestoreTargets(cfg, resolvedCfgPath)
-	if err := backup.RestoreWithOptions(snapshotDir, targets, backup.RestoreOptions{Warn: func(s string) { fmt.Fprintln(stdout, s) }}); err != nil {
+	if err := backup.RestoreWithOptions(snapshotDir, targets, backup.RestoreOptions{Random: restoreRandom, Warn: func(s string) { fmt.Fprintln(stdout, s) }}); err != nil {
 		fmt.Fprintf(stderr, "restore: %v\n", err)
 		return 1
 	}

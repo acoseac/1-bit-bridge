@@ -185,8 +185,8 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 		if err := completeCapturedPlayerSeal(filepath.Dir(src.PlayerUUID)); err != nil {
 			// Local repair is not part of a snapshot. The captured UUID/floor
 			// pairing checks below still decide whether its identity is safe.
-			// Only a busy lock defers the repair; any other failure recurs at
-			// the next serve boot or start, and is logged as the failure it is.
+			// Only a busy lock defers the repair; any other failure is logged
+			// as the failure it is, with the advice its cause supports.
 			if errors.Is(err, errSealCompletionBusy) {
 				logging.Component("backup").Warn("player seal completion deferred", "reason", err.Error())
 			} else {
@@ -369,9 +369,10 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 // A restored identity first gets a merged, durable reservation, past both
 // the snapshot's and the live counters by 2^24 plus one random 24-bit draw.
 // The snapshot reservation is only an input, never copied to the live path.
-// A snapshot that lists no floor counts as 2^31 + 2^24, the adoption
-// ceiling, when an older writer made it, and is refused when this bridge
-// did (floorlessSnapshotBound).
+// A snapshot that lists no floor and holds none counts as 2^31 + 2^24, the
+// adoption ceiling, when an older writer made it, and is refused when this
+// bridge did (floorlessSnapshotBound). One that holds a floor its manifest
+// does not list has a damaged manifest, and is refused (unlistedFloorError).
 func Restore(snapshotDir string, dst Targets) error {
 	return RestoreWithOptions(snapshotDir, dst, RestoreOptions{})
 }

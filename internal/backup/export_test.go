@@ -3,7 +3,20 @@ package backup
 import (
 	"context"
 	"io"
+	"os"
 )
+
+// SetTryLockForTest replaces the lock a backup's seal completion tries, and
+// returns the restore.
+func SetTryLockForTest(fn func(*os.File) error) (restore func()) {
+	prev := tryLock
+	tryLock = fn
+	return func() { tryLock = prev }
+}
+
+// UnlistedFloorError is restore's verdict on the Lstat of a floor its
+// snapshot's manifest does not list.
+func UnlistedFloorError(err error) error { return unlistedFloorError(err) }
 
 // AdoptPlayerStateWith is AdoptPlayerState drawing the adoption's random
 // part from random, as restore's adoption does: a source box adopting at a

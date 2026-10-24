@@ -295,12 +295,21 @@ func TestRestoreFloorPreflightWritesNothing(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			writes := 0
-			prev := atomicwrite.SetRenameFuncForTest(func(a, b string) error { writes++; return os.Rename(a, b) })
+			writes := map[string]int{}
+			prev := atomicwrite.SetRenameFuncForTest(func(a, b string) error { writes[filepath.Base(b)]++; return os.Rename(a, b) })
 			err := fixedRestore(t, snap, dir, 0)
 			atomicwrite.SetRenameFuncForTest(prev)
-			if err == nil || writes != 0 {
-				t.Fatalf("preflight: %v writes=%d", err, writes)
+			if kind == "dangling_seal" && writes["player-initialized"] == 1 {
+				// A seal entry that is not a regular file is kept, and restore's
+				// own completion may record the seal in player-initialized before
+				// it refuses: local seal evidence, never snapshot state.
+				if m := markerAt(t, dir); m.Version != 1 || !m.Sealed || m.Minted {
+					t.Fatalf("completion beside a dangling seal wrote %+v", m)
+				}
+				delete(writes, "player-initialized")
+			}
+			if err == nil || len(writes) != 0 {
+				t.Fatalf("preflight: %v writes=%v", err, writes)
 			}
 		})
 	}

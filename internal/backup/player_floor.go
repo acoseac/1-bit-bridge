@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -39,34 +41,63 @@ type playerMarker struct {
 	Minted  bool `json:"minted,omitempty"`
 }
 
-// markerRefusal is a local marker an operation will not read, or keep, as it
-// stands. Its text carries its remedy, so a caller adds none of its own.
+// markerRefusal is a local marker an operation will not read as it stands: a
+// whole, newer version. Its text carries its remedy, so a caller adds none of
+// its own. An entry that is not a regular file is never refused: it is kept
+// as present evidence (ensurePlayerMarker).
 type markerRefusal string
 
 func (e markerRefusal) Error() string { return string(e) }
+
+// accessError is an error a step on the player's local state met, tagged
+// where it happened with what the step was reading or writing and the access
+// that needed. Its text is the error's own: only sealCompletionFailed reads
+// the tag, to advise by cause without taking the error apart.
+type accessError struct {
+	access string // "read" or "write"
+	what   string // a file, or the data directory (dataDirectory)
+	err    error
+}
+
+func (e *accessError) Error() string { return e.err.Error() }
+func (e *accessError) Unwrap() error { return e.err }
+
+// needsAccess tags err, when there is one, with the access its step needed.
+func needsAccess(access, what string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &accessError{access: access, what: what, err: err}
+}
+
+// dataDirectory names dir for an accessError. An Lstat needs to search the
+// directory, a barrier opens it, and a durable write creates and renames in
+// it, so their access is the directory's, not a file's.
+func dataDirectory(dir string) string { return "the data directory " + dir }
 
 // playerMarkerState reads a local marker and logs nothing: only a start's
 // preflight says anything about a damaged player-initialized, and only where
 // following its advice is safe (CheckPlayerStart).
 func playerMarkerState(dir, name string) (present, valid bool, m playerMarker, err error) {
-	st, err := os.Lstat(filepath.Join(dir, name))
+	path := filepath.Join(dir, name)
+	st, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, false, m, nil
 	}
 	if err != nil {
-		return false, false, m, err
+		return false, false, m, needsAccess("read", dataDirectory(dir), err)
 	}
 	if !st.Mode().IsRegular() {
 		return true, false, m, nil
 	}
-	f, _, err := fsutil.OpenAsFile(filepath.Join(dir, name))
+	f, _, err := fsutil.OpenAsFile(path)
 	if err != nil {
-		return true, false, m, err
+		return true, false, m, needsAccess("read", path, err)
 	}
 	defer f.Close()
 	b, err := io.ReadAll(io.LimitReader(f, 129))
 	if err != nil {
-		return true, false, m, err
+		return true, false, m, needsAccess("read", path, err)
 	}
 	d := json.NewDecoder(bytes.NewReader(b))
 	if len(b) > 128 || d.Decode(&m) != nil || d.Decode(new(any)) != io.EOF {
@@ -88,11 +119,15 @@ type markerNotice int
 const (
 	noMarkerNotice markerNotice = iota
 	// moveAsideNotice: moving the marker aside is safe. Start re-ensures it,
-	// and beside a valid seal completion records it sealed and minted.
+	// and beside any seal entry completion records it sealed and minted: a
+	// seal entry that is not a regular file is kept, never opened or
+	// followed (ensurePlayerMarker), and counts as a seal here too.
 	moveAsideNotice
 	// soleSealNotice: the marker's sealed bit is the only intact seal record
-	// (playerRestoresSealed honours it). Moved aside, the next start would
-	// write an unsealed marker and identity restores would reopen.
+	// (playerRestoresSealed honours it), beside a seal file that is missing or
+	// a regular file whose bytes do not read as a seal. Moved aside beside a
+	// missing one, the next start would write an unsealed marker and identity
+	// restores would reopen; the advice keeps the intact record either way.
 	soleSealNotice
 )
 
@@ -105,16 +140,19 @@ func warnPlayerMarker(n markerNotice) {
 	switch n {
 	case moveAsideNotice:
 		logging.Component("player").Warn("player initialization marker is damaged", "file", playerInitialized,
-			"remedy", "move it aside: player-ids.json names the current player-uuid, so start re-ensures it, and beside a valid seal completion records sealed and minted")
+			"remedy", "move it aside: player-ids.json names the current player-uuid, so start re-ensures it, and beside a discard seal, completion records it sealed and minted")
 	case soleSealNotice:
 		logging.Component("player").Warn("player initialization marker is damaged and holds the only intact discard seal", "file", playerInitialized, "seal", playerFloorDiscarded,
-			"remedy", "keep it: do not move or delete it, because player-floor-discarded.json is missing or damaged and this marker's seal is what keeps player identity restores refused; the player runs as it is; bridge reset-player --discard-floor rewrites both seal records and gives up this identity and its queue")
+			"remedy", "keep it: do not move or delete it, because player-floor-discarded.json is missing or damaged, so this marker's seal is the only intact record that keeps player identity restores refused; the player runs as it is; bridge reset-player --discard-floor rewrites both seal records and gives up this identity and its queue")
 	}
 }
 
 // damagedMarkerNotice is the notice checkPlayerStart returns once the floor
 // is present and readable, names the current UUID and is not exhausted. It
-// reads only the two local markers, never UUID bytes.
+// reads only the two local markers, never UUID bytes. A seal entry that is
+// not a regular file is a seal: completion keeps it without opening or
+// following it and seals the marker again beside it, so moving the marker
+// aside is safe there.
 func damagedMarkerNotice(dir string) (markerNotice, error) {
 	present, valid, m, err := playerMarkerState(dir, playerInitialized)
 	if err != nil || !present || valid {
@@ -125,11 +163,28 @@ func damagedMarkerNotice(dir string) (markerNotice, error) {
 		if err != nil {
 			return noMarkerNotice, err
 		}
-		if !sealValid {
+		notAFile, err := playerEntryNotAFile(dir, playerFloorDiscarded)
+		if err != nil {
+			return noMarkerNotice, err
+		}
+		if !sealValid && !notAFile {
 			return soleSealNotice, nil
 		}
 	}
 	return moveAsideNotice, nil
+}
+
+// playerEntryNotAFile reports whether dir holds an entry named name that is
+// not a regular file, from an Lstat that never follows it.
+func playerEntryNotAFile(dir, name string) (bool, error) {
+	st, err := os.Lstat(filepath.Join(dir, name))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, needsAccess("read", dataDirectory(dir), err)
+	}
+	return !st.Mode().IsRegular(), nil
 }
 
 func readPlayerMarker(dir, name string) (bool, error) {
@@ -149,6 +204,11 @@ func playerRestoresSealed(dir string) (bool, error) {
 }
 
 // ensurePlayerMarker preserves existing bytes and reestablishes their barrier.
+// An entry that is not a regular file is preserved too, never opened or
+// followed. At the seal path it is still a seal (playerRestoresSealed), and
+// completion records the seal in player-initialized beside it. Refusing it,
+// with a remedy to move it aside, would send the operator to drop the box's
+// only seal record. Only discard repairs it (sealPlayerMarker).
 func ensurePlayerMarker(dir, name string) error {
 	present, err := readPlayerMarker(dir, name)
 	if err != nil {
@@ -158,22 +218,22 @@ func ensurePlayerMarker(dir, name string) error {
 	if present {
 		st, err := os.Lstat(path)
 		if err != nil {
-			return err
+			return needsAccess("read", dataDirectory(dir), err)
 		}
+		barrier := path
 		if !st.Mode().IsRegular() {
-			if name == playerInitialized {
-				// Preserve non-file evidence without opening or following it.
-				return atomicwrite.ProbeDurable(dir, filepath.Join(dir, ".player-marker-barrier"))
-			}
-			return markerRefusal(name + " is not a regular file: move it aside")
+			// A sibling's barrier, so nothing opens or follows the entry.
+			barrier = filepath.Join(dir, ".player-marker-barrier")
 		}
-		return atomicwrite.ProbeDurable(dir, path)
+		return needsAccess("read", dataDirectory(dir), atomicwrite.ProbeDurable(dir, barrier))
 	}
-	return atomicwrite.WriteBytesDurable(dir, path, []byte("{\"version\":1}\n"), ".player-marker-*.tmp")
+	return needsAccess("write", dataDirectory(dir), atomicwrite.WriteBytesDurable(dir, path, []byte("{\"version\":1}\n"), ".player-marker-*.tmp"))
 }
 
 // sealPlayerMarker repairs damaged markers only in explicit discard. Renaming
 // a bad entry preserves it for inspection and never opens a FIFO or symlink.
+// Between that rename and its replacement the entry is gone, so discard
+// repairs a record only while the other holds a durable seal (resetPlayer).
 func sealPlayerMarker(dir, name string) error {
 	present, valid, m, err := playerMarkerState(dir, name)
 	if err != nil {
@@ -237,8 +297,11 @@ func completePlayerSeal(dir string) error {
 func playerAllocationEvidence(dir string) (bool, error) {
 	for _, name := range []string{engine.ReservationFileName, config.PlayerUUIDFile, "player-queue.json"} {
 		present, err := playerEntry(dir, name)
-		if err != nil || present {
-			return present, err
+		if err != nil {
+			return false, needsAccess("read", dataDirectory(dir), err)
+		}
+		if present {
+			return true, nil
 		}
 	}
 	return false, nil
@@ -249,7 +312,7 @@ func writePlayerMarker(dir string, m playerMarker) error {
 	if err != nil {
 		return err
 	}
-	return atomicwrite.WriteBytesDurable(dir, filepath.Join(dir, playerInitialized), append(b, '\n'), ".player-marker-*.tmp")
+	return needsAccess("write", dataDirectory(dir), atomicwrite.WriteBytesDurable(dir, filepath.Join(dir, playerInitialized), append(b, '\n'), ".player-marker-*.tmp"))
 }
 
 // markPlayerMinted consumes a discard's exemption after the floor is durable
@@ -286,6 +349,11 @@ func adoptPlayerState(dir string, random io.Reader) error {
 	return err
 }
 
+// tryLock is the lock a backup's seal completion tries on server.lock:
+// fsutil.TryLock. A test swaps it to inject a lock error and puts it back in
+// t.Cleanup.
+var tryLock = fsutil.TryLock
+
 // errSealCompletionBusy is a backup's seal completion that another lifecycle
 // writer's server.lock defers. It is the one completion failure that is
 // deferred: that holder, or the next lifecycle operation, completes it.
@@ -294,7 +362,8 @@ var errSealCompletionBusy = errors.New("player seal completion is busy: another 
 // completeCapturedPlayerSeal serializes a backup's local marker upgrade with
 // every lifecycle writer. A normal live backup needs no exclusive lock. Only
 // a busy lock defers the upgrade (errSealCompletionBusy); any other failure
-// recurs at the next serve boot or start (sealCompletionFailed).
+// is logged as failed, with the advice its cause supports
+// (sealCompletionFailed).
 func completeCapturedPlayerSeal(dir string) error {
 	sealed, err := readPlayerMarker(dir, playerFloorDiscarded)
 	if err != nil {
@@ -327,10 +396,10 @@ func completeCapturedPlayerSeal(dir string) error {
 
 	f, err := fsutil.OpenLockFile(dir, "server.lock")
 	if err != nil {
-		return sealCompletionFailed(err)
+		return sealCompletionFailed(needsAccess("write", filepath.Join(dir, "server.lock"), err))
 	}
 	defer f.Close()
-	if err := fsutil.TryLock(f); err != nil {
+	if err := tryLock(f); err != nil {
 		if errors.Is(err, fsutil.ErrLocked) {
 			return fmt.Errorf("%w: %w", errSealCompletionBusy, err)
 		}
@@ -344,16 +413,27 @@ func completeCapturedPlayerSeal(dir string) error {
 }
 
 // sealCompletionFailed is a backup's seal completion that failed for any
-// reason but a busy lock. The same failure stops the next serve boot or
-// start, so it is never called deferred: it keeps its error, and a marker
-// refusal its own remedy; anything else is the data directory refusing a
-// read or a write.
+// reason but a busy lock. It is never called deferred: it keeps its error and
+// advises by cause, claiming no more than the cause supports. A marker
+// refusal keeps its own remedy, and a read-only data directory says so; both
+// stop the next serve boot and start too. A permission error names what its
+// step was reading or writing and the access that needed, from the tag the
+// step put on it (accessError); serve boot and start fail on it too when they
+// run as the user the backup ran as, which a CLI backup need not share with
+// serve. Anything else, an interrupted or refused lock or an I/O error, need
+// not recur and keeps only its error.
 func sealCompletionFailed(err error) error {
 	var refusal markerRefusal
-	if errors.As(err, &refusal) {
+	var access *accessError
+	switch {
+	case errors.As(err, &refusal):
 		return fmt.Errorf("player seal completion failed: %w; serve boot and start fail on it too", err)
+	case errors.Is(err, syscall.EROFS):
+		return fmt.Errorf("player seal completion failed: %w; the data directory is read-only: serve boot and start fail on it too", err)
+	case errors.Is(err, fs.ErrPermission) && errors.As(err, &access):
+		return fmt.Errorf("player seal completion failed: %w; restore %s access to %s: serve boot and start fail on it too when run as this user", err, access.access, access.what)
 	}
-	return fmt.Errorf("player seal completion failed: %w; restore write access to the data directory: serve boot and start fail on it too", err)
+	return fmt.Errorf("player seal completion failed: %w", err)
 }
 
 // unstartedPlayer recognizes a UUID-only upgrade, which can also be a
@@ -659,11 +739,20 @@ func resetPlayer(dir string, discard bool, after func(string) error) (bool, erro
 		if err := fsutil.MkdirAll(dir, 0700); err != nil {
 			return false, err
 		}
-		if err := sealPlayerMarker(dir, playerFloorDiscarded); err != nil {
+		// Seal both records, renaming a damaged one aside only while the other
+		// already holds a durable seal: with the seal entry damaged,
+		// player-initialized is sealed first, so a crash between a rename and
+		// its replacement never leaves the box with no seal record.
+		order := []string{playerFloorDiscarded, playerInitialized}
+		if present, valid, _, err := playerMarkerState(dir, playerFloorDiscarded); err != nil {
 			return false, err
+		} else if present && !valid {
+			order = []string{playerInitialized, playerFloorDiscarded}
 		}
-		if err := sealPlayerMarker(dir, playerInitialized); err != nil {
-			return false, err
+		for _, name := range order {
+			if err := sealPlayerMarker(dir, name); err != nil {
+				return false, err
+			}
 		}
 		if err := step(playerFloorDiscarded); err != nil {
 			return false, err

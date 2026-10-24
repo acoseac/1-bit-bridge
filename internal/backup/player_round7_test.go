@@ -206,20 +206,6 @@ func TestResetAdoptsUUIDOnlyWithJump(t *testing.T) {
 	}
 }
 
-func TestLoneSealCompletionRefusesNonregularFirstRecord(t *testing.T) {
-	reservationStorage(t)
-	dir := t.TempDir()
-	if err := os.Mkdir(filepath.Join(dir, "player-floor-discarded.json"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := backup.EnsurePlayerUUID(dir); err == nil || !strings.Contains(err.Error(), "player-floor-discarded.json is not a regular file") {
-		t.Fatalf("unverified first seal: %v", err)
-	}
-	if _, err := os.Lstat(filepath.Join(dir, "player-initialized")); !os.IsNotExist(err) {
-		t.Fatalf("second seal written before verifying first: %v", err)
-	}
-}
-
 func TestLoneSealPreflightAllowsCompletionBeforeFirstMint(t *testing.T) {
 	reservationStorage(t)
 	dir := t.TempDir()

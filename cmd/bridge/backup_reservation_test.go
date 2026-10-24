@@ -143,7 +143,6 @@ func TestRestoreCLIPrintsTheNoMarkAdvice(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(snap, backup.ManifestFile), raw, 0600); err != nil {
 		t.Fatal(err)
 	}
-	var m backup.Manifest
 	if err := os.Remove(filepath.Join(snap, playerReservationFile)); err != nil {
 		t.Fatal(err)
 	}
@@ -155,6 +154,7 @@ func TestRestoreCLIPrintsTheNoMarkAdvice(t *testing.T) {
 		t.Fatal("restore did not finish")
 	}
 	// The same production path takes legacy schema 1 and still jumps.
+	var m backup.Manifest
 	if err := json.Unmarshal(readFileT(t, filepath.Join(snap, backup.ManifestFile)), &m); err != nil {
 		t.Fatal(err)
 	}

@@ -45,10 +45,10 @@ func damageBootPlayer(t *testing.T, dir, kind string) {
 		if err := os.Remove(filepath.Join(dir, "player-initialized")); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Remove(filepath.Join(dir, "player-floor-discarded.json")); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Mkdir(filepath.Join(dir, "player-floor-discarded.json"), 0700); err != nil {
+		// A seal a newer bridge wrote, which completion refuses to read. (A
+		// directory at the seal path made the error until round 11, which
+		// keeps a non-file seal and completes beside it.)
+		if err := os.WriteFile(filepath.Join(dir, "player-floor-discarded.json"), []byte(`{"version":2,"sealed":true}`), 0600); err != nil {
 			t.Fatal(err)
 		}
 	case "preflight":
