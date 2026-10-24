@@ -383,7 +383,7 @@ func TestAWholeNumberOfThePlayerTakesNoFraction(t *testing.T) {
 		{"openhomePort", "    openhome: true\n", "    ", PlayerConfig.EffectiveOpenHomePort, DefaultOpenHomePort,
 			[]readsAs{{"7793", 7793}, {"7793.0", 7793}}, []string{"7792.9", "7793.25", "7793.0000000000001"}},
 		{"device.pcmDevice", device, "      ", func(p PlayerConfig) int { return p.Device.PCMDevice }, 0,
-			[]readsAs{{"1", 1}, {"08", 8}}, []string{"1.5", "0.75", "1e-400"}},
+			[]readsAs{{"1", 1}, {"08", 8}, {"!!float 010", 8}}, []string{"1.5", "0.75", "1e-400"}},
 		{"device.subdevice", device, "      ", func(p PlayerConfig) int { return p.Device.Subdevice }, 0,
 			[]readsAs{{"2", 2}, {"2.0", 2}}, []string{"2.5", "0.25"}},
 	} {

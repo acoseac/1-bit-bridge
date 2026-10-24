@@ -180,6 +180,9 @@ func TestAWholeNumberSettingTakesWhatDecodesUnchanged(t *testing.T) {
 		{"a leading zero, which yaml.v3 resolves as a float", "08", 8, false},
 		{"a negative zero", "-0.0", 0, false},
 		{"a float tag on a whole number", "!!float 6", 6, false},
+		{"a float tag on an octal spelling, which yaml.v3 reads as octal as it does untagged", "!!float 036", 30, false},
+		{"a whole number with a million zeros after its point", "30." + strings.Repeat("0", 1_000_001), 30, false},
+		{"zero with an exponent past an int64", "0e99999999999999999999", 0, false},
 		{"hexadecimal", "0x1F", 31, false},
 		{"null", "~", DefaultManifestRequestsPerMinute, false},
 		{"left out", "", DefaultManifestRequestsPerMinute, false},
@@ -188,7 +191,8 @@ func TestAWholeNumberSettingTakesWhatDecodesUnchanged(t *testing.T) {
 		{"a fraction past a whole number", "6.000001", 0, true},
 		{"a fraction ParseFloat rounds to a whole number", "6.0000000000000001", 0, true},
 		{"a fraction ParseFloat rounds to zero", "1e-400", 0, true},
-		{"a fraction too small for big.Rat to read", "1e-1000000000", 0, true},
+		{"a fraction with a ten-digit exponent", "1e-1000000000", 0, true},
+		{"a float tag on an integer past what a float64 holds", "!!float 0x20000000000001", 0, true},
 		{"a whole number ParseFloat rounds to another", "9007199254740993.0", 0, true},
 		{"a whole number a float64 holds exactly", "9007199254740992.0", 9007199254740992, false},
 		{"minus infinity", "-.inf", 0, true},
@@ -216,7 +220,8 @@ func TestAWholeNumberSettingTakesWhatDecodesUnchanged(t *testing.T) {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("Load = %v, want a refusal saying %q", err, want)
 			}
-			if carriesTheValue(refusalText(err, file), tc.value) {
+			// The tag is the refusal's own word; the scalar's text is the value.
+			if carriesTheValue(refusalText(err, file), strings.TrimPrefix(tc.value, "!!float ")) {
 				t.Errorf("the refusal carries the value: %v", err)
 			}
 		})
@@ -253,6 +258,41 @@ func TestAWholeNumberSettingTakesWhatDecodesUnchanged(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestWrittenIntegerReadsTheTextAsYAMLDoes: the value a !!float's text writes
+// is read as yaml.v3's resolve reads it, an integer spelling through
+// strconv.ParseInt with base 0 and anything else as a decimal float, exactly
+// and in time linear in the text; a fraction, a whole number past 20 digits,
+// a nonzero number with an exponent of a million or more, and a text that
+// reads as no number write no whole number.
+func TestWrittenIntegerReadsTheTextAsYAMLDoes(t *testing.T) {
+	for _, tc := range []struct {
+		text  string
+		value string // "" when no whole number is written
+	}{
+		{"30", "30"}, {"+30", "30"}, {"-30", "-30"}, {"30.", "30"}, {"30.000", "30"}, {"3e1", "30"},
+		{"3E+1", "30"}, {"300e-1", "30"}, {".3e2", "30"}, {"0030.0", "30"}, {"3_0.0", "30"},
+		{"036", "30"}, {"0o36", "30"}, {"0x1E", "30"}, {"0b11110", "30"}, {"-0x1E", "-30"}, {"08", "8"},
+		{"-0.0", "0"}, {"0e99999999999999999999", "0"}, {"0.0e-99999999999999999999", "0"},
+		{"18446744073709551615", "18446744073709551615"}, {"1.8446744073709551615e19", "18446744073709551615"},
+		{"9007199254740993.0", "9007199254740993"}, {"1" + strings.Repeat("0", 19), "1" + strings.Repeat("0", 19)},
+		{"30." + strings.Repeat("0", 1_000_001), "30"}, {"0." + strings.Repeat("0", 1_000_000) + "3e1000002", ""},
+		{"30.5", ""}, {"0.5", ""}, {"1e-400", ""}, {"1e-1000000000", ""}, {"3e999999", ""},
+		{"1" + strings.Repeat("0", 20), ""}, {"123456789012345678901", ""},
+		{"", ""}, {".", ""}, {"e5", ""}, {"1e", ""}, {"1e+", ""}, {"--1", ""}, {"+-1", ""}, {"1.2.3", ""},
+		{"1e5e5", ""}, {"0x1p4", ""}, {"1e5.0", ""}, {" 30", ""}, {".inf", ""}, {".nan", ""},
+	} {
+		v, ok := writtenInteger(tc.text)
+		switch {
+		case tc.value == "" && ok:
+			t.Errorf("writtenInteger(%.40q) = %v, want no whole number", tc.text, v)
+		case tc.value != "" && !ok:
+			t.Errorf("writtenInteger(%.40q) wrote no whole number, want %s", tc.text, tc.value)
+		case ok && v.String() != tc.value:
+			t.Errorf("writtenInteger(%.40q) = %v, want %s", tc.text, v, tc.value)
+		}
 	}
 }
 

@@ -230,3 +230,13 @@ func buildShadow(t reflect.Type, within map[reflect.Type]bool) (reflect.Type, bo
 	}
 	return t, false
 }
+
+// writtenInteger is a stand-in so the red-first tests compile; the next
+// commit replaces it.
+func writtenInteger(text string) (*big.Int, bool) {
+	r, ok := new(big.Rat).SetString(strings.ReplaceAll(text, "_", ""))
+	if !ok || !r.IsInt() {
+		return nil, false
+	}
+	return r.Num(), true
+}
