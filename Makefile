@@ -57,7 +57,7 @@ test:
 # Fast inner-loop tests: no race detector — much faster to build and a
 # fraction of the RAM, so it won't thrash on a loaded machine. Use while
 # iterating; run `make test` (race) before pushing. A single package is
-# faster still: `go test -tags "$(GO_TAGS)" ./internal/<pkg>/`.
+# faster still: `go test -tags ts_omit_webclient,ts_omit_debugeventbus ./internal/<pkg>/`.
 test-fast:
 	go test -tags "$(GO_TAGS)" -p $(P) ./...
 

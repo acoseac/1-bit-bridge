@@ -335,7 +335,7 @@ var shellAssignment = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 // pattern.
 func verbPackageSite(line string) bool {
 	for i := 0; i < len(line); i++ {
-		if i > 0 && !strings.ContainsRune(" \t=(&;|!", rune(line[i-1])) {
+		if i > 0 && strings.IndexByte(" \t=(&;|!", line[i-1]) < 0 {
 			continue
 		}
 		if buildVerbAt.MatchString(line[i:]) && !commandPosition(line[:i]) {
@@ -349,7 +349,7 @@ func verbPackageSite(line string) bool {
 // command does.
 func commandPosition(before string) bool {
 	before = strings.TrimRight(before, " \t")
-	if before == "" || strings.ContainsRune(";&|(!", rune(before[len(before)-1])) {
+	if before == "" || strings.IndexByte(";&|(!", before[len(before)-1]) >= 0 {
 		return true
 	}
 	fields := strings.Fields(before)
@@ -398,11 +398,12 @@ func checkBuildSites(root, tags string) error {
 		return err
 	}
 	for _, name := range sortedKeys(sites) {
+		fileSites, ok := remaining[name]
 		for _, line := range sites[name] {
-			if remaining[name][line] == 0 {
+			if !ok || fileSites[line] == 0 {
 				return fmt.Errorf("unreviewed build/test site in %s: %s; use release tags and update reviewedBuildSites", name, line)
 			}
-			remaining[name][line]--
+			fileSites[line]--
 		}
 	}
 	for _, name := range sortedKeys(remaining) {

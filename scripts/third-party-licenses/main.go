@@ -92,6 +92,9 @@ func releaseTargets(data []byte) ([]string, error) {
 	return build.targets, err
 }
 
+// buildTagName is the grammar a release build tag must match.
+var buildTagName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.]*$`)
+
 type releaseConfig struct{ targets, tags []string }
 
 func releaseBuild(data []byte) (releaseConfig, error) {
@@ -166,7 +169,7 @@ func releaseBuild(data []byte) (releaseConfig, error) {
 		}
 		seen := map[string]bool{}
 		for _, tag := range tags {
-			if !regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.]*$`).MatchString(tag) || yamlTypedTag(tag) || seen[tag] {
+			if !buildTagName.MatchString(tag) || yamlTypedTag(tag) || seen[tag] {
 				return releaseConfig{}, fmt.Errorf("invalid or duplicate build tag: %q", tag)
 			}
 			seen[tag] = true
