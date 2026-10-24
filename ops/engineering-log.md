@@ -151,12 +151,13 @@ Ordinary reset now clears queue then UUID durably and keeps the floor byte for
 byte. History read/write/merge/preflight, snapshot history capture and rechecks,
 UUID-fragment recovery and schema 3 are removed. Snapshots stay schema 2.
 
-Initialization writes floor, immutable marker, then UUID durably. The marker
+Initialization writes floor, local marker, then UUID durably. The marker
 detects manual deletion of the old three player files. Explicit `--discard-floor`
 first writes a permanent seal against every identity import, then clears queue
 and UUID and renames the floor aside. It recovers lost/corrupt/exhausted floors
 without claiming old UUIDs are safe. Restore keeps max(snapshot, live) plus its
-jump and preflights loss, seal and exhaustion before writes. The engine's old
+jump and preflights loss, seal and exhaustion before importing data; round 7
+first completes an incomplete local seal. The engine's old
 corruption recovery moved a reservation aside and returned zero; it now refuses.
 Queue recovery stays separate. The UUID writer now checks parent-directory
 fsync. Backup captures UUID then floor through the existing sharing retry and
@@ -194,8 +195,8 @@ also checked on restore, retaining historical v1 snapshot compatibility.
 Discard now writes two independent seals: the seal file, then `sealed:true`
 in the initialized marker, both durable before deletion. This avoids changing
 the reservation format: all writers, including the engine, preserve the local
-seal files. Any single file's loss, truncation or replacement cannot reopen
-restores. The smallest deletion set that does is BOTH local markers, after a
+seal files. Once both records are durable, any single file's loss, truncation or replacement cannot reopen
+restores. Round 7 also completes a lone older seal before proceeding. The smallest deletion set that does is BOTH local markers, after a
 new floor exists or before any new identity is minted. This two-file loss is
 a documented limit beside full rollback, two live boxes holding one UUID and
 non-latest cross-box migration. Tests run real engine writes before damage.
@@ -208,12 +209,15 @@ engine start. Non-file advice names moving the entry aside. Backup advises
 retry only when the captured UUID vanished; persistent loss names discard.
 Restore loss advice includes both the permanent seal and snapshot-copy remedy.
 
-The exact main-era bind-only state (valid regular UUID, no queue, floor or
-markers) upgrades without rotating identity or sealing: floor zero, then
-marker. Backup takes the exclusive lock and rechecks the captured identity
-before this write. Any additional lifecycle evidence means floor loss.
-Residual risk: a main-era box whose queue and floor were both deleted by hand
-looks identical. Tests pin both sides and bind's read-only preflight.
+The UUID-only main-era state (valid regular UUID, no queue, floor or markers)
+upgrades without rotating identity or sealing. Round 6 wrote a zero floor;
+round 7 replaces that with restore's jump on BOTH counters, since main could
+publish token 4097 without saving a queue and lose only its floor. Serve boot,
+start, bind, reset and backup adopt it; reset then removes the UUID. Backup
+serializes this write and rechecks the captured identity. Additional lifecycle
+evidence means floor loss, except the one-shot post-discard exemption below.
+The residual is an identity that handed out more than 2^24 values before losing
+its floor, the same margin as restore, not a claim that it never ran.
 
 Usage now names --discard-floor and the retained-floor contract exactly;
 command tests require the snapshot UUID, both counters above the pre-reset
@@ -221,6 +225,47 @@ floor, a truly empty no-op and output that claims only actual removals.
 Red-first logs, rebased round-five controls, new controls and gates are recorded
 in the round-six scratch report. No commit or push was performed in this round.
 
+
+**Round 7.** The supplied host round-six result on macOS arm64 passed all 12
+packages in `go test -race -count=1 ./cmd/bridge/ ./internal/backup/
+./internal/config/ ./internal/player/...`, including
+`TestServeRefusedMintLeavesTheReservationFloor`.
+
+UUID-only adoption now calls the same jump function as restore with zero bounds.
+A real engine's token-only start, stop, floor-only deletion and restart proves
+no repeated token within that margin. The floor stays monotonic across identities
+while present; ordinary reset keeps it byte-identical. Discard is the sole escape.
+
+The discard exemption is one-shot. After the next floor is durable and before
+UUID publication, the initialized marker records `sealed:true,minted:true`.
+Ordinary reset preserves it. Discard → mint → real engine allocations → reset →
+loss of only the floor now refuses start. Repeated explicit discard reopens the
+exemption only after all removals are durable. Barrier tests cover the consumed
+marker before UUID and the first seal before completion of its second record.
+
+Every lifecycle writer completes a lone seal after its durability barrier;
+backup takes server.lock only when local repair is needed. Existing allocation
+or identity evidence consumes the exemption during completion. An identity
+restore may complete the local seal before refusing, but imports no data.
+A completed pair of seals survives any single-file loss for restore refusal;
+loss of both local seal records, full rollback and the migration limits above
+remain outside the guarantee. Malformed markers need explicit discard and a
+well-formed newer marker is never rewritten.
+
+Serve boot adopts existing UUID-only state under its lock before TLS or live
+backups, even with playback disabled; it mints nothing on a pristine box. A live
+backup then needs no adoption lock. Busy backup advice explicitly says to stop
+the service and run the backup again. Tests exercise backupCmd with server.lock
+held, plus actual serve boot. Docs name reset among all five adopters and state
+the issuance margin and one-shot exemption consistently.
+
+Round-seven scratch evidence records 54 assertion-failing controls (all 44
+rebased controls plus 10 new ones), including the red-first token repetition.
+Native, Linux and Windows vet, the backup/config/engine race suites and the
+new sandbox-runnable regressions repeated ten times all pass. Formatting and
+docs checks pass.
+Socket-bind refusals are listed separately for the host cmd/bridge rerun.
+No commit or push was performed.
 
 ## File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)
 

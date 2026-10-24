@@ -22,7 +22,9 @@ new counters. Restore adds 2^24 plus a random value below 2^24 to the larger of
 the snapshot and live floors, durably writes that floor, establishes the local
 initialization marker, clears a replaced identity's queue, then writes the
 UUID. An interrupted restore may leave a higher floor; retrying raises it
-again. An unreadable live floor refuses the restore before any write.
+again. An unreadable live floor refuses the restore before any snapshot data
+is written.
+A lone local discard seal may first be completed as described below.
 
 A backup captures the UUID before the floor and requires the floor to name
 that UUID. A mismatched pair refuses the backup. If the floor is missing while
@@ -45,15 +47,24 @@ Reset does not need to read a malformed, unreadable or dangling UUID; a
 directory at that path must be moved aside. `--yes` skips the prompt.
 `bridge output player` remains the read-only MPD report.
 
-`player-initialized` is a versioned local marker, preserved by ordinary reset. Initialization
-commits floor, marker, then UUID, each durably. An existing valid floor gains
+`player-initialized` is a versioned local marker. Ordinary reset preserves its
+consumed state and completes an incomplete seal. Initialization commits floor,
+marker, then UUID, each durably. An existing valid floor gains
 the marker when the player starts, binds, resets or adopts an identity.
-A missing floor beside a UUID, queue or initialization marker is floor loss.
-The one upgrade exception is a valid regular UUID with no floor, queue or either
-local marker: a DAC bound on an older bridge whose engine never ran. Start,
-bind and backup retain that UUID and create its zero floor, then the marker,
-without sealing restores. A main-era box whose queue and floor were both deleted
-by hand is indistinguishable from that state.
+A missing floor beside a UUID, queue or initialization marker is floor loss,
+with the upgrade and one-shot post-discard exceptions below.
+The upgrade exception is a valid regular UUID with no floor, queue or either
+local marker. Serve boot, start, bind, reset and backup adopt this state without
+sealing restores. Both counters jump by 2^24 plus a random value below 2^24,
+using the same calculation as restore with a zero snapshot, before the marker
+is committed. Reset then removes the UUID; the other adopters retain it.
+Serve adopts at boot even when playback is disabled. Backup takes the exclusive
+server lock only if adoption or seal completion is needed; if it is busy, stop
+the service and run the backup again.
+An older engine can hand out tokens without writing a queue, so losing only
+its floor can look like this upgrade state. The margin covers fewer than 2^24
+values handed out before that loss; an identity that handed out more than 2^24
+values before losing its floor has the same residual risk as restore.
 A queue without a UUID needs ordinary reset when the floor remains, or
 `--discard-floor` when it is missing. A UUID that is a symlink or does not match
 the floor also needs ordinary reset. A version-1 live floor names no UUID;
@@ -70,10 +81,13 @@ bridge reset-player --discard-floor --config /path/to/bridge.yaml
 This first durably writes `player-floor-discarded.json`, a permanent seal
 against **all incoming player identities**, then independently records the
 seal in `player-initialized`. Only after both are durable does it clear queue
-and UUID,
-renames the floor to `player-ids.json.discarded-<random>`, and syncs the
-directory. A rerun completes the sequence after any interruption. The next
-start creates a fresh floor and UUID. The initialization marker and seal are
+and UUID, rename the floor to `player-ids.json.discarded-<random>`, and sync
+the directory. A rerun completes the sequence after any interruption. The next
+start creates a fresh floor, durably records `minted:true` beside `sealed:true`
+in `player-initialized`, then publishes the UUID. The missing-floor exemption
+is one-shot: ordinary reset preserves this bit, and losing only the floor
+afterwards refuses another start. A later explicit discard opens a new exemption
+only after its removals are durable. The initialization marker and seal are
 never backed up or restored as bytes. Damaged entries conservatively count as
 present. Discard renames malformed or non-file markers aside and writes fresh
 ones after establishing the seal; a well-formed newer version requires a newer
@@ -82,13 +96,18 @@ discard. Do not delete markers to bypass a refusal.
 
 A sealed box still restores the database, tokens and configuration from a
 copy of a snapshot with `player-uuid` and `player-ids.json` removed. An
-identity-bearing restore refuses before any write and names that remedy.
+identity-bearing restore refuses before writing snapshot data and names that
+remedy.
+If `player-floor-discarded.json` exists without a seal recorded in
+`player-initialized`, the next lifecycle operation verifies the first record
+is durable and completes the second. This local repair can precede a restore
+refusal; it never imports snapshot bytes.
 For permission failures restore read access first; for a newer reservation
 format use a newer bridge. **Never copy a snapshot's older floor over the
 live floor, or delete the floor while keeping the identity.**
 
 Restore checks both counters for room for the largest jump plus 2^24 values
-before writing anything. An exhausted snapshot or destination can still
+before writing any snapshot data. An exhausted snapshot or destination can still
 restore its non-player contents from a copy without `player-uuid` and
 `player-ids.json`; the box keeps its identity. Ordinary reset does not refund
 counter space. If the engine can no longer start, use `--discard-floor` and
@@ -101,8 +120,9 @@ another box, are unsupported and not guaranteed.** Stop the source and use
 its latest snapshot for migration. The restore margin assumes fewer than
 2^24 IDs and tokens were issued after capture and before stopping. Random
 separation between independent restores is not a global uniqueness guarantee.
-Loss, truncation or replacement of any one local file cannot reopen identity
-restores after discard. Deleting both `player-floor-discarded.json` and
+After both discard records are established, loss, truncation or replacement of
+any one local file cannot reopen identity restores. Deleting both
+`player-floor-discarded.json` and
 `player-initialized` can reopen them; this is the smallest such deletion set.
-Whole-directory or storage rollback and the pre-upgrade manual floor loss
-described above cannot be detected by these local files.
+Whole-directory or storage rollback cannot be detected by these local files.
+The UUID-only upgrade is bounded by the issuance margin described above.
