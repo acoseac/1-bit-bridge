@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B470 PR 5a4: the player's OpenHome writes, Insert's Uri confined to the bridge's own tracks, and the owner's dogfood](#2026-10-24--b470-pr-5a4-the-players-openhome-writes-inserts-uri-confined-to-the-bridges-own-tracks-and-the-owners-dogfood)
 - [2026-10-24 — B500 round 8: key the build-site census on the verb](#2026-10-24--b500-round-8-key-the-build-site-census-on-the-verb)
 - [2026-10-24 — B500 round 7: the build-site census fails closed](#2026-10-24--b500-round-7-the-build-site-census-fails-closed)
 - [2026-10-24 — B500 round 6: documented deploy tags and invocation census](#2026-10-24--b500-round-6-documented-deploy-tags-and-invocation-census)
@@ -61585,3 +61586,464 @@ census still finds only the reviewed sites. Controls on the committed fix,
 each red as predicted and nothing else: counting only labelled fences, the
 four unlabelled-fence cases; no quote after the executable, the 720 quoted
 cases; the records counted as runbooks, the four record cases.
+
+## 2026-10-24 — B470 PR 5a4: the player's OpenHome writes, Insert's Uri confined to the bridge's own tracks, and the owner's dogfood
+
+Every write action of the Source's services is answered (the 17 of the 42
+actions that are not reads): each is one engine command, or none for the
+Product writes that change nothing and the seeks the engine cannot make,
+answered within one budget, beside a write pool of its own; an Insert's Uri
+is taken only as the canonical URI of a track the library serves now, on a
+host the bridge advertises in `/v1/health` or binds for DLNA. The opt-in
+stays off by default, decided after 5b and 5c. Run on legion0 (Linux, Go
+1.27.3, GOTOOLCHAIN=local, GOPROXY=off), where the Linux-only tests ran;
+the work was committed on `feat/b470-pr5a4-writes` with no attribution.
+
+### What shipped
+
+- `internal/player/engine` (03d1aeba, 69533376, 9b98c4c8): `ReserveTimeout`
+  exported; `ErrNotAdmitted`, wrapped by every cancellation of a command that
+  did not run (a context ended before the call, a send the owner did not
+  take, the owner's refusal of a command whose context had ended, and the
+  caller's abandonment of a command the owner had taken and not admitted,
+  decided once with the owner by a compare-and-swap on `command.admission`),
+  never by one that may have run; a `checked` seam between the owner's look
+  at a command's context and its admission, and the tests of each window.
+  The only engine changes, as the brief allows; no contract changed.
+- `internal/player/trackref` (4ac93cf6): the one parser of a track's canonical
+  URI (`Parse`, an Insert's) and of an entry's stored reference (`ParseStored`,
+  an open's: that URI, whatever its host and port, or a bare id).
+- `internal/manifest` and `internal/player/library` (6ca4bfcf, 25298409):
+  `Store.TrackPathsIndexedAfter` (every row stamped past a stamp, in stamp
+  order); the resolver's index of the paths by their ids, kept current by
+  those stamps; `Member`, the membership check that opens nothing; both
+  reference forms at an open; `sacd_virtual_track`; `ErrCancelled`.
+- `internal/player/openhome` (1c4d6523, c7cecdbd): `writes.go` (the writers,
+  the budget, `transportFault`, the edit gate, the fault table, the
+  confinement, the metadata check), `inventory.go` (`Inventory`,
+  `DefaultTrackPort`), the write pool (`handler.go`, `Limits.WriteSlots`,
+  `WritesPerSource`), `act` taking the writes, `Config.Library` and
+  `Config.Hosts`, 600 defined and 602 retired (`soap.go`), the package doc.
+- `internal/api` (746388a8): `Server.HealthEndpoints`, the snapshot
+  `/v1/health` serves, which the handler now reads through it.
+- `internal/dlna` (a407f679): `Server.AcceptsOn`.
+- `cmd/bridge` (44cedd49): `newPlayerHosts` and `playerTrackPorts`; serve
+  hands the surface its library resolver and the inventory, and tells the
+  inventory the DLNA listener once DLNA has started; the serve test's Insert
+  answers 600 where it answered 602.
+- `CLAUDE.md`'s rows, and the long forms in `ops/History-rules-openhome.md`
+  and `ops/History-rules-player.md` (ef7e6aa9). The rules files' lines
+  (`openhome.md`'s, two of `player.md`'s, one each in `wire.md` and
+  `dlna-upnp.md`) are in the worker's report for the orchestrator to apply,
+  since the session cannot edit `.claude/`.
+
+### The writes, action by action
+
+| Action | What it does | Its answers |
+|---|---|---|
+| Playlist Play, Pause, Stop, Next, Previous | the engine's command of that name | success; a refusal by the table below |
+| SeekId(Value) | `PlayID` | 800 for an ID not held |
+| SeekIndex(Value) | `PlayIndex` | 802 past the queue |
+| SetRepeat(Value) | `SetRepeat` | success |
+| SetShuffle(Value) | 0: `SetShuffle(false)`; 1: no command | 1 is 804 "Shuffle not currently possible" |
+| SeekSecondAbsolute, SeekSecondRelative | no command | 803 "Seek failed", every value |
+| Insert(AfterId, Uri, Metadata) | the Uri confined, the metadata checked, the edit gate, then `InsertAfter` with the Uri as sent | NewId; 800 for an AfterId not held; 801 "Playlist full" for `full` alone; 600 or 605 for the Uri or the metadata; 501 |
+| DeleteId(Value) | `Delete` | 800 for an ID not held |
+| DeleteAll | `DeleteAll` | success |
+| Product SetStandby(Value) | no command | 0 success, changing nothing; 1 899 "Wip - action not (yet) implemented", no Stop made of it |
+| Product SetSourceIndex(Value) | no command | 0 success; any other 801 "Source not found" |
+| Product SetSourceIndexByName(Value) | no command | `Playlist` success; any other name 801 "Source not found" |
+
+The no-engine fault (501) is asked first, before anything a write does.
+Sources, read by the orchestrator at openhome/ohPipeline master
+c1047a8dc801 (2026-10-21): `OpenHome/Av/Playlist/ProviderPlaylist.cpp`
+lines 23-32 (800 for Read, SeekId, DeleteId and Insert's AfterId; 801 for
+Insert; 802 for SeekIndex; 803 for the seeks, lines 245-281; 804 for
+SetShuffle, line 227); `OpenHome/Av/Utils/FaultCode.cpp` line 21 (801
+"Source not found", `kSourceNotFound`, which `ProviderProduct.cpp` answers for
+Source, SetSourceIndex and SetSourceIndexByName at lines 284, 244 and 256)
+and 899 for an action not built; UPnP Device Architecture 1.1, §3.2.2, the
+same in 1.0, for 501, 600 and 605. 1-bit sends SetStandby only when Standby
+reads 1, which never happens, and SetSourceIndex only when the active source
+is not a Playlist, which never happens with one source.
+
+### The fault table
+
+Every reason `engine/errors.go` names has a row (the test reads them from
+the source): 800 for `id_not_found` on every action, 801 for `full` on
+Insert alone, 802 for `index_not_found` on SeekIndex alone, 804 for
+`not_in_this_release` on SetShuffle alone, 605 for `metadata_too_large`, and
+501 for every other reason: `closed` (5a3's no-engine fault), `cancelled`,
+`overtaken`, `generation_conflict`, `maintenance`, `lease_invalid`,
+`bad_reference`, `too_many_ids`, `empty_queue`, `ids_exhausted`,
+`reservation_not_durable`, `queue_identity_mismatch`, `file_not_moved_aside`,
+`output_unknown`, `output_unavailable`, `release_unconfirmed`,
+`backend_error`, `backend_timeout`, `superseded` (a transport write's
+success, the next section), `stopped`, `end_of_queue`, `unplayable`,
+`all_unplayable`, `fault`, `output_unit_changed`, `removed_entry_audible`,
+`missing_file`, `refused_content`, `dsd_off`, `xrun`, `disconnected`,
+`device_error`, `decode_failed`. A reason outside the table, every
+`library.Reason*` and `playback.Reason*` among them and one nobody wrote, is
+501. On Insert, 801 is `full` and nothing else: 1-bit reads 801 after its
+first row as "the player is full, play what is in", so a reservation that is
+not durable, a file not moved aside, IDs exhausted or metadata too large
+answering it would make a cast silently play a truncated queue. Playlist's
+801 reads "Playlist full" and Product's "Source not found", each asserted.
+
+### When a write answers
+
+The budget runs from the request's arrival at `ServeHTTP`: `Limits.Write`
+(10 s, the write deadline net/http sets from the request's headers) less
+`budgetMargin` (1 s), `Limits.writeBudget`, 9 s; 1-bit's SOAP calls time out
+at 15 s. A transport write (Play, Pause, Stop, Next, Previous, SeekId,
+SeekIndex, SetRepeat, SetShuffle(0)) maps the engine's answer:
+
+| The engine's answer | The reply |
+|---|---|
+| nil | success |
+| `superseded` (a later command or edit replaced the playback it asked for) | success |
+| `overtaken` (a Stop overtook it parked: it did not run) | 501 |
+| `cancelled`, the command admitted (the budget ended while it waited: it may yet run) | success |
+| `cancelled` wrapping `ErrNotAdmitted` (it never ran) | 501 |
+| any other refusal | its row of the table |
+
+Success past the budget means "ran, or parked and may yet run, be overtaken
+by a Stop, or be refused by an output report or maintenance", all of which
+the reads show, which is how an OpenHome controller learns outcomes; it is
+what ohPipeline answers a command it has accepted. An edit answers only with
+its reply: an edit can park for a reservation write up to `ReserveTimeout`
+(5 s) and does not ask its context again, so, last thing before the engine,
+`editGate` requires `editBudget` (`ReserveTimeout` and a second) of the
+budget left, and otherwise answers 501 without calling it (at most 3 s
+after arrival with the default limits; never 801). A cancelled edit is 501,
+and an Insert is never answered success without a NewId above 0. Two limits
+are named, not fixed: a client that disconnects mid-wait can still have its
+Insert land; and a filesystem stall in a synchronous step on the engine's
+owner (`unstick`'s `Lstat`, `edits.go` ~225) can delay an admitted edit past
+the budget like any engine step, after which it can land unheard.
+
+### The confinement
+
+The Uri is taken only when it is byte for byte
+`"http://" + host + ":" + port + "/dlna/file/" + id`: an IP host as
+`netip.Addr.String()` (an IPv6 literal bracketed, unzoned; an IPv4-mapped
+one refused), a name of letters, digits and hyphens with a last label not all
+digits and no trailing dot, lower-cased for the comparison alone, the port
+decimal without a leading zero, the id 16 lower-case hex. Past 128 bytes it
+is 605 whatever its shape; every other spelling (`HTTP://`, `https://`,
+`:07790`, an empty or missing port, `192.168.001.005`, an abbreviated
+address, a non-canonical IPv6, a trailing dot, user information, a query, a
+fragment, percent-encoding in the path or the host, a trailing slash, a
+`/variant-…` path, another route, an id in capitals or short, a bare id, a
+UPnP server's `res`, an empty Uri) is 600. The host must be one `/v1/health`
+advertises, its very snapshot (`api.Server.HealthEndpoints`: the same
+provider and 15 s cache), or an address the DLNA listener takes connections
+on now (`dlna.Server.AcceptsOn`: its served set, a pinned listener its
+address alone); the port 7790 or `dlna.listenAddress`'s. A docker0 address
+health advertises first is taken; nothing is resolved (names compared as
+strings, lower-cased); a paired alias the bridge never advertised is refused.
+Refused whatever is advertised or bound, 600: link-local, zoned or not
+(outright in this release; a custom endpoint can carry one), and, decided
+here, loopback, unspecified, multicast, `localhost`, the tailnet's ranges and
+`ts.net` names, none of which 1-bit emits or a LAN controller can reach the
+bridge by. A Uri refused for its shape or host never asks the library. The
+membership check (`library.Member`) answers 600 for no row, a routed track,
+an SACD virtual track and a root no longer configured, and 501 for two rows
+with one id, an index it cannot read, a panic and a cancellation; no library
+is 501 and no hosts 600. The reference is the Uri as sent, so Read gives it
+back byte for byte; at an open the stored form, that Uri or a bare id, is
+parsed again and its host and port not looked at, so a queue keeps playing
+after the bridge's address changes, and a near miss in a hand-edited queue
+file is refused there.
+
+### The membership check, and why not the brief's Store method
+
+The brief asked to reuse the DLNA adapter's `TrackLookup.GetTrackInfo` if
+indexed and current after a scan, or else to add one Store method keyed by
+id. Measured by reading: the adapter (`cmd/bridge/dlna_wiring.go`) caches the
+whole served list and rebuilds it by a full walk once 30 s old, so a track a
+scan adds is not found for up to 30 s, and every rebuild walks every row; not
+current. A Store method keyed by id needs the id in the store: it is a hash
+of the path computed in Go (`dlna.TrackID("", path)`), so a lookup by id
+needs a column every writer fills, with a migration a rollback leaves behind,
+or an index on a function SQLite cannot compute. What every writer already
+moves is `indexed_at`, the delta stamp (`readNextDeltaStamp`, past every
+earlier row): one Store method keyed by stamp (`TrackPathsIndexedAfter`, a
+seek of the stamps' index when nothing changed; its plan pinned by
+`TestTrackPathsIndexedAfterReadsTheStampsIndex`) keeps an in-memory index of
+the paths by id current, as a delta client of `/v1/manifest` keeps its
+library. Over 25,000 synthetic tracks (`TestTheIndexCostsTheLibraryOnceAndASeekAfter`,
+counted at the store): `New` reads nothing; the first lookup every row once
+(the initialization); a lookup of another track its one row; a hundred
+absent ids no row (no rescan per miss); a track added afterwards found by
+reading it alone; a deleted one refused by its own row, and found again,
+once indexed again, by reading it alone; one build. The index is built again
+only past twice its last build and `staleSlack` (2,000 paths), so it holds a
+few times the library at most; a lookup cancelled mid-build keeps what it
+read (the context asked every 256 rows) and the next reads the rest; a scan
+writing beside the lookups (5,000 rows, 2,000 writes, under -race) leaves
+every track indexed before found, every added one found once written and
+every deleted one refused; two rows sharing an id stay `ambiguous_reference`.
+4b3's lookup fetched and hashed every indexed path for each unfamiliar id,
+with no cancellation (a 500-track handoff on a 25,000-track library repeated
+that per Insert). The golden vectors, computed outside Go:
+`Artist/Album (2020)/01 Track One.flac` is `b5b4c8dc9764772e` and
+`Ünïcödé/Ålbum/02 – Song.flac` `9ec9973104172764`, each taken by an Insert
+through the real resolver and opened.
+
+### The metadata
+
+At most the engine's 64 KiB (605), every character in XML 1.0's Char
+production (600), never parsed (a DIDL-Lite that is not well-formed is stored
+as sent), empty taken. The envelope is decoded first, so a character XML
+forbids, literal or referenced, and a byte that is not UTF-8 stay HTTP 400 at
+row 7 and never reach the Insert's check, which no request can fail today
+(its test calls it directly); decoded metadata past 64 KiB gets the 605
+(Insert's text bound is 88 KiB); 64 KiB of ampersands, 320 KiB escaped, is
+413 at the unchanged body bound.
+
+### The write pool
+
+The slots (`Limits.Slots`, 8) were one pool for every request; a waiting
+write now holds one for up to its budget, so a write but Stop also takes a
+slot of the write pool (`WriteSlots`, 6, held to two fewer than the slots),
+and one source holds at most `WritesPerSource` of them (`maxWritesPerSource`,
+4, below the listener's 8 connections a source); 503 at once past either, the
+connection kept. Reads, the descriptions and a Stop always find a slot.
+Limits, named: many controllers can still fill the write pool together; a
+source's ninth connection is refused at accept, unanswered, and a kept-alive
+connection counts after its request. 1-bit sends one SOAP call at a time.
+
+### What the engine does, pinned as it is
+
+- A Pause sent while a release carrying a play is under way (a SeekId while
+  playing, the Pause before the SeekId replies) succeeds and changes nothing;
+  the SeekId's entry plays, TransportState Playing: the brief's documented
+  limit.
+- Checked rather than assumed: the engine parks a Play only behind a Pause or
+  a Resume under way (`owner.go`'s `blocked`), never behind a start, so the
+  brief's "a second Play parked behind a start" answers success at once (the
+  table's nothing), the first Play waiting on; a Stop then supersedes it,
+  success. `overtaken` is pinned behind a Pause and behind a Resume.
+- A refusal at an open (the brief's "say exactly what each reply returns"):
+  an unsupported first entry before a playable one: Play success, Id the
+  playable entry as Play answers, TransportState Buffering until it is heard,
+  then Playing, the skip in `Snapshot.Skipped` (no OpenHome read shows it),
+  Read of the skipped entry its Uri. An unsupported prefetched successor: Id
+  and TransportState unchanged (the entry playing, Playing) while the engine
+  prepares the entry after it; Id that entry once heard. Every entry refused,
+  repeat off and on (one lap): Play 501 (`all_unplayable`), Stopped, Id the
+  last refused entry. A start refused as busy: Play 501 (`backend_error`),
+  Stopped, Id the first entry. A track removed from the index, and a file
+  deleted with its row kept, after their Inserts, through the real resolver:
+  skipped with `not_indexed` and `missing_file`, Id moving on to the entry
+  that plays, Read still their Uris.
+
+### Tests
+
+New: `internal/player/openhome`'s `writes_test.go` (the writes, the fault
+table, the transport answers, the budget, the gate, the metadata),
+`confine_test.go` (the matrix, the inventory's changes, the golden vectors
+through the real library), `onebit_test.go` (1-bit's sequences: the cast
+start, a refused Uri mid-start, the 500-track window and its re-handoff,
+SeekId from every state, the queue edits, an Insert after the playing row
+once the next is handed off, a DeleteId at the boundary in time and too late,
+a track gone after its Insert, the relaunch re-attach apart from an engine
+restart, an unclean stop inside the write coalescing), `pool_test.go`;
+`player_test.go`'s fake backend holds Start, Pause and Resume and counts each
+call, and its Cut can answer too late; `FuzzControlRequest` covers the writes
+over a fake engine answering every reason and both cancellations. The
+library's `membership_test.go`, trackref's tests, the store's, the engine's
+admission tests, `internal/api`'s `TestHealthEndpointsIsTheSnapshotHealthServes`,
+`internal/dlna`'s three `AcceptsOn` tests, and serve's
+`TestThePlayersHostsAreHealthsAndTheDLNAListeners` and
+`TestServeConfinesAnInsertToTheBridgesOwnHosts` (the real serve on the
+discovery rig's in-memory LAN: the golden track taken on the host health
+advertises, and on the DLNA listener's address only while DLNA runs). 49 of
+the openhome package's tests start the real engine (they skip where it
+cannot): all 49 ran and passed in the race run. `FuzzControlRequest` ran
+1,068,953 inputs in 60 s with four workers and `trackref`'s `FuzzParse`
+887,149 in 30 s, none failing.
+
+### Red first
+
+- Every write answering 602 again (a mutation of `act` on 1c4d6523): 31 of
+  the openhome package's tests red, every test of the writes written by then
+  but the unit tests of the fault table, the transport answers, the library's
+  reasons, the metadata check and the limits (which their own controls turn
+  red), and `FuzzControlRequest`'s seeds (602 is no fault the layer defines
+  now). `TestTheWritesThatNeedNoCommandMakeNone` and
+  `TestAnInsertIsNeverAnsweredWithoutAnID` came after (c7cecdbd), against the
+  implementation, for rules no test had seen break: controls O13, O16, O17
+  and O18 below.
+- Each other rule was shown red with the rule removed: the controls below.
+
+### Negative controls
+
+Each on the committed tree, one mutation, the rule's tests run, the file
+restored from git and the tree checked clean (42 controls, all red, every
+file restored):
+
+| NC | Mutation | Red |
+|---|---|---|
+| E1 | an abandoned command answered as one that may have run | the two engine window tests |
+| E2 | the owner admits without the compare-and-swap | `TestACommandWhoseContextEndsAsTheOwnerAdmitsItDidNotRun` |
+| E3 | a context ended before the call answered without the sentinel | green first: no test had it; `TestACommandTheOwnerNeverTookDidNotRun` added (9b98c4c8); red |
+| E5 | a send the owner did not take answered without the sentinel | `TestACommandTheOwnerNeverTookDidNotRun` |
+| E4 | the engine's table: a Pause while a release carries a play sets a pending pause | `TestAPauseWhileAReleaseCarriesAPlayChangesNothing` |
+| L1 | an SACD virtual track taken | `TestMembershipIsTheOpensChecksShortOfTheFile` |
+| L2 | the host checked at the open | `TestBothReferenceFormsOpenAndTheHostIsNotChecked` |
+| L3 | the index not kept current after its build | `TestATrackAScanAddsIsFoundAtOnce` |
+| L4 | two rows with one id taken | `TestMembershipIsTheOpensChecksShortOfTheFile` |
+| T1 | a scheme in capitals taken | `TestOnlyTheCanonicalFormIsAURI` |
+| T2 | the length not checked first | `TestOnlyTheCanonicalFormIsAURI` |
+| T3 | a zero-padded port taken | `TestOnlyTheCanonicalFormIsAURI` |
+| O1 | `superseded` a fault | the admission table, `TestASupersededPlayAnswersSuccess` |
+| O2 | a cancellation after admission a fault | the admission table, the budget's two tests |
+| O3 | a command never admitted success | the admission table |
+| O4 | `overtaken` success | `TestAnOvertakenPlayIsAFault`, both cases |
+| O5 | no edit gate | `TestAnEditLateInItsBudgetIsRefusedBeforeTheEngine` |
+| O6 | the gate without its second | the same, its 3.5 s bodies |
+| O7 | the budget without its margin | `TestTheLimitsKeepTwoSlotsFromTheWrites`, `TestATransportWriteAdmittedPastItsBudgetIsSuccess` |
+| O8 | `reservation_not_durable` 801 on Insert | `TestEveryEngineReasonHasItsFault` |
+| O9 | 801 on every action | `TestEveryEngineReasonHasItsFault` |
+| O10 | no host refused for its kind | the matrix, the inventory test |
+| O11 | no host checked against the inventory | the matrix, the inventory test |
+| O12 | the library not asked | the matrix, the golden vectors |
+| O13 | metadata past 64 KiB passed to the engine | `TestTheWritesThatNeedNoCommandMakeNone` (the engine's own bound answers 605 too, so the metadata test alone stays green) |
+| O14 | metadata not held to XML 1.0 text | `TestOnlyXMLTextIsMetadata` |
+| O15 | the reference made from the lower-cased Uri | the matrix's capitals row |
+| O16 | an Insert answered without an ID | `TestAnInsertIsNeverAnsweredWithoutAnID` |
+| O17 | SetShuffle(1) sent to the engine | `TestTheWritesThatNeedNoCommandMakeNone` |
+| O18 | SetStandby(1) made a Stop | the same, `TestEachWriteIsItsEngineCommand` |
+| O19 | 803's description not ohPipeline's | `TestEachWriteIsItsEngineCommand` |
+| O20 | the no-engine check after SetShuffle's own | `TestNoEngineIsOneFaultForEveryRead`, every case |
+| O21 | Stop takes a write slot | the per-source test, the listener test |
+| O22 | no per-source share | `TestOneSourceHoldsAtMostItsShareOfTheWritePool` |
+| O23 | the write pool not held below the slots | `TestTheLimitsKeepTwoSlotsFromTheWrites` |
+| A1 | `HealthEndpoints` past health's cache | `TestHealthEndpointsIsTheSnapshotHealthServes` |
+| D1 | `AcceptsOn` ignores a pinned listener | `TestAcceptsOnIsTheListenersServedSet`, two cases |
+| D2 | `AcceptsOn` kept past Stop | `TestAcceptsOnIsTheRunningListeners` |
+| B1 | the inventory never told the DLNA listener | `TestServeConfinesAnInsertToTheBridgesOwnHosts`, DLNA on |
+| B2 | the surface given no hosts | the same, both cases |
+| B3 | the surface given no library | the same, both cases |
+| B4 | `dlna.listenAddress`'s port not taken | `TestThePlayersHostsAreHealthsAndTheDLNAListeners` |
+
+### Decided otherwise than the brief, and why
+
+- The membership check reads one Store method keyed by stamp, not by id,
+  and keeps the index of ids in memory: above.
+- Beyond link-local, Insert refuses loopback, unspecified, multicast and
+  `localhost` hosts, and the tailnet's addresses and `ts.net` names, whatever
+  the bridge advertises: no controller on the LAN can reach the bridge by
+  them, 1-bit never emits them, and the DLNA listener refuses tailnet peers.
+- A Play during a start is not parked by the engine: pinned as it is (above),
+  and `overtaken` pinned behind a Pause and a Resume.
+- A name in the canonical form has a grammar (labels, a last label not all
+  digits), so that no spelling of an address that is not its canonical form
+  reads as a name.
+- `TestEveryValidActionIsAnswered602` is `TestEveryValidActionIsAnswered602NoMore`:
+  the cited-name guard takes the old name as its prefix; the rules note
+  updates the citations.
+- No library is 501 and no hosts 600, so a surface started without them
+  takes no Insert.
+- The race suite ran as `make test`'s command (`go test -tags … -race
+  -timeout 30m`) over the packages in groups, cmd/bridge, internal/manifest
+  and internal/admin by their tests' initials, since one run exceeds a
+  foreground command's ten minutes here; every package and every test ran.
+
+### Environment
+
+`/tmp` is tmpfs on legion0, which the engine refuses, so every test run here
+set `TMPDIR` to a directory on the worktree's disk (`_tmp`, which the build
+census and Go's patterns skip, removed before the end). legion0's `go env`
+sets `GOFLAGS=-mod=readonly`, and `scripts/third-party-licenses`'
+`TestRealReleaseGraphEmbeds` refuses a non-default GOFLAGS by design: it fails
+in the full run and passes with `GOFLAGS` empty, as does its package whole.
+
+### Gate
+
+On legion0 with Go 1.27.3, through the build lock: `make fmt` (nothing
+rewritten), `make vet`, and `go vet` of the touched packages for Windows and
+macOS, clean; `make build-all` clean; `make docs-check` clean (player.md at
+99.9% of its budget; the rules note leaves it 151 bytes smaller); the race
+suite over all 88 packages passes, the one test above aside. Skipped at
+runtime here (106 tests and 10 subtests, none of this PR's): the ones that
+need sox, ffmpeg, ffprobe, fpcalc or node, root, a case-insensitive or
+normalizing volume, a network or mount namespace this user may configure,
+the private corpora, the ALSA ABI probe, `snd-aloop`
+(`TestAloopNegotiatesAndCloses`), the kernel uevent capture and the live
+controls. Build-excluded on Linux: 25 test files of the Windows, macOS and
+other-platform variants.
+
+### Not in this change
+
+GENA (501: 1-bit polls; so no claim of support for the controllers that need
+it), Volume, seek within a track (7a), shuffle, native DSD and DoP (2c/2d),
+`/v1/outputs` (5b), iOS (5b/5c: they filter what 1-bit inserts), the opt-in's
+default, a proxy for third-party renderers. No compatibility is claimed with
+Linn Kazoo, BubbleUPnP or Lumin: they drive their state from GENA, and the
+write actions match ohPipeline's SOAP answers, no more.
+
+### The owner's gate: casting from 1-bit to the bridge's player on the Pi with the GO bar
+
+On the 64-bit Volumio Pi with the iFi GO bar, the bridge running as its
+service with this branch's `dist/bridge-linux-arm64`. `UNIT`, `DATA`, `CONF`
+and `N` are as in the 4b3 gate above (the unit, the data dir, `bridge.yaml`,
+the GO bar's card as `./bridge output dac` lists it). The data dir must be on
+storage that outlives a reboot (the engine refuses one that does not, and the
+journal says so).
+
+Before: Volumio's MPD must have let go of the GO bar. Stop playback in
+Volumio (its UI, or `mpc stop` on the Pi); then `cat
+/proc/asound/cardN/pcm0p/sub0/status` reads `closed`, and `./bridge output
+dac` names no holder. The gapless pass needs an album whose FLAC files share
+one rate and one bit depth: a change of format between tracks reopens the
+device, a gap by design (`player.md`).
+
+1. Configure and start. `systemctl --user stop $UNIT`; if the DAC is not
+   bound, `./bridge output dac bind N --binding serial --config $CONF`; in
+   `$CONF`, under `output: player:`, `enabled: true` and `openhome: true`;
+   `systemctl --user start $UNIT`. Pass, in `journalctl --user -u $UNIT
+   --since -2min | grep -E 'player'`: "player: started", "player DAC:
+   available … card=N", "player: the output is available", "player: the
+   OpenHome surface is on; discovery follows its bound LAN addresses", and
+   "the OpenHome surface listens on an address" for the Pi's LAN address.
+2. The picker. In 1-bit, open the output picker. Pass: a row "1-bit Bridge
+   Player" captioned "OpenHome · Unverified" appears (the room's name, if
+   `room:` is set). The box's MPD row is hidden while the Source is
+   advertised: expected until 5b and 5c.
+3. Cast an album of the bridge's own FLAC files. Pass: playback starts on
+   the GO bar within a few seconds; the journal shows the transport playing;
+   `cat /proc/asound/cardN/pcm0p/sub0/hw_params` shows the file's rate and a
+   format of its depth (S16_LE for 16 bits; S24_3LE, S24_LE or S32_LE for
+   24; S32_LE for 32), and `status` an `owner_pid` of the bridge's (`ps -L -p
+   <pid of bridge>` lists it), never MPD's.
+4. Gapless. Let one track run into the next. Pass: no gap or click at the
+   boundary, and no reopen between the two in the journal (one device open
+   for the album's run).
+5. Pause and resume. Pause in 1-bit, wait, resume. Pass: sound stops and
+   comes back at the same place. Paused past 30 s (`pauseReleaseSeconds`),
+   `status` reads `closed` (the device let go) and the resume reopens it.
+6. Skip forward and back (1-bit's next and previous, which send SeekId).
+   Pass: each skip plays the row chosen, and 1-bit's now-playing follows.
+7. A queue edit: add a track to the queue and remove an upcoming one.
+   Pass: no "Couldn't update the queue on the OpenHome player"; the edited
+   queue plays in its new order.
+8. Kill 1-bit (swipe it away) and relaunch it while the bridge plays. Pass:
+   it re-attaches to the player, showing the queue and the row playing, and
+   playback was not interrupted.
+9. Stop (1-bit's Clear, or leaving the output). Pass: sound stops, the
+   journal shows the transport stopped, and `status` reads `closed` once the
+   release is done.
+
+What to keep from each step: the `player` journal lines and the `hw_params`
+and `status` of the substream. `GET /v1/outputs` describes MPD's outputs and
+cannot show the bridge's player before 5b: use it only to confirm that MPD
+does not hold the card. The known limits and what they look like: no volume
+(the output is fixed: use the GO bar's own), no seek within a track
+(scrubbing answers 803, which 1-bit logs, and the track plays on), no DSD (a
+DSF or DFF track is skipped, `dsd_not_in_this_release`, the next one plays),
+no standby, no shuffle (1-bit sends it off). A pass is steps 1 to 9 as
+written; a failure is kept with its step's journal lines and the substream's
+files.
