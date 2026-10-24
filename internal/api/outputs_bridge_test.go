@@ -369,7 +369,7 @@ func TestTheMPDGateIsAskedOnEveryRequestWhateverThePlayer(t *testing.T) {
 		resp.Body.Close()
 	}
 	if got := n.onActive.Load(); got != 6 {
-		t.Fatalf("OnActive ran %d times for three health answers and three bodies with the player on, want 6", got)
+		t.Errorf("OnActive ran %d times for three health answers and three bodies with the player on, want 6", got)
 	}
 
 	for _, through := range []string{"/v1/health", "/v1/outputs"} {
