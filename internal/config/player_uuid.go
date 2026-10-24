@@ -42,10 +42,11 @@ var ErrNotOnePlayerUUID = errors.New("does not hold one UUID")
 // ReadPlayerUUID returns the player's UUID from dataDir, and an error that
 // is fs.ErrNotExist when none was made yet. The UUID may be followed by
 // white space (unicode.IsSpace), such as the CR LF an editor leaves; a
-// file that is there and holds anything else is an error too, never a
-// reason to make another: a new UUID is a new player to every controller,
-// so the operator decides (removing the file makes a new one at the next
-// start).
+// file that is there and holds anything else is an error too, and so is
+// anything there that is not a file, refused without waiting
+// (ReadPlayerUUIDFile), never a reason to make another: a new UUID is a new
+// player to every controller, so the operator decides (removing the file
+// makes a new one at the next start).
 func ReadPlayerUUID(dataDir string) (string, error) {
 	id, err := ReadPlayerUUIDFile(filepath.Join(dataDir, PlayerUUIDFile))
 	if errors.Is(err, ErrNotOnePlayerUUID) {
@@ -58,9 +59,15 @@ func ReadPlayerUUID(dataDir string) (string, error) {
 // path, wherever it is: a snapshot's copy is read by it too, so a restore
 // takes exactly what the player would. A file that is there and holds
 // anything but one UUID, followed by nothing but white space, gives an
-// error wrapping ErrNotOnePlayerUUID; no file gives fs.ErrNotExist.
+// error wrapping ErrNotOnePlayerUUID; no file gives fs.ErrNotExist. It
+// opens path as the routes that serve a file's bytes do
+// (fsutil.OpenAsFile): without waiting, and reading only a file, so a named
+// pipe, a directory or a device there is refused at once, an *fs.PathError
+// around a *fsutil.NotAFileError that is neither of those two errors, where
+// a plain open of a named pipe waited for a writer and held whoever read it:
+// serve's player start, bind, inspect and a restore (B525).
 func ReadPlayerUUIDFile(path string) (string, error) {
-	f, err := os.Open(path)
+	f, _, err := fsutil.OpenAsFile(path)
 	if err != nil {
 		return "", err
 	}

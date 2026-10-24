@@ -268,6 +268,9 @@ type playerServeCase struct {
 	bounds servePlayerBounds
 	// with changes the serve options last.
 	with func(*serveOpts)
+	// top is config written after the output block: top-level keys of the
+	// case's own.
+	top string
 }
 
 // playerServe is a serve a test booted with its player.
@@ -337,7 +340,7 @@ func bootPlayerServeAt(t *testing.T, c playerServeCase, root, music, dataDir str
 	lan, admin := holdLoopback(t), holdLoopback(t)
 	configPath := filepath.Join(root, "bridge.yaml")
 	text := "libraryRoots:\n  - " + music + "\ndataDir: " + dataDir + "\nadminAddress: " + admin.addr +
-		"\noutput:\n  mpd: off\n  player:\n" + c.player
+		"\noutput:\n  mpd: off\n  player:\n" + c.player + c.top
 	if err := os.WriteFile(configPath, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}

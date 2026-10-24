@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader](#2026-10-24--b525-the-players-identity-file-is-read-without-waiting-a-named-pipe-at-player-uuid-is-refused-at-once-by-every-reader)
 - [2026-10-24 — B470 PR 5a2b: shared discovery for the opt-in OpenHome Source](#2026-10-24--b470-pr-5a2b-shared-discovery-for-the-opt-in-openhome-source)
 - [2026-10-24 — B470 PR 5a0 Round 11: a listed snapshot reservation that cannot be read refuses restore](#2026-10-24--b470-pr-5a0-round-11-a-listed-snapshot-reservation-that-cannot-be-read-refuses-restore)
 - [2026-10-24 — B470 PR 5a0 Round 10: reset advice requires invalid reservation data](#2026-10-24--b470-pr-5a0-round-10-reset-advice-requires-invalid-reservation-data)
@@ -59831,3 +59832,178 @@ The separate B520 host-address check skips at its denied bind. Exact commands,
 failed test names, cached outcomes, logs and the verified control are in the
 external round-3 report. Linux/Windows execution and the manual owner gate
 remain unrun. No commit was made.
+
+## 2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader
+
+`config.ReadPlayerUUIDFile` is the UUID parser for `<dataDir>/player-uuid`
+(the live backup capture is a separate byte reader, fixed in round 2 below):
+`ReadPlayerUUID`, `EnsurePlayerUUID` and `ForgetPlayerUUID` call it, and so
+does a restore, for a snapshot's copy and for the box's own. It opened the
+file with `os.Open`, and on a named pipe `open(2)` waits for a writer, which
+nothing cancels: the class B523 closed for the engine's own files
+(`readLimited`). It now opens through `fsutil.OpenAsFile`, as `readLimited`
+does: a nonblocking open, a refusal of anything the opened file's stat says
+is not a file (an `*fsutil.NotAFileError` inside an `*fs.PathError`), and the
+nonblocking flag cleared before the read, which keeps its bound (129 bytes,
+`maxPlayerUUIDFile` plus one). A missing file still answers the open's own
+`fs.ErrNotExist`, and a file that is not one UUID `ErrNotOnePlayerUUID`.
+
+### What each reader does with it
+
+The refusal is neither `fs.ErrNotExist` nor `ErrNotOnePlayerUUID`, so every
+reader takes the branch it already had for a file it cannot read, and none
+takes it for an identity not made yet:
+
+- Serve's player start (`bridgePlayer.start`, `EnsurePlayerUUID` on the
+  supervisor's goroutine): "the player's identity: open …/player-uuid: named
+  pipe is not a file", before the resolver, the backend or the engine. No
+  identity is made (`EnsurePlayerUUID` makes one only on `fs.ErrNotExist`),
+  the pipe stays, and serve serves on.
+- `bridge output dac bind`, which makes the UUID after it writes the binding:
+  "output dac bind: the player's UUID: open …: named pipe is not a file",
+  exit 1, as for any identity it cannot read; the binding it wrote stays, as
+  before.
+- `bridge output dac inspect`: its `player uuid:` line is the error; "not
+  made yet" is the `fs.ErrNotExist` branch alone.
+- A restore's read of a snapshot's copy (`snapshotPlayerUUID`): its generic
+  case, "restore player-uuid: open …: named pipe is not a file; nothing was
+  restored", before any file is written.
+- A restore's read of the box's own copy (`discardReplacedPlayerQueue`),
+  which keeps the box's queue only for the identity it restores: any error is
+  an identity whose queue it does not keep, so the queue is discarded and the
+  snapshot's identity renamed over the pipe (`WritePlayerUUIDFile`), as for a
+  file that does not hold one UUID.
+- `ForgetPlayerUUID`: the reader's error, the entry left.
+- `Snapshot`'s read of the copy it captured: the copy is the file `Snapshot`
+  wrote, so nothing changes in practice.
+
+A link to a character device read before as a file that does not hold one
+UUID (`ErrNotOnePlayerUUID`, so a restore's refusal said to remove the copy
+from the snapshot), and a directory failed in its read ("read …: is a
+directory"); both are now `NotAFileError` refusals down the same branches.
+
+### Red first
+
+The tests, against the tree before the change:
+
+- `TestWhatIsNotAFileAtPlayerUUIDIsRefusedAtOnce` (`internal/config`; a
+  named pipe, a link to one, a link to `/dev/null` and a directory at
+  `player-uuid`, each through `ReadPlayerUUIDFile`, `ReadPlayerUUID`,
+  `EnsurePlayerUUID` and `ForgetPlayerUUID`): both pipe cases "still running
+  after 5s, waiting to open a named pipe" in all four readers, then, once the
+  writer was played, "does not hold one UUID (refused as \"\")"; the device
+  "does not hold one UUID"; the directory "read …: is a directory".
+- `TestANamedPipeAtThePlayersUUIDRefusesItsStartAtOnce` (`cmd/bridge`): "the
+  player's start: still running after 5s", then the start refused "…
+  does not hold one UUID: remove it, and the next start makes a new one, …",
+  its log line the same.
+- `TestOutputDACBindRefusesANamedPipeAtThePlayersUUIDAtOnce`: "bridge output
+  dac bind: still running after 5s", then exit 1 with "does not hold one
+  UUID".
+- `TestOutputDACInspectSaysANamedPipeAtThePlayersUUIDIsNotAFile`: "bridge
+  output dac inspect: still running after 5s", then the UUID line "… does
+  not hold one UUID: …".
+- `TestRestoreRefusesANamedPipeForThePlayerUUIDAtOnce` (`internal/backup`):
+  "Restore: still running after 5s", then "restore player-uuid: … does not
+  hold one UUID, so the player cannot have the identity it had; nothing was
+  restored: remove it from the snapshot …".
+- `TestRestoreOverANamedPipeAtTheBoxsPlayerUUIDDoesNotWait`: "Restore: still
+  running after 5s", with the reservation already raised.
+
+### Decided otherwise than the brief, and why
+
+- The brief named three readers. Inspect, the restore's read of the box's own
+  copy and `ForgetPlayerUUID` read through the same function, so the change
+  covers them too; inspect and the box's copy have tests of their own, and the
+  config package a test of the reader itself over each kind of entry.
+- The serve test turns backups off (`playerServeCase.top`, a field added for
+  config written after the output block), so the player's start is what reads
+  `player-uuid` at boot.
+- The identity rule in `player.md` was a 1.6 KB bullet with no long form, in a
+  file at 97.9% of its budget. It moved verbatim to `History-rules-player.md`
+  first (its own commit, through `move_entry.py`, with `verify_moves.py`
+  passing), and B525's text went to the long form, its Don't to the line.
+
+### Negative controls
+
+On the committed tree (ac6ed516; the two that go through the bind tests'
+helper again on cac7518a), one control per reader: `ReadPlayerUUIDFile`
+opening with `os.Open` again, applied as a one-line edit checked to match
+once, that reader's test run, the file restored from git and the tree
+checked clean, then the tests run green again.
+
+| NC | Reader | Test | Red |
+|---|---|---|---|
+| 1 | serve's player start | `TestANamedPipeAtThePlayersUUIDRefusesItsStartAtOnce` | "the player's start: still running after 5s, waiting to open a named pipe"; refused "the player's identity: … does not hold one UUID: remove it, …", and its log line the same |
+| 2 | bind | `TestOutputDACBindRefusesANamedPipeAtThePlayersUUIDAtOnce` | "bridge output dac bind: still running after 5s, …"; exit 1, "the player's UUID: … does not hold one UUID: …" |
+| 3 | a restore's read of a snapshot's copy | `TestRestoreRefusesANamedPipeForThePlayerUUIDAtOnce` | "Restore: still running after 5s, …"; "restore player-uuid: … does not hold one UUID, so the player cannot have the identity it had; …" (refused as "") |
+| 4 | inspect | `TestOutputDACInspectSaysANamedPipeAtThePlayersUUIDIsNotAFile` | "bridge output dac inspect: still running after 5s, …"; the UUID line "… does not hold one UUID: …" |
+| 5 | a restore's read of the box's own copy | `TestRestoreOverANamedPipeAtTheBoxsPlayerUUIDDoesNotWait` | "Restore: still running after 5s, …" |
+| 6 | the reader itself | `TestWhatIsNotAFileAtPlayerUUIDIsRefusedAtOnce` | every subtest: both pipes 5 s in each of the four readers, then refused as ""; the device and the directory refused as "" |
+
+### Runs
+
+Through the build lock: `make fmt`, which rewrote nothing (go1.27.3's
+gofmt: `go.mod`'s go1.27.2 is not in this host's module cache and GOPROXY is
+off); `make vet`, `GOOS=linux go vet ./...` and `GOOS=windows go vet ./...`,
+clean; `make build-all`, every target built; `make docs-check`, passing,
+`player.md` at 97.0%. `go test -race -timeout 30m`: `internal/config`
+(2.956 s) and `internal/backup` (31.434 s) passing; `cmd/bridge` failed its
+first run on `TestEveryBackgroundGoroutineDrainsOnCleanup` alone, since the
+bind tests' helper (`runDACWithin`) started the command's goroutine without
+draining it on cleanup; it now registers `drainLoopOnCleanup` (cac7518a),
+and `cmd/bridge` passed (499.109 s). The six new tests under `-race -count
+20`: 20 of 20 each, every subtest included.
+
+### Round 2 — live backup capture and the loaded refusal clause
+
+The live capture was missed in round 1: `Snapshot` called `copyFileCtx`
+with a plain `os.Open` before its later parse of the captured UUID.
+A FIFO at the live identity therefore still held manual and scheduled
+backups. The same open served tokens, the certificate, key, YAML, console
+account and Atlas state. `copyFileCtx` now opens through
+`fsutil.OpenAsFile` inside its existing `atomicwrite.ReadWithRetryCtx`:
+the Windows sharing retry remains, while a FIFO is refused at once as a
+`*fsutil.NotAFileError` inside a `*fs.PathError`. The source loop names
+the file without a value and its existing error cleanup removes the partial
+snapshot directory. The optional-source stat/ErrNotExist skip is unchanged.
+Restore's ordinary file copies use the same helper.
+
+Two Unix tests create real FIFOs with `syscall.Mkfifo`:
+`TestSnapshotRefusesALivePlayerUUIDPipeAtOnce` and
+`TestSnapshotRefusesALiveTokensPipeAtOnce`. Both ran red before the fix:
+“Snapshot: still running after 5s, waiting to open a named pipe”; once the
+fixture released the open, the backup succeeded with an empty copy and left
+a snapshot. That holds for `player-uuid` too: `Snapshot` keeps a captured
+copy that does not hold one UUID (`config.ErrNotOnePlayerUUID` is not a
+backup failure; restore refuses such a copy later), so the empty copy did
+not fail the backup (`red-r2.log`: `Snapshot error = <nil>` for both). They require prompt typed refusal, the exact file-and-kind-only
+message, no returned or remaining snapshot directory, and the source pipe
+left intact. The negative control restores the plain open in `copyFileCtx`
+and runs both tests again.
+
+The identity pointer lost “is refused, never replaced” when the long form
+moved. Its loaded bold Don't sentence now includes “replace one that does
+not hold one UUID”; the existing History bullet remains unchanged.
+A separate History follow-up records this correction and the live capture.
+The backup open rule is loaded with backup code through `cli-serve.md`.
+
+Round 2 validation used Go 1.27.2 offline. Host, Linux and Windows
+`go vet ./...` passed; `make fmt` changed nothing and `make docs-check`
+passed (`player.md` 97,039 bytes, 97.0% of budget).
+The full race suites passed for `internal/backup` (37.291 s) and
+`internal/config` (4.046 s), including regular-file restore and missing
+optional sources. Each new test passed 20 race-enabled runs (40 total).
+The plain-open control compiled and failed both tests with the same
+five-second wait and accepted empty copy as the red-first run; the loaded
+clause's removal failed a separate documentation assertion. Both mutations
+were restored from saved bytes without a commit.
+
+The focused `cmd/bridge` race run passed the bind and inspect FIFO tests,
+`TestEveryBackgroundGoroutineDrainsOnCleanup`,
+`TestEveryCitedTestNameExists` and `TestJobWritersKeepTheInstallOwner`.
+`TestANamedPipeAtThePlayersUUIDRefusesItsStartAtOnce` could not reach its
+assertion in the sandbox, which refused `listen tcp 127.0.0.1:0` with
+“bind: operation not permitted”; run again on the host outside it, all six
+passed under `-race` (the serve start 1.08 s, `cmd/bridge` 13.902 s).
+Linux and Windows were vetted here and run by CI.

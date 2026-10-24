@@ -8,12 +8,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/unix"
 
+	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil/fsutiltest"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 )
@@ -106,5 +109,50 @@ func TestANamedPipeAtThePlayersFilesDoesNotHoldItsStart(t *testing.T) {
 				t.Fatalf("exit %d; stderr=%s", code, ps.stderr.String())
 			}
 		})
+	}
+}
+
+// TestANamedPipeAtThePlayersUUIDRefusesItsStartAtOnce: a named pipe at the
+// player's identity, <dataDir>/player-uuid, is no file and no identity: the
+// player's start refuses it at once and says so, where its read of the
+// identity waited for a writer to the pipe and held the start on its
+// supervisor's goroutine. It is no reason to make an identity either: the
+// pipe is left where it is, no backend or engine is built, and serve serves
+// on and stops cleanly. Backups are off, so the player's start is what reads
+// player-uuid at boot.
+func TestANamedPipeAtThePlayersUUIDRefusesItsStartAtOnce(t *testing.T) {
+	needsDirectorySync(t)
+	rec := loggingtest.Record(t)
+	standIn := newPlayerStandIn()
+	var fifo string
+	ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer, top: "backup:\n  intervalHours: 0\n", standIn: standIn,
+		before: func(dataDir string) {
+			fifo = filepath.Join(dataDir, config.PlayerUUIDFile)
+			fsutiltest.MakeFIFO(t, fifo)
+		}})
+	fsutiltest.AwaitPastFIFOs(t, "the player's start", fsutiltest.ServeBound, ps.player.ready, fifo)
+	if failed := ps.player.failed; ps.player.eng != nil || !strings.Contains(failed, "the player's identity: ") || !strings.Contains(failed, "named pipe is not a file") {
+		t.Errorf("the player's start with a named pipe at player-uuid: started %v, refused %q; want it refused as a named pipe", ps.player.eng != nil, failed)
+	}
+	if lines := rec.Lines("player: not started"); len(lines) != 1 || !strings.Contains(lines[0], "named pipe is not a file") {
+		t.Errorf("the refusal logged %q, want one line naming the pipe", lines)
+	}
+	if lines := rec.Lines("player: made the player's identity"); len(lines) > 0 {
+		t.Errorf("serve made an identity in place of a named pipe: %q", lines)
+	}
+	if info, err := os.Lstat(fifo); err != nil || info.Mode()&fs.ModeNamedPipe == 0 {
+		t.Errorf("player-uuid is %v (%v) after the refusal, want the named pipe left as it was", info, err)
+	}
+	if code := ps.health(t); code != http.StatusOK {
+		t.Errorf("GET /v1/health beside a player refused its identity: %d", code)
+	}
+	if code := ps.stopServe(t); code != 0 {
+		t.Fatalf("exit %d; stderr=%s", code, ps.stderr.String())
+	}
+	standIn.mu.Lock()
+	built := standIn.built
+	standIn.mu.Unlock()
+	if built {
+		t.Error("the player built its backend past an identity it could not read")
 	}
 }
