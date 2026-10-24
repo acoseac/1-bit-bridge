@@ -258,7 +258,7 @@ func (e *Engine) reserveWrite() {
 	}
 	r.inflight = true
 	ids, tokens := r.ids.want, r.tokens.want
-	e.spawn(func() { e.post(msgReserveDone{err: e.reserve(ids, tokens)}) })
+	e.spawn(func() any { return msgReserveDone{err: e.reserve(ids, tokens)} })
 }
 
 // reserve writes a reservation, the start's or one on a goroutine of its
