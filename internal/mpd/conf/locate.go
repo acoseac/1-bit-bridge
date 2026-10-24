@@ -158,6 +158,12 @@ func ReadFile(root, logical, host string) (File, error) {
 	if err != nil {
 		return File{}, err
 	}
+	namedDir := filepath.Dir(host)
+	// Resolve the directory itself (e.g. macOS /var), not the file link.
+	namedDir, err = filepath.EvalSymlinks(namedDir)
+	if err != nil {
+		return File{}, err
+	}
 	host, err = filepath.EvalSymlinks(host)
 	if err != nil {
 		return File{}, err
@@ -167,7 +173,7 @@ func ReadFile(root, logical, host string) (File, error) {
 		return File{}, err
 	}
 	load := &loader{root: root, stack: map[string]struct{}{host: {}}}
-	f := parseFile(text, logical, filepath.Dir(host), load)
+	f := parseFile(text, logical, namedDir, load)
 	f.Path = logical
 	f.finish()
 	return f, nil
@@ -245,11 +251,9 @@ func (l *loader) resolve(dir, name string) (string, error) {
 	if err := staysInRoot(l.root, host); err != nil {
 		return "", err
 	}
-	resolved, err := filepath.EvalSymlinks(host)
-	if err != nil {
-		return "", err
-	}
-	return resolved, nil
+	// Keep the named path for the next relative include. The caller uses
+	// the resolved path only as its cycle key.
+	return host, nil
 }
 
 func logicalAbs(p string) bool {

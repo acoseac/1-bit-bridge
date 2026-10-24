@@ -932,7 +932,12 @@ func (p *prober) include(line int, name string, optional bool) {
 		p.add(line, "include %s: %s", quotePath(name), cleanErr(err))
 		return
 	}
-	if _, cyc := p.load.stack[host]; cyc {
+	key, err := filepath.EvalSymlinks(host)
+	if err != nil {
+		// Missing optional files must still reach open and errNotFound.
+		key = host
+	}
+	if _, cyc := p.load.stack[key]; cyc {
 		p.add(line, "include %s: cycle", quotePath(name))
 		return
 	}
@@ -952,11 +957,11 @@ func (p *prober) include(line int, name string, optional bool) {
 		p.add(line, "include %s: %s", quotePath(name), cleanErr(err))
 		return
 	}
-	p.load.stack[host] = struct{}{}
+	p.load.stack[key] = struct{}{}
 	p.load.depth++
 	child := parseFile(text, logicalFromHost(p.load.root, host), filepath.Dir(host), p.load)
 	p.load.depth--
-	delete(p.load.stack, host)
+	delete(p.load.stack, key)
 	mergeFile(p.file, child)
 }
 
