@@ -3,10 +3,15 @@
 package backup_test
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/backup"
+	"github.com/acoseac/1-bit-bridge/internal/config"
 )
 
 // TestALockFileLinkNamesTheEntryAndWhatItLinksTo: server.lock as a link. A
@@ -48,5 +53,56 @@ func TestALockFileLinkNamesTheEntryAndWhatItLinksTo(t *testing.T) {
 				t.Fatalf("advice for a server.lock link:\n%s\nwant it to end:\n%s", line, want)
 			}
 		})
+	}
+}
+
+// TestALockFileLinkLeadingOutIsNeverFollowed: a server.lock that is a link
+// leading out of the data directory, by an absolute or a relative target, is
+// refused by the data directory's root and never followed, so the file it
+// names is never made. The refusal ("path escapes from parent") is no
+// permission failure and takes no remedy: a seal completion logs it with its
+// error alone and the backup goes on, and an adoption refuses the backup with
+// it, never busy, the player's state as it was.
+func TestALockFileLinkLeadingOutIsNeverFollowed(t *testing.T) {
+	reservationStorage(t)
+	const escape = "path escapes from parent"
+	for _, target := range []string{"absolute", "relative"} {
+		for _, step := range []string{"completion", "adoption"} {
+			t.Run(target+"_"+step, func(t *testing.T) {
+				dir := loneSealBox(t)
+				if step == "adoption" {
+					dir = uuidOnlyBox(t)
+				}
+				link := filepath.Join(t.TempDir(), "named.lock")
+				if target == "relative" {
+					link = filepath.Join("..", "named.lock")
+				}
+				named := link
+				if !filepath.IsAbs(named) {
+					named = filepath.Join(dir, named)
+				}
+				if err := os.Symlink(link, filepath.Join(dir, "server.lock")); err != nil {
+					t.Fatal(err)
+				}
+				if step == "completion" {
+					if line := completionWarning(t, dir, true); !strings.HasSuffix(line, "player seal completion failed: openat server.lock: "+escape) {
+						t.Fatalf("a completion over a lock link leading out logged:\n%s\nwant the refusal alone", line)
+					}
+				} else {
+					before := playerFiles(t, dir)
+					snap, err := backup.Snapshot(t.Context(), backup.Sources{DataDir: dir, PlayerUUID: filepath.Join(dir, config.PlayerUUIDFile)})
+					if err == nil || snap != "" || !strings.HasSuffix(err.Error(), "player initialization failed: openat server.lock: "+escape) ||
+						strings.Contains(err.Error(), "busy") {
+						t.Fatalf("an adoption over a lock link leading out: %q %v", snap, err)
+					}
+					if after := playerFiles(t, dir); fmt.Sprint(after) != fmt.Sprint(before) {
+						t.Fatalf("the refused adoption changed the player's state: %v -> %v", before, after)
+					}
+				}
+				if _, err := os.Lstat(named); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("the file the lock link names, %s, was made: %v", named, err)
+				}
+			})
+		}
 	}
 }
