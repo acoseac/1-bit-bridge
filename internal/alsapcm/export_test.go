@@ -229,6 +229,23 @@ func (tk *FakeKernel) ParkNextStatus() (parked <-chan struct{}, release func()) 
 	return tk.k.parkNextStatus()
 }
 
+// ParkStatusAfterWritten parks the first STATUS after the kernel takes
+// frames frames across its opens, before that STATUS reads the pointers.
+func (tk *FakeKernel) ParkStatusAfterWritten(frames uint64) (parked <-chan struct{}, release func()) {
+	gate, arrived := make(chan struct{}), make(chan struct{})
+	tk.k.inspect(func(k *fakeKernel) {
+		k.at = append(k.at, fakeAt{frames: frames, do: func(k *fakeKernel) {
+			k.statusGate, k.statusParked = gate, arrived
+		}})
+	})
+	var once sync.Once
+	return arrived, func() { once.Do(func() { close(gate) }) }
+}
+
+// AdvanceUnwatched lets the DAC play d while a kernel call is parked,
+// before a wake-up reaches the writer, without waking a poll.
+func (tk *FakeKernel) AdvanceUnwatched(d time.Duration) { tk.k.advanceUnwatched(d) }
+
 // PanicAtNextClockRead makes the next read of the fake's clock panic with v:
 // a sink's writer is the one goroutine that reads it, so the panic is the
 // writer's.

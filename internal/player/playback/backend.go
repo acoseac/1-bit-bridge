@@ -52,6 +52,11 @@ type Config struct {
 // Seams are the backend's test seams (Config.Seams). Each runs on the
 // goroutine that reaches it, and may block to hold that goroutine there.
 type Seams struct {
+	// SinkCall observes the context bounding a call to a sink, before the
+	// command starts. The command itself has no context argument; call owns
+	// this bound while its goroutine waits for the sink's answer. An optional
+	// returned observer receives the result on the caller's goroutine.
+	SinkCall func(context.Context) func(error)
 	// PauseRefused runs in Pause once a sink has refused it because it is
 	// playing out its last frames or has played them out, before Pause
 	// decides what the refusal means.
