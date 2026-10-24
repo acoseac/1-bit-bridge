@@ -83,12 +83,17 @@ Serve adopts at boot even when playback is disabled. Backup takes the exclusive
 server lock for adoption; if adoption is busy, stop the service and run the backup
 again. Backup also takes that lock for seal completion. When the lock is busy,
 the completion is logged and left to the next lifecycle operation. Any other
-failure is logged with its error and advice by its cause: a file or directory
-this user cannot read or write names the path and the access to restore, a
-read-only data directory says so, and a marker refusal keeps its own remedy.
-Each of these meets the next serve boot or start too, a permission failure when
-it runs as the same user. An interrupted or refused lock, or an I/O error, is
-logged with its error alone. Backup continues either way.
+failure is logged with its error and advice by its cause. A failure at the data
+directory itself takes one remedy that always suffices: restore read, write and
+search (execute) access to it and each directory above it, or clear an
+immutable flag or ACL on it; on Windows, full control of it. A marker this user
+cannot open names read access to it, and `server.lock` read and write access to
+it, each with the flag or ACL when the system answers "operation not
+permitted"; a `server.lock` the open failed to create takes the directory's
+remedy. A read-only data directory says so, and a marker refusal keeps its own
+remedy. Each of these meets the next serve boot or start too, a permission
+failure when it runs as the same user. An interrupted or refused lock, or an
+I/O error, is logged with its error alone. Backup continues either way.
 An older engine can hand out tokens without writing a queue, so losing only
 its floor can look like this upgrade state. Adoption covers old counter space
 below 2^31, including reserved blocks skipped at restarts, not the number of

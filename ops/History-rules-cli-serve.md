@@ -2474,3 +2474,54 @@ its refusal. `TestRestoreRefusesAFloorItsManifestDoesNotList`,
 `TestSealCompletionAdviceNamesTheReadItLacked`,
 `TestBusySealCompletionAcrossProcesses` and `TestLockedErrMapsOnlyAHeldLock`
 pin these boundaries.
+
+### Round 12: one remedy for a directory failure, a file's own access for a file
+
+Round 11's advice named the access a step needed, and three kinds of failure
+named one the user already had. An Lstat, which needs the directory's search
+access, said read; the marker write's directory sync, in a directory the user
+may write and search but not read, said write; and the lock file's open, for
+reading and writing, said write access to `server.lock`, also where the file
+was missing and the open had failed creating it. A remedy is advice the
+operator follows, not a diagnosis, so every failure at the data directory
+itself now takes one remedy that always suffices (`directoryAccess`): on unix,
+restore read, write and search (execute) access to the data directory and each
+directory above it, or clear an immutable flag or ACL on it; on Windows,
+restore full control of the data directory. These failures are an entry's
+Lstat (in `markerEntry`, `playerEntryNotAFile`, `playerAllocationEvidence` and
+the lock file's check), the barrier, which opens the directory to sync it and
+creates nothing, and a durable write's temporary file, rename and directory
+sync. `ensurePlayerMarker` now takes the entry's kind from the one Lstat that
+read the marker (`markerEntry`), so it has no Lstat of its own.
+
+A file's own open names the file (`fileAccess`). A marker's open or read
+needs read access to it; an EPERM rather than an EACCES adds "or clear an
+immutable flag or ACL on it", which read access alone does not undo. The lock
+file is opened for reading and writing and created when missing, so a
+permission failure there is told apart by an Lstat through the data
+directory's root, which follows nothing outside it (`lockFileAccess`). A
+regular file needs read and write access to it, with the same EPERM addition.
+No entry, a link the root resolves to nothing, a root that will not open and
+an Lstat that fails take the directory remedy: the open failed creating the
+file, or never reached it. Any other entry keeps the lock file's write remedy.
+The claim that serve boot and start fail on it too holds when they run as this
+user, as before.
+
+On the owner's Mac a backup's own lock open needs to read the data directory
+(`os.OpenRoot`), so in a 0300 directory it fails there, with the directory
+remedy, before completion reaches the seal's barrier; the barrier case drives
+the completion itself. The identity-free restore of a snapshot whose
+`player-uuid` entry is damaged is now pinned to its one outcome: it completes,
+and the box's identity and floor stay byte for byte. Round 10's failed-write
+case now asserts the directory remedy.
+`TestALockFileThisUserCannotReadNamesReadAndWriteAccess`,
+`TestALockFileTheOpenCouldNotCreateNamesTheDirectory`,
+`TestAnUnreadableDataDirectoryFailsAtTheSealBarrier`,
+`TestAnUnreadableDataDirectoryFailsAtTheMarkerWrite`,
+`TestADataDirectoryThisUserCannotSearchFailsAtTheFirstLstat`,
+`TestEveryDirectoryStepNamesTheDirectory`,
+`TestAMarkerOpenRefusedAsNotPermittedNamesTheFlag`,
+`TestAnImmutableLockFileNamesTheFlag`, `TestAnyOtherLockEntryKeepsItsAdvice`,
+`TestTheDirectoryRemedyPerPlatform` and
+`TestRestoreKeepsTheBoxIdentityWhenItsUUIDEntryIsDamaged` pin these
+boundaries.

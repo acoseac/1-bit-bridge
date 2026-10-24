@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B524 round 12: a seal completion's permission advice takes one remedy for a directory failure and names the file for a file's own](#2026-10-24--b524-round-12-a-seal-completions-permission-advice-takes-one-remedy-for-a-directory-failure-and-names-the-file-for-a-files-own)
 - [2026-10-24 — B524 round 11: an unlisted floor the snapshot holds refuses restore, a non-file seal is kept and recorded twice, and seal-completion advice names its cause](#2026-10-24--b524-round-11-an-unlisted-floor-the-snapshot-holds-refuses-restore-a-non-file-seal-is-kept-and-recorded-twice-and-seal-completion-advice-names-its-cause)
 - [2026-10-24 — B524: a reset keeps the player floor](#2026-10-24--b524-a-reset-keeps-the-player-floor)
 - [2026-10-24 — B526 items 2 and 3, B532 and B536: four tests CI reddened at random, each red first in its losing order](#2026-10-24--b526-items-2-and-3-b532-and-b536-four-tests-ci-reddened-at-random-each-red-first-in-its-losing-order)
@@ -152,6 +153,71 @@ reaches a session that has not gone looking for it.
 - [The original "Things that have bitten before" list (2026-04 → 2026-08)](#the-original-things-that-have-bitten-before-list-2026-04-2026-08)
 - [DSD → PCM renditions on the bridge, B1 (PR #863, 2026-09-07)](#dsd--pcm-renditions-on-the-bridge-b1-pr-863-2026-09-07)
 - [DSD renditions B4 — the alias measurement, and why it is a differential (2026-09-07)](#dsd-renditions-b4--the-alias-measurement-and-why-it-is-a-differential-2026-09-07)
+
+---
+
+## 2026-10-24 — B524 round 12: a seal completion's permission advice takes one remedy for a directory failure and names the file for a file's own
+
+Round 11's reviews found no High. Three findings concerned the advice a seal
+completion prints for a permission failure: each named an access the user
+already had, so following it changed nothing.
+
+**One remedy for a directory failure.** A remedy is advice the operator
+follows, not a diagnosis, so every failure at the data directory itself, an
+entry's Lstat, the barrier that opens the directory to sync it and a durable
+write's temporary file, rename and directory sync, now takes one remedy that
+always suffices: on unix, restore read, write and search (execute) access to
+the data directory and each directory above it, or clear an immutable flag or
+ACL on it; on Windows, restore full control of the data directory. Red first
+on 032934fe: a data directory without search (0600) was told to restore read
+access at the completion's first Lstat, as were the seal's entry check, the
+allocation evidence and a marker's ensure; a 0300 directory's seal barrier was
+told read access and its marker write, which lands and then cannot sync the
+directory, write access; a 0500 directory's marker ensure was told write
+access.
+
+**A file's own open names the file.** A marker's open or read needs read
+access to it, and an EPERM adds the flag or ACL. The lock file is opened for
+reading and writing and created when missing, so its permission failure is
+told apart by an Lstat through the data directory's root: a regular file needs
+read and write access to it; no entry, a link the root resolves to nothing, a
+root that will not open and an Lstat that fails take the directory remedy;
+anything else keeps the lock file's write remedy. Red first: a 0200
+`server.lock` was told to restore write access to it; an absent one, and a
+relative link to a missing sibling, in an unwritable directory were told the
+same of a file that was not there; a lock file whose own Lstat fails, in a
+directory without search, was told write access to it too; a lock file with
+the immutable flag (macOS uchg, an EPERM) and an EPERM opening a marker got no
+word of the flag. A named pipe at `server.lock` keeps its write remedy, before
+and after.
+
+**One outcome for the identity-free restore.** A snapshot whose `player-uuid`
+entry is damaged restores identity-free; the test accepted a refusal too, and
+now requires the restore to complete with the box's identity and floor byte
+for byte, as it does on 032934fe and after.
+
+**Tests.** Every permission case is unix-only, skips under root, restores modes
+in `t.Cleanup` and asserts the advice it expects. Where a backup's earlier
+step fails first, the completion or the step is driven directly: on the
+owner's Mac a backup's own lock open needs to read the data directory, so a
+0300 directory fails there, with the directory remedy, before the seal's
+barrier. The EPERM opening a marker comes from a test-only seam
+(`readMarker`), since no fixture gives one. None skipped on the owner's Mac;
+the immutable lock file case is macOS-only. Round 10's failed-write case now
+asserts the directory remedy.
+
+Round-twelve evidence records 145 code negative controls failing by
+assertion, each anchor count-checked, mutated in the committed tree and
+restored from git: round 11's 126, seven of them rebased onto anchors this
+round moved, and 19 new ones, one or more for each changed tag and one that
+refuses the identity-free restore. Thirty-one documentation mutations, round
+11's twenty and eleven new, each fail the documentation contract. On the
+owner's Mac (macOS arm64, Go 1.27.3, not root) native, Linux and Windows vet
+pass with the release build tags, `make fmt` changes nothing and `make
+docs-check` passes. `go test -race -count=1` passes `internal/backup` and
+`cmd/bridge`: 1,064 top-level cases pass and five skip (two default-port and
+three root-only CLI cases), cmd/bridge in 605 s. The ten new tests and two
+revised ones pass ten race-enabled runs each.
 
 ---
 
