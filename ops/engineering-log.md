@@ -60360,6 +60360,26 @@ merged (B535). Nothing reloads the config live. One thing found beside this
 change, in how `Load` resolves a config's relative paths, predates B506, is
 no writer's, and was handed on as a follow-up.
 
+### Checks of the second round
+
+Through the build lock, on 3c50f001: `make fmt` rewrote nothing (Go 1.27.3,
+`GOTOOLCHAIN=local`) and `make vet` was clean; `make test` passed 74 packages
+under the race detector, `cmd/bridge` (596 s), `internal/admin` (724 s),
+`internal/backup` (31 s), `internal/config` (8 s) and `internal/fsutil` (3 s)
+among them, and failed one, `internal/handshakelog`'s
+`TestAProbeOfASpecificBoundIPIsNotLogged`, whose dial to this host's
+address on the point-to-point VPN tunnel `utun40` times out as it did
+in the first round: that test's binary imports none of the packages this
+change touches. `make build-all` built the six targets, `make docs-check`
+passed, `go test -race -count=1` of `internal/config`, `internal/fsutil`,
+`internal/backup`, `internal/admin` and `cmd/bridge` passed (567 s for
+`cmd/bridge`, 706 s for `internal/admin`), and `GOOS=windows go vet ./...`
+was clean. The Windows halves of `fsutil.KeepsNoLocks` and
+`fsutil.ResolveParent` are compiled and vetted here; running them is CI's
+Windows leg. Rules: the config-lifecycle.md and cli-serve.md lines, written
+by the orchestrator from the worker's report; their long forms are above in
+`ops/History-rules-config-lifecycle.md` and `ops/History-rules-cli-serve.md`.
+
 ## 2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader
 
 `config.ReadPlayerUUIDFile` is the UUID parser for `<dataDir>/player-uuid`
