@@ -61929,6 +61929,21 @@ Rules: the config-lifecycle.md line, which names the allowance, given to the
 orchestrator as an OLD and NEW pair against 5400d608; cli-serve.md's does not
 name it, and is unchanged.
 
+### After the sixth round's review
+
+The reviews of the sixth round found one Low (Codex's; the Claude review
+found none). A range's key and value were not assignments to the sweep, so
+`for _, t = range []*config.FileLock{l} {}` after a nil check moved the
+checked name unseen. The orchestrator fixed it in 4f689a1d: the walker
+records a range's key and value as assignments from the ranged expression.
+
+- **Red before:** with the new fixture `reassignsItsNilCheckedTurnInARange`,
+  the self-test reported 44 problems of 45.
+- **The control:** not counting them made it red again, 44 of 45, and the
+  file was put back from git.
+- **Checks:** `go vet` and gofmt clean, and the two sweep tests passed
+  `-race -count=10`.
+
 ## 2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader
 
 `config.ReadPlayerUUIDFile` is the UUID parser for `<dataDir>/player-uuid`

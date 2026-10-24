@@ -1094,6 +1094,16 @@ Windows-runner check, distinct from portable race-test results.
   itself while its caller makes no write the sweep knows. It is a check of
   shapes, not a proof.
 
+  **A range's key and value count as assignments** (the sixth round's
+  review, Codex's Low; 4f689a1d). The reassignment check read assignment
+  statements and declarations only, so `for _, t = range
+  []*config.FileLock{l} {}` after the check moved the nil-checked name
+  unseen, and the save through it passed with the comparison skipped. The
+  walker now records a range's key and value as assignments from the ranged
+  expression. Red before: the self-test reported 44 problems of 45, with
+  `reassignsItsNilCheckedTurnInARange` passing. The control, not counting
+  them, brings that back.
+
   **Don't save a copy read before the lock or decide on a read beside the
   turn, save a value not taken from the turn without an if that refuses on
   a comparison `comparedSaves` lists, accept a save past a nil-checked
