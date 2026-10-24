@@ -60234,7 +60234,7 @@ as 30, octal, as `036` untagged does, while `big.Rat` read 36 and the load
 refused it; the player block left `device.pcmDevice: !!float 010` unread.
 `big.Rat` also refused texts that write a whole number,
 `0e99999999999999999999` (its exponent overflows) and `30.` with a million
-zeros after its point (an exponent past a million), and reads a long
+and one zeros after its point (an exponent past a million), and reads a long
 mantissa in time quadratic in its digits, measured on this host: a hundred
 thousand digits in 6.7 ms, a million in 517 ms, where `strconv.ParseFloat`,
 which yaml.v3 runs first, takes 1.4 ms.
@@ -60243,11 +60243,12 @@ which yaml.v3 runs first, takes 1.4 ms.
 dropped, `strconv.ParseInt` with base 0 first (`!!float 0x20000000000001`
 writes 2^53+1, which the float64 rounds to 2^53, and is refused), then a
 decimal float digit by digit, in time linear in the text (a million digits
-in 0.74 ms). Zero is zero whatever its exponent. Refused unread, by
-choice: a whole number of more than 20 digits, which no 64-bit integer
-holds, and a number other than zero with an exponent of a million or more,
-which only a mantissa of a million digits or more brings back to a whole
-number.
+in 0.74 ms). Zero is zero whatever its exponent. Refused unread: a whole
+number of more than 20 digits, which no 64-bit integer holds, and a number
+other than zero with an exponent of a million or more, which yaml.v3 never
+decodes unchanged (strconv stops reading an exponent once it reaches 10000,
+so such a text overflows, and resolves as a string, or decodes to another
+value: `0.` and 9,998 zeros then `3e10000000` decodes as 30).
 
 Red first, on a stand-in with round 9's reading: four of the new behaviour
 cases (the tagged octal in both tests, the million zeros, the overflowing
@@ -60258,6 +60259,20 @@ predicted and nothing else: without `ParseInt` first, the two tagged octals
 and five of the unit test's integer spellings; with the exponent bound
 raised from six digits to eighteen, the one row whose exponent is a million
 or more; with 21 digits allowed, the two 21-digit rows.
+
+Codex, reviewing that round, found one more of resolve's readings: once
+base 0 refuses a text, a binary or octal prefix followed by a sign
+(`!!float 0b+11110`, `!!float 0o-36`) is read by `strconv.ParseInt` of
+what follows the prefix, in its base, so yaml.v3 decodes 30 where the
+round refused the file. `writtenInteger` now runs the same fallback, its
+`0b`, `-0b`, `0o` and `-0o` branches as resolve writes them. Red first:
+that behaviour case and four rows of the unit test, and nothing else; the
+same five went red with the fallback disabled on the committed fix.
+Claude's review corrected the reason given for the large-exponent refusal
+(it is no trade-off: yaml.v3 never decodes such a text unchanged) and the
+round-9 case's count (a million and one zeros). `0.` and 9,998 zeros then
+`3e10000000`, which yaml.v3 decodes as 30, is now a refused row; it was
+refused before this round too.
 
 ### Not in this change
 
