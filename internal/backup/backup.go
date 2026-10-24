@@ -173,6 +173,14 @@ type Targets struct {
 	PlayerUUID   string
 }
 
+// afterIdentityCopy is a test seam, nil in production: Snapshot calls it once
+// it has copied the player's UUID into the snapshot and closed the source,
+// before it reads that UUID's floor, so a test can change the box's identity
+// in between, as a lifecycle operation could. A change made from the copy's
+// own rename instead runs while the source is still open, which Windows
+// refuses to remove from under it.
+var afterIdentityCopy func()
+
 // Snapshot captures every present file in `src` into a fresh
 // timestamped directory under `<src.DataDir>/backups/`. Returns the
 // absolute path of the created directory.
@@ -260,6 +268,9 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 	// Capture the UUID before its floor and require the same named identity.
 	// A discard and mint between these reads must not pair old UUID/new floor.
 	if slices.Contains(captured, PlayerUUIDFileName) {
+		if afterIdentityCopy != nil {
+			afterIdentityCopy()
+		}
 		var id string
 		idErr := atomicwrite.ReadWithRetryCtx(ctx, func() error {
 			var err error

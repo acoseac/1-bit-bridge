@@ -92,31 +92,31 @@ func TestStartRequiresTheFloorsIdentity(t *testing.T) {
 	}
 }
 
+// TestBackupNeverPairsAcrossDiscard: a discard and a fresh mint between the
+// backup's UUID copy and its floor read must not pair the old UUID with the
+// new floor. The change runs once the copy has closed the live UUID: from the
+// copy's own rename it ran while the source was still open, which Windows
+// will not let a discard remove.
 func TestBackupNeverPairsAcrossDiscard(t *testing.T) {
 	reservationStorage(t)
 	dir := t.TempDir()
 	if _, _, err := backup.EnsurePlayerUUID(dir); err != nil {
 		t.Fatal(err)
 	}
-	captured := false
-	prev := atomicwrite.SetRenameFuncForTest(func(a, b string) error {
-		if err := os.Rename(a, b); err != nil {
-			return err
+	changes := 0
+	var changeErr error
+	t.Cleanup(backup.SetAfterIdentityCopyForTest(func() {
+		changes++
+		if _, changeErr = backup.DiscardPlayerFloor(dir); changeErr == nil {
+			_, _, changeErr = backup.EnsurePlayerUUID(dir)
 		}
-		if filepath.Base(b) == "player-uuid" && filepath.Dir(b) != dir {
-			captured = true
-			if _, err := backup.DiscardPlayerFloor(dir); err != nil {
-				return err
-			}
-			_, _, err := backup.EnsurePlayerUUID(dir)
-			return err
-		}
-		return nil
-	})
-	defer atomicwrite.SetRenameFuncForTest(prev)
+	}))
 	snap, err := backup.Snapshot(t.Context(), backup.Sources{DataDir: dir, PlayerUUID: filepath.Join(dir, "player-uuid")})
-	if !captured || err == nil || snap != "" || !strings.Contains(err.Error(), "identity changed") {
-		t.Fatalf("mixed snapshot: %q %v captured=%t", snap, err, captured)
+	if changes != 1 || changeErr != nil {
+		t.Fatalf("the discard and mint ran %d times: %v", changes, changeErr)
+	}
+	if err == nil || snap != "" || !strings.Contains(err.Error(), "identity changed") {
+		t.Fatalf("mixed snapshot: %q %v", snap, err)
 	}
 }
 
@@ -234,6 +234,10 @@ func TestFloorLossRemediesCanBeFollowed(t *testing.T) {
 	firstValues(t, dir, markAt(t, dir))
 }
 
+// TestBackupRetryOnlyWhenUUIDVanished: the floor lost between the backup's
+// UUID copy and its floor read refuses the backup, and the advice to run it
+// again is only for a UUID that vanished too. The loss runs once the copy has
+// closed the live UUID, as for TestBackupNeverPairsAcrossDiscard.
 func TestBackupRetryOnlyWhenUUIDVanished(t *testing.T) {
 	reservationStorage(t)
 	for _, vanished := range []bool{false, true} {
@@ -242,22 +246,18 @@ func TestBackupRetryOnlyWhenUUIDVanished(t *testing.T) {
 			if _, _, err := backup.EnsurePlayerUUID(dir); err != nil {
 				t.Fatal(err)
 			}
-			prev := atomicwrite.SetRenameFuncForTest(func(a, b string) error {
-				if err := os.Rename(a, b); err != nil {
-					return err
+			losses := 0
+			var lossErr error
+			t.Cleanup(backup.SetAfterIdentityCopyForTest(func() {
+				losses++
+				if lossErr = os.Remove(filepath.Join(dir, "player-ids.json")); lossErr == nil && vanished {
+					lossErr = os.Remove(filepath.Join(dir, "player-uuid"))
 				}
-				if filepath.Base(b) == "player-uuid" && filepath.Dir(b) != dir {
-					if err := os.Remove(filepath.Join(dir, "player-ids.json")); err != nil {
-						return err
-					}
-					if vanished {
-						return os.Remove(filepath.Join(dir, "player-uuid"))
-					}
-				}
-				return nil
-			})
+			}))
 			_, err := backup.Snapshot(t.Context(), backup.Sources{DataDir: dir, PlayerUUID: filepath.Join(dir, "player-uuid")})
-			atomicwrite.SetRenameFuncForTest(prev)
+			if losses != 1 || lossErr != nil {
+				t.Fatalf("the loss ran %d times: %v", losses, lossErr)
+			}
 			if err == nil || strings.Contains(err.Error(), "run the backup again") != vanished {
 				t.Fatalf("retry advice: %v", err)
 			}

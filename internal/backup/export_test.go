@@ -6,7 +6,15 @@ import (
 	"os"
 )
 
-// SetTryLockForTest replaces the lock a backup's seal completion tries, and
+// SetAfterIdentityCopyForTest sets the hook Snapshot calls between copying
+// the player's UUID and reading its floor, and returns the restore.
+func SetAfterIdentityCopyForTest(fn func()) (restore func()) {
+	prev := afterIdentityCopy
+	afterIdentityCopy = fn
+	return func() { afterIdentityCopy = prev }
+}
+
+// SetTryLockForTest replaces the lock a backup tries on server.lock, and
 // returns the restore.
 func SetTryLockForTest(fn func(*os.File) error) (restore func()) {
 	prev := tryLock
@@ -37,8 +45,24 @@ func OpenSealLock(dir string) error {
 	return err
 }
 
-// DirectoryRemedy is the one remedy a directory-level failure takes on goos.
+// DirectoryRemedy is the one remedy a failure at the data directory alone
+// takes on goos.
 func DirectoryRemedy(goos, dir string) string { return directoryRemedy(goos, dir) }
+
+// EntryRemedy is the union a failure of a step naming dir/name takes on goos.
+func EntryRemedy(goos, dir, name, access string) string { return entryRemedy(goos, dir, name, access) }
+
+// LockFileFailure is the tag a failure to open or lock server.lock takes.
+func LockFileFailure(dir string, err error) error { return lockFileFailure(dir, err) }
+
+// MarkerWriteFailure is the tag a marker's failed durable write takes.
+func MarkerWriteFailure(dir, name string, err error) error { return markerWriteFailure(dir, name, err) }
+
+// SealCompletionAdviceOn is what a backup logs on goos for a seal completion
+// that failed with err.
+func SealCompletionAdviceOn(goos string, err error) string {
+	return sealCompletionAdvice(goos, err).Error()
+}
 
 // SealCompletionAdvice is what a backup logs for a seal completion that
 // failed with err.

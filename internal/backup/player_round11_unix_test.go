@@ -19,6 +19,11 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
+// neitherAbsentNorPresent is an Lstat error that says neither that the
+// entry is there nor that it is not: on unix, a path component that is not a
+// directory.
+var neitherAbsentNorPresent = syscall.ENOTDIR
+
 // withinDeadline runs fn and fails the test, without waiting for it, when
 // it has not returned in time: what a FIFO opened for reading would do.
 func withinDeadline(t *testing.T, what string, fn func() error) error {

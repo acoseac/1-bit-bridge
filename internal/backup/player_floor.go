@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
@@ -51,55 +52,110 @@ type markerRefusal string
 func (e markerRefusal) Error() string { return string(e) }
 
 // accessError is an error a step on the player's local state met, tagged
-// where it happened with the remedy that always suffices for it: advice the
-// operator follows, not a diagnosis. Its text is the error's own: only
-// sealCompletionFailed reads the tag, and only for a permission error.
+// where it happened with what its remedy must cover: the data directory, and
+// the entry the step named, if it named one, with the access the step needed
+// on that entry. Its text is the error's own: only the advice reads the tag
+// (remedy), and only for a permission error.
 type accessError struct {
-	remedy string
+	dir    string
+	entry  string // "" for a step at the data directory alone
+	access string // the access the step needed on the entry: "read", "read and write" or ""
 	err    error
 }
 
 func (e *accessError) Error() string { return e.err.Error() }
 func (e *accessError) Unwrap() error { return e.err }
 
+// remedy is e's advice on goos: the directory's remedy for a step at the data
+// directory alone, the union for a step that named an entry.
+func (e *accessError) remedy(goos string) string {
+	if e.entry == "" {
+		return directoryRemedy(goos, e.dir)
+	}
+	return entryRemedy(goos, e.dir, e.entry, e.access)
+}
+
 // directoryAccess tags err, when there is one, as a failure at the data
-// directory itself: an Lstat of an entry, which searches it; a barrier, which
-// opens the directory to sync it and creates nothing; a durable write, which
-// creates a temporary file in it, renames that into place and syncs it.
-// Which access failed varies with the step, so its remedy names them all
+// directory alone: an Lstat of an entry, which searches it, and a barrier,
+// which opens the directory to sync it and creates nothing. Which access
+// failed varies with the step, so its remedy names them all
 // (directoryRemedy).
 func directoryAccess(dir string, err error) error {
 	if err == nil {
 		return nil
 	}
-	return &accessError{remedy: directoryRemedy(runtime.GOOS, dir), err: err}
+	return &accessError{dir: dir, err: err}
 }
 
-// directoryRemedy is the one remedy every directory-level failure takes on
-// goos: on unix, read, write and search access to dir and the search of each
-// directory above it, or an immutable flag or ACL cleared; on Windows, full
-// control of dir.
+// entryAccess tags err, when there is one, as a failure of a step that names
+// the entry dir/name: a marker's read or durable write, the lock file's open
+// or lock. The directory, the entry, or what the entry links to may each have
+// refused it, and no step tells them apart: the remedy is their union
+// (entryRemedy), so it always suffices. access is what the step needed on
+// the entry itself, or "" when that is the directory's alone.
+func entryAccess(dir, name, access string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &accessError{dir: dir, entry: name, access: access, err: err}
+}
+
+// lockFileFailure tags a failure to open or lock dir's server.lock, which is
+// opened for reading and writing and created when it is missing.
+func lockFileFailure(dir string, err error) error {
+	return entryAccess(dir, "server.lock", "read and write", err)
+}
+
+// markerWriteFailure tags a failure of a marker's durable write, which
+// creates a temporary file in dir and renames it over dir/name.
+func markerWriteFailure(dir, name string, err error) error {
+	return entryAccess(dir, name, "", err)
+}
+
+// directoryRemedy is the one remedy a failure at the data directory alone
+// takes on goos: on unix, read, write and search access to dir and the
+// search of each directory above it, or an immutable or append-only flag or
+// an ACL cleared on dir; on Windows, full control of dir.
 func directoryRemedy(goos, dir string) string {
 	if goos == "windows" {
 		return "restore full control of the data directory " + dir
 	}
 	return "restore read, write and search (execute) access to the data directory " + dir +
-		" and each directory above it, or clear an immutable flag or ACL on it"
+		" and each directory above it, or clear an immutable or append-only flag or ACL on it"
 }
 
-// fileAccess tags err, when there is one, as a failure opening path itself
-// for the access named ("read", or "read and write"). An EPERM, rather than
-// an EACCES, is a flag or an ACL the access alone does not undo, and the
-// remedy says so too.
-func fileAccess(path, access string, err error) error {
-	if err == nil {
-		return nil
+// entryRemedy is the union a failure of a step naming dir/name takes on goos.
+// On unix: the access the step needed on the entry, when there is one; the
+// directory's remedy; any immutable or append-only flag or ACL on the entry
+// or on what it links to, or a link replaced by a regular file; and, in a
+// sticky directory, the entry's owner. On Windows: full control of the
+// directory and of the entry, which covers its access, and its read-only
+// attribute cleared, or a link replaced by a regular file; and any program
+// holding it open closed.
+func entryRemedy(goos, dir, name, access string) string {
+	path := entryPath(goos, dir, name)
+	if goos == "windows" {
+		return "restore full control of the data directory " + dir + " and of " + path +
+			", and clear its read-only attribute, or replace a link at " + path +
+			" with a regular file; and close any program holding " + path + " open"
 	}
-	remedy := "restore " + access + " access to " + path
-	if errors.Is(err, syscall.EPERM) {
-		remedy += ", or clear an immutable flag or ACL on it"
+	remedy := directoryRemedy(goos, dir) + "; and clear any immutable or append-only flag or ACL on " + path +
+		" and on what it links to, or replace a link at " + path + " with a regular file; and either own " + path +
+		" or clear the sticky bit on " + dir
+	if access != "" {
+		remedy = "restore " + access + " access to " + path + "; " + remedy
 	}
-	return &accessError{remedy: remedy, err: err}
+	return remedy
+}
+
+// entryPath is dir/name spelled with goos's separator: filepath.Join's on the
+// platform the bridge runs on, for the cleaned directories it is given.
+func entryPath(goos, dir, name string) string {
+	sep := "/"
+	if goos == "windows" {
+		sep = `\`
+	}
+	return strings.TrimSuffix(dir, sep) + sep + name
 }
 
 // playerMarkerState reads a local marker and logs nothing: only a start's
@@ -113,7 +169,7 @@ func playerMarkerState(dir, name string) (present, valid bool, m playerMarker, e
 // markerEntry is playerMarkerState with the entry's Lstat, nil when there is
 // none. ensurePlayerMarker takes the entry's kind from this one Lstat too.
 // The Lstat's failure is the directory's (directoryAccess); the marker's open
-// and read are the file's (fileAccess).
+// and read name the marker (entryAccess).
 func markerEntry(dir, name string) (st fs.FileInfo, valid bool, m playerMarker, err error) {
 	path := filepath.Join(dir, name)
 	st, err = os.Lstat(path)
@@ -128,7 +184,7 @@ func markerEntry(dir, name string) (st fs.FileInfo, valid bool, m playerMarker, 
 	}
 	b, err := readMarker(path)
 	if err != nil {
-		return st, false, m, fileAccess(path, "read", err)
+		return st, false, m, entryAccess(dir, name, "read", err)
 	}
 	d := json.NewDecoder(bytes.NewReader(b))
 	if len(b) > 128 || d.Decode(&m) != nil || d.Decode(new(any)) != io.EOF {
@@ -256,8 +312,9 @@ func playerRestoresSealed(dir string) (bool, error) {
 // completion records the seal in player-initialized beside it. Refusing it,
 // with a remedy to move it aside, would send the operator to drop the box's
 // only seal record. Only discard repairs it (sealPlayerMarker). The entry's
-// kind is the one Lstat's that read it (markerEntry); the barrier and the
-// write are the directory's (directoryAccess).
+// kind is the one Lstat's that read it (markerEntry); the barrier is the
+// directory's (directoryAccess), the write names the marker
+// (markerWriteFailure).
 func ensurePlayerMarker(dir, name string) error {
 	st, _, _, err := markerEntry(dir, name)
 	if err != nil {
@@ -272,7 +329,7 @@ func ensurePlayerMarker(dir, name string) error {
 		}
 		return directoryAccess(dir, atomicwrite.ProbeDurable(dir, barrier))
 	}
-	return directoryAccess(dir, atomicwrite.WriteBytesDurable(dir, path, []byte("{\"version\":1}\n"), ".player-marker-*.tmp"))
+	return markerWriteFailure(dir, name, atomicwrite.WriteBytesDurable(dir, path, []byte("{\"version\":1}\n"), ".player-marker-*.tmp"))
 }
 
 // sealPlayerMarker repairs damaged markers only in explicit discard. Renaming
@@ -357,7 +414,7 @@ func writePlayerMarker(dir string, m playerMarker) error {
 	if err != nil {
 		return err
 	}
-	return directoryAccess(dir, atomicwrite.WriteBytesDurable(dir, filepath.Join(dir, playerInitialized), append(b, '\n'), ".player-marker-*.tmp"))
+	return markerWriteFailure(dir, playerInitialized, atomicwrite.WriteBytesDurable(dir, filepath.Join(dir, playerInitialized), append(b, '\n'), ".player-marker-*.tmp"))
 }
 
 // markPlayerMinted consumes a discard's exemption after the floor is durable
@@ -448,7 +505,7 @@ func completeCapturedPlayerSeal(dir string) error {
 		if errors.Is(err, fsutil.ErrLocked) {
 			return fmt.Errorf("%w: %w", errSealCompletionBusy, err)
 		}
-		return sealCompletionFailed(err)
+		return sealCompletionFailed(lockFileFailure(dir, err))
 	}
 	defer fsutil.Unlock(f)
 	if err := completePlayerSeal(dir); err != nil {
@@ -458,58 +515,32 @@ func completeCapturedPlayerSeal(dir string) error {
 }
 
 // openSealLock opens server.lock for a backup's seal completion and its
-// adoption, a failure tagged with its remedy (lockFileAccess).
+// adoption, a failure tagged with the lock file's union (lockFileFailure):
+// whatever the entry is, a regular file, a link, or nothing the open could
+// create, the union covers it.
 func openSealLock(dir string) (*os.File, error) {
 	f, err := fsutil.OpenLockFile(dir, "server.lock")
 	if err != nil {
-		return nil, lockFileAccess(dir, err)
+		return nil, lockFileFailure(dir, err)
 	}
 	return f, nil
 }
 
-// lockFileAccess tags OpenLockFile's failure, an open of server.lock for
-// reading and writing that creates the file when it is missing, by what the
-// entry is. Only a permission error is told apart, by an Lstat through the
-// data directory's root that follows nothing outside it. A regular file needs
-// read and write access to it. No entry, or a link the root resolves to
-// nothing, means the open failed creating the file: the directory's access,
-// as is a root that will not open or an Lstat that fails. Any other entry
-// keeps the lock file's write remedy.
-func lockFileAccess(dir string, err error) error {
-	if !errors.Is(err, fs.ErrPermission) {
-		return err
-	}
-	path := filepath.Join(dir, "server.lock")
-	root, rootErr := os.OpenRoot(dir)
-	if rootErr != nil {
-		return directoryAccess(dir, err)
-	}
-	defer root.Close()
-	st, lstatErr := root.Lstat("server.lock")
-	switch {
-	case lstatErr != nil:
-		return directoryAccess(dir, err)
-	case st.Mode().IsRegular():
-		return fileAccess(path, "read and write", err)
-	case st.Mode()&fs.ModeSymlink != 0:
-		if _, statErr := root.Stat("server.lock"); errors.Is(statErr, fs.ErrNotExist) {
-			return directoryAccess(dir, err)
-		}
-	}
-	return &accessError{remedy: "restore write access to " + path, err: err}
-}
-
 // sealCompletionFailed is a backup's seal completion that failed for any
-// reason but a busy lock. It is never called deferred: it keeps its error and
-// advises by cause, claiming no more than the cause supports. A marker
-// refusal keeps its own remedy, and a read-only data directory says so; both
-// stop the next serve boot and start too. A permission error takes the remedy
-// its step tagged it with (accessError): the one directory remedy for a step
-// at the data directory itself, the file's access for a file's own open; serve
-// boot and start fail on it too when they run as the user the backup ran as,
-// which a CLI backup need not share with serve. Anything else, an interrupted
-// or refused lock or an I/O error, need not recur and keeps only its error.
-func sealCompletionFailed(err error) error {
+// reason but a busy lock, advised for this platform (sealCompletionAdvice).
+func sealCompletionFailed(err error) error { return sealCompletionAdvice(runtime.GOOS, err) }
+
+// sealCompletionAdvice is a failed seal completion's warning on goos. It is
+// never called deferred: it keeps its error and advises by cause, claiming no
+// more than the cause supports. A marker refusal keeps its own remedy, and a
+// read-only data directory says so; both stop the next serve boot and start
+// too. A permission error takes the remedy its step tagged it with
+// (accessError): the directory's for a step at the data directory alone, the
+// union for a step that named an entry; serve boot and start fail on it too
+// when they run as the user the backup ran as, which a CLI backup need not
+// share with serve. Anything else, an interrupted or refused lock or an I/O
+// error, need not recur and keeps only its error.
+func sealCompletionAdvice(goos string, err error) error {
 	var refusal markerRefusal
 	var access *accessError
 	switch {
@@ -518,9 +549,21 @@ func sealCompletionFailed(err error) error {
 	case errors.Is(err, syscall.EROFS):
 		return fmt.Errorf("player seal completion failed: %w; the data directory is read-only: serve boot and start fail on it too", err)
 	case errors.Is(err, fs.ErrPermission) && errors.As(err, &access):
-		return fmt.Errorf("player seal completion failed: %w; %s: serve boot and start fail on it too when run as this user", err, access.remedy)
+		return fmt.Errorf("player seal completion failed: %w; %s: serve boot and start fail on it too when run as this user", err, access.remedy(goos))
 	}
 	return fmt.Errorf("player seal completion failed: %w", err)
+}
+
+// adoptionFailed is a backup's adoption under server.lock that failed for any
+// reason but a lock another open holds: its own error, with the remedy a
+// permission error's step tagged it with. Serve boot adopts too, so a
+// permission error stops it there as well.
+func adoptionFailed(err error) error {
+	var access *accessError
+	if errors.Is(err, fs.ErrPermission) && errors.As(err, &access) {
+		return fmt.Errorf("player initialization failed: %w; %s: serve boot and start fail on it too when run as this user", err, access.remedy(runtime.GOOS))
+	}
+	return fmt.Errorf("player initialization failed: %w", err)
 }
 
 // unstartedPlayer recognizes a UUID-only upgrade, which can also be a
@@ -899,6 +942,8 @@ func resetPlayer(dir string, discard bool, after func(string) error) (bool, erro
 
 // upgradeCapturedPlayer adopts a UUID-only upgrade under the same lock
 // serve, bind and reset hold. The caller rereads the floor through its retry.
+// Only a lock another open holds (fsutil.ErrLocked) makes it busy; any other
+// failure to open or take the lock is adoptionFailed's, with its own error.
 func upgradeCapturedPlayer(dir, captured string) error {
 	unstarted, err := unstartedPlayer(dir)
 	if err != nil || !unstarted {
@@ -906,11 +951,14 @@ func upgradeCapturedPlayer(dir, captured string) error {
 	}
 	f, err := openSealLock(dir)
 	if err != nil {
-		return err
+		return adoptionFailed(err)
 	}
 	defer f.Close()
 	if err := tryLock(f); err != nil {
-		return fmt.Errorf("player initialization is busy; stop the service and run the backup again: %w", err)
+		if errors.Is(err, fsutil.ErrLocked) {
+			return fmt.Errorf("player initialization is busy; stop the service and run the backup again: %w", err)
+		}
+		return adoptionFailed(lockFileFailure(dir, err))
 	}
 	defer fsutil.Unlock(f)
 	id, err := config.ReadPlayerUUID(dir)

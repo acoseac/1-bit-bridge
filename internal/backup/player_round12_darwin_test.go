@@ -13,7 +13,8 @@ import (
 
 // TestAnImmutableLockFileNamesTheFlag: macOS lets a user set the immutable
 // flag (uchg) on their own file, and opening it for writing is then EPERM,
-// which read and write access do not undo: the advice names the flag too.
+// which read and write access do not undo: the lock file's union names the
+// flag too.
 func TestAnImmutableLockFileNamesTheFlag(t *testing.T) {
 	notAsRoot(t)
 	reservationStorage(t)
@@ -26,7 +27,7 @@ func TestAnImmutableLockFileNamesTheFlag(t *testing.T) {
 		t.Fatalf("set the immutable flag: %v", err)
 	}
 	t.Cleanup(func() { _ = unix.Chflags(lock, 0) })
-	want := "restore read and write access to " + lock + ", or clear an immutable flag or ACL on it: serve boot and start fail on it too when run as this user"
+	want := entryAdvice(dir, "server.lock", "read and write")
 	if line := completionWarning(t, dir, true); !strings.Contains(line, want) {
 		t.Fatalf("advice for an immutable lock file:\n%s\nwant:\n%s", line, want)
 	}

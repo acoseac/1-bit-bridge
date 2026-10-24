@@ -110,7 +110,10 @@ func TestAnUnlistedFloorRefusesUnlessItIsGenuinelyAbsent(t *testing.T) {
 			t.Errorf("a genuine absence (%v) refused: %v", absent, err)
 		}
 	}
-	for _, errno := range []syscall.Errno{syscall.EACCES, syscall.EIO, syscall.ENOTDIR} {
+	for _, errno := range []syscall.Errno{syscall.EACCES, syscall.EIO, neitherAbsentNorPresent} {
+		if errors.Is(errno, os.ErrNotExist) {
+			t.Fatalf("%v reads as no entry here, so it cannot stand for an error that says neither", errno)
+		}
 		lstatErr := &os.PathError{Op: "lstat", Path: "player-ids.json", Err: errno}
 		if err := backup.UnlistedFloorError(lstatErr); !errors.Is(err, errno) || !strings.Contains(err.Error(), "nothing was restored") {
 			t.Errorf("an Lstat error %v: %v", errno, err)
