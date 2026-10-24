@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -636,7 +637,7 @@ func TestSaveIfAsksJustBeforeTheRename(t *testing.T) {
 	defer l.Unlock()
 	refused := errors.New("the file changed")
 	var asked []string
-	if err := cfg.SaveIf(l, func() error { asked = staged(); return refused }); err != refused {
+	if err := cfg.SaveIf(l, func(context.Context) error { asked = staged(); return refused }); err != refused {
 		t.Errorf("SaveIf returned %v, want unchanged's error as it is", err)
 	}
 	if len(asked) != 1 {
@@ -648,7 +649,7 @@ func TestSaveIfAsksJustBeforeTheRename(t *testing.T) {
 	if left := staged(); len(left) != 0 {
 		t.Errorf("a refused SaveIf left %q behind", left)
 	}
-	if err := cfg.SaveIf(l, func() error { return nil }); err != nil {
+	if err := cfg.SaveIf(l, func(context.Context) error { return nil }); err != nil {
 		t.Fatalf("SaveIf: %v", err)
 	}
 	if after, err := os.ReadFile(p); err != nil || !bytes.Contains(after, []byte("libraryName: After")) {

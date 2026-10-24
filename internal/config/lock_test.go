@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -229,7 +230,7 @@ func TestASaveNeedsATurnItHolds(t *testing.T) {
 	if err := cfg.Save(l); err == nil || !strings.Contains(err.Error(), "after its lock was given back") {
 		t.Errorf("a save after the turn was given back = %v, want a refusal", err)
 	}
-	if err := cfg.SaveIf(l, func() error { return nil }); err == nil {
+	if err := cfg.SaveIf(l, func(context.Context) error { return nil }); err == nil {
 		t.Error("a SaveIf after the turn was given back went through")
 	}
 	if got, _ := os.ReadFile(path); string(got) != "libraryName: Before\n" {
@@ -341,7 +342,7 @@ func TestARefusedUpdateRunsNoneOfItsChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	rc := NewRuntimeConfig(cfg)
-	rc.RecordFile(raw)
+	rc.RecordFile(path, raw)
 	writeMeanwhile(t, path, string(bytes.Replace(raw, []byte("Home"), []byte("Away"), 1)))
 	ran := false
 	err = rc.Update(path, func(c *Config) error {
@@ -375,7 +376,7 @@ func TestUpdateComparesTheFileAgainJustBeforeItsRename(t *testing.T) {
 		t.Fatal(err)
 	}
 	rc := NewRuntimeConfig(cfg)
-	rc.RecordFile(raw)
+	rc.RecordFile(path, raw)
 	theirs := string(bytes.Replace(raw, []byte("Home"), []byte("Away"), 1))
 	stop := OnSaveStagedForTest(path, func() { writeMeanwhile(t, path, theirs) })
 	defer stop()
@@ -530,7 +531,7 @@ func TestUpdateRefusesAFileAnotherWriterChanged(t *testing.T) {
 				t.Fatal(err)
 			}
 			rc := NewRuntimeConfig(cfg)
-			rc.RecordFile(raw)
+			rc.RecordFile(path, raw)
 			if tc.meanwhile != nil {
 				tc.meanwhile(t, path)
 			}
@@ -581,7 +582,7 @@ func TestUpdateWaitsForTheLockThenRefuses(t *testing.T) {
 		t.Fatal(err)
 	}
 	rc := NewRuntimeConfig(cfg)
-	rc.RecordFile(before)
+	rc.RecordFile(path, before)
 	holdLock(t, path)
 	start := time.Now()
 	ran := false

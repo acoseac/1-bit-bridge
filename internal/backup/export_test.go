@@ -20,3 +20,10 @@ func WithBeforeConfigForTest(opts RestoreOptions, fn func()) RestoreOptions {
 	opts.beforeConfig = fn
 	return opts
 }
+
+// WithBeforeWritesForTest returns opts with fn as what a restore runs once it
+// holds its locks and has read the snapshot, just before its first write.
+func WithBeforeWritesForTest(opts RestoreOptions, fn func()) RestoreOptions {
+	opts.beforeWrites = fn
+	return opts
+}

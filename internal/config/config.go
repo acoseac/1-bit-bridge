@@ -6,6 +6,7 @@
 package config
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -4371,15 +4372,16 @@ func (c *Config) Save(l *FileLock) error {
 // whether the file still holds the bytes it read in its turn, with a refusal
 // of its own. Like the turn's comparison it narrows the window to the instant
 // between the question and the rename, and does not close it: no rename can
-// be made conditional on the file it replaces.
-func (c *Config) SaveIf(l *FileLock, unchanged func() error) error {
+// be made conditional on the file it replaces. unchanged's context is the
+// save's, for a read it makes.
+func (c *Config) SaveIf(l *FileLock, unchanged func(ctx context.Context) error) error {
 	_, err := c.save(l, unchanged)
 	return err
 }
 
 // save is Save, with SaveIf's unchanged when it is not nil, and answers the
 // bytes it wrote.
-func (c *Config) save(l *FileLock, unchanged func() error) ([]byte, error) {
+func (c *Config) save(l *FileLock, unchanged func(context.Context) error) ([]byte, error) {
 	if err := l.heldFor(); err != nil {
 		return nil, err
 	}

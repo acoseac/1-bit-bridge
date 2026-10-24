@@ -3945,7 +3945,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// file that still holds them, or that it wrote itself, and refuses one
 	// another writer changed meanwhile (config.RuntimeConfig.Update, backlog
 	// B506).
-	apiSrv.ConfigHolder().RecordFile(cfgRead)
+	apiSrv.ConfigHolder().RecordFile(*configPath, cfgRead)
 	// Demo mode (read-only public demo bridge): the three user-data
 	// stores + the device registrar are deliberately NOT wired, so
 	// PUT /v1/playlists/{id}, DELETE /v1/playlists/{id}, PUT /v1/favorites

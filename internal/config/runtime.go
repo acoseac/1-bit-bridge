@@ -51,11 +51,12 @@ func (e *ChangedOutsideError) Error() string {
 // Is makes a *ChangedOutsideError match ErrChangedOutside.
 func (e *ChangedOutsideError) Is(target error) bool { return target == ErrChangedOutside }
 
-// RecordFile tells the holder raw, the bytes the config file held when the
-// live snapshot was read from it (LoadFile): its first Update then saves
-// only over a file that still holds them. A holder told nothing saves its
-// first Update over whatever the file holds, and records from then on.
-func (r *RuntimeConfig) RecordFile(raw []byte) {
+// RecordFile tells the holder raw, the bytes the config file at path held
+// when the live snapshot was read from it (LoadFile): its first Update then
+// saves only over a file that still holds them. path is the name the holder's
+// saves give Update. A holder told nothing saves its first Update over
+// whatever the file holds, and records from then on.
+func (r *RuntimeConfig) RecordFile(path string, raw []byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.file, r.fileKnown = append([]byte(nil), raw...), true

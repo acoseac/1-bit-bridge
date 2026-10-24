@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -198,14 +199,37 @@ func lockFile(path string, try func(*os.File) error, wait time.Duration) (*FileL
 			l.Unlock()
 			return nil, err
 		}
+		noteTurnTaken(l.target)
 		return l, nil
 	}
+}
+
+// readTurnFile is how a turn reads the config file, and ReadFile: through
+// fsutil.ReadAsFile, so a named pipe there is refused rather than waited on.
+// SetTurnReadForTest replaces it.
+var readTurnFile = fsutil.ReadAsFile
+
+// SetTurnReadForTest makes every read of a config file that a turn makes, and
+// ReadFile, go through fn, and returns what puts the read before it back.
+// Tests only, and process-global: a test that sets it does not call
+// t.Parallel, and puts it back once every writer it started has returned.
+func SetTurnReadForTest(fn func(path string) ([]byte, error)) (restore func()) {
+	prev := readTurnFile
+	readTurnFile = fn
+	return func() { readTurnFile = prev }
+}
+
+// ReadFile reads the config file at path as a turn reads it: for a writer's
+// own comparison in its turn (bind's SaveIf), which reads what the turn's
+// comparison reads.
+func ReadFile(ctx context.Context, path string) ([]byte, error) {
+	return readTurnFile(path)
 }
 
 // find reads the config file as the turn finds it once it is taken: through
 // fsutil.ReadAsFile, so a named pipe there is refused rather than waited on.
 func (l *FileLock) find() error {
-	data, err := fsutil.ReadAsFile(l.target)
+	data, err := readTurnFile(l.target)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		l.found, l.absent = nil, true
@@ -223,7 +247,7 @@ func (l *FileLock) find() error {
 // A read that fails otherwise is an error too, since it cannot say the file
 // is unchanged.
 func (l *FileLock) stillAsFound() error {
-	now, err := fsutil.ReadAsFile(l.target)
+	now, err := readTurnFile(l.target)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		if l.absent {
@@ -242,7 +266,7 @@ func (l *FileLock) stillAsFound() error {
 // synced, and renamed onto the file only while it is still the one the turn
 // found (stillAsFound) and unchanged, when given, answers nil. Once it lands
 // it is what the turn compares with.
-func (l *FileLock) write(data []byte, unchanged func() error) error {
+func (l *FileLock) write(data []byte, unchanged func(context.Context) error) error {
 	if err := l.heldFor(); err != nil {
 		return err
 	}
@@ -283,7 +307,7 @@ func (l *FileLock) write(data []byte, unchanged func() error) error {
 		return err
 	}
 	if unchanged != nil {
-		if err := unchanged(); err != nil {
+		if err := unchanged(context.Background()); err != nil {
 			return err
 		}
 	}
@@ -430,6 +454,31 @@ func OnSaveStagedForTest(path string, fn func()) (stop func()) {
 // noteSaveStaged runs what OnSaveStagedForTest asked for key, if anything.
 func noteSaveStaged(key string) {
 	if v, ok := saveStagedHooks.Load(key); ok {
+		(*v.(*func()))()
+	}
+}
+
+// turnTakenHooks holds, by turnKey, what OnTurnTakenForTest asked a turn to
+// run: nothing in production.
+var turnTakenHooks sync.Map
+
+// OnTurnTakenForTest makes each turn of the config file at path run fn once
+// LockFile has taken it and read the file, before the turn's writer does
+// anything in it, and returns what stops that. Tests only: it is the window
+// between the turn's read and its writer's work (a console root change's
+// library index change, a restore's first write), where a test lands a writer
+// that takes no turns (an edit, or a bridge older than the lock). One hook per
+// config file at a time.
+func OnTurnTakenForTest(path string, fn func()) (stop func()) {
+	key := turnKey(path)
+	h := &fn
+	turnTakenHooks.Store(key, h)
+	return func() { turnTakenHooks.CompareAndDelete(key, h) }
+}
+
+// noteTurnTaken runs what OnTurnTakenForTest asked for key, if anything.
+func noteTurnTaken(key string) {
+	if v, ok := turnTakenHooks.Load(key); ok {
 		(*v.(*func()))()
 	}
 }

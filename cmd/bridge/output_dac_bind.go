@@ -586,8 +586,8 @@ func runDACBind(ctx context.Context, args []string, env outputBindEnv, stdout, s
 	if env.beforeSave != nil {
 		env.beforeSave()
 	}
-	err = cfg.SaveIf(lock, func() error {
-		if now, err := os.ReadFile(cfgPath); err != nil || !bytes.Equal(now, read) {
+	err = cfg.SaveIf(lock, func(ctx context.Context) error {
+		if now, err := config.ReadFile(ctx, cfgPath); err != nil || !bytes.Equal(now, read) {
 			return errBindConfigChanged
 		}
 		return nil

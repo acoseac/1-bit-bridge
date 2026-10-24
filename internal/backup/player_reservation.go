@@ -23,11 +23,16 @@ import (
 type RestoreOptions struct {
 	Random io.Reader
 	Warn   func(string)
-	// beforeConfig, when set, runs just before the restore writes the
-	// snapshot's bridge.yaml, in its turn of the file's lock: the window a
-	// test lands another writer in (WithBeforeConfigForTest). Nil in
-	// production.
-	beforeConfig func()
+	// ConfigAsRead is the bytes of the config file at Targets.BridgeYAML that
+	// the caller read the config from when it worked out the targets: nil
+	// when the caller read none.
+	ConfigAsRead []byte
+	// beforeWrites, when set, runs once the restore holds its locks and has
+	// read the snapshot, just before its first write; beforeConfig just
+	// before it writes the snapshot's bridge.yaml, in its turn of the file's
+	// lock. They are the windows a test lands another writer in
+	// (WithBeforeWritesForTest, WithBeforeConfigForTest). Nil in production.
+	beforeWrites, beforeConfig func()
 }
 
 // restoreMargin is the minimum jump and the amount of running room left

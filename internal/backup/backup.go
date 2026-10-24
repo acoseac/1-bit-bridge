@@ -398,6 +398,9 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 			return err
 		}
 	}
+	if opts.beforeWrites != nil {
+		opts.beforeWrites()
+	}
 	if playerUUIDRead {
 		if err := restorePlayerReservation(snapshotDir, dst.PlayerUUID, playerUUID, m, opts); err != nil {
 			return err

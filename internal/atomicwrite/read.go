@@ -19,9 +19,26 @@ var ErrReadBusy = errors.New("file was busy")
 // and the last read error; cancellation returns the context error alone.
 // The callback must close any handles on failure and must not mutate files.
 func ReadWithRetryCtx(ctx context.Context, read func() error) error {
-	err := retryIO(ctx, read, retryableReadError)
-	if err != nil && retryableReadError(err) {
+	err := retryIO(ctx, read, readRetryable)
+	if err != nil && readRetryable(err) {
 		return fmt.Errorf("%w: %w", ErrReadBusy, err)
 	}
 	return err
+}
+
+// readRetryable is what ReadWithRetryCtx asks again on: the platform's
+// retryableReadError (Windows' sharing and access violations, nothing
+// elsewhere). SetReadRetryableForTest replaces it.
+var readRetryable = retryableReadError
+
+// SetReadRetryableForTest makes ReadWithRetryCtx ask again on the errors fn
+// answers true for, and returns what puts the platform's answer back: for a
+// test, on every platform, of a reader that must ask again where Windows
+// refuses a read for a moment. Process-global, like SetSyncDirForTest: a test
+// that sets it does not call t.Parallel, and puts it back once every reader it
+// started has returned.
+func SetReadRetryableForTest(fn func(error) bool) (restore func()) {
+	prev := readRetryable
+	readRetryable = fn
+	return func() { readRetryable = prev }
 }

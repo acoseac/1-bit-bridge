@@ -45,7 +45,7 @@ func editConfigBesideTheConsole(t *testing.T, srv *Server, cfgPath string) []byt
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv.deps.CfgHolder.RecordFile(raw)
+	srv.deps.CfgHolder.RecordFile(cfgPath, raw)
 	edited := bytes.Replace(raw, []byte("Test Library"), []byte("Edited Library"), 1)
 	if bytes.Equal(edited, raw) {
 		t.Fatal("the fixture's config holds no library name to edit")
