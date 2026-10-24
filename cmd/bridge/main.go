@@ -2961,7 +2961,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// live holder (RecordFile, below): a console save then writes only into
 	// that file, only over a file that still holds them, and refuses one
 	// another writer changed since, or a name repointed to another file.
-	cfg, cfgFile, cfgRead, cfgTarget, err := loadServeConfigFile(*configPath)
+	cfg, cfgFile, cfgRead, cfgBootFile, err := loadServeConfigFile(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return 2
@@ -3986,7 +3986,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// meanwhile, or a name a link repointed since (config.RuntimeConfig.Update,
 	// backlog B506; resolved here, a link repointed during the boot above
 	// would have the holder record a file serve never read).
-	apiSrv.ConfigHolder().RecordFile(cfgTarget, cfgRead)
+	apiSrv.ConfigHolder().RecordFile(cfgBootFile, cfgRead)
 	// Demo mode (read-only public demo bridge): the three user-data
 	// stores + the device registrar are deliberately NOT wired, so
 	// PUT /v1/playlists/{id}, DELETE /v1/playlists/{id}, PUT /v1/favorites

@@ -123,14 +123,14 @@ func loadCLIConfigFile(explicit string) (*config.Config, string, []byte, error) 
 // with the bytes, and the holder's console saves write only into it, and
 // only over those bytes. A name that opens another file after each read
 // than before it, a link being repointed, is refused.
-func loadServeConfigFile(explicit string) (cfg *config.Config, path string, raw []byte, target string, err error) {
+func loadServeConfigFile(explicit string) (cfg *config.Config, path string, raw []byte, file config.BootFile, err error) {
 	path, ok := resolveConfigPath(explicit)
 	if !ok {
-		return nil, path, nil, "", errConfigNotFound(explicit)
+		return nil, path, nil, config.BootFile{}, errConfigNotFound(explicit)
 	}
-	cfg, raw, target, err = config.LoadFileAt(path)
+	cfg, raw, file, err = config.LoadFileAt(path)
 	if err != nil {
-		return nil, path, nil, "", fmt.Errorf("load %s: %w", path, err)
+		return nil, path, nil, config.BootFile{}, fmt.Errorf("load %s: %w", path, err)
 	}
-	return cfg, path, raw, target, nil
+	return cfg, path, raw, file, nil
 }

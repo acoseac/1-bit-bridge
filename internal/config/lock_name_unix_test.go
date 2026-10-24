@@ -239,17 +239,17 @@ func TestTheBootReadReadsAgainWhenTheNameMovesAcrossIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	reads := 0
-	cfg, got, read, err := loadFileAt(link, func() {
+	cfg, got, read, err := loadFileAt(link, bootHooks{afterRead: func() {
 		if reads++; reads == 1 {
 			repoint(t, link, moved)
 		}
-	})
+	}})
 	if err != nil {
 		t.Fatalf("a boot read whose name moved once: %v", err)
 	}
-	if read != moved || !bytes.Equal(got, other) || cfg.LibraryName != "Switched" {
+	if read.target != moved || !bytes.Equal(got, other) || cfg.LibraryName != "Switched" {
 		t.Errorf("the boot read answered %s with %q (libraryName %q): want the file the name opened for that read, and its bytes",
-			read, got, cfg.LibraryName)
+			read.target, got, cfg.LibraryName)
 	}
 	if reads != 2 {
 		t.Errorf("the file was read %d times, want once more after the name moved", reads)
@@ -265,10 +265,10 @@ func TestTheBootReadRefusesANameThatKeepsMoving(t *testing.T) {
 	moved, _ := twinOf(t, target, "switched.yaml")
 	next := []string{moved, target}
 	reads := 0
-	_, _, _, err := loadFileAt(link, func() {
+	_, _, _, err := loadFileAt(link, bootHooks{afterRead: func() {
 		repoint(t, link, next[reads%2])
 		reads++
-	})
+	}})
 	var moving *NameMovingError
 	if !errors.As(err, &moving) || moving.Path != link || !errors.Is(err, ErrNameMoving) {
 		t.Fatalf("a boot read whose name moved across every read = %v, want a *NameMovingError for %s", err, link)
@@ -315,17 +315,17 @@ func TestTheBootReadResolvesRelativePathsAgainstTheNameAsGiven(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			moved := false
-			cfg, _, read, err := loadFileAt(link, func() {
+			cfg, _, read, err := loadFileAt(link, bootHooks{afterRead: func() {
 				if tc.afterRead != nil && !moved {
 					moved = true
 					tc.afterRead()
 				}
-			})
+			}})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if read == link {
-				t.Errorf("the boot read answered the link itself, %s", read)
+			if read.target == link {
+				t.Errorf("the boot read answered the link itself, %s", read.target)
 			}
 			for _, c := range []struct{ what, got, want string }{
 				{"data dir", cfg.DataDir, filepath.Join(aliasDir, "data")},

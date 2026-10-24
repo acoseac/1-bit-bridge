@@ -2826,8 +2826,20 @@ func LoadFile(path string) (*Config, []byte, error) {
 // another file after a read than before it, before it refuses.
 const bootReads = 3
 
+// BootFile is the file serve's boot read of the config opened (LoadFileAt),
+// which serve tells its live holder with the bytes it read
+// (RuntimeConfig.RecordFile): the file the config's name opened for that
+// read, as a turn of the file's lock resolves it (ResolveFile), "" when the
+// name could not be resolved. Only LoadFileAt makes one.
+type BootFile struct {
+	// target is the file the name opened for the read answered, and
+	// resolved whether the name was resolved at all.
+	target   string
+	resolved bool
+}
+
 // LoadFileAt is LoadFile, and the file the name opened for that read, as a
-// turn of the file's lock resolves it (ResolveFile), "" when the name cannot
+// turn of the file's lock resolves it (ResolveFile), none when the name cannot
 // be resolved: what serve tells its live config holder with the bytes
 // (RuntimeConfig.RecordFile). The name is resolved just before the read and
 // just after it, and a read across which the two differ (a link at the name,
@@ -2836,33 +2848,60 @@ const bootReads = 3
 // that moved across every read is a *NameMovingError. The config's relative
 // paths resolve against the directory Load takes from path, never the
 // target's, whichever read is answered.
-func LoadFileAt(path string) (cfg *Config, raw []byte, target string, err error) {
-	return loadFileAt(path, nil)
+func LoadFileAt(path string) (cfg *Config, raw []byte, file BootFile, err error) {
+	return loadFileAt(path, bootHooks{})
 }
 
-// loadFileAt is LoadFileAt, running afterRead, when it is given, once each
-// read of the file has returned: the window a test repoints a link in.
-func loadFileAt(path string, afterRead func()) (*Config, []byte, string, error) {
+// bootHooks are what a test runs inside LoadFileAt's reads, at each of them:
+// beforeRead once the name has been resolved and before the file is read,
+// afterRead once the read has returned. A nil hook runs nothing.
+type bootHooks struct {
+	beforeRead, afterRead func()
+}
+
+// loadFileAt is LoadFileAt, running hooks around each read: the windows a
+// test repoints a link in.
+func loadFileAt(path string, hooks bootHooks) (*Config, []byte, BootFile, error) {
 	for range bootReads {
 		before := resolvedOrNone(path)
+		if hooks.beforeRead != nil {
+			hooks.beforeRead()
+		}
 		cfg, raw, err := LoadFile(path)
 		if err != nil {
-			return nil, nil, "", err
+			return nil, nil, BootFile{}, err
 		}
-		if afterRead != nil {
-			afterRead()
+		if hooks.afterRead != nil {
+			hooks.afterRead()
 		}
 		if after := resolvedOrNone(path); after == before {
-			return cfg, raw, after, nil
+			return cfg, raw, BootFile{target: after, resolved: after != ""}, nil
 		}
 	}
-	return nil, nil, "", &NameMovingError{Path: path, Reads: bootReads}
+	return nil, nil, BootFile{}, &NameMovingError{Path: path, Reads: bootReads}
 }
 
-// resolvedOrNone is the file path's name opens (ResolveFile), "" when it
+// resolveBootFile is how LoadFileAt resolves the config's name around each
+// read: ResolveFile, as a turn of the file's lock resolves it.
+// SetBootResolveForTest replaces it.
+var resolveBootFile = ResolveFile
+
+// SetBootResolveForTest makes LoadFileAt resolve the config's name through
+// fn, and returns what puts the resolution before it back: a test makes the
+// name unresolvable for serve's boot read alone, the turns of the file's lock
+// resolving it as they do. Tests only, and process-global: a test that sets
+// it does not call t.Parallel, and puts it back once every boot read it
+// started has returned.
+func SetBootResolveForTest(fn func(path string) (string, error)) (restore func()) {
+	prev := resolveBootFile
+	resolveBootFile = fn
+	return func() { resolveBootFile = prev }
+}
+
+// resolvedOrNone is the file path's name opens (resolveBootFile), "" when it
 // cannot be resolved.
 func resolvedOrNone(path string) string {
-	target, err := ResolveFile(path)
+	target, err := resolveBootFile(path)
 	if err != nil {
 		return ""
 	}

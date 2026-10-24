@@ -77,15 +77,15 @@ func loadableConfig(t *testing.T, dir, name string) (path, base string) {
 	return writeConfigFile(t, dir, base+"libraryName: "+name+"\n"), base
 }
 
-// fileTarget is the file a turn of the config at path locks (ResolveFile):
-// what serve tells its live holder it read (RecordFile).
-func fileTarget(t *testing.T, path string) string {
+// fileTarget is the file a turn of the config at path locks (ResolveFile),
+// as serve's boot read tells its live holder it read it (RecordFile).
+func fileTarget(t *testing.T, path string) BootFile {
 	t.Helper()
 	target, err := ResolveFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return target
+	return BootFile{target: target, resolved: true}
 }
 
 // writeMeanwhile writes text to path, as a writer that takes no lock (an

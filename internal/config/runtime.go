@@ -57,20 +57,20 @@ func (e *ChangedOutsideError) Error() string {
 func (e *ChangedOutsideError) Is(target error) bool { return target == ErrChangedOutside }
 
 // RecordFile tells the holder raw, the bytes the config file held when the
-// live snapshot was read from it, and target, the file its name opened for
-// that read, resolved before and after it (LoadFileAt), "" when the name
-// could not be resolved: its first Update then saves only into that file,
-// and only while it still holds them. target is taken as it is, never
-// resolved again here: a link at the name repointed between the read and
-// this call (a dotfiles restow, a home-manager switch during serve's boot)
-// would otherwise have the holder record a file it never read. A name that
-// opens another file than target at a save, the link repointed since, is
-// refused by Update. A holder told nothing saves its first Update over
-// whatever the file holds, and records from then on.
-func (r *RuntimeConfig) RecordFile(target string, raw []byte) {
+// live snapshot was read from it, and file, the file its name opened for that
+// read, resolved before and after it (LoadFileAt), none when the name could
+// not be resolved: its first Update then saves only into that file, and only
+// while it still holds them. file is taken as it is, never resolved again
+// here: a link at the name repointed between the read and this call (a
+// dotfiles restow, a home-manager switch during serve's boot) would otherwise
+// have the holder record a file it never read. A name that opens another file
+// than file at a save, the link repointed since, is refused by Update. A
+// holder told nothing saves its first Update over whatever the file holds,
+// and records from then on.
+func (r *RuntimeConfig) RecordFile(file BootFile, raw []byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.file, r.fileKnown, r.target = append([]byte(nil), raw...), true, target
+	r.file, r.fileKnown, r.target = append([]byte(nil), raw...), true, file.target
 }
 
 // Changed returns a channel that the next Store closes, the Store an

@@ -275,8 +275,8 @@ func TestARepointedLinkRefusesTheHoldersSave(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if read != target {
-		t.Fatalf("premise: the boot read through %s opened %s, want %s", link, read, target)
+	if read.target != target {
+		t.Fatalf("premise: the boot read through %s opened %s, want %s", link, read.target, target)
 	}
 	rc := NewRuntimeConfig(cfg)
 	rc.RecordFile(read, raw)

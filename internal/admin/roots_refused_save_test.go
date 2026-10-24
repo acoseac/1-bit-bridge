@@ -37,19 +37,15 @@ func seedRendition(t *testing.T, srv *Server, dataDir, source string) string {
 }
 
 // recordBootRead tells the console's holder the config file at cfgPath as
-// serve's boot read leaves it (RecordFile: the file the name opens, and the
-// bytes it holds), and returns those bytes.
+// serve's boot read leaves it (config.LoadFileAt, RecordFile: the file the
+// name opens, and the bytes it holds), and returns those bytes.
 func recordBootRead(t *testing.T, srv *Server, cfgPath string) []byte {
 	t.Helper()
-	raw, err := os.ReadFile(cfgPath)
+	_, raw, file, err := config.LoadFileAt(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	target, err := config.ResolveFile(cfgPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv.deps.CfgHolder.RecordFile(target, raw)
+	srv.deps.CfgHolder.RecordFile(file, raw)
 	return raw
 }
 
