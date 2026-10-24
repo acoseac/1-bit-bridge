@@ -1220,7 +1220,7 @@ Windows skips only this test's privileged symlink creation.
 
 ## B500 — third-party licences in release archives (2026-10-24)
 
-**Every release archive and Docker image carries freshly generated third-party licences from the union of the release builds; missing licences fail the release. Never replace build-derived discovery with the go.mod list or skip the before-hook. Require a licence at each effective module root; include compiled-package ancestry and the pinned Go toolchain notices. Unknown notice suffixes fail; never synthesize module grants. Omit unneeded Tailscale webclient and debugeventbus assets with the release tags in .goreleaser.yaml; keep all builds, deploys and CI tests/vet in step through the repository-wide reviewed-site census in check-build-tags, including every README.md and recursive Markdown under ops/, deploy/ and docs/, except records (ops/engineering-log.md, History-*, plan-* and release-notes-*). Scan all fence labels except text, plain, plaintext, txt, output, log, diff, patch, json, jsonc, yaml, yml, toml, ini, xml, html, css, sql, go, golang, swift and mermaid; recognize blockquote/list containers, reject backtick openers with backticks in their info, and strip console/session/terminal prompts before comments. Match build/install/run/test/vet after a Go path (go or go.exe, optional variable suffix) or any variable name and optional global flags, with quotes, backticks, commas and brackets as separators only on the matching copy. Keep original logical lines and multiplicities; review ambiguous matches. This static census cannot see runtime-computed verbs or commands assembled across unjoined lines. Discover with those same tags; refuse YAML null, boolean and numeric tag spellings. Refuse linked web packages and every non-main-module embed outside the exact module@version/package/file allowlist; exercise the real six-target graph in tests. The supplement registry is empty. Docker generates notices with the full go.mod patch toolchain and copies them into its final stage. Pin embedded-asset supplements to exact module versions and re-audit on upgrades or replacements. Discovery refuses vendor trees, a non-default GOFLAGS or workspace, and non-default architecture feature levels.**
+**Every release archive and Docker image carries freshly generated third-party licences from the union of the release builds; missing licences fail the release. Never replace build-derived discovery with the go.mod list or skip the before-hook. Require a licence at each effective module root; include compiled-package ancestry and the pinned Go toolchain notices. Unknown notice suffixes fail; never synthesize module grants. Omit unneeded Tailscale webclient and debugeventbus assets with the release tags in .goreleaser.yaml; keep all builds, deploys and CI tests/vet in step through the repository-wide reviewed-site census in check-build-tags, over every operational file and every non-record Markdown file the walk reaches (records by basename: engineering-log.md, History-*, plan-* and release-notes-*). Scan all fence labels except text, plain, plaintext, txt, output, log, diff, patch, json, jsonc, yaml, yml, toml, ini, xml, html, css, sql, go, golang, swift and mermaid; recognize blockquote/list containers and end fences when their containers end, reject backtick openers with backticks in their info, and strip console/session/terminal prompts before comments. The census is the union of build/install/run/test/vet followed after optional flags by a package pattern regardless of executable spelling, the executable rule (a case-insensitive Go path or variable before a verb even without a package; includes go.exe, go1.27.3 and gotip), and the tool list (gotestsum, golangci-lint run, staticcheck, dlv debug/test/exec). Match with quotes, backticks, commas and brackets as separators only on the matching copy. Keep original logical lines and multiplicities; review ambiguous matches. Static analysis cannot see a verb computed at run time, a package argument and a verb on different unjoined lines, or a tool not on the list that drives go. Discover with those same tags; refuse YAML null, boolean and numeric tag spellings. Refuse linked web packages and every non-main-module embed outside the exact module@version/package/file allowlist; exercise the real six-target graph in tests. The supplement registry is empty. Docker generates notices with the full go.mod patch toolchain and copies them into its final stage. Pin embedded-asset supplements to exact module versions and re-audit on upgrades or replacements. Discovery refuses vendor trees, a non-default GOFLAGS or workspace, and non-default architecture feature levels.**
 
 `go run ./scripts/third-party-licenses` reads the explicit matrix in
 `.goreleaser.yaml`, then runs `go list -mod=readonly -deps -json -tags=<release-tags> ./cmd/bridge`
@@ -1267,9 +1267,9 @@ The Makefile GO_TAGS value, Dockerfile build flags, all three deploy scripts,
 and every CI test/vet invocation mirror that list. check-build-tags uses the
 same fail-closed reader. It scans operational files across the repository
 (shell, PowerShell, Python, batch, workflow YAML, Makefiles, Dockerfiles and
-extensionless scripts). Markdown scope is every README.md anywhere and every
-.md under ops/, deploy/ and docs/, recursively. Records are excluded:
-ops/engineering-log.md and History-*, plan-* and release-notes-* basenames.
+extensionless scripts). Markdown scope is every .md file the walk reaches.
+Records are excluded by basename wherever they live: engineering-log.md,
+History-*, plan-* and release-notes-*.
 Generated output trees (.git, bin, dist, vendor, node_modules, underscore-prefixed
 directories) and nested checkouts are excluded, as before.
 
@@ -1285,38 +1285,56 @@ strip leading blockquotes and list markers (-, *, +, or 1–9 digits followed by
 . or ) and whitespace), repeatedly for nested containers. A backtick opener
 with a backtick in its info string is inline code, not a fence (CommonMark
 0.31 section 4.5). Closers must have the opener's marker, at least its length,
-and no info string. An unterminated fence runs to EOF. In labels containing
+and no info string. An unterminated fence ends with its container: a
+blockquote fence ends on the first line without its quote prefix (including
+a blank line); a list-item fence ends on the first non-blank line indented
+less than the item's content. Nested containers end independently. Without
+a container ending, an unterminated fence runs to EOF. In labels containing
 console, session or terminal, strip a leading $, #, % or > prompt and keep the
 command before removing full-line # comments: # there is a root prompt.
 
 Join shell/Docker and PowerShell continuations. Match on a copy where quotes,
-backticks, commas and brackets are separators: build, install, run, test or
-vet after a possible Go executable and optional global flags. A possible Go
-executable is go or go.exe, including a path and an optional variable suffix
-(go${EXE}, go$(EXE)), with expansions permitted within the path and repeated
-in the suffix, or any variable expansion, independent of its name:
-$X, ${X…} (including ${GO:-go}), $(X), $env:X, %X%. This includes exec-form
-Docker RUN, Python argv lists and PowerShell quoted verbs and ArgumentList.
-Keep the original logical line (whitespace collapsed) for the explicit
-reviewedBuildSites comparison, including multiplicities. Ambiguity is a site,
-not an escape: the current census reviews $(MAKE) vet/test as calls to tagged
-Make targets and the firewall script's description as a non-Go match. New
-files and additional recognized commands fail until reviewed.
+backticks, commas and brackets are separators. The census is the union of:
 
-The static census is not a shell, Python, PowerShell or Make interpreter. It
-cannot see a verb computed at runtime, a renamed literal executable that
-never names go, commands assembled in separate statements/variables or argv
-spread across lines without a supported continuation, or commands sourced
-from external/generated files outside the scope. Review those manually and
-extend discovery with regression cases before adopting a new build form.
-Go source and unfenced Markdown are outside this operational census. The
-untagged Go exceptions remain the notice generator, temp-directory helper and
-two printed test instructions. The three newly discovered bridge-test fences
-(the review guide, ALAC and DSD fixture READMEs) carry both release tags.
+- The verb-with-package rule: build, install, run, test or vet followed, after
+  optional flags, by a package pattern, whatever precedes the verb. Patterns
+  are `.`, paths beginning `./` or `.\`, `all`, `std`, patterns ending `/...`,
+  and this module's import path or a path below it. Flag values can span
+  normalized tokens, including quoted paths and argv punctuation. This catches
+  nested expansions, workflow templates and Python argv with a variable or
+  shutil.which call for the executable without parsing those expressions.
+- The executable rule: a possible Go executable or variable expansion before
+  a verb, with optional global flags, even without a package argument. It is
+  case-insensitive and accepts go, go.exe, version wrappers such as go1.27.3,
+  and gotip, paths and variable suffixes (go${EXE}, go$(EXE)). Its expansion
+  grammar covers $X, ${X…}, $(X), $env:X and %X%; it does not parse arbitrary
+  nested expressions. The verb-with-package branch covers those expressions
+  when the verb and package are visible together.
+- The tool list: gotestsum, golangci-lint run, staticcheck, and dlv with debug,
+  test or exec, including paths and .exe spellings, case-insensitively.
+
+Keep the original logical line (whitespace collapsed) for the explicit
+reviewedBuildSites comparison, including multiplicities. Ambiguity is a site
+requiring review: $(MAKE) vet/test call tagged Make targets; a firewall
+command's description, two Docker builds and migration text are reviewed
+non-Go matches. New files and additional recognized commands fail until
+reviewed. The same union applies to every operational file and every
+non-record Markdown file described above.
+
+The static census is not a shell, Python, PowerShell or Make interpreter.
+It cannot see a verb computed at run time, a package argument and a verb on
+different unjoined lines (unless the executable rule independently finds the
+verb), or a tool not on the list that drives go. Commands sourced from
+external/generated files outside the scope also need manual review. Extend
+discovery with regression cases before adopting a new build form. Go source,
+Markdown prose and unfenced Markdown (including indented code blocks) remain
+outside this operational census. The untagged Go exceptions remain the notice
+generator, temp-directory helper and two printed test instructions.
 TestRealTreeBuildSiteCensus prints every in-scope Markdown file, even one with
 zero sites, and every discovered site, then requires exact agreement with the
-reviewed census. In round 7 the real tree has 39 sites and 22 Markdown files,
-five of them with one site each.
+reviewed census. Round 8 has 42 sites and 51 Markdown files (six with sites),
+adding three reviewed non-Go sites to round 7's 39; no newly discovered bridge
+command needed tags.
 
 The shard's RACE_FLAGS is separately pinned so it cannot override the explicit
 tags. Make's override assignment

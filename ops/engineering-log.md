@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B500 round 8: key the build-site census on the verb](#2026-10-24--b500-round-8-key-the-build-site-census-on-the-verb)
 - [2026-10-24 — B500 round 7: the build-site census fails closed](#2026-10-24--b500-round-7-the-build-site-census-fails-closed)
 - [2026-10-24 — B500 round 6: documented deploy tags and invocation census](#2026-10-24--b500-round-6-documented-deploy-tags-and-invocation-census)
 - [2026-10-24 — B500 round 5: deployed builds, embedded-file admission and image notices](#2026-10-24--b500-round-5-deployed-builds-embedded-file-admission-and-image-notices)
@@ -147,7 +148,62 @@ reaches a session that has not gone looking for it.
 
 ---
 
+## 2026-10-24 — B500 round 8: key the build-site census on the verb
+
+The census is now the union of three branches: build/install/run/test/vet
+followed after optional flags by a package pattern regardless of executable
+spelling; a case-insensitive Go path or variable before a verb, even without
+a package (including go.exe, go1.27.3 and gotip); and gotestsum,
+golangci-lint run, staticcheck, and dlv debug/test/exec. Quotes, backticks,
+commas and brackets are normalized only on the matching copy; exact original
+logical lines and multiplicities remain the review boundary.
+
+Every non-record Markdown file reached by the walk is in scope. Records are
+excluded by basename: engineering-log.md, History-*, plan-* and release-notes-*.
+Fences close with their CommonMark containers: missing quote prefixes end
+blockquote fences; non-blank lines below list content indentation end list
+fences. Existing container fixtures now keep their content inside their
+containers; a skipped inline label pins rejection of backticks in fence info.
+Prose and explicitly non-executable fences stay out.
+
+Before implementation, the regression run on 4eb5769d failed 77 subtests:
+51 verb/package cases, 12 tool cases, five Markdown paths, five container
+endings (including both erroneous admission and omission), and four executable
+forms without package arguments. The real-tree equality check now accounts
+for 42 sites and 51 Markdown files, including zero-site files. Three sites
+were newly discovered and reviewed: Makefile's Docker build, docs/docker.md's
+Docker build, and migration text in scripts/doc-split/restructure-2026-10-18/routes.py
+that says "run all". No newly discovered Go build or test needed release tags.
+
+The rule and its long form replace round 7's scope and matching claims and
+name the remaining limits: a verb computed at run time, a package argument
+and verb on different unjoined lines, and an unlisted tool that drives go.
+Unfenced Markdown, including indented code, stays outside this fence census.
+
+Five controls restored the source from saved bytes after each run. Removing
+the verb rule failed 47 verb/package cases; removing executable case folding
+failed two package-free executable cases; removing the tool list failed ten
+tool cases; restoring round 7's Markdown scope failed five scope cases;
+removing container endings failed all five ending cases. No other test group
+failed, and every control compiled. For the verb control, the three newly
+reviewed non-Go sites were removed from the review map because that control
+makes them invisible; fixture baselines remained valid. The first verb-control
+prediction was 48; the observed 47 identified an intended overlap: the
+case-insensitive executable branch also recognizes Python's GO variable.
+The corrected prediction was rerun and matched exactly.
+
+The first full race gate hit Go's default ten-minute timeout inside the
+existing large refusal matrix, with no assertion failure. Literal substring
+prefilters now avoid path/flag regex work on lines that cannot match that
+branch; normalization cannot create any of those required words. The union
+and review semantics are unchanged. All five controls matched again, and
+all six requested gates passed on the final implementation; the full package
+race run completed in 157.31 seconds.
+
 ## 2026-10-24 — B500 round 7: the build-site census fails closed
+
+The scope, executable-only matching, and EOF-only fence behavior described
+below are superseded by round 8 above.
 
 Round 6 still enumerated executable spellings and executable fence labels.
 The replacement recognizes build/install/run/test/vet after a possible Go
