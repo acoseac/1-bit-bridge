@@ -364,6 +364,43 @@ the race suite. The full all-player gate fails on sandbox-denied OpenHome
 loopback binds (`operation not permitted`), followed by waits and a cleanup
 panic without a listener; it is not claimed passed.
 
+Round 6 fixes the intermittent before-fault completed-drain test ordering.
+receiveIn now dumps goroutines at its watchdog before cleanup. The captured
+hang has the sink writer in idle, Resume held in the command hook, and no
+producer remaining. The first Drain can refuse the paused sink; the command
+hook signals only enqueueing, so Resume's arrival does not establish that
+the producer retried Drain. A one-second fake-time grant can consume the
+half-second file before that retry. The sink stops with an xrun, the retry
+returns xrun and the producer exits, while drainCompleted only reports a
+successful Drain. Its event can never arrive. A control holds the producer
+at SinkCall after the paused refusal until the resumed sink has run dry:
+24,000 frames consumed, zero hardware drains, and a retried Drain refused
+with xrun, followed by the same completion watchdog. The fix waits on
+Sink.Changed (subscribed before Position) for the producer's accepted
+SinkDraining state before granting time; with no fake time available that
+state cannot finish before observation. No production code, sleep or timeout
+increase is involved. The B526 ordering rule's long form records this case.
+
+Round 6 Go 1.27.3 offline validation: the fixed completed-drain test passes
+300 times under race without stress and 300 times with twelve busy loops,
+and the whole rollback family passes 100 times under race. Restoring only
+the old ordering gives 5/200 completion hangs without stress and 24/200
+with twelve busy loops, using a one-second diagnostic watchdog; the forced
+old interleaving fails 3/3 under that same stress. The same forced paused
+refusal followed by the accepted-Drain wait passes 100 times. The initial
+minute-watchdog 200-run check completes with eight hangs; its stressed peer
+records nine before the ten-minute package cap (an incomplete repetition
+run). Those first checks overlapped the peer's twelve-loop stress. Darwin
+and Linux vet, make fmt and make docs-check pass. The full player/ALSA race
+gate hits sandbox-refused OpenHome loopback binds in
+TestAHeaderPastItsBoundIsRefused, TestAPanicInTheListingStaysInTheSurface,
+TestAnIdleConnectionAndAStalledHeaderAreClosed and
+TestTheSurfaceBindsEachServedAddressAndFollowsThem, then subsequent waits
+and a cleanup panic without a listener near the package cap. Every player
+package outside OpenHome, plus ALSA, passes. The full gate is not claimed
+passed. Controls use test-file overlays, leaving production and fixed
+source bytes intact; every busy loop is stopped and reaped.
+
 ## File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)
 
 The whole-track spectrum (`1BSP`, 84 bytes = 24-byte header + 60 band bytes; `Track.bandwidthHz`; `GET /v1/spectrum`; `spectrum` health flag) answers "is this file an upsampled CD rip?". Five bridge PRs, each finding a defect only REAL data exposed — every synthetic fixture agreed with every other synthetic fixture and they were all wrong together. Invariants:
