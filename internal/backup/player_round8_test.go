@@ -81,8 +81,8 @@ func TestDamagedSealedMarkerKeepsBackupAndIdentityFreeRestore(t *testing.T) {
 	if err := backup.AdoptPlayerState(dir); err != nil {
 		t.Fatalf("completion rejected damaged marker: %v", err)
 	}
-	if err := backup.CheckPlayerStart(dir); err == nil || !strings.Contains(err.Error(), "player-initialized") {
-		t.Fatalf("player not off with marker reason: %v", err)
+	if err := backup.CheckPlayerStart(dir); err != nil {
+		t.Fatalf("damaged marker rejected matching floor: %v", err)
 	}
 	snap, err := backup.Snapshot(t.Context(), backup.Sources{DataDir: dir, PlayerUUID: filepath.Join(dir, "player-uuid")})
 	if err != nil {

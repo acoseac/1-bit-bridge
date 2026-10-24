@@ -98,6 +98,12 @@ func restorePlayerReservation(snapshotDir, target, id string, m Manifest, opts R
 	if sealed || sealErr != nil {
 		return fmt.Errorf("restore: player identity restores are sealed by the local discard records; nothing was restored; %s", snapshotIdentityRemedy())
 	}
+	// A UUID-only destination has unknown main-era history. Establish the
+	// same durable adoption floor as start before computing max(snapshot, live).
+	// Restore's caller already holds server.lock.
+	if err := AdoptPlayerState(dataDir); err != nil {
+		return fmt.Errorf("restore: adopt destination player: %w; nothing was restored", err)
+	}
 	live, present, err := readPlayerFloor(dataDir)
 	if err != nil {
 		return fmt.Errorf("restore: %w; %s; nothing was restored", err, playerResetAdvice(true))

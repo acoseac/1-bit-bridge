@@ -59,7 +59,7 @@ func damageBootPlayer(t *testing.T, dir, kind string) {
 }
 
 func TestPlayerFileErrorsDoNotStopServeBeforeTLS(t *testing.T) {
-	for _, kind := range []string{"damaged marker", "completion", "preflight", "adoption"} {
+	for _, kind := range []string{"completion", "preflight", "adoption"} {
 		for _, enabled := range []string{"false", "true"} {
 			t.Run(kind+"/"+enabled, func(t *testing.T) {
 				cfg, dir := resetInstall(t, "127.0.0.1:0")
@@ -91,31 +91,44 @@ func TestPlayerFileErrorsDoNotStopServeBeforeTLS(t *testing.T) {
 
 func TestServeKeepsLibraryWithDamagedSealedPlayerMarker(t *testing.T) {
 	needsDirectorySync(t)
-	for _, enabled := range []bool{false, true} {
-		name, settings := "disabled", "    enabled: false\n"
-		if enabled {
-			name, settings = "enabled", goBarPlayer
+	for _, sealed := range []bool{false, true} {
+		for _, enabled := range []bool{false, true} {
+			name, settings := "disabled", "    enabled: false\n"
+			if enabled {
+				name, settings = "enabled", goBarPlayer
+			}
+			if sealed {
+				name += "/sealed"
+			}
+			t.Run(name, func(t *testing.T) {
+				rec := loggingtest.Record(t)
+				standIn := newPlayerStandIn()
+				ps := bootPlayerServe(t, playerServeCase{player: settings, standIn: standIn, before: func(dir string) {
+					damageBootPlayer(t, dir, "damaged marker")
+					if !sealed {
+						if err := os.Remove(filepath.Join(dir, "player-floor-discarded.json")); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}})
+				if code := ps.health(t); code != http.StatusOK {
+					t.Fatalf("library health beside damaged marker: %d", code)
+				}
+				eng := ps.engine(t) // Join startup before reading the backend and its outcome.
+				if ps.player.plan.start != enabled || standIn.built != enabled || (eng != nil) != enabled {
+					t.Fatalf("damaged player's plan: %+v", ps.player.plan)
+				}
+				if lines := rec.Lines("player initialization marker is damaged"); len(lines) == 0 || !strings.Contains(lines[0], "player-initialized") || !strings.Contains(lines[0], "move it aside") || strings.Contains(lines[0], "--discard-floor") {
+					t.Fatalf("missing player file reason: %v", lines)
+				}
+				var out, errs bytes.Buffer
+				if code := backupCmd([]string{"--config", ps.configPath}, &out, &errs); code != 0 {
+					t.Fatalf("live backup: %d %s", code, &errs)
+				}
+				if code := ps.stopServe(t); code != 0 {
+					t.Fatalf("serve exit %d", code)
+				}
+			})
 		}
-		t.Run(name, func(t *testing.T) {
-			rec := loggingtest.Record(t)
-			standIn := newPlayerStandIn()
-			ps := bootPlayerServe(t, playerServeCase{player: settings, standIn: standIn, before: func(dir string) { damageBootPlayer(t, dir, "damaged marker") }})
-			if code := ps.health(t); code != http.StatusOK {
-				t.Fatalf("library health beside damaged marker: %d", code)
-			}
-			if ps.player.plan.start || !strings.Contains(ps.player.plan.off, "player-initialized") || standIn.built {
-				t.Fatalf("damaged player's plan: %+v", ps.player.plan)
-			}
-			if lines := rec.Lines("player: not started"); len(lines) != 1 || !strings.Contains(lines[0], "player-initialized") {
-				t.Fatalf("missing player file reason: %v", lines)
-			}
-			var out, errs bytes.Buffer
-			if code := backupCmd([]string{"--config", ps.configPath}, &out, &errs); code != 0 {
-				t.Fatalf("live backup: %d %s", code, &errs)
-			}
-			if code := ps.stopServe(t); code != 0 {
-				t.Fatalf("serve exit %d", code)
-			}
-		})
 	}
 }

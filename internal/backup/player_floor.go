@@ -12,6 +12,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/google/uuid"
 )
@@ -46,6 +47,7 @@ func playerMarkerState(dir, name string) (present, valid bool, m playerMarker, e
 		return false, false, m, err
 	}
 	if !st.Mode().IsRegular() {
+		warnDamagedPlayerMarker(name)
 		return true, false, m, nil
 	}
 	f, _, err := fsutil.OpenAsFile(filepath.Join(dir, name))
@@ -59,12 +61,27 @@ func playerMarkerState(dir, name string) (present, valid bool, m playerMarker, e
 	}
 	d := json.NewDecoder(bytes.NewReader(b))
 	if len(b) > 128 || d.Decode(&m) != nil || d.Decode(new(any)) != io.EOF {
+		warnDamagedPlayerMarker(name)
 		return true, false, playerMarker{}, nil
 	}
 	if m.Version > 1 {
 		return true, false, m, fmt.Errorf("%s has a newer version; use a newer bridge", name)
 	}
+	if m.Version != 1 {
+		warnDamagedPlayerMarker(name)
+	}
 	return true, m.Version == 1, m, nil
+}
+
+// warnDamagedPlayerMarker keeps marker reads independent of UUID bytes (reset
+// must be able to remove an unreadable UUID). Floor-loss errors still refuse
+// the operation; moving this evidence aside is safe only with a matching floor.
+func warnDamagedPlayerMarker(name string) {
+	if name != playerInitialized {
+		return
+	}
+	logging.Component("player").Warn("player initialization marker is damaged", "file", name,
+		"remedy", "with a readable player-ids.json naming the current player-uuid, move it aside; start re-ensures it, and beside a valid seal completion records sealed and minted")
 }
 
 func readPlayerMarker(dir, name string) (bool, error) {
@@ -96,7 +113,11 @@ func ensurePlayerMarker(dir, name string) error {
 			return err
 		}
 		if !st.Mode().IsRegular() {
-			return fmt.Errorf("%s is not a regular file: move it aside and run bridge reset-player --discard-floor", name)
+			if name == playerInitialized {
+				// Preserve non-file evidence without opening or following it.
+				return atomicwrite.ProbeDurable(dir, filepath.Join(dir, ".player-marker-barrier"))
+			}
+			return fmt.Errorf("%s is not a regular file: move it aside", name)
 		}
 		return atomicwrite.ProbeDurable(dir, path)
 	}
@@ -147,7 +168,7 @@ func completePlayerSeal(dir string) error {
 		}
 	}
 	// A damaged second record still counts as present. Keep it for the
-	// conservative start checks and explicit discard; the first seal is durable.
+	// floor-loss checks; a matching readable floor still permits start.
 	if present && !valid {
 		return nil
 	}
@@ -186,11 +207,11 @@ func writePlayerMarker(dir string, m playerMarker) error {
 // markPlayerMinted consumes a discard's exemption after the floor is durable
 // and before the UUID is published. Ordinary initialization preserves bytes.
 func markPlayerMinted(dir string) error {
-	_, _, m, err := playerMarkerState(dir, playerInitialized)
+	_, valid, m, err := playerMarkerState(dir, playerInitialized)
 	if err != nil {
 		return err
 	}
-	if m.Sealed && !m.Minted {
+	if valid && m.Sealed && !m.Minted {
 		m.Minted = true
 		return writePlayerMarker(dir, m)
 	}
@@ -383,16 +404,6 @@ func CheckPlayerStart(dir string) error {
 	}
 	if err := checkPlayerFloorLoss(dir, present); err != nil {
 		return err
-	}
-	if st, err := os.Lstat(filepath.Join(dir, playerInitialized)); err == nil && !st.Mode().IsRegular() {
-		return errors.New("player-initialized is not a regular file: move it aside and run bridge reset-player --discard-floor")
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if present, valid, _, err := playerMarkerState(dir, playerInitialized); err != nil {
-		return err
-	} else if present && !valid {
-		return errors.New("player-initialized is damaged: move it aside and run bridge reset-player --discard-floor")
 	}
 
 	if floor.Exhausted() {
