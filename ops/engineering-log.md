@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B500 round 7: the build-site census fails closed](#2026-10-24--b500-round-7-the-build-site-census-fails-closed)
 - [2026-10-24 — B500 round 6: documented deploy tags and invocation census](#2026-10-24--b500-round-6-documented-deploy-tags-and-invocation-census)
 - [2026-10-24 — B500 round 5: deployed builds, embedded-file admission and image notices](#2026-10-24--b500-round-5-deployed-builds-embedded-file-admission-and-image-notices)
 - [2026-10-24 — B500 round 4: omit unused bundled UIs](#2026-10-24--b500-round-4-omit-unused-bundled-uis)
@@ -145,6 +146,69 @@ reaches a session that has not gone looking for it.
 - [DSD renditions B4 — the alias measurement, and why it is a differential (2026-09-07)](#dsd-renditions-b4--the-alias-measurement-and-why-it-is-a-differential-2026-09-07)
 
 ---
+
+## 2026-10-24 — B500 round 7: the build-site census fails closed
+
+Round 6 still enumerated executable spellings and executable fence labels.
+The replacement recognizes build/install/run/test/vet after a possible Go
+path (including go.exe and variable suffixes) or any variable expansion,
+with optional global flags. Quotes, backticks, commas and brackets are
+separators on a matching copy; original logical lines and multiplicities
+still have to match reviewedBuildSites. Ambiguous shapes require review.
+
+Markdown scope now includes every README.md and recursive .md files under
+ops/, deploy/ and docs/, with records and the existing excluded trees kept
+out. Fences are scanned unless their language is on the explicit
+non-executable skip list in the code and rule. Container markers are stripped
+before fence detection; a backtick opener cannot have a backtick in its info.
+Console/session/terminal prompts are removed before comment filtering, so a
+root prompt is a command. The long rule names static-analysis limits, including
+runtime-computed verbs and commands assembled across unjoined lines.
+
+All concrete review examples became refusal tests before the implementation
+changed: on 36b6e617 the run failed 276 subtests (162 invocation forms,
+10 fence labels, 12 container/inline cases, 17 prompt cases, 9 scope cases,
+and 66 prose cases incorrectly admitted after a container fence). A later
+red-first check caught five expansion-in-path/repeated-suffix forms in the
+first redesign; the matcher now reuses its expansion grammar in paths and
+suffixes too. The post-change census matches 39 reviewed sites. It enumerates
+all 22 in-scope Markdown files, including the 17 with no sites; the other five each hold
+one. Three newly visible test commands now have both release tags: the
+review guide and the ALAC/DSD fixture READMEs. Three ambiguous sites were
+reviewed: Make's vet and test recurse into tagged targets, and a firewall
+command's description contains a variable/flag/install shape without running
+Go. No Markdown prose was reviewed as an exception. The walk's renamed
+function is classified in the repository tree-walk audit.
+
+Five negative controls, restored from saved bytes without a commit, all
+failed exactly the predicted subtests: executable list restored, 127
+invocation cases plus five expanded-path/suffix cases; fence allowlist restored,
+10 labels and 16 prompts; container stripping removed, 11 containers and 66 prose cases; prompt
+stripping removed, five root prompts; top-level ops scope restored, nine
+scope cases. For the executable and scope controls only, reviewed baseline
+entries made invisible by the mutation were removed with it, so baseline
+validation still reached each new-site probe. All controls compiled; none
+panicked or failed outside its predicted set. The original-line and duplicate
+site checks, exclusions and real-tree equality remain covered.
+
+Host evidence supplied after round 6: a Linux amd64 host built the Docker
+image at 36b6e617 with Docker 29.1.3, buildx 0.30.1 and
+`docker buildx build --load` in 75 s. Its
+`/usr/share/doc/1-bit-bridge/THIRD_PARTY_LICENSES.md` is 355,656 bytes,
+SHA-256 `45324dc3621413caf5f52bc302d51a302040f782e07acb905b1b90e564b15fd4`,
+byte-identical to the notices in all six GoReleaser snapshot archives. The
+image's binary records `-tags=ts_omit_webclient,ts_omit_debugeventbus`,
+`-trimpath`, CGO 0 and linux/amd64, includes no web-client module, and runs
+`bridge version`. This is host evidence for round 6, not a new image build
+in the round-7 workspace.
+
+Verification on Go 1.27.3: tagged vet of ./..., make fmt, make docs-check,
+make check-build-tags, the tagged package race suite with -count=1
+(397.922 s), and make build-all all passed; all six cross-built binaries
+were produced. The tree-walk classification test also passed. The cross-builds
+emitted nonfatal module stat-cache write warnings under the sandbox.
+The rule-line replacement is supplied separately because .claude/ is not
+writable in this workspace. No commit or push was made.
 
 ## 2026-10-24 — B500: release archives carry build-derived third-party licences
 
@@ -60211,8 +60275,10 @@ first. A quoted executable (`"$GO" build`, `"/usr/local/go/bin/go" build`)
 did not match, since the pattern wanted white space straight after the
 name: 720 cases, three spellings by the four flag forms, five verbs and
 twelve files. An unlabelled fence, which a reader runs as shell, was left
-out with the prose; the census now leaves out only a fence whose info string
-names another language (`text`, `go`, `yaml`). And the records were in it:
+out with the prose; round 6 added unlabelled fences to its executable-language
+allowlist. It still skipped every label outside that allowlist, not just
+non-executable languages (`text`, `go`, `yaml`); round 7 replaces that allowlist
+with the explicit skip list. And the records were in it:
 the engineering log, the History files, plans and release-note drafts quote
 commands as they were run, before the tags existed among them, so they stay
 out, and every other top-level ops document is in. On the real tree the
