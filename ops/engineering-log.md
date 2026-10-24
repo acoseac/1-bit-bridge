@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader](#2026-10-24--b525-the-players-identity-file-is-read-without-waiting-a-named-pipe-at-player-uuid-is-refused-at-once-by-every-reader)
 - [2026-10-24 — B470 PR 5a0 Round 11: a listed snapshot reservation that cannot be read refuses restore](#2026-10-24--b470-pr-5a0-round-11-a-listed-snapshot-reservation-that-cannot-be-read-refuses-restore)
 - [2026-10-24 — B470 PR 5a0 Round 10: reset advice requires invalid reservation data](#2026-10-24--b470-pr-5a0-round-10-reset-advice-requires-invalid-reservation-data)
 - [2026-10-23 — B470 PR 5a0 round 4: giving up a player identity is permanent](#2026-10-23--b470-pr-5a0-round-4-giving-up-a-player-identity-is-permanent)
@@ -59628,3 +59629,93 @@ minting a fresh identity per run (a new backlog item, not a safety issue on the
 Linux-only test tool); and a History wording nit, applied — the backup
 capture's "only a missing file omits the mark" now says it holds after a valid
 `player-uuid` is captured. Docs in `ops/History-rules-player.md`.
+
+## 2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader
+
+`config.ReadPlayerUUIDFile` is the one reader of `<dataDir>/player-uuid`:
+`ReadPlayerUUID`, `EnsurePlayerUUID` and `ForgetPlayerUUID` call it, and so
+does a restore, for a snapshot's copy and for the box's own. It opened the
+file with `os.Open`, and on a named pipe `open(2)` waits for a writer, which
+nothing cancels: the class B523 closed for the engine's own files
+(`readLimited`). It now opens through `fsutil.OpenAsFile`, as `readLimited`
+does: a nonblocking open, a refusal of anything the opened file's stat says
+is not a file (an `*fsutil.NotAFileError` inside an `*fs.PathError`), and the
+nonblocking flag cleared before the read, which keeps its bound (129 bytes,
+`maxPlayerUUIDFile` plus one). A missing file still answers the open's own
+`fs.ErrNotExist`, and a file that is not one UUID `ErrNotOnePlayerUUID`.
+
+### What each reader does with it
+
+The refusal is neither `fs.ErrNotExist` nor `ErrNotOnePlayerUUID`, so every
+reader takes the branch it already had for a file it cannot read, and none
+takes it for an identity not made yet:
+
+- Serve's player start (`bridgePlayer.start`, `EnsurePlayerUUID` on the
+  supervisor's goroutine): "the player's identity: open …/player-uuid: named
+  pipe is not a file", before the resolver, the backend or the engine. No
+  identity is made (`EnsurePlayerUUID` makes one only on `fs.ErrNotExist`),
+  the pipe stays, and serve serves on.
+- `bridge output dac bind`, which makes the UUID after it writes the binding:
+  "output dac bind: the player's UUID: open …: named pipe is not a file",
+  exit 1, as for any identity it cannot read; the binding it wrote stays, as
+  before.
+- `bridge output dac inspect`: its `player uuid:` line is the error; "not
+  made yet" is the `fs.ErrNotExist` branch alone.
+- A restore's read of a snapshot's copy (`snapshotPlayerUUID`): its generic
+  case, "restore player-uuid: open …: named pipe is not a file; nothing was
+  restored", before any file is written.
+- A restore's read of the box's own copy (`discardReplacedPlayerQueue`),
+  which keeps the box's queue only for the identity it restores: any error is
+  an identity whose queue it does not keep, so the queue is discarded and the
+  snapshot's identity renamed over the pipe (`WritePlayerUUIDFile`), as for a
+  file that does not hold one UUID.
+- `ForgetPlayerUUID`: the reader's error, the entry left.
+- `Snapshot`'s read of the copy it captured: the copy is the file `Snapshot`
+  wrote, so nothing changes in practice.
+
+A link to a character device read before as a file that does not hold one
+UUID (`ErrNotOnePlayerUUID`, so a restore's refusal said to remove the copy
+from the snapshot), and a directory failed in its read ("read …: is a
+directory"); both are now `NotAFileError` refusals down the same branches.
+
+### Red first
+
+The tests, against the tree before the change:
+
+- `TestWhatIsNotAFileAtPlayerUUIDIsRefusedAtOnce` (`internal/config`; a
+  named pipe, a link to one, a link to `/dev/null` and a directory at
+  `player-uuid`, each through `ReadPlayerUUIDFile`, `ReadPlayerUUID`,
+  `EnsurePlayerUUID` and `ForgetPlayerUUID`): both pipe cases "still running
+  after 5s, waiting to open a named pipe" in all four readers, then, once the
+  writer was played, "does not hold one UUID (refused as \"\")"; the device
+  "does not hold one UUID"; the directory "read …: is a directory".
+- `TestANamedPipeAtThePlayersUUIDRefusesItsStartAtOnce` (`cmd/bridge`): "the
+  player's start: still running after 5s", then the start refused "…
+  does not hold one UUID: remove it, and the next start makes a new one, …",
+  its log line the same.
+- `TestOutputDACBindRefusesANamedPipeAtThePlayersUUIDAtOnce`: "bridge output
+  dac bind: still running after 5s", then exit 1 with "does not hold one
+  UUID".
+- `TestOutputDACInspectSaysANamedPipeAtThePlayersUUIDIsNotAFile`: "bridge
+  output dac inspect: still running after 5s", then the UUID line "… does
+  not hold one UUID: …".
+- `TestRestoreRefusesANamedPipeForThePlayerUUIDAtOnce` (`internal/backup`):
+  "Restore: still running after 5s", then "restore player-uuid: … does not
+  hold one UUID, so the player cannot have the identity it had; nothing was
+  restored: remove it from the snapshot …".
+- `TestRestoreOverANamedPipeAtTheBoxsPlayerUUIDDoesNotWait`: "Restore: still
+  running after 5s", with the reservation already raised.
+
+### Decided otherwise than the brief, and why
+
+- The brief named three readers. Inspect, the restore's read of the box's own
+  copy and `ForgetPlayerUUID` read through the same function, so the change
+  covers them too; inspect and the box's copy have tests of their own, and the
+  config package a test of the reader itself over each kind of entry.
+- The serve test turns backups off (`playerServeCase.top`, a field added for
+  config written after the output block), so the player's start is what reads
+  `player-uuid` at boot.
+- The identity rule in `player.md` was a 1.6 KB bullet with no long form, in a
+  file at 97.9% of its budget. It moved verbatim to `History-rules-player.md`
+  first (its own commit, through `move_entry.py`, with `verify_moves.py`
+  passing), and B525's text went to the long form, its Don't to the line.

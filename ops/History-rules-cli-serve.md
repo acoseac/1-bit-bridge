@@ -1300,8 +1300,10 @@ mentions across the four `ops/audit-*.md` files.
   snapshot without the file, taken before B505 or of a box whose player
   had none, leaves the box's identity as it is and makes none. `Restore`
   reads the copy before its loop, by the player's own rule
-  (`config.ReadPlayerUUIDFile`: one lowercase UUID, white space after it
-  and nothing else, 128 bytes at most), for the console account's
+  (`config.ReadPlayerUUIDFile`: a file, opened without waiting, so a
+  named pipe, a directory or a device in its place fails the restore at
+  once, before any file is written, B525; one lowercase UUID, white space
+  after it and nothing else, 128 bytes at most), for the console account's
   reason: the manifest lists the file last, and a check at its turn would
   come after every other file was replaced. A copy that does not hold one
   UUID fails the restore before any file is written; the refusal names
@@ -1322,7 +1324,9 @@ mentions across the four `ops/audit-*.md` files.
   cancellation and file-access errors refuse backup without it,
   and only missing files omit the mark.
   An identity replacement also durably removes the destination queue before
-  writing the UUID; restoring the same UUID keeps its queue; no UUID leaves the live reservation
+  writing the UUID; restoring the same UUID keeps its queue, and a box
+  whose own `player-uuid` the rule cannot read, a named pipe there included
+  (read at once, B525), keeps none; no UUID leaves the live reservation
   alone too. The full arithmetic, assumptions, exhaustion remedies, crash
   order and release coupling are in History-rules-player.md under the
   restored-identity rule. Two boxes running one identity at once are
@@ -1335,6 +1339,8 @@ mentions across the four `ops/audit-*.md` files.
   `TestSnapshotSkipsAPlayerUUIDTheBoxDoesNotHave`,
   `TestRestoreOfASnapshotWithoutThePlayerUUIDLeavesTheIdentityAlone`,
   `TestRestoreRefusesAPlayerUUIDThatIsNotOneUUIDBeforeWritingAnyFile`,
+  `TestRestoreRefusesANamedPipeForThePlayerUUIDAtOnce`,
+  `TestRestoreOverANamedPipeAtTheBoxsPlayerUUIDDoesNotWait`,
   `TestSnapshotAndRestoreAsRootKeepThePlayerUUID`,
   `TestBuildBackupSourcesNamesThePlayerUUID`.)
 
