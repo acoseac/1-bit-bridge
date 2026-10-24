@@ -61915,6 +61915,20 @@ after it; every one went red:
    (`RestoreWithOptions` reported) and the self-test (the saves through the
    checked name reported).
 
+### Checks of the sixth round
+
+Through the build lock, on 074f03c9 (its test code 8d75e471's): `make fmt
+vet docs-check` passed, `make fmt` rewriting nothing; `GOOS=windows` and
+`GOOS=linux` `go vet ./...`, with the Makefile's tags, were clean; `go test
+-race -count=1 -timeout 45m` passed `cmd/bridge` (552 s) and
+`internal/config` (11 s); and the two changed tests,
+`TestTheConfigWriterSweepReportsEveryShape` and
+`TestEveryConfigWriterTakesTheConfigLock`, passed `-race -count=10`. The
+sweep's two "cannot see" texts compare equal word for word (187 words).
+Rules: the config-lifecycle.md line, which names the allowance, given to the
+orchestrator as an OLD and NEW pair against 5400d608; cli-serve.md's does not
+name it, and is unchanged.
+
 ## 2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader
 
 `config.ReadPlayerUUIDFile` is the UUID parser for `<dataDir>/player-uuid`
