@@ -218,6 +218,19 @@ accepted lines; without flags before dlv's subcommand, the three flagged dlv
 lines; with golangci-lint matched only before `run`, the flagged run and the
 action. The real tree's census is unchanged (42 sites).
 
+**Windows CI.** The PR's first windows-latest run failed 22 of the package's tests:
+GitHub's Windows checkout gives every text file CRLF line endings, and the release
+checks and their tests read `.goreleaser.yaml`, the Makefile, the Dockerfile and
+the build sites by `\n`-ended lines. `readRepoText` now reads a repository text
+file as its LF text wherever the checks parse it (`checkBuildTags`, the release
+config), and the tests read repository files through it; a licence text the
+generator copies is never normalised, so the notices stay byte for byte.
+`TestACRLFCheckoutReadsAsLF` converts every build-site file to CRLF (red on the
+PR's head, by the same refusal CI showed). A CRLF copy of the whole tree, made as
+autocrlf makes it (the `.gitattributes` eol=lf paths kept), reproduced CI's
+failures on the PR's head and passes on the fix; restoring the unnormalised read
+reddens the new test.
+
 ## 2026-10-24 — B500 round 7: the build-site census fails closed
 
 The scope, executable-only matching, and EOF-only fence behavior described
