@@ -1220,7 +1220,7 @@ Windows skips only this test's privileged symlink creation.
 
 ## B500 — third-party licences in release archives (2026-10-24)
 
-**Every release archive carries freshly generated third-party licences from the union of the release builds; missing licences fail the release. Never replace build-derived discovery with the go.mod list or skip the before-hook.**
+**Every release archive carries freshly generated third-party licences from the union of the release builds; missing licences fail the release. Never replace build-derived discovery with the go.mod list or skip the before-hook. Include compiled-package ancestry and the pinned Go toolchain notices; never synthesize module grants. Discovery refuses a non-default GOFLAGS or workspace, and non-default architecture feature levels.**
 
 `go run ./scripts/third-party-licenses` reads the explicit matrix in
 `.goreleaser.yaml`, then runs `go list -mod=readonly -deps -json ./cmd/bridge`
@@ -1230,16 +1230,33 @@ are excluded; modules used on only one platform still enter the union.
 The small stdlib configuration reader accepts the current builds stanza
 only and refuses unfamiliar settings, tags, exclusions, flags and YAML
 forms. Extend discovery and its tests together before changing that stanza.
-Developer GOFLAGS and workspaces do not affect discovery. Release builds
-must likewise use the clean checkout and default architecture feature levels.
+Discovery refuses a non-default GOFLAGS or workspace. It reads inherited
+`go env GOFLAGS GOWORK GOAMD64 GOARM64`, including persisted `go env -w`
+settings, and also refuses non-default architecture feature levels. It
+preserves that checked environment for discovery so GoReleaser inherits
+the same build settings. Empty values and the defaults (GOWORK=off,
+GOAMD64=v1, GOARM64=v8.0) are accepted.
 
 Every entry identifies the original module path/version and its replacement
-path/version, but reads files from the replacement's directory. Include the
-full bytes of all root files matching LICENSE*, COPYING*, NOTICE*, PATENTS
-(case-insensitive), plus UNLICENSE (mewkiz/pkg and mewpkg/term use it).
-NOTICE or PATENTS alone is not a licence. Empty files and read failures are
-errors too. Keep the Go patent grant with each golang.org/x module; when its
-root omits PATENTS (currently x/oauth2), use the release toolchain's PATENTS.
+path/version (without a trailing space for an unversioned local replacement),
+but reads files from the replacement's directory. For every compiled package,
+collect files from its directory and every ancestor through the module root;
+deduplicate by module-relative path and label each file with that path. Never
+walk unlinked subtrees. Include full bytes of LICENSE*, LICENCE*, COPYING*,
+COPYRIGHT*, NOTICE*, PATENTS and UNLICENSE (case-insensitive), restricted to
+extensionless names, text extensions (.txt, .md, .rst, .markdown) or supported
+licence suffixes such as -APACHE and .MIT. Source files such as license_test.go
+are not notices and cannot satisfy the licence requirement. NOTICE or PATENTS
+alone is not a licence. Empty files and read failures are errors too.
+
+Reproduce only the PATENTS a module or its replacement actually ships; never
+supply a missing grant from another source. In particular, x/oauth2 has no
+PATENTS. Emit one separate "Go standard library and runtime (go1.x.y)" section
+with the release toolchain's GOROOT/LICENSE and GOROOT/PATENTS when present.
+A missing or empty Go LICENSE fails generation. The section covers the
+standard library, runtime and toolchain-vendored code; the module counts
+exclude it. Require the running toolchain to match go.mod's go directive,
+which release CI's setup-go uses, and label the section with that version.
 Module and filename order is sorted, without dates or cache paths.
 
 The before-hook runs after `go mod tidy`, writes the ignored root file
@@ -1252,5 +1269,8 @@ playbook verifies every snapshot archive's notice bytes before removing dist/.
 Tests build a local fixture graph through the actual go-list entry point,
 including target-specific imports, unused and test-only requirements,
 replacements, missing licences, mixed-case filenames, multiple licence
-files, NOTICE, PATENTS, UNLICENSE and deterministic ordering. The wiring
-test pins the before-hook and the archive file entry.
+files, nested ancestry and deduplication, COPYRIGHT, LICENCE, rejected source
+files, module-owned PATENTS, UNLICENSE, Go toolchain notices and deterministic
+ordering. Environment tests cover inherited flags, explicit and automatically
+found workspaces, persisted settings and architecture levels. The wiring test
+pins the before-hook and the archive file entry.

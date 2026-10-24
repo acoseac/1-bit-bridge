@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B500 round 2: package ancestry, shipped grants and release environment](#2026-10-24--b500-round-2-package-ancestry-shipped-grants-and-release-environment)
 - [2026-10-24 — B500: release archives carry build-derived third-party licences](#2026-10-24--b500-release-archives-carry-build-derived-third-party-licences)
 - [2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader](#2026-10-24--b525-the-players-identity-file-is-read-without-waiting-a-named-pipe-at-player-uuid-is-refused-at-once-by-every-reader)
 - [2026-10-24 — B470 PR 5a2b: shared discovery for the opt-in OpenHome Source](#2026-10-24--b470-pr-5a2b-shared-discovery-for-the-opt-in-openhome-source)
@@ -151,8 +152,8 @@ Discovery uses go list's non-test package dependency closure with CGO=0:
 63 modules on each Darwin target, 67 on each Linux target and 68 on each
 Windows target. Entries record replacements and read their root files,
 including the fsnotify fork. saprobe-alac's full Apache licence and NOTICE
-are included. All golang.org/x modules carry PATENTS; x/oauth2 takes the
-Go toolchain grant because its root omits it. UNLICENSE extends the requested
+are included. Round 1 incorrectly supplied Go toolchain PATENTS to x/oauth2;
+round 2 below removes that synthesized grant. UNLICENSE extends the requested
 filename patterns for mewkiz/pkg and mewpkg/term; an initial real generation
 failed loudly on mewkiz/pkg before that extension.
 
@@ -60033,3 +60034,34 @@ assertion in the sandbox, which refused `listen tcp 127.0.0.1:0` with
 “bind: operation not permitted”; run again on the host outside it, all six
 passed under `-race` (the serve start 1.08 s, `cmd/bridge` 13.902 s).
 Linux and Windows were vetted here and run by CI.
+
+
+## 2026-10-24 — B500 round 2: package ancestry, shipped grants and release environment
+
+The generator now collects notices from each compiled package directory up
+through its effective module root, deduplicating module-relative paths. The
+six-target union adds prometheus/client_golang's internal gddo LICENSE and
+klauspost/compress's internal/snapref/LICENSE and zstd/internal/xxhash/LICENSE.txt.
+COPYRIGHT and LICENCE spellings are accepted case-insensitively; miekg/dns's
+COPYRIGHT now ships. Text-name filtering removes tailscale's license_test.go
+and refuses a module whose only apparent licence is source code.
+
+Module PATENTS are reproduced only when shipped by that module or replacement.
+The prior x/oauth2 fallback is removed. The separate Go standard library and
+runtime section carries the go1.27.2 toolchain's LICENSE and PATENTS; missing
+or empty Go LICENSE fails. The running toolchain must match go.mod's version.
+Before listing dependencies, inherited go env values (including persisted
+settings and workspace discovery) must have default GOFLAGS, GOWORK, GOAMD64
+and GOARM64. Discovery no longer clears settings the release build inherits.
+Local replacement labels omit the version separator when no version exists.
+
+Regression tests failed on the round-1 generator before these fixes, then
+passed. Mutation controls cover the old guarantees (with the obsolete patent
+fallback control reversed to forbid synthesis), every new finding, Go notice
+requirements and environment refusal. Saved bytes are restored after each
+control; no commit or HEAD restore is used. The counts remain 63 per Darwin
+target, 67 per Linux target, 68 per Windows target, 75 modules in the union.
+The generated output is 358,063 bytes (was 355,170); two generations match.
+The requested three-platform vet, fmt, docs-check and generator race gates
+pass. Archive checks use synthetic fixtures; no release or packaging run is
+claimed.
