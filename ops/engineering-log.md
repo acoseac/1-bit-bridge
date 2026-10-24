@@ -61542,7 +61542,10 @@ turn (`LoadFound`'s config, `Found`'s bytes, or a value made from one),
 a create-only save, or a comparison `comparedSaves` lists (init's, a
 restore's, the holder's `UpdateChecked`), enforcing rather than
 documenting: every current writer passes without a rewrite. Red: the
-self-test reported 21 of its 29 problems.
+self-test reported 21 of its 29 problems. (It enforced less than that: a
+guard or a comparison anywhere in the function counted, a comparison whose
+answer was dropped included, and a name shadowed in a block counted for
+the one outside it; the fifth round, below.)
 
 **The queue in the late restore refusal** (Codex's second Low): said only
 when the restore removed one. Red on the seams: a restore of the box's own
@@ -61672,6 +61675,164 @@ to run. Rules: the config-lifecycle.md and cli-serve.md lines, given to the
 orchestrator as OLD and NEW pairs against 24a4c4ad; their long forms are in
 `ops/History-rules-config-lifecycle.md` and `ops/History-rules-cli-serve.md`.
 player.md is unchanged.
+
+### Fifth round: the fourth round's reviews, and the end of the link-repoint hunt
+
+Two reviews read the fourth round (Codex's, static: three Mediums, one Low;
+a Claude review: one Medium, two Lows), and the orchestrator decided them
+(decisions 1 to 6). This is the last round of link-repoint hardening, and
+it states once the window no turn closes: **the time between the turn's
+final check (the name still opens the target, and the target's bytes are as
+found) and the rename syscall itself, plus any writer that takes no lock,
+and, for work a check authorizes (a root change's index change, a
+restore's writes, an Edit writer's own work), the time between that check
+and the work**. Only what the brief names was closed. Each fix was red
+first, on the fourth round's code (6e03497f) with only the seams of three
+commits that change no behaviour (af59db9b, 6f6c4ffb, 7ee08187; listed in
+the config long form). The fixes are 48b2664a, 6f63cfef, 38a046e5, 71d01baf
+and 91ca1e85.
+
+**The name, resolved after the read it guards** (Codex's first Medium;
+decision 2). The fourth round resolved the config's name before each read a
+decision rests on, so a link repointed while the read ran left the read
+answering the locked file, unchanged, and the name opening another. Now the
+save's condition asks the byte comparison, then the writer's own (bind's
+`SaveIf` read through the name), then the name, last before each rename
+attempt; `Check` reads, then resolves; `lockFile` resolves after `find`.
+Red on the seams, each link repointed inside the nth read the turn makes,
+to a twin holding the same bytes, and each test asking which file that read
+was of: a save's comparison read (the locked file written, nil), `SaveIf`'s
+own read (the same), the console's check (its change run), an `Edit`'s
+turn read (its change run), bind (exit 0, the locked file bound), library
+add (the index wiped), and a restore's check (every file before
+bridge.yaml restored).
+
+**The boot read, through the file it resolved** (Codex's third Medium;
+decision 3). Red on the seams: a link pointed at B during the read and back
+at A before the second resolution answered B's bytes with A.
+
+**A failed resolution, no file** (Codex's second Medium, the Claude
+review's first Low; decision 4). Two failed resolutions compared equal as
+`""`, the boot answered `""`, and the holder skipped `""` when it compared.
+Now a read whose two resolutions agree is answered through its file; one
+across which they differ or one side alone resolved is read again, and a
+name that never resolved alike is refused (`*NameMovingError`); a name
+resolved at no side of any of the three reads boots on the last read
+through the name with no file, and the holder refuses every save, at its
+top, before `LockFile`, until a restart (`*BootUnresolvedError`), which the
+first-update allowance of a holder told nothing does not touch. Red on the
+seams: a first read resolved at neither side, then one side, answered at
+once with `""`; a name resolving nowhere read once, not three times; the
+holder's save went through, its turn taken, and still did once the name
+resolved; serve booted that way answered the console's save 200 and wrote
+the file.
+
+**Windows: a reparse point that is no link** (the Claude review's Medium,
+the fourth round's regression; decision 1). `physicalDir` refused
+`ModeSymlink` and `ModeIrregular`, and Go 1.23's `ModeIrregular` marks
+OneDrive's cloud folders and container layers. `checkResolvedDir`, untagged,
+refuses a name surrogate by the tag of the directory's own entry, or a
+resolution that moves when asked again, and nothing else. Red on the seams
+(its decision as `os.Lstat`'s mode had it): cloud, placeholder and
+container tags refused, a moving resolution and a failing one taken. The
+Windows reader, `entryOf`, is compiled and vetted here; its test is
+`TestEntryOfReadsTheEntryItself`, beside the fourth round's eight junction
+tests, for a Windows host. No test makes a cloud-tagged folder natively.
+
+**The sweep's guards and comparisons, where they stand** (Codex's Low, the
+Claude review's second Low; decision 6). A guard counts only as a statement
+of the function's own body; a listed comparison only as an if that returns
+before the save, at the top of the body or directly inside a top-level nil
+check of the turn, in decision 6's three forms; a name's last assignment is
+its variable's, as the parser resolves it. Red: the self-test reported 29
+of its 36 problems (the shape under another name's nil check, the 37th,
+came after the fix), and the tree's sweep found `FileLock.write` calling no
+`stillNamed`. **The restore fails the strict top-level rule**: its
+comparison sits inside `if configTurn != nil`. Reported, not restructured:
+the sweep accepts a comparison directly inside a top-level nil check of the
+turn, since a save through a nil turn writes nothing. What the sweep still
+cannot see (a pointer write, a loop's later pass, `pick(stale, found)`, a
+comparison's polarity, a conjunct that switches the refusal off, whether a
+save inside the nil check goes through that turn, a helper in another
+function) is pinned as passing in the self-test and listed in
+`derivationProblem`'s comment.
+
+### Negative controls of the fifth round
+
+Each against 91ca1e85, one mutation at a time, every edited file put back
+from git after it, each mutation matching its file exactly once; every one
+went red:
+
+1. The turn resolving its name before its read, as the fourth round did:
+   the `Edit` and library add tests.
+2. The save resolving the name before its comparisons, as the fourth round
+   did: the comparison-read, `SaveIf` and bind tests.
+3. The save resolving the name between the byte comparison and the
+   writer's own: the `SaveIf` and bind tests alone.
+4. `Check` resolving the name before its read: the console's check and the
+   restore.
+5. The save never resolving the name itself: the tree's sweep.
+6. The boot read reading the name again: the read-the-file-it-resolved
+   test.
+7. A failed read whose resolutions agree taken for a move: the missing
+   config's guard.
+8. A failed read through the name taken for a move: the link-to-nothing
+   guard.
+9. Two failed resolutions compared alike, as the fourth round did: the
+   no-file read, the mixed case and the holder.
+10. One read resolved nowhere among moving ones booting with no file: the
+    mixed case.
+11. The holder saving with no file: the holder's test and serve's.
+12. The holder refusing only after its turn: the holder's test (the lock
+    file made).
+13. Refusing the symbolic link's tag alone: the junction and WSL-link
+    cases.
+14. Refusing every reparse point but dedup, as the fourth round's
+    `ModeIrregular` did: the cloud, placeholder and container cases.
+15. Never resolving the directory again: the moving and failing cases.
+16. A guard anywhere in the function: the self-test.
+17. A comparison anywhere in the function: the self-test.
+18. A comparison at the top level only: the tree's sweep (the restore) and
+    the self-test.
+19. A nil check of any name: the self-test.
+20. A comparison whose body does not return: the self-test.
+21. Any call of the comparison, its answer dropped included, as the fourth
+    round's `asksInTurn`: the self-test.
+22. An initializer's error not read as a refusal: the tree's sweep (the
+    restore) and the self-test.
+23. A condition not read through `&&` and `||`: the tree's sweep (the
+    holder) and the self-test.
+24. A name's last assignment by its name alone, as the fourth round did:
+    the self-test (the shadowed turn read).
+
+The Windows reader has no control here: its test cannot run on this host.
+
+### Other tests the fifth round moved
+
+- `LoadFileAt` answers a `BootFile`: `fileTarget` hands one to the holder,
+  the boot-read tests read its file, and the admin root tests'
+  `recordBootRead` tells the holder through `config.LoadFileAt`; done in the
+  seam commit, where it changed nothing.
+- `loadFileAt` takes `bootHooks`, the fourth round's tests their
+  `afterRead`.
+- `TestTheConfigWriterSweepReportsEveryShape`'s message for a listed writer
+  that does not refuse is "never refuses its save on …".
+
+### Beside the fifth round's brief
+
+- `bridge library add` beside a running serve hands its change to the
+  console (`tryLibraryViaAdmin`), so a serve booted with no file refuses it
+  too; the CLI writer that is unaffected is the one that takes its own turn
+  (`config.Edit`), which `TestAHolderBootedWithNoFileRefusesEverySave` runs
+  beside the refusing holder.
+- `*NameMovingError`'s words cover a name resolved on one side of a read
+  alone: "did not open one file both before and after any of its 3 reads".
+- A read through the resolved file that fails is said of the name as given,
+  as `LoadFile` says it (`readConfigTarget`), so its messages are as they
+  were.
+- The self-test gained a shape the brief did not list, a comparison inside
+  another name's nil check, with its control, so the allowance for the
+  restore's nesting is pinned to the turn's own name.
 
 ## 2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader
 

@@ -2129,16 +2129,19 @@ Windows-runner check, distinct from portable race-test results.
   replaced identity's queue as let go only when the restore removed one)
   and says running it again finishes it; serve and init keep the config's
   name as written (`fsutil.AbsAsWritten`), serve's boot read resolves it
-  before and after it reads (`loadServeConfigFile`, `config.LoadFileAt`) and
-  tells its holder that file, and init and the seed refuse a link to no file
-  before anything is written; a save the turn refuses before a rename
-  (`config.ErrChangedInTurn`) writes nothing, the seed then saying it wrote
-  nothing and serve loading what appeared, init and bind saying the file
-  changed, bind a failed read of its own comparison as that read's failure,
-  and a turn whose name now opens another file than it locked
-  (`config.ErrNameMoved`, at the lock or a rename) writes nothing, every CLI
-  writer saying to run it again** (2026-10-24, backlog B506, four rounds;
-  the lock itself is config-lifecycle.md's).
+  before each read, reads the file it resolved, and resolves it again after
+  (`loadServeConfigFile`, `config.LoadFileAt`), and tells its holder that
+  file, or no file where no resolution could follow the name, its console
+  then refusing every save until a restart, and init and the seed refuse a
+  link to no file before anything is written; a save the turn refuses
+  before a rename (`config.ErrChangedInTurn`) writes nothing, the seed then
+  saying it wrote nothing and serve loading what appeared, init and bind
+  saying the file changed, bind a failed read of its own comparison as that
+  read's failure, and a turn whose name now opens another file than it
+  locked (`config.ErrNameMoved`, at the lock after its read, at a rename
+  after its comparisons, or at a check after its read) writes nothing, every
+  CLI writer saying to run it again** (2026-10-24, backlog B506, five
+  rounds; the lock itself is config-lifecycle.md's).
   Serve fixes the order: it holds the data dir's
   lock for its whole life (`dataDirHold`) and takes bridge.yaml's for each
   console save, so the data dir's is necessarily the outer one, and bind and
@@ -2351,12 +2354,38 @@ Windows-runner check, distinct from portable race-test results.
   written). `serveOpts.afterConfigRead` is the window between the read and
   the rest of the boot.
 
+  **The fifth round** (the same day) took the reviews of the fourth; the
+  turn's half is config-lifecycle.md's, where the name is now resolved after
+  every read a decision rests on, last, and the window no turn closes is
+  stated once. Through the CLI writers: bind's own comparison in its
+  `SaveIf`, during which a link at the config's name was repointed to a
+  twin holding the same bytes, let the binding be written into the file the
+  name no longer opened, exit 0; now the name is resolved after that
+  comparison and bind refuses, saying it now opens another file and to run
+  it again (`TestBindRefusesANameRepointedDuringItsOwnComparison`). Library
+  add, whose turn's own read the repoint fell inside, wiped the library
+  index for its second root before its save refused; now the turn refuses
+  before its writer's change (`TestLibraryAddRefusesANameRepointedDuringItsTurnsRead`,
+  red before: `bridge.db` made by the wipe). A restore's check, during
+  whose read the repoint fell, let every file before bridge.yaml be
+  restored; now it refuses with nothing restored
+  (`TestARestoreRefusesANameRepointedDuringItsCheck`). Serve's boot read
+  reads the file it resolved, never the name again, and a name no
+  resolution could follow at any of its three reads boots serve on the last
+  read through the name with no file: its console refuses every save before
+  its turn, saying the bridge could not resolve the file the name opens
+  when it started and to restart once the name resolves, and goes on
+  refusing once it does (`TestServeRefusesConsoleSavesWhenItsBootCouldNotResolveTheConfig`,
+  red before: 200, and the file written). A `bridge library add` beside
+  such a serve hands its change to the console, and is refused the same
+  way; a CLI writer that takes its own turn is not.
+
   **Don't take the data dir's lock while holding bridge.yaml's, take
   bridge.yaml's across init's prompts or a restore's prompt, decide a
   library change on the read before the turn, restore into targets worked
   out from a config that changed since it was read, or through a name
   repointed since, say nothing was written after a restore wrote files, or
   that a queue went that the restore kept, clean a config's name in an
-  entry, resolve serve's config file anywhere but at its boot read, retry a
-  writer on the file a moved name opens, or write a restored bridge.yaml
-  past its turn.**
+  entry, resolve serve's config file anywhere but at its boot read, boot a
+  holder on a file its boot read was not of, retry a writer on the file a
+  moved name opens, or write a restored bridge.yaml past its turn.**
