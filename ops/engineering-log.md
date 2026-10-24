@@ -61856,6 +61856,65 @@ Rules: the config-lifecycle.md and cli-serve.md lines, given to the
 orchestrator as OLD and NEW pairs against 6e03497f; their long forms are in
 `ops/History-rules-config-lifecycle.md` and `ops/History-rules-cli-serve.md`.
 
+### Sixth round (2026-10-25): the writer sweep's nil-check allowance, and its list of what it cannot see
+
+Two reviews read the fifth round (Codex's, static: one Low; a Claude review:
+one Low) and found no High or Medium; a Windows 11 host passed the nine
+Windows tests the round named, and the whole of `internal/fsutil`,
+`internal/config`, `internal/atomicwrite`, `internal/backup`,
+`internal/admin` and `cmd/bridge`. The orchestrator applied the fifth
+round's rules note (5400d608). This round changed the writer sweep, test
+code in `cmd/bridge/config_writers_test.go`, and these docs, and no
+production code: `internal/backup/backup.go` is as it was. The fix is
+8d75e471.
+
+**A save past a nil-checked comparison, through the checked name alone**
+(both Lows, on the allowance for the restore's nesting). The sweep took a
+comparison inside a top-level `if name != nil` of a turn name as refusing
+any save after it, so a writer could check one turn name and save through
+another while the checked one was nil (Codex: `optionalTurn` set to `l`
+only when `compareEnabled`, the comparison inside `if optionalTurn != nil`,
+then `stale.Save(l)`). The orchestrator kept the allowance, on the Claude
+review's recommendation, amended by the brief's own reviews: a save after a
+nil-checked comparison counts as refused only when it goes through the very
+name the check tests, and nothing assigns that name between the check and
+the save. Each save now records its turn apart from the value it saves (a
+`Save`'s or `SaveIf`'s first argument, a `SaveBytes`'s receiver, none for a
+method value), since the value, a `SaveBytes`'s bytes, would have refused
+the restore. Hoisting the restore's comparison was weighed and declined: the
+hoisted form is none of the three accepted forms, and would hide the nil
+case in a helper the sweep cannot read. Red on 5400d608: the self-test, 37
+of its 44 problems; its seven new shapes (the optional alias, a nil-able
+alias saved through the turn it was copied from, that alias assigned again
+after the check, a save through another name for `Save`, `SaveIf` and
+`SaveBytes`, a method value) all passed the old sweep. A save through the
+checked name, for each of the three, passes before and after; so does the
+restore, unchanged.
+
+**What it cannot see, exactly** (the Claude review's second point). The
+fifth round's list said each shape was pinned as passing, and three of its
+seven were; it named the nil-check gap as a save inside the check. The
+self-test now pins, as passing, the inverted comparison, the conjunct that
+switches the refusal off, an assignment to the nil-checked name through a
+pointer or in a function literal written before the check, and a helper in
+another function, beside the pointer write, the loop and `pick`; the
+nil-check entry left the list, and `derivationProblem`'s comment and the
+long form read the same, word for word. These pin what the sweep does
+today: green on 5400d608 as after the fix.
+
+### Negative controls of the sixth round
+
+Each against 8d75e471, one mutation at a time, the file put back from git
+after it; every one went red:
+
+1. The name condition dropped: the self-test, 39 of 44 (the two aliases and
+   the three saves through another name passing again).
+2. The reassignment check dropped: the self-test, 43 of 44 (the reassigned
+   alias passing again).
+3. The saved value compared in place of the save's turn: the tree's sweep
+   (`RestoreWithOptions` reported) and the self-test (the saves through the
+   checked name reported).
+
 ## 2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader
 
 `config.ReadPlayerUUIDFile` is the UUID parser for `<dataDir>/player-uuid`

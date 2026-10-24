@@ -128,7 +128,8 @@ Windows-runner check, distinct from portable race-test results.
   `Found`), or only where its turn found no file, or after an if that
   returns on a comparison of the turn's bytes `comparedSaves` lists (init's,
   a restore's, the holder's), at the top of the function or inside its
-  check of the turn against nil, and writes only through `Save(l)` /
+  check of the turn against nil, a save after that check then made through
+  the name it tests, assigned nothing since, and writes only through `Save(l)` /
   `SaveIf(l, …)` / `l.SaveBytes`, which stage beside the target and, before
   each attempt at the rename, refuse a file that is no longer the one the
   turn read (`*config.ChangedInTurnError`), a refusal ending the retries and
@@ -160,8 +161,9 @@ Windows-runner check, distinct from portable race-test results.
   between the turn's final check and the rename, a writer that takes no
   lock, and the time between a check and the work it authorizes** (2026-10-24,
   backlog B506; the second round, the same day, took the first round's
-  reviews, the third the second's, the fourth the third's, and the fifth the
-  fourth's, below). Until then several writers read the file, changed it and wrote it
+  reviews, the third the second's, the fourth the third's, the fifth the
+  fourth's, and the sixth, the next day, the fifth's, below). Until then
+  several writers read the file, changed it and wrote it
   back, and nothing made them take turns: `bridge library add` and `remove`
   (their offline path) and `bridge init`'s save took no lock at all;
   `bridge output dac bind` held the data dir's lock and saved through
@@ -1012,21 +1014,91 @@ Windows-runner check, distinct from portable race-test results.
   `TestTheConfigWriterSweepReportsEveryShape` (29 problems of 36, and the
   new message; the shape under another name's nil check came after the fix,
   37, and its control is red), `TestEveryConfigWriterTakesTheConfigLock`
-  (`FileLock.write` calling no `stillNamed`). **What it cannot see**, each pinned as passing in
-  the self-test and listed in `derivationProblem`'s comment: a variable
-  written through a pointer (`p := &cfg; *p = stale`); a loop's later pass
-  (a save before `cfg = stale` in the loop); a call handed what the turn
-  found beside a stale value (`pick(stale, found)`); which answer of a
-  comparison means a change (an if that returns when the bytes match passes
-  like one that returns when they differ); a conjunct beside the comparison
-  that switches its refusal off (the holder's `fileKnown`, the first-update
-  allowance, is one); whether a save inside the turn's nil check is made
-  through that turn; and, as before, a helper in another function. It is a
-  check of shapes, not a proof.
+  (`FileLock.write` calling no `stillNamed`). **What it cannot see** was
+  listed here as each pinned as passing in the self-test, when three of its
+  seven shapes were, and with the nil-check gap described as a save inside
+  the check rather than a save after it through another name: the sixth
+  round's list, below, is the one, word for word `derivationProblem`'s.
+
+  **The sixth round** (2026-10-25) took the reviews of the fifth (Codex's
+  Low, the Claude review's Low; neither found a High or a Medium), as the
+  orchestrator decided them. It changed test code alone, the writer sweep
+  in `cmd/bridge/config_writers_test.go`, and these docs: no production code,
+  and `internal/backup/backup.go` is as it was. The fix is 8d75e471.
+
+  **A save past a nil-checked comparison counts as refused only through the
+  checked name, unmoved since the check** (Codex's Low, the Claude review's
+  Low; the orchestrator's decision, from the Claude review's recommendation,
+  amended by the brief's own reviews). The fifth round accepted any save
+  after a comparison inside a top-level nil check of a turn name, so a
+  writer could check one name and save through another: acquire `l`, alias
+  it as `optionalTurn` only when `compareEnabled`, compare inside `if
+  optionalTurn != nil`, then `stale.Save(l)` (Codex's shape), and with
+  `compareEnabled` false the comparison is skipped while `l` is held and
+  saved through. The sweep now records each save's turn apart from the value
+  it saves (`storeAt.turn`: a `Save`'s or `SaveIf`'s first argument, a
+  `SaveBytes`'s receiver, none for a save through a method value; the saved
+  value is still what the derivation checks read, and comparing it would
+  have refused the restore's `configTurn.SaveBytes(data)`), and accepts a
+  save after a nil-checked comparison only when it goes through the very
+  name the check tests (the variable the parser resolved it to) and nothing
+  assigns that name between the check and the save (`savesThroughUnmoved`);
+  a save through a method value is reported. The restore passes as it is: it
+  assigns `configTurn` once, before its nil check, and saves through
+  `configTurn.SaveBytes(data)` with nothing assigned to it in between. Red
+  before, on 5400d608: `TestTheConfigWriterSweepReportsEveryShape` (37
+  problems of 44), whose seven new shapes all passed the old sweep: the
+  optional alias; a nil-able alias (`t := l; if disabled { t = nil }`)
+  checked and the save made through `l`; that alias assigned again after the
+  check (`t = l`) and saved through; a save through another name after the
+  check, for each of `Save`, `SaveIf` and `SaveBytes`; and a method value. A
+  save through the checked name with nothing assigned to it after the check,
+  for each of the three, passes before and after. The controls: dropping the
+  name condition lets the two aliases and the three other-name saves pass
+  again (39 problems); dropping the reassignment check lets the reassigned
+  alias pass again (43); comparing the saved value in place of the save's
+  turn reports the tree's `RestoreWithOptions`, and the self-test's saves
+  through the checked name.
+
+  **Why the allowance stays, and the restore's comparison is not hoisted.**
+  Codex's review recommended hoisting the restore's comparison to the top
+  level and dropping the allowance. The hoisted form, `if configTurn != nil
+  && configStillAsRead(…) != nil`, is not one of the fifth round's three
+  accepted forms (the initializer's form wants the condition to be the
+  error it took, found non-nil, alone), and hoisting would move the nil case
+  into a helper that takes a nil turn, which the sweep cannot read; and a
+  writer that fails a rule is reported, not restructured. The allowance
+  keeps the nil case in the writer, where the sweep reads it, and with the
+  condition above, a save gets past a skipped comparison only through a nil
+  turn, which writes nothing.
+
+  **What it cannot see, listed exactly** (the Claude review's second point).
+  The self-test now pins as passing every shape the list names, and the list
+  names nothing else; the nil-check entry left it, and what the condition
+  above leaves unseen joined it. Word for word as `derivationProblem`'s
+  comment has it: What it cannot see, each pinned as passing in
+  TestTheConfigWriterSweepReportsEveryShape, and nothing else: a variable
+  written through a pointer (`p := &cfg; *p = stale`) keeps its last
+  assignment as its value; a loop's later pass is read as its first (a save
+  before `cfg = stale` in the loop's body); a call handed what the turn
+  found is taken as derived from it whatever else it is handed
+  (`pick(stale, found)`); which answer of a comparison means the file changed
+  (an if that returns when configChangedSinceRead finds no change passes as
+  one that returns when it finds one); a conjunct beside the comparison that
+  switches its refusal off (`enabled && configChangedSinceRead(…)`, the shape
+  of the holder's fileKnown, which lets a holder told nothing save); an
+  assignment to the nil-checked name that is not one to the sweep, through a
+  pointer (`*p = other`) or in a function literal written before the check
+  and called after it; and a helper in another function that writes the path
+  a caller hands it (`writeBlob(cfgPath, data)`), which names no config path
+  itself while its caller makes no write the sweep knows. It is a check of
+  shapes, not a proof.
 
   **Don't save a copy read before the lock or decide on a read beside the
   turn, save a value not taken from the turn without an if that refuses on
-  a comparison `comparedSaves` lists, take the lock around a prompt or for a
+  a comparison `comparedSaves` lists, accept a save past a nil-checked
+  comparison through another name than the checked one or through that name
+  assigned since the check, take the lock around a prompt or for a
   process's life, lock the config file itself or put the lock in the data
   dir, clean a config's name before it resolves or move the base of its
   relative paths, lock or rename beside a link rather than its target,
