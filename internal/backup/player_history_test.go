@@ -738,3 +738,170 @@ func TestSnapshotRefusesAPlayerChangeDuringCapture(t *testing.T) {
 		})
 	}
 }
+
+func TestPlayerResetWithoutUUIDRemovesLeftovers(t *testing.T) {
+	reservationStorage(t)
+	for _, files := range [][]string{{engine.ReservationFileName, "player-queue.json"}, {engine.ReservationFileName}, {"player-queue.json"}} {
+		t.Run(strings.Join(files, "+"), func(t *testing.T) {
+			dir := t.TempDir()
+			for _, name := range files {
+				data := `{"version":1,"revision":1,"ids":{"next":4098,"reserved":8192},"tokens":{"current":4098,"reserved":8192},"selected":4097,"entries":[{"id":4097,"ref":"old-track","meta":null}]}`
+				if name == engine.ReservationFileName {
+					data = fmt.Sprintf(`{"version":2,"uuid":%q,"ids":8192,"tokens":8192}`, boxPlayerUUID)
+				}
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			changed, err := backup.ResetPlayer(dir)
+			if err != nil || !changed {
+				t.Fatalf("leftovers were not reset: changed=%t err=%v", changed, err)
+			}
+			for _, name := range files {
+				if _, err := os.Lstat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+					t.Errorf("leftover %s: %v", name, err)
+				}
+			}
+			var h struct {
+				GivenUp      []string
+				ResetPending bool
+			}
+			if err := json.Unmarshal(readBytes(t, filepath.Join(dir, historyFile)), &h); err != nil {
+				t.Fatal(err)
+			}
+			if h.ResetPending {
+				t.Error("reset still pending")
+			}
+			if slices.Contains(files, engine.ReservationFileName) && !slices.Contains(h.GivenUp, boxPlayerUUID) {
+				t.Error("reservation UUID was not given up")
+			}
+		})
+	}
+}
+
+func TestPlayerResetRecoversMalformedUUID(t *testing.T) {
+	reservationStorage(t)
+	for _, tc := range []struct {
+		name, data string
+		want       []string
+	}{
+		{"two_uuids", boxPlayerUUID + "\n" + snapshotPlayerUUID + "\n", []string{boxPlayerUUID, snapshotPlayerUUID}},
+		{"garbage", "not an identity", nil},
+		{"bounded", boxPlayerUUID + "\n" + strings.Repeat(" ", 128) + snapshotPlayerUUID, []string{boxPlayerUUID}},
+		{"cut_token", strings.Repeat(" ", 100) + boxPlayerUUID, nil},
+		{"ends_at_lookahead", strings.Repeat(" ", 93) + boxPlayerUUID, nil},
+		{"ends_at_limit", strings.Repeat(" ", 92) + boxPlayerUUID + "\n", []string{boxPlayerUUID}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			foreign := "11111111-2222-4333-8444-555555555555"
+			for name, data := range map[string]string{
+				config.PlayerUUIDFile:      tc.data,
+				engine.ReservationFileName: fmt.Sprintf(`{"version":2,"uuid":%q,"ids":8192,"tokens":8192}`, foreign),
+				"player-queue.json":        `{"version":1}`,
+			} {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			changed, err := backup.ResetPlayer(dir)
+			if err != nil || !changed {
+				t.Fatalf("malformed identity not reset: changed=%t err=%v", changed, err)
+			}
+			for _, name := range []string{config.PlayerUUIDFile, engine.ReservationFileName, "player-queue.json"} {
+				if _, err := os.Lstat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+					t.Errorf("%s not removed: %v", name, err)
+				}
+			}
+			var h struct {
+				GivenUp      []string
+				ResetPending bool
+			}
+			if err := json.Unmarshal(readBytes(t, filepath.Join(dir, historyFile)), &h); err != nil {
+				t.Fatal(err)
+			}
+			want := append(slices.Clone(tc.want), foreign)
+			slices.Sort(want)
+			if !slices.Equal(h.GivenUp, want) || h.ResetPending {
+				t.Fatalf("history = %+v, want givenUp=%v and complete", h, want)
+			}
+		})
+	}
+}
+
+func TestPlayerResetMalformedUUIDRemovalIsDurable(t *testing.T) {
+	reservationStorage(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, config.PlayerUUIDFile), []byte(boxPlayerUUID+"\n"+snapshotPlayerUUID), 0600); err != nil {
+		t.Fatal(err)
+	}
+	putMark(t, dir, boxPlayerUUID, 90000, 80000)
+	broken := errors.New("UUID unlink barrier failed")
+	undo := atomicwrite.SetSyncDirForTest(func(string) error {
+		if _, err := os.Lstat(filepath.Join(dir, config.PlayerUUIDFile)); os.IsNotExist(err) {
+			return broken
+		}
+		return nil
+	})
+	_, err := backup.ResetPlayerAfterStep(dir, func(step string) error {
+		if step == config.PlayerUUIDFile {
+			t.Error("UUID removal reported complete before its barrier succeeded")
+		}
+		return nil
+	})
+	undo()
+	if !errors.Is(err, broken) {
+		t.Fatalf("malformed UUID unlink durability ignored: %v", err)
+	}
+	if r := markAt(t, dir); r.IDs != 90000 {
+		t.Fatal("floor dropped before UUID removal durable")
+	}
+	h := readHistoryMap(t, dir)
+	if !h.ResetPending || !slices.Contains(h.GivenUp, boxPlayerUUID) || !slices.Contains(h.GivenUp, snapshotPlayerUUID) {
+		t.Fatalf("history lost identities or pending state: %+v", h)
+	}
+	if changed, err := backup.ResetPlayer(dir); err != nil || !changed {
+		t.Fatalf("resume: %t %v", changed, err)
+	}
+}
+
+func TestPlayerResetUUIDReadRefusalsNameRemedy(t *testing.T) {
+	reservationStorage(t)
+	for _, kind := range []string{"directory", "unreadable"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, config.PlayerUUIDFile)
+			want := "move the non-file at player-uuid aside and then rerun bridge reset-player"
+			if kind == "directory" {
+				if err := os.Mkdir(path, 0700); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+					t.Skip("permission fixture requires non-root POSIX")
+				}
+				if err := os.WriteFile(path, []byte(boxPlayerUUID), 0000); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(path, 0600) })
+				want = "restore read access to player-uuid and then rerun bridge reset-player"
+			}
+			changed, err := backup.ResetPlayer(dir)
+			if changed || err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("reset refusal: %t %v", changed, err)
+			}
+			if kind == "unreadable" && !errors.Is(err, os.ErrPermission) {
+				t.Errorf("lost access error: %v", err)
+			}
+			if kind == "directory" && fsutil.NotAFileKind(err) != "directory" {
+				t.Errorf("lost non-file error: %v", err)
+			}
+			if _, err := os.Lstat(path); err != nil {
+				t.Error("refusal removed identity entry")
+			}
+			if _, err := os.Stat(filepath.Join(dir, historyFile)); !os.IsNotExist(err) {
+				t.Error("refusal wrote history")
+			}
+		})
+	}
+}

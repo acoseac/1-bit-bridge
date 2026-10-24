@@ -13,7 +13,7 @@ import (
 // playerResetCmd gives up the player's identity under restore's exclusive
 // data-dir lock and both admin probes. --yes skips only the confirmation.
 func playerResetCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("output player reset", flag.ContinueOnError)
+	fs := flag.NewFlagSet("reset-player", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "", configFlagUsage)
 	yes := fs.Bool("yes", false, "skip the interactive confirmation prompt")
@@ -25,7 +25,7 @@ func playerResetCmd(ctx context.Context, args []string, stdin io.Reader, stdout,
 		return 2
 	}
 	if fs.NArg() != 0 {
-		fmt.Fprintln(stderr, "output player reset: unexpected arguments")
+		fmt.Fprintln(stderr, "reset-player: unexpected arguments")
 		return 2
 	}
 	cfg, _, err := loadCLIConfig(*configPath)
@@ -33,14 +33,14 @@ func playerResetCmd(ctx context.Context, args []string, stdin io.Reader, stdout,
 		fmt.Fprintf(stderr, "config load failed: %v\n", err)
 		return 2
 	}
-	const action = "output player reset"
+	const action = "reset-player"
 	release, fallback, refused := holdDataDirForMutation(cfg.DataDir, action, stderr)
 	defer release()
 	if refused {
 		return 1
 	}
 	if fallback {
-		fmt.Fprintln(stderr, "output player reset: the data directory's exclusive lock could not be taken; fix its permissions or use storage that supports locking, then reset again.")
+		fmt.Fprintln(stderr, "reset-player: the data directory's exclusive lock could not be taken; fix its permissions or use storage that supports locking, then reset again.")
 		return 1
 	}
 	if probeAdminBesideTheLock(fallback, cfg) && refuseIfBridgeMayBeRunning(ctx, cfg, action, stderr) {
@@ -61,7 +61,7 @@ func playerResetCmd(ctx context.Context, args []string, stdin io.Reader, stdout,
 	}
 	changed, err := backup.ResetPlayer(cfg.DataDir)
 	if err != nil {
-		fmt.Fprintf(stderr, "output player reset: %v\n", err)
+		fmt.Fprintf(stderr, "reset-player: %v\n", err)
 		return 1
 	}
 	if !changed {

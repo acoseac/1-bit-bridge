@@ -2442,6 +2442,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return backupCmd(args[1:], stdout, stderr)
 	case "restore":
 		return restoreCmd(ctx, args[1:], os.Stdin, stdout, stderr)
+	case "reset-player":
+		return playerResetCmd(ctx, args[1:], os.Stdin, stdout, stderr)
 	case "token":
 		return tokenCmd(args[1:], stdout, stderr)
 	case "cert":
@@ -2541,14 +2543,18 @@ Subcommands:
            bridge output dac inspect shows each card's unit and port and how
            the player's binding resolves, and bridge output dac bind writes
            one. bridge output player reports the box's MPD and how it is set.
-           These readings and dac bind are Linux only; bind writes the config
-           and the player's first UUID. bridge output player reset [--yes]
-           gives up the bridge player's identity and clears its queue with
-           the service stopped, recording identities that restore must refuse.
-           The next start makes a new device to controllers.
+           Host readings and dac bind require Linux; explicit reading paths
+           work on other platforms. Of these listed output commands, only dac bind
+           writes: the config file, and the player's UUID file on its first
+           binding of an enabled player.
   update   Check for / install a new bridge release from GitHub.
   backup   Snapshot bridge state into <dataDir>/backups/<timestamp>/.
   restore  Restore bridge state from a snapshot directory.
+  reset-player
+           Give up the bridge player's identity and clear its queue with the
+           service stopped: bridge reset-player [--config X] [--yes].
+           Records identities that restore must refuse; the next start makes
+           a new device to controllers.
   token    Manage paired tokens (list / rotate / expire / revoke).
   cert     Inspect or rotate the TLS cert (info / rotate).
   tsnet    Embedded tailnet node management (auth | status | logout).

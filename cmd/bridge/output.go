@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -20,8 +19,7 @@ import (
 
 // outputCmd dispatches `bridge output <verb>`: the box the bridge runs on,
 // as an audio output. `dac` reads what the box's sound cards say and
-// `player` reads the box's MPD and how it is set; `player reset` gives up
-// the bridge player's identity with the service stopped.
+// `player` reads the box's MPD and how it is set.
 func outputCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		outputUsage(stderr)
@@ -31,8 +29,9 @@ func outputCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	case "dac":
 		return outputDACCmd(ctx, args[1:], stdout, stderr)
 	case "player":
-		if len(args) > 1 && args[1] == "reset" {
-			return playerResetCmd(ctx, args[2:], os.Stdin, stdout, stderr)
+		if len(args) > 1 && !strings.HasPrefix(args[1], "-") {
+			fmt.Fprintf(stderr, "unknown output player subcommand: %s\n", args[1])
+			return 2
 		}
 		return outputPlayerCmd(ctx, args[1:], stdout, stderr)
 	case "pcm-test":
@@ -78,11 +77,6 @@ Subcommands:
            set: its version, music directory, outputs, replay gain,
            normalization, resampler and filters. Read-only. Linux only;
            --root, --conf and --mpd name a tree, a file or an endpoint.
-
-  player reset [--config X] [--yes]
-           Give up the bridge player's identity and clear its queue with the
-           service stopped. Records identities so restore cannot revive them;
-           the next start makes a new device to controllers.
 
 Run "bridge output <subcommand> -h" for subcommand-specific flags.
 `)

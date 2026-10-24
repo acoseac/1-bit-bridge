@@ -144,7 +144,7 @@ func preflightPlayerHistory(snapshotDir, target, id string, m Manifest) (playerH
 		return h, false, fmt.Errorf("restore: the snapshot's player identity was given up; nothing was restored; %s", snapshotIdentityRemedy())
 	}
 	if h.ResetPending {
-		return h, false, errors.New("restore: player reset is incomplete; run bridge output player reset before restoring; nothing was restored")
+		return h, false, errors.New("restore: player reset is incomplete; run bridge reset-player before restoring; nothing was restored")
 	}
 	if id != "" {
 		old, err := config.ReadPlayerUUIDFile(target)
@@ -170,7 +170,8 @@ func preflightPlayerHistory(snapshotDir, target, id string, m Manifest) (playerH
 // ResetPlayer gives up the live identity and every identity its floor covers,
 // then durably removes queue, UUID, reservation in that order. The caller must
 // hold the data-dir lock and refuse a running serve, as restore does. It returns
-// false without writing when no identity or interrupted reset exists.
+// false without writing only when UUID, reservation and queue are absent and
+// no reset is pending.
 func ResetPlayer(dataDir string) (bool, error) { return resetPlayer(dataDir, nil) }
 
 // resetPlayer's instance seam stops after a durable step, never on a timer.
@@ -179,11 +180,24 @@ func resetPlayer(dir string, after func(string) error) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	id, err := config.ReadPlayerUUID(dir)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	id, err := config.ReadPlayerUUIDFile(filepath.Join(dir, config.PlayerUUIDFile))
+	malformed := errors.Is(err, config.ErrNotOnePlayerUUID)
+	missing := errors.Is(err, os.ErrNotExist)
+	if err != nil && !missing && !malformed {
+		return false, playerUUIDResetReadError(err)
+	}
+	var recovered []string
+	if malformed {
+		recovered, err = config.ReadPlayerUUIDsForReset(dir)
+		if err != nil {
+			return false, playerUUIDResetReadError(err)
+		}
+	}
+	leftovers, err := playerFilesRemain(dir)
+	if err != nil {
 		return false, err
 	}
-	if id == "" && !h.ResetPending {
+	if missing && !leftovers && !h.ResetPending {
 		return false, nil
 	}
 	r, err := engine.ReadReservation(filepath.Join(dir, engine.ReservationFileName))
@@ -202,6 +216,7 @@ func resetPlayer(dir string, after func(string) error) (bool, error) {
 	}
 	h.GivenUp = unionIDs(h.GivenUp, h.Covered...)
 	h.GivenUp = unionIDs(h.GivenUp, id, r.UUID)
+	h.GivenUp = unionIDs(h.GivenUp, recovered...)
 	h.Covered = nil
 	h.ResetPending = true
 	if err := writePlayerHistory(dir, h); err != nil {
@@ -218,7 +233,7 @@ func resetPlayer(dir string, after func(string) error) (bool, error) {
 			return false, err
 		}
 		var removeErr error
-		if name == config.PlayerUUIDFile {
+		if name == config.PlayerUUIDFile && !malformed {
 			removeErr = config.ForgetPlayerUUID(dir, id)
 		} else {
 			removeErr = os.Remove(path)
@@ -242,7 +257,32 @@ func resetPlayer(dir string, after func(string) error) (bool, error) {
 	return true, nil
 }
 
-// CheckPlayerStart refuses an incomplete reset or unreadable history before
+// playerUUIDResetReadError distinguishes a non-file from a file whose contents
+// reset cannot read, without echoing any of the identity file's contents.
+func playerUUIDResetReadError(err error) error {
+	advice := "restore read access to player-uuid and then rerun bridge reset-player"
+	if fsutil.NotAFileKind(err) != "" {
+		advice = "move the non-file at player-uuid aside and then rerun bridge reset-player"
+	}
+	return fmt.Errorf("read player identity before reset: %w; %s", err, advice)
+}
+
+// playerFilesRemain checks directory entries, so even a dangling link is not
+// mistaken for absent state. It never opens a queue or waits on a named pipe.
+func playerFilesRemain(dir string) (bool, error) {
+	present := false
+	for _, name := range []string{engine.ReservationFileName, "player-queue.json"} {
+		_, err := os.Lstat(filepath.Join(dir, name))
+		if err == nil {
+			present = true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return false, err
+		}
+	}
+	return present, nil
+}
+
+// CheckPlayerStart refuses an incomplete reset, orphaned files or unreadable history before
 // serve creates an identity or starts the engine. The caller holds the data-dir
 // lock, which also excludes a reset until the player has stopped.
 func CheckPlayerStart(dataDir string) error {
@@ -251,7 +291,16 @@ func CheckPlayerStart(dataDir string) error {
 		return err
 	}
 	if h.ResetPending {
-		return errors.New("player reset is incomplete; with the service stopped, run bridge output player reset to finish the reset before starting the player")
+		return errors.New("player reset is incomplete; with the service stopped, run bridge reset-player to finish the reset before starting the player")
+	}
+	if _, err := config.ReadPlayerUUIDFile(filepath.Join(dataDir, config.PlayerUUIDFile)); errors.Is(err, os.ErrNotExist) {
+		remain, err := playerFilesRemain(dataDir)
+		if err != nil {
+			return err
+		}
+		if remain {
+			return errors.New("player-uuid is missing beside a player reservation or queue; with the service stopped, run bridge reset-player before starting the player")
+		}
 	}
 	return nil
 }

@@ -394,8 +394,9 @@ func TestOutputCommandUsage(t *testing.T) {
 	if !strings.Contains(b.String(), "\n  output   This box as an audio output: bridge output dac") {
 		t.Errorf("bridge's usage does not list output:\n%s", b.String())
 	}
-	if !strings.Contains(b.String(), "Linux only; only dac bind changes anything: the config file, and\n"+
-		"           the player's UUID file the first time it binds an enabled player.") {
+	if !strings.Contains(b.String(), "Of these listed output commands, only dac bind\n"+
+		"           writes: the config file, and the player's UUID file on its first\n"+
+		"           binding of an enabled player.") {
 		t.Errorf("usage does not say which output command writes, and what:\n%s", b.String())
 	}
 }

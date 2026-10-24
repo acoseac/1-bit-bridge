@@ -131,3 +131,23 @@ func TestRestoreOverANamedPipeAtTheBoxsPlayerUUIDDoesNotWait(t *testing.T) {
 		t.Errorf("refused restore wrote history: %v", err)
 	}
 }
+
+func TestPlayerResetRefusesUUIDNamedPipeAtOnce(t *testing.T) {
+	dir := t.TempDir()
+	pipe := filepath.Join(dir, backup.PlayerUUIDFileName)
+	fsutiltest.MakeFIFO(t, pipe)
+	var changed bool
+	var err error
+	done := make(chan struct{})
+	go func() { defer close(done); changed, err = backup.ResetPlayer(dir) }()
+	fsutiltest.AwaitPastFIFOs(t, "ResetPlayer", fsutiltest.ServeBound, done, pipe)
+	if changed || fsutil.NotAFileKind(err) != "named pipe" || !strings.Contains(err.Error(), "move the non-file at player-uuid aside and then rerun bridge reset-player") {
+		t.Fatalf("reset pipe refusal: %t %v", changed, err)
+	}
+	if info, err := os.Lstat(pipe); err != nil || info.Mode()&fs.ModeNamedPipe == 0 {
+		t.Errorf("reset removed pipe: %v %v", info, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, backup.PlayerHistoryFileName)); !os.IsNotExist(err) {
+		t.Error("refusal wrote history")
+	}
+}

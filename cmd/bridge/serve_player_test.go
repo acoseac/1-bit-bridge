@@ -1620,7 +1620,7 @@ func TestBridgeDoctorMakesNoPlayerFile(t *testing.T) {
 func TestServePlayerRefusesAnIncompleteReset(t *testing.T) {
 	t.Cleanup(atomicwrite.SetSyncDirForTest(func(string) error { return nil }))
 	t.Cleanup(atomicwrite.SetMediumForTest(func(string) error { return nil }))
-	for _, phase := range []string{"history", "queue_removed", "uuid_removed", "reservation_removed", "legacy_uuid_removed", "complete", "no_history", "corrupt"} {
+	for _, phase := range []string{"history", "queue_removed", "uuid_removed", "reservation_removed", "legacy_uuid_removed", "complete", "no_history", "corrupt", "orphan_queue", "orphan_reservation", "orphan_both"} {
 		t.Run(phase, func(t *testing.T) {
 			dir := t.TempDir()
 			const id = "7d444840-9dc0-11d1-b245-5ffdce74fad2"
@@ -1630,7 +1630,7 @@ func TestServePlayerRefusesAnIncompleteReset(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if phase != "no_history" {
+			if phase != "no_history" && !strings.HasPrefix(phase, "orphan_") {
 				pending := phase != "complete"
 				write(backup.PlayerHistoryFileName, fmt.Sprintf(`{"version":1,"givenUp":[%q],"resetPending":%t}`, id, pending))
 			}
@@ -1642,10 +1642,10 @@ func TestServePlayerRefusesAnIncompleteReset(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if phase != "reservation_removed" && phase != "complete" {
+			if phase != "reservation_removed" && phase != "complete" && phase != "orphan_queue" {
 				write(engine.ReservationFileName, fmt.Sprintf(`{"version":2,"uuid":%q,"ids":8192,"tokens":8192}`, id))
 			}
-			if phase == "history" || phase == "legacy_uuid_removed" || phase == "no_history" || phase == "corrupt" {
+			if phase == "history" || phase == "legacy_uuid_removed" || phase == "no_history" || phase == "corrupt" || phase == "orphan_queue" || phase == "orphan_both" {
 				write(playerQueueFile, `{"version":1,"revision":1,"ids":{"next":4098,"reserved":8192},"tokens":{"current":4098,"reserved":8192},"selected":4097,"entries":[{"id":4097,"ref":"old-track","meta":null}]}`)
 			}
 			before := map[string]string{}
@@ -1692,7 +1692,11 @@ func TestServePlayerRefusesAnIncompleteReset(t *testing.T) {
 				if !strings.Contains(p.failed, backup.PlayerHistoryFileName) {
 					t.Errorf("history read failure ignored: %s", p.failed)
 				}
-			} else if !strings.Contains(p.failed, "reset is incomplete") || !strings.Contains(p.failed, "bridge output player reset") {
+			} else if strings.HasPrefix(phase, "orphan_") {
+				if !strings.Contains(p.failed, "player-uuid is missing") || !strings.Contains(p.failed, "bridge reset-player") {
+					t.Errorf("orphaned files not refused with remedy: %s", p.failed)
+				}
+			} else if !strings.Contains(p.failed, "reset is incomplete") || !strings.Contains(p.failed, "bridge reset-player") {
 				t.Errorf("pending reset not refused with recovery command: %s", p.failed)
 			}
 			p.stop()

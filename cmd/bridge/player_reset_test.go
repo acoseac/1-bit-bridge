@@ -39,7 +39,7 @@ func TestPlayerResetCommandDispatchAndRestoreRefusal(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out, errs bytes.Buffer
-	if code := run(t.Context(), []string{"output", "player", "reset", "--config", cfg, "--yes"}, &out, &errs); code != 0 {
+	if code := run(t.Context(), []string{"reset-player", "--config", cfg, "--yes"}, &out, &errs); code != 0 {
 		t.Fatalf("reset exit %d: %s", code, &errs)
 	}
 	for _, want := range []string{"recorded", "new identity", "new device to controllers"} {
@@ -148,7 +148,7 @@ func TestPlayerResetCommandNoIdentityAndHelp(t *testing.T) {
 	out.Reset()
 	errs.Reset()
 	run(t.Context(), []string{"--help"}, &out, &errs)
-	if !strings.Contains(out.String()+errs.String(), "bridge output player reset") {
+	if !strings.Contains(out.String()+errs.String(), "bridge reset-player") {
 		t.Fatal("help omits reset")
 	}
 }
@@ -199,5 +199,37 @@ func TestPlayerResetCommandProbesAdminBeforeAndAfterPrompt(t *testing.T) {
 				t.Fatal("probe refusal wrote history")
 			}
 		})
+	}
+}
+
+func TestResetPlayerIsATopLevelCommand(t *testing.T) {
+	cfg, dir := resetInstall(t, "127.0.0.1:0")
+	before, err := os.ReadFile(filepath.Join(dir, config.PlayerUUIDFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out, errs bytes.Buffer
+	code := run(t.Context(), []string{"output", "player", "reset", "--config", cfg, "--yes"}, &out, &errs)
+	if code != 2 || !strings.Contains(errs.String(), "unknown output player subcommand: reset") {
+		t.Errorf("old spelling is not an unknown subcommand: exit %d: %s", code, &errs)
+	}
+	after, err := os.ReadFile(filepath.Join(dir, config.PlayerUUIDFile))
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatal("old spelling changed identity")
+	}
+	out.Reset()
+	errs.Reset()
+	if code := run(t.Context(), []string{"reset-player", "--config", cfg, "--yes"}, &out, &errs); code != 0 {
+		t.Fatalf("top-level reset exit %d: %s", code, &errs)
+	}
+	out.Reset()
+	usage(&out)
+	if !strings.Contains(out.String(), "\n  reset-player") || !strings.Contains(out.String(), "bridge reset-player [--config X] [--yes]") {
+		t.Error("top-level help omits reset-player")
+	}
+	out.Reset()
+	outputUsage(&out)
+	if strings.Contains(out.String(), "player reset") || strings.Contains(out.String(), "reset-player") {
+		t.Error("output help lists reset")
 	}
 }
