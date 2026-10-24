@@ -62228,7 +62228,8 @@ form is what is stored, as the task decided: `trackref.URI.String` writes
 the name lower-cased, `playlistInsert` hands the engine that serialization
 rather than the request's string, and Read, ReadList, the occurrence handed
 to the backend, and after a restart the queue file and Read, give it back
-(`TestAnInsertStoresTheURIsCanonicalForm`, red at 864f50a2 in all five).
+(the test round 3 renamed `TestAnInsertStoresItsURIAsSent` when it made it
+assert the spelling sent; red at 864f50a2 in all five).
 FuzzParse's oracle is no longer that a URI taken reads back as its input: a
 URI taken is ASCII, serializes to the input with its capitals lower-cased
 (computed by the test, not by the parser), parses again to the same URI,
@@ -62328,7 +62329,7 @@ clean:
 | NC | Mutation | Red |
 |---|---|---|
 | N1a | `CanonicalName` folds by `strings.ToLower`, with no ASCII check | trackref's U+0130 and U+212A rows, `TestACanonicalNameIsASCIIBeforeItIsFolded`, FuzzParse's seeds; the matrix (both taken, the library asked); the advertised side's Kelvin and İ names |
-| N1b | the Insert stores the Uri as sent | the matrix's capitals rows, `TestAnAdvertisedNameIsComparedAsASCII`'s, `TestAnInsertStoresTheURIsCanonicalForm` (all five) |
+| N1b | the Insert stores the Uri as sent | the matrix's capitals rows, `TestAnAdvertisedNameIsComparedAsASCII`'s, the canonical-form test round 3 renamed `TestAnInsertStoresItsURIAsSent` (all five) |
 | N1c | the inventory compares by `strings.EqualFold` | `TestAnAdvertisedNameIsComparedAsASCII`'s Kelvin and long-s names |
 | N2a | a Stop holds its slot until its answer | the three slot cases and the listener's (503) |
 | N2b | a Stop during a release is answered from the earlier wait, not submitted | `TestEveryStopIsTheEnginesOwnCommand` (two sessions, Buffering) |
