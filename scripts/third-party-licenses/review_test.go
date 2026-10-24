@@ -20,7 +20,8 @@ var buildSiteFiles = []string{
 func buildSiteFixture(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	for _, name := range buildSiteFiles {
+	// Include the exact reviewed census as it grows, plus the gate inputs.
+	for _, name := range append(append([]string{}, buildSiteFiles...), sortedKeys(reviewedBuildSites)...) {
 		b, err := os.ReadFile(filepath.Join("../..", name))
 		if err != nil {
 			t.Fatal(err)

@@ -159,14 +159,14 @@ func TestCensusFenceLabels(t *testing.T) {
 func TestCensusFenceContainers(t *testing.T) {
 	for _, prefix := range []string{"- ", "* ", "+ ", "2. ", "1) ", "123456789. ", "> ", "> - ", "- > ", "> > 2) "} {
 		t.Run(prefix, func(t *testing.T) {
-			refuseNewSite(t, "ops/new.md", prefix+"```sh\n  GOOS=linux GOARCH=amd64 go build -o dist/bridge ./cmd/bridge\n"+prefix+"```\n")
+			refuseNewSite(t, "ops/new.md", prefix+"```sh\n"+markdownTestContinuation(prefix)+"GOOS=linux GOARCH=amd64 go build -o dist/bridge ./cmd/bridge\n"+markdownTestContinuation(prefix)+"```\n")
 		})
 	}
 	t.Run("quoted content", func(t *testing.T) {
 		refuseNewSite(t, "ops/new.md", "> ```sh\n> go build ./cmd/bridge\n> ```\n")
 	})
 	t.Run("inline before fence", func(t *testing.T) {
-		refuseNewSite(t, "ops/new.md", "```make check``` must pass first.\n```sh\ngo build ./cmd/bridge\n```\n")
+		refuseNewSite(t, "ops/new.md", "```json``` is the output format.\n```sh\ngo build ./cmd/bridge\n```\n")
 	})
 }
 
@@ -181,7 +181,7 @@ func TestCensusPrompts(t *testing.T) {
 }
 
 func TestCensusMarkdownScope(t *testing.T) {
-	for _, name := range []string{"deploy/README.md", "deploy/linux/README.md", "ops/runbooks/deploy.md", "ops/runbooks/nuc.md", "docs/build.md", "docs/nested/build.md", "deploy/linux/build.md", "internal/example/README.md", "scripts/tool/README.md"} {
+	for _, name := range []string{"deploy/README.md", "deploy/linux/README.md", "ops/runbooks/deploy.md", "ops/runbooks/nuc.md", "docs/build.md", "docs/nested/build.md", "deploy/linux/build.md", "internal/example/README.md", "scripts/tool/README.md", "CONTRIBUTING.md", "BUILDING.md", "CLAUDE.md", ".github/CONTRIBUTING.md", "internal/player/decode/testdata/flac-goldens/GENERATE.md"} {
 		t.Run(name, func(t *testing.T) {
 			refuseNewSite(t, name, "```sh\ngo build ./cmd/bridge\n```\n")
 		})
@@ -193,7 +193,7 @@ func TestCensusMarkdownNonExecutable(t *testing.T) {
 		for _, prefix := range []string{"", "- ", "2. ", "> "} {
 			t.Run(label+"/"+prefix, func(t *testing.T) {
 				root := buildSiteFixture(t)
-				put(t, root, "ops/new.md", "Prose mentions go build.\n"+prefix+"```"+label+"\ngo build ./cmd/bridge\n"+"  ```\nProse mentions go build.\n```make check``` is inline go test ./... prose.\n")
+				put(t, root, "ops/new.md", "Prose mentions go build.\n"+prefix+"```"+label+"\n"+markdownTestContinuation(prefix)+"go build ./cmd/bridge\n"+markdownTestContinuation(prefix)+"```\nProse mentions go build.\n```make check``` is inline go test ./... prose.\n")
 				if err := checkBuildTags(root); err != nil {
 					t.Fatalf("non-executable Markdown entered census: %v", err)
 				}
@@ -240,7 +240,7 @@ func TestCensusOriginalLinesAndMultiplicity(t *testing.T) {
 }
 
 func TestCensusExcludedTreesAndRecords(t *testing.T) {
-	for _, name := range []string{"ops/nested/History-old.md", "deploy/nested/plan-old.md", "docs/nested/release-notes-old.md", "vendor/tool/README.md", "node_modules/tool/README.md", "dist/README.md", "bin/README.md", "_scratch/README.md", "nested/README.md"} {
+	for _, name := range []string{"engineering-log.md", "internal/example/engineering-log.md", "History-old.md", "plan-old.md", "release-notes-old.md", "ops/nested/History-old.md", "deploy/nested/plan-old.md", "docs/nested/release-notes-old.md", "vendor/tool/README.md", "node_modules/tool/README.md", "dist/README.md", "bin/README.md", "_scratch/README.md", "nested/README.md"} {
 		t.Run(name, func(t *testing.T) {
 			root := buildSiteFixture(t)
 			put(t, root, name, "```sh\ngo build ./cmd/bridge\n```\n")
@@ -258,6 +258,85 @@ func TestCensusExpandedGoPaths(t *testing.T) {
 	for _, executable := range []string{"${GOROOT}/bin/go", "$(GOROOT)/bin/go", "${ROOT:-/opt/go}/bin/go.exe", "$(go env GOROOT)/bin/go", "go${EXE}${SUFFIX}"} {
 		t.Run(executable, func(t *testing.T) {
 			refuseNewSite(t, "scripts/new.sh", executable+" build ./cmd/bridge")
+		})
+	}
+}
+
+// Keep the content inside the same list/quote containers as the opener.
+func markdownTestContinuation(prefix string) string {
+	var out strings.Builder
+	for _, c := range prefix {
+		if c == '>' {
+			out.WriteRune(c)
+		} else {
+			out.WriteByte(' ')
+		}
+	}
+	return out.String()
+}
+
+func TestCensusVerbWithPackage(t *testing.T) {
+	for _, tc := range []struct{ name, command string }{
+		{"deploy/new.cmd", `GO.EXE build -o bridge.exe .\cmd\bridge`},
+		{"deploy/new.ps1", "$go = Get-Command go -CommandType Application -ErrorAction Stop\n& $go.Source build -o bridge.exe .\\cmd\\bridge"},
+		{"scripts/new.sh", `"${GO:-${GOROOT}/bin/go}" build ./cmd/bridge`},
+		{"new/Makefile", `$(or $(GO),go) build ./cmd/bridge`},
+		{"new/Makefile", `$(abspath $(GOROOT))/bin/go build ./cmd/bridge`},
+		{".github/workflows/new.yml", `run: ${{ env.GO }} test ./...`},
+		{"deploy/new.ps1", `& "C:\Program Files (x86)\Go\bin\go.exe" build .\cmd\bridge`},
+		{"scripts/new.py", `subprocess.run([GO, "test", "./internal/player/decode"], check=True)`},
+		{"scripts/new.py", `subprocess.run([shutil.which("go"), "build", "./cmd/bridge"])`},
+		{"scripts/new.sh", `go1.27.3 test ./...`},
+		{"scripts/new.sh", `gotip build ./cmd/bridge`},
+	} {
+		t.Run(tc.command, func(t *testing.T) { refuseNewSite(t, tc.name, tc.command) })
+	}
+	for _, verb := range []string{"build", "install", "run", "test", "vet"} {
+		for _, pkg := range []string{".", "./...", `.\...`, "all", "std", "example.org/pkg/...", "github.com/acoseac/1-bit-bridge", "github.com/acoseac/1-bit-bridge/cmd/bridge"} {
+			t.Run(verb+"/"+pkg, func(t *testing.T) {
+				refuseNewSite(t, "scripts/new.sh", `arbitrary `+verb+` -race -o "some file" -tags=custom `+pkg)
+			})
+		}
+	}
+}
+
+func TestCensusExecutableWithoutPackage(t *testing.T) {
+	for _, executable := range []string{"go", "GO.EXE", `C:\Go\BIN\GO.EXE`, "go1.27.3", "gotip", "$X", "${X}", "$(X)", "%X%"} {
+		t.Run(executable, func(t *testing.T) {
+			refuseNewSite(t, "scripts/new.sh", executable+" -C somewhere build")
+		})
+	}
+}
+
+func TestCensusGoDrivingTools(t *testing.T) {
+	for _, command := range []string{
+		"gotestsum --format pkgname -- -race ./...",
+		"golangci-lint run ./...", "staticcheck ./...",
+		"dlv debug ./cmd/bridge -- serve", "dlv test ./internal/player/decode", "dlv exec ./bin/bridge",
+		"gotestsum", "golangci-lint run", "staticcheck", "dlv debug", "dlv test", "dlv exec",
+	} {
+		t.Run(command, func(t *testing.T) { refuseNewSite(t, ".github/workflows/new.yml", "run: "+command) })
+	}
+}
+
+func TestCensusFenceContainerEnds(t *testing.T) {
+	for _, tc := range []struct{ name, content string }{
+		{"blockquote hides build", "> ~~~text\n> Previous output\n\n~~~sh\ngo build ./cmd/bridge\n~~~\n"},
+		{"nested quote ends", "> > ~~~text\n> > output\n> ~~~sh\n> go build ./cmd/bridge\n> ~~~\n"},
+		{"list hides build", "1. Check status:\n   ```text\n   active (running)\n2. Build:\n   ```sh\n   go build ./cmd/bridge\n   ```\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) { refuseNewSite(t, "ops/new.md", tc.content) })
+	}
+	for _, content := range []string{
+		"> ~~~sh\n> echo done\n\nUse go build only for local debugging.",
+		"1. Check:\n   ~~~sh\n   echo done\n\nUse go build only for local debugging.",
+	} {
+		t.Run(content, func(t *testing.T) {
+			root := buildSiteFixture(t)
+			put(t, root, "ops/new.md", content)
+			if err := checkBuildTags(root); err != nil {
+				t.Fatalf("prose after container entered census: %v", err)
+			}
 		})
 	}
 }

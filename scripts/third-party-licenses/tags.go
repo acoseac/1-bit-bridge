@@ -80,7 +80,7 @@ func checkBuildTags(root string) error {
 // notice generator, the temp-dir helper, and two printed test instructions;
 // none builds/tests the shipped bridge. Go source and Markdown prose are not
 // executable shell/PowerShell/workflow sites. Potentially executable fences
-// in operational Markdown are sites too (buildSiteMarkdown).
+// in every non-record Markdown file are sites too (buildSiteMarkdown).
 var reviewedBuildSites = map[string][]string{
 	".github/scripts/test-shard.sh": {
 		"if ! out=\"$(go test -tags @TAGS@ \"${RACE_FLAGS[@]}\" \"$1\" -list '.*')\"; then",
@@ -120,6 +120,7 @@ var reviewedBuildSites = map[string][]string{
 		"go run ./scripts/third-party-licenses -check-build-tags",
 		"$(MAKE) vet",  // Recurses into the tagged Make target.
 		"$(MAKE) test", // Recurses into the tagged Make target.
+		`docker buildx build --load --build-arg VERSION="$(VERSION)" -t $(IMAGE):dev .`, // Docker context, not a Go package.
 	},
 	"deploy/linux/deploy-bridge-vps.sh": {
 		"GOOS=linux GOARCH=amd64 go build -tags @TAGS@ -ldflags \"-s -w -X github.com/acoseac/1-bit-bridge/internal/version.ServerVersion=$VER\" -o \"$LOCAL_BIN\" ./cmd/bridge",
@@ -127,6 +128,12 @@ var reviewedBuildSites = map[string][]string{
 	"deploy/windows/firewall-bridge-windows.ps1": {
 		// Ambiguous variable/flag/verb shape in a firewall description, not Go.
 		`New-NetFirewallRule -DisplayName $ruleName -Description "1-bit-bridge HTTPS listener (PR #276 fresh install)" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 7788 -Program $exePath -Profile Domain,Private,Public -Enabled True | Out-Null`,
+	},
+	"docs/docker.md": {
+		"docker buildx build --load -t 1-bit-bridge:dev .", // Docker context, not a Go package.
+	},
+	"scripts/doc-split/restructure-2026-10-18/routes.py": {
+		`("- how to run all of it with agents inside the usage limits.", "skill:release-playbook"),`, // Migration text, not a command.
 	},
 	"docs/LoupeReviewCycle.md": {
 		"go test -tags @TAGS@ ./internal/x/... -count=1 -v 2>&1 | tee /tmp/t.log",
@@ -160,18 +167,12 @@ var reviewedBuildSites = map[string][]string{
 	},
 }
 
-// buildSiteMarkdown includes every README and recursive operational Markdown,
-// except records that quote commands as they were run.
+// buildSiteMarkdown includes every Markdown file except records that quote
+// commands as they were run, wherever the repository walk reaches them.
 func buildSiteMarkdown(name string) bool {
 	base := filepath.Base(name)
-	if base == "README.md" {
-		return true
-	}
-	if !strings.EqualFold(filepath.Ext(name), ".md") ||
-		!(strings.HasPrefix(name, "ops/") || strings.HasPrefix(name, "deploy/") || strings.HasPrefix(name, "docs/")) {
-		return false
-	}
-	return name != "ops/engineering-log.md" && !strings.HasPrefix(base, "History-") && !strings.HasPrefix(base, "plan-") && !strings.HasPrefix(base, "release-notes-")
+	return strings.EqualFold(filepath.Ext(name), ".md") && base != "engineering-log.md" &&
+		!strings.HasPrefix(base, "History-") && !strings.HasPrefix(base, "plan-") && !strings.HasPrefix(base, "release-notes-")
 }
 
 func buildSiteFile(name string) bool {
@@ -189,20 +190,46 @@ func buildSiteFile(name string) bool {
 	return filepath.Ext(name) == "" && (!strings.Contains(name, "/") || strings.HasPrefix(name, "scripts/") || strings.HasPrefix(name, "deploy/"))
 }
 
-// markdownContainerContent removes CommonMark blockquote and list markers,
-// including nested combinations, before looking for a fence.
-func markdownContainerContent(line string) string {
+// markdownContainer records a quote prefix or a list item's content indentation.
+// Widths are relative to the enclosing container, so nested lists and quotes
+// can close independently. Blank lines continue lists, but never blockquotes.
+type markdownContainer struct {
+	quote bool
+	width int
+}
+
+func markdownContainerLine(line string, parents []markdownContainer) (string, []markdownContainer, int) {
+	line = strings.ReplaceAll(line, "\t", "    ")
+	var containers []markdownContainer
+	for _, parent := range parents {
+		if parent.quote {
+			trimmed := strings.TrimLeft(line, " ")
+			if !strings.HasPrefix(trimmed, ">") {
+				break
+			}
+			line = strings.TrimPrefix(trimmed[1:], " ")
+		} else if strings.TrimSpace(line) != "" {
+			if len(line)-len(strings.TrimLeft(line, " ")) < parent.width {
+				break
+			}
+			line = line[parent.width:]
+		}
+		containers = append(containers, parent)
+	}
+	continued := len(containers)
 	for {
-		line = strings.TrimLeft(line, " \t")
-		if strings.HasPrefix(line, ">") {
-			line = line[1:]
+		trimmed := strings.TrimLeft(line, " ")
+		if strings.HasPrefix(trimmed, ">") {
+			containers = append(containers, markdownContainer{quote: true})
+			line = strings.TrimPrefix(trimmed[1:], " ")
 			continue
 		}
-		if loc := markdownListMarker.FindStringIndex(line); loc != nil {
-			line = line[loc[1]:]
+		if loc := markdownListMarker.FindStringIndex(trimmed); loc != nil {
+			containers = append(containers, markdownContainer{width: len(line) - len(trimmed) + loc[1]})
+			line = trimmed[loc[1]:]
 			continue
 		}
-		return line
+		return trimmed, containers, continued
 	}
 }
 
@@ -216,9 +243,20 @@ func markdownShellLines(text string) string {
 	fence := regexp.MustCompile("^(`{3,}|~{3,})(.*)$")
 	var marker string
 	var executable, prompts bool
+	var containers, fenceContainers []markdownContainer
 	var lines []string
 	for _, line := range strings.Split(text, "\n") {
-		content := markdownContainerContent(line)
+		content, current, continued := markdownContainerLine(line, containers)
+		if marker != "" && continued < len(fenceContainers) {
+			// CommonMark closes an unclosed fence with its containing block.
+			marker, executable, prompts = "", false, false
+			lines = append(lines, "")
+		}
+		containers = current
+		if marker != "" {
+			// Code inside the fence cannot start another Markdown container.
+			containers = fenceContainers
+		}
 		if match := fence.FindStringSubmatch(content); match != nil {
 			if marker == "" {
 				// A backtick in a backtick opener's info makes it inline code.
@@ -226,6 +264,7 @@ func markdownShellLines(text string) string {
 					continue
 				}
 				marker = match[1]
+				fenceContainers = containers
 				var lang string
 				if info := strings.Fields(strings.ToLower(match[2])); len(info) > 0 {
 					lang = info[0]
@@ -252,21 +291,48 @@ func markdownShellLines(text string) string {
 	return strings.Join(lines, "\n")
 }
 
-// Match the verb after a possible Go executable, never a list of variable
-// names. Quotes and argv punctuation are separators only on the matching copy;
+// Keep the executable branch even without a recognizable package argument.
+// Quotes and argv punctuation are separators only on the matching copy;
 // the census retains the original logical line. Flags may have quoted values
 // containing spaces. Ambiguous matches are deliberately sites requiring review.
 const buildVariable = `\$\{[^}]*\}|\$\([^)]*\)|\$[[:alnum:]_:]+|%[^%\s]+%`
 
-var buildCommand = regexp.MustCompile(`(?:^|[\s=(&;|!])` +
+var buildCommand = regexp.MustCompile(`(?i)(?:^|[\s=(&;|!])` +
 	// A path may itself contain expansions, such as $(GOROOT)/bin/go.
-	`(?:(?:(?:` + buildVariable + `|[^\s;|&()])+[/\\])?go(?:\.exe)?(?:` + buildVariable + `)*|` + buildVariable + `)\s+` +
+	`(?:(?:(?:` + buildVariable + `|[^\s;|&()])+[/\\])?go(?:[0-9][0-9.]*|tip)?(?:\.exe)?(?:` + buildVariable + `)*|` + buildVariable + `)\s+` +
 	`(?:-\S+(?:[ \t]+[^\s;|&]+)*?[ \t]+)*(?:build|install|run|test|vet)\b`)
 
 var buildCommandSeparators = strings.NewReplacer("\"", " ", "'", " ", "`", " ", ",", " ", "[", " ", "]", " ")
 
+// The verb/package branch deliberately ignores executable spelling. Flag values
+// may span several normalized tokens (quoted paths, templates, argv lists).
+// Ambiguity, including non-Go build/install commands, requires explicit review.
+var buildVerbPackage = regexp.MustCompile(`(?:^|[\s=(&;|!])(?:build|install|run|test|vet)\s+` +
+	`(?:-\S+(?:[ \t]+[^\s;|&]+)*?[ \t]+)*` +
+	`(?:\.|\.[/\\][^\s;|&]*|all|std|[^\s;|&]+/\.\.\.|github\.com/acoseac/1-bit-bridge(?:/[^\s;|&]*)?)(?:$|[\s;)])`)
+
+var buildDrivingTool = regexp.MustCompile(`(?i)(?:^|[\s=(&;|!])(?:[^\s;|&()]+[/\\])?` +
+	`(?:(?:gotestsum|staticcheck)(?:\.exe)?\b|golangci-lint(?:\.exe)?\s+run\b|dlv(?:\.exe)?\s+(?:debug|test|exec)\b)`)
+
 func isBuildCommand(line string) bool {
-	return buildCommand.MatchString(buildCommandSeparators.Replace(line))
+	// Each branch requires a literal word that normalization cannot create.
+	// Avoid the path/flag regexes on unrelated lines; the refusal matrix scans
+	// the same operational files thousands of times under the race detector.
+	lower := strings.ToLower(line)
+	hasVerb := false
+	for _, verb := range []string{"build", "install", "run", "test", "vet"} {
+		hasVerb = hasVerb || strings.Contains(lower, verb)
+	}
+	hasTool := false
+	for _, tool := range []string{"gotestsum", "golangci-lint", "staticcheck", "dlv"} {
+		hasTool = hasTool || strings.Contains(lower, tool)
+	}
+	if !hasVerb && !hasTool {
+		return false
+	}
+	hasExecutable := strings.Contains(lower, "go") || strings.ContainsAny(line, "$%")
+	match := buildCommandSeparators.Replace(line)
+	return hasVerb && (buildVerbPackage.MatchString(match) || hasExecutable && buildCommand.MatchString(match)) || hasTool && buildDrivingTool.MatchString(match)
 }
 
 func checkBuildSites(root, tags string) error {
