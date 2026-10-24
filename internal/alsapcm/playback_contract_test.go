@@ -672,6 +672,7 @@ func receiveIn[T any](t *testing.T, ch <-chan T, what string) T {
 	case v := <-ch:
 		return v
 	case <-timer.C:
+		alsapcm.LogGoroutines(t)
 		t.Fatalf("waited %v for %s", alsapcm.Watchdog(), what)
 	}
 	var zero T
