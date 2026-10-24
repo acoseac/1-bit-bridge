@@ -1,7 +1,7 @@
 // Package openhome is the player's LAN surface (B470 PR 5a2a): what an
 // OpenHome controller talks to, reachable on the LAN behind the opt-in
-// (output.player.openhome, off by default until PR 5a4) and advertised
-// nowhere yet (SSDP is PR 5a2b's); its tests reach it directly.
+// (output.player.openhome, off by default until PR 5a4). Bound listeners
+// advertise a Source through serve's shared SSDP subsystem (PR 5a2b).
 //
 // It is a listener of its own, never mounted on the DLNA listener, whose
 // guards (servedOnlyListener, ownHostOnly) do not meet the player's LAN
@@ -14,7 +14,7 @@
 // interface's RFC 1918 or 169.254 address: up, running, multicast, not
 // point-to-point, never public or tailnet), keyed by the address, its
 // on-link prefix and its interface: a listing every Limits.Rescan (5 s)
-// binds an address that appears, and closes, its connections with it, the
+// binds an address before advertising it, and withdraws before closing the
 // socket of one that goes away, changes its prefix or interface, or stops
 // being eligible. A listing that fails keeps what is bound. The port is
 // output.player.openhomePort (7792), or one the kernel picks per address
@@ -53,7 +53,8 @@
 // deadline from when the request's headers were read, an idle deadline;
 // 16 KiB of headers read; the body bound (maxBody); and Limits.Slots
 // requests answered at once, 503 at once past them. Stop refuses every new
-// request (503, its connection closed), joins the listing loop, shuts each
+// request (503, its connection closed), withdraws discovery while HTTP is
+// bound, joins the listing loop, shuts each
 // socket down within Limits.ShutdownGrace, closes what is still open, and
 // joins the goroutines it started within Limits.Join.
 //
@@ -63,6 +64,5 @@
 // with every URL absolute on the address and port the request arrived on;
 // the four services' descriptions, the bridge's own, generated from its
 // tables (services.go); the SOAP layer (soap.go), whose every valid request
-// is answered 602, since no controller may read an ID or a token before
-// the restored identity's policy (PR 5a0); and GENA's refusal, 501.
+// is answered 602 until PRs 5a3/5a4 implement actions; and GENA's refusal, 501.
 package openhome

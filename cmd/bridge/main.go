@@ -48,6 +48,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
+	"github.com/acoseac/1-bit-bridge/internal/dlna"
 	"github.com/acoseac/1-bit-bridge/internal/dupes"
 	"github.com/acoseac/1-bit-bridge/internal/enrich"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
@@ -2672,6 +2673,12 @@ type serveOpts struct {
 	// surface (its addresses and listeners) and its hold on it; the zero
 	// value is production's. Per invocation for tailscaleCLI's reason.
 	playerOpenHome openhomeWiring
+	ssdpNetwork    *dlna.SSDPNetwork
+	// ssdpStopTimeout shortens the shared retirement budget in boot tests.
+	ssdpStopTimeout time.Duration
+	dlnaNetwork     *dlnaBootNetwork
+	// upnpStopping observes the upstream stop boundary in boot tests.
+	upnpStopping func()
 }
 
 // adoptHandedListener returns lis when it is nil or when its address is
@@ -4155,7 +4162,20 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// the boot snapshot's, reports the output unavailable at once, whatever
 	// the watcher's readings do. The player keeps the DAC it started with
 	// until serve next starts.
-	player := startServePlayer(playerPlan, servePlayerWiring{
+	// One socket-free subsystem, before either owner starts. Every owner
+	// withdraws under the same absolute deadline before final Close.
+	ssdpSubsystem := newServeSSDP(ctx, logger, opts.ssdpNetwork)
+	var player *bridgePlayer
+	discoveryStopped := false
+	// Cover an early return before the DLNA teardown is registered. The
+	// full teardown below runs before upstream resolution is stopped.
+	defer func() {
+		if !discoveryStopped && player != nil {
+			player.refuseOpenHome(context.Background())
+			player.stop()
+		}
+	}()
+	player = startServePlayer(playerPlan, servePlayerWiring{
 		Cfg:      cfg,
 		Hold:     dataDirLock,
 		Store:    manifestStore,
@@ -4169,8 +4189,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		Seams:    opts.playerSeams,
 		Bounds:   opts.playerBounds,
 		OpenHome: opts.playerOpenHome,
+		SSDP:     ssdpSubsystem,
 	})
-	defer player.stop()
 
 	// DLNA MediaServer (opt-in, LAN-only). Starts a parallel
 	// http.Server on its own port + an SSDP advertiser so any DLNA
@@ -4205,24 +4225,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	cadenceRearms = append(cadenceRearms, upnpIngestRearm)
 	upnpLC := startUPnPUpstreamIfEnabled(ctx, cfg, manifestStore, apiSrv, logger,
 		liveInterval((*config.Config).ScanInterval), upnpIngestRearm)
-	defer upnpLC.Stop()
-
-	// The process's one SSDP subsystem (B470 PR 5a1): every SSDP device the
-	// bridge advertises registers with it (the DLNA MediaServer today, the
-	// player's OpenHome Source from PR 5a2), so they share the listeners on
-	// port 1900 and a unicast M-SEARCH reaches each of them. It opens no
-	// socket until a device registers, so with DLNA off nothing is bound and
-	// nothing sent. Its Close is deferred here, ahead of DLNA's Stop, so it
-	// runs after it: it withdraws whatever is still registered, byebye
-	// included (the serve context, cancelled first on a signal, does not
-	// cut a byebye short), and joins every goroutine it started.
-	ssdpSubsystem := newServeSSDP(ctx, logger)
 	defer func() {
-		closeCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
-		defer cancel()
-		if err := ssdpSubsystem.Close(closeCtx); err != nil {
-			logger.Warn("SSDP shutdown error", slog.String("err", err.Error()))
+		if opts.upnpStopping != nil {
+			opts.upnpStopping()
 		}
+		upnpLC.Stop()
 	}()
 
 	// apiSrv doubles as the DLNA listener's ArtworkSource: its ServeArtwork
@@ -4237,11 +4244,38 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		VariantsDir: liveVariantsDir,
 		Logger:      logger,
 		SSDP:        ssdpSubsystem,
+		Network:     opts.dlnaNetwork,
 	})
+	dlnaOwner := dlnaLC
 	defer func() {
-		stopCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		discoveryStopped = true
+		budget := shutdownGrace
+		if opts.ssdpStopTimeout > 0 && opts.ssdpStopTimeout < budget {
+			budget = opts.ssdpStopTimeout
+		}
+		stopCtx, cancel := context.WithTimeout(context.Background(), budget)
 		defer cancel()
-		dlnaLC.Stop(stopCtx)
+		if player != nil {
+			player.refuseOpenHome(stopCtx)
+		}
+		if dlnaOwner != nil && dlnaOwner.server != nil {
+			dlnaOwner.server.WithdrawSSDP(stopCtx)
+		}
+		if player != nil {
+			player.withdrawOpenHome(stopCtx)
+		}
+		if err := ssdpSubsystem.Close(stopCtx); err != nil {
+			logger.Warn("SSDP shutdown error", slog.String("err", err.Error()))
+		}
+		// HTTP and player shutdown get separate budgets after discovery.
+		if dlnaOwner != nil {
+			httpCtx, done := context.WithTimeout(context.Background(), shutdownGrace)
+			dlnaOwner.Stop(httpCtx)
+			done()
+		}
+		if player != nil {
+			player.stop()
+		}
 	}()
 	apiSrv.WithDLNA(dlnaEnabled)
 

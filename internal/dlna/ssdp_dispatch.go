@@ -156,10 +156,7 @@ func (t *ssdpTable) plan(l *ssdpListener, pkt []byte, src netip.AddrPort, m data
 			if targets = MSearchTargets(st, e.h.targets); len(targets) == 0 {
 				continue
 			}
-			if ep = e.strictSelect(l, kind, d); ep == nil {
-				continue
-			}
-			if !a.Source(SSDPSearch{Endpoint: ep.snapshot(), Datagram: d}) {
+			if ep = e.strictSelect(l, kind, d, a); ep == nil {
 				continue
 			}
 		default:
@@ -252,11 +249,11 @@ func (a ssdpServedAdmission) admits(log *slog.Logger, kind ssdpSearchKind, d SSD
 // strictSelect is a strict registration's choice of endpoint
 // (SSDPStrictAdmission): a group search arrived, by its reported index, on
 // the interface of the listener that read it, which must report both and be
-// confined, and is answered from the first endpoint on that listener; a
+// confined, and is answered from the first admitted endpoint on that listener; a
 // unicast, read by a listener that reports both (confinement is a matter of
 // group datagrams), is answered from the endpoint whose Local address it was
 // sent to on the interface it arrived on; nothing else is answered.
-func (e ssdpTableEntry) strictSelect(l *ssdpListener, kind ssdpSearchKind, d SSDPDatagram) *ssdpEndpoint {
+func (e ssdpTableEntry) strictSelect(l *ssdpListener, kind ssdpSearchKind, d SSDPDatagram, a SSDPStrictAdmission) *ssdpEndpoint {
 	caps := l.setup.caps
 	switch kind {
 	case searchToGroup:
@@ -266,14 +263,21 @@ func (e ssdpTableEntry) strictSelect(l *ssdpListener, kind ssdpSearchKind, d SSD
 		if !d.ArrivalValid || d.ArrivalIndex != l.key.index {
 			return nil
 		}
-		return e.firstOn(l)
+		for _, ep := range e.eps {
+			if ep.listener == l && a.Source(SSDPSearch{Endpoint: ep.snapshot(), Datagram: d}) {
+				return ep
+			}
+		}
 	case searchUnicast:
 		if !caps.DestinationReporting || !caps.ArrivalReporting || !d.ArrivalValid {
 			return nil
 		}
 		for _, ep := range e.eps {
 			if ep.spec.Local.IsValid() && ep.spec.Local.Addr().Unmap() == d.Destination && ep.key.index == d.ArrivalIndex {
-				return ep
+				if a.Source(SSDPSearch{Endpoint: ep.snapshot(), Datagram: d}) {
+					return ep
+				}
+				return nil
 			}
 		}
 	}
@@ -365,11 +369,12 @@ func (h *SSDPHandle) answer(ep *ssdpEndpoint, targets []NotifyTarget, mx int, to
 	_ = conn.SetWriteDeadline(time.Now().Add(ssdpBurstDeadline))
 	now := time.Now()
 	for _, target := range targets {
-		if ep.ctx.Err() != nil {
+		response := BuildMSearchResponse(ep.spec.Location, h.serverToken, target.NT, target.USN, now)
+		_, err := h.sendNormal(ep, func() (int, error) { return conn.Write(response) })
+		if errors.Is(err, errSSDPSendCancelled) {
 			return
 		}
-		response := BuildMSearchResponse(ep.spec.Location, h.serverToken, target.NT, target.USN, now)
-		if _, err := conn.Write(response); err != nil {
+		if err != nil {
 			if h.strict() {
 				h.noteReplyRefusal(ep, err)
 				return
