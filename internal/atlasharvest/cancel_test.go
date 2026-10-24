@@ -1,7 +1,9 @@
 package atlasharvest
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -43,30 +45,46 @@ const (
 // the poll and booklet legs after it are not started on the cancelled
 // context (one warn line each, before), which the booklet store's untouched
 // universe listing shows.
+//
+// It runs over the client's own transport, and over one that takes whatever
+// the fake sends once the client has hung up (racingHangUpClient): net/http
+// takes an answer that races its close, and on CI the fake's empty 200 to
+// the abandoned submit was decoded as EOF and reported (B526).
 func TestATickStoppedByShutdownReportsNothingAndStopsThere(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	srv := atlasFake(t, func(w http.ResponseWriter, r *http.Request) {
-		cancel()
-		holdUntilAbandoned(r)
-	})
-	booklets := &stoppingBooklets{fakeBookletSink: newFakeBookletSink()}
-	c := dueClient(t, srv)
-	c.Booklets = booklets
-	c.BookletFiles = newFakeBookletFiles()
-	// The booklet leg is due, so an untouched universe listing below means
-	// the tick never started it, not that it had nothing to do (Gemini API
-	// review, #1003).
-	if !bookletsCheckDue(c.State.Snapshot(), c.now(), c.submitInterval()) {
-		t.Fatal("precondition: the booklet check is not due, so this test would pass having shown nothing")
-	}
+	for _, tc := range []struct {
+		name   string
+		client func(*httptest.Server) *http.Client
+	}{
+		{"over the client's transport", (*httptest.Server).Client},
+		{"taking what the fake sends after the hang-up", racingHangUpClient},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			srv := atlasFake(t, func(w http.ResponseWriter, r *http.Request) {
+				cancel()
+				holdUntilAbandoned(r)
+			})
+			booklets := &stoppingBooklets{fakeBookletSink: newFakeBookletSink()}
+			c := dueClient(t, srv)
+			c.HTTP = tc.client(srv)
+			c.Booklets = booklets
+			c.BookletFiles = newFakeBookletFiles()
+			// The booklet leg is due, so an untouched universe listing below
+			// means the tick never started it, not that it had nothing to do
+			// (Gemini API review, #1003).
+			if !bookletsCheckDue(c.State.Snapshot(), c.now(), c.submitInterval()) {
+				t.Fatal("precondition: the booklet check is not due, so this test would pass having shown nothing")
+			}
 
-	rec := loggingtest.Record(t)
-	c.tick(ctx)
+			rec := loggingtest.Record(t)
+			c.tick(ctx)
 
-	mustNotReport(t, rec, msgTickError, msgFetchList)
-	if got := booklets.universeCalls.Load(); got != 0 {
-		t.Errorf("the booklet leg started after the tick was stopped (%d universe listing(s))", got)
+			mustNotReport(t, rec, msgTickError, msgFetchList)
+			if got := booklets.universeCalls.Load(); got != 0 {
+				t.Errorf("the booklet leg started after the tick was stopped (%d universe listing(s))", got)
+			}
+		})
 	}
 }
 
@@ -348,16 +366,89 @@ func atlasFake(t *testing.T, h http.HandlerFunc) *httptest.Server {
 }
 
 // holdUntilAbandoned holds a request until the client gives up on it, as a
-// shutdown or a request timeout does. Bounded, so a client that never gives
-// up fails the test rather than hanging it. It reads the body first: net/http
-// notices a client hanging up only once the request body is consumed, so a
-// POST held unread would sit out the whole bound.
+// shutdown or a request timeout does, and then answers nothing: the handler
+// aborts (http.ErrAbortHandler), so the server ends the connection with no
+// response. A handler that returned had net/http write an empty 200, which a
+// client taking an answer that races its close read as the request's
+// answer: the tick decoded it as EOF and reported a failure the shutdown had
+// caused (B526; racingHangUpClient makes that order certain). The client
+// hangs up only once it has recorded why, so a connection that ends with no
+// answer can only be read as the request's own end. Bounded, so a client
+// that never gives up fails the test rather than hanging it. It reads the
+// body first: net/http notices a client hanging up only once the request
+// body is consumed, so a POST held unread would sit out the whole bound.
 func holdUntilAbandoned(r *http.Request) {
 	_, _ = io.Copy(io.Discard, r.Body)
 	select {
 	case <-r.Context().Done():
+		panic(http.ErrAbortHandler)
 	case <-time.After(5 * time.Second):
 	}
+}
+
+// racingHangUpClient is a client of srv that hangs up as net/http's
+// transport does once a request's context ends, sending close_notify, and
+// then takes whatever the server sends before the connection ends. net/http
+// takes an answer that races its close (persistConn.roundTrip: "Use the
+// response") in the moment between its close_notify and its close; this
+// client holds that moment open until the server has answered or closed, so
+// an answer to an abandoned request reaches the tick every time. A
+// connection that ends with no answer is the request's own end, which is
+// what net/http answers once it has recorded the cancellation, as it does
+// before it hangs up.
+func racingHangUpClient(srv *httptest.Server) *http.Client {
+	cfg := srv.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	return &http.Client{Transport: racingHangUp{tls: cfg}}
+}
+
+// racingHangUp is racingHangUpClient's transport.
+type racingHangUp struct{ tls *tls.Config }
+
+func (rt racingHangUp) RoundTrip(req *http.Request) (*http.Response, error) {
+	conn, err := tls.Dial("tcp", req.URL.Host, rt.tls)
+	if err != nil {
+		return nil, err
+	}
+	if err := req.Write(conn); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	type answer struct {
+		resp *http.Response
+		err  error
+	}
+	got := make(chan answer, 1)
+	go func() {
+		resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+		got <- answer{resp, err}
+	}()
+	var a answer
+	select {
+	case a = <-got:
+	case <-req.Context().Done():
+		_ = conn.CloseWrite()
+		if a = <-got; a.err != nil {
+			a.err = context.Cause(req.Context())
+		}
+	}
+	if a.err != nil {
+		_ = conn.Close()
+		return nil, a.err
+	}
+	a.resp.Body = connBody{ReadCloser: a.resp.Body, conn: conn}
+	return a.resp, nil
+}
+
+// connBody is a response's body that closes its connection with it.
+type connBody struct {
+	io.ReadCloser
+	conn *tls.Conn
+}
+
+func (b connBody) Close() error {
+	err := b.ReadCloser.Close()
+	_ = b.conn.Close()
+	return err
 }
 
 // dueClient is a client against atlas whose submit and booklet check are
