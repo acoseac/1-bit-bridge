@@ -122,7 +122,7 @@ func lockFile(path string, try func(*os.File) error, wait time.Duration) (*FileL
 		}
 		if !waited {
 			waited = true
-			noteLockWaited(lockWaitKey(path))
+			noteLockWaited(turnKey(path))
 		}
 		if !time.Now().Before(deadline) {
 			_ = f.Close()
@@ -132,7 +132,7 @@ func lockFile(path string, try func(*os.File) error, wait time.Duration) (*FileL
 	}
 }
 
-// lockWaitedHooks holds, by lockWaitKey, what LockWaitedForTest asked to be
+// lockWaitedHooks holds, by turnKey, what LockWaitedForTest asked to be
 // told: nothing in production.
 var lockWaitedHooks sync.Map
 
@@ -148,7 +148,7 @@ type lockWaitedHook struct {
 // writer reached a turn another writer holds, rather than guessing how long
 // the writer takes to get there. One hook per config file at a time.
 func LockWaitedForTest(path string) (waited <-chan struct{}, stop func()) {
-	key := lockWaitKey(path)
+	key := turnKey(path)
 	h := &lockWaitedHook{ch: make(chan struct{})}
 	lockWaitedHooks.Store(key, h)
 	return h.ch, func() { lockWaitedHooks.CompareAndDelete(key, h) }
@@ -165,9 +165,33 @@ func noteLockWaited(key string) {
 	h.once.Do(func() { close(h.ch) })
 }
 
-// lockWaitKey is the key LockWaitedForTest and lockFile agree on for the
+// saveStagedHooks holds, by turnKey, what OnSaveStagedForTest asked a save
+// to run: nothing in production.
+var saveStagedHooks sync.Map
+
+// OnSaveStagedForTest makes each save of the config file at path run fn once
+// it has staged the new file, just before the rename that puts it in place,
+// and returns what stops that. Tests only: it is the window a test lands
+// another writer in there, which no writer that takes the lock can reach (an
+// edit, or a bridge older than the lock, can). One hook per config file at a
+// time.
+func OnSaveStagedForTest(path string, fn func()) (stop func()) {
+	key := turnKey(path)
+	h := &fn
+	saveStagedHooks.Store(key, h)
+	return func() { saveStagedHooks.CompareAndDelete(key, h) }
+}
+
+// noteSaveStaged runs what OnSaveStagedForTest asked for key, if anything.
+func noteSaveStaged(key string) {
+	if v, ok := saveStagedHooks.Load(key); ok {
+		(*v.(*func()))()
+	}
+}
+
+// turnKey is the key the test hooks and a writer's turn agree on for the
 // config file at path.
-func lockWaitKey(path string) string {
+func turnKey(path string) string {
 	return filepath.Clean(path)
 }
 

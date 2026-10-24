@@ -4419,6 +4419,7 @@ func (c *Config) save(l *FileLock, unchanged func() error) ([]byte, error) {
 	if err := tmp.Close(); err != nil {
 		return nil, fmt.Errorf("close tmp: %w", err)
 	}
+	noteSaveStaged(turnKey(path))
 	if unchanged != nil {
 		if err := unchanged(); err != nil {
 			return nil, err
