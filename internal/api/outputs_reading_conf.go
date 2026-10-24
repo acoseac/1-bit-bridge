@@ -120,6 +120,10 @@ func hintOperandHost(root, logical string) (string, bool) {
 			continue
 		case "..":
 			if len(parts) == 0 {
+				// The host's /.. is /; an injected root still cannot be left.
+				if root == "/" {
+					continue
+				}
 				return "", false
 			}
 			parts = parts[:len(parts)-1]
@@ -155,14 +159,18 @@ func hintOperandHost(root, logical string) (string, bool) {
 				return "", false
 			}
 			// Do not clean a link/.. sequence while removing the canonical root.
-			prefix := strings.TrimRight(root, string(filepath.Separator)) + string(filepath.Separator)
-			if !strings.HasPrefix(target, prefix) {
-				prefix = strings.TrimRight(namedRoot, string(filepath.Separator)) + string(filepath.Separator)
+			if target == root || target == namedRoot {
+				target = ""
+			} else {
+				prefix := strings.TrimRight(root, string(filepath.Separator)) + string(filepath.Separator)
 				if !strings.HasPrefix(target, prefix) {
-					return "", false
+					prefix = strings.TrimRight(namedRoot, string(filepath.Separator)) + string(filepath.Separator)
+					if !strings.HasPrefix(target, prefix) {
+						return "", false
+					}
 				}
+				target = strings.TrimPrefix(target, prefix)
 			}
-			target = strings.TrimPrefix(target, prefix)
 			parts = nil
 		} else if filepath.VolumeName(target) != "" {
 			return "", false
