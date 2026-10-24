@@ -107,23 +107,37 @@ Windows-runner check, distinct from portable race-test results.
 
 ## The config file's lock (backlog B506, 2026-10-24)
 
-- **Every read-modify-write of `bridge.yaml` takes the exclusive lock on
-  `.bridge.yaml.lock` beside the file, in the directory the OS writes it in
-  as its name resolves (`config.LockFile`, `fsutil.ResolveParent`), a lock
-  file a root writer makes taking the config's owner
-  (`fsutil.OpenLockFileLike`); it decides on the file as its turn reads it,
-  and writes only through `Save(l)` / `SaveIf(l, …)` / `l.SaveBytes`, which
-  stage in that directory and, just before the rename, refuse a file that is
-  no longer the one the turn read (`*config.ChangedInTurnError`); the wait
-  is bounded at `config.LockWait` (5 s), then a value-free
-  `*config.BusyError`; only a lock whose answer says the filesystem keeps
-  none (`fsutil.KeepsNoLocks`) leaves the turn unlocked, and any other
-  failure is returned; serve's console save (`RuntimeConfig.Update`) takes
-  its turn and compares before it runs its change, saves only over the
-  bytes the holder last read (`RecordFile`, at boot) or wrote, and refuses a
-  file another writer changed with a `*config.ChangedOutsideError` rather
-  than merge** (2026-10-24, backlog B506; the second round, the same day,
-  took the reviews' findings, below). Until then several writers read the file, changed it and wrote it
+- **Every read-modify-write of `bridge.yaml` takes the exclusive lock
+  beside the file the OS opens for its name (`config.LockFile`,
+  `fsutil.ResolveParent`: the directory a `..` after a link resolves to, a
+  link at the last element followed to its target, whose name the lock
+  takes, `.actual.yaml.lock` for `alias.yaml` → `actual.yaml`), a lock file
+  a root writer makes taking the config's owner
+  (`fsutil.OpenLockFileLike`); it decides on what its turn found
+  (`FileLock.LoadFound`, `Found`), and writes only through `Save(l)` /
+  `SaveIf(l, …)` / `l.SaveBytes`, which stage beside the target and, before
+  each attempt at the rename, refuse a file that is no longer the one the
+  turn read (`*config.ChangedInTurnError`), a refusal ending the retries
+  (`atomicwrite.RenameWithRetryIf`, within `saveWindow`); the turn's reads
+  are asked again only while Windows answers a sharing or access
+  violation; the wait is bounded at `config.LockWait` (5 s), then a
+  value-free `*config.BusyError`, or, where every try answered ENOLCK, a
+  `*config.NoLockManagerError` naming the remedy; only a lock whose answer
+  says the filesystem keeps none (EOPNOTSUPP, ENOTSUP,
+  `errors.ErrUnsupported`, Windows' ERROR_NOT_SUPPORTED and
+  ERROR_INVALID_FUNCTION) leaves the turn unlocked, and any other failure
+  is returned; a link to no file is refused before anything is written, a
+  link into a directory this user cannot write names the remedy, and every
+  entry resolves the config's relative paths against the directory
+  `config.Load` takes from the name it was given, unmoved; serve's console
+  save (`RuntimeConfig.Update`, `UpdateChecked`) takes its turn and compares
+  before it runs its change, saves only into the file it read at boot and
+  over the bytes the holder last read (`RecordFile`) or wrote, refuses a
+  file another writer changed, or a link repointed since, with a
+  `*config.ChangedOutsideError` rather than merge, and a change of its own a
+  late refusal would leave done asks the turn's comparison again just before
+  it (`check`)** (2026-10-24, backlog B506; the second round, the same day,
+  took the first round's reviews, and the third the second's, below). Until then several writers read the file, changed it and wrote it
   back, and nothing made them take turns: `bridge library add` and `remove`
   (their offline path) and `bridge init`'s save took no lock at all;
   `bridge output dac bind` held the data dir's lock and saved through
@@ -145,7 +159,9 @@ Windows-runner check, distinct from portable race-test results.
 
   **The lock** is an exclusive kernel lock (`fsutil.TryLock`: flock on
   unix, LockFileEx on Windows) on `config.LockFileName(path)`, a dot, the
-  config file's base name and `.lock`, beside the config file, opened
+  config file's base name and `.lock` (since the third round the base name
+  of the file the config's name opens, a link's target's), beside the
+  config file, opened
   through `fsutil.OpenLockFileLike` (OpenLockFile's macOS create-race retry
   and its refusal of a link out of the directory). Not on the config file
   itself: Save replaces it by a rename, which a lock on the old file does
@@ -220,7 +236,10 @@ Windows-runner check, distinct from portable race-test results.
   its lock for longer than 5s, so nothing was written: try again", naming
   the file and nothing it holds. An ordinary turn is milliseconds (a read, a
   staged write and its fsync, a rename, and on Windows at most
-  `atomicwrite`'s 750 ms of rename retries); the long turns are a CLI's own,
+  `atomicwrite`'s 750 ms of rename retries; since the third round, on
+  Windows, up to 750 ms of retries of the turn's first read, and up to
+  `saveWindow`, 2 s, of a save's comparisons and rename attempts together,
+  below); the long turns are a CLI's own,
   library add's and remove's index change and a restore's copy, and a writer
   behind one of those for longer than that is better told to try again than
   left waiting: a console save is a request someone is watching. SQLite's
@@ -238,9 +257,10 @@ Windows-runner check, distinct from portable race-test results.
 
   **A filesystem that keeps no locks is no refusal, and only that**: where
   the lock's own answer says no lock can be taken there
-  (`fsutil.KeepsNoLocks`: ENOLCK, EOPNOTSUPP, ENOTSUP and
-  `errors.ErrUnsupported`, which ENOSYS matches too, from flock; on Windows
-  ERROR_NOT_SUPPORTED and ERROR_INVALID_FUNCTION from LockFileEx), the turn
+  (`fsutil.KeepsNoLocks`: EOPNOTSUPP, ENOTSUP and `errors.ErrUnsupported`,
+  which ENOSYS matches too, from flock; on Windows ERROR_NOT_SUPPORTED and
+  ERROR_INVALID_FUNCTION from LockFileEx; ENOLCK was among them until the
+  third round, which asks it again instead, below), the turn
   is taken without the lock (`FileLock.Unheld` says why), said once per file
   and process ("config: no lock can be taken beside the config file, so its
   writers do not take turns there"). That is the data dir's lock's rule: a
@@ -257,7 +277,8 @@ Windows-runner check, distinct from portable race-test results.
   an error of no errno). `TestAFilesystemThatKeepsNoLocksIsNoRefusal`.
 
   **Every save in a turn compares the file with the one the turn found,
-  just before its rename** (the second round). `LockFile` reads the file once
+  just before its rename** (the second round; since the third, before each
+  attempt at its rename, below). `LockFile` reads the file once
   it holds the turn, through `fsutil.ReadAsFile` (a named pipe refused, not
   waited on), or notes there is none (`found`, `absent`); the one write every
   save goes through (`FileLock.write`: `Save`, `SaveIf` and the turn's
@@ -344,11 +365,17 @@ Windows-runner check, distinct from portable race-test results.
   `fn`: a refused save (the comparison, or a lock another writer held past
   the wait) runs none of it. The order of PR #22 stays, the manifest change
   first and the root list's save after it succeeds, so a failed wipe saves
-  nothing and every failure after a wipe lands where a scan heals: a save
-  that fails after it, or that the comparison just before the rename
-  refuses (a writer that takes no turns, landing in the save's own staging),
-  retargets the carry and runs the compensating scan, as a failed save
-  always did. Doing the change after `Update` returned was weighed: it
+  nothing; a save that fails after it, or that the comparison just before
+  the rename refuses (a writer that takes no turns), retargets the carry and
+  runs the compensating scan, as a failed save always did. **This said such
+  a failure "lands where a scan heals", and that was true of the rows
+  alone** (the third round, Codex's and the Claude review's findings on the
+  second): the compensating scan puts the tracks' rows back, and nothing
+  puts back the renditions and waveforms the wipe or the prune unlinked; and
+  the window such a writer could land in was all of `fn`, the wipe or the
+  prune itself included, and the save's staging, never the staging alone.
+  The third round narrowed it to the index change itself and the staging,
+  and says what a refusal there costs (below). Doing the change after `Update` returned was weighed: it
   reverses PR #22's order, and a manifest change that failed after the save
   landed would need a second save to put the roots back, which can fail in
   turn; inside `fn` it is one turn of the lock with the save, as library
@@ -382,7 +409,8 @@ Windows-runner check, distinct from portable race-test results.
   of a path that names the config's) must come after the lock, which a
   writer that reads before its turn to decide and again in it (bind,
   library add) passes and one that saves what it read before the lock does
-  not. An entry nothing writes any more fails it, and so does a method
+  not. (The third round replaced that rule with a stricter one: the turn's
+  own read, below.) An entry nothing writes any more fails it, and so does a method
   named Save, SaveIf or SaveBytes on another type, which the sweep would
   read as the config's. `notConfigWriters` excuses `backup.Snapshot`, which
   reads the file into a snapshot, and the sweep requires it to still be
@@ -424,14 +452,210 @@ Windows-runner check, distinct from portable race-test results.
   (`t.Parallel`); the console's, which boots a serve, does not, since no
   serve test in `cmd/bridge` runs beside another.
 
-  **Don't save a copy read before the lock, take the lock around a prompt
-  or for a process's life, lock the config file itself or put the lock in
-  the data dir, clean a config's name before it resolves, stage a save
-  anywhere but where its rename lands, make a root writer's lock file
-  root's beside another owner's config, wait for it without a bound, take a
-  failure other than no locks for an unlocked turn, rename without the
-  turn's comparison, put a value of the file in a refusal, give `Save` a
-  path back, drop `SaveIf`'s comparison from bind, let a console save write
-  over bytes it did not last read or write, change anything besides the
-  config before calling `Update` (do it in `fn`, after the comparison), or
-  add a writer of `bridge.yaml` that `configWriters` does not name.**
+  **The third round** (the same day) took the reviews of the second
+  (Codex's five findings, the Claude review's four), as the orchestrator
+  decided them and then amended the decisions after two reviews of that
+  brief. Each fix was red first, on the second round's code with only the
+  seams of two commits that change no behaviour (11ad932b: a hook just after
+  a turn's read, `config.OnTurnTakenForTest`; the turn's read through one
+  function a test replaces, `config.SetTurnReadForTest`, and
+  `config.ReadFile`; what atomicwrite's read retry asks again on,
+  `atomicwrite.SetReadRetryableForTest`; `RecordFile`'s path; `SaveIf`'s
+  callback taking the save's context; a restore's `ConfigAsRead` and its
+  hook before its first write. 7909065d: the two refusals the tests name,
+  returned by nothing yet). The fixes are 00e2d0d8, and the rename loop's
+  own tests 4887d219. The restore's half is cli-serve.md's.
+
+  **ENOLCK is asked again, never taken for no locks** (Codex's first).
+  Linux's flock answers ENOLCK when the kernel cannot allocate a lock
+  record, on any filesystem and while another open holds the lock, and an
+  NFS mount whose lock manager is down answers it too; the second round
+  read it, with `fsutil.KeepsNoLocks`, as a filesystem that keeps none, so
+  one such answer took the turn without the lock beside a writer that held
+  it. `lockFile` now asks ENOLCK again every `lockRetry`, as it asks a held
+  lock (a config-only classifier, `noLockToGive`, so `KeepsNoLocks` keeps
+  its meaning for its other readers), and a wait whose every try answered
+  ENOLCK ends in a `*NoLockManagerError` ("the filesystem holding <path>
+  gave no lock beside it for 5s (…), so nothing was written: it has no
+  working lock manager; mount it with local locking, or start its lock
+  service, and try again"), matching `ErrNoLockManager` and the ENOLCK it
+  wraps; a try in the same wait that found the lock held makes it a
+  `*BusyError`. No verdict is kept: the brief's first form remembered one
+  for the path for the process's life, which both reviews of the brief
+  showed would leave a serve unlocked for good after a passing shortage of
+  lock records. Red before: `TestAFilesystemThatGivesNoLockRefusesTheTurn`
+  (a holder, every try ENOLCK: the turn taken, unheld),
+  `TestNoLockToGiveThenAHeldLockIsBusy` and
+  `TestNoLockToGiveOnceIsAskedAgain` (one ENOLCK, then a free lock: the turn
+  taken unheld).
+
+  **Every rename attempt is compared, and a refusal ends the retries**
+  (Codex's second, and both reviews of the brief). On Windows
+  `RenameWithRetry` tries the rename again for up to 750 ms while another
+  process has the file open, and the second round compared the file once,
+  before the first attempt: an editor that saved the file while the first
+  attempt failed had its change renamed over by the next.
+  `atomicwrite.RenameWithRetryIf(ctx, src, dst, before)` asks `before` ahead
+  of every attempt, the first included, returns its refusal at once with no
+  attempt after it (a refusal asked again could find the file put back as
+  it was between attempts, and write over the change it refused), tries
+  again only on the rename's own failures, on `RenameWithRetry`'s schedule,
+  and stops when ctx ends. `FileLock.write` passes it the turn's comparison
+  and `SaveIf`'s (bind's) under one context of `saveWindow` (2 s), which
+  bounds each comparison's read retries too, so a slow turn stays inside
+  another writer's `LockWait`; `SaveIf`'s callback takes that context. Red
+  before: `TestAChangeBetweenTwoRenameAttemptsIsRefused` (the change renamed
+  over at the second attempt), `TestARefusalBetweenRenameAttemptsEndsTheRetries`
+  (the other writer puts the file back once the comparison has read its
+  change), `TestSaveIfIsAskedBeforeEveryRenameAttempt` (asked once around
+  two renames). `TestAnUnchangedFileSavesAcrossAFailedRenameAttempt` and
+  the loop's own `TestRenameWithRetryIfEndsAtTheConditionsRefusal`,
+  `TestRenameWithRetryIfIsBoundedByItsContext` and
+  `TestRenameWithRetryIfRenames` are guards.
+
+  **A root change compares the file once more just before its library
+  index change, and a refusal after that change costs what the change
+  costs** (Codex's third, the Claude review's third). What rebuilds what a
+  wipe or a prune drops, read in the code: nothing adopts a sidecar file
+  back into a row (the only writers of `track_variants` and
+  `track_analysis` rows are the transcode pool, the CLI renderers and the
+  analysis pool; the scanner skips sidecar-shaped names; `LocateSidecar`
+  classifies a row that exists; the variants watcher works from listed
+  rows), and deleting a track cascades its variant and analysis rows
+  (`FOREIGN KEY … ON DELETE CASCADE` in the store's schema). The renditions
+  come back as they first came: `optimized-*` and `optimized-dsd-*` through
+  the auto-optimize pre-generation sweep (off by default; the compensating
+  scan nudges it; at most `maxPerSweep`, 200, a sweep) and on request (the
+  app's CarPlay generate, `POST /v1/upscale` with kind optimize, the
+  batches, `bridge optimize`); `upscaled-*` and `pcm-*` on request only
+  (`POST /v1/upscale`, `POST /v1/upscale/batch`, the console's Generate,
+  `bridge upscale` and `bridge render`), no sweep rendering a first one;
+  waveforms through the analysis sweep (off by default; every track without
+  a fresh analysis row) and `bridge analyze`. A download makes none (a
+  variant with no row is 404 `variant_not_found`). Sidecar paths are
+  deterministic, so a render lands where the old file was. A successful 1→N
+  add or collapse drops the same renditions (every row's path form changes),
+  a successful remove the removed root's. The root handlers now save through
+  `RuntimeConfig.UpdateChecked`, which hands `fn` the turn's comparison
+  (`check`: `FileLock.Check`, which reads the file again), and ask it just
+  before the wipe or the prune, so a file a writer that takes no turns
+  changed after the turn read it refuses the change before anything is
+  unlinked (the console's 500 `save-config`, the `*ChangedOutsideError`'s
+  words). What is left is such a writer landing during the index change
+  itself or the save's staging: refused after the change, at the cost above
+  (the renditions and waveforms it unlinked, rebuilt as above, and the rows,
+  which the compensating scan puts back). Deferring the unlinks until the
+  save had landed was the brief's first form and was dropped (Codex's review
+  of the brief): the cascade drops the rows that name the files, so nothing
+  adopts them, the background orphan sweep reaps unreferenced files, and
+  work after `Update` returns runs outside both locks. Red before:
+  `TestARootChangeRefusedJustBeforeItsIndexChangeLeavesTheLibraryAlone`, an
+  edit landed after the turn's read (`OnTurnTakenForTest`): the add, the
+  prune and the collapse each unlinked the rendition.
+
+  **One file for every entry, and the base of the config's relative paths
+  does not move** (Codex's fourth, the Claude review's fourth, and both
+  reviews of the brief). `fsutil.ResolveParent`, which `lockFile` and
+  `turnKey` ask on every turn, now follows a link at the last element to its
+  target (`filepath.EvalSymlinks` of the whole name) and answers the
+  target's directory and name: the lock sits beside the target, named after
+  it (`alias.yaml` → `actual.yaml` locks `.actual.yaml.lock` whichever name
+  a writer is given), and the save renames onto the target, so the link
+  stays a link. Directories that do not exist yet resolve through their
+  nearest existing ancestor, the missing ones after it as written (`bridge
+  init --dir` below a linked ancestor). A link to no file is refused
+  (`fsutil.ErrDanglingLink`), and `LockFile`, `config.CheckName` (init's,
+  before it writes anything) and `LoadFile` give one refusal naming the link
+  and what to do ("…is a symbolic link to a file that is not there, so no
+  bridge command reads or writes it: point the link at the config file, or
+  put the config file where the link is"): a writer there neither makes the
+  file the link names nor replaces the link with one. A link into a
+  directory this user cannot write (a home-manager store, a read-only
+  mount: EACCES or EROFS at the lock or the save's staging) is refused
+  saying to point the link at a writable copy or put the file in its place.
+  Serve and init keep the config's name as written (`fsutil.AbsAsWritten`:
+  on unix the working directory joined by hand, an empty element and "."
+  dropped, a ".." kept; on Windows `filepath.Abs`), so they open the file
+  the OS opens for it, which every CLI writer has since the second round:
+  serve cleaned `cfg/link/../bridge.yaml` to `cfg/bridge.yaml` and loaded,
+  locked and saved that file, and its console cleaned the name again for its
+  saves; `bridge doctor` loads the name as written too. **The base of the
+  relative paths is the one `config.Load` takes from the name as given, as it
+  always was**: Load cleans the name for it (`filepath.Dir(filepath.Abs)`), so
+  `dataDir: data` in a config reached through a link at its last element
+  resolves beside the link, and through a `..` after a link against the
+  directory the name cleans to. The brief's first form moved it to the
+  target's directory, which would boot serve on a fresh database and identity
+  for an install whose config is a link (the Claude review of the brief).
+  Serve's holder records the file its name opened at boot (`RecordFile(path,
+  raw)`), and refuses a console save through a link repointed since (a
+  dotfiles restow, a home-manager switch) with its `*ChangedOutsideError`,
+  however alike the two files are. Red before:
+  `TestResolveParentFollowsALinkAtTheLastElement`,
+  `TestResolveParentResolvesMissingDirectoriesThroughTheirNearestAncestor`,
+  `TestResolveParentRefusesALinkThatLeadsNowhere`;
+  `TestALinkedConfigsWritersTakeTheLockBesideItsTarget` (no lock beside the
+  target, and an Edit through the target's name went through while a turn
+  through the link was held), `TestALinkThatLeadsNowhereIsRefused` and
+  `TestALinkIntoADirectoryThisUserCannotWriteSaysWhatToDo` (a save renamed a
+  file over the link), `TestARepointedLinkRefusesTheHoldersSave`; in
+  `cmd/bridge`, `TestServeOpensTheConfigItsNameOpens` (serve saved the decoy
+  `cfg/bridge.yaml`, and over the link), `TestLibraryAddWritesTheConfigItsNameOpens`
+  (over the link; its `..` case passed, the second round's), and the seed's
+  and init's refusals of a link to nothing (cli-serve.md's).
+  `TestInitMakesANestedConfigDirUnderALinkedAncestor` is a guard.
+
+  **The turn's reads ask again while Windows refuses them for a moment, and
+  a named pipe is still refused at once** (the Claude review's second).
+  `config.ReadFile(ctx, path)` reads through `fsutil.ReadAsFile` within
+  `atomicwrite.ReadWithRetryCtx`, which asks again only on
+  ERROR_SHARING_VIOLATION and ERROR_ACCESS_DENIED, never on a file that is
+  not there; the turn's first read, every comparison and bind's own
+  comparison read through it, and bind reports a read that fails for good as
+  that read's failure, never as a change (Codex's review of the brief).
+  Tested on every platform through the turn's read and atomicwrite's
+  question, with an error of the test's own standing for Windows' codes;
+  those codes are atomicwrite's `TestReadRetryWindowsErrors`, on CI's
+  Windows leg. Red before: `TestATurnsReadsAskAgainWhileTheFileIsBusy` (each
+  of the two reads failed the save),
+  `TestBindsOwnComparisonAsksAgainWhileTheConfigIsBusy` and
+  `TestBindsOwnComparisonSaysAReadFailedForWhatItIs` (bind said the config
+  had changed). `TestATurnRefusesANamedPipeAtOnce` and
+  `TestATurnsReadOfAMissingFileAnswersAtOnce` are guards.
+
+  **The sweep asks for the turn's own read** (Codex's fifth, and the Claude
+  review of the brief). A writer that saves itself must, between its lock
+  and its first save, decide on what its turn found: `FileLock.LoadFound`
+  (the config loaded from the turn's bytes, as `Load` loads the file, the
+  base from the name), `FileLock.Found` (those bytes, and whether there was
+  a file), or a helper `turnReadHelpers` names (init's
+  `configChangedSinceRead`, a restore's `configStillAsRead`), which the
+  sweep requires to make one of those reads itself; and no other read of the
+  config may come between the lock and the save, a `Stat` and a `Load`
+  among them. The second round's rule took any read after the lock, so
+  `Load; LockFile; Stat; Save` passed (Codex's case), and one that counted
+  the read inside `LockFile` would have let `Load; LockFile; Save` through
+  (the Claude review of the brief): both are reported now, beside a positive
+  case of each turn read. Bind decides on `LoadFound` and compares with
+  `Found`, the seed on `Found` (a turn that found no file), init's check and
+  a restore's on `Found`, `Edit` on `LoadFound`, and the holder's
+  `UpdateChecked` on `Found`. Red before: `TestEveryConfigWriterTakesTheConfigLock`
+  (the seed's `os.Stat` and bind's reads in the turn, `Edit`'s and
+  `Update`'s reads of the turn's fields, a restore with no turn read, and
+  `configChangedSinceRead` reading the file itself).
+
+  **Don't save a copy read before the lock or decide on a read beside the
+  turn, take the lock around a prompt or for a process's life, lock the
+  config file itself or put the lock in the data dir, clean a config's name
+  before it resolves or move the base of its relative paths, lock or rename
+  beside a link rather than its target, write through a link to no file,
+  stage a save anywhere but where its rename lands, make a root writer's
+  lock file root's beside another owner's config, wait for it without a
+  bound, take ENOLCK or any failure but a definitive no-locks answer for an
+  unlocked turn, rename an attempt without the turn's comparison or retry
+  past its refusal, put a value of the file in a refusal, give `Save` a path
+  back, drop `SaveIf`'s comparison from bind, let a console save write over
+  bytes it did not last read or write or into another file than it read,
+  change anything besides the config before calling `Update` (do it in
+  `fn`, after the comparison, asking `check` just before), or add a writer of
+  `bridge.yaml` that `configWriters` does not name.**

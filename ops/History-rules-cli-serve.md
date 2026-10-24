@@ -2120,11 +2120,19 @@ Windows-runner check, distinct from portable race-test results.
   before its first write, to its end, bridge.yaml written through the
   turn's `SaveBytes`) and serve; library add and remove (`config.Edit`),
   init (`saveInitConfig`) and serve's seed (`writeAutoInitConfig`) take
-  bridge.yaml's alone, each deciding on the file read in its turn; a save
-  the turn refuses just before its rename (`config.ErrChangedInTurn`)
-  writes nothing, the seed then saying it wrote nothing and serve loading
-  what appeared, init and bind saying the file changed** (2026-10-24,
-  backlog B506, two rounds; the lock itself is config-lifecycle.md's).
+  bridge.yaml's alone, each deciding on what its turn found
+  (`FileLock.LoadFound`, `Found`); a restore compares the config with the
+  bytes `bridge restore` read before its lock and its prompt, and with what
+  its turn found, before its first write, refusing a change with nothing
+  restored, and a refusal at bridge.yaml's own write names what it restored
+  and says running it again finishes it; serve and init keep the config's
+  name as written (`fsutil.AbsAsWritten`), and init and the seed refuse a
+  link to no file before anything is written; a save the turn refuses
+  before a rename (`config.ErrChangedInTurn`) writes nothing, the seed then
+  saying it wrote nothing and serve loading what appeared, init and bind
+  saying the file changed, bind a failed read of its own comparison as that
+  read's failure** (2026-10-24, backlog B506, three rounds; the lock itself
+  is config-lifecycle.md's).
   Serve fixes the order: it holds the data dir's
   lock for its whole life (`dataDirHold`) and takes bridge.yaml's for each
   console save, so the data dir's is necessarily the outer one, and bind and
@@ -2143,8 +2151,46 @@ Windows-runner check, distinct from portable race-test results.
   turn found: `copyFile` staged it in the directory `filepath.Dir` cleaned
   the name to, and renamed it over whatever an edit had put there meanwhile
   (`TestARestoreLeavesAConfigChangedInItsTurn`, red before: the snapshot's
-  copy over the edit). Nothing takes the data dir's lock while it holds
-  bridge.yaml's. The data dir's lock is a try that never waits and
+  copy over the edit).
+
+  **A refused restore restores nothing, a late one says what it did, and
+  running it again finishes it** (the third round: the Claude review's
+  Medium, and Codex's review of the brief). `bridge restore` reads the
+  config before it takes the data dir's lock and asks for confirmation,
+  and works out every target from that read (its data dir, its TLS pair);
+  a library add, an init or an edit can change the config while it asks,
+  since bridge.yaml's lock is not held at the prompt, and the second round's
+  restore compared only with what its own turn found, after that change, and
+  restored into the data dir the config no longer named. Now `restoreCmd`
+  hands the restore the bytes it read (`loadCLIConfigFile`,
+  `RestoreOptions.ConfigAsRead`), the restore takes bridge.yaml's turn
+  whenever it has them (a snapshot without bridge.yaml included), and once it
+  has read the snapshot, before its first write (the player's reservation),
+  `configStillAsRead` asks whether the turn found exactly those bytes and
+  whether the file, read again, is still the one the turn found: a config
+  changed since either refuses the restore with nothing restored ("… is not
+  the config this restore read when it worked out where each file goes:
+  another writer changed it since …, so nothing was restored: run the
+  restore again, to restore into what the config names now"). A writer that
+  takes no turns can still change the file while the files before
+  bridge.yaml are copied; the refusal at bridge.yaml's own write then names
+  the files restored before it, the player's identity with its reservation
+  and the queue it let go among them, and those not restored, and says that
+  running the restore again finishes it, putting every file the snapshot
+  holds back, bridge.yaml over that change (`partialRestoreError`); it said
+  "nothing was written" until then. The copies keep their order. Red before:
+  `TestARestoreRefusedBeforeItsFirstWriteRestoresNothing` (an edit landed
+  just before the first write: every file before bridge.yaml restored, the
+  reservation, the identity and the queue included, each live file holding
+  bytes the snapshot's differ from), `TestARestoreRefusesAConfigItsTargetsDidNotComeFrom`
+  (the config changed since its caller read it, with a snapshot that carries
+  bridge.yaml and one that does not: restored), the late refusal's words in
+  `TestARestoreLeavesAConfigChangedInItsTurn` (which then runs the restore
+  again and finds every target as the snapshot has it), and in `cmd/bridge`
+  `TestARestoreRefusesAConfigChangedWhileItAsked` (its data dir, and its TLS
+  pair, changed at the prompt: the database replaced).
+
+  Nothing takes the data dir's lock while it holds bridge.yaml's. The data dir's lock is a try that never waits and
   bridge.yaml's waits at most `config.LockWait`, so no order could block
   forever; the fixed one keeps it so if the data dir's ever waits, and keeps
   a command from holding bridge.yaml's, and every writer behind it, while it
@@ -2202,7 +2248,18 @@ Windows-runner check, distinct from portable race-test results.
   check's own words ("the config at … changed while this init ran …; this
   run did not write it", `sayConfigChangedWhileInitRan`), exit 1:
   `TestInitsSaveLeavesAConfigChangedWhileItSaves`, red before, the edit
-  written over.
+  written over. Since the third round the check compares the run's first
+  read with what the turn found (`FileLock.Found`), the turn's own bytes,
+  rather than reading the file once more; init names the config file as
+  written (`fsutil.AbsAsWritten` of `--dir`, the file the OS opens for it,
+  where `filepath.Abs` cleaned a `..` after a link away), keeps the data dir
+  `filepath.Join` of the cleaned directory as before, makes the directory as
+  written, and refuses a config that is a link to no file before it writes
+  anything (`config.CheckName`): until then it minted its TLS pair, made its
+  data dir and saved its config over the link
+  (`TestInitRefusesALinkThatLeadsNowhereBeforeItWritesAnything`). A config
+  dir that does not exist yet, below a linked ancestor, is made where the OS
+  puts it (`TestInitMakesANestedConfigDirUnderALinkedAncestor`).
 
   **serve --init-if-missing writes its seed only while the config is still
   missing in its turn** (`writeAutoInitConfig`, which answers whether it
@@ -2213,16 +2270,40 @@ Windows-runner check, distinct from portable race-test results.
   no turns put there meanwhile is kept too, the seed answers that it wrote
   nothing, and serve loads that config
   (`TestServesSeedLeavesAConfigThatAppearsWhileItSaves`, red before: the
-  seed renamed its default over it and said it wrote).
+  seed renamed its default over it and said it wrote). Since the third round
+  the seed decides on the turn's own answer (`FileLock.Found`: a turn that
+  found no file), not a `Stat` beside it, makes the config's directory as
+  written, and a name that is a link to no file is refused by its turn, so
+  the seed neither makes the file the link names nor puts one in its place
+  (`TestServesSeedRefusesALinkThatLeadsNowhere`, red before: it wrote its
+  default over the link). Serve keeps its config's name as written
+  (`fsutil.AbsAsWritten`), for its load, its seed, its console's saves and
+  its backups: it cleaned the name with `filepath.Abs`, so for
+  `cfg/link/../bridge.yaml` it loaded, locked and saved `cfg/bridge.yaml`
+  while the OS, and every CLI writer, opened `real/bridge.yaml`
+  (`TestServeOpensTheConfigItsNameOpens`, red before: it saved the decoy at
+  the cleaned name); the base of the config's relative paths is still the
+  one `config.Load` takes from the name, so its data dir does not move.
 
   **bind answers the turn's refusal as its own** ("changed after bind read
   it, so the binding was not written: run bind again"): the turn's
   comparison, against the file as the turn read it, runs before bind's
   `SaveIf` comparison, against bind's own read in the turn, and the two
   differ only by the instant each read
-  (`TestOutputDACBindNeverWritesOverAnUpdateAfterItsRead`).
+  (`TestOutputDACBindNeverWritesOverAnUpdateAfterItsRead`). Since the third
+  round bind decides on the config its turn found (`FileLock.LoadFound`) and
+  its `SaveIf` compares the file with those bytes (`Found`), before each
+  attempt at the rename, reading as the turn's comparison reads
+  (`config.ReadFile`, asked again while Windows refuses the read for a
+  moment), and a read that fails for good is reported as that read's
+  failure ("save config: read … again before replacing it: …"), never as a
+  config that changed (`TestBindsOwnComparisonAsksAgainWhileTheConfigIsBusy`,
+  `TestBindsOwnComparisonSaysAReadFailedForWhatItIs`, red before: "changed
+  after bind read it" for both).
 
   **Don't take the data dir's lock while holding bridge.yaml's, take
   bridge.yaml's across init's prompts or a restore's prompt, decide a
-  library change on the read before the turn, or write a restored
-  bridge.yaml past its turn.**
+  library change on the read before the turn, restore into targets worked
+  out from a config that changed since it was read, say nothing was written
+  after a restore wrote files, clean a config's name in an entry, or write a
+  restored bridge.yaml past its turn.**
