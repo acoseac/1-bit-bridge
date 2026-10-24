@@ -334,7 +334,8 @@ and live backup with and without a seal, enabled and disabled.
 
 Backup documentation now limits the busy-stop-and-retry advice to adoption;
 busy or failed seal completion is logged and left to the next lifecycle
-operation. Both rule lines and their long forms record destination adoption,
+operation (round 10 below: only a busy completion is deferred). Both rule
+lines and their long forms record destination adoption,
 proportionate marker recovery and the existing unsupported history bounds.
 
 Round-nine evidence records 72 assertion-failing negative controls: all 65
@@ -349,6 +350,84 @@ The updated live-serve test is among those host-required cases; it waits for
 startup readiness and requires an engine when enabled, then checks health,
 warning and live backup. The report names every blocked test and retains the
 initial timeout and corrected barrier-fixture evidence separately.
+
+**Round 10.**
+
+A snapshot whose manifest lists a player UUID and no floor cannot bound what
+that identity handed out. This bridge never writes one: backup refuses a
+missing floor unless the box is in the UUID-only state, which it adopts and
+then captures, and every manifest now records `playerFloorRequired`. The
+manifest's `bridgeVersion` is the build's stamped version (0.0.1 for every
+build from source), so it cannot tell this writer from an older one; the new
+record does. Restore refuses this writer's UUID without its listed floor,
+naming the snapshot-copy remedy, before any write. An older writer's
+floorless snapshot takes the adoption ceiling, 2^31 + 2^24, in one helper
+(`floorlessSnapshotBound`) after `snapshotReservationFloor`; `marked` stays
+false, so the missing-mark warning still fires, and a listed floor that is
+missing or corrupt keeps its refusal. Codex's round-9 sequence (8,193
+main-era starts, the latest snapshot holding the UUID alone, a pristine
+destination) restored at 16,777,216; it now restores at exactly 2^31 + 2^25
+with draw zero and 2^31 + 2^25 + 2^24 - 1 with the largest. A source that
+adopted at its largest draw after its snapshot and started once holds
+2,164,273,151, and the old snapshot restores above it, which a 2^31 ceiling
+would not. A live bound above the ceiling still wins counter by counter,
+and a UUID-only destination's adoption stays below the ceiling at any draw.
+
+Restore adopts a UUID-only destination from its own random source
+(`RestoreOptions.Random`), the adoption's three bytes before the jump's;
+every other adopter keeps crypto/rand. A source that fails on its first read
+writes nothing and leaves the UUID-only state; one that fails after the
+adoption's draw leaves the adopted floor durable and no snapshot data, and a
+retry jumps from it. The same bytes give the same floor, 2^31 + r_a + 2^24 +
+r_j beside a listed 10,000,000 snapshot floor.
+
+Only a busy server.lock defers a backup's seal completion: the log says the
+next lifecycle operation completes it, and that operation does. Any other
+failure recurs at the next serve boot or start, so backup logs it as failed,
+with its error and the advice to restore write access to the data directory.
+Busy adoption still refuses the backup with its stop-and-retry advice.
+
+Marker reads no longer log. `CheckPlayerStart` warns once per call, serve
+boot's preflight once per boot (covering the player that boot starts) and
+bind's, and only beside a readable, unexhausted floor that names the UUID;
+the minter and every other lifecycle operation are silent, and nothing
+suppresses a later boot's warning. Beside a lost floor nothing warns, and the
+refusal says `do not move player-initialized aside`: on round 9's code that
+state logged the move-aside warning three times per serve boot. An
+invalid-version marker reading `sealed:true` with no valid seal file holds
+the only intact seal, so its warning says to keep it; the box runs, and
+identity restores stay refused as sealed through start, boot, backup, reset
+and a later discard.
+
+Red first, on round 9's code: the Codex sequence restored at 16,777,216 (a
+first token of 16,781,313 against 67,112,961 already published); a stripped
+snapshot of this bridge restored from zero; restore's adoption drew from
+crypto/rand, so injected bytes gave 2,176,223,088 where 2,165,947,905 was due,
+a first-read failure left player-ids.json and player-initialized behind, and a
+draw-then-failure source restored in full; busy seal completion logged "stop
+the service and run the backup again", and an EACCES completion was logged as
+deferred with no remedy; floor-loss refusals beside a damaged marker lacked
+the phrase, while serve boot logged the move-aside warning three times there
+and a start logged it up to seven times beside a matching floor. The capture
+side was already closed: adoption, a restore jump, a run and a lost floor
+refused the backup on round 9's code too, and its control (capturing the UUID
+without its floor) turns that test red.
+
+Round-ten evidence records 96 code negative controls failing by assertion, each
+anchor count-checked, mutated in the committed tree and restored from git:
+round 9's 69, ten of them rebased onto anchors this round moved (one,
+`backup-local-repair-fatal`, first survived because its anchor is now the busy
+branch while its test's failure is not busy; rebased onto the failure branch,
+it fails), and 27 new ones, among them a 2^31 ceiling, which turns the
+continued-source test red. On the owner's Mac (macOS arm64, Go 1.27.3, real
+sockets) native, Linux and Windows vet pass, `make fmt` changes nothing and
+`make docs-check` passes. `go test -race -count=1` passes all 12 packages of
+`./cmd/bridge/ ./internal/backup/ ./internal/config/ ./internal/player/...`:
+1,651 top-level cases, six skipped (five root or default-port CLI cases and
+the ALAC reference corpus), cmd/bridge in 613 s. The 20 new tests and six
+revised ones pass ten race-enabled runs each. The manifest field's doc comment
+now says that a player-uuid holding no one UUID travels alone, as it always
+has, for restore to refuse.
 
 ## File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)
 

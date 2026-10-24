@@ -81,9 +81,9 @@
 
   Backups capture the UUID before reading its live floor and require matching UUIDs before stamping the snapshot copy. A live v1 or foreign floor refuses a valid captured UUID; ordinary reset retains its numeric bounds before the next mint restamps it. A missing floor refuses except for the jumped UUID-only adoption. A malformed UUID with a missing floor refuses too. A malformed UUID is preserved for restore's strict refusal, without a stamped floor. A foreign floor still covers the box's earlier identities. Cancellation, expiry and file-access failures refuse without advice to discard; exhausted sharing retries name the busy file and retry. Invalid reservation data names `bridge reset-player --discard-floor`, never a snapshot repair.
 
-  Restore under the exclusive lock completes an incomplete local seal, then preflights the permanent seal, local floor loss and both exhaustion limits before importing data. It writes `max(snapshot, live) + 2^24 + draw` for each counter, with one cryptographic draw below 2^24 shared by both. The merged floor precedes the initialized marker, queue unlink when identity changes, and UUID. A crash may leave the old identity beside a raised floor naming the incoming identity; start and backup refuse the mismatch until restore is retried or ordinary reset retains the bounds and removes the old UUID. A retry raises it again. No incoming UUID leaves the live identity and floor untouched. A missing live reservation is a zero input to the restore jump on a pristine box or a UUID-only upgrade; a sealed box refuses every identity restore. A live floor that cannot be read is never discarded automatically.
+  Restore under the exclusive lock completes an incomplete local seal, then preflights the permanent seal, local floor loss and both exhaustion limits before importing data. It writes `max(snapshot, live) + 2^24 + draw` for each counter, with one draw below 2^24 shared by both, from restore's random source (crypto/rand unless a test injects one); onto a UUID-only destination its adoption draws from that source first (B524 round 10). The merged floor precedes the initialized marker, queue unlink when identity changes, and UUID. A crash may leave the old identity beside a raised floor naming the incoming identity; start and backup refuse the mismatch until restore is retried or ordinary reset retains the bounds and removes the old UUID. A retry raises it again. No incoming UUID leaves the live identity and floor untouched. A missing live reservation is a zero input to the restore jump on a pristine box, and a UUID-only upgrade is adopted first (B524 round 9); a sealed box refuses every identity restore. A live floor that cannot be read is never discarded automatically.
 
-  A snapshot reservation omitted from its manifest is legacy absence and takes the unmarked path. A listed but unreadable reservation, or a v2 stamp naming another UUID, refuses before any snapshot data is written (local seal completion may precede refusal). Otherwise a damaged snapshot could reissue values from the bare jump. Its remedy is to remove UUID and floor from a copy and restore the rest, keeping the healthy box's identity and queue. The decoded version decides: v1 is a floor without a UUID; v2 must name the captured identity. No queue is backed up.
+  A snapshot reservation omitted from its manifest is legacy absence: from an older writer it takes the adoption ceiling, 2^31 + 2^24, and from this bridge, whose manifest records `playerFloorRequired`, it refuses (B524 round 10). A listed but unreadable reservation, or a v2 stamp naming another UUID, refuses before any snapshot data is written (local seal completion may precede refusal). Otherwise a damaged snapshot could reissue values from the bare jump. Its remedy is to remove UUID and floor from a copy and restore the rest, keeping the healthy box's identity and queue. The decoded version decides: v1 is a floor without a UUID; v2 must name the captured identity. No queue is backed up.
 
   Restore refuses both exhausted source counters before importing snapshot data. An exhausted destination can restore a copy without player UUID and floor, keeping its identity, or use `bridge reset-player --discard-floor` to seal identity restores permanently. Ordinary reset retains the floor and does not refund range.
 
@@ -151,7 +151,7 @@ in `History-rules-cli-serve.md`, under “Backup source opens”.
 
 ## Player floor and reset (B524 round 5, 2026-10-24)
 
-**The player floor is monotonic across identities; reset keeps it byte-identical. Only `--discard-floor` drops it after BOTH local seals; its one-shot exemption opens after the floor rename and directory sync, and any floor, UUID or queue evidence consumes it before completion returns. A damaged initialized marker beside a matching floor stays present with its exemption spent; warn to move it aside, never discard that floor. Player-file errors turn the player off with a reason, never stop serve; seal-repair errors block neither backup nor identity-free restore. Serve boot, start, bind, reset, backup and restore adopt UUID-only upgrades at 2^31 plus a random value below 2^24 on BOTH counters; the bound is counter space, including skipped reservations, never issuance count. Restore adopts before taking max(snapshot, live) plus its jump. Start and backup require a matching UUID/floor; exhausted minting changes neither. Never repair a live floor from a snapshot. Two live boxes, older cross-box snapshots, pre-upgrade counter space reaching 2^31 and loss of both seals remain unsupported.**
+**The player floor is monotonic across identities; reset keeps it byte-identical. Only `--discard-floor` drops it after BOTH local seals; its one-shot exemption opens after the floor rename and directory sync, and any floor, UUID or queue evidence consumes it before completion returns. A damaged initialized marker stays present with its exemption spent. Only a start's preflight warns about it, once per serve boot or bind, and only beside a readable, unexhausted floor naming the UUID: move it aside, or keep it when its sealed bit is the only intact seal; never discard that floor. Beside a lost floor nothing warns, and the refusal says not to move it. Player-file errors turn the player off with a reason, never stop serve; seal-repair errors block neither backup nor identity-free restore, and only a busy one is deferred. Serve boot, start, bind, reset, backup and restore adopt UUID-only upgrades at 2^31 plus a random value below 2^24 on BOTH counters; the bound is counter space, including skipped reservations, never issuance count. Restore adopts first, from its own random source, before taking max(snapshot, live) plus its jump; a snapshot listing no floor counts as 2^31 + 2^24 from an older writer and is refused from this one. Start and backup require a matching UUID/floor; exhausted minting changes neither. Never repair a live floor from a snapshot. Two live boxes, older cross-box snapshots, pre-upgrade counter space reaching 2^31 and loss of both seals remain unsupported.**
 
 Ordinary reset keeps the box's numeric upper bounds across all identities,
 including identities displaced by successful or interrupted restores. It needs
@@ -173,7 +173,7 @@ a sealed exemption on allocation evidence or the first mint after discard. Disca
 marker as independent evidence, after the seal file is durable and before any
 queue, UUID or floor is removed. It renames an unparsable or non-file marker
 aside before writing a fresh one. A damaged initialization marker beside a matching floor is kept as evidence;
-its warning says to move it aside, without discarding the floor. A missing floor beside a UUID, queue or initialization marker is
+its start preflight warns to move it aside, or to keep it when its sealed bit is the only intact seal, without discarding the floor (round 10). A missing floor beside a UUID, queue or initialization marker is
 loss, except the UUID-only upgrade and the unconsumed post-discard exemption
 described below.
 A queue without UUID refuses minting, because an unstamped v1 queue must not
@@ -195,7 +195,7 @@ refuses before restoring data and explains that remedy; completing a lone local
 seal and adopting a UUID-only destination may precede snapshot writes. The seal never leaves
 through backup. Ordinary reset does not free exhausted counter range.
 
-**A snapshot captures UUID then floor through bounded Windows sharing retry and refuses a captured UUID without a readable floor. Schema stays 2; local initialization and discard markers never travel in backups. Restore completes a lone local seal, checks the seal, adopts a UUID-only destination, then checks the live floor and both exhaustion bounds before restoring any data, then writes max(snapshot, live) plus the jump, ensures the initialization marker, durably clears a replaced identity's queue and writes the UUID through its own durable writer.**
+**A snapshot captures UUID then floor through bounded Windows sharing retry, refuses a captured UUID without a readable floor, and records `playerFloorRequired` in its manifest. Schema stays 2; local initialization and discard markers never travel in backups. Restore refuses that writer's UUID without its listed floor and bounds an older writer's floorless snapshot at 2^31 + 2^24, completes a lone local seal, checks the seal, adopts a UUID-only destination from restore's own random source (the adoption's draw, then the jump's), then checks the live floor and both exhaustion bounds before restoring any data, then writes max(snapshot, live) plus the jump, ensures the initialization marker, durably clears a replaced identity's queue and writes the UUID through its own durable writer.**
 
 The engine independently refuses unreadable or corrupt reservation data instead
 of moving it aside and starting at zero. Queue-corruption recovery is separate.
@@ -253,8 +253,10 @@ new floor and the snapshot bound before adding its smaller jump. Serve performs 
 and live backups, even when playback is disabled, without minting on a pristine
 box. Backup takes that lock for adoption and rechecks the captured UUID;
 if adoption is busy, stop the service and run the backup again. It also takes
-the lock for seal completion, but busy or failed completion is logged and
-left to the next lifecycle operation; backup still checks the captured pair.
+the lock for seal completion: a busy completion is logged and left to the next
+lifecycle operation, and any other failure is logged with its error and the
+advice to restore write access, since it recurs at the next serve boot or
+start (round 10); backup still checks the captured pair.
 A main-era engine can hand out token 4097 without saving a queue, so losing ONLY
 its floor looks identical. The adoption bound is pre-upgrade counter space below
 2^31, including skipped reservations; a count of values handed out cannot bound
@@ -354,4 +356,66 @@ exemption. The warning names player-initialized and advises moving it aside;
 start re-ensures it, and completion beside a valid seal records sealed and minted.
 A later floor loss refuses. Missing or unreadable floors retain discard advice.
 Backup's busy-stop-and-retry advice applies to adoption alone; busy or failed seal
-completion is logged and left to the next lifecycle operation.
+completion is logged and left to the next lifecycle operation (round 10 below: only
+a busy completion is deferred).
+
+### Round 10: floorless snapshots, restore's draws, busy completion and one warning
+
+A snapshot whose manifest lists no floor beside its player UUID (the unmarked
+case of `snapshotReservationFloor`) cannot bound what that identity handed out.
+This bridge never writes one with a readable UUID: backup refuses a missing
+floor unless the box is in the UUID-only state, which it adopts first and then
+captures, and every manifest it writes records `playerFloorRequired`. Restore
+refuses such a snapshot of this bridge's making, whose floor was stripped, with
+the snapshot-copy remedy before any write. One from an older writer, whose
+manifest has no such record (`bridgeVersion` is the build's stamped version and
+cannot tell the two apart), takes the adoption ceiling, 2^31 + 2^24, as its
+bound. One helper, `floorlessSnapshotBound`, applies both, right after
+`snapshotReservationFloor` and only when nothing is listed; `marked` stays
+false, so the missing-mark warning still fires, and a listed floor that is
+missing or corrupt keeps its refusal. Restore then writes max(ceiling, live)
++ 2^24 + r. The 2^24 term covers a source that upgraded and adopted after its
+snapshot: adopted at the largest draw and started once, its durable floor is
+2^31 + 2^24 + 8,191, below the restored 2^31 + 2^25. Codex's 8,193-start main-era
+sequence now restores at exactly 2^31 + 2^25 with draw zero and
+2^31 + 2^25 + 2^24 - 1 with the largest; it restored at 2^24 before.
+
+Restore adopts a UUID-only destination with its own random source
+(`RestoreOptions.Random`, crypto/rand unless a test injects one), the
+adoption's three bytes before the jump's: six there, three elsewhere. Every
+other adopter keeps crypto/rand. The adoption draws before it writes, so a
+source that fails at once leaves the UUID-only state untouched; one that
+fails after the adoption's draw leaves the adopted floor durable and no
+snapshot data, and a retry jumps from that floor.
+
+Only a busy server.lock defers a backup's seal completion, which backup logs as
+deferred to the next lifecycle operation. Any other failure, such as a data
+directory backup cannot write, recurs at the next serve boot or start: backup
+logs it as a failure, with its error and the advice to restore write access to
+the data directory, or a marker refusal's own remedy. Busy adoption still
+refuses the backup and says to stop the service and run it again.
+
+Marker reads log nothing. `CheckPlayerStart` is the one place that warns, once
+per call: serve boot's preflight, once per boot, covering the player that boot
+starts, and bind's. The minter and every other lifecycle operation preflight
+silently, and no process state hides a later boot's warning. The move-aside
+warning needs a readable floor that names the current UUID and is not
+exhausted, beside a present, invalid marker. When that marker reads
+`sealed:true` and no valid `player-floor-discarded.json` exists, its sealed bit
+is the only intact seal: moved aside, the next start would write an unsealed
+marker and reopen identity restores, so the warning names the seal and says to
+keep it. The player runs as it is; `bridge reset-player --discard-floor`
+rewrites both records at the cost of the identity and its queue. Beside a lost
+floor nothing warns, and every floor-loss refusal with the marker present says
+`do not move player-initialized aside`.
+
+`TestThisBridgeNeverCapturesAFloorlessIdentity`, `TestThisBridgesSnapshotWithoutItsFloorIsRefused`,
+`TestLegacyFloorlessSnapshotRestoresAboveTheAdoptionCeiling`, `TestLegacyCeilingCoversASourceThatAdoptedAfterItsSnapshot`,
+`TestLegacyCeilingYieldsToEachHigherLiveBound`, `TestLegacyFloorlessSnapshotOntoAUUIDOnlyBox`,
+`TestALegacySnapshotsListedFloorStillMustRead`, `TestRestoreAdoptsWithItsOwnRandomnessFirst`,
+`TestRestoreAdoptionDrawFailureWritesNothing`, `TestRestoreAdoptionDrawThenFailureKeepsTheAdoptedFloor`,
+`TestBusySealCompletionIsLeftToTheNextLifecycleOperation`, `TestFailedSealCompletionKeepsItsErrorAndNamesWriteAccess`,
+`TestBusyAdoptionStillAsksToStopTheService`, `TestFloorLossRefusalsNeverAdviseMovingTheMarker`,
+`TestMoveAsideWarningOncePerStart`, `TestMoveAsideAdviceNeedsTheFloorToNameTheUUID`,
+`TestADamagedMarkerHoldingTheOnlySealIsKept`, `TestServeBootRefusesALostFloorWithoutTheMoveAsideWarning`,
+`TestServeWarnsOnceEachBootBesideADamagedMarker` and `TestBindWarnsOnceBesideADamagedMarker` pin these boundaries.

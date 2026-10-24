@@ -130,11 +130,12 @@ type Manifest struct {
 	CreatedAt       time.Time `json:"createdAt"`
 	Files           []string  `json:"files"`
 	// PlayerFloorRequired records a writer that lists player-ids.json beside
-	// every player-uuid it captures, as this bridge's Snapshot does: restore
-	// refuses such a snapshot's UUID without its floor, which only stripping
-	// leaves. A writer before reservation capture recorded nothing, and
-	// BridgeVersion cannot tell the two apart (it is the build's stamped
-	// version, the same 0.0.1 for every build from source).
+	// every player UUID it captures, as this bridge's Snapshot does (a
+	// player-uuid that holds no one UUID is copied alone, for restore to
+	// refuse as it stands): restore refuses such a snapshot's UUID without its
+	// floor, which only stripping leaves. A writer before reservation capture
+	// recorded nothing, and BridgeVersion cannot tell the two apart (it is the
+	// build's stamped version, the same 0.0.1 for every build from source).
 	PlayerFloorRequired bool `json:"playerFloorRequired,omitempty"`
 }
 
