@@ -30,12 +30,14 @@ marks. Restore adds 2^24 plus a cryptographically random value below 2^24,
 then makes those marks durable before restoring any identity file. An
 interrupted restore may leave a raised reservation; retrying raises it again.
 A missing reservation is omitted. An unreadable reservation stops backup or
-restore. The remedy for an unreadable reservation or an exhausted destination
-mark is the same player reset: **with the service stopped, run
+restore. If read access to `player-ids.json` failed, restore read access first,
+then rerun `bridge output player reset`. A malformed reservation or an exhausted
+destination mark also requires a player reset: **with the service stopped, run
 `bridge output player reset --config /path/to/bridge.yaml`**. It asks for
 confirmation; `--yes` skips only that prompt. The command records the
-identities given up before removing the UUID, queue and reservation, in that
-order. Rerun the command to finish an interrupted reset. The next
+identities given up before removing the queue, UUID and reservation, in that
+order. Rerun the command to finish an interrupted reset; the player will not
+start until the reset finishes, including after a reboot. The next
 start makes a new identity with no queue, a new device to controllers.
 **A snapshot's `player-ids.json` is never a valid repair**. Do not delete the
 reservation while keeping the player identity.
@@ -93,12 +95,16 @@ snapshots and gives their restored identities the same jump.
 `player-history.json` stays in the data directory through a reset. It records
 identities replaced by restore whose values the live floor covers, and the
 identities a reset gives up. Backup lists and carries the history even when
-there is no player UUID. Restore merges the snapshot's history with the box's
+there is no player UUID. If the player's identity or history changes during
+a backup, backup refuses and asks you to run it again. Normal advances of the
+reservation counters do not prevent a live backup. Restore merges the
+snapshot's history with the box's
 history before installing an identity; it never replaces the live list with
 an older one. Do not delete or edit the history to bypass a refusal. A history
 that is corrupt, unreadable or not a file refuses backup, restore or reset.
-For a reservation that cannot be read, fix its read access before resetting;
-a malformed reservation can be reset, retaining every UUID it still names.
+For a reservation that cannot be read, restore read access to `player-ids.json`
+and then rerun `bridge output player reset`; a malformed reservation can be
+reset, retaining every UUID it still names.
 
 Restore refuses a UUID given up in either history before writing any file.
 Remove `player-uuid` and `player-ids.json` from a copy of the snapshot to

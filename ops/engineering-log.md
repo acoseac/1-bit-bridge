@@ -149,9 +149,10 @@ revive one of those UUIDs below IDs or tokens already issued after the snapshot.
 The random restore jump cannot cover an arbitrarily old dropped floor.
 
 `bridge output player reset` now records every known covered identity in
-`player-history.json` before removing UUID, queue and reservation, in that
+`player-history.json` before removing queue, UUID and reservation, in that
 order. Each removal is durable before the next; a pending marker makes the
-command resumable even after the final removal. It uses restore's exclusive
+command resumable even after the final removal; serve refuses to start the
+player while that marker is set, before it creates an identity. It uses restore's exclusive
 data-dir lock and both admin-port guards around confirmation. `--yes` skips
 only the prompt. No identity and no pending reset is a no-op.
 
@@ -159,8 +160,11 @@ Restore preflights live and snapshot histories before every write. Either
 list giving up the incoming UUID refuses with the snapshot-copy remedy,
 keeping the box's own identity. An admitted restore unions both histories
 and records the displaced UUID and any foreign live-reservation UUID before
-replacing the floor or identity. History is never restored by a byte copy.
-Backup includes it even without a player UUID. Schema 3 refuses older readers
+replacing the floor or identity, retaining the incoming UUID in `covered`.
+History is never restored by a byte copy.
+Backup includes it even without a player UUID and rechecks it after capturing
+the player files, along with the UUID and reservation UUID, before publishing
+the manifest. Schema 3 refuses older readers
 that would silently skip history; schemas 1 and 2 remain readable.
 
 History has one bounded, nonblocking file reader (`fsutil.OpenAsFile`) and
@@ -193,6 +197,30 @@ Linux and Windows vet, formatting and docs-check, the backup/config/engine
 race suites, touched CLI tests, and ten race runs of every new test. Socket
 restrictions and any unrelated guard failures are reported separately rather
 than counted as passes. No commit or push is part of this work.
+
+
+**Round 2.** Four regressions were reproduced before the fixes. A failed
+reservation rename after the history landed allowed an old snapshot back after
+reset; retaining the incoming covered UUID keeps its refusal. A reset between
+backup's history read and player capture produced a mixed snapshot; backup now
+rechecks the captured identities and history and removes a failed capture.
+It does not take the reset lock, because scheduled backups run inside serve,
+which already holds that lock. Reservation counters may advance during capture.
+Reset now removes queue before UUID before reservation, and serve checks the
+pending marker before creating an identity or starting the engine: the old
+start ran a newly minted UUID with the leftover v1 queue. Both restore's advice
+and reset's refusal now name restoring read access to `player-ids.json` before
+rerunning the reset. The tests are
+`TestInterruptedRestoreKeepsTheIncomingIdentityCovered`,
+`TestSnapshotRefusesAPlayerChangeDuringCapture`,
+`TestServePlayerRefusesAnIncompleteReset`, the revised removal-order test and
+`TestUnreadableReservationAdviceResetsIdentityAndQueue`. The round-two report
+records red/green evidence, all round-one controls rerun (the order control
+updated to the queue-first contract), new controls, gates and sandbox limits. The
+merged named-pipe restore test still expected identity replacement, although
+B524 preflight already refused an unreadable live identity at the starting
+commit. Its expectation now pins that refusal and unchanged pipe, queue,
+reservation and history; the nonblocking reader is unchanged.
 
 ## File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)
 
