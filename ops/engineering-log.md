@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B500: release archives carry build-derived third-party licences](#2026-10-24--b500-release-archives-carry-build-derived-third-party-licences)
 - [2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader](#2026-10-24--b525-the-players-identity-file-is-read-without-waiting-a-named-pipe-at-player-uuid-is-refused-at-once-by-every-reader)
 - [2026-10-24 — B470 PR 5a2b: shared discovery for the opt-in OpenHome Source](#2026-10-24--b470-pr-5a2b-shared-discovery-for-the-opt-in-openhome-source)
 - [2026-10-24 — B470 PR 5a0 Round 11: a listed snapshot reservation that cannot be read refuses restore](#2026-10-24--b470-pr-5a0-round-11-a-listed-snapshot-reservation-that-cannot-be-read-refuses-restore)
@@ -138,6 +139,31 @@ reaches a session that has not gone looking for it.
 - [DSD renditions B4 — the alias measurement, and why it is a differential (2026-09-07)](#dsd-renditions-b4--the-alias-measurement-and-why-it-is-a-differential-2026-09-07)
 
 ---
+
+## 2026-10-24 — B500: release archives carry build-derived third-party licences
+
+The release before-hook now runs the stdlib Go notice generator against
+all six configured release targets. The archives include its ignored root
+output, THIRD_PARTY_LICENSES.md. Generating after dependency resolution
+keeps weekly dependency bumps current without a checked-in notice file.
+
+Discovery uses go list's non-test package dependency closure with CGO=0:
+63 modules on each Darwin target, 67 on each Linux target and 68 on each
+Windows target. Entries record replacements and read their root files,
+including the fsnotify fork. saprobe-alac's full Apache licence and NOTICE
+are included. All golang.org/x modules carry PATENTS; x/oauth2 takes the
+Go toolchain grant because its root omits it. UNLICENSE extends the requested
+filename patterns for mewkiz/pkg and mewpkg/term; an initial real generation
+failed loudly on mewkiz/pkg before that extension.
+
+Fixture tests were red before implementation. They exercise the actual
+build graph, exclusion of unused/test-only dependencies, target union,
+missing licences, full root texts and stable order. Negative controls
+restore saved bytes of the uncommitted files, not HEAD. Release wiring is
+pinned by a test; the release playbook now checks each snapshot archive's
+notice bytes and the complete matrix. GoReleaser itself was unavailable in
+the offline implementation environment, so the real snapshot check remains
+a required release-candidate step.
 
 ## File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)
 

@@ -1216,3 +1216,41 @@ Its check that `mountIDOf` still names the link's mount goes through the
 stubbed platform reader, so it shows that the Go wrapper resolves nothing,
 not that statx keeps its no-follow flag.
 Windows skips only this test's privileged symlink creation.
+
+
+## B500 — third-party licences in release archives (2026-10-24)
+
+**Every release archive carries freshly generated third-party licences from the union of the release builds; missing licences fail the release. Never replace build-derived discovery with the go.mod list or skip the before-hook.**
+
+`go run ./scripts/third-party-licenses` reads the explicit matrix in
+`.goreleaser.yaml`, then runs `go list -mod=readonly -deps -json ./cmd/bridge`
+for each GOOS/GOARCH with CGO disabled, as the release build does. The Go
+executable belongs to the running toolchain. Test-only and unused modules
+are excluded; modules used on only one platform still enter the union.
+The small stdlib configuration reader accepts the current builds stanza
+only and refuses unfamiliar settings, tags, exclusions, flags and YAML
+forms. Extend discovery and its tests together before changing that stanza.
+Developer GOFLAGS and workspaces do not affect discovery. Release builds
+must likewise use the clean checkout and default architecture feature levels.
+
+Every entry identifies the original module path/version and its replacement
+path/version, but reads files from the replacement's directory. Include the
+full bytes of all root files matching LICENSE*, COPYING*, NOTICE*, PATENTS
+(case-insensitive), plus UNLICENSE (mewkiz/pkg and mewpkg/term use it).
+NOTICE or PATENTS alone is not a licence. Empty files and read failures are
+errors too. Keep the Go patent grant with each golang.org/x module; when its
+root omits PATENTS (currently x/oauth2), use the release toolchain's PATENTS.
+Module and filename order is sorted, without dates or cache paths.
+
+The before-hook runs after `go mod tidy`, writes the ignored root file
+`THIRD_PARTY_LICENSES.md`, and every archive includes it. Weekly dependency
+bumps therefore refresh notices automatically on the next release; no
+checked-in copy or human regeneration reminder is needed. Do not seed dist/
+from the hook: GoReleaser requires it empty at that stage. The release
+playbook verifies every snapshot archive's notice bytes before removing dist/.
+
+Tests build a local fixture graph through the actual go-list entry point,
+including target-specific imports, unused and test-only requirements,
+replacements, missing licences, mixed-case filenames, multiple licence
+files, NOTICE, PATENTS, UNLICENSE and deterministic ordering. The wiring
+test pins the before-hook and the archive file entry.

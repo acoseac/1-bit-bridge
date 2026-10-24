@@ -6,6 +6,8 @@ paths:
   - "Makefile"
   - "Dockerfile"
   - ".goreleaser.yaml"
+  - "scripts/third-party-licenses/**"
+  - "THIRD_PARTY_LICENSES.md"
   - "compose.yaml"
   - "internal/sweeptest/**"
   - "internal/proctest/**"
@@ -26,6 +28,8 @@ How a test here is written, run and trusted, and the CI, SonarCloud and Docker r
 Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had there, so a code comment citing "CLAUDE.md <title>" or "under **<section>**" means an entry here. The record behind each rule is in `ops/engineering-log.md`: grep it by symbol, file or PR number before changing anything a rule names.
 
 ## Build, CI, and test discipline
+
+- **Every release archive carries freshly generated third-party licences from the union of the release builds; missing licences fail the release. Never replace build-derived discovery with the go.mod list or skip the before-hook.** (B500) → History-rules-build-ci-tests.md
 
 - **SonarCloud's `go:S2077` follows a named const to its concatenation.** → History-rules-build-ci-tests.md
 - **A test server that redirects to the REQUEST'S OWN path is a BLOCKER for SonarCloud's gate.** → History-rules-build-ci-tests.md
