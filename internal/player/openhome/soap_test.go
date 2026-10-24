@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -17,9 +18,25 @@ import (
 // arrival is the address and port the handler's test requests arrive on.
 var arrival = netip.MustParseAddrPort("192.168.1.20:7792")
 
-// testHandler is a handler with production's limits.
+// testHandler is a handler with production's limits and no engine: every
+// read is 501.
 func testHandler() *handler {
-	return newHandler(Device{UUID: testUUID, ModelNumber: "test"}, DefaultLimits.orDefaults(), nil)
+	return newHandler(Device{UUID: testUUID, ModelNumber: "test"}, nil, DefaultLimits.orDefaults(), nil)
+}
+
+// knownFault reports whether code and description are a fault this layer
+// defines: a UPnP code with its description, or one of the reads' OpenHome
+// codes with its own.
+func knownFault(code int, description string) bool {
+	if d, ok := faultDescription[code]; ok && d == description {
+		return true
+	}
+	for _, f := range []faultReply{faultIDNotFound, faultSourceNotFound} {
+		if f.code == code && f.description == description {
+			return true
+		}
+	}
+	return false
 }
 
 // request is a request to path that arrived on arrival, its Host that
@@ -143,8 +160,8 @@ func serve(t *testing.T, h *handler, r *http.Request) answer {
 			t.Fatalf("a UPnP fault without its UPnPError: %s", body)
 		}
 		a.code = f.Fault.Detail.Code
-		if want := faultDescription[a.code]; want == "" || f.Fault.Detail.Description != want {
-			t.Errorf("fault %d's description is %q, want %q", a.code, f.Fault.Detail.Description, want)
+		if !knownFault(a.code, f.Fault.Detail.Description) {
+			t.Errorf("fault %d with the description %q, which this layer does not define", a.code, f.Fault.Detail.Description)
 		}
 		return a
 	}
@@ -176,26 +193,59 @@ type failingReader struct{}
 
 func (failingReader) Read([]byte) (int, error) { return 0, errors.New("the connection went away") }
 
-// TestEveryValidActionIsAnswered602: every action of every service, with
-// arguments of each type that parse (none for those that take none), is
-// answered fault 602 and nothing else: nothing reaches the engine in this
-// release.
+// writes are the write actions, by service: every action of the four
+// services that changes state, which this release answers fault 602 (B470
+// PR 5a4 implements them); every other action is a read (reads).
+var writes = map[string][]string{
+	"Product": {"SetStandby", "SetSourceIndex", "SetSourceIndexByName"},
+	"Playlist": {"Play", "Pause", "Stop", "Next", "Previous", "SetRepeat", "SetShuffle", "SeekSecondAbsolute",
+		"SeekSecondRelative", "SeekId", "SeekIndex", "Insert", "DeleteId", "DeleteAll"},
+}
+
+// TestEveryValidActionIsAnswered602 pins the writes, which PR 5a3 leaves
+// unimplemented: every write action of the four services, with arguments
+// of each type that parse (none for those that take none), is answered
+// fault 602 and nothing else, with no engine and with a running one that
+// holds a queue and a session that plays, and nothing reaches the engine:
+// its generation, queue, token, selection and transport are as they were.
+// (5a2a asked it of every action, before the reads.)
 func TestEveryValidActionIsAnswered602(t *testing.T) {
-	h := testHandler()
-	n := 0
-	for _, s := range services {
-		for i := range s.actions {
-			a := &s.actions[i]
-			got := serve(t, h, soapRequest(s, header(s, a.name), "text/xml; charset=\"utf-8\"", envelope(call(s, a.name, validArgs(s, a)))))
-			if got != (answer{http.StatusInternalServerError, 602}) {
-				t.Errorf("%s#%s: %v, want fault 602", s.name, a.name, got)
+	answersEvery := func(t *testing.T, h *handler) {
+		t.Helper()
+		n := 0
+		for svc, names := range writes {
+			s := servicesByPath[strings.ToLower(svc)]
+			for _, name := range names {
+				a := s.action(name)
+				got := serve(t, h, soapRequest(s, header(s, name), "text/xml; charset=\"utf-8\"", envelope(call(s, name, validArgs(s, a)))))
+				if got != (answer{http.StatusInternalServerError, 602}) {
+					t.Errorf("%s#%s: %v, want fault 602", s.name, name, got)
+				}
+				n++
 			}
-			n++
+		}
+		if n != 3+14 {
+			t.Errorf("%d writes answered, want the 17 of the four services", n)
 		}
 	}
-	if n != 13+24+4+1 {
-		t.Errorf("%d actions answered, want the 42 of the four services", n)
-	}
+	t.Run("no engine", func(t *testing.T) { answersEvery(t, testHandler()) })
+	t.Run("an engine that plays", func(t *testing.T) {
+		p := newTestPlayer(t)
+		p.add("a", []byte("meta:a"))
+		p.add("b", []byte("meta:b"))
+		must(t, "play", p.eng.Play(context.Background()))
+		s := p.be.session(t, 1)
+		s.hear(s.first.ID, nil)
+		before := p.heardNow(s.first.ID)
+		answersEvery(t, p.handler(""))
+		after := p.eng.Snapshot()
+		if after.Generation() != before.Generation() || !slices.Equal(after.IDs(), before.IDs()) || after.Token() != before.Token() ||
+			after.Selected() != before.Selected() || after.State() != before.State() || after.Repeat() != before.Repeat() {
+			t.Errorf("a write reached the engine: generation %s, IDs %v, token %d, selected %d, %s, repeat %v; was %s, %v, %d, %d, %s, %v",
+				after.Generation(), after.IDs(), after.Token(), after.Selected(), after.State(), after.Repeat(),
+				before.Generation(), before.IDs(), before.Token(), before.Selected(), before.State(), before.Repeat())
+		}
+	})
 }
 
 // TestTheSOAPTableRowByRow: each row of the table in soap.go, in its order,
@@ -353,9 +403,9 @@ func TestTheSOAPTableRowByRow(t *testing.T) {
 		{"9: an argument to Info's Counters", func() *http.Request {
 			return soapRequest(info, header(info, "Counters"), ct, envelope(call(info, "Counters", "<TrackCount>1</TrackCount>")))
 		}, fault(402)},
-		{"9: Time's Time", func() *http.Request {
+		{"9: Time's Time, a read with no engine", func() *http.Request {
 			return soapRequest(timeSvc, header(timeSvc, "Time"), ct, envelope(call(timeSvc, "Time", "")))
-		}, fault(602)},
+		}, fault(501)},
 		{"9: ui4 at its top", soap(header(playlist, "SeekId"), ct, seekID("4294967295")), fault(602)},
 		{"9: ui4 past its top", soap(header(playlist, "SeekId"), ct, seekID("4294967296")), fault(402)},
 		{"9: ui4 with a minus", soap(header(playlist, "SeekId"), ct, seekID("-1")), fault(402)},

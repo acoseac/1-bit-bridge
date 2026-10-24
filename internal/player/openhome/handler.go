@@ -25,6 +25,9 @@ import (
 // surface stops, is 503 and its connection closed.
 type handler struct {
 	device Device
+	// engine is what every read action answers from (actions.go); nil is
+	// no engine.
+	engine Engine
 	scpds  map[string][]byte
 	lim    Limits
 	seams  *Seams
@@ -38,8 +41,8 @@ type handler struct {
 	flight inflight
 }
 
-func newHandler(d Device, lim Limits, seams *Seams) *handler {
-	h := &handler{device: d, scpds: map[string][]byte{}, lim: lim, seams: seams, slots: make(chan struct{}, lim.Slots)}
+func newHandler(d Device, eng Engine, lim Limits, seams *Seams) *handler {
+	h := &handler{device: d, engine: eng, scpds: map[string][]byte{}, lim: lim, seams: seams, slots: make(chan struct{}, lim.Slots)}
 	for _, s := range services {
 		h.scpds[s.path] = s.scpd()
 	}
@@ -142,8 +145,8 @@ func (h *handler) serveDocument(w http.ResponseWriter, r *http.Request, body fun
 	}
 }
 
-// control is the SOAP layer: rows 2 to 9 of the table in soap.go, then
-// 602 for every request that passes them.
+// control is the SOAP layer: rows 2 to 9 of the table in soap.go, then the
+// action's answer (act): a read from one engine snapshot, a write 602.
 func (h *handler) control(w http.ResponseWriter, r *http.Request, s *service) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
@@ -208,10 +211,7 @@ func (h *handler) control(w http.ResponseWriter, r *http.Request, s *service) {
 		writeFault(w, faultReply{code: errInvalidArgs}, false)
 		return
 	}
-	// Every action is answered as not implemented in this release: the
-	// identity a controller would read is not restored yet (B470 PR 5a0),
-	// so nothing is read from or done to the engine.
-	writeFault(w, faultReply{code: errActionUnavailable}, false)
+	h.act(w, s, a, env.action)
 }
 
 // event answers GENA at a service's eventSubURL. SUBSCRIBE and UNSUBSCRIBE

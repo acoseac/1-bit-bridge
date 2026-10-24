@@ -31,7 +31,7 @@ Write-Host "`n=== 3/4 Rebuild bridge.exe (no init -> cert + config preserved) ==
 Push-Location $src
 $env:CGO_ENABLED = '0'
 $ldflags = "-s -w -X github.com/acoseac/1-bit-bridge/internal/version.ServerVersion=$head"
-go build -ldflags $ldflags -o $exe .\cmd\bridge
+go build -tags ts_omit_webclient,ts_omit_debugeventbus -ldflags $ldflags -o $exe .\cmd\bridge
 Pop-Location
 Write-Host "  built: $exe ($((Get-Item $exe).Length) bytes)"
 

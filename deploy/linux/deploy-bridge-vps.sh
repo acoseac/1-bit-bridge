@@ -99,7 +99,7 @@ VER=$(git describe --tags --always)
 echo "    version: $VER"
 
 echo "==> 2/6 Cross-compile linux/amd64"
-GOOS=linux GOARCH=amd64 go build \
+GOOS=linux GOARCH=amd64 go build -tags ts_omit_webclient,ts_omit_debugeventbus \
   -ldflags "-s -w -X github.com/acoseac/1-bit-bridge/internal/version.ServerVersion=$VER" \
   -o "$LOCAL_BIN" ./cmd/bridge
 echo "    built $LOCAL_BIN ($(wc -c < "$LOCAL_BIN") bytes)"

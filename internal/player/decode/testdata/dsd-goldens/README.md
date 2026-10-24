@@ -12,7 +12,7 @@ a scratch directory and point the golden tests at it:
 
 ```sh
 python3 scripts/player-dsd-goldens/generate.py --out /tmp/dsd-goldens
-go test ./internal/player/decode -args -dsd-goldens=/tmp/dsd-goldens
+go test -tags ts_omit_webclient,ts_omit_debugeventbus ./internal/player/decode -args -dsd-goldens=/tmp/dsd-goldens
 ```
 
 The demuxer skips COMT and MANF by their sizes, so no decoding test sees

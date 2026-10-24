@@ -271,6 +271,11 @@
 // IdArrayChanged (Snapshot.Token); Repeat, SetRepeat, Shuffle, SetShuffle;
 // TracksMax (MaxEntries); Id (Snapshot.Selected) and TransportState
 // (Snapshot.State, Pending and Starting); faults 800, 801 and 802 from
-// ReasonIDNotFound, ReasonFull and ReasonIndexNotFound. Time:1 reads
-// Snapshot.Position and Info:1 counts the audible occurrences.
+// ReasonIDNotFound, ReasonFull and ReasonIndexNotFound. Time:1 and Info:1
+// read the occurrence heard (Snapshot.Track: its entry's reference and
+// metadata as it was handed off, and the Details the backend reported of its
+// content, DetailsEvents), Snapshot.Position, and the counts of the
+// occurrences heard and of the changes of their details
+// (Snapshot.TrackCount, DetailsCount), none of which moves the generation
+// (B470 PR 5a3).
 package engine

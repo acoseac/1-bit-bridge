@@ -145,7 +145,7 @@ is_sharded() {
 # names the symptom and hides the cause. (CodeRabbit on #943.)
 names() {
   local out
-  if ! out="$(go test "${RACE_FLAGS[@]}" "$1" -list '.*')"; then
+  if ! out="$(go test -tags ts_omit_webclient,ts_omit_debugeventbus "${RACE_FLAGS[@]}" "$1" -list '.*')"; then
     echo "test-shard: could not list tests in $1" >&2
     return 1
   fi
@@ -257,7 +257,7 @@ run_rest() {
     exit 1
   fi
   echo "test-shard: rest — ${#all[@]} packages on $(cores) cores, ${#SHARDED[@]} sharded elsewhere"
-  go test -p "$(cores)" "${RACE_FLAGS[@]}" "${all[@]}"
+  go test -tags ts_omit_webclient,ts_omit_debugeventbus -p "$(cores)" "${RACE_FLAGS[@]}" "${all[@]}"
 }
 
 # assert_index_is_a_shard <count> <what> — INDEX must be one of the exact
@@ -327,7 +327,7 @@ run_sharded() {
   fi
 
   echo "test-shard: $pkg shard $INDEX/$shards — $mine of $total names"
-  go test "$pkg" "${RACE_FLAGS[@]}" -run "^($(printf '%s\n' "$part" | paste -sd'|' -))\$"
+  go test -tags ts_omit_webclient,ts_omit_debugeventbus "$pkg" "${RACE_FLAGS[@]}" -run "^($(printf '%s\n' "$part" | paste -sd'|' -))\$"
 }
 
 if [ "$GROUP" = rest ]; then
