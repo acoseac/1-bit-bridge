@@ -996,11 +996,15 @@ func TestALiveBindingChangeReportsThePlayersOutputUnavailable(t *testing.T) {
 // (its mailboxes, its log line, then the count), so the engine can have the
 // first snapshot's output, and the test its Play, before that publish is
 // counted: a count read then missed it (B536, CI's "published 1 snapshots").
-// The count is read once the first held reading has arrived: the watcher
-// takes one reading at a time on one goroutine, where it counts each
-// publish, so every reading before that one is counted by then; and that
-// first publish is held at its log line until the test changes the
-// binding, which makes the order certain.
+// The count is read while that first publish is still held at its log
+// line, so it is exact: only the watcher's goroutine publishes here (the
+// service's disabled publish comes only after a stop, which the held reading
+// holds back), every publish before the held one is counted by then, and
+// nothing else can publish until the test lets it go. The test then expects
+// that one publish and no other, so a publish the watcher makes for the
+// changed binding before it reads the box is counted against it too
+// (B536; the second review: a count read once the held reading has arrived
+// would already include such a publish).
 func TestTheLiveConfigReachesThePlayersOutputWithoutAReadingOfTheBox(t *testing.T) {
 	needsDirectorySync(t)
 	first := parkFirstLog(t, "player DAC: available")
@@ -1042,6 +1046,7 @@ func TestTheLiveConfigReachesThePlayersOutputWithoutAReadingOfTheBox(t *testing.
 		t.Fatal(err)
 	}
 	boot := ps.holder.Load().Output.Player.Device
+	publishes := ps.hotplug.Status().Stats.Publishes + 1
 	first.letGo()
 	held.Store(true)
 	ps.livePlayer(t, func(p *config.PlayerConfig) { p.Device = goBarByModel })
@@ -1050,7 +1055,6 @@ func TestTheLiveConfigReachesThePlayersOutputWithoutAReadingOfTheBox(t *testing.
 	case <-serveGiveUp(t):
 		t.Fatal("the watcher took no reading of the changed binding")
 	}
-	publishes := ps.hotplug.Status().Stats.Publishes
 	awaitEngine(t, eng, "binding_changed and playback stopped, the watcher's reading held", func(s *engine.Snapshot) bool {
 		return s.Output().Known && !s.Output().Available && s.Output().Reason == reasonBindingChanged && s.State() == engine.Stopped
 	})
