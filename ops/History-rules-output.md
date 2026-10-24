@@ -129,9 +129,11 @@ read; argv[0]'s basename is `mpd`; root links compare by SameFile, with root
 mount device and root fields as fallback only when links cannot be inspected.
 These are observations, not proof of startup identity or mount equivalence.
 Cmdline is capped at 64 KiB with overflow detection, stat at 64 KiB and
-mountinfo at 1 MiB. All run in the existing single-outstanding bounded config
-step, after the ALSA configuration and MPD status bracket. Failed or late
-steps publish no config or hints. A cached view performs no I/O and retains
+mountinfo at 1 MiB. The configured file is published from the config step
+alone; then hints run in their own single-outstanding bounded step, with
+their own busy flag and 500 ms deadline, after the ALSA configuration and
+MPD status bracket. A failed or late hint omits only hints. A failed or late
+config step publishes neither config nor hints. A cached view performs no I/O and retains
 a separate hint for each card.
 
 MPD 0.24.4 CommandLine.cxx and OptionParser.cxx define options anywhere,
@@ -184,3 +186,31 @@ links for main and nested files, with further nested includes.
 `TestLinkedConfigIncludesUseTheNamedDirectory` and
 `TestLinkedConfigIncludesKeepConfinementAndCycleChecks` retain the round-1
 simple-link, cycle and outside-root controls.
+
+
+### B515 round 4: named reopen, independent hints and confined identities
+
+The production inspection resolves an explicit file for its display path.
+The reading reopens `output.conf` by the configured name, preserving MPD's
+named include directory through inspection and the later reread. Nested
+include diagnostics use the resolved cycle key against the canonical root;
+the unresolved named path still supplies the next include directory.
+
+Hints use `conf.StatHost`: physical resolution and the conf reader's root
+check, followed by a stat beneath an opened root. An unresolved or escaped
+identity omits the hint, and no operand contents are read. Process-relative
+names under `/proc/` or `/dev/fd/`, `/dev/stdin`, and paths resolving there
+omit hints. A hint worker that times out or panics cannot erase the already
+published configured file, nor block fresh configured reads on the next
+reading. One hint worker may remain outstanding; later readings do not
+start a second. The configured block's no-live-dop fallback is read once
+through `namedBlock`, retaining both yes and no behavior.
+
+`TestReadingKeepsInspectNamedConfig`, `TestReadingOmitsProcessRelativeConfigHint`,
+`TestReadingHintOmissionEvidence`, `TestHungHintDoesNotBlockLaterConfigReads`,
+`TestFailedHintKeepsConfiguredFile`,
+`TestReadingHintRefusesAbsoluteLinkOutsideInjectedRoot`,
+`TestNestedIncludeLocationsUnderLinkedRoot` and
+`TestConfiguredDoPVetoWithoutLiveAttribute` pin these paths. The task's
+`report-r4.md` and `controls-r4/` record the red runs, restored controls,
+main comparison and gates.

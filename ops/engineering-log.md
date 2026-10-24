@@ -25,7 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
-- [2026-10-24 — B515: MPD config provenance and includes from linked config paths](#2026-10-24--b515-mpd-config-provenance-and-includes-from-linked-config-paths)
+- [2026-10-24 — B515: configured MPD file, command-line hint and named includes](#2026-10-24--b515-configured-mpd-file-command-line-hint-and-named-includes)
 - [2026-10-24 — B526: three ALSA playback hangs are test sequencing defects](#2026-10-24--b526-three-alsa-playback-hangs-are-test-sequencing-defects)
 - [2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader](#2026-10-24--b525-the-players-identity-file-is-read-without-waiting-a-named-pipe-at-player-uuid-is-refused-at-once-by-every-reader)
 - [2026-10-24 — B470 PR 5a2b: shared discovery for the opt-in OpenHome Source](#2026-10-24--b470-pr-5a2b-shared-discovery-for-the-opt-in-openhome-source)
@@ -141,7 +141,33 @@ reaches a session that has not gone looking for it.
 
 ---
 
-## 2026-10-24 — B515: MPD config provenance and includes from linked config paths
+## 2026-10-24 — B515: configured MPD file, command-line hint and named includes
+
+
+**Current design (rounds 3–4).** The reading describes the bridge's
+configured/discovered file. That file supplies `mpd.config`, config warnings,
+song mapping and the DoP veto when live `dop` is absent. The optional
+`mpd.configHint` describes only the observed command-line operand: `same`,
+`different` with a redacted logical path, `none`, or `no_config`. No operand
+file contents or process environment are read, and no MPD default is inferred.
+Argv is mutable and equal roots do not establish equal mount namespaces;
+the hint proves neither what MPD loaded nor its startup settings.
+
+MPD's include rule keeps the unresolved named directory at every level,
+including the explicit configured name when the reading reopens it after
+inspection. Physical resolution supplies confinement, cycle identity and
+nested diagnostic paths, including through an alias of the root. Hints
+compare only confined physical file identities and omit process-relative
+operands and links into them. Config publication precedes a separately
+bounded hint step: a late or failed hint drops only hints. The configured
+file and its includes plus `output.password` redact every external string.
+The implementation detail and evidence follow in the round-3 and round-4
+records; protocol version remains 1.
+
+### Round 1 provenance design — superseded in round 3 (never shipped)
+
+The following paragraphs record the removed design and its checks; they
+are historical evidence, not the current selection or wire contract.
 
 The output reading previously described the configured/discovered `mpd.conf`
 even when the MPD holding the DAC started with another file. A relative
@@ -197,6 +223,10 @@ at `TestHealthReturns200WithExpectedShape` on sandbox-refused bind, and
 MPD socket fixture tests likewise failed solely on refused TCP/Unix binds.
 The report names every observed refusal. `make docs-check` is recorded in
 the final report after all documentation edits.
+
+### Round 2 provenance design — superseded in round 3 (never shipped)
+
+The following records the second removed design, not current behavior.
 
 Round 2 (2026-10-24): the source copies of MPD 0.24.4 `CommandLine.cxx`,
 `OptionParser.cxx` and `config/File.cxx` were read, replacing round 1's
@@ -60136,3 +60166,33 @@ required; the protocol mirror should be copied with the next companion update.
 Red-first hint values and dangling-include failures, adapted parser/identity,
 include/privacy controls, repeated race tests and the exact gate results are
 recorded in report-r3.md and controls-r3/. No commit or push is part of this round.
+
+
+## 2026-10-24 — B515 round 4: independent hints and configured named paths
+
+The production Inspect-to-reading path reopened a symlink's resolved target,
+so probe and reading could follow different relative includes. The reading
+now reopens the explicit configured name. A shared config/hint deadline also
+discarded a successfully read config when process metadata stalled; config
+publication now precedes a separate hint deadline and busy flag. A late,
+failed or already-running hint omits only hints, and the next reading can
+still refresh the configured file.
+
+Process-relative operands under `/proc/` or `/dev/fd/`, `/dev/stdin`, and
+links resolving there omit hints. Identity comparison uses confined physical
+resolution with `conf.StatHost`, never a second stat of the unresolved
+operand. The static absolute-link escape was already refused by the old
+Exists check; the new path centralizes confinement and identity lookup.
+Nested include diagnostics previously compared an unresolved host name
+against a canonical root; they now use the physical cycle key. The duplicate
+configured DoP scan was replaced by the existing named-block lookup, with
+both configured values pinned when no live attribute is present.
+
+Regressions failed before the fixes; the unchanged absolute-link refusal and
+DoP behavior were green baselines, then tested with deliberate regressions.
+The task's `report-r4.md` and `controls-r4/manifest.json` hold exact red/green
+runs, controls, root behavior comparisons and gates. The original B515 index
+and entry now describe the configured file, informational hint, MPD's include
+rule and redaction; removed round-1/2 provenance designs are explicitly
+superseded in round 3. Backward-compatible protocol change, no iOS change
+required; the protocol mirror remains a companion update.
