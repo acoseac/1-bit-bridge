@@ -4,7 +4,6 @@ package main
 
 import (
 	"bytes"
-	_ "embed"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -12,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -29,20 +29,16 @@ type notice struct {
 	text []byte
 }
 
-// These notices are reviewed against exact module versions. An upgrade (or a
-// replacement) must re-audit the embedded assets before changing this registry.
-//
-//go:embed embedded-web-client.md
-var webClientNotices string
+// Supplements are keyed by reviewed module identity and version. The release
+// tags omit the former webclient and eventbus assets; no supplements remain.
+// Keep this registry for future linked assets, with fixture-tested refusal of
+// unreviewed upgrades and replacements.
+type embeddedNotice struct{ version, text string }
 
-//go:embed embedded-tailscale.md
-var tailscaleNotices string
+var embeddedRegistry = map[string]embeddedNotice{}
 
 func embeddedNotices(m module) (string, error) {
-	registry := map[string]struct{ version, text string }{
-		"github.com/tailscale/web-client-prebuilt": {"v0.0.0-20260917222731-e0ed2d0d0fea", webClientNotices},
-		"tailscale.com": {"v1.104.2", tailscaleNotices},
-	}
+	registry := embeddedRegistry
 	original := m
 	if m.Replace != nil {
 		m = *m.Replace
@@ -65,7 +61,16 @@ func embeddedNotices(m module) (string, error) {
 
 func main() {
 	output := flag.String("output", "THIRD_PARTY_LICENSES.md", "output file")
+	checkTags := flag.Bool("check-build-tags", false, "check release tags in Makefile and Dockerfile")
 	flag.Parse()
+	if *checkTags {
+		if err := checkBuildTags("."); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println("check-build-tags: OK")
+		return
+	}
 	data, counts, err := generate(".")
 	if err == nil {
 		err = os.WriteFile(*output, data, 0644)
@@ -83,6 +88,13 @@ func main() {
 // This is not a general YAML parser: new build settings or YAML forms must fail
 // rather than silently change the set of packages whose notices we ship.
 func releaseTargets(data []byte) ([]string, error) {
+	build, err := releaseBuild(data)
+	return build.targets, err
+}
+
+type releaseConfig struct{ targets, tags []string }
+
+func releaseBuild(data []byte) (releaseConfig, error) {
 	lists := map[string][]string{}
 	scalars := map[string]string{}
 	active, field := false, ""
@@ -102,14 +114,14 @@ func releaseTargets(data []byte) ([]string, error) {
 		}
 		if strings.HasPrefix(line, "  - id: ") {
 			if scalars["id"] != "" {
-				return nil, fmt.Errorf("expected one release build")
+				return releaseConfig{}, fmt.Errorf("expected one release build")
 			}
 			scalars["id"] = strings.TrimPrefix(line, "  - id: ")
 			continue
 		}
 		if strings.HasPrefix(line, "      - ") {
 			if field == "" {
-				return nil, fmt.Errorf("unexpected build list: %s", s)
+				return releaseConfig{}, fmt.Errorf("unexpected build list: %s", s)
 			}
 			lists[field] = append(lists[field], strings.TrimPrefix(line, "      - "))
 			continue
@@ -118,45 +130,57 @@ func releaseTargets(data []byte) ([]string, error) {
 			key, value, ok := strings.Cut(s, ":")
 			value = strings.TrimSpace(value)
 			if !ok {
-				return nil, fmt.Errorf("unsupported build line: %s", s)
+				return releaseConfig{}, fmt.Errorf("unsupported build line: %s", s)
 			}
 			field = ""
 			switch key {
 			case "main", "binary":
 				if scalars[key] != "" {
-					return nil, fmt.Errorf("duplicate build key: %s", key)
+					return releaseConfig{}, fmt.Errorf("duplicate build key: %s", key)
 				}
 				scalars[key] = value
-			case "env", "goos", "goarch", "flags", "ldflags":
+			case "env", "goos", "goarch", "flags", "ldflags", "tags":
 				if value != "" || lists[key] != nil {
-					return nil, fmt.Errorf("expected one block list for %s", key)
+					return releaseConfig{}, fmt.Errorf("expected one block list for %s", key)
 				}
 				lists[key] = []string{}
 				field = key
 			default:
-				return nil, fmt.Errorf("unsupported build setting %q; update licence discovery with release configuration", key)
+				return releaseConfig{}, fmt.Errorf("unsupported build setting %q; update licence discovery with release configuration", key)
 			}
 			continue
 		}
-		return nil, fmt.Errorf("unsupported build line: %s", s)
+		return releaseConfig{}, fmt.Errorf("unsupported build line: %s", s)
 	}
 	if scalars["id"] != "bridge" || scalars["main"] != "./cmd/bridge" || scalars["binary"] != "bridge" || strings.Join(lists["env"], ",") != "CGO_ENABLED=0" || strings.Join(lists["flags"], ",") != "-trimpath" {
-		return nil, fmt.Errorf("expected bridge build with CGO_ENABLED=0 and only -trimpath")
+		return releaseConfig{}, fmt.Errorf("expected bridge build with CGO_ENABLED=0 and only -trimpath")
 	}
 	for _, ldflag := range lists["ldflags"] {
 		if ldflag != "-s -w" && !strings.HasPrefix(ldflag, "-X ") {
-			return nil, fmt.Errorf("unsupported ldflag: %s", ldflag)
+			return releaseConfig{}, fmt.Errorf("unsupported ldflag: %s", ldflag)
+		}
+	}
+	if tags, present := lists["tags"]; present {
+		if len(tags) == 0 {
+			return releaseConfig{}, fmt.Errorf("empty tags list")
+		}
+		seen := map[string]bool{}
+		for _, tag := range tags {
+			if !regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.]*$`).MatchString(tag) || seen[tag] {
+				return releaseConfig{}, fmt.Errorf("invalid or duplicate build tag: %q", tag)
+			}
+			seen[tag] = true
 		}
 	}
 	var targets []string
 	for _, key := range []string{"goos", "goarch"} {
 		if len(lists[key]) == 0 {
-			return nil, fmt.Errorf("empty %s matrix", key)
+			return releaseConfig{}, fmt.Errorf("empty %s matrix", key)
 		}
 		seen := map[string]bool{}
 		for _, value := range lists[key] {
 			if value == "" || strings.ContainsAny(value, " \t#[]{}'\"/") || seen[value] {
-				return nil, fmt.Errorf("invalid or duplicate %s value: %q", key, value)
+				return releaseConfig{}, fmt.Errorf("invalid or duplicate %s value: %q", key, value)
 			}
 			seen[value] = true
 		}
@@ -167,7 +191,7 @@ func releaseTargets(data []byte) ([]string, error) {
 		}
 	}
 	sort.Strings(targets)
-	return targets, nil
+	return releaseConfig{targets: targets, tags: lists["tags"]}, nil
 }
 
 func sortedKeys[V any](m map[string]V) []string {
@@ -190,10 +214,11 @@ func generate(root string) ([]byte, map[string]int, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	targets, err := releaseTargets(config)
+	build, err := releaseBuild(config)
 	if err != nil {
 		return nil, nil, err
 	}
+	targets := build.targets
 	modules := map[string]module{}
 	counts := map[string]int{}
 	goBin := filepath.Join(runtime.GOROOT(), "bin", "go")
@@ -216,7 +241,7 @@ func generate(root string) ([]byte, map[string]int, error) {
 	}
 	for _, target := range targets {
 		goos, arch, _ := strings.Cut(target, "/")
-		cmd := exec.Command(goBin, "list", "-mod=readonly", "-deps", "-json", "./cmd/bridge")
+		cmd := exec.Command(goBin, "list", "-mod=readonly", "-deps", "-json", "-tags="+strings.Join(build.tags, ","), "./cmd/bridge")
 		cmd.Dir = root
 		// Preserve the checked build environment, including persisted go env values.
 		// Only the release matrix and its explicit CGO setting vary by target.

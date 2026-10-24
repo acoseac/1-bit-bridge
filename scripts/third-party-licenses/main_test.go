@@ -136,7 +136,7 @@ func TestStableOrder(t *testing.T) {
 func TestBuildConfigFailsClosed(t *testing.T) {
 	for _, edit := range []struct{ old, new string }{
 		{"CGO_ENABLED=0", "CGO_ENABLED=1"},
-		{"    flags:", "    tags:\n      - custom\n    flags:"},
+		{"    flags:", "    unknown:\n      - custom\n    flags:"},
 		{"      - -trimpath", "      - -race"},
 		{"    goarch:", "    ignore:\n      - goos: windows\n    goarch:"},
 		{"    main: ./cmd/bridge", "    main: ./cmd/other"},
@@ -440,12 +440,16 @@ func TestVendorRefused(t *testing.T) {
 }
 
 func TestEmbeddedNotices(t *testing.T) {
+	saved := embeddedRegistry
+	t.Cleanup(func() { embeddedRegistry = saved })
+	embeddedRegistry = map[string]embeddedNotice{
+		"example.com/assets": {"v1.0.0", "fixture component A; full notice A\nfixture component B; full notice B\n"},
+	}
 	for _, tc := range []struct {
 		path, version string
 		wants         []string
 	}{
-		{"github.com/tailscale/web-client-prebuilt", "v0.0.0-20260917222731-e0ed2d0d0fea", []string{"React", "React DOM", "scheduler", "classnames", "use-sync-external-store", "Inter", "Permission is hereby granted", "Copyright (c) 2018 Jed Watson.", "SIL OPEN FONT LICENSE"}},
-		{"tailscale.com", "v1.104.2", []string{"htmx", "2.0.4", "htmx-ext-ws", "2.0.2", "Permission to use, copy, modify", "Josh Comeau"}},
+		{"example.com/assets", "v1.0.0", []string{"fixture component A; full notice A", "fixture component B; full notice B"}},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
 			root := t.TempDir()

@@ -96,6 +96,7 @@ ARG TARGETARCH
 ENV CGO_ENABLED=0
 
 RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+    -tags ts_omit_webclient,ts_omit_debugeventbus \
     -trimpath \
     -ldflags="-s -w -X github.com/acoseac/1-bit-bridge/internal/version.ServerVersion=${VERSION}" \
     -o /out/bridge \

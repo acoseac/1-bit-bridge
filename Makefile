@@ -1,9 +1,12 @@
-.PHONY: build build-all test test-fast measure-dsd check fmt vet clean run check-go-version check-buildx docker docs-check
+.PHONY: build build-all test test-fast measure-dsd check fmt vet clean run check-go-version check-build-tags check-buildx docker docs-check
 
 BINARY      := bridge
 IMAGE       := 1-bit-bridge
 PKG         := ./cmd/bridge
 DIST        := dist
+
+# Mirror .goreleaser.yaml; check-build-tags refuses drift.
+override GO_TAGS := ts_omit_webclient,ts_omit_debugeventbus
 
 # P bounds Go's build/test parallelism (the `-p` flag). The `-race` test
 # build plus the 6-target cross-compile spike peak RAM enough to OOM a
@@ -29,17 +32,17 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w \
 	-X github.com/acoseac/1-bit-bridge/internal/version.ServerVersion=$(VERSION)
 
-build:
-	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) $(PKG)
+build: check-build-tags
+	go build -tags "$(GO_TAGS)" -ldflags "$(LDFLAGS)" -o bin/$(BINARY) $(PKG)
 
-build-all:
+build-all: check-build-tags
 	@mkdir -p $(DIST)
-	GOOS=darwin  GOARCH=arm64 go build -p $(P) -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-arm64  $(PKG)
-	GOOS=darwin  GOARCH=amd64 go build -p $(P) -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-amd64  $(PKG)
-	GOOS=linux   GOARCH=arm64 go build -p $(P) -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-arm64   $(PKG)
-	GOOS=linux   GOARCH=amd64 go build -p $(P) -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-amd64   $(PKG)
-	GOOS=windows GOARCH=amd64 go build -p $(P) -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-windows-amd64.exe $(PKG)
-	GOOS=windows GOARCH=arm64 go build -p $(P) -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-windows-arm64.exe $(PKG)
+	GOOS=darwin  GOARCH=arm64 go build -tags "$(GO_TAGS)" -p $(P) -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-arm64  $(PKG)
+	GOOS=darwin  GOARCH=amd64 go build -tags "$(GO_TAGS)" -p $(P) -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-darwin-amd64  $(PKG)
+	GOOS=linux   GOARCH=arm64 go build -tags "$(GO_TAGS)" -p $(P) -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-arm64   $(PKG)
+	GOOS=linux   GOARCH=amd64 go build -tags "$(GO_TAGS)" -p $(P) -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-linux-amd64   $(PKG)
+	GOOS=windows GOARCH=amd64 go build -tags "$(GO_TAGS)" -p $(P) -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-windows-amd64.exe $(PKG)
+	GOOS=windows GOARCH=arm64 go build -tags "$(GO_TAGS)" -p $(P) -ldflags "$(LDFLAGS)" -o $(DIST)/$(BINARY)-windows-arm64.exe $(PKG)
 
 # Full pre-push gate's test step: race-enabled, parallelism-capped (see P).
 # -timeout 30m (not the default 10m/package): internal/adminauth's suite pays
@@ -49,14 +52,14 @@ build-all:
 # timeout goroutine-dump landed, not a hang). The race detector still catches a
 # genuine deadlock at the 30m ceiling.
 test:
-	go test -p $(P) -race -timeout 30m ./...
+	go test -tags "$(GO_TAGS)" -p $(P) -race -timeout 30m ./...
 
 # Fast inner-loop tests: no race detector — much faster to build and a
 # fraction of the RAM, so it won't thrash on a loaded machine. Use while
 # iterating; run `make test` (race) before pushing. A single package is
-# faster still: `go test ./internal/<pkg>/`.
+# faster still: `go test -tags "$(GO_TAGS)" ./internal/<pkg>/`.
 test-fast:
-	go test -p $(P) ./...
+	go test -tags "$(GO_TAGS)" -p $(P) ./...
 
 # The DSD render measurements. Gated behind BRIDGE_DSD_FIXTURE_TESTS because
 # they need a real sox + ffmpeg (with the four dsd_* decoders); they SKIP
@@ -71,7 +74,7 @@ test-fast:
 # delta +0.00 dB faithful / +0.38 dB compact, rendition -0.97 dBTP at a
 # +5.00 dB applied gain. Under three seconds once the toolchain is there.
 measure-dsd:
-	BRIDGE_DSD_FIXTURE_TESTS=1 go test ./internal/transcode/ \
+	BRIDGE_DSD_FIXTURE_TESTS=1 go test -tags "$(GO_TAGS)" ./internal/transcode/ \
 		-run 'TestDSDRender_|TestDSDLowpass|TestRunDSD' -count=1 -v
 
 # Per-change gate: format + vet + race tests, WITHOUT the 6-target
@@ -92,20 +95,24 @@ fmt:
 	go fmt ./...
 
 vet:
-	go vet ./...
+	go vet -tags "$(GO_TAGS)" ./...
 
 clean:
 	rm -rf bin $(DIST)
 
 run:
-	go run $(PKG) serve --config config/bridge.yaml.example
+	go run -tags "$(GO_TAGS)" $(PKG) serve --config config/bridge.yaml.example
+
+# GoReleaser owns the tags; this also runs in gate.yml via check-go-version.
+check-build-tags:
+	go run ./scripts/third-party-licenses -check-build-tags
 
 # Guard: the Dockerfile's `ARG GO_VERSION` major.minor MUST match go.mod's
 # `go` directive. The alpine golang image sets GOTOOLCHAIN=local, so a stale
 # ARG fails the image build with "go.mod requires go >= X" rather than
 # auto-downloading a toolchain (this broke the first v0.1.7 image). CI runs
 # this via .github/workflows/gate.yml; run it locally before bumping either.
-check-go-version:
+check-go-version: check-build-tags
 	@gomod=$$(awk '/^go /{print $$2; exit}' go.mod); \
 	dockerfile=$$(awk -F= '/^ARG GO_VERSION=/{print $$2; exit}' Dockerfile); \
 	gomm=$$(printf '%s' "$$gomod" | cut -d. -f1-2); \

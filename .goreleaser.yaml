@@ -62,6 +62,10 @@ builds:
   - id: bridge
     main: ./cmd/bridge
     binary: bridge
+    # Authoritative release tags; check-build-tags guards Make and Docker.
+    tags:
+      - ts_omit_webclient
+      - ts_omit_debugeventbus
     env:
       - CGO_ENABLED=0
     goos:

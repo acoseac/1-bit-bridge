@@ -15,7 +15,7 @@ name: gate
 # clock was one package's sequential runtime. A
 # tiny `gate` job fans them back into one green signal (convenient if `main`
 # ever gains a required-status-check rule; today it has none). `go-version` is
-# a fast text check (no Go toolchain) that keeps the Dockerfile's ARG
+# a release-config check that keeps build tags aligned and Dockerfile's ARG
 # GO_VERSION in step with go.mod — a stale pair breaks the image build under
 # GOTOOLCHAIN=local (it broke the first v0.1.7 image).
 #
@@ -275,9 +275,8 @@ jobs:
       - name: build-all (cross-compile)
         run: make build-all P=$(nproc)
 
-  # Text-only guard: the Dockerfile's `ARG GO_VERSION` major.minor must match
-  # go.mod's `go` directive (GOTOOLCHAIN=local makes a stale pair a hard image
-  # build failure). No Go toolchain / cache needed — awk + cut in a Make target.
+  # Release configuration guard: Go version plus build tags. The tag reader
+  # shares the notice generator's stdlib-only code and needs the pinned Go.
   go-version:
     name: go-version sync
     runs-on: ubuntu-latest
@@ -287,7 +286,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Dockerfile GO_VERSION matches go.mod
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Release build tags and Dockerfile GO_VERSION agree
         run: make check-go-version
 
   # The instruction-file budgets (see the header). Python 3 stdlib only, which
