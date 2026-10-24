@@ -376,7 +376,8 @@ false, so the missing-mark warning still fires, and a listed floor that is
 missing or corrupt keeps its refusal. Restore then writes max(ceiling, live)
 + 2^24 + r. The 2^24 term covers a source that upgraded and adopted after its
 snapshot: adopted at the largest draw and started once, its durable floor is
-2^31 + 2^24 + 8,191, below the restored 2^31 + 2^25. Codex's 8,193-start main-era
+2,164,273,151 (2^31 + 2^24 + 12,287, as measured), below the restored
+2^31 + 2^25. Codex's 8,193-start main-era
 sequence now restores at exactly 2^31 + 2^25 with draw zero and
 2^31 + 2^25 + 2^24 - 1 with the largest; it restored at 2^24 before.
 
