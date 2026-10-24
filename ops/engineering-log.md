@@ -60263,8 +60263,8 @@ or more; with 21 digits allowed, the two 21-digit rows.
 Codex, reviewing that round, found one more of resolve's readings: once
 base 0 refuses a text, a binary or octal prefix followed by a sign
 (`!!float 0b+11110`, `!!float 0o-36`) is read by `strconv.ParseInt` of
-what follows the prefix, in its base, so yaml.v3 decodes 30 where the
-round refused the file. `writtenInteger` now runs the same fallback, its
+what follows the prefix, in its base, so yaml.v3 decodes 30 and -30
+where the round refused the file. `writtenInteger` now runs the same fallback, its
 `0b`, `-0b`, `0o` and `-0o` branches as resolve writes them. Red first:
 that behaviour case and four rows of the unit test, and nothing else; the
 same five went red with the fallback disabled on the committed fix.
