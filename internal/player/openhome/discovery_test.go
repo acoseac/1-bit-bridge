@@ -83,7 +83,8 @@ func sourceGroup() dlna.SSDPDatagram {
 }
 
 // TestSourceDiscoveryIdentityAndSearches reaches the real registration and HTTP
-// surface through the LOCATION in its packets, with every action still 602.
+// surface through the LOCATION in its packets, a read there answered 501 by a
+// surface that has no engine (B470 PR 5a3; 602 before the reads).
 func TestSourceDiscoveryIdentityAndSearches(t *testing.T) {
 	s, box, n := discoveryRig(t, eth0, eth0b)
 	alive := packets(n, "NTS", "ssdp:alive")
@@ -138,7 +139,7 @@ func TestSourceDiscoveryIdentityAndSearches(t *testing.T) {
 	}
 	body, _ := io.ReadAll(response.Body)
 	_ = response.Body.Close()
-	if response.StatusCode != 500 || !strings.Contains(string(body), "<errorCode>602</errorCode>") {
+	if response.StatusCode != 500 || !strings.Contains(string(body), "<errorCode>501</errorCode>") {
 		t.Fatalf("SOAP: %d %s", response.StatusCode, body)
 	}
 	for _, target := range expected {
