@@ -4192,6 +4192,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		SSDP:     ssdpSubsystem,
 	})
 
+	// GET /v1/outputs lists the player as its element of kind bridge, and
+	// /v1/health advertises bridgeOutput while the plan lists it (B470 PR
+	// 5b): the route's view over this plan and this player, installed
+	// before the API listeners start, whether or not the plan starts it.
+	// It starts no route, probes nothing, and shows no checklist: those
+	// stay on the MPD gate above.
+	apiSrv.WithBridgeOutput(newBridgeOutput(playerPlan, player, cfg))
+
 	// DLNA MediaServer (opt-in, LAN-only). Starts a parallel
 	// http.Server on its own port + an SSDP advertiser so any DLNA
 	// renderer (Chord 2go, Lumin, Bluesound, etc.) on the LAN can
