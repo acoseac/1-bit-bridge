@@ -3010,10 +3010,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	defer dataDirLock.done()
 	// Adopt pre-floor identities before any live backup can run, even with
 	// playback disabled. A pristine box still gets no player identity here.
+	var playerStateErr error
 	if lockErr == nil {
 		if err := backup.AdoptPlayerState(cfg.DataDir); err != nil {
-			fmt.Fprintf(stderr, "serve: player state: %v\n", err)
-			return 1
+			playerStateErr = err
+		} else {
+			playerStateErr = backup.CheckPlayerStart(cfg.DataDir)
+		}
+		if playerStateErr != nil {
+			playerLog.Warn("player: not started", "reason", playerStateErr.Error())
 		}
 	}
 
@@ -4148,6 +4153,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 			playerPlan.off = strings.Replace(playerPlan.off, "for listenAddress:", "for listenAddress, set by --addr:", 1)
 		}
 	}
+	if playerStateErr != nil {
+		playerPlan = servePlayerPlan{off: playerStateErr.Error(), told: true}
+	}
+
 	var playerFeed *hotplug.Feed
 	if playerPlan.start {
 		playerFeed = hotplug.NewFeed()

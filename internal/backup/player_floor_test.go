@@ -369,8 +369,8 @@ func TestLocalPlayerMarkersAreStrictAndNeverRewritten(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, "player-initialized"), []byte(body), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := backup.EnsurePlayerUUID(dir); err == nil {
-			t.Fatalf("accepted marker %q", body)
+		if _, _, err := backup.EnsurePlayerUUID(dir); err == nil || !strings.Contains(err.Error(), "newer bridge") {
+			t.Fatalf("newer marker %q did not name the newer-bridge remedy: %v", body, err)
 		}
 	}
 	dir := t.TempDir()

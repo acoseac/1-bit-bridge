@@ -329,8 +329,14 @@ func TestBothLocalMarkersRefuseOnlyWholeNewerVersions(t *testing.T) {
 					}
 					return
 				}
+				if name == "player-initialized" && (body == "" || body == `{"version":9`) {
+					if err == nil || !strings.Contains(err.Error(), "damaged") || strings.Contains(err.Error(), "newer bridge") {
+						t.Fatalf("damaged initialization must turn off only the player: %v", err)
+					}
+					return
+				}
 				if err != nil {
-					t.Fatalf("damaged marker was not conservative: %v", err)
+					t.Fatalf("compatible marker refused: %v", err)
 				}
 			})
 		}

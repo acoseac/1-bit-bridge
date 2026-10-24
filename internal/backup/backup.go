@@ -63,6 +63,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/version"
@@ -174,7 +175,9 @@ type Targets struct {
 func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 	if src.PlayerUUID != "" {
 		if err := completeCapturedPlayerSeal(filepath.Dir(src.PlayerUUID)); err != nil {
-			return "", err
+			// Local repair is not part of a snapshot. The captured UUID/floor
+			// pairing checks below still decide whether its identity is safe.
+			logging.Component("backup").Warn("player seal completion deferred", "reason", err.Error())
 		}
 	}
 	if src.DataDir == "" {
@@ -352,10 +355,9 @@ func Restore(snapshotDir string, dst Targets) error {
 // RestoreWithOptions restores with an optional warning sink and random source.
 // Like Restore, its caller must hold the data directory's exclusive lock.
 func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) error {
+	var completionErr error
 	if dst.PlayerUUID != "" {
-		if err := completePlayerSeal(filepath.Dir(dst.PlayerUUID)); err != nil {
-			return err
-		}
+		completionErr = completePlayerSeal(filepath.Dir(dst.PlayerUUID))
 	}
 	m, err := readManifest(filepath.Join(snapshotDir, ManifestFile))
 	if err != nil {
@@ -405,6 +407,9 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 		}
 	}
 	if playerUUIDRead {
+		if completionErr != nil {
+			return completionErr
+		}
 		if err := restorePlayerReservation(snapshotDir, dst.PlayerUUID, playerUUID, m, opts); err != nil {
 			return err
 		}

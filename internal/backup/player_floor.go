@@ -131,28 +131,48 @@ func sealPlayerMarker(dir, name string) error {
 // adding independent evidence; never turn a consumed exemption back on.
 func completePlayerSeal(dir string) error {
 	sealed, err := readPlayerMarker(dir, playerFloorDiscarded)
-	if err != nil || !sealed {
+	if err != nil {
 		return err
 	}
 	present, valid, m, err := playerMarkerState(dir, playerInitialized)
-	if err != nil || m.Sealed {
+	if err != nil || !sealed && !m.Sealed {
 		return err
 	}
-	if err := ensurePlayerMarker(dir, playerFloorDiscarded); err != nil {
-		return err
+	if valid && m.Sealed && m.Minted {
+		return nil
 	}
-	if present && !valid {
-		return errors.New("player-initialized is damaged: move it aside and run bridge reset-player --discard-floor")
-	}
-	for _, name := range []string{engine.ReservationFileName, config.PlayerUUIDFile, "player-queue.json"} {
-		present, err := playerEntry(dir, name)
-		if err != nil {
+	if sealed {
+		if err := ensurePlayerMarker(dir, playerFloorDiscarded); err != nil {
 			return err
 		}
-		m.Minted = m.Minted || present
 	}
+	// A damaged second record still counts as present. Keep it for the
+	// conservative start checks and explicit discard; the first seal is durable.
+	if present && !valid {
+		return nil
+	}
+	evidence, err := playerAllocationEvidence(dir)
+	if err != nil {
+		return err
+	}
+	if m.Sealed && !evidence {
+		return nil
+	}
+	m.Minted = m.Minted || evidence
 	m.Version, m.Sealed = 1, true
 	return writePlayerMarker(dir, m)
+}
+
+// playerAllocationEvidence spends a sealed marker's one-shot exemption even
+// when an older writer left no minted bit. Entry presence alone is evidence.
+func playerAllocationEvidence(dir string) (bool, error) {
+	for _, name := range []string{engine.ReservationFileName, config.PlayerUUIDFile, "player-queue.json"} {
+		present, err := playerEntry(dir, name)
+		if err != nil || present {
+			return present, err
+		}
+	}
+	return false, nil
 }
 
 func writePlayerMarker(dir string, m playerMarker) error {
@@ -196,13 +216,26 @@ func AdoptPlayerState(dir string) error {
 // every lifecycle writer. A normal live backup needs no exclusive lock.
 func completeCapturedPlayerSeal(dir string) error {
 	sealed, err := readPlayerMarker(dir, playerFloorDiscarded)
-	if err != nil || !sealed {
+	if err != nil {
 		return err
 	}
-	_, _, m, err := playerMarkerState(dir, playerInitialized)
-	if err != nil || m.Sealed {
+	present, valid, m, err := playerMarkerState(dir, playerInitialized)
+	if err != nil || !sealed && !m.Sealed || valid && m.Sealed && m.Minted {
 		return err
 	}
+	if present && !valid {
+		if sealed {
+			return ensurePlayerMarker(dir, playerFloorDiscarded)
+		}
+		return nil
+	}
+	if m.Sealed {
+		evidence, err := playerAllocationEvidence(dir)
+		if err != nil || !evidence {
+			return err
+		}
+	}
+
 	f, err := fsutil.OpenLockFile(dir, "server.lock")
 	if err != nil {
 		return err
@@ -356,6 +389,12 @@ func CheckPlayerStart(dir string) error {
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	if present, valid, _, err := playerMarkerState(dir, playerInitialized); err != nil {
+		return err
+	} else if present && !valid {
+		return errors.New("player-initialized is damaged: move it aside and run bridge reset-player --discard-floor")
+	}
+
 	if floor.Exhausted() {
 		return fmt.Errorf("player counter floor is exhausted; %s", playerResetAdvice(false))
 	}
@@ -388,7 +427,11 @@ func EnsurePlayerUUID(dir string) (string, bool, error) {
 		if unstarted, err := unstartedPlayer(dir); err != nil {
 			return "", false, err
 		} else if unstarted {
-			want, err := jumpedPlayerReservation(id, engine.Reservation{}, engine.Reservation{}, (RestoreOptions{}).randomSource())
+			// No old floor bounds this identity. Skip the lower half of counter
+			// space, including reservations skipped at every restart. Restore's
+			// smaller jump needs a known bound, which adoption does not have.
+			base := engine.Reservation{IDs: 1<<31 - uint32(restoreMargin), Tokens: 1<<31 - uint32(restoreMargin)}
+			want, err := jumpedPlayerReservation(id, base, base, (RestoreOptions{}).randomSource())
 			if err != nil {
 				return "", false, err
 			}
