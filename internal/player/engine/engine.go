@@ -115,6 +115,9 @@ type seams struct {
 	admitted     func(c *command)
 	applied      func(op string)
 	handled      func(what string)
+	// checked sees a command whose context the owner found alive, before it
+	// decides the command's admission (command.admission).
+	checked func(c *command)
 	// replying sees each reply as it is sent, with the snapshot published
 	// then; writerWaits, the queue file writer about to wait, with the
 	// newest revision it has seen.

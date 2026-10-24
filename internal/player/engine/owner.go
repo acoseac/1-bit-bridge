@@ -412,6 +412,9 @@ func (e *Engine) admit(c *command) {
 		e.answer(c, reply{err: notAdmitted(c.op.String(), err)})
 		return
 	}
+	if e.sm.checked != nil {
+		e.sm.checked(c)
+	}
 	if !c.admission.CompareAndSwap(admissionPending, admissionAdmitted) {
 		// Its caller abandoned it once its context ended, between the look
 		// above and this one.

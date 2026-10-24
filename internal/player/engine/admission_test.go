@@ -54,6 +54,52 @@ func TestACommandHeldBeforeItsAdmissionPastItsCallersDeadlineDidNotRun(t *testin
 	}
 }
 
+// TestACommandWhoseContextEndsAsTheOwnerAdmitsItDidNotRun pins the decision's
+// other window: the owner has found the command's context alive (it is held at
+// the checked seam, before it admits it) when the caller's context ends. The
+// caller abandons it and is told it did not run, and the owner, finding it
+// abandoned, refuses it: it never runs, though its context was alive when the
+// owner looked.
+func TestACommandWhoseContextEndsAsTheOwnerAdmitsItDidNotRun(t *testing.T) {
+	h := newHarness(t)
+	reached, release := make(chan struct{}, 1), newGate()
+	h.tweak = func(c *Config) {
+		c.seams.checked = func(cmd *command) {
+			if cmd.op != opInsert {
+				return
+			}
+			reached <- struct{}{}
+			<-release
+		}
+	}
+	h.boot()
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			release.open()
+		}
+	})
+	ctx, cancel := context.WithCancel(bg)
+	defer cancel()
+	insert := async(func() error { _, err := h.eng.InsertAfter(ctx, 0, ref("a"), nil); return err })
+	select {
+	case <-reached:
+	case <-time.After(*watchdog):
+		t.Fatalf("waited %v for the owner to find the insert's context alive", *watchdog)
+	}
+	cancel()
+	err := h.result("the insert its caller abandoned", insert)
+	if !errors.Is(err, ErrNotAdmitted) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("the insert whose context ended as the owner admitted it: %v; want a cancellation wrapping ErrNotAdmitted", err)
+	}
+	release.open()
+	h.must("a command after it", h.eng.SetRepeat(bg, false))
+	if n := h.snap().Len(); n != 0 {
+		t.Fatalf("the insert its caller was told did not run ran: the queue holds %d entries", n)
+	}
+}
+
 // TestACommandAdmittedBeforeItsCallersDeadlineMayHaveRun pins the other side:
 // an insert the owner admitted and parked on a reservation write that has not
 // landed, whose caller's context then ends, is answered cancelled without
