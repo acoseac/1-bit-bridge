@@ -160,9 +160,12 @@ func TestAWholeNumberSettingTakesNoFraction(t *testing.T) {
 // a float outside its range, made value free: on
 // limits.manifest.requestsPerMinute, where 0 and a negative number turn the
 // manifest limit off, 0.5 loaded as 0 and -.inf as the smallest int64, each
-// a limit nobody wrote turned off. A fraction is refused wherever the
-// decoder takes it from, through a merge key or an alias, and every one in
-// the file is named, at its line.
+// a limit nobody wrote turned off. What is weighed is the value the text
+// writes, exactly, never the float64 strconv.ParseFloat rounds it to: that
+// made 6.0000000000000001 a 6, 1e-400 a 0, which turned the limit off too,
+// and 9007199254740993.0 a 9007199254740992. A fraction is refused wherever
+// the decoder takes it from, through a merge key or an alias, and every one
+// in the file is named, at its line.
 func TestAWholeNumberSettingTakesWhatDecodesUnchanged(t *testing.T) {
 	const path = "limits.manifest.requestsPerMinute"
 	for _, tc := range []struct {
@@ -183,6 +186,11 @@ func TestAWholeNumberSettingTakesWhatDecodesUnchanged(t *testing.T) {
 		{"a fraction that loaded as 0", "0.5", 0, true},
 		{"a negative fraction", "-0.5", 0, true},
 		{"a fraction past a whole number", "6.000001", 0, true},
+		{"a fraction ParseFloat rounds to a whole number", "6.0000000000000001", 0, true},
+		{"a fraction ParseFloat rounds to zero", "1e-400", 0, true},
+		{"a fraction too small for big.Rat to read", "1e-1000000000", 0, true},
+		{"a whole number ParseFloat rounds to another", "9007199254740993.0", 0, true},
+		{"a whole number a float64 holds exactly", "9007199254740992.0", 9007199254740992, false},
 		{"minus infinity", "-.inf", 0, true},
 		{"infinity", ".inf", 0, true},
 		{"not a number", ".nan", 0, true},

@@ -354,7 +354,10 @@ func TestASerialInTheWrongFieldIsNeverQuoted(t *testing.T) {
 // fraction, and any float yaml.v3 would change on the way in, leaves the
 // block unread as a word there does: the load goes on, the player is off,
 // the reason names the setting and its line and quotes nothing of the
-// value, and a save writes the block back as the file held it. An integer
+// value, and a save writes the block back as the file held it. What is
+// weighed is the value written, exactly, never the float64 it rounds to:
+// pauseReleaseSeconds: 45.0000000000000001 read as 45, and
+// device.pcmDevice: 1e-400 as 0. An integer
 // reads as written, and so does a float whose value is whole (45.0, and 08,
 // which yaml.v3 resolves as a float); left out, the setting is its default.
 // Each subtest is named for the kind of value, never the value.
@@ -376,11 +379,11 @@ func TestAWholeNumberOfThePlayerTakesNoFraction(t *testing.T) {
 		refused             []string
 	}{
 		{"pauseReleaseSeconds", "", "    ", func(p PlayerConfig) int { return int(p.PauseRelease() / time.Second) }, DefaultPauseReleaseSeconds,
-			[]readsAs{{"45", 45}, {"45.0", 45}, {"4.5e1", 45}}, []string{"45.75", "0.5", "-.inf"}},
+			[]readsAs{{"45", 45}, {"45.0", 45}, {"4.5e1", 45}}, []string{"45.75", "0.5", "-.inf", "45.0000000000000001"}},
 		{"openhomePort", "    openhome: true\n", "    ", PlayerConfig.EffectiveOpenHomePort, DefaultOpenHomePort,
-			[]readsAs{{"7793", 7793}, {"7793.0", 7793}}, []string{"7792.9", "7793.25"}},
+			[]readsAs{{"7793", 7793}, {"7793.0", 7793}}, []string{"7792.9", "7793.25", "7793.0000000000001"}},
 		{"device.pcmDevice", device, "      ", func(p PlayerConfig) int { return p.Device.PCMDevice }, 0,
-			[]readsAs{{"1", 1}, {"08", 8}}, []string{"1.5", "0.75"}},
+			[]readsAs{{"1", 1}, {"08", 8}}, []string{"1.5", "0.75", "1e-400"}},
 		{"device.subdevice", device, "      ", func(p PlayerConfig) int { return p.Device.Subdevice }, 0,
 			[]readsAs{{"2", 2}, {"2.0", 2}}, []string{"2.5", "0.25"}},
 	} {
