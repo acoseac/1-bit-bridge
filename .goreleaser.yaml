@@ -10,7 +10,7 @@
 #   darwin and linux is a single matrix with no toolchain juggling.
 # - go:embed pulls the admin console's templates + static assets into
 #   the binary at build time. No runtime file-system dependencies; the
-#   tarball is a single binary plus LICENSE / README.
+#   archives include the binary, README, protocol and licence notices.
 
 version: 2
 
@@ -19,6 +19,8 @@ project_name: 1-bit-bridge
 before:
   hooks:
     - go mod tidy
+    # Recompute from every release target after dependency resolution.
+    - go run ./scripts/third-party-licenses
     # Hard-fail when macOS signing is enabled but APPLE_TEAM_ID is unset.
     # Without this, the .goreleaser.yaml ldflags below silently inject an
     # empty appleTeamIDOverride, which disables the Team-ID equality check
@@ -118,6 +120,7 @@ archives:
     files:
       - README.md
       - LICENSE
+      - THIRD_PARTY_LICENSES.md
       - PROTOCOL.md
 
 checksum:
