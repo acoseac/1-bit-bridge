@@ -1,8 +1,8 @@
 // Package trackref is the one parser of what names one of the bridge's own
 // tracks to its player (B470 PR 5a4): the URI of the track's /dlna/file/
 // route, as an OpenHome controller inserts it, and the reference the
-// player's engine keeps for an entry, that URI in its canonical form or the
-// bare track id serve's player and bridge output play wrote before it.
+// player's engine keeps for an entry, that URI as it was sent or the bare
+// track id serve's player and bridge output play wrote before it.
 //
 // A URI is taken only in its canonical form, byte for byte but for the case
 // of a name:
@@ -30,9 +30,12 @@
 // rules read as an ASCII name it is not. An internationalized name is taken
 // in its punycode form alone; the rest of the form (the scheme, an address,
 // the port, the path) is ASCII by its grammar, so every URI taken is ASCII.
-// URI.String is the canonical form: the URI with its name lower-cased, byte
-// by byte as ASCII, which is what an Insert stores and Read returns, never
-// the spelling a controller sent.
+// URI.String is the canonical form, the URI with its name lower-cased byte by
+// byte, in which two spellings of one URI compare. A URI taken differs from
+// it in the ASCII case of its name alone (Parse folds nothing else: the
+// scheme, the path and an address are matched exactly), so it names the same
+// host and track as sent, and an Insert stores it as sent (B470 PR 5a4,
+// round 3), which is what Read returns.
 //
 // The length is checked first: a string past MaxLength bytes, the engine's
 // longest reference, is ErrTooLong whatever its shape.
@@ -81,8 +84,8 @@ type URI struct {
 }
 
 // String is the URI's canonical form: the URI as it was sent, but for a name
-// in capitals, which it writes lower-cased. It is what an Insert stores
-// (B470 PR 5a4, round 2), and Parse takes it back to the same URI.
+// in capitals, which it writes lower-cased; Parse takes it back to the same
+// URI. An Insert stores the URI as sent, not this (B470 PR 5a4, round 3).
 func (u URI) String() string {
 	host := u.Name
 	if u.Addr.IsValid() {

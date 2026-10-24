@@ -3,6 +3,7 @@ package trackref
 import (
 	"errors"
 	"net/netip"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -82,6 +83,9 @@ func TestOnlyTheCanonicalFormIsAURI(t *testing.T) {
 		}
 		if got, err := ParseStored(tc.uri); err != nil || got != id {
 			t.Errorf("%s as a stored reference: %q, %v", tc.uri, got, err)
+		}
+		if _, err := engine.NewReference(tc.uri); err != nil {
+			t.Errorf("%s, as an Insert stores it (round 3), is no engine reference: %v", tc.uri, err)
 		}
 	}
 	for _, tc := range []struct{ why, uri string }{
@@ -213,8 +217,11 @@ func TestAStoredReferenceIsAURIOrABareID(t *testing.T) {
 // itself; its host is an address in its canonical form (never IPv4-mapped or
 // zoned) or a lower-case ASCII name, never both; its port is not 0 and its
 // id a track id; and ParseStored names the same id from the input and from
-// its serialization. Round 2 replaced the oracle that a taken URI reads back
-// as its input byte for byte: an Insert now stores the canonical form.
+// its serialization (round 2). Round 3: an Insert stores the URI as sent, so
+// every spelling Parse takes is one the engine stores and an open reads: it
+// differs from its serialization in its host alone (the scheme, the port and
+// the path byte for byte the same, so Parse folds nothing but a name's case),
+// engine.NewReference takes it, and ParseStored names Parse's id from it.
 func FuzzParse(f *testing.F) {
 	for _, s := range []string{"http://192.168.1.20:7790/dlna/file/" + id, "http://[fd00::1]:7790/dlna/file/" + id,
 		"http://Bridge.Local:7790/dlna/file/" + id, "http://192.168.001.020:7790/dlna/file/" + id, id, "",
@@ -254,7 +261,15 @@ func FuzzParse(f *testing.F) {
 		if err != nil || again != u || again.String() != c {
 			t.Fatalf("%q's serialization %q does not parse to itself: %+v, %v", s, c, again, err)
 		}
+		tail := ":" + strconv.Itoa(int(u.Port)) + filePrefix + u.ID
+		if !strings.HasPrefix(s, scheme) || !strings.HasSuffix(s, tail) || !strings.HasSuffix(c, tail) ||
+			!strings.EqualFold(s[len(scheme):len(s)-len(tail)], c[len(scheme):len(c)-len(tail)]) {
+			t.Fatalf("%q and its serialization %q differ outside the host's case", s, c)
+		}
 		for _, stored := range []string{s, c} {
+			if _, err := engine.NewReference(stored); err != nil {
+				t.Fatalf("%q, taken by Parse, is no engine reference: %v", stored, err)
+			}
 			if got, err := ParseStored(stored); err != nil || got != u.ID {
 				t.Fatalf("%q as a stored reference: %q, %v", stored, got, err)
 			}
