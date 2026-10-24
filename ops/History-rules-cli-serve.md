@@ -1322,12 +1322,9 @@ mentions across the four `ops/audit-*.md` files.
   live reservation travels in snapshots, restamped with the captured UUID;
   reservations refused as data get the player reset command advice;
   cancellation and file-access errors refuse backup without it,
-  and only missing files omit the mark.
+  and a captured UUID without a floor refuses with retry advice.
   An identity replacement also durably removes the destination queue before
-  writing the UUID; restoring the same UUID keeps its queue. B524
-  history preflight refuses a live `player-uuid` it cannot read, a named pipe
-  included (read at once, B525), before changing any file: the displaced
-  identity must be remembered. No snapshot UUID leaves the live reservation
+  writing the UUID; restoring the same UUID keeps its queue. The floor survives identity replacement, so a non-file live UUID may be replaced without reading it. No snapshot UUID leaves the live reservation
   alone too. The full arithmetic, assumptions, exhaustion remedies, crash
   order and release coupling are in History-rules-player.md under the
   restored-identity rule. Two boxes running one identity at once are
@@ -2051,11 +2048,9 @@ and bind history after serve stops; eligible cases prove a real bind is seen.
 A control injects real late surfaces through the upstream-stop seam for the
 disabled/refused/failed cases: all three fail the settled-state assertions,
 where the old immediate nonblocking check observed nothing.
-## Player identity reset (B470 PR 5a0, round 3)
-- **Giving up a player's identity uses `bridge reset-player`, with the service stopped: durably record the identities given up, then remove queue, UUID and reservation in that order; rerunning completes an interrupted reset, and every UUID minter goes through backup.EnsurePlayerUUID: serve and DAC bind refuse resetPending, a missing UUID beside a reservation or queue, a live or reservation UUID given up in history, or covered identities without a reservation. Only all three files absent, no covered identities and no pending reset is a no-op. A malformed UUID file is recoverable: record every canonical UUID within the reader's bound, then remove it with os.Remove and the same directory barriers; valid UUID removal still uses ForgetPlayerUUID. Restore read access to an unreadable player-uuid or player-ids.json before rerunning reset; move a non-file at player-uuid aside first. The command is top-level, beside backup and restore; output player reports MPD and has no reset alias.** **A reset gives up for good the identity it removes and any the box ran earlier (one an earlier restore replaced on this box), unless, after this box last ran it, another box took it over from this box, by restoring a snapshot this box made, and has not reset it since, running or powered off. Their values were held only by the floor the reset drops. No snapshot of a given-up identity taken before the reset, on this box or another, may restore its player identity again: remove `player-uuid` and `player-ids.json` from every such snapshot, or delete those snapshots. Any other box that still holds a given-up identity's files (one powered off since a migration, say) must be reset too before it runs again. An identity another box took over from this box by a restore, after this box last ran it, and has not reset since, is not given up: that box's floor holds it, and its snapshots stay valid. Never repair a reservation from a snapshot or delete it while keeping the identity.** Backup uses `playerResetAdvice` only for a live reservation refused as data; restore uses it for an unreadable live reservation or an exhausted box mark: stop the service and run `bridge reset-player`. The next start makes a new identity with no queue, a new device to controllers. If the reset answers a refused restore, remove `player-uuid` and `player-ids.json` from a copy of that snapshot, then restore that copy. Only the restore refusal carries this copy-and-restore step; the backup refusal does not. B524 enforces this rule through the durable history, as described below. A snapshot reservation is never a valid repair, even when stamped with the box's UUID; it can be older than the floor already used. Do not delete the reservation while keeping the identity. The reason, v1 queue reproduction and tests are in History-rules-player.md under the giving-up-identity rule.
 ## Live backup reads across rename (B470 PR 5a0, Round 9)
 - **A live backup retries Windows sharing/access failures while opening files replaced by rename, with atomicwrite’s bounded, cancellable backoff; persistent errors still refuse it.** **Only a reservation refused as data gets backup’s player reset advice; cancellation, an expired context and file-access errors never do. Exhausted sharing/access retries say the file was busy and to retry the backup.** `Snapshot` reads a reservation while the engine may refill it asynchronously (`ahead` → `reserveWrite` → `writeReservation` → `WriteBytesDurable`). The writer closes its staged descriptor before rename; neither it nor `readLimited` leaks a reservation handle. A rename or a Windows scan-on-close handle can nevertheless conflict with the reader's open. Closing the test's engine before backup would remove the live-backup case, not fix it. Production currently refuses the player on Windows because directory fsync is unavailable; the Windows fixture supplies that barrier, but backup also reads files other live writers replace there.
-  `atomicwrite.ReadWithRetryCtx` shares `RenameWithRetry`'s five-attempt schedule (0, 50, 100, 200, 400 ms; 750 ms total sleeping). Only Windows `ERROR_SHARING_VIOLATION` and `ERROR_ACCESS_DENIED`, including wrapped errors, retry. Other platforms and other errors return at once. The context interrupts backoff; exhausted errors keep their cause. Snapshot uses it for the live reservation, the freshly renamed UUID copy it rereads to stamp that reservation, and source stats/opens, including player UUID, tokens, config and account files. The copy still streams and commits once; no queue is backed up. A persistent unreadable reservation refuses backup, and only absence omits its mark.
+  `atomicwrite.ReadWithRetryCtx` shares `RenameWithRetry`'s five-attempt schedule (0, 50, 100, 200, 400 ms; 750 ms total sleeping). Only Windows `ERROR_SHARING_VIOLATION` and `ERROR_ACCESS_DENIED`, including wrapped errors, retry. Other platforms and other errors return at once. The context interrupts backoff; exhausted errors keep their cause. Snapshot uses it for the live reservation, the freshly renamed UUID copy it rereads to stamp that reservation, and source stats/opens, including player UUID, tokens, config and account files. The copy still streams and commits once; no queue is backed up. A persistent unreadable reservation refuses backup; a captured UUID without a floor requires retry.
   `TestSnapshotRetriesAHandleHeldAcrossRename` uses the existing rename seam to hold a real Windows staged-file handle that permits rename and denies read. It verifies the unprotected open returns the sharing violation, then releases the handle only when the snapshot's context is consulted for backoff: no timer can release it before the failed read. Reservation, source UUID, captured UUID and tokens cases require captured bytes and both floors. A read error on the captured UUID refuses backup after retries rather than silently omitting the mark; a malformed UUID still keeps the existing no-mark policy. `TestSnapshotRefusesAReservationStillHeldOrCancelled` keeps the handle through exhaustion or cancellation and requires the failed snapshot to be removed. `TestReadRetryWindowsErrors` checks both Windows codes; `TestReadRetryBoundsAndCancellation` checks the shared schedule and cancellation on every platform; `TestReadRetryKeepsPermanentErrors` keeps absence and malformed data immediate.
 ### Round 10 — reset advice requires invalid reservation data
 A shutdown cancellation in the Windows backoff used to reach the same advice
@@ -2067,8 +2062,7 @@ exhaustion; cancellation/deadline errors stay plain. `Snapshot` names
 deadline expiry or a filesystem `PathError`. Busy errors also say to retry
 the backup. A reservation read successfully but refused as data (malformed,
 unsupported version, invalid UUID or excessive size) retains the reset advice.
-Only absence omits the mark; every other error still refuses and removes the
-partial snapshot. `ERROR_ACCESS_DENIED` remains retryable: replacement or
+A captured UUID without a floor now refuses too; all these errors remove the partial snapshot. `ERROR_ACCESS_DENIED` remains retryable: replacement or
 delete-pending files can return it during the swap, with the same bounded
 schedule as sharing violations.
 `TestSnapshotRefusesAReservationStillHeldOrCancelled` now checks held,
@@ -2103,144 +2097,56 @@ Windows-runner check, distinct from portable race-test results.
   With the plain open restored both tests fail after five seconds; the
   fixture then releases and joins the blocked snapshot.
 
-## Player reset and identity history (B524)
+## Player floor and reset (B524 round 5, 2026-10-24)
 
-`bridge reset-player [--config X] [--yes]` takes the data-directory
-lock for its whole run, refuses every lock failure, and makes restore's two
-fixed-admin-port checks, before and after the confirmation. The prompt goes
-to stderr; `--yes` skips neither guard. With no UUID, reservation, queue or covered identities and no pending reset,
-it reports that there is no identity and writes nothing besides the lock
-file required to decide exclusivity.
+**The player floor is monotonic across every identity the box runs: nothing lowers or removes it. `bridge reset-player` durably clears queue then UUID and leaves the floor byte-identical; only `--discard-floor` drops it, after a durable permanent seal against identity restores. Every minter uses `backup.EnsurePlayerUUID`: floor → initialization marker → UUID, each durable; bind preflights read-only before saving config. A marker without a floor refuses until explicit discard. Never repair a live floor from a snapshot. Two live holders of a UUID, and a non-latest snapshot onto another box, are unsupported and not guaranteed.**
 
-The version-1 `player-history.json` has `covered` and `givenUp` UUID lists.
-Restore unions the snapshot and live lists, recording the live UUID it
-replaces and any foreign reservation UUID before writing the raised floor.
-It adds the incoming identity to `covered` before that floor write, even when
-it was not already listed, and keeps it after a successful restore.
-A reservation write or UUID write can fail after the history becomes durable;
-removing that identity first would forget a floor the live reservation still
-covers. Keeping it is harmless: reset gives up the live UUID anyway. The lists are sets;
-no snapshot can erase live history. The only writer is `writePlayerHistory`,
-over `atomicwrite.WriteBytesDurable`: staged, owner preserved, file fsynced,
-renamed and directory fsynced. Reads use `fsutil.OpenAsFile`, bounded to
-1 MiB, and reject corrupt JSON, unsupported versions, invalid UUIDs, trailing
-content and non-files. A listed snapshot history that is missing refuses.
-A real absence on the live box or in an older snapshot remains compatible.
+Ordinary reset keeps the box's numeric upper bounds across all identities,
+including identities displaced by successful or interrupted restores. It needs
+no UUID history or pending transaction flag: after a durable queue unlink, an
+old UUID can run empty; after the UUID unlink, the checked wrapper mints a new
+UUID and restamps by max. Reset reads the floor strictly, with Lstat deciding
+absence, and never reads the UUID it removes. A directory at the UUID or queue
+path refuses; malformed UUID bytes, inaccessible UUID bytes and dangling UUID
+links can be unlinked safely while the floor remains intact. The command keeps
+its exclusive lock, refuses the lock fallback, probes admin before and after
+confirmation, and lives beside backup and restore, not under output player.
 
-Reset first writes every covered identity, the live UUID and the reservation's
-UUID into `givenUp`, with `resetPending: true`; it then durably removes
-`player-queue.json`, `player-uuid` (through `ForgetPlayerUUID` for a valid
-identity, `os.Remove` for a malformed one), and
-`player-ids.json`, in that order. Each unlink has a directory barrier before
-the next. Only after all three does it clear the pending marker. That marker
-lets a rerun finish even after the last unlink, when no identity remains.
-Serve and bind use `backup.EnsurePlayerUUID`, which runs `CheckPlayerStart`
-under the data-dir lock before the config minter. It refuses pending resets,
-orphaned files, a given-up live or reservation UUID, and covered history with
-no reservation. The refusal says to finish the reset with the service stopped;
-corrupt or unreadable history refuses the start too. Stopping a service does
-not disable it at boot, so the lock alone cannot protect an interrupted reset.
-Every step has a per-call interruption seam, with no sleeps. A malformed
-reservation can be reset: any canonical UUID still decoded from it is kept.
-A reservation access failure refuses instead of guessing which UUID it names;
-restore read access to `player-ids.json` and then rerun
-`bridge reset-player`, as both reset and restore now advise. A failed
-history write never authorizes deletion.
+`player-initialized` and `player-floor-discarded.json` are immutable version-1
+local markers with one bounded, nonblocking strict reader and one durable
+writer. A missing floor beside a UUID, queue or initialization marker is loss.
+A queue without UUID refuses minting, because an unstamped v1 queue must not
+appear under a new device. Existing valid floors gain the initialization marker
+before a UUID is published. Pristine initialization commits a v2 zero floor,
+then marker, then UUID. The UUID writer fsyncs the parent after rename.
 
-Restore reads both histories and refuses a snapshot UUID in either `givenUp`
-list before any file is written, including history, reservation, database,
-WAL and SHM. Its remedy is `snapshotIdentityRemedy`: remove `player-uuid` and
-`player-ids.json` from a copy of the snapshot, restore the rest, and keep or
-make the box's own identity. A pending live reset must be finished first.
-The snapshot's pending marker is not imported as an instruction to delete
-another box's files; its given-up list still travels. A history-only snapshot
-merges history without touching UUID or reservation.
+`--discard-floor` durably seals every future incoming identity restore, unlinks
+queue then UUID with directory barriers, renames even a non-file floor aside
+with a random suffix, then fsyncs the directory. Rerunning completes any
+interruption. Only after the UUID and queue are gone does the seal permit a new
+floor despite the initialization marker. A sealed box still restores ordinary
+data from a snapshot copy without UUID and floor; an identity-bearing restore
+refuses before writing anything and explains that remedy. The seal never leaves
+through backup. Ordinary reset does not free exhausted counter range.
 
-The takeover exception in the preceding operator rule remains true on the
-other box: its retained floor still makes its snapshots valid. The reset box
-cannot prove that floor exists, so it refuses the identity back here too.
-This is deliberately fail-closed: refusing is safe, reissuing is not. Copying
-history propagates that conservative refusal to the destination.
+**A snapshot captures UUID then floor through bounded Windows sharing retry and refuses a captured UUID without a readable floor. Schema stays 2; local initialization and discard markers never travel in backups. Restore preflights the seal, live floor and both exhaustion checks before any write, then writes max(snapshot, live) plus the jump, ensures the initialization marker, durably clears a replaced identity's queue and writes the UUID through its own durable writer.**
 
-Backup carries history even without a UUID and lists it in the manifest.
-History is read before the capture and rechecked last, after checking the live
-UUID and the reservation's original UUID against those captured. Changes of
-identity, presence or history refuse the backup and remove the partial directory
-before the manifest is published. A running engine advancing its reservation
-counters is allowed. Scheduled backups run inside serve, which already holds
-the exclusive data-dir lock, so backup uses these checks instead of taking that
-lock again. The per-call capture seam pins a reset after the history read and
-changes after the player files are captured.
-Schema 3 makes older restores refuse rather than silently ignore it; schemas
-1 and 2 remain readable. This is snapshot format only, not a client wire
-change. History cannot reconstruct identities that were already forgotten
-by resets or restores predating this feature.
+The engine independently refuses unreadable or corrupt reservation data instead
+of moving it aside and starting at zero. Queue-corruption recovery is separate.
+A non-file is refused without waiting and names moving it aside, rather than
+sending the operator to an ordinary reset that also refuses the floor. Restore
+preserves the existing max-and-jump and queue ordering, without history hooks.
+A listed snapshot floor still must parse and name its captured identity; older
+unmarked snapshot compatibility remains subject to the documented migration
+margin. The exhausted-destination remedy is a snapshot copy without UUID and
+floor, preserving the box's identity, or explicit discard with its permanent
+seal. Local files cannot detect full data-directory rollback or erasure.
 
-The regressions cover reset/start/untouched-snapshot refusal, an identity
-replaced by an earlier restore, history transfer and union, every interrupted
-reset step, malformed/unreadable/directory/FIFO history, strict write and
-unlink barriers, owner/mode retention, no-identity reset, the dispatch/help,
-and both admin probes and the lock through confirmation. Tests and negative
-control evidence are recorded in the B524 engineering-log entry.
-
-
-## Player reset recovery (B524 round 3, 2026-10-24)
-
-`bridge reset-player [--config X] [--yes]` is a top-level sibling of backup
-and restore. `bridge output player` reports MPD; it has no reset subcommand
-or compatibility alias. Top-level and output help distinguish read-only
-reports from dac bind's config and first enabled-player UUID writes.
-
-A missing UUID does not make remaining player files disposable without a
-record: reset gives up a canonical reservation UUID and all covered identities,
-sets resetPending durably, then removes queue, UUID and reservation in the
-established order. Serve refuses to mint beside either orphaned file, through
-CheckPlayerStart under the data-dir lock, and names the reset command. Only
-all three absent, no covered identities and no pending reset is a no-op. This also ends restore's
-advice loop after a partial manual reset predating the command.
-
-A readable malformed player-uuid is resettable. ReadPlayerUUIDsForReset shares
-the normal reader's nonblocking OpenAsFile and 128-byte limit (one lookahead
-byte), retaining whole whitespace-delimited lowercase UUIDs within that limit.
-These are tombstones only, never identities eligible to start. Reset records
-them and the canonical reservation UUID before any removal. It uses os.Remove
-for the malformed UUID, surrounded by the same strict directory barriers;
-ForgetPlayerUUID remains the primitive for a valid UUID. Access failures
-refuse with read-access advice; a non-file, including a named pipe, refuses
-at once and says to move that entry aside before rerunning reset.
-
-TestResetPlayerIsATopLevelCommand, TestPlayerResetWithoutUUIDRemovesLeftovers,
-TestPlayerResetRecoversMalformedUUID, TestPlayerResetMalformedUUIDRemovalIsDurable,
-TestPlayerResetUUIDReadRefusalsNameRemedy and TestPlayerResetRefusesUUIDNamedPipeAtOnce
-pin these paths. TestServePlayerRefusesAnIncompleteReset also drives the real
-start with orphaned queue, reservation and both, with no history at all.
-
-
-**B524 round 4 (2026-10-24).** Restore adds the incoming UUID to `covered`
-before durably writing its reservation and keeps it after success. If the
-restore stops before the UUID lands, the old player's next start can restamp
-the floor; the history still gives up the incoming identity on reset, refusing
-its older snapshots. Restore checks the live UUID and reservation UUID against
-the merged given-up list before any write, even for a history-only snapshot;
-the remedy is `bridge reset-player`, even when the incoming UUID matches
-the given-up live or reservation UUID. Its live UUID read refusal distinguishes
-malformed content (reset), unreadable content (restore read access) and a
-non-file (move it aside).
-
-Every production UUID minter uses `backup.EnsurePlayerUUID` under the data-dir
-lock: `bridgePlayer.start` and `runDACBind`. The wrapper runs
-`CheckPlayerStart` before calling config's primitive: pending reset, orphaned
-reservation or queue, live or reservation UUID given up, and covered history
-without a reservation all refuse. The AST source guard permits the primitive
-only in that wrapper. A reset with covered identities and no player files is
-real work, never a no-op: the covered names must become given-up names.
-History's ENOENT is absence only when Lstat confirms no entry; a dangling link
-refuses backup, restore, reset and start. Use the reset command, never manual
-three-file removal, so covered identities remain recorded.
-
-The regression runs the actual engine after interrupting restore at the UUID
-rename, joins it before reset, and refuses the old incoming snapshot. Further
-tests cover history-only restore for each live identity, each start refusal,
-bind through the real command, dangling history and all three read remedies.
-The round-four report holds red-first evidence, the earlier 56 controls rerun,
-new mutation controls and the Go 1.27.3 gates, with socket restrictions separate.
+Tests cover X at 2e9 → restore Y → reset → old X or Y, including an interrupted
+UUID commit followed by a real engine restart, every discard crash point,
+marker barrier failures, initialization order, byte-identical ordinary reset,
+seal and lost-floor preflight with no writes, backup without a floor, and both
+serve and bind through the shared wrapper. Negative controls and gate outputs
+are in the round-five scratch report. The design replaces the history model
+after four rounds failed to converge: remembering names was unnecessary while
+preserving their shared numeric bound supplies the same-box proof directly.
