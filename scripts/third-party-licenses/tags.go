@@ -80,7 +80,8 @@ func checkBuildTags(root string) error {
 // notice generator, the temp-dir helper, and two printed test instructions;
 // none builds/tests the shipped bridge. Go source and Markdown prose are not
 // executable shell/PowerShell/workflow sites. Shell fences in README.md and
-// top-level ops Markdown are operational sites too.
+// top-level ops Markdown are operational sites too, except the records'
+// (buildSiteMarkdown).
 var reviewedBuildSites = map[string][]string{
 	".github/scripts/test-shard.sh": {
 		"if ! out=\"$(go test -tags @TAGS@ \"${RACE_FLAGS[@]}\" \"$1\" -list '.*')\"; then",
@@ -145,8 +146,19 @@ var reviewedBuildSites = map[string][]string{
 	},
 }
 
+// buildSiteMarkdown reports whether name is Markdown a reader follows to
+// build: README.md and the top-level ops documents, except the records (the
+// engineering log, the History files, plans and release-note drafts), which
+// quote commands as they were run.
 func buildSiteMarkdown(name string) bool {
-	return name == "README.md" || (filepath.ToSlash(filepath.Dir(name)) == "ops" && strings.EqualFold(filepath.Ext(name), ".md"))
+	if name == "README.md" {
+		return true
+	}
+	if filepath.ToSlash(filepath.Dir(name)) != "ops" || !strings.EqualFold(filepath.Ext(name), ".md") {
+		return false
+	}
+	base := filepath.Base(name)
+	return base != "engineering-log.md" && !strings.HasPrefix(base, "History-") && !strings.HasPrefix(base, "plan-") && !strings.HasPrefix(base, "release-notes-")
 }
 
 func buildSiteFile(name string) bool {
@@ -164,7 +176,8 @@ func buildSiteFile(name string) bool {
 	return filepath.Ext(name) == "" && (!strings.Contains(name, "/") || strings.HasPrefix(name, "scripts/") || strings.HasPrefix(name, "deploy/"))
 }
 
-// markdownShellLines keeps only explicitly labelled shell fences. Track every
+// markdownShellLines keeps the lines of shell fences: those whose info string
+// names a shell, and unlabelled ones, which a reader runs as one. Track every
 // fence, including non-shell ones, so prose and code in other languages stay out.
 // Blank lines at boundaries prevent a continuation from joining separate blocks.
 func markdownShellLines(text string) string {
@@ -176,8 +189,12 @@ func markdownShellLines(text string) string {
 		if match := fence.FindStringSubmatch(line); match != nil {
 			if marker == "" {
 				marker = match[1]
-				switch strings.ToLower(strings.TrimSpace(match[2])) {
-				case "sh", "bash", "shell", "zsh", "ksh", "fish", "console", "powershell", "ps1", "cmd", "bat":
+				var lang string
+				if info := strings.Fields(strings.ToLower(match[2])); len(info) > 0 {
+					lang = info[0]
+				}
+				switch lang {
+				case "", "sh", "bash", "shell", "zsh", "ksh", "fish", "console", "powershell", "ps1", "cmd", "bat":
 					shell = true
 				}
 			} else if match[1][0] == marker[0] && len(match[1]) >= len(marker) && strings.TrimSpace(match[2]) == "" {
@@ -201,9 +218,10 @@ func checkBuildSites(root, tags string) error {
 			remaining[name][strings.ReplaceAll(command, "@TAGS@", tags)]++
 		}
 	}
-	// Global flags may have an attached value or a separate (possibly quoted)
+	// The executable may be quoted ("$GO", "/usr/local/go/bin/go"). Global
+	// flags may have an attached value or a separate (possibly quoted)
 	// argument. Unknown invocation forms are still unreviewed census entries.
-	command := regexp.MustCompile(`(?:^|[^[:alnum:]_])(?:go(?:\.exe)?|\$\(GO\)|\$\{GO\}|\$GO)\s+(?:-\S+(?:\s+(?:"[^"\r\n]*"|'[^'\r\n]*'|\S+))?\s+)*(?:build|install|run|test|vet)\b`)
+	command := regexp.MustCompile(`(?:^|[^[:alnum:]_])(?:go(?:\.exe)?|\$\(GO\)|\$\{GO\}|\$GO)["']?\s+(?:-\S+(?:\s+(?:"[^"\r\n]*"|'[^'\r\n]*'|\S+))?\s+)*(?:build|install|run|test|vet)\b`)
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
