@@ -100,6 +100,54 @@ func TestACommandWhoseContextEndsAsTheOwnerAdmitsItDidNotRun(t *testing.T) {
 	}
 }
 
+// TestACommandTheOwnerNeverTookDidNotRun pins ErrNotAdmitted on the two
+// windows before the owner has the command: a context that has ended before
+// the call, and one that ends while the owner, held in another command's step
+// (the admitted seam), cannot take the send. Each is answered with a refusal
+// that wraps ErrNotAdmitted and the context's error, and neither runs.
+func TestACommandTheOwnerNeverTookDidNotRun(t *testing.T) {
+	h := newHarness(t)
+	reached, release := make(chan struct{}, 1), newGate()
+	h.tweak = func(c *Config) {
+		c.seams.admitted = func(cmd *command) {
+			if cmd.op != opInsert {
+				return
+			}
+			reached <- struct{}{}
+			<-release
+		}
+	}
+	h.boot()
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			release.open()
+		}
+	})
+	ended, cancel := context.WithCancel(bg)
+	cancel()
+	if err := h.eng.SetRepeat(ended, true); !errors.Is(err, ErrNotAdmitted) || ReasonOf(err) != ReasonCancelled || !errors.Is(err, context.Canceled) {
+		t.Fatalf("a command whose context had ended before the call: %v; want a cancellation wrapping ErrNotAdmitted", err)
+	}
+	insert := async(func() error { _, err := h.eng.InsertAfter(bg, 0, ref("a"), nil); return err })
+	select {
+	case <-reached:
+	case <-time.After(*watchdog):
+		t.Fatalf("waited %v for the owner to take the insert", *watchdog)
+	}
+	ctx, done := context.WithTimeout(bg, 50*time.Millisecond)
+	defer done()
+	if err := h.eng.SetRepeat(ctx, true); !errors.Is(err, ErrNotAdmitted) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a command whose send the owner could not take before its deadline: %v; want a cancellation wrapping ErrNotAdmitted", err)
+	}
+	release.open()
+	h.must("the insert the owner held", h.result("the insert", insert))
+	if h.snap().Repeat() {
+		t.Fatal("a command its caller was told did not run ran: repeat is on")
+	}
+}
+
 // TestACommandAdmittedBeforeItsCallersDeadlineMayHaveRun pins the other side:
 // an insert the owner admitted and parked on a reservation write that has not
 // landed, whose caller's context then ends, is answered cancelled without
