@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
@@ -359,6 +360,9 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 	cfg, player := w.Cfg, w.Cfg.Output.Player
 	if w.Feed == nil {
 		return p.fail("serve started no hotplug watcher for the player")
+	}
+	if err := backup.CheckPlayerStart(cfg.DataDir); err != nil {
+		return p.fail(err.Error())
 	}
 	id, made, err := config.EnsurePlayerUUID(cfg.DataDir)
 	if err != nil {

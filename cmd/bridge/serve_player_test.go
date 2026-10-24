@@ -23,9 +23,13 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/alsa/sysfstest"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/flactest"
+	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/player/binding"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
@@ -1608,5 +1612,100 @@ func TestBridgeDoctorMakesNoPlayerFile(t *testing.T) {
 	}
 	if files := playerFiles(t, dataDir); len(files) > 0 {
 		t.Errorf("bridge doctor made %v", files)
+	}
+}
+
+// A boot owns the lock again after a crash. Drive the same player start serve
+// calls, with a real queue and engine but no network listeners or PCM nodes.
+func TestServePlayerRefusesAnIncompleteReset(t *testing.T) {
+	t.Cleanup(atomicwrite.SetSyncDirForTest(func(string) error { return nil }))
+	t.Cleanup(atomicwrite.SetMediumForTest(func(string) error { return nil }))
+	for _, phase := range []string{"history", "queue_removed", "uuid_removed", "reservation_removed", "legacy_uuid_removed", "complete", "no_history", "corrupt"} {
+		t.Run(phase, func(t *testing.T) {
+			dir := t.TempDir()
+			const id = "7d444840-9dc0-11d1-b245-5ffdce74fad2"
+			write := func(name, data string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if phase != "no_history" {
+				pending := phase != "complete"
+				write(backup.PlayerHistoryFileName, fmt.Sprintf(`{"version":1,"givenUp":[%q],"resetPending":%t}`, id, pending))
+			}
+			if phase == "corrupt" {
+				write(backup.PlayerHistoryFileName, "{")
+			}
+			if phase == "history" || phase == "queue_removed" || phase == "no_history" || phase == "corrupt" {
+				if err := config.WritePlayerUUIDFile(filepath.Join(dir, config.PlayerUUIDFile), id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if phase != "reservation_removed" && phase != "complete" {
+				write(engine.ReservationFileName, fmt.Sprintf(`{"version":2,"uuid":%q,"ids":8192,"tokens":8192}`, id))
+			}
+			if phase == "history" || phase == "legacy_uuid_removed" || phase == "no_history" || phase == "corrupt" {
+				write(playerQueueFile, `{"version":1,"revision":1,"ids":{"next":4098,"reserved":8192},"tokens":{"current":4098,"reserved":8192},"selected":4097,"entries":[{"id":4097,"ref":"old-track","meta":null}]}`)
+			}
+			before := map[string]string{}
+			for _, name := range []string{config.PlayerUUIDFile, playerQueueFile, engine.ReservationFileName, backup.PlayerHistoryFileName} {
+				b, err := os.ReadFile(filepath.Join(dir, name))
+				if err == nil {
+					before[name] = string(b)
+				} else if !os.IsNotExist(err) {
+					t.Fatal(err)
+				}
+			}
+			store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			cfg := &config.Config{DataDir: dir}
+			cfg.Output.Player.Enabled = true
+			cfg.Output.Player.Device = goBarByModel
+			holdDataDirLock(t, dir)
+			hold := newDataDirHold(func() {})
+			defer hold.done()
+			backend := newPlayerStandIn()
+			p := startServePlayer(planServePlayer(cfg, "linux", true), servePlayerWiring{Cfg: cfg, Hold: hold, Feed: hotplug.NewFeed(), Store: store, Paths: bridgefs.New([]string{dir}), Backend: backend.build})
+			t.Cleanup(p.stop)
+			select {
+			case <-p.ready:
+			case <-serveGiveUp(t):
+				t.Fatal("player did not decide its start")
+			}
+			if phase == "complete" || phase == "no_history" {
+				if p.eng == nil || p.failed != "" {
+					t.Fatalf("normal start refused: %s", p.failed)
+				}
+				if phase == "complete" && p.eng.Snapshot().Len() != 0 {
+					t.Fatal("completed reset retained queue")
+				}
+				return
+			}
+			if p.eng != nil {
+				t.Errorf("player started during reset with %d old queue entries", p.eng.Snapshot().Len())
+			}
+			if phase == "corrupt" {
+				if !strings.Contains(p.failed, backup.PlayerHistoryFileName) {
+					t.Errorf("history read failure ignored: %s", p.failed)
+				}
+			} else if !strings.Contains(p.failed, "reset is incomplete") || !strings.Contains(p.failed, "bridge output player reset") {
+				t.Errorf("pending reset not refused with recovery command: %s", p.failed)
+			}
+			p.stop()
+			if backend.built {
+				t.Error("pending reset built the backend")
+			}
+			for _, name := range []string{config.PlayerUUIDFile, playerQueueFile, engine.ReservationFileName, backup.PlayerHistoryFileName} {
+				b, err := os.ReadFile(filepath.Join(dir, name))
+				old, existed := before[name]
+				if existed && (err != nil || string(b) != old) || !existed && !os.IsNotExist(err) {
+					t.Errorf("refused start changed %s", name)
+				}
+			}
+		})
 	}
 }

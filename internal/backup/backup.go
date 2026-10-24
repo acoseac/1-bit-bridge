@@ -172,7 +172,12 @@ type Targets struct {
 // `ctx` is forwarded to the SQLite VACUUM INTO step and read retries so the
 // periodic ticker can cancel an in-flight snapshot on bridge shutdown. Pass
 // `context.Background()` if you don't have a richer scope.
-func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
+func Snapshot(ctx context.Context, src Sources) (string, error) {
+	return snapshot(ctx, src, nil)
+}
+
+// snapshot calls after at capture boundaries; production supplies no seam.
+func snapshot(ctx context.Context, src Sources, after func(string)) (snapDir string, retErr error) {
 	if src.DataDir == "" {
 		return "", errors.New("backup: DataDir is required")
 	}
@@ -205,6 +210,10 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 			return "", err
 		}
 		captured = append(captured, PlayerHistoryFileName)
+	}
+
+	if after != nil {
+		after("history")
 	}
 
 	if src.ManifestDB != "" {
@@ -247,6 +256,7 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 		captured = append(captured, pair.name)
 	}
 
+	check := snapshotPlayerCheck{history: h, historyPresent: historyPresent}
 	// Every writer merges the live reservation, so even a foreign UUID or
 	// v1 file covers this box's identities. Capture that conservative floor
 	// after the UUID and restamp the snapshot copy, including after a restore
@@ -261,6 +271,7 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 		if err != nil && !errors.Is(err, config.ErrNotOnePlayerUUID) {
 			return "", fmt.Errorf("backup: read captured %s: %w", PlayerUUIDFileName, err)
 		}
+		check.uuid, check.uuidInvalid = id, errors.Is(err, config.ErrNotOnePlayerUUID)
 		if err == nil {
 			var mark engine.Reservation
 			err := atomicwrite.ReadWithRetryCtx(ctx, func() error {
@@ -281,6 +292,7 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 				return "", fmt.Errorf("backup: read %s: %w; %s", engine.ReservationFileName, err, playerResetAdvice(false))
 			}
 			if err == nil {
+				check.reservationUUID, check.reservationPresent = mark.UUID, true
 				mark.Version, mark.UUID = 2, id
 				data, err := json.Marshal(mark)
 				if err != nil {
@@ -292,6 +304,13 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 				captured = append(captured, engine.ReservationFileName)
 			}
 		}
+	}
+
+	if after != nil {
+		after("player")
+	}
+	if err := check.verify(ctx, src); err != nil {
+		return "", err
 	}
 
 	m := Manifest{

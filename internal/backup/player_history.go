@@ -160,14 +160,15 @@ func preflightPlayerHistory(snapshotDir, target, id string, m Manifest) (playerH
 			h.Covered = unionIDs(h.Covered, r.UUID)
 			present = true
 		}
-		h.Covered = slices.DeleteFunc(h.Covered, func(covered string) bool { return covered == id })
+		// Keep the incoming UUID covered: a failure after this history lands
+		// can leave the old UUID installed while its floor still covers both.
 		// Reservation failures retain restorePlayerReservation's existing remedy.
 	}
 	return h, present, nil
 }
 
 // ResetPlayer gives up the live identity and every identity its floor covers,
-// then durably removes UUID, queue, reservation in that order. The caller must
+// then durably removes queue, UUID, reservation in that order. The caller must
 // hold the data-dir lock and refuse a running serve, as restore does. It returns
 // false without writing when no identity or interrupted reset exists.
 func ResetPlayer(dataDir string) (bool, error) { return resetPlayer(dataDir, nil) }
@@ -191,7 +192,7 @@ func resetPlayer(dir string, after func(string) error) (bool, error) {
 		// we cannot know which identity an unreadable file names.
 		var pe *os.PathError
 		if errors.As(err, &pe) {
-			return false, fmt.Errorf("read player reservation before reset: %w", err)
+			return false, fmt.Errorf("read player reservation before reset: %w; %s", err, playerReservationReadAdvice)
 		}
 	}
 	// A refused reservation can still name a valid UUID (for example a
@@ -211,7 +212,7 @@ func resetPlayer(dir string, after func(string) error) (bool, error) {
 			return false, err
 		}
 	}
-	for _, name := range []string{config.PlayerUUIDFile, "player-queue.json", engine.ReservationFileName} {
+	for _, name := range []string{"player-queue.json", config.PlayerUUIDFile, engine.ReservationFileName} {
 		path := filepath.Join(dir, name)
 		if err := atomicwrite.ProbeDurable(dir, path); err != nil {
 			return false, err
@@ -239,4 +240,18 @@ func resetPlayer(dir string, after func(string) error) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// CheckPlayerStart refuses an incomplete reset or unreadable history before
+// serve creates an identity or starts the engine. The caller holds the data-dir
+// lock, which also excludes a reset until the player has stopped.
+func CheckPlayerStart(dataDir string) error {
+	h, _, err := optionalPlayerHistory(filepath.Join(dataDir, PlayerHistoryFileName))
+	if err != nil {
+		return err
+	}
+	if h.ResetPending {
+		return errors.New("player reset is incomplete; with the service stopped, run bridge output player reset to finish the reset before starting the player")
+	}
+	return nil
 }

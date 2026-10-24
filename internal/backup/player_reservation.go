@@ -29,6 +29,9 @@ type RestoreOptions struct {
 // after the largest possible jump. The random part is uniform in [0, margin).
 const restoreMargin uint64 = 1 << 24
 
+// playerReservationReadAdvice names the prerequisite for resetting an unreadable floor.
+const playerReservationReadAdvice = "restore read access to player-ids.json and then rerun bridge output player reset"
+
 // playerResetAdvice is the single remedy for giving up an exhausted or
 // unreadable live floor. With the service stopped, run bridge output player
 // reset to record the identities given up and remove their files; the next start makes a
@@ -113,7 +116,12 @@ func restorePlayerReservation(snapshotDir, target, id string, m Manifest, opts R
 	livePath := filepath.Join(dataDir, engine.ReservationFileName)
 	live, err := engine.ReadReservation(livePath)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("restore: read the box's player reservation: %w; %s; nothing was restored", err, playerResetAdvice(true))
+		advice := playerResetAdvice(true)
+		var pe *os.PathError
+		if errors.As(err, &pe) {
+			advice = playerReservationReadAdvice + "; " + advice
+		}
+		return fmt.Errorf("restore: read the box's player reservation: %w; %s; nothing was restored", err, advice)
 	}
 	// Test each source separately so both remedies are named if both are
 	// exhausted. This bound is independent of the random draw.

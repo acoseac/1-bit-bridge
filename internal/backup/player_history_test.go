@@ -180,7 +180,7 @@ func TestPlayerResetRefusesEveryIdentityItsFloorCovered(t *testing.T) {
 
 func TestPlayerResetResumesEveryDurableStep(t *testing.T) {
 	reservationStorage(t)
-	for _, stop := range []string{historyFile, config.PlayerUUIDFile, "player-queue.json", engine.ReservationFileName} {
+	for _, stop := range []string{historyFile, "player-queue.json", config.PlayerUUIDFile, engine.ReservationFileName} {
 		t.Run(stop, func(t *testing.T) {
 			dir := t.TempDir()
 			snap := identitySnapshot(t, true)
@@ -203,7 +203,7 @@ func TestPlayerResetResumesEveryDurableStep(t *testing.T) {
 			if !errors.Is(err, interrupted) {
 				t.Fatalf("seam: %v", err)
 			}
-			order := []string{historyFile, config.PlayerUUIDFile, "player-queue.json", engine.ReservationFileName}
+			order := []string{historyFile, "player-queue.json", config.PlayerUUIDFile, engine.ReservationFileName}
 			if !slices.Equal(steps, order[:slices.Index(order, stop)+1]) {
 				t.Fatalf("removal order: %v", steps)
 			}
@@ -610,6 +610,130 @@ func TestPlayerResetOfDamagedReservationRecordsReadableIdentities(t *testing.T) 
 			}
 			if strings.Contains(body, snapshotPlayerUUID) && !slices.Contains(h.GivenUp, snapshotPlayerUUID) {
 				t.Fatal("readable reservation UUID lost")
+			}
+		})
+	}
+}
+
+func TestInterruptedRestoreKeepsTheIncomingIdentityCovered(t *testing.T) {
+	reservationStorage(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.PlayerUUIDFile)
+	if err := config.WritePlayerUUIDFile(path, boxPlayerUUID); err != nil {
+		t.Fatal(err)
+	}
+	putMark(t, dir, boxPlayerUUID, 10000, 10000)
+	old, err := backup.Snapshot(t.Context(), backup.Sources{DataDir: dir, PlayerUUID: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	putMark(t, dir, boxPlayerUUID, 2000000000, 2000000000)
+	if err := fixedRestore(t, identitySnapshot(t, true), dir, 0); err != nil {
+		t.Fatal(err)
+	}
+	interrupted := errors.New("reservation rename failed")
+	historyLanded, reservationAttempted := false, false
+	prev := atomicwrite.SetRenameFuncForTest(func(a, b string) error {
+		if filepath.Base(b) == engine.ReservationFileName {
+			reservationAttempted = true
+			if !historyLanded {
+				t.Error("reservation attempted before history landed")
+			}
+			return interrupted
+		}
+		err := os.Rename(a, b)
+		if err == nil && filepath.Base(b) == historyFile {
+			historyLanded = true
+		}
+		return err
+	})
+	func() {
+		defer atomicwrite.SetRenameFuncForTest(prev)
+		if err := fixedRestore(t, old, dir, 0); !errors.Is(err, interrupted) {
+			t.Fatalf("interruption: %v", err)
+		}
+	}()
+	if !historyLanded || !reservationAttempted {
+		t.Fatal("interruption seam not reached")
+	}
+	if id, err := config.ReadPlayerUUID(dir); err != nil || id != snapshotPlayerUUID {
+		t.Fatalf("live UUID: %s %v", id, err)
+	}
+	if r := markAt(t, dir); r.UUID != snapshotPlayerUUID || r.IDs < 2000000000 || r.Tokens < 2000000000 {
+		t.Fatalf("live floor: %+v", r)
+	}
+	if changed, err := backup.ResetPlayer(dir); err != nil || !changed {
+		t.Fatalf("reset: %t %v", changed, err)
+	}
+	before := historyTree(t, dir)
+	if err := fixedRestore(t, old, dir, 0); err == nil || !strings.Contains(err.Error(), "given up") {
+		t.Fatalf("old covered identity revived after interrupted restore and reset: %v", err)
+	}
+	if !bytes.Equal(before, historyTree(t, dir)) {
+		t.Fatal("refused restore changed files")
+	}
+}
+
+func TestSnapshotRefusesAPlayerChangeDuringCapture(t *testing.T) {
+	reservationStorage(t)
+	for _, kind := range []string{"reset_after_history", "uuid_after_capture", "reservation_uuid_after_capture", "history_after_capture", "floor_advance"} {
+		t.Run(kind, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, config.PlayerUUIDFile)
+			if err := config.WritePlayerUUIDFile(path, boxPlayerUUID); err != nil {
+				t.Fatal(err)
+			}
+			putHistory(t, dir, nil, nil)
+			putMark(t, dir, boxPlayerUUID, 2000000000, 2000000000)
+			reached := false
+			snap, err := backup.SnapshotAfterCapture(t.Context(), backup.Sources{DataDir: dir, PlayerUUID: path}, func(step string) {
+				if kind == "reset_after_history" && step == "history" {
+					reached = true
+					if _, err := backup.ResetPlayer(dir); err != nil {
+						t.Fatal(err)
+					}
+					id, _, err := config.EnsurePlayerUUID(dir)
+					if err != nil {
+						t.Fatal(err)
+					}
+					putMark(t, dir, id, 4096, 4096)
+				} else if kind != "reset_after_history" && step == "player" {
+					reached = true
+					switch kind {
+					case "uuid_after_capture":
+						if err := config.WritePlayerUUIDFile(path, snapshotPlayerUUID); err != nil {
+							t.Fatal(err)
+						}
+					case "reservation_uuid_after_capture":
+						putMark(t, dir, snapshotPlayerUUID, 2100000000, 2100000000)
+					case "history_after_capture":
+						putHistory(t, dir, nil, []string{snapshotPlayerUUID})
+					case "floor_advance":
+						putMark(t, dir, boxPlayerUUID, 2100000000, 2100000000)
+					}
+				}
+			})
+			if !reached {
+				t.Fatal("capture seam not reached")
+			}
+			if kind == "floor_advance" {
+				if err != nil {
+					t.Fatalf("normal reservation advance refused: %v", err)
+				}
+				if r := markAt(t, snap); r.IDs != 2000000000 || r.Tokens != 2000000000 {
+					t.Fatalf("captured floor: %+v", r)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "player's identity changed during the backup; run it again") {
+				t.Errorf("mixed capture accepted: %s %v", snap, err)
+			}
+			entries, err := os.ReadDir(filepath.Join(dir, backup.BackupsDirName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Errorf("failed backup left %d snapshot directories", len(entries))
 			}
 		})
 	}

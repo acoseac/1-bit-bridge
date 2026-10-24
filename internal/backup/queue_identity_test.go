@@ -370,6 +370,15 @@ func TestUnreadableReservationAdviceResetsIdentityAndQueue(t *testing.T) {
 				} else {
 					assertPlayerResetAdvice(t, err.Error(), operation)
 				}
+				if operation == "restore" && kind == "unreadable" {
+					want := "restore read access to player-ids.json and then rerun bridge output player reset"
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("restore advice omits read-access prerequisite: %v", err)
+					}
+					if _, resetErr := backup.ResetPlayer(dst); resetErr == nil || !strings.Contains(resetErr.Error(), want) {
+						t.Errorf("reset refusal omits read-access prerequisite: %v", resetErr)
+					}
+				}
 				if id, err := config.ReadPlayerUUID(dst); err != nil || id != snapshotPlayerUUID {
 					t.Fatalf("refusal changed identity: %s, %v", id, err)
 				}
