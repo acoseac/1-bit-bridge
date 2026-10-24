@@ -32,9 +32,8 @@ type confineRow struct {
 }
 
 // insertFault is the fault an Insert of uri answers through h, 0 when it is
-// taken; a taken Insert's Read gives the Uri back in its canonical form, the
-// Uri with its name's capitals lower-cased (round 2: never the spelling the
-// controller sent).
+// taken; a taken Insert's Read gives the Uri back byte for byte (round 3: as
+// sent, its name in the case the controller wrote it).
 func insertFault(t *testing.T, h *handler, uri string) int {
 	t.Helper()
 	r := invoke(t, h, playlist, "Insert", "AfterId", "0", "Uri", uri, "Metadata", "")
@@ -43,8 +42,8 @@ func insertFault(t *testing.T, h *handler, uri string) int {
 		if id == 0 {
 			t.Errorf("%s: taken with NewId 0", uri)
 		}
-		if got := read(t, h, playlist, "Read", "Id", u(id))["Uri"]; got != lowerASCII(uri) {
-			t.Errorf("%s: Read gives %q back, want its canonical form %q", uri, got, lowerASCII(uri))
+		if got := read(t, h, playlist, "Read", "Id", u(id))["Uri"]; got != uri {
+			t.Errorf("%s: Read gives %q back, want the Uri as sent", uri, got)
 		}
 		return 0
 	}
@@ -52,19 +51,6 @@ func insertFault(t *testing.T, h *handler, uri string) int {
 		t.Fatalf("%s: %d, want a response or a fault", uri, r.status)
 	}
 	return r.fault
-}
-
-// lowerASCII is s with each ASCII capital lower-cased and every other byte as
-// it is: a taken Uri's canonical form, worked out without the parser under
-// test (a Uri taken has capitals in its name alone).
-func lowerASCII(s string) string {
-	b := []byte(s)
-	for i, c := range b {
-		if 'A' <= c && c <= 'Z' {
-			b[i] = c + 'a' - 'A'
-		}
-	}
-	return string(b)
 }
 
 // TestTheConfinementMatrix pins what an Insert takes: the canonical URI of a
@@ -81,7 +67,8 @@ func lowerASCII(s string) string {
 // to (round 2: U+0130 lower-cases to i and the Kelvin sign to k, so
 // lower-cased first they read as names the bridge advertises). A refusal
 // never reaches the engine, and a Uri refused for its host or its shape never
-// asks the library; a Uri taken is stored in its canonical form.
+// asks the library; a Uri taken is stored as sent (round 3), its name in the
+// case the controller wrote it.
 func TestTheConfinementMatrix(t *testing.T) {
 	p := newTestPlayer(t)
 	h := p.handler("")
@@ -290,30 +277,38 @@ func TestAnAdvertisedNameIsComparedAsASCII(t *testing.T) {
 	}
 }
 
-// TestAnInsertStoresTheURIsCanonicalForm pins what an Insert keeps (round 2):
-// the Uri in its canonical form, its name lower-cased, never the spelling the
-// controller sent. Read and ReadList give that form, the occurrence the
-// engine hands the backend names it, and so do the queue file and Read after
-// a restart; the spelling sent is nowhere.
-func TestAnInsertStoresTheURIsCanonicalForm(t *testing.T) {
+// TestAnInsertStoresItsURIAsSent pins what an Insert keeps (round 3): the Uri
+// as the controller sent it, its name in the case it was written in, once the
+// confinement, which compares it in its canonical form, has taken it. Read,
+// ReadList, the occurrence the engine hands the backend and Info's Track give
+// that spelling, and so do the queue file and Read and ReadList after a
+// restart. 1-bit matches Read's Uri byte for byte against what it inserted
+// (OpenHomeWake.decide), so a spelling changed in storage loses its cast on a
+// relaunch; round 2 stored the canonical form, and round 3 restored this.
+func TestAnInsertStoresItsURIAsSent(t *testing.T) {
 	p := newTestPlayer(t)
 	h := p.handler("")
 	const sent = "http://Bridge.LOCAL:7790/dlna/file/" + goldenID
-	const canon = "http://bridge.local:7790/dlna/file/" + goldenID
 	id := newID(t, h, 0, sent, "meta")
 	reads := func(when string) {
 		t.Helper()
-		if got := read(t, h, playlist, "Read", "Id", u(id))["Uri"]; got != canon {
-			t.Errorf("%s: Read gives %q, want %q", when, got, canon)
+		if got := read(t, h, playlist, "Read", "Id", u(id))["Uri"]; got != sent {
+			t.Errorf("%s: Read gives %q, want the Uri as sent, %q", when, got, sent)
 		}
-		if list := entries(t, h, u(id)); len(list.Entries) != 1 || list.Entries[0].URI != canon {
-			t.Errorf("%s: ReadList gives %+v, want the one entry's Uri %q", when, list.Entries, canon)
+		if list := entries(t, h, u(id)); len(list.Entries) != 1 || list.Entries[0].URI != sent {
+			t.Errorf("%s: ReadList gives %+v, want the one entry's Uri as sent, %q", when, list.Entries, sent)
 		}
 	}
 	reads("as inserted")
 	read(t, h, playlist, "Play")
-	if s := p.be.session(t, 1); s.first.Ref.String() != canon {
-		t.Errorf("the occurrence handed to the backend names %q, want %q", s.first.Ref.String(), canon)
+	s := p.be.session(t, 1)
+	if got := s.first.Ref.String(); got != sent {
+		t.Errorf("the occurrence handed to the backend names %q, want %q", got, sent)
+	}
+	s.hear(s.first.ID, nil)
+	p.heardNow(s.first.ID)
+	if got := read(t, h, info, "Track")["Uri"]; got != sent {
+		t.Errorf("Info's Track gives %q, want %q", got, sent)
 	}
 	read(t, h, playlist, "Stop")
 	p.restart()
@@ -321,9 +316,72 @@ func TestAnInsertStoresTheURIsCanonicalForm(t *testing.T) {
 	reads("after a restart")
 	raw, err := os.ReadFile(filepath.Join(p.dir, p.queue))
 	must(t, "read the queue file", err)
-	if !strings.Contains(string(raw), canon) || strings.Contains(string(raw), "Bridge.LOCAL") {
-		t.Errorf("the queue file holds %s, want the canonical form and not the spelling sent", raw)
+	if !strings.Contains(string(raw), sent) {
+		t.Errorf("the queue file holds %s, want the Uri as sent", raw)
 	}
+}
+
+// TestOneTrackUnderTwoSpellingsIsTwoEntries pins one track inserted twice,
+// its host spelled two ways (round 3): two entries with two IDs, each keeping
+// its own spelling, each opening the track's file through the library
+// resolver (an open parses its stored form, the host not looked at), and each
+// played as an occurrence of its own entry and spelling, Info's Track naming
+// that spelling while it is heard. Nothing in the engine, the backend or the
+// library is keyed on a stored Uri, so neither spelling stands in for the
+// other; and after a restart both are there as they were, and both open.
+func TestOneTrackUnderTwoSpellingsIsTwoEntries(t *testing.T) {
+	p := newTestPlayer(t)
+	lib := newRealLibrary(t)
+	lib.add("Artist/Album (2020)/01 Track One.flac", []byte("one"))
+	h := p.handler("")
+	h.library = lib.r
+	spellings := []string{"http://Bridge.LOCAL:7790/dlna/file/" + goldenID, "http://bridge.local:7790/dlna/file/" + goldenID}
+	var ids []uint32
+	for _, uri := range spellings {
+		after := uint32(0)
+		if len(ids) > 0 {
+			after = ids[len(ids)-1]
+		}
+		ids = append(ids, newID(t, h, after, uri, ""))
+	}
+	if ids[0] == ids[1] {
+		t.Fatalf("both spellings were given the ID %d", ids[0])
+	}
+	opens := func(when string) {
+		t.Helper()
+		for i, id := range ids {
+			got := read(t, h, playlist, "Read", "Id", u(id))["Uri"]
+			if got != spellings[i] {
+				t.Errorf("%s: Read(%d) gives %q, want %q", when, id, got, spellings[i])
+			}
+			ref, err := engine.NewReference(got)
+			must(t, "a stored Uri as a reference", err)
+			if err := lib.opens(ref); err != nil {
+				t.Errorf("%s: %q does not open: %v", when, got, err)
+			}
+		}
+		if list := entries(t, h, u(ids[0])+" "+u(ids[1])); len(list.Entries) != 2 || list.Entries[0].URI != spellings[0] || list.Entries[1].URI != spellings[1] {
+			t.Errorf("%s: ReadList gives %+v, want each entry with its own spelling", when, list.Entries)
+		}
+	}
+	opens("as inserted")
+	for i, id := range ids {
+		read(t, h, playlist, "SeekId", "Value", u(id))
+		s := p.be.session(t, i+1)
+		if s.first.Entry != id || s.first.Ref.String() != spellings[i] {
+			t.Errorf("SeekId(%d) started entry %d naming %q, want entry %d naming %q", id, s.first.Entry, s.first.Ref.String(), id, spellings[i])
+		}
+		s.hear(s.first.ID, nil)
+		p.heardNow(s.first.ID)
+		if got := read(t, h, info, "Track")["Uri"]; got != spellings[i] {
+			t.Errorf("Info's Track while entry %d is heard: %q, want %q", id, got, spellings[i])
+		}
+	}
+	read(t, h, playlist, "Stop")
+	p.restart()
+	h = p.handler("")
+	h.library = lib.r
+	opens("after a restart")
 }
 
 // realLibrary is the player's library resolver over a store of its own and a

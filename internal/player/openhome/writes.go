@@ -349,13 +349,16 @@ func playlistSeekSecond(writeRequest) ([][]byte, *faultReply) { return nil, &fau
 // playlistInsert is Playlist's Insert(AfterId, Uri, Metadata): the URI
 // confined to this bridge's own tracks (confine), the metadata checked
 // (metadataFault), then the edit gate, then the engine's InsertAfter, with
-// the URI's canonical form as the entry's reference (trackref.URI.String: its
-// name lower-cased, never the spelling sent; B470 PR 5a4, round 2), so Read
-// returns that form; NewId its answer.
+// the URI exactly as it was sent as the entry's reference, so Read returns
+// it byte for byte; NewId its answer. The confinement compares the URI in its
+// canonical form; what it takes is ASCII, and differs from that form in the
+// case of its name alone (trackref), so the spelling sent is stored (B470 PR
+// 5a4, round 3: round 2 stored the canonical form, and a controller that
+// matches Read against what it inserted, 1-bit, lost a cast inserted with a
+// name in capitals).
 func playlistInsert(wr writeRequest) ([][]byte, *faultReply) {
-	meta := []byte(wr.args[2])
-	u, f := wr.h.confine(wr.ctx, wr.args[1])
-	if f != nil {
+	uri, meta := wr.args[1], []byte(wr.args[2])
+	if f := wr.h.confine(wr.ctx, uri); f != nil {
 		return nil, f
 	}
 	if f := metadataFault(meta); f != nil {
@@ -364,7 +367,7 @@ func playlistInsert(wr writeRequest) ([][]byte, *faultReply) {
 	if f := editGate(wr.ctx); f != nil {
 		return nil, f
 	}
-	ref, err := engine.NewReference(u.String())
+	ref, err := engine.NewReference(uri)
 	if err != nil {
 		return nil, &faultReply{code: errActionFailed}
 	}
@@ -387,28 +390,28 @@ func playlistInsert(wr writeRequest) ([][]byte, *faultReply) {
 // served on (Hosts: 600 otherwise), never a host that cannot name this
 // bridge to a controller on its LAN (lanHostRefused: 600), and a track id the
 // library serves now (Library: a track that is not the library's 600; no
-// answer, or a library that failed, 501). It returns the URI parsed, whose
-// canonical form the Insert stores.
-func (h *handler) confine(ctx context.Context, uri string) (trackref.URI, *faultReply) {
+// answer, or a library that failed, 501). The host is compared in its
+// canonical form (trackref.CanonicalName, on the inventory's side too).
+func (h *handler) confine(ctx context.Context, uri string) *faultReply {
 	u, err := trackref.Parse(uri)
 	switch {
 	case errors.Is(err, trackref.ErrTooLong):
-		return trackref.URI{}, &faultReply{code: errStringTooLong}
+		return &faultReply{code: errStringTooLong}
 	case err != nil:
-		return trackref.URI{}, &faultReply{code: errArgumentValueInvalid}
+		return &faultReply{code: errArgumentValueInvalid}
 	case lanHostRefused(u), h.hosts == nil || !h.hosts.Names(u):
-		return trackref.URI{}, &faultReply{code: errArgumentValueInvalid}
+		return &faultReply{code: errArgumentValueInvalid}
 	case h.library == nil:
-		return trackref.URI{}, &faultReply{code: errActionFailed}
+		return &faultReply{code: errActionFailed}
 	}
 	var refused *engine.Unplayable
 	switch err := h.library.Member(ctx, u.ID); {
 	case err == nil:
-		return u, nil
+		return nil
 	case errors.As(err, &refused) && notALibraryTrack(refused.Reason):
-		return trackref.URI{}, &faultReply{code: errArgumentValueInvalid}
+		return &faultReply{code: errArgumentValueInvalid}
 	default:
-		return trackref.URI{}, &faultReply{code: errActionFailed}
+		return &faultReply{code: errActionFailed}
 	}
 }
 
