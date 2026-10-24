@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B528: a whole-number setting refuses a fraction rather than load its whole part, in the player block and across the config](#2026-10-24--b528-a-whole-number-setting-refuses-a-fraction-rather-than-load-its-whole-part-in-the-player-block-and-across-the-config)
 - [2026-10-24 — B470 PR 5a0 Round 11: a listed snapshot reservation that cannot be read refuses restore](#2026-10-24--b470-pr-5a0-round-11-a-listed-snapshot-reservation-that-cannot-be-read-refuses-restore)
 - [2026-10-24 — B470 PR 5a0 Round 10: reset advice requires invalid reservation data](#2026-10-24--b470-pr-5a0-round-10-reset-advice-requires-invalid-reservation-data)
 - [2026-10-23 — B470 PR 5a0 round 4: giving up a player identity is permanent](#2026-10-23--b470-pr-5a0-round-4-giving-up-a-player-identity-is-permanent)
@@ -59628,3 +59629,151 @@ minting a fresh identity per run (a new backlog item, not a safety issue on the
 Linux-only test tool); and a History wording nit, applied — the backup
 capture's "only a missing file omits the mark" now says it holds after a valid
 `player-uuid` is captured. Docs in `ops/History-rules-player.md`.
+
+## 2026-10-24 — B528: a whole-number setting refuses a fraction rather than load its whole part, in the player block and across the config
+
+B470 PR 5a2a recorded a follow-up (its "Not in this change"): the player
+block's whole-number lines took a fraction as its whole part. Backlog B528
+took it, and the same pattern across the rest of the config.
+
+### What yaml.v3 did
+
+yaml.v3 v3.0.1 decodes a `!!float` into an int kind by dropping what
+follows the point: `decode.go`'s `scalar` sets `int64(resolved)` once the
+float is no more than `math.MaxInt64` and fits the field, and the uint kinds
+the same way. Go's conversion of a float the integer cannot hold is the
+platform's: measured on darwin/arm64, `-.inf` loaded as the smallest int64
+and 2^63 (`9223372036854775808.0`) as the largest. Measured on main
+(e263ee86) through `Load`:
+
+- The player block: `openhomePort: 7792.9` bound 7792 and the player ran;
+  `pauseReleaseSeconds: 45.75` held the DAC for 45 s, and `0.5` and `-.inf`
+  reached `Problem` as 0 and the smallest int64, refused there as out of
+  range rather than as what they were; `device.pcmDevice: 1.5` read as 1 and
+  `device.subdevice: 0.25` as 0.
+- The rest of the config: of its 44 whole-number settings (`envBindings`'
+  integer leaves outside `output.player`), 42 loaded `2.75` as 2, and
+  `enrich.coverSize` and `retention.playbackHistoryDays` refused it only
+  because 2 is outside what they take: `250.4375` loaded as 250 in both.
+  `limits.manifest.requestsPerMinute: 0.5` loaded as 0, which with the
+  default burst turns the manifest limit off, `-.inf` as the smallest int64,
+  `6.000001` as 6, and 2^63 as the largest int64. `.inf`, `.nan` and `1e19`
+  were refused already, by yaml.v3 itself, as out of range.
+- `Load` took a file holding `output.loopbackPort: 7795.5`, so `bridge
+  init`'s rewrite, which keeps the block Load's decode reads when that
+  decode takes the whole file, kept the port as the 7795 it read (from the
+  code: the new init rows failed on main at their check that `Load` refuses
+  the fixture).
+
+### The rule
+
+A whole-number setting takes no value yaml.v3 would change on the way in.
+`exactInteger` is the one test: anything but a `!!float` passes (an integer,
+a null, or a value the decoder refuses itself), and a `!!float` passes when
+its value is whole and inside the integer's range, the bounds powers of two
+(`math.Ldexp`), which a float64 holds exactly. So `30.0`, `3e1`, `-0.0`,
+`!!float 6` and `08` (which yaml.v3 resolves as a float, being no octal)
+load as written, and no value a file holds changes. Refusing every
+`!!float`, the simpler rule, was rejected: it would stop a file loading over
+values that lose nothing. A round trip through the integer as the range test
+was rejected too: arm64 saturates 2^63 to the largest int64, which converts
+back to 2^63.
+
+Each refusal follows its neighbours. The player block's reader
+(`playerReader.whole`) refuses as it refuses a word there: the block is
+unread, kept as the file holds it, the player off with
+`output.player.<setting> (line N): must be a whole number`, and the load
+goes on. The rest of the config is refused by `Load`, as a word on that
+line is, in the words `ValueFreeYAMLError` gives the out-of-range float
+yaml.v3 refuses itself: `line N: cannot unmarshal a !!float value into int`
+(or `int64`): the line, the tag and the Go type, and nothing of the value.
+`ValueFreeYAMLError` keeps such a line as it is (`valueFreeTagged`: yaml.v3's
+own lines always start with the tag), so the check's lines pass through it.
+
+### How Load finds them: a shadow the decoder maps itself
+
+`config.DecodeFile` is Load's decode: yaml.v3's decoder with `KnownFields`,
+and, once that decode succeeds, `CheckWholeNumbers` over the same bytes,
+which decodes them a second time into a shadow of `Config` (`shadowOf`):
+each integer field replaced by an `integerCheck` of its type, whose
+`UnmarshalYAML` decodes nothing and answers a `*yaml.TypeError` that the
+decoder adds to its own and goes on past, so every such value is named.
+Every struct it rebuilds keeps its fields' names and tags (`reflect.StructOf`)
+and every type that holds no integer is kept as it is, so yaml.v3 maps the
+file onto the shadow as onto `Config`: merge keys, aliases (named at the line
+of the node an alias names, once for each setting it reaches), inline fields
+and encoded keys reach the setting they reach in the decode, and the
+decoder visits the same nodes in the same order, so its alias limit judges
+the two decodes alike. A type that reads its own YAML (`PlayerConfig` among
+them) is not looked into; `time.Duration` decodes from text alone; no map
+in the config is keyed by a number, and a map's keys are not looked at.
+
+Rejected: a resolver of the config's own over the node tree, which would
+copy the decoder's merge and key rules, the copy B505's round 2 found
+disagreeing with the decoder three ways (the rewrite's rule in cli-serve.md);
+a type of its own for every whole-number field, which every consumer's
+arithmetic would have to convert, and whose `UnmarshalYAML` decodes with a
+fresh decoder, dropping `KnownFields`; and running the check when the first
+decode fails, which would mix the shadow's own mismatches into the refusal.
+So a file with a word and a fraction in it is refused for the word first,
+and for the fraction once the word is put right.
+
+`bridge init`'s rewrite reads the file through `DecodeFile`
+(`outputAsLoadDecodes`), so a file holding a fraction anywhere decodes whole
+there no more than in `Load`, and asks `CheckWholeNumbers` of the block it
+decodes on its own (`outputAsLoaded`) and of each setting it recovers
+(`outputRecovered`): a fraction there is "it does not read as that setting",
+as a word is, and one in a merged block keeps nothing, as a word there does.
+
+What changes for an operator: a config that holds a fraction in a
+whole-number setting no longer loads, where it loaded the whole part:
+`bridge serve` does not start, and serve, `bridge doctor` and init name the
+line. A release note should say so.
+
+### Red first
+
+On main with the tests in place: in `internal/config`, 62 subtests failed
+(every fraction of `TestAWholeNumberSettingTakesNoFraction`'s 44 settings,
+the four player settings' nine refused values, the edges of
+`TestAWholeNumberSettingTakesWhatDecodesUnchanged` that loaded, its merge,
+alias and three-fraction cases, and the new row of
+`TestAnOpenHomeSettingIsValidatedLikeItsNeighbours`), each because the value
+loaded truncated ("a fraction loaded, as 7", "Load took it, as a limit of
+0", "PlayerEnabled = true, <nil>"); 34 passed: every integer, whole float,
+null and absent case, `.inf`, `.nan` and `1e19`, which yaml.v3 refused in
+the same words already, and the OpenHome rows that were there before. The
+player block's values were measured through main's own decode
+(`Node.Decode` into an int, as its `whole` made it): 7792.9 as 7792, 45.75
+as 45, 0.5 as 0, `-.inf` as the smallest int64, 1.5 as 1, 0.25 as 0. In
+`cmd/bridge`, the three new init cases failed, each on its fixture loading.
+
+### Runs
+
+On darwin/arm64 with Go 1.27.3 (go.mod's 1.27.2 toolchain is not in this
+host's module cache, and it is offline): `make fmt` rewrote nothing, and
+`gofmt -l internal/config cmd/bridge` lists nothing; `make vet`, and `go vet
+./...` with `GOOS=linux` and with `GOOS=windows`, clean; `make build-all`,
+the six targets built; `make docs-check`, ok; `go test -p 4 -race -timeout
+30m ./internal/config/ ./cmd/bridge/`, ok (3.4 s and 497.7 s); the four
+config tests and the three new init subtests at `-race -count 20`, every
+run passed.
+
+### Where the rule is
+
+Its lines: a new bullet in `config-lifecycle.md`, a clause in `player.md`'s
+binding bullet and in `openhome.md`'s opt-in bullet. The session that made
+this change could not write `.claude/rules`, so those three edits went to
+the owner as a patch beside the commit. Its long forms: the new entry in
+`ops/History-rules-config-lifecycle.md`, the opt-in entry in
+`ops/History-rules-openhome.md`, and the rewrite's entry in
+`ops/History-rules-cli-serve.md`, whose line, keep Load's own decode, holds
+as written.
+
+### Not in this change
+
+yaml.v3 reads an integer written with a leading zero as YAML 1.1's octal:
+`output.loopbackPort: 010` loads as 8, and `0777` as 511 (measured). It is a
+value nobody wrote, but no fraction: a follow-up. The `BRIDGE_*` overrides
+parse with `strconv.ParseInt`, which refuses a fraction (warned and
+ignored), and the console's settings PATCH decodes JSON into `*int`, which
+`encoding/json` refuses with a fraction in it (400): neither truncates.
