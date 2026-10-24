@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -343,6 +344,9 @@ type testPlayer struct {
 	// unreported leaves the output unreported at each start: unknown to the
 	// engine, which refuses whatever would start a session.
 	unreported bool
+	// reserveWrite, when set, runs before each of the engine's reservation
+	// writes (engine.Config.Seams.ReserveWrite; hangReservations).
+	reserveWrite func() error
 }
 
 // newTestPlayer starts an engine. The engine keeps its IDs and tokens
@@ -396,7 +400,12 @@ func (p *testPlayer) start() error {
 	if p.reserve != "" {
 		reserve = filepath.Join(p.dir, p.reserve)
 	}
-	eng, err := engine.New(engine.Config{PlayerUUID: p.uuid, Backend: p.be, QueuePath: filepath.Join(p.dir, p.queue), ReservePath: reserve, DataDir: p.dir})
+	var seams *engine.Seams
+	if p.reserveWrite != nil {
+		seams = &engine.Seams{ReserveWrite: p.reserveWrite}
+	}
+	eng, err := engine.New(engine.Config{PlayerUUID: p.uuid, Backend: p.be, QueuePath: filepath.Join(p.dir, p.queue), ReservePath: reserve, DataDir: p.dir,
+		Seams: seams})
 	if err != nil {
 		return err
 	}
@@ -434,6 +443,33 @@ func (p *testPlayer) restart() {
 	if err := p.start(); err != nil {
 		p.tb.Fatalf("the engine does not start again: %v", err)
 	}
+}
+
+// hangReservations restarts p's engine with its run's first reservation
+// write failing, so the next edit that takes a value parks for a write, and
+// holds every reservation write from then on until the returned function
+// lets them go: the engine's own hangReservations (its harness_test.go),
+// through engine.Config.Seams (B470 PR 5a4, round 2). A parked edit is then
+// refused at engine.ReserveTimeout, as the engine refuses one whose write has
+// not landed. The test's cleanup lets the writes go before the engine stops,
+// whose shutdown waits for a write under way: it is registered after the
+// restart's stop, so it runs first.
+func (p *testPlayer) hangReservations() (letGo func()) {
+	p.tb.Helper()
+	hold := make(chan struct{})
+	var once sync.Once
+	letGo = func() { once.Do(func() { close(hold) }) }
+	var calls atomic.Int32
+	p.reserveWrite = func() error {
+		if calls.Add(1) == 1 {
+			return errors.New("read-only file system")
+		}
+		<-hold
+		return nil
+	}
+	p.restart()
+	p.tb.Cleanup(letGo)
+	return letGo
 }
 
 // available reports the output available, numbering the report.

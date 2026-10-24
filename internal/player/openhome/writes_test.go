@@ -1128,51 +1128,74 @@ func TestAnEditLateInItsBudgetIsRefusedBeforeTheEngine(t *testing.T) {
 }
 
 // TestAnEditThatPassesTheGateIsAnsweredInsideItsBudget pins why the gate is
-// editBudget: an Insert that passes it with as little of its budget left as
-// it lets (a budget of editBudget and a fifth of a second, through the
-// listener's limits) is answered inside that budget however long the engine
-// may hold it for a reservation write, which is at most engine.ReserveTimeout,
-// its own timer refusing it then (in the engine,
-// TestAParkedEditIsAnsweredWithinReserveTimeoutOfItsPark): held a little less,
-// it answers its NewId; held a little more and refused as the engine refuses
-// it there, 501.
+// editBudget, against the real engine with its reservation write held
+// (hangReservations), so an edit that reaches it parks the longest it can,
+// engine.ReserveTimeout, and is then refused (in the engine,
+// TestAParkedEditIsAnsweredWithinReserveTimeoutOfItsPark). The limits are
+// the listener's defaults, a budget of 9 s, and the Insert's body arrives
+// late. With ReserveTimeout and half a second of its budget left, less than
+// editBudget, the gate answers 501 and the engine is never called, the queue
+// as it was: the engine would hold it the whole ReserveTimeout and answer the
+// same 501 inside the budget, so the fault and the time alone could not tell
+// the gate's refusal from the engine's. With ReserveTimeout and two seconds
+// left, a second more than editBudget, it passes the gate, the engine holds
+// it the whole ReserveTimeout and refuses it, and it is answered inside its
+// budget all the same. Neither case is worked out from editBudget, the
+// constant under test. Round 2: the test
+// this replaces took its limit from editBudget itself, and stayed green with
+// the gate's second removed, or the gate gone.
 func TestAnEditThatPassesTheGateIsAnsweredInsideItsBudget(t *testing.T) {
-	p := newTestPlayer(t)
-	lim := Limits{Write: editBudget + budgetMargin + 200*time.Millisecond}.orDefaults()
-	const epsilon = 50 * time.Millisecond
+	lim := DefaultLimits.orDefaults()
+	budget := lim.writeBudget()
+	if budget != 9*time.Second {
+		t.Fatalf("a budget of %v: the cases below are for 9 s", budget)
+	}
 	for _, tc := range []struct {
-		what    string
-		hold    time.Duration
-		refused bool
+		what string
+		// left is what is left of the budget once the body has arrived.
+		left  time.Duration
+		gated bool
 	}{
-		{"held a little less than ReserveTimeout", engine.ReserveTimeout - epsilon, false},
-		{"held a little more, then refused", engine.ReserveTimeout + epsilon, true},
+		{"with ReserveTimeout and half a second left", engine.ReserveTimeout + 500*time.Millisecond, true},
+		{"with ReserveTimeout and two seconds left", engine.ReserveTimeout + 2*time.Second, false},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
 			t.Parallel()
+			p := newTestPlayer(t)
+			p.hangReservations()
+			var calls atomic.Int32
 			spy := newSpy(p.eng)
-			spy.beforeInsert = func(ctx context.Context) error {
-				select {
-				case <-time.After(tc.hold):
-				case <-ctx.Done():
-					return &engine.Error{Reason: engine.ReasonCancelled, Op: "insert", Err: ctx.Err()}
-				}
-				if tc.refused {
-					return &engine.Error{Reason: engine.ReasonReservation, Op: "insert", Detail: "the reservation write did not land within ReserveTimeout"}
-				}
+			spy.beforeInsert = func(context.Context) error {
+				calls.Add(1)
 				return nil
 			}
 			h := p.handlerWith("", spy, lim)
+			before := p.eng.Snapshot().IDs()
 			began := time.Now()
-			r := invoke(t, h, playlist, "Insert", "AfterId", "0", "Uri", uriOf(goldenID), "Metadata", "")
-			if took := time.Since(began); took >= lim.writeBudget() {
-				t.Errorf("answered after %v, past its %v budget", took, lim.writeBudget())
+			r := sendRequest(h, playlist, "Insert", slowRequest(playlist, "Insert", budget-tc.left,
+				"AfterId", "0", "Uri", uriOf(goldenID), "Metadata", "")).answer(t)
+			took := time.Since(began)
+			if took >= budget {
+				t.Errorf("answered after %v, past its %v budget", took, budget)
 			}
-			switch {
-			case tc.refused && r.fault != errActionFailed:
-				t.Errorf("an Insert the engine refused: %d, fault %d, want 501", r.status, r.fault)
-			case !tc.refused && (r.status != http.StatusOK || ui4Value(t, "NewId", r.values["NewId"]) == 0):
-				t.Errorf("an Insert the engine took: %d, fault %d, NewId %q", r.status, r.fault, r.values["NewId"])
+			if r.status != http.StatusInternalServerError || r.fault != errActionFailed {
+				t.Errorf("%d, fault %d; want 501, the gate's or the engine's refusal at ReserveTimeout", r.status, r.fault)
+			}
+			answers := spy.answered("InsertAfter")
+			if tc.gated {
+				if n := calls.Load(); n != 0 || len(answers) != 0 {
+					t.Errorf("the gate let the Insert reach the engine: %d calls, answered %v", n, answers)
+				}
+			} else {
+				if n := calls.Load(); n != 1 || len(answers) != 1 || engine.ReasonOf(answers[0]) != engine.ReasonReservation {
+					t.Errorf("the Insert past the gate: %d calls, answered %v; want the engine's refusal at ReserveTimeout", n, answers)
+				}
+				if took < engine.ReserveTimeout {
+					t.Errorf("answered after %v: the engine held it less than ReserveTimeout", took)
+				}
+			}
+			if got := p.eng.Snapshot().IDs(); !slices.Equal(got, before) {
+				t.Errorf("the queue %v, want it as it was, %v", got, before)
 			}
 		})
 	}
