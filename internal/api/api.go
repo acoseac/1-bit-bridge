@@ -1861,7 +1861,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		// /v1/health is unauthenticated and unlimited, and the uncached
 		// form ran a full interface enumeration (1 + N kernel dumps) per
 		// request. See endpointsCache.
-		Endpoints: s.endpointsCache.endpoints(s.reachableEndpoints),
+		Endpoints: s.HealthEndpoints(),
 	}
 	if authed {
 		resp.ScanState = &scanState
@@ -2250,6 +2250,18 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		resp.UPnPUpstreamServers = s.publicServers.servers(r.Context(), s.upnpPublicProvider)
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// HealthEndpoints is the endpoint URLs `/v1/health` serves now, its very
+// snapshot: the same provider (reachableEndpoints) through the same cache
+// (endpointsCache, endpointsTTL), so a caller has exactly what a client of
+// `/v1/health` could have read: an address that disappears stays in it
+// until the snapshot refreshes, and a walk that could list only part of the
+// interfaces gives the part it listed. The player's Insert takes a host from
+// it (B470 PR 5a4: 1-bit builds a track's URI from these endpoints). The
+// slice is the cache's: read-only.
+func (s *Server) HealthEndpoints() []string {
+	return s.endpointsCache.endpoints(s.reachableEndpoints)
 }
 
 // reachableEndpoints is the flat, URL-only form of ReachableEndpoints —
