@@ -51,6 +51,37 @@ func (e *BusyError) Error() string {
 // Is makes a *BusyError match ErrBusy.
 func (e *BusyError) Is(target error) bool { return target == ErrBusy }
 
+// ErrNoLockManager is what a *NoLockManagerError matches: the filesystem the
+// config file is on gave no lock for the whole of the wait.
+var ErrNoLockManager = errors.New("config: the config file's filesystem gave no lock")
+
+// NoLockManagerError is LockFile's refusal once the wait is over when every
+// try at the lock answered that there was no lock to give (ENOLCK): an NFS
+// mount whose lock manager is not running, or that ran out of locks. That
+// answer does not say the filesystem keeps no locks, so the turn is not taken
+// without one. It names the config file, why, and what to do, and nothing the
+// file holds.
+type NoLockManagerError struct {
+	// Path is the config file.
+	Path string
+	// Wait is how long LockFile tried.
+	Wait time.Duration
+	// Err is the lock's last answer.
+	Err error
+}
+
+func (e *NoLockManagerError) Error() string {
+	return fmt.Sprintf("the filesystem holding %s gave no lock beside it for %s (%v), so nothing was written: "+
+		"it has no working lock manager; mount it with local locking, or start its lock service, and try again",
+		e.Path, e.Wait, e.Err)
+}
+
+// Is makes a *NoLockManagerError match ErrNoLockManager.
+func (e *NoLockManagerError) Is(target error) bool { return target == ErrNoLockManager }
+
+// Unwrap is the lock's last answer.
+func (e *NoLockManagerError) Unwrap() error { return e.Err }
+
 // ErrChangedInTurn is what a *ChangedInTurnError matches.
 var ErrChangedInTurn = errors.New("config: the config file changed during a writer's turn")
 

@@ -1,5 +1,13 @@
 package fsutil
 
+import "errors"
+
+// ErrDanglingLink is what ResolveParent's refusal of a path whose last
+// element is a symbolic link that leads to nothing matches: a write there
+// would either make the file the link names or replace the link with a file,
+// and neither is the writer's to choose.
+var ErrDanglingLink = errors.New("a symbolic link that leads to no file")
+
 // ResolveParent splits path into the directory a create or a rename of path
 // lands in, named as the OS resolves path, and path's last element. Two
 // spellings of one destination answer one directory, so a lock taken beside
