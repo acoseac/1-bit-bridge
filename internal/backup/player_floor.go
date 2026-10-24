@@ -394,9 +394,9 @@ func adoptPlayerState(dir string, random io.Reader) error {
 	return err
 }
 
-// tryLock is the lock a backup's seal completion tries on server.lock:
-// fsutil.TryLock. A test swaps it to inject a lock error and puts it back in
-// t.Cleanup.
+// tryLock is the lock a backup tries on server.lock, for its seal completion
+// and its adoption: fsutil.TryLock. A test swaps it to inject a lock error and
+// puts it back in t.Cleanup.
 var tryLock = fsutil.TryLock
 
 // errSealCompletionBusy is a backup's seal completion that another lifecycle
@@ -457,8 +457,8 @@ func completeCapturedPlayerSeal(dir string) error {
 	return nil
 }
 
-// openSealLock opens server.lock for a backup's seal completion, a failure
-// tagged with its remedy (lockFileAccess).
+// openSealLock opens server.lock for a backup's seal completion and its
+// adoption, a failure tagged with its remedy (lockFileAccess).
 func openSealLock(dir string) (*os.File, error) {
 	f, err := fsutil.OpenLockFile(dir, "server.lock")
 	if err != nil {
@@ -904,12 +904,12 @@ func upgradeCapturedPlayer(dir, captured string) error {
 	if err != nil || !unstarted {
 		return err
 	}
-	f, err := fsutil.OpenLockFile(dir, "server.lock")
+	f, err := openSealLock(dir)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	if err := fsutil.TryLock(f); err != nil {
+	if err := tryLock(f); err != nil {
 		return fmt.Errorf("player initialization is busy; stop the service and run the backup again: %w", err)
 	}
 	defer fsutil.Unlock(f)
