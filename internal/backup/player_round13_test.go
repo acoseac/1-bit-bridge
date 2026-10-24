@@ -14,6 +14,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
 // userClaim is what every permission failure's advice ends with: the next
@@ -123,6 +124,25 @@ func TestOnlyAHeldLockMakesAdoptionBusy(t *testing.T) {
 				t.Fatalf("the refused adoption changed the player's state: %v -> %v", before, after)
 			}
 		})
+	}
+}
+
+// TestALockRefusedForPermissionNamesTheLockFile: a seal completion's lock on
+// server.lock refused for permission, rather than held by another open,
+// carries the lock file's union, as a refused open of it does.
+func TestALockRefusedForPermissionNamesTheLockFile(t *testing.T) {
+	reservationStorage(t)
+	dir := loneSealBox(t)
+	t.Cleanup(backup.SetTryLockForTest(func(*os.File) error {
+		return &os.PathError{Op: "flock", Path: "server.lock", Err: syscall.EACCES}
+	}))
+	rec := loggingtest.Record(t)
+	if _, err := backup.Snapshot(t.Context(), backup.Sources{DataDir: dir, PlayerUUID: filepath.Join(dir, config.PlayerUUIDFile)}); err != nil {
+		t.Fatalf("a refused completion stopped the backup: %v", err)
+	}
+	want := entryAdvice(dir, "server.lock", "read and write")
+	if lines := rec.Lines("player seal completion failed"); len(lines) != 1 || !strings.Contains(lines[0], want) {
+		t.Fatalf("a lock refused for permission:\n%v\nwant it to end:\n%s", lines, want)
 	}
 }
 
