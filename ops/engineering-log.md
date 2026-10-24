@@ -209,6 +209,9 @@ or Finished. All ten compiled and failed their predicted assertions. The
 no-fallback control now advances the fake DAC from 16,800 to 19,200 consumed
 frames after Resume; the fresh-timeout control fails the context/deadline
 comparison, and each producer-event control fails the exact event sequence.
+Those controls did not isolate the state half of the fallback condition: the
+xrun case was already excluded by its reason. The command hook also still
+used fatal test helpers off the test goroutine; round 3 corrects both gaps.
 
 Round 2 Go 1.27.2 offline validation passed Darwin and Linux `go vet ./...`,
 `make fmt`, `make docs-check`, and each changed test twenty times under
@@ -225,6 +228,49 @@ established. A separate focused race run of
 `listen tcp4 127.0.0.1:0: bind: operation not permitted`. OpenHome still
 requires a host that permits those listeners; this round does not claim a
 passing all-player gate.
+
+Round 3 adds `TestPlaybackResumeRollbackKeepsACompletedDrain` for the
+producer's sink after it has played out, with the producer held at SinkCall
+before it can mark the output drained or close it. Its before-fault case
+finishes the drain while Resume's command reply is held, then records the
+fault: the real sink returns `ReasonClosed`, not `ReasonBadState`, for that
+Pause. That ordering alone cannot isolate the state check. Its
+after-pause-refusal case instead lets the final drain refuse Pause with
+`ReasonBadState`, holds that reply at SinkCall, completes the drain, then
+lets rollback check Position. The same current sink is now `SinkStopped`.
+Both cases require zero Drops, exactly one bounded sink call (Pause), and
+exactly the original fault joined with that call's Pause error. Control 11
+removes only `&& out.sink.Position().State == alsapcm.SinkDraining`: the
+before-fault case passes, and after-pause-refusal fails with two bounded
+calls and answers instead of one. Drop of a stopped sink is a no-op before
+the command hook, so counting bounded calls is essential to see that attempt.
+
+All watchdog waits and fatal checks now run on the test goroutine. The
+Resume command hook signals its arrival and holds only its reply; Resume
+runs on a separate goroutine whose answer the test receives under the
+watchdog. Every held reply is freed during cleanup and that Resume goroutine
+is joined, including after a fatal assertion. Control 12 gives the final
+kernel drain a zero timeout: the final-drain wait fails at the one-second
+watchdog and the process exits FAIL, without a test-timeout panic or a
+stranded Resume. Controls 1–10 were rerun against these tests and all twelve
+controls compile and fail their predicted assertions. Production code is
+unchanged in round 3; all temporary mutations are restored from saved bytes.
+
+Round 3 Go 1.27.2 offline validation passed Darwin and Linux `go vet ./...`,
+`make fmt`, `make docs-check`, and all three changed test functions twenty
+times each under `-race` (both completed-drain subtests included). Every
+player package outside OpenHome, plus `internal/alsapcm`, passed the full
+race suite. The requested all-player run failed on sandbox-refused loopback
+binds in `TestAHeaderPastItsBoundIsRefused`,
+`TestAPanicInTheListingStaysInTheSurface`,
+`TestAnIdleConnectionAndAStalledHeaderAreClosed` and
+`TestTheSurfaceBindsEachServedAddressAndFollowsThem`. As its two-minute
+package cap approached, later OpenHome waits failed immediately and
+`TestStopRefusesThenShutsDownThenCloses` panicked in cleanup without a
+listener. A focused run of
+`TestTheSurfaceBindsEachServedAddressAndFollowsThem` independently confirmed
+`listen tcp4 127.0.0.1:0: bind: operation not permitted`. The all-player gate
+still requires a host permitting those listeners and is not claimed passed.
 
 ## File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)
 
