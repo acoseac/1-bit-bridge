@@ -65,7 +65,7 @@ jobs:
         name: Enumerate fuzz targets
         run: |
           set -euo pipefail
-          go test -list 'Fuzz.*' ./... 2>/dev/null > /tmp/list.txt || true
+          go test -tags ts_omit_webclient,ts_omit_debugeventbus -list 'Fuzz.*' ./... 2>/dev/null > /tmp/list.txt || true
           python3 - <<'PY' > /tmp/targets.json
           import json, re
           pkg, out = None, []
@@ -150,7 +150,7 @@ jobs:
         env:
           FUZZ_AS_LIMIT: "5368709120"
         run: |
-          go test ${{ matrix.target.package }} \
+          go test -tags ts_omit_webclient,ts_omit_debugeventbus ${{ matrix.target.package }} \
             -exec "prlimit --as=${FUZZ_AS_LIMIT} --" \
             -run XXX \
             -fuzz '^${{ matrix.target.name }}$' \

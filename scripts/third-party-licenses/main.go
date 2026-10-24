@@ -61,7 +61,7 @@ func embeddedNotices(m module) (string, error) {
 
 func main() {
 	output := flag.String("output", "THIRD_PARTY_LICENSES.md", "output file")
-	checkTags := flag.Bool("check-build-tags", false, "check release tags in Makefile and Dockerfile")
+	checkTags := flag.Bool("check-build-tags", false, "check release tags at every reviewed build and test site")
 	flag.Parse()
 	if *checkTags {
 		if err := checkBuildTags("."); err != nil {
@@ -166,7 +166,7 @@ func releaseBuild(data []byte) (releaseConfig, error) {
 		}
 		seen := map[string]bool{}
 		for _, tag := range tags {
-			if !regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.]*$`).MatchString(tag) || seen[tag] {
+			if !regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.]*$`).MatchString(tag) || yamlTypedTag(tag) || seen[tag] {
 				return releaseConfig{}, fmt.Errorf("invalid or duplicate build tag: %q", tag)
 			}
 			seen[tag] = true
@@ -256,8 +256,9 @@ func generate(root string) ([]byte, map[string]int, error) {
 		linked := map[string]bool{}
 		for {
 			var pkg struct {
-				Module *module
-				Dir    string
+				Module          *module
+				Dir, ImportPath string
+				EmbedFiles      []string
 			}
 			err := decoder.Decode(&pkg)
 			if err == io.EOF {
@@ -265,6 +266,9 @@ func generate(root string) ([]byte, map[string]int, error) {
 			}
 			if err != nil {
 				return nil, nil, fmt.Errorf("go list %s JSON: %w", target, err)
+			}
+			if err := checkPackageEmbeds(pkg.Module, pkg.ImportPath, pkg.EmbedFiles); err != nil {
+				return nil, nil, fmt.Errorf("go list %s: %w", target, err)
 			}
 			if pkg.Module == nil || pkg.Module.Main {
 				continue
@@ -458,4 +462,41 @@ func notices(m module) ([]notice, error) {
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].name < files[j].name })
 	return files, nil
+}
+
+// yamlTypedTag refuses YAML 1.1 and 1.2 implicit non-string words. Numeric
+// spellings are excluded by the tag grammar's letter/underscore first byte.
+func yamlTypedTag(tag string) bool {
+	switch strings.ToLower(tag) {
+	case "null", "true", "false", "yes", "no", "on", "off", "y", "n":
+		return true
+	}
+	return false
+}
+
+// These embedded files were reviewed as module-owned data/scripts covered by
+// their module notices. Keys are exact module@version plus import path; files
+// are an exact set, never a glob. Any replacement needs a fresh review.
+var reviewedEmbeds = map[string][]string{
+	"google.golang.org/protobuf@v1.36.12 google.golang.org/protobuf/internal/editiondefaults": {"editions_defaults.binpb"},
+	"tailscale.com@v1.104.2 tailscale.com":                                                    {"ALPINE.txt", "VERSION.txt", "go.toolchain.next.rev", "go.toolchain.rev"},
+	"tailscale.com@v1.104.2 tailscale.com/net/dns":                                            {"resolvconf-workaround.sh"},
+	"tailscale.com@v1.104.2 tailscale.com/net/dnsfallback":                                    {"dns-fallback-servers.json"},
+}
+
+func checkPackageEmbeds(m *module, pkg string, files []string) error {
+	if pkg == "tailscale.com/client/web" || pkg == "github.com/tailscale/web-client-prebuilt" || strings.HasPrefix(pkg, "github.com/tailscale/web-client-prebuilt/") || (m != nil && m.Path == "github.com/tailscale/web-client-prebuilt") {
+		return fmt.Errorf("forbidden web package %s; review release omission tags", pkg)
+	}
+	if m == nil || m.Main || len(files) == 0 {
+		return nil
+	}
+	key := m.Path + "@" + m.Version + " " + pkg
+	expected, ok := reviewedEmbeds[key]
+	actual := append([]string(nil), files...)
+	sort.Strings(actual)
+	if !ok || m.Replace != nil || strings.Join(actual, "\n") != strings.Join(expected, "\n") {
+		return fmt.Errorf("unreviewed embedded files in %s: %v; review module version, package and exact file set", key, files)
+	}
+	return nil
 }

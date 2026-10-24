@@ -72,7 +72,7 @@ func TestBuildTagsAgree(t *testing.T) {
 		{"Dockerfile", "    -trimpath", "    -tags other\n    -trimpath"},
 	} {
 		t.Run(tc.file+tc.new, func(t *testing.T) {
-			root := t.TempDir()
+			root := buildSiteFixture(t)
 			for _, name := range []string{".goreleaser.yaml", "Makefile", "Dockerfile"} {
 				b, err := os.ReadFile("../../" + name)
 				if err != nil {

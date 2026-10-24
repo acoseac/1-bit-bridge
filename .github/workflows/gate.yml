@@ -246,7 +246,7 @@ jobs:
           sudo mkdir -p /mnt/b264-small
           sudo mount -t tmpfs -o size=16m tmpfs /mnt/b264-small
           sudo chown "$(id -u):$(id -g)" /mnt/b264-small
-          BRIDGE_TEST_SMALL_VOLUME=/mnt/b264-small go test ./internal/transcode/ \
+          BRIDGE_TEST_SMALL_VOLUME=/mnt/b264-small go test -tags ts_omit_webclient,ts_omit_debugeventbus ./internal/transcode/ \
             -run 'TestARenditionThatCouldNotBeWrittenWholeIsNotPublished' -count=1 -v
 
   build-all:
@@ -510,7 +510,7 @@ jobs:
       # the real check on `doctor_windows.go`'s Syscall6 argument
       # liveness, and it cannot run from a non-Windows host.
       - name: vet
-        run: go vet ./...
+        run: go vet -tags ts_omit_webclient,ts_omit_debugeventbus ./...
       # -timeout 30m, matching the Makefile's `test` target rather than
       # taking Go's 10m/package default. The Makefile already documents
       # why 10m is too short even on Linux (internal/adminauth pays real
@@ -526,7 +526,7 @@ jobs:
       # timeout-minutes above has to leave room for several slow packages
       # in sequence — hence 60 there against 30 here.
       - name: test
-        run: go test -timeout 30m ./...
+        run: go test -tags ts_omit_webclient,ts_omit_debugeventbus -timeout 30m ./...
 
   # Single green signal that fans in the parallel jobs. `if: always()` + the
   # explicit result check means a failed (or cancelled) dependency fails the

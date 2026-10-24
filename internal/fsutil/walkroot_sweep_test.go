@@ -41,6 +41,7 @@ var libraryRootWalks = map[string]string{
 // implementation behind WalkableRoot's answer; the callers above are what
 // start from WalkableRoot.
 var otherTreeWalks = map[string]string{
+	"scripts/third-party-licenses/tags.go checkBuildSites": "the source repository, to census reviewed build and test commands",
 	"internal/fsutil/walkroot.go WalkConfigured":           "the path WalkableRoot returned; a separator path whose chain names a directory is read there and reported under that path",
 	"internal/fsutil/walkroot.go walkResolvedChain":        "the directory a separator path's link chain names, reported under the configured path",
 	"internal/doctor/cgroup.go findCgroups":                "the cgroup2 mount",
