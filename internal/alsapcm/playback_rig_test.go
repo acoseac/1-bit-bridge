@@ -48,6 +48,7 @@ func waitOn(t *testing.T, what string, changed func() <-chan struct{}, cond func
 		select {
 		case <-ch:
 		case <-timer.C:
+			alsapcm.LogGoroutines(t)
 			t.Fatalf("waited %v for %s", alsapcm.Watchdog(), what)
 		}
 	}
@@ -779,6 +780,28 @@ func (r *rig) waitStopped(why engine.Reason) *engine.Snapshot {
 	return s
 }
 
+// tickUntilStopped measures while playback is live and waits for the stop,
+// not for another reporter receive: the measurement can end the reporter.
+func (r *rig) tickUntilStopped(why engine.Reason) *engine.Snapshot {
+	r.t.Helper()
+	timer := time.NewTimer(alsapcm.Watchdog())
+	defer timer.Stop()
+	for {
+		changed := r.eng.Changed()
+		s := r.eng.Snapshot()
+		if s.State() == engine.Stopped && s.LastStop().Reason != "" {
+			return r.waitStopped(why)
+		}
+		select {
+		case <-changed:
+		case r.ticks <- time.Time{}:
+		case <-timer.C:
+			alsapcm.LogGoroutines(r.t)
+			r.t.Fatalf("waited %v for playback to stop: %s", alsapcm.Watchdog(), why)
+		}
+	}
+}
+
 // waitEvents waits until the events reported satisfy cond.
 func (r *rig) waitEvents(what string, cond func([]event) bool) []event {
 	r.t.Helper()
@@ -811,6 +834,7 @@ func (r *rig) tick() {
 		select {
 		case r.ticks <- time.Time{}:
 		case <-time.After(alsapcm.Watchdog()):
+			alsapcm.LogGoroutines(r.t)
 			r.t.Fatalf("no reporter took a tick within %v", alsapcm.Watchdog())
 		}
 	}
