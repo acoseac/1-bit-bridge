@@ -277,6 +277,15 @@ func testResumeRollback(t *testing.T, window rollbackWindow, heldDrop bool) {
 	// goroutine and strand Resume. Cleanup always frees both held replies.
 	receiveIn(t, resumeEntered, "Resume to reach its command hook")
 	if window == rollbackCompletedBeforeFault {
+		// The first Drain can refuse the paused sink. Resume's command
+		// hook only says it was queued; the producer may still need to
+		// retry Drain after that refusal. Granting time first can run the
+		// sink dry before the retry, so no successful Drain ever arrives.
+		// With fake time held, an accepted Drain stays draining until we
+		// grant time; subscribe before reading its state.
+		waitOn(t, "the producer's Drain to be accepted", sink.Changed, func() bool {
+			return sink.Position().State == alsapcm.SinkDraining
+		})
 		d.k.Grant(time.Second)
 		if err := receiveIn(t, drainCompleted, "the producer's completed Drain"); err != nil {
 			t.Fatal(err)
