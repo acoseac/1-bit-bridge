@@ -111,7 +111,7 @@ reservation counters do not prevent a live backup. Restore merges the
 snapshot's history with the box's
 history before installing an identity; it never replaces the live list with
 an older one. Do not delete or edit the history to bypass a refusal. A history
-that is corrupt, unreadable or not a file refuses backup, restore or reset.
+that is corrupt, unreadable, a dangling link or not a file refuses backup, restore or reset.
 For a reservation that cannot be read, restore read access to `player-ids.json`
 and then rerun `bridge reset-player`; a malformed reservation can be
 reset, retaining every UUID it still names.
@@ -124,3 +124,20 @@ over after this box last ran it still has valid snapshots on that other box,
 as described above, but this box refuses it after recording a reset. It
 cannot establish what the other box still holds. Refusing is safe; reissuing
 an old ID or token is not.
+
+
+The same identity checks run before serve starts the player and before DAC
+bind keeps or creates its UUID. A pending reset, orphaned player files, a live
+or reservation UUID recorded as given up, or covered identities with no
+reservation require `bridge reset-player` with the service stopped. Covered
+history alone still needs that reset; manually removing the three player files
+is unsafe because it does not record the identities given up.
+
+Restore records the incoming UUID in history before its reservation lands,
+so an interrupted restore followed by a restart and reset cannot forget it.
+Restore also refuses before writing if its merged history gives up the box's
+live or reservation UUID, including a history-only restore. Reset the box
+before retrying, even when the incoming UUID matches that given-up identity. Keep
+history in snapshots when removing their UUID and reservation. A malformed
+live UUID requires reset; unreadable UUID content requires read access first,
+and a non-file at its path must be moved aside first.

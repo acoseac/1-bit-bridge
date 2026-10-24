@@ -248,6 +248,36 @@ fixes; the round-three report holds those logs, all 44 prior mutation controls,
 the additional controls, native and cross-platform vet, race gates and exact
 socket restrictions. No commit or push is part of this round.
 
+
+**Round 4.** Restore adds the incoming UUID to `covered`
+before durably writing its reservation and keeps it after success. If the
+restore stops before the UUID lands, the old player's next start can restamp
+the floor; the history still gives up the incoming identity on reset, refusing
+its older snapshots. Restore checks the live UUID and reservation UUID against
+the merged given-up list before any write, even for a history-only snapshot;
+the remedy is `bridge reset-player`, even when the incoming UUID matches
+the given-up live or reservation UUID. Its live UUID read refusal distinguishes
+malformed content (reset), unreadable content (restore read access) and a
+non-file (move it aside).
+
+Every production UUID minter uses `backup.EnsurePlayerUUID` under the data-dir
+lock: `bridgePlayer.start` and `runDACBind`. The wrapper runs
+`CheckPlayerStart` before calling config's primitive: pending reset, orphaned
+reservation or queue, live or reservation UUID given up, and covered history
+without a reservation all refuse. The AST source guard permits the primitive
+only in that wrapper. A reset with covered identities and no player files is
+real work, never a no-op: the covered names must become given-up names.
+History's ENOENT is absence only when Lstat confirms no entry; a dangling link
+refuses backup, restore, reset and start. Use the reset command, never manual
+three-file removal, so covered identities remain recorded.
+
+The regression runs the actual engine after interrupting restore at the UUID
+rename, joins it before reset, and refuses the old incoming snapshot. Further
+tests cover history-only restore for each live identity, each start refusal,
+bind through the real command, dangling history and all three read remedies.
+The round-four report holds red-first evidence, the earlier 56 controls rerun,
+new mutation controls and the Go 1.27.3 gates, with socket restrictions separate.
+
 ## File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)
 
 The whole-track spectrum (`1BSP`, 84 bytes = 24-byte header + 60 band bytes; `Track.bandwidthHz`; `GET /v1/spectrum`; `spectrum` health flag) answers "is this file an upsampled CD rip?". Five bridge PRs, each finding a defect only REAL data exposed — every synthetic fixture agreed with every other synthetic fixture and they were all wrong together. Invariants:
