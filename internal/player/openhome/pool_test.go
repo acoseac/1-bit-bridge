@@ -99,7 +99,12 @@ func from(src netip.Addr, s *service, action string, args ...string) *http.Reque
 // TestTheLimitsKeepTwoSlotsFromTheWrites pins the pool's sizes: the
 // defaults, six writes of the eight slots and four a source, below the
 // listener's eight connections a source; and limits that would leave the
-// reads fewer than two slots, or a source every connection, are held to them.
+// reads fewer than two slots, a source every connection, or a source the
+// whole write pool, are held to them (round 2: a source's share was held
+// below its connections alone, so at Slots 4 one source held both write
+// slots). A share strictly below the pool is impossible with one write slot
+// (Slots of 1 to 3, or WriteSlots 1): there the share is the pool. Every
+// limit from 0 to 12 of each field is held to the same bounds.
 func TestTheLimitsKeepTwoSlotsFromTheWrites(t *testing.T) {
 	d := DefaultLimits.orDefaults()
 	if d.Slots != 8 || d.WriteSlots != 6 || d.WritesPerSource != maxWritesPerSource || maxWritesPerSource != 4 || d.MaxConnsPerSource != 8 {
@@ -112,15 +117,83 @@ func TestTheLimitsKeepTwoSlotsFromTheWrites(t *testing.T) {
 		in             Limits
 		writes, source int
 	}{
-		{Limits{Slots: 4, WriteSlots: 4}, 2, 4},
-		{Limits{Slots: 2, WriteSlots: 6}, 1, 4},
-		{Limits{Slots: 1}, 1, 4},
+		{Limits{Slots: 4, WriteSlots: 4}, 2, 1},
+		{Limits{Slots: 4}, 2, 1},
+		{Limits{Slots: 5}, 3, 2},
+		{Limits{Slots: 6}, 4, 3},
+		{Limits{Slots: 7}, 5, 4},
+		{Limits{WriteSlots: 2}, 2, 1},
+		{Limits{WriteSlots: 3, WritesPerSource: 7}, 3, 2},
+		{Limits{Slots: 100, WriteSlots: 50, WritesPerSource: 60, MaxConnsPerSource: 100}, 50, 49},
 		{Limits{MaxConnsPerSource: 3, WritesPerSource: 4}, 6, 2},
 		{Limits{MaxConnsPerSource: 1}, 6, 1},
+		// One write slot: the share is the pool.
+		{Limits{Slots: 3}, 1, 1},
+		{Limits{Slots: 2, WriteSlots: 6}, 1, 1},
+		{Limits{Slots: 1}, 1, 1},
+		{Limits{WriteSlots: 1}, 1, 1},
+		{Limits{WriteSlots: 1, WritesPerSource: 1}, 1, 1},
 	} {
 		got := tc.in.orDefaults()
 		if got.WriteSlots != tc.writes || got.WritesPerSource != tc.source {
 			t.Errorf("%+v: %d writes, %d a source; want %d and %d", tc.in, got.WriteSlots, got.WritesPerSource, tc.writes, tc.source)
+		}
+	}
+	for slots := 0; slots <= 12; slots++ {
+		for writes := 0; writes <= 12; writes++ {
+			for share := 0; share <= 12; share++ {
+				for conns := 0; conns <= 12; conns++ {
+					in := Limits{Slots: slots, WriteSlots: writes, WritesPerSource: share, MaxConnsPerSource: conns}
+					got := in.orDefaults()
+					switch {
+					case got.WriteSlots < 1 || got.WriteSlots > max(got.Slots-2, 1):
+						t.Fatalf("%+v: %d writes of %d slots", in, got.WriteSlots, got.Slots)
+					case got.WritesPerSource < 1 || got.WritesPerSource > max(got.MaxConnsPerSource-1, 1):
+						t.Fatalf("%+v: %d writes a source of %d connections", in, got.WritesPerSource, got.MaxConnsPerSource)
+					case got.WriteSlots >= 2 && got.WritesPerSource > got.WriteSlots-1:
+						t.Fatalf("%+v: a source may hold %d of the %d write slots", in, got.WritesPerSource, got.WriteSlots)
+					case got.WriteSlots == 1 && got.WritesPerSource != 1:
+						t.Fatalf("%+v: %d writes a source of the one write slot", in, got.WritesPerSource)
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestOneSourceNeverHoldsTheWritePoolAtAnyLimits pins the share at limits
+// that are not the defaults (round 2): at Slots 4, a write pool of two and a
+// share of one, a source holding a write has a second refused, 503 at once,
+// and a second source's write is taken; with one write slot (Slots 3) the
+// share is the pool, so a second source's write is 503 while one waits.
+func TestOneSourceNeverHoldsTheWritePoolAtAnyLimits(t *testing.T) {
+	p := newTestPlayer(t)
+	for _, tc := range []struct {
+		lim Limits
+		// second is what a second source's write gets.
+		second int
+	}{
+		{Limits{Slots: 4}, http.StatusOK},
+		{Limits{Slots: 3}, http.StatusServiceUnavailable},
+	} {
+		g := newGateEngine(t, p.eng)
+		h := p.handlerWith("", g, tc.lim.orDefaults())
+		held := []sent{sendRequest(h, playlist, "Play", from(phone, playlist, "Play"))}
+		g.waitHeld(t, 1)
+		if got := serve(t, h, from(phone, playlist, "Play")); got.status != http.StatusServiceUnavailable {
+			t.Errorf("%+v: a second write from the source holding one: %v, want 503", tc.lim, got)
+		}
+		if tc.second == http.StatusOK {
+			held = append(held, sendRequest(h, playlist, "Play", from(tablet, playlist, "Play")))
+			g.waitHeld(t, 2)
+		} else if got := serve(t, h, from(tablet, playlist, "Play")); got.status != http.StatusServiceUnavailable {
+			t.Errorf("%+v: a second source's write with the one write slot held: %v, want 503", tc.lim, got)
+		}
+		g.letGoAll()
+		for _, c := range held {
+			if r := c.answer(t); r.status != http.StatusOK {
+				t.Errorf("%+v: a held write: %d, fault %d", tc.lim, r.status, r.fault)
+			}
 		}
 	}
 }

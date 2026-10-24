@@ -34,7 +34,11 @@ type Limits struct {
 	// up to its budget, so the writes keep at least two of Slots free for the
 	// reads, the descriptions and a Stop, and one source cannot hold every
 	// write slot. WriteSlots is held to Slots less two (one at least), and
-	// WritesPerSource to MaxConnsPerSource less one.
+	// WritesPerSource to MaxConnsPerSource less one and to WriteSlots less
+	// one (one at least; round 2: it was held by the connections alone, so at
+	// Slots 4 one source held the whole pool). With one write slot (Slots of
+	// 1 to 3, or WriteSlots 1) a share below the pool is impossible, and the
+	// share is the pool.
 	WriteSlots, WritesPerSource int
 	// ReadHeader is the header's read deadline; BodyRead a control body's,
 	// set once its headers have passed; Read the whole request's; Write the
@@ -105,6 +109,7 @@ func (l Limits) orDefaults() Limits {
 	}
 	out.WriteSlots = max(min(out.WriteSlots, out.Slots-2), 1)
 	out.WritesPerSource = max(min(out.WritesPerSource, out.MaxConnsPerSource-1), 1)
+	out.WritesPerSource = max(min(out.WritesPerSource, out.WriteSlots-1), 1)
 	return out
 }
 
