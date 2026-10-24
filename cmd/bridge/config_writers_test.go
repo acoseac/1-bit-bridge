@@ -1450,6 +1450,17 @@ func comparesInsideItsTurnsNilCheck(cfgPath string, asRead []byte) {
 	_ = turn.SaveBytes([]byte("libraryName: Snapshot\n"))
 }
 
+func comparesInsideAnotherNilCheck(cfgPath string, cfg, other *config.Config, asRead []byte) {
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	if other != nil {
+		if err := configStillAsRead(l, asRead); err != nil {
+			return
+		}
+	}
+	_ = cfg.Save(l)
+}
+
 func overwritesWhatItsTurnFoundThroughAPointer(cfgPath string, stale *config.Config) {
 	l, _ := config.LockFile(cfgPath)
 	defer l.Unlock()
@@ -1513,6 +1524,7 @@ func picksAStaleValueBesideWhatItsTurnFound(cfgPath string, stale *config.Config
 		"x/x.go:refusesOnAnErrorItsComparisonReturns":      "config.LockFile",
 		"x/x.go:refusesOnACompoundCondition":               "config.LockFile",
 		"x/x.go:comparesInsideItsTurnsNilCheck":            "config.LockFile",
+		"x/x.go:comparesInsideAnotherNilCheck":             "config.LockFile",
 		"x/x.go:overwritesWhatItsTurnFoundThroughAPointer": "config.LockFile",
 		"x/x.go:savesAStaleValueOnALoopsSecondPass":        "config.LockFile",
 		"x/x.go:picksAStaleValueBesideWhatItsTurnFound":    "config.LockFile",
@@ -1534,6 +1546,7 @@ func picksAStaleValueBesideWhatItsTurnFound(cfgPath string, stale *config.Config
 		"x/x.go:refusesOnAnErrorItsComparisonReturns": "configStillAsRead",
 		"x/x.go:refusesOnACompoundCondition":          "bytes.Equal",
 		"x/x.go:comparesInsideItsTurnsNilCheck":       "configStillAsRead",
+		"x/x.go:comparesInsideAnotherNilCheck":        "configStillAsRead",
 	}
 	got := configWriterProblems(sites, named, excused, compared)
 	want := []string{
@@ -1573,6 +1586,7 @@ func picksAStaleValueBesideWhatItsTurnFound(cfgPath string, stale *config.Config
 		"x/x.go:comparesOnlyWhenVerbose is listed in comparedSaves, and never refuses its save on configChangedSinceRead",
 		"x/x.go:comparesInAClosureItNeverCalls is listed in comparedSaves, and never refuses its save on configChangedSinceRead",
 		"x/x.go:comparesAndSavesAnyway is listed in comparedSaves, and never refuses its save on configChangedSinceRead",
+		"x/x.go:comparesInsideAnotherNilCheck is listed in comparedSaves, and never refuses its save on configStillAsRead",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("the sweep reported %d problems, want %d:\n%s", len(got), len(want), strings.Join(got, "\n"))
