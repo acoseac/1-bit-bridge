@@ -18,8 +18,8 @@ import (
 // completion that fails on a data directory this user cannot write is not
 // deferred: the failure persists, and recurs at the next start run as this
 // user. The backup goes on and logs the failure with its error and the
-// remedy, restoring write access to the data directory, never that the next
-// lifecycle operation completes it.
+// directory's remedy, which restores write access among the rest, never that
+// the next lifecycle operation completes it.
 func TestFailedSealCompletionKeepsItsErrorAndNamesWriteAccess(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root writes a directory whatever its mode")
@@ -44,7 +44,8 @@ func TestFailedSealCompletionKeepsItsErrorAndNamesWriteAccess(t *testing.T) {
 		t.Fatalf("failed completion stopped the backup: %v", err)
 	}
 	lines := rec.Lines("player seal completion failed")
-	if len(lines) != 1 || !strings.Contains(lines[0], "permission denied") || !strings.Contains(lines[0], "restore write access to the data directory") ||
+	if len(lines) != 1 || !strings.Contains(lines[0], "permission denied") ||
+		!strings.Contains(lines[0], "restore read, write and search (execute) access to the data directory "+dir+" and each directory above it") ||
 		strings.Contains(lines[0], "the next lifecycle operation") || strings.Contains(lines[0], "stop the service") {
 		t.Fatalf("failed completion's text: %v", lines)
 	}

@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"syscall"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
@@ -50,63 +51,109 @@ type markerRefusal string
 func (e markerRefusal) Error() string { return string(e) }
 
 // accessError is an error a step on the player's local state met, tagged
-// where it happened with what the step was reading or writing and the access
-// that needed. Its text is the error's own: only sealCompletionFailed reads
-// the tag, to advise by cause without taking the error apart.
+// where it happened with the remedy that always suffices for it: advice the
+// operator follows, not a diagnosis. Its text is the error's own: only
+// sealCompletionFailed reads the tag, and only for a permission error.
 type accessError struct {
-	access string // "read" or "write"
-	what   string // a file, or the data directory (dataDirectory)
+	remedy string
 	err    error
 }
 
 func (e *accessError) Error() string { return e.err.Error() }
 func (e *accessError) Unwrap() error { return e.err }
 
-// needsAccess tags err, when there is one, with the access its step needed.
-func needsAccess(access, what string, err error) error {
+// directoryAccess tags err, when there is one, as a failure at the data
+// directory itself: an Lstat of an entry, which searches it; a barrier, which
+// opens the directory to sync it and creates nothing; a durable write, which
+// creates a temporary file in it, renames that into place and syncs it.
+// Which access failed varies with the step, so its remedy names them all
+// (directoryRemedy).
+func directoryAccess(dir string, err error) error {
 	if err == nil {
 		return nil
 	}
-	return &accessError{access: access, what: what, err: err}
+	return &accessError{remedy: directoryRemedy(runtime.GOOS, dir), err: err}
 }
 
-// dataDirectory names dir for an accessError. An Lstat needs to search the
-// directory, a barrier opens it, and a durable write creates and renames in
-// it, so their access is the directory's, not a file's.
-func dataDirectory(dir string) string { return "the data directory " + dir }
+// directoryRemedy is the one remedy every directory-level failure takes on
+// goos: on unix, read, write and search access to dir and the search of each
+// directory above it, or an immutable flag or ACL cleared; on Windows, full
+// control of dir.
+func directoryRemedy(goos, dir string) string {
+	if goos == "windows" {
+		return "restore full control of the data directory " + dir
+	}
+	return "restore read, write and search (execute) access to the data directory " + dir +
+		" and each directory above it, or clear an immutable flag or ACL on it"
+}
+
+// fileAccess tags err, when there is one, as a failure opening path itself
+// for the access named ("read", or "read and write"). An EPERM, rather than
+// an EACCES, is a flag or an ACL the access alone does not undo, and the
+// remedy says so too.
+func fileAccess(path, access string, err error) error {
+	if err == nil {
+		return nil
+	}
+	remedy := "restore " + access + " access to " + path
+	if errors.Is(err, syscall.EPERM) {
+		remedy += ", or clear an immutable flag or ACL on it"
+	}
+	return &accessError{remedy: remedy, err: err}
+}
 
 // playerMarkerState reads a local marker and logs nothing: only a start's
 // preflight says anything about a damaged player-initialized, and only where
 // following its advice is safe (CheckPlayerStart).
 func playerMarkerState(dir, name string) (present, valid bool, m playerMarker, err error) {
+	st, valid, m, err := markerEntry(dir, name)
+	return st != nil, valid, m, err
+}
+
+// markerEntry is playerMarkerState with the entry's Lstat, nil when there is
+// none. ensurePlayerMarker takes the entry's kind from this one Lstat too.
+// The Lstat's failure is the directory's (directoryAccess); the marker's open
+// and read are the file's (fileAccess).
+func markerEntry(dir, name string) (st fs.FileInfo, valid bool, m playerMarker, err error) {
 	path := filepath.Join(dir, name)
-	st, err := os.Lstat(path)
+	st, err = os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return false, false, m, nil
+		return nil, false, m, nil
 	}
 	if err != nil {
-		return false, false, m, needsAccess("read", dataDirectory(dir), err)
+		return nil, false, m, directoryAccess(dir, err)
 	}
 	if !st.Mode().IsRegular() {
-		return true, false, m, nil
+		return st, false, m, nil
 	}
-	f, _, err := fsutil.OpenAsFile(path)
+	b, err := readMarker(path)
 	if err != nil {
-		return true, false, m, needsAccess("read", path, err)
-	}
-	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, 129))
-	if err != nil {
-		return true, false, m, needsAccess("read", path, err)
+		return st, false, m, fileAccess(path, "read", err)
 	}
 	d := json.NewDecoder(bytes.NewReader(b))
 	if len(b) > 128 || d.Decode(&m) != nil || d.Decode(new(any)) != io.EOF {
-		return true, false, playerMarker{}, nil
+		return st, false, playerMarker{}, nil
 	}
 	if m.Version > 1 {
-		return true, false, m, markerRefusal(name + " has a newer version; use a newer bridge")
+		return st, false, m, markerRefusal(name + " has a newer version; use a newer bridge")
 	}
-	return true, m.Version == 1, m, nil
+	return st, m.Version == 1, m, nil
+}
+
+// readMarker opens a local marker and reads at most one byte more than a
+// whole one holds: readMarkerBytes. A test swaps it to inject an open or read
+// error no real fixture gives, and puts it back in t.Cleanup.
+var readMarker = readMarkerBytes
+
+// readMarkerBytes opens path without waiting (fsutil.OpenAsFile) and reads at
+// most 129 bytes of it.
+func readMarkerBytes(path string) ([]byte, error) {
+	f, _, err := fsutil.OpenAsFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, 129))
 }
 
 // markerNotice is what a start's preflight owes a damaged player-initialized
@@ -182,7 +229,7 @@ func playerEntryNotAFile(dir, name string) (bool, error) {
 		return false, nil
 	}
 	if err != nil {
-		return false, needsAccess("read", dataDirectory(dir), err)
+		return false, directoryAccess(dir, err)
 	}
 	return !st.Mode().IsRegular(), nil
 }
@@ -208,26 +255,24 @@ func playerRestoresSealed(dir string) (bool, error) {
 // followed. At the seal path it is still a seal (playerRestoresSealed), and
 // completion records the seal in player-initialized beside it. Refusing it,
 // with a remedy to move it aside, would send the operator to drop the box's
-// only seal record. Only discard repairs it (sealPlayerMarker).
+// only seal record. Only discard repairs it (sealPlayerMarker). The entry's
+// kind is the one Lstat's that read it (markerEntry); the barrier and the
+// write are the directory's (directoryAccess).
 func ensurePlayerMarker(dir, name string) error {
-	present, err := readPlayerMarker(dir, name)
+	st, _, _, err := markerEntry(dir, name)
 	if err != nil {
 		return err
 	}
 	path := filepath.Join(dir, name)
-	if present {
-		st, err := os.Lstat(path)
-		if err != nil {
-			return needsAccess("read", dataDirectory(dir), err)
-		}
+	if st != nil {
 		barrier := path
 		if !st.Mode().IsRegular() {
 			// A sibling's barrier, so nothing opens or follows the entry.
 			barrier = filepath.Join(dir, ".player-marker-barrier")
 		}
-		return needsAccess("read", dataDirectory(dir), atomicwrite.ProbeDurable(dir, barrier))
+		return directoryAccess(dir, atomicwrite.ProbeDurable(dir, barrier))
 	}
-	return needsAccess("write", dataDirectory(dir), atomicwrite.WriteBytesDurable(dir, path, []byte("{\"version\":1}\n"), ".player-marker-*.tmp"))
+	return directoryAccess(dir, atomicwrite.WriteBytesDurable(dir, path, []byte("{\"version\":1}\n"), ".player-marker-*.tmp"))
 }
 
 // sealPlayerMarker repairs damaged markers only in explicit discard. Renaming
@@ -298,7 +343,7 @@ func playerAllocationEvidence(dir string) (bool, error) {
 	for _, name := range []string{engine.ReservationFileName, config.PlayerUUIDFile, "player-queue.json"} {
 		present, err := playerEntry(dir, name)
 		if err != nil {
-			return false, needsAccess("read", dataDirectory(dir), err)
+			return false, directoryAccess(dir, err)
 		}
 		if present {
 			return true, nil
@@ -312,7 +357,7 @@ func writePlayerMarker(dir string, m playerMarker) error {
 	if err != nil {
 		return err
 	}
-	return needsAccess("write", dataDirectory(dir), atomicwrite.WriteBytesDurable(dir, filepath.Join(dir, playerInitialized), append(b, '\n'), ".player-marker-*.tmp"))
+	return directoryAccess(dir, atomicwrite.WriteBytesDurable(dir, filepath.Join(dir, playerInitialized), append(b, '\n'), ".player-marker-*.tmp"))
 }
 
 // markPlayerMinted consumes a discard's exemption after the floor is durable
@@ -394,9 +439,9 @@ func completeCapturedPlayerSeal(dir string) error {
 		}
 	}
 
-	f, err := fsutil.OpenLockFile(dir, "server.lock")
+	f, err := openSealLock(dir)
 	if err != nil {
-		return sealCompletionFailed(needsAccess("write", filepath.Join(dir, "server.lock"), err))
+		return sealCompletionFailed(err)
 	}
 	defer f.Close()
 	if err := tryLock(f); err != nil {
@@ -412,16 +457,58 @@ func completeCapturedPlayerSeal(dir string) error {
 	return nil
 }
 
+// openSealLock opens server.lock for a backup's seal completion, a failure
+// tagged with its remedy (lockFileAccess).
+func openSealLock(dir string) (*os.File, error) {
+	f, err := fsutil.OpenLockFile(dir, "server.lock")
+	if err != nil {
+		return nil, lockFileAccess(dir, err)
+	}
+	return f, nil
+}
+
+// lockFileAccess tags OpenLockFile's failure, an open of server.lock for
+// reading and writing that creates the file when it is missing, by what the
+// entry is. Only a permission error is told apart, by an Lstat through the
+// data directory's root that follows nothing outside it. A regular file needs
+// read and write access to it. No entry, or a link the root resolves to
+// nothing, means the open failed creating the file: the directory's access,
+// as is a root that will not open or an Lstat that fails. Any other entry
+// keeps the lock file's write remedy.
+func lockFileAccess(dir string, err error) error {
+	if !errors.Is(err, fs.ErrPermission) {
+		return err
+	}
+	path := filepath.Join(dir, "server.lock")
+	root, rootErr := os.OpenRoot(dir)
+	if rootErr != nil {
+		return directoryAccess(dir, err)
+	}
+	defer root.Close()
+	st, lstatErr := root.Lstat("server.lock")
+	switch {
+	case lstatErr != nil:
+		return directoryAccess(dir, err)
+	case st.Mode().IsRegular():
+		return fileAccess(path, "read and write", err)
+	case st.Mode()&fs.ModeSymlink != 0:
+		if _, statErr := root.Stat("server.lock"); errors.Is(statErr, fs.ErrNotExist) {
+			return directoryAccess(dir, err)
+		}
+	}
+	return &accessError{remedy: "restore write access to " + path, err: err}
+}
+
 // sealCompletionFailed is a backup's seal completion that failed for any
 // reason but a busy lock. It is never called deferred: it keeps its error and
 // advises by cause, claiming no more than the cause supports. A marker
 // refusal keeps its own remedy, and a read-only data directory says so; both
-// stop the next serve boot and start too. A permission error names what its
-// step was reading or writing and the access that needed, from the tag the
-// step put on it (accessError); serve boot and start fail on it too when they
-// run as the user the backup ran as, which a CLI backup need not share with
-// serve. Anything else, an interrupted or refused lock or an I/O error, need
-// not recur and keeps only its error.
+// stop the next serve boot and start too. A permission error takes the remedy
+// its step tagged it with (accessError): the one directory remedy for a step
+// at the data directory itself, the file's access for a file's own open; serve
+// boot and start fail on it too when they run as the user the backup ran as,
+// which a CLI backup need not share with serve. Anything else, an interrupted
+// or refused lock or an I/O error, need not recur and keeps only its error.
 func sealCompletionFailed(err error) error {
 	var refusal markerRefusal
 	var access *accessError
@@ -431,7 +518,7 @@ func sealCompletionFailed(err error) error {
 	case errors.Is(err, syscall.EROFS):
 		return fmt.Errorf("player seal completion failed: %w; the data directory is read-only: serve boot and start fail on it too", err)
 	case errors.Is(err, fs.ErrPermission) && errors.As(err, &access):
-		return fmt.Errorf("player seal completion failed: %w; restore %s access to %s: serve boot and start fail on it too when run as this user", err, access.access, access.what)
+		return fmt.Errorf("player seal completion failed: %w; %s: serve boot and start fail on it too when run as this user", err, access.remedy)
 	}
 	return fmt.Errorf("player seal completion failed: %w", err)
 }

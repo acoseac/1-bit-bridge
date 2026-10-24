@@ -426,8 +426,8 @@ func TestARefusedDamagedManifestOnlyCompletesTheLocalSeal(t *testing.T) {
 
 // TestRestoreKeepsTheBoxIdentityWhenItsUUIDEntryIsDamaged: the same damage to
 // the player-uuid entry of such a snapshot makes the restore identity-free.
-// The box keeps its own identity and floor byte for byte, so nothing the
-// snapshot's identity handed out can come back.
+// It succeeds, and the box keeps its own identity and floor byte for byte, so
+// nothing the snapshot's identity handed out can come back.
 func TestRestoreKeepsTheBoxIdentityWhenItsUUIDEntryIsDamaged(t *testing.T) {
 	needsDirectorySync(t)
 	fastPlayerStorage(t)
@@ -444,17 +444,14 @@ func TestRestoreKeepsTheBoxIdentityWhenItsUUIDEntryIsDamaged(t *testing.T) {
 	floorBefore := readFileT(t, filepath.Join(dstDir, playerReservationFile))
 	idBefore := readFileT(t, filepath.Join(dstDir, config.PlayerUUIDFile))
 	code, out, stderr := runRestoreYes(t, dstCfg, snap)
-	if code != 0 {
-		if !bytes.Equal(floorBefore, readFileT(t, filepath.Join(dstDir, playerReservationFile))) {
-			t.Fatalf("a refused restore changed the floor: %s", stderr)
-		}
-		return
+	if code != 0 || !strings.Contains(out, "Restore complete") {
+		t.Fatalf("the identity-free restore did not complete: %d %s %s", code, out, stderr)
 	}
-	if !strings.Contains(out, "Restore complete") {
-		t.Fatalf("restore %d: %s %s", code, out, stderr)
+	if !bytes.Equal(floorBefore, readFileT(t, filepath.Join(dstDir, playerReservationFile))) {
+		t.Error("the identity-free restore changed the box's floor")
 	}
-	if !bytes.Equal(floorBefore, readFileT(t, filepath.Join(dstDir, playerReservationFile))) || !bytes.Equal(idBefore, readFileT(t, filepath.Join(dstDir, config.PlayerUUIDFile))) {
-		t.Fatal("an identity-free restore changed the box's identity or floor")
+	if !bytes.Equal(idBefore, readFileT(t, filepath.Join(dstDir, config.PlayerUUIDFile))) {
+		t.Error("the identity-free restore changed the box's identity")
 	}
 }
 
