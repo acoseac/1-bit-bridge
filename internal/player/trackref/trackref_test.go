@@ -30,8 +30,12 @@ func TestTheFilePrefixIsDLNAs(t *testing.T) {
 
 // TestOnlyTheCanonicalFormIsAURI pins the canonical form, spelling by
 // spelling: each accepted URI parses to its host, port and id and reads back
-// byte for byte; every other spelling of the same track is refused as not
-// canonical, and one past MaxLength bytes as too long, whatever its shape.
+// as its canonical form, which is the URI itself but for a name in capitals,
+// written lower-case (B470 PR 5a4, round 2: the form an Insert stores); every
+// other spelling of the same track is refused as not canonical, a host with a
+// byte that is not ASCII among them (an internationalized name is taken in
+// its punycode form alone), and one past MaxLength bytes as too long,
+// whatever its shape.
 func TestOnlyTheCanonicalFormIsAURI(t *testing.T) {
 	long := "http://" + strings.Repeat("a", 63) + "." + strings.Repeat("b", 19) + ".local:7790/dlna/file/" + id
 	if len(long) != MaxLength {
@@ -42,16 +46,20 @@ func TestOnlyTheCanonicalFormIsAURI(t *testing.T) {
 		addr string
 		name string
 		port uint16
+		// canon is what the URI reads back as, "" for the URI itself.
+		canon string
 	}{
-		{"http://192.168.1.20:7790/dlna/file/" + id, "192.168.1.20", "", 7790},
-		{"http://10.0.0.2:7800/dlna/file/" + id, "10.0.0.2", "", 7800},
-		{"http://[fd00::1]:7790/dlna/file/" + id, "fd00::1", "", 7790},
-		{"http://[fe80::1]:7790/dlna/file/" + id, "fe80::1", "", 7790},
-		{"http://bridge.local:7790/dlna/file/" + id, "", "bridge.local", 7790},
-		{"http://Bridge-1.LOCAL:7790/dlna/file/" + id, "", "bridge-1.local", 7790},
-		{"http://nas:1/dlna/file/" + id, "", "nas", 1},
-		{"http://192.168.1.20:65535/dlna/file/" + id, "192.168.1.20", "", 65535},
-		{long, "", strings.ToLower(long[7 : len(long)-len(":7790/dlna/file/"+id)]), 7790},
+		{"http://192.168.1.20:7790/dlna/file/" + id, "192.168.1.20", "", 7790, ""},
+		{"http://10.0.0.2:7800/dlna/file/" + id, "10.0.0.2", "", 7800, ""},
+		{"http://[fd00::1]:7790/dlna/file/" + id, "fd00::1", "", 7790, ""},
+		{"http://[fe80::1]:7790/dlna/file/" + id, "fe80::1", "", 7790, ""},
+		{"http://bridge.local:7790/dlna/file/" + id, "", "bridge.local", 7790, ""},
+		{"http://Bridge-1.LOCAL:7790/dlna/file/" + id, "", "bridge-1.local", 7790, "http://bridge-1.local:7790/dlna/file/" + id},
+		{"http://KITCHEN:7790/dlna/file/" + id, "", "kitchen", 7790, "http://kitchen:7790/dlna/file/" + id},
+		{"http://xn--bridge-ryd.local:7790/dlna/file/" + id, "", "xn--bridge-ryd.local", 7790, ""},
+		{"http://nas:1/dlna/file/" + id, "", "nas", 1, ""},
+		{"http://192.168.1.20:65535/dlna/file/" + id, "192.168.1.20", "", 65535, ""},
+		{long, "", strings.ToLower(long[7 : len(long)-len(":7790/dlna/file/"+id)]), 7790, ""},
 	} {
 		u, err := Parse(tc.uri)
 		if err != nil {
@@ -62,8 +70,15 @@ func TestOnlyTheCanonicalFormIsAURI(t *testing.T) {
 		if tc.addr != "" {
 			want = netip.MustParseAddr(tc.addr)
 		}
-		if u.Addr != want || u.Name != tc.name || u.Port != tc.port || u.ID != id || u.String() != tc.uri {
-			t.Errorf("%s: %+v, reads back %q", tc.uri, u, u.String())
+		canon := tc.canon
+		if canon == "" {
+			canon = tc.uri
+		}
+		if u.Addr != want || u.Name != tc.name || u.Port != tc.port || u.ID != id || u.String() != canon {
+			t.Errorf("%s: %+v, reads back %q, want %q", tc.uri, u, u.String(), canon)
+		}
+		if again, err := Parse(u.String()); err != nil || again != u || again.String() != canon {
+			t.Errorf("%s: its canonical form %q parses to %+v, %v", tc.uri, u.String(), again, err)
 		}
 		if got, err := ParseStored(tc.uri); err != nil || got != id {
 			t.Errorf("%s as a stored reference: %q, %v", tc.uri, got, err)
@@ -112,6 +127,21 @@ func TestOnlyTheCanonicalFormIsAURI(t *testing.T) {
 		{"a bare id", id},
 		{"nothing", ""},
 		{"white space", " http://192.168.1.20:7790/dlna/file/" + id},
+		// Round 2: a host is ASCII, looked at before anything is folded.
+		// Unicode's lower-case of U+0130 (İ) is i and of U+212A (the Kelvin
+		// sign) k, so a name folded first read as the ASCII name it is not;
+		// U+017F (long s) folds to s under Unicode's case folding; a
+		// fullwidth letter and a byte that is not ASCII in the port are
+		// refused by the grammar too.
+		{"a dotted capital I, which lower-cases to i", "http://brİdge.local:7790/dlna/file/" + id},
+		{"the Kelvin sign, which lower-cases to k", "http://Kitchen.local:7790/dlna/file/" + id},
+		{"a long s, which folds to s", "http://ſpeaker.local:7790/dlna/file/" + id},
+		{"a fullwidth letter", "http://ｂridge.local:7790/dlna/file/" + id},
+		{"a name in its Unicode form", "http://bücher.local:7790/dlna/file/" + id},
+		{"fullwidth digits in the port", "http://192.168.1.20:７７９０/dlna/file/" + id},
+		{"a superscript digit in the port", "http://192.168.1.20:779¹/dlna/file/" + id},
+		{"a byte that is not UTF-8 in the port", "http://192.168.1.20:7790\xff/dlna/file/" + id},
+		{"fullwidth digits in an address", "http://１９２.168.1.20:7790/dlna/file/" + id},
 	} {
 		if _, err := Parse(tc.uri); !errors.Is(err, ErrNotCanonical) || errors.Is(err, ErrTooLong) {
 			t.Errorf("%s (%q): %v, want it refused as not canonical", tc.why, tc.uri, err)
@@ -133,6 +163,32 @@ func TestOnlyTheCanonicalFormIsAURI(t *testing.T) {
 	}
 }
 
+// TestACanonicalNameIsASCIIBeforeItIsFolded pins CanonicalName, through which
+// a URI's name and every name the bridge advertises are compared (round 2):
+// ASCII, asked of every byte before any is folded, then lower-cased byte by
+// byte; a host Unicode's rules would fold to ASCII (U+0130 to i, the Kelvin
+// sign U+212A to k, a long s U+017F to s), a fullwidth letter and a name in
+// its Unicode form are no name, its punycode form is one, and so is no
+// spelling of an address or a host the grammar refuses.
+func TestACanonicalNameIsASCIIBeforeItIsFolded(t *testing.T) {
+	for _, tc := range []struct{ host, want string }{
+		{"bridge.local", "bridge.local"},
+		{"Bridge.LOCAL", "bridge.local"},
+		{"KITCHEN", "kitchen"},
+		{"xn--bcher-kva.local", "xn--bcher-kva.local"},
+	} {
+		if got, ok := CanonicalName(tc.host); !ok || got != tc.want {
+			t.Errorf("%q: %q, %v; want %q", tc.host, got, ok, tc.want)
+		}
+	}
+	for _, host := range []string{"brİdge.local", "Kitchen.local", "ſpeaker.local", "ｂridge.local", "bücher.local",
+		"bridge.local\xff", "192.168.1.20", "127.1", "bridge.local.", "", "my_bridge"} {
+		if got, ok := CanonicalName(host); ok {
+			t.Errorf("%q: taken as %q, want no name", host, got)
+		}
+	}
+}
+
 // TestAStoredReferenceIsAURIOrABareID pins ParseStored: a bare track id (the
 // form before PR 5a4) and a canonical URI, whatever host and port it names,
 // name the id; anything else is refused, the near misses of an id included.
@@ -150,12 +206,23 @@ func TestAStoredReferenceIsAURIOrABareID(t *testing.T) {
 }
 
 // FuzzParse holds Parse to the canonical form on any input: never a panic;
-// a URI it takes is at most MaxLength bytes, reads back as the input byte for
-// byte, and parses again to itself; and ParseStored names the same id.
+// a URI it takes is pure ASCII and at most MaxLength bytes; its serialization
+// is canonical, the input with its name's capitals lower-cased and nothing
+// else changed (so an address, the port and the path are the input's own),
+// and idempotent: it parses again to the same URI, which serializes to
+// itself; its host is an address in its canonical form (never IPv4-mapped or
+// zoned) or a lower-case ASCII name, never both; its port is not 0 and its
+// id a track id; and ParseStored names the same id from the input and from
+// its serialization. Round 2 replaced the oracle that a taken URI reads back
+// as its input byte for byte: an Insert now stores the canonical form.
 func FuzzParse(f *testing.F) {
 	for _, s := range []string{"http://192.168.1.20:7790/dlna/file/" + id, "http://[fd00::1]:7790/dlna/file/" + id,
 		"http://Bridge.Local:7790/dlna/file/" + id, "http://192.168.001.020:7790/dlna/file/" + id, id, "",
-		"http://[::ffff:1.2.3.4]:1/dlna/file/" + id, "http://a:07/dlna/file/" + id} {
+		"http://[::ffff:1.2.3.4]:1/dlna/file/" + id, "http://a:07/dlna/file/" + id,
+		// Round 2: what Unicode folds to ASCII, and what it does not.
+		"http://brİdge.local:7790/dlna/file/" + id, "http://Kitchen.local:7790/dlna/file/" + id,
+		"http://ſpeaker.local:7790/dlna/file/" + id, "http://ｂridge.local:7790/dlna/file/" + id,
+		"http://192.168.1.20:７７９０/dlna/file/" + id, "http://192.168.1.20:7790\xff/dlna/file/" + id} {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, s string) {
@@ -166,15 +233,53 @@ func FuzzParse(f *testing.F) {
 			}
 			return
 		}
-		if len(s) > MaxLength || u.String() != s || !IsID(u.ID) || u.Port == 0 {
-			t.Fatalf("%q taken as %+v, reading back %q", s, u, u.String())
+		for i := 0; i < len(s); i++ {
+			if s[i] >= 0x80 {
+				t.Fatalf("%q taken as %+v, with a byte that is not ASCII at %d", s, u, i)
+			}
 		}
-		again, err := Parse(u.String())
-		if err != nil || again != u {
-			t.Fatalf("%q read back does not parse to itself: %+v, %v", s, again, err)
+		c := u.String()
+		if len(s) > MaxLength || c != lowerASCII(s) || !IsID(u.ID) || u.Port == 0 {
+			t.Fatalf("%q taken as %+v, serialized %q: not the input with its capitals lower-cased", s, u, c)
 		}
-		if got, err := ParseStored(s); err != nil || got != u.ID {
-			t.Fatalf("%q as a stored reference: %q, %v", s, got, err)
+		switch {
+		case u.Addr.IsValid() == (u.Name != ""):
+			t.Fatalf("%q taken as %+v: an address and a name, or neither", s, u)
+		case u.Addr.IsValid() && (u.Addr.Is4In6() || u.Addr.Zone() != "" || !strings.Contains(c, "//"+hostOf(u.Addr)+":")):
+			t.Fatalf("%q taken as %+v: an address not in its canonical form", s, u)
+		case u.Name != "" && (u.Name != lowerASCII(u.Name) || !strings.HasPrefix(c, "http://"+u.Name+":")):
+			t.Fatalf("%q taken as %+v: a name that is not lower-case ASCII as it is written", s, u)
+		}
+		again, err := Parse(c)
+		if err != nil || again != u || again.String() != c {
+			t.Fatalf("%q's serialization %q does not parse to itself: %+v, %v", s, c, again, err)
+		}
+		for _, stored := range []string{s, c} {
+			if got, err := ParseStored(stored); err != nil || got != u.ID {
+				t.Fatalf("%q as a stored reference: %q, %v", stored, got, err)
+			}
 		}
 	})
+}
+
+// lowerASCII is s with each ASCII capital lower-cased and every other byte
+// as it is: the oracle's own, so the fuzz does not ask the parser what the
+// canonical form is.
+func lowerASCII(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
+}
+
+// hostOf is a's host as the canonical form writes it: netip's form, an IPv6
+// address in brackets.
+func hostOf(a netip.Addr) string {
+	if a.Is6() {
+		return "[" + a.String() + "]"
+	}
+	return a.String()
 }

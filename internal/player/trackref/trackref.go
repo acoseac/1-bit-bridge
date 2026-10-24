@@ -1,28 +1,38 @@
 // Package trackref is the one parser of what names one of the bridge's own
 // tracks to its player (B470 PR 5a4): the URI of the track's /dlna/file/
 // route, as an OpenHome controller inserts it, and the reference the
-// player's engine keeps for an entry, that URI as it was sent or the bare
-// track id serve's player and bridge output play wrote before it.
+// player's engine keeps for an entry, that URI in its canonical form or the
+// bare track id serve's player and bridge output play wrote before it.
 //
-// A URI is taken only in its canonical form, byte for byte:
+// A URI is taken only in its canonical form, byte for byte but for the case
+// of a name:
 //
 //	"http://" + host + ":" + port + "/dlna/file/" + id
 //
 // where an IP host is netip.Addr.String() (an IPv6 literal in brackets, with
-// no zone; an IPv4-mapped IPv6 address is no host), a name is letters,
+// no zone; an IPv4-mapped IPv6 address is no host), a name is ASCII letters,
 // digits and hyphens in dot-separated labels, with no trailing dot and a
-// last label that is not all digits, in any case (the case of a name is not
-// part of the comparison), the port is decimal, 1 to 65535, with no leading
-// zero, and id is 16 lower-case hexadecimal digits, the track id
-// (dlna.TrackID with an empty root). So a scheme in capitals, an empty or
-// zero-padded port, a zero-padded or abbreviated address, a trailing dot,
-// user information, a query, a fragment, percent-encoding, a trailing slash
-// and a rendition's path below the id are each refused, and nothing is ever
-// resolved: the host is compared as it is written, by the caller
-// (internal/player/openhome checks it against the hosts the bridge
+// last label that is not all digits, in any case, the port is decimal, 1 to
+// 65535, with no leading zero, and id is 16 lower-case hexadecimal digits,
+// the track id (dlna.TrackID with an empty root). So a scheme in capitals, an
+// empty or zero-padded port, a zero-padded or abbreviated address, a
+// trailing dot, user information, a query, a fragment, percent-encoding, a
+// trailing slash and a rendition's path below the id are each refused, and
+// nothing is ever resolved: the host is compared as it is written, by the
+// caller (internal/player/openhome checks it against the hosts the bridge
 // advertises and binds; the library resolver, at an occurrence's open, does
 // not look at it, so a queue keeps playing after the bridge's address
 // changes).
+//
+// A name is ASCII, asked of every byte of it before any is folded (B470 PR
+// 5a4, round 2: CanonicalName): Unicode's lower case of U+0130 (İ) is i and
+// of U+212A (the Kelvin sign) k, so a host lower-cased first by Unicode's
+// rules read as an ASCII name it is not. An internationalized name is taken
+// in its punycode form alone; the rest of the form (the scheme, an address,
+// the port, the path) is ASCII by its grammar, so every URI taken is ASCII.
+// URI.String is the canonical form: the URI with its name lower-cased, byte
+// by byte as ASCII, which is what an Insert stores and Read returns, never
+// the spelling a controller sent.
 //
 // The length is checked first: a string past MaxLength bytes, the engine's
 // longest reference, is ErrTooLong whatever its shape.
@@ -61,20 +71,20 @@ var (
 type URI struct {
 	// Addr is the host when it is an IP literal (the zero Addr for a name).
 	Addr netip.Addr
-	// Name is the host when it is a name, lower-cased (empty for an IP
-	// literal); written is the name as it was sent.
-	Name    string
-	written string
+	// Name is the host when it is a name, in its canonical form: ASCII,
+	// lower-cased (CanonicalName); empty for an IP literal.
+	Name string
 	// Port is the port the URI names.
 	Port uint16
 	// ID is the track id, 16 lower-case hexadecimal digits.
 	ID string
 }
 
-// String is the URI as it was sent: its canonical form, the name in the case
-// it was written in.
+// String is the URI's canonical form: the URI as it was sent, but for a name
+// in capitals, which it writes lower-cased. It is what an Insert stores
+// (B470 PR 5a4, round 2), and Parse takes it back to the same URI.
 func (u URI) String() string {
-	host := u.written
+	host := u.Name
 	if u.Addr.IsValid() {
 		host = u.Addr.String()
 		if u.Addr.Is6() {
@@ -146,11 +156,11 @@ func Parse(s string) (URI, error) {
 			}
 			u.Addr = addr
 		} else {
-			name := strings.ToLower(host)
-			if !validName(name) {
+			name, ok := CanonicalName(host)
+			if !ok {
 				return URI{}, refused("a host that is neither an address in its canonical form nor a name")
 			}
-			u.Name, u.written = name, host
+			u.Name = name
 		}
 	}
 	n, ok := portOf(port)
@@ -190,6 +200,40 @@ func IsID(s string) bool {
 		}
 	}
 	return true
+}
+
+// isASCII reports whether every byte of s is ASCII.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+// CanonicalName is host as the canonical form writes a name, and whether it
+// is one: ASCII, asked of every byte before any is folded, lower-cased byte
+// by byte (never by Unicode's case mapping, which takes U+0130 to i and
+// U+212A to k), and a name validName takes. An internationalized name in its
+// Unicode form, or any other host that is not ASCII, is no name: its punycode
+// form is. internal/player/openhome compares the names the bridge advertises
+// through it too (B470 PR 5a4, round 2).
+func CanonicalName(host string) (string, bool) {
+	if !isASCII(host) {
+		return "", false
+	}
+	b := []byte(host)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	name := string(b)
+	if !validName(name) {
+		return "", false
+	}
+	return name, true
 }
 
 // validName reports whether n, lower-cased, is a host name the canonical form
