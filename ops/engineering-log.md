@@ -61771,8 +61771,8 @@ the work was committed on `feat/b470-pr5a4-writes` with no attribution.
 - `CLAUDE.md`'s rows, and the long forms in `ops/History-rules-openhome.md`
   and `ops/History-rules-player.md` (ef7e6aa9). The rules files' lines
   (`openhome.md`'s, two of `player.md`'s, one each in `wire.md` and
-  `dlna-upnp.md`) are in the worker's report for the orchestrator to apply,
-  since the session cannot edit `.claude/`.
+  `dlna-upnp.md`) are in this change too, in commit 6b8ad3ff, applied from
+  the worker's report (its session could not edit `.claude/`).
 
 ### The writes, action by action
 
@@ -62184,3 +62184,189 @@ DSF or DFF track is skipped, `dsd_not_in_this_release`, the next one plays),
 no standby, no shuffle (1-bit sends it off). A pass is steps 1 to 9 as
 written; a failure is kept with its step's journal lines and the substream's
 files.
+
+### Round 2: round 1's findings
+
+Round 1's reviews (Codex, the Claude API) found two Mediums and three Lows;
+round 2 fixes all five, each red first where a defect existed and each rule
+under a negative control (committed, mutated, red by assertion, restored from
+git, the tree checked clean). The task's own reviews before dispatch (Codex,
+the Claude API) fixed item 2's design and item 1's cases, overriding the
+task's first text. Run on the dev Mac (darwin/arm64), Go 1.27.3 at the
+pinned toolchain with GOTOOLCHAIN=local, the tags on every direct go command;
+the host's load average, from other jobs, ran from 4 to 57. Commits, no
+attribution: f57f1ed4 and d09b966e (item 1), 7123ae6c (item 3), 3c1ecee8 and
+05982951 (item 4), c997a26f, 071d6fa5, 803adb81 and e38caa43 (item 2),
+0a4f52d4 (the rules lines and long forms), b93d3cb7 (trackref's package
+doc), and this section.
+
+**1. A Unicode host that folds to ASCII (Codex, Medium).** `trackref.Parse`
+lower-cased a name with `strings.ToLower` before the grammar looked at it,
+and Go lower-cases U+0130 (İ) to i and the Kelvin sign U+212A to k, so
+`http://brİdge.local:7790/dlna/file/<id>` read as the advertised
+`bridge.local`. Measured at 864f50a2, the finding's "stored and returned"
+did not hold: `engine.NewReference` takes printable ASCII alone, so the
+Insert, once confinement had passed and the library been asked, answered
+501; the defect was a confinement that passed. Red first: trackref's
+U+0130 and U+212A rows taken, and FuzzParse's seeds for them; the matrix's
+two rows 501 with the library asked, where 600 is due before it.
+`CanonicalName` now asks every byte of a name to be ASCII before anything is
+folded, then lower-cases it byte by byte; an internationalized name is taken
+in its punycode form alone. The ASCII rule is in that one place: the rest of
+the canonical form (the scheme, an address, the port, the path) is ASCII by
+its grammar, and a second whole-string check would have been one no control
+could tell from the first. U+017F (long s), a fullwidth letter, a Unicode
+name, and non-ASCII bytes in the port (fullwidth digits, a superscript, a
+byte that is not UTF-8) and in an address were refused at 864f50a2 and are
+regression guards. The same fold sat on the inventory's side, found here
+beyond the named cases: `Inventory.Names` compared an advertised name by
+`strings.EqualFold`, whose Unicode folding takes the Kelvin sign to k and a
+long s to s, so a name health advertised with one of them named the ASCII
+name a Uri spelled (red at 864f50a2: both taken); both sides now go through
+`CanonicalName` (`TestAnAdvertisedNameIsComparedAsASCII`). The canonical
+form is what is stored, as the task decided: `trackref.URI.String` writes
+the name lower-cased, `playlistInsert` hands the engine that serialization
+rather than the request's string, and Read, ReadList, the occurrence handed
+to the backend, and after a restart the queue file and Read, give it back
+(`TestAnInsertStoresTheURIsCanonicalForm`, red at 864f50a2 in all five).
+FuzzParse's oracle is no longer that a URI taken reads back as its input: a
+URI taken is ASCII, serializes to the input with its capitals lower-cased
+(computed by the test, not by the parser), parses again to the same URI,
+and its address, port and path are the strict forms as before.
+
+What it means for 1-bit, not fixed here (iOS is out of scope): 1-bit
+matches Read's Uri exactly against what it inserted (`OpenHomeWake.decide`),
+so a Uri it built with a name in capitals no longer matches after a
+relaunch. It builds one with a name only when none of its bridge URLs holds
+an RFC 1918 IPv4 address (`BridgeDLNAURLResolver.dlnaServerURLBase`, read in
+the iOS tree on 2026-10-24); the owner's dogfood casts by the Pi's LAN
+address, unchanged. 5b/5c, which filter what 1-bit inserts, are where its
+side is set.
+
+**2. Concurrent Stops took every request slot (Codex, Medium).** A Stop held
+its request's slot while it waited for its release, so one source sending
+Stop on its eight connections during a pending release held all eight slots
+until the release was acknowledged or its ReleaseTimeout (2 s) passed, and
+every other source's reads, descriptions and Stops were 503. The task's two
+remedies were refused by its own reviews: coalescing loses a later Stop's
+effect (Stop A starts a release, a Play sets the intent to play, Stop B
+joins A's wait: playback starts, though B answered success), and a bound per
+source protects nothing across sources. Built as decided: every Stop is
+submitted to the engine (`playlistStop`); the engine closes a channel a
+command's context carries once it admits the command (`engine.WithAdmission`,
+right after the admission's compare-and-swap, so never for a command not
+admitted; c997a26f, with `TestWithAdmissionClosesAsTheOwnerAdmits`); a Stop
+gives its slot back there and waits for the release holding its connection
+alone, so the Stops that wait are bounded by the listener's caps (32, 8 a
+source), never the slots; a Stop the engine has not admitted holds its slot;
+and Stop still takes no slot of the write pool. The Stop's engine call runs
+on a goroutine of its own while the handler waits for the admission or the
+answer; `Seams.StopWaiting` runs once a Stop has given its slot back, the
+tests' barrier. Red first at 05982951 (round 1's Stop), from a temporary test
+file using only the API there, the spy's view of each Stop's admission as
+the barrier, removed after the run: one source's eight Stops left another
+source's TransportState and description 503; eight sources' one each left a
+ninth source's read 503; six writes and two Stops left a read 503; and over
+the listener, one source's eight connections of Stops left another source's
+description 503. `stops_test.go` holds the decision's six cases: the three
+slot cases with another source's Stop admitted too; Codex's interleaving
+(Stop, Play, Stop) ending Stopped with one session started; every waiting
+Stop answering on the acknowledgement and past ReleaseTimeout; a Stop held
+before the engine holding its slot; and over the listener, a source's ninth
+connection refused at accept while its eight Stops wait, and a connection
+closed mid-wait ending that Stop alone while the others answer on the
+acknowledgement. The release these tests hold is the test backend's, so each
+makes its checks inside the engine's ReleaseTimeout on the real clock and
+asks afterwards that its Stops still wait and the engine still releases: a
+slow run fails rather than passes on a release that already ended. The
+interleaving's test lets the release go once Stop B is admitted (803adb81):
+B's admission and its effect on the intent are one engine step, so the
+acknowledgement finds it, and a joined wait fails on the test's own
+assertions rather than on a watchdog; the barrier fails at once on a Stop
+answered before it waits (e38caa43).
+
+**3. The per-source share at any limits (the Claude API, Low).**
+`orDefaults` held `WritesPerSource` below `MaxConnsPerSource` alone, so at
+`Limits{Slots: 4}`, a write pool of two, one source held both, and the
+limits test asserted it. The share is now held below `WriteSlots` too, one
+at least; with one write slot (`Slots` of 1 to 3, or `WriteSlots: 1`) a
+share below the pool is impossible, and the share is the pool, which the
+`Limits` comment says and a row pins. The test's rows now say so, with rows
+for Slots 4 to 7 and explicit pools, and every limit from 0 to 12 of the
+four fields held to the bounds; `TestOneSourceNeverHoldsTheWritePoolAtAnyLimits`
+pins the behaviour at Slots 4 and the singleton at Slots 3. Red at 864f50a2:
+eleven rows and the grid (a share of 6 of 6 write slots), and a second write
+from the source at Slots 4 taken.
+
+**4. The edit gate's test (the Claude API, Low).**
+`TestAnEditThatPassesTheGateIsAnsweredInsideItsBudget` took its limit from
+`editBudget` itself and held its Inserts in the spy, so it was green with
+`editBudget = engine.ReserveTimeout` and with the gate gone: both shown
+again here (`old4-M4a`, `old4-M4b`, each subtest passing at 4.95 s and
+5.05 s). It now runs on the default limits, a 9 s budget, against the real
+engine with its reservation write held: the test player's
+`hangReservations` restarts the engine with its run's first reservation
+write failing and every later one held, through `engine.Config.Seams` (a
+`ReserveWrite` hook, nil in production, in its own behaviour-neutral commit
+3c1ecee8 with `TestTheReserveWriteSeamHoldsAndFailsTheWrite`; the engine's
+own holds are unexported). With ReserveTimeout and half a second left the
+gate answers 501, no edit call reaches the engine and the queue is as it
+was; with ReserveTimeout and two seconds left the Insert passes, the engine
+holds it the whole ReserveTimeout and refuses it, and it is answered inside
+its budget. Neither case is worked out from `editBudget`. Both mutations now
+turn it red, and only through the absent engine call: the mutated gate let
+the Insert reach the engine, which answered `reservation_not_durable`, 501,
+at 8.54 s, inside the budget, so the fault and the time could not have told.
+
+**5. The log said the rules lines were the orchestrator's to apply.** They
+are in this change, in commit 6b8ad3ff; the bullet above says so now.
+
+**Negative controls**, each on the committed tree, one mutation (its anchor
+asserted to occur once), restored with `git checkout` and the tree checked
+clean:
+
+| NC | Mutation | Red |
+|---|---|---|
+| N1a | `CanonicalName` folds by `strings.ToLower`, with no ASCII check | trackref's U+0130 and U+212A rows, `TestACanonicalNameIsASCIIBeforeItIsFolded`, FuzzParse's seeds; the matrix (both taken, the library asked); the advertised side's Kelvin and İ names |
+| N1b | the Insert stores the Uri as sent | the matrix's capitals rows, `TestAnAdvertisedNameIsComparedAsASCII`'s, `TestAnInsertStoresTheURIsCanonicalForm` (all five) |
+| N1c | the inventory compares by `strings.EqualFold` | `TestAnAdvertisedNameIsComparedAsASCII`'s Kelvin and long-s names |
+| N2a | a Stop holds its slot until its answer | the three slot cases and the listener's (503) |
+| N2b | a Stop during a release is answered from the earlier wait, not submitted | `TestEveryStopIsTheEnginesOwnCommand` (two sessions, Buffering) |
+| N2c | the slot given back before the engine is called | `TestAStopTheEngineHasNotAdmittedHoldsItsSlot` (the read 200) |
+| N2d | the admission noted at the top of `admit` | `TestWithAdmissionClosesAsTheOwnerAdmits` (the abandoned insert's channel closed) |
+| N2e | Stop takes a slot of the write pool | the three slot cases (a Stop 503 before it waits) |
+| N3 | the share's clamp below the write pool removed | `TestTheLimitsKeepTwoSlotsFromTheWrites`, `TestOneSourceNeverHoldsTheWritePoolAtAnyLimits` |
+| N4a | `editBudget = engine.ReserveTimeout` | the gate test's case with ReserveTimeout and half a second left |
+| N4b | the gate removed | the same |
+
+**Decided otherwise than the task, and why**: the ASCII rule in one place
+(`CanonicalName`), above; the inventory's fold fixed with the parser's; the
+engine's hook as an exported `Config.Seams`, the convention of the library's
+and the backend's; item 2's red first from a temporary file, since the
+barrier the final tests use (`Seams.StopWaiting`) does not exist at
+05982951; `WithAdmission` is an addition, not behaviour-neutral, though
+nothing that exists changes with it.
+
+**Not fixed, named**: 1-bit's exact match of Read's Uri for a name in
+capitals (above, 5b/5c); the tests that hold a release live inside the
+engine's ReleaseTimeout on the real clock (above). The round-1 sections of
+this entry describe round 1's code ("kept as sent", the old gate test), as
+the record of that round; the rules files and their long forms are current.
+
+**Gate**, on the dev Mac with Go 1.27.3 (GOTOOLCHAIN=local), its bin first
+on PATH for make (the Makefile calls a bare `go`): `make fmt vet docs-check
+build-all` clean at 0a4f52d4 (`make fmt` rewrote nothing; CLAUDE.md at 70.4%
+of its budget, player.md 99.1%); `go vet ./...` with the tags for
+GOOS=linux and GOOS=windows clean; `go test -race -count=1 -timeout 45m`
+with the tags over `./internal/player/...`, `./internal/dlna/...`,
+`./internal/api/`, `./internal/config/` and `./cmd/bridge/` at 0a4f52d4:
+every package passes (`cmd/bridge` 563 s, `internal/player/openhome` 38 s,
+the engine 19 s, the library 22 s); each test round 2 added or changed with
+`-race -count=10`: openhome's eleven (110 runs and their 70 subtests), the
+engine's two (20) and trackref's four (40), all passing, none skipped (the
+engine-backed tests start their engines on this host's APFS); `FuzzParse`
+for 30 s, 1,070,917 inputs, and `FuzzControlRequest` for 60 s, 1,573,173
+inputs against the engine, each with four workers, none failing. The
+Linux-only tests are build-excluded here; round 1 ran them on legion0, and
+round 2 changes none of their code. b93d3cb7, after the race run, changes a
+comment alone.
