@@ -245,3 +245,35 @@ failed on round 4 and pass on the fix. The Linux-only
 `TestHintOmitsLiveProcessAliasesAtHostRoot` holds a regular file open and
 uses real `/proc/self/fd`, `/dev/fd` and `/proc/self/cwd` aliases under root `/`;
 its runtime result must come from Linux, not the macOS cross-compile.
+
+
+### B515 round 6: root boundaries, valid links and informational limits
+
+An absolute link targeting exactly the injected root is inside it, under either
+its named or canonical spelling. A relative link target can climb to canonical
+root `/` and stay there on further `..` components, as the kernel and
+EvalSymlinks do. Every other injected root still refuses a parent step with
+no component left. Link targets remain uncleaned until preceding links have
+been followed. Forty symlink hops retain a hint; forty-one omit it. An in-root
+absolute link and a relative `dir-link/../x` chain retain a hint too.
+
+The process-relative exclusion is by name only: procfs mounted elsewhere,
+such as `/host/proc` or another `mount -t proc` location, is not recognised by
+filesystem type. No statfs check is made. The final confined `conf.StatHost`
+also resolves the pathname again after the walk. A file replaced by a link
+between those operations can still yield a hint, including through a
+process-relative alias whose final endpoint is ordinary. Confinement holds,
+but the alias exclusion is not an atomic guarantee across the two resolutions.
+These are limits of an informational hint, already documented as not proof
+of what MPD loaded; neither changes the configured file or verdict inputs.
+
+`TestHintParentAtHostRootStaysAtRoot` pins host-root saturation against the
+conf reader's resolution and refusal at an injected root.
+`TestReadingHintLinkToInjectedRoot`, `TestReadingHintFortyLinks` and
+`TestReadingHintValidLinkChains` exercise the production hint path, including
+a decoy configured file that would turn a lexically cleaned link/.. chain
+into the wrong identity. `TestReadingHintLinkHopLimit` pins forty-one hops.
+The host-root case is POSIX-only; the other cases run on every OS with symlink
+support. Round-6 controls restore each rejection, lower the limit to 39,
+refuse all links, and clean a relative target early; each fails its intended
+assertion. Exact gates and controls are in `report-r6.md` and `controls-r6/`.

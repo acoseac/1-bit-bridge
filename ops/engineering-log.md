@@ -161,7 +161,7 @@ compare only confined physical file identities and omit process-relative
 operands and links into them. All verdict inputs, including song lookup and the stream-open observation,
 precede a separately bounded hint step: a late or failed hint drops only hints. The configured
 file and its includes plus `output.password` redact every external string.
-The implementation detail and evidence follow in the round-3 through round-5
+The implementation detail and evidence follow in the round-3 through round-6
 records; protocol version remains 1.
 
 **Round 5.** A stalled hint previously consumed the shared reading deadline
@@ -189,6 +189,35 @@ Exact gates and rebased controls are in `report-r5.md` and
 `controls-r5/manifest.json`. No new index entry is added. Protocol version
 remains 1; backward-compatible protocol change, no iOS change required.
 The protocol mirror remains a companion documentation update.
+
+**Round 6.** Round-5 host evidence is now available: on macOS arm64 with
+Go 1.27.3, `go test -p 4 -race -count=1 ./internal/api/ ./internal/mpd/...
+./internal/alsa/ ./internal/signalpath/` passes (api 100.3 s). On Linux,
+Ubuntu 26.04, Go 1.27.3, linux/amd64, the same race command passes (api
+103.0 s); `TestHintOmitsLiveProcessAliasesAtHostRoot` passes with
+`-race -count=10`, and control 70 fails its predicted assertion with the
+saved fix restored afterward. This supplies round 5's previously pending
+Linux runtime/control evidence and validates the reading order on both hosts.
+
+Two valid walker boundaries now retain hints: a parent step with no component
+left stays at canonical root `/` (every other injected root still refuses it),
+and an absolute link to exactly the injected root is inside it. Both new
+regressions fail on round 5 before the fix. Production hint tests additionally
+pin forty links accepted against forty-one refused, an in-root absolute link,
+and a relative `dir-link/../x` chain whose lexical clean would name the wrong
+file. Independent controls restore each boundary rejection, lower the hop
+limit, refuse all links, or clean a relative target early. Round 5's controls
+64–69 are rerun against this tree. No statfs check is added: the process-path
+exclusion recognises names only, so procfs mounted at `/host/proc` or another
+`mount -t proc` location is not recognised by filesystem type. A file replaced
+by a link between the walk and the confined stat can still yield a hint;
+the second pathname resolution retains confinement but cannot atomically
+preserve the alias exclusion. Both are documented limits of an informational
+hint already stated not to prove what MPD loaded. The configured file and
+verdict inputs remain independent. PROTOCOL.md already describes in-root
+identities, more than forty hops and the hint's lack of proof, so its text
+needs no change. Exact red/green, controls and requested gate results are in
+`report-r6.md` and `controls-r6/manifest.json`. No new index line is added.
 
 ### Round 1 provenance design — superseded in round 3 (never shipped)
 
