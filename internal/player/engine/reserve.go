@@ -21,11 +21,18 @@ const (
 	reserveVersion = 2
 	// maxReserveFileBytes caps the reservation file read at a start.
 	maxReserveFileBytes = 4 << 10
-	// reserveTimeout bounds how long the edits that need a reservation wait
-	// for its write to land: past it they are refused (ReasonReservation),
-	// and so is every edit that needs one, until the write lands.
-	reserveTimeout = 5 * time.Second
 )
+
+// ReserveTimeout bounds how long the edits that need a reservation (an
+// insert, a delete, a DeleteAll) wait for its write to land: past it they
+// are refused (ReasonReservation), and so is every edit that needs one,
+// until the write lands. It is armed once, as the first edit parks, and every
+// edit that parks while it runs is refused at it too, so an edit's reply comes
+// at most ReserveTimeout after it parked. A parked edit does not ask its
+// context again: a caller that must hear an edit's answer gives it at least
+// this long (the OpenHome surface's Insert, DeleteId and DeleteAll do, B470 PR
+// 5a4).
+const ReserveTimeout = 5 * time.Second
 
 // reserveFile is the reservation file: the highest ID and the highest
 // token any run may hand out without writing the file again. It is written,
@@ -168,7 +175,7 @@ type reservation struct {
 	ids, tokens counter
 	// inflight is a write under way; awaiting, that commands wait on it.
 	inflight, awaiting bool
-	// bound ends the wait at reserveTimeout (msgReserveOverdue, numbered
+	// bound ends the wait at ReserveTimeout (msgReserveOverdue, numbered
 	// by waits); overdue is a write past it, which refuses every edit that
 	// needs a value until it lands.
 	bound   timer

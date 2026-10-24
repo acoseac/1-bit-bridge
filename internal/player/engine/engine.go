@@ -536,7 +536,19 @@ type command struct {
 	reply   chan reply
 	replied bool
 	parked  bool
+	// admission is decided once, between the caller and the owner: pending
+	// until the owner admits the command (it runs) or its caller, whose
+	// context ended first, abandons it (it does not run, and the caller is
+	// told so: ErrNotAdmitted).
+	admission atomic.Int32
 }
+
+// A command's admission (command.admission).
+const (
+	admissionPending int32 = iota
+	admissionAdmitted
+	admissionAbandoned
+)
 
 // reply is a command's answer.
 type reply struct {
@@ -547,12 +559,15 @@ type reply struct {
 }
 
 // do hands c to the owner and waits for its reply. A context that has
-// ended, or ends before the owner takes c, means c does not run; one that
-// ends after means c runs and its reply is dropped. After shutdown every
-// command is answered ReasonClosed at once. c holds nothing of the
-// caller's once it is sent: do copies the conditions here, and InsertAfter
-// the metadata, so a caller that returns early may reuse its slices while
-// the owner still runs the command.
+// ended, or ends before the owner admits c, means c does not run, and the
+// refusal wraps ErrNotAdmitted: before the owner takes it, and once taken
+// and not yet admitted, where do abandons it (command.admission), so the
+// owner refuses it in turn; one that ends after the owner admitted c means
+// c may run and its reply is dropped. After shutdown every command is
+// answered ReasonClosed at once. c holds nothing of the caller's once it is
+// sent: do copies the conditions here, and InsertAfter the metadata, so a
+// caller that returns early may reuse its slices while the owner still runs
+// the command.
 func (e *Engine) do(c *command) reply {
 	c.conds = slices.Clone(c.conds)
 	name := c.op.String()
@@ -581,6 +596,10 @@ func (e *Engine) do(c *command) reply {
 			return r
 		default:
 		}
+		if c.admission.CompareAndSwap(admissionPending, admissionAbandoned) {
+			// The owner has taken c and not admitted it, and now never will.
+			return reply{err: notAdmitted(name, c.ctx.Err())}
+		}
 		return reply{err: &Error{Reason: ReasonCancelled, Op: name, Detail: "the context ended while the command ran: it may have taken effect", Err: c.ctx.Err()}}
 	case <-e.done:
 		select {
@@ -592,9 +611,11 @@ func (e *Engine) do(c *command) reply {
 	}
 }
 
-// notAdmitted is a command whose context ended before the owner took it.
+// notAdmitted is a command whose context ended before the owner admitted
+// it: it wraps ErrNotAdmitted and the context's error.
 func notAdmitted(name string, err error) error {
-	return &Error{Reason: ReasonCancelled, Op: name, Detail: "the context ended before the command was admitted: it did not run", Err: err}
+	return &Error{Reason: ReasonCancelled, Op: name, Detail: "the context ended before the command was admitted: it did not run",
+		Err: fmt.Errorf("%w: %w", ErrNotAdmitted, err)}
 }
 
 // answer gives c its reply, once. The reply is sent when the step that
