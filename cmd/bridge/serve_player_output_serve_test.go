@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -234,6 +235,44 @@ func TestServeListsItsPlayerOnAGateOfItsOwn(t *testing.T) {
 	f := newBridgeOutput(ps.player.plan, ps.player, &config.Config{DataDir: ps.dataDir}).Facts(context.Background())
 	if !f.Listed || f.UUID != uuid || f.State != "unavailable" || f.Reason != "closed" {
 		t.Fatalf("once serve stopped: %+v", f)
+	}
+}
+
+// TestTheElementSaysAReleaseIsUnconfirmedUntilItsLateAcknowledgement: a
+// release the DAC does not confirm by its deadline (the stand-in holds
+// Release, as a kernel call that does not return) leaves the player
+// unavailable as release_unconfirmed, through the real engine and serve's
+// deadline, and its late acknowledgement makes it stopped again (B470 PR
+// 5b).
+func TestTheElementSaysAReleaseIsUnconfirmedUntilItsLateAcknowledgement(t *testing.T) {
+	needsDirectorySync(t)
+	standIn := newPlayerStandIn()
+	standIn.holdRelease = make(chan struct{})
+	var once sync.Once
+	letGo := func() { once.Do(func() { close(standIn.holdRelease) }) }
+	var bearer string
+	ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer, standIn: standIn,
+		before: func(dataDir string) { bearer = mintBearer(t, dataDir) }})
+	t.Cleanup(letGo)
+	eng := ps.runningEngine(t)
+	availableOutput(t, eng)
+	queue(t, eng, 0, someReference(t, "0123456789abcdef"))
+	if err := eng.Play(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	wantElement(t, "playing", bridgeElementOf(t, ps, bearer), "playing", "", "")
+	began := time.Now()
+	_ = eng.Stop(context.Background())
+	awaitEngine(t, eng, "the release unconfirmed", func(s *engine.Snapshot) bool { _, ok := s.ReleaseUnconfirmed(); return ok })
+	if waited := time.Since(began); waited < engine.ReleaseTimeout {
+		t.Fatalf("the release was unconfirmed after %v, before its deadline of %v", waited, engine.ReleaseTimeout)
+	}
+	wantElement(t, "past the release's deadline", bridgeElementOf(t, ps, bearer), "unavailable", "release_unconfirmed", "")
+	letGo()
+	awaitEngine(t, eng, "the late acknowledgement", func(s *engine.Snapshot) bool { _, ok := s.ReleaseUnconfirmed(); return !ok })
+	wantElement(t, "after the late acknowledgement", bridgeElementOf(t, ps, bearer), "stopped", "", "")
+	if code := ps.stopServe(t); code != 0 {
+		t.Fatalf("exit %d; stderr=%s", code, ps.stderr.String())
 	}
 }
 
