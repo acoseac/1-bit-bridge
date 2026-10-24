@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B470 PR 5a0 Round 10: reset advice requires invalid reservation data](#2026-10-24--b470-pr-5a0-round-10-reset-advice-requires-invalid-reservation-data)
 - [2026-10-23 — B470 PR 5a0 round 4: giving up a player identity is permanent](#2026-10-23--b470-pr-5a0-round-4-giving-up-a-player-identity-is-permanent)
 - [2026-10-23 — B470 PR 5a0 round 3: one complete player reset remedy](#2026-10-23--b470-pr-5a0-round-3-one-complete-player-reset-remedy)
 - [2026-10-23 — B470 PR 5a0: a restored identity raises its ID and token floors before any identity file](#2026-10-23--b470-pr-5a0-a-restored-identity-raises-its-id-and-token-floors-before-any-identity-file)
@@ -58156,7 +58157,10 @@ only the identity it just made, never the reservation.
 **Snapshot and restore.** Snapshot captures the UUID, then any decodable
 live reservation, restamped with that UUID. A v1 or foreign reservation is a
 conservative floor because every writer merges. Only a missing file omits
-the mark; an unreadable one refuses backup with the three-file player reset advice. The reservation covers every
+the mark; one refused as data gets the three-file player reset advice.
+Cancellation, expiry and file-access errors refuse backup without reset
+advice; an exhausted sharing/access retry says busy and to retry the backup
+(Round 10). The reservation covers every
 value issued before that read. The queue is not backed up. With a UUID to
 restore, one three-byte `crypto/rand` draw is shared by the two counters:
 `new = max(snapshot, live) + 2^24 + uniform[0,2^24)`. Tests inject a reader;
@@ -58574,3 +58578,50 @@ packages and all player packages passed. Manifest's 1209.751 s run failed
 its socket fixtures on denied Unix binds, without a timeout. B520's named
 test was explicitly run and skipped for its denied listener. The B523
 stalled-storage test was not changed. Changes remain uncommitted.
+
+
+## 2026-10-24 — B470 PR 5a0 Round 10: reset advice requires invalid reservation data
+
+Review of Round 9 (`a41d682d`, PR #1331) found one valid Low: Snapshot
+attached the permanent three-file player reset remedy to every reservation
+read failure other than absence. The Windows retry added cancellation at
+shutdown and sharing-retry exhaustion to that branch; neither says anything
+about the reservation's contents. Resetting would give up the identity and
+invalidate its older snapshots for no established data problem.
+
+`atomicwrite.ReadWithRetryCtx` now wraps `ErrReadBusy` plus the last read
+error only when the bounded Windows sharing/access retry is exhausted.
+Cancellation and deadline expiry retain their context errors, without the
+busy marker. Snapshot names the reservation and cause, adds retry-the-backup
+advice for busy, and emits no reset remedy for context or filesystem access
+errors. Data refusals retain the reset remedy: malformed JSON, unsupported
+version, invalid UUID and oversized data. Missing files still omit the mark;
+all other failures still refuse the backup and remove its partial directory.
+The Windows `ERROR_ACCESS_DENIED` retry remains: replaced/delete-pending
+files can return it during the swap, bounded by five attempts and 750 ms
+backoff. A persistent permission refusal remains a failure, never a missing
+floor. Restore's existing error policy is unchanged.
+
+The portable file-access case first failed on Round 9's unconditional advice
+(`TestUnreadableReservationAdviceResetsIdentityAndQueue/backup/unreadable`).
+The same test retains full reset advice for malformed data and adds an
+unsupported-version case; refused operations leave the live UUID, queue and
+reservation unchanged. The real Windows handle fixture now requires no reset
+advice in its held, cancelled and expired subtests, busy/retry words on
+exhaustion, and the filename plus preserved cause. The atomicwrite Windows
+test pins the busy marker and cancellation/expiry for both sharing and
+access-denied codes. Runtime Windows results are separate from test-binary
+cross-compilation; validation and independently applicable controls are
+recorded in scratch report-r10.md. No commit is made in this round.
+
+
+Round 10 validation: Go 1.27.2, offline, shared GOCACHE. The final backup
+and atomicwrite suites passed five race-enabled runs (148.756 s and
+53.154 s). Repository-wide vet passed for darwin/arm64, linux/amd64 and
+arm64, and windows/amd64 and arm64; final affected-package vet and Windows
+test compilation passed for the same targets. Both portable controls built
+and failed their exact predicted assertions; the Windows control compiled
+but could not run on this macOS host. Docs-check, source/doc/owner guards,
+formatting and diff checks passed. The first race run exposed a sibling
+file-access test's old reset-advice expectation, corrected before the final
+run. No requested validation was refused; no commit was made.

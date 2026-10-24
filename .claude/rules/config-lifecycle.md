@@ -337,7 +337,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   **Release note**: a macOS or Windows service install that updates from
   v0.2.0 through the console runs v0.2.0's restart, which exits 0, so it
   comes back down: run `bridge restart` once after that update.
-- **A live backup retries Windows sharing/access failures while opening files replaced by rename, with atomicwrite’s bounded, cancellable backoff; persistent errors still refuse it.** → History-rules-config-lifecycle.md
+- **A live backup retries Windows sharing/access failures while opening files replaced by rename, with atomicwrite’s bounded, cancellable backoff; persistent errors still refuse it.** **Only a reservation refused as data gets backup’s player reset advice; cancellation, an expired context and file-access errors never do. Exhausted sharing/access retries say the file was busy and to retry the backup.** → History-rules-config-lifecycle.md
 - **Atomic writes: stage, then rename with retry.** `RenameWithRetry` absorbs
   the Windows AV scan-on-close window; the deferred `Close` must be registered
   AFTER the deferred `Remove` (LIFO — Windows won't unlink an open file).

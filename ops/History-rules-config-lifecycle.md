@@ -67,8 +67,34 @@ The engine state machine, wire, and macOS/Windows mount readers are unchanged.
 
 ## Live backup reads across rename (B470 PR 5a0, Round 9)
 
-- **A live backup retries Windows sharing/access failures while opening files replaced by rename, with atomicwrite’s bounded, cancellable backoff; persistent errors still refuse it.** `Snapshot` reads a reservation while the engine may refill it asynchronously (`ahead` → `reserveWrite` → `writeReservation` → `WriteBytesDurable`). The writer closes its staged descriptor before rename; neither it nor `readLimited` leaks a reservation handle. A rename or a Windows scan-on-close handle can nevertheless conflict with the reader's open. Closing the test's engine before backup would remove the live-backup case, not fix it. Production currently refuses the player on Windows because directory fsync is unavailable; the Windows fixture supplies that barrier, but backup also reads files other live writers replace there.
+- **A live backup retries Windows sharing/access failures while opening files replaced by rename, with atomicwrite’s bounded, cancellable backoff; persistent errors still refuse it.** **Only a reservation refused as data gets backup’s player reset advice; cancellation, an expired context and file-access errors never do. Exhausted sharing/access retries say the file was busy and to retry the backup.** `Snapshot` reads a reservation while the engine may refill it asynchronously (`ahead` → `reserveWrite` → `writeReservation` → `WriteBytesDurable`). The writer closes its staged descriptor before rename; neither it nor `readLimited` leaks a reservation handle. A rename or a Windows scan-on-close handle can nevertheless conflict with the reader's open. Closing the test's engine before backup would remove the live-backup case, not fix it. Production currently refuses the player on Windows because directory fsync is unavailable; the Windows fixture supplies that barrier, but backup also reads files other live writers replace there.
 
   `atomicwrite.ReadWithRetryCtx` shares `RenameWithRetry`'s five-attempt schedule (0, 50, 100, 200, 400 ms; 750 ms total sleeping). Only Windows `ERROR_SHARING_VIOLATION` and `ERROR_ACCESS_DENIED`, including wrapped errors, retry. Other platforms and other errors return at once. The context interrupts backoff; exhausted errors keep their cause. Snapshot uses it for the live reservation, the freshly renamed UUID copy it rereads to stamp that reservation, and source stats/opens, including player UUID, tokens, config and account files. The copy still streams and commits once; no queue is backed up. A persistent unreadable reservation refuses backup, and only absence omits its mark.
 
   `TestSnapshotRetriesAHandleHeldAcrossRename` uses the existing rename seam to hold a real Windows staged-file handle that permits rename and denies read. It verifies the unprotected open returns the sharing violation, then releases the handle only when the snapshot's context is consulted for backoff: no timer can release it before the failed read. Reservation, source UUID, captured UUID and tokens cases require captured bytes and both floors. A read error on the captured UUID refuses backup after retries rather than silently omitting the mark; a malformed UUID still keeps the existing no-mark policy. `TestSnapshotRefusesAReservationStillHeldOrCancelled` keeps the handle through exhaustion or cancellation and requires the failed snapshot to be removed. `TestReadRetryWindowsErrors` checks both Windows codes; `TestReadRetryBoundsAndCancellation` checks the shared schedule and cancellation on every platform; `TestReadRetryKeepsPermanentErrors` keeps absence and malformed data immediate.
+
+### Round 10 — reset advice requires invalid reservation data
+
+A shutdown cancellation in the Windows backoff used to reach the same advice
+as malformed reservation data. An exhausted sharing retry also recommended
+permanently giving up the identity, though neither established damaged data.
+`ReadWithRetryCtx` now wraps `ErrReadBusy` and the last Windows error on
+exhaustion; cancellation/deadline errors stay plain. `Snapshot` names
+`player-ids.json` and the cause without reset advice for cancellation,
+deadline expiry or a filesystem `PathError`. Busy errors also say to retry
+the backup. A reservation read successfully but refused as data (malformed,
+unsupported version, invalid UUID or excessive size) retains the reset advice.
+Only absence omits the mark; every other error still refuses and removes the
+partial snapshot. `ERROR_ACCESS_DENIED` remains retryable: replacement or
+delete-pending files can return it during the swap, with the same bounded
+schedule as sharing violations.
+
+`TestSnapshotRefusesAReservationStillHeldOrCancelled` now checks held,
+cancelled and expired cases for no reset advice, the file and cause, and
+busy/retry wording on exhaustion. `TestUnreadableReservationAdviceResetsIdentityAndQueue`
+requires no reset for a backup's file-access error and retains the complete
+advice for malformed data and an unsupported version. Restore's existing
+refusal policy is unchanged. `TestReadRetryWindowsErrors` requires the busy
+marker on exhaustion of either code and its absence on cancellation/expiry.
+Windows tests are cross-compiled here; their native execution remains a
+Windows-runner check, distinct from portable race-test results.
