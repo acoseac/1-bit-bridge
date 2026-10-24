@@ -151,7 +151,7 @@ After the compensating Pause, Resume now checks the sink's own typed reason
 (`ReasonBadState`) and position state (`SinkDraining`). Only that pair takes
 Drop, through `s.call` with the existing detached rollback context and its
 original two-second deadline. The answer joins the fault, the refused Pause
-and any Drop failure. Other refusals and the recorded fault are unchanged; round 4 below narrows the reporter's handling of the dropped final buffer.
+and any Drop failure. Other refusals and the recorded fault are unchanged; round 5 below restores the reporter's measured progress after Drop.
 No wire schema, iOS behavior, sink gate or teardown order changes.
 
 `TestPlaybackResumeRollbackDropsFinalDrain` uses B523's direct backend, real
@@ -285,21 +285,19 @@ ending the reporter. The reporter's Tick factory holds its first read until
 rollback has answered, so it deterministically sees `SinkStopped` with
 `Played < Written == Submitted`. The test checks the measured occurrence
 and frames on Fault, the original shared rollback context and joined errors,
-and exactly one fault event before release and after release and Wait.
+and, after round 5's correction below, the exact measured sequence before
+release and after release plus Wait.
 
-Red first on b1b289b8 with only that subtest added, the live reporter sends
-Audible, Position and Fault. It sends neither Finished nor a second fault,
-but the progress callbacks violate the promised exact sequence. The minimal
-fix is confined to `reportStep`: a recorded fault and a stopped, incompletely
-played final buffer discard the queued progress callbacks while preserving
-the measured occurrence and frames for Fault. Other sink states and a
-fully played drain retain the existing path. No sink, rollback, producer,
-wire or teardown code changes in this round. Control 13 removes only the
-reporter guard and restores the Audible, Position, Fault failure. Controls
-1–12 were rerun independently against the final round-4 tests; all thirteen
-compiled and failed their predicted runtime assertions. None failed to
-build, reported a data race, or reached the package timeout. Every mutation
-was restored from saved fixed bytes.
+With only that subtest added on b1b289b8, the live reporter sends
+`[Audible(101), Position(101, p.Played), Fault(101, p.Played)]`, with
+`p.Played > 0`. It sends neither Finished nor a second fault. Round 4
+mistakenly treated that measured progress as a defect and added a guard in
+`reportStep` that cleared every queued callback when a recorded fault met a
+stopped sink with `Played < Written == Submitted`. Round 5 removes it for
+the reasons below. Round 4's control 13 removed that guard and recovered
+the accurate sequence; that red result supported the wrong expectation.
+Controls 1–12 were also rerun against the round-4 tests and failed their
+predicted runtime assertions. Every mutation was restored from saved bytes.
 
 Round 4 Go 1.27.2 offline validation passed Darwin and Linux `go vet ./...`,
 `make fmt`, `make docs-check`, and all three rollback test functions twenty
@@ -314,6 +312,56 @@ package cap, subsequent OpenHome waits failed immediately, and
 `TestStopRefusesThenShutsDownThenCloses` panicked in cleanup without an
 established listener. The full all-player gate is not claimed passed; it
 still needs a host permitting those listeners.
+
+Round 5 corrects round 4's reporter guard. Codex and the Claude API found
+it independently in their round-4 reviews: the first live report was
+accurate and measured. Position reports Played, which remains true after
+Drop. Suppressing Audible can leave the engine on A while a fault names a
+short successor B that was heard, and incorrectly fail a pending Play.
+The predicate also describes any dropped sink and erases all callbacks
+queued in that step, including Prepared, Submitted and successor refusals.
+`reporter.go` is restored byte for byte to its state before b9a169b5.
+
+The retained live-reporter subtest now requires exactly
+`[Audible(101), Position(101, p.Played), Fault(101, p.Played)]` both before
+release and after release plus Wait. Position's frames equal Fault's and
+never exceed Played; there is no Finished, second Fault, or event after
+Fault. The producer's cancelled-drain checks and rollback context/error
+assertions remain in place.
+
+The deterministic gapless-live-reporter case adds A (18,000 frames) then
+short final B (6,000). B's start is verified inside the final hardware
+buffer. Two test-only exports reuse the fake kernel's existing mechanisms:
+`ParkStatusAfterWritten` parks the first STATUS after the final write,
+and `AdvanceUnwatched` moves fake time while that call is held, before its
+reading. The next measurement crosses B's start while a tail remains
+buffered; rollback Drops that tail. No sleep, polling loop or production
+seam is added. The engine supplies B through its real successor hand-off;
+the test supplies the end notification because the held reporter has yet
+to deliver Submitted(B). After rollback, the reporter delivers Prepared(B),
+Submitted(B), Audible(A), Audible(B), Position(B, Played - B.start), then
+Fault(B, Played - B.start). The real engine must answer its pending Play
+successfully, select B, and keep one fault naming B and those measured
+frames. The complete sequence is compared again after release and Wait.
+
+Control 13 restores round 4's guard and fails both live-reporter cases:
+only Fault remains, and the real engine stays selected on A while its
+fault names B. The single-occurrence measurement is 14,400 frames; the
+gapless measurement is 19,200 total frames, so B's Position and Fault both
+carry 1,200 frames. Controls 01–12 also compile and fail their predicted
+assertions. No control reports a data race or reaches the package timeout;
+all mutations are restored from saved fixed bytes.
+
+Round 5 Go 1.27.2 offline validation passes Darwin and Linux `go vet ./...`,
+`make fmt`, `make docs-check`, and the final `-race -count 20` runs of all
+three rollback test functions. The first completed-drain repeat run had
+one before-fault watchdog failure waiting for the producer's completed
+Drain; a diagnostic 100-run check and the requested 20-run rerun passed
+without a code change to that path. The intermittent failure's cause was
+not established. All player packages outside OpenHome, plus ALSA, pass
+the race suite. The full all-player gate fails on sandbox-denied OpenHome
+loopback binds (`operation not permitted`), followed by waits and a cleanup
+panic without a listener; it is not claimed passed.
 
 ## File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)
 
