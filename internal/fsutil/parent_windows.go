@@ -13,9 +13,8 @@ import (
 
 // resolveParent is ResolveParent on Windows, before its last element is
 // followed: filepath.Abs, the normalisation Win32 makes of a path before the
-// filesystem sees it, `..` taken by the name, then the directory it names,
-// which must be one where it exists; directories that do not exist yet are
-// answered as written, as Win32 will make them.
+// filesystem sees it, `..` taken by the name, then the directory it names as
+// the OS opens it (physicalDir).
 func resolveParent(path string) (dir, name string, err error) {
 	last := path[len(filepath.VolumeName(path)):]
 	last = last[strings.LastIndexAny(last, `\/`)+1:]
@@ -26,17 +25,50 @@ func resolveParent(path string) (dir, name string, err error) {
 	if err != nil {
 		return "", "", err
 	}
-	dir, name = filepath.Dir(abs), filepath.Base(abs)
-	info, err := os.Stat(dir)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return dir, name, nil
-	case err != nil:
+	dir, err = physicalDir(filepath.Dir(abs))
+	if err != nil {
 		return "", "", err
-	case !info.IsDir():
-		return "", "", &fs.PathError{Op: "resolve", Path: dir, Err: syscall.ENOTDIR}
 	}
-	return dir, name, nil
+	return dir, filepath.Base(abs), nil
+}
+
+// physicalDir is dir as the OS opens it, named by the handle it opens to
+// (ResolveLinks), through every junction, mounted folder and symbolic link on
+// its way; a directory that does not exist yet (a config dir bridge init is
+// about to make) is resolved through its nearest ancestor that does, with the
+// directories after that ancestor as written. One that is not a directory,
+// and one ResolveLinks's fallback leaves a link (no handle could name it), are
+// refused: answered as itself, a junction keeps its spelling when it is
+// repointed.
+func physicalDir(dir string) (string, error) {
+	missing := ""
+	for {
+		resolved, err := ResolveLinks(dir)
+		if err == nil {
+			info, err := os.Lstat(resolved)
+			switch {
+			case err != nil:
+				return "", err
+			case info.Mode()&(fs.ModeSymlink|fs.ModeIrregular) != 0:
+				return "", &fs.PathError{Op: "resolve", Path: dir, Err: errLinkNotResolved}
+			case !info.IsDir():
+				return "", &fs.PathError{Op: "resolve", Path: dir, Err: syscall.ENOTDIR}
+			}
+			if missing == "" {
+				return resolved, nil
+			}
+			return filepath.Join(resolved, missing), nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", err
+		}
+		missing = filepath.Join(filepath.Base(dir), missing)
+		dir = parent
+	}
 }
 
 // joinAsWritten is filepath.Join on Windows, whose cleaning is Win32's own.

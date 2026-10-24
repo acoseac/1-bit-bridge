@@ -341,13 +341,15 @@ func Restore(snapshotDir string, dst Targets) error {
 // write, it compares the config with the bytes its caller read (whose data
 // dir and TLS pair the targets came from) and with what the turn found, read
 // again (configStillAsRead): a config changed since, while the caller asked
-// for confirmation or after the turn's own read, refuses the restore with
-// nothing restored. The snapshot's bridge.yaml is written in that turn
-// (FileLock.SaveBytes), where the config file is, and only over the file the
-// turn found: one an edit (or, where the filesystem keeps no locks, any
-// writer) changed while the files before it were copied is left as it is,
-// and the restore says which files it restored and that running it again
-// finishes it (partialRestoreError).
+// for confirmation or after the turn's own read, or one whose name a link
+// repointed since opens another file (config.ErrNameMoved), refuses the
+// restore with nothing restored. The snapshot's bridge.yaml is written in
+// that turn (FileLock.SaveBytes), where the config file is, and only over the
+// file the turn found while the name still opens it: one an edit (or, where
+// the filesystem keeps no locks, any writer) changed while the files before
+// it were copied, or a name repointed meanwhile, is left as it is, and the
+// restore says which files it restored and that running it again finishes it
+// (partialRestoreError).
 func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) error {
 	m, err := readManifest(filepath.Join(snapshotDir, ManifestFile))
 	if err != nil {
@@ -422,7 +424,8 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 		}
 		// A replacement identity must never expose this box's old entries,
 		// including the UUID-less queue format on development boxes.
-		if err := discardReplacedPlayerQueue(dst.PlayerUUID, playerUUID); err != nil {
+		discarded, err := discardReplacedPlayerQueue(dst.PlayerUUID, playerUUID)
+		if err != nil {
 			return err
 		}
 		// This comes after the reservation and before all other identity
@@ -431,7 +434,13 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 		if err := config.WritePlayerUUIDFile(dst.PlayerUUID, playerUUID); err != nil {
 			return fmt.Errorf("restore %s: %w", PlayerUUIDFileName, err)
 		}
-		restored = append(restored, PlayerUUIDFileName+" (with the player's reservation, and its queue let go)")
+		// Said only of a queue the restore removed: the box's own identity
+		// keeps its queue, and a box with none had none to let go.
+		if discarded {
+			restored = append(restored, PlayerUUIDFileName+" (with the player's reservation, and its queue let go)")
+		} else {
+			restored = append(restored, PlayerUUIDFileName+" (with the player's reservation)")
+		}
 	}
 	for i, name := range m.Files {
 		// The reservation is an input only, never a copied snapshot file.
@@ -467,7 +476,7 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 			if err == nil {
 				err = configTurn.SaveBytes(data)
 			}
-			if errors.Is(err, config.ErrChangedInTurn) {
+			if configMovedOn(err) {
 				return &partialRestoreError{path: dst.BridgeYAML, restored: restored,
 					unrestored: unrestoredFrom(m.Files[i:], mapping), err: err}
 			}
@@ -556,7 +565,7 @@ func configStillAsRead(turn *config.FileLock, asRead []byte) error {
 		}
 	}
 	switch err := turn.Check(); {
-	case errors.Is(err, config.ErrChangedInTurn):
+	case configMovedOn(err):
 		return &configChangedError{path: turn.Path(), err: err}
 	case err != nil:
 		return fmt.Errorf("read %s before restoring anything: %w; nothing was restored", turn.Path(), err)
@@ -564,10 +573,21 @@ func configStillAsRead(turn *config.FileLock, asRead []byte) error {
 	return nil
 }
 
+// configMovedOn reports whether err, a refusal of the restore's turn of the
+// config file, says the config is no longer the one the turn read: another
+// writer changed the file (config.ErrChangedInTurn), or its name now opens
+// another file, a link repointed (config.ErrNameMoved). A restore takes the
+// two alike, refusing before its first write with nothing restored, and at
+// bridge.yaml's own write saying what it restored.
+func configMovedOn(err error) bool {
+	return errors.Is(err, config.ErrChangedInTurn) || errors.Is(err, config.ErrNameMoved)
+}
+
 // configChangedError is a restore's refusal, before its first write, of a
 // config another writer changed since the restore's caller read it, or since
-// the restore's turn did: the targets may be the old config's. It names the
-// config file and nothing it holds.
+// the restore's turn did, or whose name a link repointed since opens another
+// file: the targets may be the old config's. It names the config file and
+// nothing it holds.
 type configChangedError struct {
 	path string
 	err  error
@@ -575,8 +595,9 @@ type configChangedError struct {
 
 func (e *configChangedError) Error() string {
 	return fmt.Sprintf("%s is not the config this restore read when it worked out where each file goes: another writer "+
-		"changed it since (a bridge command, an edit, or a bridge older than the config's lock), so nothing was restored: "+
-		"run the restore again, to restore into what the config names now", e.path)
+		"changed it since (a bridge command, an edit, or a bridge older than the config's lock), or it now opens another "+
+		"file (a link at it repointed), so nothing was restored: run the restore again, to restore into what the config "+
+		"names now", e.path)
 }
 
 // Unwrap is the turn's refusal, which config.ErrChangedInTurn matches.
@@ -584,10 +605,11 @@ func (e *configChangedError) Unwrap() error { return e.err }
 
 // partialRestoreError is a restore's refusal at bridge.yaml's own write, of a
 // config a writer that takes no turns (an edit, a bridge older than the
-// config's lock) changed while the files before it were copied: the restore
-// leaves it as that writer left it, and says which files it had restored by
-// then, which it had not, and that running the restore again finishes it,
-// putting every file the snapshot holds back, bridge.yaml over that change.
+// config's lock) changed while the files before it were copied, or whose name
+// a link repointed meanwhile opens another file: the restore leaves the
+// config as it is, and says which files it had restored by then, which it had
+// not, and that running the restore again finishes it, putting every file the
+// snapshot holds back, bridge.yaml over that change.
 type partialRestoreError struct {
 	path                 string
 	restored, unrestored []string
@@ -600,9 +622,9 @@ func (e *partialRestoreError) Error() string {
 		done = strings.Join(e.restored, ", ")
 	}
 	return fmt.Sprintf("restore bridge.yaml: %s was changed by another writer while the restore ran (an edit, or a bridge "+
-		"older than the config's lock), and is left as that writer left it; restored before it: %s; not restored: %s: "+
-		"run the restore again to finish it, which restores every file the snapshot holds, bridge.yaml over that change",
-		e.path, done, strings.Join(e.unrestored, ", "))
+		"older than the config's lock), or now opens another file (a link at it repointed), and is left as it is; "+
+		"restored before it: %s; not restored: %s: run the restore again to finish it, which restores every file the "+
+		"snapshot holds, bridge.yaml over that change", e.path, done, strings.Join(e.unrestored, ", "))
 }
 
 // Unwrap is the turn's refusal, which config.ErrChangedInTurn matches.

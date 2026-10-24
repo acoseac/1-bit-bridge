@@ -222,6 +222,124 @@ func TestLibraryAddWritesTheConfigItsNameOpens(t *testing.T) {
 	}
 }
 
+// repointLink makes link lead to to, in one rename, as a dotfiles restow or a
+// home-manager switch replaces it.
+func repointLink(t *testing.T, link, to string) {
+	t.Helper()
+	tmp := link + ".repoint"
+	if err := os.Symlink(to, tmp); err != nil {
+		t.Error(err)
+		return
+	}
+	if err := os.Rename(tmp, link); err != nil {
+		t.Error(err)
+	}
+}
+
+// twinBeside writes a file holding file's bytes beside it, named
+// switched.yaml, and returns its path and those bytes.
+func twinBeside(t *testing.T, file string) (string, []byte) {
+	t.Helper()
+	raw := readBytes(t, file)
+	twin := filepath.Join(filepath.Dir(file), "switched.yaml")
+	if err := os.WriteFile(twin, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return twin, raw
+}
+
+// TestLibraryAddRefusesANameRepointedWhileItWaited: library add, waiting for
+// the lock beside the file its config's name opened while the link at that
+// name is repointed to a file holding the same bytes, and the lock given back
+// with the file unchanged, refuses once it holds the lock, saying the name now
+// opens another file and to run it again: neither file is written, and the
+// library index is not touched (the wipe a second root takes never runs).
+// Until B506's fourth round it saved the file the name no longer opened, and
+// wiped the index, and said it had added the root.
+func TestLibraryAddRefusesANameRepointedWhileItWaited(t *testing.T) {
+	l := layouts(t, closedAdminAddr(t))["a link at the last element"]
+	moved, raw := twinBeside(t, l.file)
+	extra := filepath.Join(l.base, "Extra")
+	dataDir := filepath.Join(l.base, "data")
+	for _, d := range []string{extra, dataDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	release := holdConfigLock(t, l.file)
+	waited, stop := config.LockWaitedForTest(l.name)
+	defer stop()
+	type result struct {
+		code int
+		out  string
+	}
+	done := make(chan result, 1)
+	go func() {
+		code, out := runLibraryCapture(libraryEnv{}, "add", "--config", l.name, extra)
+		done <- result{code, out}
+	}()
+	select {
+	case <-waited:
+	case r := <-done:
+		t.Fatalf("library add went through while another held the lock: exit %d\n%s", r.code, r.out)
+	case <-time.After(30 * time.Second):
+		t.Fatal("library add neither waited for the lock nor finished")
+	}
+	repointLink(t, l.link, moved)
+	release()
+	var r result
+	select {
+	case r = <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("library add did not finish once the lock was given back")
+	}
+	if r.code == 0 || !strings.Contains(r.out, "now opens another file") || !strings.Contains(r.out, "run it again") {
+		t.Errorf("library add whose config's name was repointed while it waited: exit %d\n%s\nwant a refusal that says the name moved and to run it again", r.code, r.out)
+	}
+	for _, p := range []string{l.file, moved} {
+		if got := readBytes(t, p); string(got) != string(raw) {
+			t.Errorf("library add wrote %s:\n%s", p, got)
+		}
+	}
+	requireLinkTo(t, l.link, moved)
+	if _, err := os.Stat(filepath.Join(dataDir, "bridge.db")); !os.IsNotExist(err) {
+		t.Errorf("library add changed the library index before it refused (bridge.db: %v)", err)
+	}
+}
+
+// TestServeRecordsTheFileItsBootReadOpened: serve's live holder is told the
+// file its boot read opened, resolved at that read, never later: a link at
+// the config's name repointed between the read and the holder's record (a
+// thousand lines of boot apart), to a file holding the same bytes, makes the
+// first console save refuse, both files left as they are. Until B506's fourth
+// round the holder resolved the name when it was told, and recorded the file
+// the link led to by then, which serve never read.
+func TestServeRecordsTheFileItsBootReadOpened(t *testing.T) {
+	lan, admin := holdLoopback(t), holdLoopback(t)
+	l := layouts(t, admin.addr)["a link at the last element"]
+	moved, raw := twinBeside(t, l.file)
+	opts := serveOpts{configPath: l.name, addrOverride: lan.addr, lanListener: lan.ln, adminListener: admin.ln,
+		afterConfigRead: func() { repointLink(t, l.link, moved) }}
+	b := &consoleBridge{
+		adminBase: "http://" + admin.addr,
+		console:   &http.Client{Timeout: 30 * time.Second},
+		phone:     &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}},
+	}
+	b.servedBridge = launchServe(t, func(ctx context.Context, stdout, stderr io.Writer) int {
+		return runServe(ctx, opts, stdout, stderr)
+	})
+	waitForAdminReady(t, admin.addr, b.done, b.stderr)
+	if status, body := patchSettings(t, b, `{"libraryName":"After"}`); status != http.StatusInternalServerError || !strings.Contains(body, "save-config") {
+		t.Errorf("the first console save after the name moved past serve's boot read: %d %s, want it refused", status, body)
+	}
+	for _, p := range []string{l.file, moved} {
+		if got := readBytes(t, p); string(got) != string(raw) {
+			t.Errorf("the console save wrote %s:\n%s", p, got)
+		}
+	}
+	requireLinkTo(t, l.link, moved)
+}
+
 // TestServesSeedRefusesALinkThatLeadsNowhere: serve's seed, given a config
 // name that is a link to no file, writes nothing and says what to do: it
 // neither makes the file the link names nor replaces the link with one.

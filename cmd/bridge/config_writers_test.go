@@ -26,9 +26,11 @@ import (
 // snapshot's bridge.yaml over it.
 //
 // A new writer goes here with its lock, which the sweep then requires it to
-// call, and, for one that saves itself, to call before its save and to decide
+// call, and, for one that saves itself, to call before its save, to decide
 // on what that turn found (turnReadCall), reading the config in the turn
-// through nothing else. The console's writers all go through
+// through nothing else, and to save a value taken from that turn
+// (derivationProblem), unless comparedSaves lists the comparison it makes
+// instead. The console's writers all go through
 // (*RuntimeConfig).UpdateChecked, Update's own, which takes the lock itself,
 // so theirs is the holder's Update or UpdateChecked, and Edit's callers' is
 // Edit, which decides on its own turn's bytes.
@@ -80,6 +82,30 @@ var turnReadMethods = map[string]bool{"Found": true, "LoadFound": true}
 // the one its turn found, and a restore's of the file its caller read.
 var turnReadHelpers = map[string]bool{"configChangedSinceRead": true, "configStillAsRead": true}
 
+// comparedSaves are the named writers that save a config they did not take
+// from their own turn's bytes, each with the comparison it makes in its turn
+// instead, of the turn's bytes with the read its config came from, which the
+// sweep requires it to ask, of the turn or of what it found, before it saves
+// (derivationProblem): init saves the config it built from the file it read
+// at its start, once configChangedSinceRead has found the turn's bytes to be
+// that file's; a restore puts the snapshot's bridge.yaml over the file its
+// turn found, which is what a restore is for, once configStillAsRead has
+// found that file to be the one its caller read; and the live holder's
+// UpdateChecked saves its snapshot, read at boot or last written by it, only
+// while bytes.Equal finds Found's bytes to be the ones it last read or wrote.
+// RuntimeConfig.Update saves through UpdateChecked and is no writer of the
+// sweep's itself. Every other named writer that saves itself saves what its
+// turn found: Edit, and bind, what LoadFound gave (bind's SaveIf comparison
+// is a second guard beside the turn's own, not where its config comes from),
+// and serve's seed a default only where its turn found no file (createOnly).
+// A writer listed here that has come to save only what its turn found is
+// reported, so the list holds only the writers that need it.
+var comparedSaves = map[string]string{
+	"cmd/bridge/init.go:saveInitConfig":                      "configChangedSinceRead",
+	"internal/backup/backup.go:RestoreWithOptions":           "configStillAsRead",
+	"internal/config/runtime.go:RuntimeConfig.UpdateChecked": "bytes.Equal",
+}
+
 // notConfigWriters are the functions that write a file while they name the
 // config's path and still write no config file, each with what it writes
 // instead. The sweep requires each to still be one of those, so an entry
@@ -123,7 +149,7 @@ var writeFlags = map[string]bool{"O_WRONLY": true, "O_RDWR": true, "O_CREATE": t
 // not come from is reported there.
 var configReadCalls = map[string]bool{
 	"config.Load": true, "config.LoadFile": true, "config.LoadFileAt": true, "config.ReadFile": true,
-	"loadCLIConfig": true, "loadCLIConfigFile": true, "readConfigAsIs": true,
+	"loadCLIConfig": true, "loadCLIConfigFile": true, "loadServeConfigFile": true, "readConfigAsIs": true,
 }
 
 // pathReadCalls are the reads that are a read of the config when they name
@@ -152,12 +178,43 @@ type configWriteSite struct {
 	// it saves it itself: a Save, SaveIf or SaveBytes, or a file write while
 	// it names the config's path.
 	reads, saves []token.Pos
+	// assigns are its assignments to a name, in source order; stores what
+	// each of its own saves of the config saves, and where (a Save's,
+	// SaveIf's or save's receiver, a SaveBytes's argument); guards its ifs
+	// whose condition is a name alone and whose body ends in a return.
+	assigns []assignAt
+	stores  []storeAt
+	guards  []guardAt
 }
 
-// chainAt is one call a function makes and where.
+// chainAt is one call a function makes, where, and what it is handed.
 type chainAt struct {
 	chain string
 	pos   token.Pos
+	args  []ast.Expr
+}
+
+// assignAt is one assignment to name, at pos: rhs is the value assigned, or
+// the call whose results are assigned, index naming which of them.
+type assignAt struct {
+	name  string
+	pos   token.Pos
+	rhs   ast.Expr
+	index int
+}
+
+// storeAt is one save of the config, at pos, of value: nil for a save made
+// through a method value, whose argument the sweep cannot see.
+type storeAt struct {
+	pos   token.Pos
+	value ast.Expr
+}
+
+// guardAt is an if at pos, ending at end, whose condition is the name cond
+// alone, read at condPos, and whose body ends in a return.
+type guardAt struct {
+	pos, condPos, end token.Pos
+	cond              string
 }
 
 // TestEveryConfigWriterTakesTheConfigLock is the pin of backlog B506: every
@@ -174,7 +231,7 @@ func TestEveryConfigWriterTakesTheConfigLock(t *testing.T) {
 	if files < 300 || len(sites) < len(configWriters)/2 {
 		t.Fatalf("read %d files and found %d writers of the config; the sweep looks at nothing it was written for", files, len(sites))
 	}
-	for _, p := range configWriterProblems(sites, configWriters, notConfigWriters) {
+	for _, p := range configWriterProblems(sites, configWriters, notConfigWriters, comparedSaves) {
 		t.Error(p)
 	}
 	for key, wants := range configSavePrimitive {
@@ -225,9 +282,10 @@ func turnReadHelperProblems(found map[string]map[string]bool) []string {
 	return problems
 }
 
-// configWriterProblems compares what the sweep found with the writers named
-// and the functions excused, and says what does not agree, in a fixed order.
-func configWriterProblems(sites map[string]configWriteSite, named, excused map[string]string) []string {
+// configWriterProblems compares what the sweep found with the writers named,
+// the functions excused and the writers listed as saving what they compared
+// (compared), and says what does not agree, in a fixed order.
+func configWriterProblems(sites map[string]configWriteSite, named, excused, compared map[string]string) []string {
 	var problems []string
 	for key, why := range excused {
 		if site, ok := sites[key]; !ok || len(site.kinds) != 1 || site.kinds[0] != writesByFile {
@@ -253,12 +311,27 @@ func configWriterProblems(sites map[string]configWriteSite, named, excused map[s
 		}
 		if p := lockOrderProblem(key, site, lock); p != "" {
 			problems = append(problems, p)
+			continue
+		}
+		if p := derivationProblem(key, site, lock, compared); p != "" {
+			problems = append(problems, p)
 		}
 	}
 	for key := range named {
 		if _, ok := sites[key]; !ok {
 			problems = append(problems, fmt.Sprintf("configWriters names %s, which the sweep no longer finds writing the config: "+
 				"remove it, or rename it to the function that writes now", key))
+		}
+	}
+	for key := range compared {
+		site, ok := sites[key]
+		switch {
+		case !ok || len(site.stores) == 0:
+			problems = append(problems, fmt.Sprintf("comparedSaves lists %s, which the sweep no longer finds saving the config itself: "+
+				"remove it", key))
+		case site.savesOnlyFromItsTurn(named[key]):
+			problems = append(problems, fmt.Sprintf("comparedSaves lists %s, whose saves are made from what its turn found: "+
+				"remove it, so the sweep holds it to that", key))
 		}
 	}
 	sort.Strings(problems)
@@ -289,13 +362,12 @@ func isChain(c, lock string) bool {
 // turn's own reads (turnReadCall) between the lock and its first save, and
 // read the config there through nothing else (a writer may read before its
 // turn to decide what to ask, as bind and init do, if it decides again on
-// what its turn found). A writer that saves through Edit or the holder's
+// what its turn found). Where the value it saves comes from is
+// derivationProblem's. A writer that saves through Edit or the holder's
 // Update is left out: Edit and Update are named writers themselves, and
 // decide on their own turn's bytes. Positions are the source's, not the
 // control flow's: a read in a loop after the save, or one through a helper
-// configReadCalls does not name, is not seen, and nor is which bytes a save is
-// made from: a writer that makes a turn's read and saves a copy it read
-// before is not told apart.
+// configReadCalls does not name, is not seen.
 func lockOrderProblem(key string, site configWriteSite, lock string) string {
 	if len(site.saves) == 0 {
 		return ""
@@ -325,6 +397,184 @@ func lockOrderProblem(key string, site configWriteSite, lock string) string {
 	}
 	return fmt.Sprintf("%s: %s saves the config without deciding on what its turn of %s found: "+
 		"a read before the turn, or a probe in it, is not the turn's (FileLock.LoadFound, FileLock.Found)", site.pos, key, lock)
+}
+
+// derivationProblem says what is wrong with where a named writer's own saves
+// of the config come from, and "" when nothing is: each value it saves in its
+// turn of lock must be taken from that turn, the config LoadFound gave, the
+// bytes Found gave, or a value made from one of them (fromTurn, by the last
+// assignment to a name before it is read); or be saved only where the turn
+// found no file (createOnly), with nothing there to write over; or the writer
+// must be listed in compared and ask, in its turn, the comparison listed for
+// it, of the turn or of what it found (init's, a restore's and the holder's,
+// whose config comes from a read they compare with the turn's bytes).
+// Assignments are told apart by name and source position, never by scope or
+// control flow: a name shadowed in a block, or assigned in a loop after it is
+// saved, is read as its last assignment in the source before the save.
+func derivationProblem(key string, site configWriteSite, lock string, compared map[string]string) string {
+	lockAt, turns := site.lockAt(lock), site.turnVars(lock)
+	check, listed := compared[key]
+	for _, s := range site.stores {
+		if s.pos < lockAt || site.fromTurn(s.value, s.pos, turns, 0) || site.createOnly(s.pos, lockAt, turns) {
+			continue
+		}
+		if !listed {
+			return fmt.Sprintf("%s: %s saves a config not derived from what its turn of %s found: save what FileLock.LoadFound "+
+				"gave, or Found's bytes (SaveBytes), or a value made from them, or list in comparedSaves the comparison of "+
+				"the turn's bytes it makes instead", site.pos, key, lock)
+		}
+		if !site.asksInTurn(check, lockAt, s.pos, turns) {
+			return fmt.Sprintf("%s: %s is listed in comparedSaves, and never asks %s in its turn of %s, of the turn or of "+
+				"what it found, before it saves a config it did not take from the turn", site.pos, key, check, lock)
+		}
+	}
+	return ""
+}
+
+// savesOnlyFromItsTurn reports whether every save the site makes in its turn
+// of lock is of a value taken from that turn, or one where the turn found no
+// file: a writer comparedSaves need not list.
+func (s configWriteSite) savesOnlyFromItsTurn(lock string) bool {
+	lockAt, turns := s.lockAt(lock), s.turnVars(lock)
+	for _, st := range s.stores {
+		if st.pos > lockAt && !s.fromTurn(st.value, st.pos, turns, 0) && !s.createOnly(st.pos, lockAt, turns) {
+			return false
+		}
+	}
+	return true
+}
+
+// lockAt is where the site first calls lock, token.NoPos when it never does.
+func (s configWriteSite) lockAt(lock string) token.Pos {
+	for _, c := range s.at {
+		if isChain(c.chain, lock) {
+			return c.pos
+		}
+	}
+	return token.NoPos
+}
+
+// turnVars are the names the site holds its turn of lock by: the first
+// result of a call of lock, and a name assigned one of those.
+func (s configWriteSite) turnVars(lock string) map[string]bool {
+	turns := map[string]bool{}
+	for _, a := range s.assigns {
+		switch rhs := a.rhs.(type) {
+		case *ast.CallExpr:
+			if a.index == 0 && isChain(callChain(rhs.Fun), lock) {
+				turns[a.name] = true
+			}
+		case *ast.Ident:
+			if turns[rhs.Name] {
+				turns[a.name] = true
+			}
+		}
+	}
+	return turns
+}
+
+// lastAssign is the last assignment to name before pos in the source.
+func (s configWriteSite) lastAssign(name string, pos token.Pos) (assignAt, bool) {
+	var last assignAt
+	found := false
+	for _, a := range s.assigns {
+		if a.name == name && a.pos < pos && (!found || a.pos > last.pos) {
+			last, found = a, true
+		}
+	}
+	return last, found
+}
+
+// fromTurn reports whether e, read at pos, holds a value the function took
+// from its turn: what a turn's LoadFound or Found gave (its first result: the
+// config, or the bytes, never Found's ok), or a value made from one of them,
+// a call handed one or called on one, a field of one, or a name last
+// assigned one.
+func (s configWriteSite) fromTurn(e ast.Expr, pos token.Pos, turns map[string]bool, depth int) bool {
+	if e == nil || depth > 16 {
+		return false
+	}
+	switch x := e.(type) {
+	case *ast.ParenExpr:
+		return s.fromTurn(x.X, pos, turns, depth+1)
+	case *ast.StarExpr:
+		return s.fromTurn(x.X, pos, turns, depth+1)
+	case *ast.UnaryExpr:
+		return s.fromTurn(x.X, pos, turns, depth+1)
+	case *ast.SelectorExpr:
+		return s.fromTurn(x.X, pos, turns, depth+1)
+	case *ast.Ident:
+		a, ok := s.lastAssign(x.Name, pos)
+		if !ok {
+			return false
+		}
+		if call, isCall := a.rhs.(*ast.CallExpr); isCall && turnRead(call, turns) {
+			return a.index == 0
+		}
+		return s.fromTurn(a.rhs, a.pos, turns, depth+1)
+	case *ast.CallExpr:
+		if turnRead(x, turns) {
+			return true
+		}
+		if sel, ok := x.Fun.(*ast.SelectorExpr); ok && s.fromTurn(sel.X, pos, turns, depth+1) {
+			return true
+		}
+		for _, arg := range x.Args {
+			if s.fromTurn(arg, pos, turns, depth+1) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// turnRead reports whether call is one of a turn's own reads (turnReadMethods)
+// made on a name the function holds its turn by.
+func turnRead(call *ast.CallExpr, turns map[string]bool) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	return ok && turnReadMethods[sel.Sel.Name] && turns[callChain(sel.X)]
+}
+
+// createOnly reports whether the save at pos is made only where its turn
+// found no file: after an if in the turn, ended before the save, that returns
+// when the second result of the turn's Found, its condition alone, says a
+// file was there. Nothing another writer saved can be written over there,
+// and a file that appears meanwhile the save's own comparison refuses.
+func (s configWriteSite) createOnly(pos, lockAt token.Pos, turns map[string]bool) bool {
+	for _, g := range s.guards {
+		if g.pos < lockAt || g.end > pos {
+			continue
+		}
+		a, ok := s.lastAssign(g.cond, g.condPos)
+		if !ok || a.index != 1 {
+			continue
+		}
+		if call, isCall := a.rhs.(*ast.CallExpr); isCall && turnRead(call, turns) {
+			if sel := call.Fun.(*ast.SelectorExpr); sel.Sel.Name == "Found" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// asksInTurn reports whether the site calls check after it takes its lock and
+// before pos, handing it the turn or something it found.
+func (s configWriteSite) asksInTurn(check string, lockAt, pos token.Pos, turns map[string]bool) bool {
+	for _, c := range s.at {
+		if c.pos <= lockAt || c.pos >= pos || !isChain(c.chain, check) {
+			continue
+		}
+		for _, arg := range c.args {
+			if id, ok := arg.(*ast.Ident); ok && turns[id.Name] {
+				return true
+			}
+			if s.fromTurn(arg, c.pos, turns, 0) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // turnReadCall reports whether the rendered call chain is one of a turn's own
@@ -458,20 +708,37 @@ var saveMethods = map[string]bool{"Save": true, "SaveIf": true, "SaveBytes": tru
 
 // inspectConfigWriter reads body, a function's or a variable's value, for
 // what makes it a writer of the config: the kinds of write it makes, the
-// calls it makes and where, where it reads the config and where it saves it.
-// A save, an Edit or the holder's Update counts whether it is called or
-// taken as a value (a method value is a save made later, through it).
+// calls it makes and where, where it reads the config and where it saves it,
+// and what each of its saves saves (its assignments, its saves' values, and
+// its ifs that return on a name). A save, an Edit or the holder's Update
+// counts whether it is called or taken as a value (a method value is a save
+// made later, through it).
 func inspectConfigWriter(body ast.Node, inConfig bool) (configWriteSite, map[string]bool) {
 	site := configWriteSite{calls: map[string]bool{}}
 	kinds := map[string]bool{}
 	namesPath := false
 	var fileWrites []token.Pos
+	// calledBytes are the SaveBytes selectors a call is made through, whose
+	// saved value is the call's argument.
+	calledBytes := map[*ast.SelectorExpr]bool{}
 	ast.Inspect(body, func(n ast.Node) bool {
 		switch x := n.(type) {
+		case *ast.AssignStmt:
+			site.assigns = append(site.assigns, assignmentsOf(x.Lhs, x.Rhs, x.Pos())...)
+		case *ast.ValueSpec:
+			lhs := make([]ast.Expr, len(x.Names))
+			for i, id := range x.Names {
+				lhs[i] = id
+			}
+			site.assigns = append(site.assigns, assignmentsOf(lhs, x.Values, x.Pos())...)
+		case *ast.IfStmt:
+			if g, ok := guardOf(x); ok {
+				site.guards = append(site.guards, g)
+			}
 		case *ast.CallExpr:
 			chain := callChain(x.Fun)
 			site.calls[chain] = true
-			site.at = append(site.at, chainAt{chain, x.Pos()})
+			site.at = append(site.at, chainAt{chain, x.Pos(), x.Args})
 			if inConfig && chain == "Edit" {
 				kinds[writesByEdit] = true
 			}
@@ -481,6 +748,14 @@ func inspectConfigWriter(body ast.Node, inConfig bool) (configWriteSite, map[str
 			if configReadCall(x, chain, inConfig) {
 				site.reads = append(site.reads, x.Pos())
 			}
+			if sel, ok := x.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "SaveBytes" {
+				calledBytes[sel] = true
+				var value ast.Expr
+				if len(x.Args) > 0 {
+					value = x.Args[0]
+				}
+				site.stores = append(site.stores, storeAt{sel.Pos(), value})
+			}
 		case *ast.SelectorExpr:
 			switch {
 			case callChain(x) == "config.Edit":
@@ -488,6 +763,12 @@ func inspectConfigWriter(body ast.Node, inConfig bool) (configWriteSite, map[str
 			case saveMethods[x.Sel.Name] || (inConfig && x.Sel.Name == "save"):
 				kinds[writesBySave] = true
 				site.saves = append(site.saves, x.Pos())
+				switch {
+				case x.Sel.Name != "SaveBytes":
+					site.stores = append(site.stores, storeAt{x.Pos(), x.X})
+				case !calledBytes[x]:
+					site.stores = append(site.stores, storeAt{x.Pos(), nil})
+				}
 			case x.Sel.Name == "Update" || x.Sel.Name == "UpdateChecked":
 				if holder := callChain(x.X); strings.HasSuffix(strings.ToLower(holder), "cfgholder") {
 					kinds[writesByHolder] = true
@@ -510,6 +791,40 @@ func inspectConfigWriter(body ast.Node, inConfig bool) (configWriteSite, map[str
 		sort.Slice(site.saves, func(i, j int) bool { return site.saves[i] < site.saves[j] })
 	}
 	return site, kinds
+}
+
+// assignmentsOf are the assignments to a name that lhs and rhs, an
+// assignment's or a var declaration's two sides, make at pos: one value per
+// name, or one call's results, the i-th to the i-th name. A blank name, and
+// one assigned through a field or an index, is no assignment to a name.
+func assignmentsOf(lhs, rhs []ast.Expr, pos token.Pos) []assignAt {
+	var out []assignAt
+	for i, l := range lhs {
+		id, ok := l.(*ast.Ident)
+		if !ok || id.Name == "_" {
+			continue
+		}
+		switch {
+		case len(rhs) == len(lhs):
+			out = append(out, assignAt{name: id.Name, pos: pos, rhs: rhs[i]})
+		case len(rhs) == 1:
+			out = append(out, assignAt{name: id.Name, pos: pos, rhs: rhs[0], index: i})
+		}
+	}
+	return out
+}
+
+// guardOf is x as a guard (guardAt): an if with no else whose condition is a
+// name alone and whose body ends in a return.
+func guardOf(x *ast.IfStmt) (guardAt, bool) {
+	cond, ok := x.Cond.(*ast.Ident)
+	if !ok || x.Else != nil || len(x.Body.List) == 0 {
+		return guardAt{}, false
+	}
+	if _, returns := x.Body.List[len(x.Body.List)-1].(*ast.ReturnStmt); !returns {
+		return guardAt{}, false
+	}
+	return guardAt{pos: x.Pos(), condPos: x.Cond.Pos(), end: x.End(), cond: cond.Name}, true
 }
 
 // fileWriteCall reports whether call, rendered as chain, writes a file or
@@ -647,6 +962,8 @@ func TestTheConfigWriterSweepReportsEveryShape(t *testing.T) {
 	const src = `package x
 
 import (
+	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 
@@ -763,6 +1080,96 @@ func savesOnlyWhereItsTurnFoundNone(cfgPath string, cfg *config.Config) {
 	}
 	_ = cfg.Save(l)
 }
+
+func discardsWhatItsTurnFound(cfgPath string) {
+	cfg, _ := config.Load(cfgPath)
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	l.Found()
+	_ = cfg.Save(l)
+}
+
+func keepsWhatItsTurnFoundAside(cfgPath string) {
+	cfg, _ := config.Load(cfgPath)
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	found, _ := l.Found()
+	_ = found
+	_ = cfg.Save(l)
+}
+
+func checksWhatItsTurnFoundAndSavesItsOwn(cfgPath string) {
+	cfg, _ := config.Load(cfgPath)
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	if found, ok := l.Found(); !ok || len(found) == 0 {
+		return
+	}
+	_ = cfg.Save(l)
+}
+
+func overwritesWhatItsTurnFound(cfgPath string, stale *config.Config) {
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	cfg, _ := l.LoadFound()
+	cfg = stale
+	_ = cfg.Save(l)
+}
+
+func savesBytesItsTurnDidNotFind(cfgPath string, stale []byte) {
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	found, _ := l.Found()
+	_ = found
+	_ = l.SaveBytes(stale)
+}
+
+func savesBytesMadeFromWhatItsTurnFound(cfgPath string) {
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	found, _ := l.Found()
+	_ = l.SaveBytes(bytes.TrimSpace(found))
+}
+
+func decidesAsBindDoes(cfgPath string) {
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	cfg, _ := l.LoadFound()
+	read, _ := l.Found()
+	cfg.LibraryName = "Bound"
+	_ = cfg.SaveIf(l, func(ctx context.Context) error {
+		now, _ := config.ReadFile(ctx, cfgPath)
+		if !bytes.Equal(now, read) {
+			return context.Canceled
+		}
+		return nil
+	})
+}
+
+func comparesWithItsOwnRead(cfgPath string, cfg *config.Config, asRead []byte) {
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	if configChangedSinceRead(asRead, l) {
+		return
+	}
+	_ = cfg.Save(l)
+}
+
+func listedWithoutItsComparison(cfgPath string, cfg *config.Config) {
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	if _, ok := l.Found(); !ok {
+		return
+	}
+	_ = cfg.Save(l)
+}
+
+func listedButDecidesOnItsTurn(cfgPath string) {
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	cfg, _ := l.LoadFound()
+	_ = cfg.Save(l)
+}
 `
 	sites, _, err := scanConfigWriters("x/x.go", src)
 	if err != nil {
@@ -778,12 +1185,29 @@ func savesOnlyWhereItsTurnFoundNone(cfgPath string, cfg *config.Config) {
 		"x/x.go:statsInItsTurn":                 "config.LockFile",
 		"x/x.go:decidesOnWhatItsTurnFound":      "config.LockFile",
 		"x/x.go:savesOnlyWhereItsTurnFoundNone": "config.LockFile",
+
+		"x/x.go:discardsWhatItsTurnFound":             "config.LockFile",
+		"x/x.go:keepsWhatItsTurnFoundAside":           "config.LockFile",
+		"x/x.go:checksWhatItsTurnFoundAndSavesItsOwn": "config.LockFile",
+		"x/x.go:overwritesWhatItsTurnFound":           "config.LockFile",
+		"x/x.go:savesBytesItsTurnDidNotFind":          "config.LockFile",
+		"x/x.go:savesBytesMadeFromWhatItsTurnFound":   "config.LockFile",
+		"x/x.go:decidesAsBindDoes":                    "config.LockFile",
+		"x/x.go:comparesWithItsOwnRead":               "config.LockFile",
+		"x/x.go:listedWithoutItsComparison":           "config.LockFile",
+		"x/x.go:listedButDecidesOnItsTurn":            "config.LockFile",
 	}
 	excused := map[string]string{
 		"x/x.go:copiesThePathElsewhere": "writes the bundle",
 		"x/x.go:writesAnotherFile":      "writes no config file, and names no config path either",
 	}
-	got := configWriterProblems(sites, named, excused)
+	compared := map[string]string{
+		"x/x.go:comparesWithItsOwnRead":     "configChangedSinceRead",
+		"x/x.go:listedWithoutItsComparison": "configChangedSinceRead",
+		"x/x.go:listedButDecidesOnItsTurn":  "configChangedSinceRead",
+		"x/x.go:goneToo":                    "configChangedSinceRead",
+	}
+	got := configWriterProblems(sites, named, excused, compared)
 	want := []string{
 		"configWriters names x/x.go:gone",
 		"notConfigWriters excuses x/x.go:writesAnotherFile",
@@ -806,6 +1230,14 @@ func savesOnlyWhereItsTurnFoundNone(cfgPath string, cfg *config.Config) {
 		"x/x.go:readsBeforeItsLock saves the config without deciding on what its turn of config.LockFile found",
 		"x/x.go:readsAgainInItsTurn reads the config in its turn of config.LockFile through something other than the turn",
 		"x/x.go:statsInItsTurn reads the config in its turn of config.LockFile through something other than the turn",
+		"x/x.go:discardsWhatItsTurnFound saves a config not derived from what its turn of config.LockFile found",
+		"x/x.go:keepsWhatItsTurnFoundAside saves a config not derived from what its turn of config.LockFile found",
+		"x/x.go:checksWhatItsTurnFoundAndSavesItsOwn saves a config not derived from what its turn of config.LockFile found",
+		"x/x.go:overwritesWhatItsTurnFound saves a config not derived from what its turn of config.LockFile found",
+		"x/x.go:savesBytesItsTurnDidNotFind saves a config not derived from what its turn of config.LockFile found",
+		"x/x.go:listedWithoutItsComparison is listed in comparedSaves, and never asks configChangedSinceRead in its turn",
+		"comparedSaves lists x/x.go:listedButDecidesOnItsTurn, whose saves are made from what its turn found",
+		"comparedSaves lists x/x.go:goneToo, which the sweep no longer finds saving the config itself",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("the sweep reported %d problems, want %d:\n%s", len(got), len(want), strings.Join(got, "\n"))
@@ -826,7 +1258,8 @@ func savesOnlyWhereItsTurnFoundNone(cfgPath string, cfg *config.Config) {
 			t.Errorf("the sweep took %s for a writer of the config", through)
 		}
 	}
-	for _, decided := range []string{"savesNamedWithItsLock", "decidesOnWhatItsTurnFound", "savesOnlyWhereItsTurnFoundNone"} {
+	for _, decided := range []string{"savesNamedWithItsLock", "decidesOnWhatItsTurnFound", "savesOnlyWhereItsTurnFoundNone",
+		"savesBytesMadeFromWhatItsTurnFound", "decidesAsBindDoes", "comparesWithItsOwnRead"} {
 		for _, g := range got {
 			if strings.Contains(g, "x/x.go:"+decided+" ") {
 				t.Errorf("the sweep reported %s, which decides on what its turn found: %s", decided, g)

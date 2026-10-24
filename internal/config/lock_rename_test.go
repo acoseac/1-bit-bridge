@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
@@ -146,6 +147,39 @@ func TestAnUnchangedFileSavesAcrossAFailedRenameAttempt(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(path); !bytes.Contains(got, []byte("libraryName: Mine")) {
 		t.Errorf("the save did not land:\n%s", got)
+	}
+	requireNothingStaged(t, dir)
+}
+
+// TestASaveRenamesNothingPastItsWindow: a save's comparison that answers
+// after the save's window has ended (a read Windows held for longer, a slow
+// mount) ends the save with nothing written, however it answers: the window
+// bounds the rename as well as the comparisons before it. Until B506's fourth
+// round a comparison that answered nil past the window was followed by the
+// rename all the same.
+func TestASaveRenamesNothingPastItsWindow(t *testing.T) {
+	dir := realTempDir(t)
+	const before = "libraryName: Before\n"
+	path := writeConfigFile(t, dir, before)
+	const window = 50 * time.Millisecond
+	t.Cleanup(SetSaveWindowForTest(window))
+	l, err := LockFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Unlock()
+	// The comparison's read, once the turn is taken, answers the file as it
+	// is, unchanged, after the window.
+	t.Cleanup(SetTurnReadForTest(func(p string) ([]byte, error) {
+		time.Sleep(2 * window)
+		return fsutil.ReadAsFile(p)
+	}))
+	err = (&Config{LibraryName: "Mine"}).Save(l)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("a save whose comparison answered past its window = %v, want the window's end", err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != before {
+		t.Errorf("the save renamed past its window:\n%s", got)
 	}
 	requireNothingStaged(t, dir)
 }

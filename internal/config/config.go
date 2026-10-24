@@ -2822,11 +2822,20 @@ func LoadFile(path string) (*Config, []byte, error) {
 	return cfg, data, nil
 }
 
+// bootReads is how many times LoadFileAt reads a config whose name opens
+// another file after a read than before it, before it refuses.
+const bootReads = 3
+
 // LoadFileAt is LoadFile, and the file the name opened for that read, as a
 // turn of the file's lock resolves it (ResolveFile), "" when the name cannot
 // be resolved: what serve tells its live config holder with the bytes
-// (RuntimeConfig.RecordFile). The config's relative paths resolve against
-// the directory Load takes from path, never the target's.
+// (RuntimeConfig.RecordFile). The name is resolved just before the read and
+// just after it, and a read across which the two differ (a link at the name,
+// or on its way, repointed meanwhile) is made again, up to bootReads times in
+// all, so the bytes answered are the file's that the target names; a name
+// that moved across every read is a *NameMovingError. The config's relative
+// paths resolve against the directory Load takes from path, never the
+// target's, whichever read is answered.
 func LoadFileAt(path string) (cfg *Config, raw []byte, target string, err error) {
 	return loadFileAt(path, nil)
 }
@@ -2834,15 +2843,30 @@ func LoadFileAt(path string) (cfg *Config, raw []byte, target string, err error)
 // loadFileAt is LoadFileAt, running afterRead, when it is given, once each
 // read of the file has returned: the window a test repoints a link in.
 func loadFileAt(path string, afterRead func()) (*Config, []byte, string, error) {
-	cfg, raw, err := LoadFile(path)
+	for range bootReads {
+		before := resolvedOrNone(path)
+		cfg, raw, err := LoadFile(path)
+		if err != nil {
+			return nil, nil, "", err
+		}
+		if afterRead != nil {
+			afterRead()
+		}
+		if after := resolvedOrNone(path); after == before {
+			return cfg, raw, after, nil
+		}
+	}
+	return nil, nil, "", &NameMovingError{Path: path, Reads: bootReads}
+}
+
+// resolvedOrNone is the file path's name opens (ResolveFile), "" when it
+// cannot be resolved.
+func resolvedOrNone(path string) string {
+	target, err := ResolveFile(path)
 	if err != nil {
-		return nil, nil, "", err
+		return ""
 	}
-	if afterRead != nil {
-		afterRead()
-	}
-	target, _ := ResolveFile(path)
-	return cfg, raw, target, nil
+	return target
 }
 
 // loadData is Load over the bytes it read from path.

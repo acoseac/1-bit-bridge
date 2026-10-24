@@ -4,11 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
-
-	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // RuntimeConfig is the process-wide holder for the live config
@@ -41,8 +38,9 @@ type RuntimeConfig struct {
 var ErrChangedOutside = errors.New("config: the config file changed outside this holder")
 
 // ChangedOutsideError is Update's refusal of a save over a config file that
-// no longer holds what the holder last read or wrote: another writer saved
-// it since. It names the file and nothing it holds.
+// no longer holds what the holder last read or wrote, another writer saved it
+// since, or of one whose name now opens another file than the one the holder
+// read, a link repointed. It names the file and nothing it holds.
 type ChangedOutsideError struct {
 	// Path is the config file.
 	Path string
@@ -50,29 +48,29 @@ type ChangedOutsideError struct {
 
 func (e *ChangedOutsideError) Error() string {
 	return fmt.Sprintf("%s was changed or removed by another writer since this bridge read it "+
-		"(a bridge command such as library add or init, or an edit), so this change was not saved, "+
-		"and the file keeps that writer's: restart the bridge to load the file, then make the change again", e.Path)
+		"(a bridge command such as library add or init, or an edit), or now opens another file (a link at it repointed), "+
+		"so this change was not saved, and the file keeps what that writer left: restart the bridge to load the file, "+
+		"then make the change again", e.Path)
 }
 
 // Is makes a *ChangedOutsideError match ErrChangedOutside.
 func (e *ChangedOutsideError) Is(target error) bool { return target == ErrChangedOutside }
 
-// RecordFile tells the holder raw, the bytes the config file at path held
-// when the live snapshot was read from it (LoadFile), and the file that name
-// opens now, as a turn resolves it: its first Update then saves only into
-// that file, and only while it still holds them. path is the name the
-// holder's saves give Update; a link at its last element repointed since
-// (a dotfiles restow, a home-manager switch) names a file the holder never
-// read, which Update refuses. A holder told nothing saves its first Update
-// over whatever the file holds, and records from then on.
-func (r *RuntimeConfig) RecordFile(path string, raw []byte) {
+// RecordFile tells the holder raw, the bytes the config file held when the
+// live snapshot was read from it, and target, the file its name opened for
+// that read, resolved before and after it (LoadFileAt), "" when the name
+// could not be resolved: its first Update then saves only into that file,
+// and only while it still holds them. target is taken as it is, never
+// resolved again here: a link at the name repointed between the read and
+// this call (a dotfiles restow, a home-manager switch during serve's boot)
+// would otherwise have the holder record a file it never read. A name that
+// opens another file than target at a save, the link repointed since, is
+// refused by Update. A holder told nothing saves its first Update over
+// whatever the file holds, and records from then on.
+func (r *RuntimeConfig) RecordFile(target string, raw []byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.file, r.fileKnown = append([]byte(nil), raw...), true
-	r.target = ""
-	if dir, name, err := fsutil.ResolveParent(path); err == nil {
-		r.target = filepath.Join(dir, name)
-	}
+	r.file, r.fileKnown, r.target = append([]byte(nil), raw...), true, target
 }
 
 // Changed returns a channel that the next Store closes, the Store an
@@ -153,7 +151,10 @@ func (r *RuntimeConfig) Clone() *Config {
 // library add, init, a restore or an edit beside the running bridge), nothing
 // is saved or stored and a *ChangedOutsideError says so: the file keeps that
 // writer's change, which the bridge loads when it next starts, and nothing
-// reloads it now. A lock another writer holds past LockWait is a *BusyError.
+// reloads it now. So does a name the turn finds repointed, a *NameMovedError
+// (the link moved while the save waited for the lock, before fn's check, or
+// while the save staged), and nothing is tried again on the file the name
+// opens now. A lock another writer holds past LockWait is a *BusyError.
 // Either refusal comes before fn runs, so a caller that changes something
 // besides the config in fn (the console's root changes change the library
 // index there) changes nothing when the save is refused before it, and such a
@@ -190,7 +191,7 @@ func (r *RuntimeConfig) UpdateChecked(path string, fn func(next *Config, check f
 	}
 	l, err := LockFile(path)
 	if err != nil {
-		return err
+		return changedOutside(path, err)
 	}
 	defer l.Unlock()
 	found, ok := l.Found()
@@ -198,27 +199,30 @@ func (r *RuntimeConfig) UpdateChecked(path string, fn func(next *Config, check f
 		return &ChangedOutsideError{Path: path}
 	}
 	next := Clone(r.Load())
-	check := func() error {
-		if err := l.Check(); errors.Is(err, ErrChangedInTurn) {
-			return &ChangedOutsideError{Path: path}
-		} else if err != nil {
-			return err
-		}
-		return nil
-	}
+	check := func() error { return changedOutside(path, l.Check()) }
 	if err := fn(next, check); err != nil {
 		return err
 	}
 	written, err := next.save(l, nil)
-	if errors.Is(err, ErrChangedInTurn) {
-		return &ChangedOutsideError{Path: path}
-	}
 	if err != nil {
-		return err
+		return changedOutside(path, err)
 	}
 	r.file, r.fileKnown, r.target = written, true, l.target
 	r.Store(next)
 	return nil
+}
+
+// changedOutside is err, a turn's answer to the holder's save of the config
+// file at path, as the holder says it: a file another writer changed in the
+// turn (ErrChangedInTurn) and a name that opens another file than the turn
+// locked (ErrNameMoved), whether found when the turn is taken, at a check or
+// at the save's rename, are each a *ChangedOutsideError; any other error is
+// returned as it is.
+func changedOutside(path string, err error) error {
+	if errors.Is(err, ErrChangedInTurn) || errors.Is(err, ErrNameMoved) {
+		return &ChangedOutsideError{Path: path}
+	}
+	return err
 }
 
 // Clone returns a deep clone of cfg. Nil input returns nil.

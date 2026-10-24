@@ -28,8 +28,16 @@ type restorableBox struct {
 	live  map[string][]byte
 }
 
-// newRestorableBox lays out restorableBox in a directory of its own.
+// newRestorableBox lays out restorableBox in a directory of its own, the box
+// running another player identity than the snapshot's, with a queue.
 func newRestorableBox(t *testing.T) *restorableBox {
+	t.Helper()
+	return newRestorableBoxOf(t, boxPlayerUUID, true)
+}
+
+// newRestorableBoxOf is newRestorableBox whose box runs the player identity
+// liveUUID, with a queue for it when withQueue is set.
+func newRestorableBoxOf(t *testing.T, liveUUID string, withQueue bool) *restorableBox {
 	t.Helper()
 	reservationStorage(t)
 	dir := t.TempDir()
@@ -46,17 +54,21 @@ func newRestorableBox(t *testing.T) *restorableBox {
 		src.ServerCert: []byte("live cert"),
 		src.ServerKey:  []byte("live key"),
 		src.BridgeYAML: []byte("libraryRoots:\n  - /live\n"),
-		src.PlayerUUID: []byte(boxPlayerUUID + "\n"),
+		src.PlayerUUID: []byte(liveUUID + "\n"),
 	} {
 		if err := os.WriteFile(p, data, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	putMark(t, dir, boxPlayerUUID, 20000, 40000)
-	seedDestinationQueue(t, dir, boxPlayerUUID, 2)
+	putMark(t, dir, liveUUID, 20000, 40000)
+	written := []string{src.TokensJSON, src.ServerCert, src.ServerKey, src.BridgeYAML, src.PlayerUUID,
+		filepath.Join(dir, engine.ReservationFileName)}
+	if withQueue {
+		seedDestinationQueue(t, dir, liveUUID, 2)
+		written = append(written, b.queue)
+	}
 	b.live = moveOnLiveDatabase(t, src.ManifestDB)
-	for _, p := range []string{src.TokensJSON, src.ServerCert, src.ServerKey, src.BridgeYAML, src.PlayerUUID,
-		filepath.Join(dir, engine.ReservationFileName), b.queue} {
+	for _, p := range written {
 		b.live[p] = readBytes(t, p)
 	}
 	b.targets = backup.Targets{
@@ -235,5 +247,68 @@ func TestARestoreLeavesAConfigChangedInItsTurn(t *testing.T) {
 	}
 	if pathExists(t, b.queue) {
 		t.Error("after the second restore the box's queue for its replaced identity is still there")
+	}
+}
+
+// refusedLate restores b's snapshot with an edit landing just before its
+// bridge.yaml's own write, after the files before it were restored, and
+// returns the refusal, failing the test unless it is the late one and the
+// files before bridge.yaml were restored.
+func refusedLate(t *testing.T, b *restorableBox) string {
+	t.Helper()
+	opts := backup.WithBeforeConfigForTest(backup.RestoreOptions{Random: bytes.NewReader([]byte{0, 0, 7})}, func() {
+		edit(t, b.src.BridgeYAML)
+	})
+	err := backup.RestoreWithOptions(b.snap, b.targets, opts)
+	if err == nil || !strings.Contains(err.Error(), "run the restore again") {
+		t.Fatalf("a restore over a config changed in its turn = %v, want the late refusal", err)
+	}
+	if got, want := readBytes(t, b.src.TokensJSON), readBytes(t, filepath.Join(b.snap, "tokens.json")); !bytes.Equal(got, want) {
+		t.Fatalf("premise: the files before bridge.yaml were not restored (tokens.json holds %q)", got)
+	}
+	return err.Error()
+}
+
+// TestALateRefusalDoesNotSayAKeptQueueWent: a restore of the identity the box
+// already runs keeps the box's queue, and its late refusal, which names what
+// it restored, does not say the queue went: the queue is there, as it was.
+// Until B506's fourth round the refusal said the queue was let go whatever
+// the restore had done with it.
+func TestALateRefusalDoesNotSayAKeptQueueWent(t *testing.T) {
+	b := newRestorableBoxOf(t, snapshotPlayerUUID, true)
+	msg := refusedLate(t, b)
+	if !strings.Contains(msg, backup.PlayerUUIDFileName) {
+		t.Errorf("the late refusal %q does not name the player's identity it restored", msg)
+	}
+	if strings.Contains(msg, "queue let go") || strings.Contains(msg, "discarded") {
+		t.Errorf("the late refusal %q says the queue went, which the restore kept", msg)
+	}
+	if got := readBytes(t, b.queue); !bytes.Equal(got, b.live[b.queue]) {
+		t.Errorf("the restore of the box's own identity changed its queue:\n%s", got)
+	}
+}
+
+// TestALateRefusalSaysAReplacedIdentitysQueueWent: a restore that replaces
+// the box's identity discards the queue the box kept for it, and its late
+// refusal says so; the queue is gone.
+func TestALateRefusalSaysAReplacedIdentitysQueueWent(t *testing.T) {
+	b := newRestorableBox(t)
+	msg := refusedLate(t, b)
+	if !strings.Contains(msg, "queue let go") {
+		t.Errorf("the late refusal %q does not say the replaced identity's queue was let go", msg)
+	}
+	if pathExists(t, b.queue) {
+		t.Error("the restore that replaced the identity left its queue")
+	}
+}
+
+// TestALateRefusalClaimsNoQueueWhereThereWasNone: a restore that replaces the
+// box's identity where the box kept no queue discards nothing, and its late
+// refusal says nothing of a queue.
+func TestALateRefusalClaimsNoQueueWhereThereWasNone(t *testing.T) {
+	b := newRestorableBoxOf(t, boxPlayerUUID, false)
+	msg := refusedLate(t, b)
+	if strings.Contains(msg, "queue let go") || strings.Contains(msg, "discarded") {
+		t.Errorf("the late refusal %q says a queue went, where there was none", msg)
 	}
 }

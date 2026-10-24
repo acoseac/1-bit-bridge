@@ -103,8 +103,8 @@ func loadCLIConfig(explicit string) (*config.Config, string, error) {
 }
 
 // loadCLIConfigFile is loadCLIConfig, and the bytes the config was read
-// from (config.LoadFile): serve hands them to its live config holder, whose
-// console saves write only over a file that still holds them.
+// from (config.LoadFile): a restore compares the config with them before
+// its first write (backup.RestoreOptions.ConfigAsRead).
 func loadCLIConfigFile(explicit string) (*config.Config, string, []byte, error) {
 	path, ok := resolveConfigPath(explicit)
 	if !ok {
@@ -115,4 +115,22 @@ func loadCLIConfigFile(explicit string) (*config.Config, string, []byte, error) 
 		return nil, path, nil, fmt.Errorf("load %s: %w", path, err)
 	}
 	return cfg, path, raw, nil
+}
+
+// loadServeConfigFile is loadCLIConfigFile for serve's boot read, and the
+// file the config's name opened for it, resolved just before the read and
+// just after it (config.LoadFileAt): serve tells its live holder that file
+// with the bytes, and the holder's console saves write only into it, and
+// only over those bytes. A name that opens another file after each read
+// than before it, a link being repointed, is refused.
+func loadServeConfigFile(explicit string) (cfg *config.Config, path string, raw []byte, target string, err error) {
+	path, ok := resolveConfigPath(explicit)
+	if !ok {
+		return nil, path, nil, "", errConfigNotFound(explicit)
+	}
+	cfg, raw, target, err = config.LoadFileAt(path)
+	if err != nil {
+		return nil, path, nil, "", fmt.Errorf("load %s: %w", path, err)
+	}
+	return cfg, path, raw, target, nil
 }

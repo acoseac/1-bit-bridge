@@ -27,16 +27,24 @@ var ErrDanglingLink = errors.New("a symbolic link that leads to no file")
 // relative one is resolved from the working directory, by the directory's
 // own links. On Windows the OS takes a `..` by the name alone, before any
 // link is followed (Win32 normalises a path before the filesystem sees it),
-// so the directory is filepath.Abs's, which is that same normalisation; a
-// link in it is left as it is, since opening through it reaches the same
-// directory.
+// so the name is filepath.Abs's, which is that same normalisation, and the
+// directory is then the one the OS opens for it, named by its handle
+// (ResolveLinks: GetFinalPathNameByHandle, the `\\?\` prefix taken off),
+// through every junction, mounted folder and symbolic link on its way: two
+// names of one directory answer one spelling, and a junction repointed
+// answers the directory it leads to now. A directory that stays a link
+// (ResolveLinks's fallback ends at one) is refused, never answered as itself.
 //
 // A last element that is a symbolic link is followed to the file it leads
-// to (filepath.EvalSymlinks of the whole path), and that file's directory
-// and own name are answered: a lock beside the answer sits beside the target
-// and is named after it, and a file renamed onto the answer replaces the
-// target and leaves the link. One that leads to no file is refused, an
-// *fs.PathError naming path and wrapping ErrDanglingLink.
+// to, as the OS opens it (ResolveLinks: on unix filepath.EvalSymlinks of the
+// whole path; on Windows the handle's name, which a junction on the way does
+// not stop, where EvalSymlinks refuses a junction inside a path with
+// ENOTDIR), and that file's directory and own name are answered: a lock
+// beside the answer sits beside the target and is named after it, and a file
+// renamed onto the answer replaces the target and leaves the link. One that
+// leads to no file is refused, an *fs.PathError naming path and wrapping
+// ErrDanglingLink; any other failure to follow it is an error, never the
+// link answered as itself.
 //
 // Directories that do not exist yet (a config dir bridge init is about to
 // make) are answered through their nearest ancestor that does, resolved as
@@ -78,7 +86,7 @@ func followLast(path, dir, name string) (string, string, error) {
 	case info.Mode()&fs.ModeSymlink == 0:
 		return dir, name, nil
 	}
-	target, err := filepath.EvalSymlinks(full)
+	target, err := ResolveLinks(full)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return "", "", &fs.PathError{Op: "resolve", Path: path, Err: ErrDanglingLink}

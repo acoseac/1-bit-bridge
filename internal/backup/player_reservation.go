@@ -184,25 +184,31 @@ func (o RestoreOptions) randomSource() io.Reader {
 }
 
 // discardReplacedPlayerQueue removes the destination's queue only when its
-// identity changes. The caller holds the data-dir lock and has already made
-// the raised reservation durable. ProbeDurable actually fsyncs the directory
-// chain: the second call commits the unlink, even when a previous interrupted
-// attempt already removed the file. A failed barrier must stop before UUID.
-func discardReplacedPlayerQueue(target, id string) error {
+// identity changes, and answers whether it removed one: none when the
+// identity stays, or when there was no queue to remove (a box whose player
+// kept none, or an interrupted attempt that already removed it). The caller
+// holds the data-dir lock and has already made the raised reservation
+// durable. ProbeDurable actually fsyncs the directory chain: the second call
+// commits the unlink, even when a previous interrupted attempt already
+// removed the file. A failed barrier must stop before UUID.
+func discardReplacedPlayerQueue(target, id string) (discarded bool, err error) {
 	old, err := config.ReadPlayerUUIDFile(target)
 	if err == nil && old == id {
-		return nil
+		return false, nil
 	}
 	dir := filepath.Dir(target)
 	path := filepath.Join(dir, "player-queue.json")
 	if err := atomicwrite.ProbeDurable(dir, path); err != nil {
-		return fmt.Errorf("restore: check player queue discard: %w", err)
+		return false, fmt.Errorf("restore: check player queue discard: %w", err)
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("restore: discard previous player's queue: %w", err)
+	switch err := os.Remove(path); {
+	case err == nil:
+		discarded = true
+	case !errors.Is(err, os.ErrNotExist):
+		return false, fmt.Errorf("restore: discard previous player's queue: %w", err)
 	}
 	if err := atomicwrite.ProbeDurable(dir, path); err != nil {
-		return fmt.Errorf("restore: make player queue discard durable: %w", err)
+		return false, fmt.Errorf("restore: make player queue discard durable: %w", err)
 	}
-	return nil
+	return discarded, nil
 }

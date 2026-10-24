@@ -2956,10 +2956,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 			}
 		}
 	}
-	// The bytes the config is read from are kept for the live holder
-	// (RecordFile, below): a console save then writes only over a file that
-	// still holds them, and refuses one another writer changed since.
-	cfg, cfgFile, cfgRead, err := loadCLIConfigFile(*configPath)
+	// The bytes the config is read from, and the file its name opened for
+	// that read, resolved at the read (config.LoadFileAt), are kept for the
+	// live holder (RecordFile, below): a console save then writes only into
+	// that file, only over a file that still holds them, and refuses one
+	// another writer changed since, or a name repointed to another file.
+	cfg, cfgFile, cfgRead, cfgTarget, err := loadServeConfigFile(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return 2
@@ -3976,12 +3978,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		WithAtlasMeta(cfg.Atlas.Enabled, cfg.Atlas.EffectiveMetaTTL(), manifestStore).
 		WithPlaylistCoverStore(manifestStore).
 		WithDemoMode(cfg.Demo.Enabled)
-	// The live holder is told the bytes its snapshot was read from, before
-	// anything can save through it: a console save then writes only over a
-	// file that still holds them, or that it wrote itself, and refuses one
-	// another writer changed meanwhile (config.RuntimeConfig.Update, backlog
-	// B506).
-	apiSrv.ConfigHolder().RecordFile(*configPath, cfgRead)
+	// The live holder is told the bytes its snapshot was read from, and the
+	// file the config's name opened for that read, resolved at the read and
+	// not here, before anything can save through it: a console save then
+	// writes only into that file, only over a file that still holds those
+	// bytes or that it wrote itself, and refuses one another writer changed
+	// meanwhile, or a name a link repointed since (config.RuntimeConfig.Update,
+	// backlog B506; resolved here, a link repointed during the boot above
+	// would have the holder record a file serve never read).
+	apiSrv.ConfigHolder().RecordFile(cfgTarget, cfgRead)
 	// Demo mode (read-only public demo bridge): the three user-data
 	// stores + the device registrar are deliberately NOT wired, so
 	// PUT /v1/playlists/{id}, DELETE /v1/playlists/{id}, PUT /v1/favorites
