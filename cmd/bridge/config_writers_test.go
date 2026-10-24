@@ -836,6 +836,17 @@ func inspectConfigWriter(body ast.Node, inConfig bool) (configWriteSite, map[str
 		switch x := n.(type) {
 		case *ast.AssignStmt:
 			site.assigns = append(site.assigns, assignmentsOf(x.Lhs, x.Rhs, x.Pos())...)
+		case *ast.RangeStmt:
+			// A range assigns its key and value on every pass, as an
+			// assignment does, so a range cannot move a nil-checked turn
+			// unseen (round 6's review).
+			var lhs []ast.Expr
+			for _, e := range []ast.Expr{x.Key, x.Value} {
+				if e != nil {
+					lhs = append(lhs, e)
+				}
+			}
+			site.assigns = append(site.assigns, assignmentsOf(lhs, []ast.Expr{x.X}, x.Pos())...)
 		case *ast.ValueSpec:
 			lhs := make([]ast.Expr, len(x.Names))
 			for i, id := range x.Names {
@@ -1597,6 +1608,23 @@ func reassignsItsNilCheckedTurnBeforeItSaves(cfgPath string, cfg *config.Config,
 	_ = cfg.Save(t)
 }
 
+func reassignsItsNilCheckedTurnInARange(cfgPath string, cfg *config.Config, asRead []byte, disabled bool) {
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	t := l
+	if disabled {
+		t = nil
+	}
+	if t != nil {
+		if err := configStillAsRead(t, asRead); err != nil {
+			return
+		}
+	}
+	for _, t = range []*config.FileLock{l} {
+	}
+	_ = cfg.Save(t)
+}
+
 func savesThroughAnotherNameAfterItsNilCheck(cfgPath string, cfg *config.Config, asRead []byte) {
 	l, _ := config.LockFile(cfgPath)
 	defer l.Unlock()
@@ -1764,6 +1792,7 @@ func reassignsItsNilCheckedTurnInAClosure(cfgPath string, cfg *config.Config, as
 		"x/x.go:comparesUnderAnOptionalAliasAndSavesThroughItsTurn": "config.LockFile",
 		"x/x.go:comparesUnderANilableAliasAndSavesThroughItsTurn":   "config.LockFile",
 		"x/x.go:reassignsItsNilCheckedTurnBeforeItSaves":            "config.LockFile",
+		"x/x.go:reassignsItsNilCheckedTurnInARange":                 "config.LockFile",
 		"x/x.go:savesThroughAnotherNameAfterItsNilCheck":            "config.LockFile",
 		"x/x.go:savesIfThroughAnotherNameAfterItsNilCheck":          "config.LockFile",
 		"x/x.go:savesBytesThroughAnotherNameAfterItsNilCheck":       "config.LockFile",
@@ -1797,6 +1826,7 @@ func reassignsItsNilCheckedTurnInAClosure(cfgPath string, cfg *config.Config, as
 		"x/x.go:comparesUnderAnOptionalAliasAndSavesThroughItsTurn": "configStillAsRead",
 		"x/x.go:comparesUnderANilableAliasAndSavesThroughItsTurn":   "configStillAsRead",
 		"x/x.go:reassignsItsNilCheckedTurnBeforeItSaves":            "configStillAsRead",
+		"x/x.go:reassignsItsNilCheckedTurnInARange":                 "configStillAsRead",
 		"x/x.go:savesThroughAnotherNameAfterItsNilCheck":            "configStillAsRead",
 		"x/x.go:savesIfThroughAnotherNameAfterItsNilCheck":          "configStillAsRead",
 		"x/x.go:savesBytesThroughAnotherNameAfterItsNilCheck":       "configStillAsRead",
@@ -1850,6 +1880,7 @@ func reassignsItsNilCheckedTurnInAClosure(cfgPath string, cfg *config.Config, as
 		"x/x.go:comparesUnderAnOptionalAliasAndSavesThroughItsTurn is listed in comparedSaves, and never refuses its save on configStillAsRead",
 		"x/x.go:comparesUnderANilableAliasAndSavesThroughItsTurn is listed in comparedSaves, and never refuses its save on configStillAsRead",
 		"x/x.go:reassignsItsNilCheckedTurnBeforeItSaves is listed in comparedSaves, and never refuses its save on configStillAsRead",
+		"x/x.go:reassignsItsNilCheckedTurnInARange is listed in comparedSaves, and never refuses its save on configStillAsRead",
 		"x/x.go:savesThroughAnotherNameAfterItsNilCheck is listed in comparedSaves, and never refuses its save on configStillAsRead",
 		"x/x.go:savesIfThroughAnotherNameAfterItsNilCheck is listed in comparedSaves, and never refuses its save on configStillAsRead",
 		"x/x.go:savesBytesThroughAnotherNameAfterItsNilCheck is listed in comparedSaves, and never refuses its save on configStillAsRead",
