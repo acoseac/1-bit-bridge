@@ -7,9 +7,10 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"os"
 	"sync"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // The queue file's bounds and the writer's timing.
@@ -199,9 +200,13 @@ func decodeQueue(data []byte) (*queueFile, []entry, error) {
 }
 
 // readLimited reads at most limit+1 bytes of path, so a file past the cap
-// is known as one without reading it whole.
+// is known as one without reading it whole. It opens the path as the routes
+// that serve a file's bytes do (fsutil.OpenAsFile): without waiting, and
+// reading only a file, so a named pipe, a directory or a device at the path
+// is refused at once, a bad file the engine moves aside, where a plain open
+// of a named pipe waited for a writer and held New.
 func readLimited(path string, limit int64) ([]byte, error) {
-	f, err := os.Open(path)
+	f, _, err := fsutil.OpenAsFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -276,11 +281,18 @@ type writer struct {
 
 	kick chan struct{}
 	stop chan struct{}
+	// stopOnce closes stop: at the shutdown's flush, or as the owner leaves
+	// by a panic (Engine.abandon).
+	stopOnce sync.Once
 }
 
 func newWriter(e *Engine) *writer {
 	return &writer{e: e, kick: make(chan struct{}, 1), stop: make(chan struct{})}
 }
+
+// stopWriting asks the writer to write the newest revision once more, if it
+// is not written, and exit.
+func (w *writer) stopWriting() { w.stopOnce.Do(func() { close(w.stop) }) }
 
 // update hands the writer a newer revision.
 func (w *writer) update(p *payload) {
@@ -322,9 +334,12 @@ func (w *writer) due() (*payload, time.Time) {
 }
 
 // run is the writer goroutine. Asked to stop, it writes the newest
-// revision once more if it is not written, and exits.
+// revision once more if it is not written, and exits. A panic in a write is
+// that write's failure (attempt); one anywhere else on the goroutine ends
+// the writer (ended).
 func (w *writer) run() {
 	var t timer
+	defer w.ended()
 	defer func() {
 		if t != nil {
 			t.Stop()
@@ -372,15 +387,48 @@ func (w *writer) writtenRev() uint64 {
 	return w.written
 }
 
+// ended is the writer goroutine's last word when it leaves by a panic, which
+// it recovers and logs: nothing writes the queue file from then on, so the
+// state stays dirty, and the owner is told so, as of a write that failed,
+// and that the writer has exited, so its shutdown waits for no flush. A
+// writer that returned has told the owner itself.
+func (w *writer) ended() {
+	p := recover()
+	if p == nil {
+		return
+	}
+	w.e.logPanic("the queue file's writer", p)
+	w.mu.Lock()
+	w.failures++
+	failures, written := w.failures, w.written
+	w.mu.Unlock()
+	w.e.post(msgPersisted{written: written, err: errors.New("the queue file's writer panicked and has stopped: nothing writes the queue file until the engine starts again; the bridge's log has why"), failures: failures})
+	w.e.post(msgWriterExited{})
+}
+
+// attempt encodes p and writes it. A panic in either is recovered and
+// logged, and is the write's failure: the state stays dirty, and the write
+// is retried after a backoff, as after any failed write.
+func (w *writer) attempt(p *payload) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			w.e.logPanic("the queue file's writer", r)
+			err = errors.New("the queue file write panicked; the bridge's log has why")
+		}
+	}()
+	data, err := p.encode()
+	if err != nil {
+		return err
+	}
+	return w.e.sm.writeQueue(w.e.cfg.QueuePath, data)
+}
+
 // write writes p and tells the owner how it went: a failure keeps the
 // state dirty and is retried after a backoff, logged once until a write
 // lands.
 func (w *writer) write(p *payload) {
 	began := w.e.clk.Now()
-	data, err := p.encode()
-	if err == nil {
-		err = w.e.sm.writeQueue(w.e.cfg.QueuePath, data)
-	}
+	err := w.attempt(p)
 	w.mu.Lock()
 	recovered := false
 	if err == nil {

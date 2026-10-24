@@ -35,6 +35,12 @@
 //     until the caller asks for Recover; silence never counts as content;
 //     a frame is never written twice or skipped, a release and a reopen
 //     included; and the device is closed once per open.
+//   - A panic on a sink's writer is recovered there, logged once
+//     (SinkConfig.Log), and ends the sink typed (ReasonPanicked): the device
+//     closed, and whatever waited on the writer answered. A node a panic
+//     comes to between its open and a sink taking it (the kernel's setup,
+//     the check after open) is closed before the panic goes on to its
+//     caller, or, at a reopen, ends the sink the same way.
 //   - No buffer is ever shared with the kernel past a call: nothing is
 //     mmapped, and each ioctl's argument is kept alive across the call
 //     (ioctlOn).

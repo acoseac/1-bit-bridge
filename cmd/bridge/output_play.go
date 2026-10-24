@@ -37,11 +37,14 @@ const (
 )
 
 // playBackend is what the harness and serve's player play through: the
-// player's backend (playback.Backend), or a test's stand-in, and the wait
-// for its goroutines their stops join.
+// player's backend (playback.Backend), or a test's stand-in, the wait for
+// its goroutines their stops join, and the release of every session it
+// holds, which serve's player asks for once its engine's Run has ended in a
+// panic (playback.Backend.ReleaseAll).
 type playBackend interface {
 	engine.Backend
 	Wait(ctx context.Context) error
+	ReleaseAll(ctx context.Context) error
 }
 
 // outputPlayEnv is what `bridge output play` takes from the host, so a

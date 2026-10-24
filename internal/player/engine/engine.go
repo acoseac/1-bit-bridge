@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -136,7 +138,10 @@ type Engine struct {
 	cmds chan *command
 	msgs chan any
 	done chan struct{}
-	ran  atomic.Bool
+	// doneOnce closes done: once Run's shutdown ends, or as the owner leaves
+	// by a panic (abandon).
+	doneOnce sync.Once
+	ran      atomic.Bool
 
 	// life is cancelled as Run ends; every backend call's context is
 	// derived from it.
@@ -337,6 +342,14 @@ func notDurable(path, dataDir string, err error) error {
 // and fsynced, and an fsync cannot be cancelled, so a filesystem that hangs
 // there holds Run past that bound. Run returns once, and nil; a second Run
 // is an error.
+//
+// A panic on the owner is not recovered here: it goes on to Run's caller,
+// and its shutdown never runs. On its way out the engine ends what the
+// shutdown would have (abandon): every backend call's context ends, the
+// queue file's writer writes the newest revision it was handed and exits,
+// and Done closes, so nothing waits on an owner that is gone. The session
+// the backend plays is not released: that is the caller's, through the
+// backend (serve's player has it release every session it holds).
 func (e *Engine) Run(ctx context.Context) error {
 	if !e.ran.CompareAndSwap(false, true) {
 		return errors.New("player: Run called twice")
@@ -345,7 +358,8 @@ func (e *Engine) Run(ctx context.Context) error {
 	return nil
 }
 
-// Done is closed once Run has returned, or is about to.
+// Done is closed once Run has returned, or is about to, a return or a panic
+// on the owner.
 func (e *Engine) Done() <-chan struct{} { return e.done }
 
 // Snapshot is the state after the last change. It never waits on the
@@ -636,7 +650,25 @@ func (e *Engine) post(m any) {
 	}
 }
 
-// spawn runs f on a goroutine the engine counts until it returns.
+// panicMessage is the line a panic the engine recovers is logged with.
+const panicMessage = "player: a panic was recovered in the engine; what panicked fails as it would on an error"
+
+// logPanic logs a panic recovered on one of the engine's goroutines, once:
+// where, its stack, and its value only when it is the runtime's own error,
+// which carries nothing the engine was handed (a value code panics with
+// could quote a path).
+func (e *Engine) logPanic(where string, r any) {
+	attrs := []any{"where", where, "stack", string(debug.Stack())}
+	if rerr, ok := r.(runtime.Error); ok {
+		attrs = append(attrs, "error", rerr.Error())
+	}
+	e.log.Error(panicMessage, attrs...)
+}
+
+// spawn runs f on a goroutine the engine counts until it returns. Each f
+// recovers its own work's panic as that work's failure: a backend call's
+// (callBackend), a reservation write's (reserve), the queue file writer's
+// (writer.run, writer.attempt).
 func (e *Engine) spawn(f func()) {
 	e.wg.Add(1)
 	e.live.Add(1)

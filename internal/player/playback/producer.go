@@ -69,10 +69,12 @@ func (s *session) produce() {
 // callers make themselves from now on, and tells Start, when its first
 // frames never reached the sink.
 func (s *session) producerExit() {
-	s.mu.Lock()
+	l := s.hold()
+	defer l.release()
+	l.lock()
 	s.producerDone = true
 	s.serveLocked()
-	s.mu.Unlock()
+	l.unlock()
 	s.signalFirst(errors.New("player backend: the session stopped before its first frames reached the sink"))
 	wake(s.wakeR)
 }
@@ -90,7 +92,7 @@ func (s *session) next() step {
 			return step{kind: stepWrite, o: w}
 		}
 		s.writing = nil
-		closeOcc(w)
+		s.closeOcc(w)
 	}
 	if s.decodeErr != nil {
 		return step{kind: stepFinish}
@@ -179,7 +181,7 @@ func (s *session) writeChunk(o *occ, samples []int32, packed []byte) bool {
 		if s.writing == o && !o.dropped {
 			o.eof = true
 			s.writing = nil
-			closeOcc(o)
+			s.closeOcc(o)
 		}
 		s.mu.Unlock()
 		wake(s.wakeR)
@@ -202,7 +204,7 @@ func (s *session) failDecode(o *occ, err error) {
 	s.decodeErr = &engine.Fault{Reason: engine.ReasonDecodeFailed, Occurrence: o.id, Frames: o.written,
 		Detail: fmt.Sprintf("decoding occurrence %d failed after %d frames: %v", o.id, o.written, err)}
 	s.writing = nil
-	closeOcc(o)
+	s.closeOcc(o)
 }
 
 // writeAll hands b, o's packed frames, to o's sink. A cut that needs the
@@ -211,15 +213,17 @@ func (s *session) failDecode(o *occ, err error) {
 // sink stops taking frames (an xrun, an end) or the session ends.
 func (s *session) writeAll(o *occ, b []byte) bool {
 	fb := int64(format.PackedBytes(alsapcm.Channels, o.out.transport.Format))
+	l := s.hold()
+	defer l.release()
 	for len(b) > 0 {
-		s.mu.Lock()
+		l.lock()
 		s.serveLocked()
 		if o.dropped || s.writing != o {
-			s.mu.Unlock()
+			l.unlock()
 			return true
 		}
 		if s.ctx.Err() != nil {
-			s.mu.Unlock()
+			l.unlock()
 			return false
 		}
 		if s.wctx == nil || s.wctx.Err() != nil {
@@ -227,13 +231,13 @@ func (s *session) writeAll(o *occ, b []byte) bool {
 		}
 		wctx, out := s.wctx, o.out
 		s.inWrite = true
-		s.mu.Unlock()
+		l.unlock()
 		n, err := out.sink.Write(wctx, b)
-		s.mu.Lock()
+		l.lock()
 		s.inWrite = false
 		o.written += int64(n)
 		out.submitted += int64(n)
-		s.mu.Unlock()
+		l.unlock()
 		if n > 0 {
 			s.signalFirst(nil)
 			wake(s.wakeR)
@@ -258,9 +262,11 @@ func (s *session) writeAll(o *occ, b []byte) bool {
 // Resume, so a device another process took meanwhile refuses the resume.
 // It reports false when the session cannot go on.
 func (s *session) transition(o *occ) bool {
-	s.mu.Lock()
+	l := s.hold()
+	defer l.release()
+	l.lock()
 	old := s.cur
-	s.mu.Unlock()
+	l.unlock()
 	if old != nil {
 		if !old.drained {
 			if err := s.drainOutput(old); err != nil {
@@ -268,9 +274,9 @@ func (s *session) transition(o *occ) bool {
 				// the session ends.
 				return false
 			}
-			s.mu.Lock()
+			l.lock()
 			old.drained = true
-			s.mu.Unlock()
+			l.unlock()
 			wake(s.wakeR)
 			s.b.transportDrained()
 		}
@@ -278,7 +284,7 @@ func (s *session) transition(o *occ) bool {
 	}
 	var out *output
 	for out == nil {
-		s.mu.Lock()
+		l.lock()
 		s.serveLocked()
 		if s.cur == old {
 			s.cur = nil
@@ -287,12 +293,12 @@ func (s *session) transition(o *occ) bool {
 		// no device reports its release only then (reportStep).
 		switch {
 		case s.ctx.Err() != nil:
-			s.mu.Unlock()
+			l.unlock()
 			return false
 		case o.dropped:
 			stale := s.handed
 			s.between, s.handed = nil, nil
-			s.mu.Unlock()
+			l.unlock()
 			wake(s.wakeR)
 			if stale != nil {
 				s.closeOutput(stale)
@@ -300,24 +306,24 @@ func (s *session) transition(o *occ) bool {
 			return true
 		case s.handed != nil:
 			out, s.handed, s.between = s.handed, nil, nil
-			s.mu.Unlock()
+			l.unlock()
 		case s.paused:
 			s.between = o
-			s.mu.Unlock()
+			l.unlock()
 			wake(s.wakeR)
 			if !s.waitWake(nil) {
 				return false
 			}
 		default:
 			s.between = nil
-			s.mu.Unlock()
+			l.unlock()
 			var err error
 			if out, err = s.openOutput(s.ctx, o); err != nil {
 				return s.openFailed(o, err)
 			}
 		}
 	}
-	// The sink is the session's from here (s.outs: the teardown closes it,
+	// The sink is already the session's (s.outs: the teardown closes it,
 	// after every file), and it becomes the current one once it is in the
 	// session's pause state. A pause that came while it opened found no
 	// device to pause: the sink takes it before a frame is written to it, and
@@ -327,39 +333,38 @@ func (s *session) transition(o *occ) bool {
 	// no command, and a Release must not wait on it. Until the sink is
 	// current, a pause or a resume meanwhile is one with no device, which the
 	// next turn follows.
-	s.mu.Lock()
-	s.outs = append(s.outs, out)
+	l.lock()
 	sinkPaused := false
 	for {
 		switch {
 		case s.ctx.Err() != nil:
-			s.mu.Unlock()
+			l.unlock()
 			return false
 		case o.dropped:
-			s.mu.Unlock()
+			l.unlock()
 			s.closeOutput(out)
 			return true
 		case s.paused == sinkPaused:
 			s.currentLocked(o, out, sinkPaused)
-			s.mu.Unlock()
+			l.unlock()
 			return true
 		}
 		cmd := out.sink.Pause
 		if sinkPaused {
 			cmd = out.sink.Resume
 		}
-		s.mu.Unlock()
+		l.unlock()
 		err := s.call(s.ctx, cmd)
-		s.mu.Lock()
+		l.lock()
 		switch {
 		case s.ctx.Err() != nil:
-			s.mu.Unlock()
+			l.unlock()
 			return false
 		case err != nil:
 			// The sink took neither (it ended: the reporter reads why from its
 			// state). It is current as it is.
 			s.currentLocked(o, out, false)
-			s.mu.Unlock()
+			l.unlock()
 			return true
 		}
 		sinkPaused = !sinkPaused
@@ -393,7 +398,7 @@ func (s *session) openFailed(o *occ, err error) bool {
 		if !o.dropped {
 			o.refused = &engine.Unplayable{Reason: ReasonTransport, Detail: te.Error()}
 			o.dropped = true
-			closeOcc(o)
+			s.closeOcc(o)
 		}
 	} else if s.fault == nil {
 		s.fault = &engine.Fault{Reason: faultReason(err), Detail: "the device could not be opened for the next transport: " + err.Error()}

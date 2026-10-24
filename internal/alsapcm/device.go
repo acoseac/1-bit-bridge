@@ -252,7 +252,8 @@ func (cfg Config) resolve(ep Endpoint) (request, error) {
 }
 
 // open is Open over a kernel seam and a clock. Once the node is open, every
-// refusal goes out through release, so a refused open leaves nothing open.
+// refusal goes out through release, and so does a panic in its setup, which
+// is the caller's to recover, so a refused open leaves nothing open.
 func open(s sys, now func() time.Time, ep Endpoint, cfg Config) (*Device, error) {
 	if err := ep.validate(); err != nil {
 		return nil, err
@@ -266,10 +267,16 @@ func open(s sys, now func() time.Time, ep Endpoint, cfg Config) (*Device, error)
 		return nil, openError(ep, err)
 	}
 	d := &Device{sys: s, now: now, fd: fd, params: Params{Endpoint: ep}}
+	set := false
+	defer func() {
+		if !set {
+			_ = d.release()
+		}
+	}()
 	if err := d.setUp(want); err != nil {
-		_ = d.release()
 		return nil, err
 	}
+	set = true
 	return d, nil
 }
 

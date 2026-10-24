@@ -162,6 +162,78 @@ func wake(ch chan struct{}) {
 	}
 }
 
+// lockHold is a goroutine's hold of the session's lock across work that can
+// panic (a sink's command, the session's bookkeeping), which a deferred
+// release lets go of should a panic come while it is held: the goroutine's
+// recover, and the release that follows the session's fault, find the lock
+// free.
+type lockHold struct {
+	mu   *sync.Mutex
+	held bool
+}
+
+// hold is a lockHold of the session's lock, not yet taken.
+func (s *session) hold() lockHold { return lockHold{mu: &s.mu} }
+
+func (h *lockHold) lock() {
+	h.mu.Lock()
+	h.held = true
+}
+
+func (h *lockHold) unlock() {
+	h.held = false
+	h.mu.Unlock()
+}
+
+// release lets go of the lock if a panic left it held; it is deferred where
+// the hold is made.
+func (h *lockHold) release() {
+	if h.held {
+		h.unlock()
+	}
+}
+
+// faulted records the session's fault after a goroutine of the session's
+// panicked in where, unless a fault was recorded already, and wakes the
+// producer, which writes no more, and the reporter, which reports it, so the
+// engine releases the session and its device is let go as after any fault.
+// It returns the error that stands for the panic, naming where and nothing
+// the panic carried.
+func (s *session) faulted(where string) error {
+	err := fmt.Errorf("player backend: %s panicked; the bridge's log has why", where)
+	s.mu.Lock()
+	if s.fault == nil {
+		s.fault = &engine.Fault{Reason: ReasonFailed, Detail: err.Error()}
+	}
+	s.mu.Unlock()
+	wake(s.wakeP)
+	wake(s.wakeR)
+	return err
+}
+
+// recoverFault is deferred last by the producer: a panic on it is recovered,
+// logged once, and is the session's fault (faulted).
+func (s *session) recoverFault(where string) {
+	if r := recover(); r != nil {
+		s.b.logPanic(where, r)
+		s.faulted(where)
+	}
+}
+
+// recoverCall is deferred first by each call the engine makes into a
+// session (Start, Prepare, Cut, Pause, Resume), on the engine's goroutine
+// for it: a panic there is recovered, logged once, and is the session's
+// fault, and the call answers with it, so the engine takes the call's
+// failure and releases the session for the fault, rather than leave a
+// session the panic cut short mid-change playing on.
+func (s *session) recoverCall(call string, err *error) {
+	if r := recover(); r != nil {
+		where := "the backend's " + call
+		s.b.logPanic(where, r)
+		*err = s.faulted(where)
+	}
+}
+
 // bound is ctx ended also by the session's release.
 func (s *session) bound(ctx context.Context) (context.Context, func()) {
 	c, cancel := context.WithCancel(ctx)
@@ -176,10 +248,20 @@ func (s *session) bound(ctx context.Context) (context.Context, func()) {
 // with what it returned, or with ctx's error once ctx ends: a sink whose
 // writer the kernel holds answers no command, and the engine's call must
 // not wait for it. f's goroutine then outlives the call, abandoned and
-// counted (Stats.Goroutines), until the kernel returns.
+// counted (Stats.Goroutines), until the kernel returns. A panic in f is
+// recovered there, logged once, and is the session's fault, and the call is
+// answered with it.
 func (s *session) call(ctx context.Context, f func() error) error {
 	done := make(chan error, 1)
-	s.b.spawn(func() { done <- f() })
+	s.b.spawn(func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.b.logPanic("a call to a sink", r)
+				done <- s.faulted("a call to a sink")
+			}
+		}()
+		done <- f()
+	})
 	select {
 	case err := <-done:
 		return err
@@ -236,7 +318,8 @@ func (s *session) tailLocked() *occ {
 }
 
 // start is Start.
-func (s *session) start(ctx context.Context, req engine.StartRequest) error {
+func (s *session) start(ctx context.Context, req engine.StartRequest) (err error) {
+	defer s.recoverCall("start", &err)
 	s.mu.Lock()
 	if s.started {
 		s.mu.Unlock()
@@ -287,17 +370,18 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) error {
 		return errReleased
 	}
 	s.cur = out
-	s.outs = append(s.outs, out)
 	first.out, first.start, first.transport = out, 0, out.transport
 	s.writing = first
 	s.wg.Add(2)
 	s.mu.Unlock()
 	s.b.spawn(func() {
 		defer s.wg.Done()
+		defer s.recoverFault("the producer")
 		s.produce()
 	})
 	s.b.spawn(func() {
 		defer s.wg.Done()
+		defer s.recoverReporter()
 		s.report()
 	})
 	select {
@@ -355,10 +439,15 @@ func (s *session) openOutput(ctx context.Context, o *occ) (*output, error) {
 		out := &output{s: s, transport: transportFor(rate, bits, f), unit: u}
 		sink, err := s.b.cfg.OpenSink(s.ctx, alsapcm.SinkConfig{
 			Endpoint: u.Endpoint, Transport: out.transport, Pause: alsapcm.PauseAuto,
-			ReleaseAfter: s.opts.PauseRelease, Admit: out.admit, Locate: out.locate,
+			ReleaseAfter: s.opts.PauseRelease, Admit: out.admit, Locate: out.locate, Log: s.b.log,
 		})
 		if err == nil {
 			out.sink = sink
+			// Own it before any observer can panic. Start, the producer and
+			// a resume are joined before teardown reads this list.
+			s.mu.Lock()
+			s.outs = append(s.outs, out)
+			s.mu.Unlock()
 			s.b.remember(rate, bits, f)
 			s.b.notify(Note{Session: s.id, Kind: NoteOpened, Params: sink.Params(), Transport: out.transport, Unit: u.Label})
 			return out, nil
@@ -423,7 +512,8 @@ func (s *session) drainOutput(out *output) error {
 }
 
 // prepare is Prepare.
-func (s *session) prepare(ctx context.Context, after engine.OccurrenceID, next *engine.Occurrence) error {
+func (s *session) prepare(ctx context.Context, after engine.OccurrenceID, next *engine.Occurrence) (err error) {
+	defer s.recoverCall("prepare", &err)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.callableLocked(); err != nil {
@@ -461,6 +551,7 @@ func (s *session) prepare(ctx context.Context, after engine.OccurrenceID, next *
 		s.wg.Add(1)
 		s.b.spawn(func() {
 			defer s.wg.Done()
+			defer s.recoverOpener(o)
 			s.openSuccessor(octx, o)
 		})
 	}
@@ -495,13 +586,13 @@ func (s *session) openSuccessor(ctx context.Context, o *occ) {
 		// Dropped while it opened: nothing of it plays or is reported, and
 		// it leaves the chain with its opener, which retirement passed over
 		// while the open was under way.
-		closeOcc(o)
+		s.closeOcc(o)
 		s.removeLocked(o)
 		return
 	}
 	if o.refused != nil {
 		o.dropped = true
-		closeOcc(o)
+		s.closeOcc(o)
 		return
 	}
 	rate, bits := o.pcm.RateHz, o.pcm.ValidBits
@@ -521,8 +612,31 @@ func (s *session) openSuccessor(ctx context.Context, o *occ) {
 	o.join = engine.Join{Gapless: j.Gapless, Differs: j.Differs}
 }
 
+// recoverOpener is deferred last by a successor's opener: a panic on it is
+// recovered, logged once, and is the session's fault. An open the panic cut
+// short is still the opener's to finish: the occurrence is dropped, what the
+// open had opened is closed, and its open counts as done, so nothing waits
+// on it.
+func (s *session) recoverOpener(o *occ) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	const where = "a successor's opener"
+	s.b.logPanic(where, r)
+	s.mu.Lock()
+	if !o.opened() {
+		o.dropped = true
+		s.closeOcc(o)
+		close(o.done)
+	}
+	s.mu.Unlock()
+	s.faulted(where)
+}
+
 // cut is Cut.
-func (s *session) cut(ctx context.Context, from engine.OccurrenceID) (bool, error) {
+func (s *session) cut(ctx context.Context, from engine.OccurrenceID) (ok bool, err error) {
+	defer s.recoverCall("cut", &err)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.callableLocked(); err != nil {
@@ -616,7 +730,7 @@ func (s *session) dropLocked(o *occ) {
 			x.cancel()
 		}
 		if x.opened() && x != s.writing {
-			closeOcc(x)
+			s.closeOcc(x)
 		}
 		if s.endAfter == x.id {
 			s.endAfter = 0
@@ -708,12 +822,15 @@ func (s *session) refersLocked(out *output) bool {
 // session pauses with no device, recorded in the critical section that read
 // the transport, so a sink the producer opens after it takes the pause
 // before a frame.
-func (s *session) pause(ctx context.Context) error {
+func (s *session) pause(ctx context.Context) (err error) {
+	defer s.recoverCall("pause", &err)
+	l := s.hold()
+	defer l.release()
 	var refused *output
 	for {
-		s.mu.Lock()
+		l.lock()
 		if err := s.callableLocked(); err != nil {
-			s.mu.Unlock()
+			l.unlock()
 			return err
 		}
 		out := s.cur
@@ -721,17 +838,17 @@ func (s *session) pause(ctx context.Context) error {
 			out = nil
 		}
 		if out == nil || out == refused {
-			s.pausedLocked(true)
-			s.mu.Unlock()
-			return nil
+			err := s.pausedLocked(true)
+			l.unlock()
+			return err
 		}
-		s.mu.Unlock()
+		l.unlock()
 		err := s.call(ctx, out.sink.Pause)
 		if err == nil {
-			s.mu.Lock()
-			s.pausedLocked(false)
-			s.mu.Unlock()
-			return nil
+			l.lock()
+			err := s.pausedLocked(false)
+			l.unlock()
+			return err
 		}
 		// Anything but a sink playing out its last frames or done with them is
 		// the pause's refusal.
@@ -746,14 +863,13 @@ func (s *session) pause(ctx context.Context) error {
 
 // pausedLocked records a pause; one that holds no device arms the release
 // it reports once the pause release has passed, as a sink's own would.
-func (s *session) pausedLocked(noDevice bool) {
+func (s *session) pausedLocked(noDevice bool) error {
+	if s.stopReleaseLocked() {
+		return errors.New(s.fault.Detail)
+	}
 	s.paused = true
 	s.pauseSeq++
 	s.relSent, s.relFired = false, false
-	if s.relStop != nil {
-		s.relStop()
-		s.relStop = nil
-	}
 	if noDevice {
 		seq := s.pauseSeq
 		s.relStop = s.b.cfg.AfterFunc(s.opts.PauseRelease, func() {
@@ -765,16 +881,43 @@ func (s *session) pausedLocked(noDevice bool) {
 			wake(s.wakeR)
 		})
 	}
+	return nil
+}
+
+// stopReleaseLocked forgets the timer's stop before calling it. Its panic
+// is recovered here, under the session's lock. It reports that panic so a
+// command returns the recorded fault; teardown ignores it and goes on.
+// No caller can try that same stop again.
+func (s *session) stopReleaseLocked() (panicked bool) {
+	stop := s.relStop
+	s.relStop = nil
+	if stop == nil {
+		return false
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			panicked = true
+			s.b.logPanic("the pause release timer's stop", r)
+			if s.fault == nil {
+				s.fault = &engine.Fault{Reason: ReasonFailed, Detail: "player backend: the pause release timer's stop panicked; the bridge's log has why"}
+			}
+			wake(s.wakeP)
+			wake(s.wakeR)
+		}
+	}()
+	stop()
+	return false
 }
 
 // unpausedLocked records a resume.
-func (s *session) unpausedLocked() {
+func (s *session) unpausedLocked() error {
+	s.stopReleaseLocked()
+	if s.fault != nil {
+		return errors.New(s.fault.Detail)
+	}
 	s.paused = false
 	s.relSent, s.relFired = false, false
-	if s.relStop != nil {
-		s.relStop()
-		s.relStop = nil
-	}
+	return nil
 }
 
 // ResumeError is a resume the backend refused: the session stays paused,
@@ -830,30 +973,54 @@ func resumeError(err error) error {
 }
 
 // resume is Resume.
-func (s *session) resume(ctx context.Context) (engine.ResumeResult, error) {
-	s.mu.Lock()
+func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err error) {
+	defer s.recoverCall("resume", &err)
+	l := s.hold()
+	defer l.release()
+	l.lock()
 	if err := s.callableLocked(); err != nil {
-		s.mu.Unlock()
+		l.unlock()
 		return 0, err
+	}
+	// A known fault must never release the sink's pause, even briefly:
+	// buffered frames may play, and a draining sink can refuse re-pause.
+	if s.fault != nil {
+		return 0, errors.New(s.fault.Detail)
 	}
 	out, between := s.cur, s.between
 	if out != nil && (out.drained || out.closed) {
 		out = nil
 	}
-	s.mu.Unlock()
+	l.unlock()
 	if out != nil {
 		released := out.sink.Position().State == alsapcm.SinkReleased
 		err := s.call(ctx, out.sink.Resume)
 		if err == nil {
-			s.mu.Lock()
-			s.unpausedLocked()
-			s.mu.Unlock()
+			l.lock()
+			if err := s.unpausedLocked(); err != nil {
+				l.unlock()
+				// The sink has already resumed, but the session cannot. Put
+				// its pause back before answering the fault, retaining any
+				// failure alongside it. The reporter still delivers the fault
+				// so the engine releases the session. Caller cancellation must
+				// not abandon rollback; give it the usual call bound of its own.
+				rollback, stop := context.WithTimeout(context.WithoutCancel(ctx), engine.CallTimeout)
+				defer stop()
+				if pauseErr := s.call(rollback, out.sink.Pause); pauseErr != nil {
+					return 0, errors.Join(err, pauseErr)
+				}
+				return 0, err
+			}
+			l.unlock()
 			wake(s.wakeR)
 			if released {
 				s.b.notify(Note{Session: s.id, Kind: NoteReopened, Params: out.sink.Params(), Transport: out.transport, Unit: out.unitLabel()})
 				return engine.ResumeReopened, nil
 			}
 			return engine.ResumeContinued, nil
+		}
+		if alsapcm.ReasonOf(err) == alsapcm.ReasonPanicked {
+			return 0, s.faulted("a sink's writer")
 		}
 		// A sink playing out its last frames, or done with them, held no
 		// pause (pause): the session was paused with no device, and resumes
@@ -864,9 +1031,11 @@ func (s *session) resume(ctx context.Context) (engine.ResumeResult, error) {
 		}
 	}
 	if between == nil {
-		s.mu.Lock()
-		s.unpausedLocked()
-		s.mu.Unlock()
+		l.lock()
+		if err := s.unpausedLocked(); err != nil {
+			return 0, err
+		}
+		l.unlock()
 		wake(s.wakeP)
 		wake(s.wakeR)
 		return engine.ResumeContinued, nil
@@ -877,13 +1046,13 @@ func (s *session) resume(ctx context.Context) (engine.ResumeResult, error) {
 	// runs (s.wg), joined by its release, which is never acknowledged while
 	// a node this open holds is open: until the check after open answers no
 	// sink exists to close the node with the session's life.
-	s.mu.Lock()
+	l.lock()
 	if err := s.callableLocked(); err != nil {
-		s.mu.Unlock()
+		l.unlock()
 		return 0, err
 	}
 	s.wg.Add(1)
-	s.mu.Unlock()
+	l.unlock()
 	defer s.wg.Done()
 	cctx, stop := s.bound(ctx)
 	defer stop()
@@ -893,31 +1062,37 @@ func (s *session) resume(ctx context.Context) (engine.ResumeResult, error) {
 		if !errors.As(err, &te) {
 			return 0, resumeError(err)
 		}
-		s.mu.Lock()
+		l.lock()
 		if !between.dropped {
 			between.refused = &engine.Unplayable{Reason: ReasonTransport, Detail: te.Error()}
 			between.dropped = true
-			closeOcc(between)
+			s.closeOcc(between)
 		}
-		s.unpausedLocked()
-		s.mu.Unlock()
+		if err := s.unpausedLocked(); err != nil {
+			return 0, err
+		}
+		l.unlock()
 		wake(s.wakeP)
 		wake(s.wakeR)
 		return engine.ResumeContinued, nil
 	}
-	s.mu.Lock()
+	l.lock()
 	if s.releasing || s.between != between || between.dropped {
-		s.mu.Unlock()
+		l.unlock()
 		s.closeOutput(next)
-		s.mu.Lock()
-		s.unpausedLocked()
-		s.mu.Unlock()
+		l.lock()
+		if err := s.unpausedLocked(); err != nil {
+			return 0, err
+		}
+		l.unlock()
 		wake(s.wakeP)
 		return engine.ResumeContinued, nil
 	}
+	if err := s.unpausedLocked(); err != nil {
+		return 0, err
+	}
 	s.handed = next
-	s.unpausedLocked()
-	s.mu.Unlock()
+	l.unlock()
 	wake(s.wakeP)
 	wake(s.wakeR)
 	return engine.ResumeReopened, nil
@@ -965,40 +1140,69 @@ func (s *session) release(ctx context.Context) error {
 // through Events.Released when Release has answered its context's error. A
 // sink the kernel holds in a call keeps it in Close, abandoned, its files
 // already closed, and the release is never acknowledged: the session still
-// holds the device.
+// holds the device. A panic on the way does not stop it: a file's close
+// recovers its own (closeOcc), and a sink's is recovered and the sink left
+// to end with the session's life, as it does (closeAtTeardown), so the
+// device is let go and the release acknowledged all the same.
 func (s *session) teardown() {
-	s.mu.Lock()
+	defer func() {
+		// A panic past the closes (in an owner's Events) is logged; what was
+		// let go stays let go.
+		if r := recover(); r != nil {
+			s.b.logPanic("the teardown", r)
+		}
+	}()
+	l := s.hold()
+	defer l.release()
+	l.lock()
 	started := s.started
-	s.mu.Unlock()
+	l.unlock()
 	if started {
 		<-s.startDone
 	}
 	s.wg.Wait()
-	s.mu.Lock()
+	l.lock()
 	for _, o := range s.chain {
-		closeOcc(o)
+		s.closeOcc(o)
 	}
 	outs := slices.Clone(s.outs)
-	if s.handed != nil {
-		outs = append(outs, s.handed)
-		s.handed = nil
-	}
-	if s.relStop != nil {
-		s.relStop()
-		s.relStop = nil
-	}
-	s.mu.Unlock()
+	s.handed = nil
+	s.stopReleaseLocked()
+	l.unlock()
 	for _, out := range outs {
-		s.closeOutput(out)
+		s.closeAtTeardown(out)
 	}
 	s.b.letGo(s, started)
-	s.mu.Lock()
+	l.lock()
 	close(s.down)
 	late, ev := s.lateAck, s.ev
-	s.mu.Unlock()
+	l.unlock()
 	if late && ev != nil {
 		ev.Released(s.id)
 	}
+}
+
+// closeAtTeardown closes out for the teardown. A panic in its close, or in
+// the note of it, is recovered and logged once. The sink's life is the
+// session's, which has ended, so its writer ends the sink on its own and
+// closes the device: the teardown waits for that, as the Close would, before
+// it goes on, so it lets go of the device only once the device is closed.
+func (s *session) closeAtTeardown(out *output) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		s.b.logPanic("the teardown", r)
+		for {
+			changed := out.sink.Changed()
+			if st := out.sink.Position().State; st == alsapcm.SinkStopped || st == alsapcm.SinkEnded {
+				return
+			}
+			<-changed
+		}
+	}()
+	s.closeOutput(out)
 }
 
 // faultReason is the engine's reason for a sink that stopped.
@@ -1012,6 +1216,10 @@ func faultReason(err error) engine.Reason {
 		return engine.ReasonXrun
 	case alsapcm.ReasonDisconnected, alsapcm.ReasonNoDevice:
 		return engine.ReasonDisconnected
+	case alsapcm.ReasonPanicked:
+		// The sink's writer panicked: the backend's own failure, never the
+		// device's.
+		return ReasonFailed
 	}
 	return engine.ReasonDeviceError
 }

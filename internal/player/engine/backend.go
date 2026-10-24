@@ -160,7 +160,9 @@ var ErrSessionEnding = errors.New("player: the session is playing out its last c
 // the engine releases the session, playback stops with ReasonTimeout, and
 // the late answer is ignored, even when it reaches the engine before the
 // deadline's own expiry does. A call that ignores its context and never returns
-// is abandoned and logged; its goroutine then outlives Run. Events come back
+// is abandoned and logged; its goroutine then outlives Run. A call that panics
+// is recovered on its goroutine and logged, and fails as one that returned an
+// error typed ReasonBackend would. Events come back
 // through the session's Events from any goroutine, in order within a
 // session.
 //

@@ -227,6 +227,13 @@ func (tk *FakeKernel) ParkNextStatus() (parked <-chan struct{}, release func()) 
 	return tk.k.parkNextStatus()
 }
 
+// PanicAtNextClockRead makes the next read of the fake's clock panic with v:
+// a sink's writer is the one goroutine that reads it, so the panic is the
+// writer's.
+func (tk *FakeKernel) PanicAtNextClockRead(v any) {
+	tk.k.atNow(func() bool { return true }, func() { panic(v) })
+}
+
 // CheckClosedEach fails the test unless every open of the node was closed
 // once and nothing reached it while closed.
 func (tk *FakeKernel) CheckClosedEach(t *testing.T) { tk.k.checkClosedEach(t) }
