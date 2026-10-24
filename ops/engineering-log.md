@@ -155,14 +155,22 @@ and any Drop failure. Other refusals and the reporter's fault are unchanged.
 No wire schema, iOS behavior, sink gate or teardown order changes.
 
 `TestPlaybackResumeRollbackDropsFinalDrain` uses B523's direct backend, real
-sink, reporter-panic gate and fake kernel command hook. Resume's successful
-reply is held until the fault is recorded and the sink is in its final
-hardware drain. No further fake time is granted. Before any session release,
-rollback must Drop once, stop the sink, give the kernel no further bytes or
-played frames, and retain the fault and Pause refusal. Its held-Drop case
-cancels the caller and retains the Drop's rollback deadline as a third error.
-`TestPlaybackResumeRollbackKeepsOtherRefusals` reaches a real xrun in that
-same window and requires no Drop and the original joined errors.
+sink, reporter-panic gate and fake kernel command hook. The producer receives
+the end-of-queue notification after Pause; its half-second file fits within
+the lookahead plus hardware buffer. Resume's successful reply is held while
+350 ms of fake time carries that producer's Drain to its final hardware
+drain, with 150 ms still buffered, and then until the fault is recorded.
+Before any session release, rollback must Drop once and stop the sink. The
+normal case grants another 50 ms after Resume returns and requires the
+kernel to have left DRAINING, with unchanged written bytes and consumed
+frames. Its held-Drop case cancels the caller and retains the Drop's rollback
+deadline as a third error. A per-backend SinkCall seam observes both rollback
+calls: Pause and Drop must receive the same context and deadline. The test
+waits for the producer's cancelled Drain result, then releases and joins
+all backend goroutines and requires exactly the original backend fault,
+with no second fault or other event. `TestPlaybackResumeRollbackKeepsOtherRefusals`
+reaches a real xrun in that same window and requires no Drop and the original
+joined errors, with that same exact event-sequence check after joining.
 
 Red first, with only the tests on 42b4a397: both final-drain subtests failed
 with zero Drops; the normal case left the sink draining, and the held-Drop
@@ -173,15 +181,50 @@ fault, discard the Pause refusal, discard the Drop failure, or attach Drop
 to the caller's context. Each compiles and fails its named regression;
 mutations are restored from saved fixed bytes, with no HEAD change.
 
-Go 1.27.2 offline validation: Darwin and Linux `go vet ./...`, `make fmt`,
-`make docs-check`, and both new test functions twenty times under `-race`
-passed. Every player package except OpenHome, plus `internal/alsapcm`,
+Round 1 Go 1.27.2 offline validation: Darwin and Linux `go vet ./...`,
+`make fmt`, `make docs-check`, and both new test functions twenty times
+under `-race` passed. Every player package except OpenHome, plus `internal/alsapcm`,
 passed the full race suite. The requested all-player race run was stopped
 after confirming that OpenHome's loopback listeners are refused by the
 sandbox. A focused race run of
 `TestTheSurfaceBindsEachServedAddressAndFollowsThem` fails solely on
 `listen tcp4 127.0.0.1:0: bind: operation not permitted`; the full OpenHome
 suite still requires a host that permits those listeners.
+
+Round 2 corrected three gaps in the original test evidence. Round 1 started
+a test-owned Drain while the producer was still streaming, checked only the
+reason of any fault events without their count or kinds, and granted no time
+after its frame snapshot. That unchanged-frame assertion also passed without
+the fix and did not establish that buffered sound stopped. Round 1's held
+Drop pinned detachment from caller cancellation but accepted a fresh timeout
+for Drop, so it did not pin the shared rollback deadline. The revised tests
+exercise the producer's own cancelled Drain and its exit, count and compare
+all events after release and Wait, grant time after rollback, and observe
+the two contexts directly without measuring elapsed wall time. The rollback
+branch itself is unchanged; the only production additions are the optional,
+nil-in-production call observers. Controls 1–6 are rerun on these tests;
+control 7 gives Drop a fresh detached CallTimeout, and controls 8–10 make the
+producer report its cancelled Drain as a cut fault, a second backend fault,
+or Finished. All ten compiled and failed their predicted assertions. The
+no-fallback control now advances the fake DAC from 16,800 to 19,200 consumed
+frames after Resume; the fresh-timeout control fails the context/deadline
+comparison, and each producer-event control fails the exact event sequence.
+
+Round 2 Go 1.27.2 offline validation passed Darwin and Linux `go vet ./...`,
+`make fmt`, `make docs-check`, and each changed test twenty times under
+`-race`. All player packages outside OpenHome, plus `internal/alsapcm`,
+passed the full race suite. The all-player run encountered sandbox-refused
+loopback binds in `TestAHeaderPastItsBoundIsRefused`,
+`TestAPanicInTheListingStaysInTheSurface`,
+`TestAnIdleConnectionAndAStalledHeaderAreClosed` and
+`TestTheSurfaceBindsEachServedAddressAndFollowsThem`. Near its two-minute
+package cap, subsequent OpenHome waits failed immediately and
+`TestStopRefusesThenShutsDownThenCloses` panicked in cleanup with no listener
+established. A separate focused race run of
+`TestTheSurfaceBindsEachServedAddressAndFollowsThem` again reported
+`listen tcp4 127.0.0.1:0: bind: operation not permitted`. OpenHome still
+requires a host that permits those listeners; this round does not claim a
+passing all-player gate.
 
 ## File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)
 
