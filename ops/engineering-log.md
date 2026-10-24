@@ -60202,6 +60202,30 @@ the owner as a patch beside the commit. Its long forms: the new entry in
 `ops/History-rules-cli-serve.md`, whose line, keep Load's own decode, holds
 as written.
 
+### After review: the value the text writes
+
+CodeRabbit on PR #1339 found a fraction the test let through:
+`pauseReleaseSeconds: 30.0000000000000001` loaded as 30. yaml.v3 reads a
+float through `strconv.ParseFloat`, which rounds to the nearest float64,
+and `exactInteger` weighed that float64, which is whole. Measured on the
+branch before the fix: `limits.manifest.requestsPerMinute: 6.0000000000000001`
+loaded as 6, `1e-400` and `1e-1000000000` as 0 (the limit off), and
+`9007199254740993.0` as 9007199254740992; in the player block,
+`pauseReleaseSeconds: 45.0000000000000001`, `openhomePort:
+7793.0000000000001` and `device.pcmDevice: 1e-400` each read. A `!!float`
+now passes only when its text, read exactly (`big.Rat`, its underscores
+dropped as yaml.v3 drops them), writes the float64 yaml.v3 decodes; a text
+`big.Rat` refuses to read, an exponent past a million, is refused.
+`9007199254740992.0`, which a float64 holds, still loads.
+
+Red first: the seven new cases (four in
+`TestAWholeNumberSettingTakesWhatDecodesUnchanged`, three in
+`TestAWholeNumberOfThePlayerTakesNoFraction`) failed on the test commit and
+nothing else did. Negative control, on the committed fix: weighing only
+whether the text is whole (`written.IsInt()`) in place of comparing it with
+the float64 turned exactly one case red, `a whole number ParseFloat rounds
+to another`, as predicted.
+
 ### Not in this change
 
 yaml.v3 reads an integer written with a leading zero as YAML 1.1's octal:
