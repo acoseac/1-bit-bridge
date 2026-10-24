@@ -60212,19 +60212,52 @@ branch before the fix: `limits.manifest.requestsPerMinute: 6.0000000000000001`
 loaded as 6, `1e-400` and `1e-1000000000` as 0 (the limit off), and
 `9007199254740993.0` as 9007199254740992; in the player block,
 `pauseReleaseSeconds: 45.0000000000000001`, `openhomePort:
-7793.0000000000001` and `device.pcmDevice: 1e-400` each read. A `!!float`
-now passes only when its text, read exactly (`big.Rat`, its underscores
-dropped as yaml.v3 drops them), writes the float64 yaml.v3 decodes; a text
-`big.Rat` refuses to read, an exponent past a million, is refused.
-`9007199254740992.0`, which a float64 holds, still loads.
+7793.0000000000001` and `device.pcmDevice: 1e-400` each read. The round
+made a `!!float` pass only when its text, read exactly (`big.Rat`, its
+underscores dropped as yaml.v3 drops them), wrote the float64 yaml.v3
+decodes; `9007199254740992.0`, which a float64 holds, still loads.
 
-Red first: the seven new cases (four in
-`TestAWholeNumberSettingTakesWhatDecodesUnchanged`, three in
-`TestAWholeNumberOfThePlayerTakesNoFraction`) failed on the test commit and
-nothing else did. Negative control, on the committed fix: weighing only
+Red first: seven of the eight new cases failed on the test commit, every
+refusal (four in `TestAWholeNumberSettingTakesWhatDecodesUnchanged`, three
+in `TestAWholeNumberOfThePlayerTakesNoFraction`), and nothing else did; the
+eighth, `9007199254740992.0`, loads on both sides by design. Negative control, on the committed fix: weighing only
 whether the text is whole (`written.IsInt()`) in place of comparing it with
 the float64 turned exactly one case red, `a whole number ParseFloat rounds
 to another`, as predicted.
+
+### After review, again: the text as yaml.v3 reads it
+
+Codex and Claude, reviewing that round, each found `big.Rat` reading the
+text otherwise than yaml.v3 does. yaml.v3's resolve tries
+`strconv.ParseInt` with base 0 before any float, so `!!float 036` decodes
+as 30, octal, as `036` untagged does, while `big.Rat` read 36 and the load
+refused it; the player block left `device.pcmDevice: !!float 010` unread.
+`big.Rat` also refused texts that write a whole number,
+`0e99999999999999999999` (its exponent overflows) and `30.` with a million
+zeros after its point (an exponent past a million), and reads a long
+mantissa in time quadratic in its digits, measured on this host: a hundred
+thousand digits in 6.7 ms, a million in 517 ms, where `strconv.ParseFloat`,
+which yaml.v3 runs first, takes 1.4 ms.
+
+`writtenInteger` now reads the text as resolve does: its underscores
+dropped, `strconv.ParseInt` with base 0 first (`!!float 0x20000000000001`
+writes 2^53+1, which the float64 rounds to 2^53, and is refused), then a
+decimal float digit by digit, in time linear in the text (a million digits
+in 0.74 ms). Zero is zero whatever its exponent. Refused unread, by
+choice: a whole number of more than 20 digits, which no 64-bit integer
+holds, and a number other than zero with an exponent of a million or more,
+which only a mantissa of a million digits or more brings back to a whole
+number.
+
+Red first, on a stand-in with round 9's reading: four of the new behaviour
+cases (the tagged octal in both tests, the million zeros, the overflowing
+exponent of zero) and nine rows of the new
+`TestWrittenIntegerReadsTheTextAsYAMLDoes`; the tagged 2^53+1 was refused
+on both sides. Negative controls on the committed fix, each red as
+predicted and nothing else: without `ParseInt` first, the two tagged octals
+and five of the unit test's integer spellings; with the exponent bound
+raised from six digits to eighteen, the one row whose exponent is a million
+or more; with 21 digits allowed, the two 21-digit rows.
 
 ### Not in this change
 
