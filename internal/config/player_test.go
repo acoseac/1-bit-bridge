@@ -226,7 +226,7 @@ func TestAnInvalidPlayerBlockTurnsOffThePlayerAndNothingElse(t *testing.T) {
 		name, block, reason string
 	}{
 		{"unknown key", "    enabled: true\n    pauseReleaseSecond: 30\n",
-			"that key is not a player setting (enabled, room, pauseReleaseSeconds, device, dsdMode, allowDoP or mixer)"},
+			"that key is not a player setting (enabled, room, pauseReleaseSeconds, device, dsdMode, allowDoP, mixer, openhome or openhomePort)"},
 		{"unknown key holding the serial", "    enabled: true\n    serail: " + playerSerial + "\n", "that key is not a player setting"},
 		{"a wrong type", "    enabled: maybe\n", "output.player.enabled (line"},
 		{"the serial where a number goes", "    enabled: true\n    device:\n      pcmDevice: " + playerSerial + "\n", "output.player.device.pcmDevice (line"},

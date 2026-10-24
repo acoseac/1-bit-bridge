@@ -13,3 +13,10 @@ internal/player/decode/testdata/dsd-goldens/*.dff binary
 # The ALAC goldens are compared sample for sample after decoding; keep git
 # from ever treating one as text.
 internal/player/decode/testdata/alac-goldens/*.m4a binary
+# OpenHome's service descriptions are upstream's bytes, held to their
+# hashes; two of them are CRLF, which no checkout may convert.
+internal/player/openhome/testdata/upstream/*.xml -text
+internal/player/openhome/testdata/upstream/License.txt -text
+# OpenHome's upstream service files are pinned by their bytes (CRLF and all,
+# testdata/upstream/README.md lists the sums): no checkout may convert them.
+internal/player/openhome/testdata/upstream/** -text

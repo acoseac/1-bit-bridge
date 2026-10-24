@@ -613,6 +613,7 @@ func TestServeStartsThePlayerOnlyWhenEveryGateHolds(t *testing.T) {
 		{name: "a pause release of an hour", player: release(3600), off: "pauseReleaseSeconds"},
 		{name: "a block that cannot run", player: goBarPlayer + "    dsdMode: native\n", off: "dsdMode"},
 		{name: "off Linux", player: goBarPlayer, goos: "darwin", off: "Linux only"},
+		{name: "an OpenHome port serve binds already", player: goBarPlayer + "    openhome: true\n    openhomePort: 7790\n", off: "openhomePort"},
 		{name: "the default pause release", player: goBarPlayer, start: true, release: 30 * time.Second},
 		{name: "a pause release of 600 s", player: release(600), start: true, release: 600 * time.Second},
 	} {

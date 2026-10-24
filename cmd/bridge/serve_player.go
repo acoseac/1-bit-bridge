@@ -16,6 +16,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
 	"github.com/acoseac/1-bit-bridge/internal/player/library"
+	"github.com/acoseac/1-bit-bridge/internal/player/openhome"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 )
 
@@ -58,6 +59,12 @@ type servePlayerPlan struct {
 	// told is an off reason the config's Validate has logged already:
 	// config.PlayerEnabled's, which Load runs (logPlayerOff).
 	told bool
+	// openhome is a player that starts its OpenHome surface with it
+	// (output.player.openhome, B470 PR 5a2a); openhomeOff is why the opt-in
+	// is on and nothing of it starts, for a player that is simply off,
+	// which boot says once.
+	openhome    bool
+	openhomeOff string
 }
 
 // planServePlayer decides whether serve starts its player: only when every
@@ -67,6 +74,9 @@ type servePlayerPlan struct {
 // does not ask; serve holds its data directory's lock, under which alone
 // the player's identity and IDs are made (lockHeld); and the pause release
 // is one the engine takes, 1 s to 10 min, of the config's 1 s to an hour.
+// A player that starts starts its OpenHome surface too when
+// output.player.openhome is on (B470 PR 5a2a); with the opt-in on and the
+// player simply off, nothing of the surface starts, and boot says so once.
 // goos is the host ("" is this one). It reads nothing but the config.
 func planServePlayer(cfg *config.Config, goos string, lockHeld bool) servePlayerPlan {
 	if goos == "" {
@@ -77,6 +87,9 @@ func planServePlayer(cfg *config.Config, goos string, lockHeld bool) servePlayer
 	switch {
 	case why != nil:
 		return servePlayerPlan{off: why.Error(), told: true}
+	case !on && player.OpenHome:
+		return servePlayerPlan{openhomeOff: "output.player.openhome is on and the player is off (output.player.enabled is not true): " +
+			"nothing of the OpenHome surface starts, no listener and no goroutine"}
 	case !on:
 		return servePlayerPlan{}
 	case !player.Device.Configured():
@@ -88,7 +101,7 @@ func planServePlayer(cfg *config.Config, goos string, lockHeld bool) servePlayer
 		return servePlayerPlan{off: fmt.Sprintf("output.player.pauseReleaseSeconds is outside the %d to %d seconds the player's engine takes (the config takes up to an hour): set it to %d or less, and the player starts when bridge serve next starts",
 			int(playMinPauseRelease/time.Second), int(playMaxPauseRelease/time.Second), int(playMaxPauseRelease/time.Second))}
 	}
-	return servePlayerPlan{start: true}
+	return servePlayerPlan{start: true, openhome: player.OpenHome}
 }
 
 // servePlayerWiring is what serve hands its player.
@@ -126,6 +139,9 @@ type servePlayerWiring struct {
 	Seams *servePlayerSeams
 	// Bounds are the stop's bounds; the zero value is production's.
 	Bounds servePlayerBounds
+	// OpenHome is a boot test's hold on the player's OpenHome surface; the
+	// zero value is production's.
+	OpenHome openhomeWiring
 }
 
 // servePlayerSeams are where a boot test holds serve's player between two
@@ -145,9 +161,10 @@ type servePlayerSeams struct {
 }
 
 // servePlayerBounds are the stop's bounds: how long it waits for the
-// engine's Run to return, and then for the backend's goroutines.
+// engine's Run to return, and then for the backend's goroutines; and what
+// the OpenHome surface's own stop takes at most, which comes first.
 type servePlayerBounds struct {
-	engine, backend time.Duration
+	engine, backend, surface time.Duration
 }
 
 // orProduction is b, or production's bounds where b sets none.
@@ -157,6 +174,9 @@ func (b servePlayerBounds) orProduction() servePlayerBounds {
 	}
 	if b.backend <= 0 {
 		b.backend = playerBackendWaitBound
+	}
+	if b.surface <= 0 {
+		b.surface = openhome.DefaultLimits.StopBound()
 	}
 	return b
 }
@@ -191,11 +211,13 @@ type bridgePlayer struct {
 	failed string
 
 	// The supervisor's alone: the engine as it runs, the live config it
-	// follows, and what it tells the engine of the output.
+	// follows, what it tells the engine of the output, and the OpenHome
+	// surface, when the opt-in starts it.
 	run     *playerRun
 	live    func() hotplug.Settings
 	changed func() <-chan struct{}
 	out     playerOutput
+	surface *openhome.Surface
 
 	mu      sync.Mutex
 	stopped time.Duration // how long its stop took, once it has
@@ -229,6 +251,9 @@ func startServePlayer(plan servePlayerPlan, w servePlayerWiring) *bridgePlayer {
 		if plan.off != "" && !plan.told {
 			playerLog.Warn("player: not started", "reason", plan.off)
 		}
+		if plan.openhomeOff != "" {
+			playerLog.Warn("player: the OpenHome surface does not start", "reason", plan.openhomeOff)
+		}
 		p.markReady()
 		close(p.done)
 		close(p.settled)
@@ -261,9 +286,9 @@ func startServePlayer(plan servePlayerPlan, w servePlayerWiring) *bridgePlayer {
 func (p *bridgePlayer) markReady() { p.readyOnce.Do(func() { close(p.ready) }) }
 
 // stop is serve's teardown of the player: it ends it and waits for its
-// supervisor, which stops the engine and joins it, and then the backend,
-// each within its bound, before serve's watcher and store close (the
-// caller's defer order). A player whose start or whose state storage is
+// supervisor, which stops the OpenHome surface first, then the engine and
+// joins it, and then the backend, each within its bound, before serve's
+// watcher and store close (the caller's defer order). A player whose start or whose state storage is
 // stalled past the bounds is abandoned, said so, and keeps its share of the
 // data directory's lock until it ends; one whose engine's Run a panic ended
 // keeps it until the process exits (settle).
@@ -272,7 +297,7 @@ func (p *bridgePlayer) stop() {
 		return
 	}
 	p.cancel()
-	bound := p.bounds.engine + p.bounds.backend + time.Second
+	bound := p.bounds.surface + p.bounds.engine + p.bounds.backend + time.Second
 	t := time.NewTimer(bound)
 	defer t.Stop()
 	select {
@@ -402,6 +427,9 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 	}()
 	p.eng, p.be = eng, be
 	playerLog.Info("player: started", "uuid", id, "entries", eng.Snapshot().Len(), "pauseRelease", player.PauseRelease())
+	if p.plan.openhome {
+		p.startOpenHome(id, w)
+	}
 	p.markReady()
 	return true
 }
@@ -579,6 +607,14 @@ func (p *bridgePlayer) send(rp engine.OutputReport) {
 	playerLog.Info("player: the output is unavailable", append(attrs, "reason", rp.Reason)...)
 }
 
+// shutdown stops the OpenHome surface, when the opt-in started it, so no
+// request reaches the engine as it stops (it refuses, shuts down within its
+// grace, and closes what is open), then stops the engine and waits for it,
+// then for the backend's goroutines, each within its bound, and says what it
+// left: an engine whose state write did not return, a device call held in
+// the kernel, a release never confirmed. Then it closes the feed's
+// subscription. It is the supervisor's last step, and recovers its own
+// panic.
 // shutdown stops the engine and waits for it, then for the backend's
 // goroutines, each within its bound, and says what it left: an engine whose
 // state write did not return, a device call held in the kernel, a release
@@ -595,6 +631,8 @@ func (p *bridgePlayer) shutdown() {
 	}()
 	run := p.run
 	began := time.Now()
+	// The surface first, so no request reaches the engine as it stops.
+	p.stopOpenHome()
 	run.stop()
 	t := time.NewTimer(p.bounds.engine)
 	ended := false

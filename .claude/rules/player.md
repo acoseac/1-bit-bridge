@@ -151,3 +151,7 @@ The bit-exact OpenHome player inside the bridge (B470), PR by PR. These sections
 
 ## The player on the LAN (B470 PR 5a)
 - **The player's OpenHome Source advertises through serve's one SSDP subsystem, as a strict registration, never through an SSDP stack of its own** (B470 PR 5a1 built the seam; PR 5a2 registers): `dlna.SSDPSubsystem.Register` with `SSDPStrictAdmission` (its `Source` hook the on-link rule over each endpoint's `Local` prefix), each endpoint an interface, an incarnation token the caller changes when the interface is recreated, one LOCATION and the local IPv4 prefix; `SSDPHandle.Update` with the whole new snapshot as addresses change; `Withdraw` when the player stops. Register once the Source's HTTP listener is up. Rules in `dlna-upnp.md`, under the subsystem's bullet.
+
+## The player's OpenHome surface (B470 PR 5a2a)
+
+- **The player's OpenHome surface has a rules file of its own, `openhome.md`**, which loads with `internal/player/openhome`, `internal/player/lan`, `cmd/bridge/serve_player.go` and `serve_player_openhome*.go`, and `internal/config/player.go`: the opt-in (`output.player.openhome`, off by default until PR 5a4), the player's own listener on each LAN address with its admission and limits, the Source's descriptions, the SOAP table that answers every action 602, and GENA's refusal.

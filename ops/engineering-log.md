@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-23 — B470 PR 5a2a: the player's LAN surface, reachable but not advertised: the opt-in, its own listener, admission and limits, the Source's descriptions, and a SOAP layer that answers every action 602](#2026-10-23--b470-pr-5a2a-the-players-lan-surface-reachable-but-not-advertised-the-opt-in-its-own-listener-admission-and-limits-the-sources-descriptions-and-a-soap-layer-that-answers-every-action-602)
 - [2026-10-23 — B523: the player's engine, backend and sink recover the panics on the goroutines they start, a dead engine's sessions are let go of, and the engine opens its own files without waiting](#2026-10-23--b523-the-players-engine-backend-and-sink-recover-the-panics-on-the-goroutines-they-start-a-dead-engines-sessions-are-let-go-of-and-the-engine-opens-its-own-files-without-waiting)
 - [2026-10-23 — B470 PR 5a1: one SSDP subsystem for several devices, with the MediaServer its one registration](#2026-10-23--b470-pr-5a1-one-ssdp-subsystem-for-several-devices-with-the-mediaserver-its-one-registration)
 - [2026-10-23 — B514 round 3: symlinked upper-path mount evidence](#2026-10-23--b514-round-3-symlinked-upper-path-mount-evidence)
@@ -58604,3 +58605,490 @@ entry fault guard and restore caller cancellation to rollback. The retained
 missing-Wait control reproduced four failures in 10,000 runs. Every patch
 applies alone to the final tree, and each mutation was restored from saved
 bytes without committing or discarding the uncommitted changes.
+
+## 2026-10-23 — B470 PR 5a2a: the player's LAN surface, reachable but not advertised: the opt-in, its own listener, admission and limits, the Source's descriptions, and a SOAP layer that answers every action 602
+
+What an OpenHome controller talks to, built behind an opt-in and advertised
+nowhere: SSDP and the Source's registration with 5a1's subsystem are 5a2b's,
+every action's behaviour 5a3's and 5a4's, and the restored identity's policy
+5a0's, so this PR implements no action. Its tests reach the surface directly.
+
+### What shipped
+
+- `internal/config/player.go`: `output.player.openhome` (a boolean, default
+  false) and `openhomePort` (nil is `DefaultOpenHomePort`, 7792; 0 a port the
+  kernel picks), read by the player block's strict reader, the port refused
+  outside 0 to 65535 by `Problem`, and, with the surface on, a port another
+  listener of serve binds refused by `PlayerEnabled` (`openHomePortClash`).
+  `config/bridge.yaml.example` documents both beside their neighbours.
+- `internal/player/lan`: `Interface.Index`, `Eligible.Index` and `Prefixes`,
+  `Address` (an eligible IPv4 address with its on-link prefix and its
+  interface's name and index), `Inventory` and `Look` (the served addresses
+  and every address the box holds, from one listing; a listing that fails is
+  its error alone), `IsLANAddress`; `prefixOf`, the conversion of an
+  interface address. `lantest`: a loopback LAN for the tests.
+- `internal/player/openhome` (new): `services.go` (the four services' tables
+  and the SCPD generator), `description.go` (the device description and
+  `FriendlyName`), `soap.go` (the check table and its bounds, the faults),
+  `handler.go` (the routes, row 1's Host check, the stop's refusal, the
+  slots, the control path, GENA's refusal), `listener.go` (`Surface`: the
+  listing loop, the sockets, admission and the caps, the limits, the stop),
+  `restrict_linux.go`, `restrict_darwin.go`, `restrict_other.go` (the
+  arrival interface); `testdata/upstream` (OpenHome's four files at
+  22feef52, their licence and a README with their hashes).
+- `cmd/bridge/serve_player_openhome.go` (new): `hostLAN`, `openhomeWiring`,
+  `startOpenHome` and `stopOpenHome`. `serve_player.go`: the plan's
+  `openhome` and `openhomeOff`, the boot warning, the surface started once
+  the engine runs and stopped first in the shutdown, the stop's outer bound
+  with the surface's in it. `main.go`: `serveOpts.playerOpenHome`. The
+  suite's TestMain (`hashcost_test.go`) points `hostLAN` at a box with no
+  interface.
+- `.gitattributes`: the upstream files are never converted (two are CRLF).
+  `CLAUDE.md`: the `openhome.md` row and the package rows.
+- Tests: 4 in `internal/config`, 3 in `internal/player/lan`, 29 and a fuzz
+  target in `internal/player/openhome` (the SOAP table's 109 rows among
+  them), 1 in `cmd/bridge` (four cases) and a row of serve's gate table.
+
+### The opt-in, from the boot snapshot
+
+`output.player.openhome` is off by default and stays so until 5a4: 1-bit
+never probes a host that advertises an OpenHome Source for MPD (the iOS
+research note, MPDP:5-9), so a Source that answers every action 602 would
+take the box's MPD row away. Serve reads it once, from the boot snapshot,
+in `planServePlayer`: a player that starts starts the surface once its
+engine runs; a player that does not start starts none of it; with the
+opt-in on and the player simply off (`enabled: false`), nothing of it
+starts and boot says so once ("player: the OpenHome surface does not
+start"). A player refused for another reason says why already.
+
+The port is validated like its neighbours: a word or a list where the
+number goes leaves the block unread, and a number outside 0 to 65535 is
+refused by `Problem`, either turning the player off with a reason that
+quotes no value. With the surface on, a port equal to one serve binds
+already turns the player off too, the reason naming that setting and never
+the port: `listenAddress`'s, `adminAddress`'s, `dlna.listenAddress`'s
+(whether or not DLNA is on: it can be turned on later) and
+`output.loopbackPort`'s (bound once `output.mpd` resolves on, at any time),
+an empty address its default; port 0 clashes with nothing. 7792 is free:
+nothing in the repo named it, and it is the port after 7788 to 7791. A
+fraction (7792.5) reads as its whole part, as it does on every whole-number
+line of the player block: yaml.v3 truncates a float into an int (a
+follow-up, below).
+
+### The listener: addresses, admission, the arrival interface, the port
+
+One TCP socket per IPv4 address `lan.Look` serves, never a wildcard, never
+on DLNA's listener: `servedOnlyListener` serves every LAN address to any
+source and `ownHostOnly` passes any Host naming this host, and the player's
+rule is narrower. A listing every 5 s (`Limits.Rescan`, and `Rescan` for a
+test) binds an address that appears and closes the socket (and its
+connections) of one that goes away, changes its prefix or its interface's
+index, or stops being eligible; each socket is keyed by `lan.Address`, the
+address, its prefix and its interface. The index is in the key as well as
+the brief's address and prefix: the restriction below names the index, so a
+socket bound to an interface made again under another index would hear
+nothing. A listing that fails keeps what is bound, said once a streak. A
+socket's listener is closed by the surface itself as well as by its
+server's `Close`: `Close` closes only the listeners `Serve` has begun to
+track, and a socket retired before its `Serve` goroutine ran stayed open
+until it did (found by the follow test, one run in a few).
+
+Admission is at accept, before any cap counts: the connection's local
+address must be its socket's while the listing serves that address
+(`destination_not_served`), and its source an approved one: IPv4
+(`source_not_ipv4`), not loopback (`source_loopback`), none of the box's
+own addresses, every interface's (`source_own_address`), inside the on-link
+prefix of the address it arrived on, not another address's or another
+interface's (`source_outside_prefix`), and of the LAN's classes,
+`lan.IsLANAddress` (`source_not_lan`), so a prefix wider than its address's
+class, a mask given by mistake, admits no public address. A refused
+connection is closed at once (linger 0), unread and unanswered, and counts
+against nothing; refusals are logged once per kind and source, 32 at most.
+Then the caps: 32 connections open, 8 from one source (URLSession's
+default is 4 per host on iOS, 6 on macOS, by Apple's documentation). Then a request's Host must be exactly the address and
+port it arrived on, no default port elided, or it is 400.
+
+The arrival interface: IPv4 on Linux is the weak host model, and a
+handshake from outside the prefix needs a route back, so a source in the
+prefix and a served destination refuse what they must in the ordinary
+case. Besides, `Listen` restricts each socket where an unprivileged option
+exists. **Linux**: `SO_BINDTOIFINDEX`, which a process may set on a socket
+not bound to a device yet since Linux 5.7 (before, unprivileged, EPERM);
+the kernel then hands a listening socket bound to a device only a SYN that
+arrived on it (socket(7)). Where the kernel refuses, the socket listens
+unrestricted and says why. Not measured here: no Linux host was reached
+from this session. **macOS**: `IP_BOUND_IF`, measured on this Mac (darwin
+27) with a throwaway probe: a loopback listener bound to en0, dialled on
+loopback, timed out (its SYN-ACK went out en0), and a listener on en0's
+address bound to en0 accepted this host's own connection, which arrives on
+lo0: it scopes what the socket sends, and does not refuse a segment by the
+interface it arrived on. **Elsewhere** (Windows): nothing; the player runs
+on Linux alone. The residual: a router on the LAN that rewrites sources into
+the prefix (SNAT), and anything on the link that holds an address in it, is
+admitted; and a container on a Docker bridge is on a link the box serves
+when that bridge is eligible (running, private IPv4), as DLNA's residual
+says.
+
+The port: `output.player.openhomePort` on every address; 0 gives each
+address a port of its own, and every URL is built from the address and
+port the request arrived on. A bind that fails fails that address alone,
+is said once (until it binds or its error changes), and is tried at the
+next listing; serve and the library never see it.
+
+### The limits and the stop
+
+`DefaultLimits`: 32 and 8 connections; 8 slots; a header read deadline of
+5 s, the whole request's of 10 s, a control body's own of 5 s set once its
+headers have passed rows 2 to 5 (`ResponseController.SetReadDeadline`), a
+write deadline of 10 s from when the request's headers were read, an idle
+deadline of 30 s; 16 KiB of headers read (`MaxHeaderBytes` 12 KiB and
+net/http's 4 KiB of lookahead, as the DLNA listener's bound); 256 KiB of
+body. A slot is taken once the body is read, 503 at once past them, so a
+client that trickles its body holds none. The server's `ErrorLog` is
+`handshakelog.ErrorLog()`, which keeps no client address.
+
+`Stop`: every request after it is 503 with its connection closed; the
+listing loop is cancelled and joined (bounded); each listener is closed and
+each server shut down within `Limits.ShutdownGrace` (2 s); what is still
+open is closed; the Serve goroutines and the handlers are joined within
+`Limits.Join` (1 s), what is left counted abandoned and said. Serve's
+player stops the surface first in its shutdown, before the engine, so no
+request reaches the engine as it stops; `stop`'s outer bound gains the
+surface's (`Limits.StopBound`, 4 s). The join covers the Serve goroutines
+and the handlers, not net/http's goroutine per connection, so a request
+that goroutine read just before the stop closed its connection can still
+reach the handler after the join: it is refused 503 with the EXT header
+every reply carries, onto a connection already closed
+(`TestARequestAfterTheStopsJoinIsRefusedLikeEveryReply`, found reviewing the
+handler before the last gate run).
+
+A panic in the listing loop (the address source's or the listing's own)
+is recovered there: the surface serves what it has bound, follows the
+interfaces no more, and stops as before; the line carries the stack, and
+the value only when it is the runtime's own error, as serve's player logs
+its own (`TestAPanicInTheListingStaysInTheSurface`, red first: the panic
+crashed the test binary). net/http recovers a handler's panic per request.
+
+### The seams
+
+`Config.Addresses` and `Config.Listen`: the tests' `lantest.Box` serves the
+LAN addresses the test names from listeners on 127.0.0.1 whose connections
+report those addresses, and the source each `Dial` stands for (its Accept
+waits for the dial to record it). Serve's tests hand the box through
+`serveOpts.playerOpenHome`; `hostLAN`, the production source's interfaces,
+is a box with no interface in cmd/bridge's suite, which the "no box of the
+test's" case checks. `Seams.Handling`, `Stopping` and `Forcing` hold a
+request in its slot and mark the stop's phases.
+
+### The descriptions
+
+The device description at `/openhome/description.xml`: deviceType
+`urn:av-openhome-org:device:Source:1`, UDN `uuid:` and the player's UUID,
+manufacturer `1-bit`, manufacturerURL `https://1-bit.app`, modelName
+`1-bit Bridge Player`, modelNumber the bridge's version, modelDescription
+`The 1-bit bridge's own player`, no serialNumber, and friendlyName
+`output.player.room` from the boot snapshot or `1-bit Bridge Player`:
+what XML 1.0 cannot carry dropped (bytes that are not UTF-8, runes outside
+its Char production), cut to 64 runes on a rune boundary, then escaped. Four
+services, Product, Playlist, Info and Time (no Volume), each with its type,
+its ID (`urn:av-openhome-org:serviceId:<name>`) and its SCPD, control and
+event URLs under `/openhome/<service>/`, absolute on the arrival address and
+port. modelDescription and the vendor fields match neither of upmpdcli's
+strings (manufacturer "JF Light Industries", modelDescription "UPnP
+front-end to MPD", which 1-bit does not offer) nor "-UPnP/AV"; the iOS
+renderer profiles' own substrings (RPR:453-484) were not read: the iOS
+checkout is not on this host, and the research note says "1-bit" matches
+none (an owner check).
+
+The four SCPDs are the bridge's own: Go tables written from OpenHome's
+action tables (each action, its arguments in order with directions and
+related state variables, each variable's type, allowed values and
+eventing), and generated. OpenHome's files at ohNetGenerated 22feef52 are
+test data with their MIT licence (`testdata/upstream`, never embedded), and
+`TestOurSCPDsAreUpstreamsInventory` compares the two exactly. The files were
+reproduced in the worktree from the brief's copies, which this session
+could read and hash but not copy, and are held to their pinned SHA-256s
+(`TestTheUpstreamFilesAreTheirPinnedBytes`; the Write tool had dropped a
+line of four blanks in Playlist1.xml, which the hash caught).
+
+### The SOAP layer
+
+The table, as built (`soap.go`, and the rules):
+
+| Row | Check | Refused with |
+|---|---|---|
+| 1 | admission at accept; then Host exactly the arrival address and port | closed unread; 400 |
+| 2 | POST | 405, Allow: POST |
+| 3 | no `Origin` at all (empty and `null` included), before the body is read | 403 |
+| 4 | one Content-Type, `text/xml`, charset utf-8 (any case, quoted or not) or none (`mime.ParseMediaType`) | 415 |
+| 5 | one SOAPAction, quoted or not, `<type>#<action>`, this URL's service and one of its actions | fault 401 |
+| 6 | the body through `MaxBytesReader` at 256 KiB, read to EOF under its own deadline | 413; 408; 400 |
+| — | a slot | 503 at once |
+| 7 | no directive; the declaration first or not at all; 4 other processing instructions ignored at most; 128 elements, 8 deep; text at most 64 KiB + 8 KiB per in-argument; nothing after the envelope but white space | 400 |
+| 8 | one SOAP 1.1 Envelope, any prefix; an optional Header (8 entries, 8 KiB), its entries ignored unless one carries `mustUnderstand="1"` (SOAP's namespace or none); one Body holding one action element whose name and namespace are SOAPAction's | fault 401; MustUnderstand fault; 400 past the Header's bounds |
+| 9 | the in-arguments in the SCPD's order, no namespace or the action's own (a default namespace inherited), none missing, repeated, unknown or nested, each its type: ui4 and i4 decimal in range (no sign on ui4, a sign on i4), boolean 0, 1, true, false, yes, no in any case, bin.base64 strict (padded, zero trailing bits, no line break), string any text; for every action | fault 402 |
+| then | every request that passes | fault 602 |
+
+A fault is HTTP 500 with `s:Client`, `UPnPError` and the code's description
+(UPnP Device Architecture 1.1, §3.2.2; 401 Invalid Action, 402 Invalid Args,
+602 Optional Action Not Implemented, the same in UDA 1.0), or
+`s:MustUnderstand` with no detail (SOAP 1.1, §4.4, keeps the detail for the
+Body). No other code is defined. Every reply of the surface carries an
+empty `EXT` header, written as UDA writes it (a direct map assignment;
+`Header.Set` would write `Ext`). A control request refused before its body
+is read asks for its connection to be closed, so net/http reads none of it
+(a description's 405 and a 404 leave that to net/http, which reads at most
+256 KiB of what is left to keep the connection, or closes it). Nothing
+is trimmed: " 1" is no boolean. The text bound counts decoded character
+data; 64 KiB is the engine's metadata bound per entry. The Header's bounds
+are 400, as row 7's bounds are, the brief leaving them open.
+
+`FuzzControlRequest` drives the control handler with any SOAPAction,
+Content-Type and body: no panic, a status the table names, a 500 a fault of
+a defined code or MustUnderstand, and the EXT header (2.8 million inputs in
+20 s here, none failing).
+
+### GENA
+
+`SUBSCRIBE` and `UNSUBSCRIBE` at every eventSubURL are 501 Not Implemented,
+with no SID or TIMEOUT; any other method there is 405. UDA 1.1 (§4.1.2) has
+a publisher that cannot accept a subscription answer a 5xx; 501, unlike
+503, says the condition is not passing, so no controller is asked to try
+again soon; and never 200, so no controller holds a subscription it would
+wait on events for. The SCPDs keep OpenHome's `sendEvents` as the protocol
+defines them.
+
+### Red first
+
+Against skeletons with the rules absent:
+
+- `internal/config`, the fields and the accessor alone (no reader keys, no
+  range, no clash): `TestTheOpenHomeOptInLoadsAndRoundTrips` (4 of 5 cases),
+  `TestAnOpenHomeSettingIsValidatedLikeItsNeighbours` (every case) and
+  `TestAnOpenHomePortServeBindsElsewhereTurnsThePlayerOff` (7 rows and the
+  log line) red; the default test green.
+- `internal/player/lan`, a `Look` that lists nothing and the conversion it
+  replaced: the listing test red, and the conversion test showed the old
+  hazard, a mask that is not a prefix read as `/0` ("192.168.1.20/0") and a
+  16-byte mask an invalid prefix.
+- `internal/player/openhome`, a skeleton that dropped every rule (no Host
+  check, no stop refusal, 602 for anything at the control URL, GENA 200
+  with a SID, no method check or slot on the descriptions, everything
+  admitted and uncounted against a cap, no deadline, no socket ever
+  retired, a stop that closes at once, the room as it is, relative URLs):
+  red were the description, friendlyName (7 rows), routes, GENA, follow,
+  admission (9 rows), destination, caps, trickle, write deadline, slots,
+  stop order, URLs, bounds and Origin-ordering tests and 82 of the table's
+  107 rows then. Green on it: the inventory and pinned-bytes tests (the
+  tables were the skeleton's too), the 602 test (the skeleton answered 602
+  to everything), the type parser's, the bind failure's and the quick
+  stop's. A first skeleton run hung in its own stop, which held the
+  surface's lock while closing the sockets whose release publishes under
+  it; the real stop closes outside the lock.
+- `cmd/bridge`, the wiring without the surface's start and the boot line:
+  the "on" case "the player never started its OpenHome surface", the "no
+  box" case and the "player off" case red; "off" green.
+- The handler after the stop's join, on the committed tree before 63d546ba:
+  `TestARequestAfterTheStopsJoinIsRefusedLikeEveryReply` red, "the reply's
+  EXT header is [] (false), want one, empty" (the status already 503); the
+  header set first, green.
+
+### Negative controls
+
+Each one mutation on the committed tree, run against its tests, then
+restored from git and the tree checked clean.
+
+| NC | Mutation | Red |
+|---|---|---|
+| 1 | the reader without `openhome` | the round trip (4 cases), the validation test |
+| 2 | no port range | 4 range rows |
+| 3 | no clash check | 7 clash rows |
+| 4 | the clash without `dlna.listenAddress` | the 2 DLNA rows and the log line |
+| 5 | `prefixOf` without its guard | "a mask that is not a prefix: 192.168.1.20/0" |
+| 6 | `Look`'s own addresses from eligible interfaces alone | 5 own addresses missing |
+| 7 | no prefix check | 3 prefix rows and the caps test |
+| 8 | the prefix of any served address | 3 prefix rows |
+| 9 | no own-address check | 3 own-address rows |
+| 10 | no loopback check | the loopback row (refused as another kind) |
+| 11 | no LAN-class check | the wide-prefix row |
+| 12 | no destination check | the destination test |
+| 13 | a connection counted before admission | "five refusals, none counted": 5 open |
+| 14 | no per-source cap | "answered past the cap" |
+| 15 | no global cap | "answered past the cap" |
+| 16 | the slot taken before the body | "beside a trickler, with one slot: 503" |
+| 17 | no body deadline of its own | "no answer within 5 s" |
+| 18 | no write deadline | "the connection that stopped reading cut off": still open at 15 s |
+| 19 | no idle deadline | "still open after 5 s" |
+| 20 | no header deadline | "still open after 5 s" |
+| 21 | no header bound | "a header past the bound: 200, want 431" |
+| 22 | no Host check | 8 row-1 rows and the listener's Host check |
+| 23 | a Host with its port elided accepted | 2 rows |
+| 24 | no stop refusal | "answered 200, closing false" |
+| 25 | no close after the grace | "the held request's connection: i/o timeout" |
+| 26 | no join of the handlers | "Abandoned:0" |
+| 27 | sockets never retired | the follow test |
+| 28 | a failed listing closing everything | the follow test |
+| 29 | a bind failure said at every listing | 4 lines for one |
+| 30 | `/` served | "GET /: 200, want 404" |
+| 31 | relative URLs | the description and URL tests |
+| 32 | the room not cut | 2 rows; 32b, what XML cannot carry kept: 4 rows |
+| 33 | Insert's arguments swapped in the table | the Playlist inventory |
+| 34 | GENA 200 with a SID | every SUBSCRIBE and UNSUBSCRIBE |
+| 35 | no EXT header | every reply checked |
+| 36 | no Origin check | 3 rows and the ordering test |
+| 37 | the Origin refused after the body | the ordering test: "259 bytes of the body read" |
+| 38 | no Content-Type check | 5 rows |
+| 39 | the SOAPAction's type not compared | the version row (and, rerun, the new row below) |
+| 40 | no body bound | the 413 row |
+| 41 | directives accepted | the DOCTYPE row (and, rerun, the ENTITY row below) |
+| 42 | no depth bound | the depth row and "nine deep" |
+| 43 | no text bound | "text a byte past the bound" |
+| 44 | processing instructions unbounded | "five processing instructions" |
+| 45 | a comment, then an element, after the envelope (two mutations) | each its row |
+| 46 | the Envelope's namespace not checked | first green (below); rerun, the new row |
+| 47 | mustUnderstand ignored | 2 rows |
+| 48 | no Header bounds | 2 rows |
+| 49 | arguments matched in any order | the order row |
+| 50 | ui4 parsed signed | 2 rows and the parser test |
+| 51 | a boolean trimmed | the white-space row |
+| 52 | row 9 skipped for an action with none | 2 rows and "eight deep" |
+| 53 | 401 for a valid request | every action |
+| 54 | IP_BOUND_IF claimed and not set (macOS) | "the socket's IP_BOUND_IF 0" |
+| 55 | the surface started whatever the opt-in | "with the opt-in off, a surface true" |
+| 56 | no boot line for the opt-in with the player off | "boot said []" |
+| 57 | the surface stopped after the engine | the journal's order |
+| 58 | the suite's `hostLAN` given an interface (an address no host here holds) | "the suite's surface found the host's addresses" |
+| 59 | no recover in the listing loop | the panic crashed the test binary |
+| 59b | the panic's value logged | "the line … quotes the panic's value" |
+| 60 | the EXT header set after the handler's count is entered | the stop-join test alone (the routes and the table green) |
+
+Three controls found rows that another check covered, and the table test
+was sharpened (bae85761): NC41 left "an ENTITY alone" green, since its
+declaration then sat past the start, now "an ENTITY after the declaration";
+NC46 left the SOAP 1.2 row green, whose Body is in 1.2's namespace too, now
+beside "another namespace's Envelope around a SOAP 1.1 Body"; NC39 was red
+on the version row alone, now with "another service's type with this
+service's action". Each was rerun, red. Not controlled, no seam reaching
+it: the surface closing a socket's listener beside its server's `Close` (a
+window before `Serve` tracks its listener) and the listener closed before
+`Shutdown` at the stop.
+
+### Decided otherwise than the brief, and why
+
+- The socket's key holds the interface's index as well as the address and
+  prefix: the restriction names the index.
+- The port clash turns the player off (`PlayerEnabled`), as its neighbours'
+  refusals do, rather than the surface alone: validation's refusals of the
+  player block all turn the player off, and Validate logs them once a
+  reason.
+- An approved source must also be of the LAN's classes (`IsLANAddress`), so
+  a mask wider than its address's class admits no public address.
+- The Header's bounds are 400, with row 7's bounds; the brief left their
+  outcome open. `mustUnderstand="1"` without a namespace counts too.
+- GENA is 501 (the brief asked for a status and a reason).
+- Element count (128) is bounded beside depth and text.
+
+### Not in this change
+
+SSDP and the Source's registration, readiness and the lifecycle order
+(5a2b); every action (5a3, 5a4); URI confinement (5a4); the restored
+identity's policy (5a0); a second device with our UDN; GENA; Volume;
+`/v1/outputs`; iOS; IPv6. Follow-ups: the player block's whole-number lines
+take a fraction as its whole part (yaml.v3); the iOS renderer profiles'
+substrings against modelDescription, which this session could not read;
+`SO_BINDTOIFINDEX`'s behaviour measured on a Linux box.
+
+### Round 2 — shutdown reporting, address overrides and observable surface tests
+
+2026-10-24. Six findings corrected, without changing the SOAP action table,
+implementing an action or advertising the Source:
+
+1. Stop still closes listeners before Shutdown, including sockets Serve has
+   not tracked yet. Only a Shutdown result matching DeadlineExceeded or
+   Canceled now marks the grace expired. A second close's net.ErrClosed is
+   not a forced stop. `TestIdleSocketsNeverMakeACleanStopForced` repeats 200
+   stops with two sockets and completed requests, requiring a clean report
+   and no forcing hook. Its control restores the any-error classification.
+2. Serve validates `--addr` with `config.ValidateBindAddress` before either
+   player plan and before the data-directory lock. Named services, empty
+   ports and ports outside the TCP range are refused without quoting the
+   value. `TestServeRefusesANonnumericAddressOverrideBeforePlanning` uses
+   `:postgresql` beside openhomePort 5432, plus four other invalid forms,
+   and holds the data-directory lock so a bypass cannot bind any service
+   port. Red first: all five reached the lock and exited 1. Green: 20
+   race-enabled repetitions pass. Restoring SplitHostPort-only validation
+   fails at the intended assertion again.
+3. Serve records the player plan before a validated address override, then
+   calls a refusal already reported only when its reason is unchanged
+   (the stored reasons are strings). Round 2's regression exercises only
+   the new-reason path; the unchanged path gains its test in Round 3.
+   A new override clash is one value-free "player: not started" warning.
+   `TestServeSaysOnceWhenAnAddressOverrideClashesWithOpenHome` gives serve
+   an already-bound ephemeral API listener, uses that port for OpenHome,
+   checks the file alone enables the player, and requires the player and
+   surface off with one warning while serve still runs. The control keeps
+   the old already-reported flag. The History entry's claim that this
+   clash merely fails the surface's bind was corrected.
+4. DisableGeneralOptionsHandler is true on every surface server.
+   `TestOptionsStarPassesThroughTheSurface` sends raw OPTIONS * through a
+   real listener for own/foreign Hosts, running/stopping: 404/400 and
+   503/400, respectively, with empty EXT and a closed connection on a stop
+   refusal. Host remains before the stop check. The control restores Go's
+   general OPTIONS interception.
+5. `TestServeRunsTheOpenHomeSurfaceOnlyWithItsOptInAndThePlayer/on` sends
+   valid Insert arguments, receives 602 and requires the queue to stay
+   empty. Its positive control inserts the same reference and metadata
+   directly, observes one entry and deletes it before the request. The
+   negative control uses the existing Handling seam to forward that
+   Insert to the real engine, synchronously, while still returning 602;
+   the unchanged empty-queue assertion must then fail.
+6. That test observes Run's done channel at Seams.Stopping, rather than
+   comparing two journal lines printed after teardown. The control moves
+   stopOpenHome after the engine/backend joins and before "player: shut
+   down", which the old journal assertion accepted.
+
+Validation: the pinned Go 1.27.2 toolchain, offline. `go vet ./...` passes
+for darwin, linux and windows. `make fmt` and `make docs-check` pass. The
+requested race suite passes binding, decode, engine, format, hotplug, lan,
+library, playback and config; socket-based OpenHome and cmd/bridge tests
+are refused by this sandbox (`bind: operation not permitted`), including
+httptest's panic in `TestWriteGateRefusesWhileABridgeAnswers`. OpenHome's
+existing `TestStopRefusesThenShutsDownThenCloses` also aborts its binary:
+after its denied bind, its cleanup uses a connection never initialized.
+Tests later in those binaries did not run. Every new regression and the strengthened serve case was invoked with `-race
+-count 20 -failfast`; only the address-override regression can complete in
+this sandbox. Controls 01 through 06 each apply alone and compile; 02
+fails at its intended assertion, and the other five stop at listener bind
+refusals before their assertions. Their behavioral red/green runs remain
+for a host that permits binds; a sandbox failure is not evidence that a
+control detects its intended regression. No commit was made. The rules
+and their long forms were updated with these changes.
+
+
+### Round 3 — unchanged refusal coverage and the source of an override clash
+
+2026-10-24. The unchanged-refusal comparison already compares text:
+`servePlayerPlan.off` is a string. It needs no equality fix.
+`TestServeDoesNotRepeatAnUnchangedRefusalUnderAnAddressOverride` now boots
+serve with a player Load refuses (pauseReleaseSeconds outside its range,
+which precedes the platform gate) and a valid non-clashing numeric API
+override. It clears Validate's process-wide last reason through a valid
+config with the player off before and after the test, requires exactly one
+Validate refusal and no additional serve refusal, and keeps the player and
+surface off. Its independent control forces `told` false under an override.
+
+A new API-port clash now names `listenAddress, set by --addr` in its one
+warning, without printing any supplied value. The existing clash test sets
+`:8080` in the file, moves the API to an already-bound ephemeral port also
+configured for OpenHome, and requires the entire value-free warning. Its
+independent control removes only the source annotation. The reason-text
+comparison still runs before that annotation, so an unchanged refusal
+remains already reported. The rules and their History entries name both
+regressions; Round 2's paragraph now states its narrower test coverage.
+
+Red-first and repeated race runs of both boot tests compile but meet this
+sandbox's loopback bind denial before their assertions. The two controls
+also compile and meet that denial, so their intended behavioral failures
+remain unverified here; their independent patches and commands accompany
+the Round 3 report outside the repository. No equality defect or successful
+behavioral red/green run is claimed.
