@@ -1220,7 +1220,7 @@ Windows skips only this test's privileged symlink creation.
 
 ## B500 — third-party licences in release archives (2026-10-24)
 
-**Every release archive carries freshly generated third-party licences from the union of the release builds; missing licences fail the release. Never replace build-derived discovery with the go.mod list or skip the before-hook. Require a licence at each effective module root; include compiled-package ancestry and the pinned Go toolchain notices. Unknown notice suffixes fail; never synthesize module grants. Omit unneeded Tailscale webclient and debugeventbus assets with the release tags in .goreleaser.yaml; keep Make and Docker in step through check-build-tags. Discover with those same tags. Future embedded assets must be omitted or covered by the registry. Pin embedded-asset supplements to exact module versions and re-audit on upgrades or replacements. Discovery refuses vendor trees, a non-default GOFLAGS or workspace, and non-default architecture feature levels.**
+**Every release archive and Docker image carries freshly generated third-party licences from the union of the release builds; missing licences fail the release. Never replace build-derived discovery with the go.mod list or skip the before-hook. Require a licence at each effective module root; include compiled-package ancestry and the pinned Go toolchain notices. Unknown notice suffixes fail; never synthesize module grants. Omit unneeded Tailscale webclient and debugeventbus assets with the release tags in .goreleaser.yaml; keep all builds, deploys and CI tests/vet in step through the repository-wide reviewed-site census in check-build-tags. Discover with those same tags; refuse YAML null, boolean and numeric tag spellings. Refuse linked web packages and every non-main-module embed outside the exact module@version/package/file allowlist; exercise the real six-target graph in tests. The supplement registry is empty. Docker generates notices with the full go.mod patch toolchain and copies them into its final stage. Pin embedded-asset supplements to exact module versions and re-audit on upgrades or replacements. Discovery refuses vendor trees, a non-default GOFLAGS or workspace, and non-default architecture feature levels.**
 
 `go run ./scripts/third-party-licenses` reads the explicit matrix in
 `.goreleaser.yaml`, then runs `go list -mod=readonly -deps -json -tags=<release-tags> ./cmd/bridge`
@@ -1230,7 +1230,9 @@ are excluded; modules used on only one platform still enter the union.
 The small stdlib configuration reader accepts the current builds stanza
 only and refuses unfamiliar settings, exclusions, flags and YAML forms.
 Tags must be a block list of unique literal Go tag names; templates, aliases,
-flow/scalar forms, blank lists and duplicate keys or values refuse. Extend
+flow/scalar forms, blank lists and duplicate keys or values refuse. YAML null
+and boolean spellings (1.1 and 1.2, case-insensitively) refuse too; a tag
+must start with a letter or underscore, excluding all numeric spellings. Extend
 discovery and its tests together before changing that stanza.
 Discovery refuses a vendor/ directory at the module root: GoReleaser would
 automatically build its sources while -mod=readonly discovers the cache.
@@ -1261,9 +1263,18 @@ Empty files and read failures are errors too.
 
 GoReleaser's builds.tags is authoritative. It sets `ts_omit_webclient` and
 `ts_omit_debugeventbus`.
-The Makefile GO_TAGS value and Dockerfile build flags mirror that list;
-check-build-tags uses the same fail-closed reader to require exact agreement
-and verifies that every build invocation uses it. Make's override assignment
+The Makefile GO_TAGS value, Dockerfile build flags, all three deploy scripts,
+and every CI test/vet invocation mirror that list. check-build-tags uses the
+same fail-closed reader. It scans operational files across the repository
+(shell, PowerShell, Python, batch, workflow YAML, Makefiles, Dockerfiles and
+extensionless scripts), joins command continuations, strips full-line comments,
+and compares every go build/install/run/test/vet site with the explicit
+reviewedBuildSites census, including multiplicities. New files and additional
+commands fail until reviewed. The untagged exceptions are the notice generator,
+the temp-directory helper and two printed test instructions; none builds the
+shipped bridge. Generated output trees and nested checkouts are excluded;
+Markdown prose and Go source are not operational command sites. The shard's
+RACE_FLAGS is separately pinned so it cannot override the explicit tags. Make's override assignment
 prevents command-line or environment drift. make build and build-all run the
 check, as does check-go-version, already part of gate.yml. That gate was chosen
 to keep docs-check Python-only and to reuse the release-config gate; that job
@@ -1278,14 +1289,23 @@ features instead. The six tagged dependency graphs include neither
 web-client-prebuilt nor client/web, and no debugger HTMX/CSS/templates.
 The two former supplements were removed; tailscale.com itself stays linked
 and retains its module notices. Protobuf edition defaults and Tailscale's
-first-party metadata, DNS data and resolvconf workaround keep their handling.
+first-party metadata, DNS data and resolvconf workaround are the only reviewed
+third-party embeds: seven files, keyed by module@version and import path in
+reviewedEmbeds. Every target's go list decodes ImportPath and EmbedFiles.
+An unknown package, changed module version, any replacement, or a changed
+nonempty file set fails before notices are emitted. Main-module and standard
+library embeds are outside this dependency census. client/web and the
+web-client-prebuilt module/packages are explicitly forbidden even without
+embeds. TestRealReleaseGraphEmbeds runs discovery on the real six-target graph,
+without an opt-in or fixture substitute.
 
 The registry in main.go remains, currently empty, exercised with fixture
 components. It pins each supplement to an exact module path and version;
 upgrades, local replacements and changed replacement identities/versions
-require review. A future Tailscale feature with embedded third-party assets
-must either be omitted through the release tags or attributed completely
-through this registry. Audit go-list EmbedFiles across all six targets after
+require review when entries exist. Today there are no real supplements.
+The separate reviewedEmbeds allowlist is the fail-closed gate for new assets;
+a future embedded third-party asset must either be omitted or receive a full
+notice review, an explicit embed allowlist entry and any needed supplement. Audit go-list EmbedFiles across all six targets after
 upgrades, including compressed JS/CSS and fonts; a module-root licence does
 not automatically cover third-party code bundled as assets.
 
@@ -1302,8 +1322,9 @@ Module and filename order is sorted, without dates or cache paths.
 The before-hook runs after `go mod tidy`, writes the ignored root file
 `THIRD_PARTY_LICENSES.md`, and every archive includes it. Weekly dependency
 bumps therefore refresh module notices automatically on the next release.
-Embedded-asset module bumps instead fail until their supplements are reviewed
-and the exact-version registry is updated. The generated aggregate stays
+Modules with reviewed embeds instead fail on a version bump until the new
+embedded files and their coverage are reviewed and reviewedEmbeds is updated.
+The empty supplement registry alone would not detect a newly linked bundle. The generated aggregate stays
 untracked; any future supplementary source notices must be checked in. Do not seed dist/
 from the hook: GoReleaser requires it empty at that stage. The release
 playbook verifies every snapshot archive's notice bytes before removing dist/.
@@ -1319,3 +1340,13 @@ pins the before-hook and the archive file entry. Round-3 fixtures also pin
 nested-only root refusal (including replacements), COPYING.LESSER beside
 COPYING, HTML and unknown suffix handling, supplementary PATENTS/UNLICENSE,
 vendor refusal, embedded notice content and version/replacement rejection.
+
+The Docker builder runs the generator after COPY of the source, on its native
+build platform, before the target-specific binary build. Its final stage copies
+/src/THIRD_PARTY_LICENSES.md to
+/usr/share/doc/1-bit-bridge/THIRD_PARTY_LICENSES.md. Docker's GO_VERSION pins
+the complete go.mod version (1.27.3), since the generator requires equality
+with runtime.Version(), not merely a compatible major.minor. check-go-version
+compares full versions, and check-build-tags requires the generator, final-stage
+COPY and full toolchain pin. Release validation compares the image's notice
+bytes with a fresh generation, for both published image architectures.

@@ -60147,3 +60147,39 @@ path and netstack ListenPacket intact: the web-client stub and no-op debugger
 HTTP registration are separate surfaces. No live tailnet access was used.
 Round-4 control logs record the initial red checks, drift controls, rerun
 round-3 controls and gate results, including sandbox restrictions on tests.
+
+
+## 2026-10-24 — B500 round 5: deployed builds, embedded-file admission and image notices
+
+Red-first regressions reproduced untagged deploy and CI commands, newly added
+scripts bypassing the build guard, YAML null/boolean/numeric tags being accepted,
+an unreviewed embedded bundle admitted by its module-root licence, forbidden web
+packages with no embeds, and Docker's missing notices and partial toolchain pin.
+
+All three deploy builds and every CI test/vet site now use the release tags,
+including shard enumeration, fuzzing, the small-volume test and the ALSA ABI
+probe. The repository-wide command census compares operational command sites
+against an explicit reviewed allowlist; additions and changes require review.
+The shard flag array is pinned against a later overriding tag. YAML tags accept
+only unambiguous string names with a letter/underscore first byte, excluding
+null and boolean words in both YAML versions.
+
+Each target's real go-list output is checked for package names and embeds.
+Seven module-owned files are admitted by exact module@version, package and file
+set; upgrades, replacements and other embeds fail before notices are emitted.
+The web client and prebuilt bundle are explicitly refused. The supplement
+registry remains empty; it is not the embed admission gate. The committed
+real-graph test covers all six release targets beside the fixture tests.
+
+Docker pins Go 1.27.3, generates notices on its native builder and copies them
+into /usr/share/doc/1-bit-bridge/THIRD_PARTY_LICENSES.md in the final image.
+Both version guards require the full patch version, and the command guard also
+requires the generator and final-stage COPY. The playbook checks image bytes.
+Docker execution is unavailable in this sandbox; stage wiring was inspected,
+and actual image execution remains a host validation. The round-5 scratch report
+records gates, byte comparisons and negative-control evidence.
+
+The full-suite tree-walk audit required classifying the new census walk. Its
+otherTreeWalks table now names checkBuildSites as a source-repository walk; no
+library-root exception or traversal behavior changed. The focused audit rerun
+passes; the package still has three socket tests refused by this sandbox.

@@ -7,6 +7,8 @@ paths:
   - "Dockerfile"
   - ".goreleaser.yaml"
   - "scripts/third-party-licenses/**"
+  - "deploy/**"
+  - "scripts/alsa-abi/check.sh"
   - "THIRD_PARTY_LICENSES.md"
   - "compose.yaml"
   - "internal/sweeptest/**"
@@ -29,7 +31,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 
 ## Build, CI, and test discipline
 
-- **Every release archive carries freshly generated third-party licences from the union of the release builds; missing licences fail the release. Never replace build-derived discovery with the go.mod list or skip the before-hook. Require a licence at each effective module root; include compiled-package ancestry and the pinned Go toolchain notices. Unknown notice suffixes fail; never synthesize module grants. Omit unneeded Tailscale webclient and debugeventbus assets with the release tags in .goreleaser.yaml; keep Make and Docker in step through check-build-tags. Discover with those same tags. Future embedded assets must be omitted or covered by the registry. Pin embedded-asset supplements to exact module versions and re-audit on upgrades or replacements. Discovery refuses vendor trees, a non-default GOFLAGS or workspace, and non-default architecture feature levels.** (B500) → History-rules-build-ci-tests.md
+- **Every release archive and Docker image carries freshly generated third-party licences from the union of the release builds; missing licences fail the release. Never replace build-derived discovery with the go.mod list or skip the before-hook. Require a licence at each effective module root; include compiled-package ancestry and the pinned Go toolchain notices. Unknown notice suffixes fail; never synthesize module grants. Omit unneeded Tailscale webclient and debugeventbus assets with the release tags in .goreleaser.yaml; keep all builds, deploys and CI tests/vet in step through the repository-wide reviewed-site census in check-build-tags. Discover with those same tags; refuse YAML null, boolean and numeric tag spellings. Refuse linked web packages and every non-main-module embed outside the exact module@version/package/file allowlist; exercise the real six-target graph in tests. The supplement registry is empty. Docker generates notices with the full go.mod patch toolchain and copies them into its final stage. Pin embedded-asset supplements to exact module versions and re-audit on upgrades or replacements. Discovery refuses vendor trees, a non-default GOFLAGS or workspace, and non-default architecture feature levels.** (B500) → History-rules-build-ci-tests.md
 
 - **SonarCloud's `go:S2077` follows a named const to its concatenation.** → History-rules-build-ci-tests.md
 - **A test server that redirects to the REQUEST'S OWN path is a BLOCKER for SonarCloud's gate.** → History-rules-build-ci-tests.md

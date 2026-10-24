@@ -117,6 +117,21 @@ The candidate is main's head once every fix in scope has merged. Record its sha.
    - **Build:** clone the repo, check out the candidate, then
      `sudo -n docker buildx build --load -t bridge-p3:rc .` (BuildKit is required; see CLAUDE.md
      on the Dockerfile).
+   - **Notices:** the native builder generates the same six-target aggregate as
+     the archive hook, using Docker's full patch toolchain pin from go.mod.
+     The final image must contain
+     `/usr/share/doc/1-bit-bridge/THIRD_PARTY_LICENSES.md`. Generate the candidate's
+     notices locally with the pinned toolchain, then compare the image bytes:
+
+     ```sh
+     go run ./scripts/third-party-licenses
+     sudo -n docker run --rm --entrypoint cat bridge-p3:rc \
+       /usr/share/doc/1-bit-bridge/THIRD_PARTY_LICENSES.md > /tmp/bridge-image-notices.md
+     cmp THIRD_PARTY_LICENSES.md /tmp/bridge-image-notices.md
+     ```
+
+     Repeat for both published image architectures when checking release images.
+     A missing or differing file fails packaging validation.
    - **Test library:** generate tagged tracks with the image's own ffmpeg (FLAC at 96/24 and
      44.1/16, an MP3), plus the repo's fixtures (`internal/manifest/testdata/m4a/*.m4a`, a DSF
      from `internal/transcode/testdata/`). Library permissions must be readable by UID 100.
