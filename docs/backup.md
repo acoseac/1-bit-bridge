@@ -2,7 +2,7 @@
 
 Run `bridge backup --config /path/to/bridge.yaml` to capture the library
 database, pairing tokens, TLS pair, configuration, console account, harvest
-state, and player identity when present. A running service can be backed up.
+state, player identity and player history when present. A running service can be backed up.
 Protect the snapshot: it contains credentials that can impersonate the bridge.
 
 Stop the service, then run
@@ -31,8 +31,11 @@ then makes those marks durable before restoring any identity file. An
 interrupted restore may leave a raised reservation; retrying raises it again.
 A missing reservation is omitted. An unreadable reservation stops backup or
 restore. The remedy for an unreadable reservation or an exhausted destination
-mark is the same player reset: **with the service stopped, remove the box's
-`player-uuid`, `player-ids.json` and `player-queue.json` together**. The next
+mark is the same player reset: **with the service stopped, run
+`bridge output player reset --config /path/to/bridge.yaml`**. It asks for
+confirmation; `--yes` skips only that prompt. The command records the
+identities given up before removing the UUID, queue and reservation, in that
+order. Rerun the command to finish an interrupted reset. The next
 start makes a new identity with no queue, a new device to controllers.
 **A snapshot's `player-ids.json` is never a valid repair**. Do not delete the
 reservation while keeping the player identity.
@@ -63,8 +66,8 @@ largest jump plus 2^24 more values. The error identifies the exhausted source:
 
 - For a snapshot mark, remove `player-uuid` and `player-ids.json` from a copy
   of the snapshot and restore the rest. The box keeps or makes its own identity.
-- For a destination mark, follow the player reset above, removing all three
-  live files together while the service is stopped.
+- For a destination mark, run the player reset command above while
+  the service is stopped.
   A reset gives up for good the identity it removes and any the box ran
   earlier (one an earlier restore replaced on this box), unless, after this
   box last ran it, another box took it over from this box, by restoring a
@@ -83,6 +86,25 @@ largest jump plus 2^24 more values. The error identifies the exhausted source:
 Each restore spends less than 2^25 values, so roughly 120 worst-case restores
 consume the available space. Ordinary engine starts spend much less.
 
-New snapshots use schema 2 so older bridge versions refuse them before
-restoring an identity without advancing its counters. The new bridge still
-reads schema 1 snapshots and gives their restored identities the same jump.
+New snapshots use schema 3 so older bridge versions refuse them before
+ignoring the player history. The new bridge still reads schema 1 and 2
+snapshots and gives their restored identities the same jump.
+
+`player-history.json` stays in the data directory through a reset. It records
+identities replaced by restore whose values the live floor covers, and the
+identities a reset gives up. Backup lists and carries the history even when
+there is no player UUID. Restore merges the snapshot's history with the box's
+history before installing an identity; it never replaces the live list with
+an older one. Do not delete or edit the history to bypass a refusal. A history
+that is corrupt, unreadable or not a file refuses backup, restore or reset.
+For a reservation that cannot be read, fix its read access before resetting;
+a malformed reservation can be reset, retaining every UUID it still names.
+
+Restore refuses a UUID given up in either history before writing any file.
+Remove `player-uuid` and `player-ids.json` from a copy of the snapshot to
+restore the rest; the box keeps or makes its own player identity. Keep the
+history in that copy. This check fails closed: an identity another box took
+over after this box last ran it still has valid snapshots on that other box,
+as described above, but this box refuses it after recording a reset. It
+cannot establish what the other box still holds. Refusing is safe; reissuing
+an old ID or token is not.

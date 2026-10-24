@@ -25,6 +25,8 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+
+- [2026-10-24 — B524: a reset records the player identities it gives up](#2026-10-24--b524-a-reset-records-the-player-identities-it-gives-up)
 - [2026-10-24 — B470 PR 5a2b: shared discovery for the opt-in OpenHome Source](#2026-10-24--b470-pr-5a2b-shared-discovery-for-the-opt-in-openhome-source)
 - [2026-10-24 — B470 PR 5a0 Round 11: a listed snapshot reservation that cannot be read refuses restore](#2026-10-24--b470-pr-5a0-round-11-a-listed-snapshot-reservation-that-cannot-be-read-refuses-restore)
 - [2026-10-24 — B470 PR 5a0 Round 10: reset advice requires invalid reservation data](#2026-10-24--b470-pr-5a0-round-10-reset-advice-requires-invalid-reservation-data)
@@ -137,6 +139,60 @@ reaches a session that has not gone looking for it.
 - [DSD renditions B4 — the alias measurement, and why it is a differential (2026-09-07)](#dsd-renditions-b4--the-alias-measurement-and-why-it-is-a-differential-2026-09-07)
 
 ---
+
+## 2026-10-24 — B524: a reset records the player identities it gives up
+
+A reset used to be three manual removals. The reservation it dropped was the
+only floor covering both the current identity and identities earlier restores
+replaced on this box. Restoring an untouched pre-reset snapshot could then
+revive one of those UUIDs below IDs or tokens already issued after the snapshot.
+The random restore jump cannot cover an arbitrarily old dropped floor.
+
+`bridge output player reset` now records every known covered identity in
+`player-history.json` before removing UUID, queue and reservation, in that
+order. Each removal is durable before the next; a pending marker makes the
+command resumable even after the final removal. It uses restore's exclusive
+data-dir lock and both admin-port guards around confirmation. `--yes` skips
+only the prompt. No identity and no pending reset is a no-op.
+
+Restore preflights live and snapshot histories before every write. Either
+list giving up the incoming UUID refuses with the snapshot-copy remedy,
+keeping the box's own identity. An admitted restore unions both histories
+and records the displaced UUID and any foreign live-reservation UUID before
+replacing the floor or identity. History is never restored by a byte copy.
+Backup includes it even without a player UUID. Schema 3 refuses older readers
+that would silently skip history; schemas 1 and 2 remain readable.
+
+History has one bounded, nonblocking file reader (`fsutil.OpenAsFile`) and
+one owner-preserving writer over `atomicwrite.WriteBytesDurable`. Corruption,
+unsupported versions, noncanonical UUIDs, extra JSON, directories, named
+pipes and read failures refuse the operation. The reset records a canonical
+UUID still decoded from a damaged reservation; an inaccessible reservation
+must first be made readable, since its identity cannot safely be guessed.
+The existing restore jump, valid-snapshot takeover exception and snapshot
+scrubbing remedy retain their meanings. The local refusal is deliberately
+conservative even after another box safely took the identity over: refusing
+is safe, reissuing an old ID or token is not. History cannot reconstruct
+identities lost before this change.
+
+**Red first.** On unchanged production code,
+`TestRestoreRefusesGivenUpIdentity/live` and `/snapshot` observed an accepted
+restore, a replaced fresh UUID and changed live files.
+`TestSnapshotCarriesPlayerHistory` found no history in the manifest. The
+fixed tests also plant database/WAL/SHM and token sentinels to pin refusal
+before writes. Reset/start/restore and earlier-replaced-identity cases,
+transfer to a fresh box, union into existing history, all four interruption
+steps, file and unlink barriers, owner/mode retention, history read failures,
+and command dispatch/help/confirmation/lock/admin guards cover the remaining
+rules. Per-rule mutation controls save and restore the exact fixed bytes;
+none changes HEAD or uses git restore. Their patches, commands, named failing
+tests and outputs are in the round-one scratch controls and report.
+
+Validation uses cached Go 1.27.2 offline. The round-one report records native,
+Linux and Windows vet, formatting and docs-check, the backup/config/engine
+race suites, touched CLI tests, and ten race runs of every new test. Socket
+restrictions and any unrelated guard failures are reported separately rather
+than counted as passes. No commit or push is part of this work.
 
 ## File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)
 
