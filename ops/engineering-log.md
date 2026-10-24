@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B526: three ALSA playback hangs are test sequencing defects](#2026-10-24--b526-three-alsa-playback-hangs-are-test-sequencing-defects)
 - [2026-10-24 — B470 PR 5a0 Round 11: a listed snapshot reservation that cannot be read refuses restore](#2026-10-24--b470-pr-5a0-round-11-a-listed-snapshot-reservation-that-cannot-be-read-refuses-restore)
 - [2026-10-24 — B470 PR 5a0 Round 10: reset advice requires invalid reservation data](#2026-10-24--b470-pr-5a0-round-10-reset-advice-requires-invalid-reservation-data)
 - [2026-10-23 — B470 PR 5a0 round 4: giving up a player identity is permanent](#2026-10-23--b470-pr-5a0-round-4-giving-up-a-player-identity-is-permanent)
@@ -59628,3 +59629,13 @@ minting a fresh identity per run (a new backlog item, not a safety issue on the
 Linux-only test tool); and a History wording nit, applied — the backup
 capture's "only a missing file omits the mark" now says it holds after a valid
 `player-uuid` is captured. Docs in `ops/History-rules-player.md`.
+
+## 2026-10-24 — B526: three ALSA playback hangs are test sequencing defects
+
+Forced each ordering using events and captured goroutine stacks at the watchdog before cleanup. The producer-panic test had already played the replacement: two device opens, two closes, and no backend goroutines remained. Its Open predicate missed a completed open, so playsOn now compares the monotonic open count captured before PlayID. The regression forces the replacement to finish before checking.
+
+The successor-opener test could decode its entire first track into lookahead plus hardware buffers before inserting the successor. Waiting for the sink's drain command before insertion reproduced the fault wait every time: producer in finish/drainOutput, sink writer waiting for fake DAC time, reporter and engine awaiting events. No opener panicked: Prepare refused the new successor with ErrSessionEnding. The test now parks a read before EOF until the successor's Prepare has succeeded, then releases the read and checks the recovered panic, fault, release and subsequent playback.
+
+The cut-too-late test's tick could report the removed entry audible and end the session before the second (barrier) send. Joining the backend after the first tick made that second send fail every time with no reporter alive. The first race repetition exposed the same terminal ordering at FakeKernel.Play: its grant caused the boundary stop before its waiter could observe a starved writer. Its watchdog dump again held no backend goroutines. The test now grants time directly and offers ticks while waiting on engine snapshot changes until the specified stop, and exercises the same wait after the backend is fully joined. A fourth control waits for a writer after that join and fails deterministically.
+
+FakeKernel.when checks and registers under the kernel mutex; the engine wait helper subscribes before reading its snapshot. Neither loses a wakeup. No production code, wire contract, or timeout changed. The player rules and History record the ordering requirements. Each ordering has a negative control; focused race repetition, package stress loops and validation results are recorded with the task's report.
