@@ -173,6 +173,11 @@ type SSDPRegistration struct {
 	// as a value or non-nil pointer (copied at registration).
 	Admission SSDPAdmission
 
+	// SendBarrier optionally lets the owner invalidate normal sends even
+	// before Register returns its handle. Use a fresh barrier per lifetime.
+	// Byebye bypasses it; nil preserves ordinary context-only cancellation.
+	SendBarrier *SSDPSendBarrier
+
 	// ResponderSlots is how many answers each endpoint may have in flight
 	// (one search's burst holds one across its MX delay and its writes); 0
 	// is maxConcurrentMSearchResponders.
@@ -223,6 +228,7 @@ type SSDPHandle struct {
 	targets      []NotifyTarget
 	serverToken  string
 	admission    SSDPAdmission
+	sendBarrier  *SSDPSendBarrier
 	slots        int
 	interval     time.Duration
 	log          *slog.Logger
@@ -363,6 +369,7 @@ func (s *SSDPSubsystem) Register(ctx context.Context, reg SSDPRegistration) (*SS
 		targets:     slices.Clone(reg.Targets),
 		serverToken: reg.ServerToken,
 		admission:   reg.Admission,
+		sendBarrier: reg.SendBarrier,
 		slots:       reg.ResponderSlots,
 		interval:    advertiseIntervalOf(reg.AdvertiseInterval, s.intervalFloor),
 		log:         reg.Logger,
@@ -600,6 +607,41 @@ func (h *SSDPHandle) startTimer(ep *ssdpEndpoint) {
 // the endpoint is going, which is no failure to report.
 var errSSDPSendCancelled = errors.New("dlna: SSDP burst cancelled")
 
+// SSDPSendBarrier joins normal writes when an advertised service disappears.
+// Its zero value permits sends. A barrier belongs to one registration lifetime
+// and must not be copied or reused after invalidation.
+type SSDPSendBarrier struct {
+	mu      sync.RWMutex
+	invalid bool
+}
+
+// Invalidate prevents later alive/reply writes and waits for writes already
+// under way. Each holds a read lock only across a context check and one write,
+// bounded by the burst's installed deadline (at most ssdpBurstDeadline).
+// It neither closes senders nor gates byebye, so withdrawal can still announce
+// departure. Packets already queued in the kernel cannot be recalled.
+func (b *SSDPSendBarrier) Invalidate() {
+	b.mu.Lock()
+	b.invalid = true
+	b.mu.Unlock()
+}
+
+// sendNormal checks the lifetime under the lock invalidation takes, holding it
+// until the write completes. Callers install the burst deadline before entry.
+func (h *SSDPHandle) sendNormal(ep *ssdpEndpoint, write func() (int, error)) (int, error) {
+	if b := h.sendBarrier; b != nil {
+		b.mu.RLock()
+		defer b.mu.RUnlock()
+		if b.invalid {
+			return 0, errSSDPSendCancelled
+		}
+	}
+	if ep.ctx.Err() != nil {
+		return 0, errSSDPSendCancelled
+	}
+	return write()
+}
+
 // noteAlive notes one alive burst's result to ep's failure log, unless its
 // cancellation cut it short.
 func (h *SSDPHandle) noteAlive(ep *ssdpEndpoint, err error) {
@@ -614,8 +656,8 @@ func (h *SSDPHandle) noteAlive(ep *ssdpEndpoint, err error) {
 // failure. Each failed write is also logged at Debug, naming its target; the
 // burst's result is what reaches the default level, through notifyErrs. The
 // burst is bounded (ssdpBurstDeadline from its first write), and checks its
-// endpoint's context before each write, so nothing is sent once the
-// endpoint has started to go.
+// endpoint's context before each write. An optional SendBarrier joins a write
+// already under way when the owner invalidates the registration.
 //
 // A write that meets net.ErrClosed ends the burst without a line, and is
 // what the burst returns: a withdrawal closed the sender under a burst, and
@@ -629,14 +671,15 @@ func (h *SSDPHandle) sendAliveAll(ep *ssdpEndpoint) error {
 	_ = ep.sender.SetWriteDeadline(time.Now().Add(ssdpBurstDeadline))
 	var first error
 	for _, target := range h.targets {
-		if ep.ctx.Err() != nil {
+		pkt := BuildNotifyAlive(ep.spec.Location, h.serverToken, target)
+		_, err := h.sendNormal(ep, func() (int, error) { return ep.sender.WriteToUDP(pkt, h.s.notifyTo) })
+		if errors.Is(err, errSSDPSendCancelled) {
 			if first != nil {
 				return first
 			}
 			return errSSDPSendCancelled
 		}
-		pkt := BuildNotifyAlive(ep.spec.Location, h.serverToken, target)
-		if _, err := ep.sender.WriteToUDP(pkt, h.s.notifyTo); err != nil {
+		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				return err
 			}

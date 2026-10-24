@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/dlna"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/player/binding"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
@@ -142,6 +143,8 @@ type servePlayerWiring struct {
 	// OpenHome is a boot test's hold on the player's OpenHome surface; the
 	// zero value is production's.
 	OpenHome openhomeWiring
+	// SSDP is the one subsystem shared with the MediaServer, even with DLNA off.
+	SSDP *dlna.SSDPSubsystem
 }
 
 // servePlayerSeams are where a boot test holds serve's player between two
@@ -164,7 +167,7 @@ type servePlayerSeams struct {
 // engine's Run to return, and then for the backend's goroutines; and what
 // the OpenHome surface's own stop takes at most, which comes first.
 type servePlayerBounds struct {
-	engine, backend, surface time.Duration
+	engine, backend, surface, discovery time.Duration
 }
 
 // orProduction is b, or production's bounds where b sets none.
@@ -177,6 +180,9 @@ func (b servePlayerBounds) orProduction() servePlayerBounds {
 	}
 	if b.surface <= 0 {
 		b.surface = openhome.DefaultLimits.StopBound()
+	}
+	if b.discovery <= 0 {
+		b.discovery = openhome.DiscoveryStopBound
 	}
 	return b
 }
@@ -219,8 +225,10 @@ type bridgePlayer struct {
 	out     playerOutput
 	surface *openhome.Surface
 
-	mu      sync.Mutex
-	stopped time.Duration // how long its stop took, once it has
+	mu            sync.Mutex
+	closing       bool
+	discoveryStop context.Context
+	stopped       time.Duration // how long its stop took, once it has
 }
 
 // playerRun is the engine as it runs: its Run, ended by stop and over once
@@ -296,8 +304,9 @@ func (p *bridgePlayer) stop() {
 	if p.cancel == nil {
 		return
 	}
+	p.refuseOpenHome(context.Background())
 	p.cancel()
-	bound := p.bounds.surface + p.bounds.engine + p.bounds.backend + time.Second
+	bound := p.bounds.discovery + p.bounds.surface + p.bounds.engine + p.bounds.backend + time.Second
 	t := time.NewTimer(bound)
 	defer t.Stop()
 	select {

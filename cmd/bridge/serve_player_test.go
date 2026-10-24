@@ -1545,6 +1545,21 @@ func TestServeStopsThePlayerBeforeItsWatcherAndItsStore(t *testing.T) {
 			return true
 		}
 		switch {
+		case func() bool {
+			lit, ok := d.Call.Fun.(*ast.FuncLit)
+			if !ok {
+				return false
+			}
+			found := false
+			ast.Inspect(lit.Body, func(n ast.Node) bool {
+				if c, ok := n.(*ast.CallExpr); ok && isSelector(c.Fun, "player", "stop") {
+					found = true
+				}
+				return true
+			})
+			return found
+		}():
+			at["player"] = d.Pos()
 		case isSelector(d.Call.Fun, "player", "stop"):
 			at["player"] = d.Pos()
 		case isIdent(d.Call.Fun, "stopPlayerHotplug"):
