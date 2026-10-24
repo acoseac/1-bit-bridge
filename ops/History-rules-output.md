@@ -95,71 +95,58 @@ ErrMediumUnknown compatibility. The output state machine and wire are
 unchanged; player.md and History-rules-player.md carry the operative rule.
 
 
-### The reading's informational MPD config names its provenance (2026-10-24, B515)
+### The reading keeps the configured MPD file and adds a command-line hint (2026-10-24, B515, round 3)
 
-**Select per card from its one MPD Tgid and matching live output thread,
-never another card's owner. Require stable start time around bounded cmdline,
-argv[0] basename `mpd`, and the same filesystem root. Use MPD's bounded
-HOME/XDG environment for defaults; unreadable evidence falls back even for
-the same uid. Parse MPD's options anywhere, refuse `--`, unknown options and
-ambiguous paths, and report `--no-config` as no file. Never claim a file not
-read or expose argv/environ. Redact every external string against every
-config read and output.password. Use the selected file for the no-live-dop
-veto; retain configured song mapping.**
+**Never substitute an argument or inferred default for the configured file:
+its config, warnings, song mapping and no-live-dop veto stay together. Keep
+per-card Tgid/output-thread, stable-start, argv[0] and root checks; parse
+MPD's grammar and emit no raw argv. Compare file identities physically in
+the bridge's view and never read the operand's contents. Do not read process
+environ or infer default paths. Redact every external string against every
+config read, including includes, and output.password.**
 
-Round 2 corrects round 1's global owner scan, assumed bridge environment,
-option grammar, attempted-file provenance, DoP input and incomplete
-redaction. `alsa.Owner.PID` already is the Tgid, resolved from the status of
-`Owner.TID` (ALSA's `owner_pid`). Only the output's card is eligible; a second
-MPD process on that card is ambiguous. The start time (stat field 22,
-parsing after the last `)` in comm) must agree before and after cmdline.
-The basename of argv[0] must be `mpd`. The root links under the injected
-proc tree must identify the same file, or, if they cannot be inspected,
-the two mountinfo `/` entries must agree on major:minor and root. A known
-mismatch is never overridden by the other check. Every operation stays in
-the bounded, single-outstanding config step; the ALSA configuration is read
-first, after the status bracket, so the picks already name the cards.
+Round 3 replaces rounds 1–2's unshipped provenance design. The reviews
+found that a private bind mount over `/etc/mpd.conf` can leave the same root
+inode; argv can be rewritten after loading; `/proc/self/cwd/...` resolves
+in the bridge; PID reuse can precede the first stat; MPD falls back from an
+unset or non-directory HOME to `getpwuid(getuid())->pw_dir`; and an unreadable
+but different argument file could leave the configured file displayed as a
+fallback. Linux cannot prove the file MPD loaded through these observations.
+Signal Path therefore describes the bridge's configured file and limits the
+new field to a hint about the command line observed now.
 
-Cmdline and environ use `ReadLogical`, which already reads cap+1 bytes and
-refuses overflow, including a NUL at the cap. Both caps are 64 KiB; stat is
-also 64 KiB and mountinfo 1 MiB. Environ is never retained in the snapshot,
-printed or logged. If it cannot be read, no default-source claim is made,
-regardless of uid: services can override HOME even for the same uid. There
-is deliberately no uid-based bridge-environment proxy. Empty readable
-environment means no home/XDG candidates. Duplicate or malformed relevant
-environment entries are refused. The default order remains the existing
-Linux USE_XDG `conf.Locate` order; the bridge does not model another build's
-compiled system config location.
+`mpd.configHint` is optional and additive: `argument` is `same`, `different`,
+`none` or `no_config`. Only `different` has `path`, a validated, redacted
+logical operand. `same` compares physical file identity, including symlinks
+and hard links, in the bridge's view. A file operand without available
+identities, a non-file or an out-of-root operand omits the hint; unreadable
+contents alone do not. Neither `none` nor `no_config` suppresses the configured
+file. No process environment is read and no MPD default is inferred.
 
-MPD 0.24.4 `src/CommandLine.cxx` and `src/cmdline/OptionParser.cxx`, read
-from the supplied source copies in round 2, establish the flags, options
-anywhere, long `=value`, and rejection of `--`. At most one non-option
-filename is accepted; `--no-config` returns before MPD inspects remaining
-operands. Absolute file arguments reject backslashes, empty, dot and dotdot
-segments before mapping to the config root. Relative filenames remain
-unprovable because MPD can change cwd after loading them. No raw argv is
-published; validated logical paths are redacted by the same rules as the
-file's strings.
+Only this card's unique MPD Tgid and matching enabled output thread may
+supply a hint. Stat field 22 must agree around the bounded command-line
+read; argv[0]'s basename is `mpd`; root links compare by SameFile, with root
+mount device and root fields as fallback only when links cannot be inspected.
+These are observations, not proof of startup identity or mount equivalence.
+Cmdline is capped at 64 KiB with overflow detection, stat at 64 KiB and
+mountinfo at 1 MiB. All run in the existing single-outstanding bounded config
+step, after the ALSA configuration and MPD status bracket. Failed or late
+steps publish no config or hints. A cached view performs no I/O and retains
+a separate hint for each card.
 
-The optional additive `configProvenance` identifies only files actually
-read: `process_cmdline`, `mpd_default`, `configured_fallback`. With no file
-read it is absent, except verified `--no-config`: `mpd_no_config`, empty
-path, null config. Config failures and expired steps never claim a file.
-Each card keeps its own selection and chains in the shared snapshot, and
-all files read supply redaction to every card's external strings, including
-DAC mixer/control, kernel names, song row and provenance. The configured
-file still supplies song mapping; selected config supplies information,
-config warnings and the no-live-dop veto. No signalpath judging algorithm
-changes. The process identity/output-thread tie still cannot prove the
-network session is this process when two daemons use identical output
-names, and current file bytes cannot prove startup settings.
+MPD 0.24.4 CommandLine.cxx and OptionParser.cxx define options anywhere,
+hidden flags, long `=value`, rejection of `--`, and at most one file operand.
+`--no-config` returns before checking remaining operands. Relative paths,
+backslashes, empty/dot/dotdot components and unmodeled grammar omit the hint;
+no raw argv or process environment reaches the response or logs. Every
+external string, including hint paths, DAC mixer/control, kernel names,
+song rows and MPD fields, uses the configured file's collected secrets
+(includes too) and output.password. The argument file contributes no bytes.
 
-Tests drive the production reading and real handler without listeners.
-The round-2 regression cases cover identity refusal, mountinfo root and
-device mismatches, root inode agreement/disagreement, default environments,
-option and path grammar, cap-boundary truncation, unread provenance,
-redaction and the actual no-live-dop veto. Controls and exact gate evidence
-are recorded in the task's `report-r2.md` and `controls-r2/`.
+The production reading and handler tests cover all four values, file identity,
+identity and grammar refusals, per-card caching, unreadable files, bounded
+publication, configured warnings and DoP, and privacy. The exact red/green,
+controls and gates are in the task's `report-r3.md` and `controls-r3/`.
 
 ### Linked MPD files keep the named directory for includes (2026-10-24, B515)
 
@@ -185,6 +172,11 @@ before applying `..`. The physical path supplies confinement, the open and
 the cycle key; the unresolved name supplies only the next include base.
 A missing optional path is checked through its nearest existing physical
 parent and then ignored as missing; outside-root targets remain refusals.
+Round 3 also classifies physical resolution failure at a dangling link as
+not found, so plain includes report absence and optional includes skip it.
+The resolution error's missing component is checked against its physical
+parent before absence is accepted; a dangling target outside the root stays
+a refusal. Resolution failures never emit the host path.
 Existing depth, file-count, read, non-file and pattern bounds remain.
 
 `TestIncludesResolveDotDotPhysicallyAtEveryLevel` covers directory and file

@@ -60101,3 +60101,38 @@ The successor-opener test could decode its entire first track into lookahead plu
 The cut-too-late test's tick could report the removed entry audible and end the session before the second (barrier) send. Joining the backend after the first tick made that second send fail every time with no reporter alive. The first race repetition exposed the same terminal ordering at FakeKernel.Play: its grant caused the boundary stop before its waiter could observe a starved writer. Its watchdog dump again held no backend goroutines. The test now grants time directly and offers ticks while waiting on engine snapshot changes until the specified stop, and exercises the same wait after the backend is fully joined. A fourth control waits for a writer after that join and fails deterministically.
 
 The fake kernel's `when` (under `FakeKernel.Await`) checks and registers under the kernel mutex; the engine wait helper subscribes before reading its snapshot. Neither loses a wakeup. No production code, wire contract, or timeout changed. The player rules and History record the ordering requirements. Each ordering has a negative control; focused race repetition, package stress loops and validation results are recorded with the task's report.
+
+
+## 2026-10-24 — B515 round 3: configured MPD file and informational argv hint
+
+The reading again describes only the bridge's configured/discovered mpd.conf.
+That file supplies config, mpd_conf warnings, song mapping and the DoP veto.
+The unshipped provenance field is replaced by optional mpd.configHint:
+same/different (physical identities in the bridge's view), none (no operand),
+or no_config; only different includes a redacted logical path. The operand's
+contents are never read. Process environ and MPD default inference are removed.
+Per-card Tgid/output-thread, stable start time, argv[0], root and bounded grammar
+checks remain, now determining hint presence alone.
+
+The round-3 design change follows the reviews' counterexamples: a private
+bind mount may keep the same root inode, mutable argv may describe a later
+path, /proc/self/cwd is bridge-relative, PID reuse may precede the first stat,
+MPD's HOME fallback uses getpwuid(getuid())->pw_dir, and a different unreadable
+file left the configured fallback displayed. These checks cannot prove which
+file MPD loaded. Signal Path keeps a verifiable description of the configured
+file and makes only an explicitly limited command-line observation.
+
+Named-parent physical include resolution and combined redaction remain.
+Ordinary absent includes already worked; a dangling include reproduced the
+resolution-error defect: optional absence was reported, plain absence lacked
+not-found classification, and the raw host path appeared. Resolution absence
+now maps to not found after checking the physical missing parent is inside
+the root. Both directives and outside-root dangling targets are tested.
+PROTOCOL.md now matches takeReading: ALSA configuration then mpd.conf, after
+the MPD status bracket. The only additive shipped wire field is configHint;
+protocol version remains 1. Backward-compatible protocol change, no iOS change
+required; the protocol mirror should be copied with the next companion update.
+
+Red-first hint values and dangling-include failures, adapted parser/identity,
+include/privacy controls, repeated race tests and the exact gate results are
+recorded in report-r3.md and controls-r3/. No commit or push is part of this round.
