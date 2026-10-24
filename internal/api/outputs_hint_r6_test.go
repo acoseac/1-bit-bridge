@@ -110,3 +110,47 @@ func TestReadingHintValidLinkChains(t *testing.T) {
 		})
 	}
 }
+
+// TestHintLinkToEitherSpellingOfTheRoot: an absolute link to exactly the
+// injected root stays inside it, whether it names the root as configured or
+// by its canonical path. The root is reached through a link here, so the two
+// spellings differ on every OS: a bare t.TempDir has one spelling on Linux,
+// where TestReadingHintLinkToInjectedRoot's two subtests are the same test.
+func TestHintLinkToEitherSpellingOfTheRoot(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real")
+	named := filepath.Join(dir, "alias")
+	writeRigFile(t, real, "srv/mpd.conf", "")
+	if err := os.MkdirAll(filepath.Join(real, "etc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, named); err != nil {
+		t.Skip(err)
+	}
+	canonical, err := filepath.EvalSymlinks(named)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonical == named {
+		t.Fatalf("premise: the root's two spellings differ, both %q", named)
+	}
+	want, err := os.Stat(filepath.Join(real, "srv/mpd.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{named, canonical} {
+		link := filepath.Join(real, "etc/base")
+		_ = os.Remove(link)
+		if err := os.Symlink(target, link); err != nil {
+			t.Skip(err)
+		}
+		got, ok := hintOperandHost(named, "/etc/base/srv/mpd.conf")
+		if !ok {
+			t.Errorf("a link to the root spelled %q lost the hint", target)
+			continue
+		}
+		if fi, err := os.Stat(got); err != nil || !os.SameFile(fi, want) {
+			t.Errorf("a link to the root spelled %q resolved to %q (%v), not the root's srv/mpd.conf", target, got, err)
+		}
+	}
+}
