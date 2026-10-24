@@ -364,7 +364,7 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 		if errors.As(err, &te) {
 			return &engine.Unplayable{Reason: ReasonTransport, Detail: te.Error()}
 		}
-		return fmt.Errorf("player backend: the device could not be opened: %w", err)
+		return fmt.Errorf("player backend: the device could not be opened: %w", busy(err))
 	}
 	s.mu.Lock()
 	if s.releasing {
@@ -974,8 +974,29 @@ func resumeError(err error) error {
 			code = "permission_denied"
 		}
 	}
-	return &ResumeError{Code: code, Err: err}
+	return &ResumeError{Code: code, Err: busy(err)}
 }
+
+// busy is err with engine.ErrDeviceBusy beside it in its chain when alsapcm
+// refused an open because another process holds the node
+// (alsapcm.ReasonBusy), at a session's start or at a resume's reopen, and err
+// unchanged otherwise (B470 PR 5b): the engine knows a busy device by that
+// sentinel alone, so it is mapped from alsapcm's own error, never from this
+// package's codes (a ResumeError's "busy") or from any error's text. Its
+// text is err's.
+func busy(err error) error {
+	if alsapcm.ReasonOf(err) != alsapcm.ReasonBusy {
+		return err
+	}
+	return &busyError{err: err}
+}
+
+// busyError is a busy refusal with engine.ErrDeviceBusy in its chain.
+type busyError struct{ err error }
+
+func (e *busyError) Error() string { return e.err.Error() }
+
+func (e *busyError) Unwrap() []error { return []error{e.err, engine.ErrDeviceBusy} }
 
 // resume is Resume.
 func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err error) {

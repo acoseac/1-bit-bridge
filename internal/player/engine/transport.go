@@ -1108,6 +1108,7 @@ func (e *Engine) startDone(s *session, r callResult) {
 	if s.phase != sessStarting || o.sess != s {
 		return
 	}
+	e.attempted(r.err)
 	if r.err == nil {
 		s.phase = sessLive
 		if s.chain[0].stage < stageSubmitted {
@@ -1197,6 +1198,7 @@ func (e *Engine) resumeDone(c *call, r callResult) {
 		}
 		return
 	}
+	e.attempted(r.err)
 	if r.err != nil {
 		o.resumeErr = r.err.Error()
 		e.touched()
@@ -1240,9 +1242,24 @@ func (e *Engine) callExpired(c *call) {
 		s.succCall = nil
 	}
 	if e.current(s.id) == s {
+		if c.kind == callStart || c.kind == callResume {
+			e.attempted(refuse("play", ReasonTimeout, why))
+		}
 		e.playFailed(refuse("play", ReasonTimeout, why))
 		e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonTimeout, Detail: why})
 	}
+}
+
+// attempted records the outcome of a play attempt whose answer the owner
+// took (Snapshot.LastAttempt, B470 PR 5b): a session's Start or a Resume,
+// err its failure or nil. The attempt is busy when err wraps ErrDeviceBusy,
+// the backend's mapping of its device layer's busy refusal, and never by
+// the error's text. It replaces the last attempt, so a later one that
+// succeeds, or fails otherwise, ends a busy record. It moves no generation.
+func (e *Engine) attempted(err error) {
+	o := &e.o
+	o.attempt = Attempt{Seq: o.attempt.Seq + 1, Failed: err != nil, Busy: errors.Is(err, ErrDeviceBusy)}
+	e.touched()
 }
 
 // onAudible is the played content crossing an occurrence's first frame:

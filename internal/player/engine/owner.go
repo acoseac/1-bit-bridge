@@ -36,6 +36,7 @@ type owner struct {
 	resumed     ResumeResult
 	resumeErr   string
 	lastStop    StopInfo
+	attempt     Attempt         // the last play attempt (attempted)
 	skips       map[uint32]Skip // replaced, never written to, once published
 	pass        map[uint32]bool // the entries refused since the last start or queue change
 	faults      []Fault         // replaced, never written to, once published
@@ -700,6 +701,7 @@ func (e *Engine) snapshot() *Snapshot {
 		resumed:   o.resumed,
 		resumeErr: o.resumeErr,
 		lastStop:  o.lastStop,
+		attempt:   o.attempt,
 		skips:     o.skips,
 		faults:    o.faults,
 		edits:     e.editState(),
