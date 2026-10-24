@@ -1220,7 +1220,7 @@ Windows skips only this test's privileged symlink creation.
 
 ## B500 — third-party licences in release archives (2026-10-24)
 
-**Every release archive carries freshly generated third-party licences from the union of the release builds; missing licences fail the release. Never replace build-derived discovery with the go.mod list or skip the before-hook. Include compiled-package ancestry and the pinned Go toolchain notices; never synthesize module grants. Discovery refuses a non-default GOFLAGS or workspace, and non-default architecture feature levels.**
+**Every release archive carries freshly generated third-party licences from the union of the release builds; missing licences fail the release. Never replace build-derived discovery with the go.mod list or skip the before-hook. Require a licence at each effective module root; include compiled-package ancestry and the pinned Go toolchain notices. Unknown notice suffixes fail; never synthesize module grants. Pin embedded-asset supplements to exact module versions and re-audit on upgrades or replacements. Discovery refuses vendor trees, a non-default GOFLAGS or workspace, and non-default architecture feature levels.**
 
 `go run ./scripts/third-party-licenses` reads the explicit matrix in
 `.goreleaser.yaml`, then runs `go list -mod=readonly -deps -json ./cmd/bridge`
@@ -1230,6 +1230,8 @@ are excluded; modules used on only one platform still enter the union.
 The small stdlib configuration reader accepts the current builds stanza
 only and refuses unfamiliar settings, tags, exclusions, flags and YAML
 forms. Extend discovery and its tests together before changing that stanza.
+Discovery refuses a vendor/ directory at the module root: GoReleaser would
+automatically build its sources while -mod=readonly discovers the cache.
 Discovery refuses a non-default GOFLAGS or workspace. It reads inherited
 `go env GOFLAGS GOWORK GOAMD64 GOARM64`, including persisted `go env -w`
 settings, and also refuses non-default architecture feature levels. It
@@ -1243,11 +1245,31 @@ but reads files from the replacement's directory. For every compiled package,
 collect files from its directory and every ancestor through the module root;
 deduplicate by module-relative path and label each file with that path. Never
 walk unlinked subtrees. Include full bytes of LICENSE*, LICENCE*, COPYING*,
-COPYRIGHT*, NOTICE*, PATENTS and UNLICENSE (case-insensitive), restricted to
-extensionless names, text extensions (.txt, .md, .rst, .markdown) or supported
-licence suffixes such as -APACHE and .MIT. Source files such as license_test.go
-are not notices and cannot satisfy the licence requirement. NOTICE or PATENTS
-alone is not a licence. Empty files and read failures are errors too.
+COPYRIGHT*, NOTICE*, PATENTS* and UNLICENSE* (case-insensitive). Require a
+licence-class file at the effective module root; a copied package's nested
+licence is additional coverage, never a grant for the rest of the module.
+Accept extensionless names, text extensions (.txt, .md, .rst, .markdown,
+.html, .htm) and the explicit licence-name suffix allow-list. This includes
+.LESSER and .Apache-2.0: these identify licence variants, not source code.
+Match the whole dotted suffix so Apache-2.0 is not mistaken for extension .0.
+Skip known source extensions such as license_test.go; fail on every other
+suffix, naming the file even when another valid licence is present. Extend
+the allow-list deliberately. NOTICE or PATENTS alone is not a licence.
+Empty files and read failures are errors too.
+
+The checked-in embedded-web-client.md and embedded-tailscale.md supplements
+are included inside their enclosing modules' entries, only when linked.
+The registry in main.go pins the exact module path and version. Any other
+version requires a fresh bundle audit; an unversioned or different-path
+replacement cannot inherit the reviewed original's supplement. Check the
+effective replacement identity/version as well. Supplements cover the
+web-client bundle's preserved React-family and classnames notices, its Inter
+font, and the event-bus debugger's HTMX scripts. Preserve the bundle's own
+copyright statements and label versions absent from its comments honestly.
+The offline review record identifies reconstructed licence texts requiring
+upstream verification. When auditing upgrades, inspect go-list EmbedFiles
+across every target, including compressed JS/CSS and font assets; module-root
+licences do not automatically grant rights to bundled third-party code.
 
 Reproduce only the PATENTS a module or its replacement actually ships; never
 supply a missing grant from another source. In particular, x/oauth2 has no
@@ -1261,8 +1283,10 @@ Module and filename order is sorted, without dates or cache paths.
 
 The before-hook runs after `go mod tidy`, writes the ignored root file
 `THIRD_PARTY_LICENSES.md`, and every archive includes it. Weekly dependency
-bumps therefore refresh notices automatically on the next release; no
-checked-in copy or human regeneration reminder is needed. Do not seed dist/
+bumps therefore refresh module notices automatically on the next release.
+Embedded-asset module bumps instead fail until their supplements are reviewed
+and the exact-version registry is updated. The generated aggregate stays
+untracked; the supplementary source notices are checked in. Do not seed dist/
 from the hook: GoReleaser requires it empty at that stage. The release
 playbook verifies every snapshot archive's notice bytes before removing dist/.
 
@@ -1273,4 +1297,7 @@ files, nested ancestry and deduplication, COPYRIGHT, LICENCE, rejected source
 files, module-owned PATENTS, UNLICENSE, Go toolchain notices and deterministic
 ordering. Environment tests cover inherited flags, explicit and automatically
 found workspaces, persisted settings and architecture levels. The wiring test
-pins the before-hook and the archive file entry.
+pins the before-hook and the archive file entry. Round-3 fixtures also pin
+nested-only root refusal (including replacements), COPYING.LESSER beside
+COPYING, HTML and unknown suffix handling, supplementary PATENTS/UNLICENSE,
+vendor refusal, embedded notice content and version/replacement rejection.

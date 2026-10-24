@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B500 round 3: embedded assets and fail-closed discovery](#2026-10-24--b500-round-3-embedded-assets-and-fail-closed-discovery)
 - [2026-10-24 — B500 round 2: package ancestry, shipped grants and release environment](#2026-10-24--b500-round-2-package-ancestry-shipped-grants-and-release-environment)
 - [2026-10-24 — B500: release archives carry build-derived third-party licences](#2026-10-24--b500-release-archives-carry-build-derived-third-party-licences)
 - [2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader](#2026-10-24--b525-the-players-identity-file-is-read-without-waiting-a-named-pipe-at-player-uuid-is-refused-at-once-by-every-reader)
@@ -60065,3 +60066,40 @@ The generated output is 358,063 bytes (was 355,170); two generations match.
 The requested three-platform vet, fmt, docs-check and generator race gates
 pass. Archive checks use synthetic fixtures; no release or packaging run is
 claimed.
+
+## 2026-10-24 — B500 round 3: embedded assets and fail-closed discovery
+
+The release notice generator now requires a licence-class file at each
+effective module root. A nested copied package's licence remains an additional
+notice, but cannot grant coverage to the rest of the module. Replacement roots
+follow the same rule. Notice-prefixed filenames use a three-way suffix policy:
+include known text and licence-name suffixes, skip known source extensions,
+and refuse every unknown suffix by filename even beside a valid licence.
+COPYING.LESSER, LICENSE.Apache-2.0, HTML notices and suffixed PATENTS/UNLICENSE
+are included. A vendor/ directory at the bridge root fails before discovery,
+since release builds would otherwise select different sources from go list.
+
+Checked-in supplements add the web-client bundle's preserved React, React DOM,
+scheduler, classnames and external-store-shim notices and its Inter font;
+the Tailscale supplement adds HTMX and its WebSocket extension and preserves
+the event-bus CSS reset's source notice. Both are pinned by exact module path
+and version, with replacement checks. Upgrades require another asset audit.
+The six-target EmbedFiles union and a module-wide go:embed/asset search found
+17 linked embedded files. Protobuf's edition defaults and Tailscale's own
+metadata, DNS data and resolvconf script remain covered by their module grants.
+Unlinked embed targets are excluded. The offline audit records the missing
+bundle version labels and reconstructed MIT/Zero-Clause BSD texts for upstream
+verification; it does not assert an exhaustive JavaScript component inventory
+from minified bytes whose other package notices were stripped.
+
+The four regressions failed against the round-2 generator before production
+changes, then passed. Fifty-one assertion-level mutation controls retain the
+37 round-2 guarantees and exercise the new root, suffix, vendor and embedded
+notice guards; saved bytes are restored after every mutation. The six-target
+counts remain 63 per Darwin target, 67 per Linux target, 68 per Windows target
+and 75 modules in the union. Two generations match at 370,674 bytes, up 12,611
+from round 2. Besides supplements, the Go heading advances to go1.27.3 and
+Tailscale to v1.104.2 from the merged main; their existing notice bytes are
+unchanged. The requested host/Linux/Windows vet, pinned fmt, docs-check and
+generator race gates are recorded in the round-3 report. No commit, push,
+release or deployment was performed.

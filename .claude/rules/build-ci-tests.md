@@ -29,7 +29,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 
 ## Build, CI, and test discipline
 
-- **Every release archive carries freshly generated third-party licences from the union of the release builds; missing licences fail the release. Never replace build-derived discovery with the go.mod list or skip the before-hook. Include compiled-package ancestry and the pinned Go toolchain notices; never synthesize module grants. Discovery refuses a non-default GOFLAGS or workspace, and non-default architecture feature levels.** (B500) → History-rules-build-ci-tests.md
+- **Every release archive carries freshly generated third-party licences from the union of the release builds; missing licences fail the release. Never replace build-derived discovery with the go.mod list or skip the before-hook. Require a licence at each effective module root; include compiled-package ancestry and the pinned Go toolchain notices. Unknown notice suffixes fail; never synthesize module grants. Pin embedded-asset supplements to exact module versions and re-audit on upgrades or replacements. Discovery refuses vendor trees, a non-default GOFLAGS or workspace, and non-default architecture feature levels.** (B500) → History-rules-build-ci-tests.md
 
 - **SonarCloud's `go:S2077` follows a named const to its concatenation.** → History-rules-build-ci-tests.md
 - **A test server that redirects to the REQUEST'S OWN path is a BLOCKER for SonarCloud's gate.** → History-rules-build-ci-tests.md
