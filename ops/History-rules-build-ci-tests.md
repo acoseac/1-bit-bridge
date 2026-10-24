@@ -1220,7 +1220,7 @@ Windows skips only this test's privileged symlink creation.
 
 ## B500 — third-party licences in release archives (2026-10-24)
 
-**Every release archive and Docker image carries freshly generated third-party licences from the union of the release builds; missing licences fail the release. Never replace build-derived discovery with the go.mod list or skip the before-hook. Require a licence at each effective module root; include compiled-package ancestry and the pinned Go toolchain notices. Unknown notice suffixes fail; never synthesize module grants. Omit unneeded Tailscale webclient and debugeventbus assets with the release tags in .goreleaser.yaml; keep all builds, deploys and CI tests/vet in step through the repository-wide reviewed-site census in check-build-tags. Discover with those same tags; refuse YAML null, boolean and numeric tag spellings. Refuse linked web packages and every non-main-module embed outside the exact module@version/package/file allowlist; exercise the real six-target graph in tests. The supplement registry is empty. Docker generates notices with the full go.mod patch toolchain and copies them into its final stage. Pin embedded-asset supplements to exact module versions and re-audit on upgrades or replacements. Discovery refuses vendor trees, a non-default GOFLAGS or workspace, and non-default architecture feature levels.**
+**Every release archive and Docker image carries freshly generated third-party licences from the union of the release builds; missing licences fail the release. Never replace build-derived discovery with the go.mod list or skip the before-hook. Require a licence at each effective module root; include compiled-package ancestry and the pinned Go toolchain notices. Unknown notice suffixes fail; never synthesize module grants. Omit unneeded Tailscale webclient and debugeventbus assets with the release tags in .goreleaser.yaml; keep all builds, deploys and CI tests/vet in step through the repository-wide reviewed-site census in check-build-tags, including operational Markdown shell fences and Go executable/variable forms with global flags. Discover with those same tags; refuse YAML null, boolean and numeric tag spellings. Refuse linked web packages and every non-main-module embed outside the exact module@version/package/file allowlist; exercise the real six-target graph in tests. The supplement registry is empty. Docker generates notices with the full go.mod patch toolchain and copies them into its final stage. Pin embedded-asset supplements to exact module versions and re-audit on upgrades or replacements. Discovery refuses vendor trees, a non-default GOFLAGS or workspace, and non-default architecture feature levels.**
 
 `go run ./scripts/third-party-licenses` reads the explicit matrix in
 `.goreleaser.yaml`, then runs `go list -mod=readonly -deps -json -tags=<release-tags> ./cmd/bridge`
@@ -1267,9 +1267,11 @@ The Makefile GO_TAGS value, Dockerfile build flags, all three deploy scripts,
 and every CI test/vet invocation mirror that list. check-build-tags uses the
 same fail-closed reader. It scans operational files across the repository
 (shell, PowerShell, Python, batch, workflow YAML, Makefiles, Dockerfiles and
-extensionless scripts), joins command continuations, strips full-line comments,
+extensionless scripts, plus labelled shell fences in README.md and ops/*.md),
+joins command continuations, strips full-line comments,
 and compares every go build/install/run/test/vet site with the explicit
-reviewedBuildSites census, including multiplicities. New files and additional
+reviewedBuildSites census, including multiplicities. It recognizes go, go.exe,
+$(GO), ${GO} and $GO, with global flags before the verb. New files and additional
 commands fail until reviewed. The untagged exceptions are the notice generator,
 the temp-directory helper and two printed test instructions; none builds the
 shipped bridge. Generated output trees and nested checkouts are excluded;

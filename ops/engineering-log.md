@@ -25,6 +25,8 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B500 round 6: documented deploy tags and invocation census](#2026-10-24--b500-round-6-documented-deploy-tags-and-invocation-census)
+- [2026-10-24 — B500 round 5: deployed builds, embedded-file admission and image notices](#2026-10-24--b500-round-5-deployed-builds-embedded-file-admission-and-image-notices)
 - [2026-10-24 — B500 round 4: omit unused bundled UIs](#2026-10-24--b500-round-4-omit-unused-bundled-uis)
 - [2026-10-24 — B500 round 3: embedded assets and fail-closed discovery](#2026-10-24--b500-round-3-embedded-assets-and-fail-closed-discovery)
 - [2026-10-24 — B500 round 2: package ancestry, shipped grants and release environment](#2026-10-24--b500-round-2-package-ancestry-shipped-grants-and-release-environment)
@@ -60183,3 +60185,21 @@ The full-suite tree-walk audit required classifying the new census walk. Its
 otherTreeWalks table now names checkBuildSites as a source-repository walk; no
 library-root exception or traversal behavior changed. The focused audit rerun
 passes; the package still has three socket tests refused by this sandbox.
+
+
+## 2026-10-24 — B500 round 6: documented deploy tags and invocation census
+
+The canonical manual Linux deployment now supplies both release omission tags.
+The build-site census includes labelled shell fences in README.md and top-level
+ops Markdown, with prose and other code languages outside it. The deployment
+command and the release playbook's notice-generator command join the reviewed
+sites. Go executable and variable spellings (go, go.exe, $(GO), ${GO}, $GO),
+including global flags before build/install/run/test/vet, now enter the census.
+Regression cases reproduce the previously accepted commands before the fix.
+
+The Docker notice guard derives its full version from go.mod, so a coherent
+patch-version change still exercises each intended deletion. A private-copy
+control changes both pins to another supported patch, reproducing the old
+hardcoded test's mutation miss. The missing round-5 index line is restored,
+newest first. The round-6 scratch report records red-first checks, independent
+mutation controls, saved-byte restoration and the requested gates.
