@@ -119,8 +119,8 @@ Windows-runner check, distinct from portable race-test results.
   each attempt at the rename, refuse a file that is no longer the one the
   turn read (`*config.ChangedInTurnError`), a refusal ending the retries
   (`atomicwrite.RenameWithRetryIf`, within `saveWindow`); the turn's reads
-  are asked again only while Windows answers a sharing or access
-  violation; the wait is bounded at `config.LockWait` (5 s), then a
+  are asked again only while Windows answers `ERROR_SHARING_VIOLATION` or
+  `ERROR_ACCESS_DENIED`; the wait is bounded at `config.LockWait` (5 s), then a
   value-free `*config.BusyError`, or, where every try answered ENOLCK, a
   `*config.NoLockManagerError` naming the remedy; only a lock whose answer
   says the filesystem keeps none (EOPNOTSUPP, ENOTSUP,

@@ -14,8 +14,8 @@ import (
 )
 
 // On Windows a read of a file just renamed in, or one an indexer or a virus
-// scanner holds, is refused for a moment with a sharing or an access
-// violation, which atomicwrite.ReadWithRetryCtx asks again on. Until B506's
+// scanner holds, is refused for a moment with a sharing violation or access
+// denied, which atomicwrite.ReadWithRetryCtx asks again on. Until B506's
 // third round the read a turn makes when LockFile takes it, and the one each
 // save makes before its rename, were asked once, so such a refusal failed the
 // save. These tests stand a portable error in for Windows' (errBusyForTest)

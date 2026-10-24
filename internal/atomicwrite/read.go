@@ -27,8 +27,8 @@ func ReadWithRetryCtx(ctx context.Context, read func() error) error {
 }
 
 // readRetryable is what ReadWithRetryCtx asks again on: the platform's
-// retryableReadError (Windows' sharing and access violations, nothing
-// elsewhere). SetReadRetryableForTest replaces it.
+// retryableReadError (Windows' ERROR_SHARING_VIOLATION and
+// ERROR_ACCESS_DENIED, nothing elsewhere). SetReadRetryableForTest replaces it.
 var readRetryable = retryableReadError
 
 // SetReadRetryableForTest makes ReadWithRetryCtx ask again on the errors fn

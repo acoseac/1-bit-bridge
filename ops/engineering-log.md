@@ -60816,8 +60816,9 @@ and replaced the database.
 Codex's seventh on the brief). The turn's reads (`find`, `stillAsFound`) and
 bind's own comparison read through `config.ReadFile`: `fsutil.ReadAsFile`
 inside `atomicwrite.ReadWithRetryCtx`, so a named pipe is still refused at
-once and a missing file still answers at once, and only Windows' sharing and
-access violations are asked again. Bind reports a read that fails for good
+once and a missing file still answers at once, and only Windows'
+`ERROR_SHARING_VIOLATION` and `ERROR_ACCESS_DENIED` are asked again. Bind
+reports a read that fails for good
 as that read's failure. Red on the seams, through the portable seams:
 "a turn behind one refused read: read … in its turn: … being used by another
 process", the same "again before replacing it", and bind's "changed after
@@ -60927,7 +60928,8 @@ file put back from git after it; every one went red:
 ### Checks of the third round
 
 Through the build lock, on ff07d2f9's code (the commits after it change
-only this log): `make fmt` rewrote nothing (Go 1.27.3, `GOTOOLCHAIN=local`)
+only this log, but for the last, whose own checks close this section):
+`make fmt` rewrote nothing (Go 1.27.3, `GOTOOLCHAIN=local`)
 and `make vet` was clean; `make test` passed 74 packages under the race
 detector, `cmd/bridge` (617 s), `internal/admin` (747 s), `internal/backup`
 (33 s), `internal/atomicwrite` (12 s), `internal/config` (11 s) and
@@ -60949,6 +60951,17 @@ its seam on every platform. Rules: the config-lifecycle.md and cli-serve.md
 lines, given to the orchestrator as OLD and NEW pairs against 42cca59c;
 their long forms are in `ops/History-rules-config-lifecycle.md` and
 `ops/History-rules-cli-serve.md`. player.md is unchanged.
+
+The last commit changes comments and prose alone: this round's text called
+`ERROR_ACCESS_DENIED`, the second answer the read retry asks again on, an
+access violation, which on Windows is a memory fault; `ReadFile`'s and
+`readRetryable`'s comments, a test's, the config long form, the Windows
+paragraph above and the rules note's config-lifecycle.md line now name
+`ERROR_SHARING_VIOLATION` and `ERROR_ACCESS_DENIED`. Checked through the build lock: gofmt listed none of
+its Go files, `go vet` of `internal/config` and `internal/atomicwrite` was
+clean here and for Windows, `go test -race -count=1` of both passed (11 s,
+12 s), `cmd/bridge`'s docblock and test-citation guards and the config
+writers' sweep passed, and `make docs-check` passed.
 
 ## 2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader
 

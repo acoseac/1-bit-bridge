@@ -295,8 +295,8 @@ func SetTurnReadForTest(fn func(path string) ([]byte, error)) (restore func()) {
 // fsutil.ReadAsFile, so anything there that is not a file is refused at once
 // rather than waited on, and again, within atomicwrite's bounded schedule and
 // ctx, while Windows answers that another process holds the file (a sharing
-// or an access violation: an indexer's or a virus scanner's handle on a file
-// just renamed in), never on a file that is not there. A writer's own
+// violation or access denied: an indexer's or a virus scanner's handle on a
+// file just renamed in), never on a file that is not there. A writer's own
 // comparison in its turn (bind's SaveIf) reads through it, as the turn's
 // comparison does.
 func ReadFile(ctx context.Context, path string) ([]byte, error) {
