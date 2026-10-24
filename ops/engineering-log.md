@@ -200,6 +200,23 @@ and review semantics are unchanged. All five controls matched again, and
 all six requested gates passed on the final implementation; the full package
 race run completed in 157.31 seconds.
 
+**After review.** Codex and Claude, reviewing round 8, found three gaps. The
+verb rule counted a verb in command position as Go's, so an ordinary deploy
+line refused the census: `sudo install -m 0755 -o root -g root ./1-bit-bridge
+/usr/local/bin/1-bit-bridge`, `if test -f ./deploy.env`, `test -x ./bin/bridge`
+(seven such lines are now accepted cases). A verb at the start of a line, after
+;, &, |, ( or !, after a VAR=value assignment, or after if, then, else, elif,
+do, while, until, sudo, exec, command, env, time, nohup or nice is the command
+itself; every real Go invocation names an executable before its verb. dlv's
+subcommand may follow its flags (`dlv --headless debug ./cmd/bridge`), and
+golangci-lint is a site wherever it is named, its GitHub action included
+(`uses: golangci/golangci-lint-action@v6`, which the union missed). Red first:
+the twelve new cases; nothing else. Controls on the committed fix, each red as
+predicted and nothing else: without the command-position check, the seven
+accepted lines; without flags before dlv's subcommand, the three flagged dlv
+lines; with golangci-lint matched only before `run`, the flagged run and the
+action. The real tree's census is unchanged (42 sites).
+
 ## 2026-10-24 — B500 round 7: the build-site census fails closed
 
 The scope, executable-only matching, and EOF-only fence behavior described
