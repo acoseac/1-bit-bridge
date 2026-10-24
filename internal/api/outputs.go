@@ -256,6 +256,7 @@ type localOutputs struct {
 	// configuration reads: conf.ReadFile and alsa.LoadPCMConfig, which a
 	// test replaces with one that hangs or panics.
 	confFile   func(root, logical, host string) (conf.File, error)
+	cmdline    func(root, logical string, limit int64) ([]byte, error)
 	alsaConfig func(root string) alsa.PCMConfig
 
 	mu           sync.Mutex
@@ -362,6 +363,7 @@ func newLocalOutputs(cfg LocalOutputsConfig) *localOutputs {
 		loopTrack:  cfg.LoopbackTrack,
 		limits:     defaultReadingLimits,
 		confFile:   conf.ReadFile,
+		cmdline:    conf.ReadLogical,
 		alsaConfig: alsa.LoadPCMConfig,
 	}
 	if o.goos == "" {

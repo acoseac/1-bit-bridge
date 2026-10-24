@@ -365,11 +365,22 @@ type call struct {
 	err   error
 }
 
+// reported is one occurrence's Details as the backend reported them, and at
+// how many events into evs: kept apart from evs, whose sequences the tests
+// read as they were before the backend reported Details (B470 PR 5a3).
+type reported struct {
+	s  engine.SessionID
+	o  engine.OccurrenceID
+	d  engine.Details
+	at int
+}
+
 // recorder keeps what the backend reported and what the engine asked of
 // it, in order, and tells waiters of each.
 type recorder struct {
 	mu      sync.Mutex
 	evs     []event
+	details []reported
 	calls   []call
 	changed chan struct{}
 	// panicOn, when set, makes the delivery of the first event it holds of
@@ -453,6 +464,12 @@ func (r *recorder) callList() []call {
 	return slices.Clone(r.calls)
 }
 
+func (r *recorder) detailsList() []reported {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.details)
+}
+
 // recEvents records each event and passes it on to the engine.
 type recEvents struct {
 	r    *recorder
@@ -532,6 +549,15 @@ func (v *recEvents) Released(s engine.SessionID) {
 	h := v.add(event{kind: "released", s: s})
 	v.next.Released(s)
 	h.wait()
+}
+
+// Details records what the backend reported of o's content, beside the
+// events, and passes it on to the engine (engine.DetailsEvents).
+func (v *recEvents) Details(s engine.SessionID, o engine.OccurrenceID, d engine.Details) {
+	v.r.note(func() { v.r.details = append(v.r.details, reported{s: s, o: o, d: d, at: len(v.r.evs)}) })
+	if de, ok := v.next.(engine.DetailsEvents); ok {
+		de.Details(s, o, d)
+	}
 }
 
 // tee is the backend as the engine sees it: every call recorded, and every

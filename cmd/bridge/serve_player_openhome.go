@@ -29,9 +29,11 @@ type openhomeWiring struct {
 
 // startOpenHome starts the player's OpenHome surface, which the plan asks
 // for (output.player.openhome) and the player runs: id is the player's
-// identity, its UDN; the room and the port are the boot snapshot's. It
-// listens on each LAN address and registers bound endpoints with serve's
-// shared SSDP subsystem. A surface that cannot start fails alone: the player runs
+// identity, its UDN; the room and the port are the boot snapshot's; its
+// read actions answer from the engine the player runs (B470 PR 5a3), and
+// from no engine once that engine's Run has ended. It listens on each LAN
+// address and registers bound endpoints with serve's shared SSDP
+// subsystem. A surface that cannot start fails alone: the player runs
 // without it, and says so; an address that cannot be bound fails that
 // address alone, said by the surface.
 func (p *bridgePlayer) startOpenHome(id string, w servePlayerWiring) {
@@ -46,9 +48,14 @@ func (p *bridgePlayer) startOpenHome(id string, w servePlayerWiring) {
 		p.mu.Unlock()
 		return
 	}
+	var eng openhome.Engine
+	if p.eng != nil {
+		eng = p.eng
+	}
 	s, err := openhome.Start(openhome.Config{
 		SSDP:      w.SSDP,
 		Device:    openhome.Device{UUID: id, Room: player.Room, ModelNumber: version.ServerVersion},
+		Engine:    eng,
 		Port:      player.EffectiveOpenHomePort(),
 		Addresses: addresses,
 		Listen:    o.Listen,

@@ -44,7 +44,12 @@ type occ struct {
 	id    OccurrenceID
 	entry uint32
 	ref   Reference
-	stage stage
+	// meta is the entry's metadata as it was handed off, shared with the
+	// queue, which never writes to it; details is what the backend reported
+	// of its content (DetailsEvents), nil until it does.
+	meta    []byte
+	details *Details
+	stage   stage
 	// unwanted is why it must not be heard: an edit removed it, or made it
 	// no longer follow the occurrence before it. reconcile sets it in the
 	// edit's own step, even while a Prepare or a Cut is under way, and clears
@@ -459,7 +464,36 @@ func (e *Engine) newOcc(id uint32) *occ {
 	o := &e.o
 	o.nextOcc++
 	en, _ := o.q.get(id)
-	return &occ{id: OccurrenceID(o.nextOcc), entry: id, ref: en.ref}
+	return &occ{id: OccurrenceID(o.nextOcc), entry: id, ref: en.ref, meta: en.meta}
+}
+
+// hear makes oc the occurrence heard, or nothing (nil): the audible
+// occurrence and its track (Snapshot.Track), built from the occurrence as it
+// was handed off, never looked up in the queue; one more track counted for
+// each occurrence heard, the one heard already counting no more, and one
+// more change of the details whenever what is known of the content heard
+// changes (B470 PR 5a3). A published track is never written to: each is a
+// new one.
+func (e *Engine) hear(oc *occ) {
+	o := &e.o
+	if oc != nil && o.track != nil && o.track.Occurrence == oc.id {
+		return
+	}
+	before, had := o.track.details()
+	if oc == nil {
+		o.audible, o.track = Audible{}, nil
+	} else {
+		o.audible = Audible{Occurrence: oc.id, Entry: oc.entry}
+		t := &Track{Occurrence: oc.id, Entry: oc.entry, Ref: oc.ref, Meta: oc.meta}
+		if oc.details != nil {
+			t.Details, t.HasDetails = *oc.details, true
+		}
+		o.track = t
+		o.tracks++
+	}
+	if after, has := o.track.details(); has != had || after != before {
+		o.detailsN++
+	}
 }
 
 // startSession starts a session at entry target, for the play commands
@@ -480,7 +514,8 @@ func (e *Engine) startSession(target uint32) {
 	o.sess = s
 	o.sessions[s.id] = s
 	o.state, o.starting, o.then = Playing, true, IntentStop
-	o.audible, o.join = Audible{}, nil
+	e.hear(nil)
+	o.join = nil
 	e.selectEntry(target)
 	e.visible()
 	req := StartRequest{
@@ -531,7 +566,8 @@ func (e *Engine) releaseSession(s *session, then Intent, why StopInfo) {
 	if o.maint == nil {
 		o.state = Releasing
 	}
-	o.starting, o.audible, o.join = false, Audible{}, nil
+	o.starting, o.join = false, nil
+	e.hear(nil)
 	e.visible()
 	rc := e.call(callRelease, s, ReleaseTimeout, func(ctx context.Context) callResult { return callResult{err: e.be.Release(ctx, s.id)} })
 	s.releaseCall = rc
@@ -1239,7 +1275,7 @@ func (e *Engine) onAudible(id SessionID, oid OccurrenceID) {
 	}
 	s.chain = s.chain[i:]
 	oc.stage = stageAudible
-	o.audible = Audible{Occurrence: oc.id, Entry: oc.entry}
+	e.hear(oc)
 	o.pos = Position{Occurrence: oc.id}
 	o.starting = false
 	e.playBegan(s)
@@ -1249,6 +1285,35 @@ func (e *Engine) onAudible(id SessionID, oid OccurrenceID) {
 	e.selectEntry(oc.entry)
 	e.touched()
 	e.reconcile(s)
+}
+
+// onDetails is what the backend reports of an occurrence's content
+// (DetailsEvents): kept with the occurrence, so it is the track's when the
+// occurrence is heard, and the track's at once when it is heard already. A
+// report from a session that is not current, or of an occurrence the
+// session does not hold, changes nothing; none moves the generation.
+func (e *Engine) onDetails(id SessionID, oid OccurrenceID, d Details) {
+	o := &e.o
+	s := e.current(id)
+	if s == nil {
+		return
+	}
+	i := s.index(oid)
+	if i < 0 {
+		return
+	}
+	s.chain[i].details = &d
+	if o.track == nil || o.track.Occurrence != oid {
+		return
+	}
+	before, had := o.track.details()
+	t := *o.track
+	t.Details, t.HasDetails = d, true
+	o.track = &t
+	if !had || before != d {
+		o.detailsN++
+	}
+	e.touched()
 }
 
 // onFinished is everything handed off played out: playback stops on the

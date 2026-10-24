@@ -36,7 +36,7 @@
 # Keep GO_VERSION in step with the `go` directive in go.mod: the alpine
 # golang image sets GOTOOLCHAIN=local, so a stale value fails the build
 # with "go.mod requires go >= X" instead of auto-downloading a toolchain.
-ARG GO_VERSION=1.27
+ARG GO_VERSION=1.27.3
 ARG ALPINE_VERSION=3.22
 
 # --- builder ---
@@ -76,6 +76,9 @@ RUN go mod download
 
 COPY . .
 
+# Generate on the native builder, before TARGETOS/TARGETARCH affect the binary.
+RUN go run ./scripts/third-party-licenses
+
 # Static binary, stripped, no cgo. modernc.org/sqlite is pure-Go so
 # CGO=0 is safe across our SQLite path.
 #
@@ -96,6 +99,7 @@ ARG TARGETARCH
 ENV CGO_ENABLED=0
 
 RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+    -tags ts_omit_webclient,ts_omit_debugeventbus \
     -trimpath \
     -ldflags="-s -w -X github.com/acoseac/1-bit-bridge/internal/version.ServerVersion=${VERSION}" \
     -o /out/bridge \
@@ -169,6 +173,7 @@ RUN apk add --no-cache ca-certificates tzdata sox ffmpeg chromaprint lsof && \
     chmod 0700 /data
 
 COPY --from=builder /out/bridge /usr/local/bin/bridge
+COPY --from=builder /src/THIRD_PARTY_LICENSES.md /usr/share/doc/1-bit-bridge/THIRD_PARTY_LICENSES.md
 
 # /data is the canonical persistent volume — bridge.yaml, the
 # SQLite manifest DB, the TLS material, and the artwork cache

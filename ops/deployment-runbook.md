@@ -238,7 +238,7 @@ The scripted form is [`deploy/linux/deploy-bridge-vps.sh`](../deploy/linux/deplo
 ```sh
 # 1. Cross-compile against current main.
 git checkout main && git pull --ff-only
-GOOS=linux GOARCH=amd64 go build \
+GOOS=linux GOARCH=amd64 go build -tags ts_omit_webclient,ts_omit_debugeventbus \
   -ldflags "-s -w -X github.com/acoseac/1-bit-bridge/internal/version.ServerVersion=$(git describe --tags --always)" \
   -o dist/bridge-linux-amd64 ./cmd/bridge
 

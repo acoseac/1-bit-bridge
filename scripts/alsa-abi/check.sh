@@ -82,7 +82,7 @@ echo "the probe printed $(wc -l <"$work/probe.txt") facts:"
 sed 's/^/  /' "$work/probe.txt"
 
 cd "$repo"
-go test ./internal/alsapcm -run '^TestUAPIMatchesTheKernelHeader$' -count=1 -v \
+go test -tags ts_omit_webclient,ts_omit_debugeventbus ./internal/alsapcm -run '^TestUAPIMatchesTheKernelHeader$' -count=1 -v \
 	-args -abi-probe="$work/probe.txt" | tee "$work/go-test.txt"
 # A skipped test also exits 0, so the pass line is what proves the
 # comparison ran.

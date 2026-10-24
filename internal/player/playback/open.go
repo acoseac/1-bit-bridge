@@ -160,6 +160,32 @@ func (b *Backend) open(ctx context.Context, o *occ) {
 	}
 }
 
+// detailsOf is what the session reports of an occurrence's content as it is
+// heard (engine.Details, B470 PR 5a3): the decoder's own length (its total
+// frames, 0 when the container declares none) and format, never a tag's,
+// and lossless, as everything this backend plays is.
+func detailsOf(p format.PCM) engine.Details {
+	return engine.Details{Frames: p.Frames, RateHz: p.RateHz, Bits: p.ValidBits, Channels: p.Channels,
+		Codec: codecName(p.Container), Lossless: true}
+}
+
+// codecName names the decoder of a container content inspection chose, as
+// OpenHome's Info:1 names a codec (CodecName): FLAC, WAV, AIFF (AIFF-C
+// included) or ALAC; "" for a container no session plays.
+func codecName(c format.Container) string {
+	switch c {
+	case format.ContainerFLAC:
+		return "FLAC"
+	case format.ContainerWAV:
+		return "WAV"
+	case format.ContainerAIFF:
+		return "AIFF"
+	case format.ContainerALAC:
+		return "ALAC"
+	}
+	return ""
+}
+
 // refuseDecode refuses o with a decoder's refusal, by its own reason, or an
 // I/O error as unreadable.
 func refuseDecode(o *occ, err error) {

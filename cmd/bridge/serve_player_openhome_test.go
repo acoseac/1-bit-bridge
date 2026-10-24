@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -10,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -71,10 +74,10 @@ func (b *openhomeBox) surface(t *testing.T) (*openhome.Surface, netip.AddrPort) 
 // output.player.openhome off, the player runs and nothing of the surface
 // does: no listener asked for, no surface built. With it on, the player
 // starts it once its engine runs, on each LAN address on 7792, the device
-// description naming the player's identity and room, and the SOAP layer
-// answering 602; serve's stop stops it first, before the engine, and closes
-// its sockets. With it on and the player off, nothing of it runs, and boot
-// says so once.
+// description naming the player's identity and room, the reads answering
+// from serve's engine and the writes 602 (B470 PR 5a3); serve's stop stops
+// it first, before the engine, and closes its sockets. With it on and the
+// player off, nothing of it runs, and boot says so once.
 func TestServeRunsTheOpenHomeSurfaceOnlyWithItsOptInAndThePlayer(t *testing.T) {
 	needsDirectorySync(t)
 	t.Run("off", func(t *testing.T) {
@@ -135,19 +138,48 @@ func TestServeRunsTheOpenHomeSurfaceOnlyWithItsOptInAndThePlayer(t *testing.T) {
 		if doc.Device.UDN != "uuid:"+uuid || doc.Device.FriendlyName != "Study" || doc.Device.DeviceType != openhome.DeviceType {
 			t.Errorf("the description names %+v, want the player's uuid:%s, Study, a Source", doc.Device, uuid)
 		}
-		// Positive control: the same Insert forwarded to the engine changes
-		// the queue. Restore it before checking the surface's refusal.
+		// The reads answer from serve's own engine (B470 PR 5a3): an entry
+		// inserted through it is in the IdArray the surface answers, with the
+		// engine's token, and the transport the engine's.
 		ref, err := engine.NewReference("library-track")
 		if err != nil {
 			t.Fatal(err)
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		if _, err := eng.InsertAfter(ctx, 0, ref, []byte("metadata")); err != nil {
+		id, err := eng.InsertAfter(ctx, 0, ref, []byte("metadata"))
+		if err != nil {
 			t.Fatal(err)
 		}
 		if eng.Snapshot().Len() != 1 {
 			t.Fatal("a forwarded Insert was not observable")
+		}
+		soap := func(action, args string) (int, string) {
+			t.Helper()
+			req, err := http.NewRequest(http.MethodPost, "http://"+at.String()+"/openhome/playlist/control",
+				strings.NewReader(`<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:`+action+
+					` xmlns:u="urn:av-openhome-org:service:Playlist:1">`+args+`</u:`+action+`></s:Body></s:Envelope>`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Content-Type", `text/xml; charset="utf-8"`)
+			req.Header.Set("SOAPAction", `"urn:av-openhome-org:service:Playlist:1#`+action+`"`)
+			res, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := io.ReadAll(res.Body)
+			_ = res.Body.Close()
+			return res.StatusCode, string(raw)
+		}
+		var ids [4]byte
+		binary.BigEndian.PutUint32(ids[:], id)
+		wantArray := "<Token>" + strconv.FormatUint(uint64(eng.Snapshot().Token()), 10) + "</Token><Array>" + base64.StdEncoding.EncodeToString(ids[:]) + "</Array>"
+		if code, body := soap("IdArray", ""); code != 200 || !strings.Contains(body, wantArray) {
+			t.Errorf("IdArray: %d %s; want the engine's token and its one entry, %s", code, body, wantArray)
+		}
+		if code, body := soap("TransportState", ""); code != 200 || !strings.Contains(body, "<Value>Stopped</Value>") {
+			t.Errorf("TransportState: %d %s; want the engine's, Stopped", code, body)
 		}
 		if err := eng.DeleteAll(ctx); err != nil {
 			t.Fatal(err)
@@ -155,21 +187,9 @@ func TestServeRunsTheOpenHomeSurfaceOnlyWithItsOptInAndThePlayer(t *testing.T) {
 		if eng.Snapshot().Len() != 0 {
 			t.Fatal("positive control did not restore an empty queue")
 		}
-		req, err := http.NewRequest(http.MethodPost, "http://"+at.String()+"/openhome/playlist/control",
-			strings.NewReader(`<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:Insert xmlns:u="urn:av-openhome-org:service:Playlist:1"><AfterId>0</AfterId><Uri>library-track</Uri><Metadata>metadata</Metadata></u:Insert></s:Body></s:Envelope>`))
-		if err != nil {
-			t.Fatal(err)
-		}
-		req.Header.Set("Content-Type", `text/xml; charset="utf-8"`)
-		req.Header.Set("SOAPAction", `"urn:av-openhome-org:service:Playlist:1#Insert"`)
-		res, err = client.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		raw, _ = io.ReadAll(res.Body)
-		_ = res.Body.Close()
-		if res.StatusCode != 500 || !strings.Contains(string(raw), "<errorCode>602</errorCode>") {
-			t.Errorf("Insert: %d %s; want fault 602", res.StatusCode, raw)
+		// A write is still 602, and nothing of it reaches the engine.
+		if code, body := soap("Insert", "<AfterId>0</AfterId><Uri>library-track</Uri><Metadata>metadata</Metadata>"); code != 500 || !strings.Contains(body, "<errorCode>602</errorCode>") {
+			t.Errorf("Insert: %d %s; want fault 602", code, body)
 		}
 		if st := ps.runningEngine(t).Snapshot(); st.Len() != 0 || st.State().String() != "stopped" {
 			t.Errorf("a refused Insert reached the engine: %d entries, %s", st.Len(), st.State())
