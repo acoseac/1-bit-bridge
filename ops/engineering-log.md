@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B470 PR 5a3: the player's OpenHome read actions, each answered from one engine snapshot, and the backend's report of the decoder's length and format](#2026-10-24--b470-pr-5a3-the-players-openhome-read-actions-each-answered-from-one-engine-snapshot-and-the-backends-report-of-the-decoders-length-and-format)
 - [2026-10-24 — B470 PR 5a2b: shared discovery for the opt-in OpenHome Source](#2026-10-24--b470-pr-5a2b-shared-discovery-for-the-opt-in-openhome-source)
 - [2026-10-24 — B470 PR 5a0 Round 11: a listed snapshot reservation that cannot be read refuses restore](#2026-10-24--b470-pr-5a0-round-11-a-listed-snapshot-reservation-that-cannot-be-read-refuses-restore)
 - [2026-10-24 — B470 PR 5a0 Round 10: reset advice requires invalid reservation data](#2026-10-24--b470-pr-5a0-round-10-reset-advice-requires-invalid-reservation-data)
@@ -59831,3 +59832,277 @@ The separate B520 host-address check skips at its denied bind. Exact commands,
 failed test names, cached outcomes, logs and the verified control are in the
 external round-3 report. Linux/Windows execution and the manual owner gate
 remain unrun. No commit was made.
+
+## 2026-10-24 — B470 PR 5a3: the player's OpenHome read actions, each answered from one engine snapshot, and the backend's report of the decoder's length and format
+
+Every action of the Source's four services that reads state and changes
+nothing is answered (25 of the 42); the 17 writes stay 602 until 5a4, and the
+opt-in stays off by default. Each read takes one `engine.Snapshot()` and
+answers from it alone; while no engine runs every read is fault 501. The
+length and format Time and Info report come from the decoder, through an
+addition to the backend seam. Run on legion0 (Linux, Go 1.27.2), where the
+Linux-only tests ran.
+
+### What shipped
+
+- `internal/player/engine`: `Details` (the decoder's total frames, rate,
+  valid bits, channels, codec, lossless) and `DetailsEvents`, an `Events`
+  that takes them too (an addition: `Events` and `Backend` unchanged, so
+  their other implementers compile as they were); the engine's own Events
+  implements it. `Snapshot.Track` (the occurrence heard: its entry's
+  reference and metadata as it was handed off, and the Details),
+  `TrackCount` and `DetailsCount`. `hear` sets and clears the track with the
+  audible occurrence, in the three places `o.audible` was assigned; neither
+  the track nor the counts move the generation.
+- `internal/player/playback`: the reporter sends an occurrence's Details just
+  before its Audible, from the one goroutine that reports, to an Events that
+  takes them (`detailsOf`, `codecName`: FLAC, WAV, AIFF, ALAC from
+  `format.PCM.Container`, and `format.PCM.Frames`).
+- `internal/player/openhome`: `actions.go` (the `reads` table, `act`,
+  `snapshot`, `writeResponse` with a counted Content-Length, the values);
+  `Config.Engine`; `newHandler` takes the engine; `soap.go` defines 501 and
+  605 beside 401, 402 and 602, and `faultReply` carries an OpenHome code's own
+  description; `services.go`: `outs`, and `escapeTo`, the one escaper.
+- `cmd/bridge/serve_player_openhome.go`: `startOpenHome` hands the surface
+  the engine the player runs. `output_play_print.go`: `bridge output play`
+  prints the Details and forwards them.
+- `CLAUDE.md`: the rows of the four packages. The rules text (openhome.md's
+  lines, player.md's, their long forms, and the lines of both and of
+  `ops/History-rules-openhome.md` that said every action is 602) goes to the
+  orchestrator in the worker's report: this session cannot edit `.claude/`.
+
+### The values, action by action
+
+Playlist: `TransportState` Playing, Buffering while `Starting`, Paused,
+Stopped, a release by its pending intent (stop Stopped, pause Paused, play
+Buffering), maintenance Stopped; `Id` the selection, 0 for none; `Read` the
+entry's reference and metadata byte for byte, 800 for an ID not held (the
+engine's `ReasonIDNotFound`); `ReadList` an Entry (Id, Uri, Metadata) per ID
+held, in the order and as often as asked, an ID not held left out, its IdList
+ui4s by row 9's rule separated by XML white space anywhere, a token that is no
+ui4 402, past `engine.MaxReadList` IDs or an 8 MiB TrackList 605; `IdArray`
+the token and the IDs from one snapshot, big-endian ui4s in base64, "" for an
+empty queue; `IdArrayChanged` whether the token differs; `TracksMax` 1000;
+`Repeat`; `Shuffle` 0; `ProtocolInfo`
+`http-get:*:audio/x-flac:*,http-get:*:audio/wav:*,http-get:*:audio/aiff:*,http-get:*:audio/mp4:*`,
+each type `dlna.ResolveMIMEType("", ext)`, which every renderer profile
+agrees with (they override only DSF and DFF).
+
+Time: TrackCount (occurrences heard since the engine started), Duration (the
+decoder's frames over its rate, to the nearest second, a half up), Seconds
+(the floor of the heard occurrence's position), each held to 10,000,000.
+
+Info: Counters (TrackCount, DetailsCount: one per change of the details,
+nothing heard counting as none, so a stop is a change; MetatextCount 0);
+Track (the occurrence's reference and metadata, empty while nothing is
+heard); Details (Time's Duration, rate × bits × channels, the bits, the rate,
+lossless, the codec; zeros while nothing is heard or reported); Metatext "".
+
+Product: Manufacturer (`1-bit`, `https://1-bit.app`), Model (`1-bit Bridge
+Player`, the description's modelDescription), Product (Room the friendly
+name), Standby 0, SourceCount 1, SourceXml
+`<SourceList><Source><Name>Playlist</Name><Type>Playlist</Type><Visible>true</Visible><SystemName>Playlist</SystemName></Source></SourceList>`,
+SourceIndex 0, Source(0) and 800 past it, Attributes `Info Time`,
+SourceXmlChangeCount 0. Booleans are 1 and 0 (UDA 1.1, §2.5).
+
+Sources. UDA 1.1, §3.2.2, for 501 ("Action Failed: may be returned if the
+current state of the service prevents invoking that action") and 605
+("String Argument Too Long"), the same in 1.0. The engine's own mapping for
+Playlist's 800. OpenHome's reference player, ohPipeline (what the brief calls
+ohMediaPlayer), for the SourceList form with SystemName, the 800 of Source past
+the last index ("Source index out of range", `ProviderProduct`), ReadList
+leaving out an ID it does not find (`ProviderPlaylist::ReadList`) and the
+space-joined Attributes: recalled, not read. This session had no network
+(fetches denied) and no copy of ohPipeline or ohMediaPlayer on the host, so
+each is an owner check, beside 1-bit's parser taking SystemName beside the
+Type, Name and Visible it requires.
+
+### No engine, one fault
+
+`act` answers a write 602 before it looks at the engine. A read takes one
+snapshot; there is no engine when `Config.Engine` is nil, when `Done` is
+closed (asked after the snapshot is taken, so an engine that ended before the
+ask is never read), or when the snapshot is `Closed`. Each covers a case the
+other misses: a Run that returns publishes a Closed snapshot and then closes
+Done, and a panic on the owner closes Done (`abandon`) with no Closed
+snapshot. 501, not 602 (the reads are implemented) and not 503 (the
+surface's answer for its slots and its stop, and no SOAP fault). The fixed
+Product reads answer 501 too, so a Source whose player has gone does not
+describe a working Playlist source. In serve the surface stops before the
+engine, so a request meets no engine only after a panic in the engine's Run,
+until the supervisor stops the surface.
+
+### ReadList's bounds
+
+The brief asked for at most `MaxReadList` IDs and what past it: 605, String
+Argument Too Long. Measuring the reply raised a second bound: an entry's
+metadata is escaped twice (up to nine bytes a byte), and 1000 IDs naming one
+64 KiB entry, or the queue's 16 MiB of metadata, built replies of hundreds of
+MiB. The TrackList document is held to 8 MiB (605 past it; a full queue of
+ordinary DIDL-Lite answers within it), the entries read one at a time
+(`Snapshot.Read`) so no copy of the next is taken past the bound
+(`Snapshot.ReadList` copies every entry first), and the reply is escaped as it
+is written after a counting pass, so no second copy of the TrackList exists.
+Truncating was rejected: a controller that read a short TrackList would take
+the IDs left out for deleted.
+
+### The escaping
+
+One escaper, `escapeTo` (xml.EscapeText), for every string of every reply,
+once per level of a value that is XML itself (SourceXml; a TrackList, and the
+DIDL-Lite inside it). A value that is XML 1.0 text reads back byte for byte;
+a character XML 1.0 cannot carry, which the engine takes through its own API,
+is sent as U+FFFD, so the reply stays well-formed. For 5a4: Insert refuses a
+Uri or Metadata that is not XML 1.0 text; what reaches it is the decoded text
+(encoding/xml refuses such a character at row 7, literal or referenced, but
+decodes `&#xD800;` to U+FFFD and a literal carriage return to a line feed).
+
+### The engine and the backend: the length and the format
+
+`DetailsEvents` is an optional interface beside `Events` rather than a new
+`Events` method: the engine, `bridge output play`'s `playEvents` and the
+backend rig's `recEvents` take it; `nopEvents` and the stand-ins need not.
+The reporter type-asserts the session's Events at each crossing and sends
+Details then Audible in one step's list, so the owner holds them as it applies
+Audible; Details that arrive after Audible update the track. The rig records
+Details apart from the events, whose sequences other tests read. The track is
+built from the occurrence as handed off (`occ.meta`, shared with the queue,
+which never writes to it), never looked up; under the engine's policy an
+entry deleted while heard stops being heard in the same step, so the copy is
+structural (control E3 below stays green).
+
+### Tests
+
+Four in `internal/player/engine` (`track_test.go`), two in `internal/alsapcm`
+(`playback_details_test.go`: every PR 1 golden that plays, its Details the
+reference tools' frame count, before its Audible; and the engine's track
+through the real backend, beside metadata claiming 599 s), fifteen in
+`internal/player/openhome` (`actions_test.go`, over a real engine and a fake
+backend in `player_test.go`: an empty queue, one entry, many, the selection
+moving, a deleted entry and a deleted audible one, a restart's token and
+counters, the release states) with `TestEveryValidActionIsAnswered602`
+rewritten for the writes (its name kept: openhome.md cites it), one SOAP-table
+row (Time with no engine, 501) and one discovery assertion (a read through the
+LOCATION, 501 with no engine) changed, `FuzzControlRequest` extended (an
+engine with every kind of metadata and a track heard, a seed per read, every
+200 parsed as its action's response, SourceXml and TrackList parsed again);
+the serve test reads IdArray and TransportState from serve's engine.
+`FuzzControlRequest` ran 440,818 inputs in 30 s with four workers and one-second
+minimization, none failing.
+
+### Red first
+
+- The engine with the types and accessors and a `Details` that did nothing:
+  the four engine tests red (no track heard, waits on the details).
+- The backend unchanged: every golden "details reported 0 times", and the
+  engine's track without details.
+- Every action still 602 (`act` with the read table cut): the fourteen read
+  tests written then and the Time row red; the classification and the writes
+  table green. (`TestADeletedAudibleEntryIsNoLongerHeard` and the restart's
+  zeros came after, against the implementation; control E9 below is the
+  deleted entry's.)
+- Serve without `Config.Engine`: "IdArray: 500", "TransportState: 500".
+
+### Negative controls
+
+Each on the staged tree, one mutation, the tests run, then restored from the
+index (`git checkout --`) and the tree checked.
+
+| NC | Mutation | Red |
+|---|---|---|
+| E1 | no track counted | two engine tests' counts, Time's TrackCount, 1-bit's poll |
+| E2 | details counted when unchanged (the first form did not build: `before` unused; rerun) | "c heard with b's details: 3 changes, want 2" |
+| E3 | the track looked up in the queue | green: not observable (above) |
+| E4 | details after Audible ignored | two engine tests |
+| E5 | a details report moves the generation | "generation .5 (was .4)" |
+| E5b | the track heard moves the generation | "the first sound moved the generation" |
+| E6 | Details sent after Audible | every golden |
+| E7 | a length rounded to whole seconds | every golden ("Frames:0") |
+| E8 | ALAC named M4A | the six ALAC goldens |
+| E9 | a release that keeps the track heard | the deleted audible entry's reads, the stop's zeros |
+| O1 | SetRepeat answered as a read | the classification, the writes table, the SOAP table's SetRepeat rows |
+| O2 | `snapshot` without the Done check | first green (a returned Run's snapshot is Closed); the panic case added; red |
+| O2b | without the Closed check | the shutting-down case |
+| O3 | without the nil check | a nil pointer panic |
+| O4 | a starting session read as Playing | the table, the engine walk, 1-bit's poll |
+| O5, O5b | a release to pause, to play, read as Stopped | the table and the engine walk |
+| O6 | ReadList faults an ID it does not hold | the queue test |
+| O7 | a token that is no ui4 skipped | the IdList rows that are no ID |
+| O8 | no MaxReadList bound | "1001 IDs: 200" |
+| O9 | no TrackList bound | "a TrackList past 8388608 bytes: 200" |
+| O10 | the TrackList's metadata unescaped | the round trip, the bound, a fuzz seed |
+| O11 | IdArray little-endian | four tests, serve's included |
+| O12 | IdArrayChanged inverted | three assertions |
+| O13 | Seconds rounded | "Seconds:62, want 61" |
+| O14 | Duration floored | "200.5 s rounded to 201", the rounding rows |
+| O15 | Time not held | both clamp checks |
+| O16 | Duration from the metadata's `duration` | "Duration:599, want 180" |
+| O17 | Source answers index 1 | "Source(1): 200" |
+| O18 | SourceXml without SystemName, Visible 1 | the Product test, 1-bit's source pick |
+| O19 | values unescaped | the tests whose values hold markup (Product's room, the queue's, the bound) |
+| O20 | an escaper that keeps what XML cannot carry | the round trip, a fuzz seed |
+| O21 | Content-Length one off | every response checked |
+| O22 | DetailsCount answered as TrackCount | "stopped: DetailsCount 2" |
+| O23 | Track reads the selection when nothing is heard | two assertions |
+| O24 | ProtocolInfo's FLAC type not internal/dlna's | the string and every profile |
+| O25 | Standby on | the Product test, 1-bit's cast start |
+| O26 | booleans as words | five tests |
+| O27 | serve does not hand the surface its engine | serve's IdArray and TransportState |
+| O28 | Room ignores the room | two rooms |
+| O29 | Read's Uri altered | 1-bit's exact match |
+| O32 | no engine answered 602 | the four no-engine cases, the Time row, the discovery read |
+
+Not controlled, no seam reaching it: one snapshot a request (a second
+snapshot differs only in a race), and the track's copy (E3).
+
+### Decided otherwise than the brief, and why
+
+- The fixed Product reads answer 501 with no engine too: one fault for every
+  read; the writes stay 602 in every state.
+- ReadList has a second bound (an 8 MiB TrackList, 605) and reads its entries
+  one at a time: the measured replies above.
+- DetailsCount counts changes of the Details the backend reported, so two
+  tracks whose lengths differ by less than a second count a change though
+  Details answers the same seconds; nothing heard counts as no details.
+- Lossless is the backend's report (true for everything it plays), false
+  while nothing is reported.
+- Info's counters are held to a ui4, Time's to 10,000,000.
+- The brief's `upnpErrorDescription` is internal/dlna's; the surface's table
+  is `faultDescription`, and an OpenHome code carries its service's own
+  description (800 is Playlist's "Id not found" and Product's "Source index
+  out of range").
+- The length and format reach the engine through `DetailsEvents`, an optional
+  interface, so no implementer of `Events` changes.
+
+### Environment
+
+`/tmp` is tmpfs on legion0, which the engine refuses (`ErrVolatile`), so the
+player's serve tests and the engine-backed tests fail or skip there by
+default; every run here set `TMPDIR` to a directory on the worktree's disk.
+The host has no git identity, and `git config`, `git -c` and
+`git write-tree` need an approval this headless run cannot give, so no commit
+was made: the work is staged, and the report carries the commits to make.
+
+### Gate
+
+On legion0, Go 1.27.2, through the build lock: `make fmt` (nothing
+rewritten), `make vet`, and `go vet` of the touched packages for Windows and
+macOS clean; `make build-all` clean; `make docs-check` clean. `make test`'s
+race run takes longer than one foreground command may here, so it ran as the
+same `go test -race -timeout 30m` over every package in shards (cmd/bridge and
+internal/manifest by their tests' initials, the rest in groups), the player's
+tests on a persistent TMPDIR: every package passes but `internal/transcode`,
+whose `TestRunSoxConcurrentSameSpecDoesNotStealTmp` fails in the package's
+full run on this host, with the default TMPDIR as with the other (its stand-in
+sox times out waiting for the second writer), and passes alone; neither that
+package nor its tests depend on a package this change touches (`go list -deps
+-test`), so its test binary is the base's: a finding about the host or the
+test, left to its own entry.
+
+### Not in this change
+
+Every write (5a4), URI confinement (5a4), GENA (501), Volume, seek, shuffle,
+DSD and DoP, `/v1/outputs` (5b), iOS, and the opt-in's default (off until 5a4
+and the owner's dogfood). Owner checks: ohPipeline's codes and forms above;
+1-bit's parser with SystemName; a cast start from 1-bit to the bridge, which
+needs 5a4's inserts.

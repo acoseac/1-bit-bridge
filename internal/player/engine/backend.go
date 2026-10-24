@@ -89,6 +89,38 @@ func (p Position) Seconds() float64 {
 	return float64(p.Frames) / float64(p.RateHz)
 }
 
+// Details is what the backend knows of an occurrence's content once its
+// decoder is open, as the decoder gives it (B470 PR 5a3): the content's
+// exact length, in frames at its rate, and its format. Never the
+// controller's metadata, which is untrusted, and never the library index's
+// length, a tag's rounded value.
+type Details struct {
+	// Frames is the content's length in frames, 0 when its container
+	// declares none; RateHz is its rate.
+	Frames int64
+	RateHz int
+	// Bits is a sample's valid bits, and Channels the channels.
+	Bits     int
+	Channels int
+	// Codec names the decoder that reads the content: FLAC, WAV, AIFF or
+	// ALAC.
+	Codec string
+	// Lossless is content played as it is stored, everything this release's
+	// backend plays.
+	Lossless bool
+}
+
+// DetailsEvents is an Events that takes an occurrence's Details too (B470
+// PR 5a3): an addition, which Events' other implementers need not make. A
+// backend whose session's Events implements it reports an occurrence's
+// Details before it reports the occurrence Audible, from the goroutine that
+// reports Audible, so the engine holds them as the occurrence is heard. The
+// engine's own Events implements it, and keeps the Details of the occurrence
+// heard in its snapshot (Snapshot.Track).
+type DetailsEvents interface {
+	Details(s SessionID, o OccurrenceID, d Details)
+}
+
 // Fault is a failure after content played: an xrun, a disconnect, a device
 // error, a decode failure. Playback stops and does not restart on its own.
 type Fault struct {
