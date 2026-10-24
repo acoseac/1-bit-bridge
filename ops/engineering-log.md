@@ -60578,3 +60578,93 @@ DSD and DoP, `/v1/outputs` (5b), iOS, and the opt-in's default (off until 5a4
 and the owner's dogfood). Owner checks: 1-bit's parser with SystemName; a
 cast start from 1-bit to the bridge, which needs 5a4's inserts (ohPipeline's
 codes and forms were read in round 2, below).
+
+### Round 2: the reviews, and ohPipeline's own sources
+
+Codex's and Claude's reviews of round 1, and the five ohPipeline files the
+orchestrator fetched (openhome/ohPipeline master c1047a8dc801, 2026-10-21:
+`ProviderPlaylist.cpp`, `ProviderProduct.cpp`, `Product.cpp`,
+`SourcePlaylist.cpp` and `FaultCode.cpp`). Run on legion0 with Go 1.27.3, on
+the orchestrator's merge of main (f58d4587, B528 among it).
+
+- **Source's fault is 801 (the files).** Product's Source of an index it
+  does not hold is `FaultCode::kSourceNotFound`, 801 "Source not found"
+  (`FaultCode.cpp` line 21), which `ProviderProduct::Source` answers at 284
+  (`SetSourceIndex` and `SetSourceIndexByName` too, 244 and 256) when
+  `Product::GetSourceDetails` throws `AvSourceNotFound` past its last source
+  (`Product.cpp` 505-510). Round 1 answered 800 "Source index out of range",
+  from memory. `faultSourceIndex` is `faultSourceNotFound` now, and the
+  tests pin each OpenHome fault's description beside its code. The other
+  citations held, now by file and line: Read's 800 "Id not found"
+  (`ProviderPlaylist.cpp` 23-24), ReadList leaving out an ID it does not find
+  (389) and escaping each Uri and Metadata once (382, 385), the SourceList's
+  order (`Product.cpp` 299-317) and the space-joined Attributes (209-215).
+  One difference is kept, with why, in `ops/History-rules-openhome.md`:
+  ohPipeline splits the IdList on single spaces and skips a token that is
+  not a number (391), where 5a3 answers 402.
+- **The TrackList bound counts its closing tag (Codex, Low).** The check ran
+  after each entry, before `</TrackList>`: with IDs 1 and 2, Codex's
+  construction checked exactly 8,388,608 bytes and answered a TrackList of
+  8,388,620. `TestTheTrackListBoundIsItsWholeDocument` builds it over the
+  engine's own IDs, twenty-five copies of an entry of 64 KiB of ampersands
+  and one entry whose metadata fills the document to the byte: at the bound
+  it is answered whole, 8,388,608 bytes; 1 and 12 bytes past it, 605.
+- **Id after the selection is deleted (Codex, Medium): unchanged.** The
+  engine selects the entry that followed a deleted selection, or nothing
+  when none followed it, so Id reads 0 with entries still queued. ohPipeline
+  re-points a stopped source the same way (`SourcePlaylist.cpp` 443-456),
+  and 1-bit seeks off the row playing before it deletes that row.
+  `TestIdFollowsADeletedSelection` pins both cases through the SOAP layer.
+- **The restored identity (Claude, High): the policy is in place.** 5a0's
+  policy landed on main before 5a3 (#1331, e263ee86): a backup carries the
+  reservation, and a restore raises both marks past anything the snapshot's
+  identity handed out. Claude read `player.md`'s line from before it, which
+  #1331 left behind when it replaced that line's long form, and the 5a2a
+  record's sentence in `ops/History-rules-openhome.md`; the rules note
+  corrects both. `TestARestoredIdentityHandsOutValuesPastItsSnapshot` pins
+  the policy through the SOAP layer: a source on serve's file names hands
+  out IDs and tokens, `backup.Snapshot` and `backup.Restore` take it onto a
+  fresh data directory, and the restored player's first IdArray answers a
+  token above the snapshot's reservation (12,288) and no queue, the source's
+  last token reads as changed, its first Id (an entry inserted through the
+  engine, selected in the empty queue) is above the snapshot's ID mark, and
+  every ID the source handed out answers 800.
+- **This entry (Claude, Low).** "What shipped", "Red first" and
+  "Environment" above now say what happened: the orchestrator applied the
+  rules note (0a1e7781) and committed round 1's staged work (89812eed), and
+  the all-602 run had fourteen tests red, counted from round 1's own output.
+
+Red first. The Product test against round 1's code: "Source(1): 500, fault
+800 "Source index out of range", want fault 801 "Source not found"", and the
+same for 4294967295. The boundary test against round 1's check: the
+TrackLists 1 and 12 bytes past the bound answered 200, the one at it
+answered. The restore test against the restore before #1331
+(`restorePlayerReservation` writing nothing): the first token and ID 4097,
+below the snapshot's 12,288, and Read of the source's 4097 answered the new
+entry. The deleted-selection test changes no behaviour and passed at once.
+
+Negative controls, each on the committed tree (09f47bd7), the file then
+restored from git and the tree checked clean:
+
+| NC | Mutation | Red |
+|---|---|---|
+| R1a | Source's fault back to 800 "Source index out of range" | the Product test, both indexes |
+| R1b | 801 with round 1's description | the Product test's description check |
+| R2a | the bound checked without the closing tag | the TrackLists 1 and 12 bytes past it answered |
+| R2b | the bound taken as exclusive (`>=`) | the TrackList at the bound refused, 605 |
+| R3a | a deleted selection selects nothing | "a deleted selection in the middle: Id 0" |
+| R3b | the first entry follows the last, as with repeat | "with nothing after it: Id 4097, want 0" |
+| R4a | the engine ignores its reservation at start | the first token and ID 4097, Read(4097) answered |
+| R4b | the restore raises the IDs and drops the token mark | the first token, 4097, alone |
+
+Gate, on legion0 with Go 1.27.3, through the build lock: `make fmt`
+(nothing rewritten), `make vet`, and `go vet` of the touched packages for
+Windows and macOS clean; `make build-all` and `make docs-check` clean. The
+race suite, `make test`'s `go test -race -timeout 30m`, ran in shards with a
+TMPDIR on disk (cmd/bridge in four and internal/manifest in six by their
+tests' initials, the rest in groups; `internal/admin` alone took 725 s):
+every package passes but `internal/transcode`, whose
+`TestRunSoxConcurrentSameSpecDoesNotStealTmp` fails in the package's full
+run and passes alone, as in round 1, in a package that depends on none this
+change touches. `FuzzControlRequest` ran 495,073 inputs in 30 s, none
+failing.

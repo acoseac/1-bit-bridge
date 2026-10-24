@@ -1,7 +1,6 @@
 package openhome
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -64,7 +63,7 @@ func TestARestoredIdentityHandsOutValuesPastItsSnapshot(t *testing.T) {
 	}
 	src.stop()
 
-	snap, err := backup.Snapshot(context.Background(), backup.Sources{DataDir: source, PlayerUUID: identity})
+	snap, err := backup.Snapshot(t.Context(), backup.Sources{DataDir: source, PlayerUUID: identity})
 	must(t, "the snapshot", err)
 	mark, err := engine.ReadReservation(filepath.Join(snap, engine.ReservationFileName))
 	must(t, "the snapshot's reservation", err)

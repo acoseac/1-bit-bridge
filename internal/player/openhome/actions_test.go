@@ -436,7 +436,7 @@ func TestTheTrackListBoundIsItsWholeDocument(t *testing.T) {
 	p := newTestPlayer(t)
 	h := p.handler("")
 	a := p.add("a", bytes.Repeat([]byte("&"), engine.MaxMetadataBytes))
-	entry := func(id string, uri string, escaped int) int {
+	entry := func(id, uri string, escaped int) int {
 		return len("<Entry><Id>"+id+"</Id><Uri>"+uri+"</Uri><Metadata>") + escaped + len("</Metadata></Entry>")
 	}
 	const copies = 25
