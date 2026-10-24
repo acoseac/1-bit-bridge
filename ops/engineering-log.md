@@ -60001,6 +60001,60 @@ the lock, answered after 5.03 to 5.08 s, refused, the file as it was; the
 console's save after 5 s (`TestAConsoleSaveWaitsForTheLockThenRefuses`), and
 the next one went through once the lock was free.
 
+### Negative controls
+
+Each run against the committed change, one mutation at a time, the file put
+back from git after it; every one went red:
+
+1. library add saves the copy it read before its turn (`*cfg = *stale` as
+   the first statement of its `config.Edit` closure):
+   `TestLibraryChangesKeepASettingsSaveThatLandsAfterTheirRead/library_add`,
+   "libraryName \"Test Library\"" (remove, unmutated, passed).
+2. `RuntimeConfig.Update` without its comparison (`if false &&
+   r.fileKnown`): `TestUpdateRefusesAFileAnotherWriterChanged`'s three
+   changed-file cases, "= <nil>, want a *ChangedOutsideError", and
+   `TestServeRefusesASettingsSaveOverAConfigAnotherWriterChanged`, 200
+   `live` and the file rewritten.
+3. `runServe` without `RecordFile` (the wiring):
+   `TestServeRefusesASettingsSaveOverAConfigAnotherWriterChanged`, the same.
+4. `lockFile` taking a held lock for no lock at all (no wait, no refusal):
+   `TestALockAnotherHoldsIsWaitedForThenRefused` ("a held lock was taken"),
+   `TestUpdateWaitsForTheLockThenRefuses` ("answered after 9ms"),
+   `TestAConsoleSaveWaitsForTheLockThenRefuses`, and every case of
+   `TestEveryConfigWriterWaitsForTheLockThenRefuses`.
+5. bind taking bridge.yaml's lock before the data dir's:
+   `TestTheDataDirLockComesBeforeTheConfigLock`'s two bind cases, "did not
+   hold the data dir while it waited" and "refused after 5.02s: it waited
+   for bridge.yaml's lock before it asked for the data dir" (restore's
+   cases, unmutated, passed).
+6. restore taking the lock only at its bridge.yaml copy:
+   `TestARestoreRefusedTheLockRestoresNothing`, "the refused restore
+   replaced the database".
+7. serve's seed written with `os.WriteFile` and no lock:
+   `TestEveryConfigWriterTakesTheConfigLock` ("writeAutoInitConfig writes a
+   file while it names the config's path and never calls config.LockFile")
+   and the seed's case of the bound test.
+8. A writer nobody named (`saveSomewhere`, a `cfg.Save(l)` in
+   configpath.go): `TestEveryConfigWriterTakesTheConfigLock`, "configWriters
+   does not name it".
+9. `heldFor` answering nil: `TestASaveNeedsATurnItHolds`, a nil dereference
+   in `Save(nil)`; with only the given-back check dropped, "a save after the
+   turn was given back = <nil>", the SaveIf through, the file written.
+10. `Edit` loading before its turn: `TestEditReadsTheFileInItsTurn`, "saw
+    libraryName \"Before\"".
+11. init's check moved before its lock:
+    `TestTheChangedConfigCheckIsTheStepBeforeSave`, "asks
+    configChangedSinceRead … before it takes bridge.yaml's lock".
+12. The seed without its stat in the turn:
+    `TestTheSeedKeepsAConfigWrittenBeforeItsTurn`, "wrote true".
+13. bind taking bridge.yaml's lock only just before its `SaveIf`:
+    `TestBindKeepsALibraryAddThatLandsInItsWindow`, bind refused by its byte
+    comparison and the binding gone.
+14. A filesystem with no locks refused:
+    `TestAFilesystemThatKeepsNoLocksIsNoRefusal`.
+15. `Config.save` not asking `heldFor`: `TestEveryConfigWriterTakesTheConfigLock`,
+    "does not ask heldFor".
+
 ### Other tests the change moved
 
 - `TestRuntimeConfigUpdate`'s "save failure" case put the config in a
