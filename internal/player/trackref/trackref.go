@@ -18,8 +18,8 @@
 // empty or zero-padded port, a zero-padded or abbreviated address, a
 // trailing dot, user information, a query, a fragment, percent-encoding, a
 // trailing slash and a rendition's path below the id are each refused, and
-// nothing is ever resolved: the host is compared as it is written, by the
-// caller (internal/player/openhome checks it against the hosts the bridge
+// nothing is ever resolved: the host is compared in its canonical form, by
+// the caller (internal/player/openhome checks it against the hosts the bridge
 // advertises and binds; the library resolver, at an occurrence's open, does
 // not look at it, so a queue keeps playing after the bridge's address
 // changes).
