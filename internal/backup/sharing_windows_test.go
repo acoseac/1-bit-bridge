@@ -5,7 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 
@@ -130,11 +132,7 @@ func TestSnapshotRetriesAHandleHeldAcrossRename(t *testing.T) {
 }
 
 func TestSnapshotRefusesAReservationStillHeldOrCancelled(t *testing.T) {
-	for _, cancelRead := range []bool{false, true} {
-		name := "held"
-		if cancelRead {
-			name = "cancelled"
-		}
+	for _, name := range []string{"held", "cancelled", "expired"} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			identity := filepath.Join(dir, config.PlayerUUIDFile)
@@ -155,18 +153,32 @@ func TestSnapshotRefusesAReservationStillHeldOrCancelled(t *testing.T) {
 			defer windows.CloseHandle(h)
 			base, cancel := context.WithCancel(t.Context())
 			defer cancel()
+			if name == "expired" {
+				var expire context.CancelFunc
+				base, expire = context.WithDeadline(t.Context(), time.Unix(0, 0))
+				defer expire()
+			}
 			ctx := &releaseOnReadRetry{Context: base}
 			want := error(windows.ERROR_SHARING_VIOLATION)
 			waits := 4
-			if cancelRead {
+			if name == "cancelled" {
 				// Cancel only once the real read has failed, keeping the handle
 				// held throughout; cancellation must not become a missing floor.
 				ctx.release = cancel
 				want, waits = context.Canceled, 1
+			} else if name == "expired" {
+				want, waits = context.DeadlineExceeded, 1
 			}
 			snap, err := backup.Snapshot(ctx, backup.Sources{DataDir: dir, PlayerUUID: identity})
 			if !errors.Is(err, want) || snap != "" || ctx.waits != waits {
 				t.Fatalf("snapshot = %q, %v after %d waits; want %v after %d", snap, err, ctx.waits, want, waits)
+			}
+			assertNoPlayerResetAdvice(t, err.Error())
+			if !strings.Contains(err.Error(), engine.ReservationFileName) || !strings.Contains(err.Error(), want.Error()) {
+				t.Errorf("read failure does not name its file and cause: %v", err)
+			}
+			if name == "held" && (!strings.Contains(err.Error(), "busy") || !strings.Contains(err.Error(), "retry the backup")) {
+				t.Errorf("exhausted read lacks busy/retry advice: %v", err)
 			}
 			entries, err := os.ReadDir(filepath.Join(dir, backup.BackupsDirName))
 			if err != nil || len(entries) != 0 {

@@ -258,6 +258,15 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 				return err
 			})
 			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				if errors.Is(err, atomicwrite.ErrReadBusy) {
+					return "", fmt.Errorf("backup: read %s: %w; retry the backup", engine.ReservationFileName, err)
+				}
+				var pathErr *os.PathError
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.As(err, &pathErr) {
+					return "", fmt.Errorf("backup: read %s: %w", engine.ReservationFileName, err)
+				}
+				// Only a file read successfully but refused as data justifies
+				// giving up the identity. A failed read establishes no damage.
 				return "", fmt.Errorf("backup: read %s: %w; %s", engine.ReservationFileName, err, playerResetAdvice(false))
 			}
 			if err == nil {

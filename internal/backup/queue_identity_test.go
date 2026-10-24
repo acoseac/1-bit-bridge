@@ -321,10 +321,21 @@ func assertPlayerResetAdvice(t *testing.T, advice, operation string) {
 	}
 }
 
+// assertNoPlayerResetAdvice rejects a destructive remedy for a failed read
+// that established nothing about the reservation's contents.
+func assertNoPlayerResetAdvice(t *testing.T, message string) {
+	t.Helper()
+	for _, advice := range []string{"reset the player", "remove the box's", "gives up for good", "new device to controllers"} {
+		if strings.Contains(message, advice) {
+			t.Errorf("read failure carries reset advice %q: %s", advice, message)
+		}
+	}
+}
+
 func TestUnreadableReservationAdviceResetsIdentityAndQueue(t *testing.T) {
 	reservationStorage(t)
 	for _, operation := range []string{"backup", "restore"} {
-		for _, kind := range []string{"unreadable", "invalid"} {
+		for _, kind := range []string{"unreadable", "invalid", "unsupported_version"} {
 			t.Run(operation+"/"+kind, func(t *testing.T) {
 				snap, dst := identitySnapshot(t, true), t.TempDir()
 				uuidPath := filepath.Join(dst, config.PlayerUUIDFile)
@@ -337,8 +348,14 @@ func TestUnreadableReservationAdviceResetsIdentityAndQueue(t *testing.T) {
 					if err := os.Mkdir(rp, 0700); err != nil {
 						t.Fatal(err)
 					}
-				} else if err := os.WriteFile(rp, []byte("broken"), 0600); err != nil {
-					t.Fatal(err)
+				} else {
+					data := []byte("broken")
+					if kind == "unsupported_version" {
+						data = []byte(`{"version":99,"ids":1,"tokens":2}`)
+					}
+					if err := os.WriteFile(rp, data, 0600); err != nil {
+						t.Fatal(err)
+					}
 				}
 				var err error
 				if operation == "backup" {
@@ -349,7 +366,15 @@ func TestUnreadableReservationAdviceResetsIdentityAndQueue(t *testing.T) {
 				if err == nil {
 					t.Fatal("unreadable reservation accepted")
 				}
-				assertPlayerResetAdvice(t, err.Error(), operation)
+				if operation == "backup" && kind == "unreadable" {
+					assertNoPlayerResetAdvice(t, err.Error())
+					var pathErr *os.PathError
+					if !errors.As(err, &pathErr) || filepath.Base(pathErr.Path) != engine.ReservationFileName {
+						t.Errorf("backup lost its file-access error: %v", err)
+					}
+				} else {
+					assertPlayerResetAdvice(t, err.Error(), operation)
+				}
 				if id, err := config.ReadPlayerUUID(dst); err != nil || id != snapshotPlayerUUID {
 					t.Fatalf("refusal changed identity: %s, %v", id, err)
 				}

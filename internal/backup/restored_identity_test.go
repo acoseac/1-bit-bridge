@@ -316,7 +316,11 @@ func TestSnapshotCarriesEveryDecodableLiveFloor(t *testing.T) {
 				if err == nil {
 					t.Fatal("backup accepted an unreadable floor")
 				}
-				assertPlayerResetAdvice(t, err.Error(), "backup")
+				if kind == "unreadable" {
+					assertNoPlayerResetAdvice(t, err.Error())
+				} else {
+					assertPlayerResetAdvice(t, err.Error(), "backup")
+				}
 				return
 			}
 			if err != nil {
