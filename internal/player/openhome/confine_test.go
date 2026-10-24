@@ -32,7 +32,9 @@ type confineRow struct {
 }
 
 // insertFault is the fault an Insert of uri answers through h, 0 when it is
-// taken; a taken Insert's Read gives the Uri back byte for byte.
+// taken; a taken Insert's Read gives the Uri back in its canonical form, the
+// Uri with its name's capitals lower-cased (round 2: never the spelling the
+// controller sent).
 func insertFault(t *testing.T, h *handler, uri string) int {
 	t.Helper()
 	r := invoke(t, h, playlist, "Insert", "AfterId", "0", "Uri", uri, "Metadata", "")
@@ -41,8 +43,8 @@ func insertFault(t *testing.T, h *handler, uri string) int {
 		if id == 0 {
 			t.Errorf("%s: taken with NewId 0", uri)
 		}
-		if got := read(t, h, playlist, "Read", "Id", u(id))["Uri"]; got != uri {
-			t.Errorf("%s: Read gives %q back", uri, got)
+		if got := read(t, h, playlist, "Read", "Id", u(id))["Uri"]; got != lowerASCII(uri) {
+			t.Errorf("%s: Read gives %q back, want its canonical form %q", uri, got, lowerASCII(uri))
 		}
 		return 0
 	}
@@ -50,6 +52,19 @@ func insertFault(t *testing.T, h *handler, uri string) int {
 		t.Fatalf("%s: %d, want a response or a fault", uri, r.status)
 	}
 	return r.fault
+}
+
+// lowerASCII is s with each ASCII capital lower-cased and every other byte as
+// it is: a taken Uri's canonical form, worked out without the parser under
+// test (a Uri taken has capitals in its name alone).
+func lowerASCII(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
 }
 
 // TestTheConfinementMatrix pins what an Insert takes: the canonical URI of a
@@ -61,9 +76,12 @@ func insertFault(t *testing.T, h *handler, uri string) int {
 // a tailnet's, localhost), a paired alias the bridge never advertised, and a
 // track id the library does not serve now (no row, routed, an SACD image's
 // virtual track, outside the roots); 501 for a library that cannot answer.
-// Nothing is resolved: a name is compared as a string, its case aside. A
-// refusal never reaches the engine, and a Uri refused for its host or its
-// shape never asks the library.
+// Nothing is resolved: a name is compared as a string, its ASCII case aside,
+// and a host with a byte that is not ASCII is 600 whatever Unicode folds it
+// to (round 2: U+0130 lower-cases to i and the Kelvin sign to k, so
+// lower-cased first they read as names the bridge advertises). A refusal
+// never reaches the engine, and a Uri refused for its host or its shape never
+// asks the library; a Uri taken is stored in its canonical form.
 func TestTheConfinementMatrix(t *testing.T) {
 	p := newTestPlayer(t)
 	h := p.handler("")
@@ -76,8 +94,15 @@ func TestTheConfinementMatrix(t *testing.T) {
 		{"a ULA health advertises", at("[fd00::5]:7790"), 0},
 		{"a .local name health advertises", at("bridge.local:7790"), 0},
 		{"that name in capitals", at("Bridge.LOCAL:7790"), 0},
+		{"a second name health advertises, in capitals", at("KITCHEN.Local:7790"), 0},
 		{"a custom endpoint's name", at("music.example.com:7790"), 0},
 		{"another track of the library's", "http://192.168.1.5:7790/dlna/file/" + trackB, 0},
+
+		{"a dotted capital I (U+0130), which lower-cases to i", at("brİdge.local:7790"), 600},
+		{"the Kelvin sign (U+212A), which lower-cases to k", at("Kitchen.local:7790"), 600},
+		{"a long s (U+017F), which folds to s", at("muſic.example.com:7790"), 600},
+		{"a fullwidth letter", at("ｂridge.local:7790"), 600},
+		{"a byte that is not ASCII in the port", at("192.168.1.5:７７９０"), 600},
 
 		{"an address the bridge neither advertises nor binds", at("192.168.1.99:7790"), 600},
 		{"a port no track is served on", at("192.168.1.5:7801"), 600},
@@ -228,6 +253,76 @@ func TestTheHostsAreTheInventoryNow(t *testing.T) {
 	mu.Unlock()
 	if got := insertFault(t, h, uri("192.168.1.5")); got != 600 {
 		t.Errorf("an address neither advertises nor binds now: fault %d, want 600", got)
+	}
+}
+
+// TestAnAdvertisedNameIsComparedAsASCII pins the inventory's side of a name's
+// comparison (round 2): the host health advertises is lower-cased as ASCII,
+// byte by byte, and never folded by Unicode's rules, so a name it advertises
+// with the Kelvin sign (U+212A, which folds to k) or a long s (U+017F, which
+// folds to s) names no Uri's ASCII host, nor one with a dotted capital I
+// (U+0130); one it advertises in ASCII capitals names its lower-case
+// spelling, and a Uri that spells it in capitals too.
+func TestAnAdvertisedNameIsComparedAsASCII(t *testing.T) {
+	p := newTestPlayer(t)
+	h := p.handler("")
+	h.hosts = Inventory{
+		Advertised: func() []string {
+			return []string{"https://Kitchen.local:7788", "https://muſic.example.com", "https://brİdge.lan:7788",
+				"https://Bridge.LOCAL:7788"}
+		},
+		Ports: []uint16{DefaultTrackPort},
+	}
+	uri := func(host string) string { return "http://" + host + ":7790/dlna/file/" + goldenID }
+	for _, tc := range []struct {
+		host  string
+		fault int
+	}{
+		{"kitchen.local", 600},
+		{"music.example.com", 600},
+		{"bridge.lan", 600},
+		{"bridge.local", 0},
+		{"BRIDGE.local", 0},
+	} {
+		if got := insertFault(t, h, uri(tc.host)); got != tc.fault {
+			t.Errorf("%s: fault %d, want %d", tc.host, got, tc.fault)
+		}
+	}
+}
+
+// TestAnInsertStoresTheURIsCanonicalForm pins what an Insert keeps (round 2):
+// the Uri in its canonical form, its name lower-cased, never the spelling the
+// controller sent. Read and ReadList give that form, the occurrence the
+// engine hands the backend names it, and so do the queue file and Read after
+// a restart; the spelling sent is nowhere.
+func TestAnInsertStoresTheURIsCanonicalForm(t *testing.T) {
+	p := newTestPlayer(t)
+	h := p.handler("")
+	const sent = "http://Bridge.LOCAL:7790/dlna/file/" + goldenID
+	const canon = "http://bridge.local:7790/dlna/file/" + goldenID
+	id := newID(t, h, 0, sent, "meta")
+	reads := func(when string) {
+		t.Helper()
+		if got := read(t, h, playlist, "Read", "Id", u(id))["Uri"]; got != canon {
+			t.Errorf("%s: Read gives %q, want %q", when, got, canon)
+		}
+		if list := entries(t, h, u(id)); len(list.Entries) != 1 || list.Entries[0].URI != canon {
+			t.Errorf("%s: ReadList gives %+v, want the one entry's Uri %q", when, list.Entries, canon)
+		}
+	}
+	reads("as inserted")
+	read(t, h, playlist, "Play")
+	if s := p.be.session(t, 1); s.first.Ref.String() != canon {
+		t.Errorf("the occurrence handed to the backend names %q, want %q", s.first.Ref.String(), canon)
+	}
+	read(t, h, playlist, "Stop")
+	p.restart()
+	h = p.handler("")
+	reads("after a restart")
+	raw, err := os.ReadFile(filepath.Join(p.dir, p.queue))
+	must(t, "read the queue file", err)
+	if !strings.Contains(string(raw), canon) || strings.Contains(string(raw), "Bridge.LOCAL") {
+		t.Errorf("the queue file holds %s, want the canonical form and not the spelling sent", raw)
 	}
 }
 

@@ -38,12 +38,13 @@ const (
 func uriOf(id string) string { return "http://192.168.1.5:7790/dlna/file/" + id }
 
 // testHosts is the test bridge's inventory: health advertises its LAN
-// address, a ULA, its .local name and a custom endpoint's name, and a tailnet
-// address and name (which no URI may name); the DLNA listener serves its LAN
-// address and a second interface's; tracks are served on 7790 and 7800.
+// address, a ULA, its .local name, a second name and a custom endpoint's
+// name, and a tailnet address and name (which no URI may name); the DLNA
+// listener serves its LAN address and a second interface's; tracks are
+// served on 7790 and 7800.
 var testHosts = Inventory{
 	Advertised: func() []string {
-		return []string{"https://192.168.1.5:7788", "https://[fd00::5]:7788", "https://bridge.local:7788",
+		return []string{"https://192.168.1.5:7788", "https://[fd00::5]:7788", "https://bridge.local:7788", "https://kitchen.local:7788",
 			"https://music.example.com", "https://100.101.102.103:7788", "https://bridge.tail1234.ts.net:7788"}
 	},
 	Served: func(a netip.Addr) bool {

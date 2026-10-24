@@ -338,10 +338,10 @@ func playlistTransportState(r readRequest) ([][]byte, *faultReply) {
 	return texts(transportState(r.snap.State(), r.snap.Starting(), r.snap.Pending())), nil
 }
 
-// playlistRead is Playlist's Read(Id): the entry's reference, the Uri
-// exactly as the controller inserted it (an Insert keeps it as sent, PR 5a4),
-// or a bare track id an entry written before keeps, and its metadata; an ID
-// the queue does not hold is fault 800.
+// playlistRead is Playlist's Read(Id): the entry's reference, the Uri in the
+// canonical form an Insert keeps (its name lower-cased, never the spelling
+// the controller sent: PR 5a4, round 2), or a bare track id an entry written
+// before keeps, and its metadata; an ID the queue does not hold is fault 800.
 func playlistRead(r readRequest) ([][]byte, *faultReply) {
 	e, ok := r.snap.Read(ui4Of(r.args[0]))
 	if !ok {

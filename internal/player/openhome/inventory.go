@@ -22,7 +22,11 @@ const DefaultTrackPort = 7790
 // and an interface listing that fails in part gives the partial set health
 // shows), or an address the DLNA listener has bound now (Served); a port is
 // one of Ports. Nothing is resolved: a name is compared as a string, both
-// sides lower-cased, and an address by its value.
+// sides in their canonical form (trackref.CanonicalName: ASCII, asked before
+// anything is folded, lower-cased byte by byte, never by Unicode's rules,
+// which fold the Kelvin sign to k and a long s to s; B470 PR 5a4, round 2),
+// so a name advertised in its Unicode form names no URI, and an address is
+// compared by its value.
 type Inventory struct {
 	// Advertised is the endpoint URLs /v1/health serves now
 	// (api.Server.HealthEndpoints); nil is none.
@@ -58,7 +62,7 @@ func (inv Inventory) Names(u trackref.URI) bool {
 			}
 			continue
 		}
-		if u.Name != "" && strings.EqualFold(strings.TrimSuffix(host, "."), u.Name) {
+		if name, ok := trackref.CanonicalName(strings.TrimSuffix(host, ".")); ok && u.Name != "" && name == u.Name {
 			return true
 		}
 	}
