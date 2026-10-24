@@ -2808,12 +2808,9 @@ func Load(path string) (*Config, error) {
 // symbolic link to no file says so, and what to do, as a turn of the file's
 // lock refuses it.
 func LoadFile(path string) (*Config, []byte, error) {
-	data, err := os.ReadFile(path)
+	data, err := readConfigFile(path)
 	if err != nil {
-		if info, lerr := os.Lstat(path); errors.Is(err, fs.ErrNotExist) && lerr == nil && info.Mode()&fs.ModeSymlink != 0 {
-			err = &linkToNothingError{path: path, err: err}
-		}
-		return nil, nil, fmt.Errorf("read config %q: %w", path, err)
+		return nil, nil, err
 	}
 	cfg, err := loadData(path, data)
 	if err != nil {
@@ -2822,32 +2819,69 @@ func LoadFile(path string) (*Config, []byte, error) {
 	return cfg, data, nil
 }
 
-// bootReads is how many times LoadFileAt reads a config whose name opens
-// another file after a read than before it, before it refuses.
+// readConfigFile is LoadFile's read of the config file at path, by its name:
+// a name that is a symbolic link to no file says so, and what to do.
+func readConfigFile(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if info, lerr := os.Lstat(path); errors.Is(err, fs.ErrNotExist) && lerr == nil && info.Mode()&fs.ModeSymlink != 0 {
+			err = &linkToNothingError{path: path, err: err}
+		}
+		return nil, fmt.Errorf("read config %q: %w", path, err)
+	}
+	return data, nil
+}
+
+// readConfigTarget is the boot read of the config named path through target,
+// the file its name was resolved to just before: a failure is said as
+// LoadFile says it, of the name as given, never of the file it resolved to.
+func readConfigTarget(path, target string) ([]byte, error) {
+	data, err := os.ReadFile(target)
+	if err != nil {
+		var pe *fs.PathError
+		if errors.As(err, &pe) {
+			err = &fs.PathError{Op: pe.Op, Path: path, Err: pe.Err}
+		}
+		return nil, fmt.Errorf("read config %q: %w", path, err)
+	}
+	return data, nil
+}
+
+// bootReads is how many times LoadFileAt reads a config whose name it cannot
+// say opened one file across a read, before it decides.
 const bootReads = 3
 
-// BootFile is the file serve's boot read of the config opened (LoadFileAt),
-// which serve tells its live holder with the bytes it read
-// (RuntimeConfig.RecordFile): the file the config's name opened for that
-// read, as a turn of the file's lock resolves it (ResolveFile), "" when the
-// name could not be resolved. Only LoadFileAt makes one.
+// BootFile is the file serve's boot read of the config read (LoadFileAt),
+// which serve tells its live holder with the bytes (RuntimeConfig.RecordFile):
+// the file the config's name opened for that read, as a turn of the file's
+// lock resolves it (ResolveFile), or no file, where the name could be
+// resolved at none of the reads. Only LoadFileAt makes one, so a file is
+// never "", and a holder told no file keeps that state apart.
 type BootFile struct {
-	// target is the file the name opened for the read answered, and
-	// resolved whether the name was resolved at all.
+	// target is the file the answered read was of, and resolved whether
+	// there is one.
 	target   string
 	resolved bool
 }
 
-// LoadFileAt is LoadFile, and the file the name opened for that read, as a
-// turn of the file's lock resolves it (ResolveFile), none when the name cannot
-// be resolved: what serve tells its live config holder with the bytes
-// (RuntimeConfig.RecordFile). The name is resolved just before the read and
-// just after it, and a read across which the two differ (a link at the name,
-// or on its way, repointed meanwhile) is made again, up to bootReads times in
-// all, so the bytes answered are the file's that the target names; a name
-// that moved across every read is a *NameMovingError. The config's relative
-// paths resolve against the directory Load takes from path, never the
-// target's, whichever read is answered.
+// LoadFileAt is LoadFile, and the file it read: what serve tells its live
+// config holder with the bytes (RuntimeConfig.RecordFile). The name is
+// resolved just before each read, as a turn of the file's lock resolves it
+// (ResolveFile), the file it resolved to is read, never the name again, and
+// the name is resolved once more just after the read. A read is answered,
+// with that file, when both resolutions agree; the file the name opens then
+// being unreadable, or not there, is the read's error, said of the name as
+// given. A read across which the two differ, or the name resolved on one side
+// alone, is made again, up to bootReads times in all, and a name that never
+// resolved alike on both sides of one is a *NameMovingError: a link on its
+// way was being repointed, and no read can be said to be of the file the name
+// opens. A name resolved at neither side of any of the reads (a resolution
+// that fails for good) is read through the name, and the last of those reads
+// is answered with no file, which the holder saves into no file from
+// (BootUnresolvedError). A read through the name that fails is its error at
+// once (a link to no file says what to do). The config's relative paths
+// resolve against the directory Load takes from path, never the file's,
+// whichever read is answered.
 func LoadFileAt(path string) (cfg *Config, raw []byte, file BootFile, err error) {
 	return loadFileAt(path, bootHooks{})
 }
@@ -2862,21 +2896,48 @@ type bootHooks struct {
 // loadFileAt is LoadFileAt, running hooks around each read: the windows a
 // test repoints a link in.
 func loadFileAt(path string, hooks bootHooks) (*Config, []byte, BootFile, error) {
+	var byName []byte
+	unresolved := 0
 	for range bootReads {
-		before := resolvedOrNone(path)
+		before, beforeErr := resolveBootFile(path)
 		if hooks.beforeRead != nil {
 			hooks.beforeRead()
 		}
-		cfg, raw, err := LoadFile(path)
-		if err != nil {
-			return nil, nil, BootFile{}, err
+		var raw []byte
+		var readErr error
+		if beforeErr == nil {
+			raw, readErr = readConfigTarget(path, before)
+		} else {
+			raw, readErr = readConfigFile(path)
 		}
 		if hooks.afterRead != nil {
 			hooks.afterRead()
 		}
-		if after := resolvedOrNone(path); after == before {
-			return cfg, raw, BootFile{target: after, resolved: after != ""}, nil
+		after, afterErr := resolveBootFile(path)
+		switch {
+		case beforeErr == nil && afterErr == nil && after == before:
+			if readErr != nil {
+				return nil, nil, BootFile{}, readErr
+			}
+			cfg, err := loadData(path, raw)
+			if err != nil {
+				return nil, nil, BootFile{}, err
+			}
+			return cfg, raw, BootFile{target: before, resolved: true}, nil
+		case beforeErr != nil && afterErr != nil:
+			if readErr != nil {
+				return nil, nil, BootFile{}, readErr
+			}
+			byName = raw
+			unresolved++
 		}
+	}
+	if unresolved == bootReads {
+		cfg, err := loadData(path, byName)
+		if err != nil {
+			return nil, nil, BootFile{}, err
+		}
+		return cfg, byName, BootFile{}, nil
 	}
 	return nil, nil, BootFile{}, &NameMovingError{Path: path, Reads: bootReads}
 }
@@ -2896,16 +2957,6 @@ func SetBootResolveForTest(fn func(path string) (string, error)) (restore func()
 	prev := resolveBootFile
 	resolveBootFile = fn
 	return func() { resolveBootFile = prev }
-}
-
-// resolvedOrNone is the file path's name opens (resolveBootFile), "" when it
-// cannot be resolved.
-func resolvedOrNone(path string) string {
-	target, err := resolveBootFile(path)
-	if err != nil {
-		return ""
-	}
-	return target
 }
 
 // loadData is Load over the bytes it read from path.

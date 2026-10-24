@@ -256,6 +256,65 @@ func TestTheBootReadReadsAgainWhenTheNameMovesAcrossIt(t *testing.T) {
 	}
 }
 
+// TestTheBootReadReadsTheFileItResolved: serve's boot read reads the file the
+// name resolved to just before it, never the name again: a link repointed to
+// another file during the read, and back before the resolution after it,
+// leaves the two resolutions alike, and the bytes answered are still the
+// resolved file's. Until B506's fifth round the read went through the name,
+// and answered the other file's bytes as the resolved file's.
+func TestTheBootReadReadsTheFileItResolved(t *testing.T) {
+	target, link := linkedConfigFile(t)
+	raw, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := filepath.Join(filepath.Dir(target), "switched.yaml")
+	other := bytes.Replace(raw, []byte("Before"), []byte("Switched"), 1)
+	if err := os.WriteFile(moved, other, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reads := 0
+	cfg, got, file, err := loadFileAt(link, bootHooks{
+		beforeRead: func() {
+			if reads == 0 {
+				repoint(t, link, moved)
+			}
+		},
+		afterRead: func() {
+			if reads++; reads == 1 {
+				repoint(t, link, target)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("a boot read whose name moved during the read and back: %v", err)
+	}
+	if file.target != target || !bytes.Equal(got, raw) || cfg.LibraryName != "Before" {
+		t.Errorf("the boot read answered %s with %q (libraryName %q): want the file it resolved, %s, and that file's bytes",
+			file.target, got, cfg.LibraryName, target)
+	}
+}
+
+// TestTheBootReadOfALinkToNothingSaysWhatToDo: a name that is a link to no
+// file, which no resolution can follow, is the read's refusal at once, saying
+// what to do, as LoadFile's is: never a boot with no file, and never a name
+// that keeps moving.
+func TestTheBootReadOfALinkToNothingSaysWhatToDo(t *testing.T) {
+	dir := realTempDir(t)
+	link := filepath.Join(dir, "bridge.yaml")
+	if err := os.Symlink(filepath.Join(dir, "gone.yaml"), link); err != nil {
+		t.Fatal(err)
+	}
+	reads := 0
+	_, _, _, err := loadFileAt(link, bootHooks{beforeRead: func() { reads++ }})
+	if err == nil || errors.Is(err, ErrNameMoving) || !strings.Contains(err.Error(), "point the link") {
+		t.Errorf("the boot read of a link to nothing = %v, want the refusal that says to point the link", err)
+	}
+	if reads != 1 {
+		t.Errorf("the boot read made %d reads of a link to nothing, want the one that failed", reads)
+	}
+}
+
 // TestTheBootReadRefusesANameThatKeepsMoving: a name that opens another file
 // after each of the boot read's three reads than before it is refused, naming
 // the config's name and none of its values: serve does not start on a file it

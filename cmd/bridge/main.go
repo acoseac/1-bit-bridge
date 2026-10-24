@@ -2960,7 +2960,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// that read, resolved at the read (config.LoadFileAt), are kept for the
 	// live holder (RecordFile, below): a console save then writes only into
 	// that file, only over a file that still holds them, and refuses one
-	// another writer changed since, or a name repointed to another file.
+	// another writer changed since, or a name repointed to another file. A
+	// name no resolution could follow at the read boots on the read through
+	// the name, and every console save is refused until a restart.
 	cfg, cfgFile, cfgRead, cfgBootFile, err := loadServeConfigFile(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)

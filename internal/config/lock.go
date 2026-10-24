@@ -149,10 +149,12 @@ func (e *NameMovedError) Is(target error) bool { return target == ErrNameMoved }
 // ErrNameMoving is what a *NameMovingError matches.
 var ErrNameMoving = errors.New("config: the config file's name opened another file before its read than after it")
 
-// NameMovingError is LoadFileAt's refusal when, at each of its reads, the
-// config's name opened another file before the read than after it: a link on
-// the name's way kept being repointed, so no read could be said to be of the
-// file the name opens. It names the config's name and nothing the file holds.
+// NameMovingError is LoadFileAt's refusal when, at none of its reads, the
+// config's name resolved to one file both before the read and after it: it
+// opened another file after the read than before it, or resolved on one side
+// of the read alone, as a link on the name's way that kept being repointed
+// makes it do, so no read could be said to be of the file the name opens. It
+// names the config's name and nothing the file holds.
 type NameMovingError struct {
 	// Path is the config file, as its reader named it; Reads how many times
 	// it was read.
@@ -161,7 +163,7 @@ type NameMovingError struct {
 }
 
 func (e *NameMovingError) Error() string {
-	return fmt.Sprintf("%s opened another file before each of its %d reads than after it (a link on its way was being "+
+	return fmt.Sprintf("%s did not open one file both before and after any of its %d reads (a link on its way was being "+
 		"repointed), so it was not read: start again once the link is settled", e.Path, e.Reads)
 }
 

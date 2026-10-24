@@ -121,8 +121,10 @@ func loadCLIConfigFile(explicit string) (*config.Config, string, []byte, error) 
 // file the config's name opened for it, resolved just before the read and
 // just after it (config.LoadFileAt): serve tells its live holder that file
 // with the bytes, and the holder's console saves write only into it, and
-// only over those bytes. A name that opens another file after each read
-// than before it, a link being repointed, is refused.
+// only over those bytes. A name that did not resolve to one file on both
+// sides of any read, a link being repointed, is refused; one that resolved
+// on neither side of any read boots with no file, which the holder saves
+// nothing into.
 func loadServeConfigFile(explicit string) (cfg *config.Config, path string, raw []byte, file config.BootFile, err error) {
 	path, ok := resolveConfigPath(explicit)
 	if !ok {

@@ -23,11 +23,14 @@ type RuntimeConfig struct {
 	// file is the config file's bytes as this holder last read them for
 	// the live snapshot (RecordFile) or wrote them (Update), and fileKnown
 	// whether it has either; target is that file, as a turn resolves its
-	// name (the target of a link at its last element), "" when the name
-	// could not be resolved. All under mu.
-	file      []byte
-	fileKnown bool
-	target    string
+	// name (the target of a link at its last element), and unresolved that
+	// serve's boot read could resolve the name at none of its reads, so
+	// that there is no file the holder may save into (target is never ""
+	// once fileKnown, unless unresolved). All under mu.
+	file       []byte
+	fileKnown  bool
+	target     string
+	unresolved bool
 	// changedMu guards changed, the channel the next Store closes
 	// (Changed), nil until someone asks for it.
 	changedMu sync.Mutex
@@ -62,8 +65,9 @@ var ErrBootUnresolved = errors.New("config: serve's boot read could not resolve 
 // BootUnresolvedError is the holder's refusal of a save once serve's boot
 // read could resolve the config's name at none of its reads (LoadFileAt, a
 // BootFile with no file): the holder cannot say which file its snapshot was
-// read from, so it saves into none. It names the config file and nothing it
-// holds.
+// read from, so it saves into none, and goes on refusing once the name
+// resolves, since the file it resolves to then is not one it read. It names
+// the config file and nothing it holds.
 type BootUnresolvedError struct {
 	// Path is the config file.
 	Path string
@@ -80,19 +84,22 @@ func (e *BootUnresolvedError) Is(target error) bool { return target == ErrBootUn
 
 // RecordFile tells the holder raw, the bytes the config file held when the
 // live snapshot was read from it, and file, the file its name opened for that
-// read, resolved before and after it (LoadFileAt), none when the name could
-// not be resolved: its first Update then saves only into that file, and only
-// while it still holds them. file is taken as it is, never resolved again
-// here: a link at the name repointed between the read and this call (a
-// dotfiles restow, a home-manager switch during serve's boot) would otherwise
-// have the holder record a file it never read. A name that opens another file
-// than file at a save, the link repointed since, is refused by Update. A
-// holder told nothing saves its first Update over whatever the file holds,
-// and records from then on.
+// read, resolved before and after it (LoadFileAt): its first Update then
+// saves only into that file, and only while it still holds them. file is
+// taken as it is, never resolved again here: a link at the name repointed
+// between the read and this call (a dotfiles restow, a home-manager switch
+// during serve's boot) would otherwise have the holder record a file it never
+// read. A name that opens another file than file at a save, the link
+// repointed since, is refused by Update. A boot read that resolved the name
+// at none of its reads is no file, never one named "": the holder then
+// refuses every Update (*BootUnresolvedError), until a restart reads the
+// file again. A holder told nothing saves its first Update over whatever the
+// file holds, and records from then on.
 func (r *RuntimeConfig) RecordFile(file BootFile, raw []byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.file, r.fileKnown, r.target = append([]byte(nil), raw...), true, file.target
+	r.file, r.fileKnown = append([]byte(nil), raw...), true
+	r.target, r.unresolved = file.target, !file.resolved
 }
 
 // Changed returns a channel that the next Store closes, the Store an
@@ -176,8 +183,13 @@ func (r *RuntimeConfig) Clone() *Config {
 // reloads it now. So does a name the turn finds repointed, a *NameMovedError
 // (the link moved while the save waited for the lock, before fn's check, or
 // while the save staged), and nothing is tried again on the file the name
-// opens now. A lock another writer holds past LockWait is a *BusyError.
-// Either refusal comes before fn runs, so a caller that changes something
+// opens now. A lock another writer holds past LockWait is a *BusyError. A
+// holder whose boot read resolved the config's name at none of its reads
+// (RecordFile of no file) cannot say which file its snapshot came from, and
+// refuses every save with a *BootUnresolvedError before it takes a turn,
+// until a restart reads the file again; a CLI writer's own turn, which
+// resolves the name itself, is not the holder's and is not refused.
+// Each refusal comes before fn runs, so a caller that changes something
 // besides the config in fn (the console's root changes change the library
 // index there) changes nothing when the save is refused before it, and such a
 // caller asks the turn's comparison again just before that change
@@ -211,13 +223,16 @@ func (r *RuntimeConfig) UpdateChecked(path string, fn func(next *Config, check f
 	if r.Load() == nil {
 		return errors.New("config: Update with no config loaded")
 	}
+	if r.unresolved {
+		return &BootUnresolvedError{Path: path}
+	}
 	l, err := LockFile(path)
 	if err != nil {
 		return changedOutside(path, err)
 	}
 	defer l.Unlock()
 	found, ok := l.Found()
-	if r.fileKnown && ((r.target != "" && l.target != r.target) || !ok || !bytes.Equal(found, r.file)) {
+	if r.fileKnown && (l.target != r.target || !ok || !bytes.Equal(found, r.file)) {
 		return &ChangedOutsideError{Path: path}
 	}
 	next := Clone(r.Load())
