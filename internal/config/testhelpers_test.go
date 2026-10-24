@@ -6,6 +6,17 @@ import (
 	"strings"
 )
 
+// saveAt saves cfg to the config file at path in a turn of its lock, as a
+// writer with nothing to read first does (a test's fixture).
+func saveAt(cfg *Config, path string) error {
+	l, err := LockFile(path)
+	if err != nil {
+		return err
+	}
+	defer l.Unlock()
+	return cfg.Save(l)
+}
+
 // yamlStr renders s as a SINGLE-quoted YAML scalar.
 //
 // Test fixtures build bridge.yaml by string concatenation and used to

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/backup"
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
@@ -64,7 +65,16 @@ func TestSnapshotAndRestoreAsRootKeepTheInstallOwner(t *testing.T) {
 		// migration lock (manifest's ladderLockSuffix, backlog B185): left
 		// root's, the service could not open it again.
 		src.ManifestDB + "-migrate.lock",
+		// The restore takes bridge.yaml's lock (config.LockFile, backlog
+		// B506), whose file it creates when no writer has yet: left root's,
+		// the service's next console save could not open it.
+		configLockFile(src.BridgeYAML),
 	})
+}
+
+// configLockFile is the lock file beside the config file at path.
+func configLockFile(path string) string {
+	return filepath.Join(filepath.Dir(path), config.LockFileName(path))
 }
 
 // The console account and the harvest state take the same single chown
@@ -119,7 +129,7 @@ func TestSnapshotAndRestoreAsRootKeepTheConsoleAccountAndHarvestState(t *testing
 	}
 	assertGivenAway(t, changes()[before:], []string{
 		src.ManifestDB, src.TokensJSON, src.ServerCert, src.ServerKey, src.BridgeYAML,
-		src.AdminAuth, src.AtlasHarvest, src.ManifestDB + "-migrate.lock",
+		src.AdminAuth, src.AtlasHarvest, src.ManifestDB + "-migrate.lock", configLockFile(src.BridgeYAML),
 	})
 }
 

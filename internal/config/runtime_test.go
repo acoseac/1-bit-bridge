@@ -40,8 +40,11 @@ func TestRuntimeConfigUpdate(t *testing.T) {
 		// mutate is the fn passed to Update; nil means "no-op fn".
 		mutate func(*Config) error
 		// pathOverride, when set, replaces the default bridge.yaml
-		// path (used to force a Save failure).
+		// path (used to force a failure to take the file's lock).
 		pathOverride string
+		// occupied puts a directory, not empty, where bridge.yaml goes,
+		// which Save's rename cannot replace.
+		occupied bool
 		// holderEmpty constructs the holder with no config loaded.
 		holderEmpty bool
 
@@ -69,9 +72,15 @@ func TestRuntimeConfigUpdate(t *testing.T) {
 			wantName: "Home",
 		},
 		{
-			name:         "save failure keeps live snapshot",
+			name:        "save failure keeps live snapshot",
+			occupied:    true,
+			wantErrText: "rename",
+			wantName:    "Home",
+		},
+		{
+			name:         "a lock that cannot be opened keeps live snapshot",
 			pathOverride: filepath.Join("no-such-dir", "bridge.yaml"),
-			wantErrText:  "temp file",
+			wantErrText:  "open the lock beside",
 			wantName:     "Home",
 		},
 		{
@@ -96,6 +105,11 @@ func TestRuntimeConfigUpdate(t *testing.T) {
 			path := cfgPath
 			if tc.pathOverride != "" {
 				path = filepath.Join(dir, tc.pathOverride)
+			}
+			if tc.occupied {
+				if err := os.MkdirAll(filepath.Join(cfgPath, "occupied"), 0o755); err != nil {
+					t.Fatal(err)
+				}
 			}
 			fn := tc.mutate
 			if fn == nil {
@@ -125,9 +139,9 @@ func TestRuntimeConfigUpdate(t *testing.T) {
 			if live.LibraryName != tc.wantName {
 				t.Errorf("live LibraryName = %q, want %q", live.LibraryName, tc.wantName)
 			}
-			_, statErr := os.Stat(cfgPath)
+			st, statErr := os.Stat(cfgPath)
 			if !tc.wantSaved {
-				if statErr == nil {
+				if statErr == nil && st.Mode().IsRegular() {
 					t.Errorf("bridge.yaml exists after failed Update; want no file")
 				}
 				return

@@ -2798,10 +2798,27 @@ const (
 // against the config file's directory, and validates. A returned *Config is
 // ready to hand to downstream subsystems.
 func Load(path string) (*Config, error) {
+	cfg, _, err := LoadFile(path)
+	return cfg, err
+}
+
+// LoadFile is Load, and the bytes it read: what serve hands its live config
+// holder (RuntimeConfig.RecordFile), so that a console save can tell the
+// file another writer changed since from the one serve read.
+func LoadFile(path string) (*Config, []byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read config %q: %w", path, err)
+		return nil, nil, fmt.Errorf("read config %q: %w", path, err)
 	}
+	cfg, err := loadData(path, data)
+	if err != nil {
+		return nil, nil, err
+	}
+	return cfg, data, nil
+}
+
+// loadData is Load over the bytes it read from path.
+func loadData(path string, data []byte) (*Config, error) {
 	var cfg Config
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true) // typo-catcher: unknown YAML keys fail the load
@@ -4335,37 +4352,44 @@ func (c *Config) VariantSweepMaxDeletePercent() int {
 	return *c.Integrity.VariantSweepMaxDeletePercent
 }
 
-// Save atomically writes c as YAML to path (temp file + rename). Parent
-// directory must exist. Comments and fields unknown to this schema are not
-// preserved — callers that want to keep hand-authored comments should not
-// use Save. `bridge init` and admin-console edits are the intended callers.
-func (c *Config) Save(path string) error {
-	return c.save(path, nil)
+// Save atomically writes c as YAML to the config file l is a turn at (temp
+// file + rename), and only during that turn: the lock every writer takes
+// around its read-modify-write (LockFile, Edit). Parent directory must
+// exist. Comments and fields unknown to this schema are not preserved —
+// callers that want to keep hand-authored comments should not use Save.
+func (c *Config) Save(l *FileLock) error {
+	_, err := c.save(l, nil)
+	return err
 }
 
 // SaveIf is Save, asking unchanged once the new file is staged, just before
-// it replaces path: when unchanged returns an error, path is left as it is,
-// the staged file is removed, and that error is returned as it is. A writer
-// that cannot hold off every other writer (library add and remove and init
-// take no lock) asks whether the file still holds what it read, so a save
-// made before that question is not written over (bridge output dac bind).
-// That narrows the window to the instant between the question and the
-// rename, and does not close it: no rename can be made conditional on the
-// file it replaces, so a save that lands in that instant is still written
-// over. A lock that every config writer takes is the fix.
-func (c *Config) SaveIf(path string, unchanged func() error) error {
-	return c.save(path, unchanged)
+// it replaces the file: when unchanged returns an error, the file is left as
+// it is, the staged file is removed, and that error is returned as it is.
+// Under the lock no writer that takes it can land between the read and the
+// save, so the question guards against one that does not: an edit, or a
+// bridge older than the lock (bridge output dac bind asks whether the file
+// still holds the bytes it read). It narrows that window to the instant
+// between the question and the rename, and does not close it: no rename can
+// be made conditional on the file it replaces.
+func (c *Config) SaveIf(l *FileLock, unchanged func() error) error {
+	_, err := c.save(l, unchanged)
+	return err
 }
 
-// save is Save, with SaveIf's unchanged when it is not nil.
-func (c *Config) save(path string, unchanged func() error) error {
+// save is Save, with SaveIf's unchanged when it is not nil, and answers the
+// bytes it wrote.
+func (c *Config) save(l *FileLock, unchanged func() error) ([]byte, error) {
+	if err := l.heldFor(); err != nil {
+		return nil, err
+	}
+	path := l.path
 	data, err := yaml.Marshal(c)
 	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
+		return nil, fmt.Errorf("marshal config: %w", err)
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".bridge-*.yaml")
 	if err != nil {
-		return fmt.Errorf("temp file: %w", err)
+		return nil, fmt.Errorf("temp file: %w", err)
 	}
 	tmpName := tmp.Name()
 	defer func() {
@@ -4382,27 +4406,27 @@ func (c *Config) save(path string, unchanged func() error) error {
 	// file as root; the service reads it at its next start.
 	if err := fsutil.KeepOwner(tmp, path); err != nil {
 		tmp.Close()
-		return fmt.Errorf("keep the config's owner: %w", err)
+		return nil, fmt.Errorf("keep the config's owner: %w", err)
 	}
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
-		return fmt.Errorf("write tmp: %w", err)
+		return nil, fmt.Errorf("write tmp: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
-		return fmt.Errorf("sync tmp: %w", err)
+		return nil, fmt.Errorf("sync tmp: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close tmp: %w", err)
+		return nil, fmt.Errorf("close tmp: %w", err)
 	}
 	if unchanged != nil {
 		if err := unchanged(); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if err := atomicwrite.RenameWithRetry(tmpName, path); err != nil {
-		return fmt.Errorf("rename: %w", err)
+		return nil, fmt.Errorf("rename: %w", err)
 	}
 	tmpName = "" // suppress defer cleanup
-	return nil
+	return data, nil
 }

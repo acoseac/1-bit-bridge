@@ -868,15 +868,12 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	// The config must still be the one this run read and decided about, and
-	// this is the last step before Save: every prompt, refusal and check ran
-	// since, and another process can have written the config meanwhile
-	// (configChangedSinceRead).
-	if configChangedSinceRead(stderr, cfgPath, asRead) {
-		return 1
-	}
-	if err := cfg.Save(cfgPath); err != nil {
-		fmt.Fprintf(stderr, "save config: %v\n", err)
-		return 1
+	// this is the last step: every prompt, refusal and check ran since, and
+	// another process can have written the config meanwhile
+	// (configChangedSinceRead). The check and the save are one turn of
+	// bridge.yaml's lock (saveInitConfig).
+	if code := saveInitConfig(stderr, cfgPath, asRead, cfg); code != 0 {
+		return code
 	}
 	printKept(stdout, cfg, initDataDir, rootsKept, nameKept, endpointsKept, listenListed, adminListed)
 	if endpointsKept {
@@ -917,6 +914,32 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	choice := resolveLaunchChoice(in, stdout, *nonInteractive, *skipService, *windowsService, *startNow)
 	return finishInit(in, *nonInteractive, stdout, stderr, cfgPath, dataDir, choice)
+}
+
+// saveInitConfig writes cfg as the config at cfgPath, in one turn of
+// bridge.yaml's lock (config.LockFile, backlog B506), and only while the file
+// is still as this run read it at its start (asRead): the check reads the
+// file again under the lock, and no writer that takes the lock can land
+// between it and the save. A run asks its questions between its read and
+// this turn, which is why the turn is this step alone and never the run: it
+// decides from its read and refuses a file that changed, as it did before
+// the lock, rather than hold every other writer off while it waits on the
+// operator. It answers init's exit code.
+func saveInitConfig(stderr io.Writer, cfgPath string, asRead configAsRead, cfg *config.Config) int {
+	lock, err := config.LockFile(cfgPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "save config: %v\n", err)
+		return 1
+	}
+	defer lock.Unlock()
+	if configChangedSinceRead(stderr, cfgPath, asRead) {
+		return 1
+	}
+	if err := cfg.Save(lock); err != nil {
+		fmt.Fprintf(stderr, "save config: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 // openInitAdminAuth reads a public install's admin credential store for

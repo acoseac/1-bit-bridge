@@ -1,7 +1,11 @@
 package config
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
+	"io/fs"
+	"os"
 	"sync"
 	"sync/atomic"
 )
@@ -9,7 +13,8 @@ import (
 // RuntimeConfig is the process-wide holder for the live config
 // snapshot. Readers call Load() per-request; writers go through
 // Update, which serialises the clone→mutate→Save→Store cycle behind
-// one mutex shared by every config writer in the process.
+// one mutex shared by every config writer in the process, and takes
+// the config file's lock (LockFile) shared with every writer outside it.
 type RuntimeConfig struct {
 	ptr atomic.Pointer[Config]
 	// mu serialises Update calls. Two writers that each clone the
@@ -17,10 +22,45 @@ type RuntimeConfig struct {
 	// silently drop the other's fields from both bridge.yaml and the
 	// final live snapshot (2026-07-21 review finding M13).
 	mu sync.Mutex
+	// file is the config file's bytes as this holder last read them for
+	// the live snapshot (RecordFile) or wrote them (Update), and fileKnown
+	// whether it has either; both under mu.
+	file      []byte
+	fileKnown bool
 	// changedMu guards changed, the channel the next Store closes
 	// (Changed), nil until someone asks for it.
 	changedMu sync.Mutex
 	changed   chan struct{}
+}
+
+// ErrChangedOutside is what a *ChangedOutsideError matches.
+var ErrChangedOutside = errors.New("config: the config file changed outside this holder")
+
+// ChangedOutsideError is Update's refusal of a save over a config file that
+// no longer holds what the holder last read or wrote: another writer saved
+// it since. It names the file and nothing it holds.
+type ChangedOutsideError struct {
+	// Path is the config file.
+	Path string
+}
+
+func (e *ChangedOutsideError) Error() string {
+	return fmt.Sprintf("%s was changed or removed by another writer since this bridge read it "+
+		"(a bridge command such as library add or init, or an edit), so this change was not saved, "+
+		"and the file keeps that writer's: restart the bridge to load the file, then make the change again", e.Path)
+}
+
+// Is makes a *ChangedOutsideError match ErrChangedOutside.
+func (e *ChangedOutsideError) Is(target error) bool { return target == ErrChangedOutside }
+
+// RecordFile tells the holder raw, the bytes the config file held when the
+// live snapshot was read from it (LoadFile): its first Update then saves
+// only over a file that still holds them. A holder told nothing saves its
+// first Update over whatever the file holds, and records from then on.
+func (r *RuntimeConfig) RecordFile(raw []byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.file, r.fileKnown = append([]byte(nil), raw...), true
 }
 
 // Changed returns a channel that the next Store closes, the Store an
@@ -90,6 +130,17 @@ func (r *RuntimeConfig) Clone() *Config {
 // add/remove, UPnP server CRUD, …) can't clone the same base and
 // have the last Save silently drop the loser's field changes.
 //
+// The save is a turn of the config file's lock (LockFile), shared with
+// every writer outside the process (backlog B506), and in it the file is
+// read again: the clone is of a snapshot read before the turn, so it is
+// saved only over a file that still holds the bytes this holder last read
+// (RecordFile) or wrote. Over a file another writer changed since (a
+// library add, init, a restore or an edit beside the running bridge),
+// nothing is saved or stored and a *ChangedOutsideError says so: the file
+// keeps that writer's change, which the bridge loads when it next starts,
+// and nothing reloads it now. A lock another writer holds past LockWait
+// is a *BusyError, with nothing saved or stored either.
+//
 // When fn returns an error the clone is discarded: nothing is saved
 // or stored, and fn's error is returned verbatim. A Save failure
 // likewise leaves both the live snapshot and the on-disk file
@@ -109,9 +160,27 @@ func (r *RuntimeConfig) Update(path string, fn func(*Config) error) error {
 	if err := fn(next); err != nil {
 		return err
 	}
-	if err := next.Save(path); err != nil {
+	l, err := LockFile(path)
+	if err != nil {
 		return err
 	}
+	defer l.Unlock()
+	if r.fileKnown {
+		now, err := os.ReadFile(path)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			return &ChangedOutsideError{Path: path}
+		case err != nil:
+			return fmt.Errorf("read %s again before saving it: %w", path, err)
+		case !bytes.Equal(now, r.file):
+			return &ChangedOutsideError{Path: path}
+		}
+	}
+	written, err := next.save(l, nil)
+	if err != nil {
+		return err
+	}
+	r.file, r.fileKnown = written, true
 	r.Store(next)
 	return nil
 }

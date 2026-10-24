@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -33,6 +34,20 @@ const libraryAddFailedFormat = "library add: %v\n"
 // bridge.yaml + the manifest store directly so headless Ansible /
 // shell-script setups work without spinning up a server first.
 func libraryCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	return runLibrary(ctx, args, libraryEnv{}, stdout, stderr)
+}
+
+// libraryEnv is what a test can stand in for in `bridge library add` and
+// `remove`.
+type libraryEnv struct {
+	// beforeLock, when set, runs between the command's first read of the
+	// config and the offline change's turn of bridge.yaml's lock: the window
+	// a test lands another writer in.
+	beforeLock func()
+}
+
+// runLibrary is libraryCmd on env.
+func runLibrary(ctx context.Context, args []string, env libraryEnv, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "library: missing subcommand")
 		fmt.Fprintln(stderr, "  bridge library add <path>")
@@ -41,16 +56,16 @@ func libraryCmd(ctx context.Context, args []string, stdout, stderr io.Writer) in
 	}
 	switch args[0] {
 	case "add":
-		return libraryAddCmd(ctx, args[1:], stdout, stderr)
+		return libraryAddCmd(ctx, args[1:], env, stdout, stderr)
 	case "remove":
-		return libraryRemoveCmd(ctx, args[1:], stdout, stderr)
+		return libraryRemoveCmd(ctx, args[1:], env, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "library: unknown subcommand %q\n", args[0])
 		return 2
 	}
 }
 
-func libraryAddCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+func libraryAddCmd(ctx context.Context, args []string, env libraryEnv, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("library add", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "", configFlagUsage)
@@ -84,43 +99,71 @@ func libraryAddCmd(ctx context.Context, args []string, stdout, stderr io.Writer)
 	if running, code := tryLibraryViaAdmin(ctx, cfg, http.MethodPost, target, stdout, stderr); running {
 		return code
 	}
+	if env.beforeLock != nil {
+		env.beforeLock()
+	}
 
-	// Offline path. Re-validate, mutate config + manifest directly.
-	if slices.Contains(cfg.LibraryRoots, target) {
-		fmt.Fprintf(stdout, "library add: %s is already configured (no-op)\n", target)
-		return 0
-	}
-	newList := append(append([]string(nil), cfg.LibraryRoots...), target)
-	if err := bridgefs.ValidateRoots(newList); err != nil {
-		fmt.Fprintf(stderr, libraryAddFailedFormat, err)
-		return 1
-	}
-	willTransition := len(cfg.LibraryRoots) == 1
-	var carryGen int64
-	if willTransition {
-		// 1 → N: stored path form changes from bare "Artist/…" to
-		// "<basename>/Artist/…". Wipe so the next scan repopulates
-		// in the new form. Same rationale as the admin API path.
-		gen, err := wipeManifest(ctx, cfg)
-		if err != nil {
-			fmt.Fprintf(stderr, "library add: wipe manifest: %v\n", err)
-			return 1
+	// Offline path. Re-validate, mutate config + manifest directly, in one
+	// turn of bridge.yaml's lock (config.Edit, backlog B506): the config is
+	// read again under it, so what another writer saved since the read above
+	// (a console save, another library change) is kept, and every decision
+	// below is made on that copy.
+	var (
+		edited                         *config.Config
+		noop, willTransition, changing bool
+		carryGen                       int64
+		refused                        error
+	)
+	err = config.Edit(resolvedCfgPath, func(cfg *config.Config) (bool, error) {
+		edited = cfg
+		if slices.Contains(cfg.LibraryRoots, target) {
+			noop = true
+			return false, nil
 		}
-		carryGen = gen
-	}
-	cfg.LibraryRoots = newList
-	if err := cfg.Save(resolvedCfgPath); err != nil {
+		newList := append(append([]string(nil), cfg.LibraryRoots...), target)
+		if err := bridgefs.ValidateRoots(newList); err != nil {
+			refused = err
+			return false, err
+		}
+		willTransition = len(cfg.LibraryRoots) == 1
 		if willTransition {
-			retargetAbandonedCarry(ctx, cfg, carryGen, false)
+			// 1 → N: stored path form changes from bare "Artist/…" to
+			// "<basename>/Artist/…". Wipe so the next scan repopulates
+			// in the new form. Same rationale as the admin API path.
+			gen, err := wipeManifest(ctx, cfg)
+			if err != nil {
+				refused = fmt.Errorf("wipe manifest: %w", err)
+				return false, refused
+			}
+			carryGen = gen
+		}
+		cfg.LibraryRoots = newList
+		changing = true
+		return true, nil
+	})
+	switch {
+	case refused != nil:
+		fmt.Fprintf(stderr, libraryAddFailedFormat, refused)
+		return 1
+	case err != nil && changing:
+		if willTransition {
+			retargetAbandonedCarry(ctx, edited, carryGen, false)
 		}
 		fmt.Fprintf(stderr, "library add: save config: %v\n", err)
 		return 1
+	case err != nil:
+		// The lock, or the read under it.
+		fmt.Fprintf(stderr, libraryAddFailedFormat, err)
+		return 1
+	case noop:
+		fmt.Fprintf(stdout, "library add: %s is already configured (no-op)\n", target)
+		return 0
 	}
 	fmt.Fprintf(stdout, "library add: %s added; next start (or `bridge scan`) will index it.\n", target)
 	return 0
 }
 
-func libraryRemoveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+func libraryRemoveCmd(ctx context.Context, args []string, env libraryEnv, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("library remove", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "", configFlagUsage)
@@ -144,37 +187,96 @@ func libraryRemoveCmd(ctx context.Context, args []string, stdout, stderr io.Writ
 	if running, code := tryLibraryViaAdmin(ctx, cfg, http.MethodDelete, target, stdout, stderr); running {
 		return code
 	}
+	if env.beforeLock != nil {
+		env.beforeLock()
+	}
 
-	// Offline path.
-	idx := slices.Index(cfg.LibraryRoots, target)
-	if idx < 0 {
+	// Offline path, in one turn of bridge.yaml's lock (config.Edit, backlog
+	// B506), as library add's: every decision below is made on the config
+	// read again under the lock.
+	var (
+		removal        offlineRemoval
+		noop, changing bool
+		refused        error
+	)
+	defer func() {
+		if removal.store != nil {
+			removal.store.Close()
+		}
+	}()
+	err = config.Edit(resolvedCfgPath, func(cfg *config.Config) (bool, error) {
+		idx := slices.Index(cfg.LibraryRoots, target)
+		if idx < 0 {
+			noop = true
+			return false, nil
+		}
+		newList := slices.Delete(append([]string(nil), cfg.LibraryRoots...), idx, idx+1)
+		if removal, refused = removeRootOffline(ctx, cfg, target, newList); refused != nil {
+			return false, refused
+		}
+		cfg.LibraryRoots = newList
+		changing = true
+		return true, nil
+	})
+	switch {
+	case refused != nil:
+		fmt.Fprintf(stderr, "library remove: %v\n", refused)
+		return 1
+	case err != nil && changing:
+		if removal.collapse {
+			removal.store.RetargetFirstIndexedCarry(ctx, removal.carryGen, true)
+		}
+		fmt.Fprintf(stderr, "library remove: save config: %v\n", err)
+		return 1
+	case err != nil:
+		// The lock, or the read under it.
+		fmt.Fprintf(stderr, "library remove: %v\n", err)
+		return 1
+	case noop:
 		fmt.Fprintf(stdout, "library remove: %s is not configured (no-op)\n", target)
 		return 0
 	}
-	newList := slices.Delete(append([]string(nil), cfg.LibraryRoots...), idx, idx+1)
-	if len(newList) == 0 {
-		fmt.Fprintln(stderr, "library remove: refusing to remove the last root (use `bridge init` to reconfigure)")
-		return 1
-	}
-	willCollapse := len(cfg.LibraryRoots) > 1 && len(newList) == 1
-	store, err := openManifestStore(cfg)
-	if err != nil {
-		fmt.Fprintf(stderr, "library remove: open store: %v\n", err)
-		return 1
-	}
-	defer store.Close()
+	fmt.Fprintf(stdout, "library remove: %s removed; manifest cleaned.\n", target)
+	return 0
+}
 
-	var carryGen int64
-	if willCollapse {
+// offlineRemoval is what library remove's change to the library index
+// left: the store it opened, which the caller closes, whether the removal
+// collapses the library to one root, and the generation that collapse's
+// wipe recorded.
+type offlineRemoval struct {
+	store    *manifest.Store
+	collapse bool
+	carryGen int64
+}
+
+// removeRootOffline is library remove's change to the library index for
+// taking target out of cfg's roots, leaving newList: it refuses the last
+// root, opens the store, and wipes it on a collapse to one root or prunes
+// the root's tracks. It answers why it refused, nil when cfg may be saved
+// with newList, beside what it left, a store it opened included. Library
+// remove runs it under bridge.yaml's lock, on the config read there.
+func removeRootOffline(ctx context.Context, cfg *config.Config, target string, newList []string) (offlineRemoval, error) {
+	var r offlineRemoval
+	if len(newList) == 0 {
+		return r, errors.New("refusing to remove the last root (use `bridge init` to reconfigure)")
+	}
+	r.collapse = len(cfg.LibraryRoots) > 1 && len(newList) == 1
+	s, err := openManifestStore(cfg)
+	if err != nil {
+		return r, fmt.Errorf("open store: %w", err)
+	}
+	r.store = s
+
+	if r.collapse {
 		// Spare UPnP-routed rows: only filesystem tracks change path
 		// form on the multi→single flip; the upstream library's
 		// lifecycle belongs to the ingest reconcile, not this wipe.
-		gen, err := store.RecordFirstIndexedCarryAndWipe(ctx, true, filepath.Base(newList[0]))
+		gen, err := s.RecordFirstIndexedCarryAndWipe(ctx, true, filepath.Base(newList[0]))
 		if err != nil {
-			fmt.Fprintf(stderr, "library remove: wipe manifest: %v\n", err)
-			return 1
+			return r, fmt.Errorf("wipe manifest: %w", err)
 		}
-		carryGen = gen
+		r.carryGen = gen
 	} else {
 		// Multi-root → multi-root: the manifest stores rows under
 		// "<basename>/Artist/Album/Track". `bridgefs.ValidateRoots`
@@ -194,26 +296,15 @@ func libraryRemoveCmd(ctx context.Context, args []string, stdout, stderr io.Writ
 		targetKey := bridgefs.FoldRootBasename(target)
 		for _, surviving := range newList {
 			if bridgefs.FoldRootBasename(surviving) == targetKey {
-				fmt.Fprintf(stderr, "library remove: refusing — another configured root (%q) shares the basename %q\n", surviving, basename)
-				fmt.Fprintln(stderr, "  rename the colliding root first; the manifest path namespace can't disambiguate.")
-				return 1
+				return r, fmt.Errorf("refusing — another configured root (%q) shares the basename %q\n"+
+					"  rename the colliding root first; the manifest path namespace can't disambiguate.", surviving, basename)
 			}
 		}
-		if _, err := store.DeleteTracksByPrefix(ctx, basename+"/"); err != nil {
-			fmt.Fprintf(stderr, "library remove: prune tracks: %v\n", err)
-			return 1
+		if _, err := s.DeleteTracksByPrefix(ctx, basename+"/"); err != nil {
+			return r, fmt.Errorf("prune tracks: %w", err)
 		}
 	}
-	cfg.LibraryRoots = newList
-	if err := cfg.Save(resolvedCfgPath); err != nil {
-		if willCollapse {
-			store.RetargetFirstIndexedCarry(ctx, carryGen, true)
-		}
-		fmt.Fprintf(stderr, "library remove: save config: %v\n", err)
-		return 1
-	}
-	fmt.Fprintf(stdout, "library remove: %s removed; manifest cleaned.\n", target)
-	return 0
+	return r, nil
 }
 
 // tryLibraryViaAdmin probes the loopback admin API. If a bridge is

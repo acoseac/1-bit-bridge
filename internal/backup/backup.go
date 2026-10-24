@@ -329,6 +329,14 @@ func Restore(snapshotDir string, dst Targets) error {
 
 // RestoreWithOptions restores with an optional warning sink and random source.
 // Like Restore, its caller must hold the data directory's exclusive lock.
+//
+// A restore that writes bridge.yaml takes the config file's lock too
+// (config.LockFile, backlog B506), inside the data dir's, the order every
+// command that takes both keeps, and before it writes any file, holding it
+// to the end: so a writer that takes turns at the config (a library add, an
+// init) waits for the whole restore and then reads the restored file, and a
+// config another writer holds refuses the restore with nothing restored,
+// never half of it.
 func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) error {
 	m, err := readManifest(filepath.Join(snapshotDir, ManifestFile))
 	if err != nil {
@@ -337,6 +345,13 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 	if m.SchemaVersion != 1 && m.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("snapshot schema v%d not supported (this bridge supports v%d)",
 			m.SchemaVersion, SchemaVersion)
+	}
+	if dst.BridgeYAML != "" && slices.Contains(m.Files, "bridge.yaml") {
+		l, err := config.LockFile(dst.BridgeYAML)
+		if err != nil {
+			return err
+		}
+		defer l.Unlock()
 	}
 
 	// Pair the manifest's file list with the caller's targets.

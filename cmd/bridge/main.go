@@ -2757,18 +2757,32 @@ const autoInitDefaultRoot = "/library"
 // (matching init). No cert mint here — serve's LoadOrGenerate first-mints on
 // the persistent volume. MkdirAll(0o700) because config.Save writes its temp
 // file in the config dir, which fails if the parent doesn't exist yet.
-func writeAutoInitConfig(cfgPath string) error {
+//
+// The seed is written in a turn of bridge.yaml's lock (config.LockFile,
+// backlog B506), and only while the file is still missing once the lock is
+// held: a config another writer saved since serve looked (an init, a second
+// container start) is kept, and serve loads it. wrote says whether the seed
+// was written.
+func writeAutoInitConfig(cfgPath string) (wrote bool, err error) {
 	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
-		return fmt.Errorf("create config dir: %w", err)
+		return false, fmt.Errorf("create config dir: %w", err)
 	}
 	cfg := baseConfig([]string{autoInitDefaultRoot}, config.DefaultLibraryName, "data")
 	if err := cfg.NormalizeAndValidate(); err != nil {
-		return fmt.Errorf("validate seed config: %w", err)
+		return false, fmt.Errorf("validate seed config: %w", err)
 	}
-	if err := cfg.Save(cfgPath); err != nil {
-		return fmt.Errorf("save seed config: %w", err)
+	lock, err := config.LockFile(cfgPath)
+	if err != nil {
+		return false, fmt.Errorf("save seed config: %w", err)
 	}
-	return nil
+	defer lock.Unlock()
+	if _, err := os.Stat(cfgPath); !errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err := cfg.Save(lock); err != nil {
+		return false, fmt.Errorf("save seed config: %w", err)
+	}
+	return true, nil
 }
 
 // thumbKeyPattern bounds the cache keys ArtworkThumbPath will build a
@@ -2891,15 +2905,21 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// errors below, directing the operator to `bridge init`.
 	if opts.initIfMissing {
 		if _, statErr := os.Stat(*configPath); os.IsNotExist(statErr) {
-			if werr := writeAutoInitConfig(*configPath); werr != nil {
+			wrote, werr := writeAutoInitConfig(*configPath)
+			if werr != nil {
 				fmt.Fprintf(stderr, "auto-init: %v\n", werr)
 				return 2
 			}
-			logger.Info("no config found — wrote a default; env (BRIDGE_LIBRARY_ROOTS/NAME/…) still overrides it at runtime",
-				"path", *configPath, "libraryRoots", autoInitDefaultRoot)
+			if wrote {
+				logger.Info("no config found — wrote a default; env (BRIDGE_LIBRARY_ROOTS/NAME/…) still overrides it at runtime",
+					"path", *configPath, "libraryRoots", autoInitDefaultRoot)
+			}
 		}
 	}
-	cfg, cfgFile, err := loadCLIConfig(*configPath)
+	// The bytes the config is read from are kept for the live holder
+	// (RecordFile, below): a console save then writes only over a file that
+	// still holds them, and refuses one another writer changed since.
+	cfg, cfgFile, cfgRead, err := loadCLIConfigFile(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return 2
@@ -3913,6 +3933,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		WithAtlasMeta(cfg.Atlas.Enabled, cfg.Atlas.EffectiveMetaTTL(), manifestStore).
 		WithPlaylistCoverStore(manifestStore).
 		WithDemoMode(cfg.Demo.Enabled)
+	// The live holder is told the bytes its snapshot was read from, before
+	// anything can save through it: a console save then writes only over a
+	// file that still holds them, or that it wrote itself, and refuses one
+	// another writer changed meanwhile (config.RuntimeConfig.Update, backlog
+	// B506).
+	apiSrv.ConfigHolder().RecordFile(cfgRead)
 	// Demo mode (read-only public demo bridge): the three user-data
 	// stores + the device registrar are deliberately NOT wired, so
 	// PUT /v1/playlists/{id}, DELETE /v1/playlists/{id}, PUT /v1/favorites

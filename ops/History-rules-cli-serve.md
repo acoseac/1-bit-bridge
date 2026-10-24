@@ -2101,3 +2101,80 @@ Windows-runner check, distinct from portable race-test results.
   message, the unchanged source pipe and the absence of a snapshot directory.
   With the plain open restored both tests fail after five seconds; the
   fixture then releases and joins the blocked snapshot.
+
+## bridge.yaml's lock in the CLI and serve (backlog B506, 2026-10-24)
+
+- **A command that takes both the data dir's lock and bridge.yaml's takes
+  the data dir's first (`holdDataDirForMutation`, `lockServeDataDir`) and
+  bridge.yaml's inside it: bind, restore (in `backup.RestoreWithOptions`,
+  before its first write, to its end) and serve; library add and remove
+  (`config.Edit`), init (`saveInitConfig`) and serve's seed
+  (`writeAutoInitConfig`) take bridge.yaml's alone, each deciding on the
+  file read in its turn** (2026-10-24, backlog B506; the lock itself is
+  config-lifecycle.md's). Serve fixes the order: it holds the data dir's
+  lock for its whole life (`dataDirHold`) and takes bridge.yaml's for each
+  console save, so the data dir's is necessarily the outer one, and bind and
+  restore keep it: `bridge output dac bind` takes bridge.yaml's after
+  `holdDataDirForMutation` and before its read under the locks, and gives it
+  back after its `SaveIf`, before it makes the player's UUID, which is not
+  the config; `bridge restore` holds the data dir's for its whole run (the
+  prompt included) and `RestoreWithOptions` takes bridge.yaml's, when the
+  snapshot holds the file and the caller maps it, before the player's
+  reservation and identity and the copies, holding it until it returns, so a
+  config another writer holds refuses the restore with nothing restored
+  (`TestARestoreRefusedTheLockRestoresNothing`: a track added after the
+  snapshot is still there). Nothing takes the data dir's lock while it holds
+  bridge.yaml's. The data dir's lock is a try that never waits and
+  bridge.yaml's waits at most `config.LockWait`, so no order could block
+  forever; the fixed one keeps it so if the data dir's ever waits, and keeps
+  a command from holding bridge.yaml's, and every writer behind it, while it
+  is refused the data dir. `TestTheDataDirLockComesBeforeTheConfigLock`:
+  with bridge.yaml's lock held by another open, bind and restore are found
+  holding the data dir halfway through their wait, and go through once it is
+  free; with both held, each is refused at the data dir at once ("already
+  running on the data dir"), never after waiting out bridge.yaml's. The
+  halfway check asks the data dir's lock once, never in a poll: that lock is
+  a try, so a poll holding it at the instant the command asked for it would
+  refuse the command. Red on main: bind and restore returned at once, exit
+  0, never waiting.
+
+  **library add and remove's offline change is one turn of bridge.yaml's
+  lock** (`config.Edit`): the config is read again under it, after the
+  admin probe that read it first, and every decision is made on that copy,
+  already configured or not, the root list `ValidateRoots` checks, the 1→N
+  wipe, the last root, the basename guard and the collapse; the library
+  index's wipe or prune runs in the turn, and a save that fails after a wipe
+  retargets the carry as before (`retargetAbandonedCarry`,
+  `RetargetFirstIndexedCarry`). Every message and exit code is as it was;
+  a lock another writer holds past the wait is "library add: another bridge
+  command or the running bridge is changing …", exit 1.
+  `libraryEnv.beforeLock` is the window between the first read and the turn.
+  `TestLibraryChangesKeepASettingsSaveThatLandsAfterTheirRead` (a console
+  save through a holder in that window is kept, for add and for remove; red
+  on main, `libraryName "Test Library"`), and
+  `TestBindKeepsALibraryAddThatLandsInItsWindow` (a library add started
+  while bind holds the lock, between its read and its save, waits for bind's
+  turn and adds its root to the file bind wrote; red on main, bind refused
+  by its byte comparison and the binding gone).
+
+  **init's turn is its final check and save, never the run**
+  (`saveInitConfig`): the lock, `configChangedSinceRead` (which reads the
+  file again), then `cfg.Save` with the turn. A run asks its questions
+  between its read and that turn, so it decides from its read and refuses a
+  file that changed, as it did before, rather than hold every other writer
+  off while it waits on the operator; no writer that takes the lock can land
+  between the check and the save. `TestTheChangedConfigCheckIsTheStepBeforeSave`
+  pins it by the syntax tree (initCmd calls `saveInitConfig` once and
+  neither the check nor `cfg.Save` itself; in `saveInitConfig` the lock
+  comes before the check and the check directly before the save), and
+  `TestInitRefusesAConfigThatChangedWhileItRan` the refusal.
+
+  **serve --init-if-missing writes its seed only while the config is still
+  missing in its turn** (`writeAutoInitConfig`, which answers whether it
+  wrote; the boot's "wrote a default" line follows that answer), so a config
+  another writer saved after serve looked is kept and loaded.
+  `TestTheSeedKeepsAConfigWrittenBeforeItsTurn`.
+
+  **Don't take the data dir's lock while holding bridge.yaml's, take
+  bridge.yaml's across init's prompts or a restore's prompt, or decide a
+  library change on the read before the turn.**

@@ -561,7 +561,7 @@ func TestSaveRoundTrip(t *testing.T) {
 		ScanIntervalSec: 1800,
 		LibraryName:     "Home",
 	}
-	if err := orig.Save(p); err != nil {
+	if err := saveAt(orig, p); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	loaded, err := Load(p)
@@ -596,7 +596,7 @@ func TestSaveAtomicRename(t *testing.T) {
 		ScanIntervalSec: 3600,
 		LibraryName:     "H",
 	}
-	if err := cfg.Save(p); err != nil {
+	if err := saveAt(cfg, p); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	// No .bridge-*.yaml leftovers in the parent dir.
@@ -629,9 +629,14 @@ func TestSaveIfAsksJustBeforeTheRename(t *testing.T) {
 		return names
 	}
 	cfg := &Config{LibraryName: "After"}
+	l, err := LockFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Unlock()
 	refused := errors.New("the file changed")
 	var asked []string
-	if err := cfg.SaveIf(p, func() error { asked = staged(); return refused }); err != refused {
+	if err := cfg.SaveIf(l, func() error { asked = staged(); return refused }); err != refused {
 		t.Errorf("SaveIf returned %v, want unchanged's error as it is", err)
 	}
 	if len(asked) != 1 {
@@ -643,7 +648,7 @@ func TestSaveIfAsksJustBeforeTheRename(t *testing.T) {
 	if left := staged(); len(left) != 0 {
 		t.Errorf("a refused SaveIf left %q behind", left)
 	}
-	if err := cfg.SaveIf(p, func() error { return nil }); err != nil {
+	if err := cfg.SaveIf(l, func() error { return nil }); err != nil {
 		t.Fatalf("SaveIf: %v", err)
 	}
 	if after, err := os.ReadFile(p); err != nil || !bytes.Contains(after, []byte("libraryName: After")) {

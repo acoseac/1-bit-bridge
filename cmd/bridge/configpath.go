@@ -98,13 +98,21 @@ func errConfigNotFound(explicit string) error {
 // platform location unless the operator happened to be standing in the
 // right directory.
 func loadCLIConfig(explicit string) (*config.Config, string, error) {
+	cfg, path, _, err := loadCLIConfigFile(explicit)
+	return cfg, path, err
+}
+
+// loadCLIConfigFile is loadCLIConfig, and the bytes the config was read
+// from (config.LoadFile): serve hands them to its live config holder, whose
+// console saves write only over a file that still holds them.
+func loadCLIConfigFile(explicit string) (*config.Config, string, []byte, error) {
 	path, ok := resolveConfigPath(explicit)
 	if !ok {
-		return nil, path, errConfigNotFound(explicit)
+		return nil, path, nil, errConfigNotFound(explicit)
 	}
-	cfg, err := config.Load(path)
+	cfg, raw, err := config.LoadFile(path)
 	if err != nil {
-		return nil, path, fmt.Errorf("load %s: %w", path, err)
+		return nil, path, nil, fmt.Errorf("load %s: %w", path, err)
 	}
-	return cfg, path, nil
+	return cfg, path, raw, nil
 }

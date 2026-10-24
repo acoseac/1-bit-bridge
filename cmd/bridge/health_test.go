@@ -61,7 +61,7 @@ func writeHealthTestConfig(t *testing.T, listenAddr string) string {
 	cfg := baseConfig([]string{dir}, "Health Test", filepath.Join(dir, "data"))
 	cfg.ListenAddress = listenAddr
 	cfgPath := filepath.Join(dir, "bridge.yaml")
-	if err := cfg.Save(cfgPath); err != nil {
+	if err := saveConfigAt(cfg, cfgPath); err != nil {
 		t.Fatalf("save config: %v", err)
 	}
 	return cfgPath

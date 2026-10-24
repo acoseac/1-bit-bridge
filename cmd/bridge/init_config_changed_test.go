@@ -105,36 +105,62 @@ func checkLeftAsWritten(t *testing.T, cfgDir, written, printed string) {
 	}
 }
 
-// TestTheChangedConfigCheckIsTheStepBeforeSave: in initCmd, the statement
-// that asks configChangedSinceRead comes directly before the one that calls
-// cfg.Save, so no step of the run falls between the check and the write.
-// The check sat before refuseRewrite first, and the second port pass and the
-// TLS load then ran after it (CodeRabbit's second review of #1106). A change
-// made during those steps cannot be timed from a test without a seam, so the
-// order is pinned here.
+// TestTheChangedConfigCheckIsTheStepBeforeSave: the statement that asks
+// configChangedSinceRead comes directly before the one that calls cfg.Save,
+// both in saveInitConfig after it takes bridge.yaml's lock (backlog B506),
+// and initCmd saves through saveInitConfig, once, and calls neither itself:
+// so no step of the run falls between the check and the write, and no
+// writer that takes the lock does either. The check sat before refuseRewrite
+// first, and the second port pass and the TLS load then ran after it
+// (CodeRabbit's second review of #1106). A change made during those steps
+// cannot be timed from a test without a seam, so the order is pinned here.
 func TestTheChangedConfigCheckIsTheStepBeforeSave(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "init.go", nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var body []ast.Stmt
+	bodies := map[string][]ast.Stmt{}
 	for _, d := range f.Decls {
-		if fn, ok := d.(*ast.FuncDecl); ok && fn.Name.Name == "initCmd" && fn.Recv == nil {
-			body = fn.Body.List
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Recv == nil && (fn.Name.Name == "initCmd" || fn.Name.Name == "saveInitConfig") {
+			bodies[fn.Name.Name] = fn.Body.List
 		}
 	}
-	if body == nil {
-		t.Fatal("init.go declares no initCmd")
+	initBody, saveBody := bodies["initCmd"], bodies["saveInitConfig"]
+	if initBody == nil || saveBody == nil {
+		t.Fatal("init.go declares no initCmd, or no saveInitConfig")
 	}
-	check, save := statementsCalling(body, isCallOf("configChangedSinceRead")), statementsCalling(body, isCfgSave)
-	if len(check) != 1 || len(save) != 1 {
-		t.Fatalf("initCmd has %d top-level statements calling configChangedSinceRead and %d calling cfg.Save, want one of each",
-			len(check), len(save))
+	if n := len(statementsCalling(initBody, isCallOf("saveInitConfig"))); n != 1 {
+		t.Errorf("initCmd has %d top-level statements calling saveInitConfig, want one", n)
+	}
+	if n, m := len(statementsCalling(initBody, isCallOf("configChangedSinceRead"))), len(statementsCalling(initBody, isCfgSave)); n != 0 || m != 0 {
+		t.Errorf("initCmd itself calls configChangedSinceRead %d times and cfg.Save %d times, want none: it saves through saveInitConfig", n, m)
+	}
+	lock := statementsCalling(saveBody, isSelectorCall("config", "LockFile"))
+	check, save := statementsCalling(saveBody, isCallOf("configChangedSinceRead")), statementsCalling(saveBody, isCfgSave)
+	if len(lock) != 1 || len(check) != 1 || len(save) != 1 {
+		t.Fatalf("saveInitConfig has %d top-level statements calling config.LockFile, %d calling configChangedSinceRead and %d calling cfg.Save, want one of each",
+			len(lock), len(check), len(save))
+	}
+	if lock[0] > check[0] {
+		t.Errorf("saveInitConfig asks configChangedSinceRead at %s, before it takes bridge.yaml's lock at %s",
+			fset.Position(saveBody[check[0]].Pos()), fset.Position(saveBody[lock[0]].Pos()))
 	}
 	if save[0] != check[0]+1 {
-		t.Errorf("initCmd calls cfg.Save at %s and configChangedSinceRead at %s, %d statements before it; want the check directly before the save",
-			fset.Position(body[save[0]].Pos()), fset.Position(body[check[0]].Pos()), save[0]-check[0])
+		t.Errorf("saveInitConfig calls cfg.Save at %s and configChangedSinceRead at %s, %d statements before it; want the check directly before the save",
+			fset.Position(saveBody[save[0]].Pos()), fset.Position(saveBody[check[0]].Pos()), save[0]-check[0])
+	}
+}
+
+// isSelectorCall matches a call of pkg.name.
+func isSelectorCall(pkg, name string) func(*ast.CallExpr) bool {
+	return func(c *ast.CallExpr) bool {
+		sel, ok := c.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != name {
+			return false
+		}
+		x, ok := sel.X.(*ast.Ident)
+		return ok && x.Name == pkg
 	}
 }
 

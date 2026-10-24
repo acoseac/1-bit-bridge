@@ -32,8 +32,8 @@ func TestBaseConfigProducesValidLoopbackConfig(t *testing.T) {
 func TestWriteAutoInitConfigSeedsSparseDefaults(t *testing.T) {
 	// Nested path whose parent doesn't exist yet — exercises MkdirAll.
 	cfgPath := filepath.Join(t.TempDir(), "sub", "bridge.yaml")
-	if err := writeAutoInitConfig(cfgPath); err != nil {
-		t.Fatalf("writeAutoInitConfig: %v", err)
+	if wrote, err := writeAutoInitConfig(cfgPath); err != nil || !wrote {
+		t.Fatalf("writeAutoInitConfig: wrote %v, %v", wrote, err)
 	}
 	raw, err := os.ReadFile(cfgPath)
 	if err != nil {
@@ -47,6 +47,25 @@ func TestWriteAutoInitConfigSeedsSparseDefaults(t *testing.T) {
 	}
 }
 
+// TestTheSeedKeepsAConfigWrittenBeforeItsTurn: serve --init-if-missing writes
+// its seed only while the config is still missing once it holds bridge.yaml's
+// lock, so a config another writer saved after serve looked (an init, a
+// second container start) is kept as written, and serve loads that one.
+func TestTheSeedKeepsAConfigWrittenBeforeItsTurn(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "bridge.yaml")
+	const written = "libraryRoots: ['/srv/music']\nlibraryName: Written First\n"
+	if err := os.WriteFile(cfgPath, []byte(written), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wrote, err := writeAutoInitConfig(cfgPath)
+	if err != nil || wrote {
+		t.Fatalf("writeAutoInitConfig over a config that is there: wrote %v, %v; want nothing written", wrote, err)
+	}
+	if raw, err := os.ReadFile(cfgPath); err != nil || string(raw) != written {
+		t.Errorf("the seed wrote over the config that was there: %q, %v", raw, err)
+	}
+}
+
 // TestAutoInitSeedDoesNotCaptureEnv proves the load-bearing "no state
 // capture" contract: the seed is written WITHOUT reading BRIDGE_* env, so at
 // runtime env wins (injected by config.Load's applyEnvOverrides) while the
@@ -55,8 +74,8 @@ func TestWriteAutoInitConfigSeedsSparseDefaults(t *testing.T) {
 // would surprisingly keep the old value.
 func TestAutoInitSeedDoesNotCaptureEnv(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "bridge.yaml")
-	if err := writeAutoInitConfig(cfgPath); err != nil {
-		t.Fatalf("writeAutoInitConfig: %v", err)
+	if wrote, err := writeAutoInitConfig(cfgPath); err != nil || !wrote {
+		t.Fatalf("writeAutoInitConfig: wrote %v, %v", wrote, err)
 	}
 	// An ABSOLUTE root, derived rather than written literally. A hardcoded
 	// "/music" is absolute only on POSIX: filepath.IsAbs wants a drive

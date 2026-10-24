@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B506: one lock for every bridge.yaml writer, and each reads the file again in its turn](#2026-10-24--b506-one-lock-for-every-bridgeyaml-writer-and-each-reads-the-file-again-in-its-turn)
 - [2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader](#2026-10-24--b525-the-players-identity-file-is-read-without-waiting-a-named-pipe-at-player-uuid-is-refused-at-once-by-every-reader)
 - [2026-10-24 — B470 PR 5a2b: shared discovery for the opt-in OpenHome Source](#2026-10-24--b470-pr-5a2b-shared-discovery-for-the-opt-in-openhome-source)
 - [2026-10-24 — B470 PR 5a0 Round 11: a listed snapshot reservation that cannot be read refuses restore](#2026-10-24--b470-pr-5a0-round-11-a-listed-snapshot-reservation-that-cannot-be-read-refuses-restore)
@@ -59832,6 +59833,208 @@ The separate B520 host-address check skips at its denied bind. Exact commands,
 failed test names, cached outcomes, logs and the verified control are in the
 external round-3 report. Linux/Windows execution and the manual owner gate
 remain unrun. No commit was made.
+
+## 2026-10-24 — B506: one lock for every bridge.yaml writer, and each reads the file again in its turn
+
+Several commands and serve itself write `bridge.yaml`, each by reading the
+file, changing what it read and writing it back, and nothing made them take
+turns. `bridge library add` and `remove` (the offline path, when the admin
+probe finds no bridge) and `bridge init`'s save took no lock at all. `bridge
+output dac bind` (B470 4a) read the file again under the data dir's lock and
+saved through `SaveIf`, which refuses when the bytes changed since its read:
+that narrowed the window to the instant before its rename and could not close
+it, since no rename can be made conditional on the file it replaces, and 4a's
+rule called "a lock every config writer takes" the fix. `bridge restore`
+copied a snapshot's `bridge.yaml` over the file, serve's `--init-if-missing`
+wrote its seed after a stat, and a running serve's console saves
+(`RuntimeConfig.Update`: the settings PATCH, roots add and remove, the
+variants directory, UPnP server CRUD) wrote the live snapshot, read at boot,
+over whatever the file held. Two writers could each lose the other's update.
+
+### The lock
+
+`config.LockFile(path)` takes an exclusive kernel lock (`fsutil.TryLock`:
+flock on unix, LockFileEx on Windows) on `.bridge.yaml.lock`
+(`config.LockFileName`: a dot, the config file's base name, `.lock`) in the
+config file's directory, opened through `fsutil.OpenLockFile`, and answers a
+`*config.FileLock`, the writer's turn. Beside the config file and not on it:
+`Save` replaces the file by a rename, which a lock on the old file would not
+follow, and on Windows a locked range refuses other handles' reads, while
+everything reads the config. Not in the data dir: the config names its data
+dir, a write can change it, and init and the seed write a config before any
+data dir is known. The file is never removed; the kernel drops the lock with
+the process however it exits.
+
+It is held only around one read-modify-write: init's final check and save,
+bind's read-to-save, library add's and remove's offline change, a restore's
+writes, one console save; never a prompt, never a process's life.
+
+**The bound is `config.LockWait`, 5 s**, asked again every 25 ms, then a
+`*config.BusyError` (matching `config.ErrBusy`): "another bridge command or
+the running bridge is changing <path>, and held its lock for longer than 5s,
+so nothing was written: try again". It names the file and nothing it holds.
+Why 5 s: an ordinary turn is milliseconds (a read, a staged write with its
+fsync, a rename; on Windows at most atomicwrite's 750 ms of rename retries),
+the long turns are a CLI's own (library add's and remove's index change, a
+restore's copy), and a console save is a request someone is watching, which
+is better refused with a "try again" than left hanging; SQLite's busy wait is
+the same 5 s.
+
+A filesystem that keeps no locks (TryLock answering anything but contention)
+is not a refusal: the turn is taken without the lock (`FileLock.Unheld`), a
+Warn once per file and process says so, and the writers there keep their own
+byte comparisons, as before. That is serve's data-dir rule (a lock that
+cannot be taken must not stop a bridge from starting), here a console from
+saving any setting.
+
+`Save` and `SaveIf` take the turn, never a path, and write the file it is at;
+a nil turn or one given back is refused (`heldFor`). So no writer of the
+config can compile without the lock in hand, or write after giving it back.
+`config.Edit(path, fn)` is the read-modify-write in one call. `SaveIf`'s byte
+comparison stays where it was, in bind, as the second guard against a writer
+that takes no lock: an edit, or a bridge older than the lock.
+
+### The writers, and how each takes it
+
+Found with `git grep` for `.Save(`, `.SaveIf(`, `CfgHolder.Update`,
+`cfgHolder.Update`, the atomic writers and every name the tree gives the
+config's path (`cfgPath`, `configPath`, `CfgPath`, `BridgeYAML`,
+`resolvedCfgPath`, `cfgFile`, `absCfgPath`):
+
+- `bridge library add` and `remove`, offline (`cmd/bridge/library.go`):
+  `config.Edit` around the whole offline change. The config is read again
+  in the turn and every decision (already configured, `ValidateRoots`, the
+  1→N wipe, the last root, the basename guard, the collapse) is made on that
+  copy; the library index's wipe or prune runs in the turn. Messages and
+  exit codes are as they were. The remove's index change is
+  `removeRootOffline`.
+- `bridge init`'s save (`cmd/bridge/init.go`): `saveInitConfig`, the lock,
+  then `configChangedSinceRead` (which reads the file again and refuses one
+  that is not as the run read it at its start), then `cfg.Save`. The run's
+  prompts stay outside the turn.
+- serve's `--init-if-missing` seed (`writeAutoInitConfig`): the lock, then
+  the seed only while the file is still missing; it answers whether it
+  wrote, and the boot's "wrote a default" line follows.
+- `bridge output dac bind` (`runDACBind`): the data dir's lock, then
+  bridge.yaml's, held from its read to its `SaveIf`, given back before it
+  makes the player's UUID.
+- `bridge restore` (`backup.RestoreWithOptions`): the lock, when the
+  snapshot holds bridge.yaml and the caller maps it, before the first write
+  (the player's reservation), held to the end, so a busy config refuses the
+  restore with nothing restored rather than half of it.
+- serve's console saves (`RuntimeConfig.Update`, which the settings PATCH,
+  roots add and remove, the variants directory and the UPnP adapter call):
+  the lock after `fn`, then the file read again, and the save only over the
+  bytes the holder last read or wrote. `runServe` hands the holder the bytes
+  it loaded at boot (`config.LoadFile`, `loadCLIConfigFile`, `RecordFile`),
+  and each save records its own. Over a file another writer changed or
+  removed since, nothing is saved or stored and a
+  `*config.ChangedOutsideError` says so ("…restart the bridge to load the
+  file, then make the change again"), through the console's existing 500
+  `save-config` with the message.
+
+`backup.Snapshot` names the config's path and writes only the snapshot's
+files; the pin excuses it by name. `bridge backup`, doctor, and every other
+loader read the config and write nothing.
+
+### Refused, not merged
+
+A console save over a file another writer changed is refused rather than
+merged. A merge was weighed: apply the leaves the PATCH changed to the file
+as it is, refusing a leaf both changed. It was not taken, because serve's
+live snapshot differs from the file by more than another writer's changes:
+`--addr` (every console test bridge passes it, and it is in the live copy and
+not the file), the defaults, resolved paths and environment overrides `Load`
+puts in, and an unread player block whose reason names a line. A merge would
+either refuse saves that conflict with nothing (a console change of
+`listenAddress` under `--addr`) or need a record of every leaf the two
+disagree on, and its validation of the merged copy would log the player-off
+warning twice per save over an unread block. The refusal loses nothing (the
+other writer's change stays, and the console is told what to do), and nothing
+reloads the config live (out of scope). A follow-up could merge.
+
+### Order with the data dir's lock
+
+A command that takes both takes the data dir's first and bridge.yaml's
+inside it: bind and restore by their code, serve because it holds the data
+dir for its life and takes bridge.yaml's per save. Nothing takes the data
+dir's lock while it holds bridge.yaml's. The data dir's lock is a try that
+never waits and bridge.yaml's waits at most 5 s, so no order could block
+forever; the fixed order keeps it so if the data dir's lock ever waits, and
+keeps a command from holding bridge.yaml's, and every writer behind it, while
+it is refused the data dir.
+
+### Red first
+
+The new tests compile against main's code (the lock held through a second
+open of `.bridge.yaml.lock` with `fsutil` directly, fixtures written as
+YAML), with only library add's and remove's `libraryEnv.beforeLock` seam
+added. On main:
+
+- `TestLibraryChangesKeepASettingsSaveThatLandsAfterTheirRead`: for add and
+  for remove, "the command wrote over the settings save that landed after its
+  read: libraryName \"Test Library\"".
+- `TestBindKeepsALibraryAddThatLandsInItsWindow`: "bind: exit 1 … changed
+  after bind read it, so the binding was not written", "the binding is gone".
+- `TestServeRefusesASettingsSaveOverAConfigAnotherWriterChanged`: "the
+  console's save went through over a file another writer changed:
+  {\"restartRequired\":false,\"fields\":{\"libraryName\":{\"status\":\"live\"}}}",
+  and the file rewritten.
+- `TestEveryConfigWriterWaitsForTheLockThenRefuses`: library add, library
+  remove, init's rewrite, bind and restore each "went through while another
+  held the lock" in 18 to 149 ms and changed the file. (The seed's case, added
+  with the fix, is shown by its control.)
+- `TestARestoreRefusedTheLockRestoresNothing`: "restore went through while
+  another held the config's lock".
+- `TestTheDataDirLockComesBeforeTheConfigLock`: bind and restore, with
+  bridge.yaml's lock held, "returned before bridge.yaml's lock was free, so
+  it never waited for it (exit 0)". The both-held cases pass on main: both
+  are refused at the data dir there too.
+- `TestEveryConfigWriterTakesTheConfigLock`: nine problems, every writer
+  ("libraryAddCmd calls the config's Save or SaveIf and never calls
+  config.Edit", "initCmd calls the config's Save or SaveIf, and configWriters
+  does not name it", "RestoreWithOptions writes a file while it names the
+  config's path and never calls config.LockFile", …).
+
+With the fix every one passes. Each CLI writer, held off by another open of
+the lock, answered after 5.03 to 5.08 s, refused, the file as it was; the
+console's save after 5 s (`TestAConsoleSaveWaitsForTheLockThenRefuses`), and
+the next one went through once the lock was free.
+
+### Other tests the change moved
+
+- `TestRuntimeConfigUpdate`'s "save failure" case put the config in a
+  directory that does not exist, where the lock's open now fails first; it
+  is now a directory at the config's path, which the rename cannot replace,
+  beside a case for the lock that cannot be opened.
+- `TestSaveAsRootKeepsTheConfigOwner` and the two backup root tests now name
+  the lock file among the files given the install's owner: run as root, the
+  first writer creates it with the directory's owner (Precreate), or the
+  service could not open it for its next save.
+- `TestTheChangedConfigCheckIsTheStepBeforeSave` pins the check and the save
+  in `saveInitConfig`, after its lock, and initCmd calling it once.
+- Every fixture that saved a config (`cfg.Save(path)`) saves through a test
+  helper that takes the lock (`saveAt`, `saveConfigAt`).
+- bind's refusal text no longer blames library add, remove and init ("something
+  saved it without bridge.yaml's lock (an edit, or a bridge older than the
+  lock)"), and its docblocks and test docblocks say why bind still refuses
+  beside a serve: serve reads the binding only at its next start, and its
+  console would refuse a save over the file bind changed.
+
+### Checks
+
+`make fmt vet test`, `make build-all` and `make docs-check` through the build
+lock; `go test -race` of `cmd/bridge`, `internal/config` and
+`internal/fsutil`; `GOOS=windows go vet` of `cmd/bridge`, `internal/config`,
+`internal/backup`, `internal/admin` and `internal/fsutil`. The Windows run
+itself is CI's leg. Rules: config-lifecycle.md (the lock), cli-serve.md (the
+order and the CLI writers) and player.md's bind bullet, written by the
+orchestrator from the worker's report; long forms in
+`ops/History-rules-config-lifecycle.md`, `ops/History-rules-cli-serve.md`
+and `ops/History-rules-player.md`. The bind bullet moved to its long form
+whole, with this change in it, and player.md keeps its one line: the file
+stood at 97.2% of its budget, and the budget check asks for an entry to move
+out before anything is added there.
 
 ## 2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader
 
