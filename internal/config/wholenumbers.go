@@ -7,6 +7,7 @@ import (
 	"math"
 	"math/big"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,9 +26,10 @@ import (
 // refuses the file (DecodeFile), and the player block's reader leaves the
 // block unread (playerReader.whole). A float the integer holds exactly is
 // taken as it is: 30.0, 3e1, and 08, which yaml.v3 resolves as a float.
-// What is weighed is the value the text writes, read exactly: yaml.v3 reads
-// a float through strconv.ParseFloat, which rounds to the nearest float64,
-// so 30.0000000000000001 came out 30, 1e-400 0, and 9007199254740993.0
+// What is weighed is the value the text writes, read exactly as yaml.v3
+// reads it (writtenInteger): yaml.v3 reads a float through
+// strconv.ParseFloat, which rounds to the nearest float64, so
+// 30.0000000000000001 came out 30, 1e-400 0, and 9007199254740993.0
 // 9007199254740992, each whole and each a value nobody wrote.
 
 // DecodeFile decodes raw, a config file's bytes, into cfg as Load does
@@ -102,11 +104,102 @@ func exactInteger(n *yaml.Node, t reflect.Type) bool {
 	if f != math.Trunc(f) || f < lo || f >= hi {
 		return false
 	}
-	// f is the text as strconv.ParseFloat rounds it. Read again exactly,
-	// its underscores dropped as yaml.v3 drops them, the text must write f.
-	// big.Rat refuses an exponent past a million, and so is the value.
-	written, ok := new(big.Rat).SetString(strings.ReplaceAll(n.Value, "_", ""))
-	return ok && written.Cmp(new(big.Rat).SetFloat64(f)) == 0
+	// f is the text as yaml.v3 decodes it, rounded to a float64. The text
+	// must write f.
+	written, ok := writtenInteger(n.Value)
+	if !ok {
+		return false
+	}
+	whole, _ := big.NewFloat(f).Int(nil)
+	return written.Cmp(whole) == 0
+}
+
+// writtenInteger is the whole number a !!float's text writes, read as
+// yaml.v3's resolve reads it, and ok false when the text writes a fraction,
+// a whole number of more than 20 digits (past every 64-bit integer), a
+// number other than zero with an exponent of a million or more, or no
+// number. resolve drops the text's underscores and tries strconv.ParseInt
+// with base 0 first, so !!float 036 is 30, octal, as 036 untagged is, and
+// !!float 0x20000000000001 is 2^53+1, which the float64 rounds to 2^53.
+// What is left is a decimal float: an optional sign, digits with at most
+// one point, and an optional exponent, read here digit by digit, so the
+// work is linear in the text, where big.Rat's is quadratic in a long
+// mantissa's digits. Only a mantissa of a million digits or more brings an
+// exponent of a million or more back to a whole number of 20 digits, so
+// such a text is refused unread; zero is zero whatever its exponent, as
+// strconv.ParseFloat reads it.
+func writtenInteger(text string) (*big.Int, bool) {
+	plain := strings.ReplaceAll(text, "_", "")
+	if v, err := strconv.ParseInt(plain, 0, 64); err == nil {
+		return big.NewInt(v), true
+	}
+	s, negative := plain, false
+	if s != "" && (s[0] == '+' || s[0] == '-') {
+		s, negative = s[1:], s[0] == '-'
+	}
+	mantissa, exponent, scientific := s, "", false
+	if i := strings.IndexAny(s, "eE"); i >= 0 {
+		mantissa, exponent, scientific = s[:i], s[i+1:], true
+	}
+	whole, fraction, _ := strings.Cut(mantissa, ".")
+	if whole == "" && fraction == "" || !decimalDigits(whole) || !decimalDigits(fraction) {
+		return nil, false
+	}
+	var exp int64
+	var large bool
+	if scientific {
+		var ok bool
+		if exp, large, ok = decimalExponent(exponent); !ok {
+			return nil, false
+		}
+	}
+	digits := strings.TrimLeft(whole+fraction, "0")
+	if digits == "" {
+		return new(big.Int), true
+	}
+	if large {
+		return nil, false
+	}
+	significant := strings.TrimRight(digits, "0")
+	exp += int64(len(digits)-len(significant)) - int64(len(fraction))
+	if exp < 0 || int64(len(significant))+exp > 20 {
+		return nil, false
+	}
+	v, _ := new(big.Int).SetString(significant+strings.Repeat("0", int(exp)), 10)
+	if negative {
+		v.Neg(v)
+	}
+	return v, true
+}
+
+// decimalDigits reports whether s holds the digits 0 to 9 and nothing else;
+// "" does.
+func decimalDigits(s string) bool {
+	return strings.Trim(s, "0123456789") == ""
+}
+
+// decimalExponent reads s, a float's exponent: an optional sign, then at
+// least one digit. large is true, and e 0, for an exponent of a million or
+// more either way.
+func decimalExponent(s string) (e int64, large, ok bool) {
+	negative := false
+	if s != "" && (s[0] == '+' || s[0] == '-') {
+		s, negative = s[1:], s[0] == '-'
+	}
+	if s == "" || !decimalDigits(s) {
+		return 0, false, false
+	}
+	s = strings.TrimLeft(s, "0")
+	if len(s) > 6 {
+		return 0, true, true
+	}
+	if s != "" {
+		e, _ = strconv.ParseInt(s, 10, 64)
+	}
+	if negative {
+		e = -e
+	}
+	return e, false, true
 }
 
 // integerCheck stands in for a whole-number setting of type T in a shadow
@@ -229,14 +322,4 @@ func buildShadow(t reflect.Type, within map[reflect.Type]bool) (reflect.Type, bo
 		return check, true
 	}
 	return t, false
-}
-
-// writtenInteger is a stand-in so the red-first tests compile; the next
-// commit replaces it.
-func writtenInteger(text string) (*big.Int, bool) {
-	r, ok := new(big.Rat).SetString(strings.ReplaceAll(text, "_", ""))
-	if !ok || !r.IsInt() {
-		return nil, false
-	}
-	return r.Num(), true
 }
