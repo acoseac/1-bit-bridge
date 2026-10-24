@@ -254,12 +254,18 @@ to its subscribers, then logs it, and the watch counts it only after `offer`
 returns, so the Reporter, the engine's output, the test's queue and Play can
 all come before the count. The watcher takes one reading at a time, on the
 goroutine that counts every publish (the service's disable publish waits for
-the stop, which the held reading holds), so the count is read once the first
-held reading has arrived. Widening: the first "player DAC: available" line is
-parked in a default log handler (`parkFirstLog`, let go too when the test's
-context ends, before its cleanups) until the test changes the binding: the
-count read at the old place then missed it on every run, five of five, CI's
-text. Test-only. Control: the read put back before the hold, red ten of ten.
+the stop, which the held reading holds). Widening: the first "player DAC:
+available" line is parked in a default log handler (`parkFirstLog`, let go
+too when the test's context ends, before its cleanups) until the test changes
+the binding: the count read at the old place then missed it on every run,
+five of five, CI's text. The count is now read while that publish is parked,
+which is exact, and the test expects one more. Round 1 read it once the first
+held reading had arrived; the review showed that such a count already holds
+a publish the watcher makes for the changed binding before it reads the box,
+the publish the test exists to catch. Test-only. Controls: the read put back
+before the hold, red ten of ten; a source-note publish added on the binding
+poke, red three of three on the fixed test and green on round 1's;
+`-race -count=20` green on this Mac.
 
 ### Runs and the gate
 
