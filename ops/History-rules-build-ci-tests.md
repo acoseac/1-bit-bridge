@@ -1220,16 +1220,18 @@ Windows skips only this test's privileged symlink creation.
 
 ## B500 — third-party licences in release archives (2026-10-24)
 
-**Every release archive carries freshly generated third-party licences from the union of the release builds; missing licences fail the release. Never replace build-derived discovery with the go.mod list or skip the before-hook. Require a licence at each effective module root; include compiled-package ancestry and the pinned Go toolchain notices. Unknown notice suffixes fail; never synthesize module grants. Pin embedded-asset supplements to exact module versions and re-audit on upgrades or replacements. Discovery refuses vendor trees, a non-default GOFLAGS or workspace, and non-default architecture feature levels.**
+**Every release archive carries freshly generated third-party licences from the union of the release builds; missing licences fail the release. Never replace build-derived discovery with the go.mod list or skip the before-hook. Require a licence at each effective module root; include compiled-package ancestry and the pinned Go toolchain notices. Unknown notice suffixes fail; never synthesize module grants. Omit unneeded Tailscale webclient and debugeventbus assets with the release tags in .goreleaser.yaml; keep Make and Docker in step through check-build-tags. Discover with those same tags. Future embedded assets must be omitted or covered by the registry. Pin embedded-asset supplements to exact module versions and re-audit on upgrades or replacements. Discovery refuses vendor trees, a non-default GOFLAGS or workspace, and non-default architecture feature levels.**
 
 `go run ./scripts/third-party-licenses` reads the explicit matrix in
-`.goreleaser.yaml`, then runs `go list -mod=readonly -deps -json ./cmd/bridge`
+`.goreleaser.yaml`, then runs `go list -mod=readonly -deps -json -tags=<release-tags> ./cmd/bridge`
 for each GOOS/GOARCH with CGO disabled, as the release build does. The Go
 executable belongs to the running toolchain. Test-only and unused modules
 are excluded; modules used on only one platform still enter the union.
 The small stdlib configuration reader accepts the current builds stanza
-only and refuses unfamiliar settings, tags, exclusions, flags and YAML
-forms. Extend discovery and its tests together before changing that stanza.
+only and refuses unfamiliar settings, exclusions, flags and YAML forms.
+Tags must be a block list of unique literal Go tag names; templates, aliases,
+flow/scalar forms, blank lists and duplicate keys or values refuse. Extend
+discovery and its tests together before changing that stanza.
 Discovery refuses a vendor/ directory at the module root: GoReleaser would
 automatically build its sources while -mod=readonly discovers the cache.
 Discovery refuses a non-default GOFLAGS or workspace. It reads inherited
@@ -1257,19 +1259,35 @@ suffix, naming the file even when another valid licence is present. Extend
 the allow-list deliberately. NOTICE or PATENTS alone is not a licence.
 Empty files and read failures are errors too.
 
-The checked-in embedded-web-client.md and embedded-tailscale.md supplements
-are included inside their enclosing modules' entries, only when linked.
-The registry in main.go pins the exact module path and version. Any other
-version requires a fresh bundle audit; an unversioned or different-path
-replacement cannot inherit the reviewed original's supplement. Check the
-effective replacement identity/version as well. Supplements cover the
-web-client bundle's preserved React-family and classnames notices, its Inter
-font, and the event-bus debugger's HTMX scripts. Preserve the bundle's own
-copyright statements and label versions absent from its comments honestly.
-The offline review record identifies reconstructed licence texts requiring
-upstream verification. When auditing upgrades, inspect go-list EmbedFiles
-across every target, including compressed JS/CSS and font assets; module-root
-licences do not automatically grant rights to bundled third-party code.
+GoReleaser's builds.tags is authoritative. It sets `ts_omit_webclient` and
+`ts_omit_debugeventbus`.
+The Makefile GO_TAGS value and Dockerfile build flags mirror that list;
+check-build-tags uses the same fail-closed reader to require exact agreement
+and verifies that every build invocation uses it. Make's override assignment
+prevents command-line or environment drift. make build and build-all run the
+check, as does check-go-version, already part of gate.yml. That gate was chosen
+to keep docs-check Python-only and to reuse the release-config gate; that job
+now installs the pinned Go toolchain for the shared reader.
+Make's test, test-fast, vet and run also use GO_TAGS. The notice generator passes
+the parsed tags to every target's go list, including fixture builds.
+
+The bridge uses neither Tailscale's web UI nor its event-bus debugger HTTP
+surface. The prebuilt UI strips notices from several bundled npm components;
+an incomplete offline reconstruction is not a release notice. Omit these
+features instead. The six tagged dependency graphs include neither
+web-client-prebuilt nor client/web, and no debugger HTMX/CSS/templates.
+The two former supplements were removed; tailscale.com itself stays linked
+and retains its module notices. Protobuf edition defaults and Tailscale's
+first-party metadata, DNS data and resolvconf workaround keep their handling.
+
+The registry in main.go remains, currently empty, exercised with fixture
+components. It pins each supplement to an exact module path and version;
+upgrades, local replacements and changed replacement identities/versions
+require review. A future Tailscale feature with embedded third-party assets
+must either be omitted through the release tags or attributed completely
+through this registry. Audit go-list EmbedFiles across all six targets after
+upgrades, including compressed JS/CSS and fonts; a module-root licence does
+not automatically cover third-party code bundled as assets.
 
 Reproduce only the PATENTS a module or its replacement actually ships; never
 supply a missing grant from another source. In particular, x/oauth2 has no
@@ -1286,7 +1304,7 @@ The before-hook runs after `go mod tidy`, writes the ignored root file
 bumps therefore refresh module notices automatically on the next release.
 Embedded-asset module bumps instead fail until their supplements are reviewed
 and the exact-version registry is updated. The generated aggregate stays
-untracked; the supplementary source notices are checked in. Do not seed dist/
+untracked; any future supplementary source notices must be checked in. Do not seed dist/
 from the hook: GoReleaser requires it empty at that stage. The release
 playbook verifies every snapshot archive's notice bytes before removing dist/.
 

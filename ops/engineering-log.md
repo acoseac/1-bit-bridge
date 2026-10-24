@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B500 round 4: omit unused bundled UIs](#2026-10-24--b500-round-4-omit-unused-bundled-uis)
 - [2026-10-24 — B500 round 3: embedded assets and fail-closed discovery](#2026-10-24--b500-round-3-embedded-assets-and-fail-closed-discovery)
 - [2026-10-24 — B500 round 2: package ancestry, shipped grants and release environment](#2026-10-24--b500-round-2-package-ancestry-shipped-grants-and-release-environment)
 - [2026-10-24 — B500: release archives carry build-derived third-party licences](#2026-10-24--b500-release-archives-carry-build-derived-third-party-licences)
@@ -60103,3 +60104,36 @@ Tailscale to v1.104.2 from the merged main; their existing notice bytes are
 unchanged. The requested host/Linux/Windows vet, pinned fmt, docs-check and
 generator race gates are recorded in the round-3 report. No commit, push,
 release or deployment was performed.
+
+
+## 2026-10-24 — B500 round 4: omit unused bundled UIs
+
+The release builds now set ts_omit_webclient and ts_omit_debugeventbus. The
+bridge does not use either UI, and the minified prebuilt web client strips
+component notices that cannot be reconstructed completely offline. Omitting
+those features removes that incomplete audit from the shipped binary.
+GoReleaser's builds.tags owns the list; Make's GO_TAGS and Docker mirror it.
+check-build-tags checks all three and the build invocations, and runs through
+check-go-version in the existing CI gate and before Make builds. docs-check
+remains Python-only. The notice generator's fail-closed builds reader accepts
+only unique literal tags in a block list and supplies them to every go list.
+A tagged import fixture covers all six target invocations.
+
+The untagged six-target omission assertion failed before the change; all six
+tagged graphs pass. Counts are 61 per Darwin target, 65 per Linux target,
+66 per Windows target, 73 modules in the union. The removed modules are
+web-client-prebuilt and coder/websocket. The eventbus package remains, but
+its debugger assets do not. Both stale supplements were deleted; fixture
+components retain the registry's content, version and replacement controls.
+The remaining seven third-party embedded files are protobuf edition defaults
+and Tailscale's metadata, DNS data and resolvconf workaround; their existing
+module notices remain. Future embedded third-party assets must be omitted or
+fully covered through the exact-version registry.
+
+Two generations are byte-identical at 355,656 bytes, SHA-256
+45324dc3621413caf5f52bc302d51a302040f782e07acb905b1b90e564b15fd4.
+The Tailscale source trace keeps tsnet's tailnet listener, LocalAPI certificate
+path and netstack ListenPacket intact: the web-client stub and no-op debugger
+HTTP registration are separate surfaces. No live tailnet access was used.
+Round-4 control logs record the initial red checks, drift controls, rerun
+round-3 controls and gate results, including sandbox restrictions on tests.
