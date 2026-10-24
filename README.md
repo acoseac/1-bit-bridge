@@ -86,7 +86,7 @@ Prefer the newest snapshot; see the [backup guide](docs/backup.md).
 
 ## Build from source
 
-Requires Go 1.27.2+.
+Requires Go 1.27.3+.
 
 ```sh
 make build          # builds ./bin/bridge for the host OS
