@@ -334,12 +334,13 @@ func (w *writer) due() (*payload, time.Time) {
 }
 
 // run is the writer goroutine. Asked to stop, it writes the newest
-// revision once more if it is not written, and exits. A panic in a write is
-// that write's failure (attempt); one anywhere else on the goroutine ends
-// the writer (ended).
-func (w *writer) run() {
+// revision once more if it is not written, and exits: its exit is its last
+// message, which spawn hands the owner. A panic in a write is that write's
+// failure (attempt); one anywhere else on the goroutine ends the writer
+// (ended).
+func (w *writer) run() (last any) {
 	var t timer
-	defer w.ended()
+	defer w.ended(&last)
 	defer func() {
 		if t != nil {
 			t.Stop()
@@ -351,8 +352,7 @@ func (w *writer) run() {
 			if p, _ := w.due(); p != nil {
 				w.write(p)
 			}
-			w.e.post(msgWriterExited{})
-			return
+			return msgWriterExited{}
 		default:
 		}
 		p, due := w.due()
@@ -390,9 +390,9 @@ func (w *writer) writtenRev() uint64 {
 // ended is the writer goroutine's last word when it leaves by a panic, which
 // it recovers and logs: nothing writes the queue file from then on, so the
 // state stays dirty, and the owner is told so, as of a write that failed,
-// and that the writer has exited, so its shutdown waits for no flush. A
-// writer that returned has told the owner itself.
-func (w *writer) ended() {
+// and that the writer has exited, its last message (last), so its shutdown
+// waits for no flush. A writer that returned has returned its exit itself.
+func (w *writer) ended(last *any) {
 	p := recover()
 	if p == nil {
 		return
@@ -403,7 +403,7 @@ func (w *writer) ended() {
 	failures, written := w.failures, w.written
 	w.mu.Unlock()
 	w.e.post(msgPersisted{written: written, err: errors.New("the queue file's writer panicked and has stopped: nothing writes the queue file until the engine starts again; the bridge's log has why"), failures: failures})
-	w.e.post(msgWriterExited{})
+	*last = msgWriterExited{}
 }
 
 // attempt encodes p and writes it. A panic in either is recovered and

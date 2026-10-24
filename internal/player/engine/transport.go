@@ -984,10 +984,10 @@ func (e *Engine) call(kind callKind, s *session, timeout time.Duration, fn func(
 		})
 	}
 	o.calls[c.id] = c
-	e.spawn(func() {
+	e.spawn(func() any {
 		r := e.callBackend(kind, ctx, fn)
 		r.at = e.clk.Now()
-		e.post(msgCallDone{c: c, r: r})
+		return msgCallDone{c: c, r: r}
 	})
 	return c
 }

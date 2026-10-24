@@ -123,6 +123,10 @@ type seams struct {
 	// newest revision it has seen.
 	replying    func(op string, r reply, s *Snapshot)
 	writerWaits func(seen uint64)
+	// exiting sees each goroutine the engine started at its end, its last
+	// message handed over and nothing of it counted any more, so a test can
+	// hold it there.
+	exiting func()
 }
 
 // Engine owns the player's state: one goroutine, the owner, runs every
@@ -155,8 +159,9 @@ type Engine struct {
 	chMu    sync.Mutex
 	changed chan struct{}
 
-	// wg and live count the goroutines the engine started and has not
-	// joined, abandoned the backend calls Run gave up on (the tests read
+	// live counts the goroutines the engine started and has not joined,
+	// each joined by its last message (spawn), wg those that have not
+	// returned, abandoned the backend calls Run gave up on (the tests read
 	// them).
 	wg        sync.WaitGroup
 	live      atomic.Int64
@@ -341,10 +346,11 @@ func notDurable(path, dataDir string, err error) error {
 // the session (at most ReleaseTimeout), flushes the queue file's newest
 // revision, waits shutdownGrace for backend calls still under way and
 // abandons the rest, ends the owner and joins every goroutine the engine
-// started but an abandoned call. The flush is atomicwrite's, synchronous
-// and fsynced, and an fsync cannot be cancelled, so a filesystem that hangs
-// there holds Run past that bound. Run returns once, and nil; a second Run
-// is an error.
+// started but an abandoned call, each by its last message, which comes
+// once nothing of the goroutine is left to count (spawn). The flush is
+// atomicwrite's, synchronous and fsynced, and an fsync cannot be
+// cancelled, so a filesystem that hangs there holds Run past that bound.
+// Run returns once, and nil; a second Run is an error.
 //
 // A panic on the owner is not recovered here: it goes on to Run's caller,
 // and its shutdown never runs. On its way out the engine ends what the
@@ -689,17 +695,27 @@ func (e *Engine) logPanic(where string, r any) {
 	e.log.Error(panicMessage, attrs...)
 }
 
-// spawn runs f on a goroutine the engine counts until it returns. Each f
-// recovers its own work's panic as that work's failure: a backend call's
-// (callBackend), a reservation write's (reserve), the queue file writer's
-// (writer.run, writer.attempt).
-func (e *Engine) spawn(f func()) {
+// spawn runs f on a goroutine the engine counts, and hands the owner what f
+// returns, the goroutine's last message, once it no longer counts: f's
+// work, its own deferred calls with it, is done by then, so the owner, which
+// joins each goroutine by its last message (a call's answer, a reservation
+// write's result, the writer's exit), has joined it once it has that
+// message, and Run returns with an abandoned call alone still counted. A
+// goroutine counted until it returned, after its message, was still counted
+// when Run returned (B526). Each f recovers its own work's panic as that
+// work's failure: a backend call's (callBackend), a reservation write's
+// (reserve), the queue file writer's (writer.run, writer.attempt).
+func (e *Engine) spawn(f func() any) {
 	e.wg.Add(1)
 	e.live.Add(1)
 	go func() {
 		defer e.wg.Done()
-		defer e.live.Add(-1)
-		f()
+		last := f()
+		e.live.Add(-1)
+		e.post(last)
+		if e.sm.exiting != nil {
+			e.sm.exiting()
+		}
 	}()
 }
 
