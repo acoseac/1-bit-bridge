@@ -59,24 +59,39 @@ func playerResetAdvice(restoring bool) string {
 	return advice + "; the next start makes a new identity with no queue, a new device to controllers; a snapshot's player-ids.json is never a valid repair; do not delete the reservation while keeping the player identity"
 }
 
-// matchingReservation reads the snapshot's already captured and restamped
-// mark. Live reservations must not go through this filter: every decodable
-// live floor covers the box, whatever UUID or supported version it names.
-func matchingReservation(path, id string) (engine.Reservation, bool) {
-	r, err := engine.ReadReservation(path)
-	if err != nil || r.UUID != id {
-		return engine.Reservation{}, false
+// snapshotReservationFloor reads the snapshot's already captured and restamped
+// mark when the manifest lists it. A listed reservation is part of the bundle:
+// if it cannot be read (corruption, a truncated copy, a partial hand-edit that
+// left the manifest entry) the restore refuses, because treating it as "no
+// mark" would drop the snapshot's floor and let the restored identity reissue
+// IDs and tokens below its true high-water mark (CodeRabbit on PR #1331,
+// reproduced). A v2 mark must name the identity being restored — Snapshot
+// always writes the two together, so a mismatch is tampering — while a v1
+// mark has no UUID and is a floor whatever it names, as a live floor is. A
+// reservation the manifest does not list is a genuine absence (a snapshot from
+// before reservations, or one an operator stripped), handled by the caller's
+// unmarked path. Live reservations never come here: every decodable live floor
+// covers the box, whatever UUID or supported version it names.
+func snapshotReservationFloor(snapshotDir, id string, m Manifest) (engine.Reservation, bool, error) {
+	if !slices.Contains(m.Files, engine.ReservationFileName) {
+		return engine.Reservation{}, false, nil
 	}
-	return r, true
+	r, err := engine.ReadReservation(filepath.Join(snapshotDir, engine.ReservationFileName))
+	if err != nil {
+		return engine.Reservation{}, false, fmt.Errorf("restore: the snapshot lists %s but it cannot be read: %w; nothing was restored; %s", engine.ReservationFileName, err, playerResetAdvice(true))
+	}
+	if r.UUID != "" && r.UUID != id {
+		return engine.Reservation{}, false, fmt.Errorf("restore: the snapshot's %s names player %s, not the identity %s being restored; nothing was restored; %s", engine.ReservationFileName, r.UUID, id, playerResetAdvice(true))
+	}
+	return r, true, nil
 }
 
 // restorePlayerReservation preflights both counters, draws once, then makes
 // the new floor durable before the caller writes any identity file.
 func restorePlayerReservation(snapshotDir, target, id string, m Manifest, opts RestoreOptions) error {
-	var snap engine.Reservation
-	marked := false
-	if slices.Contains(m.Files, engine.ReservationFileName) {
-		snap, marked = matchingReservation(filepath.Join(snapshotDir, engine.ReservationFileName), id)
+	snap, marked, err := snapshotReservationFloor(snapshotDir, id, m)
+	if err != nil {
+		return err
 	}
 	dataDir := filepath.Dir(target)
 	livePath := filepath.Join(dataDir, engine.ReservationFileName)

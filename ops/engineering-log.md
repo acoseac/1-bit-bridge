@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B470 PR 5a0 Round 11: a listed snapshot reservation that cannot be read refuses restore](#2026-10-24--b470-pr-5a0-round-11-a-listed-snapshot-reservation-that-cannot-be-read-refuses-restore)
 - [2026-10-24 — B470 PR 5a0 Round 10: reset advice requires invalid reservation data](#2026-10-24--b470-pr-5a0-round-10-reset-advice-requires-invalid-reservation-data)
 - [2026-10-23 — B470 PR 5a0 round 4: giving up a player identity is permanent](#2026-10-23--b470-pr-5a0-round-4-giving-up-a-player-identity-is-permanent)
 - [2026-10-23 — B470 PR 5a0 round 3: one complete player reset remedy](#2026-10-23--b470-pr-5a0-round-3-one-complete-player-reset-remedy)
@@ -59589,3 +59590,39 @@ but could not run on this macOS host. Docs-check, source/doc/owner guards,
 formatting and diff checks passed. The first race run exposed a sibling
 file-access test's old reset-advice expectation, corrected before the final
 run. No requested validation was refused; no commit was made.
+## 2026-10-24 — B470 PR 5a0 Round 11: a listed snapshot reservation that cannot be read refuses restore
+
+Review of the main merge at the merge gate (CodeRabbit on PR #1331) found one
+valid data-integrity defect on the restore path, reproduced before the fix.
+`matchingReservation` turned every `engine.ReadReservation` failure into "no
+mark": a snapshot that *lists* `player-ids.json` in its manifest but whose copy
+is unreadable (corruption, a truncated copy, a partial hand-edit that left the
+manifest entry) was treated the same as a snapshot that never carried one. When
+the restored box had no live reservation to fall back on, the identity was then
+restored at `max(0, 0) + jump` — about 2^24 — and reissued every ID and token
+the snapshot's true floor had already handed out. A throwaway probe confirmed
+it: a snapshot taken at a floor of 2,000,000,000 whose `player-ids.json` was
+then corrupted restored the identity at 18,410,935, silently, with only a
+"carries no player reservation mark" warning. This is the exact reuse 5a0
+exists to prevent.
+
+`snapshotReservationFloor` replaces `matchingReservation`. A reservation the
+manifest does not list stays a genuine absence (a snapshot from before
+reservations, or one an operator stripped per the reset remedy, which also
+removes `player-uuid` so no identity is restored) and takes the unmarked path.
+A reservation the manifest lists must read cleanly: a read error, or a v2 mark
+whose UUID is not the identity being restored (Snapshot always writes the two
+together, so a mismatch is tampering), refuses the restore with the player
+reset advice and writes nothing. A listed v1 mark has no UUID and is a floor
+whatever it names, as a live floor is, preserving pre-UUID compatibility.
+
+Red first: `TestRestoreRefusesADamagedListedReservation` (corrupt, truncated,
+uuid_mismatch and a positive v1_floor_ok case) and
+`TestRestoreOfACorruptReservationKeepsTheFloorFromReissuing` all failed on the
+committed tree — the three damage cases restored at the bare jump and the v1
+case lost its floor — and pass with the fix. The full `internal/backup` suite
+is green. Two other review threads: `output_play.go`'s hand-run harness
+minting a fresh identity per run (a new backlog item, not a safety issue on the
+Linux-only test tool); and a History wording nit, applied — the backup
+capture's "only a missing file omits the mark" now says it holds after a valid
+`player-uuid` is captured. Docs in `ops/History-rules-player.md`.
