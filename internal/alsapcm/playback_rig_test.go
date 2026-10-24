@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -62,11 +63,18 @@ type files struct {
 	block   map[string]chan struct{} // an open that waits for the channel's close
 	stalls  map[string]*stall        // reads that do not return (stall)
 	changed chan struct{}            // closed and replaced at each content's close
+	// The panics a test asks for: an open of the reference, a read of its
+	// content that reaches past the byte, and its content's close (counted
+	// closed first, as a Close that panicked after letting go of its file).
+	panicOpen  map[string]bool
+	panicRead  map[string]int64
+	panicClose map[string]bool
 }
 
 func newFiles() *files {
 	return &files{content: map[string][]byte{}, fail: map[string]error{}, block: map[string]chan struct{}{},
-		stalls: map[string]*stall{}, changed: make(chan struct{})}
+		stalls: map[string]*stall{}, changed: make(chan struct{}),
+		panicOpen: map[string]bool{}, panicRead: map[string]int64{}, panicClose: map[string]bool{}}
 }
 
 // tracked is one content the resolver handed out.
@@ -75,6 +83,7 @@ type tracked struct {
 	closed bool
 	f      *files
 	st     *stall
+	panics bool // its Close panics
 }
 
 func (c *tracked) Close() error {
@@ -90,7 +99,32 @@ func (c *tracked) Close() error {
 	c.closed = true
 	close(c.f.changed)
 	c.f.changed = make(chan struct{})
+	if c.panics {
+		panic(panicValue)
+	}
 	return nil
+}
+
+// panicValue is what the backend tests' panics carry: a value a panic could
+// carry in the bridge, a library path, which no line of the log may show.
+const panicValue = "a value the panic carries: /srv/music/Secret/Track.flac"
+
+// panickyReader checks the live panic setting, so a test can arm a read
+// failure after Play has answered, even on content already open.
+type panickyReader struct {
+	r   io.ReaderAt
+	f   *files
+	ref string
+}
+
+func (p panickyReader) ReadAt(b []byte, off int64) (int, error) {
+	p.f.mu.Lock()
+	at, armed := p.f.panicRead[p.ref]
+	p.f.mu.Unlock()
+	if armed && off+int64(len(b)) > at {
+		panic(panicValue)
+	}
+	return p.r.ReadAt(b, off)
 }
 
 // stall is a read of a content held inside its ReadAt (files.stall).
@@ -191,7 +225,11 @@ func (f *files) Open(ctx context.Context, ref engine.Reference) (playback.Conten
 	fail := f.fail[ref.String()]
 	block := f.block[ref.String()]
 	st := f.stalls[ref.String()]
+	panicOpen, panicClose := f.panicOpen[ref.String()], f.panicClose[ref.String()]
 	f.mu.Unlock()
+	if panicOpen {
+		panic(panicValue)
+	}
 	if block != nil {
 		select {
 		case <-block:
@@ -205,7 +243,7 @@ func (f *files) Open(ctx context.Context, ref engine.Reference) (playback.Conten
 	if !ok {
 		return playback.Content{}, fmt.Errorf("no file %q", ref)
 	}
-	c := &tracked{ref: ref.String(), f: f, st: st}
+	c := &tracked{ref: ref.String(), f: f, st: st, panics: panicClose}
 	f.mu.Lock()
 	f.opened = append(f.opened, c)
 	f.mu.Unlock()
@@ -213,6 +251,7 @@ func (f *files) Open(ctx context.Context, ref engine.Reference) (playback.Conten
 	if st != nil {
 		data = stalledReader{r: data, st: st}
 	}
+	data = panickyReader{r: data, f: f, ref: ref.String()}
 	return playback.Content{Data: data, Size: int64(len(b)), Closer: c}, nil
 }
 
@@ -332,6 +371,10 @@ type recorder struct {
 	evs     []event
 	calls   []call
 	changed chan struct{}
+	// panicOn, when set, makes the delivery of the first event it holds of
+	// panic, once the event is recorded and before the engine has it: a
+	// defect in the reporter's sending of it.
+	panicOn func(event) bool
 }
 
 func newRecorder() *recorder { return &recorder{changed: make(chan struct{})} }
@@ -368,7 +411,18 @@ type recEvents struct {
 	next engine.Events
 }
 
-func (v *recEvents) add(e event) { v.r.note(func() { v.r.evs = append(v.r.evs, e) }) }
+func (v *recEvents) add(e event) {
+	panics := false
+	v.r.note(func() {
+		v.r.evs = append(v.r.evs, e)
+		if v.r.panicOn != nil && v.r.panicOn(e) {
+			v.r.panicOn, panics = nil, true
+		}
+	})
+	if panics {
+		panic(panicValue)
+	}
+}
 
 func (v *recEvents) Prepared(s engine.SessionID, o engine.OccurrenceID, j engine.Join) {
 	v.add(event{kind: "prepared", s: s, o: o, join: j})
@@ -565,6 +619,11 @@ type rigOptions struct {
 	afterFunc    func(time.Duration, func()) func() bool
 	realTick     bool
 	seams        *playback.Seams
+	log          *slog.Logger
+	// notify, when set, is told of each note before the rig keeps it.
+	notify func(playback.Note)
+	// onTick, when set, runs as a reporter takes its tick, at its start.
+	onTick func()
 }
 
 // newRig starts an engine with the backend over a fresh fake kernel, and
@@ -592,8 +651,11 @@ func newRig(t *testing.T, opts ...func(*rigOptions)) *rig {
 		open = o.openSink(open)
 	}
 	cfg := playback.Config{
-		Resolver: r.files, Locator: loc, OpenSink: open, AfterFunc: o.afterFunc, Seams: o.seams,
+		Resolver: r.files, Locator: loc, OpenSink: open, AfterFunc: o.afterFunc, Seams: o.seams, Log: o.log,
 		Notify: func(n playback.Note) {
+			if o.notify != nil {
+				o.notify(n)
+			}
 			select {
 			case r.notes <- n:
 			default:
@@ -601,7 +663,12 @@ func newRig(t *testing.T, opts ...func(*rigOptions)) *rig {
 		},
 	}
 	if !o.realTick {
-		cfg.Tick = func() (<-chan time.Time, func()) { return r.ticks, func() {} }
+		cfg.Tick = func() (<-chan time.Time, func()) {
+			if o.onTick != nil {
+				o.onTick()
+			}
+			return r.ticks, func() {}
+		}
 	}
 	be, err := playback.New(cfg)
 	if err != nil {

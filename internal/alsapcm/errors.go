@@ -67,6 +67,9 @@ const (
 	ReasonCancelled Reason = "cancelled"
 	// ReasonClosed is an operation on a closed Device.
 	ReasonClosed Reason = "closed"
+	// ReasonPanicked is a sink whose writer panicked: the panic was
+	// recovered and logged, the device closed, and the sink ended.
+	ReasonPanicked Reason = "panicked"
 	// ReasonKernel is any other error the kernel returned.
 	ReasonKernel Reason = "kernel_error"
 )

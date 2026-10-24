@@ -3,11 +3,13 @@ package alsapcm
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
 )
 
@@ -165,6 +167,9 @@ type SinkConfig struct {
 	// reopen. The open itself asks no Locate: it opens Endpoint. Unset, a
 	// reopen opens the endpoint the sink last had open.
 	Locate func(ctx context.Context) (Endpoint, error)
+	// Log is where the sink logs a panic its writer recovered; nil is the
+	// player component.
+	Log *slog.Logger
 }
 
 // admit asks admit about the node dev has open at ep; op is the open or
@@ -206,8 +211,9 @@ const (
 	// SinkStopped was dropped or drained: the device is released and the
 	// sink is done.
 	SinkStopped
-	// SinkEnded was ended by a disconnect, a suspend, a cancel or another
-	// failure (Position.Err): the device is closed and the sink is done.
+	// SinkEnded was ended by a disconnect, a suspend, a cancel, a panic on
+	// its writer (ReasonPanicked) or another failure (Position.Err): the
+	// device is closed and the sink is done.
 	SinkEnded
 )
 
@@ -316,6 +322,7 @@ type SinkStats struct {
 type Sink struct {
 	cfg               SinkConfig
 	devCfg            Config
+	log               *slog.Logger
 	life              context.Context
 	open              func(Endpoint, Config) (*Device, error)
 	now               func() time.Time
@@ -338,6 +345,8 @@ type Sink struct {
 	unexplained int       // POLLERRs in a row that woke a wait on the stream and its state explained away
 	xrunPaused  bool      // the last xrun stopped a paused sink: Recover keeps the pause
 	drainStop   func() bool
+	wHeld       bool     // the writer holds mu (lockW): a panic's recover lets go of it
+	doing       *sinkCmd // the command the writer is carrying out, which a panic's end answers
 
 	wmu sync.Mutex // one producer at a time
 
@@ -471,13 +480,20 @@ func openSink(ctx context.Context, cfg SinkConfig, seams sinkSeams) (*Sink, erro
 	if err != nil {
 		return nil, err
 	}
+	// The device opened is closed on every way out but the one that hands it
+	// to the sink's writer: a refusal below, and a panic in the check after
+	// open, which is the caller's to recover.
+	handed := false
+	defer func() {
+		if !handed {
+			_ = dev.Close()
+		}
+	}()
 	p := dev.Params()
 	if err := checkSetup(cfg, p); err != nil {
-		_ = dev.Close()
 		return nil, err
 	}
 	if err := admit(cfg.Admit, dev, cfg.Endpoint, "open"); err != nil {
-		_ = dev.Close()
 		return nil, err
 	}
 	fb, keep := p.FrameBytes(), int64(p.BufferFrames)
@@ -486,15 +502,18 @@ func openSink(ctx context.Context, cfg SinkConfig, seams sinkSeams) (*Sink, erro
 		frames = MaxRingBytes / int64(fb)
 	}
 	if frames < keep+int64(p.PeriodFrames) {
-		_ = dev.Close()
 		return nil, &Error{Reason: ReasonBadConfig, Op: "open", Endpoint: cfg.Endpoint, Detail: fmt.Sprintf(
 			"a store of at most %d bytes cannot hold the hardware buffer of %d frames and a period of %d more", MaxRingBytes, keep, p.PeriodFrames)}
 	}
 	if seams.afterFunc == nil {
 		seams.afterFunc = context.AfterFunc
 	}
+	log := cfg.Log
+	if log == nil {
+		log = logging.Component("player")
+	}
 	s := &Sink{
-		cfg: cfg, devCfg: devCfg, life: ctx,
+		cfg: cfg, devCfg: devCfg, log: log, life: ctx,
 		open: seams.open, now: seams.now, producerWaits: seams.producerWaits, producerPublishes: seams.producerPublishes, afterFunc: seams.afterFunc, commanded: seams.commanded,
 		dev:     dev,
 		zeros:   make([]byte, p.PeriodFrames*fb),
@@ -508,6 +527,7 @@ func openSink(ctx context.Context, cfg SinkConfig, seams sinkSeams) (*Sink, erro
 	ep := cfg.Endpoint
 	s.endpoint.Store(&ep)
 	s.pos.Stream = State(statePrepared)
+	handed = true
 	go s.loop()
 	return s, nil
 }

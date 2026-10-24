@@ -949,11 +949,30 @@ func (e *Engine) call(kind callKind, s *session, timeout time.Duration, fn func(
 	}
 	o.calls[c.id] = c
 	e.spawn(func() {
-		r := fn(ctx)
+		r := e.callBackend(kind, ctx, fn)
 		r.at = e.clk.Now()
 		e.post(msgCallDone{c: c, r: r})
 	})
 	return c
+}
+
+// callBackend is fn, on its call's goroutine. A panic in the backend is
+// recovered there, logged, and is the call's failure (ReasonBackend), which
+// the owner takes through the path an error the call returned takes: a
+// Start's stops playback and releases the session, a Prepare's leaves what
+// follows to a session of its own, a Cut's is one that could not cut, a
+// Pause's and a Resume's answer their command, a Release's leaves the
+// release unconfirmed until it is acknowledged, and a Discard's changes
+// nothing. The error names the call and nothing the panic carried.
+func (e *Engine) callBackend(kind callKind, ctx context.Context, fn func(ctx context.Context) callResult) (r callResult) {
+	defer func() {
+		if p := recover(); p != nil {
+			where := "the backend's " + kind.String() + " call"
+			e.logPanic(where, p)
+			r = callResult{err: &Error{Reason: ReasonBackend, Op: kind.String(), Detail: where + " panicked; the bridge's log has why"}}
+		}
+	}()
+	return fn(ctx)
 }
 
 // callDone applies what a call returned. An answer at or past the call's

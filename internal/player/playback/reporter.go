@@ -48,9 +48,11 @@ func (s *session) report() {
 // order; the decoder's end of an occurrence reports nothing.
 func (s *session) reportStep() bool {
 	var evs []func()
-	s.mu.Lock()
+	l := s.hold()
+	defer l.release()
+	l.lock()
 	if s.releasing || len(s.chain) == 0 {
-		s.mu.Unlock()
+		l.unlock()
 		return true
 	}
 	id := s.id
@@ -131,7 +133,6 @@ func (s *session) reportStep() bool {
 		}
 	}
 	if s.fault != nil && !s.faultSent {
-		s.faultSent = true
 		f := *s.fault
 		switch {
 		case f.Occurrence != 0:
@@ -140,7 +141,15 @@ func (s *session) reportStep() bool {
 		default:
 			f.Occurrence = s.chain[0].id
 		}
-		evs = append(evs, func() { s.ev.Fault(id, f) })
+		evs = append(evs, func() {
+			// Queuing is not delivery: an earlier callback may panic. Mark
+			// the attempt here so recovery sends an unreached fault once,
+			// but never retries a Fault callback that itself panicked.
+			s.mu.Lock()
+			s.faultSent = true
+			s.mu.Unlock()
+			s.ev.Fault(id, f)
+		})
 	}
 	// A pause's release of the device: the sink's own, or, holding no device,
 	// the pause release passed, once no sink is current. A sink that played
@@ -148,7 +157,7 @@ func (s *session) reportStep() bool {
 	// to the next transport (transition) and yet to record the occurrence it
 	// opens a sink for, so a resume told of the release then would find none
 	// to open; at the end of the session one is followed by Finished.
-	if s.paused && !s.relSent && !s.faultSent {
+	if s.paused && !s.relSent && s.fault == nil {
 		c := s.cur
 		switch {
 		case c != nil && !c.closed && !c.drained && posOf(c).State == alsapcm.SinkReleased:
@@ -163,7 +172,7 @@ func (s *session) reportStep() bool {
 			evs = append(evs, func() { s.ev.DeviceReleased(id) })
 		}
 	}
-	done := s.faultSent
+	done := s.fault != nil
 	if s.drained && !s.finSent && s.fault == nil {
 		s.finSent, done = true, true
 		evs = append(evs, func() { s.ev.Finished(id) })
@@ -171,9 +180,49 @@ func (s *session) reportStep() bool {
 	// What this step reported of the occurrences before the one heard was
 	// the last of them.
 	s.retireLocked(heard)
-	s.mu.Unlock()
+	l.unlock()
 	for _, e := range evs {
 		e()
 	}
 	return done
+}
+
+// recoverReporter is deferred last by the reporter: a panic on it is
+// recovered, logged once, and is the session's fault, which the reporter,
+// the one goroutine that sends the session's events, sends itself, since it
+// sends nothing after, unless a fault was sent already or the session is
+// being released. The fault names the occurrence last heard, with its
+// frames, or else the first.
+func (s *session) recoverReporter() {
+	r := recover()
+	if r == nil {
+		return
+	}
+	const where = "the reporter"
+	s.b.logPanic(where, r)
+	s.faulted(where)
+	s.mu.Lock()
+	send := !s.faultSent && !s.releasing
+	var f engine.Fault
+	if send {
+		s.faultSent = true
+		f = *s.fault
+		if f.Occurrence == 0 {
+			f.Occurrence, f.Frames = s.posOcc, s.posFrames
+			if f.Occurrence == 0 && len(s.chain) > 0 {
+				f.Occurrence = s.chain[0].id
+			}
+		}
+	}
+	ev, id := s.ev, s.id
+	s.mu.Unlock()
+	if !send {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			s.b.logPanic("the reporter's report of its fault", r)
+		}
+	}()
+	ev.Fault(id, f)
 }

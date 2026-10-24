@@ -57,6 +57,8 @@ type playerStandIn struct {
 	last    engine.SessionID
 	calls   int // calls under way
 	changed chan struct{}
+	// releasedAll counts the ReleaseAll calls.
+	releasedAll int
 }
 
 func newPlayerStandIn() *playerStandIn {
@@ -190,6 +192,30 @@ func (b *playerStandIn) Release(_ context.Context, s engine.SessionID) error {
 	b.mu.Unlock()
 	if opened && notify != nil {
 		notify(playback.Note{Session: s, Kind: playback.NoteClosed, Params: alsapcm.Params{Endpoint: alsapcm.Endpoint{Card: 5, Device: 0}}})
+	}
+	return nil
+}
+
+// ReleaseAll closes every DAC a Start opened and no Release closed, as the
+// backend's releases every session it holds, and counts the call.
+func (b *playerStandIn) ReleaseAll(context.Context) error {
+	b.enter()
+	defer b.leave()
+	b.mu.Lock()
+	b.releasedAll++
+	var released []engine.SessionID
+	for s := range b.evs {
+		delete(b.evs, s)
+		b.closed++
+		released = append(released, s)
+	}
+	b.signal()
+	notify := b.cfg.Notify
+	b.mu.Unlock()
+	for _, s := range released {
+		if notify != nil {
+			notify(playback.Note{Session: s, Kind: playback.NoteClosed, Params: alsapcm.Params{Endpoint: alsapcm.Endpoint{Card: 5, Device: 0}}})
+		}
 	}
 	return nil
 }
@@ -1289,6 +1315,61 @@ func TestAPanicOnTheEnginesGoroutineKeepsItsShareOfTheLock(t *testing.T) {
 	}
 	if lines := rec.Failures("player: the engine's Run ended in a panic, before its own shutdown, which waits for its state writes: they may still run, so the player keeps its share of the data directory's lock until the process exits"); len(lines) != 1 {
 		t.Errorf("the abandonment logged %q, want once", lines)
+	}
+}
+
+// nopEvents is the engine's side of a session a test starts on the stand-in
+// itself: the session an engine left when its Run ended in a panic.
+type nopEvents struct{}
+
+func (nopEvents) Prepared(engine.SessionID, engine.OccurrenceID, engine.Join)      {}
+func (nopEvents) Refused(engine.SessionID, engine.OccurrenceID, engine.Unplayable) {}
+func (nopEvents) Submitted(engine.SessionID, engine.OccurrenceID)                  {}
+func (nopEvents) Audible(engine.SessionID, engine.OccurrenceID)                    {}
+func (nopEvents) Position(engine.SessionID, engine.Position)                       {}
+func (nopEvents) Fault(engine.SessionID, engine.Fault)                             {}
+func (nopEvents) Finished(engine.SessionID)                                        {}
+func (nopEvents) DeviceReleased(engine.SessionID)                                  {}
+func (nopEvents) Released(engine.SessionID)                                        {}
+
+// TestAPanicOnTheEnginesGoroutineLetsGoOfTheDAC: a panic on the goroutine
+// that runs the engine's Run leaves the session the backend plays holding
+// the DAC, with no owner to release it: the player has the backend let go
+// of every session it holds, within its bound, and says so, so the DAC is
+// free rather than held until the process exits, while the player keeps its
+// share of the data directory's lock, as for any panic in Run.
+func TestAPanicOnTheEnginesGoroutineLetsGoOfTheDAC(t *testing.T) {
+	needsDirectorySync(t)
+	rec := loggingtest.Record(t)
+	standIn := newPlayerStandIn()
+	// The session the engine started and its Run never released.
+	req := engine.StartRequest{Session: 1, First: engine.Occurrence{ID: 1, Entry: 1, Ref: someReference(t, "0123456789abcdef")}, Events: nopEvents{}}
+	ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer, standIn: standIn,
+		seams: &servePlayerSeams{runs: func() {
+			if err := standIn.Start(context.Background(), req); err != nil {
+				panic(err)
+			}
+			panic("on the engine's goroutine")
+		}}})
+	select {
+	case <-ps.player.done:
+	case <-serveGiveUp(t):
+		t.Fatalf("the player did not stop after its engine's panic; stderr=%s\nserve's goroutines:\n%s", ps.stderr.String(), serveStacks())
+	}
+	standIn.mu.Lock()
+	releasedAll := standIn.releasedAll
+	standIn.mu.Unlock()
+	if opened, closed, _ := standIn.counts(); opened != 1 || closed != 1 || releasedAll != 1 {
+		t.Errorf("the DAC opened %d times and closed %d, ReleaseAll asked %d times; want the session the engine left let go, once", opened, closed, releasedAll)
+	}
+	if lines := rec.Lines("player: the engine's Run ended in a panic, so the backend let go of every session it held: the device is free"); len(lines) != 1 {
+		t.Errorf("the release logged %q, want once", lines)
+	}
+	if closedNow(ps.player.settled) {
+		t.Error("the player settled, its engine's writers never joined")
+	}
+	if code := ps.stopServe(t); code != 0 {
+		t.Fatalf("exit %d; stderr=%s", code, ps.stderr.String())
 	}
 }
 

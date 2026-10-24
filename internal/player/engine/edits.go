@@ -258,7 +258,21 @@ func (e *Engine) reserveWrite() {
 	}
 	r.inflight = true
 	data := encodeReserve(r.ids.want, r.tokens.want)
-	e.spawn(func() { e.post(msgReserveDone{err: e.sm.writeReserve(e.cfg.ReservePath, data)}) })
+	e.spawn(func() { e.post(msgReserveDone{err: e.reserve(data)}) })
+}
+
+// reserve writes a reservation, the start's or one on a goroutine of its
+// own. A panic in the write is recovered there, logged, and is a write that
+// failed: nothing it would cover is handed out, and the edits that need it
+// are refused until one lands, as after any failed write.
+func (e *Engine) reserve(data []byte) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			e.logPanic("a reservation write", p)
+			err = errors.New("the reservation write panicked; the bridge's log has why")
+		}
+	}()
+	return e.sm.writeReserve(e.cfg.ReservePath, data)
 }
 
 // ahead reserves the next block in the background once less than a block

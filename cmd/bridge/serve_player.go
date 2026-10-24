@@ -426,7 +426,7 @@ func (p *bridgePlayer) watch(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-run.done:
-			playerLog.Error("player: the engine stopped on its own, which only a panic in it does (logged above): the player is off until bridge serve next starts, and the device may be held until then")
+			playerLog.Error("player: the engine stopped on its own, which only a panic in it does (logged above): the player is off until bridge serve next starts, and the backend is asked to let go of the device; the release outcome follows")
 			return
 		case snap := <-run.sub.C():
 			p.report(snap)
@@ -582,8 +582,11 @@ func (p *bridgePlayer) send(rp engine.OutputReport) {
 // shutdown stops the engine and waits for it, then for the backend's
 // goroutines, each within its bound, and says what it left: an engine whose
 // state write did not return, a device call held in the kernel, a release
-// never confirmed. Then it closes the feed's subscription. It is the
-// supervisor's last step, and recovers its own panic.
+// never confirmed. An engine whose Run a panic ended never ran its own
+// shutdown, which releases the session it plays, so the backend lets go of
+// every session it holds first, within the backend's bound (releaseAll).
+// Then it closes the feed's subscription. It is the supervisor's last step,
+// and recovers its own panic.
 func (p *bridgePlayer) shutdown() {
 	defer func() {
 		if r := recover(); r != nil {
@@ -594,14 +597,19 @@ func (p *bridgePlayer) shutdown() {
 	began := time.Now()
 	run.stop()
 	t := time.NewTimer(p.bounds.engine)
+	ended := false
 	select {
 	case <-run.done:
 		t.Stop()
+		ended = true
 	case <-t.C:
 		playerLog.Warn("player: the engine did not shut down within its bound: its state storage may be stalled, a write or an fsync that does not return; it is abandoned and ends with the process, and serve keeps its data directory's lock until then",
 			"bound", p.bounds.engine)
 	}
 	wctx, cancel := context.WithTimeout(context.Background(), p.bounds.backend)
+	if ended && run.panicked {
+		releaseAll(wctx, run.be)
+	}
 	err := run.be.Wait(wctx)
 	cancel()
 	if err != nil {
@@ -618,6 +626,19 @@ func (p *bridgePlayer) shutdown() {
 	p.stopped = took
 	p.mu.Unlock()
 	playerLog.Info("player: shut down", "took", took.Round(time.Millisecond))
+}
+
+// releaseAll has the backend let go of every session it holds, for an
+// engine whose Run a panic ended: the engine's owner, the backend's only
+// caller, is gone, and the session it played would hold the DAC until the
+// process exits. It waits at most until ctx ends, and says how it went.
+func releaseAll(ctx context.Context, be playBackend) {
+	if err := be.ReleaseAll(ctx); err != nil {
+		playerLog.Warn("player: the engine's Run ended in a panic, and the backend did not let go of every session it held within its bound: the device may still be held until the process exits",
+			"err", err)
+		return
+	}
+	playerLog.Info("player: the engine's Run ended in a panic, so the backend let go of every session it held: the device is free")
 }
 
 // settle lets go of the player's share of the data directory's lock and
