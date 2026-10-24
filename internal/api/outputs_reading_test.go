@@ -2177,23 +2177,39 @@ func TestAReadingNamesItsOutputByID(t *testing.T) {
 	}
 }
 
-// TestHealthAdvertisesOutputReadingWithLocalOutputs: the reading's flag is
-// on exactly when the outputs route is.
-func TestHealthAdvertisesOutputReadingWithLocalOutputs(t *testing.T) {
+// TestHealthAdvertisesOutputReadingOnTheMPDGateAlone: the reading's flag is
+// on exactly when output.mpd resolves on and the host is Linux, the MPD
+// gate, whatever serve's player says (B470 PR 5b): the reading probes and
+// dials MPD for any well-formed id, so a bridge whose localOutputs is its
+// player's alone advertises no reading. Until 5b the two keys were one gate.
+func TestHealthAdvertisesOutputReadingOnTheMPDGateAlone(t *testing.T) {
 	for _, tc := range []struct {
 		goos, mode string
-		want       bool
-	}{{"linux", "on", true}, {"linux", "off", false}, {"darwin", "on", false}} {
+		player     bool
+		reading    bool
+		local      bool
+	}{
+		{"linux", "on", false, true, true},
+		{"linux", "off", false, false, false},
+		{"darwin", "on", false, false, false},
+		{"linux", "on", true, true, true},
+		{"linux", "off", true, false, true},
+		{"darwin", "on", true, false, true},
+	} {
 		cfg := quietOutputs(tc.goos, tc.mode)
-		hs, _ := newOutputsHTTP(t, "fp", cfg)
+		var b BridgeOutput
+		if tc.player {
+			b = &fakeBridgeOutput{enabled: true}
+		}
+		hs, _, _ := newBridgeOutputsHTTP(t, cfg, b)
 		resp := outputsGet(t, hs, "", "/v1/health")
 		var h HealthResponse
 		if err := json.NewDecoder(resp.Body).Decode(&h); err != nil {
 			t.Fatal(err)
 		}
 		resp.Body.Close()
-		if slices.Contains(h.Features, "outputReading") != tc.want || slices.Contains(h.Features, "localOutputs") != tc.want {
-			t.Errorf("%s %s: features %v, want outputReading %v", tc.goos, tc.mode, h.Features, tc.want)
+		if slices.Contains(h.Features, "outputReading") != tc.reading || slices.Contains(h.Features, "localOutputs") != tc.local {
+			t.Errorf("%s %s, player %v: features %v, want outputReading %v and localOutputs %v", tc.goos, tc.mode, tc.player, h.Features, tc.reading, tc.local)
 		}
 	}
 }
