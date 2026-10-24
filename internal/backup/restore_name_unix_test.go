@@ -89,8 +89,10 @@ func TestARestoreRefusesANameRepointedBeforeItsFirstWrite(t *testing.T) {
 		repointLink(t, link, twin)
 	})
 	err := backup.RestoreWithOptions(b.snap, b.targets, opts)
-	if !errors.Is(err, config.ErrNameMoved) || !strings.Contains(err.Error(), "nothing was restored") {
-		t.Errorf("a restore whose config's name moved before its first write = %v, want a refusal that says nothing was restored", err)
+	if !errors.Is(err, config.ErrNameMoved) || !strings.Contains(err.Error(), "nothing was restored") ||
+		!strings.Contains(err.Error(), "run the restore again") {
+		t.Errorf("a restore whose config's name moved before its first write = %v, want the refusal of a changed config: "+
+			"nothing was restored, run the restore again", err)
 	}
 	b.requireUntouched(t)
 	requireConfigsAsTheyWere(t, raw, link, a, twin)
