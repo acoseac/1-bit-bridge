@@ -144,7 +144,7 @@ reaches a session that has not gone looking for it.
 ## 2026-10-24 — B515: configured MPD file, command-line hint and named includes
 
 
-**Current design (rounds 3–4).** The reading describes the bridge's
+**Current design (rounds 3–5).** The reading describes the bridge's
 configured/discovered file. That file supplies `mpd.config`, config warnings,
 song mapping and the DoP veto when live `dop` is absent. The optional
 `mpd.configHint` describes only the observed command-line operand: `same`,
@@ -158,11 +158,37 @@ including the explicit configured name when the reading reopens it after
 inspection. Physical resolution supplies confinement, cycle identity and
 nested diagnostic paths, including through an alias of the root. Hints
 compare only confined physical file identities and omit process-relative
-operands and links into them. Config publication precedes a separately
-bounded hint step: a late or failed hint drops only hints. The configured
+operands and links into them. All verdict inputs, including song lookup and the stream-open observation,
+precede a separately bounded hint step: a late or failed hint drops only hints. The configured
 file and its includes plus `output.password` redact every external string.
-The implementation detail and evidence follow in the round-3 and round-4
+The implementation detail and evidence follow in the round-3 through round-5
 records; protocol version remains 1.
+
+**Round 5.** A stalled hint previously consumed the shared reading deadline
+before song lookup, changing a known row to `source_unknown`. Every verdict
+input is now gathered first; the hint keeps its own busy flag and 500 ms bound
+within the remaining reading time. Intermediate process-relative aliases are
+checked with a confined Lstat/Readlink walk: any prefix or target through
+`/proc`, `/dev/fd`, `/dev/stdin`, `/dev/stdout` or `/dev/stderr` omits the hint,
+even when it ends at a regular file; more than 40 hops also omits it. Named
+reopen, independent config/hint bounds, confined final identity lookup and
+root-relative include diagnostics remain pinned. The slow-song/stalled-hint,
+intermediate-alias and hop-limit regressions failed on round 4 before the fix.
+A Linux-only regression holds a regular descriptor open and checks real
+`/proc/self/fd`, `/dev/fd` and cwd aliases with root `/`; macOS cannot run it.
+The round-4 host socket-capable run passed `go test -p 4 -race -count=1
+./internal/api/ ./internal/mpd/... ./internal/alsa/ ./internal/signalpath/`:
+api 111.6 s, mpd 1.8 s, mpd/conf 1.5 s, alsa 3.1 s, signalpath 1.3 s.
+Round-5 validation: all 59 prior controls and four new macOS controls are
+assertion reds, with saved bytes restored. Host/Linux/Windows vet, formatting,
+docs checks, the conf/ALSA/signalpath race suites and ten race repetitions of
+each new macOS test pass. All runnable API (286) and MPD (21) test invocations
+pass; 437 API and 17 MPD invocations are blocked by refused socket binds.
+The Linux-only test cross-compiles; its runtime and control remain pending.
+Exact gates and rebased controls are in `report-r5.md` and
+`controls-r5/manifest.json`. No new index entry is added. Protocol version
+remains 1; backward-compatible protocol change, no iOS change required.
+The protocol mirror remains a companion documentation update.
 
 ### Round 1 provenance design — superseded in round 3 (never shipped)
 

@@ -130,9 +130,9 @@ mount device and root fields as fallback only when links cannot be inspected.
 These are observations, not proof of startup identity or mount equivalence.
 Cmdline is capped at 64 KiB with overflow detection, stat at 64 KiB and
 mountinfo at 1 MiB. The configured file is published from the config step
-alone; then hints run in their own single-outstanding bounded step, with
-their own busy flag and 500 ms deadline, after the ALSA configuration and
-MPD status bracket. A failed or late hint omits only hints. A failed or late
+alone; after all verdict-bearing inputs (including the song row and
+stream-open observation), hints run in their own single-outstanding bounded
+step with their own busy flag, bounded by 500 ms and the reading time left. A failed or late hint omits only hints. A failed or late
 config step publishes neither config nor hints. A cached view performs no I/O and retains
 a separate hint for each card.
 
@@ -199,8 +199,12 @@ the unresolved named path still supplies the next include directory.
 Hints use `conf.StatHost`: physical resolution and the conf reader's root
 check, followed by a stat beneath an opened root. An unresolved or escaped
 identity omits the hint, and no operand contents are read. Process-relative
-names under `/proc/` or `/dev/fd/`, `/dev/stdin`, and paths resolving there
-omit hints. A hint worker that times out or panics cannot erase the already
+names under `/proc`, `/dev/fd`, `/dev/stdin`, `/dev/stdout` or `/dev/stderr`
+omit hints at every operand prefix or symlink target, even if the final file
+is ordinary. The walk uses Lstat/Readlink one link at a time, refuses failed
+resolution and more than 40 hops, and preserves relative link/.. semantics.
+Absolute links retain the conf reader's host semantics and confinement; the
+named root and canonical root are both accepted for in-root absolute links. A hint worker that times out or panics cannot erase the already
 published configured file, nor block fresh configured reads on the next
 reading. One hint worker may remain outstanding; later readings do not
 start a second. The configured block's no-live-dop fallback is read once
@@ -214,3 +218,30 @@ through `namedBlock`, retaining both yes and no behavior.
 `TestConfiguredDoPVetoWithoutLiveAttribute` pin these paths. The task's
 `report-r4.md` and `controls-r4/` record the red runs, restored controls,
 main comparison and gates.
+
+
+### B515 round 5: hints wait for verdict inputs and omit intermediate aliases
+
+The hint previously ran before song lookup on the shared three-second reading
+context. A stalled hint could consume the remaining time and turn a known
+source into `withheld/source_unknown`. Config acquisition, song lookup and
+the timestamped stream-open observation now all precede the optional hint.
+Its separate 500 ms step uses only the remaining reading time; timeout, panic
+or an outstanding worker can change hint presence alone.
+
+Checking only the written operand and fully resolved endpoint missed chains
+such as `/etc/alias.conf -> /proc/self/cwd/mpd.conf` and descriptor aliases
+whose endpoint is a regular file. `hintOperandHost` checks every traversed
+prefix before Lstat and every absolute link target before following it;
+relative targets are traversed component by component, never cleaned across
+a link/.. pair. `/proc`, `/dev/fd`, `/dev/stdin`, `/dev/stdout` and `/dev/stderr`
+all cause omission. More than 40 links, missing paths and confinement failures
+also omit hints. The final identity still comes from `conf.StatHost` under
+its opened root, without reading operand contents.
+
+`TestStalledHintCannotSpendSongLookupTime`,
+`TestReadingOmitsIntermediateProcessAliases` and `TestReadingHintLinkHopLimit`
+failed on round 4 and pass on the fix. The Linux-only
+`TestHintOmitsLiveProcessAliasesAtHostRoot` holds a regular file open and
+uses real `/proc/self/fd`, `/dev/fd` and `/proc/self/cwd` aliases under root `/`;
+its runtime result must come from Linux, not the macOS cross-compile.
