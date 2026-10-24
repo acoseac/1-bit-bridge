@@ -214,7 +214,7 @@ func TestPlayerResetResumesEveryDurableStep(t *testing.T) {
 				}
 			}
 			before := historyTree(t, dir)
-			if err := fixedRestore(t, snap, dir, 0); err == nil || !strings.Contains(err.Error(), "given up") {
+			if err := fixedRestore(t, snap, dir, 0); err == nil || !strings.Contains(err.Error(), "reset is incomplete") || !strings.Contains(err.Error(), "bridge reset-player") {
 				t.Fatalf("interrupted restore: %v", err)
 			}
 			if !bytes.Equal(before, historyTree(t, dir)) {

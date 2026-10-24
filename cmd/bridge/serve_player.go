@@ -361,10 +361,7 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 	if w.Feed == nil {
 		return p.fail("serve started no hotplug watcher for the player")
 	}
-	if err := backup.CheckPlayerStart(cfg.DataDir); err != nil {
-		return p.fail(err.Error())
-	}
-	id, made, err := config.EnsurePlayerUUID(cfg.DataDir)
+	id, made, err := backup.EnsurePlayerUUID(cfg.DataDir)
 	if err != nil {
 		return p.fail("the player's identity: " + err.Error())
 	}

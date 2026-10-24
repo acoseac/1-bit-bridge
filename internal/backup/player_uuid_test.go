@@ -330,5 +330,5 @@ func TestSnapshotAndRestoreAsRootKeepThePlayerUUID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertGivenAway(t, changes()[before:], []string{filepath.Join(realDir, "player-ids.json"), src.PlayerUUID})
+	assertGivenAway(t, changes()[before:], []string{filepath.Join(realDir, backup.PlayerHistoryFileName), filepath.Join(realDir, "player-ids.json"), src.PlayerUUID})
 }

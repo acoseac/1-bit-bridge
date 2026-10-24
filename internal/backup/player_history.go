@@ -81,7 +81,10 @@ func (h playerHistory) validate() error {
 func optionalPlayerHistory(path string) (playerHistory, bool, error) {
 	h, err := readPlayerHistory(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return playerHistory{Version: 1}, false, nil
+		// ENOENT from open can mean a dangling link, not absent history.
+		if _, statErr := os.Lstat(path); errors.Is(statErr, os.ErrNotExist) {
+			return playerHistory{Version: 1}, false, nil
+		}
 	}
 	if err != nil {
 		return h, false, fmt.Errorf("read %s: %w", PlayerHistoryFileName, err)
@@ -140,26 +143,31 @@ func preflightPlayerHistory(snapshotDir, target, id string, m Manifest) (playerH
 		// to remove its files. Its given-up list is sufficient to refuse revival.
 		present = true
 	}
-	if id != "" && slices.Contains(h.GivenUp, id) {
-		return h, false, fmt.Errorf("restore: the snapshot's player identity was given up; nothing was restored; %s", snapshotIdentityRemedy())
-	}
 	if h.ResetPending {
 		return h, false, errors.New("restore: player reset is incomplete; run bridge reset-player before restoring; nothing was restored")
 	}
+	old, err := config.ReadPlayerUUIDFile(target)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return h, false, fmt.Errorf("restore: read live player identity: %w", playerUUIDReadError(err))
+	}
+	r, reservationErr := engine.ReadReservation(filepath.Join(dir, engine.ReservationFileName))
+	if err := checkGivenUpPlayer(h, old, r.UUID); err != nil {
+		return h, false, fmt.Errorf("restore: %w; nothing was restored", err)
+	}
+	if id != "" && slices.Contains(h.GivenUp, id) {
+		return h, false, fmt.Errorf("restore: the snapshot's player identity was given up; nothing was restored; %s", snapshotIdentityRemedy())
+	}
 	if id != "" {
-		old, err := config.ReadPlayerUUIDFile(target)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return h, false, fmt.Errorf("restore: read live player identity: %w", err)
-		}
 		if old != "" && old != id {
 			h.Covered = unionIDs(h.Covered, old)
 			present = true
 		}
-		r, err := engine.ReadReservation(filepath.Join(dir, engine.ReservationFileName))
-		if err == nil && r.UUID != "" && r.UUID != id {
+		if reservationErr == nil && r.UUID != "" && r.UUID != id {
 			h.Covered = unionIDs(h.Covered, r.UUID)
 			present = true
 		}
+		h.Covered = unionIDs(h.Covered, id)
+		present = true
 		// Keep the incoming UUID covered: a failure after this history lands
 		// can leave the old UUID installed while its floor still covers both.
 		// Reservation failures retain restorePlayerReservation's existing remedy.
@@ -171,7 +179,7 @@ func preflightPlayerHistory(snapshotDir, target, id string, m Manifest) (playerH
 // then durably removes queue, UUID, reservation in that order. The caller must
 // hold the data-dir lock and refuse a running serve, as restore does. It returns
 // false without writing only when UUID, reservation and queue are absent and
-// no reset is pending.
+// no reset is pending and no covered identity remains.
 func ResetPlayer(dataDir string) (bool, error) { return resetPlayer(dataDir, nil) }
 
 // resetPlayer's instance seam stops after a durable step, never on a timer.
@@ -197,7 +205,7 @@ func resetPlayer(dir string, after func(string) error) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if missing && !leftovers && !h.ResetPending {
+	if missing && !leftovers && !h.ResetPending && len(h.Covered) == 0 {
 		return false, nil
 	}
 	r, err := engine.ReadReservation(filepath.Join(dir, engine.ReservationFileName))
@@ -260,11 +268,19 @@ func resetPlayer(dir string, after func(string) error) (bool, error) {
 // playerUUIDResetReadError distinguishes a non-file from a file whose contents
 // reset cannot read, without echoing any of the identity file's contents.
 func playerUUIDResetReadError(err error) error {
+	return fmt.Errorf("read player identity before reset: %w", playerUUIDReadError(err))
+}
+
+// playerUUIDReadError gives the prerequisite for recovering an unreadable identity.
+func playerUUIDReadError(err error) error {
 	advice := "restore read access to player-uuid and then rerun bridge reset-player"
 	if fsutil.NotAFileKind(err) != "" {
 		advice = "move the non-file at player-uuid aside and then rerun bridge reset-player"
 	}
-	return fmt.Errorf("read player identity before reset: %w; %s", err, advice)
+	if errors.Is(err, config.ErrNotOnePlayerUUID) {
+		advice = "with the service stopped, run bridge reset-player to give up the malformed identity"
+	}
+	return fmt.Errorf("%w; %s", err, advice)
 }
 
 // playerFilesRemain checks directory entries, so even a dangling link is not
@@ -283,7 +299,7 @@ func playerFilesRemain(dir string) (bool, error) {
 }
 
 // CheckPlayerStart refuses an incomplete reset, orphaned files or unreadable history before
-// serve creates an identity or starts the engine. The caller holds the data-dir
+// a caller creates an identity or starts the engine. The caller holds the data-dir
 // lock, which also excludes a reset until the player has stopped.
 func CheckPlayerStart(dataDir string) error {
 	h, _, err := optionalPlayerHistory(filepath.Join(dataDir, PlayerHistoryFileName))
@@ -293,7 +309,11 @@ func CheckPlayerStart(dataDir string) error {
 	if h.ResetPending {
 		return errors.New("player reset is incomplete; with the service stopped, run bridge reset-player to finish the reset before starting the player")
 	}
-	if _, err := config.ReadPlayerUUIDFile(filepath.Join(dataDir, config.PlayerUUIDFile)); errors.Is(err, os.ErrNotExist) {
+	id, err := config.ReadPlayerUUIDFile(filepath.Join(dataDir, config.PlayerUUIDFile))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return playerUUIDReadError(err)
+	}
+	if errors.Is(err, os.ErrNotExist) {
 		remain, err := playerFilesRemain(dataDir)
 		if err != nil {
 			return err
@@ -302,5 +322,33 @@ func CheckPlayerStart(dataDir string) error {
 			return errors.New("player-uuid is missing beside a player reservation or queue; with the service stopped, run bridge reset-player before starting the player")
 		}
 	}
+	r, _ := engine.ReadReservation(filepath.Join(dataDir, engine.ReservationFileName))
+	if err := checkGivenUpPlayer(h, id, r.UUID); err != nil {
+		return err
+	}
+	if len(h.Covered) != 0 {
+		if _, err := os.Lstat(filepath.Join(dataDir, engine.ReservationFileName)); errors.Is(err, os.ErrNotExist) {
+			return errors.New("player history covers identities without a reservation; with the service stopped, run bridge reset-player before starting the player")
+		} else if err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// checkGivenUpPlayer checks the box's identities against the history being used.
+func checkGivenUpPlayer(h playerHistory, live, reserved string) error {
+	if slices.Contains(h.GivenUp, live) || slices.Contains(h.GivenUp, reserved) {
+		return errors.New("the live player or reservation identity was given up; with the service stopped, run bridge reset-player before using the player")
+	}
+	return nil
+}
+
+// EnsurePlayerUUID checks the box's history and state before keeping or minting
+// its player identity. Every minter uses this wrapper under the data-dir lock.
+func EnsurePlayerUUID(dataDir string) (string, bool, error) {
+	if err := CheckPlayerStart(dataDir); err != nil {
+		return "", false, err
+	}
+	return config.EnsurePlayerUUID(dataDir)
 }
