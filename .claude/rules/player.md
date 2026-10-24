@@ -162,4 +162,4 @@ The bit-exact OpenHome player inside the bridge (B470), PR by PR. These sections
 
 ## Player test ordering (B526)
 
-- **Observe a reopen by its increasing open count; hold the producer before EOF when inserting a successor whose open must run; and wait for a terminal state while offering ticks, never require a terminal reporter to take another tick or its writer to wait again (`Grant`, not `Play`).** `FakeKernel.When` observes present and future state, not past transient states. **Don't raise a timeout or sleep to order these events.** → History-rules-player.md
+- **Observe a reopen by its increasing open count; hold the producer before EOF when inserting a successor whose open must run; and wait for a terminal state while offering ticks, never require a terminal reporter to take another tick or its writer to wait again (`Grant`, not `Play`).** `FakeKernel.Await` (over the fake kernel's `when`) observes present and future state, not past transient states. **Don't raise a timeout or sleep to order these events.** → History-rules-player.md
