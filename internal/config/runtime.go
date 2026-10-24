@@ -56,6 +56,28 @@ func (e *ChangedOutsideError) Error() string {
 // Is makes a *ChangedOutsideError match ErrChangedOutside.
 func (e *ChangedOutsideError) Is(target error) bool { return target == ErrChangedOutside }
 
+// ErrBootUnresolved is what a *BootUnresolvedError matches.
+var ErrBootUnresolved = errors.New("config: serve's boot read could not resolve the config file's name")
+
+// BootUnresolvedError is the holder's refusal of a save once serve's boot
+// read could resolve the config's name at none of its reads (LoadFileAt, a
+// BootFile with no file): the holder cannot say which file its snapshot was
+// read from, so it saves into none. It names the config file and nothing it
+// holds.
+type BootUnresolvedError struct {
+	// Path is the config file.
+	Path string
+}
+
+func (e *BootUnresolvedError) Error() string {
+	return fmt.Sprintf("this bridge could not resolve the file %s opens when it started, so it cannot say which file "+
+		"its settings were read from, and this change was not saved: restart the bridge once that name resolves, "+
+		"then make the change again", e.Path)
+}
+
+// Is makes a *BootUnresolvedError match ErrBootUnresolved.
+func (e *BootUnresolvedError) Is(target error) bool { return target == ErrBootUnresolved }
+
 // RecordFile tells the holder raw, the bytes the config file held when the
 // live snapshot was read from it, and file, the file its name opened for that
 // read, resolved before and after it (LoadFileAt), none when the name could
