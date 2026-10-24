@@ -5,7 +5,9 @@ import (
 	"encoding"
 	"fmt"
 	"math"
+	"math/big"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +25,10 @@ import (
 // refuses the file (DecodeFile), and the player block's reader leaves the
 // block unread (playerReader.whole). A float the integer holds exactly is
 // taken as it is: 30.0, 3e1, and 08, which yaml.v3 resolves as a float.
+// What is weighed is the value the text writes, read exactly: yaml.v3 reads
+// a float through strconv.ParseFloat, which rounds to the nearest float64,
+// so 30.0000000000000001 came out 30, 1e-400 0, and 9007199254740993.0
+// 9007199254740992, each whole and each a value nobody wrote.
 
 // DecodeFile decodes raw, a config file's bytes, into cfg as Load does
 // before its defaults, its BRIDGE_* overrides, its paths and its checks:
@@ -76,9 +82,9 @@ func checkWholeNumbers(into reflect.Type, decode func(any) error) error {
 
 // exactInteger reports whether yaml.v3 decodes n, a value written for an
 // integer of type t, unchanged: anything but a !!float (an integer, a null,
-// or a value the decoder refuses itself), or a !!float whose value is whole
-// and inside t's range. Any other !!float that the decoder takes, it takes
-// changed.
+// or a value the decoder refuses itself), or a !!float whose value is whole,
+// inside t's range, and the value its text writes. Any other !!float that
+// the decoder takes, it takes changed.
 func exactInteger(n *yaml.Node, t reflect.Type) bool {
 	if n.Kind != yaml.ScalarNode || n.ShortTag() != "!!float" {
 		return true
@@ -93,7 +99,14 @@ func exactInteger(n *yaml.Node, t reflect.Type) bool {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		lo, hi = -math.Ldexp(1, bits-1), math.Ldexp(1, bits-1)
 	}
-	return f == math.Trunc(f) && f >= lo && f < hi
+	if f != math.Trunc(f) || f < lo || f >= hi {
+		return false
+	}
+	// f is the text as strconv.ParseFloat rounds it. Read again exactly,
+	// its underscores dropped as yaml.v3 drops them, the text must write f.
+	// big.Rat refuses an exponent past a million, and so is the value.
+	written, ok := new(big.Rat).SetString(strings.ReplaceAll(n.Value, "_", ""))
+	return ok && written.Cmp(new(big.Rat).SetFloat64(f)) == 0
 }
 
 // integerCheck stands in for a whole-number setting of type T in a shadow
