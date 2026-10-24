@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,7 +16,9 @@ import (
 
 // holdLock takes the lock beside the config file at path through an open of
 // its own, as another writer's process would, and returns what gives it
-// back.
+// back. A test may give it back from a goroutine of its own, beside the
+// cleanup, and the kernel lock that orders the two is nothing the race
+// detector sees: hence the Once.
 func holdLock(t *testing.T, path string) (release func()) {
 	t.Helper()
 	f, err := fsutil.OpenLockFile(filepath.Dir(path), LockFileName(path))
@@ -26,13 +29,12 @@ func holdLock(t *testing.T, path string) (release func()) {
 		_ = f.Close()
 		t.Fatalf("take the lock: %v", err)
 	}
-	released := false
+	var once sync.Once
 	release = func() {
-		if !released {
-			released = true
+		once.Do(func() {
 			_ = fsutil.Unlock(f)
 			_ = f.Close()
-		}
+		})
 	}
 	t.Cleanup(release)
 	return release
