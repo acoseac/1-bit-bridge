@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B529: Drop a final drain after Resume rollback Pause is refused](#2026-10-24--b529-drop-a-final-drain-after-resume-rollback-pause-is-refused)
 - [2026-10-24 — B470 PR 5a2b: shared discovery for the opt-in OpenHome Source](#2026-10-24--b470-pr-5a2b-shared-discovery-for-the-opt-in-openhome-source)
 - [2026-10-24 — B470 PR 5a0 Round 11: a listed snapshot reservation that cannot be read refuses restore](#2026-10-24--b470-pr-5a0-round-11-a-listed-snapshot-reservation-that-cannot-be-read-refuses-restore)
 - [2026-10-24 — B470 PR 5a0 Round 10: reset advice requires invalid reservation data](#2026-10-24--b470-pr-5a0-round-10-reset-advice-requires-invalid-reservation-data)
@@ -137,6 +138,49 @@ reaches a session that has not gone looking for it.
 - [DSD renditions B4 — the alias measurement, and why it is a differential (2026-09-07)](#dsd-renditions-b4--the-alias-measurement-and-why-it-is-a-differential-2026-09-07)
 
 ---
+
+## 2026-10-24 — B529: Drop a final drain after Resume rollback Pause is refused
+
+Resume already compensates a sink that resumed successfully before the session
+noticed a fault. B523 round 5 left the final-drain refusal as B529: the sink's
+command gate refuses Pause while the kernel plays out its last buffer, so that
+buffer could play until the engine's fault release arrived.
+
+After the compensating Pause, Resume now checks the sink's own typed reason
+(`ReasonBadState`) and position state (`SinkDraining`). Only that pair takes
+Drop, through `s.call` with the existing detached rollback context and its
+original two-second deadline. The answer joins the fault, the refused Pause
+and any Drop failure. Other refusals and the reporter's fault are unchanged.
+No wire schema, iOS behavior, sink gate or teardown order changes.
+
+`TestPlaybackResumeRollbackDropsFinalDrain` uses B523's direct backend, real
+sink, reporter-panic gate and fake kernel command hook. Resume's successful
+reply is held until the fault is recorded and the sink is in its final
+hardware drain. No further fake time is granted. Before any session release,
+rollback must Drop once, stop the sink, give the kernel no further bytes or
+played frames, and retain the fault and Pause refusal. Its held-Drop case
+cancels the caller and retains the Drop's rollback deadline as a third error.
+`TestPlaybackResumeRollbackKeepsOtherRefusals` reaches a real xrun in that
+same window and requires no Drop and the original joined errors.
+
+Red first, with only the tests on 42b4a397: both final-drain subtests failed
+with zero Drops; the normal case left the sink draining, and the held-Drop
+case had no joined deadline. The xrun preservation test already passed on
+main; it becomes red under the independent broadened-fallback control.
+Six independent controls remove the fallback, broaden its gate, discard the
+fault, discard the Pause refusal, discard the Drop failure, or attach Drop
+to the caller's context. Each compiles and fails its named regression;
+mutations are restored from saved fixed bytes, with no HEAD change.
+
+Go 1.27.2 offline validation: Darwin and Linux `go vet ./...`, `make fmt`,
+`make docs-check`, and both new test functions twenty times under `-race`
+passed. Every player package except OpenHome, plus `internal/alsapcm`,
+passed the full race suite. The requested all-player race run was stopped
+after confirming that OpenHome's loopback listeners are refused by the
+sandbox. A focused race run of
+`TestTheSurfaceBindsEachServedAddressAndFollowsThem` fails solely on
+`listen tcp4 127.0.0.1:0: bind: operation not permitted`; the full OpenHome
+suite still requires a host that permits those listeners.
 
 ## File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)
 
