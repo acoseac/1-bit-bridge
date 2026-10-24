@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B526 items 2 and 3, B532 and B536: four tests CI reddened at random, each red first in its losing order](#2026-10-24--b526-items-2-and-3-b532-and-b536-four-tests-ci-reddened-at-random-each-red-first-in-its-losing-order)
 - [2026-10-24 — B500 round 8: key the build-site census on the verb](#2026-10-24--b500-round-8-key-the-build-site-census-on-the-verb)
 - [2026-10-24 — B500 round 7: the build-site census fails closed](#2026-10-24--b500-round-7-the-build-site-census-fails-closed)
 - [2026-10-24 — B500 round 6: documented deploy tags and invocation census](#2026-10-24--b500-round-6-documented-deploy-tags-and-invocation-census)
@@ -151,6 +152,142 @@ reaches a session that has not gone looking for it.
 - [DSD renditions B4 — the alias measurement, and why it is a differential (2026-09-07)](#dsd-renditions-b4--the-alias-measurement-and-why-it-is-a-differential-2026-09-07)
 
 ---
+
+## 2026-10-24 — B526 items 2 and 3, B532 and B536: four tests CI reddened at random, each red first in its losing order
+
+Four tests had each failed a PR's CI once and passed on a rerun. Each was
+reproduced first by forcing its losing order with a seam or a held channel,
+never a sleep, red on every run with CI's own message (the engine's with its
+count one higher, every late goroutine held); then fixed; then run
+`-race -count=50`, and 200 times under `-race` beside 24 shell busy loops
+(`while :; do :; done`, killed by their PIDs). Every negative control puts
+the old code back under the widening and is red on every run. On legion0
+(Linux, Go 1.27.3), with TMPDIR on disk, since `/tmp` there is tmpfs, which
+the player's engine refuses.
+
+### The engine's shutdown join (`TestShutdownJoinsWithinItsBound`)
+
+CI (linux `test -race (rest)`, #1328 and #1339): "2 goroutines still running
+after Run, want only the abandoned call". Run's shutdown waits for messages:
+the writer's exit, a reservation write's result, each call's answer within
+shutdownGrace. Each goroutine posted its message from inside its function,
+and `spawn` counted it (`live`, `wg`) until it returned, after the post, so
+Run could return with a goroutine it had joined still counted. B523's
+`abandon` and `doneOnce` did not change that path. Widening: an `exiting`
+seam on every goroutine the engine starts, at its end, which the test holds
+from the shutdown on: on the old order the count read 3 every time (the
+writer and the last reservation write, held, beside the abandoned release),
+twenty runs of twenty.
+
+Which side was wrong: Run's doc says it joins every goroutine the engine
+started but an abandoned call, `player.md` says a call that never returns is
+the one thing that outlives Run, and the `live` field's doc says it counts
+goroutines not joined. So the code. The brief's form, an exit signal from
+`spawn` waited for within what is left of the bound, was rejected for one
+with no wait: the harness's `drive` fires every armed timer at once, so a
+wait bounded on the engine's clock is cut short in exactly the tests that
+pin it, and an unbounded wait waits on a return nothing can hold. f now
+returns its last message (`func() any`) and `spawn` drops `live` and then
+posts it, so the message the owner already waits for is the exit signal,
+sent once f's work and its deferred calls are done; Run's bound is what it
+was, and `wg` is still done as the goroutine returns. `writer.run` returns
+its exit, which `writer.ended` sets as its named result after a panic.
+Control: the deferred decrement put back after the post, red twenty runs of
+twenty ("3 goroutines still running after Run (2 held at their end)").
+
+### The harvest tick a shutdown stops (`TestATickStoppedByShutdownReportsNothingAndStopsThere`)
+
+CI (linux `test -race (rest)`): `tick_error phase=submit error=EOF`. A bare
+`EOF`, not a `*url.Error`, is `json.Decoder`'s answer for an empty body: Do
+had returned a response. The fake Atlas cancels the tick's context and holds
+the request until the client hangs up; once the client's close_notify ends
+the server's request context, the handler returned, net/http wrote an empty
+200, and a client between its close_notify and its TCP close takes an answer
+that races that close (`persistConn.roundTrip`: "Use the response"). The
+decision was asked on the production side first, and declined:
+`ctxerr.WithoutCancellation` quiets the cancellation alone, by design
+(its doc: the error must BE the cancellation), and a rule that quiets every
+error arriving once the loop's context has ended would hide a store write
+that fails as the shutdown begins (the cursor's, the submit stamp's, the
+booklet store's), none of which watch the context. So the fake: once its
+client has hung up it aborts (`http.ErrAbortHandler`), the server closes the
+connection with no answer, and the client reads that as the cancellation it
+recorded before hanging up. Widening: `racingHangUpClient`, a client that
+sends close_notify when the request's context ends and takes whatever the
+server sends before the connection ends, which reported CI's exact line ten
+runs of ten against the old fake; the test now runs over it and over the
+client's own transport. Control: the abort taken out, the racing subtest red
+twenty runs of twenty. Not done: against a real upstream that answers a
+request its client abandoned, the same race can put one `tick_error` line in
+the journal at a shutdown; discarding an answer that races the request's own
+cancellation would remove it, and is a production change of its own.
+
+### Retirement read while playback goes on (`TestPlaybackRetiresWhatHasPlayed`, B532)
+
+macos-latest on #1337: "ten entries in, the backend holds 3 sinks and 3
+occurrences". The test read `Stats` at one instant while the fake DAC
+free-ran, and the producer opens the next transport's sink as soon as the
+drained one has played out, before the report step that hears it, so a read
+between the two finds the sink heard last, the drained one and the new one.
+The rule bounds what a report step leaves, not every instant. Widening: the
+rig's recorder holds the reporter in the delivery of the next Submitted once
+the engine has it (`holdAfterNext`), so the engine names the successor and
+the producer drains, closes and opens with no report step between, and the
+test waits for that open's note (the recorder counts `NoteOpened`): read
+there, 3 and 3 on every run, ten of ten, CI's text. Fix: the DAC stops
+(`FakeKernel.Hold`: free ended, no grant left), the reporter is let go, and
+the count is read once the producer drains the sink it wrote last with no
+time to do it in (`DRAINING` and `Starved`). That state comes only after the
+engine named what follows the occurrence in that sink, on its Submitted,
+which a report step sends after it has retired everything before the
+occurrence heard; nothing after it adds a sink or an occurrence without DAC
+time. The test keeps the backend's real ticker. Controls: the read put back
+at the held instant, red twenty of twenty; retirement taken out of the
+reporter, red five of five with 12 sinks and 13 occurrences at the new read.
+
+### The watcher's publishes counted early (`TestTheLiveConfigReachesThePlayersOutputWithoutAReadingOfTheBox`, B536)
+
+macos-latest on #1340: "the watcher published 1 snapshots while its readings
+were held". On this host every run read Publishes 1 at the sample and 1 at
+the end; the extra one is the boot reading's own: the feed hands a snapshot
+to its subscribers, then logs it, and the watch counts it only after `offer`
+returns, so the Reporter, the engine's output, the test's queue and Play can
+all come before the count. The watcher takes one reading at a time, on the
+goroutine that counts every publish (the service's disable publish waits for
+the stop, which the held reading holds). Widening: the first "player DAC:
+available" line is parked in a default log handler (`parkFirstLog`, let go
+too when the test's context ends, before its cleanups) until the test changes
+the binding: the count read at the old place then missed it on every run,
+five of five, CI's text. The count is now read while that publish is parked,
+which is exact, and the test expects one more. Round 1 read it once the first
+held reading had arrived; the review showed that such a count already holds
+a publish the watcher makes for the changed binding before it reads the box,
+the publish the test exists to catch. Test-only. Controls: the read put back
+before the hold, red ten of ten; a source-note publish added on the binding
+poke, red three of three on the fixed test and green on round 1's;
+`-race -count=20` green on this Mac.
+
+### Runs and the gate
+
+Each test `-race -count=50` green; under the 24 busy loops `-race -count=200`
+green for the engine (9.8 s), the harvest (15.2 s) and the retirement test
+(17.1 s); the serve test, about 3.2 s a run under that load, ran 250 times
+green (50, then two runs of `-count=100`), since one run of 200 outlasts the
+ten-minute foreground limit. The gate, through the build lock: `make fmt vet
+docs-check` clean (gofmt rewrote nothing), `make build-all` built the six
+targets, and `make test P=12` passed the first 43 of 86 packages
+(`cmd/bridge` 634.9 s, `internal/admin` 778.5 s, `internal/alsapcm` 27.6 s,
+`internal/atlasharvest` 13.6 s) before the tool's twenty-minute limit
+stopped it inside `internal/manifest`, which alone needs about eighteen
+minutes here; manifest then passed as CI's four shards
+(`.github/scripts/test-shard.sh manifest 0` to `3`, 1,372 names, 270, 409,
+264 and 307 s), and the 42 packages after it in one `go test -p 12 -race
+-timeout 30m` run (`internal/player/engine` 25.6 s). With the rules note
+applied in the working tree, and taken back after, `player.md` is 97,575
+bytes (97.6%, from 98.8%: the fake kernel's entry moved to its long form),
+`verify_moves.py --base HEAD` passes with its four declared edits, and
+`TestEveryCitedTestNameExists` and `TestNoDocblockNamesAnotherDeclaration`
+pass.
 
 ## 2026-10-24 — B529: Drop a final drain after Resume rollback Pause is refused
 

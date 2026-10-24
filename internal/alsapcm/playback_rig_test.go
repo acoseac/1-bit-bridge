@@ -387,6 +387,53 @@ type recorder struct {
 	// panic, once the event is recorded and before the engine has it: a
 	// defect in the reporter's sending of it.
 	panicOn func(event) bool
+	// opened is the sinks the backend noted opened (NoteOpened), and hold
+	// the delivery holdAfterNext waits to hold.
+	opened int
+	hold   *heldDelivery
+}
+
+// heldDelivery is a reporter held in the delivery of one event once the
+// engine has it (holdAfterNext). opened is the recorder's opened as the
+// event came, before the engine had it.
+type heldDelivery struct {
+	kind    string
+	opened  int
+	held    chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+// holdAfterNext holds the reporter in the delivery of the next event of
+// kind, once the engine has it, until letGo: the reporter stays in its
+// step, as one the scheduler has not run again, while the engine and the
+// producer go on. held is closed once it holds.
+func (r *recorder) holdAfterNext(kind string) *heldDelivery {
+	h := &heldDelivery{kind: kind, held: make(chan struct{}), release: make(chan struct{})}
+	r.mu.Lock()
+	r.hold = h
+	r.mu.Unlock()
+	return h
+}
+
+// letGo lets the held reporter go on, once: a test calls it in a cleanup
+// too.
+func (h *heldDelivery) letGo() { h.once.Do(func() { close(h.release) }) }
+
+// wait is the delivery's hold, for h nil none.
+func (h *heldDelivery) wait() {
+	if h == nil {
+		return
+	}
+	close(h.held)
+	<-h.release
+}
+
+// openedSinks is the sinks the backend has noted opened.
+func (r *recorder) openedSinks() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.opened
 }
 
 func newRecorder() *recorder { return &recorder{changed: make(chan struct{})} }
@@ -429,62 +476,79 @@ type recEvents struct {
 	next engine.Events
 }
 
-func (v *recEvents) add(e event) {
+// add records e, and returns the hold its delivery takes once the engine
+// has it (holdAfterNext), or nil.
+func (v *recEvents) add(e event) *heldDelivery {
 	panics := false
+	var h *heldDelivery
 	v.r.note(func() {
 		v.r.evs = append(v.r.evs, e)
 		if v.r.panicOn != nil && v.r.panicOn(e) {
 			v.r.panicOn, panics = nil, true
 		}
+		if v.r.hold != nil && v.r.hold.kind == e.kind {
+			h, v.r.hold = v.r.hold, nil
+			h.opened = v.r.opened
+		}
 	})
 	if panics {
 		panic(panicValue)
 	}
+	return h
 }
 
 func (v *recEvents) Prepared(s engine.SessionID, o engine.OccurrenceID, j engine.Join) {
-	v.add(event{kind: "prepared", s: s, o: o, join: j})
+	h := v.add(event{kind: "prepared", s: s, o: o, join: j})
 	v.next.Prepared(s, o, j)
+	h.wait()
 }
 
 func (v *recEvents) Refused(s engine.SessionID, o engine.OccurrenceID, why engine.Unplayable) {
-	v.add(event{kind: "refused", s: s, o: o, why: why})
+	h := v.add(event{kind: "refused", s: s, o: o, why: why})
 	v.next.Refused(s, o, why)
+	h.wait()
 }
 
 func (v *recEvents) Submitted(s engine.SessionID, o engine.OccurrenceID) {
-	v.add(event{kind: "submitted", s: s, o: o})
+	h := v.add(event{kind: "submitted", s: s, o: o})
 	v.next.Submitted(s, o)
+	h.wait()
 }
 
 func (v *recEvents) Audible(s engine.SessionID, o engine.OccurrenceID) {
-	v.add(event{kind: "audible", s: s, o: o})
+	h := v.add(event{kind: "audible", s: s, o: o})
 	v.next.Audible(s, o)
+	h.wait()
 }
 
 func (v *recEvents) Position(s engine.SessionID, p engine.Position) {
-	v.add(event{kind: "position", s: s, o: p.Occurrence, pos: p})
+	h := v.add(event{kind: "position", s: s, o: p.Occurrence, pos: p})
 	v.next.Position(s, p)
+	h.wait()
 }
 
 func (v *recEvents) Fault(s engine.SessionID, f engine.Fault) {
-	v.add(event{kind: "fault", s: s, o: f.Occurrence, fault: f})
+	h := v.add(event{kind: "fault", s: s, o: f.Occurrence, fault: f})
 	v.next.Fault(s, f)
+	h.wait()
 }
 
 func (v *recEvents) Finished(s engine.SessionID) {
-	v.add(event{kind: "finished", s: s})
+	h := v.add(event{kind: "finished", s: s})
 	v.next.Finished(s)
+	h.wait()
 }
 
 func (v *recEvents) DeviceReleased(s engine.SessionID) {
-	v.add(event{kind: "device released", s: s})
+	h := v.add(event{kind: "device released", s: s})
 	v.next.DeviceReleased(s)
+	h.wait()
 }
 
 func (v *recEvents) Released(s engine.SessionID) {
-	v.add(event{kind: "released", s: s})
+	h := v.add(event{kind: "released", s: s})
 	v.next.Released(s)
+	h.wait()
 }
 
 // Details records what the backend reported of o's content, beside the
@@ -682,6 +746,9 @@ func newRig(t *testing.T, opts ...func(*rigOptions)) *rig {
 		Notify: func(n playback.Note) {
 			if o.notify != nil {
 				o.notify(n)
+			}
+			if n.Kind == playback.NoteOpened {
+				r.rec.note(func() { r.rec.opened++ })
 			}
 			select {
 			case r.notes <- n:
