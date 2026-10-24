@@ -22,12 +22,6 @@ const (
 	volumeNameGUID = 0x1
 )
 
-// errLinkNotResolved is the cause, inside an *fs.PathError, of ResolveLinks's
-// answer for a path that is there, leads to a directory, and still ends at a
-// link after every way of resolving it: answering that link as resolved is
-// what made a walk of it see one entry.
-var errLinkNotResolved = errors.New("links to a directory that could not be resolved to a path")
-
 // resolveLinks is ResolveLinks on Windows: an absolute path is named by the
 // handle it opens to, so every symbolic link, junction and mounted folder in
 // it is followed; what cannot be named that way gets EvalSymlinks's answer
