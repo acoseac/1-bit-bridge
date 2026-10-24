@@ -60920,6 +60920,35 @@ file put back from git after it; every one went red:
 - The restore takes bridge.yaml's turn whenever its caller gives the bytes
   it read, a snapshot without bridge.yaml included, since its targets come
   from that read either way.
+- The first two rounds' checks named this host's VPN tunnel by its
+  address, in this public file; they name it by its interface now, as the
+  log names this host's other addresses by placeholder.
+
+### Checks of the third round
+
+Through the build lock, on ff07d2f9's code (the commits after it change
+only this log): `make fmt` rewrote nothing (Go 1.27.3, `GOTOOLCHAIN=local`)
+and `make vet` was clean; `make test` passed 74 packages under the race
+detector, `cmd/bridge` (617 s), `internal/admin` (747 s), `internal/backup`
+(33 s), `internal/atomicwrite` (12 s), `internal/config` (11 s) and
+`internal/fsutil` (3 s) among them, and failed one, `internal/handshakelog`'s
+`TestAProbeOfASpecificBoundIPIsNotLogged`, whose dial to this host's address
+on the VPN tunnel times out as in the first two rounds. `make build-all`
+built the six targets, and `make docs-check` passed. `go test -race
+-count=1` passed `internal/config` (10 s), `internal/fsutil` (3 s),
+`internal/backup` (32 s) and `cmd/bridge` (563 s); `internal/admin` ran
+past `go test`'s default bound of ten minutes for one test binary, the test
+running then having run for a second (the package's length under the race
+detector, not a hang), and passed when run again alone with the Makefile's
+`-timeout 30m` (678 s). `GOOS=windows go vet ./...` and `GOOS=linux go vet
+./...` were clean. The Windows halves (`internal/fsutil/parent_windows.go`,
+`internal/config/nolock_other.go`, and the sharing and access answers
+`internal/atomicwrite/read_windows.go` retries) are compiled and vetted
+here; running them is CI's Windows leg, and the read retry's tests reach
+its seam on every platform. Rules: the config-lifecycle.md and cli-serve.md
+lines, given to the orchestrator as OLD and NEW pairs against 42cca59c;
+their long forms are in `ops/History-rules-config-lifecycle.md` and
+`ops/History-rules-cli-serve.md`. player.md is unchanged.
 
 ## 2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader
 
