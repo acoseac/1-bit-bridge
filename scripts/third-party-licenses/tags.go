@@ -304,15 +304,57 @@ var buildCommand = regexp.MustCompile(`(?i)(?:^|[\s=(&;|!])` +
 
 var buildCommandSeparators = strings.NewReplacer("\"", " ", "'", " ", "`", " ", ",", " ", "[", " ", "]", " ")
 
-// The verb/package branch deliberately ignores executable spelling. Flag values
-// may span several normalized tokens (quoted paths, templates, argv lists).
+// The verb/package branch deliberately ignores executable spelling: a verb
+// followed by a package pattern is a site whatever runs it. Flag values may
+// span several normalized tokens (quoted paths, templates, argv lists).
 // Ambiguity, including non-Go build/install commands, requires explicit review.
-var buildVerbPackage = regexp.MustCompile(`(?:^|[\s=(&;|!])(?:build|install|run|test|vet)\s+` +
+// buildVerbAt is anchored at the verb; verbPackageSite finds the verbs.
+var buildVerbAt = regexp.MustCompile(`^(?:build|install|run|test|vet)\s+` +
 	`(?:-\S+(?:[ \t]+[^\s;|&]+)*?[ \t]+)*` +
 	`(?:\.|\.[/\\][^\s;|&]*|all|std|[^\s;|&]+/\.\.\.|github\.com/acoseac/1-bit-bridge(?:/[^\s;|&]*)?)(?:$|[\s;)])`)
 
+// commandWords are the words a command follows: a verb after one, or at the
+// start of a line, after ;, &, |, ( or !, or after a VAR=value assignment, is
+// the command itself (the coreutils install, the shell's test), never an
+// argument of a Go executable, so its ./ path names no package.
+var commandWords = map[string]bool{"if": true, "then": true, "else": true, "elif": true, "do": true, "while": true,
+	"until": true, "sudo": true, "exec": true, "command": true, "env": true, "time": true, "nohup": true, "nice": true}
+
+var shellAssignment = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+
+// verbPackageSite reports whether line holds a Go verb, standing as an
+// argument (after the token that runs it), followed by its flags and a package
+// pattern.
+func verbPackageSite(line string) bool {
+	for i := 0; i < len(line); i++ {
+		if i > 0 && !strings.ContainsRune(" \t=(&;|!", rune(line[i-1])) {
+			continue
+		}
+		if buildVerbAt.MatchString(line[i:]) && !commandPosition(line[:i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// commandPosition reports whether a word that follows before stands where a
+// command does.
+func commandPosition(before string) bool {
+	before = strings.TrimRight(before, " \t")
+	if before == "" || strings.ContainsRune(";&|(!", rune(before[len(before)-1])) {
+		return true
+	}
+	fields := strings.Fields(before)
+	last := fields[len(fields)-1]
+	return commandWords[last] || shellAssignment.MatchString(last)
+}
+
+// A tool that drives the go command is a site wherever it is named: dlv's
+// subcommand may follow its flags (dlv --headless debug), and golangci-lint
+// is reached through its GitHub action (golangci/golangci-lint-action) too.
 var buildDrivingTool = regexp.MustCompile(`(?i)(?:^|[\s=(&;|!])(?:[^\s;|&()]+[/\\])?` +
-	`(?:(?:gotestsum|staticcheck)(?:\.exe)?\b|golangci-lint(?:\.exe)?\s+run\b|dlv(?:\.exe)?\s+(?:debug|test|exec)\b)`)
+	`(?:(?:gotestsum|staticcheck|golangci-lint)(?:\.exe)?\b|` +
+	`dlv(?:\.exe)?\s+(?:-\S+(?:\s+[^-\s][^\s;|&]*)?\s+)*(?:debug|test|exec)\b)`)
 
 func isBuildCommand(line string) bool {
 	// Each branch requires a literal word that normalization cannot create.
@@ -332,7 +374,7 @@ func isBuildCommand(line string) bool {
 	}
 	hasExecutable := strings.Contains(lower, "go") || strings.ContainsAny(line, "$%")
 	match := buildCommandSeparators.Replace(line)
-	return hasVerb && (buildVerbPackage.MatchString(match) || hasExecutable && buildCommand.MatchString(match)) || hasTool && buildDrivingTool.MatchString(match)
+	return hasVerb && (verbPackageSite(match) || hasExecutable && buildCommand.MatchString(match)) || hasTool && buildDrivingTool.MatchString(match)
 }
 
 func checkBuildSites(root, tags string) error {
