@@ -61509,6 +61509,33 @@ The Windows half has no control here: its tests cannot run on this host.
   repointed)…"), a restore's `configChangedError` and its
   `partialRestoreError`.
 
+### Checks of the fourth round
+
+Through the build lock, on 162180ee (its code d3a58c41's): `make fmt`
+rewrote nothing (Go 1.27.3, `GOTOOLCHAIN=local`), `make vet` was clean,
+`make docs-check` passed, and `make build-all` built the six targets, its
+`check-build-tags` OK once a build output a `go build` of `cmd/bridge` had
+left at the worktree's root in the third round was removed (an ignored
+file, which the census read as one to review). `GOOS=windows` and
+`GOOS=linux` `go vet ./...`, with the Makefile's tags, were clean. `go test
+-race -count=1 -timeout 45m` passed `internal/config` (16 s),
+`internal/fsutil` (5 s), `internal/atomicwrite` (12 s), `internal/backup`
+(58 s), `internal/admin` (817 s) and `cmd/bridge` (669 s), and each of the
+round's new tests passed `-race -count=10`. `make test` passed 74 packages,
+`cmd/bridge` (809 s) and `internal/admin` (959 s) among them, and failed
+two the branch does not touch: `internal/handshakelog`'s
+`TestAProbeOfASpecificBoundIPIsNotLogged`, as in the first three rounds,
+and `scripts/third-party-licenses` (merged from main with B500), whose
+eleven tests read the Go toolchain's LICENSE at `$(go env GOROOT)/LICENSE`,
+which this host's Go, Homebrew's bottle of 1.27.3, keeps beside its
+GOROOT rather than in it ("Go toolchain LICENSE: open …: no such file or
+directory"); nothing in `scripts/`, `go.mod` or `go.sum` changed since the
+merge. The Windows tests are compiled and vetted here, for a Windows host
+to run. Rules: the config-lifecycle.md and cli-serve.md lines, given to the
+orchestrator as OLD and NEW pairs against 24a4c4ad; their long forms are in
+`ops/History-rules-config-lifecycle.md` and `ops/History-rules-cli-serve.md`.
+player.md is unchanged.
+
 ## 2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader
 
 `config.ReadPlayerUUIDFile` is the UUID parser for `<dataDir>/player-uuid`
