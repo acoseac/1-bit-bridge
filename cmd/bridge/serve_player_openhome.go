@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"github.com/acoseac/1-bit-bridge/internal/player/lan"
 	"github.com/acoseac/1-bit-bridge/internal/player/openhome"
 	"github.com/acoseac/1-bit-bridge/internal/version"
@@ -29,8 +30,8 @@ type openhomeWiring struct {
 // startOpenHome starts the player's OpenHome surface, which the plan asks
 // for (output.player.openhome) and the player runs: id is the player's
 // identity, its UDN; the room and the port are the boot snapshot's. It
-// listens on each LAN address and advertises nothing (PR 5a2b registers
-// it with SSDP). A surface that cannot start fails alone: the player runs
+// listens on each LAN address and registers bound endpoints with serve's
+// shared SSDP subsystem. A surface that cannot start fails alone: the player runs
 // without it, and says so; an address that cannot be bound fails that
 // address alone, said by the surface.
 func (p *bridgePlayer) startOpenHome(id string, w servePlayerWiring) {
@@ -40,7 +41,13 @@ func (p *bridgePlayer) startOpenHome(id string, w servePlayerWiring) {
 	if addresses == nil {
 		addresses = func() (lan.Inventory, error) { return lan.Look(hostLAN) }
 	}
+	p.mu.Lock()
+	if p.closing {
+		p.mu.Unlock()
+		return
+	}
 	s, err := openhome.Start(openhome.Config{
+		SSDP:      w.SSDP,
 		Device:    openhome.Device{UUID: id, Room: player.Room, ModelNumber: version.ServerVersion},
 		Port:      player.EffectiveOpenHomePort(),
 		Addresses: addresses,
@@ -50,11 +57,13 @@ func (p *bridgePlayer) startOpenHome(id string, w servePlayerWiring) {
 		Seams:     o.Seams,
 	})
 	if err != nil {
+		p.mu.Unlock()
 		playerLog.Warn("player: the OpenHome surface did not start; the player runs without it", "err", err)
 		return
 	}
 	p.surface = s
-	playerLog.Info("player: the OpenHome surface is on, on each LAN address, and advertised nowhere yet", "port", player.EffectiveOpenHomePort())
+	p.mu.Unlock()
+	playerLog.Info("player: the OpenHome surface is on; discovery follows its bound LAN addresses", "port", player.EffectiveOpenHomePort())
 	if o.Started != nil {
 		o.Started(s)
 	}
@@ -65,7 +74,43 @@ func (p *bridgePlayer) startOpenHome(id string, w servePlayerWiring) {
 // and what is still open is closed, so no request reaches the engine as it
 // stops (openhome.Surface.Stop, bounded by its limits).
 func (p *bridgePlayer) stopOpenHome() {
-	if p.surface != nil {
-		p.surface.Stop()
+	p.mu.Lock()
+	s, ctx := p.surface, p.discoveryStop
+	p.mu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if s != nil {
+		s.StopContext(ctx)
+	}
+}
+
+// refuseOpenHome freezes a surface already running and any start still in
+// progress, before another SSDP owner or the shared subsystem is retired.
+func (p *bridgePlayer) refuseOpenHome(ctx context.Context) {
+	p.mu.Lock()
+	p.closing = true
+	if p.discoveryStop == nil {
+		p.discoveryStop = ctx
+	} else if deadline, ok := ctx.Deadline(); ok {
+		if old, had := p.discoveryStop.Deadline(); !had || deadline.Before(old) {
+			p.discoveryStop = ctx
+		}
+	}
+	s := p.surface
+	p.mu.Unlock()
+	if s != nil {
+		s.Refuse(ctx)
+	}
+}
+
+// withdrawOpenHome joins discovery alone; HTTP and the engine have their own bounds.
+func (p *bridgePlayer) withdrawOpenHome(ctx context.Context) {
+	p.refuseOpenHome(ctx)
+	p.mu.Lock()
+	s := p.surface
+	p.mu.Unlock()
+	if s != nil {
+		s.Withdraw(ctx)
 	}
 }

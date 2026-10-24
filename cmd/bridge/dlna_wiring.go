@@ -62,7 +62,18 @@ type dlnaWiring struct {
 	// shares its listeners on port 1900, where a second set would take
 	// unicast M-SEARCHes meant for the first.
 	// TestServeGivesTheMediaServerItsOneSSDPSubsystem reads the wiring.
-	SSDP *dlna.SSDPSubsystem
+	SSDP    *dlna.SSDPSubsystem
+	Network *dlnaBootNetwork
+}
+
+// dlnaBootNetwork supplies a boot test's interface inventory and held HTTP
+// listener. Nil retains the production pick, gather and bind paths.
+type dlnaBootNetwork struct {
+	Pick       func() (*net.Interface, error)
+	Gather     func(bool, int, *slog.Logger) []dlna.AdvertiseEndpoint
+	Interfaces func() ([]net.Interface, error)
+	Addrs      func(*net.Interface) ([]net.Addr, error)
+	Listener   net.Listener
 }
 
 // startDLNAIfEnabled is the single chokepoint for DLNA wiring. Routes
@@ -123,7 +134,11 @@ func startDLNAIfEnabled(ctx context.Context, w dlnaWiring) (lc *dlnaLifecycle, e
 	// picker on LAN-only interfaces (since 2026-09-28: until then
 	// Tailscale's fd7a:115c:a1e0::/48 address admitted its interface
 	// anyway).
-	iface, ifaceErr := dlna.PickLANEligibleInterface(dlna.EligibilityOpts{})
+	pick := func() (*net.Interface, error) { return dlna.PickLANEligibleInterface(dlna.EligibilityOpts{}) }
+	if w.Network != nil && w.Network.Pick != nil {
+		pick = w.Network.Pick
+	}
+	iface, ifaceErr := pick()
 	if ifaceErr != nil {
 		dlnaLog.Warn("DLNA disabled — no LAN-eligible interface", slog.String("err", ifaceErr.Error()))
 		return &dlnaLifecycle{log: dlnaLog}, false
@@ -139,13 +154,21 @@ func startDLNAIfEnabled(ctx context.Context, w dlnaWiring) (lc *dlnaLifecycle, e
 	// on PR #328). Gathered BEFORE the fallback ServerURL so an IPv6-only
 	// FIRST interface can't false-bail startup when a LATER interface has
 	// a usable IPv4 (CodeRabbit on PR #328).
-	endpoints := gatherAdvertiseEndpoints(bindWildcard, port, dlnaLog)
+	gather := gatherAdvertiseEndpoints
+	if w.Network != nil && w.Network.Gather != nil {
+		gather = w.Network.Gather
+	}
+	endpoints := gather(bindWildcard, port, dlnaLog)
+	addrs := (*net.Interface).Addrs
+	if w.Network != nil && w.Network.Addrs != nil {
+		addrs = w.Network.Addrs
+	}
 
 	// Resolve the fallback ServerURL renderers dial for /dlna/file/ + SOAP
 	// control. Prefer a gathered endpoint's IP (any interface with IPv4),
 	// then a pinned bind host, then the picked interface's IPv4 as a last
 	// resort. DLNA disables only when NONE yield a dialable host.
-	serverURL, urlErr := deriveServerURL(rawHost, bindWildcard, port, endpoints, iface, (*net.Interface).Addrs)
+	serverURL, urlErr := deriveServerURL(rawHost, bindWildcard, port, endpoints, iface, addrs)
 	if urlErr != nil {
 		dlnaLog.Warn("DLNA disabled — couldn't resolve a dialable server URL",
 			slog.String("iface", iface.Name),
@@ -185,7 +208,16 @@ func startDLNAIfEnabled(ctx context.Context, w dlnaWiring) (lc *dlnaLifecycle, e
 		}
 	}
 
+	var listener net.Listener
+	var interfaces func() ([]net.Interface, error)
+	if w.Network != nil {
+		listener = w.Network.Listener
+		interfaces = w.Network.Interfaces
+	}
 	srv, err := dlna.NewServer(dlna.ServerConfig{
+		Listener:           listener,
+		Interfaces:         interfaces,
+		InterfaceAddresses: addrs,
 		Library:            library,
 		UPnPRouting:        dlnaUPnPRouting,
 		UPnPProxy:          dlnaUPnPProxy,
@@ -242,9 +274,10 @@ func startDLNAIfEnabled(ctx context.Context, w dlnaWiring) (lc *dlnaLifecycle, e
 // ctx is serve's: its cancellation stops the subsystem's readers and every
 // device's announcements and answers; the subsystem's Close, which runServe
 // defers, withdraws them. It is the only place cmd/bridge builds one.
-func newServeSSDP(ctx context.Context, logger *slog.Logger) *dlna.SSDPSubsystem {
+func newServeSSDP(ctx context.Context, logger *slog.Logger, network *dlna.SSDPNetwork) *dlna.SSDPSubsystem {
 	return dlna.NewSSDPSubsystem(ctx, dlna.SSDPSubsystemOptions{
-		Logger: logger.With(slog.String("component", "dlna")),
+		Logger:  logger.With(slog.String("component", "dlna")),
+		Network: network,
 	})
 }
 

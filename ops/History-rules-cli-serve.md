@@ -1310,8 +1310,10 @@ mentions across the four `ops/audit-*.md` files.
   snapshot without the file, taken before B505 or of a box whose player
   had none, leaves the box's identity as it is and makes none. `Restore`
   reads the copy before its loop, by the player's own rule
-  (`config.ReadPlayerUUIDFile`: one lowercase UUID, white space after it
-  and nothing else, 128 bytes at most), for the console account's
+  (`config.ReadPlayerUUIDFile`: a file, opened without waiting, so a
+  named pipe, a directory or a device in its place fails the restore at
+  once, before any file is written, B525; one lowercase UUID, white space
+  after it and nothing else, 128 bytes at most), for the console account's
   reason: the manifest lists the file last, and a check at its turn would
   come after every other file was replaced. A copy that does not hold one
   UUID fails the restore before any file is written; the refusal names
@@ -1332,7 +1334,9 @@ mentions across the four `ops/audit-*.md` files.
   cancellation and file-access errors refuse backup without it,
   and only missing files omit the mark.
   An identity replacement also durably removes the destination queue before
-  writing the UUID; restoring the same UUID keeps its queue; no UUID leaves the live reservation
+  writing the UUID; restoring the same UUID keeps its queue, and a box
+  whose own `player-uuid` the rule cannot read, a named pipe there included
+  (read at once, B525), keeps none; no UUID leaves the live reservation
   alone too. The full arithmetic, assumptions, exhaustion remedies, crash
   order and release coupling are in History-rules-player.md under the
   restored-identity rule. Two boxes running one identity at once are
@@ -1345,6 +1349,8 @@ mentions across the four `ops/audit-*.md` files.
   `TestSnapshotSkipsAPlayerUUIDTheBoxDoesNotHave`,
   `TestRestoreOfASnapshotWithoutThePlayerUUIDLeavesTheIdentityAlone`,
   `TestRestoreRefusesAPlayerUUIDThatIsNotOneUUIDBeforeWritingAnyFile`,
+  `TestRestoreRefusesANamedPipeForThePlayerUUIDAtOnce`,
+  `TestRestoreOverANamedPipeAtTheBoxsPlayerUUIDDoesNotWait`,
   `TestSnapshotAndRestoreAsRootKeepThePlayerUUID`,
   `TestBuildBackupSourcesNamesThePlayerUUID`.)
 
@@ -1998,20 +2004,69 @@ mentions across the four `ops/audit-*.md` files.
   PROCESS writes files: the Tailscale auto-pilot's `tailscale cert` was the one
   unjoined writer in `runServe` until #997 (the `cmd/bridge` section below).
 
+## Shared Source discovery lifecycle (B470 PR 5a2b)
+
+Serve constructs its sole socket-free SSDP subsystem before starting either
+owner. `servePlayerWiring.SSDP` and `dlnaWiring.SSDP` carry the same instance.
+No device means no SSDP sockets or workers; DLNA off does not gate Source.
+The Source's eligible interfaces are independent of the MediaServer's picker.
+Its initial incarnation zero shares a listener when the interface overlaps.
+The boot snapshot still gates the surface; live player-disable only withholds
+output. Failed/refused/disabled players publish no Source.
+
+The full lifecycle closure is deferred after the UPnP upstream stop, so it
+runs first under LIFO: MediaServer withdrawal and HTTP stop must precede the
+resolver teardown its routed file handler depends on. A player-only early
+fallback refuses/stops the player if that closure was never registered.
+The full closure refuses Source first, withdraws the MediaServer
+and Source, then calls shared Close, all with the same absolute five-second
+SSDP deadline. Cancellation of serve's parent ends normal sends but leaves
+byebye possible. HTTP receives separate deadlines afterward; the player's
+surface stops before its engine/backend, before the watcher/store/lock. The
+player's outer stop adds DiscoveryStopBound independently of Limits.StopBound.
+Publication of a new surface and refusal serialize under the player lock;
+no late start can escape a stop that found no surface yet.
+
+The instance `serveOpts.ssdpNetwork` seam reaches the real subsystem, while
+`dlnaNetwork` supplies synthetic pick/gather/inventory and a held HTTP listener.
+Defaults retain production selection and host transport. The new serve tests
+use in-memory HTTP, fake SSDP, an empty hotplug observation and the real engine;
+no audio tree read or PCM open is needed. Tests count memberships and packets
+for off/Source-only/MediaServer-only/both/disjoint/failed/refused configurations,
+strict capability failure beside MediaServer, repeat serve generations with
+stable identity, and park withdrawal to observe both 503 and a live engine.
+
+### Round 2: teardown order and non-vacuous observers
+
+`TestServeStopsDLNABeforeItsUPnPResolver` records the MediaServer's actual
+byebye write, its HTTP listener's close, and the upstream stop boundary through
+an instance seam. Before the fix it recorded UPnP first. Moving the full
+teardown to DLNA's slot makes the order byebye, HTTP close, UPnP stop, while
+retaining refusal, both withdrawals, shared Close, DLNA HTTP stop and player
+stop inside the closure. The early fallback runs only if the full closure did
+not run.
+
+The 50 ms blocked-write case in
+`TestServeDiscoverySharesOneShortShutdownDeadline` checks bounded release,
+not equality of budgets: four fresh 50 ms budgets fit under its 500 ms bar.
+Its `same-absolute-deadline` case now records SetWriteDeadline's value at
+every byebye write, requires both Source and MediaServer, and compares those
+absolute deadlines. Fresh per-owner contexts fail that assertion.
+`TestServeDiscoveryRestartsWithStableIdentity` waits for alive packets,
+requires a nonempty Source identity in each generation and checks every
+byebye USN. Replacing Source's NT or corrupting byebye USNs fails it.
+`TestServeSharesDiscoveryAcrossItsEligibleDevices` checks the start channel
+and bind history after serve stops; eligible cases prove a real bind is seen.
+A control injects real late surfaces through the upstream-stop seam for the
+disabled/refused/failed cases: all three fail the settled-state assertions,
+where the old immediate nonblocking check observed nothing.
 ## Player identity reset (B470 PR 5a0, round 3)
-
 - **Giving up a player's identity resets its UUID, reservation and queue together, with the service stopped.** **A reset gives up for good the identity it removes and any the box ran earlier (one an earlier restore replaced on this box), unless, after this box last ran it, another box took it over from this box, by restoring a snapshot this box made, and has not reset it since, running or powered off. Their values were held only by the floor the reset drops. No snapshot of a given-up identity taken before the reset, on this box or another, may restore its player identity again: remove `player-uuid` and `player-ids.json` from every such snapshot, or delete those snapshots. Any other box that still holds a given-up identity's files (one powered off since a migration, say) must be reset too before it runs again. An identity another box took over from this box by a restore, after this box last ran it, and has not reset since, is not given up: that box's floor holds it, and its snapshots stay valid. Never repair a reservation from a snapshot or delete it while keeping the identity.** Backup uses `playerResetAdvice` only for a live reservation refused as data; restore uses it for an unreadable live reservation or an exhausted box mark: stop the service and remove `player-uuid`, `player-ids.json` and `player-queue.json` together. The next start makes a new identity with no queue, a new device to controllers. If the reset answers a refused restore, remove `player-uuid` and `player-ids.json` from a copy of that snapshot, then restore that copy. Only the restore refusal carries this copy-and-restore step; the backup refusal does not. B524 will enforce this operator rule before 5a ships. A snapshot reservation is never a valid repair, even when stamped with the box's UUID; it can be older than the floor already used. Do not delete the reservation while keeping the identity. The reason, v1 queue reproduction and tests are in History-rules-player.md under the giving-up-identity rule.
-
 ## Live backup reads across rename (B470 PR 5a0, Round 9)
-
 - **A live backup retries Windows sharing/access failures while opening files replaced by rename, with atomicwrite’s bounded, cancellable backoff; persistent errors still refuse it.** **Only a reservation refused as data gets backup’s player reset advice; cancellation, an expired context and file-access errors never do. Exhausted sharing/access retries say the file was busy and to retry the backup.** `Snapshot` reads a reservation while the engine may refill it asynchronously (`ahead` → `reserveWrite` → `writeReservation` → `WriteBytesDurable`). The writer closes its staged descriptor before rename; neither it nor `readLimited` leaks a reservation handle. A rename or a Windows scan-on-close handle can nevertheless conflict with the reader's open. Closing the test's engine before backup would remove the live-backup case, not fix it. Production currently refuses the player on Windows because directory fsync is unavailable; the Windows fixture supplies that barrier, but backup also reads files other live writers replace there.
-
   `atomicwrite.ReadWithRetryCtx` shares `RenameWithRetry`'s five-attempt schedule (0, 50, 100, 200, 400 ms; 750 ms total sleeping). Only Windows `ERROR_SHARING_VIOLATION` and `ERROR_ACCESS_DENIED`, including wrapped errors, retry. Other platforms and other errors return at once. The context interrupts backoff; exhausted errors keep their cause. Snapshot uses it for the live reservation, the freshly renamed UUID copy it rereads to stamp that reservation, and source stats/opens, including player UUID, tokens, config and account files. The copy still streams and commits once; no queue is backed up. A persistent unreadable reservation refuses backup, and only absence omits its mark.
-
   `TestSnapshotRetriesAHandleHeldAcrossRename` uses the existing rename seam to hold a real Windows staged-file handle that permits rename and denies read. It verifies the unprotected open returns the sharing violation, then releases the handle only when the snapshot's context is consulted for backoff: no timer can release it before the failed read. Reservation, source UUID, captured UUID and tokens cases require captured bytes and both floors. A read error on the captured UUID refuses backup after retries rather than silently omitting the mark; a malformed UUID still keeps the existing no-mark policy. `TestSnapshotRefusesAReservationStillHeldOrCancelled` keeps the handle through exhaustion or cancellation and requires the failed snapshot to be removed. `TestReadRetryWindowsErrors` checks both Windows codes; `TestReadRetryBoundsAndCancellation` checks the shared schedule and cancellation on every platform; `TestReadRetryKeepsPermanentErrors` keeps absence and malformed data immediate.
-
 ### Round 10 — reset advice requires invalid reservation data
-
 A shutdown cancellation in the Windows backoff used to reach the same advice
 as malformed reservation data. An exhausted sharing retry also recommended
 permanently giving up the identity, though neither established damaged data.
@@ -2025,7 +2080,6 @@ Only absence omits the mark; every other error still refuses and removes the
 partial snapshot. `ERROR_ACCESS_DENIED` remains retryable: replacement or
 delete-pending files can return it during the swap, with the same bounded
 schedule as sharing violations.
-
 `TestSnapshotRefusesAReservationStillHeldOrCancelled` now checks held,
 cancelled and expired cases for no reset advice, the file and cause, and
 busy/retry wording on exhaustion. `TestUnreadableReservationAdviceResetsIdentityAndQueue`
@@ -2035,3 +2089,25 @@ refusal policy is unchanged. `TestReadRetryWindowsErrors` requires the busy
 marker on exhaustion of either code and its absence on cancellation/expiry.
 Windows tests are cross-compiled here; their native execution remains a
 Windows-runner check, distinct from portable race-test results.
+
+## Backup source opens (B525 round 2, 2026-10-24)
+
+- **Every backup source copied by `copyFileCtx` opens through
+  `fsutil.OpenAsFile` inside the sharing-violation retry: a named pipe is
+  refused at once, naming the file without its value, and the partial
+  snapshot is removed. Don't replace this with a plain open; keep missing
+  optional sources skipped.** The live capture of `player-uuid` did not
+  use `ReadPlayerUUIDFile`: it copied bytes first and parsed the snapshot
+  copy afterward. Round 1 guarded only the parser's open. The copy now
+  refuses a FIFO at the live identity, tokens, certificate, key, YAML,
+  console account or Atlas state through the same open inside
+  `atomicwrite.ReadWithRetryCtx`. The opened descriptor decides its kind;
+  the earlier stat remains only the optional-source skip. The existing
+  snapshot cleanup removes the partial directory on refusal. Restore uses
+  the same helper for ordinary snapshot files and still round-trips them.
+  `TestSnapshotRefusesALivePlayerUUIDPipeAtOnce` and
+  `TestSnapshotRefusesALiveTokensPipeAtOnce` pin prompt refusal, the
+  `*fs.PathError` around `*fsutil.NotAFileError`, the exact value-free
+  message, the unchanged source pipe and the absence of a snapshot directory.
+  With the plain open restored both tests fail after five seconds; the
+  fixture then releases and joins the blocked snapshot.
