@@ -114,6 +114,20 @@ func (v *playEvents) Audible(s engine.SessionID, o engine.OccurrenceID) {
 	v.next.Audible(s, o)
 }
 
+// Details prints what the backend reported of an occurrence's content, its
+// decoder's length and format, and passes it on to an engine that takes it
+// (engine.DetailsEvents, B470 PR 5a3).
+func (v *playEvents) Details(s engine.SessionID, o engine.OccurrenceID, d engine.Details) {
+	length := "no length declared"
+	if d.Frames > 0 && d.RateHz > 0 {
+		length = fmt.Sprintf("%.3f s (%d frames)", float64(d.Frames)/float64(d.RateHz), d.Frames)
+	}
+	v.r.out.line("session %d: %s is %s, %d Hz, %d bits, %d channels, %s", s, v.r.name(o), d.Codec, d.RateHz, d.Bits, d.Channels, length)
+	if de, ok := v.next.(engine.DetailsEvents); ok {
+		de.Details(s, o, d)
+	}
+}
+
 func (v *playEvents) Position(s engine.SessionID, p engine.Position) {
 	v.mu.Lock()
 	print := p.Measured.Sub(v.printed) >= time.Second || p.Measured.Before(v.printed)

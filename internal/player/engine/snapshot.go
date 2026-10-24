@@ -140,6 +140,30 @@ type Audible struct {
 	Entry      uint32
 }
 
+// Track is the occurrence heard (B470 PR 5a3): its entry's reference and
+// metadata as they were when the occurrence was handed off, kept with the
+// occurrence rather than looked up in the queue, and what the backend
+// reported of its content, when it reported it.
+type Track struct {
+	Occurrence OccurrenceID
+	Entry      uint32
+	Ref        Reference
+	Meta       []byte
+	// Details is the backend's report of the content (Details), and
+	// HasDetails whether it made one.
+	Details    Details
+	HasDetails bool
+}
+
+// details is what is known of t's content: none for no track, or for one
+// whose backend reported nothing.
+func (t *Track) details() (Details, bool) {
+	if t == nil || !t.HasDetails {
+		return Details{}, false
+	}
+	return t.Details, true
+}
+
 // OutputReport is the output's availability as an adapter reports it
 // (4b2 adapts 4a2's hotplug watcher to it).
 type OutputReport struct {
@@ -233,6 +257,9 @@ type Snapshot struct {
 	token       uint32
 	selected    uint32
 	audible     Audible
+	track       *Track // never written to once published
+	tracks      uint64
+	detailsN    uint64
 	pos         Position
 	repeat      bool
 	shuffle     bool
@@ -271,6 +298,32 @@ func (s *Snapshot) Selected() uint32 { return s.selected }
 // Audible is the occurrence being heard, and false when none is: after a
 // command, until the new session reports.
 func (s *Snapshot) Audible() (Audible, bool) { return s.audible, s.audible.Occurrence != 0 }
+
+// Track is the occurrence heard, and false when none is, as Audible says
+// (B470 PR 5a3): its entry's reference and metadata as the occurrence was
+// handed off, never looked up in the queue (an entry deleted while it is
+// heard stops being heard in the same step, so the track never names
+// another's), and what the backend reported of its content (Details).
+func (s *Snapshot) Track() (Track, bool) {
+	if s.track == nil {
+		return Track{}, false
+	}
+	t := *s.track
+	t.Meta = slices.Clone(t.Meta)
+	return t, true
+}
+
+// TrackCount is the occurrences heard since the engine started: one more
+// each time an occurrence becomes audible (OpenHome Info:1's and Time:1's
+// TrackCount). It never moves the generation.
+func (s *Snapshot) TrackCount() uint64 { return s.tracks }
+
+// DetailsCount is the changes of what is known of the content heard since
+// the engine started: one more each time the Details of the track heard
+// differ from the last ones, nothing heard, or a track whose backend
+// reported nothing, counting as no Details (OpenHome Info:1's
+// DetailsCount). It never moves the generation.
+func (s *Snapshot) DetailsCount() uint64 { return s.detailsN }
 
 // Position is the content of the audible occurrence played, as the backend
 // last measured it; it stays where it was when playback pauses or stops.
