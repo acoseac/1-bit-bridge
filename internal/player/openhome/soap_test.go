@@ -31,7 +31,7 @@ func knownFault(code int, description string) bool {
 	if d, ok := faultDescription[code]; ok && d == description {
 		return true
 	}
-	for _, f := range []faultReply{faultIDNotFound, faultSourceIndex} {
+	for _, f := range []faultReply{faultIDNotFound, faultSourceNotFound} {
 		if f.code == code && f.description == description {
 			return true
 		}

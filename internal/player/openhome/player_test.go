@@ -211,6 +211,10 @@ type testPlayer struct {
 	// shut ends the engine's Run, leaving any held release held; stop ends
 	// it, lets every release go and waits for Run.
 	shut, stop func()
+	// uuid is the engine's identity, and queue and reserve name its files in
+	// dir: playerUUID and the harness's names (reserve "" for the engine's
+	// default), or serve's beside player-uuid (servesPlayer).
+	uuid, queue, reserve string
 }
 
 // newTestPlayer starts an engine. The engine keeps its IDs and tokens
@@ -232,7 +236,7 @@ func tryTestPlayer(tb testing.TB) (*testPlayer, error) {
 	if runtime.GOOS == "windows" {
 		return nil, errors.New("the engine keeps its IDs durable with a directory fsync, which Windows has not: the player runs on Linux")
 	}
-	p := &testPlayer{tb: tb, dir: filepath.Join(tb.TempDir(), "data")}
+	p := &testPlayer{tb: tb, dir: filepath.Join(tb.TempDir(), "data"), uuid: playerUUID, queue: "queue.json"}
 	if err := os.Mkdir(p.dir, 0o700); err != nil {
 		tb.Fatal(err)
 	}
@@ -247,7 +251,11 @@ func tryTestPlayer(tb testing.TB) (*testPlayer, error) {
 func (p *testPlayer) start() error {
 	p.tb.Helper()
 	p.be = newFakeBackend()
-	eng, err := engine.New(engine.Config{PlayerUUID: playerUUID, Backend: p.be, QueuePath: filepath.Join(p.dir, "queue.json"), DataDir: p.dir})
+	reserve := ""
+	if p.reserve != "" {
+		reserve = filepath.Join(p.dir, p.reserve)
+	}
+	eng, err := engine.New(engine.Config{PlayerUUID: p.uuid, Backend: p.be, QueuePath: filepath.Join(p.dir, p.queue), ReservePath: reserve, DataDir: p.dir})
 	if err != nil {
 		return err
 	}
@@ -354,14 +362,15 @@ func (p *testPlayer) handler(room string) *handler {
 }
 
 // result is a control request's answer, as a controller reads it: the
-// HTTP status, a fault's UPnP code, and a response's out-arguments, by
-// name and in order.
+// HTTP status, a fault's UPnP code and description, and a response's
+// out-arguments, by name and in order.
 type result struct {
-	status int
-	fault  int
-	names  []string
-	values map[string]string
-	raw    []byte
+	status      int
+	fault       int
+	description string
+	names       []string
+	values      map[string]string
+	raw         []byte
 }
 
 // invoke sends service s's action with args (name, value, name, value…),
@@ -406,7 +415,7 @@ func readResult(tb testing.TB, res *http.Response, s *service, action string) re
 		if !knownFault(f.Fault.Detail.Code, f.Fault.Detail.Description) {
 			tb.Errorf("%s#%s: fault %d, %q, which this layer does not define", s.name, action, f.Fault.Detail.Code, f.Fault.Detail.Description)
 		}
-		out.fault = f.Fault.Detail.Code
+		out.fault, out.description = f.Fault.Detail.Code, f.Fault.Detail.Description
 		return out
 	case http.StatusOK:
 	default:

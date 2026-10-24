@@ -99,7 +99,8 @@ func strictly(t *testing.T, what, doc string, v any) {
 // name holds it: what XML cannot carry dropped, the rest escaped and read
 // back) or the default name; never in standby; one source, Playlist, at
 // index 0, in OpenHome's SourceList form; Source(0) that source and any
-// other index fault 800; the optional services Info and Time.
+// other index fault 801, "Source not found", ohPipeline's answer for an
+// index Product does not hold; the optional services Info and Time.
 func TestTheProductReadsAreTheSourcesOwn(t *testing.T) {
 	p := newTestPlayer(t)
 	for _, tc := range []struct{ room, want string }{{"Study", "Study"}, {"", DefaultName}, {"Kitchen\x01 & <Bar> \"1\"", "Kitchen & <Bar> \"1\""}} {
@@ -138,8 +139,8 @@ func TestTheProductReadsAreTheSourcesOwn(t *testing.T) {
 		t.Errorf("Source(0): %v", got)
 	}
 	for _, index := range []string{"1", "4294967295"} {
-		if r := invoke(t, h, product, "Source", "Index", index); r.fault != 800 {
-			t.Errorf("Source(%s): %d, fault %d, want fault 800", index, r.status, r.fault)
+		if r := invoke(t, h, product, "Source", "Index", index); r.fault != 801 || r.description != "Source not found" {
+			t.Errorf("Source(%s): %d, fault %d %q, want fault 801 \"Source not found\"", index, r.status, r.fault, r.description)
 		}
 	}
 }
@@ -305,8 +306,8 @@ func TestIdReadAndReadListFollowTheQueue(t *testing.T) {
 	if got := read(t, h, playlist, "Id")["Value"]; got != "0" {
 		t.Errorf("an empty queue: Id %s, want 0", got)
 	}
-	if r := invoke(t, h, playlist, "Read", "Id", "1"); r.fault != 800 {
-		t.Errorf("an empty queue: Read: %d, fault %d, want 800", r.status, r.fault)
+	if r := invoke(t, h, playlist, "Read", "Id", "1"); r.fault != 800 || r.description != "Id not found" {
+		t.Errorf("an empty queue: Read: %d, fault %d %q, want 800 \"Id not found\"", r.status, r.fault, r.description)
 	}
 	if list := entries(t, h, "1 2 3"); len(list.Entries) != 0 {
 		t.Errorf("an empty queue: ReadList %v, want no entry", idsOf(list))
@@ -336,6 +337,37 @@ func TestIdReadAndReadListFollowTheQueue(t *testing.T) {
 	}
 	if got := idsOf(entries(t, h, u(c)+" "+u(a))); !slices.Equal(got, []string{u(a)}) {
 		t.Errorf("ReadList with a deleted entry: %v, want only %d", got, a)
+	}
+}
+
+// TestIdFollowsADeletedSelection pins Id when the selection is deleted
+// (Codex on round 1): the engine selects the entry that followed it, so Id
+// reads that entry's ID, and with nothing after it nothing is selected, so
+// Id reads 0 though entries are still queued. ohPipeline re-points a
+// stopped source the same way, at the track after the deleted current one
+// or at none after the last (SourcePlaylist.cpp, lines 443-456). 1-bit,
+// which reads 0 as the queue emptied elsewhere, seeks off the row playing
+// before it deletes that row.
+func TestIdFollowsADeletedSelection(t *testing.T) {
+	p := newTestPlayer(t)
+	h := p.handler("")
+	a, b, c := p.add("a", nil), p.add("b", nil), p.add("c", nil)
+	must(t, "play b", p.eng.PlayID(bg, b))
+	must(t, "stop", p.eng.Stop(bg))
+	p.waitSnap("stopped at b", func(s *engine.Snapshot) bool { return s.State() == engine.Stopped && s.Selected() == b })
+	if got := read(t, h, playlist, "Id")["Value"]; got != u(b) {
+		t.Fatalf("stopped at b: Id %s, want %d", got, b)
+	}
+	must(t, "delete b", p.eng.Delete(bg, b))
+	if got := read(t, h, playlist, "Id")["Value"]; got != u(c) {
+		t.Errorf("a deleted selection in the middle: Id %s, want the entry after it, %d", got, c)
+	}
+	must(t, "delete c", p.eng.Delete(bg, c))
+	if got := read(t, h, playlist, "Id")["Value"]; got != "0" {
+		t.Errorf("a deleted selection with nothing after it: Id %s, want 0", got)
+	}
+	if got := decodeIDArray(t, read(t, h, playlist, "IdArray")["Array"]); !slices.Equal(got, []uint32{a}) {
+		t.Errorf("after the last selection's deletion: the queue %v, want %d still in it", got, a)
 	}
 }
 
@@ -389,6 +421,44 @@ func TestReadListIsBounded(t *testing.T) {
 	}
 	if got := entries(t, h, u(big)+" "+u(a)); len(got.Entries) != 2 || len(got.Entries[0].Metadata) != engine.MaxMetadataBytes {
 		t.Errorf("an entry of the most metadata the engine takes: %d entries", len(got.Entries))
+	}
+}
+
+// TestTheTrackListBoundIsItsWholeDocument pins where ReadList's TrackList
+// bound falls: the document, its closing tag counted, may hold maxTrackList
+// bytes and no more (Codex's construction on round 1, over the engine's own
+// IDs): twenty-five copies of an entry of 64 KiB of ampersands, each escaped
+// to five bytes, then one entry whose metadata fills the document to the
+// byte. Exactly at the bound it is answered, whole; a byte past it, and
+// twelve, where the document before its closing tag is at the bound, are
+// fault 605.
+func TestTheTrackListBoundIsItsWholeDocument(t *testing.T) {
+	p := newTestPlayer(t)
+	h := p.handler("")
+	a := p.add("a", bytes.Repeat([]byte("&"), engine.MaxMetadataBytes))
+	entry := func(id string, uri string, escaped int) int {
+		return len("<Entry><Id>"+id+"</Id><Uri>"+uri+"</Uri><Metadata>") + escaped + len("</Metadata></Entry>")
+	}
+	const copies = 25
+	ids := strings.Repeat(u(a)+" ", copies)
+	head := len("<TrackList>") + copies*entry(u(a), "a", 5*engine.MaxMetadataBytes) + len("</TrackList>")
+	for _, over := range []int{0, 1, 12} {
+		// The last entry's ID is the next the engine hands out, as long as a's.
+		rest := maxTrackList + over - head - entry(u(a), "b", 0)
+		meta := append(bytes.Repeat([]byte("&"), rest/5), bytes.Repeat([]byte("x"), rest%5)...)
+		b := p.add("b", meta)
+		if len(u(b)) != len(u(a)) {
+			t.Fatalf("the construction needs IDs of one length: %d and %d", a, b)
+		}
+		r := invoke(t, h, playlist, "ReadList", "IdList", ids+u(b))
+		switch {
+		case over == 0 && r.status != http.StatusOK:
+			t.Errorf("a TrackList of exactly %d bytes: %d, fault %d, want it answered", maxTrackList, r.status, r.fault)
+		case over == 0 && len(r.values["TrackList"]) != maxTrackList:
+			t.Errorf("a TrackList at the bound: %d bytes, want %d", len(r.values["TrackList"]), maxTrackList)
+		case over > 0 && r.fault != 605:
+			t.Errorf("a TrackList of %d bytes, its closing tag counted, past %d: %d, fault %d, want 605", maxTrackList+over, maxTrackList, r.status, r.fault)
+		}
 	}
 }
 

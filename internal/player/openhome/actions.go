@@ -39,37 +39,42 @@ const (
 	// player's queue, OpenHome's Playlist source.
 	sourceName = "Playlist"
 	// attributes are the optional services the Source carries, as Product's
-	// Attributes lists them, separated by spaces.
+	// Attributes lists them, separated by spaces (ohPipeline's Product.cpp,
+	// lines 209-215).
 	attributes = "Info Time"
 	// timeMax bounds what Time reports (TrackCount, Duration, Seconds) and
 	// Info's Duration: 1-bit refuses a Time value past it.
 	timeMax = 10_000_000
-	// maxTrackList bounds ReadList's TrackList document, before the reply
-	// escapes it once more: every entry the queue holds (MaxEntries) answers
-	// within it with metadata of a few KiB an entry; past it, a controller
-	// asks for fewer IDs (fault 605).
+	// maxTrackList bounds ReadList's TrackList document, its closing tag
+	// (trackListEnd) counted, before the reply escapes it once more: every
+	// entry the queue holds (MaxEntries) answers within it with metadata of a
+	// few KiB an entry; past it, a controller asks for fewer IDs (fault 605).
 	maxTrackList = 8 << 20
+	// trackListEnd closes ReadList's TrackList.
+	trackListEnd = "</TrackList>"
 )
 
-// OpenHome's codes the reads answer, one service's each. Neither source
-// was read from this session (no network, and no copy of OpenHome's player
-// on the host): the codes are the engine's mapping (Playlist's) and
-// ohPipeline's OpenHome/Av/ProviderProduct.cpp as recalled (Product's), an
-// owner check.
+// OpenHome's codes the reads answer, one service's each, as OpenHome's
+// reference player, ohPipeline, answers them (read at master c1047a8dc801,
+// 2026-10-21; the files cited by line here and in the rules file).
 var (
 	// faultIDNotFound is Playlist's Read of an ID the queue does not hold:
-	// the engine's ReasonIDNotFound, OpenHome's 800 (engine.ReasonIDNotFound;
-	// ohPipeline's ProviderPlaylist, "Id not found").
+	// the engine's ReasonIDNotFound, OpenHome's 800, "Id not found"
+	// (ProviderPlaylist.cpp, lines 23-24, answered by Read at 336-337).
 	faultIDNotFound = faultReply{code: 800, description: "Id not found"}
-	// faultSourceIndex is Product's Source of an index past the one source
-	// (ohPipeline's ProviderProduct, 800, "Source index out of range").
-	faultSourceIndex = faultReply{code: 800, description: "Source index out of range"}
+	// faultSourceNotFound is Product's Source of an index past the one
+	// source: FaultCode::kSourceNotFound, 801, "Source not found"
+	// (FaultCode.cpp, line 21), which ProviderProduct.cpp answers at line 284
+	// when Product's GetSourceDetails throws AvSourceNotFound for an index
+	// past its last source (Product.cpp, lines 505-510).
+	faultSourceNotFound = faultReply{code: 801, description: "Source not found"}
 )
 
 // sourceXML is Product's SourceXml: the one source, in the form OpenHome's
-// reference player writes its SourceList (ohPipeline's Product: each
-// source's Name, Type, Visible as true or false, and SystemName), each value
-// escaped, the whole escaped once more as the argument's value.
+// reference player writes its SourceList (ohPipeline's Product.cpp, lines
+// 299-317: each source's Name, Type, Visible as true or false, and
+// SystemName, in that order, each value escaped at 319-329), the whole
+// escaped once more as the argument's value.
 var sourceXML = "<SourceList><Source><Name>" + escape(sourceName) + "</Name><Type>" + escape(sourceName) +
 	"</Type><Visible>true</Visible><SystemName>" + escape(sourceName) + "</SystemName></Source></SourceList>"
 
@@ -272,10 +277,10 @@ func ui4Of(text string) uint32 {
 }
 
 // productSource is Product's Source(Index): the one source, at index 0;
-// any other index is fault 800.
+// any other index is fault 801 (faultSourceNotFound).
 func productSource(r readRequest) ([][]byte, *faultReply) {
 	if ui4Of(r.args[0]) != 0 {
-		return nil, &faultSourceIndex
+		return nil, &faultSourceNotFound
 	}
 	return texts(sourceName, sourceName, sourceName, boolean(true)), nil
 }
@@ -337,13 +342,16 @@ func idList(text string) ([]uint32, bool) {
 
 // playlistReadList is Playlist's ReadList(IdList): a TrackList with an
 // Entry (Id, Uri, Metadata) for each ID the queue holds, in the order
-// asked, as often as asked, an ID it does not hold left out, as OpenHome's
-// reference player answers (ohPipeline's ProviderPlaylist skips an ID it
-// does not find). A token that is not a ui4 is fault 402; more IDs than the
-// engine reads at once (engine.MaxReadList, Snapshot.ReadList's bound) or a
-// TrackList past maxTrackList is fault 605. The entries are read one at a
-// time, each held only while it is escaped, so the bound holds before the
-// next copy is taken.
+// asked, as often as asked, an ID it does not hold left out, its Uri and
+// Metadata escaped once into the TrackList, as OpenHome's reference player
+// answers (ohPipeline's ProviderPlaylist.cpp, lines 349-397: an ID it does
+// not find skipped at 389, Converter::ToXmlEscaped at 382 and 385). A token
+// that is not a ui4 is fault 402, where ohPipeline skips it (391): an IdList
+// that is not one is no request a controller meant. More IDs than the engine
+// reads at once (engine.MaxReadList, Snapshot.ReadList's bound) or a
+// TrackList past maxTrackList, its closing tag counted, is fault 605. The
+// entries are read one at a time, each held only while it is escaped, so the
+// bound holds before the next copy is taken.
 func playlistReadList(r readRequest) ([][]byte, *faultReply) {
 	ids, ok := idList(r.args[0])
 	if !ok {
@@ -364,11 +372,11 @@ func playlistReadList(r readRequest) ([][]byte, *faultReply) {
 		b.WriteString("</Uri><Metadata>")
 		escapeTo(&b, e.Meta)
 		b.WriteString("</Metadata></Entry>")
-		if b.Len() > maxTrackList {
+		if b.Len()+len(trackListEnd) > maxTrackList {
 			return nil, &faultReply{code: errStringTooLong}
 		}
 	}
-	b.WriteString("</TrackList>")
+	b.WriteString(trackListEnd)
 	return [][]byte{b.Bytes()}, nil
 }
 

@@ -20,7 +20,7 @@ import (
 // SOAPAction, Content-Type and body: it never panics; it answers only a
 // status the table names, or a response; a 500 is a SOAP fault,
 // MustUnderstand or a UPnP fault with a code this layer defines (401, 402,
-// 501, 602, 605, or a read's OpenHome 800) and its description; a 200 is
+// 501, 602, 605, or a read's OpenHome 800 or 801) and its description; a 200 is
 // the response of the action SOAPAction names, which parses as XML, carries
 // that action's out-arguments, and whose values that are XML themselves
 // (SourceXml, ReadList's TrackList) parse too; and every reply carries the

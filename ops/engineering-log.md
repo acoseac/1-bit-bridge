@@ -60319,8 +60319,10 @@ Linux-only tests ran.
   prints the Details and forwards them.
 - `CLAUDE.md`: the rows of the four packages. The rules text (openhome.md's
   lines, player.md's, their long forms, and the lines of both and of
-  `ops/History-rules-openhome.md` that said every action is 602) goes to the
-  orchestrator in the worker's report: this session cannot edit `.claude/`.
+  `ops/History-rules-openhome.md` that said every action is 602) went to the
+  orchestrator in the worker's report, since the session could not edit
+  `.claude/`, and the orchestrator applied it as 0a1e7781 (three of its blocks
+  by hand: their directives sat in the sections' bodies).
 
 ### The values, action by action
 
@@ -60353,20 +60355,23 @@ Product: Manufacturer (`1-bit`, `https://1-bit.app`), Model (`1-bit Bridge
 Player`, the description's modelDescription), Product (Room the friendly
 name), Standby 0, SourceCount 1, SourceXml
 `<SourceList><Source><Name>Playlist</Name><Type>Playlist</Type><Visible>true</Visible><SystemName>Playlist</SystemName></Source></SourceList>`,
-SourceIndex 0, Source(0) and 800 past it, Attributes `Info Time`,
-SourceXmlChangeCount 0. Booleans are 1 and 0 (UDA 1.1, §2.5).
+SourceIndex 0, Source(0) and 801 past it (800 until round 2), Attributes
+`Info Time`, SourceXmlChangeCount 0. Booleans are 1 and 0 (UDA 1.1, §2.5).
 
 Sources. UDA 1.1, §3.2.2, for 501 ("Action Failed: may be returned if the
 current state of the service prevents invoking that action") and 605
 ("String Argument Too Long"), the same in 1.0. The engine's own mapping for
 Playlist's 800. OpenHome's reference player, ohPipeline (what the brief calls
-ohMediaPlayer), for the SourceList form with SystemName, the 800 of Source past
-the last index ("Source index out of range", `ProviderProduct`), ReadList
-leaving out an ID it does not find (`ProviderPlaylist::ReadList`) and the
-space-joined Attributes: recalled, not read. This session had no network
-(fetches denied) and no copy of ohPipeline or ohMediaPlayer on the host, so
-each is an owner check, beside 1-bit's parser taking SystemName beside the
-Type, Name and Visible it requires.
+ohMediaPlayer), for the rest, read in round 2 at master c1047a8dc801
+(2026-10-21) from the files the orchestrator fetched (round 1 had them from
+memory: no network, no copy on the host): Read's 800 "Id not found"
+(`ProviderPlaylist.cpp` lines 23-24), Source's 801 "Source not found" past the
+last index (`FaultCode.cpp` line 21, answered at `ProviderProduct.cpp` 284;
+round 1's 800 "Source index out of range" was wrong), ReadList leaving out an
+ID it does not find (`ProviderPlaylist.cpp` 389), the SourceList form with
+SystemName (`Product.cpp` 299-317) and the space-joined Attributes
+(`Product.cpp` 209-215). 1-bit's parser taking SystemName beside the Type,
+Name and Visible it requires stays an owner check.
 
 ### No engine, one fault
 
@@ -60389,13 +60394,13 @@ The brief asked for at most `MaxReadList` IDs and what past it: 605, String
 Argument Too Long. Measuring the reply raised a second bound: an entry's
 metadata is escaped twice (up to nine bytes a byte), and 1000 IDs naming one
 64 KiB entry, or the queue's 16 MiB of metadata, built replies of hundreds of
-MiB. The TrackList document is held to 8 MiB (605 past it; a full queue of
-ordinary DIDL-Lite answers within it), the entries read one at a time
-(`Snapshot.Read`) so no copy of the next is taken past the bound
-(`Snapshot.ReadList` copies every entry first), and the reply is escaped as it
-is written after a counting pass, so no second copy of the TrackList exists.
-Truncating was rejected: a controller that read a short TrackList would take
-the IDs left out for deleted.
+MiB. The TrackList document is held to 8 MiB, its closing tag counted since
+round 2 (605 past it; a full queue of ordinary DIDL-Lite answers within it),
+the entries read one at a time (`Snapshot.Read`) so no copy of the next is
+taken past the bound (`Snapshot.ReadList` copies every entry first), and the
+reply is escaped as it is written after a counting pass, so no second copy of
+the TrackList exists. Truncating was rejected: a controller that read a short
+TrackList would take the IDs left out for deleted.
 
 ### The escaping
 
@@ -60447,11 +60452,26 @@ minimization, none failing.
   the four engine tests red (no track heard, waits on the details).
 - The backend unchanged: every golden "details reported 0 times", and the
   engine's track without details.
-- Every action still 602 (`act` with the read table cut): the fourteen read
-  tests written then and the Time row red; the classification and the writes
-  table green. (`TestADeletedAudibleEntryIsNoLongerHeard` and the restart's
-  zeros came after, against the implementation; control E9 below is the
-  deleted entry's.)
+- Every action still 602 (`act` answering every read as a write: `read =
+  nil`), sixteen tests run, fourteen red: the thirteen read tests of
+  `actions_test.go` written then (`TestTheProductReadsAreTheSourcesOwn`,
+  `TestTransportStateIsTheEnginesTransport`,
+  `TestIdReadAndReadListFollowTheQueue`,
+  `TestReadListTakesWhiteSpaceAndRefusesWhatIsNoID`, `TestReadListIsBounded`,
+  `TestIdArrayIsTheTokenAndTheIDsInQueueOrder`,
+  `TestTracksMaxRepeatShuffleAndProtocolInfo`,
+  `TestTimeAndInfoReadTheTrackHeard`, `TestTheTimeIsHeldForOneBit`,
+  `TestNoEngineIsOneFaultForEveryRead`, its two cases then,
+  `TestEveryValueRoundTripsThroughItsEscaping`, `TestOneBitsCastStartAndPoll`
+  and `TestTheSurfaceAnswersReadsFromItsEngine`) and `TestTheSOAPTableRowByRow`
+  (its row "9: Time's Time, a read with no engine"); the classification
+  (`TestTheReadsAndTheWritesAreEveryAction`) and the writes table
+  (`TestEveryValidActionIsAnswered602`) green. Round 1's record said "the
+  fourteen read tests and the Time row", counting the SOAP table's row twice
+  (Claude's review of round 1). `TestADeletedAudibleEntryIsNoLongerHeard`, the
+  restart's zeros in `TestTimeAndInfoReadTheTrackHeard`, and the shutting-down
+  and panic cases of `TestNoEngineIsOneFaultForEveryRead` came after, against
+  the implementation (controls E9, O2 and O2b below).
 - Serve without `Config.Engine`: "IdArray: 500", "TransportState: 500".
 
 ### Negative controls
@@ -60520,8 +60540,8 @@ snapshot differs only in a race), and the track's copy (E3).
 - Info's counters are held to a ui4, Time's to 10,000,000.
 - The brief's `upnpErrorDescription` is internal/dlna's; the surface's table
   is `faultDescription`, and an OpenHome code carries its service's own
-  description (800 is Playlist's "Id not found" and Product's "Source index
-  out of range").
+  description (Playlist's 800 "Id not found"; Product's 801 "Source not
+  found", which round 1 had as 800 "Source index out of range").
 - The length and format reach the engine through `DetailsEvents`, an optional
   interface, so no implementer of `Events` changes.
 
@@ -60530,9 +60550,10 @@ snapshot differs only in a race), and the track's copy (E3).
 `/tmp` is tmpfs on legion0, which the engine refuses (`ErrVolatile`), so the
 player's serve tests and the engine-backed tests fail or skip there by
 default; every run here set `TMPDIR` to a directory on the worktree's disk.
-The host has no git identity, and `git config`, `git -c` and
-`git write-tree` need an approval this headless run cannot give, so no commit
-was made: the work is staged, and the report carries the commits to make.
+The host had no git identity, and `git config`, `git -c` and
+`git write-tree` need an approval the headless run could not give, so the
+session made no commit: it left the work staged, and the orchestrator
+committed it as 89812eed.
 
 ### Gate
 
@@ -60554,6 +60575,6 @@ test, left to its own entry.
 
 Every write (5a4), URI confinement (5a4), GENA (501), Volume, seek, shuffle,
 DSD and DoP, `/v1/outputs` (5b), iOS, and the opt-in's default (off until 5a4
-and the owner's dogfood). Owner checks: ohPipeline's codes and forms above;
-1-bit's parser with SystemName; a cast start from 1-bit to the bridge, which
-needs 5a4's inserts.
+and the owner's dogfood). Owner checks: 1-bit's parser with SystemName; a
+cast start from 1-bit to the bridge, which needs 5a4's inserts (ohPipeline's
+codes and forms were read in round 2, below).
