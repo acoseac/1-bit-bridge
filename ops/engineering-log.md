@@ -148,13 +148,13 @@ replaced on this box. Restoring an untouched pre-reset snapshot could then
 revive one of those UUIDs below IDs or tokens already issued after the snapshot.
 The random restore jump cannot cover an arbitrarily old dropped floor.
 
-`bridge output player reset` now records every known covered identity in
+`bridge reset-player` now records every known covered identity in
 `player-history.json` before removing queue, UUID and reservation, in that
 order. Each removal is durable before the next; a pending marker makes the
 command resumable even after the final removal; serve refuses to start the
 player while that marker is set, before it creates an identity. It uses restore's exclusive
 data-dir lock and both admin-port guards around confirmation. `--yes` skips
-only the prompt. No identity and no pending reset is a no-op.
+only the prompt. Only an absent UUID, reservation and queue with no pending reset is a no-op.
 
 Restore preflights live and snapshot histories before every write. Either
 list giving up the incoming UUID refuses with the snapshot-copy remedy,
@@ -221,6 +221,31 @@ merged named-pipe restore test still expected identity replacement, although
 B524 preflight already refused an unreadable live identity at the starting
 commit. Its expectation now pins that refusal and unchanged pipe, queue,
 reservation and history; the nonblocking reader is unchanged.
+
+
+**Round 3.** The reset is now `bridge reset-player [--config X] [--yes]`, a
+top-level sibling of backup and restore, with no output-player alias. That
+namespace reports MPD; the reset gives up the bridge's own OpenHome identity.
+Usage tests pin dispatch, rejection of the old spelling, top-level discovery,
+and dac bind's config and first enabled-player UUID writes.
+
+A UUID missing beside a reservation or v1 queue was a reset no-op; the next
+serve minted a UUID and loaded the old queue. Reset now treats only all three
+files absent with no pending marker as empty. It records the canonical
+reservation UUID even without player-uuid, and uses the same pending history
+and queue-first durable removal sequence. CheckPlayerStart refuses those
+orphaned files before minting, with the supported reset remedy.
+
+Malformed UUID files now have a supported recovery: canonical UUIDs in the
+reader's bounded window and the reservation are recorded as given up, and the
+malformed file is removed by os.Remove with the same barriers. Access failures
+and non-files still refuse, naming read-access repair or moving the non-file
+aside, respectively. Two UUIDs, garbage, bounded recovery, a failed unlink
+barrier, permissions and named pipes are pinned. Round-two behavior failed
+the new orphan, damaged-UUID and command-placement regressions before the
+fixes; the round-three report holds those logs, all 44 prior mutation controls,
+the additional controls, native and cross-platform vet, race gates and exact
+socket restrictions. No commit or push is part of this round.
 
 ## File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)
 

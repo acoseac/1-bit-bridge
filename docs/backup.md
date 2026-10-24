@@ -31,14 +31,24 @@ then makes those marks durable before restoring any identity file. An
 interrupted restore may leave a raised reservation; retrying raises it again.
 A missing reservation is omitted. An unreadable reservation stops backup or
 restore. If read access to `player-ids.json` failed, restore read access first,
-then rerun `bridge output player reset`. A malformed reservation or an exhausted
+then rerun `bridge reset-player`. A malformed reservation or an exhausted
 destination mark also requires a player reset: **with the service stopped, run
-`bridge output player reset --config /path/to/bridge.yaml`**. It asks for
+`bridge reset-player --config /path/to/bridge.yaml`**. It asks for
 confirmation; `--yes` skips only that prompt. The command records the
 identities given up before removing the queue, UUID and reservation, in that
 order. Rerun the command to finish an interrupted reset; the player will not
 start until the reset finishes, including after a reboot. The next
 start makes a new identity with no queue, a new device to controllers.
+
+The reset command also handles a missing UUID with a leftover reservation or
+queue, and a damaged UUID file. It records canonical UUIDs recoverable within
+the identity reader's size limit before removing the files. The player refuses
+to start beside orphaned reservation or queue files until reset completes.
+If `player-uuid` cannot be read, restore read access first; if that path is a
+non-file, move that entry aside first. Then rerun `bridge reset-player`.
+This command resets the bridge's own player; `bridge output player` remains
+the read-only MPD report.
+
 **A snapshot's `player-ids.json` is never a valid repair**. Do not delete the
 reservation while keeping the player identity.
 A reset gives up for good the identity it removes and any the box ran
@@ -103,7 +113,7 @@ history before installing an identity; it never replaces the live list with
 an older one. Do not delete or edit the history to bypass a refusal. A history
 that is corrupt, unreadable or not a file refuses backup, restore or reset.
 For a reservation that cannot be read, restore read access to `player-ids.json`
-and then rerun `bridge output player reset`; a malformed reservation can be
+and then rerun `bridge reset-player`; a malformed reservation can be
 reset, retaining every UUID it still names.
 
 Restore refuses a UUID given up in either history before writing any file.
