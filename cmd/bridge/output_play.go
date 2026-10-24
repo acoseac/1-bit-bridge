@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/acoseac/1-bit-bridge/internal/alsa"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -408,8 +410,15 @@ func (r *playRun) run(ctx context.Context, dir string, dev config.PlayerDevice) 
 		return 1
 	}
 	r.be = be
+	// The hardware harness has no controller identity. Name this run's
+	// reservation without minting a player-uuid in its scratch state dir.
+	id, err := uuid.NewRandom()
+	if err != nil {
+		fmt.Fprintf(r.stderr, "output play: %v\n", err)
+		return 1
+	}
 	eng, err := engine.New(engine.Config{Backend: playTee{playBackend: be, r: r}, QueuePath: filepath.Join(dir, "queue.json"),
-		DataDir: dir, PauseRelease: r.release, DSD: r.dsd})
+		PlayerUUID: id.String(), DataDir: dir, PauseRelease: r.release, DSD: r.dsd})
 	if err != nil {
 		fmt.Fprintf(r.stderr, "output play: %v\n", err)
 		return 1

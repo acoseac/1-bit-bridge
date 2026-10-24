@@ -27,7 +27,7 @@ import (
 // keeps its own elsewhere, and never here.
 const (
 	playerQueueFile       = "player-queue.json"
-	playerReservationFile = "player-ids.json"
+	playerReservationFile = engine.ReservationFileName
 )
 
 // The bounds of the player's stop: the engine's shutdown, its release
@@ -393,6 +393,7 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 		return refuse("the player's backend: " + err.Error())
 	}
 	ecfg := engine.Config{
+		PlayerUUID:   id,
 		Backend:      be,
 		QueuePath:    filepath.Join(cfg.DataDir, playerQueueFile),
 		ReservePath:  filepath.Join(cfg.DataDir, playerReservationFile),

@@ -109,7 +109,7 @@ const (
 
 // start loads what the files hold and publishes the first snapshot. It
 // runs in New: the owner has not started, so it may wait on the files.
-func (e *Engine) start() {
+func (e *Engine) start() error {
 	o := &e.o
 	o.q = emptyQueue
 	o.sessions = map[SessionID]*session{}
@@ -136,9 +136,12 @@ func (e *Engine) start() {
 		}
 	}
 	o.res.ids, o.res.tokens = startCounter(idsBase), startCounter(tokBase)
+	if o.res.ids.exhausted() || o.res.tokens.exhausted() {
+		return refuse("start", ReasonIDsExhausted, "the player's ID or token space is exhausted; no value can be handed out without reuse")
+	}
 	if o.res.stuckReserve == "" {
 		ids, tokens := o.res.ids.target(), o.res.tokens.target()
-		if err := e.reserve(encodeReserve(ids, tokens)); err != nil {
+		if err := e.reserve(ids, tokens); err != nil {
 			o.res.failed = err
 			e.log.Warn("player: the reservation of this run could not be written; inserts and the other edits that advance the token are refused until one is",
 				"path", e.cfg.ReservePath, "err", err)
@@ -159,6 +162,7 @@ func (e *Engine) start() {
 	o.state = Stopped
 	o.dirty = true
 	e.publishIfDirty()
+	return nil
 }
 
 // loadReserve reads the reservation file: none is a reservation of
@@ -174,7 +178,7 @@ func (e *Engine) loadReserve() reserveFile {
 		f, err = decodeReserve(data)
 	}
 	if err != nil {
-		if !e.moveAside("reservation file", path, err.Error()) {
+		if !e.moveAside("reservation file", path, err) {
 			e.o.res.stuckReserve = path
 		}
 		return reserveFile{}
@@ -194,9 +198,14 @@ func (e *Engine) loadQueue() (*queueFile, []entry) {
 	var entries []entry
 	if err == nil {
 		f, entries, err = decodeQueue(data)
+		// Version 1 was written only on development boxes; its entries
+		// belong to the running identity. Version 2 names its writer.
+		if err == nil && f.Version == 2 && f.UUID != e.cfg.PlayerUUID {
+			err = refuse("load queue", ReasonQueueIdentity, "the queue belongs to another player identity")
+		}
 	}
 	if err != nil {
-		if !e.moveAside("queue file", path, err.Error()) {
+		if !e.moveAside("queue file", path, err) {
 			e.o.res.stuckQueue = path
 		}
 		return nil, nil
@@ -654,6 +663,7 @@ func (e *Engine) publishIfDirty() {
 func (e *Engine) payload() *payload {
 	o := &e.o
 	return &payload{
+		uuid:        e.cfg.PlayerUUID,
 		rev:         o.persist.Revision,
 		q:           o.q,
 		idsNext:     o.res.ids.next,

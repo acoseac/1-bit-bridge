@@ -204,6 +204,15 @@ var syncParentDir = platformBarrier()
 // `t.Parallel()`.
 var syncFile = (*os.File).Sync
 
+// SetSyncFileForTest replaces the staged-file barrier for a failure test.
+// Like SetSyncDirForTest it is process-global: do not use t.Parallel, and
+// restore it only after every writer using it has stopped.
+func SetSyncFileForTest(fn func(*os.File) error) (restore func()) {
+	prev := syncFile
+	syncFile = fn
+	return func() { syncFile = prev }
+}
+
 // syncDir is the strict writer's and the probe's directory barrier: the
 // fsync of a directory they opened themselves, so that its failure, and
 // only its failure, is ErrBarrierFailed. It is (*os.File).Sync where the
@@ -418,6 +427,11 @@ func RenameWithRetryCtx(ctx context.Context, src, dst string) error {
 // caller runs that in its own mode (commitDirEntry, or durableChain for
 // WriteBytesDurable).
 func renameRetry(ctx context.Context, src, dst string) error {
+	return retryIO(ctx, func() error { return renameFunc(src, dst) }, func(error) bool { return true })
+}
+
+// retryIO shares the bounded rename schedule with readers of renamed files.
+func retryIO(ctx context.Context, op func() error, retryable func(error) bool) error {
 	var err error
 	for _, d := range renameBackoff {
 		if d > 0 {
@@ -427,8 +441,8 @@ func renameRetry(ctx context.Context, src, dst string) error {
 			case <-time.After(d):
 			}
 		}
-		if err = renameFunc(src, dst); err == nil {
-			return nil
+		if err = op(); err == nil || !retryable(err) {
+			return err
 		}
 	}
 	return err

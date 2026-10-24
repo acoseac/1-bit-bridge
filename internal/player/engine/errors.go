@@ -52,6 +52,9 @@ const (
 	// ReasonReservation is an insert or another token-advancing edit whose
 	// ID or token could not be reserved durably first.
 	ReasonReservation Reason = "reservation_not_durable"
+	// ReasonQueueIdentity is a persisted queue from another player identity.
+	// Its entries are never loaded; the file is moved aside and logged once.
+	ReasonQueueIdentity Reason = "queue_identity_mismatch"
 	// ReasonFileStuck is an insert or another token-advancing edit while a
 	// bad queue or reservation file could not be moved aside: the engine
 	// writes no file it would overwrite until the operator moves it.

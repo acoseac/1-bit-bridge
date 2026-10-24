@@ -26,10 +26,12 @@ import (
 // out the running process. The other captured files (tokens.json,
 // cert/key, config, adminauth.json when the console has an account,
 // atlas-harvest.json when a harvest credential is stored, player-uuid
-// once the player has an identity) are read normally — a write race with
+// once the player has an identity, and its matching durable reservation)
+// are read normally — a write race with
 // serve is harmless for these because they're mutated rarely and
 // atomically (temp + rename). A restore brings the console account back
-// and signs its sessions out, and gives the player the identity it had.
+// and signs its sessions out, and gives the player the identity it had with
+// both reservation marks raised past the snapshot and live marks.
 func backupCmd(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -90,11 +92,12 @@ func backupCmd(args []string, stdout, stderr io.Writer) int {
 // The bridge serve process MUST be stopped before restore. Running
 // restore while serve is up would leave the SQLite WAL inconsistent
 // with the new main file, surface as silent corruption on next
-// query. The CLI surfaces this as a `--yes`-gated prompt rather
-// than enforcing a process check.
+// query. The CLI requires the exclusive data-dir lock throughout restore,
+// refusing even a lock error other than contention. `--yes` skips only the
+// confirmation, never the lock or the admin probe.
 //
 // It ALSO refuses outright when a bridge is answering on the admin port.
-// The prompt is advice; the probe is the enforcement, and the two are not
+// The prompt is advice; the lock and probe are enforcement, and they are not
 // interchangeable on the one command that renames a database over a
 // possibly-open one. (The docblock used to justify having no check with
 // "no PID file today" — false since cmd/bridge/pidfile.go landed;
@@ -140,6 +143,10 @@ func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	if refused {
 		return 1
 	}
+	if fallback {
+		fmt.Fprintln(stderr, "restore: the data directory's exclusive lock could not be taken; fix its permissions or use storage that supports locking, then restore again.")
+		return 1
+	}
 	if probeAdminBesideTheLock(fallback, cfg) && refuseIfBridgeMayBeRunning(ctx, cfg, "restore", stderr) {
 		return 1
 	}
@@ -171,7 +178,7 @@ func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	}
 
 	targets := buildRestoreTargets(cfg, resolvedCfgPath)
-	if err := backup.Restore(snapshotDir, targets); err != nil {
+	if err := backup.RestoreWithOptions(snapshotDir, targets, backup.RestoreOptions{Warn: func(s string) { fmt.Fprintln(stdout, s) }}); err != nil {
 		fmt.Fprintf(stderr, "restore: %v\n", err)
 		return 1
 	}

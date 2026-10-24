@@ -16,11 +16,12 @@ import (
 // The queue file's bounds and the writer's timing.
 const (
 	// queueVersion is the queue file's format.
-	queueVersion = 1
+	queueVersion = 2
 	// maxQueueFileBytes caps the queue file read at a start: the real
 	// encoding of a full queue (MaxEntries entries carrying
 	// MaxTotalMetadataBytes, base64 rounding up on each, references whose
-	// bytes JSON escapes) measures 22,595,456 bytes
+	// bytes JSON escapes) measured 22,595,456 bytes in version 1;
+	// version 2 adds 46 bytes for its UUID
 	// (TestAMaximumSizeQueueRoundTrips), and this leaves room above it.
 	maxQueueFileBytes = 24 << 20
 	// writeCoalesce is how long the writer waits after a change for the
@@ -43,6 +44,7 @@ const (
 // holds the transport state: a start is always stopped.
 type queueFile struct {
 	Version  int         `json:"version"`
+	UUID     string      `json:"uuid,omitempty"`
 	Revision uint64      `json:"revision"`
 	IDs      fileIDs     `json:"ids"`
 	Tokens   fileTokens  `json:"tokens"`
@@ -80,6 +82,7 @@ type fileEntry struct {
 // and immutable after: the queue it shares with the snapshots is never
 // written to.
 type payload struct {
+	uuid                 string
 	rev                  uint64
 	q                    *queue
 	idsNext, idsReserved uint64
@@ -93,6 +96,7 @@ type payload struct {
 func (p *payload) encode() ([]byte, error) {
 	f := queueFile{
 		Version:  queueVersion,
+		UUID:     p.uuid,
 		Revision: p.rev,
 		IDs:      fileIDs{Next: p.idsNext, Reserved: p.idsReserved},
 		Tokens:   fileTokens{Current: p.tokCurrent, Reserved: p.tokReserved},
@@ -151,8 +155,10 @@ func decodeQueue(data []byte) (*queueFile, []entry, error) {
 	// be written records values past it, and hands out nothing beyond it,
 	// so they are not checked against the reservation; every entry is.
 	switch {
-	case f.Version != queueVersion:
+	case f.Version != 1 && f.Version != queueVersion:
 		return nil, nil, fmt.Errorf("version %d, not %d", f.Version, queueVersion)
+	case f.Version == 2 && !validPlayerUUID(f.UUID) || f.Version == 1 && f.UUID != "":
+		return nil, nil, errors.New("queue does not name one lowercase UUID for its version")
 	case len(f.Entries) > MaxEntries:
 		return nil, nil, fmt.Errorf("%d entries, more than %d", len(f.Entries), MaxEntries)
 	case f.Shuffle:
@@ -230,7 +236,7 @@ func (e *Engine) readBounded(path string, limit int64) ([]byte, error) {
 // ENOTDIR, an I/O error), or maxAsideNames names all taken, is a move that
 // cannot be made. It reports false when the move was not made: the file
 // then stays where it is.
-func (e *Engine) moveAside(what, path, why string) bool {
+func (e *Engine) moveAside(what, path string, why error) bool {
 	stamp := e.clk.Now().UTC().Format("20060102T150405.000000000Z")
 	to := path + ".bad-" + stamp
 	for i := 1; ; i++ {
