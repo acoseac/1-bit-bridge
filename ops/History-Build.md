@@ -11,8 +11,8 @@
   rotation: one-target-per-night by day-of-year would give each target five minutes a
   MONTH. A crasher fails that matrix leg and uploads `testdata/fuzz/**` as an artifact —
   deliberately not auto-committed, since a corpus commit from CI is noise while a crasher
-  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. **52** targets across **fourteen** packages —
-  `internal/{manifest,fs,dlna,dlna/discovery,upnp,enrich,dupes,lyrics,upload,atlasharvest,handshakelog,alsa,mpd,mpd/conf}` —
+  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. **60** targets across **seventeen** packages —
+  `internal/{manifest,fs,dlna,dlna/discovery,upnp,enrich,dupes,lyrics,upload,atlasharvest,handshakelog,alsa,mpd,mpd/conf,player/decode,player/hotplug,player/openhome}` —
   and `atlasharvest`'s `FuzzMatchRelease` lives in
   `lyrics_test.go` rather than a `fuzz_*_test.go` file, so a census that
   greps only the latter undercounts. (This entry said 37 across nine until
@@ -27,7 +27,13 @@
   `internal/alsa` gained its five parser targets; by then the tree held 45 across eleven,
   since backlog B246 had added `FuzzPeerAddressSpansMatchThePattern` in
   `internal/handshakelog` and nobody counted it; 52 across fourteen later the same day, when
-  `internal/mpd` gained `FuzzParseReply` and `internal/mpd/conf` gained `FuzzParseConf`.) They cover
+  `internal/mpd` gained `FuzzParseReply` and `internal/mpd/conf` gained `FuzzParseConf`; and
+  52 until 2026-10-23, when B470 PR 5a2a added `FuzzControlRequest` in
+  `internal/player/openhome` and found the tree holding 59 across sixteen without it:
+  `internal/player/decode`'s four (`FuzzDSFOpen`, `FuzzDFFOpen`, `FuzzALACOpen`,
+  `FuzzALACCookie`), `internal/player/hotplug`'s `FuzzParseUevent`, `internal/alsa`'s
+  `FuzzPCMConfigValues` and `internal/mpd`'s `FuzzReadReplyMatchesParseReply` had joined
+  uncounted.) They cover
   the five untrusted-input surfaces: the audio extractors (whole-file + the pure
   chunk-body parsers + the SACD ISO reader), the LAN-facing UNAUTHENTICATED parsers (SSDP /
   SOAP / DIDL / device description), `fs.Resolver`, the web-upload path validation
@@ -36,9 +42,14 @@
   line (`internal/handshakelog`) and, since 2026-10-19, the `/proc/asound` parsers
   (`internal/alsa`), whose input is kernel text and, through `bridge output dac
   --proc-root`, a tree copied off another box, and the MPD configuration and reply parsers
-  (`internal/mpd`, `internal/mpd/conf`), whose input is a daemon's reply and an `mpd.conf`.
-  **Count them by file:name pair** to get 52 targets. A function-name-only
-  census (`grep -h '^func Fuzz' | sort -u`) reports 51, because
+  (`internal/mpd`, `internal/mpd/conf`), whose input is a daemon's reply and an `mpd.conf`;
+  and, for the bridge's own player (B470), its DSD and ALAC demuxers
+  (`internal/player/decode`), whose input is a library file, the kernel's uevents
+  (`internal/player/hotplug`), the ALSA configuration's values (`internal/alsa`), and the
+  OpenHome surface's control requests (`internal/player/openhome`), LAN-facing and
+  unauthenticated like DLNA's.
+  **Count them by file:name pair** to get 60 targets. A function-name-only
+  census (`grep -h '^func Fuzz' | sort -u`) reports 59, because
   `FuzzNormalize` exists in both `internal/dupes` and `internal/lyrics`. Without `-fuzz` they run their seed
   corpora as ordinary tests, so the normal suite absorbs them for free. To actually fuzz:
   `go test ./internal/fs/ -run XXX -fuzz FuzzResolveContainment -fuzztime 60s -fuzzminimizetime 1s`
@@ -48,7 +59,7 @@
   run still says `PASS` — so the failure mode is a target that looks like it ran and did not.
   Measured on `FuzzFoldForMatch`: `-fuzztime 60s` alone executes **19,003** inputs and then
   sits at 0/sec for 43 seconds; adding `-fuzzminimizetime 1s` executes **1,302,362** in half
-  the wall clock. Thirty-three carry PROPERTY assertions worth keeping green rather than merely
+  the wall clock. Forty-one carry PROPERTY assertions worth keeping green rather than merely
   not-crashing: `FuzzResolveContainment` (a successful `Resolve` must land inside a root —
   asymmetric, so only a real escape fails it), `FuzzFoldForMatch` (the documented
   `foldNameNoArticle == stripLeadingArticle∘foldName` identity `pickBestArtist` depends on),
@@ -85,11 +96,29 @@
   `output.md`), and `FuzzParseConf` and `FuzzParseReply` (a configuration password of eight
   bytes or more is absent from the text, the JSON and the problems once public field values
   are removed, the JSON is bounded by the input, and every reply key and value is text the
-  reply holds; under `output.md`). This said "Four" until 2026-09-28, while eight more were added beside
+  reply holds; under `output.md`), `FuzzReadReplyMatchesParseReply` (the client's reply
+  loop takes exactly the framing `ParseReply` accepts, a binary payload included; under
+  `output.md`), `FuzzPCMConfigValues` (two parses agree, a chain only where the card
+  resolver resolves to the same card and device, a sample stage only from a parse that
+  held and of a type `SampleStageTypes` names, and no hooks or include guard bypassed by
+  what follows it; under `output.md`), `FuzzDSFOpen` and `FuzzDFFOpen` (an opened stream
+  has a shape the player accepts, reads no more than asked, than it declares or than the
+  input holds, ends exactly at its length with EOF or a refusal, and seeks to its start and
+  end and refuses past it), `FuzzALACOpen` (what opens reads as those streams do, every
+  sample within its valid bits, and a packet the library decoded from past its end decodes
+  differently under `overrunOracle`, which fails the target) and `FuzzALACCookie` (an
+  accepted cookie is the configuration it carries, within the player's bounds, accepted by
+  the library, and gives a decoder that decodes a one-frame escape packet exactly; all four
+  under `player.md`), `FuzzParseUevent` (an accepted message is one
+  the kernel could have sent, within its caps, read the same twice, and written back reads
+  as itself; under `player.md`), and `FuzzControlRequest` (every answer is one the SOAP
+  table names, a 500 is a fault of a defined code or MustUnderstand, and every reply
+  carries the EXT header; under `openhome.md`). This said "Four" until 2026-09-28, while eight more were added beside
   them, then "Twelve" and "Thirteen" that same day, as two more joined, "Fourteen" until
   2026-09-29, "Twenty-two" until later that day, "Twenty-three" until later still,
   "Twenty-four" until backlog B117, "Twenty-five" until 2026-10-19, one short since
-  B246, and "Thirty-one" until later that day: **count them
+  B246, "Thirty-one" until later that day, and "Thirty-three" until 2026-10-23, seven short
+  by then and the eighth added that day (B470 PR 5a2a's census): **count them
   by the assertions in each `f.Fuzz` body**, not from this list. **A crash found by the extractor
   targets is a REAL defect, not a nicety** — `runScanWorker`'s per-iteration `recover()` means
   a panicking file is skipped, so it silently never reaches the manifest, and a throw (out of

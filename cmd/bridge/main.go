@@ -2668,6 +2668,10 @@ type serveOpts struct {
 	// production.
 	playerSeams  *servePlayerSeams
 	playerBounds servePlayerBounds
+	// playerOpenHome is a boot test's box for the player's OpenHome
+	// surface (its addresses and listeners) and its hold on it; the zero
+	// value is production's. Per invocation for tailscaleCLI's reason.
+	playerOpenHome openhomeWiring
 }
 
 // adoptHandedListener returns lis when it is nil or when its address is
@@ -2947,15 +2951,19 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 			return 2
 		}
 	}
+	// Load reported the configured player's refusal, if any. An override
+	// can introduce a different refusal which still needs its boot warning.
+	var configuredPlayerPlan servePlayerPlan
 	if *addrOverride != "" {
 		// Validate the override the same way config.Validate validates
 		// ListenAddress — otherwise an invalid value like "notaport"
 		// slips through and only surfaces much later as a net.Listen
 		// failure with an opaque error.
-		if _, _, err := net.SplitHostPort(*addrOverride); err != nil {
-			fmt.Fprintf(stderr, "invalid --addr %q: %v\n", *addrOverride, err)
+		if err := config.ValidateBindAddress("--addr", *addrOverride); err != nil {
+			fmt.Fprintf(stderr, "invalid --addr: %v\n", err)
 			return 2
 		}
+		configuredPlayerPlan = planServePlayer(cfg, opts.playerGOOS, true)
 		cfg.ListenAddress = *addrOverride
 	}
 
@@ -4107,6 +4115,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// applies when serve next starts. A player that does not start adds
 	// nothing: no goroutine, no file.
 	playerPlan := planServePlayer(cfg, opts.playerGOOS, lockErr == nil)
+	if *addrOverride != "" {
+		playerPlan.told = playerPlan.told && playerPlan.off == configuredPlayerPlan.off
+		// A new API-port clash comes from the override, not the address
+		// still written in the file. Name its source without quoting it.
+		if !playerPlan.told {
+			playerPlan.off = strings.Replace(playerPlan.off, "for listenAddress:", "for listenAddress, set by --addr:", 1)
+		}
+	}
 	var playerFeed *hotplug.Feed
 	if playerPlan.start {
 		playerFeed = hotplug.NewFeed()
@@ -4140,18 +4156,19 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// the watcher's readings do. The player keeps the DAC it started with
 	// until serve next starts.
 	player := startServePlayer(playerPlan, servePlayerWiring{
-		Cfg:     cfg,
-		Hold:    dataDirLock,
-		Store:   manifestStore,
-		Paths:   apiSrv.Resolver(),
-		Feed:    playerFeed,
-		Live:    livePlayerSettings(cfgHolder, opts.playerGOOS),
-		Changed: cfgHolder.Changed,
-		Trees:   opts.playerTrees,
-		Backend: opts.playerBackend,
-		Boot:    opts.playerBoot,
-		Seams:   opts.playerSeams,
-		Bounds:  opts.playerBounds,
+		Cfg:      cfg,
+		Hold:     dataDirLock,
+		Store:    manifestStore,
+		Paths:    apiSrv.Resolver(),
+		Feed:     playerFeed,
+		Live:     livePlayerSettings(cfgHolder, opts.playerGOOS),
+		Changed:  cfgHolder.Changed,
+		Trees:    opts.playerTrees,
+		Backend:  opts.playerBackend,
+		Boot:     opts.playerBoot,
+		Seams:    opts.playerSeams,
+		Bounds:   opts.playerBounds,
+		OpenHome: opts.playerOpenHome,
 	})
 	defer player.stop()
 

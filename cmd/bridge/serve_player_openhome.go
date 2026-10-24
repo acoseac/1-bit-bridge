@@ -1,0 +1,71 @@
+package main
+
+import (
+	"github.com/acoseac/1-bit-bridge/internal/player/lan"
+	"github.com/acoseac/1-bit-bridge/internal/player/openhome"
+	"github.com/acoseac/1-bit-bridge/internal/version"
+)
+
+// hostLAN lists the host's interfaces where nothing names another box: what
+// serve's OpenHome surface serves (B470 PR 5a2a), through lan.Look. This
+// package's TestMain points it at a box with no interface before any test
+// runs and never again, so no serve test binds the host's LAN addresses; a
+// test of the surface hands serve a box of its own (playerOpenHome).
+var hostLAN lan.Lister = lan.HostInterfaces
+
+// openhomeWiring is a boot test's hold on serve's OpenHome surface; the zero
+// value is production's: the host's interfaces through hostLAN, the
+// platform's listener (openhome.Listen) and openhome.DefaultLimits.
+type openhomeWiring struct {
+	// Addresses and Listen are the surface's box: a test's lantest.Box.
+	Addresses func() (lan.Inventory, error)
+	Listen    openhome.ListenFunc
+	Limits    openhome.Limits
+	Seams     *openhome.Seams
+	// Started is told the surface once the player starts it.
+	Started func(*openhome.Surface)
+}
+
+// startOpenHome starts the player's OpenHome surface, which the plan asks
+// for (output.player.openhome) and the player runs: id is the player's
+// identity, its UDN; the room and the port are the boot snapshot's. It
+// listens on each LAN address and advertises nothing (PR 5a2b registers
+// it with SSDP). A surface that cannot start fails alone: the player runs
+// without it, and says so; an address that cannot be bound fails that
+// address alone, said by the surface.
+func (p *bridgePlayer) startOpenHome(id string, w servePlayerWiring) {
+	player := w.Cfg.Output.Player
+	o := w.OpenHome
+	addresses := o.Addresses
+	if addresses == nil {
+		addresses = func() (lan.Inventory, error) { return lan.Look(hostLAN) }
+	}
+	s, err := openhome.Start(openhome.Config{
+		Device:    openhome.Device{UUID: id, Room: player.Room, ModelNumber: version.ServerVersion},
+		Port:      player.EffectiveOpenHomePort(),
+		Addresses: addresses,
+		Listen:    o.Listen,
+		Limits:    o.Limits,
+		Log:       playerLog,
+		Seams:     o.Seams,
+	})
+	if err != nil {
+		playerLog.Warn("player: the OpenHome surface did not start; the player runs without it", "err", err)
+		return
+	}
+	p.surface = s
+	playerLog.Info("player: the OpenHome surface is on, on each LAN address, and advertised nowhere yet", "port", player.EffectiveOpenHomePort())
+	if o.Started != nil {
+		o.Started(s)
+	}
+}
+
+// stopOpenHome stops the surface, first in the player's shutdown: every
+// request after it is refused, those under way get the surface's grace,
+// and what is still open is closed, so no request reaches the engine as it
+// stops (openhome.Surface.Stop, bounded by its limits).
+func (p *bridgePlayer) stopOpenHome() {
+	if p.surface != nil {
+		p.surface.Stop()
+	}
+}
