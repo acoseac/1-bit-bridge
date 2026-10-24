@@ -138,7 +138,7 @@ func (e *Engine) start() {
 	o.res.ids, o.res.tokens = startCounter(idsBase), startCounter(tokBase)
 	if o.res.stuckReserve == "" {
 		ids, tokens := o.res.ids.target(), o.res.tokens.target()
-		if err := e.sm.writeReserve(e.cfg.ReservePath, encodeReserve(ids, tokens)); err != nil {
+		if err := e.reserve(encodeReserve(ids, tokens)); err != nil {
 			o.res.failed = err
 			e.log.Warn("player: the reservation of this run could not be written; inserts and the other edits that advance the token are refused until one is",
 				"path", e.cfg.ReservePath, "err", err)
@@ -205,8 +205,15 @@ func (e *Engine) loadQueue() (*queueFile, []entry) {
 }
 
 // loop is the owner: one command, message or shutdown step at a time,
-// and a snapshot after each that changed anything.
+// and a snapshot after each that changed anything. An owner that leaves by
+// a panic abandons the engine on its way out.
 func (e *Engine) loop(ctx context.Context) {
+	finished := false
+	defer func() {
+		if !finished {
+			e.abandon()
+		}
+	}()
 	e.spawn(e.w.run)
 	stop := ctx.Done()
 	for !e.o.finished {
@@ -222,6 +229,23 @@ func (e *Engine) loop(ctx context.Context) {
 		e.advance()
 	}
 	e.finish()
+	finished = true
+}
+
+// abandon is the owner leaving by a panic, which goes on to Run's caller:
+// the shutdown never runs, so the engine ends what it would have, without
+// the owner. Every backend call's context ends (a Start under way gives up);
+// the queue file's writer writes the newest revision it was handed, a
+// snapshot's that was whole, and exits; and done closes, so a command is
+// answered closed and a backend's event, a timer or a write's report returns
+// at once, where each would wait for an owner that is gone once its buffer
+// filled. What the backend holds is not released here: the owner is the
+// engine's only caller of the backend, and its caller has the backend
+// release it (serve's player, Backend's ReleaseAll).
+func (e *Engine) abandon() {
+	e.lifeCancel()
+	e.w.stopWriting()
+	e.doneOnce.Do(func() { close(e.done) })
 }
 
 // advance does what the last step made possible: parked commands, waiters
@@ -292,7 +316,7 @@ func (e *Engine) shutdownStep() {
 			return
 		}
 		o.phase = phaseFlushing
-		close(e.w.stop)
+		e.w.stopWriting()
 	case phaseFlushing:
 		if !o.writerDone {
 			return
@@ -334,7 +358,7 @@ func (e *Engine) finish() {
 	e.lifeCancel()
 	e.publishIfDirty()
 	e.sendReplies()
-	close(e.done)
+	e.doneOnce.Do(func() { close(e.done) })
 }
 
 // lane is which parked commands a command keeps its order among: a command

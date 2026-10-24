@@ -32,6 +32,11 @@ const (
 	// ReasonUnreadable is content that could not be read at its open for a
 	// reason the decoders do not type (an I/O error).
 	ReasonUnreadable engine.Reason = "unreadable"
+	// ReasonFailed is a fault the backend itself caused, never the device or
+	// the content: a goroutine of the backend's panicked, or a sink's writer
+	// did (alsapcm.ReasonPanicked). The panic was recovered and logged, and
+	// the session plays no more.
+	ReasonFailed engine.Reason = "backend_failed"
 )
 
 // chunkFrames is the frames the producer decodes and hands the sink at a
@@ -168,17 +173,37 @@ func refuseDecode(o *occ, err error) {
 // closeOcc closes o's decoder and content, once, and lets go of them and of
 // the buffers they hold. The caller owns them: the opener, the producer
 // writing o, or a session that holds no other owner of them (an occurrence
-// opened and not taken, the teardown).
-func closeOcc(o *occ) {
+// opened and not taken, the teardown); it holds the session's lock. A panic
+// in either Close is recovered and logged once, and the other is closed all
+// the same: the occurrence holds neither from then on, and the panic is the
+// session's fault, recorded here under the lock its caller holds.
+func (s *session) closeOcc(o *occ) {
 	if o.closed {
 		return
 	}
 	o.closed = true
-	if o.dec != nil {
-		_ = o.dec.Close()
-	}
-	if o.content.Closer != nil {
-		_ = o.content.Closer.Close()
-	}
+	dec, closer := o.dec, o.content.Closer
 	o.dec, o.content, o.first = nil, Content{}, nil
+	const where = "the close of an occurrence's decoder and content"
+	panicked := false
+	closeOne := func(c io.Closer) {
+		defer func() {
+			if r := recover(); r != nil {
+				s.b.logPanic(where, r)
+				panicked = true
+			}
+		}()
+		_ = c.Close()
+	}
+	if dec != nil {
+		closeOne(dec)
+	}
+	if closer != nil {
+		closeOne(closer)
+	}
+	if panicked && s.fault == nil {
+		s.fault = &engine.Fault{Reason: ReasonFailed, Detail: "player backend: " + where + " panicked; the bridge's log has why"}
+		wake(s.wakeP)
+		wake(s.wakeR)
+	}
 }

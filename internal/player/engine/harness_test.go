@@ -87,6 +87,7 @@ type fakeFiles struct {
 	reserveCalls    int // writes begun, counted before a hold
 	reserveAttempts int
 	failReserve     error
+	panicReserve    any // the next reservation write panics with it, once
 	holdReserve     gate
 	renameErr       error
 	readErr         map[string]error
@@ -150,6 +151,10 @@ func (f *fakeFiles) writeReserve(path string, data []byte) error {
 	defer f.mu.Unlock()
 	defer f.signal()
 	f.reserveAttempts++
+	if p := f.panicReserve; p != nil {
+		f.panicReserve = nil
+		panic(p)
+	}
 	if f.failReserve != nil {
 		return f.failReserve
 	}

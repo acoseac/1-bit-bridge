@@ -141,4 +141,25 @@
 // one that can outlive a release is the one in a sink's Close, or a call's
 // command, while the kernel holds the sink's writer in a call that never
 // returns.
+//
+// A panic on one of them is recovered there, logged once (where, its stack,
+// and its value only when it is the runtime's own error), and is the
+// session's fault, typed backend_failed (ReasonFailed): the reporter
+// reports it, the reporter's own panic included, which it sends itself, so
+// the engine releases the session and the device is let go as for any
+// fault; a call's command answers its caller with it. So is a panic in a
+// call the engine makes into a session (Start, Prepare, Cut, Pause,
+// Resume), on the engine's goroutine for that call, which answers with the
+// fault as its error, so a session a panic cut short mid-change never
+// plays on. A teardown goes on
+// past one: a file's close recovers its own and closes the other file, and
+// a sink whose close panicked ends with the session's life, which the
+// teardown waits for before it lets go of the device and acknowledges. Each
+// hold of the session's lock across work that can panic (a sink's command,
+// the session's bookkeeping) is let go of by a deferred release (lockHold),
+// so a recover, and the release after the fault, never find it held. A
+// sink's writer that panics ends its sink typed (alsapcm.ReasonPanicked),
+// which the reporter reports as the backend's own fault, never the device's.
+// ReleaseAll releases every session for an owner that can release none: an
+// engine whose Run ended in a panic.
 package playback
