@@ -15,10 +15,10 @@ func WithBusyObserver(ctx context.Context, observe func()) context.Context {
 
 // ResetPlayerAfterStep exposes the interruption seam to external tests.
 func ResetPlayerAfterStep(dir string, after func(string) error) (bool, error) {
-	return resetPlayer(dir, after)
+	return resetPlayer(dir, false, after)
 }
 
-// SnapshotAfterCapture exposes the per-call capture seam to external tests.
-func SnapshotAfterCapture(ctx context.Context, src Sources, after func(string)) (string, error) {
-	return snapshot(ctx, src, after)
+// DiscardPlayerFloorAfterStep exposes durable interruption points.
+func DiscardPlayerFloorAfterStep(dir string, after func(string) error) (bool, error) {
+	return resetPlayer(dir, true, after)
 }

@@ -16,6 +16,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/alsa"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 	"github.com/acoseac/1-bit-bridge/internal/usbid"
 )
@@ -770,6 +771,8 @@ var uuidV4 = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-
 // data directories never share one, so it is not derived from anything a
 // config holds.
 func TestThePlayerUUIDIsMadeOnceAndKept(t *testing.T) {
+	t.Cleanup(atomicwrite.SetSyncDirForTest(func(string) error { return nil }))
+	t.Cleanup(atomicwrite.SetMediumForTest(func(string) error { return nil }))
 	dir := t.TempDir()
 	if _, err := ReadPlayerUUID(dir); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("ReadPlayerUUID on a fresh data dir = %v, want fs.ErrNotExist", err)
@@ -820,6 +823,8 @@ func TestThePlayerUUIDIsMadeOnceAndKept(t *testing.T) {
 // data directory with none, and a file that does not read, whose error it
 // answers.
 func TestForgetPlayerUUIDRemovesOnlyTheUUIDItIsGiven(t *testing.T) {
+	t.Cleanup(atomicwrite.SetSyncDirForTest(func(string) error { return nil }))
+	t.Cleanup(atomicwrite.SetMediumForTest(func(string) error { return nil }))
 	dir := t.TempDir()
 	id, created, err := EnsurePlayerUUID(dir)
 	if err != nil || !created {
@@ -859,6 +864,8 @@ func TestForgetPlayerUUIDRemovesOnlyTheUUIDItIsGiven(t *testing.T) {
 // was there; and it refuses to write anything but one lowercase UUID,
 // leaving the file as it was and nothing staged beside it.
 func TestWritePlayerUUIDFileWritesOneUUIDAndNothingElse(t *testing.T) {
+	t.Cleanup(atomicwrite.SetSyncDirForTest(func(string) error { return nil }))
+	t.Cleanup(atomicwrite.SetMediumForTest(func(string) error { return nil }))
 	const id = "0f8fad5b-d9cb-469f-a165-70867728950e"
 	dir := t.TempDir()
 	path := filepath.Join(dir, PlayerUUIDFile)

@@ -12,9 +12,10 @@ import (
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 )
 
-func TestEveryPlayerUUIDMinterUsesHistoryChecks(t *testing.T) {
+func TestEveryPlayerUUIDMinterUsesFloorChecks(t *testing.T) {
 	root := repoRootForCitations(t)
 	calls := 0
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -67,9 +68,7 @@ func TestEveryPlayerUUIDMinterUsesHistoryChecks(t *testing.T) {
 				}
 				calls++
 				rel, _ := filepath.Rel(root, path)
-				if filepath.ToSlash(rel) != "internal/backup/player_history.go" || fn == nil || fn.Name.Name != "EnsurePlayerUUID" {
-					t.Errorf("%s bypasses checked UUID wrapper", rel)
-				}
+				t.Errorf("%s bypasses checked UUID wrapper", rel)
 				return true
 			})
 		}
@@ -78,13 +77,13 @@ func TestEveryPlayerUUIDMinterUsesHistoryChecks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if calls != 1 {
-		t.Errorf("found %d raw UUID minter references, want the checked wrapper alone", calls)
+	if calls != 0 {
+		t.Errorf("found %d raw UUID minter references, want no calls to the unchecked primitive", calls)
 	}
 }
 
 func TestDACBindRefusesUnsafePlayerIdentity(t *testing.T) {
-	for _, kind := range []string{"orphan_reservation", "orphan_queue", "pending", "given_up_live", "given_up_reservation", "covered_without_floor"} {
+	for _, kind := range []string{"orphan_queue", "orphan_queue_with_floor", "uuid_without_floor", "marker_without_floor", "bad_floor"} {
 		t.Run(kind, func(t *testing.T) {
 			root := dacTree(t)
 			cfgPath := dacConfig(t, "  player:\n    enabled: true\n")
@@ -102,32 +101,80 @@ func TestDACBindRefusesUnsafePlayerIdentity(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			mark := `{"version":2,"uuid":"` + id + `","ids":90000,"tokens":80000}`
 			switch kind {
-			case "orphan_reservation":
-				put("player-ids.json", mark)
-			case "orphan_queue":
-				put("player-queue.json", `{"version":1,"entries":[]}`)
-			case "pending":
-				put("player-history.json", `{"version":1,"resetPending":true}`)
-			case "covered_without_floor":
-				put("player-history.json", `{"version":1,"covered":["`+id+`"]}`)
-			case "given_up_live":
+			case "orphan_queue", "orphan_queue_with_floor":
+				if kind == "orphan_queue_with_floor" {
+					put("player-ids.json", `{"version":2,"uuid":"`+id+`","ids":8192,"tokens":8192}`)
+				}
+				put("player-queue.json", `{"version":1}`)
+			case "uuid_without_floor":
 				put("player-uuid", id)
-				put("player-history.json", `{"version":1,"givenUp":["`+id+`"]}`)
-			case "given_up_reservation":
-				put("player-uuid", "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee")
-				put("player-ids.json", mark)
-				put("player-history.json", `{"version":1,"givenUp":["`+id+`"]}`)
+			case "marker_without_floor":
+				put("player-initialized", `{"version":1}`)
+			case "bad_floor":
+				put("player-ids.json", "{")
 			}
+			configBefore, _ := os.ReadFile(cfgPath)
 			before, readErr := os.ReadFile(filepath.Join(cfg.DataDir, config.PlayerUUIDFile))
 			out, errOut, code := runDAC(t, dacEnv(), append([]string{"bind", "5", "--binding", "serial", "--config", cfgPath}, treeFlags(root)...)...)
 			if code == 0 || !strings.Contains(errOut, "bridge reset-player") {
 				t.Errorf("unsafe bind: exit %d stdout %q stderr %q", code, out, errOut)
 			}
+			configAfter, _ := os.ReadFile(cfgPath)
+			if string(configBefore) != string(configAfter) {
+				t.Error("refused bind saved config")
+			}
 			after, err := os.ReadFile(filepath.Join(cfg.DataDir, config.PlayerUUIDFile))
 			if string(before) != string(after) || os.IsNotExist(readErr) != os.IsNotExist(err) {
 				t.Error("bind minted or changed unsafe identity")
+			}
+		})
+	}
+}
+
+func TestDACBindKeepsOrRestampsTheBoxFloor(t *testing.T) {
+	for _, kind := range []string{"pristine", "existing", "reset"} {
+		t.Run(kind, func(t *testing.T) {
+			root := dacTree(t)
+			cfgPath := dacConfig(t, "  player:\n    enabled: true\n")
+			cfg, err := config.Load(cfgPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			const old = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+			if kind != "pristine" {
+				if err := os.WriteFile(filepath.Join(cfg.DataDir, "player-ids.json"), []byte(`{"version":2,"uuid":"`+old+`","ids":2000000000,"tokens":2000000001}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if kind == "existing" {
+				if err := os.WriteFile(filepath.Join(cfg.DataDir, "player-uuid"), []byte(old), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			out, errs, code := runDAC(t, dacEnv(), append([]string{"bind", "5", "--binding", "serial", "--config", cfgPath}, treeFlags(root)...)...)
+			if code != 0 {
+				t.Fatalf("bind: %d %s %s", code, out, errs)
+			}
+			id, err := config.ReadPlayerUUID(cfg.DataDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kind == "existing" && id != old || kind == "reset" && id == old {
+				t.Fatalf("identity: %s", id)
+			}
+			r, err := engine.ReadReservation(filepath.Join(cfg.DataDir, "player-ids.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.UUID != id || kind != "pristine" && (r.IDs != 2000000000 || r.Tokens != 2000000001) {
+				t.Fatalf("floor changed: %+v", r)
+			}
+			if _, err := os.Stat(filepath.Join(cfg.DataDir, "player-initialized")); err != nil {
+				t.Fatalf("no marker: %v", err)
 			}
 		})
 	}

@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -120,10 +121,26 @@ func TestServeRefusedMintLeavesTheReservationFloor(t *testing.T) {
 func TestRestoreCLIPrintsTheNoMarkAdvice(t *testing.T) {
 	needsDirectorySync(t)
 	cfg, dir, _ := seedRestorableInstall(t, "127.0.0.1:0")
-	if _, _, err := config.EnsurePlayerUUID(dir); err != nil {
+	if _, _, err := backup.EnsurePlayerUUID(dir); err != nil {
 		t.Fatal(err)
 	}
 	snap := runBackup(t, cfg)
+	// Model a genuine legacy snapshot, predating reservation capture.
+	var m backup.Manifest
+	if err := json.Unmarshal(readFileT(t, filepath.Join(snap, backup.ManifestFile)), &m); err != nil {
+		t.Fatal(err)
+	}
+	m.Files = slices.DeleteFunc(m.Files, func(name string) bool { return name == playerReservationFile })
+	raw, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(snap, backup.ManifestFile), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(snap, playerReservationFile)); err != nil {
+		t.Fatal(err)
+	}
 	code, out, stderr := runRestoreYes(t, cfg, snap)
 	if code != 0 || !strings.Contains(out, "no player reservation mark") || !strings.Contains(out, "newest snapshot") {
 		t.Fatalf("restore %d, %s, %s", code, out, stderr)
@@ -132,7 +149,6 @@ func TestRestoreCLIPrintsTheNoMarkAdvice(t *testing.T) {
 		t.Fatal("restore did not finish")
 	}
 	// The same production path takes legacy schema 1 and still jumps.
-	var m backup.Manifest
 	if err := json.Unmarshal(readFileT(t, filepath.Join(snap, backup.ManifestFile)), &m); err != nil {
 		t.Fatal(err)
 	}

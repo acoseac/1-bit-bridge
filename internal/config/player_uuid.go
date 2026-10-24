@@ -46,7 +46,7 @@ var ErrNotOnePlayerUUID = errors.New("does not hold one UUID")
 // anything there that is not a file, refused without waiting
 // (ReadPlayerUUIDFile), never a reason to make another: a new UUID is a new
 // player to every controller, so the operator decides through bridge
-// reset-player, which also clears the queue and records identities given up.
+// reset-player, which also clears the queue and retains the box's floor.
 func ReadPlayerUUID(dataDir string) (string, error) {
 	id, err := ReadPlayerUUIDFile(filepath.Join(dataDir, PlayerUUIDFile))
 	if errors.Is(err, ErrNotOnePlayerUUID) {
@@ -78,7 +78,7 @@ func ReadPlayerUUIDFile(path string) (string, error) {
 	return id, nil
 }
 
-// readPlayerUUIDBytes shares the bounded, nonblocking read with reset recovery.
+// readPlayerUUIDBytes performs the bounded, nonblocking identity read.
 func readPlayerUUIDBytes(path string) ([]byte, error) {
 	f, _, err := fsutil.OpenAsFile(path)
 	if err != nil {
@@ -90,27 +90,6 @@ func readPlayerUUIDBytes(path string) ([]byte, error) {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	return b, nil
-}
-
-// ReadPlayerUUIDsForReset recovers canonical whitespace-delimited UUIDs within
-// the identity reader's size limit, even from a malformed file. Only reset may
-// use these names, to record identities given up; they never authorize a start.
-// Access failures and non-files retain the ordinary reader's refusal.
-func ReadPlayerUUIDsForReset(dataDir string) ([]string, error) {
-	b, err := readPlayerUUIDBytes(filepath.Join(dataDir, PlayerUUIDFile))
-	if err != nil {
-		return nil, err
-	}
-	text := string(b)
-	var ids []string
-	end := 0
-	for _, field := range strings.Fields(text) {
-		end += strings.Index(text[end:], field) + len(field)
-		if end <= maxPlayerUUIDFile && playerUUIDShape.MatchString(field) {
-			ids = append(ids, field)
-		}
-	}
-	return ids, nil
 }
 
 // EnsurePlayerUUID returns the player's UUID, making it the first time:
@@ -206,5 +185,5 @@ func WritePlayerUUIDFile(path, id string) error {
 		return fmt.Errorf("rename %s: %w", path, err)
 	}
 	tmpName = ""
-	return nil
+	return atomicwrite.ProbeDurable(filepath.Dir(path), path)
 }

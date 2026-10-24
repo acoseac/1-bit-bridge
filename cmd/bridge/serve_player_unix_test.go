@@ -82,7 +82,7 @@ func TestServeStopWithThePlayersStorageStalled(t *testing.T) {
 
 // TestANamedPipeAtThePlayersFilesDoesNotHoldItsStart: a named pipe at the
 // engine's reservation path or its queue path is no file: the engine refuses
-// it at once and moves it aside, as any bad file, and the player starts,
+// it at once, leaving the pipe untouched and refusing the player start,
 // where its start waited for a writer to the pipe. Mkfifo comes from x/sys,
 // which has it wherever the unix tag builds.
 func TestANamedPipeAtThePlayersFilesDoesNotHoldItsStart(t *testing.T) {
@@ -97,13 +97,12 @@ func TestANamedPipeAtThePlayersFilesDoesNotHoldItsStart(t *testing.T) {
 						t.Fatal(err)
 					}
 				}})
-			ps.runningEngine(t)
-			aside, _ := filepath.Glob(fifo + ".bad-*")
-			if len(aside) != 1 {
-				t.Fatalf("moved aside: %v, want the pipe", aside)
+			fsutiltest.AwaitPastFIFOs(t, "player start", fsutiltest.ServeBound, ps.player.ready, fifo)
+			if ps.player.eng != nil || !strings.Contains(ps.player.failed, "named pipe") || !strings.Contains(ps.player.failed, "move") {
+				t.Fatalf("expected prompt non-file refusal: %s", ps.player.failed)
 			}
-			if info, err := os.Lstat(aside[0]); err != nil || info.Mode()&fs.ModeNamedPipe == 0 {
-				t.Fatalf("what was moved aside is not the pipe: %v, %v", info, err)
+			if info, err := os.Lstat(fifo); err != nil || info.Mode()&fs.ModeNamedPipe == 0 {
+				t.Fatalf("pipe changed: %v %v", info, err)
 			}
 			if code := ps.stopServe(t); code != 0 {
 				t.Fatalf("exit %d; stderr=%s", code, ps.stderr.String())

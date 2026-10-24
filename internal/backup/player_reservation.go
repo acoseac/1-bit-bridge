@@ -29,36 +29,16 @@ type RestoreOptions struct {
 // after the largest possible jump. The random part is uniform in [0, margin).
 const restoreMargin uint64 = 1 << 24
 
-// playerReservationReadAdvice names the prerequisite for resetting an unreadable floor.
-const playerReservationReadAdvice = "restore read access to player-ids.json and then rerun bridge reset-player"
+// playerReservationReadAdvice distinguishes access failures from a lost floor.
+const playerReservationReadAdvice = "restore read access to player-ids.json; for an unsupported version use a newer bridge; never replace it with a snapshot's older floor"
 
-// playerResetAdvice is the single remedy for giving up an exhausted or
-// unreadable live floor. With the service stopped, run bridge reset-player
-// to record the identities given up and remove their files; the next start makes a
-// new identity with no queue (a v1 queue has no identity stamp). A reset
-// gives up for good the identity it removes and any the box ran earlier
-// (one an earlier restore replaced on this box), unless, after this box last
-// ran it, another box took it over from this box, by restoring a snapshot
-// this box made, and has not reset it since, running or powered off.
-// Their values were held only by the floor the reset drops. No snapshot of
-// a given-up identity taken before the reset, on this box or another, may
-// restore its player identity again: remove player-uuid and player-ids.json
-// from every such snapshot, or delete it. Any other box that still holds a
-// given-up identity's files (one powered off since a migration, say) must
-// be reset too before it runs again. An identity another box took over from
-// this box by a restore, after this box last ran it, and has not reset since, is not given up: that box's
-// floor holds it, and its snapshots stay valid. If the reset answers a
-// refused restore, remove the two files from a copy of that snapshot, then
-// restore that copy. Only the restore refusal carries this step. A snapshot's
-// player-ids.json is never a repair; never delete the reservation while
-// keeping the identity. The history refuses their restoration (B524).
+// playerResetAdvice names the explicit escape from a lost or exhausted floor.
 func playerResetAdvice(restoring bool) string {
-	advice := "with the service stopped, reset the player: run bridge reset-player (removes player-uuid, player-queue.json and player-ids.json after recording the identities given up)"
-	advice += "; this reset gives up for good the identity it removes and any the box ran earlier, unless, after this box last ran it, another box took it over from this box, by restoring a snapshot this box made, and has not reset it since, running or powered off; no snapshot of one of them taken before the reset, on this box or another, may restore its player identity again; remove player-uuid and player-ids.json from every such snapshot, or delete those snapshots; reset any other box that still holds one of them before it runs again; an identity another box took over from this box, after this box last ran it, and has not reset since, keeps its snapshots"
+	advice := "with the service stopped, run bridge reset-player --discard-floor; this seals all player identity restores on this box and the next start makes a new identity with no queue"
 	if restoring {
-		advice += fmt.Sprintf("; remove %s and %s from a copy of the snapshot as well, then restore that copy", PlayerUUIDFileName, engine.ReservationFileName)
+		advice = snapshotIdentityRemedy() + "; or " + advice
 	}
-	return advice + "; the next start makes a new identity with no queue, a new device to controllers; a snapshot's player-ids.json is never a valid repair; do not delete the reservation while keeping the player identity"
+	return advice
 }
 
 // snapshotIdentityRemedy is the remedy for a snapshot whose player identity
@@ -107,21 +87,23 @@ func snapshotReservationFloor(snapshotDir, id string, m Manifest) (engine.Reserv
 
 // restorePlayerReservation preflights both counters, draws once, then makes
 // the new floor durable before the caller writes any identity file.
-func restorePlayerReservation(snapshotDir, target, id string, m Manifest, opts RestoreOptions, beforeWrite func() error) error {
+func restorePlayerReservation(snapshotDir, target, id string, m Manifest, opts RestoreOptions) error {
 	snap, marked, err := snapshotReservationFloor(snapshotDir, id, m)
 	if err != nil {
 		return err
 	}
 	dataDir := filepath.Dir(target)
 	livePath := filepath.Join(dataDir, engine.ReservationFileName)
-	live, err := engine.ReadReservation(livePath)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		advice := playerResetAdvice(true)
-		var pe *os.PathError
-		if errors.As(err, &pe) {
-			advice = playerReservationReadAdvice + "; " + advice
-		}
-		return fmt.Errorf("restore: read the box's player reservation: %w; %s; nothing was restored", err, advice)
+	sealed, sealErr := readPlayerMarker(dataDir, playerFloorDiscarded)
+	if sealed || sealErr != nil {
+		return fmt.Errorf("restore: player identity restores are sealed by player-floor-discarded.json; nothing was restored; %s", snapshotIdentityRemedy())
+	}
+	live, present, err := readPlayerFloor(dataDir)
+	if err != nil {
+		return fmt.Errorf("restore: %w; %s; nothing was restored", err, playerResetAdvice(true))
+	}
+	if err := checkPlayerFloorLoss(dataDir, present); err != nil {
+		return fmt.Errorf("restore: %w; nothing was restored", err)
 	}
 	// Test each source separately so both remedies are named if both are
 	// exhausted. This bound is independent of the random draw.
@@ -165,13 +147,10 @@ func restorePlayerReservation(snapshotDir, target, id string, m Manifest, opts R
 	if err := fsutil.MkdirAll(dataDir, 0o700); err != nil {
 		return err
 	}
-	if err := beforeWrite(); err != nil {
-		return err
-	}
 	if err := engine.WriteReservation(dataDir, livePath, want); err != nil {
 		return fmt.Errorf("restore player reservation: %w", err)
 	}
-	return nil
+	return ensurePlayerMarker(dataDir, playerInitialized)
 }
 
 // randomSource keeps the production default explicit and testable without a

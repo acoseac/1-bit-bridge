@@ -21,6 +21,9 @@ func TestOlderRestoresRejectA5a0Snapshot(t *testing.T) {
 	if err := config.WritePlayerUUIDFile(p, id); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(source, "player-ids.json"), []byte(`{"version":1,"ids":0,"tokens":0}`), 0600); err != nil {
+		t.Fatal(err)
+	}
 	snap, err := Snapshot(t.Context(), Sources{DataDir: source, PlayerUUID: p})
 	if err != nil {
 		t.Fatal(err)

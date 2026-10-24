@@ -72,8 +72,7 @@ import (
 // (e.g. new mandatory file, restructured manifest). Restore refuses
 // snapshots newer than this constant. Version 1 remains readable. Version 2
 // makes older restores refuse before they could restore a UUID without a jump.
-// Version 3 requires player-history merging and given-up identity refusals.
-const SchemaVersion = 3
+const SchemaVersion = 2
 
 // ManifestFile is the metadata file written into every snapshot dir.
 const ManifestFile = "manifest.json"
@@ -172,12 +171,7 @@ type Targets struct {
 // `ctx` is forwarded to the SQLite VACUUM INTO step and read retries so the
 // periodic ticker can cancel an in-flight snapshot on bridge shutdown. Pass
 // `context.Background()` if you don't have a richer scope.
-func Snapshot(ctx context.Context, src Sources) (string, error) {
-	return snapshot(ctx, src, nil)
-}
-
-// snapshot calls after at capture boundaries; production supplies no seam.
-func snapshot(ctx context.Context, src Sources, after func(string)) (snapDir string, retErr error) {
+func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 	if src.DataDir == "" {
 		return "", errors.New("backup: DataDir is required")
 	}
@@ -201,21 +195,6 @@ func snapshot(ctx context.Context, src Sources, after func(string)) (snapDir str
 	}()
 
 	var captured []string
-	h, historyPresent, err := optionalPlayerHistory(filepath.Join(src.DataDir, PlayerHistoryFileName))
-	if err != nil {
-		return "", err
-	}
-	if historyPresent {
-		if err := writePlayerHistory(dst, h); err != nil {
-			return "", err
-		}
-		captured = append(captured, PlayerHistoryFileName)
-	}
-
-	if after != nil {
-		after("history")
-	}
-
 	if src.ManifestDB != "" {
 		if _, err := os.Stat(src.ManifestDB); err == nil {
 			if err := vacuumInto(ctx, src.ManifestDB, filepath.Join(dst, ManifestDBFileName)); err != nil {
@@ -256,61 +235,52 @@ func snapshot(ctx context.Context, src Sources, after func(string)) (snapDir str
 		captured = append(captured, pair.name)
 	}
 
-	check := snapshotPlayerCheck{history: h, historyPresent: historyPresent}
 	// Every writer merges the live reservation, so even a foreign UUID or
 	// v1 file covers this box's identities. Capture that conservative floor
 	// after the UUID and restamp the snapshot copy, including after a restore
 	// interrupted before its UUID landed and before any engine restarts.
 	if slices.Contains(captured, PlayerUUIDFileName) {
 		var id string
-		err := atomicwrite.ReadWithRetryCtx(ctx, func() error {
+		idErr := atomicwrite.ReadWithRetryCtx(ctx, func() error {
 			var err error
 			id, err = config.ReadPlayerUUIDFile(filepath.Join(dst, PlayerUUIDFileName))
 			return err
 		})
-		if err != nil && !errors.Is(err, config.ErrNotOnePlayerUUID) {
-			return "", fmt.Errorf("backup: read captured %s: %w", PlayerUUIDFileName, err)
+		if idErr != nil && !errors.Is(idErr, config.ErrNotOnePlayerUUID) {
+			return "", fmt.Errorf("backup: read captured %s: %w", PlayerUUIDFileName, idErr)
 		}
-		check.uuid, check.uuidInvalid = id, errors.Is(err, config.ErrNotOnePlayerUUID)
-		if err == nil {
-			var mark engine.Reservation
-			err := atomicwrite.ReadWithRetryCtx(ctx, func() error {
-				var err error
-				mark, err = engine.ReadReservation(filepath.Join(filepath.Dir(src.PlayerUUID), engine.ReservationFileName))
-				return err
-			})
-			if err != nil && !errors.Is(err, os.ErrNotExist) {
-				if errors.Is(err, atomicwrite.ErrReadBusy) {
-					return "", fmt.Errorf("backup: read %s: %w; retry the backup", engine.ReservationFileName, err)
-				}
-				var pathErr *os.PathError
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.As(err, &pathErr) {
-					return "", fmt.Errorf("backup: read %s: %w", engine.ReservationFileName, err)
-				}
-				// Only a file read successfully but refused as data justifies
-				// giving up the identity. A failed read establishes no damage.
-				return "", fmt.Errorf("backup: read %s: %w; %s", engine.ReservationFileName, err, playerResetAdvice(false))
-			}
-			if err == nil {
-				check.reservationUUID, check.reservationPresent = mark.UUID, true
-				mark.Version, mark.UUID = 2, id
-				data, err := json.Marshal(mark)
-				if err != nil {
-					return "", err
-				}
-				if err := writeFrom(filepath.Join(dst, engine.ReservationFileName), bytes.NewReader(data), 0o600); err != nil {
-					return "", err
-				}
-				captured = append(captured, engine.ReservationFileName)
-			}
+		var mark engine.Reservation
+		err := atomicwrite.ReadWithRetryCtx(ctx, func() error {
+			var err error
+			mark, err = engine.ReadReservation(filepath.Join(filepath.Dir(src.PlayerUUID), engine.ReservationFileName))
+			return err
+		})
+		if errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("backup: player UUID was captured without a readable floor; run the backup again: %w", err)
 		}
-	}
-
-	if after != nil {
-		after("player")
-	}
-	if err := check.verify(ctx, src); err != nil {
-		return "", err
+		if err != nil {
+			if errors.Is(err, atomicwrite.ErrReadBusy) {
+				return "", fmt.Errorf("backup: read %s: %w; retry the backup", engine.ReservationFileName, err)
+			}
+			var pathErr *os.PathError
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.As(err, &pathErr) {
+				return "", fmt.Errorf("backup: read %s: %w", engine.ReservationFileName, err)
+			}
+			// Only a file read successfully but refused as data justifies
+			// giving up the identity. A failed read establishes no damage.
+			return "", fmt.Errorf("backup: read %s: %w; %s", engine.ReservationFileName, err, playerResetAdvice(false))
+		}
+		if idErr == nil {
+			mark.Version, mark.UUID = 2, id
+			data, err := json.Marshal(mark)
+			if err != nil {
+				return "", err
+			}
+			if err := writeFrom(filepath.Join(dst, engine.ReservationFileName), bytes.NewReader(data), 0o600); err != nil {
+				return "", err
+			}
+			captured = append(captured, engine.ReservationFileName)
+		}
 	}
 
 	m := Manifest{
@@ -407,26 +377,8 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 			return err
 		}
 	}
-	var history playerHistory
-	var historyPresent bool
-	if dst.PlayerUUID != "" {
-		history, historyPresent, err = preflightPlayerHistory(snapshotDir, dst.PlayerUUID, playerUUID, m)
-		if err != nil {
-			return err
-		}
-	}
-	writeHistory := func() error {
-		if !historyPresent {
-			return nil
-		}
-		dir := filepath.Dir(dst.PlayerUUID)
-		if err := fsutil.MkdirAll(dir, 0700); err != nil {
-			return err
-		}
-		return writePlayerHistory(dir, history)
-	}
 	if playerUUIDRead {
-		if err := restorePlayerReservation(snapshotDir, dst.PlayerUUID, playerUUID, m, opts, writeHistory); err != nil {
+		if err := restorePlayerReservation(snapshotDir, dst.PlayerUUID, playerUUID, m, opts); err != nil {
 			return err
 		}
 		// A replacement identity must never expose this box's old entries,
@@ -441,14 +393,9 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 			return fmt.Errorf("restore %s: %w", PlayerUUIDFileName, err)
 		}
 	}
-	if !playerUUIDRead {
-		if err := writeHistory(); err != nil {
-			return err
-		}
-	}
 	for _, name := range m.Files {
 		// The reservation is an input only, never a copied snapshot file.
-		if name == PlayerUUIDFileName || name == engine.ReservationFileName || name == PlayerHistoryFileName {
+		if name == PlayerUUIDFileName || name == engine.ReservationFileName {
 			continue
 		}
 		target, ok := mapping[name]

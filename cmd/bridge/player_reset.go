@@ -16,6 +16,7 @@ func playerResetCmd(ctx context.Context, args []string, stdin io.Reader, stdout,
 	fs := flag.NewFlagSet("reset-player", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "", configFlagUsage)
+	discard := fs.Bool("discard-floor", false, "discard a lost or exhausted floor and permanently seal player identity restores")
 	yes := fs.Bool("yes", false, "skip the interactive confirmation prompt")
 	fs.BoolVar(yes, "y", false, "alias for --yes")
 	if err := fs.Parse(args); err != nil {
@@ -46,8 +47,15 @@ func playerResetCmd(ctx context.Context, args []string, stdin io.Reader, stdout,
 	if probeAdminBesideTheLock(fallback, cfg) && refuseIfBridgeMayBeRunning(ctx, cfg, action, stderr) {
 		return 1
 	}
+	if *discard {
+		fmt.Fprintln(stdout, "Discarding the floor permanently seals player identity restores on this box. Database, tokens and config can still be restored without a player identity.")
+	}
 	if !*yes {
-		fmt.Fprintln(stdout, "Give up the player's identity and clear its queue? Stop the bridge service first. The next start makes a new identity, a new device to controllers.")
+		if *discard {
+			fmt.Fprintln(stdout, "Discard the player's counter floor, clear its UUID and queue, and seal identity restores? Stop the bridge service first.")
+		} else {
+			fmt.Fprintln(stdout, "Rotate the player's identity and clear its queue, keeping its counter floor? Stop the bridge service first. The next start makes a new identity, a new device to controllers.")
+		}
 		fmt.Fprint(stderr, "Type 'yes' to continue: ")
 		var resp string
 		_, _ = fmt.Fscanln(stdin, &resp)
@@ -59,7 +67,12 @@ func playerResetCmd(ctx context.Context, args []string, stdin io.Reader, stdout,
 	if probeAdminBesideTheLock(fallback, cfg) && refuseIfBridgeMayBeRunning(ctx, cfg, action, stderr) {
 		return 1
 	}
-	changed, err := backup.ResetPlayer(cfg.DataDir)
+	var changed bool
+	if *discard {
+		changed, err = backup.DiscardPlayerFloor(cfg.DataDir)
+	} else {
+		changed, err = backup.ResetPlayer(cfg.DataDir)
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "reset-player: %v\n", err)
 		return 1
@@ -68,6 +81,11 @@ func playerResetCmd(ctx context.Context, args []string, stdin io.Reader, stdout,
 		fmt.Fprintln(stdout, "The box has no player identity; nothing changed.")
 		return 0
 	}
-	fmt.Fprintln(stdout, "Player reset complete: recorded the identities given up and removed the UUID, queue and reservation. The next start makes a new identity with no queue, a new device to controllers.")
+	if *discard {
+		fmt.Fprintln(stdout, "Player reset complete: removed the UUID and queue and set the floor aside. Player identity restores are permanently sealed on this box.")
+	} else {
+		fmt.Fprintln(stdout, "Player reset complete: removed the UUID and queue. The counter floor is retained.")
+	}
+	fmt.Fprintln(stdout, "The next start makes a new identity with no queue, a new device to controllers.")
 	return 0
 }

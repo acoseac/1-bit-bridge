@@ -55,12 +55,25 @@ func identitySnapshot(t *testing.T, marked bool) string {
 	if err := config.WritePlayerUUIDFile(p, snapshotPlayerUUID); err != nil {
 		t.Fatal(err)
 	}
-	if marked {
-		putMark(t, dir, snapshotPlayerUUID, 10000, 30000)
-	}
+	putMark(t, dir, snapshotPlayerUUID, 10000, 30000)
 	snap, err := backup.Snapshot(t.Context(), backup.Sources{DataDir: dir, PlayerUUID: p})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !marked {
+		if err := os.Remove(filepath.Join(snap, "player-ids.json")); err != nil {
+			t.Fatal(err)
+		}
+		var m backup.Manifest
+		p := filepath.Join(snap, backup.ManifestFile)
+		if err := json.Unmarshal(readBytes(t, p), &m); err != nil {
+			t.Fatal(err)
+		}
+		m.Files = slices.DeleteFunc(m.Files, func(s string) bool { return s == "player-ids.json" })
+		b, _ := json.Marshal(m)
+		if err := os.WriteFile(p, b, 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return snap
 }
@@ -312,6 +325,12 @@ func TestSnapshotCarriesEveryDecodableLiveFloor(t *testing.T) {
 				putMark(t, dir, snapshotPlayerUUID, 100, 200)
 			}
 			snap, err := backup.Snapshot(t.Context(), backup.Sources{DataDir: dir, PlayerUUID: idPath})
+			if kind == "missing" {
+				if err == nil {
+					t.Fatal("backup accepted missing floor")
+				}
+				return
+			}
 			if kind == "unreadable" || kind == "invalid" {
 				if err == nil {
 					t.Fatal("backup accepted an unreadable floor")

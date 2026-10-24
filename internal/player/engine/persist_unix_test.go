@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -13,9 +14,8 @@ import (
 
 // TestANamedPipeAtTheEnginesFilesIsMovedAsideAtOnce pins the engine's own
 // files, the queue file and the reservation file, opened without waiting and
-// read only when they are files: a named pipe at either path is a bad file,
-// moved aside at once as any bad file is, and the engine starts from what
-// remains. A plain open of the pipe waited for a writer, which held New.
+// read only when they are files: a reservation pipe refuses the start;
+// a queue pipe is moved aside and the engine starts from its retained floor. A plain open of the pipe waited for a writer, which held New.
 func TestANamedPipeAtTheEnginesFilesIsMovedAsideAtOnce(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -54,6 +54,16 @@ func TestANamedPipeAtTheEnginesFilesIsMovedAsideAtOnce(t *testing.T) {
 				}()
 				<-done
 				t.Fatalf("New did not return within %v with a named pipe at %s", *watchdog, filepath.Base(path))
+			}
+			if tc.name == "the reservation file" {
+				if b.err == nil || !strings.Contains(b.err.Error(), "named pipe") {
+					t.Fatalf("expected prompt floor refusal: %v", b.err)
+				}
+				h.be.close()
+				if info, err := os.Lstat(path); err != nil || info.Mode()&fs.ModeNamedPipe == 0 {
+					t.Fatalf("reservation pipe changed: %v %v", info, err)
+				}
+				return
 			}
 			if b.err != nil {
 				t.Fatalf("New: %v", b.err)

@@ -5,11 +5,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"syscall"
-
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
@@ -24,15 +23,15 @@ func resetInstall(t *testing.T, adminAddr string) (string, string) {
 	if err := os.WriteFile(cfg, []byte(fmt.Sprintf("dataDir: %s\nlibraryRoots: [%s]\nadminAddress: %s\n", dir, dir, adminAddr)), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := config.EnsurePlayerUUID(dir); err != nil {
-		t.Fatal(err)
-	}
 	t.Cleanup(atomicwrite.SetSyncDirForTest(func(string) error { return nil }))
 	t.Cleanup(atomicwrite.SetMediumForTest(func(string) error { return nil }))
+	if _, _, err := backup.EnsurePlayerUUID(dir); err != nil {
+		t.Fatal(err)
+	}
 	return cfg, dir
 }
 
-func TestPlayerResetCommandDispatchAndRestoreRefusal(t *testing.T) {
+func TestPlayerResetCommandDispatchAndRestore(t *testing.T) {
 	cfg, dir := resetInstall(t, "127.0.0.1:0")
 	snap, err := backup.Snapshot(t.Context(), backup.Sources{DataDir: dir, PlayerUUID: filepath.Join(dir, config.PlayerUUIDFile)})
 	if err != nil {
@@ -42,22 +41,22 @@ func TestPlayerResetCommandDispatchAndRestoreRefusal(t *testing.T) {
 	if code := run(t.Context(), []string{"reset-player", "--config", cfg, "--yes"}, &out, &errs); code != 0 {
 		t.Fatalf("reset exit %d: %s", code, &errs)
 	}
-	for _, want := range []string{"recorded", "new identity", "new device to controllers"} {
+	for _, want := range []string{"retained", "new identity", "new device to controllers"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("missing %q: %s", want, &out)
 		}
 	}
-	id, _, err := config.EnsurePlayerUUID(dir)
+	_, _, err = backup.EnsurePlayerUUID(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	out.Reset()
 	errs.Reset()
-	if code := restoreCmd(t.Context(), []string{"--config", cfg, "--yes", snap}, strings.NewReader(""), &out, &errs); code == 0 || !strings.Contains(errs.String(), "given up") {
+	if code := restoreCmd(t.Context(), []string{"--config", cfg, "--yes", snap}, strings.NewReader(""), &out, &errs); code != 0 {
 		t.Fatalf("restore exit %d: %s", code, &errs)
 	}
-	if got, _ := config.ReadPlayerUUID(dir); got != id {
-		t.Fatal("restore replaced new identity")
+	if got, _ := config.ReadPlayerUUID(dir); got == "" {
+		t.Fatal("restore did not install identity")
 	}
 }
 
@@ -87,8 +86,8 @@ func TestPlayerResetCommandRequiresExclusiveLock(t *testing.T) {
 			if err != nil || !bytes.Equal(before, after) {
 				t.Fatal("refused reset changed identity")
 			}
-			if _, err := os.Stat(filepath.Join(dir, backup.PlayerHistoryFileName)); !os.IsNotExist(err) {
-				t.Fatal("refused reset wrote history")
+			if _, err := os.Stat(filepath.Join(dir, "player-floor-discarded.json")); !os.IsNotExist(err) {
+				t.Fatal("refused reset wrote a discard seal")
 			}
 		})
 	}
@@ -119,8 +118,8 @@ func TestPlayerResetCommandHoldsLockDuringConfirmation(t *testing.T) {
 	if _, err := config.ReadPlayerUUID(dir); err != nil {
 		t.Fatal("declined confirmation changed identity")
 	}
-	if _, err := os.Stat(filepath.Join(dir, backup.PlayerHistoryFileName)); !os.IsNotExist(err) {
-		t.Fatal("declined confirmation wrote history")
+	if _, err := os.Stat(filepath.Join(dir, "player-floor-discarded.json")); !os.IsNotExist(err) {
+		t.Fatal("declined confirmation wrote a discard seal")
 	}
 	release, err := lockServeDataDir(dir)
 	if err != nil {
@@ -139,11 +138,11 @@ func TestPlayerResetCommandNoIdentityAndHelp(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out, errs bytes.Buffer
-	if code := playerResetCmd(t.Context(), []string{"--config", cfg, "--yes"}, strings.NewReader(""), &out, &errs); code != 0 || !strings.Contains(out.String(), "no player identity") {
+	if code := playerResetCmd(t.Context(), []string{"--config", cfg, "--yes"}, strings.NewReader(""), &out, &errs); code != 0 || !strings.Contains(out.String(), "reset complete") {
 		t.Fatalf("exit %d: %s / %s", code, &out, &errs)
 	}
-	if _, err := os.Stat(filepath.Join(dir, backup.PlayerHistoryFileName)); !os.IsNotExist(err) {
-		t.Fatal("empty reset wrote history")
+	if _, err := os.Stat(filepath.Join(dir, "player-floor-discarded.json")); !os.IsNotExist(err) {
+		t.Fatal("empty reset wrote a discard seal")
 	}
 	out.Reset()
 	errs.Reset()
@@ -195,8 +194,8 @@ func TestPlayerResetCommandProbesAdminBeforeAndAfterPrompt(t *testing.T) {
 			if _, err := config.ReadPlayerUUID(dir); err != nil {
 				t.Fatal("probe refusal removed identity")
 			}
-			if _, err := os.Stat(filepath.Join(dir, backup.PlayerHistoryFileName)); !os.IsNotExist(err) {
-				t.Fatal("probe refusal wrote history")
+			if _, err := os.Stat(filepath.Join(dir, "player-floor-discarded.json")); !os.IsNotExist(err) {
+				t.Fatal("probe refusal wrote a discard seal")
 			}
 		})
 	}
@@ -231,5 +230,22 @@ func TestResetPlayerIsATopLevelCommand(t *testing.T) {
 	outputUsage(&out)
 	if strings.Contains(out.String(), "player reset") || strings.Contains(out.String(), "reset-player") {
 		t.Error("output help lists reset")
+	}
+}
+
+func TestPlayerResetDiscardFloorCommand(t *testing.T) {
+	cfg, dir := resetInstall(t, "127.0.0.1:0")
+	var out, errs bytes.Buffer
+	if code := playerResetCmd(t.Context(), []string{"--config", cfg, "--discard-floor"}, strings.NewReader("yes\n"), &out, &errs); code != 0 {
+		t.Fatalf("discard %d: %s", code, &errs)
+	}
+	if !strings.Contains(out.String(), "permanently sealed") || strings.Contains(out.String(), "keeping its counter floor") {
+		t.Fatalf("discard confirmation: %s", &out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "player-floor-discarded.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "player-ids.json")); !os.IsNotExist(err) {
+		t.Fatalf("floor remains: %v", err)
 	}
 }

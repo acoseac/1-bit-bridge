@@ -24,7 +24,6 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/alsa/sysfstest"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
-	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/flactest"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
@@ -1617,10 +1616,10 @@ func TestBridgeDoctorMakesNoPlayerFile(t *testing.T) {
 
 // A boot owns the lock again after a crash. Drive the same player start serve
 // calls, with a real queue and engine but no network listeners or PCM nodes.
-func TestServePlayerRefusesAnIncompleteReset(t *testing.T) {
+func TestServePlayerChecksTheFloorBeforeStarting(t *testing.T) {
 	t.Cleanup(atomicwrite.SetSyncDirForTest(func(string) error { return nil }))
 	t.Cleanup(atomicwrite.SetMediumForTest(func(string) error { return nil }))
-	for _, phase := range []string{"history", "queue_removed", "uuid_removed", "reservation_removed", "legacy_uuid_removed", "complete", "no_history", "corrupt", "orphan_queue", "orphan_reservation", "orphan_both"} {
+	for _, phase := range []string{"uuid_without_floor", "marker_without_floor", "bad_floor", "orphan_queue", "orphan_queue_with_floor", "orphan_reservation", "pristine", "existing"} {
 		t.Run(phase, func(t *testing.T) {
 			dir := t.TempDir()
 			const id = "7d444840-9dc0-11d1-b245-5ffdce74fad2"
@@ -1630,26 +1629,23 @@ func TestServePlayerRefusesAnIncompleteReset(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if phase != "no_history" && !strings.HasPrefix(phase, "orphan_") {
-				pending := phase != "complete"
-				write(backup.PlayerHistoryFileName, fmt.Sprintf(`{"version":1,"givenUp":[%q],"resetPending":%t}`, id, pending))
+			if phase == "marker_without_floor" {
+				write("player-initialized", `{"version":1}`)
 			}
-			if phase == "corrupt" {
-				write(backup.PlayerHistoryFileName, "{")
+			if phase == "uuid_without_floor" || phase == "existing" {
+				write(config.PlayerUUIDFile, id)
 			}
-			if phase == "history" || phase == "queue_removed" || phase == "no_history" || phase == "corrupt" {
-				if err := config.WritePlayerUUIDFile(filepath.Join(dir, config.PlayerUUIDFile), id); err != nil {
-					t.Fatal(err)
-				}
+			if phase == "bad_floor" {
+				write(engine.ReservationFileName, "{")
 			}
-			if phase != "reservation_removed" && phase != "complete" && phase != "orphan_queue" {
+			if phase == "orphan_reservation" || phase == "existing" || phase == "orphan_queue_with_floor" {
 				write(engine.ReservationFileName, fmt.Sprintf(`{"version":2,"uuid":%q,"ids":8192,"tokens":8192}`, id))
 			}
-			if phase == "history" || phase == "legacy_uuid_removed" || phase == "no_history" || phase == "corrupt" || phase == "orphan_queue" || phase == "orphan_both" {
-				write(playerQueueFile, `{"version":1,"revision":1,"ids":{"next":4098,"reserved":8192},"tokens":{"current":4098,"reserved":8192},"selected":4097,"entries":[{"id":4097,"ref":"old-track","meta":null}]}`)
+			if phase == "orphan_queue" || phase == "orphan_queue_with_floor" {
+				write(playerQueueFile, `{"version":1}`)
 			}
 			before := map[string]string{}
-			for _, name := range []string{config.PlayerUUIDFile, playerQueueFile, engine.ReservationFileName, backup.PlayerHistoryFileName} {
+			for _, name := range []string{config.PlayerUUIDFile, playerQueueFile, engine.ReservationFileName, "player-initialized"} {
 				b, err := os.ReadFile(filepath.Join(dir, name))
 				if err == nil {
 					before[name] = string(b)
@@ -1676,34 +1672,26 @@ func TestServePlayerRefusesAnIncompleteReset(t *testing.T) {
 			case <-serveGiveUp(t):
 				t.Fatal("player did not decide its start")
 			}
-			if phase == "complete" || phase == "no_history" {
+			if phase == "pristine" || phase == "orphan_reservation" || phase == "existing" {
 				if p.eng == nil || p.failed != "" {
 					t.Fatalf("normal start refused: %s", p.failed)
 				}
-				if phase == "complete" && p.eng.Snapshot().Len() != 0 {
+				if phase != "existing" && p.eng.Snapshot().Len() != 0 {
 					t.Fatal("completed reset retained queue")
 				}
 				return
 			}
 			if p.eng != nil {
-				t.Errorf("player started during reset with %d old queue entries", p.eng.Snapshot().Len())
+				t.Errorf("player started from unsafe files with %d queue entries", p.eng.Snapshot().Len())
 			}
-			if phase == "corrupt" {
-				if !strings.Contains(p.failed, backup.PlayerHistoryFileName) {
-					t.Errorf("history read failure ignored: %s", p.failed)
-				}
-			} else if strings.HasPrefix(phase, "orphan_") {
-				if !strings.Contains(p.failed, "player-uuid is missing") || !strings.Contains(p.failed, "bridge reset-player") {
-					t.Errorf("orphaned files not refused with remedy: %s", p.failed)
-				}
-			} else if !strings.Contains(p.failed, "reset is incomplete") || !strings.Contains(p.failed, "bridge reset-player") {
-				t.Errorf("pending reset not refused with recovery command: %s", p.failed)
+			if !strings.Contains(p.failed, "bridge reset-player") {
+				t.Errorf("missing remedy: %s", p.failed)
 			}
 			p.stop()
 			if backend.built {
-				t.Error("pending reset built the backend")
+				t.Error("refused start built the backend")
 			}
-			for _, name := range []string{config.PlayerUUIDFile, playerQueueFile, engine.ReservationFileName, backup.PlayerHistoryFileName} {
+			for _, name := range []string{config.PlayerUUIDFile, playerQueueFile, engine.ReservationFileName, "player-initialized"} {
 				b, err := os.ReadFile(filepath.Join(dir, name))
 				old, existed := before[name]
 				if existed && (err != nil || string(b) != old) || !existed && !os.IsNotExist(err) {

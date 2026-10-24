@@ -179,12 +179,10 @@ type reservation struct {
 	// write again.
 	failed       error
 	refuseParked bool
-	// stuckQueue and stuckReserve are a bad queue file and a bad
-	// reservation file that could not be moved aside. While either stays,
-	// every insert and every other token-advancing edit is refused; while
-	// the queue file stays no queue file is written, and while the
-	// reservation file stays no reservation is, so neither is overwritten.
-	stuckQueue, stuckReserve string
+	// stuckQueue is a corrupt queue that could not be moved aside. Until
+	// it is removed, token-advancing edits and queue writes are refused.
+	// An unreadable reservation instead refuses New; it is never discarded.
+	stuckQueue string
 	// exhaustedLogged is the one log line for exhausted IDs or tokens.
 	exhaustedLogged bool
 }

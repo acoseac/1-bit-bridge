@@ -88,10 +88,13 @@ func TestRestoreRefusesANamedPipeForThePlayerUUIDAtOnce(t *testing.T) {
 	}
 }
 
-// TestRestoreOverANamedPipeAtTheBoxsPlayerUUIDDoesNotWait: history preflight
-// must read the identity whose floor it would replace. A named pipe is refused
-// immediately, before any write, because its identity cannot be remembered.
-// The pipe, queue and reservation remain intact for the operator to repair.
+// TestRestoreOverANamedPipeAtTheBoxsPlayerUUIDDoesNotWait: a restore of an
+// identity reads the box's own player-uuid too, to keep the box's queue only
+// for the identity it restores. A named pipe there is no identity, read at
+// once as one the restore cannot keep a queue for, where the read waited for
+// a writer and held the restore once the reservation had been raised: the
+// box's queue is discarded and the snapshot's identity is written in the
+// pipe's place.
 func TestRestoreOverANamedPipeAtTheBoxsPlayerUUIDDoesNotWait(t *testing.T) {
 	reservationStorage(t)
 	live := t.TempDir()
@@ -110,44 +113,24 @@ func TestRestoreOverANamedPipeAtTheBoxsPlayerUUIDDoesNotWait(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	putMark(t, live, boxPlayerUUID, 90000, 80000)
-	reservation := filepath.Join(live, "player-ids.json")
-	before := readBytes(t, reservation)
-	err = restoreWithin(t, snap, backup.Targets{PlayerUUID: src.PlayerUUID}, src.PlayerUUID)
-	if kind := fsutil.NotAFileKind(err); kind != "named pipe" || !strings.Contains(err.Error(), "read live player identity") {
-		t.Errorf("restore must refuse the unreadable live identity at once: %v (kind %q)", err, kind)
+	if err := restoreWithin(t, snap, backup.Targets{PlayerUUID: src.PlayerUUID}, src.PlayerUUID); err != nil {
+		t.Fatalf("Restore over a named pipe at the box's player-uuid: %v", err)
 	}
-	// Lstat only: reading the preserved pipe would wait for a writer.
-	if info, err := os.Lstat(src.PlayerUUID); err != nil || info.Mode()&fs.ModeNamedPipe == 0 {
-		t.Errorf("refused restore replaced the identity pipe: %v (%v)", info, err)
+	// Lstat first: a read of a pipe still there would wait for a writer.
+	if info, err := os.Lstat(src.PlayerUUID); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("the box's player-uuid is %v (%v) after the restore, want the snapshot's identity in a file", info, err)
 	}
-	if got := string(readBytes(t, queue)); got != `{"version":1}` {
-		t.Errorf("refused restore changed queue: %s", got)
+	if got := string(readBytes(t, src.PlayerUUID)); got != snapshotPlayerUUID+"\n" {
+		t.Errorf("the restored player-uuid holds %q, want the snapshot's UUID and a newline", got)
 	}
-	if got := string(readBytes(t, reservation)); got != string(before) {
-		t.Errorf("refused restore changed reservation: %s", got)
+	if _, err := os.Lstat(queue); !os.IsNotExist(err) {
+		t.Errorf("the box's queue is still there (%v) after a restore over an identity it could not read", err)
 	}
-	if _, err := os.Stat(filepath.Join(live, backup.PlayerHistoryFileName)); !os.IsNotExist(err) {
-		t.Errorf("refused restore wrote history: %v", err)
-	}
-}
-
-func TestPlayerResetRefusesUUIDNamedPipeAtOnce(t *testing.T) {
-	dir := t.TempDir()
-	pipe := filepath.Join(dir, backup.PlayerUUIDFileName)
-	fsutiltest.MakeFIFO(t, pipe)
-	var changed bool
-	var err error
-	done := make(chan struct{})
-	go func() { defer close(done); changed, err = backup.ResetPlayer(dir) }()
-	fsutiltest.AwaitPastFIFOs(t, "ResetPlayer", fsutiltest.ServeBound, done, pipe)
-	if changed || fsutil.NotAFileKind(err) != "named pipe" || !strings.Contains(err.Error(), "move the non-file at player-uuid aside and then rerun bridge reset-player") {
-		t.Fatalf("reset pipe refusal: %t %v", changed, err)
-	}
-	if info, err := os.Lstat(pipe); err != nil || info.Mode()&fs.ModeNamedPipe == 0 {
-		t.Errorf("reset removed pipe: %v %v", info, err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, backup.PlayerHistoryFileName)); !os.IsNotExist(err) {
-		t.Error("refusal wrote history")
+	if entries, err := os.ReadDir(live); err == nil {
+		for _, e := range entries {
+			if e.Type()&fs.ModeNamedPipe != 0 {
+				t.Errorf("the restore left a named pipe in the data dir: %s", e.Name())
+			}
+		}
 	}
 }

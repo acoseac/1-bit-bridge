@@ -571,6 +571,12 @@ func runDACBind(ctx context.Context, args []string, env outputBindEnv, stdout, s
 		fmt.Fprintf(stderr, "%s: %v\n", cmd, err)
 		return 1
 	}
+	if cfg.Output.Player.Enabled {
+		if err := backup.CheckPlayerStart(cfg.DataDir); err != nil {
+			fmt.Fprintf(stderr, "%s: the player's UUID: %v\n", cmd, err)
+			return 1
+		}
+	}
 	cfg.Output.Player.Device = dev
 	if env.beforeSave != nil {
 		env.beforeSave()

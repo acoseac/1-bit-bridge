@@ -40,7 +40,7 @@ func TestBackupAndRestoreGiveThePlayerTheIdentityItHad(t *testing.T) {
 	t.Cleanup(atomicwrite.SetSyncDirForTest(func(string) error { return nil }))
 	t.Cleanup(atomicwrite.SetMediumForTest(func(string) error { return nil }))
 	cfgPath, dataDir, _ := seedRestorableInstall(t, closedAdminAddr(t))
-	id, created, err := config.EnsurePlayerUUID(dataDir)
+	id, created, err := backup.EnsurePlayerUUID(dataDir)
 	if err != nil || !created {
 		t.Fatalf("EnsurePlayerUUID = %q, %v, %v", id, created, err)
 	}
@@ -61,7 +61,7 @@ func TestBackupAndRestoreGiveThePlayerTheIdentityItHad(t *testing.T) {
 	if err := os.Remove(live); err != nil {
 		t.Fatal(err)
 	}
-	other, _, err := config.EnsurePlayerUUID(dataDir)
+	other, _, err := backup.EnsurePlayerUUID(dataDir)
 	if err != nil || other == id {
 		t.Fatalf("the box's next identity = %q, %v", other, err)
 	}
@@ -94,7 +94,7 @@ func TestBackupAndRestoreGiveThePlayerTheIdentityItHad(t *testing.T) {
 // identity, as for a snapshot taken before the file was part of the bundle.
 func TestARestoreRefusesAPlayerUUIDThatIsNotOneUUIDAndSaysWhatToDo(t *testing.T) {
 	cfgPath, dataDir, _ := seedRestorableInstall(t, closedAdminAddr(t))
-	if _, _, err := config.EnsurePlayerUUID(dataDir); err != nil {
+	if _, _, err := backup.EnsurePlayerUUID(dataDir); err != nil {
 		t.Fatal(err)
 	}
 	snap := runBackup(t, cfgPath)
@@ -106,7 +106,7 @@ func TestARestoreRefusesAPlayerUUIDThatIsNotOneUUIDAndSaysWhatToDo(t *testing.T)
 	if err := os.Remove(live); err != nil {
 		t.Fatal(err)
 	}
-	boxID, _, err := config.EnsurePlayerUUID(dataDir)
+	boxID, _, err := backup.EnsurePlayerUUID(dataDir)
 	if err != nil {
 		t.Fatal(err)
 	}
