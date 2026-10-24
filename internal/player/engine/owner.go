@@ -28,6 +28,9 @@ type owner struct {
 	sessions    map[SessionID]*session // every session whose release is not yet acknowledged
 	unconfirmed *ReleaseInfo
 	audible     Audible
+	track       *Track // the occurrence heard (hear): replaced, never written to, once published
+	tracks      uint64 // the occurrences heard
+	detailsN    uint64 // the changes of what is known of the content heard
 	pos         Position
 	join        *Join
 	resumed     ResumeResult
@@ -687,6 +690,9 @@ func (e *Engine) snapshot() *Snapshot {
 		token:     o.token,
 		selected:  o.selected,
 		audible:   o.audible,
+		track:     o.track,
+		tracks:    o.tracks,
+		detailsN:  o.detailsN,
 		pos:       o.pos,
 		repeat:    o.repeat,
 		shuffle:   o.shuffle,

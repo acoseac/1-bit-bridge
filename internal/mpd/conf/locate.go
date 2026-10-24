@@ -110,7 +110,7 @@ func ReadHost(root, host string) (File, error) {
 	if err != nil {
 		return File{}, err
 	}
-	absHost, err := filepath.Abs(host)
+	absHost, err := absoluteNamed(host)
 	if err != nil {
 		return File{}, err
 	}
@@ -144,7 +144,7 @@ func ReadFile(root, logical, host string) (File, error) {
 	if err != nil {
 		return File{}, err
 	}
-	host, err = filepath.Abs(host)
+	host, err = absoluteNamed(host)
 	if err != nil {
 		return File{}, err
 	}
@@ -158,6 +158,7 @@ func ReadFile(root, logical, host string) (File, error) {
 	if err != nil {
 		return File{}, err
 	}
+	namedDir := namedDirectory(host)
 	host, err = filepath.EvalSymlinks(host)
 	if err != nil {
 		return File{}, err
@@ -167,7 +168,7 @@ func ReadFile(root, logical, host string) (File, error) {
 		return File{}, err
 	}
 	load := &loader{root: root, stack: map[string]struct{}{host: {}}}
-	f := parseFile(text, logical, filepath.Dir(host), load)
+	f := parseFile(text, logical, namedDir, load)
 	f.Path = logical
 	f.finish()
 	return f, nil
@@ -185,9 +186,13 @@ func (l *loader) open(path string) (string, error) {
 		return "", errUnreadable
 	}
 	if err := staysInRoot(l.root, path); err != nil {
-		return "", err
+		return "", l.resolveError(err)
 	}
-	text, err := readCapped(path)
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", l.resolveError(err)
+	}
+	text, err := readCapped(resolved)
 	if err != nil && !errors.Is(err, errNotFound) && !errors.Is(err, errTooLong) {
 		return "", errUnreadable
 	}
@@ -222,34 +227,67 @@ func (l *loader) resolve(dir, name string) (string, error) {
 	}
 	var host string
 	if strings.HasPrefix(name, "/") {
-		host = hostPath(l.root, name)
+		host = strings.TrimRight(l.root, string(filepath.Separator)) + string(filepath.Separator) + filepath.FromSlash(name[1:])
 	} else {
 		if dir == "" {
 			return "", errors.New("no base file")
 		}
-		host = filepath.Join(dir, filepath.FromSlash(name))
-	}
-	host = filepath.Clean(host)
-	if !lexicalInside(l.root, host) {
-		return "", errOutside
+		host = dir + string(filepath.Separator) + filepath.FromSlash(name)
 	}
 	// A symlink is the file it names. Refuse one that leaves the root,
 	// and let a missing file through as itself so include_optional can
 	// ignore it.
 	if _, err := os.Lstat(host); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return host, nil
+			// Check the nearest existing parent physically too. This handles
+			// root aliases (/var on macOS) without cleaning link/.. pairs.
+			for parent := namedDirectory(host); ; parent = namedDirectory(parent) {
+				resolved, e := filepath.EvalSymlinks(parent)
+				if e == nil {
+					if !lexicalInside(l.root, resolved) {
+						return "", errOutside
+					}
+					return host, nil
+				}
+				if !errors.Is(e, fs.ErrNotExist) {
+					return "", errUnreadable
+				}
+				if namedDirectory(parent) == parent {
+					return "", errOutside
+				}
+			}
 		}
 		return "", errUnreadable
 	}
 	if err := staysInRoot(l.root, host); err != nil {
-		return "", err
+		return "", l.resolveError(err)
 	}
-	resolved, err := filepath.EvalSymlinks(host)
-	if err != nil {
-		return "", err
+	// Keep the named path for the next relative include. Opening, root
+	// confinement and the cycle key each resolve it physically.
+	return host, nil
+}
+
+// resolveError maps a physically missing include to errNotFound, while
+// retaining confinement even for a dangling link to an outside target.
+// EvalSymlinks' PathError names the first missing component; its parent
+// has already been traversed. Recheck that parent before accepting absence.
+func (l *loader) resolveError(err error) error {
+	if errors.Is(err, errOutside) {
+		return errOutside
 	}
-	return resolved, nil
+	if errors.Is(err, fs.ErrNotExist) {
+		var pe *fs.PathError
+		if errors.As(err, &pe) {
+			parent, e := filepath.EvalSymlinks(namedDirectory(pe.Path))
+			if e == nil {
+				if !lexicalInside(l.root, parent) {
+					return errOutside
+				}
+				return errNotFound
+			}
+		}
+	}
+	return errUnreadable
 }
 
 func logicalAbs(p string) bool {
@@ -258,6 +296,30 @@ func logicalAbs(p string) bool {
 
 func joinLogical(base, rel string) string {
 	return strings.TrimRight(base, "/") + "/" + rel
+}
+
+// namedDirectory is MPD's lexical GetDirectoryName: never clean away a
+// link/.. pair before the kernel (or EvalSymlinks) can resolve it physically.
+func namedDirectory(p string) string {
+	i := strings.LastIndexAny(p, "/"+string(filepath.Separator))
+	if i < 0 {
+		return "."
+	}
+	if i == len(filepath.VolumeName(p)) {
+		return p[:i+1]
+	}
+	return p[:i]
+}
+
+func absoluteNamed(p string) (string, error) {
+	if filepath.IsAbs(p) {
+		return p, nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	return cwd + string(filepath.Separator) + p, nil
 }
 
 // hostPath maps a logical absolute path ("/etc/mpd.conf") into root.
@@ -294,7 +356,7 @@ func staysInRoot(root, path string) error {
 	if err != nil {
 		return err
 	}
-	path, err = filepath.Abs(path)
+	path, err = absoluteNamed(path)
 	if err != nil {
 		return err
 	}
@@ -310,6 +372,51 @@ func staysInRoot(root, path string) error {
 		return errOutside
 	}
 	return nil
+}
+
+// StatHost returns the physical logical path and identity of host under root,
+// using the conf reader's symlink resolution and confinement. It reads no file
+// contents. The final stat stays below the opened root even if a link changes.
+func StatHost(root, host string) (string, os.FileInfo, error) {
+	if root == "" {
+		root = string(filepath.Separator)
+	}
+	if host == "" {
+		return "", nil, errNotFound
+	}
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return "", nil, err
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", nil, err
+	}
+	host, err = absoluteNamed(host)
+	if err != nil {
+		return "", nil, err
+	}
+	host, err = filepath.EvalSymlinks(host)
+	if err != nil {
+		return "", nil, err
+	}
+	if !lexicalInside(root, host) {
+		return "", nil, errOutside
+	}
+	dir, err := os.OpenRoot(root)
+	if err != nil {
+		return "", nil, err
+	}
+	defer func() { _ = dir.Close() }()
+	rel, err := filepath.Rel(root, host)
+	if err != nil {
+		return "", nil, err
+	}
+	info, err := dir.Stat(rel)
+	if err != nil {
+		return "", nil, err
+	}
+	return logicalFromHost(root, host), info, nil
 }
 
 // Exists reports whether logical (an absolute path like "/volumio") is

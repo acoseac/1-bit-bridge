@@ -2,6 +2,7 @@ package openhome
 
 import (
 	"encoding/xml"
+	"io"
 	"strings"
 )
 
@@ -50,6 +51,17 @@ func (a *action) ins() []argument {
 	var out []argument
 	for _, g := range a.args {
 		if g.in {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+// outs are the action's out-arguments, in order: what its response carries.
+func (a *action) outs() []argument {
+	var out []argument
+	for _, g := range a.args {
+		if !g.in {
 			out = append(out, g)
 		}
 	}
@@ -261,10 +273,21 @@ func (s *service) scpd() []byte {
 	return []byte(b.String())
 }
 
-// escape is s as XML character data: the five special characters, and
-// tab, newline and carriage return, as references (xml.EscapeText).
+// escape is s as XML character data, through the surface's one escaper
+// (escapeTo).
 func escape(s string) string {
 	var b strings.Builder
-	_ = xml.EscapeText(&b, []byte(s))
+	escapeTo(&b, []byte(s))
 	return b.String()
 }
+
+// escapeTo writes b to w as XML character data: the five special
+// characters, and tab, newline and carriage return, as references; each
+// byte that is not UTF-8, and each character XML 1.0 cannot carry (a
+// control other than those three, a surrogate, U+FFFE, U+FFFF), as U+FFFD;
+// the rest as it is (xml.EscapeText). It is the surface's one escaper:
+// every string in a description, a fault and a response goes through it,
+// once at each level of a value that is XML itself (B470 PR 5a3), so a value
+// that is XML 1.0 text reads back byte for byte, and one that is not still
+// makes a well-formed reply.
+func escapeTo(w io.Writer, b []byte) { _ = xml.EscapeText(w, b) }

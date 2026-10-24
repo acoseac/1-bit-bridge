@@ -80,6 +80,10 @@
 // Audible when the sink's Position.Played, content frames never silence,
 // passes its first frame in that sink, never at the decoder's end of file;
 // several boundaries crossed in one measurement each get theirs, in order.
+// Just before an occurrence's Audible, to a session's Events that takes
+// them (engine.DetailsEvents, B470 PR 5a3), the reporter reports its
+// Details: the decoder's own length (its total frames) and format, the
+// codec content inspection chose, and lossless.
 // The sink measures nothing while the kernel drains a sink's last hardware
 // buffer (alsapcm.Sink.Drain), so a boundary in a sink's last 200 ms or so
 // is reported when that drain ends. Prepare answers engine.ErrSessionEnding

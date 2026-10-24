@@ -25,6 +25,12 @@ func (v *events) Fault(s SessionID, f Fault)            { v.e.post(evFault{s: s,
 func (v *events) Finished(s SessionID)                  { v.e.post(evFinished{s: s}) }
 func (v *events) DeviceReleased(s SessionID)            { v.e.post(evDeviceReleased{s: s}) }
 
+// Details takes what the backend reports of an occurrence's content
+// (DetailsEvents).
+func (v *events) Details(s SessionID, o OccurrenceID, d Details) {
+	v.e.post(evDetails{s: s, o: o, d: d})
+}
+
 // Released is stamped as the backend calls it, so an acknowledgement past
 // the release's deadline is late whichever reaches the owner first (ackAt).
 func (v *events) Released(s SessionID) { v.e.post(evReleased{s: s, at: v.e.clk.Now()}) }
@@ -57,6 +63,11 @@ type (
 	evFault struct {
 		s SessionID
 		f Fault
+	}
+	evDetails struct {
+		s SessionID
+		o OccurrenceID
+		d Details
 	}
 	evFinished       struct{ s SessionID }
 	evDeviceReleased struct{ s SessionID }
@@ -115,6 +126,9 @@ func (e *Engine) handle(m any) {
 	case evAudible:
 		what = "audible"
 		e.onAudible(m.s, m.o)
+	case evDetails:
+		what = "details"
+		e.onDetails(m.s, m.o, m.d)
 	case evPosition:
 		what = "position"
 		if s := e.current(m.s); s != nil && o.audible.Occurrence != 0 && m.p.Occurrence == o.audible.Occurrence {
