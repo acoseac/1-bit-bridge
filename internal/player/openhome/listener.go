@@ -348,6 +348,8 @@ func (s *Surface) reconcile() {
 			retire = append(retire, k)
 		}
 	}
+	// The retired sockets' slots beyond kept would otherwise keep them reachable.
+	clear(s.sockets[len(kept):])
 	s.sockets = kept
 	for a := range s.failed {
 		if !slices.Contains(want, a) {
