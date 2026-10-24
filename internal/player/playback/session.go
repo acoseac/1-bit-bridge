@@ -1007,6 +1007,11 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 				rollback, stop := context.WithTimeout(context.WithoutCancel(ctx), engine.CallTimeout)
 				defer stop()
 				if pauseErr := s.call(rollback, out.sink.Pause); pauseErr != nil {
+					// The kernel's final drain refuses Pause: only Drop can
+					// stop those last frames. Keep both refusals if it fails too.
+					if alsapcm.ReasonOf(pauseErr) == alsapcm.ReasonBadState && out.sink.Position().State == alsapcm.SinkDraining {
+						return 0, errors.Join(err, pauseErr, s.call(rollback, out.sink.Drop))
+					}
 					return 0, errors.Join(err, pauseErr)
 				}
 				return 0, err
