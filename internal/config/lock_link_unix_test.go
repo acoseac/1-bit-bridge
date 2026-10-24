@@ -271,12 +271,15 @@ func TestALinkIntoADirectoryThisUserCannotWriteSaysWhatToDo(t *testing.T) {
 // *ChangedOutsideError, both files left as they are.
 func TestARepointedLinkRefusesTheHoldersSave(t *testing.T) {
 	target, link := linkedConfigFile(t)
-	cfg, raw, err := LoadFile(link)
+	cfg, raw, read, err := LoadFileAt(link)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if read != target {
+		t.Fatalf("premise: the boot read through %s opened %s, want %s", link, read, target)
+	}
 	rc := NewRuntimeConfig(cfg)
-	rc.RecordFile(link, raw)
+	rc.RecordFile(read, raw)
 	moved := filepath.Join(filepath.Dir(target), "switched.yaml")
 	if err := os.WriteFile(moved, raw, 0o600); err != nil {
 		t.Fatal(err)

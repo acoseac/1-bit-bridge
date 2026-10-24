@@ -33,8 +33,18 @@ const LockWait = 5 * time.Second
 // saveWindow bounds a save's comparisons and renames together
 // (atomicwrite.RenameWithRetryIf): the comparison before each attempt, with
 // its read's own retries, every attempt, and the waits between them. On unix
-// the first attempt answers.
-const saveWindow = 2 * time.Second
+// the first attempt answers. SetSaveWindowForTest shortens it.
+var saveWindow = 2 * time.Second
+
+// SetSaveWindowForTest makes every save's window d, and returns what puts the
+// window before it back. Tests only, and process-global: a test that sets it
+// does not call t.Parallel, and puts it back once every save it started has
+// returned.
+func SetSaveWindowForTest(d time.Duration) (restore func()) {
+	prev := saveWindow
+	saveWindow = d
+	return func() { saveWindow = prev }
+}
 
 // lockRetry is how often LockFile asks again while another writer holds the
 // lock.
@@ -654,8 +664,23 @@ func noteTurnTaken(key string) {
 // config file at path: the file the OS writes, as LockFile resolves it, so
 // that a hook set through one name of the file hears a writer given another.
 func turnKey(path string) string {
-	if dir, name, err := fsutil.ResolveParent(path); err == nil {
-		return filepath.Join(dir, name)
+	if target, err := ResolveFile(path); err == nil {
+		return target
 	}
 	return filepath.Clean(path)
+}
+
+// ResolveFile is the file a turn of the config at path locks, compares and
+// replaces, as LockFile resolves the name (fsutil.ResolveParent: the
+// directory the OS writes it in, a link at its last element followed). A
+// name that is a link to no file is refused as LockFile refuses it.
+func ResolveFile(path string) (string, error) {
+	dir, name, err := fsutil.ResolveParent(path)
+	switch {
+	case errors.Is(err, fsutil.ErrDanglingLink):
+		return "", &linkToNothingError{path: path, err: err}
+	case err != nil:
+		return "", err
+	}
+	return filepath.Join(dir, name), nil
 }

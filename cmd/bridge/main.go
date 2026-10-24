@@ -2570,6 +2570,12 @@ type serveOpts struct {
 	configPath    string
 	addrOverride  string
 	initIfMissing bool
+	// afterConfigRead runs once serve has read its config, the read its
+	// live holder is told of (RecordFile), before anything else of the
+	// boot. Nil in production. A boot test repoints a link at the config's
+	// name there, a thousand lines before the holder is told what was read
+	// (B506's fourth round). Per invocation for tailscaleCLI's reason.
+	afterConfigRead func()
 	// tailscaleCLI stands in for the host's Tailscale CLI in the cli-mode
 	// auto-pilot. Nil (the host's CLI) everywhere but the boot tests,
 	// which pass a fake so a mint can be held open across a shutdown
@@ -2957,6 +2963,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return 2
+	}
+	if opts.afterConfigRead != nil {
+		opts.afterConfigRead()
 	}
 	// Identical to `resolved` by construction (resolveConfigPath echoes a
 	// non-empty explicit path back), but taking the loader's own answer

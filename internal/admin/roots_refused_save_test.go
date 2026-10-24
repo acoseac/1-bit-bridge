@@ -36,17 +36,30 @@ func seedRendition(t *testing.T, srv *Server, dataDir, source string) string {
 	return sidecar
 }
 
+// recordBootRead tells the console's holder the config file at cfgPath as
+// serve's boot read leaves it (RecordFile: the file the name opens, and the
+// bytes it holds), and returns those bytes.
+func recordBootRead(t *testing.T, srv *Server, cfgPath string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := config.ResolveFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.deps.CfgHolder.RecordFile(target, raw)
+	return raw
+}
+
 // editConfigBesideTheConsole tells the console's holder the config file as
 // serve read it at boot (RecordFile), then changes the file as an edit, a
 // library add beside a serve that had not started yet, or an init does, and
 // returns what that writer left.
 func editConfigBesideTheConsole(t *testing.T, srv *Server, cfgPath string) []byte {
 	t.Helper()
-	raw, err := os.ReadFile(cfgPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv.deps.CfgHolder.RecordFile(cfgPath, raw)
+	raw := recordBootRead(t, srv, cfgPath)
 	edited := bytes.Replace(raw, []byte("Test Library"), []byte("Edited Library"), 1)
 	if bytes.Equal(edited, raw) {
 		t.Fatal("the fixture's config holds no library name to edit")
@@ -137,11 +150,7 @@ func TestARootChangeRefusedJustBeforeItsIndexChangeLeavesTheLibraryAlone(t *test
 			method, body, source := tc.arrange(t, srv, dataDir)
 			sidecar := seedRendition(t, srv, dataDir, source)
 			roots := append([]string(nil), srv.deps.Scanner.Roots()...)
-			raw, err := os.ReadFile(cfgPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			srv.deps.CfgHolder.RecordFile(cfgPath, raw)
+			raw := recordBootRead(t, srv, cfgPath)
 			edited := bytes.Replace(raw, []byte("Test Library"), []byte("Edited Library"), 1)
 			stop := config.OnTurnTakenForTest(cfgPath, func() {
 				if err := os.WriteFile(cfgPath, edited, 0o600); err != nil {

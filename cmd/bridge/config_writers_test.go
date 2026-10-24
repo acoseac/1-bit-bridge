@@ -122,8 +122,8 @@ var writeFlags = map[string]bool{"O_WRONLY": true, "O_RDWR": true, "O_CREATE": t
 // through the turn alone, so a Stat, a Load or any read its saved copy does
 // not come from is reported there.
 var configReadCalls = map[string]bool{
-	"config.Load": true, "config.LoadFile": true, "config.ReadFile": true, "loadCLIConfig": true,
-	"loadCLIConfigFile": true, "readConfigAsIs": true,
+	"config.Load": true, "config.LoadFile": true, "config.LoadFileAt": true, "config.ReadFile": true,
+	"loadCLIConfig": true, "loadCLIConfigFile": true, "readConfigAsIs": true,
 }
 
 // pathReadCalls are the reads that are a read of the config when they name

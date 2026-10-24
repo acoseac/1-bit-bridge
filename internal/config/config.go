@@ -2822,6 +2822,29 @@ func LoadFile(path string) (*Config, []byte, error) {
 	return cfg, data, nil
 }
 
+// LoadFileAt is LoadFile, and the file the name opened for that read, as a
+// turn of the file's lock resolves it (ResolveFile), "" when the name cannot
+// be resolved: what serve tells its live config holder with the bytes
+// (RuntimeConfig.RecordFile). The config's relative paths resolve against
+// the directory Load takes from path, never the target's.
+func LoadFileAt(path string) (cfg *Config, raw []byte, target string, err error) {
+	return loadFileAt(path, nil)
+}
+
+// loadFileAt is LoadFileAt, running afterRead, when it is given, once each
+// read of the file has returned: the window a test repoints a link in.
+func loadFileAt(path string, afterRead func()) (*Config, []byte, string, error) {
+	cfg, raw, err := LoadFile(path)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	if afterRead != nil {
+		afterRead()
+	}
+	target, _ := ResolveFile(path)
+	return cfg, raw, target, nil
+}
+
 // loadData is Load over the bytes it read from path.
 func loadData(path string, data []byte) (*Config, error) {
 	var cfg Config

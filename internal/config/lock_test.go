@@ -77,6 +77,17 @@ func loadableConfig(t *testing.T, dir, name string) (path, base string) {
 	return writeConfigFile(t, dir, base+"libraryName: "+name+"\n"), base
 }
 
+// fileTarget is the file a turn of the config at path locks (ResolveFile):
+// what serve tells its live holder it read (RecordFile).
+func fileTarget(t *testing.T, path string) string {
+	t.Helper()
+	target, err := ResolveFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return target
+}
+
 // writeMeanwhile writes text to path, as a writer that takes no lock (an
 // edit, or a bridge older than the lock) does, failing the test on an error.
 func writeMeanwhile(t *testing.T, path, text string) {
@@ -342,7 +353,7 @@ func TestARefusedUpdateRunsNoneOfItsChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	rc := NewRuntimeConfig(cfg)
-	rc.RecordFile(path, raw)
+	rc.RecordFile(fileTarget(t, path), raw)
 	writeMeanwhile(t, path, string(bytes.Replace(raw, []byte("Home"), []byte("Away"), 1)))
 	ran := false
 	err = rc.Update(path, func(c *Config) error {
@@ -376,7 +387,7 @@ func TestUpdateComparesTheFileAgainJustBeforeItsRename(t *testing.T) {
 		t.Fatal(err)
 	}
 	rc := NewRuntimeConfig(cfg)
-	rc.RecordFile(path, raw)
+	rc.RecordFile(fileTarget(t, path), raw)
 	theirs := string(bytes.Replace(raw, []byte("Home"), []byte("Away"), 1))
 	stop := OnSaveStagedForTest(path, func() { writeMeanwhile(t, path, theirs) })
 	defer stop()
@@ -531,7 +542,7 @@ func TestUpdateRefusesAFileAnotherWriterChanged(t *testing.T) {
 				t.Fatal(err)
 			}
 			rc := NewRuntimeConfig(cfg)
-			rc.RecordFile(path, raw)
+			rc.RecordFile(fileTarget(t, path), raw)
 			if tc.meanwhile != nil {
 				tc.meanwhile(t, path)
 			}
@@ -582,7 +593,7 @@ func TestUpdateWaitsForTheLockThenRefuses(t *testing.T) {
 		t.Fatal(err)
 	}
 	rc := NewRuntimeConfig(cfg)
-	rc.RecordFile(path, before)
+	rc.RecordFile(fileTarget(t, path), before)
 	holdLock(t, path)
 	start := time.Now()
 	ran := false
