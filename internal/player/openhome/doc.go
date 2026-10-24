@@ -56,8 +56,12 @@
 // 16 KiB of headers read; the body bound (maxBody); Limits.Slots requests
 // answered at once, 503 at once past them; and of those, Limits.WriteSlots
 // writes but Stop waiting for the engine, two slots fewer, and
-// Limits.WritesPerSource of them from one source, 503 at once past either
-// (PR 5a4). Stop refuses every new
+// Limits.WritesPerSource of them from one source, fewer than the write
+// slots where there are two or more, 503 at once past either (PR 5a4). A
+// Stop takes no write slot, and holds a slot only until
+// the engine admits it, then waits for its release holding its connection
+// alone, so the caps on the connections bound the Stops that wait (PR 5a4,
+// round 2). Stop refuses every new
 // request (503, its connection closed), withdraws discovery while HTTP is
 // bound, joins the listing loop, shuts each
 // socket down within Limits.ShutdownGrace, closes what is still open, and
