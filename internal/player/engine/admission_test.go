@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -208,5 +209,96 @@ func TestAParkedEditIsAnsweredWithinReserveTimeoutOfItsPark(t *testing.T) {
 	h.refused("the second edit, parked under the first's timer", h.result("second", second), ReasonReservation)
 	if n := h.snap().Len(); n != 2 {
 		t.Fatalf("the queue holds %d entries after both edits were refused, want a and b", n)
+	}
+}
+
+// TestWithAdmissionClosesAsTheOwnerAdmits pins WithAdmission (B470 PR 5a4,
+// round 2), which the OpenHome surface gives a Stop's request slot back on:
+// its channel closes once the owner admits the command, so a Stop that waits
+// for a release closes it long before its answer, which comes once the
+// release is acknowledged; and it never closes for a command the owner did
+// not admit: one whose context had ended before the call, one the owner,
+// held at the checked seam, finds abandoned by its caller, and one sent after
+// the engine shut down.
+func TestWithAdmissionClosesAsTheOwnerAdmits(t *testing.T) {
+	h := newHarness(t)
+	reached, release := make(chan struct{}, 1), newGate()
+	var armed atomic.Bool
+	h.tweak = func(c *Config) {
+		c.seams.checked = func(cmd *command) {
+			if cmd.op != opInsert || !armed.Load() {
+				return
+			}
+			reached <- struct{}{}
+			<-release
+		}
+	}
+	h.boot()
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			release.open()
+		}
+	})
+	_, s := h.playing(0, "a")
+	ack := newGate()
+	h.be.script(func() {
+		h.be.onRelease = func(ctx context.Context, fs *fakeSession) error {
+			if err := ack.wait(ctx, h.be, true); err != nil {
+				return err
+			}
+			return fs.release(ctx)
+		}
+	})
+	ctx, admitted := WithAdmission(bg)
+	stop := async(func() error { return h.eng.Stop(ctx) })
+	select {
+	case <-admitted:
+	case <-time.After(*watchdog):
+		t.Fatalf("waited %v for the Stop's admission", *watchdog)
+	}
+	h.be.waitFor("the release", func() bool { return s.releaseAsked })
+	select {
+	case err := <-stop:
+		t.Fatalf("the Stop answered %v while its release is held", err)
+	default:
+	}
+	ack.open()
+	h.must("the Stop once its release is acknowledged", h.result("the stop", stop))
+
+	ended, cancel := context.WithCancel(bg)
+	cancel()
+	ctx, notAdmittedYet := WithAdmission(ended)
+	if err := h.eng.Stop(ctx); !errors.Is(err, ErrNotAdmitted) {
+		t.Fatalf("a Stop whose context had ended: %v, want ErrNotAdmitted", err)
+	}
+	abandon, leave := context.WithCancel(bg)
+	defer leave()
+	ctx, abandoned := WithAdmission(abandon)
+	armed.Store(true)
+	insert := async(func() error { _, err := h.eng.InsertAfter(ctx, 0, ref("b"), nil); return err })
+	select {
+	case <-reached:
+	case <-time.After(*watchdog):
+		t.Fatalf("waited %v for the owner to find the insert's context alive", *watchdog)
+	}
+	leave()
+	if err := h.result("the insert its caller abandoned", insert); !errors.Is(err, ErrNotAdmitted) {
+		t.Fatalf("the insert its caller abandoned: %v, want ErrNotAdmitted", err)
+	}
+	release.open()
+	h.must("a command after it", h.eng.SetRepeat(bg, false))
+	h.shutdown()
+	ctx, closed := WithAdmission(bg)
+	if err := h.eng.Stop(ctx); ReasonOf(err) != ReasonClosed {
+		t.Fatalf("a Stop after the shutdown: %v, want closed", err)
+	}
+	for what, ch := range map[string]<-chan struct{}{"a context that had ended": notAdmittedYet, "an abandoned insert": abandoned, "a Stop after the shutdown": closed} {
+		select {
+		case <-ch:
+			t.Errorf("%s: its admission channel closed", what)
+		default:
+		}
 	}
 }

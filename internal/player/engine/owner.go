@@ -421,6 +421,7 @@ func (e *Engine) admit(c *command) {
 		e.answer(c, reply{err: notAdmitted(c.op.String(), c.ctx.Err())})
 		return
 	}
+	noteAdmission(c)
 	if !e.o.closing && e.waits(c) {
 		e.o.parked = append(e.o.parked, c)
 		return

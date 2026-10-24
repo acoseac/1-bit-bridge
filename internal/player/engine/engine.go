@@ -647,6 +647,38 @@ func (e *Engine) do(c *command) reply {
 	}
 }
 
+// WithAdmission returns a context derived from ctx and a channel the owner
+// closes once it admits the command that context is passed with (B470 PR
+// 5a4, round 2): from then on the command's caller no longer decides whether
+// it runs (a context that ends after it is answered ReasonCancelled without
+// ErrNotAdmitted), and its answer comes once it has run, which for a Stop is
+// once its release is confirmed or past its deadline. A command the owner
+// never admits (its context ended first, its caller abandoned it, the engine
+// had shut down) never closes it. The OpenHome surface gives a Stop's request
+// slot back there, so the Stops that wait for a release hold no slot. A
+// context so made is for one command: another passed it closes nothing more.
+func WithAdmission(ctx context.Context) (context.Context, <-chan struct{}) {
+	n := &admissionNote{ch: make(chan struct{})}
+	return context.WithValue(ctx, admissionKey{}, n), n.ch
+}
+
+// admissionKey carries an admissionNote in a command's context.
+type admissionKey struct{}
+
+// admissionNote is WithAdmission's channel, closed once.
+type admissionNote struct {
+	once sync.Once
+	ch   chan struct{}
+}
+
+// noteAdmission closes the channel c's context carries (WithAdmission), if
+// it carries one: the owner has admitted c. Closing never blocks the owner.
+func noteAdmission(c *command) {
+	if n, ok := c.ctx.Value(admissionKey{}).(*admissionNote); ok {
+		n.once.Do(func() { close(n.ch) })
+	}
+}
+
 // notAdmitted is a command whose context ended before the owner admitted
 // it: it wraps ErrNotAdmitted and the context's error.
 func notAdmitted(name string, err error) error {
