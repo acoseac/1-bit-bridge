@@ -59632,7 +59632,8 @@ capture's "only a missing file omits the mark" now says it holds after a valid
 
 ## 2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader
 
-`config.ReadPlayerUUIDFile` is the one reader of `<dataDir>/player-uuid`:
+`config.ReadPlayerUUIDFile` is the UUID parser for `<dataDir>/player-uuid`
+(the live backup capture is a separate byte reader, fixed in round 2 below):
 `ReadPlayerUUID`, `EnsurePlayerUUID` and `ForgetPlayerUUID` call it, and so
 does a restore, for a snapshot's copy and for the box's own. It opened the
 file with `os.Open`, and on a named pipe `open(2)` waits for a writer, which
@@ -59750,3 +59751,53 @@ bind tests' helper (`runDACWithin`) started the command's goroutine without
 draining it on cleanup; it now registers `drainLoopOnCleanup` (cac7518a),
 and `cmd/bridge` passed (499.109 s). The six new tests under `-race -count
 20`: 20 of 20 each, every subtest included.
+
+### Round 2 — live backup capture and the loaded refusal clause
+
+The live capture was missed in round 1: `Snapshot` called `copyFileCtx`
+with a plain `os.Open` before its later parse of the captured UUID.
+A FIFO at the live identity therefore still held manual and scheduled
+backups. The same open served tokens, the certificate, key, YAML, console
+account and Atlas state. `copyFileCtx` now opens through
+`fsutil.OpenAsFile` inside its existing `atomicwrite.ReadWithRetryCtx`:
+the Windows sharing retry remains, while a FIFO is refused at once as a
+`*fsutil.NotAFileError` inside a `*fs.PathError`. The source loop names
+the file without a value and its existing error cleanup removes the partial
+snapshot directory. The optional-source stat/ErrNotExist skip is unchanged.
+Restore's ordinary file copies use the same helper.
+
+Two Unix tests create real FIFOs with `syscall.Mkfifo`:
+`TestSnapshotRefusesALivePlayerUUIDPipeAtOnce` and
+`TestSnapshotRefusesALiveTokensPipeAtOnce`. Both ran red before the fix:
+“Snapshot: still running after 5s, waiting to open a named pipe”; once the
+fixture released the open, the backup succeeded with an empty copy and left
+a snapshot. They require prompt typed refusal, the exact file-and-kind-only
+message, no returned or remaining snapshot directory, and the source pipe
+left intact. The negative control restores the plain open in `copyFileCtx`
+and runs both tests again.
+
+The identity pointer lost “is refused, never replaced” when the long form
+moved. Its loaded bold Don't sentence now includes “replace one that does
+not hold one UUID”; the existing History bullet remains unchanged.
+A separate History follow-up records this correction and the live capture.
+The backup open rule is loaded with backup code through `cli-serve.md`.
+
+Round 2 validation used Go 1.27.2 offline. Host, Linux and Windows
+`go vet ./...` passed; `make fmt` changed nothing and `make docs-check`
+passed (`player.md` 97,039 bytes, 97.0% of budget).
+The full race suites passed for `internal/backup` (37.291 s) and
+`internal/config` (4.046 s), including regular-file restore and missing
+optional sources. Each new test passed 20 race-enabled runs (40 total).
+The plain-open control compiled and failed both tests with the same
+five-second wait and accepted empty copy as the red-first run; the loaded
+clause's removal failed a separate documentation assertion. Both mutations
+were restored from saved bytes without a commit.
+
+The focused `cmd/bridge` race run passed the bind and inspect FIFO tests,
+`TestEveryBackgroundGoroutineDrainsOnCleanup`,
+`TestEveryCitedTestNameExists` and `TestJobWritersKeepTheInstallOwner`.
+`TestANamedPipeAtThePlayersUUIDRefusesItsStartAtOnce` could not reach its
+assertion in the sandbox, which refused `listen tcp 127.0.0.1:0` with
+“bind: operation not permitted”; run again on the host outside it, all six
+passed under `-race` (the serve start 1.08 s, `cmd/bridge` 13.902 s).
+Linux and Windows were vetted here and run by CI.

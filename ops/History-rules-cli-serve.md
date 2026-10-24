@@ -2031,3 +2031,25 @@ refusal policy is unchanged. `TestReadRetryWindowsErrors` requires the busy
 marker on exhaustion of either code and its absence on cancellation/expiry.
 Windows tests are cross-compiled here; their native execution remains a
 Windows-runner check, distinct from portable race-test results.
+
+## Backup source opens (B525 round 2, 2026-10-24)
+
+- **Every backup source copied by `copyFileCtx` opens through
+  `fsutil.OpenAsFile` inside the sharing-violation retry: a named pipe is
+  refused at once, naming the file without its value, and the partial
+  snapshot is removed. Don't replace this with a plain open; keep missing
+  optional sources skipped.** The live capture of `player-uuid` did not
+  use `ReadPlayerUUIDFile`: it copied bytes first and parsed the snapshot
+  copy afterward. Round 1 guarded only the parser's open. The copy now
+  refuses a FIFO at the live identity, tokens, certificate, key, YAML,
+  console account or Atlas state through the same open inside
+  `atomicwrite.ReadWithRetryCtx`. The opened descriptor decides its kind;
+  the earlier stat remains only the optional-source skip. The existing
+  snapshot cleanup removes the partial directory on refusal. Restore uses
+  the same helper for ordinary snapshot files and still round-trips them.
+  `TestSnapshotRefusesALivePlayerUUIDPipeAtOnce` and
+  `TestSnapshotRefusesALiveTokensPipeAtOnce` pin prompt refusal, the
+  `*fs.PathError` around `*fsutil.NotAFileError`, the exact value-free
+  message, the unchanged source pipe and the absence of a snapshot directory.
+  With the plain open restored both tests fail after five seconds; the
+  fixture then releases and joins the blocked snapshot.

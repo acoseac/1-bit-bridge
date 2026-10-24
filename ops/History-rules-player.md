@@ -123,3 +123,19 @@ totals comparison carries the writer's retry and namespace advice.
 TestNewFramesAnOverlayBindAsACrashRisk exercises New through the real probe
 with the medium seam, checking both sentinels and the operator-facing text.
 No transition, generation, reservation ordering, wire or backend changed.
+
+## Player identity follow-up (B525 round 2, 2026-10-24)
+
+The condensed identity pointer again explicitly forbids replacing a file
+that does not hold one UUID. Its long form above already said “is refused,
+never replaced”; the move to a pointer omitted that clause from the loaded
+Don't sentence. `EnsurePlayerUUID` still mints only for `fs.ErrNotExist`.
+
+The live backup capture is a separate byte reader: `Snapshot` calls
+`copyFileCtx` before parsing the captured UUID. Round 2 routes that source
+open through `fsutil.OpenAsFile`, still inside the Windows sharing retry,
+for every copied source. A FIFO at live `player-uuid` or `tokens.json`
+now fails promptly, names the file and its kind without a value, and removes
+the partial snapshot directory. Missing optional sources still skip, and
+regular snapshot files still restore. The backup rule and tests are recorded
+in `History-rules-cli-serve.md`, under “Backup source opens”.
