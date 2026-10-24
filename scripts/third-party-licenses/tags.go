@@ -79,7 +79,8 @@ func checkBuildTags(root string) error {
 // review here. @TAGS@ comes from GoReleaser. Untagged exceptions are only the
 // notice generator, the temp-dir helper, and two printed test instructions;
 // none builds/tests the shipped bridge. Go source and Markdown prose are not
-// executable shell/PowerShell/workflow sites.
+// executable shell/PowerShell/workflow sites. Shell fences in README.md and
+// top-level ops Markdown are operational sites too.
 var reviewedBuildSites = map[string][]string{
 	".github/scripts/test-shard.sh": {
 		"if ! out=\"$(go test -tags @TAGS@ \"${RACE_FLAGS[@]}\" \"$1\" -list '.*')\"; then",
@@ -130,6 +131,12 @@ var reviewedBuildSites = map[string][]string{
 	"internal/player/hotplug/testdata/uevent/reconstruct.py": {
 		"(GOOS=linux GOARCH=arm64 go test -c ./internal/player/hotplug), copy it",
 	},
+	"ops/deployment-runbook.md": {
+		`GOOS=linux GOARCH=amd64 go build -tags @TAGS@ -ldflags "-s -w -X github.com/acoseac/1-bit-bridge/internal/version.ServerVersion=$(git describe --tags --always)" -o dist/bridge-linux-amd64 ./cmd/bridge`,
+	},
+	"ops/release-playbook.md": {
+		"go run ./scripts/third-party-licenses",
+	},
 	"scripts/alsa-abi/check.sh": {
 		"go test -tags @TAGS@ ./internal/alsapcm -run '^TestUAPIMatchesTheKernelHeader$' -count=1 -v -args -abi-probe=\"$work/probe.txt\" | tee \"$work/go-test.txt\"",
 	},
@@ -138,7 +145,14 @@ var reviewedBuildSites = map[string][]string{
 	},
 }
 
+func buildSiteMarkdown(name string) bool {
+	return name == "README.md" || (filepath.ToSlash(filepath.Dir(name)) == "ops" && strings.EqualFold(filepath.Ext(name), ".md"))
+}
+
 func buildSiteFile(name string) bool {
+	if buildSiteMarkdown(name) {
+		return true
+	}
 	base := filepath.Base(name)
 	if strings.HasPrefix(base, "Makefile") || strings.HasPrefix(base, "Dockerfile") {
 		return true
@@ -150,6 +164,35 @@ func buildSiteFile(name string) bool {
 	return filepath.Ext(name) == "" && (!strings.Contains(name, "/") || strings.HasPrefix(name, "scripts/") || strings.HasPrefix(name, "deploy/"))
 }
 
+// markdownShellLines keeps only explicitly labelled shell fences. Track every
+// fence, including non-shell ones, so prose and code in other languages stay out.
+// Blank lines at boundaries prevent a continuation from joining separate blocks.
+func markdownShellLines(text string) string {
+	fence := regexp.MustCompile("^\\s*(`{3,}|~{3,})(.*)$")
+	var marker string
+	var shell bool
+	var lines []string
+	for _, line := range strings.Split(text, "\n") {
+		if match := fence.FindStringSubmatch(line); match != nil {
+			if marker == "" {
+				marker = match[1]
+				switch strings.ToLower(strings.TrimSpace(match[2])) {
+				case "sh", "bash", "shell", "zsh", "ksh", "fish", "console", "powershell", "ps1", "cmd", "bat":
+					shell = true
+				}
+			} else if match[1][0] == marker[0] && len(match[1]) >= len(marker) && strings.TrimSpace(match[2]) == "" {
+				marker, shell = "", false
+			}
+			lines = append(lines, "")
+			continue
+		}
+		if shell {
+			lines = append(lines, line)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 func checkBuildSites(root, tags string) error {
 	remaining := map[string]map[string]int{}
 	for name, commands := range reviewedBuildSites {
@@ -158,7 +201,9 @@ func checkBuildSites(root, tags string) error {
 			remaining[name][strings.ReplaceAll(command, "@TAGS@", tags)]++
 		}
 	}
-	command := regexp.MustCompile(`\bgo\s+(build|install|run|test|vet)\b`)
+	// Global flags may have an attached value or a separate (possibly quoted)
+	// argument. Unknown invocation forms are still unreviewed census entries.
+	command := regexp.MustCompile(`(?:^|[^[:alnum:]_])(?:go(?:\.exe)?|\$\(GO\)|\$\{GO\}|\$GO)\s+(?:-\S+(?:\s+(?:"[^"\r\n]*"|'[^'\r\n]*'|\S+))?\s+)*(?:build|install|run|test|vet)\b`)
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -207,14 +252,18 @@ func checkBuildSites(root, tags string) error {
 		if err != nil {
 			return err
 		}
+		text := strings.ReplaceAll(string(b), "\r\n", "\n")
+		if buildSiteMarkdown(name) {
+			text = markdownShellLines(text)
+		}
 		var active []string
-		for _, line := range strings.Split(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n") {
+		for _, line := range strings.Split(text, "\n") {
 			if !strings.HasPrefix(strings.TrimSpace(line), "#") {
 				active = append(active, line)
 			}
 		}
 		// Join shell/Docker and PowerShell continuations before the census.
-		text := strings.Join(active, "\n")
+		text = strings.Join(active, "\n")
 		text = strings.ReplaceAll(text, "\\\n", " ")
 		text = strings.ReplaceAll(text, "`\n", " ")
 		for _, line := range strings.Split(text, "\n") {

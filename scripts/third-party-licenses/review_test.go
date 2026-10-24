@@ -12,6 +12,7 @@ var buildSiteFiles = []string{
 	"deploy/linux/deploy-bridge-vps.sh", "deploy/windows/setup-bridge-windows.ps1", "deploy/windows/update-bridge-windows.ps1",
 	".github/scripts/test-shard.sh", ".github/workflows/gate.yml", ".github/workflows/fuzz.yml", "scripts/alsa-abi/check.sh",
 	"scripts/player-dsd-goldens/generate.py", "internal/player/hotplug/testdata/uevent/reconstruct.py",
+	"ops/deployment-runbook.md", "ops/release-playbook.md", "README.md",
 }
 
 func buildSiteFixture(t *testing.T) string {
@@ -28,9 +29,18 @@ func buildSiteFixture(t *testing.T) string {
 }
 
 func TestOperationalReleaseTags(t *testing.T) {
+	t.Run("documented deployment", func(t *testing.T) {
+		b, err := os.ReadFile("../../ops/deployment-runbook.md")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(b), "go build -tags ts_omit_webclient,ts_omit_debugeventbus") {
+			t.Fatal("documented deployment missing release tags")
+		}
+	})
 	tags := "ts_omit_webclient,ts_omit_debugeventbus"
 	for _, name := range buildSiteFiles[4:] {
-		if strings.HasSuffix(name, ".py") {
+		if strings.HasSuffix(name, ".py") || name == "ops/release-playbook.md" || name == "README.md" {
 			continue
 		}
 		t.Run(name, func(t *testing.T) {
@@ -46,19 +56,51 @@ func TestOperationalReleaseTags(t *testing.T) {
 }
 
 func TestNewBuildSitesRefused(t *testing.T) {
-	for _, name := range []string{"deploy/new.sh", "deploy/new.ps1", "scripts/new.py", ".github/workflows/new.yml", "Dockerfile.new", "new/Makefile", "scripts/new", "build-bridge", "build.mk", "module.psm1"} {
-		for _, verb := range []string{"build", "install", "run", "test", "vet"} {
-			t.Run(name+"/"+verb, func(t *testing.T) {
+	for _, name := range []string{"deploy/new.sh", "deploy/new.ps1", "scripts/new.py", ".github/workflows/new.yml", "Dockerfile.new", "new/Makefile", "scripts/new", "build-bridge", "build.mk", "module.psm1", "ops/new.md", "README.md"} {
+		t.Run(name, func(t *testing.T) {
+			root := buildSiteFixture(t)
+			if err := checkBuildTags(root); err != nil {
+				t.Fatalf("invalid baseline: %v", err)
+			}
+			for _, executable := range []string{"go", "go.exe", "$(GO)", "${GO}", "$GO"} {
+				for _, flags := range []string{"", " -C .", " -modfile=other.mod", " -C 'some dir' -modfile=other.mod"} {
+					for _, verb := range []string{"build", "install", "run", "test", "vet"} {
+						t.Run(executable+flags+"/"+verb, func(t *testing.T) {
+							command := executable + flags + " " + verb + " ./cmd/bridge\n"
+							if strings.HasSuffix(name, ".md") {
+								command = "```sh\n" + command + "```\n"
+							}
+							put(t, root, name, command)
+							if err := checkBuildTags(root); err == nil {
+								t.Fatal("unreviewed build site accepted")
+							}
+						})
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestMarkdownBuildSites(t *testing.T) {
+	for _, name := range []string{"ops/new.md", "README.md"} {
+		for _, fence := range []string{"```sh", "   ```bash", "~~~shell", "````zsh", "```powershell", "```console"} {
+			t.Run(name+"/"+fence, func(t *testing.T) {
 				root := buildSiteFixture(t)
 				if err := checkBuildTags(root); err != nil {
-					t.Fatalf("invalid baseline: %v", err)
+					t.Fatal(err)
 				}
-				put(t, root, name, "go "+verb+" ./cmd/bridge\n")
+				put(t, root, name, fence+"\ngo build \\\n  ./cmd/bridge\n"+strings.TrimRight(strings.TrimSpace(fence), "abcdefghijklmnopqrstuvwxyz")+"\n")
 				if err := checkBuildTags(root); err == nil {
-					t.Fatal("unreviewed build site accepted")
+					t.Fatal("documented build site accepted")
 				}
 			})
 		}
+	}
+	root := buildSiteFixture(t)
+	put(t, root, "ops/new.md", "Prose mentions go build.\n```text\ngo build ./cmd/bridge\n```\n~~~go\n// go test ./...\n~~~\n```sh\n# go build ./cmd/bridge\necho done\n```\ngo test ./... is prose again.\n")
+	if err := checkBuildTags(root); err != nil {
+		t.Fatalf("prose, non-shell blocks or comments entered census: %v", err)
 	}
 }
 
@@ -174,7 +216,7 @@ func TestReviewedEmbedIdentityAndFiles(t *testing.T) {
 
 func TestReviewedBuildSitesCannotLoseTags(t *testing.T) {
 	for _, name := range buildSiteFiles {
-		if name == "go.mod" || name == ".goreleaser.yaml" || strings.HasSuffix(name, ".py") {
+		if name == "go.mod" || name == ".goreleaser.yaml" || strings.HasSuffix(name, ".py") || name == "ops/release-playbook.md" || name == "README.md" {
 			continue
 		}
 		t.Run(name, func(t *testing.T) {
@@ -203,10 +245,14 @@ func TestReviewedBuildSitesCannotLoseTags(t *testing.T) {
 }
 
 func TestDockerNoticeGuard(t *testing.T) {
+	version, err := releaseGoVersion("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, line := range []string{
 		"RUN go run ./scripts/third-party-licenses",
 		"COPY --from=builder /src/THIRD_PARTY_LICENSES.md /usr/share/doc/1-bit-bridge/THIRD_PARTY_LICENSES.md",
-		"ARG GO_VERSION=1.27.3",
+		"ARG GO_VERSION=" + strings.TrimPrefix(version, "go"),
 	} {
 		t.Run(line, func(t *testing.T) {
 			root := buildSiteFixture(t)
