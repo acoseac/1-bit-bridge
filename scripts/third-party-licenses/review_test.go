@@ -13,6 +13,8 @@ var buildSiteFiles = []string{
 	".github/scripts/test-shard.sh", ".github/workflows/gate.yml", ".github/workflows/fuzz.yml", "scripts/alsa-abi/check.sh",
 	"scripts/player-dsd-goldens/generate.py", "internal/player/hotplug/testdata/uevent/reconstruct.py",
 	"ops/deployment-runbook.md", "ops/release-playbook.md", "README.md",
+	"deploy/windows/firewall-bridge-windows.ps1", "docs/LoupeReviewCycle.md",
+	"internal/player/decode/testdata/alac-goldens/README.md", "internal/player/decode/testdata/dsd-goldens/README.md",
 }
 
 func buildSiteFixture(t *testing.T) string {
@@ -40,7 +42,7 @@ func TestOperationalReleaseTags(t *testing.T) {
 	})
 	tags := "ts_omit_webclient,ts_omit_debugeventbus"
 	for _, name := range buildSiteFiles[4:] {
-		if strings.HasSuffix(name, ".py") || name == "ops/release-playbook.md" || name == "README.md" {
+		if strings.HasSuffix(name, ".py") || name == "ops/release-playbook.md" || name == "README.md" || name == "deploy/windows/firewall-bridge-windows.ps1" {
 			continue
 		}
 		t.Run(name, func(t *testing.T) {
@@ -240,7 +242,7 @@ func TestReviewedEmbedIdentityAndFiles(t *testing.T) {
 
 func TestReviewedBuildSitesCannotLoseTags(t *testing.T) {
 	for _, name := range buildSiteFiles {
-		if name == "go.mod" || name == ".goreleaser.yaml" || strings.HasSuffix(name, ".py") || name == "ops/release-playbook.md" || name == "README.md" {
+		if name == "go.mod" || name == ".goreleaser.yaml" || strings.HasSuffix(name, ".py") || name == "ops/release-playbook.md" || name == "README.md" || name == "deploy/windows/firewall-bridge-windows.ps1" {
 			continue
 		}
 		t.Run(name, func(t *testing.T) {

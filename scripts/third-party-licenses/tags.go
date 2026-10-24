@@ -79,9 +79,8 @@ func checkBuildTags(root string) error {
 // review here. @TAGS@ comes from GoReleaser. Untagged exceptions are only the
 // notice generator, the temp-dir helper, and two printed test instructions;
 // none builds/tests the shipped bridge. Go source and Markdown prose are not
-// executable shell/PowerShell/workflow sites. Shell fences in README.md and
-// top-level ops Markdown are operational sites too, except the records'
-// (buildSiteMarkdown).
+// executable shell/PowerShell/workflow sites. Potentially executable fences
+// in operational Markdown are sites too (buildSiteMarkdown).
 var reviewedBuildSites = map[string][]string{
 	".github/scripts/test-shard.sh": {
 		"if ! out=\"$(go test -tags @TAGS@ \"${RACE_FLAGS[@]}\" \"$1\" -list '.*')\"; then",
@@ -119,9 +118,24 @@ var reviewedBuildSites = map[string][]string{
 		"go vet -tags \"$(GO_TAGS)\" ./...",
 		"go run -tags \"$(GO_TAGS)\" $(PKG) serve --config config/bridge.yaml.example",
 		"go run ./scripts/third-party-licenses -check-build-tags",
+		"$(MAKE) vet",  // Recurses into the tagged Make target.
+		"$(MAKE) test", // Recurses into the tagged Make target.
 	},
 	"deploy/linux/deploy-bridge-vps.sh": {
 		"GOOS=linux GOARCH=amd64 go build -tags @TAGS@ -ldflags \"-s -w -X github.com/acoseac/1-bit-bridge/internal/version.ServerVersion=$VER\" -o \"$LOCAL_BIN\" ./cmd/bridge",
+	},
+	"deploy/windows/firewall-bridge-windows.ps1": {
+		// Ambiguous variable/flag/verb shape in a firewall description, not Go.
+		`New-NetFirewallRule -DisplayName $ruleName -Description "1-bit-bridge HTTPS listener (PR #276 fresh install)" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 7788 -Program $exePath -Profile Domain,Private,Public -Enabled True | Out-Null`,
+	},
+	"docs/LoupeReviewCycle.md": {
+		"go test -tags @TAGS@ ./internal/x/... -count=1 -v 2>&1 | tee /tmp/t.log",
+	},
+	"internal/player/decode/testdata/alac-goldens/README.md": {
+		"go test -tags @TAGS@ ./internal/player/decode -args -alac-goldens=DIR",
+	},
+	"internal/player/decode/testdata/dsd-goldens/README.md": {
+		"go test -tags @TAGS@ ./internal/player/decode -args -dsd-goldens=/tmp/dsd-goldens",
 	},
 	"deploy/windows/setup-bridge-windows.ps1": {
 		"go build -tags @TAGS@ -ldflags $ldflags -o (Join-Path $binDir 'bridge.exe') .\\cmd\\bridge",
@@ -146,19 +160,18 @@ var reviewedBuildSites = map[string][]string{
 	},
 }
 
-// buildSiteMarkdown reports whether name is Markdown a reader follows to
-// build: README.md and the top-level ops documents, except the records (the
-// engineering log, the History files, plans and release-note drafts), which
-// quote commands as they were run.
+// buildSiteMarkdown includes every README and recursive operational Markdown,
+// except records that quote commands as they were run.
 func buildSiteMarkdown(name string) bool {
-	if name == "README.md" {
+	base := filepath.Base(name)
+	if base == "README.md" {
 		return true
 	}
-	if filepath.ToSlash(filepath.Dir(name)) != "ops" || !strings.EqualFold(filepath.Ext(name), ".md") {
+	if !strings.EqualFold(filepath.Ext(name), ".md") ||
+		!(strings.HasPrefix(name, "ops/") || strings.HasPrefix(name, "deploy/") || strings.HasPrefix(name, "docs/")) {
 		return false
 	}
-	base := filepath.Base(name)
-	return base != "engineering-log.md" && !strings.HasPrefix(base, "History-") && !strings.HasPrefix(base, "plan-") && !strings.HasPrefix(base, "release-notes-")
+	return name != "ops/engineering-log.md" && !strings.HasPrefix(base, "History-") && !strings.HasPrefix(base, "plan-") && !strings.HasPrefix(base, "release-notes-")
 }
 
 func buildSiteFile(name string) bool {
@@ -176,38 +189,84 @@ func buildSiteFile(name string) bool {
 	return filepath.Ext(name) == "" && (!strings.Contains(name, "/") || strings.HasPrefix(name, "scripts/") || strings.HasPrefix(name, "deploy/"))
 }
 
-// markdownShellLines keeps the lines of shell fences: those whose info string
-// names a shell, and unlabelled ones, which a reader runs as one. Track every
-// fence, including non-shell ones, so prose and code in other languages stay out.
-// Blank lines at boundaries prevent a continuation from joining separate blocks.
+// markdownContainerContent removes CommonMark blockquote and list markers,
+// including nested combinations, before looking for a fence.
+func markdownContainerContent(line string) string {
+	for {
+		line = strings.TrimLeft(line, " \t")
+		if strings.HasPrefix(line, ">") {
+			line = line[1:]
+			continue
+		}
+		if loc := markdownListMarker.FindStringIndex(line); loc != nil {
+			line = line[loc[1]:]
+			continue
+		}
+		return line
+	}
+}
+
+var markdownListMarker = regexp.MustCompile(`^(?:[-*+]|[0-9]{1,9}[.)])[ \t]+`)
+
+// markdownShellLines skips only explicitly non-executable fence languages.
+// Unknown labels and unlabelled fences are scanned. Track skipped fences too
+// so their closers never turn subsequent prose into executable content.
+// Blank boundaries prevent continuations from joining separate blocks.
 func markdownShellLines(text string) string {
-	fence := regexp.MustCompile("^\\s*(`{3,}|~{3,})(.*)$")
+	fence := regexp.MustCompile("^(`{3,}|~{3,})(.*)$")
 	var marker string
-	var shell bool
+	var executable, prompts bool
 	var lines []string
 	for _, line := range strings.Split(text, "\n") {
-		if match := fence.FindStringSubmatch(line); match != nil {
+		content := markdownContainerContent(line)
+		if match := fence.FindStringSubmatch(content); match != nil {
 			if marker == "" {
+				// A backtick in a backtick opener's info makes it inline code.
+				if match[1][0] == '`' && strings.Contains(match[2], "`") {
+					continue
+				}
 				marker = match[1]
 				var lang string
 				if info := strings.Fields(strings.ToLower(match[2])); len(info) > 0 {
 					lang = info[0]
 				}
+				executable = true
 				switch lang {
-				case "", "sh", "bash", "shell", "zsh", "ksh", "fish", "console", "powershell", "ps1", "cmd", "bat":
-					shell = true
+				case "text", "plain", "plaintext", "txt", "output", "log", "diff", "patch", "json", "jsonc", "yaml", "yml", "toml", "ini", "xml", "html", "css", "sql", "go", "golang", "swift", "mermaid":
+					executable = false
 				}
+				prompts = strings.Contains(lang, "console") || strings.Contains(lang, "session") || strings.Contains(lang, "terminal")
 			} else if match[1][0] == marker[0] && len(match[1]) >= len(marker) && strings.TrimSpace(match[2]) == "" {
-				marker, shell = "", false
+				marker, executable, prompts = "", false, false
 			}
 			lines = append(lines, "")
 			continue
 		}
-		if shell {
-			lines = append(lines, line)
+		if executable {
+			if prompts && len(content) >= 2 && strings.ContainsAny(content[:1], "$#%>") && (content[1] == ' ' || content[1] == '\t') {
+				content = content[2:]
+			}
+			lines = append(lines, content)
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// Match the verb after a possible Go executable, never a list of variable
+// names. Quotes and argv punctuation are separators only on the matching copy;
+// the census retains the original logical line. Flags may have quoted values
+// containing spaces. Ambiguous matches are deliberately sites requiring review.
+const buildVariable = `\$\{[^}]*\}|\$\([^)]*\)|\$[[:alnum:]_:]+|%[^%\s]+%`
+
+var buildCommand = regexp.MustCompile(`(?:^|[\s=(&;|!])` +
+	// A path may itself contain expansions, such as $(GOROOT)/bin/go.
+	`(?:(?:(?:` + buildVariable + `|[^\s;|&()])+[/\\])?go(?:\.exe)?(?:` + buildVariable + `)*|` + buildVariable + `)\s+` +
+	`(?:-\S+(?:[ \t]+[^\s;|&]+)*?[ \t]+)*(?:build|install|run|test|vet)\b`)
+
+var buildCommandSeparators = strings.NewReplacer("\"", " ", "'", " ", "`", " ", ",", " ", "[", " ", "]", " ")
+
+func isBuildCommand(line string) bool {
+	return buildCommand.MatchString(buildCommandSeparators.Replace(line))
 }
 
 func checkBuildSites(root, tags string) error {
@@ -218,10 +277,32 @@ func checkBuildSites(root, tags string) error {
 			remaining[name][strings.ReplaceAll(command, "@TAGS@", tags)]++
 		}
 	}
-	// The executable may be quoted ("$GO", "/usr/local/go/bin/go"). Global
-	// flags may have an attached value or a separate (possibly quoted)
-	// argument. Unknown invocation forms are still unreviewed census entries.
-	command := regexp.MustCompile(`(?:^|[^[:alnum:]_])(?:go(?:\.exe)?|\$\(GO\)|\$\{GO\}|\$GO)["']?\s+(?:-\S+(?:\s+(?:"[^"\r\n]*"|'[^'\r\n]*'|\S+))?\s+)*(?:build|install|run|test|vet)\b`)
+	sites, err := discoverBuildSites(root)
+	if err != nil {
+		return err
+	}
+	for _, name := range sortedKeys(sites) {
+		for _, line := range sites[name] {
+			if remaining[name][line] == 0 {
+				return fmt.Errorf("unreviewed build/test site in %s: %s; use release tags and update reviewedBuildSites", name, line)
+			}
+			remaining[name][line]--
+		}
+	}
+	for _, name := range sortedKeys(remaining) {
+		for _, command := range sortedKeys(remaining[name]) {
+			if remaining[name][command] != 0 {
+				return fmt.Errorf("missing reviewed build/test site in %s: %s", name, command)
+			}
+		}
+	}
+	return nil
+}
+
+// discoverBuildSites retains even files with no sites so an audit can account
+// for every in-scope Markdown file, not just files with a matched command.
+func discoverBuildSites(root string) (map[string][]string, error) {
+	sites := map[string][]string{}
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -270,6 +351,7 @@ func checkBuildSites(root, tags string) error {
 		if err != nil {
 			return err
 		}
+		sites[name] = nil
 		text := strings.ReplaceAll(string(b), "\r\n", "\n")
 		if buildSiteMarkdown(name) {
 			text = markdownShellLines(text)
@@ -285,26 +367,13 @@ func checkBuildSites(root, tags string) error {
 		text = strings.ReplaceAll(text, "\\\n", " ")
 		text = strings.ReplaceAll(text, "`\n", " ")
 		for _, line := range strings.Split(text, "\n") {
-			if !command.MatchString(line) {
+			if !isBuildCommand(line) {
 				continue
 			}
 			line = strings.Join(strings.Fields(line), " ")
-			if remaining[name][line] == 0 {
-				return fmt.Errorf("unreviewed build/test site in %s: %s; use release tags and update reviewedBuildSites", name, line)
-			}
-			remaining[name][line]--
+			sites[name] = append(sites[name], line)
 		}
 		return nil
 	})
-	if err != nil {
-		return err
-	}
-	for _, name := range sortedKeys(remaining) {
-		for _, command := range sortedKeys(remaining[name]) {
-			if remaining[name][command] != 0 {
-				return fmt.Errorf("missing reviewed build/test site in %s: %s", name, command)
-			}
-		}
-	}
-	return nil
+	return sites, err
 }
