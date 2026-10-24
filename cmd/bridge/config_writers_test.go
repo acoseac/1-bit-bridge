@@ -182,12 +182,12 @@ type configWriteSite struct {
 	// it names the config's path.
 	reads, saves []token.Pos
 	// assigns are its assignments to a name, in source order; stores what
-	// each of its own saves of the config saves, and where (a Save's,
-	// SaveIf's or save's receiver, a SaveBytes's argument); guards its ifs
-	// at the top level of its body whose condition is a name alone and whose
-	// body ends in a return; and comparisons its ifs whose body ends in a
-	// return, at the top level of its body or directly inside a top-level
-	// check of a name against nil, with the calls each refuses on.
+	// each of its own saves of the config saves, where, and through which
+	// turn (storeAt); guards its ifs at the top level of its body whose
+	// condition is a name alone and whose body ends in a return; and
+	// comparisons its ifs whose body ends in a return, at the top level of
+	// its body or directly inside a top-level check of a name against nil,
+	// with the calls each refuses on.
 	assigns     []assignAt
 	stores      []storeAt
 	guards      []guardAt
@@ -213,11 +213,16 @@ type assignAt struct {
 	index int
 }
 
-// storeAt is one save of the config, at pos, of value: nil for a save made
-// through a method value, whose argument the sweep cannot see.
+// storeAt is one save of the config, at pos: value is what it saves (a
+// Save's, SaveIf's or save's receiver, a SaveBytes's argument; nil for a
+// SaveBytes made through a method value, whose argument the sweep cannot
+// see), and turn the turn it saves in (a Save's, SaveIf's or save's first
+// argument, a SaveBytes's receiver; nil for any save made through a method
+// value, whose call the sweep cannot see).
 type storeAt struct {
 	pos   token.Pos
 	value ast.Expr
+	turn  ast.Expr
 }
 
 // guardAt is an if at pos, ending at end, whose condition is the name cond
@@ -228,13 +233,20 @@ type guardAt struct {
 }
 
 // comparisonAt is an if at pos, ending at end, whose body ends in a return,
-// with the calls it refuses on (refusalCalls); underNil is the name a
-// top-level `if name != nil` it sits directly inside checks, "" for an if at
-// the top level of the function's body itself.
+// with the calls it refuses on (refusalCalls); under is the top-level
+// `if name != nil` it sits directly inside, nil for an if at the top level of
+// the function's body itself.
 type comparisonAt struct {
 	pos, end token.Pos
 	calls    []chainAt
-	underNil string
+	under    *nilCheck
+}
+
+// nilCheck is a top-level `if name != nil` with no initializer and no else:
+// where it is, and the name it checks.
+type nilCheck struct {
+	pos  token.Pos
+	name *ast.Ident
 }
 
 // TestEveryConfigWriterTakesTheConfigLock is the pin of backlog B506: every
@@ -437,23 +449,33 @@ func lockOrderProblem(key string, site configWriteSite, lock string) string {
 // itself, or negated, in a condition of && and || (init's, and the holder's
 // `fileKnown && (… || !bytes.Equal(…))`), or an error the if's initializer
 // takes from it that the condition finds non-nil (a restore's). A comparison
-// whose answer is dropped, or that decides an if in a nested block, a
-// function literal, or one that does not return, is no refusal.
+// inside the nil check refuses only a save made through the very name the
+// check tests, which nothing assigns between the check and the save
+// (savesThroughUnmoved): a save through another turn name, the one the
+// checked name was copied from among them, through that name assigned again
+// since the check, or through a method value, goes past a check that let a
+// nil name through without its comparison. A comparison whose answer is
+// dropped, or that decides an if in a nested block, a function literal, or
+// one that does not return, is no refusal.
 //
 // What it cannot see, each pinned as passing in
-// TestTheConfigWriterSweepReportsEveryShape: a variable written through a
-// pointer (`p := &cfg; *p = stale`) keeps its last assignment as its value; a
-// loop's later pass is read as its first (a save before `cfg = stale` in the
-// loop's body); a call handed what the turn found is taken as derived from
-// it whatever else it is handed (`pick(stale, found)`); which answer of a
-// comparison means the file changed (an if that returns when the bytes
-// match passes as one that returns when they differ); a conjunct beside the
-// comparison that switches its refusal off (the holder's fileKnown, which
-// lets a holder told nothing save, is one); whether a save inside a nil check
-// of the turn is made through that turn; and a helper in another function.
-// Variables are told apart by the parser's resolution, so a name shadowed in
-// a block is not the one outside it; positions are the source's, never the
-// control flow's.
+// TestTheConfigWriterSweepReportsEveryShape, and nothing else: a variable
+// written through a pointer (`p := &cfg; *p = stale`) keeps its last
+// assignment as its value; a loop's later pass is read as its first (a save
+// before `cfg = stale` in the loop's body); a call handed what the turn
+// found is taken as derived from it whatever else it is handed
+// (`pick(stale, found)`); which answer of a comparison means the file changed
+// (an if that returns when configChangedSinceRead finds no change passes as
+// one that returns when it finds one); a conjunct beside the comparison that
+// switches its refusal off (`enabled && configChangedSinceRead(…)`, the shape
+// of the holder's fileKnown, which lets a holder told nothing save); an
+// assignment to the nil-checked name that is not one to the sweep, through a
+// pointer (`*p = other`) or in a function literal written before the check
+// and called after it; and a helper in another function that writes the path
+// a caller hands it (`writeBlob(cfgPath, data)`), which names no config path
+// itself while its caller makes no write the sweep knows. Variables are told
+// apart by the parser's resolution, so a name shadowed in a block is not the
+// one outside it; positions are the source's, never the control flow's.
 func derivationProblem(key string, site configWriteSite, lock string, compared map[string]string) string {
 	lockAt, turns := site.lockAt(lock), site.turnVars(lock)
 	check, listed := compared[key]
@@ -466,11 +488,12 @@ func derivationProblem(key string, site configWriteSite, lock string, compared m
 				"gave, or Found's bytes (SaveBytes), or a value made from them, or list in comparedSaves the comparison of "+
 				"the turn's bytes it makes instead", site.pos, key, lock)
 		}
-		if !site.refusesInTurn(check, lockAt, s.pos, turns) {
+		if !site.refusesInTurn(check, lockAt, s, turns) {
 			return fmt.Sprintf("%s: %s is listed in comparedSaves, and never refuses its save on %s in its turn of %s: "+
-				"an if before the save, at the top of the function or directly inside its check of the turn against nil, "+
-				"whose body returns and whose condition asks %s of the turn or of what it found (the call, or its negation, "+
-				"in a condition of && and ||, or an error its initializer takes from it that the condition finds non-nil)",
+				"an if before the save, at the top of the function or directly inside its check of the turn against nil "+
+				"(the save then made through the name the check tests, assigned nothing since the check), whose body "+
+				"returns and whose condition asks %s of the turn or of what it found (the call, or its negation, in a "+
+				"condition of && and ||, or an error its initializer takes from it that the condition finds non-nil)",
 				site.pos, key, check, lock, check)
 		}
 	}
@@ -607,14 +630,16 @@ func (s configWriteSite) createOnly(pos, lockAt token.Pos, turns map[string]bool
 	return false
 }
 
-// refusesInTurn reports whether the site refuses the save at pos on check, in
-// its turn: one of its comparisons (an if whose body returns, at the top
-// level of its body, or directly inside a top-level check against nil of a
-// name it holds its turn by) begins after it takes its lock and ends before
-// pos, and refuses on a call of check handed the turn or something it found.
-func (s configWriteSite) refusesInTurn(check string, lockAt, pos token.Pos, turns map[string]bool) bool {
+// refusesInTurn reports whether the site refuses the save st on check, in its
+// turn: one of its comparisons (an if whose body returns, at the top level of
+// its body, or directly inside a top-level check against nil of a name it
+// holds its turn by, st then saving through that name, unmoved since the
+// check: savesThroughUnmoved) begins after it takes its lock and ends before
+// the save, and refuses on a call of check handed the turn or something it
+// found.
+func (s configWriteSite) refusesInTurn(check string, lockAt token.Pos, st storeAt, turns map[string]bool) bool {
 	for _, c := range s.comparisons {
-		if c.pos <= lockAt || c.end > pos || (c.underNil != "" && !turns[c.underNil]) {
+		if c.pos <= lockAt || c.end > st.pos || (c.under != nil && !s.savesThroughUnmoved(*c.under, st, turns)) {
 			continue
 		}
 		for _, call := range c.calls {
@@ -632,6 +657,30 @@ func (s configWriteSite) refusesInTurn(check string, lockAt, pos token.Pos, turn
 		}
 	}
 	return false
+}
+
+// savesThroughUnmoved reports whether st, a save after the nil check n, is
+// made through the very name n checks, one the site holds its turn by, and
+// that name is assigned nothing between the check and the save: a save the
+// check let past the comparison inside it is then one through the turn the
+// comparison asked of, or through a nil turn, which writes nothing. A save
+// through another name (the turn the checked name was copied from, while the
+// checked name was nil), through that name assigned again since the check,
+// or through a method value, whose call the sweep cannot see, is not.
+func (s configWriteSite) savesThroughUnmoved(n nilCheck, st storeAt, turns map[string]bool) bool {
+	id, ok := st.turn.(*ast.Ident)
+	switch {
+	case !ok || !turns[n.name.Name]:
+		return false
+	case id.Name != n.name.Name || id.Obj != n.name.Obj:
+		return false
+	}
+	for _, a := range s.assigns {
+		if a.name == n.name.Name && a.obj == n.name.Obj && a.pos > n.pos && a.pos < st.pos {
+			return false
+		}
+	}
+	return true
 }
 
 // turnReadCall reports whether the rendered call chain is one of a turn's own
@@ -777,8 +826,11 @@ func inspectConfigWriter(body ast.Node, inConfig bool) (configWriteSite, map[str
 	namesPath := false
 	var fileWrites []token.Pos
 	// calledBytes are the SaveBytes selectors a call is made through, whose
-	// saved value is the call's argument.
+	// saved value is the call's argument; calledSaves the Save, SaveIf and
+	// save selectors a call is made through, with the call, whose first
+	// argument is the turn the save is made in.
 	calledBytes := map[*ast.SelectorExpr]bool{}
+	calledSaves := map[*ast.SelectorExpr]*ast.CallExpr{}
 	top, underNil := bodyStatements(body)
 	ast.Inspect(body, func(n ast.Node) bool {
 		switch x := n.(type) {
@@ -794,9 +846,9 @@ func inspectConfigWriter(body ast.Node, inConfig bool) (configWriteSite, map[str
 			if g, ok := guardOf(x); ok && top[x] {
 				site.guards = append(site.guards, g)
 			}
-			if name, inside := underNil[x]; top[x] || inside {
+			if under, inside := underNil[x]; top[x] || inside {
 				if c, ok := comparisonOf(x); ok {
-					c.underNil = name
+					c.under = under
 					site.comparisons = append(site.comparisons, c)
 				}
 			}
@@ -813,13 +865,18 @@ func inspectConfigWriter(body ast.Node, inConfig bool) (configWriteSite, map[str
 			if configReadCall(x, chain, inConfig) {
 				site.reads = append(site.reads, x.Pos())
 			}
-			if sel, ok := x.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "SaveBytes" {
-				calledBytes[sel] = true
-				var value ast.Expr
-				if len(x.Args) > 0 {
-					value = x.Args[0]
+			if sel, ok := x.Fun.(*ast.SelectorExpr); ok {
+				switch {
+				case sel.Sel.Name == "SaveBytes":
+					calledBytes[sel] = true
+					var value ast.Expr
+					if len(x.Args) > 0 {
+						value = x.Args[0]
+					}
+					site.stores = append(site.stores, storeAt{pos: sel.Pos(), value: value, turn: sel.X})
+				case saveMethods[sel.Sel.Name] || (inConfig && sel.Sel.Name == "save"):
+					calledSaves[sel] = x
 				}
-				site.stores = append(site.stores, storeAt{sel.Pos(), value})
 			}
 		case *ast.SelectorExpr:
 			switch {
@@ -830,9 +887,13 @@ func inspectConfigWriter(body ast.Node, inConfig bool) (configWriteSite, map[str
 				site.saves = append(site.saves, x.Pos())
 				switch {
 				case x.Sel.Name != "SaveBytes":
-					site.stores = append(site.stores, storeAt{x.Pos(), x.X})
+					var turn ast.Expr
+					if call := calledSaves[x]; call != nil && len(call.Args) > 0 {
+						turn = call.Args[0]
+					}
+					site.stores = append(site.stores, storeAt{pos: x.Pos(), value: x.X, turn: turn})
 				case !calledBytes[x]:
-					site.stores = append(site.stores, storeAt{x.Pos(), nil})
+					site.stores = append(site.stores, storeAt{pos: x.Pos()})
 				}
 			case x.Sel.Name == "Update" || x.Sel.Name == "UpdateChecked":
 				if holder := callChain(x.X); strings.HasSuffix(strings.ToLower(holder), "cfgholder") {
@@ -883,10 +944,11 @@ func assignmentsOf(lhs, rhs []ast.Expr, pos token.Pos) []assignAt {
 // bodyStatements are the statements of body, a function's or a function
 // literal's, itself (top), and those directly inside each of them that is an
 // if with no initializer and no else whose condition checks a name against
-// nil (`if turn != nil`), each with that name (underNil): the ifs a guard and
-// a comparison may be, the ifs that every way to a save after them passes.
-func bodyStatements(body ast.Node) (top map[ast.Stmt]bool, underNil map[ast.Stmt]string) {
-	top, underNil = map[ast.Stmt]bool{}, map[ast.Stmt]string{}
+// nil (`if turn != nil`), each with that check (underNil): the ifs a guard
+// and a comparison may be, the ifs that every way to a save after them
+// passes, and for one inside a nil check, every way with that name not nil.
+func bodyStatements(body ast.Node) (top map[ast.Stmt]bool, underNil map[ast.Stmt]*nilCheck) {
+	top, underNil = map[ast.Stmt]bool{}, map[ast.Stmt]*nilCheck{}
 	var list []ast.Stmt
 	switch b := body.(type) {
 	case *ast.BlockStmt:
@@ -901,8 +963,9 @@ func bodyStatements(body ast.Node) (top map[ast.Stmt]bool, underNil map[ast.Stmt
 			continue
 		}
 		if name, ok := nilCheckOf(x.Cond); ok {
+			check := &nilCheck{pos: x.Pos(), name: name}
 			for _, inner := range x.Body.List {
-				underNil[inner] = name
+				underNil[inner] = check
 			}
 		}
 	}
@@ -911,10 +974,10 @@ func bodyStatements(body ast.Node) (top map[ast.Stmt]bool, underNil map[ast.Stmt
 
 // nilCheckOf is the name cond finds non-nil, `name != nil`, and whether cond
 // is that.
-func nilCheckOf(cond ast.Expr) (string, bool) {
+func nilCheckOf(cond ast.Expr) (*ast.Ident, bool) {
 	b, ok := cond.(*ast.BinaryExpr)
 	if !ok || b.Op != token.NEQ {
-		return "", false
+		return nil, false
 	}
 	x, y := b.X, b.Y
 	if isNilIdent(x) {
@@ -922,9 +985,9 @@ func nilCheckOf(cond ast.Expr) (string, bool) {
 	}
 	id, ok := x.(*ast.Ident)
 	if !ok || !isNilIdent(y) {
-		return "", false
+		return nil, false
 	}
-	return id.Name, true
+	return id, true
 }
 
 // isNilIdent reports whether e is the name nil.
@@ -985,7 +1048,7 @@ func refusalCalls(x *ast.IfStmt) []chainAt {
 	if init, ok := x.Init.(*ast.AssignStmt); ok && len(init.Lhs) == 1 && len(init.Rhs) == 1 {
 		id, isName := init.Lhs[0].(*ast.Ident)
 		call, isCall := init.Rhs[0].(*ast.CallExpr)
-		if name, checks := nilCheckOf(x.Cond); isName && isCall && checks && name == id.Name {
+		if name, checks := nilCheckOf(x.Cond); isName && isCall && checks && name.Name == id.Name {
 			out = append(out, chainAt{callChain(call.Fun), call.Pos(), call.Args})
 		}
 	}
@@ -1487,6 +1550,175 @@ func picksAStaleValueBesideWhatItsTurnFound(cfgPath string, stale *config.Config
 	cfg := pick(stale, found)
 	_ = cfg.Save(l)
 }
+
+func comparesUnderAnOptionalAliasAndSavesThroughItsTurn(cfgPath string, stale *config.Config, asRead []byte, compareEnabled bool) {
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	var optionalTurn *config.FileLock
+	if compareEnabled {
+		optionalTurn = l
+	}
+	if optionalTurn != nil {
+		if err := configStillAsRead(optionalTurn, asRead); err != nil {
+			return
+		}
+	}
+	_ = stale.Save(l)
+}
+
+func comparesUnderANilableAliasAndSavesThroughItsTurn(cfgPath string, cfg *config.Config, asRead []byte, disabled bool) {
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	t := l
+	if disabled {
+		t = nil
+	}
+	if t != nil {
+		if err := configStillAsRead(t, asRead); err != nil {
+			return
+		}
+	}
+	_ = cfg.Save(l)
+}
+
+func reassignsItsNilCheckedTurnBeforeItSaves(cfgPath string, cfg *config.Config, asRead []byte, disabled bool) {
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	t := l
+	if disabled {
+		t = nil
+	}
+	if t != nil {
+		if err := configStillAsRead(t, asRead); err != nil {
+			return
+		}
+	}
+	t = l
+	_ = cfg.Save(t)
+}
+
+func savesThroughAnotherNameAfterItsNilCheck(cfgPath string, cfg *config.Config, asRead []byte) {
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	t := l
+	if t != nil {
+		if err := configStillAsRead(t, asRead); err != nil {
+			return
+		}
+	}
+	_ = cfg.Save(l)
+}
+
+func savesIfThroughAnotherNameAfterItsNilCheck(cfgPath string, cfg *config.Config, asRead []byte) {
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	t := l
+	if t != nil {
+		if err := configStillAsRead(t, asRead); err != nil {
+			return
+		}
+	}
+	_ = cfg.SaveIf(l, nil)
+}
+
+func savesBytesThroughAnotherNameAfterItsNilCheck(cfgPath string, asRead []byte) {
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	t := l
+	if t != nil {
+		if err := configStillAsRead(t, asRead); err != nil {
+			return
+		}
+	}
+	_ = l.SaveBytes([]byte("libraryName: Snapshot\n"))
+}
+
+func savesThroughAMethodValueAfterItsNilCheck(cfgPath string, cfg *config.Config, asRead []byte) {
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	t := l
+	if t != nil {
+		if err := configStillAsRead(t, asRead); err != nil {
+			return
+		}
+	}
+	save := cfg.Save
+	_ = save(t)
+}
+
+func savesThroughItsNilCheckedTurn(cfgPath string, cfg *config.Config, asRead []byte) {
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	t := l
+	if t != nil {
+		if err := configStillAsRead(t, asRead); err != nil {
+			return
+		}
+	}
+	_ = cfg.Save(t)
+}
+
+func savesIfThroughItsNilCheckedTurn(cfgPath string, cfg *config.Config, asRead []byte) {
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	t := l
+	if t != nil {
+		if err := configStillAsRead(t, asRead); err != nil {
+			return
+		}
+	}
+	_ = cfg.SaveIf(t, nil)
+}
+
+func refusesOnlyWhenItsComparisonFindsNoChange(cfgPath string, cfg *config.Config, asRead []byte) {
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	if !configChangedSinceRead(asRead, l) {
+		return
+	}
+	_ = cfg.Save(l)
+}
+
+func switchesItsRefusalOffWithAConjunct(cfgPath string, cfg *config.Config, asRead []byte, enabled bool) {
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	if enabled && configChangedSinceRead(asRead, l) {
+		return
+	}
+	_ = cfg.Save(l)
+}
+
+func writesThroughAHelper(cfgPath string, data []byte) { _ = writeBlob(cfgPath, data) }
+
+func writeBlob(path string, data []byte) error { return os.WriteFile(path, data, 0o600) }
+
+func reassignsItsNilCheckedTurnThroughAPointer(cfgPath string, cfg *config.Config, asRead []byte, other *config.FileLock) {
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	t := l
+	p := &t
+	if t != nil {
+		if err := configStillAsRead(t, asRead); err != nil {
+			return
+		}
+	}
+	*p = other
+	_ = cfg.Save(t)
+}
+
+func reassignsItsNilCheckedTurnInAClosure(cfgPath string, cfg *config.Config, asRead []byte, other *config.FileLock) {
+	l, _ := config.LockFile(cfgPath)
+	defer l.Unlock()
+	t := l
+	swap := func() { t = other }
+	if t != nil {
+		if err := configStillAsRead(t, asRead); err != nil {
+			return
+		}
+	}
+	swap()
+	_ = cfg.Save(t)
+}
 `
 	sites, _, err := scanConfigWriters("x/x.go", src)
 	if err != nil {
@@ -1528,6 +1760,20 @@ func picksAStaleValueBesideWhatItsTurnFound(cfgPath string, stale *config.Config
 		"x/x.go:overwritesWhatItsTurnFoundThroughAPointer": "config.LockFile",
 		"x/x.go:savesAStaleValueOnALoopsSecondPass":        "config.LockFile",
 		"x/x.go:picksAStaleValueBesideWhatItsTurnFound":    "config.LockFile",
+
+		"x/x.go:comparesUnderAnOptionalAliasAndSavesThroughItsTurn": "config.LockFile",
+		"x/x.go:comparesUnderANilableAliasAndSavesThroughItsTurn":   "config.LockFile",
+		"x/x.go:reassignsItsNilCheckedTurnBeforeItSaves":            "config.LockFile",
+		"x/x.go:savesThroughAnotherNameAfterItsNilCheck":            "config.LockFile",
+		"x/x.go:savesIfThroughAnotherNameAfterItsNilCheck":          "config.LockFile",
+		"x/x.go:savesBytesThroughAnotherNameAfterItsNilCheck":       "config.LockFile",
+		"x/x.go:savesThroughAMethodValueAfterItsNilCheck":           "config.LockFile",
+		"x/x.go:savesThroughItsNilCheckedTurn":                      "config.LockFile",
+		"x/x.go:savesIfThroughItsNilCheckedTurn":                    "config.LockFile",
+		"x/x.go:refusesOnlyWhenItsComparisonFindsNoChange":          "config.LockFile",
+		"x/x.go:switchesItsRefusalOffWithAConjunct":                 "config.LockFile",
+		"x/x.go:reassignsItsNilCheckedTurnThroughAPointer":          "config.LockFile",
+		"x/x.go:reassignsItsNilCheckedTurnInAClosure":               "config.LockFile",
 	}
 	excused := map[string]string{
 		"x/x.go:copiesThePathElsewhere": "writes the bundle",
@@ -1547,6 +1793,20 @@ func picksAStaleValueBesideWhatItsTurnFound(cfgPath string, stale *config.Config
 		"x/x.go:refusesOnACompoundCondition":          "bytes.Equal",
 		"x/x.go:comparesInsideItsTurnsNilCheck":       "configStillAsRead",
 		"x/x.go:comparesInsideAnotherNilCheck":        "configStillAsRead",
+
+		"x/x.go:comparesUnderAnOptionalAliasAndSavesThroughItsTurn": "configStillAsRead",
+		"x/x.go:comparesUnderANilableAliasAndSavesThroughItsTurn":   "configStillAsRead",
+		"x/x.go:reassignsItsNilCheckedTurnBeforeItSaves":            "configStillAsRead",
+		"x/x.go:savesThroughAnotherNameAfterItsNilCheck":            "configStillAsRead",
+		"x/x.go:savesIfThroughAnotherNameAfterItsNilCheck":          "configStillAsRead",
+		"x/x.go:savesBytesThroughAnotherNameAfterItsNilCheck":       "configStillAsRead",
+		"x/x.go:savesThroughAMethodValueAfterItsNilCheck":           "configStillAsRead",
+		"x/x.go:savesThroughItsNilCheckedTurn":                      "configStillAsRead",
+		"x/x.go:savesIfThroughItsNilCheckedTurn":                    "configStillAsRead",
+		"x/x.go:refusesOnlyWhenItsComparisonFindsNoChange":          "configChangedSinceRead",
+		"x/x.go:switchesItsRefusalOffWithAConjunct":                 "configChangedSinceRead",
+		"x/x.go:reassignsItsNilCheckedTurnThroughAPointer":          "configStillAsRead",
+		"x/x.go:reassignsItsNilCheckedTurnInAClosure":               "configStillAsRead",
 	}
 	got := configWriterProblems(sites, named, excused, compared)
 	want := []string{
@@ -1587,6 +1847,13 @@ func picksAStaleValueBesideWhatItsTurnFound(cfgPath string, stale *config.Config
 		"x/x.go:comparesInAClosureItNeverCalls is listed in comparedSaves, and never refuses its save on configChangedSinceRead",
 		"x/x.go:comparesAndSavesAnyway is listed in comparedSaves, and never refuses its save on configChangedSinceRead",
 		"x/x.go:comparesInsideAnotherNilCheck is listed in comparedSaves, and never refuses its save on configStillAsRead",
+		"x/x.go:comparesUnderAnOptionalAliasAndSavesThroughItsTurn is listed in comparedSaves, and never refuses its save on configStillAsRead",
+		"x/x.go:comparesUnderANilableAliasAndSavesThroughItsTurn is listed in comparedSaves, and never refuses its save on configStillAsRead",
+		"x/x.go:reassignsItsNilCheckedTurnBeforeItSaves is listed in comparedSaves, and never refuses its save on configStillAsRead",
+		"x/x.go:savesThroughAnotherNameAfterItsNilCheck is listed in comparedSaves, and never refuses its save on configStillAsRead",
+		"x/x.go:savesIfThroughAnotherNameAfterItsNilCheck is listed in comparedSaves, and never refuses its save on configStillAsRead",
+		"x/x.go:savesBytesThroughAnotherNameAfterItsNilCheck is listed in comparedSaves, and never refuses its save on configStillAsRead",
+		"x/x.go:savesThroughAMethodValueAfterItsNilCheck is listed in comparedSaves, and never refuses its save on configStillAsRead",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("the sweep reported %d problems, want %d:\n%s", len(got), len(want), strings.Join(got, "\n"))
@@ -1609,24 +1876,42 @@ func picksAStaleValueBesideWhatItsTurnFound(cfgPath string, stale *config.Config
 	}
 	for _, decided := range []string{"savesNamedWithItsLock", "decidesOnWhatItsTurnFound", "savesOnlyWhereItsTurnFoundNone",
 		"savesBytesMadeFromWhatItsTurnFound", "decidesAsBindDoes", "comparesWithItsOwnRead",
-		"refusesOnAnErrorItsComparisonReturns", "refusesOnACompoundCondition", "comparesInsideItsTurnsNilCheck"} {
+		"refusesOnAnErrorItsComparisonReturns", "refusesOnACompoundCondition", "comparesInsideItsTurnsNilCheck",
+		"savesThroughItsNilCheckedTurn", "savesIfThroughItsNilCheckedTurn"} {
 		for _, g := range got {
 			if strings.Contains(g, "x/x.go:"+decided+" ") {
 				t.Errorf("the sweep reported %s, which decides on what its turn found: %s", decided, g)
 			}
 		}
 	}
-	// What the sweep cannot see (derivationProblem): a value written through
-	// a pointer, a loop's later pass, and a call handed a stale value beside
-	// what the turn found each save a stale config and pass. Pinned here as
-	// passing, so that a sweep that comes to see one changes this list and
-	// derivationProblem's account of what it cannot see together.
+	// What the sweep cannot see (derivationProblem's list, shape for shape):
+	// a value written through a pointer, a loop's later pass, a call handed a
+	// stale value beside what the turn found, a comparison that refuses on the
+	// wrong answer, a conjunct that switches the refusal off, and an
+	// assignment to the nil-checked turn through a pointer or in a function
+	// literal written before the check, each save a stale config and pass.
+	// Pinned here as passing, so that a sweep that comes to see one changes
+	// this list and derivationProblem's account of what it cannot see together.
 	for _, unseen := range []string{"overwritesWhatItsTurnFoundThroughAPointer", "savesAStaleValueOnALoopsSecondPass",
-		"picksAStaleValueBesideWhatItsTurnFound"} {
+		"picksAStaleValueBesideWhatItsTurnFound", "refusesOnlyWhenItsComparisonFindsNoChange",
+		"switchesItsRefusalOffWithAConjunct", "reassignsItsNilCheckedTurnThroughAPointer",
+		"reassignsItsNilCheckedTurnInAClosure"} {
+		if _, ok := sites["x/x.go:"+unseen]; !ok {
+			t.Errorf("the sweep found no %s, a writer of the shape derivationProblem says it cannot see", unseen)
+		}
 		for _, g := range got {
 			if strings.Contains(g, "x/x.go:"+unseen+" ") {
 				t.Errorf("the sweep reported %s, a shape derivationProblem says it cannot see: update that account and this list: %s", unseen, g)
 			}
+		}
+	}
+	// And the last entry of that list: a helper that writes the path a caller
+	// hands it, while neither function names the path and writes in one: the
+	// sweep, reading one function at a time, finds no writer in either.
+	for _, unseen := range []string{"writesThroughAHelper", "writeBlob"} {
+		if _, ok := sites["x/x.go:"+unseen]; ok {
+			t.Errorf("the sweep took %s for a writer of the config, a helper in another function derivationProblem says it cannot see: "+
+				"update that account and this list", unseen)
 		}
 	}
 	if site := sites["x/x.go:server.savesThroughTheHolder"]; len(site.kinds) != 1 || site.kinds[0] != writesByHolder {
