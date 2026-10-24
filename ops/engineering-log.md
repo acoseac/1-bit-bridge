@@ -202,7 +202,12 @@ Linux runtime/control evidence and validates the reading order on both hosts.
 Two valid walker boundaries now retain hints: a parent step with no component
 left stays at canonical root `/` (every other injected root still refuses it),
 and an absolute link to exactly the injected root is inside it. Both new
-regressions fail on round 5 before the fix. Production hint tests additionally
+regressions fail on round 5 before the fix. Claude's review of the round found
+the reading-level test's named and canonical spellings of the root identical
+on Linux (a bare temporary directory has one spelling there), so
+`TestHintLinkToEitherSpellingOfTheRoot` reaches the root through a link,
+asserts the two spellings differ, and keeps the hint for a link to either;
+dropping the named comparison reddens it. Production hint tests additionally
 pin forty links accepted against forty-one refused, an in-root absolute link,
 and a relative `dir-link/../x` chain whose lexical clean would name the wrong
 file. Independent controls restore each boundary rejection, lower the hop
