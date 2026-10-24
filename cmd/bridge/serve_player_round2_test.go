@@ -17,7 +17,7 @@ func TestPlayerWatchRequestsReleaseWithoutPromisingItsOutcome(t *testing.T) {
 	needsDirectorySync(t)
 	rec := loggingtest.Record(t)
 	dir := t.TempDir()
-	eng, err := engine.New(engine.Config{Backend: newPlayerStandIn(), DataDir: dir, QueuePath: filepath.Join(dir, "queue.json")})
+	eng, err := engine.New(engine.Config{PlayerUUID: "0f8fad5b-d9cb-469f-a165-70867728950e", Backend: newPlayerStandIn(), DataDir: dir, QueuePath: filepath.Join(dir, "queue.json")})
 	if err != nil {
 		t.Fatal(err)
 	}

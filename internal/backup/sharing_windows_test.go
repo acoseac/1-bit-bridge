@@ -35,6 +35,20 @@ func (c *releaseOnReadRetry) Done() <-chan struct{} {
 	return c.Context.Done()
 }
 
+// sameDir reports whether a and b name one directory. WriteBytesDurable
+// renames onto the path its root resolves to (filepath.EvalSymlinks), and on
+// a Windows runner that expands t.TempDir()'s 8.3 short name (RUNNER~1), so a
+// string comparison with the path as written never matches: the rename seam
+// then held nothing and the test proved no retry (CI, 2026-10-24).
+func sameDir(a, b string) bool {
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bi, err := os.Stat(b)
+	return err == nil && os.SameFile(ai, bi)
+}
+
 func TestSnapshotRetriesAHandleHeldAcrossRename(t *testing.T) {
 	for _, name := range []string{engine.ReservationFileName, config.PlayerUUIDFile, "tokens.json", "captured-player-uuid"} {
 		t.Run(name, func(t *testing.T) {
@@ -60,9 +74,9 @@ func TestSnapshotRetriesAHandleHeldAcrossRename(t *testing.T) {
 			// can. DELETE sharing permits its rename; lack of READ sharing
 			// prevents the subsequent backup from opening the renamed file.
 			prev := atomicwrite.SetRenameFuncForTest(func(src, dst string) error {
-				match := dst == path
+				match := strings.EqualFold(filepath.Base(dst), fileName) && sameDir(filepath.Dir(dst), dir)
 				if capturedUUID {
-					match = filepath.Base(dst) == config.PlayerUUIDFile && filepath.Dir(dst) != dir
+					match = strings.EqualFold(filepath.Base(dst), config.PlayerUUIDFile) && !sameDir(filepath.Dir(dst), dir)
 				}
 				if !match {
 					return os.Rename(src, dst)
@@ -107,6 +121,9 @@ func TestSnapshotRetriesAHandleHeldAcrossRename(t *testing.T) {
 			if !capturedUUID {
 				if err := atomicwrite.WriteBytesDurable(dir, path, data, ".sharing-*.tmp"); err != nil {
 					t.Fatal(err)
+				}
+				if ctx.release == nil {
+					t.Fatal("the rename seam held no handle on the renamed file: the fixture never engaged")
 				}
 			}
 			src := backup.Sources{DataDir: dir, PlayerUUID: identity}
