@@ -540,6 +540,32 @@
   the runs, where the transport form stayed on the write in 50 of 50 under
   `-race` (#1001).
 
+- **…and answers nothing once the client gives up: it aborts the handler
+  (`panic(http.ErrAbortHandler)`) rather than return** (2026-10-24, B526).
+  A handler that returns has net/http write an empty 200, after the
+  client's close_notify made its request context end, and a client in the
+  moment between its close_notify and its TCP close takes an answer that
+  races that close (`persistConn.roundTrip`: "Use the response"): the
+  atlas harvest's `TestATickStoppedByShutdownReportsNothingAndStopsThere`
+  then decoded the empty body as EOF and reported `tick_error phase=submit
+  error=EOF` for a tick the shutdown stopped (linux `test -race (rest)`).
+  An aborted handler writes nothing and the server closes the connection,
+  which the client reads as the cancellation it recorded before it hung
+  up. The window is TLS's: `tls.Conn.Close` sends close_notify and then
+  closes the socket, while over plain TCP the client's close is one step,
+  and the server sees the hang-up only once the client can read nothing
+  (the held handlers over `httptest.NewServer` in `internal/enrich` and
+  `internal/updater` return after it and are not exposed; the rule holds
+  for them all the same). **Reproduce it by holding that moment open, not by stress**:
+  `racingHangUpClient` (internal/atlasharvest) sends close_notify when the
+  request's context ends and takes whatever the server sends before the
+  connection ends; against the returning handler it reported EOF twenty
+  runs of twenty, against the aborting one never. The production rule did
+  not move: `ctxerr.WithoutCancellation` quiets the cancellation alone, and
+  quieting every error that came after the loop's context ended would hide
+  a store write that failed as the shutdown began. **Don't let a held test
+  handler return once its client has hung up.**
+
 - **A test whose request gets an answer with no body sends it on a transport
   of its own, never `http.DefaultTransport`** (2026-10-18, backlog B456).
   Every `httptest.Server.Close` calls
