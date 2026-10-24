@@ -223,7 +223,7 @@ Usage now names --discard-floor and the retained-floor contract exactly;
 command tests require the snapshot UUID, both counters above the pre-reset
 floor, a truly empty no-op and output that claims only actual removals.
 Red-first logs, rebased round-five controls, new controls and gates are recorded
-in the round-six scratch report. No commit or push was performed in this round.
+in the round-six scratch report.
 
 
 **Round 7.** The supplied host round-six result on macOS arm64 passed all 12
@@ -265,10 +265,11 @@ Native, Linux and Windows vet, the backup/config/engine race suites and the
 new sandbox-runnable regressions repeated ten times all pass. Formatting and
 docs checks pass.
 Socket-bind refusals are listed separately for the host cmd/bridge rerun.
-No commit or push was performed.
+That host run was stopped unfinished when round eight began in the same
+tree; round eight's host run covers both rounds.
 
 
-**Round 8.** The round-seven host result has not yet been supplied.
+**Round 8.**
 
 Serve boot, start, bind, reset and backup now adopt UUID-only state at 2^31
 plus a random value below 2^24 on BOTH counters. A real main-era engine started
@@ -301,7 +302,10 @@ Linux and Windows vet, formatting, docs checks and the backup/config/engine
 race suites pass. The six socket-free new regressions pass ten race-enabled
 runs each; the full live-serve regression and the updated FIFO boot assertions
 are blocked by the sandbox's socket binds. The report inventories every CLI
-test and names the restricted cases. No commit or push was performed.
+test and names the restricted cases. On the host (macOS, Go 1.27.3),
+`go test -race -count=1` passed cmd/bridge in full (577 s), backup, config and
+all nine player packages, and the live-backup, serve-health, named-pipe, boot
+and player-off cases passed ten race-enabled runs.
 
 ## File-provenance spectrum — floors, the decode filter's transition band, and the v34/v35 pair (PRs #684–#688 + iOS #1338–#1341, 2026-08-14)
 
