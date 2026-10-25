@@ -20,6 +20,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/player/lan"
 	"github.com/acoseac/1-bit-bridge/internal/player/lan/lantest"
 	"github.com/acoseac/1-bit-bridge/internal/player/library"
+	"github.com/acoseac/1-bit-bridge/internal/player/openhome"
 )
 
 // The lines of the library index's build ahead of the first lookup: the
@@ -312,5 +313,49 @@ func TestServeAbandonsALibraryIndexBuildHeldPastItsBound(t *testing.T) {
 	}
 	if lines := rec.Lines(warmStoppedLine); len(lines) != 1 {
 		t.Errorf("the abandoned build's stop logged %q, want once, in this test", lines)
+	}
+}
+
+// TestServeStopsThePlayersLibraryIndexBuildWhenItsSurfaceDoesNotStart pins
+// the build to the surface it is for (the Claude API on the warm's round):
+// when the surface does not start (here openhome.Start refusing it, through
+// openhomeWiring.Start), the player runs without it and stops the build it
+// began at once, before serve's stop, which says so, never keeping an index
+// for a surface that takes no Insert; serve's stop then has nothing of it to
+// wait for.
+func TestServeStopsThePlayersLibraryIndexBuildWhenItsSurfaceDoesNotStart(t *testing.T) {
+	needsDirectorySync(t)
+	rec := loggingtest.Record(t)
+	idx := newHeldIndex(t)
+	ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer + "    openhome: true\n", standIn: newPlayerStandIn(),
+		files: map[string][]byte{"a.flac": []byte("a")}, seams: &servePlayerSeams{store: idx.wrap},
+		with: func(o *serveOpts) {
+			o.playerOpenHome = openhomeWiring{Start: func(openhome.Config) (*openhome.Surface, error) {
+				return nil, errors.New("the surface refused to start")
+			}}
+		}})
+	ps.runningEngine(t)
+	if ps.player.surface != nil {
+		t.Fatal("a surface runs, which this test's start refuses")
+	}
+	select {
+	case <-ps.player.run.warmed:
+	case <-serveGiveUp(t):
+		t.Fatal("the library index's build went on for a surface that did not start")
+	}
+	if lines := rec.Failures("player: the OpenHome surface did not start; the player runs without it"); len(lines) != 1 {
+		t.Errorf("the surface's refusal logged %q, want once", lines)
+	}
+	if lines := rec.Lines(warmStoppedLine); len(lines) != 1 || !strings.HasPrefix(lines[0], "INFO ") {
+		t.Errorf("the build's stop logged %q, want once, at Info", lines)
+	}
+	if lines := rec.Lines(warmBuiltLine); len(lines) != 0 {
+		t.Errorf("the index was built for a surface that did not start: %q", lines)
+	}
+	if code := ps.stopServe(t); code != 0 {
+		t.Fatalf("exit %d; stderr=%s", code, ps.stderr.String())
+	}
+	if lines := rec.Lines(warmAbandonedLine); len(lines) != 0 {
+		t.Errorf("serve's stop abandoned a build: %q", lines)
 	}
 }

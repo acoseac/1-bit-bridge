@@ -464,9 +464,13 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 	if p.plan.openhome {
 		// The build of the library's index begins first, on a goroutine of its
 		// own, so it is under way before a controller can find the surface,
-		// whose listener and discovery do not wait for it (warmLibrary).
+		// whose listener and discovery do not wait for it (warmLibrary); a
+		// surface that does not start takes no Insert, so the build stops at
+		// once, and the shutdown still waits for it.
 		p.warmLibrary(ctx, res)
-		p.startOpenHome(id, w, res)
+		if !p.startOpenHome(id, w, res) {
+			p.run.stopWarm()
+		}
 	}
 	p.markReady()
 	return true

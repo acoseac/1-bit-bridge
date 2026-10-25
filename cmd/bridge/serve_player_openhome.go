@@ -74,6 +74,9 @@ type openhomeWiring struct {
 	Listen    openhome.ListenFunc
 	Limits    openhome.Limits
 	Seams     *openhome.Seams
+	// Start, when set, starts the surface in openhome.Start's place: a boot
+	// test's way to have the surface refuse to start.
+	Start func(openhome.Config) (*openhome.Surface, error)
 	// Started is told the surface once the player starts it.
 	Started func(*openhome.Surface)
 }
@@ -87,24 +90,31 @@ type openhomeWiring struct {
 // resolver, serves now. It listens on each LAN address and registers bound
 // endpoints with serve's shared SSDP subsystem. A surface that cannot start
 // fails alone: the player runs without it, and says so; an address that
-// cannot be bound fails that address alone, said by the surface.
-func (p *bridgePlayer) startOpenHome(id string, w servePlayerWiring, lib openhome.Library) {
+// cannot be bound fails that address alone, said by the surface, which
+// runs on and binds it at a later listing, as it does through a listing that
+// fails. It reports whether the surface started: not when openhome.Start
+// refused it, nor when serve's stop came first.
+func (p *bridgePlayer) startOpenHome(id string, w servePlayerWiring, lib openhome.Library) bool {
 	player := w.Cfg.Output.Player
 	o := w.OpenHome
 	addresses := o.Addresses
 	if addresses == nil {
 		addresses = func() (lan.Inventory, error) { return lan.Look(hostLAN) }
 	}
+	start := o.Start
+	if start == nil {
+		start = openhome.Start
+	}
 	p.mu.Lock()
 	if p.closing {
 		p.mu.Unlock()
-		return
+		return false
 	}
 	var eng openhome.Engine
 	if p.eng != nil {
 		eng = p.eng
 	}
-	s, err := openhome.Start(openhome.Config{
+	s, err := start(openhome.Config{
 		SSDP:      w.SSDP,
 		Device:    openhome.Device{UUID: id, Room: player.Room, ModelNumber: version.ServerVersion},
 		Engine:    eng,
@@ -120,7 +130,7 @@ func (p *bridgePlayer) startOpenHome(id string, w servePlayerWiring, lib openhom
 	if err != nil {
 		p.mu.Unlock()
 		playerLog.Warn("player: the OpenHome surface did not start; the player runs without it", "err", err)
-		return
+		return false
 	}
 	p.surface = s
 	p.mu.Unlock()
@@ -128,6 +138,7 @@ func (p *bridgePlayer) startOpenHome(id string, w servePlayerWiring, lib openhom
 	if o.Started != nil {
 		o.Started(s)
 	}
+	return true
 }
 
 // warmLibrary builds the library resolver's index of the paths by their ids
@@ -141,10 +152,13 @@ func (p *bridgePlayer) startOpenHome(id string, w servePlayerWiring, lib openhom
 // comes while the build runs waits for it in the resolver's turn, with its
 // own budget, which without the build ahead of it would have paid for the
 // whole build. The build runs on a context of ctx's, the player's, that the
-// player's shutdown also ends, and the shutdown waits for it last, within
-// bounds.warm (joinWarm). It reads the index and writes nothing, so it takes
-// no share of the data directory's lock. It logs how it ended (Warm), and a
-// panic on its goroutine is recovered and logged as the player's are.
+// player stops at once when the surface does not start (with no surface no
+// Insert comes, and the index would be kept for the process's life for
+// nothing) and that its shutdown ends too, and the shutdown waits for it
+// last, within bounds.warm (joinWarm). It reads the index and writes
+// nothing, so it takes no share of the data directory's lock. It logs how it
+// ended (Warm), and a panic on its goroutine is recovered and logged as the
+// player's are.
 func (p *bridgePlayer) warmLibrary(ctx context.Context, res *library.Resolver) {
 	wctx, stop := context.WithCancel(ctx)
 	done := make(chan struct{})
