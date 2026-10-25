@@ -18,10 +18,10 @@ import (
 const slowBuild = time.Second
 
 // warmLimits are the listener's limits but its write deadline, which leaves
-// an Insert 300 ms of its budget for its confinement before the edit gate
+// an Insert 500 ms of its budget for its confinement before the edit gate
 // (its budget, Write less budgetMargin, less editBudget). The default
 // limits leave it 3 s: a budget of 9 s less editBudget's 6 s.
-var warmLimits = Limits{Write: budgetMargin + editBudget + 300*time.Millisecond}.orDefaults()
+var warmLimits = Limits{Write: budgetMargin + editBudget + 500*time.Millisecond}.orDefaults()
 
 // slowIndex is the library index of a large library on a slow box: every
 // row is stamped 1, and a read from before that stamp, the one that builds
@@ -91,7 +91,7 @@ func (s *slowIndex) builtTimes() int {
 // before the edit gate, and the library builds its index of the paths by
 // their ids at its first lookup, so that build spends the first Insert's
 // budget: past what the budget leaves an edit (3 s with the default limits,
-// 300 ms under warmLimits), a valid Insert is answered 501, which it was
+// 500 ms under warmLimits), a valid Insert is answered 501, which it was
 // before the warm. Here the first build takes a second. Built ahead of the
 // Insert (library.Resolver.Warm, which serve's player runs as it starts its
 // surface), the first Insert is taken, Read gives its Uri back, and its
