@@ -30,7 +30,7 @@ func writeOfflineLibrary(t *testing.T, roots ...string) (string, string) {
 		LibraryName:     "Test Library",
 	}
 	path := filepath.Join(dir, "bridge.yaml")
-	if err := cfg.Save(path); err != nil {
+	if err := saveConfigAt(cfg, path); err != nil {
 		t.Fatal(err)
 	}
 	return path, data

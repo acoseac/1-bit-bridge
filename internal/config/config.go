@@ -6,9 +6,11 @@
 package config
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/netip"
 	"net/url"
@@ -24,7 +26,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/baseurl"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
@@ -2797,10 +2798,169 @@ const (
 // against the config file's directory, and validates. A returned *Config is
 // ready to hand to downstream subsystems.
 func Load(path string) (*Config, error) {
+	cfg, _, err := LoadFile(path)
+	return cfg, err
+}
+
+// LoadFile is Load, and the bytes it read: what serve hands its live config
+// holder (RuntimeConfig.RecordFile), so that a console save can tell the
+// file another writer changed since from the one serve read. A name that is a
+// symbolic link to no file says so, and what to do, as a turn of the file's
+// lock refuses it.
+func LoadFile(path string) (*Config, []byte, error) {
+	data, err := readConfigFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	cfg, err := loadData(path, data)
+	if err != nil {
+		return nil, nil, err
+	}
+	return cfg, data, nil
+}
+
+// readConfigFile is LoadFile's read of the config file at path, by its name:
+// a name that is a symbolic link to no file says so, and what to do.
+func readConfigFile(path string) ([]byte, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if info, lerr := os.Lstat(path); errors.Is(err, fs.ErrNotExist) && lerr == nil && info.Mode()&fs.ModeSymlink != 0 {
+			err = &linkToNothingError{path: path, err: err}
+		}
 		return nil, fmt.Errorf("read config %q: %w", path, err)
 	}
+	return data, nil
+}
+
+// readConfigTarget is the boot read of the config named path through target,
+// the file its name was resolved to just before: a failure is said as
+// LoadFile says it, of the name as given, never of the file it resolved to.
+func readConfigTarget(path, target string) ([]byte, error) {
+	data, err := os.ReadFile(target)
+	if err != nil {
+		var pe *fs.PathError
+		if errors.As(err, &pe) {
+			err = &fs.PathError{Op: pe.Op, Path: path, Err: pe.Err}
+		}
+		return nil, fmt.Errorf("read config %q: %w", path, err)
+	}
+	return data, nil
+}
+
+// bootReads is how many times LoadFileAt reads a config whose name it cannot
+// say opened one file across a read, before it decides.
+const bootReads = 3
+
+// BootFile is the file serve's boot read of the config read (LoadFileAt),
+// which serve tells its live holder with the bytes (RuntimeConfig.RecordFile):
+// the file the config's name opened for that read, as a turn of the file's
+// lock resolves it (ResolveFile), or no file, where the name could be
+// resolved at none of the reads. Only LoadFileAt makes one, so a file is
+// never "", and a holder told no file keeps that state apart.
+type BootFile struct {
+	// target is the file the answered read was of, and resolved whether
+	// there is one.
+	target   string
+	resolved bool
+}
+
+// LoadFileAt is LoadFile, and the file it read: what serve tells its live
+// config holder with the bytes (RuntimeConfig.RecordFile). The name is
+// resolved just before each read, as a turn of the file's lock resolves it
+// (ResolveFile), the file it resolved to is read, never the name again, and
+// the name is resolved once more just after the read. A read is answered,
+// with that file, when both resolutions agree; the file the name opens then
+// being unreadable, or not there, is the read's error, said of the name as
+// given. A read across which the two differ, or the name resolved on one side
+// alone, is made again, up to bootReads times in all, and a name that never
+// resolved alike on both sides of one is a *NameMovingError: a link on its
+// way was being repointed, and no read can be said to be of the file the name
+// opens. A name resolved at neither side of any of the reads (a resolution
+// that fails for good) is read through the name, and the last of those reads
+// is answered with no file, which the holder saves into no file from
+// (BootUnresolvedError). A read through the name that fails is its error at
+// once (a link to no file says what to do). The config's relative paths
+// resolve against the directory Load takes from path, never the file's,
+// whichever read is answered.
+func LoadFileAt(path string) (cfg *Config, raw []byte, file BootFile, err error) {
+	return loadFileAt(path, bootHooks{})
+}
+
+// bootHooks are what a test runs inside LoadFileAt's reads, at each of them:
+// beforeRead once the name has been resolved and before the file is read,
+// afterRead once the read has returned. A nil hook runs nothing.
+type bootHooks struct {
+	beforeRead, afterRead func()
+}
+
+// loadFileAt is LoadFileAt, running hooks around each read: the windows a
+// test repoints a link in.
+func loadFileAt(path string, hooks bootHooks) (*Config, []byte, BootFile, error) {
+	var byName []byte
+	unresolved := 0
+	for range bootReads {
+		before, beforeErr := resolveBootFile(path)
+		if hooks.beforeRead != nil {
+			hooks.beforeRead()
+		}
+		var raw []byte
+		var readErr error
+		if beforeErr == nil {
+			raw, readErr = readConfigTarget(path, before)
+		} else {
+			raw, readErr = readConfigFile(path)
+		}
+		if hooks.afterRead != nil {
+			hooks.afterRead()
+		}
+		after, afterErr := resolveBootFile(path)
+		switch {
+		case beforeErr == nil && afterErr == nil && after == before:
+			if readErr != nil {
+				return nil, nil, BootFile{}, readErr
+			}
+			cfg, err := loadData(path, raw)
+			if err != nil {
+				return nil, nil, BootFile{}, err
+			}
+			return cfg, raw, BootFile{target: before, resolved: true}, nil
+		case beforeErr != nil && afterErr != nil:
+			if readErr != nil {
+				return nil, nil, BootFile{}, readErr
+			}
+			byName = raw
+			unresolved++
+		}
+	}
+	if unresolved == bootReads {
+		cfg, err := loadData(path, byName)
+		if err != nil {
+			return nil, nil, BootFile{}, err
+		}
+		return cfg, byName, BootFile{}, nil
+	}
+	return nil, nil, BootFile{}, &NameMovingError{Path: path, Reads: bootReads}
+}
+
+// resolveBootFile is how LoadFileAt resolves the config's name around each
+// read: ResolveFile, as a turn of the file's lock resolves it.
+// SetBootResolveForTest replaces it.
+var resolveBootFile = ResolveFile
+
+// SetBootResolveForTest makes LoadFileAt resolve the config's name through
+// fn, and returns what puts the resolution before it back: a test makes the
+// name unresolvable for serve's boot read alone, the turns of the file's lock
+// resolving it as they do. Tests only, and process-global: a test that sets
+// it does not call t.Parallel, and puts it back once every boot read it
+// started has returned.
+func SetBootResolveForTest(fn func(path string) (string, error)) (restore func()) {
+	prev := resolveBootFile
+	resolveBootFile = fn
+	return func() { resolveBootFile = prev }
+}
+
+// loadData is Load over the bytes it read from path.
+func loadData(path string, data []byte) (*Config, error) {
 	var cfg Config
 	// Unknown keys refused, and a whole number written as a fraction
 	// refused as a word there is (DecodeFile, backlog B528).
@@ -4334,74 +4494,46 @@ func (c *Config) VariantSweepMaxDeletePercent() int {
 	return *c.Integrity.VariantSweepMaxDeletePercent
 }
 
-// Save atomically writes c as YAML to path (temp file + rename). Parent
-// directory must exist. Comments and fields unknown to this schema are not
-// preserved — callers that want to keep hand-authored comments should not
-// use Save. `bridge init` and admin-console edits are the intended callers.
-func (c *Config) Save(path string) error {
-	return c.save(path, nil)
+// Save atomically writes c as YAML to the config file l is a turn at (temp
+// file + rename), only during that turn, the lock every writer takes around
+// its read-modify-write (LockFile, Edit), and only over the file the turn
+// found: once the new file is staged, a file another writer changed meanwhile
+// is a *ChangedInTurnError, and nothing is written. The file is staged in the
+// directory its rename lands in, as the OS resolves the config's name.
+// Parent directory must exist. Comments and fields unknown to this schema are
+// not preserved — callers that want to keep hand-authored comments should not
+// use Save.
+func (c *Config) Save(l *FileLock) error {
+	_, err := c.save(l, nil)
+	return err
 }
 
-// SaveIf is Save, asking unchanged once the new file is staged, just before
-// it replaces path: when unchanged returns an error, path is left as it is,
-// the staged file is removed, and that error is returned as it is. A writer
-// that cannot hold off every other writer (library add and remove and init
-// take no lock) asks whether the file still holds what it read, so a save
-// made before that question is not written over (bridge output dac bind).
-// That narrows the window to the instant between the question and the
-// rename, and does not close it: no rename can be made conditional on the
-// file it replaces, so a save that lands in that instant is still written
-// over. A lock that every config writer takes is the fix.
-func (c *Config) SaveIf(path string, unchanged func() error) error {
-	return c.save(path, unchanged)
+// SaveIf is Save, asking unchanged as well once the new file is staged and
+// the turn's own comparison has passed, just before the rename: when
+// unchanged returns an error, the file is left as it is, the staged file is
+// removed, and that error is returned as it is. bridge output dac bind asks
+// whether the file still holds the bytes it read in its turn, with a refusal
+// of its own. Like the turn's comparison it narrows the window to the instant
+// between the question and the rename, and does not close it: no rename can
+// be made conditional on the file it replaces. unchanged's context is the
+// save's, for a read it makes.
+func (c *Config) SaveIf(l *FileLock, unchanged func(ctx context.Context) error) error {
+	_, err := c.save(l, unchanged)
+	return err
 }
 
-// save is Save, with SaveIf's unchanged when it is not nil.
-func (c *Config) save(path string, unchanged func() error) error {
+// save is Save, with SaveIf's unchanged when it is not nil, and answers the
+// bytes it wrote.
+func (c *Config) save(l *FileLock, unchanged func(context.Context) error) ([]byte, error) {
+	if err := l.heldFor(); err != nil {
+		return nil, err
+	}
 	data, err := yaml.Marshal(c)
 	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
+		return nil, fmt.Errorf("marshal config: %w", err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".bridge-*.yaml")
-	if err != nil {
-		return fmt.Errorf("temp file: %w", err)
+	if err := l.write(data, unchanged); err != nil {
+		return nil, err
 	}
-	tmpName := tmp.Name()
-	defer func() {
-		if tmpName != "" {
-			_ = os.Remove(tmpName)
-		}
-	}()
-	// Panic-safety FD close. Registered AFTER the Remove defer so it
-	// runs first (LIFO) — Windows requires the FD closed before
-	// Remove can unlink. See internal/auth/auth.go for the rationale
-	// in detail; pattern repeats across every atomic-write helper.
-	defer func() { _ = tmp.Close() }()
-	// A `sudo bridge library add` beside a service install stages this
-	// file as root; the service reads it at its next start.
-	if err := fsutil.KeepOwner(tmp, path); err != nil {
-		tmp.Close()
-		return fmt.Errorf("keep the config's owner: %w", err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return fmt.Errorf("write tmp: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return fmt.Errorf("sync tmp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close tmp: %w", err)
-	}
-	if unchanged != nil {
-		if err := unchanged(); err != nil {
-			return err
-		}
-	}
-	if err := atomicwrite.RenameWithRetry(tmpName, path); err != nil {
-		return fmt.Errorf("rename: %w", err)
-	}
-	tmpName = "" // suppress defer cleanup
-	return nil
+	return data, nil
 }

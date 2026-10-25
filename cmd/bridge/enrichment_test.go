@@ -356,7 +356,7 @@ func writeProbeFixture(t *testing.T, adminAddr string) (*config.Config, string) 
 		ScanIntervalSec: 3600,
 		LibraryName:     "T",
 	}
-	if err := cfg.Save(cfgPath); err != nil {
+	if err := saveConfigAt(cfg, cfgPath); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := config.Load(cfgPath)

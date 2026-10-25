@@ -294,7 +294,7 @@ func precreate(path string, perm os.FileMode, dst string) error {
 	if err != nil {
 		err = fmt.Errorf("stat %s: %w", path, err)
 	} else if have != want {
-		if cerr := s.chown(f, dst, want); cerr != nil {
+		if cerr := s.chown(f, path, want); cerr != nil {
 			err = fmt.Errorf("give %s to uid %d gid %d, the owner of %s: %w", path, want.uid, want.gid, dst, cerr)
 		}
 	}
@@ -333,6 +333,58 @@ func SimulateRootForTest(uid, gid int) (changes func() []OwnerChange, restore fu
 		},
 		dirTarget: func(*os.Root, dirOwnerPolicy, bool, string) (fileOwner, error) {
 			return fileOwner{uid: uid, gid: gid}, nil
+		},
+		chownDir: func(_ *os.Root, _, path string, o fileOwner) error {
+			record(path, o)
+			return nil
+		},
+	}
+	prev := activeOwnerSeams.Swap(s)
+	return func() []OwnerChange {
+			mu.Lock()
+			defer mu.Unlock()
+			return append([]OwnerChange(nil), got...)
+		}, func() {
+			activeOwnerSeams.Store(prev)
+		}
+}
+
+// SimulateRootOwnersForTest is SimulateRootForTest over entries that have
+// owners of their own: ownerOf answers the owner of each path it is asked
+// about, and a destination's owner is looked up as KeepOwner looks it up,
+// the owner of the entry there when there is one (os.Lstat) and otherwise
+// of its directory, and a new directory's is that of the directory it is
+// made in. So a test that does not run as root can give the config file
+// and the directory holding it two owners, and see which one a writer
+// takes. Tests only; a no-op on Windows, as SimulateRootForTest is.
+func SimulateRootOwnersForTest(ownerOf func(path string) (uid, gid int)) (changes func() []OwnerChange, restore func()) {
+	var mu sync.Mutex
+	var got []OwnerChange
+	record := func(dst string, o fileOwner) {
+		mu.Lock()
+		defer mu.Unlock()
+		got = append(got, OwnerChange{Dst: dst, UID: o.uid, GID: o.gid})
+	}
+	owner := func(p string) fileOwner {
+		uid, gid := ownerOf(p)
+		return fileOwner{uid: uid, gid: gid}
+	}
+	s := &ownerSeams{
+		euid: func() int { return 0 },
+		target: func(dst string) (fileOwner, error) {
+			if _, err := os.Lstat(dst); err == nil {
+				return owner(dst), nil
+			} else if !errors.Is(err, fs.ErrNotExist) {
+				return fileOwner{}, err
+			}
+			return owner(filepath.Dir(dst)), nil
+		},
+		chown: func(_ *os.File, dst string, o fileOwner) error {
+			record(dst, o)
+			return nil
+		},
+		dirTarget: func(r *os.Root, _ dirOwnerPolicy, _ bool, _ string) (fileOwner, error) {
+			return owner(r.Name()), nil
 		},
 		chownDir: func(_ *os.Root, _, path string, o fileOwner) error {
 			record(path, o)

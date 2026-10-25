@@ -62,7 +62,7 @@ func TestTheOpenHomeOptInLoadsAndRoundTrips(t *testing.T) {
 			if on, why := cfg.PlayerEnabled("linux"); !on || why != nil {
 				t.Fatalf("PlayerEnabled = %v, %v", on, why)
 			}
-			if err := cfg.Save(path); err != nil {
+			if err := saveAt(cfg, path); err != nil {
 				t.Fatal(err)
 			}
 			b, err := os.ReadFile(path)

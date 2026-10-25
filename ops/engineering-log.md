@@ -26,6 +26,7 @@ reaches a session that has not gone looking for it.
 
 ## Index
 - [2026-10-24 — B470 PR 5a4: the player's OpenHome writes, Insert's Uri confined to the bridge's own tracks, and the owner's dogfood](#2026-10-24--b470-pr-5a4-the-players-openhome-writes-inserts-uri-confined-to-the-bridges-own-tracks-and-the-owners-dogfood)
+- [2026-10-24 — B506: one lock for every bridge.yaml writer, and each reads the file again in its turn](#2026-10-24--b506-one-lock-for-every-bridgeyaml-writer-and-each-reads-the-file-again-in-its-turn)
 - [2026-10-25 — CI on Ubuntu 26.04: the race tests' TMPDIR on the runner's disk, and the fake sox's claim made atomic](#2026-10-25--ci-on-ubuntu-2604-the-race-tests-tmpdir-on-the-runners-disk-and-the-fake-soxs-claim-made-atomic)
 - [2026-10-24 — B526 items 2 and 3, B532 and B536: four tests CI reddened at random, each red first in its losing order](#2026-10-24--b526-items-2-and-3-b532-and-b536-four-tests-ci-reddened-at-random-each-red-first-in-its-losing-order)
 - [2026-10-24 — B500 round 8: key the build-site census on the verb](#2026-10-24--b500-round-8-key-the-build-site-census-on-the-verb)
@@ -60655,6 +60656,1296 @@ failed test names, cached outcomes, logs and the verified control are in the
 external round-3 report. Linux/Windows execution and the manual owner gate
 remain unrun. No commit was made.
 
+## 2026-10-24 — B506: one lock for every bridge.yaml writer, and each reads the file again in its turn
+
+Several commands and serve itself write `bridge.yaml`, each by reading the
+file, changing what it read and writing it back, and nothing made them take
+turns. `bridge library add` and `remove` (the offline path, when the admin
+probe finds no bridge) and `bridge init`'s save took no lock at all. `bridge
+output dac bind` (B470 4a) read the file again under the data dir's lock and
+saved through `SaveIf`, which refuses when the bytes changed since its read:
+that narrowed the window to the instant before its rename and could not close
+it, since no rename can be made conditional on the file it replaces, and 4a's
+rule called "a lock every config writer takes" the fix. `bridge restore`
+copied a snapshot's `bridge.yaml` over the file, serve's `--init-if-missing`
+wrote its seed after a stat, and a running serve's console saves
+(`RuntimeConfig.Update`: the settings PATCH, roots add and remove, the
+variants directory, UPnP server CRUD) wrote the live snapshot, read at boot,
+over whatever the file held. Two writers could each lose the other's update.
+
+### The lock
+
+`config.LockFile(path)` takes an exclusive kernel lock (`fsutil.TryLock`:
+flock on unix, LockFileEx on Windows) on `.bridge.yaml.lock`
+(`config.LockFileName`: a dot, the config file's base name, `.lock`) in the
+config file's directory, opened through `fsutil.OpenLockFile`, and answers a
+`*config.FileLock`, the writer's turn. Beside the config file and not on it:
+`Save` replaces the file by a rename, which a lock on the old file would not
+follow, and on Windows a locked range refuses other handles' reads, while
+everything reads the config. Not in the data dir: the config names its data
+dir, a write can change it, and init and the seed write a config before any
+data dir is known. The file is never removed; the kernel drops the lock with
+the process however it exits.
+
+It is held only around one read-modify-write: init's final check and save,
+bind's read-to-save, library add's and remove's offline change, a restore's
+writes, one console save; never a prompt, never a process's life.
+
+**The bound is `config.LockWait`, 5 s**, asked again every 25 ms, then a
+`*config.BusyError` (matching `config.ErrBusy`): "another bridge command or
+the running bridge is changing <path>, and held its lock for longer than 5s,
+so nothing was written: try again". It names the file and nothing it holds.
+Why 5 s: an ordinary turn is milliseconds (a read, a staged write with its
+fsync, a rename; on Windows at most atomicwrite's 750 ms of rename retries),
+the long turns are a CLI's own (library add's and remove's index change, a
+restore's copy), and a console save is a request someone is watching, which
+is better refused with a "try again" than left hanging; SQLite's busy wait is
+the same 5 s.
+
+A filesystem that keeps no locks (TryLock answering anything but contention)
+is not a refusal: the turn is taken without the lock (`FileLock.Unheld`), a
+Warn once per file and process says so, and the writers there keep their own
+byte comparisons, as before. That is serve's data-dir rule (a lock that
+cannot be taken must not stop a bridge from starting), here a console from
+saving any setting. (Corrected by the second round, below: only bind and the
+console had a byte comparison of their own, and `Edit`, a restore and the
+seed had none; and "anything but contention" took an I/O error for a
+filesystem with no locks. Now only the lock's own no-locks answers leave a
+turn unlocked, and every save in a turn compares the file just before its
+rename.)
+
+`Save` and `SaveIf` take the turn, never a path, and write the file it is at;
+a nil turn or one given back is refused (`heldFor`). So no writer of the
+config can compile without the lock in hand, or write after giving it back.
+`config.Edit(path, fn)` is the read-modify-write in one call. `SaveIf`'s byte
+comparison stays where it was, in bind, as the second guard against a writer
+that takes no lock: an edit, or a bridge older than the lock.
+
+### The writers, and how each takes it
+
+Found with `git grep` for `.Save(`, `.SaveIf(`, `CfgHolder.Update`,
+`cfgHolder.Update`, the atomic writers and every name the tree gives the
+config's path (`cfgPath`, `configPath`, `CfgPath`, `BridgeYAML`,
+`resolvedCfgPath`, `cfgFile`, `absCfgPath`):
+
+- `bridge library add` and `remove`, offline (`cmd/bridge/library.go`):
+  `config.Edit` around the whole offline change. The config is read again
+  in the turn and every decision (already configured, `ValidateRoots`, the
+  1→N wipe, the last root, the basename guard, the collapse) is made on that
+  copy; the library index's wipe or prune runs in the turn. Messages and
+  exit codes are as they were. The remove's index change is
+  `removeRootOffline`.
+- `bridge init`'s save (`cmd/bridge/init.go`): `saveInitConfig`, the lock,
+  then `configChangedSinceRead` (which reads the file again and refuses one
+  that is not as the run read it at its start), then `cfg.Save`. The run's
+  prompts stay outside the turn.
+- serve's `--init-if-missing` seed (`writeAutoInitConfig`): the lock, then
+  the seed only while the file is still missing; it answers whether it
+  wrote, and the boot's "wrote a default" line follows.
+- `bridge output dac bind` (`runDACBind`): the data dir's lock, then
+  bridge.yaml's, held from its read to its `SaveIf`, given back before it
+  makes the player's UUID.
+- `bridge restore` (`backup.RestoreWithOptions`): the lock, when the
+  snapshot holds bridge.yaml and the caller maps it, before the first write
+  (the player's reservation), held to the end, so a busy config refuses the
+  restore with nothing restored rather than half of it.
+- serve's console saves (`RuntimeConfig.Update`, which the settings PATCH,
+  roots add and remove, the variants directory and the UPnP adapter call):
+  the lock after `fn`, then the file read again, and the save only over the
+  bytes the holder last read or wrote. `runServe` hands the holder the bytes
+  it loaded at boot (`config.LoadFile`, `loadCLIConfigFile`, `RecordFile`),
+  and each save records its own. Over a file another writer changed or
+  removed since, nothing is saved or stored and a
+  `*config.ChangedOutsideError` says so ("…restart the bridge to load the
+  file, then make the change again"), through the console's existing 500
+  `save-config` with the message.
+
+`backup.Snapshot` names the config's path and writes only the snapshot's
+files; the pin excuses it by name. `bridge backup`, doctor, and every other
+loader read the config and write nothing.
+
+### Refused, not merged
+
+A console save over a file another writer changed is refused rather than
+merged. A merge was weighed: apply the leaves the PATCH changed to the file
+as it is, refusing a leaf both changed. It was not taken, because serve's
+live snapshot differs from the file by more than another writer's changes:
+`--addr` (every console test bridge passes it, and it is in the live copy and
+not the file), the defaults, resolved paths and environment overrides `Load`
+puts in, and an unread player block whose reason names a line. A merge would
+either refuse saves that conflict with nothing (a console change of
+`listenAddress` under `--addr`) or need a record of every leaf the two
+disagree on, and its validation of the merged copy would log the player-off
+warning twice per save over an unread block. The refusal loses nothing (the
+other writer's change stays, and the console is told what to do), and nothing
+reloads the config live (out of scope). A follow-up could merge.
+
+### Order with the data dir's lock
+
+A command that takes both takes the data dir's first and bridge.yaml's
+inside it: bind and restore by their code, serve because it holds the data
+dir for its life and takes bridge.yaml's per save. Nothing takes the data
+dir's lock while it holds bridge.yaml's. The data dir's lock is a try that
+never waits and bridge.yaml's waits at most 5 s, so no order could block
+forever; the fixed order keeps it so if the data dir's lock ever waits, and
+keeps a command from holding bridge.yaml's, and every writer behind it, while
+it is refused the data dir.
+
+### Red first
+
+The new tests compile against main's code (the lock held through a second
+open of `.bridge.yaml.lock` with `fsutil` directly, fixtures written as
+YAML), with only library add's and remove's `libraryEnv.beforeLock` seam
+added. On main:
+
+- `TestLibraryChangesKeepASettingsSaveThatLandsAfterTheirRead`: for add and
+  for remove, "the command wrote over the settings save that landed after its
+  read: libraryName \"Test Library\"".
+- `TestBindKeepsALibraryAddThatLandsInItsWindow`: "bind: exit 1 … changed
+  after bind read it, so the binding was not written", "the binding is gone".
+- `TestServeRefusesASettingsSaveOverAConfigAnotherWriterChanged`: "the
+  console's save went through over a file another writer changed:
+  {\"restartRequired\":false,\"fields\":{\"libraryName\":{\"status\":\"live\"}}}",
+  and the file rewritten.
+- `TestEveryConfigWriterWaitsForTheLockThenRefuses`: library add, library
+  remove, init's rewrite, bind and restore each "went through while another
+  held the lock" in 18 to 149 ms and changed the file. (The seed's case, added
+  with the fix, is shown by its control.)
+- `TestARestoreRefusedTheLockRestoresNothing`: "restore went through while
+  another held the config's lock".
+- `TestTheDataDirLockComesBeforeTheConfigLock`: bind and restore, with
+  bridge.yaml's lock held, "returned before bridge.yaml's lock was free, so
+  it never waited for it (exit 0)". The both-held cases pass on main: both
+  are refused at the data dir there too.
+- `TestEveryConfigWriterTakesTheConfigLock`: nine problems, every writer
+  ("libraryAddCmd calls the config's Save or SaveIf and never calls
+  config.Edit", "initCmd calls the config's Save or SaveIf, and configWriters
+  does not name it", "RestoreWithOptions writes a file while it names the
+  config's path and never calls config.LockFile", …).
+
+With the fix every one passes. Each CLI writer, held off by another open of
+the lock, answered after 5.03 to 5.08 s, refused, the file as it was; the
+console's save after 5 s (`TestAConsoleSaveWaitsForTheLockThenRefuses`), and
+the next one went through once the lock was free.
+
+### Negative controls
+
+Each run against the committed change, one mutation at a time, the file put
+back from git after it; every one went red:
+
+1. library add saves the copy it read before its turn (`*cfg = *stale` as
+   the first statement of its `config.Edit` closure):
+   `TestLibraryChangesKeepASettingsSaveThatLandsAfterTheirRead/library_add`,
+   "libraryName \"Test Library\"" (remove, unmutated, passed).
+2. `RuntimeConfig.Update` without its comparison (`if false &&
+   r.fileKnown`): `TestUpdateRefusesAFileAnotherWriterChanged`'s three
+   changed-file cases, "= <nil>, want a *ChangedOutsideError", and
+   `TestServeRefusesASettingsSaveOverAConfigAnotherWriterChanged`, 200
+   `live` and the file rewritten.
+3. `runServe` without `RecordFile` (the wiring):
+   `TestServeRefusesASettingsSaveOverAConfigAnotherWriterChanged`, the same.
+4. `lockFile` taking a held lock for no lock at all (no wait, no refusal):
+   `TestALockAnotherHoldsIsWaitedForThenRefused` ("a held lock was taken"),
+   `TestUpdateWaitsForTheLockThenRefuses` ("answered after 9ms"),
+   `TestAConsoleSaveWaitsForTheLockThenRefuses`, and every case of
+   `TestEveryConfigWriterWaitsForTheLockThenRefuses`.
+5. bind taking bridge.yaml's lock before the data dir's:
+   `TestTheDataDirLockComesBeforeTheConfigLock`'s two bind cases, "did not
+   hold the data dir while it waited" and "refused after 5.02s: it waited
+   for bridge.yaml's lock before it asked for the data dir" (restore's
+   cases, unmutated, passed).
+6. restore taking the lock only at its bridge.yaml copy:
+   `TestARestoreRefusedTheLockRestoresNothing`, "the refused restore
+   replaced the database".
+7. serve's seed written with `os.WriteFile` and no lock:
+   `TestEveryConfigWriterTakesTheConfigLock` ("writeAutoInitConfig writes a
+   file while it names the config's path and never calls config.LockFile")
+   and the seed's case of the bound test.
+8. A writer nobody named (`saveSomewhere`, a `cfg.Save(l)` in
+   configpath.go): `TestEveryConfigWriterTakesTheConfigLock`, "configWriters
+   does not name it".
+9. `heldFor` answering nil: `TestASaveNeedsATurnItHolds`, a nil dereference
+   in `Save(nil)`; with only the given-back check dropped, "a save after the
+   turn was given back = <nil>", the SaveIf through, the file written.
+10. `Edit` loading before its turn: `TestEditReadsTheFileInItsTurn`, "saw
+    libraryName \"Before\"".
+11. init's check moved before its lock:
+    `TestTheChangedConfigCheckIsTheStepBeforeSave`, "asks
+    configChangedSinceRead … before it takes bridge.yaml's lock".
+12. The seed without its stat in the turn:
+    `TestTheSeedKeepsAConfigWrittenBeforeItsTurn`, "wrote true".
+13. bind taking bridge.yaml's lock only just before its `SaveIf`:
+    `TestBindKeepsALibraryAddThatLandsInItsWindow`, bind refused by its byte
+    comparison and the binding gone.
+14. A filesystem with no locks refused:
+    `TestAFilesystemThatKeepsNoLocksIsNoRefusal`.
+15. `Config.save` not asking `heldFor`: `TestEveryConfigWriterTakesTheConfigLock`,
+    "does not ask heldFor".
+
+### Other tests the change moved
+
+- `TestRuntimeConfigUpdate`'s "save failure" case put the config in a
+  directory that does not exist, where the lock's open now fails first; it
+  is now a directory at the config's path, which the rename cannot replace,
+  beside a case for the lock that cannot be opened.
+- `TestSaveAsRootKeepsTheConfigOwner` and the two backup root tests now name
+  the lock file among the files given the install's owner: run as root, the
+  first writer creates it with the directory's owner (Precreate), or the
+  service could not open it for its next save.
+- `TestTheChangedConfigCheckIsTheStepBeforeSave` pins the check and the save
+  in `saveInitConfig`, after its lock, and initCmd calling it once.
+- Every fixture that saved a config (`cfg.Save(path)`) saves through a test
+  helper that takes the lock (`saveAt`, `saveConfigAt`).
+- bind's refusal text no longer blames library add, remove and init ("something
+  saved it without bridge.yaml's lock (an edit, or a bridge older than the
+  lock)"), and its docblocks and test docblocks say why bind still refuses
+  beside a serve: serve reads the binding only at its next start, and its
+  console would refuse a save over the file bind changed.
+
+### Checks
+
+`make fmt vet test`, `make build-all` and `make docs-check` through the build
+lock; `go test -race` of `cmd/bridge`, `internal/config` and
+`internal/fsutil`; `GOOS=windows go vet` of `cmd/bridge`, `internal/config`,
+`internal/backup`, `internal/admin` and `internal/fsutil`. The Windows run
+itself is CI's leg. `make fmt` rewrote nothing (Go 1.27.3, go.mod's 1.27.2
+cannot be fetched here), vet was clean. `make test` passed 73 packages,
+`cmd/bridge` (635 s) and `internal/fsutil` among them under the race
+detector, and failed two: `internal/config`, where the race detector caught
+the lock tests' own holder giving its lock back from a goroutine beside its
+cleanup (a plain bool; it gives it back once now, and the package then passed
+under `-race`), and `internal/handshakelog`'s
+`TestAProbeOfASpecificBoundIPIsNotLogged`, whose dial to this host's
+address on a point-to-point VPN tunnel (`utun40`) times out on every
+run; that test's binary has no package this change touches. `make build-all`
+built all six targets, and `make docs-check` passed. Rules: config-lifecycle.md (the lock), cli-serve.md (the
+order and the CLI writers) and player.md's bind bullet, written by the
+orchestrator from the worker's report; long forms in
+`ops/History-rules-config-lifecycle.md`, `ops/History-rules-cli-serve.md`
+and `ops/History-rules-player.md`. The bind bullet moved to its long form
+whole, with this change in it, and player.md keeps its one line: the file
+stood at 97.2% of its budget, and the budget check asks for an entry to move
+out before anything is added there.
+
+### Second round: the reviews' findings
+
+Two reviews read the first round (Codex's, static, five findings; a Claude
+review, five Low findings), and the orchestrator decided each: the findings
+below, all taken. Each fix was red first, on the first round's code with
+only the seams of two commits that change no behaviour (20415193, d05bab45):
+`config.LockWaitedForTest`, a channel closed the first time a writer of a
+config file finds its lock held; `config.OnSaveStagedForTest`, a test's
+writer run between a save's staging and its rename; `fsutil.
+SimulateRootOwnersForTest`, which gives each path an owner of its own (and
+Precreate's recorded change names the file it made, not the path whose
+owner it took); and a restore's unexported hook just before it writes
+bridge.yaml. The fixes are 8566ca32.
+
+**The lock file's owner** (Codex's first, the Claude review's fifth). Run as
+root, the lock file took the directory's owner, through `OpenLockFile`'s
+Precreate, while `Save` keeps bridge.yaml's: a user's config in a directory
+root owns (`/tmp`, a mount point, `root:bridge 0775`) had its lock made
+root's 0600 by the first `sudo bridge library add`, and every later save of
+the config's own user failed at "open the lock beside …". Now
+`fsutil.OpenLockFileLike(dir, name, like)` precreates it with the owner
+`KeepOwner` would give a file staged for the config file: the config's when
+it exists, the directory's only while it does not; 0600 for that owner. A
+lock file already there is opened as it is. Red on the seams:
+`TestALockFileMadeAsRootTakesTheConfigsOwner`, "owner changes =
+[{Dst:…/.bridge.yaml.lock UID:0 GID:0}], want exactly {… UID:4242
+GID:4243}", the directory root's and the config 4242's; before there is a
+config file, the directory's, both before and after.
+
+**One destination, one lock** (Codex's second). `filepath.Dir` cleans
+lexically: with `cfg/link` leading to `real/sub`, `cfg/link/../bridge.yaml`
+is `real/bridge.yaml` to the OS, and its lock was `cfg/.bridge.yaml.lock`,
+so two library commands given the two names took two locks. Save staged in
+that cleaned directory too, then renamed across into `real` (and a restore's
+copy of bridge.yaml did the same through `writeFrom`): it fails across
+filesystems, and a save in a directory the writer cannot write fails at
+once. Now `fsutil.ResolveParent` gives the directory a write lands in as the
+OS resolves the name: on unix the directory part as written, made absolute
+by the working directory without cleaning, through `filepath.EvalSymlinks`,
+which follows a link where it stands and takes the `..` after it from where
+the link leads; on Windows `filepath.Abs`, which is Win32's own
+normalisation, `..` by the name, before any link is followed. The turn keeps
+that directory and the file in it, the lock is beside that file, and every
+save stages there and renames onto it; messages keep the name the writer
+gave. Red on the seams: `TestTwoNamesOfOneConfigTakeOneLock` ("an Edit
+through …/cfg/link/../bridge.yaml went through while a turn through
+…/real/bridge.yaml was held: it took another lock", and the second turn's
+change gone from the file), `TestASaveThroughALinkStagesWhereItRenames`
+("temp file: open …/cfg/.bridge-835027459.yaml: permission denied", with a
+lock file waiting in `cfg` so the old code reached its save). Unix only.
+
+**The console's save** (the Claude review's second, Codex's third). `Update`
+ran `fn` before it took the turn and compared the file, and the console's
+root changes did their library index change before calling `Update`: the
+1→N add's wipe (every filesystem row, every rendition and waveform unlinked
+once it commits), a remove's prefix delete, a collapse's wipe. B506 makes a
+refused save routine after any outside write, lasting until a restart, and
+each retry wiped again. And the comparison came before the marshal, the
+staged write and its fsync, with nothing after it, so an edit landing in
+those was written over and the console said success. Now `Update` takes the
+turn and compares before it clones and runs `fn`, the root handlers'
+manifest change runs inside `fn`, and the save compares again just before
+its rename (the turn's own comparison, below), which `Update` answers with
+its `*ChangedOutsideError`. Red on the seams:
+`TestARefusedUpdateRunsNoneOfItsChange` ("Update ran its change before it
+compared the file, and refused the save after"),
+`TestUpdateWaitsForTheLockThenRefuses` (the same before a busy refusal),
+`TestUpdateComparesTheFileAgainJustBeforeItsRename` ("= <nil>, want a
+*ChangedOutsideError"), and `TestARootChangeTheSaveRefusesLeavesTheLibraryAlone`
+(an add that would wipe, a remove that would prune, a remove that would
+collapse: "the refused root change unlinked the rendition
+…/data/variants/Album-song.flac" in each, after the compensating scan had
+put every row back).
+
+The orchestrator's sentence was that every `Update` caller's side effects
+outside `fn` run only after `Update` returns. They now run inside `fn`,
+which since this change runs only after the comparison, and never before
+`Update`: the deviation from "after it returns" is deliberate. Doing the
+manifest change after the save would reverse PR #22's order (the manifest
+first, the root list's save only once it succeeded: `TestRootsRemoveManifestFailureDoesNotCommitRoots`),
+and a manifest change that failed after the save landed would need a
+second save to put the roots back, which can fail in its turn and leave the
+config naming roots the manifest does not hold. Inside `fn` it is one turn
+with the save, as library add's and remove's offline change is in `Edit`; a
+wipe that fails saves nothing; a save that fails after it, or that the
+just-before-rename comparison refuses (only a writer that takes no turns can
+land there), lands where the compensating scan heals and the carry is
+retargeted, as a failed save always did. (Corrected by the third round,
+below: the scan heals the rows alone, never the renditions and waveforms the
+wipe or the prune unlinked, and the window such a writer could land in was
+all of `fn`, the index change included, and the staging, not "there" alone.)
+The settings PATCH, the variants directory and the UPnP server writer do
+nothing outside `fn` before `Update`. The cost: the turn is held for the
+wipe, so a CLI writer behind it waits, and past 5 s is told to try again.
+
+**A turn without the lock, and the comparison every save makes** (the Claude
+review's third). `lockFile` took every answer of the lock but contention for
+"this filesystem keeps no locks" and went on unlocked: an EIO or an EBADF
+dropped mutual exclusion, in silence after the first warning, and the rule
+and this entry said the writers there were back to their own byte
+comparisons, which `Edit`, a restore and the seed did not have. Now only the
+lock's own no-locks answers leave a turn unlocked (`fsutil.KeepsNoLocks`:
+ENOLCK, EOPNOTSUPP, ENOTSUP, `errors.ErrUnsupported`, which ENOSYS matches;
+on Windows ERROR_NOT_SUPPORTED and ERROR_INVALID_FUNCTION); any other is
+returned ("take the lock beside …: …"). And every turn reads the file once it
+is taken (`found`, through `fsutil.ReadAsFile`), every save in it (Save,
+SaveIf, and `SaveBytes`, which restore now writes bridge.yaml through)
+compares the file with that just before its rename and refuses with a
+`*ChangedInTurnError`, whichever mode the turn is in. Red on the seams:
+`TestOnlyAFilesystemThatKeepsNoLocksTakesTheTurnUnlocked` ("input/output
+error: took the turn without the lock", and EBADF, EINVAL and an error of no
+errno); `TestAnUnlockedTurnSavesOnlyOverWhatItFound` (a turn without the
+lock, over a file another writer changed and over one that appeared where
+the turn found none, each "= <nil>, want a refusal" and the other writer's
+file replaced); `TestEditSavesOnlyOverTheFileItRead`;
+`TestARestoreLeavesAConfigChangedInItsTurn` ("the restore wrote the
+snapshot's bridge.yaml over the other writer's");
+`TestServesSeedLeavesAConfigThatAppearsWhileItSaves` ("the seed says it
+wrote its default over the config that appeared");
+`TestInitsSaveLeavesAConfigChangedWhileItSaves` ("init's save went through
+over a config edited while it saved"). What each writer makes of the
+refusal: the console its `*ChangedOutsideError`; the seed "wrote nothing",
+and serve loads what appeared; init its own "changed while this init ran …
+this run did not write it", exit 1; bind its own "changed after bind read
+it" (the turn's comparison runs before bind's `SaveIf` one, and the two
+differ only by the instant each read); a restore "restore bridge.yaml: …";
+library add and remove "save config: …", retargeting the carry after a wipe.
+
+**The pin** (Codex's fourth, the Claude review's fourth). The sweep missed
+writers by their shape: the literal "bridge.yaml" with no listed path name,
+os.Root's writes, fsutil's and atomicwrite's writers beyond four names, a
+package-level `var f = func(){…}`, a method value (`save := cfg.Save`), and
+a writer whose lock came after its read (the first round's control 13, bind's
+lock moved to just before its `SaveIf`, passed it). It now reads each
+function and each package-level variable's value; a save, an Edit or a
+holder's Update whether called or taken as a value; a file write while the
+function names the config's path or the literal, a write being os's or an
+`*os.Root`'s WriteFile, Create or Rename, OpenFile with a flag that writes
+(or one it cannot read), any atomicwrite or fsutil function named Write… or
+Rename…, `fsutil.Precreate`, and `copyFile` and `writeFrom` by name; and a
+writer that saves itself must take its lock before it saves and make the
+save from a read in the turn: the last read of the config before its first
+save must follow the lock (a writer that reads before its turn to decide
+and again in it, bind and library add, passes). It is not "the lock before
+the first read", which bind's first read, before its data dir's lock, would
+fail; library add's and the console's saves are made in `Edit` and `Update`,
+which read in their own turn. The config's own write must call `heldFor`,
+`stillAsFound` and its rename. Each new shape has a case in
+`TestTheConfigWriterSweepReportsEveryShape`, which reported 8 problems of 19
+on the first round's sweep. Its blind spot, named in the test and the long
+form: it reads one function at a time, so a helper handed the path by a
+caller elsewhere, and writing it, is not seen; and the order is the source's
+positions, not the control flow's.
+
+**The waits** (Codex's fifth, the Claude review's first). Three tests stood a
+time in for an event: bind's window test let the add run 300 ms and went on
+whether or not it had reached the lock (a late add leaves the same file, so
+the test passed with library add's lock removed whenever the goroutine was
+slow); `TestEditReadsTheFileInItsTurn` slept 100 ms, so its control caught
+the defect only when the goroutine read in time; the lock-order test asked
+the data dir's lock halfway through the 5 s wait, which a slow runner could
+miss either way. Each now waits for `LockWaitedForTest`'s channel, and fails
+at once when the writer finishes first: controls 10 and 13 below went red 20
+times in 20. The tests that wait out the whole 5 s and share nothing run in
+parallel (`TestALockAnotherHoldsIsWaitedForThenRefused`,
+`TestUpdateWaitsForTheLockThenRefuses`, `TestARestoreRefusedTheLockRestoresNothing`,
+`TestEveryConfigWriterWaitsForTheLockThenRefuses`); the console's
+(`TestAConsoleSaveWaitsForTheLockThenRefuses`) boots a serve, and no serve
+test in `cmd/bridge` runs beside another, so it stays sequential.
+
+### Negative controls of the second round
+
+Each against 8566ca32, one mutation at a time, the file put back from git
+after it; every one went red:
+
+1. The lock file takes its own path's owner (`OpenLockFileLike`'s `like` the
+   lock path): `TestALockFileMadeAsRootTakesTheConfigsOwner`, given 0:0.
+2. The lock opened in `filepath.Dir(path)`: `TestTwoNamesOfOneConfigTakeOneLock`,
+   "went through while a turn … was held: it took another lock" (and the
+   first turn's own save then refused by the turn's comparison, which kept
+   the second turn's change: the defence behind the lock held).
+3. A save staged in `filepath.Dir(l.path)`: `TestASaveThroughALinkStagesWhereItRenames`,
+   "temp file: … permission denied".
+4. `Update` running `fn` before its turn: `TestARefusedUpdateRunsNoneOfItsChange`,
+   `TestUpdateWaitsForTheLockThenRefuses`, and the three cases of
+   `TestARootChangeTheSaveRefusesLeavesTheLibraryAlone`.
+5. The root add's wipe before `Update`: that test's add case, the rendition
+   unlinked and "recorded 1 dates for a flip" (the removes, unmutated,
+   passed).
+6. The root remove's prefix delete before `Update`: its prune case alone.
+7. No comparison before the rename (`stillAsFound` not called):
+   `TestUpdateComparesTheFileAgainJustBeforeItsRename`,
+   `TestEditSavesOnlyOverTheFileItRead`, both cases of
+   `TestAnUnlockedTurnSavesOnlyOverWhatItFound`,
+   `TestARestoreLeavesAConfigChangedInItsTurn`,
+   `TestServesSeedLeavesAConfigThatAppearsWhileItSaves`,
+   `TestInitsSaveLeavesAConfigChangedWhileItSaves`, and the pin ("FileLock.write
+   does not call stillAsFound"); bind's tests passed, its own comparison
+   standing.
+8. Every lock failure taken for no locks: `TestOnlyAFilesystemThatKeepsNoLocksTakesTheTurnUnlocked`,
+   four failures "took the turn without the lock". 8b. fsutil's unix
+   classifier without ENOLCK: the same test, "no locks available: refused
+   the turn".
+9. A restore's bridge.yaml by `copyFile` again, past its turn:
+   `TestARestoreLeavesAConfigChangedInItsTurn`. (Its first form did not build,
+   `configTurn` left unused, and was rewritten before it was counted.)
+10. `Edit` deciding on a copy loaded before its turn (the first round's
+    control 10): `TestEditReadsTheFileInItsTurn`, red in 20 runs of 20, "saw
+    libraryName \"Before\"" each time.
+11. bind taking bridge.yaml's lock only just before its `SaveIf` (the first
+    round's control 13): `TestBindKeepsALibraryAddThatLandsInItsWindow`, red
+    in 20 of 20, "the library add finished inside bind's turn, never waiting
+    for bind's lock", the binding gone; and the pin, which the first round's
+    sweep was not, "runDACBind reads the config before it takes
+    config.LockFile and saves what it read".
+12. The seed answering the turn's refusal as a failure:
+    `TestServesSeedLeavesAConfigThatAppearsWhileItSaves`.
+13. init answering it as "save config:": `TestInitsSaveLeavesAConfigChangedWhileItSaves`.
+14. bind answering it as "save config:": the three cases of
+    `TestOutputDACBindNeverWritesOverAnUpdateAfterItsRead`.
+15. bind's two locks swapped: `TestTheDataDirLockComesBeforeTheConfigLock`'s two
+    bind cases in 10 runs of 10, "did not hold the data dir while it waited
+    for bridge.yaml's lock" and "not refused at the data dir … refused after
+    5.0s" (restore's, unmutated, passed).
+16. The sweep, a mutation per new shape, `TestTheConfigWriterSweepReportsEveryShape`
+    each time: the literal unread (18 problems of 19); os.Root's and os's
+    WriteFile, Create and Rename unread (14); OpenFile never a write (18);
+    atomicwrite's and fsutil's writers unread (16); package-level values
+    unread (18); a save counted only where it is called, so a method value
+    escapes (18); the order check dropped (18).
+
+### Other tests the second round moved
+
+- `TestRuntimeConfigUpdate`: a directory at the config's path is now refused
+  at the turn's read ("in its turn") rather than the rename; a save failure
+  is a directory put there once the save has staged its file, which the
+  comparison refuses ("before replacing it"); a directory that is not there
+  fails at its resolution ("find the directory"); and the lock that cannot
+  be opened is a directory where the lock file goes.
+- `TestSaveAsRootKeepsTheConfigOwner` and the two backup root-owner tests
+  read their temp directories resolved: the turn names the config and its
+  lock as the OS resolves them, and macOS reaches its temp directory through
+  `/var` → `/private/var`.
+- `TestAFilesystemThatKeepsNoLocksIsNoRefusal` answers with
+  `errors.ErrUnsupported`, a real no-locks answer, where it answered an
+  error of no kind.
+- `TestEditReadsTheFileInItsTurn`, `TestBindKeepsALibraryAddThatLandsInItsWindow`
+  and `TestTheDataDirLockComesBeforeTheConfigLock` wait on the lock's word;
+  the last no longer waits half of 5 s per case.
+
+### Left as it was
+
+A console save over a changed file is still refused until a restart, never
+merged (B535). Nothing reloads the config live. One thing found beside this
+change, in how `Load` resolves a config's relative paths, predates B506, is
+no writer's, and was handed on as a follow-up.
+
+### Checks of the second round
+
+Through the build lock, on 246cff63: `make fmt` rewrote nothing (Go 1.27.3,
+`GOTOOLCHAIN=local`) and `make vet` was clean; `make test` passed 74 packages
+under the race detector, `cmd/bridge` (596 s), `internal/admin` (724 s),
+`internal/backup` (31 s), `internal/config` (8 s) and `internal/fsutil` (3 s)
+among them, and failed one, `internal/handshakelog`'s
+`TestAProbeOfASpecificBoundIPIsNotLogged`, whose dial to this host's
+address on the point-to-point VPN tunnel `utun40` times out as it did
+in the first round: that test's binary imports none of the packages this
+change touches. `make build-all` built the six targets, `make docs-check`
+passed, `go test -race -count=1` of `internal/config`, `internal/fsutil`,
+`internal/backup`, `internal/admin` and `cmd/bridge` passed (567 s for
+`cmd/bridge`, 706 s for `internal/admin`), and `GOOS=windows go vet ./...`
+was clean. The Windows halves of `fsutil.KeepsNoLocks` and
+`fsutil.ResolveParent` are compiled and vetted here; running them is CI's
+Windows leg. Rules: the config-lifecycle.md and cli-serve.md lines, written
+by the orchestrator from the worker's report; their long forms are above in
+`ops/History-rules-config-lifecycle.md` and `ops/History-rules-cli-serve.md`.
+
+### Third round: the second round's reviews
+
+Two reviews read the second round (Codex's, static, five findings; a Claude
+review, one Medium and three Low). The orchestrator decided each in a brief,
+two reviews read that brief against the code before anything changed
+(Codex's eight gaps, the Claude review's eight), and the orchestrator
+amended the decisions; the work below is the amended brief's. Each fix was
+red first, on the second round's code with only the seams of two commits
+that change no behaviour (e667797c, 5631bcb5; listed in the config long
+form). The fixes are d61af204; the rename loop's own tests 2fb0d5c4.
+
+**ENOLCK** (Codex's first). The second round took flock's ENOLCK for a
+filesystem with no locks (`fsutil.KeepsNoLocks`), and Linux answers it too
+when the kernel cannot allocate a lock record, beside a writer that holds
+the lock: one such answer took the turn without it. Now it is asked again,
+as a held lock is, and a wait whose every try answered it ends in a
+`*config.NoLockManagerError` naming the remedy (mount with local locking, or
+start the lock service); a held answer in the same wait is a `*BusyError`.
+The brief first said to take the turn unlocked once every try to the
+deadline answered ENOLCK and remember that for the process's life; both
+brief reviews showed a passing shortage of lock records then leaves serve
+unlocked for good, and the amendment refuses instead and keeps no verdict.
+The classifier is config's own (`noLockToGive`), so `KeepsNoLocks` keeps its
+meaning for its other readers. Red on the seams: the turn taken unlocked
+beside a holder in all three tests
+(`TestAFilesystemThatGivesNoLockRefusesTheTurn`,
+`TestNoLockToGiveThenAHeldLockIsBusy`, `TestNoLockToGiveOnceIsAskedAgain`).
+
+**Every rename attempt compared** (Codex's second; Codex's sixth and the
+Claude review's seventh on the brief). The comparison ran once before
+`RenameWithRetry`'s attempts, up to 750 ms apart on Windows: a change that
+landed between two attempts was renamed over. `atomicwrite.RenameWithRetryIf`
+asks the condition before each attempt, ends at its refusal with no attempt
+after it (a refusal asked again could see the file put back and write over
+the change, Codex's sequence), retries only the rename's own failures, and
+stops when its context ends; a save's loop runs under `saveWindow` (2 s),
+which bounds the comparison reads' retries too, and `LockWait`'s doc says
+so. Red on the seams: `TestAChangeBetweenTwoRenameAttemptsIsRefused` ("=
+<nil>, want a *ChangedInTurnError", "2 renames were tried", the turn's
+found bytes moved to the save's), `TestARefusalBetweenRenameAttemptsEndsTheRetries`
+(the file put back and written over), `TestSaveIfIsAskedBeforeEveryRenameAttempt`
+("asked 1 times around 2 renames").
+
+**The root change's cost on a late refusal** (Codex's third, the Claude
+review's third; the amendment after Codex's third and the Claude review's
+second and third on the brief). The brief first deferred the unlinks to
+after the save; the reviews of the brief showed that buys nothing: deleting
+the tracks cascades their variant and analysis rows (`ON DELETE CASCADE`),
+nothing adopts a file back into a row, the background orphan sweep reaps
+unreferenced files, and work after `Update` returns runs outside both
+locks. So (a) what rebuilds them was established, by a read of the code (an
+agent's survey, checked): `optimized-*` and `optimized-dsd-*` come back
+through the auto-optimize sweep (off by default, nudged by the compensating
+scan, 200 a sweep) and on request; `upscaled-*` and `pcm-*` on request alone
+(the app's and the console's requests, the batches, the CLI renderers); no
+sweep renders a first one; waveforms through the analysis sweep (off by
+default) and `bridge analyze`; a download makes none (404
+`variant_not_found` without a row); sidecar paths are deterministic. A
+successful change drops the same files. (b) The root handlers ask the turn's
+comparison once more just before the wipe or the prune
+(`RuntimeConfig.UpdateChecked`'s `check`, `FileLock.Check`), so only a
+writer that takes no turns landing during the index change itself or the
+staging is refused after it. (c) The long forms say that cost, and this
+entry's second-round "heals" sentence is corrected above. Not an owner
+question: something rebuilds each kind. Red on the seams:
+`TestARootChangeRefusedJustBeforeItsIndexChangeLeavesTheLibraryAlone` (an
+edit just after the turn's read; the add, the prune and the collapse each
+"unlinked the rendition").
+
+**One file for every entry, the base unmoved** (Codex's fourth, the Claude
+review's fourth; the amendment after the Claude review's first and fourth
+and Codex's fifth and eighth on the brief). The brief first resolved the
+whole name at every entry and used the resolved directory for the relative
+paths' base, which would move a linked config's data dir (a fresh database
+and identity at boot); the amendment keeps the base `config.Load` takes from
+the name as given and changes only which file is opened, locked, compared
+and replaced. `fsutil.ResolveParent` follows a link at the last element (the
+lock beside the target, named after it; the save onto it, the link kept),
+resolves missing directories through their nearest existing ancestor, and
+refuses a link to no file; a link into a directory this user cannot write
+names the remedy; serve and init keep the name as written
+(`fsutil.AbsAsWritten`), `bridge doctor` loads it so, init refuses a link to
+nothing before it writes anything (`config.CheckName`), and serve's holder
+refuses a save through a link repointed since boot. Red on the seams: the
+fsutil tests (the link's own directory and name answered; "lstat …/real/new:
+no such file or directory" for a missing directory; a link to nowhere
+answered, no refusal); the config link tests (no lock beside the target, the
+target's Edit through while the link's turn was held, a save renamed a file
+over the link); serve's `..` case loading, locking and saving the decoy at
+the cleaned name, its link case and library add's replacing the link; the
+seed writing its default over a link to nowhere ("wrote true"), init minting
+and saving over one.
+
+**A refused restore restores nothing** (the Claude review's Medium;
+Codex's second and fourth on the brief). The brief first had the restore
+compare with what its turn found before its first write; Codex's review of
+the brief showed `bridge restore` reads the config before its data dir's
+lock and prompt and takes its targets from that read, so a change at the
+prompt became the turn's baseline. The restore now compares with the bytes
+`restoreCmd` read (`RestoreOptions.ConfigAsRead`) and with the file read
+again, before its first write (`configStillAsRead`), taking bridge.yaml's
+turn whenever it was given them; a refusal at bridge.yaml's own write names
+what was restored and says running the restore again finishes it, which
+the extended test does. Red on the seams: an edit just before the first
+write left every file before bridge.yaml restored (the reservation, the
+identity and the queue among them, each live file differing from the
+snapshot's); a config changed since its caller read it was restored over,
+with a snapshot that carries bridge.yaml ("= <nil>") and one that does not;
+the late refusal said "nothing was written over it"; and `bridge restore`
+with its data dir, and its TLS pair, changed at the prompt "went through"
+and replaced the database.
+
+**Windows reads** (the Claude review's second; the Claude review's sixth and
+Codex's seventh on the brief). The turn's reads (`find`, `stillAsFound`) and
+bind's own comparison read through `config.ReadFile`: `fsutil.ReadAsFile`
+inside `atomicwrite.ReadWithRetryCtx`, so a named pipe is still refused at
+once and a missing file still answers at once, and only Windows'
+`ERROR_SHARING_VIOLATION` and `ERROR_ACCESS_DENIED` are asked again. Bind
+reports a read that fails for good
+as that read's failure. Red on the seams, through the portable seams:
+"a turn behind one refused read: read … in its turn: … being used by another
+process", the same "again before replacing it", and bind's "changed after
+bind read it" for an unchanged file behind one refused read and for a read
+refused for good.
+
+**The sweep** (Codex's fifth; the Claude review's eighth on the brief). A
+writer that saves itself must decide on its turn's own bytes (`LoadFound`,
+`Found`, or a listed helper that makes one of those reads) and read the
+config in its turn through nothing else; `Load; LockFile; Stat; Save` and
+`Load; LockFile; Save` are both reported, and `Load; LockFile; Load; Save`
+too, now. Red on the seams: `TestEveryConfigWriterTakesTheConfigLock` named
+the seed (`os.Stat` in its turn), bind (its `os.ReadFile` and
+`loadCLIConfig` in its turn), `Edit` and `Update` (reads of the turn's
+fields beside its own), the restore (no turn read) and
+`configChangedSinceRead` (a read of its own); the new synthetic cases are
+shown by controls 22 and 23.
+
+### Negative controls of the third round
+
+Each against d61af204 (26 against 2fb0d5c4), one mutation at a time, the
+file put back from git after it; every one went red:
+
+1. ENOLCK not told apart (`noLockToGive` answering false): the three ENOLCK
+   tests, the turn taken unlocked.
+2. A held answer in the wait not making it busy (`!held || noLock != nil`):
+   `TestNoLockToGiveThenAHeldLockIsBusy`, a `*NoLockManagerError`. (Its
+   first form left `held` unused and did not build; it was rewritten before
+   it was counted.)
+3. The condition asked before the first attempt only: the three rename
+   tests.
+4. A refusal tried again (`continue`): `TestARefusalBetweenRenameAttemptsEndsTheRetries`
+   (the file put back and renamed over) and `TestSaveIfIsAskedBeforeEveryRenameAttempt`
+   ("asked 5 times").
+5. The root add without its check: that test's add case alone.
+6. The root remove without its check: its two remove cases alone.
+7. `ResolveParent` not following the last element: the fsutil link tests,
+   four config link tests, serve's and library add's link cases, the seed's
+   and init's refusals.
+8. Serve cleaning its config's name (`filepath.Abs`): serve's `..` case.
+9. The console's save name cleaned again: serve's `..` case, its save
+   refused by the holder's target check ("…cfg/bridge.yaml was changed or
+   removed…").
+10. The holder's target check gone: `TestARepointedLinkRefusesTheHoldersSave`,
+    the save written into the other file.
+11. No resolution through the nearest ancestor:
+    `TestResolveParentResolvesMissingDirectoriesThroughTheirNearestAncestor`.
+12. A link to no file answered as itself: the fsutil, config, seed and init
+    refusals.
+13. init without its `CheckName`: "init wrote …/cfg/data before refusing".
+14. No remedy for a link into a read-only directory: both cases of
+    `TestALinkIntoADirectoryThisUserCannotWriteSaysWhatToDo`.
+15. The restore without `configStillAsRead`: the early test, both
+    `ConfigAsRead` cases, and both of `bridge restore`'s prompt cases.
+16. `configStillAsRead` without its comparison against the caller's read:
+    both `ConfigAsRead` cases and both prompt cases (the early test,
+    which the turn's own check catches, passed).
+17. `bridge restore` handing no `ConfigAsRead`: both prompt cases.
+18. The late refusal's report gone: `TestARestoreLeavesAConfigChangedInItsTurn`.
+19. `ReadFile` asking once: both read tests and bind's busy test.
+20. The turn's read through `os.ReadFile`: `TestATurnRefusesANamedPipeAtOnce`,
+    "LockFile waited on a named pipe" after 10 s.
+21. bind's failed read taken for a change: `TestBindsOwnComparisonSaysAReadFailedForWhatItIs`.
+22. The sweep counting any read in the turn: `readsAgainInItsTurn` and
+    `statsInItsTurn` not reported.
+23. The sweep asking for no turn read: `readsBeforeItsLock` not reported (20
+    problems of 21).
+24. `configChangedSinceRead` reading the file itself: the helper's pin.
+25. bind deciding on `loadCLIConfig` in its turn: "runDACBind reads the
+    config in its turn of config.LockFile through something other than the
+    turn".
+26. `RenameWithRetryIf`'s waits ignoring its context:
+    `TestRenameWithRetryIfIsBoundedByItsContext`.
+
+### Other tests the third round moved
+
+- `TestRuntimeConfigUpdate`'s missing-directory case now fails at the lock's
+  open ("open the lock beside"): a missing directory resolves through its
+  nearest ancestor.
+- The unix no-locks answers in `TestOnlyAFilesystemThatKeepsNoLocksTakesTheTurnUnlocked`
+  no longer include ENOLCK.
+- `TestSaveIfAsksJustBeforeTheRename` and `TestASaveNeedsATurnItHolds` give
+  `SaveIf` a callback that takes the save's context.
+- `TestARootChangeTheSaveRefusesLeavesTheLibraryAlone` shares its three
+  cases (`rootChangeCases`) and its assertions with the new root test.
+- `TestARestoreLeavesAConfigChangedInItsTurn` runs over an install with a
+  player identity, its live files differing from the snapshot's, asserts the
+  late refusal's report, and runs the restore again to the snapshot's
+  files.
+- The sweep's synthetic `savesNamedWithItsLock` decides on `LoadFound`, and
+  `readsAgainInItsTurn` is now a case it reports.
+
+### Beside the brief
+
+- `bridge doctor` loads its config by the name as written too (one line,
+  `asWrittenOrAsGiven`), so it grades the file every other entry opens; the
+  brief did not list it.
+- `SaveIf`'s callback takes the save's context, and `RecordFile` the
+  config's path: two signature changes, each made first as a seam.
+- The restore takes bridge.yaml's turn whenever its caller gives the bytes
+  it read, a snapshot without bridge.yaml included, since its targets come
+  from that read either way.
+
+### Checks of the third round
+
+Through the build lock, on 14cebad6's code (the commits after it change
+only this log, but for the last, whose own checks close this section):
+`make fmt` rewrote nothing (Go 1.27.3, `GOTOOLCHAIN=local`)
+and `make vet` was clean; `make test` passed 74 packages under the race
+detector, `cmd/bridge` (617 s), `internal/admin` (747 s), `internal/backup`
+(33 s), `internal/atomicwrite` (12 s), `internal/config` (11 s) and
+`internal/fsutil` (3 s) among them, and failed one, `internal/handshakelog`'s
+`TestAProbeOfASpecificBoundIPIsNotLogged`, whose dial to this host's address
+on the VPN tunnel times out as in the first two rounds. `make build-all`
+built the six targets, and `make docs-check` passed. `go test -race
+-count=1` passed `internal/config` (10 s), `internal/fsutil` (3 s),
+`internal/backup` (32 s) and `cmd/bridge` (563 s); `internal/admin` ran
+past `go test`'s default bound of ten minutes for one test binary, the test
+running then having run for a second (the package's length under the race
+detector, not a hang), and passed when run again alone with the Makefile's
+`-timeout 30m` (678 s). `GOOS=windows go vet ./...` and `GOOS=linux go vet
+./...` were clean. The Windows halves (`internal/fsutil/parent_windows.go`,
+`internal/config/nolock_other.go`, and the sharing and access answers
+`internal/atomicwrite/read_windows.go` retries) are compiled and vetted
+here; running them is CI's Windows leg, and the read retry's tests reach
+its seam on every platform. Rules: the config-lifecycle.md and cli-serve.md
+lines, given to the orchestrator as OLD and NEW pairs against eafea88f;
+their long forms are in `ops/History-rules-config-lifecycle.md` and
+`ops/History-rules-cli-serve.md`. player.md is unchanged.
+
+The last commit changes comments and prose alone: this round's text called
+`ERROR_ACCESS_DENIED`, the second answer the read retry asks again on, an
+access violation, which on Windows is a memory fault; `ReadFile`'s and
+`readRetryable`'s comments, a test's, the config long form, the Windows
+paragraph above and the rules note's config-lifecycle.md line now name
+`ERROR_SHARING_VIOLATION` and `ERROR_ACCESS_DENIED`. Checked through the build lock: gofmt listed none of
+its Go files, `go vet` of `internal/config` and `internal/atomicwrite` was
+clean here and for Windows, `go test -race -count=1` of both passed (11 s,
+12 s), `cmd/bridge`'s docblock and test-citation guards and the config
+writers' sweep passed, and `make docs-check` passed.
+
+### Fourth round: the third round's reviews
+
+Two reviews read the third round (Codex's, static: three Mediums, two
+Lows; a Claude review: three Lows). The orchestrator decided each in a
+brief, two reviews read that brief before anything changed, and nine
+decisions of the orchestrator's on them override it; the work below is the
+brief's with those. Each fix was red first, on the third round's code with
+only the seams of two commits that change no behaviour (6d3b7d9b, 3e502489;
+listed in the config long form). The fixes are bfa8bd71 and 7c8a6d3b, and
+d3a58c41 pins a test.
+
+**The name and the file it opens, checked where they can part** (Codex's
+first Medium, the Claude review's third Low). A turn resolved the config's
+name once, before it waited for the lock: a link at the name repointed
+while a writer waited, to a file holding the same bytes, and the lock given
+back with the first file unchanged, had the writer compare and save the
+file the name no longer opened, run the roots' wipe or prune, and answer
+success. Now the name is resolved again once the turn holds the lock,
+before each rename attempt and at `FileLock.Check`, and a name that opens
+another file refuses (`*config.NameMovedError`); serve's holder answers it
+as a change outside it at the turn, the check and the save; a CLI writer
+refuses and says to run it again, and nothing is retried on the new file;
+a restore takes it as a changed config. A link repointed during the roots'
+change itself, or while the save stages, is refused at the save, after the
+change, and the compensating scan brings the rows back. Red on the seams,
+each link repointed to a twin holding the same bytes: the console's save
+after a lock wait (its change run and the old file saved), an `Edit` after
+one, library add after one (exit 0, the old file written, `bridge.db` made
+by its wipe), a repoint between two rename attempts (the second renamed
+onto the old file), the console's check and its save (each answered nil),
+the root changes repointed after the turn's read (201 or 204, the
+rendition unlinked, the old file saved), the root add repointed while it
+staged (201), and the restore before its first write (every file
+restored) and at bridge.yaml's (the snapshot's copy written into the old
+file).
+
+**Serve's boot read and its holder's file** (the Claude review's first
+Low). `RecordFile` resolved the name about a thousand lines of boot after
+the read, so a link repointed in between had the holder record a file
+serve never read, and the first console save wrote into it. `LoadFileAt`
+resolves the name just before and just after each read, reads again when
+the two differ, up to three reads, and refuses a name that moved across
+each (`*config.NameMovingError`); serve tells its holder the answered read's
+file, and `RecordFile` resolves nothing. Red on the seams: a repoint
+between the boot read and `RecordFile` (`serveOpts.afterConfigRead`) saved
+into the twin with 200; a name that moved once answered one file's bytes
+under another's name; a name that kept moving was read. The relative paths'
+base is unmoved (decision 5's guard, green on both commits).
+
+**No rename after the save's window** (Codex's second Medium).
+`RenameWithRetryIf` asked its context only between attempts: a condition
+that answered nil after the window, or a first attempt made after it,
+renamed. It now asks before each condition and again before each rename.
+Red on the seams: a condition that cancels the context and answers nil
+renamed; one past the deadline renamed; after a failed rename the next
+attempt was made though the condition had ended the context; an ended
+context still had its condition asked and its rename made; a config save
+whose comparison answered past a 50 ms window renamed.
+
+**Windows: the turn on the physical path** (Codex's third Medium; Codex's
+High and the Claude review on the brief). Since Go 1.23 a junction is
+`ModeIrregular`, and `filepath.EvalSymlinks` refuses one inside a path with
+ENOTDIR: a file link inside a junction'd config directory was refused by
+every writer while serve loaded the config, and a plain file there was
+spelled through the junction, which a junction repointed after the lock
+spells the same way. On Windows the directory is named by the handle the
+OS opens for it (`fsutil.ResolveLinks`), the `\\?\` prefix off, and a link
+at the last element is followed the same way; unix is unchanged
+(`ResolveLinks` is `filepath.EvalSymlinks` there). Compiled and vetted
+here; the eight Windows tests (named in the config long form) are for a
+Windows host to run.
+
+**The sweep and the turn's bytes** (Codex's Low, the Claude review's Low).
+The sweep required a turn read and passed a save of a copy read before the
+lock beside a `Found` whose result was thrown away: a lost update. It now
+holds every save a named writer makes itself to a value taken from its
+turn (`LoadFound`'s config, `Found`'s bytes, or a value made from one),
+a create-only save, or a comparison `comparedSaves` lists (init's, a
+restore's, the holder's `UpdateChecked`), enforcing rather than
+documenting: every current writer passes without a rewrite. Red: the
+self-test reported 21 of its 29 problems. (It enforced less than that: a
+guard or a comparison anywhere in the function counted, a comparison whose
+answer was dropped included, and a name shadowed in a block counted for
+the one outside it; the fifth round, below.)
+
+**The queue in the late restore refusal** (Codex's second Low): said only
+when the restore removed one. Red on the seams: a restore of the box's own
+identity, and one over a box with no queue, each said "its queue let go".
+
+**`KeepsNoLocks`** (the Claude review's second Low): the long form said
+ENOLCK had left it; it had not. Corrected, and its readers named as they
+are (below).
+
+### Negative controls of the fourth round
+
+Each against d3a58c41, one mutation at a time, every edited file put back
+from git after it, each mutation matching its file exactly once; every one
+went red:
+
+1. The turn not resolving its name again once it holds the lock: the
+   console's save, `Edit` and library add after a lock wait.
+2. The comparison before each rename, and `Check`, not resolving the name:
+   the later rename attempt, the console's check and save, the three root
+   changes, the compensated add, and both restore tests.
+3. The holder not mapping a moved name at the turn: the console's save
+   after a lock wait (a `*NameMovedError`, not a change outside).
+4. Not mapping it at the check: the console's check.
+5. Mapping only a changed file at the save: the console's save while it
+   staged.
+6. The restore mapping only a changed file before its first write: the
+   early restore test (the unmapped refusal says "run it again", not "run
+   the restore again"; the first form of the test could not tell, d3a58c41).
+7. Mapping only a changed file at bridge.yaml's write: the late restore
+   test.
+8. The boot read not reading again: both boot-read tests.
+9. The boot read not refusing a name that kept moving: that test.
+10. Serve handing its holder the config's name for the read's file: both
+    cases of `TestServeOpensTheConfigItsNameOpens`.
+11. The holder resolving the name when told, as before the round:
+    `TestServeRecordsTheFileItsBootReadOpened`.
+12. The boot read resolving relative paths against the file the name
+    opened: decision 5's guard, both cases.
+13. The holder's target check removed: the guard
+    `TestARepointedLinkRefusesTheHoldersSave`, and serve's boot test.
+14. `RenameWithRetryIf` not asking its context before the condition:
+    `TestRenameWithRetryIfAsksNothingOfAContextAlreadyEnded`.
+15. Not asking it before the rename: the three cases of
+    `TestRenameWithRetryIfRenamesNothingOnceItsContextEnds`, and the config
+    save past its window.
+16. The sweep asking nothing of where a saved config comes from: the
+    self-test, 23 of 29.
+17. The sweep taking no save as create-only: the real tree's sweep (the
+    seed reported) and the self-test.
+18. A listed comparison taken as asked when it was not: the self-test (28,
+    `listedWithoutItsComparison` unreported).
+19. `comparedSaves` without the holder's `UpdateChecked`: the real tree's
+    sweep (`UpdateChecked` reported).
+20. An entry its writer no longer needs kept: the self-test (28,
+    `listedButDecidesOnItsTurn` unreported).
+21. The late refusal saying the queue went whatever the restore did: the
+    kept-queue and no-queue tests.
+22. Never saying it: the converse guard,
+    `TestALateRefusalSaysAReplacedIdentitysQueueWent`.
+23. A queue counted discarded where there was none: the no-queue test.
+24. The console's root add without its check: that test's add case alone.
+25. The add without its compensating scan: the compensated add's test (the
+    wiped row not back).
+
+The Windows half has no control here: its tests cannot run on this host.
+
+### Other tests the fourth round moved
+
+- The tests that tell the live holder its boot read
+  (`TestARefusedUpdateRunsNoneOfItsChange`,
+  `TestUpdateComparesTheFileAgainJustBeforeItsRename`,
+  `TestUpdateRefusesAFileAnotherWriterChanged`,
+  `TestUpdateWaitsForTheLockThenRefuses`, and the admin root tests through
+  `recordBootRead`) hand it the resolved file (`fileTarget`,
+  `config.ResolveFile`), since `RecordFile` resolves nothing; done in the
+  seam commit, where it changed nothing.
+- `TestARepointedLinkRefusesTheHoldersSave` reads through `LoadFileAt`.
+- The restore's box takes the identity the box runs and whether it keeps a
+  queue (`newRestorableBoxOf`).
+- The sweep's `configWriterProblems` takes `comparedSaves`, and its
+  `configReadCalls` name `config.LoadFileAt` and `loadServeConfigFile`.
+
+### Beside the fourth round's brief
+
+- Decision 6's rename-failure seam was there already
+  (`atomicwrite.SetRenameFuncForTest`, which `failFirstRename` drives from
+  `internal/config`'s tests since the third round); none was added.
+- Item 6 named serve's data-dir lock and the migration lock as readers of
+  `KeepsNoLocks`. Its one caller is the config's lock: those two locks read
+  `TryLock`'s answers themselves and go on without the lock on any answer
+  but a held lock, ENOLCK included. The long form says that.
+- The commit SHAs the first three rounds cite in this entry and in the
+  config long form were the branch's before the orchestrator rewrote its
+  history on 2026-10-24 (git filter-branch); they name the rewritten commits
+  now, matched by subject and, for the merge, by its time.
+- The third round's last "Beside the brief" bullet said it had taken this
+  host's VPN tunnel address out of the first two rounds' checks; the
+  rewrite took it out of every commit instead, so the bullet is gone.
+- The refusals a moved name reaches widen their words to say so: serve's
+  `*ChangedOutsideError` ("…or now opens another file (a link at it
+  repointed)…"), a restore's `configChangedError` and its
+  `partialRestoreError`.
+
+### Checks of the fourth round
+
+Through the build lock, on 162180ee (its code d3a58c41's): `make fmt`
+rewrote nothing (Go 1.27.3, `GOTOOLCHAIN=local`), `make vet` was clean,
+`make docs-check` passed, and `make build-all` built the six targets, its
+`check-build-tags` OK once a build output a `go build` of `cmd/bridge` had
+left at the worktree's root in the third round was removed (an ignored
+file, which the census read as one to review). `GOOS=windows` and
+`GOOS=linux` `go vet ./...`, with the Makefile's tags, were clean. `go test
+-race -count=1 -timeout 45m` passed `internal/config` (16 s),
+`internal/fsutil` (5 s), `internal/atomicwrite` (12 s), `internal/backup`
+(58 s), `internal/admin` (817 s) and `cmd/bridge` (669 s), and each of the
+round's new tests passed `-race -count=10`. `make test` passed 74 packages,
+`cmd/bridge` (809 s) and `internal/admin` (959 s) among them, and failed
+two the branch does not touch: `internal/handshakelog`'s
+`TestAProbeOfASpecificBoundIPIsNotLogged`, as in the first three rounds,
+and `scripts/third-party-licenses` (merged from main with B500), whose
+eleven tests read the Go toolchain's LICENSE at `$(go env GOROOT)/LICENSE`,
+which this host's Go, Homebrew's bottle of 1.27.3, keeps beside its
+GOROOT rather than in it ("Go toolchain LICENSE: open …: no such file or
+directory"); nothing in `scripts/`, `go.mod` or `go.sum` changed since the
+merge. The Windows tests are compiled and vetted here, for a Windows host
+to run. Rules: the config-lifecycle.md and cli-serve.md lines, given to the
+orchestrator as OLD and NEW pairs against 24a4c4ad; their long forms are in
+`ops/History-rules-config-lifecycle.md` and `ops/History-rules-cli-serve.md`.
+player.md is unchanged.
+
+### Fifth round: the fourth round's reviews, and the end of the link-repoint hunt
+
+Two reviews read the fourth round (Codex's, static: three Mediums, one Low;
+a Claude review: one Medium, two Lows), and the orchestrator decided them
+(decisions 1 to 6). This is the last round of link-repoint hardening, and
+it states once the window no turn closes: **the time between the turn's
+final check (the name still opens the target, and the target's bytes are as
+found) and the rename syscall itself, plus any writer that takes no lock,
+and, for work a check authorizes (a root change's index change, a
+restore's writes, an Edit writer's own work), the time between that check
+and the work**. Only what the brief names was closed. Each fix was red
+first, on the fourth round's code (6e03497f) with only the seams of three
+commits that change no behaviour (af59db9b, 6f6c4ffb, 7ee08187; listed in
+the config long form). The fixes are 48b2664a, 6f63cfef, 38a046e5, 71d01baf
+and 91ca1e85.
+
+**The name, resolved after the read it guards** (Codex's first Medium;
+decision 2). The fourth round resolved the config's name before each read a
+decision rests on, so a link repointed while the read ran left the read
+answering the locked file, unchanged, and the name opening another. Now the
+save's condition asks the byte comparison, then the writer's own (bind's
+`SaveIf` read through the name), then the name, last before each rename
+attempt; `Check` reads, then resolves; `lockFile` resolves after `find`.
+Red on the seams, each link repointed inside the nth read the turn makes,
+to a twin holding the same bytes, and each test asking which file that read
+was of: a save's comparison read (the locked file written, nil), `SaveIf`'s
+own read (the same), the console's check (its change run), an `Edit`'s
+turn read (its change run), bind (exit 0, the locked file bound), library
+add (the index wiped), and a restore's check (every file before
+bridge.yaml restored).
+
+**The boot read, through the file it resolved** (Codex's third Medium;
+decision 3). Red on the seams: a link pointed at B during the read and back
+at A before the second resolution answered B's bytes with A.
+
+**A failed resolution, no file** (Codex's second Medium, the Claude
+review's first Low; decision 4). Two failed resolutions compared equal as
+`""`, the boot answered `""`, and the holder skipped `""` when it compared.
+Now a read whose two resolutions agree is answered through its file; one
+across which they differ or one side alone resolved is read again, and a
+name that never resolved alike is refused (`*NameMovingError`); a name
+resolved at no side of any of the three reads boots on the last read
+through the name with no file, and the holder refuses every save, at its
+top, before `LockFile`, until a restart (`*BootUnresolvedError`), which the
+first-update allowance of a holder told nothing does not touch. Red on the
+seams: a first read resolved at neither side, then one side, answered at
+once with `""`; a name resolving nowhere read once, not three times; the
+holder's save went through, its turn taken, and still did once the name
+resolved; serve booted that way answered the console's save 200 and wrote
+the file.
+
+**Windows: a reparse point that is no link** (the Claude review's Medium,
+the fourth round's regression; decision 1). `physicalDir` refused
+`ModeSymlink` and `ModeIrregular`, and Go 1.23's `ModeIrregular` marks
+OneDrive's cloud folders and container layers. `checkResolvedDir`, untagged,
+refuses a name surrogate by the tag of the directory's own entry, or a
+resolution that moves when asked again, and nothing else. Red on the seams
+(its decision as `os.Lstat`'s mode had it): cloud, placeholder and
+container tags refused, a moving resolution and a failing one taken. The
+Windows reader, `entryOf`, is compiled and vetted here; its test is
+`TestEntryOfReadsTheEntryItself`, beside the fourth round's eight junction
+tests, for a Windows host. No test makes a cloud-tagged folder natively.
+
+**The sweep's guards and comparisons, where they stand** (Codex's Low, the
+Claude review's second Low; decision 6). A guard counts only as a statement
+of the function's own body; a listed comparison only as an if that returns
+before the save, at the top of the body or directly inside a top-level nil
+check of the turn, in decision 6's three forms; a name's last assignment is
+its variable's, as the parser resolves it. Red: the self-test reported 29
+of its 36 problems (the shape under another name's nil check, the 37th,
+came after the fix), and the tree's sweep found `FileLock.write` calling no
+`stillNamed`. **The restore fails the strict top-level rule**: its
+comparison sits inside `if configTurn != nil`. Reported, not restructured:
+the sweep accepts a comparison directly inside a top-level nil check of the
+turn, since a save through a nil turn writes nothing. What the sweep still
+cannot see (a pointer write, a loop's later pass, `pick(stale, found)`, a
+comparison's polarity, a conjunct that switches the refusal off, whether a
+save inside the nil check goes through that turn, a helper in another
+function) is pinned as passing in the self-test and listed in
+`derivationProblem`'s comment.
+
+### Negative controls of the fifth round
+
+Each against 91ca1e85, one mutation at a time, every edited file put back
+from git after it, each mutation matching its file exactly once; every one
+went red:
+
+1. The turn resolving its name before its read, as the fourth round did:
+   the `Edit` and library add tests.
+2. The save resolving the name before its comparisons, as the fourth round
+   did: the comparison-read, `SaveIf` and bind tests.
+3. The save resolving the name between the byte comparison and the
+   writer's own: the `SaveIf` and bind tests alone.
+4. `Check` resolving the name before its read: the console's check and the
+   restore.
+5. The save never resolving the name itself: the tree's sweep.
+6. The boot read reading the name again: the read-the-file-it-resolved
+   test.
+7. A failed read whose resolutions agree taken for a move: the missing
+   config's guard.
+8. A failed read through the name taken for a move: the link-to-nothing
+   guard.
+9. Two failed resolutions compared alike, as the fourth round did: the
+   no-file read, the mixed case and the holder.
+10. One read resolved nowhere among moving ones booting with no file: the
+    mixed case.
+11. The holder saving with no file: the holder's test and serve's.
+12. The holder refusing only after its turn: the holder's test (the lock
+    file made).
+13. Refusing the symbolic link's tag alone: the junction and WSL-link
+    cases.
+14. Refusing every reparse point but dedup, as the fourth round's
+    `ModeIrregular` did: the cloud, placeholder and container cases.
+15. Never resolving the directory again: the moving and failing cases.
+16. A guard anywhere in the function: the self-test.
+17. A comparison anywhere in the function: the self-test.
+18. A comparison at the top level only: the tree's sweep (the restore) and
+    the self-test.
+19. A nil check of any name: the self-test.
+20. A comparison whose body does not return: the self-test.
+21. Any call of the comparison, its answer dropped included, as the fourth
+    round's `asksInTurn`: the self-test.
+22. An initializer's error not read as a refusal: the tree's sweep (the
+    restore) and the self-test.
+23. A condition not read through `&&` and `||`: the tree's sweep (the
+    holder) and the self-test.
+24. A name's last assignment by its name alone, as the fourth round did:
+    the self-test (the shadowed turn read).
+
+The Windows reader has no control here: its test cannot run on this host.
+
+### Other tests the fifth round moved
+
+- `LoadFileAt` answers a `BootFile`: `fileTarget` hands one to the holder,
+  the boot-read tests read its file, and the admin root tests'
+  `recordBootRead` tells the holder through `config.LoadFileAt`; done in the
+  seam commit, where it changed nothing.
+- `loadFileAt` takes `bootHooks`, the fourth round's tests their
+  `afterRead`.
+- `TestTheConfigWriterSweepReportsEveryShape`'s message for a listed writer
+  that does not refuse is "never refuses its save on …".
+
+### Beside the fifth round's brief
+
+- `bridge library add` beside a running serve hands its change to the
+  console (`tryLibraryViaAdmin`), so a serve booted with no file refuses it
+  too; the CLI writer that is unaffected is the one that takes its own turn
+  (`config.Edit`), which `TestAHolderBootedWithNoFileRefusesEverySave` runs
+  beside the refusing holder.
+- `*NameMovingError`'s words cover a name resolved on one side of a read
+  alone: "did not open one file both before and after any of its 3 reads".
+- A read through the resolved file that fails is said of the name as given,
+  as `LoadFile` says it (`readConfigTarget`), so its messages are as they
+  were.
+- The self-test gained a shape the brief did not list, a comparison inside
+  another name's nil check, with its control, so the allowance for the
+  restore's nesting is pinned to the turn's own name.
+
+### Checks of the fifth round
+
+Through the build lock, on 04c4bdfd (its code 91ca1e85's): `make fmt vet
+docs-check build-all` passed, `make fmt` rewriting nothing (Go 1.27.3,
+`GOTOOLCHAIN=local`), `check-build-tags` OK and the six targets built.
+`GOOS=windows` and `GOOS=linux` `go vet ./...`, with the Makefile's tags,
+were clean. `go test -race -count=1 -timeout 45m` passed `internal/config`
+(11 s), `internal/fsutil` (3 s), `internal/atomicwrite` (12 s),
+`internal/backup` (36 s), `internal/admin` (699 s) and `cmd/bridge` (571 s),
+and the round's seventeen new or changed tests passed `-race -count=10`
+(170 passes). `make test` passed every package but two the branch does not
+touch: `internal/handshakelog`'s `TestAProbeOfASpecificBoundIPIsNotLogged`,
+as in the first four rounds, and `scripts/third-party-licenses`, eleven
+tests, ten reading the Go toolchain's LICENSE at `$(go env GOROOT)/LICENSE`,
+which this host's Go, Homebrew's bottle of 1.27.3, keeps beside its GOROOT,
+and `TestRealReleaseGraphEmbeds` refusing this host's `GOFLAGS=-mod=readonly`;
+nothing in `scripts/`, `go.mod` or `go.sum` changed in the round. The
+Windows tests are compiled and vetted here, for a Windows host to run.
+Rules: the config-lifecycle.md and cli-serve.md lines, given to the
+orchestrator as OLD and NEW pairs against 6e03497f; their long forms are in
+`ops/History-rules-config-lifecycle.md` and `ops/History-rules-cli-serve.md`.
+
+### Sixth round (2026-10-25): the writer sweep's nil-check allowance, and its list of what it cannot see
+
+Two reviews read the fifth round (Codex's, static: one Low; a Claude review:
+one Low) and found no High or Medium; a Windows 11 host passed the nine
+Windows tests the round named, and the whole of `internal/fsutil`,
+`internal/config`, `internal/atomicwrite`, `internal/backup`,
+`internal/admin` and `cmd/bridge`. The orchestrator applied the fifth
+round's rules note (5400d608). This round changed the writer sweep, test
+code in `cmd/bridge/config_writers_test.go`, and these docs, and no
+production code: `internal/backup/backup.go` is as it was. The fix is
+8d75e471.
+
+**A save past a nil-checked comparison, through the checked name alone**
+(both Lows, on the allowance for the restore's nesting). The sweep took a
+comparison inside a top-level `if name != nil` of a turn name as refusing
+any save after it, so a writer could check one turn name and save through
+another while the checked one was nil (Codex: `optionalTurn` set to `l`
+only when `compareEnabled`, the comparison inside `if optionalTurn != nil`,
+then `stale.Save(l)`). The orchestrator kept the allowance, on the Claude
+review's recommendation, amended by the brief's own reviews: a save after a
+nil-checked comparison counts as refused only when it goes through the very
+name the check tests, and nothing assigns that name between the check and
+the save. Each save now records its turn apart from the value it saves (a
+`Save`'s or `SaveIf`'s first argument, a `SaveBytes`'s receiver, none for a
+method value), since the value, a `SaveBytes`'s bytes, would have refused
+the restore. Hoisting the restore's comparison was weighed and declined: the
+hoisted form is none of the three accepted forms, and would hide the nil
+case in a helper the sweep cannot read. Red on 5400d608: the self-test, 37
+of its 44 problems; its seven new shapes (the optional alias, a nil-able
+alias saved through the turn it was copied from, that alias assigned again
+after the check, a save through another name for `Save`, `SaveIf` and
+`SaveBytes`, a method value) all passed the old sweep. A save through the
+checked name, for each of the three, passes before and after; so does the
+restore, unchanged.
+
+**What it cannot see, exactly** (the Claude review's second point). The
+fifth round's list said each shape was pinned as passing, and three of its
+seven were; it named the nil-check gap as a save inside the check. The
+self-test now pins, as passing, the inverted comparison, the conjunct that
+switches the refusal off, an assignment to the nil-checked name through a
+pointer or in a function literal written before the check, and a helper in
+another function, beside the pointer write, the loop and `pick`; the
+nil-check entry left the list, and `derivationProblem`'s comment and the
+long form read the same, word for word. These pin what the sweep does
+today: green on 5400d608 as after the fix.
+
+### Negative controls of the sixth round
+
+Each against 8d75e471, one mutation at a time, the file put back from git
+after it; every one went red:
+
+1. The name condition dropped: the self-test, 39 of 44 (the two aliases and
+   the three saves through another name passing again).
+2. The reassignment check dropped: the self-test, 43 of 44 (the reassigned
+   alias passing again).
+3. The saved value compared in place of the save's turn: the tree's sweep
+   (`RestoreWithOptions` reported) and the self-test (the saves through the
+   checked name reported).
+
+### Checks of the sixth round
+
+Through the build lock, on 074f03c9 (its test code 8d75e471's): `make fmt
+vet docs-check` passed, `make fmt` rewriting nothing; `GOOS=windows` and
+`GOOS=linux` `go vet ./...`, with the Makefile's tags, were clean; `go test
+-race -count=1 -timeout 45m` passed `cmd/bridge` (552 s) and
+`internal/config` (11 s); and the two changed tests,
+`TestTheConfigWriterSweepReportsEveryShape` and
+`TestEveryConfigWriterTakesTheConfigLock`, passed `-race -count=10`. The
+sweep's two "cannot see" texts compare equal word for word (187 words).
+Rules: the config-lifecycle.md line, which names the allowance, given to the
+orchestrator as an OLD and NEW pair against 5400d608; cli-serve.md's does not
+name it, and is unchanged.
+
+### After the sixth round's review
+
+The reviews of the sixth round found one Low (Codex's; the Claude review
+found none). A range's key and value were not assignments to the sweep, so
+`for _, t = range []*config.FileLock{l} {}` after a nil check moved the
+checked name unseen. The orchestrator fixed it in 4f689a1d: the walker
+records a range's key and value as assignments from the ranged expression.
+
+- **Red before:** with the new fixture `reassignsItsNilCheckedTurnInARange`,
+  the self-test reported 44 problems of 45.
+- **The control:** not counting them made it red again, 44 of 45, and the
+  file was put back from git.
+- **Checks:** `go vet` and gofmt clean, and the two sweep tests passed
+  `-race -count=10`.
+
 ## 2026-10-24 — B525: the player's identity file is read without waiting: a named pipe at player-uuid is refused at once by every reader
 
 `config.ReadPlayerUUIDFile` is the UUID parser for `<dataDir>/player-uuid`
@@ -61736,6 +63027,22 @@ cases; the records counted as runbooks, the four record cases.
 **Checks:** the sox test passes `-count=5` locally on macOS. The workflow change is checked by this PR's own gate run on 26.04, which must pass the rest shard in about main's time.
 
 **Not in this change:** `make test` on a developer's Linux host whose `/tmp` is tmpfs (Fedora, Arch) hits the same refusal. That host needs `TMPDIR` on disk too; it is a follow-up for the Makefile or the docs. The PRs re-run once this merges into them.
+
+## 2026-10-25 — B506 review: the lock-owner test's directory is not owned by 0:0
+
+CodeRabbit on PR #1345: the "before there is one" case of
+`TestALockFileMadeAsRootTakesTheConfigsOwner` gave the simulated directory
+the owner 0:0. Run as root, the lock file it makes is already 0:0, and
+`precreate` changes an owner only when the two differ, so no change was
+recorded and the case failed; the repository has root-only tests, so a
+root run is a supported one. The directory's owner is now 4300:4301, which
+stands for root's and is no runner's real owner.
+
+- Red before, shown without root: with the directory's simulated owner set
+  to the test process's own (as 0:0 is under root), "owner changes = [],
+  want exactly {… UID:501 GID:20}".
+- Green after: `go vet` and `go test` of `./internal/config/` and
+  `./internal/fsutil/`.
 
 ## 2026-10-24 — B470 PR 5a4: the player's OpenHome writes, Insert's Uri confined to the bridge's own tracks, and the owner's dogfood
 
