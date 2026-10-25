@@ -216,7 +216,7 @@ func TestJobCLIsRunAsRootKeepTheInstallOwner(t *testing.T) {
 	cfg.Upscale.Enabled = true
 	cfg.Upscale.DSDRender.Enabled = true
 	cfg.Analysis.Enabled = true
-	if err := cfg.Save(cfgPath); err != nil {
+	if err := saveConfigAt(cfg, cfgPath); err != nil {
 		t.Fatal(err)
 	}
 	// The service has run once: its store exists and is its own, and a

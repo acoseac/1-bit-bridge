@@ -47,7 +47,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 | Package | Role |
 |---|---|
 | `cmd/bridge` | CLI: **31 subcommands** dispatched in `run()` — `init` / `serve` / `pair` / `scan` / `upscale` / `analyze` / `optimize` / `render` / `variants` / `artwork` / `enrichment` / `duplicates` / `fingerprint` / `doctor` / `update` / `backup` / `restore` / `token` / `cert` / `status` / `health` / `logs` / `library` / `admin` / `manifest` / `output` / `tsnet` / `start` / `stop` / `restart` / `version`. Bare `bridge` on a real TTY drops into a context-aware launcher menu (`menu.go`); pipes / non-TTY callers fall through to `usage + exit 2` so automation is unchanged. Box / frame / shell-aware handoff helpers in `styles.go`. |
-| `internal/config` | YAML loader with defaults + path-relative resolution + `Save()` for admin edits |
+| `internal/config` | YAML loader with defaults + path-relative resolution + `Save()`, which writes only in a turn of the lock beside the file (`LockFile`, `Edit`) that every writer of `bridge.yaml` takes (B506) |
 | `internal/tls` | Self-signed ECDSA P-256 cert minter, SHA-256 fingerprint for iOS pinning |
 | `internal/auth` | Bearer-token store (hashed, atomic persist, cross-process pickup) |
 | `internal/fs` | Path-safe resolver (traversal-rejection, multi-root routing, hot-reload via SetRoots) |

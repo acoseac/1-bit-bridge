@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/backup"
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
@@ -27,7 +28,7 @@ func TestSnapshotAndRestoreAsRootKeepTheInstallOwner(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("a file takes its directory's ACL on Windows; these helpers change no owner there")
 	}
-	dataDir := t.TempDir()
+	dataDir := resolvedTempDir(t)
 	src := primeLiveState(t, dataDir)
 	changes, restore := fsutil.SimulateRootForTest(4242, 4243)
 	defer restore()
@@ -64,7 +65,29 @@ func TestSnapshotAndRestoreAsRootKeepTheInstallOwner(t *testing.T) {
 		// migration lock (manifest's ladderLockSuffix, backlog B185): left
 		// root's, the service could not open it again.
 		src.ManifestDB + "-migrate.lock",
+		// The restore takes bridge.yaml's lock (config.LockFile, backlog
+		// B506), whose file it creates when no writer has yet: left root's,
+		// the service's next console save could not open it.
+		configLockFile(src.BridgeYAML),
 	})
+}
+
+// configLockFile is the lock file beside the config file at path.
+func configLockFile(path string) string {
+	return filepath.Join(filepath.Dir(path), config.LockFileName(path))
+}
+
+// resolvedTempDir is t.TempDir() as the OS resolves it (on macOS the temp
+// directory is reached through the link /var → /private/var): a restore's
+// turn of bridge.yaml's lock names the config and its lock file that way, so
+// the owner changes it records do too.
+func resolvedTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 // The console account and the harvest state take the same single chown
@@ -74,7 +97,7 @@ func TestSnapshotAndRestoreAsRootKeepTheConsoleAccountAndHarvestState(t *testing
 	if runtime.GOOS == "windows" {
 		t.Skip("a file takes its directory's ACL on Windows; these helpers change no owner there")
 	}
-	dataDir := t.TempDir()
+	dataDir := resolvedTempDir(t)
 	src := primeLiveState(t, dataDir)
 	src.AdminAuth = filepath.Join(dataDir, backup.AdminAuthFileName)
 	src.AtlasHarvest = filepath.Join(dataDir, backup.AtlasHarvestFileName)
@@ -119,7 +142,7 @@ func TestSnapshotAndRestoreAsRootKeepTheConsoleAccountAndHarvestState(t *testing
 	}
 	assertGivenAway(t, changes()[before:], []string{
 		src.ManifestDB, src.TokensJSON, src.ServerCert, src.ServerKey, src.BridgeYAML,
-		src.AdminAuth, src.AtlasHarvest, src.ManifestDB + "-migrate.lock",
+		src.AdminAuth, src.AtlasHarvest, src.ManifestDB + "-migrate.lock", configLockFile(src.BridgeYAML),
 	})
 }
 

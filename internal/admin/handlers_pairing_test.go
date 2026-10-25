@@ -39,7 +39,7 @@ func newPairingTestServer(t *testing.T, fingerprint string) (*Server, http.Handl
 		ScanIntervalSec: 3600,
 		LibraryName:     "Test",
 	}
-	if err := cfg.Save(cfgPath); err != nil {
+	if err := saveConfigAt(cfg, cfgPath); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
@@ -188,7 +188,7 @@ func TestApiPairingListNilStore(t *testing.T) {
 		LibraryName:     "Test",
 	}
 	cfgPath := filepath.Join(tmp, "bridge.yaml")
-	_ = cfg.Save(cfgPath)
+	_ = saveConfigAt(cfg, cfgPath)
 	_ = os.MkdirAll(cfg.DataDir, 0o755)
 	mstore, _ := manifest.OpenStore(manifest.DefaultDBPath(cfg.DataDir))
 	t.Cleanup(func() { mstore.Close() })

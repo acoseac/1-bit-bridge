@@ -28,6 +28,17 @@ import (
 // otherwise, and the loopback gate refuses that with 421 (backlog B170).
 const testConsoleHost = "127.0.0.1:7789"
 
+// saveConfigAt saves cfg as the config at path in a turn of its lock, as a
+// writer with nothing to read first does (a test's fixture).
+func saveConfigAt(cfg *config.Config, path string) error {
+	lock, err := config.LockFile(path)
+	if err != nil {
+		return err
+	}
+	defer lock.Unlock()
+	return cfg.Save(lock)
+}
+
 // newTestServer spins up an admin Server over a temp dir with one library
 // root, fresh manifest store, fresh auth store, and no real listener.
 // Tests drive the Handler directly via httptest.
@@ -47,7 +58,7 @@ func newTestServer(t *testing.T) (*Server, *config.Config, string) {
 		ScanIntervalSec: 3600,
 		LibraryName:     "Test Library",
 	}
-	if err := cfg.Save(cfgPath); err != nil {
+	if err := saveConfigAt(cfg, cfgPath); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
