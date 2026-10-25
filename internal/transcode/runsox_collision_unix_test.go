@@ -49,7 +49,7 @@ waitfor() {
   done
 }
 
-if mkdir "$state/claim-a" 2>/dev/null; then
+if (set -C; : > "$state/claim-a") 2>/dev/null; then
   ` + shWrites("$out", streamA) + `
   : > "$state/a-wrote"
   waitfor "$state/b-wrote"

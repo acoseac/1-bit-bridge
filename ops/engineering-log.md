@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-25 — CI on Ubuntu 26.04: the race tests' TMPDIR on the runner's disk, and the fake sox's claim made atomic](#2026-10-25--ci-on-ubuntu-2604-the-race-tests-tmpdir-on-the-runners-disk-and-the-fake-soxs-claim-made-atomic)
 - [2026-10-24 — B526 items 2 and 3, B532 and B536: four tests CI reddened at random, each red first in its losing order](#2026-10-24--b526-items-2-and-3-b532-and-b536-four-tests-ci-reddened-at-random-each-red-first-in-its-losing-order)
 - [2026-10-24 — B500 round 8: key the build-site census on the verb](#2026-10-24--b500-round-8-key-the-build-site-census-on-the-verb)
 - [2026-10-24 — B500 round 7: the build-site census fails closed](#2026-10-24--b500-round-7-the-build-site-census-fails-closed)
@@ -61722,3 +61723,15 @@ census still finds only the reviewed sites. Controls on the committed fix,
 each red as predicted and nothing else: counting only labelled fences, the
 four unlabelled-fence cases; no quote after the executable, the 720 quoted
 cases; the records counted as runbooks, the four record cases.
+
+## 2026-10-25 — CI on Ubuntu 26.04: the race tests' TMPDIR on the runner's disk, and the fake sox's claim made atomic
+
+**Why.** On the evening of 2026-10-24, three open PRs (B506, B524, B470 PR 5a4) failed the gate's `test -race (rest)` job the same way, while main had passed it in 18.5 minutes that afternoon. The cause was the runner image, not the PRs. GitHub had begun moving `ubuntu-latest` to Ubuntu 26.04 on 10-19: main's green run, and every rest job up to 20:56 UTC, ran on 24.04, and every rest job from 22:29 UTC ran on 26.04. 26.04 mounts `/tmp` as tmpfs, and the durable writer (`atomicwrite`) refuses volatile storage. Every test data directory under `t.TempDir()` was therefore refused, the test player never started, and `TestServeSharesDiscoveryAcrossItsEligibleDevices/Source-only` waited for a surface until the 30-minute package deadline minus 30 s. Every serve wait then fired at once, 45 to 60 failures in each run. The openhome and alsapcm engine tests skipped silently on tmpfs as well, so their coverage was lost even where nothing failed. Re-running did not help: both re-runs landed on 26.04 and timed out again.
+
+**What changed:**
+- The `test (race)` step runs with `TMPDIR` set to `${{ runner.temp }}`, which is on the runner's disk. Every Linux race shard then gets a durable `t.TempDir()`, on 24.04 or 26.04 alike.
+- `TestRunSoxConcurrentSameSpecDoesNotStealTmp`'s fake sox claims its role with an exclusive file create (`(set -C; : > "$state/claim-a")`) in place of `mkdir`. On 26.04, `mkdir` (uutils 0.8.0) can exit 0 for a directory that already exists when two processes race (uutils issue 13970). Both fake processes then took role A and waited on each other until the test failed. It had passed on main, and in 3 of 5 runs on 26.04.
+
+**Checks:** the sox test passes `-count=5` locally on macOS. The workflow change is checked by this PR's own gate run on 26.04, which must pass the rest shard in about main's time.
+
+**Not in this change:** `make test` on a developer's Linux host whose `/tmp` is tmpfs (Fedora, Arch) hits the same refusal. That host needs `TMPDIR` on disk too; it is a follow-up for the Makefile or the docs. The PRs re-run once this merges into them.
