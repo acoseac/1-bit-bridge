@@ -1,6 +1,7 @@
 package openhome
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -45,20 +46,24 @@ func TestARestoredIdentityHandsOutValuesPastItsSnapshot(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the engine keeps its IDs durable with a directory fsync, which Windows has not: the player runs on Linux")
 	}
-	// The identity's writer, the engine and the restore refuse a data
+	// The identity's minter, the engine and the restore refuse a data
 	// directory on storage that does not outlive a reboot, as a TMPDIR on
-	// tmpfs is (atomicwrite.ErrVolatile), and the first of them is the seed
-	// write below, before the engine's skip: the medium is not what this
-	// test is about.
+	// tmpfs is (atomicwrite.ErrVolatile), and the first of them is the mint
+	// below: the medium is not what this test is about.
 	t.Cleanup(atomicwrite.SetMediumForTest(func(string) error { return nil }))
 	source := filepath.Join(t.TempDir(), "source")
 	must(t, "the source's data directory", os.Mkdir(source, 0o700))
 	identity := filepath.Join(source, config.PlayerUUIDFile)
-	must(t, "the source's identity", config.WritePlayerUUIDFile(identity, playerUUID))
-	src, err := servesPlayer(t, source, playerUUID)
-	if err != nil {
+	// The source's identity as serve's start makes it, its floor and its
+	// marker first: the engine refuses an identity whose floor is missing,
+	// so a bare player-uuid would leave the engine nothing to start on.
+	minted, _, err := backup.EnsurePlayerUUID(source)
+	must(t, "the source's identity", err)
+	src, err := servesPlayer(t, source, minted)
+	if errors.Is(err, atomicwrite.ErrBarrierFailed) || errors.Is(err, atomicwrite.ErrMountsUnknown) || errors.Is(err, atomicwrite.ErrMediumUnknown) {
 		t.Skipf("the engine does not start on this test's data directory: %v", err)
 	}
+	must(t, "the source's player", err)
 	h := src.handler("")
 	a, b := src.add("a", nil), src.add("b", nil)
 	must(t, "delete a", src.eng.Delete(bg, a))
@@ -74,7 +79,7 @@ func TestARestoredIdentityHandsOutValuesPastItsSnapshot(t *testing.T) {
 	must(t, "the snapshot", err)
 	mark, err := engine.ReadReservation(filepath.Join(snap, engine.ReservationFileName))
 	must(t, "the snapshot's reservation", err)
-	if mark.UUID != playerUUID || mark.IDs < c || mark.Tokens < last {
+	if mark.UUID != minted || mark.IDs < c || mark.Tokens < last {
 		t.Fatalf("the snapshot's reservation %+v does not cover the IDs to %d and the tokens to %d its source handed out", mark, c, last)
 	}
 
@@ -83,8 +88,8 @@ func TestARestoredIdentityHandsOutValuesPastItsSnapshot(t *testing.T) {
 	must(t, "the restore", backup.Restore(snap, backup.Targets{PlayerUUID: filepath.Join(restored, config.PlayerUUIDFile)}))
 	id, err := config.ReadPlayerUUID(restored)
 	must(t, "the restored identity", err)
-	if id != playerUUID {
-		t.Fatalf("the restored identity %s, want the snapshot's %s", id, playerUUID)
+	if id != minted {
+		t.Fatalf("the restored identity %s, want the snapshot's %s", id, minted)
 	}
 	p, err := servesPlayer(t, restored, id)
 	must(t, "the restored player", err)
