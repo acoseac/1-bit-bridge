@@ -189,8 +189,10 @@ running, which refuses volatile storage there as well, and are PR #1349's.
 with main's merge at 032934fe, seeding a bare `player-uuid`, and since round 5
 the engine refuses an identity whose floor is missing, so it skipped at its
 guard on every host, a disk's TMPDIR included. It now mints its source through
-`backup.EnsurePlayerUUID`, as serve's start does. It skips only for storage
-the engine cannot keep IDs on, and fails on any other refusal.
+`backup.EnsurePlayerUUID`, as serve's start does, and fails on any refusal.
+The skip it first kept, for storage the engine cannot keep IDs on, was removed
+after round 14's review (Claude Low): the mint has just probed that directory,
+so such a refusal afterwards would be a regression that the skip hid.
 
 **A refused start leaves no identity behind.** Serve's start and bind mint
 through `backup.EnsurePlayerUUID`. It writes the floor and the marker through

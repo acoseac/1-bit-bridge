@@ -689,9 +689,10 @@ on every host since it reached B524 with main's merge at 032934fe. It seeded a
 bare `player-uuid`, and since round 5 the engine refuses an identity whose
 floor is missing ("player floor is missing"). It now mints its source as
 serve's start does (`backup.EnsurePlayerUUID`: the floor, the marker, then the
-UUID). It fails, rather than skips, on any refusal except storage the engine
-cannot keep IDs on (`ErrBarrierFailed`, `ErrMountsUnknown`,
-`ErrMediumUnknown`).
+UUID). It fails, never skips, on any refusal: the mint has just probed the
+same directory, so a barrier or mount refusal from the engine afterwards would
+be a regression, not the host (round 14's review, Claude Low; the narrower
+skip it first had is gone).
 
 In production, a refused probe leaves no identity behind.
 `config.WritePlayerUUIDFile` does rename the file into place before it probes.

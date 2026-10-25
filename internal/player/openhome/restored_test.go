@@ -1,7 +1,6 @@
 package openhome
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -59,10 +58,10 @@ func TestARestoredIdentityHandsOutValuesPastItsSnapshot(t *testing.T) {
 	// so a bare player-uuid would leave the engine nothing to start on.
 	minted, _, err := backup.EnsurePlayerUUID(source)
 	must(t, "the source's identity", err)
+	// No skip here: the mint above has just probed this directory, so a
+	// barrier or mount refusal from the engine now is a regression, not the
+	// host (round 14's review).
 	src, err := servesPlayer(t, source, minted)
-	if errors.Is(err, atomicwrite.ErrBarrierFailed) || errors.Is(err, atomicwrite.ErrMountsUnknown) || errors.Is(err, atomicwrite.ErrMediumUnknown) {
-		t.Skipf("the engine does not start on this test's data directory: %v", err)
-	}
 	must(t, "the source's player", err)
 	h := src.handler("")
 	a, b := src.add("a", nil), src.add("b", nil)
