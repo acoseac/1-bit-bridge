@@ -659,3 +659,47 @@ deny-read case drops both privileges for its duration.
 `TestALockFileLinkLeadingOutIsNeverFollowed` and
 `TestALockFileDeniedReadingNamesTheEntry` pin these boundaries, beside round
 12's permission cases, which now assert the union.
+
+### Round 14: a TMPDIR on tmpfs, and no identity left by a refused start
+
+PR #1346's CI run on Ubuntu 26.04, where `/tmp` is tmpfs, failed
+`TestARestoredIdentityHandsOutValuesPastItsSnapshot` at its seed write. Round 5
+made `config.WritePlayerUUIDFile` end with `atomicwrite.ProbeDurable`, which
+refuses a root on storage that does not outlive a reboot
+(`atomicwrite.ErrVolatile`), and the write came before the test's skip.
+
+On any host, a test-only `init` that makes the medium check answer volatile
+for a whole test binary stands in for that TMPDIR. Run that way at 51d2900b,
+`cmd/bridge` failed 35 tests and `internal/player/openhome` one; main at
+9e7b2675 failed 27 in `cmd/bridge` and none in openhome, where the test
+skipped. Nine discovery and OpenHome serve tests that wait for a player that
+cannot start were left out of both runs; with a short deadline they fail
+alike on both. Twelve tests are B524's to fix: ten failed on B524 alone, and
+two more failed on both but, on B524, at their own identity write. Each
+writes the player's identity, floor or marker in its temporary directory,
+through a fixture or the bind, serve start or restore it drives, and B524's
+writers refuse that storage. Each now answers the medium check as a disk
+does while it runs (`persistentMedium` in `cmd/bridge`, the seam inline in
+openhome). The other 24 fail on main too: they need the engine running, and
+the engine refuses volatile storage there as well. A TMPDIR on disk (the
+workflow's PR #1349) is their fix, not this round's.
+
+`TestARestoredIdentityHandsOutValuesPastItsSnapshot` had in fact been skipping
+on every host since round 5. It seeded a bare `player-uuid`, and the engine
+refuses an identity whose floor is missing ("player floor is missing"). It now
+mints its source as serve's start does (`backup.EnsurePlayerUUID`: the floor,
+the marker, then the UUID). It fails, rather than skips, on any refusal except
+storage the engine cannot keep IDs on (`ErrBarrierFailed`,
+`ErrMountsUnknown`, `ErrMediumUnknown`).
+
+In production, a refused probe leaves no identity behind.
+`config.WritePlayerUUIDFile` does rename the file into place before it
+probes. But serve's start and bind mint through `backup.EnsurePlayerUUID`,
+which writes the floor and the marker through the strict writer first, and
+that writer refuses volatile storage before it creates anything; the UUID
+comes last. A start on an identity that is already there probes it at its
+marker (`ensurePlayerMarker`), and the engine probes again as it starts.
+`config.EnsurePlayerUUID` does leave its file when its probe refuses, and a
+second call returns it unprobed, but nothing in production calls it.
+`TestAMintRefusedForVolatileStorageLeavesNoIdentity` and
+`TestServeOnVolatileStorageRefusesEveryStartAndKeepsNoIdentity` pin this.
