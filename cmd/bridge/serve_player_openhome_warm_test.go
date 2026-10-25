@@ -34,8 +34,11 @@ const (
 // (servePlayerSeams.store): the manifest store, but for its first read of
 // the paths, the build of the resolver's index, which it holds until letGo,
 // or until the read's context ends, which it records; with pastCancel, until
-// the test ends, whatever the context says, as a read held in the kernel
-// is. It keeps where each read of the paths began (after).
+// letGo alone, whatever the context says, as a read held in the kernel is,
+// so the test that holds it lets it go and joins the build it held before
+// the test ends. A read let go after it was held ends the build without
+// reading the store, which serve may have closed. Every hold ends with the
+// test at the latest. It keeps where each read of the paths began (after).
 type heldIndex struct {
 	library.Store
 	pastCancel bool
@@ -72,8 +75,12 @@ func (s *heldIndex) TrackPathsIndexedAfter(ctx context.Context, after int64, fn 
 	if first {
 		close(s.held)
 		if s.pastCancel {
-			<-s.ended
-			return errors.New("the test ended")
+			select {
+			case <-s.release:
+				return errors.New("the held read was let go")
+			case <-s.ended:
+				return errors.New("the test ended")
+			}
 		}
 		select {
 		case <-s.release:
@@ -273,6 +280,17 @@ func TestServeAbandonsALibraryIndexBuildHeldPastItsBound(t *testing.T) {
 		bounds: servePlayerBounds{warm: 100 * time.Millisecond},
 		with:   func(o *serveOpts) { o.playerOpenHome = box.wiring() }})
 	idx.awaitHeld(t)
+	// A test that ends early still lets the held read go and joins the build
+	// in its cleanup, which runs before the recorder is put back.
+	warmed := ps.player.run.warmed
+	t.Cleanup(func() {
+		idx.letGo()
+		select {
+		case <-warmed:
+		case <-serveDrainGiveUp(t):
+			t.Error("the abandoned build did not return once its read was let go")
+		}
+	})
 	if code := ps.stopServe(t); code != 0 {
 		t.Fatalf("exit %d; stderr=%s", code, ps.stderr.String())
 	}
@@ -281,5 +299,18 @@ func TestServeAbandonsALibraryIndexBuildHeldPastItsBound(t *testing.T) {
 	}
 	if lines := rec.Lines("player: shut down"); len(lines) != 1 {
 		t.Errorf("the player's shutdown logged %q, want it shut down once", lines)
+	}
+	// The read held in the kernel returns now, and the build it held is
+	// joined here, its stop said in this test's log: an abandoned build left
+	// to the test's end logged its stop into the next test's recorder (Codex
+	// on the warm's round).
+	idx.letGo()
+	select {
+	case <-warmed:
+	case <-serveGiveUp(t):
+		t.Fatal("the abandoned build did not return once its read was let go")
+	}
+	if lines := rec.Lines(warmStoppedLine); len(lines) != 1 {
+		t.Errorf("the abandoned build's stop logged %q, want once, in this test", lines)
 	}
 }
