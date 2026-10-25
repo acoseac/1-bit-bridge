@@ -368,9 +368,9 @@ whatever its build constraint. (The package depends on the engine through
 imports.)
 
 The element: `id` `bridge:` and the UUID; `kind` `bridge`; `player` `bridge`
-and `version.ServerVersion`; no `mpd`; `dac` `null` (not reported yet: the
-bound card's `/proc/asound` stream, matched by ALSA id and `usbId` and never
-by index, is a later change, and `alsa.USBIdentity` is never serialised);
+and `version.ServerVersion`; no `mpd`; `dac` the boot binding's projected
+card or `null` (B543: see "The bridge player's DAC projection" below;
+`alsa.USBIdentity` is never serialised);
 `pathRules` `[]`, an exception to "one element per library root". The
 `bridge` object is `json:"bridge,omitempty"` beside `mpd`'s, so a kind `mpd`
 element's bytes are main's (`TestAnMPDElementsBytesAreMains`, against bytes
