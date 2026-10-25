@@ -51,6 +51,33 @@ func listedPlayer() BridgeOutputFacts {
 		Codecs: []string{"flac", "wav", "aiff", "alac"}, FixedVolume: true, DSDMode: "off"}
 }
 
+// TestBridgeDACFactsReachTheElement exercises the socket-free composer.
+func TestBridgeDACFactsReachTheElement(t *testing.T) {
+	f := listedPlayer()
+	f.DAC = &OutputDAC{Card: 7, ID: "Bound", Name: "DAC", USBID: "20b1:3009",
+		Capabilities: OutputCapabilities{MaxPCMRate: 192000, PCMBitDepths: []int{24}, NativeDSDRates: []int{}, DSDFormats: []string{}}}
+	s := (&Server{}).WithBridgeOutput(&fakeBridgeOutput{enabled: true, facts: f})
+	body, err := s.composeOutputs(context.Background(), false)
+	if err != nil || len(body.Outputs) != 1 || body.Outputs[0].DAC == nil {
+		t.Fatalf("bound DAC missing: %+v, %v", body, err)
+	}
+	d := body.Outputs[0].DAC
+	if d.Card != 7 || d.ID != "Bound" || d.USBID != "20b1:3009" || d.Capabilities.MaxPCMRate != 192000 || d.IsMPDsOutput != nil {
+		t.Fatalf("wrong DAC: %+v", d)
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dac map[string]json.RawMessage
+	if err := json.Unmarshal(rawElements(t, raw)[0]["dac"], &dac); err != nil {
+		t.Fatal(err)
+	}
+	if string(dac["isMPDsOutput"]) != "null" {
+		t.Fatalf("isMPDsOutput: %s", raw)
+	}
+}
+
 // newBridgeOutputsHTTP is newOutputsHTTP with serve's player wired as b,
 // returning the server too.
 func newBridgeOutputsHTTP(t *testing.T, cfg LocalOutputsConfig, b BridgeOutput) (*httptest.Server, string, *Server) {

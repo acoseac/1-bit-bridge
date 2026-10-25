@@ -64941,3 +64941,47 @@ before bgScans drained"); restored, `-race -count=3` passes. The whole
 admin package under `-race` passed, 824 tests in 666 s, on the main Mac
 (Go 1.27.3): past `go test`'s default 10-minute timeout, so a local run of
 that package needs `-timeout`; CI runs it in four shards.
+
+## 2026-10-25 — B543: the bridge player's DAC in GET /v1/outputs
+
+The bridge element now carries the card resolved for the player's boot USB
+binding. `BridgeOutputFacts.DAC` is a plain `OutputDAC` projected in cmd/bridge;
+the API imports no player package. The watcher snapshot must be available,
+non-stale and of the boot binding, and every unavailable player state withholds
+the DAC without changing state/reason. The snapshot carries no stream altsets,
+so `Observer.ObserveWithProc` returns the inventory and its own /proc reading
+from one pass. Resolve the boot binding on that inventory, then project the
+bound PCM device's playback capabilities from that very reading. Index and
+ALSA id are observations, not bindings; a port binding uses the observed model.
+No identity or card longname crosses the seam; `isMPDsOutput` stays null.
+
+The request waits at most 500 ms (or its own deadline), and one read at most
+runs per output view. A read held in the kernel keeps its slot after the
+request returns; more requests return null without another reader. A panic,
+partial reading, unreadable stream or stream without playback altsets is null.
+The protocol documents the capabilities, the queue check, and the moments-apart
+state/DAC observation; protocol version stays 1. The iOS mirror is a reviewer
+copy, not part of this worktree.
+
+`TestBridgeDACBindingsAndPrivacy` uses serial/model/port bindings, two PCM devices
+with different capabilities, and serial/port strings in sysfs and the longname.
+`TestBridgeDACReplug` moves the bound unit while another occupies its old index,
+swaps two identical DACs' ALSA ids, and replaces a port-bound model.
+The read-failure, startup, unavailable/stale, boot-snapshot and model-ambiguity
+tests withhold the DAC while preserving state/reason. The stalled-reader test
+holds the reader through 51 requests, counts one call, then releases it.
+The API composer test was red first: it dropped the supplied DAC fact.
+
+Negative controls all compiled and failed their intended tests: old index
+(replug); JSON-tagged USBIdentity (privacy, including its port); non-null
+isMPDsOutput and PCM device 0 (bindings/capabilities); bypassed unavailable
+or stale gate (unavailable/startup); ignored partial reading (read failures);
+a second read in flight or no deadline (stalled reader); a foreign snapshot
+accepted (boot snapshot). Every mutation was restored from saved file bytes,
+without committing or resetting the worktree.
+
+Validation on Go 1.27.3 with ts_omit_webclient,ts_omit_debugeventbus: repository
+vet; full alsa, player/binding and player/hotplug suites; socket-free bridge/API
+element, plan/start/state, protocol-word, import and cited-test guards. Formatting
+and docs-check pass. The sandbox cannot bind sockets; full API/serve suites,
+race runs and Linux-only runtime tests remain for the reviewer.

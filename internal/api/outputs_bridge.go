@@ -82,6 +82,9 @@ type BridgeOutputFacts struct {
 	FixedVolume bool
 	DSDMode     string
 	AllowDoP    bool
+	// DAC is the boot binding's resolved card, projected by cmd/bridge.
+	// It contains no device identity; IsMPDsOutput is always nil.
+	DAC *OutputDAC
 }
 
 // BridgeOpenHomeFacts is the player's OpenHome Source as BridgeOutputFacts
@@ -100,7 +103,10 @@ type BridgeOutput interface {
 	// for its 404.
 	Enabled() bool
 	// Facts is the player now, built from snapshots and at most one read of
-	// the player's identity file, which it never makes or writes.
+	// the player's identity file, which it never makes or writes. DAC is a
+	// privacy-safe projection of the boot binding, nil while unavailable or
+	// stale. Any hardware read has a short deadline and at most one in flight
+	// per server, even when a kernel read outlives cancellation.
 	Facts(ctx context.Context) BridgeOutputFacts
 }
 
@@ -153,6 +159,7 @@ func (s *Server) bridgeElement(ctx context.Context) (OutputInfo, bool) {
 		Player:    OutputPlayer{Software: bridgePlayerSoftware, Version: version.ServerVersion},
 		PathRules: []OutputPathRule{},
 		Bridge:    b,
+		DAC:       f.DAC,
 	}, true
 }
 

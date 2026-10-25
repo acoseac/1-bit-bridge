@@ -506,7 +506,7 @@ pin it.
 **Install the view before the API listeners start, whether or not the plan
 starts the player; read `ready` before `eng` and `id`, the surface's pointer
 under `p.mu`, and the identity file afresh until the engine runs. Never read
-`playerOutput`, make or cache the identity, or let the view start, probe,
+`playerOutput`, make or cache the identity, or let the view start, probe MPD,
 dial or write anything.**
 
 `newBridgeOutput(plan, player, cfg)` is installed with
@@ -528,6 +528,9 @@ start; no lock), `TestTheOutputsRouteMakesNoPlayerFile` compares the data
 directory around the route, and `TestServeListsItsPlayerOnAGateOfItsOwn` and
 `TestServeNamesItsOpenHomeSourceWhileItListens` run serve itself (control
 B17 removes the wiring).
+
+B543 adds a bounded hardware read for the boot binding's DAC, with at most
+one in flight per view; it reads neither MPD nor the supervisor's state.
 
 ### What stays MPD's
 

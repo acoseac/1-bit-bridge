@@ -241,6 +241,9 @@ type bridgePlayer struct {
 	seams  *servePlayerSeams
 	// device is the binding the player started with.
 	device config.PlayerDevice
+	// Immutable wiring for the outputs view, independent of the supervisor.
+	feed  *hotplug.Feed
+	trees outputTrees
 
 	// cancel ends the player; nil when it never started.
 	cancel context.CancelFunc
@@ -302,6 +305,7 @@ type playerRun struct {
 // The caller defers stop.
 func startServePlayer(plan servePlayerPlan, w servePlayerWiring) *bridgePlayer {
 	p := &bridgePlayer{plan: plan, bounds: w.Bounds.orProduction(), hold: w.Hold, seams: w.Seams,
+		feed: w.Feed, trees: w.Trees.or(hostTrees),
 		ready: make(chan struct{}), done: make(chan struct{}), settled: make(chan struct{})}
 	if !plan.start {
 		if plan.off != "" && !plan.told {
