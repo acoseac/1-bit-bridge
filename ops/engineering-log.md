@@ -209,13 +209,13 @@ assertion, each anchor count-checked, mutated in the committed tree and
 restored from git: one for each of the twelve tests' stand-ins, run on the
 simulated tmpfs, one that empties `persistentMedium`, one that seeds the
 restored-identity test with a bare `player-uuid`, and two for each pin, the
-UUID written before the floor and an existing marker left unprobed.
-Seventy-nine documentation mutations, round 13's sixty-one and eighteen new,
-each fail the documentation contract. Under the simulation at fc965061, every
-package in scope passes but `cmd/bridge`, whose 24 failures all fail on main
-as well, and the restored-identity test runs and passes. On the owner's Mac
-(macOS arm64, Go 1.27.3, not root) native, Linux and Windows vet pass with the
-release build tags, `make fmt` changes nothing and `make docs-check` passes.
+UUID written before the floor and an existing marker left unprobed. Eighty
+documentation mutations, round 13's sixty-one and nineteen new, each fail the
+documentation contract. Under the simulation at fc965061, every package in
+scope passes but `cmd/bridge`, whose 24 failures all fail on main as well, and
+the restored-identity test runs and passes. On the owner's Mac (macOS arm64,
+Go 1.27.3, not root) native, Linux and Windows vet pass with the release build
+tags, `make fmt` changes nothing and `make docs-check` passes.
 `go test -race -count=1` passes `internal/config`, `internal/player/...`,
 `internal/backup` and `cmd/bridge` at fc965061: 1,712 top-level cases pass and
 six skip (two default-port cases, three root-only CLI cases and the ALAC
