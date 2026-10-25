@@ -284,20 +284,26 @@ func syntheticPath(i int) string {
 // syntheticResolver is a resolver over a synthetic library of n tracks.
 func syntheticResolver(t *testing.T, n int) (*Resolver, *fakeStore) {
 	t.Helper()
-	s := newFakeStore()
-	paths := make([]string, n)
-	for i := range paths {
-		paths[i] = syntheticPath(i)
-	}
-	// As a scan writes: batches of 500, a stamp each.
-	for i := 0; i < n; i += 500 {
-		s.put(paths[i:min(i+500, n)]...)
-	}
+	s := syntheticStore(n)
 	r, err := New(Config{Store: s, Paths: fakePaths{}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return r, s
+}
+
+// syntheticStore is the library index of a synthetic library of n tracks,
+// written as a scan writes: batches of 500, a stamp each.
+func syntheticStore(n int) *fakeStore {
+	s := newFakeStore()
+	paths := make([]string, n)
+	for i := range paths {
+		paths[i] = syntheticPath(i)
+	}
+	for i := 0; i < n; i += 500 {
+		s.put(paths[i:min(i+500, n)]...)
+	}
+	return s
 }
 
 // fakePaths maps every stored path onto one root.

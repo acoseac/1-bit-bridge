@@ -24,7 +24,11 @@
 // (manifest.Store.TrackPathsIndexedAfter, a seek of the stamps' index when
 // nothing changed), and a track a scan adds is found at once, whatever the
 // library's size; a path the index once held is taken for the id's only once
-// the row is read again. Then, at every open and at every membership check
+// the row is read again. The index is built from the first row by the first
+// lookup, or ahead of it by Warm, which serve's player runs as it starts its
+// OpenHome surface (B470 PR 5a4): an Insert asks Member with what its write
+// budget leaves an edit, about 3 s, and the first build of a large library on
+// a slow box can take longer. Then, at every open and at every membership check
 // (Member, which opens nothing): the index still holds that path's row
 // (not_indexed), one path alone hashing to the id among those it holds
 // (ambiguous_reference); the row is not an upstream server's (routed), nor an
@@ -55,7 +59,8 @@
 //
 // A panic in the resolver is recovered as the entry's refusal
 // (resolver_failed), logged with its stack and never its value: the
-// backend's goroutines recover nothing.
+// backend's goroutines recover nothing. One in Warm is recovered the same
+// way, and the next lookup builds what it did not.
 package library
 
 import (
@@ -70,6 +75,7 @@ import (
 	"runtime/debug"
 	"slices"
 	"syscall"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
@@ -212,7 +218,7 @@ type idIndex struct {
 var _ playback.Resolver = (*Resolver)(nil)
 
 // New builds a resolver. It reads nothing: the index of the paths by their
-// ids is built at the first lookup.
+// ids is built at the first lookup, or ahead of it by Warm.
 func New(cfg Config) (*Resolver, error) {
 	switch {
 	case cfg.Store == nil:
@@ -268,8 +274,8 @@ func (r *Resolver) pathsOf(ctx context.Context, id string) (string, error) {
 		return "", errCancelled(ctx.Err())
 	}
 	defer func() { <-r.turn }()
-	if err := r.catchUp(ctx, id); err != nil {
-		return "", err
+	if err := r.catchUp(ctx); err != nil {
+		return "", r.indexError(ctx, err, id, "paths")
 	}
 	var live []string
 	for _, p := range slices.Clone(r.ids.byID[id]) {
@@ -294,11 +300,12 @@ func (r *Resolver) pathsOf(ctx context.Context, id string) (string, error) {
 
 // catchUp takes into the index every row stamped since it last read, first
 // building it again from the first row when it has grown past staleSlack with
-// the paths of rows deleted since its last build. A read the context ends
-// keeps what it took whole, every row up to the last stamp it finished, and
-// the next lookup goes on from there. The caller holds the turn; id is the
-// track id it looks up, for the log.
-func (r *Resolver) catchUp(ctx context.Context, id string) error {
+// the paths of rows deleted since its last build. A read the context ends, or
+// that fails, keeps what it took whole, every row up to the last stamp it
+// finished, and the next lookup goes on from there; the read's error is
+// returned as it is, for the caller to map (indexError, Warm). The caller
+// holds the turn.
+func (r *Resolver) catchUp(ctx context.Context) error {
 	x := &r.ids
 	if x.built >= 0 && x.paths > 2*x.built+staleSlack {
 		x.reset()
@@ -318,13 +325,83 @@ func (r *Resolver) catchUp(ctx context.Context, id string) error {
 	})
 	if err != nil {
 		x.after = done
-		return r.indexError(ctx, err, id, "paths")
+		return err
 	}
 	x.after = cur
 	if x.built < 0 {
 		x.built = x.paths
 	}
 	return nil
+}
+
+// The lines Warm logs, one for each warm: how it ended.
+const (
+	warmBuiltMessage   = "player: the library index is built ahead of the first lookup"
+	warmStoppedMessage = "player: the library index's build ahead of the first lookup stopped before it was done; the next lookup builds the rest"
+	warmFailedMessage  = "player: the library index could not be built ahead of the first lookup; the next lookup builds the rest"
+	warmPanicMessage   = "player: the library resolver panicked building its index ahead of the first lookup; the next lookup builds the rest"
+)
+
+// errWarmFailed is what Warm answers when a read of the index failed, or a
+// panic stopped it: the log says how, by the error's class.
+var errWarmFailed = errors.New("player library: the index could not be built ahead of the first lookup; the bridge's log says how")
+
+// Warm builds the index of the paths by their ids as the first lookup would
+// build it, ahead of that lookup (B470 PR 5a4, CodeRabbit on #1347: an
+// Insert's confinement asks Member before the edit gate, with about 3 s of
+// its write budget left for it, and the first build of a large library on a
+// slow box can take longer). It holds the resolver's turn while it reads, so
+// a lookup that comes meanwhile waits for it, with its own context, and then
+// finds the index built. It answers nil once the index holds every row
+// stamped before its read ended; ErrCancelled, and why, when ctx ended
+// first, before it had the turn or during the build; and, when a read of the
+// index failed or a panic stopped it, an error that names no path. A build
+// cut short keeps what it took whole, every row up to the last stamp it
+// finished, and the next lookup goes on from there, as it does after a
+// lookup whose build was cancelled. Warm logs how it ended, once: built,
+// with the paths the index holds and how long the build took; stopped; or
+// failed, by the error's class (manifest.ErrorClass), never its text, which
+// can quote a stored path. A panic is logged with its stack, and never its
+// value.
+func (r *Resolver) Warm(ctx context.Context) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			logPanic(r.log, warmPanicMessage, p)
+			err = errWarmFailed
+		}
+	}()
+	paths, took, err := r.warm(ctx)
+	switch {
+	case err == nil:
+		r.log.Info(warmBuiltMessage, "paths", paths, "took", took.Round(time.Millisecond))
+		return nil
+	case errors.Is(err, ErrCancelled):
+		r.log.Info(warmStoppedMessage)
+		return err
+	}
+	r.log.Warn(warmFailedMessage, "class", manifest.ErrorClass(err))
+	return errWarmFailed
+}
+
+// warm is Warm's build, in the resolver's turn, which it waits for with ctx:
+// the paths the index holds once it is current and how long the build took,
+// ErrCancelled when ctx ended first, or the read's own failure, for Warm to
+// log by its class.
+func (r *Resolver) warm(ctx context.Context) (int, time.Duration, error) {
+	select {
+	case r.turn <- struct{}{}:
+	case <-ctx.Done():
+		return 0, 0, errCancelled(ctx.Err())
+	}
+	defer func() { <-r.turn }()
+	began := time.Now()
+	if err := r.catchUp(ctx); err != nil {
+		if cancelled(ctx, err) {
+			return 0, 0, errCancelled(err)
+		}
+		return 0, 0, err
+	}
+	return r.ids.paths, time.Since(began), nil
 }
 
 // errCancelled is a lookup whose context ended: ErrCancelled, and why.
@@ -340,7 +417,7 @@ func refuse(reason engine.Reason, detail string) *engine.Unplayable {
 func (r *Resolver) Open(ctx context.Context, ref engine.Reference) (c playback.Content, err error) {
 	defer func() {
 		if p := recover(); p != nil {
-			logPanic(r.log, p)
+			logPanic(r.log, panicMessage, p)
 			c, err = playback.Content{}, refuse(ReasonResolverFailed, "the library resolver failed; the bridge's log has why")
 		}
 	}()
@@ -378,7 +455,7 @@ func (r *Resolver) Open(ctx context.Context, ref engine.Reference) (c playback.C
 func (r *Resolver) Member(ctx context.Context, id string) (err error) {
 	defer func() {
 		if p := recover(); p != nil {
-			logPanic(r.log, p)
+			logPanic(r.log, panicMessage, p)
 			err = refuse(ReasonResolverFailed, "the library resolver failed; the bridge's log has why")
 		}
 	}()
@@ -509,7 +586,7 @@ func openRefusal(err error) *engine.Unplayable {
 // quote the stored path (GetUPnPRouting's does), and refused
 // index_unreadable.
 func (r *Resolver) indexError(ctx context.Context, err error, id, read string) error {
-	if ctx.Err() != nil || ctxerr.WithoutCancellation(ctx, err) == nil {
+	if cancelled(ctx, err) {
 		return errCancelled(err)
 	}
 	r.log.Warn("player: the library index could not be read for an entry; it is skipped",
@@ -517,16 +594,24 @@ func (r *Resolver) indexError(ctx context.Context, err error, id, read string) e
 	return refuse(ReasonIndexUnreadable, "the library index could not be read; the bridge's log says which read failed, and how")
 }
 
-// panicMessage is the line a recovered panic logs.
+// cancelled reports whether err, a read of the index on ctx, is ctx's end
+// rather than a failure: ctx has ended, or err is nothing but its
+// cancellation.
+func cancelled(ctx context.Context, err error) bool {
+	return ctx.Err() != nil || ctxerr.WithoutCancellation(ctx, err) == nil
+}
+
+// panicMessage is the line a panic recovered in an open or a membership
+// check logs.
 const panicMessage = "player: the library resolver panicked; the entry is refused"
 
-// logPanic logs a panic in the resolver: its stack, and its value only when
-// it is the runtime's own error, which carries nothing the resolver read (a
-// value code panics with could quote a path).
-func logPanic(log *slog.Logger, p any) {
+// logPanic logs msg for a panic in the resolver: its stack, and its value
+// only when it is the runtime's own error, which carries nothing the
+// resolver read (a value code panics with could quote a path).
+func logPanic(log *slog.Logger, msg string, p any) {
 	attrs := []any{"stack", string(debug.Stack())}
 	if rerr, ok := p.(runtime.Error); ok {
 		attrs = append(attrs, "error", rerr.Error())
 	}
-	log.Error(panicMessage, attrs...)
+	log.Error(msg, attrs...)
 }

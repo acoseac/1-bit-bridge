@@ -6,9 +6,11 @@ import (
 	"net/netip"
 	"strconv"
 	"sync/atomic"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/player/lan"
+	"github.com/acoseac/1-bit-bridge/internal/player/library"
 	"github.com/acoseac/1-bit-bridge/internal/player/openhome"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
@@ -125,6 +127,54 @@ func (p *bridgePlayer) startOpenHome(id string, w servePlayerWiring, lib openhom
 	playerLog.Info("player: the OpenHome surface is on; discovery follows its bound LAN addresses", "port", player.EffectiveOpenHomePort())
 	if o.Started != nil {
 		o.Started(s)
+	}
+}
+
+// warmLibrary builds the library resolver's index of the paths by their ids
+// ahead of the first lookup (library.Resolver.Warm, B470 PR 5a4), on a
+// goroutine of its own, which the player starts just before its OpenHome
+// surface: an Insert asks the library with what its write budget leaves an
+// edit, about 3 s (the listener's 10 s write deadline, less a second for the
+// reply and the 6 s an edit needs left), and the first build of a large
+// library on a slow box can take longer. The surface's listener and
+// discovery never wait for it: a read needs no index, and an Insert that
+// comes while the build runs waits for it in the resolver's turn, with its
+// own budget, which without the build ahead of it would have paid for the
+// whole build. The build runs on a context of ctx's, the player's, that the
+// player's shutdown also ends, and the shutdown waits for it last, within
+// bounds.warm (joinWarm). It reads the index and writes nothing, so it takes
+// no share of the data directory's lock. It logs how it ended (Warm), and a
+// panic on its goroutine is recovered and logged as the player's are.
+func (p *bridgePlayer) warmLibrary(ctx context.Context, res *library.Resolver) {
+	wctx, stop := context.WithCancel(ctx)
+	done := make(chan struct{})
+	p.run.stopWarm, p.run.warmed = stop, done
+	go func() {
+		defer close(done)
+		defer func() {
+			if r := recover(); r != nil {
+				logPlayerPanic("the build of the player's library index", r)
+			}
+		}()
+		_ = res.Warm(wctx)
+	}()
+}
+
+// joinWarm waits for the library index's build ahead of the first lookup,
+// which the shutdown has stopped, at most bounds.warm: the build reads the
+// library index, which serve closes after the player. One that has not
+// returned by then, a read of the index held, is abandoned, and said so.
+func (p *bridgePlayer) joinWarm(run *playerRun) {
+	if run.warmed == nil {
+		return
+	}
+	t := time.NewTimer(p.bounds.warm)
+	defer t.Stop()
+	select {
+	case <-run.warmed:
+	case <-t.C:
+		playerLog.Warn("player: the library index's build ahead of the first lookup did not stop within its bound: a read of the index is held; it is abandoned and ends with the process",
+			"bound", p.bounds.warm)
 	}
 }
 
