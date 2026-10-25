@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-25 — B470 PR 5b: GET /v1/outputs lists the bridge's own player, kind bridge, on a gate of its own](#2026-10-25--b470-pr-5b-get-v1outputs-lists-the-bridges-own-player-kind-bridge-on-a-gate-of-its-own)
 - [2026-10-25 — B524 round 14: tests that write the player's identity run on a TMPDIR on tmpfs, and a refused start leaves no identity](#2026-10-25--b524-round-14-tests-that-write-the-players-identity-run-on-a-tmpdir-on-tmpfs-and-a-refused-start-leaves-no-identity)
 - [2026-10-24 — B524 round 13: B524 passes on Windows, a permission failure naming an entry takes one union, and only a held lock makes adoption busy](#2026-10-24--b524-round-13-b524-passes-on-windows-a-permission-failure-naming-an-entry-takes-one-union-and-only-a-held-lock-makes-adoption-busy)
 - [2026-10-24 — B524 round 12: a seal completion's permission advice takes one remedy for a directory failure and names the file for a file's own](#2026-10-24--b524-round-12-a-seal-completions-permission-advice-takes-one-remedy-for-a-directory-failure-and-names-the-file-for-a-files-own)
@@ -63646,3 +63647,366 @@ site names its binary by an absolute path or by `exec.LookPath`'s absolute
 answer. It now resolves `icacls` once through `exec.LookPath` and runs that
 path for the deny and for its cleanup. Windows-only: `GOOS=windows go vet` and
 `go test -c` of `./internal/backup/` compiled it here; CI's Windows leg runs it.
+
+## 2026-10-25 — B470 PR 5b: GET /v1/outputs lists the bridge's own player, kind bridge, on a gate of its own
+
+`GET /v1/outputs` lists the bridge's own player as an element of kind `bridge`
+beside MPD's, on a gate of its own, and `/v1/health` says so with
+`bridgeOutput`. The change is additive: `ProtocolVersion` stays 1, an MPD
+element's bytes are main's, and the shipped app, which skips a kind it does
+not know, keeps its MPD rows. MPD's behaviour is unchanged: its gate is asked
+where and as often as before, its builder, flight and caches are as they were,
+and the loopback route, the checklist, the reading and `bridge doctor` stay on
+its gate alone. Built and tested on macOS (darwin/arm64) with go.mod's Go
+1.27.3; the Linux-only tests of the packages it touches are owed to a Linux
+host (below).
+
+### What shipped
+
+- `internal/api`: `outputs_bridge.go` holds the seam (`BridgeOutput`, with
+  `Enabled` and `Facts`; `BridgeOutputFacts` and `BridgeOpenHomeFacts`, plain
+  facts `cmd/bridge` fills, so the package imports no `internal/player`
+  package), `Server.WithBridgeOutput`, the element (`bridgeElement`,
+  `OutputBridge`, `OutputOpenHome`) and the one composer (`composeOutputs`).
+  `outputs.go`: `OutputInfo.Bridge` (`omitempty`), the route's two gates,
+  `LocalOutputsResponse` through the composer. `api.go`: `bridgeOutput`
+  (sorted between `booklets` and `carPlayOptimize`), `localOutputs` on either
+  gate with MPD's asked first and on every answer, `outputReading` on MPD's
+  alone; the features' capacity is 39.
+- `cmd/bridge`: `serve_player_output.go`, the route's view of serve's player
+  (`bridgeOutput`, `newBridgeOutput`) and its closed word lists;
+  `serve_player.go`: the plan's `lists` and `refused`, and `bridgePlayer.id`,
+  set with the engine before `ready` closes; `main.go`: the wiring, before the
+  API listeners start; `output_checklist.go`: comments only (the checklist's
+  `Active` is MPD's gate, and `checklistInput` reads kind `mpd` alone).
+- `internal/player/engine`: `ErrDeviceBusy`; `Attempt` and
+  `Snapshot.LastAttempt`, the last Start or Resume whose answer the engine
+  took (`attempted`, from `startDone`, `resumeDone` and a Start or Resume past
+  its deadline in `callExpired`).
+- `internal/player/playback`: `busy` maps alsapcm's `ReasonBusy` to the
+  sentinel, at the start's `%w` and in `ResumeError.Err` (`busyError`, whose
+  text is the device layer's own); `codecs.go`: `Plays` and
+  `PlayedContainers`; `open.go`'s DSD refusal reads `Plays`.
+- `internal/player/format`: `Containers` and `Container.IsDSD`.
+  `internal/player/binding`: `States`.
+- `internal/player/openhome`: `endpoints.go`: `UDN`, `Authority`,
+  `sourceLocation` and `Status.Endpoints`; `discovery.go` builds its USNs, its
+  registration's UDN and every LOCATION from them.
+- `PROTOCOL.md`: the activation (two gates, `bridgeOutput`), the body's
+  composition and its 500, `kind` (`mpd` and `bridge`), the example with a
+  bridge element, `bridge`'s presence and the id forms, `player.software`
+  `bridge`, the loopback (MPD's alone), the `pathRules` exception, the 404's
+  condition, a section for the `bridge` object (its identity and listing,
+  `id`, `mpd`, `dac` and `pathRules`, `openHome` and the correlation rule, the
+  state and its eighteen reasons in order, `lastError`, `libraryScope`, the
+  fixed fields, `codecs` and the manifest's `codec` table), the reading's gate
+  (MPD's alone; a `bridge:` id is `404 output_not_found`), the error table's
+  rows, and the Golden fixtures paragraph, which cited a `testdata/fixtures/`
+  this repo does not have.
+- `CLAUDE.md`: the output.md row of "Where things live" names
+  `GET /v1/outputs` and its two gates. `ops/History-rules-output.md`: the long
+  forms. The rules text (output.md's bullets on the route, a glob so that
+  output.md loads with `cmd/bridge/serve_player_output*.go`, wire.md's two
+  lines, cli-serve.md's loopback line and a line on serve's view, and
+  player.md's line on the last attempt) went to the orchestrator in the
+  report, since the session could not edit `.claude/`.
+
+### The words, and where each comes from
+
+The states are `stopped`, `playing` and `paused` (the transport's) and
+`unavailable`. The reasons, in the order they are decided, each the first that
+holds:
+
+- `not_configured`: the boot plan, no DAC bound (`binding.StateNotConfigured`,
+  a word an output report can carry too); `config_invalid`: the boot plan,
+  `output.player.pauseReleaseSeconds` outside the 1 s to 10 min the engine
+  takes;
+- `starting`: `ready` still open; `start_failed`: `ready` closed with no
+  engine (a failure the start recorded, a panic its supervisor recovered,
+  which records nothing, or serve's stop during the start);
+- `closed` (`engine.ReasonClosed`): the engine's `Done` closed, or its
+  snapshot `Closed`;
+- `output_unknown` (`engine.ReasonOutputUnknown`): no output report yet;
+- the output report's own word (`engine.OutputState.Reason`): each
+  `binding.State` but `available` (`disabled`, `device_missing`,
+  `device_ambiguous`, `endpoint_missing`, `binding_invalid`,
+  `identity_unsupported`, `identity_transient`, `identity_incomplete`, from
+  `hotplug.Reporter`; `disabled` from serve's live config too) and serve's
+  `binding_changed` (`playerOutput`); a word none of them names is
+  `output_unavailable` (`engine.ReasonOutputUnavailable`), never sent today;
+- `maintenance` (`engine.ReasonMaintenance`): the snapshot's maintenance hold,
+  or its state Maintenance;
+- `release_unconfirmed` (`engine.ReasonReleaseUnconfirmed`): a release the
+  snapshot says was not confirmed by its deadline.
+
+When none holds, the transport: `playing` (a session starting too), `paused`,
+`stopped`, and while the player releases its DAC, what follows the release
+(play `playing`, pause `paused`, stop or none `stopped`). `lastError` is
+`device_busy` while the last attempt failed busy, and null otherwise. This is
+not 5a3's OpenHome mapping, which has Buffering and reads maintenance as
+Stopped. `TestEveryBridgeWordIsInTheProtocol` requires each of the four
+states, the eighteen reasons and the lastError, with `self`, `bridge` and each
+codec, backticked inside PROTOCOL.md's bridge section and not merely somewhere
+in the file.
+
+### The busy classification
+
+alsapcm says a node another process holds is busy (`ReasonBusy`, from the
+kernel's EBUSY at open). The backend wraps such an error beside an
+engine-owned sentinel, `engine.ErrDeviceBusy` (`busyError`, whose `Unwrap`
+gives both and whose text is the device layer's), at the start
+(`session.start`'s `%w`) and at a resume's reopen (`resumeError`'s `Err`; the
+`ResumeError` code stays `busy`). The engine checks the sentinel alone and
+never imports an ALSA package. It records each Start and Resume whose answer
+it takes (`attempted`: in `startDone` after the current-session check, in
+`resumeDone` after the live check, and for a Start or Resume past its
+deadline) as `Attempt{Seq, Failed, Busy}`: a later attempt replaces it
+whichever way it goes, a pause is no attempt, and a Start past its deadline is
+failed and not busy. `LastStop` cannot serve: a start that succeeds stops
+nothing and leaves it. A refusal whose detail says "busy" is not busy, at
+either layer (`TestABusyWordIsNotTheBusyError`,
+`TestPlaybackARefusalThatSaysBusyIsNoBusyAttempt`).
+
+### The accessor
+
+`newBridgeOutput(plan, player, cfg)`, installed with
+`api.Server.WithBridgeOutput` right after `startServePlayer`, whether or not
+the plan starts the player. It holds the boot plan, the `bridgePlayer` and the
+boot snapshot's `fixedVolume` (`EffectiveMixer` is `none`), `dsdMode`
+(`EffectiveDSDMode`) and `allowDoP` (`AllowsDoP`). `Enabled` is `plan.lists`:
+`config.PlayerEnabled` on the boot snapshot (enabled, readable and valid,
+Linux, not public, no OpenHome port clash) and serve's data-directory lock
+held, which includes a plan refused as `not_configured` or `config_invalid`.
+`Facts`, per request: nothing while the gate is shut; `ready` read before
+anything else; the identity (`p.id` once `ready` and `eng`, else
+`config.ReadPlayerUUID` afresh, never cached and never made); no element
+without one; then the state, reason and lastError from one `eng.Snapshot()`;
+`openHome` from the surface read under `p.mu` (`Status().Endpoints()`,
+`openhome.UDN`), null without the boot opt-in, an address listening, or once
+its stop began; `codecs` from `playback.PlayedContainers`. It never reads
+`playerOutput` (the supervisor's alone) and starts, probes, dials and writes
+nothing.
+
+### Tests
+
+New: in `internal/api`, `TestAnMPDElementsBytesAreMains` (an MPD element's
+bytes against main's, captured from 9e7b2675), `TestTheBridgesOwnElement`,
+`TestTheOutputsRouteHasTwoGates` (MPD off, on, auto with a hit, auto with a
+miss and off Linux, each with the player on and off: the three keys, the
+status, and the probe, dial, greeting, track-list, card and `OnActive`
+counts), `TestTheMPDGateIsAskedOnEveryRequestWhateverThePlayer`,
+`TestABridgeIDNamesNoReading`,
+`TestTwoRequestsInTheCacheWindowLeaveTheCachedBodyAlone`,
+`TestAnMPDFailureWithBothGatesOnIsStill500`,
+`TestTheServersOutputsBodyIsTheRoutesWithThePlayersElement` and
+`TestTheAPIImportsNoPlayerPackage`; in `cmd/bridge`,
+`TestThePlanSaysWhetherGETOutputsListsThePlayer`,
+`TestThePlayersStateFromOneSnapshot`, `TestEveryOutputReasonIsPassedOn`,
+`TestEveryBridgeWordIsInTheProtocol`, `TestThePlayersElementThroughItsPlan`,
+`TestThePlayersElementAcrossItsStart`, `TestTheOutputsRouteMakesNoPlayerFile`,
+`TestTheChecklistReadsNoBridgeElement`,
+`TestServeListsItsPlayerOnAGateOfItsOwn`,
+`TestTheElementSaysAReleaseIsUnconfirmedUntilItsLateAcknowledgement`,
+`TestServeNamesItsOpenHomeSourceWhileItListens`,
+`TestTheCodecsAreTheManifestsCodecsThePlayerPlays` and
+`TestBridgeDoctorStaysMPDs`; in the engine,
+`TestABusyStartIsTheLastAttemptUntilAStartSucceeds`,
+`TestABusyResumeIsTheLastAttemptUntilAResumeSucceeds`,
+`TestABusyWordIsNotTheBusyError`, `TestALaterFailureForAnotherReasonEndsBusy`,
+`TestAStartPastItsDeadlineIsAFailedAttempt` and
+`TestTheEngineImportsNoALSAPackage`; in `internal/alsapcm`, over the real
+backend and the fake kernel's EBUSY,
+`TestPlaybackStartOnABusyDeviceIsTheEnginesBusyAttempt`,
+`TestPlaybackBusyResumeAfterTheReleaseIsTheEnginesBusyAttempt` and
+`TestPlaybackARefusalThatSaysBusyIsNoBusyAttempt`;
+`TestContainersIsEveryContainerDeclared`,
+`TestADecoderGivesDSDExactlyForADSDContainer`,
+`TestTheContainersThePlayerPlaysAreTheOnesItsOpenTakes`,
+`TestStatesIsEveryStateDeclared`, `TestAuthorityIsHowALocationNamesItsSocket`
+and `TestEveryLocationTheSourceAdvertisesIsOneOfItsEndpoints`. No test reads
+the host's `/proc` or `/sys` or opens a PCM node; Linux stands in through
+`localOutputsGOOS` and `playerGOOS`.
+
+Changed, as the brief allowed: `TestHealthFeaturesCompleteSet` (the
+`bridgeOutput` key, and the all-features server gains a player), and
+`TestHealthAdvertisesOutputReadingWithLocalOutputs`, rewritten to the two
+gates under its own name, which `output.md` and this log cite. Every other
+outputs test passes unchanged, `TestOutputKindIsOpen`, the cache, flight and
+probe tests and the reading's among them.
+
+### Red first
+
+The engine's, the backend's, the containers', the binding list's and the
+endpoints' tests were run before each change, against main's code with the new
+names declared and empty, and failed: the five attempt tests waited out their
+deadline for an attempt never recorded; the two busy-backend tests saw a busy
+start and a busy resume answered with no busy attempt (the decoy passed, as it
+should); the container, DSD and played-containers pins found empty lists;
+`TestStatesIsEveryStateDeclared` found an empty `States`; the endpoint tests
+found an empty `Authority` and LOCATIONs built inline, a zoned one that does
+not parse. The route's and serve's tests name the new seam and do not compile
+on main, so their red first is the rule removed, which is each control below.
+
+### Negative controls
+
+Each on a committed tree, mutated by a script that counts its anchor, run, and
+restored from git; all 47 went red by assertion and none by a compile failure.
+
+| Control | Mutation | Red |
+|---|---|---|
+| A1 | health asks the player's gate first (`bridgeOn \|\| Active`) | `TestTheOutputsRouteHasTwoGates` (OnActive counts), `TestTheMPDGateIsAskedOnEveryRequestWhateverThePlayer` (the auto flip through health), `TestHealthAdvertisesOutputReadingWithLocalOutputs` |
+| A2 | the route reads MPD's last answer (`activeNow`) instead of asking, with the player on | the same two (the auto flip through the route) |
+| A3 | the route's 404 on MPD's gate alone | `TestTheOutputsRouteHasTwoGates`, `TestTheBridgesOwnElement` |
+| A4 | `outputReading` on either gate | `TestTheOutputsRouteHasTwoGates`, `TestHealthAdvertisesOutputReadingWithLocalOutputs` |
+| A5 | no `bridgeOutput` key | `TestHealthFeaturesCompleteSet`, `TestTheOutputsRouteHasTwoGates` |
+| A6 | the composer enters MPD's builder with its gate shut | `TestTheOutputsRouteHasTwoGates`, `TestTheBridgesOwnElement` |
+| A7 | the composer appends into the cached body's slice | `TestTwoRequestsInTheCacheWindowLeaveTheCachedBodyAlone` (a data race, and the element left in the cached array) |
+| A8 | `bridge` without `omitempty` | `TestAnMPDElementsBytesAreMains`, `TestTheBridgesOwnElement` |
+| A9 | a reason passed on outside `unavailable` | `TestTheBridgesOwnElement` |
+| A10 | `codecs` as given, null for none | `TestTheBridgesOwnElement` |
+| A11 | an OpenHome Source listed with no endpoint | `TestTheBridgesOwnElement` |
+| A12 | the server's body MPD's alone | `TestTheServersOutputsBodyIsTheRoutesWithThePlayersElement` |
+| B1 | the plan lists the player without serve's lock | `TestThePlanSaysWhetherGETOutputsListsThePlayer`, `TestThePlayersElementAcrossItsStart` |
+| B2 | the view makes the identity (`EnsurePlayerUUID`) | `TestThePlayersElementThroughItsPlan`, `TestThePlayersElementAcrossItsStart`, `TestTheOutputsRouteMakesNoPlayerFile` |
+| B3 | the identity read once and cached | `TestThePlayersElementThroughItsPlan`, `TestThePlayersElementAcrossItsStart` (made, refused, removed) |
+| B4 | a missing identity cached | the same two |
+| B5 | the plan's refusal not decided first | `TestThePlayersElementThroughItsPlan` |
+| B6 | no engine after `ready` read as `starting` | `TestThePlayersElementAcrossItsStart` (the recorded failure, the panic, serve's stop) |
+| B7 | an engine that ended not read as `closed` | `TestServeListsItsPlayerOnAGateOfItsOwn`, `TestThePlayersElementAcrossItsStart` |
+| B8 | maintenance read as the transport (5a3's Stopped) | `TestThePlayersStateFromOneSnapshot`, `TestServeListsItsPlayerOnAGateOfItsOwn` |
+| B9 | an unconfirmed release not reported | `TestThePlayersStateFromOneSnapshot`, `TestTheElementSaysAReleaseIsUnconfirmedUntilItsLateAcknowledgement` |
+| B10 | a release to pause read as `stopped` | `TestThePlayersStateFromOneSnapshot` |
+| B11 | a word no list names passed on | `TestThePlayersStateFromOneSnapshot` |
+| B12 | every output word turned into the fallback | `TestThePlayersStateFromOneSnapshot`, `TestEveryOutputReasonIsPassedOn`, `TestServeListsItsPlayerOnAGateOfItsOwn` |
+| B13 | `lastError` read from `LastStop` | `TestServeListsItsPlayerOnAGateOfItsOwn` (the busy start, then the start that succeeds) |
+| B14 | PROTOCOL.md's `start_failed` row deleted | `TestEveryBridgeWordIsInTheProtocol` |
+| B15 | PROTOCOL.md's `closed` row deleted, a word found elsewhere in the file | `TestEveryBridgeWordIsInTheProtocol` (the pin reads the bridge section alone) |
+| B16 | PROTOCOL.md's ALAC row of the `codec` table deleted | `TestTheCodecsAreTheManifestsCodecsThePlayerPlays` |
+| B17 | serve does not wire its player into the route | `TestServeListsItsPlayerOnAGateOfItsOwn`, `TestServeNamesItsOpenHomeSourceWhileItListens` |
+| B18 | the checklist reads every element, the bridge's included | `TestTheChecklistReadsNoBridgeElement` |
+| B19 | `Enabled` ignores the plan | `TestThePlanSaysWhetherGETOutputsListsThePlayer`, `TestThePlayersElementAcrossItsStart` |
+| E1 | the engine records failed attempts alone | `TestABusyStartIsTheLastAttemptUntilAStartSucceeds`, `TestABusyResumeIsTheLastAttemptUntilAResumeSucceeds` |
+| E2 | the engine reads busy from the error's text | `TestABusyWordIsNotTheBusyError` |
+| E3 | the start's wrap `%v` | `TestPlaybackStartOnABusyDeviceIsTheEnginesBusyAttempt` |
+| E4 | the resume's wrap `%v` | `TestPlaybackBusyResumeAfterTheReleaseIsTheEnginesBusyAttempt`, `TestPlaybackRefusesABusyResumeAndStaysPaused` |
+| E5 | the backend reads busy from the error's text | `TestPlaybackARefusalThatSaysBusyIsNoBusyAttempt` |
+| P1 | `Plays` takes DSF | `TestTheContainersThePlayerPlaysAreTheOnesItsOpenTakes` |
+| P2 | the open's DSD refusal does not read `Plays`, and `Plays` leaves WAV out | `TestTheContainersThePlayerPlaysAreTheOnesItsOpenTakes` (the open's cross-check) |
+| P3 | `IsDSD` forgets DFF | `TestTheContainersThePlayerPlaysAreTheOnesItsOpenTakes`, `TestContainersIsEveryContainerDeclared`, `TestADecoderGivesDSDExactlyForADSDContainer` |
+| P4 | `Containers` forgets ALAC | the same three |
+| S1 | `binding.States` forgets a state | `TestStatesIsEveryStateDeclared` |
+| O1 | `Endpoints` lists the first socket alone | `TestEveryLocationTheSourceAdvertisesIsOneOfItsEndpoints` |
+| O2 | `Authority` leaves a zone unencoded | `TestAuthorityIsHowALocationNamesItsSocket` |
+| O3 | a surface whose stop began lists endpoints | `TestEveryLocationTheSourceAdvertisesIsOneOfItsEndpoints` |
+| O4 | discovery's LOCATION built apart, on another port | `TestEveryLocationTheSourceAdvertisesIsOneOfItsEndpoints`, `TestSourceDiscoveryIdentityAndSearches` |
+| I1 | `internal/api` imports `internal/player/format` | `TestTheAPIImportsNoPlayerPackage` |
+| I2 | the engine imports `internal/alsapcm` | `TestTheEngineImportsNoALSAPackage` |
+
+Two first versions hid half of what they test under a control: the
+operand-order test's `OnActive` count and the codecs test's list pin were
+fatal, so A1 and A2 reddened them without reaching the auto-flip subtests, and
+P1 and P2 without reaching the open's cross-check. Both became `t.Errorf`, and
+the four controls were run again: each then reddened the later half too.
+
+### Decided otherwise than the brief, and why
+
+- `TestHealthAdvertisesOutputReadingWithLocalOutputs` keeps its name and is
+  rewritten to the two gates: `output.md` and this log cite it, and
+  `TestEveryCitedTestNameExists` failed on the rename.
+- An output report's word none of the lists names is sent as
+  `output_unavailable`, the eighteenth reason, so no word PROTOCOL.md does not
+  name reaches the wire; none is sent today.
+- `openHome` is null once the surface's stop has begun (`Status.Stopped`), not
+  only while no address listens: a stopped Source answers nothing.
+- The brief's one table over state, reason and lastError is three: a pure
+  table over a snapshot's half (`playerSnapshot`, an interface the table's
+  fakes implement), the plan's and the start's halves on the real player's
+  start with its seams, and the real engine in serve. A fake snapshot cannot
+  reach the start's seams, and the real engine cannot be put in every state by
+  hand.
+- The gate matrix is three too: the route's (MPD's five cells by the player on
+  and off) in `internal/api`, the player's conditions (enabled, disabled,
+  public, off Linux, no DAC, the lock, a pause release out of range, a port
+  clash) on the plan in `cmd/bridge`, which `internal/api` cannot build, and a
+  boot of serve with the player and `output.mpd: off`.
+- The engine's sentinel is declared in `backend.go`, beside the seam that
+  carries it, and new code sits in files of its own (`outputs_bridge.go`,
+  `serve_player_output.go`, `codecs.go`, `endpoints.go`), so 5a4's open PR
+  merges with few conflicts.
+- `busyError` keeps the device layer's text and adds none; `open.go` keeps its
+  type check beside `Plays`, so content that is not a decoder is still
+  refused.
+- `libraryScope`'s text describes the Insert URI form B470 PR 5a4 ships, which
+  is still open; 5c must not rely on an Insert before it merges.
+- The long forms of the cli-serve.md and player.md lines are in
+  `ops/History-rules-output.md`, as the brief says, rather than in those
+  files' own History files.
+- output.md gains a glob, `cmd/bridge/serve_player_output*.go`, since its
+  rules bind that file and only cli-serve.md and player.md loaded with it.
+- The two "imports no" rules got pins (`TestTheAPIImportsNoPlayerPackage`,
+  `TestTheEngineImportsNoALSAPackage`), each reading every source file
+  whatever its build constraint; the engine's covers `internal/alsa` as well
+  as `internal/alsapcm`.
+- `fixedVolume`, `dsdMode` and `allowDoP` are read from the boot snapshot as
+  the brief says, but no control can tell that from the live config: this
+  release takes one value of each.
+
+### Environment
+
+macOS, darwin/arm64, Go 1.27.3 (go.mod's) with `GOTOOLCHAIN=local` and
+`GOPROXY=off`, the Makefile's tags. A `bridge` binary that
+`go build ./cmd/bridge/` leaves at the worktree's root (ignored by git) fails
+`scripts/third-party-licenses`' `TestBuildTagsAgree` and
+`TestRealTreeBuildSiteCensus`; compile checks here used `go vet` or
+`-o /dev/null`.
+
+### Gate
+
+On macOS (darwin/arm64), Go 1.27.3: `make fmt` (nothing rewritten);
+`make vet`; `go vet` of every package with the Makefile's tags for
+windows/arm64, windows/amd64, darwin/arm64 and linux/arm64, the last of which
+type-checks the Linux-only tests; `make test` (every package under `-race`: 76
+packages, in 21.5 minutes) on the code's last commit, and then `go test -race`
+of `internal/api` and `internal/player/engine` again for the two import pins
+committed after it; `make build-all` (six targets; `dist/` removed after);
+`make docs-check`; and `TestEveryCitedTestNameExists` on the final tree. The
+rules text, applied to a copy of the tree with the orchestrator's applier,
+passes `make docs-check` and `TestEveryCitedTestNameExists` there.
+
+### Linux-only tests, owed to a Linux host
+
+On a Linux host, with `TMPDIR` on a persistent disk (the engine refuses tmpfs,
+`ErrVolatile`): `go test -race` over `cmd/bridge`, `internal/api`,
+`internal/config`, `internal/alsapcm` and `internal/player/...`, which runs
+the Linux-only files among them: `cmd/bridge/snapshot_hold_linux_test.go`,
+`internal/alsapcm/sys_linux_test.go`,
+`internal/api/outputs_hint_r5_linux_test.go`,
+`internal/player/openhome/restrict_linux_test.go` and
+`internal/player/hotplug/source_linux_test.go`.
+
+### For 5c and the iOS companion PR
+
+- The iOS mirror copies this `PROTOCOL.md` into `docs/BridgeProtocol.md`
+  (`cp`, never a rewrite), and adds the DTO: `bridge` optional, a kind it does
+  not know still skipped, and a decoding test of a body with an MPD element
+  and a bridge element. iOS tests that use `bridge` as their unknown kind need
+  another word.
+- 5c correlates a discovered Source with the element only by both its UDN and
+  its LOCATION's host and port among `endpoints`; SSDP carries the UDN in
+  clear.
+- Until `dac` is reported, a client's check of a queue covers its scope and
+  its containers alone; the player's refusal stays the authority on rates and
+  transports.
+- `libraryScope`'s Insert form depends on 5a4, still open.
+- `bridgeOutput` tells a bridge older than 5b from one whose player has no
+  identity yet, which lists no element.
+
+### Not in this change
+
+- The `dac` object for kind `bridge`: a follow-up reads the bound card's
+  `/proc/asound` stream, matched by its ALSA id and `usbId`, never its index,
+  and never serialises `alsa.USBIdentity`.
+- A reading for kind `bridge`: its 404 stays.
+- openhome's playable-extension list, left to 5a4.
+- Volume, the DSD modes, DoP and GENA; the opt-in's default; the console's DAC
+  page (6a); the iOS mirror and DTO; 5c.

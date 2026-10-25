@@ -17,6 +17,17 @@ const (
 	ContainerALAC Container = "alac"
 )
 
+// Containers is every container a decoder reconstructs samples from, in the
+// order they are declared above (B470 PR 5b): what the player's codecs are
+// filtered from (playback.PlayedContainers).
+func Containers() []Container {
+	return []Container{ContainerFLAC, ContainerWAV, ContainerAIFF, ContainerDSF, ContainerDFF, ContainerALAC}
+}
+
+// IsDSD reports whether c carries DSD, which its decoder gives as native DSD
+// (NativeDSD), never as PCM: DSF and DFF.
+func (c Container) IsDSD() bool { return c == ContainerDSF || c == ContainerDFF }
+
 // Kind is the playback transport representation.
 type Kind int
 
