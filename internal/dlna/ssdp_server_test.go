@@ -12,10 +12,11 @@ import (
 // on en0's synthetic interface, with sub.
 func fakeServer(t *testing.T, sub *SSDPSubsystem) (*Server, string) {
 	t.Helper()
-	addr := findFreePort(t)
+	l := loopbackListener(t)
+	addr := l.Addr().String()
 	s, err := NewServer(ServerConfig{
 		Library: newTestLib(testTrack("t1", "Test Track")), UDN: msUDN, FriendlyName: "Fake",
-		ListenAddress: addr, ServerURL: "http://" + addr,
+		ListenAddress: addr, Listener: l, ServerURL: "http://" + addr,
 		AdvertiseEndpoints: []AdvertiseEndpoint{{Interface: en0, ServerURL: "http://192.168.1.20:7790"}},
 		SSDP:               sub,
 		Logger:             discardLogger(),

@@ -64892,3 +64892,52 @@ and `go vet ./...` on the merged tree found it before CI did. The stand-in now
 has `TrackPathsIndexedAfter`, an empty library calling `fn` for no row. Checked
 with `go vet` on darwin, linux and windows, and `go test` of `./cmd/bridge/`
 and `./internal/api/`, plain and under `-race -timeout 30m`.
+
+## 2026-10-25 — the MediaServer's failed-start test observes its own socket (B547)
+
+**The cause.** `TestTheMediaServerStartsOnTheEndpointsThatBind/none_binds`
+called Stop, then dialled the released ephemeral port: another test could
+already own it (the #1347 CI failure). `goldenServer` also chose that port
+by listen-then-close, racing Start's bind. Start owns rollback, without a
+required Stop: its failure-path Shutdown and cancellation comment say so;
+the B470 PR 5a1 record above preserves the all-failed outcome with HTTP
+taken back down. The former assertion could also let Stop mask a leak.
+
+**The fix.** All seven DLNA fixture constructors hand Start a held listener.
+The none-binds case retains the actual TCPListener, waits boundedly for a
+wrapper to delegate Close to it, then requires Accept to return net.ErrClosed
+BEFORE Stop. The wait changes no deadline HTTP's Accept loop shares. The
+loopback server's stop test checks both original sockets and still checks
+that Stop interrupts its stream. Three admin serve fixtures hand over their
+listeners and wait for HTTP/TLS readiness. Refusal-only fixtures in packaging,
+UPnP, enrichment and AcoustID use port zero, which no listener can own.
+The rule and its reasoning live beside B313 in the test rules and History.
+
+**Audit.** Searched `internal/...` for both released-port dials (including
+closed httptest URLs) and listen-close-rebind fixtures. The remaining sites
+are doctor's free-port bind/ownership probes (`mustFreePort` and its callers,
+and the Windows ownership test) and its intentional GC/rebind test drawing
+below the ephemeral range; these are listed individually in the work report.
+
+**Validation.** Written in a sandbox that denies socket creation, so every run
+below was made outside it, on the main Mac (Go 1.27.3, offline, the release
+omit tags). `go vet ./...` passed on darwin and with `GOOS=linux`; `make fmt`
+and `make docs-check` passed. `-race` passed in all eight touched packages
+(dlna, dlna/discovery, admin, packaging, upnp, enrich, acoustid, doctor).
+The none-binds case ran `-race -count=200` under 12 CPU spinners: 200 passes,
+no failure. Three controls, applied through `go test -overlay` so the tree
+never changed: omitting Start's failure-path Shutdown (the call that closes
+the listener), with Stop intact, turns the new assertion red; a rebind of the
+freed port after Stop turns the OLD dial assertion red, reproducing the CI
+flake on demand; the same rebind leaves the new socket assertion green.
+
+**SonarCloud's duplication gate.** The PR first failed it at 12.4% duplicated
+new lines (the gate allows 3%): the two shutdown tests repeated the same
+21-line boot, the held listener, the serve goroutine with its cleanup and the
+HTTP wait. `startShutdownTestServer` is now that boot, registering the same
+cleanups in the same order. Control: with `s.bgScans.Wait()` removed from
+the shutdown drain, `TestShutdownWaitsForBgScans` fails ("Serve returned
+before bgScans drained"); restored, `-race -count=3` passes. The whole
+admin package under `-race` passed, 824 tests in 666 s, on the main Mac
+(Go 1.27.3): past `go test`'s default 10-minute timeout, so a local run of
+that package needs `-timeout`; CI runs it in four shards.

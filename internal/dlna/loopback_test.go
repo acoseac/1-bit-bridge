@@ -15,8 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"testing"
+	"time"
 )
 
 // loopbackLib is the track lookup the loopback route reads: a track id to
@@ -777,7 +777,23 @@ func TestLoopbackServerStopsWithTheServer(t *testing.T) {
 			_ = srv.Stop(context.Background())
 		}
 	})
+	listeners := append([]net.Listener(nil), srv.lns...)
 	base := srv.BaseURL()
+	// The listeners observed after Stop must include the one clients reach
+	// (BaseURL), or the check below could pass over an empty or unrelated
+	// set. One listener on a host without IPv6 loopback, two otherwise.
+	if len(listeners) == 0 {
+		t.Fatal("the server recorded no listeners")
+	}
+	served := false
+	for _, l := range listeners {
+		if l.Addr().String() == strings.TrimPrefix(base, "http://") {
+			served = true
+		}
+	}
+	if !served {
+		t.Fatalf("BaseURL %s is not among the recorded listeners", base)
+	}
 	resp, err := loopbackClient().Get(base + "/dlna/file/big")
 	if err != nil {
 		t.Fatalf("get: %v", err)
@@ -797,14 +813,16 @@ func TestLoopbackServerStopsWithTheServer(t *testing.T) {
 	if n+1 >= size && rerr == nil {
 		t.Fatalf("the stream ran to its end after Stop (%d bytes)", n+1)
 	}
-	host := strings.TrimPrefix(base, "http://")
-	conn, err := net.Dial("tcp", host)
-	if err == nil {
-		conn.Close()
-		t.Fatalf("%s still accepts after Stop", host)
-	}
-	if !errors.Is(err, syscall.ECONNREFUSED) && !strings.Contains(err.Error(), "refused") {
-		t.Fatalf("dial after Stop: %v", err)
+	// Observe both original sockets; their port can already belong to
+	// another test after Stop. Keep the stream-termination check above too.
+	for _, l := range listeners {
+		_ = l.(*net.TCPListener).SetDeadline(time.Now().Add(5 * time.Second))
+		if c, err := l.Accept(); !errors.Is(err, net.ErrClosed) {
+			if c != nil {
+				_ = c.Close()
+			}
+			t.Errorf("listener %s after Stop: Accept = %v, want net.ErrClosed", l.Addr(), err)
+		}
 	}
 }
 

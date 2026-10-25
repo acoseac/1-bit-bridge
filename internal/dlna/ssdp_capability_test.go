@@ -321,9 +321,10 @@ func TestTheMediaServerFailingBesideAnotherDeviceLeavesItAlone(t *testing.T) {
 	n.listenErr["en1"] = errInjected
 	sub := fakeSubsystem(t, n)
 	mustRegister(t, sub, strictReg(srcUDN, 4, SSDPEndpoint{Interface: en0, Location: srcOnEn0, Local: netip.MustParsePrefix("192.168.1.20/24")}))
-	addr := findFreePort(t)
+	l := loopbackListener(t)
+	addr := l.Addr().String()
 	s, err := NewServer(ServerConfig{
-		Library: newTestLib(), UDN: msUDN, ListenAddress: addr, ServerURL: "http://" + addr,
+		Library: newTestLib(), UDN: msUDN, ListenAddress: addr, Listener: l, ServerURL: "http://" + addr,
 		AdvertiseEndpoints: []AdvertiseEndpoint{{Interface: en1, ServerURL: "http://10.0.0.5:7790"}},
 		SSDP:               sub,
 		Logger:             discardLogger(),

@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -49,7 +48,7 @@ func TestManualPollerDebugLinesNameTheHostAlone(t *testing.T) {
 
 	for _, mode := range []struct {
 		name, line string
-		handler    http.HandlerFunc // nil: a port nothing listens on
+		handler    http.HandlerFunc // nil: port zero refuses the connection
 	}{
 		{"a refused connection", fetchFailed, nil},
 		{"a 404", fetchFailed, func(w http.ResponseWriter, _ *http.Request) { http.NotFound(w, nil) }},
@@ -106,17 +105,13 @@ func TestManualPollerDebugLinesNameTheHostAlone(t *testing.T) {
 }
 
 // manualDebugTestHost serves handler on loopback for the test and returns its
-// host and port, or, for a nil handler, a port nothing listens on.
+// host and port, or port zero for a refused connection with a nil handler.
 func manualDebugTestHost(t *testing.T, handler http.HandlerFunc) string {
 	t.Helper()
 	if handler == nil {
-		l, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		host := l.Addr().String()
-		l.Close()
-		return host
+		// A closed ephemeral port can already belong to another test.
+		// No listener can own port zero: binding it allocates a nonzero port.
+		return "127.0.0.1:0"
 	}
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)

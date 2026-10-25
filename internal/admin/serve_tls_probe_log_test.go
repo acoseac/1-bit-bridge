@@ -47,13 +47,13 @@ func TestTLSConsoleDoesNotLogALocalProbe(t *testing.T) {
 	}
 	addr := lis.Addr().String()
 	cfg.AdminAddress = addr
-	lis.Close()
+	t.Cleanup(func() { _ = lis.Close() })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = srv.Serve(ctx)
+		_ = srv.ServeListener(ctx, lis)
 	}()
 	// A cleanup, not a tail: registered after newTestServer's store
 	// teardown, so it runs BEFORE it and a failing assertion cannot leave

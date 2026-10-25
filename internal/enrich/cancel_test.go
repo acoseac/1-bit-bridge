@@ -202,9 +202,9 @@ func TestAPremiumCoverFetchStoppedByShutdownReportsNothing(t *testing.T) {
 // TestAPremiumCoverFetchThatFailsIsStillReported is the twin: the upstream
 // is unreachable on a live context.
 func TestAPremiumCoverFetchThatFailsIsStillReported(t *testing.T) {
-	srv := httptest.NewServer(http.NotFoundHandler())
-	base := srv.URL
-	srv.Close() // nothing listens there now
+	// A released ephemeral port can already belong to another test.
+	// No listener can own port zero.
+	base := "http://127.0.0.1:0"
 	dir := t.TempDir()
 	f := NewAtlasPremiumFetcher(fakeCred{token: "tok", base: base, ok: true}, "ua", nil, dir)
 

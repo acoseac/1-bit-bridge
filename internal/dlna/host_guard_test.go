@@ -227,12 +227,14 @@ func Test_ownHostOnly_LogsARefusedNameOnce(t *testing.T) {
 // Its advertiser is bound to the loopback interface, as the lifecycle
 // test's is, and it skips where multicast cannot be pinned there.
 func Test_Server_Start_ServesTheHostCheck(t *testing.T) {
-	addr := findFreePort(t)
+	l := loopbackListener(t)
+	addr := l.Addr().String()
 	s, err := NewServer(ServerConfig{
 		Library:       newTestLib(testTrack("t1", "Test Track")),
 		UDN:           "uuid:test-host-guard-start",
 		FriendlyName:  "Test Bridge",
 		ListenAddress: addr,
+		Listener:      l,
 		ServerURL:     "http://" + addr,
 		AdvertiseEndpoints: []AdvertiseEndpoint{{
 			Interface: loopbackInterface(t),
