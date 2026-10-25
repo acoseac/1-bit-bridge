@@ -64930,3 +64930,14 @@ never changed: omitting Start's failure-path Shutdown (the call that closes
 the listener), with Stop intact, turns the new assertion red; a rebind of the
 freed port after Stop turns the OLD dial assertion red, reproducing the CI
 flake on demand; the same rebind leaves the new socket assertion green.
+
+**SonarCloud's duplication gate.** The PR first failed it at 12.4% duplicated
+new lines (the gate allows 3%): the two shutdown tests repeated the same
+21-line boot, the held listener, the serve goroutine with its cleanup and the
+HTTP wait. `startShutdownTestServer` is now that boot, registering the same
+cleanups in the same order. Control: with `s.bgScans.Wait()` removed from
+the shutdown drain, `TestShutdownWaitsForBgScans` fails ("Serve returned
+before bgScans drained"); restored, `-race -count=3` passes. The whole
+admin package under `-race` passed, 824 tests in 666 s, on the main Mac
+(Go 1.27.3): past `go test`'s default 10-minute timeout, so a local run of
+that package needs `-timeout`; CI runs it in four shards.
