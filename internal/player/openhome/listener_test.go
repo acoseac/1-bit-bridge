@@ -411,7 +411,8 @@ func TestTheCapsCountOnlyAdmittedConnections(t *testing.T) {
 // TestATrickledBodyMeetsItsDeadlineHoldingNoSlot: a client that sends its
 // body a byte at a time is answered 408 at the body's own deadline and its
 // connection closed, and while it trickles it holds no slot: with one slot,
-// another client's request is answered (fault 602), never 503.
+// another client's request is answered (fault 501: the surface has no
+// engine; 602 until B470 PR 5a4), never 503.
 func TestATrickledBodyMeetsItsDeadlineHoldingNoSlot(t *testing.T) {
 	box := lantest.New(t)
 	box.Set([]lan.Address{eth0})
@@ -457,8 +458,8 @@ func TestATrickledBodyMeetsItsDeadlineHoldingNoSlot(t *testing.T) {
 	}
 	body, _ := io.ReadAll(res.Body)
 	_ = res.Body.Close()
-	if res.StatusCode != 500 || !strings.Contains(string(body), "<errorCode>602</errorCode>") {
-		t.Errorf("beside a trickler, with one slot: %d %s; want fault 602", res.StatusCode, body)
+	if res.StatusCode != 500 || !strings.Contains(string(body), "<errorCode>501</errorCode>") {
+		t.Errorf("beside a trickler, with one slot: %d %s; want fault 501", res.StatusCode, body)
 	}
 	// Well inside the request's whole deadline (Limits.Read, 10 s), so the
 	// answer is the body's own deadline's.

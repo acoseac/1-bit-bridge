@@ -27,14 +27,18 @@ var bg = context.Background()
 
 // TestTheReadsAndTheWritesAreEveryAction pins which actions this release
 // answers: every action of the four services is a read (reads) or a write
-// (writes), never both and never neither; 25 reads and 17 writes, the 42 of
-// the SCPDs; and every read names an action its service has.
+// (writes, writes.go), never both and never neither; 25 reads and 17 writes,
+// the 42 of the SCPDs, the writes exactly OpenHome's (writeActions); and every
+// read and every write names an action its service has.
 func TestTheReadsAndTheWritesAreEveryAction(t *testing.T) {
 	nReads, nWrites := 0, 0
 	for _, s := range services {
 		for _, a := range s.actions {
 			_, isRead := reads[s.name][a.name]
-			isWrite := slices.Contains(writes[s.name], a.name)
+			_, isWrite := writes[s.name][a.name]
+			if isWrite != slices.Contains(writeActions[s.name], a.name) {
+				t.Errorf("%s#%s: a write %v, and in OpenHome's list of writes %v", s.name, a.name, isWrite, !isWrite)
+			}
 			switch {
 			case isRead && isWrite:
 				t.Errorf("%s#%s is a read and a write", s.name, a.name)
@@ -52,6 +56,14 @@ func TestTheReadsAndTheWritesAreEveryAction(t *testing.T) {
 		for name := range m {
 			if s == nil || s.action(name) == nil {
 				t.Errorf("the read %s#%s names no action", svc, name)
+			}
+		}
+	}
+	for svc, m := range writes {
+		s := servicesByPath[strings.ToLower(svc)]
+		for name := range m {
+			if s == nil || s.action(name) == nil {
+				t.Errorf("the write %s#%s names no action", svc, name)
 			}
 		}
 	}
@@ -767,11 +779,14 @@ func (endedEngine) Done() <-chan struct{} {
 	return ch
 }
 
-// TestNoEngineIsOneFaultForEveryRead pins the read actions while no engine
-// runs: with none given, with one whose Run has ended (its last snapshot
-// Closed), and with one whose Run a panic ended (Done closed, its last
-// snapshot not), every read is fault 501 (Action Failed), never an answer
-// from an engine that is gone; the writes stay 602.
+// TestNoEngineIsOneFaultForEveryRead pins the actions while no engine runs:
+// with none given, with one whose Run has ended (its last snapshot Closed),
+// with one shutting down, and with one whose Run a panic ended (Done closed,
+// its last snapshot not), every read is fault 501 (Action Failed), never an
+// answer from an engine that is gone, and so is every write (B470 PR 5a4),
+// the no-engine check asked before anything else a write does: before the
+// Product writes that change nothing, the seeks that answer 803, SetShuffle's
+// 804 and an Insert's confinement.
 func TestNoEngineIsOneFaultForEveryRead(t *testing.T) {
 	everyRead := func(t *testing.T, h *handler, want int) {
 		t.Helper()
@@ -779,6 +794,20 @@ func TestNoEngineIsOneFaultForEveryRead(t *testing.T) {
 			s := servicesByPath[c[0]]
 			if r := invoke(t, h, s, c[1], c[2:]...); r.fault != want {
 				t.Errorf("%s#%s: %d, fault %d, want %d", s.name, c[1], r.status, r.fault, want)
+			}
+		}
+		for svc, names := range writeActions {
+			s := servicesByPath[strings.ToLower(svc)]
+			for _, name := range names {
+				if got := serve(t, h, soapRequest(s, header(s, name), "text/xml", envelope(call(s, name, validArgs(s, s.action(name)))))); got.code != want {
+					t.Errorf("%s#%s: %v, want fault %d", s.name, name, got, want)
+				}
+			}
+		}
+		for _, c := range [][]string{{"SetShuffle", "Value", "1"}, {"SeekSecondAbsolute", "Value", "5"},
+			{"Insert", "AfterId", "0", "Uri", "http://192.168.1.5:7790/dlna/file/" + goldenID, "Metadata", ""}} {
+			if r := invoke(t, h, playlist, c[0], c[1:]...); r.fault != want {
+				t.Errorf("%s with no engine: %d, fault %d, want %d", c[0], r.status, r.fault, want)
 			}
 		}
 	}
@@ -792,9 +821,6 @@ func TestNoEngineIsOneFaultForEveryRead(t *testing.T) {
 		}
 		p.stop()
 		everyRead(t, h, 501)
-		if r := invoke(t, h, playlist, "Insert", "AfterId", "0", "Uri", "a", "Metadata", ""); r.fault != 602 {
-			t.Errorf("a write with the engine ended: %d, fault %d, want 602", r.status, r.fault)
-		}
 	})
 	t.Run("one shutting down", func(t *testing.T) {
 		p := newTestPlayer(t)

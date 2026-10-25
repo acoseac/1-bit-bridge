@@ -248,7 +248,9 @@ func TestEveryBridgeWordIsInTheProtocol(t *testing.T) {
 // roots, for a player no test plays from.
 type emptyLibrary struct{}
 
-func (emptyLibrary) TrackPaths(context.Context) ([]string, error) { return nil, nil }
+func (emptyLibrary) TrackPathsIndexedAfter(context.Context, int64, func(string, int64) error) error {
+	return nil
+}
 func (emptyLibrary) GetTrack(context.Context, string) (*manifest.Track, error) {
 	return nil, nil
 }

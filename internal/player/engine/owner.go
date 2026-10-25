@@ -395,7 +395,7 @@ const (
 	// commands and the modes.
 	laneNone lane = iota
 	// laneValues is the edits that take new IDs or tokens: they wait for a
-	// reservation write that has not landed, at most reserveTimeout.
+	// reservation write that has not landed, at most ReserveTimeout.
 	laneValues
 	// laneTransport is the transport commands but Stop: Play and Pause wait
 	// for a Pause or a Resume under way, and Pause for a start.
@@ -414,9 +414,9 @@ func (o op) lane() lane {
 	return laneNone
 }
 
-// admit takes c from its caller: a context that has ended means it does
-// not run; blocked, or behind a parked command of its lane, it waits its
-// turn.
+// admit takes c from its caller: a context that has ended, or a caller that
+// abandoned c as its context ended (command.admission), means it does not
+// run; blocked, or behind a parked command of its lane, it waits its turn.
 func (e *Engine) admit(c *command) {
 	if e.sm.admitted != nil {
 		e.sm.admitted(c)
@@ -425,6 +425,16 @@ func (e *Engine) admit(c *command) {
 		e.answer(c, reply{err: notAdmitted(c.op.String(), err)})
 		return
 	}
+	if e.sm.checked != nil {
+		e.sm.checked(c)
+	}
+	if !c.admission.CompareAndSwap(admissionPending, admissionAdmitted) {
+		// Its caller abandoned it once its context ended, between the look
+		// above and this one.
+		e.answer(c, reply{err: notAdmitted(c.op.String(), c.ctx.Err())})
+		return
+	}
+	noteAdmission(c)
 	if !e.o.closing && e.waits(c) {
 		e.o.parked = append(e.o.parked, c)
 		return

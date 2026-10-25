@@ -75,9 +75,10 @@ func (b *openhomeBox) surface(t *testing.T) (*openhome.Surface, netip.AddrPort) 
 // does: no listener asked for, no surface built. With it on, the player
 // starts it once its engine runs, on each LAN address on 7792, the device
 // description naming the player's identity and room, the reads answering
-// from serve's engine and the writes 602 (B470 PR 5a3); serve's stop stops
-// it first, before the engine, and closes its sockets. With it on and the
-// player off, nothing of it runs, and boot says so once.
+// from serve's engine (B470 PR 5a3) and an Insert whose Uri names no track of
+// the bridge's refused before it (PR 5a4); serve's stop stops it first,
+// before the engine, and closes its sockets. With it on and the player off,
+// nothing of it runs, and boot says so once.
 func TestServeRunsTheOpenHomeSurfaceOnlyWithItsOptInAndThePlayer(t *testing.T) {
 	needsDirectorySync(t)
 	t.Run("off", func(t *testing.T) {
@@ -187,9 +188,12 @@ func TestServeRunsTheOpenHomeSurfaceOnlyWithItsOptInAndThePlayer(t *testing.T) {
 		if eng.Snapshot().Len() != 0 {
 			t.Fatal("positive control did not restore an empty queue")
 		}
-		// A write is still 602, and nothing of it reaches the engine.
-		if code, body := soap("Insert", "<AfterId>0</AfterId><Uri>library-track</Uri><Metadata>metadata</Metadata>"); code != 500 || !strings.Contains(body, "<errorCode>602</errorCode>") {
-			t.Errorf("Insert: %d %s; want fault 602", code, body)
+		// The writes are the engine's commands (B470 PR 5a4), and an Insert
+		// whose Uri is no canonical URI of a track of the bridge's is 600,
+		// Argument Value Invalid, nothing of it reaching the engine
+		// (TestServeConfinesAnInsertToTheBridgesOwnHosts takes one that is).
+		if code, body := soap("Insert", "<AfterId>0</AfterId><Uri>library-track</Uri><Metadata>metadata</Metadata>"); code != 500 || !strings.Contains(body, "<errorCode>600</errorCode>") {
+			t.Errorf("Insert: %d %s; want fault 600", code, body)
 		}
 		if st := ps.runningEngine(t).Snapshot(); st.Len() != 0 || st.State().String() != "stopped" {
 			t.Errorf("a refused Insert reached the engine: %d entries, %s", st.Len(), st.State())

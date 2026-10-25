@@ -33,10 +33,14 @@ const (
 
 // The bounds of the player's stop: the engine's shutdown, its release
 // (engine.ReleaseTimeout) and its flush with room for both, as bridge output
-// play waits for it, and then the backend's goroutines (playback.Backend.Wait).
+// play waits for it, and then the backend's goroutines (playback.Backend.Wait);
+// and the build of the library's index ahead of the first lookup
+// (warmLibrary), stopped first and waited for last: it looks at its context
+// every 256 rows it reads, and the read's query ends with that context.
 const (
 	playerEngineStopBound  = engine.ReleaseTimeout + 5*time.Second
 	playerBackendWaitBound = 5 * time.Second
+	playerWarmStopBound    = 2 * time.Second
 )
 
 // reasonBindingChanged is the output's reason, to the engine, while the
@@ -171,6 +175,10 @@ type servePlayerWiring struct {
 	OpenHome openhomeWiring
 	// SSDP is the one subsystem shared with the MediaServer, even with DLNA off.
 	SSDP *dlna.SSDPSubsystem
+	// Hosts are the hosts and ports an OpenHome Insert's Uri may name
+	// (newPlayerHosts, B470 PR 5a4); nil names none, so the surface takes
+	// no Insert.
+	Hosts openhome.Hosts
 }
 
 // servePlayerSeams are where a boot test holds serve's player between two
@@ -187,13 +195,17 @@ type servePlayerSeams struct {
 	// engineConfig changes the engine's config before engine.New: a boot
 	// test's way to have New refuse the player's storage.
 	engineConfig func(*engine.Config)
+	// store wraps the library index the player's resolver reads: a boot
+	// test's hold on the index's build ahead of the first lookup.
+	store func(library.Store) library.Store
 }
 
 // servePlayerBounds are the stop's bounds: how long it waits for the
-// engine's Run to return, and then for the backend's goroutines; and what
-// the OpenHome surface's own stop takes at most, which comes first.
+// engine's Run to return, and then for the backend's goroutines; what the
+// OpenHome surface's own stop takes at most, which comes first; and how long
+// it waits, last, for the library index's build ahead of the first lookup.
 type servePlayerBounds struct {
-	engine, backend, surface, discovery time.Duration
+	engine, backend, surface, discovery, warm time.Duration
 }
 
 // orProduction is b, or production's bounds where b sets none.
@@ -209,6 +221,9 @@ func (b servePlayerBounds) orProduction() servePlayerBounds {
 	}
 	if b.discovery <= 0 {
 		b.discovery = openhome.DiscoveryStopBound
+	}
+	if b.warm <= 0 {
+		b.warm = playerWarmStopBound
 	}
 	return b
 }
@@ -274,6 +289,11 @@ type playerRun struct {
 	calls context.Context
 	// panicked is a Run a panic ended, set before done closes.
 	panicked bool
+	// stopWarm ends the build of the library's index ahead of the first
+	// lookup, and warmed is closed once that build's goroutine has returned
+	// (warmLibrary); both nil when no build was started.
+	stopWarm context.CancelFunc
+	warmed   chan struct{}
 }
 
 // startServePlayer starts the player plan allows, on a goroutine of its
@@ -334,7 +354,7 @@ func (p *bridgePlayer) stop() {
 	}
 	p.refuseOpenHome(context.Background())
 	p.cancel()
-	bound := p.bounds.discovery + p.bounds.surface + p.bounds.engine + p.bounds.backend + time.Second
+	bound := p.bounds.discovery + p.bounds.surface + p.bounds.engine + p.bounds.backend + p.bounds.warm + time.Second
 	t := time.NewTimer(bound)
 	defer t.Stop()
 	select {
@@ -404,7 +424,11 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 	if p.seams != nil && p.seams.opens != nil {
 		seams = &library.Seams{Opens: p.seams.opens}
 	}
-	res, err := library.New(library.Config{Store: w.Store, Paths: w.Paths, Seams: seams})
+	store := w.Store
+	if p.seams != nil && p.seams.store != nil {
+		store = p.seams.store(store)
+	}
+	res, err := library.New(library.Config{Store: store, Paths: w.Paths, Seams: seams})
 	if err != nil {
 		return refuse(err.Error())
 	}
@@ -466,7 +490,15 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 	p.eng, p.be, p.id = eng, be, id
 	playerLog.Info("player: started", "uuid", id, "entries", eng.Snapshot().Len(), "pauseRelease", player.PauseRelease())
 	if p.plan.openhome {
-		p.startOpenHome(id, w)
+		// The build of the library's index begins first, on a goroutine of its
+		// own, so it is under way before a controller can find the surface,
+		// whose listener and discovery do not wait for it (warmLibrary); a
+		// surface that does not start takes no Insert, so the build stops at
+		// once, and the shutdown still waits for it.
+		p.warmLibrary(ctx, res)
+		if !p.startOpenHome(id, w, res) {
+			p.run.stopWarm()
+		}
 	}
 	p.markReady()
 	return true
@@ -645,22 +677,19 @@ func (p *bridgePlayer) send(rp engine.OutputReport) {
 	playerLog.Info("player: the output is unavailable", append(attrs, "reason", rp.Reason)...)
 }
 
-// shutdown stops the OpenHome surface, when the opt-in started it, so no
-// request reaches the engine as it stops (it refuses, shuts down within its
-// grace, and closes what is open), then stops the engine and waits for it,
-// then for the backend's goroutines, each within its bound, and says what it
+// shutdown stops the library index's build ahead of the first lookup and
+// the OpenHome surface, when the opt-in started them, so no request reaches
+// the engine as it stops (the surface refuses, shuts down within its grace,
+// and closes what is open); then it stops the engine and waits for it, then
+// for the backend's goroutines, each within its bound, and says what it
 // left: an engine whose state write did not return, a device call held in
-// the kernel, a release never confirmed. Then it closes the feed's
-// subscription. It is the supervisor's last step, and recovers its own
-// panic.
-// shutdown stops the engine and waits for it, then for the backend's
-// goroutines, each within its bound, and says what it left: an engine whose
-// state write did not return, a device call held in the kernel, a release
-// never confirmed. An engine whose Run a panic ended never ran its own
-// shutdown, which releases the session it plays, so the backend lets go of
-// every session it holds first, within the backend's bound (releaseAll).
-// Then it closes the feed's subscription. It is the supervisor's last step,
-// and recovers its own panic.
+// the kernel, a release never confirmed. An engine whose Run a panic ended
+// never ran its own shutdown, which releases the session it plays, so the
+// backend lets go of every session it holds first, within the backend's
+// bound (releaseAll). Then it waits for the index's build within a bound of
+// its own (joinWarm), since the build reads the library index, which serve
+// closes after the player, and closes the feed's subscription. It is the
+// supervisor's last step, and recovers its own panic.
 func (p *bridgePlayer) shutdown() {
 	defer func() {
 		if r := recover(); r != nil {
@@ -669,6 +698,12 @@ func (p *bridgePlayer) shutdown() {
 	}()
 	run := p.run
 	began := time.Now()
+	// The library index's build ahead of the first lookup is stopped at once:
+	// the player's context has ended it already, unless the engine stopped on
+	// its own. It is waited for last (joinWarm).
+	if run.stopWarm != nil {
+		run.stopWarm()
+	}
 	// The surface first, so no request reaches the engine as it stops.
 	p.stopOpenHome()
 	run.stop()
@@ -696,6 +731,7 @@ func (p *bridgePlayer) shutdown() {
 		playerLog.Warn("player: a session's release was never confirmed: the device may still be held until the process exits",
 			"session", uint64(u.Session))
 	}
+	p.joinWarm(run)
 	run.sub.Close()
 	took := time.Since(began)
 	p.mu.Lock()

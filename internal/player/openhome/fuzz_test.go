@@ -6,11 +6,16 @@ package openhome
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
@@ -20,14 +25,19 @@ import (
 // SOAPAction, Content-Type and body: it never panics; it answers only a
 // status the table names, or a response; a 500 is a SOAP fault,
 // MustUnderstand or a UPnP fault with a code this layer defines (401, 402,
-// 501, 602, 605, or a read's OpenHome 800 or 801) and its description; a 200 is
+// 501, 600, 605, or an OpenHome code of the reads' or the writes', 800 to 804
+// and 899, each with its service's description) and its description; a 200 is
 // the response of the action SOAPAction names, which parses as XML, carries
 // that action's out-arguments, and whose values that are XML themselves
 // (SourceXml, ReadList's TrackList) parse too; and every reply carries the
-// empty EXT header (B470 PR 5a3 added the responses). The handler reads an
-// engine holding entries of every kind of metadata, what XML cannot carry
-// among it, and a track heard with its details, when the engine starts on
-// the fuzz's directory; without one, every read is 501.
+// empty EXT header (B470 PR 5a3 added the read responses, PR 5a4 the
+// writes'). The handler reads an engine holding entries of every kind of
+// metadata, what XML cannot carry among it, and a track heard with its
+// details, when the engine starts on the fuzz's directory; without one, every
+// action is 501. The writes go to a fake engine over it (fuzzEngine), which
+// answers each command with the next of every answer the engine gives (nil,
+// each reason, a cancellation admitted and not), so the fixture the reads
+// answer from stays as it is and every refusal's fault is asked for.
 func FuzzControlRequest(f *testing.F) {
 	pl := servicesByPath["playlist"]
 	f.Add(uint8(1), `"`+pl.serviceType()+`#Play"`, "text/xml", []byte(envelope(call(pl, "Play", ""))))
@@ -44,7 +54,23 @@ func FuzzControlRequest(f *testing.F) {
 		f.Logf("the fuzz reads no engine: %v", err)
 	} else {
 		ids = fuzzQueue(f, p)
-		h = p.handler("Room & <Study> \x01")
+		h = p.handlerWith("Room & <Study> \x01", &fuzzEngine{Engine: p.eng}, DefaultLimits.orDefaults())
+	}
+	for svc, names := range writeActions {
+		s := servicesByPath[strings.ToLower(svc)]
+		which := uint8(0)
+		for k, svc := range services {
+			if svc == s {
+				which = uint8(k)
+			}
+		}
+		for _, name := range names {
+			args := validArgs(s, s.action(name))
+			if name == "Insert" {
+				args = "<AfterId>" + u(ids[0]) + "</AfterId><Uri>" + uriOf(goldenID) + "</Uri><Metadata>&lt;DIDL-Lite/&gt;</Metadata>"
+			}
+			f.Add(which, header(s, name), "text/xml", []byte(envelope(call(s, name, args))))
+		}
 	}
 	for i, c := range readCalls {
 		s := servicesByPath[c[0]]
@@ -91,8 +117,8 @@ func FuzzControlRequest(f *testing.F) {
 		switch res.StatusCode {
 		case http.StatusOK:
 			_, name, ok := soapAction(r.Header)
-			if !ok || s.action(name) == nil || reads[s.name][name] == nil {
-				t.Fatalf("a response to %q, which is no read of %s", sa, s.name)
+			if !ok || s.action(name) == nil || (reads[s.name][name] == nil && writes[s.name][name] == nil) {
+				t.Fatalf("a response to %q, which is no action of %s", sa, s.name)
 			}
 			got := readResult(t, res, s, name)
 			for _, k := range []string{"SourceXml", "ReadList"} {
@@ -126,6 +152,57 @@ func FuzzControlRequest(f *testing.F) {
 		}
 	})
 }
+
+// fuzzEngine is the fuzz's engine: the real one's snapshot and Done, and a
+// command answered with the next of fuzzAnswers, each in turn, never reaching
+// the engine; an Insert's ID is 7 when its answer is nil.
+type fuzzEngine struct {
+	Engine
+	next atomic.Uint64
+}
+
+// fuzzAnswers are every answer a command of the engine's gives: success, a
+// refusal for each reason errors.go names and one it does not, a playback
+// another command replaced, and a cancellation the engine admitted and one it
+// never did.
+var fuzzAnswers = func() []error {
+	out := []error{nil, &engine.Error{Reason: engine.ReasonCancelled, Err: context.DeadlineExceeded},
+		&engine.Error{Reason: engine.ReasonCancelled, Err: fmt.Errorf("%w: %w", engine.ErrNotAdmitted, context.DeadlineExceeded)},
+		&engine.Error{Reason: "a_reason_no_one_wrote"}, &engine.Unplayable{Reason: "not_indexed"}}
+	reasons := make([]string, 0, len(reasonFaults))
+	for reason := range reasonFaults {
+		reasons = append(reasons, string(reason))
+	}
+	slices.Sort(reasons)
+	for _, reason := range reasons {
+		out = append(out, &engine.Error{Reason: engine.Reason(reason)})
+	}
+	return out
+}()
+
+func (e *fuzzEngine) answer() error { return fuzzAnswers[e.next.Add(1)%uint64(len(fuzzAnswers))] }
+
+func (e *fuzzEngine) Play(context.Context, ...engine.Cond) error     { return e.answer() }
+func (e *fuzzEngine) Pause(context.Context, ...engine.Cond) error    { return e.answer() }
+func (e *fuzzEngine) Stop(context.Context, ...engine.Cond) error     { return e.answer() }
+func (e *fuzzEngine) Next(context.Context, ...engine.Cond) error     { return e.answer() }
+func (e *fuzzEngine) Previous(context.Context, ...engine.Cond) error { return e.answer() }
+func (e *fuzzEngine) PlayID(context.Context, uint32, ...engine.Cond) error {
+	return e.answer()
+}
+func (e *fuzzEngine) PlayIndex(context.Context, int, ...engine.Cond) error { return e.answer() }
+func (e *fuzzEngine) InsertAfter(context.Context, uint32, engine.Reference, []byte, ...engine.Cond) (uint32, error) {
+	if err := e.answer(); err != nil {
+		return 0, err
+	}
+	return 7, nil
+}
+func (e *fuzzEngine) Delete(context.Context, uint32, ...engine.Cond) error { return e.answer() }
+func (e *fuzzEngine) DeleteAll(context.Context, ...engine.Cond) error      { return e.answer() }
+func (e *fuzzEngine) SetRepeat(context.Context, bool, ...engine.Cond) error {
+	return e.answer()
+}
+func (e *fuzzEngine) SetShuffle(context.Context, bool, ...engine.Cond) error { return e.answer() }
 
 // fuzzQueue fills p's queue with entries of every kind of metadata (none,
 // DIDL-Lite, markup and references, what XML 1.0 cannot carry, the most an

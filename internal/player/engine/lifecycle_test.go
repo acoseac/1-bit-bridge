@@ -43,7 +43,7 @@ func TestACommandCancelledBeforeAdmissionDoesNotRun(t *testing.T) {
 // TestAHungReservationWriteHoldsOnlyTheEditsThatNeedIt pins admission
 // while a reservation write hangs: the insert that needs it waits, and an
 // output report, a Pause and a Stop are answered at once; past
-// reserveTimeout the waiting insert is refused with ReasonReservation, and
+// ReserveTimeout the waiting insert is refused with ReasonReservation, and
 // so is the next one at once, until the write lands.
 func TestAHungReservationWriteHoldsOnlyTheEditsThatNeedIt(t *testing.T) {
 	h := startHarness(t)
@@ -76,7 +76,7 @@ func TestAHungReservationWriteHoldsOnlyTheEditsThatNeedIt(t *testing.T) {
 	default:
 	}
 
-	h.clk.Advance(reserveTimeout)
+	h.clk.Advance(ReserveTimeout)
 	h.refused("the insert past the bound", h.result("insert", insert), ReasonReservation)
 	h.refused("an insert while the write still hangs", h.result("insert", async(func() error {
 		_, err := h.eng.InsertAfter(bg, 0, ref("y"), nil)

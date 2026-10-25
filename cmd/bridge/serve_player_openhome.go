@@ -2,10 +2,61 @@ package main
 
 import (
 	"context"
+	"net"
+	"net/netip"
+	"strconv"
+	"sync/atomic"
+	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/player/lan"
+	"github.com/acoseac/1-bit-bridge/internal/player/library"
 	"github.com/acoseac/1-bit-bridge/internal/player/openhome"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
+
+// dlnaAcceptor is what the player's address inventory asks of the DLNA
+// listener: whether it takes a connection on an address now
+// (dlna.Server.AcceptsOn).
+type dlnaAcceptor interface{ AcceptsOn(netip.Addr) bool }
+
+// newPlayerHosts is the inventory an OpenHome Insert's Uri is confined to
+// (B470 PR 5a4, openhome.Inventory): a host /v1/health advertises, from its
+// very snapshot (advertised, api.Server.HealthEndpoints), or an address the
+// DLNA listener takes connections on now, which serve hands the setter once
+// DLNA has started, after the player (none until then, and none on a bridge
+// without DLNA); on a port playerTrackPorts names.
+func newPlayerHosts(advertised func() []string, cfg *config.Config) (openhome.Inventory, func(dlnaAcceptor)) {
+	type held struct{ a dlnaAcceptor }
+	var listener atomic.Pointer[held]
+	inv := openhome.Inventory{
+		Advertised: advertised,
+		Served: func(a netip.Addr) bool {
+			h := listener.Load()
+			return h != nil && h.a.AcceptsOn(a)
+		},
+		Ports: playerTrackPorts(cfg),
+	}
+	return inv, func(a dlnaAcceptor) { listener.Store(&held{a}) }
+}
+
+// playerTrackPorts are the ports an OpenHome Insert's Uri may name: the one
+// 1-bit names in every URI of a bridge track, openhome.DefaultTrackPort
+// (7790, whatever dlna.listenAddress says), and the port of the boot
+// snapshot's dlna.listenAddress, on which the DLNA server hands other
+// controllers its tracks. A port 0 (a kernel pick) names none.
+func playerTrackPorts(cfg *config.Config) []uint16 {
+	ports := []uint16{openhome.DefaultTrackPort}
+	_, p, err := net.SplitHostPort(cfg.DLNA.EffectiveDLNAListenAddress())
+	if err != nil {
+		return ports
+	}
+	n, err := strconv.ParseUint(p, 10, 16)
+	if err != nil || n == 0 || n == openhome.DefaultTrackPort {
+		return ports
+	}
+	return append(ports, uint16(n))
+}
 
 // hostLAN lists the host's interfaces where nothing names another box: what
 // serve's OpenHome surface serves (B470 PR 5a2a), through lan.Look. This
@@ -23,6 +74,9 @@ type openhomeWiring struct {
 	Listen    openhome.ListenFunc
 	Limits    openhome.Limits
 	Seams     *openhome.Seams
+	// Start, when set, starts the surface in openhome.Start's place: a boot
+	// test's way to have the surface refuse to start.
+	Start func(openhome.Config) (*openhome.Surface, error)
 	// Started is told the surface once the player starts it.
 	Started func(*openhome.Surface)
 }
@@ -30,32 +84,42 @@ type openhomeWiring struct {
 // startOpenHome starts the player's OpenHome surface, which the plan asks
 // for (output.player.openhome) and the player runs: id is the player's
 // identity, its UDN; the room and the port are the boot snapshot's; its
-// read actions answer from the engine the player runs (B470 PR 5a3), and
-// from no engine once that engine's Run has ended. It listens on each LAN
-// address and registers bound endpoints with serve's shared SSDP
-// subsystem. A surface that cannot start fails alone: the player runs
-// without it, and says so; an address that cannot be bound fails that
-// address alone, said by the surface.
-func (p *bridgePlayer) startOpenHome(id string, w servePlayerWiring) {
+// actions answer from the engine the player runs (B470 PRs 5a3 and 5a4),
+// and from no engine once that engine's Run has ended; an Insert's Uri is
+// confined to w.Hosts and to the tracks lib, the player's own library
+// resolver, serves now. It listens on each LAN address and registers bound
+// endpoints with serve's shared SSDP subsystem. A surface that cannot start
+// fails alone: the player runs without it, and says so; an address that
+// cannot be bound fails that address alone, said by the surface, which
+// runs on and binds it at a later listing, as it does through a listing that
+// fails. It reports whether the surface started: not when openhome.Start
+// refused it, nor when serve's stop came first.
+func (p *bridgePlayer) startOpenHome(id string, w servePlayerWiring, lib openhome.Library) bool {
 	player := w.Cfg.Output.Player
 	o := w.OpenHome
 	addresses := o.Addresses
 	if addresses == nil {
 		addresses = func() (lan.Inventory, error) { return lan.Look(hostLAN) }
 	}
+	start := o.Start
+	if start == nil {
+		start = openhome.Start
+	}
 	p.mu.Lock()
 	if p.closing {
 		p.mu.Unlock()
-		return
+		return false
 	}
 	var eng openhome.Engine
 	if p.eng != nil {
 		eng = p.eng
 	}
-	s, err := openhome.Start(openhome.Config{
+	s, err := start(openhome.Config{
 		SSDP:      w.SSDP,
 		Device:    openhome.Device{UUID: id, Room: player.Room, ModelNumber: version.ServerVersion},
 		Engine:    eng,
+		Library:   lib,
+		Hosts:     w.Hosts,
 		Port:      player.EffectiveOpenHomePort(),
 		Addresses: addresses,
 		Listen:    o.Listen,
@@ -66,13 +130,65 @@ func (p *bridgePlayer) startOpenHome(id string, w servePlayerWiring) {
 	if err != nil {
 		p.mu.Unlock()
 		playerLog.Warn("player: the OpenHome surface did not start; the player runs without it", "err", err)
-		return
+		return false
 	}
 	p.surface = s
 	p.mu.Unlock()
 	playerLog.Info("player: the OpenHome surface is on; discovery follows its bound LAN addresses", "port", player.EffectiveOpenHomePort())
 	if o.Started != nil {
 		o.Started(s)
+	}
+	return true
+}
+
+// warmLibrary builds the library resolver's index of the paths by their ids
+// ahead of the first lookup (library.Resolver.Warm, B470 PR 5a4), on a
+// goroutine of its own, which the player starts just before its OpenHome
+// surface: an Insert asks the library with what its write budget leaves an
+// edit, about 3 s (the listener's 10 s write deadline, less a second for the
+// reply and the 6 s an edit needs left), and the first build of a large
+// library on a slow box can take longer. The surface's listener and
+// discovery never wait for it: a read needs no index, and an Insert that
+// comes while the build runs waits for it in the resolver's turn, with its
+// own budget, which without the build ahead of it would have paid for the
+// whole build. The build runs on a context of ctx's, the player's, that the
+// player stops at once when the surface does not start (with no surface no
+// Insert comes, and the index would be kept for the process's life for
+// nothing) and that its shutdown ends too, and the shutdown waits for it
+// last, within bounds.warm (joinWarm). It reads the index and writes
+// nothing, so it takes no share of the data directory's lock. It logs how it
+// ended (Warm), and a panic on its goroutine is recovered and logged as the
+// player's are.
+func (p *bridgePlayer) warmLibrary(ctx context.Context, res *library.Resolver) {
+	wctx, stop := context.WithCancel(ctx)
+	done := make(chan struct{})
+	p.run.stopWarm, p.run.warmed = stop, done
+	go func() {
+		defer close(done)
+		defer func() {
+			if r := recover(); r != nil {
+				logPlayerPanic("the build of the player's library index", r)
+			}
+		}()
+		_ = res.Warm(wctx)
+	}()
+}
+
+// joinWarm waits for the library index's build ahead of the first lookup,
+// which the shutdown has stopped, at most bounds.warm: the build reads the
+// library index, which serve closes after the player. One that has not
+// returned by then, a read of the index held, is abandoned, and said so.
+func (p *bridgePlayer) joinWarm(run *playerRun) {
+	if run.warmed == nil {
+		return
+	}
+	t := time.NewTimer(p.bounds.warm)
+	defer t.Stop()
+	select {
+	case <-run.warmed:
+	case <-t.C:
+		playerLog.Warn("player: the library index's build ahead of the first lookup did not stop within its bound: a read of the index is held; it is abandoned and ends with the process",
+			"bound", p.bounds.warm)
 	}
 }
 

@@ -15,8 +15,10 @@ const (
 	// more changes, and after Run returns it answers every command so.
 	ReasonClosed Reason = "closed"
 	// ReasonCancelled is a command whose caller's context ended before the
-	// owner admitted it (it did not run), or while the caller waited for
-	// the reply (it may have run: the snapshot says).
+	// owner admitted it (it did not run, and the refusal wraps
+	// ErrNotAdmitted), or while the caller waited for the reply once it was
+	// admitted (it may have run: the snapshot says, and the refusal does not
+	// wrap ErrNotAdmitted).
 	ReasonCancelled Reason = "cancelled"
 	// ReasonConflict is a command whose expected generation is not the
 	// engine's: another change came first, or the pair is from another run.
@@ -130,6 +132,14 @@ const (
 	// ReasonDecodeFailed is a decode that failed after content played.
 	ReasonDecodeFailed Reason = "decode_failed"
 )
+
+// ErrNotAdmitted is what every refusal of a command that did not run because
+// its context ended wraps (B470 PR 5a4): the context had ended when the method
+// was called, it ended before the owner took the command, or the owner took
+// it and found it ended, or abandoned by its caller, before admitting it. A
+// ReasonCancelled refusal that does not wrap it is of a command the owner
+// admitted, which may have run. errors.Is finds it.
+var ErrNotAdmitted = errors.New("not admitted")
 
 // Error is a refused command, or a failure the engine reports for one.
 type Error struct {

@@ -10,7 +10,12 @@
 // Run is the owner. Every command (a method), backend event and output
 // report reaches it as a message, and it handles them one at a time. A
 // command whose caller's context ends before the owner admits it does not
-// run; once admitted its effect is applied, or recorded as the pending
+// run, and its refusal wraps ErrNotAdmitted, the owner having taken it or
+// not (admission is decided once, between the caller and the owner: the
+// caller abandons a command it stops waiting for that the owner has not
+// admitted yet, and the owner refuses it in turn); one whose context ends
+// after its admission may have run, and its refusal does not wrap it. Once
+// admitted its effect is applied, or recorded as the pending
 // intent while a release is under way, and its reply is sent once that
 // effect is decided, which can be after a backend call. The reply is sent
 // after the snapshot of the step that decided it, so a caller reads its own
@@ -32,7 +37,8 @@
 //
 // A command that cannot run yet waits, and only behind the waiting commands
 // of its own kind: an insert, a delete or a DeleteAll for a reservation
-// write, at most reserveTimeout (5 s); Play and Pause for a Pause, a Resume
+// write, at most ReserveTimeout (5 s) after the first of them parked, and
+// without asking its context again; Play and Pause for a Pause, a Resume
 // or a start under way, and the other transport commands but Stop behind
 // them. Stop, the output's reports, the maintenance commands and the modes
 // never wait. A Stop, or a report that stops playback, answers the
@@ -191,7 +197,7 @@
 // review, to fail closed. The next block is reserved in the
 // background, so a command waits on a write only when that write has not
 // landed by the time the current block runs out, and at most
-// reserveTimeout: past it the waiting edits are refused with
+// ReserveTimeout: past it the waiting edits are refused with
 // ReasonReservation, and so is every edit that needs a value until the
 // write lands. A start begins one block past the larger
 // of the saved reservations, the queue file's values and its largest ID, a

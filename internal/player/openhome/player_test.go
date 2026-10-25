@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,14 +35,26 @@ const playerUUID = "0f8fad5b-d9cb-469f-a165-70867728950e"
 
 // fakeBackend is an engine.Backend that plays nothing: Start answers at
 // once and keeps the session's Events, so the test reports what the
-// hardware would; every other call answers at once (Cut true, Resume
-// continued), and Release acknowledges at once unless the test holds it.
+// hardware would; every other call answers at once (Cut true unless the
+// test says it is too late, Resume continued), and Start, Pause, Resume and
+// Release answer at once unless the test holds them.
 type fakeBackend struct {
 	mu       sync.Mutex
 	sessions []*fakeSession
 	changed  chan struct{}
-	// hold, while set, holds every Release until it closes (holdReleases).
-	hold chan struct{}
+	// hold, while set, holds every Release until it closes (holdReleases);
+	// startHold every Start, pauseHold every Pause and resumeHold every
+	// Resume, until they close or the call's context ends (holdStarts,
+	// holdPauses, holdResumes).
+	hold, startHold, pauseHold, resumeHold chan struct{}
+	// refuseStart, when set, is what Start answers once it is let go: a
+	// refusal of the device (busy) or an *engine.Unplayable.
+	refuseStart func(engine.StartRequest) error
+	// cutTooLate, while set, makes Cut answer false: the occurrence's
+	// frames are the kernel's already.
+	cutTooLate bool
+	// begun counts the calls begun, by method (callsBegun).
+	begun map[string]int
 }
 
 // fakeSession is one session the engine started.
@@ -54,7 +67,9 @@ type fakeSession struct {
 	next []*engine.Occurrence
 }
 
-func newFakeBackend() *fakeBackend { return &fakeBackend{changed: make(chan struct{})} }
+func newFakeBackend() *fakeBackend {
+	return &fakeBackend{changed: make(chan struct{}), begun: map[string]int{}}
+}
 
 // signal wakes every waiter; b.mu is held.
 func (b *fakeBackend) signal() {
@@ -62,17 +77,45 @@ func (b *fakeBackend) signal() {
 	b.changed = make(chan struct{})
 }
 
-func (b *fakeBackend) Start(_ context.Context, req engine.StartRequest) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.sessions = append(b.sessions, &fakeSession{b: b, id: req.Session, first: req.First, ev: req.Events})
+// call counts a call of op begun and returns the gate that holds it, if
+// any; b.mu is held.
+func (b *fakeBackend) call(op string, hold chan struct{}) chan struct{} {
+	b.begun[op]++
 	b.signal()
+	return hold
+}
+
+// wait holds a call at its gate until the gate opens or ctx ends.
+func wait(ctx context.Context, hold chan struct{}) error {
+	if hold == nil {
+		return nil
+	}
+	select {
+	case <-hold:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (b *fakeBackend) Start(ctx context.Context, req engine.StartRequest) error {
+	b.mu.Lock()
+	b.sessions = append(b.sessions, &fakeSession{b: b, id: req.Session, first: req.First, ev: req.Events})
+	hold, refuse := b.call("Start", b.startHold), b.refuseStart
+	b.mu.Unlock()
+	if err := wait(ctx, hold); err != nil {
+		return err
+	}
+	if refuse != nil {
+		return refuse(req)
+	}
 	return nil
 }
 
 func (b *fakeBackend) Prepare(_ context.Context, id engine.SessionID, _ engine.OccurrenceID, next *engine.Occurrence) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.begun["Prepare"]++
 	for _, s := range b.sessions {
 		if s.id == id {
 			var n *engine.Occurrence
@@ -88,18 +131,85 @@ func (b *fakeBackend) Prepare(_ context.Context, id engine.SessionID, _ engine.O
 }
 
 func (b *fakeBackend) Cut(context.Context, engine.SessionID, engine.OccurrenceID) (bool, error) {
-	return true, nil
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.call("Cut", nil)
+	return !b.cutTooLate, nil
 }
 
-func (b *fakeBackend) Pause(context.Context, engine.SessionID) error { return nil }
+func (b *fakeBackend) Pause(ctx context.Context, _ engine.SessionID) error {
+	b.mu.Lock()
+	hold := b.call("Pause", b.pauseHold)
+	b.mu.Unlock()
+	return wait(ctx, hold)
+}
 
-func (b *fakeBackend) Resume(context.Context, engine.SessionID) (engine.ResumeResult, error) {
+// holdStarts holds every Start from now until the returned function, which
+// may be called again and runs at the test's end, lets them go.
+func (b *fakeBackend) holdStarts(tb testing.TB) (letGo func()) {
+	return b.holdCalls(tb, &b.startHold)
+}
+
+// holdPauses holds every Pause the same way, and holdResumes every Resume.
+func (b *fakeBackend) holdPauses(tb testing.TB) (letGo func()) {
+	return b.holdCalls(tb, &b.pauseHold)
+}
+
+func (b *fakeBackend) holdResumes(tb testing.TB) (letGo func()) {
+	return b.holdCalls(tb, &b.resumeHold)
+}
+
+// holdCalls sets *slot to a gate, and returns what opens it.
+func (b *fakeBackend) holdCalls(tb testing.TB, slot *chan struct{}) func() {
+	g := make(chan struct{})
+	b.mu.Lock()
+	*slot = g
+	b.mu.Unlock()
+	letGo := func() {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if *slot == g {
+			*slot = nil
+		}
+		closeOnce(g)
+	}
+	tb.Cleanup(letGo)
+	return letGo
+}
+
+// callsBegun waits until n calls of op (a Backend method's name) have
+// begun.
+func (b *fakeBackend) callsBegun(tb testing.TB, op string, n int) {
+	tb.Helper()
+	give := time.After(testWait)
+	for {
+		b.mu.Lock()
+		got, ch := b.begun[op], b.changed
+		b.mu.Unlock()
+		if got >= n {
+			return
+		}
+		select {
+		case <-ch:
+		case <-give:
+			tb.Fatalf("waited %v for %d calls of %s, %d began", testWait, n, op, got)
+		}
+	}
+}
+
+func (b *fakeBackend) Resume(ctx context.Context, _ engine.SessionID) (engine.ResumeResult, error) {
+	b.mu.Lock()
+	hold := b.call("Resume", b.resumeHold)
+	b.mu.Unlock()
+	if err := wait(ctx, hold); err != nil {
+		return 0, err
+	}
 	return engine.ResumeContinued, nil
 }
 
 func (b *fakeBackend) Release(context.Context, engine.SessionID) error {
 	b.mu.Lock()
-	hold := b.hold
+	hold := b.call("Release", b.hold)
 	b.mu.Unlock()
 	if hold != nil {
 		<-hold
@@ -116,32 +226,45 @@ func (b *fakeBackend) holdReleases() (letGo func()) {
 	b.mu.Lock()
 	b.hold = g
 	b.mu.Unlock()
-	var once sync.Once
 	return func() {
-		once.Do(func() {
-			b.mu.Lock()
-			if b.hold == g {
-				b.hold = nil
-			}
-			b.mu.Unlock()
-			close(g)
-		})
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		if b.hold == g {
+			b.hold = nil
+		}
+		closeOnce(g)
 	}
 }
 
-// letGoAll lets every held Release go, for the engine's stop.
+// letGoAll lets every held Release, Start and Pause go, for the engine's
+// stop.
 func (b *fakeBackend) letGoAll() {
 	b.mu.Lock()
-	hold := b.hold
-	b.hold = nil
-	b.mu.Unlock()
-	if hold != nil {
-		select {
-		case <-hold:
-		default:
-			close(hold)
-		}
+	defer b.mu.Unlock()
+	for _, hold := range []chan struct{}{b.hold, b.startHold, b.pauseHold, b.resumeHold} {
+		closeOnce(hold)
 	}
+	b.hold, b.startHold, b.pauseHold, b.resumeHold = nil, nil, nil, nil
+}
+
+// closeOnce closes g unless it is nil or closed; the caller holds b.mu,
+// under which every gate is closed.
+func closeOnce(g chan struct{}) {
+	if g == nil {
+		return
+	}
+	select {
+	case <-g:
+	default:
+		close(g)
+	}
+}
+
+// sessionCount is how many sessions the engine has started.
+func (b *fakeBackend) sessionCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.sessions)
 }
 
 // session waits for the n-th session (from 1) to start.
@@ -215,6 +338,15 @@ type testPlayer struct {
 	// dir: playerUUID and the harness's names (reserve "" for the engine's
 	// default), or serve's beside player-uuid (servesPlayer).
 	uuid, queue, reserve string
+	// lib is the library an Insert through p's handler asks (testLibrary):
+	// every track id a member until the test refuses one.
+	lib *testLibrary
+	// unreported leaves the output unreported at each start: unknown to the
+	// engine, which refuses whatever would start a session.
+	unreported bool
+	// reserveWrite, when set, runs before each of the engine's reservation
+	// writes (engine.Config.Seams.ReserveWrite; hangReservations).
+	reserveWrite func() error
 }
 
 // newTestPlayer starts an engine. The engine keeps its IDs and tokens
@@ -223,7 +355,14 @@ type testPlayer struct {
 // skips, saying so, as the backend's rig does.
 func newTestPlayer(tb testing.TB) *testPlayer {
 	tb.Helper()
-	p, err := tryTestPlayer(tb)
+	return newTestPlayerWith(tb, func(*testPlayer) {})
+}
+
+// newTestPlayerWith is newTestPlayer with set applied to the player before
+// its engine starts.
+func newTestPlayerWith(tb testing.TB, set func(*testPlayer)) *testPlayer {
+	tb.Helper()
+	p, err := tryTestPlayerWith(tb, set)
 	if err != nil {
 		tb.Skipf("the engine does not start on this test's data directory: %v", err)
 	}
@@ -233,11 +372,17 @@ func newTestPlayer(tb testing.TB) *testPlayer {
 // tryTestPlayer is newTestPlayer, or why the engine does not start.
 func tryTestPlayer(tb testing.TB) (*testPlayer, error) {
 	tb.Helper()
+	return tryTestPlayerWith(tb, func(*testPlayer) {})
+}
+
+func tryTestPlayerWith(tb testing.TB, set func(*testPlayer)) (*testPlayer, error) {
+	tb.Helper()
 	if runtime.GOOS == "windows" {
 		return nil, errors.New("the engine keeps its IDs durable with a directory fsync, which Windows has not: the player runs on Linux")
 	}
-	p := &testPlayer{tb: tb, dir: filepath.Join(tb.TempDir(), "data"), uuid: playerUUID, queue: "queue.json"}
-	if err := os.Mkdir(p.dir, 0o700); err != nil {
+	p := &testPlayer{tb: tb, dir: filepath.Join(tb.TempDir(), "data"), uuid: playerUUID, queue: "queue.json", lib: newTestLibrary()}
+	set(p)
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(p.dir, p.queue)), 0o700); err != nil {
 		tb.Fatal(err)
 	}
 	if err := p.start(); err != nil {
@@ -255,7 +400,12 @@ func (p *testPlayer) start() error {
 	if p.reserve != "" {
 		reserve = filepath.Join(p.dir, p.reserve)
 	}
-	eng, err := engine.New(engine.Config{PlayerUUID: p.uuid, Backend: p.be, QueuePath: filepath.Join(p.dir, p.queue), ReservePath: reserve, DataDir: p.dir})
+	var seams *engine.Seams
+	if p.reserveWrite != nil {
+		seams = &engine.Seams{ReserveWrite: p.reserveWrite}
+	}
+	eng, err := engine.New(engine.Config{PlayerUUID: p.uuid, Backend: p.be, QueuePath: filepath.Join(p.dir, p.queue), ReservePath: reserve, DataDir: p.dir,
+		Seams: seams})
 	if err != nil {
 		return err
 	}
@@ -280,7 +430,9 @@ func (p *testPlayer) start() error {
 	}
 	p.tb.Cleanup(p.stop)
 	p.eng, p.outGen, p.shut = eng, 0, cancel
-	p.available()
+	if !p.unreported {
+		p.available()
+	}
 	return nil
 }
 
@@ -291,6 +443,33 @@ func (p *testPlayer) restart() {
 	if err := p.start(); err != nil {
 		p.tb.Fatalf("the engine does not start again: %v", err)
 	}
+}
+
+// hangReservations restarts p's engine with its run's first reservation
+// write failing, so the next edit that takes a value parks for a write, and
+// holds every reservation write from then on until the returned function
+// lets them go: the engine's own hangReservations (its harness_test.go),
+// through engine.Config.Seams (B470 PR 5a4, round 2). A parked edit is then
+// refused at engine.ReserveTimeout, as the engine refuses one whose write has
+// not landed. The test's cleanup lets the writes go before the engine stops,
+// whose shutdown waits for a write under way: it is registered after the
+// restart's stop, so it runs first.
+func (p *testPlayer) hangReservations() (letGo func()) {
+	p.tb.Helper()
+	hold := make(chan struct{})
+	var once sync.Once
+	letGo = func() { once.Do(func() { close(hold) }) }
+	var calls atomic.Int32
+	p.reserveWrite = func() error {
+		if calls.Add(1) == 1 {
+			return errors.New("read-only file system")
+		}
+		<-hold
+		return nil
+	}
+	p.restart()
+	p.tb.Cleanup(letGo)
+	return letGo
 }
 
 // available reports the output available, numbering the report.
@@ -356,9 +535,17 @@ func must(tb testing.TB, what string, err error) {
 	}
 }
 
-// handler is a handler over p's engine, the device's room room.
+// handler is a handler over p's engine, the device's room room, its Inserts
+// confined to p's library and the test's hosts (testHosts).
 func (p *testPlayer) handler(room string) *handler {
-	return newHandler(Device{UUID: testUUID, Room: room, ModelNumber: "test"}, p.eng, DefaultLimits.orDefaults(), nil)
+	return p.handlerWith(room, p.eng, DefaultLimits.orDefaults())
+}
+
+// handlerWith is handler over eng (p's engine, or one wrapping it) and lim.
+func (p *testPlayer) handlerWith(room string, eng Engine, lim Limits) *handler {
+	h := newHandler(Device{UUID: testUUID, Room: room, ModelNumber: "test"}, eng, lim, nil)
+	h.library, h.hosts = p.lib, testHosts
+	return h
 }
 
 // result is a control request's answer, as a controller reads it: the
@@ -382,15 +569,60 @@ type result struct {
 // action's out-arguments, in the SCPD's order, none nested.
 func invoke(tb testing.TB, h *handler, s *service, action string, args ...string) result {
 	tb.Helper()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, actionRequest(s, action, args...))
+	return readResult(tb, rec.Result(), s, action)
+}
+
+// actionRequest is the control request of s's action with args (name, value,
+// name, value…), each value escaped as a controller escapes it.
+func actionRequest(s *service, action string, args ...string) *http.Request {
 	var b strings.Builder
 	for i := 0; i+1 < len(args); i += 2 {
 		b.WriteString("<" + args[i] + ">" + escape(args[i+1]) + "</" + args[i] + ">")
 	}
-	r := soapRequest(s, header(s, action), `text/xml; charset="utf-8"`, envelope(call(s, action, b.String())))
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, r)
-	return readResult(tb, rec.Result(), s, action)
+	return soapRequest(s, header(s, action), `text/xml; charset="utf-8"`, envelope(call(s, action, b.String())))
 }
+
+// sent is a request sent through a handler on a goroutine of its own, whose
+// answer the test reads on its own goroutine (answer).
+type sent struct {
+	s      *service
+	action string
+	res    chan *http.Response
+}
+
+// send sends s's action with args through h on a goroutine of its own.
+func send(h *handler, s *service, action string, args ...string) sent {
+	return sendRequest(h, s, action, actionRequest(s, action, args...))
+}
+
+// sendRequest sends r, a request of s's action, through h on a goroutine of
+// its own.
+func sendRequest(h *handler, s *service, action string, r *http.Request) sent {
+	c := sent{s: s, action: action, res: make(chan *http.Response, 1)}
+	go func() {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, r)
+		c.res <- rec.Result()
+	}()
+	return c
+}
+
+// answer waits for the request's answer and reads it as invoke does.
+func (c sent) answer(tb testing.TB) result {
+	tb.Helper()
+	select {
+	case res := <-c.res:
+		return readResult(tb, res, c.s, c.action)
+	case <-time.After(testWait):
+		tb.Fatalf("waited %v for %s#%s to answer", testWait, c.s.name, c.action)
+		return result{}
+	}
+}
+
+// pending reports whether the request has not been answered yet.
+func (c sent) pending() bool { return len(c.res) == 0 }
 
 // readResult reads res, an answer to s's action, as invoke says.
 func readResult(tb testing.TB, res *http.Response, s *service, action string) result {

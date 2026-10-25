@@ -167,8 +167,8 @@ func (e *Engine) setShuffle(c *command) {
 // values reports whether c may take the next ID (when id is set) and the
 // next token now. Otherwise c is refused (a file that could not be moved
 // aside, values exhausted, a reservation that failed or has not landed
-// within reserveTimeout) or parked until a reservation write lands, at most
-// reserveTimeout; a write is started for it when none is under way.
+// within ReserveTimeout) or parked until a reservation write lands, at most
+// ReserveTimeout; a write is started for it when none is under way.
 func (e *Engine) values(c *command, id bool) bool {
 	r := &e.o.res
 	name := c.op.String()
@@ -194,7 +194,7 @@ func (e *Engine) values(c *command, id bool) bool {
 			r.awaiting = true
 			r.waits++
 			seq := r.waits
-			r.bound = e.clk.AfterFunc(reserveTimeout, func() { e.post(msgReserveOverdue{seq: seq}) })
+			r.bound = e.clk.AfterFunc(ReserveTimeout, func() { e.post(msgReserveOverdue{seq: seq}) })
 		}
 		e.park(c)
 		return false
@@ -202,7 +202,7 @@ func (e *Engine) values(c *command, id bool) bool {
 	return true
 }
 
-// reserveOverdue is the wait for a reservation write past reserveTimeout:
+// reserveOverdue is the wait for a reservation write past ReserveTimeout:
 // the edits parked on it are refused, and so is every edit that needs a
 // value until it lands, rather than waiting on a write that may never.
 func (e *Engine) reserveOverdue(seq uint64) {
@@ -212,9 +212,9 @@ func (e *Engine) reserveOverdue(seq uint64) {
 	}
 	r.awaiting, r.overdue, r.refuseParked, r.bound = false, true, true, nil
 	if r.failed == nil {
-		r.failed = fmt.Errorf("the reservation write has not landed within %v", reserveTimeout)
+		r.failed = fmt.Errorf("the reservation write has not landed within %v", ReserveTimeout)
 		e.log.Warn("player: the reservation write has not landed by its bound; inserts and the other edits that advance the token are refused until it does",
-			"path", e.cfg.ReservePath, "bound", reserveTimeout)
+			"path", e.cfg.ReservePath, "bound", ReserveTimeout)
 	}
 	e.touched()
 }

@@ -6297,6 +6297,40 @@ func (s *Store) TrackPaths(ctx context.Context) ([]string, error) {
 	return s.trackPaths(ctx, `SELECT path FROM tracks ORDER BY path ASC`)
 }
 
+// trackPathsIndexedAfterSQL is TrackPathsIndexedAfter's read: idx_tracks_indexed
+// answers it, in its order (TestTrackPathsIndexedAfterReadsTheStampsIndex).
+const trackPathsIndexedAfterSQL = `SELECT path, indexed_at FROM tracks WHERE indexed_at > ? ORDER BY indexed_at`
+
+// TrackPathsIndexedAfter calls fn with the path and the indexed_at of every
+// track row whose indexed_at is past after, in indexed_at order, INCLUDING
+// suppressed duplicates and rows routed from a UPnP upstream, as TrackPaths
+// lists them. The player's library resolver keeps its index of the tracks by
+// their DLNA track id current with it (B470 PR 5a4) as a delta client of
+// /v1/manifest keeps its library: every row a writer inserts or rewrites is
+// stamped past every row stamped before its transaction (readNextDeltaStamp,
+// in the writer's BEGIN IMMEDIATE), so a reader that has every row up to a
+// stamp has every later one by asking past it. The rows of one commit share
+// one stamp. It stops at fn's first error or at ctx's end, and returns it.
+// Reads are un-mutexed (WAL).
+func (s *Store) TrackPathsIndexedAfter(ctx context.Context, after int64, fn func(path string, indexedAt int64) error) error {
+	rows, err := s.db.QueryContext(ctx, trackPathsIndexedAfterSQL, after)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p string
+		var at int64
+		if err := rows.Scan(&p, &at); err != nil {
+			return err
+		}
+		if err := fn(p, at); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
 // TrackPathsLocal returns every known FILESYSTEM track path (sorted) —
 // TrackPaths minus anything routed from a UPnP upstream.
 //

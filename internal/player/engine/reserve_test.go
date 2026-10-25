@@ -656,3 +656,70 @@ func TestNewFramesAnOverlayBindAsACrashRisk(t *testing.T) {
 		t.Errorf("New = %v, wrongly frames the bind as volatile storage", err)
 	}
 }
+
+// TestTheReserveWriteSeamHoldsAndFailsTheWrite pins Config.Seams.ReserveWrite,
+// through which the OpenHome surface's tests hold the engine in a reservation
+// write (B470 PR 5a4, round 2): it runs before each write, New's first among
+// them; an error it returns fails that write as the filesystem's refusal
+// would, so no token is published and the edits that need a value are
+// refused until one lands; while it blocks, an insert that needs a value
+// parks behind the write, answering nothing, and it lands once the seam
+// returns nil. Every other test runs with no Seams, which changes nothing.
+func TestTheReserveWriteSeamHoldsAndFailsTheWrite(t *testing.T) {
+	var calls atomic.Int32
+	entered := make(chan struct{}, 8)
+	hold := newGate()
+	h := newHarness(t)
+	h.tweak = func(c *Config) {
+		c.Seams = &Seams{ReserveWrite: func() error {
+			entered <- struct{}{}
+			if calls.Add(1) == 1 {
+				return errors.New("read-only file system")
+			}
+			<-hold
+			return nil
+		}}
+	}
+	h.boot()
+	// Registered after boot, so it runs before the engine's shutdown, which
+	// waits for a reservation write under way.
+	t.Cleanup(func() {
+		select {
+		case <-hold:
+		default:
+			hold.open()
+		}
+	})
+	<-entered
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("the seam ran %d times by New's return, want once, for the run's first write", n)
+	}
+	h.files.mu.Lock()
+	written := h.files.reserveCalls
+	h.files.mu.Unlock()
+	if written != 0 {
+		t.Fatalf("the write the seam failed reached the file %d times", written)
+	}
+	if tok, _ := h.snap().IDArray(); tok != 0 || h.snap().Edits().Refused != ReasonReservation {
+		t.Fatalf("after the seam failed the run's first write: token %d, edits %+v; want no token and the edits refused", tok, h.snap().Edits())
+	}
+	insert := async(func() error { _, err := h.eng.InsertAfter(bg, 0, ref("a"), nil); return err })
+	select {
+	case <-entered:
+	case <-time.After(*watchdog):
+		t.Fatalf("waited %v for the insert's reservation write", *watchdog)
+	}
+	select {
+	case err := <-insert:
+		t.Fatalf("the insert answered %v while the seam holds its write", err)
+	default:
+	}
+	hold.open()
+	h.must("the insert once its write lands", h.result("the insert", insert))
+	if n := h.snap().Len(); n != 1 {
+		t.Fatalf("the queue holds %d entries, want the insert's", n)
+	}
+	if tok, _ := h.snap().IDArray(); tok == 0 || h.snap().Edits().Refused != "" {
+		t.Fatalf("once the write landed: token %d, edits %+v", tok, h.snap().Edits())
+	}
+}

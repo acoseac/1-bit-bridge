@@ -43,10 +43,11 @@ import (
 //	     with no namespace or the action's own, none missing,
 //	     repeated, unknown or nested, each parsing as its type;
 //	     for every action, those with none included
-//	then a request that passes is answered (actions.go, B470 PR 5a3): a
-//	     write fault 602 (Optional Action Not Implemented), nothing done to
-//	     the engine; a read from one engine snapshot, fault 501 (Action
-//	     Failed) while no engine runs, or the read's own fault
+//	then a request that passes is answered (actions.go, B470 PRs 5a3 and
+//	     5a4), fault 501 (Action Failed) while no engine runs, asked first:
+//	     a read from one engine snapshot, or the read's own fault; a write
+//	     by one engine command within its budget (writes.go), or its own
+//	     fault
 //
 // A fault is a UPnP SOAP fault: HTTP 500, faultcode s:Client, faultstring
 // UPnPError and the code and its description in UPnPError (UPnP Device
@@ -86,26 +87,27 @@ const (
 
 // The UPnP error codes this layer answers, with their descriptions, from
 // UPnP Device Architecture 1.1, §3.2.2 (the action error codes), the same in
-// UDA 1.0: 401, 402 and 602 since B470 PR 5a2a; 501, for a read while no
-// engine runs ("the current state of the service prevents invoking that
-// action"), and 605, for a ReadList past what one reply answers, since PR
-// 5a3. OpenHome's own codes, one service's each (800 to 899 are a vendor's
-// action-specific codes, §3.2.2), are actions.go's, each with its source.
+// UDA 1.0: 401 and 402 since B470 PR 5a2a; 501, for an action while no engine
+// runs ("the current state of the service prevents invoking that action"),
+// and 605, for a ReadList past what one reply answers, since PR 5a3; 600
+// (writes.go, errArgumentValueInvalid) since PR 5a4, which answers every
+// write and so retires 5a2a's 602, Optional Action Not Implemented. OpenHome's
+// own codes, one service's each (800 to 899 are a vendor's action-specific
+// codes, §3.2.2), are actions.go's and writes.go's, each with its source.
 const (
-	errInvalidAction     = 401
-	errInvalidArgs       = 402
-	errActionFailed      = 501
-	errActionUnavailable = 602
-	errStringTooLong     = 605
+	errInvalidAction = 401
+	errInvalidArgs   = 402
+	errActionFailed  = 501
+	errStringTooLong = 605
 )
 
 // faultDescription is a UPnP code's description.
 var faultDescription = map[int]string{
-	errInvalidAction:     "Invalid Action",
-	errInvalidArgs:       "Invalid Args",
-	errActionFailed:      "Action Failed",
-	errActionUnavailable: "Optional Action Not Implemented",
-	errStringTooLong:     "String Argument Too Long",
+	errInvalidAction:        "Invalid Action",
+	errInvalidArgs:          "Invalid Args",
+	errActionFailed:         "Action Failed",
+	errArgumentValueInvalid: "Argument Value Invalid",
+	errStringTooLong:        "String Argument Too Long",
 }
 
 // textLimit is a's text bound: textBase and textPerArgument for each of its

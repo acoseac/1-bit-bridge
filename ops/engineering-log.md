@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-24 — B470 PR 5a4: the player's OpenHome writes, Insert's Uri confined to the bridge's own tracks, and the owner's dogfood](#2026-10-24--b470-pr-5a4-the-players-openhome-writes-inserts-uri-confined-to-the-bridges-own-tracks-and-the-owners-dogfood)
 - [2026-10-25 — B470 PR 5b: GET /v1/outputs lists the bridge's own player, kind bridge, on a gate of its own](#2026-10-25--b470-pr-5b-get-v1outputs-lists-the-bridges-own-player-kind-bridge-on-a-gate-of-its-own)
 - [2026-10-25 — B524 round 14: tests that write the player's identity run on a TMPDIR on tmpfs, and a refused start leaves no identity](#2026-10-25--b524-round-14-tests-that-write-the-players-identity-run-on-a-tmpdir-on-tmpfs-and-a-refused-start-leaves-no-identity)
 - [2026-10-24 — B524 round 13: B524 passes on Windows, a permission failure naming an entry takes one union, and only a held lock makes adoption busy](#2026-10-24--b524-round-13-b524-passes-on-windows-a-permission-failure-naming-an-entry-takes-one-union-and-only-a-held-lock-makes-adoption-busy)
@@ -64010,3 +64011,884 @@ the Linux-only files among them: `cmd/bridge/snapshot_hold_linux_test.go`,
 - openhome's playable-extension list, left to 5a4.
 - Volume, the DSD modes, DoP and GENA; the opt-in's default; the console's DAC
   page (6a); the iOS mirror and DTO; 5c.
+
+## 2026-10-24 — B470 PR 5a4: the player's OpenHome writes, Insert's Uri confined to the bridge's own tracks, and the owner's dogfood
+
+Every write action of the Source's services is answered (the 17 of the 42
+actions that are not reads): each is one engine command, or none for the
+Product writes that change nothing and the seeks the engine cannot make,
+answered within one budget, beside a write pool of its own; an Insert's Uri
+is taken only as the canonical URI of a track the library serves now, on a
+host the bridge advertises in `/v1/health` or binds for DLNA. The opt-in
+stays off by default, decided after 5b and 5c. Run on legion0 (Linux, Go
+1.27.3, GOTOOLCHAIN=local, GOPROXY=off), where the Linux-only tests ran;
+the work was committed on `feat/b470-pr5a4-writes` with no attribution.
+
+### What shipped
+
+- `internal/player/engine` (03d1aeba, 69533376, 9b98c4c8): `ReserveTimeout`
+  exported; `ErrNotAdmitted`, wrapped by every cancellation of a command that
+  did not run (a context ended before the call, a send the owner did not
+  take, the owner's refusal of a command whose context had ended, and the
+  caller's abandonment of a command the owner had taken and not admitted,
+  decided once with the owner by a compare-and-swap on `command.admission`),
+  never by one that may have run; a `checked` seam between the owner's look
+  at a command's context and its admission, and the tests of each window.
+  The only engine changes, as the brief allows; no contract changed.
+- `internal/player/trackref` (4ac93cf6): the one parser of a track's canonical
+  URI (`Parse`, an Insert's) and of an entry's stored reference (`ParseStored`,
+  an open's: that URI, whatever its host and port, or a bare id).
+- `internal/manifest` and `internal/player/library` (6ca4bfcf, 25298409):
+  `Store.TrackPathsIndexedAfter` (every row stamped past a stamp, in stamp
+  order); the resolver's index of the paths by their ids, kept current by
+  those stamps; `Member`, the membership check that opens nothing; both
+  reference forms at an open; `sacd_virtual_track`; `ErrCancelled`.
+- `internal/player/openhome` (1c4d6523, c7cecdbd): `writes.go` (the writers,
+  the budget, `transportFault`, the edit gate, the fault table, the
+  confinement, the metadata check), `inventory.go` (`Inventory`,
+  `DefaultTrackPort`), the write pool (`handler.go`, `Limits.WriteSlots`,
+  `WritesPerSource`), `act` taking the writes, `Config.Library` and
+  `Config.Hosts`, 600 defined and 602 retired (`soap.go`), the package doc.
+- `internal/api` (746388a8): `Server.HealthEndpoints`, the snapshot
+  `/v1/health` serves, which the handler now reads through it.
+- `internal/dlna` (a407f679): `Server.AcceptsOn`.
+- `cmd/bridge` (44cedd49): `newPlayerHosts` and `playerTrackPorts`; serve
+  hands the surface its library resolver and the inventory, and tells the
+  inventory the DLNA listener once DLNA has started; the serve test's Insert
+  answers 600 where it answered 602.
+- `CLAUDE.md`'s rows, and the long forms in `ops/History-rules-openhome.md`
+  and `ops/History-rules-player.md` (ef7e6aa9). The rules files' lines
+  (`openhome.md`'s, two of `player.md`'s, one each in `wire.md` and
+  `dlna-upnp.md`) are in this change too, in commit 6b8ad3ff, applied from
+  the worker's report (its session could not edit `.claude/`).
+
+### The writes, action by action
+
+| Action | What it does | Its answers |
+|---|---|---|
+| Playlist Play, Pause, Stop, Next, Previous | the engine's command of that name | success; a refusal by the table below |
+| SeekId(Value) | `PlayID` | 800 for an ID not held |
+| SeekIndex(Value) | `PlayIndex` | 802 past the queue |
+| SetRepeat(Value) | `SetRepeat` | success |
+| SetShuffle(Value) | 0: `SetShuffle(false)`; 1: no command | 1 is 804 "Shuffle not currently possible" |
+| SeekSecondAbsolute, SeekSecondRelative | no command | 803 "Seek failed", every value |
+| Insert(AfterId, Uri, Metadata) | the Uri confined, the metadata checked, the edit gate, then `InsertAfter` with the Uri as sent | NewId; 800 for an AfterId not held; 801 "Playlist full" for `full` alone; 600 or 605 for the Uri or the metadata; 501 |
+| DeleteId(Value) | `Delete` | 800 for an ID not held |
+| DeleteAll | `DeleteAll` | success |
+| Product SetStandby(Value) | no command | 0 success, changing nothing; 1 899 "Wip - action not (yet) implemented", no Stop made of it |
+| Product SetSourceIndex(Value) | no command | 0 success; any other 801 "Source not found" |
+| Product SetSourceIndexByName(Value) | no command | `Playlist` success; any other name 801 "Source not found" |
+
+The no-engine fault (501) is asked first, before anything a write does.
+Sources, read by the orchestrator at openhome/ohPipeline master
+c1047a8dc801 (2026-10-21): `OpenHome/Av/Playlist/ProviderPlaylist.cpp`
+lines 23-32 (800 for Read, SeekId, DeleteId and Insert's AfterId; 801 for
+Insert; 802 for SeekIndex; 803 for the seeks, lines 245-281; 804 for
+SetShuffle, line 227); `OpenHome/Av/Utils/FaultCode.cpp` line 21 (801
+"Source not found", `kSourceNotFound`, which `ProviderProduct.cpp` answers for
+Source, SetSourceIndex and SetSourceIndexByName at lines 284, 244 and 256)
+and 899 for an action not built; UPnP Device Architecture 1.1, §3.2.2, the
+same in 1.0, for 501, 600 and 605. 1-bit sends SetStandby only when Standby
+reads 1, which never happens, and SetSourceIndex only when the active source
+is not a Playlist, which never happens with one source.
+
+### The fault table
+
+Every reason `engine/errors.go` names has a row (the test reads them from
+the source): 800 for `id_not_found` on every action, 801 for `full` on
+Insert alone, 802 for `index_not_found` on SeekIndex alone, 804 for
+`not_in_this_release` on SetShuffle alone, 605 for `metadata_too_large`, and
+501 for every other reason: `closed` (5a3's no-engine fault), `cancelled`,
+`overtaken`, `generation_conflict`, `maintenance`, `lease_invalid`,
+`bad_reference`, `too_many_ids`, `empty_queue`, `ids_exhausted`,
+`reservation_not_durable`, `queue_identity_mismatch`, `file_not_moved_aside`,
+`output_unknown`, `output_unavailable`, `release_unconfirmed`,
+`backend_error`, `backend_timeout`, `superseded` (a transport write's
+success, the next section), `stopped`, `end_of_queue`, `unplayable`,
+`all_unplayable`, `fault`, `output_unit_changed`, `removed_entry_audible`,
+`missing_file`, `refused_content`, `dsd_off`, `xrun`, `disconnected`,
+`device_error`, `decode_failed`. A reason outside the table, every
+`library.Reason*` and `playback.Reason*` among them and one nobody wrote, is
+501. On Insert, 801 is `full` and nothing else: 1-bit reads 801 after its
+first row as "the player is full, play what is in", so a reservation that is
+not durable, a file not moved aside, IDs exhausted or metadata too large
+answering it would make a cast silently play a truncated queue. Playlist's
+801 reads "Playlist full" and Product's "Source not found", each asserted.
+
+### When a write answers
+
+The budget runs from the request's arrival at `ServeHTTP`: `Limits.Write`
+(10 s, the write deadline net/http sets from the request's headers) less
+`budgetMargin` (1 s), `Limits.writeBudget`, 9 s; 1-bit's SOAP calls time out
+at 15 s. A transport write (Play, Pause, Stop, Next, Previous, SeekId,
+SeekIndex, SetRepeat, SetShuffle(0)) maps the engine's answer:
+
+| The engine's answer | The reply |
+|---|---|
+| nil | success |
+| `superseded` (a later command or edit replaced the playback it asked for) | success |
+| `overtaken` (a Stop overtook it parked: it did not run) | 501 |
+| `cancelled`, the command admitted (the budget ended while it waited: it may yet run) | success |
+| `cancelled` wrapping `ErrNotAdmitted` (it never ran) | 501 |
+| any other refusal | its row of the table |
+
+Success past the budget means "ran, or parked and may yet run, be overtaken
+by a Stop, or be refused by an output report or maintenance", all of which
+the reads show, which is how an OpenHome controller learns outcomes; it is
+what ohPipeline answers a command it has accepted. An edit answers only with
+its reply: an edit can park for a reservation write up to `ReserveTimeout`
+(5 s) and does not ask its context again, so, last thing before the engine,
+`editGate` requires `editBudget` (`ReserveTimeout` and a second) of the
+budget left, and otherwise answers 501 without calling it (at most 3 s
+after arrival with the default limits; never 801). A cancelled edit is 501,
+and an Insert is never answered success without a NewId above 0. Two limits
+are named, not fixed: a client that disconnects mid-wait can still have its
+Insert land; and a filesystem stall in a synchronous step on the engine's
+owner (`unstick`'s `Lstat`, `edits.go` ~225) can delay an admitted edit past
+the budget like any engine step, after which it can land unheard.
+
+### The confinement
+
+The Uri is taken only when it is byte for byte
+`"http://" + host + ":" + port + "/dlna/file/" + id`: an IP host as
+`netip.Addr.String()` (an IPv6 literal bracketed, unzoned; an IPv4-mapped
+one refused), a name of letters, digits and hyphens with a last label not all
+digits and no trailing dot, lower-cased for the comparison alone, the port
+decimal without a leading zero, the id 16 lower-case hex. Past 128 bytes it
+is 605 whatever its shape; every other spelling (`HTTP://`, `https://`,
+`:07790`, an empty or missing port, `192.168.001.005`, an abbreviated
+address, a non-canonical IPv6, a trailing dot, user information, a query, a
+fragment, percent-encoding in the path or the host, a trailing slash, a
+`/variant-…` path, another route, an id in capitals or short, a bare id, a
+UPnP server's `res`, an empty Uri) is 600. The host must be one `/v1/health`
+advertises, its very snapshot (`api.Server.HealthEndpoints`: the same
+provider and 15 s cache), or an address the DLNA listener takes connections
+on now (`dlna.Server.AcceptsOn`: its served set, a pinned listener its
+address alone); the port 7790 or `dlna.listenAddress`'s. A docker0 address
+health advertises first is taken; nothing is resolved (names compared as
+strings, lower-cased); a paired alias the bridge never advertised is refused.
+Refused whatever is advertised or bound, 600: link-local, zoned or not
+(outright in this release; a custom endpoint can carry one), and, decided
+here, loopback, unspecified, multicast, `localhost`, the tailnet's ranges and
+`ts.net` names, none of which 1-bit emits or a LAN controller can reach the
+bridge by. A Uri refused for its shape or host never asks the library. The
+membership check (`library.Member`) answers 600 for no row, a routed track,
+an SACD virtual track and a root no longer configured, and 501 for two rows
+with one id, an index it cannot read, a panic and a cancellation; no library
+is 501 and no hosts 600. The reference is the Uri as sent, so Read gives it
+back byte for byte; at an open the stored form, that Uri or a bare id, is
+parsed again and its host and port not looked at, so a queue keeps playing
+after the bridge's address changes, and a near miss in a hand-edited queue
+file is refused there.
+
+### The membership check, and why not the brief's Store method
+
+The brief asked to reuse the DLNA adapter's `TrackLookup.GetTrackInfo` if
+indexed and current after a scan, or else to add one Store method keyed by
+id. Measured by reading: the adapter (`cmd/bridge/dlna_wiring.go`) caches the
+whole served list and rebuilds it by a full walk once 30 s old, so a track a
+scan adds is not found for up to 30 s, and every rebuild walks every row; not
+current. A Store method keyed by id needs the id in the store: it is a hash
+of the path computed in Go (`dlna.TrackID("", path)`), so a lookup by id
+needs a column every writer fills, with a migration a rollback leaves behind,
+or an index on a function SQLite cannot compute. What every writer already
+moves is `indexed_at`, the delta stamp (`readNextDeltaStamp`, past every
+earlier row): one Store method keyed by stamp (`TrackPathsIndexedAfter`, a
+seek of the stamps' index when nothing changed; its plan pinned by
+`TestTrackPathsIndexedAfterReadsTheStampsIndex`) keeps an in-memory index of
+the paths by id current, as a delta client of `/v1/manifest` keeps its
+library. Over 25,000 synthetic tracks (`TestTheIndexCostsTheLibraryOnceAndASeekAfter`,
+counted at the store): `New` reads nothing; the first lookup every row once
+(the initialization); a lookup of another track its one row; a hundred
+absent ids no row (no rescan per miss); a track added afterwards found by
+reading it alone; a deleted one refused by its own row, and found again,
+once indexed again, by reading it alone; one build. The index is built again
+only past twice its last build and `staleSlack` (2,000 paths), so it holds a
+few times the library at most; a lookup cancelled mid-build keeps what it
+read (the context asked every 256 rows) and the next reads the rest; a scan
+writing beside the lookups (5,000 rows, 2,000 writes, under -race) leaves
+every track indexed before found, every added one found once written and
+every deleted one refused; two rows sharing an id stay `ambiguous_reference`.
+4b3's lookup fetched and hashed every indexed path for each unfamiliar id,
+with no cancellation (a 500-track handoff on a 25,000-track library repeated
+that per Insert). The golden vectors, computed outside Go:
+`Artist/Album (2020)/01 Track One.flac` is `b5b4c8dc9764772e` and
+`Ünïcödé/Ålbum/02 – Song.flac` `9ec9973104172764`, each taken by an Insert
+through the real resolver and opened.
+
+### The metadata
+
+At most the engine's 64 KiB (605), every character in XML 1.0's Char
+production (600), never parsed (a DIDL-Lite that is not well-formed is stored
+as sent), empty taken. The envelope is decoded first, so a character XML
+forbids, literal or referenced, and a byte that is not UTF-8 stay HTTP 400 at
+row 7 and never reach the Insert's check, which no request can fail today
+(its test calls it directly); decoded metadata past 64 KiB gets the 605
+(Insert's text bound is 88 KiB); 64 KiB of ampersands, 320 KiB escaped, is
+413 at the unchanged body bound.
+
+### The write pool
+
+The slots (`Limits.Slots`, 8) were one pool for every request; a waiting
+write now holds one for up to its budget, so a write but Stop also takes a
+slot of the write pool (`WriteSlots`, 6, held to two fewer than the slots),
+and one source holds at most `WritesPerSource` of them (`maxWritesPerSource`,
+4, below the listener's 8 connections a source); 503 at once past either, the
+connection kept. Reads, the descriptions and a Stop always find a slot.
+Limits, named: many controllers can still fill the write pool together; a
+source's ninth connection is refused at accept, unanswered, and a kept-alive
+connection counts after its request. 1-bit sends one SOAP call at a time.
+
+### What the engine does, pinned as it is
+
+- A Pause sent while a release carrying a play is under way (a SeekId while
+  playing, the Pause before the SeekId replies) succeeds and changes nothing;
+  the SeekId's entry plays, TransportState Playing: the brief's documented
+  limit.
+- Checked rather than assumed: the engine parks a Play only behind a Pause or
+  a Resume under way (`owner.go`'s `blocked`), never behind a start, so the
+  brief's "a second Play parked behind a start" answers success at once (the
+  table's nothing), the first Play waiting on; a Stop then supersedes it,
+  success. `overtaken` is pinned behind a Pause and behind a Resume.
+- A refusal at an open (the brief's "say exactly what each reply returns"):
+  an unsupported first entry before a playable one: Play success, Id the
+  playable entry as Play answers, TransportState Buffering until it is heard,
+  then Playing, the skip in `Snapshot.Skipped` (no OpenHome read shows it),
+  Read of the skipped entry its Uri. An unsupported prefetched successor: Id
+  and TransportState unchanged (the entry playing, Playing) while the engine
+  prepares the entry after it; Id that entry once heard. Every entry refused,
+  repeat off and on (one lap): Play 501 (`all_unplayable`), Stopped, Id the
+  last refused entry. A start refused as busy: Play 501 (`backend_error`),
+  Stopped, Id the first entry. A track removed from the index, and a file
+  deleted with its row kept, after their Inserts, through the real resolver:
+  skipped with `not_indexed` and `missing_file`, Id moving on to the entry
+  that plays, Read still their Uris.
+
+### Tests
+
+New: `internal/player/openhome`'s `writes_test.go` (the writes, the fault
+table, the transport answers, the budget, the gate, the metadata),
+`confine_test.go` (the matrix, the inventory's changes, the golden vectors
+through the real library), `onebit_test.go` (1-bit's sequences: the cast
+start, a refused Uri mid-start, the 500-track window and its re-handoff,
+SeekId from every state, the queue edits, an Insert after the playing row
+once the next is handed off, a DeleteId at the boundary in time and too late,
+a track gone after its Insert, the relaunch re-attach apart from an engine
+restart, an unclean stop inside the write coalescing), `pool_test.go`;
+`player_test.go`'s fake backend holds Start, Pause and Resume and counts each
+call, and its Cut can answer too late; `FuzzControlRequest` covers the writes
+over a fake engine answering every reason and both cancellations. The
+library's `membership_test.go`, trackref's tests, the store's, the engine's
+admission tests, `internal/api`'s `TestHealthEndpointsIsTheSnapshotHealthServes`,
+`internal/dlna`'s three `AcceptsOn` tests, and serve's
+`TestThePlayersHostsAreHealthsAndTheDLNAListeners` and
+`TestServeConfinesAnInsertToTheBridgesOwnHosts` (the real serve on the
+discovery rig's in-memory LAN: the golden track taken on the host health
+advertises, and on the DLNA listener's address only while DLNA runs). 49 of
+the openhome package's tests start the real engine (they skip where it
+cannot): all 49 ran and passed in the race run. `FuzzControlRequest` ran
+1,068,953 inputs in 60 s with four workers and `trackref`'s `FuzzParse`
+887,149 in 30 s, none failing.
+
+### Red first
+
+- Every write answering 602 again (a mutation of `act` on 1c4d6523): 31 of
+  the openhome package's tests red, every test of the writes written by then
+  but the unit tests of the fault table, the transport answers, the library's
+  reasons, the metadata check and the limits (which their own controls turn
+  red), and `FuzzControlRequest`'s seeds (602 is no fault the layer defines
+  now). `TestTheWritesThatNeedNoCommandMakeNone` and
+  `TestAnInsertIsNeverAnsweredWithoutAnID` came after (c7cecdbd), against the
+  implementation, for rules no test had seen break: controls O13, O16, O17
+  and O18 below.
+- Each other rule was shown red with the rule removed: the controls below.
+
+### Negative controls
+
+Each on the committed tree, one mutation, the rule's tests run, the file
+restored from git and the tree checked clean (42 controls, all red, every
+file restored):
+
+| NC | Mutation | Red |
+|---|---|---|
+| E1 | an abandoned command answered as one that may have run | the two engine window tests |
+| E2 | the owner admits without the compare-and-swap | `TestACommandWhoseContextEndsAsTheOwnerAdmitsItDidNotRun` |
+| E3 | a context ended before the call answered without the sentinel | green first: no test had it; `TestACommandTheOwnerNeverTookDidNotRun` added (9b98c4c8); red |
+| E5 | a send the owner did not take answered without the sentinel | `TestACommandTheOwnerNeverTookDidNotRun` |
+| E4 | the engine's table: a Pause while a release carries a play sets a pending pause | `TestAPauseWhileAReleaseCarriesAPlayChangesNothing` |
+| L1 | an SACD virtual track taken | `TestMembershipIsTheOpensChecksShortOfTheFile` |
+| L2 | the host checked at the open | `TestBothReferenceFormsOpenAndTheHostIsNotChecked` |
+| L3 | the index not kept current after its build | `TestATrackAScanAddsIsFoundAtOnce` |
+| L4 | two rows with one id taken | `TestMembershipIsTheOpensChecksShortOfTheFile` |
+| T1 | a scheme in capitals taken | `TestOnlyTheCanonicalFormIsAURI` |
+| T2 | the length not checked first | `TestOnlyTheCanonicalFormIsAURI` |
+| T3 | a zero-padded port taken | `TestOnlyTheCanonicalFormIsAURI` |
+| O1 | `superseded` a fault | the admission table, `TestASupersededPlayAnswersSuccess` |
+| O2 | a cancellation after admission a fault | the admission table, the budget's two tests |
+| O3 | a command never admitted success | the admission table |
+| O4 | `overtaken` success | `TestAnOvertakenPlayIsAFault`, both cases |
+| O5 | no edit gate | `TestAnEditLateInItsBudgetIsRefusedBeforeTheEngine` |
+| O6 | the gate without its second | the same, its 3.5 s bodies |
+| O7 | the budget without its margin | `TestTheLimitsKeepTwoSlotsFromTheWrites`, `TestATransportWriteAdmittedPastItsBudgetIsSuccess` |
+| O8 | `reservation_not_durable` 801 on Insert | `TestEveryEngineReasonHasItsFault` |
+| O9 | 801 on every action | `TestEveryEngineReasonHasItsFault` |
+| O10 | no host refused for its kind | the matrix, the inventory test |
+| O11 | no host checked against the inventory | the matrix, the inventory test |
+| O12 | the library not asked | the matrix, the golden vectors |
+| O13 | metadata past 64 KiB passed to the engine | `TestTheWritesThatNeedNoCommandMakeNone` (the engine's own bound answers 605 too, so the metadata test alone stays green) |
+| O14 | metadata not held to XML 1.0 text | `TestOnlyXMLTextIsMetadata` |
+| O15 | the reference made from the lower-cased Uri | the matrix's capitals row |
+| O16 | an Insert answered without an ID | `TestAnInsertIsNeverAnsweredWithoutAnID` |
+| O17 | SetShuffle(1) sent to the engine | `TestTheWritesThatNeedNoCommandMakeNone` |
+| O18 | SetStandby(1) made a Stop | the same, `TestEachWriteIsItsEngineCommand` |
+| O19 | 803's description not ohPipeline's | `TestEachWriteIsItsEngineCommand` |
+| O20 | the no-engine check after SetShuffle's own | `TestNoEngineIsOneFaultForEveryRead`, every case |
+| O21 | Stop takes a write slot | the per-source test, the listener test |
+| O22 | no per-source share | `TestOneSourceHoldsAtMostItsShareOfTheWritePool` |
+| O23 | the write pool not held below the slots | `TestTheLimitsKeepTwoSlotsFromTheWrites` |
+| A1 | `HealthEndpoints` past health's cache | `TestHealthEndpointsIsTheSnapshotHealthServes` |
+| D1 | `AcceptsOn` ignores a pinned listener | `TestAcceptsOnIsTheListenersServedSet`, two cases |
+| D2 | `AcceptsOn` kept past Stop | `TestAcceptsOnIsTheRunningListeners` |
+| B1 | the inventory never told the DLNA listener | `TestServeConfinesAnInsertToTheBridgesOwnHosts`, DLNA on |
+| B2 | the surface given no hosts | the same, both cases |
+| B3 | the surface given no library | the same, both cases |
+| B4 | `dlna.listenAddress`'s port not taken | `TestThePlayersHostsAreHealthsAndTheDLNAListeners` |
+
+### Decided otherwise than the brief, and why
+
+- The membership check reads one Store method keyed by stamp, not by id,
+  and keeps the index of ids in memory: above.
+- Beyond link-local, Insert refuses loopback, unspecified, multicast and
+  `localhost` hosts, and the tailnet's addresses and `ts.net` names, whatever
+  the bridge advertises: no controller on the LAN can reach the bridge by
+  them, 1-bit never emits them, and the DLNA listener refuses tailnet peers.
+- A Play during a start is not parked by the engine: pinned as it is (above),
+  and `overtaken` pinned behind a Pause and a Resume.
+- A name in the canonical form has a grammar (labels, a last label not all
+  digits), so that no spelling of an address that is not its canonical form
+  reads as a name.
+- `TestEveryValidActionIsAnswered602` is `TestEveryValidActionIsAnswered602NoMore`:
+  the cited-name guard takes the old name as its prefix; the rules note
+  updates the citations.
+- No library is 501 and no hosts 600, so a surface started without them
+  takes no Insert.
+- The race suite ran as `make test`'s command (`go test -tags … -race
+  -timeout 30m`) over the packages in groups, cmd/bridge, internal/manifest
+  and internal/admin by their tests' initials, since one run exceeds a
+  foreground command's ten minutes here; every package and every test ran.
+
+### Environment
+
+`/tmp` is tmpfs on legion0, which the engine refuses, so every test run here
+set `TMPDIR` to a directory on the worktree's disk (`_tmp`, which the build
+census and Go's patterns skip, removed before the end). legion0's `go env`
+sets `GOFLAGS=-mod=readonly`, and `scripts/third-party-licenses`'
+`TestRealReleaseGraphEmbeds` refuses a non-default GOFLAGS by design: it fails
+in the full run and passes with `GOFLAGS` empty, as does its package whole.
+
+### Gate
+
+On legion0 with Go 1.27.3, through the build lock: `make fmt` (nothing
+rewritten), `make vet`, and `go vet` of the touched packages for Windows and
+macOS, clean; `make build-all` clean; `make docs-check` clean (player.md at
+99.9% of its budget; the rules note leaves it 151 bytes smaller); the race
+suite over all 88 packages passes, the one test above aside. Skipped at
+runtime here (106 tests and 10 subtests, none of this PR's): the ones that
+need sox, ffmpeg, ffprobe, fpcalc or node, root, a case-insensitive or
+normalizing volume, a network or mount namespace this user may configure,
+the private corpora, the ALSA ABI probe, `snd-aloop`
+(`TestAloopNegotiatesAndCloses`), the kernel uevent capture and the live
+controls. Build-excluded on Linux: 25 test files of the Windows, macOS and
+other-platform variants.
+
+### Not in this change
+
+GENA (501: 1-bit polls; so no claim of support for the controllers that need
+it), Volume, seek within a track (7a), shuffle, native DSD and DoP (2c/2d),
+`/v1/outputs` (5b), iOS (5b/5c: they filter what 1-bit inserts), the opt-in's
+default, a proxy for third-party renderers. No compatibility is claimed with
+Linn Kazoo, BubbleUPnP or Lumin: they drive their state from GENA, and the
+write actions match ohPipeline's SOAP answers, no more.
+
+### The owner's gate: casting from 1-bit to the bridge's player on the Pi with the GO bar
+
+On the 64-bit Volumio Pi with the iFi GO bar, the bridge running as its
+service with this branch's `dist/bridge-linux-arm64`. `UNIT`, `DATA`, `CONF`
+and `N` are as in the 4b3 gate above (the unit, the data dir, `bridge.yaml`,
+the GO bar's card as `./bridge output dac` lists it). The data dir must be on
+storage that outlives a reboot (the engine refuses one that does not, and the
+journal says so).
+
+Before: Volumio's MPD must have let go of the GO bar. Stop playback in
+Volumio (its UI, or `mpc stop` on the Pi); then `cat
+/proc/asound/cardN/pcm0p/sub0/status` reads `closed`, and `./bridge output
+dac` names no holder. The gapless pass needs an album whose FLAC files share
+one rate and one bit depth: a change of format between tracks reopens the
+device, a gap by design (`player.md`).
+
+1. Configure and start. `systemctl --user stop $UNIT`; if the DAC is not
+   bound, `./bridge output dac bind N --binding serial --config $CONF`; in
+   `$CONF`, under `output: player:`, `enabled: true` and `openhome: true`;
+   `systemctl --user start $UNIT`. Pass, in `journalctl --user -u $UNIT
+   --since -2min | grep -E 'player'`: "player: started", "player DAC:
+   available … card=N", "player: the output is available", "player: the
+   OpenHome surface is on; discovery follows its bound LAN addresses", and
+   "the OpenHome surface listens on an address" for the Pi's LAN address.
+2. The picker. In 1-bit, open the output picker. Pass: a row "1-bit Bridge
+   Player" captioned "OpenHome · Unverified" appears (the room's name, if
+   `room:` is set). The box's MPD row is hidden while the Source is
+   advertised: expected until 5b and 5c.
+3. Cast an album of the bridge's own FLAC files. Pass: playback starts on
+   the GO bar within a few seconds; the journal shows the transport playing;
+   `cat /proc/asound/cardN/pcm0p/sub0/hw_params` shows the file's rate and a
+   format of its depth (S16_LE for 16 bits; S24_3LE, S24_LE or S32_LE for
+   24; S32_LE for 32), and `status` an `owner_pid` of the bridge's (`ps -L -p
+   <pid of bridge>` lists it), never MPD's.
+4. Gapless. Let one track run into the next. Pass: no gap or click at the
+   boundary, and no reopen between the two in the journal (one device open
+   for the album's run).
+5. Pause and resume. Pause in 1-bit, wait, resume. Pass: sound stops and
+   comes back at the same place. Paused past 30 s (`pauseReleaseSeconds`),
+   `status` reads `closed` (the device let go) and the resume reopens it.
+6. Skip forward and back (1-bit's next and previous, which send SeekId).
+   Pass: each skip plays the row chosen, and 1-bit's now-playing follows.
+7. A queue edit: add a track to the queue and remove an upcoming one.
+   Pass: no "Couldn't update the queue on the OpenHome player"; the edited
+   queue plays in its new order.
+8. Kill 1-bit (swipe it away) and relaunch it while the bridge plays. Pass:
+   it re-attaches to the player, showing the queue and the row playing, and
+   playback was not interrupted.
+9. Stop (1-bit's Clear, or leaving the output). Pass: sound stops, the
+   journal shows the transport stopped, and `status` reads `closed` once the
+   release is done.
+
+What to keep from each step: the `player` journal lines and the `hw_params`
+and `status` of the substream. `GET /v1/outputs` describes MPD's outputs and
+cannot show the bridge's player before 5b: use it only to confirm that MPD
+does not hold the card. The known limits and what they look like: no volume
+(the output is fixed: use the GO bar's own), no seek within a track
+(scrubbing answers 803, which 1-bit logs, and the track plays on), no DSD (a
+DSF or DFF track is skipped, `dsd_not_in_this_release`, the next one plays),
+no standby, no shuffle (1-bit sends it off). A pass is steps 1 to 9 as
+written; a failure is kept with its step's journal lines and the substream's
+files.
+
+### Round 2: round 1's findings
+
+Round 1's reviews (Codex, the Claude API) found two Mediums and three Lows;
+round 2 fixes all five, each red first where a defect existed and each rule
+under a negative control (committed, mutated, red by assertion, restored from
+git, the tree checked clean). The task's own reviews before dispatch (Codex,
+the Claude API) fixed item 2's design and item 1's cases, overriding the
+task's first text. Run on the dev Mac (darwin/arm64), Go 1.27.3 at the
+pinned toolchain with GOTOOLCHAIN=local, the tags on every direct go command;
+the host's load average, from other jobs, ran from 4 to 57. Commits, no
+attribution: f57f1ed4 and d09b966e (item 1), 7123ae6c (item 3), 3c1ecee8 and
+05982951 (item 4), c997a26f, 071d6fa5, 803adb81 and e38caa43 (item 2),
+0a4f52d4 (the rules lines and long forms), b93d3cb7 (trackref's package
+doc), and this section.
+
+**1. A Unicode host that folds to ASCII (Codex, Medium).** `trackref.Parse`
+lower-cased a name with `strings.ToLower` before the grammar looked at it,
+and Go lower-cases U+0130 (İ) to i and the Kelvin sign U+212A to k, so
+`http://brİdge.local:7790/dlna/file/<id>` read as the advertised
+`bridge.local`. Measured at 864f50a2, the finding's "stored and returned"
+did not hold: `engine.NewReference` takes printable ASCII alone, so the
+Insert, once confinement had passed and the library been asked, answered
+501; the defect was a confinement that passed. Red first: trackref's
+U+0130 and U+212A rows taken, and FuzzParse's seeds for them; the matrix's
+two rows 501 with the library asked, where 600 is due before it.
+`CanonicalName` now asks every byte of a name to be ASCII before anything is
+folded, then lower-cases it byte by byte; an internationalized name is taken
+in its punycode form alone. The ASCII rule is in that one place: the rest of
+the canonical form (the scheme, an address, the port, the path) is ASCII by
+its grammar, and a second whole-string check would have been one no control
+could tell from the first. U+017F (long s), a fullwidth letter, a Unicode
+name, and non-ASCII bytes in the port (fullwidth digits, a superscript, a
+byte that is not UTF-8) and in an address were refused at 864f50a2 and are
+regression guards. The same fold sat on the inventory's side, found here
+beyond the named cases: `Inventory.Names` compared an advertised name by
+`strings.EqualFold`, whose Unicode folding takes the Kelvin sign to k and a
+long s to s, so a name health advertised with one of them named the ASCII
+name a Uri spelled (red at 864f50a2: both taken); both sides now go through
+`CanonicalName` (`TestAnAdvertisedNameIsComparedAsASCII`). The canonical
+form is what is stored, as the task decided: `trackref.URI.String` writes
+the name lower-cased, `playlistInsert` hands the engine that serialization
+rather than the request's string, and Read, ReadList, the occurrence handed
+to the backend, and after a restart the queue file and Read, give it back
+(the test round 3 renamed `TestAnInsertStoresItsURIAsSent` when it made it
+assert the spelling sent; red at 864f50a2 in all five).
+FuzzParse's oracle is no longer that a URI taken reads back as its input: a
+URI taken is ASCII, serializes to the input with its capitals lower-cased
+(computed by the test, not by the parser), parses again to the same URI,
+and its address, port and path are the strict forms as before.
+
+What it means for 1-bit, not fixed here (iOS is out of scope): 1-bit
+matches Read's Uri exactly against what it inserted (`OpenHomeWake.decide`),
+so a Uri it built with a name in capitals no longer matches after a
+relaunch. It builds one with a name only when none of its bridge URLs holds
+an RFC 1918 IPv4 address (`BridgeDLNAURLResolver.dlnaServerURLBase`, read in
+the iOS tree on 2026-10-24); the owner's dogfood casts by the Pi's LAN
+address, unchanged. 5b/5c, which filter what 1-bit inserts, are where its
+side is set.
+
+**2. Concurrent Stops took every request slot (Codex, Medium).** A Stop held
+its request's slot while it waited for its release, so one source sending
+Stop on its eight connections during a pending release held all eight slots
+until the release was acknowledged or its ReleaseTimeout (2 s) passed, and
+every other source's reads, descriptions and Stops were 503. The task's two
+remedies were refused by its own reviews: coalescing loses a later Stop's
+effect (Stop A starts a release, a Play sets the intent to play, Stop B
+joins A's wait: playback starts, though B answered success), and a bound per
+source protects nothing across sources. Built as decided: every Stop is
+submitted to the engine (`playlistStop`); the engine closes a channel a
+command's context carries once it admits the command (`engine.WithAdmission`,
+right after the admission's compare-and-swap, so never for a command not
+admitted; c997a26f, with `TestWithAdmissionClosesAsTheOwnerAdmits`); a Stop
+gives its slot back there and waits for the release holding its connection
+alone, so the Stops that wait are bounded by the listener's caps (32, 8 a
+source), never the slots; a Stop the engine has not admitted holds its slot;
+and Stop still takes no slot of the write pool. The Stop's engine call runs
+on a goroutine of its own while the handler waits for the admission or the
+answer; `Seams.StopWaiting` runs once a Stop has given its slot back, the
+tests' barrier. Red first at 05982951 (round 1's Stop), from a temporary test
+file using only the API there, the spy's view of each Stop's admission as
+the barrier, removed after the run: one source's eight Stops left another
+source's TransportState and description 503; eight sources' one each left a
+ninth source's read 503; six writes and two Stops left a read 503; and over
+the listener, one source's eight connections of Stops left another source's
+description 503. `stops_test.go` holds the decision's six cases: the three
+slot cases with another source's Stop admitted too; Codex's interleaving
+(Stop, Play, Stop) ending Stopped with one session started; every waiting
+Stop answering on the acknowledgement and past ReleaseTimeout; a Stop held
+before the engine holding its slot; and over the listener, a source's ninth
+connection refused at accept while its eight Stops wait, and a connection
+closed mid-wait ending that Stop alone while the others answer on the
+acknowledgement. The release these tests hold is the test backend's, so each
+makes its checks inside the engine's ReleaseTimeout on the real clock and
+asks afterwards that its Stops still wait and the engine still releases: a
+slow run fails rather than passes on a release that already ended. The
+interleaving's test lets the release go once Stop B is admitted (803adb81):
+B's admission and its effect on the intent are one engine step, so the
+acknowledgement finds it, and a joined wait fails on the test's own
+assertions rather than on a watchdog; the barrier fails at once on a Stop
+answered before it waits (e38caa43).
+
+**3. The per-source share at any limits (the Claude API, Low).**
+`orDefaults` held `WritesPerSource` below `MaxConnsPerSource` alone, so at
+`Limits{Slots: 4}`, a write pool of two, one source held both, and the
+limits test asserted it. The share is now held below `WriteSlots` too, one
+at least; with one write slot (`Slots` of 1 to 3, or `WriteSlots: 1`) a
+share below the pool is impossible, and the share is the pool, which the
+`Limits` comment says and a row pins. The test's rows now say so, with rows
+for Slots 4 to 7 and explicit pools, and every limit from 0 to 12 of the
+four fields held to the bounds; `TestOneSourceNeverHoldsTheWritePoolAtAnyLimits`
+pins the behaviour at Slots 4 and the singleton at Slots 3. Red at 864f50a2:
+eleven rows and the grid (a share of 6 of 6 write slots), and a second write
+from the source at Slots 4 taken.
+
+**4. The edit gate's test (the Claude API, Low).**
+`TestAnEditThatPassesTheGateIsAnsweredInsideItsBudget` took its limit from
+`editBudget` itself and held its Inserts in the spy, so it was green with
+`editBudget = engine.ReserveTimeout` and with the gate gone: both shown
+again here (`old4-M4a`, `old4-M4b`, each subtest passing at 4.95 s and
+5.05 s). It now runs on the default limits, a 9 s budget, against the real
+engine with its reservation write held: the test player's
+`hangReservations` restarts the engine with its run's first reservation
+write failing and every later one held, through `engine.Config.Seams` (a
+`ReserveWrite` hook, nil in production, in its own behaviour-neutral commit
+3c1ecee8 with `TestTheReserveWriteSeamHoldsAndFailsTheWrite`; the engine's
+own holds are unexported). With ReserveTimeout and half a second left the
+gate answers 501, no edit call reaches the engine and the queue is as it
+was; with ReserveTimeout and two seconds left the Insert passes, the engine
+holds it the whole ReserveTimeout and refuses it, and it is answered inside
+its budget. Neither case is worked out from `editBudget`. Both mutations now
+turn it red, and only through the absent engine call: the mutated gate let
+the Insert reach the engine, which answered `reservation_not_durable`, 501,
+at 8.54 s, inside the budget, so the fault and the time could not have told.
+
+**5. The log said the rules lines were the orchestrator's to apply.** They
+are in this change, in commit 6b8ad3ff; the bullet above says so now.
+
+**Negative controls**, each on the committed tree, one mutation (its anchor
+asserted to occur once), restored with `git checkout` and the tree checked
+clean:
+
+| NC | Mutation | Red |
+|---|---|---|
+| N1a | `CanonicalName` folds by `strings.ToLower`, with no ASCII check | trackref's U+0130 and U+212A rows, `TestACanonicalNameIsASCIIBeforeItIsFolded`, FuzzParse's seeds; the matrix (both taken, the library asked); the advertised side's Kelvin and İ names |
+| N1b | the Insert stores the Uri as sent | the matrix's capitals rows, `TestAnAdvertisedNameIsComparedAsASCII`'s, the canonical-form test round 3 renamed `TestAnInsertStoresItsURIAsSent` (all five) |
+| N1c | the inventory compares by `strings.EqualFold` | `TestAnAdvertisedNameIsComparedAsASCII`'s Kelvin and long-s names |
+| N2a | a Stop holds its slot until its answer | the three slot cases and the listener's (503) |
+| N2b | a Stop during a release is answered from the earlier wait, not submitted | `TestEveryStopIsTheEnginesOwnCommand` (two sessions, Buffering) |
+| N2c | the slot given back before the engine is called | `TestAStopTheEngineHasNotAdmittedHoldsItsSlot` (the read 200) |
+| N2d | the admission noted at the top of `admit` | `TestWithAdmissionClosesAsTheOwnerAdmits` (the abandoned insert's channel closed) |
+| N2e | Stop takes a slot of the write pool | the three slot cases (a Stop 503 before it waits) |
+| N3 | the share's clamp below the write pool removed | `TestTheLimitsKeepTwoSlotsFromTheWrites`, `TestOneSourceNeverHoldsTheWritePoolAtAnyLimits` |
+| N4a | `editBudget = engine.ReserveTimeout` | the gate test's case with ReserveTimeout and half a second left |
+| N4b | the gate removed | the same |
+
+**Decided otherwise than the task, and why**: the ASCII rule in one place
+(`CanonicalName`), above; the inventory's fold fixed with the parser's; the
+engine's hook as an exported `Config.Seams`, the convention of the library's
+and the backend's; item 2's red first from a temporary file, since the
+barrier the final tests use (`Seams.StopWaiting`) does not exist at
+05982951; `WithAdmission` is an addition, not behaviour-neutral, though
+nothing that exists changes with it.
+
+**Not fixed, named**: 1-bit's exact match of Read's Uri for a name in
+capitals (above, 5b/5c); the tests that hold a release live inside the
+engine's ReleaseTimeout on the real clock (above). The round-1 sections of
+this entry describe round 1's code ("kept as sent", the old gate test), as
+the record of that round; the rules files and their long forms are current.
+
+**Gate**, on the dev Mac with Go 1.27.3 (GOTOOLCHAIN=local), its bin first
+on PATH for make (the Makefile calls a bare `go`): `make fmt vet docs-check
+build-all` clean at 0a4f52d4 (`make fmt` rewrote nothing; CLAUDE.md at 70.4%
+of its budget, player.md 99.1%); `go vet ./...` with the tags for
+GOOS=linux and GOOS=windows clean; `go test -race -count=1 -timeout 45m`
+with the tags over `./internal/player/...`, `./internal/dlna/...`,
+`./internal/api/`, `./internal/config/` and `./cmd/bridge/` at 0a4f52d4:
+every package passes (`cmd/bridge` 563 s, `internal/player/openhome` 38 s,
+the engine 19 s, the library 22 s); each test round 2 added or changed with
+`-race -count=10`: openhome's eleven (110 runs and their 70 subtests), the
+engine's two (20) and trackref's four (40), all passing, none skipped (the
+engine-backed tests start their engines on this host's APFS); `FuzzParse`
+for 30 s, 1,070,917 inputs, and `FuzzControlRequest` for 60 s, 1,573,173
+inputs against the engine, each with four workers, none failing. The
+Linux-only tests are build-excluded here; round 1 ran them on legion0, and
+round 2 changes none of their code. b93d3cb7, after the race run, changes a
+comment alone.
+
+### Round 3: the Uri stored as sent again
+
+Round 2's reviews (Codex, the Claude API) found the same Medium: round 2
+stored the canonical form (`engine.NewReference(u.String())`), so an Insert
+of `http://Bridge.LOCAL:7790/dlna/file/<id>` read back as `bridge.local`,
+and 1-bit, whose `OpenHomeWake.decide` matches Read's Uri byte for byte
+against what it inserted, lost the cast on a relaunch whenever the bridge
+advertises a name with capitals (a custom endpoint, or a `.local` name made
+from the hostname) and 1-bit builds its Uri from it, as it does when none of
+its bridge URLs holds an RFC 1918 IPv4 address. Round 1 had guaranteed that
+case. The orchestrator's decision, from both reviews: store the spelling
+sent once confined, and compare canonically. Commits, no attribution:
+24b66ce1, c644bbcf, 92f3e6ff and a9061693, and this section. Round 2's
+named follow-up, 1-bit's relaunch match for 5b/5c, is no longer needed: the
+bridge returns what 1-bit inserted again.
+
+Why the spelling sent is safe to store now: `CanonicalName` asks every byte
+of a name to be ASCII before anything is folded (round 2), so a string
+`Parse` takes is ASCII; and `Parse` folds nothing but a name's ASCII case,
+from the code: the scheme and `/dlna/file/` are exact prefixes
+(`strings.CutPrefix`), the id 16 lower-case hex (`IsID`), an IPv4 or IPv6
+literal must equal netip's own string, `%` and `@` are refused anywhere in
+the authority, and the port is decimal digits. So the spelling sent differs
+from its canonical form in its name's case alone and names the same host
+and track, and the U+0130, Kelvin, long-s, fullwidth and non-ASCII-port rows
+still answer 600 before anything is stored; `CanonicalName` stays on both
+sides of every comparison. Until now only canonical strings reached
+`engine.NewReference` and `ParseStored`, so FuzzParse asks of every string
+`Parse` takes that `NewReference` takes it, that `ParseStored` names
+`Parse`'s id from it, and that it differs from its serialization in its host
+alone, the scheme, the port and the path byte for byte the same; its seeds
+now carry an upper-case scheme, path and id, which `Parse` refuses, so a
+loosened `Parse` fails the oracle where round 2's `lowerASCII` oracle would
+not (an upper-case scheme lower-cases to the serialization as a name does).
+No row can take an upper-case scheme, path or id through an Insert, a
+restart and an open: `Parse` refuses all three (the matrix's rows and
+trackref's).
+
+What returns a track's Uri: Playlist's Read and ReadList (the entry's
+`Ref.String()`) and Info's Track (the reference of the occurrence heard,
+handed off from its entry). Product's ImageUri values name no track; the
+transport, Time and the other reads carry no Uri; GENA's evented Uri is not
+served (501). Each gives the spelling sent: `TestAnInsertStoresItsURIAsSent`
+(round 2's test, renamed) asserts `Bridge.LOCAL` on Read, ReadList, the
+backend's occurrence, Info's Track, and after a restart the queue file, Read
+and ReadList; `insertFault` compares Read's Uri exactly again.
+
+One track under two spellings (`TestOneTrackUnderTwoSpellingsIsTwoEntries`):
+`Bridge.LOCAL` and `bridge.local` of the golden track are two entries with
+two IDs, each keeping its spelling, each opening the track's file through
+the real library resolver, and each played as an occurrence of its own
+entry and spelling (SeekId, the backend's occurrence, Info's Track while it
+is heard), after a restart too. Nothing is keyed on a stored Uri, read in
+the code: the engine keys its queue's index and its skips and pass sets by
+entry ID and its sessions and calls by their own IDs, and carries a
+reference from an entry to its occurrence and Track without comparing two;
+the backend keys its sessions by session ID and its packings by rate and
+depth, and hands a reference to the resolver alone; the library's index
+maps the track id an open parses from the stored form (the same for both
+spellings) to paths; the surface compares a Uri only at an Insert, through
+`CanonicalName`; `bridge output play` names occurrences by their IDs. So
+neither spelling stands in for the other, and both open the same file.
+
+**Red first** at 2318ed58: `TestAnInsertStoresItsURIAsSent` (Read, ReadList,
+the occurrence, Info's Track and, after the restart, Read and ReadList all
+`bridge.local`, and the queue file holding `bridge.local`), the matrix's two
+capitals rows and the advertised names' `BRIDGE.local` row (`insertFault`'s
+exact comparison), and `TestOneTrackUnderTwoSpellingsIsTwoEntries` (both
+entries reading `bridge.local`). FuzzParse's new oracle passed at 2318ed58:
+the property held, and the oracle pins it.
+
+**Controls**, each on the committed tree, restored from git, the tree
+checked clean: storing the canonical form again (`trackref.Parse`, then
+`engine.NewReference(pu.String())` in `playlistInsert`) turned the four
+tests red, 16 assertions; letting `HTTP://` through `Parse` turned
+FuzzParse's seed red.
+
+**Decided otherwise than the task, and why**: `confine` returns its fault
+alone again, as in round 1, since the Insert no longer uses the URI it
+parsed; the seeds that give the new oracle a refused spelling to catch are
+a commit of their own (92f3e6ff). The cited-test-names guard (cmd/bridge)
+reads this log, and round 2's section named the test this round renamed, so
+the guard fails at c644bbcf and 92f3e6ff; a9061693 names the test as
+renamed there, and the guard passes from it on.
+
+**Gate**, on the dev Mac with Go 1.27.3 (GOTOOLCHAIN=local), its bin first
+on PATH for make: `make fmt vet docs-check build-all` clean at a9061693
+(`make fmt` rewrote nothing; CLAUDE.md at 70.4% of its budget, player.md
+99.1%, openhome.md well within); `go vet ./...` with the tags for
+GOOS=linux and GOOS=windows clean; `go test -race -count=1` with the tags
+over `./internal/player/...` and `./cmd/bridge` at a9061693: every package
+passes (`cmd/bridge` 626 s, `internal/player/openhome` 34 s); the six
+openhome tests round 3 changed or added (the four `insertFault` serves, the
+renamed test and the two-spellings test) and trackref's two with
+`-race -count=10`, 80 runs, all passing, none skipped; `FuzzParse` for 30 s,
+650,713 inputs with four workers, none failing.
+
+## 2026-10-25 — B470 PR 5a4: SeekIndex's ui4 held to an index an int of any width holds (CodeQL)
+
+**The finding.** CodeQL's `go/incorrect-integer-conversion` (high, alert
+179 on #1347) at `internal/player/openhome/writes.go:126`, SeekIndex's
+writer, `e.PlayIndex(ctx, int(ui4Of(args[0])))`: an unsigned 32-bit
+integer from `strconv.ParseUint` (`ui4Of` parses at bitSize 32 and returns
+a `uint32`) converted to `int` without an upper bound check.
+
+**Not a shipped defect.** Every release target is 64-bit
+(`.goreleaser.yaml`: darwin, linux and windows on amd64 and arm64; `make
+build-all`'s six targets; the image's linux/amd64 and linux/arm64), so int
+holds every ui4 in every build the bridge ships. A build from source for a
+32-bit target (linux/arm, a Pi on a 32-bit OS, or linux/386) has a 32-bit
+int, and there a ui4 past 2147483647 wrapped negative; the engine refuses
+an index below 0 as it refuses one past the end (`transport.go`,
+`ReasonIndexNotFound`), so even there the answer was 802 "Index not
+found", its refusal's detail naming a negative index.
+
+**What changed** (ccbad88c). `indexOf`, beside `booleanOf` in `writes.go`,
+returns the ui4 when it is at most `math.MaxInt32` and `math.MaxInt32`
+otherwise: the bound is checked where the conversion happens, in the shape
+the query takes for one (a comparison with a constant no larger than the
+target's maximum), and an int of any width holds what it returns.
+`math.MaxInt32` is past the end of every queue (a queue holds at most
+`engine.MaxEntries`, 1,000, at an insert and at a load), so the engine
+refuses it as before. `engine.MaxEntries` was weighed as the value and not
+taken: the indexes past the bound would then read below 2147483647, and
+the refusal would name index 1000, which a controller can send. SeekIndex
+is still the engine's `PlayIndex`, its signature unchanged, so its
+refusals keep their order (an unconfirmed release's 501 before the index's
+802). The sweep of the PR's diff for other `int(` conversions of a ui4 or
+a ParseUint result found one, in a test:
+`TestTheFiveHundredTrackWindowAndItsReHandoff` converted TracksMax before
+taking the lower of it and 500, and now takes the lower first. The PR's
+other parse sites keep their bounds (trackref's `portOf`, `Atoi` then 1 to
+65535; `playerTrackPorts`, `ParseUint` at 16 bits into a uint16). No rule
+line: 802 on SeekIndex is openhome.md's already, and no shipped build's
+answer changes.
+
+**The pin.** `TestEachWriteIsItsEngineCommand`, beside SeekIndex past the
+queue: the ui4 maximum, 4294967295, is 802 "Index not found", and neither
+SeekIndex past the queue starts a session or moves the generation. Green
+on this 64-bit Mac before the fix (int holds the value) and after it.
+
+**Controls**, on ccbad88c, each restored from git and the tree checked
+clean: the clamp at 0 (an index past the bound landing on the first entry)
+turned it red at the new case, `Playlist#SeekIndex: 200, want a fault`,
+the reply a SeekIndexResponse; a SeekIndex that answers its refusal and
+plays the first entry turned it red at the new check alone, `a SeekIndex
+past the queue started a session or changed the engine`.
+
+**Commands**, on the dev Mac, Go 1.27.3 (GOTOOLCHAIN=local, GOPROXY=off),
+each go command with `-tags ts_omit_webclient,ts_omit_debugeventbus`:
+`gofmt -l ./internal/player/` empty; `go vet` and `go test -count=1` over
+`./internal/player/...` clean, every package passing; `go test -race
+-count=1 ./internal/player/openhome/` passing (34 s); for GOOS=linux with
+GOARCH=386 and with GOARCH=arm, `go vet` of `./internal/player/openhome/`
+and `./internal/player/engine/` and `go test -c -o /dev/null` of each
+clean (compiled only: no 32-bit host ran them); `make docs-check` and the
+cited-test-names guard (`TestEveryCitedTestNameExists`) clean. Whether
+CodeQL takes the check is the PR's next analysis.
+
+## 2026-10-25 — B470 PR 5a4: the library's index built ahead of the first Insert (CodeRabbit)
+
+**The finding.** CodeRabbit (Minor, on #1347, `internal/player/library/library.go` at `New`): `library.New` builds no index ("the index of the paths by their ids is built at the first lookup"), and `playlistInsert` (`internal/player/openhome/writes.go`) asks the resolver's `Member`, in `confine`, before `editGate`. A write's budget is `Limits.Write` (10 s) less `budgetMargin` (1 s), 9 s from the request's arrival, and an edit calls the engine only with `editBudget` (`engine.ReserveTimeout`, 5 s, and a second) of it left, so the first Insert after the player starts has 3 s, less its body's read and parse, for the whole first build of the index. On a large library on a slow box (a Pi reading its store from an SD card) the build can take longer, and a valid Insert is then answered 501, which 1-bit takes for a failed cast start. CodeRabbit proposed a `Warm(ctx)` on the resolver, called after `library.New` and before the first OpenHome request, its errors through the startup error path.
+
+**Verified, red first.** At HEAD (183f6b7d) nothing builds the index ahead of a lookup: serve's player calls `library.New` and hands the resolver to the backend and the surface, whose `Open` and `Member` are its only lookups, and `confine` runs before `metadataFault` and `editGate`. `TestTheFirstInsertAfterTheStartFindsTheLibrarysIndexBuilt` (`internal/player/openhome/warm_test.go`) drives the real path: the real resolver over a library index of 5,001 paths whose first build takes a second (`slowIndex`: an injected delay on the read from before the first stamp, nothing slept in the test), the real engine on `newTestPlayer`, the real SOAP handler with limits whose write deadline leaves an Insert 500 ms of its budget before the gate (`warmLimits`, which keeps the test near a second where the default limits' 3 s would need a build past three), and the first Insert of a track the library holds. Against 183f6b7d's resolver it is answered 501:
+
+    warm_test.go:112: the first Insert after the start: 500, fault 501; want it taken
+
+That run is the final test, its Warm call taken out, over `git show 183f6b7d:internal/player/library/library.go`, restored after; the first red-first run, at 183f6b7d itself with a 300 ms allowance, gave the same answer (line 109). The finding holds as stated.
+
+**The fix** (9ea5cd97; c760f2d5 widened the test's allowance from 300 to 500 ms for a loaded runner). `library.Resolver.Warm(ctx)` builds the index as the first lookup does (`catchUp`) in the resolver's turn, which it waits for with its context and holds for the whole build, so a lookup that comes meanwhile waits for it, with its own context, and then finds the index built. It answers nil, `ErrCancelled` when its context ended (before it had the turn or during the build), or a failure naming no path. A build cut short or failed keeps what it took whole, every row up to the last stamp it finished, so the next lookup goes on from there (the lazy build stays). It logs how it ended, once: built at Info with the paths the index holds and how long the build took, stopped at Info, failed at Warn by `manifest.ErrorClass` and never the error's text; a panic in it is recovered, logged with its stack and never its value, and the turn let go. `catchUp` returns the store's error as it is, `pathsOf` maps it through `indexError` as before, and both share `cancelled`; `logPanic` takes its message. Serve's player starts the warm in `start`, once its engine runs and just before `startOpenHome`, on a goroutine of its own (`bridgePlayer.warmLibrary`, `serve_player_openhome.go`), only when the plan starts the surface; its context is derived from the player's, the shutdown cancels it first (`playerRun.stopWarm`) and waits for it last, after the backend, within `servePlayerBounds.warm` (`playerWarmStopBound`, 2 s), saying so when it abandons one, and `bridgePlayer.stop`'s bound counts that wait. A boot test wraps the player's library index through `servePlayerSeams.store`.
+
+**Decided otherwise than proposed.** A failed or stopped warm does not go through the startup error path: it is no reason to refuse the player, whose lookups build the index as before, so it is logged once and the player runs. The warm starts once the engine runs, a few lines after `library.New`, not right after it, so a start refused after the resolver is built (the backend, `engine.New`) leaves no build running; and only with the OpenHome surface, since nothing else in serve commands the engine, and an index built with no surface would only hold the library's paths in memory (about 37 MB allocated in the 100,000-track build below). The rule went into `openhome.md`, whose globs load it with `library.go`, `writes.go`, `serve_player.go` and `serve_player_openhome*.go` alike and which has room, not `player.md` (98 KB of 100).
+
+**The listener does not wait for the warm.** The reads need no index (each answers from the engine's snapshot or the Source's own values), nor do the transport writes, DeleteId and DeleteAll; a Source that appeared only once the build was done would hide the player from 1-bit for as long as the build ran; and a build that stalls, a read of the store held, would hold the surface with it. An Insert that comes while the build runs waits for it in the turn and spends of its 9 s budget at most what is left of the build, where before it spent the whole build, so it fails (501) only where the rest of the build outlasts its 3 s, which the whole build did before. On the dev Mac the whole build of 100,000 tracks takes about 74 ms (below), so the warm is done long before a controller can discover the Source, fetch its description and send an Insert; on a Pi the CPU half is slower by a multiple not measured here, and after a boot the build first reads the store's pages from its card, both of which the warm takes at the player's start.
+
+**Measured** on the dev Mac (Apple M3 Pro, 12 cores, load averages 5 to 10 from other sessions during the runs), Go 1.27.3, `BenchmarkTheIndexBuild` (`internal/player/library/warm_test.go`): a fresh resolver's Warm over a manifest store at rest (written 500 tracks a commit, closed and opened again), its tracks with paths of about 80 bytes and full tags, read from the page cache: 25,000 tracks in 16.1 to 17.4 ms (about 16 ms; 9.1 MB and 200,170 allocations a build), 100,000 in 71 to 116 ms (about 74 ms; 36.6 MB, 800,556 allocations), five runs of 20 builds each; the stores are 36.5 MB and 144.5 MB on disk. An earlier run on rows with no tags gave 13.6 to 13.9 and 58 to 66 ms. The build reads the path of every row of the tracks table, which holds most of a store like these: read cold from an SD card at a few tens of MB/s, a 100,000-track store's pages could take seconds (an estimate, not measured), and that is what the warm moves out of the first Insert's budget. To judge the Pi: the benchmark runs there as `go test -tags ts_omit_webclient,ts_omit_debugeventbus -run '^$' -bench TheIndexBuild -benchtime 20x ./internal/player/library/`, or, with no Go on the box, built here with `GOOS=linux GOARCH=arm64 go test -c -tags ts_omit_webclient,ts_omit_debugeventbus -o library.test ./internal/player/library/` and run there as `./library.test -test.run '^$' -test.bench TheIndexBuild -test.benchtime 20x`; it measures a store the page cache holds (in `TMPDIR`, which on a Pi can be RAM), so a cold build is the journal's to tell: a bridge with the surface on logs `player: the library index is built ahead of the first lookup paths=… took=…` at each start, and the start after a boot is the likeliest to read the store from the card.
+
+**Tests** (B470 PR 5a4, this round): `TestTheFirstInsertAfterTheStartFindsTheLibrarysIndexBuilt` (above; green with the Warm, the Insert taken, Read giving its Uri back, the index built once, by the warm); `TestALookupDuringTheWarmWaitsForItAndFindsTheIndexBuilt` (a warm held halfway through 25,000 rows; a lookup sent then reaches the turn's wait, seen through its context's Done, and once the warm is let go finds the track; the store handed every row once, `idIndex.reads` 25,000 and `builds` 1, the lookup reading its own row alone; a second read of the library is held until the warm returns, so a lookup that built beside the warm shows in the counts and never races it); `TestAWarmThatFailsLeavesTheNextLookupToBuild` (a read failing halfway with an error quoting a stored path: a failure that is not `ErrCancelled` and names no path, one Warn with `class=other` and neither the path nor the error's text, then a lookup bounded by its own context reads the rest and the commit it stopped inside, 13,000 rows, and finds the track, one build); `TestAWarmEndsWithItsContext` (a context ended halfway: `ErrCancelled`, one Info, no failure, the next lookup going on from there; and a warm waiting for a turn a held lookup has, its context ended: `ErrCancelled` at once, nothing read); `TestAWarmThatPanicsIsRecovered`; and in `cmd/bridge/serve_player_openhome_warm_test.go` (named `serve_player_warm_test.go` in 9ea5cd97; 8cad029a renamed it so `openhome.md` loads with it), `TestServeBuildsThePlayersLibraryIndexBesideItsSurface` (the real serve with the surface on the discovery rig's LAN: the build begins before any request and is held while the surface listens and a TransportState read answers, then the first Insert is taken and no read of the library starts from the first row again), `TestServeStopEndsThePlayersLibraryIndexBuild` (serve's stop, and the player's own once its engine's goroutine panicked, end the held build's context; the build's Info line comes before `player: shut down`; nothing abandoned) and `TestServeAbandonsALibraryIndexBuildHeldPastItsBound` (a read held past its context, the bound 100 ms: one abandonment Warn naming it, exit 0).
+
+**Controls**, on 9ea5cd97 (the openhome test's allowance 300 ms then, which c760f2d5 changed, and the serve tests' file `serve_player_warm_test.go`, as their lines below say), each an anchored replacement counted once, run, then restored with `git checkout --` and `git status` clean:
+
+1. Serve's warm call taken out: `serve_player_warm_test.go:144: the player began no build of its library's index` (`TestServeBuildsThePlayersLibraryIndexBesideItsSurface`, its wait giving up under `-timeout 70s`).
+2. The build outside the turn (warm's wait for the turn and its release taken out): `library/warm_test.go:104: the library handed over 50000 rows (50000 into the index, 1 builds) and 1 tracks; want every row once, by the warm, in one build, and the lookup's own track`.
+3. The shutdown's cancel of the build taken out: the subtest whose engine stopped on its own, `serve_player_warm_test.go:243: the player abandoned the build: ["WARN … bound=2s"]` and `:254` the order; the serve's-stop subtest stayed green, the player's context ending the build.
+4. That, and the build's context made `context.Background()`: both subtests, `serve_player_warm_test.go:237: the build's context did not end with the player's`, `:240: the build's stop logged [], want once, at Info`, `:243`, `:254`.
+5. The shutdown's wait for the build taken out: `serve_player_warm_test.go:280: the abandonment logged [], want once, naming its bound` (`TestServeAbandonsALibraryIndexBuildHeldPastItsBound`); `TestServeStopEndsThePlayersLibraryIndexBuild` stayed green, a cancelled build ending before the shutdown's last line by itself, so the abandonment test is the wait's pin.
+6. A failed warm resetting the index: `library/warm_test.go:170: the lookup after the failed warm read 25000 rows, more than the 12500 left and one commit's 500` and `:173: 2 builds, want one`.
+7. The failure logged with its error: `library/warm_test.go:159: the line carries the error's text: WARN … class=other err=disk I/O error reading the row of Artist 012/Album 050/00 Track.flac`.
+8. The build made synchronous before the surface (the listener waiting for it): `serve_player_warm_test.go:142: the player neither ran nor failed` (the player's readiness held by the build).
+9. The warm waiting for the turn without its context: `library/warm_test.go:240: waited 1m0s for the warm to wait for the turn` (`TestAWarmEndsWithItsContext`).
+10. Warm a no-op: `openhome/warm_test.go:115: the first Insert after the start: 500, fault 501; want it taken`.
+
+`TestAWarmThatPanicsIsRecovered` has no control by assertion: without the recover the panic fails the binary.
+
+**Docs.** `openhome.md` has the rule's line, after the write actions' last, and its intro's pointers name `Warm` and this entry; the long form is in `ops/History-rules-openhome.md`. `cli-serve.md`'s line on the surface's start and stop said `stopOpenHome` comes first in the shutdown, which now cancels the build before it, and names the build's bound beside the surface's. `ops/History-rules-cli-serve.md`'s long form of serve's player names the build's wait in the shutdown's order, and said its stop waits for the supervisor "at most both bounds and a second", stale since 5a2a added the surface's and discovery's bounds to the sum; it says the sum.
+
+**Commands**, on the dev Mac, Go 1.27.3 (`GOTOOLCHAIN=local`, `GOPROXY=off`), each go command with `-tags ts_omit_webclient,ts_omit_debugeventbus`: `gofmt -l ./internal/player/ ./cmd/bridge/` with the toolchain's own gofmt, empty; `go vet ./internal/player/... ./cmd/bridge/` clean on darwin, with `GOOS=linux` and with `GOOS=windows`; `go test -count=1 ./internal/player/... ./cmd/bridge/` on c760f2d5, every package passing (cmd/bridge 159.6 s, openhome 25.5 s, library 3.3 s); `go test -race -timeout 30m -count=1 ./internal/player/library/ ./internal/player/openhome/ ./cmd/bridge/` on c760f2d5, passing with no race reported (library 16.2 s, openhome 35.3 s, cmd/bridge 592.3 s, 10 min 7 s in all, load averages up to 18 from other sessions); the three serve tests again on 8cad029a after the rename, passing; `go test -run '^$' -bench TheIndexBuild -benchtime 20x -benchmem -count 5 ./internal/player/library/` for the numbers above; `make docs-check` and the cited-test-names guard (`go test -run TestEveryCitedTestNameExists ./cmd/bridge/`) clean over these docs.
+
+## 2026-10-25 — B470 PR 5a4: the warm's review round (Codex, the Claude API)
+
+The warm of the entry above (9ea5cd97 to 1f16660c) was reviewed by Codex and the Claude API; three findings, each verified red first and fixed with a control.
+
+**Medium (Codex): a warm over an empty store left the staleness rule a build of none.** A warm that finishes against an empty library index (a fresh install's first boot, whose scan writes the library once the player has started) took no row and set `built` to 0; once the scan added more than 2,000 tracks, the first lookup caught up every row and left `built` at 0, and the next lookup, the index past twice 0 and `staleSlack`, built it again from the first row on its own budget, the 501 the warm exists to prevent. Without the warm a lookup that lands mid-scan can do the same; the warm makes it likely on a first boot. Red first: `TestAReadFromTheFirstRowIsTheIndexsBuild` (`internal/player/library/warm_test.go`; the real resolver over the package's synthetic store: an empty warm, 25,000 tracks written 500 to a commit, then lookups) against 1f16660c's resolver: `warm_test.go:344: a later lookup read 25000 rows, want none: the index was built again (2 builds)`, and with the first read cut halfway `warm_test.go:366: the lookup after the cut read more than the 12500 rows left and the commit it stopped inside: the index was built again (2 builds)`; its third subtest, the rule still letting go of a library replaced whole, passed there too. The fix (18220259): `catchUp` counts a read that begins at the first row, which is what follows a build that took no row (`after` still `math.MinInt64`), as the index's build: it sets `built` to -1 before the read, and the read's end, now or at the lookup that finishes a read cut short, sets it to the paths read, as a build's does. The choice, in the code and in the History: that read is the rows a build reads, every row the store holds; no other read is, since the rows a catch-up adds cannot be told from rows that replaced others the index still holds, and counting them would let the paths of deleted rows count as the library, so the rule would no longer let go of them. Left as before the warm, and said there: a build that read part of a library a scan goes on writing is measured by what it read, so a lookup can build the index again once the scan has more than doubled it and added 2,000.
+
+**Low (Codex): the abandoned build outlived its test.** In `TestServeAbandonsALibraryIndexBuildHeldPastItsBound` the held read (`pastCancel`) ignored `letGo` and waited for the test's context, and nothing joined the build it held, so its stop line could land in the next test's recorder and, under `-shuffle`, give `TestServeStopEndsThePlayersLibraryIndexBuild` two. Red first: the test's new join against 1f16660c's `heldIndex`: `serve_player_openhome_warm_test.go:293: the abandoned build did not return once its read was let go`. At 1f16660c the three serve warm tests shuffled twenty times passed all twenty: the window, the line landing after the test's end and before its recorder is put back, did not open, so the join's assertion is the red. The fix (42b0bc64, test only): a held read past its context ends at `letGo` too; the test lets it go once its assertions are made, waits for the player's `run.warmed`, and requires the build's stop logged once in its own recorder; a cleanup, registered after the recorder so it runs before it is put back, does the same for a test that ends early.
+
+**Low (the Claude API): a surface that does not start kept the build.** The warm started whenever the plan allowed the surface and ran on when `startOpenHome` then failed, which `openhome.md`'s line ("only with it"), the History and `ops/History-rules-cli-serve.md` said it did not. `openhome.Start` refuses only its config (no UUID, a port outside 0 to 65535, both of which serve's own checks rule out), and `startOpenHome` gives up when serve's stop came first; a bind that fails, or a listing that fails, leaves the surface running and binding later, and the build with it, rightly, since an Insert can come once the surface binds. So the case is rare, and it is now as the docs say. Red first, with the new seam `openhomeWiring.Start` (a function in `openhome.Start`'s place) refusing: `serve_player_openhome_warm_test.go:344: the library index's build went on for a surface that did not start` (`TestServeStopsThePlayersLibraryIndexBuildWhenItsSurfaceDoesNotStart`, its wait giving up under `-timeout 70s`). The fix (8cf7a471): `startOpenHome` reports whether the surface started, and `start` stops the build at once when it did not (`playerRun.stopWarm`); the shutdown still waits for it, at once.
+
+**Controls**, each on the fix's own commit, an anchored replacement counted once, run, then restored with `git checkout --` and `git status` clean:
+
+1. The first-row read not counted (the fix's three lines taken out): `warm_test.go:344` and `:366`, as at 1f16660c.
+2. Every read counted as the build (`built` set from every read that reaches its end): `warm_test.go:382: the index holds 11000 paths for 11000 built and was not built again: the rule no longer lets go of deleted rows`, and `membership_test.go:370` (`TestTheIndexIsBuiltAgainOncePastItsSlack`) the same.
+3. The abandonment test's join taken out: `serve_player_openhome_warm_test.go:308: the abandoned build's stop logged [], want once, in this test`.
+4. The build not stopped for a surface that did not start (`startOpenHome`'s answer ignored): `serve_player_openhome_warm_test.go:344: the library index's build went on for a surface that did not start`.
+
+**Shuffled**: on 8cf7a471, `go test -count=20 -shuffle on -run LibraryIndex ./cmd/bridge/` (the four serve warm tests), seed 1792911029294186000: 80 passes, none failed; and `-count=20 -shuffle on` over the library's and openhome's warm tests: passing.
+
+**Docs.** `openhome.md`'s line on the warm says the surface that does not start stops it and that a read from the first row is the build, with the two new tests; its long form in `ops/History-rules-openhome.md` has this round's reasoning, and the confinement's long form says a read from the first row counts as a build; `cli-serve.md`'s line on the surface's start says a surface that cannot start tells `start`, which stops the build; `ops/History-rules-cli-serve.md` says the shutdown waits for the build the player begins with the surface and stops when it does not start.
+
+**Commands**, on the dev Mac, Go 1.27.3 (`GOTOOLCHAIN=local`, `GOPROXY=off`), each go command with `-tags ts_omit_webclient,ts_omit_debugeventbus`: `gofmt -l ./internal/player/ ./cmd/bridge/` with the toolchain's own gofmt, empty; `go vet ./internal/player/... ./cmd/bridge/` clean on darwin, with `GOOS=linux` and with `GOOS=windows`; `go test -count=1 ./internal/player/... ./cmd/bridge/` on 8cf7a471, every package passing (cmd/bridge 150.7 s, openhome 26.2 s, library 3.4 s); `go test -race -timeout 30m -count=1 ./internal/player/library/ ./internal/player/openhome/ ./cmd/bridge/` on 8cf7a471, passing with no race reported (library 21.3 s, openhome 38.9 s, cmd/bridge 608.7 s, 10 min 22 s in all, load averages up to 21 from other sessions); the shuffled runs above; `make docs-check` and the cited-test-names guard (`go test -run TestEveryCitedTestNameExists ./cmd/bridge/`) clean over these docs.
+
+## 2026-10-25 — B470 PR 5a4: main's 5b test library takes the resolver's new read
+
+Merging main (B470 PR 5b, #1348) into PR 5a4 left `cmd/bridge`'s tests
+uncompiled: 5b's `emptyLibrary` stand-in (`serve_player_output_test.go`)
+implements `library.Store` with `TrackPaths`, and 5a4 replaced that method with
+`TrackPathsIndexedAfter`, the read the resolver's index is built and kept
+current from. Neither branch was wrong alone; the two met only in the merge,
+and `go vet ./...` on the merged tree found it before CI did. The stand-in now
+has `TrackPathsIndexedAfter`, an empty library calling `fn` for no row. Checked
+with `go vet` on darwin, linux and windows, and `go test` of `./cmd/bridge/`
+and `./internal/api/`, plain and under `-race -timeout 30m`.

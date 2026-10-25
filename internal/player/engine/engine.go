@@ -94,8 +94,26 @@ type Config struct {
 	MaintenanceTTL time.Duration
 	// Log is where the engine logs; nil is the "player" component.
 	Log *slog.Logger
+	// Seams are a test's holds on the engine from a package above it; nil in
+	// production. The package's own tests set seams.
+	Seams *Seams
 
 	seams seams
+}
+
+// Seams are the engine's test seams for the packages above it (B470 PR 5a4,
+// round 2: the OpenHome surface's edit gate is tested against an engine held
+// in a reservation write). Each runs on the goroutine that reaches it, and
+// may block there; a nil field, like a nil Seams, changes nothing.
+type Seams struct {
+	// ReserveWrite runs before each reservation write, on the goroutine that
+	// makes it (New's, for the run's first): an error it returns is that
+	// write's, which fails as one the filesystem refused, and while it
+	// blocks the write is under way, as on a filesystem that holds it, so
+	// the edits that need it wait, at most ReserveTimeout. A test that holds
+	// a write lets it go before the engine stops: Run's shutdown waits for a
+	// reservation write under way.
+	ReserveWrite func() error
 }
 
 // seams is what the tests replace on one engine: the clock, the file
@@ -115,6 +133,9 @@ type seams struct {
 	admitted     func(c *command)
 	applied      func(op string)
 	handled      func(what string)
+	// checked sees a command whose context the owner found alive, before it
+	// decides the command's admission (command.admission).
+	checked func(c *command)
 	// replying sees each reply as it is sent, with the snapshot published
 	// then; writerWaits, the queue file writer about to wait, with the
 	// newest revision it has seen.
@@ -238,6 +259,15 @@ func New(cfg Config) (*Engine, error) {
 		// failed directory fsync is not taken here.
 		sm.writeReserve = func(path string, data []byte) error {
 			return atomicwrite.WriteBytesDurable(dataDir, path, data, ".player-ids-*.tmp")
+		}
+	}
+	if s := cfg.Seams; s != nil && s.ReserveWrite != nil {
+		write, before := sm.writeReserve, s.ReserveWrite
+		sm.writeReserve = func(path string, data []byte) error {
+			if err := before(); err != nil {
+				return err
+			}
+			return write(path, data)
 		}
 	}
 	if sm.probe == nil {
@@ -542,7 +572,19 @@ type command struct {
 	reply   chan reply
 	replied bool
 	parked  bool
+	// admission is decided once, between the caller and the owner: pending
+	// until the owner admits the command (it runs) or its caller, whose
+	// context ended first, abandons it (it does not run, and the caller is
+	// told so: ErrNotAdmitted).
+	admission atomic.Int32
 }
+
+// A command's admission (command.admission).
+const (
+	admissionPending int32 = iota
+	admissionAdmitted
+	admissionAbandoned
+)
 
 // reply is a command's answer.
 type reply struct {
@@ -553,12 +595,15 @@ type reply struct {
 }
 
 // do hands c to the owner and waits for its reply. A context that has
-// ended, or ends before the owner takes c, means c does not run; one that
-// ends after means c runs and its reply is dropped. After shutdown every
-// command is answered ReasonClosed at once. c holds nothing of the
-// caller's once it is sent: do copies the conditions here, and InsertAfter
-// the metadata, so a caller that returns early may reuse its slices while
-// the owner still runs the command.
+// ended, or ends before the owner admits c, means c does not run, and the
+// refusal wraps ErrNotAdmitted: before the owner takes it, and once taken
+// and not yet admitted, where do abandons it (command.admission), so the
+// owner refuses it in turn; one that ends after the owner admitted c means
+// c may run and its reply is dropped. After shutdown every command is
+// answered ReasonClosed at once. c holds nothing of the caller's once it is
+// sent: do copies the conditions here, and InsertAfter the metadata, so a
+// caller that returns early may reuse its slices while the owner still runs
+// the command.
 func (e *Engine) do(c *command) reply {
 	c.conds = slices.Clone(c.conds)
 	name := c.op.String()
@@ -587,6 +632,10 @@ func (e *Engine) do(c *command) reply {
 			return r
 		default:
 		}
+		if c.admission.CompareAndSwap(admissionPending, admissionAbandoned) {
+			// The owner has taken c and not admitted it, and now never will.
+			return reply{err: notAdmitted(name, c.ctx.Err())}
+		}
 		return reply{err: &Error{Reason: ReasonCancelled, Op: name, Detail: "the context ended while the command ran: it may have taken effect", Err: c.ctx.Err()}}
 	case <-e.done:
 		select {
@@ -598,9 +647,43 @@ func (e *Engine) do(c *command) reply {
 	}
 }
 
-// notAdmitted is a command whose context ended before the owner took it.
+// WithAdmission returns a context derived from ctx and a channel the owner
+// closes once it admits the command that context is passed with (B470 PR
+// 5a4, round 2): from then on the command's caller no longer decides whether
+// it runs (a context that ends after it is answered ReasonCancelled without
+// ErrNotAdmitted), and its answer comes once it has run, which for a Stop is
+// once its release is confirmed or past its deadline. A command the owner
+// never admits (its context ended first, its caller abandoned it, the engine
+// had shut down) never closes it. The OpenHome surface gives a Stop's request
+// slot back there, so the Stops that wait for a release hold no slot. A
+// context so made is for one command: another passed it closes nothing more.
+func WithAdmission(ctx context.Context) (context.Context, <-chan struct{}) {
+	n := &admissionNote{ch: make(chan struct{})}
+	return context.WithValue(ctx, admissionKey{}, n), n.ch
+}
+
+// admissionKey carries an admissionNote in a command's context.
+type admissionKey struct{}
+
+// admissionNote is WithAdmission's channel, closed once.
+type admissionNote struct {
+	once sync.Once
+	ch   chan struct{}
+}
+
+// noteAdmission closes the channel c's context carries (WithAdmission), if
+// it carries one: the owner has admitted c. Closing never blocks the owner.
+func noteAdmission(c *command) {
+	if n, ok := c.ctx.Value(admissionKey{}).(*admissionNote); ok {
+		n.once.Do(func() { close(n.ch) })
+	}
+}
+
+// notAdmitted is a command whose context ended before the owner admitted
+// it: it wraps ErrNotAdmitted and the context's error.
 func notAdmitted(name string, err error) error {
-	return &Error{Reason: ReasonCancelled, Op: name, Detail: "the context ended before the command was admitted: it did not run", Err: err}
+	return &Error{Reason: ReasonCancelled, Op: name, Detail: "the context ended before the command was admitted: it did not run",
+		Err: fmt.Errorf("%w: %w", ErrNotAdmitted, err)}
 }
 
 // answer gives c its reply, once. The reply is sent when the step that

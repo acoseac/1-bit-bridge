@@ -20,7 +20,7 @@ import (
 // restore raises. It returns why the engine does not start, if it does not.
 func servesPlayer(tb testing.TB, dir, uuid string) (*testPlayer, error) {
 	tb.Helper()
-	p := &testPlayer{tb: tb, dir: dir, uuid: uuid, queue: "player-queue.json", reserve: engine.ReservationFileName}
+	p := &testPlayer{tb: tb, dir: dir, uuid: uuid, queue: "player-queue.json", reserve: engine.ReservationFileName, lib: newTestLibrary()}
 	return p, p.start()
 }
 
