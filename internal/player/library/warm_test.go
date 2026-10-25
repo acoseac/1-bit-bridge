@@ -287,6 +287,112 @@ func TestAWarmThatPanicsIsRecovered(t *testing.T) {
 	}
 }
 
+// scanWrites writes the synthetic tracks from to from+n into s as a scan
+// writes them: 500 to a commit, a stamp each.
+func scanWrites(s *fakeStore, from, n int) {
+	for i := from; i < from+n; i += 500 {
+		var batch []string
+		for j := i; j < min(i+500, from+n); j++ {
+			batch = append(batch, syntheticPath(j))
+		}
+		s.put(batch...)
+	}
+}
+
+// handedFor is the rows of the library the store handed over for a lookup of
+// the i-th synthetic track, which must be found.
+func handedFor(t *testing.T, r *Resolver, s *fakeStore, i int) int {
+	t.Helper()
+	before, _ := s.counts()
+	if got := member(t, r, Reference(syntheticPath(i)).String()); got != "" {
+		t.Fatalf("the lookup of track %d: %s, want it found", i, got)
+	}
+	after, _ := s.counts()
+	return after - before
+}
+
+// TestAReadFromTheFirstRowIsTheIndexsBuild pins the staleness rule after a
+// warm over an empty library index, a fresh install's first boot whose scan
+// writes the library once the player has started (Codex on the warm's
+// round). The warm takes no row, so the first lookup reads from the first
+// row, the rows a build reads, and that read counts as the build: the 25,000
+// tracks the scan wrote are then the library the rule measures against, not
+// paths of rows deleted since, and no later lookup builds the index again.
+// A first read cut short (its lookup's context ending halfway, as an
+// Insert's budget can end it) is a build not yet read to its end, which the
+// next lookup finishes. And the rule keeps its job: after such a build, a
+// library replaced whole, round after round, is let go of by one build
+// again once the index has grown past twice that build and staleSlack.
+func TestAReadFromTheFirstRowIsTheIndexsBuild(t *testing.T) {
+	const n = 25_000
+	warmEmpty := func(t *testing.T) (*Resolver, *fakeStore) {
+		t.Helper()
+		r, s := syntheticResolver(t, 0)
+		if err := r.Warm(context.Background()); err != nil {
+			t.Fatalf("a warm over an empty library: %v", err)
+		}
+		return r, s
+	}
+	t.Run("read to its end", func(t *testing.T) {
+		r, s := warmEmpty(t)
+		scanWrites(s, 0, n)
+		if handed := handedFor(t, r, s, 7); handed != n {
+			t.Fatalf("the first lookup after the scan read %d rows, want the library's %d from its first row", handed, n)
+		}
+		for _, i := range []int{n - 1, n / 2} {
+			if handed := handedFor(t, r, s, i); handed != 0 {
+				t.Fatalf("a later lookup read %d rows, want none: the index was built again (%d builds)", handed, r.ids.builds)
+			}
+		}
+		if r.ids.builds != 1 || r.ids.built != n {
+			t.Errorf("%d builds, the last of %d paths; want the first lookup's read to have been the one build, of %d", r.ids.builds, r.ids.built, n)
+		}
+	})
+	t.Run("cut short", func(t *testing.T) {
+		r, s := warmEmpty(t)
+		scanWrites(s, 0, n)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		s.hold = func(i int) {
+			if i == n/2 {
+				cancel()
+			}
+		}
+		if err := r.Member(ctx, Reference(syntheticPath(n-1)).String()); !errors.Is(err, ErrCancelled) {
+			t.Fatalf("the first lookup, cut halfway: %v, want ErrCancelled", err)
+		}
+		s.hold = nil
+		if left := n - n/2; handedFor(t, r, s, n-1) > left+500 {
+			t.Fatalf("the lookup after the cut read more than the %d rows left and the commit it stopped inside: the index was built again (%d builds)", left, r.ids.builds)
+		}
+		if handed := handedFor(t, r, s, 7); handed != 0 {
+			t.Fatalf("a later lookup read %d rows, want none: the index was built again (%d builds)", handed, r.ids.builds)
+		}
+		if r.ids.builds != 1 || r.ids.built != n {
+			t.Errorf("%d builds, the last of %d paths; want the first read, finished by the next lookup, to have been the one build, of %d", r.ids.builds, r.ids.built, n)
+		}
+	})
+	t.Run("the rule lets go of deleted rows", func(t *testing.T) {
+		const m = 1_000
+		r, s := warmEmpty(t)
+		scanWrites(s, 0, m)
+		handedFor(t, r, s, 0)
+		for round := 1; r.ids.builds == 1; round++ {
+			if round > 10 {
+				t.Fatalf("the index holds %d paths for %d built and was not built again: the rule no longer lets go of deleted rows", r.ids.paths, r.ids.built)
+			}
+			for i := 0; i < m; i++ {
+				s.remove(syntheticPath(i + (round-1)*m))
+			}
+			scanWrites(s, round*m, m)
+			handedFor(t, r, s, round*m)
+		}
+		if r.ids.paths > 2*m || r.ids.built != m {
+			t.Errorf("after the build again: %d paths, %d built, want the %d of the library now", r.ids.paths, r.ids.built, m)
+		}
+	})
+}
+
 // benchTrack is the i-th track of BenchmarkTheIndexBuild's library, its row
 // about the size of a real library's: a path of about 80 bytes (an artist,
 // an album with its year, a numbered title) and the tags a scan stores.

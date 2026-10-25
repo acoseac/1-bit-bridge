@@ -118,7 +118,8 @@ const (
 // grow before the next lookup builds it again: a path the index holds is let
 // go only when the row is read again (a lookup of its id, or a build), so the
 // paths of rows deleted since grow it, and a build every so many inserts keeps
-// it within a few times the library, its cost spread over them.
+// it within a few times the library, its cost spread over them. A read from
+// the first row is a build too, whatever began it (catchUp).
 const staleSlack = 2 * engine.MaxEntries
 
 // readCheck is how many rows the index takes between two looks at its
@@ -208,7 +209,8 @@ type idIndex struct {
 	byID  map[string][]string
 	after int64
 	// paths counts the paths byID holds, and built those the last build read
-	// (-1 while a build has not read to its end).
+	// (-1 while a build has not read to its end; a read from the first row
+	// is a build, catchUp).
 	paths, built int
 	// reads counts the rows taken from the store, builds every build begun:
 	// the tests' measure of the work.
@@ -305,8 +307,26 @@ func (r *Resolver) pathsOf(ctx context.Context, id string) (string, error) {
 // finished, and the next lookup goes on from there; the read's error is
 // returned as it is, for the caller to map (indexError, Warm). The caller
 // holds the turn.
+//
+// A read from the first row is a build, whatever began it: while the index
+// has taken no row (after is still before every stamp), what it reads next
+// is every row the store holds, the rows a build reads, so built is counted
+// from that read once it reaches its end, as a build's is. A warm over an
+// empty library index (a fresh install whose scan writes the library once
+// the player has started) took no row, and its build of none would
+// otherwise stand: the library the scan wrote would count against it as
+// paths of rows deleted since, and a lookup would build the index again on
+// an Insert's budget (Codex on the warm's round). Any other read is not
+// counted: what it adds is rows new to the index, which the index cannot
+// tell from the rows that replaced others it still holds, so counting them
+// would let the paths of deleted rows count as the library, and the rule
+// would no longer let go of them. A build that read only part of a library
+// a scan goes on writing is measured by what it read, as before the warm.
 func (r *Resolver) catchUp(ctx context.Context) error {
 	x := &r.ids
+	if x.after == math.MinInt64 {
+		x.built = -1
+	}
 	if x.built >= 0 && x.paths > 2*x.built+staleSlack {
 		x.reset()
 	}
