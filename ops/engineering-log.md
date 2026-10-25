@@ -64941,3 +64941,102 @@ before bgScans drained"); restored, `-race -count=3` passes. The whole
 admin package under `-race` passed, 824 tests in 666 s, on the main Mac
 (Go 1.27.3): past `go test`'s default 10-minute timeout, so a local run of
 that package needs `-timeout`; CI runs it in four shards.
+
+## 2026-10-25 — B543: the bridge player's DAC in GET /v1/outputs
+
+The bridge element now carries the card resolved for the player's boot USB
+binding. `BridgeOutputFacts.DAC` is a plain `OutputDAC` projected in cmd/bridge;
+the API imports no player package. The watcher snapshot must be available,
+non-stale and of the boot binding, and every unavailable player state withholds
+the DAC without changing state/reason. The snapshot carries no stream altsets,
+so `Observer.ObserveWithProc` returns the inventory and its own /proc reading
+from one pass. Resolve the boot binding on that inventory, then project the
+bound PCM device's playback capabilities from that very reading. Index and
+ALSA id are observations, not bindings; a port binding uses the observed model.
+No identity or card longname crosses the seam; `isMPDsOutput` stays null.
+
+The request waits at most 500 ms (or its own deadline), and one read at most
+runs per output view. A read held in the kernel keeps its slot after the
+request returns; more requests return null without another reader. A panic,
+partial reading, unreadable stream or stream without playback altsets is null.
+The protocol documents the capabilities, the queue check, and the moments-apart
+state/DAC observation; protocol version stays 1. The iOS mirror is a reviewer
+copy, not part of this worktree.
+
+`TestBridgeDACBindingsAndPrivacy` uses serial/model/port bindings, two PCM devices
+with different capabilities, and serial/port strings in sysfs and the longname.
+`TestBridgeDACReplug` moves the bound unit while another occupies its old index,
+swaps two identical DACs' ALSA ids, and replaces a port-bound model.
+The read-failure, startup, unavailable/stale, boot-snapshot and model-ambiguity
+tests withhold the DAC while preserving state/reason. The stalled-reader test
+holds the reader through 51 requests, counts one call, then releases it.
+The API composer test was red first: it dropped the supplied DAC fact.
+
+Negative controls all compiled and failed their intended tests: old index
+(replug); JSON-tagged USBIdentity (privacy, including its port); non-null
+isMPDsOutput and PCM device 0 (bindings/capabilities); bypassed unavailable
+or stale gate (unavailable/startup); ignored partial reading (read failures);
+a second read in flight or no deadline (stalled reader); a foreign snapshot
+accepted (boot snapshot). Every mutation was restored from saved file bytes,
+without committing or resetting the worktree.
+
+Validation on Go 1.27.3 with ts_omit_webclient,ts_omit_debugeventbus: repository
+vet; full alsa, player/binding and player/hotplug suites; socket-free bridge/API
+element, plan/start/state, protocol-word, import and cited-test guards. Formatting
+and docs-check pass. The sandbox cannot bind sockets; full API/serve suites,
+race runs and Linux-only runtime tests remain for the reviewer.
+
+## 2026-10-25 — B543 iteration 2: stable DAC observations and shared reads
+
+The bridge DAC projection now reads sysfs before `Observer.ObserveWithProc`
+and requires the resolved card to have the same unit (`SameUnit`) and readable,
+nonzero `DevNum` on both sides of the proc read. Vendor:product alone was
+insufficient when identical units exchanged card numbers between reads.
+`Observer.AfterProc`, nil in production, injects that exact swap in the test.
+A completed replug before the observation still resolves the bound unit.
+
+The bridge's public name and ALSA id replace occurrences of the observed serial
+and anchored port with `[redacted]`. `Serial.Redact` does not expose the serial
+as text. MPD's element is unchanged. The projection explicitly builds non-nil
+capability slices; PCM-only and DSD-only encoded fixtures check every empty list.
+
+A mutex selects one in-flight read and a closed channel broadcasts its result.
+Each caller has its own 500 ms wait, while the reader has a separate 500 ms
+context detached from caller cancellation. The slot remains occupied while a
+kernel read is stalled and is released on return or panic, including after
+waiters time out. A late result is null. No completed result is cached.
+The slot tests now require a real fixture DAC after the held reader finishes
+and after a panic. The unavailable/stale test has a second positive assertion
+between the generation-1000 Available report and the stale transition.
+`testing/synctest` orders overlapping callers and advances their deadlines;
+nonblocking result checks after 501 ms prevent the harness advancing further
+from hiding a caller that exceeded its bound.
+
+Red-first evidence on 1790731f, with only the observation hook and pass-through
+helper added so the injection compiles: the mid-read identical swap and changed
+enumeration returned stale facts; serial and port leaked through both public
+fields; a concurrent caller returned before the held read. Slot recovery and
+empty-list tests already passed that base: the slot was released and the ALSA
+helper already initialized its slices. Those are coverage/defensive changes,
+not fabricated base failures.
+
+Named negative controls all compiled and failed their intended assertions:
+SkipIdentityBracket, IgnoreEnumeration and UnknownEnumeration; RawIdentityLabels;
+BaseNeverReleaseSlot (stalled recovery, panic recovery and the second positive
+before stale), NeverReleaseFlight (both recovery tests); NullCapabilityLists and
+NullDSDFormats (encoded arrays); BusyReturnsNull (shared result), SecondReader
+(one reader), WaitPastBound (500 ms), and CallerCancelsSharedRead (independent
+waiters). Mutations were restored from saved file bytes, without committing or
+resetting the worktree. Scratch controls2.py and control2-*.log retain the runs.
+
+Validation used Go 1.27.3, ts_omit_webclient,ts_omit_debugeventbus, and a GOCACHE
+under the task scratch. Repository-wide vet passed. Race tests passed for the
+full alsa, player/binding, player/hotplug and usbid packages, every BridgeDAC
+test, the socket-free player plan/start/state/reason/protocol and cited-test
+checks, and the API composer/import/unchanged-MPD-bytes checks. The broader
+bridge selection's release-acknowledgement serve test could not bind its socket
+(operation not permitted); rerunning the socket-free selection passed. Full
+listener-dependent suites and Linux-only runtime tests remain unrun in this
+macOS sandbox. Formatting, docs-check and diff whitespace checks passed.
+PROTOCOL.md and the output/player rules and History record describe the new
+contract; protocol version stays 1, and the iOS mirror remains a separate copy.

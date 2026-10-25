@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"slices"
+	"sync"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/api"
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -97,7 +99,8 @@ func bridgeOutputLastErrors() []string { return []string{lastErrorDeviceBusy} }
 // Every request builds the facts afresh, from one snapshot of the engine
 // and at most one read of the identity file, which it never makes or
 // writes; it reads ready before eng, never playerOutput (the supervisor's
-// alone), and the surface's pointer under the player's mu.
+// alone), and the surface's pointer under the player's mu. Its DAC read is
+// bounded separately, with at most one in flight even after a timeout.
 type bridgeOutput struct {
 	plan    servePlayerPlan
 	p       *bridgePlayer
@@ -106,14 +109,24 @@ type bridgeOutput struct {
 	fixedVolume bool
 	dsdMode     string
 	allowDoP    bool
+	// DAC reads cannot interrupt a kernel read; retain the flight until
+	// it returns. Concurrent callers share it under their own wait bounds.
+	dacMu     sync.Mutex
+	dacFlight *playerDACFlight
+	dacRead   func(context.Context) *api.OutputDAC
+	dacLimit  time.Duration
 }
 
 // newBridgeOutput is the route's view of p, which plan decided and cfg, the
 // boot snapshot, configures.
 func newBridgeOutput(plan servePlayerPlan, p *bridgePlayer, cfg *config.Config) *bridgeOutput {
 	player := cfg.Output.Player
-	return &bridgeOutput{plan: plan, p: p, dataDir: cfg.DataDir,
+	b := &bridgeOutput{plan: plan, p: p, dataDir: cfg.DataDir, dacLimit: 500 * time.Millisecond,
 		fixedVolume: player.EffectiveMixer() == "none", dsdMode: player.EffectiveDSDMode(), allowDoP: player.AllowsDoP()}
+	if p != nil {
+		b.dacRead = func(ctx context.Context) *api.OutputDAC { return readPlayerDAC(ctx, p.trees, p.device) }
+	}
+	return b
 }
 
 // Enabled is the player's gate: enabled on the boot snapshot, with serve's
@@ -122,7 +135,7 @@ func (b *bridgeOutput) Enabled() bool { return b != nil && b.plan.lists }
 
 // Facts is the player now: no element while the gate is off or the player
 // has no identity.
-func (b *bridgeOutput) Facts(context.Context) api.BridgeOutputFacts {
+func (b *bridgeOutput) Facts(ctx context.Context) api.BridgeOutputFacts {
 	if !b.Enabled() || b.p == nil {
 		return api.BridgeOutputFacts{}
 	}
@@ -133,6 +146,7 @@ func (b *bridgeOutput) Facts(context.Context) api.BridgeOutputFacts {
 	}
 	state, reason, lastErr := b.state(ready)
 	return api.BridgeOutputFacts{Listed: true, UUID: id, State: state, Reason: reason, LastError: lastErr,
+		DAC:      b.dac(ctx, state),
 		OpenHome: b.openHome(id), Codecs: playedCodecs(), FixedVolume: b.fixedVolume, DSDMode: b.dsdMode, AllowDoP: b.allowDoP}
 }
 

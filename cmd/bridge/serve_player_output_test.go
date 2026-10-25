@@ -292,6 +292,9 @@ func wantFacts(t *testing.T, what string, f api.BridgeOutputFacts, id, state, re
 		}
 		return
 	}
+	if state == bridgeStateUnavailable && f.DAC != nil {
+		t.Fatalf("%s: unavailable player has DAC %+v", what, f.DAC)
+	}
 	if !f.Listed || f.UUID != id || f.State != state || f.Reason != reason {
 		t.Fatalf("%s: listed %v as %q, %s/%q; want %q, %s/%q", what, f.Listed, f.UUID, f.State, f.Reason, id, state, reason)
 	}

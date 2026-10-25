@@ -62,6 +62,15 @@ func (s Serial) Equal(t Serial) bool {
 	return s.v != nil && t.v != nil && *s.v == *t.v
 }
 
+// Redact replaces every occurrence of s in text with [redacted], without
+// exposing the serial to the caller. An absent serial leaves text unchanged.
+func (s Serial) Redact(text string) string {
+	if s.v == nil {
+		return text
+	}
+	return strings.ReplaceAll(text, *s.v, redacted)
+}
+
 // labelMin is the shortest serial whose label shows its tail: a shorter
 // one is not shown at all.
 const labelMin = 12

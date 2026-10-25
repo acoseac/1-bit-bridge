@@ -368,9 +368,9 @@ whatever its build constraint. (The package depends on the engine through
 imports.)
 
 The element: `id` `bridge:` and the UUID; `kind` `bridge`; `player` `bridge`
-and `version.ServerVersion`; no `mpd`; `dac` `null` (not reported yet: the
-bound card's `/proc/asound` stream, matched by ALSA id and `usbId` and never
-by index, is a later change, and `alsa.USBIdentity` is never serialised);
+and `version.ServerVersion`; no `mpd`; `dac` the boot binding's projected
+card or `null` (B543: see "The bridge player's DAC projection" below;
+`alsa.USBIdentity` is never serialised);
 `pathRules` `[]`, an exception to "one element per library root". The
 `bridge` object is `json:"bridge,omitempty"` beside `mpd`'s, so a kind `mpd`
 element's bytes are main's (`TestAnMPDElementsBytesAreMains`, against bytes
@@ -506,7 +506,7 @@ pin it.
 **Install the view before the API listeners start, whether or not the plan
 starts the player; read `ready` before `eng` and `id`, the surface's pointer
 under `p.mu`, and the identity file afresh until the engine runs. Never read
-`playerOutput`, make or cache the identity, or let the view start, probe,
+`playerOutput`, make or cache the identity, or let the view start, probe MPD,
 dial or write anything.**
 
 `newBridgeOutput(plan, player, cfg)` is installed with
@@ -529,6 +529,9 @@ directory around the route, and `TestServeListsItsPlayerOnAGateOfItsOwn` and
 `TestServeNamesItsOpenHomeSourceWhileItListens` run serve itself (control
 B17 removes the wiring).
 
+B543 adds a bounded hardware read for the boot binding's DAC, with at most
+one in flight per view; it reads neither MPD nor the supervisor's state.
+
 ### What stays MPD's
 
 `bridge doctor`'s checklist (the one-shot builder, on the MPD gate, never
@@ -540,3 +543,45 @@ as a later change will), the loopback track route (`OnActive`, `activeNow`)
 and the reading (a `bridge:` id is `404 output_not_found`, with no probe or
 dial: `TestABridgeIDNamesNoReading`). The admin page's JavaScript reads the
 checklist's lines, never an `OutputInfo`.
+
+## The bridge player's DAC projection (B543, iteration 2)
+
+The bridge player's `dac` is resolved from its boot USB binding, never an old
+card index or ALSA id. Require an available player and a non-stale watcher
+snapshot of that binding. The snapshot has no stream altsets, so
+`readPlayerDACObserved` brackets `Observer.ObserveWithProc` with an earlier
+sysfs identity read. The resolved card must have been that same unit
+(`binding.SameUnit`) at that same card index and readable, nonzero `DevNum`
+before `/proc` was read. An identical-model swap or re-enumeration during the
+read yields null. A swap completed before the bracket still resolves normally.
+`Observer.AfterProc` is an instance test seam, nil in production, that injects
+exactly the swap after `/proc` and before the final identity observation.
+
+Only the bound PCM device's whole playback altsets are projected. Empty
+`pcmBitDepths`, `nativeDSDRates` and `dsdFormats` are normalized to `[]` in the
+projection even though the ALSA helper currently already returns non-nil
+slices. No identity or longname crosses the seam. The bridge's `name` and `id`
+replace known serial and anchored port substrings with `[redacted]`:
+`Serial.Redact` does the serial replacement without exposing its raw value.
+MPD's projection remains unchanged; `isMPDsOutput` stays null for bridge.
+
+Concurrent callers share one flight, guarded by a mutex held only to select
+or complete it. Each caller waits within its own 500 ms bound; the shared
+reader has a separate 500 ms context detached from caller cancellation.
+A timeout ends a wait, never the slot: a stalled kernel read still owns it.
+Completion, including panic, clears the slot and closes a broadcast channel
+with the result; a read past its deadline publishes null. Results are not
+cached after completion. Never start a second reader while one is stalled,
+let a caller cancel the shared read, or keep the slot after its reader returns.
+
+`TestBridgeDACIdentityStableAcrossProc` pins a mid-read identical-unit swap and
+a changed enumeration. `TestBridgeDACRedactsIdentityInsideNameAndID` puts both
+private strings inside each public label. `TestBridgeDACCapabilityListsAreArrays`
+checks PCM-only and DSD-only encoded bodies. The stalled/panic recovery tests
+require a subsequent fixture DAC, and `TestBridgeDACUnavailableAndStale` proves
+availability again immediately before making the snapshot stale.
+`TestBridgeDACConcurrentCallersShareRead` and
+`TestBridgeDACCallerCancellationKeepsSharedRead` pin overlapping waits and
+independent caller deadlines; the stalled test counts one reader after fifty
+callers exhaust their bounds. Tests use `testing/synctest` for deterministic
+holds and virtual deadlines, without wall-clock sleeps or sockets.

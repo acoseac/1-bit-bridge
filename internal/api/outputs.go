@@ -81,7 +81,8 @@ type OutputMPD struct {
 // false. It is true when this card is the one device MPD's alsa output
 // names, and null when that device did not resolve to one card. The
 // bridge does not list the other cards once one resolved, so it has no
-// card to mark false.
+// card to mark false. For kind bridge it is always null: this is the
+// player's bound card, not an MPD candidate.
 type OutputDAC struct {
 	Card         int                `json:"card"`
 	ID           string             `json:"id"`
@@ -91,7 +92,7 @@ type OutputDAC struct {
 	Capabilities OutputCapabilities `json:"capabilities"`
 }
 
-// OutputCapabilities is every playback altset of the card's stream.
+// OutputCapabilities is every playback altset of the selected PCM device.
 // Lists are never null.
 type OutputCapabilities struct {
 	MaxPCMRate     int      `json:"maxPCMRate"`
