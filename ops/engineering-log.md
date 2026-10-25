@@ -161,15 +161,16 @@ reaches a session that has not gone looking for it.
 ## 2026-10-25 — B524 round 14: tests that write the player's identity run on a TMPDIR on tmpfs, and a refused start leaves no identity
 
 PR #1346's `test -race (rest)` on Ubuntu 26.04, where `/tmp` is tmpfs, failed
-`TestARestoredIdentityHandsOutValuesPastItsSnapshot` at its seed write (line 50).
-Round 5 made `config.WritePlayerUUIDFile` end with `atomicwrite.ProbeDurable`,
-which refuses volatile storage (`ErrVolatile`), before the test's skip. The
-workflow's own fix, a TMPDIR on the runner's disk, is PR #1349.
+`TestARestoredIdentityHandsOutValuesPastItsSnapshot` at its seed write (line
+50). Round 5 made `config.WritePlayerUUIDFile` end with
+`atomicwrite.ProbeDurable`, which refuses volatile storage (`ErrVolatile`),
+before the test's skip. The workflow's own fix, a TMPDIR on the runner's disk,
+is PR #1349.
 
 **A tmpfs TMPDIR on any host.** A test-only `init` in each package (never
 committed) makes the medium check answer volatile for the whole binary, as
-statfs answers for tmpfs; a test's own stand-in overrides it while it runs.
-At 51d2900b, `cmd/bridge` failed 35 tests that way and openhome one. Main at
+statfs answers for tmpfs; a test's own stand-in overrides it while it runs. At
+51d2900b, `cmd/bridge` failed 35 tests that way and openhome one. Main at
 9e7b2675 failed 27 and none; its openhome test skipped. Nine discovery and
 OpenHome serve tests were left out of both runs, since they wait for a player
 that cannot start until the binary's deadline; with a three-minute deadline
@@ -178,30 +179,30 @@ they fail alike on both.
 **Twelve tests now answer the medium check as a disk does.** Ten failed on
 B524 alone: openhome's restored-identity test, four bind tests, four serve
 tests and a restore. Two more failed on both, but on B524 at their own
-identity write. Each writes the player's identity, floor or marker in its temporary
-directory, itself or through the bind, serve start or restore it drives. Red
-first, at 51d2900b under the simulation, the twelve failed; with the stand-in
-they pass. The other 24 fail on main too: they need the engine running,
-which refuses volatile storage there as well, and are PR #1349's.
+identity write. Each writes the player's identity, floor or marker in its
+temporary directory, itself or through the bind, serve start or restore it
+drives. Red first, at 51d2900b under the simulation, the twelve failed; with
+the stand-in they pass. The other 24 fail on main too: they need the engine
+running, which refuses volatile storage there as well, and are PR #1349's.
 
-**The restored-identity test had been skipping everywhere.** Since round 5
-the engine refuses an identity whose floor is missing, and the test seeded a
-bare `player-uuid`, so it skipped at its guard on every host, a disk's
-TMPDIR included. It now mints its source through `backup.EnsurePlayerUUID`,
-as serve's start does. It skips only for storage the engine cannot keep IDs
-on, and fails on any other refusal.
+**The restored-identity test had been skipping everywhere.** It reached B524
+with main's merge at 032934fe, seeding a bare `player-uuid`, and since round 5
+the engine refuses an identity whose floor is missing, so it skipped at its
+guard on every host, a disk's TMPDIR included. It now mints its source through
+`backup.EnsurePlayerUUID`, as serve's start does. It skips only for storage
+the engine cannot keep IDs on, and fails on any other refusal.
 
 **A refused start leaves no identity behind.** Serve's start and bind mint
 through `backup.EnsurePlayerUUID`. It writes the floor and the marker through
-the strict writer, which refuses volatile storage before it creates
-anything, and the UUID last. So the identity file is never renamed into
-place on such storage, and the next start finds nothing to take up. An
-identity that is already there is probed at its marker before anything
-starts on it, and again by the engine. Only `config.EnsurePlayerUUID` leaves
-its file when its probe refuses, and nothing in production calls it. Two
-pins cover this, at the minter and across two serve boots, each with a
-control: writing the UUID before the floor leaves the identity behind, and an
-unprobed marker lets the start reach the engine.
+the strict writer, which refuses volatile storage before it creates anything,
+and the UUID last. So the identity file is never renamed into place on such
+storage, and the next start finds nothing to take up. An identity that is
+already there is probed at its marker before anything starts on it, and again
+by the engine. Only `config.EnsurePlayerUUID` leaves its file when its probe
+refuses, and nothing in production calls it. Two pins cover this, at the
+minter and across two serve boots, each with a control: writing the UUID
+before the floor leaves the identity behind, and an unprobed marker lets the
+start reach the engine.
 
 Round-fourteen evidence records 18 code negative controls failing by
 assertion, each anchor count-checked, mutated in the committed tree and
