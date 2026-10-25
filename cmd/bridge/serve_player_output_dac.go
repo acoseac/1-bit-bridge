@@ -124,8 +124,9 @@ func readPlayerDACObserved(ctx context.Context, observer binding.Observer, devic
 			continue
 		}
 		// A parsed prefix of a failed or truncated stream is not capabilities.
+		prefix := fmt.Sprintf("card%d/stream%d:", found.Index, d.Device)
 		for _, problem := range found.Problems {
-			if strings.HasPrefix(problem, fmt.Sprintf("card%d/stream%d:", found.Index, d.Device)) {
+			if strings.HasPrefix(problem, prefix) {
 				return nil
 			}
 		}
