@@ -277,3 +277,266 @@ The host-root case is POSIX-only; the other cases run on every OS with symlink
 support. Round-6 controls restore each rejection, lower the limit to 39,
 refuse all links, and clean a relative target early; each fails its intended
 assertion. Exact gates and controls are in `report-r6.md` and `controls-r6/`.
+
+## B470 PR 5b — GET /v1/outputs lists the bridge's own player (2026-10-25)
+
+The record is in `ops/engineering-log.md`, 2026-10-25, B470 PR 5b. Each
+heading below is the long form of rule lines that point here: `output.md`'s
+five bullets on the route and its element, `cli-serve.md`'s line on serve's
+view of its player, and `player.md`'s line on the last play attempt (that
+file's budget holds one line). `output.md` loads with
+`cmd/bridge/serve_player_output*.go` since this change, where the element's
+words and identity are read.
+
+### Two gates, never one: MPD's, and the player's
+
+**Ask the MPD gate first and on every request, wherever it was asked
+before (`/v1/health`, `GET /v1/outputs`), and only then combine it with the
+player's: never `bridgeOn || Active(ctx)`. Never start the loopback route,
+show the checklist, open a reading or let `bridge doctor` print on the
+player's gate.**
+
+Until 5b one boolean, `localOutputs.Active`, did four jobs: the health flag,
+the loopback track route's start (`OnActive`) and its per-request answer
+(`activeNow`), the player checklist, and `bridge doctor`. Widening it to the
+player would have started the loopback route and shown an MPD checklist that
+fails on a box with no MPD. So it stays exactly as it was, now named the MPD
+gate (`mpdOn`), and the player has a gate of its own (`bridgeOn`):
+`api.BridgeOutput.Enabled`, which serve's `bridgeOutput` answers from the boot
+plan's `lists` (`planServePlayer`): `config.PlayerEnabled` on the boot snapshot
+(enabled, a block that reads and is valid, Linux, not public, no OpenHome port
+clash) and serve's data-directory lock held. It reads nothing and probes,
+dials and starts nothing, and a live change of `output.player` does not move
+it: the running player reports a live disable as `disabled` through the
+output report it already has.
+
+A short-circuit is the defect this rule exists for: with the player on,
+`bridgeOn || Active(ctx)` never asks MPD's gate, so `OnActive` does not run
+for an MPD that appears after boot and `auto`'s recorded answer, the one the
+loopback route reads, goes stale. The boot call has already run `OnActive`
+once, so a test that reads `activeNow` with `on` alone passes either way:
+`TestTheMPDGateIsAskedOnEveryRequestWhateverThePlayer` counts `OnActive`
+(six for three health answers and three bodies with the player on), and flips
+`auto` from a hit to a miss through each route, asserting the route's answer
+follows. Swapping the operands at health (control A1) and reading the gate's
+last answer instead of asking it at the route (A2) each go red there.
+
+`/v1/health`: `localOutputs` while either gate holds; `bridgeOutput` exactly
+while the player's does (a client tells a bridge older than 5b from one whose
+player has no identity yet by it: wire.md's rule to name a feature flag);
+`outputReading` exactly while MPD's does, since the reading probes and dials
+MPD for any well-formed id. `GET /v1/outputs` is `404
+local_outputs_not_supported` only while both are shut. With MPD's gate shut
+its builder is never entered: no session, dial, `status`, LAN greeting,
+`find`, `mpd.conf` read or `ProveRoots`. With `off` or off Linux nothing is
+probed; with `auto`, the gate's own probe (`answerAuto`) runs as it did, and
+after a miss nothing more. `TestTheOutputsRouteHasTwoGates` is the matrix:
+MPD off, on, auto with a hit, auto with a miss and off Linux, each with the
+player on and off, the three keys, the status, and the probe, dial, greeting,
+track-list, card and `OnActive` counts. `TestThePlanSaysWhetherGETOutputsListsThePlayer`
+maps the player's conditions (enabled, disabled, public, off Linux, no DAC,
+the lock, a pause release out of range, an OpenHome port clash) onto
+`Enabled`. `TestServeListsItsPlayerOnAGateOfItsOwn` boots serve with the player
+and `output.mpd: off`: the keys, the element, no loopback route, no checklist.
+
+### The element of kind bridge, and the identity it never makes
+
+**List the element only while the player's gate holds and the player has an
+identity; never make, write or cache the identity: read the started player's
+own once it runs, and the file, afresh, before that or with no engine. Never
+list it without serve's lock: the file is then another serve's player's.**
+
+The identity is `<dataDir>/player-uuid`, made by the player's first start or
+by `bridge output dac bind`, both under every gate and the lock (player.md).
+The route's view (`bridgeOutput.identity`) reads `bridgePlayer.id`, set before
+`ready` closes, once the player runs, and `config.ReadPlayerUUID` otherwise,
+on every request: a miss is never kept (a start that makes the file is seen at
+once), nor a value (a start that makes it and has its engine refuse the
+storage removes it with `ForgetPlayerUUID`, and the next answer lists
+nothing). `TestThePlayersElementAcrossItsStart` walks missing, made, ready
+and closed, and made, refused and removed, asking from the start's own seam;
+`TestTheOutputsRouteMakesNoPlayerFile` compares the data directory entry by
+entry around GET /v1/outputs, with no identity and with one. With no element
+the answer is `200` with `outputs: []` while the MPD gate is shut.
+
+`internal/api` imports no `internal/player` package: the handler builds the
+element from `BridgeOutputFacts`, plain facts `cmd/bridge` fills, so no
+player type reaches the wire by an encoding of its own.
+`TestTheAPIImportsNoPlayerPackage` reads every source file of the package,
+whatever its build constraint. (The package depends on the engine through
+`internal/backup`, as it did before this change: the rule is about what it
+imports.)
+
+The element: `id` `bridge:` and the UUID; `kind` `bridge`; `player` `bridge`
+and `version.ServerVersion`; no `mpd`; `dac` `null` (not reported yet: the
+bound card's `/proc/asound` stream, matched by ALSA id and `usbId` and never
+by index, is a later change, and `alsa.USBIdentity` is never serialised);
+`pathRules` `[]`, an exception to "one element per library root". The
+`bridge` object is `json:"bridge,omitempty"` beside `mpd`'s, so a kind `mpd`
+element's bytes are main's (`TestAnMPDElementsBytesAreMains`, against bytes
+captured from 9e7b2675). Its keys are every one present: `openHome`, `state`,
+`reason` (null outside `unavailable`, which the handler enforces), `lastError`,
+`libraryScope` `self`, `fixedVolume` (the boot snapshot's `EffectiveMixer` is
+`none`), `codecs` (never null), `dsdMode` and `allowDoP` (the boot snapshot's
+`EffectiveDSDMode` and `AllowsDoP`). `TestTheBridgesOwnElement` pins every key
+and value.
+
+### One composer, a fresh slice, the MPD half as it was
+
+**Compose the body in `composeOutputs` alone: MPD's elements as its builder
+answers them, then the player's element built afresh, in a slice of its own.
+Never append into the cached body, and never put the player's element behind
+MPD's cache, flight or deadline.**
+
+The route and `Server.LocalOutputsResponse` (the console's checklist, both its
+panel and its doctor) call one composer, so the console and the app read one
+body (`TestTheServersOutputsBodyIsTheRoutesWithThePlayersElement`); the
+one-shot builder (`api.NewLocalOutputs`, `bridge doctor`) has no player and
+stays MPD's. MPD's half keeps its flight, its 500 ms body cache, its probe
+cache and its path-rule cache unchanged. The composer copies MPD's elements
+into `make([]OutputInfo, 0, len(mpd)+1)` and appends the player's: the cached
+`Response` shares its slice with every answer the cache serves, so an append
+into it, with room to spare, would write one request's element into another's
+answer and into the cache. `TestTwoRequestsInTheCacheWindowLeaveTheCachedBodyAlone`
+runs two requests at once inside the window under `-race`, over the builder's
+own body and over a cached body given room to grow; the in-place append
+(control A7) is a data race and an element left in the cached array. An MPD
+failure with both gates on keeps today's `500`, the player's element with it
+(`TestAnMPDFailureWithBothGatesOnIsStill500`).
+
+### State, reason and lastError: a closed list
+
+**Build them from one engine snapshot per request, in this order: the plan's
+refusal, the start's outcome (`ready` read before `eng`), the engine closed
+(`Snapshot`, then `Done`, then `Closed`), the output (not known, or its
+report's word), maintenance, an unconfirmed release, then the transport.
+Never parse free text, never read `playerOutput`, and never send a word
+PROTOCOL.md's bridge section does not name.**
+
+The plan's refusals are words set where `planServePlayer` refuses
+(`not_configured`, `config_invalid`); the start's are `starting` (`ready`
+open) and `start_failed` (`ready` closed with no engine: a recorded failure,
+a supervisor panic recovered, which closes `ready` and records nothing, or
+serve's stop during the start); `closed` an engine whose shutdown began or
+whose Run ended. The output's reason is passed on when it is one of
+`outputReasons` (every `binding.State` but `available`, and serve's
+`binding_changed`), else `output_unavailable`. Maintenance is `unavailable`
+here, where 5a3's OpenHome mapping reads it as Stopped; a starting session is
+`playing`, where 5a3 has Buffering; a release reads by its pending intent,
+none `stopped`. `TestThePlayersStateFromOneSnapshot` is the table over the
+snapshot's half; `TestThePlayersElementThroughItsPlan` and
+`TestThePlayersElementAcrossItsStart` the plan's and the start's, the panic
+and the cancellation included; `TestServeListsItsPlayerOnAGateOfItsOwn` and
+`TestTheElementSaysAReleaseIsUnconfirmedUntilItsLateAcknowledgement` the real
+engine's (stopped, a busy start's `lastError`, playing, paused, maintenance,
+a live disable, closed; the release's deadline and its late acknowledgement).
+`TestEveryOutputReasonIsPassedOn` enumerates `binding.States`, which
+`TestStatesIsEveryStateDeclared` holds to the source, and
+`TestEveryBridgeWordIsInTheProtocol` requires every word, backticked, inside
+PROTOCOL.md's bridge section (control B15 deletes the `closed` row, a word
+found elsewhere in the file, and goes red).
+
+### The last play attempt, and a busy device by its sentinel
+
+**Never derive `lastError` from `LastStop`: a start that succeeds stops
+nothing and leaves it. The engine records each Start and Resume whose answer
+it takes as the last attempt (`Snapshot.LastAttempt`), busy only when the
+error wraps `engine.ErrDeviceBusy`, which the backend maps from alsapcm's
+busy reason, at a start and at a resume's reopen; never from playback's
+`busy` code or any error's text, and the engine never imports alsapcm.**
+
+An `Attempt` carries a sequence number, failed and busy; a later attempt
+replaces it whichever way it went, so a busy start, a retry that succeeds and
+a pause read `null` from the retry on, and a busy resume after the pause let
+the DAC go is ended by the next resume that succeeds, or by a later failure
+for another reason. A Start past its deadline is a failed attempt, not a busy
+one. The backend's `busy` wraps the alsapcm error beside the sentinel
+(`busyError`, its text the error's), at `session.start`'s `%w` and in
+`resumeError`'s `Err`. The engine's attempt tests (`attempt_test.go`) run on
+the fake backend; `playback_busy_test.go` runs the real backend over the fake
+kernel's EBUSY, through the real wrap chain, for a start and for a resume
+after the release, and a decoy whose detail says busy; a `%w` turned `%v` at
+the start (E3) or the resume (E4) goes red. The engine imports neither ALSA
+package (`TestTheEngineImportsNoALSAPackage`, every source file whatever its
+build constraint), so its darwin and windows builds are as they were.
+
+### The codecs, one source
+
+**List the containers `playback.PlayedContainers` names, which the open's
+`dsd_not_in_this_release` refusal reads (`Plays`); never type them twice, and
+leave openhome's playable-extension list alone (an extension is not a
+container: `.m4a` is ALAC or AAC).**
+
+`format.Containers` is every container the decoders reconstruct from and
+`Container.IsDSD` the DSD ones, each pinned to the source and cross-checked on
+every golden against the decoder the content opens
+(`TestContainersIsEveryContainerDeclared`,
+`TestADecoderGivesDSDExactlyForADSDContainer`). `Plays` is a container's
+question alone; content of a container it takes can still be refused (float
+PCM, a rate, a depth, a transport the DAC does not take), and a client's
+check covers scope and container only until `dac` ships.
+`TestTheContainersThePlayerPlaysAreTheOnesItsOpenTakes` opens real content of
+every container through the backend's own open; `TestTheCodecsAreTheManifestsCodecsThePlayerPlays`
+holds the client's mapping (the manifest's `codec`: `FLAC`, `WAV`, `AIFF`,
+`ALAC`) to the scanner's codec and the decoder's container on real files, an
+AAC `.m4a` among them, and to PROTOCOL.md's table.
+
+### The Source's endpoints, from its LOCATION's own function
+
+**Build `openHome.endpoints` from `openhome.Authority`, the function every
+LOCATION is built from (`sourceLocation`), over the running surface read
+under the player's `mu`; never from the live config. List no Source while
+the boot snapshot's opt-in is off, the surface lists no address, or its stop
+has begun.**
+
+A client correlates a discovered Source with the element only when its UDN
+matches and its LOCATION's host and port are one of `endpoints`: SSDP carries
+the UDN in clear. `Authority` writes a URL's authority (an IPv6 zone as
+`%25`, an IPv4-mapped address unmapped), which today's inline LOCATION
+(`"http://" + l.Bound.String()`) did not do for a zoned address: it did not
+parse. The surface binds IPv4 alone, so nothing advertised changes.
+`TestAuthorityIsHowALocationNamesItsSocket`,
+`TestEveryLocationTheSourceAdvertisesIsOneOfItsEndpoints` (every LOCATION in
+alive notifications and search replies, against `Status.Endpoints`, and none
+once `Refuse` has run) and `TestServeNamesItsOpenHomeSourceWhileItListens`
+pin it.
+
+### Serve's view of its player
+
+**Install the view before the API listeners start, whether or not the plan
+starts the player; read `ready` before `eng` and `id`, the surface's pointer
+under `p.mu`, and the identity file afresh until the engine runs. Never read
+`playerOutput`, make or cache the identity, or let the view start, probe,
+dial or write anything.**
+
+`newBridgeOutput(plan, player, cfg)` is installed with
+`api.Server.WithBridgeOutput` right after `startServePlayer` returns, long
+before the listeners. It holds the boot plan, the `bridgePlayer` and the boot
+snapshot's fixed fields (`EffectiveMixer` `none`, `EffectiveDSDMode`,
+`AllowsDoP`); `Enabled` is `plan.lists`. `bridgePlayer.id` is set with `eng`
+and `be` before `ready` closes, so once `ready` reads closed both are the
+start's own; before that the view reads neither, and with no engine after it
+reads the file. `playerOutput` (`p.out`) is the supervisor's alone, as its
+doc says, with no lock for another reader: the view reads the output from
+the engine's snapshot instead. The surface pointer is written once, by
+`startOpenHome` under `p.mu`, and never cleared, so after the stop the view
+reads `Status().Stopped` and lists no Source; `Status` is the surface's own
+locked read. `TestThePlayersElementAcrossItsStart` asks from the
+start's own seam at each step (missing, made, ready, closed; made, refused,
+removed; a recorded failure; a supervisor panic; serve's stop during the
+start; no lock), `TestTheOutputsRouteMakesNoPlayerFile` compares the data
+directory around the route, and `TestServeListsItsPlayerOnAGateOfItsOwn` and
+`TestServeNamesItsOpenHomeSourceWhileItListens` run serve itself (control
+B17 removes the wiring).
+
+### What stays MPD's
+
+`bridge doctor`'s checklist (the one-shot builder, on the MPD gate, never
+reading the player's identity: `TestBridgeDoctorStaysMPDs`), the console's
+checklist (`outputChecklistSource.Active` is the MPD gate, and
+`checklistInput` reads kind `mpd` elements alone:
+`TestTheChecklistReadsNoBridgeElement`, with a bridge element carrying a DAC
+as a later change will), the loopback track route (`OnActive`, `activeNow`)
+and the reading (a `bridge:` id is `404 output_not_found`, with no probe or
+dial: `TestABridgeIDNamesNoReading`). The admin page's JavaScript reads the
+checklist's lines, never an `OutputInfo`.

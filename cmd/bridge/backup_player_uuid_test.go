@@ -5,15 +5,19 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 )
 
 // runBackup runs bridge backup on cfgPath and returns the snapshot it wrote.
@@ -40,7 +44,7 @@ func TestBackupAndRestoreGiveThePlayerTheIdentityItHad(t *testing.T) {
 	t.Cleanup(atomicwrite.SetSyncDirForTest(func(string) error { return nil }))
 	t.Cleanup(atomicwrite.SetMediumForTest(func(string) error { return nil }))
 	cfgPath, dataDir, _ := seedRestorableInstall(t, closedAdminAddr(t))
-	id, created, err := config.EnsurePlayerUUID(dataDir)
+	id, created, err := backup.EnsurePlayerUUID(dataDir)
 	if err != nil || !created {
 		t.Fatalf("EnsurePlayerUUID = %q, %v, %v", id, created, err)
 	}
@@ -61,7 +65,7 @@ func TestBackupAndRestoreGiveThePlayerTheIdentityItHad(t *testing.T) {
 	if err := os.Remove(live); err != nil {
 		t.Fatal(err)
 	}
-	other, _, err := config.EnsurePlayerUUID(dataDir)
+	other, _, err := backup.EnsurePlayerUUID(dataDir)
 	if err != nil || other == id {
 		t.Fatalf("the box's next identity = %q, %v", other, err)
 	}
@@ -85,6 +89,37 @@ func TestBackupAndRestoreGiveThePlayerTheIdentityItHad(t *testing.T) {
 	}
 }
 
+// mintPlayerIdentity gives dataDir a player identity, as a fixture: the
+// player's own minter where it can make the identity durable, and on
+// Windows, where it refuses because no directory can be synced
+// (atomicwrite.ErrNoDirectoryBarrier), the same three files written plainly:
+// the UUID, a floor that names it and the initialization marker.
+func mintPlayerIdentity(t *testing.T, dataDir string) string {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		id, _, err := backup.EnsurePlayerUUID(dataDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	id := uuid.NewString()
+	floor, err := json.Marshal(engine.Reservation{Version: 2, UUID: id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, b := range map[string][]byte{
+		config.PlayerUUIDFile:      []byte(id + "\n"),
+		engine.ReservationFileName: floor,
+		"player-initialized":       []byte("{\"version\":1}\n"),
+	} {
+		if err := os.WriteFile(filepath.Join(dataDir, name), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return id
+}
+
 // TestARestoreRefusesAPlayerUUIDThatIsNotOneUUIDAndSaysWhatToDo: a snapshot
 // whose player-uuid does not hold one UUID is refused before the restore
 // writes anything, the database included, which the restore writes first
@@ -93,10 +128,9 @@ func TestBackupAndRestoreGiveThePlayerTheIdentityItHad(t *testing.T) {
 // file from the snapshot is that way: the restore then keeps the box's
 // identity, as for a snapshot taken before the file was part of the bundle.
 func TestARestoreRefusesAPlayerUUIDThatIsNotOneUUIDAndSaysWhatToDo(t *testing.T) {
+	persistentMedium(t)
 	cfgPath, dataDir, _ := seedRestorableInstall(t, closedAdminAddr(t))
-	if _, _, err := config.EnsurePlayerUUID(dataDir); err != nil {
-		t.Fatal(err)
-	}
+	mintPlayerIdentity(t, dataDir)
 	snap := runBackup(t, cfgPath)
 	snapID := filepath.Join(snap, config.PlayerUUIDFile)
 	if err := os.WriteFile(snapID, []byte("not-a-uuid\n"), 0o600); err != nil {
@@ -106,10 +140,7 @@ func TestARestoreRefusesAPlayerUUIDThatIsNotOneUUIDAndSaysWhatToDo(t *testing.T)
 	if err := os.Remove(live); err != nil {
 		t.Fatal(err)
 	}
-	boxID, _, err := config.EnsurePlayerUUID(dataDir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	boxID := mintPlayerIdentity(t, dataDir)
 	// The install moves on after the snapshot, so a restore that wrote the
 	// config or the database shows.
 	edit := []byte("# written after the snapshot\n")

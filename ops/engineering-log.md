@@ -26,6 +26,12 @@ reaches a session that has not gone looking for it.
 
 ## Index
 - [2026-10-24 — B470 PR 5a4: the player's OpenHome writes, Insert's Uri confined to the bridge's own tracks, and the owner's dogfood](#2026-10-24--b470-pr-5a4-the-players-openhome-writes-inserts-uri-confined-to-the-bridges-own-tracks-and-the-owners-dogfood)
+- [2026-10-25 — B470 PR 5b: GET /v1/outputs lists the bridge's own player, kind bridge, on a gate of its own](#2026-10-25--b470-pr-5b-get-v1outputs-lists-the-bridges-own-player-kind-bridge-on-a-gate-of-its-own)
+- [2026-10-25 — B524 round 14: tests that write the player's identity run on a TMPDIR on tmpfs, and a refused start leaves no identity](#2026-10-25--b524-round-14-tests-that-write-the-players-identity-run-on-a-tmpdir-on-tmpfs-and-a-refused-start-leaves-no-identity)
+- [2026-10-24 — B524 round 13: B524 passes on Windows, a permission failure naming an entry takes one union, and only a held lock makes adoption busy](#2026-10-24--b524-round-13-b524-passes-on-windows-a-permission-failure-naming-an-entry-takes-one-union-and-only-a-held-lock-makes-adoption-busy)
+- [2026-10-24 — B524 round 12: a seal completion's permission advice takes one remedy for a directory failure and names the file for a file's own](#2026-10-24--b524-round-12-a-seal-completions-permission-advice-takes-one-remedy-for-a-directory-failure-and-names-the-file-for-a-files-own)
+- [2026-10-24 — B524 round 11: an unlisted floor the snapshot holds refuses restore, a non-file seal is kept and recorded twice, and seal-completion advice names its cause](#2026-10-24--b524-round-11-an-unlisted-floor-the-snapshot-holds-refuses-restore-a-non-file-seal-is-kept-and-recorded-twice-and-seal-completion-advice-names-its-cause)
+- [2026-10-24 — B524: a reset keeps the player floor](#2026-10-24--b524-a-reset-keeps-the-player-floor)
 - [2026-10-24 — B506: one lock for every bridge.yaml writer, and each reads the file again in its turn](#2026-10-24--b506-one-lock-for-every-bridgeyaml-writer-and-each-reads-the-file-again-in-its-turn)
 - [2026-10-25 — CI on Ubuntu 26.04: the race tests' TMPDIR on the runner's disk, and the fake sox's claim made atomic](#2026-10-25--ci-on-ubuntu-2604-the-race-tests-tmpdir-on-the-runners-disk-and-the-fake-soxs-claim-made-atomic)
 - [2026-10-24 — B526 items 2 and 3, B532 and B536: four tests CI reddened at random, each red first in its losing order](#2026-10-24--b526-items-2-and-3-b532-and-b536-four-tests-ci-reddened-at-random-each-red-first-in-its-losing-order)
@@ -156,6 +162,596 @@ reaches a session that has not gone looking for it.
 
 ---
 
+## 2026-10-25 — B524 round 14: tests that write the player's identity run on a TMPDIR on tmpfs, and a refused start leaves no identity
+
+PR #1346's `test -race (rest)` on Ubuntu 26.04, where `/tmp` is tmpfs, failed
+`TestARestoredIdentityHandsOutValuesPastItsSnapshot` at its seed write (line
+50). Round 5 made `config.WritePlayerUUIDFile` end with
+`atomicwrite.ProbeDurable`, which refuses volatile storage (`ErrVolatile`),
+before the test's skip. The workflow's own fix, a TMPDIR on the runner's disk,
+is PR #1349.
+
+**A tmpfs TMPDIR on any host.** A test-only `init` in each package (never
+committed) makes the medium check answer volatile for the whole binary, as
+statfs answers for tmpfs; a test's own stand-in overrides it while it runs. At
+51d2900b, `cmd/bridge` failed 35 tests that way and openhome one. Main at
+9e7b2675 failed 27 and none; its openhome test skipped. Nine discovery and
+OpenHome serve tests were left out of both runs, since they wait for a player
+that cannot start until the binary's deadline; with a three-minute deadline
+they fail alike on both.
+
+**Twelve tests now answer the medium check as a disk does.** Ten failed on
+B524 alone: openhome's restored-identity test, four bind tests, four serve
+tests and a restore. Two more failed on both, but on B524 at their own
+identity write. Each writes the player's identity, floor or marker in its
+temporary directory, itself or through the bind, serve start or restore it
+drives. Red first, at 51d2900b under the simulation, the twelve failed; with
+the stand-in they pass. The other 24 fail on main too: they need the engine
+running, which refuses volatile storage there as well, and are PR #1349's.
+
+**The restored-identity test had been skipping everywhere.** It reached B524
+with main's merge at 032934fe, seeding a bare `player-uuid`, and since round 5
+the engine refuses an identity whose floor is missing, so it skipped at its
+guard on every host, a disk's TMPDIR included. It now mints its source through
+`backup.EnsurePlayerUUID`, as serve's start does, and fails on any refusal.
+The skip it first kept, for storage the engine cannot keep IDs on, was removed
+after round 14's review (Claude Low): the mint has just probed that directory,
+so such a refusal afterwards would be a regression that the skip hid.
+
+**A refused start leaves no identity behind.** Serve's start and bind mint
+through `backup.EnsurePlayerUUID`. It writes the floor and the marker through
+the strict writer, which refuses volatile storage before it creates anything,
+and the UUID last. So the identity file is never renamed into place on such
+storage, and the next start finds nothing to take up. An identity that is
+already there is probed at its marker before anything starts on it, and again
+by the engine. Only `config.EnsurePlayerUUID` leaves its file when its probe
+refuses, and nothing in production calls it. Two pins cover this, at the
+minter and across two serve boots, each with a control: writing the UUID
+before the floor leaves the identity behind, and an unprobed marker lets the
+start reach the engine.
+
+Round-fourteen evidence records 18 code negative controls failing by
+assertion, each anchor count-checked, mutated in the committed tree and
+restored from git: one for each of the twelve tests' stand-ins, run on the
+simulated tmpfs, one that empties `persistentMedium`, one that seeds the
+restored-identity test with a bare `player-uuid`, and two for each pin, the
+UUID written before the floor and an existing marker left unprobed. Eighty
+documentation mutations, round 13's sixty-one and nineteen new, each fail the
+documentation contract. Under the simulation at fc965061, every package in
+scope passes but `cmd/bridge`, whose 24 failures all fail on main as well, and
+the restored-identity test runs and passes. On the owner's Mac (macOS arm64,
+Go 1.27.3, not root) native, Linux and Windows vet pass with the release build
+tags, `make fmt` changes nothing and `make docs-check` passes.
+`go test -race -count=1` passes `internal/config`, `internal/player/...`,
+`internal/backup` and `cmd/bridge` at fc965061: 1,712 top-level cases pass and
+six skip (two default-port cases, three root-only CLI cases and the ALAC
+reference corpus, whose file this Mac does not hold), cmd/bridge in 656 s. The
+fourteen tests this round changed or added pass ten race-enabled runs each.
+
+---
+
+## 2026-10-24 — B524 round 13: B524 passes on Windows, a permission failure naming an entry takes one union, and only a held lock makes adoption busy
+
+PR #1346's first CI run, at 032934fe, was B524's first on Windows: eleven
+cases failed in `test (windows-latest)`. Round 12's reviews found more advice
+that a named entry could defeat, and CodeRabbit flagged that adoption read
+every lock error as busy.
+
+**The Windows failures, all in test fixtures.** nomos, a Windows 11 host on
+Go 1.27.3, failed the same eleven at 9a21f8d2.
+- Four tests, seven of the eleven with their subtests, built a fixture with
+  the durable writer, which Windows refuses for want of a directory barrier
+  (`atomicwrite.ErrNoDirectoryBarrier`, from `engine.WriteReservation` in the
+  minter and the probe that ends `config.WritePlayerUUIDFile`). The cmd/bridge
+  restore case and the Windows sharing case seed their identities with plain
+  writes there; the historical restores keep the writer of 71af3f26, which
+  returned once its rename landed. Every assertion stands, and Windows
+  proceeds where they make it.
+- A table case's "neither absent nor present" Lstat error was ENOTDIR, which
+  on Windows is ERROR_PATH_NOT_FOUND and reads as no entry; Windows uses
+  ERROR_SHARING_VIOLATION.
+- Two cases changed the live identity from the snapshot copy's rename, while
+  the copy held the live player-uuid open without delete sharing: Windows
+  refused the removal, and the rename's retry then ran on a temporary file
+  already renamed, hence "cannot find the file specified". The change now runs
+  from a seam once the copy has closed its source, exactly once. Production
+  retries after a consumed temporary file only where a rename lands and still
+  reports failure; that is not changed here.
+
+**One union for a named entry.** Round 12's classification still missed an
+immutable or append-only flag on the marker a rename replaces, a link chain to
+a lock file that refuses reading, a dangling link into a directory that
+refuses writing, and a Windows ACL that denies reading the lock file. A
+permission failure of a step that names an entry, a marker's read or write or
+the lock file's open or lock, now prints the directory's remedy and the
+entry's together, whatever the entry is: on unix the step's access to the
+entry, any immutable or append-only flag or ACL on it and on what it links to,
+a link replaced by a regular file and a sticky directory's owner; on Windows
+full control of the directory and the entry, its read-only attribute, a link
+replaced and any program holding it closed. Red first, on round 12's code:
+`uchg` and `uappnd` on a sealed marker not yet minted named only the data
+directory; a link chain to a 0200 lock file said "restore write access" to the
+link; a dangling link into a 0500 subdirectory named only the data directory.
+A `server.lock` that is a link leading out of the data directory is no
+permission failure: the root refuses it unfollowed
+(`path escapes from parent`) and it keeps that error alone, as in round 12,
+now pinned; round 12's review had taken it for followed.
+
+**Busy only for a held lock.** Adoption opens and locks `server.lock` through
+the completion's open and lock seam, in a commit that changes nothing it does,
+and only `fsutil.ErrLocked` is busy; any other lock error keeps its own text,
+with the lock file's union for a permission error. Red first, on that commit:
+an injected ENOLCK, EIO and EACCES each said "player initialization is busy";
+a held lock still says it.
+
+**nomos.** The SSH session holds an administrator's token with
+SeBackupPrivilege and SeRestorePrivilege enabled, and Go opens files with
+backup semantics, which read through a deny entry; the deny-read case drops
+both privileges while it runs.
+
+Round-thirteen evidence records 157 code negative controls failing by
+assertion, each anchor count-checked, mutated in the committed tree and
+restored from git: round 12's 145 less the six that mutated the lock file's
+per-entry classification and the EPERM branch, which this round removes,
+sixteen of the rest rebased onto anchors this round moved, and 18 new ones, at
+least one for each part of each union, each lock outcome of an adoption, the
+identity change's seam, the Windows errno and the lock link leading out.
+Sixty-one documentation mutations, round 11's twenty, eight of round 12's
+eleven (its three on the guide paragraph this round rewrites retired) and 33
+new, each fail the documentation contract. On nomos (Windows 11, Go 1.27.3
+windows/amd64, an administrator's SSH session) 9a21f8d2 failed the eleven
+cases CI failed. At c53496bb the eleven pass, as do the four new cases built
+there; `internal/backup` passes whole (126 top-level cases pass and five skip,
+each with its reason) and so does `cmd/bridge` (824 pass and 89 skip, each
+with its reason); and the seven fixed tests, the four new ones and the revised
+remedy-text test pass ten runs each. The one later code commit, ce3097f4, adds
+a unix-only test. On the owner's Mac (macOS arm64, Go 1.27.3, not root)
+native, Linux and Windows vet pass with the release build tags, `make fmt`
+changes nothing and `make docs-check` passes. `go test -race -count=1` passes
+`internal/backup` and `cmd/bridge` at ce3097f4: 1,070 top-level cases pass and
+five skip (two default-port cases and three root-only CLI cases), cmd/bridge
+in 627 s. The six new tests and sixteen revised ones that build here pass ten
+race-enabled runs each.
+
+---
+
+## 2026-10-24 — B524 round 12: a seal completion's permission advice takes one remedy for a directory failure and names the file for a file's own
+
+Round 11's reviews found no High. Three findings concerned the advice a seal
+completion prints for a permission failure: each named an access the user
+already had, so following it changed nothing.
+
+**One remedy for a directory failure.** A remedy is advice the operator
+follows, not a diagnosis, so every failure at the data directory itself, an
+entry's Lstat, the barrier that opens the directory to sync it and a durable
+write's temporary file, rename and directory sync, now takes one remedy that
+always suffices: on unix, restore read, write and search (execute) access to
+the data directory and each directory above it, or clear an immutable flag or
+ACL on it; on Windows, restore full control of the data directory. Red first
+on 032934fe: a data directory without search (0600) was told to restore read
+access at the completion's first Lstat, as were the seal's entry check, the
+allocation evidence and a marker's ensure; a 0300 directory's seal barrier was
+told read access and its marker write, which lands and then cannot sync the
+directory, write access; a 0500 directory's marker ensure was told write
+access.
+
+**A file's own open names the file.** A marker's open or read needs read
+access to it, and an EPERM adds the flag or ACL. The lock file is opened for
+reading and writing and created when missing, so its permission failure is
+told apart by an Lstat through the data directory's root: a regular file needs
+read and write access to it; no entry, a link the root resolves to nothing, a
+root that will not open and an Lstat that fails take the directory remedy;
+anything else keeps the lock file's write remedy. Red first: a 0200
+`server.lock` was told to restore write access to it; an absent one, and a
+relative link to a missing sibling, in an unwritable directory were told the
+same of a file that was not there; a lock file whose own Lstat fails, in a
+directory without search, was told write access to it too; a lock file with
+the immutable flag (macOS uchg, an EPERM) and an EPERM opening a marker got no
+word of the flag. A named pipe at `server.lock` keeps its write remedy, before
+and after.
+
+**One outcome for the identity-free restore.** A snapshot whose `player-uuid`
+entry is damaged restores identity-free; the test accepted a refusal too, and
+now requires the restore to complete with the box's identity and floor byte
+for byte, as it does on 032934fe and after.
+
+**Tests.** Every permission case is unix-only, skips under root, restores modes
+in `t.Cleanup` and asserts the advice it expects. Where a backup's earlier
+step fails first, the completion or the step is driven directly: on the
+owner's Mac a backup's own lock open needs to read the data directory, so a
+0300 directory fails there, with the directory remedy, before the seal's
+barrier. The EPERM opening a marker comes from a test-only seam
+(`readMarker`), since no fixture gives one. None skipped on the owner's Mac;
+the immutable lock file case is macOS-only. Round 10's failed-write case now
+asserts the directory remedy.
+
+Round-twelve evidence records 145 code negative controls failing by
+assertion, each anchor count-checked, mutated in the committed tree and
+restored from git: round 11's 126, seven of them rebased onto anchors this
+round moved, and 19 new ones, one or more for each changed tag and one that
+refuses the identity-free restore. Thirty-one documentation mutations, round
+11's twenty and eleven new, each fail the documentation contract. On the
+owner's Mac (macOS arm64, Go 1.27.3, not root) native, Linux and Windows vet
+pass with the release build tags, `make fmt` changes nothing and `make
+docs-check` passes. `go test -race -count=1` passes `internal/backup` and
+`cmd/bridge`: 1,064 top-level cases pass and five skip (two default-port and
+three root-only CLI cases), cmd/bridge in 605 s. The ten new tests and two
+revised ones pass ten race-enabled runs each.
+
+---
+
+## 2026-10-24 — B524 round 11: an unlisted floor the snapshot holds refuses restore, a non-file seal is kept and recorded twice, and seal-completion advice names its cause
+
+Round 10's reviews found two Highs and a Low, and the reviews of this round's
+task a third High.
+
+**A floor the snapshot holds and its manifest does not list.** Every writer
+that captures the floor lists it beside the UUID, those from before the
+`playerFloorRequired` record included, so such a snapshot has a damaged file
+list. Restore now Lstats `<snapshot>/player-ids.json` whenever the manifest
+does not list it, never opening or following it: an entry of any kind refuses
+before anything snapshot-derived is written, the adoption included, naming the
+snapshot-copy remedy or a newer snapshot of this box; only ErrNotExist is a
+genuine absence, which takes round 10's path; any other Lstat error refuses
+with itself. Restore's own seal completion may still run first, adding local
+seal evidence only. Red first on 13744c20, through `bridge restore`: Codex's
+sequence (adopted at 2^31, 4,097 starts, captured by such a writer, the entry
+read as `player-ids.jsoo`, restored onto a pristine box at draw zero) gave a
+floor of 2,181,038,080 and a first startup token of 2,181,042,177, the
+source's last; a directory and a dangling symbolic link at the unlisted entry
+restored too, and so did the same damage onto a UUID-only box, after adopting
+it. The same damage to the `player-uuid` entry makes the restore
+identity-free and leaves the box's identity and floor byte for byte, before
+and after.
+
+**A seal that is not a regular file (B539).** `ensurePlayerMarker` refused a
+directory, symbolic link or named pipe at `player-floor-discarded.json` with
+"is not a regular file: move it aside", printed by start, a backup's
+completion and every adoption; following it dropped the box's only seal
+record, and the next start wrote an unsealed marker. It now keeps such an
+entry, never opening or following it, and completion records the seal in
+`player-initialized` beside it. Beside such an entry a damaged marker reading
+`sealed:true` gets the move-aside advice; beside a missing seal file, or one
+whose bytes do not read, the advice is still to keep the marker. Red first:
+start refused all three kinds with that advice, a backup logged it as its
+completion's failure, a lone non-file seal refused adoption, and the advice
+beside a damaged sealed marker was the sole-seal one. Discard still
+repairs the entry: `bridge reset-player --discard-floor` on that state renames
+it aside and writes a fresh regular seal.
+
+**Discard's order.** Discard renamed a damaged seal entry aside before it
+sealed `player-initialized`, so with the marker gone a crash between the
+rename and the replacement left no seal record. With the seal entry damaged,
+discard now seals `player-initialized` first. Red first: a directory seal, no
+marker and an injected failure of the replacement left identity restores
+open, and one restored.
+
+**Advice by cause.** A failed seal completion said "restore write access to
+the data directory: serve boot and start fail on it too" for every failure.
+Each step now tags its error where it happens with what it was reading or
+writing and the access that needed: a permission error names that path and
+access and says serve boot and start fail on it too when run as this user; a
+read-only data directory says so; a marker refusal keeps its remedy; an
+interrupted or refused lock or an I/O error keeps only its error. Red first:
+an injected EINTR, ENOLCK and EIO each claimed "serve boot", EROFS got the
+write advice, and a seal file this user cannot read got the write advice in a
+writable directory. `fsutil.TryLock` maps only EWOULDBLOCK (EAGAIN) and
+Windows' `ERROR_LOCK_VIOLATION` to `ErrLocked`, now through a pure function
+pinned per platform; a lock held by another process is still logged as
+deferred.
+
+**Tests changed on purpose.** Round 7's test that required a non-regular lone
+seal to refuse startup is replaced by one that completes the seal around it,
+on a box minted before and on one with no allocation evidence. Three older
+tests made their completion error from a directory seal and now use a seal a
+newer bridge wrote; one lets restore's own completion write
+`player-initialized` beside a dangling seal before its refusal.
+
+Round-eleven evidence records 126 code negative controls failing by
+assertion, each anchor count-checked, mutated in the committed tree and
+restored from git: round 10's 96, five of them rebased onto anchors this round
+moved, and 30 new ones, among them the old seal-first discard order, which
+turns the interrupted-discard test red, and a restore that adopts before its
+check, which turns the UUID-only destination test red. Twenty documentation
+mutations each fail the round's documentation contract. On the owner's Mac
+(macOS arm64, Go 1.27.3, real sockets) native, Linux and Windows vet pass,
+`make fmt` changes nothing and `make docs-check` passes. `go test -race
+-count=1` passes all 13 packages of `./cmd/bridge/ ./internal/backup/
+./internal/config/ ./internal/fsutil/ ./internal/player/...` that have tests:
+1,721 top-level cases pass and eight skip (five root or default-port CLI
+cases, two root-only fsutil cases and the ALAC reference corpus), cmd/bridge
+in 586 s. The 18 new tests and five revised ones pass ten race-enabled runs
+each; the Windows table test is type-checked by the Windows vet and not run.
+
+---
+
+## 2026-10-24 — B524: a reset keeps the player floor
+
+**Round 5 redesign.** Four review rounds of covered/given-up identity lists and
+reset-pending state kept uncovering forgotten identities and interruption
+holes. Two independent design reviews converged on the simpler invariant:
+the numeric floor belongs to the box and never decreases across its identities.
+Ordinary reset now clears queue then UUID durably and keeps the floor byte for
+byte. History read/write/merge/preflight, snapshot history capture and rechecks,
+UUID-fragment recovery and schema 3 are removed. Snapshots stay schema 2.
+
+Initialization writes floor, local marker, then UUID durably. The marker
+detects manual deletion of the old three player files. Explicit `--discard-floor`
+first writes a permanent seal against every identity import, then clears queue
+and UUID and renames the floor aside. It recovers lost/corrupt/exhausted floors
+without claiming old UUIDs are safe. Restore keeps max(snapshot, live) plus its
+jump and preflights loss, seal and exhaustion before importing data; round 7
+first completes an incomplete local seal. The engine's old
+corruption recovery moved a reservation aside and returned zero; it now refuses.
+Queue recovery stays separate. The UUID writer now checks parent-directory
+fsync. Backup captures UUID then floor through the existing sharing retry and
+refuses UUID without floor. Serve and bind share one minter; bind preflights
+before saving configuration. Lock, prompt and both admin probes are retained.
+
+Red controls on round four demonstrated floor deletion by reset, marker loss
+accepted as pristine, UUID-only backups accepted, and the engine starting over
+corrupt reservation data. New controls cover old identities restored above 2e9,
+interrupted restore followed by engine restamp, every discard crash point,
+marker barriers, no-write restore refusal, initialization ordering, and prompt
+non-file refusals. The scratch round-five report records controls and native,
+Linux and Windows vet, formatting/docs gates, race suites and ten-run repeats.
+Two live holders of a UUID and non-latest cross-box snapshots remain unsupported
+and not guaranteed; arbitrary storage rollback cannot be detected locally.
+
+
+**Round 6.** The host's round-five run on cfa4666c, Go 1.27.3, passed every
+package in `go test -race -count=1 ./cmd/bridge/ ./internal/backup/
+./internal/config/ ./internal/player/...` except
+`TestServeRefusedMintLeavesTheReservationFloor/{ids,tokens}`. Each failed 3/3
+alone: the minter restamped the floor before the engine found exhaustion,
+then its undo removed the UUID. The two FIFO tests passed `-race -count=10`.
+The unchanged host regression is retained; a socket-free minter test reproduces
+both exhaustion bounds and follows discard through an engine start.
+
+Minting now checks the engine's exhaustion predicate before writing. Start
+requires a regular UUID entry by Lstat and a floor naming it. A live v1 floor
+has no name: reset keeps its bounds, then mint restamps it. Successful mint and
+restore always write the named floor before UUID; an interrupted restore's
+mismatch refuses start and backup until retry or reset. Backup never combines
+a captured old UUID with a later discard's fresh floor. Snapshot pairing is
+also checked on restore, retaining historical v1 snapshot compatibility.
+
+Discard now writes two independent seals: the seal file, then `sealed:true`
+in the initialized marker, both durable before deletion. This avoids changing
+the reservation format: all writers, including the engine, preserve the local
+seal files. Once both records are durable, any single file's loss, truncation or replacement cannot reopen
+restores. Round 7 also completes a lone older seal before proceeding. The smallest deletion set that does is BOTH local markers, after a
+new floor exists or before any new identity is minted. This two-file loss is
+a documented limit beside full rollback, two live boxes holding one UUID and
+non-latest cross-box migration. Tests run real engine writes before damage.
+
+Damaged local markers conservatively count as present; only a well-formed
+newer version requires a newer bridge. Discard repairs malformed, truncated,
+FIFO, directory and dangling-link markers by renaming them aside, with the
+seal durable before initialized-marker repair. Each recovery reaches a real
+engine start. Non-file advice names moving the entry aside. Backup advises
+retry only when the captured UUID vanished; persistent loss names discard.
+Restore loss advice includes both the permanent seal and snapshot-copy remedy.
+
+The UUID-only main-era state (valid regular UUID, no queue, floor or markers)
+upgrades without rotating identity or sealing. Round 6 wrote a zero floor;
+round 7 replaced that with restore's jump on BOTH counters (superseded by round 8), since main could
+publish token 4097 without saving a queue and lose only its floor. Serve boot,
+start, bind, reset and backup adopt it; reset then removes the UUID. Backup
+serializes this write and rechecks the captured identity. Additional lifecycle
+evidence means floor loss, except the one-shot post-discard exemption below.
+Round 7 described an issuance-count bound of 2^24; round 8 below corrects it
+to a bound on counter space, including skipped reservations.
+
+Usage now names --discard-floor and the retained-floor contract exactly;
+command tests require the snapshot UUID, both counters above the pre-reset
+floor, a truly empty no-op and output that claims only actual removals.
+Red-first logs, rebased round-five controls, new controls and gates are recorded
+in the round-six scratch report.
+
+
+**Round 7.** The supplied host round-six result on macOS arm64 passed all 12
+packages in `go test -race -count=1 ./cmd/bridge/ ./internal/backup/
+./internal/config/ ./internal/player/...`, including
+`TestServeRefusedMintLeavesTheReservationFloor`.
+
+UUID-only adoption now calls the same jump function as restore with zero bounds.
+A real engine's token-only start, stop, floor-only deletion and restart proves
+no repeated token within that margin. The floor stays monotonic across identities
+while present; ordinary reset keeps it byte-identical. Discard is the sole escape.
+
+The discard exemption is one-shot. After the next floor is durable and before
+UUID publication, the initialized marker records `sealed:true,minted:true`.
+Ordinary reset preserves it. Discard → mint → real engine allocations → reset →
+loss of only the floor now refuses start. Repeated explicit discard reopens the
+exemption only after all removals are durable. Barrier tests cover the consumed
+marker before UUID and the first seal before completion of its second record.
+
+Every lifecycle writer completes a lone seal after its durability barrier;
+backup takes server.lock only when local repair is needed. Existing allocation
+or identity evidence consumes the exemption during completion. An identity
+restore may complete the local seal before refusing, but imports no data.
+A completed pair of seals survives any single-file loss for restore refusal;
+loss of both local seal records, full rollback and the migration limits above
+remain outside the guarantee. Malformed markers need explicit discard and a
+well-formed newer marker is never rewritten.
+
+Serve boot adopts existing UUID-only state under its lock before TLS or live
+backups, even with playback disabled; it mints nothing on a pristine box. A live
+backup then needs no adoption lock. Busy backup advice explicitly says to stop
+the service and run the backup again. Tests exercise backupCmd with server.lock
+held, plus actual serve boot. Docs name reset among all five adopters and state
+the issuance margin and one-shot exemption consistently.
+
+Round-seven scratch evidence records 54 assertion-failing controls (all 44
+rebased controls plus 10 new ones), including the red-first token repetition.
+Native, Linux and Windows vet, the backup/config/engine race suites and the
+new sandbox-runnable regressions repeated ten times all pass. Formatting and
+docs checks pass.
+Socket-bind refusals are listed separately for the host cmd/bridge rerun.
+That host run was stopped unfinished when round eight began in the same
+tree; round eight's host run covers both rounds.
+
+
+**Round 8.**
+
+Serve boot, start, bind, reset and backup now adopt UUID-only state at 2^31
+plus a random value below 2^24 on BOTH counters. A real main-era engine started
+4,097 times without edits publishes only 4,097 tokens but reaches 33,558,529:
+its reservations skip 8,192 counter values between starts. Thus the earlier
+issuance-count bound was false. Adoption covers old counter space below 2^31,
+including reserved and skipped values. The largest new floor leaves
+2,130,706,432 values before uint32 exhaustion, past the engine's 4,097-value
+startup requirement. An absent floor cannot prove a history already reaching
+the upper half; that remains unsupported. Restore's max-and-jump arithmetic is
+unchanged; round 9 below closes its UUID-only destination gap.
+
+Completion now verifies a valid seal and leaves a present damaged initialized
+marker untouched, for conservative floor-loss checks and explicit discard.
+Serve records any adoption/completion/preflight failure as a player-off reason
+and continues boot, enabled or disabled. Backup logs local repair errors while
+retaining strict captured-pair checks; identity-free restore ignores a local
+completion error and restores ordinary data. A valid sealed marker without
+minted is consumed by any floor, UUID or queue evidence before completion
+returns, including reset and backup. The legacy discard → engine → upgrade →
+reset → floor-only loss sequence now refuses another mint.
+
+The starting HEAD already writes sealed:true,minted:false after the queue and
+UUID unlink barriers, floor rename and directory sync. That ordering is kept
+and stated explicitly in both long forms and the backup guide. The one-shot
+exemption remains spent until the last barrier completes.
+
+Round-eight scratch evidence records red-first regressions and 65 controls
+failing by assertion: all 54 rebased controls plus 11 new mutations. Native,
+Linux and Windows vet, formatting, docs checks and the backup/config/engine
+race suites pass. The six socket-free new regressions pass ten race-enabled
+runs each; the full live-serve regression and the updated FIFO boot assertions
+are blocked by the sandbox's socket binds. The report inventories every CLI
+test and names the restricted cases. On the host (macOS, Go 1.27.3),
+`go test -race -count=1` passed cmd/bridge in full (577 s), backup, config and
+all nine player packages, and the live-backup, serve-health, named-pipe, boot
+and player-off cases passed ten race-enabled runs.
+
+**Round 9.**
+
+Serve boot, start, bind, reset, backup and restore adopt UUID-only state at
+2^31 plus a random value below 2^24 on both counters. Restore now adopts the
+destination under its existing exclusive lock before reading its live bound,
+then takes max(snapshot, adopted live) + 2^24 + r. The absent live bound was
+unknown, not zero. A main-era engine regression captures the first reservation
+(8,192), runs 8,193 starts without queue edits or markers, deletes only the
+floor, and restores before upgraded service boot. Both first restored values
+exceed the largest pre-restore startup token (67,112,961). An interrupted
+adoption marker commit leaves the raised local floor and publishes no snapshot
+identity; retry keeps that bound.
+
+A damaged player-initialized beside a readable floor naming the UUID no longer
+turns the player off. Every lifecycle reader retains its presence and treats
+its one-shot exemption as spent. The warning names the file and advises moving
+it aside only with a matching readable floor. Start re-ensures the marker;
+beside a valid seal, completion records sealed and minted. Later floor loss
+still refuses. Non-file markers remain nonblocking evidence, and an invalid
+version carrying a seal bit is preserved rather than rewritten during mint.
+The warning does not read UUID bytes, so reset can still remove an unreadable
+UUID. The serve regression now checks player-on boot, library health, warning
+and live backup with and without a seal, enabled and disabled.
+
+Backup documentation now limits the busy-stop-and-retry advice to adoption;
+busy or failed seal completion is logged and left to the next lifecycle
+operation (round 10 below: only a busy completion is deferred). Both rule
+lines and their long forms record destination adoption,
+proportionate marker recovery and the existing unsupported history bounds.
+
+Round-nine evidence records 72 assertion-failing negative controls: all 65
+prior controls, rebased for damaged-marker acceptance, plus seven additions.
+Native, Linux and Windows vet, pinned formatting and docs checks pass. The
+backup, config and engine suites pass with race detection and count 1; each
+of the five new tests passes ten race-enabled runs. The marker lifecycle and
+updated round-6/8 backup and socket-free serve cases also pass ten runs. The
+CLI inventory covers 913 top-level cases: 680 pass, five skip, and 228 need
+socket permissions the sandbox denies (226 listener/multicast, two connects).
+The updated live-serve test is among those host-required cases; it waits for
+startup readiness and requires an engine when enabled, then checks health,
+warning and live backup. The report names every blocked test and retains the
+initial timeout and corrected barrier-fixture evidence separately.
+
+**Round 10.**
+
+A snapshot whose manifest lists a player UUID and no floor cannot bound what
+that identity handed out. This bridge never writes one: backup refuses a
+missing floor unless the box is in the UUID-only state, which it adopts and
+then captures, and every manifest now records `playerFloorRequired`. The
+manifest's `bridgeVersion` is the build's stamped version (0.0.1 for every
+build from source), so it cannot tell this writer from an older one; the new
+record does. Restore refuses this writer's UUID without its listed floor,
+naming the snapshot-copy remedy, before any write. An older writer's
+floorless snapshot takes the adoption ceiling, 2^31 + 2^24, in one helper
+(`floorlessSnapshotBound`) after `snapshotReservationFloor`; `marked` stays
+false, so the missing-mark warning still fires, and a listed floor that is
+missing or corrupt keeps its refusal. Codex's round-9 sequence (8,193
+main-era starts, the latest snapshot holding the UUID alone, a pristine
+destination) restored at 16,777,216; it now restores at exactly 2^31 + 2^25
+with draw zero and 2^31 + 2^25 + 2^24 - 1 with the largest. A source that
+adopted at its largest draw after its snapshot and started once holds
+2,164,273,151, and the old snapshot restores above it, which a 2^31 ceiling
+would not. A live bound above the ceiling still wins counter by counter,
+and a UUID-only destination's adoption stays below the ceiling at any draw.
+
+Restore adopts a UUID-only destination from its own random source
+(`RestoreOptions.Random`), the adoption's three bytes before the jump's;
+every other adopter keeps crypto/rand. A source that fails on its first read
+writes nothing and leaves the UUID-only state; one that fails after the
+adoption's draw leaves the adopted floor durable and no snapshot data, and a
+retry jumps from it. The same bytes give the same floor, 2^31 + r_a + 2^24 +
+r_j beside a listed 10,000,000 snapshot floor.
+
+Only a busy server.lock defers a backup's seal completion: the log says the
+next lifecycle operation completes it, and that operation does. Any other
+failure recurs at the next serve boot or start, so backup logs it as failed,
+with its error and the advice to restore write access to the data directory.
+Busy adoption still refuses the backup with its stop-and-retry advice.
+
+Marker reads no longer log. `CheckPlayerStart` warns once per call, serve
+boot's preflight once per boot (covering the player that boot starts) and
+bind's, and only beside a readable, unexhausted floor that names the UUID;
+the minter and every other lifecycle operation are silent, and nothing
+suppresses a later boot's warning. Beside a lost floor nothing warns, and the
+refusal says `do not move player-initialized aside`: on round 9's code that
+state logged the move-aside warning three times per serve boot. An
+invalid-version marker reading `sealed:true` with no valid seal file holds
+the only intact seal, so its warning says to keep it; the box runs, and
+identity restores stay refused as sealed through start, boot, backup, reset
+and a later discard.
+
+Red first, on round 9's code: the Codex sequence restored at 16,777,216 (a
+first token of 16,781,313 against 67,112,961 already published); a stripped
+snapshot of this bridge restored from zero; restore's adoption drew from
+crypto/rand, so injected bytes gave 2,176,223,088 where 2,165,947,905 was due,
+a first-read failure left player-ids.json and player-initialized behind, and a
+draw-then-failure source restored in full; busy seal completion logged "stop
+the service and run the backup again", and an EACCES completion was logged as
+deferred with no remedy; floor-loss refusals beside a damaged marker lacked
+the phrase, while serve boot logged the move-aside warning three times there
+and a start logged it up to seven times beside a matching floor. The capture
+side was already closed: adoption, a restore jump, a run and a lost floor
+refused the backup on round 9's code too, and its control (capturing the UUID
+without its floor) turns that test red.
+
+Round-ten evidence records 96 code negative controls failing by assertion, each
+anchor count-checked, mutated in the committed tree and restored from git:
+round 9's 69, ten of them rebased onto anchors this round moved (one,
+`backup-local-repair-fatal`, first survived because its anchor is now the busy
+branch while its test's failure is not busy; rebased onto the failure branch,
+it fails), and 27 new ones, among them a 2^31 ceiling, which turns the
+continued-source test red. On the owner's Mac (macOS arm64, Go 1.27.3, real
+sockets) native, Linux and Windows vet pass, `make fmt` changes nothing and
+`make docs-check` passes. `go test -race -count=1` passes all 12 packages of
+`./cmd/bridge/ ./internal/backup/ ./internal/config/ ./internal/player/...`:
+1,651 top-level cases, six skipped (five root or default-port CLI cases and
+the ALAC reference corpus), cmd/bridge in 613 s. The 20 new tests and six
+revised ones pass ten race-enabled runs each. The manifest field's doc comment
+now says that a player-uuid holding no one UUID travels alone, as it always
+has, for restore to refuse.
 ## 2026-10-24 — B526 items 2 and 3, B532 and B536: four tests CI reddened at random, each red first in its losing order
 
 Four tests had each failed a PR's CI once and passed on a rerun. Each was
@@ -63043,6 +63639,378 @@ stands for root's and is no runner's real owner.
   want exactly {… UID:501 GID:20}".
 - Green after: `go vet` and `go test` of `./internal/config/` and
   `./internal/fsutil/`.
+
+## 2026-10-25 — B524 review: the round-13 Windows test runs icacls by its absolute path
+
+CodeRabbit on PR #1346: `TestALockFileDeniedReadingNamesTheEntry` started
+`icacls` by its bare name, against `build-ci-tests.md`'s rule that a new exec
+site names its binary by an absolute path or by `exec.LookPath`'s absolute
+answer. It now resolves `icacls` once through `exec.LookPath` and runs that
+path for the deny and for its cleanup. Windows-only: `GOOS=windows go vet` and
+`go test -c` of `./internal/backup/` compiled it here; CI's Windows leg runs it.
+
+## 2026-10-25 — B470 PR 5b: GET /v1/outputs lists the bridge's own player, kind bridge, on a gate of its own
+
+`GET /v1/outputs` lists the bridge's own player as an element of kind `bridge`
+beside MPD's, on a gate of its own, and `/v1/health` says so with
+`bridgeOutput`. The change is additive: `ProtocolVersion` stays 1, an MPD
+element's bytes are main's, and the shipped app, which skips a kind it does
+not know, keeps its MPD rows. MPD's behaviour is unchanged: its gate is asked
+where and as often as before, its builder, flight and caches are as they were,
+and the loopback route, the checklist, the reading and `bridge doctor` stay on
+its gate alone. Built and tested on macOS (darwin/arm64) with go.mod's Go
+1.27.3; the Linux-only tests of the packages it touches are owed to a Linux
+host (below).
+
+### What shipped
+
+- `internal/api`: `outputs_bridge.go` holds the seam (`BridgeOutput`, with
+  `Enabled` and `Facts`; `BridgeOutputFacts` and `BridgeOpenHomeFacts`, plain
+  facts `cmd/bridge` fills, so the package imports no `internal/player`
+  package), `Server.WithBridgeOutput`, the element (`bridgeElement`,
+  `OutputBridge`, `OutputOpenHome`) and the one composer (`composeOutputs`).
+  `outputs.go`: `OutputInfo.Bridge` (`omitempty`), the route's two gates,
+  `LocalOutputsResponse` through the composer. `api.go`: `bridgeOutput`
+  (sorted between `booklets` and `carPlayOptimize`), `localOutputs` on either
+  gate with MPD's asked first and on every answer, `outputReading` on MPD's
+  alone; the features' capacity is 39.
+- `cmd/bridge`: `serve_player_output.go`, the route's view of serve's player
+  (`bridgeOutput`, `newBridgeOutput`) and its closed word lists;
+  `serve_player.go`: the plan's `lists` and `refused`, and `bridgePlayer.id`,
+  set with the engine before `ready` closes; `main.go`: the wiring, before the
+  API listeners start; `output_checklist.go`: comments only (the checklist's
+  `Active` is MPD's gate, and `checklistInput` reads kind `mpd` alone).
+- `internal/player/engine`: `ErrDeviceBusy`; `Attempt` and
+  `Snapshot.LastAttempt`, the last Start or Resume whose answer the engine
+  took (`attempted`, from `startDone`, `resumeDone` and a Start or Resume past
+  its deadline in `callExpired`).
+- `internal/player/playback`: `busy` maps alsapcm's `ReasonBusy` to the
+  sentinel, at the start's `%w` and in `ResumeError.Err` (`busyError`, whose
+  text is the device layer's own); `codecs.go`: `Plays` and
+  `PlayedContainers`; `open.go`'s DSD refusal reads `Plays`.
+- `internal/player/format`: `Containers` and `Container.IsDSD`.
+  `internal/player/binding`: `States`.
+- `internal/player/openhome`: `endpoints.go`: `UDN`, `Authority`,
+  `sourceLocation` and `Status.Endpoints`; `discovery.go` builds its USNs, its
+  registration's UDN and every LOCATION from them.
+- `PROTOCOL.md`: the activation (two gates, `bridgeOutput`), the body's
+  composition and its 500, `kind` (`mpd` and `bridge`), the example with a
+  bridge element, `bridge`'s presence and the id forms, `player.software`
+  `bridge`, the loopback (MPD's alone), the `pathRules` exception, the 404's
+  condition, a section for the `bridge` object (its identity and listing,
+  `id`, `mpd`, `dac` and `pathRules`, `openHome` and the correlation rule, the
+  state and its eighteen reasons in order, `lastError`, `libraryScope`, the
+  fixed fields, `codecs` and the manifest's `codec` table), the reading's gate
+  (MPD's alone; a `bridge:` id is `404 output_not_found`), the error table's
+  rows, and the Golden fixtures paragraph, which cited a `testdata/fixtures/`
+  this repo does not have.
+- `CLAUDE.md`: the output.md row of "Where things live" names
+  `GET /v1/outputs` and its two gates. `ops/History-rules-output.md`: the long
+  forms. The rules text (output.md's bullets on the route, a glob so that
+  output.md loads with `cmd/bridge/serve_player_output*.go`, wire.md's two
+  lines, cli-serve.md's loopback line and a line on serve's view, and
+  player.md's line on the last attempt) went to the orchestrator in the
+  report, since the session could not edit `.claude/`.
+
+### The words, and where each comes from
+
+The states are `stopped`, `playing` and `paused` (the transport's) and
+`unavailable`. The reasons, in the order they are decided, each the first that
+holds:
+
+- `not_configured`: the boot plan, no DAC bound (`binding.StateNotConfigured`,
+  a word an output report can carry too); `config_invalid`: the boot plan,
+  `output.player.pauseReleaseSeconds` outside the 1 s to 10 min the engine
+  takes;
+- `starting`: `ready` still open; `start_failed`: `ready` closed with no
+  engine (a failure the start recorded, a panic its supervisor recovered,
+  which records nothing, or serve's stop during the start);
+- `closed` (`engine.ReasonClosed`): the engine's `Done` closed, or its
+  snapshot `Closed`;
+- `output_unknown` (`engine.ReasonOutputUnknown`): no output report yet;
+- the output report's own word (`engine.OutputState.Reason`): each
+  `binding.State` but `available` (`disabled`, `device_missing`,
+  `device_ambiguous`, `endpoint_missing`, `binding_invalid`,
+  `identity_unsupported`, `identity_transient`, `identity_incomplete`, from
+  `hotplug.Reporter`; `disabled` from serve's live config too) and serve's
+  `binding_changed` (`playerOutput`); a word none of them names is
+  `output_unavailable` (`engine.ReasonOutputUnavailable`), never sent today;
+- `maintenance` (`engine.ReasonMaintenance`): the snapshot's maintenance hold,
+  or its state Maintenance;
+- `release_unconfirmed` (`engine.ReasonReleaseUnconfirmed`): a release the
+  snapshot says was not confirmed by its deadline.
+
+When none holds, the transport: `playing` (a session starting too), `paused`,
+`stopped`, and while the player releases its DAC, what follows the release
+(play `playing`, pause `paused`, stop or none `stopped`). `lastError` is
+`device_busy` while the last attempt failed busy, and null otherwise. This is
+not 5a3's OpenHome mapping, which has Buffering and reads maintenance as
+Stopped. `TestEveryBridgeWordIsInTheProtocol` requires each of the four
+states, the eighteen reasons and the lastError, with `self`, `bridge` and each
+codec, backticked inside PROTOCOL.md's bridge section and not merely somewhere
+in the file.
+
+### The busy classification
+
+alsapcm says a node another process holds is busy (`ReasonBusy`, from the
+kernel's EBUSY at open). The backend wraps such an error beside an
+engine-owned sentinel, `engine.ErrDeviceBusy` (`busyError`, whose `Unwrap`
+gives both and whose text is the device layer's), at the start
+(`session.start`'s `%w`) and at a resume's reopen (`resumeError`'s `Err`; the
+`ResumeError` code stays `busy`). The engine checks the sentinel alone and
+never imports an ALSA package. It records each Start and Resume whose answer
+it takes (`attempted`: in `startDone` after the current-session check, in
+`resumeDone` after the live check, and for a Start or Resume past its
+deadline) as `Attempt{Seq, Failed, Busy}`: a later attempt replaces it
+whichever way it goes, a pause is no attempt, and a Start past its deadline is
+failed and not busy. `LastStop` cannot serve: a start that succeeds stops
+nothing and leaves it. A refusal whose detail says "busy" is not busy, at
+either layer (`TestABusyWordIsNotTheBusyError`,
+`TestPlaybackARefusalThatSaysBusyIsNoBusyAttempt`).
+
+### The accessor
+
+`newBridgeOutput(plan, player, cfg)`, installed with
+`api.Server.WithBridgeOutput` right after `startServePlayer`, whether or not
+the plan starts the player. It holds the boot plan, the `bridgePlayer` and the
+boot snapshot's `fixedVolume` (`EffectiveMixer` is `none`), `dsdMode`
+(`EffectiveDSDMode`) and `allowDoP` (`AllowsDoP`). `Enabled` is `plan.lists`:
+`config.PlayerEnabled` on the boot snapshot (enabled, readable and valid,
+Linux, not public, no OpenHome port clash) and serve's data-directory lock
+held, which includes a plan refused as `not_configured` or `config_invalid`.
+`Facts`, per request: nothing while the gate is shut; `ready` read before
+anything else; the identity (`p.id` once `ready` and `eng`, else
+`config.ReadPlayerUUID` afresh, never cached and never made); no element
+without one; then the state, reason and lastError from one `eng.Snapshot()`;
+`openHome` from the surface read under `p.mu` (`Status().Endpoints()`,
+`openhome.UDN`), null without the boot opt-in, an address listening, or once
+its stop began; `codecs` from `playback.PlayedContainers`. It never reads
+`playerOutput` (the supervisor's alone) and starts, probes, dials and writes
+nothing.
+
+### Tests
+
+New: in `internal/api`, `TestAnMPDElementsBytesAreMains` (an MPD element's
+bytes against main's, captured from 9e7b2675), `TestTheBridgesOwnElement`,
+`TestTheOutputsRouteHasTwoGates` (MPD off, on, auto with a hit, auto with a
+miss and off Linux, each with the player on and off: the three keys, the
+status, and the probe, dial, greeting, track-list, card and `OnActive`
+counts), `TestTheMPDGateIsAskedOnEveryRequestWhateverThePlayer`,
+`TestABridgeIDNamesNoReading`,
+`TestTwoRequestsInTheCacheWindowLeaveTheCachedBodyAlone`,
+`TestAnMPDFailureWithBothGatesOnIsStill500`,
+`TestTheServersOutputsBodyIsTheRoutesWithThePlayersElement` and
+`TestTheAPIImportsNoPlayerPackage`; in `cmd/bridge`,
+`TestThePlanSaysWhetherGETOutputsListsThePlayer`,
+`TestThePlayersStateFromOneSnapshot`, `TestEveryOutputReasonIsPassedOn`,
+`TestEveryBridgeWordIsInTheProtocol`, `TestThePlayersElementThroughItsPlan`,
+`TestThePlayersElementAcrossItsStart`, `TestTheOutputsRouteMakesNoPlayerFile`,
+`TestTheChecklistReadsNoBridgeElement`,
+`TestServeListsItsPlayerOnAGateOfItsOwn`,
+`TestTheElementSaysAReleaseIsUnconfirmedUntilItsLateAcknowledgement`,
+`TestServeNamesItsOpenHomeSourceWhileItListens`,
+`TestTheCodecsAreTheManifestsCodecsThePlayerPlays` and
+`TestBridgeDoctorStaysMPDs`; in the engine,
+`TestABusyStartIsTheLastAttemptUntilAStartSucceeds`,
+`TestABusyResumeIsTheLastAttemptUntilAResumeSucceeds`,
+`TestABusyWordIsNotTheBusyError`, `TestALaterFailureForAnotherReasonEndsBusy`,
+`TestAStartPastItsDeadlineIsAFailedAttempt` and
+`TestTheEngineImportsNoALSAPackage`; in `internal/alsapcm`, over the real
+backend and the fake kernel's EBUSY,
+`TestPlaybackStartOnABusyDeviceIsTheEnginesBusyAttempt`,
+`TestPlaybackBusyResumeAfterTheReleaseIsTheEnginesBusyAttempt` and
+`TestPlaybackARefusalThatSaysBusyIsNoBusyAttempt`;
+`TestContainersIsEveryContainerDeclared`,
+`TestADecoderGivesDSDExactlyForADSDContainer`,
+`TestTheContainersThePlayerPlaysAreTheOnesItsOpenTakes`,
+`TestStatesIsEveryStateDeclared`, `TestAuthorityIsHowALocationNamesItsSocket`
+and `TestEveryLocationTheSourceAdvertisesIsOneOfItsEndpoints`. No test reads
+the host's `/proc` or `/sys` or opens a PCM node; Linux stands in through
+`localOutputsGOOS` and `playerGOOS`.
+
+Changed, as the brief allowed: `TestHealthFeaturesCompleteSet` (the
+`bridgeOutput` key, and the all-features server gains a player), and
+`TestHealthAdvertisesOutputReadingWithLocalOutputs`, rewritten to the two
+gates under its own name, which `output.md` and this log cite. Every other
+outputs test passes unchanged, `TestOutputKindIsOpen`, the cache, flight and
+probe tests and the reading's among them.
+
+### Red first
+
+The engine's, the backend's, the containers', the binding list's and the
+endpoints' tests were run before each change, against main's code with the new
+names declared and empty, and failed: the five attempt tests waited out their
+deadline for an attempt never recorded; the two busy-backend tests saw a busy
+start and a busy resume answered with no busy attempt (the decoy passed, as it
+should); the container, DSD and played-containers pins found empty lists;
+`TestStatesIsEveryStateDeclared` found an empty `States`; the endpoint tests
+found an empty `Authority` and LOCATIONs built inline, a zoned one that does
+not parse. The route's and serve's tests name the new seam and do not compile
+on main, so their red first is the rule removed, which is each control below.
+
+### Negative controls
+
+Each on a committed tree, mutated by a script that counts its anchor, run, and
+restored from git; all 47 went red by assertion and none by a compile failure.
+
+| Control | Mutation | Red |
+|---|---|---|
+| A1 | health asks the player's gate first (`bridgeOn \|\| Active`) | `TestTheOutputsRouteHasTwoGates` (OnActive counts), `TestTheMPDGateIsAskedOnEveryRequestWhateverThePlayer` (the auto flip through health), `TestHealthAdvertisesOutputReadingWithLocalOutputs` |
+| A2 | the route reads MPD's last answer (`activeNow`) instead of asking, with the player on | the same two (the auto flip through the route) |
+| A3 | the route's 404 on MPD's gate alone | `TestTheOutputsRouteHasTwoGates`, `TestTheBridgesOwnElement` |
+| A4 | `outputReading` on either gate | `TestTheOutputsRouteHasTwoGates`, `TestHealthAdvertisesOutputReadingWithLocalOutputs` |
+| A5 | no `bridgeOutput` key | `TestHealthFeaturesCompleteSet`, `TestTheOutputsRouteHasTwoGates` |
+| A6 | the composer enters MPD's builder with its gate shut | `TestTheOutputsRouteHasTwoGates`, `TestTheBridgesOwnElement` |
+| A7 | the composer appends into the cached body's slice | `TestTwoRequestsInTheCacheWindowLeaveTheCachedBodyAlone` (a data race, and the element left in the cached array) |
+| A8 | `bridge` without `omitempty` | `TestAnMPDElementsBytesAreMains`, `TestTheBridgesOwnElement` |
+| A9 | a reason passed on outside `unavailable` | `TestTheBridgesOwnElement` |
+| A10 | `codecs` as given, null for none | `TestTheBridgesOwnElement` |
+| A11 | an OpenHome Source listed with no endpoint | `TestTheBridgesOwnElement` |
+| A12 | the server's body MPD's alone | `TestTheServersOutputsBodyIsTheRoutesWithThePlayersElement` |
+| B1 | the plan lists the player without serve's lock | `TestThePlanSaysWhetherGETOutputsListsThePlayer`, `TestThePlayersElementAcrossItsStart` |
+| B2 | the view makes the identity (`EnsurePlayerUUID`) | `TestThePlayersElementThroughItsPlan`, `TestThePlayersElementAcrossItsStart`, `TestTheOutputsRouteMakesNoPlayerFile` |
+| B3 | the identity read once and cached | `TestThePlayersElementThroughItsPlan`, `TestThePlayersElementAcrossItsStart` (made, refused, removed) |
+| B4 | a missing identity cached | the same two |
+| B5 | the plan's refusal not decided first | `TestThePlayersElementThroughItsPlan` |
+| B6 | no engine after `ready` read as `starting` | `TestThePlayersElementAcrossItsStart` (the recorded failure, the panic, serve's stop) |
+| B7 | an engine that ended not read as `closed` | `TestServeListsItsPlayerOnAGateOfItsOwn`, `TestThePlayersElementAcrossItsStart` |
+| B8 | maintenance read as the transport (5a3's Stopped) | `TestThePlayersStateFromOneSnapshot`, `TestServeListsItsPlayerOnAGateOfItsOwn` |
+| B9 | an unconfirmed release not reported | `TestThePlayersStateFromOneSnapshot`, `TestTheElementSaysAReleaseIsUnconfirmedUntilItsLateAcknowledgement` |
+| B10 | a release to pause read as `stopped` | `TestThePlayersStateFromOneSnapshot` |
+| B11 | a word no list names passed on | `TestThePlayersStateFromOneSnapshot` |
+| B12 | every output word turned into the fallback | `TestThePlayersStateFromOneSnapshot`, `TestEveryOutputReasonIsPassedOn`, `TestServeListsItsPlayerOnAGateOfItsOwn` |
+| B13 | `lastError` read from `LastStop` | `TestServeListsItsPlayerOnAGateOfItsOwn` (the busy start, then the start that succeeds) |
+| B14 | PROTOCOL.md's `start_failed` row deleted | `TestEveryBridgeWordIsInTheProtocol` |
+| B15 | PROTOCOL.md's `closed` row deleted, a word found elsewhere in the file | `TestEveryBridgeWordIsInTheProtocol` (the pin reads the bridge section alone) |
+| B16 | PROTOCOL.md's ALAC row of the `codec` table deleted | `TestTheCodecsAreTheManifestsCodecsThePlayerPlays` |
+| B17 | serve does not wire its player into the route | `TestServeListsItsPlayerOnAGateOfItsOwn`, `TestServeNamesItsOpenHomeSourceWhileItListens` |
+| B18 | the checklist reads every element, the bridge's included | `TestTheChecklistReadsNoBridgeElement` |
+| B19 | `Enabled` ignores the plan | `TestThePlanSaysWhetherGETOutputsListsThePlayer`, `TestThePlayersElementAcrossItsStart` |
+| E1 | the engine records failed attempts alone | `TestABusyStartIsTheLastAttemptUntilAStartSucceeds`, `TestABusyResumeIsTheLastAttemptUntilAResumeSucceeds` |
+| E2 | the engine reads busy from the error's text | `TestABusyWordIsNotTheBusyError` |
+| E3 | the start's wrap `%v` | `TestPlaybackStartOnABusyDeviceIsTheEnginesBusyAttempt` |
+| E4 | the resume's wrap `%v` | `TestPlaybackBusyResumeAfterTheReleaseIsTheEnginesBusyAttempt`, `TestPlaybackRefusesABusyResumeAndStaysPaused` |
+| E5 | the backend reads busy from the error's text | `TestPlaybackARefusalThatSaysBusyIsNoBusyAttempt` |
+| P1 | `Plays` takes DSF | `TestTheContainersThePlayerPlaysAreTheOnesItsOpenTakes` |
+| P2 | the open's DSD refusal does not read `Plays`, and `Plays` leaves WAV out | `TestTheContainersThePlayerPlaysAreTheOnesItsOpenTakes` (the open's cross-check) |
+| P3 | `IsDSD` forgets DFF | `TestTheContainersThePlayerPlaysAreTheOnesItsOpenTakes`, `TestContainersIsEveryContainerDeclared`, `TestADecoderGivesDSDExactlyForADSDContainer` |
+| P4 | `Containers` forgets ALAC | the same three |
+| S1 | `binding.States` forgets a state | `TestStatesIsEveryStateDeclared` |
+| O1 | `Endpoints` lists the first socket alone | `TestEveryLocationTheSourceAdvertisesIsOneOfItsEndpoints` |
+| O2 | `Authority` leaves a zone unencoded | `TestAuthorityIsHowALocationNamesItsSocket` |
+| O3 | a surface whose stop began lists endpoints | `TestEveryLocationTheSourceAdvertisesIsOneOfItsEndpoints` |
+| O4 | discovery's LOCATION built apart, on another port | `TestEveryLocationTheSourceAdvertisesIsOneOfItsEndpoints`, `TestSourceDiscoveryIdentityAndSearches` |
+| I1 | `internal/api` imports `internal/player/format` | `TestTheAPIImportsNoPlayerPackage` |
+| I2 | the engine imports `internal/alsapcm` | `TestTheEngineImportsNoALSAPackage` |
+
+Two first versions hid half of what they test under a control: the
+operand-order test's `OnActive` count and the codecs test's list pin were
+fatal, so A1 and A2 reddened them without reaching the auto-flip subtests, and
+P1 and P2 without reaching the open's cross-check. Both became `t.Errorf`, and
+the four controls were run again: each then reddened the later half too.
+
+### Decided otherwise than the brief, and why
+
+- `TestHealthAdvertisesOutputReadingWithLocalOutputs` keeps its name and is
+  rewritten to the two gates: `output.md` and this log cite it, and
+  `TestEveryCitedTestNameExists` failed on the rename.
+- An output report's word none of the lists names is sent as
+  `output_unavailable`, the eighteenth reason, so no word PROTOCOL.md does not
+  name reaches the wire; none is sent today.
+- `openHome` is null once the surface's stop has begun (`Status.Stopped`), not
+  only while no address listens: a stopped Source answers nothing.
+- The brief's one table over state, reason and lastError is three: a pure
+  table over a snapshot's half (`playerSnapshot`, an interface the table's
+  fakes implement), the plan's and the start's halves on the real player's
+  start with its seams, and the real engine in serve. A fake snapshot cannot
+  reach the start's seams, and the real engine cannot be put in every state by
+  hand.
+- The gate matrix is three too: the route's (MPD's five cells by the player on
+  and off) in `internal/api`, the player's conditions (enabled, disabled,
+  public, off Linux, no DAC, the lock, a pause release out of range, a port
+  clash) on the plan in `cmd/bridge`, which `internal/api` cannot build, and a
+  boot of serve with the player and `output.mpd: off`.
+- The engine's sentinel is declared in `backend.go`, beside the seam that
+  carries it, and new code sits in files of its own (`outputs_bridge.go`,
+  `serve_player_output.go`, `codecs.go`, `endpoints.go`), so 5a4's open PR
+  merges with few conflicts.
+- `busyError` keeps the device layer's text and adds none; `open.go` keeps its
+  type check beside `Plays`, so content that is not a decoder is still
+  refused.
+- `libraryScope`'s text describes the Insert URI form B470 PR 5a4 ships, which
+  is still open; 5c must not rely on an Insert before it merges.
+- The long forms of the cli-serve.md and player.md lines are in
+  `ops/History-rules-output.md`, as the brief says, rather than in those
+  files' own History files.
+- output.md gains a glob, `cmd/bridge/serve_player_output*.go`, since its
+  rules bind that file and only cli-serve.md and player.md loaded with it.
+- The two "imports no" rules got pins (`TestTheAPIImportsNoPlayerPackage`,
+  `TestTheEngineImportsNoALSAPackage`), each reading every source file
+  whatever its build constraint; the engine's covers `internal/alsa` as well
+  as `internal/alsapcm`.
+- `fixedVolume`, `dsdMode` and `allowDoP` are read from the boot snapshot as
+  the brief says, but no control can tell that from the live config: this
+  release takes one value of each.
+
+### Environment
+
+macOS, darwin/arm64, Go 1.27.3 (go.mod's) with `GOTOOLCHAIN=local` and
+`GOPROXY=off`, the Makefile's tags. A `bridge` binary that
+`go build ./cmd/bridge/` leaves at the worktree's root (ignored by git) fails
+`scripts/third-party-licenses`' `TestBuildTagsAgree` and
+`TestRealTreeBuildSiteCensus`; compile checks here used `go vet` or
+`-o /dev/null`.
+
+### Gate
+
+On macOS (darwin/arm64), Go 1.27.3: `make fmt` (nothing rewritten);
+`make vet`; `go vet` of every package with the Makefile's tags for
+windows/arm64, windows/amd64, darwin/arm64 and linux/arm64, the last of which
+type-checks the Linux-only tests; `make test` (every package under `-race`: 76
+packages, in 21.5 minutes) on the code's last commit, and then `go test -race`
+of `internal/api` and `internal/player/engine` again for the two import pins
+committed after it; `make build-all` (six targets; `dist/` removed after);
+`make docs-check`; and `TestEveryCitedTestNameExists` on the final tree. The
+rules text, applied to a copy of the tree with the orchestrator's applier,
+passes `make docs-check` and `TestEveryCitedTestNameExists` there.
+
+### Linux-only tests, owed to a Linux host
+
+On a Linux host, with `TMPDIR` on a persistent disk (the engine refuses tmpfs,
+`ErrVolatile`): `go test -race` over `cmd/bridge`, `internal/api`,
+`internal/config`, `internal/alsapcm` and `internal/player/...`, which runs
+the Linux-only files among them: `cmd/bridge/snapshot_hold_linux_test.go`,
+`internal/alsapcm/sys_linux_test.go`,
+`internal/api/outputs_hint_r5_linux_test.go`,
+`internal/player/openhome/restrict_linux_test.go` and
+`internal/player/hotplug/source_linux_test.go`.
+
+### For 5c and the iOS companion PR
+
+- The iOS mirror copies this `PROTOCOL.md` into `docs/BridgeProtocol.md`
+  (`cp`, never a rewrite), and adds the DTO: `bridge` optional, a kind it does
+  not know still skipped, and a decoding test of a body with an MPD element
+  and a bridge element. iOS tests that use `bridge` as their unknown kind need
+  another word.
+- 5c correlates a discovered Source with the element only by both its UDN and
+  its LOCATION's host and port among `endpoints`; SSDP carries the UDN in
+  clear.
+- Until `dac` is reported, a client's check of a queue covers its scope and
+  its containers alone; the player's refusal stays the authority on rates and
+  transports.
+- `libraryScope`'s Insert form depends on 5a4, still open.
+- `bridgeOutput` tells a bridge older than 5b from one whose player has no
+  identity yet, which lists no element.
+
+### Not in this change
+
+- The `dac` object for kind `bridge`: a follow-up reads the bound card's
+  `/proc/asound` stream, matched by its ALSA id and `usbId`, never its index,
+  and never serialises `alsa.USBIdentity`.
+- A reading for kind `bridge`: its 404 stays.
+- openhome's playable-extension list, left to 5a4.
+- Volume, the DSD modes, DoP and GENA; the opt-in's default; the console's DAC
+  page (6a); the iOS mirror and DTO; 5c.
 
 ## 2026-10-24 — B470 PR 5a4: the player's OpenHome writes, Insert's Uri confined to the bridge's own tracks, and the owner's dogfood
 

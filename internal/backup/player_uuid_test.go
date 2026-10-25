@@ -31,6 +31,20 @@ func withPlayerUUID(t *testing.T, src *backup.Sources, body string, perm os.File
 	if err := os.WriteFile(src.PlayerUUID, []byte(body), perm); err != nil {
 		t.Fatal(err)
 	}
+	floor := filepath.Join(src.DataDir, "player-ids.json")
+	if _, err := os.Lstat(floor); os.IsNotExist(err) {
+		id := strings.TrimSpace(body)
+		if _, err := config.ReadPlayerUUID(src.DataDir); err != nil {
+			id = snapshotPlayerUUID
+		}
+		data, err := json.Marshal(map[string]any{"version": 2, "uuid": id, "ids": 0, "tokens": 0})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(floor, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := os.Chmod(src.PlayerUUID, perm); err != nil {
 		t.Fatal(err)
 	}
@@ -319,6 +333,7 @@ func TestSnapshotAndRestoreAsRootKeepThePlayerUUID(t *testing.T) {
 		filepath.Join(snap, "server.key"),
 		filepath.Join(snap, "bridge.yaml"),
 		filepath.Join(snap, backup.PlayerUUIDFileName),
+		filepath.Join(snap, "player-ids.json"),
 		filepath.Join(snap, backup.ManifestFile),
 	})
 
@@ -330,5 +345,5 @@ func TestSnapshotAndRestoreAsRootKeepThePlayerUUID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertGivenAway(t, changes()[before:], []string{filepath.Join(realDir, "player-ids.json"), src.PlayerUUID})
+	assertGivenAway(t, changes()[before:], []string{filepath.Join(realDir, "player-initialized"), filepath.Join(realDir, "player-ids.json"), src.PlayerUUID})
 }

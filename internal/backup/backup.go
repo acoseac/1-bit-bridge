@@ -63,6 +63,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
+	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/version"
@@ -128,6 +129,14 @@ type Manifest struct {
 	ProtocolVersion int       `json:"protocolVersion"`
 	CreatedAt       time.Time `json:"createdAt"`
 	Files           []string  `json:"files"`
+	// PlayerFloorRequired records a writer that lists player-ids.json beside
+	// every player UUID it captures, as this bridge's Snapshot does (a
+	// player-uuid that holds no one UUID is copied alone, for restore to
+	// refuse as it stands): restore refuses such a snapshot's UUID without its
+	// floor, which only stripping leaves. A writer before reservation capture
+	// recorded nothing, and BridgeVersion cannot tell the two apart (it is the
+	// build's stamped version, the same 0.0.1 for every build from source).
+	PlayerFloorRequired bool `json:"playerFloorRequired,omitempty"`
 }
 
 // Sources points at the live files that should be captured.
@@ -164,6 +173,14 @@ type Targets struct {
 	PlayerUUID   string
 }
 
+// afterIdentityCopy is a test seam, nil in production: Snapshot calls it once
+// it has copied the player's UUID into the snapshot and closed the source,
+// before it reads that UUID's floor, so a test can change the box's identity
+// in between, as a lifecycle operation could. A change made from the copy's
+// own rename instead runs while the source is still open, which Windows
+// refuses to remove from under it.
+var afterIdentityCopy func()
+
 // Snapshot captures every present file in `src` into a fresh
 // timestamped directory under `<src.DataDir>/backups/`. Returns the
 // absolute path of the created directory.
@@ -172,6 +189,19 @@ type Targets struct {
 // periodic ticker can cancel an in-flight snapshot on bridge shutdown. Pass
 // `context.Background()` if you don't have a richer scope.
 func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
+	if src.PlayerUUID != "" {
+		if err := completeCapturedPlayerSeal(filepath.Dir(src.PlayerUUID)); err != nil {
+			// Local repair is not part of a snapshot. The captured UUID/floor
+			// pairing checks below still decide whether its identity is safe.
+			// Only a busy lock defers the repair; any other failure is logged
+			// as the failure it is, with the advice its cause supports.
+			if errors.Is(err, errSealCompletionBusy) {
+				logging.Component("backup").Warn("player seal completion deferred", "reason", err.Error())
+			} else {
+				logging.Component("backup").Warn("player seal completion failed", "reason", err.Error())
+			}
+		}
+	}
 	if src.DataDir == "" {
 		return "", errors.New("backup: DataDir is required")
 	}
@@ -195,7 +225,6 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 	}()
 
 	var captured []string
-
 	if src.ManifestDB != "" {
 		if _, err := os.Stat(src.ManifestDB); err == nil {
 			if err := vacuumInto(ctx, src.ManifestDB, filepath.Join(dst, ManifestDBFileName)); err != nil {
@@ -236,59 +265,87 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 		captured = append(captured, pair.name)
 	}
 
-	// Every writer merges the live reservation, so even a foreign UUID or
-	// v1 file covers this box's identities. Capture that conservative floor
-	// after the UUID and restamp the snapshot copy, including after a restore
-	// interrupted before its UUID landed and before any engine restarts.
+	// Capture the UUID before its floor and require the same named identity.
+	// A discard and mint between these reads must not pair old UUID/new floor.
 	if slices.Contains(captured, PlayerUUIDFileName) {
+		if afterIdentityCopy != nil {
+			afterIdentityCopy()
+		}
 		var id string
-		err := atomicwrite.ReadWithRetryCtx(ctx, func() error {
+		idErr := atomicwrite.ReadWithRetryCtx(ctx, func() error {
 			var err error
 			id, err = config.ReadPlayerUUIDFile(filepath.Join(dst, PlayerUUIDFileName))
 			return err
 		})
-		if err != nil && !errors.Is(err, config.ErrNotOnePlayerUUID) {
-			return "", fmt.Errorf("backup: read captured %s: %w", PlayerUUIDFileName, err)
+		if idErr != nil && !errors.Is(idErr, config.ErrNotOnePlayerUUID) {
+			return "", fmt.Errorf("backup: read captured %s: %w", PlayerUUIDFileName, idErr)
 		}
-		if err == nil {
-			var mark engine.Reservation
-			err := atomicwrite.ReadWithRetryCtx(ctx, func() error {
+		var mark engine.Reservation
+		readFloor := func() error {
+			return atomicwrite.ReadWithRetryCtx(ctx, func() error {
 				var err error
 				mark, err = engine.ReadReservation(filepath.Join(filepath.Dir(src.PlayerUUID), engine.ReservationFileName))
 				return err
 			})
-			if err != nil && !errors.Is(err, os.ErrNotExist) {
-				if errors.Is(err, atomicwrite.ErrReadBusy) {
-					return "", fmt.Errorf("backup: read %s: %w; retry the backup", engine.ReservationFileName, err)
+		}
+		err := readFloor()
+		if errors.Is(err, os.ErrNotExist) {
+			if idErr == nil {
+				if upgradeErr := upgradeCapturedPlayer(filepath.Dir(src.PlayerUUID), id); upgradeErr != nil {
+					return "", fmt.Errorf("backup: %w", upgradeErr)
 				}
-				var pathErr *os.PathError
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.As(err, &pathErr) {
-					return "", fmt.Errorf("backup: read %s: %w", engine.ReservationFileName, err)
-				}
-				// Only a file read successfully but refused as data justifies
-				// giving up the identity. A failed read establishes no damage.
-				return "", fmt.Errorf("backup: read %s: %w; %s", engine.ReservationFileName, err, playerResetAdvice(false))
+				err = readFloor()
 			}
-			if err == nil {
-				mark.Version, mark.UUID = 2, id
-				data, err := json.Marshal(mark)
-				if err != nil {
-					return "", err
+			if errors.Is(err, os.ErrNotExist) {
+				if _, statErr := os.Lstat(src.PlayerUUID); errors.Is(statErr, os.ErrNotExist) {
+					return "", fmt.Errorf("backup: player UUID vanished during capture; run the backup again: %w", err)
+				} else if statErr != nil {
+					return "", fmt.Errorf("backup: check player-uuid: %w", statErr)
 				}
-				if err := writeFrom(filepath.Join(dst, engine.ReservationFileName), bytes.NewReader(data), 0o600); err != nil {
-					return "", err
+				advice := playerResetAdvice(false)
+				if marked, err := playerEntry(filepath.Dir(src.PlayerUUID), playerInitialized); err != nil || marked {
+					advice = keepInitializedMarker + "; " + advice
 				}
-				captured = append(captured, engine.ReservationFileName)
+				return "", fmt.Errorf("backup: player floor is missing; %s", advice)
 			}
+		}
+		if err != nil {
+			if errors.Is(err, atomicwrite.ErrReadBusy) {
+				return "", fmt.Errorf("backup: read %s: %w; retry the backup", engine.ReservationFileName, err)
+			}
+			var pathErr *os.PathError
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.As(err, &pathErr) {
+				return "", fmt.Errorf("backup: read %s: %w", engine.ReservationFileName, err)
+			}
+			// Only a file read successfully but refused as data justifies
+			// giving up the identity. A failed read establishes no damage.
+			return "", fmt.Errorf("backup: read %s: %w; %s", engine.ReservationFileName, err, playerResetAdvice(false))
+		}
+		if idErr == nil {
+			if mark.UUID != id {
+				return "", errors.New("backup: player identity changed or the floor does not name the captured UUID; run bridge reset-player before backing up again")
+			}
+			mark.Version, mark.UUID = 2, id
+			data, err := json.Marshal(mark)
+			if err != nil {
+				return "", err
+			}
+			if err := writeFrom(filepath.Join(dst, engine.ReservationFileName), bytes.NewReader(data), 0o600); err != nil {
+				return "", err
+			}
+			captured = append(captured, engine.ReservationFileName)
 		}
 	}
 
+	// Every captured player UUID above travels with its floor, or the
+	// snapshot was refused: the manifest says so to restore.
 	m := Manifest{
-		SchemaVersion:   SchemaVersion,
-		BridgeVersion:   version.ServerVersion,
-		ProtocolVersion: version.ProtocolVersion,
-		CreatedAt:       time.Now().UTC(),
-		Files:           captured,
+		SchemaVersion:       SchemaVersion,
+		BridgeVersion:       version.ServerVersion,
+		ProtocolVersion:     version.ProtocolVersion,
+		CreatedAt:           time.Now().UTC(),
+		Files:               captured,
+		PlayerFloorRequired: true,
 	}
 	if err := writeManifest(filepath.Join(dst, ManifestFile), m); err != nil {
 		return "", fmt.Errorf("write snapshot manifest: %w", err)
@@ -323,6 +380,10 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 // A restored identity first gets a merged, durable reservation, past both
 // the snapshot's and the live counters by 2^24 plus one random 24-bit draw.
 // The snapshot reservation is only an input, never copied to the live path.
+// A snapshot that lists no floor and holds none counts as 2^31 + 2^24, the
+// adoption ceiling, when an older writer made it, and is refused when this
+// bridge did (floorlessSnapshotBound). One that holds a floor its manifest
+// does not list has a damaged manifest, and is refused (unlistedFloorError).
 func Restore(snapshotDir string, dst Targets) error {
 	return RestoreWithOptions(snapshotDir, dst, RestoreOptions{})
 }
@@ -351,11 +412,15 @@ func Restore(snapshotDir string, dst Targets) error {
 // restore says which files it restored and that running it again finishes it
 // (partialRestoreError).
 func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) error {
+	var completionErr error
+	if dst.PlayerUUID != "" {
+		completionErr = completePlayerSeal(filepath.Dir(dst.PlayerUUID))
+	}
 	m, err := readManifest(filepath.Join(snapshotDir, ManifestFile))
 	if err != nil {
 		return fmt.Errorf("read snapshot manifest: %w", err)
 	}
-	if m.SchemaVersion != 1 && m.SchemaVersion != SchemaVersion {
+	if m.SchemaVersion < 1 || m.SchemaVersion > SchemaVersion {
 		return fmt.Errorf("snapshot schema v%d not supported (this bridge supports v%d)",
 			m.SchemaVersion, SchemaVersion)
 	}
@@ -419,6 +484,9 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 	// own write to say.
 	var restored []string
 	if playerUUIDRead {
+		if completionErr != nil {
+			return completionErr
+		}
 		if err := restorePlayerReservation(snapshotDir, dst.PlayerUUID, playerUUID, m, opts); err != nil {
 			return err
 		}

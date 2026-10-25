@@ -96,12 +96,6 @@ func TestAStartWithoutItsReservationPublishesNoToken(t *testing.T) {
 		}, func(h *harness) {
 			h.files.failReserve = nil
 		}, ReasonReservation},
-		{"the bad file stays", func(h *harness) {
-			h.must("corrupt", os.WriteFile(h.reservePath(), []byte("not json"), 0o600))
-			h.files.renameErr = errors.New("read-only file system")
-		}, func(h *harness) {
-			h.files.renameErr = nil
-		}, ReasonFileStuck},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := startHarness(t)
@@ -441,25 +435,18 @@ func TestNewRefusesADataDirectoryThatDoesNotOutliveAReboot(t *testing.T) {
 	}
 }
 
-// TestABadReservationFileIsMovedAside pins the reservation file's own
-// checks: moved aside, logged, and the IDs then start past the queue
-// file's.
-func TestABadReservationFileIsMovedAside(t *testing.T) {
+// TestABadReservationRefusesDespiteAQueue pins that a queue cannot repair a floor.
+func TestABadReservationRefusesDespiteAQueue(t *testing.T) {
 	h := startHarness(t)
-	ids := h.insert("a", "b")
+	h.insert("a", "b")
 	h.shutdown()
 	h.joinAfter(h.eng)
-	h.must("corrupt", os.WriteFile(h.reservePath(), []byte("not json"), 0o600))
-	h.boot()
-	aside, _ := filepath.Glob(h.reservePath() + ".bad-*")
-	if len(aside) != 1 {
-		t.Fatalf("moved aside: %v", aside)
+	h.must("corrupt", os.WriteFile(h.reservePath(), []byte("not json"), 0600))
+	if _, err := New(h.config()); err == nil {
+		t.Fatal("queue repaired an unknown floor")
 	}
-	if id := h.insert("c")[0]; id <= ids[1] {
-		t.Fatalf("an ID after a bad reservation file is %d, not past the queue's %d", id, ids[1])
-	}
-	if h.logs.count("moved aside") != 1 {
-		t.Fatalf("logs %v", h.logs.all())
+	if b, err := os.ReadFile(h.reservePath()); err != nil || string(b) != "not json" {
+		t.Fatalf("floor changed: %q %v", b, err)
 	}
 }
 

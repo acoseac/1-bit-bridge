@@ -18,7 +18,7 @@ const DiscoveryStopBound = 5 * time.Second
 
 // sourceTargets derives the ordered announcement from the description's table.
 func sourceTargets(id string) []dlna.NotifyTarget {
-	udn := "uuid:" + id
+	udn := UDN(id)
 	nts := []string{"upnp:rootdevice", udn, DeviceType}
 	for _, service := range services {
 		nts = append(nts, service.serviceType())
@@ -215,7 +215,7 @@ func (d *sourceDiscovery) run() {
 			for _, l := range c.listening {
 				key := dlna.SSDPInterface{Index: l.Address.Index, Name: l.Address.Interface}
 				ep := dlna.SSDPEndpoint{Interface: &net.Interface{Index: key.Index, Name: key.Name}, Incarnation: lives[key], Local: l.Address.Prefix,
-					Location: "http://" + l.Bound.String() + "/openhome/description.xml"}
+					Location: sourceLocation(l.Bound)}
 				key.Incarnation = ep.Incarnation
 				endpoints = append(endpoints, ep)
 				v.endpoints = append(v.endpoints, dlna.SSDPEndpointSnapshot{Interface: key, Local: ep.Local, Location: ep.Location})
@@ -239,7 +239,7 @@ func (d *sourceDiscovery) run() {
 				if seams := d.surface.cfg.Seams; seams != nil {
 					interval = seams.AdvertiseInterval
 				}
-				handle, result, err = d.subsystem.Register(registrationCtx, dlna.SSDPRegistration{Name: "OpenHome", UDN: "uuid:" + d.surface.cfg.Device.UUID,
+				handle, result, err = d.subsystem.Register(registrationCtx, dlna.SSDPRegistration{Name: "OpenHome", UDN: UDN(d.surface.cfg.Device.UUID),
 					Targets: sourceTargets(d.surface.cfg.Device.UUID), ServerToken: sourceServerToken(d.surface.cfg.Device.ModelNumber),
 					Endpoints: endpoints, Admission: dlna.SSDPStrictAdmission{Source: d.admits}, SendBarrier: registrationBarrier,
 					Logger: d.surface.log, AdvertiseInterval: interval})

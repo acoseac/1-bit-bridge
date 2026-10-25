@@ -119,8 +119,10 @@ func (b *Backend) open(ctx context.Context, o *occ) {
 		refuseDecode(o, err)
 		return
 	}
+	// DSD, whatever the mode: content of a container Plays does not take
+	// (PlayedContainers, what GET /v1/outputs lists the player plays).
 	d, ok := src.(decode.Decoder)
-	if !ok {
+	if !ok || !Plays(d.Format().Container) {
 		_ = src.Close()
 		refuse(ReasonDSD, "native DSD and DoP are later releases, and DSD is never converted to PCM")
 		return

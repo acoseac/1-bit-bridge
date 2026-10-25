@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
@@ -70,7 +71,24 @@ type servePlayerPlan struct {
 	// which boot says once.
 	openhome    bool
 	openhomeOff string
+	// lists is a player GET /v1/outputs lists, as its element of kind
+	// bridge, whenever the player has an identity (B470 PR 5b): one this
+	// config enables (config.PlayerEnabled) with serve holding its data
+	// directory's lock, under which alone the identity file is this serve's
+	// player's. refused is the word for a plan that lists the player and
+	// does not start it: refusedNotConfigured or refusedConfigInvalid.
+	lists   bool
+	refused string
 }
+
+// The words of a plan that lists the player and does not start it
+// (servePlayerPlan.refused), as GET /v1/outputs gives them for its reason.
+const (
+	// refusedNotConfigured is no DAC bound: the binding is not configured.
+	refusedNotConfigured = string(binding.StateNotConfigured)
+	// refusedConfigInvalid is a pause release the engine does not take.
+	refusedConfigInvalid = "config_invalid"
+)
 
 // planServePlayer decides whether serve starts its player: only when every
 // gate holds, each refusal a reason. The player runs on this config
@@ -82,7 +100,10 @@ type servePlayerPlan struct {
 // A player that starts starts its OpenHome surface too when
 // output.player.openhome is on (B470 PR 5a2a); with the opt-in on and the
 // player simply off, nothing of the surface starts, and boot says so once.
-// goos is the host ("" is this one). It reads nothing but the config.
+// The plan says too whether GET /v1/outputs lists the player (lists, B470
+// PR 5b): enabled on this config with the lock held, whether or not it
+// starts. goos is the host ("" is this one). It reads nothing but the
+// config.
 func planServePlayer(cfg *config.Config, goos string, lockHeld bool) servePlayerPlan {
 	if goos == "" {
 		goos = runtime.GOOS
@@ -98,15 +119,20 @@ func planServePlayer(cfg *config.Config, goos string, lockHeld bool) servePlayer
 	case !on:
 		return servePlayerPlan{}
 	case !player.Device.Configured():
-		return servePlayerPlan{off: "output.player.device binds no DAC: bridge output dac bind <card> --binding serial|uniqueModel|port binds one, and the player starts when bridge serve next starts"}
+		plan := servePlayerPlan{off: "output.player.device binds no DAC: bridge output dac bind <card> --binding serial|uniqueModel|port binds one, and the player starts when bridge serve next starts"}
+		if lockHeld {
+			plan.lists, plan.refused = true, refusedNotConfigured
+		}
+		return plan
 	case !lockHeld:
 		return servePlayerPlan{off: "serve holds no lock on its data directory (it said why above), and the player's identity and its IDs are made only under that lock"}
 	}
 	if r := player.PauseRelease(); r < playMinPauseRelease || r > playMaxPauseRelease {
 		return servePlayerPlan{off: fmt.Sprintf("output.player.pauseReleaseSeconds is outside the %d to %d seconds the player's engine takes (the config takes up to an hour): set it to %d or less, and the player starts when bridge serve next starts",
-			int(playMinPauseRelease/time.Second), int(playMaxPauseRelease/time.Second), int(playMaxPauseRelease/time.Second))}
+			int(playMinPauseRelease/time.Second), int(playMaxPauseRelease/time.Second), int(playMaxPauseRelease/time.Second)),
+			lists: true, refused: refusedConfigInvalid}
 	}
-	return servePlayerPlan{start: true, openhome: player.OpenHome}
+	return servePlayerPlan{start: true, openhome: player.OpenHome, lists: true}
 }
 
 // servePlayerWiring is what serve hands its player.
@@ -225,10 +251,12 @@ type bridgePlayer struct {
 	ready, done, settled chan struct{}
 	readyOnce            sync.Once
 
-	// Set before ready closes: the engine and the backend that run, or why
-	// the player did not start past its plan.
+	// Set before ready closes: the engine and the backend that run and the
+	// identity they run (GET /v1/outputs reads it once ready, B470 PR 5b),
+	// or why the player did not start past its plan.
 	eng    *engine.Engine
 	be     playBackend
+	id     string
 	failed string
 
 	// The supervisor's alone: the engine as it runs, the live config it
@@ -380,7 +408,7 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 	if w.Feed == nil {
 		return p.fail("serve started no hotplug watcher for the player")
 	}
-	id, made, err := config.EnsurePlayerUUID(cfg.DataDir)
+	id, made, err := backup.EnsurePlayerUUID(cfg.DataDir)
 	if err != nil {
 		return p.fail("the player's identity: " + err.Error())
 	}
@@ -459,7 +487,7 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 		}
 		_ = eng.Run(runCtx)
 	}()
-	p.eng, p.be = eng, be
+	p.eng, p.be, p.id = eng, be, id
 	playerLog.Info("player: started", "uuid", id, "entries", eng.Snapshot().Len(), "pauseRelease", player.PauseRelease())
 	if p.plan.openhome {
 		// The build of the library's index begins first, on a goroutine of its

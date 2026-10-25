@@ -177,6 +177,15 @@ func (r ResumeResult) String() string {
 // successor in a session of its own once this one has finished.
 var ErrSessionEnding = errors.New("player: the session is playing out its last content")
 
+// ErrDeviceBusy is what the error of a Start, or of a Resume that opens the
+// device again, wraps when another process holds the device (MPD playing,
+// most often): the backend maps its device layer's busy refusal to it, so
+// the engine knows a busy device by this sentinel alone, never by the
+// backend's codes or text, and imports no device layer (B470 PR 5b). The
+// engine records it as the last play attempt's failure
+// (Snapshot.LastAttempt).
+var ErrDeviceBusy = errors.New("player: another process holds the device")
+
 // Backend is what plays: PR 4b2 implements it over internal/player/decode
 // and alsapcm.Sink, and this package's tests over a fake. It is a contract,
 // and these are its terms.

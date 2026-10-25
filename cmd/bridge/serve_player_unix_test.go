@@ -30,6 +30,7 @@ import (
 // directory in this process is refused until the stall ends; then the lock
 // is let go, and the engine the start went on to build never runs.
 func TestServeStopWithThePlayersStorageStalled(t *testing.T) {
+	persistentMedium(t)
 	rec := loggingtest.Record(t)
 	var startOnce sync.Once
 	starts := make(chan struct{})
@@ -81,8 +82,8 @@ func TestServeStopWithThePlayersStorageStalled(t *testing.T) {
 }
 
 // TestANamedPipeAtThePlayersFilesDoesNotHoldItsStart: a named pipe at the
-// engine's reservation path or its queue path is no file: the engine refuses
-// it at once and moves it aside, as any bad file, and the player starts,
+// engine's reservation path or its queue path is no file: boot preflight refuses
+// it at once, leaving the pipe untouched and refusing the player start,
 // where its start waited for a writer to the pipe. Mkfifo comes from x/sys,
 // which has it wherever the unix tag builds.
 func TestANamedPipeAtThePlayersFilesDoesNotHoldItsStart(t *testing.T) {
@@ -97,13 +98,12 @@ func TestANamedPipeAtThePlayersFilesDoesNotHoldItsStart(t *testing.T) {
 						t.Fatal(err)
 					}
 				}})
-			ps.runningEngine(t)
-			aside, _ := filepath.Glob(fifo + ".bad-*")
-			if len(aside) != 1 {
-				t.Fatalf("moved aside: %v, want the pipe", aside)
+			fsutiltest.AwaitPastFIFOs(t, "player start", fsutiltest.ServeBound, ps.player.ready, fifo)
+			if off := ps.player.plan.off; ps.player.eng != nil || !strings.Contains(off, "named pipe") || !strings.Contains(off, "move") {
+				t.Fatalf("expected prompt non-file refusal: %s", off)
 			}
-			if info, err := os.Lstat(aside[0]); err != nil || info.Mode()&fs.ModeNamedPipe == 0 {
-				t.Fatalf("what was moved aside is not the pipe: %v, %v", info, err)
+			if info, err := os.Lstat(fifo); err != nil || info.Mode()&fs.ModeNamedPipe == 0 {
+				t.Fatalf("pipe changed: %v %v", info, err)
 			}
 			if code := ps.stopServe(t); code != 0 {
 				t.Fatalf("exit %d; stderr=%s", code, ps.stderr.String())
@@ -119,7 +119,7 @@ func TestANamedPipeAtThePlayersFilesDoesNotHoldItsStart(t *testing.T) {
 // supervisor's goroutine. It is no reason to make an identity either: the
 // pipe is left where it is, no backend or engine is built, and serve serves
 // on and stops cleanly. Backups are off, so the player's start is what reads
-// player-uuid at boot.
+// player-uuid at boot through its preflight.
 func TestANamedPipeAtThePlayersUUIDRefusesItsStartAtOnce(t *testing.T) {
 	needsDirectorySync(t)
 	rec := loggingtest.Record(t)
@@ -131,7 +131,7 @@ func TestANamedPipeAtThePlayersUUIDRefusesItsStartAtOnce(t *testing.T) {
 			fsutiltest.MakeFIFO(t, fifo)
 		}})
 	fsutiltest.AwaitPastFIFOs(t, "the player's start", fsutiltest.ServeBound, ps.player.ready, fifo)
-	if failed := ps.player.failed; ps.player.eng != nil || !strings.Contains(failed, "the player's identity: ") || !strings.Contains(failed, "named pipe is not a file") {
+	if failed := ps.player.plan.off; ps.player.eng != nil || !strings.Contains(failed, "player-uuid") || !strings.Contains(failed, "named pipe is not a file") {
 		t.Errorf("the player's start with a named pipe at player-uuid: started %v, refused %q; want it refused as a named pipe", ps.player.eng != nil, failed)
 	}
 	if lines := rec.Lines("player: not started"); len(lines) != 1 || !strings.Contains(lines[0], "named pipe is not a file") {

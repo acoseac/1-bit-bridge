@@ -31,6 +31,7 @@ import (
 var wantAllHealthFeatures = []string{
 	"atlasEnrichment",
 	"booklets",
+	"bridgeOutput",
 	"carPlayOptimize",
 	"deleteVariants",
 	"demoMode",
@@ -122,7 +123,8 @@ func newAllFeaturesServer(t *testing.T) *Server {
 			Output: func() config.OutputConfig {
 				return config.OutputConfig{MPD: "on"}
 			},
-		})
+		}).
+		WithBridgeOutput(&fakeBridgeOutput{enabled: true})
 	srv.EnableSyncEvents()
 	t.Cleanup(srv.StartEventBroker())
 	return srv

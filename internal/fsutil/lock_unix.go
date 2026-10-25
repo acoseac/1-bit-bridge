@@ -11,17 +11,22 @@ import (
 
 func tryLock(f *os.File) error {
 	return controlFD(f, "flock", func(fd uintptr) error {
-		err := flockRetryingEINTR(fd, unix.LOCK_EX|unix.LOCK_NB)
-		// EWOULDBLOCK is what flock(2) answers for a held lock, and on
-		// every GOOS this file builds for it is the same Errno as EAGAIN
-		// (Linux's pair is arch-independent, MIPS included; the BSDs and
-		// macOS give both 35), so this matches an NFS server's EAGAIN as
-		// well.
-		if errors.Is(err, unix.EWOULDBLOCK) {
-			return ErrLocked
-		}
-		return err
+		return lockedErr(flockRetryingEINTR(fd, unix.LOCK_EX|unix.LOCK_NB))
 	})
+}
+
+// lockedErr is TryLock's reading of what flock(2) answered: EWOULDBLOCK, what
+// it answers for a held lock, is ErrLocked, and anything else is itself. On
+// every GOOS this file builds for EWOULDBLOCK is the same Errno as EAGAIN
+// (Linux's pair is arch-independent, MIPS included; the BSDs and macOS give
+// both 35), so this matches an NFS server's EAGAIN as well. EINTR never comes
+// here (flockRetryingEINTR asks again), and ENOLCK and EOPNOTSUPP, a
+// filesystem that keeps no locks, stay themselves.
+func lockedErr(err error) error {
+	if errors.Is(err, unix.EWOULDBLOCK) {
+		return ErrLocked
+	}
+	return err
 }
 
 // keepsNoLocks is KeepsNoLocks on these platforms: flock's own answers for a

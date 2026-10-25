@@ -42,7 +42,9 @@ type OutputsResponse struct {
 
 // OutputInfo is one local output. DAC is null when this element names
 // no card. MPD is present for kind mpd and omitted for any other kind,
-// so a client decodes it as optional.
+// so a client decodes it as optional; Bridge is present for kind bridge,
+// the bridge's own player (B470 PR 5b), and omitted for any other, so an
+// MPD element's bytes are what they were before it.
 type OutputInfo struct {
 	ID        string           `json:"id"`
 	Kind      string           `json:"kind"`
@@ -50,9 +52,11 @@ type OutputInfo struct {
 	MPD       *OutputMPD       `json:"mpd,omitempty"`
 	DAC       *OutputDAC       `json:"dac"`
 	PathRules []OutputPathRule `json:"pathRules"`
+	Bridge    *OutputBridge    `json:"bridge,omitempty"`
 }
 
-// OutputPlayer is the software driving MPD.
+// OutputPlayer is the software driving the output: MPD's (volumio, moode,
+// mpd or ""), or the bridge itself for kind bridge.
 type OutputPlayer struct {
 	Software string `json:"software"`
 	Version  string `json:"version"`
@@ -410,8 +414,11 @@ func newLocalOutputs(cfg LocalOutputsConfig) *localOutputs {
 	return o
 }
 
-// Active reports whether /v1/health advertises localOutputs and the
-// route answers. Off this host's Linux it is false, including when the
+// Active is the MPD gate (mpdOn): whether output.mpd resolves on and the
+// host is Linux. /v1/health advertises outputReading on it alone, and
+// localOutputs on it or on serve's player (B470 PR 5b: the two are asked
+// apart, this one first and on every request, never short-circuited by
+// the player's). Off this host's Linux it is false, including when the
 // config says on: the readers refuse the host the way bridge output dac
 // does. auto is on only when a configuration was read or a daemon
 // greeted, and that answer is cached so health does not dial every time.
@@ -1277,7 +1284,9 @@ func (s *Server) WithLocalOutputs(cfg LocalOutputsConfig) *Server {
 
 // LocalOutputs is GET /v1/outputs' builder on its own, for a caller with
 // no server: `bridge doctor` asks it once for the checklist and closes it.
-// The gate and the body are the route's, from the same code.
+// The MPD gate and the MPD elements are the route's, from the same code; a
+// one-shot builder has no serve and so no player of its own, and lists no
+// element of kind bridge: the doctor's checklist is MPD's (B470 PR 5b).
 type LocalOutputs struct{ o *localOutputs }
 
 // NewLocalOutputs builds the outputs body the way WithLocalOutputs does,
@@ -1287,10 +1296,10 @@ func NewLocalOutputs(cfg LocalOutputsConfig) *LocalOutputs {
 	return &LocalOutputs{o: newLocalOutputs(cfg)}
 }
 
-// Active is the localOutputs gate.
+// Active is the MPD gate: output.mpd resolves on and the host is Linux.
 func (l *LocalOutputs) Active(ctx context.Context) bool { return l.o.Active(ctx) }
 
-// Response builds the body GET /v1/outputs would serve.
+// Response builds the MPD elements GET /v1/outputs would serve.
 func (l *LocalOutputs) Response(ctx context.Context) (OutputsResponse, error) {
 	return l.o.Response(ctx)
 }
@@ -1320,19 +1329,26 @@ func (o *localOutputs) close() {
 // errNoLocalOutputs is a server with no outputs builder wired.
 var errNoLocalOutputs = errors.New("api: local outputs are not wired")
 
-// LocalOutputsResponse is the body GET /v1/outputs serves, built by the
-// route's own builder, with its caches and its lazy session: the console's
-// checklist reads the box from here, the way the app does.
+// LocalOutputsResponse is the body GET /v1/outputs serves while output.mpd
+// resolves on, composed as the route composes it (composeOutputs: the MPD
+// elements from the route's own builder, with its caches and its lazy
+// session, then the bridge's own player's, B470 PR 5b): the console's
+// checklist reads the box from here, the way the app does, and reads its
+// kind mpd elements alone (cmd/bridge's checklistInput), so the checklist
+// stays MPD's.
 func (s *Server) LocalOutputsResponse(ctx context.Context) (OutputsResponse, error) {
 	if s.localOutputs == nil {
 		return OutputsResponse{}, errNoLocalOutputs
 	}
-	return s.localOutputs.Response(ctx)
+	return s.composeOutputs(ctx, true)
 }
 
-// LocalOutputsActive is the gate /v1/health's localOutputs flag reads:
-// output.mpd resolves on and the host is Linux. False when the route is
-// not wired. Like every call of that gate, a true answer runs OnActive.
+// LocalOutputsActive is the MPD gate, mpdOn: output.mpd resolves on and
+// the host is Linux. /v1/health's outputReading flag reads it alone, and
+// its localOutputs flag reads it beside serve's player (B470 PR 5b); the
+// loopback track route and the player checklist start and show from it
+// alone. False when the route is not wired. Like every call of that gate,
+// a true answer runs OnActive.
 func (s *Server) LocalOutputsActive(ctx context.Context) bool {
 	return s.localOutputs.Active(ctx)
 }
@@ -1345,13 +1361,18 @@ func (s *Server) LocalOutputsActiveNow() bool {
 	return s.localOutputs.activeNow()
 }
 
+// outputs is GET /v1/outputs: the MPD gate asked first and on every
+// request, as before the bridge's player was listed (its true answer
+// starts the loopback track route and is the route's answer), then the
+// player's; 404 only while both are off (B470 PR 5b).
 func (s *Server) outputs(w http.ResponseWriter, r *http.Request) {
-	if s.localOutputs == nil || !s.localOutputs.Active(r.Context()) {
+	mpdOn := s.localOutputs != nil && s.localOutputs.Active(r.Context())
+	if !mpdOn && !s.bridgeOutputOn() {
 		writeError(w, http.StatusNotFound, "local_outputs_not_supported",
 			"local outputs are not enabled on this bridge")
 		return
 	}
-	resp, err := s.localOutputs.Response(r.Context())
+	resp, err := s.composeOutputs(r.Context(), mpdOn)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal",
 			"the bridge encountered an internal error")

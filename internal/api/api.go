@@ -164,7 +164,10 @@ type Server struct {
 	endpointsCache         *endpointsCache              // TTL cache for /v1/health advertised-endpoint interface walk
 	fingerprint            string
 	localOutputs           *localOutputs
-	startedAt              time.Time
+	// bridgeOutput is serve's player as GET /v1/outputs lists it (B470 PR
+	// 5b, WithBridgeOutput); nil lists none. Set before serving.
+	bridgeOutput BridgeOutput
+	startedAt    time.Time
 
 	// certIPs are the IP addresses the certificate this bridge minted and
 	// serves names (WithCertifiedAddrs, backlog B457): the interface walk
@@ -1942,8 +1945,8 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	//     upscale gate says.
 	//
 	// Alpha-sort stays correct by construction: each conditional
-	// appends in lex order. Capacity 38 covers the current maximum
-	// (atlasEnrichment + booklets + carPlayOptimize + deleteVariants +
+	// appends in lex order. Capacity 39 covers the current maximum
+	// (atlasEnrichment + booklets + bridgeOutput + carPlayOptimize + deleteVariants +
 	// demoMode + diagnosticsSummary + dlnaArtwork + dlnaServer + dsdRender +
 	// dsdSilence +
 	// favorites + favoritesRevisions + firstIndexedAt + keyTempo + localOutputs +
@@ -1958,7 +1961,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// count — until 2026-08-16; keep the list and the number in step when
 	// adding a flag, since the list is the only thing that makes the
 	// number checkable.
-	feats := make([]string, 0, 38)
+	feats := make([]string, 0, 39)
 	// `atlasEnrichment` advertises the rich-tier Atlas metadata surface
 	// (cfg.Atlas.Enabled): the bridge accepts POST /v1/atlas-ingest from the
 	// closed-source app and serves GET /v1/atlas-meta/{release,artist}/{mbid}.
@@ -1973,6 +1976,17 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	// between `atlasEnrichment` and `carPlayOptimize` (a < b < c).
 	if s.bookletStore != nil && s.bookletDir != "" {
 		feats = append(feats, "booklets")
+	}
+	// `bridgeOutput` advertises that GET /v1/outputs lists the bridge's own
+	// player, an element of kind bridge, whenever the player has an
+	// identity (B470 PR 5b): serve's boot decision that the player is
+	// enabled and serve holds its data directory's lock (bridgeOutputOn),
+	// which probes, dials and starts nothing. A client tells a bridge older
+	// than the element from one whose player has no identity yet by it.
+	// Alpha-sorted between `booklets` and `carPlayOptimize` (bo < br < c).
+	bridgeOn := s.bridgeOutputOn()
+	if bridgeOn {
+		feats = append(feats, "bridgeOutput")
 	}
 	if s.upscaleActive() {
 		if s.carPlayOptimizeEnabled != nil && s.carPlayOptimizeEnabled() {
@@ -2065,12 +2079,17 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		// and `localOutputs`.
 		feats = append(feats, "keyTempo")
 	}
-	// `localOutputs` advertises GET /v1/outputs. It is on only when
-	// output.mpd resolves on and this host is Linux. Alpha-sorted
-	// between `keyTempo` and `loudness`. `outputReading` (GET
-	// /v1/outputs/{id}/reading, below) rides the same gate, asked once.
-	localOutputsOn := s.localOutputs != nil && s.localOutputs.Active(r.Context())
-	if localOutputsOn {
+	// `localOutputs` advertises GET /v1/outputs: on while output.mpd
+	// resolves on and this host is Linux (the MPD gate, mpdOn), or while
+	// serve's player is enabled with its data directory's lock (bridgeOn,
+	// above; B470 PR 5b). The MPD gate is asked here on every request,
+	// whatever bridgeOn says, never short-circuited by it: its true answer
+	// starts the loopback track route (OnActive) and is the route's answer
+	// (activeNow). Alpha-sorted between `keyTempo` and `loudness`.
+	// `outputReading` (GET /v1/outputs/{id}/reading, below) is on the MPD
+	// gate alone, asked once.
+	mpdOn := s.localOutputs != nil && s.localOutputs.Active(r.Context())
+	if mpdOn || bridgeOn {
 		feats = append(feats, "localOutputs")
 	}
 	if s.analysisActive() {
@@ -2096,11 +2115,13 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	}
 	// `outputReading` advertises GET /v1/outputs/{id}/reading, the live
 	// reading of an output's DAC and the bridge's verdict on it (B473 B3).
-	// Its own key, on the localOutputs gate: a bridge built between B2 and
-	// B3 answers /v1/outputs and has no reading route, so a client keyed on
-	// localOutputs alone would ask it for one. Alpha-sorted between
-	// `operatorDrivenUpscale` and `pairingEventsSupported`.
-	if localOutputsOn {
+	// Its own key, on the MPD gate alone (B470 PR 5b): the reading probes
+	// and dials MPD for any well-formed id, so a bridge whose localOutputs
+	// is its player's alone has no reading route; and a bridge built
+	// between B2 and B3 answers /v1/outputs and has none either, so a
+	// client keyed on localOutputs alone would ask it for one. Alpha-sorted
+	// between `operatorDrivenUpscale` and `pairingEventsSupported`.
+	if mpdOn {
 		feats = append(feats, "outputReading")
 	}
 	if s.eventBroker != nil && s.pairing != nil {

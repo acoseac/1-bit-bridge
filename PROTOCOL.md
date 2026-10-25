@@ -747,11 +747,13 @@ Gate on the **`rendererDiscovery`** feature flag — present only when the DLNA 
 
 ### `GET /v1/outputs` (additive; `localOutputs`)
 
-Gate on the **`localOutputs`** feature flag. It sorts between `keyTempo` and `loudness`, and it is present only when `output.mpd` resolves on and this bridge is running on Linux. `on` resolves on even when the daemon is down. `auto` (the default, and the empty value) resolves on when a configuration was read or a daemon greeted. `off` does not. Off Linux the flag is absent even when the config says `on`: the readers refuse the host. `ProtocolVersion` stays `1`.
+Gate on the **`localOutputs`** feature flag. It sorts between `keyTempo` and `loudness`, and it is present while either of two gates holds. The MPD gate: `output.mpd` resolves on and this bridge is running on Linux. `on` resolves on even when the daemon is down. `auto` (the default, and the empty value) resolves on when a configuration was read or a daemon greeted. `off` does not. Off Linux the MPD gate is shut even when the config says `on`: the readers refuse the host. The player's gate: the bridge's own player is enabled (`output.player.enabled`, in a player block that is valid) on a bridge that runs on Linux and is not public, its OpenHome port is not one `bridge serve` already binds, and `bridge serve` holds its data directory's lock. `bridge serve` decides it when it starts, so a change of `output.player` applies at its next start; it probes, dials and starts nothing. `ProtocolVersion` stays `1`.
 
-Without the flag the route answers `404` `local_outputs_not_supported`. With it, the route is bearer-authenticated like the other library routes and returns one snapshot of the MPD and DAC on this box. The answer may be a fraction of a second old. It is not a live meter, and it never changes playback.
+**`bridgeOutput`** (additive) sorts between `booklets` and `carPlayOptimize`, and it is present exactly while the player's gate holds: this bridge lists its player as an element of kind `bridge` (**The `bridge` object**, below) whenever the player has an identity. A bridge that advertises `localOutputs` without `bridgeOutput` lists MPD's outputs alone, or is older than the element; one that advertises `bridgeOutput` and lists no element of kind `bridge` has a player with no identity yet.
 
-`kind` is an open string. This bridge sends `mpd`. A client ignores an output whose `kind` it does not know, so a later kind is not a breaking change.
+Without `localOutputs` the route answers `404` `local_outputs_not_supported`. With it, the route is bearer-authenticated like the other library routes and returns one snapshot of the outputs on this box: the MPD and DAC elements while the MPD gate holds, then the element of the bridge's own player while the player's gate holds and the player has an identity. The MPD elements may be a fraction of a second old; the player's element is read afresh at every request. It is not a live meter, and it never changes playback. While the MPD gate is shut nothing is asked of MPD: with `off`, or off Linux, nothing is probed or dialled, and with `auto` the gate's own detection may run as it does for `/v1/health`, and no session is dialled after a miss. With both gates open, a failure of the MPD elements is the answer's: `500`, with no element of the player's either.
+
+`kind` is an open string. This bridge sends `mpd` and `bridge`. A client ignores an output whose `kind` it does not know, so a later kind is not a breaking change.
 
 ```json
 {
@@ -792,36 +794,109 @@ Without the flag the route answers `404` `local_outputs_not_supported`. With it,
           "found": 20
         }
       ]
+    },
+    {
+      "id": "bridge:7d444840-9dc0-11d1-b245-5ffdce74fad2",
+      "kind": "bridge",
+      "player": { "software": "bridge", "version": "0.2.3" },
+      "dac": null,
+      "pathRules": [],
+      "bridge": {
+        "openHome": {
+          "udn": "uuid:7d444840-9dc0-11d1-b245-5ffdce74fad2",
+          "endpoints": ["192.168.1.42:7792"]
+        },
+        "state": "stopped",
+        "reason": null,
+        "lastError": null,
+        "libraryScope": "self",
+        "fixedVolume": true,
+        "codecs": ["flac", "wav", "aiff", "alac"],
+        "dsdMode": "off",
+        "allowDoP": false
+      }
     }
   ]
 }
 ```
 
-A kind `mpd` element has every key but the additive `mpd.loopbackBaseURL`. A list is `[]`, never `null`. `dac` is `null` when the element names no card. There is still one element then, so a bridge with the flag on and no card does not answer `outputs: []`. `mpd` is present for kind `mpd` and omitted for any other kind. A client decodes `mpd` as optional, so the bridge's own player (kind `bridge`) can be listed without one. When MPD's device does not resolve to one card, each candidate card is its own element of `outputs`: the same `mpd` and `pathRules`, a different `id` and `dac`.
+A kind `mpd` element has every key but the additive `mpd.loopbackBaseURL`. A list is `[]`, never `null`. `dac` is `null` when the element names no card. There is still one element then, so a bridge whose MPD gate holds and has no card does not answer `outputs: []`. A bridge whose `localOutputs` is the player's gate alone answers `outputs: []` while its player has no identity (below); a client reads an empty list as no outputs. `mpd` is present for kind `mpd` and omitted for any other kind. A client decodes `mpd` as optional, so the bridge's own player (kind `bridge`) is listed without one. `bridge` is present for kind `bridge` and omitted for any other kind, so a kind `mpd` element is what it was before the player was listed. When MPD's device does not resolve to one card, each candidate card is its own element of `outputs`: the same `mpd` and `pathRules`, a different `id` and `dac`. The player's element comes after MPD's.
 
-`id` is the hex SHA-256 of the bridge identity, a newline, the MPD endpoint, a newline, the card's ALSA id (the id string in `/proc/asound/cards`, for example `A20`), a newline, and its USB id (`vendor:product`). The bridge identity is the hex SHA-256 of the data directory, the same directory the DLNA UDN is derived from, without the friendly name. The TLS certificate and the library name are not inputs: a renewing certificate and a rename keep the id. The card index is not an input either: it changes when a DAC is replugged or the box reboots, and the app remembers an output by this id. A null `dac` uses an empty ALSA id and an empty USB id. The same data directory, endpoint, ALSA id and USB id keep the same id across restarts. Two cards do not share an id.
+The `id` of a kind `bridge` element is `bridge:` and the player's UUID (**The `bridge` object**). The `id` of a kind `mpd` element is the hex SHA-256 of the bridge identity, a newline, the MPD endpoint, a newline, the card's ALSA id (the id string in `/proc/asound/cards`, for example `A20`), a newline, and its USB id (`vendor:product`). The bridge identity is the hex SHA-256 of the data directory, the same directory the DLNA UDN is derived from, without the friendly name. The TLS certificate and the library name are not inputs: a renewing certificate and a rename keep the id. The card index is not an input either: it changes when a DAC is replugged or the box reboots, and the app remembers an output by this id. A null `dac` uses an empty ALSA id and an empty USB id. The same data directory, endpoint, ALSA id and USB id keep the same id across restarts. Two cards do not share an id.
 
-`player.software` is `volumio`, `moode`, `mpd`, or `""` when the box is none of those. `player.version` is that player's version.
+`player.software` is `volumio`, `moode`, `mpd`, or `""` when the box is none of those, for kind `mpd`, and `bridge` for kind `bridge`. `player.version` is that player's version: for kind `bridge`, the bridge's own (`/v1/health`'s `serverVersion`).
 
 `mpd.port` is the TCP port in the endpoint. A socket endpoint uses the `port` from `mpd.conf`, or 6600. `mpd.version` is the daemon's greeting, and `""` when the daemon is down. `mpd.state` is `play`, `pause`, `stop`, or `unknown` when `status` did not answer; a daemon that is down is `unknown` and still `200`.
 
 `mpd.addresses` are the LAN addresses, from the same set `/v1/health` and mDNS advertise, on which a short dial of that port reads `OK MPD`. Loopback is never listed, and neither is a link-local address (`fe80::/10`, `169.254/16`) or a hostname. A socket-only or loopback-only daemon has `addresses: []` and `reachableFromLAN: false`. The app matches a picker row to this box by the resolved IP, never by host text.
 
-`mpd.loopbackBaseURL` (additive) is the base URL of the bridge's loopback track route, `http://127.0.0.1:<port>` (7791 unless `output.loopbackPort` names another), present only while that route is serving and absent otherwise, an older bridge included. The route serves this bridge's own tracks over plain HTTP on 127.0.0.1 and ::1 and on no other address, with no authentication and no SSDP. Those limits keep it off the network, but they do not authenticate the caller. A track id is no secret, since it is derived from the track's path (below), so any process on this box can fetch any track whose path it knows or can guess, as this box's MPD does. It serves while `output.mpd` resolves on (the `localOutputs` gate), whether or not the DLNA server is enabled, and asks on every request, so a URL the app handed MPD earlier is refused once `output.mpd` no longer resolves on. For one of this bridge's tracks that MPD's database cannot play by path (the root's rule is not `proven`, or `find` misses the track), the app hands this MPD `<loopbackBaseURL>/dlna/file/<trackID>`. It never fetches that URL itself and never hands it to an MPD on another box. `<trackID>` is the DLNA listener's track id: the first 16 hex digits of the SHA-256 of a NUL byte followed by the track's `path` as `/v1/manifest` sends it. The bytes are the file's, unaltered, and a range request is answered `206`. The route answers `GET` and `HEAD` of one track id, and only for a file that, its links resolved, lies inside a library root. It lists nothing and serves no rendition and no track proxied from an upstream server. Anything else is refused with `{"error": code, "message": …}`: `403 loopback_only` (the request did not come from loopback), `403 loopback_host_only` (its `Host` is not `127.0.0.1`, `[::1]` or `localhost`, with any port or none), `403 forwarded_request` (it carries `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host` or `X-Real-IP`), `404 not_serving` (`output.mpd` does not resolve on now), `404 not_found` (no track with that id, or a path below one), `404 not_a_file`, `403 outside_library`, `405 method_not_allowed` and `500 internal`. These belong to the loopback route, not to `/v1`, so the error table below does not list them.
+`mpd.loopbackBaseURL` (additive) is the base URL of the bridge's loopback track route, `http://127.0.0.1:<port>` (7791 unless `output.loopbackPort` names another), present only while that route is serving and absent otherwise, an older bridge included. The route serves this bridge's own tracks over plain HTTP on 127.0.0.1 and ::1 and on no other address, with no authentication and no SSDP. Those limits keep it off the network, but they do not authenticate the caller. A track id is no secret, since it is derived from the track's path (below), so any process on this box can fetch any track whose path it knows or can guess, as this box's MPD does. It serves while `output.mpd` resolves on (the MPD gate behind `localOutputs`; the player's gate starts and serves nothing here), whether or not the DLNA server is enabled, and asks on every request, so a URL the app handed MPD earlier is refused once `output.mpd` no longer resolves on. For one of this bridge's tracks that MPD's database cannot play by path (the root's rule is not `proven`, or `find` misses the track), the app hands this MPD `<loopbackBaseURL>/dlna/file/<trackID>`. It never fetches that URL itself and never hands it to an MPD on another box. `<trackID>` is the DLNA listener's track id: the first 16 hex digits of the SHA-256 of a NUL byte followed by the track's `path` as `/v1/manifest` sends it. The bytes are the file's, unaltered, and a range request is answered `206`. The route answers `GET` and `HEAD` of one track id, and only for a file that, its links resolved, lies inside a library root. It lists nothing and serves no rendition and no track proxied from an upstream server. Anything else is refused with `{"error": code, "message": …}`: `403 loopback_only` (the request did not come from loopback), `403 loopback_host_only` (its `Host` is not `127.0.0.1`, `[::1]` or `localhost`, with any port or none), `403 forwarded_request` (it carries `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host` or `X-Real-IP`), `404 not_serving` (`output.mpd` does not resolve on now), `404 not_found` (no track with that id, or a path below one), `404 not_a_file`, `403 outside_library`, `405 method_not_allowed` and `500 internal`. These belong to the loopback route, not to `/v1`, so the error table below does not list them.
 
 `dac` is the card MPD's enabled ALSA output names when that device resolves to exactly one card, and `isMPDsOutput` is then `true`. `hw:N`, `hw:N,D`, `hw:CARD=ID`, `hw:CARD=ID,DEV=D`, and the same forms with `plughw:`, name that card directly. Any other device string is a PCM name. It is looked up in `/etc/alsa/conf.d/*.conf` and then `/etc/asound.conf`. A PCM name defined more than once is not resolved. A `pcm` stanza that is not `pcm.NAME { … }` or `pcm.!NAME { … }` makes the file unresolved. `slave.pcm` (the dotted key, or a `slave { pcm }` block) is followed through `type empty` and `type plug` only, at most 8 hops, until a `type hw` with a `card` id or index. A slave that contains `:` is that device string, not a PCM whose name is the string. A `ctl` block and a `defaults` assignment beside the PCM blocks are ignored. Inside one `pcm.NAME` block, `@args`, `@func`, a `$` variable, or a nested block this reader does not model makes that name unresolved and leaves the rest of the file in force. A `ctl` or `defaults` block is skipped, directives inside it included. `@hooks`, `@args`, `@func` or an include at the top level, and a file that does not parse, make the whole configuration unresolved. A file that is present but cannot be read, or that does not parse, makes the whole configuration unresolved: the other files are not used. A missing file does not. A quoted string accepts `\"`, `\\` and `\'` only; any other escape makes the file unresolved. A chain through anything else (`dmix`, `softvol`, `rate`, `route`, `multi`, another plugin, a hook, an include), a repeated `type`, `card`, `device` or `slave` in one block, a cycle, a longer chain, a file the reader cannot parse, or a missing file does not resolve. When it does not resolve, each USB card is listed with `isMPDsOutput` null. When several devices resolve to several cards, those cards are listed with `isMPDsOutput` null. `isMPDsOutput` is `true` or `null`, never `false`. `usbId` is `vendor:product` or `""`.
 
 `capabilities` come from every playback altset of that card's PCM device, not from the running `hw_params`. `maxPCMRate` and `pcmBitDepths` count only PCM formats (`S` or `U` plus a bit depth). A native DSD rate is the altset's frame rate times the format's width: `DSD_U32_*` ×32, `DSD_U16_*` ×16, `DSD_U8` ×8. A DSD format of another width is listed in `dsdFormats` and adds no rate.
 
-`pathRules` has one element per library root, never per track. `state` is `proven` (the root is MPD's music directory, or lies under exactly one top-level entry of it, and every sampled track was found), `mismatch` (that match, and a sample's lookup answered that the file is not there), `unproven` (no single match), or `unchecked` (a match, and no connection, no tracks, or a lookup that returned an error). An error is not evidence the file is missing. `checked` and `found` are those counts, at most 20. `stripBridgePrefix` and `prependMpdPrefix` are filled for `proven`, `mismatch`, and `unchecked` when `os.SameFile` matched, and empty for `unproven`. The client applies them only when `state` is `proven`. It does not re-derive the prefixes. A multi-root library stores `filepath.Base(root)/` in front of each path within that root, and that string is `stripBridgePrefix`. A single-root library stores paths with no root-basename prefix, and `stripBridgePrefix` is empty.
+`pathRules` has one element per library root, never per track, for kind `mpd`. A kind `bridge` element's `pathRules` is `[]`: path rules map this bridge's paths onto MPD's, and are inapplicable to kind `bridge`. `state` is `proven` (the root is MPD's music directory, or lies under exactly one top-level entry of it, and every sampled track was found), `mismatch` (that match, and a sample's lookup answered that the file is not there), `unproven` (no single match), or `unchecked` (a match, and no connection, no tracks, or a lookup that returned an error). An error is not evidence the file is missing. `checked` and `found` are those counts, at most 20. `stripBridgePrefix` and `prependMpdPrefix` are filled for `proven`, `mismatch`, and `unchecked` when `os.SameFile` matched, and empty for `unproven`. The client applies them only when `state` is `proven`. It does not re-derive the prefixes. A multi-root library stores `filepath.Base(root)/` in front of each path within that root, and that string is `stripBridgePrefix`. A single-root library stores paths with no root-basename prefix, and `stripBridgePrefix` is empty.
 
-**Response** (`404 local_outputs_not_supported`): local outputs are not enabled on this bridge. Gate on the `localOutputs` feature flag.
+**Response** (`404 local_outputs_not_supported`): local outputs are not enabled on this bridge: neither the MPD gate nor the player's holds. Gate on the `localOutputs` feature flag.
+
+#### The `bridge` object (kind `bridge`)
+
+An element of kind `bridge` is this bridge's own player. It is listed while the player's gate holds (`bridgeOutput`) and the player has an identity: a `player-uuid` in the data directory that holds one UUID, which the player's first start makes, or `bridge output dac bind`. Before the player has one, and while `bridge serve` does not hold its data directory's lock (that file is then another serve's player's), there is no element, and the answer may be `200` with `outputs: []`. Listing the player never makes or changes its identity.
+
+Its `id` is `bridge:` and the player's UUID, the one its OpenHome UDN carries; it is no reading's id, and `GET /v1/outputs/{id}/reading` answers it `404` `output_not_found`. `mpd` is absent. `dac` is `null`: the bridge does not report its player's DAC here yet. `pathRules` is `[]`, inapplicable to kind `bridge`. Every key of `bridge` is present.
+
+**`openHome`** is the player's OpenHome Source while `output.player.openhome` was on when `bridge serve` started and the Source listens on at least one LAN address, and `null` otherwise. `udn` is `uuid:` and the player's UUID, as the Source's description and its SSDP advertisements name it. `endpoints` are the host and port of each LOCATION the Source advertises: one per LAN address it listens on, each with its own port when `output.player.openhomePort` is `0`, in address order, written as a URL's authority writes them (an IPv6 host in brackets, its zone percent-encoded: `[fe80::1%25eth0]:7792`). **A client correlates a discovered Source with this element only when the UDN matches and the host and port of the Source's LOCATION are one of `endpoints`**: SSDP carries the UDN in clear, and any host on the LAN can advertise it with a LOCATION of its own.
+
+**`state`** is `stopped`, `playing`, `paused` or `unavailable`, and **`reason`** is a word while `state` is `unavailable`, `null` otherwise. The reason is the first of these that holds, in this order:
+
+| `reason` | The player is unavailable because |
+|---|---|
+| `not_configured` | no DAC is bound: `output.player.device` names no binding |
+| `config_invalid` | `output.player.pauseReleaseSeconds` is outside the 1 s to 10 min the player takes |
+| `starting` | its start has not finished |
+| `start_failed` | its start ended with no player running: it failed (its storage refused, say), or serve stopped during it |
+| `closed` | it has shut down, or ended |
+| `output_unknown` | it has heard nothing of its DAC yet |
+| `disabled` | `output.player.enabled` was turned off while `bridge serve` runs |
+| `binding_changed` | `output.player.device` names another DAC than the one it started with |
+| `device_missing` | no card the binding names is there |
+| `device_ambiguous` | two or more cards the binding names are there, or one beside a card whose identity cannot be read |
+| `endpoint_missing` | the DAC is there with no playback stream at the bound PCM device |
+| `binding_invalid` | the binding cannot be resolved as it stands (a port binding whose controller is gone, say) |
+| `identity_unsupported` | the cards' identities cannot be read at all |
+| `identity_transient` | the kernel is adding or removing a card the binding may name |
+| `identity_incomplete` | the listing of the cards was cut short |
+| `output_unavailable` | its DAC is unavailable for a reason this table does not name |
+| `maintenance` | maintenance holds it |
+| `release_unconfirmed` | the release of its DAC was not confirmed in time, and it opens nothing until it is |
+
+When none holds, `state` is the transport's: `playing` (a track that is starting included), `paused` or `stopped`, and while the player releases its DAC, what follows the release.
+
+**`lastError`** is `device_busy` while the last attempt to play (a start, or a resume after a pause let the DAC go) failed because another process holds the DAC, MPD most often, and no later attempt has succeeded; `null` otherwise. It is independent of `state`: a busy start leaves the player `stopped`. The next attempt replaces it, whichever way it goes.
+
+**`libraryScope`** is `self`: the player plays this bridge's own tracks, the ones it would not refuse as `not_indexed` (no row of the library's index has it), `routed` (an upstream server's track) or `outside_library` (a file outside every library root configured now). An OpenHome controller queues one by the URI the player's Source takes in an Insert, `http://<host>:<port>/dlna/file/<id>`: a host this bridge advertises, the DLNA listener's port, and the track's DLNA id (B470 PR 5a4).
+
+**`fixedVolume`** is `true` while the player has no volume control (`output.player.mixer` none, the one this release takes): the DAC receives the file's own level. **`dsdMode`** is `off`, the one this release takes (a DSD track is refused, never converted), and **`allowDoP`** is `false`, both as the player took them when `bridge serve` started.
+
+**`codecs`** are the containers the player plays in this release: `flac`, `wav`, `aiff` and `alac` (ALAC in an M4A). A client matches a track by its `codec` in `/v1/manifest`:
+
+| Track `codec` | `codecs` word |
+|---|---|
+| `FLAC` | `flac` |
+| `WAV` | `wav` |
+| `AIFF` | `aiff` |
+| `ALAC` | `alac` |
+
+Any other `codec` names no container the player plays: `AAC`, which the manifest tells from ALAC in an `.m4a` by its `codec`, `MP3`, `OGG`, `DSF`, `DFF`, and a compressed AIFF-C or WAV. A track with no `codec` cannot be matched, and the player's own refusal decides. DSD containers appear here once a DSD mode other than `off` ships. A container listed is no promise for every file in it: the player refuses floating-point PCM (`sampleFormat` `"float"`), and a rate, a depth or a transport its DAC does not take.
+
+**Until `dac` is reported, a client's check of a queue covers its scope and its containers only**: the player's own refusal stays the authority on rates and transports.
 
 ### `GET /v1/outputs/{id}/reading` (additive; `outputReading`)
 
-Gate on the **`outputReading`** feature flag. It sorts between `operatorDrivenUpscale` and `pairingEventsSupported`, and it is present exactly when `localOutputs` is: `output.mpd` resolves on and this bridge runs on Linux. A bridge that advertises `localOutputs` without `outputReading` has no such route. Without the flag the route answers `404` `local_outputs_not_supported`. `ProtocolVersion` stays `1`.
+Gate on the **`outputReading`** feature flag. It sorts between `operatorDrivenUpscale` and `pairingEventsSupported`, and it is present exactly when the MPD gate holds: `output.mpd` resolves on and this bridge runs on Linux. The player's gate opens no reading. A bridge that advertises `localOutputs` without `outputReading` (its `localOutputs` its player's alone, or a bridge older than the reading) has no such route. Without the flag the route answers `404` `local_outputs_not_supported`. `ProtocolVersion` stays `1`.
 
-The route is bearer-authenticated. `{id}` is an `id` from `GET /v1/outputs`. It returns what that output's DAC receives now, which the bridge reads from the kernel's `/proc/asound` and from the MPD beside it, and the bridge's verdict on the format it receives. It only reads. To MPD it sends `status`, `currentsong`, `replay_gain_status` and `outputs` (and `password`, when one is configured), never a command that changes playback, the queue, the database or MPD's configuration, and it reads `mpd.conf` and the ALSA configuration files without writing either.
+The route is bearer-authenticated. `{id}` is the `id` of a kind `mpd` element of `GET /v1/outputs`; a kind `bridge` element's id is answered `404` `output_not_found`. It returns what that output's DAC receives now, which the bridge reads from the kernel's `/proc/asound` and from the MPD beside it, and the bridge's verdict on the format it receives. It only reads. To MPD it sends `status`, `currentsong`, `replay_gain_status` and `outputs` (and `password`, when one is configured), never a command that changes playback, the queue, the database or MPD's configuration, and it reads `mpd.conf` and the ALSA configuration files without writing either.
 
 ```json
 {
@@ -941,9 +1016,9 @@ The verdict is `format_preserved` (or `format_preserved_dop`) when all of these 
 
 A warning is information beside the verdict. It never changes the verdict, which claims no sample, and it is given only for MPD's own running stream: not when a condition under **A stream to judge** fails, and not for a settling or unknown reading. Its absence proves nothing: an empty `warnings` says the bridge read no such setting, not that MPD and ALSA apply none. A setting MPD does not report over its protocol (the mixer type, normalization, filters, the ALSA stages) comes from files the bridge cannot show MPD runs with, and nothing from `mpd.conf` is warned of when it was not read or has no block for the output, or when two outputs could be the one holding the card.
 
-**Response** (`404 output_not_found`): `{id}` names no output of this bridge now. When `/proc/asound` cannot be read, the ALSA configuration was not read, the probe that finds MPD passed its deadline without the MPD endpoint the ids are made from, or the reading failed, an id of the right form (64 lower-case hex digits) is answered `200` with `state` `unknown`: what would say which ids exist could not be read.
+**Response** (`404 output_not_found`): `{id}` names no output of this bridge now. When `/proc/asound` cannot be read, the ALSA configuration was not read, the probe that finds MPD passed its deadline without the MPD endpoint the ids are made from, or the reading failed, an id of the right form (64 lower-case hex digits) is answered `200` with `state` `unknown`: what would say which ids exist could not be read. A kind `bridge` element's id is not of that form.
 
-**Response** (`404 local_outputs_not_supported`): local outputs are not enabled on this bridge. Gate on the `outputReading` feature flag.
+**Response** (`404 local_outputs_not_supported`): the MPD gate is shut on this bridge. Gate on the `outputReading` feature flag.
 
 ### DLNA listener: `GET /dlna/artwork/{key}` (additive; `dlnaArtwork`)
 
@@ -1962,8 +2037,8 @@ Errors are JSON, with the exceptions listed under the table:
 |    404 | `pairing_code_not_supported` | Bridge doesn't issue pairing-link codes (`POST /v1/pairing/redeem`) |
 |    404 | `events_not_supported`   | `GET /v1/events` on a demo bridge, or either event stream with no event broker running (`serve` always starts one); iOS falls back to polling |
 |    404 | `smart_playlists_not_supported` | `smartPlaylists.enabled` is off (no `smartPlaylists` flag) — no `/v1/smart-playlists` |
-|    404 | `local_outputs_not_supported` | `GET /v1/outputs` or `GET /v1/outputs/{id}/reading` when `localOutputs` is absent (`output.mpd` resolves off, or this host is not Linux) |
-|    404 | `output_not_found`       | `GET /v1/outputs/{id}/reading`: `{id}` names no output of this bridge now |
+|    404 | `local_outputs_not_supported` | `GET /v1/outputs` when `localOutputs` is absent (neither the MPD gate, `output.mpd` resolving on on a Linux host, nor the bridge's own player's gate holds), or `GET /v1/outputs/{id}/reading` when `outputReading` is absent (`output.mpd` resolves off, or this host is not Linux) |
+|    404 | `output_not_found`       | `GET /v1/outputs/{id}/reading`: `{id}` names no output of this bridge now, or names the bridge's own player (kind `bridge`) |
 |    404 | `playlist_files_not_supported` | No playlist-file index (no `playlistFiles` flag) — no `GET /v1/playlist-files`; `serve` wires it on every bridge |
 |    404 | `favorites_not_supported` | No favorites store, as on a demo bridge (no `favorites` flag) — no `/v1/favorites` |
 |    404 | `playlist_backup_not_supported` | No playlist store, as on a demo bridge (no `playlistBackup` flag) — no `/v1/playlists` route |
@@ -2056,7 +2131,7 @@ The scheme is **additive** — bridges that don't ship the admin console (pre-0.
 
 ## Golden fixtures
 
-See the bridge repo's `testdata/fixtures/` for canonical manifest payloads used as decode-test goldens on the iOS side (`com.acoseac.dsdplayer/Tests/com_acoseac_dsdplayerTests/Fixtures/Bridge/`). A schema change must regenerate the fixtures in both places in the same PR pair.
+The canonical manifest payloads used as decode-test goldens are on the iOS side (`com.acoseac.dsdplayer/Tests/com_acoseac_dsdplayerTests/Fixtures/Bridge/`). The bridge repo keeps no shared fixture directory: its tests pin each shape where they build it. A schema change updates the bridge's tests and the iOS fixtures in the same PR pair.
 
 ## Updates
 

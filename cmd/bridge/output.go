@@ -19,7 +19,7 @@ import (
 
 // outputCmd dispatches `bridge output <verb>`: the box the bridge runs on,
 // as an audio output. `dac` reads what the box's sound cards say and
-// `player` reads the box's MPD and how it is set. Both write nothing.
+// `player` reads the box's MPD and how it is set.
 func outputCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		outputUsage(stderr)
@@ -29,6 +29,10 @@ func outputCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	case "dac":
 		return outputDACCmd(ctx, args[1:], stdout, stderr)
 	case "player":
+		if len(args) > 1 && !strings.HasPrefix(args[1], "-") {
+			fmt.Fprintf(stderr, "unknown output player subcommand: %s\n", args[1])
+			return 2
+		}
 		return outputPlayerCmd(ctx, args[1:], stdout, stderr)
 	case "pcm-test":
 		// Not in outputUsage: the B470 hardware harness, run by hand on a

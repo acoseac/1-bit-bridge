@@ -34,9 +34,10 @@ import (
 
 // outputChecklistSource is what the checklist reads.
 type outputChecklistSource struct {
-	// Active is the localOutputs gate: output.mpd resolves on and the host
-	// is Linux. When it is false the bridge is no player and there is no
-	// checklist.
+	// Active is the MPD gate: output.mpd resolves on and the host is Linux.
+	// When it is false the bridge is no MPD player and there is no
+	// checklist, whatever the bridge's own player does: the checklist stays
+	// MPD's, on that gate alone (B470 PR 5b).
 	Active func(context.Context) bool
 	// Outputs is the body GET /v1/outputs serves.
 	Outputs func(context.Context) (api.OutputsResponse, error)
@@ -131,7 +132,10 @@ func unreadInput(err error, src outputChecklistSource) outputcheck.Input {
 }
 
 // checklistInput reads the outputs body: the player, MPD and path rules
-// every element shares, and each element's card.
+// every element shares, and each element's card. It reads the elements of
+// kind mpd alone: the bridge's own player's (kind bridge, B470 PR 5b), which
+// serve's body carries after them and which has no mpd object, is no MPD
+// output, so the checklist stays MPD's.
 func checklistInput(resp api.OutputsResponse) outputcheck.Input {
 	var in outputcheck.Input
 	for i, o := range resp.Outputs {
@@ -209,7 +213,10 @@ func doctorChecks(lines []outputcheck.Line) []doctor.Check {
 // doctorOutputChecklist is `bridge doctor`'s source: the GET /v1/outputs
 // builder over the loaded config, asked once and closed, so the doctor
 // holds no MPD connection past its run; the serving bridge's loopback
-// route, asked on its port; and the paired devices in tokens.json.
+// route, asked on its port; and the paired devices in tokens.json. It
+// stays MPD's: the one-shot builder lists MPD's elements alone, on the MPD
+// gate, and the doctor never reads or makes the bridge's own player's
+// identity (B470 PR 5b).
 //
 // seam, when not nil, edits the builder's config before it is built: a
 // test stands in for Linux and for the box's MPD and cards there.

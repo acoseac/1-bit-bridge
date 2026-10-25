@@ -223,6 +223,23 @@ type StopInfo struct {
 	At    time.Time
 }
 
+// Attempt is the last play attempt whose answer the owner took (B470 PR
+// 5b): a session's Start, or the Resume of a paused session, and how it
+// went. Seq numbers the attempts of the engine's run from 1, 0 for none yet,
+// so a later attempt is known from an earlier one. Failed is one that
+// failed: a Start that returned an error, refused its first entry or passed
+// its deadline, or a Resume the backend refused or that passed its
+// deadline. Busy is a failure whose error wraps ErrDeviceBusy: another
+// process held the device. Each attempt replaces the last, so a later one
+// that succeeded, or failed for another reason, clears a busy one, whatever
+// happened in between. LastStop is no such record: a Start that succeeds
+// stops nothing, so it leaves the last stop as it was.
+type Attempt struct {
+	Seq    uint64
+	Failed bool
+	Busy   bool
+}
+
 // EditState says whether inserts and the other token-advancing edits are
 // taken: Refused is "" when they are, and otherwise the reason each is
 // refused with (a reservation that could not be made durable, a file that
@@ -270,6 +287,7 @@ type Snapshot struct {
 	resumed     ResumeResult
 	resumeErr   string
 	lastStop    StopInfo
+	attempt     Attempt
 	skips       map[uint32]Skip
 	faults      []Fault
 	edits       EditState
@@ -414,6 +432,11 @@ func (s *Snapshot) LastResume() (ResumeResult, string) { return s.resumed, s.res
 
 // LastStop is why playback last stopped.
 func (s *Snapshot) LastStop() StopInfo { return s.lastStop }
+
+// LastAttempt is the last play attempt and how it went (Attempt): what says
+// whether the last Start or Resume found the device busy, which LastStop
+// cannot, since a Start that succeeds does not replace it.
+func (s *Snapshot) LastAttempt() Attempt { return s.attempt }
 
 // Skipped is why entry id was skipped, when it was.
 func (s *Snapshot) Skipped(id uint32) (Skip, bool) {

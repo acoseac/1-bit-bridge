@@ -18,14 +18,20 @@ func tryLock(f *os.File) error {
 	return controlFD(f, "LockFileEx", func(fd uintptr) error {
 		// os.File's handle is synchronous, and LockFileEx still takes an
 		// OVERLAPPED: its offset is where the range starts, zero.
-		err := windows.LockFileEx(windows.Handle(fd),
+		return lockedErr(windows.LockFileEx(windows.Handle(fd),
 			windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,
-			0, lockAllBytes, lockAllBytes, new(windows.Overlapped))
-		if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
-			return ErrLocked
-		}
-		return err
+			0, lockAllBytes, lockAllBytes, new(windows.Overlapped)))
 	})
+}
+
+// lockedErr is TryLock's reading of what LockFileEx answered: with
+// LOCKFILE_FAIL_IMMEDIATELY a range another handle holds is
+// ERROR_LOCK_VIOLATION, which is ErrLocked, and anything else is itself.
+func lockedErr(err error) error {
+	if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+		return ErrLocked
+	}
+	return err
 }
 
 // keepsNoLocks is KeepsNoLocks on Windows: LockFileEx's answers for a

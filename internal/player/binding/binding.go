@@ -67,6 +67,15 @@ const (
 	StateIdentityIncomplete State = "identity_incomplete"
 )
 
+// States is every State, in the order they are declared above (B470 PR 5b):
+// all but StateAvailable can be the player's output reason, which GET
+// /v1/outputs passes on as a closed list of words (cmd/bridge maps each,
+// and PROTOCOL.md names each).
+func States() []State {
+	return []State{StateAvailable, StateNotConfigured, StateDisabled, StateDeviceMissing, StateDeviceAmbiguous,
+		StateEndpointMissing, StateBindingInvalid, StateIdentityUnsupported, StateIdentityTransient, StateIdentityIncomplete}
+}
+
 // CardState is what the readings say about one card.
 type CardState string
 

@@ -19,7 +19,9 @@ import (
 
 // RestoreOptions supplies the restore's warnings and randomness. Zero uses
 // crypto/rand.Reader and discards warnings. Random is for deterministic tests;
-// production callers leave it nil. It is read once per restored identity.
+// production callers leave it nil. A restored identity reads three bytes of it
+// for its jump; onto a UUID-only destination, restore first adopts the box and
+// that adoption reads three bytes before the jump's, six in all.
 type RestoreOptions struct {
 	Random io.Reader
 	Warn   func(string)
@@ -39,34 +41,16 @@ type RestoreOptions struct {
 // after the largest possible jump. The random part is uniform in [0, margin).
 const restoreMargin uint64 = 1 << 24
 
-// playerResetAdvice is the single remedy for giving up an exhausted or
-// unreadable live floor. With the service stopped, remove player-uuid,
-// player-ids.json and player-queue.json together; the next start makes a
-// new identity with no queue (a v1 queue has no identity stamp). A reset
-// gives up for good the identity it removes and any the box ran earlier
-// (one an earlier restore replaced on this box), unless, after this box last
-// ran it, another box took it over from this box, by restoring a snapshot
-// this box made, and has not reset it since, running or powered off.
-// Their values were held only by the floor the reset drops. No snapshot of
-// a given-up identity taken before the reset, on this box or another, may
-// restore its player identity again: remove player-uuid and player-ids.json
-// from every such snapshot, or delete it. Any other box that still holds a
-// given-up identity's files (one powered off since a migration, say) must
-// be reset too before it runs again. An identity another box took over from
-// this box by a restore, after this box last ran it, and has not reset since, is not given up: that box's
-// floor holds it, and its snapshots stay valid. If the reset answers a
-// refused restore, remove the two files from a copy of that snapshot, then
-// restore that copy. Only the restore refusal carries this step. A snapshot's
-// player-ids.json is never a repair; never delete the reservation while
-// keeping the identity. B524 will enforce this operator rule before 5a
-// ships.
+// playerReservationReadAdvice distinguishes access failures from a lost floor.
+const playerReservationReadAdvice = "restore read access to player-ids.json; for an unsupported version use a newer bridge; never replace it with a snapshot's older floor"
+
+// playerResetAdvice names the explicit escape from a lost or exhausted floor.
 func playerResetAdvice(restoring bool) string {
-	advice := fmt.Sprintf("with the service stopped, reset the player: remove the box's %s, %s and player-queue.json together", PlayerUUIDFileName, engine.ReservationFileName)
-	advice += "; this reset gives up for good the identity it removes and any the box ran earlier, unless, after this box last ran it, another box took it over from this box, by restoring a snapshot this box made, and has not reset it since, running or powered off; no snapshot of one of them taken before the reset, on this box or another, may restore its player identity again; remove player-uuid and player-ids.json from every such snapshot, or delete those snapshots; reset any other box that still holds one of them before it runs again; an identity another box took over from this box, after this box last ran it, and has not reset since, keeps its snapshots"
+	advice := "with the service stopped, run bridge reset-player --discard-floor; this seals all player identity restores on this box and the next start makes a new identity with no queue"
 	if restoring {
-		advice += fmt.Sprintf("; remove %s and %s from a copy of the snapshot as well, then restore that copy", PlayerUUIDFileName, engine.ReservationFileName)
+		advice = snapshotIdentityRemedy() + "; or " + advice
 	}
-	return advice + "; the next start makes a new identity with no queue, a new device to controllers; a snapshot's player-ids.json is never a valid repair; do not delete the reservation while keeping the player identity"
+	return advice
 }
 
 // snapshotIdentityRemedy is the remedy for a snapshot whose player identity
@@ -91,13 +75,15 @@ func snapshotIdentityRemedy() string {
 // decoded version decides, not the UUID alone, so a value that reads clean yet
 // is neither a v1 mark nor a matching v2 mark refuses rather than passing as a
 // zero floor. A reservation the manifest does not list is a genuine absence (a
-// snapshot from before reservations, or one an operator stripped), handled by
-// the caller's unmarked path. Live reservations never come here: every
-// decodable live floor covers the box, whatever UUID or supported version it
-// names.
+// snapshot from before reservations, or one an operator stripped) only when
+// the snapshot holds no entry of that name, which floorlessSnapshotBound then
+// bounds or refuses; one it holds means a damaged file list
+// (unlistedFloorError). Live reservations never come here: every decodable
+// live floor covers the box, whatever UUID or supported version it names.
 func snapshotReservationFloor(snapshotDir, id string, m Manifest) (engine.Reservation, bool, error) {
 	if !slices.Contains(m.Files, engine.ReservationFileName) {
-		return engine.Reservation{}, false, nil
+		_, err := os.Lstat(filepath.Join(snapshotDir, engine.ReservationFileName))
+		return engine.Reservation{}, false, unlistedFloorError(err)
 	}
 	r, err := engine.ReadReservation(filepath.Join(snapshotDir, engine.ReservationFileName))
 	if err != nil {
@@ -113,18 +99,82 @@ func snapshotReservationFloor(snapshotDir, id string, m Manifest) (engine.Reserv
 	}
 }
 
-// restorePlayerReservation preflights both counters, draws once, then makes
-// the new floor durable before the caller writes any identity file.
+// unlistedFloorError is restore's verdict on a floor the manifest does not
+// list, from an Lstat of the entry the snapshot would hold it in, which never
+// follows a link or opens a named pipe. Every writer that captures the floor
+// lists it beside the UUID, those from before the playerFloorRequired record
+// included, so a snapshot that holds a floor its manifest does not list has a
+// damaged file list: one bad byte in the floor's entry would otherwise send an
+// intact floor to the adoption ceiling, below what the identity handed out
+// (Codex on round 10, reproduced). An entry of any kind refuses before
+// anything is written, the adoption included; only ErrNotExist is a genuine
+// absence (nil); any other error refuses with itself.
+func unlistedFloorError(err error) error {
+	switch {
+	case err == nil:
+		return fmt.Errorf("restore: the snapshot's manifest does not list %s, which the snapshot holds: the manifest is damaged; nothing was restored; %s; or restore a newer snapshot of this box", engine.ReservationFileName, snapshotIdentityRemedy())
+	case errors.Is(err, os.ErrNotExist):
+		return nil
+	default:
+		return fmt.Errorf("restore: check the snapshot for an unlisted %s: %w; nothing was restored", engine.ReservationFileName, err)
+	}
+}
+
+// floorlessSnapshotCeiling bounds an identity whose snapshot, from a writer
+// before reservation capture, lists no floor: its counter space below 2^31,
+// the documented upgrade boundary, plus an adoption's random part below 2^24
+// when its source upgraded after the snapshot. Restore adds its jump on top.
+const floorlessSnapshotCeiling = 1<<31 + restoreMargin
+
+// floorlessSnapshotBound is the snapshot bound restorePlayerReservation takes
+// after snapshotReservationFloor, and its one treatment of a snapshot whose
+// manifest lists no floor and that holds none (!marked), which cannot bound
+// what its identity handed out. This bridge lists the floor beside every UUID
+// it captures and says so in the manifest (Manifest.PlayerFloorRequired), so
+// such a snapshot of its making was stripped: restore refuses it. One from an
+// older writer takes the adoption ceiling. marked stays the caller's, so the
+// missing-mark warning still fires; a listed floor that will not read, and an
+// unlisted one the snapshot holds, never come here.
+func floorlessSnapshotBound(snap engine.Reservation, marked bool, m Manifest) (engine.Reservation, error) {
+	if marked {
+		return snap, nil
+	}
+	if m.PlayerFloorRequired {
+		return engine.Reservation{}, fmt.Errorf("restore: the snapshot holds %s without %s, which the bridge that wrote it lists beside every player UUID; nothing was restored; %s", PlayerUUIDFileName, engine.ReservationFileName, snapshotIdentityRemedy())
+	}
+	return engine.Reservation{IDs: uint32(floorlessSnapshotCeiling), Tokens: uint32(floorlessSnapshotCeiling)}, nil
+}
+
+// restorePlayerReservation preflights both counters, draws its jump (after a
+// UUID-only destination's adoption has drawn first), then makes the new
+// floor durable before the caller writes any identity file.
 func restorePlayerReservation(snapshotDir, target, id string, m Manifest, opts RestoreOptions) error {
 	snap, marked, err := snapshotReservationFloor(snapshotDir, id, m)
 	if err != nil {
 		return err
 	}
+	if snap, err = floorlessSnapshotBound(snap, marked, m); err != nil {
+		return err
+	}
 	dataDir := filepath.Dir(target)
 	livePath := filepath.Join(dataDir, engine.ReservationFileName)
-	live, err := engine.ReadReservation(livePath)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("restore: read the box's player reservation: %w; %s; nothing was restored", err, playerResetAdvice(true))
+	sealed, sealErr := playerRestoresSealed(dataDir)
+	if sealed || sealErr != nil {
+		return fmt.Errorf("restore: player identity restores are sealed by the local discard records; nothing was restored; %s", snapshotIdentityRemedy())
+	}
+	// A UUID-only destination has unknown main-era history. Establish the
+	// same durable adoption floor as start before computing max(snapshot, live).
+	// Restore's caller already holds server.lock. The adoption draws from
+	// restore's own source, before the jump does.
+	if err := adoptPlayerState(dataDir, opts.randomSource()); err != nil {
+		return fmt.Errorf("restore: adopt destination player: %w; nothing was restored", err)
+	}
+	live, present, err := readPlayerFloor(dataDir)
+	if err != nil {
+		return fmt.Errorf("restore: %w; %s; nothing was restored", err, playerResetAdvice(true))
+	}
+	if err := checkPlayerFloorLoss(dataDir, present); err != nil {
+		return fmt.Errorf("restore: %w; %s; nothing was restored", err, playerResetAdvice(true))
 	}
 	// Test each source separately so both remedies are named if both are
 	// exhausted. This bound is independent of the random draw.
@@ -146,14 +196,9 @@ func restorePlayerReservation(snapshotDir, target, id string, m Manifest, opts R
 	if err := errors.Join(exhausted...); err != nil {
 		return fmt.Errorf("%w; nothing was restored", err)
 	}
-	var draw [3]byte
-	if _, err := io.ReadFull(opts.randomSource(), draw[:]); err != nil {
+	want, err := jumpedPlayerReservation(id, snap, live, opts.randomSource())
+	if err != nil {
 		return fmt.Errorf("restore: draw the player reservation jump: %w; nothing was restored", err)
-	}
-	jump := restoreMargin + (uint64(draw[0])<<16 | uint64(draw[1])<<8 | uint64(draw[2]))
-	want := engine.Reservation{UUID: id,
-		IDs:    uint32(uint64(max(snap.IDs, live.IDs)) + jump),
-		Tokens: uint32(uint64(max(snap.Tokens, live.Tokens)) + jump),
 	}
 	if opts.Warn != nil && (!marked || time.Since(m.CreatedAt) > 24*time.Hour) {
 		reason := "is older than a day"
@@ -171,7 +216,21 @@ func restorePlayerReservation(snapshotDir, target, id string, m Manifest, opts R
 	if err := engine.WriteReservation(dataDir, livePath, want); err != nil {
 		return fmt.Errorf("restore player reservation: %w", err)
 	}
-	return nil
+	return ensurePlayerMarker(dataDir, playerInitialized)
+}
+
+// jumpedPlayerReservation applies restore's migration margin to both counters.
+// Callers must first check that their floors leave room for the largest jump.
+func jumpedPlayerReservation(id string, snap, live engine.Reservation, random io.Reader) (engine.Reservation, error) {
+	var draw [3]byte
+	if _, err := io.ReadFull(random, draw[:]); err != nil {
+		return engine.Reservation{}, err
+	}
+	jump := restoreMargin + (uint64(draw[0])<<16 | uint64(draw[1])<<8 | uint64(draw[2]))
+	return engine.Reservation{UUID: id,
+		IDs:    uint32(uint64(max(snap.IDs, live.IDs)) + jump),
+		Tokens: uint32(uint64(max(snap.Tokens, live.Tokens)) + jump),
+	}, nil
 }
 
 // randomSource keeps the production default explicit and testable without a
