@@ -106,7 +106,9 @@ type BridgeOutput interface {
 	// the player's identity file, which it never makes or writes. DAC is a
 	// privacy-safe projection of the boot binding, nil while unavailable or
 	// stale. Any hardware read has a short deadline and at most one in flight
-	// per server, even when a kernel read outlives cancellation.
+	// per server, even when a kernel read outlives cancellation. Concurrent
+	// callers share that read within their own deadlines. Known serial/port
+	// substrings in DAC labels are redacted and capability lists are non-nil.
 	Facts(ctx context.Context) BridgeOutputFacts
 }
 

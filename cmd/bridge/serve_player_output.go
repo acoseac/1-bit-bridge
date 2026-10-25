@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"slices"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/api"
@@ -109,11 +109,12 @@ type bridgeOutput struct {
 	fixedVolume bool
 	dsdMode     string
 	allowDoP    bool
-	// DAC reads cannot interrupt a kernel read; retain the busy flag until
-	// it returns. The reader and limit are per-view seams for stalled reads.
-	dacBusy  atomic.Bool
-	dacRead  func(context.Context) *api.OutputDAC
-	dacLimit time.Duration
+	// DAC reads cannot interrupt a kernel read; retain the flight until
+	// it returns. Concurrent callers share it under their own wait bounds.
+	dacMu     sync.Mutex
+	dacFlight *playerDACFlight
+	dacRead   func(context.Context) *api.OutputDAC
+	dacLimit  time.Duration
 }
 
 // newBridgeOutput is the route's view of p, which plan decided and cfg, the

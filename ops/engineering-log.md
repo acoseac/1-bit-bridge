@@ -64985,3 +64985,58 @@ vet; full alsa, player/binding and player/hotplug suites; socket-free bridge/API
 element, plan/start/state, protocol-word, import and cited-test guards. Formatting
 and docs-check pass. The sandbox cannot bind sockets; full API/serve suites,
 race runs and Linux-only runtime tests remain for the reviewer.
+
+## 2026-10-25 — B543 iteration 2: stable DAC observations and shared reads
+
+The bridge DAC projection now reads sysfs before `Observer.ObserveWithProc`
+and requires the resolved card to have the same unit (`SameUnit`) and readable,
+nonzero `DevNum` on both sides of the proc read. Vendor:product alone was
+insufficient when identical units exchanged card numbers between reads.
+`Observer.AfterProc`, nil in production, injects that exact swap in the test.
+A completed replug before the observation still resolves the bound unit.
+
+The bridge's public name and ALSA id replace occurrences of the observed serial
+and anchored port with `[redacted]`. `Serial.Redact` does not expose the serial
+as text. MPD's element is unchanged. The projection explicitly builds non-nil
+capability slices; PCM-only and DSD-only encoded fixtures check every empty list.
+
+A mutex selects one in-flight read and a closed channel broadcasts its result.
+Each caller has its own 500 ms wait, while the reader has a separate 500 ms
+context detached from caller cancellation. The slot remains occupied while a
+kernel read is stalled and is released on return or panic, including after
+waiters time out. A late result is null. No completed result is cached.
+The slot tests now require a real fixture DAC after the held reader finishes
+and after a panic. The unavailable/stale test has a second positive assertion
+between the generation-1000 Available report and the stale transition.
+`testing/synctest` orders overlapping callers and advances their deadlines;
+nonblocking result checks after 501 ms prevent the harness advancing further
+from hiding a caller that exceeded its bound.
+
+Red-first evidence on 1790731f, with only the observation hook and pass-through
+helper added so the injection compiles: the mid-read identical swap and changed
+enumeration returned stale facts; serial and port leaked through both public
+fields; a concurrent caller returned before the held read. Slot recovery and
+empty-list tests already passed that base: the slot was released and the ALSA
+helper already initialized its slices. Those are coverage/defensive changes,
+not fabricated base failures.
+
+Named negative controls all compiled and failed their intended assertions:
+SkipIdentityBracket, IgnoreEnumeration and UnknownEnumeration; RawIdentityLabels;
+BaseNeverReleaseSlot (stalled recovery, panic recovery and the second positive
+before stale), NeverReleaseFlight (both recovery tests); NullCapabilityLists and
+NullDSDFormats (encoded arrays); BusyReturnsNull (shared result), SecondReader
+(one reader), WaitPastBound (500 ms), and CallerCancelsSharedRead (independent
+waiters). Mutations were restored from saved file bytes, without committing or
+resetting the worktree. Scratch controls2.py and control2-*.log retain the runs.
+
+Validation used Go 1.27.3, ts_omit_webclient,ts_omit_debugeventbus, and a GOCACHE
+under the task scratch. Repository-wide vet passed. Race tests passed for the
+full alsa, player/binding, player/hotplug and usbid packages, every BridgeDAC
+test, the socket-free player plan/start/state/reason/protocol and cited-test
+checks, and the API composer/import/unchanged-MPD-bytes checks. The broader
+bridge selection's release-acknowledgement serve test could not bind its socket
+(operation not permitted); rerunning the socket-free selection passed. Full
+listener-dependent suites and Linux-only runtime tests remain unrun in this
+macOS sandbox. Formatting, docs-check and diff whitespace checks passed.
+PROTOCOL.md and the output/player rules and History record describe the new
+contract; protocol version stays 1, and the iOS mirror remains a separate copy.

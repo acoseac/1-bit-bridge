@@ -27,45 +27,84 @@ func (b *bridgeOutput) dac(ctx context.Context, state string) *api.OutputDAC {
 	if _, stale := snap.Stale(); stale || snap.Resolution().State != binding.StateAvailable {
 		return nil
 	}
-	if !b.dacBusy.CompareAndSwap(false, true) {
-		return nil
-	}
 	ctx, cancel := context.WithTimeout(ctx, b.dacLimit)
 	defer cancel()
-	done := make(chan *api.OutputDAC, 1)
-	go func() {
-		var dac *api.OutputDAC
-		defer func() {
-			if recover() != nil {
-				// A reader panic is no DAC; never print an identity or path.
-				dac = nil
-			}
-			b.dacBusy.Store(false)
-			done <- dac
-		}()
-		dac = b.dacRead(ctx)
-	}()
+	b.dacMu.Lock()
+	flight := b.dacFlight
+	if flight == nil {
+		flight = &playerDACFlight{done: make(chan struct{})}
+		b.dacFlight = flight
+		// The shared read has its own lifetime: one caller leaving must not
+		// cancel the evidence another caller is still waiting for.
+		readCtx, readCancel := context.WithTimeout(context.WithoutCancel(ctx), b.dacLimit)
+		go b.runDACRead(readCtx, readCancel, flight)
+	}
+	b.dacMu.Unlock()
 	select {
-	case dac := <-done:
+	case <-flight.done:
 		if ctx.Err() == nil {
-			return dac
+			return flight.dac
 		}
 	case <-ctx.Done():
 	}
 	return nil
 }
 
+// playerDACFlight publishes an immutable result when done closes.
+// The view keeps it only until the reader returns, including after a timeout.
+type playerDACFlight struct {
+	done chan struct{}
+	dac  *api.OutputDAC
+}
+
+// runDACRead releases the slot when the reader returns or panics, even after
+// its waiters have timed out.
+func (b *bridgeOutput) runDACRead(ctx context.Context, cancel context.CancelFunc, flight *playerDACFlight) {
+	var dac *api.OutputDAC
+	defer cancel()
+	defer func() {
+		if recover() != nil || ctx.Err() != nil {
+			// A reader panic is no DAC; never print an identity or path.
+			dac = nil
+		}
+		b.dacMu.Lock()
+		flight.dac = dac
+		b.dacFlight = nil
+		close(flight.done)
+		b.dacMu.Unlock()
+	}()
+	dac = b.dacRead(ctx)
+}
+
 // readPlayerDAC uses the binding reader's very /proc reading for the chosen
-// card's capabilities. Only the observed vendor:product and short card name
+// card's capabilities. Only the observed vendor:product and redacted card labels
 // cross the seam; USBIdentity and the longname (which includes the USB port)
 // never do. A port binding intentionally follows whatever model is there.
 func readPlayerDAC(ctx context.Context, trees outputTrees, device config.PlayerDevice) *api.OutputDAC {
-	inv, proc, err := trees.observer().ObserveWithProc(ctx)
-	if err != nil || inv.Partial || len(proc.Problems) != 0 {
+	return readPlayerDACObserved(ctx, trees.observer(), device)
+}
+
+// readPlayerDACObserved projects one observation, with injectable tree readers.
+func readPlayerDACObserved(ctx context.Context, observer binding.Observer, device config.PlayerDevice) *api.OutputDAC {
+	// Bracket proc with identities. Vendor:product alone cannot detect two
+	// identical units exchanging card numbers while proc is being read.
+	before := observer.Sysfs.ReadContext(ctx)
+	inv, proc, err := observer.ObserveWithProc(ctx)
+	if err != nil || !before.Present || !before.CardsComplete || before.Partial || inv.Partial || len(proc.Problems) != 0 {
 		return nil
 	}
 	res, settled := binding.Settled(device, inv)
 	if !settled || res.State != binding.StateAvailable {
+		return nil
+	}
+	stable := false
+	for _, id := range before.Cards {
+		if id.Card == res.Card && !id.Vanished && id.Kind == alsa.IdentityUSB && id.USB != nil {
+			stable = binding.SameUnit(*id.USB, res.Identity) && id.USB.DevNum > 0 && id.USB.DevNum == res.Identity.DevNum
+			break
+		}
+	}
+	if !stable {
 		return nil
 	}
 	var found *alsa.CardReading
@@ -91,9 +130,18 @@ func readPlayerDAC(ctx context.Context, trees outputTrees, device config.PlayerD
 			}
 		}
 		caps := alsa.CapabilitiesFromAltsets(d.Stream.Playback.Altsets)
-		return &api.OutputDAC{Card: found.Index, ID: found.ID, Name: found.Name, USBID: res.Identity.ID.String(),
-			Capabilities: api.OutputCapabilities{MaxPCMRate: caps.MaxPCMRate, PCMBitDepths: caps.PCMBitDepths,
-				NativeDSD: caps.NativeDSD, NativeDSDRates: caps.NativeDSDRates, DSDFormats: caps.DSDFormats}}
+		return &api.OutputDAC{Card: found.Index, ID: playerDACText(found.ID, res.Identity), Name: playerDACText(found.Name, res.Identity), USBID: res.Identity.ID.String(),
+			Capabilities: api.OutputCapabilities{MaxPCMRate: caps.MaxPCMRate, PCMBitDepths: append([]int{}, caps.PCMBitDepths...),
+				NativeDSD: caps.NativeDSD, NativeDSDRates: append([]int{}, caps.NativeDSDRates...), DSDFormats: append([]string{}, caps.DSDFormats...)}}
 	}
 	return nil
+}
+
+// playerDACText removes known identity substrings from the bridge's public
+// labels. MPD's projection is separate and unchanged.
+func playerDACText(text string, identity alsa.USBIdentity) string {
+	if identity.Port != "" {
+		text = strings.ReplaceAll(text, identity.Port, "[redacted]")
+	}
+	return identity.Serial.Redact(text)
 }

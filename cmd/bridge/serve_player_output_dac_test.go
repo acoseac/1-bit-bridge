@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/alsa/sysfstest"
@@ -33,7 +34,7 @@ const dacLongPort = "usb-0000:01:00.0-1.2"
 func dacUnit(card int, id, model, serial, chain string) string {
 	vid, pid, _ := strings.Cut(model, ":")
 	dir := dacUSBRoot + "/1-1/1-" + chain
-	return fmt.Sprintf("usbdev %s vendor=%s product=%s serial=%s\nusbcard %d %s/1-%s:1.0\nproccard %d %s \"Synthetic DAC\" usb=%s pcm=0.0,1.0\n", dir, vid, pid, serial, card, dir, chain, card, id, model)
+	return fmt.Sprintf("usbdev %s vendor=%s product=%s serial=%s devnum=10\nusbcard %d %s/1-%s:1.0\nproccard %d %s \"Synthetic DAC\" usb=%s pcm=0.0,1.0\n", dir, vid, pid, serial, card, dir, chain, card, id, model)
 }
 
 func outputDACTree(t *testing.T) (string, outputTrees) {
@@ -282,6 +283,9 @@ func TestBridgeDACReadFailures(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
+		{"enumeration unreadable", func(t *testing.T, r string, _ *bridgeOutput) {
+			sysfstest.Apply(t, r, "file "+dacUSBRoot+"/1-1/1-1.2/devnum invalid\n")
+		}},
 		{"stream missing", func(t *testing.T, r string, _ *bridgeOutput) {
 			if err := os.Remove(filepath.Join(r, "proc/asound/card5/stream1")); err != nil {
 				t.Fatal(err)
@@ -338,6 +342,7 @@ func TestBridgeDACUnavailableAndStale(t *testing.T) {
 	if err := b.p.eng.ReportOutput(context.Background(), engine.OutputReport{Generation: 1000, Available: true}); err != nil {
 		t.Fatal(err)
 	}
+	requireDAC(t, b.Facts(context.Background()).DAC, 5, "Audio", "20b1:3009")
 	stale()
 	f := b.Facts(context.Background())
 	if f.DAC != nil || f.State != "stopped" || f.Reason != "" {
@@ -354,37 +359,88 @@ func TestBridgeDACUnavailableAndStale(t *testing.T) {
 func TestBridgeDACStalledReadIsBounded(t *testing.T) {
 	_, trees := outputDACTree(t)
 	b, _ := dacView(t, trees, dacBinding(config.BindingSerial))
-	entered, release, returned := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	var calls atomic.Int32
-	b.dacLimit = 10 * time.Millisecond
-	b.dacRead = func(context.Context) *api.OutputDAC {
-		calls.Add(1)
-		close(entered)
-		<-release
-		defer close(returned)
-		return &api.OutputDAC{Card: 99}
-	}
-	t.Cleanup(func() { close(release); <-returned })
-	done := make(chan api.BridgeOutputFacts, 1)
-	go func() { done <- b.Facts(context.Background()) }()
-	<-entered
-	select {
-	case f := <-done:
-		if f.DAC != nil {
-			t.Fatal("late read returned a DAC")
+	productionRead := b.dacRead
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		var calls atomic.Int32
+		b.dacRead = func(context.Context) *api.OutputDAC {
+			calls.Add(1)
+			<-release
+			return &api.OutputDAC{Card: 99}
 		}
-	case <-time.After(time.Second):
-		t.Fatal("request waited for stalled read")
-	}
-	// Every additional request returns while the first reader is still held.
-	for range 50 {
-		if f := b.Facts(context.Background()); f.DAC != nil {
-			t.Fatal("stalled reader gave a DAC")
+		defer func() { close(release); synctest.Wait() }()
+		// All callers exhaust their own bound while the same read stays held.
+		for range 2 {
+			results := make(chan api.BridgeOutputFacts, 25)
+			for range 25 {
+				go func() { results <- b.Facts(context.Background()) }()
+			}
+			synctest.Wait()
+			time.Sleep(501 * time.Millisecond)
+			synctest.Wait()
+			for range 25 {
+				select {
+				case f := <-results:
+					if f.DAC != nil {
+						t.Fatal("stalled read gave a DAC")
+					}
+				default:
+					t.Fatal("caller exceeded its 500 ms bound")
+				}
+			}
 		}
+		if n := calls.Load(); n != 1 {
+			t.Fatalf("%d readers accumulated", n)
+		}
+		// Release before restoring the seam; Wait joins the reader's completion too.
+		release <- struct{}{}
+		synctest.Wait()
+		b.dacRead = productionRead
+		requireDAC(t, b.Facts(context.Background()).DAC, 5, "Audio", "20b1:3009")
+	})
+}
+
+func TestBridgeDACReadSlotReleasedAfterPanic(t *testing.T) {
+	_, trees := outputDACTree(t)
+	b, _ := dacView(t, trees, dacBinding(config.BindingSerial))
+	productionRead := b.dacRead
+	b.dacRead = func(context.Context) *api.OutputDAC { panic("reader failed") }
+	if f := b.Facts(context.Background()); f.DAC != nil {
+		t.Fatal("panic gave a DAC")
 	}
-	if n := calls.Load(); n != 1 {
-		t.Fatalf("%d readers accumulated", n)
-	}
+	b.dacRead = productionRead
+	requireDAC(t, b.Facts(context.Background()).DAC, 5, "Audio", "20b1:3009")
+}
+
+func TestBridgeDACConcurrentCallersShareRead(t *testing.T) {
+	_, trees := outputDACTree(t)
+	b, _ := dacView(t, trees, dacBinding(config.BindingSerial))
+	productionRead := b.dacRead
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		defer func() { close(release); synctest.Wait() }()
+		var calls atomic.Int32
+		b.dacRead = func(ctx context.Context) *api.OutputDAC { calls.Add(1); <-release; return productionRead(ctx) }
+		results := make(chan api.BridgeOutputFacts, 2)
+		go func() { results <- b.Facts(context.Background()) }()
+		synctest.Wait()
+		go func() { results <- b.Facts(context.Background()) }()
+		synctest.Wait()
+		select {
+		case <-results:
+			t.Fatal("caller did not wait for the in-flight read")
+		default:
+		}
+		time.Sleep(100 * time.Millisecond)
+		release <- struct{}{}
+		synctest.Wait()
+		for range 2 {
+			requireDAC(t, (<-results).DAC, 5, "Audio", "20b1:3009")
+		}
+		if n := calls.Load(); n != 1 {
+			t.Fatalf("%d concurrent readers", n)
+		}
+	})
 }
 
 func TestBridgeDACNeedsBootSnapshot(t *testing.T) {
@@ -460,4 +516,128 @@ func TestBridgeDACStartupReasons(t *testing.T) {
 	if f.Reason != reasonOutputUnknown || f.DAC != nil {
 		t.Fatalf("unknown output: %+v", f)
 	}
+}
+
+// TestBridgeDACIdentityStableAcrossProc swaps only sysfs after proc has been
+// captured. The old proc facts must never be assigned to the new occupant.
+func TestBridgeDACIdentityStableAcrossProc(t *testing.T) {
+	for _, change := range []string{"identical swap", "enumeration"} {
+		t.Run(change, func(t *testing.T) {
+			root, trees := outputDACTree(t)
+			sysfstest.Apply(t, root, dacUnit(7, "Other", "20b1:3009", "OTHER-UNIT", "1.3"))
+			dacStreams(t, root, 7)
+			dev := dacBinding(config.BindingSerial)
+			requireDAC(t, readPlayerDAC(context.Background(), trees, dev), 5, "Audio", "20b1:3009")
+			observer := trees.observer()
+			observer.AfterProc = func() {
+				if change == "enumeration" {
+					sysfstest.Apply(t, root, "file "+dacUSBRoot+"/1-1/1-1.2/devnum 42\n")
+				} else {
+					sysfstest.Apply(t, root, "usbcard 7 "+dacUSBRoot+"/1-1/1-1.2/1-1.2:1.0\nusbcard 5 "+dacUSBRoot+"/1-1/1-1.3/1-1.3:1.0\n")
+				}
+			}
+			if d := readPlayerDACObserved(context.Background(), observer, dev); d != nil {
+				t.Fatalf("changed identity carried stale proc facts: %+v", d)
+			}
+		})
+	}
+}
+
+func TestBridgeDACRedactsIdentityInsideNameAndID(t *testing.T) {
+	for _, field := range []string{"name", "id"} {
+		for _, private := range []struct{ name, value string }{{"serial", outputDACSerial}, {"port", dacPort}} {
+			t.Run(field+"/"+private.name, func(t *testing.T) {
+				root, trees := outputDACTree(t)
+				b, _ := dacView(t, trees, dacBinding(config.BindingSerial))
+				value := "prefix-" + private.value + "-suffix"
+				path := filepath.Join(root, "proc/asound/cards")
+				raw, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				old := "Synthetic DAC"
+				if field == "id" {
+					old = "Audio"
+				}
+				if err := os.WriteFile(path, []byte(strings.Replace(string(raw), old, value, 1)), 0600); err != nil {
+					t.Fatal(err)
+				}
+
+				el, _ := dacBody(t, b)
+				if el.DAC == nil {
+					t.Fatal("redaction withheld DAC")
+				}
+				got := el.DAC.Name
+				if field == "id" {
+					got = el.DAC.ID
+				}
+				if got != "prefix-[redacted]-suffix" {
+					t.Fatalf("redacted %s = %q", field, got)
+				}
+			})
+		}
+	}
+}
+
+func TestBridgeDACCapabilityListsAreArrays(t *testing.T) {
+	for _, format := range []string{"S16_LE", "DSD_U32_BE"} {
+		t.Run(format, func(t *testing.T) {
+			root, trees := outputDACTree(t)
+			path := filepath.Join(root, "proc/asound/card5/stream1")
+			stream := "Playback:\n  Status: Stop\n  Interface 1\n    Altset 1\n    Format: " + format + "\n    Channels: 2\n    Rates: 48000\n"
+			if err := os.WriteFile(path, []byte(stream), 0600); err != nil {
+				t.Fatal(err)
+			}
+			b, _ := dacView(t, trees, dacBinding(config.BindingSerial))
+			el, body := dacBody(t, b)
+			if el.DAC == nil {
+				t.Fatal("missing DAC")
+			}
+			empty := []string{"nativeDSDRates", "dsdFormats"}
+			if format == "DSD_U32_BE" {
+				empty = []string{"pcmBitDepths"}
+			}
+			for _, key := range empty {
+				if !strings.Contains(string(body), `"`+key+`":[]`) {
+					t.Fatalf("%s is not []: %s", key, body)
+				}
+			}
+		})
+	}
+}
+
+func TestBridgeDACCallerCancellationKeepsSharedRead(t *testing.T) {
+	_, trees := outputDACTree(t)
+	b, _ := dacView(t, trees, dacBinding(config.BindingSerial))
+	productionRead := b.dacRead
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		defer func() { close(release); synctest.Wait() }()
+		var calls atomic.Int32
+		b.dacRead = func(ctx context.Context) *api.OutputDAC { calls.Add(1); <-release; return productionRead(ctx) }
+		first, second := make(chan api.BridgeOutputFacts, 1), make(chan api.BridgeOutputFacts, 1)
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		go func() { first <- b.Facts(ctx) }()
+		synctest.Wait()
+		time.Sleep(50 * time.Millisecond)
+		go func() { second <- b.Facts(context.Background()) }()
+		synctest.Wait()
+		time.Sleep(51 * time.Millisecond)
+		synctest.Wait()
+		if f := <-first; f.DAC != nil {
+			t.Fatal("expired caller got DAC")
+		}
+		select {
+		case <-second:
+			t.Fatal("second caller lost its own wait budget")
+		default:
+		}
+		release <- struct{}{}
+		synctest.Wait()
+		requireDAC(t, (<-second).DAC, 5, "Audio", "20b1:3009")
+		if n := calls.Load(); n != 1 {
+			t.Fatalf("%d readers", n)
+		}
+	})
 }

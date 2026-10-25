@@ -178,6 +178,9 @@ func (inv Inventory) Card(n int) (Card, bool) {
 type Observer struct {
 	Proc  alsa.Reader
 	Sysfs alsa.SysfsReader
+	// AfterProc is a test seam between the proc and final identity readings.
+	// Production leaves it nil.
+	AfterProc func()
 }
 
 // sndUSBAudio is the driver name snd-usb-audio gives its cards in
@@ -208,11 +211,16 @@ func (o Observer) ObserveContext(ctx context.Context) (Inventory, error) {
 
 // ObserveWithProc is ObserveContext with the same reading of /proc returned
 // alongside the inventory. Consumers can project a resolved card's playback
-// capabilities without a second read at an index that may now name another unit.
+// capabilities without a second proc read. This cross-checks vendor:product;
+// a consumer requiring unit-stable proc facts must also bracket this call with
+// an earlier identity observation (identical models can exchange card numbers).
 func (o Observer) ObserveWithProc(ctx context.Context) (Inventory, alsa.Snapshot, error) {
 	snap, err := o.Proc.ReadContext(ctx)
 	if err != nil {
 		return Inventory{}, alsa.Snapshot{}, err
+	}
+	if o.AfterProc != nil {
+		o.AfterProc()
 	}
 	sys := o.Sysfs.ReadContext(ctx)
 	if err := ctx.Err(); err != nil {
