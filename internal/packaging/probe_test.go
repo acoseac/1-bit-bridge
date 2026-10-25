@@ -6,15 +6,14 @@ import (
 	"time"
 )
 
-// TestIsListeningRoundTrip stands up a TCP listener on a random local
-// port, confirms IsListening sees it, then tears it down and confirms
-// the follow-up sees the port free. We care about the round-trip so
-// a flaky net layer can't paint a false green.
+// TestIsListeningRoundTrip checks both dial outcomes: an owned listener
+// accepts, and port zero refuses (no TCP listener can have that port).
 func TestIsListeningRoundTrip(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	t.Cleanup(func() { _ = ln.Close() })
 	_, portStr, err := net.SplitHostPort(ln.Addr().String())
 	if err != nil {
 		t.Fatalf("split host:port: %v", err)
@@ -27,34 +26,19 @@ func TestIsListeningRoundTrip(t *testing.T) {
 	if !IsListening("127.0.0.1", port) {
 		t.Errorf("expected IsListening=true on live port %d", port)
 	}
-	_ = ln.Close()
-	// Give the kernel a breath to release the TIME_WAIT state. Even on
-	// a zero-port bind the OS needs a moment.
-	time.Sleep(50 * time.Millisecond)
-	if IsListening("127.0.0.1", port) {
-		// Not fatal — the kernel's TIME_WAIT can keep the port warm
-		// for a bit. Treat as a soft warning rather than failure.
-		t.Log("port still shows as listening briefly after Close (TIME_WAIT); acceptable")
+	// Never probe the listener's address after releasing it: another test
+	// can own that port by then. Port zero cannot be allocated to one.
+	if IsListening("127.0.0.1", 0) {
+		t.Error("expected IsListening=false on port zero")
 	}
 }
 
-// TestWaitForListenTimesOut drives WaitForListen against a port we
-// know is cold and confirms it returns false within the budget. Picks
-// a random-local port and releases it immediately so the test doesn't
-// depend on a fixed "surely unused" port number.
+// TestWaitForListenTimesOut drives WaitForListen against port zero, which
+// no listener can own, and confirms it returns false within the budget.
 func TestWaitForListenTimesOut(t *testing.T) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	_, portStr, _ := net.SplitHostPort(ln.Addr().String())
-	var port int
-	_, _ = parsePort(portStr, &port)
-	_ = ln.Close()
-	time.Sleep(20 * time.Millisecond)
 	start := time.Now()
-	if WaitForListen("127.0.0.1", port, 300*time.Millisecond) {
-		t.Error("WaitForListen should have timed out on a closed port")
+	if WaitForListen("127.0.0.1", 0, 300*time.Millisecond) {
+		t.Error("WaitForListen should have timed out on port zero")
 	}
 	elapsed := time.Since(start)
 	if elapsed < 250*time.Millisecond {

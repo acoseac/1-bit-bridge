@@ -42,6 +42,7 @@ func TestAControlURLsUserInformationTravelsAsBasicAuth(t *testing.T) {
 		mu.Unlock()
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
+	t.Cleanup(srv.Close)
 	host := strings.TrimPrefix(srv.URL, "http://")
 	lastAuth := func() string {
 		mu.Lock()
@@ -89,13 +90,13 @@ func TestAControlURLsUserInformationTravelsAsBasicAuth(t *testing.T) {
 
 	// A connection that fails: net/http's own *url.Error names the request
 	// URL, so the user information must not be in it either.
-	srv.Close()
+	// No listener can own port zero; a closed server's port can be reused.
 	for _, userinfo := range []string{"user:" + secret + "@", secret + "@"} {
-		ctrl := "http://" + userinfo + host + "/ctl"
+		ctrl := "http://" + userinfo + "127.0.0.1:0/ctl"
 		ctx := discovery.WithDialApproval(context.Background(), discovery.OperatorChose(ctrl))
 		_, err := client.GetSystemUpdateID(ctx, ctrl)
 		if err == nil {
-			t.Fatalf("GetSystemUpdateID answered no error with the server gone (%s)", userinfo)
+			t.Fatalf("GetSystemUpdateID answered no error on port zero (%s)", userinfo)
 		}
 		if carries(err.Error()) || strings.Contains(err.Error(), "@") {
 			t.Errorf("a failed connection's error names the control URL's user information: %v", err)

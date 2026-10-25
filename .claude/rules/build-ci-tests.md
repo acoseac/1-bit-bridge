@@ -133,7 +133,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 - **Windows CI catches wall-clock assumptions** — ~15.6 ms granularity means two stamps milliseconds apart are not reliably ordered: assert on counted events, and detect "was this rewritten?" by planted CONTENT, never by comparing mtimes. **An mtime compare is wrong in BOTH directions** (B52). → History-rules-build-ci-tests.md
 - **A real timer a test fixture arms outlasts the test binary, unless the test is about that timer** (2026-10-23, the pairing fixtures, `pairingTestTTL`). **Don't shorten a shared fixture's timer to keep the suite fast: a test about expiry passes a short one of its own**. → History-rules-build-ci-tests.md
 - **A port free on BOTH TCP and UDP cannot come from either allocator, so `drawLoopbackTCPAndUDPAddr` binds random numbers from 20000–32767 on both at once** (#1026) → History-rules-build-ci-tests.md
-- **A serve test hands serve its listeners, never a closed port's number** (2026-10-09, backlog B313) → History-rules-build-ci-tests.md
+- **A serve test hands serve its listeners, never a closed port's number** (2026-10-09, backlog B313); **a shutdown assertion observes the original listener (for example, Accept returning net.ErrClosed), never a dial of its released port, and checks failed-Start rollback before Stop can mask it** (2026-10-25, backlog B547) → History-rules-build-ci-tests.md
 - **`filepath.ToSlash` is a no-op on POSIX**, so a Windows-shaped path handed to
   it on a Mac keeps its backslashes.
 - **A test asserting that a message NAMES A PATH must not substring-match the raw path.** → History-rules-build-ci-tests.md

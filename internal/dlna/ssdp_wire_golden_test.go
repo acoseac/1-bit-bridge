@@ -3,6 +3,7 @@ package dlna
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"strings"
@@ -175,17 +176,19 @@ func sameDatagrams(t *testing.T, what string, got, want []string) {
 	}
 }
 
-// goldenServer is a Server built for a golden: loopback HTTP on a free port,
+// goldenServer is a Server built for a golden: pre-bound loopback HTTP,
 // the golden ModelNumber, and the endpoints, Interface and ServerURL given
 // (a ServerURL of "" is the HTTP listener's own address).
 func goldenServer(t *testing.T, udn string, cfg ServerConfig) (*Server, string) {
 	t.Helper()
-	addr := findFreePort(t)
+	l := loopbackListener(t)
+	addr := l.Addr().String()
 	cfg.Library = newTestLib(testTrack("t1", "Test Track"))
 	cfg.UDN = udn
 	cfg.FriendlyName = "Golden"
 	cfg.ModelNumber = goldenModelNumber
 	cfg.ListenAddress = addr
+	cfg.Listener = l
 	if cfg.ServerURL == "" {
 		cfg.ServerURL = "http://" + addr
 	}
@@ -340,14 +343,28 @@ func unboundInterface() *net.Interface {
 	return &net.Interface{Index: 1 << 20, Name: "bridge-test-nonexistent0"}
 }
 
+// closeObservedListener signals only after Close reaches the real socket.
+// Waiting for it does not change a deadline shared with HTTP's Accept loop.
+type closeObservedListener struct {
+	net.Listener
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (l *closeObservedListener) Close() error {
+	err := l.Listener.Close()
+	l.once.Do(func() { close(l.closed) })
+	return err
+}
+
 // TestTheMediaServerStartsOnTheEndpointsThatBind pins what Start makes of an
 // endpoint that cannot join the group: it is logged and skipped, and the
 // server starts, announces and reports on the others; with none left, Start
 // fails with the error the wiring reads as "DLNA disabled" and takes the
 // HTTP listener back down.
 func TestTheMediaServerStartsOnTheEndpointsThatBind(t *testing.T) {
-	lo := loopbackInterface(t)
 	t.Run("one_of_two_binds", func(t *testing.T) {
+		lo := loopbackInterface(t)
 		capture := ssdpGroupCapture(t, lo)
 		udn := goldenUDN(t)
 		var log syncBuffer
@@ -376,7 +393,11 @@ func TestTheMediaServerStartsOnTheEndpointsThatBind(t *testing.T) {
 		}
 	})
 	t.Run("none_binds", func(t *testing.T) {
-		s, addr := goldenServer(t, goldenUDN(t), ServerConfig{})
+		s, _ := goldenServer(t, goldenUDN(t), ServerConfig{})
+		l := s.cfg.Listener.(*net.TCPListener)
+		observed := &closeObservedListener{Listener: l, closed: make(chan struct{})}
+		s.cfg.Listener = observed
+		t.Cleanup(func() { _ = s.Stop(context.Background()) })
 		s.cfg.AdvertiseEndpoints = []AdvertiseEndpoint{{Interface: unboundInterface(), ServerURL: "http://192.168.77.1:7790"}}
 		err := s.Start(context.Background())
 		if err == nil {
@@ -386,10 +407,22 @@ func TestTheMediaServerStartsOnTheEndpointsThatBind(t *testing.T) {
 		if want := "dlna: SSDP start: no advertiser could bind (tried 1 endpoint(s))"; err.Error() != want {
 			t.Errorf("Start's error is %q, want %q", err, want)
 		}
-		_ = s.Stop(context.Background())
-		if c, dialErr := net.DialTimeout("tcp", addr, time.Second); dialErr == nil {
-			_ = c.Close()
-			t.Errorf("the HTTP listener on %s still takes connections after the failed Start", addr)
+		// Start owns rollback: callers need not Stop after it fails. Observe
+		// this socket before Stop can mask a leak, never its reusable port.
+		// Serve may still be entering on its goroutine. Wait for the real
+		// Close without expiring its Accept and making Serve close it itself.
+		select {
+		case <-observed.closed:
+			_ = l.SetDeadline(time.Now().Add(5 * time.Second))
+			if c, acceptErr := l.Accept(); !errors.Is(acceptErr, net.ErrClosed) {
+				if c != nil {
+					_ = c.Close()
+				}
+				t.Errorf("the HTTP listener after the failed Start: Accept = %v, want net.ErrClosed", acceptErr)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("the HTTP listener was not closed by the failed Start")
 		}
+		_ = s.Stop(context.Background())
 	})
 }

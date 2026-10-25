@@ -29,10 +29,12 @@ func startLoopbackDLNA(t *testing.T, cfg ServerConfig, tune func(*Server)) *Serv
 	if cfg.Library == nil {
 		cfg.Library = newTestLib(testTrack("t1", "Test Track"))
 	}
-	addr := findFreePort(t)
+	l := loopbackListener(t)
+	addr := l.Addr().String()
 	cfg.UDN = "uuid:listener-bounds"
 	cfg.FriendlyName = "Listener Bounds"
 	cfg.ListenAddress = addr
+	cfg.Listener = l
 	cfg.ServerURL = "http://" + addr
 	cfg.AdvertiseEndpoints = []AdvertiseEndpoint{{
 		Interface: loopbackInterface(t),

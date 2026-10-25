@@ -223,10 +223,8 @@ func TestLookupRateLimitCarriesRetryAfter(t *testing.T) {
 // full URL, so any error path that wraps it naively leaks the key into logs.
 func TestLookupNeverLeaksTheAPIKey(t *testing.T) {
 	t.Run("transport failure", func(t *testing.T) {
-		// A server that is closed immediately, so Do() fails at connect.
-		srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-		c := NewClient(srv.URL, testKey, "test-agent", srv.Client())
-		srv.Close()
+		// No listener can own port zero, unlike a released ephemeral port.
+		c := NewClient("http://127.0.0.1:0", testKey, "test-agent", nil)
 
 		_, err := c.Lookup(context.Background(), testFP())
 		if err == nil {

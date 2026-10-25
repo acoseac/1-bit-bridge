@@ -192,10 +192,9 @@ type failingMirror struct {
 
 var failingMirrors = []failingMirror{
 	{"a refused connection", func(t testing.TB) string {
-		srv := httptest.NewServer(http.NotFoundHandler())
-		u := srv.URL
-		srv.Close()
-		return u
+		// A closed server's ephemeral port can already be another test's.
+		// No TCP listener can own port zero; binding it allocates another.
+		return "http://127.0.0.1:0"
 	}},
 	{"a certificate this process does not trust", func(t testing.TB) string {
 		return newUntrustedTLSServer(t).URL

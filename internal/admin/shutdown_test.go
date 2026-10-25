@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"net"
+	"net/http"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,14 +16,13 @@ import (
 func TestShutdownWaitsForBgScans(t *testing.T) {
 	srv, cfg, _ := newTestServer(t)
 
-	// Bind a listener on a random loopback port so Serve can stand up
-	// against it. AdminAddress in cfg drives Listen().
+	// Hand ServeListener the bound socket so no other test can take its port.
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	cfg.AdminAddress = lis.Addr().String()
-	lis.Close()
+	t.Cleanup(func() { _ = lis.Close() })
 
 	// Spawn Serve in a goroutine. Cancel its ctx after kicking off a
 	// background scan and assert Serve returns only after the scan
@@ -32,20 +32,19 @@ func TestShutdownWaitsForBgScans(t *testing.T) {
 
 	serveDone := make(chan struct{})
 	go func() {
-		_ = srv.Serve(ctx)
+		_ = srv.ServeListener(ctx, lis)
 		close(serveDone)
 	}()
 
-	// Wait until Serve has bound its listener.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		c, derr := net.Dial("tcp", cfg.AdminAddress)
-		if derr == nil {
-			c.Close()
-			break
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-serveDone:
+		case <-time.After(7 * time.Second):
+			t.Error("ServeListener did not stop during cleanup")
 		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	})
+	waitForShutdownTestServer(t, cfg.AdminAddress, serveDone)
 
 	// Inject a fake bg scan via the WaitGroup. We don't need the
 	// Scanner to actually run — we just need bgScans counted.
@@ -86,26 +85,25 @@ func TestShutdownGraceCappedForStuckScan(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	cfg.AdminAddress = lis.Addr().String()
-	lis.Close()
+	t.Cleanup(func() { _ = lis.Close() })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
 	serveDone := make(chan struct{})
 	go func() {
-		_ = srv.Serve(ctx)
+		_ = srv.ServeListener(ctx, lis)
 		close(serveDone)
 	}()
-	// Wait for listener.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		c, derr := net.Dial("tcp", cfg.AdminAddress)
-		if derr == nil {
-			c.Close()
-			break
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-serveDone:
+		case <-time.After(7 * time.Second):
+			t.Error("ServeListener did not stop during cleanup")
 		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	})
+	waitForShutdownTestServer(t, cfg.AdminAddress, serveDone)
 
 	// Hold the WG for longer than the 5s grace.
 	srv.bgScans.Add(1)
@@ -126,4 +124,30 @@ func TestShutdownGraceCappedForStuckScan(t *testing.T) {
 	case <-time.After(7 * time.Second):
 		t.Errorf("Serve hung past shutdown grace")
 	}
+}
+
+// waitForShutdownTestServer waits for HTTP, since a pre-bound socket can
+// complete a TCP handshake before ServeListener has adopted it.
+func waitForShutdownTestServer(t *testing.T, addr string, done <-chan struct{}) {
+	t.Helper()
+	tr := &http.Transport{DisableKeepAlives: true}
+	t.Cleanup(tr.CloseIdleConnections)
+	client := &http.Client{Transport: tr, Timeout: time.Second}
+	deadline, ok := t.Deadline()
+	if !ok {
+		deadline = time.Now().Add(time.Minute)
+	}
+	for time.Now().Before(deadline) {
+		resp, err := client.Get("http://" + addr + "/healthz")
+		if err == nil {
+			_ = resp.Body.Close()
+			return
+		}
+		select {
+		case <-done:
+			t.Fatal("ServeListener exited before answering HTTP")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	t.Fatal("ServeListener did not answer HTTP")
 }

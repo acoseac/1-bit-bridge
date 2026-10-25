@@ -45,11 +45,13 @@ func Test_Server_ServeGoroutineUsesCapturedServerNotTheField(t *testing.T) {
 	// early t.Fatal must never leave the serve goroutine parked forever.
 	t.Cleanup(rel)
 
-	addr := findFreePort(t)
+	l := loopbackListener(t)
+	addr := l.Addr().String()
 	s, err := NewServer(ServerConfig{
 		Library:       newTestLib(),
 		UDN:           "uuid:test-serve-goroutine-capture",
 		ListenAddress: addr,
+		Listener:      l,
 		ServerURL:     "http://" + addr,
 		// A nonexistent interface makes every SSDP advertiser fail to bind,
 		// which is the production trigger for "Start returns an error after

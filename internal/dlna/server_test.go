@@ -76,18 +76,16 @@ func Test_NewServer_ReturnsServerForValidConfig(t *testing.T) {
 // so the test doesn't conflict with anything on a real port.
 // -----------------------------------------------------------------------------
 
-// findFreePort returns an OS-assigned ephemeral port. Used so the
-// lifecycle test can verify start/stop against a real socket without
-// hardcoding a port that might conflict.
-func findFreePort(t *testing.T) string {
+// loopbackListener keeps an OS-assigned port bound until Start adopts the
+// listener. Returning a closed port's number races every other binder.
+func loopbackListener(t *testing.T) *net.TCPListener {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	l, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
-		t.Fatalf("findFreePort: %v", err)
+		t.Fatalf("loopback listener: %v", err)
 	}
-	addr := l.Addr().String()
-	l.Close()
-	return addr
+	t.Cleanup(func() { _ = l.Close() })
+	return l
 }
 
 // Test_Server_StartStop_LifecycleBindsLoopbackPort exercises the
@@ -101,13 +99,15 @@ func findFreePort(t *testing.T) string {
 // (loopbackInterface), so the Start and Stop bursts it sends never leave
 // this host; SSDP packet builders are tested in ssdp_packet_test.go.
 func Test_Server_StartStop_LifecycleBindsLoopbackPort(t *testing.T) {
-	addr := findFreePort(t)
+	l := loopbackListener(t)
+	addr := l.Addr().String()
 	lib := newTestLib(testTrack("t1", "Test Track"))
 	s, err := NewServer(ServerConfig{
 		Library:       lib,
 		UDN:           "uuid:test-lifecycle",
 		FriendlyName:  "Test Bridge",
 		ListenAddress: addr,
+		Listener:      l,
 		ServerURL:     "http://" + addr,
 		AdvertiseEndpoints: []AdvertiseEndpoint{{
 			Interface: loopbackInterface(t),

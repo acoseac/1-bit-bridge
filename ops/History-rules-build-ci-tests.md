@@ -1048,6 +1048,22 @@
   `TestARefusedHandedUDPSocketLeavesTheLANPortFree`,
   `TestTheAdminReadinessCheckWaitsUntilServeAdoptsTheListener`.)
 
+  **A shutdown assertion observes the original listener (for example,
+  Accept returning net.ErrClosed), never a dial of its released port, and
+  checks failed-Start rollback before Stop can mask it** (2026-10-25,
+  backlog B547). The MediaServer's none-binds golden dialled its old port
+  after Stop: a parallel test could already own it. Its fixture also used
+  listen-then-close before Start. The DLNA fixtures now hand Start a live
+  listener, and the golden retains that TCPListener and requires Accept to
+  return net.ErrClosed before Stop. A wrapper signals after delegating Close
+  to the real socket; its wait is bounded, without changing HTTP's Accept
+  deadline and making Serve close the socket itself. Serve may still be
+  entering on its goroutine when Start returns, and closes it as it observes
+  Shutdown. Stop remains as cleanup.
+  The production failure path's Shutdown, rather than Stop, owns rollback.
+  Refusal-only dial fixtures can use port zero, which no listener can own;
+  binding port zero always allocates a nonzero port.
+
 - **A test asserting that a message NAMES A PATH must not substring-match the
   raw path.** `%q` escapes backslashes, so a Windows `C:\Users\…` renders as
   `C:\\Users\\…` and `strings.Contains(out, dir)` fails on that platform
