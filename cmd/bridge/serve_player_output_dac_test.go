@@ -123,14 +123,7 @@ func dacFeed(t *testing.T, trees outputTrees, dev config.PlayerDevice) (*hotplug
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); svc.Run(ctx) }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case <-done:
-		case <-serveGiveUp(t):
-			t.Error("watcher did not stop")
-		}
-	})
+	drainLoopOnCleanup(t, cancel, done, "the DAC test's hotplug watcher")
 	select {
 	case <-sub.C():
 	case <-serveGiveUp(t):
