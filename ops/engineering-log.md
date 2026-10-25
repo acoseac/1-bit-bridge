@@ -62481,3 +62481,65 @@ openhome tests round 3 changed or added (the four `insertFault` serves, the
 renamed test and the two-spellings test) and trackref's two with
 `-race -count=10`, 80 runs, all passing, none skipped; `FuzzParse` for 30 s,
 650,713 inputs with four workers, none failing.
+
+## 2026-10-25 — B470 PR 5a4: SeekIndex's ui4 held to an index an int of any width holds (CodeQL)
+
+**The finding.** CodeQL's `go/incorrect-integer-conversion` (high, alert
+179 on #1347) at `internal/player/openhome/writes.go:126`, SeekIndex's
+writer, `e.PlayIndex(ctx, int(ui4Of(args[0])))`: an unsigned 32-bit
+integer from `strconv.ParseUint` (`ui4Of` parses at bitSize 32 and returns
+a `uint32`) converted to `int` without an upper bound check.
+
+**Not a shipped defect.** Every release target is 64-bit
+(`.goreleaser.yaml`: darwin, linux and windows on amd64 and arm64; `make
+build-all`'s six targets; the image's linux/amd64 and linux/arm64), so int
+holds every ui4 in every build the bridge ships. A build from source for a
+32-bit target (linux/arm, a Pi on a 32-bit OS, or linux/386) has a 32-bit
+int, and there a ui4 past 2147483647 wrapped negative; the engine refuses
+an index below 0 as it refuses one past the end (`transport.go`,
+`ReasonIndexNotFound`), so even there the answer was 802 "Index not
+found", its refusal's detail naming a negative index.
+
+**What changed** (ccbad88c). `indexOf`, beside `booleanOf` in `writes.go`,
+returns the ui4 when it is at most `math.MaxInt32` and `math.MaxInt32`
+otherwise: the bound is checked where the conversion happens, in the shape
+the query takes for one (a comparison with a constant no larger than the
+target's maximum), and an int of any width holds what it returns.
+`math.MaxInt32` is past the end of every queue (a queue holds at most
+`engine.MaxEntries`, 1,000, at an insert and at a load), so the engine
+refuses it as before. `engine.MaxEntries` was weighed as the value and not
+taken: the indexes past the bound would then read below 2147483647, and
+the refusal would name index 1000, which a controller can send. SeekIndex
+is still the engine's `PlayIndex`, its signature unchanged, so its
+refusals keep their order (an unconfirmed release's 501 before the index's
+802). The sweep of the PR's diff for other `int(` conversions of a ui4 or
+a ParseUint result found one, in a test:
+`TestTheFiveHundredTrackWindowAndItsReHandoff` converted TracksMax before
+taking the lower of it and 500, and now takes the lower first. The PR's
+other parse sites keep their bounds (trackref's `portOf`, `Atoi` then 1 to
+65535; `playerTrackPorts`, `ParseUint` at 16 bits into a uint16). No rule
+line: 802 on SeekIndex is openhome.md's already, and no shipped build's
+answer changes.
+
+**The pin.** `TestEachWriteIsItsEngineCommand`, beside SeekIndex past the
+queue: the ui4 maximum, 4294967295, is 802 "Index not found", and neither
+SeekIndex past the queue starts a session or moves the generation. Green
+on this 64-bit Mac before the fix (int holds the value) and after it.
+
+**Controls**, on ccbad88c, each restored from git and the tree checked
+clean: the clamp at 0 (an index past the bound landing on the first entry)
+turned it red at the new case, `Playlist#SeekIndex: 200, want a fault`,
+the reply a SeekIndexResponse; a SeekIndex that answers its refusal and
+plays the first entry turned it red at the new check alone, `a SeekIndex
+past the queue started a session or changed the engine`.
+
+**Commands**, on the dev Mac, Go 1.27.3 (GOTOOLCHAIN=local, GOPROXY=off),
+each go command with `-tags ts_omit_webclient,ts_omit_debugeventbus`:
+`gofmt -l ./internal/player/` empty; `go vet` and `go test -count=1` over
+`./internal/player/...` clean, every package passing; `go test -race
+-count=1 ./internal/player/openhome/` passing (34 s); for GOOS=linux with
+GOARCH=386 and with GOARCH=arm, `go vet` of `./internal/player/openhome/`
+and `./internal/player/engine/` and `go test -c -o /dev/null` of each
+clean (compiled only: no 32-bit host ran them); `make docs-check` and the
+cited-test-names guard (`TestEveryCitedTestNameExists`) clean. Whether
+CodeQL takes the check is the PR's next analysis.
