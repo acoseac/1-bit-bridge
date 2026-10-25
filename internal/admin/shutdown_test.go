@@ -100,12 +100,24 @@ func startShutdownTestServer(t *testing.T) (*Server, <-chan struct{}, context.Ca
 		cancel()
 		select {
 		case <-serveDone:
-		case <-time.After(7 * time.Second):
-			t.Error("ServeListener did not stop during cleanup")
+		case <-time.After(shutdownDrainWait(t)):
+			t.Error("ServeListener did not stop before the test deadline")
 		}
 	})
 	waitForShutdownTestServer(t, cfg.AdminAddress, serveDone)
 	return srv, serveDone, cancel
+}
+
+// shutdownDrainWait is how long a cleanup waits for ServeListener to exit:
+// until the test binary's deadline less 10 s, as serve tests' drains do
+// (cmd/bridge's serveDrainGiveUp; build-ci-tests.md, B63), never a fixed
+// time, or a minute when the test has no deadline.
+func shutdownDrainWait(t *testing.T) time.Duration {
+	deadline, ok := t.Deadline()
+	if !ok {
+		return time.Minute
+	}
+	return max(time.Until(deadline)-10*time.Second, 0)
 }
 
 // waitForShutdownTestServer waits for HTTP, since a pre-bound socket can
