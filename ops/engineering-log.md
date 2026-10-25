@@ -64880,3 +64880,15 @@ The warm of the entry above (9ea5cd97 to 1f16660c) was reviewed by Codex and the
 **Docs.** `openhome.md`'s line on the warm says the surface that does not start stops it and that a read from the first row is the build, with the two new tests; its long form in `ops/History-rules-openhome.md` has this round's reasoning, and the confinement's long form says a read from the first row counts as a build; `cli-serve.md`'s line on the surface's start says a surface that cannot start tells `start`, which stops the build; `ops/History-rules-cli-serve.md` says the shutdown waits for the build the player begins with the surface and stops when it does not start.
 
 **Commands**, on the dev Mac, Go 1.27.3 (`GOTOOLCHAIN=local`, `GOPROXY=off`), each go command with `-tags ts_omit_webclient,ts_omit_debugeventbus`: `gofmt -l ./internal/player/ ./cmd/bridge/` with the toolchain's own gofmt, empty; `go vet ./internal/player/... ./cmd/bridge/` clean on darwin, with `GOOS=linux` and with `GOOS=windows`; `go test -count=1 ./internal/player/... ./cmd/bridge/` on 8cf7a471, every package passing (cmd/bridge 150.7 s, openhome 26.2 s, library 3.4 s); `go test -race -timeout 30m -count=1 ./internal/player/library/ ./internal/player/openhome/ ./cmd/bridge/` on 8cf7a471, passing with no race reported (library 21.3 s, openhome 38.9 s, cmd/bridge 608.7 s, 10 min 22 s in all, load averages up to 21 from other sessions); the shuffled runs above; `make docs-check` and the cited-test-names guard (`go test -run TestEveryCitedTestNameExists ./cmd/bridge/`) clean over these docs.
+
+## 2026-10-25 — B470 PR 5a4: main's 5b test library takes the resolver's new read
+
+Merging main (B470 PR 5b, #1348) into PR 5a4 left `cmd/bridge`'s tests
+uncompiled: 5b's `emptyLibrary` stand-in (`serve_player_output_test.go`)
+implements `library.Store` with `TrackPaths`, and 5a4 replaced that method with
+`TrackPathsIndexedAfter`, the read the resolver's index is built and kept
+current from. Neither branch was wrong alone; the two met only in the merge,
+and `go vet ./...` on the merged tree found it before CI did. The stand-in now
+has `TrackPathsIndexedAfter`, an empty library calling `fn` for no row. Checked
+with `go vet` on darwin, linux and windows, and `go test` of `./cmd/bridge/`
+and `./internal/api/`, plain and under `-race -timeout 30m`.
