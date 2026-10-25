@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -36,8 +35,9 @@ type outputBindEnv struct {
 	// writer in.
 	beforeLock func()
 	// beforeSave, when set, runs between bind's read of the config under
-	// the lock and its save: the window a writer that takes no lock (library
-	// add or remove, init) can save in.
+	// the locks and its save: the window a writer that takes no lock (an
+	// edit, or a bridge older than bridge.yaml's lock) can still save in,
+	// and one that takes bridge.yaml's waits through.
 	beforeSave func()
 }
 
@@ -459,11 +459,12 @@ var errBindConfigChanged = errors.New("the config changed after bind read it")
 // printed. It refuses a binding that would not resolve to that card now,
 // an ambiguous one above all, a player block that does not read (Save
 // would write its old text back), and a data dir a running bridge holds,
-// which would write its own copy of the config over the binding at its next
-// settings save. Once it holds the data dir's lock it reads the config
-// again and saves that copy, refusing a data dir that moved in between.
-// When the player is enabled it makes the player's UUID, the first time
-// only.
+// which reads output.player only when it starts, and whose console would
+// then refuse every settings save over the file bind changed until it
+// restarted. Once it holds the data dir's lock and then bridge.yaml's
+// (config.LockFile), it reads the config again and saves that copy,
+// refusing a data dir that moved in between. When the player is enabled it
+// makes the player's UUID, the first time only.
 //
 // Exit codes: 0 the binding was written, 1 refused, 2 usage error.
 func runDACBind(ctx context.Context, args []string, env outputBindEnv, stdout, stderr io.Writer) int {
@@ -528,24 +529,32 @@ func runDACBind(ctx context.Context, args []string, env outputBindEnv, stdout, s
 	if refused {
 		return 1
 	}
-	// The binding is saved into the config as it stands under the lock, not
-	// as it was read before it: a restore, or a serve's last settings save
-	// before it stopped, that committed in between would otherwise be
-	// written over with the older copy. The path is the one resolved
-	// above, so this reads that file again. read is the bytes this read
-	// parses, or older ones: library add and remove and init save the file
-	// without the lock, so the save asks just before its rename whether the
-	// file still holds them (SaveIf). That narrows the window to the instant
-	// before the rename and does not close it; a lock that every config
-	// writer takes would.
-	read, err := os.ReadFile(cfgPath)
-	if err == nil {
-		cfg, _, err = loadCLIConfig(cfgPath)
+	// bridge.yaml's own lock (config.LockFile, backlog B506), inside the
+	// data dir's, the order every command that takes both keeps, and held
+	// from the read below to the save, so no writer that takes it lands
+	// between them.
+	lock, err := config.LockFile(cfgPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", cmd, err)
+		return 1
 	}
+	defer lock.Unlock()
+	// The binding is saved into the config as it stands under the locks,
+	// not as it was read before them: a restore, a library add, or a
+	// serve's last settings save before it stopped, that committed in
+	// between would otherwise be written over with the older copy. It is the
+	// config the turn found once it was taken (LoadFound), and read is those
+	// bytes: a writer that takes no lock (an edit, or a bridge older than the
+	// lock) can still save, so the save asks before each attempt at its
+	// rename whether the file still holds them (SaveIf), the second guard
+	// beside the turn's own, which narrows that window to the instant before
+	// the rename and does not close it.
+	cfg, err = lock.LoadFound()
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: config load: %v\n", cmd, err)
 		return 1
 	}
+	read, _ := lock.Found()
 	if cfg.DataDir != dataDir {
 		fmt.Fprintf(stderr, "%s: the config's data dir changed from %s to %s while bind took the lock on the first\n", cmd, dataDir, cfg.DataDir)
 		fmt.Fprintln(stderr, "  Run bind again: it locks the data dir the config names.")
@@ -581,16 +590,29 @@ func runDACBind(ctx context.Context, args []string, env outputBindEnv, stdout, s
 	if env.beforeSave != nil {
 		env.beforeSave()
 	}
-	err = cfg.SaveIf(cfgPath, func() error {
-		if now, err := os.ReadFile(cfgPath); err != nil || !bytes.Equal(now, read) {
+	err = cfg.SaveIf(lock, func(ctx context.Context) error {
+		// Read as the turn's own comparison reads, asked again while
+		// Windows answers that another process holds the file; a read that
+		// fails for good is that failure, never a change.
+		now, err := config.ReadFile(ctx, cfgPath)
+		switch {
+		case err != nil:
+			return fmt.Errorf("read %s again before replacing it: %w", cfgPath, err)
+		case !bytes.Equal(now, read):
 			return errBindConfigChanged
 		}
 		return nil
 	})
+	// The turn is over: what follows writes the player's identity, never the
+	// config.
+	lock.Unlock()
 	switch {
-	case errors.Is(err, errBindConfigChanged):
+	case errors.Is(err, errBindConfigChanged) || errors.Is(err, config.ErrChangedInTurn):
+		// Bind's own comparison, or the one every save in a turn makes first
+		// (against the file as the turn found it), which differ only by the
+		// instant each read.
 		fmt.Fprintf(stderr, "%s: %s changed after bind read it, so the binding was not written: run bind again\n", cmd, cfgPath)
-		fmt.Fprintln(stderr, "  library add, library remove and init save the config without the data dir's lock, and bind does not write over what they saved.")
+		fmt.Fprintln(stderr, "  something saved it without bridge.yaml's lock (an edit, or a bridge older than the lock), and bind does not write over what it saved.")
 		return 1
 	case err != nil:
 		fmt.Fprintf(stderr, "%s: save config: %v\n", cmd, err)

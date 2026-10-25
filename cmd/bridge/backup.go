@@ -130,7 +130,12 @@ func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 		return 2
 	}
 
-	cfg, resolvedCfgPath, err := loadCLIConfig(*configPath)
+	// The bytes the config is read from go to the restore (ConfigAsRead):
+	// the targets below come from this read, its data dir and its TLS pair,
+	// and the restore refuses, with nothing restored, a config another
+	// writer changed since (while this command asks for confirmation, say),
+	// once it has the config's turn (backlog B506).
+	cfg, resolvedCfgPath, cfgRead, err := loadCLIConfigFile(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "config load failed: %v\n", err)
 		return 2
@@ -183,7 +188,8 @@ func restoreCmd(ctx context.Context, args []string, stdin io.Reader, stdout, std
 	}
 
 	targets := buildRestoreTargets(cfg, resolvedCfgPath)
-	if err := backup.RestoreWithOptions(snapshotDir, targets, backup.RestoreOptions{Random: restoreRandom, Warn: func(s string) { fmt.Fprintln(stdout, s) }}); err != nil {
+	opts := backup.RestoreOptions{Random: restoreRandom, Warn: func(s string) { fmt.Fprintln(stdout, s) }, ConfigAsRead: cfgRead}
+	if err := backup.RestoreWithOptions(snapshotDir, targets, opts); err != nil {
 		fmt.Fprintf(stderr, "restore: %v\n", err)
 		return 1
 	}

@@ -111,3 +111,18 @@ func ResetPlayerAfterStep(dir string, after func(string) error) (bool, error) {
 func DiscardPlayerFloorAfterStep(dir string, after func(string) error) (bool, error) {
 	return resetPlayer(dir, true, after)
 }
+
+// WithBeforeConfigForTest returns opts with fn as what a restore runs just
+// before it writes the snapshot's bridge.yaml, in its turn of the file's
+// lock.
+func WithBeforeConfigForTest(opts RestoreOptions, fn func()) RestoreOptions {
+	opts.beforeConfig = fn
+	return opts
+}
+
+// WithBeforeWritesForTest returns opts with fn as what a restore runs once it
+// holds its locks and has read the snapshot, just before its first write.
+func WithBeforeWritesForTest(opts RestoreOptions, fn func()) RestoreOptions {
+	opts.beforeWrites = fn
+	return opts
+}

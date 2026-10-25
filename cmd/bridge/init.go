@@ -26,6 +26,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/adminauth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/packaging"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 )
@@ -401,13 +402,30 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// service fails at start with a silent "no such file" from the
 	// daemon's log. Resolving here keeps the rest of init trust-but-
 	// verify-free.
-	if absDir, err := filepath.Abs(expandHome(cfgDir)); err == nil {
-		cfgDir = absDir
-	} else {
+	//
+	// The config file is named as written (fsutil.AbsAsWritten): it is
+	// the file the OS opens for --dir, a `..` after a link climbing from
+	// where the link leads, the file serve and every CLI writer open for
+	// that name (B506's third round). The directory init prints and puts
+	// the data dir in is that name cleaned, the base config.Load takes
+	// from it, as before.
+	cfgDirAsWritten, err := fsutil.AbsAsWritten(expandHome(cfgDir))
+	if err != nil {
 		fmt.Fprintf(stderr, "resolve --dir path: %v\n", err)
 		return 1
 	}
-	cfgPath := filepath.Join(cfgDir, "bridge.yaml")
+	cfgDir = filepath.Clean(cfgDirAsWritten)
+	cfgPath := cfgDirAsWritten + string(filepath.Separator) + "bridge.yaml"
+	if strings.HasSuffix(cfgDirAsWritten, string(filepath.Separator)) {
+		cfgPath = cfgDirAsWritten + "bridge.yaml"
+	}
+	// A config that is a link to no file is refused before anything is
+	// written: a save there would make a file where the link points or put
+	// one in its place, and the data dir and the TLS pair come first.
+	if err := config.CheckName(cfgPath); err != nil {
+		fmt.Fprintf(stderr, "%v\n", err)
+		return 1
+	}
 	// The install already at cfgPath, as its file says (priorInstallFile). A
 	// rewrite keeps its data dir, which the header, the preflight, the
 	// credential store, the TLS pair and the service all use from here on.
@@ -690,11 +708,11 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	// are non-fatal: if perms can't be tightened (e.g. the dir is on
 	// a filesystem that ignores POSIX modes, or Windows ACLs differ)
 	// we still want init to succeed — surface a warning.
-	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+	if err := os.MkdirAll(cfgDirAsWritten, 0o700); err != nil {
 		fmt.Fprintf(stderr, "mkdir config dir: %v\n", err)
 		return 1
 	}
-	if err := os.Chmod(cfgDir, 0o700); err != nil {
+	if err := os.Chmod(cfgDirAsWritten, 0o700); err != nil {
 		fmt.Fprintf(stderr, "warning: chmod config dir: %v\n", err)
 	}
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
@@ -868,15 +886,12 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 
 	// The config must still be the one this run read and decided about, and
-	// this is the last step before Save: every prompt, refusal and check ran
-	// since, and another process can have written the config meanwhile
-	// (configChangedSinceRead).
-	if configChangedSinceRead(stderr, cfgPath, asRead) {
-		return 1
-	}
-	if err := cfg.Save(cfgPath); err != nil {
-		fmt.Fprintf(stderr, "save config: %v\n", err)
-		return 1
+	// this is the last step: every prompt, refusal and check ran since, and
+	// another process can have written the config meanwhile
+	// (configChangedSinceRead). The check and the save are one turn of
+	// bridge.yaml's lock (saveInitConfig).
+	if code := saveInitConfig(stderr, cfgPath, asRead, cfg); code != 0 {
+		return code
 	}
 	printKept(stdout, cfg, initDataDir, rootsKept, nameKept, endpointsKept, listenListed, adminListed)
 	if endpointsKept {
@@ -917,6 +932,38 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	choice := resolveLaunchChoice(in, stdout, *nonInteractive, *skipService, *windowsService, *startNow)
 	return finishInit(in, *nonInteractive, stdout, stderr, cfgPath, dataDir, choice)
+}
+
+// saveInitConfig writes cfg as the config at cfgPath, in one turn of
+// bridge.yaml's lock (config.LockFile, backlog B506), and only while the file
+// is still as this run read it at its start (asRead): the check reads the
+// file again under the lock, no writer that takes the lock can land between
+// it and the save, and the save compares the file once more just before its
+// rename, for one that does not (an edit). A run asks its questions between
+// its read and this turn, which is why the turn is this step alone and never
+// the run: it decides from its read and refuses a file that changed, as it
+// did before the lock, rather than hold every other writer off while it
+// waits on the operator. It answers init's exit code.
+func saveInitConfig(stderr io.Writer, cfgPath string, asRead configAsRead, cfg *config.Config) int {
+	lock, err := config.LockFile(cfgPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "save config: %v\n", err)
+		return 1
+	}
+	defer lock.Unlock()
+	if configChangedSinceRead(stderr, cfgPath, asRead, lock) {
+		return 1
+	}
+	// The save asks once more just before its rename, as every save in a
+	// turn does: a config an edit changed after the check is left as it is.
+	if err := cfg.Save(lock); errors.Is(err, config.ErrChangedInTurn) {
+		sayConfigChangedWhileInitRan(stderr, cfgPath)
+		return 1
+	} else if err != nil {
+		fmt.Fprintf(stderr, "save config: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 // openInitAdminAuth reads a public install's admin credential store for

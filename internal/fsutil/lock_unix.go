@@ -29,6 +29,17 @@ func lockedErr(err error) error {
 	return err
 }
 
+// keepsNoLocks is KeepsNoLocks on these platforms: flock's own answers for a
+// filesystem that keeps no locks (an NFS mount without a lock manager
+// answers ENOLCK; one that does not do flock, and some FUSE and SMB mounts,
+// EOPNOTSUPP or ENOTSUP, which are one Errno on Linux and two on macOS and
+// the BSDs), and errors.ErrUnsupported, which a kernel without flock
+// (ENOSYS) matches too.
+func keepsNoLocks(err error) bool {
+	return errors.Is(err, unix.ENOLCK) || errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOTSUP) ||
+		errors.Is(err, errors.ErrUnsupported)
+}
+
 func unlock(f *os.File) error {
 	return controlFD(f, "flock", func(fd uintptr) error {
 		return flockRetryingEINTR(fd, unix.LOCK_UN)

@@ -311,7 +311,11 @@ func buildDoctorDepsFor(cfgPath string, absentIsPreSetup bool) doctor.Deps {
 	// If a config file was found, pull LibraryRoots / ports / dataDir
 	// from it so doctor's checks are accurate.
 	if found {
-		d.ConfigFile.Path = absOrAsGiven(path)
+		// Made absolute as written (fsutil.AbsAsWritten), never cleaned:
+		// the file the OS opens for the name, which serve and every writer
+		// open too, where filepath.Abs took a `..` after a link away with
+		// the link and graded another file (B506's third round).
+		d.ConfigFile.Path = asWrittenOrAsGiven(path)
 		// Loaded by its absolute name so a load error spells the path the
 		// way the report does (config.Load absolutizes it anyway).
 		cfg, err := config.Load(d.ConfigFile.Path)
@@ -488,6 +492,16 @@ func doctorConfigDir(explicit, resolved string, found bool) string {
 // rather than losing the path entirely.
 func absOrAsGiven(p string) string {
 	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return p
+}
+
+// asWrittenOrAsGiven is absOrAsGiven for a config's name that is opened:
+// made absolute as written (fsutil.AbsAsWritten), so it names the file the OS
+// opens for it.
+func asWrittenOrAsGiven(p string) string {
+	if abs, err := fsutil.AbsAsWritten(p); err == nil {
 		return abs
 	}
 	return p

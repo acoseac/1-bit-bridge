@@ -423,6 +423,55 @@ func RenameWithRetryCtx(ctx context.Context, src, dst string) error {
 	return nil
 }
 
+// RenameWithRetryIf is RenameWithRetryCtx for a rename that is right only
+// while a condition holds, a config save's comparison with the file its turn
+// found: before runs ahead of every attempt, the first included, and an error
+// of its ends the retries at once, returned as it is, with no rename tried
+// after it. Only the rename's own failures are tried again, on
+// RenameWithRetry's schedule: a refusal tried again could find the file put
+// back as it was between attempts, and write over the change it refused. ctx
+// bounds the whole loop, before's work, the attempts and the waits between
+// them: it is asked before each condition and again once the condition has
+// answered, before each rename, so no rename is made once it has ended,
+// however late the condition answered nil, and none is asked of a ctx that
+// ended before the first (renameStopped: its end, wrapping the last rename's
+// failure when one failed). On success the destination's directory is
+// synced, as RenameWithRetry syncs it.
+func RenameWithRetryIf(ctx context.Context, src, dst string, before func() error) error {
+	var err error
+	for _, d := range renameBackoff {
+		if d > 0 {
+			select {
+			case <-ctx.Done():
+			case <-time.After(d):
+			}
+		}
+		if ctx.Err() != nil {
+			return renameStopped(ctx, err)
+		}
+		if refused := before(); refused != nil {
+			return refused
+		}
+		if ctx.Err() != nil {
+			return renameStopped(ctx, err)
+		}
+		if err = renameFunc(src, dst); err == nil {
+			commitDirEntry(dst)
+			return nil
+		}
+	}
+	return err
+}
+
+// renameStopped is RenameWithRetryIf's answer once ctx has ended: ctx's end,
+// after the last rename's failure when one failed.
+func renameStopped(ctx context.Context, last error) error {
+	if last == nil {
+		return fmt.Errorf("no rename was made: %w", ctx.Err())
+	}
+	return fmt.Errorf("%w (stopped retrying: %w)", last, ctx.Err())
+}
+
 // renameRetry is the rename and its retries, without the barrier: each
 // caller runs that in its own mode (commitDirEntry, or durableChain for
 // WriteBytesDurable).

@@ -362,9 +362,9 @@ func TestOutputDACBindRefusesWhatWouldNotResolve(t *testing.T) {
 }
 
 // TestOutputDACBindRefusesWhileABridgeServesTheDataDir: a running serve
-// holds the data dir's lock, and would write its own copy of the config
-// over the binding at its next settings save, so bind refuses until it
-// stops.
+// holds the data dir's lock and reads output.player only when it starts,
+// and its console would refuse every settings save over the file bind
+// changed until it restarted, so bind refuses until it stops.
 func TestOutputDACBindRefusesWhileABridgeServesTheDataDir(t *testing.T) {
 	root := dacTree(t)
 	cfgPath := dacConfig(t, "")
@@ -388,12 +388,13 @@ func TestOutputDACBindRefusesWhileABridgeServesTheDataDir(t *testing.T) {
 }
 
 // TestOutputDACBindSavesTheConfigItReadUnderTheLock: bind reads the config
-// again once it holds the data dir's lock, so what another writer committed
-// between bind's first read and the lock (a restore, a serve's last
-// settings save before it stopped) is kept beside the binding, never
-// written over with the copy read before it. A data dir that moved in
-// between, whose lock bind does not hold, and a player block that no longer
-// reads are refused, and the file is left as the other writer left it.
+// again once it holds the data dir's lock and bridge.yaml's, so what another
+// writer committed between bind's first read and the locks (a restore, a
+// library add, a serve's last settings save before it stopped) is kept
+// beside the binding, never written over with the copy read before it. A
+// data dir that moved in between, whose lock bind does not hold, and a
+// player block that no longer reads are refused, and the file is left as
+// the other writer left it.
 func TestOutputDACBindSavesTheConfigItReadUnderTheLock(t *testing.T) {
 	root := dacTree(t)
 	for _, tc := range []struct {
@@ -454,13 +455,14 @@ func TestOutputDACBindSavesTheConfigItReadUnderTheLock(t *testing.T) {
 	}
 }
 
-// TestOutputDACBindNeverWritesOverAnUpdateAfterItsRead: library add and
-// remove and init save the config without the data dir's lock, so one of
-// them can save between bind's read under the lock and its own save. bind
-// replaces the file only while it still holds the bytes bind read: an
-// update, one of the same size whose modification time was put back (which
-// a look at the size and the time would miss), and a file removed are each
-// refused, and the file is left as the other writer left it.
+// TestOutputDACBindNeverWritesOverAnUpdateAfterItsRead: a writer that takes
+// no lock (an edit, or a bridge older than bridge.yaml's lock; every writer
+// in this tree takes it since backlog B506) can save between bind's read
+// under the locks and its own save. bind replaces the file only while it
+// still holds the bytes bind read, the second guard (SaveIf): an update, one
+// of the same size whose modification time was put back (which a look at the
+// size and the time would miss), and a file removed are each refused, and
+// the file is left as the other writer left it.
 func TestOutputDACBindNeverWritesOverAnUpdateAfterItsRead(t *testing.T) {
 	root := dacTree(t)
 	for _, tc := range []struct {
@@ -643,7 +645,7 @@ func TestOutputDACBindKeepsThePlayersUUID(t *testing.T) {
 	if _, _, code := runDAC(t, dacEnv(), append([]string{"bind", "6", "--binding", "port", "--config", cfgPath}, treeFlags(root)...)...); code != 0 {
 		t.Fatal("rebind failed")
 	}
-	if err := cfg.Save(cfgPath); err != nil {
+	if err := saveConfigAt(cfg, cfgPath); err != nil {
 		t.Fatal(err)
 	}
 	if again, err := config.ReadPlayerUUID(cfg.DataDir); err != nil || again != id {

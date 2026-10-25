@@ -124,7 +124,7 @@ func TestAPortBindingLoadsInEitherForm(t *testing.T) {
 		if on, why := cfg.PlayerEnabled("linux"); !on || why != nil {
 			t.Errorf("%s: PlayerEnabled = %v, %v", port, on, why)
 		}
-		if err := cfg.Save(path); err != nil {
+		if err := saveAt(cfg, path); err != nil {
 			t.Fatal(err)
 		}
 		again, err := Load(path)
@@ -156,7 +156,7 @@ func TestThePlayerBlockLoadsAndRoundTrips(t *testing.T) {
 	if on, why := cfg.PlayerEnabled("linux"); !on || why != nil {
 		t.Fatalf("PlayerEnabled(linux) = %v, %v", on, why)
 	}
-	if err := cfg.Save(path); err != nil {
+	if err := saveAt(cfg, path); err != nil {
 		t.Fatal(err)
 	}
 	b, err := os.ReadFile(path)
@@ -204,7 +204,7 @@ func TestASaveKeepsWhatWasNotWritten(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := cfg.Save(path); err != nil {
+	if err := saveAt(cfg, path); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(path)
@@ -260,7 +260,7 @@ func TestAnInvalidPlayerBlockTurnsOffThePlayerAndNothingElse(t *testing.T) {
 				t.Errorf("the reason quotes the serial: %v", why)
 			}
 			written, _ := os.ReadFile(path)
-			if err := cfg.Save(path); err != nil {
+			if err := saveAt(cfg, path); err != nil {
 				t.Fatal(err)
 			}
 			saved, _ := os.ReadFile(path)
@@ -338,7 +338,7 @@ func TestASerialInTheWrongFieldIsNeverQuoted(t *testing.T) {
 						t.Errorf("%s: a log line quotes the serial: %s", pass, l)
 					}
 				}
-				if err := cfg.Save(path); err != nil {
+				if err := saveAt(cfg, path); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -438,7 +438,9 @@ func TestAWholeNumberOfThePlayerTakesNoFraction(t *testing.T) {
 				if said := unlined.ReplaceAllString(why.Error(), ""); strings.ContainsAny(said, "0123456789") || strings.Contains(said, value) {
 					t.Errorf("the reason quotes the value: %v", why)
 				}
-				if err := cfg.Save(path); err != nil {
+				// The save goes through a turn (Edit), which saves the copy it
+				// loads, as every writer must since B506.
+				if err := Edit(path, func(*Config) (bool, error) { return true, nil }); err != nil {
 					t.Fatal(err)
 				}
 				if saved, _ := os.ReadFile(path); !strings.Contains(string(saved), name+": "+value+"\n") {
@@ -508,7 +510,7 @@ func TestAnUnreadBlockWithAnAliasSavesAFileThatLoads(t *testing.T) {
 				t.Fatalf("PlayerEnabled's reason = %v", why)
 			}
 			for i := 0; i < 2; i++ {
-				if err := cfg.Save(path); err != nil {
+				if err := saveAt(cfg, path); err != nil {
 					t.Fatalf("save %d: %v", i+1, err)
 				}
 				saved, _ := os.ReadFile(path)
@@ -549,7 +551,7 @@ func TestAnUnreadBlockWhoseAliasesCannotBeCopiedIsNotKept(t *testing.T) {
 			if _, why := cfg.PlayerEnabled("linux"); why == nil || !strings.Contains(why.Error(), "a save drops it") {
 				t.Fatalf("PlayerEnabled's reason = %v", why)
 			}
-			if err := cfg.Save(path); err != nil {
+			if err := saveAt(cfg, path); err != nil {
 				t.Fatal(err)
 			}
 			saved, _ := os.ReadFile(path)

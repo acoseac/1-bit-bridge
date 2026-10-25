@@ -1705,9 +1705,10 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// applyRootAddition wipes on a single-to-multi flip, saves the root list
-// and points the scanner at it. CommitRootChange calls it while it holds
-// the scanner lock, after the previous scan has stopped writing.
+// applyRootAddition wipes on a single-to-multi flip, in the save's turn of
+// bridge.yaml's lock and after its comparison of the file, saves the root
+// list and points the scanner at it. CommitRootChange calls it while it
+// holds the scanner lock, after the previous scan has stopped writing.
 func (s *Server) applyRootAddition(w http.ResponseWriter, r *http.Request, abs string, newList, current []string, willTransition bool) {
 	// A single↔multi transition changes the stored path form
 	// (bare "Artist/…" vs "<basename>/Artist/…"), so filesystem tracks
@@ -1726,18 +1727,25 @@ func (s *Server) applyRootAddition(w http.ResponseWriter, r *http.Request, abs s
 	// means the config file is untouched; a config-save failure after
 	// a successful wipe means the next scan simply re-populates —
 	// every failure window lands in a state the scanner can heal.
+	//
+	// The wipe runs inside the Update below, in bridge.yaml's turn and
+	// after the holder's comparison of the file (backlog B506): a save
+	// refused because another writer changed the config since serve read
+	// it, or because another writer holds its lock past the wait, is
+	// refused before the wipe, so it wipes nothing (and unlinks no
+	// rendition), however often the operator retries. Before, the wipe ran
+	// first and the refusal came after it. The turn's comparison is asked
+	// once more just before the wipe starts (check), so the one refusal
+	// that can still come after it is a writer that takes no turns (an
+	// edit, a bridge older than the lock) landing during the wipe itself or
+	// the save's staging: that costs the renditions and waveforms the wipe
+	// unlinked, which a successful add drops too (the rows' path form
+	// changes), and which come back as they first came (B506's third round,
+	// ops/History-rules-config-lifecycle.md); the rows come back with the
+	// compensating scan.
 	var carryGen int64
-	if willTransition {
-		gen, err := s.deps.Manifest.RecordFirstIndexedCarryAndWipe(r.Context(), false, filepath.Base(current[0]))
-		if err != nil {
-			// The in-flight scan was cancelled so it would not write
-			// after this wipe. The wipe did not happen; redo the walk.
-			s.spawnBackgroundScan(scanAfterFailedRootWipe)
-			writeError(w, http.StatusInternalServerError, "wipe-tracks", err.Error())
-			return
-		}
-		carryGen = gen
-	}
+	var wiped bool
+	var wipeErr error
 	// Persist via CfgHolder.Update: the clone-from-live → Save → Store
 	// sequence runs under the holder's single write lock, shared with
 	// every other config writer (settings PATCH, UPnP server CRUD, …).
@@ -1745,23 +1753,42 @@ func (s *Server) applyRootAddition(w http.ResponseWriter, r *http.Request, abs s
 	// concurrent writer committing between our checks above and here
 	// can't be silently dropped by our Save. If Save fails the clone
 	// is discarded — no manual rollback required.
-	err := s.deps.CfgHolder.Update(s.deps.CfgPath, func(next *config.Config) error {
+	err := s.deps.CfgHolder.UpdateChecked(s.deps.CfgPath, func(next *config.Config, check func() error) error {
+		if willTransition {
+			if err := check(); err != nil {
+				return err
+			}
+			gen, err := s.deps.Manifest.RecordFirstIndexedCarryAndWipe(r.Context(), false, filepath.Base(current[0]))
+			if err != nil {
+				wipeErr = err
+				return err
+			}
+			carryGen, wiped = gen, true
+		}
 		next.LibraryRoots = newList
 		return nil
 	})
+	if wipeErr != nil {
+		// The in-flight scan was cancelled so it would not write
+		// after this wipe. The wipe did not happen; redo the walk.
+		s.spawnBackgroundScan(scanAfterFailedRootWipe)
+		writeError(w, http.StatusInternalServerError, "wipe-tracks", wipeErr.Error())
+		return
+	}
 	if err != nil {
-		// Compensating scan: if we reached here via the transition
-		// branch, WipeFilesystemTracks has already cleared the
-		// filesystem rows (UPnP-routed rows were spared) but the config
-		// was never persisted — /v1/manifest will serve only the
-		// upstream tracks until the next scheduled/manual scan. Kick off
-		// a best-effort scan against the RESTORED (previous) roots
-		// so the outage is bounded by one scan-duration rather than
-		// one scan-interval. The 500 the user sees is the real
-		// failure (Save); a compensating-scan failure is an
+		// Compensating scan: if the wipe ran (the save failed after it,
+		// or the file changed during the wipe or while the save staged),
+		// WipeFilesystemTracks has already cleared the filesystem rows
+		// (UPnP-routed rows were spared) but the config was never
+		// persisted — /v1/manifest will serve only the upstream tracks
+		// until the next scheduled/manual scan. Kick off a best-effort
+		// scan against the RESTORED
+		// (previous) roots so the outage is bounded by one scan-duration
+		// rather than one scan-interval. The 500 the user sees is the
+		// real failure (Save); a compensating-scan failure is an
 		// additional recovery attempt, so we log (not return) any
 		// error it produces for server-side observability.
-		if willTransition {
+		if wiped {
 			// The library is still one root. Point the saved dates at
 			// that form so this scan copies them and then clears them.
 			s.deps.Manifest.RetargetFirstIndexedCarry(r.Context(), carryGen, false)
@@ -1877,8 +1904,9 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 }
 
 // applyRootRemoval deletes the removed root's rows, or wipes on a collapse
-// to one root, then saves the root list. CommitRootChange calls it while
-// it holds the scanner lock.
+// to one root, in the save's turn of bridge.yaml's lock and after its
+// comparison of the file, then saves the root list. CommitRootChange calls
+// it while it holds the scanner lock.
 func (s *Server) applyRootRemoval(w http.ResponseWriter, r *http.Request, newList []string, willCollapse bool, removedBasename string) {
 	// Commit order matters: run the destructive manifest op FIRST, and
 	// only persist the root list + broadcast SetRoots after it succeeds.
@@ -1889,40 +1917,65 @@ func (s *Server) applyRootRemoval(w http.ResponseWriter, r *http.Request, newLis
 	// means the config file is untouched; a config-save failure after a
 	// successful wipe means the next scan simply re-populates — every
 	// failure window lands in a state the scanner can heal.
+	//
+	// The manifest op runs inside the Update below, in bridge.yaml's turn
+	// and after the holder's comparison of the file, as the add path's
+	// wipe does (backlog B506): a save refused before it (another writer
+	// changed the config since serve read it, or holds its lock past the
+	// wait) deletes no row and unlinks no sidecar, and the turn's
+	// comparison is asked again just before it starts (check), so only a
+	// writer that takes no turns landing during the op itself or the
+	// save's staging is refused after it: at the cost of the renditions and
+	// waveforms the op unlinked, those a successful remove drops too.
 	var carryGen int64
-	if willCollapse {
-		gen, err := s.deps.Manifest.RecordFirstIndexedCarryAndWipe(r.Context(), true, filepath.Base(newList[0]))
-		if err != nil {
-			s.spawnBackgroundScan(scanAfterFailedRootWipe)
-			writeError(w, http.StatusInternalServerError, "wipe-tracks", err.Error())
-			return
-		}
-		carryGen = gen
-	} else if _, err := s.deps.Manifest.DeleteTracksByPrefix(r.Context(), removedBasename+"/"); err != nil {
-		s.spawnBackgroundScan(scanAfterFailedPrefixDelete)
-		writeError(w, http.StatusInternalServerError, "delete-tracks", err.Error())
-		return
-	}
+	var collapsed bool
+	var opErr error
+	var opCode string
 	// Persist via CfgHolder.Update — same shape as apiRootsAdd: the
 	// clone-from-live → Save → Store sequence runs under the holder's
 	// single write lock, so a concurrent config writer committing
 	// between our checks above and here can't be silently dropped.
 	// On Save failure the clone is discarded — no manual rollback.
-	err := s.deps.CfgHolder.Update(s.deps.CfgPath, func(next *config.Config) error {
+	err := s.deps.CfgHolder.UpdateChecked(s.deps.CfgPath, func(next *config.Config, check func() error) error {
+		if err := check(); err != nil {
+			return err
+		}
+		if willCollapse {
+			gen, err := s.deps.Manifest.RecordFirstIndexedCarryAndWipe(r.Context(), true, filepath.Base(newList[0]))
+			if err != nil {
+				opErr, opCode = err, "wipe-tracks"
+				return err
+			}
+			carryGen, collapsed = gen, true
+		} else if _, err := s.deps.Manifest.DeleteTracksByPrefix(r.Context(), removedBasename+"/"); err != nil {
+			opErr, opCode = err, "delete-tracks"
+			return err
+		}
 		next.LibraryRoots = newList
 		return nil
 	})
+	if opErr != nil {
+		if willCollapse {
+			s.spawnBackgroundScan(scanAfterFailedRootWipe)
+		} else {
+			s.spawnBackgroundScan(scanAfterFailedPrefixDelete)
+		}
+		writeError(w, http.StatusInternalServerError, opCode, opErr.Error())
+		return
+	}
 	if err != nil {
-		// Compensating scan — same rationale as the Add path: the
-		// manifest op above already mutated the manifest (wipe or
-		// prefix-delete), and without a rescan the manifest sits in
+		// Compensating scan — same rationale as the Add path: when the
+		// manifest op ran (the save failed after it, or the file changed
+		// during the op or while the save staged), it already mutated the
+		// manifest (wipe
+		// or prefix-delete), and without a rescan the manifest sits in
 		// a post-mutation state until the next scheduled scan.
 		// Rescan against the restored (previous) roots to bound
 		// the outage by one scan-duration. Errors logged (not
 		// returned) — the 500 the user sees is the real Save
 		// failure; a compensating-scan error is additional recovery
 		// and only matters for operator observability.
-		if willCollapse {
+		if collapsed {
 			// The library is still several roots. Point the saved
 			// dates at that form before the scan that clears them.
 			// A prefix delete that stays multi-root recorded nothing.

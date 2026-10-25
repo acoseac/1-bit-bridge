@@ -98,13 +98,41 @@ func errConfigNotFound(explicit string) error {
 // platform location unless the operator happened to be standing in the
 // right directory.
 func loadCLIConfig(explicit string) (*config.Config, string, error) {
+	cfg, path, _, err := loadCLIConfigFile(explicit)
+	return cfg, path, err
+}
+
+// loadCLIConfigFile is loadCLIConfig, and the bytes the config was read
+// from (config.LoadFile): a restore compares the config with them before
+// its first write (backup.RestoreOptions.ConfigAsRead).
+func loadCLIConfigFile(explicit string) (*config.Config, string, []byte, error) {
 	path, ok := resolveConfigPath(explicit)
 	if !ok {
-		return nil, path, errConfigNotFound(explicit)
+		return nil, path, nil, errConfigNotFound(explicit)
 	}
-	cfg, err := config.Load(path)
+	cfg, raw, err := config.LoadFile(path)
 	if err != nil {
-		return nil, path, fmt.Errorf("load %s: %w", path, err)
+		return nil, path, nil, fmt.Errorf("load %s: %w", path, err)
 	}
-	return cfg, path, nil
+	return cfg, path, raw, nil
+}
+
+// loadServeConfigFile is loadCLIConfigFile for serve's boot read, and the
+// file the config's name opened for it, resolved just before the read and
+// just after it (config.LoadFileAt): serve tells its live holder that file
+// with the bytes, and the holder's console saves write only into it, and
+// only over those bytes. A name that did not resolve to one file on both
+// sides of any read, a link being repointed, is refused; one that resolved
+// on neither side of any read boots with no file, which the holder saves
+// nothing into.
+func loadServeConfigFile(explicit string) (cfg *config.Config, path string, raw []byte, file config.BootFile, err error) {
+	path, ok := resolveConfigPath(explicit)
+	if !ok {
+		return nil, path, nil, config.BootFile{}, errConfigNotFound(explicit)
+	}
+	cfg, raw, file, err = config.LoadFileAt(path)
+	if err != nil {
+		return nil, path, nil, config.BootFile{}, fmt.Errorf("load %s: %w", path, err)
+	}
+	return cfg, path, raw, file, nil
 }
