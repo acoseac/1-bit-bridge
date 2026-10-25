@@ -15,6 +15,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/alsa"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
+	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/player/binding"
 	"github.com/acoseac/1-bit-bridge/internal/player/lan"
@@ -579,6 +580,12 @@ func runDACBind(ctx context.Context, args []string, env outputBindEnv, stdout, s
 		fmt.Fprintf(stderr, "%s: %v\n", cmd, err)
 		return 1
 	}
+	if cfg.Output.Player.Enabled {
+		if err := backup.CheckPlayerStart(cfg.DataDir); err != nil {
+			fmt.Fprintf(stderr, "%s: the player's UUID: %v\n", cmd, err)
+			return 1
+		}
+	}
 	cfg.Output.Player.Device = dev
 	if env.beforeSave != nil {
 		env.beforeSave()
@@ -633,7 +640,7 @@ func runDACBind(ctx context.Context, args []string, env outputBindEnv, stdout, s
 		fmt.Fprintln(stdout, "output.player.enabled is not true: the binding waits for the player to be turned on")
 		return 0
 	}
-	id, created, err := config.EnsurePlayerUUID(cfg.DataDir)
+	id, created, err := backup.EnsurePlayerUUID(cfg.DataDir)
 	switch {
 	case err != nil:
 		fmt.Fprintf(stderr, "%s: the player's UUID: %v\n", cmd, err)

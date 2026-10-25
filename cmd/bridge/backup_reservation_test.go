@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -119,11 +120,33 @@ func TestServeRefusedMintLeavesTheReservationFloor(t *testing.T) {
 
 func TestRestoreCLIPrintsTheNoMarkAdvice(t *testing.T) {
 	needsDirectorySync(t)
+	persistentMedium(t)
 	cfg, dir, _ := seedRestorableInstall(t, "127.0.0.1:0")
-	if _, _, err := config.EnsurePlayerUUID(dir); err != nil {
+	if _, _, err := backup.EnsurePlayerUUID(dir); err != nil {
 		t.Fatal(err)
 	}
 	snap := runBackup(t, cfg)
+	// Model a genuine legacy snapshot, predating reservation capture: no
+	// floor, and none of the record this bridge's writer adds that it lists
+	// the floor beside the UUID (B524 round 10). Through a map, so the record
+	// is dropped whatever this build's Manifest declares.
+	var doc map[string]any
+	if err := json.Unmarshal(readFileT(t, filepath.Join(snap, backup.ManifestFile)), &doc); err != nil {
+		t.Fatal(err)
+	}
+	files, _ := doc["files"].([]any)
+	doc["files"] = slices.DeleteFunc(files, func(name any) bool { return name == playerReservationFile })
+	delete(doc, "playerFloorRequired")
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(snap, backup.ManifestFile), raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(snap, playerReservationFile)); err != nil {
+		t.Fatal(err)
+	}
 	code, out, stderr := runRestoreYes(t, cfg, snap)
 	if code != 0 || !strings.Contains(out, "no player reservation mark") || !strings.Contains(out, "newest snapshot") {
 		t.Fatalf("restore %d, %s, %s", code, out, stderr)
@@ -163,6 +186,7 @@ func TestRestoreCLIPrintsTheNoMarkAdvice(t *testing.T) {
 
 func TestBackupRestoreCLICarriesForeignFloorAndDiscardsForeignQueue(t *testing.T) {
 	needsDirectorySync(t)
+	persistentMedium(t)
 	cfg, dir, _ := seedRestorableInstall(t, "127.0.0.1:0")
 	id, _, err := config.EnsurePlayerUUID(dir)
 	if err != nil {
@@ -179,6 +203,18 @@ func TestBackupRestoreCLICarriesForeignFloorAndDiscardsForeignQueue(t *testing.T
 	if err := os.WriteFile(filepath.Join(dir, playerReservationFile), raw, 0600); err != nil {
 		t.Fatal(err)
 	}
+	var outBefore, errBefore bytes.Buffer
+	if code := backupCmd([]string{"--config", cfg}, &outBefore, &errBefore); code == 0 || !strings.Contains(errBefore.String(), "bridge reset-player") {
+		t.Fatalf("backup accepted mismatched identity: %d %s", code, &errBefore)
+	}
+	if code := playerResetCmd(t.Context(), []string{"--config", cfg, "--yes"}, strings.NewReader(""), &outBefore, &errBefore); code != 0 {
+		t.Fatalf("reset remedy: %s", &errBefore)
+	}
+	id, _, err = backup.EnsurePlayerUUID(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	snap := runBackup(t, cfg)
 	mark, err := engine.ReadReservation(filepath.Join(snap, playerReservationFile))
 	if err != nil || mark.UUID != id || mark.IDs != live.IDs || mark.Tokens != live.Tokens {

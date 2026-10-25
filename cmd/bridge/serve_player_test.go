@@ -23,9 +23,12 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/alsa/sysfstest"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/flactest"
+	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/player/binding"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
@@ -302,6 +305,18 @@ func needsDirectorySync(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the player's engine keeps its IDs durable with a directory fsync, which Windows has not, and the GO bar's sysfs tree cannot be laid out there")
 	}
+}
+
+// persistentMedium answers the strict writer's medium check as a disk does
+// until the test ends. The player's identity, its floor and its marker are
+// written through that writer, by a fixture or by the bind, serve start or
+// restore under test, and it refuses storage that does not outlive a reboot
+// (atomicwrite.ErrVolatile): a TMPDIR on tmpfs, as /tmp is on Ubuntu 26.04,
+// would refuse the first of them. For a test whose subject is not the
+// medium; the seam is process-global, and no test here runs in parallel.
+func persistentMedium(t *testing.T) {
+	t.Helper()
+	t.Cleanup(atomicwrite.SetMediumForTest(func(string) error { return nil }))
 }
 
 // bootPlayerServe boots serve on a config whose output block is the case's
@@ -757,6 +772,7 @@ func TestServeStartsNoPlayerWithoutTheDataDirLock(t *testing.T) {
 // already (bind's, a restore's) is left as it was.
 func TestAPlayerWhoseEngineRefusesItsStorageLeavesNoIdentityItMade(t *testing.T) {
 	needsDirectorySync(t)
+	persistentMedium(t)
 	const before = "7d444840-9dc0-11d1-b245-5ffdce74fad2"
 	for _, tc := range []struct {
 		name string
@@ -1664,5 +1680,96 @@ func TestBridgeDoctorMakesNoPlayerFile(t *testing.T) {
 	}
 	if files := playerFiles(t, dataDir); len(files) > 0 {
 		t.Errorf("bridge doctor made %v", files)
+	}
+}
+
+// A boot owns the lock again after a crash. Drive the same player start serve
+// calls, with a real queue and engine but no network listeners or PCM nodes.
+func TestServePlayerChecksTheFloorBeforeStarting(t *testing.T) {
+	t.Cleanup(atomicwrite.SetSyncDirForTest(func(string) error { return nil }))
+	t.Cleanup(atomicwrite.SetMediumForTest(func(string) error { return nil }))
+	for _, phase := range []string{"uuid_without_floor", "marker_without_floor", "bad_floor", "orphan_queue", "orphan_queue_with_floor", "orphan_reservation", "pristine", "existing", "upgrade"} {
+		t.Run(phase, func(t *testing.T) {
+			dir := t.TempDir()
+			const id = "7d444840-9dc0-11d1-b245-5ffdce74fad2"
+			write := func(name, data string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if phase == "marker_without_floor" {
+				write("player-initialized", `{"version":1}`)
+			}
+			if phase == "uuid_without_floor" {
+				write("player-initialized", `{"version":1}`)
+			}
+			if phase == "uuid_without_floor" || phase == "existing" || phase == "upgrade" {
+				write(config.PlayerUUIDFile, id)
+			}
+			if phase == "bad_floor" {
+				write(engine.ReservationFileName, "{")
+			}
+			if phase == "orphan_reservation" || phase == "existing" || phase == "orphan_queue_with_floor" {
+				write(engine.ReservationFileName, fmt.Sprintf(`{"version":2,"uuid":%q,"ids":8192,"tokens":8192}`, id))
+			}
+			if phase == "orphan_queue" || phase == "orphan_queue_with_floor" {
+				write(playerQueueFile, `{"version":1}`)
+			}
+			before := map[string]string{}
+			for _, name := range []string{config.PlayerUUIDFile, playerQueueFile, engine.ReservationFileName, "player-initialized"} {
+				b, err := os.ReadFile(filepath.Join(dir, name))
+				if err == nil {
+					before[name] = string(b)
+				} else if !os.IsNotExist(err) {
+					t.Fatal(err)
+				}
+			}
+			store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			cfg := &config.Config{DataDir: dir}
+			cfg.Output.Player.Enabled = true
+			cfg.Output.Player.Device = goBarByModel
+			holdDataDirLock(t, dir)
+			hold := newDataDirHold(func() {})
+			defer hold.done()
+			backend := newPlayerStandIn()
+			p := startServePlayer(planServePlayer(cfg, "linux", true), servePlayerWiring{Cfg: cfg, Hold: hold, Feed: hotplug.NewFeed(), Store: store, Paths: bridgefs.New([]string{dir}), Backend: backend.build})
+			t.Cleanup(p.stop)
+			select {
+			case <-p.ready:
+			case <-serveGiveUp(t):
+				t.Fatal("player did not decide its start")
+			}
+			if phase == "pristine" || phase == "orphan_reservation" || phase == "existing" || phase == "upgrade" {
+				if p.eng == nil || p.failed != "" {
+					t.Fatalf("normal start refused: %s", p.failed)
+				}
+				if phase != "existing" && p.eng.Snapshot().Len() != 0 {
+					t.Fatal("completed reset retained queue")
+				}
+				return
+			}
+			if p.eng != nil {
+				t.Errorf("player started from unsafe files with %d queue entries", p.eng.Snapshot().Len())
+			}
+			if !strings.Contains(p.failed, "bridge reset-player") {
+				t.Errorf("missing remedy: %s", p.failed)
+			}
+			p.stop()
+			if backend.built {
+				t.Error("refused start built the backend")
+			}
+			for _, name := range []string{config.PlayerUUIDFile, playerQueueFile, engine.ReservationFileName, "player-initialized"} {
+				b, err := os.ReadFile(filepath.Join(dir, name))
+				old, existed := before[name]
+				if existed && (err != nil || string(b) != old) || !existed && !os.IsNotExist(err) {
+					t.Errorf("refused start changed %s", name)
+				}
+			}
+		})
 	}
 }

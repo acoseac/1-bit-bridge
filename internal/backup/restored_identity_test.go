@@ -48,6 +48,9 @@ func markAt(t *testing.T, dir string) engine.Reservation {
 	return r
 }
 
+// identitySnapshot is this bridge's snapshot of snapshotPlayerUUID at a
+// 10000/30000 floor. Unmarked, it is the snapshot a writer before
+// reservation capture left: the UUID alone (stripSnapshotFloor).
 func identitySnapshot(t *testing.T, marked bool) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -55,22 +58,27 @@ func identitySnapshot(t *testing.T, marked bool) string {
 	if err := config.WritePlayerUUIDFile(p, snapshotPlayerUUID); err != nil {
 		t.Fatal(err)
 	}
-	if marked {
-		putMark(t, dir, snapshotPlayerUUID, 10000, 30000)
-	}
+	putMark(t, dir, snapshotPlayerUUID, 10000, 30000)
 	snap, err := backup.Snapshot(t.Context(), backup.Sources{DataDir: dir, PlayerUUID: p})
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !marked {
+		stripSnapshotFloor(t, snap, true)
+	}
 	return snap
 }
 
-func fixedRestore(t *testing.T, snap, dst string, draw uint32) error {
+// fixedRestore restores snap's identity into dst with one injected draw per
+// value, in the order restore reads them: a UUID-only destination's
+// adoption first, then the jump. It fails the test when a restore that
+// succeeds leaves any of them unread.
+func fixedRestore(t *testing.T, snap, dst string, draws ...uint32) error {
 	t.Helper()
-	r := bytes.NewReader([]byte{byte(draw >> 16), byte(draw >> 8), byte(draw)})
+	r := bytes.NewReader(randomDraws(draws...))
 	err := backup.RestoreWithOptions(snap, backup.Targets{PlayerUUID: filepath.Join(dst, config.PlayerUUIDFile)}, backup.RestoreOptions{Random: r})
 	if err == nil && r.Len() != 0 {
-		t.Fatal("restore did not consume exactly one three-byte draw")
+		t.Fatalf("restore left %d of its %d injected random bytes unread", r.Len(), 3*len(draws))
 	}
 	return err
 }
@@ -190,7 +198,8 @@ func TestRestoreReservationCases(t *testing.T) {
 				t.Fatal(err)
 			}
 			got := markAt(t, dst)
-			si, st := uint32(0), uint32(0)
+			// An unmarked snapshot's bound is the adoption ceiling (B524 round 10).
+			si, st := uint32(floorlessCeiling), uint32(floorlessCeiling)
 			if tc.marked {
 				si, st = 10000, 30000
 			}
@@ -283,6 +292,7 @@ func TestTwoRestoresWithSeparatedDrawsDoNotReuseValues(t *testing.T) {
 }
 
 func TestSnapshotCarriesEveryDecodableLiveFloor(t *testing.T) {
+	reservationStorage(t)
 	for _, kind := range []string{"missing", "unreadable", "invalid", "foreign", "v1", "no_identity"} {
 		t.Run(kind, func(t *testing.T) {
 			dir := t.TempDir()
@@ -312,6 +322,15 @@ func TestSnapshotCarriesEveryDecodableLiveFloor(t *testing.T) {
 				putMark(t, dir, snapshotPlayerUUID, 100, 200)
 			}
 			snap, err := backup.Snapshot(t.Context(), backup.Sources{DataDir: dir, PlayerUUID: idPath})
+			if kind == "missing" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if r := markAt(t, snap); r.UUID != snapshotPlayerUUID || r.IDs < 1<<24 || r.Tokens < 1<<24 {
+					t.Fatalf("bind-only upgrade: %+v", r)
+				}
+				return
+			}
 			if kind == "unreadable" || kind == "invalid" {
 				if err == nil {
 					t.Fatal("backup accepted an unreadable floor")
@@ -323,17 +342,16 @@ func TestSnapshotCarriesEveryDecodableLiveFloor(t *testing.T) {
 				}
 				return
 			}
+			if kind == "foreign" || kind == "v1" {
+				if err == nil || !strings.Contains(err.Error(), "bridge reset-player") {
+					t.Fatalf("unpaired floor captured: %v", err)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
 
-			if kind == "foreign" || kind == "v1" {
-				got := markAt(t, snap)
-				if got.Version != 2 || got.UUID != snapshotPlayerUUID || got.IDs != 100 || got.Tokens != 200 {
-					t.Fatalf("backup lost/restamped the floor incorrectly: %+v", got)
-				}
-				return
-			}
 			if slices.Contains(snapshotFiles(t, snap), engine.ReservationFileName) {
 				t.Fatal("snapshot carried a mark without its identity")
 			}

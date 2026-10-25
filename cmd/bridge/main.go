@@ -46,6 +46,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/atlasharvest"
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
+	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
@@ -2442,6 +2443,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return backupCmd(args[1:], stdout, stderr)
 	case "restore":
 		return restoreCmd(ctx, args[1:], os.Stdin, stdout, stderr)
+	case "reset-player":
+		return playerResetCmd(ctx, args[1:], os.Stdin, stdout, stderr)
 	case "token":
 		return tokenCmd(args[1:], stdout, stderr)
 	case "cert":
@@ -2541,11 +2544,18 @@ Subcommands:
            bridge output dac inspect shows each card's unit and port and how
            the player's binding resolves, and bridge output dac bind writes
            one. bridge output player reports the box's MPD and how it is set.
-           Linux only; only dac bind changes anything: the config file, and
-           the player's UUID file the first time it binds an enabled player.
+           Host readings and dac bind require Linux; explicit reading paths
+           work on other platforms. Of these listed output commands, only dac bind
+           writes: the config file, and the player's UUID file on its first
+           binding of an enabled player.
   update   Check for / install a new bridge release from GitHub.
   backup   Snapshot bridge state into <dataDir>/backups/<timestamp>/.
   restore  Restore bridge state from a snapshot directory.
+  reset-player
+           Rotate the player's identity and clear its queue, keeping the counter
+           floor. With the service stopped:
+           bridge reset-player [--config X] [--yes] [--discard-floor].
+           --discard-floor drops the floor and permanently seals identity restores.
   token    Manage paired tokens (list / rotate / expire / revoke).
   cert     Inspect or rotate the TLS cert (info / rotate).
   tsnet    Embedded tailnet node management (auth | status | logout).
@@ -3065,6 +3075,19 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// outlived its stop keeps the lock past this return (dataDirHold).
 	dataDirLock := newDataDirHold(releaseDataDir)
 	defer dataDirLock.done()
+	// Adopt pre-floor identities before any live backup can run, even with
+	// playback disabled. A pristine box still gets no player identity here.
+	var playerStateErr error
+	if lockErr == nil {
+		if err := backup.AdoptPlayerState(cfg.DataDir); err != nil {
+			playerStateErr = err
+		} else {
+			playerStateErr = backup.CheckPlayerStart(cfg.DataDir)
+		}
+		if playerStateErr != nil {
+			playerLog.Warn("player: not started", "reason", playerStateErr.Error())
+		}
+	}
 
 	// Resolve TLS material (default: dataDir/server.{crt,key}; overridable
 	// via cfg.TLSCertPath / cfg.TLSKeyPath), through the helper `bridge init`
@@ -4206,6 +4229,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 			playerPlan.off = strings.Replace(playerPlan.off, "for listenAddress:", "for listenAddress, set by --addr:", 1)
 		}
 	}
+	if playerStateErr != nil {
+		playerPlan = servePlayerPlan{off: playerStateErr.Error(), told: true}
+	}
+
 	var playerFeed *hotplug.Feed
 	if playerPlan.start {
 		playerFeed = hotplug.NewFeed()

@@ -256,6 +256,7 @@ func TestOutputDACInspectWorksWithoutAConfigOrABinding(t *testing.T) {
 // bind says the binding applies when bridge serve next starts, whether the
 // player is on or off.
 func TestOutputDACBindSaysTheBindingAppliesAtTheNextStart(t *testing.T) {
+	persistentMedium(t)
 	root := dacTree(t)
 	for _, block := range []string{"  player:\n    room: Study\n", "  player:\n    enabled: true\n"} {
 		cfgPath := dacConfig(t, block)
@@ -625,6 +626,7 @@ func TestOutputDACVerifyCardFollowsAPortBinding(t *testing.T) {
 // TestOutputDACBindKeepsThePlayersUUID: a bind on an enabled player makes
 // the UUID once; a rebind to another card and a config rewrite keep it.
 func TestOutputDACBindKeepsThePlayersUUID(t *testing.T) {
+	persistentMedium(t)
 	root := dacTree(t)
 	sysfstest.Apply(t, root, dacPlug(dacUSB1+"/1-2", 6, "1234", "0f04", "ANOTHER-DAC-0000017"))
 	cfgPath := dacConfig(t, "  player:\n    enabled: true\n")
