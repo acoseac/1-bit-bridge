@@ -227,7 +227,8 @@ func queueOf(t *testing.T, h *handler) []uint32 {
 // (shuffle is release 7a's), Shuffle staying 0; Play, Pause, Stop, Next,
 // Previous, SeekId and SeekIndex are the engine's transport, each starting the
 // session the engine starts (SeekId of an ID not held 800, SeekIndex past the
-// queue 802); the seeks within a track are 803, changing nothing; and Product's
+// queue 802, the ui4 maximum among them, starting nothing and changing
+// nothing); the seeks within a track are 803, changing nothing; and Product's
 // writes: SetStandby(0) succeeds and SetStandby(1) is 899, Standby staying 0
 // and the transport as it was (no Stop is made of it); SetSourceIndex(0) and
 // SetSourceIndexByName(Playlist) succeed, and any other index or name is 801,
@@ -306,10 +307,17 @@ func TestEachWriteIsItsEngineCommand(t *testing.T) {
 	}
 	read(t, h, playlist, "SeekIndex", "Value", "1")
 	plays("SeekIndex", b)
+	before := p.eng.Snapshot().Generation()
 	if r := soapFault(t, h, playlist, "SeekIndex", "Value", "3"); r.fault != 802 || r.description != "Index not found" {
 		t.Errorf("SeekIndex past the queue: %d %q, want 802", r.fault, r.description)
 	}
-	before := p.eng.Snapshot().Generation()
+	if r := soapFault(t, h, playlist, "SeekIndex", "Value", "4294967295"); r.fault != 802 || r.description != "Index not found" {
+		t.Errorf("SeekIndex of the ui4 maximum: %d %q, want 802", r.fault, r.description)
+	}
+	if p.be.sessionCount() != started || p.eng.Snapshot().Generation() != before {
+		t.Errorf("a SeekIndex past the queue started a session or changed the engine")
+	}
+	before = p.eng.Snapshot().Generation()
 	for _, seek := range []struct{ action, value string }{{"SeekSecondAbsolute", "30"}, {"SeekSecondRelative", "-5"}} {
 		if r := soapFault(t, h, playlist, seek.action, "Value", seek.value); r.fault != 803 || r.description != "Seek failed" {
 			t.Errorf("%s: %d %q, want 803", seek.action, r.fault, r.description)

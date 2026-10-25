@@ -3,6 +3,7 @@ package openhome
 import (
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"net/netip"
 	"strconv"
@@ -123,7 +124,7 @@ var writes = map[string]map[string]writer{
 			return e.PlayID(ctx, ui4Of(args[0]))
 		}),
 		"SeekIndex": transport(func(ctx context.Context, e Engine, args []string) error {
-			return e.PlayIndex(ctx, int(ui4Of(args[0])))
+			return e.PlayIndex(ctx, indexOf(args[0]))
 		}),
 		"SetRepeat": transport(func(ctx context.Context, e Engine, args []string) error {
 			return e.SetRepeat(ctx, booleanOf(args[0]))
@@ -147,6 +148,19 @@ func booleanOf(text string) bool {
 		return true
 	}
 	return false
+}
+
+// indexOf is an in-argument's text as the ui4 row 9 passed it, as an index
+// an int holds at any width: a ui4 past math.MaxInt32, which would wrap
+// negative in a 32-bit int (no release target's int is 32 bits), reads as
+// math.MaxInt32. That is past the end of every queue, which holds at most
+// engine.MaxEntries entries, so the engine refuses it as it refuses every
+// index past the end (SeekIndex's 802).
+func indexOf(text string) int {
+	if v := ui4Of(text); v <= math.MaxInt32 {
+		return int(v)
+	}
+	return math.MaxInt32
 }
 
 // transport is a transport write: the engine's command with the budget's

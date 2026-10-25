@@ -173,8 +173,7 @@ func TestTheFiveHundredTrackWindowAndItsReHandoff(t *testing.T) {
 	for i := range app {
 		app[i] = uriOf(trackID(i + 1))
 	}
-	max := int(ui4Value(t, "TracksMax", read(t, h, playlist, "TracksMax")["Value"]))
-	window := min(500, max)
+	window := int(min(500, ui4Value(t, "TracksMax", read(t, h, playlist, "TracksMax")["Value"])))
 	first := handOff(t, h, app[:window], false)
 	if got := read(t, h, playlist, "Repeat")["Value"]; got != "0" {
 		t.Errorf("Repeat %s with part of the queue held, want 0", got)
