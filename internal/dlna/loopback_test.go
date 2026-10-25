@@ -779,6 +779,21 @@ func TestLoopbackServerStopsWithTheServer(t *testing.T) {
 	})
 	listeners := append([]net.Listener(nil), srv.lns...)
 	base := srv.BaseURL()
+	// The listeners observed after Stop must include the one clients reach
+	// (BaseURL), or the check below could pass over an empty or unrelated
+	// set. One listener on a host without IPv6 loopback, two otherwise.
+	if len(listeners) == 0 {
+		t.Fatal("the server recorded no listeners")
+	}
+	served := false
+	for _, l := range listeners {
+		if l.Addr().String() == strings.TrimPrefix(base, "http://") {
+			served = true
+		}
+	}
+	if !served {
+		t.Fatalf("BaseURL %s is not among the recorded listeners", base)
+	}
 	resp, err := loopbackClient().Get(base + "/dlna/file/big")
 	if err != nil {
 		t.Fatalf("get: %v", err)
