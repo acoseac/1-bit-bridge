@@ -53,7 +53,7 @@ var oneOfEachContainer = map[format.Container]string{
 func TestTheContainersThePlayerPlaysAreTheOnesItsOpenTakes(t *testing.T) {
 	want := []format.Container{format.ContainerFLAC, format.ContainerWAV, format.ContainerAIFF, format.ContainerALAC}
 	if got := PlayedContainers(); !slices.Equal(got, want) {
-		t.Fatalf("PlayedContainers() = %q, want %q", got, want)
+		t.Errorf("PlayedContainers() = %q, want %q", got, want)
 	}
 	files := fixtureFiles{}
 	for c, rel := range oneOfEachContainer {
