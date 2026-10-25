@@ -50,7 +50,10 @@ func TestALockFileMadeAsRootTakesTheConfigsOwner(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("a file takes its directory's ACL on Windows; no owner is given there")
 	}
-	const dirUID, dirGID = 0, 0       // the directory's: root's, as /tmp's is
+	// The directory's owner stands for root's, as /tmp's is. It is not 0:0,
+	// so that a test run as root, whose new file is already 0:0, still
+	// sees the change to it.
+	const dirUID, dirGID = 4300, 4301
 	const cfgUID, cfgGID = 4242, 4243 // the config's: the service user's
 	for _, tc := range []struct {
 		name       string

@@ -63026,3 +63026,19 @@ cases; the records counted as runbooks, the four record cases.
 **Checks:** the sox test passes `-count=5` locally on macOS. The workflow change is checked by this PR's own gate run on 26.04, which must pass the rest shard in about main's time.
 
 **Not in this change:** `make test` on a developer's Linux host whose `/tmp` is tmpfs (Fedora, Arch) hits the same refusal. That host needs `TMPDIR` on disk too; it is a follow-up for the Makefile or the docs. The PRs re-run once this merges into them.
+
+## 2026-10-25 — B506 review: the lock-owner test's directory is not owned by 0:0
+
+CodeRabbit on PR #1345: the "before there is one" case of
+`TestALockFileMadeAsRootTakesTheConfigsOwner` gave the simulated directory
+the owner 0:0. Run as root, the lock file it makes is already 0:0, and
+`precreate` changes an owner only when the two differ, so no change was
+recorded and the case failed; the repository has root-only tests, so a
+root run is a supported one. The directory's owner is now 4300:4301, which
+stands for root's and is no runner's real owner.
+
+- Red before, shown without root: with the directory's simulated owner set
+  to the test process's own (as 0:0 is under root), "owner changes = [],
+  want exactly {… UID:501 GID:20}".
+- Green after: `go vet` and `go test` of `./internal/config/` and
+  `./internal/fsutil/`.

@@ -241,7 +241,9 @@ Windows-runner check, distinct from portable race-test results.
   the config theirs. A lock file already there is opened as it is (a root
   writer does not chown a file it did not make). Red before the fix:
   `TestALockFileMadeAsRootTakesTheConfigsOwner` (the directory root's, the
-  config 4242's; the lock was given 0:0), through
+  config 4242's; the lock was given 0:0, the directory's; the directory's
+  is 4300:4301 since PR #1345's review, so that a run as root, whose new
+  file is already 0:0, still sees the change), through
   `fsutil.SimulateRootOwnersForTest`, which gives each path an owner of its
   own; `TestSaveAsRootKeepsTheConfigOwner`'s one owner could not show it.
   Run as root with a single owner, the lock is still among the files given
