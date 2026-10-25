@@ -65,10 +65,15 @@ func TestALockFileDeniedReadingNamesTheEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out, err := exec.Command("icacls", lock, "/deny", me.Username+":(R)").CombinedOutput(); err != nil {
+	// By its absolute path, never its bare name (build-ci-tests.md).
+	icacls, err := exec.LookPath("icacls")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(icacls, lock, "/deny", me.Username+":(R)").CombinedOutput(); err != nil {
 		t.Fatalf("deny %s reading %s: %v\n%s", me.Username, lock, err, out)
 	}
-	t.Cleanup(func() { _ = exec.Command("icacls", lock, "/remove:d", me.Username).Run() })
+	t.Cleanup(func() { _ = exec.Command(icacls, lock, "/remove:d", me.Username).Run() })
 	if f, err := os.Open(lock); err == nil {
 		_ = f.Close()
 		t.Fatalf("the deny-read entry did not take: %s opened for reading", lock)

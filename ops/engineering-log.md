@@ -63637,3 +63637,12 @@ stands for root's and is no runner's real owner.
   want exactly {… UID:501 GID:20}".
 - Green after: `go vet` and `go test` of `./internal/config/` and
   `./internal/fsutil/`.
+
+## 2026-10-25 — B524 review: the round-13 Windows test runs icacls by its absolute path
+
+CodeRabbit on PR #1346: `TestALockFileDeniedReadingNamesTheEntry` started
+`icacls` by its bare name, against `build-ci-tests.md`'s rule that a new exec
+site names its binary by an absolute path or by `exec.LookPath`'s absolute
+answer. It now resolves `icacls` once through `exec.LookPath` and runs that
+path for the deny and for its cleanup. Windows-only: `GOOS=windows go vet` and
+`go test -c` of `./internal/backup/` compiled it here; CI's Windows leg runs it.
