@@ -148,12 +148,17 @@ func TestSnapshotRetriesAHandleHeldAcrossRename(t *testing.T) {
 	}
 }
 
+// TestSnapshotRefusesAReservationStillHeldOrCancelled: a floor another handle
+// holds past the read's retries, or a cancelled or expired backup, refuses
+// the snapshot and leaves none. The identity is seeded with a plain write:
+// the player's own writer refuses on Windows, which syncs no directory, and
+// a backup reads the identity there all the same.
 func TestSnapshotRefusesAReservationStillHeldOrCancelled(t *testing.T) {
 	for _, name := range []string{"held", "cancelled", "expired"} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			identity := filepath.Join(dir, config.PlayerUUIDFile)
-			if err := config.WritePlayerUUIDFile(identity, boxPlayerUUID); err != nil {
+			if err := os.WriteFile(identity, []byte(boxPlayerUUID+"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			putMark(t, dir, boxPlayerUUID, 90000, 80000)

@@ -45,12 +45,12 @@ var ErrNotOnePlayerUUID = errors.New("does not hold one UUID")
 // file that is there and holds anything else is an error too, and so is
 // anything there that is not a file, refused without waiting
 // (ReadPlayerUUIDFile), never a reason to make another: a new UUID is a new
-// player to every controller, so the operator decides (removing the file
-// makes a new one at the next start).
+// player to every controller, so the operator decides through bridge
+// reset-player, which also clears the queue and retains the box's floor.
 func ReadPlayerUUID(dataDir string) (string, error) {
 	id, err := ReadPlayerUUIDFile(filepath.Join(dataDir, PlayerUUIDFile))
 	if errors.Is(err, ErrNotOnePlayerUUID) {
-		return "", fmt.Errorf("%w: remove it, and the next start makes a new one, which controllers see as a new player", err)
+		return "", fmt.Errorf("%w: with the service stopped, run bridge reset-player to give up the identity and clear its queue; the next start makes a new player", err)
 	}
 	return id, err
 }
@@ -67,20 +67,29 @@ func ReadPlayerUUID(dataDir string) (string, error) {
 // a plain open of a named pipe waited for a writer and held whoever read it:
 // serve's player start, bind, inspect and a restore (B525).
 func ReadPlayerUUIDFile(path string) (string, error) {
-	f, _, err := fsutil.OpenAsFile(path)
+	b, err := readPlayerUUIDBytes(path)
 	if err != nil {
 		return "", err
-	}
-	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, maxPlayerUUIDFile+1))
-	if err != nil {
-		return "", fmt.Errorf("read %s: %w", path, err)
 	}
 	id := strings.TrimRightFunc(string(b), unicode.IsSpace)
 	if len(b) > maxPlayerUUIDFile || !playerUUIDShape.MatchString(id) {
 		return "", fmt.Errorf("%s %w", path, ErrNotOnePlayerUUID)
 	}
 	return id, nil
+}
+
+// readPlayerUUIDBytes performs the bounded, nonblocking identity read.
+func readPlayerUUIDBytes(path string) ([]byte, error) {
+	f, _, err := fsutil.OpenAsFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, maxPlayerUUIDFile+1))
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	return b, nil
 }
 
 // EnsurePlayerUUID returns the player's UUID, making it the first time:
@@ -176,5 +185,5 @@ func WritePlayerUUIDFile(path, id string) error {
 		return fmt.Errorf("rename %s: %w", path, err)
 	}
 	tmpName = ""
-	return nil
+	return atomicwrite.ProbeDurable(filepath.Dir(path), path)
 }

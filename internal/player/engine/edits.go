@@ -172,7 +172,7 @@ func (e *Engine) setShuffle(c *command) {
 func (e *Engine) values(c *command, id bool) bool {
 	r := &e.o.res
 	name := c.op.String()
-	if (r.stuckQueue != "" || r.stuckReserve != "") && !e.unstick() {
+	if r.stuckQueue != "" && !e.unstick() {
 		e.answer(c, reply{err: refuse(name, ReasonFileStuck, e.editState().Detail)})
 		return false
 	}
@@ -219,25 +219,19 @@ func (e *Engine) reserveOverdue(seq uint64) {
 	e.touched()
 }
 
-// unstick reports whether the bad files that could not be moved aside are
-// gone, the operator having moved them; the engine then writes again. It is
-// one Lstat a file, on the owner, only while an edit is refused for them.
+// unstick reports whether the corrupt queue is gone. It never discards a floor.
 func (e *Engine) unstick() bool {
 	r := &e.o.res
-	for _, p := range []*string{&r.stuckQueue, &r.stuckReserve} {
-		if *p == "" {
-			continue
-		}
-		if _, err := e.sm.lstat(*p); !errors.Is(err, fs.ErrNotExist) {
-			return false
-		}
-		e.log.Info("player: the bad file is gone; the engine writes it again", "path", *p)
-		if p == &r.stuckQueue {
-			e.w.setOff(false)
-		}
-		*p = ""
-		e.touched()
+	if r.stuckQueue == "" {
+		return true
 	}
+	if _, err := e.sm.lstat(r.stuckQueue); !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	e.log.Info("player: the bad queue file is gone; the engine writes it again", "path", r.stuckQueue)
+	e.w.setOff(false)
+	r.stuckQueue = ""
+	e.touched()
 	return true
 }
 
@@ -246,7 +240,7 @@ func (e *Engine) unstick() bool {
 // msgReserveDone.
 func (e *Engine) reserveWrite() {
 	r := &e.o.res
-	if r.inflight || r.stuckReserve != "" {
+	if r.inflight {
 		return
 	}
 	r.ids.want, r.tokens.want = r.ids.durable, r.tokens.durable

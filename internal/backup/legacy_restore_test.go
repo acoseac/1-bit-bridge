@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"testing"
 
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -18,7 +20,10 @@ func TestOlderRestoresRejectA5a0Snapshot(t *testing.T) {
 	const id = "0f8fad5b-d9cb-469f-a165-70867728950e"
 	source := t.TempDir()
 	p := filepath.Join(source, PlayerUUIDFileName)
-	if err := config.WritePlayerUUIDFile(p, id); err != nil {
+	if err := writePlayerUUIDFileAt71af3f26(p, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "player-ids.json"), []byte(`{"version":2,"uuid":"`+id+`","ids":0,"tokens":0}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	snap, err := Snapshot(t.Context(), Sources{DataDir: source, PlayerUUID: p})
@@ -48,7 +53,7 @@ func TestOlderRestoresRejectA5a0Snapshot(t *testing.T) {
 func TestOlderSchemaOneRestoresExplainTheReleaseCoupling(t *testing.T) {
 	const id = "0f8fad5b-d9cb-469f-a165-70867728950e"
 	snap := t.TempDir()
-	if err := config.WritePlayerUUIDFile(filepath.Join(snap, PlayerUUIDFileName), id); err != nil {
+	if err := writePlayerUUIDFileAt71af3f26(filepath.Join(snap, PlayerUUIDFileName), id); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(snap, "player-ids.json"), []byte(`{"version":2,"uuid":"`+id+`","ids":10000,"tokens":30000}`), 0600); err != nil {
@@ -161,9 +166,10 @@ func restoreV021(snapshotDir string, dst Targets) error {
 	return nil
 }
 
-// restoreBefore5a0 captures Restore from 71af3f26. Only the function name and
-// references to that revision's schema constant (1) were changed; review
-// names in comments were omitted.
+// restoreBefore5a0 captures Restore from 71af3f26. Only the function name,
+// references to that revision's schema constant (1) and its identity writer,
+// that revision's config.WritePlayerUUIDFile (writePlayerUUIDFileAt71af3f26),
+// were changed; review names in comments were omitted.
 func restoreBefore5a0(snapshotDir string, dst Targets) error {
 	m, err := readManifest(filepath.Join(snapshotDir, ManifestFile))
 	if err != nil {
@@ -257,7 +263,7 @@ func restoreBefore5a0(snapshotDir string, dst Targets) error {
 			if !playerUUIDRead {
 				return fmt.Errorf("restore %s: the snapshot changed during the restore", PlayerUUIDFileName)
 			}
-			if err := config.WritePlayerUUIDFile(target, playerUUID); err != nil {
+			if err := writePlayerUUIDFileAt71af3f26(target, playerUUID); err != nil {
 				return fmt.Errorf("restore %s: %w", PlayerUUIDFileName, err)
 			}
 			continue
@@ -301,5 +307,50 @@ func restoreBefore5a0(snapshotDir string, dst Targets) error {
 			}
 		}
 	}
+	return nil
+}
+
+// playerUUIDShapeAt71af3f26 is config's playerUUIDShape at 71af3f26.
+var playerUUIDShapeAt71af3f26 = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// writePlayerUUIDFileAt71af3f26 captures config.WritePlayerUUIDFile from
+// 71af3f26, the identity writer the historical restores above and their
+// fixtures used. It returned once its rename landed; today's writer then
+// probes the directory's durability, which Windows refuses, and that is not
+// the historical behaviour these tests hold. Only the function name and the
+// shape's name were changed.
+func writePlayerUUIDFileAt71af3f26(path, id string) error {
+	if !playerUUIDShapeAt71af3f26.MatchString(id) {
+		return fmt.Errorf("write %s: what was to be written is not one UUID in lowercase", path)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".player-uuid-*")
+	if err != nil {
+		return fmt.Errorf("stage %s: %w", path, err)
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		if tmpName != "" {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	// Registered after the Remove, so it runs first: Windows will not
+	// unlink an open file.
+	defer func() { _ = tmp.Close() }()
+	if err := fsutil.KeepOwner(tmp, path); err != nil {
+		return fmt.Errorf("keep %s's owner: %w", path, err)
+	}
+	if _, err := tmp.WriteString(id + "\n"); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("sync %s: %w", path, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", path, err)
+	}
+	if err := atomicwrite.RenameWithRetry(tmpName, path); err != nil {
+		return fmt.Errorf("rename %s: %w", path, err)
+	}
+	tmpName = ""
 	return nil
 }

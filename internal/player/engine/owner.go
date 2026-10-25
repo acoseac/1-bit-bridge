@@ -2,7 +2,12 @@ package engine
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"maps"
+	"os"
+	"path/filepath"
 	"slices"
 )
 
@@ -121,7 +126,10 @@ func (e *Engine) start() error {
 	o.gen = 1
 	o.drainAt = -1
 
-	rf := e.loadReserve()
+	rf, err := e.loadReserve()
+	if err != nil {
+		return err
+	}
 	idsBase, tokBase := uint64(rf.IDs), uint64(rf.Tokens)
 	if qf, entries := e.loadQueue(); qf != nil {
 		o.q = newQueue(entries)
@@ -141,21 +149,19 @@ func (e *Engine) start() error {
 	}
 	o.res.ids, o.res.tokens = startCounter(idsBase), startCounter(tokBase)
 	if o.res.ids.exhausted() || o.res.tokens.exhausted() {
-		return refuse("start", ReasonIDsExhausted, "the player's ID or token space is exhausted; no value can be handed out without reuse")
+		return refuse("start", ReasonIDsExhausted, "the player's ID or token space is exhausted; no value can be handed out without reuse; with the service stopped, run bridge reset-player --discard-floor")
 	}
-	if o.res.stuckReserve == "" {
-		ids, tokens := o.res.ids.target(), o.res.tokens.target()
-		if err := e.reserve(ids, tokens); err != nil {
-			o.res.failed = err
-			e.log.Warn("player: the reservation of this run could not be written; inserts and the other edits that advance the token are refused until one is",
-				"path", e.cfg.ReservePath, "err", err)
-		} else {
-			o.res.ids.durable, o.res.tokens.durable = ids, tokens
-		}
+	ids, tokens := o.res.ids.target(), o.res.tokens.target()
+	if err := e.reserve(ids, tokens); err != nil {
+		o.res.failed = err
+		e.log.Warn("player: the reservation of this run could not be written; inserts and the other edits that advance the token are refused until one is", "path", e.cfg.ReservePath, "err", err)
+	} else {
+		o.res.ids.durable, o.res.tokens.durable = ids, tokens
 	}
+
 	// The run's token is published only once a durable reservation covers
-	// it: after a reservation write that failed, or with a bad reservation
-	// file that stays, there is none (0) until an edit's reservation lands,
+	// it: after a reservation write that failed there is none (0) until an
+	// edit's reservation lands,
 	// so two such starts never publish one token twice.
 	if !o.res.tokens.exhausted() && !o.res.tokens.needs() {
 		o.token = o.res.tokens.take()
@@ -169,25 +175,31 @@ func (e *Engine) start() error {
 	return nil
 }
 
-// loadReserve reads the reservation file: none is a reservation of
-// nothing, and a bad one is moved aside and counts as none.
-func (e *Engine) loadReserve() reserveFile {
+// loadReserve refuses an unknown floor. Queue recovery must never reset it.
+func (e *Engine) loadReserve() (reserveFile, error) {
 	path := e.cfg.ReservePath
-	data, err := e.readBounded(path, maxReserveFileBytes)
-	if err == nil && data == nil {
-		return reserveFile{}
+	data, err := e.sm.readFile(path, maxReserveFileBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		if _, statErr := os.Lstat(path); errors.Is(statErr, os.ErrNotExist) {
+			for _, name := range []string{"player-uuid", "player-initialized"} {
+				if _, err := os.Lstat(filepath.Join(e.cfg.DataDir, name)); !errors.Is(err, os.ErrNotExist) {
+					return reserveFile{}, fmt.Errorf("player floor is missing; run bridge reset-player --discard-floor")
+				}
+			}
+			return reserveFile{}, nil
+		}
 	}
 	var f reserveFile
 	if err == nil {
 		f, err = decodeReserve(data)
 	}
 	if err != nil {
-		if !e.moveAside("reservation file", path, err) {
-			e.o.res.stuckReserve = path
+		if kind := fsutil.NotAFileKind(err); kind != "" {
+			return f, fmt.Errorf("%s is a %s, not a file: move it aside and restore the original floor, or run bridge reset-player --discard-floor: %w", path, kind, err)
 		}
-		return reserveFile{}
+		return f, fmt.Errorf("read player reservation: %w; restore read access or use a newer bridge for a newer version; for a lost floor run bridge reset-player --discard-floor", err)
 	}
-	return f
+	return f, nil
 }
 
 // loadQueue reads the queue file: none is an empty queue, and a bad one is
@@ -734,8 +746,6 @@ func (e *Engine) editState() EditState {
 	switch {
 	case r.stuckQueue != "":
 		return EditState{Refused: ReasonFileStuck, Detail: "the queue file " + r.stuckQueue + " is bad and could not be moved aside"}
-	case r.stuckReserve != "":
-		return EditState{Refused: ReasonFileStuck, Detail: "the reservation file " + r.stuckReserve + " is bad and could not be moved aside"}
 	case r.ids.exhausted():
 		return EditState{Refused: ReasonIDsExhausted, Detail: "every ID a uint32 holds has been handed out"}
 	case r.tokens.exhausted():

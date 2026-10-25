@@ -19,6 +19,9 @@ import (
 // the stamped format. Restore must discard either before replacing identity.
 func seedDestinationQueue(t *testing.T, dir, id string, version int) []byte {
 	t.Helper()
+	if _, err := os.Lstat(filepath.Join(dir, engine.ReservationFileName)); os.IsNotExist(err) {
+		putMark(t, dir, id, 10000, 10000)
+	}
 	stamp := ""
 	if version == 2 {
 		stamp = `,"uuid":"` + id + `"`
@@ -204,12 +207,25 @@ func TestInterruptedRestoreBackupWithoutStartKeepsTheRaisedFloor(t *testing.T) {
 				t.Fatal("restore did not stop")
 			}
 			raised := markAt(t, dst)
+			if _, err := backup.Snapshot(t.Context(), backup.Sources{DataDir: dst, PlayerUUID: filepath.Join(dst, config.PlayerUUIDFile)}); err == nil {
+				t.Fatal("backup paired a floor with the pre-restore UUID")
+			}
+			if err := backup.CheckPlayerStart(dst); err == nil {
+				t.Fatal("start accepted the pre-restore UUID")
+			}
+			if _, err := backup.ResetPlayer(dst); err != nil {
+				t.Fatal(err)
+			}
+			id, _, err := backup.EnsurePlayerUUID(dst)
+			if err != nil {
+				t.Fatal(err)
+			}
 			newSnap, err := backup.Snapshot(t.Context(), backup.Sources{DataDir: dst, PlayerUUID: filepath.Join(dst, config.PlayerUUIDFile)})
 			if err != nil {
 				t.Fatal(err)
 			}
 			carried := markAt(t, newSnap)
-			if carried.UUID != boxPlayerUUID || carried.IDs != raised.IDs || carried.Tokens != raised.Tokens {
+			if carried.UUID != id || carried.IDs != raised.IDs || carried.Tokens != raised.Tokens {
 				t.Fatalf("snapshot dropped the interrupted restore floor: %+v versus %+v", carried, raised)
 			}
 			elsewhere := t.TempDir()
@@ -250,17 +266,12 @@ func TestExhaustedLiveRemedyNeverRevivesAnOlderSameIdentity(t *testing.T) {
 				advice := err.Error()
 				// Follow the actual error's advice. A legacy queue has no UUID, so
 				// leaving it behind exposes its entries under the new identity.
-				for _, name := range []string{config.PlayerUUIDFile, engine.ReservationFileName} {
-					if err := os.Remove(filepath.Join(dst, name)); err != nil {
+				if strings.Contains(advice, "bridge reset-player") {
+					if _, err := backup.DiscardPlayerFloor(dst); err != nil {
 						t.Fatal(err)
 					}
 				}
-				if strings.Contains(err.Error(), "player-queue.json") {
-					if err := os.Remove(filepath.Join(dst, "player-queue.json")); err != nil {
-						t.Fatal(err)
-					}
-				}
-				if strings.Contains(err.Error(), "from a copy of the snapshot as well") {
+				if strings.Contains(err.Error(), "from a copy of the snapshot") {
 					for _, name := range []string{config.PlayerUUIDFile, engine.ReservationFileName} {
 						if err := os.Remove(filepath.Join(snap, name)); err != nil {
 							t.Fatal(err)
@@ -270,7 +281,7 @@ func TestExhaustedLiveRemedyNeverRevivesAnOlderSameIdentity(t *testing.T) {
 				if err := backup.Restore(snap, backup.Targets{PlayerUUID: filepath.Join(dst, config.PlayerUUIDFile)}); err != nil {
 					t.Fatal(err)
 				}
-				id, _, err := config.EnsurePlayerUUID(dst)
+				id, _, err := backup.EnsurePlayerUUID(dst)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -295,34 +306,16 @@ func TestExhaustedLiveRemedyNeverRevivesAnOlderSameIdentity(t *testing.T) {
 // production builder: a snapshot may contain an older, correctly stamped floor.
 func assertPlayerResetAdvice(t *testing.T, advice, operation string) {
 	t.Helper()
-	const restoreStep = "remove player-uuid and player-ids.json from a copy of the snapshot as well, then restore that copy"
-	if got, want := strings.Contains(advice, restoreStep), operation == "restore"; got != want {
-		t.Errorf("%s refusal restore step present = %t, want %t: %s", operation, got, want, advice)
-	}
-	for _, required := range []string{
-		"with the service stopped, reset the player: remove the box's player-uuid, player-ids.json and player-queue.json together",
-		"this reset gives up for good the identity it removes and any the box ran earlier, unless, after this box last ran it, another box took it over from this box, by restoring a snapshot this box made, and has not reset it since, running or powered off",
-		"no snapshot of one of them taken before the reset, on this box or another, may restore its player identity again",
-		"remove player-uuid and player-ids.json from every such snapshot, or delete those snapshots",
-		"reset any other box that still holds one of them before it runs again",
-		"an identity another box took over from this box, after this box last ran it, and has not reset since, keeps its snapshots",
-		"the next start makes a new identity with no queue, a new device to controllers",
-		"a snapshot's player-ids.json is never a valid repair",
-		"do not delete the reservation while keeping the player identity",
-	} {
-		if !strings.Contains(advice, required) {
-			t.Errorf("refusal lacks %q: %s", required, advice)
+	for _, want := range []string{"bridge reset-player --discard-floor", "seals all player identity restores", "new identity with no queue"} {
+		if !strings.Contains(advice, want) {
+			t.Errorf("missing %q: %s", want, advice)
 		}
 	}
-	for _, unsafe := range []string{"known valid copy", "repair the reservation from", "repair it from"} {
-		if strings.Contains(advice, unsafe) {
-			t.Errorf("unsafe repair advice %q: %s", unsafe, advice)
-		}
+	if operation == "restore" && !strings.Contains(advice, "from a copy of the snapshot") {
+		t.Errorf("missing snapshot remedy: %s", advice)
 	}
 }
 
-// assertNoPlayerResetAdvice rejects a destructive remedy for a failed read
-// that established nothing about the reservation's contents.
 func assertNoPlayerResetAdvice(t *testing.T, message string) {
 	t.Helper()
 	for _, advice := range []string{"reset the player", "remove the box's", "gives up for good", "new device to controllers"} {
@@ -345,6 +338,9 @@ func TestUnreadableReservationAdviceResetsIdentityAndQueue(t *testing.T) {
 				beforeQueue := seedDestinationQueue(t, dst, snapshotPlayerUUID, 1)
 				rp := filepath.Join(dst, engine.ReservationFileName)
 				if kind == "unreadable" {
+					if err := os.Remove(rp); err != nil {
+						t.Fatal(err)
+					}
 					if err := os.Mkdir(rp, 0700); err != nil {
 						t.Fatal(err)
 					}
@@ -374,6 +370,15 @@ func TestUnreadableReservationAdviceResetsIdentityAndQueue(t *testing.T) {
 					}
 				} else {
 					assertPlayerResetAdvice(t, err.Error(), operation)
+				}
+				if operation == "restore" && kind == "unreadable" {
+					want := "move it aside"
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("restore advice omits read-access prerequisite: %v", err)
+					}
+					if _, resetErr := backup.ResetPlayer(dst); resetErr == nil || !strings.Contains(resetErr.Error(), want) {
+						t.Errorf("reset refusal omits read-access prerequisite: %v", resetErr)
+					}
 				}
 				if id, err := config.ReadPlayerUUID(dst); err != nil || id != snapshotPlayerUUID {
 					t.Fatalf("refusal changed identity: %s, %v", id, err)

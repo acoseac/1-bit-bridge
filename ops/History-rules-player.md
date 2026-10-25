@@ -8,7 +8,7 @@
 
 - **`binding.Resolve` fails closed and latches nothing.** A sysfs card listing cut short at the reader's cap (`Inventory.CardsComplete`, which `inventory` carries from `alsa.SysfsSnapshot.CardsComplete`) makes the answer `identity_incomplete` before any card is looked at, `identity_transient` included, since the card a binding names, or one that makes it ambiguous, may be missing from it, and a card cut from sysfs's listing that /proc/asound lists reads as one tree's alone; bind (`For`) refuses such a reading before it looks for its card (round 4 of the port-binding fix: Resolve answered available on it, and bind accepted, while the check after open refused every open). A card one tree lists alone, read as two units, or vanished makes the answer `identity_transient`, and so does a `USB-Audio` card with no usbid (snd-usb-audio adding or disconnecting it); a USB card's identity is sysfs's, which a usbid cross-checks only where there is one, since only snd-usb-audio writes one (a hiFace's card has none, and resolves); two matches, or one beside an unreadable card (a port binding's too, since the unit in a port may carry several cards, unless the match is on the interface the binding records, which no other card of that unit can be), are `device_ambiguous`, never the first; a port binding whose controller is gone, whose port a hub took, or whose port holds a device whose class cannot be read (`HubUnknown`: it may be a hub) is `binding_invalid`, an empty port `device_missing`; the unit without the bound stream is `endpoint_missing`. `Observe`'s inventory is `Partial` when either tree's reading is not whole: sysfs's (`SysfsSnapshot.Partial`), or a /proc card whose devices could not all be enumerated (`alsa.CardReading.Partial`, `output.md`), whose problems it then carries (`partialCards`, PR 4a2 round 2: until then a card whose PCM directory could not be listed read as having no endpoint, `endpoint_missing`). `Resolve` answers from what was read; not acting on a partial reading is its caller's: the hotplug watcher publishes none, and the check after open answers one as Resolve does (its bullet). `binding.Settled` is the hotplug watcher's resolution (PR 4a2): `Resolve` without the transient cards, settled unless one of them may be the bound unit by what its trees said (`ProcUSBID`, `SysfsUSB`: its model unknown or the bound one, its serial the bound one), or under a port binding a card at the bound port (its place unknown or the bound one, compared by place as Resolve compares it, `placeOf`, since a card's port path always carries its interface and bind writes the port alone); an ambiguity, a refused binding, a topology refusal and a port binding's card on the interface the binding records are settled whatever the transient cards are. A port binding's card found otherwise is the port's only while the unit carries no other, so a transient card that may be another card of that unit (its place unknown or the bound one, its model unknown or the unit's, since one port holds one unit) holds it: once it settles the answer is `device_ambiguous`, or that card on the recorded interface (round 4: compared as strings, a binding of the port alone set aside its own card being added or removed and answered `device_missing` as settled, CodeRabbit on #1312; and round 1's "a port that has its card is settled" held only while a port binding named an interface). `Resolve` itself still answers `identity_transient` for any transient card. **Don't return the first match, rule out an unreadable card, wait for a usbid another driver never writes, keep an answer across calls, let a port binding follow a unit, make `Resolve` set a transient card aside, call a reading whole that could not list a card's devices, resolve on a card listing that is not whole, compare a port binding's place as a string, or settle a port binding's answer beside a transient card its unit may carry unless that answer is the card on the recorded interface.** `TestARenumberedCardStillResolvesToTheSameUnit`, `TestTwoSerialLessUnitsOfOneModelAreAmbiguous`, `TestASerialTwoUnitsShareIsAmbiguous`, `TestAHubOrAGoneControllerInvalidatesAPortBinding`, `TestACardOneTreeListsAloneIsTransient`, `TestAUSBCardWithNoUsbidIsReadFromSysfs`, `TestAVirtualCardIsUnsupportedNotTransient`, `TestAnUnreadableCardIsNeverRuledOut`, `TestAPortWhoseDeviceClassCannotBeReadIsNotAnEmptyPort`, `TestSettledSetsAsideACardThatCannotBeTheBoundUnit`, `TestSettledWaitsOnACardThatMayBeTheBoundUnit`, `TestSettledHoldsWhatNoCardCanChange`, `TestSettledWaitsOnAnotherCardOfTheUnitInTheBoundPort`, `TestObserveKeepsWhatATransientCardsTreesSaid`, `TestAReadingThatCannotListACardsDevicesIsPartial` and `TestACutListingResolvesToNoCardAndBindsNone` pin it.
 
-- **The player's UUID is `<dataDir>/player-uuid`, random, made once** (`config.EnsurePlayerUUID`, by bind or PR 4b's start, under the data dir's lock); a file that does not hold one UUID, followed by nothing but white space (an editor's CR LF), is refused, never replaced. It has one reader, `ReadPlayerUUIDFile` (which `ReadPlayerUUID` wraps), and one writer, `WritePlayerUUIDFile` (the UUID and a newline, 0600, the owner kept, staged, synced and renamed; it refuses anything but one lowercase UUID), which `EnsurePlayerUUID` and `bridge restore` both call; `ForgetPlayerUUID` removes one a refused serve start made. **`bridge backup` carries it, and `bridge restore` gives the box the snapshot's, over any the box has** (2026-10-22, backlog B505): a restore makes the box the bridge the snapshot was taken from, and that bridge's player is the device its controllers know by that UUID. A snapshot without the file leaves the box's identity as it is, and a copy that does not hold one UUID fails the restore before any file is written, its refusal saying to remove the copy (the cli-serve.md bullet on the player's identity in a snapshot). **Its one reader opens it through `fsutil.OpenAsFile`, so anything there that is not a file is refused at once, never waited on and never read as none made yet** (2026-10-24, backlog B525): the open of the routes that serve a file's bytes and of the engine's own files, without waiting and reading only a file, so a named pipe, a directory or a device at the path, or a link to one, is an `*fs.PathError` around an `*fsutil.NotAFileError`, which is neither `fs.ErrNotExist` (none made yet, which `EnsurePlayerUUID` makes) nor `ErrNotOnePlayerUUID`. Each reader takes it down the refusal it has for a file it cannot read: serve's player start does not start ("the player's identity: open …: named pipe is not a file"), building no backend or engine and making no identity; bind exits 1 once it has written the binding, making no UUID; inspect's `player uuid:` line names it; a restore refuses a snapshot's copy that is one before any file is written; `ForgetPlayerUUID` answers it. A restore also reads the box's own copy, to keep the box's queue only for the identity it restores, and takes one there for an identity whose queue it does not keep: the queue is discarded and the snapshot's identity written in its place. Until then the reader opened with `os.Open`, which on a named pipe waits for a writer, and nothing cancels an open: each of those readers waited, serve's start on the player's supervisor goroutine, and a link to a device read as a file that did not hold one UUID. **Don't derive it from a serial, a card, the certificate or a name, read it through a plain open, read past anything beside the UUID but white space after it, write it but through `WritePlayerUUIDFile`, or remove it but through `ForgetPlayerUUID`.** `TestThePlayerUUIDIsMadeOnceAndKept`, `TestThePlayerUUIDReadsPastTrailingWhiteSpaceAndNothingElse`, `TestWritePlayerUUIDFileWritesOneUUIDAndNothingElse`, `TestForgetPlayerUUIDRemovesOnlyTheUUIDItIsGiven`, `TestWhatIsNotAFileAtPlayerUUIDIsRefusedAtOnce`, `TestANamedPipeAtThePlayersUUIDRefusesItsStartAtOnce`, `TestOutputDACBindRefusesANamedPipeAtThePlayersUUIDAtOnce`, `TestOutputDACInspectSaysANamedPipeAtThePlayersUUIDIsNotAFile`, `TestRestoreRefusesANamedPipeForThePlayerUUIDAtOnce` and `TestRestoreOverANamedPipeAtTheBoxsPlayerUUIDDoesNotWait` pin it.
+- **The player's UUID is `<dataDir>/player-uuid`, random, made once** (by bind or serve through `backup.EnsurePlayerUUID`, under the data dir's lock); a file that does not hold one UUID, followed by nothing but white space (an editor's CR LF), is refused, never replaced. It has one reader, `ReadPlayerUUIDFile` (which `ReadPlayerUUID` wraps), and one writer, `WritePlayerUUIDFile` (the UUID and a newline, 0600, the owner kept, staged, synced and renamed; it refuses anything but one lowercase UUID), which `EnsurePlayerUUID` and `bridge restore` both call; `ForgetPlayerUUID` removes one a refused serve start made. **`bridge backup` carries it, and `bridge restore` gives the box the snapshot's, over any the box has** (2026-10-22, backlog B505): a restore makes the box the bridge the snapshot was taken from, and that bridge's player is the device its controllers know by that UUID. A snapshot without the file leaves the box's identity as it is, and a copy that does not hold one UUID fails the restore before any snapshot data is written, its refusal saying to remove the copy (the cli-serve.md bullet on the player's identity in a snapshot). **Its one reader opens it through `fsutil.OpenAsFile`, so anything there that is not a file is refused at once, never waited on and never read as none made yet** (2026-10-24, backlog B525): the open of the routes that serve a file's bytes and of the engine's own files, without waiting and reading only a file, so a named pipe, a directory or a device at the path, or a link to one, is an `*fs.PathError` around an `*fsutil.NotAFileError`, which is neither `fs.ErrNotExist` (none made yet, which `EnsurePlayerUUID` makes) nor `ErrNotOnePlayerUUID`. Each reader takes it down the refusal it has for a file it cannot read: serve's player start does not start ("the player's identity: open …: named pipe is not a file"), building no backend or engine and making no identity; bind preflights before saving the binding and exits 1 without making a UUID; inspect's `player uuid:` line names it; a restore refuses a snapshot's copy that is one before any snapshot data is written; `ForgetPlayerUUID` answers it. A restore may replace a non-file live UUID after raising the floor and durably clearing the queue; it never needs the displaced identity's name. Until then the reader opened with `os.Open`, which on a named pipe waits for a writer, and nothing cancels an open: each of those readers waited, serve's start on the player's supervisor goroutine, and a link to a device read as a file that did not hold one UUID. **Don't derive it from a serial, a card, the certificate or a name, read it through a plain open, read past anything beside the UUID but white space after it, write it but through `WritePlayerUUIDFile`, or remove one without durably clearing its queue first; reset unlinks without reading UUID bytes, then syncs the directory.** `TestThePlayerUUIDIsMadeOnceAndKept`, `TestThePlayerUUIDReadsPastTrailingWhiteSpaceAndNothingElse`, `TestWritePlayerUUIDFileWritesOneUUIDAndNothingElse`, `TestForgetPlayerUUIDRemovesOnlyTheUUIDItIsGiven`, `TestWhatIsNotAFileAtPlayerUUIDIsRefusedAtOnce`, `TestANamedPipeAtThePlayersUUIDRefusesItsStartAtOnce`, `TestOutputDACBindRefusesANamedPipeAtThePlayersUUIDAtOnce`, `TestOutputDACInspectSaysANamedPipeAtThePlayersUUIDIsNotAFile`, `TestRestoreRefusesANamedPipeForThePlayerUUIDAtOnce` and `TestRestoreOverANamedPipeAtTheBoxsPlayerUUIDDoesNotWait` pin it.
 
 - **`bridge output dac inspect` opens nothing, and `bind <card> --binding serial|uniqueModel|port` prints no serial; bind writes in a turn of bridge.yaml's lock (`config.LockFile`), taken inside the data dir's, on the config read again in that turn, through `SaveIf`, whose byte comparison stays as the second guard against a writer that takes no lock** (moved here from player.md on 2026-10-24, when B506 gave every writer of the file its lock). `--verify-card N` runs the check after open against card N's sysfs reading, so under a port binding it passes any unit at the bound port and refuses a card elsewhere, naming the port. bind reads the config again once it holds the data dir's lock and then bridge.yaml's (`config.LockFile`, which every writer of the file takes since B506: library add and remove, init, serve's seed, a restore and serve's console saves), and writes `output.player.device` into that copy, with the serial from sysfs, through `SaveIf`, which still asks just before its rename whether the file holds the bytes bind read, and refuses if not: the second guard, against a writer that takes no lock (an edit, or a bridge older than the lock), which narrows that window to the instant before the rename and does not close it, since no rename can be made conditional on the file it replaces. Until B506 that check was the only guard (library add and remove and init saved without any lock, and a lock every config writer takes was this bullet's "fix (backlog)"). bridge.yaml's turn runs from the read to the `SaveIf` and is given back before bind makes the player's UUID. bind also refuses what `binding.For` says would not resolve to that card now, a block that did not read, a data dir a serve holds (it reads the binding only at its next start, and its console refuses a save over the file bind changed until it restarts), and a data dir that moved before the lock. inspect's binding line shows a field only when it holds a value that field takes. bind says the binding applies when bridge serve next starts: it writes only while no serve holds the data dir, and nothing reloads the file (PR 4a2). **Don't print a serial, write the config beside a running bridge, save a copy read before the locks, take bridge.yaml's lock before the data dir's, replace a file whose bytes changed since bind read them (compare the bytes, never the size and time), or call that check a lock: it narrows the window and does not close it.** `TestOutputDACBindWritesTheSerialToTheFileAndPrintsNone`, `TestOutputDACBindRefusesWhatWouldNotResolve`, `TestOutputDACBindRefusesWhileABridgeServesTheDataDir`, `TestOutputDACBindSavesTheConfigItReadUnderTheLock`, `TestOutputDACBindNeverWritesOverAnUpdateAfterItsRead`, `TestBindKeepsALibraryAddThatLandsInItsWindow`, `TestTheDataDirLockComesBeforeTheConfigLock`, `TestSaveIfAsksJustBeforeTheRename`, `TestOutputDACInspectNeverQuotesASerialInTheWrongField`, `TestOutputDACBindSaysTheBindingAppliesAtTheNextStart` and `TestOutputDACVerifyCardFollowsAPortBinding` pin it.
 
@@ -81,21 +81,24 @@
 
 - **Faults stay in the player: serve recovers panics in what it owns (its supervisor, the goroutine running `eng.Run`, the resolver, the sink notes), and the engine, the backend and the sink recover those on the goroutines they start (B523); a panic in Run abandons the engine, the backend then releases every session it holds, bounded, and the player keeps its share of the data dir's lock until the process exits.** A fault, a skip and a stop are each logged once from the engine's snapshots, at each new generation, the detail cut to 256 bytes, with no serial and no library path; nothing changes serve's exit code or holds a request. A panic in the supervisor (its start, its reporting loop, its shutdown) is recovered and logged (where, the stack, and the value only when it is the runtime's own error), and the player then stops, joining its engine; one on the goroutine running `eng.Run` is recovered, and the engine is then dead: the supervisor stops the rest, and its shutdown first has the backend release every session it holds (`releaseAll`, `Backend.ReleaseAll`) within the backend's bound, before it waits for the backend's goroutines, and logs that the device is free, or a Warn that it may still be held (B523). The earlier `watch` line says the backend is asked to let go of the device, never that it will succeed: the bounded release alone reports its outcome (B523 round 2): the engine's owner, the backend's only caller, is gone, and until B523 the session it played kept the DAC until the process exits. That recover marks the run (`playerRun.panicked`), and `settle` keeps the player's share of the data dir's lock for good, saying so; `settled` never closes (round 2, Codex: the recover let `run.done` close as a return, and `settle` let go of the lock while the reservation writes and the queue writer, which Run's skipped shutdown waits for, could still write). The supervisor's calls to the engine run on `playerRun.calls`, which ends with serve's stop and with Run's goroutine: an engine whose owner died answers nothing, and a report on its way held the supervisor until serve's stop (found fixing it). A panic on a goroutine the engine, the backend or the sink starts is recovered there (B523) and is that work's typed failure, through the path an error of that work takes: the bullets on panics in the sections on the engine (4b1), the backend (4b2) and the sink (2b). **Don't log a panic's value (the runtime's own error aside, which carries nothing the player read), a serial or a library path, keep a player running past a panic its supervisor recovered, let go of the lock after a panic in Run, leave a dead engine's sessions without a bounded release attempt, promise its outcome before `releaseAll` reports it, or call the engine on a context Run's end does not end.** `TestAPanicInServesPlayerStopsThePlayerAndKeepsTheLibrary`, `TestAPanicOnTheEnginesGoroutineKeepsItsShareOfTheLock`, `TestAPanicOnTheEnginesGoroutineLetsGoOfTheDAC`, `TestAPanicInThePlayersResolverRefusesItsEntry` and `TestAPlayerFaultStaysInsideThePlayer` pin it.
 
-- **A restored identity raises both reservation marks before any identity file, and every writer merges both floors and stamps its UUID.** **Never copy a snapshot reservation back, lower a floor, ignore a live floor because its UUID differs, or restore an identity over another identity's queue.** Version 2 of `player-ids.json` holds `version`, `uuid`, `ids` and `tokens`. Every engine and restore write uses the strict durable writer, merges each counter with the existing file whatever its UUID, and stamps the writer's UUID. Engine construction reserves before publishing its token; a v1 reservation or a missing file remains the development-box floor it was. A foreign UUID is a floor, never a refusal. A refused start undoes only its own freshly minted `player-uuid`, leaving any floor. The OpenHome reads (B470 PR 5a3: Playlist's `Id`, `Read`, `ReadList`, `IdArray` and `IdArrayChanged`) rely on it: a restored identity's first values are past every value in its snapshot, pinned through the SOAP layer by `TestARestoredIdentityHandsOutValuesPastItsSnapshot` (5a3 round 2).
+- **A restored identity raises both reservation marks before any identity file, and every writer merges both floors and stamps its UUID.** **Never copy a snapshot reservation back, lower a floor, ignore a live floor because its UUID differs, or restore an identity over another identity's queue.** Version 2 of `player-ids.json` holds `version`, `uuid`, `ids` and `tokens`. Every engine and restore write uses the strict durable writer, merges each counter with the existing file whatever its UUID, and stamps the writer's UUID. Engine construction reserves before publishing its token; a v1 reservation remains a valid floor. A missing floor beside a UUID or initialization marker is floor loss, except for the jumped UUID-only upgrade and the one-shot post-discard exemption (B524 below). A foreign floor remains a numeric bound for restore and reset, but start requires it to name the current UUID. A refused start undoes only its own freshly minted `player-uuid`, leaving any floor. The OpenHome reads (B470 PR 5a3: Playlist's `Id`, `Read`, `ReadList`, `IdArray` and `IdArrayChanged`) rely on it: a restored identity's first values are past every value in its snapshot, pinned through the SOAP layer by `TestARestoredIdentityHandsOutValuesPastItsSnapshot` (5a3 round 2).
 
-  Backups carry any decodable live v1 or v2 reservation after capturing `player-uuid`, restamped v2 with the captured UUID. Every writer merges, so a foreign reservation covers the old identity too. After a valid `player-uuid` is captured, only a missing file omits the mark (a malformed `player-uuid` captures no identity and so no mark); a file refused as data gets the same three-file player reset advice as an exhausted live floor (the giving-up-identity rule below), never a snapshot repair. Cancellation, expiry and file-access errors refuse backup without reset advice; an exhausted sharing/access retry says the file was busy and to retry the backup (5a0 Round 10). Restore under the data directory's exclusive lock reads it only as input and writes `max(snapshot, live) + 2^24 + draw` separately for IDs and tokens, with one `crypto/rand` draw uniform in `[0, 2^24)`, shared by both counters. It writes the merged reservation before `player-uuid` and before every other identity file. A crash can leave the old identity above a raised floor; starting it stamps that floor with its own UUID; backing up before or after that start carries the floor. A rerun raises it again. No UUID in the snapshot leaves both live files untouched. A missing live reservation is zero; an unreadable live reservation refuses restore rather than discarding its unknown floor. The snapshot's own reservation is checked the same way (5a0 Round 11, CodeRabbit on PR #1331, reproduced): a reservation the manifest does not list is a genuine absence (a snapshot from before reservations, or one an operator stripped) and takes the unmarked path, but a reservation the manifest *lists* whose copy cannot be read (corruption, a truncated copy, a hand-edit that deleted the file but left the manifest entry), or whose v2 mark names a different player than the identity being restored, refuses the restore and writes nothing — dropping that floor would restore the identity at the bare jump and reissue IDs and tokens below its true high-water mark. The refusal gives the *snapshot* remedy, not the live reset: the damage is in the snapshot, so the operator removes `player-uuid` and `player-ids.json` from a copy of the snapshot and restores that, and the box keeps its own identity and queue (Claude's round-11 review caught the first draft telling the operator to reset the healthy box). The decoded version decides acceptance, not the UUID alone: a listed v1 mark has no UUID and is a floor whatever it names, as a live floor is; a v2 mark must name the identity being restored; a clean read that is neither refuses rather than passing as a zero floor. No queue is backed up.
+  Backups capture the UUID before reading its live floor and require matching UUIDs before stamping the snapshot copy. A live v1 or foreign floor refuses a valid captured UUID; ordinary reset retains its numeric bounds before the next mint restamps it. A missing floor refuses except for the jumped UUID-only adoption. A malformed UUID with a missing floor refuses too. A malformed UUID is preserved for restore's strict refusal, without a stamped floor. A foreign floor still covers the box's earlier identities. Cancellation, expiry and file-access failures refuse without advice to discard; exhausted sharing retries name the busy file and retry. Invalid reservation data names `bridge reset-player --discard-floor`, never a snapshot repair.
 
-  Before writing anything, restore refuses when either source's mark exceeds `MaxUint32 - 2^25 - 2^24`, independently of the draw. The snapshot remedy removes its UUID and reservation so the box keeps or makes its identity; the live remedy resets the player with the service stopped by removing the box's `player-uuid`, `player-ids.json` and `player-queue.json` together. A reset gives up for good the identity it removes and any the box ran earlier (one an earlier restore replaced on this box), unless, after this box last ran it, another box took it over from this box, by restoring a snapshot this box made, and has not reset it since, running or powered off. Their values were held only by the floor the reset drops. No snapshot of a given-up identity taken before the reset, on this box or another, may restore its player identity again: remove `player-uuid` and `player-ids.json` from every such snapshot, or delete those snapshots. Any other box that still holds a given-up identity's files (one powered off since a migration, say) must be reset too before it runs again. An identity another box took over from this box by a restore, after this box last ran it, and has not reset since, is not given up: that box's floor holds it, and its snapshots stay valid. If the reset answers a refused restore, remove `player-uuid` and `player-ids.json` from a copy of that snapshot, then restore that copy. Only the restore refusal carries that step; the backup refusal does not. The next start makes a new identity with no queue, a new device to controllers. A snapshot reservation is never a valid repair; never delete it while keeping the identity. B524 will enforce this operator rule before 5a ships. The engine refuses an exhausted start and refuses every edit that would wrap. Each restore spends less than 2^25 of each counter's space, so about 120 worst-case restores exhaust it.
+  Restore under the exclusive lock completes an incomplete local seal, then preflights the permanent seal, local floor loss and both exhaustion limits before importing data. It writes `max(snapshot, live) + 2^24 + draw` for each counter, with one draw below 2^24 shared by both, from restore's random source (crypto/rand unless a test injects one); onto a UUID-only destination its adoption draws from that source first (B524 round 10). The merged floor precedes the initialized marker, queue unlink when identity changes, and UUID. A crash may leave the old identity beside a raised floor naming the incoming identity; start and backup refuse the mismatch until restore is retried or ordinary reset retains the bounds and removes the old UUID. A retry raises it again. No incoming UUID leaves the live identity and floor untouched. A missing live reservation is a zero input to the restore jump on a pristine box, and a UUID-only upgrade is adopted first (B524 round 9); a sealed box refuses every identity restore. A live floor that cannot be read is never discarded automatically.
 
-  The margin assumes the source issued fewer than 2^24 IDs and fewer than 2^24 tokens between taking the snapshot and stopping. These are operating assumptions, not tests or a uniqueness guarantee. Two independent restores of one old snapshot rely on their random draws being farther apart than the earlier restore's usage (overlap requires usage greater than their gap); the probability grows with that usage. Prefer the box's newest snapshot, avoiding that second case. Restore prints one line recommending it when the manifest creation time is more than a day before the restoring clock or when there is no matching mark. Two boxes running one identity at once are unsupported, as with TLS and pairing tokens. LAN detection of a duplicate UDN is 5a2's follow-up.
+  A snapshot reservation omitted from its manifest is legacy absence: from an older writer it takes the adoption ceiling, 2^31 + 2^24, and from this bridge, whose manifest records `playerFloorRequired`, it refuses (B524 round 10). A listed but unreadable reservation, or a v2 stamp naming another UUID, refuses before any snapshot data is written (local seal completion may precede refusal). Otherwise a damaged snapshot could reissue values from the bare jump. Its remedy is to remove UUID and floor from a copy and restore the rest, keeping the healthy box's identity and queue. The decoded version decides: v1 is a floor without a UUID; v2 must name the captured identity. No queue is backed up.
+
+  Restore refuses both exhausted source counters before importing snapshot data. An exhausted destination can restore a copy without player UUID and floor, keeping its identity, or use `bridge reset-player --discard-floor` to seal identity restores permanently. Ordinary reset retains the floor and does not refund range.
+
+  The migration margin assumes fewer than 2^24 IDs and tokens issued after capture and before stopping the source. Two live holders of one UUID and a non-latest snapshot restored onto another box are unsupported and not guaranteed; random gaps do not establish global uniqueness. Use the latest snapshot and stop the source. Same-box restores instead retain the box's monotonic floor across every identity. Restore still prints advice for snapshots older than a day or without a mark. Duplicate-UDN LAN detection is a separate follow-up.
 
   Snapshot schema 2 deliberately makes v0.2.1 and pre-5a0 main refuse the whole snapshot. The captured schema-1 restore bodies pin that v0.2.1 skips unknown UUID/reservation entries, while B505 main restores the UUID but skips the reservation without a jump. **B505 and 5a0 must ship in the same release.** 4b3's measured reuse (IDs 4097–14096 at the source, then 4097–4099 at each clone) is closed by this policy. The previously proposed flag and operator confirmation were rejected as fragile; a restored player starts normally.
 
   Pinned by `TestReservationNamesTheRunningIdentityAndKeepsEveryFloor`, `TestReservationWritesMergeBothCountersAndStampTheWriter`, `TestRestoreReservationCases`, `TestRepeatedRestoresOnlyRaiseEachMark`, `TestTwoRestoresWithSeparatedDrawsDoNotReuseValues`, `TestSnapshotCarriesEveryDecodableLiveFloor`, `TestInterruptedRestoreBackupWithoutStartKeepsTheRaisedFloor`, `TestExhaustedLiveRemedyNeverRevivesAnOlderSameIdentity`, `TestRestoreCrashesNeverLowerTheLiveReservation`, `TestInterruptedRestoreThenStartBackupAndRestoreKeepsTheRaisedFloor`, `TestExhaustingRestoreRefusesBeforeAnyWrite`, `TestAnExhaustedReservationRefusesStart`, `TestIDExhaustionIsRefused`, `TestTokenExhaustionRefusesEveryTokenAdvancingEdit`, `TestRestoreWarnsForOldOrUnmarkedSnapshots`, `TestRestoreDefaultsToCryptographicRandomness`, `TestOlderRestoresRejectA5a0Snapshot`, `TestOlderSchemaOneRestoresExplainTheReleaseCoupling`, `TestRestoreRefusesADamagedListedReservation`, `TestRestoreOfACorruptReservationKeepsTheFloorFromReissuing`, and the serve harness's `TestServeBacksUpItsDurableReservationAndRefusesRestore` and `TestServeRefusedMintLeavesTheReservationFloor`.
 
-- **Giving up a player's identity resets its UUID, reservation and queue together, with the service stopped.** **A reset gives up for good the identity it removes and any the box ran earlier (one an earlier restore replaced on this box), unless, after this box last ran it, another box took it over from this box, by restoring a snapshot this box made, and has not reset it since, running or powered off. Their values were held only by the floor the reset drops. No snapshot of a given-up identity taken before the reset, on this box or another, may restore its player identity again: remove `player-uuid` and `player-ids.json` from every such snapshot, or delete those snapshots. Any other box that still holds a given-up identity's files (one powered off since a migration, say) must be reset too before it runs again. An identity another box took over from this box by a restore, after this box last ran it, and has not reset since, is not given up: that box's floor holds it, and its snapshots stay valid. Never repair a reservation from a snapshot or delete it while keeping the identity.** `playerResetAdvice` builds the one remedy used by backup only for a live reservation refused as data, and by restore for an unreadable live reservation or an exhausted box mark. With the service stopped, remove the box's `player-uuid`, `player-ids.json` and `player-queue.json` together. The next start makes a new identity with no queue, a new device to controllers. If the reset answers a refused restore, remove `player-uuid` and `player-ids.json` from a copy of that snapshot, then restore that copy. Only the restore refusal carries this copy-and-restore step; the backup refusal does not. B524 will enforce this operator rule before 5a ships. A snapshot's `player-ids.json` is never a valid repair: even stamped with the right UUID, it can predate a restore's raised floor and values issued since its capture. Deleting only the reservation while keeping the identity likewise permits reuse. The queue belongs in the reset because a v1 development queue has no UUID and otherwise loads as the new identity's entries. Round 3's `TestExhaustedLiveRemedyNeverRevivesAnOlderSameIdentity` follows the emitted advice for both counters and both queue versions; `TestUnreadableReservationAdviceResetsIdentityAndQueue` pins the every-snapshot rule for malformed data and unsupported versions (also file-access failures during restore), requires the copy-and-restore step for restore and its absence for backup, and checks live state is unchanged by refusal. Backup file-access failures instead require no reset advice (Round 10).
 
-- **Serve's player tests run the real engine on a stand-in backend, and the real backend only on content it refuses before the device; they wait on an event or a journal line until the test's deadline, and hold a stalled start at the engine-config seam.** `playerStandIn` opens a session's first entry through the resolver serve wired when asked, "opens" and "closes" the DAC, sends the sink notes, can hold a Release the way a call stuck in the kernel is held, and reports its calls to `Wait`; the watcher reads the Pi 5 GO bar tree (`serveOpts.playerTrees`, through `sysfstest`) and hears no kernel. A test of a line the supervisor logs after the engine's snapshot waits for it (`logWatch`): read at once, each test missed it in one run of 5 under `-race`. The storage stall is held at the engine's config (`servePlayerSeams.engineConfig`), before the engine is built, as a write or an fsync that never returns would hold the start; until B523 a named pipe at the reservation's path held it, in the engine's read, which now refuses anything but a file at once and moves it aside (`TestANamedPipeAtThePlayersFilesDoesNotHoldItsStart`). Every serve test of the player skips on Windows, where `sysfstest` cannot lay out the GO bar's tree (its names hold colons) and the engine refuses to run (no directory fsync); the macOS and Linux legs run them standing in for Linux. A reading of the box is held through `serveOpts.hotplugObserve`, whatever its context, as a read stuck in the kernel is, and the watcher's stop stretched by `hotplugTiming`; a panic on Run's goroutine comes through `servePlayerSeams.runs` (for the session a dead engine leaves, the seam starts one on the stand-in itself, with `nopEvents`, and `playerStandIn.ReleaseAll` closes what the stand-in holds), and New's refusal of the storage through `engineConfig`. Until B523 the pipe's stall was let go by a writer that blocks on a goroutine of its own, never one opened `O_NONBLOCK`, which fails (ENXIO) while no reader has the pipe open (round 2, the Claude API), and the stall test ran in both orders; the seam's hold has one order. **Don't let a serve test reach `alsapcm.Open`, read a line the supervisor logs on its own time without waiting for it, or stall a start with a named pipe, which the engine refuses at once.**
+- **Serve's player tests run the real engine on a stand-in backend, and the real backend only on content it refuses before the device; they wait on an event or a journal line until the test's deadline, and hold a stalled start at the engine-config seam.** `playerStandIn` opens a session's first entry through the resolver serve wired when asked, "opens" and "closes" the DAC, sends the sink notes, can hold a Release the way a call stuck in the kernel is held, and reports its calls to `Wait`; the watcher reads the Pi 5 GO bar tree (`serveOpts.playerTrees`, through `sysfstest`) and hears no kernel. A test of a line the supervisor logs after the engine's snapshot waits for it (`logWatch`): read at once, each test missed it in one run of 5 under `-race`. The storage stall is held at the engine's config (`servePlayerSeams.engineConfig`), before the engine is built, as a write or an fsync that never returns would hold the start; until B523 a named pipe at the reservation's path held it, in the engine's read, which now refuses a non-file reservation at once without moving it aside (`TestANamedPipeAtThePlayersFilesDoesNotHoldItsStart`). Every serve test of the player skips on Windows, where `sysfstest` cannot lay out the GO bar's tree (its names hold colons) and the engine refuses to run (no directory fsync); the macOS and Linux legs run them standing in for Linux. A reading of the box is held through `serveOpts.hotplugObserve`, whatever its context, as a read stuck in the kernel is, and the watcher's stop stretched by `hotplugTiming`; a panic on Run's goroutine comes through `servePlayerSeams.runs` (for the session a dead engine leaves, the seam starts one on the stand-in itself, with `nopEvents`, and `playerStandIn.ReleaseAll` closes what the stand-in holds), and New's refusal of the storage through `engineConfig`. Until B523 the pipe's stall was let go by a writer that blocks on a goroutine of its own, never one opened `O_NONBLOCK`, which fails (ENXIO) while no reader has the pipe open, and the stall test ran in both orders; the seam's hold has one order. **Don't let a serve test reach `alsapcm.Open`, read a line the supervisor logs on its own time without waiting for it, or stall a start with a named pipe, which the engine refuses at once.**
 
 ## Player state owner and queue (B470 PR 4b1)
 
@@ -166,3 +169,543 @@ in `History-rules-cli-serve.md`, under “Backup source opens”.
 ## The player on the LAN (B470 PR 5a)
 
 - **The occurrence heard, and what the backend reports of it (B470 PR 5a3).** OpenHome's Time and Info need the length and the format of what plays, and the engine carried neither. The addition, no existing term changed: `engine.Details` (the decoder's total frames, `format.PCM.Frames`, 0 when the container declares none; the rate; the valid bits; the channels; the codec content inspection chose, FLAC, WAV, AIFF or ALAC from `format.PCM.Container`; lossless) and `engine.DetailsEvents`, an `Events` that also takes `Details(session, occurrence, details)`. It is an optional interface, not a new `Events` method, so the implementers of `Events` that do not take it (`nopEvents` in the tests, the stand-ins) compile and behave as before; the engine's own Events takes it, and so do `bridge output play`'s `playEvents` (which prints the details and forwards them) and the backend rig's `recEvents` (which records them apart from the events, whose sequences other tests read, and forwards them). The backend's reporter, as a crossing makes an occurrence audible, puts `Details` and then `Audible` in the same step's list and sends them from its one goroutine, so the engine's owner applies the details before the occurrence is heard; details that arrive after it (a backend of another order) update the track. The engine keeps the details on the occurrence (`occ.details`) and makes the track as the occurrence is heard (`hear`, which replaced the three assignments of `o.audible`: a session's start and release clear it, `onAudible` sets it): `Snapshot.Track` is the occurrence, its entry, its reference and metadata as the occurrence was handed off (`occ.meta`, the queue's own slice, which nothing writes after the insert), and the details, its accessor copying the metadata. `TrackCount` counts the occurrences heard since the engine started (an occurrence heard again counts nothing); `DetailsCount` the changes of the details of the track heard, nothing heard, or a track whose backend reported none, counting as no details, so a stop is a change and two tracks with equal details are one. Neither the track nor the counts move the generation: a starting session's first sound never does (4b1), and the counts follow every occurrence heard. The track is built from the occurrence, never looked up in the queue; under the engine's policy an entry deleted while it is heard stops being heard in the same step (a release), so the copy is structural, and no test can tell it from a lookup (the 5a3 record's control E3). The length is never taken from the controller's metadata (untrusted, and 1-bit's own `<res duration>` among it) or from the library index (a tag's rounded value): `TestTheEnginesTrackCarriesTheBackendsDetails` inserts metadata claiming 599 s and reads the decoder's 20,000 frames.
+
+
+## Player floor and reset (B524 round 5, 2026-10-24)
+
+**The player floor is monotonic across identities; reset keeps it byte-identical. Only `--discard-floor` drops it after BOTH local seals, renaming a damaged seal entry aside only once `player-initialized` holds a durable seal; its one-shot exemption opens after the floor rename and directory sync, and any floor, UUID or queue evidence consumes it before completion returns. A seal entry that is not a regular file is still a seal: completion keeps it unopened and records the seal in `player-initialized` beside it, only discard replaces it, and no advice says to move a seal record aside. A damaged initialized marker stays present with its exemption spent. Only a start's preflight warns about it, once per serve boot or bind, and only beside a readable, unexhausted floor naming the UUID: move it aside, or keep it when its sealed bit is the only intact seal; never discard that floor. Beside a lost floor nothing warns, and the refusal says not to move it. Player-file errors turn the player off with a reason, never stop serve; seal-repair errors block neither backup nor identity-free restore, only a busy one is deferred, and a failed one's advice names its cause, claiming a recurrence only for a persistent one. Serve boot, start, bind, reset, backup and restore adopt UUID-only upgrades at 2^31 plus a random value below 2^24 on BOTH counters; the bound is counter space, including skipped reservations, never issuance count. Restore adopts first, from its own random source, before taking max(snapshot, live) plus its jump; a snapshot listing no floor and holding none counts as 2^31 + 2^24 from an older writer and is refused from this one, and one holding a floor it does not list is refused as a damaged manifest. Start and backup require a matching UUID/floor; exhausted minting changes neither. Never repair a live floor from a snapshot. Two live boxes, older cross-box snapshots, pre-upgrade counter space reaching 2^31 and loss of both seals remain unsupported.**
+
+Ordinary reset keeps the box's numeric upper bounds across all identities,
+including identities displaced by successful or interrupted restores. It needs
+no UUID history or pending transaction flag: after a durable queue unlink, an
+old UUID can run empty; after the UUID unlink, the checked wrapper mints a new
+UUID and restamps by max. Reset reads the floor strictly, with Lstat deciding
+absence, and never reads the UUID it removes. A directory at the UUID or queue
+path refuses; malformed UUID bytes, inaccessible UUID bytes and dangling UUID
+links can be unlinked safely while the floor remains intact. The command keeps
+its exclusive lock, refuses the lock fallback, probes admin before and after
+confirmation, and lives beside backup and restore, not under output player.
+
+`player-initialized` and `player-floor-discarded.json` are version-1 local
+markers with one bounded, nonblocking reader. Existing entries, including
+unparsable bytes and non-files, count conservatively as initialized or sealed.
+Only a well-formed newer version requires a newer bridge. Ordinary lifecycle
+operations preserve their bytes except when completing a lone seal or consuming
+a sealed exemption on allocation evidence or the first mint after discard. Discard records `sealed:true` in the initialized
+marker as independent evidence, after the seal file is durable and before any
+queue, UUID or floor is removed. It renames an unparsable or non-file marker
+aside before writing a fresh one, a damaged seal entry only once
+`player-initialized` holds a durable seal (round 11). A damaged initialization marker beside a matching floor is kept as evidence;
+its start preflight warns to move it aside, or to keep it when its sealed bit is the only intact seal, without discarding the floor (round 10). A missing floor beside a UUID, queue or initialization marker is
+loss, except the UUID-only upgrade and the unconsumed post-discard exemption
+described below.
+A queue without UUID refuses minting, because an unstamped v1 queue must not
+appear under a new device. Existing valid floors gain the initialization marker
+before a UUID is published. Pristine initialization commits a v2 zero floor,
+then marker, then UUID. The UUID writer fsyncs the parent after rename.
+
+`--discard-floor` durably seals every future incoming identity restore, unlinks
+queue then UUID with directory barriers after BOTH seals are durable, renames even a non-file floor aside
+with a random suffix, then fsyncs the directory. Rerunning completes any
+interruption. After the queue and UUID unlinks, the floor rename and its directory sync, discard records
+`sealed:true,minted:false` in the initialization marker. This permits one fresh
+floor. The next mint durably records `sealed:true,minted:true` after the floor
+and before UUID publication. Ordinary reset preserves that consumed state;
+losing the floor afterwards refuses start. A retry of an interrupted mint with
+a durable floor reestablishes the marker barrier before publishing a UUID. A sealed box still restores ordinary
+data from a snapshot copy without UUID and floor; an identity-bearing restore
+refuses before restoring data and explains that remedy; completing a lone local
+seal and adopting a UUID-only destination may precede snapshot writes. The seal never leaves
+through backup. Ordinary reset does not free exhausted counter range.
+
+**A snapshot captures UUID then floor through bounded Windows sharing retry, refuses a captured UUID without a readable floor, and records `playerFloorRequired` in its manifest. Schema stays 2; local initialization and discard markers never travel in backups. Restore refuses that writer's UUID without its listed floor, refuses a floor the snapshot holds but its manifest does not list as a damaged manifest, and bounds an older writer's floorless snapshot at 2^31 + 2^24, completes a lone local seal, checks the seal, adopts a UUID-only destination from restore's own random source (the adoption's draw, then the jump's), then checks the live floor and both exhaustion bounds before restoring any data, then writes max(snapshot, live) plus the jump, ensures the initialization marker, durably clears a replaced identity's queue and writes the UUID through its own durable writer.**
+
+The engine independently refuses unreadable or corrupt reservation data instead
+of moving it aside and starting at zero. Queue-corruption recovery is separate.
+A non-file is refused without waiting and names moving it aside, rather than
+sending the operator to an ordinary reset that also refuses the floor. Restore
+preserves the existing max-and-jump and queue ordering, without history hooks.
+A listed snapshot floor still must parse and name its captured identity; older
+unmarked snapshot compatibility remains subject to the documented migration
+margin. The exhausted-destination remedy is a snapshot copy without UUID and
+floor, preserving the box's identity, or explicit discard with its permanent
+seal. Local files cannot detect full data-directory rollback or erasure.
+
+Tests cover X at 2e9 → restore Y → reset → old X or Y, including an interrupted
+UUID commit followed by a refused start, reset and a real engine restart, every discard crash point,
+marker barrier failures, initialization order, byte-identical ordinary reset,
+seal and lost-floor preflight with no writes, backup without a floor, and both
+serve and bind through the shared wrapper. Negative controls and gate outputs
+are in the round-five scratch report. The design replaces the history model
+after four rounds failed to converge: remembering names was unnecessary while
+preserving their shared numeric bound supplies the same-box proof directly.
+
+### Round 6: pairing, recovery and the upgrade boundary
+
+Before any mint write, the floor must leave room for the engine's skipped
+4,096-value block and its first value in BOTH counters (`Reservation.Exhausted`,
+using `startCounter`). Exhaustion advises discard and leaves the floor byte
+identical, with no UUID written. A local seal may be completed or consumed before that preflight; a UUID-only
+restore destination is adopted before its live-bound check. Restore's stricter bound additionally
+reserves its largest jump and 2^24 values of running room.
+
+A current UUID is a regular directory entry by Lstat, never a symlink, and the
+floor must name exactly it. A successful mint restamps the floor before writing
+the UUID; restore likewise writes its named floor before UUID. An interrupted
+restore can leave mismatched names: start and backup refuse, and ordinary reset
+keeps both numeric bounds while allowing the next mint to restamp them. A live
+version-1 reservation has no UUID and cannot establish this pairing: ordinary
+reset retains its counters and the next mint writes version 2. Historical
+version-1 snapshot floors remain accepted as migration inputs; restore names
+the new live floor before publishing that snapshot's identity.
+
+Backup captures UUID first, then reads the floor through the bounded sharing
+retry and requires the same name. A concurrent discard and mint cannot publish
+an old UUID with the new identity's zero floor. A missing floor names discard
+and its seal consequence while Lstat still finds the UUID; only a UUID that
+vanished between captures receives retry advice. Restore's floor-loss error
+also explains the snapshot-copy remedy and discard's permanent consequence.
+
+A UUID-only upgrade is a valid regular UUID with no floor, queue, initialization
+marker or seal. Serve boot, start, bind, reset, backup and restore adopt it without sealing.
+Start, bind and backup retain the UUID; reset adopts its floor before removing
+the UUID. Both counters start at 2^31 plus a random value below 2^24, followed
+by the durable initialization marker. A UUID-only restore destination has an
+unknown history, so restore adopts it first, then takes the larger of that
+new floor and the snapshot bound before adding its smaller jump. Serve performs this adoption under server.lock before TLS
+and live backups, even when playback is disabled, without minting on a pristine
+box. Backup takes that lock for adoption and rechecks the captured UUID;
+if adoption is busy, stop the service and run the backup again. It also takes
+the lock for seal completion: a busy completion is logged and left to the next
+lifecycle operation, and any other failure is logged with its error and the
+advice to restore write access, since it recurs at the next serve boot or
+start (round 10); backup still checks the captured pair.
+A main-era engine can hand out token 4097 without saving a queue, so losing ONLY
+its floor looks identical. The adoption bound is pre-upgrade counter space below
+2^31, including skipped reservations; a count of values handed out cannot bound
+that space. Reaching the upper half before floor loss remains unsupported.
+Additional lifecycle evidence makes an absent floor a loss, except immediately
+after a completed explicit discard and before its first mint.
+
+### Round 7: one-shot exemption and completing a lone seal
+
+A seal file without the initialized marker's seal bit is completed by the next
+lifecycle operation, after verifying the first record's durability. Start, reset,
+restore and serve boot hold the lifecycle lock; backup takes it for this repair,
+so it cannot overwrite a concurrently minted bit. Completion preserves a consumed
+bit and marks it consumed when UUID, queue or floor evidence already exists.
+Malformed initialized records beside a valid seal stay untouched for conservative
+floor-loss checks; completion verifies the seal and returns. With a readable
+floor naming the UUID they start, with a warning to move the marker aside.
+Their exemption is spent; later floor loss still refuses. Newer records are never rewritten. Restore may complete the local seal before refusing an
+identity import, but writes no snapshot data. Ordinary floor and exhaustion
+refusals without an incomplete seal remain free of writes.
+
+The real-engine regression starts from main's initial zero reservation without
+markers, reads token 4097 without creating a queue, stops, deletes only the floor,
+adopts, and starts again above the jumped floor. Another runs discard, mint,
+engine allocation, ordinary reset and floor-only loss: the next start refuses.
+Barrier regressions pin floor → consumed marker → UUID and the first seal's
+barrier before the second record. The disabled-player boot and live-backup tests
+cover the upgrade while server.lock is held.
+
+The discard evidence is duplicated in the seal and initialized marker rather
+than added to reservation JSON. Every floor writer, including the engine,
+leaves these independent files untouched. After both seals are established, losing, truncating or replacing any
+ONE file cannot reopen identity imports, before a fresh start or after engine
+reservation writes. The smallest deletion set that CAN reopen imports is both
+`player-floor-discarded.json` and `player-initialized`, after a fresh identity has
+a readable floor (or immediately after discard before a new identity exists).
+This two-file loss, full storage rollback, two live holders of one UUID, and
+non-latest cross-box snapshots are documented limits, not guaranteed recovery.
+The new single-file-loss matrix, second-seal barrier test and recovery tests
+pin the supported boundary. Both markers remain local and excluded from backup.
+
+
+### Round 8: counter-space bound and player-only failures
+
+A main-era start skips a 4,096-value block and reserves the next block, even
+without edits or a saved queue. After 4,097 starts it has published only 4,097
+tokens, yet the highest is 33,558,529 (8192 × 4096 + 4097). The old adoption
+jump from zero could fall below those values for every draw. Adoption now
+sets BOTH counters to 2^31 + r, with 0 <= r < 2^24. It covers pre-upgrade
+counter space strictly below 2^31, including skipped and reserved values;
+it cannot establish an absent floor's actual history. At the largest draw,
+2,130,706,432 values remain before uint32 exhaustion, comfortably past the
+engine's required 4,096 skipped values plus its first value. Restore still
+uses max(snapshot, live) + 2^24 + r, after adopting a UUID-only destination
+as described in round 9; such a destination has no known bound beforehand.
+`TestAdoptionBoundsReservedSpaceAcross4097Restarts` runs the real engine for
+every start, deletes only the floor, adopts, and checks both first values.
+
+Completion consumes a valid sealed marker lacking minted whenever ANY floor,
+UUID or queue entry exists, even if the other seal file was lost. It does so
+before returning, including reset and backup; backup locks before mutating.
+This covers old discard markers whose writers never recorded minted. A fresh
+discard with no evidence keeps its one-shot exemption. Explicit discard writes
+sealed:true,minted:false only after queue and UUID unlink barriers, the floor
+rename and its directory sync; a crash before that write is conservative.
+`TestDiscardExemptionWaitsForFloorRenameBarrier` pins this final barrier.
+
+A present invalid initialization marker beside a valid seal is not a lone
+seal. Completion verifies the first seal's barrier and leaves the damaged
+marker untouched. With a matching readable floor, start accepts it and warns
+to move it aside; a later floor loss refuses. Serve records other adoption,
+completion or preflight errors as a player-off plan and keeps booting, even
+with playback disabled. Backup logs a failed local repair and still applies
+its strict UUID/floor capture checks. Restore retains a completion error only
+for an identity import, so an identity-free snapshot still restores ordinary
+data. Neither path copies local markers. `TestDamagedSealedMarkerKeepsBackupAndIdentityFreeRestore`,
+`TestSealedExemptionConsumedByEveryEvidenceAndLifecycle`,
+`TestCompletionErrorDoesNotBlockBackupOrIdentityFreeRestore`,
+`TestPlayerFileErrorsDoNotStopServeBeforeTLS` and
+`TestServeKeepsLibraryWithDamagedSealedPlayerMarker` pin these boundaries.
+
+
+### Round 9: restore adopts before its jump; damaged markers preserve service
+
+A UUID-only destination may have run a main-era engine whose sole floor was lost.
+Restore calls the shared adoption path under its existing exclusive lock before
+reading the live bound. Adoption writes both counters at 2^31 + r, then the
+initialization marker, with the same durability order as start. Only then does
+restore add 2^24 + r to max(snapshot, adopted live). The regression runs 8,193
+real engine starts without markers or queue edits, captures the first 8,192
+reservation, deletes only the floor, and restores before upgraded service boot.
+Both first values exceed every token published before restore.
+
+A damaged initialized marker beside a floor naming the current UUID is accepted
+by every lifecycle operation. It stays present and grants no missing-floor
+exemption. The warning names player-initialized and advises moving it aside;
+start re-ensures it, and completion beside a valid seal records sealed and minted.
+A later floor loss refuses. Missing or unreadable floors retain discard advice.
+Backup's busy-stop-and-retry advice applies to adoption alone; busy or failed seal
+completion is logged and left to the next lifecycle operation (round 10 below: only
+a busy completion is deferred).
+
+### Round 10: floorless snapshots, restore's draws, busy completion and one warning
+
+A snapshot whose manifest lists no floor beside its player UUID (the unmarked
+case of `snapshotReservationFloor`) cannot bound what that identity handed out.
+This bridge never writes one with a readable UUID: backup refuses a missing
+floor unless the box is in the UUID-only state, which it adopts first and then
+captures, and every manifest it writes records `playerFloorRequired`. Restore
+refuses such a snapshot of this bridge's making, whose floor was stripped, with
+the snapshot-copy remedy before any write. One from an older writer, whose
+manifest has no such record (`bridgeVersion` is the build's stamped version and
+cannot tell the two apart), takes the adoption ceiling, 2^31 + 2^24, as its
+bound. One helper, `floorlessSnapshotBound`, applies both, right after
+`snapshotReservationFloor` and only when nothing is listed; `marked` stays
+false, so the missing-mark warning still fires, and a listed floor that is
+missing or corrupt keeps its refusal. Restore then writes max(ceiling, live)
++ 2^24 + r. The 2^24 term covers a source that upgraded and adopted after its
+snapshot: adopted at the largest draw and started once, its durable floor is
+2,164,273,151 (2^31 + 2^24 + 12,287, as measured), below the restored
+2^31 + 2^25. Codex's 8,193-start main-era
+sequence now restores at exactly 2^31 + 2^25 with draw zero and
+2^31 + 2^25 + 2^24 - 1 with the largest; it restored at 2^24 before.
+
+Restore adopts a UUID-only destination with its own random source
+(`RestoreOptions.Random`, crypto/rand unless a test injects one), the
+adoption's three bytes before the jump's: six there, three elsewhere. Every
+other adopter keeps crypto/rand. The adoption draws before it writes, so a
+source that fails at once leaves the UUID-only state untouched; one that
+fails after the adoption's draw leaves the adopted floor durable and no
+snapshot data, and a retry jumps from that floor.
+
+Only a busy server.lock defers a backup's seal completion, which backup logs as
+deferred to the next lifecycle operation. Any other failure, such as a data
+directory backup cannot write, recurs at the next serve boot or start: backup
+logs it as a failure, with its error and the advice to restore write access to
+the data directory, or a marker refusal's own remedy. Busy adoption still
+refuses the backup and says to stop the service and run it again.
+
+Marker reads log nothing. `CheckPlayerStart` is the one place that warns, once
+per call: serve boot's preflight, once per boot, covering the player that boot
+starts, and bind's. The minter and every other lifecycle operation preflight
+silently, and no process state hides a later boot's warning. The move-aside
+warning needs a readable floor that names the current UUID and is not
+exhausted, beside a present, invalid marker. When that marker reads
+`sealed:true` and no valid `player-floor-discarded.json` exists, its sealed bit
+is the only intact seal: moved aside, the next start would write an unsealed
+marker and reopen identity restores, so the warning names the seal and says to
+keep it. The player runs as it is; `bridge reset-player --discard-floor`
+rewrites both records at the cost of the identity and its queue. Beside a lost
+floor nothing warns, and every floor-loss refusal with the marker present says
+`do not move player-initialized aside`.
+
+`TestThisBridgeNeverCapturesAFloorlessIdentity`, `TestThisBridgesSnapshotWithoutItsFloorIsRefused`,
+`TestLegacyFloorlessSnapshotRestoresAboveTheAdoptionCeiling`, `TestLegacyCeilingCoversASourceThatAdoptedAfterItsSnapshot`,
+`TestLegacyCeilingYieldsToEachHigherLiveBound`, `TestLegacyFloorlessSnapshotOntoAUUIDOnlyBox`,
+`TestALegacySnapshotsListedFloorStillMustRead`, `TestRestoreAdoptsWithItsOwnRandomnessFirst`,
+`TestRestoreAdoptionDrawFailureWritesNothing`, `TestRestoreAdoptionDrawThenFailureKeepsTheAdoptedFloor`,
+`TestBusySealCompletionIsLeftToTheNextLifecycleOperation`, `TestFailedSealCompletionKeepsItsErrorAndNamesWriteAccess`,
+`TestBusyAdoptionStillAsksToStopTheService`, `TestFloorLossRefusalsNeverAdviseMovingTheMarker`,
+`TestMoveAsideWarningOncePerStart`, `TestMoveAsideAdviceNeedsTheFloorToNameTheUUID`,
+`TestADamagedMarkerHoldingTheOnlySealIsKept`, `TestServeBootRefusesALostFloorWithoutTheMoveAsideWarning`,
+`TestServeWarnsOnceEachBootBesideADamagedMarker` and `TestBindWarnsOnceBesideADamagedMarker` pin these boundaries.
+
+### Round 11: an unlisted floor, a non-file seal and completion advice by cause
+
+Every writer that captures the floor lists it beside the UUID, those from
+before the `playerFloorRequired` record included (main since 5a0, and round
+9's), so a snapshot that holds `player-ids.json` and does not list it has a
+damaged file list. On round 10's code one bad byte in that entry
+(`player-ids.json` read as `player-ids.jsoo`) sent such a snapshot down the
+older writer's path, and its intact floor gave way to the adoption ceiling.
+Codex's sequence, run through `bridge restore`: a box adopted at 2^31 starts
+4,097 times, is captured by such a writer, has that entry corrupted and is
+restored onto a pristine box at draw zero; the floor came out at
+2,181,038,080, and the restored player's first startup token, 2,181,042,177,
+was the source's last. When the manifest does not list the floor, restore now
+Lstats `<snapshot>/player-ids.json`, never opening or following it
+(`unlistedFloorError`). An entry of any kind refuses before anything
+snapshot-derived is written, the adoption included, with the snapshot-copy
+remedy or a newer snapshot of this box, never just another one. Only
+ErrNotExist is a genuine absence, which `floorlessSnapshotBound` then treats
+as round 10 does; any other Lstat error refuses with itself. Restore's own seal
+completion still runs first: it adds local seal evidence only.
+
+The manifest's word for a file's absence is taken in three other places, none
+of which can weaken the floor. An unlisted `player-uuid` makes the restore
+identity-free: the box keeps its own identity and floor byte for byte, and no
+identity the snapshot held comes back. An unlisted console account, library,
+token store, TLS pair, config or harvest file is not restored and holds no
+part of the floor. Listing, pruning and the restore preflight read manifests
+for display, retention and schema only.
+
+A seal entry that is not a regular file, a directory, a symbolic link or a
+named pipe, is still a seal, as `playerRestoresSealed` already counted it.
+`ensurePlayerMarker` refused one with "is not a regular file: move it aside",
+which start, a backup's completion and every adoption printed, and following
+that advice dropped the box's only seal record. It now keeps such an entry
+under either marker's name, never opening or following it (a sibling's
+barrier), so completion goes on to record the seal in `player-initialized`
+beside it: twice recorded. Only discard replaces it. Beside such an entry a
+damaged marker reading `sealed:true` gets the move-aside advice, since start
+seals the marker again there; beside a missing seal file, or one whose bytes do
+not read, the advice still says to keep the marker. Round 10's reason, that
+the next start would write an unsealed marker, holds beside a missing seal
+file; beside one whose bytes do not read, start seals the marker again too, and
+the advice keeps the intact record either way. No move-aside or remove text in
+`internal/backup` or `cmd/bridge` can now be printed for
+`player-floor-discarded.json`, or for `player-initialized` holding the only
+seal: the move-aside warning is given only where the marker is not the only
+seal record, and the other texts concern `player-uuid`, `player-queue.json`,
+`player-ids.json` or a copy of a snapshot.
+
+Discard repairs a damaged seal entry by renaming it aside and writing a fresh
+one, and it repaired the seal file first: with `player-initialized` gone, a
+crash between that rename and the replacement left no seal record. With the
+seal entry damaged, discard now seals `player-initialized` first, so each
+record is renamed aside only while the other holds a durable seal.
+
+A failed seal completion's advice names its cause and claims no more than it
+supports. Each step tags its error where it happens with what it was reading or
+writing and the access that needed (`accessError`): an Lstat and a barrier
+need the data directory, a marker's read needs that file, a marker's write
+needs write access to the data directory, and opening server.lock needs that
+file. A permission error names that path and access, and says serve boot and
+start fail on it too when run as this user, since a CLI backup need not run as
+serve does; a read-only data directory says so; a marker refusal keeps its own
+remedy; any other error, an interrupted or refused lock or an I/O error, keeps
+only its error. `fsutil.TryLock` maps flock's EWOULDBLOCK, the same Errno as
+EAGAIN on every unix it builds for, and Windows' `ERROR_LOCK_VIOLATION` to
+`ErrLocked`, nothing else, and retries EINTR inside; the mapping is a pure
+function now, `lockedErr`, pinned per platform.
+
+Round 7's test that required a non-regular lone seal to refuse startup is
+replaced: `TestANonFileLoneSealIsCompletedAroundIt` completes the seal around
+it, spent on a box minted before and open as the one-shot exemption on a box
+with no allocation evidence. Three older tests that made their completion
+error from a directory seal now use one a newer bridge wrote, and restore's
+own completion may write `player-initialized` beside a dangling seal before
+its refusal. `TestRestoreRefusesAFloorItsManifestDoesNotList`,
+`TestRestoreRefusesAnUnlistedFloorEntryWithoutFollowingIt`,
+`TestAnUnlistedFloorTheSnapshotDoesNotHoldIsStillAbsent`,
+`TestADamagedManifestRefusesBeforeAdoptingTheDestination`,
+`TestARefusedDamagedManifestOnlyCompletesTheLocalSeal`,
+`TestRestoreKeepsTheBoxIdentityWhenItsUUIDEntryIsDamaged`,
+`TestAnUnlistedFloorRefusesUnlessItIsGenuinelyAbsent`,
+`TestANonFileSealIsKeptAndRecordedTwice`, `TestANonFileSealIsCompletedByABackup`,
+`TestAFIFOSealIsKeptWithoutOpeningIt`, `TestMoveAsideAdviceCountsANonFileSealAsASeal`,
+`TestDiscardRecordsASecondSealBeforeRenamingADamagedOne`,
+`TestDiscardFloorRepairsANonFileSealFromTheStateItself`,
+`TestSealCompletionAdviceClaimsNothingForATransientError`,
+`TestSealCompletionAdviceNamesTheReadItLacked`,
+`TestBusySealCompletionAcrossProcesses` and `TestLockedErrMapsOnlyAHeldLock`
+pin these boundaries.
+
+### Round 12: one remedy for a directory failure, a file's own access for a file
+
+Round 11's advice named the access a step needed, and three kinds of failure
+named one the user already had. An Lstat, which needs the directory's search
+access, said read; the marker write's directory sync, in a directory the user
+may write and search but not read, said write; and the lock file's open, for
+reading and writing, said write access to `server.lock`, also where the file
+was missing and the open had failed creating it. A remedy is advice the
+operator follows, not a diagnosis, so every failure at the data directory
+itself now takes one remedy that always suffices (`directoryAccess`): on unix,
+restore read, write and search (execute) access to the data directory and each
+directory above it, or clear an immutable flag or ACL on it; on Windows,
+restore full control of the data directory. These failures are an entry's
+Lstat (in `markerEntry`, `playerEntryNotAFile`, `playerAllocationEvidence` and
+the lock file's check), the barrier, which opens the directory to sync it and
+creates nothing, and a durable write's temporary file, rename and directory
+sync. `ensurePlayerMarker` now takes the entry's kind from the one Lstat that
+read the marker (`markerEntry`), so it has no Lstat of its own.
+
+A file's own open names the file (`fileAccess`). A marker's open or read
+needs read access to it; an EPERM rather than an EACCES adds "or clear an
+immutable flag or ACL on it", which read access alone does not undo. The lock
+file is opened for reading and writing and created when missing, so a
+permission failure there is told apart by an Lstat through the data
+directory's root, which follows nothing outside it (`lockFileAccess`). A
+regular file needs read and write access to it, with the same EPERM addition.
+No entry, a link the root resolves to nothing, a root that will not open and
+an Lstat that fails take the directory remedy: the open failed creating the
+file, or never reached it. Any other entry keeps the lock file's write remedy.
+The claim that serve boot and start fail on it too holds when they run as this
+user, as before.
+
+On the owner's Mac a backup's own lock open needs to read the data directory
+(`os.OpenRoot`), so in a 0300 directory it fails there, with the directory
+remedy, before completion reaches the seal's barrier; the barrier case drives
+the completion itself. The identity-free restore of a snapshot whose
+`player-uuid` entry is damaged is now pinned to its one outcome: it completes,
+and the box's identity and floor stay byte for byte. Round 10's failed-write
+case now asserts the directory remedy.
+`TestALockFileThisUserCannotReadNamesReadAndWriteAccess`,
+`TestALockFileTheOpenCouldNotCreateNamesTheDirectory`,
+`TestAnUnreadableDataDirectoryFailsAtTheSealBarrier`,
+`TestAnUnreadableDataDirectoryFailsAtTheMarkerWrite`,
+`TestADataDirectoryThisUserCannotSearchFailsAtTheFirstLstat`,
+`TestEveryDirectoryStepNamesTheDirectory`,
+`TestAMarkerOpenRefusedAsNotPermittedNamesTheFlag`,
+`TestAnImmutableLockFileNamesTheFlag`, `TestAnyOtherLockEntryKeepsItsAdvice`,
+`TestTheDirectoryRemedyPerPlatform` and
+`TestRestoreKeepsTheBoxIdentityWhenItsUUIDEntryIsDamaged` pin these
+boundaries.
+
+### Round 13: Windows, one union for a named entry, and busy only for a held lock
+
+PR #1346's first CI run, at 032934fe, was B524's first on Windows, and eleven
+cases failed there; nomos, a Windows 11 host on Go 1.27.3, failed the same
+eleven at 9a21f8d2. None was a fault of what Windows production does.
+
+- Four tests, seven of the eleven with their subtests, built a fixture with
+  the durable writer, which Windows production refuses: the player's minter
+  writes its floor durably (`engine.WriteReservation`) and its identity writer
+  (`config.WritePlayerUUIDFile`) ends in a directory probe, and with no
+  directory barrier both return `atomicwrite.ErrNoDirectoryBarrier`.
+  `TestARestoreRefusesAPlayerUUIDThatIsNotOneUUIDAndSaysWhatToDo` seeds its
+  identities with plain writes on Windows, and
+  `TestSnapshotRefusesAReservationStillHeldOrCancelled` seeds its UUID with
+  one, since a backup reads the identity there all the same; the historical
+  restores keep the writer of 71af3f26, which returned once its rename landed.
+  What each asserts is unchanged, and Windows proceeds where they assert it: a
+  player-uuid that is not one UUID is refused before any write
+  (`snapshotPlayerUUID`), an identity-free restore writes no player state, and
+  a backup's floor read retries a held file.
+- `TestAnUnlistedFloorRefusesUnlessItIsGenuinelyAbsent` used ENOTDIR as an
+  Lstat error that says neither absent nor present. On Windows
+  `syscall.ENOTDIR` is ERROR_PATH_NOT_FOUND, which reads as no entry; it uses
+  ERROR_SHARING_VIOLATION there.
+- `TestBackupNeverPairsAcrossDiscard` and `TestBackupRetryOnlyWhenUUIDVanished`
+  changed the live identity from the snapshot copy's rename, while the copy
+  still held the live player-uuid open without delete sharing. Windows
+  refused the removal, the hook returned that error, and the rename's retry
+  ran again on a temporary file the first attempt had already renamed: "cannot
+  find the file specified". The change now runs from a seam
+  (`afterIdentityCopy`) once the copy has closed its source, exactly once, and
+  the pairing assertions stand. Production retries a rename after its
+  temporary file was consumed only where a rename lands and still reports
+  failure, as a network share whose reply is lost could; that is not changed
+  here.
+
+A permission failure of a step that names an entry, a marker's read or durable
+write or the open or lock of `server.lock`, now takes one union rather than a
+classification by entry (`entryAccess`, `entryRemedy`). Round 12's
+classification still missed an immutable or append-only flag on the marker a
+rename replaces, a link chain to a file that refuses reading, a dangling link
+into a directory that refuses writing, and a Windows ACL that denies reading
+the lock file. On unix the union is the access the step needed on the entry
+(read for a marker's read, read and write for `server.lock`), the directory's
+remedy, any immutable or append-only flag or ACL on the entry and on what it
+links to cleared or a link at it replaced with a regular file, and in a sticky
+directory the entry owned or the sticky bit cleared. On Windows it is full
+control of the data directory and of the entry, its read-only attribute
+cleared or a link at it replaced with a regular file, and any program holding
+it open closed. A failure at the data directory alone, an Lstat or the
+barrier, keeps the directory's remedy, which now says immutable or append-only
+flag. The lock file's per-entry classification and the EPERM branch are gone.
+A `server.lock` that is a link leading out of the data directory is no
+permission failure: the data directory's root refuses it unfollowed
+(`path escapes from parent`), and a seal completion logs it, or an adoption
+refuses the backup with it, with that error alone, as in round 12; round 12's
+review had taken it for followed.
+
+A backup's adoption takes `server.lock` through the seal completion's open and
+lock seam (`openSealLock`, `tryLock`), and only a lock another open holds
+(`fsutil.ErrLocked`) makes it busy, with its advice to stop the service; any
+other failure to open or take the lock refuses the backup with its own error,
+and the lock file's union for a permission error (`adoptionFailed`). The seal
+completion's lock refused for permission carries the same union.
+
+On nomos the SSH session holds an administrator's token with SeBackupPrivilege
+and SeRestorePrivilege enabled, and Go opens a file with
+FILE_FLAG_BACKUP_SEMANTICS, which then reads through any deny entry: the
+deny-read case drops both privileges for its duration.
+`TestOnlyAHeldLockMakesAdoptionBusy`,
+`TestALockRefusedForPermissionNamesTheLockFile`,
+`TestTheEntryRemedyPerPlatform`,
+`TestALockFileLinkNamesTheEntryAndWhatItLinksTo`,
+`TestAProtectedMarkerNamesTheMarker`,
+`TestALockFileLinkLeadingOutIsNeverFollowed` and
+`TestALockFileDeniedReadingNamesTheEntry` pin these boundaries, beside round
+12's permission cases, which now assert the union.
+
+### Round 14: a TMPDIR on tmpfs, and no identity left by a refused start
+
+PR #1346's CI run on Ubuntu 26.04, where `/tmp` is tmpfs, failed
+`TestARestoredIdentityHandsOutValuesPastItsSnapshot` at its seed write.
+Round 5 made `config.WritePlayerUUIDFile` end with `atomicwrite.ProbeDurable`,
+which refuses a root on storage that does not outlive a reboot
+(`atomicwrite.ErrVolatile`), and the write came before the test's skip.
+
+On any host, a test-only `init` that makes the medium check answer volatile
+for a whole test binary stands in for that TMPDIR. Run that way at 51d2900b,
+`cmd/bridge` failed 35 tests and `internal/player/openhome` one; main at
+9e7b2675 failed 27 in `cmd/bridge` and none in openhome, where the test
+skipped. Nine discovery and OpenHome serve tests that wait for a player that
+cannot start were left out of both runs; with a short deadline they fail alike
+on both. Twelve tests are B524's to fix: ten failed on B524 alone, and two
+more failed on both but, on B524, at their own identity write. Each writes the
+player's identity, floor or marker in its temporary directory, through a
+fixture or the bind, serve start or restore it drives, and B524's writers
+refuse that storage. Each now answers the medium check as a disk does while it
+runs (`persistentMedium` in `cmd/bridge`, the seam inline in openhome). The
+other 24 fail on main too: they need the engine running, and the engine
+refuses volatile storage there as well. A TMPDIR on disk (the workflow's
+PR #1349) is their fix, not this round's.
+
+`TestARestoredIdentityHandsOutValuesPastItsSnapshot` had in fact been skipping
+on every host since it reached B524 with main's merge at 032934fe. It seeded a
+bare `player-uuid`, and since round 5 the engine refuses an identity whose
+floor is missing ("player floor is missing"). It now mints its source as
+serve's start does (`backup.EnsurePlayerUUID`: the floor, the marker, then the
+UUID). It fails, never skips, on any refusal: the mint has just probed the
+same directory, so a barrier or mount refusal from the engine afterwards would
+be a regression, not the host (round 14's review, Claude Low; the narrower
+skip it first had is gone).
+
+In production, a refused probe leaves no identity behind.
+`config.WritePlayerUUIDFile` does rename the file into place before it probes.
+But serve's start and bind mint through `backup.EnsurePlayerUUID`, which
+writes the floor and the marker through the strict writer first, and that
+writer refuses volatile storage before it creates anything; the UUID comes
+last. A start on an identity that is already there probes it at its marker
+(`ensurePlayerMarker`), and the engine probes again as it starts.
+`config.EnsurePlayerUUID` does leave its file when its probe refuses, and a
+second call returns it unprobed, but nothing in production calls it.
+`TestAMintRefusedForVolatileStorageLeavesNoIdentity` and
+`TestServeOnVolatileStorageRefusesEveryStartAndKeepsNoIdentity` pin this.
