@@ -2111,3 +2111,281 @@ Windows-runner check, distinct from portable race-test results.
   message, the unchanged source pipe and the absence of a snapshot directory.
   With the plain open restored both tests fail after five seconds; the
   fixture then releases and joins the blocked snapshot.
+
+## bridge.yaml's lock in the CLI and serve (backlog B506, 2026-10-24)
+
+- **A command that takes both the data dir's lock and bridge.yaml's takes
+  the data dir's first (`holdDataDirForMutation`, `lockServeDataDir`) and
+  bridge.yaml's inside it: bind, restore (in `backup.RestoreWithOptions`,
+  before its first write, to its end, bridge.yaml written through the
+  turn's `SaveBytes`) and serve; library add and remove (`config.Edit`),
+  init (`saveInitConfig`) and serve's seed (`writeAutoInitConfig`) take
+  bridge.yaml's alone, each deciding on what its turn found
+  (`FileLock.LoadFound`, `Found`); a restore compares the config with the
+  bytes `bridge restore` read before its lock and its prompt, and with what
+  its turn found, before its first write, refusing a change, or a name a
+  link repointed since (`config.ErrNameMoved`), with nothing restored, and a
+  refusal of either at bridge.yaml's own write names what it restored (a
+  replaced identity's queue as let go only when the restore removed one)
+  and says running it again finishes it; serve and init keep the config's
+  name as written (`fsutil.AbsAsWritten`), serve's boot read resolves it
+  before each read, reads the file it resolved, and resolves it again after
+  (`loadServeConfigFile`, `config.LoadFileAt`), and tells its holder that
+  file, or no file where no resolution could follow the name, its console
+  then refusing every save until a restart, and init and the seed refuse a
+  link to no file before anything is written; a save the turn refuses
+  before a rename (`config.ErrChangedInTurn`) writes nothing, the seed then
+  saying it wrote nothing and serve loading what appeared, init and bind
+  saying the file changed, bind a failed read of its own comparison as that
+  read's failure, and a turn whose name now opens another file than it
+  locked (`config.ErrNameMoved`, at the lock after its read, at a rename
+  after its comparisons, or at a check after its read) writes nothing, every
+  CLI writer saying to run it again** (2026-10-24, backlog B506, five
+  rounds; the lock itself is config-lifecycle.md's).
+  Serve fixes the order: it holds the data dir's
+  lock for its whole life (`dataDirHold`) and takes bridge.yaml's for each
+  console save, so the data dir's is necessarily the outer one, and bind and
+  restore keep it: `bridge output dac bind` takes bridge.yaml's after
+  `holdDataDirForMutation` and before its read under the locks, and gives it
+  back after its `SaveIf`, before it makes the player's UUID, which is not
+  the config; `bridge restore` holds the data dir's for its whole run (the
+  prompt included) and `RestoreWithOptions` takes bridge.yaml's, when the
+  snapshot holds the file and the caller maps it, before the player's
+  reservation and identity and the copies, holding it until it returns, so a
+  config another writer holds refuses the restore with nothing restored
+  (`TestARestoreRefusedTheLockRestoresNothing`: a track added after the
+  snapshot is still there). Since the second round the snapshot's
+  bridge.yaml is written in that turn, through `FileLock.SaveBytes`, staged
+  where the config's name resolves and renamed in only over the file the
+  turn found: `copyFile` staged it in the directory `filepath.Dir` cleaned
+  the name to, and renamed it over whatever an edit had put there meanwhile
+  (`TestARestoreLeavesAConfigChangedInItsTurn`, red before: the snapshot's
+  copy over the edit).
+
+  **A refused restore restores nothing, a late one says what it did, and
+  running it again finishes it** (the third round: the Claude review's
+  Medium, and Codex's review of the brief). `bridge restore` reads the
+  config before it takes the data dir's lock and asks for confirmation,
+  and works out every target from that read (its data dir, its TLS pair);
+  a library add, an init or an edit can change the config while it asks,
+  since bridge.yaml's lock is not held at the prompt, and the second round's
+  restore compared only with what its own turn found, after that change, and
+  restored into the data dir the config no longer named. Now `restoreCmd`
+  hands the restore the bytes it read (`loadCLIConfigFile`,
+  `RestoreOptions.ConfigAsRead`), the restore takes bridge.yaml's turn
+  whenever it has them (a snapshot without bridge.yaml included), and once it
+  has read the snapshot, before its first write (the player's reservation),
+  `configStillAsRead` asks whether the turn found exactly those bytes and
+  whether the file, read again, is still the one the turn found: a config
+  changed since either refuses the restore with nothing restored ("… is not
+  the config this restore read when it worked out where each file goes:
+  another writer changed it since …, so nothing was restored: run the
+  restore again, to restore into what the config names now"). A writer that
+  takes no turns can still change the file while the files before
+  bridge.yaml are copied; the refusal at bridge.yaml's own write then names
+  the files restored before it, the player's identity with its reservation
+  among them (and the queue it let go, which until the fourth round it named
+  whether or not the restore had let one go: below), and those not
+  restored, and says that running the restore again finishes it, putting
+  every file the snapshot holds back, bridge.yaml over that change
+  (`partialRestoreError`); it said "nothing was written" until then. The copies keep their order. Red before:
+  `TestARestoreRefusedBeforeItsFirstWriteRestoresNothing` (an edit landed
+  just before the first write: every file before bridge.yaml restored, the
+  reservation, the identity and the queue included, each live file holding
+  bytes the snapshot's differ from), `TestARestoreRefusesAConfigItsTargetsDidNotComeFrom`
+  (the config changed since its caller read it, with a snapshot that carries
+  bridge.yaml and one that does not: restored), the late refusal's words in
+  `TestARestoreLeavesAConfigChangedInItsTurn` (which then runs the restore
+  again and finds every target as the snapshot has it), and in `cmd/bridge`
+  `TestARestoreRefusesAConfigChangedWhileItAsked` (its data dir, and its TLS
+  pair, changed at the prompt: the database replaced).
+
+  Nothing takes the data dir's lock while it holds bridge.yaml's. The data dir's lock is a try that never waits and
+  bridge.yaml's waits at most `config.LockWait`, so no order could block
+  forever; the fixed one keeps it so if the data dir's ever waits, and keeps
+  a command from holding bridge.yaml's, and every writer behind it, while it
+  is refused the data dir. `TestTheDataDirLockComesBeforeTheConfigLock`:
+  with bridge.yaml's lock held by another open, bind and restore are found
+  holding the data dir once they wait for bridge.yaml's (the lock's own word
+  for it, `config.LockWaitedForTest`), and go through once it is free; with
+  both held, each is refused at the data dir at once ("already running on
+  the data dir"), never after waiting out bridge.yaml's. The check asks the
+  data dir's lock once, never in a poll: that lock is a try, so a poll
+  holding it at the instant the command asked for it would refuse the
+  command. Red on main: bind and restore returned at once, exit 0, never
+  waiting. The first round asked halfway through the 5 s wait, a fixed
+  sample a slow runner could miss in either direction; the second round's
+  control (bind's two locks swapped) went red 10 runs in 10.
+
+  **library add and remove's offline change is one turn of bridge.yaml's
+  lock** (`config.Edit`): the config is read again under it, after the
+  admin probe that read it first, and every decision is made on that copy,
+  already configured or not, the root list `ValidateRoots` checks, the 1→N
+  wipe, the last root, the basename guard and the collapse; the library
+  index's wipe or prune runs in the turn, and a save that fails after a wipe
+  retargets the carry as before (`retargetAbandonedCarry`,
+  `RetargetFirstIndexedCarry`), the turn's own refusal just before the
+  rename (a writer that takes no turns, landing after the turn's read) among
+  those failures. Every message and exit code is as it was;
+  a lock another writer holds past the wait is "library add: another bridge
+  command or the running bridge is changing …", exit 1.
+  `libraryEnv.beforeLock` is the window between the first read and the turn.
+  `TestLibraryChangesKeepASettingsSaveThatLandsAfterTheirRead` (a console
+  save through a holder in that window is kept, for add and for remove; red
+  on main, `libraryName "Test Library"`), and
+  `TestBindKeepsALibraryAddThatLandsInItsWindow` (a library add started
+  while bind holds the lock, between its read and its save, waits for bind's
+  turn and adds its root to the file bind wrote; red on main, bind refused
+  by its byte comparison and the binding gone). Since the second round that
+  test holds bind's turn until the add is waiting for the lock, which the
+  lock says (`config.LockWaitedForTest`), and fails at once if the add
+  finishes first; the first round's 300 ms passed whether or not the add had
+  reached the lock.
+
+  **init's turn is its final check and save, never the run**
+  (`saveInitConfig`): the lock, `configChangedSinceRead` (which reads the
+  file again), then `cfg.Save` with the turn. A run asks its questions
+  between its read and that turn, so it decides from its read and refuses a
+  file that changed, as it did before, rather than hold every other writer
+  off while it waits on the operator; no writer that takes the lock can land
+  between the check and the save. `TestTheChangedConfigCheckIsTheStepBeforeSave`
+  pins it by the syntax tree (initCmd calls `saveInitConfig` once and
+  neither the check nor `cfg.Save` itself; in `saveInitConfig` the lock
+  comes before the check and the check directly before the save), and
+  `TestInitRefusesAConfigThatChangedWhileItRan` the refusal. The save then
+  compares the file once more just before its rename (the turn's own
+  comparison, the second round), and init answers its refusal with the
+  check's own words ("the config at … changed while this init ran …; this
+  run did not write it", `sayConfigChangedWhileInitRan`), exit 1:
+  `TestInitsSaveLeavesAConfigChangedWhileItSaves`, red before, the edit
+  written over. Since the third round the check compares the run's first
+  read with what the turn found (`FileLock.Found`), the turn's own bytes,
+  rather than reading the file once more; init names the config file as
+  written (`fsutil.AbsAsWritten` of `--dir`, the file the OS opens for it,
+  where `filepath.Abs` cleaned a `..` after a link away), keeps the data dir
+  `filepath.Join` of the cleaned directory as before, makes the directory as
+  written, and refuses a config that is a link to no file before it writes
+  anything (`config.CheckName`): until then it minted its TLS pair, made its
+  data dir and saved its config over the link
+  (`TestInitRefusesALinkThatLeadsNowhereBeforeItWritesAnything`). A config
+  dir that does not exist yet, below a linked ancestor, is made where the OS
+  puts it (`TestInitMakesANestedConfigDirUnderALinkedAncestor`).
+
+  **serve --init-if-missing writes its seed only while the config is still
+  missing in its turn** (`writeAutoInitConfig`, which answers whether it
+  wrote; the boot's "wrote a default" line follows that answer), so a config
+  another writer saved after serve looked is kept and loaded.
+  `TestTheSeedKeepsAConfigWrittenBeforeItsTurn`. Its save asks once more
+  just before the rename (the second round): a config a writer that takes
+  no turns put there meanwhile is kept too, the seed answers that it wrote
+  nothing, and serve loads that config
+  (`TestServesSeedLeavesAConfigThatAppearsWhileItSaves`, red before: the
+  seed renamed its default over it and said it wrote). Since the third round
+  the seed decides on the turn's own answer (`FileLock.Found`: a turn that
+  found no file), not a `Stat` beside it, makes the config's directory as
+  written, and a name that is a link to no file is refused by its turn, so
+  the seed neither makes the file the link names nor puts one in its place
+  (`TestServesSeedRefusesALinkThatLeadsNowhere`, red before: it wrote its
+  default over the link). Serve keeps its config's name as written
+  (`fsutil.AbsAsWritten`), for its load, its seed, its console's saves and
+  its backups: it cleaned the name with `filepath.Abs`, so for
+  `cfg/link/../bridge.yaml` it loaded, locked and saved `cfg/bridge.yaml`
+  while the OS, and every CLI writer, opened `real/bridge.yaml`
+  (`TestServeOpensTheConfigItsNameOpens`, red before: it saved the decoy at
+  the cleaned name); the base of the config's relative paths is still the
+  one `config.Load` takes from the name, so its data dir does not move.
+
+  **bind answers the turn's refusal as its own** ("changed after bind read
+  it, so the binding was not written: run bind again"): the turn's
+  comparison, against the file as the turn read it, runs before bind's
+  `SaveIf` comparison, against bind's own read in the turn, and the two
+  differ only by the instant each read
+  (`TestOutputDACBindNeverWritesOverAnUpdateAfterItsRead`). Since the third
+  round bind decides on the config its turn found (`FileLock.LoadFound`) and
+  its `SaveIf` compares the file with those bytes (`Found`), before each
+  attempt at the rename, reading as the turn's comparison reads
+  (`config.ReadFile`, asked again while Windows refuses the read for a
+  moment), and a read that fails for good is reported as that read's
+  failure ("save config: read … again before replacing it: …"), never as a
+  config that changed (`TestBindsOwnComparisonAsksAgainWhileTheConfigIsBusy`,
+  `TestBindsOwnComparisonSaysAReadFailedForWhatItIs`, red before: "changed
+  after bind read it" for both).
+
+  **The fourth round** (the same day) took the reviews of the third; the
+  turn's half of it is config-lifecycle.md's, where a turn resolves the
+  config's name again once it holds the lock, before each rename attempt
+  and at its check, and refuses a name that opens another file than it
+  locked (`config.ErrNameMoved`, a `*config.NameMovedError` saying "… now
+  opens another file than the one this writer locked …, so nothing was
+  written: run it again"). Every CLI writer refuses it with those words and
+  none tries again on the file the name opens now: library add, waiting
+  for the lock beside the file its name opened while the link at the name
+  was repointed to a twin holding the same bytes, wrote that file, wiped the
+  library index for its second root and said it had added the root; now it
+  refuses with nothing written and the index untouched
+  (`TestLibraryAddRefusesANameRepointedWhileItWaited`, red before: exit 0,
+  the file written, `bridge.db` made by the wipe). A restore takes a moved
+  name as it takes a changed config (`configMovedOn`): before its first
+  write a `configChangedError` with nothing restored, at bridge.yaml's own
+  write a `partialRestoreError` naming what it restored
+  (`TestARestoreRefusesANameRepointedBeforeItsFirstWrite`, red before: every
+  file restored and the snapshot's bridge.yaml written into the file the
+  name no longer opened; `TestARestoreSaysWhatItRestoredBeforeANameRepointedAtItsConfig`,
+  red before: the snapshot's copy written there). The late refusal names a
+  replaced identity's queue as let go only when the restore removed one
+  (`discardReplacedPlayerQueue` answers whether it did): a restore of the
+  identity the box runs keeps its queue, and one over a box with no queue
+  removes none, and both said "and its queue let go" (Codex's Low on the
+  third round; `TestALateRefusalDoesNotSayAKeptQueueWent` and
+  `TestALateRefusalClaimsNoQueueWhereThereWasNone`, red before, each with
+  the edit landing just before bridge.yaml's write, after the files before
+  it were restored; `TestALateRefusalSaysAReplacedIdentitysQueueWent` the
+  guard). Serve's boot read (`loadServeConfigFile`, `config.LoadFileAt`)
+  resolves the config's name just before it reads and just after, reads
+  again when the two differ, up to three reads, and refuses to start on a
+  name that moved across each (`config.ErrNameMoving`, naming the name and
+  saying to start again once the link is settled); its holder is told that
+  file, resolved at the read (`RecordFile(target, raw)`, which resolves
+  nothing itself): until then `RecordFile` resolved the name a thousand
+  lines of boot after the read, so a link repointed in between, to a twin
+  holding the same bytes, had the holder record a file serve never read,
+  and the first console save went into it (the Claude review's Low;
+  `TestServeRecordsTheFileItsBootReadOpened`, red before: 200, the twin
+  written). `serveOpts.afterConfigRead` is the window between the read and
+  the rest of the boot.
+
+  **The fifth round** (the same day) took the reviews of the fourth; the
+  turn's half is config-lifecycle.md's, where the name is now resolved after
+  every read a decision rests on, last, and the window no turn closes is
+  stated once. Through the CLI writers: bind's own comparison in its
+  `SaveIf`, during which a link at the config's name was repointed to a
+  twin holding the same bytes, let the binding be written into the file the
+  name no longer opened, exit 0; now the name is resolved after that
+  comparison and bind refuses, saying it now opens another file and to run
+  it again (`TestBindRefusesANameRepointedDuringItsOwnComparison`). Library
+  add, whose turn's own read the repoint fell inside, wiped the library
+  index for its second root before its save refused; now the turn refuses
+  before its writer's change (`TestLibraryAddRefusesANameRepointedDuringItsTurnsRead`,
+  red before: `bridge.db` made by the wipe). A restore's check, during
+  whose read the repoint fell, let every file before bridge.yaml be
+  restored; now it refuses with nothing restored
+  (`TestARestoreRefusesANameRepointedDuringItsCheck`). Serve's boot read
+  reads the file it resolved, never the name again, and a name no
+  resolution could follow at any of its three reads boots serve on the last
+  read through the name with no file: its console refuses every save before
+  its turn, saying the bridge could not resolve the file the name opens
+  when it started and to restart once the name resolves, and goes on
+  refusing once it does (`TestServeRefusesConsoleSavesWhenItsBootCouldNotResolveTheConfig`,
+  red before: 200, and the file written). A `bridge library add` beside
+  such a serve hands its change to the console, and is refused the same
+  way; a CLI writer that takes its own turn is not.
+
+  **Don't take the data dir's lock while holding bridge.yaml's, take
+  bridge.yaml's across init's prompts or a restore's prompt, decide a
+  library change on the read before the turn, restore into targets worked
+  out from a config that changed since it was read, or through a name
+  repointed since, say nothing was written after a restore wrote files, or
+  that a queue went that the restore kept, clean a config's name in an
+  entry, resolve serve's config file anywhere but at its boot read, boot a
+  holder on a file its boot read was not of, retry a writer on the file a
+  moved name opens, or write a restored bridge.yaml past its turn.**

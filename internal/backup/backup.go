@@ -329,6 +329,27 @@ func Restore(snapshotDir string, dst Targets) error {
 
 // RestoreWithOptions restores with an optional warning sink and random source.
 // Like Restore, its caller must hold the data directory's exclusive lock.
+//
+// A restore that writes bridge.yaml, or whose caller read the config to work
+// out the targets (RestoreOptions.ConfigAsRead), takes the config file's lock
+// too (config.LockFile, backlog B506), inside the data dir's, the order every
+// command that takes both keeps, and before it writes any file, holding it
+// to the end: so a writer that takes turns at the config (a library add, an
+// init) waits for the whole restore and then reads the restored file, and a
+// config another writer holds refuses the restore with nothing restored,
+// never half of it. Once it has read the snapshot, and before its first
+// write, it compares the config with the bytes its caller read (whose data
+// dir and TLS pair the targets came from) and with what the turn found, read
+// again (configStillAsRead): a config changed since, while the caller asked
+// for confirmation or after the turn's own read, or one whose name a link
+// repointed since opens another file (config.ErrNameMoved), refuses the
+// restore with nothing restored. The snapshot's bridge.yaml is written in
+// that turn (FileLock.SaveBytes), where the config file is, and only over the
+// file the turn found while the name still opens it: one an edit (or, where
+// the filesystem keeps no locks, any writer) changed while the files before
+// it were copied, or a name repointed meanwhile, is left as it is, and the
+// restore says which files it restored and that running it again finishes it
+// (partialRestoreError).
 func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) error {
 	m, err := readManifest(filepath.Join(snapshotDir, ManifestFile))
 	if err != nil {
@@ -337,6 +358,15 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 	if m.SchemaVersion != 1 && m.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("snapshot schema v%d not supported (this bridge supports v%d)",
 			m.SchemaVersion, SchemaVersion)
+	}
+	var configTurn *config.FileLock
+	if dst.BridgeYAML != "" && (slices.Contains(m.Files, "bridge.yaml") || opts.ConfigAsRead != nil) {
+		l, err := config.LockFile(dst.BridgeYAML)
+		if err != nil {
+			return err
+		}
+		defer l.Unlock()
+		configTurn = l
 	}
 
 	// Pair the manifest's file list with the caller's targets.
@@ -377,13 +407,25 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 			return err
 		}
 	}
+	if opts.beforeWrites != nil {
+		opts.beforeWrites()
+	}
+	if configTurn != nil {
+		if err := configStillAsRead(configTurn, opts.ConfigAsRead); err != nil {
+			return err
+		}
+	}
+	// restored names what has been written, for a refusal at bridge.yaml's
+	// own write to say.
+	var restored []string
 	if playerUUIDRead {
 		if err := restorePlayerReservation(snapshotDir, dst.PlayerUUID, playerUUID, m, opts); err != nil {
 			return err
 		}
 		// A replacement identity must never expose this box's old entries,
 		// including the UUID-less queue format on development boxes.
-		if err := discardReplacedPlayerQueue(dst.PlayerUUID, playerUUID); err != nil {
+		discarded, err := discardReplacedPlayerQueue(dst.PlayerUUID, playerUUID)
+		if err != nil {
 			return err
 		}
 		// This comes after the reservation and before all other identity
@@ -392,8 +434,15 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 		if err := config.WritePlayerUUIDFile(dst.PlayerUUID, playerUUID); err != nil {
 			return fmt.Errorf("restore %s: %w", PlayerUUIDFileName, err)
 		}
+		// Said only of a queue the restore removed: the box's own identity
+		// keeps its queue, and a box with none had none to let go.
+		if discarded {
+			restored = append(restored, PlayerUUIDFileName+" (with the player's reservation, and its queue let go)")
+		} else {
+			restored = append(restored, PlayerUUIDFileName+" (with the player's reservation)")
+		}
 	}
-	for _, name := range m.Files {
+	for i, name := range m.Files {
 		// The reservation is an input only, never a copied snapshot file.
 		if name == PlayerUUIDFileName || name == engine.ReservationFileName {
 			continue
@@ -413,6 +462,29 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 			// deleting the WAL for a source we never actually read. This
 			// mirrors Snapshot's non-ErrNotExist stat handling.
 			return fmt.Errorf("stat snapshot file %s: %w", name, err)
+		}
+		if name == "bridge.yaml" {
+			// Written in the restore's turn of the config file's lock, as
+			// the config's writer: staged beside the file as its name
+			// resolves, given the replaced file's owner, and renamed in
+			// only over the file the turn found (FileLock.SaveBytes),
+			// 0600 as every restored file is.
+			if opts.beforeConfig != nil {
+				opts.beforeConfig()
+			}
+			data, err := readSnapshotFile(srcPath)
+			if err == nil {
+				err = configTurn.SaveBytes(data)
+			}
+			if configMovedOn(err) {
+				return &partialRestoreError{path: dst.BridgeYAML, restored: restored,
+					unrestored: unrestoredFrom(m.Files[i:], mapping), err: err}
+			}
+			if err != nil {
+				return fmt.Errorf("restore %s: %w", name, err)
+			}
+			restored = append(restored, name)
+			continue
 		}
 		// Restore at 0o600 across the board — the snapshot bundle was
 		// stored that way, and bridge.yaml may carry sensitive data
@@ -434,6 +506,7 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 			if err := writeFrom(target, bytes.NewReader(account), 0o600); err != nil {
 				return fmt.Errorf("restore %s: %w", AdminAuthFileName, err)
 			}
+			restored = append(restored, name)
 			continue
 		}
 		if name == ManifestDBFileName {
@@ -475,8 +548,101 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 				}
 			}
 		}
+		restored = append(restored, name)
 	}
 	return nil
+}
+
+// configStillAsRead answers nil while the config file whose turn the restore
+// holds is the one its caller read when it worked out the targets (asRead,
+// when the caller read one) and, read again now, still the one the turn
+// found, and a *configChangedError, nothing restored, otherwise: the restore
+// asks it once it has read the snapshot, before its first write.
+func configStillAsRead(turn *config.FileLock, asRead []byte) error {
+	if asRead != nil {
+		if found, ok := turn.Found(); !ok || !bytes.Equal(found, asRead) {
+			return &configChangedError{path: turn.Path(), err: &config.ChangedInTurnError{Path: turn.Path()}}
+		}
+	}
+	switch err := turn.Check(); {
+	case configMovedOn(err):
+		return &configChangedError{path: turn.Path(), err: err}
+	case err != nil:
+		return fmt.Errorf("read %s before restoring anything: %w; nothing was restored", turn.Path(), err)
+	}
+	return nil
+}
+
+// configMovedOn reports whether err, a refusal of the restore's turn of the
+// config file, says the config is no longer the one the turn read: another
+// writer changed the file (config.ErrChangedInTurn), or its name now opens
+// another file, a link repointed (config.ErrNameMoved). A restore takes the
+// two alike, refusing before its first write with nothing restored, and at
+// bridge.yaml's own write saying what it restored.
+func configMovedOn(err error) bool {
+	return errors.Is(err, config.ErrChangedInTurn) || errors.Is(err, config.ErrNameMoved)
+}
+
+// configChangedError is a restore's refusal, before its first write, of a
+// config another writer changed since the restore's caller read it, or since
+// the restore's turn did, or whose name a link repointed since opens another
+// file: the targets may be the old config's. It names the config file and
+// nothing it holds.
+type configChangedError struct {
+	path string
+	err  error
+}
+
+func (e *configChangedError) Error() string {
+	return fmt.Sprintf("%s is not the config this restore read when it worked out where each file goes: another writer "+
+		"changed it since (a bridge command, an edit, or a bridge older than the config's lock), or it now opens another "+
+		"file (a link at it repointed), so nothing was restored: run the restore again, to restore into what the config "+
+		"names now", e.path)
+}
+
+// Unwrap is the turn's refusal, which config.ErrChangedInTurn matches.
+func (e *configChangedError) Unwrap() error { return e.err }
+
+// partialRestoreError is a restore's refusal at bridge.yaml's own write, of a
+// config a writer that takes no turns (an edit, a bridge older than the
+// config's lock) changed while the files before it were copied, or whose name
+// a link repointed meanwhile opens another file: the restore leaves the
+// config as it is, and says which files it had restored by then, which it had
+// not, and that running the restore again finishes it, putting every file the
+// snapshot holds back, bridge.yaml over that change.
+type partialRestoreError struct {
+	path                 string
+	restored, unrestored []string
+	err                  error
+}
+
+func (e *partialRestoreError) Error() string {
+	done := "nothing"
+	if len(e.restored) > 0 {
+		done = strings.Join(e.restored, ", ")
+	}
+	return fmt.Sprintf("restore bridge.yaml: %s was changed by another writer while the restore ran (an edit, or a bridge "+
+		"older than the config's lock), or now opens another file (a link at it repointed), and is left as it is; "+
+		"restored before it: %s; not restored: %s: run the restore again to finish it, which restores every file the "+
+		"snapshot holds, bridge.yaml over that change", e.path, done, strings.Join(e.unrestored, ", "))
+}
+
+// Unwrap is the turn's refusal, which config.ErrChangedInTurn matches.
+func (e *partialRestoreError) Unwrap() error { return e.err }
+
+// unrestoredFrom names the files of names, the snapshot's from bridge.yaml
+// on, that the restore would write and has not: those the caller mapped to a
+// target, the player's identity and reservation aside (written before the
+// copies).
+func unrestoredFrom(names []string, mapping map[string]string) []string {
+	var out []string
+	for _, name := range names {
+		if name == PlayerUUIDFileName || name == engine.ReservationFileName || mapping[name] == "" {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
 }
 
 // PruneResult reports what a Prune call did.
@@ -750,6 +916,19 @@ func ListContext(ctx context.Context, backupsRoot string) ([]snapshotEntry, erro
 // --- Internal helpers ---
 //
 // vacuumInto, the manifest database's copy, is in vacuum.go.
+
+// readSnapshotFile reads the snapshot's file at srcPath whole, as copyFile
+// reads a source: a named pipe refused at once, a Windows sharing violation
+// waited out.
+func readSnapshotFile(srcPath string) ([]byte, error) {
+	var data []byte
+	err := atomicwrite.ReadWithRetryCtx(context.Background(), func() error {
+		var err error
+		data, err = fsutil.ReadAsFile(srcPath)
+		return err
+	})
+	return data, err
+}
 
 // copyFile is an atomic byte-for-byte copy: write to `<dir>/.tmp-*`
 // then rename onto `dstPath`. The intermediate file is mode `mode`

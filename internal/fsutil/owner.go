@@ -137,8 +137,9 @@ const (
 
 // OwnerChange is one change KeepOwner, Precreate or a directory helper
 // made, as SimulateRootForTest records it: the path the file was going to
-// replace (KeepOwner, Precreate) or the directory created (MkdirAll and its
-// kin), and the owner it was given.
+// replace (KeepOwner), the file made (Precreate, whose owner may be another
+// path's) or the directory created (MkdirAll and its kin), and the owner it
+// was given.
 type OwnerChange struct {
 	Dst      string
 	UID, GID int

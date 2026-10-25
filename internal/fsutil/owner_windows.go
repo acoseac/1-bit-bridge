@@ -29,3 +29,9 @@ func precreate(string, os.FileMode, string) error { return nil }
 func SimulateRootForTest(int, int) (changes func() []OwnerChange, restore func()) {
 	return func() []OwnerChange { return nil }, func() {}
 }
+
+// SimulateRootOwnersForTest is a no-op on Windows, as SimulateRootForTest
+// is. See the POSIX version.
+func SimulateRootOwnersForTest(func(string) (int, int)) (changes func() []OwnerChange, restore func()) {
+	return func() []OwnerChange { return nil }, func() {}
+}

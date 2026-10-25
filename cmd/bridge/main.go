@@ -2570,6 +2570,12 @@ type serveOpts struct {
 	configPath    string
 	addrOverride  string
 	initIfMissing bool
+	// afterConfigRead runs once serve has read its config, the read its
+	// live holder is told of (RecordFile), before anything else of the
+	// boot. Nil in production. A boot test repoints a link at the config's
+	// name there, a thousand lines before the holder is told what was read
+	// (B506's fourth round). Per invocation for tailscaleCLI's reason.
+	afterConfigRead func()
 	// tailscaleCLI stands in for the host's Tailscale CLI in the cli-mode
 	// auto-pilot. Nil (the host's CLI) everywhere but the boot tests,
 	// which pass a fake so a mint can be held open across a shutdown
@@ -2757,18 +2763,58 @@ const autoInitDefaultRoot = "/library"
 // (matching init). No cert mint here — serve's LoadOrGenerate first-mints on
 // the persistent volume. MkdirAll(0o700) because config.Save writes its temp
 // file in the config dir, which fails if the parent doesn't exist yet.
-func writeAutoInitConfig(cfgPath string) error {
-	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
-		return fmt.Errorf("create config dir: %w", err)
+//
+// The seed is written in a turn of bridge.yaml's lock (config.LockFile,
+// backlog B506), and only while the turn finds no file: a config another
+// writer saved since serve looked (an init, a second container start) is
+// kept, and serve loads it. Its save asks once more before each attempt at
+// its rename, as every save in a turn does, so a config a writer that takes
+// no turns (an edit, a bridge older than the lock) put there meanwhile is
+// kept too. A name that is a link to no file is refused by the turn, so the
+// seed neither makes a file where the link points nor puts one in its place.
+// wrote says whether the seed was written.
+func writeAutoInitConfig(cfgPath string) (wrote bool, err error) {
+	if err := os.MkdirAll(configDirAsWritten(cfgPath), 0o700); err != nil {
+		return false, fmt.Errorf("create config dir: %w", err)
 	}
 	cfg := baseConfig([]string{autoInitDefaultRoot}, config.DefaultLibraryName, "data")
 	if err := cfg.NormalizeAndValidate(); err != nil {
-		return fmt.Errorf("validate seed config: %w", err)
+		return false, fmt.Errorf("validate seed config: %w", err)
 	}
-	if err := cfg.Save(cfgPath); err != nil {
-		return fmt.Errorf("save seed config: %w", err)
+	lock, err := config.LockFile(cfgPath)
+	if err != nil {
+		return false, fmt.Errorf("save seed config: %w", err)
 	}
-	return nil
+	defer lock.Unlock()
+	if _, found := lock.Found(); found {
+		return false, nil
+	}
+	// The save asks again just before its rename, in the comparison every
+	// save in a turn makes: a config a writer that takes no turns put there
+	// meanwhile is kept, and serve loads it.
+	if err := cfg.Save(lock); errors.Is(err, config.ErrChangedInTurn) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("save seed config: %w", err)
+	}
+	return true, nil
+}
+
+// configDirAsWritten is the directory part of a config's name as written,
+// nothing cleaned: the directory the OS creates the file in, a `..` after a
+// link included, where filepath.Dir would clean the `..` away with the link.
+// On Windows it is filepath.Dir, whose cleaning is Win32's own.
+func configDirAsWritten(cfgPath string) string {
+	if filepath.Separator != '/' {
+		return filepath.Dir(cfgPath)
+	}
+	switch i := strings.LastIndexByte(cfgPath, '/'); {
+	case i > 0:
+		return cfgPath[:i]
+	case i == 0:
+		return "/"
+	}
+	return "."
 }
 
 // thumbKeyPattern bounds the cache keys ArtworkThumbPath will build a
@@ -2877,10 +2923,18 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// error — the same silently-configless snapshot this commit is
 	// fixing, reintroduced through a different door.
 	//
-	// filepath.Abs only fails when os.Getwd does; keep the relative value
+	// Made absolute AS WRITTEN (fsutil.AbsAsWritten), never cleaned: a `..`
+	// after a link climbs from where the link leads, so filepath.Abs's
+	// lexical cleaning of cfg/link/../bridge.yaml named cfg/bridge.yaml,
+	// another file than the one the OS opens for the name and every CLI
+	// writer locks and saves (B506's third round). config.Load still takes
+	// the base of the config's relative paths from the name as Abs cleans
+	// it, as it always has, so the data dir does not move.
+	//
+	// AbsAsWritten only fails when os.Getwd does; keep the relative value
 	// in that case rather than losing the path entirely.
 	resolved, _ := resolveConfigPath(*configPath)
-	if abs, absErr := filepath.Abs(resolved); absErr == nil {
+	if abs, absErr := fsutil.AbsAsWritten(resolved); absErr == nil {
 		resolved = abs
 	}
 	*configPath = resolved
@@ -2891,18 +2945,31 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// errors below, directing the operator to `bridge init`.
 	if opts.initIfMissing {
 		if _, statErr := os.Stat(*configPath); os.IsNotExist(statErr) {
-			if werr := writeAutoInitConfig(*configPath); werr != nil {
+			wrote, werr := writeAutoInitConfig(*configPath)
+			if werr != nil {
 				fmt.Fprintf(stderr, "auto-init: %v\n", werr)
 				return 2
 			}
-			logger.Info("no config found — wrote a default; env (BRIDGE_LIBRARY_ROOTS/NAME/…) still overrides it at runtime",
-				"path", *configPath, "libraryRoots", autoInitDefaultRoot)
+			if wrote {
+				logger.Info("no config found — wrote a default; env (BRIDGE_LIBRARY_ROOTS/NAME/…) still overrides it at runtime",
+					"path", *configPath, "libraryRoots", autoInitDefaultRoot)
+			}
 		}
 	}
-	cfg, cfgFile, err := loadCLIConfig(*configPath)
+	// The bytes the config is read from, and the file its name opened for
+	// that read, resolved at the read (config.LoadFileAt), are kept for the
+	// live holder (RecordFile, below): a console save then writes only into
+	// that file, only over a file that still holds them, and refuses one
+	// another writer changed since, or a name repointed to another file. A
+	// name no resolution could follow at the read boots on the read through
+	// the name, and every console save is refused until a restart.
+	cfg, cfgFile, cfgRead, cfgBootFile, err := loadServeConfigFile(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
 		return 2
+	}
+	if opts.afterConfigRead != nil {
+		opts.afterConfigRead()
 	}
 	// Identical to `resolved` by construction (resolveConfigPath echoes a
 	// non-empty explicit path back), but taking the loader's own answer
@@ -3913,6 +3980,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		WithAtlasMeta(cfg.Atlas.Enabled, cfg.Atlas.EffectiveMetaTTL(), manifestStore).
 		WithPlaylistCoverStore(manifestStore).
 		WithDemoMode(cfg.Demo.Enabled)
+	// The live holder is told the bytes its snapshot was read from, and the
+	// file the config's name opened for that read, resolved at the read and
+	// not here, before anything can save through it: a console save then
+	// writes only into that file, only over a file that still holds those
+	// bytes or that it wrote itself, and refuses one another writer changed
+	// meanwhile, or a name a link repointed since (config.RuntimeConfig.Update,
+	// backlog B506; resolved here, a link repointed during the boot above
+	// would have the holder record a file serve never read).
+	apiSrv.ConfigHolder().RecordFile(cfgBootFile, cfgRead)
 	// Demo mode (read-only public demo bridge): the three user-data
 	// stores + the device registrar are deliberately NOT wired, so
 	// PUT /v1/playlists/{id}, DELETE /v1/playlists/{id}, PUT /v1/favorites
@@ -5211,10 +5287,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// of library roots lands on both sides in lockstep.
 	//
 	// *configPath was already resolved AND absolutised at the top of
-	// runServe, so this is a no-op Clean rather than a second resolution.
-	// It stays as the belt-and-braces path for the one case that skips
-	// the earlier absolutise — filepath.Abs failing on a broken Getwd.
-	absCfgPath, _ := filepath.Abs(*configPath)
+	// runServe, as written: cleaning it here (filepath.Abs) would name
+	// another file than the one serve loaded for a name with a `..` after a
+	// link, and the console would lock and save that one.
+	absCfgPath := *configPath
 	// Shared instance across the admin tile AND the api server: the
 	// api layer's `/v1/health.endpoints` advertising in tsnet mode
 	// queries this same source for the embedded node's MagicDNSName +

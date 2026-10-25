@@ -28,6 +28,15 @@ func tryLock(f *os.File) error {
 	})
 }
 
+// keepsNoLocks is KeepsNoLocks on Windows: LockFileEx's answers for a
+// filesystem or redirector that does not do byte-range locks
+// (ERROR_NOT_SUPPORTED, and ERROR_INVALID_FUNCTION, which a file system
+// driver without the request answers), and errors.ErrUnsupported.
+func keepsNoLocks(err error) bool {
+	return errors.Is(err, windows.ERROR_NOT_SUPPORTED) || errors.Is(err, windows.ERROR_INVALID_FUNCTION) ||
+		errors.Is(err, errors.ErrUnsupported)
+}
+
 func unlock(f *os.File) error {
 	return controlFD(f, "UnlockFileEx", func(fd uintptr) error {
 		return windows.UnlockFileEx(windows.Handle(fd), 0, lockAllBytes, lockAllBytes, new(windows.Overlapped))
