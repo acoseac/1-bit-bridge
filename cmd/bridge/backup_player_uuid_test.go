@@ -128,6 +128,7 @@ func mintPlayerIdentity(t *testing.T, dataDir string) string {
 // file from the snapshot is that way: the restore then keeps the box's
 // identity, as for a snapshot taken before the file was part of the bundle.
 func TestARestoreRefusesAPlayerUUIDThatIsNotOneUUIDAndSaysWhatToDo(t *testing.T) {
+	persistentMedium(t)
 	cfgPath, dataDir, _ := seedRestorableInstall(t, closedAdminAddr(t))
 	mintPlayerIdentity(t, dataDir)
 	snap := runBackup(t, cfgPath)

@@ -120,6 +120,7 @@ func TestServeRefusedMintLeavesTheReservationFloor(t *testing.T) {
 
 func TestRestoreCLIPrintsTheNoMarkAdvice(t *testing.T) {
 	needsDirectorySync(t)
+	persistentMedium(t)
 	cfg, dir, _ := seedRestorableInstall(t, "127.0.0.1:0")
 	if _, _, err := backup.EnsurePlayerUUID(dir); err != nil {
 		t.Fatal(err)
@@ -185,6 +186,7 @@ func TestRestoreCLIPrintsTheNoMarkAdvice(t *testing.T) {
 
 func TestBackupRestoreCLICarriesForeignFloorAndDiscardsForeignQueue(t *testing.T) {
 	needsDirectorySync(t)
+	persistentMedium(t)
 	cfg, dir, _ := seedRestorableInstall(t, "127.0.0.1:0")
 	id, _, err := config.EnsurePlayerUUID(dir)
 	if err != nil {

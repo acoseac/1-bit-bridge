@@ -71,6 +71,7 @@ func TestServeBootRefusesALostFloorWithoutTheMoveAsideWarning(t *testing.T) {
 // logs it again.
 func TestServeWarnsOnceEachBootBesideADamagedMarker(t *testing.T) {
 	needsDirectorySync(t)
+	persistentMedium(t)
 	rec := loggingtest.Record(t)
 	c := playerServeCase{player: goBarPlayer, standIn: newPlayerStandIn(), before: func(dir string) {
 		if _, _, err := backup.EnsurePlayerUUID(dir); err != nil {
@@ -102,6 +103,7 @@ func TestServeWarnsOnceEachBootBesideADamagedMarker(t *testing.T) {
 // TestBindWarnsOnceBesideADamagedMarker: an enabled player's bind runs a
 // start's preflight once and then mints, and only the preflight warns.
 func TestBindWarnsOnceBesideADamagedMarker(t *testing.T) {
+	persistentMedium(t)
 	root := dacTree(t)
 	cfgPath := dacConfig(t, "  player:\n    enabled: true\n")
 	cfg, err := config.Load(cfgPath)

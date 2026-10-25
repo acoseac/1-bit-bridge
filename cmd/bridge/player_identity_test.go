@@ -134,6 +134,7 @@ func TestDACBindRefusesUnsafePlayerIdentity(t *testing.T) {
 }
 
 func TestDACBindKeepsOrRestampsTheBoxFloor(t *testing.T) {
+	persistentMedium(t)
 	for _, kind := range []string{"pristine", "existing", "reset", "upgrade"} {
 		t.Run(kind, func(t *testing.T) {
 			root := dacTree(t)

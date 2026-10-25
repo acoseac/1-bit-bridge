@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
@@ -44,6 +45,12 @@ func TestARestoredIdentityHandsOutValuesPastItsSnapshot(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the engine keeps its IDs durable with a directory fsync, which Windows has not: the player runs on Linux")
 	}
+	// The identity's writer, the engine and the restore refuse a data
+	// directory on storage that does not outlive a reboot, as a TMPDIR on
+	// tmpfs is (atomicwrite.ErrVolatile), and the first of them is the seed
+	// write below, before the engine's skip: the medium is not what this
+	// test is about.
+	t.Cleanup(atomicwrite.SetMediumForTest(func(string) error { return nil }))
 	source := filepath.Join(t.TempDir(), "source")
 	must(t, "the source's data directory", os.Mkdir(source, 0o700))
 	identity := filepath.Join(source, config.PlayerUUIDFile)

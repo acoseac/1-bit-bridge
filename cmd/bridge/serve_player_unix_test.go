@@ -30,6 +30,7 @@ import (
 // directory in this process is refused until the stall ends; then the lock
 // is let go, and the engine the start went on to build never runs.
 func TestServeStopWithThePlayersStorageStalled(t *testing.T) {
+	persistentMedium(t)
 	rec := loggingtest.Record(t)
 	var startOnce sync.Once
 	starts := make(chan struct{})

@@ -91,6 +91,7 @@ func TestPlayerFileErrorsDoNotStopServeBeforeTLS(t *testing.T) {
 
 func TestServeKeepsLibraryWithDamagedSealedPlayerMarker(t *testing.T) {
 	needsDirectorySync(t)
+	persistentMedium(t)
 	for _, sealed := range []bool{false, true} {
 		for _, enabled := range []bool{false, true} {
 			name, settings := "disabled", "    enabled: false\n"

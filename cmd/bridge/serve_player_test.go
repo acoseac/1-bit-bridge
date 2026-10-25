@@ -307,6 +307,18 @@ func needsDirectorySync(t *testing.T) {
 	}
 }
 
+// persistentMedium answers the strict writer's medium check as a disk does
+// until the test ends. The player's identity, its floor and its marker are
+// written through that writer, by a fixture or by the bind, serve start or
+// restore under test, and it refuses storage that does not outlive a reboot
+// (atomicwrite.ErrVolatile): a TMPDIR on tmpfs, as /tmp is on Ubuntu 26.04,
+// would refuse the first of them. For a test whose subject is not the
+// medium; the seam is process-global, and no test here runs in parallel.
+func persistentMedium(t *testing.T) {
+	t.Helper()
+	t.Cleanup(atomicwrite.SetMediumForTest(func(string) error { return nil }))
+}
+
 // bootPlayerServe boots serve on a config whose output block is the case's
 // player block, standing in for Linux unless the case names another host,
 // with the watcher reading the GO bar's box and hearing no kernel, and
@@ -760,6 +772,7 @@ func TestServeStartsNoPlayerWithoutTheDataDirLock(t *testing.T) {
 // already (bind's, a restore's) is left as it was.
 func TestAPlayerWhoseEngineRefusesItsStorageLeavesNoIdentityItMade(t *testing.T) {
 	needsDirectorySync(t)
+	persistentMedium(t)
 	const before = "7d444840-9dc0-11d1-b245-5ffdce74fad2"
 	for _, tc := range []struct {
 		name string
