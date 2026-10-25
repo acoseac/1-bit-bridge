@@ -196,6 +196,14 @@ jobs:
             ${{ runner.os }}-gobuild-test-${{ matrix.group }}-${{ hashFiles('**/go.sum') }}-
             ${{ runner.os }}-gobuild-test-${{ matrix.group }}-
       - name: test (race)
+        # Ubuntu 26.04 (ubuntu-latest since 2026-10) mounts /tmp as tmpfs.
+        # atomicwrite refuses volatile storage, so a test data directory
+        # under /tmp makes the player refuse to start, and cmd/bridge's
+        # serve tests then wait out the 30 m package timeout. runner.temp is
+        # on the runner's disk, as a test's t.TempDir() must be for the
+        # durable writer's tests to run at all.
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: .github/scripts/test-shard.sh ${{ matrix.group }} ${{ matrix.index }}
 
   dsd-measure:
