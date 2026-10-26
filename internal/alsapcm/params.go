@@ -144,10 +144,13 @@ type sampleFormat struct {
 // sampleFormats are the formats of the design's PCM table, each the
 // format package's packer writes.
 var sampleFormats = map[format.ALSAFormat]sampleFormat{
-	format.S16LE:  {code: formatS16LE, bytes: 2},
-	format.S243LE: {code: formatS243LE, bytes: 3},
-	format.S24LE:  {code: formatS24LE, bytes: 4},
-	format.S32LE:  {code: formatS32LE, bytes: 4},
+	format.DSDU16LE: {code: formatDSDU16LE, bytes: 2},
+	format.DSDU32LE: {code: formatDSDU32LE, bytes: 4},
+	format.DSDU32BE: {code: formatDSDU32BE, bytes: 4},
+	format.S16LE:    {code: formatS16LE, bytes: 2},
+	format.S243LE:   {code: formatS243LE, bytes: 3},
+	format.S24LE:    {code: formatS24LE, bytes: 4},
+	format.S32LE:    {code: formatS32LE, bytes: 4},
 }
 
 // formatName names an ALSA format code this backend packs, or numbers one

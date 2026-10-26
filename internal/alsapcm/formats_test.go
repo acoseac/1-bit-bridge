@@ -15,7 +15,7 @@ func TestFormatsOfNamesOnlyRealFormats(t *testing.T) {
 	for v := uint32(53); v < maskMax; v++ {
 		m.bits[v/32] |= 1 << (v % 32)
 	}
-	want := "S16_LE S32_LE S24_3LE (and formats 31, 52, which this backend does not pack)"
+	want := "S16_LE S32_LE S24_3LE DSD_U32_BE (and formats 31, which this backend does not pack)"
 	if got := formatsOf(m); got != want {
 		t.Errorf("formatsOf:\n got %q\nwant %q", got, want)
 	}

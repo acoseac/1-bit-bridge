@@ -13,6 +13,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/adminauth"
 	"github.com/acoseac/1-bit-bridge/internal/alsa"
+	"github.com/acoseac/1-bit-bridge/internal/alsactl"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/player/lan"
 )
@@ -58,8 +59,10 @@ func TestMain(m *testing.M) {
 	hostTrees = trees
 	hostLAN = func() ([]lan.Interface, error) { return nil, nil }
 	stopOpens := alsapcm.GuardNodeOpens(recordNodeOpen)
+	stopControls := alsactl.GuardNodeOpens(recordNodeOpen)
 	stopReads := alsa.WatchHostReads(recordHostRead)
 	code := m.Run()
+	stopControls()
 	stopReads()
 	stopOpens()
 	_ = os.RemoveAll(treesDir)
