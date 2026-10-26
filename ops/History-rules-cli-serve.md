@@ -2926,3 +2926,22 @@ last. A start on an identity that is already there probes it at its marker
 second call returns it unprobed, but nothing in production calls it.
 `TestAMintRefusedForVolatileStorageLeavesNoIdentity` and
 `TestServeOnVolatileStorageRefusesEveryStartAndKeepsNoIdentity` pin this.
+
+### B544 — retire the unchecked UUID minter (2026-10-26)
+
+- **`backup.EnsurePlayerUUID` is the sole UUID minter; the retired config minter must not return.** Its reservation writer checks the medium before UUID publication; keep minting tests in backup's tests to avoid config's import cycle, including v4 shape, persistence, non-file kinds and a refusing medium leaving no final UUID on either attempt (B544).
+
+The symbol census found only tests calling `config.EnsurePlayerUUID`, so
+it was retired; serve and bind already use the checked backup minter. Keep
+`config.WritePlayerUUIDFile` for that minter and restore. Round 14 above
+records why the reservation writer checks the medium before publishing the
+UUID. Backup's external tests hold v4-shape, persistence, permission and
+malformed-identity coverage, avoiding config's import cycle.
+`TestPlayerUUIDRefusingProbeLeavesNoIdentity` checks probe counts and no
+final UUID on both attempts; publishing the UUID before the reservation
+makes both attempts fail. `TestPlayerUUIDMinterRefusesNonFilesAtOnce`
+covers a named pipe, a link to one, a link to a character device and a
+directory: within five seconds, an error other than `fs.ErrNotExist`, no
+identity, and the same node and mode. A plain-open negative control fails
+both FIFO rows; the restored test passes all four under `-race`. The
+B544/B520 entry in `ops/engineering-log.md` records both controls.
