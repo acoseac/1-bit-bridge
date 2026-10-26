@@ -1224,6 +1224,44 @@
   CI build at all: verify on a real daemon under BOTH builders
   (`DOCKER_BUILDKIT=0` forces the legacy one). (#983)
 
+### B544 — developer test TMPDIR (2026-10-26)
+
+- **Developer test targets (`test`, `test-fast`) use a target-specific exported TMPDIR, defaulting to absolute `$(CURDIR)/.tmp` when the caller's environment is unset or empty; keep `.tmp/` in both ignore files.** A non-empty caller value wins. Keep Unix-socket fixtures on short paths or bind by basename from their directory: deep checkouts exceed `sun_path` (B544).
+
+The player refuses volatile storage, so a developer host with `/tmp` on
+tmpfs needs test files on disk too. Only `test` and `test-fast` export the
+fallback, creating it with quoted `mkdir -p`; a non-empty caller TMPDIR
+wins. `.gitignore` and `.dockerignore` exclude `.tmp/`. CI keeps its own
+`runner.temp`. A deep checkout can exceed Unix `sun_path` (104/108 bytes):
+the socket census confirmed MPD uses short `/tmp/mpd*` directories and
+fsutiltest binds a basename after Chdir. Keep those protections.
+
+Proof recorded in `ops/engineering-log.md` under B544/B520: a real
+unset-TMPDIR `make test` of config passed under `-race` with Go 1.27.3;
+dry runs for unset, empty, caller-set and space-containing values showed
+the correct quoted paths. This is a default location, not a claim that
+every checkout is on persistent storage.
+
+### B520 — self-dial candidate search (2026-10-26)
+
+- **A host-address test must establish self-dialability, not just bindability, without switching to loopback or an unspecified address when the specific-IP branch is its subject.** B520 tries every non-loopback IPv4 candidate with a bounded bind/dial and source-IP check, listing failures when none works; skip locally, fail when `CI` is set. Preserve the logging negative control in the engineering log.
+
+Binding a host address does not prove that it can dial itself. Try every
+non-loopback, non-unspecified IPv4 candidate until bind, dial and the
+source-IP check succeed, allowing at most 200 ms per candidate and its
+share of a two-second network budget. Retain the successful listener and
+connection for the silent probe, avoiding a second dial or rebind. If none
+works, list every attempted address and its failure; skip locally and fail
+when `CI` is present. Loopback or an unspecified address would miss the
+specific-IP branch the test is meant to exercise.
+
+`TestAProbeOfASpecificBoundIPIsNotLogged` passed without skipping on
+darwin/arm64 with Go 1.27.3. The logging negative control in
+`ops/engineering-log.md` adds `&& remote.IP.IsLoopback()` to
+`fromThisHost`'s matching-IP return: the test then failed because it logged
+the bound-IP probe, and passed after restoration. A separate restricted
+run with all four binds denied exercised the local-skip and CI-fatal paths.
+
 ## B514 — deterministic medium evidence and controls (2026-10-23)
 
 Mount tables, device identities and statfs sequences are explicit fixtures.
@@ -1464,41 +1502,3 @@ with runtime.Version(), not merely a compatible major.minor. check-go-version
 compares full versions, and check-build-tags requires the generator, final-stage
 COPY and full toolchain pin. Release validation compares the image's notice
 bytes with a fresh generation, for both published image architectures.
-
-## B544 — developer test TMPDIR (2026-10-26)
-
-- **Developer test targets (`test`, `test-fast`) use a target-specific exported TMPDIR, defaulting to absolute `$(CURDIR)/.tmp` when the caller's environment is unset or empty; keep `.tmp/` in both ignore files.** A non-empty caller value wins. Keep Unix-socket fixtures on short paths or bind by basename from their directory: deep checkouts exceed `sun_path` (B544).
-
-The player refuses volatile storage, so a developer host with `/tmp` on
-tmpfs needs test files on disk too. Only `test` and `test-fast` export the
-fallback, creating it with quoted `mkdir -p`; a non-empty caller TMPDIR
-wins. `.gitignore` and `.dockerignore` exclude `.tmp/`. CI keeps its own
-`runner.temp`. A deep checkout can exceed Unix `sun_path` (104/108 bytes):
-the socket census confirmed MPD uses short `/tmp/mpd*` directories and
-fsutiltest binds a basename after Chdir. Keep those protections.
-
-Proof recorded in `ops/engineering-log.md` under B544/B520: a real
-unset-TMPDIR `make test` of config passed under `-race` with Go 1.27.3;
-dry runs for unset, empty, caller-set and space-containing values showed
-the correct quoted paths. This is a default location, not a claim that
-every checkout is on persistent storage.
-
-## B520 — self-dial candidate search (2026-10-26)
-
-- **A host-address test must establish self-dialability, not just bindability, without switching to loopback or an unspecified address when the specific-IP branch is its subject.** B520 tries every non-loopback IPv4 candidate with a bounded bind/dial and source-IP check, listing failures when none works; skip locally, fail when `CI` is set. Preserve the logging negative control in the engineering log.
-
-Binding a host address does not prove that it can dial itself. Try every
-non-loopback, non-unspecified IPv4 candidate until bind, dial and the
-source-IP check succeed, allowing at most 200 ms per candidate and its
-share of a two-second network budget. Retain the successful listener and
-connection for the silent probe, avoiding a second dial or rebind. If none
-works, list every attempted address and its failure; skip locally and fail
-when `CI` is present. Loopback or an unspecified address would miss the
-specific-IP branch the test is meant to exercise.
-
-`TestAProbeOfASpecificBoundIPIsNotLogged` passed without skipping on
-darwin/arm64 with Go 1.27.3. The logging negative control in
-`ops/engineering-log.md` adds `&& remote.IP.IsLoopback()` to
-`fromThisHost`'s matching-IP return: the test then failed because it logged
-the bound-IP probe, and passed after restoration. A separate restricted
-run with all four binds denied exercised the local-skip and CI-fatal paths.
