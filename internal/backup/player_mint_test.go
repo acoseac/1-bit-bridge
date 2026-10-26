@@ -73,6 +73,11 @@ func TestThePlayerUUIDIsMadeOnceAndKept(t *testing.T) {
 
 // A refused medium must not leave an identity a retry could adopt unprobed.
 func TestPlayerUUIDRefusingProbeLeavesNoIdentity(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The storage-medium check is Unix-only, so on Windows the probe is never
+		// consulted (the retired config test lived in a unix-only file too).
+		t.Skip("the storage-medium probe is Unix-only")
+	}
 	reservationStorage(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, config.PlayerUUIDFile)
