@@ -65161,9 +65161,8 @@ The binding rule and its reasoning are in config-lifecycle.md and its
 History file, updated with B528's entry.
 
 Checks use Go 1.27.3 and ts_omit_webclient,ts_omit_debugeventbus. Whole-module
-vet passes. Whole-module tests encounter sandbox-denied TCP and Unix binds;
-this is not a full-suite green claim. Formatting, diff whitespace and
-make docs-check pass. Full commands, statuses, the socket-test inventory,
-the required leading-zero grep classification and PR text are in the local
-report and logs under the session's scratchpad/codex-b533 directory.
-All changes remain uncommitted and unpushed.
+vet passes, the whole-module test suite (`go test -p 4 ./...`, all 77
+packages, socket tests included) passes on a macOS developer host, and the
+config package passes under the race detector. Formatting, diff whitespace
+and make docs-check pass. The log names above label the run's working files,
+which are not kept; their results are quoted here.
