@@ -14,6 +14,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"runtime"
 	"strings"
@@ -198,17 +199,13 @@ func TestASilentPeerFromElsewhereIsLogged(t *testing.T) {
 // so its source is that IP, not loopback. Source equal to destination
 // is still this host, and still the probe.
 func TestAProbeOfASpecificBoundIPIsNotLogged(t *testing.T) {
-	ip := firstNonLoopbackIPv4(t)
+	inner, c := selfDialableIPv4(t)
 	logs := handshaketest.CaptureStdLog(t)
-	inner, err := net.Listen("tcp", net.JoinHostPort(ip.String(), "0"))
-	if err != nil {
-		t.Skipf("cannot listen on %v: %v", ip, err)
-	}
 	s := serveOn(t, inner, true, 0)
-	probe := silentProbe(t, s.addr)
-	if host, _, _ := net.SplitHostPort(probe); host != ip.String() {
-		t.Skipf("the kernel sourced the probe from %s, not %s; nothing to pin here", host, ip)
-	}
+	probe := c.LocalAddr().String()
+	// Use the checked connection itself: no second dial or rebind can pick
+	// a different source or turn a usable candidate into a timeout.
+	_ = c.Close()
 	s.waitUntilClosed(t, probe)
 	if got := append(linesFrom(logs, probe), redactedLines(logs)...); len(got) != 0 {
 		t.Errorf("a probe of the bound IP from this host was logged: %q", got)
@@ -668,21 +665,68 @@ func (l *queueListener) Accept() (net.Conn, error) {
 	return c, nil
 }
 
-// firstNonLoopbackIPv4 returns an IPv4 address this machine holds that is
-// neither loopback nor link-local, and skips the test when there is none.
-func firstNonLoopbackIPv4(t *testing.T) net.IP {
+// selfDialableIPv4 tries every non-loopback, non-unspecified IPv4 candidate
+// until one both binds and self-dials with that IP as its source. Each trial
+// gets at most 200 ms, reduced to share a total two-second network budget
+// across all candidates. Failed trial listeners are thrown away; the successful
+// listener and connection become the test's server and silent probe.
+func selfDialableIPv4(t *testing.T) (net.Listener, net.Conn) {
 	t.Helper()
+	var ips []net.IP
+	var tried []string
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
-		t.Skipf("no interface addresses: %v", err)
+		tried = append(tried, fmt.Sprintf("interface enumeration: %v", err))
 	}
+	seen := make(map[string]bool)
 	for _, a := range addrs {
-		if n, ok := a.(*net.IPNet); ok && !n.IP.IsLoopback() && n.IP.To4() != nil && !n.IP.IsLinkLocalUnicast() {
-			return n.IP.To4()
+		n, ok := a.(*net.IPNet)
+		if !ok || n.IP.To4() == nil || n.IP.IsLoopback() || n.IP.IsUnspecified() || seen[n.IP.String()] {
+			continue
 		}
+		seen[n.IP.String()] = true
+		ips = append(ips, n.IP.To4())
 	}
-	t.Skip("this host has no non-loopback IPv4 address to bind")
-	return nil
+	const budget = 2 * time.Second
+	perAddress := 200 * time.Millisecond
+	if len(ips) > 0 && budget/time.Duration(len(ips)) < perAddress {
+		perAddress = budget / time.Duration(len(ips))
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), budget)
+	defer cancel()
+	for _, ip := range ips {
+		trial, stop := context.WithTimeout(ctx, perAddress)
+		var lc net.ListenConfig
+		l, err := lc.Listen(trial, "tcp4", net.JoinHostPort(ip.String(), "0"))
+		if err != nil {
+			stop()
+			tried = append(tried, fmt.Sprintf("%s: bind: %v", ip, err))
+			continue
+		}
+		c, err := (&net.Dialer{}).DialContext(trial, "tcp4", l.Addr().String())
+		stop()
+		if err != nil {
+			_ = l.Close()
+			tried = append(tried, fmt.Sprintf("%s: dial: %v", ip, err))
+			continue
+		}
+		source, ok := c.LocalAddr().(*net.TCPAddr)
+		if !ok || !source.IP.Equal(ip) {
+			tried = append(tried, fmt.Sprintf("%s: source mismatch: %v", ip, c.LocalAddr()))
+			_ = c.Close()
+			_ = l.Close()
+			continue
+		}
+		t.Logf("self-dial from %s to specifically bound %s", c.LocalAddr(), l.Addr())
+		t.Cleanup(func() { _ = c.Close(); _ = l.Close() })
+		return l, c
+	}
+	reason := fmt.Sprintf("no self-dialable non-loopback IPv4 within %v; tried: %v", budget, tried)
+	if _, ci := os.LookupEnv("CI"); ci {
+		t.Fatal(reason)
+	}
+	t.Skip(reason)
+	return nil, nil
 }
 
 // ---- log capture ----

@@ -38,6 +38,17 @@ build-all` once before pushing (it's what CI reproduces). While iterating
 on one package, `go test ./internal/<pkg>/` (or `make test-fast`, no race
 detector) is seconds.
 
+`make test` and `make test-fast` create and use the
+checkout's absolute `.tmp/` directory as `TMPDIR` when it is unset or empty.
+This keeps player tests on the checkout's disk when the host's `/tmp` is
+tmpfs, which the player's durability checks refuse. A non-empty caller
+`TMPDIR` wins; choose a directory on persistent storage if the checkout is
+also on tmpfs. Use `make test TEST_PKGS=./internal/config` for a focused race
+run through the same target. `.tmp/` is ignored by Git and excluded from Docker builds.
+Unix-socket fixtures keep short `/tmp/mpd*` paths or bind by basename from
+inside their directory, since deep checkout paths exceed the OS socket
+address limit (104 bytes on macOS, 108 on Linux).
+
 **On a RAM-constrained machine** the `-race` + 6-target cross-compile peak
 can OOM. The Makefile caps build/test parallelism via `P` (default 4);
 lower it (`make test P=2`) if builds still thrash, or raise it on a roomy

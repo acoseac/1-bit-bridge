@@ -188,7 +188,7 @@ func TestBackupRestoreCLICarriesForeignFloorAndDiscardsForeignQueue(t *testing.T
 	needsDirectorySync(t)
 	persistentMedium(t)
 	cfg, dir, _ := seedRestorableInstall(t, "127.0.0.1:0")
-	id, _, err := config.EnsurePlayerUUID(dir)
+	id, _, err := backup.EnsurePlayerUUID(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

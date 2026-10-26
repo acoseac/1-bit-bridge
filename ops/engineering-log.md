@@ -65040,3 +65040,70 @@ listener-dependent suites and Linux-only runtime tests remain unrun in this
 macOS sandbox. Formatting, docs-check and diff whitespace checks passed.
 PROTOCOL.md and the output/player rules and History record describe the new
 contract; protocol version stays 1, and the iOS mirror remains a separate copy.
+
+## 2026-10-26 — B544 and B520: developer-host test robustness
+
+Retired `config.EnsurePlayerUUID`: a repository-wide Go-symbol census found
+only test callers, while serve and bind already use `backup.EnsurePlayerUUID`.
+Kept `config.WritePlayerUUIDFile`, used by that minter and by restore. Before
+retirement, verified the backup minter's ordering: `player_floor.go:804` calls
+`engine.WriteReservation` (`reserve.go:113`), whose `WriteBytesDurable` checks
+`p.storage()` at `atomicwrite.go:996`, before the UUID writer at
+`player_floor.go:810` publishes the identity. The config primitive had only
+the UUID writer's post-rename probe, without that earlier medium check.
+
+Moved v4-shape, persistence, permission and malformed-identity coverage into
+backup's external test package; config's undo fixture now uses its writer,
+and the CLI foreign-floor fixture uses the checked minter. The new refusing
+medium test checks both calls, probe counts and absence of the final UUID.
+Negative control: move the fresh-mint `config.WritePlayerUUIDFile` block above
+`engine.WriteReservation` in `ensurePlayerUUID`. The test compiles and fails
+on both attempts: "left the final UUID path: <nil>". Restoring the saved file
+bytes makes it pass. No commit or worktree reset was used for the control.
+
+`test` and `test-fast` alone export a target-specific TMPDIR: the caller's
+non-empty environment value or absolute `$(CURDIR)/.tmp`, created with quoted
+`mkdir -p`. Both ignore files exclude `.tmp/`; CONTRIBUTING explains the
+fallback and focused `TEST_PKGS` selection. All five CI make invocations are
+unchanged: vet, measure-dsd, build-all P=$(nproc), check-go-version, docs-check;
+CI's race shards still set their own runner.temp. The Unix-socket census
+found MPD's short `/tmp/mpd*` directories and fsutiltest's basename bind after
+Chdir, which already avoid deep-checkout sun_path overflow (104/108 bytes).
+
+B520 now tries all non-loopback, non-unspecified IPv4 candidates until one
+binds and self-dials with a matching source. Each gets at most 200 ms and a
+share of a two-second network budget. The successful listener/connection are
+retained for the actual silent probe, avoiding a second dial or rebind. No
+usable candidate lists every attempted address: skip locally, fatal when CI
+is present. Logging negative control for an unrestricted host: in
+`fromThisHost`, replace `return ok && remote.IP.Equal(local.IP)` with
+`return ok && remote.IP.Equal(local.IP) && remote.IP.IsLoopback()`. The named
+test was verified by the reviewer on macOS (darwin/arm64, Go 1.27.3): it
+passed without skipping (0.01 s); with that mutation it failed with
+`handshakelog_test.go:211: a probe of the bound IP from this host was logged: ["http: TLS handshake error from <client address>: EOF"]`;
+restored, it passed. The original sandbox run separately observed the local
+skip and CI-fatal paths when binds were denied on all four addresses.
+
+Go 1.27.3: whole-module build and vet passed on darwin/arm64 and GOOS=linux,
+each with and without the release tags. Tagged config and backup suites
+passed; the focused CLI foreign-floor test and both UUID/citation guards
+passed. A real unset-TMPDIR make test of config passed under -race. Dry runs
+for unset, empty, caller-set and space-containing TMPDIR values showed the
+correct quoted paths. Full handshake and CLI suites were attempted but socket
+binds were denied; no full-suite green or Linux runtime result is claimed.
+Formatting, diff whitespace and docs-check passed. All changes stay uncommitted.
+
+Review follow-up: `TestPlayerUUIDMinterRefusesNonFilesAtOnce` restores the
+retired config minter's Unix coverage at `backup.EnsurePlayerUUID`: a named
+pipe, a link to one, a link to a character device and a directory. Each
+must return within fsutiltest's five-second bound with a non-nil error other
+than `fs.ErrNotExist`, no identity, and the same node and mode still present
+(`Lstat` and `os.SameFile`). The helper releases a stuck FIFO and joins the
+call after recording a timing failure, so the negative control cannot hang
+cleanup. Control: insert `if f, err := os.Open(filepath.Join(dir,
+config.PlayerUUIDFile)); err == nil { _ = f.Close() }` at the start of
+`ensurePlayerUUID`, before `completePlayerSeal`. Under Go 1.27.3 and the
+release tags with `-race`, the original passes all four rows; the control
+fails both FIFO rows with "still running after 5s, waiting to open a named
+pipe". Production bytes are restored after the control. The CLI coverage
+rule now includes non-file kinds; that short rule has no separate long form.
