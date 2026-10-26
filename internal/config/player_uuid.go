@@ -10,8 +10,6 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/google/uuid"
-
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
@@ -20,7 +18,7 @@ import (
 // directory the config names (dataDir), one line holding a random
 // version-4 UUID in lowercase. It is the player's identity to a controller
 // (the OpenHome UDN, the /v1/outputs id), so it is made once, the first
-// time a player that is enabled asks for it (EnsurePlayerUUID), and kept:
+// time a player that is enabled asks for it (backup.EnsurePlayerUUID), and kept:
 // a config rewrite leaves the data directory alone, and neither a DAC swap
 // nor a rebinding touches it. bridge backup carries it, and bridge restore
 // gives the box the snapshot's (internal/backup), so a restored player is
@@ -92,35 +90,8 @@ func readPlayerUUIDBytes(path string) ([]byte, error) {
 	return b, nil
 }
 
-// EnsurePlayerUUID returns the player's UUID, making it the first time:
-// created is true when this call made it, through WritePlayerUUIDFile. The
-// caller holds the data directory's lock (serve's own, or
-// holdDataDirForMutation's), so no other process makes one at the same
-// time.
-func EnsurePlayerUUID(dataDir string) (id string, created bool, err error) {
-	id, err = ReadPlayerUUID(dataDir)
-	if err == nil {
-		return id, false, nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return "", false, err
-	}
-	u, err := uuid.NewRandom()
-	if err != nil {
-		return "", false, fmt.Errorf("make the player's UUID: %w", err)
-	}
-	id = u.String()
-	if err := fsutil.MkdirAll(dataDir, 0o700); err != nil {
-		return "", false, err
-	}
-	if err := WritePlayerUUIDFile(filepath.Join(dataDir, PlayerUUIDFile), id); err != nil {
-		return "", false, err
-	}
-	return id, true, nil
-}
-
 // ForgetPlayerUUID removes dataDir's player-uuid file while it holds id:
-// the undo of an EnsurePlayerUUID that made it (created) for a player that
+// the undo of a backup.EnsurePlayerUUID that made it (created) for a player that
 // then did not start, serve's whose engine refused the data directory's
 // storage, so the refusal leaves no identity behind on storage that may not
 // keep it. A file that holds another UUID, or that is not there, is left
@@ -144,7 +115,7 @@ func ForgetPlayerUUID(dataDir, id string) error {
 
 // WritePlayerUUIDFile writes id and a newline to the player-uuid file at
 // path, replacing what is there: the identity file's one writer, which
-// EnsurePlayerUUID makes the file with and bridge restore writes a
+// backup.EnsurePlayerUUID makes the file with and bridge restore writes a
 // snapshot's UUID through. It refuses an id that is not one UUID in
 // lowercase, so it never writes a file ReadPlayerUUIDFile refuses. The file
 // is written as every config file is, staged beside path, given the owner

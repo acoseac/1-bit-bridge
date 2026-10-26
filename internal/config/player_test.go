@@ -875,62 +875,6 @@ func TestThePlayerIsEnvSettableButItsSerialIsNot(t *testing.T) {
 	}
 }
 
-// uuidV4 is the form EnsurePlayerUUID writes: a random (version 4, RFC 4122
-// variant) UUID in lowercase.
-var uuidV4 = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
-
-// TestThePlayerUUIDIsMadeOnceAndKept: the UUID is random, made the first
-// time it is asked for, kept in the data directory's player-uuid, and the
-// same every time after, whatever the config or the binding become; two
-// data directories never share one, so it is not derived from anything a
-// config holds.
-func TestThePlayerUUIDIsMadeOnceAndKept(t *testing.T) {
-	t.Cleanup(atomicwrite.SetSyncDirForTest(func(string) error { return nil }))
-	t.Cleanup(atomicwrite.SetMediumForTest(func(string) error { return nil }))
-	dir := t.TempDir()
-	if _, err := ReadPlayerUUID(dir); !errors.Is(err, fs.ErrNotExist) {
-		t.Fatalf("ReadPlayerUUID on a fresh data dir = %v, want fs.ErrNotExist", err)
-	}
-	id, created, err := EnsurePlayerUUID(dir)
-	if err != nil || !created || !uuidV4.MatchString(id) {
-		t.Fatalf("EnsurePlayerUUID = %q, %v, %v", id, created, err)
-	}
-	b, err := os.ReadFile(filepath.Join(dir, PlayerUUIDFile))
-	if err != nil || strings.TrimSpace(string(b)) != id {
-		t.Fatalf("player-uuid holds %q, %v", b, err)
-	}
-	if runtime.GOOS != "windows" {
-		if st, err := os.Stat(filepath.Join(dir, PlayerUUIDFile)); err != nil || st.Mode().Perm() != 0o600 {
-			t.Errorf("player-uuid mode %v, %v", st.Mode().Perm(), err)
-		}
-	}
-	for i := 0; i < 3; i++ {
-		again, created, err := EnsurePlayerUUID(dir)
-		if err != nil || created || again != id {
-			t.Fatalf("EnsurePlayerUUID again = %q, %v, %v; want %q kept", again, created, err, id)
-		}
-	}
-	if got, err := ReadPlayerUUID(dir); err != nil || got != id {
-		t.Fatalf("ReadPlayerUUID = %q, %v", got, err)
-	}
-	other, _, err := EnsurePlayerUUID(t.TempDir())
-	if err != nil || other == id {
-		t.Fatalf("a second data dir got %q, %v", other, err)
-	}
-	for _, garbage := range []string{"", "not-a-uuid\n", id + id, strings.ToUpper(id)} {
-		bad := t.TempDir()
-		if err := os.WriteFile(filepath.Join(bad, PlayerUUIDFile), []byte(garbage), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if got, err := ReadPlayerUUID(bad); err == nil || errors.Is(err, fs.ErrNotExist) {
-			t.Errorf("player-uuid %q read as %q, %v; want a refusal", garbage, got, err)
-		}
-		if got, _, err := EnsurePlayerUUID(bad); err == nil {
-			t.Errorf("EnsurePlayerUUID replaced a player-uuid it could not read with %q", got)
-		}
-	}
-}
-
 // TestForgetPlayerUUIDRemovesOnlyTheUUIDItIsGiven: the undo of a make, for
 // a player that then did not start, removes the identity file while it
 // holds the UUID it is given, and leaves alone one that holds another, a
@@ -940,9 +884,9 @@ func TestForgetPlayerUUIDRemovesOnlyTheUUIDItIsGiven(t *testing.T) {
 	t.Cleanup(atomicwrite.SetSyncDirForTest(func(string) error { return nil }))
 	t.Cleanup(atomicwrite.SetMediumForTest(func(string) error { return nil }))
 	dir := t.TempDir()
-	id, created, err := EnsurePlayerUUID(dir)
-	if err != nil || !created {
-		t.Fatalf("EnsurePlayerUUID = %q, %v, %v", id, created, err)
+	const id = "0f8fad5b-d9cb-469f-a165-70867728950e"
+	if err := WritePlayerUUIDFile(filepath.Join(dir, PlayerUUIDFile), id); err != nil {
+		t.Fatal(err)
 	}
 	const other = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
 	if err := ForgetPlayerUUID(dir, other); err != nil {
@@ -973,7 +917,7 @@ func TestForgetPlayerUUIDRemovesOnlyTheUUIDItIsGiven(t *testing.T) {
 }
 
 // TestWritePlayerUUIDFileWritesOneUUIDAndNothingElse: the identity file's
-// writer, which EnsurePlayerUUID makes the file with and a restore writes a
+// writer, which backup.EnsurePlayerUUID makes the file with and a restore writes a
 // snapshot's UUID through, writes the UUID and a newline, 0600, over what
 // was there; and it refuses to write anything but one lowercase UUID,
 // leaving the file as it was and nothing staged beside it.
@@ -1046,9 +990,6 @@ func TestThePlayerUUIDReadsPastTrailingWhiteSpaceAndNothingElse(t *testing.T) {
 		dir := write(t, body)
 		if got, err := ReadPlayerUUID(dir); err == nil || errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("player-uuid %q read as %q, %v; want a refusal", body, got, err)
-		}
-		if got, _, err := EnsurePlayerUUID(dir); err == nil {
-			t.Errorf("EnsurePlayerUUID replaced player-uuid %q with %q", body, got)
 		}
 	}
 }

@@ -67,3 +67,6 @@ ops/*findings*.md
 # copy is pure diff noise (one slipped in with the fixtures on #866).
 __pycache__/
 *.pyc
+
+# Test scratch space on the checkout's disk.
+.tmp/

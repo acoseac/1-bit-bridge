@@ -18,7 +18,7 @@ import (
 // one (fsutil.OpenAsFile). A named pipe, a link to one, a link to a
 // character device and a directory at player-uuid are each refused at once
 // by every reader, named by their kind, with an error that is neither
-// fs.ErrNotExist (no identity, which EnsurePlayerUUID would make) nor
+// fs.ErrNotExist (no identity, which backup.EnsurePlayerUUID would make) nor
 // ErrNotOnePlayerUUID, and none of them is replaced or removed. A plain open
 // of the pipe waited for a writer, and nothing could cancel the wait; the
 // device read as a file that does not hold one UUID.
@@ -69,7 +69,6 @@ func TestWhatIsNotAFileAtPlayerUUIDIsRefusedAtOnce(t *testing.T) {
 			}{
 				{"ReadPlayerUUIDFile", func() error { _, err := ReadPlayerUUIDFile(path); return err }},
 				{"ReadPlayerUUID", func() error { _, err := ReadPlayerUUID(dir); return err }},
-				{"EnsurePlayerUUID", func() error { _, _, err := EnsurePlayerUUID(dir); return err }},
 				{"ForgetPlayerUUID", func() error { return ForgetPlayerUUID(dir, id) }},
 			} {
 				var err error

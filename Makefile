@@ -17,6 +17,9 @@ override GO_TAGS := ts_omit_webclient,ts_omit_debugeventbus
 # Raise it on a roomy box: `make test P=8` (or P=$(nproc) / P=$(sysctl -n hw.ncpu)).
 P ?= 4
 
+# Narrow the ordinary suites for an inner-loop run.
+TEST_PKGS ?= ./...
+
 # VERSION is injected into internal/version.ServerVersion so that
 # `make build` artefacts report something meaningful in the admin
 # console and update-poll User-Agent. Auto-derives from `git describe`
@@ -51,15 +54,25 @@ build-all: check-build-tags
 # IsBcryptShape was the recurring timeout victim — it's just where the package
 # timeout goroutine-dump landed, not a hang). The race detector still catches a
 # genuine deadlock at the 30m ceiling.
+# Use disk-backed scratch space unless the caller supplied a non-empty TMPDIR.
+# Target-specific export keeps build/vet/run and CI's explicit TMPDIR unchanged.
+# An explicit recipe assignment also makes the effective path visible in make -n.
+# Separate export and override for GNU make 3.81 (macOS); an empty
+# command-line TMPDIR= must use the fallback too.
+test test-fast: export TMPDIR := $(TMPDIR)
+test test-fast: override TMPDIR := $(if $(strip $(TMPDIR)),$(TMPDIR),$(CURDIR)/.tmp)
+
 test:
-	go test -tags "$(GO_TAGS)" -p $(P) -race -timeout 30m ./...
+	@mkdir -p "$(TMPDIR)"
+	TMPDIR="$(TMPDIR)" go test -tags "$(GO_TAGS)" -p $(P) -race -timeout 30m $(TEST_PKGS)
 
 # Fast inner-loop tests: no race detector — much faster to build and a
 # fraction of the RAM, so it won't thrash on a loaded machine. Use while
 # iterating; run `make test` (race) before pushing. A single package is
 # faster still: `go test -tags ts_omit_webclient,ts_omit_debugeventbus ./internal/<pkg>/`.
 test-fast:
-	go test -tags "$(GO_TAGS)" -p $(P) ./...
+	@mkdir -p "$(TMPDIR)"
+	TMPDIR="$(TMPDIR)" go test -tags "$(GO_TAGS)" -p $(P) $(TEST_PKGS)
 
 # The DSD render measurements. Gated behind BRIDGE_DSD_FIXTURE_TESTS because
 # they need a real sox + ffmpeg (with the four dsd_* decoders); they SKIP
