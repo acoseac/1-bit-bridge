@@ -775,10 +775,15 @@ func (r *playerReader) optionalBool(n *yaml.Node, path string) *bool {
 // yaml.v3 would change on the way in is refused as a word is, a fraction
 // among them: it decodes a float into an int by dropping what follows the
 // point, so openhomePort: 7792.9 read as 7792 (exactInteger, backlog B528).
+// An otherwise accepted leading-zero spelling is refused too (B533).
 func (r *playerReader) whole(n *yaml.Node, path string, into *int) {
 	n = deref(n)
 	if n.Kind != yaml.ScalarNode || !exactInteger(n, intType) || n.Decode(into) != nil {
 		r.fail(n, path, "must be a whole number")
+		return
+	}
+	if leadingZero(n.Value) {
+		r.fail(n, path, "must be written without a leading zero, %s", leadingZeroRemedy)
 	}
 }
 

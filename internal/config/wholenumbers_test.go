@@ -154,9 +154,8 @@ func TestAWholeNumberSettingTakesNoFraction(t *testing.T) {
 }
 
 // TestAWholeNumberSettingTakesWhatDecodesUnchanged: what decides is the
-// value written, never its spelling. A float yaml.v3 decodes unchanged into
-// the setting is taken (6.0, 6e1, and 08, which yaml.v3 resolves as a
-// float), and one it would change is refused with the refusal yaml.v3 gives
+// value written, with leading-zero spellings refused separately (B533).
+// A float yaml.v3 decodes unchanged into the setting is taken (6.0, 6e1), and one it would change is refused with the refusal yaml.v3 gives
 // a float outside its range, made value free: on
 // limits.manifest.requestsPerMinute, where 0 and a negative number turn the
 // manifest limit off, 0.5 loaded as 0 and -.inf as the smallest int64, each
@@ -177,10 +176,8 @@ func TestAWholeNumberSettingTakesWhatDecodesUnchanged(t *testing.T) {
 		{"an integer", "6", 6, false},
 		{"a whole float", "6.0", 6, false},
 		{"an exponent", "6e1", 60, false},
-		{"a leading zero, which yaml.v3 resolves as a float", "08", 8, false},
 		{"a negative zero", "-0.0", 0, false},
 		{"a float tag on a whole number", "!!float 6", 6, false},
-		{"a float tag on an octal spelling, which yaml.v3 reads as octal as it does untagged", "!!float 036", 30, false},
 		{"a float tag on a binary spelling with a sign after its prefix, which yaml.v3 still reads", "!!float 0b+11110", 30, false},
 		{"a whole number with a million zeros after its point", "30." + strings.Repeat("0", 1_000_001), 30, false},
 		{"zero with an exponent past an int64", "0e99999999999999999999", 0, false},

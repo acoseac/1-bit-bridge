@@ -71,6 +71,9 @@ func valueFreeTypeError(e string) string {
 		return "a value does not read"
 	}
 	at, rest := "line "+m[1]+": ", m[2]
+	if rest == leadingZeroDiagnostic {
+		return at + leadingZeroDiagnostic
+	}
 	if body, ok := strings.CutPrefix(rest, "cannot unmarshal "); ok {
 		// "cannot unmarshal <tag><value> into <type>": the type is
 		// last, and holds no " into ", so the last one ends the value.
