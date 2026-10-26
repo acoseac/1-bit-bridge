@@ -221,6 +221,15 @@ libraryName: "Living Room Library"
 The bridge will still mint a TLS cert on first run if one isn't
 present.
 
+Whole-number values in `bridge.yaml` must not have a leading zero. For example,
+`output.loopbackPort: 08080`, which loaded as 8080 at revision `a6393b1e`, now
+refuses to load. Write `8080` for decimal, or use an explicit `0o` prefix if you
+mean octal. The error names the line to fix. This also applies to counts and
+intervals; `0`, `30.0`, `3e1` and explicit-base numbers remain accepted. In
+`output.player`, a refused value disables the player and is preserved on save.
+`bridge init` writes numbers without leading zeros; when rewriting an existing
+file, it warns and drops an offending output setting while keeping valid neighbours.
+
 ## Where state lives (`/data`)
 
 Everything the bridge writes — `bridge.yaml`, the SQLite manifest DB, the TLS

@@ -25,7 +25,9 @@ import (
 // nobody wrote. Such a value is refused where a word on its line is: Load
 // refuses the file (DecodeFile), and the player block's reader leaves the
 // block unread (playerReader.whole). A float the integer holds exactly is
-// taken as it is: 30.0, 3e1, and 08, which yaml.v3 resolves as a float.
+// taken as it is: 30.0 and 3e1. Leading-zero spellings, including 08,
+// are refused after this exact-value check (B533): YAML 1.1 may read them
+// as octal, so accepting them or reinterpreting them as decimal is unsafe.
 // What is weighed is the value the text writes, read exactly as yaml.v3
 // reads it (writtenInteger): yaml.v3 reads a float through
 // strconv.ParseFloat, which rounds to the nearest float64, so
@@ -51,10 +53,10 @@ func DecodeFile(raw []byte, cfg *Config) error {
 // CheckWholeNumbers refuses each whole-number setting that n, decoded into
 // into (a pointer, as for Decode), writes as a value yaml.v3 would change on
 // the way in: a fraction, an infinity, NaN, or a float outside the setting's
-// range (exactInteger). It answers a *yaml.TypeError with a line for each,
-// in the words ValueFreeYAMLError gives a float yaml.v3 refuses itself
-// ("line 5: cannot unmarshal a !!float value into int"), which quote
-// nothing of the value, or nil. It looks at nothing else, so it is asked of
+// range (exactInteger), or an otherwise accepted leading-zero spelling.
+// It answers a *yaml.TypeError with a value-free line for each: the
+// existing float diagnostic ("line 5: cannot unmarshal a !!float value
+// into int") or leadingZeroDiagnostic, or nil. It looks at nothing else, so it is asked of
 // a node that decodes into into without an error.
 //
 // yaml.v3 itself maps n onto the settings, decoding it into into's type
@@ -222,6 +224,23 @@ func decimalExponent(s string) (e int64, large, ok bool) {
 	return e, false, true
 }
 
+// leadingZero reports a zero followed by a decimal digit after dropping
+// underscores and an optional sign, as writtenInteger does. Call it only
+// after the existing decode and exact-value checks, so their refusals win.
+func leadingZero(text string) bool {
+	plain := strings.ReplaceAll(text, "_", "")
+	if plain != "" && (plain[0] == '+' || plain[0] == '-') {
+		plain = plain[1:]
+	}
+	return len(plain) > 1 && plain[0] == '0' && plain[1] >= '0' && plain[1] <= '9'
+}
+
+// leadingZeroRemedy is shared by the file's diagnostic and the player's reason.
+const leadingZeroRemedy = "which YAML may read as octal; write it in decimal without the leading zero, or with 0o if you mean octal"
+
+// leadingZeroDiagnostic is a fixed, value-free sentence, recognized exactly by ValueFreeYAMLError.
+const leadingZeroDiagnostic = "a whole number is written with a leading zero, " + leadingZeroRemedy
+
 // integerCheck stands in for a whole-number setting of type T in a shadow
 // (shadowOf). It decodes nothing.
 type integerCheck[T any] struct{}
@@ -233,10 +252,13 @@ type integerCheck[T any] struct{}
 // node it names.
 func (*integerCheck[T]) UnmarshalYAML(n *yaml.Node) error {
 	t := reflect.TypeFor[T]()
-	if exactInteger(n, t) {
-		return nil
+	if !exactInteger(n, t) {
+		return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: cannot unmarshal a !!float value into %s", n.Line, t)}}
 	}
-	return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: cannot unmarshal a !!float value into %s", n.Line, t)}}
+	if leadingZero(n.Value) {
+		return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: %s", n.Line, leadingZeroDiagnostic)}}
+	}
+	return nil
 }
 
 // integerChecks is the integerCheck for each integer kind. A named integer

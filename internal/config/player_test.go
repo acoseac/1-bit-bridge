@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/acoseac/1-bit-bridge/internal/alsa"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
@@ -359,8 +361,8 @@ func TestASerialInTheWrongFieldIsNeverQuoted(t *testing.T) {
 // weighed is the value written, exactly, never the float64 it rounds to:
 // pauseReleaseSeconds: 45.0000000000000001 read as 45, and
 // device.pcmDevice: 1e-400 as 0. An integer
-// reads as written, and so does a float whose value is whole (45.0, and 08,
-// which yaml.v3 resolves as a float); left out, the setting is its default.
+// reads as written unless it has a leading zero (B533), and so does a
+// float whose value is whole (45.0); left out, the setting is its default.
 // Each subtest is named for the kind of value, never the value.
 func TestAWholeNumberOfThePlayerTakesNoFraction(t *testing.T) {
 	const device = "    device:\n      binding: uniqueModel\n      vendorId: 20b1\n      productId: \"3009\"\n"
@@ -384,7 +386,7 @@ func TestAWholeNumberOfThePlayerTakesNoFraction(t *testing.T) {
 		{"openhomePort", "    openhome: true\n", "    ", PlayerConfig.EffectiveOpenHomePort, DefaultOpenHomePort,
 			[]readsAs{{"7793", 7793}, {"7793.0", 7793}}, []string{"7792.9", "7793.25", "7793.0000000000001"}},
 		{"device.pcmDevice", device, "      ", func(p PlayerConfig) int { return p.Device.PCMDevice }, 0,
-			[]readsAs{{"1", 1}, {"08", 8}, {"!!float 010", 8}}, []string{"1.5", "0.75", "1e-400"}},
+			[]readsAs{{"1", 1}}, []string{"1.5", "0.75", "1e-400"}},
 		{"device.subdevice", device, "      ", func(p PlayerConfig) int { return p.Device.Subdevice }, 0,
 			[]readsAs{{"2", 2}, {"2.0", 2}}, []string{"2.5", "0.25"}},
 	} {
@@ -991,5 +993,78 @@ func TestThePlayerUUIDReadsPastTrailingWhiteSpaceAndNothingElse(t *testing.T) {
 		if got, err := ReadPlayerUUID(dir); err == nil || errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("player-uuid %q read as %q, %v; want a refusal", body, got, err)
 		}
+	}
+}
+
+// TestLeadingZeroPlayerBlock drives the player's own reader and preserves unread blocks through save.
+func TestLeadingZeroPlayerBlock(t *testing.T) {
+	for _, tc := range []struct{ key, value string }{
+		{"pauseReleaseSeconds", "010"}, {"openhomePort", "07792"},
+		{"device.pcmDevice", "08"}, {"device.pcmDevice", "!!float 010"}, {"device.subdevice", "0_10"},
+	} {
+		t.Run(tc.key+"/"+tc.value, func(t *testing.T) {
+			field := tc.key
+			body := "enabled: true\n"
+			line := 2
+			if strings.HasPrefix(field, "device.") {
+				field = strings.TrimPrefix(field, "device.")
+				body += "device:\n  "
+				line = 3
+			}
+			body += field + ": " + tc.value + "\n"
+			// A later setting must not be read once the first problem is found.
+			body += "room: Later\n"
+			var p PlayerConfig
+			if err := yaml.Unmarshal([]byte(body), &p); err != nil {
+				t.Fatal(err)
+			}
+			reason := fmt.Sprintf("output.player.%s (line %d): must be written without a leading zero, which YAML may read as octal; write it in decimal without the leading zero, or with 0o if you mean octal", tc.key, line)
+			wantYAMLError(t, p.Unread(), reason)
+			if p.Room != "" {
+				t.Fatalf("reader continued past its first problem: room %q", p.Room)
+			}
+			block := "  player:\n    " + strings.ReplaceAll(strings.TrimSuffix(body, "\n"), "\n", "\n    ") + "\n"
+			path := writePlayerConfig(t, block)
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if on, why := cfg.PlayerEnabled("linux"); on || why == nil || cfg.Output.Player.Unread() == nil {
+				t.Fatalf("PlayerEnabled = %v, %v; want disabled and unread", on, why)
+			}
+			wantYAMLError(t, cfg.Output.Player.Unread(), strings.Replace(reason, fmt.Sprintf("(line %d)", line), fmt.Sprintf("(line %d)", line+8), 1))
+			if err := Edit(path, func(*Config) (bool, error) { return true, nil }); err != nil {
+				t.Fatal(err)
+			}
+			saved, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(saved), field+": "+tc.value+"\n") {
+				t.Fatalf("save lost the refused spelling:\n%s", saved)
+			}
+			back, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if on, why := back.PlayerEnabled("linux"); on || why == nil || back.Output.Player.Unread() == nil {
+				t.Fatalf("after save: PlayerEnabled = %v, %v; want disabled and unread", on, why)
+			}
+			unlined := regexp.MustCompile(` \(line \d+\)`)
+			wantYAMLError(t, errors.New(unlined.ReplaceAllString(back.Output.Player.Unread().Error(), "")), unlined.ReplaceAllString(reason, ""))
+		})
+	}
+}
+
+// TestLeadingZeroPlayerBoundary keeps the player's existing first refusal for invalid values.
+func TestLeadingZeroPlayerBoundary(t *testing.T) {
+	for _, value := range []string{`"010"`, "!!int 08", "00.5", "099999999999999999999", "!!bool 010"} {
+		t.Run(value, func(t *testing.T) {
+			var p PlayerConfig
+			if err := yaml.Unmarshal([]byte("enabled: true\nopenhomePort: "+value+"\npauseReleaseSeconds: 010\n"), &p); err != nil {
+				t.Fatal(err)
+			}
+			wantYAMLError(t, p.Unread(), "output.player.openhomePort (line 2): must be a whole number")
+		})
 	}
 }

@@ -65107,3 +65107,64 @@ release tags with `-race`, the original passes all four rows; the control
 fails both FIFO rows with "still running after 5s, waiting to open a named
 pipe". Production bytes are restored after the control. The CLI coverage
 rule now includes non-file kinds; that short rule has no separate long form.
+
+## 2026-10-26 — B533: whole-number settings refuse leading-zero spellings
+
+At a6393b1e, yaml.v3 read `010` as octal 8 and `0777` as 511, but `08`
+and `07792` as floats, 8 and 7792. B528's shadow already reaches the raw
+scalar of each decoded whole-number setting. Added one predicate there and
+in the player reader: drop underscores and an optional sign, then refuse
+zero followed by a decimal digit. Reinterpreting these as decimal was
+rejected because it would silently disagree with other YAML 1.1 tools.
+No integer config setting represents a permission or umask; modes are text.
+
+Existing decode errors and B528's exact-value refusal still win. A fraction
+such as `00.5` gets only its previous line. The decoder still determines
+merge precedence, aliases, inline fields, error order and multiplicity;
+map keys remain unchecked. The leading-zero diagnostic is a fixed sentence,
+value-free, recognized by equality of its entire body in ValueFreeYAMLError.
+Appending file text makes a lookalike fall back to the generic diagnostic.
+The player retains its first problem, stops reading and preserves the unread
+block on save. Init's three existing validation calls need no production
+change: whole file, output block beside another decode error, and recovered
+setting. The tests also run the real initCmd rewrite, warning and save.
+
+Red first, before the production change: the new tests compiled and failed
+on accepted leading-zero settings, with each complete got/want message in
+`red-final.log`. After extending the player round-trip, map and init-entry
+assertions, `red-entry.log` re-ran the final tests with the three production
+files overlaid verbatim from a6393b1e: 95 diagnostics got nil, the mixed
+case retained only its two B528 lines, and all three init cases kept 7795.
+The sanitizer cases also failed because the new sentence was unfamiliar.
+The new accepted-value and compatibility cases and B528 tests passed.
+
+Green: `green-final.log`, both packages' B533 and B528 cases pass.
+Negative control: a Go overlay replaces only leadingZero's body with
+`return false`; `control.log` fails only the five leading-zero test groups,
+with the same 95 nil diagnostics, the mixed case's two unchanged B528 lines,
+and the three init admissions. The sanitizer stays green. Running the
+entire config suite under that control (`control-config-all.log`) fails
+only its four leading-zero groups; no other config test fails. Removing
+the overlay passes the focused packages again (`restored.log`), and the
+full config suite passes under the race detector (`config-all.log`).
+The overlays and original bytes are saved beside the logs; no commit,
+stash or worktree reset was used, and production files retain the fix.
+
+Flipped acceptance expectations: the shared settings' `08` and `!!float
+036`, and the player's device.pcmDevice `08` and `!!float 010`, all now
+refused by complete-diagnostic tests. writtenInteger's parser expectations
+remain: it must still model YAML's interpretation before B533 checks the
+spelling. README and the Docker/VPS config guides explain the compatibility
+change: a port written as `08080`, which loaded as 8080 at a6393b1e, must
+now be written as `8080`, or with an explicit octal prefix if intended.
+The binding rule and its reasoning are in config-lifecycle.md and its
+History file, updated with B528's entry.
+
+Checks use Go 1.27.3 and ts_omit_webclient,ts_omit_debugeventbus. Whole-module
+vet passes, the whole-module test suite (`go test -p 4
+-tags=ts_omit_webclient,ts_omit_debugeventbus -timeout 30m ./...` with
+GOTOOLCHAIN=go1.27.3, all 77 packages, socket tests included) passes on a
+macOS developer host, and the
+config package passes under the race detector. Formatting, diff whitespace
+and make docs-check pass. The log names above label the run's working files,
+which are not kept; their results are quoted here.

@@ -123,6 +123,15 @@ For anyone who wants to skip the service install or run the bridge out of an arb
 ./bridge serve --config ./bridge-data/bridge.yaml
 ```
 
+Whole-number values in `bridge.yaml` must not have a leading zero. For example,
+`output.loopbackPort: 08080`, which loaded as 8080 at revision `a6393b1e`, now
+refuses to load. Write `8080` for decimal, or use an explicit `0o` prefix if you
+mean octal. The error names the line to fix. This also applies to counts and
+intervals; `0`, `30.0`, `3e1` and explicit-base numbers remain accepted. In
+`output.player`, a refused value disables the player and is preserved on save.
+`bridge init` writes numbers without leading zeros; when rewriting an existing
+file, it warns and drops an offending output setting while keeping valid neighbours.
+
 ## Protocol
 
 See [`PROTOCOL.md`](PROTOCOL.md). Every client endpoint is prefixed `/v1/`. The admin console (`/`, `/api/*`, `/static/*`) lives on a separate loopback listener and is **not** part of the wire protocol — iOS never talks to it.
