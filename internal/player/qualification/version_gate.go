@@ -9,7 +9,7 @@ import (
 )
 
 // GuardedPaths enumerates implementation files whose change invalidates evidence.
-var GuardedPaths = []string{"internal/player/format/dsd_pack.go", "internal/alsapcm/uapi.go", "internal/alsapcm/device.go", "internal/alsapcm/params.go", "internal/alsapcm/sink.go", "internal/alsapcm/sink_ring.go", "internal/alsapcm/sink_writer.go", "internal/alsapcm/sink_dsd.go", "internal/alsapcm/sink_dsd_open.go", "internal/alsapcm/sink_dsd_writer.go", "cmd/bridge/output_dsdtest.go", "cmd/bridge/output_dsdtest_run.go"}
+var GuardedPaths = []string{"internal/player/format/dsd_pack.go", "internal/alsapcm/uapi.go", "internal/alsapcm/device.go", "internal/alsapcm/params.go", "internal/alsapcm/sink.go", "internal/alsapcm/sink_ring.go", "internal/alsapcm/sink_writer.go", "internal/alsapcm/sink_dsd.go", "internal/alsapcm/sink_dsd_open.go", "internal/alsapcm/sink_dsd_writer.go", "cmd/bridge/output_dsdtest.go", "cmd/bridge/output_dsdtest_run.go", "cmd/bridge/output_dsdtest_input.go", "internal/alsapcm/device_native.go", "internal/alsapcm/sys_linux.go", "internal/alsapcm/sys_other.go", "internal/alsactl/control.go", "internal/alsactl/control_linux.go", "internal/alsactl/uapi.go", "internal/alsa/qualification.go", "internal/player/qualification/inputs.go", "internal/player/qualification/version_gate.go"}
 
 // CheckVersion compares read-only Git refs; guarded rename/deletion counts too.
 func CheckVersion(dir, base, head string) error {

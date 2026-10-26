@@ -5,13 +5,26 @@ import (
 	"context"
 	"errors"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
+	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestNativeProbeRequiresAcknowledgement pins every default-less input gate.
 func TestNativeProbeRequiresAcknowledgement(t *testing.T) {
-	base := []string{"--ack-level=off-ear", "--format=DSD_U32_BE", "--bit-rate=2822400", "--seconds=5", "--pause-method=kernel", "--tail-ms=0", "--prefill-ms=0"}
+	t.Run("valid", func(t *testing.T) {
+		h := harnessRig(t)
+		calls := 0
+		h.env.open = func(context.Context, alsapcm.DSDConfig) (nativeTestSink, error) {
+			calls++
+			return nil, errors.New("test opener")
+		}
+		runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, io.Discard)
+		if calls != 1 {
+			t.Fatalf("valid opener-count=%d", calls)
+		}
+	})
 	cases := []struct {
 		flag   string
 		values []string
@@ -23,6 +36,8 @@ func TestNativeProbeRequiresAcknowledgement(t *testing.T) {
 				label = "empty"
 			}
 			t.Run(tc.flag+"/"+label, func(t *testing.T) {
+				h := harnessRig(t)
+				base := h.args[:len(h.args)-4]
 				args := []string{}
 				for _, a := range base {
 					if !strings.HasPrefix(a, "--"+tc.flag+"=") {
@@ -32,14 +47,20 @@ func TestNativeProbeRequiresAcknowledgement(t *testing.T) {
 				if v != "MISSING" {
 					args = append(args, "--"+tc.flag+"="+v)
 				}
+				args = append(args, "dsd")
 				calls := 0
-				env := outputDSDTestEnv{goos: "linux", open: func(context.Context, alsapcm.DSDConfig) (nativeTestSink, error) {
+				env := h.env
+				env.at = func(time.Time) (<-chan time.Time, func()) { return make(chan time.Time), func() {} }
+				env.open = func(context.Context, alsapcm.DSDConfig) (nativeTestSink, error) {
 					calls++
 					return nil, errors.New("fake refusal")
-				}}
+				}
 				var out bytes.Buffer
 				code := runOutputDSDTest(context.Background(), args, env, &out, &out)
-				if code == 0 || !strings.Contains(out.String(), "--"+tc.flag) || calls != 0 {
+				if calls != 0 {
+					t.Fatalf("opener-count: missing/invalid %s reached opener %d times", tc.flag, calls)
+				}
+				if code == 0 || !strings.Contains(out.String(), "--"+tc.flag) {
 					t.Fatalf("exit=%d opens=%d output=%q", code, calls, out.String())
 				}
 			})

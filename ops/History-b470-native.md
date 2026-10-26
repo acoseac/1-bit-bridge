@@ -38,3 +38,44 @@ No production admission, fallback, autoplay, engine lock/event, approval reader 
 is claimed here. See b470-native-qualification.md for owner commands and pending Linux execution.
 
 Cancelled opens retain cleanup ownership in the opening worker. Inert Pause also releases at 30 s; reopen geometry cannot outgrow the allocated store. Actual close acknowledgement wins over an expired release timer. The CLI continues reading Stop/quit while TrackChange is draining.
+
+## Round 2 — 2026-10-27
+
+PCM's packing table and refusal expectations are restored. The native opener has a
+separate format table and NativeFrameBytes; native writes use that frame width.
+Native setup, post-open refusal and writer cleanup retain DROP/HW_FREE/close errors.
+An unconfirmed reopen cleanup is terminal before its waiter receives the error.
+
+Control Access is retained. Only volatile PCM-interface controls are excluded from
+the one fingerprint used by admission, contact validation and receipt creation.
+All MIXER/CARD controls stay constrained. Reports include full snapshots at admission
+and explicit excluded values before/after; an opening-worker timeout never races report
+serialization.
+
+One stdin reader cancels the whole audition on Stop/quit, including PCM references and
+level-check. Playback keys are immediate on a raw TTY; at silent text prompts s/q are
+whole lines. End is stopped/quit and exit 0 only after successful cleanup. Cleanup failure
+keeps End, records Error and exits 1. No later leg or receipt follows either key.
+PCM playback verifies and decodes one descriptor and passes binding admission to OpenSink.
+The test-only overlay shares the real fake kernel with the complete CLI without shipping
+a fake in the binary or weakening hardware guards.
+
+TrackChange is established synchronously before producer cancellation. Finish cancellation
+cannot escalate it. Same-mode releases join the first cutoff/deadline; only initial release
+or Immediate escalation interrupts. Finish observes the release deadline even at natural
+EOF while a parked writer retains cleanup ownership. Activation/resume waiters receive their
+own request result even if cleanup completes first. Resume requires an activation generation,
+rechecks fences after STATUS, and closes a newly opened device when admission is fenced.
+
+The native-qualification CI job is in gate's dependencies. CheckVersion runs against the
+actual PR head's merge base with fetched main, with full history and fail-closed ref
+resolution; main pushes run integration but do not compare a commit to itself.
+GuardedPaths now also includes all activation-deciding control, attachment and evidence
+paths, the native opener, platform openers, console input and version checker. Version is 2.
+Escalation, retained-word replay and all seven mandatory-flag tests are regression pins:
+their explicit mutations, not a baseline failure, demonstrate sensitivity.
+
+A round-2 control exposed the idle-wait race too: Pause can win after the writer's
+loop snapshot but before watchNative installs its context. watchNative rechecks an
+unapplied Pause under the mutex, returning to the writer instead of installing an
+uncancelled wait. TestNativeIdlePauseFence pins that exact window.

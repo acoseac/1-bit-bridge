@@ -270,3 +270,13 @@ func LogGoroutines(t *testing.T) {
 	_ = pprof.Lookup("goroutine").WriteTo(&b, 2)
 	t.Logf("goroutines at watchdog:\n%s", &b)
 }
+
+// HardwareFormats sets literal UAPI codes, without consulting either pack table.
+func (tk *FakeKernel) HardwareFormats(codes ...uint32) {
+	tk.k.inspect(func(k *fakeKernel) { k.hw.formats = append([]uint32(nil), codes...) })
+}
+
+// OpenNativeSink is the real native sink over the same simulated kernel.
+func (tk *FakeKernel) OpenNativeSink(ctx context.Context, c DSDConfig) (*DSDSink, error) {
+	return openNativeBounded(ctx, c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(tk.k, tk.k.now, ep, c) }, now: tk.k.now})
+}

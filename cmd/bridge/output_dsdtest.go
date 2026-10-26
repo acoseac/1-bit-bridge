@@ -23,12 +23,14 @@ import (
 	"runtime"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 type nativeTestSink interface {
 	Activate(context.Context, uint64) error
+	BeginRelease(alsapcm.ReleaseMode)
 	WriteDSD(context.Context, uint64, []byte, []byte, int, int) (int, error)
 	Finish(context.Context) error
 	Release(context.Context, alsapcm.ReleaseMode) error
@@ -38,7 +40,13 @@ type nativeTestSink interface {
 	Position() alsapcm.DSDPosition
 	Done() <-chan struct{}
 }
+type nativePCMSink interface {
+	Write(context.Context, []byte) (int, error)
+	Drain(context.Context) error
+	Close() error
+}
 type outputDSDTestEnv struct {
+	openPCM    func(context.Context, alsapcm.SinkConfig) (nativePCMSink, error)
 	open       func(context.Context, alsapcm.DSDConfig) (nativeTestSink, error)
 	controls   func(int) (alsactl.Snapshot, error)
 	attachment func(int) (qualification.Attachment, error)
@@ -47,7 +55,6 @@ type outputDSDTestEnv struct {
 	stdin      io.Reader
 	tty        bool
 	goos       string
-	playPCM    func(context.Context, string, alsapcm.Endpoint) error
 	resolve    func(context.Context, string) (alsapcm.Endpoint, func(alsapcm.NodeInfo) error, error)
 }
 
@@ -61,9 +68,15 @@ func productionNativeOpen(ctx context.Context, c alsapcm.DSDConfig) (nativeTestS
 func outputDSDTestCmd(ctx context.Context, args []string, out, errout io.Writer) int {
 	ctx, stopSignal := signal.NotifyContext(ctx, os.Interrupt)
 	defer stopSignal()
-	env := outputDSDTestEnv{goos: runtime.GOOS, open: productionNativeOpen, controls: (alsactl.Reader{}).Read, now: time.Now, stdin: os.Stdin, tty: term.IsTerminal(int(os.Stdin.Fd())), resolve: resolveNativeTest, playPCM: func(ctx context.Context, path string, ep alsapcm.Endpoint) error {
-		return nativePCMCall(ctx, func(ctx context.Context) error { return playNativeReference(ctx, path, ep) })
-	}}
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		state, e := term.MakeRaw(int(os.Stdin.Fd()))
+		if e != nil {
+			fmt.Fprintln(errout, e)
+			return 1
+		}
+		defer term.Restore(int(os.Stdin.Fd()), state)
+	}
+	env := outputDSDTestEnv{goos: runtime.GOOS, open: productionNativeOpen, controls: (alsactl.Reader{}).Read, now: time.Now, stdin: os.Stdin, tty: term.IsTerminal(int(os.Stdin.Fd())), resolve: resolveNativeTest, openPCM: productionNativePCMOpen}
 	env.at = func(at time.Time) (<-chan time.Time, func()) {
 		t := time.NewTimer(time.Until(at))
 		return t.C, func() { t.Stop() }
@@ -113,10 +126,12 @@ func parseNativeOptions(args []string, w io.Writer) (nativeOptions, error) {
 	fs := flag.NewFlagSet("dsd-test", flag.ContinueOnError)
 	fs.SetOutput(w)
 	fs.StringVar(&o.ack, "ack-level", "", "off-ear or contact-position (required)")
-	fs.StringVar(&o.format, "format", "", "native ALSA format (required)")
-	fs.IntVar(&o.rate, "bit-rate", 0, "logical bits/channel/s (required)")
+	// Neutral parser values keep downstream diagnostics defined; Visit still
+	// requires explicit flags before any evidence or opener is reached.
+	fs.StringVar(&o.format, "format", "DSD_U32_BE", "native ALSA format (required)")
+	fs.IntVar(&o.rate, "bit-rate", 2822400, "logical bits/channel/s (required)")
 	fs.IntVar(&o.seconds, "seconds", 0, "wall-clock budget from first open (required)")
-	fs.StringVar(&o.pause, "pause-method", "", "kernel or silence (required)")
+	fs.StringVar(&o.pause, "pause-method", "kernel", "kernel or silence (required)")
 	fs.IntVar(&o.tail, "tail-ms", 0, "outgoing silence, 0..100 (required)")
 	fs.IntVar(&o.prefill, "prefill-ms", 0, "activation silence, 0..500 (required)")
 	fs.StringVar(&o.config, "config", "", "loopback config")
@@ -172,6 +187,8 @@ type nativeReport struct {
 	Tuple                                                    qualification.Tuple
 	Attachment                                               qualification.Attachment
 	Before, After                                            alsactl.Snapshot
+	ControlObservations                                      []alsactl.Snapshot
+	ExcludedBefore, ExcludedAfter                            []alsactl.Control
 	ManifestHash, AmixerAnnex, End, Error, OwnerConfirmation string
 	PauseReleaseSeconds                                      int
 	PCMTimePolicy                                            [2]int
@@ -281,6 +298,10 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 		return 1
 	}
 	defer file.Close()
+	// Capture every admission snapshot, including excluded values, without
+	// sharing the report with opening workers that may outlive a timed-out call.
+	var observationsMu sync.Mutex
+	var observations []alsactl.Snapshot
 	// Capture the reference once, compare it before every activation/reopen.
 	admit := func(n alsapcm.NodeInfo) error {
 		if check != nil {
@@ -296,6 +317,9 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 		if e != nil {
 			return e
 		}
+		observationsMu.Lock()
+		observations = append(observations, cc)
+		observationsMu.Unlock()
 		if aa != a || cc.Hash() != controls.Hash() {
 			return errors.New("native binding/mixer reference changed")
 		}
@@ -305,12 +329,25 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 	e = executeNativeTest(ctx, o, env, ep, admit, m, byID, reader, out, &report)
 	after, ae := env.controls(ep.Card)
 	report.After = after
+	observationsMu.Lock()
+	report.ControlObservations = append([]alsactl.Snapshot(nil), observations...)
+	observationsMu.Unlock()
+	for _, c := range controls.Controls {
+		if c.Excluded() {
+			report.ExcludedBefore = append(report.ExcludedBefore, c)
+		}
+	}
+	for _, c := range after.Controls {
+		if c.Excluded() {
+			report.ExcludedAfter = append(report.ExcludedAfter, c)
+		}
+	}
 	if ae != nil {
 		e = errors.Join(e, ae)
 	}
 	if e != nil {
 		report.Error = e.Error()
-		if report.End != "deadline" {
+		if report.End != "deadline" && report.End != "stopped" && report.End != "quit" {
 			report.End = "incomplete"
 		}
 		fmt.Fprintln(errout, e)

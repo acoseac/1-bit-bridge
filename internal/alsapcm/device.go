@@ -203,6 +203,7 @@ type Counters struct {
 // not safe for concurrent use: one goroutine drives it, and a write is
 // stopped by cancelling its context, never by closing the Device under it.
 type Device struct {
+	native   bool
 	sys      sys
 	now      func() time.Time
 	fd       int
@@ -237,6 +238,13 @@ func (cfg Config) resolve(ep Endpoint) (request, error) {
 	sf, ok := sampleFormats[cfg.Format]
 	if !ok {
 		return bad(fmt.Sprintf("format %q is not one this backend packs (S16_LE, S24_3LE, S24_LE, S32_LE)", cfg.Format))
+	}
+	return cfg.resolveSample(ep, sf)
+}
+
+func (cfg Config) resolveSample(ep Endpoint, sf sampleFormat) (request, error) {
+	bad := func(detail string) (request, error) {
+		return request{}, &Error{Reason: ReasonBadConfig, Op: "open", Endpoint: ep, Detail: detail}
 	}
 	if cfg.RateHz < MinRateHz || cfg.RateHz > MaxRateHz {
 		return bad(fmt.Sprintf("rate %d Hz is outside %d..%d", cfg.RateHz, MinRateHz, MaxRateHz))
@@ -579,6 +587,9 @@ func (d *Device) Write(ctx context.Context, frames []byte) (int, error) {
 		return 0, d.closedError("write")
 	}
 	fb := d.params.FrameBytes()
+	if d.native {
+		fb = d.params.NativeFrameBytes()
+	}
 	if len(frames)%fb != 0 {
 		return 0, d.refuse("write", ReasonBadConfig, fmt.Sprintf("%d bytes is not whole frames of %d bytes", len(frames), fb))
 	}

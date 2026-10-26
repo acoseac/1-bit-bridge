@@ -52,7 +52,8 @@ func (f *nativeHarnessFake) WriteDSD(ctx context.Context, _ uint64, l, r []byte,
 	<-ctx.Done()
 	return 0, ctx.Err()
 }
-func (f *nativeHarnessFake) Finish(context.Context) error { return nil }
+func (f *nativeHarnessFake) BeginRelease(alsapcm.ReleaseMode) {}
+func (f *nativeHarnessFake) Finish(context.Context) error     { return nil }
 func (f *nativeHarnessFake) Release(_ context.Context, m alsapcm.ReleaseMode) error {
 	f.once.Do(func() { f.closedAt.Store(f.now().UnixNano()); close(f.done); f.events <- fmt.Sprintf("release:%d", m) })
 	return nil
@@ -122,7 +123,7 @@ func harnessRig(t *testing.T) *nativeHarnessRig {
 		return h.ticks, func() {}
 	}, stdin: strings.NewReader(""), controls: func(int) (alsactl.Snapshot, error) { return controls, nil }, attachment: func(int) (qualification.Attachment, error) { return a, nil }, resolve: func(context.Context, string) (alsapcm.Endpoint, func(alsapcm.NodeInfo) error, error) {
 		return alsapcm.Endpoint{}, nil, nil
-	}, playPCM: func(context.Context, string, alsapcm.Endpoint) error { return nil }}
+	}, openPCM: func(context.Context, alsapcm.SinkConfig) (nativePCMSink, error) { return nativePCMStub{}, nil }}
 	h.env.open = func(_ context.Context, c alsapcm.DSDConfig) (nativeTestSink, error) {
 		h.opens.Add(1)
 		f := &nativeHarnessFake{cfg: c, events: h.events, now: h.env.now, done: make(chan struct{})}
@@ -231,7 +232,7 @@ func TestNativeProductionOpenerRejectsTestBinary(t *testing.T) {
 	if _, e := productionNativeOpen(context.Background(), alsapcm.DSDConfig{}); e == nil || !strings.Contains(e.Error(), "prohibited in tests") {
 		t.Fatalf("production opener: %v", e)
 	}
-	if e := playNativeReference(context.Background(), "missing", alsapcm.Endpoint{}); e == nil || !strings.Contains(e.Error(), "prohibited in tests") {
+	if _, e := productionNativePCMOpen(context.Background(), alsapcm.SinkConfig{}); e == nil || !strings.Contains(e.Error(), "prohibited in tests") {
 		t.Fatal(e)
 	}
 }
@@ -318,3 +319,9 @@ func TestNativeHarnessStopInterruptsTail(t *testing.T) {
 		t.Fatal("Stop could not interrupt pending tail")
 	}
 }
+
+type nativePCMStub struct{}
+
+func (nativePCMStub) Write(_ context.Context, b []byte) (int, error) { return len(b), nil }
+func (nativePCMStub) Drain(context.Context) error                    { return nil }
+func (nativePCMStub) Close() error                                   { return nil }

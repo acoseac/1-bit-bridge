@@ -79,7 +79,7 @@ func TestOpenRefusesAConfigItCannotPack(t *testing.T) {
 		"no format":       {RateHz: 48000},
 		"S24_BE":          {RateHz: 48000, Format: "S24_BE"},
 		"FLOAT_LE":        {RateHz: 48000, Format: "FLOAT_LE"},
-		"DSD_U8":          {RateHz: 352800, Format: "DSD_U8"},
+		"DSD_U32_BE":      {RateHz: 352800, Format: "DSD_U32_BE"},
 		"rate 0":          {RateHz: 0, Format: format.S16LE},
 		"rate 7999":       {RateHz: 7999, Format: format.S16LE},
 		"rate 1536001":    {RateHz: 1536001, Format: format.S16LE},
@@ -347,7 +347,7 @@ func TestOpenRefusesWhatTheHardwareDoesNotTake(t *testing.T) {
 		{"more channels only", cfg48k, func(h *fakeHW) { h.chMin, h.chMax = 4, 8 },
 			[]string{"4..8 channels"}},
 		{"formats it does not pack", Config{RateHz: 48000, Format: format.S16LE}, func(h *fakeHW) { h.formats = []uint32{31, 52} },
-			[]string{"DSD_U32_BE", "formats 31"}},
+			[]string{"formats 31, 52"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			k := newFake(t)

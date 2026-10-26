@@ -63,7 +63,7 @@ func TestNativeTeardownOwnership(t *testing.T) {
 			if tc.fail {
 				a.closeErr = errors.New("close failed")
 			}
-			s, e := openDSDSink(context.Background(), nativeConfig(), nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return open(a, k.now, ep, c) }, now: k.now})
+			s, e := openDSDSink(context.Background(), nativeConfig(), nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(a, k.now, ep, c) }, now: k.now})
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -138,7 +138,7 @@ func TestNativePauseDuringActivation(t *testing.T) {
 func TestNativeReleaseDeadline(t *testing.T) {
 	k := nativeKernel(t)
 	a := &nativeAuditSys{sys: k, t: t, parked: make(chan struct{}), release: make(chan struct{})}
-	s, e := openDSDSink(context.Background(), nativeConfig(), nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return open(a, k.now, ep, c) }, now: k.now})
+	s, e := openDSDSink(context.Background(), nativeConfig(), nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(a, k.now, ep, c) }, now: k.now})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -170,7 +170,7 @@ func TestNativeMutexBoundary(t *testing.T) {
 	a := &nativeAuditSys{sys: k, t: t}
 	c := nativeConfig()
 	c.Prefill = time.Millisecond
-	s, e := openDSDSink(context.Background(), c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return open(a, k.now, ep, c) }, now: k.now})
+	s, e := openDSDSink(context.Background(), c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(a, k.now, ep, c) }, now: k.now})
 	if e != nil {
 		t.Fatal(e)
 	}

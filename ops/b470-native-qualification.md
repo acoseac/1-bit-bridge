@@ -86,11 +86,19 @@ quiet-boundary clicks, and no silence/reopen at compatible joins. Record wavefor
 Different native rates/word formats use separate contact/run commands and closed-device boundaries;
 continuous mixed-tuple backend queues and their event accounting belong to 2c.2.
 
-Interactive input is line-buffered on a normal terminal: type the command and Return.
-Space pauses/resumes; n/p selects next/previous fixture with TrackChange; s is Immediate Stop;
-q and Ctrl-C immediately release and exit. Non-TTY input disables keys. The seconds limit is wall
-clock from the first open, across all pauses and track changes; it never resets. Expiry reports
-`End: deadline`, stops admission and allows at most 2 s for confirmed cleanup.
+Keys are read throughout every scenario, including calibration and both PCM references.
+On a TTY, playback uses raw input: s stops and q quits immediately, without Return.
+Both request Immediate cleanup, skip every later leg, and issue no contact receipt.
+Space pauses/resumes native playback; n/p establishes TrackChange before cancelling
+the producer. Stop and quit remain live during that tail and drain. Piped keys also work.
+At a silent confirmation prompt, enter s or q as a whole line followed by Return;
+letters in the required phrases are text. Ctrl-C works immediately in either mode.
+There is no Ctrl-C-only calibration exception. Type confirmations only when prompted.
+A confirmed Stop reports `End: stopped`; quit reports `End: quit`; both exit 0.
+Cleanup failure preserves that End, records Error, exits 1, and never opens a successor.
+The seconds limit is wall clock from the first open, across all pauses and track changes;
+it never resets. Expiry reports `End: deadline`, stops admission and allows at most
+2 s for confirmed cleanup. Natural EOF uses that same shared release deadline.
 Pause for more than 30 seconds; verify the PCM node closes, then explicitly resume. Both DSD pause
 methods use 30 s, irrespective of player config. Repeat busy reopen, unplug, Stop during a tail,
 and under library scan load. A fault never recovers or autoplays; a failed harness action ends the run.
@@ -103,7 +111,15 @@ capture && KNOB_BEFORE="$RUN/mixer.txt"
 # Turn the knob off-ear, without playing anything.
 capture && KNOB_AFTER="$RUN/mixer.txt"
 ```
-Attach both annexes. This provisional harness constrains the entire read-only snapshot. If the knob
+Attach both annexes. The activation fingerprint excludes a control only when its interface
+is SNDRV_CTL_ELEM_IFACE_PCM (3) AND its Access has VOLATILE (1<<2). Volatility alone
+never excludes a control: every MIXER and CARD control remains constrained. The same
+fingerprint binds contact validation, every admission and contact receipt creation.
+Reports retain complete Before/After and ControlObservations snapshots, with excluded
+controls also listed in ExcludedBefore/ExcludedAfter. Thus a volatile PCM channel map
+may change at open without invalidating contact; mixer values, metadata and membership
+remain binding. Every PCM reference verifies the opened descriptor's hash and geometry,
+decodes that same descriptor, and checks binding/attachment before any write. If the knob
 changes a USB control, restore the captured state before DSD activation or start a new contact;
 any reference drift/read failure refuses activation. No controls is a readable empty snapshot.
 There are no mixer writes. Model, bcdDevice, manufacturer/product and anchored port are read from
@@ -122,3 +138,23 @@ Keep the report set, omitted tuple names and reasons. 2c.2 must rerun integrated
 lifecycle on its own build before any approval, with qualificationVersion bumped for guarded changes.
 Claims remain software bit preservation, exact opened format, and owner listening qualification.
 There is no end-to-end verified-bit-exact badge, no serial requirement, and no automatic approval.
+
+
+The gate's `native-qualification` job runs real-sink CLI integration on PRs and main.
+Its CheckVersion step runs on PRs only: full history, the actual PR head and fetched
+origin/main, then merge-base..HEAD. Missing main/history/merge-base fails; it never skips.
+The job is a dependency of `gate`. The guarded implementation files are enumerated in
+`internal/player/qualification/version_gate.go`: native packing; ALSA UAPI, PCM device,
+native device, params, sys_linux/sys_other, ring, both sinks and writers, native opening;
+all three dsd-test files; alsactl control/control_linux/uapi; ALSA qualification identity;
+qualification inputs and the version checker itself. Changes require a version increase.
+
+The integration overlay exposes the existing ALSA _test.go fake only to this test command.
+The injected PCM opener is below descriptor verification and binding admission; production
+hardware guards remain intact. After committing round 2, rerun the real-ref checker:
+```sh
+BASE=$(git merge-base origin/main HEAD) && test -n "$BASE"
+GOTOOLCHAIN=go1.27.3 go run -tags ts_omit_webclient,ts_omit_debugeventbus ./scripts/qualification-version -base "$BASE" -head HEAD
+python3 scripts/native-integration-overlay.py /tmp/native-overlay.json
+GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus -overlay /tmp/native-overlay.json ./cmd/bridge -run '^TestNativeIntegration' -timeout 5m -watchdog 10s
+```

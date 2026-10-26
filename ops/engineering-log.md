@@ -65174,3 +65174,18 @@ which are not kept; their results are quoted here.
 Base d9e53584. Native packers, inert DSDSink, bounded release/carry, read-only controls and qualification harness; PCM base traces pinned before production edits. Signature-stub assertion reds and subsequent green/control evidence are in the phase report and red-first.log/controls.json. No hardware was opened; Linux ABI/race execution and owner qualification remain pending. Contracts: `History-b470-native.md`; commands: `b470-native-qualification.md`. Production admission, cross-layer occurrence reservation, approvals and engine events remain 2c.2.
 
 Final software evidence: 65 isolated mutations each built and vetted the whole tree and matched exactly its predicted failing leaf tests. Focused race checks, the complete ALSA race package, host build/vet and Linux amd64/arm64 cross-build/vet pass. Broad suites encountered sandbox-denied TCP/UDP/Unix binds; Linux ABI/race execution and listening qualification are not claimed.
+
+
+## 2026-10-27 — B470 2c.1 round 2
+Restored PCM-only format negotiation and isolated native sizing/open cleanup. Reproduced
+volatile PCM-control refusal, stale Resume, leaked reopen, retry after failed cleanup,
+lost activation replies, repeated-cutoff tail cancellation, unbounded natural Finish,
+and matrix Stop opening trailing PCM. Tests now cover all CLI legs on the real fake
+kernel via a test-only overlay, descriptor verification/admission, tail cancellation,
+full snapshot reporting, and real-ref CI wiring. Mandatory-flag opener counts, retained
+native words and drain escalation are mutation-sensitive regression pins. Full contract:
+ops/History-b470-native.md; owner procedure: ops/b470-native-qualification.md.
+
+The control sweep also reproduced a native idle-wait/Pause race. The writer now
+rechecks unapplied Pause while installing the wait; the deterministic seam test fails
+on the prior code and the removal control. PCM wait behavior is untouched.

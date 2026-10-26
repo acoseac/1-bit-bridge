@@ -65,12 +65,20 @@ func (s *DSDSink) loopNative() {
 			if s.activation == r {
 				s.activation = nil
 			}
+			if errors.Is(e, ErrReleaseUnconfirmed) {
+				s.err = errors.Join(s.err, e)
+				s.revoked = true
+			}
 			r.reply <- e
 			s.notify()
 			s.mu.Unlock()
 			if e != nil {
 				s.mu.Lock()
-				held := s.paused && !s.releasing
+				terminal := errors.Is(e, ErrReleaseUnconfirmed)
+				held := s.paused && !s.releasing && !terminal
+				if !terminal && !held && !s.releasing {
+					s.err = errors.Join(s.err, e)
+				}
 				if held && !r.resume {
 					s.active = false
 				}
@@ -166,6 +174,9 @@ func (s *DSDSink) activateNative(r *nativeRequest) error {
 	s.mu.Lock()
 	if s.life.Err() != nil || s.revoked || s.releasing || (s.paused && (!r.resume || r.pauseEpoch != s.pauseEpoch)) {
 		s.mu.Unlock()
+		if reopened {
+			return nativeCleanupError(errors.New("native activation fenced"), s.closeNative())
+		}
 		return errors.New("native activation fenced")
 	}
 	wasActive := s.active
@@ -179,6 +190,12 @@ func (s *DSDSink) activateNative(r *nativeRequest) error {
 		st, e := s.dev.status()
 		if e != nil {
 			return e
+		}
+		s.mu.Lock()
+		fenced := s.life.Err() != nil || s.revoked || s.releasing || r.pauseEpoch != s.pauseEpoch
+		s.mu.Unlock()
+		if fenced {
+			return errors.New("native resume fenced after status")
 		}
 		if st.state == statePaused {
 			if e = s.dev.Pause(false); e != nil {
@@ -236,7 +253,7 @@ func (s *DSDSink) nativeSilence(frames int, tail, allowPaused bool) error {
 	}
 	for frames > 0 {
 		n := min(frames, s.params.PeriodFrames)
-		if e := s.writeNative(s.scratch[:n*s.params.FrameBytes()], true, tail, allowPaused); e != nil {
+		if e := s.writeNative(s.scratch[:n*s.params.NativeFrameBytes()], true, tail, allowPaused); e != nil {
 			return e
 		}
 		frames -= n
@@ -284,7 +301,7 @@ func (s *DSDSink) measureNative() error {
 }
 func (s *DSDSink) watchNative(d time.Duration) error {
 	s.mu.Lock()
-	if s.releasing || s.activation != nil || (!s.paused && (s.finishing || s.ring.pending() > 0)) {
+	if s.releasing || s.activation != nil || (s.paused && !s.pauseApplied) || (!s.paused && (s.finishing || s.ring.pending() > 0)) {
 		s.mu.Unlock()
 		return nil
 	}
@@ -374,13 +391,5 @@ func (s *DSDSink) closeNative() error {
 		return nil
 	}
 	s.dev = nil
-	if d.closed {
-		return nil
-	}
-	d.closed = true
-	var e error
-	if d.hwSet {
-		e = errors.Join(d.ioctlNone(ioctlDrop), d.ioctlNone(ioctlHWFree))
-	}
-	return errors.Join(e, d.sys.close(d.fd))
+	return d.releaseNative()
 }

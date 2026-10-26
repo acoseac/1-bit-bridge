@@ -80,7 +80,7 @@ func (d *linuxDevice) Controls() ([]Control, error) {
 		if e := ctlIO(d, ctlRead, &v); e != nil {
 			return nil, e
 		}
-		c := Control{Interface: id.Interface, Device: id.Device, Subdevice: id.Subdevice, Index: id.Index, Name: strings.TrimRight(string(id.Name[:]), "\x00"), Type: info.Type, Count: info.Count, Values: append([]byte(nil), unsafe.Slice((*byte)(unsafe.Pointer(&v.Value)), int(info.Count)*width)...), Info: append([]byte(nil), unsafe.Slice((*byte)(unsafe.Pointer(&info.Value)), 128)...)}
+		c := Control{Interface: id.Interface, Device: id.Device, Subdevice: id.Subdevice, Index: id.Index, Name: strings.TrimRight(string(id.Name[:]), "\x00"), Type: info.Type, Access: info.Access, Count: info.Count, Values: append([]byte(nil), unsafe.Slice((*byte)(unsafe.Pointer(&v.Value)), int(info.Count)*width)...), Info: append([]byte(nil), unsafe.Slice((*byte)(unsafe.Pointer(&info.Value)), 128)...)}
 		if info.Access&(1<<4) != 0 {
 			tlv := make([]uint32, 1026)
 			tlv[0] = id.NumID

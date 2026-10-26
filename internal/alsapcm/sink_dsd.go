@@ -105,7 +105,7 @@ type nativeSeams struct {
 
 // OpenDSDSink opens an inert native sink. Activate is mandatory.
 func OpenDSDSink(ctx context.Context, c DSDConfig) (*DSDSink, error) {
-	return openNativeBounded(ctx, c, nativeSeams{open: Open, now: time.Now})
+	return openNativeBounded(ctx, c, nativeSeams{open: openNativeDevice, now: time.Now})
 }
 func (c DSDConfig) validate() (DSDConfig, error) {
 	if format.DSDWordBytes(c.Format) == 0 {
@@ -158,27 +158,22 @@ func openDSDSink(ctx context.Context, c DSDConfig, h nativeSeams) (*DSDSink, err
 	}
 	p := d.Params()
 	if p.BufferTime() > 500*time.Millisecond || p.BufferTime()+nativeFrameDuration(nativeFrames(p.RateHz, c.Tail), p.RateHz)+nativeCloseMargin >= nativeReleaseBudget {
-		_ = d.Close()
-		return nil, errors.New("native readback exceeds release budget")
+		return nil, nativeCleanupError(errors.New("native readback exceeds release budget"), d.releaseNative())
 	}
 	if c.Pause == PauseKernel && !p.CanPause() {
-		_ = d.Close()
-		return nil, errors.New("native kernel pause unavailable")
+		return nil, nativeCleanupError(errors.New("native kernel pause unavailable"), d.releaseNative())
 	}
 	if err = admit(c.Check, d, c.Endpoint, "native open"); err != nil {
-		_ = d.Close()
-		return nil, err
+		return nil, nativeCleanupError(err, d.releaseNative())
 	}
-	if c.RingBytes/p.FrameBytes() <= p.BufferFrames {
-		_ = d.Close()
-		return nil, errors.New("native ring must retain hardware buffer plus lookahead")
+	if c.RingBytes/p.NativeFrameBytes() <= p.BufferFrames {
+		return nil, nativeCleanupError(errors.New("native ring must retain hardware buffer plus lookahead"), d.releaseNative())
 	}
-	scratchBytes := p.PeriodFrames * p.FrameBytes()
+	scratchBytes := p.PeriodFrames * p.NativeFrameBytes()
 	if c.RingBytes+scratchBytes+nativeLedgerMax*16+8+4096 > MaxRingBytes {
-		_ = d.Close()
-		return nil, errors.New("native aggregate memory budget")
+		return nil, nativeCleanupError(errors.New("native aggregate memory budget"), d.releaseNative())
 	}
-	s := &DSDSink{life: ctx, cfg: c, seams: h, devCfg: dc, params: p, dev: d, word: w * 8, ring: newRing(int64(c.RingBytes/p.FrameBytes()), p.FrameBytes(), int64(p.BufferFrames)), changed: make(chan struct{}), kick: make(chan struct{}, 1), done: make(chan struct{}), scratch: make([]byte, scratchBytes)}
+	s := &DSDSink{life: ctx, cfg: c, seams: h, devCfg: dc, params: p, dev: d, word: w * 8, ring: newRing(int64(c.RingBytes/p.NativeFrameBytes()), p.NativeFrameBytes(), int64(p.BufferFrames)), changed: make(chan struct{}), kick: make(chan struct{}, 1), done: make(chan struct{}), scratch: make([]byte, scratchBytes)}
 	go s.loopNative()
 	go func() {
 		select {
@@ -229,7 +224,7 @@ func (s *DSDSink) Activate(ctx context.Context, gen uint64) error {
 		s.Revoke()
 		return ctx.Err()
 	case <-s.done:
-		return s.result()
+		return <-r.reply
 	}
 }
 
@@ -317,7 +312,7 @@ func (s *DSDSink) flushCarry() {
 // Finish ends admission, pads final carry with phased 0x69 and drains naturally.
 func (s *DSDSink) Finish(ctx context.Context) error {
 	if e := ctx.Err(); e != nil {
-		s.Revoke()
+		s.cancelFinish()
 		return errors.Join(ErrReleaseUnconfirmed, e)
 	}
 	s.producer.Lock()
@@ -325,7 +320,7 @@ func (s *DSDSink) Finish(ctx context.Context) error {
 	if s.releasing {
 		s.mu.Unlock()
 		s.producer.Unlock()
-		return errors.New("native release underway")
+		return s.waitRelease(ctx)
 	}
 	if s.carryBits > 0 {
 		for i := s.carryBits; i < s.word; i++ {
@@ -340,17 +335,49 @@ func (s *DSDSink) Finish(ctx context.Context) error {
 	s.interrupt()
 	s.mu.Unlock()
 	s.producer.Unlock()
-	select {
-	case <-s.done:
-		return s.result()
-	case <-ctx.Done():
-		s.beginRelease(Immediate)
-		return errors.Join(ErrReleaseUnconfirmed, ctx.Err())
+	for {
+		s.mu.Lock()
+		releasing, ch := s.releasing, s.changed
+		s.mu.Unlock()
+		if releasing {
+			return s.waitRelease(ctx)
+		}
+		select {
+		case <-s.done:
+			return s.result()
+		case <-ctx.Done():
+			s.cancelFinish()
+			return errors.Join(ErrReleaseUnconfirmed, ctx.Err())
+		case <-ch:
+		}
 	}
+}
+
+// cancelFinish establishes an Immediate release only if no owner has selected
+// a cutoff. Cancelling the producer cannot escalate a chosen TrackChange.
+func (s *DSDSink) cancelFinish() {
+	s.mu.Lock()
+	if !s.releasing {
+		s.beginReleaseLocked(Immediate)
+	}
+	s.mu.Unlock()
+}
+
+// BeginRelease establishes the cutoff synchronously, without waiting for cleanup.
+// Callers can cancel producers afterwards and still process Stop during the tail.
+func (s *DSDSink) BeginRelease(m ReleaseMode) {
+	if m != Immediate && m != TrackChange {
+		return
+	}
+	s.beginRelease(m)
 }
 func (s *DSDSink) beginRelease(m ReleaseMode) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.beginReleaseLocked(m)
+}
+func (s *DSDSink) beginReleaseLocked(m ReleaseMode) {
+	interrupt := !s.releasing || (m == Immediate && s.mode != Immediate)
 	if !s.releasing {
 		s.releasing = true
 		s.mode = m
@@ -365,7 +392,9 @@ func (s *DSDSink) beginRelease(m ReleaseMode) {
 			s.releaseCancel()
 		}
 	}
-	s.interrupt()
+	if interrupt {
+		s.interrupt()
+	}
 }
 
 // Release returns within the shared two-second release budget. A timeout never
@@ -376,6 +405,9 @@ func (s *DSDSink) Release(ctx context.Context, m ReleaseMode) error {
 		return errors.New("invalid native release mode")
 	}
 	s.beginRelease(m)
+	return s.waitRelease(ctx)
+}
+func (s *DSDSink) waitRelease(ctx context.Context) error {
 	select {
 	case <-s.done:
 		return s.result()
@@ -429,7 +461,7 @@ func (s *DSDSink) Pause(ctx context.Context) error {
 // Resume revalidates a released endpoint before resuming retained content.
 func (s *DSDSink) Resume(ctx context.Context) error {
 	s.mu.Lock()
-	if s.releasing || s.activation != nil {
+	if s.generation == 0 || s.releasing || s.revoked || s.err != nil || s.activation != nil {
 		s.mu.Unlock()
 		return errors.New("native resume fenced")
 	}
@@ -448,7 +480,7 @@ func (s *DSDSink) Resume(ctx context.Context) error {
 		s.Revoke()
 		return ctx.Err()
 	case <-s.done:
-		return s.result()
+		return <-r.reply
 	}
 }
 

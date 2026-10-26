@@ -159,3 +159,10 @@ func errnoFrom(err error) error {
 	}
 	return err
 }
+
+func openNativeDevice(ep Endpoint, cfg Config) (*Device, error) {
+	if e := guarded(ep); e != nil {
+		return nil, e
+	}
+	return openNative(linuxSys{}, time.Now, ep, cfg)
+}

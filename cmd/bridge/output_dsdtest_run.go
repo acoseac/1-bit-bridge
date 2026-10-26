@@ -85,27 +85,19 @@ func verifyNativeFixture(root string, f qualification.Fixture) error {
 	}
 	return nil
 }
-func confirmNative(ctx context.Context, r *bufio.Reader, out io.Writer, prompt string) (string, error) {
-	fmt.Fprintln(out, prompt)
-	ch := make(chan struct {
-		s string
-		e error
-	}, 1)
-	go func() {
-		s, e := r.ReadString('\n')
-		ch <- struct {
-			s string
-			e error
-		}{strings.TrimSpace(s), e}
+func executeNativeTest(parent context.Context, o nativeOptions, env outputDSDTestEnv, ep alsapcm.Endpoint, check func(alsapcm.NodeInfo) error, m qualification.Manifest, fixtures map[string]qualification.Fixture, in *bufio.Reader, out io.Writer, report *nativeReport) (runResult error) {
+	ctx, cancelRun := context.WithCancelCause(parent)
+	defer cancelRun(nil)
+	console := newNativeConsole(ctx, in, cancelRun, o.scenario == "level-check")
+	defer func() {
+		var stopped *nativeStop
+		if errors.As(context.Cause(ctx), &stopped) {
+			report.End = stopped.Error()
+			report.Contact = nil
+			runResult = withoutNativeCancellation(runResult)
+		}
 	}()
-	select {
-	case <-ctx.Done():
-		return "", ctx.Err()
-	case v := <-ch:
-		return v.s, v.e
-	}
-}
-func executeNativeTest(parent context.Context, o nativeOptions, env outputDSDTestEnv, ep alsapcm.Endpoint, check func(alsapcm.NodeInfo) error, m qualification.Manifest, fixtures map[string]qualification.Fixture, in *bufio.Reader, out io.Writer, report *nativeReport) error {
+
 	for _, id := range o.list {
 		if e := verifyNativeFixture(o.fixtures, fixtures[id]); e != nil {
 			return e
@@ -115,7 +107,7 @@ func executeNativeTest(parent context.Context, o nativeOptions, env outputDSDTes
 		}
 	}
 	if o.scenario == "level-check" {
-		typed, e := confirmNative(parent, in, out, "Type exactly: "+qualification.CalibrationPhrase)
+		typed, e := console.confirm(ctx, out, "Type exactly: "+qualification.CalibrationPhrase)
 		if e != nil {
 			return e
 		}
@@ -126,8 +118,7 @@ func executeNativeTest(parent context.Context, o nativeOptions, env outputDSDTes
 	}
 	// One deadline from first open; keys, pause, reopens and track changes never
 	// reset it. Cancellation stops admission; sink cleanup has its own 2 s bound.
-	ctx, cancel := context.WithCancel(parent)
-	defer cancel()
+	cancel := func() { cancelRun(context.DeadlineExceeded) }
 	ticks, stop := env.at(env.now().Add(time.Duration(o.seconds) * time.Second))
 	defer stop()
 	var expired atomic.Bool
@@ -145,27 +136,27 @@ func executeNativeTest(parent context.Context, o nativeOptions, env outputDSDTes
 		f := fixtures[o.list[0]]
 		pcm := fixtures[f.PCMReference]
 		fmt.Fprintln(out, "Headphones off ears. Start at minimum; raise PCM until just audible off-ear, then keep that position. Stop for louder DSD or gain bypass.")
-		runErr = env.playPCM(ctx, filepath.Join(o.fixtures, pcm.Path), ep)
+		runErr = playNativePCM(ctx, env, o.fixtures, pcm, ep, check)
 		var audible, knob, matched string
 		if runErr == nil {
-			audible, runErr = confirmNative(ctx, in, out, "Type exactly: "+qualification.PCMConfirmation)
+			audible, runErr = console.confirm(ctx, out, "Type exactly: "+qualification.PCMConfirmation)
 			if runErr == nil && audible != qualification.PCMConfirmation {
 				runErr = errors.New("PCM not confirmed audible")
 			}
 		}
 		if runErr == nil {
-			knob, runErr = confirmNative(ctx, in, out, "Type the recorded knob position:")
-			if knob == "" {
+			knob, runErr = console.confirm(ctx, out, "Type the recorded knob position:")
+			if runErr == nil && knob == "" {
 				runErr = errors.New("missing knob position")
 			}
 		}
 		if runErr == nil {
 			one := o
 			one.list = one.list[:1]
-			runErr = runNativeQueue(ctx, one, env, ep, check, fixtures, nil, report)
+			runErr = runNativeQueue(ctx, one, env, ep, check, fixtures, console.keys, report)
 		}
 		if runErr == nil {
-			matched, runErr = confirmNative(ctx, in, out, "At the SAME position DSD must be audible, not louder; type exactly: "+qualification.DSDConfirmation)
+			matched, runErr = console.confirm(ctx, out, "At the SAME position DSD must be audible, not louder; type exactly: "+qualification.DSDConfirmation)
 			if runErr == nil && matched != qualification.DSDConfirmation {
 				runErr = errors.New("DSD not matched")
 			}
@@ -175,38 +166,17 @@ func executeNativeTest(parent context.Context, o nativeOptions, env outputDSDTes
 			report.End = "complete"
 		}
 	} else {
-		var keys <-chan byte
-		if env.tty {
-			ch := make(chan byte)
-			keys = ch
-			go func() {
-				defer close(ch)
-				for {
-					b, e := in.ReadByte()
-					if e != nil {
-						return
-					}
-					select {
-					case ch <- b:
-					case <-ctx.Done():
-						return
-					}
-					if b == 'q' || b == 's' {
-						return
-					}
-				}
-			}()
-		}
+		keys := console.keys
 		if o.scenario == "matrix" {
 			pcm := fixtures[fixtures[o.list[0]].PCMReference]
-			runErr = env.playPCM(ctx, filepath.Join(o.fixtures, pcm.Path), ep)
+			runErr = playNativePCM(ctx, env, o.fixtures, pcm, ep, check)
 		}
 		if runErr == nil {
 			runErr = runNativeQueue(ctx, o, env, ep, check, fixtures, keys, report)
 		}
-		if runErr == nil && o.scenario == "matrix" {
+		if runErr == nil && ctx.Err() == nil && report.End == "complete" && o.scenario == "matrix" {
 			pcm := fixtures[fixtures[o.list[len(o.list)-1]].PCMReference]
-			runErr = env.playPCM(ctx, filepath.Join(o.fixtures, pcm.Path), ep)
+			runErr = playNativePCM(ctx, env, o.fixtures, pcm, ep, check)
 		}
 	}
 	if expired.Load() {
@@ -345,6 +315,7 @@ func runNativeQueue(ctx context.Context, o nativeOptions, env outputDSDTestEnv, 
 					if key == 'p' {
 						next = max(0, current-1)
 					}
+					s.BeginRelease(alsapcm.TrackChange)
 					stop()
 					stopped, queued, re := nativeTrackRelease(ctx, s, keys, report)
 					if len(pendingKeys)+len(queued) > 16 {
@@ -359,7 +330,7 @@ func runNativeQueue(ctx context.Context, o nativeOptions, env outputDSDTestEnv, 
 					stop()
 					e = s.Release(context.Background(), alsapcm.Immediate)
 					if e == nil {
-						report.End = "stopped"
+						report.End = (&nativeStop{key}).Error()
 					}
 					return e
 				}
@@ -373,27 +344,40 @@ func runNativeQueue(ctx context.Context, o nativeOptions, env outputDSDTestEnv, 
 	}
 }
 
-// playNativeReference uses the unchanged PCM sink; it is separately injected in
-// harness tests and cannot open hardware from a test binary.
-func playNativeReference(ctx context.Context, path string, ep alsapcm.Endpoint) error {
+// productionNativePCMOpen guards only hardware. Verification and admission
+// stay above the injected sink seam, so tests exercise the shipping helper.
+func productionNativePCMOpen(ctx context.Context, c alsapcm.SinkConfig) (nativePCMSink, error) {
 	if testing.Testing() {
-		return errors.New("PCM reference hardware prohibited in tests")
+		return nil, errors.New("PCM reference hardware prohibited in tests")
 	}
-	file, _, e := fsutil.OpenAsFile(path)
+	return alsapcm.OpenSink(ctx, c)
+}
+func playNativePCM(ctx context.Context, env outputDSDTestEnv, root string, f qualification.Fixture, ep alsapcm.Endpoint, check func(alsapcm.NodeInfo) error) error {
+	return nativePCMCall(ctx, func(ctx context.Context) error {
+		if e := ctx.Err(); e != nil {
+			return e
+		}
+		return playNativeReference(ctx, root, f, ep, check, env.openPCM)
+	})
+}
+func playNativeReference(ctx context.Context, root string, fixture qualification.Fixture, ep alsapcm.Endpoint, check func(alsapcm.NodeInfo) error, open func(context.Context, alsapcm.SinkConfig) (nativePCMSink, error)) (result error) {
+	src, file, e := nativeSource(root, fixture)
 	if e != nil {
 		return e
 	}
 	defer file.Close()
-	src, e := decode.Open(file)
-	if e != nil {
-		return e
-	}
 	defer src.Close()
 	d, ok := src.(decode.Decoder)
 	if !ok {
 		return errors.New("reference must be PCM")
 	}
 	p := d.Format()
+	if p.RateHz != fixture.Rate || p.Channels != fixture.Channels || p.Frames != fixture.Frames || fixture.Container != "WAV" {
+		return errors.New("opened PCM geometry disagrees with manifest")
+	}
+	if e := ctx.Err(); e != nil {
+		return e
+	}
 	f := format.S32LE
 	if p.ValidBits == 16 {
 		f = format.S16LE
@@ -401,11 +385,11 @@ func playNativeReference(ctx context.Context, path string, ep alsapcm.Endpoint) 
 	if p.ValidBits == 24 {
 		f = format.S243LE
 	}
-	s, e := alsapcm.OpenSink(ctx, alsapcm.SinkConfig{Endpoint: ep, Transport: alsapcm.Transport{Kind: format.KindPCM, Format: f, RateHz: p.RateHz, Channels: p.Channels, ValidBits: p.ValidBits}})
+	s, e := open(ctx, alsapcm.SinkConfig{Endpoint: ep, Admit: check, Transport: alsapcm.Transport{Kind: format.KindPCM, Format: f, RateHz: p.RateHz, Channels: p.Channels, ValidBits: p.ValidBits}})
 	if e != nil {
 		return e
 	}
-	defer s.Close()
+	defer func() { result = errors.Join(result, s.Close()) }()
 	samples := make([]int32, 8192)
 	packed := make([]byte, format.PackedBytes(len(samples), f))
 	for {
@@ -472,7 +456,7 @@ func nativeTrackRelease(ctx context.Context, s nativeTestSink, keys <-chan byte,
 			if key == 's' || key == 'q' {
 				e := s.Release(context.Background(), alsapcm.Immediate)
 				if e == nil {
-					report.End = "stopped"
+					report.End = (&nativeStop{key}).Error()
 				}
 				return true, nil, e
 			}

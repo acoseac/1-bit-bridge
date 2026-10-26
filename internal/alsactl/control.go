@@ -17,6 +17,7 @@ type Control struct {
 	Interface, Device, Subdevice, Index uint32
 	Name                                string
 	Type                                uint32
+	Access                              uint32
 	Count                               uint32
 	Values                              []byte
 	Info                                []byte
@@ -29,8 +30,22 @@ type Snapshot struct {
 	Controls []Control
 }
 
-// Hash is the deterministic snapshot identity used by provisional admission.
-func (s Snapshot) Hash() string { b, _ := json.Marshal(s); return fmt.Sprintf("%x", sha256.Sum256(b)) }
+// Excluded reports the only controls whose values may change when PCM opens:
+// volatile controls on the PCM interface. Mixer and card controls always bind.
+func (c Control) Excluded() bool { return c.Interface == 3 && c.Access&(1<<2) != 0 }
+
+// Hash is the stable activation fingerprint. The complete snapshot remains
+// available for reporting; only volatile PCM controls are excluded here.
+func (s Snapshot) Hash() string {
+	stable := Snapshot{Card: s.Card, Controls: make([]Control, 0, len(s.Controls))}
+	for _, c := range s.Controls {
+		if !c.Excluded() {
+			stable.Controls = append(stable.Controls, c)
+		}
+	}
+	b, _ := json.Marshal(stable)
+	return fmt.Sprintf("%x", sha256.Sum256(b))
+}
 
 // Device is the injected read-only control-device seam.
 type Device interface {

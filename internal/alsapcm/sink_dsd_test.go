@@ -21,7 +21,7 @@ func nativeKernel(t *testing.T) *fakeKernel {
 }
 func nativeSink(t *testing.T, k *fakeKernel, c DSDConfig) *DSDSink {
 	t.Helper()
-	s, e := openDSDSink(context.Background(), c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return open(k, k.now, ep, c) }, now: k.now})
+	s, e := openDSDSink(context.Background(), c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(k, k.now, ep, c) }, now: k.now})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -189,7 +189,7 @@ func TestNativeBufferAndPolicyBounds(t *testing.T) {
 			case "rate":
 				c.BitRate = 123
 			}
-			s, e := openDSDSink(context.Background(), c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return open(k, k.now, ep, c) }, now: k.now})
+			s, e := openDSDSink(context.Background(), c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(k, k.now, ep, c) }, now: k.now})
 			if e == nil {
 				_ = s.Release(context.Background(), Immediate)
 				t.Fatal("accepted invalid setup")
@@ -237,30 +237,28 @@ func TestNativeTrackChangeCutoff(t *testing.T) {
 // TestNativeReleaseEscalation holds the drain while Stop escalates release.
 func TestNativeReleaseEscalation(t *testing.T) {
 	k := nativeKernel(t)
-	s := nativeSink(t, k, nativeConfig())
-	if e := s.Activate(context.Background(), 1); e != nil {
+	g := &nativePollGate{sys: k, entered: make(chan struct{}), gate: make(chan struct{})}
+	s, e := openDSDSink(context.Background(), nativeConfig(), nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(g, k.now, ep, c) }, now: k.now})
+	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e := s.WriteDSD(context.Background(), 1, []byte{1, 2, 3, 4}, []byte{5, 6, 7, 8}, 0, 32); e != nil {
+	defer s.Release(context.Background(), Immediate)
+	if e = s.Activate(context.Background(), 1); e != nil {
 		t.Fatal(e)
 	}
-	await(t, k.when(filledAndIdle(1)), "written word")
-	park, release := k.parkNextDrain()
-	defer release()
-	done := make(chan error, 1)
-	go func() { done <- s.Release(context.Background(), TrackChange) }()
-	await(t, park, "drain parked")
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if e := s.Release(ctx, Immediate); e == nil {
-		t.Fatal("claimed close before parked drain ended")
+	_, _ = s.WriteDSD(context.Background(), 1, []byte{1, 2, 3, 4}, []byte{5, 6, 7, 8}, 0, 32)
+	await(t, k.when(filledAndIdle(1)), "queued word")
+	g.armed.Store(true)
+	answer := make(chan error, 1)
+	go func() { answer <- s.Release(context.Background(), TrackChange) }()
+	await(t, g.entered, "cancellable drain seam")
+	start := time.Now()
+	e = s.Release(context.Background(), Immediate)
+	if e != nil || time.Since(start) > time.Second {
+		t.Errorf("escalation did not cancel drain promptly: %v after %v", e, time.Since(start))
 	}
-	if !s.immediate() {
-		t.Fatal("Stop did not escalate")
-	}
-	select {
-	case <-s.Done():
-		t.Fatal("ack before cleanup")
-	default:
-	}
+	await(t, s.Done(), "Immediate cleanup")
+	close(g.gate)
+	<-answer
+	k.checkClosedEach(t)
 }

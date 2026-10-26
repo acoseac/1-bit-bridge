@@ -932,7 +932,7 @@ func (k *fakeKernel) writei(x *xferi) error {
 func (k *fakeKernel) frameBytes() uint32 {
 	f, _ := k.committed.maskOf(hwParamFormat).single()
 	ch, _ := k.committed.intervalOf(hwParamChannels).exact()
-	for _, sf := range sampleFormats {
+	for _, sf := range map[uint32]sampleFormat{2: {code: 2, bytes: 2}, 6: {code: 6, bytes: 4}, 10: {code: 10, bytes: 4}, 32: {code: 32, bytes: 3}, 49: {code: 49, bytes: 2}, 50: {code: 50, bytes: 4}, 52: {code: 52, bytes: 4}} {
 		if sf.code == f {
 			return uint32(sf.bytes) * ch
 		}

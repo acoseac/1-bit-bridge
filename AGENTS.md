@@ -314,8 +314,9 @@ mode). iOS never talks to the admin listener.
 CI workflows (`.github/workflows/`):
 
 - `gofmt.yml` — read-only formatting check on PRs/pushes to main.
-- `gate.yml` — seven prerequisite jobs (`vet`, `test`, `dsd-measure`,
-  `build-all`, `go-version`, `cross-platform`, `docs-check`) with a `gate`
+- `gate.yml` — nine prerequisite jobs (`vet`, `test`, `dsd-measure`,
+  `build-all`, `go-version`, `cross-platform`, `docs-check`, `alsa-abi`,
+  `native-qualification`) with a `gate`
   fan-in; includes the local pre-push gate.
 - `codeql.yml` — security static analysis (PRs, main, weekly cron).
 - `release.yml` — goreleaser on `v*` tag push: signed + notarized macOS

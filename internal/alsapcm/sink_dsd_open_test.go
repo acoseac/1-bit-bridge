@@ -19,7 +19,11 @@ func TestNativeCancelledOpen(t *testing.T) {
 	defer cancel()
 	answer := make(chan error, 1)
 	go func() {
-		_, e := openNativeBounded(ctx, nativeConfig(), nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { close(entered); <-gate; return open(k, k.now, ep, c) }, now: k.now})
+		_, e := openNativeBounded(ctx, nativeConfig(), nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) {
+			close(entered)
+			<-gate
+			return openNative(k, k.now, ep, c)
+		}, now: k.now})
 		answer <- e
 	}()
 	select {
