@@ -65078,9 +65078,11 @@ usable candidate lists every attempted address: skip locally, fatal when CI
 is present. Logging negative control for an unrestricted host: in
 `fromThisHost`, replace `return ok && remote.IP.Equal(local.IP)` with
 `return ok && remote.IP.Equal(local.IP) && remote.IP.IsLoopback()`. The named
-test must fail "a probe of the bound IP from this host was logged". This
-sandbox denies every bind, so the non-skipping green and this control remain
-unrun; the local skip and CI-fatal paths were observed for all four addresses.
+test was verified by the reviewer on macOS (darwin/arm64, Go 1.27.3): it
+passed without skipping (0.01 s); with that mutation it failed with
+`handshakelog_test.go:211: a probe of the bound IP from this host was logged: ["http: TLS handshake error from <client address>: EOF"]`;
+restored, it passed. The original sandbox run separately observed the local
+skip and CI-fatal paths when binds were denied on all four addresses.
 
 Go 1.27.3: whole-module build and vet passed on darwin/arm64 and GOOS=linux,
 each with and without the release tags. Tagged config and backup suites
@@ -65090,3 +65092,18 @@ for unset, empty, caller-set and space-containing TMPDIR values showed the
 correct quoted paths. Full handshake and CLI suites were attempted but socket
 binds were denied; no full-suite green or Linux runtime result is claimed.
 Formatting, diff whitespace and docs-check passed. All changes stay uncommitted.
+
+Review follow-up: `TestPlayerUUIDMinterRefusesNonFilesAtOnce` restores the
+retired config minter's Unix coverage at `backup.EnsurePlayerUUID`: a named
+pipe, a link to one, a link to a character device and a directory. Each
+must return within fsutiltest's five-second bound with a non-nil error other
+than `fs.ErrNotExist`, no identity, and the same node and mode still present
+(`Lstat` and `os.SameFile`). The helper releases a stuck FIFO and joins the
+call after recording a timing failure, so the negative control cannot hang
+cleanup. Control: insert `if f, err := os.Open(filepath.Join(dir,
+config.PlayerUUIDFile)); err == nil { _ = f.Close() }` at the start of
+`ensurePlayerUUID`, before `completePlayerSeal`. Under Go 1.27.3 and the
+release tags with `-race`, the original passes all four rows; the control
+fails both FIFO rows with "still running after 5s, waiting to open a named
+pipe". Production bytes are restored after the control. The CLI coverage
+rule now includes non-file kinds; that short rule has no separate long form.
