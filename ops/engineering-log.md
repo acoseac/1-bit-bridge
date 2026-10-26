@@ -65161,8 +65161,10 @@ The binding rule and its reasoning are in config-lifecycle.md and its
 History file, updated with B528's entry.
 
 Checks use Go 1.27.3 and ts_omit_webclient,ts_omit_debugeventbus. Whole-module
-vet passes, the whole-module test suite (`go test -p 4 ./...`, all 77
-packages, socket tests included) passes on a macOS developer host, and the
+vet passes, the whole-module test suite (`go test -p 4
+-tags=ts_omit_webclient,ts_omit_debugeventbus -timeout 30m ./...` with
+GOTOOLCHAIN=go1.27.3, all 77 packages, socket tests included) passes on a
+macOS developer host, and the
 config package passes under the race detector. Formatting, diff whitespace
 and make docs-check pass. The log names above label the run's working files,
 which are not kept; their results are quoted here.
