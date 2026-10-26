@@ -33,7 +33,7 @@ const (
 
 // Device is what the device description names.
 type Device struct {
-	// UUID is the player's identity (config.EnsurePlayerUUID): the UDN is
+	// UUID is the player's identity (backup.EnsurePlayerUUID): the UDN is
 	// "uuid:" and it, never the MediaServer's.
 	UUID string
 	// Room is output.player.room, from the boot snapshot; "" is DefaultName.

@@ -73,7 +73,7 @@ type Config struct {
 	// serve creates it where it is missing (lockServeDataDir), and neither
 	// syncs it. No ID or token is handed out twice all the same, because
 	// DataDir holds the player's identity (player-uuid,
-	// config.EnsurePlayerUUID): a crash that takes DataDir takes that
+	// backup.EnsurePlayerUUID): a crash that takes DataDir takes that
 	// identity with it, and the player that comes back is a new device to
 	// every controller, which has seen none of its IDs or tokens. On an
 	// overlay that does not hold: a DataDir in the lower layer alone, its
