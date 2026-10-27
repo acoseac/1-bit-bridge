@@ -65414,3 +65414,16 @@ that the extractor withholds channels as well as other format stamps; the doc
 now says so. Qualification version 11 follows the existing path guard (which
 includes test files), without changing extraction/playback behavior. The iOS
 mirror and consumers remain companion work; no hardware or deployment ran.
+
+## 2026-10-27 — B470 2c.2 / #1356 final delta review
+
+Confirmed the manifest exporter's unconditional provenance failure; moved Git/HEAD
+and fallback validation under the export gate without gating extraction or JSON
+assertions. The API exporter already gates its provenance-file dependency; both
+now have source-archive regression coverage. Two stale version-10 runbook
+instructions were confirmed. All five current references now follow version 12,
+required by the guarded manifest/qualification test changes, with a docs/code pin.
+Raw HTTP member-table checks cover exact names, types, mandatory zero values and
+optional absence/presence, closing the DTO round-trip gap. Negative controls target
+provenance, runbook drift and wire omissions/types. Rules and detail are in
+History-b470-native.md, “Final delta review”. No hardware qualification ran.

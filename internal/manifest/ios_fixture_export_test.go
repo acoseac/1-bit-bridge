@@ -155,18 +155,20 @@ func TestExportIOSManifestFixtures(t *testing.T) {
 	if !reflect.DeepEqual(full["tracks"], delta["tracks"]) {
 		t.Fatal("full/delta track bytes differ")
 	}
-	git, err := exec.LookPath("git")
 	commit := ""
-	if err == nil {
-		if b, e := exec.Command(git, "rev-parse", "HEAD").Output(); e == nil {
-			commit = strings.TrimSpace(string(b))
+	if os.Getenv("BRIDGE_EXPORT_IOS_FIXTURES") != "" {
+		git, err := exec.LookPath("git")
+		if err == nil {
+			if b, e := exec.Command(git, "rev-parse", "HEAD").Output(); e == nil {
+				commit = strings.TrimSpace(string(b))
+			}
 		}
-	}
-	if commit == "" {
-		commit = os.Getenv("BRIDGE_FIXTURE_COMMIT")
-	}
-	if commit == "" {
-		t.Fatal("git unavailable: set BRIDGE_FIXTURE_COMMIT")
+		if commit == "" {
+			commit = os.Getenv("BRIDGE_FIXTURE_COMMIT")
+		}
+		if commit == "" {
+			t.Fatal("git unavailable: set BRIDGE_FIXTURE_COMMIT")
+		}
 	}
 	protocol, err := os.ReadFile(filepath.Join("..", "..", "PROTOCOL.md"))
 	if err != nil {
@@ -230,4 +232,14 @@ func iosReplaceCMPR(t *testing.T, raw, chunk []byte) []byte {
 	size := int(binary.BigEndian.Uint64(raw[prop+4:prop+12])) + len(chunk) - n
 	binary.BigEndian.PutUint64(out[prop+4:prop+12], uint64(size))
 	return out
+}
+
+// Ordinary source-archive runs still exercise extraction and both serializers.
+func TestIOSManifestFixturesWithoutProvenance(t *testing.T) {
+	t.Setenv("BRIDGE_EXPORT_IOS_FIXTURES", "")
+	t.Setenv("BRIDGE_FIXTURE_COMMIT", "")
+	t.Setenv("GIT_DIR", filepath.Join(t.TempDir(), "missing.git"))
+	t.Run("no_head", TestExportIOSManifestFixtures)
+	t.Setenv("PATH", t.TempDir())
+	t.Run("no_git", TestExportIOSManifestFixtures)
 }

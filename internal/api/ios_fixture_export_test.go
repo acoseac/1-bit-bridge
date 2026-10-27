@@ -203,3 +203,11 @@ func TestExportIOSOutputFixtures(t *testing.T) {
 		}
 	}
 }
+
+func TestIOSOutputFixturesWithoutProvenance(t *testing.T) {
+	t.Setenv("BRIDGE_EXPORT_IOS_FIXTURES", "")
+	t.Setenv("BRIDGE_FIXTURE_COMMIT", "")
+	t.Setenv("GIT_DIR", filepath.Join(t.TempDir(), "missing.git"))
+	t.Setenv("PATH", t.TempDir())
+	TestExportIOSOutputFixtures(t)
+}

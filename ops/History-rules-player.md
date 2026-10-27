@@ -810,3 +810,10 @@ Qualification version 11 supersedes version 10: the path guard includes the new
 manifest exporter test. This is a contract/test change, with no hardware run or
 playback/extraction implementation change. See History-b470-native.md,
 “iOS mirror precision”.
+
+### Native engine hand-off, final delta review
+
+Qualification version 12 supersedes 11 for the manifest exporter provenance fix
+and qualification runbook pin (test files are guarded). Current runbook instructions
+must track Version; history retains its original versions. See
+History-b470-native.md, “Final delta review”.

@@ -299,3 +299,18 @@ protocol hash and explicit working-tree label avoid claiming uncommitted changes
 belong to it. Fixture files are consumer artifacts, not hardware qualification.
 Qualification version 11 supersedes 10 because the guard includes test paths
 under internal/manifest; no playback or extraction implementation changed.
+
+### Final delta review
+
+Both fixture exporters keep extraction/HTTP serialization assertions active without
+BRIDGE_EXPORT_IOS_FIXTURES, Git or HEAD. Only publication requires provenance;
+the manifest exporter resolves Git/BRIDGE_FIXTURE_COMMIT inside its export gate.
+The API exporter's provenance-file dependency was already export-gated.
+TestDSDOutputProtocolMembers compares raw HTTP JSON against PROTOCOL.md's member
+table: exact member sets, JSON types, required zero/empty values, optional fields
+absent when empty and present when set, absent objects and non-null empty arrays.
+A DTO decode round trip alone cannot detect omitted mandatory zero values.
+Qualification version 12 supersedes 11 because manifest/qualification tests match
+the path guard. TestQualificationRunbookVersion pins all five current runbook
+version references to Version; historical evidence records retain their versions.
+No playback/extraction implementation or wire contract changed.

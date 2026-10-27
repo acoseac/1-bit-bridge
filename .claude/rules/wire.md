@@ -672,4 +672,4 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
 
 - **`bridge.playback.logicalRate` is always present: zero for PCM, logical bits/s for native DSD; `policyId` remains optional.** PROTOCOL.md is authoritative; protocol stays v1. → History-b470-native.md, “PR #1356 review”.
 
-- **DSD output member presence and exact token lists follow PROTOCOL.md; keep the source-derived token drift guard and iOS fixture exporters live without their export variable.** Export the manifest then API packages sequentially (`-p=1`) with `BRIDGE_EXPORT_IOS_FIXTURES`; never hand-author their JSON. → History-b470-native.md, “iOS mirror precision”.
+- **DSD output member presence and exact token lists follow PROTOCOL.md; keep the source-derived token guard, raw-JSON member/type/omission checks and iOS fixture exporters live without their export variable or Git provenance.** Export the manifest then API packages sequentially (`-p=1`) with `BRIDGE_EXPORT_IOS_FIXTURES`; never hand-author their JSON. → History-b470-native.md, “iOS mirror precision”.
