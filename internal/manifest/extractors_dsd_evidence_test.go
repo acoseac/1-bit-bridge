@@ -38,6 +38,9 @@ func TestDFFCompressionEvidence(t *testing.T) {
 			if tr.DFFCompressionEvidence != tc.want {
 				t.Fatalf("evidence=%q want %q", tr.DFFCompressionEvidence, tc.want)
 			}
+			if tc.name == "two_props" && (tr.SampleRate == nil || *tr.SampleRate != 2822400 || tr.Channels == nil || *tr.Channels != 2 || tr.IsDSD == nil || !*tr.IsDSD || tr.BitsPerSample == nil || *tr.BitsPerSample != 1) {
+				t.Fatalf("duplicate PROP erased first format facts: %+v", tr)
+			}
 			wire, _ := json.Marshal(tr)
 			var fields map[string]any
 			json.Unmarshal(wire, &fields)
@@ -99,7 +102,7 @@ func TestDSDEvidenceBackfillFullDelta(t *testing.T) {
 		}
 	}
 	scanOnce(t, sc, "initial")
-	if _, e := store.db.Exec(`UPDATE tracks SET extractor_version=27,tags_json=json_remove(tags_json,'$.dffCompressionEvidence','$.channels')`); e != nil {
+	if _, e := store.db.Exec(`UPDATE tracks SET extractor_version=29,tags_json=json_remove(tags_json,'$.dffCompressionEvidence','$.channels')`); e != nil {
 		t.Fatal(e)
 	}
 	var before int64
@@ -164,7 +167,7 @@ func TestDSDEvidenceBackfillFullDelta(t *testing.T) {
 	if len(m.Tracks) != 0 {
 		t.Fatal("unchanged scan emits a delta")
 	}
-	if ExtractorVersion <= 27 {
+	if ExtractorVersion <= 29 {
 		t.Fatal("extractor version not bumped")
 	}
 }

@@ -238,7 +238,7 @@ func trustedFile(stateDir, name string) ([]byte, error) {
 		return nil, err
 	}
 	rel, err := filepath.Rel(root, resolved)
-	if err != nil || !filepath.IsLocal(rel) {
+	if err != nil || rel == "." || !filepath.IsLocal(rel) {
 		return nil, errors.New("approval must live in state directory")
 	}
 	for dir := filepath.Dir(resolved); ; dir = filepath.Dir(dir) {
@@ -251,6 +251,9 @@ func trustedFile(stateDir, name string) ([]byte, error) {
 		}
 		if dir == root {
 			break
+		}
+		if filepath.Dir(dir) == dir {
+			return nil, errors.New("approval must live in state directory")
 		}
 	}
 	f, _, err := fsutil.OpenAsFile(resolved)

@@ -606,7 +606,8 @@ var Ext = map[string]bool{
 // the formats a file can hold either kind in, where a bump re-opens every
 // file once. A later change to what the kind reads is a bump like any other:
 // the stamp leg records the kind a re-read finds (writeSampleFormatTx).
-const ExtractorVersion = 29
+// v30 preserves the first parsed DFF PROP format facts across duplicate PROP.
+const ExtractorVersion = 30
 
 // Extract reads as much metadata as it can from the file at absPath and
 // fills in the Track at t. Path, Size, ModTime on t MUST already be set by
@@ -2668,6 +2669,7 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	}
 	var (
 		props        int
+		parsedProp   bool
 		invalidProps bool
 		prop         dffPropInfo
 		sound        dffSoundInfo
@@ -2788,7 +2790,12 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 				}
 				continue
 			}
-			prop = parsePropChunks(body[4:])
+			// A duplicate invalidates compression evidence, but must not
+			// erase the format facts already parsed from the first PROP.
+			if !parsedProp {
+				prop = parsePropChunks(body[4:])
+				parsedProp = true
+			}
 			// Pad byte after odd-size payload — the body slice already
 			// consumed `size` bytes, but the file cursor needs a pad
 			// advance to stay aligned for the next chunk.

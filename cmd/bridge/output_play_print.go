@@ -33,6 +33,12 @@ type playTee struct {
 	r *playRun
 }
 
+// OwnsOccurrenceReservations preserves the backend's optional hand-off ownership.
+func (t playTee) OwnsOccurrenceReservations() bool {
+	b, ok := t.playBackend.(engine.ReservationBackend)
+	return ok && b.OwnsOccurrenceReservations()
+}
+
 func (t playTee) Start(ctx context.Context, req engine.StartRequest) error {
 	t.r.noteOcc(req.First)
 	t.r.out.line("session %d: start with %s", req.Session, t.r.name(req.First.ID))

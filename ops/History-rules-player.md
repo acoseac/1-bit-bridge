@@ -793,3 +793,13 @@ checks that tests ran; the repository wiring test and build-site census pin it.
 The production-constructor test registers drainLoopOnCleanup at its launch,
 before backend Wait and temporary-directory removal. It previously joined the
 engine in a custom cleanup, which the repository's required helper audit rejected.
+
+### Native engine hand-off, PR #1356 review
+
+Qualification version 10 supersedes version 9 for guarded output-play, approval,
+config, wire DTO and extraction changes. Output-play forwards the concrete
+backend's optional reservation opt-in through playTee, with legacy and opted-out
+backends retaining their old behavior. Accepted DSD settings are off/auto/native/dop;
+allowDoP is accepted configuration, not a claim that DoP is implemented. Invalid-mode
+refusals name those choices without claiming that off is the only choice.
+The complete review invariants are in History-b470-native.md, “PR #1356 review”.

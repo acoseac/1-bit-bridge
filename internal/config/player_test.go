@@ -1078,3 +1078,11 @@ func TestApprovedNativeSettingsParse(t *testing.T) {
 		}
 	}
 }
+
+func TestInvalidDSDModeNamesCurrentChoices(t *testing.T) {
+	p := PlayerConfig{DSDMode: "invalid"}
+	err := p.Problem()
+	if err == nil || !strings.Contains(err.Error(), "dsdMode: that value is not a DSD mode (auto, native, dop or off)") || strings.Contains(err.Error(), "takes off alone") {
+		t.Fatalf("invalid DSD mode diagnostic: %v", err)
+	}
+}

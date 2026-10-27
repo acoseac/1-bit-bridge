@@ -1,6 +1,6 @@
 # B470 native qualification — owner approval and provisional evidence
 
-QualificationVersion is **8**. All older evidence must be rerun. The harness never
+QualificationVersion is **10**. All older evidence must be rerun. The harness never
 creates approval. Production native DSD requires a fresh matching approved record;
 DoP remains unimplemented. Real-ref and Linux hardware gates remain reviewer/owner work.
 
@@ -166,7 +166,7 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-Historical round 3 used qualificationVersion 4; current version is **9** and Contact.SchemaVersion remains **2**. All older
+Historical round 3 used qualificationVersion 4; current version is **10** and Contact.SchemaVersion remains **2**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
 either audition leg opens. Missing fields are not zero. Both opened-node checks
@@ -253,7 +253,7 @@ still resolve inside it). `dsdMode: native` or `auto` enables only approved nati
 
 The Go contracts are `qualification.Approval`, `ApprovalBody`, `ApprovedPolicy`, `Edge`
 and `Evidence` in `internal/player/qualification/approval.go`. JSON uses those exact
-exported field names. SchemaVersion=1; QualificationVersion=9; Revision is the owner's
+exported field names. SchemaVersion=1; QualificationVersion=10; Revision is the owner's
 revision; Identity is the observed VID/ProductID/manufacturer/product/bcdDevice,
 anchored controller/port, interface, device and subdevice. No serial or card number is
 persistent identity. Unchanged descriptors may retain approval after replug/restart;
@@ -300,7 +300,7 @@ At least one native fixture must finish with measured playback of that tuple.
 NativeTuple and NativeCompleted record that execution; PCM-only lists or completion
 cannot qualify it. LifecycleActions count observed native outcomes: pause/resume,
 release/reopen, navigation between native occurrences, Stop, and natural completion.
-An admitted command alone is insufficient. Version 9 invalidates older evidence.
+An admitted command alone is insufficient. Version 10 invalidates older evidence.
 List all candidate directional edges explicitly. No command generates that record.
 
 ```sh
@@ -332,3 +332,11 @@ flag exists. All dsd-test invocations require valued `--ack-level`, `--manifest`
 positional fixture IDs. iOS I1–I3 (Track migration, QueueItem propagation and whole-window
 pre-DeleteAll/Insert eligibility) remain pending companion PRs; the bridge guarantees its
 own content/tuple/record gate before hardware writes.
+
+The PR #1356 review fixes the output-play reservation opt-in and rejects approval
+or evidence names resolving to the state directory itself before any ancestor
+walk. Native monitoring remains fail-closed without a grace period. The overlay
+generator requires both integration suites before publishing its overlay.
+Guarded API, config, extractor, output-play and approval paths changed; rerun
+qualification with version 10. ExtractorVersion 30 retains the first parsed DFF
+PROP's known format facts when a later PROP makes compression unsupported.

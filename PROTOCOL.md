@@ -527,17 +527,19 @@ omit both and clients treat absence as before):
   rate already rules it out (the iOS repo's `docs/DSTFeasibility.md`).
 - `channels` (`*int`, `omitempty`) — the audio channel count (DSDIFF
   `CHNL` numChannels; 2 = stereo, 5/6 = multichannel SACD layouts).
-  The DFF extractor populates it; since ExtractorVersion 28 a validated DSF
+  The DFF extractor populates it; since ExtractorVersion 29 a validated DSF
   fmt channel type/count stamps its actual count too (invalid is absent, never 2).
   A SACD ISO virtual row carries `2`, and
   since ExtractorVersion 25 an Ogg FLAC, Vorbis or Opus row does too. A
   native FLAC and the other formats omit it. `ProtocolVersion` stays `1`.
 
-Since ExtractorVersion **28**, `dffCompressionEvidence` is an optional string:
+Since ExtractorVersion **29**, `dffCompressionEvidence` is an optional string:
 `raw` only for a structurally valid single PROP with one `CMPR=DSD `;
 `missing` when CMPR is absent; `unsupported` for DST, unknown or short CMPR,
 duplicate/conflicting CMPR, multiple PROP or malformed properties, including
-malformation after otherwise valid raw evidence. An absent field from an older
+malformation after otherwise valid raw evidence. Since ExtractorVersion **30**,
+a later duplicate PROP cannot erase the first parsed PROP's format facts;
+compression evidence remains `unsupported`. An absent field from an older
 bridge means missing evidence, never raw. Full and delta manifests carry the
 same stored value. The stale-extractor scan backfills unchanged files and emits
 the changed rows; the next unchanged scan emits no delta.
@@ -905,7 +907,7 @@ Any other `codec` names no container the player plays: `AAC`, which the manifest
 **DSD eligibility comes only from `bridge.dsdPlayback`**, never passive DAC capabilities, MPD facts or PCM rate ceilings. Optional additive objects (protocol v1):
 
 - `dsdPlayback`: `bootId` (random per backend boot), `policyGeneration` (monotonic within that boot), `qualificationRevision`, `reason`, and `tuples` (always an array). Each tuple contains `format`, `bitRate`, `channels`, `policyId`, `pause`, `tailMs`, `prefillMs`. This is the effective exact tuple set, not a Cartesian product. Native preference is U32_BE, U32_LE, U16_LE. Missing, stale, revoked, off or filtered-empty authorization gives the original PCM codecs and ProtocolInfo bytes. GET only copies cached policy, performing no hardware probes.
-- `playback`: the latest current occurrence's observed `session`, `occurrence`, `state` (`open`, `released`, `revoked`), exact `format`, `rateHz`, `logicalRate`, `channels`, `validBits`, `policyId`, `bootId` and `policyGeneration`. It is absent before an occurrence is installed. Released/revoked retain the last observation; capability tuples never substitute for it. Its generation can precede the current capability generation. Native logicalRate is DSD bits/s; rateHz is the actual ALSA word rate. PCM logicalRate is zero.
+- `playback`: the latest current occurrence's observed `session`, `occurrence`, `state` (`open`, `released`, `revoked`), exact `format`, `rateHz`, `logicalRate`, `channels`, `validBits`, `policyId`, `bootId` and `policyGeneration`. It is absent before an occurrence is installed. Released/revoked retain the last observation; capability tuples never substitute for it. Its generation can precede the current capability generation. Native logicalRate is DSD bits/s; rateHz is the actual ALSA word rate. PCM logicalRate is always present and zero; policyId is optional.
 
 Revocation publishes a PCM-only policy epoch, discards prepared DSD and Immediate-stops active or retiring DSD. A session playing PCM with only prepared DSD keeps playing PCM. Recovery never autoplays. Replacing or deleting the approval revokes old permissions, including identical replacement bytes. Every new session and activation verifies ownership/mode, body and report hashes, version, identity and semantic mixer constraints.
 

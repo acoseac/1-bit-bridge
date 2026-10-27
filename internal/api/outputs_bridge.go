@@ -224,7 +224,7 @@ type OutputPlayback struct {
 	State            string `json:"state"`
 	Format           string `json:"format"`
 	RateHz           int    `json:"rateHz"`
-	LogicalRate      int    `json:"logicalRate,omitempty"`
+	LogicalRate      int    `json:"logicalRate"`
 	Channels         int    `json:"channels"`
 	ValidBits        int    `json:"validBits"`
 	PolicyID         string `json:"policyId,omitempty"`

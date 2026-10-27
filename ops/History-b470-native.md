@@ -238,7 +238,8 @@ gapless installation rechecks both before accepting the successor's bytes.
 DFF decoding validates the whole bounded form, skipping payloads by seek. Trailing
 PROP bytes, missing odd padding, duplicate PROP after sound and bytes outside FRM8
 refuse before hardware. The extractor preserves established format stamps even
-when later structure makes compression evidence unsupported (version 29).
+when later structure within a PROP makes compression evidence unsupported (version 29);
+duplicate-PROP preservation is corrected in version 30 below.
 
 Live facts read sink state and correlate lifecycle notifications by physical output,
 so buffering cannot invent a reopen and an old sink cannot release a new observation.
@@ -250,3 +251,29 @@ The production policy reader supplies negative surface fixtures, including actua
 revocation after valid approval. Codec words remain protocol-v1 lowercase dsf/dff.
 qualificationVersion 9 invalidates version-8 evidence. No hardware qualification,
 Linux execution, iOS companion work or DoP implementation is claimed.
+
+### PR #1356 review
+
+Qualification version 10 invalidates version-9 and older reports because guarded
+API, config, extraction, output-play and approval code changed. Output-play forwards
+OwnsOccurrenceReservations through its playTee wrapper so the real engine hands off
+shared reservations; a backend that opts out or has no opt-in still gets none.
+Approval and evidence paths must resolve strictly below the state directory, never
+to the directory itself, including empty, dot, absolute and symlink spellings.
+The ancestor walk also refuses a filesystem root reached before the state root.
+That second bound is defensive after the strict-relative-path check.
+The overlay generator requires both integration source files and publishes its
+mapping only after validating both; a missing backend suite is an error.
+
+ExtractorVersion 30 preserves the first parsed DFF PROP's facts across later PROP
+chunks while keeping duplicate compression evidence unsupported. Version-29 rows
+are re-extracted; changed rows reach full and delta manifests once. Version 29 is
+the documented baseline for DSF channel validation and DFF compression evidence.
+PCM playback always serializes logicalRate as zero, with optional policyId, matching
+PROTOCOL.md; this is additive protocol v1. Invalid dsdMode diagnostics list the
+accepted modes and retain the prohibition on DSD-to-PCM conversion.
+
+ReleaseNative still uses the session-creating lookup: release may arrive before
+start and must leave the fence record. Native permission monitoring still revokes
+on the first failed check; uncertain authorization is not permission to continue,
+and recovery never starts playback. These two review suggestions were declined.

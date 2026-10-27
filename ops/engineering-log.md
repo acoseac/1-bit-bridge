@@ -65384,3 +65384,18 @@ edge keys. Real policy reader fixtures exercise surface negatives and lowercase 
 The full-suite review's stale configuration tests now use an invalid mode; constructor
 census includes the CLI candidate lifecycle engine. qualificationVersion is 9.
 Matching rules and History-b470-native.md carry the durable invariants. No hardware.
+
+
+## 2026-10-27 — B470 2c.2 PR #1356 review
+
+Eight of ten inline findings were confirmed. Assertion reds reproduced omitted PCM
+logicalRate, stale invalid-mode guidance, duplicate PROP erasure, lost output-play
+reservation ownership, state-directory evidence walking above its root, and a
+missing backend suite accepted by the overlay generator. Version-29 backfill and
+version-9 approval invalidation were red before the version bumps too. The runbook
+and protocol version references were corrected in the same round; protocol stays 1.
+QualificationVersion is 10 and ExtractorVersion is 30. Rule detail is in
+History-b470-native.md, “PR #1356 review”, with matching player/scanner/wire lines.
+The release-before-start lookup and immediate fail-closed permission revocation
+are intentional and unchanged. Local review artifacts record exact mutation reds
+and gate exits. No commit, push or hardware qualification was performed.

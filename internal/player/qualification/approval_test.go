@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -155,5 +156,36 @@ func TestApprovalExecutedEvidence(t *testing.T) {
 				t.Fatal("unexecuted or tampered evidence approved")
 			}
 		})
+	}
+}
+
+func TestApprovalRejectsStateDirectory(t *testing.T) {
+	for _, name := range []string{"empty", "dot", "absolute", "alias"} {
+		t.Run(name, func(t *testing.T) {
+			dir, a, id := approvalFixture(t)
+			path := map[string]string{"empty": "", "dot": ".", "absolute": dir, "alias": "alias"}[name]
+			if name == "alias" {
+				if err := os.Symlink(".", filepath.Join(dir, path)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			a.Body.Policies[0].Matrix.Path = path
+			a.SHA256 = Digest(a.Body)
+			writeApproval(t, dir, a)
+			_, err := ReadApproval(dir, "approved.json", id)
+			if err == nil || !strings.Contains(err.Error(), "approval must live in state directory") {
+				t.Fatalf("state directory must be rejected before walking its ancestors: %v", err)
+			}
+		})
+	}
+}
+
+func TestApprovalRejectsPreBotReviewVersion(t *testing.T) {
+	dir, a, id := approvalFixture(t)
+	a.Body.QualificationVersion = 9
+	a.SHA256 = Digest(a.Body)
+	writeApproval(t, dir, a)
+	if _, err := ReadApproval(dir, "approved.json", id); err == nil || err.Error() != "stale approval version" {
+		t.Fatalf("version-9 approval was not invalidated: %v", err)
 	}
 }

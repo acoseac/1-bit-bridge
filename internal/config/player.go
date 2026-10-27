@@ -418,7 +418,7 @@ func (p PlayerConfig) Problem() error {
 	switch p.DSDMode {
 	case "", "off", "auto", "native", "dop":
 	default:
-		return errors.New(at + "dsdMode: that value is not a DSD mode (auto, native, dop or off), and this release takes off alone: the player never converts DSD to PCM")
+		return errors.New(at + "dsdMode: that value is not a DSD mode (auto, native, dop or off); the player never converts DSD to PCM")
 	}
 
 	switch p.Mixer.Type {
