@@ -516,7 +516,8 @@ omit both and clients treat absence as before):
   name. Exactly `"DST"` for DST-compressed `.dff`; omitted for
   everything else. `codec` stays `"DFF"` for compressed and uncompressed
   DSDIFF alike (clients match `codec` by equality elsewhere), so this
-  field is the ONLY wire discriminator. iOS maps `compression == "DST"`
+  field explicitly identifies DST; `dffCompressionEvidence` below separately
+  establishes raw eligibility. iOS maps `compression == "DST"`
   onto its canonical DST codec marker at its upsert chokepoint and
   decodes DST itself: a stereo DSD64 or DSD128 track (44.1 kHz family)
   with a library row is decoded on the phone into an uncompressed
@@ -526,9 +527,20 @@ omit both and clients treat absence as before):
   rate already rules it out (the iOS repo's `docs/DSTFeasibility.md`).
 - `channels` (`*int`, `omitempty`) — the audio channel count (DSDIFF
   `CHNL` numChannels; 2 = stereo, 5/6 = multichannel SACD layouts).
-  The DFF extractor populates it, a SACD ISO virtual row carries `2`, and
+  The DFF extractor populates it; since ExtractorVersion 28 a validated DSF
+  fmt channel type/count stamps its actual count too (invalid is absent, never 2).
+  A SACD ISO virtual row carries `2`, and
   since ExtractorVersion 25 an Ogg FLAC, Vorbis or Opus row does too. A
   native FLAC and the other formats omit it. `ProtocolVersion` stays `1`.
+
+Since ExtractorVersion **28**, `dffCompressionEvidence` is an optional string:
+`raw` only for a structurally valid single PROP with one `CMPR=DSD `;
+`missing` when CMPR is absent; `unsupported` for DST, unknown or short CMPR,
+duplicate/conflicting CMPR, multiple PROP or malformed properties, including
+malformation after otherwise valid raw evidence. An absent field from an older
+bridge means missing evidence, never raw. Full and delta manifests carry the
+same stored value. The stale-extractor scan backfills unchanged files and emits
+the changed rows; the next unchanged scan emits no delta.
 
 DST rows are TYPED like any other DSD row: `isDSD: true`,
 `sampleRate` = the DSD rate, `bitsPerSample: 1` — all stamped together
@@ -877,7 +889,7 @@ When none holds, `state` is the transport's: `playing` (a track that is starting
 
 **`libraryScope`** is `self`: the player plays this bridge's own tracks, the ones it would not refuse as `not_indexed` (no row of the library's index has it), `routed` (an upstream server's track) or `outside_library` (a file outside every library root configured now). An OpenHome controller queues one by the URI the player's Source takes in an Insert, `http://<host>:<port>/dlna/file/<id>`: a host this bridge advertises, the DLNA listener's port, and the track's DLNA id (B470 PR 5a4).
 
-**`fixedVolume`** is `true` while the player has no volume control (`output.player.mixer` none, the one this release takes): the DAC receives the file's own level. **`dsdMode`** is `off`, the one this release takes (a DSD track is refused, never converted), and **`allowDoP`** is `false`, both as the player took them when `bridge serve` started.
+**`fixedVolume`** is `true` while the player has no volume control (`output.player.mixer` none, the one this release takes): the DAC receives the file's own level. **`dsdMode`** is `off` (default), `native`, `auto` or `dop`, and **`allowDoP`** is the configured boolean, both as the player took them at boot. These settings alone grant no DSD permission. Native playback requires a fresh matching owner-approved record. DoP packing is not implemented in this release: DoP-only tuples are omitted, and no mode converts DSD to PCM.
 
 **`codecs`** are the containers the player plays in this release: `flac`, `wav`, `aiff` and `alac` (ALAC in an M4A). A client matches a track by its `codec` in `/v1/manifest`:
 
@@ -888,9 +900,26 @@ When none holds, `state` is the transport's: `playing` (a track that is starting
 | `AIFF` | `aiff` |
 | `ALAC` | `alac` |
 
-Any other `codec` names no container the player plays: `AAC`, which the manifest tells from ALAC in an `.m4a` by its `codec`, `MP3`, `OGG`, `DSF`, `DFF`, and a compressed AIFF-C or WAV. A track with no `codec` cannot be matched, and the player's own refusal decides. DSD containers appear here once a DSD mode other than `off` ships. A container listed is no promise for every file in it: the player refuses floating-point PCM (`sampleFormat` `"float"`), and a rate, a depth or a transport its DAC does not take.
+Any other `codec` names no container the player plays: `AAC`, which the manifest tells from ALAC in an `.m4a` by its `codec`, `MP3`, `OGG`, and a compressed AIFF-C or WAV. A track with no `codec` cannot be matched, and the player's own refusal decides. `dsf` and `dff` appear only when `dsdPlayback.tuples` is nonempty, mapping `DSF` and `DFF` respectively. A container listed is no promise for every file in it: the player refuses floating-point PCM (`sampleFormat` `"float"`), and a rate, a depth or a transport its DAC does not take.
 
-**When `dac` is not `null`, a client may also judge rates and DSD transports from its `capabilities`**, together with the player's `dsdMode` and `allowDoP`. When `dac` is `null`, the queue check covers scope and containers only. The player's own refusal stays authoritative on rates and transports either way.
+**DSD eligibility comes only from `bridge.dsdPlayback`**, never passive DAC capabilities, MPD facts or PCM rate ceilings. Optional additive objects (protocol v1):
+
+- `dsdPlayback`: `bootId` (random per backend boot), `policyGeneration` (monotonic within that boot), `qualificationRevision`, `reason`, and `tuples` (always an array). Each tuple contains `format`, `bitRate`, `channels`, `policyId`, `pause`, `tailMs`, `prefillMs`. This is the effective exact tuple set, not a Cartesian product. Native preference is U32_BE, U32_LE, U16_LE. Missing, stale, revoked, off or filtered-empty authorization gives the original PCM codecs and ProtocolInfo bytes. GET only copies cached policy, performing no hardware probes.
+- `playback`: the latest current occurrence's observed `session`, `occurrence`, `state` (`open`, `released`, `revoked`), exact `format`, `rateHz`, `logicalRate`, `channels`, `validBits`, `policyId`, `bootId` and `policyGeneration`. It is absent before an occurrence is installed. Released/revoked retain the last observation; capability tuples never substitute for it. Its generation can precede the current capability generation. Native logicalRate is DSD bits/s; rateHz is the actual ALSA word rate. PCM logicalRate is zero.
+
+Revocation publishes a PCM-only policy epoch, discards prepared DSD and Immediate-stops active or retiring DSD. A session playing PCM with only prepared DSD keeps playing PCM. Recovery never autoplays. Replacing or deleting the approval revokes old permissions, including identical replacement bytes. Every new session and activation verifies ownership/mode, body and report hashes, version, identity and semantic mixer constraints.
+
+| Track evidence, in this bridge's own library | DSD eligibility (also requires exact approved stereo/rate tuple) |
+|---|---|
+| DSF, validated fmt with known stereo/rate | Eligible |
+| DFF, `raw`, no conflicting DST evidence | Eligible |
+| DFF, `missing` or absent evidence | Refuse |
+| DFF, `unsupported`, DST or malformed properties | Refuse |
+| Missing/invalid/non-stereo channel facts | Refuse |
+
+The bridge independently inspects content at its open and refuses invalid DSF/DFF, missing tuples or invalid approval before hardware writes. Directional transition approval includes both endpoint tuples and complete policies; an unapproved natural or navigation edge refuses the incoming hardware open, even when both endpoints are approved. The outgoing occurrence follows its own release.
+
+**iOS I1–I3 companion PRs remain pending:** stored Track migration, QueueItem propagation, and checking the entire insertion window before DeleteAll/Insert belong to iOS. Bridge Insert cannot inspect a controller's future window. These bridge changes do not claim zero controller mutations or completion of that cross-repository gate; mirror this contract and its fixtures in those PRs.
 
 ### `GET /v1/outputs/{id}/reading` (additive; `outputReading`)
 

@@ -19,8 +19,9 @@ import (
 // and report them, the producer and the reporter, beside one opener a
 // successor.
 type session struct {
-	b  *Backend
-	id engine.SessionID
+	permission *permission
+	b          *Backend
+	id         engine.SessionID
 
 	// ctx is the session's life: every goroutine it starts and every sink it
 	// opens ends with it, at its release.
@@ -98,6 +99,8 @@ type session struct {
 
 // output is one sink a session opened, for one transport.
 type output struct {
+	plan         *engine.NativePlan
+	permission   *permission
 	s            *session
 	sink         streamSink
 	native       *alsapcm.DSDSink
@@ -120,10 +123,26 @@ func (o *output) admit(n alsapcm.NodeInfo) error {
 	o.umu.Lock()
 	u := o.unit
 	o.umu.Unlock()
-	if u.Admit == nil {
-		return nil
+	if u.Admit != nil {
+		if e := u.Admit(n); e != nil {
+			return e
+		}
 	}
-	return u.Admit(n)
+	if o.permission != nil {
+		if err := o.s.b.checkPermission(o.s.ctx, o.permission, &n); err != nil {
+			return err
+		}
+		if a := o.s.b.cfg.Authorization; a != nil && a.ContactCheck != nil {
+			for _, p := range o.permission.record.Body.Policies {
+				if p.ID == o.policyID {
+					return a.ContactCheck(n, p, o.permission.record.Body.ManifestHash)
+				}
+			}
+			return errors.New("approved policy missing")
+		}
+	}
+
+	return nil
 }
 
 // locate is the sink's reopen locator: the binding resolved again, and the
@@ -288,7 +307,7 @@ func (s *session) call(ctx context.Context, f func() error) (err error) {
 
 // newOccLocked appends an occurrence to the chain. s.mu is held.
 func (s *session) newOccLocked(eo engine.Occurrence) *occ {
-	o := &occ{reservation: eo.Reservation, id: eo.ID, entry: eo.Entry, ref: eo.Ref, pos: len(s.chain), done: make(chan struct{})}
+	o := &occ{permission: s.permission, reservation: eo.Reservation, id: eo.ID, entry: eo.Entry, ref: eo.Ref, pos: len(s.chain), done: make(chan struct{})}
 	s.chain = append(s.chain, o)
 	return o
 }
@@ -360,6 +379,22 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	}
 	cctx, stop := s.bound(ctx)
 	defer stop()
+	if s.b.cfg.Authorization != nil {
+		p, e := s.b.readPermission(cctx)
+		s.mu.Lock()
+		if s.nativeRevoked && p != nil {
+			p.revoked.Store(true)
+		}
+		if e != nil {
+			s.b.publishPermission(nil, "approval_unavailable")
+		} else {
+			s.b.publishPermission(p, "")
+		}
+		s.permission = p
+		first.permission = p
+		s.mu.Unlock()
+		s.monitorPermission()
+	}
 	s.b.open(cctx, first)
 	close(first.done)
 	if first.refused != nil {
@@ -467,7 +502,11 @@ func (s *session) openOutput(ctx context.Context, o *occ) (*output, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		out := &output{s: s, transport: transportFor(rate, bits, f), unit: u}
+		transport := transportFor(rate, bits, f)
+		if err := s.b.checkEdge(transport, nil, nil); err != nil {
+			return nil, err
+		}
+		out := &output{s: s, transport: transport, unit: u}
 		sink, err := s.b.cfg.OpenSink(s.ctx, alsapcm.SinkConfig{
 			Endpoint: u.Endpoint, Transport: out.transport, Pause: alsapcm.PauseAuto,
 			ReleaseAfter: s.opts.PauseRelease, Admit: out.admit, Locate: out.locate, Log: s.b.log,
@@ -636,6 +675,9 @@ func (s *session) openSuccessor(ctx context.Context, o *occ) {
 		wake(s.wakeP)
 		wake(s.wakeR)
 	}()
+	if s.nativeRevoked && o.plan != nil {
+		o.refused = &engine.Unplayable{Reason: "native_revoked", Detail: "DSD permission revoked"}
+	}
 	if o.dropped {
 		// Dropped while it opened: nothing of it plays or is reported, and
 		// it leaves the chain with its opener, which retirement passed over

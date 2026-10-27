@@ -34,7 +34,7 @@ func TestNativeProductionConstructorsRefuse(t *testing.T) {
 					t.Fatal(e)
 				}
 				calls, opens := 0, 0
-				cfg := playback.Config{Resolver: refusedNativeResolver(data), Locator: refusedNativeLocator{&calls}, OpenSink: func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error) {
+				cfg := playback.Config{Authorization: &playback.Authorization{Mode: "native", StateDir: t.TempDir(), Record: "missing-approved.json"}, Resolver: refusedNativeResolver(data), Locator: refusedNativeLocator{&calls}, OpenSink: func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error) {
 					opens++
 					return nil, errors.New("unexpected open")
 				}}

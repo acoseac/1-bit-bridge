@@ -196,6 +196,8 @@ type Track struct {
 	// never observe a half-stamped row (the PR #563 renderer
 	// silent-decline class).
 	Compression string `json:"compression,omitempty"`
+	// DFFCompressionEvidence is raw, missing or unsupported; absence is missing.
+	DFFCompressionEvidence string `json:"dffCompressionEvidence,omitempty"`
 
 	// Channels is the audio channel count (DSDIFF `CHNL` numChannels;
 	// 2 = stereo, 5/6 = multichannel SACD layouts). Pointer + omitempty

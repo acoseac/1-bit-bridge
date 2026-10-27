@@ -120,6 +120,7 @@ type reader func(r readRequest) ([][]byte, *faultReply)
 // the device the surface describes, and the action's in-arguments' text,
 // in the SCPD's order, as row 9 passed it.
 type readRequest struct {
+	dsd    bool
 	snap   *engine.Snapshot
 	device Device
 	args   []string
@@ -157,7 +158,7 @@ var reads = map[string]map[string]reader{
 		"TracksMax":      func(readRequest) ([][]byte, *faultReply) { return texts(ui4(engine.MaxEntries)), nil },
 		"IdArray":        playlistIDArray,
 		"IdArrayChanged": playlistIDArrayChanged,
-		"ProtocolInfo":   func(readRequest) ([][]byte, *faultReply) { return texts(protocolInfo), nil },
+		"ProtocolInfo":   func(r readRequest) ([][]byte, *faultReply) { return texts(policyProtocolInfo(r.dsd)), nil },
 	},
 	"Info": {
 		"Counters": func(r readRequest) ([][]byte, *faultReply) {
@@ -188,7 +189,7 @@ func (h *handler) act(w http.ResponseWriter, r *http.Request, s *service, a *act
 	var values [][]byte
 	var f *faultReply
 	if read := reads[s.name][a.name]; read != nil {
-		values, f = read(readRequest{snap: snap, device: h.device, args: args})
+		values, f = read(readRequest{snap: snap, device: h.device, args: args, dsd: h.dsdPolicy != nil && h.dsdPolicy()})
 	} else if write := writes[s.name][a.name]; write != nil {
 		ctx, cancel := context.WithDeadline(r.Context(), arrived.Add(h.lim.writeBudget()))
 		values, f = write(writeRequest{ctx: ctx, h: h, r: r, action: a, args: args, slot: slot})
@@ -508,4 +509,11 @@ func infoDetails(r readRequest) ([][]byte, *faultReply) {
 		bitRate = min(rate*bits*channels, math.MaxUint32)
 	}
 	return texts(ui4(min(p.duration(), timeMax)), ui4(bitRate), ui4(bits), ui4(rate), boolean(d.Lossless), d.Codec), nil
+}
+
+func policyProtocolInfo(dsd bool) string {
+	if !dsd {
+		return protocolInfo
+	}
+	return protocolInfo + ",http-get:*:" + dlna.ResolveMIMEType("", ".dsf") + ":*,http-get:*:" + dlna.ResolveMIMEType("", ".dff") + ":*"
 }

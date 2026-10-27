@@ -230,7 +230,7 @@ func TestAnInvalidPlayerBlockTurnsOffThePlayerAndNothingElse(t *testing.T) {
 		name, block, reason string
 	}{
 		{"unknown key", "    enabled: true\n    pauseReleaseSecond: 30\n",
-			"that key is not a player setting (enabled, room, pauseReleaseSeconds, device, dsdMode, allowDoP, mixer, openhome or openhomePort)"},
+			"that key is not a player setting (enabled, room, pauseReleaseSeconds, device, dsdMode, dsdQualification, allowDoP, mixer, openhome or openhomePort)"},
 		{"unknown key holding the serial", "    enabled: true\n    serail: " + playerSerial + "\n", "that key is not a player setting"},
 		{"a wrong type", "    enabled: maybe\n", "output.player.enabled (line"},
 		{"the serial where a number goes", "    enabled: true\n    device:\n      pcmDevice: " + playerSerial + "\n", "output.player.device.pcmDevice (line"},
@@ -584,7 +584,6 @@ func fullPlayer() PlayerConfig {
 // and the neighbours it accepts.
 func TestEveryPlayerRefusal(t *testing.T) {
 	intp := func(n int) *int { return &n }
-	boolp := func(b bool) *bool { return &b }
 	for _, tc := range []struct {
 		name   string
 		edit   func(*PlayerConfig)
@@ -596,12 +595,8 @@ func TestEveryPlayerRefusal(t *testing.T) {
 		{"release 0", func(p *PlayerConfig) { p.PauseReleaseSeconds = intp(0) }, "pauseReleaseSeconds"},
 		{"release negative", func(p *PlayerConfig) { p.PauseReleaseSeconds = intp(-5) }, "pauseReleaseSeconds"},
 		{"release past an hour", func(p *PlayerConfig) { p.PauseReleaseSeconds = intp(3601) }, "pauseReleaseSeconds"},
-		{"dsd auto", func(p *PlayerConfig) { p.DSDMode = "auto" }, `dsdMode: "auto" is not in this release`},
-		{"dsd native", func(p *PlayerConfig) { p.DSDMode = "native" }, `dsdMode: "native" is not in this release`},
-		{"dsd dop", func(p *PlayerConfig) { p.DSDMode = "dop" }, `dsdMode: "dop" is not in this release`},
 		{"dsd to pcm", func(p *PlayerConfig) { p.DSDMode = "pcm" }, `dsdMode: that value is not a DSD mode`},
 		{"dsd off", func(p *PlayerConfig) { p.DSDMode = "off" }, ""},
-		{"dop on", func(p *PlayerConfig) { p.AllowDoP = boolp(true) }, "allowDoP: true is not in this release"},
 		{"hardware mixer", func(p *PlayerConfig) { p.Mixer.Type = "hardware" }, `mixer.type: "hardware" is not in this release`},
 		{"software mixer", func(p *PlayerConfig) { p.Mixer.Type = "software" }, `mixer.type: that value is not a mixer type`},
 		{"room too long", func(p *PlayerConfig) { p.Room = strings.Repeat("r", 65) }, "room"},
@@ -782,11 +777,11 @@ func TestThePlayerOffWarningIsLoggedOnceForEachReason(t *testing.T) {
 			}
 		}
 	}
-	const native, dop = `dsdMode: "native" is not in this release`, "allowDoP: true is not in this release"
-	loadAndSave(t, writePlayerConfig(t, "  player:\n    enabled: true\n    dsdMode: native\n"))
+	const native, dop = "dsdMode: that value is not a DSD mode", "pauseReleaseSeconds: must be"
+	loadAndSave(t, writePlayerConfig(t, "  player:\n    enabled: true\n    dsdMode: invalid\n"))
 	wantLines(t, native)
 
-	dopPath := writePlayerConfig(t, "  player:\n    enabled: true\n    allowDoP: true\n")
+	dopPath := writePlayerConfig(t, "  player:\n    enabled: true\n    pauseReleaseSeconds: -1\n")
 	loadAndSave(t, dopPath)
 	wantLines(t, native, dop)
 
@@ -803,7 +798,7 @@ func TestThePlayerOffWarningIsLoggedOnceForEachReason(t *testing.T) {
 	// config is built in memory, so these saves are the first to see its
 	// reason.
 	inMemory := &Config{ListenAddress: ":7788", AdminAddress: "127.0.0.1:7789", ScanIntervalSec: 3600, LibraryRoots: []string{"/music"},
-		Output: OutputConfig{Player: PlayerConfig{Enabled: true, DSDMode: "native"}}}
+		Output: OutputConfig{Player: PlayerConfig{Enabled: true, DSDMode: "invalid"}}}
 	var wg sync.WaitGroup
 	for i := 0; i < 16; i++ {
 		wg.Add(1)
@@ -1066,5 +1061,20 @@ func TestLeadingZeroPlayerBoundary(t *testing.T) {
 			}
 			wantYAMLError(t, p.Unread(), "output.player.openhomePort (line 2): must be a whole number")
 		})
+	}
+}
+
+func TestApprovedNativeSettingsParse(t *testing.T) {
+	for _, mode := range []string{"off", "native", "auto", "dop"} {
+		var p PlayerConfig
+		if err := yaml.Unmarshal([]byte("dsdMode: "+mode+"\ndsdQualification: approved.json\nallowDoP: true\n"), &p); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.Problem(); err != nil {
+			t.Fatal(err)
+		}
+		if p.DSDQualification != "approved.json" {
+			t.Fatal("qualification path lost")
+		}
 	}
 }

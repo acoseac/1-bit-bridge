@@ -24,7 +24,8 @@ import (
 // first passes row 1 (admission at accept, then its Host), then, while the
 // surface stops, is 503 and its connection closed.
 type handler struct {
-	device Device
+	dsdPolicy func() bool
+	device    Device
 	// engine is what every action answers from (actions.go, writes.go); nil
 	// is no engine.
 	engine Engine

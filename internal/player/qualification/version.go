@@ -1,7 +1,7 @@
 package qualification
 
 // qualificationVersion changes whenever a guarded implementation changes.
-const qualificationVersion = 7
+const qualificationVersion = 8
 
-// Version is written into every provisional report; production approval is 2c.2.
+// Version binds provisional reports and production approval to this implementation.
 const Version = qualificationVersion

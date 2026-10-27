@@ -109,6 +109,14 @@ func (s *session) next() step {
 		return step{kind: stepWait, wait: o.done}
 	}
 	if c := s.cur; c != nil && !c.drained && !c.closed && c.transport == o.transport && (o.plan == nil || c.policyID == o.plan.PolicyID) {
+		if err := s.b.checkEdge(o.transport, o.plan, o.permission); err != nil {
+			o.refused = &engine.Unplayable{Reason: "transition_unapproved", Detail: err.Error()}
+			o.dropped = true
+			wake(s.wakeR)
+			return step{kind: stepFinish}
+		}
+		s.b.rememberEdge(o.transport, o.plan, o.permission)
+		s.observeOccurrence(o, c)
 		// Gapless: its frames follow the last ones in the same sink.
 		o.out, o.start = c, c.submitted
 		s.writing = o

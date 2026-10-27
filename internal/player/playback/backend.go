@@ -2,6 +2,7 @@ package playback
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,6 +24,8 @@ const MeasureEvery = 50 * time.Millisecond
 
 // Config is what New builds a backend from.
 type Config struct {
+	// Authorization supplies approved-only native DSD admission; nil is off.
+	Authorization *Authorization
 	// Resolver opens the content an occurrence's reference names. Required.
 	Resolver Resolver
 	// Locator resolves the configured binding to the unit to open.
@@ -136,10 +139,17 @@ func (n Note) StatusPath() string {
 // alsapcm.Sink, PCM only. It is the package documentation's contract, term
 // by term.
 type Backend struct {
-	nativeAdmission func(format.NativeDSD) (engine.NativePlan, error)
-	nativeOpen      func(context.Context, alsapcm.DSDConfig) (*alsapcm.DSDSink, error)
-	cfg             Config
-	log             *slog.Logger
+	policyMu            sync.Mutex
+	policy              PlayerPolicy
+	liveFacts           *PlaybackFacts
+	publishedPermission *permission
+	cliCandidate        bool
+	lastEdge            string
+	lastPlan            *engine.NativePlan
+	nativeAdmission     func(format.NativeDSD) (engine.NativePlan, error)
+	nativeOpen          func(context.Context, alsapcm.DSDConfig) (*alsapcm.DSDSink, error)
+	cfg                 Config
+	log                 *slog.Logger
 
 	mu       sync.Mutex
 	sessions map[engine.SessionID]*session
@@ -181,7 +191,7 @@ func New(cfg Config) (*Backend, error) {
 	}
 	zero := make(chan struct{})
 	close(zero)
-	return &Backend{cfg: cfg, log: cfg.Log, sessions: map[engine.SessionID]*session{}, took: map[packKey]format.ALSAFormat{}, zero: zero}, nil
+	return &Backend{policy: PlayerPolicy{BootID: fmt.Sprintf("%x", randomBoot()), Generation: 1, Reason: "DSD is off"}, cfg: cfg, log: cfg.Log, sessions: map[engine.SessionID]*session{}, took: map[packKey]format.ALSAFormat{}, zero: zero}, nil
 }
 
 // Stats are the backend's counts, for diagnostics and the tests.
@@ -284,6 +294,7 @@ func (b *Backend) spawn(f func()) {
 
 // notify tells Config.Notify of a note.
 func (b *Backend) notify(n Note) {
+	b.observeNote(n)
 	if b.cfg.Notify != nil {
 		b.cfg.Notify(n)
 	}
@@ -453,3 +464,11 @@ var _ engine.Backend = (*Backend)(nil)
 
 // OwnsOccurrenceReservations enables shared engine/backend resource accounting.
 func (*Backend) OwnsOccurrenceReservations() bool { return true }
+
+func randomBoot() []byte {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	return b
+}

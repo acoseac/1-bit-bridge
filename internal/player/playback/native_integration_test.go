@@ -1172,3 +1172,118 @@ func TestNativeIntegrationFaultThenExplicitPCM(t *testing.T) {
 		t.Fatalf("explicit PCM after confirmed cleanup refused: %v", err)
 	}
 }
+
+func TestNativeIntegrationApprovedConstructor(t *testing.T) {
+	for _, mode := range []string{"valid", "missing", "version", "identity", "tampered", "candidate", "replaced_before_activation", "revoke_before_publication"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg, record := approvedBackendFixture(t)
+			cfg.Resolver = nativeFiles{"a": nativeDSF(t, 31)}
+			switch mode {
+			case "missing":
+				os.Remove(cfg.Authorization.path())
+			case "version":
+				record.Body.QualificationVersion--
+				saveApprovedFixture(t, cfg.Authorization, record)
+			case "identity":
+				record.Body.Identity.BCDDevice = "ffff"
+				saveApprovedFixture(t, cfg.Authorization, record)
+			case "tampered":
+				os.WriteFile(cfg.Authorization.path(), []byte(`{"Body":{},"SHA256":"bad"}`), 0600)
+			case "candidate":
+				record.Body.Confirmation = "CLI candidate; not approved"
+				saveApprovedFixture(t, cfg.Authorization, record)
+			}
+			b, e := New(cfg)
+			if e != nil {
+				t.Fatal(e)
+			}
+			k := alsapcm.NewFakeKernel(t)
+			k.HardwareFormats(49, 50, 52)
+			k.Free()
+			b.nativeOpen = func(ctx context.Context, c alsapcm.DSDConfig) (*alsapcm.DSDSink, error) {
+				sink, e := k.OpenNativeSink(ctx, c)
+				if mode == "replaced_before_activation" {
+					os.Remove(cfg.Authorization.path())
+				}
+				if mode == "revoke_before_publication" {
+					b.Revoke(engine.RevokeInput{Session: 1, Reason: "before publication"})
+				}
+				return sink, e
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			ref, _ := engine.NewReference("a")
+			ev := &nativeEvents{done: make(chan struct{})}
+			e = b.Start(ctx, engine.StartRequest{Session: 1, First: engine.Occurrence{ID: 1, Ref: ref}, Events: ev})
+			if (e == nil) != (mode == "valid") {
+				t.Fatalf("start=%v", e)
+			}
+			if mode != "valid" && k.View().Writes != 0 {
+				t.Fatal("invalid approval wrote hardware")
+			}
+			if mode != "valid" && mode != "replaced_before_activation" && mode != "revoke_before_publication" && k.View().Opens != 0 {
+				t.Fatal("invalid approval opened hardware")
+			}
+			if err := b.Release(ctx, 1); err != nil {
+				t.Fatal(err)
+			}
+			if err := b.Wait(ctx); err != nil {
+				t.Fatal(err)
+			}
+			k.CheckClosedEach(t)
+		})
+	}
+}
+
+func TestNativeIntegrationRevokeRetiringTail(t *testing.T) {
+	k := alsapcm.NewFakeKernel(t)
+	k.HardwareFormats(49, 50, 52)
+	k.Free()
+	b, err := New(Config{Resolver: nativeFiles{"a": nativeDSF(t, 31)}, Locator: nativeLocator{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	AdmitNativeForIntegration(b, nativeTestPlan, k.OpenNativeSink)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ref, _ := engine.NewReference("a")
+	if err = b.Start(ctx, engine.StartRequest{Session: 1, First: engine.Occurrence{ID: 1, Ref: ref}, Events: &nativeEvents{done: make(chan struct{})}}); err != nil {
+		t.Fatal(err)
+	}
+	parked, unpark := k.ParkNextWrite()
+	defer unpark()
+	result := make(chan error, 1)
+	go func() {
+		result <- b.ReleaseNative(ctx, engine.ReleaseRequest{Token: engine.ReleaseToken{Session: 1, Generation: 1}, Mode: engine.ReleaseTrackChange})
+	}()
+	select {
+	case <-parked:
+	case <-ctx.Done():
+		t.Fatal("retiring tail did not reach write")
+	}
+	s := b.known(1)
+	if s == nil {
+		t.Fatal("retired before tail completion")
+	}
+	b.Revoke(engine.RevokeInput{Session: 1, Reason: "record revoked during tail"})
+	unpark()
+	select {
+	case err = <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("revoked tail did not finish")
+	}
+	if err = b.Wait(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if k.View().Drains != 0 {
+		t.Fatal("revoked retiring tail drained instead of Immediate")
+	}
+	b.Revoke(engine.RevokeInput{Session: 1, Reason: "late monitor callback"})
+	if b.Stats().Sessions != 0 {
+		t.Fatal("late monitor recreated session")
+	}
+	k.CheckClosedEach(t)
+}

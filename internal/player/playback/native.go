@@ -29,7 +29,7 @@ func (b *Backend) openNativeContent(ctx context.Context, o *occ, d decode.DSDDec
 	}
 	admit := b.nativeAdmission
 	if admit == nil {
-		admit = productionNativeAdmission
+		admit = o.permission.selectNative
 	}
 	plan, err := admit(o.nativeFormat)
 	if err != nil {
@@ -141,11 +141,20 @@ func (n *nativeStream) Position() alsapcm.Position {
 }
 
 func (s *session) openNativeOutput(ctx context.Context, o *occ) (*output, error) {
+	s.mu.Lock()
+	revoked := s.nativeRevoked
+	s.mu.Unlock()
+	if revoked {
+		return nil, errors.New("DSD permission revoked")
+	}
+	if err := s.b.checkEdge(o.transport, o.plan, o.permission); err != nil {
+		return nil, err
+	}
 	u, err := s.b.cfg.Locator.Locate(ctx)
 	if err != nil {
 		return nil, err
 	}
-	out := &output{s: s, transport: o.transport, unit: u, policyID: o.plan.PolicyID}
+	out := &output{plan: o.plan, s: s, transport: o.transport, unit: u, policyID: o.plan.PolicyID, permission: o.permission}
 	pause := alsapcm.PauseKernel
 	if o.plan.Pause == "silence" {
 		pause = alsapcm.PauseZeros
@@ -180,6 +189,8 @@ func (s *session) activateOutput(ctx context.Context, o *occ, out *output) error
 		ev.CurrentOccurrence(s.id, o.id, o.plan)
 	}
 	if out.native == nil {
+		s.b.rememberEdge(out.transport, nil, nil)
+		s.observeOccurrence(o, out)
 		return nil
 	}
 	s.mu.Lock()
@@ -191,9 +202,15 @@ func (s *session) activateOutput(ctx context.Context, o *occ, out *output) error
 		return errors.New("native activation fenced")
 	}
 	if paused {
+		s.observeOccurrence(o, out)
 		return out.native.Pause(ctx)
 	}
-	return out.activate(ctx)
+	err := out.activate(ctx)
+	if err == nil {
+		s.b.rememberEdge(out.transport, o.plan, o.permission)
+		s.observeOccurrence(o, out)
+	}
+	return err
 }
 func (s *session) writeNativeChunk(o *occ) bool {
 	planes, err := o.nativeFirst, o.firstErr
@@ -288,7 +305,10 @@ func (b *Backend) ReleaseNative(ctx context.Context, r engine.ReleaseRequest) er
 
 // EscalateNative never waits for the releasing caller or a kernel operation.
 func (b *Backend) EscalateNative(r engine.ReleaseRequest) {
-	s := b.session(r.Token.Session)
+	s := b.known(r.Token.Session)
+	if s == nil {
+		return
+	}
 	s.mu.Lock()
 	s.nativeEscalated = true
 	for _, o := range s.outs {
@@ -299,21 +319,47 @@ func (b *Backend) EscalateNative(r engine.ReleaseRequest) {
 	s.mu.Unlock()
 }
 
-// Revoke applies a per-session native permission revocation; policy producers
-// are supplied by the following phase. Revocation never starts a successor.
+// Revoke fences DSD occurrences, including retiring tails, while preserving PCM.
+// A late callback never recreates a retired session or starts a successor.
 func (b *Backend) Revoke(r engine.RevokeInput) {
-	s := b.session(r.Session)
+	s := b.known(r.Session)
+	if s == nil {
+		return
+	}
 	s.mu.Lock()
 	s.nativeRevoked = true
-	for _, o := range s.outs {
-		if o.native != nil {
-			o.native.Revoke()
+	if s.permission != nil {
+		s.permission.revoked.Store(true)
+	}
+	active := false
+	var sinks []*alsapcm.DSDSink
+	for _, out := range s.outs {
+		if out.native != nil && !out.closed {
+			active = true
+			sinks = append(sinks, out.native)
 		}
 	}
-	if s.fault == nil {
-		s.fault = &engine.Fault{Reason: engine.Reason("native_revoked"), Detail: r.Reason}
+	for _, o := range s.chain {
+		if o.opened() && o.plan != nil && o.out == nil {
+			o.dropped = true
+			o.refused = &engine.Unplayable{Reason: "native_revoked", Detail: r.Reason}
+		}
+	}
+	if active && s.fault == nil {
+		s.fault = &engine.Fault{Reason: "native_revoked", Detail: r.Reason}
 	}
 	s.mu.Unlock()
+	for _, sink := range sinks {
+		sink.Revoke()
+		sink.BeginRelease(alsapcm.Immediate)
+	}
+	b.policyMu.Lock()
+	if b.liveFacts != nil && b.liveFacts.Session == r.Session && b.liveFacts.LogicalRate > 0 {
+		b.liveFacts.State = "revoked"
+	}
+	b.policyMu.Unlock()
+	b.publishPermission(nil, "native_revoked")
+	wake(s.wakeP)
 	wake(s.wakeR)
 }
 
@@ -389,7 +435,11 @@ func (o *output) pause(ctx context.Context) error {
 }
 func (o *output) resume(ctx context.Context) error {
 	if o.native != nil {
-		return o.adapter.resume(ctx)
+		err := o.adapter.resume(ctx)
+		if err == nil {
+			o.s.b.rememberEdge(o.transport, o.plan, o.permission)
+		}
+		return err
 	}
 	return o.sink.Resume()
 }

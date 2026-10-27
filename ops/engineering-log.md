@@ -65355,3 +65355,16 @@ required drainLoopOnCleanup at that launch and keep backend Wait ordered after i
 Round-2 evidence (red-first logs, exact-leaf mutation controls, race and docs
 checks) is recorded in the review workspace's b-2c2a/r2 artifacts; no hardware,
 Git writes or production enablement were used.
+
+
+### 2026-10-27 — B470 2c.2b approval boundary
+
+Implemented local owner approval (version 8), complete report provenance, exact tuple selection,
+semantic mixer constraints, directional transition enforcement and DSD-only revocation. The
+real production constructor overlay refuses missing/stale/tampered/candidate/deleted-before-
+activation records with zero writes; the retiring-tail test verifies Immediate instead of drain,
+and prepared DSD no longer faults PCM. Independent live facts and capability epochs are additive
+protocol-v1 DTOs. ExtractorVersion 28 carries validated DSF channels and structural DFF evidence
+through unchanged-file backfill, full/delta and a no-op second scan. No hardware qualification,
+DoP release claim or iOS I1–I3 claim. Procedures and trust decisions: ops/b470-native-qualification.md;
+long-form invariants: ops/History-b470-native.md, “Owner approval (2c.2b)”.

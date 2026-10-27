@@ -12,6 +12,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/player/lan"
 	"github.com/acoseac/1-bit-bridge/internal/player/library"
 	"github.com/acoseac/1-bit-bridge/internal/player/openhome"
+	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
@@ -115,9 +116,15 @@ func (p *bridgePlayer) startOpenHome(id string, w servePlayerWiring, lib openhom
 		eng = p.eng
 	}
 	s, err := start(openhome.Config{
-		SSDP:      w.SSDP,
-		Device:    openhome.Device{UUID: id, Room: player.Room, ModelNumber: version.ServerVersion},
-		Engine:    eng,
+		SSDP:   w.SSDP,
+		Device: openhome.Device{UUID: id, Room: player.Room, ModelNumber: version.ServerVersion},
+		Engine: eng,
+		DSDPolicy: func() bool {
+			if be, ok := p.be.(*playback.Backend); ok {
+				return len(be.Policy().Tuples) > 0
+			}
+			return false
+		},
 		Library:   lib,
 		Hosts:     w.Hosts,
 		Port:      player.EffectiveOpenHomePort(),

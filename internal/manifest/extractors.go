@@ -606,7 +606,7 @@ var Ext = map[string]bool{
 // the formats a file can hold either kind in, where a bump re-opens every
 // file once. A later change to what the kind reads is a bump like any other:
 // the stamp leg records the kind a re-read finds (writeSampleFormatTx).
-const ExtractorVersion = 27
+const ExtractorVersion = 28
 
 // Extract reads as much metadata as it can from the file at absPath and
 // fills in the Track at t. Path, Size, ModTime on t MUST already be set by
@@ -2470,6 +2470,14 @@ func extractDSFFromReader(f io.ReadSeeker, absPath string, t *Track, ec *Extract
 	// blockSizePerChannel is [44:48]. Reading [40:48] straddles both
 	// and yields garbage on every real-encoder (Korg/Sony/dCS) DSF.
 	sampleCount := le64(fmtChunk[36:44])
+	// Preserve unknown channels on invalid fmt evidence; never assume stereo.
+	channelType, channelCount := le32(fmtChunk[20:24]), le32(fmtChunk[24:28])
+	counts := map[uint32]uint32{1: 1, 2: 2, 3: 3, 4: 4, 5: 4, 6: 5, 7: 6}
+	t.Channels = nil
+	if le64(fmtChunk[4:12]) == 52 && le32(fmtChunk[12:16]) == 1 && le32(fmtChunk[16:20]) == 0 && counts[channelType] == channelCount && channelCount > 0 && (bitsPerSample == 1 || bitsPerSample == 8) && le32(fmtChunk[44:48]) == 4096 {
+		channels := int(channelCount)
+		t.Channels = &channels
+	}
 
 	// v1.2 additive: canonical codec for iOS-side `Track.codec`.
 	// Codec MUST be stamped BEFORE BitsPerSample so the
@@ -2659,10 +2667,12 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 		physicalSize = uint64(fi.Size())
 	}
 	var (
-		prop  dffPropInfo
-		sound dffSoundInfo
-		diin  containerText
-		id3   tag.Metadata
+		props        int
+		invalidProps bool
+		prop         dffPropInfo
+		sound        dffSoundInfo
+		diin         containerText
+		id3          tag.Metadata
 	)
 	sound.physicalSize = physicalSize
 	logPath := trackLogPath(absPath, t)
@@ -2672,6 +2682,9 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	// text beneath the ID3 tag (whichever chunk came first), and the cover,
 	// the ID3 tag's picture ahead of a cover.jpg beside the file.
 	finish := func() error {
+		if invalidProps {
+			prop.malformed = true
+		}
 		applyDFFStamps(t, absPath, prop, sound)
 		if id3 == nil && prop.id3 != nil {
 			id3 = applyEmbeddedID3(prop.id3, t, nil, absPath, "dff")
@@ -2703,6 +2716,10 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 		size := be64(chunkHeader[4:12])
 		switch fourcc {
 		case "PROP":
+			props++
+			if props > 1 {
+				invalidProps = true
+			}
 			// PROP body: 4 bytes form type ("SND "), then nested
 			// chunks. 1 MiB cap on the body allocation — real PROP
 			// chunks hold a handful of small property chunks (FS,
@@ -2710,6 +2727,7 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 			// multi-MiB declared PROP is a corruption signal, not a
 			// high-res DSD payload.
 			if size < 4 {
+				invalidProps = true
 				// Malformed: PROP payload too short to hold the
 				// "SND " form-type. Pre-fix the bare `continue`
 				// left the cursor at the start of the payload —
@@ -2755,6 +2773,7 @@ func extractDFFWithContext(absPath string, t *Track, ec *ExtractContext) error {
 				return fmt.Errorf("dff: PROP body read: %w", err)
 			}
 			if len(body) < 4 || string(body[0:4]) != "SND " {
+				invalidProps = true
 				// Body consumed (size bytes), but the odd-size pad
 				// byte still belongs to this chunk's footprint and
 				// must be consumed before the next iteration reads
@@ -3061,6 +3080,7 @@ const (
 // iOS `DFFHeadScan.Result` / `typeStamp` split so the two sides can't
 // drift on the commit rules.
 type dffPropInfo struct {
+	malformed   bool
 	fsRate      uint32
 	haveFS      bool
 	channels    int
@@ -3097,12 +3117,14 @@ type dffPropInfo struct {
 // reads stay inside the buffer.
 func parsePropChunks(body []byte) dffPropInfo {
 	info := dffPropInfo{compression: dffCompressionAbsent}
+	cmprSeen := false
 	for len(body) >= 12 {
 		fourcc := string(body[0:4])
 		size := be64(body[4:12])
 		// Bound size against the remaining slice — a corrupt header
 		// could over-read.
 		if size > uint64(len(body)-12) {
+			info.malformed = true
 			break
 		}
 		payload := body[12 : 12+size]
@@ -3121,6 +3143,10 @@ func parsePropChunks(body []byte) dffPropInfo {
 				info.haveCHNL = true
 			}
 		case "CMPR":
+			if cmprSeen || len(payload) < 4 {
+				info.malformed = true
+			}
+			cmprSeen = true
 			// CMPR payload: 4 bytes compression FOURCC + variable-
 			// length compression name. "DSD " = uncompressed,
 			// "DST " = DST compressed, anything else = unknown.
@@ -3150,9 +3176,13 @@ func parsePropChunks(body []byte) dffPropInfo {
 			advance++
 		}
 		if advance > uint64(len(body)) {
+			info.malformed = true
 			break
 		}
 		body = body[advance:]
+	}
+	if len(body) != 0 {
+		info.malformed = true
 	}
 	return info
 }
@@ -3283,6 +3313,17 @@ func PlausibleDuration(d float64) bool { return plausibleDuration(d) }
 // parity).
 func applyDFFStamps(t *Track, absPath string, prop dffPropInfo,
 	sound dffSoundInfo) {
+	t.DFFCompressionEvidence = "missing"
+	if prop.malformed {
+		t.DFFCompressionEvidence = "unsupported"
+		return
+	}
+	switch prop.compression {
+	case dffCompressionUncompressed:
+		t.DFFCompressionEvidence = "raw"
+	case dffCompressionDST, dffCompressionUnknown:
+		t.DFFCompressionEvidence = "unsupported"
+	}
 	if !prop.haveFS || prop.fsRate == 0 {
 		return
 	}

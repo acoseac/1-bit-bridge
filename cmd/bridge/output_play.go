@@ -88,10 +88,9 @@ func outputPlayUsage(w io.Writer, fs *flag.FlagSet) {
 The bridge player's engine and backend, by hand (B470 PR 4b2's hardware gate).
 It resolves the configured binding, output.player.device, to its DAC on this
 box's trees, runs the hotplug watcher, and plays the files in order through
-the player's engine and backend: PCM only (integer FLAC, WAV, AIFF, AIFC and
-ALAC), bit-exact, through the one DAC the binding names, opened exclusively.
-DSD, floating-point and lossy files are refused with their reasons, as the
-player refuses them.
+the player's engine and backend: integer FLAC, WAV, AIFF, AIFC and ALAC, plus
+DSF/raw DFF only with fresh matching owner approval. The bound DAC opens
+exclusively. Floating-point, lossy, DoP and unapproved DSD are refused.
 
 Files play at their own level: the bridge never lowers a sample (no software
 volume). Use headphones, with the DAC's or the amplifier's own volume set low.
@@ -107,7 +106,7 @@ drive the engine: space pauses or resumes, n next, p previous, s stop, d
 deletes the entry after the playing one (an edit after hand-off), m enters or
 leaves maintenance, q quits (a bounded shutdown). Ctrl-C quits too.
 
-It never touches bridge serve's data directory: the engine's queue and
+It reads approval in bridge serve's data directory; the engine's queue and
 reservation files go in --state-dir, or in a new directory of its own under
 the user's cache directory, removed at exit, and a --state-dir that is
 serve's data directory, lies inside it or holds it, through a link or
@@ -138,11 +137,16 @@ func runOutputPlay(ctx context.Context, args []string, env outputPlayEnv, stdout
 	keys := fs.Bool("keys", false, "drive the engine with single keys from standard input: space, n, p, s, d, m, q")
 	stateDir := fs.String("state-dir", "", "the `dir`ectory the engine keeps its queue and reservation files in (default: a new one, removed at exit)")
 	pauseRelease := fs.Int("pause-release", 0, "how many `seconds` a pause holds the DAC before it is let go, 1 to 600 (default: output.player.pauseReleaseSeconds)")
+	reports := playReportFlags(fs)
 	fs.Usage = func() { outputPlayUsage(stderr, fs) }
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
+		return 2
+	}
+	if err := reports.validate(); err != nil {
+		fmt.Fprintln(stderr, err)
 		return 2
 	}
 	set := map[string]bool{}
@@ -212,13 +216,23 @@ func runOutputPlay(ctx context.Context, args []string, env outputPlayEnv, stdout
 	}
 	defer cleanup()
 	out := &playOut{w: stdout, now: env.now}
-	r := &playRun{env: env, out: out, stderr: stderr, files: files, keys: *keys, release: release, dsd: player.EffectiveDSDMode(),
+	r := &playRun{authorization: &playback.Authorization{StateDir: cfg.DataDir, Record: player.DSDQualification, Mode: player.EffectiveDSDMode(), Sysfs: alsa.SysfsReader{Root: env.trees.sysfs}}, env: env, out: out, stderr: stderr, files: files, keys: *keys, release: release, dsd: player.EffectiveDSDMode(),
 		observer: binding.Observer{Proc: alsa.Reader{ProcRoot: env.trees.proc}, Sysfs: alsa.SysfsReader{Root: env.trees.sysfs}}}
+	r.report, err = reports.prepare(r.authorization, env.trees.or(hostTrees))
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
 	if !on {
 		out.line("output.player.enabled is false in %s: this harness plays all the same, and bridge serve runs no player", path)
 	}
 	out.line("files play bit-exact, at their own level, which the bridge never lowers: use headphones, with the DAC's or the amplifier's own volume set low")
-	return r.run(ctx, dir, player.Device)
+	code := r.run(ctx, dir, player.Device)
+	if err := r.report.finish(code); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	return code
 }
 
 // playStateDir is the directory the engine's files go in: dir, made if it
@@ -315,14 +329,16 @@ func playResolve(p string) (string, error) {
 
 // playRun is one run of the harness.
 type playRun struct {
-	env      outputPlayEnv
-	out      *playOut
-	stderr   io.Writer
-	files    []string
-	keys     bool
-	release  time.Duration
-	dsd      string
-	observer binding.Observer
+	authorization *playback.Authorization
+	report        *playReport
+	env           outputPlayEnv
+	out           *playOut
+	stderr        io.Writer
+	files         []string
+	keys          bool
+	release       time.Duration
+	dsd           string
+	observer      binding.Observer
 
 	eng  *engine.Engine
 	be   playBackend
@@ -395,9 +411,10 @@ func (r *playRun) noteOcc(o engine.Occurrence) {
 func (r *playRun) run(ctx context.Context, dir string, dev config.PlayerDevice) int {
 	r.occs = map[engine.OccurrenceID]occName{}
 	be, err := r.env.backend(playback.Config{
-		Resolver: playFiles(r.files),
-		Locator:  playback.BindingLocator{Device: dev, Observer: r.observer},
-		Notify:   r.note,
+		Resolver:      playFiles(r.files),
+		Authorization: r.authorization,
+		Locator:       playback.BindingLocator{Device: dev, Observer: r.observer},
+		Notify:        func(n playback.Note) { r.report.note(n); r.note(n) },
 	})
 	if err != nil {
 		fmt.Fprintf(r.stderr, "output play: %v\n", err)
@@ -441,6 +458,9 @@ func (r *playRun) watch(ctx context.Context, dev config.PlayerDevice) <-chan str
 		Observe:    r.observer.ObserveContext,
 		OpenSource: r.env.openSource,
 	})
+	if r.authorization != nil {
+		r.authorization.Healthy = func() bool { snap, ok := svc.Feed().Latest(); _, stale := snap.Stale(); return ok && !stale }
+	}
 	sub := svc.Feed().Subscribe()
 	done := make(chan struct{})
 	var wg sync.WaitGroup
@@ -453,10 +473,16 @@ func (r *playRun) watch(ctx context.Context, dev config.PlayerDevice) <-chan str
 		defer wg.Done()
 		defer sub.Close()
 		rep := &hotplug.Reporter{}
+		tick := time.NewTicker(100 * time.Millisecond)
+		defer tick.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
+			case <-tick.C:
+				if b, ok := r.be.(*playback.Backend); ok {
+					b.RefreshAuthorization(ctx)
+				}
 			case snap := <-sub.C():
 				rp, ok := rep.Report(snap)
 				if !ok {

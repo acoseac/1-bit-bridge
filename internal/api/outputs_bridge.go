@@ -36,6 +36,8 @@ const (
 // bridge. Every key is present: OpenHome, Reason and LastError are null
 // when they say nothing, and Codecs is never null.
 type OutputBridge struct {
+	DSDPlayback *OutputDSDPlayback `json:"dsdPlayback,omitempty"`
+	Playback    *OutputPlayback    `json:"playback,omitempty"`
 	// OpenHome is the player's OpenHome Source while the opt-in started it
 	// and it listens on a LAN address, null otherwise.
 	OpenHome *OutputOpenHome `json:"openHome"`
@@ -72,6 +74,8 @@ type OutputOpenHome struct {
 // values. Listed false, or no UUID, lists no element. Reason is read while
 // State is unavailable; OpenHome nil, or with no endpoint, is no Source.
 type BridgeOutputFacts struct {
+	DSDPlayback *OutputDSDPlayback
+	Playback    *OutputPlayback
 	Listed      bool
 	UUID        string
 	State       string
@@ -137,6 +141,7 @@ func (s *Server) bridgeElement(ctx context.Context) (OutputInfo, bool) {
 		return OutputInfo{}, false
 	}
 	b := &OutputBridge{
+		DSDPlayback: f.DSDPlayback, Playback: f.Playback,
 		State:        f.State,
 		LibraryScope: LibraryScopeSelf,
 		FixedVolume:  f.FixedVolume,
@@ -188,4 +193,39 @@ func (s *Server) composeOutputs(ctx context.Context, mpdOn bool) (OutputsRespons
 		out = append(out, el)
 	}
 	return OutputsResponse{Outputs: out}, nil
+}
+
+// OutputDSDTuple is one exact approved tuple and its indivisible policy.
+type OutputDSDTuple struct {
+	Format    string `json:"format"`
+	BitRate   int    `json:"bitRate"`
+	Channels  int    `json:"channels"`
+	PolicyID  string `json:"policyId"`
+	Pause     string `json:"pause"`
+	TailMS    int64  `json:"tailMs"`
+	PrefillMS int64  `json:"prefillMs"`
+}
+
+// OutputDSDPlayback describes the current authorization epoch, not an open DAC.
+type OutputDSDPlayback struct {
+	BootID                string           `json:"bootId"`
+	PolicyGeneration      uint64           `json:"policyGeneration"`
+	QualificationRevision string           `json:"qualificationRevision,omitempty"`
+	Reason                string           `json:"reason,omitempty"`
+	Tuples                []OutputDSDTuple `json:"tuples"`
+}
+
+// OutputPlayback is the backend's current occurrence observation.
+type OutputPlayback struct {
+	BootID           string `json:"bootId"`
+	PolicyGeneration uint64 `json:"policyGeneration"`
+	Session          uint64 `json:"session"`
+	Occurrence       uint64 `json:"occurrence"`
+	State            string `json:"state"`
+	Format           string `json:"format"`
+	RateHz           int    `json:"rateHz"`
+	LogicalRate      int    `json:"logicalRate,omitempty"`
+	Channels         int    `json:"channels"`
+	ValidBits        int    `json:"validBits"`
+	PolicyID         string `json:"policyId,omitempty"`
 }

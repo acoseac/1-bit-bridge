@@ -50,6 +50,8 @@ type nativeEndpoint struct {
 }
 
 type outputDSDTestEnv struct {
+	identity   func(int, int, int) (qualification.Identity, error)
+	gain       func(int) (bool, error)
 	openPCM    func(context.Context, alsapcm.SinkConfig) (nativePCMSink, error)
 	open       func(context.Context, alsapcm.DSDConfig) (nativeTestSink, error)
 	controls   func(int) (alsactl.Snapshot, error)
@@ -85,6 +87,19 @@ func outputDSDTestCmd(ctx context.Context, args []string, out, errout io.Writer)
 		return 1
 	}
 	env := outputDSDTestEnv{goos: runtime.GOOS, open: productionNativeOpen, controls: (alsactl.Reader{}).Read, now: time.Now, stdin: os.Stdin, tty: term.IsTerminal(fd), resolve: resolveNativeTest, openPCM: productionNativePCMOpen}
+	env.gain = (alsa.SysfsReader{Root: hostTrees.sysfs}).QualificationGain
+	env.identity = func(card, device, sub int) (qualification.Identity, error) {
+		sys := alsa.SysfsReader{Root: hostTrees.sysfs}
+		q, e := sys.Qualification(card)
+		if e != nil {
+			return qualification.Identity{}, e
+		}
+		id, ok := sys.Card(card)
+		if !ok || id.USB == nil {
+			return qualification.Identity{}, errors.New("USB identity unavailable")
+		}
+		return qualification.Identity{Vendor: fmt.Sprintf("%04x", id.USB.ID.Vendor), ProductID: fmt.Sprintf("%04x", id.USB.ID.Product), Manufacturer: q.Manufacturer, Product: q.Product, BCDDevice: q.BCDDevice, Port: q.Port, Interface: q.Interface, Device: device, Subdevice: sub}, nil
+	}
 	env.makeRaw = func() (func() error, error) {
 		state, e := term.MakeRaw(fd)
 		if e != nil {
@@ -131,6 +146,7 @@ func resolveNativeTest(ctx context.Context, file string) (nativeEndpoint, func(a
 }
 
 type nativeOptions struct {
+	provisional                                                                      string
 	config, manifest, fixtures, contact, report, mixer, scenario, ack, format, pause string
 	rate, seconds, tail, prefill                                                     int
 	list                                                                             []string
@@ -155,7 +171,8 @@ func parseNativeOptions(args []string, w io.Writer) (nativeOptions, error) {
 	fs.StringVar(&o.contact, "contact-report", "", "version 2 contact receipt")
 	fs.StringVar(&o.report, "report", "", "new report path, never an approval")
 	fs.StringVar(&o.mixer, "mixer-snapshot", "", "fresh amixer annex")
-	fs.StringVar(&o.scenario, "scenario", "", "level-check, matrix or interactive")
+	fs.StringVar(&o.provisional, "provisional-record", "", "CLI candidate for backend-lifecycle only")
+	fs.StringVar(&o.scenario, "scenario", "", "level-check, matrix, interactive or backend-lifecycle")
 	if e := fs.Parse(args); e != nil {
 		return o, e
 	}
@@ -184,8 +201,11 @@ func parseNativeOptions(args []string, w io.Writer) (nativeOptions, error) {
 	if o.config == "" || o.manifest == "" || o.fixtures == "" || o.report == "" || o.mixer == "" {
 		return o, errors.New("--config, --manifest, --fixtures, --mixer-snapshot and --report required")
 	}
-	if o.scenario != "level-check" && o.scenario != "matrix" && o.scenario != "interactive" {
-		return o, errors.New("--scenario must be level-check, matrix or interactive")
+	if o.scenario != "level-check" && o.scenario != "matrix" && o.scenario != "interactive" && o.scenario != "backend-lifecycle" {
+		return o, errors.New("--scenario must be level-check, matrix, interactive or backend-lifecycle")
+	}
+	if (o.scenario == "backend-lifecycle") != (o.provisional != "") {
+		return o, errors.New("--provisional-record is required only for backend-lifecycle")
 	}
 	if o.scenario == "level-check" && o.ack != "off-ear" {
 		return o, errors.New("--ack-level must be off-ear for level-check")
@@ -194,6 +214,11 @@ func parseNativeOptions(args []string, w io.Writer) (nativeOptions, error) {
 }
 
 type nativeReport struct {
+	Identity                                                 qualification.Identity
+	FeatureUnit                                              *bool
+	Scenario, Environment                                    string
+	LifecycleActions                                         []string
+	PassedEdges                                              []qualification.Edge
 	pendingContact                                           *qualification.Contact
 	Completed                                                []bool
 	IgnoredKeys                                              []string
@@ -251,7 +276,7 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 	}
 	for _, id := range o.list {
 		f, ok := byID[id]
-		if !ok || f.Rate != o.rate || (f.Container != "DSF" && f.Container != "DFF") {
+		if !ok || ((f.Rate != o.rate || (f.Container != "DSF" && f.Container != "DFF")) && !(o.scenario == "backend-lifecycle" && f.Container == "WAV")) {
 			fmt.Fprintln(errout, "fixture-list tuple mismatch")
 			return 1
 		}
@@ -305,6 +330,22 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 		}
 	}
 	report := nativeReport{Device: ep.Device, Subdevice: resolved.Subdevice, SchemaVersion: 1, QualificationVersion: qualification.Version, Args: args, Tuple: tuple, Attachment: a, Before: controls, ManifestHash: mh, AmixerAnnex: string(annex), PauseReleaseSeconds: 30, End: "incomplete"}
+	report.Scenario = o.scenario
+	if env.gain != nil {
+		gain, e := env.gain(ep.Card)
+		if e != nil {
+			fmt.Fprintln(errout, e)
+			return 1
+		}
+		report.FeatureUnit = &gain
+	}
+	if env.identity != nil {
+		report.Identity, e = env.identity(ep.Card, ep.Device, resolved.Subdevice)
+		if e != nil {
+			fmt.Fprintln(errout, e)
+			return 1
+		}
+	}
 	report.Platform = runtime.GOOS + "/" + runtime.GOARCH
 	report.GoVersion = runtime.Version()
 	report.BuildSHA = "unverified"
@@ -318,6 +359,7 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 			}
 		}
 	}
+	report.Environment = qualification.Digest([]string{report.Platform, report.GoVersion})
 	carrier := o.rate / (8 * format.DSDWordBytes(format.ALSAFormat(o.format)))
 	report.SilenceFrames = [2]int{(carrier*o.tail + 999) / 1000, (carrier*o.prefill + 999) / 1000}
 	file, e := os.OpenFile(o.report, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)

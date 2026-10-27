@@ -442,8 +442,16 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 	}
 	be, err := newBackend(playback.Config{
 		Resolver: res,
-		Locator:  playback.BindingLocator{Device: player.Device, Observer: w.Trees.or(hostTrees).observer()},
-		Notify:   p.note,
+		Authorization: &playback.Authorization{StateDir: cfg.DataDir, Record: player.DSDQualification, Mode: player.EffectiveDSDMode(), Sysfs: w.Trees.or(hostTrees).observer().Sysfs, Healthy: func() bool {
+			if w.Feed == nil {
+				return false
+			}
+			snap, ok := w.Feed.Latest()
+			_, stale := snap.Stale()
+			return ok && !stale
+		}},
+		Locator: playback.BindingLocator{Device: player.Device, Observer: w.Trees.or(hostTrees).observer()},
+		Notify:  p.note,
 	})
 	if err != nil {
 		return refuse("the player's backend: " + err.Error())
@@ -513,6 +521,14 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 // the engine stops on its own, which only a recovered panic in it makes it
 // do.
 func (p *bridgePlayer) watch(ctx context.Context) {
+	policyTick := time.NewTicker(100 * time.Millisecond)
+	defer policyTick.Stop()
+	refresh := func() {
+		if be, ok := p.be.(*playback.Backend); ok {
+			be.RefreshAuthorization(ctx)
+		}
+	}
+	refresh()
 	run := p.run
 	// The holder's channel is taken before the config is read, so a change
 	// in between still wakes the loop.
@@ -527,6 +543,8 @@ func (p *bridgePlayer) watch(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-policyTick.C:
+			refresh()
 		case <-run.done:
 			playerLog.Error("player: the engine stopped on its own, which only a panic in it does (logged above): the player is off until bridge serve next starts, and the backend is asked to let go of the device; the release outcome follows")
 			return

@@ -667,3 +667,5 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   `TestJSONStringBytesIsWhatEncodingJSONWrites`.
 
 - **`api.Server.HealthEndpoints` is the endpoint list `/v1/health` serves, its very snapshot through the same cache, and the player's OpenHome Insert takes its hosts from it** (B470 PR 5a4; the confinement's bullet in `openhome.md`). **Don't give the player an interface walk or a cache of its own, or let the handler read the list another way.** `TestHealthEndpointsIsTheSnapshotHealthServes` pins it.
+
+- **DSD capability is `bridge.dsdPlayback` exact tuples/boot/epoch, never passive DAC arrays; `bridge.playback` is the distinct current occurrence observation.** Optional protocol-v1 additions and `dffCompressionEvidence` are in PROTOCOL.md. iOS I1–I3 migration, propagation and whole-window mutation gates remain companion work. → History-b470-native.md, “Owner approval (2c.2b)”.

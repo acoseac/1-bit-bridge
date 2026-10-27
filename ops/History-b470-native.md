@@ -187,3 +187,40 @@ path with filepath.Clean, preserving OS separator rules, exact count and queue
 order. Every queued line and the availability report remain after the warning
 and before Start, independently of one another. Equivalent ./ paths pass;
 a suffix appended to a path, reordered paths and misplaced entries fail.
+
+
+## Owner approval (2c.2b)
+
+Native admission now requires owner-controlled state-directory records and complete matching
+matrix/lifecycle reports, each hashed, qualificationVersion 8, exact sysfs identity and
+semantic read-only mixer constraints. The exact typed owner phrase is local approval,
+not a cryptographic signature. The harness's visibly non-approved candidate is limited
+to its real-engine/backend lifecycle constructor. Production constructors accept no candidate.
+The record is checked at session start, after the inert open and before activation, and by
+monitors that survive the producer's cancellation through a retiring tail. Replaced/deleted
+records and stale health revoke existing DSD permissions; recovery does not play.
+
+The directional edge interpreter remembers tuple and full policy across sessions, including
+an initially paused occurrence resumed later. Both endpoint approval without edge approval
+refuses the incoming open before writes; outgoing release remains independent. Revocation
+discards prepared DSD without faulting active PCM, escalates every open retiring DSD sink to
+Immediate, and never recreates retired IDs. Constructor overlay tests use the actual approval
+reader and backend with fake kernel I/O, not a substituted native admission decision.
+
+Persistent controls exclude card/numid from identity. Unrelated changes/unreadability do not
+fail semantic constraints; constrained disappearance/unreadability fails. Descriptor feature
+unit evidence and a readable control node are mandatory, including the no-control case.
+No DoP packer ships; its tuples stay absent. Sessions retain immutable policies and separately
+revocable tokens. Capability snapshots and live open/released/revoked facts carry boot/epoch
+identity and remain distinct wire DTOs; GET performs no probes.
+
+ExtractorVersion 28 backfills validated DSF channels and DFF raw/missing/unsupported evidence.
+Structural malformation stamps unsupported even after raw evidence; full/delta persistence
+and an unchanged no-op scan are tested. The bridge checks actual content before hardware;
+iOS Track/QueueItem and pre-DeleteAll/Insert window checks remain I1–I3 companion work.
+Runbook: ops/b470-native-qualification.md. Linux execution, ABI and owner qualification remain
+separate gates; no hardware was used to implement this change. Single-tuple candidate runs
+can evidence native/PCM edges; cross-native tuple transitions remain unapproved without
+integrated multi-tuple evidence. The native+DoP release qualification gate remains closed.
+
+- **Native approval is local owner trust, canonical/report hashes, version and descriptor identity; candidates are CLI-only.** Reverify each session/open/activation; semantic mixer drift, replacement and stale health revoke DSD occurrences and retiring tails, never PCM with only queued DSD. Exact directional tuple/policy edges gate incoming opens; keep live occurrence facts separate from capability epochs. No DoP implementation or autoplay recovery. → History-b470-native.md, “Owner approval (2c.2b)”.

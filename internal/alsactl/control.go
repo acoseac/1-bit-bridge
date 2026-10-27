@@ -14,6 +14,8 @@ import (
 
 // Control is one semantic control and its complete read value.
 type Control struct {
+	// ReadError preserves a listed but unreadable control for selective checks.
+	ReadError                           string
 	Interface, Device, Subdevice, Index uint32
 	Name                                string
 	Type                                uint32
@@ -55,7 +57,9 @@ type Device interface {
 
 // Reader takes its opener through an instance, so tests never require hardware.
 type Reader struct {
-	Open func(card int) (Device, error)
+	// AllowUnreadable keeps unrelated unreadable controls in the snapshot.
+	AllowUnreadable bool
+	Open            func(card int) (Device, error)
 }
 
 // Read obtains one complete snapshot and always closes its control descriptor.
@@ -81,6 +85,13 @@ func (r Reader) Read(card int) (Snapshot, error) {
 	}
 	if len(v) > 1024 {
 		return Snapshot{}, errors.New("control count exceeds bound")
+	}
+	if !r.AllowUnreadable {
+		for _, c := range v {
+			if c.ReadError != "" {
+				return Snapshot{}, errors.New("control unreadable")
+			}
+		}
 	}
 	sort.Slice(v, func(i, j int) bool {
 		a, b := v[i], v[j]

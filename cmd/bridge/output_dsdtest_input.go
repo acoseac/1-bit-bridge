@@ -177,7 +177,7 @@ func newNativeConsole(ctx context.Context, source io.Reader, cancel context.Canc
 				cancel(&nativeStop{b})
 				return
 			}
-			if b == ' ' || b == 'n' || b == 'p' {
+			if b == ' ' || b == 'n' || b == 'p' || b == 'x' {
 				select {
 				case c.keys <- b:
 				case <-ctx.Done():
