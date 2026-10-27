@@ -1,6 +1,6 @@
 # B470 native qualification — owner approval and provisional evidence
 
-QualificationVersion is **10**. All older evidence must be rerun. The harness never
+QualificationVersion is **11**. All older evidence must be rerun. The harness never
 creates approval. Production native DSD requires a fresh matching approved record;
 DoP remains unimplemented. Real-ref and Linux hardware gates remain reviewer/owner work.
 
@@ -166,7 +166,7 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-Historical round 3 used qualificationVersion 4; current version is **10** and Contact.SchemaVersion remains **2**. All older
+Historical round 3 used qualificationVersion 4; current version is **11** and Contact.SchemaVersion remains **2**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
 either audition leg opens. Missing fields are not zero. Both opened-node checks
@@ -253,7 +253,7 @@ still resolve inside it). `dsdMode: native` or `auto` enables only approved nati
 
 The Go contracts are `qualification.Approval`, `ApprovalBody`, `ApprovedPolicy`, `Edge`
 and `Evidence` in `internal/player/qualification/approval.go`. JSON uses those exact
-exported field names. SchemaVersion=1; QualificationVersion=10; Revision is the owner's
+exported field names. SchemaVersion=1; QualificationVersion=11; Revision is the owner's
 revision; Identity is the observed VID/ProductID/manufacturer/product/bcdDevice,
 anchored controller/port, interface, device and subdevice. No serial or card number is
 persistent identity. Unchanged descriptors may retain approval after replug/restart;

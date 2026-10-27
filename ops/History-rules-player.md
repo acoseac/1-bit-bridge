@@ -803,3 +803,10 @@ backends retaining their old behavior. Accepted DSD settings are off/auto/native
 allowDoP is accepted configuration, not a claim that DoP is implemented. Invalid-mode
 refusals name those choices without claiming that off is the only choice.
 The complete review invariants are in History-b470-native.md, “PR #1356 review”.
+
+### Native engine hand-off, iOS fixture exporter
+
+Qualification version 11 supersedes version 10: the path guard includes the new
+manifest exporter test. This is a contract/test change, with no hardware run or
+playback/extraction implementation change. See History-b470-native.md,
+“iOS mirror precision”.

@@ -65399,3 +65399,18 @@ History-b470-native.md, “PR #1356 review”, with matching player/scanner/wire
 The release-before-start lookup and immediate fail-closed permission revocation
 are intentional and unchanged. Local review artifacts record exact mutation reds
 and gate exits. No commit, push or hardware qualification was performed.
+
+## 2026-10-27 — B470 2c.2 / #1356 iOS mirror precision
+
+The iOS companion reviews identified a blanket bridge-key presence claim and
+missing token/member lists. The serializer retains mandatory logicalRate=0 for
+PCM; optional objects and empty-string fields are now enumerated. Source-derived
+TestDSDOutputProtocolTokens checks both directions of each token table. The
+negative control changes the documented silence token to a nonexistent token,
+expecting only its pause leaf red. The two iOS exporter tests exercise
+scan/store/full+since streaming and the real outputs HTTP serializer, with all
+assertions active when publication is off. The unknown-CMPR fixture confirmed
+that the extractor withholds channels as well as other format stamps; the doc
+now says so. Qualification version 11 follows the existing path guard (which
+includes test files), without changing extraction/playback behavior. The iOS
+mirror and consumers remain companion work; no hardware or deployment ran.

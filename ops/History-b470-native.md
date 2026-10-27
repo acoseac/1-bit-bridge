@@ -277,3 +277,25 @@ ReleaseNative still uses the session-creating lookup: release may arrive before
 start and must leave the fence record. Native permission monitoring still revokes
 on the first failed check; uncertain authorization is not permission to continue,
 and recovery never starts playback. These two review suggestions were declined.
+
+### iOS mirror precision
+
+PROTOCOL.md enumerates baseline and optional bridge members, every nested member's
+JSON type and omission rule, exact native/PCM format, pause and observation state
+vocabularies, and unknown-token handling. DSD policy reason is display text;
+logicalRate is always present, zero for PCM. Manifest evidence and channel absence
+are explicit. TestDSDOutputProtocolTokens compares the protocol tables in both
+directions with parsed producer definitions and the native format filter.
+TestExportIOSManifestFixtures scans synthetic DSF/DFF/WAV through extraction,
+SQLite and full/since streaming. TestExportIOSOutputFixtures exercises the real
+HTTP handler without sockets for six independent synthetic players, collected
+with the real OutputsResponse serializer into one response fixture (a live
+bridge lists only its own player). Both build and assert their documents on ordinary test runs; only writes
+to the export directory require BRIDGE_EXPORT_IOS_FIXTURES. Export manifest then
+API with -p=1: the manifest creates fixtures-info.json and the API adds its input
+hashes and output-index cases. BRIDGE_FIXTURE_COMMIT supplies provenance only
+when git rev-parse HEAD is unavailable. The commit is the base revision; the
+protocol hash and explicit working-tree label avoid claiming uncommitted changes
+belong to it. Fixture files are consumer artifacts, not hardware qualification.
+Qualification version 11 supersedes 10 because the guard includes test paths
+under internal/manifest; no playback or extraction implementation changed.
