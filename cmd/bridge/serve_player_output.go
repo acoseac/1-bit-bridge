@@ -156,7 +156,7 @@ func (b *bridgeOutput) Facts(ctx context.Context) api.BridgeOutputFacts {
 				facts.DSDPlayback.Tuples = append(facts.DSDPlayback.Tuples, api.OutputDSDTuple{Format: p.Tuple.Format, BitRate: p.Tuple.BitRate, Channels: 2, PolicyID: p.PolicyID, Pause: p.Pause, TailMS: p.Tail.Milliseconds(), PrefillMS: p.Prefill.Milliseconds()})
 			}
 			if len(policy.Tuples) > 0 {
-				facts.Codecs = append(facts.Codecs, "DSF", "DFF")
+				facts.Codecs = append(facts.Codecs, "dsf", "dff")
 			}
 			if live != nil {
 				facts.Playback = &api.OutputPlayback{BootID: live.BootID, PolicyGeneration: live.PolicyGeneration, Session: uint64(live.Session), Occurrence: uint64(live.Occurrence), State: live.State, Format: live.Format, RateHz: live.RateHz, LogicalRate: live.LogicalRate, Channels: live.Channels, ValidBits: live.ValidBits, PolicyID: live.PolicyID}

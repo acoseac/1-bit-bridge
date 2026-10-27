@@ -185,7 +185,7 @@ func (s *session) reportStep() bool {
 		switch {
 		case c != nil && !c.closed && !c.drained && posOf(c).State == alsapcm.SinkReleased:
 			s.relSent = true
-			n := Note{Session: id, Kind: NoteReleased, Params: c.sink.Params(), Transport: c.transport, Unit: c.unitLabel()}
+			n := Note{Session: id, Occurrence: c.occurrence, output: c, Kind: NoteReleased, Params: c.sink.Params(), Transport: c.transport, Unit: c.unitLabel()}
 			evs = append(evs, func() {
 				s.b.notify(n)
 				s.ev.DeviceReleased(id)

@@ -141,6 +141,9 @@ func readApproval(stateDir, name string, identity Identity, candidate bool) (App
 				return a, errors.New("report does not execute approved policy")
 			}
 			if scenario == "backend-lifecycle" {
+				if r.NativeCompleted <= 0 || r.NativeTuple != t {
+					return a, errors.New("lifecycle has no completion of the candidate native tuple")
+				}
 				for _, e := range r.PassedEdges {
 					executedEdges[e] = true
 				}
@@ -202,6 +205,8 @@ func (i Identity) valid() bool {
 }
 
 type executedReport struct {
+	NativeTuple                                               Tuple
+	NativeCompleted                                           int
 	QualificationVersion                                      int
 	Tuple                                                     Tuple
 	Identity                                                  Identity

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -38,10 +39,11 @@ type PlayerPolicy struct {
 }
 
 type permission struct {
-	record     qualification.Approval
-	file       os.FileInfo
-	generation uint64
-	revoked    atomic.Bool
+	unavailable map[string]bool
+	record      qualification.Approval
+	file        os.FileInfo
+	generation  uint64
+	revoked     atomic.Bool
 }
 
 func (a *Authorization) identity(u Unit) (qualification.Identity, error) {
@@ -109,22 +111,30 @@ func (b *Backend) readPermission(ctx context.Context) (*permission, error) {
 	if e != nil {
 		return nil, e
 	}
+	unavailable := map[string]bool{}
 	for _, p := range record.Body.Policies {
 		if len(p.Constraints) == 0 {
-			if gain {
-				return nil, errors.New("gain has no approved constraint")
-			}
+			unavailable[qualification.NativeKey(p)] = gain
 			for _, c := range controls.Controls {
 				if c.Interface == 2 {
-					return nil, errors.New("mixer has no approved constraint")
+					unavailable[qualification.NativeKey(p)] = true
 				}
 			}
 		}
-		if e = controls.CheckConstraints(p.Constraints); e != nil {
-			return nil, e
+		if controls.CheckConstraints(p.Constraints) != nil {
+			unavailable[qualification.NativeKey(p)] = true
 		}
 	}
-	return &permission{record: record, file: after}, nil
+	available := false
+	for _, p := range record.Body.Policies {
+		if !unavailable[qualification.NativeKey(p)] {
+			available = true
+		}
+	}
+	if !available {
+		return nil, errors.New("no tuple satisfies its approved constraints")
+	}
+	return &permission{record: record, file: after, unavailable: unavailable}, nil
 }
 func planOf(p qualification.ApprovedPolicy, a qualification.Approval) engine.NativePlan {
 	plan := engine.NativePlan{Tuple: engine.NativeTuple{Format: p.Tuple.Format, BitRate: p.Tuple.BitRate}, PolicyID: p.ID, Pause: p.Tuple.Pause, Tail: time.Duration(p.Tuple.TailMS) * time.Millisecond, Prefill: time.Duration(p.Tuple.PrefillMS) * time.Millisecond}
@@ -139,7 +149,7 @@ func (p *permission) selectNative(f format.NativeDSD) (engine.NativePlan, error)
 	}
 	for _, preferred := range []string{"DSD_U32_BE", "DSD_U32_LE", "DSD_U16_LE"} {
 		for _, t := range p.record.Body.Policies {
-			if t.Tuple.Format == preferred && t.Tuple.BitRate == f.BitRateHz && f.Channels == 2 {
+			if !p.unavailable[qualification.NativeKey(t)] && t.Tuple.Format == preferred && t.Tuple.BitRate == f.BitRateHz && f.Channels == 2 {
 				return planOf(t, p.record), nil
 			}
 		}
@@ -162,7 +172,7 @@ func (b *Backend) publishPermission(p *permission, reason string) {
 		p.generation = b.policy.Generation
 		b.policy.Revision = p.record.Body.Revision
 		for _, v := range p.record.Body.Policies {
-			if format.DSDWordBytes(format.ALSAFormat(v.Tuple.Format)) == 0 {
+			if p.unavailable[qualification.NativeKey(v)] || format.DSDWordBytes(format.ALSAFormat(v.Tuple.Format)) == 0 {
 				continue
 			}
 			b.policy.Tuples = append(b.policy.Tuples, planOf(v, p.record))
@@ -187,7 +197,7 @@ func (b *Backend) copyPolicyLocked() PlayerPolicy {
 	}
 	return p
 }
-func (b *Backend) checkPermission(ctx context.Context, p *permission, n *alsapcm.NodeInfo) error {
+func (b *Backend) checkPermission(ctx context.Context, p *permission, n *alsapcm.NodeInfo, policyID ...string) error {
 	if p == nil || p.revoked.Load() {
 		return errors.New("DSD permission revoked")
 	}
@@ -198,6 +208,12 @@ func (b *Backend) checkPermission(ctx context.Context, p *permission, n *alsapcm
 	if current.record.SHA256 != p.record.SHA256 || !os.SameFile(current.file, p.file) {
 		return errors.New("approved record replaced")
 	}
+	for _, id := range policyID {
+		if current.unavailable[id] {
+			return errors.New("selected policy constraints changed")
+		}
+	}
+
 	if n != nil {
 		a := b.cfg.Authorization
 		id, e := a.identity(Unit{Endpoint: alsapcm.Endpoint{Card: n.Card, Device: n.Device}})
@@ -215,6 +231,9 @@ func (b *Backend) checkPermission(ctx context.Context, p *permission, n *alsapcm
 			return e
 		}
 		for _, v := range p.record.Body.Policies {
+			if len(policyID) > 0 && !slices.Contains(policyID, qualification.NativeKey(v)) {
+				continue
+			}
 			if e = controls.CheckConstraints(v.Constraints); e != nil {
 				return e
 			}
@@ -237,10 +256,8 @@ func (s *session) monitorPermission() {
 			case <-s.down:
 				return
 			case <-ticker.C:
-				if err := s.b.checkPermission(context.Background(), s.permission, nil); err != nil {
-					s.b.Revoke(engine.RevokeInput{Session: s.id, Reason: "approval, identity, health or constrained mixer changed"})
-					return
-				}
+				next, err := s.b.readPermission(s.ctx)
+				s.reconcilePermission(next, err)
 			}
 		}
 	})
@@ -255,7 +272,7 @@ func (b *Backend) RefreshAuthorization(ctx context.Context) {
 	next, err := b.readPermission(ctx)
 	b.policyMu.Lock()
 	previous := b.publishedPermission
-	unchanged := err == nil && previous != nil && next.record.SHA256 == previous.record.SHA256 && os.SameFile(next.file, previous.file)
+	unchanged := err == nil && previous != nil && next.record.SHA256 == previous.record.SHA256 && os.SameFile(next.file, previous.file) && maps.Equal(next.unavailable, previous.unavailable)
 	alreadyEmpty := err != nil && len(b.policy.Tuples) == 0 && b.policy.Reason == "approval_unavailable"
 	b.policyMu.Unlock()
 	if unchanged || alreadyEmpty {
@@ -268,7 +285,9 @@ func (b *Backend) RefreshAuthorization(ctx context.Context) {
 	}
 	b.mu.Unlock()
 	for _, id := range ids {
-		b.Revoke(engine.RevokeInput{Session: id, Reason: "DSD authorization changed"})
+		if s := b.known(id); s != nil {
+			s.reconcilePermission(next, err)
+		}
 	}
 	if err != nil {
 		b.publishPermission(nil, "approval_unavailable")
@@ -289,4 +308,39 @@ func NewQualificationBackend(cfg Config) (*Backend, error) {
 	}
 	b.cliCandidate = true
 	return b, nil
+}
+
+// reconcilePermission drops only ineligible prepared occurrences; an invalid
+// open native output (including a retiring tail) is fenced immediately.
+func (s *session) reconcilePermission(next *permission, err error) {
+	s.mu.Lock()
+	prior := s.permission
+	replaced := err != nil || next == nil || prior == nil || prior.revoked.Load()
+	if !replaced {
+		replaced = next.record.SHA256 != prior.record.SHA256 || !os.SameFile(next.file, prior.file)
+	}
+	active := false
+	for _, out := range s.outs {
+		if out.native != nil && !out.closed && (replaced || next.unavailable[edgeKey(out.transport, out.plan)]) {
+			active = true
+		}
+	}
+	for _, o := range s.chain {
+		if o.opened() && o.plan != nil && o.out == nil && (replaced || next.unavailable[edgeKey(o.transport, o.plan)]) {
+			o.dropped = true
+			o.refused = &engine.Unplayable{Reason: "native_revoked", Detail: "selected DSD policy is no longer eligible"}
+		}
+	}
+	if replaced {
+		s.nativeRevoked = true
+		if prior != nil {
+			prior.revoked.Store(true)
+		}
+	}
+	s.mu.Unlock()
+	if active {
+		s.b.Revoke(engine.RevokeInput{Session: s.id, Reason: "selected DSD authorization changed"})
+	}
+	wake(s.wakeP)
+	wake(s.wakeR)
 }

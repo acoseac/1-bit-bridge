@@ -166,7 +166,7 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-Historical round 3 used qualificationVersion 4; current version is **8** and Contact.SchemaVersion remains **2**. All older
+Historical round 3 used qualificationVersion 4; current version is **9** and Contact.SchemaVersion remains **2**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
 either audition leg opens. Missing fields are not zero. Both opened-node checks
@@ -253,7 +253,7 @@ still resolve inside it). `dsdMode: native` or `auto` enables only approved nati
 
 The Go contracts are `qualification.Approval`, `ApprovalBody`, `ApprovedPolicy`, `Edge`
 and `Evidence` in `internal/player/qualification/approval.go`. JSON uses those exact
-exported field names. SchemaVersion=1; QualificationVersion=8; Revision is the owner's
+exported field names. SchemaVersion=1; QualificationVersion=9; Revision is the owner's
 revision; Identity is the observed VID/ProductID/manufacturer/product/bcdDevice,
 anchored controller/port, interface, device and subdevice. No serial or card number is
 persistent identity. Unchanged descriptors may retain approval after replug/restart;
@@ -288,7 +288,7 @@ Native edge keys are `native/FORMAT/BITRATE/2/msb/ID/PAUSE/TAIL_MS/PREFILL_MS/30
 PCM keys are `pcm/FORMAT/RATE/CHANNELS/VALIDBITS/zero`. Edges are directional `{From,To}`,
 including self edges; approval of endpoints alone authorizes no edge. Edges must occur in
 the lifecycle reports. The backend enforces them on natural advance and navigation,
-including separate sessions, before the incoming open. Unapproved edges remain unavailable.
+including separate sessions, before an incoming DSD open or Locate. PCM opens never depend on DSD approval or edges. Unapproved incoming DSD edges remain unavailable.
 
 ## Real backend lifecycle and approved production reports
 
@@ -296,6 +296,11 @@ First construct a visibly provisional record in Q: same schema/hash/identity/pol
 complete current matrix evidence, but Confirmation exactly `CLI candidate; not approved`.
 Its Lifecycle is empty. It grants nothing to serve, output play or any API. For this command,
 one native tuple must match all explicit flags; WAV fixtures exercise PCM boundaries.
+At least one native fixture must finish with measured playback of that tuple.
+NativeTuple and NativeCompleted record that execution; PCM-only lists or completion
+cannot qualify it. LifecycleActions count observed native outcomes: pause/resume,
+release/reopen, navigation between native occurrences, Stop, and natural completion.
+An admitted command alone is insufficient. Version 9 invalidates older evidence.
 List all candidate directional edges explicitly. No command generates that record.
 
 ```sh

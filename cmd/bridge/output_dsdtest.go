@@ -214,6 +214,8 @@ func parseNativeOptions(args []string, w io.Writer) (nativeOptions, error) {
 }
 
 type nativeReport struct {
+	NativeTuple                                              qualification.Tuple
+	NativeCompleted                                          int
 	Identity                                                 qualification.Identity
 	FeatureUnit                                              *bool
 	Scenario, Environment                                    string
@@ -274,12 +276,18 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 	for _, f := range m.Fixtures {
 		byID[f.ID] = f
 	}
+	anyNative := false
 	for _, id := range o.list {
 		f, ok := byID[id]
+		anyNative = anyNative || f.Container == "DSF" || f.Container == "DFF"
 		if !ok || ((f.Rate != o.rate || (f.Container != "DSF" && f.Container != "DFF")) && !(o.scenario == "backend-lifecycle" && f.Container == "WAV")) {
 			fmt.Fprintln(errout, "fixture-list tuple mismatch")
 			return 1
 		}
+	}
+	if o.scenario == "backend-lifecycle" && !anyNative {
+		fmt.Fprintln(errout, "backend lifecycle requires native execution")
+		return 1
 	}
 	a, e := env.attachment(ep.Card)
 	if e != nil {

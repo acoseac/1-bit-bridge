@@ -19,7 +19,7 @@ func approvalFixture(t *testing.T) (string, Approval, Identity) {
 	id := Identity{Vendor: "20b1", ProductID: "300a", Manufacturer: "iFi", Product: "GO bar", BCDDevice: "0100", Port: "platform-test/usb-0:1:1.0", Device: 0}
 	p := ApprovedPolicy{ID: "one", Tuple: Tuple{Format: "DSD_U32_BE", BitRate: 2822400, Pause: "kernel"}, Channels: 2, Ordering: "msb", PauseReleaseSeconds: 30}
 	for _, scenario := range []string{"matrix", "backend-lifecycle"} {
-		report := map[string]any{"QualificationVersion": Version, "Tuple": p.Tuple, "Identity": id, "ManifestHash": Digest("fixtures"), "Environment": "test", "Scenario": scenario, "End": "complete", "LifecycleActions": []string{"natural", "next", "previous", "pause", "resume", "released", "reopened", "stop"}, "Completed": []bool{true}, "PauseReleaseSeconds": 30, "PCMTimePolicy": [2]int{}, "BuildSHA": "test-build", "FeatureUnit": false, "Before": map[string]any{}, "After": map[string]any{}}
+		report := map[string]any{"QualificationVersion": Version, "Tuple": p.Tuple, "NativeTuple": p.Tuple, "NativeCompleted": 1, "Identity": id, "ManifestHash": Digest("fixtures"), "Environment": "test", "Scenario": scenario, "End": "complete", "LifecycleActions": []string{"natural", "next", "previous", "pause", "resume", "released", "reopened", "stop"}, "Completed": []bool{true}, "PauseReleaseSeconds": 30, "PCMTimePolicy": [2]int{}, "BuildSHA": "test-build", "FeatureUnit": false, "Before": map[string]any{}, "After": map[string]any{}}
 		b, _ := json.Marshal(report)
 		path := scenario + ".json"
 		if err := os.WriteFile(filepath.Join(dir, path), b, 0600); err != nil {
@@ -68,6 +68,23 @@ func TestApprovedRecordTrust(t *testing.T) {
 				a.Body.Policies = append(a.Body.Policies, a.Body.Policies[0])
 			case "policy":
 				a.Body.Policies[0].Tuple.TailMS = 25
+				// Keep native execution matching; only the report's declared
+				// tuple is stale, so that comparison is independently pinned.
+				ev := &a.Body.Policies[0].Lifecycle
+				data, e := os.ReadFile(filepath.Join(dir, ev.Path))
+				if e != nil {
+					t.Fatal(e)
+				}
+				var report map[string]any
+				if e = json.Unmarshal(data, &report); e != nil {
+					t.Fatal(e)
+				}
+				report["NativeTuple"] = a.Body.Policies[0].Tuple
+				data, _ = json.Marshal(report)
+				if e = os.WriteFile(filepath.Join(dir, ev.Path), data, 0600); e != nil {
+					t.Fatal(e)
+				}
+				ev.SHA256 = hashBytes(data)
 			case "missing_evidence":
 				os.Remove(filepath.Join(dir, a.Body.Policies[0].Lifecycle.Path))
 			case "provisional":
@@ -89,7 +106,7 @@ func TestApprovedRecordTrust(t *testing.T) {
 }
 
 func TestApprovalExecutedEvidence(t *testing.T) {
-	for _, mode := range []string{"hash", "cancelled", "sink_only", "unverified", "incomplete", "lifecycle", "gain", "edge"} {
+	for _, mode := range []string{"hash", "cancelled", "sink_only", "unverified", "incomplete", "lifecycle", "pcm_only", "negative_native", "wrong_native_tuple", "gain", "edge"} {
 		t.Run(mode, func(t *testing.T) {
 			dir, a, id := approvalFixture(t)
 			name := a.Body.Policies[0].Lifecycle.Path
@@ -112,6 +129,12 @@ func TestApprovalExecutedEvidence(t *testing.T) {
 				r["BuildSHA"] = "unverified"
 			case "incomplete":
 				r["Completed"] = []bool{true, false}
+			case "pcm_only":
+				r["NativeCompleted"] = 0
+			case "negative_native":
+				r["NativeCompleted"] = -1
+			case "wrong_native_tuple":
+				r["NativeTuple"] = Tuple{Format: "DSD_U32_BE", BitRate: 5644800, Pause: "kernel"}
 			case "lifecycle":
 				r["LifecycleActions"] = []string{"natural"}
 			case "gain":

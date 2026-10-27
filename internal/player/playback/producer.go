@@ -23,9 +23,10 @@ const (
 )
 
 type step struct {
-	kind stepKind
-	o    *occ
-	wait <-chan struct{}
+	install bool
+	kind    stepKind
+	o       *occ
+	wait    <-chan struct{}
 }
 
 // produce is the session's producer, the one goroutine that decodes, packs
@@ -45,6 +46,9 @@ func (s *session) produce() {
 		st := s.next()
 		switch st.kind {
 		case stepWrite:
+			if st.install {
+				s.installed(st.o, st.o.out, false)
+			}
 			if !s.writeChunk(st.o, samples, packed) {
 				return
 			}
@@ -115,12 +119,31 @@ func (s *session) next() step {
 			wake(s.wakeR)
 			return step{kind: stepFinish}
 		}
+		if o.plan != nil && o.permission != nil {
+			s.mu.Unlock()
+			err := s.b.checkPermission(s.ctx, o.permission, nil, edgeKey(o.transport, o.plan))
+			if err != nil {
+				s.b.Revoke(engine.RevokeInput{Session: s.id, Reason: "gapless DSD authorization changed"})
+			}
+			s.mu.Lock()
+			if err != nil {
+				o.refused = &engine.Unplayable{Reason: "native_revoked", Detail: err.Error()}
+				o.dropped = true
+				wake(s.wakeR)
+				return step{kind: stepStop}
+			}
+			if s.ctx.Err() != nil || s.fault != nil {
+				return step{kind: stepStop}
+			}
+			if o.dropped || s.cur != c {
+				return step{kind: stepWait}
+			}
+		}
 		s.b.rememberEdge(o.transport, o.plan, o.permission)
-		s.observeOccurrence(o, c)
 		// Gapless: its frames follow the last ones in the same sink.
 		o.out, o.start = c, c.submitted
 		s.writing = o
-		return step{kind: stepWrite, o: o}
+		return step{kind: stepWrite, o: o, install: true}
 	}
 	return step{kind: stepTransition, o: o}
 }

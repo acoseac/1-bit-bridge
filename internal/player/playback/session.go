@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/acoseac/1-bit-bridge/internal/player/qualification"
 	"slices"
 	"strings"
 	"sync"
@@ -99,6 +100,7 @@ type session struct {
 
 // output is one sink a session opened, for one transport.
 type output struct {
+	occurrence   engine.OccurrenceID
 	plan         *engine.NativePlan
 	permission   *permission
 	s            *session
@@ -129,12 +131,12 @@ func (o *output) admit(n alsapcm.NodeInfo) error {
 		}
 	}
 	if o.permission != nil {
-		if err := o.s.b.checkPermission(o.s.ctx, o.permission, &n); err != nil {
+		if err := o.s.b.checkPermission(o.s.ctx, o.permission, &n, edgeKey(o.transport, o.plan)); err != nil {
 			return err
 		}
 		if a := o.s.b.cfg.Authorization; a != nil && a.ContactCheck != nil {
 			for _, p := range o.permission.record.Body.Policies {
-				if p.ID == o.policyID {
+				if qualification.NativeKey(p) == edgeKey(o.transport, o.plan) {
 					return a.ContactCheck(n, p, o.permission.record.Body.ManifestHash)
 				}
 			}
@@ -386,9 +388,11 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 			p.revoked.Store(true)
 		}
 		if e != nil {
-			s.b.publishPermission(nil, "approval_unavailable")
-		} else {
-			s.b.publishPermission(p, "")
+			p = nil
+		}
+		// Session admission never publishes capabilities. The supervisor owns epochs.
+		if p != nil {
+			p.generation = s.b.Policy().Generation
 		}
 		s.permission = p
 		first.permission = p
@@ -506,7 +510,7 @@ func (s *session) openOutput(ctx context.Context, o *occ) (*output, error) {
 		if err := s.b.checkEdge(transport, nil, nil); err != nil {
 			return nil, err
 		}
-		out := &output{s: s, transport: transport, unit: u}
+		out := &output{occurrence: o.id, s: s, transport: transport, unit: u}
 		sink, err := s.b.cfg.OpenSink(s.ctx, alsapcm.SinkConfig{
 			Endpoint: u.Endpoint, Transport: out.transport, Pause: alsapcm.PauseAuto,
 			ReleaseAfter: s.opts.PauseRelease, Admit: out.admit, Locate: out.locate, Log: s.b.log,
@@ -519,7 +523,7 @@ func (s *session) openOutput(ctx context.Context, o *occ) (*output, error) {
 			s.outs = append(s.outs, out)
 			s.mu.Unlock()
 			s.b.remember(rate, bits, f)
-			s.b.notify(Note{Session: s.id, Kind: NoteOpened, Params: sink.Params(), Transport: out.transport, Unit: u.Label})
+			s.b.notify(Note{Session: s.id, Occurrence: out.occurrence, output: out, Kind: NoteOpened, Params: sink.Params(), Transport: out.transport, Unit: u.Label})
 			return out, nil
 		}
 		switch alsapcm.ReasonOf(err) {
@@ -560,7 +564,7 @@ func (s *session) closeOutput(out *output) {
 		s.releaseErr = errors.Join(s.releaseErr, engine.ErrReleaseUnconfirmed, err)
 		s.mu.Unlock()
 	}
-	s.b.notify(Note{Session: s.id, Kind: NoteClosed, Params: out.sink.Params(), Transport: out.transport, Unit: out.unitLabel()})
+	s.b.notify(Note{Session: s.id, Occurrence: out.occurrence, output: out, Kind: NoteClosed, Params: out.sink.Params(), Transport: out.transport, Unit: out.unitLabel()})
 }
 
 // drainOutput has out play everything submitted. A paused sink holds what
@@ -1151,7 +1155,7 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 			l.unlock()
 			wake(s.wakeR)
 			if released {
-				s.b.notify(Note{Session: s.id, Kind: NoteReopened, Params: out.sink.Params(), Transport: out.transport, Unit: out.unitLabel()})
+				s.b.notify(Note{Session: s.id, Occurrence: out.occurrence, output: out, Kind: NoteReopened, Params: out.sink.Params(), Transport: out.transport, Unit: out.unitLabel()})
 				return engine.ResumeReopened, nil
 			}
 			return engine.ResumeContinued, nil

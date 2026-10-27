@@ -41,7 +41,7 @@ func approvedBackendFixture(t *testing.T) (Config, qualification.Approval) {
 	p := qualification.ApprovedPolicy{ID: "p64", Tuple: qualification.Tuple{Format: "DSD_U32_BE", BitRate: 2822400, Pause: "kernel"}, Channels: 2, Ordering: "msb", PauseReleaseSeconds: 30}
 	edge := qualification.Edge{From: qualification.NativeKey(p), To: qualification.NativeKey(p)}
 	for _, scenario := range []string{"matrix", "backend-lifecycle"} {
-		r := map[string]any{"QualificationVersion": qualification.Version, "Tuple": p.Tuple, "Identity": id, "ManifestHash": qualification.Digest("fixtures"), "Environment": "fixture", "Scenario": scenario, "End": "complete", "Completed": []bool{true}, "PauseReleaseSeconds": 30, "PCMTimePolicy": [2]int{}, "BuildSHA": "fixture", "FeatureUnit": false, "LifecycleActions": []string{"natural", "next", "previous", "pause", "resume", "released", "reopened", "stop"}, "PassedEdges": []qualification.Edge{edge}}
+		r := map[string]any{"QualificationVersion": qualification.Version, "Tuple": p.Tuple, "NativeTuple": p.Tuple, "NativeCompleted": 1, "Identity": id, "ManifestHash": qualification.Digest("fixtures"), "Environment": "fixture", "Scenario": scenario, "End": "complete", "Completed": []bool{true}, "PauseReleaseSeconds": 30, "PCMTimePolicy": [2]int{}, "BuildSHA": "fixture", "FeatureUnit": false, "LifecycleActions": []string{"natural", "next", "previous", "pause", "resume", "released", "reopened", "stop"}, "PassedEdges": []qualification.Edge{edge}}
 		b, _ := json.Marshal(r)
 		name := scenario + ".json"
 		if e := os.WriteFile(filepath.Join(a.StateDir, name), b, 0600); e != nil {
@@ -188,5 +188,63 @@ func TestProductionApprovalSemanticMixer(t *testing.T) {
 				t.Fatalf("semantic authorization=%v", e)
 			}
 		})
+	}
+}
+
+func TestPolicyConstraintsAreTupleLocal(t *testing.T) {
+	cfg, record := approvedBackendFixture(t)
+	volume := alsactl.Control{Interface: 2, Name: "Volume", Type: 2, Count: 1, Access: 1, Values: []byte{1, 0, 0, 0, 0, 0, 0, 0}}
+	for i := 0; i < 2; i++ {
+		p := record.Body.Policies[0]
+		p.ID = fmt.Sprintf("p%d", i)
+		p.Tuple.BitRate = 2822400 * (i + 1)
+		value := append([]byte(nil), volume.Values...)
+		value[0] = byte(i + 1)
+		p.Constraints = []alsactl.Constraint{{Interface: 2, Name: "Volume", Value: value}}
+		for _, ev := range []*qualification.Evidence{&p.Matrix, &p.Lifecycle} {
+			data, e := os.ReadFile(filepath.Join(cfg.Authorization.StateDir, ev.Path))
+			if e != nil {
+				t.Fatal(e)
+			}
+			var r map[string]any
+			if e = json.Unmarshal(data, &r); e != nil {
+				t.Fatal(e)
+			}
+			c := volume
+			c.Values = value
+			r["Tuple"] = p.Tuple
+			r["NativeTuple"] = p.Tuple
+			r["Before"] = alsactl.Snapshot{Controls: []alsactl.Control{c}}
+			r["After"] = r["Before"]
+			data, _ = json.Marshal(r)
+			ev.Path = fmt.Sprintf("p%d-%s", i, ev.Path)
+			ev.SHA256 = fmt.Sprintf("%x", sha256.Sum256(data))
+			if e = os.WriteFile(filepath.Join(cfg.Authorization.StateDir, ev.Path), data, 0600); e != nil {
+				t.Fatal(e)
+			}
+		}
+		if i == 0 {
+			record.Body.Policies[0] = p
+		} else {
+			record.Body.Policies = append(record.Body.Policies, p)
+		}
+	}
+	record.Body.Edges = nil
+	saveApprovedFixture(t, cfg.Authorization, record)
+	cfg.Authorization.Controls = alsactl.Reader{Open: func(int) (alsactl.Device, error) { return listControls{volume}, nil }}
+	b := &Backend{cfg: cfg}
+	token, e := b.readPermission(context.Background())
+	if e != nil {
+		t.Fatal("passing tuple was withheld by another tuple:", e)
+	}
+	b.publishPermission(token, "")
+	if p := b.Policy(); len(p.Tuples) != 1 || p.Tuples[0].PolicyID != "p0" {
+		t.Fatalf("effective tuples: %+v", p)
+	}
+	if e = b.checkPermission(context.Background(), token, nil, qualification.NativeKey(record.Body.Policies[0])); e != nil {
+		t.Fatal("other policy revoked passing tuple:", e)
+	}
+	if e = b.checkPermission(context.Background(), token, nil, qualification.NativeKey(record.Body.Policies[1])); e == nil {
+		t.Fatal("ineligible selected policy passed activation")
 	}
 }

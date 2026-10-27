@@ -44,6 +44,8 @@ type Config struct {
 	// go of during a pause, or reopens, on the goroutine that did it: a
 	// diagnostic observer, as the harness's printer. It must not block.
 	Notify func(Note)
+	// Installed observes occurrence boundaries separately from hardware lifecycle notes.
+	Installed func(Note)
 	// Log is where the backend logs; nil is the player component.
 	Log *slog.Logger
 	// Seams are where a test holds the backend between two of its steps,
@@ -101,6 +103,8 @@ const (
 	// NoteReopened is a released sink that opened the device again on a
 	// resume, at the endpoint the binding resolves to now.
 	NoteReopened
+	// NoteInstalled identifies each installed occurrence, including gapless successors.
+	NoteInstalled
 )
 
 func (k NoteKind) String() string {
@@ -113,14 +117,20 @@ func (k NoteKind) String() string {
 		return "released"
 	case NoteReopened:
 		return "reopened"
+	case NoteInstalled:
+		return "installed"
 	}
 	return fmt.Sprintf("note %d", int(k))
 }
 
 // Note is one thing a session's sink did, for Config.Notify.
 type Note struct {
-	Session engine.SessionID
-	Kind    NoteKind
+	// Plan is detached native policy metadata on an installation observation.
+	Plan       *engine.NativePlan
+	Occurrence engine.OccurrenceID
+	output     *output
+	Session    engine.SessionID
+	Kind       NoteKind
 	// Params is what the kernel committed for the device the sink has, or
 	// last had, open.
 	Params    alsapcm.Params
@@ -142,6 +152,7 @@ type Backend struct {
 	policyMu            sync.Mutex
 	policy              PlayerPolicy
 	liveFacts           *PlaybackFacts
+	liveOutput          *output
 	publishedPermission *permission
 	cliCandidate        bool
 	lastEdge            string

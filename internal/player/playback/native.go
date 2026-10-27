@@ -154,7 +154,7 @@ func (s *session) openNativeOutput(ctx context.Context, o *occ) (*output, error)
 	if err != nil {
 		return nil, err
 	}
-	out := &output{plan: o.plan, s: s, transport: o.transport, unit: u, policyID: o.plan.PolicyID, permission: o.permission}
+	out := &output{occurrence: o.id, plan: o.plan, s: s, transport: o.transport, unit: u, policyID: o.plan.PolicyID, permission: o.permission}
 	pause := alsapcm.PauseKernel
 	if o.plan.Pause == "silence" {
 		pause = alsapcm.PauseZeros
@@ -181,16 +181,13 @@ func (s *session) openNativeOutput(ctx context.Context, o *occ) (*output, error)
 	if releasing || ctx.Err() != nil {
 		sink.BeginRelease(alsapcm.Immediate)
 	}
-	s.b.notify(Note{Session: s.id, Kind: NoteOpened, Params: sink.Params(), Transport: out.transport, Unit: u.Label})
+	s.b.notify(Note{Session: s.id, Occurrence: o.id, output: out, Kind: NoteOpened, Params: sink.Params(), Transport: out.transport, Unit: u.Label})
 	return out, nil
 }
 func (s *session) activateOutput(ctx context.Context, o *occ, out *output) error {
-	if ev, ok := s.ev.(engine.CurrentOccurrenceEvents); ok {
-		ev.CurrentOccurrence(s.id, o.id, o.plan)
-	}
 	if out.native == nil {
 		s.b.rememberEdge(out.transport, nil, nil)
-		s.observeOccurrence(o, out)
+		s.installed(o, out, true)
 		return nil
 	}
 	s.mu.Lock()
@@ -201,14 +198,23 @@ func (s *session) activateOutput(ctx context.Context, o *occ, out *output) error
 		out.native.Revoke()
 		return errors.New("native activation fenced")
 	}
+	if o.permission != nil {
+		if err := s.b.checkPermission(ctx, o.permission, nil, edgeKey(o.transport, o.plan)); err != nil {
+			return err
+		}
+	}
 	if paused {
-		s.observeOccurrence(o, out)
-		return out.native.Pause(ctx)
+		if err := out.native.Pause(ctx); err != nil {
+			return err
+		}
+		s.b.rememberEdge(out.transport, o.plan, o.permission)
+		s.installed(o, out, true)
+		return nil
 	}
 	err := out.activate(ctx)
 	if err == nil {
 		s.b.rememberEdge(out.transport, o.plan, o.permission)
-		s.observeOccurrence(o, out)
+		s.installed(o, out, true)
 	}
 	return err
 }
@@ -354,11 +360,10 @@ func (b *Backend) Revoke(r engine.RevokeInput) {
 		sink.BeginRelease(alsapcm.Immediate)
 	}
 	b.policyMu.Lock()
-	if b.liveFacts != nil && b.liveFacts.Session == r.Session && b.liveFacts.LogicalRate > 0 {
+	if active && b.liveFacts != nil && b.liveFacts.Session == r.Session && b.liveFacts.LogicalRate > 0 && b.liveFacts.State == "open" {
 		b.liveFacts.State = "revoked"
 	}
 	b.policyMu.Unlock()
-	b.publishPermission(nil, "native_revoked")
 	wake(s.wakeP)
 	wake(s.wakeR)
 }

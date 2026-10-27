@@ -1287,3 +1287,115 @@ func TestNativeIntegrationRevokeRetiringTail(t *testing.T) {
 	}
 	k.CheckClosedEach(t)
 }
+
+func TestNativeIntegrationApprovedPCMGapless(t *testing.T) {
+	cfg, _ := approvedBackendFixture(t)
+	pcm, e := os.ReadFile(filepath.Join("..", "decode", "testdata", "goldens", "decorrelated_16bit_44100.wav"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	cfg.Resolver = nativeFiles{"a": pcm}
+	k := alsapcm.NewFakeKernel(t)
+	k.HardwareFormats(2, 6, 10)
+	k.Free()
+	cfg.OpenSink = k.OpenSink
+	b, e := New(cfg)
+	if e != nil {
+		t.Fatal(e)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	t.Cleanup(func() { _ = b.Release(context.Background(), 1); _ = b.Wait(context.Background()); k.CheckClosedEach(t) })
+	b.RefreshAuthorization(ctx)
+	generation := b.Policy().Generation
+	ev := &nativeEvents{done: make(chan struct{})}
+	ref, _ := engine.NewReference("a")
+	if e = b.Start(ctx, engine.StartRequest{Session: 1, First: engine.Occurrence{ID: 1, Ref: ref}, Events: ev}); e != nil {
+		t.Fatal(e)
+	}
+	if e = b.Prepare(ctx, 1, 1, &engine.Occurrence{ID: 2, Ref: ref}); e != nil {
+		t.Fatal(e)
+	}
+	if e = b.Prepare(ctx, 1, 2, nil); e != nil {
+		t.Fatal(e)
+	}
+	select {
+	case <-ev.done:
+	case <-ctx.Done():
+		t.Fatal("approved PCM sequence stalled")
+	}
+	ev.mu.Lock()
+	records := slices.Clone(ev.records)
+	ev.mu.Unlock()
+	if !slices.Contains(records, "audible:2") || k.View().Opens != 1 {
+		t.Fatalf("PCM gapless refused: %v opens=%d", records, k.View().Opens)
+	}
+	if b.Policy().Generation != generation {
+		t.Fatal("PCM changed authorization epoch")
+	}
+}
+
+func TestNativeIntegrationPausedAdmissionEdge(t *testing.T) {
+	cfg, record := approvedBackendFixture(t)
+	record.Body.Edges = nil
+	saveApprovedFixture(t, cfg.Authorization, record)
+	cfg.Resolver = nativeFiles{"a": nativeDSF(t, 31)}
+	k := alsapcm.NewFakeKernel(t)
+	k.HardwareFormats(49, 50, 52)
+	k.Free()
+	b, e := New(cfg)
+	if e != nil {
+		t.Fatal(e)
+	}
+	b.nativeOpen = k.OpenNativeSink
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	t.Cleanup(func() { _ = b.Release(context.Background(), 1); _ = b.Wait(context.Background()); k.CheckClosedEach(t) })
+	s := b.session(1)
+	s.paused = true
+	ref, _ := engine.NewReference("a")
+	ev := &nativeEvents{done: make(chan struct{})}
+	if e = b.Start(ctx, engine.StartRequest{Session: 1, First: engine.Occurrence{ID: 1, Ref: ref}, Events: ev}); e != nil {
+		t.Fatal(e)
+	}
+	s.mu.Lock()
+	first := s.chain[0]
+	s.mu.Unlock()
+	if e = b.checkEdge(first.transport, first.plan, first.permission); e == nil {
+		t.Fatal("paused native installation omitted its outgoing edge")
+	}
+	if k.View().Writes != 0 {
+		t.Fatal("paused installation wrote audio")
+	}
+}
+
+func TestNativeIntegrationPausedAdmissionConstraints(t *testing.T) {
+	cfg, _ := approvedBackendFixture(t)
+	cfg.Resolver = nativeFiles{"a": nativeDSF(t, 31)}
+	k := alsapcm.NewFakeKernel(t)
+	k.HardwareFormats(49, 50, 52)
+	k.Free()
+	b, e := New(cfg)
+	if e != nil {
+		t.Fatal(e)
+	}
+	b.nativeOpen = func(ctx context.Context, c alsapcm.DSDConfig) (*alsapcm.DSDSink, error) {
+		sink, e := k.OpenNativeSink(ctx, c)
+		if e == nil {
+			if e = os.Remove(cfg.Authorization.path()); e != nil {
+				t.Fatal(e)
+			}
+		}
+		return sink, e
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	t.Cleanup(func() { _ = b.Release(context.Background(), 1); _ = b.Wait(context.Background()); k.CheckClosedEach(t) })
+	s := b.session(1)
+	s.paused = true
+	ref, _ := engine.NewReference("a")
+	e = b.Start(ctx, engine.StartRequest{Session: 1, First: engine.Occurrence{ID: 1, Ref: ref}, Events: &nativeEvents{done: make(chan struct{})}})
+	if e == nil || k.View().Writes != 0 {
+		t.Fatal("paused installation bypassed changed permission", e)
+	}
+}

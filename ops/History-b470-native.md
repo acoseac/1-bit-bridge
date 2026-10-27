@@ -192,7 +192,7 @@ a suffix appended to a path, reordered paths and misplaced entries fail.
 ## Owner approval (2c.2b)
 
 Native admission now requires owner-controlled state-directory records and complete matching
-matrix/lifecycle reports, each hashed, qualificationVersion 8, exact sysfs identity and
+matrix/lifecycle reports, each hashed, qualificationVersion 9, exact sysfs identity and
 semantic read-only mixer constraints. The exact typed owner phrase is local approval,
 not a cryptographic signature. The harness's visibly non-approved candidate is limited
 to its real-engine/backend lifecycle constructor. Production constructors accept no candidate.
@@ -201,8 +201,8 @@ monitors that survive the producer's cancellation through a retiring tail. Repla
 records and stale health revoke existing DSD permissions; recovery does not play.
 
 The directional edge interpreter remembers tuple and full policy across sessions, including
-an initially paused occurrence resumed later. Both endpoint approval without edge approval
-refuses the incoming open before writes; outgoing release remains independent. Revocation
+an initially paused installation before any resume. Missing directional edge approval
+refuses an incoming DSD open before Locate and writes; incoming PCM is never gated. Revocation
 discards prepared DSD without faulting active PCM, escalates every open retiring DSD sink to
 Immediate, and never recreates retired IDs. Constructor overlay tests use the actual approval
 reader and backend with fake kernel I/O, not a substituted native admission decision.
@@ -214,7 +214,7 @@ No DoP packer ships; its tuples stay absent. Sessions retain immutable policies 
 revocable tokens. Capability snapshots and live open/released/revoked facts carry boot/epoch
 identity and remain distinct wire DTOs; GET performs no probes.
 
-ExtractorVersion 28 backfills validated DSF channels and DFF raw/missing/unsupported evidence.
+ExtractorVersion 29 backfills validated DSF channels and DFF raw/missing/unsupported evidence.
 Structural malformation stamps unsupported even after raw evidence; full/delta persistence
 and an unchanged no-op scan are tested. The bridge checks actual content before hardware;
 iOS Track/QueueItem and pre-DeleteAll/Insert window checks remain I1–I3 companion work.
@@ -224,3 +224,29 @@ can evidence native/PCM edges; cross-native tuple transitions remain unapproved 
 integrated multi-tuple evidence. The native+DoP release qualification gate remains closed.
 
 - **Native approval is local owner trust, canonical/report hashes, version and descriptor identity; candidates are CLI-only.** Reverify each session/open/activation; semantic mixer drift, replacement and stale health revoke DSD occurrences and retiring tails, never PCM with only queued DSD. Exact directional tuple/policy edges gate incoming opens; keep live occurrence facts separate from capability epochs. No DoP implementation or autoplay recovery. → History-b470-native.md, “Owner approval (2c.2b)”.
+
+### Owner approval review round 2 (2026-10-27)
+
+PCM gapless joins and every PCM open ignore DSD approval and transition edges.
+Session admission and session-local revocation cannot publish capability epochs;
+only RefreshAuthorization publishes changed effective sets. Mixer constraints filter
+policies individually and activation checks the selected policy. Prepared ineligible
+DSD is dropped without faulting PCM; monitors still fence open and retiring DSD.
+Native paused installation records its predecessor edge and rechecks permission;
+gapless installation rechecks both before accepting the successor's bytes.
+
+DFF decoding validates the whole bounded form, skipping payloads by seek. Trailing
+PROP bytes, missing odd padding, duplicate PROP after sound and bytes outside FRM8
+refuse before hardware. The extractor preserves established format stamps even
+when later structure makes compression evidence unsupported (version 29).
+
+Live facts read sink state and correlate lifecycle notifications by physical output,
+so buffering cannot invent a reopen and an old sink cannot release a new observation.
+The optional occurrence observer is separate from unchanged PCM hardware notes.
+Lifecycle reports bind measured native completion to the exact candidate tuple;
+command admission alone is no outcome, and PCM actions cannot count. Edge keys come
+from each installed occurrence, including gapless PCM, never an unrelated sink's note.
+The production policy reader supplies negative surface fixtures, including actual
+revocation after valid approval. Codec words remain protocol-v1 lowercase dsf/dff.
+qualificationVersion 9 invalidates version-8 evidence. No hardware qualification,
+Linux execution, iOS companion work or DoP implementation is claimed.

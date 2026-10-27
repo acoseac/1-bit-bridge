@@ -54,15 +54,30 @@ func openDFF(rs io.ReadSeeker) (DSDDecoder, error) {
 		return nil, refuse(ReasonUnsupportedLayout, "DFF form type %q is not DSD", hdr[12:16])
 	}
 	frmEnd := dffChunkHeader + int64(frmSize)
+	physicalEnd, err := rs.Seek(0, io.SeekEnd)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = rs.Seek(int64(len(hdr)), io.SeekStart); err != nil {
+		return nil, err
+	}
 	pos := int64(len(hdr))
 	var (
-		prop     *dffProp
-		chunkHdr [dffChunkHeader]byte
+		soundBody int64
+		soundSize uint64
+		prop      *dffProp
+		chunkHdr  [dffChunkHeader]byte
 	)
 	for i := 0; i < maxDSDChunks; i++ {
 		// What remains of the form, never pos+12: a position within 12 of
 		// math.MaxInt64 wraps that sum negative, and the walk then read a
 		// header past the form. pos never passes frmEnd, so this cannot wrap.
+		if pos == frmEnd && soundBody != 0 {
+			if physicalEnd != frmEnd {
+				return nil, refuse(ReasonTruncated, "DFF form does not cover exactly the file")
+			}
+			return newDFF(rs, prop, soundBody, soundSize)
+		}
 		if frmEnd-pos < dffChunkHeader {
 			return nil, refuse(ReasonTruncated, "DFF has no DSD sound data")
 		}
@@ -112,7 +127,10 @@ func openDFF(rs io.ReadSeeker) (DSDDecoder, error) {
 			if prop == nil {
 				return nil, refuse(ReasonUnsupportedLayout, "DFF sound data before PROP")
 			}
-			return newDFF(rs, prop, body, size)
+			if soundBody != 0 {
+				return nil, refuse(ReasonUnsupportedLayout, "DFF has two sound chunks")
+			}
+			soundBody, soundSize = body, size
 		}
 		if _, err := rs.Seek(end, io.SeekStart); err != nil {
 			return nil, err
@@ -192,9 +210,12 @@ func parseDFFProp(b []byte) (*dffProp, error) {
 		}
 		next := dffChunkHeader + int(size) + int(size&1)
 		if next > len(rest) {
-			next = len(rest)
+			return nil, refuse(ReasonUnsupportedLayout, "DFF PROP lacks odd chunk pad")
 		}
 		rest = rest[next:]
+	}
+	if len(rest) != 0 {
+		return nil, refuse(ReasonUnsupportedLayout, "DFF PROP has trailing bytes")
 	}
 	for _, c := range []struct {
 		name string

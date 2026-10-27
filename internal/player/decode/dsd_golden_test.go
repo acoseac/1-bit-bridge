@@ -364,11 +364,15 @@ func TestDSDTruncatedMidBlock(t *testing.T) {
 				start := dffSoundDataStart(t, raw)
 				cut = start + 2*5000 + 1
 			}
-			d, err := openDSD(bytes.NewReader(raw[:cut]))
+			reader := bytes.NewReader(raw)
+			d, err := openDSD(reader)
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer d.Close()
+			at, _ := reader.Seek(0, io.SeekCurrent)
+			reader.Reset(raw[:cut])
+			_, _ = reader.Seek(at, io.SeekStart)
 			want := g.want(f)
 			got := [][]byte{nil, nil}
 			dst := dsdBufs(2, 1000)

@@ -21,7 +21,7 @@ func (b *Backend) checkEdge(t alsapcm.Transport, p *engine.NativePlan, permissio
 	}
 	// Inert test admissions predate owner approval. Production's only admission
 	// carries a permission, including when the outgoing occurrence was DSD.
-	if permission == nil && b.lastPlan == nil {
+	if p == nil || (permission == nil && b.lastPlan == nil) {
 		return nil
 	}
 	to := edgeKey(t, p)

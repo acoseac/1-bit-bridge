@@ -56,22 +56,9 @@ func executeBackendLifecycle(ctx context.Context, o nativeOptions, ep alsapcm.En
 		return err
 	}
 	defer os.RemoveAll(state)
-	evidence := &lifecycleEvidence{entries: map[engine.OccurrenceID]int{}, lengths: map[engine.OccurrenceID]int64{}, complete: make([]bool, len(files)), actions: map[string]bool{}}
+	evidence := &lifecycleEvidence{tuple: report.Tuple, entries: map[engine.OccurrenceID]int{}, lengths: map[engine.OccurrenceID]int64{}, complete: make([]bool, len(files)), actions: map[string]bool{}}
 	defer evidence.copy(report)
-	b, err := playback.NewQualificationBackend(playback.Config{Notify: func(n playback.Note) {
-		evidence.mu.Lock()
-		evidence.lastPCM = fmt.Sprintf("pcm/%s/%d/%d/%d/zero", n.Transport.Format, n.Transport.RateHz, n.Transport.Channels, n.Transport.ValidBits)
-		if n.Kind == playback.NoteOpened || n.Kind == playback.NoteReopened {
-			evidence.opened = append(evidence.opened, n.Params)
-		}
-		if n.Kind == playback.NoteReleased {
-			evidence.actions["released"] = true
-		}
-		if n.Kind == playback.NoteReopened {
-			evidence.actions["reopened"] = true
-		}
-		evidence.mu.Unlock()
-	}, Resolver: lifecycleFiles{root: o.fixtures, fixtures: approvedFiles}, Locator: lifecycleLocator{o.config, check}, Authorization: &playback.Authorization{Mode: "native", Record: filepath.Base(o.provisional), StateDir: filepath.Dir(o.provisional), Sysfs: alsa.SysfsReader{Root: hostTrees.sysfs}}})
+	b, err := playback.NewQualificationBackend(playback.Config{Installed: evidence.note, Notify: evidence.note, Resolver: lifecycleFiles{root: o.fixtures, fixtures: approvedFiles}, Locator: lifecycleLocator{o.config, check}, Authorization: &playback.Authorization{Mode: "native", Record: filepath.Base(o.provisional), StateDir: filepath.Dir(o.provisional), Sysfs: alsa.SysfsReader{Root: hostTrees.sysfs}}})
 	if err != nil {
 		return err
 	}
@@ -110,14 +97,15 @@ func executeBackendLifecycle(ctx context.Context, o nativeOptions, ep alsapcm.En
 	fmt.Fprintln(out, "Real engine/backend: space play/pause/resume, n next, p previous, x Stop; finish each listed fixture naturally. Stop ends the run without approval.")
 	report.Completed = make([]bool, len(files))
 
+	var pending *lifecycleAction
 	for {
 		changed := eng.Changed()
 		snap := eng.Snapshot()
 		if len(snap.Faults()) > 0 || len(snap.Skips()) > 0 {
 			return errors.New("backend lifecycle fault or refusal")
 		}
-		if snap.DeviceReleased() {
-			evidence.action("released")
+		if pending != nil && evidence.settleAction(pending, snap) {
+			pending = nil
 		}
 		if evidence.copy(report) && snap.State() == engine.Stopped {
 			report.End = "complete"
@@ -133,44 +121,61 @@ func executeBackendLifecycle(ctx context.Context, o nativeOptions, ep alsapcm.En
 				continue
 			}
 			var e error
+			action := ""
+			before, heard := snap.Track()
+			running := snap.State() == engine.Playing || snap.State() == engine.Paused
 			switch key {
 			case 'x':
 				e = eng.Stop(ctx)
-				evidence.action("stop")
+				action = "stop"
 			case ' ':
 				if snap.State() != engine.Playing {
 					e = eng.Play(ctx)
-					evidence.action("resume")
+					action = "resume"
 				} else {
 					e = eng.Pause(ctx)
-					evidence.action("pause")
+					action = "pause"
 				}
 			case 'n':
 				e = eng.Next(ctx)
-				evidence.action("next")
+				action = "next"
 			case 'p':
 				e = eng.Previous(ctx)
-				evidence.action("previous")
+				action = "previous"
 			}
 			if e != nil {
 				return e
+			}
+			if heard && running && action != "" {
+				pending = &lifecycleAction{name: action, from: before.Occurrence}
 			}
 		}
 	}
 }
 
 type lifecycleEvidence struct {
-	mu                sync.Mutex
-	entries           map[engine.OccurrenceID]int
-	lengths           map[engine.OccurrenceID]int64
-	complete          []bool
-	actions           map[string]bool
-	opened            []alsapcm.Params
-	lastEdge, lastPCM string
-	edges             []qualification.Edge
+	mu         sync.Mutex
+	entries    map[engine.OccurrenceID]int
+	lengths    map[engine.OccurrenceID]int64
+	complete   []bool
+	actions    map[string]bool
+	opened     []alsapcm.Params
+	lastEdge   string
+	tuple      qualification.Tuple
+	current    engine.OccurrenceID
+	native     map[engine.OccurrenceID]bool
+	nativeDone map[engine.OccurrenceID]bool
+	pcm        map[engine.OccurrenceID]string
+	edges      []qualification.Edge
 }
 
-func (v *lifecycleEvidence) action(name string) { v.mu.Lock(); v.actions[name] = true; v.mu.Unlock() }
+func (v *lifecycleEvidence) action(name string) {
+	v.mu.Lock()
+	if v.native[v.current] {
+		v.actions[name] = true
+	}
+	v.mu.Unlock()
+}
 func (v *lifecycleEvidence) occurrence(o engine.Occurrence) {
 	n, e := strconv.Atoi(strings.TrimPrefix(o.Ref.String(), "file:"))
 	if e != nil {
@@ -186,6 +191,13 @@ func (v *lifecycleEvidence) position(p engine.Position) {
 	n, ok := v.entries[p.Occurrence]
 	if ok && n >= 0 && n < len(v.complete) && v.lengths[p.Occurrence] > 0 && p.Frames >= v.lengths[p.Occurrence] {
 		v.complete[n] = true
+		if v.native[p.Occurrence] {
+			if v.nativeDone == nil {
+				v.nativeDone = map[engine.OccurrenceID]bool{}
+			}
+			v.nativeDone[p.Occurrence] = true
+			v.actions["natural"] = true
+		}
 	}
 }
 func (v *lifecycleEvidence) details(id engine.OccurrenceID, d engine.Details) {
@@ -196,6 +208,8 @@ func (v *lifecycleEvidence) details(id engine.OccurrenceID, d engine.Details) {
 func (v *lifecycleEvidence) copy(report *nativeReport) bool {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	report.NativeTuple = v.tuple
+	report.NativeCompleted = len(v.nativeDone)
 	report.PassedEdges = slices.Clone(v.edges)
 	report.Completed = slices.Clone(v.complete)
 	report.Opened = slices.Clone(v.opened)
@@ -204,6 +218,9 @@ func (v *lifecycleEvidence) copy(report *nativeReport) bool {
 		report.LifecycleActions = append(report.LifecycleActions, a)
 	}
 	slices.Sort(report.LifecycleActions)
+	if report.NativeCompleted == 0 {
+		return false
+	}
 	for _, done := range v.complete {
 		if !done {
 			return false
@@ -255,19 +272,6 @@ func (v lifecycleEvents) NativePlan(s engine.SessionID, o engine.OccurrenceID, p
 	v.Events.(engine.NativePlanEvents).NativePlan(s, o, p)
 }
 func (v lifecycleEvents) CurrentOccurrence(s engine.SessionID, o engine.OccurrenceID, p *engine.NativePlan) {
-	v.evidence.mu.Lock()
-	key := v.evidence.lastPCM
-	if p != nil {
-		key = fmt.Sprintf("native/%s/%d/2/msb/%s/%s/%d/%d/30", p.Tuple.Format, p.Tuple.BitRate, p.PolicyID, p.Pause, p.Tail.Milliseconds(), p.Prefill.Milliseconds())
-	}
-	if v.evidence.lastEdge != "" {
-		edge := qualification.Edge{From: v.evidence.lastEdge, To: key}
-		if !slices.Contains(v.evidence.edges, edge) {
-			v.evidence.edges = append(v.evidence.edges, edge)
-		}
-	}
-	v.evidence.lastEdge = key
-	v.evidence.mu.Unlock()
 	v.Events.(engine.CurrentOccurrenceEvents).CurrentOccurrence(s, o, p)
 }
 func (v lifecycleEvents) Retiring(t engine.ReleaseToken, n engine.NativeEvent) {
@@ -306,4 +310,78 @@ func (f lifecycleFiles) Open(ctx context.Context, ref engine.Reference) (playbac
 		return playback.Content{}, e
 	}
 	return playback.Content{Data: file, Size: st.Size(), Closer: file}, nil
+}
+
+// note records format by occurrence only at installation, never from a close
+// of another sink or an output opened ahead of the occurrence being heard.
+func (v *lifecycleEvidence) note(n playback.Note) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if n.Kind == playback.NoteInstalled && n.Transport.LogicalRate == 0 {
+		if v.pcm == nil {
+			v.pcm = map[engine.OccurrenceID]string{}
+		}
+		v.pcm[n.Occurrence] = fmt.Sprintf("pcm/%s/%d/%d/%d/zero", n.Transport.Format, n.Transport.RateHz, n.Transport.Channels, n.Transport.ValidBits)
+	}
+	if n.Kind == playback.NoteInstalled {
+		p := n.Plan
+		key := v.pcm[n.Occurrence]
+		v.current = n.Occurrence
+		if v.native == nil {
+			v.native = map[engine.OccurrenceID]bool{}
+		}
+		v.native[n.Occurrence] = p != nil && (qualification.Tuple{Format: p.Tuple.Format, BitRate: p.Tuple.BitRate, Pause: p.Pause, TailMS: int(p.Tail.Milliseconds()), PrefillMS: int(p.Prefill.Milliseconds())}) == v.tuple
+		if p != nil {
+			key = fmt.Sprintf("native/%s/%d/2/msb/%s/%s/%d/%d/30", p.Tuple.Format, p.Tuple.BitRate, p.PolicyID, p.Pause, p.Tail.Milliseconds(), p.Prefill.Milliseconds())
+		}
+		if v.lastEdge != "" && key != "" {
+			edge := qualification.Edge{From: v.lastEdge, To: key}
+			if !slices.Contains(v.edges, edge) {
+				v.edges = append(v.edges, edge)
+			}
+		}
+		v.lastEdge = key
+
+	}
+	if n.Kind == playback.NoteOpened || n.Kind == playback.NoteReopened {
+		v.opened = append(v.opened, n.Params)
+	}
+	if n.Transport.LogicalRate == v.tuple.BitRate && string(n.Transport.Format) == v.tuple.Format {
+		if n.Kind == playback.NoteReleased {
+			v.actions["released"] = true
+		}
+		if n.Kind == playback.NoteReopened {
+			v.actions["reopened"] = true
+		}
+	}
+}
+
+type lifecycleAction struct {
+	name string
+	from engine.OccurrenceID
+}
+
+// settleAction counts observed native outcomes, never just an admitted command.
+func (v *lifecycleEvidence) settleAction(a *lifecycleAction, s *engine.Snapshot) bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if !v.native[a.from] {
+		return true
+	}
+	tr, heard := s.Track()
+	done := false
+	switch a.name {
+	case "stop":
+		done = s.State() == engine.Stopped
+	case "pause":
+		done = s.State() == engine.Paused && heard && tr.Occurrence == a.from
+	case "resume":
+		done = s.State() == engine.Playing && heard && tr.Occurrence == a.from
+	case "next", "previous":
+		done = s.State() == engine.Playing && heard && tr.Occurrence != a.from && v.native[tr.Occurrence]
+	}
+	if done {
+		v.actions[a.name] = true
+	}
+	return done
 }

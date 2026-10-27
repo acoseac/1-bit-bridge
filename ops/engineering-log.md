@@ -65368,3 +65368,19 @@ protocol-v1 DTOs. ExtractorVersion 28 carries validated DSF channels and structu
 through unchanged-file backfill, full/delta and a no-op second scan. No hardware qualification,
 DoP release claim or iOS I1–I3 claim. Procedures and trust decisions: ops/b470-native-qualification.md;
 long-form invariants: ops/History-b470-native.md, “Owner approval (2c.2b)”.
+
+
+## 2026-10-27 — B470 2c.2b approval review round 2
+
+Reproduced PCM edge gating, session-driven capability churn, malformed DFF admission,
+and PCM-only lifecycle evidence. Kept PCM independent of DSD approval; moved epoch
+publication to supervision; filtered and monitored constraints per tuple. Paused and
+gapless native boundaries recheck permission and edges. DFF validation covers the
+complete form while seeking over audio; extractor version 29 preserves valid format
+facts beside unsupported compression evidence. Sink-correlated live facts cannot
+invent a reopen or apply an older close to a successor. Native lifecycle completion
+and observed actions bind the exact tuple; installed-occurrence transport supplies
+edge keys. Real policy reader fixtures exercise surface negatives and lowercase codecs.
+The full-suite review's stale configuration tests now use an invalid mode; constructor
+census includes the CLI candidate lifecycle engine. qualificationVersion is 9.
+Matching rules and History-b470-native.md carry the durable invariants. No hardware.

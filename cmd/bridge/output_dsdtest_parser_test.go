@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"flag"
+	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
+	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 	"github.com/acoseac/1-bit-bridge/internal/player/qualification"
 	"go/ast"
 	"go/parser"
@@ -110,7 +112,7 @@ func TestCandidateConstructorIsCLIOnly(t *testing.T) {
 }
 
 func TestLifecycleEvidenceRequiresMeasuredCompletion(t *testing.T) {
-	v := &lifecycleEvidence{entries: map[engine.OccurrenceID]int{1: 0}, lengths: map[engine.OccurrenceID]int64{1: 100}, complete: []bool{false}, actions: map[string]bool{}}
+	v := &lifecycleEvidence{current: 1, native: map[engine.OccurrenceID]bool{1: true}, entries: map[engine.OccurrenceID]int{1: 0}, lengths: map[engine.OccurrenceID]int64{1: 100}, complete: []bool{false}, actions: map[string]bool{}}
 	var report nativeReport
 	for _, action := range []string{"natural", "next", "previous", "pause", "resume", "released", "reopened", "stop"} {
 		v.action(action)
@@ -138,5 +140,65 @@ func TestLifecycleResolverRechecksOpenedHash(t *testing.T) {
 	ref, _ := engine.NewReference("file:1")
 	if _, e := f.Open(context.Background(), ref); e == nil || !strings.Contains(e.Error(), "hash mismatch") {
 		t.Fatalf("opened descriptor was not hashed: %v", e)
+	}
+}
+
+func TestLifecycleRejectsPCMOnlyExecution(t *testing.T) {
+	v := &lifecycleEvidence{entries: map[engine.OccurrenceID]int{1: 0}, lengths: map[engine.OccurrenceID]int64{1: 100}, complete: []bool{false}, actions: map[string]bool{}}
+	for _, a := range []string{"natural", "next", "previous", "pause", "resume", "released", "reopened", "stop"} {
+		v.action(a)
+	}
+	v.position(engine.Position{Occurrence: 1, Frames: 100})
+	if v.copy(&nativeReport{}) {
+		t.Fatal("PCM-only execution qualified native lifecycle")
+	}
+}
+
+type lifecycleCurrentEvents struct{ engine.Events }
+
+func (lifecycleCurrentEvents) CurrentOccurrence(engine.SessionID, engine.OccurrenceID, *engine.NativePlan) {
+}
+func TestLifecycleEdgesUseInstalledOccurrence(t *testing.T) {
+	v := &lifecycleEvidence{actions: map[string]bool{}}
+	events := lifecycleEvents{Events: lifecycleCurrentEvents{}, evidence: v}
+	v.note(playback.Note{Kind: playback.NoteInstalled, Occurrence: 1, Transport: alsapcm.Transport{Format: "S16_LE", RateHz: 44100, Channels: 2, ValidBits: 16}})
+	// A future sink's open and an old native sink's close cannot rename PCM 1.
+	v.note(playback.Note{Kind: playback.NoteOpened, Occurrence: 2, Transport: alsapcm.Transport{Format: "S32_LE", RateHz: 96000, Channels: 2, ValidBits: 24}})
+	v.note(playback.Note{Kind: playback.NoteClosed, Occurrence: 3, Transport: alsapcm.Transport{Format: "DSD_U32_BE", RateHz: 88200, LogicalRate: 2822400, Channels: 2, ValidBits: 1}})
+	events.CurrentOccurrence(1, 1, nil)
+	if v.lastEdge != "pcm/S16_LE/44100/2/16/zero" {
+		t.Fatal("edge inherited another sink's transport", v.lastEdge)
+	}
+	v.note(playback.Note{Kind: playback.NoteInstalled, Occurrence: 4, Transport: alsapcm.Transport{Format: "S16_LE", RateHz: 44100, Channels: 2, ValidBits: 16}})
+	events.CurrentOccurrence(1, 4, nil)
+	if len(v.edges) != 1 || v.edges[0].To != v.edges[0].From {
+		t.Fatal("gapless PCM edge missing", v.edges)
+	}
+}
+
+func TestLifecycleRejectsLegacyPCMReport(t *testing.T) {
+	v := &lifecycleEvidence{complete: []bool{true}, actions: map[string]bool{}}
+	for _, a := range []string{"natural", "next", "previous", "pause", "resume", "released", "reopened", "stop"} {
+		v.actions[a] = true
+	}
+	if v.copy(&nativeReport{}) {
+		t.Fatal("legacy PCM completion/actions became native evidence")
+	}
+}
+func TestLifecyclePCMActionDoesNotCount(t *testing.T) {
+	v := &lifecycleEvidence{actions: map[string]bool{}}
+	v.action("pause")
+	if v.actions["pause"] {
+		t.Fatal("PCM pause counted as native")
+	}
+}
+
+func TestLifecycleSettledActionsNeedNativeExecution(t *testing.T) {
+	for _, native := range []bool{false, true} {
+		v := &lifecycleEvidence{native: map[engine.OccurrenceID]bool{1: native}, actions: map[string]bool{}}
+		v.settleAction(&lifecycleAction{name: "stop", from: 1}, &engine.Snapshot{})
+		if v.actions["stop"] != native {
+			t.Fatal("settled PCM Stop counted as native, or native Stop lost")
+		}
 	}
 }

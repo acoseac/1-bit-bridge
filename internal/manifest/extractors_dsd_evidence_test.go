@@ -176,3 +176,14 @@ func conflictingDFFEvidence(t *testing.T) []byte {
 	copy(b[at+12:], "DST ")
 	return b
 }
+
+func TestMalformedDFFKeepsKnownFormat(t *testing.T) {
+	path := writeTempDFF(t, dffWithPropAndChunks(t, 2822400, []byte{1, 2}))
+	tr := &Track{}
+	if e := extractDFFWithContext(path, tr, nil); e != nil {
+		t.Fatal(e)
+	}
+	if tr.DFFCompressionEvidence != "unsupported" || tr.Codec != "DFF" || tr.IsDSD == nil || !*tr.IsDSD || tr.SampleRate == nil || *tr.SampleRate != 2822400 || tr.BitsPerSample == nil || *tr.BitsPerSample != 1 {
+		t.Fatalf("known DFF format lost: %+v", tr)
+	}
+}

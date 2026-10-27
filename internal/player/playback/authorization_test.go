@@ -110,17 +110,17 @@ func TestPlaybackObservationStates(t *testing.T) {
 	if f.State != "open" || f.Occurrence != 3 || f.RateHz != 88200 || f.LogicalRate != 2822400 || f.BootID != "boot" || f.PolicyGeneration != 8 {
 		t.Fatalf("live facts=%+v", f)
 	}
-	b.notify(Note{Session: 1, Kind: NoteReleased})
+	b.notify(Note{Session: 1, output: out, Kind: NoteReleased})
 	_, f = b.Facts()
 	if f.State != "released" {
 		t.Fatal("released observed open")
 	}
 	s.observeOccurrence(o, out)
 	b.Revoke(engine.RevokeInput{Session: 1})
-	b.notify(Note{Session: 1, Kind: NoteClosed})
+	b.notify(Note{Session: 1, output: out, Kind: NoteClosed})
 	p, f := b.Facts()
-	if f.State != "revoked" || len(p.Tuples) != 0 {
-		t.Fatal("revocation lost")
+	if f.State != "released" || len(p.Tuples) != 0 {
+		t.Fatal("revocation invented an active native sink")
 	}
 }
 
@@ -162,7 +162,7 @@ func TestApprovedTupleSelection(t *testing.T) {
 }
 
 func TestApprovedConstructorContentGate(t *testing.T) {
-	for _, mode := range []string{"dff_dst", "dff_missing", "dff_duplicate", "dff_short", "dsf_mono", "dsf_invalid_fmt"} {
+	for _, mode := range []string{"dff_dst", "dff_missing", "dff_duplicate", "dff_short", "dff_trailing", "dff_late_prop", "dff_outside_form", "dsf_mono", "dsf_invalid_fmt"} {
 		t.Run(mode, func(t *testing.T) {
 			cfg, _ := approvedBackendFixture(t)
 			name := "dsd64.dff"
@@ -191,6 +191,19 @@ func TestApprovedConstructorContentGate(t *testing.T) {
 				data = append(append(append([]byte(nil), data[:end]...), extra...), data[end:]...)
 				binary.BigEndian.PutUint64(data[at+4:at+12], uint64(size+len(extra)))
 				binary.BigEndian.PutUint64(data[4:12], uint64(len(data)-12))
+			case "dff_trailing", "dff_late_prop", "dff_outside_form":
+				at := bytes.Index(data, []byte("PROP"))
+				size := int(binary.BigEndian.Uint64(data[at+4 : at+12]))
+				if mode == "dff_trailing" {
+					end := at + 12 + size
+					data = append(append(append([]byte(nil), data[:end]...), 1, 2), data[end:]...)
+					binary.BigEndian.PutUint64(data[at+4:at+12], uint64(size+2))
+				} else {
+					data = append(data, append([]byte(nil), data[at:at+12+size]...)...)
+				}
+				if mode != "dff_outside_form" {
+					binary.BigEndian.PutUint64(data[4:12], uint64(len(data)-12))
+				}
 			case "dsf_mono":
 				binary.LittleEndian.PutUint32(data[48:52], 1)
 				binary.LittleEndian.PutUint32(data[52:56], 1)
@@ -218,5 +231,141 @@ func TestApprovedConstructorContentGate(t *testing.T) {
 				t.Fatal(e)
 			}
 		})
+	}
+}
+
+func TestApprovalNeverGatesPCMEdges(t *testing.T) {
+	b := &Backend{}
+	pcm := transportFor(44100, 16, format.ALSAFormat("S16_LE"))
+	b.rememberEdge(pcm, nil, nil)
+	if err := b.checkEdge(pcm, nil, &permission{}); err != nil {
+		t.Fatal("PCM gapless gated by approval:", err)
+	}
+	plan := &engine.NativePlan{Tuple: engine.NativeTuple{Format: "DSD_U32_BE", BitRate: 2822400}}
+	b.rememberEdge(nativeTransport(*plan), plan, &permission{})
+	if err := b.checkEdge(pcm, nil, nil); err != nil {
+		t.Fatal("PCM after DSD gated by approval:", err)
+	}
+}
+
+func TestSessionDoesNotPublishAuthorization(t *testing.T) {
+	cfg, _ := approvedBackendFixture(t)
+	cfg.Resolver = edgeContent(nil)
+	b, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.RefreshAuthorization(context.Background())
+	before := b.Policy()
+	ref, _ := engine.NewReference("empty")
+	_ = b.Start(context.Background(), engine.StartRequest{Session: 1, First: engine.Occurrence{ID: 1, Ref: ref}})
+	after := b.Policy()
+	if after.Generation != before.Generation || after.Revision != before.Revision {
+		t.Fatalf("session changed epoch: %+v -> %+v", before, after)
+	}
+	_ = b.Release(context.Background(), 1)
+}
+
+func TestRevokeDoesNotPublishSessionState(t *testing.T) {
+	b := &Backend{sessions: map[engine.SessionID]*session{}, policy: PlayerPolicy{Generation: 9, Tuples: []engine.NativePlan{{PolicyID: "valid"}}}}
+	s := newSession(b, 1)
+	defer s.cancel()
+	b.sessions[1] = s
+	b.Revoke(engine.RevokeInput{Session: 1})
+	if p := b.Policy(); p.Generation != 9 || len(p.Tuples) != 1 {
+		t.Fatalf("session revoke clobbered capability: %+v", p)
+	}
+}
+
+type observationSink struct {
+	streamSink
+	state alsapcm.SinkState
+}
+
+func (s observationSink) Position() alsapcm.Position { return alsapcm.Position{State: s.state} }
+func TestBufferedOccurrenceKeepsReleasedState(t *testing.T) {
+	b := &Backend{}
+	s := newSession(b, 1)
+	defer s.cancel()
+	out := &output{sink: observationSink{state: alsapcm.SinkReleased}}
+	s.observeOccurrence(&occ{id: 2}, out)
+	_, f := b.Facts()
+	if f.State != "released" {
+		t.Fatal("buffered successor invented open hardware", f.State)
+	}
+}
+
+func TestOldSinkCloseKeepsNewObservation(t *testing.T) {
+	b := &Backend{}
+	s := newSession(b, 1)
+	defer s.cancel()
+	old := &output{}
+	current := &output{}
+	s.observeOccurrence(&occ{id: 1}, old)
+	s.observeOccurrence(&occ{id: 2}, current)
+	b.notify(Note{Session: 1, output: old, Kind: NoteClosed})
+	_, f := b.Facts()
+	if f.State != "open" || f.Occurrence != 2 {
+		t.Fatal("old close overwrote current occurrence", f)
+	}
+	b.notify(Note{Session: 1, output: current, Kind: NoteReleased})
+	_, f = b.Facts()
+	if f.State != "released" {
+		t.Fatal("current release ignored", f)
+	}
+}
+
+func TestGaplessNativeRechecksPermission(t *testing.T) {
+	cfg, _ := approvedBackendFixture(t)
+	b := &Backend{cfg: cfg, sessions: map[engine.SessionID]*session{}}
+	permission, e := b.readPermission(context.Background())
+	if e != nil {
+		t.Fatal(e)
+	}
+	plan, e := permission.selectNative(format.NativeDSD{BitRateHz: 2822400, Channels: 2})
+	if e != nil {
+		t.Fatal(e)
+	}
+	tr := nativeTransport(plan)
+	s := newSession(b, 1)
+	b.sessions[1] = s
+	defer s.cancel()
+	s.cur = &output{transport: tr, policyID: plan.PolicyID}
+	done := make(chan struct{})
+	close(done)
+	o := &occ{id: 2, plan: &plan, permission: permission, transport: tr, done: done}
+	s.chain = []*occ{o}
+	b.rememberEdge(tr, &plan, permission)
+	if e = os.Remove(cfg.Authorization.path()); e != nil {
+		t.Fatal(e)
+	}
+	st := s.next()
+	if st.kind == stepWrite || !o.dropped || o.refused == nil || !s.nativeRevoked {
+		t.Fatal("gapless native successor bypassed current authorization")
+	}
+}
+
+func (s observationSink) Params() alsapcm.Params { return alsapcm.Params{} }
+
+type installationEvents struct {
+	engine.Events
+	count int
+}
+
+func (e *installationEvents) CurrentOccurrence(engine.SessionID, engine.OccurrenceID, *engine.NativePlan) {
+	e.count++
+}
+func TestBufferedInstallationPreservesEngineBoundary(t *testing.T) {
+	seen := 0
+	b := &Backend{cfg: Config{Installed: func(Note) { seen++ }}}
+	s := newSession(b, 1)
+	defer s.cancel()
+	events := &installationEvents{}
+	s.ev = events
+	out := &output{sink: observationSink{state: alsapcm.SinkReleased}}
+	s.installed(&occ{id: 1}, out, true)
+	s.installed(&occ{id: 2}, out, false)
+	if seen != 2 || events.count != 1 {
+		t.Fatalf("buffering invented a physical output transition: observed=%d engine=%d", seen, events.count)
 	}
 }

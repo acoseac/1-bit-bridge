@@ -606,7 +606,7 @@ var Ext = map[string]bool{
 // the formats a file can hold either kind in, where a bump re-opens every
 // file once. A later change to what the kind reads is a bump like any other:
 // the stamp leg records the kind a re-read finds (writeSampleFormatTx).
-const ExtractorVersion = 28
+const ExtractorVersion = 29
 
 // Extract reads as much metadata as it can from the file at absPath and
 // fills in the Track at t. Path, Size, ModTime on t MUST already be set by
@@ -3314,14 +3314,13 @@ func PlausibleDuration(d float64) bool { return plausibleDuration(d) }
 func applyDFFStamps(t *Track, absPath string, prop dffPropInfo,
 	sound dffSoundInfo) {
 	t.DFFCompressionEvidence = "missing"
-	if prop.malformed {
-		t.DFFCompressionEvidence = "unsupported"
-		return
-	}
 	switch prop.compression {
 	case dffCompressionUncompressed:
 		t.DFFCompressionEvidence = "raw"
 	case dffCompressionDST, dffCompressionUnknown:
+		t.DFFCompressionEvidence = "unsupported"
+	}
+	if prop.malformed {
 		t.DFFCompressionEvidence = "unsupported"
 	}
 	if !prop.haveFS || prop.fsRate == 0 {

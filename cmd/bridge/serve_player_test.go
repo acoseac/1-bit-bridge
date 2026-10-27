@@ -668,7 +668,7 @@ func TestServeStartsThePlayerOnlyWhenEveryGateHolds(t *testing.T) {
 		{name: "no DAC bound", player: "    enabled: true\n", off: "bridge output dac bind"},
 		{name: "a pause release of 601 s", player: release(601), off: "pauseReleaseSeconds"},
 		{name: "a pause release of an hour", player: release(3600), off: "pauseReleaseSeconds"},
-		{name: "a block that cannot run", player: goBarPlayer + "    dsdMode: native\n", off: "dsdMode"},
+		{name: "a block that cannot run", player: goBarPlayer + "    dsdMode: invalid\n", off: "dsdMode"},
 		{name: "off Linux", player: goBarPlayer, goos: "darwin", off: "Linux only"},
 		{name: "an OpenHome port serve binds already", player: goBarPlayer + "    openhome: true\n    openhomePort: 7790\n", off: "openhomePort"},
 		{name: "the default pause release", player: goBarPlayer, start: true, release: 30 * time.Second},
@@ -1551,7 +1551,7 @@ func TestServeRestoresThePlayersQueueStopped(t *testing.T) {
 // alone, and runServe starts its player once.
 func TestOnlyServeAndTheHarnessBuildThePlayer(t *testing.T) {
 	allowed := map[string]map[string]bool{
-		"engine.New":   {"serve_player.go": true, "output_play.go": true},
+		"engine.New":   {"serve_player.go": true, "output_play.go": true, "output_dsdtest_backend.go": true},
 		"playback.New": {"serve_player.go": true, "output_play.go": true},
 		"library.New":  {"serve_player.go": true},
 	}
