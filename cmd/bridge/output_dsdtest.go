@@ -59,6 +59,7 @@ type outputDSDTestEnv struct {
 	at         func(time.Time) (<-chan time.Time, func())
 	stdin      io.Reader
 	tty        bool
+	makeRaw    func() (restore func() error, err error)
 	goos       string
 	resolve    func(context.Context, string) (nativeEndpoint, func(alsapcm.NodeInfo) error, error)
 }
@@ -83,15 +84,14 @@ func outputDSDTestCmd(ctx context.Context, args []string, out, errout io.Writer)
 		fmt.Fprintln(errout, err)
 		return 1
 	}
-	if term.IsTerminal(fd) {
+	env := outputDSDTestEnv{goos: runtime.GOOS, open: productionNativeOpen, controls: (alsactl.Reader{}).Read, now: time.Now, stdin: os.Stdin, tty: term.IsTerminal(fd), resolve: resolveNativeTest, openPCM: productionNativePCMOpen}
+	env.makeRaw = func() (func() error, error) {
 		state, e := term.MakeRaw(fd)
 		if e != nil {
-			fmt.Fprintln(errout, e)
-			return 1
+			return nil, e
 		}
-		defer term.Restore(fd, state)
+		return func() error { return term.Restore(fd, state) }, nil
 	}
-	env := outputDSDTestEnv{goos: runtime.GOOS, open: productionNativeOpen, controls: (alsactl.Reader{}).Read, now: time.Now, stdin: os.Stdin, tty: term.IsTerminal(fd), resolve: resolveNativeTest, openPCM: productionNativePCMOpen}
 	env.at = func(at time.Time) (<-chan time.Time, func()) {
 		t := time.NewTimer(time.Until(at))
 		return t.C, func() { t.Stop() }
@@ -369,7 +369,18 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 	}
 	out = &nativeConsoleOutput{out: out, raw: env.tty}
 	reader := env.stdin
-	e = executeNativeTest(runCtx, cancelRun, o, env, ep, admit, m, byID, reader, out, &report)
+	// Raw mode belongs only to the console: validation keeps ISIG/OPOST,
+	// and executeNativeTest joins its reader before restoration and diagnostics.
+	e = func() (runErr error) {
+		if env.tty && env.makeRaw != nil {
+			restore, err := env.makeRaw()
+			if err != nil {
+				return err
+			}
+			defer func() { runErr = errors.Join(runErr, restore()) }()
+		}
+		return executeNativeTest(runCtx, cancelRun, o, env, ep, admit, m, byID, reader, out, &report)
+	}()
 	after := report.After
 	observationsMu.Lock()
 	report.ControlObservations = append([]alsactl.Snapshot(nil), observations...)

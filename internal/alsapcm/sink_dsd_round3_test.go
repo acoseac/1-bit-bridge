@@ -101,25 +101,18 @@ func TestNativeReleaseInjectedClock(t *testing.T) {
 	a.armed.Store(true)
 	answer := make(chan error, 1)
 	go func() { answer <- s.Release(context.Background(), TrackChange) }()
-	await(t, a.parked, "cleanup")
-	select {
-	case at := <-armed:
-		if !at.Equal(start.Add(2 * time.Second)) {
-			t.Errorf("deadline=%v want %v", at, start.Add(2*time.Second))
-		}
-	case <-time.After(100 * time.Millisecond):
-		t.Error("injected timer was not armed")
+	<-a.parked
+	// These are event barriers, not performance bounds. Only injected time
+	// expires the release; the test binary's timeout catches a missing event.
+	at := <-armed
+	if !at.Equal(start.Add(2 * time.Second)) {
+		t.Errorf("deadline=%v want %v", at, start.Add(2*time.Second))
 	}
 	s.BeginRelease(Immediate)
 	k.advanceNow(2 * time.Second)
 	ticks <- k.now()
-	select {
-	case e = <-answer:
-		if !errors.Is(e, ErrReleaseUnconfirmed) {
-			t.Error(e)
-		}
-	case <-time.After(100 * time.Millisecond):
-		t.Error("advancing injected clock did not expire parked cleanup")
+	if e = <-answer; !errors.Is(e, ErrReleaseUnconfirmed) {
+		t.Error(e)
 	}
 }
 
@@ -324,16 +317,11 @@ func TestNativeClosedFaultActivation(t *testing.T) {
 	}
 	k.inspect(func(k *fakeKernel) { k.writes = []fakeWrite{{err: errnoEPIPE}} })
 	_, _ = s.WriteDSD(context.Background(), 1, []byte{1, 2, 3, 4}, []byte{1, 2, 3, 4}, 0, 32)
-	await(t, s.Done(), "fault cleanup completed")
-	answer := make(chan error, 1)
-	go func() { answer <- s.Activate(context.Background(), 2) }()
-	select {
-	case e := <-answer:
-		if e == nil {
-			t.Fatal("closed terminal sink activated")
-		}
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("activation blocked on an exited writer")
+	<-s.Done()
+	// Done is the writer-exit barrier. A regression that waits for that
+	// exited writer is a deadlock, detected by the test binary's timeout.
+	if e := s.Activate(context.Background(), 2); e == nil {
+		t.Fatal("closed terminal sink activated")
 	}
 }
 func TestNativeReleaseErrorsUnconfirmed(t *testing.T) {

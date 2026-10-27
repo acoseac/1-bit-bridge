@@ -165,3 +165,25 @@ case on a multi-item list likewise needs an early-completing mock; real Finish w
 for all fed content. The exact first-boundary playback case is reachable, and both
 branches now share the rule. A1's already-expired teardown case must still exit
 unconfirmed; the corrected reachable case is cancellation before expiry (C2).
+
+## Round 6 — 2026-10-27, PR #1355 CodeRabbit follow-up
+
+Qualification version 5. Raw mode moves from command entry into the console's
+execution scope, after option/evidence validation and report-file creation.
+The instance makeRaw hook returns restoration of the exact captured terminal
+state. It runs only for tty input; a deferred restore follows the console's
+reader join and precedes diagnostics and report serialization, also on errors
+and panic unwinds. A restore failure is joined with the run error and prevents
+successful qualification. Tests inject terminal state, never touch the host's.
+
+The native release tests use the injected clock and channel handoffs; closed
+fault activation waits for the writer's Done before calling Activate. No 100 ms
+or three-second wall-time assertion remains in these cases. The test binary's
+-timeout is the deadlock watchdog, not a release-latency assertion. No wider
+sleep or scheduler-performance bound replaces them.
+
+Queued-entry assertions parse complete timestamped lines and compare each full
+path with filepath.Clean, preserving OS separator rules, exact count and queue
+order. Every queued line and the availability report remain after the warning
+and before Start, independently of one another. Equivalent ./ paths pass;
+a suffix appended to a path, reordered paths and misplaced entries fail.

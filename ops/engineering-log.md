@@ -65263,3 +65263,23 @@ Round-5 evidence lives in the review workspace's `r5/`: red/green checkout
 simulation and ordering overlay, plus controls changing one accepted PCM byte
 and the availability report's wording. The kernel-header fetch's HTTP 429 is
 an infrastructure failure; no ABI or fetch code is changed for it.
+
+## 2026-10-27 — B470 2c.1 PR #1355, round 6
+
+CodeRabbit 4384755812 holds: command-entry raw mode disabled ISIG during evidence
+validation and OPOST for unwrapped diagnostics. An instance hook exposed that
+lifetime for a red-first test; moving it around console execution keeps validation
+cooked, joins the reader before exact restoration, and restores before error
+output. Non-terminals never call the hook; restoration failures fail the report.
+QualificationVersion is 5. TestNativeTerminalLifetime pins terminal/non-terminal,
+validation, input/open/raw/restore failures, completion, Stop/quit and cancellation.
+
+4384755816 and 4384755829 hold as test flakes: remove 100 ms handoff windows and
+the companion real three-second bound; injected time plus parked cleanup and
+writer Done establish the events. Binary timeout alone detects a deadlock, with
+no per-event upper performance bound. No production sink change was needed.
+4385352672 holds: full queued-path fields now compare with filepath.Clean;
+queue count/order and both warning-to-start constraints from round 5 remain.
+An equivalent ./ spelling reproduced the old false failure; path suffix/order/
+placement mutations pin the stronger assertions. Evidence and controls: r6/
+in the task scratch directory; no Git writes, hardware or production DSD enable.

@@ -143,26 +143,20 @@ func TestNativeReleaseDeadline(t *testing.T) {
 		t.Fatal(e)
 	}
 	a.armed.Store(true)
-	defer close(a.release)
+	defer func() { close(a.release); <-s.Done() }()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_ = s.Release(ctx, TrackChange)
-	await(t, a.parked, "close parked")
+	<-a.parked
 	s.mu.Lock()
 	deadline := s.releaseDeadline
 	s.mu.Unlock()
 	k.advanceNow(2 * time.Second)
-	start := time.Now()
-	answer := make(chan error, 1)
-	go func() { answer <- s.Release(context.Background(), Immediate) }()
-	select {
-	case e = <-answer:
-	case <-time.After(100 * time.Millisecond):
-		t.Error("release did not expire after advancing two seconds")
-		return
-	}
-	if !errors.Is(e, ErrReleaseUnconfirmed) || time.Since(start) > 3*time.Second {
-		t.Fatalf("unbounded release %v", e)
+	// The fake clock expires the release while close stays parked. The test
+	// binary's timeout detects a deadlock; scheduler speed is not an assertion.
+	e = s.Release(context.Background(), Immediate)
+	if !errors.Is(e, ErrReleaseUnconfirmed) {
+		t.Fatalf("release did not expire: %v", e)
 	}
 	s.mu.Lock()
 	same := s.releaseDeadline.Equal(deadline)

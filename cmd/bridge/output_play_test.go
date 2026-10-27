@@ -395,9 +395,6 @@ func TestOutputPlayPlaysTheQueueOnceAndSaysSo(t *testing.T) {
 	}
 	order := []string{
 		"use headphones, with the DAC's or the amplifier's own volume set low",
-		": " + c.files[0],
-		": " + c.files[1],
-		": " + c.files[2],
 		"session 1: start with occurrence 1 (entry ",
 		"opened card 5 device 0 subdevice 0 (the stand-in DAC)",
 		"status: /proc/asound/card5/pcm0p/sub0/status",
@@ -419,6 +416,26 @@ func TestOutputPlayPlaysTheQueueOnceAndSaysSo(t *testing.T) {
 	// nothing orders the report against any of the queue insertions.
 	warningEnd := strings.Index(out, order[0]) + len(order[0])
 	start := strings.Index(out, "session 1: start with occurrence 1 (entry ")
+	// Parse whole queued lines, retaining their order and their position
+	// between the warning and Start, independently of the availability report.
+	queued := 0
+	for _, line := range strings.Split(out, "\n") {
+		_, message, ok := strings.Cut(line, " ") // timestamp prefix
+		if !ok || !strings.HasPrefix(message, "queued entry ") {
+			continue
+		}
+		_, path, ok := strings.Cut(strings.TrimPrefix(message, "queued entry "), ": ")
+		if !ok || queued >= len(c.files) || filepath.Clean(path) != filepath.Clean(c.files[queued]) {
+			t.Fatalf("unexpected queued path at entry %d: %q", queued, message)
+		}
+		if !strings.Contains(out[warningEnd:start], line+"\n") {
+			t.Fatalf("queued entry outside warning/start boundaries: %q", line)
+		}
+		queued++
+	}
+	if queued != len(c.files) {
+		t.Fatalf("queued %d files, want %d:\n%s", queued, len(c.files), out)
+	}
 	if !strings.Contains(out[warningEnd:start], "output report 1: available") {
 		t.Errorf("the output does not report availability after the warning and before playback:\n%s", out)
 	}
