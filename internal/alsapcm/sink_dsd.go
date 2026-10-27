@@ -37,6 +37,8 @@ type DSDConfig struct {
 	Tail, Prefill, BufferTime time.Duration
 	RingBytes, LedgerLimit    int
 	Check                     func(NodeInfo) error
+	// Locate resolves the binding afresh before a released pause reopens.
+	Locate func(context.Context) (Endpoint, error)
 }
 
 // DSDPosition counts logical bits per channel, excluding all silence/padding.
@@ -75,6 +77,7 @@ type DSDSink struct {
 	word              int
 	carry             [2][4]byte
 	carryBits         int
+	inflight          int64
 	submitted, played int64
 	ledger            [nativeLedgerMax]nativeOccurrence
 	ledgerN           int
@@ -529,4 +532,81 @@ func (s *DSDSink) Done() <-chan struct{} { return s.done }
 func (s *DSDSink) Transport() Transport {
 	p := s.Params()
 	return Transport{Kind: format.KindNativeDSD, RateHz: p.RateHz, Channels: 2, Format: s.cfg.Format, ValidBits: 1, LogicalRate: s.cfg.BitRate, PackingVersion: 1}
+}
+
+// Changed closes on the next measured position or lifecycle change.
+func (s *DSDSink) Changed() <-chan struct{} { s.mu.Lock(); defer s.mu.Unlock(); return s.changed }
+
+// Result distinguishes successful cleanup from a failed cleanup after Done.
+func (s *DSDSink) Result() error { return s.result() }
+
+// Cut removes only wholly software-owned content, never a committed mixed word.
+func (s *DSDSink) Cut(at int64) (bool, error) {
+	s.producer.Lock()
+	defer s.producer.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if at < 0 || at > s.submitted || s.releasing {
+		return false, errors.New("invalid native cut")
+	}
+	if at < max(s.ring.wr, s.inflight)*int64(s.word) {
+		return false, nil
+	}
+	frame := at / int64(s.word)
+	bits := int(at % int64(s.word))
+	if bits > 0 && frame < s.ring.sub {
+		b := s.ring.span(frame, 1)
+		w := s.word / 8
+		for ch := range 2 {
+			for i := range w {
+				j := i
+				if s.cfg.Format != format.DSDU32BE {
+					j = w - 1 - i
+				}
+				s.carry[ch][i] = b[ch*w+j]
+			}
+		}
+	}
+	for ch := range 2 {
+		for i := bits; i < s.word; i++ {
+			s.carry[ch][i/8] &^= 1 << uint(7-i%8)
+		}
+	}
+	s.carryBits = bits
+	s.ring.sub = frame
+	s.submitted = at
+	n := 0
+	for n < s.ledgerN && s.ledger[n].end <= at {
+		n++
+	}
+	s.ledgerN = n
+	s.notify()
+	return true, nil
+}
+
+// ActivatePaused grants initial activation to a sink installed while paused.
+// Resume alone deliberately cannot activate an inert sink.
+func (s *DSDSink) ActivatePaused(ctx context.Context) error {
+	s.mu.Lock()
+	if s.generation != 0 {
+		s.mu.Unlock()
+		return s.Resume(ctx)
+	}
+	if !s.paused || s.releasing || s.revoked || s.err != nil || s.activation != nil {
+		s.mu.Unlock()
+		return errors.New("native initial paused activation fenced")
+	}
+	r := &nativeRequest{gen: 1, resume: true, pauseEpoch: s.pauseEpoch, reply: make(chan error, 1)}
+	s.activation = r
+	s.interrupt()
+	s.mu.Unlock()
+	select {
+	case e := <-r.reply:
+		return e
+	case <-ctx.Done():
+		s.Revoke()
+		return ctx.Err()
+	case <-s.done:
+		return <-r.reply
+	}
 }

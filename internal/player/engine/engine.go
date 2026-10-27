@@ -44,6 +44,8 @@ const (
 // parameter here: 4b2 wires them from the bridge's configuration, and the
 // engine reads no configuration of its own.
 type Config struct {
+	// OccurrenceLimit bounds outstanding shared hand-offs; zero selects 1024.
+	OccurrenceLimit int
 	// PlayerUUID is the identity this engine runs. Required, in canonical
 	// lowercase UUID form; serve passes the player-uuid it holds under lock.
 	PlayerUUID string
@@ -152,13 +154,14 @@ type seams struct {
 // an immutable Snapshot after each change. Commands are its methods; reads
 // are the snapshot's and never wait on the owner.
 type Engine struct {
-	cfg  Config
-	log  *slog.Logger
-	clk  clock
-	be   Backend
-	sm   seams
-	run  uint64
-	evts *events
+	occurrenceBudget *OccurrenceBudget
+	cfg              Config
+	log              *slog.Logger
+	clk              clock
+	be               Backend
+	sm               seams
+	run              uint64
+	evts             *events
 
 	cmds chan *command
 	msgs chan any
@@ -304,6 +307,13 @@ func New(cfg Config) (*Engine, error) {
 		msgs:    make(chan any, 256),
 		done:    make(chan struct{}),
 		changed: make(chan struct{}),
+	}
+	if b, ok := cfg.Backend.(ReservationBackend); ok && b.OwnsOccurrenceReservations() {
+		limit := cfg.OccurrenceLimit
+		if limit <= 0 {
+			limit = 1024
+		}
+		e.occurrenceBudget = NewOccurrenceBudget(limit)
 	}
 	e.evts = &events{e: e}
 	e.life, e.lifeCancel = context.WithCancel(context.Background())

@@ -65283,3 +65283,45 @@ queue count/order and both warning-to-start constraints from round 5 remain.
 An equivalent ./ spelling reproduced the old false failure; path suffix/order/
 placement mutations pin the stronger assertions. Evidence and controls: r6/
 in the task scratch directory; no Git writes, hardware or production DSD enable.
+
+## 2026-10-27 — B470 2c.2a native engine/backend hand-off (uncommitted review)
+
+Base HEAD: 8e3ab37e69e0f5c09e139708a31f2e789d2328ac. Production native
+admission still refuses; the accepting seam is test/overlay only. The change
+connects native accepted-bit startup, logical-bit reporting, per-occurrence
+plans, typed release/escalation, retiring events, shared occurrence reservations,
+fresh resume binding, and fixed native pause accounting. Qualification is 6;
+version-5 owner reports are not attributable. No hardware, commit or push.
+
+The task's `b-2c2a/red-first.log` records the pinned baseline and assertion reds
+for deadline selection, escalation preserving faults, relocation, guarded paths,
+tiny content, navigation/retiring progress, reservation ownership, and explicit
+initial activation after pause. Build failures and a no-tests-selected run are
+not red evidence. Later cross-layer cases are regression pins, not historical
+red-first claims. `controls.json` retains all 138 inherited controls and adds
+named R7/R3E mutations; `controls-results.json` records exact leaf comparisons.
+A full-cache/disk failure interrupted an initial control run; failed builds were
+not accepted as reds, the shared generated Go cache was cleared, and controls
+were rerun. Round 2's evidence files were not modified. The inherited release
+budget test now has a watchdog around its parked call so a bad budget reports
+its exact test failure instead of timing out the whole binary.
+
+Evidence lives in the requested scratch report, logs and command manifests.
+The report lists incomplete coverage explicitly, including the requested full
+pre-edit PCM event pins. Two requested PCM pins conflict with the base:
+OpenHome `playlistSeekSecond` already returns 803 unconditionally, and engine
+`current` already excludes releasing sessions. Preserve these baseline behaviors;
+do not implement PCM time-seek as an incidental native integration change.
+Linux amd64/arm64 native ABI and race execution, hardware qualification and the
+post-commit real-ref version check remain reviewer work. Revocation producers,
+PCM-only epoch publication and stored approval policy remain 2c.2b work.
+
+Further barrier checks found and fixed two integration races: a transport change
+while paused retained the previous transport's timer, and deletion during native
+activation admission could leave the initial Start waiting. The short/long
+PCM-to-DSD and DSD-to-PCM deadline cases and the deletion barrier have assertion
+reds followed by passing race runs. The real engine/backend/kernel retiring
+prefix test accounts for both outgoing occurrences before allowing the requested
+successor to open. The closed-fault activation test also uses a leaf watchdog
+rather than a whole-binary timeout, preserving the control runner's exact-leaf
+requirement. No timeout/build failure is counted as an assertion red.

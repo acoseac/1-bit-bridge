@@ -45,7 +45,7 @@ func (s *DSDSink) loopNative() {
 			s.carry = [2][4]byte{}
 			s.mu.Unlock()
 			if mode == TrackChange && active && !paused && s.dev != nil {
-				if e := s.nativeSilence(nativeFrames(s.params.RateHz, s.cfg.Tail), true, false); e != nil && !s.immediate() {
+				if e := s.nativeSilence(nativeFrames(s.params.RateHz, s.cfg.Tail), true, false); e != nil && !s.expectedReleaseCancellation(e) {
 					s.setNativeError(errors.Join(ErrReleaseUnconfirmed, e))
 					return
 				}
@@ -55,7 +55,7 @@ func (s *DSDSink) loopNative() {
 						s.setNativeError(errors.Join(ErrReleaseUnconfirmed, context.DeadlineExceeded))
 						return
 					}
-					if e := s.dev.Drain(s.releaseCtx, remaining); e != nil && !s.immediate() {
+					if e := s.dev.Drain(s.releaseCtx, remaining); e != nil && !s.expectedReleaseCancellation(e) {
 						s.setNativeError(errors.Join(ErrReleaseUnconfirmed, e))
 					} else if e == nil {
 						if e := s.measureNative(); e != nil {
@@ -117,6 +117,7 @@ func (s *DSDSink) loopNative() {
 		s.mu.Lock()
 		n := min(s.ring.pending(), int64(s.params.PeriodFrames))
 		b := s.ring.span(s.ring.wr, n)
+		s.inflight = s.ring.wr + int64(len(b)/s.params.NativeFrameBytes())
 		s.mu.Unlock()
 		if len(b) > 0 {
 			if e := s.writeNative(b, false, false, false); e != nil {
@@ -153,7 +154,15 @@ func (s *DSDSink) immediate() bool {
 func (s *DSDSink) activateNative(r *nativeRequest) error {
 	reopened := false
 	if s.dev == nil {
-		d, e := s.seams.open(s.cfg.Endpoint, s.devCfg)
+		ep := s.cfg.Endpoint
+		if s.cfg.Locate != nil {
+			var e error
+			ep, e = s.cfg.Locate(s.life)
+			if e != nil {
+				return e
+			}
+		}
+		d, e := s.seams.open(ep, s.devCfg)
 		if e != nil {
 			return e
 		}
@@ -171,7 +180,7 @@ func (s *DSDSink) activateNative(r *nativeRequest) error {
 		s.params = p
 		s.mu.Unlock()
 	}
-	if e := admit(s.cfg.Check, s.dev, s.cfg.Endpoint, "native activation"); e != nil {
+	if e := admit(s.cfg.Check, s.dev, s.dev.Params().Endpoint, "native activation"); e != nil {
 		if reopened {
 			if ce := s.closeNative(); ce != nil {
 				return errors.Join(ErrReleaseUnconfirmed, e, ce)
@@ -239,6 +248,7 @@ func (s *DSDSink) writeNative(b []byte, silence, tail, allowPaused bool) error {
 	defer cancel()
 	n, e := s.dev.Write(ctx, b)
 	s.mu.Lock()
+	s.inflight = 0
 	if n > 0 {
 		s.committed = true
 		if !silence {
@@ -400,4 +410,10 @@ func (s *DSDSink) closeNative() error {
 	}
 	s.dev = nil
 	return d.releaseNative()
+}
+
+// expectedReleaseCancellation suppresses only the cancellation caused by an
+// Immediate escalation. A device error established before that fence survives.
+func (s *DSDSink) expectedReleaseCancellation(e error) bool {
+	return s.immediate() && (errors.Is(e, context.Canceled) || ReasonOf(e) == ReasonCancelled)
 }

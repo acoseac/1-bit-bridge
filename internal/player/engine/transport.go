@@ -41,14 +41,16 @@ const (
 
 // occ is one hand-off of an entry.
 type occ struct {
-	id    OccurrenceID
-	entry uint32
-	ref   Reference
+	reservation *OccurrenceReservation
+	id          OccurrenceID
+	entry       uint32
+	ref         Reference
 	// meta is the entry's metadata as it was handed off, shared with the
 	// queue, which never writes to it; details is what the backend reported
 	// of its content (DetailsEvents), nil until it does.
 	meta    []byte
 	details *Details
+	plan    *NativePlan
 	stage   stage
 	// unwanted is why it must not be heard: an edit removed it, or made it
 	// no longer follow the occurrence before it. reconcile sets it in the
@@ -67,7 +69,9 @@ type occ struct {
 	skipped []uint32
 }
 
-func (oc *occ) public() Occurrence { return Occurrence{ID: oc.id, Entry: oc.entry, Ref: oc.ref} }
+func (oc *occ) public() Occurrence {
+	return Occurrence{ID: oc.id, Entry: oc.entry, Ref: oc.ref, Reservation: oc.reservation}
+}
 
 // session is one playback session as the owner tracks it.
 type session struct {
@@ -82,12 +86,14 @@ type session struct {
 	endSent, noMore bool
 	// succCall is the Prepare or Cut under way, one at a time;
 	// transportCall the Pause or Resume.
-	succCall, transportCall *call
-	paused, devReleased     bool
-	pauseTimer              timer
-	pauseSeq                uint64
-	releaseCall             *call
-	releaseTimer            timer
+	succCall, transportCall   *call
+	paused, devReleased       bool
+	pauseTimer                timer
+	pauseSeq                  uint64
+	hasCurrent, currentNative bool
+	retiring                  *retiringLedger
+	releaseCall               *call
+	releaseTimer              timer
 }
 
 // index is where occurrence id is in the chain, or -1.
@@ -337,6 +343,9 @@ func (e *Engine) selectEntry(id uint32) {
 // pending play that by replaces is superseded.
 func (e *Engine) setIntent(then Intent, by string) {
 	o := &e.o
+	if then == IntentStop {
+		e.escalateRetiring()
+	}
 	if then != IntentPlay && o.then == IntentPlay {
 		e.superseded(by)
 	}
@@ -462,9 +471,16 @@ func (e *Engine) stopped(why StopInfo) {
 // newOcc is a new hand-off of entry id.
 func (e *Engine) newOcc(id uint32) *occ {
 	o := &e.o
+	var reservation *OccurrenceReservation
+	if e.occurrenceBudget != nil {
+		reservation = e.occurrenceBudget.Reserve()
+		if reservation == nil {
+			return nil
+		}
+	}
 	o.nextOcc++
 	en, _ := o.q.get(id)
-	return &occ{id: OccurrenceID(o.nextOcc), entry: id, ref: en.ref, meta: en.meta}
+	return &occ{reservation: reservation, id: OccurrenceID(o.nextOcc), entry: id, ref: en.ref, meta: en.meta}
 }
 
 // hear makes oc the occurrence heard, or nothing (nil): the audible
@@ -510,6 +526,12 @@ func (e *Engine) startSession(target uint32) {
 		}
 	}
 	first := e.newOcc(target)
+	if first == nil {
+		e.playFailed(refuse("play", Reason("occurrence_budget_exceeded"), "outstanding occurrence bound"))
+		o.state = Stopped
+		e.visible()
+		return
+	}
 	s.chain = []*occ{first}
 	o.sess = s
 	o.sessions[s.id] = s
@@ -543,6 +565,14 @@ func (e *Engine) releaseSession(s *session, then Intent, why StopInfo) {
 		e.setIntent(then, why.Detail)
 		return
 	}
+	native := s.native()
+	if native {
+		s.retiring = &retiringLedger{token: ReleaseToken{Session: s.id, Generation: 1}, chain: make([]*occ, len(s.chain))}
+		for i, o := range s.chain {
+			cp := *o
+			s.retiring.chain[i] = &cp
+		}
+	}
 	s.phase = sessReleasing
 	s.stopPause()
 	if tc := s.transportCall; tc != nil && tc.waiter != nil {
@@ -567,9 +597,24 @@ func (e *Engine) releaseSession(s *session, then Intent, why StopInfo) {
 		o.state = Releasing
 	}
 	o.starting, o.join = false, nil
-	e.hear(nil)
+	if !native {
+		e.hear(nil)
+	}
 	e.visible()
-	rc := e.call(callRelease, s, ReleaseTimeout, func(ctx context.Context) callResult { return callResult{err: e.be.Release(ctx, s.id)} })
+	req := ReleaseRequest{Mode: ReleaseImmediate, Cause: ReleaseStop}
+	if native {
+		req.Token = s.retiring.token
+		if then == IntentPlay {
+			req.Mode = ReleaseTrackChange
+			req.Cause = ReleaseNavigation
+		}
+	}
+	rc := e.call(callRelease, s, ReleaseTimeout, func(ctx context.Context) callResult {
+		if b, ok := e.be.(NativeLifecycle); native && ok {
+			return callResult{err: b.ReleaseNative(ctx, req)}
+		}
+		return callResult{err: e.be.Release(ctx, s.id)}
+	})
 	s.releaseCall = rc
 	s.releaseTimer = e.clk.At(rc.deadline, func() { e.post(msgReleaseDeadline{s: s}) })
 }
@@ -585,6 +630,9 @@ func (e *Engine) releaseDeadline(s *session) {
 		return
 	}
 	s.phase = sessUnconfirmed
+	if s.retiring != nil {
+		e.recordRetiringFault(s, Fault{Reason: ReasonReleaseUnconfirmed, Detail: ErrReleaseUnconfirmed.Error()})
+	}
 	if rc := s.releaseCall; rc != nil {
 		rc.cancel(errCallDeadline)
 	}
@@ -624,9 +672,15 @@ func (e *Engine) ackAt(s *session, at time.Time) {
 // (sessAcked).
 func (e *Engine) acked(s *session) {
 	o := &e.o
+	if s.retiring != nil {
+		e.hear(nil)
+		s.retiring = nil
+		e.touched()
+	}
 	switch s.phase {
 	case sessReleasing:
 		s.phase = sessAcked
+		releaseOccurrences(s.chain)
 		s.stopTimers()
 		delete(o.sessions, s.id)
 		if o.sess == s {
@@ -645,6 +699,7 @@ func (e *Engine) acked(s *session) {
 		e.afterRelease()
 	case sessUnconfirmed:
 		s.phase = sessAcked
+		releaseOccurrences(s.chain)
 		s.stopTimers()
 		delete(o.sessions, s.id)
 		if u := o.unconfirmed; u != nil && u.Session == s.id {
@@ -791,6 +846,7 @@ func (e *Engine) reconcile(s *session) {
 			continue
 		case cur.late:
 		case cur.stage < stageSubmitted:
+			releaseOccurrences(s.chain[i:])
 			s.chain = s.chain[:i]
 			e.prepare(s, prev)
 		default:
@@ -815,6 +871,10 @@ func (e *Engine) prepare(s *session, after *occ) {
 	var pub *Occurrence
 	if entry != 0 {
 		next = e.newOcc(entry)
+		if next == nil {
+			e.onFault(s.id, Fault{Reason: Reason("occurrence_budget_exceeded"), Detail: "outstanding occurrence bound"})
+			return
+		}
 		next.skipped = passed
 		s.chain = append(s.chain, next)
 		p := next.public()
@@ -1048,6 +1108,7 @@ func (e *Engine) callDone(c *call, r callResult) {
 			// heard is not taken back by its Prepare's refusal.
 			if c.next != nil {
 				if i := s.index(c.next.id); i > 0 {
+					releaseOccurrences(s.chain[i:])
 					s.chain = s.chain[:i]
 				}
 			}
@@ -1086,6 +1147,7 @@ func (e *Engine) callDone(c *call, r callResult) {
 				Detail: fmt.Sprintf("occurrence %d was cut after it became audible", c.from.id)})
 			return
 		default:
+			releaseOccurrences(s.chain[i:])
 			s.chain = s.chain[:i]
 			s.endSent = false
 		}
@@ -1097,6 +1159,8 @@ func (e *Engine) callDone(c *call, r callResult) {
 	case callRelease:
 		if r.err == nil {
 			e.ackAt(s, r.at)
+		} else if errors.Is(r.err, ErrReleaseUnconfirmed) {
+			e.releaseDeadline(s)
 		}
 	}
 }
@@ -1119,6 +1183,10 @@ func (e *Engine) startDone(s *session, r callResult) {
 		o.pass = nil
 		e.touched()
 		e.reconcile(s)
+		return
+	}
+	if s.native() {
+		e.onFault(s.id, Fault{Reason: ReasonBackend, Detail: r.err.Error(), Occurrence: s.chain[0].id})
 		return
 	}
 	var u *Unplayable
@@ -1175,9 +1243,7 @@ func (e *Engine) pauseDone(c *call, r callResult) {
 	s.paused = true
 	o.state = Paused
 	e.visible()
-	s.pauseSeq++
-	seq := s.pauseSeq
-	s.pauseTimer = e.clk.AfterFunc(e.cfg.PauseRelease+ReleaseTimeout, func() { e.post(msgPauseOverdue{s: s, seq: seq}) })
+	e.armPauseDeadline(s)
 	if w != nil {
 		e.answer(w, reply{})
 	}
@@ -1290,6 +1356,7 @@ func (e *Engine) onAudible(id SessionID, oid OccurrenceID) {
 		e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonRemovedAudible, Detail: fmt.Sprintf("entry %d is not in the queue, and it became audible", oc.entry)})
 		return
 	}
+	releaseOccurrences(s.chain[:i])
 	s.chain = s.chain[i:]
 	oc.stage = stageAudible
 	e.hear(oc)
@@ -1385,6 +1452,7 @@ func (e *Engine) onRefused(id SessionID, oid OccurrenceID, u Unplayable) {
 		return
 	}
 	e.skip(s.chain[i].entry, u)
+	releaseOccurrences(s.chain[i:])
 	s.chain = s.chain[:i]
 	s.endSent = false
 	e.reconcile(s)
@@ -1424,4 +1492,27 @@ func (e *Engine) pauseOverdue(s *session, seq uint64) {
 // discard asks the backend to drop what it prepared outside a session.
 func (e *Engine) discard() {
 	e.call(callDiscard, nil, CallTimeout, func(ctx context.Context) callResult { return callResult{err: e.be.Discard(ctx)} })
+}
+
+// effectivePauseRelease belongs to the occurrence holding the device. DSD's
+// fixed native deadline overrides the configured PCM pause, in either direction.
+func (e *Engine) effectivePauseRelease(s *session) time.Duration {
+	if s.hasCurrent {
+		if s.currentNative {
+			return 30 * time.Second
+		}
+		return e.cfg.PauseRelease
+	}
+	for _, o := range s.chain {
+		if o.plan != nil {
+			return 30 * time.Second
+		}
+		if o.details != nil {
+			if o.details.Codec == "DSD" && o.details.Bits == 1 {
+				return 30 * time.Second
+			}
+			return e.cfg.PauseRelease
+		}
+	}
+	return e.cfg.PauseRelease
 }

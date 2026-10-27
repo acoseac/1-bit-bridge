@@ -102,6 +102,26 @@ func (e *Engine) handle(m any) {
 	o := &e.o
 	var what string
 	switch m := m.(type) {
+	case evCurrentOccurrence:
+		what = "current occurrence"
+		if s := e.current(m.s); s != nil && s.index(m.o) >= 0 {
+			nativeTransition := s.native() || m.p != nil
+			s.hasCurrent = true
+			s.currentNative = m.p != nil
+			if s.paused && nativeTransition {
+				s.devReleased = false
+				e.armPauseDeadline(s)
+			}
+			if m.p != nil {
+				e.onNativePlan(evNativePlan{m.s, m.o, *m.p})
+			}
+		}
+	case evNativePlan:
+		what = "native plan"
+		e.onNativePlan(m)
+	case evRetiring:
+		what = "retiring"
+		e.onRetiring(m.token, m.event)
 	case evPrepared:
 		what = "prepared"
 		if s := e.current(m.s); s != nil {
@@ -125,19 +145,28 @@ func (e *Engine) handle(m any) {
 		}
 	case evAudible:
 		what = "audible"
-		e.onAudible(m.s, m.o)
+		if !e.ordinaryRetiring(m.s, NativeEvent{Kind: "audible", Occurrence: m.o}) {
+			e.onAudible(m.s, m.o)
+		}
 	case evDetails:
 		what = "details"
-		e.onDetails(m.s, m.o, m.d)
+		if !e.ordinaryRetiring(m.s, NativeEvent{Kind: "details", Occurrence: m.o, Details: m.d}) {
+			e.onDetails(m.s, m.o, m.d)
+		}
 	case evPosition:
 		what = "position"
+		if e.ordinaryRetiring(m.s, NativeEvent{Kind: "position", Position: m.p}) {
+			break
+		}
 		if s := e.current(m.s); s != nil && o.audible.Occurrence != 0 && m.p.Occurrence == o.audible.Occurrence {
 			o.pos = m.p
 			e.touched()
 		}
 	case evFault:
 		what = "fault"
-		e.onFault(m.s, m.f)
+		if !e.ordinaryRetiring(m.s, NativeEvent{Kind: "fault", Fault: m.f}) {
+			e.onFault(m.s, m.f)
+		}
 	case evFinished:
 		what = "finished"
 		e.onFinished(m.s)
@@ -189,4 +218,10 @@ func (e *Engine) handle(m any) {
 	if e.sm.handled != nil {
 		o.notes = append(o.notes, note{what: what})
 	}
+}
+
+func (v *events) Retiring(t ReleaseToken, n NativeEvent) { v.e.post(evRetiring{t, n}) }
+func (v *events) NativePlan(s SessionID, o OccurrenceID, p NativePlan) {
+	p.Edges = slices.Clone(p.Edges)
+	v.e.post(evNativePlan{s, o, p})
 }

@@ -318,10 +318,17 @@ func TestNativeClosedFaultActivation(t *testing.T) {
 	k.inspect(func(k *fakeKernel) { k.writes = []fakeWrite{{err: errnoEPIPE}} })
 	_, _ = s.WriteDSD(context.Background(), 1, []byte{1, 2, 3, 4}, []byte{1, 2, 3, 4}, 0, 32)
 	<-s.Done()
-	// Done is the writer-exit barrier. A regression that waits for that
-	// exited writer is a deadlock, detected by the test binary's timeout.
-	if e := s.Activate(context.Background(), 2); e == nil {
-		t.Fatal("closed terminal sink activated")
+	// Done is the writer-exit barrier. Keep the watchdog in this leaf so
+	// the mutation runner can distinguish its assertion from a binary timeout.
+	answer := make(chan error, 1)
+	go func() { answer <- s.Activate(context.Background(), 2) }()
+	select {
+	case e := <-answer:
+		if e == nil {
+			t.Fatal("closed terminal sink activated")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("activation waited for an exited writer")
 	}
 }
 func TestNativeReleaseErrorsUnconfirmed(t *testing.T) {

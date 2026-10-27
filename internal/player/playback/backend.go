@@ -136,16 +136,19 @@ func (n Note) StatusPath() string {
 // alsapcm.Sink, PCM only. It is the package documentation's contract, term
 // by term.
 type Backend struct {
-	cfg Config
-	log *slog.Logger
+	nativeAdmission func(format.NativeDSD) (engine.NativePlan, error)
+	nativeOpen      func(context.Context, alsapcm.DSDConfig) (*alsapcm.DSDSink, error)
+	cfg             Config
+	log             *slog.Logger
 
 	mu       sync.Mutex
 	sessions map[engine.SessionID]*session
 	// holder is the session that holds the device or is opening it, until
 	// its release is done: a Start beside it is refused (ErrOverlap).
-	holder   *session
-	took     map[packKey]format.ALSAFormat
-	overlaps int
+	holder              *session
+	took                map[packKey]format.ALSAFormat
+	overlaps            int
+	terminalUnconfirmed bool
 
 	// The goroutines the backend started and that have not returned.
 	gmu  sync.Mutex
@@ -323,6 +326,9 @@ var errReleased = errors.New("player backend: the session's release came first: 
 func (b *Backend) hold(s *session) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.terminalUnconfirmed {
+		return engine.ErrReleaseUnconfirmed
+	}
 	if h := b.holder; h != nil && h != s {
 		b.overlaps++
 		b.log.Error("player backend: a session started while another still held the device", "session", uint64(s.id), "holder", uint64(h.id))
@@ -361,6 +367,9 @@ func (b *Backend) Start(ctx context.Context, req engine.StartRequest) error {
 func (b *Backend) Prepare(ctx context.Context, id engine.SessionID, after engine.OccurrenceID, next *engine.Occurrence) error {
 	s := b.known(id)
 	if s == nil {
+		if next != nil {
+			next.Reservation.ReleaseBackend()
+		}
 		return errUnknownSession(id)
 	}
 	return s.prepare(ctx, after, next)
@@ -441,3 +450,6 @@ func (b *Backend) Discard(context.Context) error {
 }
 
 var _ engine.Backend = (*Backend)(nil)
+
+// OwnsOccurrenceReservations enables shared engine/backend resource accounting.
+func (*Backend) OwnsOccurrenceReservations() bool { return true }

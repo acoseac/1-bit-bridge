@@ -108,7 +108,7 @@ func (s *session) next() step {
 	if !o.opened() {
 		return step{kind: stepWait, wait: o.done}
 	}
-	if c := s.cur; c != nil && !c.drained && !c.closed && c.transport == o.transport {
+	if c := s.cur; c != nil && !c.drained && !c.closed && c.transport == o.transport && (o.plan == nil || c.policyID == o.plan.PolicyID) {
 		// Gapless: its frames follow the last ones in the same sink.
 		o.out, o.start = c, c.submitted
 		s.writing = o
@@ -156,6 +156,9 @@ func (s *session) waitWake(also <-chan struct{}) bool {
 // once what was decoded before it has played (finish). It reports false
 // when the sink stopped taking frames or the session ends.
 func (s *session) writeChunk(o *occ, samples []int32, packed []byte) bool {
+	if o.plan != nil {
+		return s.writeNativeChunk(o)
+	}
 	buf, err := o.first, o.firstErr
 	o.first, o.firstErr = nil, nil
 	if buf == nil {
@@ -347,6 +350,9 @@ func (s *session) transition(o *occ) bool {
 		case s.paused == sinkPaused:
 			s.currentLocked(o, out, sinkPaused)
 			l.unlock()
+			if err := s.activateOutput(s.ctx, o, out); err != nil {
+				return s.openFailed(o, err)
+			}
 			return true
 		}
 		cmd := out.sink.Pause

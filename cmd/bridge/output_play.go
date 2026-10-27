@@ -70,14 +70,8 @@ type outputPlayEnv struct {
 // outputPlayCmd implements `bridge output play` on this host.
 func outputPlayCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return runOutputPlay(ctx, args, outputPlayEnv{
-		goos: runtime.GOOS,
-		backend: func(cfg playback.Config) (playBackend, error) {
-			b, err := playback.New(cfg)
-			if err != nil {
-				return nil, err
-			}
-			return b, nil
-		},
+		goos:        runtime.GOOS,
+		backend:     newOutputPlayBackend,
 		trees:       hostTrees,
 		stdin:       os.Stdin,
 		rawKeys:     playRawKeys,
@@ -769,3 +763,5 @@ func (r *playRun) note(n playback.Note) {
 		r.out.line("%s card %d device %d subdevice %d: the device is let go (%s reads closed)", n.Kind, p.Endpoint.Card, p.Endpoint.Device, p.Subdevice, n.StatusPath())
 	}
 }
+
+func newOutputPlayBackend(c playback.Config) (playBackend, error) { return playback.New(c) }

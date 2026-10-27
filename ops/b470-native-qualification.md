@@ -1,6 +1,11 @@
 # B470 2c.1 native qualification — provisional evidence only
 
 This CLI does not enable DSD in serve or output play and never creates an approval.
+Qualification version is now **6**: engine/playback activation and release paths
+are guarded. **Version-5 reports are not attributable** to this implementation.
+The real-ref version check is reviewer-pending after commit. The
+`backend-lifecycle` owner scenario remains 2c.2b work.
+
 Use a candidate built from the reviewed tree. No hardware qualification was run during implementation.
 Keep every failure, including unsupported formats. The release must eventually have at least one
 owner-qualified native path and one DoP path; 2c.1 has no DoP path.

@@ -711,3 +711,46 @@ second call returns it unprobed, but nothing in production calls it.
 `TestServeOnVolatileStorageRefusesEveryStartAndKeepsNoIdentity` pin this.
 
 - **`engine.WithAdmission` and `Config.Seams` (B470 PR 5a4, round 2).** The OpenHome surface gives a Stop's request slot back once the engine has admitted it, so a Stop that waits for its release holds no slot (`openhome.md`, the write pool's bullet; Codex's round-1 finding: eight Stops on one source's connections held every slot during a pending release). `WithAdmission(ctx)` returns a derived context and a channel; the owner's `admit` closes the channel (`noteAdmission`: a `sync.Once` on a value the context carries, so it never blocks the owner) right after the compare-and-swap of `command.admission` from pending to admitted succeeds, before the command runs or parks, so from then on its caller no longer decides whether it runs (a context that ends after it is answered `ReasonCancelled` without `ErrNotAdmitted`). A command whose context had ended before the call, one the owner finds abandoned by its caller in the window between its look at the context and the swap, and one sent after the shutdown never close it; a command passed no such context is unaffected, and a context so made is for one command. The round's control closed the channel at the top of `admit`, before the look and the swap: the abandoned insert's channel closed, and `TestWithAdmissionClosesAsTheOwnerAdmits` went red. `Config.Seams.ReserveWrite`, nil in production and behaviour-neutral (its own commit), runs before each reservation write on the goroutine that makes it (New's, for the run's first): an error it returns fails the write as the filesystem's refusal would, and a seam that blocks holds the write, as a filesystem that holds it does, so the edits that need it park, at most `ReserveTimeout`; the OpenHome surface's edit-gate test holds the real engine there (its test player's `hangReservations`), which the engine's own seams, unexported (`harness_test.go`), cannot do from another package. A test that holds a write lets it go before the engine stops: Run's shutdown waits for a reservation write under way. `TestTheReserveWriteSeamHoldsAndFailsTheWrite` pins both answers.
+
+## Native engine hand-off (B470 2c.2a)
+
+The production playback admission refuses every DSD tuple before resolving or
+opening hardware. Accepting admission and fake-kernel injection live in test
+files and the existing native integration overlay. Serve and output-play use
+constructors tested against valid DSF and raw DFF content. No approval, transport
+selector, preference or fallback is introduced here.
+
+An admitted occurrence retains one opaque plan: full tuple, policy ID, pause,
+tail, prefill and transition edges. Compatible tuple/policy occurrences share a
+sink and its carry; a different tuple drains and reopens. Native positions count
+logical bits per channel at the logical bit rate, and Details reports Bits=1,
+Codec=DSD, Lossless=true. Native open or activation failure faults the session.
+Health, mixer-monitor and approval-record revocation producers, PCM-only epoch
+publication, and approval storage remain the next phase's work. The backend
+accepts a typed per-session revoke input for those future producers.
+
+Navigation releases native content with TrackChange; Stop escalates to Immediate
+on a worker so the engine owner stays responsive. The retiring ledger accepts
+ordered outgoing progress independently of selected destination. Its token's
+logical-bit cutoff is published after the in-flight write returns its accepted
+prefix. Final progress/fault precedes successful acknowledgement. Done only says
+cleanup completed: failed DROP, HW_FREE or close is ErrReleaseUnconfirmed,
+faults, and cannot authorize a successor. An expected cancellation caused by
+Immediate is suppressed; an established device fault is not. Late successful
+cleanup is distinct from a failed cleanup.
+
+Native pause retains the fixed 30-second release even when the engine's PCM
+PauseRelease differs. A native-involved transport installed during pause re-arms
+the effective deadline and invalidates any queued timer for the old transport.
+Deleting an installed, unsubmitted native output revokes its activation before
+admission can return and write prefill. Reopening resolves the binding afresh and admits the opened
+node, retaining content and policy. Resume alone cannot activate an inert sink;
+the backend supplies explicit initial activation authority for a sink installed
+while paused. A shared reservation remains charged until engine and backend
+both relinquish it, including stalled cancelled resolver reads; production's
+bound is 1024 and tests exercise four. EOF alone does not relinquish ownership.
+
+Qualification version 6 covers engine and playback activation/release code.
+Version-5 reports are not attributable to this implementation. The real-ref gate
+must be rerun by the reviewer after committing. Evidence and limitations are
+recorded in the 2c.2a report and the engineering log; no hardware was used.

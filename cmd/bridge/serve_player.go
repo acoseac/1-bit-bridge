@@ -438,7 +438,7 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 	}
 	newBackend := w.Backend
 	if newBackend == nil {
-		newBackend = func(c playback.Config) (playBackend, error) { return playback.New(c) }
+		newBackend = newServePlayerBackend
 	}
 	be, err := newBackend(playback.Config{
 		Resolver: res,
@@ -876,3 +876,5 @@ func logPlayerPanic(where string, r any) {
 	}
 	playerLog.Error("player: a panic was recovered; the library is served as before", attrs...)
 }
+
+func newServePlayerBackend(c playback.Config) (playBackend, error) { return playback.New(c) }
