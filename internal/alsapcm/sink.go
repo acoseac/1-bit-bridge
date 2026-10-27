@@ -51,6 +51,9 @@ type Transport struct {
 	Channels  int
 	Format    format.ALSAFormat
 	ValidBits int
+	// LogicalRate and PackingVersion identify native/DoP packing; PCM leaves both zero.
+	LogicalRate    int
+	PackingVersion int
 }
 
 func (t Transport) String() string {
@@ -87,6 +90,12 @@ func (t Transport) Join(next Transport) Join {
 	}
 	if t.ValidBits != next.ValidBits {
 		d = append(d, fmt.Sprintf("valid bits %d → %d", t.ValidBits, next.ValidBits))
+	}
+	if t.LogicalRate != next.LogicalRate {
+		d = append(d, "logical rate")
+	}
+	if t.PackingVersion != next.PackingVersion {
+		d = append(d, "packing version")
 	}
 	return Join{Gapless: len(d) == 0, Differs: d}
 }

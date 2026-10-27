@@ -3,6 +3,7 @@ package alsapcm
 import (
 	"flag"
 	"fmt"
+	"github.com/acoseac/1-bit-bridge/internal/alsactl"
 	"os"
 	"regexp"
 	"runtime"
@@ -28,6 +29,9 @@ func abiFacts() map[string]string {
 		"meta goos":   runtime.GOOS,
 		"meta goarch": runtime.GOARCH,
 		"meta kernel": uapiKernel,
+	}
+	for k, v := range alsactl.ABIFacts() {
+		f[k] = strconv.FormatUint(v, 10)
 	}
 	num := func(key string, v uint64) { f[key] = strconv.FormatUint(v, 10) }
 	size := func(name string, v uintptr) { num("size "+name, uint64(v)) }
@@ -134,6 +138,9 @@ func abiFacts() map[string]string {
 	for name, v := range map[string]uint64{
 		"SNDRV_PCM_VERSION":                 pcmVersion,
 		"SNDRV_PROTOCOL_VERSION(2,0,15)":    uint64(protocolVersion(2, 0, 15)),
+		"SNDRV_PCM_FORMAT_DSD_U16_LE":       formatDSDU16LE,
+		"SNDRV_PCM_FORMAT_DSD_U32_LE":       formatDSDU32LE,
+		"SNDRV_PCM_FORMAT_DSD_U32_BE":       formatDSDU32BE,
 		"SNDRV_PCM_FORMAT_S16_LE":           formatS16LE,
 		"SNDRV_PCM_FORMAT_S24_LE":           formatS24LE,
 		"SNDRV_PCM_FORMAT_S32_LE":           formatS32LE,

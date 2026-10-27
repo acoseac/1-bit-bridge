@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "B470 provisional manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "calibration",
+    "fixtures"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "calibration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reference",
+        "peakDBFS",
+        "leadingSilenceMS",
+        "trailingSilenceMS",
+        "attestation"
+      ],
+      "properties": {
+        "reference": {
+          "type": "string",
+          "minLength": 1
+        },
+        "peakDBFS": {
+          "const": -30
+        },
+        "leadingSilenceMS": {
+          "type": "integer",
+          "minimum": 1000
+        },
+        "trailingSilenceMS": {
+          "type": "integer",
+          "minimum": 1000
+        },
+        "attestation": {
+          "const": "I confirm the matched -30 dBFS listening fixtures and end silences"
+        }
+      }
+    },
+    "fixtures": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ID",
+          "Path",
+          "SHA256",
+          "Container",
+          "Order",
+          "PCMReference",
+          "Rate",
+          "Channels",
+          "Frames"
+        ],
+        "properties": {
+          "ID": {
+            "type": "string",
+            "minLength": 1
+          },
+          "Path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "SHA256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "Container": {
+            "enum": [
+              "WAV",
+              "DSF",
+              "DFF"
+            ]
+          },
+          "Order": {
+            "enum": [
+              "LR",
+              "RL"
+            ]
+          },
+          "PCMReference": {
+            "type": "string"
+          },
+          "Rate": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "Channels": {
+            "const": 2
+          },
+          "Frames": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      }
+    }
+  }
+}

@@ -45,11 +45,14 @@ const (
 // The sample formats (snd_pcm_format_t) the packers emit, the one access
 // and subformat this backend asks for, and the playback stream.
 const (
-	formatS16LE  = 2  // SNDRV_PCM_FORMAT_S16_LE
-	formatS24LE  = 6  // SNDRV_PCM_FORMAT_S24_LE: four bytes, low three significant
-	formatS32LE  = 10 // SNDRV_PCM_FORMAT_S32_LE
-	formatS243LE = 32 // SNDRV_PCM_FORMAT_S24_3LE: three bytes
-	formatLast   = 52 // SNDRV_PCM_FORMAT_LAST in v6.12: SNDRV_PCM_FORMAT_DSD_U32_BE
+	formatS16LE    = 2  // SNDRV_PCM_FORMAT_S16_LE
+	formatS24LE    = 6  // SNDRV_PCM_FORMAT_S24_LE: four bytes, low three significant
+	formatS32LE    = 10 // SNDRV_PCM_FORMAT_S32_LE
+	formatS243LE   = 32 // SNDRV_PCM_FORMAT_S24_3LE: three bytes
+	formatDSDU16LE = 49 // SNDRV_PCM_FORMAT_DSD_U16_LE
+	formatDSDU32LE = 50 // SNDRV_PCM_FORMAT_DSD_U32_LE
+	formatDSDU32BE = 52 // SNDRV_PCM_FORMAT_DSD_U32_BE
+	formatLast     = 52 // SNDRV_PCM_FORMAT_LAST in v6.12: SNDRV_PCM_FORMAT_DSD_U32_BE
 
 	accessRWInterleaved = 3 // SNDRV_PCM_ACCESS_RW_INTERLEAVED: WRITEI_FRAMES
 	subformatStd        = 0 // SNDRV_PCM_SUBFORMAT_STD

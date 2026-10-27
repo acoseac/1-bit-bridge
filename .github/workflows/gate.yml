@@ -542,9 +542,41 @@ jobs:
   #
   # `cross-platform` joined this fan-in on 2026-09-01 — see its own
   # comment above for the evidence the promotion was gated on.
+  native-qualification:
+    name: native qualification evidence
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Check qualification version against PR merge base
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main:refs/remotes/origin/main
+          base=$(git merge-base origin/main HEAD)
+          test -n "$base"
+          go run -tags ts_omit_webclient,ts_omit_debugeventbus ./scripts/qualification-version -base "$base" -head HEAD
+      - name: Real-sink native harness integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/native-integration-overlay.py "$RUNNER_TEMP/native-overlay.json"
+          go test -v -race -tags ts_omit_webclient,ts_omit_debugeventbus -overlay "$RUNNER_TEMP/native-overlay.json" ./cmd/bridge -run '^TestNativeIntegration' -timeout 5m -watchdog 10s | tee "$RUNNER_TEMP/native-integration.log"
+          grep -q '^--- PASS: TestNativeIntegration' "$RUNNER_TEMP/native-integration.log"
+
   gate:
     name: gate
-    needs: [vet, test, dsd-measure, build-all, go-version, cross-platform, docs-check, alsa-abi]
+    needs: [vet, test, dsd-measure, build-all, go-version, cross-platform, docs-check, alsa-abi, native-qualification]
     if: always()
     runs-on: ubuntu-latest
     permissions: {}

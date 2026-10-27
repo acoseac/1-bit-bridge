@@ -21,3 +21,5 @@ func Open(ep Endpoint, cfg Config) (*Device, error) {
 
 // Supported reports whether this build can open an endpoint at all.
 func Supported() bool { return false }
+
+func openNativeDevice(ep Endpoint, cfg Config) (*Device, error) { return Open(ep, cfg) }

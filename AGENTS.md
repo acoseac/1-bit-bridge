@@ -134,9 +134,10 @@ automation is unaffected.
 | `internal/doctor` | Environment preflight checks for `bridge doctor` / `bridge init` |
 | `internal/alsa` | The box's ALSA state read from a `/proc` tree (cards, USB ids, stream altsets, what an open substream receives and the thread and process holding it), for `bridge output dac` |
 | `internal/mpd` | Read-only MPD client and `mpd.conf` reader (`internal/mpd/conf`): the box's player and how MPD is set, for `bridge output player` |
-| `internal/player/format` | Canonical PCM / Native-DSD / DoP representations and ALSA PCM packers for the OpenHome player (B470) |
+| `internal/player/format` | Canonical PCM / Native-DSD / DoP representations, ALSA PCM packers and provisional native DSD packers for the OpenHome player (B470) |
 | `internal/player/decode` | Content-inspected lossless PCM decoders (FLAC / WAV / AIFF, and ALAC in M4A through a bounded demuxer and saprobe-alac's packet decoder), DSF and DFF demuxers into canonical native DSD, and typed refusals |
-| `internal/alsapcm` | The player's pure-Go ALSA PCM backend (B470): an endpoint opened by card and device number with exact parameters and cancellable writes, its UAPI pinned and checked by the `alsa-abi` CI job (PR 2a), and the streaming `Sink` above it: lookahead, the position the kernel establishes, pause and its release, reported xruns, drop and drain, gapless joins (PR 2b). `bridge output pcm-test` is its hardware harness |
+| `internal/alsapcm` | The player's pure-Go ALSA PCM backend (B470): an endpoint opened by card and device number with exact parameters and cancellable writes, its UAPI pinned and checked by the `alsa-abi` CI job (PR 2a), and the streaming `Sink` above it: lookahead, the position the kernel establishes, pause and its release, reported xruns, drop and drain, gapless joins (PR 2b). `bridge output pcm-test` is its hardware harness; PR 2c.1 adds an inert native `DSDSink` and the CLI-only `output dsd-test` qualification harness; production DSD remains off |
+| `internal/alsactl` | Bounded pure-Go read-only ALSA control snapshots for provisional DSD admission, with injected tests and a control-node tripwire; no mixer writes |
 | `internal/supervision` | Answers "if this process exits, will something relaunch us?" |
 | `internal/pairing` | In-memory state machine for the admin-approval pairing flow |
 | `internal/analyze` | Offline audio analysis: sox(1) PCM decode → peak waveform sidecars; worker pool (opt-in via `analysis.enabled`) |
@@ -313,8 +314,9 @@ mode). iOS never talks to the admin listener.
 CI workflows (`.github/workflows/`):
 
 - `gofmt.yml` — read-only formatting check on PRs/pushes to main.
-- `gate.yml` — seven prerequisite jobs (`vet`, `test`, `dsd-measure`,
-  `build-all`, `go-version`, `cross-platform`, `docs-check`) with a `gate`
+- `gate.yml` — nine prerequisite jobs (`vet`, `test`, `dsd-measure`,
+  `build-all`, `go-version`, `cross-platform`, `docs-check`, `alsa-abi`,
+  `native-qualification`) with a `gate`
   fan-in; includes the local pre-push gate.
 - `codeql.yml` — security static analysis (PRs, main, weekly cron).
 - `release.yml` — goreleaser on `v*` tag push: signed + notarized macOS

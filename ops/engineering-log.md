@@ -65168,3 +65168,118 @@ macOS developer host, and the
 config package passes under the race detector. Formatting, diff whitespace
 and make docs-check pass. The log names above label the run's working files,
 which are not kept; their results are quoted here.
+
+## 2026-10-26 — B470 2c.1 provisional native transport
+
+Base d9e53584. Native packers, inert DSDSink, bounded release/carry, read-only controls and qualification harness; PCM base traces pinned before production edits. Signature-stub assertion reds and subsequent green/control evidence are in the phase report and red-first.log/controls.json. No hardware was opened; Linux ABI/race execution and owner qualification remain pending. Contracts: `History-b470-native.md`; commands: `b470-native-qualification.md`. Production admission, cross-layer occurrence reservation, approvals and engine events remain 2c.2.
+
+Final software evidence: 65 isolated mutations each built and vetted the whole tree and matched exactly its predicted failing leaf tests. Focused race checks, the complete ALSA race package, host build/vet and Linux amd64/arm64 cross-build/vet pass. Broad suites encountered sandbox-denied TCP/UDP/Unix binds; Linux ABI/race execution and listening qualification are not claimed.
+
+
+## 2026-10-27 — B470 2c.1 round 2
+Restored PCM-only format negotiation and isolated native sizing/open cleanup. Reproduced
+volatile PCM-control refusal, stale Resume, leaked reopen, retry after failed cleanup,
+lost activation replies, repeated-cutoff tail cancellation, unbounded natural Finish,
+and matrix Stop opening trailing PCM. Tests now cover all CLI legs on the real fake
+kernel via a test-only overlay, descriptor verification/admission, tail cancellation,
+full snapshot reporting, and real-ref CI wiring. Mandatory-flag opener counts, retained
+native words and drain escalation are mutation-sensitive regression pins. Full contract:
+ops/History-b470-native.md; owner procedure: ops/b470-native-qualification.md.
+
+The control sweep also reproduced a native idle-wait/Pause race. The writer now
+rechecks unapplied Pause while installing the wait; the deterministic seam test fails
+on the prior code and the removal control. PCM wait behavior is untouched.
+
+
+## 2026-10-27 — B470 2c.1 round 3, PR #1355 merge gate
+
+Reproduced endpoint-free receipt admission, terminal writer/Finish fencing, skipped
+or duplicate occurrence completeness, failed-envelope import and final-validation
+receipt retention, missing dependency version guards, uninterruptible console
+reads, and overlay generation silently retaining a changed build tag. Native
+release timing now shares the injected clock, keeps the close margin, and reports
+failed final measurement. The report's final validation stays within its deadline.
+Open/admission/cleanup workers retain explicit completion fences. No final reads or
+successor follows an unconfirmed cleanup; no second allowance starts. Contact schema
+2/version 3 invalidates previous evidence. Runbook and History-b470-native.md carry
+the behavior and outstanding Linux/hardware gates. G1's Pause sequence was refuted
+with separate cancellation/recovery/partial-prefix/terminal-fault pins; G7 is a
+defensive change because carry cursor resets already clear its storage.
+
+The four inline comments were checked: 4383824825/4383824841 use fsutil.NotAFile's
+shared explicit refusal list; 4383885164 adds raw prompt editing/echo/CRLF;
+4383885180 makes overlay tag/support checks fail closed, with CI requiring an actual
+passing integration test. No Git writes, commit, push or hardware were performed.
+
+The full-harness deadline case also pins a late admission: after its blocked
+checker returns, it rechecks the run context before any control read. A parent
+context alone misses the harness wall deadline. Unsupported injected readers
+refuse before opening audio unless they provide an explicit Interrupt contract.
+
+
+## 2026-10-27 — B470 2c.1 round 4, PR #1355 harness merge gate
+
+Verified C1–C3 and A1–A6 against 94e37bbb. C2 and A1 share the cancelled-Finish
+cleanup defect. Fixed ownership transfer for successful native opens racing cancel,
+joined the sink's original release budget, and bounded opener/PCM cancellation waits
+with the injected clock and remaining run deadline. No sink lifecycle edits.
+Attachment reads now have a cancellation fence before controls. Coverage is per fed
+occurrence and sink; exact boundaries keep the outgoing fixture current for p.
+Confirmation lines retain echoed ASCII, reject tabs/non-ASCII visibly, and consume
+CR/LF/CRLF once. Version is 4; cli_consts.go and packaging.go close the actual
+configuration dependency gaps; loader and host trees were already guarded.
+Red-first regressions and isolated controls live in the reviewer's r4 artifacts;
+C1's exact race is deterministically parked in a test-only source overlay at the
+old publication gap. See ops/History-b470-native.md for the binding behavior and
+ops/b470-native-qualification.md for owner instructions. Linux execution/ABI and
+hardware qualification remain pending.
+
+The A4 excess-Played red is explicitly a defensive seam test: the real sink strips
+silence and caps Played at submitted bits. A3's completion-time first-fixture mock
+is defensive too; the real first-boundary playback case holds. A1's literal expired
+budget needs no extra allowance; the shared C2 cancellation case does. These are
+recorded as limited/refuted sequences, not claimed production reproductions.
+
+## 2026-10-27 — B470 2c.1 round 5: portable trace pins and harness ordering (#1355)
+
+Windows failed all four PCM trace pins because Git converted the JSON goldens
+from LF to CRLF. Reproduced through read-only `git -c core.autocrlf=true
+cat-file --filters`, feeding the resulting bytes to the actual trace tests;
+all four failed at their byte comparison. Pin the PCM JSON goldens to LF in
+`.gitattributes`; preserve their captured bytes and the exact comparison.
+Paths appear only in the failure message, never in the captured trace.
+
+The macOS queue-once assertion required the availability report after the last
+queued file, but `playRun.watch` reports on its own goroutine while `play`
+inserts files. `waitOutput` gates Play, not insertion. A test-only Go overlay
+waited for that report immediately after starting the watcher and before
+calling `play`, reproducing the exact CI failure without a sleep or stress.
+The production file predates 2c.1; this is an assertion scheduling assumption,
+not a wording change or an observed data race. The assertion now requires
+both the ordered queue and availability after the warning and before playback;
+it also explicitly checks the middle queued file. Production is unchanged.
+
+Round-5 evidence lives in the review workspace's `r5/`: red/green checkout
+simulation and ordering overlay, plus controls changing one accepted PCM byte
+and the availability report's wording. The kernel-header fetch's HTTP 429 is
+an infrastructure failure; no ABI or fetch code is changed for it.
+
+## 2026-10-27 — B470 2c.1 PR #1355, round 6
+
+CodeRabbit 4384755812 holds: command-entry raw mode disabled ISIG during evidence
+validation and OPOST for unwrapped diagnostics. An instance hook exposed that
+lifetime for a red-first test; moving it around console execution keeps validation
+cooked, joins the reader before exact restoration, and restores before error
+output. Non-terminals never call the hook; restoration failures fail the report.
+QualificationVersion is 5. TestNativeTerminalLifetime pins terminal/non-terminal,
+validation, input/open/raw/restore failures, completion, Stop/quit and cancellation.
+
+4384755816 and 4384755829 hold as test flakes: remove 100 ms handoff windows and
+the companion real three-second bound; injected time plus parked cleanup and
+writer Done establish the events. Binary timeout alone detects a deadlock, with
+no per-event upper performance bound. No production sink change was needed.
+4385352672 holds: full queued-path fields now compare with filepath.Clean;
+queue count/order and both warning-to-start constraints from round 5 remain.
+An equivalent ./ spelling reproduced the old false failure; path suffix/order/
+placement mutations pin the stronger assertions. Evidence and controls: r6/
+in the task scratch directory; no Git writes, hardware or production DSD enable.

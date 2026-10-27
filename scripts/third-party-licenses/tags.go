@@ -90,6 +90,16 @@ func checkBuildTags(root string) error {
 // executable shell/PowerShell/workflow sites. Potentially executable fences
 // in every non-record Markdown file are sites too (buildSiteMarkdown).
 var reviewedBuildSites = map[string][]string{
+	"ops/b470-native-qualification.md": {
+		"GOTOOLCHAIN=go1.27.3 go test -race -tags=@TAGS@ -timeout 30m ./internal/alsapcm ./internal/alsactl ./internal/alsa ./internal/player/format ./internal/player/qualification ./cmd/bridge",
+		"GOTOOLCHAIN=go1.27.3 go test -tags=@TAGS@ ./internal/player/qualification -run '^TestQualificationVersionGate$' -count=1",
+		"GOTOOLCHAIN=go1.27.3 go run -tags @TAGS@ ./scripts/qualification-version -base \"$BASE\" -head HEAD",
+		"GOTOOLCHAIN=go1.27.3 go test -race -tags @TAGS@ -overlay /tmp/native-overlay.json ./cmd/bridge -run '^TestNativeIntegration' -timeout 5m -watchdog 10s",
+	},
+	"scripts/native-integration-overlay.py": {
+		"\"\"\"Expose the existing ALSA fake ONLY in an explicit Go test overlay.",
+	},
+
 	".github/scripts/test-shard.sh": {
 		"if ! out=\"$(go test -tags @TAGS@ \"${RACE_FLAGS[@]}\" \"$1\" -list '.*')\"; then",
 		"go test -tags @TAGS@ -p \"$(cores)\" \"${RACE_FLAGS[@]}\" \"${all[@]}\"",
@@ -100,6 +110,9 @@ var reviewedBuildSites = map[string][]string{
 		"go test -tags @TAGS@ ${{ matrix.target.package }} -exec \"prlimit --as=${FUZZ_AS_LIMIT} --\" -run XXX -fuzz '^${{ matrix.target.name }}$' -fuzztime ${{ inputs.fuzztime || '5m' }} -fuzzminimizetime 1s",
 	},
 	".github/workflows/gate.yml": {
+		"go run -tags @TAGS@ ./scripts/qualification-version -base \"$base\" -head HEAD",
+		"go test -v -race -tags @TAGS@ -overlay \"$RUNNER_TEMP/native-overlay.json\" ./cmd/bridge -run '^TestNativeIntegration' -timeout 5m -watchdog 10s | tee \"$RUNNER_TEMP/native-integration.log\"",
+
 		"BRIDGE_TEST_SMALL_VOLUME=/mnt/b264-small go test -tags @TAGS@ ./internal/transcode/ -run 'TestARenditionThatCouldNotBeWrittenWholeIsNotPublished' -count=1 -v",
 		"GOTMP=$(go run ./.github/scripts/printtmpdir 2>/dev/null || echo \"$TEMP\")",
 		"run: go vet -tags @TAGS@ ./...",

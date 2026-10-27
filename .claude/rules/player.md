@@ -2,8 +2,10 @@
 paths:
   - "internal/player/**"
   - "internal/alsapcm/**"
+  - "internal/alsactl/**"
   - "internal/alsa/**"
   - "cmd/bridge/output_pcmtest*.go"
+  - "cmd/bridge/output_dsdtest*.go"
   - "cmd/bridge/output_dac*.go"
   - "cmd/bridge/output_hotplug*.go"
   - "cmd/bridge/output_play*.go"
@@ -170,3 +172,9 @@ The bit-exact OpenHome player inside the bridge (B470), PR by PR. These sections
 ## Player test ordering (B526)
 
 - **Observe a reopen by its increasing open count; hold the producer before EOF when inserting a successor whose open must run; and wait for a terminal state while offering ticks, never require a terminal reporter to take another tick or its writer to wait again (`Grant`, not `Play`).** `FakeKernel.Await` (over the fake kernel's `when`) observes present and future state, not past transient states. **Before granting enough fake time to finish a resumed track, wait for the producer's Drain to be accepted; its paused attempt may still need a retry after Resume's command hook fires.** **Observe every producer Drain answer before checking its reason: fault-driven session release can return plain `context.Canceled` before Drop's typed cancellation reaches the call wrapper.** **Count what a session holds after a report step, never while the DAC plays on: stop it (`FakeKernel.Hold`) and count once the producer drains with no time (`DRAINING` and `Starved`)** (B532). **Read the hotplug watcher's counts while the test parks its goroutine at a publish it has not counted yet, and expect that publish; never as a subscriber has a snapshot** (B536). **Don't raise a timeout or sleep to order these events.** → History-rules-player.md
+
+- **B470 2c.1 native is provisional and CLI-only.** Preserve inert activation, accepted-bit carry, bounded writer-owned release and PCM-only opening. Only volatile PCM-interface controls escape the activation fingerprint; Stop/quit cancel every audition leg. Contact v2/version 5 binds device/subdevice; publish only after final identity/control validation and natural completion of every supplied occurrence. Faults revoke before bounded cleanup; cancellation joins the existing fence, and opener/PCM waits cannot extend the run deadline. Recheck cancellation after attachment; count only each sink's fed occurrences. Prompts preserve echoed ASCII and consume CRLF once. Pending workers forbid final reads or successors. Bump qualificationVersion for guarded code; the native-qualification CI job checks real PR refs. Contracts and deferred 2c.2 wiring: `ops/History-b470-native.md`; owner gates: `ops/b470-native-qualification.md`.
+
+- **PCM trace goldens keep LF on every checkout (`.gitattributes`), and their comparison stays byte-exact. The output-play availability report and queue insertions race: require each after the level warning and before playback, never order them against each other.** (B470 2c.1, PR #1355 round 5; `TestPCMTracePins`, `TestOutputPlayPlaysTheQueueOnceAndSaysSo`.)
+
+- **The native harness enters raw mode only for a terminal, after validation and immediately around console execution; it restores the captured state after joining the reader, before diagnostics, including error and panic exits. Non-terminal input never changes terminal state. Release/activation tests wait on events and injected time, never scheduler-speed bounds; queued paths compare complete, OS-cleaned fields while retaining warning/queue/start ordering.** (B470 2c.1, PR #1355 round 6.) → History-b470-native.md

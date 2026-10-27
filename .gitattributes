@@ -5,6 +5,9 @@ internal/manifest/testdata/playlist-parse-cases.tsv text eol=lf
 # checkout so a raw dump of one is the capture's bytes.
 internal/alsa/testdata/** text eol=lf
 internal/mpd/testdata/** text eol=lf
+# PCM traces pin the ioctl order, HW_PARAMS and accepted bytes exactly;
+# keep JSON line endings unchanged by a Windows checkout.
+internal/alsapcm/testdata/pcm-traces/*.json text eol=lf
 # The DSD goldens are compared byte for byte; pattern.bin has no NUL byte by
 # design, so git would call it text and a CRLF checkout would change it.
 internal/player/decode/testdata/dsd-goldens/*.bin binary
