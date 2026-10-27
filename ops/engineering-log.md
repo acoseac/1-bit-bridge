@@ -65427,3 +65427,38 @@ Raw HTTP member-table checks cover exact names, types, mandatory zero values and
 optional absence/presence, closing the DTO round-trip gap. Negative controls target
 provenance, runbook drift and wire omissions/types. Rules and detail are in
 History-b470-native.md, “Final delta review”. No hardware qualification ran.
+
+## 2026-10-27 — B470 2c.2 deterministic PCM trace capture (#1356)
+
+The natural-advance capture let buffer two feed before Drain was admitted.
+Parking its fifth WRITE, submitting Drain asynchronously, awaiting its commanded
+hook, freeing fake time and releasing the WRITE reproduces 38 calls against the
+37-call golden at both 44100/16 and 384000/32. Accepted bytes and committed
+HW_PARAMS are identical. This is an extra EAGAIN retry after cancellation, a
+capture artifact also present on main 8e3ab37e; playback code is unchanged.
+
+The test now holds the writer with atNow at the final first-buffer measurement,
+submits buffer two, admits Drain, then frees time and releases the writer. Both
+natural-advance cases need this ordering. Neither pause-release case feeds a
+second buffer: its settled idle watch and synchronous Pause then Drop already
+order the capture. Close still joins the writer before inspection. All four
+JSON goldens remain byte-identical, including both 37-call natural advances;
+no retry normalization or trace recapture is used. Mismatches now name the first
+Calls index, HWParams byte offset or Written byte offset, with a raw JSON offset
+fallback; bytes.Equal still decides the complete comparison.
+
+The forced fifth-WRITE reproduction fails before the fix without sleeps. Negative
+controls corrupt one accepted byte, add one PREPARE, alter one HW_PARAMS byte,
+and remove command-before-feed ordering while forcing the fifth-WRITE handoff;
+each fails at the expected trace leaf, and restoring the fixed schedule passes.
+The qualification path guard includes tests, so qualificationVersion advances
+12 to 13 and all five current runbook references advance with it. The review
+workspace's pcm-flake-fix records red-first.log, control overlays, command exit
+statuses and stress evidence; inherited control anchors retain multiplicity.
+
+Validation: all four trace leaves pass 200 repetitions with the race detector,
+and 100 more under 12 yes processes (PIDs captured, killed and reaped). The full
+internal/alsapcm race suite and qualification suite pass; no test is blocked by
+socket permissions. Vet passes for macOS, Linux and Windows. The new rule exceeded
+player.md's byte budget, so the existing backend-test ordering explanation moved
+verbatim to History-rules-player.md with its binding summary retained.

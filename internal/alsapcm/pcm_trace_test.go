@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 	"unsafe"
@@ -27,8 +28,26 @@ func TestPCMTracePins(t *testing.T) {
 			t.Run(tc.name+"/"+scenario, func(t *testing.T) {
 				k := newModel(t)
 				cfg := SinkConfig{Endpoint: testEndpoint, Transport: Transport{Kind: format.KindPCM, RateHz: tc.rate, Channels: 2, Format: tc.f, ValidBits: tc.bits}, BufferTime: 40 * time.Millisecond, Pause: PauseKernel}
-				s := openTestSink(t, k, cfg)
+				commanded := make(chan struct{})
+				s := openTestSinkWith(t, context.Background(), k, cfg, sinkSeams{commanded: func(op string) {
+					if op == "drain" {
+						close(commanded)
+					}
+				}})
 				n := s.Params().BufferFrames
+				// Hold the final first-buffer measurement before the writer can
+				// feed buffer two. Drain must be admitted before that next feed:
+				// cancellation during a full-buffer write adds an EAGAIN retry.
+				measured, resume := make(chan struct{}), make(chan struct{})
+				var once sync.Once
+				release := func() { once.Do(func() { close(resume) }) }
+				defer release()
+				if scenario == "natural_advance" {
+					k.atNow(func() bool { return s.run.written == int64(n) }, func() {
+						close(measured)
+						<-resume
+					})
+				}
 				block := make([]byte, n*(tc.bits/8)*2)
 				for i := range block {
 					block[i] = byte(i*37 + 11)
@@ -36,8 +55,9 @@ func TestPCMTracePins(t *testing.T) {
 				if _, err := s.Write(context.Background(), block); err != nil {
 					t.Fatal(err)
 				}
-				await(t, k.when(filledAndIdle(uint64(n))), "first PCM buffer")
 				if scenario == "pause_release" {
+					// No more producer frames: Pause interrupts only an idle watch.
+					await(t, k.when(filledAndIdle(uint64(n))), "first PCM buffer")
 					if err := s.Pause(); err != nil {
 						t.Fatal(err)
 					}
@@ -45,14 +65,21 @@ func TestPCMTracePins(t *testing.T) {
 						t.Fatal(err)
 					}
 				} else {
+					await(t, measured, "final first-buffer measurement")
 					if !s.Next(cfg.Transport).Gapless {
 						t.Fatal("compatible advance lost")
 					}
 					if _, err := s.Write(context.Background(), block); err != nil {
 						t.Fatal(err)
 					}
+					drained := make(chan error, 1)
+					go func() { drained <- s.Drain(context.Background()) }()
+					await(t, commanded, "Drain admission")
 					k.free()
-					drain(t, s)
+					release()
+					if err := <-drained; err != nil {
+						t.Fatal(err)
+					}
 				}
 				if err := s.Close(); err != nil {
 					t.Fatal(err)
@@ -85,9 +112,59 @@ func TestPCMTracePins(t *testing.T) {
 					t.Fatal(err)
 				}
 				if !bytes.Equal(b, want) {
-					t.Fatal(fmt.Sprintf("PCM trace differs from base: %s", path))
+					t.Fatalf("PCM trace differs from base: %s: %s", path, pcmTraceDifference(b, want))
 				}
 			})
 		}
 	}
+}
+
+// pcmTrace retains every ioctl, the committed parameters and every accepted byte.
+type pcmTrace struct {
+	Calls    []uint32
+	HWParams string
+	Written  string
+}
+
+// pcmTraceDifference diagnoses a failed byte-exact comparison; it never decides
+// equality or normalizes a golden. Indices and byte offsets are zero-based.
+func pcmTraceDifference(got, want []byte) string {
+	var g, w pcmTrace
+	if err := json.Unmarshal(got, &g); err != nil {
+		return fmt.Sprintf("actual JSON: %v", err)
+	}
+	if err := json.Unmarshal(want, &w); err != nil {
+		return fmt.Sprintf("golden JSON: %v", err)
+	}
+	for i := 0; i < min(len(g.Calls), len(w.Calls)); i++ {
+		if g.Calls[i] != w.Calls[i] {
+			return fmt.Sprintf("Calls[%d]: got %d, want %d (lengths %d/%d)", i, g.Calls[i], w.Calls[i], len(g.Calls), len(w.Calls))
+		}
+	}
+	if len(g.Calls) != len(w.Calls) {
+		return fmt.Sprintf("Calls[%d]: length got %d, want %d", min(len(g.Calls), len(w.Calls)), len(g.Calls), len(w.Calls))
+	}
+	for _, field := range []struct{ name, got, want string }{
+		{"HWParams", g.HWParams, w.HWParams}, {"Written", g.Written, w.Written},
+	} {
+		gb, ge := hex.DecodeString(field.got)
+		wb, we := hex.DecodeString(field.want)
+		if ge != nil || we != nil {
+			return fmt.Sprintf("%s: invalid hex (got %v, want %v)", field.name, ge, we)
+		}
+		if !bytes.Equal(gb, wb) {
+			return pcmByteDifference(field.name, gb, wb)
+		}
+	}
+	return pcmByteDifference("JSON encoding", got, want)
+}
+
+// pcmByteDifference names the first changed or missing byte of a field.
+func pcmByteDifference(field string, got, want []byte) string {
+	for i := 0; i < min(len(got), len(want)); i++ {
+		if got[i] != want[i] {
+			return fmt.Sprintf("%s byte offset %d: got 0x%02x, want 0x%02x", field, i, got[i], want[i])
+		}
+	}
+	return fmt.Sprintf("%s byte offset %d: length got %d, want %d", field, min(len(got), len(want)), len(got), len(want))
 }
