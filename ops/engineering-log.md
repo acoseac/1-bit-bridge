@@ -65239,3 +65239,27 @@ silence and caps Played at submitted bits. A3's completion-time first-fixture mo
 is defensive too; the real first-boundary playback case holds. A1's literal expired
 budget needs no extra allowance; the shared C2 cancellation case does. These are
 recorded as limited/refuted sequences, not claimed production reproductions.
+
+## 2026-10-27 — B470 2c.1 round 5: portable trace pins and harness ordering (#1355)
+
+Windows failed all four PCM trace pins because Git converted the JSON goldens
+from LF to CRLF. Reproduced through read-only `git -c core.autocrlf=true
+cat-file --filters`, feeding the resulting bytes to the actual trace tests;
+all four failed at their byte comparison. Pin the PCM JSON goldens to LF in
+`.gitattributes`; preserve their captured bytes and the exact comparison.
+Paths appear only in the failure message, never in the captured trace.
+
+The macOS queue-once assertion required the availability report after the last
+queued file, but `playRun.watch` reports on its own goroutine while `play`
+inserts files. `waitOutput` gates Play, not insertion. A test-only Go overlay
+waited for that report immediately after starting the watcher and before
+calling `play`, reproducing the exact CI failure without a sleep or stress.
+The production file predates 2c.1; this is an assertion scheduling assumption,
+not a wording change or an observed data race. The assertion now requires
+both the ordered queue and availability after the warning and before playback;
+it also explicitly checks the middle queued file. Production is unchanged.
+
+Round-5 evidence lives in the review workspace's `r5/`: red/green checkout
+simulation and ordering overlay, plus controls changing one accepted PCM byte
+and the availability report's wording. The kernel-header fetch's HTTP 429 is
+an infrastructure failure; no ABI or fetch code is changed for it.

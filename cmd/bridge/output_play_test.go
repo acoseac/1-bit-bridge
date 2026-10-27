@@ -382,10 +382,10 @@ func TestOutputPlayRefusesWhenNothingIsPlayable(t *testing.T) {
 }
 
 // TestOutputPlayPlaysTheQueueOnceAndSaysSo pins a run without --keys: the
-// warning about the level first, the files queued in order, the output's
-// report, the card opened with the kernel's status file, every boundary, the
-// end of the queue, the release, and a shutdown; exit 0, and the run's own
-// state directory removed.
+// warning about the level first, the files queued in order and the output's
+// report before playback, the card opened with the kernel's status file,
+// every boundary, the end of the queue, the release, and a shutdown; exit 0,
+// and the run's own state directory removed.
 func TestOutputPlayPlaysTheQueueOnceAndSaysSo(t *testing.T) {
 	c := newPlayCase(t, goBarPlayer)
 	code, stdout, stderr := c.run(context.Background(), "linux")
@@ -396,8 +396,8 @@ func TestOutputPlayPlaysTheQueueOnceAndSaysSo(t *testing.T) {
 	order := []string{
 		"use headphones, with the DAC's or the amplifier's own volume set low",
 		": " + c.files[0],
+		": " + c.files[1],
 		": " + c.files[2],
-		"output report 1: available",
 		"session 1: start with occurrence 1 (entry ",
 		"opened card 5 device 0 subdevice 0 (the stand-in DAC)",
 		"status: /proc/asound/card5/pcm0p/sub0/status",
@@ -413,6 +413,14 @@ func TestOutputPlayPlaysTheQueueOnceAndSaysSo(t *testing.T) {
 			t.Fatalf("the output does not say %q after what came before:\n%s", want, out)
 		}
 		at += i + len(want)
+	}
+	// watch reports on its own goroutine while play inserts the files.
+	// The warning precedes both; waitOutput gates Play on the report, but
+	// nothing orders the report against any of the queue insertions.
+	warningEnd := strings.Index(out, order[0]) + len(order[0])
+	start := strings.Index(out, "session 1: start with occurrence 1 (entry ")
+	if !strings.Contains(out[warningEnd:start], "output report 1: available") {
+		t.Errorf("the output does not report availability after the warning and before playback:\n%s", out)
 	}
 	// The engine records the stop as the release begins, and the run prints
 	// the two from two goroutines: either may come first.
