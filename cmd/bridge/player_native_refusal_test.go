@@ -9,6 +9,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -26,6 +27,10 @@ func (l refusedNativeLocator) Locate(context.Context) (playback.Unit, error) {
 	return playback.Unit{}, errors.New("unexpected hardware resolution")
 }
 func TestNativeProductionConstructorsRefuse(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the engine keeps its IDs durable with a directory fsync, which Windows has not: the player runs on Linux")
+	}
+	persistentMedium(t)
 	for _, mode := range []string{"serve", "output-play"} {
 		for _, file := range []string{"lsb_dsd64_partial_block.dsf", "dsd64.dff"} {
 			t.Run(mode+"/"+file, func(t *testing.T) {

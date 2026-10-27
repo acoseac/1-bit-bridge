@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
 )
@@ -176,7 +178,19 @@ func (b nativeRecordingBackend) Start(c context.Context, r engine.StartRequest) 
 	return b.Backend.Start(c, r)
 }
 
+// nativeEngineStorage isolates playback tests from a TMPDIR on tmpfs. The
+// medium seam is process-global: callers must not run in parallel, and must
+// register engine/backend cleanup after this so they join before its restore.
+func nativeEngineStorage(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("the engine keeps its IDs durable with a directory fsync, which Windows has not: the player runs on Linux")
+	}
+	t.Cleanup(atomicwrite.SetMediumForTest(func(string) error { return nil }))
+}
+
 func TestNativeIntegrationTinyThroughEngine(t *testing.T) {
+	nativeEngineStorage(t)
 	for _, bits := range []int{1, 7, 15, 31} {
 		t.Run(fmt.Sprint(bits), func(t *testing.T) {
 			k := alsapcm.NewFakeKernel(t)
@@ -720,6 +734,7 @@ func (b nativeSuccessorBarrier) Start(ctx context.Context, r engine.StartRequest
 	return b.nativeRecordingBackend.Start(ctx, r)
 }
 func TestNativeIntegrationRetiringThroughEngine(t *testing.T) {
+	nativeEngineStorage(t)
 	k := alsapcm.NewFakeKernel(t)
 	k.HardwareFormats(49, 50, 52)
 	k.Free()
@@ -958,6 +973,7 @@ func TestNativeIntegrationInstallationResume(t *testing.T) {
 }
 
 func TestNativeIntegrationBetweenTransportPauseDeadline(t *testing.T) {
+	nativeEngineStorage(t)
 	k := alsapcm.NewFakeKernel(t)
 	k.HardwareFormats(49, 50, 52)
 	k.Free()
@@ -1104,6 +1120,7 @@ func TestNativeIntegrationSuccessfulCutReplacement(t *testing.T) {
 }
 
 func TestNativeIntegrationFaultThenExplicitPCM(t *testing.T) {
+	nativeEngineStorage(t)
 	k := alsapcm.NewFakeKernel(t)
 	k.HardwareFormats(2, 6, 10, 49, 50, 52)
 	k.Free()
