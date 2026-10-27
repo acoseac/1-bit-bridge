@@ -54,6 +54,7 @@ type outputDSDTestEnv struct {
 	open       func(context.Context, alsapcm.DSDConfig) (nativeTestSink, error)
 	controls   func(int) (alsactl.Snapshot, error)
 	attachment func(int) (qualification.Attachment, error)
+	deadline   time.Time
 	now        func() time.Time
 	at         func(time.Time) (<-chan time.Time, func())
 	stdin      io.Reader
@@ -349,6 +350,9 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 		}
 		aa, e := env.attachment(ep.Card)
 		if e != nil {
+			return e
+		}
+		if e := runCtx.Err(); e != nil {
 			return e
 		}
 		cc, e := env.controls(ep.Card)

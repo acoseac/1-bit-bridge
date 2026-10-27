@@ -65215,3 +65215,27 @@ The full-harness deadline case also pins a late admission: after its blocked
 checker returns, it rechecks the run context before any control read. A parent
 context alone misses the harness wall deadline. Unsupported injected readers
 refuse before opening audio unless they provide an explicit Interrupt contract.
+
+
+## 2026-10-27 — B470 2c.1 round 4, PR #1355 harness merge gate
+
+Verified C1–C3 and A1–A6 against 94e37bbb. C2 and A1 share the cancelled-Finish
+cleanup defect. Fixed ownership transfer for successful native opens racing cancel,
+joined the sink's original release budget, and bounded opener/PCM cancellation waits
+with the injected clock and remaining run deadline. No sink lifecycle edits.
+Attachment reads now have a cancellation fence before controls. Coverage is per fed
+occurrence and sink; exact boundaries keep the outgoing fixture current for p.
+Confirmation lines retain echoed ASCII, reject tabs/non-ASCII visibly, and consume
+CR/LF/CRLF once. Version is 4; cli_consts.go and packaging.go close the actual
+configuration dependency gaps; loader and host trees were already guarded.
+Red-first regressions and isolated controls live in the reviewer's r4 artifacts;
+C1's exact race is deterministically parked in a test-only source overlay at the
+old publication gap. See ops/History-b470-native.md for the binding behavior and
+ops/b470-native-qualification.md for owner instructions. Linux execution/ABI and
+hardware qualification remain pending.
+
+The A4 excess-Played red is explicitly a defensive seam test: the real sink strips
+silence and caps Played at submitted bits. A3's completion-time first-fixture mock
+is defensive too; the real first-boundary playback case holds. A1's literal expired
+budget needs no extra allowance; the shared C2 cancellation case does. These are
+recorded as limited/refuted sequences, not claimed production reproductions.

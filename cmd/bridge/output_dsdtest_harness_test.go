@@ -118,7 +118,8 @@ func harnessRig(t *testing.T) *nativeHarnessRig {
 	h.args = []string{"--ack-level=contact-position", "--format=DSD_U32_BE", "--bit-rate=2822400", "--seconds=5", "--pause-method=kernel", "--tail-ms=0", "--prefill-ms=0", "--scenario=interactive", "--config=fake", "--manifest=" + filepath.Join(h.dir, "manifest.json"), "--fixtures=" + h.dir, "--contact-report=" + filepath.Join(h.dir, "contact.json"), "--mixer-snapshot=" + filepath.Join(h.dir, "mixer.txt"), "--report=" + filepath.Join(h.dir, "report.json"), "dsd", "dsd", "dsd", "dsd"}
 	h.env = outputDSDTestEnv{goos: "linux", now: func() time.Time { return time.Unix(0, h.clock.Load()) }, at: func(at time.Time) (<-chan time.Time, func()) {
 		if !at.Equal(time.Unix(5, 0)) {
-			t.Errorf("deadline reset: %v", at)
+			timer := time.NewTimer(at.Sub(time.Unix(0, h.clock.Load())))
+			return timer.C, func() { timer.Stop() }
 		}
 		return h.ticks, func() {}
 	}, stdin: strings.NewReader(""), controls: func(int) (alsactl.Snapshot, error) { return controls, nil }, attachment: func(int) (qualification.Attachment, error) { return a, nil }, resolve: func(context.Context, string) (nativeEndpoint, func(alsapcm.NodeInfo) error, error) {
@@ -239,13 +240,22 @@ func TestNativeProductionOpenerRejectsTestBinary(t *testing.T) {
 
 // TestNativePCMReferenceBudget bounds the harness caller while the unchanged PCM closer owns cleanup.
 func TestNativePCMReferenceBudget(t *testing.T) {
+	ticks := make(chan time.Time)
+	armed := make(chan struct{})
+	env := outputDSDTestEnv{now: func() time.Time { return time.Unix(0, 0) }, at: func(at time.Time) (<-chan time.Time, func()) {
+		if !at.Equal(time.Unix(2, 0)) {
+			t.Errorf("cleanup deadline=%v", at)
+		}
+		close(armed)
+		return ticks, func() {}
+	}}
 	entered, gate := make(chan struct{}), make(chan struct{})
 	defer close(gate)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	answer := make(chan error, 1)
 	go func() {
-		answer <- nativePCMCall(ctx, func(context.Context) error { close(entered); <-gate; return nil })
+		answer <- nativePCMCall(ctx, env, func(context.Context) error { close(entered); <-gate; return nil })
 	}()
 	select {
 	case <-entered:
@@ -255,6 +265,8 @@ func TestNativePCMReferenceBudget(t *testing.T) {
 		t.Fatal("PCM leg never started")
 	}
 	cancel()
+	<-armed
+	close(ticks)
 	select {
 	case e := <-answer:
 		if !errors.Is(e, alsapcm.ErrReleaseUnconfirmed) {

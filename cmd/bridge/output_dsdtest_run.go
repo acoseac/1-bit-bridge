@@ -148,9 +148,11 @@ func executeNativeTest(ctx context.Context, cancelRun context.CancelCauseFunc, o
 		report.OwnerConfirmation = typed
 	}
 	// One deadline from first open; keys, pause, reopens and track changes never
-	// reset it. Cancellation stops admission; sink cleanup has its own 2 s bound.
+	// reset it. Cancellation stops admission; active native sink cleanup joins its
+	// existing 2 s bound, while opener/PCM waits cannot extend this run deadline.
 	cancel := func() { cancelRun(context.DeadlineExceeded) }
-	ticks, stop := env.at(env.now().Add(time.Duration(o.seconds) * time.Second))
+	env.deadline = env.now().Add(time.Duration(o.seconds) * time.Second)
+	ticks, stop := env.at(env.deadline)
 	stopDeadline = stop
 	var expired atomic.Bool
 	go func() {
@@ -214,7 +216,7 @@ func executeNativeTest(ctx context.Context, cancelRun context.CancelCauseFunc, o
 	}
 	return runErr
 }
-func feedNative(ctx context.Context, s nativeTestSink, o nativeOptions, fixtures map[string]qualification.Fixture, start int) error {
+func feedNative(ctx context.Context, s nativeTestSink, o nativeOptions, fixtures map[string]qualification.Fixture, start int, fed []atomic.Int64) error {
 	planes := [][]byte{make([]byte, 16384), make([]byte, 16384)}
 	for i := start; i < len(o.list); i++ {
 		f := fixtures[o.list[i]]
@@ -234,6 +236,7 @@ func feedNative(ctx context.Context, s nativeTestSink, o nativeOptions, fixtures
 			bits := int(min(int64(n)*8, remain))
 			if bits > 0 {
 				accepted, we := s.WriteDSD(ctx, uint64(i+1), planes[0][:n], planes[1][:n], 0, bits)
+				fed[i].Add(int64(accepted))
 				remain -= int64(accepted)
 				if we != nil {
 					src.Close()
@@ -273,16 +276,6 @@ func runNativeQueue(ctx context.Context, o nativeOptions, env outputDSDTestEnv, 
 	cfg := alsapcm.DSDConfig{Endpoint: ep, Format: format.ALSAFormat(o.format), BitRate: o.rate, Pause: pause, Tail: time.Duration(o.tail) * time.Millisecond, Prefill: time.Duration(o.prefill) * time.Millisecond, Check: check}
 	at := 0
 	report.Completed = make([]bool, len(o.list))
-	updateCoverage := func(start int, played int64) {
-		for i := start; i < len(o.list); i++ {
-			frames := fixtures[o.list[i]].Frames
-			if played < frames {
-				break
-			}
-			report.Completed[i] = true
-			played -= frames
-		}
-	}
 	complete := func() error {
 		if o.scenario != "interactive" {
 			if report.Navigated {
@@ -302,7 +295,7 @@ func runNativeQueue(ctx context.Context, o nativeOptions, env outputDSDTestEnv, 
 		if e := ctx.Err(); e != nil {
 			return e
 		}
-		s, e := nativeOpenCall(ctx, env.open, cfg)
+		s, e := nativeOpenCall(ctx, env, cfg)
 		if e != nil {
 			return e
 		}
@@ -311,9 +304,31 @@ func runNativeQueue(ctx context.Context, o nativeOptions, env outputDSDTestEnv, 
 			ce := s.Release(context.Background(), alsapcm.Immediate)
 			return errors.Join(e, ce)
 		}
+		fed := make([]atomic.Int64, len(o.list))
+		// Played is cumulative only within this sink. Each occurrence is capped
+		// by both its own content length and the bytes this feeder accepted.
+		coverage := func(played int64) int {
+			current := at
+			for i := at; i < len(o.list); i++ {
+				frames := fixtures[o.list[i]].Frames
+				accepted := min(frames, fed[i].Load())
+				heard := min(max(played, 0), accepted)
+				if heard == frames {
+					report.Completed[i] = true
+				}
+				if heard > 0 {
+					current = i
+				}
+				played -= accepted
+				if accepted < frames || played <= 0 {
+					break
+				}
+			}
+			return current
+		}
 		feedCtx, stop := context.WithCancel(ctx)
 		done := make(chan error, 1)
-		go func(start int) { done <- feedNative(feedCtx, s, o, fixtures, start) }(at)
+		go func(start int) { done <- feedNative(feedCtx, s, o, fixtures, start, fed) }(at)
 		paused := false
 		next := -1
 	commandLoop:
@@ -331,13 +346,12 @@ func runNativeQueue(ctx context.Context, o nativeOptions, env outputDSDTestEnv, 
 				ce := s.Release(context.Background(), alsapcm.Immediate)
 				return errors.Join(ctx.Err(), ce)
 			case e := <-done:
-				updateCoverage(at, s.Position().Played)
+				current := coverage(s.Position().Played)
 				stop()
-				if errors.Is(e, alsapcm.ErrReleaseUnconfirmed) {
-					s.BeginRelease(alsapcm.Immediate)
-					return e
-				}
 				ce := s.Release(context.Background(), alsapcm.Immediate)
+				if ce == nil && errors.Is(e, context.Canceled) {
+					e = nativeConfirmedCancellation(e)
+				}
 				if e == nil && ce == nil {
 					// Inspect the whole queued batch: a space must not conceal
 					// navigation that raced natural completion.
@@ -345,7 +359,7 @@ func runNativeQueue(ctx context.Context, o nativeOptions, env outputDSDTestEnv, 
 					for range queued {
 						key := <-keys
 						if key == 'n' || key == 'p' {
-							if key == 'p' && len(o.list) == 1 {
+							if key == 'p' && current == 0 {
 								report.IgnoredKeys = append(report.IgnoredKeys, "p:first-fixture")
 							} else {
 								report.Navigated = true
@@ -377,13 +391,7 @@ func runNativeQueue(ctx context.Context, o nativeOptions, env outputDSDTestEnv, 
 					}
 					paused = !paused
 				case 'n', 'p':
-					current := at
-					played := s.Position().Played
-					updateCoverage(at, played)
-					for current < len(o.list)-1 && played >= fixtures[o.list[current]].Frames {
-						played -= fixtures[o.list[current]].Frames
-						current++
-					}
+					current := coverage(s.Position().Played)
 					if key == 'p' && current == 0 {
 						report.IgnoredKeys = append(report.IgnoredKeys, "p:first-fixture")
 						continue
@@ -433,7 +441,7 @@ func productionNativePCMOpen(ctx context.Context, c alsapcm.SinkConfig) (nativeP
 	return alsapcm.OpenSink(ctx, c)
 }
 func playNativePCM(ctx context.Context, env outputDSDTestEnv, root string, f qualification.Fixture, ep alsapcm.Endpoint, check func(alsapcm.NodeInfo) error) error {
-	return nativePCMCall(ctx, func(ctx context.Context) error {
+	return nativePCMCall(ctx, env, func(ctx context.Context) error {
 		if e := ctx.Err(); e != nil {
 			return e
 		}
@@ -498,7 +506,7 @@ func playNativeReference(ctx context.Context, root string, fixture qualification
 
 // nativePCMCall bounds only this provisional harness. The existing PCM sink
 // retains its teardown semantics and owns cleanup until the worker returns.
-func nativePCMCall(ctx context.Context, play func(context.Context) error) error {
+func nativePCMCall(ctx context.Context, env outputDSDTestEnv, play func(context.Context) error) error {
 	answer := make(chan error, 1)
 	done := make(chan struct{})
 	go func() { e := play(ctx); close(done); answer <- e }()
@@ -507,12 +515,17 @@ func nativePCMCall(ctx context.Context, play func(context.Context) error) error 
 		return e
 	case <-ctx.Done():
 	}
-	timer := time.NewTimer(2 * time.Second)
-	defer timer.Stop()
+	ticks, stop := nativeCleanupTimer(ctx, env)
+	defer stop()
 	select {
 	case e := <-answer:
 		return errors.Join(ctx.Err(), e)
-	case <-timer.C:
+	case <-ticks:
+		select {
+		case e := <-answer:
+			return errors.Join(ctx.Err(), e)
+		default:
+		}
 		return &nativePendingWorker{cause: ctx.Err(), done: done}
 	}
 }
@@ -565,6 +578,10 @@ func validateNativeFinal(ctx context.Context, env outputDSDTestEnv, card int, wa
 			answer <- result{err: e}
 			return
 		}
+		if e := ctx.Err(); e != nil {
+			answer <- result{err: e}
+			return
+		}
 		s, e := env.controls(card)
 		if e == nil && (a != want || s.Hash() != hash) {
 			e = errors.New("final binding/mixer reference changed")
@@ -584,10 +601,19 @@ func validateNativeFinal(ctx context.Context, env outputDSDTestEnv, card int, wa
 
 // nativeOpenCall retains an explicit worker fence, including an opener's own
 // admission/cleanup worker. Cancellation gets one allowance, never two.
-func nativeOpenCall(ctx context.Context, open func(context.Context, alsapcm.DSDConfig) (nativeTestSink, error), cfg alsapcm.DSDConfig) (nativeTestSink, error) {
-	var sink nativeTestSink
-	e := nativePCMCall(ctx, func(ctx context.Context) error {
-		s, e := open(ctx, cfg)
+func nativeOpenCall(ctx context.Context, env outputDSDTestEnv, cfg alsapcm.DSDConfig) (nativeTestSink, error) {
+	type result struct {
+		sink nativeTestSink
+		err  error
+	}
+	// A successful send transfers cleanup ownership. Until then the worker owns
+	// the sink, even if cancellation lands just after open's last context check.
+	answer := make(chan result)
+	done := make(chan struct{})
+	var workerErr error
+	go func() {
+		defer close(done)
+		s, e := env.open(ctx, cfg)
 		var pending interface{ Completion() <-chan struct{} }
 		if errors.As(e, &pending) {
 			<-pending.Completion()
@@ -595,20 +621,61 @@ func nativeOpenCall(ctx context.Context, open func(context.Context, alsapcm.DSDC
 				e = result.CompletionResult()
 			}
 		}
-		if ctx.Err() != nil {
+		select {
+		case answer <- result{s, e}:
+			return
+		case <-ctx.Done():
 			if s != nil {
-				s.BeginRelease(alsapcm.Immediate)
+				e = errors.Join(e, s.Release(context.Background(), alsapcm.Immediate))
 				<-s.Done()
 			}
-			return errors.Join(e, ctx.Err())
+			workerErr = e
 		}
-		sink = s
-		return e
-	})
-	if e != nil {
-		return nil, e
+	}()
+	select {
+	case r := <-answer:
+		if ctx.Err() == nil && r.err == nil {
+			return r.sink, nil
+		}
+		if r.sink != nil {
+			e := nativePCMCall(ctx, env, func(context.Context) error {
+				e := r.sink.Release(context.Background(), alsapcm.Immediate)
+				<-r.sink.Done()
+				return e
+			})
+			return nil, errors.Join(ctx.Err(), r.err, e)
+		}
+		return nil, errors.Join(ctx.Err(), r.err)
+	case <-ctx.Done():
 	}
-	return sink, nil
+	ticks, stop := nativeCleanupTimer(ctx, env)
+	defer stop()
+	select {
+	case <-done:
+		return nil, errors.Join(ctx.Err(), workerErr)
+	case <-ticks:
+		select {
+		case <-done:
+			return nil, errors.Join(ctx.Err(), workerErr)
+		default:
+			return nil, &nativePendingWorker{cause: ctx.Err(), done: done}
+		}
+	}
+}
+
+// The opener/PCM worker gets only the remainder of the run deadline, capped at
+// two seconds from cancellation. Deadline cancellation never rearms an allowance.
+func nativeCleanupTimer(ctx context.Context, env outputDSDTestEnv) (<-chan time.Time, func()) {
+	deadline := env.now().Add(2 * time.Second)
+	if !env.deadline.IsZero() && env.deadline.Before(deadline) {
+		deadline = env.deadline
+	}
+	if errors.Is(context.Cause(ctx), context.DeadlineExceeded) || !env.now().Before(deadline) {
+		expired := make(chan time.Time)
+		close(expired)
+		return expired, func() {}
+	}
+	return env.at(deadline)
 }
 
 type nativePendingWorker struct {
@@ -623,3 +690,19 @@ func (e *nativePendingWorker) Unwrap() []error {
 	return []error{alsapcm.ErrReleaseUnconfirmed, e.cause}
 }
 func (e *nativePendingWorker) Completion() <-chan struct{} { return e.done }
+
+// A cancelled Finish may report unconfirmed before cleanup has had its budget.
+// Successful Release confirms that fence; other errors remain in the report.
+func nativeConfirmedCancellation(e error) error {
+	if e == alsapcm.ErrReleaseUnconfirmed {
+		return nil
+	}
+	if joined, ok := e.(interface{ Unwrap() []error }); ok {
+		var kept []error
+		for _, v := range joined.Unwrap() {
+			kept = append(kept, nativeConfirmedCancellation(v))
+		}
+		return errors.Join(kept...)
+	}
+	return e
+}

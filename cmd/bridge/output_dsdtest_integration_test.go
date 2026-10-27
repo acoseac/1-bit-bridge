@@ -425,7 +425,7 @@ func (s *nativeCleanupFailureSink) Release(ctx context.Context, m alsapcm.Releas
 
 // These park beneath the real sinks, not at a replacement playback function.
 func TestNativeIntegrationPendingWorkers(t *testing.T) {
-	for _, name := range []string{"native_open", "pcm_open", "admission", "admission_deadline", "teardown"} {
+	for _, name := range []string{"native_open", "pcm_open", "admission", "admission_deadline", "attachment_deadline", "teardown"} {
 		t.Run(name, func(t *testing.T) {
 			h, k, _ := realNativeRig(t)
 			ctx, cancel := context.WithCancel(context.Background())
@@ -438,13 +438,25 @@ func TestNativeIntegrationPendingWorkers(t *testing.T) {
 			case "teardown":
 				entered, release = k.ParkNextClose()
 				k.Free()
-			case "admission", "admission_deadline":
+			case "admission", "admission_deadline", "attachment_deadline":
 				in, gate := make(chan struct{}), make(chan struct{})
 				entered = in
 				var once sync.Once
 				release = func() { once.Do(func() { close(gate) }) }
-				h.env.resolve = func(context.Context, string) (nativeEndpoint, func(alsapcm.NodeInfo) error, error) {
-					return nativeEndpoint{}, func(alsapcm.NodeInfo) error { close(in); <-gate; return nil }, nil
+				if name == "attachment_deadline" {
+					attachment := h.env.attachment
+					var calls atomic.Int32
+					h.env.attachment = func(card int) (qualification.Attachment, error) {
+						if calls.Add(1) == 2 {
+							close(in)
+							<-gate
+						}
+						return attachment(card)
+					}
+				} else {
+					h.env.resolve = func(context.Context, string) (nativeEndpoint, func(alsapcm.NodeInfo) error, error) {
+						return nativeEndpoint{}, func(alsapcm.NodeInfo) error { close(in); <-gate; return nil }, nil
+					}
 				}
 			}
 			defer release()
@@ -464,6 +476,26 @@ func TestNativeIntegrationPendingWorkers(t *testing.T) {
 				}
 				return controls(card)
 			}
+			completionObserved := make(chan struct{})
+			baseOpen := h.env.open
+			h.env.open = func(ctx context.Context, c alsapcm.DSDConfig) (nativeTestSink, error) {
+				sink, e := baseOpen(ctx, c)
+				var pending interface{ Completion() <-chan struct{} }
+				if errors.As(e, &pending) {
+					e = &nativeObservedPending{error: e, pending: pending, entered: completionObserved}
+				}
+				return sink, e
+			}
+			armed := make(chan time.Time, 1)
+			cleanupTicks := make(chan time.Time)
+			baseAt := h.env.at
+			h.env.at = func(at time.Time) (<-chan time.Time, func()) {
+				if at.Equal(time.Unix(5, 0)) {
+					return baseAt(at)
+				}
+				armed <- at
+				return cleanupTicks, func() {}
+			}
 			answer := make(chan int, 1)
 			go func() { answer <- runOutputDSDTest(ctx, h.args, h.env, io.Discard, io.Discard) }()
 			select {
@@ -472,23 +504,42 @@ func TestNativeIntegrationPendingWorkers(t *testing.T) {
 				t.Fatal("real worker never parked")
 			}
 			stopped.Store(true)
-			cancelledAt := time.Now()
-			if name == "admission_deadline" {
+			if name == "admission_deadline" || name == "attachment_deadline" {
 				h.ticks <- h.env.now()
 			} else if name != "teardown" {
 				cancel()
+				select {
+				case at := <-armed:
+					if !at.Equal(time.Unix(2, 0)) {
+						t.Errorf("cleanup deadline=%v", at)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("cleanup clock not armed")
+				}
+				if name == "native_open" || name == "admission" {
+					select {
+					case <-completionObserved:
+					case code := <-answer:
+						t.Fatalf("returned without joining inner completion: %d", code)
+					case <-time.After(time.Second):
+						t.Fatal("inner completion fence never observed")
+					}
+				}
+				select {
+				case code := <-answer:
+					t.Fatalf("returned before expiry: %d", code)
+				default:
+				}
+				close(cleanupTicks)
 			}
 			if name == "teardown" {
 				k.AdvanceUnwatched(2 * time.Second)
 			}
 			end := "incomplete"
-			if name == "admission_deadline" {
+			if name == "admission_deadline" || name == "attachment_deadline" {
 				end = "deadline"
 			}
 			r := nativeReportResult(t, h, answer, 1, end)
-			if name != "teardown" && time.Since(cancelledAt) < 1900*time.Millisecond {
-				t.Error("harness abandoned the opener before its original allowance expired")
-			}
 			if !strings.Contains(r.Error, "unconfirmed") {
 				t.Error("missing unconfirmed evidence", r.Error)
 			}
@@ -507,4 +558,24 @@ func TestNativeIntegrationPendingWorkers(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Observe the real opener's completion fence without a wall-clock sleep.
+type nativeObservedPending struct {
+	error
+	pending interface{ Completion() <-chan struct{} }
+	entered chan struct{}
+	once    sync.Once
+}
+
+func (e *nativeObservedPending) Unwrap() error { return e.error }
+func (e *nativeObservedPending) Completion() <-chan struct{} {
+	e.once.Do(func() { close(e.entered) })
+	return e.pending.Completion()
+}
+func (e *nativeObservedPending) CompletionResult() error {
+	if r, ok := e.pending.(interface{ CompletionResult() error }); ok {
+		return r.CompletionResult()
+	}
+	return e.error
 }

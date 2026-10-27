@@ -98,8 +98,9 @@ There is no Ctrl-C-only calibration exception. Type confirmations only when prom
 A confirmed Stop reports `End: stopped`; quit reports `End: quit`; both exit 0.
 Cleanup failure preserves that End, records Error, exits 1, and never opens a successor.
 The seconds limit is wall clock from the first open, across all pauses and track changes;
-it never resets. Expiry reports `End: deadline`, stops admission and allows at most
-2 s for confirmed cleanup. Natural EOF uses that same shared release deadline.
+it never resets. Expiry reports `End: deadline` and stops admission. An active native
+sink retains its existing shared release budget (at most 2 s); opener and PCM worker
+waits cannot extend the run deadline. Natural EOF uses that same shared release deadline.
 Pause for more than 30 seconds; verify the PCM node closes, then explicitly resume. Both DSD pause
 methods use 30 s, irrespective of player config. Repeat busy reopen, unplug, Stop during a tail,
 and under library scan load. A fault never recovers or autoplays; a failed harness action ends the run.
@@ -162,7 +163,7 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-QualificationVersion is **3** and Contact.SchemaVersion is **2**. All older
+QualificationVersion is **4** and Contact.SchemaVersion is **2**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
 either audition leg opens. Missing fields are not zero. Both opened-node checks
@@ -209,3 +210,29 @@ control, configuration, USB identity and file-reader directories, plus the share
 CLI output/input code and config-path resolver. Overlay generation fails for a missing/changed or residual build tag,
 or missing fake support. CI also requires a passing NativeIntegration test line.
 Linux amd64/arm64 execution and ABI gates above remain pending on this Darwin host.
+
+## Round 4 harness exit and input rules
+
+Version 4 invalidates version 3 receipts. A successfully opened sink keeps a cleanup
+owner through cancellation: Stop/quit exits 0 only after acknowledgement, and cleanup
+errors stay failures. A cancelled Finish is not an expired budget; the harness joins
+the sink's original release deadline. At expiry it reports unconfirmed and exits 1.
+Native opener and PCM worker waits use the injected clock, capped by the remaining
+run deadline and two seconds from cancellation; an expired run grants neither a
+fresh allowance nor final reads or successors. Active native sink teardown still
+uses its existing shared two-second release budget.
+
+Admission and final validation recheck cancellation after reading attachment and
+before reading controls, including when the attachment read returns after exit.
+Coverage is per occurrence and per sink, limited to accepted content frames and
+Played; excess from one sink never completes an unfed successor. At a boundary the
+current fixture remains the outgoing one until some content of its successor has
+played. Both playback and the completion-time key drain ignore and record
+`p:first-fixture` when that fixture is the first, for any list length.
+
+Confirmation input preserves every echoed printable ASCII byte, including spaces;
+Backspace/Ctrl-H removes the preceding byte. CR, LF and CRLF each terminate one line,
+including a split CRLF arriving at the next prompt. Tabs and non-ASCII input fail
+with a visible printable-ASCII diagnostic. Nothing is silently trimmed or discarded.
+The version gate also guards the shared CLI filename and platform config-directory
+resolver; configpath and host-tree wiring remain guarded.

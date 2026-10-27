@@ -125,3 +125,43 @@ The full-harness deadline case also pins a late admission: after its blocked
 checker returns, it rechecks the run context before any control read. A parent
 context alone misses the harness wall deadline. Unsupported injected readers
 refuse before opening audio unless they provide an explicit Interrupt contract.
+
+## Round 4 — 2026-10-27, PR #1355 third merge-gate pass
+
+Qualification version 4. C1's successful-open/cancel publication race is closed by
+an unbuffered ownership handoff: either the caller receives the sink and owns its
+release, or the opener worker keeps it through Done. The remaining-budget waiter
+retains the worker fence and cleanup errors. C2/A1 now joins Release on the original
+sink deadline even when Finish returned cancellation with ErrReleaseUnconfirmed;
+a confirmed release removes only that transient marker, retaining cancellation and
+other faults. The sink lifecycle is unchanged. A2's opener/PCM waits use env.now/at,
+never later than the run deadline and never a second two-second allowance. The real
+integration test advances injected time instead of sleeping 1900 ms.
+
+C3 checks cancellation between attachment and controls in both admission and final
+validation. Its integration test parks attachment itself; late workers cannot start
+controls after cancellation. A3 uses one played-frame current-occurrence rule in
+playback and the post-done key drain: the first occurrence remains current at its
+exact end until successor content has played. A4 bounds coverage to frames actually
+accepted from each occurrence by that sink, capped at its content length; duplicate
+IDs and multi-sink partial runs cannot borrow excess Played from another occurrence.
+
+A5's suggested configpath and host-tree gaps were already guarded (configpath.go
+explicitly, output_host.go via output_, usbid/ by prefix). Grep found two actual
+transitive dependencies: cli_consts.go's defaultConfigPath and packaging.go's
+DefaultConfigDir. Both now have unchanged-version rejection cases, beside the
+already guarded loader and host-tree file; the guard does not cover all cmd/bridge.
+A6 preserves exactly the echoed edited line, accepts CR/LF/CRLF as one terminator,
+and refuses tabs/non-ASCII visibly. A split CRLF is swallowed even if its LF arrives
+after the next prompt starts. Runbook records each behavior. No hardware, Linux
+execution/ABI qualification, production DSD admission or 2c.2 integration is claimed.
+
+Review precision: A4's proposed production overcount is not reachable from silence
+or padding: sink_dsd_writer.go's measureNative counts contentAmong and clamps Played
+to submitted bits. feedNative feeds the remaining list into the same sink. The new
+accepted-frame bounds are defensive at the harness seam; excess-Played mocks supply
+the negative evidence, not a claimed real-sink trace. A3's post-done first-fixture
+case on a multi-item list likewise needs an early-completing mock; real Finish waits
+for all fed content. The exact first-boundary playback case is reachable, and both
+branches now share the rule. A1's already-expired teardown case must still exit
+unconfirmed; the corrected reachable case is cancellation before expiry (C2).

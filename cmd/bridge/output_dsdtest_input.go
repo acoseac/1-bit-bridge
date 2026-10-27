@@ -97,6 +97,7 @@ func newNativeConsole(ctx context.Context, source io.Reader, cancel context.Canc
 			close(c.done)
 		}()
 		var line strings.Builder
+		previousCR := false
 		for {
 			if ctx.Err() != nil {
 				return
@@ -113,6 +114,11 @@ func newNativeConsole(ctx context.Context, source io.Reader, cancel context.Canc
 				}
 				return
 			}
+			if previousCR && b == '\n' {
+				previousCR = false
+				continue
+			}
+			previousCR = b == '\r'
 			if b == 3 {
 				cancel(context.Canceled)
 				return
@@ -122,7 +128,7 @@ func newNativeConsole(ctx context.Context, source io.Reader, cancel context.Canc
 					if c.echo != nil {
 						fmt.Fprint(c.echo, "\n")
 					}
-					v := strings.TrimSpace(line.String())
+					v := line.String()
 					line.Reset()
 					if v == "s" || v == "q" {
 						cancel(&nativeStop{v[0]})
@@ -146,7 +152,15 @@ func newNativeConsole(ctx context.Context, source io.Reader, cancel context.Canc
 						continue
 					}
 					if b < 32 || b > 126 {
-						continue
+						e := errors.New("confirmation requires printable ASCII; tabs and non-ASCII bytes are refused")
+						if c.echo != nil {
+							fmt.Fprintln(c.echo, "\n"+e.Error())
+						}
+						select {
+						case c.lines <- nativeLine{err: e}:
+						case <-ctx.Done():
+						}
+						return
 					}
 					if c.echo != nil {
 						fmt.Fprintf(c.echo, "%c", b)

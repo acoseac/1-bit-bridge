@@ -7,7 +7,7 @@ import (
 )
 
 func TestQualificationDependencyGate(t *testing.T) {
-	for _, p := range []string{"internal/player/binding/binding.go", "internal/alsa/sysfs.go", "internal/player/decode/dsf.go", "internal/player/decode/dff.go", "internal/player/format/format.go", "internal/fsutil/notafile.go", "internal/alsapcm/sink_run.go", "cmd/bridge/output_pcmtest_keys_unix.go", "cmd/bridge/configpath.go"} {
+	for _, p := range []string{"internal/player/binding/binding.go", "internal/alsa/sysfs.go", "internal/player/decode/dsf.go", "internal/player/decode/dff.go", "internal/player/format/format.go", "internal/fsutil/notafile.go", "internal/alsapcm/sink_run.go", "cmd/bridge/output_pcmtest_keys_unix.go", "cmd/bridge/configpath.go", "cmd/bridge/cli_consts.go", "cmd/bridge/output_host.go", "internal/packaging/packaging.go"} {
 		t.Run(filepath.Base(p), func(t *testing.T) {
 			dir := t.TempDir()
 			if e := os.MkdirAll(filepath.Join(dir, ".git/refs/heads"), 0755); e != nil {
