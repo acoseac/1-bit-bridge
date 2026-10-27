@@ -46,14 +46,21 @@ func (s *DSDSink) loopNative() {
 			s.mu.Unlock()
 			if mode == TrackChange && active && !paused && s.dev != nil {
 				if e := s.nativeSilence(nativeFrames(s.params.RateHz, s.cfg.Tail), true, false); e != nil && !s.immediate() {
-					s.setNativeError(e)
+					s.setNativeError(errors.Join(ErrReleaseUnconfirmed, e))
 					return
 				}
 				if !s.immediate() {
-					if e := s.dev.Drain(s.releaseCtx, nativeReleaseBudget-nativeCloseMargin); e != nil && !s.immediate() {
-						s.setNativeError(e)
+					remaining := s.releaseDeadline.Sub(s.seams.now()) - nativeCloseMargin
+					if remaining <= 0 {
+						s.setNativeError(errors.Join(ErrReleaseUnconfirmed, context.DeadlineExceeded))
+						return
+					}
+					if e := s.dev.Drain(s.releaseCtx, remaining); e != nil && !s.immediate() {
+						s.setNativeError(errors.Join(ErrReleaseUnconfirmed, e))
 					} else if e == nil {
-						_ = s.measureNative()
+						if e := s.measureNative(); e != nil {
+							s.setNativeError(e)
+						}
 					}
 				}
 			}
@@ -134,6 +141,7 @@ func (s *DSDSink) loopNative() {
 func (s *DSDSink) setNativeError(e error) {
 	s.mu.Lock()
 	s.err = errors.Join(s.err, e)
+	s.beginReleaseLocked(Immediate)
 	s.notify()
 	s.mu.Unlock()
 }

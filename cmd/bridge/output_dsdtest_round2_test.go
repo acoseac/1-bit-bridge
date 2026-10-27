@@ -22,7 +22,7 @@ func TestNativeMatrixStopSkipsPCM(t *testing.T) {
 			r, w := io.Pipe()
 			defer r.Close()
 			defer w.Close()
-			h.env.stdin = r
+			h.env.stdin = nativePipeInput{r}
 			h.env.tty = true
 			var pcm atomic.Int32
 			h.env.openPCM = func(context.Context, alsapcm.SinkConfig) (nativePCMSink, error) {

@@ -21,7 +21,7 @@ func nativeKernel(t *testing.T) *fakeKernel {
 }
 func nativeSink(t *testing.T, k *fakeKernel, c DSDConfig) *DSDSink {
 	t.Helper()
-	s, e := openDSDSink(context.Background(), c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(k, k.now, ep, c) }, now: k.now})
+	s, e := openDSDSink(context.Background(), c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(k, k.now, ep, c) }, now: k.now, at: k.nativeAt})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -189,7 +189,7 @@ func TestNativeBufferAndPolicyBounds(t *testing.T) {
 			case "rate":
 				c.BitRate = 123
 			}
-			s, e := openDSDSink(context.Background(), c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(k, k.now, ep, c) }, now: k.now})
+			s, e := openDSDSink(context.Background(), c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(k, k.now, ep, c) }, now: k.now, at: k.nativeAt})
 			if e == nil {
 				_ = s.Release(context.Background(), Immediate)
 				t.Fatal("accepted invalid setup")
@@ -238,7 +238,7 @@ func TestNativeTrackChangeCutoff(t *testing.T) {
 func TestNativeReleaseEscalation(t *testing.T) {
 	k := nativeKernel(t)
 	g := &nativePollGate{sys: k, entered: make(chan struct{}), gate: make(chan struct{})}
-	s, e := openDSDSink(context.Background(), nativeConfig(), nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(g, k.now, ep, c) }, now: k.now})
+	s, e := openDSDSink(context.Background(), nativeConfig(), nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(g, k.now, ep, c) }, now: k.now, at: k.nativeAt})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -253,12 +253,22 @@ func TestNativeReleaseEscalation(t *testing.T) {
 	go func() { answer <- s.Release(context.Background(), TrackChange) }()
 	await(t, g.entered, "cancellable drain seam")
 	start := time.Now()
-	e = s.Release(context.Background(), Immediate)
-	if e != nil || time.Since(start) > time.Second {
-		t.Errorf("escalation did not cancel drain promptly: %v after %v", e, time.Since(start))
+	immediate := make(chan error, 1)
+	go func() { immediate <- s.Release(context.Background(), Immediate) }()
+	select {
+	case e = <-immediate:
+		if e != nil {
+			t.Errorf("escalation failed: %v", e)
+		}
+	case <-time.After(time.Second):
+		t.Errorf("escalation did not cancel drain promptly after %v", time.Since(start))
+		// Let a defective escalation end through the independently tested
+		// release clock, so the mutation produces an assertion, not a hang.
+		k.advanceNow(2 * time.Second)
+		<-immediate
 	}
-	await(t, s.Done(), "Immediate cleanup")
 	close(g.gate)
+	await(t, s.Done(), "Immediate cleanup")
 	<-answer
 	k.checkClosedEach(t)
 }

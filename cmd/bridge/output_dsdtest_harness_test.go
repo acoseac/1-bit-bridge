@@ -112,7 +112,7 @@ func harnessRig(t *testing.T) *nativeHarnessRig {
 	mustWrite("mixer.txt", []byte("# card=0\nno controls\n"))
 	a := qualification.Attachment{BootID: "boot", Port: "port", Manufacturer: "iFi", Product: "GO bar", BCDDevice: "0123", DevNum: 2}
 	controls := alsactl.Snapshot{}
-	h.contact = qualification.Contact{SchemaVersion: 1, QualificationVersion: qualification.Version, Tuple: qualification.Tuple{Format: "DSD_U32_BE", BitRate: 2822400, Pause: "kernel"}, Attachment: a, MixerHash: controls.Hash(), ManifestHash: fmt.Sprintf("%x", sha256.Sum256(b)), KnobPosition: "1", PCMAudible: qualification.PCMConfirmation, DSDMatched: qualification.DSDConfirmation}
+	h.contact = qualification.Contact{Device: new(int), Subdevice: new(int), SchemaVersion: 2, QualificationVersion: qualification.Version, Tuple: qualification.Tuple{Format: "DSD_U32_BE", BitRate: 2822400, Pause: "kernel"}, Attachment: a, MixerHash: controls.Hash(), ManifestHash: fmt.Sprintf("%x", sha256.Sum256(b)), KnobPosition: "1", PCMAudible: qualification.PCMConfirmation, DSDMatched: qualification.DSDConfirmation}
 	b, _ = json.Marshal(h.contact)
 	mustWrite("contact.json", b)
 	h.args = []string{"--ack-level=contact-position", "--format=DSD_U32_BE", "--bit-rate=2822400", "--seconds=5", "--pause-method=kernel", "--tail-ms=0", "--prefill-ms=0", "--scenario=interactive", "--config=fake", "--manifest=" + filepath.Join(h.dir, "manifest.json"), "--fixtures=" + h.dir, "--contact-report=" + filepath.Join(h.dir, "contact.json"), "--mixer-snapshot=" + filepath.Join(h.dir, "mixer.txt"), "--report=" + filepath.Join(h.dir, "report.json"), "dsd", "dsd", "dsd", "dsd"}
@@ -121,8 +121,8 @@ func harnessRig(t *testing.T) *nativeHarnessRig {
 			t.Errorf("deadline reset: %v", at)
 		}
 		return h.ticks, func() {}
-	}, stdin: strings.NewReader(""), controls: func(int) (alsactl.Snapshot, error) { return controls, nil }, attachment: func(int) (qualification.Attachment, error) { return a, nil }, resolve: func(context.Context, string) (alsapcm.Endpoint, func(alsapcm.NodeInfo) error, error) {
-		return alsapcm.Endpoint{}, nil, nil
+	}, stdin: strings.NewReader(""), controls: func(int) (alsactl.Snapshot, error) { return controls, nil }, attachment: func(int) (qualification.Attachment, error) { return a, nil }, resolve: func(context.Context, string) (nativeEndpoint, func(alsapcm.NodeInfo) error, error) {
+		return nativeEndpoint{}, nil, nil
 	}, openPCM: func(context.Context, alsapcm.SinkConfig) (nativePCMSink, error) { return nativePCMStub{}, nil }}
 	h.env.open = func(_ context.Context, c alsapcm.DSDConfig) (nativeTestSink, error) {
 		h.opens.Add(1)
@@ -156,7 +156,7 @@ func TestNativeHarnessWallClock(t *testing.T) {
 	r, w := io.Pipe()
 	defer r.Close()
 	defer w.Close()
-	h.env.stdin = r
+	h.env.stdin = nativePipeInput{r}
 	h.env.tty = true
 	result := make(chan int, 1)
 	go func() { result <- runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, io.Discard) }()
@@ -325,3 +325,9 @@ type nativePCMStub struct{}
 func (nativePCMStub) Write(_ context.Context, b []byte) (int, error) { return len(b), nil }
 func (nativePCMStub) Drain(context.Context) error                    { return nil }
 func (nativePCMStub) Close() error                                   { return nil }
+
+// nativePipeInput is test-owned; its explicit interrupt contract permits closing
+// its own pipe, while production file readers remain caller-owned and open.
+type nativePipeInput struct{ *io.PipeReader }
+
+func (r nativePipeInput) Interrupt() { _ = r.CloseWithError(context.Canceled) }

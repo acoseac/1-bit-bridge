@@ -53,6 +53,7 @@ type Attachment struct {
 
 // Contact is a provisional receipt; its confirmations are typed, not signed.
 type Contact struct {
+	Device, Subdevice                                             *int
 	SchemaVersion, QualificationVersion                           int
 	Tuple                                                         Tuple
 	Attachment                                                    Attachment
@@ -136,8 +137,8 @@ func (m Manifest) CheckAssets(root string) error {
 		if e != nil {
 			return e
 		}
-		if !st.Mode().IsRegular() {
-			return errors.New("fixture is not regular")
+		if fixtureKind(st.Mode()) != "" {
+			return errors.New("fixture is a directory or special file")
 		}
 		file, e := r.Open(f.Path)
 		if e != nil {
@@ -148,9 +149,9 @@ func (m Manifest) CheckAssets(root string) error {
 			file.Close()
 			return e
 		}
-		if !st.Mode().IsRegular() {
+		if fixtureKind(st.Mode()) != "" {
 			file.Close()
-			return errors.New("fixture is not regular")
+			return errors.New("fixture is a directory or special file")
 		}
 		h := sha256.New()
 		_, e = io.Copy(h, io.LimitReader(file, 64<<20+1))
@@ -169,9 +170,12 @@ func (m Manifest) CheckAssets(root string) error {
 }
 
 // Validate checks a receipt against the current tuple and live attachment.
-func (c Contact) Validate(t Tuple, a Attachment, mixer, manifest string) error {
-	if c.SchemaVersion != 1 || c.QualificationVersion != Version {
+func (c Contact) Validate(t Tuple, a Attachment, device, subdevice int, mixer, manifest string) error {
+	if c.SchemaVersion != 2 || c.QualificationVersion != Version {
 		return errors.New("contact version mismatch")
+	}
+	if c.Device == nil || c.Subdevice == nil || *c.Device != device || *c.Subdevice != subdevice || device < 0 || subdevice < 0 {
+		return errors.New("contact endpoint mismatch or missing")
 	}
 	if c.Tuple != t {
 		return errors.New("contact tuple mismatch")
@@ -201,3 +205,6 @@ func ReadEvidenceFile(path string) ([]byte, error) {
 	}
 	return b, e
 }
+
+// Use the shared file-kind policy: a cloud placeholder can still hydrate.
+func fixtureKind(mode os.FileMode) string { return fsutil.NotAFile(mode) }

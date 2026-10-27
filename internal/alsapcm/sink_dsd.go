@@ -62,6 +62,7 @@ type DSDSink struct {
 	pauseEpoch        uint64
 	waitIdle          bool
 	releaseDeadline   time.Time
+	releaseExpired    chan struct{}
 	mu                sync.Mutex
 	producer          sync.Mutex
 	cfg               DSDConfig
@@ -101,9 +102,13 @@ type DSDSink struct {
 type nativeSeams struct {
 	open func(Endpoint, Config) (*Device, error)
 	now  func() time.Time
+	at   func(time.Time) (<-chan time.Time, func())
 }
 
-// OpenDSDSink opens an inert native sink. Activate is mandatory.
+// OpenDSDSink opens an inert native sink. Activate is mandatory. A cancelled
+// opener error exposes Completion() <-chan struct{} and CompletionResult() error;
+// that fence covers the worker's open, admission and cleanup. Callers must not
+// open a successor or inspect final controls while that worker is outstanding.
 func OpenDSDSink(ctx context.Context, c DSDConfig) (*DSDSink, error) {
 	return openNativeBounded(ctx, c, nativeSeams{open: openNativeDevice, now: time.Now})
 }
@@ -149,6 +154,12 @@ func openDSDSink(ctx context.Context, c DSDConfig, h nativeSeams) (*DSDSink, err
 	}
 	if err = ctx.Err(); err != nil {
 		return nil, err
+	}
+	if h.at == nil {
+		h.at = func(at time.Time) (<-chan time.Time, func()) {
+			timer := time.NewTimer(at.Sub(h.now()))
+			return timer.C, func() { timer.Stop() }
+		}
 	}
 	w := format.DSDWordBytes(c.Format)
 	dc := Config{RateHz: c.BitRate / (8 * w), Format: c.Format, BufferTime: c.BufferTime}
@@ -209,7 +220,7 @@ func (s *DSDSink) Activate(ctx context.Context, gen uint64) error {
 		return e
 	}
 	s.mu.Lock()
-	if s.revoked || s.releasing || s.paused || s.activation != nil || gen == 0 || gen <= s.generation {
+	if s.err != nil || s.released || s.revoked || s.releasing || s.paused || s.activation != nil || gen == 0 || gen <= s.generation {
 		s.mu.Unlock()
 		return errors.New("native activation fenced")
 	}
@@ -281,7 +292,7 @@ func (s *DSDSink) WriteDSD(ctx context.Context, id uint64, left, right []byte, o
 				at := offset + accepted + i
 				dst := s.carryBits + i
 				bit := (src[at/8] >> uint(7-at%8)) & 1
-				s.carry[ch][dst/8] |= bit << uint(7-dst%8)
+				s.carry[ch][dst/8] = (s.carry[ch][dst/8] &^ (1 << uint(7-dst%8))) | (bit << uint(7-dst%8))
 			}
 		}
 		accepted += n
@@ -381,8 +392,19 @@ func (s *DSDSink) beginReleaseLocked(m ReleaseMode) {
 	if !s.releasing {
 		s.releasing = true
 		s.mode = m
-		s.releaseDeadline = time.Now().Add(nativeReleaseBudget)
-		s.releaseCtx, s.releaseCancel = context.WithDeadline(context.Background(), s.releaseDeadline)
+		s.releaseDeadline = s.seams.now().Add(nativeReleaseBudget)
+		s.releaseCtx, s.releaseCancel = context.WithCancel(context.Background())
+		s.releaseExpired = make(chan struct{})
+		ticks, stop := s.seams.at(s.releaseDeadline)
+		go func() {
+			defer stop()
+			select {
+			case <-ticks:
+				s.releaseCancel()
+				close(s.releaseExpired)
+			case <-s.done:
+			}
+		}()
 	} else if m == Immediate {
 		s.mode = Immediate
 	}
@@ -414,16 +436,19 @@ func (s *DSDSink) waitRelease(ctx context.Context) error {
 	default:
 	}
 	s.mu.Lock()
-	deadline := s.releaseDeadline
+	expired := s.releaseExpired
 	s.mu.Unlock()
-	timer := time.NewTimer(time.Until(deadline))
-	defer timer.Stop()
 	select {
 	case <-s.done:
 		return s.result()
 	case <-ctx.Done():
 		return errors.Join(ErrReleaseUnconfirmed, ctx.Err())
-	case <-timer.C:
+	case <-expired:
+		select {
+		case <-s.done:
+			return s.result()
+		default:
+		}
 		return ErrReleaseUnconfirmed
 	}
 }

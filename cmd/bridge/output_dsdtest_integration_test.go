@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -62,7 +63,7 @@ func realNativeRig(t *testing.T) (*nativeHarnessRig, *alsapcm.FakeKernel, *io.Pi
 	h.args = h.args[:len(h.args)-3] // one 3-second occurrence; all input fits in the native ring
 	r, w := io.Pipe()
 	t.Cleanup(func() { r.Close(); w.Close() })
-	h.env.stdin = r
+	h.env.stdin = nativePipeInput{r}
 	h.env.tty = true
 	h.env.openPCM = func(ctx context.Context, c alsapcm.SinkConfig) (nativePCMSink, error) { return k.OpenSink(ctx, c) }
 	h.env.open = func(ctx context.Context, c alsapcm.DSDConfig) (nativeTestSink, error) {
@@ -420,4 +421,90 @@ type nativeCleanupFailureSink struct{ nativeTestSink }
 
 func (s *nativeCleanupFailureSink) Release(ctx context.Context, m alsapcm.ReleaseMode) error {
 	return errors.Join(s.nativeTestSink.Release(ctx, m), alsapcm.ErrReleaseUnconfirmed, errors.New("cleanup failure"))
+}
+
+// These park beneath the real sinks, not at a replacement playback function.
+func TestNativeIntegrationPendingWorkers(t *testing.T) {
+	for _, name := range []string{"native_open", "pcm_open", "admission", "admission_deadline", "teardown"} {
+		t.Run(name, func(t *testing.T) {
+			h, k, _ := realNativeRig(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var entered <-chan struct{}
+			var release func()
+			switch name {
+			case "native_open", "pcm_open":
+				entered, release = k.ParkNextOpen()
+			case "teardown":
+				entered, release = k.ParkNextClose()
+				k.Free()
+			case "admission", "admission_deadline":
+				in, gate := make(chan struct{}), make(chan struct{})
+				entered = in
+				var once sync.Once
+				release = func() { once.Do(func() { close(gate) }) }
+				h.env.resolve = func(context.Context, string) (nativeEndpoint, func(alsapcm.NodeInfo) error, error) {
+					return nativeEndpoint{}, func(alsapcm.NodeInfo) error { close(in); <-gate; return nil }, nil
+				}
+			}
+			defer release()
+			if name == "pcm_open" {
+				for i, a := range h.args {
+					if a == "--scenario=interactive" {
+						h.args[i] = "--scenario=matrix"
+					}
+				}
+			}
+			var stopped atomic.Bool
+			var reads atomic.Int32
+			controls := h.env.controls
+			h.env.controls = func(card int) (alsactl.Snapshot, error) {
+				if stopped.Load() {
+					reads.Add(1)
+				}
+				return controls(card)
+			}
+			answer := make(chan int, 1)
+			go func() { answer <- runOutputDSDTest(ctx, h.args, h.env, io.Discard, io.Discard) }()
+			select {
+			case <-entered:
+			case <-time.After(3 * time.Second):
+				t.Fatal("real worker never parked")
+			}
+			stopped.Store(true)
+			cancelledAt := time.Now()
+			if name == "admission_deadline" {
+				h.ticks <- h.env.now()
+			} else if name != "teardown" {
+				cancel()
+			}
+			if name == "teardown" {
+				k.AdvanceUnwatched(2 * time.Second)
+			}
+			end := "incomplete"
+			if name == "admission_deadline" {
+				end = "deadline"
+			}
+			r := nativeReportResult(t, h, answer, 1, end)
+			if name != "teardown" && time.Since(cancelledAt) < 1900*time.Millisecond {
+				t.Error("harness abandoned the opener before its original allowance expired")
+			}
+			if !strings.Contains(r.Error, "unconfirmed") {
+				t.Error("missing unconfirmed evidence", r.Error)
+			}
+			if reads.Load() != 0 {
+				t.Error("final controls read before worker completion")
+			}
+			release()
+			// The real node eventually closes; no successor has been opened in the meantime.
+			k.Await(t, "eventual cleanup", func(v alsapcm.KernelView) bool { return v.Opens > 0 && v.Opens == v.Closes })
+			k.CheckClosedEach(t)
+			if reads.Load() != 0 {
+				t.Error("cancelled opener read controls after returning to the caller")
+			}
+			if v := k.View(); v.Opens != 1 {
+				t.Errorf("successor opens=%d", v.Opens)
+			}
+		})
+	}
 }

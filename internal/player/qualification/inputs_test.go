@@ -66,7 +66,7 @@ func TestQualificationAssets(t *testing.T) {
 func TestQualificationContact(t *testing.T) {
 	a := Attachment{BootID: "boot", Port: "port", Manufacturer: "iFi", Product: "GO bar", BCDDevice: "0123", Card: 5, DevNum: 3}
 	tuple := Tuple{Format: "DSD_U32_BE", BitRate: 2822400, Pause: "kernel"}
-	base := Contact{SchemaVersion: 1, QualificationVersion: Version, Tuple: tuple, Attachment: a, MixerHash: "m", ManifestHash: "f", KnobPosition: "just audible", PCMAudible: PCMConfirmation, DSDMatched: DSDConfirmation}
+	base := Contact{Device: new(int), Subdevice: new(int), SchemaVersion: 2, QualificationVersion: Version, Tuple: tuple, Attachment: a, MixerHash: "m", ManifestHash: "f", KnobPosition: "just audible", PCMAudible: PCMConfirmation, DSDMatched: DSDConfirmation}
 	for _, name := range []string{"valid", "tuple", "replug", "restart", "mixer", "manifest", "pcm", "dsd", "version"} {
 		t.Run(name, func(t *testing.T) {
 			c := base
@@ -88,7 +88,7 @@ func TestQualificationContact(t *testing.T) {
 			case "version":
 				c.QualificationVersion++
 			}
-			e := c.Validate(tuple, a, "m", "f")
+			e := c.Validate(tuple, a, 0, 0, "m", "f")
 			if (e == nil) != (name == "valid") {
 				t.Fatalf("contact: %v", e)
 			}

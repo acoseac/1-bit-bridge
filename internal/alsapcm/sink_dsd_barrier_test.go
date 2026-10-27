@@ -63,7 +63,7 @@ func TestNativeTeardownOwnership(t *testing.T) {
 			if tc.fail {
 				a.closeErr = errors.New("close failed")
 			}
-			s, e := openDSDSink(context.Background(), nativeConfig(), nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(a, k.now, ep, c) }, now: k.now})
+			s, e := openDSDSink(context.Background(), nativeConfig(), nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(a, k.now, ep, c) }, now: k.now, at: k.nativeAt})
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -138,7 +138,7 @@ func TestNativePauseDuringActivation(t *testing.T) {
 func TestNativeReleaseDeadline(t *testing.T) {
 	k := nativeKernel(t)
 	a := &nativeAuditSys{sys: k, t: t, parked: make(chan struct{}), release: make(chan struct{})}
-	s, e := openDSDSink(context.Background(), nativeConfig(), nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(a, k.now, ep, c) }, now: k.now})
+	s, e := openDSDSink(context.Background(), nativeConfig(), nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(a, k.now, ep, c) }, now: k.now, at: k.nativeAt})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -151,8 +151,16 @@ func TestNativeReleaseDeadline(t *testing.T) {
 	s.mu.Lock()
 	deadline := s.releaseDeadline
 	s.mu.Unlock()
+	k.advanceNow(2 * time.Second)
 	start := time.Now()
-	e = s.Release(context.Background(), Immediate)
+	answer := make(chan error, 1)
+	go func() { answer <- s.Release(context.Background(), Immediate) }()
+	select {
+	case e = <-answer:
+	case <-time.After(100 * time.Millisecond):
+		t.Error("release did not expire after advancing two seconds")
+		return
+	}
 	if !errors.Is(e, ErrReleaseUnconfirmed) || time.Since(start) > 3*time.Second {
 		t.Fatalf("unbounded release %v", e)
 	}
@@ -170,7 +178,7 @@ func TestNativeMutexBoundary(t *testing.T) {
 	a := &nativeAuditSys{sys: k, t: t}
 	c := nativeConfig()
 	c.Prefill = time.Millisecond
-	s, e := openDSDSink(context.Background(), c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(a, k.now, ep, c) }, now: k.now})
+	s, e := openDSDSink(context.Background(), c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(a, k.now, ep, c) }, now: k.now, at: k.nativeAt})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -231,9 +239,7 @@ func TestNativeLateReleaseAcknowledgement(t *testing.T) {
 	if e := s.Release(context.Background(), Immediate); e != nil {
 		t.Fatal(e)
 	}
-	s.mu.Lock()
-	s.releaseDeadline = time.Now().Add(-time.Second)
-	s.mu.Unlock()
+	k.advanceNow(3 * time.Second)
 	for range 100 {
 		if e := s.Release(context.Background(), Immediate); e != nil {
 			t.Fatalf("completed close became unconfirmed: %v", e)

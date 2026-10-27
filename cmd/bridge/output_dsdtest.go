@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -45,6 +44,11 @@ type nativePCMSink interface {
 	Drain(context.Context) error
 	Close() error
 }
+type nativeEndpoint struct {
+	alsapcm.Endpoint
+	Subdevice int
+}
+
 type outputDSDTestEnv struct {
 	openPCM    func(context.Context, alsapcm.SinkConfig) (nativePCMSink, error)
 	open       func(context.Context, alsapcm.DSDConfig) (nativeTestSink, error)
@@ -55,7 +59,7 @@ type outputDSDTestEnv struct {
 	stdin      io.Reader
 	tty        bool
 	goos       string
-	resolve    func(context.Context, string) (alsapcm.Endpoint, func(alsapcm.NodeInfo) error, error)
+	resolve    func(context.Context, string) (nativeEndpoint, func(alsapcm.NodeInfo) error, error)
 }
 
 // productionNativeOpen has its own test guard, in addition to the ALSA guard.
@@ -68,15 +72,25 @@ func productionNativeOpen(ctx context.Context, c alsapcm.DSDConfig) (nativeTestS
 func outputDSDTestCmd(ctx context.Context, args []string, out, errout io.Writer) int {
 	ctx, stopSignal := signal.NotifyContext(ctx, os.Interrupt)
 	defer stopSignal()
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		state, e := term.MakeRaw(int(os.Stdin.Fd()))
+	rc, err := os.Stdin.SyscallConn()
+	if err != nil {
+		fmt.Fprintln(errout, err)
+		return 1
+	}
+	fd := -1
+	if err = rc.Control(func(d uintptr) { fd = int(d) }); err != nil {
+		fmt.Fprintln(errout, err)
+		return 1
+	}
+	if term.IsTerminal(fd) {
+		state, e := term.MakeRaw(fd)
 		if e != nil {
 			fmt.Fprintln(errout, e)
 			return 1
 		}
-		defer term.Restore(int(os.Stdin.Fd()), state)
+		defer term.Restore(fd, state)
 	}
-	env := outputDSDTestEnv{goos: runtime.GOOS, open: productionNativeOpen, controls: (alsactl.Reader{}).Read, now: time.Now, stdin: os.Stdin, tty: term.IsTerminal(int(os.Stdin.Fd())), resolve: resolveNativeTest, openPCM: productionNativePCMOpen}
+	env := outputDSDTestEnv{goos: runtime.GOOS, open: productionNativeOpen, controls: (alsactl.Reader{}).Read, now: time.Now, stdin: os.Stdin, tty: term.IsTerminal(fd), resolve: resolveNativeTest, openPCM: productionNativePCMOpen}
 	env.at = func(at time.Time) (<-chan time.Time, func()) {
 		t := time.NewTimer(time.Until(at))
 		return t.C, func() { t.Stop() }
@@ -94,25 +108,25 @@ func outputDSDTestCmd(ctx context.Context, args []string, out, errout io.Writer)
 	}
 	return runOutputDSDTest(ctx, args, env, out, errout)
 }
-func resolveNativeTest(ctx context.Context, file string) (alsapcm.Endpoint, func(alsapcm.NodeInfo) error, error) {
+func resolveNativeTest(ctx context.Context, file string) (nativeEndpoint, func(alsapcm.NodeInfo) error, error) {
 	cfg, _, e := loadCLIConfig(file)
 	if e != nil {
-		return alsapcm.Endpoint{}, nil, e
+		return nativeEndpoint{}, nil, e
 	}
 	host, _, e := net.SplitHostPort(cfg.ListenAddress)
 	if e != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() || cfg.Output.Player.OpenHome {
-		return alsapcm.Endpoint{}, nil, errors.New("dsd-test requires loopback config with OpenHome off")
+		return nativeEndpoint{}, nil, errors.New("dsd-test requires loopback config with OpenHome off")
 	}
 	inv, e := hostTrees.observer().ObserveContext(ctx)
 	if e != nil {
-		return alsapcm.Endpoint{}, nil, e
+		return nativeEndpoint{}, nil, e
 	}
 	r := binding.Resolve(cfg.Output.Player.Device, inv)
 	if r.State != binding.StateAvailable {
-		return alsapcm.Endpoint{}, nil, fmt.Errorf("native binding unavailable: %s", r.State)
+		return nativeEndpoint{}, nil, fmt.Errorf("native binding unavailable: %s", r.State)
 	}
 	checker := binding.Checker{Want: r, Proc: alsa.Reader{ProcRoot: hostTrees.proc}, Sysfs: alsa.SysfsReader{Root: hostTrees.sysfs}}
-	return alsapcm.Endpoint{Card: r.Card, Device: r.Endpoint.Device}, checker.Check, nil
+	return nativeEndpoint{Endpoint: alsapcm.Endpoint{Card: r.Card, Device: r.Endpoint.Device}, Subdevice: r.Endpoint.Subdevice}, checker.Check, nil
 }
 
 type nativeOptions struct {
@@ -137,7 +151,7 @@ func parseNativeOptions(args []string, w io.Writer) (nativeOptions, error) {
 	fs.StringVar(&o.config, "config", "", "loopback config")
 	fs.StringVar(&o.manifest, "manifest", "", "version 1 owner manifest JSON")
 	fs.StringVar(&o.fixtures, "fixtures", "", "listening asset root")
-	fs.StringVar(&o.contact, "contact-report", "", "version 1 contact receipt")
+	fs.StringVar(&o.contact, "contact-report", "", "version 2 contact receipt")
 	fs.StringVar(&o.report, "report", "", "new report path, never an approval")
 	fs.StringVar(&o.mixer, "mixer-snapshot", "", "fresh amixer annex")
 	fs.StringVar(&o.scenario, "scenario", "", "level-check, matrix or interactive")
@@ -179,6 +193,11 @@ func parseNativeOptions(args []string, w io.Writer) (nativeOptions, error) {
 }
 
 type nativeReport struct {
+	pendingContact                                           *qualification.Contact
+	Completed                                                []bool
+	IgnoredKeys                                              []string
+	Navigated                                                bool
+	Device, Subdevice                                        int
 	BuildSHA, GoVersion, Platform                            string
 	Modified                                                 bool
 	SilenceFrames                                            [2]int
@@ -206,7 +225,8 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 		fmt.Fprintln(errout, "native harness requires Linux")
 		return 1
 	}
-	ep, check, e := env.resolve(ctx, o.config)
+	resolved, check, e := env.resolve(ctx, o.config)
+	ep := resolved.Endpoint
 	if e != nil {
 		fmt.Fprintln(errout, e)
 		return 1
@@ -260,23 +280,30 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 		var contact qualification.Contact
 		b, e := qualification.ReadEvidenceFile(o.contact)
 		if e == nil {
-			var envelope struct{ Contact *qualification.Contact }
+			var envelope struct {
+				Contact    *qualification.Contact
+				End, Error string
+			}
 			e = json.Unmarshal(b, &envelope)
 			if e == nil && envelope.Contact != nil {
-				contact = *envelope.Contact
+				if envelope.End != "complete" || envelope.Error != "" {
+					e = errors.New("contact report incomplete or errored")
+				} else {
+					contact = *envelope.Contact
+				}
 			} else if e == nil {
 				e = json.Unmarshal(b, &contact)
 			}
 		}
 		if e == nil {
-			e = contact.Validate(tuple, a, controls.Hash(), mh)
+			e = contact.Validate(tuple, a, ep.Device, resolved.Subdevice, controls.Hash(), mh)
 		}
 		if e != nil {
 			fmt.Fprintln(errout, "--contact-report:", e)
 			return 1
 		}
 	}
-	report := nativeReport{SchemaVersion: 1, QualificationVersion: qualification.Version, Args: args, Tuple: tuple, Attachment: a, Before: controls, ManifestHash: mh, AmixerAnnex: string(annex), PauseReleaseSeconds: 30, End: "incomplete"}
+	report := nativeReport{Device: ep.Device, Subdevice: resolved.Subdevice, SchemaVersion: 1, QualificationVersion: qualification.Version, Args: args, Tuple: tuple, Attachment: a, Before: controls, ManifestHash: mh, AmixerAnnex: string(annex), PauseReleaseSeconds: 30, End: "incomplete"}
 	report.Platform = runtime.GOOS + "/" + runtime.GOARCH
 	report.GoVersion = runtime.Version()
 	report.BuildSHA = "unverified"
@@ -298,16 +325,27 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 		return 1
 	}
 	defer file.Close()
+	runCtx, cancelRun := context.WithCancelCause(ctx)
+	defer cancelRun(nil)
 	// Capture every admission snapshot, including excluded values, without
 	// sharing the report with opening workers that may outlive a timed-out call.
 	var observationsMu sync.Mutex
 	var observations []alsactl.Snapshot
 	// Capture the reference once, compare it before every activation/reopen.
 	admit := func(n alsapcm.NodeInfo) error {
+		if e := runCtx.Err(); e != nil {
+			return e
+		}
+		if n.Card != ep.Card || n.Device != ep.Device || n.Subdevice != resolved.Subdevice {
+			return errors.New("opened endpoint differs from contacted endpoint")
+		}
 		if check != nil {
 			if e := check(n); e != nil {
 				return e
 			}
+		}
+		if e := runCtx.Err(); e != nil {
+			return e
 		}
 		aa, e := env.attachment(ep.Card)
 		if e != nil {
@@ -325,10 +363,10 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 		}
 		return nil
 	}
-	reader := bufio.NewReader(env.stdin)
-	e = executeNativeTest(ctx, o, env, ep, admit, m, byID, reader, out, &report)
-	after, ae := env.controls(ep.Card)
-	report.After = after
+	out = &nativeConsoleOutput{out: out, raw: env.tty}
+	reader := env.stdin
+	e = executeNativeTest(runCtx, cancelRun, o, env, ep, admit, m, byID, reader, out, &report)
+	after := report.After
 	observationsMu.Lock()
 	report.ControlObservations = append([]alsactl.Snapshot(nil), observations...)
 	observationsMu.Unlock()
@@ -342,10 +380,8 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 			report.ExcludedAfter = append(report.ExcludedAfter, c)
 		}
 	}
-	if ae != nil {
-		e = errors.Join(e, ae)
-	}
 	if e != nil {
+		report.Contact = nil
 		report.Error = e.Error()
 		if report.End != "deadline" && report.End != "stopped" && report.End != "quit" {
 			report.End = "incomplete"

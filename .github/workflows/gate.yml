@@ -571,7 +571,8 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/native-integration-overlay.py "$RUNNER_TEMP/native-overlay.json"
-          go test -race -tags ts_omit_webclient,ts_omit_debugeventbus -overlay "$RUNNER_TEMP/native-overlay.json" ./cmd/bridge -run '^TestNativeIntegration' -timeout 5m -watchdog 10s
+          go test -v -race -tags ts_omit_webclient,ts_omit_debugeventbus -overlay "$RUNNER_TEMP/native-overlay.json" ./cmd/bridge -run '^TestNativeIntegration' -timeout 5m -watchdog 10s | tee "$RUNNER_TEMP/native-integration.log"
+          grep -q '^--- PASS: TestNativeIntegration' "$RUNNER_TEMP/native-integration.log"
 
   gate:
     name: gate

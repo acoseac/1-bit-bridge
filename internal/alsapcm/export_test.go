@@ -278,5 +278,21 @@ func (tk *FakeKernel) HardwareFormats(codes ...uint32) {
 
 // OpenNativeSink is the real native sink over the same simulated kernel.
 func (tk *FakeKernel) OpenNativeSink(ctx context.Context, c DSDConfig) (*DSDSink, error) {
-	return openNativeBounded(ctx, c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(tk.k, tk.k.now, ep, c) }, now: tk.k.now})
+	return openNativeBounded(ctx, c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(tk.k, tk.k.now, ep, c) }, now: tk.k.now, at: tk.k.nativeAt})
+}
+
+// ParkNextOpen blocks the real opener below negotiation until released.
+func (tk *FakeKernel) ParkNextOpen() (<-chan struct{}, func()) {
+	entered, gate := make(chan struct{}), make(chan struct{})
+	tk.k.inspect(func(k *fakeKernel) { k.openParked, k.openGate = entered, gate })
+	var once sync.Once
+	return entered, func() { once.Do(func() { close(gate) }) }
+}
+
+// ParkNextClose blocks the real native or PCM closer before its acknowledgement.
+func (tk *FakeKernel) ParkNextClose() (<-chan struct{}, func()) {
+	entered, gate := make(chan struct{}), make(chan struct{})
+	tk.k.inspect(func(k *fakeKernel) { k.closeParked, k.closeGate = entered, gate })
+	var once sync.Once
+	return entered, func() { once.Do(func() { close(gate) }) }
 }

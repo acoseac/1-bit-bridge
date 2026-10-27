@@ -83,7 +83,8 @@ type fakeCond struct {
 // its context ends: nothing in this fake raises an error condition on its
 // own.
 type fakeKernel struct {
-	t *testing.T
+	openGate, openParked, closeGate, closeParked chan struct{}
+	t                                            *testing.T
 
 	mu sync.Mutex
 
@@ -239,6 +240,14 @@ func (k *fakeKernel) open(path string) (int, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	defer k.check()
+	if gate := k.openGate; gate != nil {
+		entered := k.openParked
+		k.openGate, k.openParked = nil, nil
+		k.mu.Unlock()
+		close(entered)
+		<-gate
+		k.mu.Lock()
+	}
 	k.opened = append(k.opened, path)
 	if k.openErr != nil {
 		return -1, k.openErr
@@ -255,6 +264,14 @@ func (k *fakeKernel) close(fd int) error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	defer k.check()
+	if gate := k.closeGate; gate != nil {
+		entered := k.closeParked
+		k.closeGate, k.closeParked = nil, nil
+		k.mu.Unlock()
+		close(entered)
+		<-gate
+		k.mu.Lock()
+	}
 	if fd != k.fd {
 		k.t.Errorf("close(%d), but the node is fd %d", fd, k.fd)
 	}

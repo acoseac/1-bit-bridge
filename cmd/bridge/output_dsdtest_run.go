@@ -1,11 +1,11 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/acoseac/1-bit-bridge/internal/alsactl"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/player/decode"
@@ -85,10 +85,17 @@ func verifyNativeFixture(root string, f qualification.Fixture) error {
 	}
 	return nil
 }
-func executeNativeTest(parent context.Context, o nativeOptions, env outputDSDTestEnv, ep alsapcm.Endpoint, check func(alsapcm.NodeInfo) error, m qualification.Manifest, fixtures map[string]qualification.Fixture, in *bufio.Reader, out io.Writer, report *nativeReport) (runResult error) {
-	ctx, cancelRun := context.WithCancelCause(parent)
+func executeNativeTest(ctx context.Context, cancelRun context.CancelCauseFunc, o nativeOptions, env outputDSDTestEnv, ep alsapcm.Endpoint, check func(alsapcm.NodeInfo) error, m qualification.Manifest, fixtures map[string]qualification.Fixture, in io.Reader, out io.Writer, report *nativeReport) (runResult error) {
 	defer cancelRun(nil)
-	console := newNativeConsole(ctx, in, cancelRun, o.scenario == "level-check")
+	var echo io.Writer
+	if env.tty {
+		echo = out
+	}
+	console := newNativeConsole(ctx, in, cancelRun, o.scenario == "level-check", echo)
+	defer console.close()
+	if console.err != nil {
+		return console.err
+	}
 	defer func() {
 		var stopped *nativeStop
 		if errors.As(context.Cause(ctx), &stopped) {
@@ -96,6 +103,30 @@ func executeNativeTest(parent context.Context, o nativeOptions, env outputDSDTes
 			report.Contact = nil
 			runResult = withoutNativeCancellation(runResult)
 		}
+	}()
+
+	stopDeadline := func() {}
+	defer func() {
+		defer stopDeadline()
+		// No reads, successors, or fresh cleanup allowance after an unconfirmed
+		// release. The worker or sink's completion handle still owns cleanup.
+		if !errors.Is(runResult, alsapcm.ErrReleaseUnconfirmed) && ctx.Err() == nil {
+			after, e := validateNativeFinal(ctx, env, ep.Card, report.Attachment, report.Before.Hash())
+			report.After = after
+			runResult = errors.Join(runResult, e)
+		}
+		if ctx.Err() != nil {
+			runResult = errors.Join(runResult, ctx.Err())
+		}
+		if errors.Is(context.Cause(ctx), context.DeadlineExceeded) {
+			report.End = "deadline"
+		}
+		if runResult == nil && report.End == "complete" {
+			report.Contact = report.pendingContact
+		} else {
+			report.Contact = nil
+		}
+		report.pendingContact = nil
 	}()
 
 	for _, id := range o.list {
@@ -120,7 +151,7 @@ func executeNativeTest(parent context.Context, o nativeOptions, env outputDSDTes
 	// reset it. Cancellation stops admission; sink cleanup has its own 2 s bound.
 	cancel := func() { cancelRun(context.DeadlineExceeded) }
 	ticks, stop := env.at(env.now().Add(time.Duration(o.seconds) * time.Second))
-	defer stop()
+	stopDeadline = stop
 	var expired atomic.Bool
 	go func() {
 		select {
@@ -151,9 +182,7 @@ func executeNativeTest(parent context.Context, o nativeOptions, env outputDSDTes
 			}
 		}
 		if runErr == nil {
-			one := o
-			one.list = one.list[:1]
-			runErr = runNativeQueue(ctx, one, env, ep, check, fixtures, console.keys, report)
+			runErr = runNativeQueue(ctx, o, env, ep, check, fixtures, console.keys, report)
 		}
 		if runErr == nil {
 			matched, runErr = console.confirm(ctx, out, "At the SAME position DSD must be audible, not louder; type exactly: "+qualification.DSDConfirmation)
@@ -162,7 +191,7 @@ func executeNativeTest(parent context.Context, o nativeOptions, env outputDSDTes
 			}
 		}
 		if runErr == nil {
-			report.Contact = &qualification.Contact{SchemaVersion: 1, QualificationVersion: qualification.Version, Tuple: report.Tuple, Attachment: report.Attachment, MixerHash: report.Before.Hash(), ManifestHash: report.ManifestHash, KnobPosition: knob, PCMAudible: audible, DSDMatched: matched}
+			report.pendingContact = &qualification.Contact{Device: &report.Device, Subdevice: &report.Subdevice, SchemaVersion: 2, QualificationVersion: qualification.Version, Tuple: report.Tuple, Attachment: report.Attachment, MixerHash: report.Before.Hash(), ManifestHash: report.ManifestHash, KnobPosition: knob, PCMAudible: audible, DSDMatched: matched}
 			report.End = "complete"
 		}
 	} else {
@@ -243,12 +272,37 @@ func runNativeQueue(ctx context.Context, o nativeOptions, env outputDSDTestEnv, 
 	}
 	cfg := alsapcm.DSDConfig{Endpoint: ep, Format: format.ALSAFormat(o.format), BitRate: o.rate, Pause: pause, Tail: time.Duration(o.tail) * time.Millisecond, Prefill: time.Duration(o.prefill) * time.Millisecond, Check: check}
 	at := 0
+	report.Completed = make([]bool, len(o.list))
+	updateCoverage := func(start int, played int64) {
+		for i := start; i < len(o.list); i++ {
+			frames := fixtures[o.list[i]].Frames
+			if played < frames {
+				break
+			}
+			report.Completed[i] = true
+			played -= frames
+		}
+	}
+	complete := func() error {
+		if o.scenario != "interactive" {
+			if report.Navigated {
+				return errors.New("qualification navigation leaves evidence incomplete")
+			}
+			for _, played := range report.Completed {
+				if !played {
+					return errors.New("required fixture occurrence did not play to its natural end")
+				}
+			}
+		}
+		report.End = "complete"
+		return nil
+	}
 	var pendingKeys []byte
 	for {
 		if e := ctx.Err(); e != nil {
 			return e
 		}
-		s, e := env.open(ctx, cfg)
+		s, e := nativeOpenCall(ctx, env.open, cfg)
 		if e != nil {
 			return e
 		}
@@ -277,10 +331,28 @@ func runNativeQueue(ctx context.Context, o nativeOptions, env outputDSDTestEnv, 
 				ce := s.Release(context.Background(), alsapcm.Immediate)
 				return errors.Join(ctx.Err(), ce)
 			case e := <-done:
+				updateCoverage(at, s.Position().Played)
 				stop()
+				if errors.Is(e, alsapcm.ErrReleaseUnconfirmed) {
+					s.BeginRelease(alsapcm.Immediate)
+					return e
+				}
 				ce := s.Release(context.Background(), alsapcm.Immediate)
 				if e == nil && ce == nil {
-					report.End = "complete"
+					// Inspect the whole queued batch: a space must not conceal
+					// navigation that raced natural completion.
+					queued := len(keys)
+					for range queued {
+						key := <-keys
+						if key == 'n' || key == 'p' {
+							if key == 'p' && len(o.list) == 1 {
+								report.IgnoredKeys = append(report.IgnoredKeys, "p:first-fixture")
+							} else {
+								report.Navigated = true
+							}
+						}
+					}
+					e = complete()
 				}
 				return errors.Join(e, ce)
 			case key, ok := <-commandKeys:
@@ -307,10 +379,16 @@ func runNativeQueue(ctx context.Context, o nativeOptions, env outputDSDTestEnv, 
 				case 'n', 'p':
 					current := at
 					played := s.Position().Played
+					updateCoverage(at, played)
 					for current < len(o.list)-1 && played >= fixtures[o.list[current]].Frames {
 						played -= fixtures[o.list[current]].Frames
 						current++
 					}
+					if key == 'p' && current == 0 {
+						report.IgnoredKeys = append(report.IgnoredKeys, "p:first-fixture")
+						continue
+					}
+					report.Navigated = true
 					next = current + 1
 					if key == 'p' {
 						next = max(0, current-1)
@@ -325,6 +403,9 @@ func runNativeQueue(ctx context.Context, o nativeOptions, env outputDSDTestEnv, 
 					if re != nil || stopped {
 						return re
 					}
+					if o.scenario != "interactive" {
+						return errors.New("qualification navigation leaves evidence incomplete")
+					}
 					break commandLoop
 				case 's', 'q':
 					stop()
@@ -337,8 +418,7 @@ func runNativeQueue(ctx context.Context, o nativeOptions, env outputDSDTestEnv, 
 			}
 		}
 		if next >= len(o.list) {
-			report.End = "complete"
-			return nil
+			return complete()
 		}
 		at = next
 	}
@@ -420,7 +500,8 @@ func playNativeReference(ctx context.Context, root string, fixture qualification
 // retains its teardown semantics and owns cleanup until the worker returns.
 func nativePCMCall(ctx context.Context, play func(context.Context) error) error {
 	answer := make(chan error, 1)
-	go func() { answer <- play(ctx) }()
+	done := make(chan struct{})
+	go func() { e := play(ctx); close(done); answer <- e }()
 	select {
 	case e := <-answer:
 		return e
@@ -432,7 +513,7 @@ func nativePCMCall(ctx context.Context, play func(context.Context) error) error 
 	case e := <-answer:
 		return errors.Join(ctx.Err(), e)
 	case <-timer.C:
-		return errors.Join(alsapcm.ErrReleaseUnconfirmed, ctx.Err())
+		return &nativePendingWorker{cause: ctx.Err(), done: done}
 	}
 }
 
@@ -469,3 +550,76 @@ func nativeTrackRelease(ctx context.Context, s nativeTestSink, keys <-chan byte,
 		}
 	}
 }
+
+// Final validation remains inside the run deadline and publishes no partial
+// result if a read is parked or cancellation wins.
+func validateNativeFinal(ctx context.Context, env outputDSDTestEnv, card int, want qualification.Attachment, hash string) (alsactl.Snapshot, error) {
+	type result struct {
+		snapshot alsactl.Snapshot
+		err      error
+	}
+	answer := make(chan result, 1)
+	go func() {
+		a, e := env.attachment(card)
+		if e != nil {
+			answer <- result{err: e}
+			return
+		}
+		s, e := env.controls(card)
+		if e == nil && (a != want || s.Hash() != hash) {
+			e = errors.New("final binding/mixer reference changed")
+		}
+		answer <- result{s, e}
+	}()
+	select {
+	case r := <-answer:
+		if ctx.Err() != nil {
+			return alsactl.Snapshot{}, ctx.Err()
+		}
+		return r.snapshot, r.err
+	case <-ctx.Done():
+		return alsactl.Snapshot{}, ctx.Err()
+	}
+}
+
+// nativeOpenCall retains an explicit worker fence, including an opener's own
+// admission/cleanup worker. Cancellation gets one allowance, never two.
+func nativeOpenCall(ctx context.Context, open func(context.Context, alsapcm.DSDConfig) (nativeTestSink, error), cfg alsapcm.DSDConfig) (nativeTestSink, error) {
+	var sink nativeTestSink
+	e := nativePCMCall(ctx, func(ctx context.Context) error {
+		s, e := open(ctx, cfg)
+		var pending interface{ Completion() <-chan struct{} }
+		if errors.As(e, &pending) {
+			<-pending.Completion()
+			if result, ok := pending.(interface{ CompletionResult() error }); ok {
+				e = result.CompletionResult()
+			}
+		}
+		if ctx.Err() != nil {
+			if s != nil {
+				s.BeginRelease(alsapcm.Immediate)
+				<-s.Done()
+			}
+			return errors.Join(e, ctx.Err())
+		}
+		sink = s
+		return e
+	})
+	if e != nil {
+		return nil, e
+	}
+	return sink, nil
+}
+
+type nativePendingWorker struct {
+	cause error
+	done  <-chan struct{}
+}
+
+func (e *nativePendingWorker) Error() string {
+	return errors.Join(alsapcm.ErrReleaseUnconfirmed, e.cause).Error()
+}
+func (e *nativePendingWorker) Unwrap() []error {
+	return []error{alsapcm.ErrReleaseUnconfirmed, e.cause}
+}
+func (e *nativePendingWorker) Completion() <-chan struct{} { return e.done }

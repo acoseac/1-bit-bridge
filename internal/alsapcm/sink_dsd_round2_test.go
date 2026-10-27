@@ -147,7 +147,7 @@ func TestNativeReopenCleanupSticky(t *testing.T) {
 				return nil
 			}
 			a := &nativeAuditSys{sys: k, t: t, where: ioctlHWFree, parked: make(chan struct{}), release: make(chan struct{})}
-			s, e := openDSDSink(context.Background(), c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(a, k.now, ep, c) }, now: k.now})
+			s, e := openDSDSink(context.Background(), c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(a, k.now, ep, c) }, now: k.now, at: k.nativeAt})
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -208,7 +208,7 @@ func TestNativeFinishReleaseBudget(t *testing.T) {
 			k := nativeKernel(t)
 			k.free()
 			a := &nativeAuditSys{sys: k, t: t, where: where.req, parked: make(chan struct{}), release: make(chan struct{})}
-			s, e := openDSDSink(context.Background(), nativeConfig(), nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(a, k.now, ep, c) }, now: k.now})
+			s, e := openDSDSink(context.Background(), nativeConfig(), nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(a, k.now, ep, c) }, now: k.now, at: k.nativeAt})
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -219,6 +219,7 @@ func TestNativeFinishReleaseBudget(t *testing.T) {
 			answer := make(chan error, 1)
 			go func() { answer <- s.Finish(context.Background()) }()
 			await(t, a.parked, "natural cleanup")
+			k.advanceNow(2 * time.Second)
 			select {
 			case e = <-answer:
 				if !errors.Is(e, ErrReleaseUnconfirmed) {
@@ -260,7 +261,7 @@ func TestNativeRepeatedReleaseJoins(t *testing.T) {
 	c := nativeConfig()
 	c.Tail = time.Millisecond
 	g := &nativePollGate{sys: k, entered: make(chan struct{}), gate: make(chan struct{})}
-	s, e := openDSDSink(context.Background(), c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(g, k.now, ep, c) }, now: k.now})
+	s, e := openDSDSink(context.Background(), c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(g, k.now, ep, c) }, now: k.now, at: k.nativeAt})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -409,7 +410,7 @@ func TestNativeInitialCleanupErrors(t *testing.T) {
 				if stage == "geometry" {
 					k.hw.info &^= infoPause
 				}
-				_, e := openDSDSink(context.Background(), c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(a, k.now, ep, c) }, now: k.now})
+				_, e := openDSDSink(context.Background(), c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(a, k.now, ep, c) }, now: k.now, at: k.nativeAt})
 				if !errors.Is(e, want) || !errors.Is(e, ErrReleaseUnconfirmed) {
 					t.Fatalf("initial refusal lost cleanup error: %v", e)
 				}
@@ -435,7 +436,7 @@ func TestNativeInitialCleanupParked(t *testing.T) {
 			defer cancel()
 			answer := make(chan error, 1)
 			go func() {
-				_, e := openNativeBounded(ctx, c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(a, k.now, ep, c) }, now: k.now})
+				_, e := openNativeBounded(ctx, c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(a, k.now, ep, c) }, now: k.now, at: k.nativeAt})
 				answer <- e
 			}()
 			await(t, a.parked, "initial refusal cleanup")
@@ -464,7 +465,7 @@ func TestNativeFinishCancellationKeepsCutoff(t *testing.T) {
 	c := nativeConfig()
 	c.Tail = time.Millisecond
 	g := &nativePollGate{sys: k, entered: make(chan struct{}), gate: make(chan struct{})}
-	s, e := openDSDSink(context.Background(), c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(g, k.now, ep, c) }, now: k.now})
+	s, e := openDSDSink(context.Background(), c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(g, k.now, ep, c) }, now: k.now, at: k.nativeAt})
 	if e != nil {
 		t.Fatal(e)
 	}

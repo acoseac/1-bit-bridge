@@ -79,3 +79,49 @@ A round-2 control exposed the idle-wait race too: Pause can win after the writer
 loop snapshot but before watchNative installs its context. watchNative rechecks an
 unapplied Pause under the mutex, returning to the writer instead of installing an
 uncancelled wait. TestNativeIdlePauseFence pins that exact window.
+
+## Round 3 — 2026-10-27, PR #1355 merge gate
+
+Contact schema 2 and qualificationVersion 3 invalidate earlier receipts. Device and
+Subdevice are required pointer fields on import, compared before either opener;
+resolution exposes the expected subdevice and opened-node checks still precede
+writes. Final attachment and filtered mixer equality now gate publication. Failed,
+cancelled or incomplete reports cannot retain or import a contact. Volatile PCM
+controls remain excluded. Final validation shares the run deadline.
+
+Completeness is per supplied fixture occurrence, including duplicate IDs, from
+Position.Played rather than decoder EOF. Level-check no longer truncates its list.
+Navigation stops qualification after release and makes evidence incomplete,
+including queued navigation behind a space racing natural completion; the whole
+queued batch is inspected. First-fixture p is ignored and recorded without a transition.
+Interactive navigation remains available.
+
+Writer faults establish Immediate/revocation/deadline before teardown; terminal
+Activate refuses without waiting. TrackChange reserves the close margin from the
+remaining budget, refuses a nonpositive drain budget, wraps tail/drain failures as
+unconfirmed, and propagates final measurement errors. The release clock and timer
+are injected together; completed cleanup wins over an expired waiter. Cancelled
+openers expose completion through admission and cleanup. The harness follows that
+fence within its original allowance and skips final reads/successors after expiry.
+
+G1's proposed Pause-to-Immediate sequence did not hold: Pause sets held before the
+writer handles cancelled prefill; a later Resume only queues work. Regression
+pins cover empty and partly accepted prefill cancellation, the following Resume
+(no replay of interrupted prefill), and terminal write faults. G7's dirty carry
+requires an impossible cursor-only reset; clearing before setting is defensive.
+
+Console cancellation joins the reader. Production files reuse pcmTestStoppableFile's
+poll/wakeup without closing stdin or changing shared descriptor flags. Injected
+readers provide an explicit Interrupt adapter for cancellation. Raw prompts echo printable
+bytes, implement Backspace/Ctrl-H, and translate newlines. Asset stat checks share
+fsutil.NotAFile (cloud placeholders allowed); Linux-only audition remains unchanged.
+The integration overlay fails closed on missing/changed/residual tags or empty fake
+support; CI requires an actual passing integration test. The version checker adds
+binding/, alsa/ and decode/ dependencies, plus shared format, file, config, USB
+identity and CLI output/input dependencies. Linux execution and ABI are still pending;
+no hardware qualification, production DSD admission or 2c.2 wiring is claimed.
+
+The full-harness deadline case also pins a late admission: after its blocked
+checker returns, it rechecks the run context before any control read. A parent
+context alone misses the harness wall deadline. Unsupported injected readers
+refuse before opening audio unless they provide an explicit Interrupt contract.

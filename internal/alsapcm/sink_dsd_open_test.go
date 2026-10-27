@@ -23,7 +23,7 @@ func TestNativeCancelledOpen(t *testing.T) {
 			close(entered)
 			<-gate
 			return openNative(k, k.now, ep, c)
-		}, now: k.now})
+		}, now: k.now, at: k.nativeAt})
 		answer <- e
 	}()
 	select {

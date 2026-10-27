@@ -7,7 +7,8 @@ owner-qualified native path and one DoP path; 2c.1 has no DoP path.
 
 ## Inputs and safety
 
-Use the versioned JSON contracts in `internal/player/qualification/{manifest,contact}-v1.schema.json`.
+Use the versioned JSON contracts in `internal/player/qualification/manifest-v1.schema.json` and
+`internal/player/qualification/contact-v2.schema.json`.
 The manifest has `schemaVersion`, `calibration`, and `fixtures`; fixture field names are
 `ID`, `Path`, `SHA256`, `Container`, `Order`, `PCMReference`, `Rate`, `Channels`, `Frames`.
 Paths are relative to the asset directory. Hash the actual files, not decoded approximations.
@@ -151,10 +152,60 @@ qualification inputs and the version checker itself. Changes require a version i
 
 The integration overlay exposes the existing ALSA _test.go fake only to this test command.
 The injected PCM opener is below descriptor verification and binding admission; production
-hardware guards remain intact. After committing round 2, rerun the real-ref checker:
+hardware guards remain intact. After committing round 3, rerun the real-ref checker:
 ```sh
 BASE=$(git merge-base origin/main HEAD) && test -n "$BASE"
 GOTOOLCHAIN=go1.27.3 go run -tags ts_omit_webclient,ts_omit_debugeventbus ./scripts/qualification-version -base "$BASE" -head HEAD
 python3 scripts/native-integration-overlay.py /tmp/native-overlay.json
 GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus -overlay /tmp/native-overlay.json ./cmd/bridge -run '^TestNativeIntegration' -timeout 5m -watchdog 10s
 ```
+
+## Round 3 evidence rules
+
+QualificationVersion is **3** and Contact.SchemaVersion is **2**. All older
+contacts are invalid; repeat contact on this build. Required Device and Subdevice
+fields bind the configured PCM endpoint, including a nonzero subdevice, before
+either audition leg opens. Missing fields are not zero. Both opened-node checks
+still run before writes. The report also records Device and Subdevice: use those
+numbers in the hw_params/status path above instead of assuming pcm0p/sub0.
+
+Every occurrence in the supplied fixture list is required, including repeated
+IDs; other manifest entries are not required for that run. Level-check now plays
+the entire supplied list. Completion means Position.Played reached each occurrence's
+end, not merely that the decoder queued its bytes. Completed records this coverage.
+Navigation marks contact/matrix evidence incomplete and stops after release, even
+when it races natural completion; only interactive runs permit unrestricted navigation. First-fixture p
+is a no-op recorded in IgnoredKeys, without teardown or reopen.
+
+A contact is published only after final attachment equality and equality of the
+filtered control fingerprint. Volatile PCM controls remain excluded. Final reads
+remain inside the run deadline; any failure or cancellation clears the contact.
+Importing a report requires End=complete and an empty Error as well as a valid
+nested contact. A raw contact must satisfy the current schema and version too.
+
+Writer faults immediately revoke the sink and establish the shared cleanup deadline;
+Activate on a terminal sink refuses immediately. Tail and drain failures report
+unconfirmed release; drain receives only remaining deadline time minus the 500 ms
+close margin, and never starts without positive time left. Final STATUS failure
+prevents completion. Release cancellation and waiters use the same injected clock
+in tests. An opener's completion handle covers open, admission and cleanup. The
+harness waits within the original cleanup allowance, then exits 1 with unconfirmed
+evidence, without final control reads, a successor or a fresh two-second allowance.
+
+Pause cancelling a Resume prefill remains paused and recoverable. A following
+Resume keeps the accepted silence prefix, without replaying the cancelled suffix;
+a terminal write fault or unconfirmed close ends the sink. The unaligned carry
+writer defensively clears its destination bit; reachable carry resets already
+clear the storage and cursor together.
+
+Raw prompts echo printable input, accept Backspace/Ctrl-H, and use CRLF. The file
+reader uses poll/wakeup, joins on cancellation and preserves caller-owned stdin
+and descriptor flags. Injected in-memory readers are nonblocking; other injected readers must explicitly supply
+an Interrupt method through an adapter, which owns its cancellation policy. Asset checks use the shared explicit special-file list,
+which accepts cloud placeholders; the CLI itself still requires Linux.
+
+The version gate additionally guards binding, ALSA identity, decoder, format,
+control, configuration, USB identity and file-reader directories, plus the shared
+CLI output/input code and config-path resolver. Overlay generation fails for a missing/changed or residual build tag,
+or missing fake support. CI also requires a passing NativeIntegration test line.
+Linux amd64/arm64 execution and ABI gates above remain pending on this Darwin host.

@@ -17,8 +17,17 @@ for source in sorted((root / "internal/alsapcm").glob("*_test.go")):
     if "package alsapcm\n" in source.read_text():
         target = source.with_name("zz_nativeintegration_" + source.stem + "support.go")
         replace[str(target)] = str(source)
+if not replace:
+    sys.exit("no package alsapcm test support found")
 source = root / "cmd/bridge/output_dsdtest_integration_test.go"
 enabled = output.with_suffix(".go.txt")
-enabled.write_text(source.read_text().replace("//go:build nativeintegration\n", "", 1))
+tag = "//go:build nativeintegration\n"
+text = source.read_text()
+if not text.startswith(tag) or text.count(tag) != 1:
+    sys.exit("native integration test lost its exact leading build tag")
+text = text.removeprefix(tag)
+if "//go:build" in text or "// +build" in text:
+    sys.exit("native integration test retains a build constraint")
+enabled.write_text(text)
 replace[str(source)] = str(enabled)
 output.write_text(json.dumps({"Replace": replace}, indent=2) + "\n")

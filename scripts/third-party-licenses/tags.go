@@ -111,7 +111,7 @@ var reviewedBuildSites = map[string][]string{
 	},
 	".github/workflows/gate.yml": {
 		"go run -tags @TAGS@ ./scripts/qualification-version -base \"$base\" -head HEAD",
-		"go test -race -tags @TAGS@ -overlay \"$RUNNER_TEMP/native-overlay.json\" ./cmd/bridge -run '^TestNativeIntegration' -timeout 5m -watchdog 10s",
+		"go test -v -race -tags @TAGS@ -overlay \"$RUNNER_TEMP/native-overlay.json\" ./cmd/bridge -run '^TestNativeIntegration' -timeout 5m -watchdog 10s | tee \"$RUNNER_TEMP/native-integration.log\"",
 
 		"BRIDGE_TEST_SMALL_VOLUME=/mnt/b264-small go test -tags @TAGS@ ./internal/transcode/ -run 'TestARenditionThatCouldNotBeWrittenWholeIsNotPublished' -count=1 -v",
 		"GOTMP=$(go run ./.github/scripts/printtmpdir 2>/dev/null || echo \"$TEMP\")",

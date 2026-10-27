@@ -65189,3 +65189,29 @@ ops/History-b470-native.md; owner procedure: ops/b470-native-qualification.md.
 The control sweep also reproduced a native idle-wait/Pause race. The writer now
 rechecks unapplied Pause while installing the wait; the deterministic seam test fails
 on the prior code and the removal control. PCM wait behavior is untouched.
+
+
+## 2026-10-27 — B470 2c.1 round 3, PR #1355 merge gate
+
+Reproduced endpoint-free receipt admission, terminal writer/Finish fencing, skipped
+or duplicate occurrence completeness, failed-envelope import and final-validation
+receipt retention, missing dependency version guards, uninterruptible console
+reads, and overlay generation silently retaining a changed build tag. Native
+release timing now shares the injected clock, keeps the close margin, and reports
+failed final measurement. The report's final validation stays within its deadline.
+Open/admission/cleanup workers retain explicit completion fences. No final reads or
+successor follows an unconfirmed cleanup; no second allowance starts. Contact schema
+2/version 3 invalidates previous evidence. Runbook and History-b470-native.md carry
+the behavior and outstanding Linux/hardware gates. G1's Pause sequence was refuted
+with separate cancellation/recovery/partial-prefix/terminal-fault pins; G7 is a
+defensive change because carry cursor resets already clear its storage.
+
+The four inline comments were checked: 4383824825/4383824841 use fsutil.NotAFile's
+shared explicit refusal list; 4383885164 adds raw prompt editing/echo/CRLF;
+4383885180 makes overlay tag/support checks fail closed, with CI requiring an actual
+passing integration test. No Git writes, commit, push or hardware were performed.
+
+The full-harness deadline case also pins a late admission: after its blocked
+checker returns, it rechecks the run context before any control read. A parent
+context alone misses the harness wall deadline. Unsupported injected readers
+refuse before opening audio unless they provide an explicit Interrupt contract.

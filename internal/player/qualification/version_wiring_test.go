@@ -29,6 +29,7 @@ func TestQualificationWorkflowWiring(t *testing.T) {
 		"test -n \"$base\"",
 		"go run -tags ts_omit_webclient,ts_omit_debugeventbus ./scripts/qualification-version -base \"$base\" -head HEAD",
 		"set -euo pipefail",
+		"grep -q '^--- PASS: TestNativeIntegration'",
 	} {
 		if !strings.Contains(job, want) {
 			t.Errorf("qualification job missing %q", want)
