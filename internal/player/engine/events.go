@@ -220,7 +220,10 @@ func (e *Engine) handle(m any) {
 	}
 }
 
-func (v *events) Retiring(t ReleaseToken, n NativeEvent) { v.e.post(evRetiring{t, n}) }
+func (v *events) Retiring(t ReleaseToken, n NativeEvent) {
+	n.Prefixes = slices.Clone(n.Prefixes)
+	v.e.post(evRetiring{t, n})
+}
 func (v *events) NativePlan(s SessionID, o OccurrenceID, p NativePlan) {
 	p.Edges = slices.Clone(p.Edges)
 	v.e.post(evNativePlan{s, o, p})

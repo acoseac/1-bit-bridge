@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/player/binding"
@@ -56,8 +57,9 @@ type session struct {
 	decodeErr          *engine.Fault
 	faultSent, finSent bool
 
-	cur  *output   // the sink that plays now, nil between two transports
-	outs []*output // every sink the session opened
+	currentNative bool
+	cur           *output   // the sink that plays now, nil between two transports
+	outs          []*output // every sink the session opened
 
 	inWrite bool               // the producer is in a sink's Write, or about to be
 	wctx    context.Context    // that Write's context
@@ -99,6 +101,7 @@ type output struct {
 	s            *session
 	sink         streamSink
 	native       *alsapcm.DSDSink
+	adapter      *nativeStream
 	nativeCancel context.CancelFunc
 	policyID     string
 	transport    alsapcm.Transport
@@ -389,6 +392,7 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 		return errReleased
 	}
 	s.cur = out
+	s.currentNative = out.native != nil
 	first.out, first.start, first.transport = out, 0, out.transport
 	s.writing = first
 	s.mu.Unlock()
@@ -502,6 +506,13 @@ func (s *session) closeOutput(out *output) {
 	out.closed = true
 	s.mu.Unlock()
 	err := out.sink.Close()
+	if out.native != nil && out.native.Result() != nil {
+		s.mu.Lock()
+		if s.fault == nil {
+			s.fault = &engine.Fault{Reason: faultReason(out.native.Result()), Detail: out.native.Result().Error()}
+		}
+		s.mu.Unlock()
+	}
 	if out.nativeCancel != nil {
 		out.nativeCancel()
 	}
@@ -897,7 +908,7 @@ func (s *session) pause(ctx context.Context) (err error) {
 			return err
 		}
 		l.unlock()
-		err := s.call(ctx, out.sink.Pause)
+		err := s.call(ctx, func() error { return out.pause(ctx) })
 		if err == nil {
 			l.lock()
 			err := s.pausedLocked(false)
@@ -926,7 +937,11 @@ func (s *session) pausedLocked(noDevice bool) error {
 	s.relSent, s.relFired = false, false
 	if noDevice {
 		seq := s.pauseSeq
-		s.relStop = s.b.cfg.AfterFunc(s.opts.PauseRelease, func() {
+		delay := s.opts.PauseRelease
+		if s.currentNative {
+			delay = 30 * time.Second
+		}
+		s.relStop = s.b.cfg.AfterFunc(delay, func() {
 			s.mu.Lock()
 			if s.paused && s.pauseSeq == seq {
 				s.relFired = true
@@ -1069,7 +1084,7 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 	l.unlock()
 	if out != nil {
 		released := out.sink.Position().State == alsapcm.SinkReleased
-		err := s.call(ctx, out.sink.Resume)
+		err := s.call(ctx, func() error { return out.resume(ctx) })
 		if err == nil {
 			l.lock()
 			if err := s.unpausedLocked(); err != nil {
@@ -1081,7 +1096,7 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 				// not abandon rollback; give it the usual call bound of its own.
 				rollback, stop := context.WithTimeout(context.WithoutCancel(ctx), engine.CallTimeout)
 				defer stop()
-				if pauseErr := s.call(rollback, out.sink.Pause); pauseErr != nil {
+				if pauseErr := s.call(rollback, func() error { return out.pause(rollback) }); pauseErr != nil {
 					// The kernel's final drain refuses Pause: only Drop can
 					// stop those last frames. Keep both refusals if it fails too.
 					if alsapcm.ReasonOf(pauseErr) == alsapcm.ReasonBadState && out.sink.Position().State == alsapcm.SinkDraining {

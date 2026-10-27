@@ -13,6 +13,7 @@ type OccurrenceReservation struct {
 	b               *OccurrenceBudget
 	mu              sync.Mutex
 	engine, backend bool
+	charged         bool
 }
 
 // NewOccurrenceBudget creates bounded accounting; no occurrence is allocated yet.
@@ -26,7 +27,7 @@ func (b *OccurrenceBudget) Reserve() *OccurrenceReservation {
 		return nil
 	}
 	b.used++
-	return &OccurrenceReservation{b: b}
+	return &OccurrenceReservation{b: b, charged: true}
 }
 
 // Used includes cancelled work whose owner has not finished relinquishing it.
@@ -55,7 +56,7 @@ func (r *OccurrenceReservation) release(engine bool) {
 		}
 		r.backend = true
 	}
-	if r.engine && r.backend {
+	if r.engine && r.backend && r.charged {
 		r.b.mu.Lock()
 		r.b.used--
 		r.b.mu.Unlock()
@@ -69,4 +70,30 @@ func releaseOccurrences(os []*occ) {
 	for _, o := range os {
 		o.reservation.ReleaseEngine()
 	}
+}
+
+// Unclassified carries ownership without imposing a native limit on PCM.
+// PromoteNative must succeed before allocating native buffers.
+func (b *OccurrenceBudget) Unclassified() *OccurrenceReservation {
+	return &OccurrenceReservation{b: b}
+}
+
+// PromoteNative charges content identified as DSD; PCM never consumes a slot.
+func (r *OccurrenceReservation) PromoteNative() bool {
+	if r == nil {
+		return true
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.charged {
+		return true
+	}
+	r.b.mu.Lock()
+	defer r.b.mu.Unlock()
+	if r.b.used >= r.b.limit {
+		return false
+	}
+	r.b.used++
+	r.charged = true
+	return true
 }

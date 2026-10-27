@@ -152,12 +152,20 @@ func (s *DSDSink) immediate() bool {
 	return s.releasing && s.mode == Immediate
 }
 func (s *DSDSink) activateNative(r *nativeRequest) error {
+	ctx := r.ctx
 	reopened := false
 	if s.dev == nil {
+		// Only a reopen needs the combined lifetime while locating. Initial
+		// activation's caller already owns the cancellation fence.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(r.ctx)
+		stop := context.AfterFunc(s.life, cancel)
+		defer stop()
+		defer cancel()
 		ep := s.cfg.Endpoint
 		if s.cfg.Locate != nil {
 			var e error
-			ep, e = s.cfg.Locate(s.life)
+			ep, e = s.cfg.Locate(ctx)
 			if e != nil {
 				return e
 			}
@@ -189,7 +197,7 @@ func (s *DSDSink) activateNative(r *nativeRequest) error {
 		return e
 	}
 	s.mu.Lock()
-	if s.life.Err() != nil || s.revoked || s.releasing || (s.paused && (!r.resume || r.pauseEpoch != s.pauseEpoch)) {
+	if ctx.Err() != nil || s.life.Err() != nil || s.revoked || s.releasing || (s.paused && (!r.resume || r.pauseEpoch != s.pauseEpoch)) {
 		s.mu.Unlock()
 		if reopened {
 			return nativeCleanupError(errors.New("native activation fenced"), s.closeNative())
@@ -409,7 +417,13 @@ func (s *DSDSink) closeNative() error {
 		return nil
 	}
 	s.dev = nil
-	return d.releaseNative()
+	err := d.releaseNative()
+	if err != nil {
+		s.mu.Lock()
+		s.cleanupErr = errors.Join(s.cleanupErr, ErrReleaseUnconfirmed, err)
+		s.mu.Unlock()
+	}
+	return err
 }
 
 // expectedReleaseCancellation suppresses only the cancellation caused by an

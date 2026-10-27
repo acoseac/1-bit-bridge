@@ -473,9 +473,13 @@ func (e *Engine) newOcc(id uint32) *occ {
 	o := &e.o
 	var reservation *OccurrenceReservation
 	if e.occurrenceBudget != nil {
-		reservation = e.occurrenceBudget.Reserve()
-		if reservation == nil {
-			return nil
+		if o.sess != nil && o.sess.native() {
+			reservation = e.occurrenceBudget.Reserve()
+			if reservation == nil {
+				return nil
+			}
+		} else {
+			reservation = e.occurrenceBudget.Unclassified()
 		}
 	}
 	o.nextOcc++
@@ -603,7 +607,11 @@ func (e *Engine) releaseSession(s *session, then Intent, why StopInfo) {
 	e.visible()
 	req := ReleaseRequest{Mode: ReleaseImmediate, Cause: ReleaseStop}
 	if native {
+		s.retiring.faulted = why.Reason == ReasonFault
 		req.Token = s.retiring.token
+		if why.Reason == ReasonFault {
+			req.Cause = ReleaseFault
+		}
 		if then == IntentPlay {
 			req.Mode = ReleaseTrackChange
 			req.Cause = ReleaseNavigation
@@ -630,6 +638,13 @@ func (e *Engine) releaseDeadline(s *session) {
 		return
 	}
 	s.phase = sessUnconfirmed
+	if s.retiring != nil {
+		e.hear(nil)
+	}
+	if s.releaseTimer != nil {
+		s.releaseTimer.Stop()
+		s.releaseTimer = nil
+	}
 	if s.retiring != nil {
 		e.recordRetiringFault(s, Fault{Reason: ReasonReleaseUnconfirmed, Detail: ErrReleaseUnconfirmed.Error()})
 	}

@@ -65325,3 +65325,33 @@ prefix test accounts for both outgoing occurrences before allowing the requested
 successor to open. The closed-fault activation test also uses a leaf watchdog
 rather than a whole-binary timeout, preserving the control runner's exact-leaf
 requirement. No timeout/build failure is counted as an assertion red.
+
+
+## 2026-10-27 — B470 2c.2a review round 2
+
+Verified C1–C7 and A1–A8 against c93be360 before fixing. Native software cuts now
+continue production; cleanup success is independent of playback errors;
+installation has one initial activation authority; between-transport native
+pause uses the same 30-second deadline as the engine. Retiring accounting carries
+per-occurrence accepted intervals. Native ownership limits no longer fault PCM
+lookahead. Both integration overlays run in the CI gate, pinned by a repository
+test and the build-tag census. Early release failure cancels its timer and
+records one fault; fault releases identify their cause; reopen Locate observes
+caller cancellation. Tiny-track assertions require actual details and positions,
+and the old-card-reused fixture keeps both nodes openable with distinct identity.
+Qualification version is 7; production DSD admission remains disabled.
+
+Argon's duplicate timer transition was already guarded by sessReleasing; the
+actual duplicate was a backend fault followed by releaseDeadline's fault. Tail
+silence was already excluded by run.contentAmong (a buffered-discard regression
+pins it). The claimed decoder cleanup defer does not exist: open owns o.dsd
+until closeOcc, just as it owns o.dec, and closeOcc clears it once. Revocation
+on cancellation remains necessary to fence abandoned activation work.
+
+The reviewer’s macOS full-race log has one failed package, cmd/bridge; every
+other package with tests passed. Its drain audit identifies the constructor
+test's custom cleanup, not a demonstrated production goroutine leak. Use the
+required drainLoopOnCleanup at that launch and keep backend Wait ordered after it.
+Round-2 evidence (red-first logs, exact-leaf mutation controls, race and docs
+checks) is recorded in the review workspace's b-2c2a/r2 artifacts; no hardware,
+Git writes or production enablement were used.

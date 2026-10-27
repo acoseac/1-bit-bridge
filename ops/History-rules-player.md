@@ -750,7 +750,44 @@ while paused. A shared reservation remains charged until engine and backend
 both relinquish it, including stalled cancelled resolver reads; production's
 bound is 1024 and tests exercise four. EOF alone does not relinquish ownership.
 
-Qualification version 6 covers engine and playback activation/release code.
-Version-5 reports are not attributable to this implementation. The real-ref gate
+Qualification version 7 covers engine and playback activation/release code.
+Version-6 and older reports are not attributable to this implementation. The real-ref gate
 must be rerun by the reviewer after committing. Evidence and limitations are
 recorded in the 2c.2a report and the engineering log; no hardware was used.
+
+
+### Native engine hand-off, review round 2 (2026-10-27)
+
+A successful software cut completes that occurrence and continues the producer.
+Installation and resume share the adapter's initial activation authority; pause
+reconciliation cannot activate generation 1 twice. Reopen Locate observes both
+the resume request and sink lifetime; cancelling an in-flight activation still
+revokes it so the abandoned caller cannot authorize sound later.
+
+CleanupResult is separate from Result: a playback/admission error faults and
+stops the session, but successful DROP/HW_FREE/close permits later explicit play.
+An early unconfirmed release stops its timer, clears heard state, and retains
+only one fault for that session. The bounded retiring ledger remains available
+for late accounting until acknowledgement; it never supplies queue intent.
+Fault-initiated release carries ReleaseFault.
+
+The final cutoff supplies each occurrence's start and accepted end in its own
+output's coordinates. Details/Audible require a positive accepted interval;
+Position is compared with that interval's length, never a sink-wide count.
+Tail silence already passes through run.contentAmong and adds no content time.
+A report crossing several tiny native occurrences publishes each one's measured
+position before the following Audible; PCM reports are unchanged.
+
+Unclassified reservations carry ownership but do not charge the native limit.
+Native lookahead reserves before allocation; a newly identified native source
+must promote its reservation before allocating native buffers. Both owners must
+relinquish every charged reservation. PCM retains its prior preparation behavior,
+including lookahead beyond the native limit. Between transports the backend
+keeps the last installed transport's effective pause deadline, matching the
+engine even with a different configured PCM pause release.
+
+The native-qualification job runs both CLI and backend overlay race suites and
+checks that tests ran; the repository wiring test and build-site census pin it.
+The production-constructor test registers drainLoopOnCleanup at its launch,
+before backend Wait and temporary-directory removal. It previously joined the
+engine in a custom cleanup, which the repository's required helper audit rejected.

@@ -81,8 +81,16 @@ type RevokeInput struct {
 	Reason  string
 }
 
+// NativePrefix bounds one occurrence in its output's logical-bit coordinates.
+// End is min(occurrence end, that output's hardware-accepted cutoff).
+type NativePrefix struct {
+	Occurrence OccurrenceID
+	Start, End int64
+}
+
 // NativeEvent is measured outgoing accounting; it never carries queue intent.
 type NativeEvent struct {
+	Prefixes   []NativePrefix
 	Kind       string
 	Occurrence OccurrenceID
 	Details    Details
@@ -101,9 +109,11 @@ type NativeReleaseEvents interface {
 var ErrReleaseUnconfirmed = errors.New("player: native release unconfirmed")
 
 type retiringLedger struct {
-	token  ReleaseToken
-	cutoff bool
-	chain  []*occ
+	token    ReleaseToken
+	cutoff   bool
+	chain    []*occ
+	prefixes map[OccurrenceID]NativePrefix
+	faulted  bool
 }
 type evNativePlan struct {
 	s SessionID
@@ -150,6 +160,12 @@ func (e *Engine) onRetiring(t ReleaseToken, n NativeEvent) {
 	if n.Kind == "cutoff" {
 		if !r.cutoff && t.Cutoff >= 0 {
 			r.token = t
+			r.prefixes = make(map[OccurrenceID]NativePrefix)
+			for _, p := range n.Prefixes {
+				if p.Start >= 0 && p.End > p.Start {
+					r.prefixes[p.Occurrence] = p
+				}
+			}
 			r.cutoff = true
 		}
 		return
@@ -175,6 +191,15 @@ func (e *Engine) retireEvent(s *session, n NativeEvent) {
 			break
 		}
 	}
+	bound := int64(0)
+	if r.cutoff {
+		p, accepted := r.prefixes[oid]
+		if !accepted {
+			oc = nil
+		} else {
+			bound = p.End - p.Start
+		}
+	}
 	switch n.Kind {
 	case "details":
 		if oc != nil {
@@ -188,7 +213,7 @@ func (e *Engine) retireEvent(s *session, n NativeEvent) {
 			e.touched()
 		}
 	case "position":
-		if oc != nil && e.o.audible.Occurrence == oid && n.Position.Frames >= e.o.pos.Frames && (!r.cutoff || n.Position.Frames <= r.token.Cutoff) {
+		if oc != nil && e.o.audible.Occurrence == oid && n.Position.Frames >= e.o.pos.Frames && (!r.cutoff || n.Position.Frames <= bound) {
 			e.o.pos = n.Position
 			e.touched()
 		}
@@ -197,6 +222,10 @@ func (e *Engine) retireEvent(s *session, n NativeEvent) {
 	}
 }
 func (e *Engine) recordRetiringFault(s *session, f Fault) {
+	if s.retiring.faulted {
+		return
+	}
+	s.retiring.faulted = true
 	if f.At.IsZero() {
 		f.At = e.clk.Now()
 	}

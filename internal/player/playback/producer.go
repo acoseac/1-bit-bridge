@@ -382,6 +382,7 @@ func (s *session) transition(o *occ) bool {
 // session's pause. s.mu is held.
 func (s *session) currentLocked(o *occ, out *output, paused bool) {
 	s.cur = out
+	s.currentNative = out.native != nil
 	o.out, o.start, o.transport = out, 0, out.transport
 	s.writing = o
 	if paused {

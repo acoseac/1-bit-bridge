@@ -107,7 +107,7 @@ func TestNativeRetiringPrefixKeepsIntent(t *testing.T) {
 	r := <-rec.requests
 	r.Token.Cutoff = 32
 	ev := s.ev.(NativeReleaseEvents)
-	ev.Retiring(r.Token, NativeEvent{Kind: "cutoff"})
+	ev.Retiring(r.Token, NativeEvent{Kind: "cutoff", Prefixes: []NativePrefix{{Occurrence: s.first.ID, End: 31}, {Occurrence: next.ID, Start: 31, End: 38}}})
 	ev.Retiring(r.Token, NativeEvent{Kind: "details", Occurrence: next.ID, Details: Details{Bits: 1, Codec: "DSD", RateHz: 2822400}})
 	ev.Retiring(r.Token, NativeEvent{Kind: "audible", Occurrence: next.ID})
 	ev.Retiring(r.Token, NativeEvent{Kind: "position", Position: Position{Occurrence: next.ID, Frames: 7, RateHz: 2822400}})
@@ -157,7 +157,7 @@ func TestNativeRetiringRejects(t *testing.T) {
 			h.waitSnap("retiring", func(s *Snapshot) bool { return s.State() == Releasing })
 			token := ReleaseToken{Session: s.id, Generation: 1, Cutoff: 32}
 			ev := s.ev.(NativeReleaseEvents)
-			ev.Retiring(token, NativeEvent{Kind: "cutoff"})
+			ev.Retiring(token, NativeEvent{Kind: "cutoff", Prefixes: []NativePrefix{{Occurrence: s.first.ID, End: 32}}})
 			ev.Retiring(token, NativeEvent{Kind: "position", Position: Position{Occurrence: s.first.ID, Frames: 7, RateHz: 2822400}})
 			if kind == "late" {
 				held.open()

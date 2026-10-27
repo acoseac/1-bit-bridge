@@ -55,14 +55,13 @@ func TestNativeProductionConstructorsRefuse(t *testing.T) {
 				done := make(chan struct{})
 				go func() { defer close(done); _ = eng.Run(ctx) }()
 				t.Cleanup(func() {
-					cancel()
-					<-done
 					c, stop := context.WithTimeout(context.Background(), 5*time.Second)
 					defer stop()
 					if e := b.Wait(c); e != nil {
 						t.Error(e)
 					}
 				})
+				drainLoopOnCleanup(t, cancel, done, "native refusal engine")
 				ref, _ := engine.NewReference("native")
 				if _, e = eng.InsertAfter(ctx, 0, ref, nil); e != nil {
 					t.Fatal(e)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
@@ -22,6 +23,10 @@ func productionNativeAdmission(format.NativeDSD) (engine.NativePlan, error) {
 func (b *Backend) openNativeContent(ctx context.Context, o *occ, d decode.DSDDecoder) {
 	o.dsd = d
 	o.nativeFormat = d.Format()
+	if !o.reservation.PromoteNative() {
+		o.refused = &engine.Unplayable{Reason: engine.Reason("occurrence_budget_exceeded"), Detail: "native occurrence bound"}
+		return
+	}
 	admit := b.nativeAdmission
 	if admit == nil {
 		admit = productionNativeAdmission
@@ -70,19 +75,49 @@ type streamSink interface {
 	Position() alsapcm.Position
 	Changed() <-chan struct{}
 }
-type nativeStream struct{ *alsapcm.DSDSink }
+type nativeStream struct {
+	*alsapcm.DSDSink
+	activationMu sync.Mutex
+	activated    bool
+	life         context.Context
+}
+
+func (n *nativeStream) activate(ctx context.Context) error {
+	n.activationMu.Lock()
+	defer n.activationMu.Unlock()
+	if n.activated {
+		return nil
+	}
+	if n.DSDSink.Position().Paused {
+		return nil
+	}
+	err := n.DSDSink.Activate(ctx, 1)
+	if err == nil {
+		n.activated = true
+	}
+	return err
+}
+func (n *nativeStream) resume(ctx context.Context) error {
+	n.activationMu.Lock()
+	defer n.activationMu.Unlock()
+	err := n.DSDSink.ActivatePaused(ctx)
+	if err == nil {
+		n.activated = true
+	}
+	return err
+}
 
 func (n *nativeStream) Write(context.Context, []byte) (int, error) {
 	return 0, errors.New("PCM write to native transport")
 }
-func (n *nativeStream) Pause() error                    { return n.DSDSink.Pause(context.Background()) }
-func (n *nativeStream) Resume() error                   { return n.DSDSink.ActivatePaused(context.Background()) }
+func (n *nativeStream) Pause() error                    { return n.DSDSink.Pause(n.life) }
+func (n *nativeStream) Resume() error                   { return n.resume(n.life) }
 func (n *nativeStream) Drain(ctx context.Context) error { return n.Finish(ctx) }
 func (n *nativeStream) Drop() error                     { return n.Release(context.Background(), alsapcm.Immediate) }
 func (n *nativeStream) Close() error {
 	n.BeginRelease(alsapcm.Immediate)
 	<-n.Done()
-	return n.Result()
+	return n.CleanupResult()
 }
 func (n *nativeStream) Position() alsapcm.Position {
 	p := n.DSDSink.Position()
@@ -128,7 +163,8 @@ func (s *session) openNativeOutput(ctx context.Context, o *occ) (*output, error)
 		return nil, err
 	}
 	out.native = sink
-	out.sink = &nativeStream{sink}
+	out.adapter = &nativeStream{DSDSink: sink, life: s.ctx}
+	out.sink = out.adapter
 	s.mu.Lock()
 	s.outs = append(s.outs, out)
 	releasing := s.releasing
@@ -157,7 +193,7 @@ func (s *session) activateOutput(ctx context.Context, o *occ, out *output) error
 	if paused {
 		return out.native.Pause(ctx)
 	}
-	return out.native.Activate(ctx, 1)
+	return out.activate(ctx)
 }
 func (s *session) writeNativeChunk(o *occ) bool {
 	planes, err := o.nativeFirst, o.firstErr
@@ -175,9 +211,13 @@ func (s *session) writeNativeChunk(o *occ) bool {
 	for offset := 0; offset < bits; {
 		s.mu.Lock()
 		s.serveLocked()
-		if o.dropped || s.releasing {
+		if s.releasing || s.ctx.Err() != nil {
 			s.mu.Unlock()
 			return false
+		}
+		if o.dropped || s.writing != o {
+			s.mu.Unlock()
+			return true
 		}
 		if s.wctx == nil || s.wctx.Err() != nil {
 			s.wctx, s.wcancel = context.WithCancel(s.ctx)
@@ -309,6 +349,16 @@ func (s *session) finalNativeReport() {
 	if s.cur != nil && s.cur.native != nil {
 		token.Cutoff = s.cur.native.Position().Written
 	}
+	var prefixes []engine.NativePrefix
+	for _, o := range s.chain {
+		if o.dropped || o.out == nil {
+			continue
+		}
+		end := min(o.start+o.written, o.out.sink.Position().Written)
+		if end > o.start {
+			prefixes = append(prefixes, engine.NativePrefix{Occurrence: o.id, Start: o.start, End: end})
+		}
+	}
 	ev := s.ev
 	if to, ok := ev.(engine.NativeReleaseEvents); ok {
 		s.ev = retiringEvents{Events: ev, to: to, token: token}
@@ -319,11 +369,27 @@ func (s *session) finalNativeReport() {
 	}
 	s.mu.Unlock()
 	if to, ok := ev.(engine.NativeReleaseEvents); ok {
-		to.Retiring(token, engine.NativeEvent{Kind: "cutoff"})
+		to.Retiring(token, engine.NativeEvent{Kind: "cutoff", Prefixes: prefixes})
 	}
 	s.reportStep()
 	s.mu.Lock()
 	s.ev = ev
 	s.finalReport = false
 	s.mu.Unlock()
+}
+
+func (o *output) activate(ctx context.Context) error {
+	return o.adapter.activate(ctx)
+}
+func (o *output) pause(ctx context.Context) error {
+	if o.native != nil {
+		return o.native.Pause(ctx)
+	}
+	return o.sink.Pause()
+}
+func (o *output) resume(ctx context.Context) error {
+	if o.native != nil {
+		return o.adapter.resume(ctx)
+	}
+	return o.sink.Resume()
 }

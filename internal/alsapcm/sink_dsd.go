@@ -51,6 +51,7 @@ type nativeOccurrence struct {
 	end int64
 }
 type nativeRequest struct {
+	ctx        context.Context
 	gen        uint64
 	resume     bool
 	pauseEpoch uint64
@@ -97,6 +98,7 @@ type DSDSink struct {
 	waitCancel        context.CancelFunc
 	activation        *nativeRequest
 	err               error
+	cleanupErr        error
 	changed           chan struct{}
 	kick              chan struct{}
 	done              chan struct{}
@@ -227,7 +229,7 @@ func (s *DSDSink) Activate(ctx context.Context, gen uint64) error {
 		s.mu.Unlock()
 		return errors.New("native activation fenced")
 	}
-	r := &nativeRequest{gen: gen, reply: make(chan error, 1)}
+	r := &nativeRequest{ctx: ctx, gen: gen, reply: make(chan error, 1)}
 	s.activation = r
 	s.interrupt()
 	s.mu.Unlock()
@@ -497,7 +499,7 @@ func (s *DSDSink) Resume(ctx context.Context) error {
 		s.mu.Unlock()
 		return nil
 	}
-	r := &nativeRequest{gen: s.generation + 1, resume: true, pauseEpoch: s.pauseEpoch, reply: make(chan error, 1)}
+	r := &nativeRequest{ctx: ctx, gen: s.generation + 1, resume: true, pauseEpoch: s.pauseEpoch, reply: make(chan error, 1)}
 	s.activation = r
 	s.interrupt()
 	s.mu.Unlock()
@@ -537,7 +539,7 @@ func (s *DSDSink) Transport() Transport {
 // Changed closes on the next measured position or lifecycle change.
 func (s *DSDSink) Changed() <-chan struct{} { s.mu.Lock(); defer s.mu.Unlock(); return s.changed }
 
-// Result distinguishes successful cleanup from a failed cleanup after Done.
+// Result reports playback and cleanup errors after Done.
 func (s *DSDSink) Result() error { return s.result() }
 
 // Cut removes only wholly software-owned content, never a committed mixed word.
@@ -596,7 +598,7 @@ func (s *DSDSink) ActivatePaused(ctx context.Context) error {
 		s.mu.Unlock()
 		return errors.New("native initial paused activation fenced")
 	}
-	r := &nativeRequest{gen: 1, resume: true, pauseEpoch: s.pauseEpoch, reply: make(chan error, 1)}
+	r := &nativeRequest{ctx: ctx, gen: 1, resume: true, pauseEpoch: s.pauseEpoch, reply: make(chan error, 1)}
 	s.activation = r
 	s.interrupt()
 	s.mu.Unlock()
@@ -609,4 +611,12 @@ func (s *DSDSink) ActivatePaused(ctx context.Context) error {
 	case <-s.done:
 		return <-r.reply
 	}
+}
+
+// CleanupResult reports only failures to relinquish the device. Done must close
+// before a nil result establishes release; playback faults remain in Result.
+func (s *DSDSink) CleanupResult() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cleanupErr
 }

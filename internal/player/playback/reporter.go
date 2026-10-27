@@ -125,6 +125,13 @@ func (s *session) reportStep() bool {
 			evs = append(evs, func() { de.Details(id, oid, d) })
 		}
 		evs = append(evs, func() { s.ev.Audible(id, oid) })
+		if o.out.native != nil {
+			p := posOf(o.out)
+			frames := min(max(p.Played-o.start, 0), o.written)
+			s.posOcc, s.posFrames = oid, frames
+			pos := engine.Position{Occurrence: oid, Frames: frames, RateHz: o.out.logicalRate(), Measured: p.Measured}
+			evs = append(evs, func() { s.ev.Position(id, pos) })
+		}
 	}
 	// What is heard: its content played, at most what it gave the sink.
 	if heard != nil {
