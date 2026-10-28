@@ -65522,3 +65522,29 @@ scripts/third-party-licenses fails the same way on the untouched base: Homebrew'
 GOROOT holds no LICENSE and the go env sets `-mod=readonly`; with a symlink GOROOT
 holding the licence and default GOFLAGS it passes. Linux runtime, the ALSA ABI
 check and owner hardware qualification remain pending; no audio device was opened.
+
+### Review round 1 (#1357)
+
+- **CodeRabbit, `internal/player/qualification/dop_test.go`**: `TestDoPEvidenceValidation`
+  and `TestDoPReportGeometry` ignored the errors of `json.Unmarshal` and of the
+  per-case `os.WriteFile`, then bound the evidence hash to the bytes they meant to
+  write. Verified on f9ccb169's test: with that write skipped, all nine geometry
+  leaves passed on ReadApproval's `evidence hash mismatch`. `rewriteReport` now fails
+  the test at any step (the fixture uses it too), and every case of the two tests and
+  of `TestDoPExperiments` asserts its own refusal by its text (`refusedFor`); the
+  same stale binding fails all nine new leaves, each naming the refusal it got.
+- **CodeRabbit, the runbook**: the round 3 rules said Contact.SchemaVersion remains 2
+  with no transport, where `Contact.Validate` requires 3 for a DoP tuple. Corrected;
+  the DoP section's line (DoP contacts 3, DoP reports 2, native contacts 2) was right.
+- **SonarCloud, 9.1% duplication on new code** (3% allowed): the DoP tests repeated
+  their native twins (`TinyThroughEngine`, `MixedPolicy`, the retiring and
+  transition engines' boot, `TestNativeReleaseEscalation`, the production refusal's
+  engine). Each twin now runs a shared helper and states only what differs; no leaf
+  was renamed and no assertion changed. Estimated locally with Sonar's CPD for Go
+  reimplemented (go/scanner tokens, comments and inserted semicolons dropped, string
+  literals as one token, nothing before the first declaration, ten-token-line
+  blocks, clones of at least 100 tokens): 271 duplicated of 2,962 new lines on
+  6450a3e0, Sonar's figure exactly, and none after; at 8 lines and 70 tokens, 64
+  (2.2%). The production refusal's drain moved into `playOneOnEngine`, so the
+  control `R2-drain-owner` was re-anchored to its `drainLoopOnCleanup(t, cancel,
+  done, what)`; all 377 controls, re-run on 975d29e9, fail exactly their leaves.
