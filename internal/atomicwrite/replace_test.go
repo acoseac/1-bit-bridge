@@ -333,12 +333,15 @@ func TestReplaceDurable_RefusesBeforeItStages(t *testing.T) {
 		}, ErrNoDirectoryBarrier},
 		{"aside_in_another_directory", func(t *testing.T, root string) (string, string) {
 			mkdirs(t, filepath.Join(root, "sub"))
+			obstruction(t, filepath.Join(root, "seal.json"), "directory_with_a_file")
 			return filepath.Join(root, "seal.json"), filepath.Join(root, "sub", "seal.json.aside")
 		}, ErrNotUnderRoot},
 		{"aside_the_same_name", func(t *testing.T, root string) (string, string) {
+			obstruction(t, filepath.Join(root, "seal.json"), "directory_with_a_file")
 			return filepath.Join(root, "seal.json"), filepath.Join(root, "seal.json")
 		}, ErrNotUnderRoot},
 		{"aside_naming_a_directory", func(t *testing.T, root string) (string, string) {
+			obstruction(t, filepath.Join(root, "seal.json"), "directory_with_a_file")
 			return filepath.Join(root, "seal.json"), filepath.Join(root, "seal.json.aside") + string(filepath.Separator)
 		}, ErrNotUnderRoot},
 		{"dot_dot", func(t *testing.T, root string) (string, string) {
