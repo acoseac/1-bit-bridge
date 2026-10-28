@@ -33,6 +33,9 @@ type Config struct {
 	Locator Locator
 	// OpenSink opens a sink; nil is alsapcm.OpenSink.
 	OpenSink func(ctx context.Context, cfg alsapcm.SinkConfig) (*alsapcm.Sink, error)
+	// OpenNative opens a native DSD or DoP sink for an approved plan; nil is
+	// alsapcm.OpenDSDSink.
+	OpenNative func(ctx context.Context, cfg alsapcm.DSDConfig) (*alsapcm.DSDSink, error)
 	// Tick is what a session measures its sink's position on: a channel that
 	// ticks and the function that stops it. Nil ticks every MeasureEvery.
 	Tick func() (<-chan time.Time, func())
@@ -187,6 +190,9 @@ func New(cfg Config) (*Backend, error) {
 	}
 	if cfg.OpenSink == nil {
 		cfg.OpenSink = alsapcm.OpenSink
+	}
+	if cfg.OpenNative == nil {
+		cfg.OpenNative = alsapcm.OpenDSDSink
 	}
 	if cfg.Tick == nil {
 		cfg.Tick = func() (<-chan time.Time, func()) {

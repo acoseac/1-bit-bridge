@@ -22,8 +22,11 @@ import (
 // Authorization configures local owner approval. It never accepts a candidate.
 type Authorization struct {
 	StateDir, Record, Mode string
-	Sysfs                  alsa.SysfsReader
-	Controls               alsactl.Reader
+	// AllowDoP is output.player.allowDoP: under dsdMode dop or auto it lets
+	// an approved DoP policy play.
+	AllowDoP bool
+	Sysfs    alsa.SysfsReader
+	Controls alsactl.Reader
 	// Healthy observes authorization health independently of inventory generation.
 	Healthy func() bool
 	// ContactCheck is an optional additional CLI report interlock; it never grants permission.
@@ -36,6 +39,11 @@ type PlayerPolicy struct {
 	Generation       uint64
 	Revision, Reason string
 	Tuples           []engine.NativePlan
+	// Model, BCDDevice and QualifiedOn are the owner qualification the
+	// epoch's record states: the DAC's model (its manufacturer and product
+	// strings), its descriptor firmware code and the qualification date,
+	// never its port or serial.
+	Model, BCDDevice, QualifiedOn string
 }
 
 type permission struct {

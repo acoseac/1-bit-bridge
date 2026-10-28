@@ -7,6 +7,31 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 )
 
+// The transports a published tuple and a playback observation name (B470
+// 2d.2): native DSD, the default, is named by none.
+const (
+	// TransportDoP is DSD over PCM, an approved DoP policy's transport.
+	TransportDoP = "dop"
+	// TransportPCM is a PCM occurrence's, which a playback observation
+	// names; a tuple is never PCM.
+	TransportPCM = "pcm"
+)
+
+// TupleTransport is how a published tuple names its transport:
+// TransportDoP for DoP, "" for native DSD however its record spells it.
+func TupleTransport(t engine.NativeTuple) string {
+	if t.Transport == TransportDoP {
+		return TransportDoP
+	}
+	return ""
+}
+
+// EdgeKey is a transport boundary's key, as an approval's Edges name it:
+// qualification.NativeKey's for a plan, the PCM key for a PCM transport.
+// The qualification harness's evidence recorder keys the edges it passes
+// with it.
+func EdgeKey(t alsapcm.Transport, p *engine.NativePlan) string { return edgeKey(t, p) }
+
 func edgeKey(t alsapcm.Transport, p *engine.NativePlan) string {
 	if p != nil {
 		kind := p.Tuple.Transport

@@ -13,31 +13,46 @@ import (
 	"sync"
 	"time"
 
-	"github.com/acoseac/1-bit-bridge/internal/alsa"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 	"github.com/acoseac/1-bit-bridge/internal/player/qualification"
 )
 
+// lifecycleLocator resolves the loopback config's binding afresh at every
+// locate, as resolveNativeTest does, and admits only a node both its
+// resolution's check and the harness's reference check (check) take.
 type lifecycleLocator struct {
-	config string
-	check  func(alsapcm.NodeInfo) error
+	resolve func(context.Context, string) (nativeEndpoint, func(alsapcm.NodeInfo) error, error)
+	config  string
+	check   func(alsapcm.NodeInfo) error
 }
 
 func (l lifecycleLocator) Locate(ctx context.Context) (playback.Unit, error) {
-	ep, check, err := resolveNativeTest(ctx, l.config)
+	ep, check, err := l.resolve(ctx, l.config)
 	if err != nil {
 		return playback.Unit{}, err
 	}
 	return playback.Unit{Endpoint: ep.Endpoint, Subdevice: ep.Subdevice, Admit: func(n alsapcm.NodeInfo) error {
-		if err := check(n); err != nil {
-			return err
+		if check != nil {
+			if err := check(n); err != nil {
+				return err
+			}
 		}
 		return l.check(n)
 	}}, nil
 }
-func executeBackendLifecycle(ctx context.Context, o nativeOptions, ep alsapcm.Endpoint, check func(alsapcm.NodeInfo) error, fixtures map[string]qualification.Fixture, keys <-chan byte, out io.Writer, report *nativeReport) (result error) {
+
+// lifecycleView is one turn of a backend scenario's loop as a test's
+// observer (nativePlayerSeams.observe) sees it: the engine's snapshot the
+// turn read, and the actions the evidence has counted, sorted.
+type lifecycleView struct {
+	Snapshot *engine.Snapshot
+	Actions  []string
+}
+
+func executeBackendLifecycle(ctx context.Context, o nativeOptions, env outputDSDTestEnv, ep alsapcm.Endpoint, check func(alsapcm.NodeInfo) error, fixtures map[string]qualification.Fixture, console *nativeConsole, out io.Writer, report *nativeReport) (result error) {
+	keys := console.keys
 	candidate, err := qualification.ReadCandidate(filepath.Dir(o.provisional), filepath.Base(o.provisional), report.Identity)
 	if err != nil {
 		return err
@@ -58,7 +73,9 @@ func executeBackendLifecycle(ctx context.Context, o nativeOptions, ep alsapcm.En
 	defer os.RemoveAll(state)
 	evidence := &lifecycleEvidence{tuple: report.Tuple, entries: map[engine.OccurrenceID]int{}, lengths: map[engine.OccurrenceID]int64{}, complete: make([]bool, len(files)), actions: map[string]bool{}}
 	defer evidence.copy(report)
-	b, err := playback.NewQualificationBackend(playback.Config{Installed: evidence.note, Notify: evidence.note, Resolver: lifecycleFiles{root: o.fixtures, fixtures: approvedFiles}, Locator: lifecycleLocator{o.config, check}, Authorization: &playback.Authorization{Mode: "native", Record: filepath.Base(o.provisional), StateDir: filepath.Dir(o.provisional), Sysfs: alsa.SysfsReader{Root: hostTrees.sysfs}}})
+	b, err := playback.NewQualificationBackend(playback.Config{Installed: evidence.note, Notify: evidence.note, Resolver: lifecycleFiles{root: o.fixtures, fixtures: approvedFiles}, Locator: lifecycleLocator{env.resolve, o.config, check},
+		OpenSink: env.player.openSink, OpenNative: env.player.openNative,
+		Authorization: &playback.Authorization{Mode: "native", Record: filepath.Base(o.provisional), StateDir: filepath.Dir(o.provisional), Sysfs: env.player.sysfs, Controls: env.player.controls}})
 	if err != nil {
 		return err
 	}
@@ -107,7 +124,11 @@ func executeBackendLifecycle(ctx context.Context, o nativeOptions, ep alsapcm.En
 		if pending != nil && evidence.settleAction(pending, snap) {
 			pending = nil
 		}
-		if evidence.copy(report) && snap.State() == engine.Stopped {
+		complete := evidence.copy(report)
+		if env.player.observe != nil {
+			env.player.observe(lifecycleView{Snapshot: snap, Actions: slices.Clone(report.LifecycleActions)})
+		}
+		if complete && snap.State() == engine.Stopped {
 			report.End = "complete"
 			return nil
 		}

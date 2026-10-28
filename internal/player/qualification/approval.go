@@ -41,13 +41,31 @@ type Evidence struct{ Path, SHA256 string }
 // Edge names a directional boundary, including both complete tuple/policy keys.
 type Edge struct{ From, To string }
 
+// PolicyRef names one approved policy by its ID and the canonical digest
+// (Digest) of the whole policy as the record held it.
+type PolicyRef struct{ ID, SHA256 string }
+
+// TransitionScenario is the dsd-test scenario that plays an approved native
+// policy, then an approved DoP policy, then the native one again, through
+// the real engine and backend (B470 2d.2); its reports are an approval's
+// Transitions.
+const TransitionScenario = "approved-native-dop-native"
+
 // ApprovalBody is the canonical JSON body over which SHA256 is computed.
+// Transitions and QualifiedOn are schema 2's; both are omitted when empty,
+// so a schema-1 body digests as it did before they existed.
 type ApprovalBody struct {
 	SchemaVersion, QualificationVersion               int
 	Confirmation, Revision, ManifestHash, Environment string
 	Identity                                          Identity
 	Policies                                          []ApprovedPolicy
 	Edges                                             []Edge
+	// Transitions are the approved native↔DoP transition reports
+	// (TransitionScenario), the only evidence for an edge between a native
+	// and a DoP policy.
+	Transitions []Evidence `json:",omitempty"`
+	// QualifiedOn is the owner's qualification date, YYYY-MM-DD.
+	QualifiedOn string `json:",omitempty"`
 }
 
 // Approval is an owner-confirmed local record. Hashes detect damage; filesystem
@@ -93,6 +111,9 @@ func readApproval(stateDir, name string, identity Identity, candidate bool) (App
 	}
 	if body.SchemaVersion != 1 || body.QualificationVersion != Version {
 		return a, errors.New("stale approval version")
+	}
+	if len(body.Transitions) > 0 || body.QualifiedOn != "" {
+		return a, errors.New("approval schema 1 carries no transitions or qualification date")
 	}
 	if body.Identity != identity || !identity.valid() {
 		return a, errors.New("stale approval identity")
@@ -234,6 +255,7 @@ type executedReport struct {
 	DoP                                                       *DoPObservations
 	NativeTuple                                               Tuple
 	NativeCompleted                                           int
+	Endpoints                                                 []PolicyRef
 	QualificationVersion                                      int
 	Tuple                                                     Tuple
 	Identity                                                  Identity

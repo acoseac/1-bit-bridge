@@ -168,7 +168,7 @@ func executeNativeTest(ctx context.Context, cancelRun context.CancelCauseFunc, o
 	}()
 	var runErr error
 	if o.scenario == "backend-lifecycle" {
-		return executeBackendLifecycle(ctx, o, ep, check, fixtures, console.keys, out, report)
+		return executeBackendLifecycle(ctx, o, env, ep, check, fixtures, console, out, report)
 	}
 
 	if o.scenario == "level-check" {

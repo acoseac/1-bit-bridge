@@ -184,6 +184,9 @@ func (s *session) openNativeOutput(ctx context.Context, o *occ) (*output, error)
 	}
 	open := s.b.nativeOpen
 	if open == nil {
+		open = s.b.cfg.OpenNative
+	}
+	if open == nil {
 		open = alsapcm.OpenDSDSink
 	}
 	// Native lifetime survives the producer cancellation during TrackChange.
