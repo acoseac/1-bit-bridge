@@ -150,12 +150,13 @@ func refusedUnread(t *testing.T, c net.Conn) bool {
 func TestTheSurfaceBindsEachServedAddressAndFollowsThem(t *testing.T) {
 	box := lantest.New(t)
 	box.Set([]lan.Address{eth0, eth0b})
-	// The listing holds each socket it retires before its teardown begins
-	// (Seams.Retiring) until the test lets it go, so what Status says while
-	// one is held is what a reader of Status sees until the teardown runs.
-	// B557: Status dropped an address before its socket was torn down, and
-	// a kept-alive connection on it was answered after the surface said the
-	// address went away.
+	// The listing holds each socket it retires once its listener is closed
+	// and its Serve has ended, before its connections are closed
+	// (Seams.Retiring), until the test lets it go, so what Status says while
+	// one is held is what a reader of Status sees until the connections are
+	// closed. B557: Status dropped an address before its connections were
+	// closed, and a kept-alive connection on it was answered after the
+	// surface said the address went away.
 	retired := make(chan lan.Address)
 	release := make(chan struct{})
 	done := make(chan struct{})
@@ -211,15 +212,15 @@ func TestTheSurfaceBindsEachServedAddressAndFollowsThem(t *testing.T) {
 	box.Set([]lan.Address{eth0, cable})
 	s.Rescan()
 	whileHeld(eth0b, func() {
-		// The socket and the connection are still there, so Status must
-		// still list the address the connection is answered on.
+		// The connection is still there, so Status must still list the
+		// address it is answered on.
 		_, listed := boundOn(s.Status(), eth0b)
 		code, err := get(kept, br, bound[eth0b].String())
 		if !listed && err == nil {
-			t.Errorf("a connection on an address that went away was answered %d before its socket's teardown, Status no longer listing the address", code)
+			t.Errorf("a connection on an address that went away was answered %d before it was closed, Status no longer listing the address", code)
 		}
 		if listed && code != 200 {
-			t.Errorf("held before its teardown, a connection on the secondary address: %d, %v", code, err)
+			t.Errorf("held before its connections were closed, a connection on the secondary address: %d, %v", code, err)
 		}
 	})
 	listening(t, s, eth0, cable)
@@ -235,8 +236,8 @@ func TestTheSurfaceBindsEachServedAddressAndFollowsThem(t *testing.T) {
 	box.Set([]lan.Address{eth0wide, cable})
 	s.Rescan()
 	whileHeld(eth0, func() {
-		if _, listed := boundOn(s.Status(), eth0); !listed && slices.Contains(box.Open(), bound[eth0]) {
-			t.Errorf("the socket of an address whose prefix changed is open before its teardown, Status no longer listing the address: %v", box.Open())
+		if _, listed := boundOn(s.Status(), eth0); !listed {
+			t.Errorf("Status no longer listed an address whose prefix changed before its connections were closed: %+v", s.Status().Listening)
 		}
 	})
 	now := listening(t, s, eth0wide, cable)
@@ -248,8 +249,8 @@ func TestTheSurfaceBindsEachServedAddressAndFollowsThem(t *testing.T) {
 	box.Set([]lan.Address{eth0again, cable})
 	s.Rescan()
 	whileHeld(eth0wide, func() {
-		if _, listed := boundOn(s.Status(), eth0wide); !listed && slices.Contains(box.Open(), now[eth0wide]) {
-			t.Errorf("the socket of the interface's old index is open before its teardown, Status no longer listing the address: %v", box.Open())
+		if _, listed := boundOn(s.Status(), eth0wide); !listed {
+			t.Errorf("Status no longer listed the interface's old index before its connections were closed: %+v", s.Status().Listening)
 		}
 	})
 	again := listening(t, s, eth0again, cable)

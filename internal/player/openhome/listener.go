@@ -145,7 +145,9 @@ type Seams struct {
 	Forcing func()
 	// Retiring runs on the listing's goroutine for each socket a listing
 	// retires (its address went away, changed its prefix or interface, or
-	// is no longer served), before the socket's teardown begins (B557).
+	// is no longer served), once its listener is closed and its Serve
+	// goroutine has done with its end, before its connections are closed
+	// (B557).
 	Retiring func(lan.Address)
 }
 
@@ -269,7 +271,8 @@ type Surface struct {
 // socket is one bound address. ended is a Serve that returned on its own
 // or in the stop, which Status no longer lists; retiring is a socket the
 // listing is closing, which Status lists until the listing drops it, its
-// connections closed too.
+// connections closed too; served is closed once its Serve goroutine has
+// done with its end.
 type socket struct {
 	key      lan.Address
 	srv      *http.Server
@@ -278,6 +281,7 @@ type socket struct {
 	restr    string
 	ended    atomic.Bool
 	retiring atomic.Bool
+	served   chan struct{}
 }
 
 // close closes the socket's listener and every connection its server
@@ -289,13 +293,20 @@ func (k *socket) close() {
 	_ = k.srv.Close()
 }
 
-// retire closes the socket of an address the listing no longer serves,
-// marked retiring first, so its Serve goroutine, which returns before
-// srv.Close has closed the connections, neither marks it ended nor takes
-// its end for a listener that died (B557).
-func (k *socket) retire() {
+// retire closes the socket of an address the listing no longer serves: its
+// listener, then, once its Serve goroutine has done with its end, every
+// connection its server holds (srv.Close waits for Serve to return in any
+// case). It is marked retiring first, so that goroutine neither marks it
+// ended, which Status would stop listing while its connections are still
+// answered, nor takes its end for a listener that died (B557).
+func (s *Surface) retire(k *socket) {
 	k.retiring.Store(true)
-	k.close()
+	_ = k.ln.Close()
+	<-k.served
+	if s.cfg.Seams != nil && s.cfg.Seams.Retiring != nil {
+		s.cfg.Seams.Retiring(k.key)
+	}
+	_ = k.srv.Close()
 }
 
 // Start starts the surface: its loop binds every served address at once,
@@ -490,10 +501,7 @@ func (s *Surface) reconcile() {
 	// was answered after Status said it went away, since srv.Close closes
 	// the connections only once the socket's Serve has returned (B557).
 	for _, k := range retire {
-		if s.cfg.Seams != nil && s.cfg.Seams.Retiring != nil {
-			s.cfg.Seams.Retiring(k.key)
-		}
-		k.retire()
+		s.retire(k)
 		s.log.Info("player: the OpenHome surface closed an address that went away, changed or is no longer served",
 			"address", k.bound.String(), "interface", k.key.Interface)
 	}
@@ -561,7 +569,7 @@ func (s *Surface) bind(a lan.Address) {
 	}
 	started := make(chan struct{})
 	admit := &admitting{Listener: ln, key: a, gate: s.gate, started: started}
-	k := &socket{key: a, srv: srv, ln: admit, bound: bound, restr: restr}
+	k := &socket{key: a, srv: srv, ln: admit, bound: bound, restr: restr, served: make(chan struct{})}
 	s.mu.Lock()
 	if s.stopped {
 		s.mu.Unlock()
@@ -574,6 +582,7 @@ func (s *Surface) bind(a lan.Address) {
 	s.mu.Unlock()
 	go func() {
 		defer s.serving.Done()
+		defer close(k.served)
 		_ = srv.Serve(admit)
 		if k.retiring.Load() {
 			// The listing drops it from Status once its connections are
