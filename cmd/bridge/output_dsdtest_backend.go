@@ -13,37 +13,169 @@ import (
 	"sync"
 	"time"
 
-	"github.com/acoseac/1-bit-bridge/internal/alsa"
+	"github.com/acoseac/1-bit-bridge/internal/alsactl"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
+	"github.com/acoseac/1-bit-bridge/internal/player/format"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 	"github.com/acoseac/1-bit-bridge/internal/player/qualification"
 )
 
+// lifecycleLocator resolves the loopback config's binding afresh at every
+// locate, as resolveNativeTest does, and admits only a node both its
+// resolution's check and the harness's reference check (check) take.
 type lifecycleLocator struct {
-	config string
-	check  func(alsapcm.NodeInfo) error
+	resolve func(context.Context, string) (nativeEndpoint, func(alsapcm.NodeInfo) error, error)
+	config  string
+	check   func(alsapcm.NodeInfo) error
 }
 
 func (l lifecycleLocator) Locate(ctx context.Context) (playback.Unit, error) {
-	ep, check, err := resolveNativeTest(ctx, l.config)
+	ep, check, err := l.resolve(ctx, l.config)
 	if err != nil {
 		return playback.Unit{}, err
 	}
 	return playback.Unit{Endpoint: ep.Endpoint, Subdevice: ep.Subdevice, Admit: func(n alsapcm.NodeInfo) error {
-		if err := check(n); err != nil {
-			return err
+		if check != nil {
+			if err := check(n); err != nil {
+				return err
+			}
 		}
 		return l.check(n)
 	}}, nil
 }
-func executeBackendLifecycle(ctx context.Context, o nativeOptions, ep alsapcm.Endpoint, check func(alsapcm.NodeInfo) error, fixtures map[string]qualification.Fixture, keys <-chan byte, out io.Writer, report *nativeReport) (result error) {
-	candidate, err := qualification.ReadCandidate(filepath.Dir(o.provisional), filepath.Base(o.provisional), report.Identity)
-	if err != nil {
-		return err
+
+// lifecycleView is one turn of a backend scenario's loop as a test's
+// observer (nativePlayerSeams.observe) sees it: the engine's snapshot the
+// turn read, and the actions the evidence has counted, sorted.
+type lifecycleView struct {
+	Snapshot *engine.Snapshot
+	Actions  []string
+}
+
+// approvedTransition is what the approved-native-dop-native scenario plays
+// (B470 2d.2), read before anything opens: the owner-approved record
+// --qualification names, its native policy --native-tuple-id names and its
+// DoP policy the DoP flags' tuple names, and the DAC's identity and the
+// kernel the record was read against, which the report records.
+type approvedTransition struct {
+	record      qualification.Approval
+	native, dop qualification.ApprovedPolicy
+	identity    qualification.Identity
+	kernel      string
+}
+
+// errTransitionShape is a transition scenario whose fixtures are not three
+// DSD fixtures, the native policy's rate, then the DoP policy's, then the
+// native one's again.
+var errTransitionShape = errors.New("approved-native-dop-native plays three DSD fixtures: native, DoP, native")
+
+// readApprovedTransition reads the transition scenario's endpoints and
+// refuses, each refusal a line of its own, an invocation the owner-approved
+// record does not support, before anything is opened or the report written:
+// the record must read as approved (qualification.ReadApproval, never a
+// candidate) on the DAC's identity, have been approved on this manifest and
+// environment, and hold a native policy of --native-tuple-id's ID and a DoP
+// policy of the flags' tuple; the fixtures must be three DSD fixtures at
+// those policies' rates, native, DoP, native; and the contact bundle must
+// hold, for each policy's tuple, a receipt the DAC, its mixer and the
+// manifest still match.
+func readApprovedTransition(o nativeOptions, env outputDSDTestEnv, ep nativeEndpoint, fixtures map[string]qualification.Fixture, tuple qualification.Tuple, manifestHash string, attachment qualification.Attachment, controls alsactl.Snapshot) (approvedTransition, error) {
+	var t approvedTransition
+	if env.identity == nil || env.kernel == nil {
+		return t, errors.New("approved-native-dop-native needs the DAC's identity and the kernel's release")
 	}
-	if len(candidate.Body.Policies) != 1 || candidate.Body.Policies[0].Tuple != report.Tuple || candidate.Body.ManifestHash != report.ManifestHash || candidate.Body.Environment != report.Environment {
-		return errors.New("candidate does not match explicit invocation")
+	var err error
+	if t.identity, err = env.identity(ep.Card, ep.Device, ep.Subdevice); err != nil {
+		return t, err
+	}
+	if t.kernel, err = env.kernel(); err != nil {
+		return t, err
+	}
+	if t.record, err = qualification.ReadApproval(filepath.Dir(o.qualification), filepath.Base(o.qualification), t.identity); err != nil {
+		return t, fmt.Errorf("--qualification: %w", err)
+	}
+	if t.record.Body.ManifestHash != manifestHash || t.record.Body.Environment != nativeEnvironment(t.kernel) {
+		return t, errors.New("--qualification was approved for another manifest or environment")
+	}
+	native, dop := false, false
+	for _, p := range t.record.Body.Policies {
+		if p.ID == o.nativeTupleID && p.Tuple.TransportName() == "native" {
+			t.native, native = p, true
+		}
+		if p.Tuple == tuple {
+			t.dop, dop = p, true
+		}
+	}
+	if !native {
+		return t, errors.New("--native-tuple-id names no approved native policy")
+	}
+	if !dop {
+		return t, errors.New("--qualification approves no DoP policy for these flags")
+	}
+	if len(o.list) != 3 {
+		return t, errTransitionShape
+	}
+	for i, id := range o.list {
+		rate := t.native.Tuple.BitRate
+		if i == 1 {
+			rate = t.dop.Tuple.BitRate
+		}
+		f, ok := fixtures[id]
+		if !ok || (f.Container != "DSF" && f.Container != "DFF") || f.Rate != rate {
+			return t, errTransitionShape
+		}
+	}
+	bundle, err := readContactBundle(o.contact)
+	if err != nil {
+		return t, fmt.Errorf("--contact-report: %w", err)
+	}
+	for _, p := range []qualification.ApprovedPolicy{t.native, t.dop} {
+		i := slices.IndexFunc(bundle.Receipts, func(r contactReceipt) bool { return r.Contact.Tuple == p.Tuple })
+		if i < 0 {
+			return t, errors.New("--contact-report: contact for approved tuple missing")
+		}
+		if err = bundle.Receipts[i].Contact.Validate(p.Tuple, attachment, ep.Device, ep.Subdevice, controls.Hash(), manifestHash); err != nil {
+			return t, fmt.Errorf("--contact-report: %w", err)
+		}
+	}
+	return t, nil
+}
+
+// transitionPlans are the CLI-only admission of the transition scenario's
+// three occurrences: each fixture's policy, native, DoP, native, and the two
+// edges between them under test, admitted here and nowhere else.
+func transitionPlans(t *approvedTransition) playback.TransitionPlans {
+	native, dop := qualification.NativeKey(t.native), qualification.NativeKey(t.dop)
+	return playback.TransitionPlans{
+		Policies: map[string]string{"file:1": t.native.ID, "file:2": t.dop.ID, "file:3": t.native.ID},
+		Edges:    []engine.TransitionEdge{{From: native, To: dop}, {From: dop, To: native}},
+	}
+}
+
+func executeBackendLifecycle(ctx context.Context, o nativeOptions, env outputDSDTestEnv, ep alsapcm.Endpoint, check func(alsapcm.NodeInfo) error, fixtures map[string]qualification.Fixture, console *nativeConsole, out io.Writer, report *nativeReport, approved *approvedTransition) (result error) {
+	keys := console.keys
+	evidence := &lifecycleEvidence{tuple: report.Tuple, entries: map[engine.OccurrenceID]int{}, lengths: map[engine.OccurrenceID]int64{}, complete: make([]bool, len(o.list)), actions: map[string]bool{}}
+	// A DoP lifecycle's candidate plays under dsdMode dop, which plays DoP
+	// alone; the transition's admission is its plans', whatever the mode.
+	authorization := &playback.Authorization{Mode: "native", Record: filepath.Base(o.provisional), StateDir: filepath.Dir(o.provisional), Sysfs: env.player.sysfs, Controls: env.player.controls}
+	if report.Tuple.Transport == "dop" {
+		authorization.Mode, authorization.AllowDoP = "dop", true
+	}
+	if approved != nil {
+		authorization.Mode, authorization.Record, authorization.StateDir = "auto", filepath.Base(o.qualification), filepath.Dir(o.qualification)
+		evidence.transition = &transitionEvidence{native: approved.native.Tuple, endpoints: map[string]bool{qualification.NativeKey(approved.native): true, qualification.NativeKey(approved.dop): true}}
+		for _, e := range transitionPlans(approved).Edges {
+			evidence.transition.cross = append(evidence.transition.cross, qualification.Edge{From: e.From, To: e.To})
+		}
+	} else {
+		candidate, err := qualification.ReadCandidate(filepath.Dir(o.provisional), filepath.Base(o.provisional), report.Identity)
+		if err != nil {
+			return err
+		}
+		if len(candidate.Body.Policies) != 1 || candidate.Body.Policies[0].Tuple != report.Tuple || candidate.Body.ManifestHash != report.ManifestHash || candidate.Body.Environment != report.Environment {
+			return errors.New("candidate does not match explicit invocation")
+		}
 	}
 	var files []string
 	var approvedFiles []qualification.Fixture
@@ -56,13 +188,19 @@ func executeBackendLifecycle(ctx context.Context, o nativeOptions, ep alsapcm.En
 		return err
 	}
 	defer os.RemoveAll(state)
-	evidence := &lifecycleEvidence{tuple: report.Tuple, entries: map[engine.OccurrenceID]int{}, lengths: map[engine.OccurrenceID]int64{}, complete: make([]bool, len(files)), actions: map[string]bool{}}
 	defer evidence.copy(report)
-	b, err := playback.NewQualificationBackend(playback.Config{Installed: evidence.note, Notify: evidence.note, Resolver: lifecycleFiles{root: o.fixtures, fixtures: approvedFiles}, Locator: lifecycleLocator{o.config, check}, Authorization: &playback.Authorization{Mode: "native", Record: filepath.Base(o.provisional), StateDir: filepath.Dir(o.provisional), Sysfs: alsa.SysfsReader{Root: hostTrees.sysfs}}})
+	cfg := playback.Config{Installed: evidence.note, Notify: evidence.note, Resolver: lifecycleFiles{root: o.fixtures, fixtures: approvedFiles}, Locator: lifecycleLocator{env.resolve, o.config, check},
+		OpenSink: env.player.openSink, OpenNative: env.player.openNative, Authorization: authorization}
+	var b *playback.Backend
+	if approved != nil {
+		b, err = playback.NewTransitionQualificationBackend(cfg, transitionPlans(approved))
+	} else {
+		b, err = playback.NewQualificationBackend(cfg)
+	}
 	if err != nil {
 		return err
 	}
-	eng, err := engine.New(engine.Config{Backend: lifecycleBackend{b, evidence}, PlayerUUID: "0f8fad5b-d9cb-469f-a165-70867728950e", DataDir: state, QueuePath: filepath.Join(state, "queue.json"), DSD: "native"})
+	eng, err := engine.New(engine.Config{Backend: lifecycleBackend{b, evidence}, PlayerUUID: "0f8fad5b-d9cb-469f-a165-70867728950e", DataDir: state, QueuePath: filepath.Join(state, "queue.json"), DSD: authorization.Mode})
 	if err != nil {
 		return err
 	}
@@ -94,7 +232,11 @@ func executeBackendLifecycle(ctx context.Context, o nativeOptions, ep alsapcm.En
 	if err = eng.Play(ctx); err != nil {
 		return err
 	}
-	fmt.Fprintln(out, "Real engine/backend: space play/pause/resume, n next, p previous, x Stop; finish each listed fixture naturally. Stop ends the run without approval.")
+	if approved != nil {
+		fmt.Fprintln(out, "Real engine/backend, approved native, DoP, native: n next, p previous, x Stop, space play; finish each fixture naturally. The run ends once every fixture played to its end, after a natural change of transport, next, previous and Stop.")
+	} else {
+		fmt.Fprintln(out, "Real engine/backend: space play/pause/resume, n next, p previous, x Stop; finish each listed fixture naturally. Stop ends the run without approval.")
+	}
 	report.Completed = make([]bool, len(files))
 
 	var pending *lifecycleAction
@@ -107,7 +249,11 @@ func executeBackendLifecycle(ctx context.Context, o nativeOptions, ep alsapcm.En
 		if pending != nil && evidence.settleAction(pending, snap) {
 			pending = nil
 		}
-		if evidence.copy(report) && snap.State() == engine.Stopped {
+		complete := evidence.copy(report)
+		if env.player.observe != nil {
+			env.player.observe(lifecycleView{Snapshot: snap, Actions: slices.Clone(report.LifecycleActions)})
+		}
+		if complete && snap.State() == engine.Stopped {
 			report.End = "complete"
 			return nil
 		}
@@ -153,20 +299,56 @@ func executeBackendLifecycle(ctx context.Context, o nativeOptions, ep alsapcm.En
 	}
 }
 
+// lifecycleEvidence is what a backend scenario's report records, from the
+// backend's notes and the engine's events: the occurrences of the qualified
+// tuple (native, as its name says, for a DoP tuple too: they are the ones
+// the evidence is about), heard to their ends, the actions observed on
+// them, the edges passed and the sinks opened.
 type lifecycleEvidence struct {
-	mu         sync.Mutex
-	entries    map[engine.OccurrenceID]int
-	lengths    map[engine.OccurrenceID]int64
-	complete   []bool
-	actions    map[string]bool
-	opened     []alsapcm.Params
-	lastEdge   string
-	tuple      qualification.Tuple
-	current    engine.OccurrenceID
-	native     map[engine.OccurrenceID]bool
-	nativeDone map[engine.OccurrenceID]bool
-	pcm        map[engine.OccurrenceID]string
-	edges      []qualification.Edge
+	mu       sync.Mutex
+	entries  map[engine.OccurrenceID]int
+	lengths  map[engine.OccurrenceID]int64
+	complete []bool
+	actions  map[string]bool
+	// opened are the opens of the qualified tuple's transport, and
+	// edgeOpened every other: a PCM edge's, or a transition's native
+	// endpoint's.
+	opened, edgeOpened []alsapcm.Params
+	lastEdge           string
+	tuple              qualification.Tuple
+	current            engine.OccurrenceID
+	native             map[engine.OccurrenceID]bool
+	nativeDone         map[engine.OccurrenceID]bool
+	edges              []qualification.Edge
+	// transition, when set, is the transition scenario's (tuple is then its
+	// DoP endpoint's).
+	transition *transitionEvidence
+}
+
+// transitionEvidence is what the transition scenario's evidence adds: the
+// edge keys of its two endpoint policies, whose occurrences it qualifies,
+// the native endpoint's tuple, and the two edges between them it must pass.
+type transitionEvidence struct {
+	endpoints map[string]bool
+	native    qualification.Tuple
+	cross     []qualification.Edge
+}
+
+// lifecycleActions and transitionActions are the actions a backend-lifecycle
+// and a transition report must have observed on the qualified occurrences.
+var (
+	lifecycleActions  = []string{"natural", "next", "previous", "pause", "resume", "released", "reopened", "stop"}
+	transitionActions = []string{"natural", "next", "previous", "stop"}
+)
+
+// qualifiedTransport reports whether t is the qualified tuple's transport:
+// its kind, ALSA format and logical rate.
+func (v *lifecycleEvidence) qualifiedTransport(t alsapcm.Transport) bool {
+	kind := format.KindNativeDSD
+	if v.tuple.Transport == "dop" {
+		kind = format.KindDoP
+	}
+	return t.Kind == kind && t.LogicalRate == v.tuple.BitRate && string(t.Format) == v.tuple.Format
 }
 
 func (v *lifecycleEvidence) action(name string) {
@@ -205,14 +387,25 @@ func (v *lifecycleEvidence) details(id engine.OccurrenceID, d engine.Details) {
 	v.lengths[id] = d.Frames
 	v.mu.Unlock()
 }
+
+// copy writes the evidence into report, and answers whether it is complete:
+// a qualified occurrence and every listed fixture heard to its end, every
+// action the scenario requires observed, and for the transition both edges
+// between its endpoints passed.
 func (v *lifecycleEvidence) copy(report *nativeReport) bool {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	report.NativeTuple = v.tuple
+	required := lifecycleActions
+	if v.transition != nil {
+		report.NativeTuple = v.transition.native
+		required = transitionActions
+	}
 	report.NativeCompleted = len(v.nativeDone)
 	report.PassedEdges = slices.Clone(v.edges)
 	report.Completed = slices.Clone(v.complete)
 	report.Opened = slices.Clone(v.opened)
+	report.EdgeOpened = slices.Clone(v.edgeOpened)
 	report.LifecycleActions = nil
 	for a := range v.actions {
 		report.LifecycleActions = append(report.LifecycleActions, a)
@@ -226,9 +419,16 @@ func (v *lifecycleEvidence) copy(report *nativeReport) bool {
 			return false
 		}
 	}
-	for _, a := range []string{"natural", "next", "previous", "pause", "resume", "released", "reopened", "stop"} {
+	for _, a := range required {
 		if !v.actions[a] {
 			return false
+		}
+	}
+	if v.transition != nil {
+		for _, e := range v.transition.cross {
+			if !slices.Contains(v.edges, e) {
+				return false
+			}
 		}
 	}
 	return true
@@ -314,25 +514,29 @@ func (f lifecycleFiles) Open(ctx context.Context, ref engine.Reference) (playbac
 
 // note records format by occurrence only at installation, never from a close
 // of another sink or an output opened ahead of the occurrence being heard.
+// An installed occurrence is keyed as the backend keys its edges
+// (playback.EdgeKey): a plan's by its transport and policy, PCM's by its
+// format, and a DSD occurrence with no plan not at all.
 func (v *lifecycleEvidence) note(n playback.Note) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if n.Kind == playback.NoteInstalled && n.Transport.LogicalRate == 0 {
-		if v.pcm == nil {
-			v.pcm = map[engine.OccurrenceID]string{}
-		}
-		v.pcm[n.Occurrence] = fmt.Sprintf("pcm/%s/%d/%d/%d/zero", n.Transport.Format, n.Transport.RateHz, n.Transport.Channels, n.Transport.ValidBits)
-	}
 	if n.Kind == playback.NoteInstalled {
 		p := n.Plan
-		key := v.pcm[n.Occurrence]
+		key := ""
+		switch {
+		case p != nil:
+			key = playback.EdgeKey(n.Transport, p)
+		case n.Transport.LogicalRate == 0:
+			key = playback.EdgeKey(n.Transport, nil)
+		}
 		v.current = n.Occurrence
 		if v.native == nil {
 			v.native = map[engine.OccurrenceID]bool{}
 		}
-		v.native[n.Occurrence] = p != nil && (qualification.Tuple{Format: p.Tuple.Format, BitRate: p.Tuple.BitRate, Pause: p.Pause, TailMS: int(p.Tail.Milliseconds()), PrefillMS: int(p.Prefill.Milliseconds())}) == v.tuple
-		if p != nil {
-			key = fmt.Sprintf("native/%s/%d/2/msb/%s/%s/%d/%d/30", p.Tuple.Format, p.Tuple.BitRate, p.PolicyID, p.Pause, p.Tail.Milliseconds(), p.Prefill.Milliseconds())
+		if v.transition != nil {
+			v.native[n.Occurrence] = p != nil && v.transition.endpoints[key]
+		} else {
+			v.native[n.Occurrence] = p != nil && (qualification.Tuple{Transport: p.Tuple.Transport, Format: p.Tuple.Format, BitRate: p.Tuple.BitRate, Pause: p.Pause, TailMS: int(p.Tail.Milliseconds()), PrefillMS: int(p.Prefill.Milliseconds())}) == v.tuple
 		}
 		if v.lastEdge != "" && key != "" {
 			edge := qualification.Edge{From: v.lastEdge, To: key}
@@ -341,12 +545,15 @@ func (v *lifecycleEvidence) note(n playback.Note) {
 			}
 		}
 		v.lastEdge = key
-
 	}
 	if n.Kind == playback.NoteOpened || n.Kind == playback.NoteReopened {
-		v.opened = append(v.opened, n.Params)
+		if v.qualifiedTransport(n.Transport) {
+			v.opened = append(v.opened, n.Params)
+		} else {
+			v.edgeOpened = append(v.edgeOpened, n.Params)
+		}
 	}
-	if n.Transport.LogicalRate == v.tuple.BitRate && string(n.Transport.Format) == v.tuple.Format {
+	if v.qualifiedTransport(n.Transport) {
 		if n.Kind == playback.NoteReleased {
 			v.actions["released"] = true
 		}

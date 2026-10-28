@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/alsactl"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
@@ -41,13 +42,31 @@ type Evidence struct{ Path, SHA256 string }
 // Edge names a directional boundary, including both complete tuple/policy keys.
 type Edge struct{ From, To string }
 
+// PolicyRef names one approved policy by its ID and the canonical digest
+// (Digest) of the whole policy as the record held it.
+type PolicyRef struct{ ID, SHA256 string }
+
+// TransitionScenario is the dsd-test scenario that plays an approved native
+// policy, then an approved DoP policy, then the native one again, through
+// the real engine and backend (B470 2d.2); its reports are an approval's
+// Transitions.
+const TransitionScenario = "approved-native-dop-native"
+
 // ApprovalBody is the canonical JSON body over which SHA256 is computed.
+// Transitions and QualifiedOn are schema 2's; both are omitted when empty,
+// so a schema-1 body digests as it did before they existed.
 type ApprovalBody struct {
 	SchemaVersion, QualificationVersion               int
 	Confirmation, Revision, ManifestHash, Environment string
 	Identity                                          Identity
 	Policies                                          []ApprovedPolicy
 	Edges                                             []Edge
+	// Transitions are the approved native↔DoP transition reports
+	// (TransitionScenario), the only evidence for an edge between a native
+	// and a DoP policy.
+	Transitions []Evidence `json:",omitempty"`
+	// QualifiedOn is the owner's qualification date, YYYY-MM-DD.
+	QualifiedOn string `json:",omitempty"`
 }
 
 // Approval is an owner-confirmed local record. Hashes detect damage; filesystem
@@ -91,7 +110,23 @@ func readApproval(stateDir, name string, identity Identity, candidate bool) (App
 	if a.SHA256 != Digest(body) {
 		return a, errors.New("approval hash mismatch")
 	}
-	if body.SchemaVersion != 1 || body.QualificationVersion != Version {
+	if body.QualificationVersion != Version {
+		return a, errors.New("stale approval version")
+	}
+	switch body.SchemaVersion {
+	case 1:
+		if len(body.Transitions) > 0 || body.QualifiedOn != "" {
+			return a, errors.New("approval schema 1 carries no transitions or qualification date")
+		}
+	case 2:
+		// A candidate is qualified on no date yet, and holds no transition.
+		if !(candidate && body.QualifiedOn == "") && !validDate(body.QualifiedOn) {
+			return a, errors.New("approval qualification date invalid")
+		}
+		if candidate && len(body.Transitions) > 0 {
+			return a, errors.New("a CLI candidate carries no transitions")
+		}
+	default:
 		return a, errors.New("stale approval version")
 	}
 	if body.Identity != identity || !identity.valid() {
@@ -104,7 +139,7 @@ func readApproval(stateDir, name string, identity Identity, candidate bool) (App
 	if body.Confirmation != phrase || body.Revision == "" || body.Environment == "" || !validHash(body.ManifestHash) {
 		return a, errors.New("owner approval incomplete")
 	}
-	if len(body.Policies) == 0 || len(body.Policies) > 64 || len(body.Edges) > 4096 {
+	if len(body.Policies) == 0 || len(body.Policies) > 64 || len(body.Edges) > 4096 || len(body.Transitions) > 64 {
 		return a, errors.New("approval bounds")
 	}
 	seen := map[string]bool{}
@@ -200,6 +235,11 @@ func readApproval(stateDir, name string, identity Identity, candidate bool) (App
 			}
 		}
 	}
+	for _, ev := range body.Transitions {
+		if err := checkTransition(stateDir, ev, body, identity, executedEdges); err != nil {
+			return a, err
+		}
+	}
 	edges := map[Edge]bool{}
 	for _, e := range body.Edges {
 		if !candidate && !executedEdges[e] {
@@ -211,6 +251,119 @@ func readApproval(stateDir, name string, identity Identity, candidate bool) (App
 		edges[e] = true
 	}
 	return a, nil
+}
+
+// checkTransition takes a transition report (TransitionScenario, B470 2d.2)
+// as the evidence for the two edges between its endpoints, a native and a
+// DoP policy of this very record: the report executed them on the record's
+// identity, manifest and environment, under the DoP evidence's schema,
+// observations and geometry and both policies' constraints, heard every
+// occurrence to its end, moved across the transports by next and previous,
+// stopped, and passed both edges. Its endpoints are named by their
+// canonical digests, so a record whose policy differs from the one the
+// transition played, by a byte, is refused.
+func checkTransition(stateDir string, ev Evidence, body ApprovalBody, identity Identity, executed map[Edge]bool) error {
+	report, err := trustedFile(stateDir, ev.Path)
+	if err != nil {
+		return err
+	}
+	if !validHash(ev.SHA256) || ev.SHA256 != fmt.Sprintf("%x", sha256.Sum256(report)) {
+		return errors.New("evidence hash mismatch")
+	}
+	var r executedReport
+	if err = json.Unmarshal(report, &r); err != nil {
+		return err
+	}
+	if r.QualificationVersion != Version || r.Identity != identity || r.ManifestHash != body.ManifestHash || r.Environment != body.Environment || r.Scenario != TransitionScenario || r.End != "complete" || r.Error != "" || r.Modified || r.BuildSHA == "" || r.BuildSHA == "unverified" || r.PauseReleaseSeconds != 30 || r.PCMTimePolicy != [2]int{} || len(r.Completed) != 3 || r.NativeCompleted <= 0 {
+		// The scenario plays three fixtures, native, DoP, native, and the runner
+		// writes "complete" only when all three finished and an endpoint played
+		// to its end; the lifecycle report is held to the same completion.
+		return errors.New("transition report does not execute approved policies")
+	}
+	native, dop, ok := transitionEndpoints(body.Policies, r.Endpoints)
+	if !ok || r.NativeTuple != native.Tuple || r.Tuple != dop.Tuple {
+		return errors.New("transition endpoints do not match approved policies")
+	}
+	if r.SchemaVersion != 2 {
+		return errors.New("DoP report version mismatch")
+	}
+	if err := r.DoP.Validate(); err != nil {
+		return err
+	}
+	if err := r.validateDoPGeometry(); err != nil {
+		return err
+	}
+	for _, done := range r.Completed {
+		if !done {
+			return errors.New("incomplete occurrence evidence")
+		}
+	}
+	for _, action := range []string{"natural", "next", "previous", "stop"} {
+		if !slices.Contains(r.LifecycleActions, action) {
+			return errors.New("incomplete transition actions")
+		}
+	}
+	if r.FeatureUnit == nil {
+		return errors.New("missing USB gain evidence")
+	}
+	if *r.FeatureUnit {
+		if err := CheckDoPExperiments(stateDir, r.Experiments, dop.Tuple, identity, body.ManifestHash, body.Environment); err != nil {
+			return err
+		}
+	}
+	for _, p := range []ApprovedPolicy{native, dop} {
+		if len(p.Constraints) == 0 {
+			if *r.FeatureUnit {
+				return errors.New("unconstrained gain")
+			}
+			for _, snap := range []alsactl.Snapshot{r.Before, r.After} {
+				for _, c := range snap.Controls {
+					if c.Interface == 2 || c.ReadError != "" {
+						return errors.New("unconstrained or unreadable mixer evidence")
+					}
+				}
+			}
+		}
+		if err = r.Before.CheckConstraints(p.Constraints); err != nil {
+			return err
+		}
+		if err = r.After.CheckConstraints(p.Constraints); err != nil {
+			return err
+		}
+	}
+	for _, e := range []Edge{{From: NativeKey(native), To: NativeKey(dop)}, {From: NativeKey(dop), To: NativeKey(native)}} {
+		if !slices.Contains(r.PassedEdges, e) {
+			return errors.New("transition report lacks a native↔DoP edge")
+		}
+		executed[e] = true
+	}
+	return nil
+}
+
+// transitionEndpoints are the native and the DoP policy of policies refs
+// names, in that order, each its ID and the canonical digest of the whole
+// policy the transition played.
+func transitionEndpoints(policies []ApprovedPolicy, refs []PolicyRef) (native, dop ApprovedPolicy, ok bool) {
+	if len(refs) != 2 {
+		return native, dop, false
+	}
+	find := func(ref PolicyRef, transport string) (ApprovedPolicy, bool) {
+		for _, p := range policies {
+			if p.ID == ref.ID && p.Tuple.TransportName() == transport && Digest(p) == ref.SHA256 {
+				return p, true
+			}
+		}
+		return ApprovedPolicy{}, false
+	}
+	native, okNative := find(refs[0], "native")
+	dop, okDoP := find(refs[1], "dop")
+	return native, dop, okNative && okDoP
+}
+
+// validDate is a qualification date: YYYY-MM-DD, a real day.
+func validDate(s string) bool {
+	d, err := time.Parse(time.DateOnly, s)
+	return err == nil && d.Format(time.DateOnly) == s
 }
 
 // NativeKey includes the policy in directional edge identity.
@@ -234,6 +387,7 @@ type executedReport struct {
 	DoP                                                       *DoPObservations
 	NativeTuple                                               Tuple
 	NativeCompleted                                           int
+	Endpoints                                                 []PolicyRef
 	QualificationVersion                                      int
 	Tuple                                                     Tuple
 	Identity                                                  Identity

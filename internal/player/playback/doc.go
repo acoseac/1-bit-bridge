@@ -1,9 +1,10 @@
 // Package playback is the bridge player's backend (B470 PR 4b2): it
-// implements engine.Backend over internal/player/decode and alsapcm.Sink,
-// PCM only, through one DAC the binding names (internal/player/binding),
-// opened exclusively. The engine (internal/player/engine) owns the state
-// and decides; this package plays what it is handed and reports what the
-// hardware did.
+// implements engine.Backend over internal/player/decode, alsapcm.Sink for
+// PCM and alsapcm.DSDSink for DSD an owner-approved policy plays (native,
+// or DoP in S32_LE: B470 2c.2 and 2d.2), through one DAC the binding names
+// (internal/player/binding), opened exclusively. The engine
+// (internal/player/engine) owns the state and decides; this package plays
+// what it is handed and reports what the hardware did.
 //
 // # Content and packing
 //
@@ -12,10 +13,12 @@
 // release 5a's over the library index with its URI confinement. The backend
 // opens nothing a resolver did not hand it. Content inspection chooses the
 // decoder (decode.Open), and everything but stereo integer PCM at a rate the
-// ALSA backend opens is refused before any of it plays, by its kind:
-// DSD, whatever the DSD mode (ReasonDSD); floating-point PCM and every other
-// decoder refusal by the decoder's own reason (float_pcm_refused,
-// unknown_container, lossy_refused, …); content the resolver could not open
+// ALSA backend opens, or DSD an approved policy plays, is refused before any
+// of it plays, by its kind: DSD no policy of the effective set plays, with
+// its named reason (ReasonDSD while DSD is not configured); floating-point
+// PCM and every other decoder refusal by the decoder's own reason
+// (float_pcm_refused, unknown_container, lossy_refused, …); content the
+// resolver could not open
 // (engine.ReasonMissing); no frames (ReasonEmpty); a rate outside
 // alsapcm.MinRateHz..MaxRateHz (ReasonRate); and content the DAC takes in
 // none of its depth's packings (ReasonTransport). Each occurrence's first

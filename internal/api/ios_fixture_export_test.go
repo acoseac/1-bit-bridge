@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 )
@@ -28,7 +29,7 @@ func TestExportIOSOutputFixtures(t *testing.T) {
 	handler := server.Handler()
 	document := OutputsResponse{Outputs: []OutputInfo{}}
 	records := []map[string]any{}
-	for i, name := range []string{"dsd_open", "dsd_released", "dsd_revoked", "pcm_open", "empty_tuples", "no_backend"} {
+	for i, name := range []string{"dsd_open", "dsd_released", "dsd_revoked", "pcm_open", "empty_tuples", "no_backend", "dop_open"} {
 		f := listedPlayer()
 		f.UUID = fmt.Sprintf("7d444840-9dc0-11d1-b245-%012d", i+1)
 		f.DSDMode = "native"
@@ -72,6 +73,20 @@ func TestExportIOSOutputFixtures(t *testing.T) {
 			f.Codecs = listedPlayer().Codecs
 			f.State = "unavailable"
 			f.Reason = "starting"
+		case "dop_open":
+			// dsdMode auto with allowDoP (B470 2d.2): DoP where the record
+			// holds no native policy, the epoch's qualification, and a DoP
+			// occurrence's observation.
+			observed := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+			f.State, f.DSDMode, f.AllowDoP = "playing", "auto", true
+			f.DSDPlayback.Model, f.DSDPlayback.BCDDevice, f.DSDPlayback.QualifiedOn = "iFi GO bar", "0123", "2026-10-28"
+			f.DSDPlayback.Tuples = []OutputDSDTuple{
+				{Format: "S32_LE", BitRate: 2822400, Channels: 2, PolicyID: "dop-64", Pause: "kernel", TailMS: 10, PrefillMS: 0, Transport: "dop"},
+				{Format: "DSD_U32_LE", BitRate: 5644800, Channels: 2, PolicyID: "native-le", Pause: "silence", TailMS: 0, PrefillMS: 0},
+				{Format: "S32_LE", BitRate: 11289600, Channels: 2, PolicyID: "dop-256", Pause: "kernel", TailMS: 25, PrefillMS: 10, Transport: "dop"},
+			}
+			f.Playback.Format, f.Playback.RateHz, f.Playback.PolicyID = "S32_LE", 176400, "dop-64"
+			f.Playback.Transport, f.Playback.PackingVersion, f.Playback.ObservedAt, f.Playback.QualificationRevision = "dop", 1, &observed, "fixture-revision"
 		}
 		fake.set(f)
 		request := httptest.NewRequest(http.MethodGet, "/v1/outputs", nil)

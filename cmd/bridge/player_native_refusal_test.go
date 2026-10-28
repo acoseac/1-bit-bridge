@@ -33,6 +33,12 @@ func (l refusedNativeLocator) Locate(context.Context) (playback.Unit, error) {
 // names the engine in its drain's timeout message.
 func playOneOnEngine(t *testing.T, b playBackend, name, what string) (*engine.Engine, error) {
 	t.Helper()
+	return playOnEngine(t, b, what, name)
+}
+
+// playOnEngine is playOneOnEngine with the references names queued in order.
+func playOnEngine(t *testing.T, b playBackend, what string, names ...string) (*engine.Engine, error) {
+	t.Helper()
 	dir := t.TempDir()
 	eng, e := engine.New(engine.Config{Backend: b, PlayerUUID: "0f8fad5b-d9cb-469f-a165-70867728950e", DataDir: dir, QueuePath: filepath.Join(dir, "queue.json")})
 	if e != nil {
@@ -49,9 +55,12 @@ func playOneOnEngine(t *testing.T, b playBackend, name, what string) (*engine.En
 		}
 	})
 	drainLoopOnCleanup(t, cancel, done, what)
-	ref, _ := engine.NewReference(name)
-	if _, e = eng.InsertAfter(ctx, 0, ref, nil); e != nil {
-		t.Fatal(e)
+	var after uint32
+	for _, name := range names {
+		ref, _ := engine.NewReference(name)
+		if after, e = eng.InsertAfter(ctx, after, ref, nil); e != nil {
+			t.Fatal(e)
+		}
 	}
 	if e = eng.ReportOutput(ctx, engine.OutputReport{Generation: 1, Available: true}); e != nil {
 		t.Fatal(e)
@@ -91,8 +100,10 @@ func TestNativeProductionConstructorsRefuse(t *testing.T) {
 				if len(skipped) != 1 {
 					t.Fatalf("named production refusal absent: %+v", skipped)
 				}
+				// dsdMode native asks for DSD, and the approved record it names
+				// is not there: the refusal names the approval (B470 2d.2).
 				for _, skip := range skipped {
-					if skip.Reason != playback.ReasonDSD {
+					if skip.Reason != playback.ReasonDSDApproval {
 						t.Fatalf("wrong refusal: %+v", skip)
 					}
 				}

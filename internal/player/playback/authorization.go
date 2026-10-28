@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -22,8 +24,11 @@ import (
 // Authorization configures local owner approval. It never accepts a candidate.
 type Authorization struct {
 	StateDir, Record, Mode string
-	Sysfs                  alsa.SysfsReader
-	Controls               alsactl.Reader
+	// AllowDoP is output.player.allowDoP: under dsdMode dop or auto it lets
+	// an approved DoP policy play.
+	AllowDoP bool
+	Sysfs    alsa.SysfsReader
+	Controls alsactl.Reader
 	// Healthy observes authorization health independently of inventory generation.
 	Healthy func() bool
 	// ContactCheck is an optional additional CLI report interlock; it never grants permission.
@@ -36,6 +41,11 @@ type PlayerPolicy struct {
 	Generation       uint64
 	Revision, Reason string
 	Tuples           []engine.NativePlan
+	// Model, BCDDevice and QualifiedOn are the owner qualification the
+	// epoch's record states: the DAC's model (its manufacturer and product
+	// strings), its descriptor firmware code and the qualification date,
+	// never its port or serial.
+	Model, BCDDevice, QualifiedOn string
 }
 
 type permission struct {
@@ -44,6 +54,47 @@ type permission struct {
 	file        os.FileInfo
 	generation  uint64
 	revoked     atomic.Bool
+	// mode and allowDoP are the authorization's dsdMode (native, dop or
+	// auto) and allowDoP, which the effective set is taken under.
+	mode     string
+	allowDoP bool
+}
+
+// The refusals of DSD content the effective set names (B470 2d.2), beside
+// ReasonDSD (DSD not configured), ReasonRate (a rate no transport here
+// carries) and native_revoked.
+const (
+	// ReasonDSDApproval is DSD while dsdMode asks for it and the owner's
+	// approved record cannot be read and verified now: missing, stale,
+	// tampered, a CLI candidate, another DAC's, the health stale, or no
+	// policy's constraints holding.
+	ReasonDSDApproval engine.Reason = "dsd_approval_unavailable"
+	// ReasonDoPNotAllowed is DSD whose only approved transport at its rate,
+	// under the mode, is DoP, while allowDoP is false.
+	ReasonDoPNotAllowed engine.Reason = "dop_not_allowed"
+	// ReasonDSDNotApproved is DSD at a rate where the record holds no policy
+	// the mode may play.
+	ReasonDSDNotApproved engine.Reason = "dsd_tuple_not_approved"
+	// ReasonDSDUnavailable is DSD at a rate whose approved policy does not
+	// hold now (a constrained control changed): never played in another
+	// transport's place.
+	ReasonDSDUnavailable engine.Reason = "dsd_policy_unavailable"
+)
+
+// errDSDOff is a permission read while dsdMode is off: DSD is refused as
+// not configured, never as an approval that does not read.
+var errDSDOff = errors.New("DSD is off")
+
+// approvalDetail is why an approval did not read, as a refusal's detail: the
+// reader's own words, and of an error a filesystem call returned its
+// operation and cause alone, never the path, which names the data
+// directory.
+func approvalDetail(err error) string {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return "the approved record does not read: " + pe.Op + ": " + pe.Err.Error()
+	}
+	return "the approved record does not read: " + err.Error()
 }
 
 func (a *Authorization) identity(u Unit) (qualification.Identity, error) {
@@ -66,10 +117,10 @@ func (a *Authorization) path() string {
 func (b *Backend) readPermission(ctx context.Context) (*permission, error) {
 	a := b.cfg.Authorization
 	if a == nil || a.Mode == "" || a.Mode == "off" {
-		return nil, errors.New("DSD is off")
+		return nil, errDSDOff
 	}
-	if a.Mode != "native" && a.Mode != "auto" {
-		return nil, errors.New("DoP is not implemented")
+	if a.Mode != "native" && a.Mode != "auto" && a.Mode != "dop" {
+		return nil, errors.New("dsdMode is no DSD mode")
 	}
 	if a.Record == "" {
 		return nil, errors.New("approval missing")
@@ -134,7 +185,7 @@ func (b *Backend) readPermission(ctx context.Context) (*permission, error) {
 	if !available {
 		return nil, errors.New("no tuple satisfies its approved constraints")
 	}
-	return &permission{record: record, file: after, unavailable: unavailable}, nil
+	return &permission{record: record, file: after, unavailable: unavailable, mode: a.Mode, allowDoP: a.AllowDoP}, nil
 }
 func planOf(p qualification.ApprovedPolicy, a qualification.Approval) engine.NativePlan {
 	plan := engine.NativePlan{Tuple: engine.NativeTuple{Transport: p.Tuple.Transport, Format: p.Tuple.Format, BitRate: p.Tuple.BitRate}, PolicyID: p.ID, Pause: p.Tuple.Pause, Tail: time.Duration(p.Tuple.TailMS) * time.Millisecond, Prefill: time.Duration(p.Tuple.PrefillMS) * time.Millisecond}
@@ -143,19 +194,180 @@ func planOf(p qualification.ApprovedPolicy, a qualification.Approval) engine.Nat
 	}
 	return plan
 }
+
+// dsdRates are the logical rates an approved policy may name: DSD64, DSD128
+// and DSD256.
+var dsdRates = []int{2822400, 5644800, 11289600}
+
+// effectiveSet is a permission's effective DSD set (B470 R10, R11): the one
+// answer selection and publication both take, so what the epoch advertises
+// is what plays.
+type effectiveSet struct {
+	// plans are the policies that play, by rate, each rate's in selection
+	// order.
+	plans []engine.NativePlan
+	// refused is why a rate with no plan has none.
+	refused map[int]*engine.Unplayable
+	// reason is the epoch's when no plan plays at any rate.
+	reason string
+}
+
+// effective is the effective set of record's policies under mode and
+// allowDoP, unavailable naming those whose constraints do not hold now. A
+// policy plays only where a transport the sink opens implements it
+// (nativeTransport): under native, only native policies, DSD_U32_BE, then
+// DSD_U32_LE, then DSD_U16_LE; under dop, only DoP's S32_LE, and only with
+// allowDoP; under auto, the native policies first, and DoP only at a rate
+// where the record holds no native policy at all: one there whose
+// constraints do not hold now is that rate's refusal, never a reason to
+// play DoP in its place.
+func effective(record qualification.Approval, unavailable map[string]bool, mode string, allowDoP bool) effectiveSet {
+	set := effectiveSet{refused: map[int]*engine.Unplayable{}}
+	notAllowed := mode == "dop" && !allowDoP
+	for _, rate := range dsdRates {
+		var natives, dops []qualification.ApprovedPolicy
+		for _, f := range []string{"DSD_U32_BE", "DSD_U32_LE", "DSD_U16_LE"} {
+			for _, p := range record.Body.Policies {
+				if p.Tuple.BitRate == rate && p.Tuple.TransportName() == "native" && p.Tuple.Format == f && implemented(p) {
+					natives = append(natives, p)
+				}
+			}
+		}
+		for _, p := range record.Body.Policies {
+			if p.Tuple.BitRate == rate && p.Tuple.TransportName() == TransportDoP && implemented(p) {
+				dops = append(dops, p)
+			}
+		}
+		var candidates []qualification.ApprovedPolicy
+		var refusal *engine.Unplayable
+		switch mode {
+		case "native":
+			candidates = natives
+			if len(natives) == 0 {
+				refusal = &engine.Unplayable{Reason: ReasonDSDNotApproved, Detail: "the approval holds no native policy at this rate, and dsdMode native plays no DoP"}
+			}
+		case "dop":
+			switch {
+			case !allowDoP:
+				refusal = &engine.Unplayable{Reason: ReasonDoPNotAllowed, Detail: "dsdMode dop plays DoP alone, and allowDoP is false"}
+			case len(dops) == 0:
+				refusal = &engine.Unplayable{Reason: ReasonDSDNotApproved, Detail: "the approval holds no DoP policy at this rate, and dsdMode dop plays no native DSD"}
+			default:
+				candidates = dops
+			}
+		case "auto":
+			switch {
+			case len(natives) > 0:
+				candidates = natives
+			case len(dops) == 0:
+				refusal = &engine.Unplayable{Reason: ReasonDSDNotApproved, Detail: "the approval holds no policy at this rate"}
+			case !allowDoP:
+				notAllowed = true
+				refusal = &engine.Unplayable{Reason: ReasonDoPNotAllowed, Detail: "only DoP is approved at this rate, and allowDoP is false"}
+			default:
+				candidates = dops
+			}
+		default:
+			refusal = &engine.Unplayable{Reason: ReasonDSD, Detail: "DSD is off"}
+		}
+		n := 0
+		for _, p := range candidates {
+			if unavailable[qualification.NativeKey(p)] {
+				continue
+			}
+			set.plans = append(set.plans, planOf(p, record))
+			n++
+		}
+		if n == 0 {
+			if refusal == nil {
+				refusal = &engine.Unplayable{Reason: ReasonDSDUnavailable, Detail: "the approved policy at this rate does not hold now: a control it constrains has changed"}
+			}
+			set.refused[rate] = refusal
+		}
+	}
+	if len(set.plans) == 0 {
+		set.reason = "no_eligible_tuple"
+		if notAllowed {
+			set.reason = "dop_not_allowed"
+		}
+	}
+	return set
+}
+
+// implemented reports whether a transport the sink opens carries p.
+func implemented(p qualification.ApprovedPolicy) bool {
+	return nativeTransport(planOf(p, qualification.Approval{})) != (alsapcm.Transport{})
+}
+
+// selectNative is the DSD plan for content of f under p: the first of the
+// effective set's plans at f's rate, or that rate's refusal. The decoders
+// take DSD512, which no transport here carries: it is refused before the
+// set is asked.
 func (p *permission) selectNative(f format.NativeDSD) (engine.NativePlan, error) {
 	if p == nil || p.revoked.Load() {
 		return productionNativeAdmission(f)
 	}
-	for _, preferred := range []string{"DSD_U32_BE", "DSD_U32_LE", "DSD_U16_LE"} {
-		for _, t := range p.record.Body.Policies {
-			if !p.unavailable[qualification.NativeKey(t)] && t.Tuple.Format == preferred && t.Tuple.BitRate == f.BitRateHz && f.Channels == 2 {
-				return planOf(t, p.record), nil
-			}
+	if !nativeLogicalRate(f.BitRateHz) {
+		return engine.NativePlan{}, &engine.Unplayable{Reason: ReasonRate, Detail: "DSD64, DSD128 and DSD256 only: no native or DoP transport here carries this DSD rate"}
+	}
+	if f.Channels != 2 {
+		return engine.NativePlan{}, &engine.Unplayable{Reason: ReasonDSDNotApproved, Detail: "an approved policy is stereo"}
+	}
+	set := effective(p.record, p.unavailable, p.mode, p.allowDoP)
+	for _, plan := range set.plans {
+		if plan.Tuple.BitRate == f.BitRateHz {
+			return plan, nil
 		}
 	}
-	return engine.NativePlan{}, errors.New("no approved native tuple")
+	if u := set.refused[f.BitRateHz]; u != nil {
+		return engine.NativePlan{}, u
+	}
+	return engine.NativePlan{}, &engine.Unplayable{Reason: ReasonDSDNotApproved, Detail: "the approval holds no policy at this rate"}
 }
+
+// selectTransition is the transition scenario's CLI-only admission
+// (TransitionPlans): the approved policy plans name for ref, at the
+// content's own rate and holding now, with the edges under test beside the
+// record's own.
+func (p *permission) selectTransition(ref engine.Reference, f format.NativeDSD, plans *TransitionPlans) (engine.NativePlan, error) {
+	if p == nil || p.revoked.Load() {
+		return productionNativeAdmission(f)
+	}
+	id, ok := plans.Policies[ref.String()]
+	if !ok {
+		return engine.NativePlan{}, &engine.Unplayable{Reason: ReasonDSDNotApproved, Detail: "the transition scenario names no policy for this occurrence"}
+	}
+	for _, policy := range p.record.Body.Policies {
+		if policy.ID != id {
+			continue
+		}
+		switch {
+		case policy.Tuple.BitRate != f.BitRateHz || f.Channels != 2 || !implemented(policy):
+			return engine.NativePlan{}, &engine.Unplayable{Reason: ReasonDSDNotApproved, Detail: "the occurrence is not its policy's rate and stereo"}
+		case p.unavailable[qualification.NativeKey(policy)]:
+			return engine.NativePlan{}, &engine.Unplayable{Reason: ReasonDSDUnavailable, Detail: "the approved policy does not hold now: a control it constrains has changed"}
+		}
+		plan := planOf(policy, p.record)
+		plan.Edges = append(plan.Edges, plans.Edges...)
+		return plan, nil
+	}
+	return engine.NativePlan{}, &engine.Unplayable{Reason: ReasonDSDNotApproved, Detail: "the approval holds no policy of that ID"}
+}
+
+// qualificationFacts are the owner qualification a record states for the
+// wire: the DAC's model, its manufacturer and product strings with the
+// record's anchored port taken out wherever it shows, its descriptor
+// firmware code and the qualification date. The serial is no part of a
+// record.
+func qualificationFacts(a qualification.Approval) (model, bcdDevice, qualifiedOn string) {
+	id := a.Body.Identity
+	model = strings.TrimSpace(strings.TrimSpace(id.Manufacturer) + " " + strings.TrimSpace(id.Product))
+	if id.Port != "" {
+		model = strings.ReplaceAll(model, id.Port, "[redacted]")
+	}
+	return model, id.BCDDevice, a.Body.QualifiedOn
+}
+
 func (b *Backend) publishPermission(p *permission, reason string) {
 	b.policyMu.Lock()
 	defer b.policyMu.Unlock()
@@ -168,17 +380,15 @@ func (b *Backend) publishPermission(p *permission, reason string) {
 	b.policy.Reason = reason
 	b.policy.Tuples = nil
 	b.policy.Revision = ""
+	b.policy.Model, b.policy.BCDDevice, b.policy.QualifiedOn = "", "", ""
 	if p != nil {
 		p.generation = b.policy.Generation
 		b.policy.Revision = p.record.Body.Revision
-		for _, v := range p.record.Body.Policies {
-			if p.unavailable[qualification.NativeKey(v)] || format.DSDWordBytes(format.ALSAFormat(v.Tuple.Format)) == 0 {
-				continue
-			}
-			b.policy.Tuples = append(b.policy.Tuples, planOf(v, p.record))
-		}
-		if len(b.policy.Tuples) == 0 {
-			b.policy.Reason = "no_implemented_tuple"
+		b.policy.Model, b.policy.BCDDevice, b.policy.QualifiedOn = qualificationFacts(p.record)
+		set := effective(p.record, p.unavailable, p.mode, p.allowDoP)
+		b.policy.Tuples = set.plans
+		if len(set.plans) == 0 {
+			b.policy.Reason = set.reason
 		}
 	}
 }
@@ -307,6 +517,32 @@ func NewQualificationBackend(cfg Config) (*Backend, error) {
 		return nil, e
 	}
 	b.cliCandidate = true
+	return b, nil
+}
+
+// TransitionPlans is the approved-native-dop-native scenario's CLI-only
+// admission (B470 2d.2): the policy each reference plays under, by its ID in
+// the owner-approved record, and the directional edges under test, admitted
+// here beside the record's own and nowhere else.
+type TransitionPlans struct {
+	Policies map[string]string
+	Edges    []engine.TransitionEdge
+}
+
+// NewTransitionQualificationBackend is the CLI-only constructor of the
+// approved native↔DoP transition scenario: it reads only an owner-approved
+// record (qualification.ReadApproval, never a candidate) and admits each
+// occurrence under the approved policy plans names for its reference.
+// Serve and output-play use New.
+func NewTransitionQualificationBackend(cfg Config, plans TransitionPlans) (*Backend, error) {
+	if cfg.Authorization == nil || len(plans.Policies) == 0 {
+		return nil, errors.New("approved record and transition plans required")
+	}
+	b, e := New(cfg)
+	if e != nil {
+		return nil, e
+	}
+	b.transitions = &TransitionPlans{Policies: maps.Clone(plans.Policies), Edges: slices.Clone(plans.Edges)}
 	return b, nil
 }
 

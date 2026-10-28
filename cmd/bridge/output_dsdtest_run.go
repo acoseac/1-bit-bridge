@@ -85,7 +85,7 @@ func verifyNativeFixture(root string, f qualification.Fixture) error {
 	}
 	return nil
 }
-func executeNativeTest(ctx context.Context, cancelRun context.CancelCauseFunc, o nativeOptions, env outputDSDTestEnv, ep alsapcm.Endpoint, check func(alsapcm.NodeInfo) error, m qualification.Manifest, fixtures map[string]qualification.Fixture, in io.Reader, out io.Writer, report *nativeReport) (runResult error) {
+func executeNativeTest(ctx context.Context, cancelRun context.CancelCauseFunc, o nativeOptions, env outputDSDTestEnv, ep alsapcm.Endpoint, check func(alsapcm.NodeInfo) error, m qualification.Manifest, fixtures map[string]qualification.Fixture, approved *approvedTransition, in io.Reader, out io.Writer, report *nativeReport) (runResult error) {
 	defer cancelRun(nil)
 	var echo io.Writer
 	if env.tty {
@@ -167,8 +167,14 @@ func executeNativeTest(ctx context.Context, cancelRun context.CancelCauseFunc, o
 		}
 	}()
 	var runErr error
-	if o.scenario == "backend-lifecycle" {
-		return executeBackendLifecycle(ctx, o, ep, check, fixtures, console.keys, out, report)
+	if o.scenario == "backend-lifecycle" || o.scenario == qualification.TransitionScenario {
+		// A DoP scenario's evidence, complete, still needs the DAC's DSD
+		// indication and the listening: the backend's opens prove neither.
+		if e := executeBackendLifecycle(ctx, o, env, ep, check, fixtures, console, out, report, approved); e != nil || o.transport != "dop" || report.End != "complete" {
+			return e
+		}
+		report.DoP, runErr = confirmDoP(ctx, console, out)
+		return runErr
 	}
 
 	if o.scenario == "level-check" {

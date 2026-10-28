@@ -442,7 +442,7 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 	}
 	be, err := newBackend(playback.Config{
 		Resolver: res,
-		Authorization: &playback.Authorization{StateDir: cfg.DataDir, Record: player.DSDQualification, Mode: player.EffectiveDSDMode(), Sysfs: w.Trees.or(hostTrees).observer().Sysfs, Healthy: func() bool {
+		Authorization: &playback.Authorization{StateDir: cfg.DataDir, Record: player.DSDQualification, Mode: player.EffectiveDSDMode(), AllowDoP: player.AllowsDoP(), Sysfs: w.Trees.or(hostTrees).observer().Sysfs, Healthy: func() bool {
 			if w.Feed == nil {
 				return false
 			}

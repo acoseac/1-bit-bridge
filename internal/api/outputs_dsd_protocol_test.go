@@ -42,8 +42,19 @@ func TestDSDOutputProtocolTokens(t *testing.T) {
 		})
 	})
 	native, pcm, pause, states := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
+	// transports are playback's Transport words by constant: an
+	// observation's transport is any of them, a tuple's TransportDoP alone
+	// (TupleTransport; native DSD is named by none).
+	transports := map[string]string{}
 	protocolGoFiles(t, filepath.Join(root, "internal/player/playback"), func(f *ast.File) {
 		ast.Inspect(f, func(n ast.Node) bool {
+			if v, ok := n.(*ast.ValueSpec); ok {
+				for i, name := range v.Names {
+					if strings.HasPrefix(name.Name, "Transport") && i < len(v.Values) {
+						transports[name.Name] = protocolString(t, v.Values[i])
+					}
+				}
+			}
 			if v, ok := n.(*ast.ValueSpec); ok && len(v.Names) == 1 && v.Names[0].Name == "packings" {
 				if len(v.Values) != 1 {
 					t.Fatal("packings must have one initializer")
@@ -139,21 +150,37 @@ func TestDSDOutputProtocolTokens(t *testing.T) {
 		}
 		return true
 	})
-	// The published tuple filter is DSDWordBytes over the approval's formats.
+	// A published tuple is one of the approval's formats (B470 2d.2): a
+	// native DSD word (DSDWordBytes) or DoP's PCM carrier word, the one the
+	// approval takes that is no DSD word.
+	dop := map[string]bool{}
 	for value := range approvedFormats {
 		if format.DSDWordBytes(format.ALSAFormat(value)) > 0 {
 			native[value] = true
+		} else {
+			dop[value] = true
 		}
+	}
+	observed := map[string]bool{}
+	for _, value := range transports {
+		observed[value] = true
+	}
+	tupleTransport := map[string]bool{}
+	if value, ok := transports["TransportDoP"]; ok {
+		tupleTransport[value] = true
 	}
 	for _, tc := range []struct {
 		name, field string
 		values      map[string]bool
 	}{
-		{"native_format", "dsdPlayback.tuples[].format", native},
+		{"tuple_format", "dsdPlayback.tuples[].format", approvedFormats},
+		{"tuple_transport", "dsdPlayback.tuples[].transport", tupleTransport},
 		{"pause", "dsdPlayback.tuples[].pause", pause},
 		{"state", "playback.state", states},
+		{"transport", "playback.transport", observed},
 		{"pcm_format", "playback.format` (PCM)", pcm},
 		{"dsd_format", "playback.format` (native DSD)", native},
+		{"dop_format", "playback.format` (DoP)", dop},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			prefix := "| `" + tc.field
