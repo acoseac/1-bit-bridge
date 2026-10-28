@@ -274,7 +274,10 @@ func checkTransition(stateDir string, ev Evidence, body ApprovalBody, identity I
 	if err = json.Unmarshal(report, &r); err != nil {
 		return err
 	}
-	if r.QualificationVersion != Version || r.Identity != identity || r.ManifestHash != body.ManifestHash || r.Environment != body.Environment || r.Scenario != TransitionScenario || r.End != "complete" || r.Error != "" || r.Modified || r.BuildSHA == "" || r.BuildSHA == "unverified" || r.PauseReleaseSeconds != 30 || r.PCMTimePolicy != [2]int{} || len(r.Completed) == 0 {
+	if r.QualificationVersion != Version || r.Identity != identity || r.ManifestHash != body.ManifestHash || r.Environment != body.Environment || r.Scenario != TransitionScenario || r.End != "complete" || r.Error != "" || r.Modified || r.BuildSHA == "" || r.BuildSHA == "unverified" || r.PauseReleaseSeconds != 30 || r.PCMTimePolicy != [2]int{} || len(r.Completed) != 3 || r.NativeCompleted <= 0 {
+		// The scenario plays three fixtures, native, DoP, native, and the runner
+		// writes "complete" only when all three finished and an endpoint played
+		// to its end; the lifecycle report is held to the same completion.
 		return errors.New("transition report does not execute approved policies")
 	}
 	native, dop, ok := transitionEndpoints(body.Policies, r.Endpoints)

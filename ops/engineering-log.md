@@ -66056,3 +66056,13 @@ job; every hardware step of the runbook's 2d.2 section is the owner's.
 Merged main at d8b6897c (B557, #1360), which had taken qualificationVersion 16 for its
 own guarded change: this branch moves to **17**, and the runbook's current references
 say 17 (B557's paragraph keeps 16).
+
+Review (Argon, verified against the code): `checkTransition` now also requires the
+scenario's three fixtures (`len(Completed) == 3`) and an endpoint played to its end
+(`NativeCompleted > 0`), as the lifecycle report's check does. The runner never writes
+a shorter run as complete, and the record pins the report's bytes, so this closes a
+consistency gap, not a bypass; `TestApprovalTransitionRefusals` gained `short_run` and
+`no_endpoint_completed`, both red before the check. Two other findings were refuted:
+reports are parsed leniently by design (each reader takes part of what the harness
+writes, and the hash binds the bytes), and an empty epoch keeps the approved record's
+facts, as PROTOCOL.md says and `TestDoPPublication` pins for the revision.

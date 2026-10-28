@@ -123,8 +123,10 @@ func TestApprovalTransitionEvidence(t *testing.T) {
 // not belong or do not hash, each with its own refusal: a schema-1 record
 // carrying Transitions or a qualification date; a record whose digest is not
 // that of its body, Transitions included; a transition report whose bytes
-// are not the digest the record names; and a transition report that passed
-// one of the two native↔DoP edges, for a record that approves both.
+// are not the digest the record names; a transition report that passed
+// one of the two native↔DoP edges, for a record that approves both; and one
+// that holds fewer than the scenario's three fixtures, or no endpoint played
+// to its end, which the runner never writes as complete.
 func TestApprovalTransitionRefusals(t *testing.T) {
 	for _, tc := range []struct {
 		name, want string
@@ -148,6 +150,12 @@ func TestApprovalTransitionRefusals(t *testing.T) {
 		}},
 		{name: "edge_not_passed", want: "transition report lacks a native↔DoP edge", change: func(t *testing.T, dir string, a *Approval, edges [2]Edge) {
 			rewriteReport(t, dir, &a.Body.Transitions[0], func(r map[string]any) { r["PassedEdges"] = edges[:1] })
+		}},
+		{name: "short_run", want: "transition report does not execute approved policies", change: func(t *testing.T, dir string, a *Approval, _ [2]Edge) {
+			rewriteReport(t, dir, &a.Body.Transitions[0], func(r map[string]any) { r["Completed"] = []bool{true} })
+		}},
+		{name: "no_endpoint_completed", want: "transition report does not execute approved policies", change: func(t *testing.T, dir string, a *Approval, _ [2]Edge) {
+			rewriteReport(t, dir, &a.Body.Transitions[0], func(r map[string]any) { r["NativeCompleted"] = 0 })
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
