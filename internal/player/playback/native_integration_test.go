@@ -733,12 +733,25 @@ func (b nativeSuccessorBarrier) Start(ctx context.Context, r engine.StartRequest
 	}
 	return b.nativeRecordingBackend.Start(ctx, r)
 }
+
+// TestNativeIntegrationRetiringThroughEngine navigates to the third of three
+// 31-bit tracks, a, b and c, while the first hardware write is parked: a
+// 32-bit word holds all of a and b's first bit, so that write is a
+// two-occurrence prefix. c's content is held until the navigation's release
+// has begun, so no word holding c's bits can join that write whatever the
+// scheduler does, the latest writer included (nativeLateWriter), and the DAC
+// is given exactly that one word and the track change's tail (backlog B563;
+// B470 2d.1 closed the same window in the DoP twin).
 func TestNativeIntegrationRetiringThroughEngine(t *testing.T) {
 	nativeEngineStorage(t)
 	k := alsapcm.NewFakeKernel(t)
 	k.HardwareFormats(49, 50, 52)
 	k.Free()
-	b, err := New(Config{Resolver: nativeFiles{"a": nativeDSF(t, 31)}, Locator: nativeLocator{}})
+	data := nativeDSF(t, 31)
+	third := &nativeStalledReader{Reader: bytes.NewReader(data), entered: make(chan struct{}), gate: make(chan struct{})}
+	var thirdOnce sync.Once
+	letC := func() { thirdOnce.Do(func() { close(third.gate) }) }
+	b, err := New(Config{Resolver: nativeStalledResolver{first: data, held: map[string]*nativeStalledReader{"c": third}}, Locator: nativeLocator{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -758,6 +771,7 @@ func TestNativeIntegrationRetiringThroughEngine(t *testing.T) {
 	allow := func() { once.Do(func() { close(barrier.allow) }) }
 	t.Cleanup(func() {
 		allow()
+		letC()
 		cancel()
 		<-done
 		c, stop := context.WithTimeout(context.Background(), 5*time.Second)
@@ -766,10 +780,10 @@ func TestNativeIntegrationRetiringThroughEngine(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	ref, _ := engine.NewReference("a")
 	var ids []uint32
 	var prev uint32
-	for range 3 {
+	for _, name := range []string{"a", "b", "c"} {
+		ref, _ := engine.NewReference(name)
 		id, e := eng.InsertAfter(ctx, prev, ref, nil)
 		if e != nil {
 			t.Fatal(e)
@@ -782,9 +796,14 @@ func TestNativeIntegrationRetiringThroughEngine(t *testing.T) {
 	}
 	parked, unpark := k.ParkNextWrite()
 	defer unpark()
+	polled, wake := k.ParkNextPoll()
+	defer wake()
+	// c's open reads its content first: from there it waits for letC.
+	held := third.entered
 	if err = eng.Play(ctx); err != nil {
 		t.Fatal(err)
 	}
+	nativeLateWriter(t, ctx, b, polled, wake, held)
 	select {
 	case <-parked:
 	case <-ctx.Done():
@@ -799,6 +818,8 @@ func TestNativeIntegrationRetiringThroughEngine(t *testing.T) {
 		t.Fatal("navigation did not establish release")
 	}
 	unpark()
+	// The cutoff is fixed: c's open may finish now and write nothing.
+	letC()
 	select {
 	case <-barrier.entered:
 	case <-ctx.Done():
@@ -807,6 +828,14 @@ func TestNativeIntegrationRetiringThroughEngine(t *testing.T) {
 	sn := eng.Snapshot()
 	if sn.Selected() != ids[2] || sn.TrackCount() != 2 {
 		t.Fatalf("retiring accounting changed destination or lost a boundary: selected=%d count=%d", sn.Selected(), sn.TrackCount())
+	}
+	// The DAC was given the parked word, a's 31 bits and b's first, and the
+	// track change's tail, 1 ms at 88,200 frames a second (89 frames): none
+	// of c, and nothing of b past its first bit.
+	l, r := nativePattern(t)
+	cl, cr := nativeChain(l, r, 31, 2)
+	if got, want := k.Given(), nativeWords(cl, cr, 32, 89); !bytes.Equal(got, want) {
+		t.Fatalf("the retiring run gave the DAC %d bytes, beginning %x; want %d, the two-occurrence word %x and the tail", len(got), got[:min(len(got), 8)], len(want), want[:8])
 	}
 	// The barrier is entered only after final release events and acknowledgement
 	// were consumed; the successor has not opened or submitted any content yet.
@@ -825,6 +854,94 @@ func TestNativeIntegrationRetiringThroughEngine(t *testing.T) {
 	if err = eng.Stop(ctx); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// nativeLateWriter is session 1's writer run as late as the scheduler can
+// run it (backlog B563): its first wait is parked in the fake kernel
+// (ParkNextPoll) while the producer hands the sink everything it can, and
+// it is let go once the sink holds 64 bits of each channel, a word that
+// carries the third occurrence's first bits, or once held closes, the third
+// occurrence's content held where none of it can be submitted. A test that
+// counts on the writer taking its first word before the producer moves on
+// cannot pass under it.
+func nativeLateWriter(t *testing.T, ctx context.Context, b *Backend, polled <-chan struct{}, wake func(), held <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-polled:
+	case <-ctx.Done():
+		t.Fatal("the writer never waited")
+	}
+	s := b.known(1)
+	s.mu.Lock()
+	sink := s.cur.native
+	s.mu.Unlock()
+	for {
+		ch := sink.Changed()
+		if sink.Position().Submitted >= 64 {
+			break
+		}
+		select {
+		case <-ch:
+			continue
+		case <-held:
+		case <-ctx.Done():
+			t.Fatal("the producer stopped short of the third occurrence")
+		}
+		break
+	}
+	wake()
+}
+
+// nativePattern is the canonical audio nativeDSF's fixture decodes to: the
+// goldens' pattern.bin, the left channel's bytes, then the right's, bit 7
+// earliest.
+func nativePattern(t *testing.T) (l, r []byte) {
+	t.Helper()
+	b, e := os.ReadFile(filepath.Join("..", "decode", "testdata", "dsd-goldens", "pattern.bin"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	return b[:len(b)/2], b[len(b)/2:]
+}
+
+// nativeChain is the first n bits of each channel, times occurrences back to
+// back, bit against bit: occurrences of one track joined with nothing
+// between them.
+func nativeChain(l, r []byte, n, times int) (cl, cr []byte) {
+	bits := n * times
+	cl, cr = make([]byte, (bits+7)/8), make([]byte, (bits+7)/8)
+	for i := range bits {
+		at := i % n
+		cl[i/8] |= ((l[at/8] >> (7 - at%8)) & 1) << (7 - i%8)
+		cr[i/8] |= ((r[at/8] >> (7 - at%8)) & 1) << (7 - i%8)
+	}
+	return cl, cr
+}
+
+// nativeWords is what a DSD_U32_BE DAC must be given for the first bits of
+// each channel, worked out apart from the sink: frames of a left then a
+// right 32-bit word, the earliest bit at the first byte's bit 7, a last
+// partial word padded by 0x69's bits at their own positions, then silence
+// frames of 0x69.
+func nativeWords(l, r []byte, bits, silence int) []byte {
+	var out []byte
+	for f := range (bits + 31) / 32 {
+		for _, p := range [][]byte{l, r} {
+			for i := range 4 {
+				var v byte
+				for j := range 8 {
+					at := f*32 + i*8 + j
+					b := (byte(0x69) >> (7 - j)) & 1
+					if at < bits {
+						b = (p[at/8] >> (7 - at%8)) & 1
+					}
+					v |= b << (7 - j)
+				}
+				out = append(out, v)
+			}
+		}
+	}
+	return append(out, bytes.Repeat([]byte{0x69}, 8*silence)...)
 }
 
 func TestNativeIntegrationDeleteDuringActivation(t *testing.T) {

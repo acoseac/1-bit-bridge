@@ -128,10 +128,12 @@ type fakeKernel struct {
 	// (parkNextWrite).
 	writeGate, writeParked chan struct{}
 	// drainGate and drainParked are the same for the next DRAIN
-	// (parkNextDrain), and statusGate and statusParked for the next STATUS
-	// (parkNextStatus).
+	// (parkNextDrain), statusGate and statusParked for the next STATUS
+	// (parkNextStatus), and pollGate and pollParked for the next poll
+	// (parkNextPoll).
 	drainGate, drainParked   chan struct{}
 	statusGate, statusParked chan struct{}
+	pollGate, pollParked     chan struct{}
 
 	// The record.
 	opened     []string
@@ -285,6 +287,14 @@ func (k *fakeKernel) close(fd int) error {
 
 func (k *fakeKernel) poll(ctx context.Context, fd int, events int16, timeout time.Duration) (int16, error) {
 	k.mu.Lock()
+	if g := k.pollGate; g != nil {
+		parked := k.pollParked
+		k.pollGate, k.pollParked = nil, nil
+		k.mu.Unlock()
+		close(parked)
+		<-g
+		k.mu.Lock()
+	}
 	if !k.isOpen {
 		k.t.Errorf("poll after close")
 	}
@@ -661,6 +671,18 @@ func (k *fakeKernel) parkNextDrain() (parked <-chan struct{}, release func()) {
 func (k *fakeKernel) parkNextStatus() (parked <-chan struct{}, release func()) {
 	gate, in := make(chan struct{}), make(chan struct{})
 	k.inspect(func(k *fakeKernel) { k.statusGate, k.statusParked = gate, in })
+	var once sync.Once
+	return in, func() { once.Do(func() { close(gate) }) }
+}
+
+// parkNextPoll parks the next poll inside the call, before the kernel looks
+// at the node or at the poll's context, as parkNextWrite parks a write: a
+// writer the scheduler runs late. A cancel that comes while it is parked
+// ends the wait once it is released, since the poll then finds its context
+// done.
+func (k *fakeKernel) parkNextPoll() (parked <-chan struct{}, release func()) {
+	gate, in := make(chan struct{}), make(chan struct{})
+	k.inspect(func(k *fakeKernel) { k.pollGate, k.pollParked = gate, in })
 	var once sync.Once
 	return in, func() { once.Do(func() { close(gate) }) }
 }
