@@ -199,7 +199,11 @@ func TestDoPExperiments(t *testing.T) {
 					case "attachment":
 						r.Contact.Attachment.Product = "other"
 					case "context":
-						r.Environment = "other"
+						// Another host's report, consistent with itself, so the
+						// geometry's environment check passes and only the
+						// context check can refuse it.
+						r.Platform = "linux/amd64"
+						r.Environment = Digest([]string{r.Platform, r.GoVersion, r.Kernel})
 					case "indicator":
 						r.DoP.Indicator = nil
 					case "states":
