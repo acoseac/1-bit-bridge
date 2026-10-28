@@ -197,9 +197,10 @@ Only a well-formed newer version requires a newer bridge. Ordinary lifecycle
 operations preserve their bytes except when completing a lone seal or consuming
 a sealed exemption on allocation evidence or the first mint after discard. Discard records `sealed:true` in the initialized
 marker as independent evidence, after the seal file is durable and before any
-queue, UUID or floor is removed. It renames an unparsable or non-file marker
-aside before writing a fresh one, a damaged seal entry only once
-`player-initialized` holds a durable seal (round 11). A damaged initialization marker beside a matching floor is kept as evidence;
+queue, UUID or floor is removed. It replaces an unparsable or non-file marker
+with a fresh one, staged and synced beside it before the old entry is renamed
+aside (B539), a damaged seal entry only once `player-initialized` holds a
+durable seal (round 11). A damaged initialization marker beside a matching floor is kept as evidence;
 its start preflight warns to move it aside, or to keep it when its sealed bit is the only intact seal, without discarding the floor (round 10). A missing floor beside a UUID, queue or initialization marker is
 loss, except the UUID-only upgrade and the unconsumed post-discard exemption
 described below.
@@ -497,11 +498,12 @@ seal: the move-aside warning is given only where the marker is not the only
 seal record, and the other texts concern `player-uuid`, `player-queue.json`,
 `player-ids.json` or a copy of a snapshot.
 
-Discard repairs a damaged seal entry by renaming it aside and writing a fresh
-one, and it repaired the seal file first: with `player-initialized` gone, a
-crash between that rename and the replacement left no seal record. With the
-seal entry damaged, discard now seals `player-initialized` first, so each
-record is renamed aside only while the other holds a durable seal.
+Discard repaired a damaged seal entry by renaming it aside and then writing a
+fresh one (since B539 the fresh one is written first), and it repaired the
+seal file first: with `player-initialized` gone, a crash between that rename
+and the replacement left no seal record. With the seal entry damaged, discard
+now seals `player-initialized` first, so each record is renamed aside only
+while the other holds a durable seal.
 
 A failed seal completion's advice names its cause and claims no more than it
 supports. Each step tags its error where it happens with what it was reading or
@@ -713,6 +715,53 @@ last. A start on an identity that is already there probes it at its marker
 second call returns it unprobed, but nothing in production calls it.
 `TestAMintRefusedForVolatileStorageLeavesNoIdentity` and
 `TestServeOnVolatileStorageRefusesEveryStartAndKeepsNoIdentity` pin this.
+
+### B539: a fresh seal synced before a damaged one moves (2026-10-28)
+
+B539 came from round 10: a sealed, minted box loses `player-initialized`, its
+seal file becomes an entry that is not a regular file, serve refused with
+"player-floor-discarded.json is not a regular file: move it aside", and
+following that let the next start write `{"version":1}` and an identity
+restore succeed. Round 11 had removed that refusal, so on main at 2c7be326
+that sequence ends sealed. What still ended unsealed after a discard was the
+discard's own replacement of a damaged record: `sealPlayerMarker` renamed the
+entry aside and only then wrote the fresh record, so a failure of that write,
+or a crash during it, left the seal's name empty, and the discard said nothing
+but the error. Round 11's order kept `player-initialized` sealed meanwhile,
+but the next start spent it, and once it was lost too the start after wrote
+`{"version":1}` and an identity restore was accepted.
+
+`sealPlayerMarker` now replaces every damaged record through
+`atomicwrite.ReplaceDurable`: after every refusal the strict writer makes, the
+fresh record is staged beside the entry and fsynced; then the entry is renamed
+aside to a unique name and the staged file into its place, with no write and
+no sync between those two renames; a refused second rename puts the entry back
+and syncs the directory again, and one that cannot says where the entry is
+kept; once both renames have landed the chain is synced. No failure of a
+single step leaves the name empty. Between the two renames it is empty, since
+no rename puts a file in a directory's place in one step, and round 11's order
+has made the other record's seal durable before then; losing that record as
+well is the loss of both seals, which stays unsupported. A discard that stops
+at its seal records says it discarded nothing and to run it again once the
+cause is fixed; a record a newer bridge wrote keeps its own remedy.
+
+Refusing a non-regular seal at start, with `--discard-floor` as its advice,
+was considered and not taken: round 11 keeps it as a seal at every check, and
+a refusal would turn the player off on a sealed box, its only remedy giving up
+the player's identity and queue.
+
+`TestTheSealWalkEndsSealedFollowingTheBridgesOwnAdvice` walks B539's four
+steps through `bridge reset-player`, serve's boot and `bridge restore`,
+following every piece of advice the bridge gives about the seal; with round
+10's refusal put back it fails as B539 described.
+`TestAFailedHealKeepsTheSealEntryThroughTheNextStarts`,
+`TestEveryCrashPointOfTheSealsHealLeavesTheBoxSealed`,
+`TestAFailedStepOfTheSealsHealKeepsTheEntryItFound` and
+`TestANonRegularSealIsASealAtEveryCheckUntilDiscardHealsIt` pin the rest, and
+the `ReplaceDurable` tests in `internal/atomicwrite/replace_test.go` its
+contract. `TestDiscardRecordsASecondSealBeforeRenamingADamagedOne` refuses
+every rename into the seal's name, so it now drives the double failure, and
+passes unchanged.
 
 - **`engine.WithAdmission` and `Config.Seams` (B470 PR 5a4, round 2).** The OpenHome surface gives a Stop's request slot back once the engine has admitted it, so a Stop that waits for its release holds no slot (`openhome.md`, the write pool's bullet; Codex's round-1 finding: eight Stops on one source's connections held every slot during a pending release). `WithAdmission(ctx)` returns a derived context and a channel; the owner's `admit` closes the channel (`noteAdmission`: a `sync.Once` on a value the context carries, so it never blocks the owner) right after the compare-and-swap of `command.admission` from pending to admitted succeeds, before the command runs or parks, so from then on its caller no longer decides whether it runs (a context that ends after it is answered `ReasonCancelled` without `ErrNotAdmitted`). A command whose context had ended before the call, one the owner finds abandoned by its caller in the window between its look at the context and the swap, and one sent after the shutdown never close it; a command passed no such context is unaffected, and a context so made is for one command. The round's control closed the channel at the top of `admit`, before the look and the swap: the abandoned insert's channel closed, and `TestWithAdmissionClosesAsTheOwnerAdmits` went red. `Config.Seams.ReserveWrite`, nil in production and behaviour-neutral (its own commit), runs before each reservation write on the goroutine that makes it (New's, for the run's first): an error it returns fails the write as the filesystem's refusal would, and a seam that blocks holds the write, as a filesystem that holds it does, so the edits that need it park, at most `ReserveTimeout`; the OpenHome surface's edit-gate test holds the real engine there (its test player's `hangReservations`), which the engine's own seams, unexported (`harness_test.go`), cannot do from another package. A test that holds a write lets it go before the engine stops: Run's shutdown waits for a reservation write under way. `TestTheReserveWriteSeamHoldsAndFailsTheWrite` pins both answers.
 
