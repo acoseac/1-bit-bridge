@@ -261,6 +261,16 @@ turn its tests red. `playerEntry` ignoring a non-regular entry stays green:
 completion runs before every adoption and writes `player-initialized` beside
 the seal, so `unstartedPlayer`'s own look at it is shadowed.
 
+On the owner's Mac (macOS arm64, Go 1.27.3, not root, TMPDIR outside the
+checkout) gofmt lists none of the changed files and `git diff --check main`
+is clean; `make vet`, and Linux and Windows vet of `internal/atomicwrite`,
+`internal/backup` and `cmd/bridge` with the release build tags, pass.
+`go test -race -count=1` passes `internal/atomicwrite` whole,
+`internal/backup` in two name ranges (118 s and 89 s) and `cmd/bridge` in six
+(198, 112, 51, 94, 186 and 32 s). The eleven new tests and the revised one
+pass ten race-enabled runs each. `make docs-check` and `make build-all P=8`
+pass, and the qualification-version check finds no guarded path changed.
+
 ---
 
 ## 2026-10-25 — B524 round 14: tests that write the player's identity run on a TMPDIR on tmpfs, and a refused start leaves no identity
