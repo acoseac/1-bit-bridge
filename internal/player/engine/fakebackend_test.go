@@ -42,6 +42,12 @@ type fakeBackend struct {
 	onResume   func(ctx context.Context, s *fakeSession) (ResumeResult, error)
 	onRelease  func(ctx context.Context, s *fakeSession) error
 	onDiscard  func(ctx context.Context) error
+
+	// beforeStart runs on a Start's goroutine before the fake records any of
+	// it, so a test can hold a Start that has not reached the backend yet:
+	// the engine makes each call on a goroutine of its own, and a Release of
+	// the session can get there first (B576).
+	beforeStart func(req StartRequest)
 }
 
 // fakeSession is one session the engine started on a fakeBackend.
@@ -160,6 +166,12 @@ func (b *fakeBackend) sessionLocked(id SessionID) *fakeSession {
 }
 
 func (b *fakeBackend) Start(ctx context.Context, req StartRequest) error {
+	b.mu.Lock()
+	before := b.beforeStart
+	b.mu.Unlock()
+	if before != nil {
+		before(req)
+	}
 	b.mu.Lock()
 	for _, o := range b.order {
 		if !o.acked {

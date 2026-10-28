@@ -281,6 +281,10 @@ type harness struct {
 	ran    chan struct{}
 	down   bool
 	outGen uint64
+	// joining, when set, runs as joined begins, before anything waits for the
+	// engine's goroutines: a test that holds one of them until the harness
+	// waits for it lets it go there (TestTheContractCheckWaitsForAStartStillOnItsWay).
+	joining func()
 
 	appliedMu  sync.Mutex
 	appliedOps []string
@@ -419,6 +423,9 @@ func (h *harness) drive(done <-chan struct{}) {
 // joined waits for every goroutine the engine started to end.
 func (h *harness) joined(e *Engine) {
 	h.t.Helper()
+	if h.joining != nil {
+		h.joining()
+	}
 	done := make(chan struct{})
 	go func() {
 		e.wg.Wait()
