@@ -1,6 +1,6 @@
 # B470 native qualification — owner approval and provisional evidence
 
-QualificationVersion is **16**. All older evidence must be rerun, native included. The harness never
+QualificationVersion is **17**. All older evidence must be rerun, native included. The harness never
 creates approval. Production native DSD requires a fresh matching approved record;
 DoP S32_LE auditions are provisional and require both acknowledgements; production DoP plays only
 an approved DoP policy, under `dsdMode: dop` or `auto` with `allowDoP: true` (2d.2, below). Real-ref and Linux hardware gates remain reviewer/owner work.
@@ -169,7 +169,7 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-Historical round 3 used qualificationVersion 4; current version is **16**. A native contact's
+Historical round 3 used qualificationVersion 4; current version is **17**. A native contact's
 Contact.SchemaVersion remains **2**; a DoP contact's is **3**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
@@ -257,7 +257,7 @@ still resolve inside it). `dsdMode: native` or `auto` enables only approved nati
 
 The Go contracts are `qualification.Approval`, `ApprovalBody`, `ApprovedPolicy`, `Edge`
 and `Evidence` in `internal/player/qualification/approval.go`. JSON uses those exact
-exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=16; Revision is the owner's
+exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=17; Revision is the owner's
 revision; Identity is the observed VID/ProductID/manufacturer/product/bcdDevice,
 anchored controller/port, interface, device and subdevice. No serial or card number is
 persistent identity. Unchanged descriptors may retain approval after replug/restart;
@@ -304,7 +304,7 @@ At least one native fixture must finish with measured playback of that tuple.
 NativeTuple and NativeCompleted record that execution; PCM-only lists or completion
 cannot qualify it. LifecycleActions count observed native outcomes: pause/resume,
 release/reopen, navigation between native occurrences, Stop, and natural completion.
-An admitted command alone is insufficient. Version 16 invalidates older evidence.
+An admitted command alone is insufficient. Version 17 invalidates older evidence.
 List all candidate directional edges explicitly. No command generates that record.
 
 ```sh
@@ -343,7 +343,7 @@ or evidence names resolving to the state directory itself before any ancestor
 walk. Native monitoring remains fail-closed without a grace period. The overlay
 generator requires both integration suites before publishing its overlay.
 Guarded API, config, extractor, output-play and approval paths changed; rerun
-qualification with version 16. ExtractorVersion 30 retains the first parsed DFF
+qualification with version 17. ExtractorVersion 30 retains the first parsed DFF
 PROP's known format facts when a later PROP makes compression unsupported.
 
 Version 13 also covers the deterministic PCM trace capture test. It changes no
@@ -440,10 +440,16 @@ seam rather than a second of wall time; and TestNativeIntegrationDoPEnvelope
 requires each contact refusal's own line, a bare contact receipt's included,
 and a valid contact's exit code. They change no playback behavior either.
 
+Version 16 covers backlog B557, a guarded change in `internal/player/openhome`:
+the OpenHome surface tears a retired socket down, its listener and every
+connection on it, before its Status stops listing the address (a kept-alive
+connection was answered after Status said the address went away), and its
+tests hold each retirement at a new seam, `Seams.Retiring`. It changes no
+playback behavior, no PCM or DSD path and no wire field.
 
-## B470 2d.2 — approved DoP and auto selection, qualification version 16
+## B470 2d.2 — approved DoP and auto selection, qualification version 17
 
-Version 16 makes every contact, report, candidate and approved record of version 15
+Version 17 makes every contact, report, candidate and approved record of version 16
 or below stale, native ones included: run the whole sequence below on the 2d.2 build.
 Production now plays DSD from one effective set, which selection and the published
 epoch both read: `dsdMode: native` plays native policies (DSD_U32_BE, then DSD_U32_LE,
@@ -457,7 +463,7 @@ at run time. `allowDoP: false` under `dop` or `auto` loads: DSD is refused as
 The owner's real-DAC steps, in this order, one command at a time, inspecting each
 result before the next:
 
-1. Version-16 native and DoP contacts and matrices, the mixer experiment included
+1. Version-17 native and DoP contacts and matrices, the mixer experiment included
    (the 2c.1 and 2d.1 blocks above, with fresh contacts).
 2. Both backend-lifecycles, native and DoP, with same-carrier and cross-rate WAV
    edges (step 1 of this section).
