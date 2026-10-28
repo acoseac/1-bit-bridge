@@ -100,6 +100,10 @@ func (c fakeCall) String() string {
 	return c.kind
 }
 
+// newFakeBackend is a fake for t. Its contract check, verify, is t's cleanup,
+// registered here before any engine is built over the fake, so it runs after
+// the cleanups that shut that engine down and join every goroutine it
+// started.
 func newFakeBackend(t *testing.T) *fakeBackend {
 	b := &fakeBackend{
 		t:          t,
@@ -108,11 +112,13 @@ func newFakeBackend(t *testing.T) *fakeBackend {
 		cleanup:    make(chan struct{}),
 		unplayable: map[string]Unplayable{},
 	}
+	t.Cleanup(b.verify)
 	return b
 }
 
 // close unblocks every call a test held and waits for the fake's own
-// goroutines; then it fails the test on any violation.
+// goroutines. It reads no session: a call the engine made may still be on
+// its way here (verify).
 func (b *fakeBackend) close() {
 	b.mu.Lock()
 	b.closing = true
@@ -123,6 +129,17 @@ func (b *fakeBackend) close() {
 		close(b.cleanup)
 	}
 	b.wg.Wait()
+}
+
+// verify fails the test on any violation of the contract, a session that had
+// calls and never a Start among them. It runs once every goroutine the engine
+// started has ended, never sooner: the engine makes each call on a goroutine
+// of its own, and a Release can reach the backend before its session's Start,
+// which still comes (Backend's contract). Read before the engine's goroutines
+// were joined, the sessions took such a Start for one never made (B576,
+// TestTheContractCheckWaitsForAStartStillOnItsWay).
+func (b *fakeBackend) verify() {
+	b.close()
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for _, s := range b.sessions {

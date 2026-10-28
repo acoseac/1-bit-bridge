@@ -345,7 +345,9 @@ func (h *harness) build() *harness {
 	}
 	// Cleanups run last-registered first: Run's shutdown (registered by
 	// run), then the backend's release of what it held, then the check
-	// that every goroutine the engine started has ended.
+	// that every goroutine the engine started has ended, and only then the
+	// backend's contract check, registered as the backend was made, which
+	// must not read the calls while one of them is still on its way (B576).
 	h.t.Cleanup(func() { h.joined(e) })
 	h.t.Cleanup(be.close)
 	h.eng = e
