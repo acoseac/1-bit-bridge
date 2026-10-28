@@ -243,6 +243,11 @@ type nativePollGate struct {
 	sys
 	armed         atomic.Bool
 	entered, gate chan struct{}
+	// cancelled, when set, is closed once the held poll ends because its
+	// context did; stall then holds that poll's return as long as a
+	// scheduler that runs it late would (-escalation-stall).
+	cancelled chan struct{}
+	stall     time.Duration
 }
 
 func (g *nativePollGate) poll(ctx context.Context, fd int, events int16, timeout time.Duration) (int16, error) {
@@ -250,6 +255,12 @@ func (g *nativePollGate) poll(ctx context.Context, fd int, events int16, timeout
 		close(g.entered)
 		select {
 		case <-ctx.Done():
+			if g.cancelled != nil {
+				close(g.cancelled)
+			}
+			if g.stall > 0 {
+				time.Sleep(g.stall)
+			}
 			return 0, ctx.Err()
 		case <-g.gate:
 		}
