@@ -132,7 +132,8 @@ func TestPlaybackFactsTransport(t *testing.T) {
 // TestOutputsQualificationFacts: GET /v1/outputs states the owner
 // qualification the epoch's record holds, the DAC's model, its descriptor
 // firmware code and the qualification date, and never its USB port or its
-// serial.
+// serial, from a player that holds its boot binding, the serial included,
+// as serve's does.
 func TestOutputsQualificationFacts(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("owner approval uses Unix ownership; the player is Linux only")
@@ -152,7 +153,7 @@ func TestOutputsQualificationFacts(t *testing.T) {
 	}
 	srv := api.New(&config.Config{ListenAddress: ":7788", LibraryName: "T", LibraryRoots: []string{t.TempDir()}}, store, nil, "fp").
 		WithLocalOutputs(api.LocalOutputsConfig{GOOS: "linux", Output: func() config.OutputConfig { return config.OutputConfig{MPD: "off"} }}).
-		WithBridgeOutput(newBridgeOutput(servePlayerPlan{lists: true}, &bridgePlayer{be: b, ready: ready}, cfg))
+		WithBridgeOutput(newBridgeOutput(servePlayerPlan{lists: true}, &bridgePlayer{be: b, ready: ready, device: cfg.Output.Player.Device}, cfg))
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 	req, err := http.NewRequest(http.MethodGet, hs.URL+"/v1/outputs", nil)
