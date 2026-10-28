@@ -1,6 +1,9 @@
-# B470 2c.1 native qualification — provisional evidence only
+# B470 native qualification — owner approval and provisional evidence
 
-This CLI does not enable DSD in serve or output play and never creates an approval.
+QualificationVersion is **13**. All older evidence must be rerun. The harness never
+creates approval. Production native DSD requires a fresh matching approved record;
+DoP remains unimplemented. Real-ref and Linux hardware gates remain reviewer/owner work.
+
 Use a candidate built from the reviewed tree. No hardware qualification was run during implementation.
 Keep every failure, including unsupported formats. The release must eventually have at least one
 owner-qualified native path and one DoP path; 2c.1 has no DoP path.
@@ -85,7 +88,7 @@ reference: PCM tail/prefill are both zero. Repeat with the WAV384 reference mani
 cross-rate PCM edge. Check actual DSD indicator, channels, pitch, duration, no bursts/hiss or
 quiet-boundary clicks, and no silence/reopen at compatible joins. Record waveform-cut clicks separately.
 Different native rates/word formats use separate contact/run commands and closed-device boundaries;
-continuous mixed-tuple backend queues and their event accounting belong to 2c.2.
+the backend-lifecycle command below measures actual engine/backend occurrence accounting.
 
 Keys are read throughout every scenario, including calibration and both PCM references.
 On a TTY, playback uses raw input: s stops and q quits immediately, without Return.
@@ -153,7 +156,7 @@ qualification inputs and the version checker itself. Changes require a version i
 
 The integration overlay exposes the existing ALSA _test.go fake only to this test command.
 The injected PCM opener is below descriptor verification and binding admission; production
-hardware guards remain intact. After committing round 3, rerun the real-ref checker:
+hardware guards remain intact. After committing this change, rerun the real-ref checker:
 ```sh
 BASE=$(git merge-base origin/main HEAD) && test -n "$BASE"
 GOTOOLCHAIN=go1.27.3 go run -tags ts_omit_webclient,ts_omit_debugeventbus ./scripts/qualification-version -base "$BASE" -head HEAD
@@ -163,7 +166,7 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-QualificationVersion is **4** and Contact.SchemaVersion is **2**. All older
+Historical round 3 used qualificationVersion 4; current version is **13** and Contact.SchemaVersion remains **2**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
 either audition leg opens. Missing fields are not zero. Both opened-node checks
@@ -236,3 +239,107 @@ including a split CRLF arriving at the next prompt. Tabs and non-ASCII input fai
 with a visible printable-ASCII diagnostic. Nothing is silently trimmed or discarded.
 The version gate also guards the shared CLI filename and platform config-directory
 resolver; configpath and host-tree wiring remain guarded.
+
+
+## 0.2.2 local approval contract
+
+Approval is local trust, not a cryptographic signer. “Signed” means the owner's typed
+`I approve these complete matrix and backend-lifecycle reports` confirmation recorded
+in `Approval.Body.Confirmation`. The record AND evidence reports live under the bridge
+state directory, owned by the bridge user, with no group/other write bits; their enclosing
+directories there have the same restrictions. Use 0700 directories and 0600 files.
+`output.player.dsdQualification` is relative to that directory (an absolute path must
+still resolve inside it). `dsdMode: native` or `auto` enables only approved native tuples.
+
+The Go contracts are `qualification.Approval`, `ApprovalBody`, `ApprovedPolicy`, `Edge`
+and `Evidence` in `internal/player/qualification/approval.go`. JSON uses those exact
+exported field names. SchemaVersion=1; QualificationVersion=13; Revision is the owner's
+revision; Identity is the observed VID/ProductID/manufacturer/product/bcdDevice,
+anchored controller/port, interface, device and subdevice. No serial or card number is
+persistent identity. Unchanged descriptors may retain approval after replug/restart;
+firmware that hides changes in bcdDevice and indistinguishable hardware remain accepted
+residual risks. Environment and ManifestHash must match the reports.
+
+There is exactly one policy per format/logical-rate base tuple, stereo, Ordering=msb,
+PauseReleaseSeconds=30 and PCMTimePolicy=[0,0]. Each policy names one complete matrix
+report and one complete backend-lifecycle report as `{Path,SHA256}`. SHA256 hashes report
+file bytes; Approval.SHA256 hashes `json.Marshal(Approval.Body)` in the declared Go
+struct field order, without whitespace/newline (not the source JSON's whitespace).
+Recompute using `qualification.Digest(body)` after the owner reviews and confirms it.
+Missing fields, invented combinations of pause/tail/prefill, incomplete/cancelled reports,
+unverified builds and unexecuted edges refuse. Promotion is a separate reviewed manual
+step; neither harness nor production writes, signs, repairs or auto-promotes an approval.
+
+Tampered means wrong owner/mode or body/evidence hash mismatch. Stale means version or
+observed identity mismatch. Every session and activation rereads and verifies; a 100 ms
+monitor also detects deletion/replacement, health failure and constrained-control drift.
+An identical inode replacement still revokes the old permission. Recovery publishes new
+capability only, never Play. Descriptors and mixer reads never write controls.
+
+Persistent Constraints match Interface, Device, Name, Index, Channel and Value (raw channel
+bytes); Type/count/readability must support that value. Card and ALSA numid are deliberately
+absent. Re-enumeration and unrelated value/unreadability changes do not revoke constrained
+policies. Missing/unreadable constrained controls refuse. No constraints require descriptor
+feature units and mixer controls both absent. This differs from provisional contact's
+whole-snapshot fingerprint, which remains attachment-specific. A failed control-node read
+revokes because the constraint cannot be verified.
+
+Native edge keys are `native/FORMAT/BITRATE/2/msb/ID/PAUSE/TAIL_MS/PREFILL_MS/30`;
+PCM keys are `pcm/FORMAT/RATE/CHANNELS/VALIDBITS/zero`. Edges are directional `{From,To}`,
+including self edges; approval of endpoints alone authorizes no edge. Edges must occur in
+the lifecycle reports. The backend enforces them on natural advance and navigation,
+including separate sessions, before an incoming DSD open or Locate. PCM opens never depend on DSD approval or edges. Unapproved incoming DSD edges remain unavailable.
+
+## Real backend lifecycle and approved production reports
+
+First construct a visibly provisional record in Q: same schema/hash/identity/policies and
+complete current matrix evidence, but Confirmation exactly `CLI candidate; not approved`.
+Its Lifecycle is empty. It grants nothing to serve, output play or any API. For this command,
+one native tuple must match all explicit flags; WAV fixtures exercise PCM boundaries.
+At least one native fixture must finish with measured playback of that tuple.
+NativeTuple and NativeCompleted record that execution; PCM-only lists or completion
+cannot qualify it. LifecycleActions count observed native outcomes: pause/resume,
+release/reopen, navigation between native occurrences, Stop, and natural completion.
+An admitted command alone is insufficient. Version 13 invalidates older evidence.
+List all candidate directional edges explicitly. No command generates that record.
+
+```sh
+capture && "$B" output dsd-test --config "$C" --format "$F" --bit-rate "$R" --pause-method "$M" --tail-ms "$T" --prefill-ms "$P" --manifest "$Q/manifest.json" --fixtures "$Q/assets" --contact-report "$CONTACT" --scenario backend-lifecycle --provisional-record "$Q/candidate.json" --seconds 600 --ack-level contact-position --mixer-snapshot "$RUN/mixer.txt" --report "$RUN/report.json" wav44 dsd64-lr-lsb dsd64-rl-dff wav384
+```
+
+This uses the real engine and backend. Exercise n, p, space pause, wait for the 30 s release,
+space resume, natural completion of every listed fixture, and x Stop. s/q remain immediate
+abort keys and produce incomplete evidence. Only measured completion plus all lifecycle
+actions can finish the report. A skipped file, fault or deadline cannot approve. Revisit
+fixtures with explicit Play after Stop as needed. Copy the reviewed reports under the bridge
+state directory before separate owner promotion. Native cross-rate/cross-format edges are
+not evidenced by this single-tuple invocation and must remain absent from approval.
+
+For production, set C to the approved native config. Build a contact bundle
+`{"Receipts":[{"Contact":CONTACT_OBJECT,"SHA256":"CANONICAL_CONTACT_HASH"}]}` from the
+complete contact reports, one receipt per tuple; use `qualification.Digest(contact)`.
+Capture a fresh mixer annex. The three flags are an all-or-none report interlock; supplying
+them does not grant permission or accept a candidate. The queue remains in a separate
+state directory; the approved record is read from the configured bridge state directory.
+
+```sh
+capture && "$B" output play --config "$C" --keys --report "$RUN/production.json" --contact-report "$Q/contacts.json" --mixer-snapshot "$RUN/mixer.txt" "$Q/assets/dsd64-lr.dsf" "$Q/assets/reference.wav"
+```
+
+The production report records opens/notes and live pre/post controls; it is diagnostic,
+never a replacement for the matrix and backend-lifecycle approval evidence. No `--transport`
+flag exists. All dsd-test invocations require valued `--ack-level`, `--manifest` and
+positional fixture IDs. iOS I1–I3 (Track migration, QueueItem propagation and whole-window
+pre-DeleteAll/Insert eligibility) remain pending companion PRs; the bridge guarantees its
+own content/tuple/record gate before hardware writes.
+
+The PR #1356 review fixes the output-play reservation opt-in and rejects approval
+or evidence names resolving to the state directory itself before any ancestor
+walk. Native monitoring remains fail-closed without a grace period. The overlay
+generator requires both integration suites before publishing its overlay.
+Guarded API, config, extractor, output-play and approval paths changed; rerun
+qualification with version 13. ExtractorVersion 30 retains the first parsed DFF
+PROP's known format facts when a later PROP makes compression unsupported.
+
+Version 13 also covers the deterministic PCM trace capture test. It changes no
+playback behavior; test paths are included in the qualification version guard.

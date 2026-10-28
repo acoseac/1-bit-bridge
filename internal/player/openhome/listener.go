@@ -147,7 +147,9 @@ type Seams struct {
 
 // Config is the surface's.
 type Config struct {
-	Device Device
+	// DSDPolicy reads the backend epoch without probing hardware.
+	DSDPolicy func() bool
+	Device    Device
 	// Engine is the player's engine, whose snapshot every read action
 	// answers from (B470 PR 5a3) and whose commands the write actions are
 	// (PR 5a4): nil, never a nil pointer, is no engine, and so is one whose
@@ -303,6 +305,7 @@ func Start(cfg Config) (*Surface, error) {
 	}
 	lim := cfg.Limits.orDefaults()
 	h := newHandler(cfg.Device, cfg.Engine, lim, cfg.Seams)
+	h.dsdPolicy = cfg.DSDPolicy
 	h.library, h.hosts = cfg.Library, cfg.Hosts
 	s := &Surface{cfg: cfg, lim: lim, log: log, h: h,
 		poke: make(chan struct{}, 1), loopDone: make(chan struct{}), failed: map[lan.Address]string{},

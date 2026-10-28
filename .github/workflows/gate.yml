@@ -573,6 +573,12 @@ jobs:
           python3 scripts/native-integration-overlay.py "$RUNNER_TEMP/native-overlay.json"
           go test -v -race -tags ts_omit_webclient,ts_omit_debugeventbus -overlay "$RUNNER_TEMP/native-overlay.json" ./cmd/bridge -run '^TestNativeIntegration' -timeout 5m -watchdog 10s | tee "$RUNNER_TEMP/native-integration.log"
           grep -q '^--- PASS: TestNativeIntegration' "$RUNNER_TEMP/native-integration.log"
+      - name: Native backend integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -v -race -tags ts_omit_webclient,ts_omit_debugeventbus -overlay "$RUNNER_TEMP/native-overlay.json" ./internal/player/playback -run '^TestNativeIntegration' -timeout 5m | tee "$RUNNER_TEMP/native-backend-integration.log"
+          grep -q '^--- PASS: TestNativeIntegration' "$RUNNER_TEMP/native-backend-integration.log"
 
   gate:
     name: gate

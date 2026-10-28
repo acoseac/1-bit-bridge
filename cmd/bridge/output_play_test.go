@@ -294,7 +294,7 @@ func TestOutputPlayRefusesWhatItCannotPlay(t *testing.T) {
 		{name: "a pause release past the engine's", player: goBarPlayer, goos: "linux", args: []string{"--pause-release", "601"}, code: 2, says: "1 to 600"},
 		{name: "off Linux", player: goBarPlayer, goos: "darwin", code: 1, says: "Linux only"},
 		{name: "off Linux, before any config is read", player: goBarPlayer, goos: "darwin", noConfig: true, code: 1, says: "Linux only"},
-		{name: "a block the player cannot run", player: "    enabled: true\n    dsdMode: native\n", goos: "linux", code: 1, says: "cannot run"},
+		{name: "a block the player cannot run", player: "    enabled: true\n    dsdMode: invalid\n", goos: "linux", code: 1, says: "cannot run"},
 		{name: "no binding", player: "    enabled: true\n", goos: "linux", code: 1, says: "bridge output dac bind"},
 		{name: "a file that is not there", player: goBarPlayer, goos: "linux", files: []string{"/nonexistent/x.flac"}, code: 1, says: "x.flac"},
 	} {

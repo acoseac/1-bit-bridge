@@ -2,6 +2,7 @@ package playback
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,6 +24,8 @@ const MeasureEvery = 50 * time.Millisecond
 
 // Config is what New builds a backend from.
 type Config struct {
+	// Authorization supplies approved-only native DSD admission; nil is off.
+	Authorization *Authorization
 	// Resolver opens the content an occurrence's reference names. Required.
 	Resolver Resolver
 	// Locator resolves the configured binding to the unit to open.
@@ -41,6 +44,8 @@ type Config struct {
 	// go of during a pause, or reopens, on the goroutine that did it: a
 	// diagnostic observer, as the harness's printer. It must not block.
 	Notify func(Note)
+	// Installed observes occurrence boundaries separately from hardware lifecycle notes.
+	Installed func(Note)
 	// Log is where the backend logs; nil is the player component.
 	Log *slog.Logger
 	// Seams are where a test holds the backend between two of its steps,
@@ -98,6 +103,8 @@ const (
 	// NoteReopened is a released sink that opened the device again on a
 	// resume, at the endpoint the binding resolves to now.
 	NoteReopened
+	// NoteInstalled identifies each installed occurrence, including gapless successors.
+	NoteInstalled
 )
 
 func (k NoteKind) String() string {
@@ -110,14 +117,20 @@ func (k NoteKind) String() string {
 		return "released"
 	case NoteReopened:
 		return "reopened"
+	case NoteInstalled:
+		return "installed"
 	}
 	return fmt.Sprintf("note %d", int(k))
 }
 
 // Note is one thing a session's sink did, for Config.Notify.
 type Note struct {
-	Session engine.SessionID
-	Kind    NoteKind
+	// Plan is detached native policy metadata on an installation observation.
+	Plan       *engine.NativePlan
+	Occurrence engine.OccurrenceID
+	output     *output
+	Session    engine.SessionID
+	Kind       NoteKind
 	// Params is what the kernel committed for the device the sink has, or
 	// last had, open.
 	Params    alsapcm.Params
@@ -136,16 +149,27 @@ func (n Note) StatusPath() string {
 // alsapcm.Sink, PCM only. It is the package documentation's contract, term
 // by term.
 type Backend struct {
-	cfg Config
-	log *slog.Logger
+	policyMu            sync.Mutex
+	policy              PlayerPolicy
+	liveFacts           *PlaybackFacts
+	liveOutput          *output
+	publishedPermission *permission
+	cliCandidate        bool
+	lastEdge            string
+	lastPlan            *engine.NativePlan
+	nativeAdmission     func(format.NativeDSD) (engine.NativePlan, error)
+	nativeOpen          func(context.Context, alsapcm.DSDConfig) (*alsapcm.DSDSink, error)
+	cfg                 Config
+	log                 *slog.Logger
 
 	mu       sync.Mutex
 	sessions map[engine.SessionID]*session
 	// holder is the session that holds the device or is opening it, until
 	// its release is done: a Start beside it is refused (ErrOverlap).
-	holder   *session
-	took     map[packKey]format.ALSAFormat
-	overlaps int
+	holder              *session
+	took                map[packKey]format.ALSAFormat
+	overlaps            int
+	terminalUnconfirmed bool
 
 	// The goroutines the backend started and that have not returned.
 	gmu  sync.Mutex
@@ -178,7 +202,7 @@ func New(cfg Config) (*Backend, error) {
 	}
 	zero := make(chan struct{})
 	close(zero)
-	return &Backend{cfg: cfg, log: cfg.Log, sessions: map[engine.SessionID]*session{}, took: map[packKey]format.ALSAFormat{}, zero: zero}, nil
+	return &Backend{policy: PlayerPolicy{BootID: fmt.Sprintf("%x", randomBoot()), Generation: 1, Reason: "DSD is off"}, cfg: cfg, log: cfg.Log, sessions: map[engine.SessionID]*session{}, took: map[packKey]format.ALSAFormat{}, zero: zero}, nil
 }
 
 // Stats are the backend's counts, for diagnostics and the tests.
@@ -281,6 +305,7 @@ func (b *Backend) spawn(f func()) {
 
 // notify tells Config.Notify of a note.
 func (b *Backend) notify(n Note) {
+	b.observeNote(n)
 	if b.cfg.Notify != nil {
 		b.cfg.Notify(n)
 	}
@@ -323,6 +348,9 @@ var errReleased = errors.New("player backend: the session's release came first: 
 func (b *Backend) hold(s *session) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.terminalUnconfirmed {
+		return engine.ErrReleaseUnconfirmed
+	}
 	if h := b.holder; h != nil && h != s {
 		b.overlaps++
 		b.log.Error("player backend: a session started while another still held the device", "session", uint64(s.id), "holder", uint64(h.id))
@@ -361,6 +389,9 @@ func (b *Backend) Start(ctx context.Context, req engine.StartRequest) error {
 func (b *Backend) Prepare(ctx context.Context, id engine.SessionID, after engine.OccurrenceID, next *engine.Occurrence) error {
 	s := b.known(id)
 	if s == nil {
+		if next != nil {
+			next.Reservation.ReleaseBackend()
+		}
 		return errUnknownSession(id)
 	}
 	return s.prepare(ctx, after, next)
@@ -441,3 +472,14 @@ func (b *Backend) Discard(context.Context) error {
 }
 
 var _ engine.Backend = (*Backend)(nil)
+
+// OwnsOccurrenceReservations enables shared engine/backend resource accounting.
+func (*Backend) OwnsOccurrenceReservations() bool { return true }
+
+func randomBoot() []byte {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	return b
+}

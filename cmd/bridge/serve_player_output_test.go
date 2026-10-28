@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/acoseac/1-bit-bridge/internal/player/playback/playbacktest"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -561,5 +562,34 @@ func TestTheChecklistReadsNoBridgeElement(t *testing.T) {
 	}
 	if got, none := checklistInput(api.OutputsResponse{Outputs: []api.OutputInfo{bridgeEl}}), checklistInput(api.OutputsResponse{}); !reflect.DeepEqual(got, none) {
 		t.Fatalf("the bridge's element alone gave the checklist %+v", got)
+	}
+}
+
+func TestBridgeDSDCodecVocabulary(t *testing.T) {
+	for _, state := range []string{"off", "missing", "stale", "dop_only", "binding_mismatch", "revoked", "valid"} {
+		t.Run(state, func(t *testing.T) {
+			be := playbacktest.Approved(t, state)
+			ready := make(chan struct{})
+			close(ready)
+			cfg := playerOutputConfig(t.TempDir(), nil)
+			seedPlayerUUID(t, cfg.DataDir, thePlayerUUID)
+			p := &bridgePlayer{be: be, ready: ready}
+			out := newBridgeOutput(servePlayerPlan{lists: true}, p, cfg)
+			got := out.Facts(context.Background()).Codecs
+			want := []string{"flac", "wav", "aiff", "alac"}
+			if state == "valid" {
+				want = append(want, "dsf", "dff")
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("actual served codecs=%v want %v", got, want)
+			}
+		})
+	}
+}
+
+func TestNativeModeLeavesPCMServeGateOpen(t *testing.T) {
+	cfg := playerOutputConfig(t.TempDir(), func(p *config.PlayerConfig) { p.DSDMode = "native" })
+	if plan := planServePlayer(cfg, "linux", true); !plan.start || !plan.lists {
+		t.Fatalf("native mode disabled PCM player: %+v", plan)
 	}
 }

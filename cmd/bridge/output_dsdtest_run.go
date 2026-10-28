@@ -133,6 +133,9 @@ func executeNativeTest(ctx context.Context, cancelRun context.CancelCauseFunc, o
 		if e := verifyNativeFixture(o.fixtures, fixtures[id]); e != nil {
 			return e
 		}
+		if fixtures[id].Container == "WAV" {
+			continue
+		}
 		if e := verifyNativeFixture(o.fixtures, fixtures[fixtures[id].PCMReference]); e != nil {
 			return e
 		}
@@ -164,6 +167,9 @@ func executeNativeTest(ctx context.Context, cancelRun context.CancelCauseFunc, o
 		}
 	}()
 	var runErr error
+	if o.scenario == "backend-lifecycle" {
+		return executeBackendLifecycle(ctx, o, ep, check, fixtures, console.keys, out, report)
+	}
 
 	if o.scenario == "level-check" {
 		f := fixtures[o.list[0]]

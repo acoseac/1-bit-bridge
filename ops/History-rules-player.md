@@ -22,6 +22,8 @@
 
 - **DSD goldens are an independently specified pattern**, not a decoder round trip. `scripts/player-dsd-goldens/generate.py` writes the DSF and DFF fixtures from the specifications around `pattern.bin`: no byte is a bit palindrome, left and right differ at every index, and `0x00` never occurs, so a missed reversal, a channel swap or padding read as audio each change bytes. The fixtures are marked `binary` in `.gitattributes` because `pattern.bin` has no NUL. **The DFF goldens give both chunk walks an odd chunk before the sound data**: every DFF golden has a 7-byte `MANF` before `PROP` for the form's walk, since §3.6 pads a `COMT` comment inside its body, so a `COMT` is always even; and every DFF golden but `dst.dff`, a refusal fixture whose `CMPR` ("DST Encoded") is 16 bytes, has the 19-byte `CMPR` of §3.2.3 for `PROP`'s walk. The two accepted DFF goldens, `dsd64.dff` and `dsd256_right_first.dff`, have both. Until round 2 the generator padded `CMPR` inside its size and `COMT` outside it, every `PROP` sub-chunk was even, and a `PROP` walk without its pad skip passed every test. **Don't make every chunk of a DFF golden even.** The demuxer skips `COMT` and `MANF` by their sizes, so no decoding test sees their layout: `TestDFFGoldensCOMTFollowsSection36` and `TestDFFGoldensGiveTheWalksAnOddChunk` read the committed bytes instead (round 3). To check a generator change without touching the committed fixtures, write into a scratch directory with `generate.py --out DIR` and run `go test ./internal/player/decode -args -dsd-goldens=DIR`. `TestDSDGoldensMatchPattern`, `TestDSDGoldensExactSeek`, `TestDSDGoldensEOFAtSampleCount`, `TestDSDGoldensRefused`, `TestDSDTruncatedMidBlock`, `TestDSDAfterID3Prefix`, `TestDSDAbsurdSizesRefused`, `TestDSFMetadataPointerIgnored`, `TestDSDCancelThenRetryNoGap`, `TestDSDIOErrorThenRetryNoGap`, `TestDSDReadBufferShape`, `FuzzDSFOpen` and `FuzzDFFOpen` pin it.
 
+- **The sample count ends DSF audio, never the data size.** The final block group is zero-padded to 4096 per channel; the data chunk must hold every block group the sample count needs, or the file is `truncated_or_corrupt` at open. The `DSD ` chunk's metadata pointer and total size are never used, so ID3 metadata is never read as audio. Before the sound data, DFF chunks other than `FVER` and `PROP` (`COMT`, `MANF`, and `DIIN` or `ID3 ` where a writer puts them there) are skipped by their sizes plus the pad byte after an odd body (§2.3), in the form's walk and in `PROP`'s; `PROP` must precede the sound data. The walk validates chunk headers through the form end, seeking over audio and metadata bodies; a second PROP after sound, trailing property bytes, missing padding or bytes outside the form refuse playback. `CMPR` is read only for its four-byte compressionType, so a `CMPR` whose size counts the name's pad (20 bytes for "not compressed", the form `internal/dsdtone` writes) opens like §3.2.3's 19-byte one (`TestDFFCMPRWithItsNamePadInsideStillOpens`). **Don't follow the DSF metadata pointer.**
+
 ## Player ALAC in M4A (B470 PR 1c)
 
 - **Carry the patched saprobe-alac in `third_party/saprobe-alac`, through `go.mod`'s replace, until a released saprobe-alac checks every entropy code against the packet's own length** (2026-10-21, backlog B470). 1b6eb83's `DynDecomp` checked its cursor only before each sample, so a packet's last code decoded from the four zero bytes of padding after it with no error, or read past the padding and panicked (Codex's review of #1300; `ops/upstream/saprobe-alac.md`, 1 and 7). The copy checks an escape's value before reading it (which also bounds a 32-bit pair's 33-bit read), a normal code's length before taking it, and a zero run's count before and after `dynGet`, and returns the library's `ErrBitstreamOverrun`. `ops/upstream/saprobe-alac.patch` is that change as a diff against 1b6eb83; the copy's `README.md` lists every change, and its patched `golomb.go` says in its header that it was changed (Apache-2.0 §4(b)). The Dockerfile copies the copy's `go.mod` before `go mod download`, which cannot build the module graph without it. **Don't drop the replace or the patch, and don't bump saprobe-alac past them until a release carries that fix; then remove the replace and `third_party/saprobe-alac` in the same change.** `TestALACCodesPastThePacketAreRefused`, `TestSaprobeALACRefusesCodesPastThePacket` and `TestALACPanicPacketIsRefusedWithoutTheRecover` pin it, and `go -C third_party/saprobe-alac test ./...` runs the copy's own tests, which `make test` does not reach (the copy is a module of its own).
@@ -125,6 +127,8 @@ B523 round 4 also orders the producer and successor-open panic tests after Play 
 - **`bridge output play` is the player's hardware harness, run by hand: unlisted, Linux only, never touching serve's data directory.** `bridge output play --config <bridge.yaml> [--keys] [--state-dir DIR] [--pause-release SECONDS] FILE...` is not in `bridge output`'s usage, and is not called from the server or reachable over HTTP. Off Linux it refuses before it reads anything. It refuses a player block that cannot run and a config with no binding, and plays under `output.player.enabled: false` with a note. Its `--pause-release` is 1 to 600 s, the engine's bounds. It resolves the binding on the box's trees (`hostTrees`), runs the hotplug watcher with a `Reporter`, and plays the files in order through the real engine and backend. The engine's files go in `--state-dir`, or in a new directory under the user's cache directory, removed at exit, on storage the engine accepts. A `--state-dir` that is serve's data directory, lies inside it or holds it is a usage error (2), and a run without one whose cache directory lies in serve's is refused, both before anything is made: the paths are compared with their links resolved as the kernel resolves them (`playResolve`: a `..` after a link goes up from where it points) and in the case sensitivity of the data directory's volume (`fsutil.IsUnderAny`), either there or not yet; a bind mount is not found. Files play at their own level, after a line telling the owner to use headphones with the DAC's or amplifier's volume low. Each change is one timestamped line: each open names its card, format and the kernel's status file for its substream, a close says that file reads closed, and a stop gives where the position froze. Without `--keys` it plays the queue once and exits (0 at the end of the queue, 1 stopped short). `--keys` takes single keys: space, n, p, s, d (the entry after the playing one), m and q. A busy device names the holder of the endpoint its refusal names (the `*alsapcm.Error`'s), never the device the run opened last, and the bridge never stops MPD. **Don't list it in `bridge output`'s usage, write into serve's data directory or take a `--state-dir` that meets it, compare the two without their links resolved, play without the level warning, name a busy device's holder from anything but its refusal, stop MPD, or call it from the server.** `TestOutputPlayIsHidden`, `TestOutputPlayRefusesWhatItCannotPlay`, `TestOutputPlayRefusesWhenNothingIsPlayable`, `TestOutputPlayPlaysTheQueueOnceAndSaysSo`, `TestOutputPlayKeepsItsFilesInTheStateDir`, `TestOutputPlayNeverKeepsItsFilesInServesDataDir`, `TestOutputPlayNamesTheHolderOfTheEndpointRefusedBusy` and `TestOutputPlayKeysDriveTheEngine` pin it.
 
 - **A pause is the sink's, its release the sink's own, and a resume after it reopens where the binding resolves now, checked, with the frames the sink kept, or is refused with the session left paused.** The sink pauses by the kernel's PAUSE or by zeros, and after `SessionOptions.PauseRelease` lets the device go, which the reporter reports as `DeviceReleased`. A resume of a sink that held the device answers `ResumeContinued`. A resume that reopens the sink answers `ResumeReopened`: it asks the `Locator` again (`SinkConfig.Locate`), and the check after open (`SinkConfig.Admit`) holds the reopened node to the unit that this locate found. A refused reopen is a `*ResumeError` coded `busy`, `wrong_device`, `not_located`, `no_device`, `permission_denied`, `transport_not_supported` or `device_error`, the session paused and its frames kept. A pause acts on the transport current when it decides: a sink playing out its last frames refuses it, and by then the producer may have opened the next transport's sink and started it, which the pause then asks. With no sink (between two transports), or the one that refused still current, it pauses after them with no device held, in the critical section that read the transport, so a sink the producer opens after it takes the pause before a frame. It arms its own release timer (`Config.AfterFunc`) and reports `DeviceReleased` once the timer has fired and no sink is current: a sink that played out its last frames and is still current is the producer's, which records the occurrence it opens a sink for only as it lets go of that sink, and a resume told of the release before then found none to open, answered continued and left the open to the producer (round 4, CI's "continued, want reopened"). The resume then opens the next transport's sink itself, so a device another process took meanwhile refuses the resume. **Don't reopen by the card number a sink was opened at, reopen without the check after open, check the reopened node against the unit found before, end a pause on a refused resume, pause with no device held while a sink plays, or report a pause's release while a sink that played out is still current.** `TestPlaybackPausesAndResumesContinued`, `TestPlaybackReleasesAPausedDeviceAndReopensIt`, `TestPlaybackReopensOnARenumberedCard` (4a's resolve and check over the Pi 5 tree, the GO bar replugged as card 6 while released), `TestPlaybackRefusesABusyResumeAndStaysPaused`, `TestPlaybackRefusesAReopenTheCheckRefusesAndKeepsItsFrames`, `TestPlaybackPausesBetweenTwoTransportsWithNoDeviceHeld` and `TestPlaybackPausesTheTransportCurrentWhenItDecides` pin it.
+
+- **The backend's tests run the engine's real `Run` over the real `Sink` and the fake kernel, and never sleep.** They live in `internal/alsapcm` (package `alsapcm_test`), the one place that can reach the fake kernel (`export_test.go`'s `FakeKernel`), on the real clock with the reporter's tick sent by hand: a second send is a barrier only while the reporter stays live, since it takes it only once the first is done. A tick that can stop playback waits for the stop instead (B526, below). A call the kernel never returns is a write, a drain or a STATUS parked inside the fake (`ParkNextWrite`, `ParkNextDrain`, `ParkNextStatus`), a read that does not return is a content read held in its `ReadAt` (`files.stall`), a check after open held is the rig's `holdNextAdmit`, the window between a sink's refusal of a pause and the pause's next look is the backend's `Config.Seams.PauseRefused`, and the one between a sink played out for a change of transport and the producer's record of the occurrence it opens one for is `Config.Seams.TransportDrained`, both nil in production; a command handed to a sink's writer is the fake's `OnCommand`, so a test that pins who holds a lock while a command waits sends its rival call only once the command is handed over. Nothing orders a call's answer before the session's events, so a test lets the fake DAC play what follows a call only once the call is answered: freed before a resume, the DAC played b out before the engine took the resume's answer, and the Play was answered superseded (round 4). Each test's end requires every goroutine the backend started to have returned, no overlap, every content closed and every open of the node closed once (`rig.stop`). The harness's tests run on a stand-in backend that reports in order, as the backend's one reporter does. **Don't arm an asynchronous panic before a call whose success the test requires, add a sleep or a poll, leave to the scheduler which of two racing calls goes first, let the fake DAC play what follows a call before the call is answered, end a test with a backend goroutine, content or node still open, or report a stand-in's events out of order.**
 
 ## B514 — durable-writer refusals (2026-10-23)
 New handles ErrOverlayBind before ErrMediumUnknown because errors.Is matches
@@ -711,3 +715,121 @@ second call returns it unprobed, but nothing in production calls it.
 `TestServeOnVolatileStorageRefusesEveryStartAndKeepsNoIdentity` pin this.
 
 - **`engine.WithAdmission` and `Config.Seams` (B470 PR 5a4, round 2).** The OpenHome surface gives a Stop's request slot back once the engine has admitted it, so a Stop that waits for its release holds no slot (`openhome.md`, the write pool's bullet; Codex's round-1 finding: eight Stops on one source's connections held every slot during a pending release). `WithAdmission(ctx)` returns a derived context and a channel; the owner's `admit` closes the channel (`noteAdmission`: a `sync.Once` on a value the context carries, so it never blocks the owner) right after the compare-and-swap of `command.admission` from pending to admitted succeeds, before the command runs or parks, so from then on its caller no longer decides whether it runs (a context that ends after it is answered `ReasonCancelled` without `ErrNotAdmitted`). A command whose context had ended before the call, one the owner finds abandoned by its caller in the window between its look at the context and the swap, and one sent after the shutdown never close it; a command passed no such context is unaffected, and a context so made is for one command. The round's control closed the channel at the top of `admit`, before the look and the swap: the abandoned insert's channel closed, and `TestWithAdmissionClosesAsTheOwnerAdmits` went red. `Config.Seams.ReserveWrite`, nil in production and behaviour-neutral (its own commit), runs before each reservation write on the goroutine that makes it (New's, for the run's first): an error it returns fails the write as the filesystem's refusal would, and a seam that blocks holds the write, as a filesystem that holds it does, so the edits that need it park, at most `ReserveTimeout`; the OpenHome surface's edit-gate test holds the real engine there (its test player's `hangReservations`), which the engine's own seams, unexported (`harness_test.go`), cannot do from another package. A test that holds a write lets it go before the engine stops: Run's shutdown waits for a reservation write under way. `TestTheReserveWriteSeamHoldsAndFailsTheWrite` pins both answers.
+
+## Native engine hand-off (B470 2c.2a)
+
+The production playback admission refuses every DSD tuple before resolving or
+opening hardware. Accepting admission and fake-kernel injection live in test
+files and the existing native integration overlay. Serve and output-play use
+constructors tested against valid DSF and raw DFF content. No approval, transport
+selector, preference or fallback is introduced here.
+
+An admitted occurrence retains one opaque plan: full tuple, policy ID, pause,
+tail, prefill and transition edges. Compatible tuple/policy occurrences share a
+sink and its carry; a different tuple drains and reopens. Native positions count
+logical bits per channel at the logical bit rate, and Details reports Bits=1,
+Codec=DSD, Lossless=true. Native open or activation failure faults the session.
+Health, mixer-monitor and approval-record revocation producers, PCM-only epoch
+publication, and approval storage remain the next phase's work. The backend
+accepts a typed per-session revoke input for those future producers.
+
+Navigation releases native content with TrackChange; Stop escalates to Immediate
+on a worker so the engine owner stays responsive. The retiring ledger accepts
+ordered outgoing progress independently of selected destination. Its token's
+logical-bit cutoff is published after the in-flight write returns its accepted
+prefix. Final progress/fault precedes successful acknowledgement. Done only says
+cleanup completed: failed DROP, HW_FREE or close is ErrReleaseUnconfirmed,
+faults, and cannot authorize a successor. An expected cancellation caused by
+Immediate is suppressed; an established device fault is not. Late successful
+cleanup is distinct from a failed cleanup.
+
+Native pause retains the fixed 30-second release even when the engine's PCM
+PauseRelease differs. A native-involved transport installed during pause re-arms
+the effective deadline and invalidates any queued timer for the old transport.
+Deleting an installed, unsubmitted native output revokes its activation before
+admission can return and write prefill. Reopening resolves the binding afresh and admits the opened
+node, retaining content and policy. Resume alone cannot activate an inert sink;
+the backend supplies explicit initial activation authority for a sink installed
+while paused. A shared reservation remains charged until engine and backend
+both relinquish it, including stalled cancelled resolver reads; production's
+bound is 1024 and tests exercise four. EOF alone does not relinquish ownership.
+
+Qualification version 7 covers engine and playback activation/release code.
+Version-6 and older reports are not attributable to this implementation. The real-ref gate
+must be rerun by the reviewer after committing. Evidence and limitations are
+recorded in the 2c.2a report and the engineering log; no hardware was used.
+
+
+### Native engine hand-off, review round 2 (2026-10-27)
+
+A successful software cut completes that occurrence and continues the producer.
+Installation and resume share the adapter's initial activation authority; pause
+reconciliation cannot activate generation 1 twice. Reopen Locate observes both
+the resume request and sink lifetime; cancelling an in-flight activation still
+revokes it so the abandoned caller cannot authorize sound later.
+
+CleanupResult is separate from Result: a playback/admission error faults and
+stops the session, but successful DROP/HW_FREE/close permits later explicit play.
+An early unconfirmed release stops its timer, clears heard state, and retains
+only one fault for that session. The bounded retiring ledger remains available
+for late accounting until acknowledgement; it never supplies queue intent.
+Fault-initiated release carries ReleaseFault.
+
+The final cutoff supplies each occurrence's start and accepted end in its own
+output's coordinates. Details/Audible require a positive accepted interval;
+Position is compared with that interval's length, never a sink-wide count.
+Tail silence already passes through run.contentAmong and adds no content time.
+A report crossing several tiny native occurrences publishes each one's measured
+position before the following Audible; PCM reports are unchanged.
+
+Unclassified reservations carry ownership but do not charge the native limit.
+Native lookahead reserves before allocation; a newly identified native source
+must promote its reservation before allocating native buffers. Both owners must
+relinquish every charged reservation. PCM retains its prior preparation behavior,
+including lookahead beyond the native limit. Between transports the backend
+keeps the last installed transport's effective pause deadline, matching the
+engine even with a different configured PCM pause release.
+
+The native-qualification job runs both CLI and backend overlay race suites and
+checks that tests ran; the repository wiring test and build-site census pin it.
+The production-constructor test registers drainLoopOnCleanup at its launch,
+before backend Wait and temporary-directory removal. It previously joined the
+engine in a custom cleanup, which the repository's required helper audit rejected.
+
+### Native engine hand-off, PR #1356 review
+
+Qualification version 10 supersedes version 9 for guarded output-play, approval,
+config, wire DTO and extraction changes. Output-play forwards the concrete
+backend's optional reservation opt-in through playTee, with legacy and opted-out
+backends retaining their old behavior. Accepted DSD settings are off/auto/native/dop;
+allowDoP is accepted configuration, not a claim that DoP is implemented. Invalid-mode
+refusals name those choices without claiming that off is the only choice.
+The complete review invariants are in History-b470-native.md, “PR #1356 review”.
+
+### Native engine hand-off, iOS fixture exporter
+
+Qualification version 11 supersedes version 10: the path guard includes the new
+manifest exporter test. This is a contract/test change, with no hardware run or
+playback/extraction implementation change. See History-b470-native.md,
+“iOS mirror precision”.
+
+### Native engine hand-off, final delta review
+
+Qualification version 12 supersedes 11 for the manifest exporter provenance fix
+and qualification runbook pin (test files are guarded). Current runbook instructions
+must track Version; history retains its original versions. See
+History-b470-native.md, “Final delta review”.
+
+## PCM trace capture ordering
+
+`TestPCMTracePins` pins a chosen ioctl schedule, not every legitimate production
+retry schedule. At both 44.1 kHz/16-bit and 384 kHz/32-bit, natural advance holds
+the writer with `atNow` at the last first-buffer measurement, submits buffer two,
+queues Drain and awaits `commanded("drain")`, then frees fake time and releases
+the writer. Close still joins it before the complete byte-exact JSON comparison.
+Do not normalize retries or recapture a scheduling flake. Pause/release submits
+no second buffer: its settled idle watch, synchronous Pause and Drop already
+order its capture. The old natural-advance handoff can add an EAGAIN retry while
+preserving all accepted bytes and HW_PARAMS; a parked fifth WRITE reproduces it
+without sleeps. The original 37-call natural-advance goldens remain unchanged.
+Qualification version 13 covers this guarded test-path change (#1356).

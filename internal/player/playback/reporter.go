@@ -51,7 +51,7 @@ func (s *session) reportStep() bool {
 	l := s.hold()
 	defer l.release()
 	l.lock()
-	if s.releasing || len(s.chain) == 0 {
+	if (s.releasing && !s.finalReport) || len(s.chain) == 0 {
 		l.unlock()
 		return true
 	}
@@ -59,6 +59,9 @@ func (s *session) reportStep() bool {
 	// The successors' stages. The first occurrence's Prepared and Submitted
 	// are its Start's answer.
 	for _, o := range s.chain[1:] {
+		if s.releasing {
+			break
+		}
 		if !o.opened() {
 			continue
 		}
@@ -75,6 +78,12 @@ func (s *session) reportStep() bool {
 			continue
 		}
 		if !o.repPrepared {
+			if o.plan != nil {
+				if pe, ok := s.ev.(engine.NativePlanEvents); ok {
+					plan := *o.plan
+					evs = append(evs, func() { pe.NativePlan(id, oid, plan) })
+				}
+			}
 			o.repPrepared = true
 			j := o.join
 			evs = append(evs, func() { s.ev.Prepared(id, oid, j) })
@@ -112,10 +121,17 @@ func (s *session) reportStep() bool {
 		// takes it (B470 PR 5a3), so the engine holds it as the occurrence
 		// is heard.
 		if de, ok := s.ev.(engine.DetailsEvents); ok {
-			d := detailsOf(o.pcm)
+			d := o.details()
 			evs = append(evs, func() { de.Details(id, oid, d) })
 		}
 		evs = append(evs, func() { s.ev.Audible(id, oid) })
+		if o.out.native != nil {
+			p := posOf(o.out)
+			frames := min(max(p.Played-o.start, 0), o.written)
+			s.posOcc, s.posFrames = oid, frames
+			pos := engine.Position{Occurrence: oid, Frames: frames, RateHz: o.out.logicalRate(), Measured: p.Measured}
+			evs = append(evs, func() { s.ev.Position(id, pos) })
+		}
 	}
 	// What is heard: its content played, at most what it gave the sink.
 	if heard != nil {
@@ -123,7 +139,7 @@ func (s *session) reportStep() bool {
 		frames := min(max(p.Played-heard.start, 0), heard.written)
 		if heard.id != s.posOcc || frames != s.posFrames {
 			s.posOcc, s.posFrames = heard.id, frames
-			pos := engine.Position{Occurrence: heard.id, Frames: frames, RateHz: heard.out.transport.RateHz, Measured: p.Measured}
+			pos := engine.Position{Occurrence: heard.id, Frames: frames, RateHz: heard.out.logicalRate(), Measured: p.Measured}
 			evs = append(evs, func() { s.ev.Position(id, pos) })
 		}
 	}
@@ -169,7 +185,7 @@ func (s *session) reportStep() bool {
 		switch {
 		case c != nil && !c.closed && !c.drained && posOf(c).State == alsapcm.SinkReleased:
 			s.relSent = true
-			n := Note{Session: id, Kind: NoteReleased, Params: c.sink.Params(), Transport: c.transport, Unit: c.unitLabel()}
+			n := Note{Session: id, Occurrence: c.occurrence, output: c, Kind: NoteReleased, Params: c.sink.Params(), Transport: c.transport, Unit: c.unitLabel()}
 			evs = append(evs, func() {
 				s.b.notify(n)
 				s.ev.DeviceReleased(id)
@@ -180,7 +196,7 @@ func (s *session) reportStep() bool {
 		}
 	}
 	done := s.fault != nil
-	if s.drained && !s.finSent && s.fault == nil {
+	if s.drained && !s.finSent && s.fault == nil && !s.releasing {
 		s.finSent, done = true, true
 		evs = append(evs, func() { s.ev.Finished(id) })
 	}

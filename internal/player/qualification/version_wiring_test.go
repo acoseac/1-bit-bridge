@@ -61,3 +61,19 @@ func TestQualificationActivationPaths(t *testing.T) {
 		})
 	}
 }
+
+func TestNativeBackendIntegrationWorkflow(t *testing.T) {
+	b, err := os.ReadFile("../../../.github/workflows/gate.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(b)
+	for _, want := range []string{
+		`go test -v -race -tags ts_omit_webclient,ts_omit_debugeventbus -overlay "$RUNNER_TEMP/native-overlay.json" ./internal/player/playback -run '^TestNativeIntegration'`,
+		`grep -q '^--- PASS: TestNativeIntegration' "$RUNNER_TEMP/native-backend-integration.log"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("backend integration gate missing %q", want)
+		}
+	}
+}

@@ -3,6 +3,7 @@ package alsapcm
 import (
 	"bytes"
 	"context"
+	"errors"
 	"runtime/pprof"
 	"slices"
 	"sync"
@@ -295,4 +296,22 @@ func (tk *FakeKernel) ParkNextClose() (<-chan struct{}, func()) {
 	tk.k.inspect(func(k *fakeKernel) { k.closeParked, k.closeGate = entered, gate })
 	var once sync.Once
 	return entered, func() { once.Do(func() { close(gate) }) }
+}
+
+// OpenNativeSinkWithCleanupError injects a teardown failure after a real open.
+func (tk *FakeKernel) OpenNativeSinkWithCleanupError(ctx context.Context, c DSDConfig, where string) (*DSDSink, error) {
+	a := &nativeAuditSys{sys: tk.k}
+	s, e := openNativeBounded(ctx, c, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(a, tk.k.now, ep, c) }, now: tk.k.now, at: tk.k.nativeAt})
+	if e != nil {
+		return nil, e
+	}
+	switch where {
+	case "drop":
+		tk.k.inspect(func(k *fakeKernel) { k.fail[ioctlDrop] = errno(5) })
+	case "hw_free":
+		tk.k.inspect(func(k *fakeKernel) { k.fail[ioctlHWFree] = errno(5) })
+	case "close":
+		a.closeErr = errors.New("injected close failure")
+	}
+	return s, nil
 }

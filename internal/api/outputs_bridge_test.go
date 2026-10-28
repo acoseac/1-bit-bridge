@@ -587,3 +587,28 @@ func TestTheServersOutputsBodyIsTheRoutesWithThePlayersElement(t *testing.T) {
 		t.Fatalf("direct body\n%s\nroute body\n%s", a, c)
 	}
 }
+
+// TestNativeReleaseUnconfirmedAPI pins the existing projection at the handler
+// boundary, without sockets or importing the player's domain into the API.
+func TestNativeReleaseUnconfirmedAPI(t *testing.T) {
+	f := listedPlayer()
+	f.State = "unavailable"
+	f.Reason = "release_unconfirmed"
+	s := (&Server{}).WithBridgeOutput(&fakeBridgeOutput{enabled: true, facts: f})
+	w := httptest.NewRecorder()
+	s.outputs(w, httptest.NewRequest(http.MethodGet, "/v1/outputs", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: %d", w.Code)
+	}
+	var body OutputsResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Outputs) != 1 {
+		t.Fatalf("outputs: %+v", body)
+	}
+	b := body.Outputs[0].Bridge
+	if b == nil || b.State != "unavailable" || b.Reason == nil || *b.Reason != "release_unconfirmed" || b.DSDMode != "off" || !slices.Equal(b.Codecs, []string{"flac", "wav", "aiff", "alac"}) {
+		t.Fatalf("release projection or production codecs changed: %+v", b)
+	}
+}

@@ -198,3 +198,5 @@ lost my library."
   spelling so a lookup by what was passed still hits. (#919)
 
 - **A playlist file is indexed, never a track, and its members resolve when the feed is asked, not when it is read** (2026-10-17, backlog B431) **Don't resolve members at scan time, don't `path.Clean` a playlist line (a climb above the root is dropped even when it comes back down), don't let a failed read write the row, don't set or clear `complete` anywhere else, don't read every file before writing or load every stored line for a request, don't take the folder evidence from a running scan or from anything but the walk and `backed`, and don't edit `testdata/playlist-parse-cases.tsv`** → History-rules-scanner.md
+
+- **ExtractorVersion 29 validates DSF fmt channels and persists DFF `raw`/`missing`/`unsupported` evidence.** Duplicate/conflicting/short CMPR, multiple PROP and malformed trailing properties are unsupported, never raw. Version 30 keeps the first parsed PROP's known format facts across duplicate PROP as well as malformed later properties; evidence still says unsupported. Stale scan updates full/delta once. → History-b470-native.md, “Owner approval (2c.2b)”.

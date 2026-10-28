@@ -65283,3 +65283,182 @@ queue count/order and both warning-to-start constraints from round 5 remain.
 An equivalent ./ spelling reproduced the old false failure; path suffix/order/
 placement mutations pin the stronger assertions. Evidence and controls: r6/
 in the task scratch directory; no Git writes, hardware or production DSD enable.
+
+## 2026-10-27 — B470 2c.2a native engine/backend hand-off (uncommitted review)
+
+Base HEAD: 8e3ab37e69e0f5c09e139708a31f2e789d2328ac. Production native
+admission still refuses; the accepting seam is test/overlay only. The change
+connects native accepted-bit startup, logical-bit reporting, per-occurrence
+plans, typed release/escalation, retiring events, shared occurrence reservations,
+fresh resume binding, and fixed native pause accounting. Qualification is 6;
+version-5 owner reports are not attributable. No hardware, commit or push.
+
+The task's `b-2c2a/red-first.log` records the pinned baseline and assertion reds
+for deadline selection, escalation preserving faults, relocation, guarded paths,
+tiny content, navigation/retiring progress, reservation ownership, and explicit
+initial activation after pause. Build failures and a no-tests-selected run are
+not red evidence. Later cross-layer cases are regression pins, not historical
+red-first claims. `controls.json` retains all 138 inherited controls and adds
+named R7/R3E mutations; `controls-results.json` records exact leaf comparisons.
+A full-cache/disk failure interrupted an initial control run; failed builds were
+not accepted as reds, the shared generated Go cache was cleared, and controls
+were rerun. Round 2's evidence files were not modified. The inherited release
+budget test now has a watchdog around its parked call so a bad budget reports
+its exact test failure instead of timing out the whole binary.
+
+Evidence lives in the requested scratch report, logs and command manifests.
+The report lists incomplete coverage explicitly, including the requested full
+pre-edit PCM event pins. Two requested PCM pins conflict with the base:
+OpenHome `playlistSeekSecond` already returns 803 unconditionally, and engine
+`current` already excludes releasing sessions. Preserve these baseline behaviors;
+do not implement PCM time-seek as an incidental native integration change.
+Linux amd64/arm64 native ABI and race execution, hardware qualification and the
+post-commit real-ref version check remain reviewer work. Revocation producers,
+PCM-only epoch publication and stored approval policy remain 2c.2b work.
+
+Further barrier checks found and fixed two integration races: a transport change
+while paused retained the previous transport's timer, and deletion during native
+activation admission could leave the initial Start waiting. The short/long
+PCM-to-DSD and DSD-to-PCM deadline cases and the deletion barrier have assertion
+reds followed by passing race runs. The real engine/backend/kernel retiring
+prefix test accounts for both outgoing occurrences before allowing the requested
+successor to open. The closed-fault activation test also uses a leaf watchdog
+rather than a whole-binary timeout, preserving the control runner's exact-leaf
+requirement. No timeout/build failure is counted as an assertion red.
+
+
+## 2026-10-27 — B470 2c.2a review round 2
+
+Verified C1–C7 and A1–A8 against c93be360 before fixing. Native software cuts now
+continue production; cleanup success is independent of playback errors;
+installation has one initial activation authority; between-transport native
+pause uses the same 30-second deadline as the engine. Retiring accounting carries
+per-occurrence accepted intervals. Native ownership limits no longer fault PCM
+lookahead. Both integration overlays run in the CI gate, pinned by a repository
+test and the build-tag census. Early release failure cancels its timer and
+records one fault; fault releases identify their cause; reopen Locate observes
+caller cancellation. Tiny-track assertions require actual details and positions,
+and the old-card-reused fixture keeps both nodes openable with distinct identity.
+Qualification version is 7; production DSD admission remains disabled.
+
+Argon's duplicate timer transition was already guarded by sessReleasing; the
+actual duplicate was a backend fault followed by releaseDeadline's fault. Tail
+silence was already excluded by run.contentAmong (a buffered-discard regression
+pins it). The claimed decoder cleanup defer does not exist: open owns o.dsd
+until closeOcc, just as it owns o.dec, and closeOcc clears it once. Revocation
+on cancellation remains necessary to fence abandoned activation work.
+
+The reviewer’s macOS full-race log has one failed package, cmd/bridge; every
+other package with tests passed. Its drain audit identifies the constructor
+test's custom cleanup, not a demonstrated production goroutine leak. Use the
+required drainLoopOnCleanup at that launch and keep backend Wait ordered after it.
+Round-2 evidence (red-first logs, exact-leaf mutation controls, race and docs
+checks) is recorded in the review workspace's b-2c2a/r2 artifacts; no hardware,
+Git writes or production enablement were used.
+
+
+### 2026-10-27 — B470 2c.2b approval boundary
+
+Implemented local owner approval (version 8), complete report provenance, exact tuple selection,
+semantic mixer constraints, directional transition enforcement and DSD-only revocation. The
+real production constructor overlay refuses missing/stale/tampered/candidate/deleted-before-
+activation records with zero writes; the retiring-tail test verifies Immediate instead of drain,
+and prepared DSD no longer faults PCM. Independent live facts and capability epochs are additive
+protocol-v1 DTOs. ExtractorVersion 28 carries validated DSF channels and structural DFF evidence
+through unchanged-file backfill, full/delta and a no-op second scan. No hardware qualification,
+DoP release claim or iOS I1–I3 claim. Procedures and trust decisions: ops/b470-native-qualification.md;
+long-form invariants: ops/History-b470-native.md, “Owner approval (2c.2b)”.
+
+
+## 2026-10-27 — B470 2c.2b approval review round 2
+
+Reproduced PCM edge gating, session-driven capability churn, malformed DFF admission,
+and PCM-only lifecycle evidence. Kept PCM independent of DSD approval; moved epoch
+publication to supervision; filtered and monitored constraints per tuple. Paused and
+gapless native boundaries recheck permission and edges. DFF validation covers the
+complete form while seeking over audio; extractor version 29 preserves valid format
+facts beside unsupported compression evidence. Sink-correlated live facts cannot
+invent a reopen or apply an older close to a successor. Native lifecycle completion
+and observed actions bind the exact tuple; installed-occurrence transport supplies
+edge keys. Real policy reader fixtures exercise surface negatives and lowercase codecs.
+The full-suite review's stale configuration tests now use an invalid mode; constructor
+census includes the CLI candidate lifecycle engine. qualificationVersion is 9.
+Matching rules and History-b470-native.md carry the durable invariants. No hardware.
+
+
+## 2026-10-27 — B470 2c.2 PR #1356 review
+
+Eight of ten inline findings were confirmed. Assertion reds reproduced omitted PCM
+logicalRate, stale invalid-mode guidance, duplicate PROP erasure, lost output-play
+reservation ownership, state-directory evidence walking above its root, and a
+missing backend suite accepted by the overlay generator. Version-29 backfill and
+version-9 approval invalidation were red before the version bumps too. The runbook
+and protocol version references were corrected in the same round; protocol stays 1.
+QualificationVersion is 10 and ExtractorVersion is 30. Rule detail is in
+History-b470-native.md, “PR #1356 review”, with matching player/scanner/wire lines.
+The release-before-start lookup and immediate fail-closed permission revocation
+are intentional and unchanged. Local review artifacts record exact mutation reds
+and gate exits. No commit, push or hardware qualification was performed.
+
+## 2026-10-27 — B470 2c.2 / #1356 iOS mirror precision
+
+The iOS companion reviews identified a blanket bridge-key presence claim and
+missing token/member lists. The serializer retains mandatory logicalRate=0 for
+PCM; optional objects and empty-string fields are now enumerated. Source-derived
+TestDSDOutputProtocolTokens checks both directions of each token table. The
+negative control changes the documented silence token to a nonexistent token,
+expecting only its pause leaf red. The two iOS exporter tests exercise
+scan/store/full+since streaming and the real outputs HTTP serializer, with all
+assertions active when publication is off. The unknown-CMPR fixture confirmed
+that the extractor withholds channels as well as other format stamps; the doc
+now says so. Qualification version 11 follows the existing path guard (which
+includes test files), without changing extraction/playback behavior. The iOS
+mirror and consumers remain companion work; no hardware or deployment ran.
+
+## 2026-10-27 — B470 2c.2 / #1356 final delta review
+
+Confirmed the manifest exporter's unconditional provenance failure; moved Git/HEAD
+and fallback validation under the export gate without gating extraction or JSON
+assertions. The API exporter already gates its provenance-file dependency; both
+now have source-archive regression coverage. Two stale version-10 runbook
+instructions were confirmed. All five current references now follow version 12,
+required by the guarded manifest/qualification test changes, with a docs/code pin.
+Raw HTTP member-table checks cover exact names, types, mandatory zero values and
+optional absence/presence, closing the DTO round-trip gap. Negative controls target
+provenance, runbook drift and wire omissions/types. Rules and detail are in
+History-b470-native.md, “Final delta review”. No hardware qualification ran.
+
+## 2026-10-27 — B470 2c.2 deterministic PCM trace capture (#1356)
+
+The natural-advance capture let buffer two feed before Drain was admitted.
+Parking its fifth WRITE, submitting Drain asynchronously, awaiting its commanded
+hook, freeing fake time and releasing the WRITE reproduces 38 calls against the
+37-call golden at both 44100/16 and 384000/32. Accepted bytes and committed
+HW_PARAMS are identical. This is an extra EAGAIN retry after cancellation, a
+capture artifact also present on main 8e3ab37e; playback code is unchanged.
+
+The test now holds the writer with atNow at the final first-buffer measurement,
+submits buffer two, admits Drain, then frees time and releases the writer. Both
+natural-advance cases need this ordering. Neither pause-release case feeds a
+second buffer: its settled idle watch and synchronous Pause then Drop already
+order the capture. Close still joins the writer before inspection. All four
+JSON goldens remain byte-identical, including both 37-call natural advances;
+no retry normalization or trace recapture is used. Mismatches now name the first
+Calls index, HWParams byte offset or Written byte offset, with a raw JSON offset
+fallback; bytes.Equal still decides the complete comparison.
+
+The forced fifth-WRITE reproduction fails before the fix without sleeps. Negative
+controls corrupt one accepted byte, add one PREPARE, alter one HW_PARAMS byte,
+and remove command-before-feed ordering while forcing the fifth-WRITE handoff;
+each fails at the expected trace leaf, and restoring the fixed schedule passes.
+The qualification path guard includes tests, so qualificationVersion advances
+12 to 13 and all five current runbook references advance with it. The review
+workspace's pcm-flake-fix records red-first.log, control overlays, command exit
+statuses and stress evidence; inherited control anchors retain multiplicity.
+
+Validation: all four trace leaves pass 200 repetitions with the race detector,
+and 100 more under 12 yes processes (PIDs captured, killed and reaped). The full
+internal/alsapcm race suite and qualification suite pass; no test is blocked by
+socket permissions. Vet passes for macOS, Linux and Windows. The new rule exceeded
+player.md's byte budget, so the existing backend-test ordering explanation moved
+verbatim to History-rules-player.md with its binding summary retained.

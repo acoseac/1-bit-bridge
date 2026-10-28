@@ -45,20 +45,27 @@ const chunkFrames = 4096
 
 // occ is one occurrence the engine handed the session, in play order.
 type occ struct {
-	id    engine.OccurrenceID
-	entry uint32
-	ref   engine.Reference
-	pos   int // its place in the session's chain
+	permission  *permission
+	reservation *engine.OccurrenceReservation
+	id          engine.OccurrenceID
+	entry       uint32
+	ref         engine.Reference
+	pos         int // its place in the session's chain
 
 	// The open. done is closed once the open has a decoder or a refusal;
 	// until then the opener owns what it opened. cancel ends the open.
 	done   chan struct{}
 	cancel context.CancelFunc
 	// Set by the open, read once done is closed.
-	content Content
-	dec     decode.Decoder
-	pcm     format.PCM
-	refused *engine.Unplayable
+	content      Content
+	dec          decode.Decoder
+	dsd          decode.DSDDecoder
+	nativeFormat format.NativeDSD
+	plan         *engine.NativePlan
+	nativeFirst  [][]byte
+	decodedBits  int64
+	pcm          format.PCM
+	refused      *engine.Unplayable
 	// first is the first chunk, decoded at the open so content that cannot
 	// give a frame is refused before any of it plays; firstErr is an error
 	// that came with it, which applies after it (decode.Decoder's n > 0
@@ -117,6 +124,10 @@ func (b *Backend) open(ctx context.Context, o *occ) {
 	src, err := decode.Open(io.NewSectionReader(c.Data, 0, c.Size))
 	if err != nil {
 		refuseDecode(o, err)
+		return
+	}
+	if d, ok := src.(decode.DSDDecoder); ok {
+		b.openNativeContent(ctx, o, d)
 		return
 	}
 	// DSD, whatever the mode: content of a container Plays does not take
@@ -222,6 +233,11 @@ func (s *session) closeOcc(o *occ) {
 			}
 		}()
 		_ = c.Close()
+	}
+	if o.dsd != nil {
+		closeOne(o.dsd)
+		o.dsd = nil
+		o.nativeFirst = nil
 	}
 	if dec != nil {
 		closeOne(dec)

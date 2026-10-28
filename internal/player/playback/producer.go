@@ -23,9 +23,10 @@ const (
 )
 
 type step struct {
-	kind stepKind
-	o    *occ
-	wait <-chan struct{}
+	install bool
+	kind    stepKind
+	o       *occ
+	wait    <-chan struct{}
 }
 
 // produce is the session's producer, the one goroutine that decodes, packs
@@ -45,6 +46,9 @@ func (s *session) produce() {
 		st := s.next()
 		switch st.kind {
 		case stepWrite:
+			if st.install {
+				s.installed(st.o, st.o.out, false)
+			}
 			if !s.writeChunk(st.o, samples, packed) {
 				return
 			}
@@ -108,11 +112,38 @@ func (s *session) next() step {
 	if !o.opened() {
 		return step{kind: stepWait, wait: o.done}
 	}
-	if c := s.cur; c != nil && !c.drained && !c.closed && c.transport == o.transport {
+	if c := s.cur; c != nil && !c.drained && !c.closed && c.transport == o.transport && (o.plan == nil || c.policyID == o.plan.PolicyID) {
+		if err := s.b.checkEdge(o.transport, o.plan, o.permission); err != nil {
+			o.refused = &engine.Unplayable{Reason: "transition_unapproved", Detail: err.Error()}
+			o.dropped = true
+			wake(s.wakeR)
+			return step{kind: stepFinish}
+		}
+		if o.plan != nil && o.permission != nil {
+			s.mu.Unlock()
+			err := s.b.checkPermission(s.ctx, o.permission, nil, edgeKey(o.transport, o.plan))
+			if err != nil {
+				s.b.Revoke(engine.RevokeInput{Session: s.id, Reason: "gapless DSD authorization changed"})
+			}
+			s.mu.Lock()
+			if err != nil {
+				o.refused = &engine.Unplayable{Reason: "native_revoked", Detail: err.Error()}
+				o.dropped = true
+				wake(s.wakeR)
+				return step{kind: stepStop}
+			}
+			if s.ctx.Err() != nil || s.fault != nil {
+				return step{kind: stepStop}
+			}
+			if o.dropped || s.cur != c {
+				return step{kind: stepWait}
+			}
+		}
+		s.b.rememberEdge(o.transport, o.plan, o.permission)
 		// Gapless: its frames follow the last ones in the same sink.
 		o.out, o.start = c, c.submitted
 		s.writing = o
-		return step{kind: stepWrite, o: o}
+		return step{kind: stepWrite, o: o, install: true}
 	}
 	return step{kind: stepTransition, o: o}
 }
@@ -156,6 +187,9 @@ func (s *session) waitWake(also <-chan struct{}) bool {
 // once what was decoded before it has played (finish). It reports false
 // when the sink stopped taking frames or the session ends.
 func (s *session) writeChunk(o *occ, samples []int32, packed []byte) bool {
+	if o.plan != nil {
+		return s.writeNativeChunk(o)
+	}
 	buf, err := o.first, o.firstErr
 	o.first, o.firstErr = nil, nil
 	if buf == nil {
@@ -347,6 +381,9 @@ func (s *session) transition(o *occ) bool {
 		case s.paused == sinkPaused:
 			s.currentLocked(o, out, sinkPaused)
 			l.unlock()
+			if err := s.activateOutput(s.ctx, o, out); err != nil {
+				return s.openFailed(o, err)
+			}
 			return true
 		}
 		cmd := out.sink.Pause
@@ -376,6 +413,7 @@ func (s *session) transition(o *occ) bool {
 // session's pause. s.mu is held.
 func (s *session) currentLocked(o *occ, out *output, paused bool) {
 	s.cur = out
+	s.currentNative = out.native != nil
 	o.out, o.start, o.transport = out, 0, out.transport
 	s.writing = o
 	if paused {

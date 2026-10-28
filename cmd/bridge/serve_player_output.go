@@ -145,9 +145,25 @@ func (b *bridgeOutput) Facts(ctx context.Context) api.BridgeOutputFacts {
 		return api.BridgeOutputFacts{}
 	}
 	state, reason, lastErr := b.state(ready)
-	return api.BridgeOutputFacts{Listed: true, UUID: id, State: state, Reason: reason, LastError: lastErr,
+	facts := api.BridgeOutputFacts{Listed: true, UUID: id, State: state, Reason: reason, LastError: lastErr,
 		DAC:      b.dac(ctx, state),
 		OpenHome: b.openHome(id), Codecs: playedCodecs(), FixedVolume: b.fixedVolume, DSDMode: b.dsdMode, AllowDoP: b.allowDoP}
+	if ready {
+		if be, ok := b.p.be.(*playback.Backend); ok {
+			policy, live := be.Facts()
+			facts.DSDPlayback = &api.OutputDSDPlayback{BootID: policy.BootID, PolicyGeneration: policy.Generation, QualificationRevision: policy.Revision, Reason: policy.Reason, Tuples: []api.OutputDSDTuple{}}
+			for _, p := range policy.Tuples {
+				facts.DSDPlayback.Tuples = append(facts.DSDPlayback.Tuples, api.OutputDSDTuple{Format: p.Tuple.Format, BitRate: p.Tuple.BitRate, Channels: 2, PolicyID: p.PolicyID, Pause: p.Pause, TailMS: p.Tail.Milliseconds(), PrefillMS: p.Prefill.Milliseconds()})
+			}
+			if len(policy.Tuples) > 0 {
+				facts.Codecs = append(facts.Codecs, "dsf", "dff")
+			}
+			if live != nil {
+				facts.Playback = &api.OutputPlayback{BootID: live.BootID, PolicyGeneration: live.PolicyGeneration, Session: uint64(live.Session), Occurrence: uint64(live.Occurrence), State: live.State, Format: live.Format, RateHz: live.RateHz, LogicalRate: live.LogicalRate, Channels: live.Channels, ValidBits: live.ValidBits, PolicyID: live.PolicyID}
+			}
+		}
+	}
+	return facts
 }
 
 // identity is the player's UUID: the started player's own once it runs,

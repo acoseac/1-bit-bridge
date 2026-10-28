@@ -107,12 +107,12 @@ type PlayerConfig struct {
 	PauseReleaseSeconds *int `yaml:"pauseReleaseSeconds,omitempty"`
 	// Device is the binding: which DAC the player opens.
 	Device PlayerDevice `yaml:"device,omitempty"`
-	// DSDMode is auto, native, dop or off, and this release takes off
-	// alone (an empty value is off): a DSD track is refused, never
-	// converted.
+	// DSDMode is auto, native, dop or off (default). Native requires local
+	// owner approval; DoP remains unavailable. DSD is never converted.
 	DSDMode string `yaml:"dsdMode,omitempty"`
-	// AllowDoP may enable DoP once PR 2d qualifies it; this release takes
-	// false alone (nil is false).
+	// DSDQualification names an owner-approved record within the bridge state directory.
+	DSDQualification string `yaml:"dsdQualification,omitempty"`
+	// AllowDoP requests DoP, which remains unavailable until PR 2d. Nil is false.
 	AllowDoP *bool `yaml:"allowDoP,omitempty"`
 	// Mixer is the hardware volume control, and this release takes type
 	// none alone: the output is fixed.
@@ -250,7 +250,7 @@ func (p PlayerConfig) EffectiveMixer() string {
 // yaml.v3's omitempty asks.
 func (p PlayerConfig) IsZero() bool {
 	return p.written == nil && !p.Enabled && p.Room == "" && p.PauseReleaseSeconds == nil && p.Device.empty() &&
-		p.DSDMode == "" && p.AllowDoP == nil && p.Mixer == PlayerMixer{} && !p.OpenHome && p.OpenHomePort == nil
+		p.DSDMode == "" && p.DSDQualification == "" && p.AllowDoP == nil && p.Mixer == PlayerMixer{} && !p.OpenHome && p.OpenHomePort == nil
 }
 
 // clone is a copy that shares no pointer with p but the never-changed
@@ -416,15 +416,11 @@ func (p PlayerConfig) Problem() error {
 		return fmt.Errorf(at+"room: must be at most %d characters", maxRoomRunes)
 	}
 	switch p.DSDMode {
-	case "", "off":
-	case "auto", "native", "dop":
-		return fmt.Errorf(at+"dsdMode: %q is not in this release: only off is, and a DSD track is refused (native DSD and DoP are later work)", p.DSDMode)
+	case "", "off", "auto", "native", "dop":
 	default:
-		return errors.New(at + "dsdMode: that value is not a DSD mode (auto, native, dop or off), and this release takes off alone: the player never converts DSD to PCM")
+		return errors.New(at + "dsdMode: that value is not a DSD mode (auto, native, dop or off); the player never converts DSD to PCM")
 	}
-	if p.AllowsDoP() {
-		return errors.New(at + "allowDoP: true is not in this release: only false is (DoP is later work)")
-	}
+
 	switch p.Mixer.Type {
 	case "", "none":
 	case "hardware":
@@ -623,7 +619,7 @@ type playerSection struct {
 
 // The keys each section takes.
 var (
-	playerKeys = []string{"enabled", "room", "pauseReleaseSeconds", "device", "dsdMode", "allowDoP", "mixer", "openhome", "openhomePort"}
+	playerKeys = []string{"enabled", "room", "pauseReleaseSeconds", "device", "dsdMode", "dsdQualification", "allowDoP", "mixer", "openhome", "openhomePort"}
 	deviceKeys = []string{"transport", "binding", "vendorId", "productId", "serial", "port", "pcmDevice", "subdevice"}
 	mixerKeys  = []string{"type", "control"}
 )
@@ -831,6 +827,8 @@ func (r *playerReader) player(n *yaml.Node) PlayerConfig {
 			p.PauseReleaseSeconds = r.optionalWhole(v, at+".pauseReleaseSeconds")
 		case "device":
 			p.Device = r.device(v)
+		case "dsdQualification":
+			r.text(v, at+".dsdQualification", &p.DSDQualification)
 		case "dsdMode":
 			r.text(v, at+".dsdMode", &p.DSDMode)
 		case "allowDoP":

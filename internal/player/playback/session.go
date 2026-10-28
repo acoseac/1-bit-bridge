@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/acoseac/1-bit-bridge/internal/player/qualification"
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/player/binding"
@@ -18,8 +20,9 @@ import (
 // and report them, the producer and the reporter, beside one opener a
 // successor.
 type session struct {
-	b  *Backend
-	id engine.SessionID
+	permission *permission
+	b          *Backend
+	id         engine.SessionID
 
 	// ctx is the session's life: every goroutine it starts and every sink it
 	// opens ends with it, at its release.
@@ -33,10 +36,15 @@ type session struct {
 	ev   engine.Events
 	opts engine.SessionOptions
 
-	mu        sync.Mutex
-	started   bool
-	releasing bool
-	lateAck   bool // Release answered its context's error: the teardown acknowledges
+	mu              sync.Mutex
+	started         bool
+	releasing       bool
+	nativeRelease   *engine.ReleaseRequest
+	finalReport     bool
+	nativeRevoked   bool
+	nativeEscalated bool
+	releaseErr      error
+	lateAck         bool // Release answered its context's error: the teardown acknowledges
 
 	chain   []*occ
 	writing *occ // the occurrence the producer writes, nil between occurrences
@@ -51,8 +59,9 @@ type session struct {
 	decodeErr          *engine.Fault
 	faultSent, finSent bool
 
-	cur  *output   // the sink that plays now, nil between two transports
-	outs []*output // every sink the session opened
+	currentNative bool
+	cur           *output   // the sink that plays now, nil between two transports
+	outs          []*output // every sink the session opened
 
 	inWrite bool               // the producer is in a sink's Write, or about to be
 	wctx    context.Context    // that Write's context
@@ -91,9 +100,16 @@ type session struct {
 
 // output is one sink a session opened, for one transport.
 type output struct {
-	s         *session
-	sink      *alsapcm.Sink
-	transport alsapcm.Transport
+	occurrence   engine.OccurrenceID
+	plan         *engine.NativePlan
+	permission   *permission
+	s            *session
+	sink         streamSink
+	native       *alsapcm.DSDSink
+	adapter      *nativeStream
+	nativeCancel context.CancelFunc
+	policyID     string
+	transport    alsapcm.Transport
 	// Under the session's lock.
 	submitted int64 // content frames handed to the sink, less those a cut dropped
 	drained   bool  // a drain played everything submitted
@@ -109,10 +125,26 @@ func (o *output) admit(n alsapcm.NodeInfo) error {
 	o.umu.Lock()
 	u := o.unit
 	o.umu.Unlock()
-	if u.Admit == nil {
-		return nil
+	if u.Admit != nil {
+		if e := u.Admit(n); e != nil {
+			return e
+		}
 	}
-	return u.Admit(n)
+	if o.permission != nil {
+		if err := o.s.b.checkPermission(o.s.ctx, o.permission, &n, edgeKey(o.transport, o.plan)); err != nil {
+			return err
+		}
+		if a := o.s.b.cfg.Authorization; a != nil && a.ContactCheck != nil {
+			for _, p := range o.permission.record.Body.Policies {
+				if qualification.NativeKey(p) == edgeKey(o.transport, o.plan) {
+					return a.ContactCheck(n, p, o.permission.record.Body.ManifestHash)
+				}
+			}
+			return errors.New("approved policy missing")
+		}
+	}
+
+	return nil
 }
 
 // locate is the sink's reopen locator: the binding resolved again, and the
@@ -277,7 +309,7 @@ func (s *session) call(ctx context.Context, f func() error) (err error) {
 
 // newOccLocked appends an occurrence to the chain. s.mu is held.
 func (s *session) newOccLocked(eo engine.Occurrence) *occ {
-	o := &occ{id: eo.ID, entry: eo.Entry, ref: eo.Ref, pos: len(s.chain), done: make(chan struct{})}
+	o := &occ{permission: s.permission, reservation: eo.Reservation, id: eo.ID, entry: eo.Entry, ref: eo.Ref, pos: len(s.chain), done: make(chan struct{})}
 	s.chain = append(s.chain, o)
 	return o
 }
@@ -332,6 +364,7 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	}
 	s.started = true
 	if s.releasing {
+		req.First.Reservation.ReleaseBackend()
 		// Its release came first and holds nothing: this Start acquires
 		// nothing either.
 		s.mu.Unlock()
@@ -348,6 +381,24 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	}
 	cctx, stop := s.bound(ctx)
 	defer stop()
+	if s.b.cfg.Authorization != nil {
+		p, e := s.b.readPermission(cctx)
+		s.mu.Lock()
+		if s.nativeRevoked && p != nil {
+			p.revoked.Store(true)
+		}
+		if e != nil {
+			p = nil
+		}
+		// Session admission never publishes capabilities. The supervisor owns epochs.
+		if p != nil {
+			p.generation = s.b.Policy().Generation
+		}
+		s.permission = p
+		first.permission = p
+		s.mu.Unlock()
+		s.monitorPermission()
+	}
 	s.b.open(cctx, first)
 	close(first.done)
 	if first.refused != nil {
@@ -357,7 +408,12 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 		u := *first.refused
 		return &u
 	}
-	first.transport = transportFor(first.pcm.RateHz, first.pcm.ValidBits, s.b.preferred(first.pcm.RateHz, first.pcm.ValidBits))
+	if first.plan == nil {
+		first.transport = transportFor(first.pcm.RateHz, first.pcm.ValidBits, s.b.preferred(first.pcm.RateHz, first.pcm.ValidBits))
+	}
+	if ev, ok := s.ev.(engine.NativePlanEvents); ok && first.plan != nil {
+		ev.NativePlan(s.id, first.id, *first.plan)
+	}
 	out, err := s.openOutput(cctx, first)
 	if err != nil {
 		var te *transportError
@@ -375,8 +431,14 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 		return errReleased
 	}
 	s.cur = out
+	s.currentNative = out.native != nil
 	first.out, first.start, first.transport = out, 0, out.transport
 	s.writing = first
+	s.mu.Unlock()
+	if err := s.activateOutput(cctx, first, out); err != nil {
+		return err
+	}
+	s.mu.Lock()
 	s.wg.Add(2)
 	s.mu.Unlock()
 	s.b.spawn(func() {
@@ -431,6 +493,9 @@ func (e *transportError) Unwrap() error { return e.err }
 // packing is a transportError; any other refusal (busy, the check after
 // open, the unit not located) is returned as it is.
 func (s *session) openOutput(ctx context.Context, o *occ) (*output, error) {
+	if o.plan != nil {
+		return s.openNativeOutput(ctx, o)
+	}
 	u, err := s.b.cfg.Locator.Locate(ctx)
 	if err != nil {
 		return nil, err
@@ -441,7 +506,11 @@ func (s *session) openOutput(ctx context.Context, o *occ) (*output, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		out := &output{s: s, transport: transportFor(rate, bits, f), unit: u}
+		transport := transportFor(rate, bits, f)
+		if err := s.b.checkEdge(transport, nil, nil); err != nil {
+			return nil, err
+		}
+		out := &output{occurrence: o.id, s: s, transport: transport, unit: u}
 		sink, err := s.b.cfg.OpenSink(s.ctx, alsapcm.SinkConfig{
 			Endpoint: u.Endpoint, Transport: out.transport, Pause: alsapcm.PauseAuto,
 			ReleaseAfter: s.opts.PauseRelease, Admit: out.admit, Locate: out.locate, Log: s.b.log,
@@ -454,7 +523,7 @@ func (s *session) openOutput(ctx context.Context, o *occ) (*output, error) {
 			s.outs = append(s.outs, out)
 			s.mu.Unlock()
 			s.b.remember(rate, bits, f)
-			s.b.notify(Note{Session: s.id, Kind: NoteOpened, Params: sink.Params(), Transport: out.transport, Unit: u.Label})
+			s.b.notify(Note{Session: s.id, Occurrence: out.occurrence, output: out, Kind: NoteOpened, Params: sink.Params(), Transport: out.transport, Unit: u.Label})
 			return out, nil
 		}
 		switch alsapcm.ReasonOf(err) {
@@ -479,8 +548,23 @@ func (s *session) closeOutput(out *output) {
 	}
 	out.closed = true
 	s.mu.Unlock()
-	_ = out.sink.Close()
-	s.b.notify(Note{Session: s.id, Kind: NoteClosed, Params: out.sink.Params(), Transport: out.transport, Unit: out.unitLabel()})
+	err := out.sink.Close()
+	if out.native != nil && out.native.Result() != nil {
+		s.mu.Lock()
+		if s.fault == nil {
+			s.fault = &engine.Fault{Reason: faultReason(out.native.Result()), Detail: out.native.Result().Error()}
+		}
+		s.mu.Unlock()
+	}
+	if out.nativeCancel != nil {
+		out.nativeCancel()
+	}
+	if out.native != nil && err != nil {
+		s.mu.Lock()
+		s.releaseErr = errors.Join(s.releaseErr, engine.ErrReleaseUnconfirmed, err)
+		s.mu.Unlock()
+	}
+	s.b.notify(Note{Session: s.id, Occurrence: out.occurrence, output: out, Kind: NoteClosed, Params: out.sink.Params(), Transport: out.transport, Unit: out.unitLabel()})
 }
 
 // drainOutput has out play everything submitted. A paused sink holds what
@@ -518,6 +602,13 @@ func (s *session) drainOutput(out *output) error {
 
 // prepare is Prepare.
 func (s *session) prepare(ctx context.Context, after engine.OccurrenceID, next *engine.Occurrence) (err error) {
+	owned := false
+	defer func() {
+		if next != nil && !owned {
+			next.Reservation.ReleaseBackend()
+		}
+	}()
+
 	defer s.recoverCall("prepare", &err)
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -551,6 +642,7 @@ func (s *session) prepare(ctx context.Context, after engine.OccurrenceID, next *
 	} else {
 		s.endAfter = 0
 		o := s.newOccLocked(*next)
+		owned = true
 		octx, cancel := context.WithCancel(s.ctx)
 		o.cancel = cancel
 		s.wg.Add(1)
@@ -587,6 +679,9 @@ func (s *session) openSuccessor(ctx context.Context, o *occ) {
 		wake(s.wakeP)
 		wake(s.wakeR)
 	}()
+	if s.nativeRevoked && o.plan != nil {
+		o.refused = &engine.Unplayable{Reason: "native_revoked", Detail: "DSD permission revoked"}
+	}
 	if o.dropped {
 		// Dropped while it opened: nothing of it plays or is reported, and
 		// it leaves the chain with its opener, which retirement passed over
@@ -608,11 +703,13 @@ func (s *session) openSuccessor(ctx context.Context, o *occ) {
 			before = p.out.transport
 		}
 	}
-	f := s.b.preferred(rate, bits)
-	if before.RateHz == rate && before.ValidBits == bits {
-		f = before.Format
+	if o.plan == nil {
+		f := s.b.preferred(rate, bits)
+		if before.RateHz == rate && before.ValidBits == bits {
+			f = before.Format
+		}
+		o.transport = transportFor(rate, bits, f)
 	}
-	o.transport = transportFor(rate, bits, f)
 	j := before.Join(o.transport)
 	o.join = engine.Join{Gapless: j.Gapless, Differs: j.Differs}
 }
@@ -731,6 +828,13 @@ func (s *session) dropLocked(o *occ) {
 			continue
 		}
 		x.dropped = true
+		// A newly installed native output can be in activation admission while
+		// deletion wins here. Revoke before that admission returns, including
+		// its prefill; a later replacement must open its own inert output.
+		if x.out != nil && x.out.native != nil && x.start == 0 && x.out.submitted == 0 {
+			x.out.native.Revoke()
+			x.out.drained = true
+		}
 		if x.cancel != nil {
 			x.cancel()
 		}
@@ -778,6 +882,7 @@ func (s *session) retireLocked(heard *occ) {
 	kept := 0
 	for i, o := range s.chain {
 		if i < n && o.opened() {
+			o.reservation.ReleaseBackend()
 			continue
 		}
 		o.pos = kept
@@ -802,6 +907,7 @@ func (s *session) removeLocked(o *occ) {
 	if o.pos >= len(s.chain) || s.chain[o.pos] != o {
 		return
 	}
+	o.reservation.ReleaseBackend()
 	s.chain = slices.Delete(s.chain, o.pos, o.pos+1)
 	for i := o.pos; i < len(s.chain); i++ {
 		s.chain[i].pos = i
@@ -848,7 +954,7 @@ func (s *session) pause(ctx context.Context) (err error) {
 			return err
 		}
 		l.unlock()
-		err := s.call(ctx, out.sink.Pause)
+		err := s.call(ctx, func() error { return out.pause(ctx) })
 		if err == nil {
 			l.lock()
 			err := s.pausedLocked(false)
@@ -877,7 +983,11 @@ func (s *session) pausedLocked(noDevice bool) error {
 	s.relSent, s.relFired = false, false
 	if noDevice {
 		seq := s.pauseSeq
-		s.relStop = s.b.cfg.AfterFunc(s.opts.PauseRelease, func() {
+		delay := s.opts.PauseRelease
+		if s.currentNative {
+			delay = 30 * time.Second
+		}
+		s.relStop = s.b.cfg.AfterFunc(delay, func() {
 			s.mu.Lock()
 			if s.paused && s.pauseSeq == seq {
 				s.relFired = true
@@ -1020,7 +1130,7 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 	l.unlock()
 	if out != nil {
 		released := out.sink.Position().State == alsapcm.SinkReleased
-		err := s.call(ctx, out.sink.Resume)
+		err := s.call(ctx, func() error { return out.resume(ctx) })
 		if err == nil {
 			l.lock()
 			if err := s.unpausedLocked(); err != nil {
@@ -1032,7 +1142,7 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 				// not abandon rollback; give it the usual call bound of its own.
 				rollback, stop := context.WithTimeout(context.WithoutCancel(ctx), engine.CallTimeout)
 				defer stop()
-				if pauseErr := s.call(rollback, out.sink.Pause); pauseErr != nil {
+				if pauseErr := s.call(rollback, func() error { return out.pause(rollback) }); pauseErr != nil {
 					// The kernel's final drain refuses Pause: only Drop can
 					// stop those last frames. Keep both refusals if it fails too.
 					if alsapcm.ReasonOf(pauseErr) == alsapcm.ReasonBadState && out.sink.Position().State == alsapcm.SinkDraining {
@@ -1045,7 +1155,7 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 			l.unlock()
 			wake(s.wakeR)
 			if released {
-				s.b.notify(Note{Session: s.id, Kind: NoteReopened, Params: out.sink.Params(), Transport: out.transport, Unit: out.unitLabel()})
+				s.b.notify(Note{Session: s.id, Occurrence: out.occurrence, output: out, Kind: NoteReopened, Params: out.sink.Params(), Transport: out.transport, Unit: out.unitLabel()})
 				return engine.ResumeReopened, nil
 			}
 			return engine.ResumeContinued, nil
@@ -1134,6 +1244,20 @@ func (s *session) release(ctx context.Context) error {
 	s.mu.Lock()
 	first := !s.releasing
 	s.releasing = true
+	if first {
+		for _, o := range s.outs {
+			if o.native != nil {
+				if s.nativeRelease == nil {
+					s.nativeRelease = &engine.ReleaseRequest{Token: engine.ReleaseToken{Session: s.id, Generation: 1}, Mode: engine.ReleaseImmediate}
+				}
+				mode := alsapcm.Immediate
+				if s.nativeRelease.Mode == engine.ReleaseTrackChange {
+					mode = alsapcm.TrackChange
+				}
+				o.native.BeginRelease(mode)
+			}
+		}
+	}
 	if first && !s.started {
 		// Its Start has not begun: nothing is held, and that Start, when it
 		// comes, acquires nothing.
@@ -1151,17 +1275,20 @@ func (s *session) release(ctx context.Context) error {
 	}
 	select {
 	case <-s.down:
-		return nil
+		return s.releaseResult()
 	case <-ctx.Done():
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	select {
 	case <-s.down:
-		return nil
+		return s.releaseErr
 	default:
 	}
 	s.lateAck = true
+	if s.nativeRelease != nil {
+		return errors.Join(engine.ErrReleaseUnconfirmed, ctx.Err())
+	}
 	return ctx.Err()
 }
 
@@ -1201,12 +1328,24 @@ func (s *session) teardown() {
 	s.stopReleaseLocked()
 	l.unlock()
 	for _, out := range outs {
+		if out.native != nil {
+			<-out.native.Done()
+		}
 		s.closeAtTeardown(out)
+	}
+	s.finalNativeReport()
+	for _, o := range s.chain {
+		o.reservation.ReleaseBackend()
+	}
+	if s.releaseResult() != nil {
+		s.b.mu.Lock()
+		s.b.terminalUnconfirmed = true
+		s.b.mu.Unlock()
 	}
 	s.b.letGo(s, started)
 	l.lock()
 	close(s.down)
-	late, ev := s.lateAck, s.ev
+	late, ev := s.lateAck && s.releaseErr == nil, s.ev
 	l.unlock()
 	if late && ev != nil {
 		ev.Released(s.id)
@@ -1262,3 +1401,5 @@ func errorText(err error) string {
 	}
 	return err.Error()
 }
+
+func (s *session) releaseResult() error { s.mu.Lock(); defer s.mu.Unlock(); return s.releaseErr }

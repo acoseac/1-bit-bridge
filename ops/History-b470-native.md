@@ -187,3 +187,130 @@ path with filepath.Clean, preserving OS separator rules, exact count and queue
 order. Every queued line and the availability report remain after the warning
 and before Start, independently of one another. Equivalent ./ paths pass;
 a suffix appended to a path, reordered paths and misplaced entries fail.
+
+
+## Owner approval (2c.2b)
+
+Native admission now requires owner-controlled state-directory records and complete matching
+matrix/lifecycle reports, each hashed, qualificationVersion 9, exact sysfs identity and
+semantic read-only mixer constraints. The exact typed owner phrase is local approval,
+not a cryptographic signature. The harness's visibly non-approved candidate is limited
+to its real-engine/backend lifecycle constructor. Production constructors accept no candidate.
+The record is checked at session start, after the inert open and before activation, and by
+monitors that survive the producer's cancellation through a retiring tail. Replaced/deleted
+records and stale health revoke existing DSD permissions; recovery does not play.
+
+The directional edge interpreter remembers tuple and full policy across sessions, including
+an initially paused installation before any resume. Missing directional edge approval
+refuses an incoming DSD open before Locate and writes; incoming PCM is never gated. Revocation
+discards prepared DSD without faulting active PCM, escalates every open retiring DSD sink to
+Immediate, and never recreates retired IDs. Constructor overlay tests use the actual approval
+reader and backend with fake kernel I/O, not a substituted native admission decision.
+
+Persistent controls exclude card/numid from identity. Unrelated changes/unreadability do not
+fail semantic constraints; constrained disappearance/unreadability fails. Descriptor feature
+unit evidence and a readable control node are mandatory, including the no-control case.
+No DoP packer ships; its tuples stay absent. Sessions retain immutable policies and separately
+revocable tokens. Capability snapshots and live open/released/revoked facts carry boot/epoch
+identity and remain distinct wire DTOs; GET performs no probes.
+
+ExtractorVersion 29 backfills validated DSF channels and DFF raw/missing/unsupported evidence.
+Structural malformation stamps unsupported even after raw evidence; full/delta persistence
+and an unchanged no-op scan are tested. The bridge checks actual content before hardware;
+iOS Track/QueueItem and pre-DeleteAll/Insert window checks remain I1–I3 companion work.
+Runbook: ops/b470-native-qualification.md. Linux execution, ABI and owner qualification remain
+separate gates; no hardware was used to implement this change. Single-tuple candidate runs
+can evidence native/PCM edges; cross-native tuple transitions remain unapproved without
+integrated multi-tuple evidence. The native+DoP release qualification gate remains closed.
+
+- **Native approval is local owner trust, canonical/report hashes, version and descriptor identity; candidates are CLI-only.** Reverify each session/open/activation; semantic mixer drift, replacement and stale health revoke DSD occurrences and retiring tails, never PCM with only queued DSD. Exact directional tuple/policy edges gate incoming opens; keep live occurrence facts separate from capability epochs. No DoP implementation or autoplay recovery. → History-b470-native.md, “Owner approval (2c.2b)”.
+
+### Owner approval review round 2 (2026-10-27)
+
+PCM gapless joins and every PCM open ignore DSD approval and transition edges.
+Session admission and session-local revocation cannot publish capability epochs;
+only RefreshAuthorization publishes changed effective sets. Mixer constraints filter
+policies individually and activation checks the selected policy. Prepared ineligible
+DSD is dropped without faulting PCM; monitors still fence open and retiring DSD.
+Native paused installation records its predecessor edge and rechecks permission;
+gapless installation rechecks both before accepting the successor's bytes.
+
+DFF decoding validates the whole bounded form, skipping payloads by seek. Trailing
+PROP bytes, missing odd padding, duplicate PROP after sound and bytes outside FRM8
+refuse before hardware. The extractor preserves established format stamps even
+when later structure within a PROP makes compression evidence unsupported (version 29);
+duplicate-PROP preservation is corrected in version 30 below.
+
+Live facts read sink state and correlate lifecycle notifications by physical output,
+so buffering cannot invent a reopen and an old sink cannot release a new observation.
+The optional occurrence observer is separate from unchanged PCM hardware notes.
+Lifecycle reports bind measured native completion to the exact candidate tuple;
+command admission alone is no outcome, and PCM actions cannot count. Edge keys come
+from each installed occurrence, including gapless PCM, never an unrelated sink's note.
+The production policy reader supplies negative surface fixtures, including actual
+revocation after valid approval. Codec words remain protocol-v1 lowercase dsf/dff.
+qualificationVersion 9 invalidates version-8 evidence. No hardware qualification,
+Linux execution, iOS companion work or DoP implementation is claimed.
+
+### PR #1356 review
+
+Qualification version 10 invalidates version-9 and older reports because guarded
+API, config, extraction, output-play and approval code changed. Output-play forwards
+OwnsOccurrenceReservations through its playTee wrapper so the real engine hands off
+shared reservations; a backend that opts out or has no opt-in still gets none.
+Approval and evidence paths must resolve strictly below the state directory, never
+to the directory itself, including empty, dot, absolute and symlink spellings.
+The ancestor walk also refuses a filesystem root reached before the state root.
+That second bound is defensive after the strict-relative-path check.
+The overlay generator requires both integration source files and publishes its
+mapping only after validating both; a missing backend suite is an error.
+
+ExtractorVersion 30 preserves the first parsed DFF PROP's facts across later PROP
+chunks while keeping duplicate compression evidence unsupported. Version-29 rows
+are re-extracted; changed rows reach full and delta manifests once. Version 29 is
+the documented baseline for DSF channel validation and DFF compression evidence.
+PCM playback always serializes logicalRate as zero, with optional policyId, matching
+PROTOCOL.md; this is additive protocol v1. Invalid dsdMode diagnostics list the
+accepted modes and retain the prohibition on DSD-to-PCM conversion.
+
+ReleaseNative still uses the session-creating lookup: release may arrive before
+start and must leave the fence record. Native permission monitoring still revokes
+on the first failed check; uncertain authorization is not permission to continue,
+and recovery never starts playback. These two review suggestions were declined.
+
+### iOS mirror precision
+
+PROTOCOL.md enumerates baseline and optional bridge members, every nested member's
+JSON type and omission rule, exact native/PCM format, pause and observation state
+vocabularies, and unknown-token handling. DSD policy reason is display text;
+logicalRate is always present, zero for PCM. Manifest evidence and channel absence
+are explicit. TestDSDOutputProtocolTokens compares the protocol tables in both
+directions with parsed producer definitions and the native format filter.
+TestExportIOSManifestFixtures scans synthetic DSF/DFF/WAV through extraction,
+SQLite and full/since streaming. TestExportIOSOutputFixtures exercises the real
+HTTP handler without sockets for six independent synthetic players, collected
+with the real OutputsResponse serializer into one response fixture (a live
+bridge lists only its own player). Both build and assert their documents on ordinary test runs; only writes
+to the export directory require BRIDGE_EXPORT_IOS_FIXTURES. Export manifest then
+API with -p=1: the manifest creates fixtures-info.json and the API adds its input
+hashes and output-index cases. BRIDGE_FIXTURE_COMMIT supplies provenance only
+when git rev-parse HEAD is unavailable. The commit is the base revision; the
+protocol hash and explicit working-tree label avoid claiming uncommitted changes
+belong to it. Fixture files are consumer artifacts, not hardware qualification.
+Qualification version 11 supersedes 10 because the guard includes test paths
+under internal/manifest; no playback or extraction implementation changed.
+
+### Final delta review
+
+Both fixture exporters keep extraction/HTTP serialization assertions active without
+BRIDGE_EXPORT_IOS_FIXTURES, Git or HEAD. Only publication requires provenance;
+the manifest exporter resolves Git/BRIDGE_FIXTURE_COMMIT inside its export gate.
+The API exporter's provenance-file dependency was already export-gated.
+TestDSDOutputProtocolMembers compares raw HTTP JSON against PROTOCOL.md's member
+table: exact member sets, JSON types, required zero/empty values, optional fields
+absent when empty and present when set, absent objects and non-null empty arrays.
+A DTO decode round trip alone cannot detect omitted mandatory zero values.
+Qualification version 12 supersedes 11 because manifest/qualification tests match
+the path guard. TestQualificationRunbookVersion pins all five current runbook
+version references to Version; historical evidence records retain their versions.
+No playback/extraction implementation or wire contract changed.

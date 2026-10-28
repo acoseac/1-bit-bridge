@@ -32,9 +32,11 @@ type OccurrenceID uint64
 
 // Occurrence is one hand-off of a queue entry.
 type Occurrence struct {
-	ID    OccurrenceID
-	Entry uint32
-	Ref   Reference
+	// Reservation remains charged through engine retirement and backend cleanup.
+	Reservation *OccurrenceReservation
+	ID          OccurrenceID
+	Entry       uint32
+	Ref         Reference
 }
 
 // SessionOptions are the configured values a session plays under; the

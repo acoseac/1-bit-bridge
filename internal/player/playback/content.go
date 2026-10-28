@@ -46,6 +46,8 @@ type Resolver interface {
 // Unit is the bound unit as the binding resolves now: the endpoint to open
 // and the check after open of the node opened there.
 type Unit struct {
+	// Subdevice is the bound ALSA endpoint within the PCM device.
+	Subdevice int
 	// Endpoint is the card and PCM device the binding resolves to.
 	Endpoint alsapcm.Endpoint
 	// Admit is the check after open (binding.Checker.Check): a sink asks it
@@ -122,9 +124,10 @@ func (l BindingLocator) Locate(ctx context.Context) (Unit, error) {
 	}
 	check := binding.Checker{Proc: l.Observer.Proc, Sysfs: l.Observer.Sysfs, Want: r}
 	return Unit{
-		Endpoint: alsapcm.Endpoint{Card: r.Card, Device: r.Endpoint.Device},
-		Admit:    check.Check,
-		Label:    fmt.Sprintf("card %d, %s", r.Card, binding.Describe(r.Identity)),
+		Endpoint:  alsapcm.Endpoint{Card: r.Card, Device: r.Endpoint.Device},
+		Subdevice: r.Endpoint.Subdevice,
+		Admit:     check.Check,
+		Label:     fmt.Sprintf("card %d, %s", r.Card, binding.Describe(r.Identity)),
 	}, nil
 }
 

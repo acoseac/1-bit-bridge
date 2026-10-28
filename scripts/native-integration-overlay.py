@@ -30,4 +30,18 @@ if "//go:build" in text or "// +build" in text:
     sys.exit("native integration test retains a build constraint")
 enabled.write_text(text)
 replace[str(source)] = str(enabled)
+# The backend integration suite uses the same fake in a separate test package.
+# Its accepting admission remains a _test.go function, never a binary option.
+source = root / "internal/player/playback/native_integration_test.go"
+if not source.exists():
+    sys.exit("playback integration test missing")
+text = source.read_text()
+if not text.startswith(tag) or text.count(tag) != 1:
+    sys.exit("playback integration test lost its exact leading build tag")
+text = text.removeprefix(tag)
+if "//go:build" in text or "// +build" in text:
+    sys.exit("playback integration test retains a build constraint")
+enabled = output.with_suffix(".playback.go.txt")
+enabled.write_text(text)
+replace[str(source)] = str(enabled)
 output.write_text(json.dumps({"Replace": replace}, indent=2) + "\n")
