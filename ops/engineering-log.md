@@ -65676,3 +65676,63 @@ test's TMPDIR, `.tmp` inside the checkout, which the build-site census walks
 whose walk returns on its first error, so another package's test removing
 its temp tree during the walk could fail it. CI's TMPDIR is outside the
 checkout; this was read in the code, not observed.
+
+## 2026-10-28 — B562 and B563, round 2: onto main with 2d.1, the DoP twins, and the DoP envelope test
+
+The branch was merged with main after B470 2d.1 (#1357, 2c7be326) landed:
+one merge commit, the round-1 commits kept as they were. `git merge` needs
+an approval this session's headless permissions cannot give, so the merge
+was made the way a conflicted `git merge` ends: main's 34 files the branch
+had not touched were checked out from main, the five both sides changed
+were resolved by hand, the worktree's MERGE_HEAD named 2c7be326, and `git
+commit` recorded the two parents. The resolutions:
+`internal/alsapcm/sink_dsd_test.go` is the branch's, which already held
+2d.1's `testReleaseEscalation(t, k, cfg, frames)` signature and its
+`filledAndIdle(frames)`; in `native_integration_test.go` the native retiring
+test and 2d.1's DoP twin now run one helper, `testRetiring(t, retiringTwin,
+selector)`, over the four selectors (Next, Previous, SeekId, SeekIndex):
+2d.1's shared helpers, the held third occurrence, the late writer
+(`nativeLateWriter`, its threshold two of the transport's words: 64 bits
+native, 32 DoP) and a byte oracle per transport (`nativeWords`,
+`dopBytes`), the duplicate pattern and chain helpers made one pair
+(`dsdPattern`, `dsdChain`); version.go said 14 on both sides; the runbook
+and this log keep both sides' text. qualificationVersion then moved to 15
+in its own commit, with the runbook's five current references
+(`scripts/qualification-version -base 2c7be326 -head HEAD`: OK).
+
+**The DoP escalation twin.** `TestDoPReleaseEscalation` calls the branch's
+`testReleaseEscalation`. With main's body put back for one run (its
+one-second wall-clock select; the stall apparatus kept) and
+`-escalation-stall=2s`, it failed: `escalation did not cancel drain
+promptly after 1.001174375s`. Restored, both escalation tests are green with
+no stall, 2 s and 5 s; the DoP twin passed `-race -count=200` and
+`-count=100` under twelve `yes` processes (`pgrep -x yes` empty after).
+
+**The DoP retiring twin.** 2d.1 had already held its third occurrence; the
+merge put it under the late writer too. Green, all four selectors. With the
+hold removed for one run, under the same late writer, all four went red
+with `count=3` (selected 4098, 4097, 4099, 4099: Next, Previous, SeekId,
+SeekIndex), so the forcing reaches the DoP path; restored. Both retiring
+twins passed `-race -count=200` and `-count=100` under twelve `yes`.
+
+**TestNativeIntegrationDoPEnvelope** (Argon, Low, on 2d.1). It discarded
+`runOutputDSDTest`'s exit code and diagnostics and asserted only whether the
+hardware opened, so a negative case passed when the run refused before
+opening for any other reason, and it ignored `json.Marshal`'s error. Each
+refused case now requires exit 1 and exactly its contact check's line
+(`--contact-report: DoP contact report version mismatch`, or `observations
+incomplete`) with nothing opened; a valid contact requires exit 1 and
+exactly `EOF` after the hardware opened (the matrix plays through to
+`confirmDoP`, whose first prompt reads the rig's empty stdin). Marshal and
+write errors fail at once, in `writeDoPEvidence` too. Argon's second claim,
+that dsd-test refuses a bare contact-v3 receipt in a DoP run, is false:
+`output_dsdtest.go` decodes a Contact when no envelope holds one, and
+`Contact.Validate` checks schema 3 and the DoP observations; no test pinned
+that path's DoP checks (DoPProbeEvidence's replug and mixer cases reach it
+for other reasons), so two cases do now, one accepted and one without the
+DoP indicator (`--contact-report: DoP DSD indicator unconfirmed`). gate.yml
+requires `DoPEnvelope` to print `--- PASS:`. The negative control corrupted
+the indicator case's fixture so the hash refusal fired first: the new test
+went red (`errout="fixture pcm hash mismatch\n"; want … observations
+incomplete`), and main's version of the test stayed green under the same
+mutation.
