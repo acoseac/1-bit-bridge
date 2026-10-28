@@ -5,9 +5,11 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -366,11 +368,24 @@ func releaseGoVersion(root string) (string, error) {
 	return "", fmt.Errorf("go.mod has no release toolchain version")
 }
 
+// toolchainNotices reads the release toolchain's LICENSE and PATENTS from
+// its GOROOT. Homebrew's Go keeps GOROOT in its keg's libexec and moves
+// LICENSE to the keg's root (install_metafiles), so a notice GOROOT lacks
+// is read there, but only from a keg whose install receipt is
+// homebrew/core's of this very Go version (homebrewKeg): never a LICENSE
+// that merely sits beside a GOROOT.
 func toolchainNotices(root string) ([]notice, error) {
 	var files []notice
 	for _, name := range []string{"LICENSE", "PATENTS"} {
 		data, err := os.ReadFile(filepath.Join(root, name))
-		if name == "PATENTS" && os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
+			if keg, kegErr := homebrewKeg(root, runtime.Version()); kegErr == nil {
+				data, err = os.ReadFile(filepath.Join(keg, name))
+			} else {
+				err = fmt.Errorf("%w (%v)", err, kegErr)
+			}
+		}
+		if name == "PATENTS" && errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
 		if err != nil {
@@ -382,6 +397,33 @@ func toolchainNotices(root string) ([]notice, error) {
 		files = append(files, notice{name, data})
 	}
 	return files, nil
+}
+
+// homebrewKeg is the Homebrew keg whose libexec is root, when the keg's
+// install receipt says homebrew/core installed Go version there; otherwise
+// it says why root is no such keg.
+func homebrewKeg(root, version string) (string, error) {
+	if filepath.Base(root) != "libexec" {
+		return "", errors.New("GOROOT is not a Homebrew keg's libexec")
+	}
+	keg := filepath.Dir(root)
+	data, err := os.ReadFile(filepath.Join(keg, "INSTALL_RECEIPT.json"))
+	if err != nil {
+		return "", fmt.Errorf("no Homebrew install receipt: %w", err)
+	}
+	var receipt struct {
+		Source struct {
+			Tap      string
+			Versions struct{ Stable string }
+		}
+	}
+	if err := json.Unmarshal(data, &receipt); err != nil {
+		return "", fmt.Errorf("Homebrew install receipt: %w", err)
+	}
+	if receipt.Source.Tap != "homebrew/core" || "go"+receipt.Source.Versions.Stable != version {
+		return "", fmt.Errorf("the Homebrew keg is %q's %q, not homebrew/core's %s", receipt.Source.Tap, receipt.Source.Versions.Stable, version)
+	}
+	return keg, nil
 }
 
 // noticeName classifies suffixes only after the caller identifies a notice
