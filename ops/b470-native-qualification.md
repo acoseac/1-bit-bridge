@@ -11,7 +11,8 @@ owner-qualified native path and one DoP path; 2c.1 has no DoP path.
 ## Inputs and safety
 
 Use the versioned JSON contracts in `internal/player/qualification/manifest-v1.schema.json` and
-`internal/player/qualification/contact-v2.schema.json`.
+`internal/player/qualification/contact-v2.schema.json` (a DoP receipt is
+`internal/player/qualification/contact-v3.schema.json`).
 The manifest has `schemaVersion`, `calibration`, and `fixtures`; fixture field names are
 `ID`, `Path`, `SHA256`, `Container`, `Order`, `PCMReference`, `Rate`, `Channels`, `Frames`.
 Paths are relative to the asset directory. Hash the actual files, not decoded approximations.
@@ -149,7 +150,8 @@ The gate's `native-qualification` job runs real-sink CLI integration on PRs and 
 Its CheckVersion step runs on PRs only: full history, the actual PR head and fetched
 origin/main, then merge-base..HEAD. Missing main/history/merge-base fails; it never skips.
 The job is a dependency of `gate`. The guarded implementation files are enumerated in
-`internal/player/qualification/version_gate.go`: native packing; ALSA UAPI, PCM device,
+`internal/player/qualification/version_gate.go`: native and DoP packing, the DoP evidence
+reader; ALSA UAPI, PCM device,
 native device, params, sys_linux/sys_other, ring, both sinks and writers, native opening;
 all three dsd-test files; alsactl control/control_linux/uapi; ALSA qualification identity;
 qualification inputs and the version checker itself. Changes require a version increase.
@@ -327,9 +329,10 @@ capture && "$B" output play --config "$C" --keys --report "$RUN/production.json"
 ```
 
 The production report records opens/notes and live pre/post controls; it is diagnostic,
-never a replacement for the matrix and backend-lifecycle approval evidence. No `--transport`
-flag exists. All dsd-test invocations require valued `--ack-level`, `--manifest` and
-positional fixture IDs. iOS I1–I3 (Track migration, QueueItem propagation and whole-window
+never a replacement for the matrix and backend-lifecycle approval evidence. `output play`
+has no `--transport` flag; dsd-test's defaults to native, and a DoP audition passes
+`--transport dop` (2d.1, below). All dsd-test invocations require valued `--ack-level`,
+`--manifest` and positional fixture IDs. iOS I1–I3 (Track migration, QueueItem propagation and whole-window
 pre-DeleteAll/Insert eligibility) remain pending companion PRs; the bridge guarantees its
 own content/tuple/record gate before hardware writes.
 
@@ -351,9 +354,11 @@ The software packer supports only S32_LE, 24 significant bits left-aligned in
 32: memory `00 b a marker`, chronological `a` then `b`, identical L/R marker,
 05/FA alternating per stereo carrier frame. DSD64/128/256 carriers are
 176400/352800/705600 Hz. Unknown or less than 24 significant bits refuses before
-prefill, including after a pause release. No DSD512 admission or alternate PCM
-packing exists. Production selection/publication remains native-only; final
-integrated DoP reports and native↔DoP approval remain 2d.2.
+prefill, including after a pause release. No alternate PCM packing exists. The
+decoders still take DSD512, which no transport here carries: the sink refuses it
+before opening, and the backend refuses a plan for it at admission
+(`rate_not_supported`) before anything is located. Production selection/publication
+remains native-only; final integrated DoP reports and native↔DoP approval remain 2d.2.
 
 Use the bound loopback/OpenHome-off config, calibrated owner manifest, persistent
 Q and card-prefixed `capture` function above. Every command is one manual audition;
@@ -373,7 +378,7 @@ requires this same setup/recapture sequence and both acknowledgements.
 R=2822400; M=kernel; T=10; P=10
 capture && "$B" output dsd-test --config "$C" --transport dop --format S32_LE --bit-rate "$R" --pause-method "$M" --tail-ms "$T" --prefill-ms "$P" --seconds 60 --ack-level off-ear --ack-dop-noise --manifest "$Q/manifest.json" --fixtures "$Q/assets" --mixer-snapshot "$RUN/mixer.txt" --report "$RUN/report.json" --scenario level-check dsd64-lr-lsb
 CONTACT="$RUN/report.json"
-capture && "$B" output dsd-test --config "$C" --transport dop --format S32_LE --bit-rate "$R" --pause-method "$M" --tail-ms "$T" --prefill-ms "$P" --seconds 600 --ack-level contact-position --ack-dop-noise --manifest "$Q/manifest.json" --fixtures "$Q/assets" --contact-report "$CONTACT" --mixer-snapshot "$RUN/mixer.txt" --report "$RUN/report.json" --scenario matrix dsd64-lr-lsb dsd64-lr-msb dsd64-lr-dff dsd64-rl-dff
+capture && "$B" output dsd-test --config "$C" --transport dop --format S32_LE --bit-rate "$R" --pause-method "$M" --tail-ms "$T" --prefill-ms "$P" --seconds 600 --ack-level contact-position --ack-dop-noise --manifest "$Q/manifest.json" --fixtures "$Q/assets" --contact-report "$CONTACT" --mixer-snapshot "$RUN/mixer.txt" --report "$RUN/report.json" --scenario matrix dsd64-lr-lsb dsd64-rl-lsb dsd64-lr-msb dsd64-lr-dff dsd64-rl-dff
 capture && "$B" output dsd-test --config "$C" --transport dop --format S32_LE --bit-rate "$R" --pause-method "$M" --tail-ms "$T" --prefill-ms "$P" --seconds 600 --ack-level contact-position --ack-dop-noise --manifest "$Q/manifest.json" --fixtures "$Q/assets" --contact-report "$CONTACT" --mixer-snapshot "$RUN/mixer.txt" --report "$RUN/report.json" --scenario interactive dsd64-odd dsd64-subbyte dsd64-continuous-split
 ```
 
@@ -411,9 +416,11 @@ position or require lock loss as a successful experiment.
 
 Bridge submission traces and disabled ALSA software fill do not prove USB packets
 at drain/close boundaries. Owner qualification on the actual kernel remains required;
-no hardware was opened by the implementation tests. Linux amd64/arm64 runtime and
-ALSA ABI checks are separate from cross-builds. After the reviewer commits, run the
-real-ref gate (the implementation run deliberately makes no commit):
+no hardware was opened by the implementation tests. Their evidence is software only:
+every byte the fake kernel was given equals an independent bit-level DoP oracle,
+through the sink and through the real engine, backend and decoder. Linux amd64/arm64
+runtime and ALSA ABI checks are separate from cross-builds. On the committed branch,
+run the real-ref gate:
 
 ```sh
 git fetch origin main:refs/remotes/origin/main

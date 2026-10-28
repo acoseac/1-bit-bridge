@@ -878,3 +878,35 @@ The packer, phase, precision, carry and evidence tests have literal or independe
 pattern oracles and implementation mutations. The job's red-first and control logs
 distinguish compiling assertion reds from inherited/late regression pins. No
 hardware was used. The runbook carries version 14 and real-ref reviewer commands.
+
+Markers alone prove too little. The first phase tests checked that markers
+alternated, at boundaries that fell on even frame indexes: a phase reset at a
+kernel resume, at pause silence, or a carry dropped at an occurrence join all
+passed them, since a restart at an even index repeats nothing and a lost bit
+moves no marker. Each `TestDoPPhase` leaf now puts its boundary on an odd frame
+index (an odd 1001-frame period and 7007-frame buffer, an odd ring, odd accepted
+prefixes) and compares every byte the kernel was given with an oracle assembled
+one bit at a time from the DoP definition, never through `PackDoP`. The silence
+leaves each check one property: no zero frame, the 0x69 payload with its zero
+pad byte, the marker sequence. `TestDoPBitTransparent` writes every byte value
+through the carry in 13-bit pieces and checks the raw node and each readback
+field; `TestDoPUnderrun` pins no fill and no recovery. The playback overlay
+compares the DAC's bytes through the real engine, backend and decoder.
+
+A run's markers start at 05 at the sink's construction as well as at each
+activation that starts a run. With the activation alone, the brief's reopen
+mutation (the reset removed) left the first run at the zero value, which the
+packer refuses, so every leaf failed through that refusal and none showed the
+reopen. The packer's refusal of any marker but 05 or FA stays as the guard.
+
+The decoders take DSD512, which no transport here carries. The sink already
+refused it before opening, but a plan for it reached the locator and failed as
+a device that could not be opened; admission now refuses it as
+`rate_not_supported` before anything is located.
+
+The retiring test's first red (`selected=4099 count=1`) was its fixture: 31-bit
+tracks, copied from the native test where a 32-bit word holds occurrence 1 and
+occurrence 2's first bit, fill a 16-bit DoP word with occurrence 1 alone, so the
+parked prefix rightly held one occurrence. 15-bit tracks make the word hold two,
+and the third occurrence's content is held until the release begins, so no
+scheduler order can put a third occurrence's bits in the parked write.
