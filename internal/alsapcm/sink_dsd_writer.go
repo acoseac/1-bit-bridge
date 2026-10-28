@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/player/format"
 )
 
 func (s *DSDSink) loopNative() {
@@ -117,7 +119,7 @@ func (s *DSDSink) loopNative() {
 		s.mu.Lock()
 		n := min(s.ring.pending(), int64(s.params.PeriodFrames))
 		b := s.ring.span(s.ring.wr, n)
-		s.inflight = s.ring.wr + int64(len(b)/s.params.NativeFrameBytes())
+		s.inflight = s.ring.wr + int64(len(b)/s.ring.frameBytes)
 		s.mu.Unlock()
 		if len(b) > 0 {
 			if e := s.writeNative(b, false, false, false); e != nil {
@@ -177,6 +179,9 @@ func (s *DSDSink) activateNative(r *nativeRequest) error {
 		s.dev = d
 		reopened = true
 		p := d.Params()
+		if e := dopPrecision(s.cfg, p); e != nil {
+			return nativeCleanupError(e, s.closeNative())
+		}
 		if p.BufferTime() > 500*time.Millisecond || p.BufferTime()+nativeFrameDuration(nativeFrames(p.RateHz, s.cfg.Tail), p.RateHz)+nativeCloseMargin >= nativeReleaseBudget || p.BufferFrames != s.params.BufferFrames || p.PeriodFrames != s.params.PeriodFrames || (s.cfg.Pause == PauseKernel && !p.CanPause()) {
 			e := errors.New("native reopen geometry/pause policy changed")
 			if ce := s.closeNative(); ce != nil {
@@ -229,6 +234,9 @@ func (s *DSDSink) activateNative(r *nativeRequest) error {
 		}
 	}
 	if !wasActive || reopened {
+		// A new hardware run: its DoP markers start at 05, before its prefill,
+		// and the retained canonical content is packed from there.
+		s.dopPhase = 0x05
 		return s.nativeSilence(nativeFrames(s.params.RateHz, s.cfg.Prefill), false, false)
 	}
 	return nil
@@ -254,7 +262,25 @@ func (s *DSDSink) nativeContext(tail, allowPaused bool) (context.Context, contex
 func (s *DSDSink) writeNative(b []byte, silence, tail, allowPaused bool) error {
 	ctx, cancel := s.nativeContext(tail, allowPaused)
 	defer cancel()
-	n, e := s.dev.Write(ctx, b)
+	// Only this writer owns phase. Ring/carry bytes have no markers, so an
+	// unaccepted suffix can be repacked after interruption or a new run.
+	wire := b
+	if s.cfg.Kind == format.KindDoP {
+		wire = s.dopScratch[:len(b)*2]
+		marker := s.dopPhase
+		for i := 0; i < len(b); i += 4 {
+			_, next, err := format.PackDoP(wire[i*2:i*2+8], b[i:i+2], b[i+2:i+4], marker)
+			if err != nil {
+				return err
+			}
+			marker = next
+		}
+	}
+	n, e := s.dev.Write(ctx, wire)
+	if s.cfg.Kind == format.KindDoP {
+		// Write returns accepted stereo frames, including an errored prefix.
+		s.dopPhase ^= byte((n & 1) * 0xff)
+	}
 	s.mu.Lock()
 	s.inflight = 0
 	if n > 0 {
@@ -274,12 +300,14 @@ func (s *DSDSink) writeNative(b []byte, silence, tail, allowPaused bool) error {
 	return s.measureNative()
 }
 func (s *DSDSink) nativeSilence(frames int, tail, allowPaused bool) error {
+	// Canonical DSD silence is 0x69 for either transport: writeNative packs
+	// it for DoP through the content's packer, its markers continuing.
 	for i := range s.scratch {
 		s.scratch[i] = 0x69
 	}
 	for frames > 0 {
 		n := min(frames, s.params.PeriodFrames)
-		if e := s.writeNative(s.scratch[:n*s.params.NativeFrameBytes()], true, tail, allowPaused); e != nil {
+		if e := s.writeNative(s.scratch[:n*s.ring.frameBytes], true, tail, allowPaused); e != nil {
 			return e
 		}
 		frames -= n

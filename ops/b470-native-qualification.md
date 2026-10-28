@@ -1,8 +1,8 @@
 # B470 native qualification — owner approval and provisional evidence
 
-QualificationVersion is **13**. All older evidence must be rerun. The harness never
+QualificationVersion is **14**. All older evidence must be rerun. The harness never
 creates approval. Production native DSD requires a fresh matching approved record;
-DoP remains unimplemented. Real-ref and Linux hardware gates remain reviewer/owner work.
+DoP S32_LE auditions are provisional and require both acknowledgements; production DoP remains disabled. Real-ref and Linux hardware gates remain reviewer/owner work.
 
 Use a candidate built from the reviewed tree. No hardware qualification was run during implementation.
 Keep every failure, including unsupported formats. The release must eventually have at least one
@@ -11,7 +11,8 @@ owner-qualified native path and one DoP path; 2c.1 has no DoP path.
 ## Inputs and safety
 
 Use the versioned JSON contracts in `internal/player/qualification/manifest-v1.schema.json` and
-`internal/player/qualification/contact-v2.schema.json`.
+`internal/player/qualification/contact-v2.schema.json` (a DoP receipt is
+`internal/player/qualification/contact-v3.schema.json`).
 The manifest has `schemaVersion`, `calibration`, and `fixtures`; fixture field names are
 `ID`, `Path`, `SHA256`, `Container`, `Order`, `PCMReference`, `Rate`, `Channels`, `Frames`.
 Paths are relative to the asset directory. Hash the actual files, not decoded approximations.
@@ -149,7 +150,8 @@ The gate's `native-qualification` job runs real-sink CLI integration on PRs and 
 Its CheckVersion step runs on PRs only: full history, the actual PR head and fetched
 origin/main, then merge-base..HEAD. Missing main/history/merge-base fails; it never skips.
 The job is a dependency of `gate`. The guarded implementation files are enumerated in
-`internal/player/qualification/version_gate.go`: native packing; ALSA UAPI, PCM device,
+`internal/player/qualification/version_gate.go`: native and DoP packing, the DoP evidence
+reader; ALSA UAPI, PCM device,
 native device, params, sys_linux/sys_other, ring, both sinks and writers, native opening;
 all three dsd-test files; alsactl control/control_linux/uapi; ALSA qualification identity;
 qualification inputs and the version checker itself. Changes require a version increase.
@@ -166,7 +168,8 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-Historical round 3 used qualificationVersion 4; current version is **13** and Contact.SchemaVersion remains **2**. All older
+Historical round 3 used qualificationVersion 4; current version is **14**. A native contact's
+Contact.SchemaVersion remains **2**; a DoP contact's is **3**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
 either audition leg opens. Missing fields are not zero. Both opened-node checks
@@ -253,7 +256,7 @@ still resolve inside it). `dsdMode: native` or `auto` enables only approved nati
 
 The Go contracts are `qualification.Approval`, `ApprovalBody`, `ApprovedPolicy`, `Edge`
 and `Evidence` in `internal/player/qualification/approval.go`. JSON uses those exact
-exported field names. SchemaVersion=1; QualificationVersion=13; Revision is the owner's
+exported field names. SchemaVersion=1; QualificationVersion=14; Revision is the owner's
 revision; Identity is the observed VID/ProductID/manufacturer/product/bcdDevice,
 anchored controller/port, interface, device and subdevice. No serial or card number is
 persistent identity. Unchanged descriptors may retain approval after replug/restart;
@@ -300,7 +303,7 @@ At least one native fixture must finish with measured playback of that tuple.
 NativeTuple and NativeCompleted record that execution; PCM-only lists or completion
 cannot qualify it. LifecycleActions count observed native outcomes: pause/resume,
 release/reopen, navigation between native occurrences, Stop, and natural completion.
-An admitted command alone is insufficient. Version 13 invalidates older evidence.
+An admitted command alone is insufficient. Version 14 invalidates older evidence.
 List all candidate directional edges explicitly. No command generates that record.
 
 ```sh
@@ -327,9 +330,10 @@ capture && "$B" output play --config "$C" --keys --report "$RUN/production.json"
 ```
 
 The production report records opens/notes and live pre/post controls; it is diagnostic,
-never a replacement for the matrix and backend-lifecycle approval evidence. No `--transport`
-flag exists. All dsd-test invocations require valued `--ack-level`, `--manifest` and
-positional fixture IDs. iOS I1–I3 (Track migration, QueueItem propagation and whole-window
+never a replacement for the matrix and backend-lifecycle approval evidence. `output play`
+has no `--transport` flag; dsd-test's defaults to native, and a DoP audition passes
+`--transport dop` (2d.1, below). All dsd-test invocations require valued `--ack-level`,
+`--manifest` and positional fixture IDs. iOS I1–I3 (Track migration, QueueItem propagation and whole-window
 pre-DeleteAll/Insert eligibility) remain pending companion PRs; the bridge guarantees its
 own content/tuple/record gate before hardware writes.
 
@@ -338,8 +342,89 @@ or evidence names resolving to the state directory itself before any ancestor
 walk. Native monitoring remains fail-closed without a grace period. The overlay
 generator requires both integration suites before publishing its overlay.
 Guarded API, config, extractor, output-play and approval paths changed; rerun
-qualification with version 13. ExtractorVersion 30 retains the first parsed DFF
+qualification with version 14. ExtractorVersion 30 retains the first parsed DFF
 PROP's known format facts when a later PROP makes compression unsupported.
 
 Version 13 also covers the deterministic PCM trace capture test. It changes no
 playback behavior; test paths are included in the qualification version guard.
+
+
+## B470 2d.1 — provisional DoP, qualification version 14
+
+The software packer supports only S32_LE, 24 significant bits left-aligned in
+32: memory `00 b a marker`, chronological `a` then `b`, identical L/R marker,
+05/FA alternating per stereo carrier frame. DSD64/128/256 carriers are
+176400/352800/705600 Hz. Unknown or less than 24 significant bits refuses before
+prefill, including after a pause release. No alternate PCM packing exists. The
+decoders still take DSD512, which no transport here carries: the sink refuses it
+before opening, and the backend refuses a plan for it at admission
+(`rate_not_supported`) before anything is located. Production selection/publication
+remains native-only; final integrated DoP reports and native↔DoP approval remain 2d.2.
+
+Use the bound loopback/OpenHome-off config, calibrated owner manifest, persistent
+Q and card-prefixed `capture` function above. Every command is one manual audition;
+never run a sweep. PCM references must be 24- or 32-bit WAV at the exact carrier,
+with equal duration and the manifest's matched −30 dBFS calibration and end
+silences. The harness packs them into S32_LE. Software goldens are not listening
+assets. Choose R/M/T/P explicitly and repeat contact after every change.
+
+For a mapped knob, first use the contact command as a PCM setup leg: headphones
+off ears, establish the just-audible position during PCM, then press Stop (or type
+`s` at the PCM confirmation). This ends without DSD and without a receipt. Recapture
+controls with `capture`; repeat the complete contact without moving the knob.
+The live fingerprint never rebases during an audition. A changed-state experiment
+requires this same setup/recapture sequence and both acknowledgements.
+
+```sh
+R=2822400; M=kernel; T=10; P=10
+capture && "$B" output dsd-test --config "$C" --transport dop --format S32_LE --bit-rate "$R" --pause-method "$M" --tail-ms "$T" --prefill-ms "$P" --seconds 60 --ack-level off-ear --ack-dop-noise --manifest "$Q/manifest.json" --fixtures "$Q/assets" --mixer-snapshot "$RUN/mixer.txt" --report "$RUN/report.json" --scenario level-check dsd64-lr-lsb
+CONTACT="$RUN/report.json"
+capture && "$B" output dsd-test --config "$C" --transport dop --format S32_LE --bit-rate "$R" --pause-method "$M" --tail-ms "$T" --prefill-ms "$P" --seconds 600 --ack-level contact-position --ack-dop-noise --manifest "$Q/manifest.json" --fixtures "$Q/assets" --contact-report "$CONTACT" --mixer-snapshot "$RUN/mixer.txt" --report "$RUN/report.json" --scenario matrix dsd64-lr-lsb dsd64-rl-lsb dsd64-lr-msb dsd64-lr-dff dsd64-rl-dff
+capture && "$B" output dsd-test --config "$C" --transport dop --format S32_LE --bit-rate "$R" --pause-method "$M" --tail-ms "$T" --prefill-ms "$P" --seconds 600 --ack-level contact-position --ack-dop-noise --manifest "$Q/manifest.json" --fixtures "$Q/assets" --contact-report "$CONTACT" --mixer-snapshot "$RUN/mixer.txt" --report "$RUN/report.json" --scenario interactive dsd64-odd dsd64-subbyte dsd64-continuous-split
+```
+
+The single contact fixture plus rounded prefill/tail must fit ten seconds; pause
+or navigation invalidates contact. Confirm `PCM audible`, the unchanged knob
+position, `DSD matched`, `DAC DSD indicator confirmed`, and `L/R pitch and duration
+correct` only after observing them. Stop immediately for noise, lost indication,
+louder DSD or ineffective gain. PCM carrier lock alone never completes evidence.
+DoP contacts use schema 3; DoP reports use schema 2. Native contacts retain schema 2.
+Receipts survive CLI exit, but not replug, reboot, changed endpoint, controls,
+manifest, policy or qualification version. Both standalone and enveloped receipts
+undergo the same validation.
+
+Repeat at 5644800 and 11289600 with their own IDs, same-carrier references, fresh
+contacts, pause policies and tail/prefill. Cover odd/sub-byte joins, silence pause,
+kernel pause, >30 s release, busy reopen, Stop during tail, replug and mixer drift.
+Retained content must restart with marker 05 after close/reopen; a continuous run
+must not reset at an occurrence. Compare same-S32/carrier PCM↔DoP and separately
+identified cross-rate cases; cross-rate evidence cannot substitute for same-carrier.
+The ordinary matrix intentionally refuses cross-rate references; use separate
+manifests/contacts for separately reviewed experiments, never relabel their rate.
+
+Where descriptors expose a feature unit, use the existing control UI off-ear to
+choose known non-0 dB attenuation, recapture, and repeat contact with
+`--mixer-experiment-state nonzero-attenuation`. Restore the chosen state, recapture,
+and repeat with `--mixer-experiment-state restored`. Each report preserves the
+state and snapshots. Supply `--mixer-experiments "$Q/experiments.json"` to the matrix;
+that file is an array of `{ "Path": "reports/run.…/report.json", "SHA256": "…" }`
+with paths relative to Q. Candidate/approval readers independently verify hashes,
+complete same-tuple contacts, indication/listening, identity, environment, manifest,
+stable snapshots and distinct attenuation/restored states. Place candidate evidence
+under Q so these references retain their meaning. No-control qualification requires
+readable empty controls and descriptor evidence. Never assume feature-unit processing
+position or require lock loss as a successful experiment.
+
+Bridge submission traces and disabled ALSA software fill do not prove USB packets
+at drain/close boundaries. Owner qualification on the actual kernel remains required;
+no hardware was opened by the implementation tests. Their evidence is software only:
+every byte the fake kernel was given equals an independent bit-level DoP oracle,
+through the sink and through the real engine, backend and decoder. Linux amd64/arm64
+runtime and ALSA ABI checks are separate from cross-builds. On the committed branch,
+run the real-ref gate:
+
+```sh
+git fetch origin main:refs/remotes/origin/main
+BASE=$(git merge-base origin/main HEAD)
+go run -tags ts_omit_webclient,ts_omit_debugeventbus ./scripts/qualification-version -base "$BASE" -head HEAD
+```

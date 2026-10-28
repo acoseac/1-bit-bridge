@@ -43,7 +43,17 @@ func (b *Backend) openNativeContent(ctx context.Context, o *occ, d decode.DSDDec
 	}
 	plan.Edges = slices.Clone(plan.Edges)
 	o.plan = &plan
+	// The decoders take DSD512, which neither native DSD nor DoP carries
+	// here: a plan for it is refused before anything is located or opened.
+	if !nativeLogicalRate(plan.Tuple.BitRate) {
+		o.refused = &engine.Unplayable{Reason: ReasonRate, Detail: "DSD64, DSD128 and DSD256 only: no native or DoP transport here carries this DSD rate"}
+		return
+	}
 	o.transport = nativeTransport(plan)
+	if o.transport == (alsapcm.Transport{}) {
+		o.refused = &engine.Unplayable{Reason: ReasonTransport, Detail: "the plan names no transport the sink opens"}
+		return
+	}
 	planes := [][]byte{make([]byte, chunkFrames), make([]byte, chunkFrames)}
 	n, err := d.ReadDSD(ctx, planes)
 	o.nativeFirst = [][]byte{planes[0][:n], planes[1][:n]}
@@ -52,13 +62,26 @@ func (b *Backend) openNativeContent(ctx context.Context, o *occ, d decode.DSDDec
 		o.refused = &engine.Unplayable{Reason: ReasonEmpty, Detail: "DSD decoder gave no bits"}
 	}
 }
+
+// nativeLogicalRate is the DSD the sink opens: DSD64, DSD128 and DSD256.
+func nativeLogicalRate(bitRate int) bool {
+	return bitRate == 2822400 || bitRate == 5644800 || bitRate == 11289600
+}
+
+// nativeTransport is the transport a plan opens, or the zero Transport for a
+// plan whose transport, format and rate do not name one the sink opens.
 func nativeTransport(p engine.NativePlan) alsapcm.Transport {
 	f := format.ALSAFormat(p.Tuple.Format)
 	w := format.DSDWordBytes(f)
-	if w == 0 {
+	kind := format.KindNativeDSD
+	if p.Tuple.Transport == "dop" && f == format.S32LE {
+		w = 2
+		kind = format.KindDoP
+	}
+	if w == 0 || (p.Tuple.Transport != "" && p.Tuple.Transport != "native" && p.Tuple.Transport != "dop") || (p.Tuple.Transport == "dop" && f != format.S32LE) || !nativeLogicalRate(p.Tuple.BitRate) {
 		return alsapcm.Transport{}
 	}
-	return alsapcm.Transport{Kind: format.KindNativeDSD, RateHz: p.Tuple.BitRate / (8 * w), Channels: 2, Format: f, ValidBits: 1, LogicalRate: p.Tuple.BitRate, PackingVersion: 1}
+	return alsapcm.Transport{Kind: kind, RateHz: p.Tuple.BitRate / (8 * w), Channels: 2, Format: f, ValidBits: 1, LogicalRate: p.Tuple.BitRate, PackingVersion: 1}
 }
 
 // streamSink keeps the PCM call contract intact while native data enters through
@@ -166,7 +189,7 @@ func (s *session) openNativeOutput(ctx context.Context, o *occ) (*output, error)
 	// Native lifetime survives the producer cancellation during TrackChange.
 	life, cancel := context.WithCancel(context.Background())
 	out.nativeCancel = cancel
-	sink, err := open(life, alsapcm.DSDConfig{Endpoint: u.Endpoint, Format: format.ALSAFormat(o.plan.Tuple.Format), BitRate: o.plan.Tuple.BitRate, Pause: pause, Tail: o.plan.Tail, Prefill: o.plan.Prefill, Check: out.admit, Locate: out.locate})
+	sink, err := open(life, alsapcm.DSDConfig{Kind: o.transport.Kind, Endpoint: u.Endpoint, Format: format.ALSAFormat(o.plan.Tuple.Format), BitRate: o.plan.Tuple.BitRate, Pause: pause, Tail: o.plan.Tail, Prefill: o.plan.Prefill, Check: out.admit, Locate: out.locate})
 	if err != nil {
 		cancel()
 		return nil, err

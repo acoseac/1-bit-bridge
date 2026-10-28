@@ -198,8 +198,15 @@ func executeNativeTest(ctx context.Context, cancelRun context.CancelCauseFunc, o
 				runErr = errors.New("DSD not matched")
 			}
 		}
+		if runErr == nil && o.transport == "dop" {
+			report.DoP, runErr = confirmDoP(ctx, console, out)
+		}
 		if runErr == nil {
 			report.pendingContact = &qualification.Contact{Device: &report.Device, Subdevice: &report.Subdevice, SchemaVersion: 2, QualificationVersion: qualification.Version, Tuple: report.Tuple, Attachment: report.Attachment, MixerHash: report.Before.Hash(), ManifestHash: report.ManifestHash, KnobPosition: knob, PCMAudible: audible, DSDMatched: matched}
+			if o.transport == "dop" {
+				report.pendingContact.SchemaVersion = 3
+				report.pendingContact.DoP = report.DoP
+			}
 			report.End = "complete"
 		}
 	} else {
@@ -215,6 +222,9 @@ func executeNativeTest(ctx context.Context, cancelRun context.CancelCauseFunc, o
 			pcm := fixtures[fixtures[o.list[len(o.list)-1]].PCMReference]
 			runErr = playNativePCM(ctx, env, o.fixtures, pcm, ep, check)
 		}
+	}
+	if runErr == nil && o.transport == "dop" && o.scenario != "level-check" && report.End == "complete" {
+		report.DoP, runErr = confirmDoP(ctx, console, out)
 	}
 	if expired.Load() {
 		report.End = "deadline"
@@ -279,7 +289,11 @@ func runNativeQueue(ctx context.Context, o nativeOptions, env outputDSDTestEnv, 
 	if o.pause == "silence" {
 		pause = alsapcm.PauseZeros
 	}
-	cfg := alsapcm.DSDConfig{Endpoint: ep, Format: format.ALSAFormat(o.format), BitRate: o.rate, Pause: pause, Tail: time.Duration(o.tail) * time.Millisecond, Prefill: time.Duration(o.prefill) * time.Millisecond, Check: check}
+	kind := format.KindNativeDSD
+	if o.transport == "dop" {
+		kind = format.KindDoP
+	}
+	cfg := alsapcm.DSDConfig{Kind: kind, Endpoint: ep, Format: format.ALSAFormat(o.format), BitRate: o.rate, Pause: pause, Tail: time.Duration(o.tail) * time.Millisecond, Prefill: time.Duration(o.prefill) * time.Millisecond, Check: check}
 	at := 0
 	report.Completed = make([]bool, len(o.list))
 	complete := func() error {
@@ -385,6 +399,10 @@ func runNativeQueue(ctx context.Context, o nativeOptions, env outputDSDTestEnv, 
 				}
 				switch key {
 				case ' ':
+					if o.transport == "dop" && o.scenario == "level-check" {
+						stop()
+						return errors.Join(errors.New("contact pause invalidates evidence"), s.Release(context.Background(), alsapcm.Immediate))
+					}
 					if paused {
 						e = s.Resume(ctx)
 					} else {
@@ -397,6 +415,10 @@ func runNativeQueue(ctx context.Context, o nativeOptions, env outputDSDTestEnv, 
 					}
 					paused = !paused
 				case 'n', 'p':
+					if o.transport == "dop" && o.scenario == "level-check" {
+						stop()
+						return errors.Join(errors.New("contact navigation invalidates evidence"), s.Release(context.Background(), alsapcm.Immediate))
+					}
 					current := coverage(s.Position().Played)
 					if key == 'p' && current == 0 {
 						report.IgnoredKeys = append(report.IgnoredKeys, "p:first-fixture")
@@ -451,10 +473,10 @@ func playNativePCM(ctx context.Context, env outputDSDTestEnv, root string, f qua
 		if e := ctx.Err(); e != nil {
 			return e
 		}
-		return playNativeReference(ctx, root, f, ep, check, env.openPCM)
+		return playNativeReference(ctx, root, f, ep, check, env.openPCM, env.forceS32)
 	})
 }
-func playNativeReference(ctx context.Context, root string, fixture qualification.Fixture, ep alsapcm.Endpoint, check func(alsapcm.NodeInfo) error, open func(context.Context, alsapcm.SinkConfig) (nativePCMSink, error)) (result error) {
+func playNativeReference(ctx context.Context, root string, fixture qualification.Fixture, ep alsapcm.Endpoint, check func(alsapcm.NodeInfo) error, open func(context.Context, alsapcm.SinkConfig) (nativePCMSink, error), forceS32 ...bool) (result error) {
 	src, file, e := nativeSource(root, fixture)
 	if e != nil {
 		return e
@@ -478,6 +500,12 @@ func playNativeReference(ctx context.Context, root string, fixture qualification
 	}
 	if p.ValidBits == 24 {
 		f = format.S243LE
+	}
+	if len(forceS32) > 0 && forceS32[0] {
+		if p.ValidBits != 24 && p.ValidBits != 32 {
+			return errors.New("DoP reference requires 24 or 32-bit PCM for S32_LE")
+		}
+		f = format.S32LE
 	}
 	s, e := open(ctx, alsapcm.SinkConfig{Endpoint: ep, Admit: check, Transport: alsapcm.Transport{Kind: format.KindPCM, Format: f, RateHz: p.RateHz, Channels: p.Channels, ValidBits: p.ValidBits}})
 	if e != nil {
@@ -711,4 +739,23 @@ func nativeConfirmedCancellation(e error) error {
 		return errors.Join(kept...)
 	}
 	return e
+}
+
+// confirmDoP never infers decoder lock from the PCM carrier's successful open.
+func confirmDoP(ctx context.Context, console *nativeConsole, out io.Writer) (*qualification.DoPObservations, error) {
+	indicator, e := console.confirm(ctx, out, "Type exactly: DAC DSD indicator confirmed")
+	if e != nil {
+		return nil, e
+	}
+	dopIndicatorConfirmed := indicator == "DAC DSD indicator confirmed"
+	if !dopIndicatorConfirmed {
+		return nil, errors.New("DoP DSD indicator unconfirmed")
+	}
+	listening, e := console.confirm(ctx, out, "Type exactly: L/R pitch and duration correct")
+	if e != nil {
+		return nil, e
+	}
+	correct := listening == "L/R pitch and duration correct"
+	o := &qualification.DoPObservations{Indicator: &dopIndicatorConfirmed, Channels: &correct, PitchDuration: &correct}
+	return o, o.Validate()
 }

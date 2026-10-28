@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "B470 provisional DoP contact v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "SchemaVersion",
+    "QualificationVersion",
+    "Tuple",
+    "Attachment",
+    "MixerHash",
+    "ManifestHash",
+    "KnobPosition",
+    "PCMAudible",
+    "DSDMatched",
+    "Device",
+    "Subdevice",
+    "DoP"
+  ],
+  "properties": {
+    "SchemaVersion": {
+      "const": 3
+    },
+    "QualificationVersion": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "Tuple": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "Format",
+        "BitRate",
+        "Pause",
+        "TailMS",
+        "PrefillMS",
+        "Transport"
+      ],
+      "properties": {
+        "Format": {
+          "const": "S32_LE"
+        },
+        "BitRate": {
+          "enum": [
+            2822400,
+            5644800,
+            11289600
+          ]
+        },
+        "Pause": {
+          "enum": [
+            "kernel",
+            "silence"
+          ]
+        },
+        "TailMS": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "PrefillMS": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 500
+        },
+        "Transport": {
+          "const": "dop"
+        }
+      }
+    },
+    "Attachment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "BootID",
+        "Port",
+        "Manufacturer",
+        "Product",
+        "BCDDevice",
+        "Card",
+        "DevNum",
+        "Interface"
+      ],
+      "properties": {
+        "BootID": {
+          "type": "string",
+          "minLength": 1
+        },
+        "Port": {
+          "type": "string",
+          "minLength": 1
+        },
+        "Manufacturer": {
+          "type": "string",
+          "minLength": 1
+        },
+        "Product": {
+          "type": "string",
+          "minLength": 1
+        },
+        "BCDDevice": {
+          "type": "string",
+          "minLength": 1
+        },
+        "Card": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "DevNum": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "Interface": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "MixerHash": {
+      "type": "string",
+      "minLength": 1
+    },
+    "ManifestHash": {
+      "type": "string",
+      "minLength": 1
+    },
+    "KnobPosition": {
+      "type": "string",
+      "minLength": 1
+    },
+    "PCMAudible": {
+      "const": "PCM audible"
+    },
+    "DSDMatched": {
+      "const": "DSD matched"
+    },
+    "Device": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "Subdevice": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "DoP": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "Indicator",
+        "Channels",
+        "PitchDuration"
+      ],
+      "properties": {
+        "Indicator": {
+          "const": true
+        },
+        "Channels": {
+          "const": true
+        },
+        "PitchDuration": {
+          "const": true
+        }
+      }
+    }
+  }
+}

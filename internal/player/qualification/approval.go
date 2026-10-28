@@ -110,7 +110,7 @@ func readApproval(stateDir, name string, identity Identity, candidate bool) (App
 	seen := map[string]bool{}
 	executedEdges := map[Edge]bool{}
 	for _, p := range body.Policies {
-		key := fmt.Sprintf("%s/%d", p.Tuple.Format, p.Tuple.BitRate)
+		key := fmt.Sprintf("%s/%s/%d", p.Tuple.TransportName(), p.Tuple.Format, p.Tuple.BitRate)
 		if seen[key] {
 			return a, errors.New("duplicate base tuple")
 		}
@@ -119,6 +119,9 @@ func readApproval(stateDir, name string, identity Identity, candidate bool) (App
 			return a, errors.New("invalid policy")
 		}
 		t := p.Tuple
+		if !t.ValidTransport() {
+			return a, errors.New("invalid policy transport")
+		}
 		if (t.Format != "DSD_U32_BE" && t.Format != "DSD_U32_LE" && t.Format != "DSD_U16_LE" && t.Format != "S32_LE") || (t.BitRate != 2822400 && t.BitRate != 5644800 && t.BitRate != 11289600) || (t.Pause != "kernel" && t.Pause != "silence") || t.TailMS < 0 || t.TailMS > 100 || t.PrefillMS < 0 || t.PrefillMS > 500 {
 			return a, errors.New("invalid native policy")
 		}
@@ -140,6 +143,17 @@ func readApproval(stateDir, name string, identity Identity, candidate bool) (App
 			if r.QualificationVersion != Version || r.Tuple != t || r.Identity != identity || r.ManifestHash != body.ManifestHash || r.Environment != body.Environment || r.Scenario != scenario || r.End != "complete" || r.Error != "" || r.Modified || r.BuildSHA == "" || r.BuildSHA == "unverified" || r.PauseReleaseSeconds != 30 || r.PCMTimePolicy != [2]int{} || len(r.Completed) == 0 {
 				return a, errors.New("report does not execute approved policy")
 			}
+			if t.Transport == "dop" {
+				if r.SchemaVersion != 2 {
+					return a, errors.New("DoP report version mismatch")
+				}
+				if err := r.DoP.Validate(); err != nil {
+					return a, err
+				}
+				if err := r.validateDoPGeometry(); err != nil {
+					return a, err
+				}
+			}
 			if scenario == "backend-lifecycle" {
 				if r.NativeCompleted <= 0 || r.NativeTuple != t {
 					return a, errors.New("lifecycle has no completion of the candidate native tuple")
@@ -160,6 +174,11 @@ func readApproval(stateDir, name string, identity Identity, candidate bool) (App
 			}
 			if r.FeatureUnit == nil {
 				return a, errors.New("missing USB gain evidence")
+			}
+			if t.Transport == "dop" && *r.FeatureUnit {
+				if err := CheckDoPExperiments(stateDir, r.Experiments, t, identity, body.ManifestHash, body.Environment); err != nil {
+					return a, err
+				}
 			}
 			if len(p.Constraints) == 0 {
 				if *r.FeatureUnit {
@@ -196,7 +215,7 @@ func readApproval(stateDir, name string, identity Identity, candidate bool) (App
 
 // NativeKey includes the policy in directional edge identity.
 func NativeKey(p ApprovedPolicy) string {
-	return fmt.Sprintf("native/%s/%d/2/msb/%s/%s/%d/%d/30", p.Tuple.Format, p.Tuple.BitRate, p.ID, p.Tuple.Pause, p.Tuple.TailMS, p.Tuple.PrefillMS)
+	return fmt.Sprintf("%s/%s/%d/2/msb/%s/%s/%d/%d/30", p.Tuple.TransportName(), p.Tuple.Format, p.Tuple.BitRate, p.ID, p.Tuple.Pause, p.Tuple.TailMS, p.Tuple.PrefillMS)
 }
 
 func validHash(s string) bool { b, e := hex.DecodeString(s); return e == nil && len(b) == 32 }
@@ -205,6 +224,14 @@ func (i Identity) valid() bool {
 }
 
 type executedReport struct {
+	PackingVersion, SourceRate, CarrierRate                   int
+	Kernel, Platform, GoVersion                               string
+	Opened                                                    []dopGeometry
+	ExperimentState                                           string
+	Experiments                                               []Evidence
+	Contact                                                   *Contact
+	SchemaVersion                                             int
+	DoP                                                       *DoPObservations
 	NativeTuple                                               Tuple
 	NativeCompleted                                           int
 	QualificationVersion                                      int

@@ -833,3 +833,80 @@ order its capture. The old natural-advance handoff can add an EAGAIN retry while
 preserving all accepted bytes and HW_PARAMS; a parked fifth WRITE reproduces it
 without sleeps. The original 37-call natural-advance goldens remain unchanged.
 Qualification version 13 covers this guarded test-path change (#1356).
+
+
+## Provisional DoP (B470 2d.1)
+
+Canonical stereo bytes keep bit 7 earliest; DSF normalization happens only in the
+container decoder. For chronological a,b, S32_LE's left-aligned 24-bit DoP is
+`00 b a marker`. Both channels use one marker; the next carrier frame toggles
+05/FA. The packer validates all input before writing, with division-based capacity
+checks. Empty input leaves phase unchanged. S24 layouts and DSD512 admission are
+excluded. DSD64/128/256 run at exact carriers 176400/352800/705600 Hz.
+
+The shared DSD sink stores marker-free canonical stereo frames (four bytes) and
+packs into separate eight-byte-per-frame writer scratch, included in the memory
+budget. Exact-bit carry joins compatible occurrences without EOF padding; Cut
+reconstructs canonical bits directly. Only final carry is silence-padded. The
+writer advances phase by Device.Write's returned accepted frames, even with an
+error; retry attempts and requested frames do not advance it. Pause, ring wrap
+and compatible occurrences preserve phase. A newly opened/reopened run resets
+05 before prefill; navigation closes with acknowledgement before a successor.
+Prefill, pause silence and tail use the same packer and canonical 0x69 payload.
+
+S32 hardware width is separate from native cleanup semantics. Initial open and
+every reopen require 24..32 significant bits; refused reopen remains paused and
+preserves teardown failures. SW silence threshold/size stay zero and stop remains
+at buffer size; altered readback refuses. The unchanged PCM opener/negotiation and
+native release/activation invariants remain binding. Fake traces establish only
+bridge submissions, not USB-driver silent URBs at lifecycle boundaries.
+
+DoP is CLI-only and needs explicit transport, S32_LE, logical rate, lifecycle
+flags, valued level acknowledgement and DoP-noise acknowledgement. Contact accepts
+one fixture including rounded prefill/tail within ten seconds; pause/navigation
+invalidates it. Reference WAV is 24/32-bit at the carrier, packed S32_LE in the
+harness without changing production PCM negotiation. A mapped-knob setup ends
+before DSD; recapture and repeat at unchanged position. Receipt v3 and report v2
+carry affirmative indicator/channel/pitch-duration observations; absent is not
+true. Candidate/approval readers check transport, geometry, version, full evidence
+hashes and referenced feature-unit attenuation/restored contacts. Provisional
+snapshot drift is still forbidden. Local filesystem ownership is trust; hashes
+are integrity, never signatures. Production selection/publication ignores DoP
+even in otherwise valid owner-approved records. Final owner integration is 2d.2.
+
+The packer, phase, precision, carry and evidence tests have literal or independent
+pattern oracles and implementation mutations. The job's red-first and control logs
+distinguish compiling assertion reds from inherited/late regression pins. No
+hardware was used. The runbook carries version 14 and real-ref reviewer commands.
+
+Markers alone prove too little. The first phase tests checked that markers
+alternated, at boundaries that fell on even frame indexes: a phase reset at a
+kernel resume, at pause silence, or a carry dropped at an occurrence join all
+passed them, since a restart at an even index repeats nothing and a lost bit
+moves no marker. Each `TestDoPPhase` leaf now puts its boundary on an odd frame
+index (an odd 1001-frame period and 7007-frame buffer, an odd ring, odd accepted
+prefixes) and compares every byte the kernel was given with an oracle assembled
+one bit at a time from the DoP definition, never through `PackDoP`. The silence
+leaves each check one property: no zero frame, the 0x69 payload with its zero
+pad byte, the marker sequence. `TestDoPBitTransparent` writes every byte value
+through the carry in 13-bit pieces and checks the raw node and each readback
+field; `TestDoPUnderrun` pins no fill and no recovery. The playback overlay
+compares the DAC's bytes through the real engine, backend and decoder.
+
+A run's markers start at 05 at the sink's construction as well as at each
+activation that starts a run. With the activation alone, the brief's reopen
+mutation (the reset removed) left the first run at the zero value, which the
+packer refuses, so every leaf failed through that refusal and none showed the
+reopen. The packer's refusal of any marker but 05 or FA stays as the guard.
+
+The decoders take DSD512, which no transport here carries. The sink already
+refused it before opening, but a plan for it reached the locator and failed as
+a device that could not be opened; admission now refuses it as
+`rate_not_supported` before anything is located.
+
+The retiring test's first red (`selected=4099 count=1`) was its fixture: 31-bit
+tracks, copied from the native test where a 32-bit word holds occurrence 1 and
+occurrence 2's first bit, fill a 16-bit DoP word with occurrence 1 alone, so the
+parked prefix rightly held one occurrence. 15-bit tracks make the word hold two,
+and the third occurrence's content is held until the release begins, so no
+scheduler order can put a third occurrence's bits in the parked write.
