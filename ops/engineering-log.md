@@ -65847,3 +65847,105 @@ the indicator case's fixture so the hash refusal fired first: the new test
 went red (`errout="fixture pcm hash mismatch\n"; want … observations
 incomplete`), and main's version of the test stayed green under the same
 mutation.
+
+## 2026-10-28 — B557: the OpenHome surface tears a retired socket down before Status drops it
+
+Backlog B557: `TestTheSurfaceBindsEachServedAddressAndFollowsThem` failed
+once in CI's `test -race (rest)` on #1353 (ab05de15, a docs-only change; run
+40345494861, job 121651189597) at listener_test.go:181, "a connection on an
+address that went away was answered 200", in 0.00 s; main's gate on the same
+base was green. The backlog's guess was a check dialling a port the surface
+had just freed, which another package's test process could have bound.
+
+**The check dialled nothing.** Line 180 sends a GET on `kept`, the
+connection the test opened on the secondary address before it went away, so
+the request goes on an established connection, which no other process can
+answer: a process that bound the freed port gets only new connections. What
+answered was the surface's own server. `reconcile` dropped the retired
+socket from `Status` (`s.sockets = kept`) and then closed it (`k.close()`),
+and `http.Server.Close` (go1.27.3, net/http/server.go 3222-3241) closes its
+listeners, waits in `listenerGroup.Wait` for `Serve` to return, and only
+then closes the connections it holds. The test's `listening` looks at
+`Status` before it waits for a publish, and nothing publishes between the
+drop and the connection's close, so a first look that landed there returned
+at once and the GET was answered before `Close` reached the connection (CI
+reported line 181 alone, so the listener was already closed at line 177's
+check). That is the brief's
+(c), an earlier check's kept-alive connection answered before the close
+completed, and its cause is the surface's order, so the fix is (b)'s: a
+removed address stops answering before `Status` says it went away.
+
+**The fix** (`listener.go`). `retire` marks the socket retiring, closes its
+listener, waits for its `Serve` goroutine to have done with its end (a
+`served` channel the goroutine closes; `Close` waits for `Serve` to return in
+any case), then closes the connections; the listing drops the socket from
+`Status` after every retired socket is closed. The `Serve` goroutine of a
+retiring socket no longer marks it `ended`: that goroutine returns before the
+connections are closed, and `Status` reads `ended` as gone, so the reorder
+alone left the same window inside the teardown. `ended` still marks a
+`Serve` that returned on its own (discovery's recheck of the live listeners
+needs it, 5a2b round 2) and one that returned in the stop, whose forced close
+(`close`) no longer marks a socket retiring. `Seams.Retiring` runs between
+the listener's close and the connections', the state CI's run was in.
+
+**Red first.** The seam first sat before the teardown, on main's order:
+20 of 20 runs failed at the held check ("a connection on an address that went
+away was answered 200 before its socket's teardown, Status no longer listing
+the address") and at the checks of the two later retirements, and the
+test's own check that the socket is closed failed 2 of 20 after the hold let
+go. That hold pinned only the reorder, so it moved between the two closes
+(d5ecce3c): the test holds each of its three retirements there and requires
+`Status` to list the address, and at the first the kept-alive connection must
+be answered there and refused once `Status` drops the address.
+
+**Negative controls**, each on the committed tree (d5ecce3c), the test and
+its seam kept, `-race -count=20` unless noted, and restored from HEAD:
+- the whole fix reverted (main's reconcile order and main's `Serve`
+  goroutine): red 20 of 20 at listener_test.go:220, 240 and 253;
+- the reorder alone reverted: the same;
+- the `ended` change alone reverted: the same;
+- the seam moved after the connections' close: red 20 of 20 at :223, "held
+  before its connections were closed, a connection on the secondary address:
+  0, unexpected EOF", the guard on the hold's own place;
+- the `ended` change reverted and the wait for the `Serve` goroutine removed,
+  `-count=50`: :220 50 of 50, :240 46 of 50, :253 48 of 50, so the wait is
+  what makes that control's red certain.
+
+**Main's own test did not fail on orion** (darwin, go1.27.3): 500 runs under
+`-race` beside twelve `yes` processes, then 10,200 (`-count=3400 -cpu
+2,4,8`) the same way, all passed; the window needs the test's first look to
+land inside the teardown, which the hold makes certain and this host did
+not.
+
+**Stress on the fix**: `-race -count=200` (1.9 s); `-count=100` beside twelve
+`yes` processes, and the same under `-race`; `-race -count=200` beside two
+loops binding and closing 127.0.0.1:0 every half millisecond (5,692 and
+5,691 binds, no error); `pgrep -x yes` empty after. A first churn loop with
+no pause died part-way with ENOBUFS (errno 55) in both copies, while the
+test passed; the paced loop replaced it. The whole package, `go test -race
+./internal/player/openhome/`, passes in 36 s.
+
+**Siblings.** No test in `internal/player/openhome` or `internal/upnp`
+dials a freed port to prove absence. The upnp tests that need a refused
+connection use port zero, which no listener can own
+(manual_debug_lines_test.go:111-114, control_url_userinfo_test.go:93-95), or
+port 1 (manual_test.go:170), which no test binds;
+service_url_policy_test.go:174 closes its server after the poll. In
+openhome, listener_test.go:713 asks the box for a listener of the stopped
+surface, and the box refuses without dialling when none stands for the
+address; the discovery tests' memory box numbers its listeners 20000 and up
+and never reuses one (discovery_test.go:444, 452). Two checks in this test
+take a port number for a socket, the (c) half the fix does not reach: after
+the prefix change (listener_test.go:244) and after the index change (:257),
+`box.Open()` is asked for the old socket's address and port, and the new
+socket stands for the same address on a port the kernel picks, so a kernel
+that hands it the freed port fails the check with the old listener closed.
+The ports this host gave were consecutive (60391, 60392, 60393, 60395,
+60396); Linux takes a random odd port in the lower half of its range for a
+listener with SO_REUSEADDR, about one in 7,000 for a given free port
+(recalled from Linux's inet_csk_find_open_port, not read or measured here). Not changed: it needs the box to
+identify a listener by more than its address and port.
+
+qualificationVersion 16: `internal/player/openhome/` is a guarded prefix
+(`scripts/qualification-version -base 881f7731 -head HEAD`: OK), with the
+runbook's five current references and a note of what 16 covers.
