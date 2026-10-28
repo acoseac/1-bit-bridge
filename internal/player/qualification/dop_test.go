@@ -4,47 +4,72 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/alsactl"
 )
 
 func dopObserved() *DoPObservations { yes := true; return &DoPObservations{&yes, &yes, &yes} }
+
+// rewriteReport applies change to the report ev names and binds ev to the
+// bytes written. Every step's error fails the test, so a refusal read after
+// it is the change's, never a hash mismatch left by a write that failed.
+func rewriteReport(t *testing.T, dir string, ev *Evidence, change func(r map[string]any)) {
+	t.Helper()
+	b, e := os.ReadFile(filepath.Join(dir, ev.Path))
+	if e != nil {
+		t.Fatal(e)
+	}
+	var r map[string]any
+	if e = json.Unmarshal(b, &r); e != nil {
+		t.Fatal(e)
+	}
+	change(r)
+	if b, e = json.Marshal(r); e != nil {
+		t.Fatal(e)
+	}
+	if e = os.WriteFile(filepath.Join(dir, ev.Path), b, 0600); e != nil {
+		t.Fatal(e)
+	}
+	ev.SHA256 = hashBytes(b)
+}
+
 func dopApprovalFixture(t *testing.T) (string, Approval, Identity) {
 	dir, a, id := approvalFixture(t)
 	a.Body.Policies[0].Tuple.Format = "S32_LE"
 	a.Body.Policies[0].Tuple.Transport = "dop"
 	a.Body.Environment = Digest([]string{"linux/arm64", "test-go", "test-kernel"})
 	for _, ev := range []*Evidence{&a.Body.Policies[0].Matrix, &a.Body.Policies[0].Lifecycle} {
-		b, e := os.ReadFile(filepath.Join(dir, ev.Path))
-		if e != nil {
-			t.Fatal(e)
-		}
-		var r map[string]any
-		json.Unmarshal(b, &r)
-		r["SchemaVersion"] = 2
-		r["Environment"] = a.Body.Environment
-		r["PackingVersion"] = 1
-		r["SourceRate"] = 2822400
-		r["CarrierRate"] = 176400
-		r["Kernel"] = "test-kernel"
-		r["Platform"] = "linux/arm64"
-		r["GoVersion"] = "test-go"
-		r["Opened"] = []map[string]any{{"Format": "S32_LE", "RateHz": 176400, "Channels": 2, "Msbits": 32, "PeriodFrames": 8820, "BufferFrames": 35280, "RateNum": 176400, "RateDen": 1}}
+		rewriteReport(t, dir, ev, func(r map[string]any) {
+			r["SchemaVersion"] = 2
+			r["Environment"] = a.Body.Environment
+			r["PackingVersion"] = 1
+			r["SourceRate"] = 2822400
+			r["CarrierRate"] = 176400
+			r["Kernel"] = "test-kernel"
+			r["Platform"] = "linux/arm64"
+			r["GoVersion"] = "test-go"
+			r["Opened"] = []map[string]any{{"Format": "S32_LE", "RateHz": 176400, "Channels": 2, "Msbits": 32, "PeriodFrames": 8820, "BufferFrames": 35280, "RateNum": 176400, "RateDen": 1}}
 
-		r["Tuple"] = a.Body.Policies[0].Tuple
-		r["NativeTuple"] = a.Body.Policies[0].Tuple
-		r["DoP"] = dopObserved()
-		b, _ = json.Marshal(r)
-		if e = os.WriteFile(filepath.Join(dir, ev.Path), b, 0600); e != nil {
-			t.Fatal(e)
-		}
-		ev.SHA256 = hashBytes(b)
+			r["Tuple"] = a.Body.Policies[0].Tuple
+			r["NativeTuple"] = a.Body.Policies[0].Tuple
+			r["DoP"] = dopObserved()
+		})
 	}
 	a.SHA256 = Digest(a.Body)
 	writeApproval(t, dir, a)
 	return dir, a, id
 }
+
+// refusedFor fails the test unless e is the refusal want names.
+func refusedFor(t *testing.T, e error, want string) {
+	t.Helper()
+	if e == nil || e.Error() != want {
+		t.Fatalf("got %v, want the refusal %q", e, want)
+	}
+}
+
 func TestDoPEvidenceValidation(t *testing.T) {
 	for _, name := range []string{"receipt_indicator", "receipt_listening", "candidate_indicator", "candidate_listening", "approval_indicator", "approval_listening", "transport"} {
 		t.Run(name, func(t *testing.T) {
@@ -53,6 +78,10 @@ func TestDoPEvidenceValidation(t *testing.T) {
 					t.Fatal("PCM S32 inferred as DoP")
 				}
 				return
+			}
+			want := "DoP listening unconfirmed"
+			if strings.HasSuffix(name, "_indicator") {
+				want = "DoP DSD indicator unconfirmed"
 			}
 			if name[:7] == "receipt" {
 				// Version 3 receipt and otherwise matching endpoint/evidence.
@@ -68,9 +97,7 @@ func TestDoPEvidenceValidation(t *testing.T) {
 					no := false
 					c.DoP.Channels = &no
 				}
-				if c.Validate(tuple, a, 0, 0, "m", "f") == nil {
-					t.Fatal("missing DoP observation accepted")
-				}
+				refusedFor(t, c.Validate(tuple, a, 0, 0, "m", "f"), want)
 				return
 			}
 			dir, a, id := dopApprovalFixture(t)
@@ -85,87 +112,79 @@ func TestDoPEvidenceValidation(t *testing.T) {
 			if _, e := read(dir, "approved.json", id); e != nil {
 				t.Fatal("fresh DoP evidence:", e)
 			}
-			ev := &a.Body.Policies[0].Matrix
-			b, e := os.ReadFile(filepath.Join(dir, ev.Path))
-			if e != nil {
-				t.Fatal(e)
-			}
-			var r map[string]any
-			json.Unmarshal(b, &r)
-			o := dopObserved()
-			if name == "candidate_indicator" || name == "approval_indicator" {
-				o.Indicator = nil
-			} else {
-				no := false
-				o.PitchDuration = &no
-			}
-			r["DoP"] = o
-			b, _ = json.Marshal(r)
-			os.WriteFile(filepath.Join(dir, ev.Path), b, 0600)
-			ev.SHA256 = hashBytes(b)
+			rewriteReport(t, dir, &a.Body.Policies[0].Matrix, func(r map[string]any) {
+				o := dopObserved()
+				if name == "candidate_indicator" || name == "approval_indicator" {
+					o.Indicator = nil
+				} else {
+					no := false
+					o.PitchDuration = &no
+				}
+				r["DoP"] = o
+			})
 			a.SHA256 = Digest(a.Body)
 			writeApproval(t, dir, a)
-			if _, e = read(dir, "approved.json", id); e == nil {
-				t.Fatal("missing DoP observation accepted")
-			}
+			_, e := read(dir, "approved.json", id)
+			refusedFor(t, e, want)
 		})
 	}
 }
 
 func TestDoPReportGeometry(t *testing.T) {
+	refusals := map[string]string{
+		"packer": "DoP packer version missing", "source": "DoP source rate mismatch", "carrier": "DoP carrier rate mismatch",
+		"kernel": "DoP environment missing", "precision": "DoP precision insufficient", "layout": "DoP hardware layout mismatch",
+		"rational": "DoP rational rate mismatch", "buffer": "DoP hardware buffer out of bounds", "environment": "DoP environment missing",
+	}
 	for _, name := range []string{"packer", "source", "carrier", "kernel", "precision", "layout", "rational", "buffer", "environment"} {
 		t.Run(name, func(t *testing.T) {
 			dir, a, id := dopApprovalFixture(t)
 			if _, e := ReadApproval(dir, "approved.json", id); e != nil {
 				t.Fatal("fresh geometry", e)
 			}
-			ev := &a.Body.Policies[0].Matrix
-			b, e := os.ReadFile(filepath.Join(dir, ev.Path))
-			if e != nil {
-				t.Fatal(e)
-			}
-			var r map[string]any
-			json.Unmarshal(b, &r)
-			switch name {
-			case "packer":
-				r["PackingVersion"] = 0
-			case "source":
-				r["SourceRate"] = 176400
-			case "carrier":
-				r["CarrierRate"] = 88200
-				g := r["Opened"].([]any)[0].(map[string]any)
-				g["RateHz"] = 88200
-				g["RateNum"] = 88200
-			case "environment":
-				r["Platform"] = "other/arch"
-			case "kernel":
-				r["Kernel"] = ""
-			default:
-				g := r["Opened"].([]any)[0].(map[string]any)
+			rewriteReport(t, dir, &a.Body.Policies[0].Matrix, func(r map[string]any) {
 				switch name {
-				case "precision":
-					g["Msbits"] = 20
-				case "layout":
-					g["Format"] = "S24_LE"
-				case "rational":
-					g["RateDen"] = 0
-				case "buffer":
-					g["BufferFrames"] = 176400
+				case "packer":
+					r["PackingVersion"] = 0
+				case "source":
+					r["SourceRate"] = 176400
+				case "carrier":
+					r["CarrierRate"] = 88200
+					g := r["Opened"].([]any)[0].(map[string]any)
+					g["RateHz"] = 88200
+					g["RateNum"] = 88200
+				case "environment":
+					r["Platform"] = "other/arch"
+				case "kernel":
+					r["Kernel"] = ""
+				default:
+					g := r["Opened"].([]any)[0].(map[string]any)
+					switch name {
+					case "precision":
+						g["Msbits"] = 20
+					case "layout":
+						g["Format"] = "S24_LE"
+					case "rational":
+						g["RateDen"] = 0
+					case "buffer":
+						g["BufferFrames"] = 176400
+					}
 				}
-			}
-			b, _ = json.Marshal(r)
-			os.WriteFile(filepath.Join(dir, ev.Path), b, 0600)
-			ev.SHA256 = hashBytes(b)
+			})
 			a.SHA256 = Digest(a.Body)
 			writeApproval(t, dir, a)
-			if _, e = ReadApproval(dir, "approved.json", id); e == nil {
-				t.Fatal("invalid DoP geometry accepted")
-			}
+			_, e := ReadApproval(dir, "approved.json", id)
+			refusedFor(t, e, refusals[name])
 		})
 	}
 }
 
 func TestDoPExperiments(t *testing.T) {
+	refusals := map[string]string{
+		"hash": "DoP experiment hash mismatch", "context": "DoP experiment context mismatch", "indicator": "DoP DSD indicator unconfirmed",
+		"states": "DoP experiment lacks changed attenuation and restored state", "unbound": "DoP feature unit requires bounded experiment references",
+		"endpoint": "DoP experiment endpoint missing", "attachment": "DoP experiment attachment mismatch", "unreadable": "DoP experiment controls unreadable",
+	}
 	for _, name := range []string{"valid", "hash", "context", "indicator", "states", "unbound", "endpoint", "attachment", "unreadable"} {
 		t.Run(name, func(t *testing.T) {
 			dir, a, id := dopApprovalFixture(t)
@@ -225,7 +244,9 @@ func TestDoPExperiments(t *testing.T) {
 				refs = nil
 			}
 			e = CheckDoPExperiments(dir, refs, tuple, id, a.Body.ManifestHash, a.Body.Environment)
-			if (e == nil) != (name == "valid") {
+			if name != "valid" {
+				refusedFor(t, e, refusals[name])
+			} else if e != nil {
 				t.Fatalf("experiment validation: %v", e)
 			}
 		})
