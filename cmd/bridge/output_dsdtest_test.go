@@ -74,9 +74,9 @@ func TestNativeProbeRequiresAcknowledgement(t *testing.T) {
 func TestDoPOptions(t *testing.T) {
 	for _, tc := range []struct{ name, transport, format, ack, names string }{
 		{"dop", "dop", "S32_LE", "--ack-dop-noise", ""},
-		{"transport", "pcm", "S32_LE", "--ack-dop-noise", "--transport"},
-		{"noise", "dop", "S32_LE", "", "--ack-dop-noise"},
-		{"format", "dop", "DSD_U32_BE", "--ack-dop-noise", "--format"},
+		{"transport", "pcm", "S32_LE", "--ack-dop-noise", "--transport must be"},
+		{"noise", "dop", "S32_LE", "", "--ack-dop-noise required"},
+		{"format", "dop", "DSD_U32_BE", "--ack-dop-noise", "--format must be"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := harnessRig(t)
