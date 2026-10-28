@@ -1445,6 +1445,62 @@ func dopTestPlan(d format.NativeDSD) (engine.NativePlan, error) {
 	p.Tuple.Format = "S32_LE"
 	return p, e
 }
+
+// dopPattern is the canonical audio nativeDSF's fixture decodes to: the
+// goldens' pattern.bin, left plane then right.
+func dopPattern(t *testing.T) (l, r []byte) {
+	t.Helper()
+	b, e := os.ReadFile(filepath.Join("..", "decode", "testdata", "dsd-goldens", "pattern.bin"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	return b[:len(b)/2], b[len(b)/2:]
+}
+
+// dopChain is n bits of each plane, repeated times back to back, bit
+// against bit: compatible occurrences of one track joined with nothing
+// between them.
+func dopChain(l, r []byte, n, times int) (cl, cr []byte, bits int) {
+	bits = n * times
+	cl, cr = make([]byte, (bits+7)/8), make([]byte, (bits+7)/8)
+	for i := range bits {
+		at := i % n
+		cl[i/8] |= ((l[at/8] >> (7 - at%8)) & 1) << (7 - i%8)
+		cr[i/8] |= ((r[at/8] >> (7 - at%8)) & 1) << (7 - i%8)
+	}
+	return cl, cr, bits
+}
+
+// dopBytes is the independent DoP the DAC must be given for bits of each
+// plane, the last word padded by the 0x69 pattern's bits at their own
+// positions, then silence frames: S32_LE words 00, low byte, high byte,
+// marker, the earliest bit at the word's bit 15, both channels of a frame
+// sharing a marker that starts at 05 and alternates once per frame.
+func dopBytes(l, r []byte, bits, silence int) []byte {
+	var out []byte
+	marker := byte(0x05)
+	frames := (bits + 15) / 16
+	for f := 0; f < frames+silence; f++ {
+		for _, p := range [][]byte{l, r} {
+			var v uint16
+			for j := range 16 {
+				at := f*16 + j
+				b := (byte(0x69) >> (7 - j%8)) & 1
+				if f < frames && at < bits {
+					b = (p[at/8] >> (7 - at%8)) & 1
+				}
+				v |= uint16(b) << (15 - j)
+			}
+			out = append(out, 0, byte(v), byte(v>>8), marker)
+		}
+		if marker == 0x05 {
+			marker = 0xfa
+		} else {
+			marker = 0x05
+		}
+	}
+	return out
+}
 func TestNativeIntegrationDoPThroughEngine(t *testing.T) {
 	t.Run("StalledReservations", func(t *testing.T) { testNativeStalledReservations(t, true) })
 	t.Run("PauseKeepsPlan", func(t *testing.T) { testNativePauseKeepsPlan(t, true) })
@@ -1513,6 +1569,14 @@ func TestNativeIntegrationDoPThroughEngine(t *testing.T) {
 			if n := eng.Snapshot().TrackCount(); n != 2 {
 				t.Fatalf("heard %d occurrences, want two", n)
 			}
+			// Bit transparency through the engine, the backend, the decoder and
+			// the sink: the DAC was given exactly the DoP of the two occurrences'
+			// bits joined, padded once at the end, then the plan's 1 ms tail.
+			l, r := dopPattern(t)
+			cl, cr, n := dopChain(l, r, bits, 2)
+			if got, want := k.Given(), dopBytes(cl, cr, n, 177); !bytes.Equal(got, want) {
+				t.Errorf("the DAC was given %d bytes that are not the DoP of the content (%d bytes)", len(got), len(want))
+			}
 			events.mu.Lock()
 			defer events.mu.Unlock()
 			for _, id := range []int{1, 2} {
@@ -1531,12 +1595,23 @@ func TestNativeIntegrationDoPRetiring(t *testing.T) {
 		t.Run(selector, func(t *testing.T) { testDoPRetiring(t, selector) })
 	}
 }
+
+// testDoPRetiring: with 15-bit tracks DoP's first 16-bit word holds all of
+// a and b's first bit, so the write parked here is a two-occurrence prefix
+// (the native test's 31-bit tracks fill a whole DoP word with a alone). c's
+// content is held until the navigation's release has begun, so no word
+// holding c's bits can join that write, whatever the scheduler does: the
+// DAC is given exactly that one word and the track change's tail.
 func testDoPRetiring(t *testing.T, selector string) {
 	nativeEngineStorage(t)
 	k := alsapcm.NewFakeKernel(t)
 	k.HardwareFormats(2, 10, 32, 49, 50, 52)
 	k.Free()
-	b, err := New(Config{Resolver: nativeFiles{"a": nativeDSF(t, 15)}, Locator: nativeLocator{}})
+	data := nativeDSF(t, 15)
+	held := &nativeStalledReader{Reader: bytes.NewReader(data), entered: make(chan struct{}), gate: make(chan struct{})}
+	var gateOnce sync.Once
+	letC := func() { gateOnce.Do(func() { close(held.gate) }) }
+	b, err := New(Config{Resolver: nativeStalledResolver{first: data, held: map[string]*nativeStalledReader{"c": held}}, Locator: nativeLocator{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1556,6 +1631,7 @@ func testDoPRetiring(t *testing.T, selector string) {
 	allow := func() { once.Do(func() { close(barrier.allow) }) }
 	t.Cleanup(func() {
 		allow()
+		letC()
 		cancel()
 		<-done
 		c, stop := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1564,10 +1640,10 @@ func testDoPRetiring(t *testing.T, selector string) {
 			t.Error(err)
 		}
 	})
-	ref, _ := engine.NewReference("a")
 	var ids []uint32
 	var prev uint32
-	for range 3 {
+	for _, name := range []string{"a", "b", "c"} {
+		ref, _ := engine.NewReference(name)
 		id, e := eng.InsertAfter(ctx, prev, ref, nil)
 		if e != nil {
 			t.Fatal(e)
@@ -1609,6 +1685,8 @@ func testDoPRetiring(t *testing.T, selector string) {
 		t.Fatal("navigation did not establish release")
 	}
 	unpark()
+	// The cutoff is fixed: c's open may finish now and write nothing.
+	letC()
 	select {
 	case <-barrier.entered:
 	case <-ctx.Done():
@@ -1617,6 +1695,11 @@ func testDoPRetiring(t *testing.T, selector string) {
 	sn := eng.Snapshot()
 	if sn.Selected() != target || sn.TrackCount() != 2 {
 		t.Fatalf("retiring accounting changed destination or lost a boundary: selected=%d count=%d", sn.Selected(), sn.TrackCount())
+	}
+	l, r := dopPattern(t)
+	cl, cr, _ := dopChain(l, r, 15, 2)
+	if got, want := k.Given(), dopBytes(cl, cr, 16, 177); !bytes.Equal(got, want) {
+		t.Fatalf("the retiring run gave %d bytes, want the two-occurrence word and the tail (%d bytes)", len(got), len(want))
 	}
 	// The barrier is entered only after final release events and acknowledgement
 	// were consumed; the successor has not opened or submitted any content yet.
