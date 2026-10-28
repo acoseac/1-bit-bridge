@@ -118,3 +118,50 @@ func TestApprovalTransitionEvidence(t *testing.T) {
 		})
 	}
 }
+
+// TestApprovalTransitionRefusals: schema 2's slots are refused where they do
+// not belong or do not hash, each with its own refusal: a schema-1 record
+// carrying Transitions or a qualification date; a record whose digest is not
+// that of its body, Transitions included; a transition report whose bytes
+// are not the digest the record names; and a transition report that passed
+// one of the two native↔DoP edges, for a record that approves both.
+func TestApprovalTransitionRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name, want string
+		change     func(t *testing.T, dir string, a *Approval, edges [2]Edge)
+		// digest is the record's own, in place of its body's.
+		digest func(a Approval) string
+	}{
+		{name: "schema1_transitions", want: "approval schema 1 carries no transitions or qualification date", change: func(_ *testing.T, _ string, a *Approval, _ [2]Edge) {
+			a.Body.SchemaVersion, a.Body.QualifiedOn = 1, ""
+		}},
+		{name: "schema1_qualified_on", want: "approval schema 1 carries no transitions or qualification date", change: func(_ *testing.T, _ string, a *Approval, _ [2]Edge) {
+			a.Body.SchemaVersion, a.Body.Transitions, a.Body.Edges = 1, nil, nil
+		}},
+		{name: "record_digest", want: "approval hash mismatch", digest: func(a Approval) string {
+			body := a.Body
+			body.Transitions = nil
+			return Digest(body)
+		}},
+		{name: "report_digest", want: "evidence hash mismatch", change: func(_ *testing.T, _ string, a *Approval, _ [2]Edge) {
+			a.Body.Transitions[0].SHA256 = hashBytes([]byte("another transition report"))
+		}},
+		{name: "edge_not_passed", want: "transition report lacks a native↔DoP edge", change: func(t *testing.T, dir string, a *Approval, edges [2]Edge) {
+			rewriteReport(t, dir, &a.Body.Transitions[0], func(r map[string]any) { r["PassedEdges"] = edges[:1] })
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, a, id, edges := transitionFixture(t)
+			if tc.change != nil {
+				tc.change(t, dir, &a, edges)
+			}
+			a.SHA256 = Digest(a.Body)
+			if tc.digest != nil {
+				a.SHA256 = tc.digest(a)
+			}
+			writeApproval(t, dir, a)
+			_, e := ReadApproval(dir, "approved.json", id)
+			refusedFor(t, e, tc.want)
+		})
+	}
+}

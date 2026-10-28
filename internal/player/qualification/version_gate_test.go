@@ -129,3 +129,29 @@ func TestQualificationDoPGuardedPaths(t *testing.T) {
 		})
 	}
 }
+
+// TestQualificationApprovedDoPGuardedPaths: each file B470 2d.2 adds is
+// guarded, so a change to it alone needs a qualification version increase.
+func TestQualificationApprovedDoPGuardedPaths(t *testing.T) {
+	for _, path := range []string{"cmd/bridge/output_dsdtest_qualify_test.go", "cmd/bridge/serve_player_dop_test.go", "internal/player/playback/approval_dop_fixture_test.go", "internal/player/playback/dop_select_test.go", "internal/player/qualification/transition_test.go"} {
+		t.Run(path, func(t *testing.T) {
+			dir := t.TempDir()
+			if e := os.MkdirAll(filepath.Join(dir, ".git", "refs", "heads"), 0755); e != nil {
+				t.Fatal(e)
+			}
+			if e := os.WriteFile(filepath.Join(dir, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0644); e != nil {
+				t.Fatal(e)
+			}
+			files := map[string]string{"internal/player/qualification/version.go": "const qualificationVersion = 16\n", path: "base"}
+			base := gitCommit(t, dir, files)
+			files[path] = "changed"
+			head := gitCommit(t, dir, files)
+			if e := os.WriteFile(filepath.Join(dir, ".git", "refs", "heads", "main"), []byte(head+"\n"), 0644); e != nil {
+				t.Fatal(e)
+			}
+			if e := CheckVersion(dir, base, head); e == nil {
+				t.Fatalf("a change to %s alone escaped the qualification gate", path)
+			}
+		})
+	}
+}

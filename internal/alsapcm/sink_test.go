@@ -347,6 +347,31 @@ func TestTransportJoinNamesWhatDiffers(t *testing.T) {
 	}
 }
 
+// TestTransportJoinTellsSameCarrierPCMFromDoP: PCM in S32_LE at a DoP
+// carrier's rate is never DoP's transport (B470 2d.2). The two differ in
+// kind, valid bits, logical rate and packing version, and Join names each,
+// so a sink of one is drained, closed and reopened for the other; a logical
+// rate or a packing version alone tells two transports apart too.
+func TestTransportJoinTellsSameCarrierPCMFromDoP(t *testing.T) {
+	pcm := Transport{Kind: format.KindPCM, RateHz: 176400, Channels: 2, Format: format.S32LE, ValidBits: 32}
+	dop := Transport{Kind: format.KindDoP, RateHz: 176400, Channels: 2, Format: format.S32LE, ValidBits: 1, LogicalRate: 2822400, PackingVersion: 1}
+	want := []string{"kind pcm → dop", "valid bits 32 → 1", "logical rate", "packing version"}
+	if j := pcm.Join(dop); j.Gapless || !slices.Equal(j.Differs, want) {
+		t.Errorf("same-carrier PCM to DoP: %+v, want not gapless, differing in %q", j, want)
+	}
+	for _, c := range []struct {
+		next Transport
+		says string
+	}{
+		{Transport{Kind: format.KindDoP, RateHz: 176400, Channels: 2, Format: format.S32LE, ValidBits: 1, LogicalRate: 5644800, PackingVersion: 1}, "logical rate"},
+		{Transport{Kind: format.KindDoP, RateHz: 176400, Channels: 2, Format: format.S32LE, ValidBits: 1, LogicalRate: 2822400, PackingVersion: 2}, "packing version"},
+	} {
+		if j := dop.Join(c.next); j.Gapless || len(j.Differs) != 1 || j.Differs[0] != c.says {
+			t.Errorf("Join(%v) = %+v, want not gapless, differing in %q", c.next, j, c.says)
+		}
+	}
+}
+
 // TestSinkPositionIsWrittenMinusWhatTheKernelHolds pins the position
 // against the kernel's account: before the stream starts nothing has
 // played, although STATUS reports a delay of 0 then; while it runs, played
