@@ -66067,3 +66067,168 @@ consistency gap, not a bypass; `TestApprovalTransitionRefusals` gained `short_ru
 reports are parsed leniently by design (each reader takes part of what the harness
 writes, and the hash binds the bytes), and an empty epoch keeps the approved record's
 facts, as PROTOCOL.md says and `TestDoPPublication` pins for the revision.
+
+## 2026-10-28 — B576: the engine fake's contract check waits for the engine's goroutines
+
+Backlog B576: `TestTheSelectionMovesAtOnceOnACommand/delete` failed once in
+CI's `test -race (rest)` (run 40741394369) on #1361's head ed878076, which
+changes only comments in `internal/player/engine`, with
+"fakebackend_test.go:128: backend contract: session 2 had calls and never a
+Start" in 0.00 s; a re-run passed.
+
+**What the check says.** The fake makes a session's record on whichever of
+its calls comes first (`fakeBackend.session`, fakebackend_test.go:143-160 at
+d8b6897c), since the engine runs each call on a goroutine of its own and a
+Release may reach the backend before its Start (backend.go:219-221; 220-222
+after #1361). The check, then in `fakeBackend.close` (fakebackend_test.go:110-130
+at d8b6897c), failed the test for any record whose Start had not come.
+`close` ran as a cleanup before `harness.joined` (harness_test.go:345-346 at
+d8b6897c, registered after it), so it read the records while a call the
+engine had made could still be on its goroutine.
+
+**The engine abandons no Start, so the brief's (b) is ruled out.** Start has
+one call site, `startSession`'s `e.call(callStart, …)` (transport.go:553), and
+`call` spawns a goroutine (transport.go:1062-1066) whose `callBackend` calls
+the backend unconditionally (transport.go:1078-1087): every Start the owner
+decides on reaches the backend, however late.
+
+**When `done` returns.** Next and PlayID are transport commands: the playing
+session is released with `IntentPlay` and the command waits
+(transport.go:300-304, `e.wait(c, true)`), answered by `settleWaiters` only
+once no start and no release is under way (owner.go:620-623; `busy`,
+owner.go:642-645), so once session 2's Start has returned, which the fake
+recorded before returning. Delete is an edit: `selectionDeleted` releases
+session 1 with `IntentPlay` (edits.go:97-100) and `delete` answers in the same
+step (edits.go:73-78), before the release is acknowledged (in this subtest
+before the test opens the gate that holds it), so before session 2 exists.
+The delete row returns earlier in the session's life than the next and play
+id rows, and that is the engine's contract, not its defect: an edit answers
+with its reply (doc.go:17-21) and only the transport commands wait on the
+transport (doc.go:96-118); `TestDeletingTheSelection` calls Delete
+synchronously while session 1's Start (advance_test.go:218, :257) or Release
+(:197, :246) is held and opens the hold only after Delete returns, which a
+Delete that waited would deadlock; and the OpenHome surface answers DeleteId
+with the edit's reply inside an edit's budget (writes.go:136-139; `editBudget`
+is ReserveTimeout and a second), which a wait for a release (up to 2 s) and a
+start (up to 5 s) would overrun. So the engine is unchanged, and the subtest
+got no wait of its own: the brief's (a), fixed in the harness.
+
+**The interleaving.** Once the gate opens, session 1's release is
+acknowledged and the owner starts session 2 (`afterRelease`,
+transport.go:743-758). The subtest returns, and its cleanups run last
+registered first: Run's shutdown, `close`, `joined`. The shutdown finds
+session 2 starting and releases it (owner.go:325-327); that Release reaches
+the fake first and makes session 2's record; `drive` fires the release
+deadline and the grace timer at once on the fake clock; Run returns,
+abandoning both calls (owner.go:364-373); `close` reads the record without a
+Start; the Start reaches the fake later, while `joined` waits for it.
+
+**Red first** (cd79aa24). `TestTheContractCheckWaitsForAStartStillOnItsWay`
+takes the delete row's steps, holds session 2's Start before the fake records
+any of it (`fakeBackend.beforeStart`), begins the shutdown itself and waits
+for the shutdown's Release of session 2 to reach the fake, then returns; the
+Start goes on only as the harness begins to wait for the engine's goroutines
+(`harness.joining`, at the start of `joined`), the latest a scheduler could
+leave it, so nothing deadlocks and no watchdog fires. With the check in
+`close`, 100 of 100 runs failed in 0.03 s each with exactly
+"fakebackend_test.go:134: backend contract: session 2 had calls and never a
+Start" (the hook moved the line) and no other output.
+
+**The fix** (574a6651). `close` unblocks what a test held and waits for the
+fake's own goroutines, and reads nothing. `verify` makes the check and reports
+every violation, among them one recorded by a call that reached the fake after
+`close`, which the old `close` had already passed. `newFakeBackend` registers
+`verify` as the test's cleanup before any engine is built over the fake, so it
+runs after the shutdown and the join for every teardown: the harness's own
+(`build`), `joinAfter`'s restarts, and the hand-rolled ones
+(lifecycle_test.go:426-427, persist_unix_test.go:72-73, floor_test.go:11-17).
+The check itself is unchanged: a session the engine released and never started
+still fails the test.
+
+**Green.** The deterministic test passes 100 of 100, and the whole package
+passes (`go test -race ./internal/player/engine/`, 19.8 s).
+
+**Stress** on orion (darwin arm64, 12 cores, macOS 27.0.1, go1.27.3,
+`-race`), each run through the build slot with the tree clean at 574a6651,
+or at the record's commit for the 5,000-run rows, whose engine code and tests
+are 574a6651's; "hogs" are twelve `yes` processes, one per core, killed after
+each run. The pre-fix runs build the same tree with the red commit's
+`fakebackend_test.go` and `harness_test.go` swapped in by `go test -overlay`,
+the working tree never changed for them.
+
+| run | pre-fix harness | fix (574a6651) |
+|---|---|---|
+| `TestTheSelectionMovesAtOnceOnACommand/delete` ×500, no hogs | 0 of 500 failed | 0 of 500 |
+| the same ×500, hogs | **1 of 500 failed**, with the CI line | 0 of 500 |
+| the same ×5,000, hogs | 0 of 5,000 | 0 of 5,000 |
+| `TestTheSelectionMovesAtOnceOnACommand` (its four rows) and the new test ×500, no hogs | | 0 of 500 each |
+| the same ×500, hogs | | 0 of 500 each |
+
+Beside the hogs the pre-fix harness failed 1 run of 5,500 in all, so the
+stress runs cannot tell the fix from it: the deterministic test and its
+control are the proof, and the stress runs show the fix adds no failure of
+its own.
+
+**Audit.** A copy of the fixed fake, swapped in by overlay, logs each Start
+that reaches it after the first `close`, where the old check read the
+sessions, and flags its session when another of its calls came first. Over
+the whole engine package, five passes without the hogs and five beside them,
+the only test it named was `TestTheContractCheckWaitsForAStartStillOnItsWay`,
+once a pass, as designed: no other test reached the window in those runs.
+
+**The whole package beside the hogs, at HEAD** (×3): the first pass failed,
+not on B576's check. `TestPCMLookaheadHasNoNativeBudget` (#1356) panicked on
+a nil `next` at native_round2_test.go:67: the session started with repeat
+off, so its first occurrence's first Prepare names the end (`Prepare(first,
+nil)`, from `startDone`'s `reconcile`), and the Prepare that `SetRepeat(true)`
+causes runs on a goroutine of its own; `s.prepared(first, 1)` returns at the
+first Prepare it sees, the end's while the second has not reached the fake.
+It is not this branch's: native_round2_test.go and the engine's code are the
+same at d8b6897c, and the base's exact test code (its three engine test files
+by overlay) fails the same way beside the hogs, run alone with `-count=2000`
+(at run 153, HEAD at run 26); the base's whole package passed three passes of
+three there. Waiting for that occurrence's second Prepare (`prepared(first,
+2)`, then 1) passed 2,000 runs of 2,000 beside the hogs. Not changed here:
+reported for the backlog.
+
+**Negative controls**, on the committed tree:
+- only the fix reverted (574a6651's two files checked out from cd79aa24, +2
+  −21, the test and its seams kept); predicted red 20 of 20 by name, each with
+  exactly the contract line and nothing else; actual: 20 of 20
+  `--- FAIL: TestTheContractCheckWaitsForAStartStillOnItsWay`, each with
+  "fakebackend_test.go:134: backend contract: session 2 had calls and never a
+  Start", nothing else. Restored from HEAD: the tree clean, the test green;
+- the old check with the hold taken out of the test (an overlay), predicted
+  green: 20 of 20 passed, so the red comes from the late Start alone.
+
+**Near-clones.** The check exists only in the engine's fake (no other test
+double in the repo checks for a session without a Start), and the fix moves it
+for every test that uses the fake. A test exposed to the old read is one that
+ends with a session's Start not yet at the fake, and the engine starts a
+session with no command waiting for it only when the playing selection is
+deleted with an entry after it (edits.go:99) and when `onFinished` follows a
+session that took no successor (transport.go:1428), or past an entry refused
+at the start of either (transport.go:1235). Every other test that reaches
+those waits for the session (`h.be.nth`): `TestDeletingTheSelection`'s rows
+(advance_test.go:134, :160, :183), `TestAPlayWhosePlaybackBeganAnswersAsPlayed`
+(:485), `TestTheTrackIsTheOccurrencesOwnCopy` (track_test.go:163) and the
+prepare row of `TestAPanicInABackendCallIsThatCallsFailure`
+(panic_test.go:84); the rest delete a successor, a paused or stopped
+selection, or the last entry, and start nothing. Of
+`TestTheSelectionMovesAtOnceOnACommand`'s other rows, next and play id wait
+for session 2's Start, and skip for session 3's.
+
+qualificationVersion 18: `internal/player/engine/` is a guarded prefix that
+counts test files too (`scripts/qualification-version -base d8b6897c -head
+HEAD` refused this branch's tests at 16 → 16), and main took 17 in #1361 after
+this branch was cut, so the branch goes to 18, with the runbook's five current
+references and a note of what 18 covers. With the runbook's tags,
+`scripts/qualification-version` says OK from d8b6897c and from main.
+The branch then merged main at `e9079d16` (#1361) and stays at 18.
+
+**Gates**, at the record's commit with the tree clean: the pinned gofmt lists
+none of the changed Go files; `git diff --check d8b6897c HEAD` is empty;
+`make vet` passes; `go test -race -p 4 -count=1 ./internal/player/...` passes
+(the engine package in 13.7 s); `TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` in
+`cmd/bridge` pass; `make docs-check` passes.

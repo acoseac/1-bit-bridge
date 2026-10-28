@@ -281,6 +281,10 @@ type harness struct {
 	ran    chan struct{}
 	down   bool
 	outGen uint64
+	// joining, when set, runs as joined begins, before anything waits for the
+	// engine's goroutines: a test that holds one of them until the harness
+	// waits for it lets it go there (TestTheContractCheckWaitsForAStartStillOnItsWay).
+	joining func()
 
 	appliedMu  sync.Mutex
 	appliedOps []string
@@ -341,7 +345,9 @@ func (h *harness) build() *harness {
 	}
 	// Cleanups run last-registered first: Run's shutdown (registered by
 	// run), then the backend's release of what it held, then the check
-	// that every goroutine the engine started has ended.
+	// that every goroutine the engine started has ended, and only then the
+	// backend's contract check, registered as the backend was made, which
+	// must not read the calls while one of them is still on its way (B576).
 	h.t.Cleanup(func() { h.joined(e) })
 	h.t.Cleanup(be.close)
 	h.eng = e
@@ -419,6 +425,9 @@ func (h *harness) drive(done <-chan struct{}) {
 // joined waits for every goroutine the engine started to end.
 func (h *harness) joined(e *Engine) {
 	h.t.Helper()
+	if h.joining != nil {
+		h.joining()
+	}
 	done := make(chan struct{})
 	go func() {
 		e.wg.Wait()

@@ -890,6 +890,64 @@ func TestTheSelectionMovesAtOnceOnACommand(t *testing.T) {
 	})
 }
 
+// TestTheContractCheckWaitsForAStartStillOnItsWay pins the harness's teardown
+// against the fake's contract check (B576). A Delete of the entry playing
+// answers in its own step, before the session that plays the entry after it
+// has started: an edit answers with its reply and never waits on the
+// transport (TestDeletingTheSelection deletes while a Start or a Release is
+// held). So a test can end while that session's Start is still on its
+// goroutine, short of the backend, and the shutdown's Release of the session
+// gets there first, as Backend's contract allows. The Start is held here
+// until the harness begins to wait for the engine's goroutines, the latest a
+// scheduler could leave it, and the check that every session the backend saw
+// had its Start must count it. A check that read the sessions before those
+// goroutines were joined reported "session 2 had calls and never a Start"
+// (TestTheSelectionMovesAtOnceOnACommand/delete, once in CI under -race).
+func TestTheContractCheckWaitsForAStartStillOnItsWay(t *testing.T) {
+	h := newHarness(t)
+	held := newGate()
+	h.joining = func() {
+		select {
+		case <-held:
+		default:
+			held.open()
+		}
+	}
+	h.boot()
+	ids, _ := h.playing(0, "a", "b", "c")
+	g := holdReleases(h)
+	arrived := false
+	h.be.script(func() {
+		h.be.beforeStart = func(req StartRequest) {
+			if req.Session != 2 {
+				return
+			}
+			h.be.mu.Lock()
+			arrived = true
+			h.be.signal()
+			h.be.mu.Unlock()
+			<-held
+		}
+	})
+	applied := h.appliedMark()
+	done := async(func() error { return h.eng.Delete(bg, ids[0]) })
+	h.waitApplied("delete", applied)
+	g.open()
+	h.must("delete", h.result("delete", done))
+	h.be.waitFor("session 2's Start on its way", func() bool { return arrived })
+	// The teardown's shutdown, begun here so its Release of session 2 is at
+	// the backend before the test ends: session 2's Start is not.
+	h.cancel()
+	h.be.waitFor("the shutdown's release of session 2", func() bool {
+		for _, c := range h.be.calls {
+			if c.kind == "release" && c.session == 2 {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 // holdStart makes session n's Start wait until the returned gate opens;
 // every other Start opens at once.
 func holdStart(h *harness, n SessionID) gate {
