@@ -168,7 +168,8 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-Historical round 3 used qualificationVersion 4; current version is **14** and Contact.SchemaVersion remains **2**. All older
+Historical round 3 used qualificationVersion 4; current version is **14**. A native contact's
+Contact.SchemaVersion remains **2**; a DoP contact's is **3**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
 either audition leg opens. Missing fields are not zero. Both opened-node checks
