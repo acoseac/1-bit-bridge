@@ -213,7 +213,10 @@ func openDSDSink(ctx context.Context, c DSDConfig, h nativeSeams) (*DSDSink, err
 	if c.RingBytes+scratchBytes+packedBytes+nativeLedgerMax*16+8+4096 > MaxRingBytes {
 		return nil, nativeCleanupError(errors.New("native aggregate memory budget"), d.releaseNative())
 	}
-	s := &DSDSink{life: ctx, cfg: c, seams: h, devCfg: dc, params: p, dev: d, word: w * 8, ring: newRing(int64(c.RingBytes/(2*w)), 2*w, int64(p.BufferFrames)), changed: make(chan struct{}), kick: make(chan struct{}, 1), done: make(chan struct{}), scratch: make([]byte, scratchBytes), dopScratch: make([]byte, packedBytes)}
+	// A DoP run's markers start at 05: here for the first run, and again at
+	// every activation that starts a run (activateNative), so a reopened run
+	// never inherits the closed run's phase.
+	s := &DSDSink{life: ctx, cfg: c, seams: h, devCfg: dc, params: p, dev: d, word: w * 8, ring: newRing(int64(c.RingBytes/(2*w)), 2*w, int64(p.BufferFrames)), changed: make(chan struct{}), kick: make(chan struct{}, 1), done: make(chan struct{}), scratch: make([]byte, scratchBytes), dopScratch: make([]byte, packedBytes), dopPhase: 0x05}
 	go s.loopNative()
 	go func() {
 		select {

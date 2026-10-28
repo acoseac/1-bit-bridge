@@ -234,6 +234,8 @@ func (s *DSDSink) activateNative(r *nativeRequest) error {
 		}
 	}
 	if !wasActive || reopened {
+		// A new hardware run: its DoP markers start at 05, before its prefill,
+		// and the retained canonical content is packed from there.
 		s.dopPhase = 0x05
 		return s.nativeSilence(nativeFrames(s.params.RateHz, s.cfg.Prefill), false, false)
 	}
@@ -298,12 +300,10 @@ func (s *DSDSink) writeNative(b []byte, silence, tail, allowPaused bool) error {
 	return s.measureNative()
 }
 func (s *DSDSink) nativeSilence(frames int, tail, allowPaused bool) error {
-	dopSilence := [2]byte{0x69, 0x69}
+	// Canonical DSD silence is 0x69 for either transport: writeNative packs
+	// it for DoP through the content's packer, its markers continuing.
 	for i := range s.scratch {
 		s.scratch[i] = 0x69
-		if s.cfg.Kind == format.KindDoP {
-			s.scratch[i] = dopSilence[i%2]
-		}
 	}
 	for frames > 0 {
 		n := min(frames, s.params.PeriodFrames)

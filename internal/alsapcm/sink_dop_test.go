@@ -22,6 +22,122 @@ func dopKernel(t *testing.T) *fakeKernel {
 	k.hw.formats = append(k.hw.formats, formatS32LE)
 	return k
 }
+
+// dopOddKernel commits a 1001-frame period and a 7007-frame buffer, both
+// odd, so every period's write, the buffer filling and a pause there end on
+// an odd frame index: a phase that restarted at any of them would repeat a
+// marker the oracle does not.
+func dopOddKernel(t *testing.T) *fakeKernel {
+	k := dopKernel(t)
+	k.hw.perMin, k.hw.perMax = 1001, 1001
+	k.hw.bufMin, k.hw.bufMax = 7007, 7007
+	return k
+}
+
+// dopPattern is n bytes per plane, the channels different at every index,
+// with no 0x69 byte, so a frame of silence is never taken for content.
+func dopPattern(n int) (l, r []byte) {
+	l, r = make([]byte, n), make([]byte, n)
+	for i := range n {
+		l[i], r[i] = byte(i*37+11), byte(i*101+0xa5)
+		if l[i] == 0x69 {
+			l[i] = 0x96
+		}
+		if r[i] == 0x69 {
+			r[i] = 0x97
+		}
+	}
+	return l, r
+}
+
+// dopStream is the independent oracle: what a DoP sink must give the
+// kernel, assembled one bit at a time from the DoP definition, never through
+// PackDoP. A channel's word is its next 16 canonical bits, the earliest at
+// bit 15; left-aligned in S32_LE it is 00, the low byte, the high byte, the
+// marker. Both channels of a frame carry one marker, which starts each
+// hardware run at 05 and alternates once per stereo frame through content,
+// padding and silence alike. Content is padded only at a final end, by the
+// 0x69 pattern's bits at their own positions.
+type dopStream struct {
+	out         []byte
+	marker      byte
+	left, right []byte // content bits not yet in a frame, one per byte
+}
+
+func newDoPStream() *dopStream { return &dopStream{marker: 0x05} }
+
+// run starts a new hardware run.
+func (o *dopStream) run() *dopStream { o.marker = 0x05; return o }
+
+// bits appends n bits of each plane from bit from on.
+func (o *dopStream) bits(l, r []byte, from, n int) *dopStream {
+	for i := from; i < from+n; i++ {
+		o.left = append(o.left, (l[i/8]>>(7-i%8))&1)
+		o.right = append(o.right, (r[i/8]>>(7-i%8))&1)
+	}
+	return o.frames(false)
+}
+
+// pad completes the last partial word, as a final end does.
+func (o *dopStream) pad() *dopStream { return o.frames(true) }
+
+// silence appends frames of 0x69 silence, which only ever follow whole
+// words.
+func (o *dopStream) silence(frames int) *dopStream {
+	if len(o.left) != 0 {
+		panic("dopStream: silence inside a partial word")
+	}
+	for range frames {
+		o.emit(0x6969, 0x6969)
+	}
+	return o
+}
+
+func (o *dopStream) frames(pad bool) *dopStream {
+	for len(o.left) >= 16 || (pad && len(o.left) > 0) {
+		var w [2]uint16
+		for ch, bits := range [2][]byte{o.left, o.right} {
+			for j := range 16 {
+				b := (byte(0x69) >> (7 - j%8)) & 1
+				if j < len(bits) {
+					b = bits[j]
+				}
+				w[ch] |= uint16(b) << (15 - j)
+			}
+		}
+		n := min(16, len(o.left))
+		o.left, o.right = o.left[n:], o.right[n:]
+		o.emit(w[0], w[1])
+	}
+	return o
+}
+
+func (o *dopStream) emit(l, r uint16) {
+	for _, v := range [2]uint16{l, r} {
+		o.out = append(o.out, 0, byte(v), byte(v>>8), o.marker)
+	}
+	if o.marker == 0x05 {
+		o.marker = 0xfa
+	} else {
+		o.marker = 0x05
+	}
+}
+
+// sameDoP fails the test unless got is want, naming the first frame that
+// differs.
+func sameDoP(t *testing.T, what string, got, want []byte) {
+	t.Helper()
+	if bytes.Equal(got, want) {
+		return
+	}
+	i := 0
+	for i < min(len(got), len(want)) && got[i] == want[i] {
+		i++
+	}
+	f := i / 8 * 8
+	t.Fatalf("%s: %d bytes, want %d; frame %d is % x, want % x", what, len(got), len(want), f/8, got[f:min(f+8, len(got))], want[f:min(f+8, len(want))])
+}
+
 func TestDoPExactRate(t *testing.T) {
 	for i, name := range []string{"DSD64", "DSD128", "DSD256"} {
 		t.Run(name, func(t *testing.T) {
@@ -211,160 +327,266 @@ func assertDoPMarkers(t *testing.T, b []byte, phase byte) {
 		phase ^= 0xff
 	}
 }
+
+// TestDoPPhase pins the writer-owned marker phase at every kind of boundary,
+// each leaf's boundary on an odd frame index, against the independent
+// oracle of the uninterrupted stream: what the kernel was given must be
+// exactly that, byte for byte. partial1 and partial3 accept one and three
+// frames of a sixteen-frame request, so a phase advanced by the request
+// rather than by the frames accepted repeats a marker.
 func TestDoPPhase(t *testing.T) {
-	for _, name := range []string{"partial1", "partial3", "eintr", "eagain", "buffer", "period", "ring_wrap", "occurrence", "gapless", "kernel_pause", "silence_pause", "reopen", "prefill", "tail", "cut", "cancel", "track_change"} {
-		t.Run(name, func(t *testing.T) {
-			if name == "kernel_pause" || name == "silence_pause" {
-				testDoPPausePhase(t, name)
-				return
-			}
-			k := dopKernel(t)
-			c := dopConfig()
-			n := 32
-			switch name {
-			case "buffer", "period", "ring_wrap":
-				n = 100000
-				c.RingBytes = 40000
-			case "prefill", "reopen":
-				c.Prefill = time.Microsecond
-			case "tail", "track_change":
-				c.Tail = time.Microsecond
-			case "silence_pause":
-				c.Pause = PauseZeros
-				n = 40000
-			}
-			partial := name == "partial1" || name == "partial3" || name == "cancel" || name == "track_change"
-			if partial {
-				take := 1
-				if name == "partial3" {
-					take = 3
-				}
-				k.writes = []fakeWrite{{take: take}, {err: errnoEAGAIN}}
-				k.polls = []fakePoll{{block: true}}
-			}
-			if name == "eintr" {
-				k.writes = []fakeWrite{{err: errnoEINTR}, {take: 1}}
-			}
-			if name == "eagain" {
-				k.writes = []fakeWrite{{err: errnoEAGAIN}, {take: 3}}
-			}
-			s := nativeSink(t, k, c)
-			if name == "reopen" {
-				if e := s.Activate(context.Background(), 1); e != nil {
-					t.Fatal(e)
-				}
-				if e := s.Pause(context.Background()); e != nil {
-					t.Fatal(e)
-				}
-				k.grant(31 * time.Second)
-				nativeWait(t, s, "released pause", func() bool { return s.released })
-				k.revoke()
-				before := len(given(k))
-				if before != 8 {
-					t.Fatalf("outgoing run must have odd count: %d", before)
-				}
-				if e := s.Resume(context.Background()); e != nil {
-					t.Fatal(e)
-				}
-				if e := s.Release(context.Background(), Immediate); e != nil {
-					t.Fatal(e)
-				}
-				assertDoPMarkers(t, given(k)[before:], 5)
-				if len(given(k)[before:]) != 8 {
-					t.Fatal("reopen prefill missing")
-				}
-				return
-			}
-			l, r := bytes.Repeat([]byte{0x81}, n), bytes.Repeat([]byte{0x23}, n)
-			if n <= 32 {
-				if _, e := s.WriteDSD(context.Background(), 1, l, r, 0, n*8); e != nil {
-					t.Fatal(e)
-				}
-				if name == "cut" {
-					ok, e := s.Cut(17)
-					if e != nil || !ok {
-						t.Fatal(ok, e)
-					}
-					n = 3
-				}
-			}
-			if e := s.Activate(context.Background(), 1); e != nil {
-				t.Fatal(e)
-			}
-			if partial {
-				await(t, k.entered, "accepted prefix")
-				if name == "cancel" || name == "track_change" {
-					k.free()
-					mode := Immediate
-					if name == "track_change" {
-						mode = TrackChange
-					}
-					if e := s.Release(context.Background(), mode); e != nil {
-						t.Fatal(e)
-					}
-					want := 8
-					if name == "track_change" {
-						want += 8
-					}
-					if len(given(k)) != want {
-						t.Fatalf("released suffix: %d want %d", len(given(k)), want)
-					}
-					assertDoPMarkers(t, given(k), 5)
-					return
-				}
-				if e := s.Pause(context.Background()); e != nil {
-					t.Fatal(e)
-				}
-				if e := s.Resume(context.Background()); e != nil {
-					t.Fatal(e)
-				}
-			}
-			if name == "kernel_pause" {
-				await(t, k.when(filledAndIdle(16)), "content submitted")
-				if e := s.Pause(context.Background()); e != nil {
-					t.Fatal(e)
-				}
-				if e := s.Resume(context.Background()); e != nil {
-					t.Fatal(e)
-				}
-			}
-			k.free()
-			if n > 32 {
-				if _, e := s.WriteDSD(context.Background(), 1, l, r, 0, n*8); e != nil {
-					t.Fatal(e)
-				}
-			}
-			if name == "occurrence" || name == "gapless" {
-				for i, bits := range []int{1, 7, 15} {
-					if _, e := s.WriteDSD(context.Background(), uint64(i+2), l, r, 0, bits); e != nil {
-						t.Fatal(e)
-					}
-				}
-			}
-			if e := s.Finish(context.Background()); e != nil {
-				t.Fatal(e)
-			}
-			got := given(k)
-			assertDoPMarkers(t, got, 5)
-			if name == "cut" && (len(got) != 16 || got[10] != 0xe9 || got[14] != 0x69) {
-				t.Fatalf("canonical cut lost bits: %x", got)
-			}
-			if partial {
-				want := make([]byte, n*4)
-				for i := 0; i < n/2; i++ {
-					copy(want[i*8:], []byte{0, 0x81, 0x81, 5, 0, 0x23, 0x23, 5})
-					if i%2 == 1 {
-						want[i*8+3] = 0xfa
-						want[i*8+7] = 0xfa
-					}
-				}
-				if !bytes.Equal(got, want) {
-					t.Fatal("resumed suffix changed payload/phase")
-				}
-			}
-		})
+	for _, name := range []string{"buffer", "period", "ring_wrap", "occurrence", "gapless", "partial1", "partial3", "eintr", "eagain"} {
+		t.Run(name, func(t *testing.T) { testDoPStreamPhase(t, name) })
+	}
+	for _, name := range []string{"kernel_pause", "silence_pause", "reopen", "prefill", "tail", "cut", "cancel", "track_change"} {
+		t.Run(name, func(t *testing.T) { testDoPRunPhase(t, name) })
 	}
 }
+
+func testDoPStreamPhase(t *testing.T, name string) {
+	ctx := context.Background()
+	k := dopKernel(t)
+	c := dopConfig()
+	frames := 16
+	switch name {
+	case "buffer":
+		k = dopOddKernel(t)
+		frames = 7007 + 1001 + 3
+	case "period":
+		k = dopOddKernel(t)
+		frames = 3*1001 + 5
+	case "ring_wrap":
+		k = dopOddKernel(t)
+		c.RingBytes = 4 * 7509
+		frames = 3*7509 + 7
+	case "partial1", "partial3":
+		take := 1
+		if name == "partial3" {
+			take = 3
+		}
+		k.writes = []fakeWrite{{take: take}, {err: errnoEAGAIN}}
+		k.polls = []fakePoll{{block: true}}
+	case "eintr":
+		k.writes = []fakeWrite{{err: errnoEINTR}, {take: 1}}
+	case "eagain":
+		k.writes = []fakeWrite{{err: errnoEAGAIN}, {take: 3}}
+	}
+	s := nativeSink(t, k, c)
+	l, r := dopPattern(frames * 2)
+	want := newDoPStream()
+	write := func(id uint64, from, n int) {
+		t.Helper()
+		if got, e := s.WriteDSD(ctx, id, l, r, from, n); e != nil || got != n {
+			t.Fatalf("accepted %d of %d bits: %v", got, n, e)
+		}
+		want.bits(l, r, from, n)
+	}
+	activate := func() {
+		t.Helper()
+		if e := s.Activate(ctx, 1); e != nil {
+			t.Fatal(e)
+		}
+	}
+	switch name {
+	case "ring_wrap":
+		// The ring holds 7509 frames, odd, and keeps the buffer's 7007
+		// behind its writer, so the content wraps it at odd frame indexes in
+		// writes the ring's end cuts short.
+		activate()
+		k.free()
+		write(1, 0, frames*16)
+	case "occurrence":
+		// Compatible occurrences whose joins fall inside words share the
+		// carry: their bits follow each other with nothing between them.
+		at := 0
+		for i, n := range []int{33, 7, 15, 1, 40} {
+			write(uint64(i+1), at, n)
+			at += n
+		}
+		activate()
+		k.free()
+		want.pad()
+	case "gapless":
+		// Occurrence 1 is three whole frames, all written; occurrence 2's
+		// first frame is the next write's, at frame 3.
+		write(1, 0, 48)
+		activate()
+		await(t, k.when(filledAndIdle(3)), "occurrence 1's three frames written")
+		write(2, 48, 80)
+		k.free()
+	case "buffer":
+		write(1, 0, frames*16)
+		activate()
+		await(t, k.when(filledAndIdle(7007)), "the 7007-frame buffer full and the writer waiting for room")
+		k.free()
+	default:
+		write(1, 0, frames*16)
+		activate()
+		if name == "partial1" || name == "partial3" {
+			// The writer waits for room with part of its request accepted;
+			// a pause ends that write and a resume writes the rest.
+			await(t, k.entered, "the accepted prefix and a wait for room")
+			if e := s.Pause(ctx); e != nil {
+				t.Fatal(e)
+			}
+			if e := s.Resume(ctx); e != nil {
+				t.Fatal(e)
+			}
+		}
+		k.free()
+	}
+	if e := s.Finish(ctx); e != nil {
+		t.Fatal(e)
+	}
+	sameDoP(t, name, given(k), want.out)
+	if p := s.Position(); p.Played != p.Submitted {
+		t.Fatalf("played %d of %d submitted bits", p.Played, p.Submitted)
+	}
+}
+
+func testDoPRunPhase(t *testing.T, name string) {
+	ctx := context.Background()
+	k := dopKernel(t)
+	c := dopConfig()
+	frames := 16
+	switch name {
+	case "kernel_pause", "silence_pause":
+		k = dopOddKernel(t)
+		frames = 7007 + 1001 + 3
+		if name == "silence_pause" {
+			c.Pause = PauseZeros
+		}
+	case "reopen", "prefill":
+		c.Prefill = time.Microsecond // one frame
+	case "tail":
+		c.Tail = time.Microsecond // one frame
+		frames = 7
+	case "track_change":
+		c.Tail = time.Microsecond
+	}
+	if name == "cancel" || name == "track_change" {
+		k.writes = []fakeWrite{{take: 1}, {err: errnoEAGAIN}}
+		k.polls = []fakePoll{{block: true}}
+	}
+	s := nativeSink(t, k, c)
+	l, r := dopPattern(frames * 2)
+	want := newDoPStream()
+	if name == "reopen" {
+		// One frame of prefill leaves the run's phase at FA; the run ends with
+		// the pause's release, and the reopened run's prefill starts at 05.
+		if e := s.Activate(ctx, 1); e != nil {
+			t.Fatal(e)
+		}
+		if e := s.Pause(ctx); e != nil {
+			t.Fatal(e)
+		}
+		k.grant(31 * time.Second)
+		nativeWait(t, s, "released pause", func() bool { return s.released })
+		k.revoke()
+		if n := len(given(k)) / 8; n%2 != 1 {
+			t.Fatalf("the released run gave %d frames; the reopen needs an odd count", n)
+		}
+		if e := s.Resume(ctx); e != nil {
+			t.Fatal(e)
+		}
+		if e := s.Release(ctx, Immediate); e != nil {
+			t.Fatal(e)
+		}
+		sameDoP(t, name, given(k), want.silence(1).run().silence(1).out)
+		return
+	}
+	if got, e := s.WriteDSD(ctx, 1, l, r, 0, frames*16); e != nil || got != frames*16 {
+		t.Fatalf("accepted %d: %v", got, e)
+	}
+	if name == "cut" {
+		// The cut keeps 17 bits: a frame and one bit, padded at the end.
+		if ok, e := s.Cut(17); e != nil || !ok {
+			t.Fatal(ok, e)
+		}
+	}
+	if e := s.Activate(ctx, 1); e != nil {
+		t.Fatal(e)
+	}
+	switch name {
+	case "cancel", "track_change":
+		// One frame of the request is accepted and the writer waits for
+		// room: the release ends that write, keeps the frame and drops the
+		// rest; a track change then appends its tail in the same run.
+		await(t, k.entered, "the accepted prefix and a wait for room")
+		k.free()
+		mode := Immediate
+		if name == "track_change" {
+			mode = TrackChange
+		}
+		if e := s.Release(ctx, mode); e != nil {
+			t.Fatal(e)
+		}
+		want.bits(l, r, 0, 16)
+		if name == "track_change" {
+			want.silence(1)
+		}
+		sameDoP(t, name, given(k), want.out)
+		return
+	case "kernel_pause", "silence_pause":
+		// The pause comes once the odd 7007-frame buffer is full and running.
+		await(t, k.when(func(k *fakeKernel) bool { return k.appl == 7007 && k.state == stateRunning && starved(k) }), "a full running buffer")
+		if e := s.Pause(ctx); e != nil {
+			t.Fatal(e)
+		}
+		written := s.Position().Written
+		if name == "silence_pause" {
+			k.grant(2 * s.Params().PeriodTime())
+			await(t, k.when(func(k *fakeKernel) bool { return k.total > 7007 && starved(k) }), "pause silence accepted")
+			if s.Position().Written != written {
+				t.Fatal("pause silence counted as content")
+			}
+		} else {
+			var state int32
+			k.inspect(func(k *fakeKernel) { state = k.state })
+			if state != statePaused {
+				t.Fatalf("the kernel did not pause: state %d", state)
+			}
+		}
+		if e := s.Resume(ctx); e != nil {
+			t.Fatal(e)
+		}
+	}
+	k.free()
+	if e := s.Finish(ctx); e != nil {
+		t.Fatal(e)
+	}
+	got := given(k)
+	switch name {
+	case "kernel_pause":
+		want.bits(l, r, 0, frames*16)
+	case "silence_pause":
+		// The pause's silence lies between frame 7007 and the rest of the
+		// content; it is counted from what was given, and must continue the
+		// markers there.
+		silent := 0
+		for f := 7007; (f+1)*8 <= len(got) && bytes.Equal([]byte{got[f*8+1], got[f*8+2], got[f*8+5], got[f*8+6]}, []byte{0x69, 0x69, 0x69, 0x69}); f++ {
+			silent++
+		}
+		if silent == 0 {
+			t.Fatal("no pause silence given")
+		}
+		want.bits(l, r, 0, 7007*16).silence(silent).bits(l, r, 7007*16, (frames-7007)*16)
+	case "prefill":
+		want.silence(1).bits(l, r, 0, frames*16)
+	case "tail":
+		want.bits(l, r, 0, frames*16).silence(1)
+	case "cut":
+		want.bits(l, r, 0, 17).pad()
+	}
+	sameDoP(t, name, got, want.out)
+	if p := s.Position(); p.Played != p.Submitted {
+		t.Fatalf("played %d of %d submitted bits", p.Played, p.Submitted)
+	}
+}
+
+// TestDoPSilenceVectors checks prefill and tail silence, each leaf for one
+// property alone: no frame of zeros, the 0x69 payload with its zero pad
+// byte, and markers that alternate from 05 through both.
 func TestDoPSilenceVectors(t *testing.T) {
 	for _, name := range []string{"zeros", "payload", "marker"} {
 		t.Run(name, func(t *testing.T) {
@@ -384,10 +606,27 @@ func TestDoPSilenceVectors(t *testing.T) {
 			if len(got) != 177*8*2 {
 				t.Fatal("silence duration", len(got))
 			}
-			assertDoPMarkers(t, got, 5)
-			for i := 0; i < len(got); i += 4 {
-				if got[i+1] != 0x69 || got[i+2] != 0x69 {
-					t.Fatalf("silence payload at %d: %x", i, got[i:i+4])
+			for f := 0; f < len(got)/8; f++ {
+				frame := got[f*8 : f*8+8]
+				switch name {
+				case "zeros":
+					if bytes.Equal(frame, make([]byte, 8)) {
+						t.Fatalf("frame %d is zeros, which a DAC plays as PCM", f)
+					}
+				case "payload":
+					for ch := range 2 {
+						if w := frame[ch*4 : ch*4+3]; !bytes.Equal(w, []byte{0, 0x69, 0x69}) {
+							t.Fatalf("frame %d channel %d payload % x, want 00 69 69", f, ch, w)
+						}
+					}
+				case "marker":
+					m := byte(0x05)
+					if f%2 == 1 {
+						m = 0xfa
+					}
+					if frame[3] != m || frame[7] != m {
+						t.Fatalf("frame %d markers %02x %02x, want %02x", f, frame[3], frame[7], m)
+					}
 				}
 			}
 		})
@@ -440,6 +679,13 @@ func TestDoPInertActivation(t *testing.T) {
 		t.Fatal("paused inert sink wrote")
 	}
 }
+
+// TestDoPTransportIdentity: kind isolates the representation, every other
+// transport field equal; policy holds a sink to the lifecycle policy it was
+// admitted with: a reopened run whose device no longer pauses in the kernel
+// is refused before any write, its content kept and the sink paused. Which
+// policy's sink an occurrence may join is the producer's (playback,
+// TestNativeIntegrationDoPTransitions/policy).
 func TestDoPTransportIdentity(t *testing.T) {
 	t.Run("kind", func(t *testing.T) {
 		a := Transport{Kind: format.KindDoP, RateHz: 176400, Channels: 2, Format: format.S32LE, ValidBits: 1, LogicalRate: 2822400, PackingVersion: 1}
@@ -447,6 +693,33 @@ func TestDoPTransportIdentity(t *testing.T) {
 		b.Kind = format.KindPCM
 		if a.Join(b).Gapless {
 			t.Fatal("kind ignored")
+		}
+	})
+	t.Run("policy", func(t *testing.T) {
+		ctx := context.Background()
+		k := dopKernel(t)
+		c := dopConfig()
+		c.Prefill = time.Microsecond
+		s := nativeSink(t, k, c)
+		if e := s.Activate(ctx, 1); e != nil {
+			t.Fatal(e)
+		}
+		if e := s.Pause(ctx); e != nil {
+			t.Fatal(e)
+		}
+		k.grant(31 * time.Second)
+		nativeWait(t, s, "released pause", func() bool { return s.released })
+		k.revoke()
+		before := len(given(k))
+		k.inspect(func(k *fakeKernel) { k.hw.info &^= infoPause })
+		if e := s.Resume(ctx); e == nil {
+			t.Fatal("a reopened run without the kernel's pause continued a kernel-pause sink")
+		}
+		if len(given(k)) != before {
+			t.Fatal("the refused reopen wrote")
+		}
+		if !s.Position().Paused {
+			t.Fatal("the refused reopen lost the pause")
 		}
 	})
 }
@@ -457,6 +730,11 @@ func TestDoPStorageBudget(t *testing.T) {
 	c.BufferTime = 500 * time.Millisecond
 	probe := nativeSink(t, k, c)
 	period := probe.Params().PeriodFrames
+	// Four canonical bytes a frame in the ring and its scratch, eight
+	// hardware bytes a frame in the packed scratch.
+	if probe.ring.frameBytes != 4 || len(probe.scratch) != period*4 || len(probe.dopScratch) != period*8 {
+		t.Fatalf("ring frame %d bytes, scratch %d and %d bytes for a %d-frame period", probe.ring.frameBytes, len(probe.scratch), len(probe.dopScratch), period)
+	}
 	if e := probe.Release(context.Background(), Immediate); e != nil {
 		t.Fatal(e)
 	}
@@ -470,66 +748,103 @@ func TestDoPStorageBudget(t *testing.T) {
 	}
 }
 
-func testDoPPausePhase(t *testing.T, name string) {
-	k := dopKernel(t)
-	c := dopConfig()
-	if name == "silence_pause" {
-		c.Pause = PauseZeros
+// TestDoPBitTransparent pins that nothing between the canonical bits and
+// the kernel changes a DoP sample. values: every byte value on both
+// channels, written in 13-bit pieces through the carry, reaches the kernel
+// as exactly their DoP, so no gain, dither, mixing or conversion touched
+// them. raw_node: the open is the endpoint's own device node, never a
+// plugin. format, rate, rational and channels: a committed setup other
+// than the one asked for is refused before any write.
+func TestDoPBitTransparent(t *testing.T) {
+	t.Run("values", func(t *testing.T) {
+		k := dopKernel(t)
+		k.free()
+		s := nativeSink(t, k, dopConfig())
+		l, r := make([]byte, 512), make([]byte, 512)
+		for i := range l {
+			l[i], r[i] = byte(i), byte(255-i)
+		}
+		if e := s.Activate(context.Background(), 1); e != nil {
+			t.Fatal(e)
+		}
+		for at := 0; at < len(l)*8; at += 13 {
+			n := min(13, len(l)*8-at)
+			if got, e := s.WriteDSD(context.Background(), 1, l, r, at, n); e != nil || got != n {
+				t.Fatalf("accepted %d of %d: %v", got, n, e)
+			}
+		}
+		if e := s.Finish(context.Background()); e != nil {
+			t.Fatal(e)
+		}
+		sameDoP(t, "values", given(k), newDoPStream().bits(l, r, 0, len(l)*8).out)
+	})
+	t.Run("raw_node", func(t *testing.T) {
+		k := dopKernel(t)
+		s := nativeSink(t, k, dopConfig())
+		if e := s.Release(context.Background(), Immediate); e != nil {
+			t.Fatal(e)
+		}
+		var opened []string
+		k.inspect(func(k *fakeKernel) { opened = append(opened, k.opened...) })
+		if len(opened) != 1 || opened[0] != "/dev/snd/pcmC5D0p" {
+			t.Fatalf("opened %q, want the endpoint's own node alone", opened)
+		}
+	})
+	for _, tc := range []struct {
+		name   string
+		commit func(*hwParams)
+	}{
+		{"format", func(p *hwParams) { p.setMask(hwParamFormat, formatS24LE) }},
+		{"rate", func(p *hwParams) { p.setInteger(hwParamRate, 192000) }},
+		{"rational", func(p *hwParams) { p.rateNum, p.rateDen = 176401, 1 }},
+		{"channels", func(p *hwParams) { p.setInteger(hwParamChannels, 1) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			k := dopKernel(t)
+			k.commit = tc.commit
+			s, e := openDSDSink(context.Background(), dopConfig(), nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(k, k.now, ep, c) }, now: k.now, at: k.nativeAt})
+			if s != nil {
+				s.Release(context.Background(), Immediate)
+				t.Fatal("a converted setup was taken")
+			}
+			if ReasonOf(e) != ReasonMismatch {
+				t.Fatalf("refusal %v, want %s", e, ReasonMismatch)
+			}
+			if len(given(k)) != 0 {
+				t.Fatal("a refused setup was written")
+			}
+			k.checkClosedEach(t)
+		})
 	}
-	s := nativeSink(t, k, c)
-	l, r := bytes.Repeat([]byte{0x81}, 40000), bytes.Repeat([]byte{0x23}, 40000)
-	if _, e := s.WriteDSD(context.Background(), 1, l, r, 0, len(l)*8); e != nil {
-		t.Fatal(e)
+}
+
+// TestDoPUnderrun: the buffer running dry stops the DoP stream and ends the
+// sink with the xrun. The bridge neither fills silence, zeros or 0x69, nor
+// recovers: the kernel was given exactly the content's prefix, and one
+// PREPARE, the open's.
+func TestDoPUnderrun(t *testing.T) {
+	k := dopOddKernel(t)
+	s := nativeSink(t, k, dopConfig())
+	l, r := dopPattern(2 * 9009)
+	if got, e := s.WriteDSD(context.Background(), 1, l, r, 0, 9009*16); e != nil || got != 9009*16 {
+		t.Fatalf("accepted %d: %v", got, e)
 	}
+	k.inspect(func(k *fakeKernel) {
+		k.at = append(k.at, fakeAt{frames: 8008, do: func(k *fakeKernel) { k.state = stateXrun }})
+	})
 	if e := s.Activate(context.Background(), 1); e != nil {
 		t.Fatal(e)
 	}
-	await(t, k.when(func(k *fakeKernel) bool { return k.state == stateRunning && starved(k) }), "full running buffer")
-	if e := s.Pause(context.Background()); e != nil {
-		t.Fatal(e)
-	}
-	before := s.Position().Written
-	var total uint64
-	k.inspect(func(k *fakeKernel) { total = k.total })
-	if name == "silence_pause" {
-		k.grant(2 * s.Params().PeriodTime())
-		await(t, k.when(func(k *fakeKernel) bool { return k.total > total && starved(k) }), "pause silence accepted")
-		if s.Position().Written != before {
-			t.Fatal("silence counted as content")
-		}
-	} else {
-		k.inspect(func(k *fakeKernel) {
-			if k.state != statePaused {
-				t.Error("kernel did not pause")
-			}
-		})
-	}
-	if e := s.Resume(context.Background()); e != nil {
-		t.Fatal(e)
-	}
 	k.free()
-	if e := s.Finish(context.Background()); e != nil {
-		t.Fatal(e)
+	await(t, s.Done(), "the sink to end at the underrun")
+	if ReasonOf(s.Result()) != ReasonXrun {
+		t.Fatalf("result %v, want an xrun", s.Result())
 	}
-	assertDoPMarkers(t, given(k), 5)
-	if s.Position().Played != int64(len(l)*8) {
-		t.Fatal("pause changed logical length")
+	if n := k.callsOf(ioctlPrepare); n != 1 {
+		t.Fatalf("%d PREPAREs: the underrun was recovered", n)
 	}
-	all := given(k)
-	content := 0
-	for i := 0; i < len(all); i += 8 {
-		b := all[i : i+8]
-		if b[1] == 0x69 && b[2] == 0x69 && b[5] == 0x69 && b[6] == 0x69 {
-			continue
-		}
-		if b[1] != 0x81 || b[2] != 0x81 || b[5] != 0x23 || b[6] != 0x23 {
-			t.Fatal("pause changed content payload")
-		}
-		content++
-	}
-	if content != len(l)/2 {
-		t.Fatalf("content frames=%d", content)
-	}
+	sameDoP(t, "underrun", given(k), newDoPStream().bits(l, r, 0, 8008*16).out)
+	k.checkClosedEach(t)
 }
 
 // These admission regression pins reuse the native rate gate; decoders still support DSD512.
