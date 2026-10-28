@@ -45,7 +45,10 @@ const chunkFrames = 4096
 
 // occ is one occurrence the engine handed the session, in play order.
 type occ struct {
-	permission  *permission
+	permission *permission
+	// dsdRefusal is the session's DSD refusal while its approval did not
+	// read: DSD content of the occurrence is refused with it.
+	dsdRefusal  *engine.Unplayable
 	reservation *engine.OccurrenceReservation
 	id          engine.OccurrenceID
 	entry       uint32

@@ -786,67 +786,107 @@ func TestNativeIntegrationDoPProbeEvidence(t *testing.T) {
 	}
 }
 
-func TestNativeIntegrationDoPProductionDisabled(t *testing.T) {
+// TestNativeIntegrationDoPProductionRefusals: serve's and output play's
+// backends, on the real engine over the fake kernel, refuse DSD with the
+// effective set's named reason where it takes no DoP (B470 2d.2, decisions
+// 1 and 2), and go on to play the PCM after it under the PCM-only epoch:
+// under dsdMode native a DoP-only record's DSD is dsd_tuple_not_approved,
+// under dop or auto with allowDoP false dop_not_allowed. No DSD sink is
+// opened and no tuple published, and the PCM entry opens a PCM sink and
+// plays to its end. GET /v1/outputs' view of such a player advertises no
+// DSD codec and no tuple, the epoch's reason beside it, and opens nothing.
+func TestNativeIntegrationDoPProductionRefusals(t *testing.T) {
 	persistentMedium(t)
-	for _, mode := range []string{"serve", "output_play", "api"} {
-		t.Run(mode, func(t *testing.T) {
-			if mode == "api" {
-				// GET /v1/outputs' view of a player whose fresh owner-approved
-				// record holds only DoP: no DSD codec, no DoP tuple, and nothing
-				// opened to say so.
+	dsd, e := os.ReadFile(filepath.Join("..", "..", "internal", "player", "decode", "testdata", "dsd-goldens", "dsd64.dff"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	content := dopContents{"dsd": dsd, "pcm": qualifyWAV(44100)}
+	for _, tc := range []struct {
+		mode   string
+		reason engine.Reason
+		epoch  string
+	}{
+		{"native", playback.ReasonDSDNotApproved, "no_eligible_tuple"},
+		{"dop", playback.ReasonDoPNotAllowed, "dop_not_allowed"},
+		{"auto", playback.ReasonDoPNotAllowed, "dop_not_allowed"},
+	} {
+		for _, surface := range []string{"serve", "output_play", "api"} {
+			t.Run(tc.mode+"/"+surface, func(t *testing.T) {
 				k := alsapcm.NewFakeKernel(t)
-				be := playbacktest.Approved(t, "dop_only", func(cfg playback.Config) (*playback.Backend, error) {
+				build := newServePlayerBackend
+				if surface == "output_play" {
+					build = newOutputPlayBackend
+				}
+				var natives atomic.Int32
+				b := playbacktest.ApprovedWith(t, "dop_only", playbacktest.Options{Mode: tc.mode}, func(cfg playback.Config) (*playback.Backend, error) {
+					cfg.Resolver = content
 					cfg.OpenSink = k.OpenSink
-					return playback.New(cfg)
+					cfg.OpenNative = func(ctx context.Context, c alsapcm.DSDConfig) (*alsapcm.DSDSink, error) {
+						natives.Add(1)
+						return k.OpenNativeSink(ctx, c)
+					}
+					x, e := build(cfg)
+					if e != nil {
+						return nil, e
+					}
+					return x.(*playback.Backend), nil
 				})
-				ready := make(chan struct{})
-				close(ready)
-				cfg := playerOutputConfig(t.TempDir(), nil)
-				seedPlayerUUID(t, cfg.DataDir, thePlayerUUID)
-				f := newBridgeOutput(servePlayerPlan{lists: true}, &bridgePlayer{be: be, ready: ready}, cfg).Facts(context.Background())
-				for _, c := range f.Codecs {
-					if c == "dsf" || c == "dff" {
-						t.Fatalf("codecs %v advertise DSD from a DoP-only record", f.Codecs)
+				if pol := b.Policy(); len(pol.Tuples) != 0 || pol.Reason != tc.epoch {
+					t.Fatalf("published %+v (reason %q), want the PCM-only epoch for %s", pol.Tuples, pol.Reason, tc.epoch)
+				}
+				if surface == "api" {
+					ready := make(chan struct{})
+					close(ready)
+					cfg := playerOutputConfig(t.TempDir(), nil)
+					seedPlayerUUID(t, cfg.DataDir, thePlayerUUID)
+					f := newBridgeOutput(servePlayerPlan{lists: true}, &bridgePlayer{be: b, ready: ready}, cfg).Facts(context.Background())
+					for _, c := range f.Codecs {
+						if c == "dsf" || c == "dff" {
+							t.Fatalf("codecs %v advertise DSD from a DoP-only record", f.Codecs)
+						}
 					}
-				}
-				if f.DSDPlayback == nil {
-					t.Fatal("no DSD authorization epoch published")
-				}
-				for _, tu := range f.DSDPlayback.Tuples {
-					if tu.Format == "S32_LE" {
-						t.Fatalf("published a DoP tuple: %+v", tu)
+					if f.DSDPlayback == nil || len(f.DSDPlayback.Tuples) != 0 || f.DSDPlayback.Reason != tc.epoch || k.View().Opens != 0 {
+						t.Fatalf("dsdPlayback %+v with %d opens, want no tuple, the reason %s and nothing opened", f.DSDPlayback, k.View().Opens, tc.epoch)
 					}
+					return
 				}
-				if len(f.DSDPlayback.Tuples) != 0 || k.View().Opens != 0 {
-					t.Fatalf("tuples %v, opens %d", f.DSDPlayback.Tuples, k.View().Opens)
-				}
-				return
-			}
-			data, e := os.ReadFile(filepath.Join("..", "..", "internal", "player", "decode", "testdata", "dsd-goldens", "dsd64.dff"))
-			if e != nil {
-				t.Fatal(e)
-			}
-			k := alsapcm.NewFakeKernel(t)
-			build := newServePlayerBackend
-			if mode == "output_play" {
-				build = newOutputPlayBackend
-			}
-			b := playbacktest.Approved(t, "dop_only", func(cfg playback.Config) (*playback.Backend, error) {
-				cfg.Resolver = refusedNativeResolver(data)
-				cfg.OpenSink = k.OpenSink
-				x, e := build(cfg)
+				k.Free()
+				eng, e := playOnEngine(t, b, "DoP production refusal engine", "dsd", "pcm")
 				if e != nil {
-					return nil, e
+					t.Fatalf("the PCM after the refused DSD did not play: %v", e)
 				}
-				return x.(*playback.Backend), nil
+				skips := eng.Snapshot().Skips()
+				if len(skips) != 1 {
+					t.Fatalf("skips %+v, want the DSD entry's alone", skips)
+				}
+				for _, skip := range skips {
+					if skip.Reason != tc.reason {
+						t.Fatalf("the DSD entry was refused as %+v, want %s", skip, tc.reason)
+					}
+				}
+				timer := time.NewTimer(30 * time.Second)
+				defer timer.Stop()
+				for {
+					changed, s := eng.Changed(), eng.Snapshot()
+					if len(s.Faults()) > 0 {
+						t.Fatalf("the PCM faulted: %+v", s.Faults())
+					}
+					if s.State() == engine.Stopped && s.TrackCount() == 1 {
+						break
+					}
+					select {
+					case <-changed:
+					case <-timer.C:
+						t.Fatalf("the PCM never played to its end: %v, %d heard", s.State(), s.TrackCount())
+					}
+				}
+				if v := k.View(); natives.Load() != 0 || v.Opens != 1 || v.Committed != "S32_LE" {
+					t.Fatalf("%d DSD opens and the DAC %+v, want the PCM's one S32_LE open alone", natives.Load(), v)
+				}
+				k.CheckClosedEach(t)
 			})
-			if _, e = playOneOnEngine(t, b, "dsd", "DoP production refusal engine"); e == nil {
-				t.Fatal("production selected DoP")
-			}
-			if k.View().Opens != 0 || len(b.Policy().Tuples) != 0 {
-				t.Fatal("production opened/published DoP")
-			}
-		})
+		}
 	}
 }
 
@@ -1006,11 +1046,44 @@ func (s *backendScenario) await(t *testing.T, what string, cond func(lifecycleVi
 	}
 }
 
-// key sends one key, then grants the DAC grant of play, if any.
-func (s *backendScenario) key(b byte, grant time.Duration) {
-	nativeKey(s.keys, b)
-	if grant > 0 {
-		s.k.Grant(grant)
+// key sends one key.
+func (s *backendScenario) key(b byte) { nativeKey(s.keys, b) }
+
+// grantable is a DAC the scenario may let play 20 ms more: its writer waits
+// on it for time, and the stream fills, drains or holds a buffer of 8,820
+// frames or more, 50 ms at DoP64's carrier. The fake plays a grant at once,
+// whatever the producer has handed the writer: a writer that waits idle on
+// a running stream plays the grant out of what the stream holds, and
+// more than it holds would run it dry, an underrun no producer caused. A
+// grant to a sink still filling is spent by its writer's idle waits.
+func grantable(v alsapcm.KernelView) bool {
+	return v.Starved && (v.State != "RUNNING" || v.Appl-v.Consumed >= 8820)
+}
+
+// playUntil lets the DAC play, 20 ms at a time and each once it is
+// grantable, until the scenario's loop has seen cond hold; it fails at once
+// when the run ends first.
+func (s *backendScenario) playUntil(t *testing.T, what string, cond func(lifecycleView) bool) {
+	t.Helper()
+	timer := time.NewTimer(30 * time.Second)
+	defer timer.Stop()
+	for {
+		s.mu.Lock()
+		v, ch := s.view, s.changed
+		s.mu.Unlock()
+		if v.Snapshot != nil && cond(v) {
+			return
+		}
+		select {
+		case <-ch:
+		case <-s.k.When(grantable):
+			s.k.Grant(20 * time.Millisecond)
+		case code := <-s.done:
+			s.done <- code
+			t.Fatalf("the run ended (exit %d: %q) before %s", code, s.errout.String(), what)
+		case <-timer.C:
+			t.Fatalf("the scenario never reached %s; it last saw %v, the DAC %+v", what, v.Actions, s.k.View())
+		}
 	}
 }
 
@@ -1094,22 +1167,21 @@ func TestNativeIntegrationDoPBackendLifecycle(t *testing.T) {
 		"--manifest=" + filepath.Join(q.dir, "manifest.json"), "--fixtures=" + q.dir, "--contact-report=" + filepath.Join(q.dir, "contact.json"), "--mixer-snapshot=" + filepath.Join(q.dir, "mixer.txt"),
 		"--report=" + filepath.Join(q.dir, "report.json"), "--scenario=backend-lifecycle", "--provisional-record=" + filepath.Join(q.dir, "candidate.json"), "--config=fake", "pcm176", "dsda", "dsdb", "pcm44"}
 	s := startBackendScenario(t, q, args)
-	s.k.Grant(2500 * time.Millisecond)
-	s.await(t, "the first DoP fixture heard after the same-carrier PCM edge", heardAs("file:2", engine.Playing))
-	s.key(' ', 0)
+	s.playUntil(t, "the first DoP fixture heard after the same-carrier PCM edge", heardAs("file:2", engine.Playing))
+	s.key(' ')
 	s.await(t, "the DoP pause", hasActions("pause"))
 	s.k.Grant(31 * time.Second)
 	s.await(t, "the DoP pause's release at 30 s", hasActions("released"))
 	s.k.Revoke()
-	s.key(' ', 0)
-	s.await(t, "the resume's reopen", hasActions("resume", "reopened"))
-	s.key('n', time.Second)
-	s.await(t, "next onto the second DoP fixture", hasActions("next"))
-	s.key('p', time.Second)
-	s.await(t, "previous back onto the first", hasActions("previous"))
-	s.key('x', 0)
-	s.await(t, "Stop on a DoP fixture", hasActions("stop"))
-	s.key(' ', 0)
+	s.key(' ')
+	s.playUntil(t, "the resume's reopen", hasActions("resume", "reopened"))
+	s.key('n')
+	s.playUntil(t, "next onto the second DoP fixture", hasActions("next"))
+	s.key('p')
+	s.playUntil(t, "previous back onto the first", hasActions("previous"))
+	s.key('x')
+	s.playUntil(t, "Stop on a DoP fixture", hasActions("stop"))
+	s.key(' ')
 	s.k.Free()
 	s.answer(t, "DAC DSD indicator confirmed")
 	s.answer(t, "L/R pitch and duration correct")
@@ -1140,15 +1212,14 @@ func TestNativeIntegrationApprovedNativeDoPNative(t *testing.T) {
 	native, dop := q.approvedEndpoints()
 	q.bundle("contacts.json", q.nativeTuple(), q.dopTuple())
 	s := startBackendScenario(t, q, q.transitionArgs())
-	s.k.Grant(2500 * time.Millisecond)
-	s.await(t, "the DoP fixture heard after the native one", heardAs("file:2", engine.Playing))
-	s.key('n', time.Second)
-	s.await(t, "next from DoP onto native", hasActions("next"))
-	s.key('p', time.Second)
-	s.await(t, "previous from native onto DoP", hasActions("previous"))
-	s.key('x', 0)
-	s.await(t, "Stop", hasActions("stop"))
-	s.key(' ', 0)
+	s.playUntil(t, "the DoP fixture heard after the native one", heardAs("file:2", engine.Playing))
+	s.key('n')
+	s.playUntil(t, "next from DoP onto native", hasActions("next"))
+	s.key('p')
+	s.playUntil(t, "previous from native onto DoP", hasActions("previous"))
+	s.key('x')
+	s.playUntil(t, "Stop", hasActions("stop"))
+	s.key(' ')
 	s.k.Free()
 	s.answer(t, "DAC DSD indicator confirmed")
 	s.answer(t, "L/R pitch and duration correct")

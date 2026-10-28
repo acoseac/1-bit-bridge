@@ -216,7 +216,7 @@ func runOutputPlay(ctx context.Context, args []string, env outputPlayEnv, stdout
 	}
 	defer cleanup()
 	out := &playOut{w: stdout, now: env.now}
-	r := &playRun{authorization: &playback.Authorization{StateDir: cfg.DataDir, Record: player.DSDQualification, Mode: player.EffectiveDSDMode(), Sysfs: alsa.SysfsReader{Root: env.trees.sysfs}}, env: env, out: out, stderr: stderr, files: files, keys: *keys, release: release, dsd: player.EffectiveDSDMode(),
+	r := &playRun{authorization: &playback.Authorization{StateDir: cfg.DataDir, Record: player.DSDQualification, Mode: player.EffectiveDSDMode(), AllowDoP: player.AllowsDoP(), Sysfs: alsa.SysfsReader{Root: env.trees.sysfs}}, env: env, out: out, stderr: stderr, files: files, keys: *keys, release: release, dsd: player.EffectiveDSDMode(),
 		observer: binding.Observer{Proc: alsa.Reader{ProcRoot: env.trees.proc}, Sysfs: alsa.SysfsReader{Root: env.trees.sysfs}}}
 	r.report, err = reports.prepare(r.authorization, env.trees.or(hostTrees))
 	if err != nil {

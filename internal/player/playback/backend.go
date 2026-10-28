@@ -158,6 +158,7 @@ type Backend struct {
 	liveOutput          *output
 	publishedPermission *permission
 	cliCandidate        bool
+	transitions         *TransitionPlans
 	lastEdge            string
 	lastPlan            *engine.NativePlan
 	nativeAdmission     func(format.NativeDSD) (engine.NativePlan, error)

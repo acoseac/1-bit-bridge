@@ -106,6 +106,18 @@ func vcsBuild() (sha string, modified bool) {
 	return sha, modified
 }
 
+// nativePlatform is the platform and Go version a report records.
+func nativePlatform() (platform, goVersion string) {
+	return runtime.GOOS + "/" + runtime.GOARCH, runtime.Version()
+}
+
+// nativeEnvironment is a report's Environment on this platform and Go,
+// running kernel: what an approval and its evidence are bound to.
+func nativeEnvironment(kernel string) string {
+	platform, goVersion := nativePlatform()
+	return qualification.Digest([]string{platform, goVersion, kernel})
+}
+
 // productionNativeOpen has its own test guard, in addition to the ALSA guard.
 func productionNativeOpen(ctx context.Context, c alsapcm.DSDConfig) (nativeTestSink, error) {
 	if testing.Testing() {
@@ -280,9 +292,6 @@ func parseNativeOptions(args []string, w io.Writer) (nativeOptions, error) {
 	if o.scenario == "level-check" && o.ack != "off-ear" {
 		return o, errors.New("--ack-level must be off-ear for level-check")
 	}
-	if o.transport == "dop" && o.scenario == "backend-lifecycle" {
-		return o, errors.New("DoP backend-lifecycle qualification is reserved for 2d.2")
-	}
 	if o.transport == "dop" && o.scenario == "level-check" && len(o.list) != 1 {
 		return o, errors.New("DoP contact requires exactly one fixture")
 	}
@@ -326,8 +335,9 @@ type nativeReport struct {
 	// tuple's: a PCM edge's, or a transition's native endpoint's.
 	EdgeOpened []alsapcm.Params `json:",omitempty"`
 	// Endpoints and Qualification are a transition report's: the approved
-	// native and DoP policies it played, native first, and the approved
-	// record it read them from.
+	// native and DoP policies it played, native first, each by its ID and
+	// the digest of the whole policy, and the approved record it read them
+	// from, by its name and the digest the record carries.
 	Endpoints     []qualification.PolicyRef `json:",omitempty"`
 	Qualification *qualification.Evidence   `json:",omitempty"`
 }
@@ -342,10 +352,7 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 		fmt.Fprintln(errout, "native harness requires Linux")
 		return 1
 	}
-	if o.scenario == qualification.TransitionScenario {
-		fmt.Fprintln(errout, "approved-native-dop-native is not in this build")
-		return 1
-	}
+	transition := o.scenario == qualification.TransitionScenario
 	resolved, check, e := env.resolve(ctx, o.config)
 	ep := resolved.Endpoint
 	if e != nil {
@@ -370,10 +377,12 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 		byID[f.ID] = f
 	}
 	anyNative := false
+	// The transition scenario's fixtures are at its two policies' rates,
+	// which the approved record names: they are checked with its endpoints.
 	for _, id := range o.list {
 		f, ok := byID[id]
 		anyNative = anyNative || f.Container == "DSF" || f.Container == "DFF"
-		if !ok || ((f.Rate != o.rate || (f.Container != "DSF" && f.Container != "DFF")) && !(o.scenario == "backend-lifecycle" && f.Container == "WAV")) {
+		if !transition && (!ok || ((f.Rate != o.rate || (f.Container != "DSF" && f.Container != "DFF")) && !(o.scenario == "backend-lifecycle" && f.Container == "WAV"))) {
 			fmt.Fprintln(errout, "fixture-list tuple mismatch")
 			return 1
 		}
@@ -382,9 +391,14 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 		fmt.Fprintln(errout, "backend lifecycle requires native execution")
 		return 1
 	}
-	if o.transport == "dop" {
+	// A DoP fixture's PCM reference plays at its carrier, where a run plays
+	// one: a PCM edge's own fixture has none, and the transition plays none.
+	if o.transport == "dop" && !transition {
 		for _, id := range o.list {
 			f := byID[id]
+			if f.Container == "WAV" {
+				continue
+			}
 			ref := byID[f.PCMReference]
 			if ref.Rate != o.rate/16 {
 				fmt.Fprintln(errout, "DoP requires same-carrier PCM reference")
@@ -422,7 +436,15 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 		env.forceS32 = true
 	}
 	mh := fmt.Sprintf("%x", sha256.Sum256(b))
-	if o.scenario != "level-check" {
+	var approved *approvedTransition
+	if transition {
+		t, e := readApprovedTransition(o, env, resolved, byID, tuple, mh, a, controls)
+		if e != nil {
+			fmt.Fprintln(errout, e)
+			return 1
+		}
+		approved = &t
+	} else if o.scenario != "level-check" {
 		var contact qualification.Contact
 		b, e := qualification.ReadEvidenceFile(o.contact)
 		if e == nil {
@@ -466,7 +488,13 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 		}
 		report.FeatureUnit = &gain
 	}
-	if env.identity != nil {
+	switch {
+	case approved != nil:
+		// The identity and the kernel the approved record was read against.
+		report.Identity, report.Kernel = approved.identity, approved.kernel
+		report.Endpoints = []qualification.PolicyRef{{ID: approved.native.ID, SHA256: qualification.Digest(approved.native)}, {ID: approved.dop.ID, SHA256: qualification.Digest(approved.dop)}}
+		report.Qualification = &qualification.Evidence{Path: filepath.Base(o.qualification), SHA256: approved.record.SHA256}
+	case env.identity != nil:
 		report.Identity, e = env.identity(ep.Card, ep.Device, resolved.Subdevice)
 		if e != nil {
 			fmt.Fprintln(errout, e)
@@ -489,15 +517,14 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 			}
 		}
 	}
-	if env.kernel != nil {
+	if env.kernel != nil && approved == nil {
 		report.Kernel, e = env.kernel()
 		if e != nil {
 			fmt.Fprintln(errout, e)
 			return 1
 		}
 	}
-	report.Platform = runtime.GOOS + "/" + runtime.GOARCH
-	report.GoVersion = runtime.Version()
+	report.Platform, report.GoVersion = nativePlatform()
 	report.BuildSHA = "unverified"
 	build := env.build
 	if build == nil {
@@ -508,7 +535,7 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 		report.BuildSHA = sha
 	}
 	report.Modified = modified
-	report.Environment = qualification.Digest([]string{report.Platform, report.GoVersion, report.Kernel})
+	report.Environment = nativeEnvironment(report.Kernel)
 	w := format.DSDWordBytes(format.ALSAFormat(o.format))
 	if o.transport == "dop" {
 		w = 2
@@ -587,7 +614,7 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 			}
 			defer func() { runErr = errors.Join(runErr, restore()) }()
 		}
-		return executeNativeTest(runCtx, cancelRun, o, env, ep, admit, m, byID, reader, out, &report)
+		return executeNativeTest(runCtx, cancelRun, o, env, ep, admit, m, byID, approved, reader, out, &report)
 	}()
 	after := report.After
 	observationsMu.Lock()

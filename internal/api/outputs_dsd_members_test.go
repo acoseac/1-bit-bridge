@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 )
@@ -39,8 +40,13 @@ func TestDSDOutputProtocolMembers(t *testing.T) {
 				f.DSDPlayback.Tuples = []OutputDSDTuple{{}}
 			}
 			if name == "populated" {
-				f.DSDPlayback = &OutputDSDPlayback{BootID: "boot", PolicyGeneration: ^uint64(0), QualificationRevision: "revision", Reason: "reason", Tuples: []OutputDSDTuple{{Format: "DSD_U32_BE", BitRate: 2822400, Channels: 2, PolicyID: "native", Pause: "kernel", TailMS: 10, PrefillMS: 20}}}
-				f.Playback = &OutputPlayback{BootID: "boot", PolicyGeneration: ^uint64(0), Session: ^uint64(0), Occurrence: ^uint64(0), State: "open", Format: "DSD_U32_BE", RateHz: 88200, LogicalRate: 2822400, Channels: 2, ValidBits: 1, PolicyID: "native"}
+				// Every optional member set, B470 2d.2's included: a DoP
+				// tuple and a DoP occurrence, with the epoch's qualification.
+				observed := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+				f.DSDPlayback = &OutputDSDPlayback{BootID: "boot", PolicyGeneration: ^uint64(0), QualificationRevision: "revision", Reason: "reason", Model: "iFi GO bar", BCDDevice: "0123", QualifiedOn: "2026-10-28",
+					Tuples: []OutputDSDTuple{{Format: "S32_LE", BitRate: 2822400, Channels: 2, PolicyID: "dop64", Pause: "kernel", TailMS: 10, PrefillMS: 20, Transport: "dop"}}}
+				f.Playback = &OutputPlayback{BootID: "boot", PolicyGeneration: ^uint64(0), Session: ^uint64(0), Occurrence: ^uint64(0), State: "open", Format: "S32_LE", RateHz: 176400, LogicalRate: 2822400, Channels: 2, ValidBits: 1, PolicyID: "dop64",
+					Transport: "dop", PackingVersion: 1, ObservedAt: &observed, QualificationRevision: "revision"}
 			}
 			fake.set(f)
 			r := httptest.NewRequest(http.MethodGet, "/v1/outputs", nil)

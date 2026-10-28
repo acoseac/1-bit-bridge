@@ -112,7 +112,11 @@ func (s *session) next() step {
 	if !o.opened() {
 		return step{kind: stepWait, wait: o.done}
 	}
-	if c := s.cur; c != nil && !c.drained && !c.closed && c.transport == o.transport && (o.plan == nil || c.policyID == o.plan.PolicyID) {
+	// One answer decides a join, Prepared's and this: Transport.Join, which
+	// tells same-carrier PCM from DoP by kind, valid bits, logical rate and
+	// packing version, never by format and rate alone; a DSD successor
+	// joins only under its sink's policy too.
+	if c := s.cur; c != nil && !c.drained && !c.closed && c.transport.Join(o.transport).Gapless && (o.plan == nil || c.policyID == o.plan.PolicyID) {
 		if err := s.b.checkEdge(o.transport, o.plan, o.permission); err != nil {
 			o.refused = &engine.Unplayable{Reason: "transition_unapproved", Detail: err.Error()}
 			o.dropped = true

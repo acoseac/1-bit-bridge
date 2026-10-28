@@ -900,7 +900,7 @@ When none holds, `state` is the transport's: `playing` (a track that is starting
 
 **`libraryScope`** is `self`: the player plays this bridge's own tracks, the ones it would not refuse as `not_indexed` (no row of the library's index has it), `routed` (an upstream server's track) or `outside_library` (a file outside every library root configured now). An OpenHome controller queues one by the URI the player's Source takes in an Insert, `http://<host>:<port>/dlna/file/<id>`: a host this bridge advertises, the DLNA listener's port, and the track's DLNA id (B470 PR 5a4).
 
-**`fixedVolume`** is `true` while the player has no volume control (`output.player.mixer` none, the one this release takes): the DAC receives the file's own level. **`dsdMode`** is `off` (default), `native`, `auto` or `dop`, and **`allowDoP`** is the configured boolean, both as the player took them at boot. These settings alone grant no DSD permission. Native playback requires a fresh matching owner-approved record. DoP packing is not implemented in this release: DoP-only tuples are omitted, and no mode converts DSD to PCM.
+**`fixedVolume`** is `true` while the player has no volume control (`output.player.mixer` none, the one this release takes): the DAC receives the file's own level. **`dsdMode`** is `off` (default), `native`, `auto` or `dop`, and **`allowDoP`** is the configured boolean, both as the player took them at boot. These settings alone grant no DSD permission. Native playback requires a fresh matching owner-approved record, and DoP playback an approved DoP policy in it with `dsdMode` `dop` or `auto` and `allowDoP` true. No mode converts DSD to PCM: DoP carries the DSD bits unchanged in a PCM word.
 
 **`codecs`** are the containers the player plays in this release: `flac`, `wav`, `aiff` and `alac` (ALAC in an M4A). A client matches a track by its `codec` in `/v1/manifest`:
 
@@ -928,9 +928,9 @@ number with no fractional part; generations, session and occurrence are unsigned
 
 | Object | Always present members (JSON types) | Omitted when empty |
 |---|---|---|
-| `dsdPlayback` | `bootId`: string; `policyGeneration`: integer; `tuples`: array of tuple objects (never null, `[]` when empty) | `qualificationRevision`: string; `reason`: string |
-| Each tuple | `format`: string; `bitRate`: integer; `channels`: integer; `policyId`: string; `pause`: string; `tailMs`: integer; `prefillMs`: integer | None |
-| `playback` | `bootId`: string; `policyGeneration`: integer; `session`: integer; `occurrence`: integer; `state`: string; `format`: string; `rateHz`: integer; `logicalRate`: integer; `channels`: integer; `validBits`: integer | `policyId`: string |
+| `dsdPlayback` | `bootId`: string; `policyGeneration`: integer; `tuples`: array of tuple objects (never null, `[]` when empty) | `qualificationRevision`: string; `reason`: string; `model`: string; `bcdDevice`: string; `qualifiedOn`: string |
+| Each tuple | `format`: string; `bitRate`: integer; `channels`: integer; `policyId`: string; `pause`: string; `tailMs`: integer; `prefillMs`: integer | `transport`: string |
+| `playback` | `bootId`: string; `policyGeneration`: integer; `session`: integer; `occurrence`: integer; `state`: string; `format`: string; `rateHz`: integer; `logicalRate`: integer; `channels`: integer; `validBits`: integer | `policyId`: string; `transport`: string; `packingVersion`: integer; `observedAt`: string; `qualificationRevision`: string |
 
 No required member is omitted for zero or an empty string. Tuple `tailMs` and
 `prefillMs` are signed 64-bit integer milliseconds, including zero. Tuple
@@ -942,11 +942,14 @@ The current token vocabularies are exact and case-sensitive:
 
 | Field | Tokens |
 |---|---|
-| `dsdPlayback.tuples[].format` | `DSD_U32_BE`, `DSD_U32_LE`, `DSD_U16_LE` |
+| `dsdPlayback.tuples[].format` | `DSD_U32_BE`, `DSD_U32_LE`, `DSD_U16_LE`, `S32_LE` |
+| `dsdPlayback.tuples[].transport` | `dop` |
 | `dsdPlayback.tuples[].pause` | `kernel`, `silence` |
 | `playback.state` | `open`, `released`, `revoked` |
+| `playback.transport` | `dop`, `pcm` |
 | `playback.format` (PCM) | `S16_LE`, `S24_3LE`, `S24_LE`, `S32_LE` |
 | `playback.format` (native DSD) | `DSD_U32_BE`, `DSD_U32_LE`, `DSD_U16_LE` |
+| `playback.format` (DoP) | `S32_LE` |
 
 Format sources are `format.DSDU32BE`, `format.DSDU32LE`, `format.DSDU16LE`
 (`internal/player/format/dsd_pack.go`) and `format.S16LE`, `format.S243LE`,
@@ -956,7 +959,9 @@ constants in `qualification.readApproval` (`internal/player/qualification/approv
 `kernel` uses ALSA PAUSE and `silence` writes DSD silence. Playback state tokens
 are literal constants in `playback.Facts`, `observeOccurrence`, `observeNote`
 (`internal/player/playback/live.go`) and `Backend.Revoke` (`native.go`), not
-named enum constants. No DoP occurrence is emitted in this release.
+named enum constants. Transport tokens are `playback.TransportDoP` and
+`playback.TransportPCM` (`internal/player/playback/edges.go`); a tuple names
+`dop` alone, and a native DSD tuple or occurrence names no transport.
 `dsdPlayback.reason` is free text for display only, not a closed token contract
 (the backend initializes and publishes it in `backend.go` and `authorization.go`).
 It is distinct from the baseline `bridge.reason` table above.

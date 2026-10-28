@@ -72,9 +72,14 @@ func TestProductionPlayReportFlags(t *testing.T) {
 	}
 }
 
+// TestCandidateConstructorIsCLIOnly: the CLI-only constructors, the
+// candidate's (NewQualificationBackend) and the approved transition
+// scenario's (NewTransitionQualificationBackend), are each called once, in
+// the dsd-test backend scenarios and nowhere else: serve and output play
+// build with New, which admits neither a candidate nor an edge under test.
 func TestCandidateConstructorIsCLIOnly(t *testing.T) {
 	roots := []string{"../../internal", "."}
-	calls := 0
+	calls := map[string]int{}
 	for _, root := range roots {
 		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -93,12 +98,12 @@ func TestCandidateConstructorIsCLIOnly(t *testing.T) {
 					return true
 				}
 				sel, ok := c.Fun.(*ast.SelectorExpr)
-				if !ok || sel.Sel.Name != "NewQualificationBackend" {
+				if !ok || (sel.Sel.Name != "NewQualificationBackend" && sel.Sel.Name != "NewTransitionQualificationBackend") {
 					return true
 				}
-				calls++
+				calls[sel.Sel.Name]++
 				if filepath.Base(path) != "output_dsdtest_backend.go" {
-					t.Errorf("candidate constructor outside CLI lifecycle: %s", path)
+					t.Errorf("%s outside the CLI backend scenarios: %s", sel.Sel.Name, path)
 				}
 				return true
 			})
@@ -108,8 +113,8 @@ func TestCandidateConstructorIsCLIOnly(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if calls != 1 {
-		t.Fatalf("candidate constructor calls=%d", calls)
+	if calls["NewQualificationBackend"] != 1 || calls["NewTransitionQualificationBackend"] != 1 {
+		t.Fatalf("CLI-only constructor calls %v, want one of each", calls)
 	}
 }
 

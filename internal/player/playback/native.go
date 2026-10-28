@@ -28,7 +28,17 @@ func (b *Backend) openNativeContent(ctx context.Context, o *occ, d decode.DSDDec
 		return
 	}
 	admit := b.nativeAdmission
-	if admit == nil {
+	switch {
+	case admit != nil:
+	case o.permission == nil && o.dsdRefusal != nil:
+		u := *o.dsdRefusal
+		o.refused = &u
+		return
+	case b.transitions != nil:
+		admit = func(f format.NativeDSD) (engine.NativePlan, error) {
+			return o.permission.selectTransition(o.ref, f, b.transitions)
+		}
+	default:
 		admit = o.permission.selectNative
 	}
 	plan, err := admit(o.nativeFormat)
@@ -388,6 +398,7 @@ func (b *Backend) Revoke(r engine.RevokeInput) {
 	b.policyMu.Lock()
 	if active && b.liveFacts != nil && b.liveFacts.Session == r.Session && b.liveFacts.LogicalRate > 0 && b.liveFacts.State == "open" {
 		b.liveFacts.State = "revoked"
+		b.liveFacts.ObservedAt = time.Now()
 	}
 	b.policyMu.Unlock()
 	wake(s.wakeP)
