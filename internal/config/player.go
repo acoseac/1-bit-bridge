@@ -107,12 +107,16 @@ type PlayerConfig struct {
 	PauseReleaseSeconds *int `yaml:"pauseReleaseSeconds,omitempty"`
 	// Device is the binding: which DAC the player opens.
 	Device PlayerDevice `yaml:"device,omitempty"`
-	// DSDMode is auto, native, dop or off (default). Native requires local
-	// owner approval; DoP remains unavailable. DSD is never converted.
+	// DSDMode is auto, native, dop or off (default). Every mode but off plays
+	// DSD only under a local owner-approved policy: native its native ones,
+	// dop its DoP ones, auto native first and DoP only at a rate the record
+	// holds no native policy for (B470 2d.2). DSD is never converted.
 	DSDMode string `yaml:"dsdMode,omitempty"`
 	// DSDQualification names an owner-approved record within the bridge state directory.
 	DSDQualification string `yaml:"dsdQualification,omitempty"`
-	// AllowDoP requests DoP, which remains unavailable until PR 2d. Nil is false.
+	// AllowDoP lets dop and auto play an approved DoP policy. Nil is false:
+	// the block still loads, and DoP-only DSD is refused as dop_not_allowed
+	// while PCM plays.
 	AllowDoP *bool `yaml:"allowDoP,omitempty"`
 	// Mixer is the hardware volume control, and this release takes type
 	// none alone: the output is fixed.

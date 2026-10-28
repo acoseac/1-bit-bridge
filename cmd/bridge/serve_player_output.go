@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -151,19 +152,51 @@ func (b *bridgeOutput) Facts(ctx context.Context) api.BridgeOutputFacts {
 	if ready {
 		if be, ok := b.p.be.(*playback.Backend); ok {
 			policy, live := be.Facts()
-			facts.DSDPlayback = &api.OutputDSDPlayback{BootID: policy.BootID, PolicyGeneration: policy.Generation, QualificationRevision: policy.Revision, Reason: policy.Reason, Tuples: []api.OutputDSDTuple{}}
-			for _, p := range policy.Tuples {
-				facts.DSDPlayback.Tuples = append(facts.DSDPlayback.Tuples, api.OutputDSDTuple{Format: p.Tuple.Format, BitRate: p.Tuple.BitRate, Channels: 2, PolicyID: p.PolicyID, Pause: p.Pause, TailMS: p.Tail.Milliseconds(), PrefillMS: p.Prefill.Milliseconds()})
-			}
+			facts.DSDPlayback, facts.Playback = bridgeDSDFacts(policy, live)
+			facts.DSDPlayback.Model = playerModelText(facts.DSDPlayback.Model, b.p.device)
 			if len(policy.Tuples) > 0 {
 				facts.Codecs = append(facts.Codecs, "dsf", "dff")
-			}
-			if live != nil {
-				facts.Playback = &api.OutputPlayback{BootID: live.BootID, PolicyGeneration: live.PolicyGeneration, Session: uint64(live.Session), Occurrence: uint64(live.Occurrence), State: live.State, Format: live.Format, RateHz: live.RateHz, LogicalRate: live.LogicalRate, Channels: live.Channels, ValidBits: live.ValidBits, PolicyID: live.PolicyID}
 			}
 		}
 	}
 	return facts
+}
+
+// bridgeDSDFacts is the element's dsdPlayback and playback from one read of
+// the backend's facts (playback.Backend.Facts): the published epoch with the
+// owner qualification its record states, each tuple naming its transport
+// (absent, native DSD), and the current occurrence's observation, nil
+// before one is installed.
+func bridgeDSDFacts(policy playback.PlayerPolicy, live *playback.PlaybackFacts) (*api.OutputDSDPlayback, *api.OutputPlayback) {
+	dsd := &api.OutputDSDPlayback{BootID: policy.BootID, PolicyGeneration: policy.Generation, QualificationRevision: policy.Revision, Reason: policy.Reason, Tuples: []api.OutputDSDTuple{},
+		Model: policy.Model, BCDDevice: policy.BCDDevice, QualifiedOn: policy.QualifiedOn}
+	for _, p := range policy.Tuples {
+		dsd.Tuples = append(dsd.Tuples, api.OutputDSDTuple{Format: p.Tuple.Format, BitRate: p.Tuple.BitRate, Channels: 2, PolicyID: p.PolicyID, Pause: p.Pause, TailMS: p.Tail.Milliseconds(), PrefillMS: p.Prefill.Milliseconds(),
+			Transport: playback.TupleTransport(p.Tuple)})
+	}
+	if live == nil {
+		return dsd, nil
+	}
+	out := &api.OutputPlayback{BootID: live.BootID, PolicyGeneration: live.PolicyGeneration, Session: uint64(live.Session), Occurrence: uint64(live.Occurrence), State: live.State, Format: live.Format, RateHz: live.RateHz, LogicalRate: live.LogicalRate, Channels: live.Channels, ValidBits: live.ValidBits, PolicyID: live.PolicyID,
+		Transport: live.Transport, PackingVersion: live.PackingVersion, QualificationRevision: live.QualificationRevision}
+	if !live.ObservedAt.IsZero() {
+		at := live.ObservedAt.UTC()
+		out.ObservedAt = &at
+	}
+	return dsd, out
+}
+
+// playerModelText takes the boot binding's serial and port out of the
+// qualified model wherever they show, as the DAC's labels have them taken
+// out (playerDACText): the record holds neither, and a USB string may.
+func playerModelText(model string, device config.PlayerDevice) string {
+	if device.Serial.Present() {
+		model = device.Serial.Redact(model)
+	}
+	if device.Port != "" {
+		model = strings.ReplaceAll(model, device.Port, "[redacted]")
+	}
+	return model
 }
 
 // identity is the player's UUID: the started player's own once it runs,

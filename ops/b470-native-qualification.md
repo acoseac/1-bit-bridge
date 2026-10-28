@@ -1,8 +1,9 @@
 # B470 native qualification — owner approval and provisional evidence
 
-QualificationVersion is **16**. All older evidence must be rerun. The harness never
+QualificationVersion is **17**. All older evidence must be rerun, native included. The harness never
 creates approval. Production native DSD requires a fresh matching approved record;
-DoP S32_LE auditions are provisional and require both acknowledgements; production DoP remains disabled. Real-ref and Linux hardware gates remain reviewer/owner work.
+DoP S32_LE auditions are provisional and require both acknowledgements; production DoP plays only
+an approved DoP policy, under `dsdMode: dop` or `auto` with `allowDoP: true` (2d.2, below). Real-ref and Linux hardware gates remain reviewer/owner work.
 
 Use a candidate built from the reviewed tree. No hardware qualification was run during implementation.
 Keep every failure, including unsupported formats. The release must eventually have at least one
@@ -168,7 +169,7 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-Historical round 3 used qualificationVersion 4; current version is **16**. A native contact's
+Historical round 3 used qualificationVersion 4; current version is **17**. A native contact's
 Contact.SchemaVersion remains **2**; a DoP contact's is **3**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
@@ -256,7 +257,7 @@ still resolve inside it). `dsdMode: native` or `auto` enables only approved nati
 
 The Go contracts are `qualification.Approval`, `ApprovalBody`, `ApprovedPolicy`, `Edge`
 and `Evidence` in `internal/player/qualification/approval.go`. JSON uses those exact
-exported field names. SchemaVersion=1; QualificationVersion=16; Revision is the owner's
+exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=17; Revision is the owner's
 revision; Identity is the observed VID/ProductID/manufacturer/product/bcdDevice,
 anchored controller/port, interface, device and subdevice. No serial or card number is
 persistent identity. Unchanged descriptors may retain approval after replug/restart;
@@ -303,7 +304,7 @@ At least one native fixture must finish with measured playback of that tuple.
 NativeTuple and NativeCompleted record that execution; PCM-only lists or completion
 cannot qualify it. LifecycleActions count observed native outcomes: pause/resume,
 release/reopen, navigation between native occurrences, Stop, and natural completion.
-An admitted command alone is insufficient. Version 16 invalidates older evidence.
+An admitted command alone is insufficient. Version 17 invalidates older evidence.
 List all candidate directional edges explicitly. No command generates that record.
 
 ```sh
@@ -342,7 +343,7 @@ or evidence names resolving to the state directory itself before any ancestor
 walk. Native monitoring remains fail-closed without a grace period. The overlay
 generator requires both integration suites before publishing its overlay.
 Guarded API, config, extractor, output-play and approval paths changed; rerun
-qualification with version 16. ExtractorVersion 30 retains the first parsed DFF
+qualification with version 17. ExtractorVersion 30 retains the first parsed DFF
 PROP's known format facts when a later PROP makes compression unsupported.
 
 Version 13 also covers the deterministic PCM trace capture test. It changes no
@@ -358,8 +359,9 @@ The software packer supports only S32_LE, 24 significant bits left-aligned in
 prefill, including after a pause release. No alternate PCM packing exists. The
 decoders still take DSD512, which no transport here carries: the sink refuses it
 before opening, and the backend refuses a plan for it at admission
-(`rate_not_supported`) before anything is located. Production selection/publication
-remains native-only; final integrated DoP reports and native↔DoP approval remain 2d.2.
+(`rate_not_supported`) before anything is located. In 2d.1 production selection and
+publication stayed native-only; 2d.2 (below) adds approved DoP, its integrated reports
+and native↔DoP approval.
 
 Use the bound loopback/OpenHome-off config, calibrated owner manifest, persistent
 Q and card-prefixed `capture` function above. Every command is one manual audition;
@@ -444,3 +446,153 @@ connection on it, before its Status stops listing the address (a kept-alive
 connection was answered after Status said the address went away), and its
 tests hold each retirement at a new seam, `Seams.Retiring`. It changes no
 playback behavior, no PCM or DSD path and no wire field.
+
+## B470 2d.2 — approved DoP and auto selection, qualification version 17
+
+Version 17 makes every contact, report, candidate and approved record of version 16
+or below stale, native ones included: run the whole sequence below on the 2d.2 build.
+Production now plays DSD from one effective set, which selection and the published
+epoch both read: `dsdMode: native` plays native policies (DSD_U32_BE, then DSD_U32_LE,
+then DSD_U16_LE); `dop` plays approved S32_LE DoP policies, and only with
+`allowDoP: true`; `auto` plays native first, and DoP only at a rate the record holds
+no native policy for. A native policy whose constraints no longer hold refuses its
+rate (`dsd_policy_unavailable`); DoP never plays in its place, and nothing falls back
+at run time. `allowDoP: false` under `dop` or `auto` loads: DSD is refused as
+`dop_not_allowed` and PCM plays under a PCM-only epoch.
+
+The owner's real-DAC steps, in this order, one command at a time, inspecting each
+result before the next:
+
+1. Version-17 native and DoP contacts and matrices, the mixer experiment included
+   (the 2c.1 and 2d.1 blocks above, with fresh contacts).
+2. Both backend-lifecycles, native and DoP, with same-carrier and cross-rate WAV
+   edges (step 1 of this section).
+3. Promotion r1 (step 2).
+4. The transition scenario (step 3).
+5. Promotion r2 (step 4).
+6. The five configs, the output-play blocks and serve (step 5).
+7. Serve and iOS checks: phone-asleep advance, and no autoplay after stale health or
+   a replug.
+
+### 1. The DoP and native backend-lifecycles
+
+Each runs the real engine and backend on its CLI candidate (`Confirmation` exactly
+`CLI candidate; not approved`, one policy, its matrix evidence, its candidate edges),
+which grants nothing to serve, output play or any API. The DoP lifecycle plays its
+candidate under `dsdMode dop`; its WAV fixtures are PCM edges and need no same-carrier
+reference, and once the evidence is complete it asks for `DAC DSD indicator confirmed`
+and `L/R pitch and duration correct`. The report records the DoP sink's opens as
+`Opened`, which DoP evidence checks open by open, and every other open (a PCM edge's)
+as `EdgeOpened`; its edges carry the backend's own keys, `dop/S32_LE/…` for DoP.
+Exercise space pause past the 30 s release and resume, n, p, x Stop, and natural
+completion of every fixture.
+
+```sh
+capture && "$B" output dsd-test --config "$C" --transport dop --format S32_LE --bit-rate "$R" --pause-method "$M" --tail-ms "$T" --prefill-ms "$P" --seconds 600 --ack-level contact-position --ack-dop-noise --manifest "$Q/manifest.json" --fixtures "$Q/assets" --contact-report "$CONTACT" --provisional-record "$Q/dop-candidate.json" --mixer-snapshot "$RUN/mixer.txt" --report "$RUN/report.json" --scenario backend-lifecycle wav176 dsd64-lr-lsb dsd64-rl-dff wav44
+capture && "$B" output dsd-test --config "$C" --format "$F" --bit-rate "$R" --pause-method "$M" --tail-ms "$T" --prefill-ms "$P" --seconds 600 --ack-level contact-position --manifest "$Q/manifest.json" --fixtures "$Q/assets" --contact-report "$CONTACT" --provisional-record "$Q/candidate.json" --mixer-snapshot "$RUN/mixer.txt" --report "$RUN/report.json" --scenario backend-lifecycle wav44 dsd64-lr-lsb dsd64-rl-dff wav384
+```
+
+`wav176` is a PCM reference at DoP64's carrier (176.4 kHz, 24 or 32 bits): the
+same-carrier edge, which must close and reopen the device, never join. `wav44` is the
+cross-rate edge. Repeat for each DoP rate and each native policy to be approved.
+
+### 2. Promotion r1
+
+Build `approved.json` by hand from the reviewed reports, as the 0.2.2 contract above
+describes: the native and DoP policies, each with its matrix and backend-lifecycle
+evidence, and `Edges` listing only edges a lifecycle report passed (its `PassedEdges`).
+Schema 1 still reads; schema 2 adds `QualifiedOn`, the owner's qualification date as
+`YYYY-MM-DD`, which `/v1/outputs` shows beside the DAC's model and `bcdDevice`. A
+schema-1 record carrying `Transitions` or `QualifiedOn` is refused. Recompute the
+record's `SHA256` with `qualification.Digest(body)`.
+
+### 3. The transition scenario
+
+`approved-native-dop-native` plays an approved native policy, then an approved DoP
+policy, then the native one again. It reads both endpoints from the owner-approved
+record through `ReadApproval` (never a candidate): `--native-tuple-id` names the
+native policy by its ID, whose rate the record states, and the DoP flags name the
+DoP policy by its tuple. Before anything opens or the report is written it refuses a
+record that does not read as approved or was approved on another manifest or
+environment, an unknown native ID, DoP flags no policy matches, other than three DSD
+fixtures (native, DoP, native, each at its policy's rate) and a contact bundle
+without a fresh receipt for each endpoint's tuple. Only the two native↔DoP edges
+under test are admitted, here alone; the self edges must already be approved. Run
+natural transitions, then n and p across the transports, x Stop, and play every
+fixture to its end; the run then asks for the DoP indication and listening. The
+report names its endpoints by ID and policy digest (`Endpoints`) and the record it
+read (`Qualification`). Rates may match or differ.
+
+```sh
+read -r -p 'Approved native policy ID: ' NATIVE_ID
+capture && "$B" output dsd-test --config "$C" --qualification "$Q/approved.json" --native-tuple-id "$NATIVE_ID" --transport dop --format S32_LE --bit-rate "$R" --pause-method "$M" --tail-ms "$T" --prefill-ms "$P" --seconds 600 --ack-level contact-position --ack-dop-noise --manifest "$Q/manifest.json" --fixtures "$Q/assets" --contact-report "$Q/contacts.json" --mixer-snapshot "$RUN/mixer.txt" --report "$RUN/report.json" --scenario approved-native-dop-native dsd64-lr-lsb dsd64-rl-dff dsd64-lr-lsb
+```
+
+### 4. Promotion r2
+
+A native↔DoP edge is approved only by a transition report in schema 2's
+`Transitions`: `{Path, SHA256}` of the report's bytes, under the state directory. The
+reader checks that report against both endpoint policies by their digests (a policy
+that differs by a byte refuses), under DoP's schema, observations and geometry and
+both policies' constraints, with every fixture completed and natural, next, previous
+and Stop observed; it counts its two cross edges as executed only if the report
+passed them. Write r2 as schema 2 with a new `Revision`, the transition report in
+`Transitions`, and the two cross edges added to `Edges`; recompute `SHA256`. An edge
+no report executed is refused, so approving the endpoints alone allows no transition.
+
+### 5. The five configs, the output-play blocks and serve
+
+Copy the whole bound loopback config C for each file below, replacing only these
+`output.player` keys (absolute paths under Q). C stays the only config passed to
+dsd-test. A serving copy needs its own LAN `listenAddress`, a loopback admin
+address, `output.player.openhome: true`, a free `openhomePort` and its own dataDir
+under Q; run one serving copy at a time.
+
+| Config under Q | dsdMode | allowDoP | dsdQualification |
+|---|---|---|---|
+| native.yaml | native | false | Q/native-approved.json |
+| dop.yaml | dop | true | Q/approved.json |
+| auto.yaml | auto | true | Q/approved.json |
+| auto-fallback.yaml | auto | true | Q/auto-fallback-approved.json |
+| auto-no-dop.yaml | auto | false | Q/auto-fallback-approved.json |
+
+`native-approved.json` holds the native policies alone; `auto-fallback-approved.json`
+is a subset of `approved.json` with every DSD64 native policy removed and DoP64 kept,
+so auto chooses DoP there and only there. `auto-no-dop` must refuse its DSD as
+`dop_not_allowed` with zero DSD writes, prefill included, while PCM plays. The
+contact bundle `$Q/contacts.json` holds a fresh receipt for every DSD tuple used.
+
+```sh
+capture && "$B" output play --config "$Q/native.yaml" --keys --contact-report "$Q/contacts.json" --mixer-snapshot "$RUN/mixer.txt" --report "$RUN/report.json" "$Q/assets/pcm44.wav" "$Q/assets/dsd64-lr-lsb.dsf" "$Q/assets/dsd64-rl.dff" "$Q/assets/pcm44.wav"
+capture && "$B" output play --config "$Q/auto.yaml" --keys --contact-report "$Q/contacts.json" --mixer-snapshot "$RUN/mixer.txt" --report "$RUN/report.json" "$Q/assets/pcm44.wav" "$Q/assets/dsd64-lr.dff" "$Q/assets/pcm88.wav"
+capture && "$B" output play --config "$Q/dop.yaml" --keys --contact-report "$Q/contacts.json" --mixer-snapshot "$RUN/mixer.txt" --report "$RUN/report.json" "$Q/assets/pcm176.wav" "$Q/assets/dsd64-lr-lsb.dsf" "$Q/assets/pcm44.wav" "$Q/assets/dsd64-rl.dff" "$Q/assets/pcm88.wav"
+capture && "$B" output play --config "$Q/auto-fallback.yaml" --keys --contact-report "$Q/contacts.json" --mixer-snapshot "$RUN/mixer.txt" --report "$RUN/report.json" "$Q/assets/pcm44.wav" "$Q/assets/dsd64-lr.dff" "$Q/assets/pcm88.wav"
+capture && "$B" output play --config "$Q/auto-no-dop.yaml" --contact-report "$Q/contacts.json" --mixer-snapshot "$RUN/mixer.txt" --report "$RUN/report.json" "$Q/assets/dsd64-lr.dff"
+```
+
+The dop.yaml queue covers PCM176→DoP64 (same carrier: close and reopen, never a join)
+and PCM44→DoP64 (cross-rate). Auto must choose native where a native policy is
+eligible; Stop interrupts each tail, and nothing opens before a release is
+acknowledged. For serve, choose one full LAN config, record its logs and the iOS
+checks of step 7 of the owner's list; `GET /v1/outputs` then shows each tuple's
+`transport` (`dop`, absent for native), the observation's `transport`,
+`packingVersion`, `observedAt` and `qualificationRevision`, and the epoch's `model`,
+`bcdDevice` and `qualifiedOn`, never the USB port or serial.
+
+```sh
+S="$Q/auto.yaml"
+capture && "$B" serve --config "$S"
+```
+
+### 6. Pruning edges from subset records
+
+A subset record (`native-approved.json`, `auto-fallback-approved.json`) keeps only
+policies of `approved.json`, byte for byte, with their evidence. Remove every edge
+whose `From` or `To` names a policy the subset dropped, and every transition report
+whose two endpoints are not both kept; an edge must still be passed by a report of a
+kept policy or by a kept transition report, or the reader refuses it as unexecuted.
+Give the subset its own `Revision`, recompute its `SHA256`, and never add an edge or a
+policy the full record does not hold.
+
+Linux amd64/arm64 execution and the `alsa-abi` job remain pending on the Darwin host
+this was built on; no hardware was opened.

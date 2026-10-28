@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
@@ -204,6 +205,8 @@ type OutputDSDTuple struct {
 	Pause     string `json:"pause"`
 	TailMS    int64  `json:"tailMs"`
 	PrefillMS int64  `json:"prefillMs"`
+	// Transport is dop for a DoP tuple; absent, a native DSD one.
+	Transport string `json:"transport,omitempty"`
 }
 
 // OutputDSDPlayback describes the current authorization epoch, not an open DAC.
@@ -213,6 +216,12 @@ type OutputDSDPlayback struct {
 	QualificationRevision string           `json:"qualificationRevision,omitempty"`
 	Reason                string           `json:"reason,omitempty"`
 	Tuples                []OutputDSDTuple `json:"tuples"`
+	// Model, BCDDevice and QualifiedOn are the owner qualification the
+	// epoch's record states: the DAC's model, its descriptor firmware code
+	// and the qualification date (YYYY-MM-DD). Never its port or serial.
+	Model       string `json:"model,omitempty"`
+	BCDDevice   string `json:"bcdDevice,omitempty"`
+	QualifiedOn string `json:"qualifiedOn,omitempty"`
 }
 
 // OutputPlayback is the backend's current occurrence observation.
@@ -228,4 +237,13 @@ type OutputPlayback struct {
 	Channels         int    `json:"channels"`
 	ValidBits        int    `json:"validBits"`
 	PolicyID         string `json:"policyId,omitempty"`
+	// Transport is dop or pcm; absent, native DSD.
+	Transport string `json:"transport,omitempty"`
+	// PackingVersion is the DSD packer's version, absent for PCM.
+	PackingVersion int `json:"packingVersion,omitempty"`
+	// ObservedAt is when the backend last observed the occurrence's sink.
+	ObservedAt *time.Time `json:"observedAt,omitempty"`
+	// QualificationRevision is the approved record's revision the
+	// occurrence was admitted under, absent for PCM.
+	QualificationRevision string `json:"qualificationRevision,omitempty"`
 }

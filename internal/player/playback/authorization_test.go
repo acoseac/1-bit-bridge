@@ -130,8 +130,11 @@ func (c edgeContent) Open(context.Context, engine.Reference) (Content, error) {
 	return Content{Data: bytes.NewReader(c), Size: int64(len(c))}, nil
 }
 
+// TestApprovedTupleSelection: under dsdMode native the first approved
+// native format at the content's rate plays, DSD_U32_BE, then DSD_U32_LE,
+// then DSD_U16_LE; no other rate's policy and no DoP plays in its place.
 func TestApprovedTupleSelection(t *testing.T) {
-	p := &permission{}
+	p := &permission{mode: "native"}
 	for _, f := range []string{"DSD_U16_LE", "DSD_U32_LE", "DSD_U32_BE"} {
 		p.record.Body.Policies = append(p.record.Body.Policies, qualification.ApprovedPolicy{ID: f, Tuple: qualification.Tuple{Format: f, BitRate: 2822400}})
 	}

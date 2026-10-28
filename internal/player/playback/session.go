@@ -21,6 +21,9 @@ import (
 // successor.
 type session struct {
 	permission *permission
+	// dsdRefusal is DSD's refusal while dsdMode asks for DSD and the
+	// approval did not read at the session's start (ReasonDSDApproval).
+	dsdRefusal *engine.Unplayable
 	b          *Backend
 	id         engine.SessionID
 
@@ -309,7 +312,7 @@ func (s *session) call(ctx context.Context, f func() error) (err error) {
 
 // newOccLocked appends an occurrence to the chain. s.mu is held.
 func (s *session) newOccLocked(eo engine.Occurrence) *occ {
-	o := &occ{permission: s.permission, reservation: eo.Reservation, id: eo.ID, entry: eo.Entry, ref: eo.Ref, pos: len(s.chain), done: make(chan struct{})}
+	o := &occ{permission: s.permission, dsdRefusal: s.dsdRefusal, reservation: eo.Reservation, id: eo.ID, entry: eo.Entry, ref: eo.Ref, pos: len(s.chain), done: make(chan struct{})}
 	s.chain = append(s.chain, o)
 	return o
 }
@@ -389,13 +392,16 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 		}
 		if e != nil {
 			p = nil
+			if !errors.Is(e, errDSDOff) {
+				s.dsdRefusal = &engine.Unplayable{Reason: ReasonDSDApproval, Detail: approvalDetail(e)}
+			}
 		}
 		// Session admission never publishes capabilities. The supervisor owns epochs.
 		if p != nil {
 			p.generation = s.b.Policy().Generation
 		}
 		s.permission = p
-		first.permission = p
+		first.permission, first.dsdRefusal = p, s.dsdRefusal
 		s.mu.Unlock()
 		s.monitorPermission()
 	}

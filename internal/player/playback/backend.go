@@ -33,6 +33,9 @@ type Config struct {
 	Locator Locator
 	// OpenSink opens a sink; nil is alsapcm.OpenSink.
 	OpenSink func(ctx context.Context, cfg alsapcm.SinkConfig) (*alsapcm.Sink, error)
+	// OpenNative opens a native DSD or DoP sink for an approved plan; nil is
+	// alsapcm.OpenDSDSink.
+	OpenNative func(ctx context.Context, cfg alsapcm.DSDConfig) (*alsapcm.DSDSink, error)
 	// Tick is what a session measures its sink's position on: a channel that
 	// ticks and the function that stops it. Nil ticks every MeasureEvery.
 	Tick func() (<-chan time.Time, func())
@@ -145,9 +148,9 @@ func (n Note) StatusPath() string {
 	return fmt.Sprintf("/proc/asound/card%d/pcm%dp/sub%d/status", n.Params.Endpoint.Card, n.Params.Endpoint.Device, n.Params.Subdevice)
 }
 
-// Backend plays the engine's sessions (engine.Backend) over the decoders and
-// alsapcm.Sink, PCM only. It is the package documentation's contract, term
-// by term.
+// Backend plays the engine's sessions (engine.Backend) over the decoders,
+// alsapcm.Sink for PCM and alsapcm.DSDSink for approved DSD. It is the
+// package documentation's contract, term by term.
 type Backend struct {
 	policyMu            sync.Mutex
 	policy              PlayerPolicy
@@ -155,6 +158,7 @@ type Backend struct {
 	liveOutput          *output
 	publishedPermission *permission
 	cliCandidate        bool
+	transitions         *TransitionPlans
 	lastEdge            string
 	lastPlan            *engine.NativePlan
 	nativeAdmission     func(format.NativeDSD) (engine.NativePlan, error)
@@ -187,6 +191,9 @@ func New(cfg Config) (*Backend, error) {
 	}
 	if cfg.OpenSink == nil {
 		cfg.OpenSink = alsapcm.OpenSink
+	}
+	if cfg.OpenNative == nil {
+		cfg.OpenNative = alsapcm.OpenDSDSink
 	}
 	if cfg.Tick == nil {
 		cfg.Tick = func() (<-chan time.Time, func()) {

@@ -21,6 +21,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
+	"github.com/acoseac/1-bit-bridge/internal/player/qualification"
 )
 
 type nativeFiles map[string][]byte
@@ -1747,5 +1748,194 @@ func doPTransitionEngine(t *testing.T, mode string) {
 		if len(at) != 3 || !bytes.Equal(got[:at[1]], pcm[44:]) || !bytes.Equal(got[at[2]:], pcm[44:]) {
 			t.Fatal("PCM edge changed bytes or added PCM silence")
 		}
+	}
+}
+
+// pcmEdgeWAV is a 32-bit stereo WAV of 32 frames at rate, each data byte
+// its own offset: a PCM edge whose bytes the DAC must be given unchanged.
+func pcmEdgeWAV(rate int) []byte {
+	pcm := make([]byte, 44+32*8)
+	copy(pcm, "RIFF")
+	binary.LittleEndian.PutUint32(pcm[4:], uint32(len(pcm)-8))
+	copy(pcm[8:], "WAVEfmt ")
+	binary.LittleEndian.PutUint32(pcm[16:], 16)
+	binary.LittleEndian.PutUint16(pcm[20:], 1)
+	binary.LittleEndian.PutUint16(pcm[22:], 2)
+	binary.LittleEndian.PutUint32(pcm[24:], uint32(rate))
+	binary.LittleEndian.PutUint32(pcm[28:], uint32(rate*8))
+	binary.LittleEndian.PutUint16(pcm[32:], 8)
+	binary.LittleEndian.PutUint16(pcm[34:], 32)
+	copy(pcm[36:], "data")
+	binary.LittleEndian.PutUint32(pcm[40:], 256)
+	for i := 44; i < len(pcm); i++ {
+		pcm[i] = byte(i)
+	}
+	return pcm
+}
+
+// playApprovedToStop plays the queue and waits for the engine to stop: no
+// entry refused, no fault.
+func playApprovedToStop(t *testing.T, ctx context.Context, eng *engine.Engine) {
+	t.Helper()
+	if err := eng.Play(ctx); err != nil {
+		t.Fatalf("the approved play was refused: %v", err)
+	}
+	for {
+		ch := eng.Changed()
+		if eng.Snapshot().State() == engine.Stopped {
+			break
+		}
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the approved play stalled")
+		}
+	}
+	if skips := eng.Snapshot().Skips(); len(skips) != 0 {
+		t.Fatalf("approved content was refused: %+v", skips)
+	}
+	if faults := eng.Snapshot().Faults(); len(faults) != 0 {
+		t.Fatalf("approved content faulted: %+v", faults)
+	}
+}
+
+// TestNativeIntegrationApprovedDoPConstructor plays DoP through the approved
+// path, the real reader admitting it, never the integration seam
+// (AdmitNativeForIntegration): the engine's real Run over the backend and
+// the fake kernel, and the DAC given exactly the independent bit-level DoP
+// of the content (dopBytes). dop: dsdMode dop, a native policy approved at
+// the same rate beside it; auto_fallback: auto at a rate the record holds no
+// native policy for; same_carrier and cross_rate: PCM, DoP, PCM, each
+// boundary a close and a reopen (three opens) even where the carrier is the
+// PCM's own rate and format, the PCM bytes as the file holds them;
+// reopen_keeps_policy: a pause past the 30 s release reopens under the same
+// approved policy, its run's markers starting at 05 again.
+func TestNativeIntegrationApprovedDoPConstructor(t *testing.T) {
+	nativeEngineStorage(t)
+	dop := dopSpec("dop64", dsd64)
+	dopKey := specKey(dop)
+	l, r := dsdPattern(t)
+	for _, mode := range []string{"dop", "auto_fallback", "reopen_keeps_policy", "same_carrier", "cross_rate"} {
+		t.Run(mode, func(t *testing.T) {
+			k := alsapcm.NewFakeKernel(t)
+			k.HardwareFormats(2, 10, 32, 49, 50, 52)
+			t.Cleanup(func() { k.CheckClosedEach(t) })
+			switch mode {
+			case "reopen_keeps_policy":
+				cfg, _ := approvedDSDFixture(t, "dop", true, nil, dop)
+				cfg.Resolver = nativeFiles{"a": nativeDSF(t, 31)}
+				cfg.OpenNative = k.OpenNativeSink
+				b, err := New(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				ref, _ := engine.NewReference("a")
+				ev := &nativeEvents{done: make(chan struct{})}
+				if err = b.Start(ctx, engine.StartRequest{Session: 1, First: engine.Occurrence{ID: 1, Ref: ref}, Events: ev}); err != nil {
+					t.Fatalf("the approved DoP start was refused: %v", err)
+				}
+				s := b.known(1)
+				s.mu.Lock()
+				out := s.cur
+				s.mu.Unlock()
+				if err = b.Pause(ctx, 1); err != nil {
+					t.Fatal(err)
+				}
+				k.Grant(31 * time.Second)
+				for {
+					ch := out.native.Changed()
+					if out.native.Position().Released {
+						break
+					}
+					select {
+					case <-ch:
+					case <-ctx.Done():
+						t.Fatal("the DoP pause did not release at 30 seconds")
+					}
+				}
+				if _, err = b.Resume(ctx, 1); err != nil {
+					t.Fatalf("the released DoP pause did not reopen: %v", err)
+				}
+				if out.policyID != "dop64" || out.plan == nil || out.plan.Tail != time.Millisecond || out.plan.Pause != "kernel" || out.transport.Kind != format.KindDoP || k.View().Opens != 2 {
+					t.Fatalf("the reopen changed the approved policy: %+v %+v, %d opens", out.plan, out.transport, k.View().Opens)
+				}
+				if err = b.Prepare(ctx, 1, 1, nil); err != nil {
+					t.Fatal(err)
+				}
+				k.Free()
+				select {
+				case <-ev.done:
+				case <-ctx.Done():
+					t.Fatal("the reopened DoP run did not finish")
+				}
+				if err = b.Release(ctx, 1); err != nil {
+					t.Fatal(err)
+				}
+				if err = b.Wait(ctx); err != nil {
+					t.Fatal(err)
+				}
+				if got, want := k.Heard(), dopBytes(l, r, 31, 177); !bytes.Equal(got, want) {
+					t.Fatalf("the DAC heard %d bytes that are not the DoP of the content from marker 05 (%d bytes)", len(got), len(want))
+				}
+				return
+			case "dop", "auto_fallback":
+				specs, auth := []policySpec{dop, nativeSpec("n64", "DSD_U32_BE", dsd64)}, "dop"
+				if mode == "auto_fallback" {
+					specs, auth = []policySpec{nativeSpec("n128", "DSD_U32_BE", dsd128), dop}, "auto"
+				}
+				cfg, _ := approvedDSDFixture(t, auth, true, []qualification.Edge{{From: dopKey, To: dopKey}}, specs...)
+				k.Free()
+				cfg.Resolver = nativeFiles{"a": nativeDSF(t, 15)}
+				cfg.OpenNative = k.OpenNativeSink
+				b, err := New(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				eng := nativeEngine(t, ctx, cancel, b, b, nil)
+				queueWithOutput(t, ctx, eng, "a", "a")
+				playApprovedToStop(t, ctx, eng)
+				cl, cr, n := dsdChain(l, r, 15, 2)
+				if got, want := k.Given(), dopBytes(cl, cr, n, 177); k.View().Opens != 1 || !bytes.Equal(got, want) {
+					t.Fatalf("%d opens; the DAC was given %d bytes that are not the DoP of the two occurrences joined (%d bytes)", k.View().Opens, len(got), len(want))
+				}
+				_, live := b.Facts()
+				if live == nil || live.Transport != "dop" || live.PackingVersion != 1 || live.QualificationRevision != "r1" || live.ObservedAt.IsZero() || live.Format != "S32_LE" || live.LogicalRate != dsd64 || live.PolicyID != "dop64" {
+					t.Fatalf("the DoP observation %+v", live)
+				}
+			default:
+				rate := 176400
+				if mode == "cross_rate" {
+					rate = 44100
+				}
+				pcmKey := fmt.Sprintf("pcm/S32_LE/%d/2/32/zero", rate)
+				cfg, _ := approvedDSDFixture(t, "dop", true, []qualification.Edge{{From: pcmKey, To: dopKey}, {From: dopKey, To: pcmKey}}, dop)
+				k.Free()
+				pcm := pcmEdgeWAV(rate)
+				cfg.Resolver = nativeFiles{"pcm": pcm, "dsd": nativeDSF(t, 15)}
+				cfg.OpenSink = k.OpenSink
+				cfg.OpenNative = k.OpenNativeSink
+				b, err := New(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				eng := nativeEngine(t, ctx, cancel, b, b, nil)
+				queueWithOutput(t, ctx, eng, "pcm", "dsd", "pcm")
+				playApprovedToStop(t, ctx, eng)
+				got, at := k.Given(), k.View().OpenAt
+				if len(at) != 3 {
+					t.Fatalf("PCM, DoP and PCM opened %d times, want each boundary a close and a reopen (3 opens)", len(at))
+				}
+				if !bytes.Equal(got[:at[1]], pcm[44:]) || !bytes.Equal(got[at[2]:], pcm[44:]) {
+					t.Fatal("a PCM edge changed bytes or added PCM silence")
+				}
+				if want := dopBytes(l, r, 15, 177); !bytes.Equal(got[at[1]:at[2]], want) {
+					t.Fatalf("the DoP run between the PCM edges is %d bytes that are not the DoP of the content (%d bytes)", at[2]-at[1], len(want))
+				}
+			}
+		})
 	}
 }

@@ -45,11 +45,12 @@ type SessionOptions struct {
 	// PauseRelease is how long a pause holds the device before the backend
 	// releases it (pauseReleaseSeconds).
 	PauseRelease time.Duration
-	// DSD is the configured DSD mode. This release plays PCM only: its
-	// backend refuses DSD content in every mode, off included, before any of
-	// it plays, as dsd_not_in_this_release (playback.ReasonDSD), since no
-	// setting turns DSD on yet; ReasonDSDOff is for the release that plays
-	// it, under mode off.
+	// DSD is the configured DSD mode. The bridge's backend plays DSD content
+	// only under an owner-approved policy its effective set takes for the
+	// mode and allowDoP (B470 2d.2), and refuses it otherwise before any of
+	// it plays with a reason it names: dsd_not_in_this_release
+	// (playback.ReasonDSD) while the mode is off, ReasonDSDOff being no
+	// backend's here.
 	DSD string
 }
 

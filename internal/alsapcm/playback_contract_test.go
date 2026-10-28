@@ -510,10 +510,11 @@ func TestPlaybackRefusesBeforeAnyContentPlays(t *testing.T) {
 	}
 }
 
-// TestPlaybackRefusesDSDInEveryMode pins DSD's refusal whatever the
-// session's DSD mode: this release plays PCM only, so under off, the one
-// mode the config takes, and under the modes a later release may take, DSD
-// content is refused as not in this release, before the device is touched.
+// TestPlaybackRefusesDSDInEveryMode pins DSD's refusal by a backend with no
+// authorization, whatever the session's DSD mode: the mode the engine passes
+// decides nothing (SessionOptions.DSD), and with no owner-approved record to
+// read DSD content is refused as not in this release, before the device is
+// touched. An approved record's effective set is playback's (B470 2d.2).
 func TestPlaybackRefusesDSDInEveryMode(t *testing.T) {
 	dsf, err := os.ReadFile(filepath.Join("..", "player", "decode", "testdata", "dsd-goldens", "lsb_dsd64_whole_blocks.dsf"))
 	if err != nil {

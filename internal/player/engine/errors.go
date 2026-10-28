@@ -118,9 +118,9 @@ const (
 	ReasonMissing Reason = "missing_file"
 	// ReasonRefusedContent is content the decoders refuse.
 	ReasonRefusedContent Reason = "refused_content"
-	// ReasonDSDOff is DSD content while the session's DSD mode is off, once
-	// a release plays DSD: this release's backend refuses DSD in every mode
-	// with a reason of its own (SessionOptions.DSD).
+	// ReasonDSDOff is DSD content while the session's DSD mode is off. The
+	// bridge's backend gives reasons of its own for DSD it refuses, under
+	// mode off too (SessionOptions.DSD).
 	ReasonDSDOff Reason = "dsd_off"
 	// ReasonXrun is an underrun: the sink stopped, and the backend does not
 	// recover it on its own.

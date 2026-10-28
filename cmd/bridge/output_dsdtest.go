@@ -66,6 +66,56 @@ type outputDSDTestEnv struct {
 	makeRaw    func() (restore func() error, err error)
 	goos       string
 	resolve    func(context.Context, string) (nativeEndpoint, func(alsapcm.NodeInfo) error, error)
+	// build is the binary's VCS revision and whether its tree was modified,
+	// which a report records as BuildSHA and Modified; nil is vcsBuild.
+	build func() (sha string, modified bool)
+	// player is what the real engine and backend of the backend-lifecycle
+	// and transition scenarios read and open.
+	player nativePlayerSeams
+}
+
+// nativePlayerSeams are what the backend a backend-lifecycle or transition
+// scenario builds reads and opens: the sysfs and control readers its
+// authorization identifies the DAC and checks constraints with, and its
+// sink openers, nil for the backend's own (alsapcm's).
+type nativePlayerSeams struct {
+	sysfs      alsa.SysfsReader
+	controls   alsactl.Reader
+	openSink   func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error)
+	openNative func(context.Context, alsapcm.DSDConfig) (*alsapcm.DSDSink, error)
+	// observe, when set, is told what each turn of the scenario's loop saw:
+	// a test waits on it for a state before it sends a key.
+	observe func(lifecycleView)
+}
+
+// vcsBuild is the binary's VCS revision, "" when the build carries none,
+// and whether its tree was modified.
+func vcsBuild() (sha string, modified bool) {
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "", false
+	}
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			sha = s.Value
+		case "vcs.modified":
+			modified = s.Value == "true"
+		}
+	}
+	return sha, modified
+}
+
+// nativePlatform is the platform and Go version a report records.
+func nativePlatform() (platform, goVersion string) {
+	return runtime.GOOS + "/" + runtime.GOARCH, runtime.Version()
+}
+
+// nativeEnvironment is a report's Environment on this platform and Go,
+// running kernel: what an approval and its evidence are bound to.
+func nativeEnvironment(kernel string) string {
+	platform, goVersion := nativePlatform()
+	return qualification.Digest([]string{platform, goVersion, kernel})
 }
 
 // productionNativeOpen has its own test guard, in addition to the ALSA guard.
@@ -88,7 +138,8 @@ func outputDSDTestCmd(ctx context.Context, args []string, out, errout io.Writer)
 		fmt.Fprintln(errout, err)
 		return 1
 	}
-	env := outputDSDTestEnv{goos: runtime.GOOS, open: productionNativeOpen, controls: (alsactl.Reader{}).Read, now: time.Now, stdin: os.Stdin, tty: term.IsTerminal(fd), resolve: resolveNativeTest, openPCM: productionNativePCMOpen}
+	env := outputDSDTestEnv{goos: runtime.GOOS, open: productionNativeOpen, controls: (alsactl.Reader{}).Read, now: time.Now, stdin: os.Stdin, tty: term.IsTerminal(fd), resolve: resolveNativeTest, openPCM: productionNativePCMOpen,
+		build: vcsBuild, player: nativePlayerSeams{sysfs: alsa.SysfsReader{Root: hostTrees.sysfs}}}
 	env.kernel = func() (string, error) {
 		b, e := os.ReadFile(filepath.Join(hostTrees.proc, "sys/kernel/osrelease"))
 		return strings.TrimSpace(string(b)), e
@@ -156,6 +207,7 @@ type nativeOptions struct {
 	transport                                                                        string
 	ackDoPNoise                                                                      bool
 	provisional                                                                      string
+	qualification, nativeTupleID                                                     string
 	config, manifest, fixtures, contact, report, mixer, scenario, ack, format, pause string
 	rate, seconds, tail, prefill                                                     int
 	list                                                                             []string
@@ -185,7 +237,9 @@ func parseNativeOptions(args []string, w io.Writer) (nativeOptions, error) {
 	fs.StringVar(&o.report, "report", "", "new report path, never an approval")
 	fs.StringVar(&o.mixer, "mixer-snapshot", "", "fresh amixer annex")
 	fs.StringVar(&o.provisional, "provisional-record", "", "CLI candidate for backend-lifecycle only")
-	fs.StringVar(&o.scenario, "scenario", "", "level-check, matrix, interactive or backend-lifecycle")
+	fs.StringVar(&o.qualification, "qualification", "", "owner-approved record, for approved-native-dop-native only")
+	fs.StringVar(&o.nativeTupleID, "native-tuple-id", "", "the approved native policy's ID, for approved-native-dop-native only")
+	fs.StringVar(&o.scenario, "scenario", "", "level-check, matrix, interactive, backend-lifecycle or approved-native-dop-native")
 	if e := fs.Parse(args); e != nil {
 		return o, e
 	}
@@ -222,17 +276,21 @@ func parseNativeOptions(args []string, w io.Writer) (nativeOptions, error) {
 	if o.config == "" || o.manifest == "" || o.fixtures == "" || o.report == "" || o.mixer == "" {
 		return o, errors.New("--config, --manifest, --fixtures, --mixer-snapshot and --report required")
 	}
-	if o.scenario != "level-check" && o.scenario != "matrix" && o.scenario != "interactive" && o.scenario != "backend-lifecycle" {
-		return o, errors.New("--scenario must be level-check, matrix, interactive or backend-lifecycle")
+	transition := o.scenario == qualification.TransitionScenario
+	if o.scenario != "level-check" && o.scenario != "matrix" && o.scenario != "interactive" && o.scenario != "backend-lifecycle" && !transition {
+		return o, errors.New("--scenario must be level-check, matrix, interactive, backend-lifecycle or approved-native-dop-native")
 	}
 	if (o.scenario == "backend-lifecycle") != (o.provisional != "") {
 		return o, errors.New("--provisional-record is required only for backend-lifecycle")
 	}
+	if transition != (o.qualification != "") || transition != (o.nativeTupleID != "") {
+		return o, errors.New("--qualification and --native-tuple-id are required only for approved-native-dop-native")
+	}
+	if transition && o.transport != "dop" {
+		return o, errors.New("approved-native-dop-native names its DoP policy by --transport dop and the policy flags")
+	}
 	if o.scenario == "level-check" && o.ack != "off-ear" {
 		return o, errors.New("--ack-level must be off-ear for level-check")
-	}
-	if o.transport == "dop" && o.scenario == "backend-lifecycle" {
-		return o, errors.New("DoP backend-lifecycle qualification is reserved for 2d.2")
 	}
 	if o.transport == "dop" && o.scenario == "level-check" && len(o.list) != 1 {
 		return o, errors.New("DoP contact requires exactly one fixture")
@@ -273,6 +331,15 @@ type nativeReport struct {
 	PCMTimePolicy                                            [2]int
 	Opened                                                   []alsapcm.Params
 	Contact                                                  *qualification.Contact
+	// EdgeOpened is every open of another transport than the qualified
+	// tuple's: a PCM edge's, or a transition's native endpoint's.
+	EdgeOpened []alsapcm.Params `json:",omitempty"`
+	// Endpoints and Qualification are a transition report's: the approved
+	// native and DoP policies it played, native first, each by its ID and
+	// the digest of the whole policy, and the approved record it read them
+	// from, by its name and the digest the record carries.
+	Endpoints     []qualification.PolicyRef `json:",omitempty"`
+	Qualification *qualification.Evidence   `json:",omitempty"`
 }
 
 func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, out, errout io.Writer) int {
@@ -285,6 +352,7 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 		fmt.Fprintln(errout, "native harness requires Linux")
 		return 1
 	}
+	transition := o.scenario == qualification.TransitionScenario
 	resolved, check, e := env.resolve(ctx, o.config)
 	ep := resolved.Endpoint
 	if e != nil {
@@ -309,10 +377,12 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 		byID[f.ID] = f
 	}
 	anyNative := false
+	// The transition scenario's fixtures are at its two policies' rates,
+	// which the approved record names: they are checked with its endpoints.
 	for _, id := range o.list {
 		f, ok := byID[id]
 		anyNative = anyNative || f.Container == "DSF" || f.Container == "DFF"
-		if !ok || ((f.Rate != o.rate || (f.Container != "DSF" && f.Container != "DFF")) && !(o.scenario == "backend-lifecycle" && f.Container == "WAV")) {
+		if !transition && (!ok || ((f.Rate != o.rate || (f.Container != "DSF" && f.Container != "DFF")) && !(o.scenario == "backend-lifecycle" && f.Container == "WAV"))) {
 			fmt.Fprintln(errout, "fixture-list tuple mismatch")
 			return 1
 		}
@@ -321,9 +391,14 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 		fmt.Fprintln(errout, "backend lifecycle requires native execution")
 		return 1
 	}
-	if o.transport == "dop" {
+	// A DoP fixture's PCM reference plays at its carrier, where a run plays
+	// one: a PCM edge's own fixture has none, and the transition plays none.
+	if o.transport == "dop" && !transition {
 		for _, id := range o.list {
 			f := byID[id]
+			if f.Container == "WAV" {
+				continue
+			}
 			ref := byID[f.PCMReference]
 			if ref.Rate != o.rate/16 {
 				fmt.Fprintln(errout, "DoP requires same-carrier PCM reference")
@@ -361,7 +436,15 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 		env.forceS32 = true
 	}
 	mh := fmt.Sprintf("%x", sha256.Sum256(b))
-	if o.scenario != "level-check" {
+	var approved *approvedTransition
+	if transition {
+		t, e := readApprovedTransition(o, env, resolved, byID, tuple, mh, a, controls)
+		if e != nil {
+			fmt.Fprintln(errout, e)
+			return 1
+		}
+		approved = &t
+	} else if o.scenario != "level-check" {
 		var contact qualification.Contact
 		b, e := qualification.ReadEvidenceFile(o.contact)
 		if e == nil {
@@ -405,7 +488,13 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 		}
 		report.FeatureUnit = &gain
 	}
-	if env.identity != nil {
+	switch {
+	case approved != nil:
+		// The identity and the kernel the approved record was read against.
+		report.Identity, report.Kernel = approved.identity, approved.kernel
+		report.Endpoints = []qualification.PolicyRef{{ID: approved.native.ID, SHA256: qualification.Digest(approved.native)}, {ID: approved.dop.ID, SHA256: qualification.Digest(approved.dop)}}
+		report.Qualification = &qualification.Evidence{Path: filepath.Base(o.qualification), SHA256: approved.record.SHA256}
+	case env.identity != nil:
 		report.Identity, e = env.identity(ep.Card, ep.Device, resolved.Subdevice)
 		if e != nil {
 			fmt.Fprintln(errout, e)
@@ -428,27 +517,25 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 			}
 		}
 	}
-	if env.kernel != nil {
+	if env.kernel != nil && approved == nil {
 		report.Kernel, e = env.kernel()
 		if e != nil {
 			fmt.Fprintln(errout, e)
 			return 1
 		}
 	}
-	report.Platform = runtime.GOOS + "/" + runtime.GOARCH
-	report.GoVersion = runtime.Version()
+	report.Platform, report.GoVersion = nativePlatform()
 	report.BuildSHA = "unverified"
-	if bi, ok := debug.ReadBuildInfo(); ok {
-		for _, s := range bi.Settings {
-			if s.Key == "vcs.revision" {
-				report.BuildSHA = s.Value
-			}
-			if s.Key == "vcs.modified" {
-				report.Modified = s.Value == "true"
-			}
-		}
+	build := env.build
+	if build == nil {
+		build = vcsBuild
 	}
-	report.Environment = qualification.Digest([]string{report.Platform, report.GoVersion, report.Kernel})
+	sha, modified := build()
+	if sha != "" {
+		report.BuildSHA = sha
+	}
+	report.Modified = modified
+	report.Environment = nativeEnvironment(report.Kernel)
 	w := format.DSDWordBytes(format.ALSAFormat(o.format))
 	if o.transport == "dop" {
 		w = 2
@@ -527,7 +614,7 @@ func runOutputDSDTest(ctx context.Context, args []string, env outputDSDTestEnv, 
 			}
 			defer func() { runErr = errors.Join(runErr, restore()) }()
 		}
-		return executeNativeTest(runCtx, cancelRun, o, env, ep, admit, m, byID, reader, out, &report)
+		return executeNativeTest(runCtx, cancelRun, o, env, ep, admit, m, byID, approved, reader, out, &report)
 	}()
 	after := report.After
 	observationsMu.Lock()

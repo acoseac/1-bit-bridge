@@ -900,7 +900,7 @@ When none holds, `state` is the transport's: `playing` (a track that is starting
 
 **`libraryScope`** is `self`: the player plays this bridge's own tracks, the ones it would not refuse as `not_indexed` (no row of the library's index has it), `routed` (an upstream server's track) or `outside_library` (a file outside every library root configured now). An OpenHome controller queues one by the URI the player's Source takes in an Insert, `http://<host>:<port>/dlna/file/<id>`: a host this bridge advertises, the DLNA listener's port, and the track's DLNA id (B470 PR 5a4).
 
-**`fixedVolume`** is `true` while the player has no volume control (`output.player.mixer` none, the one this release takes): the DAC receives the file's own level. **`dsdMode`** is `off` (default), `native`, `auto` or `dop`, and **`allowDoP`** is the configured boolean, both as the player took them at boot. These settings alone grant no DSD permission. Native playback requires a fresh matching owner-approved record. DoP packing is not implemented in this release: DoP-only tuples are omitted, and no mode converts DSD to PCM.
+**`fixedVolume`** is `true` while the player has no volume control (`output.player.mixer` none, the one this release takes): the DAC receives the file's own level. **`dsdMode`** is `off` (default), `native`, `auto` or `dop`, and **`allowDoP`** is the configured boolean, both as the player took them at boot. These settings alone grant no DSD permission. Native playback requires a fresh matching owner-approved record, and DoP playback an approved DoP policy in it with `dsdMode` `dop` or `auto` and `allowDoP` true. No mode converts DSD to PCM: DoP carries the DSD bits unchanged in a PCM word.
 
 **`codecs`** are the containers the player plays in this release: `flac`, `wav`, `aiff` and `alac` (ALAC in an M4A). A client matches a track by its `codec` in `/v1/manifest`:
 
@@ -928,9 +928,9 @@ number with no fractional part; generations, session and occurrence are unsigned
 
 | Object | Always present members (JSON types) | Omitted when empty |
 |---|---|---|
-| `dsdPlayback` | `bootId`: string; `policyGeneration`: integer; `tuples`: array of tuple objects (never null, `[]` when empty) | `qualificationRevision`: string; `reason`: string |
-| Each tuple | `format`: string; `bitRate`: integer; `channels`: integer; `policyId`: string; `pause`: string; `tailMs`: integer; `prefillMs`: integer | None |
-| `playback` | `bootId`: string; `policyGeneration`: integer; `session`: integer; `occurrence`: integer; `state`: string; `format`: string; `rateHz`: integer; `logicalRate`: integer; `channels`: integer; `validBits`: integer | `policyId`: string |
+| `dsdPlayback` | `bootId`: string; `policyGeneration`: integer; `tuples`: array of tuple objects (never null, `[]` when empty) | `qualificationRevision`: string; `reason`: string; `model`: string; `bcdDevice`: string; `qualifiedOn`: string |
+| Each tuple | `format`: string; `bitRate`: integer; `channels`: integer; `policyId`: string; `pause`: string; `tailMs`: integer; `prefillMs`: integer | `transport`: string |
+| `playback` | `bootId`: string; `policyGeneration`: integer; `session`: integer; `occurrence`: integer; `state`: string; `format`: string; `rateHz`: integer; `logicalRate`: integer; `channels`: integer; `validBits`: integer | `policyId`: string; `transport`: string; `packingVersion`: integer; `observedAt`: string; `qualificationRevision`: string |
 
 No required member is omitted for zero or an empty string. Tuple `tailMs` and
 `prefillMs` are signed 64-bit integer milliseconds, including zero. Tuple
@@ -938,35 +938,64 @@ No required member is omitted for zero or an empty string. Tuple `tailMs` and
 backend boot; `policyGeneration` is monotonic within that boot. `policyId` and
 `qualificationRevision` are opaque strings, not token vocabularies.
 
+A tuple's `transport` is `dop` for a DoP policy, DSD carried unchanged in S32_LE
+PCM words at the DoP carrier (`bitRate` / 16 Hz, `format` `S32_LE`), and absent for
+native DSD: absent never means DoP. `model`, `bcdDevice` and `qualifiedOn` are the
+owner qualification the epoch's approved record states: the DAC's manufacturer and
+product strings, its USB descriptor firmware code, and the owner's qualification date
+(`YYYY-MM-DD`, an approval of schema 2 alone). They never carry the DAC's USB port
+path or serial number, and every occurrence of the bound unit's port or serial in a
+USB string is replaced with `[redacted]`.
+
+On `playback`, `transport` is `dop` for a DoP occurrence, `pcm` for a PCM one, and
+absent for native DSD. `packingVersion` is the DSD packer's version (1), absent for
+PCM. `observedAt` is when the backend last observed the occurrence's sink (installed,
+released, reopened or revoked), an RFC 3339 UTC time. `qualificationRevision` is the
+approved record's revision the occurrence was admitted under, absent for PCM; it may
+differ from the current epoch's after a promotion.
+
 The current token vocabularies are exact and case-sensitive:
 
 | Field | Tokens |
 |---|---|
-| `dsdPlayback.tuples[].format` | `DSD_U32_BE`, `DSD_U32_LE`, `DSD_U16_LE` |
+| `dsdPlayback.tuples[].format` | `DSD_U32_BE`, `DSD_U32_LE`, `DSD_U16_LE`, `S32_LE` |
+| `dsdPlayback.tuples[].transport` | `dop` |
 | `dsdPlayback.tuples[].pause` | `kernel`, `silence` |
 | `playback.state` | `open`, `released`, `revoked` |
+| `playback.transport` | `dop`, `pcm` |
 | `playback.format` (PCM) | `S16_LE`, `S24_3LE`, `S24_LE`, `S32_LE` |
 | `playback.format` (native DSD) | `DSD_U32_BE`, `DSD_U32_LE`, `DSD_U16_LE` |
+| `playback.format` (DoP) | `S32_LE` |
 
 Format sources are `format.DSDU32BE`, `format.DSDU32LE`, `format.DSDU16LE`
 (`internal/player/format/dsd_pack.go`) and `format.S16LE`, `format.S243LE`,
 `format.S24LE`, `format.S32LE` (`internal/player/format/pack.go`), selected by
-`playback.packings` and the native policy filter. Pause tokens are literal
+`playback.packings` and the effective set (`playback.effective`). Pause tokens are literal
 constants in `qualification.readApproval` (`internal/player/qualification/approval.go`);
 `kernel` uses ALSA PAUSE and `silence` writes DSD silence. Playback state tokens
 are literal constants in `playback.Facts`, `observeOccurrence`, `observeNote`
 (`internal/player/playback/live.go`) and `Backend.Revoke` (`native.go`), not
-named enum constants. No DoP occurrence is emitted in this release.
+named enum constants. Transport tokens are `playback.TransportDoP` and
+`playback.TransportPCM` (`internal/player/playback/edges.go`); a tuple names
+`dop` alone, and a native DSD tuple or occurrence names no transport.
 `dsdPlayback.reason` is free text for display only, not a closed token contract
 (the backend initializes and publishes it in `backend.go` and `authorization.go`).
 It is distinct from the baseline `bridge.reason` table above.
 **A client must treat an unknown token as unknown, never as a known one; in
 particular it must not infer eligibility from an unknown format or pause.**
 
-The tuple array is the effective exact set, not a Cartesian product. Native
-preference is DSD_U32_BE, DSD_U32_LE, DSD_U16_LE. Missing, stale, revoked, off or
-filtered-empty authorization gives the original PCM codecs and ProtocolInfo
-bytes. GET only copies cached policy, performing no hardware probes.
+The tuple array is the effective exact set, not a Cartesian product, and the
+player selects from that same set. It is ordered by rate (DSD64, DSD128, DSD256) and,
+within a rate, by selection order. Under `dsdMode` `native` a rate holds native
+policies, DSD_U32_BE first, then DSD_U32_LE, then DSD_U16_LE; under `dop`, the DoP
+policies, and only while `allowDoP` is true; under `auto`, a rate holds its native
+policies, or a DoP policy only where the record holds no native policy for that rate. A native policy whose
+mixer constraints no longer hold leaves its rate empty: DoP is never published or
+played in its place. With `allowDoP` false under `dop` or `auto`, a rate whose only
+approved transport is DoP is empty and `reason` says `dop_not_allowed`; PCM plays.
+Missing, stale, revoked, off or filtered-empty authorization gives the original PCM
+codecs and ProtocolInfo bytes. GET only copies cached policy, performing no hardware
+probes.
 
 `playback` is the latest current occurrence's observation. Released/revoked
 retain the last observation; capability tuples never substitute for it. Its
@@ -985,7 +1014,7 @@ Revocation publishes a PCM-only policy epoch, discards prepared DSD and Immediat
 | DFF, `unsupported`, DST or malformed properties | Refuse |
 | Missing/invalid/non-stereo channel facts | Refuse |
 
-The bridge independently inspects content at its open and refuses invalid DSF/DFF, missing tuples or invalid approval before hardware writes. Directional transition approval includes both endpoint tuples and complete policies; an unapproved natural or navigation edge refuses the incoming hardware open, even when both endpoints are approved. The outgoing occurrence follows its own release.
+The bridge independently inspects content at its open and refuses invalid DSF/DFF, missing tuples or invalid approval before hardware writes. Directional transition approval includes both endpoint tuples and complete policies; an unapproved natural or navigation edge refuses the incoming hardware open, even when both endpoints are approved. An edge between a native and a DoP policy is approved only by the owner's transition report, in the approved record's `Transitions`. Same-carrier PCM and DoP never join: the device is closed and reopened between them. The outgoing occurrence follows its own release.
 
 **iOS I1–I3 companion PRs remain pending:** stored Track migration, QueueItem propagation, and checking the entire insertion window before DeleteAll/Insert belong to iOS. Bridge Insert cannot inspect a controller's future window. These bridge changes do not claim zero controller mutations or completion of that cross-repository gate; mirror this contract and its fixtures in those PRs.
 
