@@ -61,8 +61,11 @@ func (pcmBudgetBackend) OwnsOccurrenceReservations() bool { return true }
 // four, and no fault. The one entry plays with repeat off, so the first
 // Prepare after its occurrence names the end, and repeat comes on while it
 // plays, which names the successor in a second Prepare after the same
-// occurrence. The held row keeps that second Prepare short of the fake until
-// the read waits for it, the latest a scheduler could leave it (B579).
+// occurrence: the lookahead waits for that one. A read of the first Prepare
+// after the occurrence took the end's nil when the second had not reached
+// the fake yet, and panicked (CI on #1362, under -race). The held row keeps
+// that second Prepare short of the fake until the read waits for it, the
+// latest a scheduler could leave it (B579).
 func TestPCMLookaheadHasNoNativeBudget(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -104,9 +107,16 @@ func TestPCMLookaheadHasNoNativeBudget(t *testing.T) {
 				h.be.waitFor("the successor's Prepare short of the fake", func() bool { return parked })
 				h.be.script(func() { h.be.waiting = sync.OnceFunc(held.open) })
 			}
+			// The first occurrence has two Prepares: the end's, named while
+			// repeat was off, then the successor's, named as repeat came on,
+			// which can reach the fake after this read begins. Each later
+			// occurrence has one.
 			after := s.first.ID
-			for range 8 {
-				next := s.prepared(after, 1)
+			next := s.successor(after)
+			for i := range 8 {
+				if i > 0 {
+					next = s.prepared(after, 1)
+				}
 				s.submitted(next.ID)
 				after = next.ID
 			}

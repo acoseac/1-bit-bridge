@@ -530,6 +530,26 @@ func (s *fakeSession) prepared(after OccurrenceID, n int) *Occurrence {
 	return last
 }
 
+// successor waits until s has had a Prepare after the occurrence after that
+// names a successor, and returns that successor, the last one's when several
+// do (B579). One that names the end can come first, as after an occurrence
+// handed off while repeat was off when repeat comes on, and a count of the
+// Prepares cannot tell whether the one that names the successor has arrived.
+func (s *fakeSession) successor(after OccurrenceID) *Occurrence {
+	s.b.t.Helper()
+	var next *Occurrence
+	s.b.waitFor(fmt.Sprintf("a successor named after occurrence %d in session %d", after, s.id), func() bool {
+		next = nil
+		for _, p := range s.prepares {
+			if p.after == after && p.next != nil {
+				next = p.next
+			}
+		}
+		return next != nil
+	})
+	return next
+}
+
 // preparesAfter is the Prepares s had after the occurrence after.
 func (s *fakeSession) preparesAfter(after OccurrenceID) []fakePrepare {
 	s.b.mu.Lock()
