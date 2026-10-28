@@ -449,7 +449,7 @@ func (cfg SinkConfig) resolve() (SinkConfig, error) {
 	t := cfg.Transport
 	switch {
 	case t.Kind != format.KindPCM:
-		return bad("the sink plays PCM, not %s: native DSD and DoP are later work", t.Kind)
+		return bad("the sink plays PCM, not %s: native DSD and DoP play through DSDSink", t.Kind)
 	case t.Channels != Channels:
 		return bad("the sink plays %d channels, not %d", Channels, t.Channels)
 	case !carries(t.Format, t.ValidBits):

@@ -49,8 +49,11 @@ func TestDocumentedNativeInvocations(t *testing.T) {
 			count++
 		}
 	}
-	if count != 8 {
-		t.Fatalf("executed %d documented invocations, want 8", count)
+	// 2c.1 to 2d.1's eight, and 2d.2's eight: the DoP and native
+	// backend-lifecycles, the transition scenario and the five output-play
+	// blocks.
+	if count != 16 {
+		t.Fatalf("executed %d documented invocations, want 16", count)
 	}
 }
 func TestProductionPlayReportFlags(t *testing.T) {

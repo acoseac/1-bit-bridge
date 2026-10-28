@@ -18,8 +18,9 @@ import (
 // and the rest) and engine.ReasonMissing for content the resolver could not
 // open.
 const (
-	// ReasonDSD is DSD content, whatever the DSD mode: native DSD and DoP
-	// are later releases (B470 PRs 2c and 2d), and DSD is never converted.
+	// ReasonDSD is DSD content while DSD is not configured: dsdMode off, or
+	// no authorization. Under a DSD mode the effective set's refusals name
+	// why (authorization.go, B470 2d.2); DSD is never converted.
 	ReasonDSD engine.Reason = "dsd_not_in_this_release"
 	// ReasonRate is a rate the ALSA backend does not open
 	// (alsapcm.MinRateHz to MaxRateHz), which the decoders take from 1 Hz.

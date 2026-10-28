@@ -62,9 +62,11 @@ libraryName: "My Music Library"
 #   --binding serial|uniqueModel|port` writes device: for you, the serial
 #   into this file alone (it is never printed, logged or served). There is
 #   no resampling, software volume or normalization setting, and there will
-#   not be. dsdMode defaults off; native/auto require owner approval in the state directory;
-#   DoP is not implemented, and mixer takes {type: none} alone
-#   in this release. The player's UUID is kept in <dataDir>/player-uuid.
+#   not be. dsdMode defaults off; native, auto and dop play DSD only under
+#   owner approval in the state directory, DoP only with allowDoP: true, and
+#   under auto only at a rate the record holds no native policy for; mixer
+#   takes {type: none} alone in this release. The player's UUID is kept in
+#   <dataDir>/player-uuid.
 #   openhome: true turns on the player's OpenHome surface on the LAN (in
 #   development, off by default): its own listener on each LAN address on
 #   openhomePort (default 7792; 0 is a port the kernel picks), with the

@@ -148,9 +148,9 @@ func (n Note) StatusPath() string {
 	return fmt.Sprintf("/proc/asound/card%d/pcm%dp/sub%d/status", n.Params.Endpoint.Card, n.Params.Endpoint.Device, n.Params.Subdevice)
 }
 
-// Backend plays the engine's sessions (engine.Backend) over the decoders and
-// alsapcm.Sink, PCM only. It is the package documentation's contract, term
-// by term.
+// Backend plays the engine's sessions (engine.Backend) over the decoders,
+// alsapcm.Sink for PCM and alsapcm.DSDSink for approved DSD. It is the
+// package documentation's contract, term by term.
 type Backend struct {
 	policyMu            sync.Mutex
 	policy              PlayerPolicy

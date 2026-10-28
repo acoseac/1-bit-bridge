@@ -227,7 +227,7 @@ func pcmTestOpenFiles(paths []string, alsaFormat string) ([]pcmTestTrack, error)
 		if !ok {
 			_ = src.Close()
 			_ = f.Close()
-			return fail(fmt.Errorf("%s is native DSD: the sink plays PCM, and native DSD and DoP are B470 PRs 2c and 2d", path))
+			return fail(fmt.Errorf("%s is native DSD: pcm-test plays PCM, and native DSD and DoP are dsd-test's", path))
 		}
 		pcm := d.Format()
 		af := format.ALSAFormat(alsaFormat)

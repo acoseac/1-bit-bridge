@@ -938,6 +938,22 @@ No required member is omitted for zero or an empty string. Tuple `tailMs` and
 backend boot; `policyGeneration` is monotonic within that boot. `policyId` and
 `qualificationRevision` are opaque strings, not token vocabularies.
 
+A tuple's `transport` is `dop` for a DoP policy, DSD carried unchanged in S32_LE
+PCM words at the DoP carrier (`bitRate` / 16 Hz, `format` `S32_LE`), and absent for
+native DSD: absent never means DoP. `model`, `bcdDevice` and `qualifiedOn` are the
+owner qualification the epoch's approved record states: the DAC's manufacturer and
+product strings, its USB descriptor firmware code, and the owner's qualification date
+(`YYYY-MM-DD`, an approval of schema 2 alone). They never carry the DAC's USB port
+path or serial number, and every occurrence of the bound unit's port or serial in a
+USB string is replaced with `[redacted]`.
+
+On `playback`, `transport` is `dop` for a DoP occurrence, `pcm` for a PCM one, and
+absent for native DSD. `packingVersion` is the DSD packer's version (1), absent for
+PCM. `observedAt` is when the backend last observed the occurrence's sink (installed,
+released, reopened or revoked), an RFC 3339 UTC time. `qualificationRevision` is the
+approved record's revision the occurrence was admitted under, absent for PCM; it may
+differ from the current epoch's after a promotion.
+
 The current token vocabularies are exact and case-sensitive:
 
 | Field | Tokens |
@@ -954,7 +970,7 @@ The current token vocabularies are exact and case-sensitive:
 Format sources are `format.DSDU32BE`, `format.DSDU32LE`, `format.DSDU16LE`
 (`internal/player/format/dsd_pack.go`) and `format.S16LE`, `format.S243LE`,
 `format.S24LE`, `format.S32LE` (`internal/player/format/pack.go`), selected by
-`playback.packings` and the native policy filter. Pause tokens are literal
+`playback.packings` and the effective set (`playback.effective`). Pause tokens are literal
 constants in `qualification.readApproval` (`internal/player/qualification/approval.go`);
 `kernel` uses ALSA PAUSE and `silence` writes DSD silence. Playback state tokens
 are literal constants in `playback.Facts`, `observeOccurrence`, `observeNote`
@@ -968,10 +984,17 @@ It is distinct from the baseline `bridge.reason` table above.
 **A client must treat an unknown token as unknown, never as a known one; in
 particular it must not infer eligibility from an unknown format or pause.**
 
-The tuple array is the effective exact set, not a Cartesian product. Native
-preference is DSD_U32_BE, DSD_U32_LE, DSD_U16_LE. Missing, stale, revoked, off or
-filtered-empty authorization gives the original PCM codecs and ProtocolInfo
-bytes. GET only copies cached policy, performing no hardware probes.
+The tuple array is the effective exact set, not a Cartesian product, and the
+player selects from that same set. Under `dsdMode` `native` it holds native policies,
+DSD_U32_BE first, then DSD_U32_LE, then DSD_U16_LE; under `dop`, the DoP policies,
+and only while `allowDoP` is true; under `auto`, the native policies first and a DoP
+policy only at a rate the record holds no native policy for. A native policy whose
+mixer constraints no longer hold leaves its rate empty: DoP is never published or
+played in its place. With `allowDoP` false under `dop` or `auto`, a rate whose only
+approved transport is DoP is empty and `reason` says `dop_not_allowed`; PCM plays.
+Missing, stale, revoked, off or filtered-empty authorization gives the original PCM
+codecs and ProtocolInfo bytes. GET only copies cached policy, performing no hardware
+probes.
 
 `playback` is the latest current occurrence's observation. Released/revoked
 retain the last observation; capability tuples never substitute for it. Its
@@ -990,7 +1013,7 @@ Revocation publishes a PCM-only policy epoch, discards prepared DSD and Immediat
 | DFF, `unsupported`, DST or malformed properties | Refuse |
 | Missing/invalid/non-stereo channel facts | Refuse |
 
-The bridge independently inspects content at its open and refuses invalid DSF/DFF, missing tuples or invalid approval before hardware writes. Directional transition approval includes both endpoint tuples and complete policies; an unapproved natural or navigation edge refuses the incoming hardware open, even when both endpoints are approved. The outgoing occurrence follows its own release.
+The bridge independently inspects content at its open and refuses invalid DSF/DFF, missing tuples or invalid approval before hardware writes. Directional transition approval includes both endpoint tuples and complete policies; an unapproved natural or navigation edge refuses the incoming hardware open, even when both endpoints are approved. An edge between a native and a DoP policy is approved only by the owner's transition report, in the approved record's `Transitions`. Same-carrier PCM and DoP never join: the device is closed and reopened between them. The outgoing occurrence follows its own release.
 
 **iOS I1–I3 companion PRs remain pending:** stored Track migration, QueueItem propagation, and checking the entire insertion window before DeleteAll/Insert belong to iOS. Bridge Insert cannot inspect a controller's future window. These bridge changes do not claim zero controller mutations or completion of that cross-repository gate; mirror this contract and its fixtures in those PRs.
 

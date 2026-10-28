@@ -65847,3 +65847,106 @@ the indicator case's fixture so the hash refusal fired first: the new test
 went red (`errout="fixture pcm hash mismatch\n"; want … observations
 incomplete`), and main's version of the test stayed green under the same
 mutation.
+
+## 2026-10-28 — B470 2d.2: approved DoP and auto selection, integrated reports, honest claims
+
+Branch `feat/b470-2d2-approved-dop` from main cabc8795, five commits in the
+brief's order: the inert API, assertion reds that compile, the implementation
+(qualification version 16), the controls' target tests, the docs. The owner's
+four decisions of 2026-10-28 are binding and each is pinned:
+
+1. **Auto never plays DoP at a rate whose approval holds a native policy**,
+   and a native policy whose mixer constraints drifted is not absent: its
+   rate is `dsd_policy_unavailable`, never DoP. One function,
+   `playback.effective`, computes the effective set over dsdMode × allowDoP
+   for both `selectNative` and `publishPermission`, using `nativeTransport`
+   for what is implemented. Rejected: keeping the record-order loop (a DoP
+   listed first wins), adding S32_LE to the native format list (the same),
+   and a runtime fallback after the plan (the engine ignores it, and it would
+   hide a native failure).
+2. **`dop` or `auto` with `allowDoP: false` loads**; DSD is refused at
+   playback as `dop_not_allowed` and the epoch publishes no DoP tuple with
+   that reason, while PCM plays (`TestServeOutputPlayAllowDoP`,
+   `TestNativeIntegrationDoPProductionRefusals`, which plays the PCM to its
+   end on the fake kernel after the refused DSD entry). A missing or
+   unreadable approval under a DSD mode is now `dsd_approval_unavailable`,
+   whose detail names an `*fs.PathError`'s operation and cause and never the
+   path; `dsd_not_in_this_release` stays DSD not configured.
+3. **Native↔DoP transitions need their own evidence**: approval schema 2
+   with `Transitions` and `QualifiedOn`, `DisallowUnknownFields` and the
+   canonical Digest kept, both omitted when empty so schema 1 digests as
+   before. `checkTransition` binds a transition report by its bytes and its
+   endpoints by their policies' digests and counts only the two cross edges
+   it passed. The scenario `approved-native-dop-native` reads both endpoints
+   through `ReadApproval` and refuses every mismatch before an open or a
+   report (`TestApprovedTransitionScenarioNeverProbes`, eight refusals each
+   with its own line, zero opens, no report file).
+4. **`/v1/outputs` adds `transport`** to each tuple and to `playback`
+   (absent is native DSD; `pcm` on an observation), `packingVersion`,
+   `observedAt` and `qualificationRevision` on the observation, and the
+   epoch's `model`, `bcdDevice` and `qualifiedOn`, never the USB port or
+   serial: the record's model has its port taken out, and serve's view takes
+   the boot binding's serial and port out again. Additive; protocol stays
+   v1; the iOS mirror PR follows separately.
+
+The DoP backend-lifecycle runs on its CLI candidate under dsdMode dop, then
+asks for the DSD indication and the listening. Its recorder compares the
+tuple with its transport, keys edges as the backend does
+(`playback.EdgeKey`), and records only the qualified transport's opens as
+`Opened` (a PCM edge's as `EdgeOpened`), which DoP's geometry check reads.
+The producer's reuse check asks `Transport.Join`, so same-carrier PCM and
+DoP close and reopen.
+
+Red-first: every listed test failed on the inert commit by its assertion
+(the logs are the job's), and is green from commit 3. Two of them, the
+overlay CLI scenarios `TestNativeIntegrationDoPBackendLifecycle` and
+`TestNativeIntegrationApprovedNativeDoPNative`, then timed out green-side:
+their single 2.5 s grant of the fake DAC was spent by the writer's idle
+watches while the new sink filled (an error-only poll consumes a grant on a
+stream that has not started), and a large grant can run a stream dry when
+the producer is behind. They now grant 20 ms at a time, each only once the
+writer waits with the stream not running or holding 8,820 frames or more
+(`grantable`); `-race -count=10` green.
+
+Native-only pins changed in commit 3, each said in its message: the two
+pins of DoP's production refusal, the playback test and its overlay twin,
+became `TestDoPProductionRefusals` and
+`TestNativeIntegrationDoPProductionRefusals` (gate.yml's PASS loop renamed,
+and the new overlay tests added); `TestApprovedTupleSelection` takes dsdMode native;
+`TestNativeProductionConstructorsRefuse` expects `dsd_approval_unavailable`;
+`TestDSDOutputProtocolTokens` reads tuple formats, transports and DoP's
+format; `TestDSDOutputProtocolMembers` populates every new member;
+`playbacktest.Approved` stays native, so `TestBridgeDSDCodecVocabulary` and
+`TestDSDPolicyProtocolInfo` remain native-mode pins.
+
+Controls: 27 new and 134 of 2d.1's (those on the files this branch changes,
+or naming a test it changed), run by a copy of 2d.1's runner on copies of
+the committed tree; all matched. Commit 4 added the leaves three controls
+lacked: `TestTransportJoinTellsSameCarrierPCMFromDoP` (dropping kind, valid
+bits, logical rate or packing version from Join leaves the other three, so
+the end-to-end same-carrier test cannot go red; this test names all four),
+`TestApprovalTransitionRefusals` (schema-1 slots, both digests, a report
+missing one cross edge) and `TestQualificationApprovedDoPGuardedPaths` (the
+five new files). The first run left three unmatched: two predictions
+(`D2-dop-before-native` also turns the drift pin red, rightly;
+`TestNativeIntegrationMixedPolicy` is not a same-transport policy change, so
+`D2-producer-policy` turns `DoPTransitions/policy` alone), and one real gap:
+`TestOutputsQualificationFacts` built its player with no boot binding, so a
+leaked serial could not reach the body; a follow-up commit gives it serve's.
+Of 2d.1's, `R7-prod-refuses` was retargeted (a missing approval is refused
+before admission now, so the container cross-check, with no authorization,
+is where `productionNativeAdmission` is reached), fifteen anchors moved with
+the code, and `D-R10-selection` and `D-R11-publication` are superseded by
+the effective set's controls.
+
+player.md was at 99,760 of its 100,000 bytes. `move_entry.py --largest`
+proposed its largest entry, whose pointer would have dropped that entry's
+bolded "Don't…" sentence (715 bytes, past the tool's 600-byte line), so the
+second largest moved instead (the hotplug watcher's generation entry), its
+pointer keeping its title and its "Don't…" sentence. The harness then
+refused edits to player.md itself, so the 2d.2 line and the corrections of
+its stale DoP claims are in the job's rules notes for the owner to apply;
+the long form is in History-rules-player.md, "Approved DoP (B470 2d.2)".
+
+Pending, as for 2c and 2d.1: Linux amd64/arm64 execution and the alsa-abi
+job; every hardware step of the runbook's 2d.2 section is the owner's.
