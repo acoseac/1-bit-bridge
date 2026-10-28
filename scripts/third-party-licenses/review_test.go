@@ -176,6 +176,7 @@ func TestWebPackagesRefusedWithoutEmbeds(t *testing.T) {
 }
 
 func TestRealReleaseGraphEmbeds(t *testing.T) {
+	defaultDiscoveryEnv(t)
 	_, counts, err := generate("../..")
 	if err != nil {
 		t.Fatal(err)

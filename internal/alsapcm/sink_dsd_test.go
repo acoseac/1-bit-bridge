@@ -4,11 +4,19 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"flag"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
 	"strconv"
 	"testing"
 	"time"
 )
+
+// escalationStall holds the escalated drain's cancelled wait this long
+// before it returns, as a scheduler that runs the escalation late would:
+// the forcing apparatus of B563's control for TestNativeReleaseEscalation,
+// which must not depend on how fast the escalation runs. Zero, the
+// default, holds nothing.
+var escalationStall = flag.Duration("escalation-stall", 0, "TestNativeReleaseEscalation: hold the escalated drain's cancelled wait this long, a scheduler that runs it late")
 
 func nativeConfig() DSDConfig {
 	return DSDConfig{Endpoint: testEndpoint, Format: format.DSDU32BE, BitRate: 2822400, Pause: PauseKernel, BufferTime: 40 * time.Millisecond}
@@ -241,9 +249,15 @@ func TestNativeReleaseEscalation(t *testing.T) {
 
 // testReleaseEscalation holds a track change's drain of 32 queued bits,
 // which the sink's transport writes as frames hardware frames, while an
-// Immediate release escalates it.
+// Immediate release escalates it. The escalation is observed where it acts,
+// never by how fast it runs (backlog B563): the held drain's wait ends
+// because its context was cancelled, the Immediate release then answers
+// nil, and the release clock has not moved, so the release's deadline did
+// not end the drain. The watchdog is a hang detector, not the measure: a
+// defective escalation is reported when it expires, then ended through the
+// release clock, so the test fails rather than hangs.
 func testReleaseEscalation(t *testing.T, k *fakeKernel, cfg DSDConfig, frames uint64) {
-	g := &nativePollGate{sys: k, entered: make(chan struct{}), gate: make(chan struct{})}
+	g := &nativePollGate{sys: k, entered: make(chan struct{}), gate: make(chan struct{}), cancelled: make(chan struct{}), stall: *escalationStall}
 	s, e := openDSDSink(context.Background(), cfg, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(g, k.now, ep, c) }, now: k.now, at: k.nativeAt})
 	if e != nil {
 		t.Fatal(e)
@@ -258,20 +272,33 @@ func testReleaseEscalation(t *testing.T, k *fakeKernel, cfg DSDConfig, frames ui
 	answer := make(chan error, 1)
 	go func() { answer <- s.Release(context.Background(), TrackChange) }()
 	await(t, g.entered, "cancellable drain seam")
-	start := time.Now()
+	start := k.now()
 	immediate := make(chan error, 1)
 	go func() { immediate <- s.Release(context.Background(), Immediate) }()
+	hang := time.NewTimer(*watchdog)
+	defer hang.Stop()
+	select {
+	case <-g.cancelled:
+	case <-hang.C:
+		t.Errorf("the escalation did not cancel the held drain within the watchdog (%v)", *watchdog)
+		k.advanceNow(2 * time.Second)
+	}
+	// The second wait gets its own watchdog: a timer that fired above
+	// delivers nothing again, so without the reset a release that never
+	// answered after a fired first wait would hang the test.
+	hang.Reset(*watchdog)
 	select {
 	case e = <-immediate:
-		if e != nil {
-			t.Errorf("escalation failed: %v", e)
-		}
-	case <-time.After(time.Second):
-		t.Errorf("escalation did not cancel drain promptly after %v", time.Since(start))
-		// Let a defective escalation end through the independently tested
-		// release clock, so the mutation produces an assertion, not a hang.
+	case <-hang.C:
+		t.Errorf("the escalated release did not answer within the watchdog (%v)", *watchdog)
 		k.advanceNow(2 * time.Second)
-		<-immediate
+		e = <-immediate
+	}
+	if e != nil {
+		t.Errorf("escalation failed: %v", e)
+	}
+	if moved := k.now().Sub(start); moved != 0 {
+		t.Errorf("the release clock moved %v before the escalated release answered", moved)
 	}
 	close(g.gate)
 	await(t, s.Done(), "Immediate cleanup")

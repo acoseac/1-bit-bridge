@@ -235,6 +235,13 @@ func (tk *FakeKernel) ParkNextStatus() (parked <-chan struct{}, release func()) 
 	return tk.k.parkNextStatus()
 }
 
+// ParkNextPoll parks the next poll inside the kernel call until release,
+// as ParkNextWrite parks a write: a sink's writer that the scheduler runs
+// late, whose producer goes on handing it frames meanwhile.
+func (tk *FakeKernel) ParkNextPoll() (parked <-chan struct{}, release func()) {
+	return tk.k.parkNextPoll()
+}
+
 // ParkStatusAfterWritten parks the first STATUS after the kernel takes
 // frames frames across its opens, before that STATUS reads the pointers.
 func (tk *FakeKernel) ParkStatusAfterWritten(frames uint64) (parked <-chan struct{}, release func()) {

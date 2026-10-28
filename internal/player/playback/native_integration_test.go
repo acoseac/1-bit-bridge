@@ -259,11 +259,16 @@ func playUntilStopped(t *testing.T, ctx context.Context, eng *engine.Engine, wha
 }
 
 // playToParkedWrite plays until the hardware write the test parked
-// (FakeKernel.ParkNextWrite) holds the two-occurrence prefix.
-func playToParkedWrite(t *testing.T, ctx context.Context, eng *engine.Engine, parked <-chan struct{}) {
+// (FakeKernel.ParkNextWrite) holds the two-occurrence prefix. late, when
+// set, runs once the play has answered and before that wait: the test's
+// hold on the writer (nativeLateWriter).
+func playToParkedWrite(t *testing.T, ctx context.Context, eng *engine.Engine, parked <-chan struct{}, late func()) {
 	t.Helper()
 	if e := eng.Play(ctx); e != nil {
 		t.Fatal(e)
+	}
+	if late != nil {
+		late()
 	}
 	select {
 	case <-parked:
@@ -808,44 +813,101 @@ func (b nativeSuccessorBarrier) Start(ctx context.Context, r engine.StartRequest
 	}
 	return b.nativeRecordingBackend.Start(ctx, r)
 }
+
 func TestNativeIntegrationRetiringThroughEngine(t *testing.T) {
+	native := retiringTwin{plan: nativeTestPlan, formats: []uint32{49, 50, 52}, word: 32, tail: 89, dac: nativeWords}
+	for _, selector := range []string{"Next", "Previous", "SeekId", "SeekIndex"} {
+		t.Run(selector, func(t *testing.T) { testRetiring(t, native, selector) })
+	}
+}
+
+// retiringTwin is one transport's run of testRetiring: its plan, the
+// formats its DAC takes, the bits of each channel one hardware frame
+// carries, the track change's tail in frames (1 ms), and the bytes the DAC
+// must be given for the first bits of each channel and that tail, worked out
+// apart from the sink.
+type retiringTwin struct {
+	plan    func(format.NativeDSD) (engine.NativePlan, error)
+	formats []uint32
+	word    int
+	tail    int
+	dac     func(l, r []byte, bits, silence int) []byte
+}
+
+// testRetiring navigates while the first hardware write is parked. Each of
+// the tracks a, b and c is one bit shorter than the transport's word, so
+// that write's word holds all of a and b's first bit: a two-occurrence
+// prefix. c's content is held until the navigation's release has begun, so
+// no word holding c's bits can join that write whatever the scheduler does,
+// the latest writer included (nativeLateWriter), and the DAC is given
+// exactly that one word and the track change's tail (backlog B563; B470 2d.1
+// closed the window first in the DoP twin).
+func testRetiring(t *testing.T, tw retiringTwin, selector string) {
 	nativeEngineStorage(t)
 	k := alsapcm.NewFakeKernel(t)
-	k.HardwareFormats(49, 50, 52)
+	k.HardwareFormats(tw.formats...)
 	k.Free()
-	b, err := New(Config{Resolver: nativeFiles{"a": nativeDSF(t, 31)}, Locator: nativeLocator{}})
+	data := nativeDSF(t, tw.word-1)
+	third := &nativeStalledReader{Reader: bytes.NewReader(data), entered: make(chan struct{}), gate: make(chan struct{})}
+	var thirdOnce sync.Once
+	letC := func() { thirdOnce.Do(func() { close(third.gate) }) }
+	b, err := New(Config{Resolver: nativeStalledResolver{first: data, held: map[string]*nativeStalledReader{"c": third}}, Locator: nativeLocator{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	AdmitNativeForIntegration(b, nativeTestPlan, k.OpenNativeSink)
+	AdmitNativeForIntegration(b, tw.plan, k.OpenNativeSink)
 	events := &nativeEvents{done: make(chan struct{})}
 	barrier := nativeSuccessorBarrier{nativeRecordingBackend{b, events}, make(chan struct{}), make(chan struct{})}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	var once sync.Once
 	allow := func() { once.Do(func() { close(barrier.allow) }) }
-	eng := nativeEngine(t, ctx, cancel, b, barrier, allow)
-	ids := queueWithOutput(t, ctx, eng, "a", "a", "a")
+	eng := nativeEngine(t, ctx, cancel, b, barrier, func() { allow(); letC() })
+	ids := queueWithOutput(t, ctx, eng, "a", "b", "c")
 	parked, unpark := k.ParkNextWrite()
 	defer unpark()
-	playToParkedWrite(t, ctx, eng, parked)
+	polled, wake := k.ParkNextPoll()
+	defer wake()
+	// c's open reads its content first: from there it waits for letC.
+	playToParkedWrite(t, ctx, eng, parked, func() { nativeLateWriter(t, ctx, b, polled, wake, third.entered, int64(2*tw.word)) })
 	s := b.known(1)
 	nav := make(chan error, 1)
-	go func() { nav <- eng.PlayID(ctx, ids[2]) }()
+	target := ids[2]
+	navigate := func() error { return eng.PlayID(ctx, ids[2]) }
+	switch selector {
+	case "Next":
+		target = ids[1]
+		navigate = func() error { return eng.Next(ctx) }
+	case "Previous":
+		target = ids[0]
+		navigate = func() error { return eng.Previous(ctx) }
+	case "SeekIndex":
+		navigate = func() error { return eng.PlayIndex(ctx, 2) }
+	}
+	go func() { nav <- navigate() }()
 	select {
 	case <-s.ctx.Done():
 	case <-ctx.Done():
 		t.Fatal("navigation did not establish release")
 	}
 	unpark()
+	// The cutoff is fixed: c's open may finish now and write nothing.
+	letC()
 	select {
 	case <-barrier.entered:
 	case <-ctx.Done():
 		t.Fatal("release did not authorize successor")
 	}
 	sn := eng.Snapshot()
-	if sn.Selected() != ids[2] || sn.TrackCount() != 2 {
+	if sn.Selected() != target || sn.TrackCount() != 2 {
 		t.Fatalf("retiring accounting changed destination or lost a boundary: selected=%d count=%d", sn.Selected(), sn.TrackCount())
+	}
+	// The DAC was given the parked word, a's bits and b's first, and the
+	// track change's tail: none of c, and nothing of b past its first bit.
+	l, r := dsdPattern(t)
+	cl, cr, _ := dsdChain(l, r, tw.word-1, 2)
+	if got, want := k.Given(), tw.dac(cl, cr, tw.word, tw.tail); !bytes.Equal(got, want) {
+		t.Fatalf("the retiring run gave the DAC %d bytes, beginning %x; want %d, the two-occurrence word %x and the tail", len(got), got[:min(len(got), 8)], len(want), want[:8])
 	}
 	// The barrier is entered only after final release events and acknowledgement
 	// were consumed; the successor has not opened or submitted any content yet.
@@ -864,6 +926,45 @@ func TestNativeIntegrationRetiringThroughEngine(t *testing.T) {
 	if err = eng.Stop(ctx); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// nativeLateWriter is session 1's writer run as late as the scheduler can
+// run it (backlog B563): its first wait is parked in the fake kernel
+// (ParkNextPoll) while the producer hands the sink everything it can, and
+// it is let go once the sink holds bits bits of each channel, a second word
+// that carries the third occurrence's first bits, or once held closes, the
+// third occurrence's content held where none of it can be submitted. A test
+// that counts on the writer taking its first word before the producer
+// moves on cannot pass under it.
+func nativeLateWriter(t *testing.T, ctx context.Context, b *Backend, polled <-chan struct{}, wake func(), held <-chan struct{}, bits int64) {
+	t.Helper()
+	select {
+	case <-polled:
+	case <-ctx.Done():
+		t.Fatal("the writer never waited")
+	}
+	s := b.known(1)
+	if s == nil {
+		t.Fatal("the backend holds no session 1 for the late writer")
+	}
+	s.mu.Lock()
+	sink := s.cur.native
+	s.mu.Unlock()
+	for {
+		ch := sink.Changed()
+		if sink.Position().Submitted >= bits {
+			break
+		}
+		select {
+		case <-ch:
+			continue
+		case <-held:
+		case <-ctx.Done():
+			t.Fatal("the producer stopped short of the third occurrence")
+		}
+		break
+	}
+	wake()
 }
 
 func TestNativeIntegrationDeleteDuringActivation(t *testing.T) {
@@ -1470,9 +1571,9 @@ func dopTestPlan(d format.NativeDSD) (engine.NativePlan, error) {
 	return p, e
 }
 
-// dopPattern is the canonical audio nativeDSF's fixture decodes to: the
+// dsdPattern is the canonical audio nativeDSF's fixture decodes to: the
 // goldens' pattern.bin, left plane then right.
-func dopPattern(t *testing.T) (l, r []byte) {
+func dsdPattern(t *testing.T) (l, r []byte) {
 	t.Helper()
 	b, e := os.ReadFile(filepath.Join("..", "decode", "testdata", "dsd-goldens", "pattern.bin"))
 	if e != nil {
@@ -1481,10 +1582,10 @@ func dopPattern(t *testing.T) (l, r []byte) {
 	return b[:len(b)/2], b[len(b)/2:]
 }
 
-// dopChain is n bits of each plane, repeated times back to back, bit
+// dsdChain is n bits of each plane, repeated times back to back, bit
 // against bit: compatible occurrences of one track joined with nothing
 // between them.
-func dopChain(l, r []byte, n, times int) (cl, cr []byte, bits int) {
+func dsdChain(l, r []byte, n, times int) (cl, cr []byte, bits int) {
 	bits = n * times
 	cl, cr = make([]byte, (bits+7)/8), make([]byte, (bits+7)/8)
 	for i := range bits {
@@ -1525,6 +1626,33 @@ func dopBytes(l, r []byte, bits, silence int) []byte {
 	}
 	return out
 }
+
+// nativeWords is what a DSD_U32_BE DAC must be given for bits of each
+// plane, worked out apart from the sink: frames of a left then a right
+// 32-bit word, the earliest bit at the first byte's bit 7, a last partial
+// word padded by 0x69's bits at their own positions, then silence frames of
+// 0x69.
+func nativeWords(l, r []byte, bits, silence int) []byte {
+	var out []byte
+	for f := range (bits + 31) / 32 {
+		for _, p := range [][]byte{l, r} {
+			for i := range 4 {
+				var v byte
+				for j := range 8 {
+					at := f*32 + i*8 + j
+					b := (byte(0x69) >> (7 - j)) & 1
+					if at < bits {
+						b = (p[at/8] >> (7 - at%8)) & 1
+					}
+					v |= b << (7 - j)
+				}
+				out = append(out, v)
+			}
+		}
+	}
+	return append(out, bytes.Repeat([]byte{0x69}, 8*silence)...)
+}
+
 func TestNativeIntegrationDoPThroughEngine(t *testing.T) {
 	t.Run("StalledReservations", func(t *testing.T) { testNativeStalledReservations(t, true) })
 	t.Run("PauseKeepsPlan", func(t *testing.T) { testNativePauseKeepsPlan(t, true) })
@@ -1538,8 +1666,8 @@ func TestNativeIntegrationDoPThroughEngine(t *testing.T) {
 				// Bit transparency through the engine, the backend, the decoder and
 				// the sink: the DAC was given exactly the DoP of the two occurrences'
 				// bits joined, padded once at the end, then the plan's 1 ms tail.
-				l, r := dopPattern(t)
-				cl, cr, n := dopChain(l, r, bits, 2)
+				l, r := dsdPattern(t)
+				cl, cr, n := dsdChain(l, r, bits, 2)
 				if got, want := k.Given(), dopBytes(cl, cr, n, 177); !bytes.Equal(got, want) {
 					t.Errorf("the DAC was given %d bytes that are not the DoP of the content (%d bytes)", len(got), len(want))
 				}
@@ -1548,96 +1676,12 @@ func TestNativeIntegrationDoPThroughEngine(t *testing.T) {
 	}
 }
 
+// TestNativeIntegrationDoPRetiring is testRetiring over DoP: 15-bit tracks,
+// so DoP's first 16-bit word holds all of a and b's first bit.
 func TestNativeIntegrationDoPRetiring(t *testing.T) {
+	dop := retiringTwin{plan: dopTestPlan, formats: []uint32{2, 10, 32, 49, 50, 52}, word: 16, tail: 177, dac: dopBytes}
 	for _, selector := range []string{"Next", "Previous", "SeekId", "SeekIndex"} {
-		t.Run(selector, func(t *testing.T) { testDoPRetiring(t, selector) })
-	}
-}
-
-// testDoPRetiring: with 15-bit tracks DoP's first 16-bit word holds all of
-// a and b's first bit, so the write parked here is a two-occurrence prefix
-// (the native test's 31-bit tracks fill a whole DoP word with a alone). c's
-// content is held until the navigation's release has begun, so no word
-// holding c's bits can join that write, whatever the scheduler does: the
-// DAC is given exactly that one word and the track change's tail.
-func testDoPRetiring(t *testing.T, selector string) {
-	nativeEngineStorage(t)
-	k := alsapcm.NewFakeKernel(t)
-	k.HardwareFormats(2, 10, 32, 49, 50, 52)
-	k.Free()
-	data := nativeDSF(t, 15)
-	held := &nativeStalledReader{Reader: bytes.NewReader(data), entered: make(chan struct{}), gate: make(chan struct{})}
-	var gateOnce sync.Once
-	letC := func() { gateOnce.Do(func() { close(held.gate) }) }
-	b, err := New(Config{Resolver: nativeStalledResolver{first: data, held: map[string]*nativeStalledReader{"c": held}}, Locator: nativeLocator{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	AdmitNativeForIntegration(b, dopTestPlan, k.OpenNativeSink)
-	events := &nativeEvents{done: make(chan struct{})}
-	barrier := nativeSuccessorBarrier{nativeRecordingBackend{b, events}, make(chan struct{}), make(chan struct{})}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	var once sync.Once
-	allow := func() { once.Do(func() { close(barrier.allow) }) }
-	eng := nativeEngine(t, ctx, cancel, b, barrier, func() { allow(); letC() })
-	ids := queueWithOutput(t, ctx, eng, "a", "b", "c")
-	parked, unpark := k.ParkNextWrite()
-	defer unpark()
-	playToParkedWrite(t, ctx, eng, parked)
-	s := b.known(1)
-	nav := make(chan error, 1)
-	target := ids[2]
-	navigate := func() error { return eng.PlayID(ctx, ids[2]) }
-	switch selector {
-	case "Next":
-		target = ids[1]
-		navigate = func() error { return eng.Next(ctx) }
-	case "Previous":
-		target = ids[0]
-		navigate = func() error { return eng.Previous(ctx) }
-	case "SeekIndex":
-		navigate = func() error { return eng.PlayIndex(ctx, 2) }
-	}
-	go func() { nav <- navigate() }()
-	select {
-	case <-s.ctx.Done():
-	case <-ctx.Done():
-		t.Fatal("navigation did not establish release")
-	}
-	unpark()
-	// The cutoff is fixed: c's open may finish now and write nothing.
-	letC()
-	select {
-	case <-barrier.entered:
-	case <-ctx.Done():
-		t.Fatal("release did not authorize successor")
-	}
-	sn := eng.Snapshot()
-	if sn.Selected() != target || sn.TrackCount() != 2 {
-		t.Fatalf("retiring accounting changed destination or lost a boundary: selected=%d count=%d", sn.Selected(), sn.TrackCount())
-	}
-	l, r := dopPattern(t)
-	cl, cr, _ := dopChain(l, r, 15, 2)
-	if got, want := k.Given(), dopBytes(cl, cr, 16, 177); !bytes.Equal(got, want) {
-		t.Fatalf("the retiring run gave %d bytes, want the two-occurrence word and the tail (%d bytes)", len(got), len(want))
-	}
-	// The barrier is entered only after final release events and acknowledgement
-	// were consumed; the successor has not opened or submitted any content yet.
-	if k.View().Opens != 1 {
-		t.Fatal("successor opened before release barrier")
-	}
-	allow()
-	select {
-	case err = <-nav:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-ctx.Done():
-		t.Fatal("navigation stalled")
-	}
-	if err = eng.Stop(ctx); err != nil {
-		t.Fatal(err)
+		t.Run(selector, func(t *testing.T) { testRetiring(t, dop, selector) })
 	}
 }
 

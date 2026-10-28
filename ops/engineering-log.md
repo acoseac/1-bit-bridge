@@ -65659,3 +65659,191 @@ check and owner hardware qualification remain pending; no audio device was opene
   (2.2%). The production refusal's drain moved into `playOneOnEngine`, so the
   control `R2-drain-owner` was re-anchored to its `drainLoopOnCleanup(t, cancel,
   done, what)`; all 377 controls, re-run on 975d29e9, fail exactly their leaves.
+
+## 2026-10-28 — B562 and B563: four test-reliability defects
+
+Backlog B562 (a CI flake) and B563 (three follow-ups B470 2d.1's verification
+found). Each was reproduced red on main's test through a seam that forces its
+bad interleaving or condition, fixed, shown green under the same forcing, and
+negative-controlled by reverting only the fix under that forcing.
+
+**B562: the restore probe test learned its admin port and released it.**
+`TestARestoreOverAnUnlockedServeRefusesWithTheProbe` took a number from
+`closedLoopbackPort`, wrote it into the install's config, and let `bridge serve`
+bind it later; in CI's Linux race shard (run 40565409736, PR #1356) a parallel
+test took it in between, and serve exited `admin listen 127.0.0.1:35347: listen
+tcp …: bind: address already in use`. B313's rule already said a serve test
+hands serve its listeners; this test predated it. The port is now held from the
+moment it is chosen (`holdLoopback`) and handed to serve on
+`serveOpts.adminListener`; the config on disk still names it, so the restore
+finds the running serve through the config as in production (no change to
+restore, serve or the probe). `squatAdminPort` stands in for the parallel test:
+between the choice and serve's start it binds the admin address if it can and
+holds it, so a test that leaves the port free there fails every run with CI's
+error. On main's test it did (`… was free between the test's choice and serve's
+bind`, then serve's exit 1 on `bind: address already in use`); the control
+(the probe-and-release and `bootServe` put back, the squatter kept) did the
+same. Stress: `-race -count=200` of the test (199 s); `-count=100` with twelve
+`yes` processes on the twelve cores (314 s); and the whole `cmd/bridge` package
+`-race -count=20`, each pass the package's tests in four name ranges run as
+four concurrent `go test` processes (1,022 passed and 5 skipped in every pass,
+none failed).
+
+Other `cmd/bridge` tests still learn a port and release it, each for a check
+that expects nothing there or a number only written into a config; none hands
+the number to a serve. A parallel bind of the same number in between would
+make the check see a listener. They were listed, not changed:
+`closedLoopbackPort` (cli_config_precedence_test.go:19) and `closedAdminAddr`
+(restore_lock_test.go:75) behind every `seedRestorableInstall(t,
+closedAdminAddr(t))` and `writeInstallAt`, whose restore and clear-missing
+probes expect nothing to answer; `freeLoopbackPort`
+(serve_config_path_test.go:380) behind the init and doctor tests, whose
+preflight grades the number as free; init_preflight_cert_test.go:353, 421 and
+573; menu_test.go:274 (`TestWaitForListenTimesOutOnUnboundPort`);
+serve_handed_listeners_test.go:119 (the LAN port bound again at :176 to prove
+it free); loopback_tcp_udp_port_test.go:80 and 203 (the draw tests' own
+numbers). A fixed port that refuses connections and that nobody else can bind
+needs a socket bound and not listening, which `net` does not offer.
+
+**B563(a): the native retiring test left the third occurrence's word to the
+scheduler.** `TestNativeIntegrationRetiringThroughEngine` played one 31-bit
+track three times, parked the first hardware write (a's 31 bits and b's
+first: the two-occurrence prefix) and navigated to the third. Its writer is
+woken when the producer completes the first word; a writer run late takes
+every word the producer has completed by then, and the second carries the
+third occurrence's first two bits, which were then heard. The fake kernel's
+new `ParkNextPoll` makes that writer: `nativeLateWriter` parks its first wait
+while the producer runs on and lets it go once the sink holds 64 bits of each
+channel or the third occurrence's content is held. On main's test it failed
+every run (20 of 20: `retiring accounting changed destination or lost a
+boundary: selected=4099 count=3`). The fix is B470 2d.1's for the DoP twin:
+the entries are a, b and c, c's content held (`nativeStalledReader`) until the
+navigation's release has begun, and the DAC must be given exactly the parked
+word and the track change's 89-frame tail, compared with an oracle worked out
+apart from the sink (`nativePattern`, `nativeChain`, `nativeWords`). A mutation
+of the oracle's input (the word's last bit a's 32nd rather than b's first)
+fails the byte comparison, so it is live. The control (c served unheld) gave
+the same red as main. Stress: `-race -count=200` and `-count=100` under the
+twelve `yes` processes, through the overlay.
+
+**B563(b): the escalation test bounded the escalation by a second of wall
+time.** `TestNativeReleaseEscalation` held a track change's drain and gave the
+Immediate release that escalates it `time.After(time.Second)` to answer: a
+bound on the scheduler. `-escalation-stall` (default 0) holds the escalated
+drain's cancelled wait in the test's poll gate, as a scheduler that runs it
+late would; at 2 s main's test failed (`escalation did not cancel drain
+promptly after 1.001107625s`). The test now observes the escalation where it
+acts: the held poll closes `nativePollGate.cancelled` when its context ends,
+the Immediate release must then answer nil, and the release clock must not
+have moved, so the production release deadline (two seconds of fake time,
+unchanged) did not end the drain. The watchdog (`-watchdog`, a minute) is the
+hang detector: a production mutation that drops the escalation's cancel failed
+in 3 s under `-watchdog=3s` with three lines and no hang. Green with no stall,
+2 s and 5 s; the control (the wall-clock select put back) red as main. The
+body is now `testReleaseEscalation(t, k, cfg, frames)`, the helper 2d.1 gives
+its DoP twin (still unmerged), so the twin takes the seam by calling it.
+
+B563(a) and (b) change only test files, but `internal/alsapcm/` and
+`internal/player/playback/` are guarded prefixes, so qualificationVersion
+moved 13 to 14 with the runbook's five references and a note of what 14
+covers (`scripts/qualification-version` OK against 94725d55).
+
+**B563(c): the licence generator's tests on a Homebrew Go and with
+GOFLAGS=-mod=readonly.** Homebrew's bottle keeps GOROOT in its keg's libexec
+and moves LICENSE to the keg's root (`install_metafiles`), so eleven tests,
+and the generator itself, failed `Go toolchain LICENSE: open
+…/Cellar/go/1.27.3/libexec/LICENSE: no such file or directory`; the release
+playbook's local notices step could not run on such a Mac. `toolchainNotices`
+now reads a notice GOROOT lacks from the keg's root, only from a keg whose
+INSTALL_RECEIPT.json is homebrew/core's install of this very Go version
+(`homebrewKeg`); GOROOT's own files come first, so CI's official toolchain
+reads what it read. `TestAHomebrewKegsToolchainLicence` lays a keg out itself
+and was red on main on any host. Separately `TestRealReleaseGraphEmbeds` ran
+discovery in the caller's environment, and a developer's
+`GOFLAGS=-mod=readonly`, in the shell or written with `go env -w`, was refused
+by design (`non-default GOFLAGS`); it now runs in the default environment the
+fixture graph already had (`defaultDiscoveryEnv`), the refusal pinned by
+`TestDiscoveryEnvironment` as before. Controls: the keg read removed (the keg
+subtests red on any host, and eleven tests here as on main); the environment
+pin removed (`non-default GOFLAGS`). The generator now runs on this host's
+Homebrew Go with GOFLAGS cleared. Stress: the three tests `-race -count=200`
+and `-count=100` under twelve `yes` processes.
+
+Validation, with go1.27.3 (Homebrew's bottle) on the dev Mac and
+`GOFLAGS=-mod=readonly` in its environment: gofmt -l and `git diff --check`
+clean; `go vet ./...`, and for the touched packages GOOS=linux and
+GOOS=windows vet with and without the native overlay, clean; `go test -race`
+over all 92 packages with make test's flags (`-timeout 30m`), TMPDIR outside
+the worktree, in chunks each under ten minutes: every package passed,
+`cmd/bridge` as four concurrent name ranges (a twenty-first pass with these
+docs in the tree), `internal/manifest` and `internal/admin` as two each;
+both native overlay integration races as gate.yml runs them; `make
+docs-check`; `make build-all` with check-build-tags; `scripts/qualification-version`
+against 94725d55.
+
+Two follow-ups, not built: the port sites listed under B562; and make
+test's TMPDIR, `.tmp` inside the checkout, which the build-site census walks
+(it skips only .git, bin, dist, vendor, node_modules and `_` directories) and
+whose walk returns on its first error, so another package's test removing
+its temp tree during the walk could fail it. CI's TMPDIR is outside the
+checkout; this was read in the code, not observed.
+
+## 2026-10-28 — B562 and B563, round 2: onto main with 2d.1, the DoP twins, and the DoP envelope test
+
+The branch was merged with main after B470 2d.1 (#1357, 2c7be326) landed:
+one merge commit, the round-1 commits kept as they were. `git merge` needs
+an approval this session's headless permissions cannot give, so the merge
+was made the way a conflicted `git merge` ends: main's 34 files the branch
+had not touched were checked out from main, the five both sides changed
+were resolved by hand, the worktree's MERGE_HEAD named 2c7be326, and `git
+commit` recorded the two parents. The resolutions:
+`internal/alsapcm/sink_dsd_test.go` is the branch's, which already held
+2d.1's `testReleaseEscalation(t, k, cfg, frames)` signature and its
+`filledAndIdle(frames)`; in `native_integration_test.go` the native retiring
+test and 2d.1's DoP twin now run one helper, `testRetiring(t, retiringTwin,
+selector)`, over the four selectors (Next, Previous, SeekId, SeekIndex):
+2d.1's shared helpers, the held third occurrence, the late writer
+(`nativeLateWriter`, its threshold two of the transport's words: 64 bits
+native, 32 DoP) and a byte oracle per transport (`nativeWords`,
+`dopBytes`), the duplicate pattern and chain helpers made one pair
+(`dsdPattern`, `dsdChain`); version.go said 14 on both sides; the runbook
+and this log keep both sides' text. qualificationVersion then moved to 15
+in its own commit, with the runbook's five current references
+(`scripts/qualification-version -base 2c7be326 -head HEAD`: OK).
+
+**The DoP escalation twin.** `TestDoPReleaseEscalation` calls the branch's
+`testReleaseEscalation`. With main's body put back for one run (its
+one-second wall-clock select; the stall apparatus kept) and
+`-escalation-stall=2s`, it failed: `escalation did not cancel drain
+promptly after 1.001174375s`. Restored, both escalation tests are green with
+no stall, 2 s and 5 s; the DoP twin passed `-race -count=200` and
+`-count=100` under twelve `yes` processes (`pgrep -x yes` empty after).
+
+**The DoP retiring twin.** 2d.1 had already held its third occurrence; the
+merge put it under the late writer too. Green, all four selectors. With the
+hold removed for one run, under the same late writer, all four went red
+with `count=3` (selected 4098, 4097, 4099, 4099: Next, Previous, SeekId,
+SeekIndex), so the forcing reaches the DoP path; restored. Both retiring
+twins passed `-race -count=200` and `-count=100` under twelve `yes`.
+
+**TestNativeIntegrationDoPEnvelope** (Argon, Low, on 2d.1). It discarded
+`runOutputDSDTest`'s exit code and diagnostics and asserted only whether the
+hardware opened, so a negative case passed when the run refused before
+opening for any other reason, and it ignored `json.Marshal`'s error. Each
+refused case now requires exit 1 and exactly its contact check's line
+(`--contact-report: DoP contact report version mismatch`, or `observations
+incomplete`) with nothing opened; a valid contact requires exit 1 and
+exactly `EOF` after the hardware opened (the matrix plays through to
+`confirmDoP`, whose first prompt reads the rig's empty stdin). Marshal and
+write errors fail at once, in `writeDoPEvidence` too. Argon's second claim,
+that dsd-test refuses a bare contact-v3 receipt in a DoP run, is false:
+`output_dsdtest.go` decodes a Contact when no envelope holds one, and
+`Contact.Validate` checks schema 3 and the DoP observations; no test pinned
+that path's DoP checks (DoPProbeEvidence's replug and mixer cases reach it
+for other reasons), so two cases do now, one accepted and one without the
+DoP indicator (`--contact-report: DoP DSD indicator unconfirmed`). gate.yml
+requires `DoPEnvelope` to print `--- PASS:`. The negative control corrupted
+the indicator case's fixture so the hash refusal fired first: the new test
+went red (`errout="fixture pcm hash mismatch\n"; want … observations
+incomplete`), and main's version of the test stayed green under the same
+mutation.

@@ -42,12 +42,21 @@ func put(t *testing.T, root, name, data string) {
 	}
 }
 
-func graph(t *testing.T) string {
+// defaultDiscoveryEnv runs discovery in the environment checkEnvironment
+// takes, the user's go env file kept out: a developer's
+// GOFLAGS=-mod=readonly, set either way, is a refusal TestDiscoveryEnvironment
+// pins, not a fact about the graph a test discovers (B563).
+func defaultDiscoveryEnv(t *testing.T) {
 	t.Helper()
-	root := t.TempDir()
 	for key, value := range map[string]string{"GOENV": "off", "GOFLAGS": "", "GOWORK": "off", "GOAMD64": "v1", "GOARM64": "v8.0"} {
 		t.Setenv(key, value)
 	}
+}
+
+func graph(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	defaultDiscoveryEnv(t)
 	put(t, root, ".goreleaser.yaml", fixtureConfig)
 	mod := "module example.com/app\n\ngo " + strings.TrimPrefix(runtime.Version(), "go") + "\n\nrequire (\n"
 	for _, name := range []string{"zulu", "alpha", "win", "unused", "testonly"} {
@@ -279,6 +288,10 @@ func TestGoStandardLibrary(t *testing.T) {
 	}
 	for _, name := range []string{"LICENSE", "PATENTS"} {
 		want, err := os.ReadFile(filepath.Join(runtime.GOROOT(), name))
+		if keg, kegErr := homebrewKeg(runtime.GOROOT(), runtime.Version()); os.IsNotExist(err) && kegErr == nil {
+			// Homebrew's keg keeps what it moved out of GOROOT at its root.
+			want, err = os.ReadFile(filepath.Join(keg, name))
+		}
 		if os.IsNotExist(err) && name == "PATENTS" {
 			continue
 		}
@@ -374,6 +387,90 @@ func TestToolchainNoticeFiles(t *testing.T) {
 	if _, err := toolchainNotices(root); err == nil {
 		t.Fatal("empty Go PATENTS accepted")
 	}
+}
+
+// TestAHomebrewKegsToolchainLicence: Homebrew's Go keeps GOROOT in its
+// keg's libexec and moves LICENSE to the keg's root (B563), where the
+// generator reads it, but only from a keg whose install receipt is
+// homebrew/core's of this very Go version. Any other GOROOT without a
+// LICENSE is refused as before, a LICENSE beside it included.
+func TestAHomebrewKegsToolchainLicence(t *testing.T) {
+	version := strings.TrimPrefix(runtime.Version(), "go")
+	receipt := func(tap, stable string) string {
+		return `{"source":{"spec":"stable","versions":{"stable":"` + stable + `","head":null},"tap":"` + tap + `"}}`
+	}
+	// keg lays out Homebrew's install: GOROOT is libexec, which keeps
+	// PATENTS; the keg's root has LICENSE and, unless empty, the receipt.
+	keg := func(t *testing.T, receiptJSON string) (root, kegDir string) {
+		t.Helper()
+		kegDir = filepath.Join(t.TempDir(), "Cellar", "go", version)
+		root = filepath.Join(kegDir, "libexec")
+		put(t, root, "PATENTS", "toolchain patent grant\n")
+		put(t, kegDir, "LICENSE", "keg licence bytes\n")
+		if receiptJSON != "" {
+			put(t, kegDir, "INSTALL_RECEIPT.json", receiptJSON)
+		}
+		return root, kegDir
+	}
+	t.Run("homebrew/core's install of this version", func(t *testing.T) {
+		root, _ := keg(t, receipt("homebrew/core", version))
+		files, err := toolchainNotices(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(files) != 2 || files[0].name != "LICENSE" || string(files[0].text) != "keg licence bytes\n" ||
+			files[1].name != "PATENTS" || string(files[1].text) != "toolchain patent grant\n" {
+			t.Fatalf("the keg's notices: %v", files)
+		}
+	})
+	t.Run("a PATENTS the keg moved too", func(t *testing.T) {
+		root, kegDir := keg(t, receipt("homebrew/core", version))
+		if err := os.Rename(filepath.Join(root, "PATENTS"), filepath.Join(kegDir, "PATENTS")); err != nil {
+			t.Fatal(err)
+		}
+		files, err := toolchainNotices(root)
+		if err != nil || len(files) != 2 || string(files[1].text) != "toolchain patent grant\n" {
+			t.Fatalf("the keg's PATENTS lost: %v %v", files, err)
+		}
+	})
+	t.Run("GOROOT's own LICENSE first", func(t *testing.T) {
+		root, _ := keg(t, receipt("homebrew/core", version))
+		put(t, root, "LICENSE", "GOROOT licence bytes\n")
+		files, err := toolchainNotices(root)
+		if err != nil || len(files) != 2 || string(files[0].text) != "GOROOT licence bytes\n" {
+			t.Fatalf("GOROOT's LICENSE passed over: %v %v", files, err)
+		}
+	})
+	for _, tc := range []struct{ name, receipt string }{
+		{"another version", receipt("homebrew/core", "1.0.0")},
+		{"another tap", receipt("someone/tap", version)},
+		{"no receipt", ""},
+		{"a receipt that does not decode", "{"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, _ := keg(t, tc.receipt)
+			if files, err := toolchainNotices(root); err == nil || !strings.Contains(err.Error(), "Go toolchain LICENSE") {
+				t.Fatalf("a keg that is not this Go's lent its LICENSE: %v %v", files, err)
+			}
+		})
+	}
+	t.Run("a LICENSE beside a GOROOT that is no keg's libexec", func(t *testing.T) {
+		dir := t.TempDir()
+		root := filepath.Join(dir, "go")
+		put(t, root, "PATENTS", "toolchain patent grant\n")
+		put(t, dir, "LICENSE", "not the toolchain's\n")
+		put(t, dir, "INSTALL_RECEIPT.json", receipt("homebrew/core", version))
+		if files, err := toolchainNotices(root); err == nil {
+			t.Fatalf("a LICENSE beside GOROOT was taken: %v", files)
+		}
+	})
+	t.Run("an empty keg LICENSE", func(t *testing.T) {
+		root, kegDir := keg(t, receipt("homebrew/core", version))
+		put(t, kegDir, "LICENSE", " \n")
+		if _, err := toolchainNotices(root); err == nil || !strings.Contains(err.Error(), "empty") {
+			t.Fatalf("an empty keg LICENSE accepted: %v", err)
+		}
+	})
 }
 
 func TestDefaultDiscoveryEnvironment(t *testing.T) {
