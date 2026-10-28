@@ -332,29 +332,45 @@ func ensurePlayerMarker(dir, name string) error {
 	return markerWriteFailure(dir, name, atomicwrite.WriteBytesDurable(dir, path, []byte("{\"version\":1}\n"), ".player-marker-*.tmp"))
 }
 
-// sealPlayerMarker repairs damaged markers only in explicit discard. Renaming
-// a bad entry preserves it for inspection and never opens a FIFO or symlink.
-// Between that rename and its replacement the entry is gone, so discard
-// repairs a record only while the other holds a durable seal (resetPlayer).
+// sealPlayerMarker repairs damaged markers only in explicit discard. A bad
+// entry, of any kind, is replaced and never removed
+// (atomicwrite.ReplaceDurable): the fresh record is staged and synced beside
+// it first; then the entry is renamed aside, which preserves it for
+// inspection and never opens a FIFO or follows a link, and the fresh record
+// renamed into its place; a refused rename puts the entry back. The name is
+// empty only between those two renames, or when the entry cannot be put
+// back, and either loses the record it held, so discard repairs a record
+// only while the other holds a durable seal (resetPlayer).
 func sealPlayerMarker(dir, name string) error {
 	present, valid, m, err := playerMarkerState(dir, name)
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(dir, name)
-	if present && !valid {
-		suffix, err := uuid.NewRandom()
-		if err != nil {
-			return err
-		}
-		if err := atomicwrite.RenameWithRetry(path, path+".discarded-"+suffix.String()); err != nil {
-			return err
-		}
-	}
 	if valid && (name == playerFloorDiscarded || m.Sealed) {
 		return ensurePlayerMarker(dir, name)
 	}
-	return atomicwrite.WriteBytesDurable(dir, path, []byte("{\"version\":1,\"sealed\":true}\n"), ".player-marker-*.tmp")
+	path := filepath.Join(dir, name)
+	sealed := []byte("{\"version\":1,\"sealed\":true}\n")
+	if !present || valid {
+		return atomicwrite.WriteBytesDurable(dir, path, sealed, ".player-marker-*.tmp")
+	}
+	suffix, err := uuid.NewRandom()
+	if err != nil {
+		return err
+	}
+	return atomicwrite.ReplaceDurable(dir, path, path+".discarded-"+suffix.String(), sealed, ".player-marker-*.tmp")
+}
+
+// discardSealFailed is a discard that stopped at its seal record name,
+// before it discarded anything: its error, and the advice to run it again,
+// since a run completes every step. A marker a newer bridge wrote keeps its
+// own remedy (markerRefusal).
+func discardSealFailed(name string, err error) error {
+	var refusal markerRefusal
+	if errors.As(err, &refusal) {
+		return err
+	}
+	return fmt.Errorf("discard stopped at %s before it discarded anything: %w; run bridge reset-player --discard-floor again once its cause is fixed", name, err)
 }
 
 // completePlayerSeal closes an interrupted or older discard's second record.
@@ -869,19 +885,19 @@ func resetPlayer(dir string, discard bool, after func(string) error) (bool, erro
 		if err := fsutil.MkdirAll(dir, 0700); err != nil {
 			return false, err
 		}
-		// Seal both records, renaming a damaged one aside only while the other
+		// Seal both records, replacing a damaged one only while the other
 		// already holds a durable seal: with the seal entry damaged,
-		// player-initialized is sealed first, so a crash between a rename and
-		// its replacement never leaves the box with no seal record.
+		// player-initialized is sealed first, so a crash between the two
+		// renames of a replacement never leaves the box with no seal record.
 		order := []string{playerFloorDiscarded, playerInitialized}
 		if present, valid, _, err := playerMarkerState(dir, playerFloorDiscarded); err != nil {
-			return false, err
+			return false, discardSealFailed(playerFloorDiscarded, err)
 		} else if present && !valid {
 			order = []string{playerInitialized, playerFloorDiscarded}
 		}
 		for _, name := range order {
 			if err := sealPlayerMarker(dir, name); err != nil {
-				return false, err
+				return false, discardSealFailed(name, err)
 			}
 		}
 		if err := step(playerFloorDiscarded); err != nil {

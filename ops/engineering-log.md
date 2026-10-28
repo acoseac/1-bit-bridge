@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-10-28 — B539: discard syncs a fresh seal before it moves a damaged one, and a stopped discard says to run it again](#2026-10-28--b539-discard-syncs-a-fresh-seal-before-it-moves-a-damaged-one-and-a-stopped-discard-says-to-run-it-again)
 - [2026-10-24 — B470 PR 5a4: the player's OpenHome writes, Insert's Uri confined to the bridge's own tracks, and the owner's dogfood](#2026-10-24--b470-pr-5a4-the-players-openhome-writes-inserts-uri-confined-to-the-bridges-own-tracks-and-the-owners-dogfood)
 - [2026-10-25 — B470 PR 5b: GET /v1/outputs lists the bridge's own player, kind bridge, on a gate of its own](#2026-10-25--b470-pr-5b-get-v1outputs-lists-the-bridges-own-player-kind-bridge-on-a-gate-of-its-own)
 - [2026-10-25 — B524 round 14: tests that write the player's identity run on a TMPDIR on tmpfs, and a refused start leaves no identity](#2026-10-25--b524-round-14-tests-that-write-the-players-identity-run-on-a-tmpdir-on-tmpfs-and-a-refused-start-leaves-no-identity)
@@ -159,6 +160,116 @@ reaches a session that has not gone looking for it.
 - [The original "Things that have bitten before" list (2026-04 → 2026-08)](#the-original-things-that-have-bitten-before-list-2026-04-2026-08)
 - [DSD → PCM renditions on the bridge, B1 (PR #863, 2026-09-07)](#dsd--pcm-renditions-on-the-bridge-b1-pr-863-2026-09-07)
 - [DSD renditions B4 — the alias measurement, and why it is a differential (2026-09-07)](#dsd-renditions-b4--the-alias-measurement-and-why-it-is-a-differential-2026-09-07)
+
+---
+
+## 2026-10-28 — B539: discard syncs a fresh seal before it moves a damaged one, and a stopped discard says to run it again
+
+B539 came from B524's round-10 worker: a sealed, minted box loses
+`player-initialized`, its `player-floor-discarded.json` becomes an entry that
+is not a regular file, serve refused with "player-floor-discarded.json is not
+a regular file: move it aside", and following that let the next start write an
+unsealed `{"version":1}` marker and an identity restore succeed. Round 11
+(#1346) had already removed that refusal by keeping such an entry as a seal,
+so on main at 2c7be326 the four steps end sealed. Mapping the two records
+against each other (`player-initialized` absent, valid unsealed, valid sealed,
+corrupt, unreadable or not a regular file; the seal absent, valid, corrupt,
+unreadable, a link to nothing or to a seal, a directory empty or not, a named
+pipe) through serve's boot, a start, the discard and an identity restore, on
+main, found every state with a seal record still sealed after each of them,
+and one path that ended unsealed after a discard, in the discard itself.
+
+**Discard renamed a damaged seal entry aside before it wrote the fresh one.**
+`sealPlayerMarker` moved the entry and then ran the strict writer, so a
+failure of that write (its fsync, its rename, any of the writer's refusals)
+or a crash during it left the seal's name empty, and the discard said nothing
+but the error. Round 11's order kept `player-initialized` sealed meanwhile;
+the next start spent that marker, and once it was lost too, the start after
+wrote `{"version":1}` and an identity restore was accepted. Red first on
+2c7be326, through `bridge reset-player --discard-floor`, serve's boot and
+`bridge restore` (`TestAFailedHealKeepsTheSealEntryThroughTheNextStarts`,
+with the fresh seal's fsync or its rename refused): "the failed discard does
+not advise running it again: reset-player: the fresh seal's write failed",
+"the failed discard left the seal entry absent, not the d--------- it found",
+then, after a start, the marker's loss and the next start, "player-initialized
+is {Version:1 Sealed:false Minted:false}, which records no seal" and "an
+identity restore was accepted, and the box now runs player 7c9e6679-…".
+
+**The fresh seal is durable before the entry moves.**
+`atomicwrite.ReplaceDurable` makes every refusal the strict writer makes
+before it writes, stages the new bytes beside the entry and fsyncs them, then
+renames the entry aside to a unique name and the staged file into its place,
+with no write and no sync between the two renames, and syncs the directory
+chain once both have landed. A refused second rename puts the entry back and
+syncs again; one that cannot says where the entry is kept. It never runs the
+best-effort barrier a plain rename runs (`commitDirEntry`): a sync between the
+two renames would make the empty name the state a crash finds.
+`sealPlayerMarker` replaces every damaged record through it, so no failure of
+a single step leaves the name empty. Between the two renames the name is
+empty, since no rename puts a file in a directory's place in one step, and
+round 11's order has made the other record's seal durable before then; losing
+that record as well is the loss of both seals, which the rule leaves
+unsupported. Red first on 2c7be326:
+`TestEveryCrashPointOfTheSealsHealLeavesTheBoxSealed`, which copies the box
+at each point a crash can come (the staged seal's fsync, before the entry
+moves, between the renames, after the sync), found "the entry moves with no
+fresh seal staged and synced beside it" and "staging: the seal's name holds
+"absent""; `TestAFailedStepOfTheSealsHealKeepsTheEntryItFound`, which fails
+each step in turn, found the name empty after a failed staging or a refused
+second rename, and no failure naming the discard.
+
+**A refusal about the seal advises the discard.** A discard that stops at its
+seal records says it discarded nothing and to run `bridge reset-player
+--discard-floor` again once the cause is fixed (`discardSealFailed`); a record
+a newer bridge wrote keeps its own remedy. No advice says to move a seal
+record aside, round 11's rule.
+
+**The non-file seal stays a seal.** Refusing a non-regular seal at start,
+with `--discard-floor` as its advice, was considered and not taken: round 11
+keeps it as a seal at every check, and a refusal would turn the player off on
+a sealed box, its only remedy giving up the player's identity and queue.
+`TestANonRegularSealIsASealAtEveryCheckUntilDiscardHealsIt` pins it at every
+check (an identity restore, serve's boot, a start, a backup, a refused restore,
+a reset, and a lone UUID beside it, which is no upgrade to adopt), a link to
+nothing, to a seal and to a directory included, and that only discard
+replaces it. `TestTheSealWalkEndsSealedFollowingTheBridgesOwnAdvice` walks
+B539's four steps through the commands an operator runs, following every piece
+of advice the bridge gives about the seal; with round 10's refusal put back
+(a reconstruction: its code was squashed into #1346) it fails as B539
+described, "round 1: advice to move the seal aside: WARN player: not started
+reason=player-floor-discarded.json is not a regular file: move it aside",
+then "the starts left player-initialized {Version:1 Sealed:false
+Minted:false}" and "an identity restore was accepted".
+
+**A test whose seam changed meaning.**
+`TestDiscardRecordsASecondSealBeforeRenamingADamagedOne` refuses every rename
+into the seal's name, the entry's way back included, so it now drives the
+double failure; it passes unchanged, and its comment says so.
+
+Negative controls, each mutated in the committed tree and restored from git:
+`player_floor.go` back to 2c7be326, and the heal order alone, turn the three
+heal tests red; the advice alone turns the advice assertions red; round 10's
+refusal turns the walk and the non-regular test red; reading a non-regular
+seal as no seal turns the non-regular test red for every kind, and following
+links turns it red for a link to nothing and a link to a seal; seal-first
+discard order beside a damaged seal turns the crash-point test and
+`TestDiscardRecordsASecondSealBeforeRenamingADamagedOne` red; and in
+`ReplaceDurable`, dropping the put-back, syncing between the renames, staging
+after the entry moves, dropping the sync after a put-back or after the
+renames, and dropping the check that the aside name is beside the entry each
+turn its tests red. `playerEntry` ignoring a non-regular entry stays green:
+completion runs before every adoption and writes `player-initialized` beside
+the seal, so `unstartedPlayer`'s own look at it is shadowed.
+
+On the owner's Mac (macOS arm64, Go 1.27.3, not root, TMPDIR outside the
+checkout) gofmt lists none of the changed files and `git diff --check main`
+is clean; `make vet`, and Linux and Windows vet of `internal/atomicwrite`,
+`internal/backup` and `cmd/bridge` with the release build tags, pass.
+`go test -race -count=1` passes `internal/atomicwrite` whole,
+`internal/backup` in two name ranges (118 s and 89 s) and `cmd/bridge` in six
+(198, 112, 51, 94, 186 and 32 s). The eleven new tests and the revised one
+pass ten race-enabled runs each. `make docs-check` and `make build-all P=8`
+pass, and the qualification-version check finds no guarded path changed.
 
 ---
 

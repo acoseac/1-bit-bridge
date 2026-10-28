@@ -142,10 +142,13 @@ never backed up or restored as bytes. Damaged entries conservatively count as
 present. A seal that is not a regular file, such as a directory, a symbolic link
 or a named pipe, is still a seal: every lifecycle operation keeps it, never
 opening or following it, and records the seal in `player-initialized` beside it.
-No advice says to move a seal record aside. Discard renames malformed or
-non-file markers aside and writes fresh ones after establishing the seal; when
-the seal file itself is damaged, it seals `player-initialized` first, so an
-interruption never leaves the box without a seal record. A well-formed newer
+No advice says to move a seal record aside. Discard replaces a malformed or
+non-file marker after establishing the seal: it writes and syncs a fresh one
+beside it first, then renames the old entry aside and the fresh one into its
+place, and puts the old entry back if that last rename fails. When the seal
+file itself is damaged, it seals `player-initialized` first, so an
+interruption never leaves the box without a seal record. A discard that stops
+there says it discarded nothing; run it again. A well-formed newer
 version requires a newer bridge. A damaged initialization marker beside a
 readable floor naming the UUID is accepted and kept as present evidence with
 any exemption spent. A start's
