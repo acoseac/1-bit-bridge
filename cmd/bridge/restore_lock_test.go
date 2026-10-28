@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -74,6 +75,23 @@ func seedRestorableInstall(t *testing.T, adminAddr string) (cfgPath, dataDir, sn
 func closedAdminAddr(t *testing.T) string {
 	t.Helper()
 	return "127.0.0.1:" + closedLoopbackPort(t)
+}
+
+// squatAdminPort stands in for the parallel test that took a serve test's
+// admin port in CI (backlog B562: run 40565409736, "admin listen
+// 127.0.0.1:35347: bind: address already in use"). It binds addr if it can
+// and holds it to the end of the test, so a test that leaves its admin port
+// free between choosing it and serve's bind fails every run, as CI's did
+// once. A port the test holds (holdLoopback) cannot be bound, and the
+// squatter takes nothing.
+func squatAdminPort(t *testing.T, addr string) {
+	t.Helper()
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	t.Errorf("the admin port %s was free between the test's choice and serve's bind: a parallel test could take it", addr)
 }
 
 // holdDataDirLock takes the serve lock and records this process in
@@ -266,11 +284,22 @@ func TestRestoreRequiresAnExclusiveDataDirLock(t *testing.T) {
 // holds no lock. Once that block is gone a restore takes the lock. The
 // admin port is fixed and the serve is answering on it, so the restore
 // must still refuse with the probe's message.
+//
+// The admin port is held from the moment it is chosen and handed to serve
+// (serveOpts.adminListener), never learned and released: a port free
+// between the choice and serve's bind was taken by a parallel test in CI,
+// and serve exited "address already in use" (backlog B562). The config on
+// disk names that port, and the restore finds the serve through it as it
+// would in production.
 func TestARestoreOverAnUnlockedServeRefusesWithTheProbe(t *testing.T) {
-	adminAddr := "127.0.0.1:" + closedLoopbackPort(t)
+	admin := holdLoopback(t)
+	adminAddr := admin.addr
 	cfgPath, dataDir, snap := seedRestorableInstall(t, adminAddr)
 	blockDataDirLock(t, dataDir)
-	served := bootServe(t, "--config", cfgPath)
+	squatAdminPort(t, adminAddr)
+	served := launchServe(t, func(ctx context.Context, stdout, stderr io.Writer) int {
+		return runServe(ctx, serveOpts{configPath: cfgPath, adminListener: admin.ln}, stdout, stderr)
+	})
 	if s := served.stderr.String(); !strings.Contains(s, "could not lock") {
 		t.Fatalf("serve did not start unlocked\nstderr:\n%s", s)
 	}
