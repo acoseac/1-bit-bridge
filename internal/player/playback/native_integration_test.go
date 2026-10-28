@@ -265,16 +265,21 @@ func TestNativeIntegrationTinyThroughEngine(t *testing.T) {
 	}
 }
 
-func TestNativeIntegrationReleaseCleanup(t *testing.T) {
+func TestNativeIntegrationReleaseCleanup(t *testing.T) { testNativeReleaseCleanup(t, false) }
+func testNativeReleaseCleanup(t *testing.T, dop bool) {
+	plan := nativeTestPlan
+	if dop {
+		plan = dopTestPlan
+	}
 	for _, where := range []string{"drop", "hw_free", "close"} {
 		t.Run(where, func(t *testing.T) {
 			k := alsapcm.NewFakeKernel(t)
-			k.HardwareFormats(49, 50, 52)
+			k.HardwareFormats(10, 49, 50, 52)
 			b, e := New(Config{Resolver: nativeFiles{"a": nativeDSF(t, 31)}, Locator: nativeLocator{}})
 			if e != nil {
 				t.Fatal(e)
 			}
-			AdmitNativeForIntegration(b, nativeTestPlan, func(ctx context.Context, c alsapcm.DSDConfig) (*alsapcm.DSDSink, error) {
+			AdmitNativeForIntegration(b, plan, func(ctx context.Context, c alsapcm.DSDConfig) (*alsapcm.DSDSink, error) {
 				return k.OpenNativeSinkWithCleanupError(ctx, c, where)
 			})
 			ev := &nativeEvents{done: make(chan struct{})}
@@ -503,9 +508,14 @@ func (r nativeStalledResolver) Open(_ context.Context, ref engine.Reference) (Co
 	}
 	return Content{Data: bytes.NewReader(r.first), Size: int64(len(r.first))}, nil
 }
-func TestNativeIntegrationStalledReservations(t *testing.T) {
+func TestNativeIntegrationStalledReservations(t *testing.T) { testNativeStalledReservations(t, false) }
+func testNativeStalledReservations(t *testing.T, dop bool) {
+	plan := nativeTestPlan
+	if dop {
+		plan = dopTestPlan
+	}
 	k := alsapcm.NewFakeKernel(t)
-	k.HardwareFormats(49, 50, 52)
+	k.HardwareFormats(10, 49, 50, 52)
 	data := nativeDSF(t, 31)
 	resolver := nativeStalledResolver{first: data, held: map[string]*nativeStalledReader{}}
 	for i := 2; i <= 4; i++ {
@@ -524,7 +534,7 @@ func TestNativeIntegrationStalledReservations(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	AdmitNativeForIntegration(b, nativeTestPlan, k.OpenNativeSink)
+	AdmitNativeForIntegration(b, plan, k.OpenNativeSink)
 	budget := engine.NewOccurrenceBudget(4)
 	var leases []*engine.OccurrenceReservation
 	take := func(id int) engine.Occurrence {
@@ -667,15 +677,20 @@ func TestNativeIntegrationCarryMixedCut(t *testing.T) {
 	}
 }
 
-func TestNativeIntegrationPauseKeepsPlan(t *testing.T) {
+func TestNativeIntegrationPauseKeepsPlan(t *testing.T) { testNativePauseKeepsPlan(t, false) }
+func testNativePauseKeepsPlan(t *testing.T, dop bool) {
+	plan := nativeTestPlan
+	if dop {
+		plan = dopTestPlan
+	}
 	k := alsapcm.NewFakeKernel(t)
-	k.HardwareFormats(49, 50, 52)
+	k.HardwareFormats(10, 49, 50, 52)
 	b, err := New(Config{Resolver: nativeFiles{"a": nativeDSF(t, 31)}, Locator: nativeLocator{}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	admissions := 0
-	AdmitNativeForIntegration(b, func(d format.NativeDSD) (engine.NativePlan, error) { admissions++; return nativeTestPlan(d) }, k.OpenNativeSink)
+	AdmitNativeForIntegration(b, func(d format.NativeDSD) (engine.NativePlan, error) { admissions++; return plan(d) }, k.OpenNativeSink)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	ref, _ := engine.NewReference("a")
@@ -888,10 +903,17 @@ func TestNativeIntegrationDeleteDuringActivation(t *testing.T) {
 }
 
 func TestNativeIntegrationPlaybackErrorReleases(t *testing.T) {
+	testNativePlaybackErrorReleases(t, false)
+}
+func testNativePlaybackErrorReleases(t *testing.T, dop bool) {
+	plan := nativeTestPlan
+	if dop {
+		plan = dopTestPlan
+	}
 	k := alsapcm.NewFakeKernel(t)
-	k.HardwareFormats(49, 50, 52)
+	k.HardwareFormats(10, 49, 50, 52)
 	b, _ := New(Config{Resolver: nativeFiles{"a": nativeDSF(t, 31)}, Locator: nativeLocator{}})
-	AdmitNativeForIntegration(b, nativeTestPlan, func(ctx context.Context, c alsapcm.DSDConfig) (*alsapcm.DSDSink, error) {
+	AdmitNativeForIntegration(b, plan, func(ctx context.Context, c alsapcm.DSDConfig) (*alsapcm.DSDSink, error) {
 		checks := 0
 		c.Check = func(alsapcm.NodeInfo) error {
 			checks++
@@ -1414,5 +1436,378 @@ func TestNativeIntegrationPausedAdmissionConstraints(t *testing.T) {
 	e = b.Start(ctx, engine.StartRequest{Session: 1, First: engine.Occurrence{ID: 1, Ref: ref}, Events: &nativeEvents{done: make(chan struct{})}})
 	if e == nil || k.View().Writes != 0 {
 		t.Fatal("paused installation bypassed changed permission", e)
+	}
+}
+
+func dopTestPlan(d format.NativeDSD) (engine.NativePlan, error) {
+	p, e := nativeTestPlan(d)
+	p.Tuple.Transport = "dop"
+	p.Tuple.Format = "S32_LE"
+	return p, e
+}
+func TestNativeIntegrationDoPThroughEngine(t *testing.T) {
+	t.Run("StalledReservations", func(t *testing.T) { testNativeStalledReservations(t, true) })
+	t.Run("PauseKeepsPlan", func(t *testing.T) { testNativePauseKeepsPlan(t, true) })
+	t.Run("ReleaseCleanup", func(t *testing.T) { testNativeReleaseCleanup(t, true) })
+	t.Run("PlaybackErrorReleases", func(t *testing.T) { testNativePlaybackErrorReleases(t, true) })
+
+	nativeEngineStorage(t)
+	for _, bits := range []int{1, 7, 15, 31} {
+		t.Run(fmt.Sprint(bits), func(t *testing.T) {
+			k := alsapcm.NewFakeKernel(t)
+			k.HardwareFormats(2, 10, 32, 49, 50, 52)
+			k.Free()
+			b, e := New(Config{Resolver: nativeFiles{"a": nativeDSF(t, bits)}, Locator: nativeLocator{}})
+			if e != nil {
+				t.Fatal(e)
+			}
+			AdmitNativeForIntegration(b, dopTestPlan, k.OpenNativeSink)
+			events := &nativeEvents{done: make(chan struct{})}
+			dir := t.TempDir()
+			eng, e := engine.New(engine.Config{Backend: nativeRecordingBackend{b, events}, PlayerUUID: "0f8fad5b-d9cb-469f-a165-70867728950e", DataDir: dir, QueuePath: filepath.Join(dir, "queue.json")})
+			if e != nil {
+				t.Fatal(e)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() { defer close(done); _ = eng.Run(ctx) }()
+			t.Cleanup(func() {
+				cancel()
+				<-done
+				c, stop := context.WithTimeout(context.Background(), 5*time.Second)
+				defer stop()
+				if e := b.Wait(c); e != nil {
+					t.Error(e)
+				}
+				k.CheckClosedEach(t)
+			})
+			ref, _ := engine.NewReference("a")
+			a, e := eng.InsertAfter(ctx, 0, ref, nil)
+			if e != nil {
+				t.Fatal(e)
+			}
+			_, e = eng.InsertAfter(ctx, a, ref, nil)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if e = eng.ReportOutput(ctx, engine.OutputReport{Generation: 1, Available: true}); e != nil {
+				t.Fatal(e)
+			}
+			if e = eng.Play(ctx); e != nil {
+				t.Fatal(e)
+			}
+			for {
+				ch := eng.Changed()
+				if eng.Snapshot().State() == engine.Stopped {
+					break
+				}
+				select {
+				case <-ch:
+				case <-time.After(5 * time.Second):
+					t.Fatal("tiny engine stalled")
+				}
+			}
+			if k.View().Opens != 1 {
+				t.Errorf("natural compatible advance reopened: %d", k.View().Opens)
+			}
+			if n := eng.Snapshot().TrackCount(); n != 2 {
+				t.Fatalf("heard %d occurrences, want two", n)
+			}
+			events.mu.Lock()
+			defer events.mu.Unlock()
+			for _, id := range []int{1, 2} {
+				for _, want := range []string{fmt.Sprintf("details:%d:1:2822400:DSD:true", id), fmt.Sprintf("audible:%d", id), fmt.Sprintf("position:%d:%d:2822400", id, bits)} {
+					if !slices.Contains(events.records, want) {
+						t.Errorf("missing %s: %v", want, events.records)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestNativeIntegrationDoPRetiring(t *testing.T) {
+	for _, selector := range []string{"Next", "Previous", "SeekId", "SeekIndex"} {
+		t.Run(selector, func(t *testing.T) { testDoPRetiring(t, selector) })
+	}
+}
+func testDoPRetiring(t *testing.T, selector string) {
+	nativeEngineStorage(t)
+	k := alsapcm.NewFakeKernel(t)
+	k.HardwareFormats(2, 10, 32, 49, 50, 52)
+	k.Free()
+	b, err := New(Config{Resolver: nativeFiles{"a": nativeDSF(t, 15)}, Locator: nativeLocator{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	AdmitNativeForIntegration(b, dopTestPlan, k.OpenNativeSink)
+	events := &nativeEvents{done: make(chan struct{})}
+	barrier := nativeSuccessorBarrier{nativeRecordingBackend{b, events}, make(chan struct{}), make(chan struct{})}
+	dir := t.TempDir()
+	eng, err := engine.New(engine.Config{Backend: barrier, PlayerUUID: "0f8fad5b-d9cb-469f-a165-70867728950e", DataDir: dir, QueuePath: filepath.Join(dir, "queue.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); _ = eng.Run(ctx) }()
+	var once sync.Once
+	allow := func() { once.Do(func() { close(barrier.allow) }) }
+	t.Cleanup(func() {
+		allow()
+		cancel()
+		<-done
+		c, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		if err := b.Wait(c); err != nil {
+			t.Error(err)
+		}
+	})
+	ref, _ := engine.NewReference("a")
+	var ids []uint32
+	var prev uint32
+	for range 3 {
+		id, e := eng.InsertAfter(ctx, prev, ref, nil)
+		if e != nil {
+			t.Fatal(e)
+		}
+		ids = append(ids, id)
+		prev = id
+	}
+	if err = eng.ReportOutput(ctx, engine.OutputReport{Generation: 1, Available: true}); err != nil {
+		t.Fatal(err)
+	}
+	parked, unpark := k.ParkNextWrite()
+	defer unpark()
+	if err = eng.Play(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-parked:
+	case <-ctx.Done():
+		t.Fatal("two-occurrence hardware prefix did not park")
+	}
+	s := b.known(1)
+	nav := make(chan error, 1)
+	target := ids[2]
+	navigate := func() error { return eng.PlayID(ctx, ids[2]) }
+	switch selector {
+	case "Next":
+		target = ids[1]
+		navigate = func() error { return eng.Next(ctx) }
+	case "Previous":
+		target = ids[0]
+		navigate = func() error { return eng.Previous(ctx) }
+	case "SeekIndex":
+		navigate = func() error { return eng.PlayIndex(ctx, 2) }
+	}
+	go func() { nav <- navigate() }()
+	select {
+	case <-s.ctx.Done():
+	case <-ctx.Done():
+		t.Fatal("navigation did not establish release")
+	}
+	unpark()
+	select {
+	case <-barrier.entered:
+	case <-ctx.Done():
+		t.Fatal("release did not authorize successor")
+	}
+	sn := eng.Snapshot()
+	if sn.Selected() != target || sn.TrackCount() != 2 {
+		t.Fatalf("retiring accounting changed destination or lost a boundary: selected=%d count=%d", sn.Selected(), sn.TrackCount())
+	}
+	// The barrier is entered only after final release events and acknowledgement
+	// were consumed; the successor has not opened or submitted any content yet.
+	if k.View().Opens != 1 {
+		t.Fatal("successor opened before release barrier")
+	}
+	allow()
+	select {
+	case err = <-nav:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("navigation stalled")
+	}
+	if err = eng.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNativeIntegrationDoPTransitions(t *testing.T) {
+	for _, mode := range []string{"same_carrier", "cross_rate", "policy"} {
+		t.Run(mode, func(t *testing.T) { doPTransitionEngine(t, mode) })
+	}
+	k := alsapcm.NewFakeKernel(t)
+	k.HardwareFormats(2, 10, 49, 50, 52)
+	k.Free()
+	second := nativeDSF(t, 31)
+	binary.LittleEndian.PutUint32(second[56:60], 5644800)
+	b, e := New(Config{Resolver: nativeFiles{"a": nativeDSF(t, 31), "b": second}, Locator: nativeLocator{}})
+	if e != nil {
+		t.Fatal(e)
+	}
+	AdmitNativeForIntegration(b, func(d format.NativeDSD) (engine.NativePlan, error) {
+		p, _ := dopTestPlan(d)
+		p.PolicyID = fmt.Sprint(d.BitRateHz)
+		return p, nil
+	}, k.OpenNativeSink)
+	ev := &nativeEvents{done: make(chan struct{})}
+	r, _ := engine.NewReference("a")
+	r2, _ := engine.NewReference("b")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if e = b.Start(ctx, engine.StartRequest{Session: 1, First: engine.Occurrence{ID: 1, Entry: 1, Ref: r}, Events: ev}); e != nil {
+		t.Fatal(e)
+	}
+	if e = b.Prepare(ctx, 1, 1, &engine.Occurrence{ID: 2, Entry: 2, Ref: r2}); e != nil {
+		t.Fatal(e)
+	}
+	s := b.known(1)
+	for {
+		s.mu.Lock()
+		o := s.find(2)
+		done := o != nil && o.opened()
+		var ch <-chan struct{}
+		if o != nil {
+			ch = o.done
+		}
+		s.mu.Unlock()
+		if done {
+			break
+		}
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			t.Fatal("successor open stalled")
+		}
+	}
+	if e = b.Prepare(ctx, 1, 2, nil); e != nil {
+		t.Fatal(e)
+	}
+	select {
+	case <-ev.done:
+	case <-ctx.Done():
+		t.Fatal("mixed transition stalled")
+	}
+	s.mu.Lock()
+	cur := s.cur
+	id := cur.policyID
+	s.mu.Unlock()
+	if id != "5644800" {
+		t.Fatalf("mixed boundary changed policy ID: %q", id)
+	}
+	if e = b.Release(ctx, 1); e != nil {
+		t.Fatal(e)
+	}
+	ev.mu.Lock()
+	defer ev.mu.Unlock()
+	found := false
+	for _, r := range ev.records {
+		if r == "position:2:31:5644800" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("mixed boundary lost logical position: %v", ev.records)
+	}
+}
+
+func doPTransitionEngine(t *testing.T, mode string) {
+	nativeEngineStorage(t)
+	k := alsapcm.NewFakeKernel(t)
+	k.HardwareFormats(2, 10, 49, 50, 52)
+	k.Free()
+	rate := 176400
+	if mode == "cross_rate" {
+		rate = 44100
+	}
+	pcm := make([]byte, 44+32*8)
+	copy(pcm, "RIFF")
+	binary.LittleEndian.PutUint32(pcm[4:], uint32(len(pcm)-8))
+	copy(pcm[8:], "WAVEfmt ")
+	binary.LittleEndian.PutUint32(pcm[16:], 16)
+	binary.LittleEndian.PutUint16(pcm[20:], 1)
+	binary.LittleEndian.PutUint16(pcm[22:], 2)
+	binary.LittleEndian.PutUint32(pcm[24:], uint32(rate))
+	binary.LittleEndian.PutUint32(pcm[28:], uint32(rate*8))
+	binary.LittleEndian.PutUint16(pcm[32:], 8)
+	binary.LittleEndian.PutUint16(pcm[34:], 32)
+	copy(pcm[36:], "data")
+	binary.LittleEndian.PutUint32(pcm[40:], 256)
+	for i := 44; i < len(pcm); i++ {
+		pcm[i] = byte(i)
+	}
+	first := pcm
+	if mode == "policy" {
+		first = nativeDSF(t, 31)
+	}
+	b, e := New(Config{Resolver: nativeFiles{"a": first, "b": nativeDSF(t, 15)}, Locator: nativeLocator{}, OpenSink: k.OpenSink})
+	if e != nil {
+		t.Fatal(e)
+	}
+	AdmitNativeForIntegration(b, func(d format.NativeDSD) (engine.NativePlan, error) {
+		p, e := dopTestPlan(d)
+		p.PolicyID = fmt.Sprint(d.Frames)
+		return p, e
+	}, k.OpenNativeSink)
+	dir := t.TempDir()
+	eng, e := engine.New(engine.Config{Backend: b, PlayerUUID: "0f8fad5b-d9cb-469f-a165-70867728950e", DataDir: dir, QueuePath: filepath.Join(dir, "q.json")})
+	if e != nil {
+		t.Fatal(e)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = eng.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+		c, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		if e := b.Wait(c); e != nil {
+			t.Error(e)
+		}
+		k.CheckClosedEach(t)
+	})
+	var prev uint32
+	for _, name := range []string{"a", "b", "a"} {
+		r, _ := engine.NewReference(name)
+		prev, e = eng.InsertAfter(ctx, prev, r, nil)
+		if e != nil {
+			t.Fatal(e)
+		}
+	}
+	if e = eng.ReportOutput(ctx, engine.OutputReport{Generation: 1, Available: true}); e != nil {
+		t.Fatal(e)
+	}
+	if e = eng.Play(ctx); e != nil {
+		t.Fatal(e)
+	}
+	for {
+		ch := eng.Changed()
+		if eng.Snapshot().State() == engine.Stopped {
+			break
+		}
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal("transition stalled")
+		}
+	}
+	if skips := eng.Snapshot().Skips(); len(skips) != 0 {
+		t.Fatal("transition refused", skips)
+	}
+	if k.View().Opens != 3 {
+		t.Fatalf("different kind/policy reused sink: %+v", k.View())
+	}
+	if mode != "policy" {
+		got := k.Given()
+		at := k.View().OpenAt
+		if len(at) != 3 || !bytes.Equal(got[:at[1]], pcm[44:]) || !bytes.Equal(got[at[2]:], pcm[44:]) {
+			t.Fatal("PCM edge changed bytes or added PCM silence")
+		}
 	}
 }

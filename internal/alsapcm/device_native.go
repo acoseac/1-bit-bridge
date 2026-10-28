@@ -22,6 +22,9 @@ func openNative(s sys, now func() time.Time, ep Endpoint, cfg Config) (_ *Device
 		return nil, err
 	}
 	sf, ok := nativeFormats[cfg.Format]
+	if cfg.Format == format.S32LE {
+		sf, ok = sampleFormats[format.S32LE]
+	}
 	if !ok {
 		return nil, errors.New("native format required")
 	}

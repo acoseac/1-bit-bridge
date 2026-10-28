@@ -47,8 +47,8 @@ func TestDocumentedNativeInvocations(t *testing.T) {
 			count++
 		}
 	}
-	if count != 5 {
-		t.Fatalf("executed %d documented invocations, want 5", count)
+	if count != 8 {
+		t.Fatalf("executed %d documented invocations, want 8", count)
 	}
 }
 func TestProductionPlayReportFlags(t *testing.T) {

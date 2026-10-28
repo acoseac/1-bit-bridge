@@ -67,3 +67,12 @@ func TestNativeProbeRequiresAcknowledgement(t *testing.T) {
 		}
 	}
 }
+
+func TestDoPOptions(t *testing.T) {
+	h := harnessRig(t)
+	args := append([]string{"--transport=dop", "--ack-dop-noise"}, h.args[:len(h.args)-3]...)
+	args = setNativeArg(args, "format", "S32_LE")
+	if _, e := parseNativeOptions(args, io.Discard); e != nil {
+		t.Fatal("explicit DoP refused:", e)
+	}
+}

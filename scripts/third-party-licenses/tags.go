@@ -91,6 +91,7 @@ func checkBuildTags(root string) error {
 // in every non-record Markdown file are sites too (buildSiteMarkdown).
 var reviewedBuildSites = map[string][]string{
 	"ops/b470-native-qualification.md": {
+		"go run -tags @TAGS@ ./scripts/qualification-version -base \"$BASE\" -head HEAD",
 		"GOTOOLCHAIN=go1.27.3 go test -race -tags=@TAGS@ -timeout 30m ./internal/alsapcm ./internal/alsactl ./internal/alsa ./internal/player/format ./internal/player/qualification ./cmd/bridge",
 		"GOTOOLCHAIN=go1.27.3 go test -tags=@TAGS@ ./internal/player/qualification -run '^TestQualificationVersionGate$' -count=1",
 		"GOTOOLCHAIN=go1.27.3 go run -tags @TAGS@ ./scripts/qualification-version -base \"$BASE\" -head HEAD",

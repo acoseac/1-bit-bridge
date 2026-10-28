@@ -9,7 +9,11 @@ import (
 
 func edgeKey(t alsapcm.Transport, p *engine.NativePlan) string {
 	if p != nil {
-		return fmt.Sprintf("native/%s/%d/2/msb/%s/%s/%d/%d/30", p.Tuple.Format, p.Tuple.BitRate, p.PolicyID, p.Pause, p.Tail.Milliseconds(), p.Prefill.Milliseconds())
+		kind := p.Tuple.Transport
+		if kind == "" {
+			kind = "native"
+		}
+		return fmt.Sprintf("%s/%s/%d/2/msb/%s/%s/%d/%d/30", kind, p.Tuple.Format, p.Tuple.BitRate, p.PolicyID, p.Pause, p.Tail.Milliseconds(), p.Prefill.Milliseconds())
 	}
 	return fmt.Sprintf("pcm/%s/%d/%d/%d/zero", t.Format, t.RateHz, t.Channels, t.ValidBits)
 }

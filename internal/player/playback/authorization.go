@@ -137,7 +137,7 @@ func (b *Backend) readPermission(ctx context.Context) (*permission, error) {
 	return &permission{record: record, file: after, unavailable: unavailable}, nil
 }
 func planOf(p qualification.ApprovedPolicy, a qualification.Approval) engine.NativePlan {
-	plan := engine.NativePlan{Tuple: engine.NativeTuple{Format: p.Tuple.Format, BitRate: p.Tuple.BitRate}, PolicyID: p.ID, Pause: p.Tuple.Pause, Tail: time.Duration(p.Tuple.TailMS) * time.Millisecond, Prefill: time.Duration(p.Tuple.PrefillMS) * time.Millisecond}
+	plan := engine.NativePlan{Tuple: engine.NativeTuple{Transport: p.Tuple.Transport, Format: p.Tuple.Format, BitRate: p.Tuple.BitRate}, PolicyID: p.ID, Pause: p.Tuple.Pause, Tail: time.Duration(p.Tuple.TailMS) * time.Millisecond, Prefill: time.Duration(p.Tuple.PrefillMS) * time.Millisecond}
 	for _, e := range a.Body.Edges {
 		plan.Edges = append(plan.Edges, engine.TransitionEdge{From: e.From, To: e.To})
 	}

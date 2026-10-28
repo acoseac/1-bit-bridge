@@ -39,6 +39,7 @@ type Fixture struct {
 
 // Tuple includes the explicit transport and its single lifecycle policy.
 type Tuple struct {
+	Transport         string `json:",omitempty"`
 	Format            string
 	BitRate           int
 	Pause             string
@@ -53,6 +54,7 @@ type Attachment struct {
 
 // Contact is a provisional receipt; its confirmations are typed, not signed.
 type Contact struct {
+	DoP                                                           *DoPObservations `json:",omitempty"`
 	Device, Subdevice                                             *int
 	SchemaVersion, QualificationVersion                           int
 	Tuple                                                         Tuple
@@ -171,11 +173,23 @@ func (m Manifest) CheckAssets(root string) error {
 
 // Validate checks a receipt against the current tuple and live attachment.
 func (c Contact) Validate(t Tuple, a Attachment, device, subdevice int, mixer, manifest string) error {
-	if c.SchemaVersion != 2 || c.QualificationVersion != Version {
+	schema := 2
+	if t.Transport == "dop" {
+		schema = 3
+	}
+	if c.SchemaVersion != schema || c.QualificationVersion != Version {
 		return errors.New("contact version mismatch")
 	}
 	if c.Device == nil || c.Subdevice == nil || *c.Device != device || *c.Subdevice != subdevice || device < 0 || subdevice < 0 {
 		return errors.New("contact endpoint mismatch or missing")
+	}
+	if !t.ValidTransport() {
+		return errors.New("contact transport mismatch")
+	}
+	if t.Transport == "dop" {
+		if e := c.DoP.Validate(); e != nil {
+			return e
+		}
 	}
 	if c.Tuple != t {
 		return errors.New("contact tuple mismatch")

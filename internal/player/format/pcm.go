@@ -38,7 +38,7 @@ const (
 	// The DSF and DFF decoders produce it; its ALSA packers are later PRs.
 	KindNativeDSD
 	// KindDoP is DSD-over-PCM with alternating 0x05/0xFA markers.
-	// Declared for later PRs; not produced by this package yet.
+	// PackDoP produces the S32_LE carrier for explicit provisional auditions.
 	KindDoP
 )
 

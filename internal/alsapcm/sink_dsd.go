@@ -30,6 +30,8 @@ const nativeLedgerMax = 1024
 // Check re-reads the harness's descriptor and control snapshot after open and
 // at activation/reopen. It never writes mixer controls.
 type DSDConfig struct {
+	// Kind selects native DSD (also the zero default) or explicit DoP.
+	Kind                      format.Kind
 	Endpoint                  Endpoint
 	Format                    format.ALSAFormat
 	BitRate                   int
@@ -103,6 +105,8 @@ type DSDSink struct {
 	kick              chan struct{}
 	done              chan struct{}
 	scratch           []byte
+	dopScratch        []byte
+	dopPhase          byte
 }
 type nativeSeams struct {
 	open func(Endpoint, Config) (*Device, error)
@@ -118,7 +122,11 @@ func OpenDSDSink(ctx context.Context, c DSDConfig) (*DSDSink, error) {
 	return openNativeBounded(ctx, c, nativeSeams{open: openNativeDevice, now: time.Now})
 }
 func (c DSDConfig) validate() (DSDConfig, error) {
-	if format.DSDWordBytes(c.Format) == 0 {
+	if c.Kind == format.KindDoP {
+		if c.Format != format.S32LE {
+			return c, errors.New("DoP requires S32_LE")
+		}
+	} else if (c.Kind != format.KindPCM && c.Kind != format.KindNativeDSD) || format.DSDWordBytes(c.Format) == 0 {
 		return c, errors.New("native format required")
 	}
 	if c.BitRate != 2822400 && c.BitRate != 5644800 && c.BitRate != 11289600 {
@@ -167,12 +175,22 @@ func openDSDSink(ctx context.Context, c DSDConfig, h nativeSeams) (*DSDSink, err
 		}
 	}
 	w := format.DSDWordBytes(c.Format)
-	dc := Config{RateHz: c.BitRate / (8 * w), Format: c.Format, BufferTime: c.BufferTime}
+	if c.Kind == format.KindDoP {
+		w = 2
+	}
+	carrier := c.BitRate / (8 * w)
+	if c.Kind == format.KindDoP {
+		carrier = c.BitRate / 16
+	}
+	dc := Config{RateHz: carrier, Format: c.Format, BufferTime: c.BufferTime}
 	d, err := h.open(c.Endpoint, dc)
 	if err != nil {
 		return nil, err
 	}
 	p := d.Params()
+	if err = dopPrecision(c, p); err != nil {
+		return nil, nativeCleanupError(err, d.releaseNative())
+	}
 	if p.BufferTime() > 500*time.Millisecond || p.BufferTime()+nativeFrameDuration(nativeFrames(p.RateHz, c.Tail), p.RateHz)+nativeCloseMargin >= nativeReleaseBudget {
 		return nil, nativeCleanupError(errors.New("native readback exceeds release budget"), d.releaseNative())
 	}
@@ -182,14 +200,20 @@ func openDSDSink(ctx context.Context, c DSDConfig, h nativeSeams) (*DSDSink, err
 	if err = admit(c.Check, d, c.Endpoint, "native open"); err != nil {
 		return nil, nativeCleanupError(err, d.releaseNative())
 	}
-	if c.RingBytes/p.NativeFrameBytes() <= p.BufferFrames {
+	if c.RingBytes/(2*w) <= p.BufferFrames {
 		return nil, nativeCleanupError(errors.New("native ring must retain hardware buffer plus lookahead"), d.releaseNative())
 	}
-	scratchBytes := p.PeriodFrames * p.NativeFrameBytes()
-	if c.RingBytes+scratchBytes+nativeLedgerMax*16+8+4096 > MaxRingBytes {
+	// DoP retains four canonical bytes per stereo frame, then expands to
+	// eight hardware bytes in writer-owned scratch; budget both stores.
+	scratchBytes := p.PeriodFrames * 2 * w
+	packedBytes := 0
+	if c.Kind == format.KindDoP {
+		packedBytes = p.PeriodFrames * 8
+	}
+	if c.RingBytes+scratchBytes+packedBytes+nativeLedgerMax*16+8+4096 > MaxRingBytes {
 		return nil, nativeCleanupError(errors.New("native aggregate memory budget"), d.releaseNative())
 	}
-	s := &DSDSink{life: ctx, cfg: c, seams: h, devCfg: dc, params: p, dev: d, word: w * 8, ring: newRing(int64(c.RingBytes/p.NativeFrameBytes()), p.NativeFrameBytes(), int64(p.BufferFrames)), changed: make(chan struct{}), kick: make(chan struct{}, 1), done: make(chan struct{}), scratch: make([]byte, scratchBytes)}
+	s := &DSDSink{life: ctx, cfg: c, seams: h, devCfg: dc, params: p, dev: d, word: w * 8, ring: newRing(int64(c.RingBytes/(2*w)), 2*w, int64(p.BufferFrames)), changed: make(chan struct{}), kick: make(chan struct{}, 1), done: make(chan struct{}), scratch: make([]byte, scratchBytes), dopScratch: make([]byte, packedBytes)}
 	go s.loopNative()
 	go func() {
 		select {
@@ -318,7 +342,12 @@ func (s *DSDSink) WriteDSD(ctx context.Context, id uint64, left, right []byte, o
 func (s *DSDSink) flushCarry() {
 	var b [8]byte
 	w := s.word / 8
-	_, _ = format.PackDSD(b[:], s.carry[0][:w], s.carry[1][:w], s.cfg.Format)
+	if s.cfg.Kind == format.KindDoP {
+		copy(b[:w], s.carry[0][:w])
+		copy(b[w:2*w], s.carry[1][:w])
+	} else {
+		_, _ = format.PackDSD(b[:], s.carry[0][:w], s.carry[1][:w], s.cfg.Format)
+	}
 	s.ring.put(s.ring.sub, b[:2*w])
 	s.ring.sub++
 	s.carry = [2][4]byte{}
@@ -533,7 +562,11 @@ func (s *DSDSink) Done() <-chan struct{} { return s.done }
 // Transport identifies the native source and exact opened carrier separately.
 func (s *DSDSink) Transport() Transport {
 	p := s.Params()
-	return Transport{Kind: format.KindNativeDSD, RateHz: p.RateHz, Channels: 2, Format: s.cfg.Format, ValidBits: 1, LogicalRate: s.cfg.BitRate, PackingVersion: 1}
+	kind := format.KindNativeDSD
+	if s.cfg.Kind == format.KindDoP {
+		kind = format.KindDoP
+	}
+	return Transport{Kind: kind, RateHz: p.RateHz, Channels: 2, Format: s.cfg.Format, ValidBits: 1, LogicalRate: s.cfg.BitRate, PackingVersion: 1}
 }
 
 // Changed closes on the next measured position or lifecycle change.
@@ -562,7 +595,7 @@ func (s *DSDSink) Cut(at int64) (bool, error) {
 		for ch := range 2 {
 			for i := range w {
 				j := i
-				if s.cfg.Format != format.DSDU32BE {
+				if s.cfg.Kind != format.KindDoP && s.cfg.Format != format.DSDU32BE {
 					j = w - 1 - i
 				}
 				s.carry[ch][i] = b[ch*w+j]
@@ -619,4 +652,12 @@ func (s *DSDSink) CleanupResult() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.cleanupErr
+}
+
+// dopPrecision is shared by initial admission and every reopened hardware run.
+func dopPrecision(c DSDConfig, p Params) error {
+	if c.Kind == format.KindDoP && (p.Msbits < 24 || p.Msbits > 32) {
+		return errors.New("DoP requires 24..32 significant bits")
+	}
+	return nil
 }

@@ -5,8 +5,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -18,6 +21,9 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/alsactl"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
+	"github.com/acoseac/1-bit-bridge/internal/player/engine"
+	"github.com/acoseac/1-bit-bridge/internal/player/playback"
+	"github.com/acoseac/1-bit-bridge/internal/player/playback/playbacktest"
 	"github.com/acoseac/1-bit-bridge/internal/player/qualification"
 )
 
@@ -47,7 +53,7 @@ func (o nativePromptOutput) Write(b []byte) (int, error) {
 	if o.hook != nil {
 		o.hook(text)
 	}
-	for _, phrase := range []string{qualification.CalibrationPhrase, qualification.PCMConfirmation, "recorded knob position", qualification.DSDConfirmation} {
+	for _, phrase := range []string{qualification.CalibrationPhrase, qualification.PCMConfirmation, "recorded knob position", qualification.DSDConfirmation, "DAC DSD indicator confirmed", "L/R pitch and duration correct"} {
 		if strings.Contains(text, phrase) {
 			o.h.events <- phrase
 		}
@@ -578,4 +584,287 @@ func (e *nativeObservedPending) CompletionResult() error {
 		return r.CompletionResult()
 	}
 	return e.error
+}
+
+func realDoPRig(t *testing.T) (*nativeHarnessRig, *alsapcm.FakeKernel, *io.PipeWriter) {
+	h, k, w := realNativeRig(t)
+	k.Free()
+	h.args = append([]string{"--transport=dop", "--ack-dop-noise=true"}, h.args...)
+	h.args = setNativeArg(h.args, "format", "S32_LE")
+	h.args = setNativeArg(setNativeArg(h.args, "scenario", "level-check"), "ack-level", "off-ear")
+	h.env.gain = func(int) (bool, error) { return false, nil }
+	h.env.kernel = func() (string, error) { return "fake-kernel", nil }
+	pcm := make([]byte, 44+176400*3*6)
+	copy(pcm, "RIFF")
+	binary.LittleEndian.PutUint32(pcm[4:], uint32(len(pcm)-8))
+	copy(pcm[8:], "WAVEfmt ")
+	binary.LittleEndian.PutUint32(pcm[16:], 16)
+	binary.LittleEndian.PutUint16(pcm[20:], 1)
+	binary.LittleEndian.PutUint16(pcm[22:], 2)
+	binary.LittleEndian.PutUint32(pcm[24:], 176400)
+	binary.LittleEndian.PutUint32(pcm[28:], 176400*6)
+	binary.LittleEndian.PutUint16(pcm[32:], 6)
+	binary.LittleEndian.PutUint16(pcm[34:], 24)
+	copy(pcm[36:], "data")
+	binary.LittleEndian.PutUint32(pcm[40:], uint32(len(pcm)-44))
+	if e := os.WriteFile(filepath.Join(h.dir, "pcm.wav"), pcm, 0600); e != nil {
+		t.Fatal(e)
+	}
+	h.manifest.Fixtures[0].Rate = 176400
+	h.manifest.Fixtures[0].Frames = 176400 * 3
+	h.manifest.Fixtures[0].SHA256 = fmt.Sprintf("%x", sha256.Sum256(pcm))
+	h.contact.SchemaVersion = 3
+	h.contact.Tuple.Transport = "dop"
+	h.contact.Tuple.Format = "S32_LE"
+	yes := true
+	h.contact.DoP = &qualification.DoPObservations{Indicator: &yes, Channels: &yes, PitchDuration: &yes}
+	writeDoPEvidence(t, h)
+	return h, k, w
+}
+func writeDoPEvidence(t *testing.T, h *nativeHarnessRig) {
+	t.Helper()
+	b, _ := json.Marshal(h.manifest)
+	h.contact.ManifestHash = fmt.Sprintf("%x", sha256.Sum256(b))
+	if e := os.WriteFile(filepath.Join(h.dir, "manifest.json"), b, 0600); e != nil {
+		t.Fatal(e)
+	}
+	b, _ = json.Marshal(h.contact)
+	if e := os.WriteFile(filepath.Join(h.dir, "contact.json"), b, 0600); e != nil {
+		t.Fatal(e)
+	}
+}
+func TestNativeIntegrationDoPProbeRequiresAcknowledgement(t *testing.T) {
+	for _, name := range []string{"level", "noise"} {
+		t.Run(name, func(t *testing.T) {
+			h, k, _ := realDoPRig(t)
+			h.args = setNativeArg(h.args, "scenario", "matrix")
+			h.env.stdin = strings.NewReader("")
+			if name == "level" {
+				h.args = setNativeArg(h.args, "ack-level", "")
+			} else {
+				h.args = setNativeArg(h.args, "ack-dop-noise", "false")
+			}
+			if code := runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, io.Discard); code == 0 {
+				t.Fatal("missing acknowledgement accepted")
+			}
+			if k.View().Opens != 0 || len(k.Given()) != 0 {
+				t.Fatal("acknowledgement opened hardware")
+			}
+		})
+	}
+}
+func TestNativeIntegrationDoPProbeEvidence(t *testing.T) {
+	for _, name := range []string{"pcm_lock_only", "wrong_rate", "replug", "mixer", "missing_snapshot", "overlong", "two_fixtures", "repeated_fixture", "stable_recapture", "no_controls", "feature_unit"} {
+		t.Run(name, func(t *testing.T) {
+			h, k, w := realDoPRig(t)
+			preflight := true
+			switch name {
+			case "wrong_rate":
+				h.manifest.Fixtures[0].Rate = 44100
+				h.manifest.Fixtures[0].Frames = 44100 * 3
+			case "replug":
+				h.args = setNativeArg(h.args, "scenario", "matrix")
+				h.contact.Attachment.DevNum++
+			case "mixer":
+				h.args = setNativeArg(h.args, "scenario", "matrix")
+				preflight = false
+				calls := 0
+				h.env.controls = func(int) (alsactl.Snapshot, error) {
+					calls++
+					snap := alsactl.Snapshot{}
+					if calls > 1 {
+						snap.Controls = []alsactl.Control{{Interface: 2, Name: "Playback Volume", Values: []byte{3}, Access: 1}}
+					}
+					return snap, nil
+				}
+			case "missing_snapshot":
+				h.args = setNativeArg(h.args, "mixer-snapshot", filepath.Join(h.dir, "absent"))
+			case "overlong":
+				h.args = setNativeArg(h.args, "prefill-ms", "1")
+				h.manifest.Fixtures[1].Frames = 2822400 * 10
+				h.manifest.Fixtures[0].Frames = 176400 * 10
+			case "two_fixtures":
+				f := h.manifest.Fixtures[1]
+				f.ID = "second"
+				h.manifest.Fixtures = append(h.manifest.Fixtures, f)
+				h.args = append(h.args, "second")
+			case "repeated_fixture":
+				h.args = append(h.args, "dsd")
+			default:
+				preflight = false
+			}
+			if name == "feature_unit" {
+				h.env.gain = func(int) (bool, error) { return true, nil }
+			}
+			if name == "stable_recapture" {
+				snap := alsactl.Snapshot{Controls: []alsactl.Control{{Interface: 2, Name: "Playback Volume", Values: []byte{7}, Access: 1}}}
+				h.env.controls = func(int) (alsactl.Snapshot, error) { return snap, nil }
+				h.contact.MixerHash = snap.Hash()
+			}
+			writeDoPEvidence(t, h)
+			if name == "mixer" {
+				h.env.stdin = strings.NewReader("")
+				var diagnostics bytes.Buffer
+				code := runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, &diagnostics)
+				if code == 0 || !strings.Contains(diagnostics.String(), "binding/mixer reference changed") || len(k.Given()) != 0 {
+					t.Fatalf("drift admitted: code=%d writes=%d error=%s", code, len(k.Given()), diagnostics.String())
+				}
+				k.CheckClosedEach(t)
+				return
+			}
+			if preflight {
+				h.env.stdin = strings.NewReader("")
+				var diagnostics bytes.Buffer
+				code := runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, &diagnostics)
+				wantError := map[string]string{"two_fixtures": "exactly one fixture", "repeated_fixture": "exactly one fixture", "wrong_rate": "same-carrier", "overlong": "ten seconds", "replug": "attachment mismatch", "mixer": "evidence mismatch", "missing_snapshot": "mixer-snapshot"}[name]
+				if code == 0 || k.View().Opens != 0 || !strings.Contains(diagnostics.String(), wantError) {
+					t.Fatalf("preflight=%d opens=%d error=%s", code, k.View().Opens, diagnostics.String())
+				}
+				return
+			}
+			answer := make(chan int, 1)
+			var diagnostics bytes.Buffer
+			go func() {
+				answer <- runOutputDSDTest(context.Background(), h.args, h.env, nativePromptOutput{h: h}, &diagnostics)
+			}()
+			for _, phrase := range []string{qualification.CalibrationPhrase, qualification.PCMConfirmation, "recorded knob position", qualification.DSDConfirmation, "DAC DSD indicator confirmed", "L/R pitch and duration correct"} {
+				harnessEvent(t, h, phrase)
+				response := phrase
+				if phrase == "recorded knob position" {
+					response = "stable position 7"
+				}
+				if name == "pcm_lock_only" && phrase == "DAC DSD indicator confirmed" {
+					response = "PCM lock only"
+				}
+				_, _ = io.WriteString(w, response+"\n")
+				if response == "PCM lock only" {
+					break
+				}
+			}
+			want := 0
+			if name == "pcm_lock_only" {
+				want = 1
+			}
+			code := 0
+			if name == "pcm_lock_only" {
+				select {
+				case code = <-answer:
+				case <-h.events:
+					_, _ = io.WriteString(w, "L/R pitch and duration correct\n")
+					code = <-answer
+				}
+			} else {
+				code = <-answer
+			}
+			if code != want {
+				t.Fatalf("code=%d want=%d: %s", code, want, diagnostics.String())
+			}
+			b, e := os.ReadFile(filepath.Join(h.dir, "report.json"))
+			if e != nil {
+				t.Fatal(e)
+			}
+			var report nativeReport
+			json.Unmarshal(b, &report)
+			if want == 0 {
+				if report.Contact == nil || report.DoP.Validate() != nil || report.End != "complete" {
+					t.Fatalf("missing receipt: %s", b)
+				}
+			} else if report.Contact != nil || report.Error == "" {
+				t.Fatal("PCM lock issued contact")
+			}
+			if k.View().Opens != 2 {
+				t.Fatal("expected PCM and DoP opens", k.View())
+			}
+			k.CheckClosedEach(t)
+		})
+	}
+}
+
+func TestNativeIntegrationDoPProductionDisabled(t *testing.T) {
+	persistentMedium(t)
+	for _, mode := range []string{"serve", "output_play", "api"} {
+		t.Run(mode, func(t *testing.T) {
+			if mode == "api" {
+				TestBridgeDSDCodecVocabulary(t)
+				return
+			}
+			data, e := os.ReadFile(filepath.Join("..", "..", "internal", "player", "decode", "testdata", "dsd-goldens", "dsd64.dff"))
+			if e != nil {
+				t.Fatal(e)
+			}
+			k := alsapcm.NewFakeKernel(t)
+			build := newServePlayerBackend
+			if mode == "output_play" {
+				build = newOutputPlayBackend
+			}
+			b := playbacktest.Approved(t, "dop_only", func(cfg playback.Config) (*playback.Backend, error) {
+				cfg.Resolver = refusedNativeResolver(data)
+				cfg.OpenSink = k.OpenSink
+				x, e := build(cfg)
+				if e != nil {
+					return nil, e
+				}
+				return x.(*playback.Backend), nil
+			})
+			dir := t.TempDir()
+			eng, e := engine.New(engine.Config{Backend: b, PlayerUUID: "0f8fad5b-d9cb-469f-a165-70867728950e", DataDir: dir, QueuePath: filepath.Join(dir, "queue.json")})
+			if e != nil {
+				t.Fatal(e)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() { defer close(done); _ = eng.Run(ctx) }()
+			t.Cleanup(func() {
+				c, stop := context.WithTimeout(context.Background(), 5*time.Second)
+				defer stop()
+				if e := b.Wait(c); e != nil {
+					t.Error(e)
+				}
+			})
+			drainLoopOnCleanup(t, cancel, done, "DoP production refusal engine")
+			ref, _ := engine.NewReference("dsd")
+			if _, e = eng.InsertAfter(ctx, 0, ref, nil); e != nil {
+				t.Fatal(e)
+			}
+			if e = eng.ReportOutput(ctx, engine.OutputReport{Generation: 1, Available: true}); e != nil {
+				t.Fatal(e)
+			}
+			if e = eng.Play(ctx); e == nil {
+				t.Fatal("production selected DoP")
+			}
+			if k.View().Opens != 0 || len(b.Policy().Tuples) != 0 {
+				t.Fatal("production opened/published DoP")
+			}
+		})
+	}
+}
+
+func TestNativeIntegrationDoPEnvelope(t *testing.T) {
+	for _, name := range []string{"valid", "version", "indicator", "listening"} {
+		t.Run(name, func(t *testing.T) {
+			h, k, _ := realDoPRig(t)
+			h.args = setNativeArg(h.args, "scenario", "matrix")
+			h.env.stdin = strings.NewReader("")
+			writeDoPEvidence(t, h)
+			yes := true
+			r := nativeReport{SchemaVersion: 2, QualificationVersion: qualification.Version, End: "complete", Contact: &h.contact, DoP: &qualification.DoPObservations{Indicator: &yes, Channels: &yes, PitchDuration: &yes}}
+			switch name {
+			case "version":
+				r.SchemaVersion = 1
+			case "indicator":
+				r.DoP.Indicator = nil
+			case "listening":
+				r.DoP.PitchDuration = nil
+			}
+			data, _ := json.Marshal(r)
+			if e := os.WriteFile(filepath.Join(h.dir, "contact.json"), data, 0600); e != nil {
+				t.Fatal(e)
+			}
+			runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, io.Discard)
+			if (k.View().Opens > 0) != (name == "valid") {
+				t.Fatalf("envelope %s opens=%d", name, k.View().Opens)
+			}
+			k.CheckClosedEach(t)
+		})
+	}
 }

@@ -55,10 +55,15 @@ func (b *Backend) openNativeContent(ctx context.Context, o *occ, d decode.DSDDec
 func nativeTransport(p engine.NativePlan) alsapcm.Transport {
 	f := format.ALSAFormat(p.Tuple.Format)
 	w := format.DSDWordBytes(f)
-	if w == 0 {
+	kind := format.KindNativeDSD
+	if p.Tuple.Transport == "dop" && f == format.S32LE {
+		w = 2
+		kind = format.KindDoP
+	}
+	if w == 0 || (p.Tuple.Transport != "" && p.Tuple.Transport != "native" && p.Tuple.Transport != "dop") || (p.Tuple.Transport == "dop" && f != format.S32LE) {
 		return alsapcm.Transport{}
 	}
-	return alsapcm.Transport{Kind: format.KindNativeDSD, RateHz: p.Tuple.BitRate / (8 * w), Channels: 2, Format: f, ValidBits: 1, LogicalRate: p.Tuple.BitRate, PackingVersion: 1}
+	return alsapcm.Transport{Kind: kind, RateHz: p.Tuple.BitRate / (8 * w), Channels: 2, Format: f, ValidBits: 1, LogicalRate: p.Tuple.BitRate, PackingVersion: 1}
 }
 
 // streamSink keeps the PCM call contract intact while native data enters through
@@ -166,7 +171,7 @@ func (s *session) openNativeOutput(ctx context.Context, o *occ) (*output, error)
 	// Native lifetime survives the producer cancellation during TrackChange.
 	life, cancel := context.WithCancel(context.Background())
 	out.nativeCancel = cancel
-	sink, err := open(life, alsapcm.DSDConfig{Endpoint: u.Endpoint, Format: format.ALSAFormat(o.plan.Tuple.Format), BitRate: o.plan.Tuple.BitRate, Pause: pause, Tail: o.plan.Tail, Prefill: o.plan.Prefill, Check: out.admit, Locate: out.locate})
+	sink, err := open(life, alsapcm.DSDConfig{Kind: o.transport.Kind, Endpoint: u.Endpoint, Format: format.ALSAFormat(o.plan.Tuple.Format), BitRate: o.plan.Tuple.BitRate, Pause: pause, Tail: o.plan.Tail, Prefill: o.plan.Prefill, Check: out.admit, Locate: out.locate})
 	if err != nil {
 		cancel()
 		return nil, err
