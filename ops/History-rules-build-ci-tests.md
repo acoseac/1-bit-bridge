@@ -1449,7 +1449,11 @@ nonempty file set fails before notices are emitted. Main-module and standard
 library embeds are outside this dependency census. client/web and the
 web-client-prebuilt module/packages are explicitly forbidden even without
 embeds. TestRealReleaseGraphEmbeds runs discovery on the real six-target graph,
-without an opt-in or fixture substitute.
+without an opt-in or fixture substitute, in the default discovery environment
+the fixture graph has too (defaultDiscoveryEnv: GOENV off and the defaults
+checkEnvironment takes): a developer's GOFLAGS=-mod=readonly, in the shell or
+written with go env -w, is a refusal TestDiscoveryEnvironment pins, not a fact
+about the graph (B563).
 
 The registry in main.go remains, currently empty, exercised with fixture
 components. It pins each supplement to an exact module path and version;
@@ -1465,6 +1469,12 @@ Reproduce only the PATENTS a module or its replacement actually ships; never
 supply a missing grant from another source. In particular, x/oauth2 has no
 PATENTS. Emit one separate "Go standard library and runtime (go1.x.y)" section
 with the release toolchain's GOROOT/LICENSE and GOROOT/PATENTS when present.
+Homebrew's Go keeps GOROOT in its keg's libexec and moves LICENSE to the
+keg's root, so a notice GOROOT lacks is read there, only from a keg whose
+INSTALL_RECEIPT.json is homebrew/core's install of this very Go version
+(homebrewKeg), never from a LICENSE that merely sits beside a GOROOT; GOROOT's
+own files come first, so an official toolchain's section is unchanged
+(B563; TestAHomebrewKegsToolchainLicence lays a keg out on any host).
 A missing or empty Go LICENSE fails generation. The section covers the
 standard library, runtime and toolchain-vendored code; the module counts
 exclude it. Require the running toolchain to match go.mod's go directive,
