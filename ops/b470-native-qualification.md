@@ -434,4 +434,6 @@ the native and DoP retiring tests run one helper, testRetiring, that holds the
 third occurrence until the release, parks the writer's first wait (ParkNextPoll,
 nativeLateWriter) and compares every byte the DAC was given; and
 TestNativeReleaseEscalation and TestDoPReleaseEscalation wait on the escalation's
-seam rather than a second of wall time. They change no playback behavior either.
+seam rather than a second of wall time; and TestNativeIntegrationDoPEnvelope
+requires each contact refusal's own line, a bare contact receipt's included,
+and a valid contact's exit code. They change no playback behavior either.

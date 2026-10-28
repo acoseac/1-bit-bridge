@@ -622,12 +622,17 @@ func realDoPRig(t *testing.T) (*nativeHarnessRig, *alsapcm.FakeKernel, *io.PipeW
 }
 func writeDoPEvidence(t *testing.T, h *nativeHarnessRig) {
 	t.Helper()
-	b, _ := json.Marshal(h.manifest)
+	b, e := json.Marshal(h.manifest)
+	if e != nil {
+		t.Fatal(e)
+	}
 	h.contact.ManifestHash = fmt.Sprintf("%x", sha256.Sum256(b))
 	if e := os.WriteFile(filepath.Join(h.dir, "manifest.json"), b, 0600); e != nil {
 		t.Fatal(e)
 	}
-	b, _ = json.Marshal(h.contact)
+	if b, e = json.Marshal(h.contact); e != nil {
+		t.Fatal(e)
+	}
 	if e := os.WriteFile(filepath.Join(h.dir, "contact.json"), b, 0600); e != nil {
 		t.Fatal(e)
 	}
@@ -843,30 +848,62 @@ func TestNativeIntegrationDoPProductionDisabled(t *testing.T) {
 	}
 }
 
+// TestNativeIntegrationDoPEnvelope reads a DoP contact report in both of its
+// forms: the harness's report envelope, and the bare contact receipt that
+// output_dsdtest.go decodes as a Contact when no envelope holds one. A
+// contact the check takes reaches the hardware; each defect is refused by
+// the contact check itself, with its own line and nothing else, before
+// anything opens, so a run refused for any other reason (a flag, a file, a
+// fixture's hash) fails here rather than passing for the wrong refusal.
 func TestNativeIntegrationDoPEnvelope(t *testing.T) {
-	for _, name := range []string{"valid", "version", "indicator", "listening"} {
+	refusals := map[string]string{
+		"version":              "DoP contact report version mismatch",
+		"indicator":            "DoP contact report observations incomplete",
+		"listening":            "DoP contact report observations incomplete",
+		"standalone_indicator": "DoP DSD indicator unconfirmed",
+	}
+	for _, name := range []string{"valid", "version", "indicator", "listening", "standalone_valid", "standalone_indicator"} {
 		t.Run(name, func(t *testing.T) {
 			h, k, _ := realDoPRig(t)
 			h.args = setNativeArg(h.args, "scenario", "matrix")
 			h.env.stdin = strings.NewReader("")
+			if name == "standalone_indicator" {
+				h.contact.DoP.Indicator = nil
+			}
+			// writeDoPEvidence leaves the bare contact in contact.json: the
+			// standalone cases read it as it is.
 			writeDoPEvidence(t, h)
-			yes := true
-			r := nativeReport{SchemaVersion: 2, QualificationVersion: qualification.Version, End: "complete", Contact: &h.contact, DoP: &qualification.DoPObservations{Indicator: &yes, Channels: &yes, PitchDuration: &yes}}
-			switch name {
-			case "version":
-				r.SchemaVersion = 1
-			case "indicator":
-				r.DoP.Indicator = nil
-			case "listening":
-				r.DoP.PitchDuration = nil
+			if !strings.HasPrefix(name, "standalone_") {
+				yes := true
+				r := nativeReport{SchemaVersion: 2, QualificationVersion: qualification.Version, End: "complete", Contact: &h.contact, DoP: &qualification.DoPObservations{Indicator: &yes, Channels: &yes, PitchDuration: &yes}}
+				switch name {
+				case "version":
+					r.SchemaVersion = 1
+				case "indicator":
+					r.DoP.Indicator = nil
+				case "listening":
+					r.DoP.PitchDuration = nil
+				}
+				data, e := json.Marshal(r)
+				if e != nil {
+					t.Fatal(e)
+				}
+				if e := os.WriteFile(filepath.Join(h.dir, "contact.json"), data, 0600); e != nil {
+					t.Fatal(e)
+				}
 			}
-			data, _ := json.Marshal(r)
-			if e := os.WriteFile(filepath.Join(h.dir, "contact.json"), data, 0600); e != nil {
-				t.Fatal(e)
-			}
-			runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, io.Discard)
-			if (k.View().Opens > 0) != (name == "valid") {
-				t.Fatalf("envelope %s opens=%d", name, k.View().Opens)
+			var errout strings.Builder
+			code := runOutputDSDTest(context.Background(), h.args, h.env, io.Discard, &errout)
+			if refusal, refused := refusals[name]; refused {
+				if want := "--contact-report: " + refusal + "\n"; code != 1 || errout.String() != want || k.View().Opens != 0 {
+					t.Fatalf("contact %s: code=%d opens=%d errout=%q; want 1, 0 and %q", name, code, k.View().Opens, errout.String(), want)
+				}
+			} else if code != 1 || errout.String() != "EOF\n" || k.View().Opens == 0 {
+				// The check takes the contact, and the matrix plays through to
+				// confirmDoP, whose first prompt reads this rig's empty stdin:
+				// the console hands it io.EOF, which runOutputDSDTest prints
+				// and answers with 1, after the hardware opened.
+				t.Fatalf("contact %s: code=%d opens=%d errout=%q; want 1, opens and %q", name, code, k.View().Opens, errout.String(), "EOF\n")
 			}
 			k.CheckClosedEach(t)
 		})
