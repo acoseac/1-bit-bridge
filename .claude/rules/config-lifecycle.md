@@ -579,6 +579,23 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestFdinfoMountIDSaysWhatFailedToRead`, `TestBarrierFailuresAreMarked`,
   `TestProbeDurable_SyncsTheDirectoryItOpened` and
   `TestProbeDurable_AnUnreadableDirectoryIsNoBarrierFailure` pin it.
+- **`atomicwrite.ReplaceDurable` replaces an entry a rename cannot replace in
+  one step, a directory included, without a failure emptying its name: after
+  WriteBytesDurable's refusals it stages and fsyncs the new bytes beside
+  path, renames the entry aside (a name beside path, checked) and the staged
+  file into its place with no write and no sync between the two renames, puts
+  the entry back and syncs again when the second rename is refused, and syncs
+  the chain once both have landed; between the two renames the name is
+  empty, so its caller keeps a second durable record** (B539; its one caller
+  is the discard's `sealPlayerMarker`). **Don't sync between the two renames,
+  stage after the entry moves, take an aside outside path's directory, or
+  drop the put-back.** `TestReplaceDurable_StagesTheNewFileBeforeTheEntryMoves`,
+  `TestReplaceDurable_ReplacesEveryKindOfEntry`,
+  `TestReplaceDurable_LeavesTheEntryWhenAStepBeforeTheSecondRenameFails`,
+  `TestReplaceDurable_SaysWhereTheEntryIsKeptWhenItCannotBePutBack`,
+  `TestReplaceDurable_ABarrierThatFailsLeavesTheWriteNotDurable` and
+  `TestReplaceDurable_RefusesBeforeItStages` pin it.
+  → History-rules-config-lifecycle.md
 - **`auth.Store.FlushLastUsed` reloads before persisting** — the shutdown flush
   rewrote `tokens.json` from a stale in-memory slice and deleted a sibling
   `bridge pair` mint. A reload failure ABORTS the flush.

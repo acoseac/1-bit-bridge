@@ -234,11 +234,14 @@ func TestANonFileLoneSealIsCompletedAroundIt(t *testing.T) {
 }
 
 // TestDiscardRecordsASecondSealBeforeRenamingADamagedOne: discard repairs a
-// damaged seal by renaming it aside and writing a fresh one. With the seal a
-// directory and player-initialized gone, that rename leaves no seal until the
-// replacement lands, so discard records the seal in player-initialized
-// first. An injected failure between the rename and the replacement leaves
-// identity restores refused, and a rerun completes the repair.
+// damaged seal by staging a fresh one beside it, then renaming the damaged
+// entry aside and the fresh seal into its place. With the seal a directory
+// and player-initialized gone, the seal's name is empty between those two
+// renames, so discard records the seal in player-initialized first. Here
+// every rename into the seal's name is refused, the fresh seal's and the
+// damaged entry's way back alike (B539), which leaves the name empty and
+// the entry aside: identity restores stay refused, and a rerun completes the
+// repair.
 func TestDiscardRecordsASecondSealBeforeRenamingADamagedOne(t *testing.T) {
 	reservationStorage(t)
 	dir := t.TempDir()
