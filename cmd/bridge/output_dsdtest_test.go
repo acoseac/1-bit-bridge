@@ -68,11 +68,33 @@ func TestNativeProbeRequiresAcknowledgement(t *testing.T) {
 	}
 }
 
+// TestDoPOptions: explicit DoP parses; a transport other than native or dop,
+// DoP without its noise acknowledgement, and DoP in a native format are each
+// refused, naming the flag to fix.
 func TestDoPOptions(t *testing.T) {
-	h := harnessRig(t)
-	args := append([]string{"--transport=dop", "--ack-dop-noise"}, h.args[:len(h.args)-3]...)
-	args = setNativeArg(args, "format", "S32_LE")
-	if _, e := parseNativeOptions(args, io.Discard); e != nil {
-		t.Fatal("explicit DoP refused:", e)
+	for _, tc := range []struct{ name, transport, format, ack, names string }{
+		{"dop", "dop", "S32_LE", "--ack-dop-noise", ""},
+		{"transport", "pcm", "S32_LE", "--ack-dop-noise", "--transport"},
+		{"noise", "dop", "S32_LE", "", "--ack-dop-noise"},
+		{"format", "dop", "DSD_U32_BE", "--ack-dop-noise", "--format"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := harnessRig(t)
+			args := append([]string{"--transport=" + tc.transport}, h.args[:len(h.args)-3]...)
+			if tc.ack != "" {
+				args = append([]string{tc.ack}, args...)
+			}
+			args = setNativeArg(args, "format", tc.format)
+			_, e := parseNativeOptions(args, io.Discard)
+			if tc.names == "" {
+				if e != nil {
+					t.Fatal("explicit DoP refused:", e)
+				}
+				return
+			}
+			if e == nil || !strings.Contains(e.Error(), tc.names) {
+				t.Fatalf("refusal %v, want one naming %s", e, tc.names)
+			}
+		})
 	}
 }

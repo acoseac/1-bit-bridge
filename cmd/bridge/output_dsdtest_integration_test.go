@@ -785,7 +785,35 @@ func TestNativeIntegrationDoPProductionDisabled(t *testing.T) {
 	for _, mode := range []string{"serve", "output_play", "api"} {
 		t.Run(mode, func(t *testing.T) {
 			if mode == "api" {
-				TestBridgeDSDCodecVocabulary(t)
+				// GET /v1/outputs' view of a player whose fresh owner-approved
+				// record holds only DoP: no DSD codec, no DoP tuple, and nothing
+				// opened to say so.
+				k := alsapcm.NewFakeKernel(t)
+				be := playbacktest.Approved(t, "dop_only", func(cfg playback.Config) (*playback.Backend, error) {
+					cfg.OpenSink = k.OpenSink
+					return playback.New(cfg)
+				})
+				ready := make(chan struct{})
+				close(ready)
+				cfg := playerOutputConfig(t.TempDir(), nil)
+				seedPlayerUUID(t, cfg.DataDir, thePlayerUUID)
+				f := newBridgeOutput(servePlayerPlan{lists: true}, &bridgePlayer{be: be, ready: ready}, cfg).Facts(context.Background())
+				for _, c := range f.Codecs {
+					if c == "dsf" || c == "dff" {
+						t.Fatalf("codecs %v advertise DSD from a DoP-only record", f.Codecs)
+					}
+				}
+				if f.DSDPlayback == nil {
+					t.Fatal("no DSD authorization epoch published")
+				}
+				for _, tu := range f.DSDPlayback.Tuples {
+					if tu.Format == "S32_LE" {
+						t.Fatalf("published a DoP tuple: %+v", tu)
+					}
+				}
+				if len(f.DSDPlayback.Tuples) != 0 || k.View().Opens != 0 {
+					t.Fatalf("tuples %v, opens %d", f.DSDPlayback.Tuples, k.View().Opens)
+				}
 				return
 			}
 			data, e := os.ReadFile(filepath.Join("..", "..", "internal", "player", "decode", "testdata", "dsd-goldens", "dsd64.dff"))

@@ -181,7 +181,7 @@ func parseNativeOptions(args []string, w io.Writer) (nativeOptions, error) {
 	fs.StringVar(&o.config, "config", "", "loopback config")
 	fs.StringVar(&o.manifest, "manifest", "", "version 1 owner manifest JSON")
 	fs.StringVar(&o.fixtures, "fixtures", "", "listening asset root")
-	fs.StringVar(&o.contact, "contact-report", "", "version 2 contact receipt")
+	fs.StringVar(&o.contact, "contact-report", "", "contact receipt: version 2 native, version 3 DoP")
 	fs.StringVar(&o.report, "report", "", "new report path, never an approval")
 	fs.StringVar(&o.mixer, "mixer-snapshot", "", "fresh amixer annex")
 	fs.StringVar(&o.provisional, "provisional-record", "", "CLI candidate for backend-lifecycle only")
@@ -194,8 +194,10 @@ func parseNativeOptions(args []string, w io.Writer) (nativeOptions, error) {
 	switch {
 	case !set["ack-level"] || (o.ack != "off-ear" && o.ack != "contact-position"):
 		return o, errors.New("--ack-level must be off-ear or contact-position")
+	case o.transport != "native" && o.transport != "dop":
+		return o, errors.New("--transport must be native or dop")
 	case !set["format"] || !(qualification.Tuple{Transport: o.transport, Format: o.format}).ValidTransport():
-		return o, errors.New("--format must be DSD_U32_LE, DSD_U32_BE or DSD_U16_LE")
+		return o, errors.New("--format must be DSD_U32_LE, DSD_U32_BE or DSD_U16_LE, or S32_LE with --transport dop")
 	case !set["bit-rate"] || (o.rate != 2822400 && o.rate != 5644800 && o.rate != 11289600):
 		return o, errors.New("--bit-rate must be 2822400, 5644800 or 11289600")
 	case !set["seconds"] || o.seconds < 1 || o.seconds > 600:
