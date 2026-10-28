@@ -66047,7 +66047,8 @@ bolded "Don't…" sentence (715 bytes, past the tool's 600-byte line), so the
 second largest moved instead (the hotplug watcher's generation entry), its
 pointer keeping its title and its "Don't…" sentence. The harness then
 refused edits to player.md itself, so the 2d.2 line and the corrections of
-its stale DoP claims are in the job's rules notes for the owner to apply;
+its stale DoP claims went to the job's rules notes, and were applied at the
+merge (379722af);
 the long form is in History-rules-player.md, "Approved DoP (B470 2d.2)".
 
 Pending, as for 2c and 2d.1: Linux amd64/arm64 execution and the alsa-abi

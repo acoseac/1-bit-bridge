@@ -985,10 +985,11 @@ It is distinct from the baseline `bridge.reason` table above.
 particular it must not infer eligibility from an unknown format or pause.**
 
 The tuple array is the effective exact set, not a Cartesian product, and the
-player selects from that same set. Under `dsdMode` `native` it holds native policies,
-DSD_U32_BE first, then DSD_U32_LE, then DSD_U16_LE; under `dop`, the DoP policies,
-and only while `allowDoP` is true; under `auto`, the native policies first and a DoP
-policy only at a rate the record holds no native policy for. A native policy whose
+player selects from that same set. It is ordered by rate (DSD64, DSD128, DSD256) and,
+within a rate, by selection order. Under `dsdMode` `native` a rate holds native
+policies, DSD_U32_BE first, then DSD_U32_LE, then DSD_U16_LE; under `dop`, the DoP
+policies, and only while `allowDoP` is true; under `auto`, a rate holds its native
+policies, or a DoP policy only where the record holds no native policy for that rate. A native policy whose
 mixer constraints no longer hold leaves its rate empty: DoP is never published or
 played in its place. With `allowDoP` false under `dop` or `auto`, a rate whose only
 approved transport is DoP is empty and `reason` says `dop_not_allowed`; PCM plays.

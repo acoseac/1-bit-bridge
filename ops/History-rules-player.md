@@ -971,8 +971,8 @@ scheduler order can put a third occurrence's bits in the parked write.
 - **The DoP backend-lifecycle runs on its candidate under dsdMode dop, and the evidence recorder is transport-aware**: the tuple comparison includes Transport, an installed occurrence's edge key is the backend's (`playback.EdgeKey`: `dop/…` for DoP), and only the qualified transport's opens are `Opened`, a PCM edge's going to `EdgeOpened` (DoP's geometry check reads `Opened` open by open). The DoP lifecycle and the transition scenario ask for the DSD indication and the listening once the evidence is complete. **Don't record a PCM open as the qualified tuple's, key an edge as `native/` for a DoP plan, or take a lifecycle as complete without the DoP observations.** `TestLifecycleDoPEvidence`, `TestDoPOptions` and `TestNativeIntegrationDoPBackendLifecycle` (its report, promoted, reads) pin it.
 - **`/v1/outputs` names each tuple's and the observation's transport (`dop`; `pcm` on an observation; absent, native DSD), the observation's packing version, observation time and admitting revision, and the epoch's model, bcdDevice and qualification date, never the USB port or serial** (decision 4): the record's model has its anchored port taken out, and serve's view takes the boot binding's serial and port out of it again. **Don't put a port or a serial on the wire, or read an absent transport as DoP.** `TestBridgeDSDTupleTransport`, `TestPlaybackFactsTransport`, `TestOutputsQualificationFacts`, `TestDSDOutputProtocolMembers` and `TestDSDOutputProtocolTokens` pin it.
 
-Qualification version 16 invalidates every contact, report, candidate and record of
-version 15 or below, native ones included. The two CLI scenario tests first spent
+Qualification version 17 (16 is B557's) invalidates every contact, report, candidate
+and record of version 16 or below, native ones included. The two CLI scenario tests first spent
 their one 2.5 s grant of the fake DAC while the new sink filled (an idle writer's
 watch consumes a grant on a stream that has not started) and then could run a
 stream dry; they grant 20 ms at a time, each once the writer waits with a buffer
