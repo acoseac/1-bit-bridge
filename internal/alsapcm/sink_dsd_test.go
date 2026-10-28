@@ -236,9 +236,15 @@ func TestNativeTrackChangeCutoff(t *testing.T) {
 
 // TestNativeReleaseEscalation holds the drain while Stop escalates release.
 func TestNativeReleaseEscalation(t *testing.T) {
-	k := nativeKernel(t)
+	testReleaseEscalation(t, nativeKernel(t), nativeConfig(), 1)
+}
+
+// testReleaseEscalation holds a track change's drain of 32 queued bits,
+// which the sink's transport writes as frames hardware frames, while an
+// Immediate release escalates it.
+func testReleaseEscalation(t *testing.T, k *fakeKernel, cfg DSDConfig, frames uint64) {
 	g := &nativePollGate{sys: k, entered: make(chan struct{}), gate: make(chan struct{})}
-	s, e := openDSDSink(context.Background(), nativeConfig(), nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(g, k.now, ep, c) }, now: k.now, at: k.nativeAt})
+	s, e := openDSDSink(context.Background(), cfg, nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(g, k.now, ep, c) }, now: k.now, at: k.nativeAt})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -247,7 +253,7 @@ func TestNativeReleaseEscalation(t *testing.T) {
 		t.Fatal(e)
 	}
 	_, _ = s.WriteDSD(context.Background(), 1, []byte{1, 2, 3, 4}, []byte{5, 6, 7, 8}, 0, 32)
-	await(t, k.when(filledAndIdle(1)), "queued word")
+	await(t, k.when(filledAndIdle(frames)), "queued word")
 	g.armed.Store(true)
 	answer := make(chan error, 1)
 	go func() { answer <- s.Release(context.Background(), TrackChange) }()

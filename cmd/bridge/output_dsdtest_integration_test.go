@@ -21,7 +21,6 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/alsactl"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
-	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback/playbacktest"
 	"github.com/acoseac/1-bit-bridge/internal/player/qualification"
@@ -834,30 +833,7 @@ func TestNativeIntegrationDoPProductionDisabled(t *testing.T) {
 				}
 				return x.(*playback.Backend), nil
 			})
-			dir := t.TempDir()
-			eng, e := engine.New(engine.Config{Backend: b, PlayerUUID: "0f8fad5b-d9cb-469f-a165-70867728950e", DataDir: dir, QueuePath: filepath.Join(dir, "queue.json")})
-			if e != nil {
-				t.Fatal(e)
-			}
-			ctx, cancel := context.WithCancel(context.Background())
-			done := make(chan struct{})
-			go func() { defer close(done); _ = eng.Run(ctx) }()
-			t.Cleanup(func() {
-				c, stop := context.WithTimeout(context.Background(), 5*time.Second)
-				defer stop()
-				if e := b.Wait(c); e != nil {
-					t.Error(e)
-				}
-			})
-			drainLoopOnCleanup(t, cancel, done, "DoP production refusal engine")
-			ref, _ := engine.NewReference("dsd")
-			if _, e = eng.InsertAfter(ctx, 0, ref, nil); e != nil {
-				t.Fatal(e)
-			}
-			if e = eng.ReportOutput(ctx, engine.OutputReport{Generation: 1, Available: true}); e != nil {
-				t.Fatal(e)
-			}
-			if e = eng.Play(ctx); e == nil {
+			if _, e = playOneOnEngine(t, b, "dsd", "DoP production refusal engine"); e == nil {
 				t.Fatal("production selected DoP")
 			}
 			if k.View().Opens != 0 || len(b.Policy().Tuples) != 0 {

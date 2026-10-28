@@ -123,6 +123,23 @@ func (o *dopStream) emit(l, r uint16) {
 	}
 }
 
+// pauseUntilReleased activates s, pauses it and runs the kernel's clock past
+// the pause's 30 s release, so the device is closed and the next Resume
+// opens it again.
+func pauseUntilReleased(t *testing.T, k *fakeKernel, s *DSDSink) {
+	t.Helper()
+	ctx := context.Background()
+	if e := s.Activate(ctx, 1); e != nil {
+		t.Fatal(e)
+	}
+	if e := s.Pause(ctx); e != nil {
+		t.Fatal(e)
+	}
+	k.grant(31 * time.Second)
+	nativeWait(t, s, "released pause", func() bool { return s.released })
+	k.revoke()
+}
+
 // sameDoP fails the test unless got is want, naming the first frame that
 // differs.
 func sameDoP(t *testing.T, what string, got, want []byte) {
@@ -239,15 +256,7 @@ func TestDoPPrecision(t *testing.T) {
 							t.Fatal(e)
 						}
 						defer s.Release(context.Background(), Immediate)
-						if e = s.Activate(context.Background(), 1); e != nil {
-							t.Fatal(e)
-						}
-						if e = s.Pause(context.Background()); e != nil {
-							t.Fatal(e)
-						}
-						k.grant(31 * time.Second)
-						nativeWait(t, s, "released", func() bool { return s.released })
-						k.revoke()
+						pauseUntilReleased(t, k, s)
 						before = len(given(k))
 						set()
 						e = s.Resume(context.Background())
@@ -474,15 +483,7 @@ func testDoPRunPhase(t *testing.T, name string) {
 	if name == "reopen" {
 		// One frame of prefill leaves the run's phase at FA; the run ends with
 		// the pause's release, and the reopened run's prefill starts at 05.
-		if e := s.Activate(ctx, 1); e != nil {
-			t.Fatal(e)
-		}
-		if e := s.Pause(ctx); e != nil {
-			t.Fatal(e)
-		}
-		k.grant(31 * time.Second)
-		nativeWait(t, s, "released pause", func() bool { return s.released })
-		k.revoke()
+		pauseUntilReleased(t, k, s)
 		if n := len(given(k)) / 8; n%2 != 1 {
 			t.Fatalf("the released run gave %d frames; the reopen needs an odd count", n)
 		}
@@ -701,15 +702,7 @@ func TestDoPTransportIdentity(t *testing.T) {
 		c := dopConfig()
 		c.Prefill = time.Microsecond
 		s := nativeSink(t, k, c)
-		if e := s.Activate(ctx, 1); e != nil {
-			t.Fatal(e)
-		}
-		if e := s.Pause(ctx); e != nil {
-			t.Fatal(e)
-		}
-		k.grant(31 * time.Second)
-		nativeWait(t, s, "released pause", func() bool { return s.released })
-		k.revoke()
+		pauseUntilReleased(t, k, s)
 		before := len(given(k))
 		k.inspect(func(k *fakeKernel) { k.hw.info &^= infoPause })
 		if e := s.Resume(ctx); e == nil {
@@ -870,40 +863,6 @@ func TestDoPUnsupportedAdmission(t *testing.T) {
 	}
 }
 
-func TestDoPReleaseEscalation(t *testing.T) {
-	k := dopKernel(t)
-	g := &nativePollGate{sys: k, entered: make(chan struct{}), gate: make(chan struct{})}
-	s, e := openDSDSink(context.Background(), dopConfig(), nativeSeams{open: func(ep Endpoint, c Config) (*Device, error) { return openNative(g, k.now, ep, c) }, now: k.now, at: k.nativeAt})
-	if e != nil {
-		t.Fatal(e)
-	}
-	defer s.Release(context.Background(), Immediate)
-	if e = s.Activate(context.Background(), 1); e != nil {
-		t.Fatal(e)
-	}
-	_, _ = s.WriteDSD(context.Background(), 1, []byte{1, 2, 3, 4}, []byte{5, 6, 7, 8}, 0, 32)
-	await(t, k.when(filledAndIdle(2)), "queued word")
-	g.armed.Store(true)
-	answer := make(chan error, 1)
-	go func() { answer <- s.Release(context.Background(), TrackChange) }()
-	await(t, g.entered, "cancellable drain seam")
-	start := time.Now()
-	immediate := make(chan error, 1)
-	go func() { immediate <- s.Release(context.Background(), Immediate) }()
-	select {
-	case e = <-immediate:
-		if e != nil {
-			t.Errorf("escalation failed: %v", e)
-		}
-	case <-time.After(time.Second):
-		t.Errorf("escalation did not cancel drain promptly after %v", time.Since(start))
-		// Let a defective escalation end through the independently tested
-		// release clock, so the mutation produces an assertion, not a hang.
-		k.advanceNow(2 * time.Second)
-		<-immediate
-	}
-	close(g.gate)
-	await(t, s.Done(), "Immediate cleanup")
-	<-answer
-	k.checkClosedEach(t)
-}
+// TestDoPReleaseEscalation is TestNativeReleaseEscalation's escalation over
+// DoP, whose 16-bit words put the 32 queued bits in two frames.
+func TestDoPReleaseEscalation(t *testing.T) { testReleaseEscalation(t, dopKernel(t), dopConfig(), 2) }

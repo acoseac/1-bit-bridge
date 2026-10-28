@@ -189,79 +189,134 @@ func nativeEngineStorage(t *testing.T) {
 	t.Cleanup(atomicwrite.SetMediumForTest(func(string) error { return nil }))
 }
 
+// nativeEngine runs an engine over backend, b or a wrapper of it, on ctx
+// until the test ends. Its cleanup calls before, when there is one, to let
+// go of what the test holds, then cancels, joins Run and waits for b's
+// goroutines; a check the test registered before this call runs after that.
+func nativeEngine(t *testing.T, ctx context.Context, cancel context.CancelFunc, b *Backend, backend engine.Backend, before func()) *engine.Engine {
+	t.Helper()
+	dir := t.TempDir()
+	eng, e := engine.New(engine.Config{Backend: backend, PlayerUUID: "0f8fad5b-d9cb-469f-a165-70867728950e", DataDir: dir, QueuePath: filepath.Join(dir, "queue.json")})
+	if e != nil {
+		t.Fatal(e)
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); _ = eng.Run(ctx) }()
+	t.Cleanup(func() {
+		if before != nil {
+			before()
+		}
+		cancel()
+		<-done
+		c, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		if e := b.Wait(c); e != nil {
+			t.Error(e)
+		}
+	})
+	return eng
+}
+
+// queueWithOutput queues the references names, each after the one before,
+// makes the output available, and returns the entries' IDs in order.
+func queueWithOutput(t *testing.T, ctx context.Context, eng *engine.Engine, names ...string) []uint32 {
+	t.Helper()
+	var ids []uint32
+	var prev uint32
+	for _, name := range names {
+		ref, _ := engine.NewReference(name)
+		id, e := eng.InsertAfter(ctx, prev, ref, nil)
+		if e != nil {
+			t.Fatal(e)
+		}
+		ids = append(ids, id)
+		prev = id
+	}
+	if e := eng.ReportOutput(ctx, engine.OutputReport{Generation: 1, Available: true}); e != nil {
+		t.Fatal(e)
+	}
+	return ids
+}
+
+// playUntilStopped plays and waits for the engine to stop; what names the
+// play in the failure a stall gives.
+func playUntilStopped(t *testing.T, ctx context.Context, eng *engine.Engine, what string) {
+	t.Helper()
+	if e := eng.Play(ctx); e != nil {
+		t.Fatal(e)
+	}
+	for {
+		ch := eng.Changed()
+		if eng.Snapshot().State() == engine.Stopped {
+			break
+		}
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal(what + " stalled")
+		}
+	}
+}
+
+// playToParkedWrite plays until the hardware write the test parked
+// (FakeKernel.ParkNextWrite) holds the two-occurrence prefix.
+func playToParkedWrite(t *testing.T, ctx context.Context, eng *engine.Engine, parked <-chan struct{}) {
+	t.Helper()
+	if e := eng.Play(ctx); e != nil {
+		t.Fatal(e)
+	}
+	select {
+	case <-parked:
+	case <-ctx.Done():
+		t.Fatal("two-occurrence hardware prefix did not park")
+	}
+}
+
 func TestNativeIntegrationTinyThroughEngine(t *testing.T) {
 	nativeEngineStorage(t)
 	for _, bits := range []int{1, 7, 15, 31} {
-		t.Run(fmt.Sprint(bits), func(t *testing.T) {
-			k := alsapcm.NewFakeKernel(t)
-			k.HardwareFormats(49, 50, 52)
-			k.Free()
-			b, e := New(Config{Resolver: nativeFiles{"a": nativeDSF(t, bits)}, Locator: nativeLocator{}})
-			if e != nil {
-				t.Fatal(e)
+		t.Run(fmt.Sprint(bits), func(t *testing.T) { testTinyThroughEngine(t, bits, nativeTestPlan, []uint32{49, 50, 52}, nil) })
+	}
+}
+
+// testTinyThroughEngine plays two queued occurrences of a bits-long track
+// through the engine's real Run, the backend and the fake kernel, admitted
+// by plan on a DAC that takes formats, and checks that the natural advance
+// kept one open, both occurrences were heard, and each reported its
+// details, its audible and its logical position. dac, when there is one,
+// checks what the DAC was given, before the events are.
+func testTinyThroughEngine(t *testing.T, bits int, plan func(format.NativeDSD) (engine.NativePlan, error), formats []uint32, dac func(*alsapcm.FakeKernel)) {
+	k := alsapcm.NewFakeKernel(t)
+	k.HardwareFormats(formats...)
+	k.Free()
+	b, e := New(Config{Resolver: nativeFiles{"a": nativeDSF(t, bits)}, Locator: nativeLocator{}})
+	if e != nil {
+		t.Fatal(e)
+	}
+	AdmitNativeForIntegration(b, plan, k.OpenNativeSink)
+	events := &nativeEvents{done: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() { k.CheckClosedEach(t) })
+	eng := nativeEngine(t, ctx, cancel, b, nativeRecordingBackend{b, events}, nil)
+	queueWithOutput(t, ctx, eng, "a", "a")
+	playUntilStopped(t, ctx, eng, "tiny engine")
+	if k.View().Opens != 1 {
+		t.Errorf("natural compatible advance reopened: %d", k.View().Opens)
+	}
+	if n := eng.Snapshot().TrackCount(); n != 2 {
+		t.Fatalf("heard %d occurrences, want two", n)
+	}
+	if dac != nil {
+		dac(k)
+	}
+	events.mu.Lock()
+	defer events.mu.Unlock()
+	for _, id := range []int{1, 2} {
+		for _, want := range []string{fmt.Sprintf("details:%d:1:2822400:DSD:true", id), fmt.Sprintf("audible:%d", id), fmt.Sprintf("position:%d:%d:2822400", id, bits)} {
+			if !slices.Contains(events.records, want) {
+				t.Errorf("missing %s: %v", want, events.records)
 			}
-			AdmitNativeForIntegration(b, nativeTestPlan, k.OpenNativeSink)
-			events := &nativeEvents{done: make(chan struct{})}
-			dir := t.TempDir()
-			eng, e := engine.New(engine.Config{Backend: nativeRecordingBackend{b, events}, PlayerUUID: "0f8fad5b-d9cb-469f-a165-70867728950e", DataDir: dir, QueuePath: filepath.Join(dir, "queue.json")})
-			if e != nil {
-				t.Fatal(e)
-			}
-			ctx, cancel := context.WithCancel(context.Background())
-			done := make(chan struct{})
-			go func() { defer close(done); _ = eng.Run(ctx) }()
-			t.Cleanup(func() {
-				cancel()
-				<-done
-				c, stop := context.WithTimeout(context.Background(), 5*time.Second)
-				defer stop()
-				if e := b.Wait(c); e != nil {
-					t.Error(e)
-				}
-				k.CheckClosedEach(t)
-			})
-			ref, _ := engine.NewReference("a")
-			a, e := eng.InsertAfter(ctx, 0, ref, nil)
-			if e != nil {
-				t.Fatal(e)
-			}
-			_, e = eng.InsertAfter(ctx, a, ref, nil)
-			if e != nil {
-				t.Fatal(e)
-			}
-			if e = eng.ReportOutput(ctx, engine.OutputReport{Generation: 1, Available: true}); e != nil {
-				t.Fatal(e)
-			}
-			if e = eng.Play(ctx); e != nil {
-				t.Fatal(e)
-			}
-			for {
-				ch := eng.Changed()
-				if eng.Snapshot().State() == engine.Stopped {
-					break
-				}
-				select {
-				case <-ch:
-				case <-time.After(5 * time.Second):
-					t.Fatal("tiny engine stalled")
-				}
-			}
-			if k.View().Opens != 1 {
-				t.Errorf("natural compatible advance reopened: %d", k.View().Opens)
-			}
-			if n := eng.Snapshot().TrackCount(); n != 2 {
-				t.Fatalf("heard %d occurrences, want two", n)
-			}
-			events.mu.Lock()
-			defer events.mu.Unlock()
-			for _, id := range []int{1, 2} {
-				for _, want := range []string{fmt.Sprintf("details:%d:1:2822400:DSD:true", id), fmt.Sprintf("audible:%d", id), fmt.Sprintf("position:%d:%d:2822400", id, bits)} {
-					if !slices.Contains(events.records, want) {
-						t.Errorf("missing %s: %v", want, events.records)
-					}
-				}
-			}
-		})
+		}
 	}
 }
 
@@ -409,7 +464,12 @@ func (v nativeTee) CurrentOccurrence(s engine.SessionID, o engine.OccurrenceID, 
 	v.Events.(engine.CurrentOccurrenceEvents).CurrentOccurrence(s, o, p)
 }
 
-func TestNativeIntegrationMixedPolicy(t *testing.T) {
+func TestNativeIntegrationMixedPolicy(t *testing.T) { testMixedPolicy(t, nativeTestPlan) }
+
+// testMixedPolicy plays a track at 2822400 and then one at 5644800, each
+// admitted by plan under a policy ID naming its rate, and checks that the
+// session crossed to the second's policy with its logical position kept.
+func testMixedPolicy(t *testing.T, plan func(format.NativeDSD) (engine.NativePlan, error)) {
 	k := alsapcm.NewFakeKernel(t)
 	k.HardwareFormats(2, 10, 49, 50, 52)
 	k.Free()
@@ -420,7 +480,7 @@ func TestNativeIntegrationMixedPolicy(t *testing.T) {
 		t.Fatal(e)
 	}
 	AdmitNativeForIntegration(b, func(d format.NativeDSD) (engine.NativePlan, error) {
-		p, _ := nativeTestPlan(d)
+		p, _ := plan(d)
 		p.PolicyID = fmt.Sprint(d.BitRateHz)
 		return p, nil
 	}, k.OpenNativeSink)
@@ -760,51 +820,15 @@ func TestNativeIntegrationRetiringThroughEngine(t *testing.T) {
 	AdmitNativeForIntegration(b, nativeTestPlan, k.OpenNativeSink)
 	events := &nativeEvents{done: make(chan struct{})}
 	barrier := nativeSuccessorBarrier{nativeRecordingBackend{b, events}, make(chan struct{}), make(chan struct{})}
-	dir := t.TempDir()
-	eng, err := engine.New(engine.Config{Backend: barrier, PlayerUUID: "0f8fad5b-d9cb-469f-a165-70867728950e", DataDir: dir, QueuePath: filepath.Join(dir, "queue.json")})
-	if err != nil {
-		t.Fatal(err)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	done := make(chan struct{})
-	go func() { defer close(done); _ = eng.Run(ctx) }()
 	var once sync.Once
 	allow := func() { once.Do(func() { close(barrier.allow) }) }
-	t.Cleanup(func() {
-		allow()
-		cancel()
-		<-done
-		c, stop := context.WithTimeout(context.Background(), 5*time.Second)
-		defer stop()
-		if err := b.Wait(c); err != nil {
-			t.Error(err)
-		}
-	})
-	ref, _ := engine.NewReference("a")
-	var ids []uint32
-	var prev uint32
-	for range 3 {
-		id, e := eng.InsertAfter(ctx, prev, ref, nil)
-		if e != nil {
-			t.Fatal(e)
-		}
-		ids = append(ids, id)
-		prev = id
-	}
-	if err = eng.ReportOutput(ctx, engine.OutputReport{Generation: 1, Available: true}); err != nil {
-		t.Fatal(err)
-	}
+	eng := nativeEngine(t, ctx, cancel, b, barrier, allow)
+	ids := queueWithOutput(t, ctx, eng, "a", "a", "a")
 	parked, unpark := k.ParkNextWrite()
 	defer unpark()
-	if err = eng.Play(ctx); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-parked:
-	case <-ctx.Done():
-		t.Fatal("two-occurrence hardware prefix did not park")
-	}
+	playToParkedWrite(t, ctx, eng, parked)
 	s := b.known(1)
 	nav := make(chan error, 1)
 	go func() { nav <- eng.PlayID(ctx, ids[2]) }()
@@ -1510,82 +1534,16 @@ func TestNativeIntegrationDoPThroughEngine(t *testing.T) {
 	nativeEngineStorage(t)
 	for _, bits := range []int{1, 7, 15, 31} {
 		t.Run(fmt.Sprint(bits), func(t *testing.T) {
-			k := alsapcm.NewFakeKernel(t)
-			k.HardwareFormats(2, 10, 32, 49, 50, 52)
-			k.Free()
-			b, e := New(Config{Resolver: nativeFiles{"a": nativeDSF(t, bits)}, Locator: nativeLocator{}})
-			if e != nil {
-				t.Fatal(e)
-			}
-			AdmitNativeForIntegration(b, dopTestPlan, k.OpenNativeSink)
-			events := &nativeEvents{done: make(chan struct{})}
-			dir := t.TempDir()
-			eng, e := engine.New(engine.Config{Backend: nativeRecordingBackend{b, events}, PlayerUUID: "0f8fad5b-d9cb-469f-a165-70867728950e", DataDir: dir, QueuePath: filepath.Join(dir, "queue.json")})
-			if e != nil {
-				t.Fatal(e)
-			}
-			ctx, cancel := context.WithCancel(context.Background())
-			done := make(chan struct{})
-			go func() { defer close(done); _ = eng.Run(ctx) }()
-			t.Cleanup(func() {
-				cancel()
-				<-done
-				c, stop := context.WithTimeout(context.Background(), 5*time.Second)
-				defer stop()
-				if e := b.Wait(c); e != nil {
-					t.Error(e)
+			testTinyThroughEngine(t, bits, dopTestPlan, []uint32{2, 10, 32, 49, 50, 52}, func(k *alsapcm.FakeKernel) {
+				// Bit transparency through the engine, the backend, the decoder and
+				// the sink: the DAC was given exactly the DoP of the two occurrences'
+				// bits joined, padded once at the end, then the plan's 1 ms tail.
+				l, r := dopPattern(t)
+				cl, cr, n := dopChain(l, r, bits, 2)
+				if got, want := k.Given(), dopBytes(cl, cr, n, 177); !bytes.Equal(got, want) {
+					t.Errorf("the DAC was given %d bytes that are not the DoP of the content (%d bytes)", len(got), len(want))
 				}
-				k.CheckClosedEach(t)
 			})
-			ref, _ := engine.NewReference("a")
-			a, e := eng.InsertAfter(ctx, 0, ref, nil)
-			if e != nil {
-				t.Fatal(e)
-			}
-			_, e = eng.InsertAfter(ctx, a, ref, nil)
-			if e != nil {
-				t.Fatal(e)
-			}
-			if e = eng.ReportOutput(ctx, engine.OutputReport{Generation: 1, Available: true}); e != nil {
-				t.Fatal(e)
-			}
-			if e = eng.Play(ctx); e != nil {
-				t.Fatal(e)
-			}
-			for {
-				ch := eng.Changed()
-				if eng.Snapshot().State() == engine.Stopped {
-					break
-				}
-				select {
-				case <-ch:
-				case <-time.After(5 * time.Second):
-					t.Fatal("tiny engine stalled")
-				}
-			}
-			if k.View().Opens != 1 {
-				t.Errorf("natural compatible advance reopened: %d", k.View().Opens)
-			}
-			if n := eng.Snapshot().TrackCount(); n != 2 {
-				t.Fatalf("heard %d occurrences, want two", n)
-			}
-			// Bit transparency through the engine, the backend, the decoder and
-			// the sink: the DAC was given exactly the DoP of the two occurrences'
-			// bits joined, padded once at the end, then the plan's 1 ms tail.
-			l, r := dopPattern(t)
-			cl, cr, n := dopChain(l, r, bits, 2)
-			if got, want := k.Given(), dopBytes(cl, cr, n, 177); !bytes.Equal(got, want) {
-				t.Errorf("the DAC was given %d bytes that are not the DoP of the content (%d bytes)", len(got), len(want))
-			}
-			events.mu.Lock()
-			defer events.mu.Unlock()
-			for _, id := range []int{1, 2} {
-				for _, want := range []string{fmt.Sprintf("details:%d:1:2822400:DSD:true", id), fmt.Sprintf("audible:%d", id), fmt.Sprintf("position:%d:%d:2822400", id, bits)} {
-					if !slices.Contains(events.records, want) {
-						t.Errorf("missing %s: %v", want, events.records)
-					}
-				}
-			}
 		})
 	}
 }
@@ -1618,52 +1576,15 @@ func testDoPRetiring(t *testing.T, selector string) {
 	AdmitNativeForIntegration(b, dopTestPlan, k.OpenNativeSink)
 	events := &nativeEvents{done: make(chan struct{})}
 	barrier := nativeSuccessorBarrier{nativeRecordingBackend{b, events}, make(chan struct{}), make(chan struct{})}
-	dir := t.TempDir()
-	eng, err := engine.New(engine.Config{Backend: barrier, PlayerUUID: "0f8fad5b-d9cb-469f-a165-70867728950e", DataDir: dir, QueuePath: filepath.Join(dir, "queue.json")})
-	if err != nil {
-		t.Fatal(err)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	done := make(chan struct{})
-	go func() { defer close(done); _ = eng.Run(ctx) }()
 	var once sync.Once
 	allow := func() { once.Do(func() { close(barrier.allow) }) }
-	t.Cleanup(func() {
-		allow()
-		letC()
-		cancel()
-		<-done
-		c, stop := context.WithTimeout(context.Background(), 5*time.Second)
-		defer stop()
-		if err := b.Wait(c); err != nil {
-			t.Error(err)
-		}
-	})
-	var ids []uint32
-	var prev uint32
-	for _, name := range []string{"a", "b", "c"} {
-		ref, _ := engine.NewReference(name)
-		id, e := eng.InsertAfter(ctx, prev, ref, nil)
-		if e != nil {
-			t.Fatal(e)
-		}
-		ids = append(ids, id)
-		prev = id
-	}
-	if err = eng.ReportOutput(ctx, engine.OutputReport{Generation: 1, Available: true}); err != nil {
-		t.Fatal(err)
-	}
+	eng := nativeEngine(t, ctx, cancel, b, barrier, func() { allow(); letC() })
+	ids := queueWithOutput(t, ctx, eng, "a", "b", "c")
 	parked, unpark := k.ParkNextWrite()
 	defer unpark()
-	if err = eng.Play(ctx); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-parked:
-	case <-ctx.Done():
-		t.Fatal("two-occurrence hardware prefix did not park")
-	}
+	playToParkedWrite(t, ctx, eng, parked)
 	s := b.known(1)
 	nav := make(chan error, 1)
 	target := ids[2]
@@ -1724,79 +1645,7 @@ func TestNativeIntegrationDoPTransitions(t *testing.T) {
 	for _, mode := range []string{"same_carrier", "cross_rate", "policy"} {
 		t.Run(mode, func(t *testing.T) { doPTransitionEngine(t, mode) })
 	}
-	k := alsapcm.NewFakeKernel(t)
-	k.HardwareFormats(2, 10, 49, 50, 52)
-	k.Free()
-	second := nativeDSF(t, 31)
-	binary.LittleEndian.PutUint32(second[56:60], 5644800)
-	b, e := New(Config{Resolver: nativeFiles{"a": nativeDSF(t, 31), "b": second}, Locator: nativeLocator{}})
-	if e != nil {
-		t.Fatal(e)
-	}
-	AdmitNativeForIntegration(b, func(d format.NativeDSD) (engine.NativePlan, error) {
-		p, _ := dopTestPlan(d)
-		p.PolicyID = fmt.Sprint(d.BitRateHz)
-		return p, nil
-	}, k.OpenNativeSink)
-	ev := &nativeEvents{done: make(chan struct{})}
-	r, _ := engine.NewReference("a")
-	r2, _ := engine.NewReference("b")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if e = b.Start(ctx, engine.StartRequest{Session: 1, First: engine.Occurrence{ID: 1, Entry: 1, Ref: r}, Events: ev}); e != nil {
-		t.Fatal(e)
-	}
-	if e = b.Prepare(ctx, 1, 1, &engine.Occurrence{ID: 2, Entry: 2, Ref: r2}); e != nil {
-		t.Fatal(e)
-	}
-	s := b.known(1)
-	for {
-		s.mu.Lock()
-		o := s.find(2)
-		done := o != nil && o.opened()
-		var ch <-chan struct{}
-		if o != nil {
-			ch = o.done
-		}
-		s.mu.Unlock()
-		if done {
-			break
-		}
-		select {
-		case <-ch:
-		case <-ctx.Done():
-			t.Fatal("successor open stalled")
-		}
-	}
-	if e = b.Prepare(ctx, 1, 2, nil); e != nil {
-		t.Fatal(e)
-	}
-	select {
-	case <-ev.done:
-	case <-ctx.Done():
-		t.Fatal("mixed transition stalled")
-	}
-	s.mu.Lock()
-	cur := s.cur
-	id := cur.policyID
-	s.mu.Unlock()
-	if id != "5644800" {
-		t.Fatalf("mixed boundary changed policy ID: %q", id)
-	}
-	if e = b.Release(ctx, 1); e != nil {
-		t.Fatal(e)
-	}
-	ev.mu.Lock()
-	defer ev.mu.Unlock()
-	found := false
-	for _, r := range ev.records {
-		if r == "position:2:31:5644800" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("mixed boundary lost logical position: %v", ev.records)
-	}
+	testMixedPolicy(t, dopTestPlan)
 }
 
 func doPTransitionEngine(t *testing.T, mode string) {
@@ -1837,49 +1686,11 @@ func doPTransitionEngine(t *testing.T, mode string) {
 		p.PolicyID = fmt.Sprint(d.Frames)
 		return p, e
 	}, k.OpenNativeSink)
-	dir := t.TempDir()
-	eng, e := engine.New(engine.Config{Backend: b, PlayerUUID: "0f8fad5b-d9cb-469f-a165-70867728950e", DataDir: dir, QueuePath: filepath.Join(dir, "q.json")})
-	if e != nil {
-		t.Fatal(e)
-	}
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { defer close(done); _ = eng.Run(ctx) }()
-	t.Cleanup(func() {
-		cancel()
-		<-done
-		c, stop := context.WithTimeout(context.Background(), 5*time.Second)
-		defer stop()
-		if e := b.Wait(c); e != nil {
-			t.Error(e)
-		}
-		k.CheckClosedEach(t)
-	})
-	var prev uint32
-	for _, name := range []string{"a", "b", "a"} {
-		r, _ := engine.NewReference(name)
-		prev, e = eng.InsertAfter(ctx, prev, r, nil)
-		if e != nil {
-			t.Fatal(e)
-		}
-	}
-	if e = eng.ReportOutput(ctx, engine.OutputReport{Generation: 1, Available: true}); e != nil {
-		t.Fatal(e)
-	}
-	if e = eng.Play(ctx); e != nil {
-		t.Fatal(e)
-	}
-	for {
-		ch := eng.Changed()
-		if eng.Snapshot().State() == engine.Stopped {
-			break
-		}
-		select {
-		case <-ch:
-		case <-time.After(5 * time.Second):
-			t.Fatal("transition stalled")
-		}
-	}
+	t.Cleanup(func() { k.CheckClosedEach(t) })
+	eng := nativeEngine(t, ctx, cancel, b, b, nil)
+	queueWithOutput(t, ctx, eng, "a", "b", "a")
+	playUntilStopped(t, ctx, eng, "transition")
 	if skips := eng.Snapshot().Skips(); len(skips) != 0 {
 		t.Fatal("transition refused", skips)
 	}

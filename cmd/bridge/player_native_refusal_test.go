@@ -26,6 +26,38 @@ func (l refusedNativeLocator) Locate(context.Context) (playback.Unit, error) {
 	*l.calls++
 	return playback.Unit{}, errors.New("unexpected hardware resolution")
 }
+
+// playOneOnEngine runs an engine over b until the test ends, queues the
+// reference name, makes the output available and asks the engine to play:
+// Play's answer is the caller's to check, beside the engine it ran on. what
+// names the engine in its drain's timeout message.
+func playOneOnEngine(t *testing.T, b playBackend, name, what string) (*engine.Engine, error) {
+	t.Helper()
+	dir := t.TempDir()
+	eng, e := engine.New(engine.Config{Backend: b, PlayerUUID: "0f8fad5b-d9cb-469f-a165-70867728950e", DataDir: dir, QueuePath: filepath.Join(dir, "queue.json")})
+	if e != nil {
+		t.Fatal(e)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = eng.Run(ctx) }()
+	t.Cleanup(func() {
+		c, stop := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stop()
+		if e := b.Wait(c); e != nil {
+			t.Error(e)
+		}
+	})
+	drainLoopOnCleanup(t, cancel, done, what)
+	ref, _ := engine.NewReference(name)
+	if _, e = eng.InsertAfter(ctx, 0, ref, nil); e != nil {
+		t.Fatal(e)
+	}
+	if e = eng.ReportOutput(ctx, engine.OutputReport{Generation: 1, Available: true}); e != nil {
+		t.Fatal(e)
+	}
+	return eng, eng.Play(ctx)
+}
 func TestNativeProductionConstructorsRefuse(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the engine keeps its IDs durable with a directory fsync, which Windows has not: the player runs on Linux")
@@ -51,30 +83,8 @@ func TestNativeProductionConstructorsRefuse(t *testing.T) {
 				if e != nil {
 					t.Fatal(e)
 				}
-				dir := t.TempDir()
-				eng, e := engine.New(engine.Config{Backend: b, PlayerUUID: "0f8fad5b-d9cb-469f-a165-70867728950e", DataDir: dir, QueuePath: filepath.Join(dir, "queue.json")})
-				if e != nil {
-					t.Fatal(e)
-				}
-				ctx, cancel := context.WithCancel(context.Background())
-				done := make(chan struct{})
-				go func() { defer close(done); _ = eng.Run(ctx) }()
-				t.Cleanup(func() {
-					c, stop := context.WithTimeout(context.Background(), 5*time.Second)
-					defer stop()
-					if e := b.Wait(c); e != nil {
-						t.Error(e)
-					}
-				})
-				drainLoopOnCleanup(t, cancel, done, "native refusal engine")
-				ref, _ := engine.NewReference("native")
-				if _, e = eng.InsertAfter(ctx, 0, ref, nil); e != nil {
-					t.Fatal(e)
-				}
-				if e = eng.ReportOutput(ctx, engine.OutputReport{Generation: 1, Available: true}); e != nil {
-					t.Fatal(e)
-				}
-				if e = eng.Play(ctx); e == nil {
+				eng, e := playOneOnEngine(t, b, "native", "native refusal engine")
+				if e == nil {
 					t.Fatal("production played native DSD")
 				}
 				skipped := eng.Snapshot().Skips()
