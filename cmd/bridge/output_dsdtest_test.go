@@ -6,6 +6,7 @@ import (
 	"errors"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -68,15 +69,20 @@ func TestNativeProbeRequiresAcknowledgement(t *testing.T) {
 	}
 }
 
-// TestDoPOptions: explicit DoP parses; a transport other than native or dop,
-// DoP without its noise acknowledgement, and DoP in a native format are each
-// refused, naming the flag to fix.
+// TestDoPOptions: explicit DoP parses, the backend-lifecycle scenario on its
+// CLI candidate included; a transport other than native or dop, DoP without
+// its noise acknowledgement, and DoP in a native format are each refused,
+// naming the flag to fix.
 func TestDoPOptions(t *testing.T) {
-	for _, tc := range []struct{ name, transport, format, ack, names string }{
-		{"dop", "dop", "S32_LE", "--ack-dop-noise", ""},
-		{"transport", "pcm", "S32_LE", "--ack-dop-noise", "--transport must be"},
-		{"noise", "dop", "S32_LE", "", "--ack-dop-noise required"},
-		{"format", "dop", "DSD_U32_BE", "--ack-dop-noise", "--format must be"},
+	for _, tc := range []struct {
+		name, transport, format, ack, names string
+		extra                               []string
+	}{
+		{"dop", "dop", "S32_LE", "--ack-dop-noise", "", nil},
+		{"transport", "pcm", "S32_LE", "--ack-dop-noise", "--transport must be", nil},
+		{"noise", "dop", "S32_LE", "", "--ack-dop-noise required", nil},
+		{"format", "dop", "DSD_U32_BE", "--ack-dop-noise", "--format must be", nil},
+		{"backend_lifecycle", "dop", "S32_LE", "--ack-dop-noise", "", []string{"--scenario=backend-lifecycle", "--provisional-record=candidate.json"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := harnessRig(t)
@@ -85,6 +91,14 @@ func TestDoPOptions(t *testing.T) {
 				args = append([]string{tc.ack}, args...)
 			}
 			args = setNativeArg(args, "format", tc.format)
+			for _, x := range tc.extra {
+				name, value, _ := strings.Cut(strings.TrimPrefix(x, "--"), "=")
+				if set := setNativeArg(args, name, value); !slices.Equal(set, args) {
+					args = set
+				} else {
+					args = append([]string{x}, args...)
+				}
+			}
 			_, e := parseNativeOptions(args, io.Discard)
 			if tc.names == "" {
 				if e != nil {

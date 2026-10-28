@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/alsactl"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
+	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback/playbacktest"
 	"github.com/acoseac/1-bit-bridge/internal/player/qualification"
@@ -908,4 +910,266 @@ func TestNativeIntegrationDoPEnvelope(t *testing.T) {
 			k.CheckClosedEach(t)
 		})
 	}
+}
+
+// backendScenario is a dsd-test run of a scenario that drives the real
+// engine and backend (backend-lifecycle, approved-native-dop-native) on a
+// qualifyBox whose DAC is the fake kernel, held until the test grants it
+// time: the keys the test sends, the prompts the run prints, the scenario's
+// loop as its observer sees it, and the run's end.
+type backendScenario struct {
+	k       *alsapcm.FakeKernel
+	keys    *io.PipeWriter
+	prompts chan string
+	mu      sync.Mutex
+	view    lifecycleView
+	changed chan struct{}
+	done    chan int
+	errout  *lockedBuffer
+}
+
+// lockedBuffer is a buffer the run writes while the test reads it.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// scenarioPrompts forwards each confirmation phrase the run prints.
+type scenarioPrompts chan string
+
+func (p scenarioPrompts) Write(b []byte) (int, error) {
+	for _, phrase := range []string{"DAC DSD indicator confirmed", "L/R pitch and duration correct"} {
+		if strings.Contains(string(b), "Type exactly: "+phrase) {
+			p <- phrase
+		}
+	}
+	return len(b), nil
+}
+
+func startBackendScenario(t *testing.T, q *qualifyBox, args []string) *backendScenario {
+	t.Helper()
+	k := alsapcm.NewFakeKernel(t)
+	k.HardwareFormats(2, 10, 32, 49, 50, 52)
+	r, w := io.Pipe()
+	t.Cleanup(func() { r.Close(); w.Close() })
+	s := &backendScenario{k: k, keys: w, prompts: make(chan string, 4), changed: make(chan struct{}), done: make(chan int, 1), errout: &lockedBuffer{}}
+	q.env.stdin = nativePipeInput{r}
+	q.env.player.openSink = k.OpenSink
+	q.env.player.openNative = k.OpenNativeSink
+	q.env.player.observe = func(v lifecycleView) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.view = v
+		close(s.changed)
+		s.changed = make(chan struct{})
+	}
+	env := q.env
+	go func() {
+		s.done <- runOutputDSDTest(context.Background(), args, env, scenarioPrompts(s.prompts), s.errout)
+	}()
+	return s
+}
+
+// await waits until the scenario's loop has seen cond hold, failing at once
+// when the run ends first.
+func (s *backendScenario) await(t *testing.T, what string, cond func(lifecycleView) bool) {
+	t.Helper()
+	timer := time.NewTimer(30 * time.Second)
+	defer timer.Stop()
+	for {
+		s.mu.Lock()
+		v, ch := s.view, s.changed
+		s.mu.Unlock()
+		if v.Snapshot != nil && cond(v) {
+			return
+		}
+		select {
+		case <-ch:
+		case code := <-s.done:
+			s.done <- code
+			t.Fatalf("the run ended (exit %d: %q) before %s", code, s.errout.String(), what)
+		case <-timer.C:
+			t.Fatalf("the scenario never reached %s; it last saw %v", what, v.Actions)
+		}
+	}
+}
+
+// key sends one key, then grants the DAC grant of play, if any.
+func (s *backendScenario) key(b byte, grant time.Duration) {
+	nativeKey(s.keys, b)
+	if grant > 0 {
+		s.k.Grant(grant)
+	}
+}
+
+// answer waits for the prompt for phrase and types it.
+func (s *backendScenario) answer(t *testing.T, phrase string) {
+	t.Helper()
+	select {
+	case got := <-s.prompts:
+		if got != phrase {
+			t.Fatalf("the run asked for %q, want %q", got, phrase)
+		}
+		_, _ = io.WriteString(s.keys, phrase+"\n")
+	case code := <-s.done:
+		s.done <- code
+		t.Fatalf("the run ended (exit %d: %q) before asking for %q", code, s.errout.String(), phrase)
+	case <-time.After(30 * time.Second):
+		t.Fatalf("the run never asked for %q", phrase)
+	}
+}
+
+// result waits for the run's exit code.
+func (s *backendScenario) result(t *testing.T) int {
+	t.Helper()
+	select {
+	case code := <-s.done:
+		return code
+	case <-time.After(30 * time.Second):
+		t.Fatal("the run did not end")
+	}
+	return 0
+}
+
+// heardAs holds while the occurrence heard is ref's and the engine is in
+// state; hasActions while the evidence has counted every action named.
+func heardAs(ref string, state engine.State) func(lifecycleView) bool {
+	return func(v lifecycleView) bool {
+		tr, ok := v.Snapshot.Track()
+		return ok && tr.Ref.String() == ref && v.Snapshot.State() == state
+	}
+}
+
+func hasActions(names ...string) func(lifecycleView) bool {
+	return func(v lifecycleView) bool {
+		for _, n := range names {
+			if !slices.Contains(v.Actions, n) {
+				return false
+			}
+		}
+		return true
+	}
+}
+
+// readScenarioReport is the report a run wrote, and its bytes' SHA-256.
+func readScenarioReport(t *testing.T, q *qualifyBox) (nativeReport, qualification.Evidence) {
+	t.Helper()
+	b, e := os.ReadFile(filepath.Join(q.dir, "report.json"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	var r nativeReport
+	if e = json.Unmarshal(b, &r); e != nil {
+		t.Fatal(e)
+	}
+	return r, qualification.Evidence{Path: "report.json", SHA256: fmt.Sprintf("%x", sha256.Sum256(b))}
+}
+
+// TestNativeIntegrationDoPBackendLifecycle: dsd-test runs the DoP
+// backend-lifecycle on the real engine and backend under its CLI candidate,
+// through PCM edges at DoP64's own carrier and at 44.1 kHz: natural advance,
+// pause past the 30 s release and its reopen, next, previous and Stop on
+// DoP occurrences, every fixture heard to its end, then the DoP indicator
+// and listening confirmations; and its report, promoted as the DoP policy's
+// backend-lifecycle evidence with the edges it executed, passes ReadApproval.
+func TestNativeIntegrationDoPBackendLifecycle(t *testing.T) {
+	q := newQualifyBox(t)
+	dop := qualification.ApprovedPolicy{ID: "dop64", Tuple: q.dopTuple(), Channels: 2, Ordering: "msb", PauseReleaseSeconds: 30, Matrix: q.report("dop64-matrix.json", "matrix", q.dopTuple(), nil)}
+	dopKey := qualification.NativeKey(dop)
+	q.record("candidate.json", "CLI candidate; not approved", 1, []qualification.ApprovedPolicy{dop}, []qualification.Edge{{From: "pcm/S32_LE/176400/2/32/zero", To: dopKey}, {From: dopKey, To: dopKey}}, nil)
+	q.write("contact.json", q.contact(q.dopTuple()))
+	args := []string{"--transport=dop", "--ack-dop-noise", "--format=S32_LE", "--bit-rate=2822400", "--pause-method=kernel", "--tail-ms=1", "--prefill-ms=0", "--seconds=600", "--ack-level=contact-position",
+		"--manifest=" + filepath.Join(q.dir, "manifest.json"), "--fixtures=" + q.dir, "--contact-report=" + filepath.Join(q.dir, "contact.json"), "--mixer-snapshot=" + filepath.Join(q.dir, "mixer.txt"),
+		"--report=" + filepath.Join(q.dir, "report.json"), "--scenario=backend-lifecycle", "--provisional-record=" + filepath.Join(q.dir, "candidate.json"), "--config=fake", "pcm176", "dsda", "dsdb", "pcm44"}
+	s := startBackendScenario(t, q, args)
+	s.k.Grant(2500 * time.Millisecond)
+	s.await(t, "the first DoP fixture heard after the same-carrier PCM edge", heardAs("file:2", engine.Playing))
+	s.key(' ', 0)
+	s.await(t, "the DoP pause", hasActions("pause"))
+	s.k.Grant(31 * time.Second)
+	s.await(t, "the DoP pause's release at 30 s", hasActions("released"))
+	s.k.Revoke()
+	s.key(' ', 0)
+	s.await(t, "the resume's reopen", hasActions("resume", "reopened"))
+	s.key('n', time.Second)
+	s.await(t, "next onto the second DoP fixture", hasActions("next"))
+	s.key('p', time.Second)
+	s.await(t, "previous back onto the first", hasActions("previous"))
+	s.key('x', 0)
+	s.await(t, "Stop on a DoP fixture", hasActions("stop"))
+	s.key(' ', 0)
+	s.k.Free()
+	s.answer(t, "DAC DSD indicator confirmed")
+	s.answer(t, "L/R pitch and duration correct")
+	if code := s.result(t); code != 0 {
+		t.Fatalf("the DoP backend-lifecycle exited %d: %s", code, s.errout.String())
+	}
+	r, lifecycle := readScenarioReport(t, q)
+	if r.End != "complete" || r.NativeTuple != q.dopTuple() || r.NativeCompleted < 1 || len(r.Opened) == 0 {
+		t.Fatalf("the DoP backend-lifecycle report: End %s, tuple %+v, %d completed, %d DoP opens", r.End, r.NativeTuple, r.NativeCompleted, len(r.Opened))
+	}
+	dop.Lifecycle = lifecycle
+	q.record("approved.json", qualification.ApprovalPhrase, 2, []qualification.ApprovedPolicy{dop}, r.PassedEdges, nil)
+	if _, e := qualification.ReadApproval(q.dir, "approved.json", q.identity); e != nil {
+		t.Fatalf("the promoted DoP backend-lifecycle report does not read: %v", e)
+	}
+	s.k.CheckClosedEach(t)
+}
+
+// TestNativeIntegrationApprovedNativeDoPNative: dsd-test's
+// approved-native-dop-native plays the owner-approved native policy, then
+// the approved DoP policy, then the native one again, through the real
+// engine and backend: natural transitions both ways, next and previous
+// across the two transports, Stop, every fixture heard to its end, then the
+// DoP confirmations; and its report, promoted as the record's Transitions
+// with the two native↔DoP edges it executed (schema 2), passes ReadApproval.
+func TestNativeIntegrationApprovedNativeDoPNative(t *testing.T) {
+	q := newQualifyBox(t)
+	native, dop := q.approvedEndpoints()
+	q.bundle("contacts.json", q.nativeTuple(), q.dopTuple())
+	s := startBackendScenario(t, q, q.transitionArgs())
+	s.k.Grant(2500 * time.Millisecond)
+	s.await(t, "the DoP fixture heard after the native one", heardAs("file:2", engine.Playing))
+	s.key('n', time.Second)
+	s.await(t, "next from DoP onto native", hasActions("next"))
+	s.key('p', time.Second)
+	s.await(t, "previous from native onto DoP", hasActions("previous"))
+	s.key('x', 0)
+	s.await(t, "Stop", hasActions("stop"))
+	s.key(' ', 0)
+	s.k.Free()
+	s.answer(t, "DAC DSD indicator confirmed")
+	s.answer(t, "L/R pitch and duration correct")
+	if code := s.result(t); code != 0 {
+		t.Fatalf("approved-native-dop-native exited %d: %s", code, s.errout.String())
+	}
+	r, transition := readScenarioReport(t, q)
+	cross := []qualification.Edge{{From: qualification.NativeKey(native), To: qualification.NativeKey(dop)}, {From: qualification.NativeKey(dop), To: qualification.NativeKey(native)}}
+	for _, e := range cross {
+		if !slices.Contains(r.PassedEdges, e) {
+			t.Fatalf("the transition report did not execute %+v: %+v", e, r.PassedEdges)
+		}
+	}
+	wantEnds := []qualification.PolicyRef{{ID: native.ID, SHA256: qualification.Digest(native)}, {ID: dop.ID, SHA256: qualification.Digest(dop)}}
+	if r.End != "complete" || r.Scenario != qualification.TransitionScenario || !slices.Equal(r.Endpoints, wantEnds) {
+		t.Fatalf("the transition report: End %s, scenario %s, endpoints %+v", r.End, r.Scenario, r.Endpoints)
+	}
+	self := []qualification.Edge{{From: qualification.NativeKey(native), To: qualification.NativeKey(native)}, {From: qualification.NativeKey(dop), To: qualification.NativeKey(dop)}}
+	q.record("approved.json", qualification.ApprovalPhrase, 2, []qualification.ApprovedPolicy{native, dop}, append(self, cross...), []qualification.Evidence{transition})
+	if _, e := qualification.ReadApproval(q.dir, "approved.json", q.identity); e != nil {
+		t.Fatalf("the record promoted with the transition report does not read: %v", e)
+	}
+	s.k.CheckClosedEach(t)
 }

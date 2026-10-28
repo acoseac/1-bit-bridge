@@ -5,6 +5,7 @@ import (
 	"flag"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
+	"github.com/acoseac/1-bit-bridge/internal/player/format"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 	"github.com/acoseac/1-bit-bridge/internal/player/qualification"
 	"go/ast"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDocumentedNativeInvocations(t *testing.T) {
@@ -191,6 +193,54 @@ func TestLifecyclePCMActionDoesNotCount(t *testing.T) {
 	if v.actions["pause"] {
 		t.Fatal("PCM pause counted as native")
 	}
+}
+
+// TestLifecycleDoPEvidence: the backend-lifecycle evidence recorder is
+// transport-aware, so a DoP lifecycle qualifies its tuple: an installed
+// occurrence of the DoP plan is the qualified tuple's, Transport included
+// (native_flag); its edge keys are the backend's, dop/… (edge_key); and the
+// geometry it records as Opened, which DoP evidence checks open by open, is
+// the DoP sink's alone, a PCM edge's open recorded apart (opened_geometry).
+func TestLifecycleDoPEvidence(t *testing.T) {
+	tuple := qualification.Tuple{Transport: "dop", Format: "S32_LE", BitRate: 2822400, Pause: "kernel", TailMS: 1}
+	plan := &engine.NativePlan{Tuple: engine.NativeTuple{Transport: "dop", Format: "S32_LE", BitRate: 2822400}, PolicyID: "dop64", Pause: "kernel", Tail: time.Millisecond}
+	dop := alsapcm.Transport{Kind: format.KindDoP, RateHz: 176400, Channels: 2, Format: format.S32LE, ValidBits: 1, LogicalRate: 2822400, PackingVersion: 1}
+	pcm := alsapcm.Transport{Kind: format.KindPCM, RateHz: 176400, Channels: 2, Format: format.S32LE, ValidBits: 32}
+	evidence := func() *lifecycleEvidence {
+		return &lifecycleEvidence{tuple: tuple, entries: map[engine.OccurrenceID]int{}, lengths: map[engine.OccurrenceID]int64{}, complete: []bool{false, false}, actions: map[string]bool{}}
+	}
+	t.Run("native_flag", func(t *testing.T) {
+		v := evidence()
+		v.note(playback.Note{Kind: playback.NoteInstalled, Occurrence: 2, Plan: plan, Transport: dop})
+		if !v.native[2] {
+			t.Fatal("an installed occurrence of the DoP tuple was not counted as the tuple's: its Transport was left out of the comparison")
+		}
+	})
+	t.Run("edge_key", func(t *testing.T) {
+		v := evidence()
+		v.note(playback.Note{Kind: playback.NoteInstalled, Occurrence: 1, Transport: pcm})
+		v.note(playback.Note{Kind: playback.NoteInstalled, Occurrence: 2, Plan: plan, Transport: dop})
+		want := qualification.Edge{From: "pcm/S32_LE/176400/2/32/zero", To: "dop/S32_LE/2822400/2/msb/dop64/kernel/1/0/30"}
+		if len(v.edges) != 1 || v.edges[0] != want {
+			t.Fatalf("the PCM to DoP edge was recorded as %v, want %v, the backend's key", v.edges, want)
+		}
+	})
+	t.Run("opened_geometry", func(t *testing.T) {
+		v := evidence()
+		pcmParams := alsapcm.Params{Format: format.S32LE, Channels: 2, RateHz: 176400, RateNum: 176400, RateDen: 1, Msbits: 32, PeriodFrames: 8820, BufferFrames: 352800}
+		dopParams := alsapcm.Params{Format: format.S32LE, Channels: 2, RateHz: 176400, RateNum: 176400, RateDen: 1, Msbits: 32, PeriodFrames: 8820, BufferFrames: 35280}
+		v.note(playback.Note{Kind: playback.NoteOpened, Occurrence: 1, Transport: pcm, Params: pcmParams})
+		v.note(playback.Note{Kind: playback.NoteOpened, Occurrence: 2, Plan: plan, Transport: dop, Params: dopParams})
+		v.note(playback.Note{Kind: playback.NoteReopened, Occurrence: 2, Plan: plan, Transport: dop, Params: dopParams})
+		var r nativeReport
+		v.copy(&r)
+		if len(r.Opened) != 2 || r.Opened[0] != dopParams || r.Opened[1] != dopParams {
+			t.Fatalf("Opened %+v, want the DoP sink's two opens alone", r.Opened)
+		}
+		if len(r.EdgeOpened) != 1 || r.EdgeOpened[0] != pcmParams {
+			t.Fatalf("EdgeOpened %+v, want the PCM edge's open", r.EdgeOpened)
+		}
+	})
 }
 
 func TestLifecycleSettledActionsNeedNativeExecution(t *testing.T) {
