@@ -190,7 +190,8 @@ type Config struct {
 
 // Status is the surface at one look.
 type Status struct {
-	// Listening are the sockets bound, in the order they were bound.
+	// Listening are the sockets bound, in the order they were bound; one
+	// the listing retires is listed until its connections are closed too.
 	Listening []Listening
 	// Failed are the served addresses that could not be bound, each with its
 	// error, tried again at the next listing.
