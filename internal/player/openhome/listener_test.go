@@ -143,13 +143,50 @@ func refusedUnread(t *testing.T, c net.Conn) bool {
 
 // TestTheSurfaceBindsEachServedAddressAndFollowsThem: a socket for each
 // served address, on the configured port; an address that appears is
-// bound; one that goes away is closed, its connections with it; one whose
-// prefix changes, or whose interface does, is closed and bound again; a
-// listing that fails keeps what is bound.
+// bound; one that goes away is closed, its connections with it, before
+// Status stops listing it; one whose prefix changes, or whose interface
+// does, is closed and bound again; a listing that fails keeps what is
+// bound.
 func TestTheSurfaceBindsEachServedAddressAndFollowsThem(t *testing.T) {
 	box := lantest.New(t)
 	box.Set([]lan.Address{eth0, eth0b})
-	s := startOn(t, box, 7792, Limits{}, nil)
+	// The listing holds each socket it retires before its teardown begins
+	// (Seams.Retiring) until the test lets it go, so what Status says while
+	// one is held is what a reader of Status sees until the teardown runs.
+	// B557: Status dropped an address before its socket was torn down, and
+	// a kept-alive connection on it was answered after the surface said the
+	// address went away.
+	retired := make(chan lan.Address)
+	release := make(chan struct{})
+	done := make(chan struct{})
+	seams := &Seams{Retiring: func(a lan.Address) {
+		select {
+		case retired <- a:
+		case <-done:
+			return
+		}
+		select {
+		case <-release:
+		case <-done:
+		}
+	}}
+	s := startOn(t, box, 7792, Limits{}, seams)
+	// After startOn's, so it runs before the surface's Stop: no teardown is
+	// held past the test.
+	t.Cleanup(func() { close(done) })
+	whileHeld := func(a lan.Address, check func()) {
+		t.Helper()
+		select {
+		case got := <-retired:
+			if got != a {
+				t.Fatalf("the listing retired %+v, want %+v", got, a)
+			}
+		case <-within(t, 30*time.Second):
+			t.Fatalf("the listing never retired %+v", a)
+		}
+		check()
+		release <- struct{}{}
+	}
 	bound := listening(t, s, eth0, eth0b)
 	for _, want := range []string{"192.168.1.20:7792", "10.0.0.2:7792"} {
 		if !slices.Contains(box.Listens(), netip.MustParseAddrPort(want)) {
@@ -173,6 +210,18 @@ func TestTheSurfaceBindsEachServedAddressAndFollowsThem(t *testing.T) {
 	}
 	box.Set([]lan.Address{eth0, cable})
 	s.Rescan()
+	whileHeld(eth0b, func() {
+		// The socket and the connection are still there, so Status must
+		// still list the address the connection is answered on.
+		_, listed := boundOn(s.Status(), eth0b)
+		code, err := get(kept, br, bound[eth0b].String())
+		if !listed && err == nil {
+			t.Errorf("a connection on an address that went away was answered %d before its socket's teardown, Status no longer listing the address", code)
+		}
+		if listed && code != 200 {
+			t.Errorf("held before its teardown, a connection on the secondary address: %d, %v", code, err)
+		}
+	})
 	listening(t, s, eth0, cable)
 	if slices.Contains(box.Open(), bound[eth0b]) {
 		t.Errorf("the socket of an address that went away is open: %v", box.Open())
@@ -185,6 +234,11 @@ func TestTheSurfaceBindsEachServedAddressAndFollowsThem(t *testing.T) {
 	eth0wide := lantest.Address("192.168.1.20/16", "eth0", 2)
 	box.Set([]lan.Address{eth0wide, cable})
 	s.Rescan()
+	whileHeld(eth0, func() {
+		if _, listed := boundOn(s.Status(), eth0); !listed && slices.Contains(box.Open(), bound[eth0]) {
+			t.Errorf("the socket of an address whose prefix changed is open before its teardown, Status no longer listing the address: %v", box.Open())
+		}
+	})
 	now := listening(t, s, eth0wide, cable)
 	if slices.Contains(box.Open(), bound[eth0]) || !slices.Contains(box.Open(), now[eth0wide]) {
 		t.Errorf("after the prefix changed, the open sockets are %v (was %s, now %s)", box.Open(), bound[eth0], now[eth0wide])
@@ -193,6 +247,11 @@ func TestTheSurfaceBindsEachServedAddressAndFollowsThem(t *testing.T) {
 	eth0again := lantest.Address("192.168.1.20/16", "eth0", 9)
 	box.Set([]lan.Address{eth0again, cable})
 	s.Rescan()
+	whileHeld(eth0wide, func() {
+		if _, listed := boundOn(s.Status(), eth0wide); !listed && slices.Contains(box.Open(), now[eth0wide]) {
+			t.Errorf("the socket of the interface's old index is open before its teardown, Status no longer listing the address: %v", box.Open())
+		}
+	})
 	again := listening(t, s, eth0again, cable)
 	if slices.Contains(box.Open(), now[eth0wide]) {
 		t.Errorf("the socket of the interface's old index is open: %v", box.Open())

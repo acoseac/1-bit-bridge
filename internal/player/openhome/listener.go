@@ -143,6 +143,10 @@ type Seams struct {
 	// Forcing runs once Shutdown's grace has run out, before Stop closes
 	// the connections still open.
 	Forcing func()
+	// Retiring runs on the listing's goroutine for each socket a listing
+	// retires (its address went away, changed its prefix or interface, or
+	// is no longer served), before the socket's teardown begins (B557).
+	Retiring func(lan.Address)
 }
 
 // Config is the surface's.
@@ -262,7 +266,10 @@ type Surface struct {
 	readyOnce  sync.Once
 }
 
-// socket is one bound address.
+// socket is one bound address. ended is a Serve that returned on its own
+// or in the stop, which Status no longer lists; retiring is a socket the
+// listing is closing, which Status lists until the listing drops it, its
+// connections closed too.
 type socket struct {
 	key      lan.Address
 	srv      *http.Server
@@ -278,9 +285,17 @@ type socket struct {
 // only the listeners Serve has begun to track: one whose Serve goroutine
 // has not run yet would stay open until it did.
 func (k *socket) close() {
-	k.retiring.Store(true)
 	_ = k.ln.Close()
 	_ = k.srv.Close()
+}
+
+// retire closes the socket of an address the listing no longer serves,
+// marked retiring first, so its Serve goroutine, which returns before
+// srv.Close has closed the connections, neither marks it ended nor takes
+// its end for a listener that died (B557).
+func (k *socket) retire() {
+	k.retiring.Store(true)
+	k.close()
 }
 
 // Start starts the surface: its loop binds every served address at once,
@@ -402,8 +417,9 @@ func (s *Surface) loop() {
 
 // reconcile lists the interfaces once and follows the listing: the
 // admission snapshot first, then each socket whose address went away,
-// changed its prefix or interface, or stopped being eligible closed, then
-// each new address bound. A listing that fails keeps everything as it was.
+// changed its prefix or interface, or stopped being eligible closed, its
+// connections with it, and only then dropped from Status, then each new
+// address bound. A listing that fails keeps everything as it was.
 func (s *Surface) reconcile() {
 	if s.ctx.Err() != nil {
 		return
@@ -464,17 +480,26 @@ func (s *Surface) reconcile() {
 		s.syncDiscovery(listening, inv)
 	}
 	s.mu.Lock()
-	if s.stopped {
-		s.mu.Unlock()
+	stopped := s.stopped
+	s.mu.Unlock()
+	if stopped {
 		return
 	}
-	s.sockets = kept
-	s.mu.Unlock()
+	// Torn down before Status drops it, so an address Status no longer
+	// lists answers nothing: dropped first, a kept-alive connection on it
+	// was answered after Status said it went away, since srv.Close closes
+	// the connections only once the socket's Serve has returned (B557).
 	for _, k := range retire {
-		k.close()
+		if s.cfg.Seams != nil && s.cfg.Seams.Retiring != nil {
+			s.cfg.Seams.Retiring(k.key)
+		}
+		k.retire()
 		s.log.Info("player: the OpenHome surface closed an address that went away, changed or is no longer served",
 			"address", k.bound.String(), "interface", k.key.Interface)
 	}
+	s.mu.Lock()
+	s.sockets = kept
+	s.mu.Unlock()
 	for _, a := range bind {
 		if s.ctx.Err() != nil {
 			break
@@ -550,8 +575,13 @@ func (s *Surface) bind(a lan.Address) {
 	go func() {
 		defer s.serving.Done()
 		_ = srv.Serve(admit)
+		if k.retiring.Load() {
+			// The listing drops it from Status once its connections are
+			// closed too (retire).
+			return
+		}
 		k.ended.Store(true)
-		if !k.retiring.Load() && s.ctx.Err() == nil {
+		if s.ctx.Err() == nil {
 			if s.discovery != nil {
 				s.discovery.invalidate()
 			}
