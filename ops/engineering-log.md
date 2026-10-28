@@ -65497,7 +65497,7 @@ that expects nothing there or a number only written into a config; none hands
 the number to a serve. A parallel bind of the same number in between would
 make the check see a listener. They were listed, not changed:
 `closedLoopbackPort` (cli_config_precedence_test.go:19) and `closedAdminAddr`
-(restore_lock_test.go:76) behind every `seedRestorableInstall(t,
+(restore_lock_test.go:75) behind every `seedRestorableInstall(t,
 closedAdminAddr(t))` and `writeInstallAt`, whose restore and clear-missing
 probes expect nothing to answer; `freeLoopbackPort`
 (serve_config_path_test.go:380) behind the init and doctor tests, whose
