@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
@@ -43,7 +44,9 @@ func ReplaceDurable(root, path, aside string, data []byte, tmpPrefix string) err
 		return err
 	}
 	switch base := filepath.Base(aside); {
-	case NamesDirectory(aside), filepath.Clean(filepath.Dir(aside)) != filepath.Clean(filepath.Dir(path)), base == filepath.Base(path):
+	// EqualFold, not ==: on a case-insensitive filesystem (APFS's default,
+	// NTFS) a name differing only in case is the entry itself.
+	case NamesDirectory(aside), filepath.Clean(filepath.Dir(aside)) != filepath.Clean(filepath.Dir(path)), strings.EqualFold(base, filepath.Base(path)):
 		return fmt.Errorf("%w: %s is not a name beside %s", ErrNotUnderRoot, aside, path)
 	}
 	asidePath := filepath.Join(p.dir(), filepath.Base(aside))

@@ -340,6 +340,14 @@ func TestReplaceDurable_RefusesBeforeItStages(t *testing.T) {
 			obstruction(t, filepath.Join(root, "seal.json"), "directory_with_a_file")
 			return filepath.Join(root, "seal.json"), filepath.Join(root, "seal.json")
 		}, ErrNotUnderRoot},
+		{"aside_differing_only_in_case", func(t *testing.T, root string) (string, string) {
+			// On a case-insensitive filesystem (APFS's default, NTFS) SEAL.JSON
+			// names the entry itself: the first rename would be a case-only
+			// rename in place, and the second could not land beside it (Argon
+			// on B539).
+			obstruction(t, filepath.Join(root, "seal.json"), "directory_with_a_file")
+			return filepath.Join(root, "seal.json"), filepath.Join(root, "SEAL.JSON")
+		}, ErrNotUnderRoot},
 		{"aside_naming_a_directory", func(t *testing.T, root string) (string, string) {
 			obstruction(t, filepath.Join(root, "seal.json"), "directory_with_a_file")
 			return filepath.Join(root, "seal.json"), filepath.Join(root, "seal.json.aside") + string(filepath.Separator)
