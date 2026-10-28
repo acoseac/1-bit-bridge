@@ -65463,6 +65463,92 @@ socket permissions. Vet passes for macOS, Linux and Windows. The new rule exceed
 player.md's byte budget, so the existing backend-test ordering explanation moved
 verbatim to History-rules-player.md with its binding summary retained.
 
+## 2026-10-28 — B470 2d.1 provisional DoP: the partial implementation verified
+
+Base 94725d55 (#1356). The branch began as one unverified work-in-progress commit
+from a coding agent that stopped at its usage limit; nothing in it was kept
+without being checked. Its S32_LE packer (`00 b a marker`, bit 7 earliest, one
+05/FA marker per stereo frame), its literal vector and its pattern hash (recomputed
+here from `pattern.bin` with an oracle written from the DoP definition and MPD's
+Dop.cxx: 53,152 bytes, the same SHA-256), the writer-owned phase advanced by the
+frames Device.Write accepted, the 24..32 significant-bit and SW-silence checks,
+receipt v3, report v2, their readers and the CLI acknowledgements all held.
+
+What did not: the phase tests checked markers at boundaries on even frame indexes.
+Single-point mutations that reset the phase at a kernel resume or at pause
+silence, or dropped the carry at an occurrence join, passed every leaf; a restart
+at each write escaped the tail leaf; the three silence leaves were one test. Each
+`TestDoPPhase` leaf now puts its boundary on an odd index (a 1001-frame period, a
+7007-frame buffer, an odd ring, odd accepted prefixes) and compares every byte the
+fake kernel was given with a bit-level oracle; the silence leaves check one
+property each; `TestDoPBitTransparent`, `TestDoPUnderrun` and
+`TestDoPTransportIdentity/policy` are new, and the engine's DoP bit chains and the
+retiring test compare the DAC's bytes too. The brief's reopen control removed the
+only phase reset, so a sink's first run began at 0x00, which the packer refuses:
+every leaf failed through that refusal, one control run taking 362 s, and none
+showed the reopen. The run-start phase is now also set at construction. DSD512,
+which the decoders take, reached the locator as a device that could not be
+opened; admission refuses it as `rate_not_supported` (`TestDoPSourceRefusals`,
+red on the WIP). `--transport` other than native or dop is refused by name.
+
+The logged retiring red (`selected=4099 count=1`) was its fixture: 31-bit tracks,
+copied from the native test where a 32-bit word holds occurrence 1 and occurrence
+2's first bit, fill a 16-bit DoP word with occurrence 1 alone. Reproduced with the
+31-bit fixture restored (count=1 under all four selectors); 15-bit tracks were
+already in the WIP, and the third occurrence's content is now held until the
+release begins, so no scheduling can put its bits in the parked write.
+
+Controls: 377 records, the 288 inherited from 2c.2, the partial work's 63 and 26
+new; each fails exactly its predicted leaves on the final tree, none passes,
+fails to build, panics or times out. The 2c.2 manifest itself was not reachable
+from this session; 276 inherited anchors match the base once and 12 moved with
+the version bump or the DoP code, with mutation semantics kept (`R7Q-guarded-paths`
+again leaves the DoP paths guarded). Two controls passed until their tests were
+isolated: `D-experiment-context` (its fixture also failed the report-geometry
+environment check) and `D-transport-flag` (the format refusal now names
+--transport). The brief's literal `D-R14-indicator` bypass is masked by the
+receipt's own validation, and its literal zero-frame mutation does not compile;
+both controls use the earlier agent's single-point forms. The control runner
+generates the overlay after each mutation: the overlay copies the two tagged
+integration files, so a copy taken first hid a mutation of either.
+
+Gates on 90e8adaa: gofmt clean, `git diff --check` clean, vet for darwin, linux and
+windows across ./..., compile-only test builds for linux/amd64 and windows/amd64
+with CGO off, the race suite over ./... including ./scripts/..., both overlay
+integration steps exactly as gate.yml runs them, `make build-all`, the linux
+amd64/arm64 cross-builds, the qualification-version check from 94725d55 and the
+licence generation, identical to the base's. On this Mac
+scripts/third-party-licenses fails the same way on the untouched base: Homebrew's
+GOROOT holds no LICENSE and the go env sets `-mod=readonly`; with a symlink GOROOT
+holding the licence and default GOFLAGS it passes. Linux runtime, the ALSA ABI
+check and owner hardware qualification remain pending; no audio device was opened.
+
+### Review round 1 (#1357)
+
+- **CodeRabbit, `internal/player/qualification/dop_test.go`**: `TestDoPEvidenceValidation`
+  and `TestDoPReportGeometry` ignored the errors of `json.Unmarshal` and of the
+  per-case `os.WriteFile`, then bound the evidence hash to the bytes they meant to
+  write. Verified on f9ccb169's test: with that write skipped, all nine geometry
+  leaves passed on ReadApproval's `evidence hash mismatch`. `rewriteReport` now fails
+  the test at any step (the fixture uses it too), and every case of the two tests and
+  of `TestDoPExperiments` asserts its own refusal by its text (`refusedFor`); the
+  same stale binding fails all nine new leaves, each naming the refusal it got.
+- **CodeRabbit, the runbook**: the round 3 rules said Contact.SchemaVersion remains 2
+  with no transport, where `Contact.Validate` requires 3 for a DoP tuple. Corrected;
+  the DoP section's line (DoP contacts 3, DoP reports 2, native contacts 2) was right.
+- **SonarCloud, 9.1% duplication on new code** (3% allowed): the DoP tests repeated
+  their native twins (`TinyThroughEngine`, `MixedPolicy`, the retiring and
+  transition engines' boot, `TestNativeReleaseEscalation`, the production refusal's
+  engine). Each twin now runs a shared helper and states only what differs; no leaf
+  was renamed and no assertion changed. Estimated locally with Sonar's CPD for Go
+  reimplemented (go/scanner tokens, comments and inserted semicolons dropped, string
+  literals as one token, nothing before the first declaration, ten-token-line
+  blocks, clones of at least 100 tokens): 271 duplicated of 2,962 new lines on
+  6450a3e0, Sonar's figure exactly, and none after; at 8 lines and 70 tokens, 64
+  (2.2%). The production refusal's drain moved into `playOneOnEngine`, so the
+  control `R2-drain-owner` was re-anchored to its `drainLoopOnCleanup(t, cancel,
+  done, what)`; all 377 controls, re-run on 975d29e9, fail exactly their leaves.
+
 ## 2026-10-28 — B562 and B563: four test-reliability defects
 
 Backlog B562 (a CI flake) and B563 (three follow-ups B470 2d.1's verification

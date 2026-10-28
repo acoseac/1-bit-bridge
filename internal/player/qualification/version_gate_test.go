@@ -105,3 +105,27 @@ func TestQualificationVersionGate(t *testing.T) {
 		})
 	}
 }
+
+func TestQualificationDoPGuardedPaths(t *testing.T) {
+	for _, path := range []string{"internal/player/format/dop_pack.go", "internal/player/qualification/dop.go"} {
+		t.Run(path, func(t *testing.T) {
+			dir := t.TempDir()
+			if e := os.MkdirAll(filepath.Join(dir, ".git", "refs", "heads"), 0755); e != nil {
+				t.Fatal(e)
+			}
+			if e := os.WriteFile(filepath.Join(dir, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0644); e != nil {
+				t.Fatal(e)
+			}
+			files := map[string]string{"internal/player/qualification/version.go": "const qualificationVersion = 13\n", path: "base"}
+			base := gitCommit(t, dir, files)
+			files[path] = "changed"
+			head := gitCommit(t, dir, files)
+			if e := os.WriteFile(filepath.Join(dir, ".git", "refs", "heads", "main"), []byte(head+"\n"), 0644); e != nil {
+				t.Fatal(e)
+			}
+			if e := CheckVersion(dir, base, head); e == nil {
+				t.Fatal("new DoP path escaped qualification gate")
+			}
+		})
+	}
+}

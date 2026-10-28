@@ -531,6 +531,9 @@ func (d *Device) setSW() error {
 	if err := ioctlOn(d, ioctlSWParams, &sw); err != nil {
 		return d.kernelError("sw_params", err)
 	}
+	if d.native && p.Format == format.S32LE && (sw.silenceThreshold != 0 || sw.silenceSize != 0 || sw.stopThreshold != uint64(p.BufferFrames)) {
+		return d.refuse("sw_params", ReasonBadConfig, "DoP software silence or stop threshold changed")
+	}
 	p.StartThreshold, p.StopThreshold, p.AvailMin = int(sw.startThreshold), int(sw.stopThreshold), int(sw.availMin)
 	return nil
 }
@@ -587,7 +590,7 @@ func (d *Device) Write(ctx context.Context, frames []byte) (int, error) {
 		return 0, d.closedError("write")
 	}
 	fb := d.params.FrameBytes()
-	if d.native {
+	if d.native && d.params.Format != format.S32LE {
 		fb = d.params.NativeFrameBytes()
 	}
 	if len(frames)%fb != 0 {

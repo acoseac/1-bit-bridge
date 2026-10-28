@@ -9,8 +9,9 @@ import (
 
 // NativeTuple identifies a native carrier without requiring ALSA in the engine.
 type NativeTuple struct {
-	Format  string
-	BitRate int
+	Transport string
+	Format    string
+	BitRate   int
 }
 
 // TransitionEdge is an admitted transport boundary, supplied with the plan.
