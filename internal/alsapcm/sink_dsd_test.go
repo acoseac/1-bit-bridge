@@ -283,6 +283,10 @@ func testReleaseEscalation(t *testing.T, k *fakeKernel, cfg DSDConfig, frames ui
 		t.Errorf("the escalation did not cancel the held drain within the watchdog (%v)", *watchdog)
 		k.advanceNow(2 * time.Second)
 	}
+	// The second wait gets its own watchdog: a timer that fired above
+	// delivers nothing again, so without the reset a release that never
+	// answered after a fired first wait would hang the test.
+	hang.Reset(*watchdog)
 	select {
 	case e = <-immediate:
 	case <-hang.C:

@@ -403,6 +403,7 @@ func toolchainNotices(root string) ([]notice, error) {
 // install receipt says homebrew/core installed Go version there; otherwise
 // it says why root is no such keg.
 func homebrewKeg(root, version string) (string, error) {
+	root = filepath.Clean(root) // a trailing slash would make Dir return libexec itself
 	if filepath.Base(root) != "libexec" {
 		return "", errors.New("GOROOT is not a Homebrew keg's libexec")
 	}

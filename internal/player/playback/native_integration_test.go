@@ -944,6 +944,9 @@ func nativeLateWriter(t *testing.T, ctx context.Context, b *Backend, polled <-ch
 		t.Fatal("the writer never waited")
 	}
 	s := b.known(1)
+	if s == nil {
+		t.Fatal("the backend holds no session 1 for the late writer")
+	}
 	s.mu.Lock()
 	sink := s.cur.native
 	s.mu.Unlock()
