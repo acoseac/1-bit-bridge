@@ -66031,18 +66031,47 @@ still fails the test.
 passes (`go test -race ./internal/player/engine/`, 19.8 s).
 
 **Stress** on orion (darwin arm64, 12 cores, macOS 27.0.1, go1.27.3,
-`-race`), each run through the build slot with the tree clean at 574a6651;
-"hogs" are twelve `yes` processes, one per core, killed after each run. The
-pre-fix runs build the same tree with the red commit's `fakebackend_test.go`
-and `harness_test.go` swapped in by `go test -overlay`, the working tree never
-changed for them.
+`-race`), each run through the build slot with the tree clean at 574a6651,
+or at the record's commit for the 5,000-run rows, whose engine code and tests
+are 574a6651's; "hogs" are twelve `yes` processes, one per core, killed after
+each run. The pre-fix runs build the same tree with the red commit's
+`fakebackend_test.go` and `harness_test.go` swapped in by `go test -overlay`,
+the working tree never changed for them.
 
 | run | pre-fix harness | fix (574a6651) |
 |---|---|---|
 | `TestTheSelectionMovesAtOnceOnACommand/delete` ×500, no hogs | 0 of 500 failed | 0 of 500 |
 | the same ×500, hogs | **1 of 500 failed**, with the CI line | 0 of 500 |
+| the same ×5,000, hogs | 0 of 5,000 | 0 of 5,000 |
 | `TestTheSelectionMovesAtOnceOnACommand` (its four rows) and the new test ×500, no hogs | | 0 of 500 each |
 | the same ×500, hogs | | 0 of 500 each |
+
+Beside the hogs the pre-fix harness failed 1 run of 5,500 in all, so the
+stress runs cannot tell the fix from it: the deterministic test and its
+control are the proof, and the stress runs show the fix adds no failure of
+its own.
+
+**Audit.** A copy of the fixed fake, swapped in by overlay, logs each Start
+that reaches it after the first `close`, where the old check read the
+sessions, and flags its session when another of its calls came first. Over
+the whole engine package, five passes without the hogs and five beside them,
+the only test it named was `TestTheContractCheckWaitsForAStartStillOnItsWay`,
+once a pass, as designed: no other test reached the window in those runs.
+
+**The whole package beside the hogs, at HEAD** (×3): the first pass failed,
+not on B576's check. `TestPCMLookaheadHasNoNativeBudget` (#1356) panicked on
+a nil `next` at native_round2_test.go:67: the session started with repeat
+off, so its first occurrence's first Prepare names the end (`Prepare(first,
+nil)`, from `startDone`'s `reconcile`), and the Prepare that `SetRepeat(true)`
+causes runs on a goroutine of its own; `s.prepared(first, 1)` returns at the
+first Prepare it sees, the end's while the second has not reached the fake.
+It is not this branch's: native_round2_test.go and the engine's code are the
+same at d8b6897c, and the base's exact test code (its three engine test files
+by overlay) fails the same way beside the hogs, run alone with `-count=2000`
+(at run 153, HEAD at run 26); the base's whole package passed three passes of
+three there. Waiting for that occurrence's second Prepare (`prepared(first,
+2)`, then 1) passed 2,000 runs of 2,000 beside the hogs. Not changed here:
+reported for the backlog.
 
 **Negative controls**, on the committed tree:
 - only the fix reverted (574a6651's two files checked out from cd79aa24, +2
@@ -66075,4 +66104,12 @@ qualificationVersion 18: `internal/player/engine/` is a guarded prefix that
 counts test files too (`scripts/qualification-version -base d8b6897c -head
 HEAD` refused this branch's tests at 16 → 16), and main took 17 in #1361 after
 this branch was cut, so the branch goes to 18, with the runbook's five current
-references and a note of what 18 covers.
+references and a note of what 18 covers. With the runbook's tags,
+`scripts/qualification-version` says OK from d8b6897c and from main.
+
+**Gates**, at the record's commit with the tree clean: the pinned gofmt lists
+none of the changed Go files; `git diff --check d8b6897c HEAD` is empty;
+`make vet` passes; `go test -race -p 4 -count=1 ./internal/player/...` passes
+(the engine package in 13.7 s); `TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` in
+`cmd/bridge` pass; `make docs-check` passes.
