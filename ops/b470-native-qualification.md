@@ -1,6 +1,6 @@
 # B470 native qualification — owner approval and provisional evidence
 
-QualificationVersion is **14**. All older evidence must be rerun. The harness never
+QualificationVersion is **15**. All older evidence must be rerun. The harness never
 creates approval. Production native DSD requires a fresh matching approved record;
 DoP S32_LE auditions are provisional and require both acknowledgements; production DoP remains disabled. Real-ref and Linux hardware gates remain reviewer/owner work.
 
@@ -168,7 +168,7 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-Historical round 3 used qualificationVersion 4; current version is **14**. A native contact's
+Historical round 3 used qualificationVersion 4; current version is **15**. A native contact's
 Contact.SchemaVersion remains **2**; a DoP contact's is **3**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
@@ -256,7 +256,7 @@ still resolve inside it). `dsdMode: native` or `auto` enables only approved nati
 
 The Go contracts are `qualification.Approval`, `ApprovalBody`, `ApprovedPolicy`, `Edge`
 and `Evidence` in `internal/player/qualification/approval.go`. JSON uses those exact
-exported field names. SchemaVersion=1; QualificationVersion=14; Revision is the owner's
+exported field names. SchemaVersion=1; QualificationVersion=15; Revision is the owner's
 revision; Identity is the observed VID/ProductID/manufacturer/product/bcdDevice,
 anchored controller/port, interface, device and subdevice. No serial or card number is
 persistent identity. Unchanged descriptors may retain approval after replug/restart;
@@ -303,7 +303,7 @@ At least one native fixture must finish with measured playback of that tuple.
 NativeTuple and NativeCompleted record that execution; PCM-only lists or completion
 cannot qualify it. LifecycleActions count observed native outcomes: pause/resume,
 release/reopen, navigation between native occurrences, Stop, and natural completion.
-An admitted command alone is insufficient. Version 14 invalidates older evidence.
+An admitted command alone is insufficient. Version 15 invalidates older evidence.
 List all candidate directional edges explicitly. No command generates that record.
 
 ```sh
@@ -342,7 +342,7 @@ or evidence names resolving to the state directory itself before any ancestor
 walk. Native monitoring remains fail-closed without a grace period. The overlay
 generator requires both integration suites before publishing its overlay.
 Guarded API, config, extractor, output-play and approval paths changed; rerun
-qualification with version 14. ExtractorVersion 30 retains the first parsed DFF
+qualification with version 15. ExtractorVersion 30 retains the first parsed DFF
 PROP's known format facts when a later PROP makes compression unsupported.
 
 Version 13 also covers the deterministic PCM trace capture test. It changes no
@@ -429,8 +429,9 @@ BASE=$(git merge-base origin/main HEAD)
 go run -tags ts_omit_webclient,ts_omit_debugeventbus ./scripts/qualification-version -base "$BASE" -head HEAD
 ```
 
-Version 14 covers backlog B563's test changes: TestNativeIntegrationRetiringThroughEngine
-holds its third occurrence until the release and compares the DAC's bytes,
-TestNativeReleaseEscalation waits on the escalation's seam rather than a second
-of wall time, and the fake kernel parks a poll (ParkNextPoll). They change no
-playback behavior either.
+Version 15 covers backlog B563's test changes, merged over 2d.1's version 14:
+the native and DoP retiring tests run one helper, testRetiring, that holds the
+third occurrence until the release, parks the writer's first wait (ParkNextPoll,
+nativeLateWriter) and compares every byte the DAC was given; and
+TestNativeReleaseEscalation and TestDoPReleaseEscalation wait on the escalation's
+seam rather than a second of wall time. They change no playback behavior either.
