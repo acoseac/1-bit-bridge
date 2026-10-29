@@ -66232,3 +66232,145 @@ none of the changed Go files; `git diff --check d8b6897c HEAD` is empty;
 (the engine package in 13.7 s); `TestEveryCitedTestNameExists`,
 `TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` in
 `cmd/bridge` pass; `make docs-check` passes.
+
+## 2026-10-29 — B579: the PCM lookahead test waits for the Prepare that names the successor
+
+Backlog B579: `TestPCMLookaheadHasNoNativeBudget` (#1356) panicked in CI's
+race leg on #1362 (run 40773254059), "invalid memory address or nil pointer
+dereference" at native_round2_test.go:67, `s.submitted(next.ID)`; the B576
+worker had reproduced it on orion beside twelve CPU hogs, at run 26 of
+`-count=2000` on 92b27901 and at run 153 on d8b6897c's test code.
+
+**The cause is the test's read.** The test's one entry plays with repeat
+off. PlayID answers once the Start's answer was taken (`settleWaiters` waits
+while the session starts, owner.go:620-645), and that step names what follows
+the first occurrence, which is nothing: `Prepare(first, nil)`, the end
+(`startDone` → `reconcile` → `prepare`, transport.go:1191-1201, 872-878,
+883-910). The test then turns repeat on (`setRepeat` → `reconcile`,
+edits.go:147-156), which names the successor in a second Prepare after the
+same occurrence: at once when the end's Prepare had been answered, or in the
+step that takes its answer while it was still under way (`reconcile` makes no
+call while `succCall` is set, transport.go:854-856; `callDone` → `reconcile`,
+1114-1145). Either way that Prepare runs on a goroutine of its own (`call`,
+1043-1068). The lookahead's first read, `s.prepared(first, 1)`, waited for one
+Prepare after the occurrence and returned the last one's successor: the end's
+nil, when the second had not reached the fake yet.
+
+**The engine cannot leave the backend with a stale end.** One Prepare or Cut
+of a session is under way at a time (`succCall`, transport.go:87-89 and
+836-837): `prepare` and `cut` set it (909, 920), `reconcile` makes no call
+while it is set (854-856), and `callDone` clears it in the step that takes the
+call's answer (1114-1117, 1147-1149), which the call's goroutine posts only
+once the backend has returned (1062-1066). So the backend has the end's
+Prepare back before the successor's begins: never the two at once, never the
+other way round. Nothing names the end after the successor: once handed off,
+the successor is the chain's tail, not yet submitted, and `reconcile` names
+nothing after such a tail (872-875); only a later edit or mode change that
+marks it unwanted makes another Prepare, from the queue as it is then
+(857-871). A call past its deadline releases its session (`callExpired`,
+1325-1331), so no Prepare runs beside an abandoned one in a current session.
+The backend takes a later Prepare after the same occurrence in place of the
+earlier one, as its contract says (backend.go:242-247; the end is recorded
+for nil, and cleared and the successor opened otherwise,
+playback/session.go:646-660); one that comes once the session plays out its
+last content is answered `ErrSessionEnding` (session.go:624-626), and the
+engine plays the successor in a session of its own after Finished
+(transport.go:1139-1143, 1426-1429). The engine is unchanged.
+
+One boundary remains, and it is not a nil successor: a Finished the engine
+takes before that `ErrSessionEnding` answer ends playback at the end of the
+queue (`onFinished` reads `noMore`, which only the answer sets,
+transport.go:1426-1431). The backend sends Finished only once the last content
+has drained (`drained`, playback/producer.go:476) and answers a Prepare at
+once from the moment it begins playing that content out (`ending`,
+producer.go:107), so the answer comes first unless repeat comes on after the
+queue has played out, when stopping at its end is right, or the call's
+goroutine is held for the whole drain. Not changed here.
+
+**Red first** (f7b4a2e3). Two test seams: `fakeBackend.beforePrepare` runs on
+a Prepare's goroutine before the fake records any of it, as B576's
+`beforeStart` does for a Start, and `fakeBackend.waiting` runs each time
+`waitFor` finds its condition false, before it waits. The test became two
+rows, the original ("as it comes") and a held row: its hook holds the first
+Prepare that names a successor, the one repeat coming on makes, and marks it
+parked; once the test sees it parked, after the repeat and the pause, it sets
+`waiting` to let it go, so it goes on only once the read has looked and is
+waiting, the latest a scheduler could leave it. The end's Prepare is at the
+fake by then, since the successor's is made only after the end's returned, and
+no gate stays closed (the fake's `close` opens the hold at a teardown). With
+the read unchanged, 20 processes of 20 (a panic ends its process) failed by
+name, `--- FAIL:
+TestPCMLookaheadHasNoNativeBudget/the_second_Prepare_held_until_the_read_waits`,
+each with CI's "panic: runtime error: invalid memory address or nil pointer
+dereference" at native_round2_test.go:110, the `s.submitted(next.ID)` there.
+
+**The fix** (125dda5c). The first read waits for a Prepare after the first
+occurrence that names a successor (`fakeSession.successor`, which returns the
+last such Prepare's successor and never nil), not for the first Prepare of
+any kind; each later occurrence has one Prepare and keeps `prepared(after,
+1)`. Not a count of two, the B576 worker's proposal: a count holds only while
+the end's Prepare comes first and the two never coalesce, which the test does
+not pin, where the one it wants is the Prepare that names a successor. The
+transition is kept, Play with repeat off, then repeat on, then the lookahead
+loop: repeat on before Play would make the first Prepare name the successor
+and skip the re-prepare under test. So is the assertion: eight successors
+handed off under a native limit of four, and no fault.
+
+**Green.** Both rows pass; the held row 100 runs of 100; the whole engine
+package passes (`go test -race ./internal/player/engine/`, 15.3 s).
+
+**Stress** on orion (darwin arm64, 12 cores, go1.27.3, `-race`), through the
+build slot, beside twelve `yes` hogs, one per core, killed after each run.
+Each runs a test binary built beforehand, started again after a panic with the
+runs still to go, so every panic of the 2,000 runs is counted. The base's
+binary was built at 444e67a4 with the tree clean, the fix's at 125dda5c.
+
+| `TestPCMLookaheadHasNoNativeBudget` ×2,000, hogs | failed | processes | wall |
+|---|---|---|---|
+| base (444e67a4) | **58 of 2,000** (2.9 %), each the nil dereference at native_round2_test.go:67 | 59 | 51 s |
+| fix (125dda5c), both rows in each run | 0 of 2,000 | 1 | 93 s |
+
+The 1-minute load average read 84 and 127 at the end of the two runs, against
+25 and 40 before the hogs: other workers' builds shared the host.
+
+**Negative control**, on the committed tree (125dda5c, status clean): only the
+fix reverted, the loop's hunk in native_round2_test.go put back (+2 −9;
+`successor` and the seams kept). Predicted: the held row red in 20 processes
+of 20 by name, with CI's nil dereference at the control file's
+`s.submitted(next.ID)`, line 113. Actual: 20 of 20, `--- FAIL:
+TestPCMLookaheadHasNoNativeBudget/the_second_Prepare_held_until_the_read_waits`,
+the panic at native_round2_test.go:113 each time. Restored with `git checkout
+HEAD --`: status clean, no diff against HEAD, the held row passing 20 of 20.
+
+**Near-clones**, reads of a Prepare right after a repeat or shuffle change in
+the engine's tests. None reads the first of two Prepares:
+- after repeat set before Play, so the session's first Prepare names the
+  successor at once and no end comes first:
+  `TestRepeatWithOneEntryGivesTwoOccurrences` (advance_test.go:92, :97),
+  `TestTheEndOfTheQueueWithRepeatOn` (:113), the "repeat off when it was the
+  wrap-around" rows of `TestAnEditBeforeSubmissionReplacesTheSuccessor`
+  (handoff_test.go:59) and `TestAnEditAfterSubmissionAsksForACut` (:118,
+  :123), and `TestOnePlayableAmongUnplayablePlaysWithoutSpinning`
+  (unplayable_test.go:96, `prepared(first, 3)`, with `preparesAfter` pinning
+  three);
+- right after a repeat change mid-session, the same two rows read
+  `prepared(first, 2)` (handoff_test.go:63, :126) once the first Prepare after
+  the occurrence was read before the change, so the count is exact, and :129
+  pins the calls since the change, "cut" then "prepare end";
+- a change that makes no call: "repeat off, as it was" (handoff_test.go:413,
+  pinned by `callsSince` being empty); repeat as a barrier with no read
+  (`TestNativeEarlyReleaseStopsTimer`); repeat on with no Prepare read, Next
+  waiting for session 2's Start (table_test.go:270);
+- shuffle makes no call: `SetShuffle(true)` is refused and `SetShuffle(false)`
+  answers without a `reconcile` (edits.go:158-165; queue_test.go:451-452).
+
+The other `prepared(…, 1)` reads in the package read the one Prepare after an
+occurrence of a queue no edit or mode change touched between its hand-off and
+the read. The only clear twin was the test itself.
+
+qualificationVersion 19: `internal/player/engine/` is a guarded prefix that
+counts test files too (`internal/player/qualification/version_gate.go:15`), so
+`scripts/qualification-version -base main -head 125dda5c` refused this
+branch's test changes at 18 → 18. The branch sets 19: `version.go`, the
+runbook's five current references, 2d.2's first owner step (version-19
+contacts), and a note of what 19 covers after B576's.
