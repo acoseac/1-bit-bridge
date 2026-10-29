@@ -48,6 +48,15 @@ type fakeBackend struct {
 	// the engine makes each call on a goroutine of its own, and a Release of
 	// the session can get there first (B576).
 	beforeStart func(req StartRequest)
+	// beforePrepare runs on a Prepare's goroutine before the fake records any
+	// of it, so a test can hold a Prepare the engine has made that has not
+	// reached the backend yet (B579).
+	beforePrepare func(id SessionID, after OccurrenceID, next *Occurrence)
+	// waiting runs each time waitFor finds its condition false, before it
+	// waits for the fake to change: a test that holds a call short of the
+	// fake until a reader waits for it, the latest a scheduler could leave
+	// it, lets it go there (B579).
+	waiting func()
 }
 
 // fakeSession is one session the engine started on a fakeBackend.
@@ -243,6 +252,12 @@ func (s *fakeSession) open() error {
 }
 
 func (b *fakeBackend) Prepare(ctx context.Context, id SessionID, after OccurrenceID, next *Occurrence) error {
+	b.mu.Lock()
+	before := b.beforePrepare
+	b.mu.Unlock()
+	if before != nil {
+		before(id, after, next)
+	}
 	s := b.session(id)
 	b.mu.Lock()
 	c := fakeCall{kind: "prepare", session: id, after: after}
@@ -412,17 +427,21 @@ func (b *fakeBackend) Discard(ctx context.Context) error {
 	return nil
 }
 
-// waitFor waits until cond, called with b.mu held, holds.
+// waitFor waits until cond, called with b.mu held, holds. Each time it does
+// not, the waiting hook runs, when one is set, before the wait.
 func (b *fakeBackend) waitFor(what string, cond func() bool) {
 	b.t.Helper()
 	timer := time.NewTimer(*watchdog)
 	defer timer.Stop()
 	for {
 		b.mu.Lock()
-		ok, ch := cond(), b.changed
+		ok, ch, waiting := cond(), b.changed, b.waiting
 		b.mu.Unlock()
 		if ok {
 			return
+		}
+		if waiting != nil {
+			waiting()
 		}
 		select {
 		case <-ch:
@@ -509,6 +528,26 @@ func (s *fakeSession) prepared(after OccurrenceID, n int) *Occurrence {
 		return k >= n
 	})
 	return last
+}
+
+// successor waits until s has had a Prepare after the occurrence after that
+// names a successor, and returns that successor, the last one's when several
+// do (B579). One that names the end can come first, as after an occurrence
+// handed off while repeat was off when repeat comes on, and a count of the
+// Prepares cannot tell whether the one that names the successor has arrived.
+func (s *fakeSession) successor(after OccurrenceID) *Occurrence {
+	s.b.t.Helper()
+	var next *Occurrence
+	s.b.waitFor(fmt.Sprintf("a successor named after occurrence %d in session %d", after, s.id), func() bool {
+		next = nil
+		for _, p := range s.prepares {
+			if p.after == after && p.next != nil {
+				next = p.next
+			}
+		}
+		return next != nil
+	})
+	return next
 }
 
 // preparesAfter is the Prepares s had after the occurrence after.

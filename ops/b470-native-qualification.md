@@ -608,6 +608,16 @@ the teardown at two new test seams (`fakeBackend.beforeStart`,
 `harness.joining`). It changes no playback behavior, no PCM or DSD path and no
 wire field.
 
+Version 19 covers backlog B579, test files under the guarded
+`internal/player/engine/` prefix: `TestPCMLookaheadHasNoNativeBudget`'s first
+lookahead read now waits for the Prepare that names the successor
+(`fakeSession.successor`), where it took the first Prepare after the
+occurrence, the end's, named while repeat was off, and panicked on its nil
+when the successor's had not reached the fake yet; a held row keeps that
+Prepare short of the fake until the read waits for it, at two new test seams
+(`fakeBackend.beforePrepare`, `fakeBackend.waiting`). It changes no playback
+behavior, no PCM or DSD path and no wire field.
+
 Version 20 covers backlog B510 (backlog B579, acoseac/1-bit-bridge#1363, takes
 19 and was not merged when this branch was cut), under the guarded
 `internal/alsa/` and `internal/player/binding/` prefixes: a sysfs reading says
