@@ -66333,6 +66333,17 @@ binary was built at 444e67a4 with the tree clean, the fix's at 125dda5c.
 The 1-minute load average read 84 and 127 at the end of the two runs, against
 25 and 40 before the hogs: other workers' builds shared the host.
 
+**Audit of the order.** A copy of the fixed test, swapped in by `go test
+-overlay` so the tree never changed, checks after the lookahead loop, before
+the barrier, that the Prepares after the first occurrence were exactly the
+end's, then the successor's: never one alone (the two coalesced) and never
+the successor's first (reordered). Its binary run as the stress runs are,
+beside the hogs, with the tree clean at f13fa8f4: 2,000 runs of 2,000 passed,
+both rows each, with no deviation, the host's 1-minute load average at 394
+before the hogs and 258 at the end. The same copy with the check inverted
+failed 5 runs of 5 of each row, each naming the record it saw, "[end
+occurrence 2]", so the check fires.
+
 **Negative control**, on the committed tree (125dda5c, status clean): only the
 fix reverted, the loop's hunk in native_round2_test.go put back (+2 −9;
 `successor` and the seams kept). Predicted: the held row red in 20 processes
@@ -66374,3 +66385,13 @@ counts test files too (`internal/player/qualification/version_gate.go:15`), so
 branch's test changes at 18 → 18. The branch sets 19: `version.go`, the
 runbook's five current references, 2d.2's first owner step (version-19
 contacts), and a note of what 19 covers after B576's.
+
+**Gates**, at f13fa8f4 with the tree clean, the test runs through the build
+slot: the pinned gofmt lists none of the changed Go files; `go vet
+./internal/player/...` passes; `go test -race -count=1
+./internal/player/engine/... ./internal/player/qualification/...` passes (the
+engine in 13.7 s, the qualification package in 5.3 s, its
+`TestQualificationRunbookVersion` among them); `TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` in
+`cmd/bridge` pass; `scripts/qualification-version -base main -head HEAD` says
+OK; `make docs-check` passes; `git diff --check main HEAD` is empty.
