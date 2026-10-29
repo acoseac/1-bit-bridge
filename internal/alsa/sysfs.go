@@ -722,7 +722,7 @@ func (t *sysfsTree) usb(snap *SysfsSnapshot) {
 		}
 		gen, err := t.gen(dir)
 		if err != nil {
-			if errors.As(err, new(fileError)) && unread(err) {
+			if !errors.As(err, new(fileError)) || unread(err) {
 				complete = false
 			}
 			snap.addProblem("%s", err)

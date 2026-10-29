@@ -131,6 +131,25 @@ func TestAUSBListingThatCannotBeReadWholeIsNoTopologyChange(t *testing.T) {
 	}
 }
 
+// TestARootHubWithAnUnknownSpeedIsNoTopologyChange: the bound controller's
+// only root hub has a speed that reads but is not a USB speed. Its omission
+// from the reading is identity_incomplete for a port binding, while a serial
+// binding on that same reading still resolves (B510).
+func TestARootHubWithAnUnknownSpeedIsNoTopologyChange(t *testing.T) {
+	root := pi5(t)
+	sysfstest.Apply(t, root, "unplug "+usb2+"\nfile "+usb1+"/speed 999\n")
+	inv := observe(t, root)
+	if contains(inv.Controllers, goBarAnchor) {
+		t.Fatalf("premise: the controller with an unknown root-hub speed is listed: %q", inv.Controllers)
+	}
+	says(t, "the reading's problems", strings.Join(inv.Problems, "; "), []string{"usb1/speed", "is not a USB speed"}, nil)
+	want(t, Resolve(bySerial(goBarSerial), inv), StateAvailable, 5)
+	r := Resolve(byPort(goBarPlace), inv)
+	want(t, r, StateIdentityIncomplete, -1)
+	says(t, "the reason", r.Reason, []string{goBarAnchor, "could not be read whole", "resolve again"},
+		[]string{"topology change", "rebind"})
+}
+
 // TestAControllerGoneFromAWholeUSBListingIsATopologyChange: a USB listing
 // read whole that does not name the bound controller is a controller that
 // is not on the box: binding_invalid, a topology change to rebind for, as

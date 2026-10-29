@@ -889,7 +889,7 @@ Its `id` is `bridge:` and the player's UUID, the one its OpenHome UDN carries; i
 | `binding_invalid` | the binding cannot be resolved as it stands (a port binding whose controller is gone, say) |
 | `identity_unsupported` | the cards' identities cannot be read at all |
 | `identity_transient` | the kernel is adding or removing a card the binding may name |
-| `identity_incomplete` | the listing of the cards was cut short |
+| `identity_incomplete` | the listing of the cards was cut short; or, under a port binding, the USB device listing could not be read whole and lacks the bound controller, or no card is readable at the bound port beside a card whose port path could not be read |
 | `output_unavailable` | its DAC is unavailable for a reason this table does not name |
 | `maintenance` | maintenance holds it |
 | `release_unconfirmed` | the release of its DAC was not confirmed in time, and it opens nothing until it is |

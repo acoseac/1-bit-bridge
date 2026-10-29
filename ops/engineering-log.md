@@ -66613,3 +66613,5 @@ are guarded prefixes. B579 (#1363) took 19 and was not on main when this
 branch was cut from 444e67a4 (it merged later, at 3ac55afa), so this branch
 goes from 18 to 20, with the runbook's five current references, its step 1,
 and a note of what 20 covers.
+
+**Round 2:** an uninterpretable root-hub speed leaves the USB listing incomplete (reader and Resolve regressions red before the fix, green after); PROTOCOL.md now names all three causes of `identity_incomplete`; the qualification note now distinguishes unchanged wire fields and schema from existing `reason` values that may differ.

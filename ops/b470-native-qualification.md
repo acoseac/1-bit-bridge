@@ -630,4 +630,5 @@ at another port: `device_ambiguous` beside the bound unit's card,
 refuses alike. It changes which binding state a port binding answers on such a
 reading (GET /v1/outputs' player element may carry `identity_incomplete` or
 `device_ambiguous` where it carried `device_missing` or `available`), and no
-playback path, PCM or DSD, and no wire field or word.
+playback path, PCM or DSD, and no wire field or schema; existing `reason`
+values may now differ as described.

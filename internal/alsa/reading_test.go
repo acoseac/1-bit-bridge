@@ -83,6 +83,8 @@ func TestSysfsSaysWhenItsReadingIsNotWhole(t *testing.T) {
 // it was read (a link to nothing, its speed file gone) are complete and not
 // partial; one with a USB device, not a root hub, that cannot be read is
 // complete and partial, since every controller is still listed (B510).
+// A root hub whose speed reads but is not a USB speed leaves the listing
+// incomplete without making the reading partial.
 func TestSysfsSaysWhetherItsUSBListingIsWhole(t *testing.T) {
 	for _, tc := range []struct {
 		name, step string
@@ -97,6 +99,7 @@ func TestSysfsSaysWhetherItsUSBListingIsWhole(t *testing.T) {
 		{"a listing cut at the cap", "", 5, false, true},
 		{"a root hub whose link leaves the tree", "link sys/bus/usb/devices/usb3 !../../../../outside\n", 0, false, true},
 		{"a root hub whose speed is not a file", "remove " + goBarHub + "/speed\ndir " + goBarHub + "/speed\n", 0, false, true},
+		{"a root hub whose speed is unknown", "file " + goBarHub + "/speed 999\n", 0, false, false},
 		{"a root hub gone as it was read", "link sys/bus/usb/devices/usb3 !gone\n", 0, true, false},
 		{"a root hub's speed gone as it was read", "remove " + goBarHub + "/speed\n", 0, true, false},
 		{"a USB device that cannot be read", "link sys/bus/usb/devices/1-1 !../../../../outside\n", 0, true, true},
