@@ -672,8 +672,8 @@ func cutAtTheCap(drop ...int) func(alsa.SysfsSnapshot) alsa.SysfsSnapshot {
 // cutDevicesAtTheCap is a sysfs reading whose USB device listing
 // (bus/usb/devices) was cut short at the reader's entry cap before the root
 // hubs of the controller anchor names, as Read returns one: that controller
-// and the devices on it left out, and the problem it adds. The card listing
-// stays whole.
+// and the devices on it left out, the problem it adds, and the reading and
+// its USB listing not whole. The card listing stays whole.
 func cutDevicesAtTheCap(anchor string) func(alsa.SysfsSnapshot) alsa.SysfsSnapshot {
 	return func(s alsa.SysfsSnapshot) alsa.SysfsSnapshot {
 		var controllers []string
@@ -688,7 +688,7 @@ func cutDevicesAtTheCap(anchor string) func(alsa.SysfsSnapshot) alsa.SysfsSnapsh
 				devices = append(devices, d)
 			}
 		}
-		s.Controllers, s.Devices = controllers, devices
+		s.Controllers, s.Devices, s.Partial, s.USBComplete = controllers, devices, true, false
 		s.Problems = append(s.Problems, "bus/usb/devices lists more than 1024 entries; the rest are not read")
 		return s
 	}
@@ -750,9 +750,7 @@ func TestTheCheckAfterOpenAgreesWithResolveOnEachReading(t *testing.T) {
 	byUnit := func(why string) [4]string { return [4]string{why, why, "", ""} }
 	every := func(s State) [4]State { return [4]State{s, s, s, s} }
 	available, ambiguous, missing, invalid := StateAvailable, StateDeviceAmbiguous, StateDeviceMissing, StateBindingInvalid
-	// second is card 6 on the GO bar's interface 2: a second card of its
-	// unit, which another driver made, so /proc/asound has no usbid for it.
-	second := "usbcard 6 " + goBar + "/1-1:1.2\nproccard 6 Other6 \"Synthetic DAC, second card\" driver=snd-synthetic pcm=0.0\n"
+	incomplete := StateIdentityIncomplete
 	for _, row := range []struct {
 		name string
 		// steps are laid out in turn on a new Pi 5 tree, and edit, when set,
@@ -809,17 +807,31 @@ func TestTheCheckAfterOpenAgreesWithResolveOnEachReading(t *testing.T) {
 		// port binding's controller must be among, and the devices it tells a
 		// hub in the bound port by. A card's own port path is read from its
 		// device's ancestors and not from the listing, so it still reads when
-		// the listing does not.
-		{name: "a USB device listing that cannot be read", resolves: [4]State{available, available, invalid, invalid},
-			steps: []string{"remove sys/bus/usb/devices\nfile sys/bus/usb/devices not a directory\n"}},
-		{name: "the root hubs of the GO bar's controller unreadable in the USB listing", resolves: [4]State{available, available, invalid, invalid},
+		// the listing does not. A listing that could not be read whole (not
+		// listed, a root hub not read, cut at the cap) lacks the controller in
+		// the reading alone, which is no topology change (B510); one whose
+		// root hubs went as they were read is the box as it is.
+		{name: "a USB device listing that cannot be read", resolves: [4]State{available, available, incomplete, incomplete},
+			steps: []string{usbUnlisted}, partial: true},
+		{name: "the root hubs of the GO bar's controller unreadable in the USB listing", resolves: [4]State{available, available, incomplete, incomplete},
+			steps: []string{rootHubsUnread}, partial: true},
+		{name: "the root hubs of the GO bar's controller gone from the USB listing as it was read", resolves: [4]State{available, available, invalid, invalid},
 			steps: []string{"link sys/bus/usb/devices/usb1 !gone\nlink sys/bus/usb/devices/usb2 !gone\n"}},
-		{name: "the USB listing cut short before the GO bar's controller", resolves: [4]State{available, available, invalid, invalid},
-			edit: cutDevicesAtTheCap(goBarAnchor)},
+		{name: "the USB listing cut short before the GO bar's controller", resolves: [4]State{available, available, incomplete, incomplete},
+			edit: cutDevicesAtTheCap(goBarAnchor), partial: true},
 		// Card 5's port path cannot be read when its root hub's speed cannot,
-		// while its controller is still listed through its other root hub.
-		{name: "card 5's port path unreadable", resolves: [4]State{available, available, missing, missing}, differs: byUnit(unitMoved),
+		// while its controller is still listed through its other root hub: no
+		// card is placed at the bound port, and card 5 may be the card there
+		// (B510).
+		{name: "card 5's port path unreadable", resolves: [4]State{available, available, incomplete, incomplete}, differs: byUnit(unitMoved),
 			steps: []string{"remove " + usb1 + "/speed\n"}},
+		// A card whose port path cannot be read is unknown, never elsewhere: one
+		// of the GO bar's model and serial may be a second card of its unit in
+		// the bound port, and one of another model cannot be (B510).
+		{name: "a second card of the unit whose port path cannot be read", resolves: [4]State{ambiguous, ambiguous, ambiguous, available},
+			differs: byUnit(unitChosen), steps: []string{second}, edit: portUnreadable(6)},
+		{name: "a card of another model at another port whose port path cannot be read", resolves: every(available),
+			steps: []string{plug(usb1+"/1-2", 7, "1234:0f02", "OTHER-UNIT-SERIAL-9")}, edit: portUnreadable(7)},
 		// Resolve reads a hub in the bound port only when no card is at it, to
 		// answer binding_invalid rather than device_missing, and the check
 		// refuses there too, since the opened card must be at the bound port.
@@ -940,10 +952,12 @@ func TestACutListingResolvesToNoCardAndBindsNone(t *testing.T) {
 // TestTheCheckAfterOpenNeedsTheBoundControllerAndStream: under a port
 // binding the check after open asks what Resolve asks of the reading before
 // it chooses a card, and refuses with a reason of its own where Resolve
-// answers binding_invalid or endpoint_missing. A USB listing that does not
-// name the bound controller is no port to choose a card at, whatever the
-// opened card's own port path says, and the refusal names the controller
-// and why the listing lacks it; a card /proc/asound lists without the bound
+// answers binding_invalid, identity_incomplete or endpoint_missing. A USB
+// listing that does not name the bound controller is no port to choose a
+// card at, whatever the opened card's own port path says, and the refusal
+// names the controller and why the listing lacks it: a listing that could
+// not be read is Resolve's identity_incomplete (B510), and the check's words
+// were never a topology change; a card /proc/asound lists without the bound
 // playback stream is no card the binding chooses.
 func TestTheCheckAfterOpenNeedsTheBoundControllerAndStream(t *testing.T) {
 	base := observe(t, pi5(t))
@@ -956,8 +970,8 @@ func TestTheCheckAfterOpenNeedsTheBoundControllerAndStream(t *testing.T) {
 			resolves   State
 			says       []string
 		}{
-			{"a USB listing that cannot be read", "remove sys/bus/usb/devices\nfile sys/bus/usb/devices not a directory\n",
-				StateBindingInvalid, []string{"the controller the port binding names, " + goBarAnchor + ", is not among the USB controllers",
+			{"a USB listing that cannot be read", usbUnlisted,
+				StateIdentityIncomplete, []string{"the controller the port binding names, " + goBarAnchor + ", is not among the USB controllers",
 					"bus/usb/devices: not a directory", "bound port " + goBarPlace}},
 			{"card 5 without the bound playback stream", "remove proc/asound/card5/pcm0p\n",
 				StateEndpointMissing, []string{"card 5 has no playback stream at device 0 subdevice 0", "bound port " + goBarPlace}},

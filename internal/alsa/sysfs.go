@@ -169,6 +169,15 @@ type SysfsSnapshot struct {
 	// short may leave a card out, which only a problem would otherwise say.
 	CardsComplete bool       `json:"cardsComplete"`
 	Cards         []Identity `json:"cards"`
+	// USBComplete says Controllers holds every controller with a root hub
+	// that bus/usb/devices lists: the listing was read, not cut at the entry
+	// cap, and every root hub in it was read (one that went as it was read
+	// is not there to read). A tree with no bus/usb/devices, a box without
+	// USB, has no controller for it to list, and is complete; a reading that
+	// never came to the listing (no class/sound, or a stop before it) is
+	// not. A controller a reading that is not complete lacks may be on the
+	// box, missing from the reading alone (B510).
+	USBComplete bool `json:"usbComplete"`
 	// Controllers are the anchors of every USB controller with a root hub,
 	// sorted, each once.
 	Controllers []string    `json:"controllers"`
@@ -657,13 +666,18 @@ func (t *sysfsTree) anchor(dir string) ([]string, error) {
 // usb reads the root hubs and the devices bus/usb/devices lists into snap:
 // the controllers' anchors and each device's place. A listing it could not
 // read whole, or a root hub it could not read, makes the reading Partial:
-// a controller missing from it would read as a controller gone. A root hub
-// or a device that went while it was read is simply not there, and one
-// under a controller the port grammar does not name is the box as it is.
+// a controller missing from it would read as a controller gone. Each of
+// them but a device it could not read leaves USBComplete false too, which
+// tells a controller missing from the reading from one gone from the box
+// (B510). A root hub or a device that went while it was read is simply not
+// there, and one under a controller the port grammar does not name is the
+// box as it is; so is a tree with no listing at all, a box without USB.
 func (t *sysfsTree) usb(snap *SysfsSnapshot) {
 	names, more, err := t.list("bus/usb/devices")
 	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) {
+			snap.USBComplete = true
+		} else {
 			snap.Partial = true
 			snap.addProblem("bus/usb/devices: %s", errText(err))
 		}
@@ -673,10 +687,16 @@ func (t *sysfsTree) usb(snap *SysfsSnapshot) {
 		snap.Partial = true
 		snap.addProblem("bus/usb/devices lists more than %d entries; the rest are not read", t.lim.entries)
 	}
-	unread := func(err error) {
-		if !errors.Is(err, fs.ErrNotExist) {
-			snap.Partial = true
+	// complete says every root hub the listing names was read, so that
+	// Controllers is every controller it names (USBComplete). A stop in the
+	// root hubs' loop returns before it is set.
+	complete := !more
+	unread := func(err error) bool {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false
 		}
+		snap.Partial = true
+		return true
 	}
 	type root struct {
 		anchor string
@@ -694,14 +714,16 @@ func (t *sysfsTree) usb(snap *SysfsSnapshot) {
 		}
 		dir, err := t.resolve("bus/usb/devices/" + name)
 		if err != nil {
-			unread(err)
+			if unread(err) {
+				complete = false
+			}
 			snap.addProblem("bus/usb/devices/%s: %s", name, errText(err))
 			continue
 		}
 		gen, err := t.gen(dir)
 		if err != nil {
-			if errors.As(err, new(fileError)) {
-				unread(err)
+			if !errors.As(err, new(fileError)) || unread(err) {
+				complete = false
 			}
 			snap.addProblem("%s", err)
 			continue
@@ -715,6 +737,7 @@ func (t *sysfsTree) usb(snap *SysfsSnapshot) {
 		roots[m[1]] = root{anchor: a, gen: gen}
 		anchors[a] = true
 	}
+	snap.USBComplete = complete
 	for a := range anchors {
 		snap.Controllers = append(snap.Controllers, a)
 	}

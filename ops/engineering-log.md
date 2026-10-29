@@ -66395,3 +66395,223 @@ engine in 13.7 s, the qualification package in 5.3 s, its
 `TestNoDocblockNamesAnotherDeclaration` and `TestNoBlankKeepers` in
 `cmd/bridge` pass; `scripts/qualification-version -base main -head HEAD` says
 OK; `make docs-check` passes; `git diff --check main HEAD` is empty.
+
+## 2026-10-29 — B510: a reading that failed is no topology change, and a card whose port path did not read is not elsewhere
+
+From the B508 port-binding round 5 worker (2026-10-22), whose note has both
+failing closed. The first does: no card is chosen, and only the reason is
+wrong (a topology change to rebind for, where a reading failed). The second
+does only with no card placed at the port, where it said the DAC was absent;
+beside a second card of the unit it chose the readable card, under the port
+alone and under a binding that records the failed card's own interface (a
+throwaway test over 444e67a4's binding.go answered `available on card 5` by
+`platform-xhci-hcd.0/usb2-1:1.2`, card 6's), and the check admitted it.
+
+**The defects, at 444e67a4, both confirmed.**
+
+1. `Resolve` (internal/player/binding/binding.go:383–386) answered a port
+   binding whose controller `inv.Controllers` lacked with `binding_invalid`,
+   "the controller the port binding names, %s, is not on the box: a topology
+   change, so rebind (bridge output dac bind)", whatever the reading said of
+   itself. `alsa.SysfsReader`'s `usb` (internal/alsa/sysfs.go:657–675) leaves
+   a controller out of `Controllers` when `bus/usb/devices` cannot be listed,
+   when the listing is cut at its 1,024-entry cap (root hubs, `usbN`, sort
+   after every `N-…` entry, so a cut drops them first), and when a root hub's
+   link or speed cannot be read; it marks the snapshot `Partial` and adds a
+   problem, and `cutShort` (binding.go:568) asks the card listing alone
+   (`CardsComplete`). bind (`For`, :893) refused with the same words, telling
+   the operator to rebind from inside a bind. The check after open
+   (`checkPort`, :794–800) already refused with "resolve again" and the
+   reading's problems: it claimed no topology change.
+2. A USB card whose port path could not be read (`Port` empty, `PortProblem`
+   set) sat at no port: `placeOf("")` never equals the bound place, so
+   `Resolve` (:389) and `checkPort` (:808) passed over it as a card
+   elsewhere, as `SamePort`'s doc (:864–869) says. With a two-card unit in the
+   bound port and one card's port path failed, the other card was resolved,
+   and admitted, under the port alone, and also under a binding that records
+   the failed card's interface. With no card placed (the GO bar's own root
+   hub's `speed` gone, which the reader takes for a root hub that went),
+   `Resolve` answered `device_missing`, "no card is at
+   platform-xhci-hcd.0/usb2-1", with the DAC in that port. That reading is
+   not partial (a card's port problem never makes one), so the hotplug watcher
+   publishes it, and the backend types a `device_missing` locate at a reopen
+   as a disconnect (`faultReason`).
+
+Two claims of the brief were narrower than stated. `Settled` does not take a
+card listing cut short through its transient loop: Resolve answers it before
+the transient check, so `Settled` returns it at its first line, settled. And
+`checkPort`'s missing-controller refusal needs no new fact: it refuses on
+either kind of listing and never named a topology change.
+
+**The fixes** (1cb81a51).
+
+1. `alsa.SysfsSnapshot.USBComplete`: `Controllers` holds every controller
+   with a root hub that `bus/usb/devices` names. `usb` sets it false when the
+   listing cannot be listed, is cut at the cap, or loses a root hub it cannot
+   read (`unread` now reports whether it marked the reading partial), and
+   leaves it false when the reading stops before its last root hub or never
+   comes to the listing (no class/sound); true on a tree with no
+   `bus/usb/devices` (`fs.ErrNotExist`: a box without USB, which is not
+   partial). A root hub that went as it was read (a dangling link, a speed
+   file gone: `fs.ErrNotExist`) leaves it true, as it leaves the reading
+   whole, and so does a USB device that is not a root hub and cannot be read,
+   which makes the reading partial while every controller is listed.
+   `Inventory.USBComplete` carries it. `Resolve` asks it for a port binding
+   alone, right after `cutShort` and before the transient check
+   (`controllerUnread`): a controller a listing that is not complete lacks is
+   `identity_incomplete`, "the controller the port binding names, %s, is not
+   in sysfs's USB device listing at %s, which could not be read whole, so it
+   may be missing from the reading alone: no card is chosen; resolve again".
+   That state is the card cut's, a reading that cannot say where the card a
+   binding names is, and no state word is new; `binding_invalid` says the
+   binding is wrong and `identity_transient` names a card the kernel is
+   adding or removing. Keyed on `USBComplete`, never `Inventory.Partial`,
+   which a /proc card whose devices could not all be listed also sets, and
+   kept out of `cutShort`, which `For` asks of every kind: serial and
+   uniqueModel bindings resolve and bind on such a reading as on a whole one.
+   Answered before any card is looked at, it is settled in `Settled` at its
+   first line whatever the transient cards, as the card cut is: no card can
+   change it on that reading. `For` refuses a port binding through Resolve's
+   answer (identity_incomplete, its words), and needs no line of its own.
+2. `Resolve` collects the USB cards whose port path could not be read. Beside
+   a port binding's one card at its port, and when the recorded interface did
+   not choose that card (`onInterface`), one of that card's model, and of its
+   serial when it has one (`mayBeOfUnit`: one port holds one unit, the
+   reasoning `mayBeBound` gives a transient card), may be another card of the
+   unit in the port: `device_ambiguous`, "card %d is %s, and the port path of
+   card %s could not be read, so it may be another card of the unit in that
+   port: neither is chosen", worded as beside an unreadable card. With no
+   card at the port, and no hub or device of unknown class in it, any such
+   card, of any model, may be the card there: `identity_incomplete`, "the
+   port path of card %s could not be read, so it may be the card at %s: no
+   card is chosen; resolve again". That one is decided among the cards, as
+   an empty port is, so `Settled` lets a transient card that may be at the
+   port hold it, as it holds `device_missing`. `checkPort` refuses alike: a
+   card whose port path cannot be read beside the opened card, of its unit by
+   `mayBeOfUnit`, unless the opened card is on the recorded interface; and an
+   opened card whose port path cannot be read, "card %d's port path cannot be
+   read now (%s), so it cannot be placed at the bound port %s: resolve
+   again", where it said the card was renumbered or moved. bind refuses the
+   port alone beside such a card through Resolve's ambiguity, as it does
+   beside an unreadable card.
+
+**Red first** (71581ff2: the tests over 444e67a4's code; `go test -count=1
+./internal/player/binding/`), every red an assertion on a state or a reason:
+
+- `TestAUSBListingThatCannotBeReadWholeIsNoTopologyChange`, its three rows (a
+  listing that cannot be listed; the bound controller's root hubs unreadable,
+  two links that leave the tree; a listing cut at the cap, the
+  `cutDevicesAtTheCap` edit): unplaced_test.go:110, `bind by port does not
+  say "identity_incomplete": binding card 5 by port would be binding_invalid
+  now: the controller the port binding names, platform-xhci-hcd.0, is not on
+  the box: a topology change, so rebind (bridge output dac bind)`, with the
+  same line for "could not be read whole" absent and "topology change" and
+  "rebind" present; and :126, `resolution binding_invalid on card -1 (the
+  controller … a topology change, so rebind …), want identity_incomplete on
+  card -1`.
+- The agreement table (`TestTheCheckAfterOpenAgreesWithResolveOnEachReading`,
+  binding_test.go:887): rows "a USB device listing that cannot be read", "the
+  root hubs of the GO bar's controller unreadable in the USB listing" and "the
+  USB listing cut short before the GO bar's controller", each `by the port
+  alone: resolves binding_invalid on card -1 (… a topology change, so rebind
+  …), and the table says identity_incomplete`, and the same by the port and
+  its interface; "card 5's port path unreadable", `resolves device_missing on
+  card -1 (no card is at platform-xhci-hcd.0/usb2-1), and the table says
+  identity_incomplete`; "a second card of the unit whose port path cannot be
+  read", `by the port alone: resolves available on card 5 (card 5 is at
+  platform-xhci-hcd.0/usb2-1, device 0 subdevice 0), and the table says
+  device_ambiguous`.
+- `TestTheCheckAfterOpenNeedsTheBoundControllerAndStream`, binding_test.go:982:
+  `a USB listing that cannot be read: Resolve answers binding_invalid (…), want
+  identity_incomplete`. Its row, and the table's three USB rows, asserted the
+  defect until now.
+- `TestACardOfTheBoundUnitWhosePortPathCannotBeReadIsNotElsewhere`, rows "a
+  second card of the unit" and "another unit of the model with no serial":
+  unplaced_test.go:216, `by platform-xhci-hcd.0/usb2-1, the check admitted
+  card 5 beside card 6: <nil>` (and by `…:1.2`); :225, `bind card 5 by port
+  beside card 6: <nil>`; :237, `resolution available on card 5 (…), want
+  device_ambiguous on card -1`.
+- `TestNoCardAtTheBoundPortBesideACardWhosePortPathCannotBeReadIsNotMissing`,
+  both rows (the GO bar's root hub's speed gone, and a failed read on its way
+  up): unplaced_test.go:277, `the check does not say "card 5's port path
+  cannot be read now": the opened node is not the bound unit: card 5 is
+  20b1:3009 (…4471) at a port this box's topology cannot anchor, not at the
+  bound port platform-xhci-hcd.0/usb2-1: renumbered or moved between the
+  resolve and the open`; :282, `resolution device_missing on card -1 (no card
+  is at platform-xhci-hcd.0/usb2-1), want identity_incomplete on card -1`.
+- `TestSettledAnswersAUSBListingThatCannotBeReadWholeAtOnce`: the USB row,
+  unplaced_test.go:310, `resolution binding_invalid on card -1 (…), want
+  identity_incomplete on card -1`; the row beside a card in sysfs alone at
+  another port, :325, `resolution device_missing on card -1 (…), want
+  identity_incomplete on card -1`.
+
+Green on main as predicted, the controls: a controller the box does not have,
+no `bus/usb/devices` at all, and root hubs gone as they were read
+(`TestAControllerGoneFromAWholeUSBListingIsATopologyChange`: `binding_invalid`,
+"topology change", "rebind"); the table's row for root hubs gone as read; a
+readable card alone in the bound port, and the card on the recorded interface
+beside a failed one; serial and uniqueModel resolving, and binding through
+`For`, on each USB listing not read whole; another model, and another unit of
+the model with its own serial, whose port path failed (available, admitted,
+bound), and the table's row for another model at another port; an empty port
+(`device_missing`); and `Settled` holding the no-card answer beside a card in
+/proc alone (`identity_transient`, unsettled). The reader's own tests of the
+new fact (`TestSysfsSaysWhetherItsUSBListingIsWhole`, and the `usb` column of
+`TestAStoppedReadingOpensNothingMore`) do not compile without it, so their
+proof is control B.
+
+**Controls**, on 1cb81a51, each restored from git with the tree clean after:
+
+- A, Resolve's consultation removed (fix 1): predicted red, the three USB
+  rows of `TestAUSBListing…`, the table's three USB rows, the controller test,
+  the USB row of `TestSettled…`; actual: exactly those, nothing else.
+- B, the reader saying its USB listing is complete whatever it read (a
+  deferred `USBComplete = true` in `usb`): predicted red, four rows of
+  `TestSysfsSaysWhetherItsUSBListingIsWhole`, the root-hub stop of
+  `TestAStoppedReadingOpensNothingMore`, the FIFO row for `bus/usb/devices`,
+  and in binding the real-tree USB cases, with the cut green (its edit sets
+  the field); actual: exactly those.
+- C, fix 2 removed from Resolve and the check: predicted red, the
+  table's two port-path rows, the two may-be-of-the-unit rows of
+  `TestACardOfTheBoundUnit…`, both rows of `TestNoCardAtTheBoundPort…`, and
+  the at-another-port row of `TestSettled…`, with the other-model and
+  own-serial controls green; actual: exactly those. Reverting Resolve alone
+  adds the table's guard that the check and Resolve agree
+  (binding_test.go:896: Resolve available, the check refusing); reverting the
+  check alone leaves the check's lines red and the same guard the other way
+  round; removing the opened card's wording reddens the two wording lines of
+  `TestNoCardAtTheBoundPort…` alone.
+- The rule-out removed (`mayBeOfUnit` true): the other-model and own-serial
+  rows of `TestACardOfTheBoundUnit…`, and the table's other-model row, go
+  red (device_ambiguous, refused, bind refused), which shows those controls
+  bear the rule.
+- D, the USB check moved after the transient check, where the topology
+  refusal is: the USB row of `TestSettled…` alone goes red (Resolve
+  `identity_transient` beside card 7, and `Settled` holds it), which pins the
+  position.
+
+**Found and not fixed.** With no match beside a card whose identity cannot be
+read at all, Resolve still answers `device_missing`, "no card is %s (the
+identity of card %s could not be read)", under every kind of binding: the same
+absence claim, older than the port-binding fix and outside this brief, since
+fixing it changes serial and uniqueModel answers. PROTOCOL.md's row for
+`identity_incomplete` describes the card cut alone; the word now also comes
+for a card whose port path did not read, which the watcher publishes, and the
+row would change only in a Mirror-PR pair. A root hub whose `speed` reads but
+is no USB speed leaves its controller out of `Controllers` with the listing
+complete, as before. A USB device in the listing that cannot be read leaves
+the listing complete, so with no card at the bound port a hub there may go
+unseen (`device_missing` for `binding_invalid`, both choosing no card). bind
+by port refuses beside a card whose port path failed where it could write the
+card's port path with its interface. And a card whose controller the port
+grammar does not name has an empty `Port` for good, so beside a card of its
+model and serial a port binding stays ambiguous: the reader does not tell
+that from a read that failed.
+
+**qualificationVersion 20**: `internal/alsa/` and `internal/player/binding/`
+are guarded prefixes. B579 (#1363) took 19 and was not on main when this
+branch was cut from 444e67a4 (it merged later, at 3ac55afa), so this branch
+goes from 18 to 20, with the runbook's five current references, its step 1,
+and a note of what 20 covers.
+
+**Round 2:** an uninterpretable root-hub speed leaves the USB listing incomplete (reader and Resolve regressions red before the fix, green after); PROTOCOL.md now names all three causes of `identity_incomplete`; the qualification note now distinguishes unchanged wire fields and schema from existing `reason` values that may differ.

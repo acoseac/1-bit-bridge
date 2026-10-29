@@ -84,7 +84,7 @@ func TestAFIFOInTheSysfsTreeIsRefusedPromptly(t *testing.T) {
 			return !snap.Present && strings.Contains(problems(snap), "class/sound")
 		}},
 		{"bus/usb/devices", "sys/bus/usb/devices", func(snap SysfsSnapshot) bool {
-			return snap.Present && len(snap.Controllers) == 0 && strings.Contains(problems(snap), "bus/usb/devices")
+			return snap.Present && len(snap.Controllers) == 0 && !snap.USBComplete && strings.Contains(problems(snap), "bus/usb/devices")
 		}},
 		{"idVendor", goBarDevice + "/idVendor", func(snap SysfsSnapshot) bool {
 			return cardKind(snap, 5) == IdentityUnreadable && strings.Contains(problems(snap), "idVendor")

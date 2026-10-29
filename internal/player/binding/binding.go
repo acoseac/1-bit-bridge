@@ -41,17 +41,18 @@ const (
 	// StateDeviceMissing is no card the binding names.
 	StateDeviceMissing State = "device_missing"
 	// StateDeviceAmbiguous is two or more cards the binding names, or one
-	// beside a card whose identity cannot be read: neither is chosen.
+	// beside a card whose identity cannot be read, or under a port binding
+	// whose port path cannot be read (B510): neither is chosen.
 	StateDeviceAmbiguous State = "device_ambiguous"
 	// StateEndpointMissing is the unit there with no playback stream at the
 	// bound PCM device and subdevice.
 	StateEndpointMissing State = "endpoint_missing"
 	// StateBindingInvalid is a binding that cannot be resolved as it
-	// stands: a port binding whose controller is gone or whose port a hub
-	// has taken (a topology change: rebind), or whose port holds a device
-	// whose class cannot be read, so may be a hub, or one the config
-	// refuses. It fails closed, which an empty port (StateDeviceMissing)
-	// does not need to.
+	// stands: a port binding whose controller is gone from a USB listing
+	// read whole, or whose port a hub has taken (a topology change: rebind),
+	// or whose port holds a device whose class cannot be read, so may be a
+	// hub, or one the config refuses. It fails closed, which an empty port
+	// (StateDeviceMissing) does not need to.
 	StateBindingInvalid State = "binding_invalid"
 	// StateIdentityUnsupported is a box whose cards' identities cannot be
 	// read at all: no sysfs.
@@ -60,10 +61,15 @@ const (
 	// one tree lists it and the other does not, or the two name different
 	// units. Nothing is concluded from it: resolve again.
 	StateIdentityTransient State = "identity_transient"
-	// StateIdentityIncomplete is a sysfs whose card listing was cut short
-	// (alsa.SysfsSnapshot.CardsComplete): the card a binding names, or one
-	// beside it that makes it ambiguous, may be missing from it, so none is
-	// chosen.
+	// StateIdentityIncomplete is a reading that cannot say where the card a
+	// binding names is, so none is chosen: a sysfs whose card listing was
+	// cut short (alsa.SysfsSnapshot.CardsComplete), from which that card, or
+	// one beside it that makes it ambiguous, may be missing; and under a
+	// port binding (B510) a USB listing that could not be read whole and
+	// lacks the controller the binding names (alsa.SysfsSnapshot.USBComplete),
+	// which may be missing from the reading alone, or no card at the bound
+	// port beside a USB card whose port path could not be read, which may be
+	// the card there. Each is a reading that failed: resolve again.
 	StateIdentityIncomplete State = "identity_incomplete"
 )
 
@@ -149,6 +155,12 @@ type Inventory struct {
 	CardsComplete bool
 	// Cards are every card either tree lists, by index.
 	Cards []Card
+	// USBComplete says sysfs's USB listing named every controller it has
+	// (alsa.SysfsSnapshot.USBComplete): a controller a port binding names
+	// that Controllers lacks is gone from the box only on a listing that is
+	// complete, and may be missing from the reading alone on one that is not
+	// (B510). Only a port binding reads the listing for its answer.
+	USBComplete bool
 	// Controllers and Devices are sysfs's USB controllers and devices,
 	// which a port binding is judged against.
 	Controllers []string
@@ -234,7 +246,8 @@ func (o Observer) ObserveWithProc(ctx context.Context) (Inventory, alsa.Snapshot
 // the two trees agree on it.
 func inventory(snap alsa.Snapshot, sys alsa.SysfsSnapshot) Inventory {
 	procPartial, unlisted := partialCards(snap)
-	inv := Inventory{Sysfs: sys.Present, SysfsRoot: sys.Root, CardsComplete: sys.CardsComplete, Controllers: sys.Controllers, Devices: sys.Devices,
+	inv := Inventory{Sysfs: sys.Present, SysfsRoot: sys.Root, CardsComplete: sys.CardsComplete, USBComplete: sys.USBComplete,
+		Controllers: sys.Controllers, Devices: sys.Devices,
 		Problems: append(append(append([]string{}, snap.Problems...), sys.Problems...), unlisted...), Partial: sys.Partial || procPartial}
 	ids := map[int]alsa.Identity{}
 	for _, id := range sys.Cards {
@@ -343,7 +356,16 @@ type Resolution struct {
 // interface the card sits on. A unit can carry more than one card (a
 // composite device): then the configuration and interface the binding
 // records choose the card on them, and with none recorded, or none on
-// them, the answer is device_ambiguous, never the first.
+// them, the answer is device_ambiguous, never the first. Only a port
+// binding reads the USB listing for its answer (B510): one that could not
+// be read whole and lacks the bound controller is identity_incomplete,
+// before any card is looked at, as a card listing cut short is, and a
+// controller gone from a listing read whole is binding_invalid. A card
+// whose port path cannot be read is at no port the reading names, which is
+// not another port: beside the one card at the bound port it may be another
+// card of that unit, unless its model, or a serial it has, is not that
+// unit's (device_ambiguous, unless the card is on the recorded interface),
+// and with no card there it may be the card there (identity_incomplete).
 func Resolve(dev config.PlayerDevice, inv Inventory) Resolution {
 	r := Resolution{Card: -1, Endpoint: Endpoint{Device: dev.PCMDevice, Subdevice: dev.Subdevice}, Binding: dev.Binding}
 	fail := func(s State, format string, args ...any) Resolution {
@@ -361,6 +383,11 @@ func Resolve(dev config.PlayerDevice, inv Inventory) Resolution {
 	}
 	if why, cut := inv.cutShort(); cut {
 		return fail(StateIdentityIncomplete, "%s", why)
+	}
+	if dev.Binding == config.BindingPort {
+		if why, unread := inv.controllerUnread(dev.Port); unread {
+			return fail(StateIdentityIncomplete, "%s", why)
+		}
 	}
 	for _, c := range inv.Cards {
 		if c.State == CardTransient {
@@ -389,12 +416,15 @@ func Resolve(dev config.PlayerDevice, inv Inventory) Resolution {
 		match = func(u *alsa.USBIdentity) bool { return placeOf(u.Port) == place }
 	}
 	var unreadable []int
+	var unplaced []Card
 	for _, c := range inv.Cards {
 		switch {
 		case c.State == CardUnreadable:
 			unreadable = append(unreadable, c.Index)
 		case c.State == CardUSB && match(c.USB):
 			r.Matches = append(r.Matches, c.Index)
+		case c.State == CardUSB && c.USB.Port == "":
+			unplaced = append(unplaced, c)
 		}
 	}
 	// The cards at a port are one unit's, and the card on the configuration
@@ -404,6 +434,19 @@ func Resolve(dev config.PlayerDevice, inv Inventory) Resolution {
 	if dev.Binding == config.BindingPort {
 		if n, ok := inv.onInterface(r.Matches, r.Port); ok {
 			r.Matches, byInterface = []int{n}, true
+		}
+	}
+	// A card whose port path could not be read is at no port the reading
+	// names, which is not another port (B510): beside a port binding's one
+	// card there, one that may be of its unit by its model and its serial
+	// (mayBeOfUnit) may be another card of the unit in that port.
+	var besides []int
+	if dev.Binding == config.BindingPort && len(r.Matches) == 1 && !byInterface {
+		m, _ := inv.Card(r.Matches[0])
+		for _, c := range unplaced {
+			if mayBeOfUnit(*c.USB, *m.USB) {
+				besides = append(besides, c.Index)
+			}
 		}
 	}
 	switch {
@@ -416,6 +459,9 @@ func Resolve(dev config.PlayerDevice, inv Inventory) Resolution {
 	case len(r.Matches) == 1 && len(unreadable) > 0 && dev.Binding == config.BindingPort && !byInterface:
 		return fail(StateDeviceAmbiguous, "card %d is %s, and the identity of card %s could not be read, so it may be another card of the unit in that port: neither is chosen",
 			r.Matches[0], what, joinInts(unreadable))
+	case len(besides) > 0:
+		return fail(StateDeviceAmbiguous, "card %d is %s, and the port path of card %s could not be read, so it may be another card of the unit in that port: neither is chosen",
+			r.Matches[0], what, joinInts(besides))
 	case len(r.Matches) > 1:
 		return fail(StateDeviceAmbiguous, "cards %s are each %s: neither is chosen", joinInts(r.Matches), what)
 	case len(r.Matches) == 1 && len(unreadable) > 0 && dev.Binding != config.BindingPort:
@@ -429,6 +475,17 @@ func Resolve(dev config.PlayerDevice, inv Inventory) Resolution {
 			} else if ok && d.HubUnknown {
 				return fail(StateBindingInvalid, "the device in the bound port %s has a class that could not be read, so it may be a hub: a port binding names that port, not what is behind a hub, and resolves again once the class reads",
 					d.Port())
+			}
+			// Any card whose port path could not be read may be the card at
+			// the bound port, whatever its model: the DAC is not known to be
+			// absent (B510).
+			if len(unplaced) > 0 {
+				var at []int
+				for _, c := range unplaced {
+					at = append(at, c.Index)
+				}
+				return fail(StateIdentityIncomplete, "the port path of card %s could not be read, so it may be the card %s: no card is chosen; resolve again",
+					joinInts(at), what)
 			}
 		}
 		more := ""
@@ -462,6 +519,13 @@ func Resolve(dev config.PlayerDevice, inv Inventory) Resolution {
 // fix, where round 1's "the port has its card" assumed it named an
 // interface). Otherwise it is Resolve's identity_transient, naming a card
 // that may be the bound unit, or a card at the bound port, and unsettled.
+// What Resolve answers before it looks at a card, a transient one included,
+// no card can change, so Settled returns it settled at once: a card listing
+// cut short, and a port binding's USB listing not read whole that lacks the
+// bound controller (B510), which a transient card at the bound port leaves
+// as it is. No card at the bound port beside a card whose port path cannot
+// be read (identity_incomplete) is decided among the cards, as an empty
+// port is: a transient card that may be at the port holds it.
 // It latches nothing, as Resolve does: the caller resolves again.
 func Settled(dev config.PlayerDevice, inv Inventory) (Resolution, bool) {
 	r := Resolve(dev, inv)
@@ -544,6 +608,16 @@ func mayBeBound(dev config.PlayerDevice, c Card, r0 Resolution) bool {
 	return true
 }
 
+// mayBeOfUnit reports whether c, the identity of a card whose port path
+// could not be read, may be a card of u's unit: c is of u's model, and of
+// its serial when c has one. One port holds one unit, so a card of another
+// model, or with a serial that is not u's, cannot be another card of the
+// unit in u's port, wherever its port path would have put it; mayBeBound
+// reasons the same of a transient card (B510).
+func mayBeOfUnit(c, u alsa.USBIdentity) bool {
+	return c.ID == u.ID && (!c.Serial.Present() || c.Serial.Equal(u.Serial))
+}
+
 // mayBeModel reports whether the transient card c may be a unit of the
 // model id: what its trees said of it does not rule that out.
 func mayBeModel(c Card, id alsa.USBID) bool {
@@ -571,6 +645,22 @@ func (inv Inventory) cutShort() (string, bool) {
 	}
 	return fmt.Sprintf("sysfs's card listing at %s was cut short, so the card the binding names, or one beside it that makes it ambiguous, may be missing from it: no card is chosen",
 		inv.SysfsRoot), true
+}
+
+// controllerUnread says why inv is no answer for a port binding of port
+// when sysfs's USB listing could not be read whole (USBComplete) and lacks
+// the controller the binding names: the controller may be on the box and
+// missing from the reading alone, a reading that failed and no topology
+// change, so no card is chosen and the binding resolves again (B510). Only
+// a port binding asks it, since no other reads the listing for its answer;
+// it is not cutShort's, which For asks of every kind.
+func (inv Inventory) controllerUnread(port string) (string, bool) {
+	p, err := usbid.ParsePort(port)
+	if err != nil || inv.USBComplete || contains(inv.Controllers, p.Anchor()) {
+		return "", false
+	}
+	return fmt.Sprintf("the controller the port binding names, %s, is not in sysfs's USB device listing at %s, which could not be read whole, so it may be missing from the reading alone: no card is chosen; resolve again",
+		p.Anchor(), inv.SysfsRoot), true
 }
 
 // found finishes a resolution on its one card.
@@ -750,10 +840,14 @@ func (c Checker) Check(n alsapcm.NodeInfo) error {
 // whose listing was cut short (alsa.SysfsSnapshot.CardsComplete), and a
 // /proc/asound that cannot be read are no answer, and refuse with a reason
 // of their own. So does a USB listing that does not name the controller the
-// binding names, where Resolve answers binding_invalid, whatever the opened
-// card's own port path says: that path is read from the card's device's
-// ancestors, not from the listing. The opened card must be a USB card both
-// trees agree on, at the bound port (SamePort), and the card the binding
+// binding names, where Resolve answers binding_invalid, or identity_incomplete
+// when the listing could not be read whole (B510), whatever the opened card's
+// own port path says: that path is read from the card's device's ancestors,
+// not from the listing; the refusal needs no USBComplete, since it is the
+// same either way and names the reading's problems, and it never said
+// topology change. The opened card must be a USB card both trees agree on,
+// with a port path that reads (one that does not is at no port, not at
+// another: B510), at the bound port (SamePort), and the card the binding
 // chooses there now, which on a unit swapped into the port between the
 // resolve and the open it may be. A card the kernel is adding or removing,
 // any card inventory calls transient (vanished as it was read, listed by one
@@ -763,7 +857,9 @@ func (c Checker) Check(n alsapcm.NodeInfo) error {
 // interface the binding records is the card whatever else the unit carries.
 // Any other is only while the unit carries no other card, and, as Resolve
 // rules out no card it cannot identify, a card unreadable in sysfs may be
-// another card of that unit and refuses too; a card that is not USB, or a
+// another card of that unit and refuses too, and so does a card whose port
+// path cannot be read unless its model, or a serial it has, is not the
+// opened card's unit's (mayBeOfUnit, B510); a card that is not USB, or a
 // readable one at another port, does not. Last, the card must have the
 // bound playback stream in /proc/asound, where Resolve answers
 // endpoint_missing. Resolve reads a hub in the bound port only when no card
@@ -789,6 +885,7 @@ func (c Checker) checkPort(n alsapcm.NodeInfo) error {
 		at         = []int{n.Card}
 		transient  []Card
 		unreadable []Card
+		unplaced   []Card
 	)
 	inv := inventory(snap, sys)
 	if anchor := w.Port.Anchor(); !contains(inv.Controllers, anchor) {
@@ -807,6 +904,8 @@ func (c Checker) checkPort(n alsapcm.NodeInfo) error {
 		case card.State == CardUSB:
 			if placeOf(card.USB.Port) == place {
 				at = append(at, card.Index)
+			} else if card.USB.Port == "" {
+				unplaced = append(unplaced, card)
 			}
 		case card.State == CardTransient:
 			transient = append(transient, card)
@@ -819,6 +918,10 @@ func (c Checker) checkPort(n alsapcm.NodeInfo) error {
 		return wrongDevice("card %d is in neither /proc/asound nor sysfs now: it went away (unplugged or renumbered) between the resolve and the open", n.Card)
 	case opened.State != CardUSB:
 		return wrongDevice("card %d is not a USB card both trees agree on now (%s): resolve again", n.Card, opened.Why)
+	case opened.USB.Port == "":
+		// At no port the reading names, which is not another port (B510).
+		return wrongDevice("card %d's port path cannot be read now (%s), so it cannot be placed at the bound port %s: resolve again",
+			n.Card, opened.USB.PortProblem, place)
 	case !SamePort(*opened.USB, w.Identity):
 		return wrongDevice("card %d is %s, not at the bound port %s: renumbered or moved between the resolve and the open", n.Card, Describe(*opened.USB), place)
 	case len(transient) > 0:
@@ -829,6 +932,12 @@ func (c Checker) checkPort(n alsapcm.NodeInfo) error {
 	}
 	if !w.Port.HasInterface() || opened.USB.Port != w.Port.String() {
 		sort.Ints(at)
+		var besides []Card
+		for _, c := range unplaced {
+			if mayBeOfUnit(*c.USB, *opened.USB) {
+				besides = append(besides, c)
+			}
+		}
 		switch {
 		case len(at) > 1 && w.Port.HasInterface():
 			return wrongDevice("the unit at the bound port %s carries cards %s, and card %d is not on the interface the binding records (configuration %d, interface %d): resolve again",
@@ -838,6 +947,9 @@ func (c Checker) checkPort(n alsapcm.NodeInfo) error {
 		case len(unreadable) > 0:
 			return wrongDevice("card %d cannot be identified now (%s), and may be another card of the unit at the bound port %s: resolve again",
 				unreadable[0].Index, unreadable[0].Why, place)
+		case len(besides) > 0:
+			return wrongDevice("card %d's port path cannot be read now (%s), and it may be another card of the unit at the bound port %s: resolve again",
+				besides[0].Index, besides[0].USB.PortProblem, place)
 		}
 	}
 	if !opened.has(w.Endpoint) {
@@ -865,7 +977,10 @@ func SameUnit(a, b alsa.USBIdentity) bool {
 // controller anchor, generation and port chain, whatever units they are and
 // whichever interfaces they sit on. It is SameUnit's counterpart under a
 // port binding, which names a port and not a unit. A card whose port this
-// box's topology cannot anchor is at no port.
+// box's topology cannot anchor, or whose port path could not be read, is at
+// no port SamePort can compare, which is not another port: Resolve and the
+// check after open take such a card for unknown, never for elsewhere
+// (B510).
 func SamePort(a, b alsa.USBIdentity) bool {
 	place := placeOf(a.Port)
 	return place != "" && place == placeOf(b.Port)
@@ -890,6 +1005,10 @@ func Describe(u alsa.USBIdentity) string {
 // the card, which such a listing may lack; a card that cannot be bound (not
 // there, transient, not USB, unreadable, no such endpoint); and a binding
 // that would not resolve to that card now, an ambiguous one above all.
+// Resolve's answer is also how a port binding is refused on a USB listing
+// not read whole that lacks the card's controller (identity_incomplete,
+// B510), which cutShort, asked of every kind, does not say: no other kind
+// reads that listing.
 func For(inv Inventory, n int, kind string, ep Endpoint) (config.PlayerDevice, error) {
 	if why, cut := inv.cutShort(); cut {
 		return config.PlayerDevice{}, fmt.Errorf("binding card %d by %s would be %s now: %s", n, kind, StateIdentityIncomplete, why)
