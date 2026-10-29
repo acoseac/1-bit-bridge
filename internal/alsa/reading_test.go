@@ -74,6 +74,55 @@ func TestSysfsSaysWhenItsReadingIsNotWhole(t *testing.T) {
 	}
 }
 
+// TestSysfsSaysWhetherItsUSBListingIsWhole: USBComplete says the controllers
+// a reading lists are every controller bus/usb/devices names. A listing that
+// cannot be listed, one cut at the cap, and a root hub that cannot be read
+// (a link that leaves the tree, a speed that is not a file) leave it false,
+// and each makes the reading partial. A whole tree, one with no
+// bus/usb/devices at all (a box without USB), and one whose root hub went as
+// it was read (a link to nothing, its speed file gone) are complete and not
+// partial; one with a USB device, not a root hub, that cannot be read is
+// complete and partial, since every controller is still listed (B510).
+func TestSysfsSaysWhetherItsUSBListingIsWhole(t *testing.T) {
+	for _, tc := range []struct {
+		name, step string
+		// entries, when set, is the reader's entry cap: 5 cuts the Pi 5's
+		// six USB entries and keeps its three cards.
+		entries           int
+		complete, partial bool
+	}{
+		{"a whole tree", "", 0, true, false},
+		{"no bus/usb/devices", "remove sys/bus/usb/devices\n", 0, true, false},
+		{"a listing that cannot be listed", "remove sys/bus/usb/devices\nfile sys/bus/usb/devices not a directory\n", 0, false, true},
+		{"a listing cut at the cap", "", 5, false, true},
+		{"a root hub whose link leaves the tree", "link sys/bus/usb/devices/usb3 !../../../../outside\n", 0, false, true},
+		{"a root hub whose speed is not a file", "remove " + goBarHub + "/speed\ndir " + goBarHub + "/speed\n", 0, false, true},
+		{"a root hub gone as it was read", "link sys/bus/usb/devices/usb3 !gone\n", 0, true, false},
+		{"a root hub's speed gone as it was read", "remove " + goBarHub + "/speed\n", 0, true, false},
+		{"a USB device that cannot be read", "link sys/bus/usb/devices/1-1 !../../../../outside\n", 0, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := sysfstest.Build(t, sysfsManifest("pi5-go-bar"))
+			sysfstest.Apply(t, root, tc.step)
+			r := SysfsReader{Root: filepath.Join(root, "sys")}
+			if tc.entries > 0 {
+				r.limits = &sysfsLimits{entries: tc.entries, file: maxSysfsFile, links: maxLinks, hops: maxHops}
+			}
+			snap := r.Read()
+			if !snap.Present || !snap.CardsComplete {
+				t.Fatalf("premise: the card listing is not whole: present %v, cards complete %v", snap.Present, snap.CardsComplete)
+			}
+			if snap.USBComplete != tc.complete || snap.Partial != tc.partial {
+				t.Errorf("USB listing complete %v, partial %v; want %v, %v (controllers %q, problems %q)",
+					snap.USBComplete, snap.Partial, tc.complete, tc.partial, snap.Controllers, snap.Problems)
+			}
+		})
+	}
+	if snap := (SysfsReader{Root: t.TempDir()}).Read(); snap.USBComplete {
+		t.Errorf("a tree with no class/sound, which the reading never takes to its USB listing: %+v", snap)
+	}
+}
+
 // TestAProcCardSaysWhenItsDevicesCannotAllBeListed: a card whose directory
 // or a pcmNp directory cannot be listed, or whose pcmNp or subM entry's
 // type cannot be read, is Partial, and its problems say which: its devices
@@ -145,8 +194,10 @@ func TestAProcCardSaysWhenItsDevicesCannotAllBeListed(t *testing.T) {
 // from the USB listing the stop refused. A stop before the last card also
 // leaves the reading's cards short of its listing, which CardsComplete says,
 // as a cut listing does; one in the USB loops has read every card (round 4:
-// the port-binding fix's CardsComplete stayed true on a stop at card 0). The
-// /proc reading returns the context's error.
+// the port-binding fix's CardsComplete stayed true on a stop at card 0). A
+// stop before the last root hub leaves the controllers short of the USB
+// listing, which USBComplete says, and one at a USB device after them does
+// not (B510). The /proc reading returns the context's error.
 func TestAStoppedReadingOpensNothingMore(t *testing.T) {
 	// card0Unit is a USB DAC on the Pi 5's second controller, put in for
 	// the first HDMI card as card 0, so the stop can land inside card 0.
@@ -155,20 +206,21 @@ func TestAStoppedReadingOpensNothingMore(t *testing.T) {
 		name string
 		// step changes the Pi 5's tree; the stop lands on the first open
 		// whose path begins with at; read says the reading stopped there,
-		// and complete whether it read every card its listing names.
-		step, at string
-		read     func(SysfsSnapshot) bool
-		complete bool
+		// complete whether it read every card its listing names, and usb
+		// whether it read every root hub its USB listing names.
+		step, at      string
+		read          func(SysfsSnapshot) bool
+		complete, usb bool
 	}{
 		{"card 0 of 0, 1 and 5", "usbdev " + card0Unit + " vendor=1234 product=0f05 devnum=2\nusbcard 0 " + card0Unit + "/3-1:1.0\n",
 			strings.TrimPrefix(card0Unit, "sys/") + "/",
-			func(s SysfsSnapshot) bool { return len(s.Cards) == 1 && s.Cards[0].Card == 0 }, false},
+			func(s SysfsSnapshot) bool { return len(s.Cards) == 1 && s.Cards[0].Card == 0 }, false, false},
 		{"a root hub before three more", "unplug " + goBarDevice + "\n",
 			strings.TrimPrefix(goBarHub, "sys/") + "/speed",
-			func(s SysfsSnapshot) bool { return len(s.Cards) == 2 && len(s.Controllers) == 0 }, true},
+			func(s SysfsSnapshot) bool { return len(s.Cards) == 2 && len(s.Controllers) == 0 }, true, false},
 		{"a USB device before another", "usbdev " + goBarHub + "/1-4 vendor=046d product=c31c devnum=7\n",
 			strings.TrimPrefix(goBarDevice, "sys/") + "/bDeviceClass",
-			func(s SysfsSnapshot) bool { return len(s.Cards) == 3 && len(s.Devices) == 1 }, true},
+			func(s SysfsSnapshot) bool { return len(s.Cards) == 3 && len(s.Devices) == 1 }, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := sysfstest.Build(t, sysfsManifest("pi5-go-bar"))
@@ -199,6 +251,9 @@ func TestAStoppedReadingOpensNothingMore(t *testing.T) {
 			}
 			if sys.CardsComplete != tc.complete {
 				t.Errorf("the reading stopped at %s says its cards are complete: %v, with %d cards read", opened[stop], sys.CardsComplete, len(sys.Cards))
+			}
+			if sys.USBComplete != tc.usb {
+				t.Errorf("the reading stopped at %s says its USB listing is complete: %v, with controllers %q", opened[stop], sys.USBComplete, sys.Controllers)
 			}
 		})
 	}

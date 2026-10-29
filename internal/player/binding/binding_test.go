@@ -672,8 +672,8 @@ func cutAtTheCap(drop ...int) func(alsa.SysfsSnapshot) alsa.SysfsSnapshot {
 // cutDevicesAtTheCap is a sysfs reading whose USB device listing
 // (bus/usb/devices) was cut short at the reader's entry cap before the root
 // hubs of the controller anchor names, as Read returns one: that controller
-// and the devices on it left out, the problem it adds, and the reading not
-// whole. The card listing stays whole.
+// and the devices on it left out, the problem it adds, and the reading and
+// its USB listing not whole. The card listing stays whole.
 func cutDevicesAtTheCap(anchor string) func(alsa.SysfsSnapshot) alsa.SysfsSnapshot {
 	return func(s alsa.SysfsSnapshot) alsa.SysfsSnapshot {
 		var controllers []string
@@ -688,7 +688,7 @@ func cutDevicesAtTheCap(anchor string) func(alsa.SysfsSnapshot) alsa.SysfsSnapsh
 				devices = append(devices, d)
 			}
 		}
-		s.Controllers, s.Devices, s.Partial = controllers, devices, true
+		s.Controllers, s.Devices, s.Partial, s.USBComplete = controllers, devices, true, false
 		s.Problems = append(s.Problems, "bus/usb/devices lists more than 1024 entries; the rest are not read")
 		return s
 	}
