@@ -203,6 +203,20 @@ func TestWriteBytesDurable_RefusesABindOfAnOverlaySubtree(t *testing.T) {
 	inOverlayNamespace(t, "bind", persistentBase(t))
 }
 
+// TestWriteBytesDurable_RefusesAnOverlayWhoseUpperLayerIsHidden pins against
+// the real kernel the shape Volumio's boot leaves (B603) on a box that is not
+// Volumio: an overlay whose upper layer's mount is detached once the overlay
+// is mounted, as Volumio's initramfs leaves /mnt/ext after the pivot, so the
+// kernel answers statfs of the upper path the mount table names with ENOENT
+// while the overlay goes on writing to it. Through the package's own medium
+// check, which reads the host's own files there, the probe and the write
+// refuse it (ErrMediumUnknown) as one whose upper layer cannot be read here
+// and is not Volumio's data partition, and nothing is copied up into the
+// hidden upper layer.
+func TestWriteBytesDurable_RefusesAnOverlayWhoseUpperLayerIsHidden(t *testing.T) {
+	inOverlayNamespace(t, "hidden-upper", realTempDir(t))
+}
+
 // TestOverlayNamespaceHelper is the child inOverlayNamespace starts, root in
 // a user namespace of its own; it does nothing unless that set its scenario.
 func TestOverlayNamespaceHelper(t *testing.T) {
@@ -236,6 +250,37 @@ func TestOverlayNamespaceHelper(t *testing.T) {
 		}
 		if _, err := os.Lstat(filepath.Join(layer, "upper", "data")); !errors.Is(err, fs.ErrNotExist) {
 			t.Errorf("the refused write copied the data directory up into the tmpfs (%v)", err)
+		}
+	case "hidden-upper":
+		if err := unix.Mount("tmpfs", layer, "tmpfs", 0, "mode=0700"); err != nil {
+			t.Skipf("no tmpfs can be mounted in the namespace: %v", err)
+		}
+		root := filepath.Join(mountOverlay(t, base, lower, layer), "data")
+		upper := filepath.Join(layer, "upper")
+		// Held open across the detach, the one way left to look inside the
+		// hidden upper layer afterwards.
+		hidden, err := os.Open(upper)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = hidden.Close() }()
+		if err := unix.Unmount(layer, unix.MNT_DETACH); err != nil {
+			t.Skipf("the upper layer's mount cannot be detached in the namespace: %v", err)
+		}
+		if _, err := os.Stat(upper); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("the detached upper layer %s is still reached (%v)", upper, err)
+		}
+		path := filepath.Join(root, "player", "ids")
+		for what, err := range map[string]error{
+			"ProbeDurable":      ProbeDurable(root, path),
+			"WriteBytesDurable": WriteBytesDurable(root, path, []byte("reserved"), ".durable-*.tmp"),
+		} {
+			if !errors.Is(err, ErrMediumUnknown) || !errors.Is(err, fs.ErrNotExist) || !strings.Contains(err.Error(), upper+", as the mount table names it, cannot be read here") || !strings.Contains(err.Error(), "not Volumio's data partition") {
+				t.Errorf("%s below an overlay whose upper layer is hidden = %v, want ErrMediumUnknown naming the hidden upper layer and the Volumio check", what, err)
+			}
+		}
+		if names, err := hidden.Readdirnames(-1); err != nil || slices.Contains(names, "data") {
+			t.Errorf("the hidden upper layer holds %v (%v) after the refused write, want nothing copied up", names, err)
 		}
 	case "copy-up":
 		root := filepath.Join(mountOverlay(t, base, lower, layer), "data")
