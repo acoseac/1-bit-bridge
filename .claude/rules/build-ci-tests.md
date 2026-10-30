@@ -122,6 +122,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 - **A field deliberately left unsynchronised binds TESTS too.** → History-rules-build-ci-tests.md
 - **…and a test that starts the loop decides what the loop's own sends do** (2026-09-28) → History-rules-build-ci-tests.md
 - **Putting back slog's previous default does not put back the `log` package, so a capture goes through `loggingtest.SetDefault`** (2026-09-28) → History-rules-build-ci-tests.md
+- **A test that a value reached no log line captures the logger the component uses, at every level, searches every string a handler could write for each record (`loggingtest.Strings`, `Recorder.Carrying`), and asserts the line it expects is there** (2026-10-30, B604): a rendered line is not all a handler writes (a LogValuer resolves, a struct prints its fields, `errors.Join` its errors), a component handed a logger never reaches `slog.Default` (`NewRecorder`, `Logger`), and a check that only looks for the value passes once the line is gone. **Don't assert a value's absence without the line's presence.**
 - **A test helper that opens a store closes it in its own `t.Cleanup`.** → History-rules-build-ci-tests.md
 - **A test that boots a server on a goroutine drains it in a `t.Cleanup`, never a `defer cancel()` plus a cancel-and-assert tail.** → History-rules-build-ci-tests.md
 - **Two things the drain cannot fix by itself, both found converting the loop tests (#945).** → History-rules-build-ci-tests.md

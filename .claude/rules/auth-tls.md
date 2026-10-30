@@ -606,7 +606,19 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   paths when adopted or removed, the bridge's own files in fault lines, info
   lines naming a track) is now what the page describes. **A new log line
   that names a library file uses the relative path; one that cannot is a
-  page change in the same release.**
+  page change in the same release.** The 0.2.2 audit (2026-10-30, B604, of
+  v0.2.1..e242ce2c) found the same leak by another road, and peers: an
+  error beside a relative path that names the absolute one (the MP4 walks'
+  `*fs.PathError`, scanner.md; one reading of such an error for every
+  package, `fsutil.ErrorWithoutPath`), an operator's directory in a disk
+  probe's error and a no-room refusal (jobs.md, B273's bullet), the config
+  file in a console 500 (admin-console.md), the peer in the DLNA listener's
+  refusal and both socket ends in a strict SSDP reply's (dlna-upnp.md), and
+  a client in the loopback route's panic line (output.md). Peers the rules
+  let a line name stay: the ContentDirectory's `remoteAddr`, OpenHome's
+  refused source (openhome.md), the SSDP Debug lines and the GENA and
+  discovery refusals by source (dlna-upnp.md). **A log line names an
+  operator's directory by its role, and a console body names no path.**
 - **A 5xx body carries a fixed message, never an error's text** (2026-10-16,
   backlog B425). `GET /v1/search` answered a store or FTS failure with the
   error as its message (`search tracks_fts (served): sql: database is

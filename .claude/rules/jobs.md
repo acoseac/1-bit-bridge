@@ -164,4 +164,4 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 
 ## Auth, pairing, TLS and security posture
 
-- **The disk probe's missing-directory warning names the directory by its role, never by its path** (2026-10-13, backlog B273) → History-rules-jobs.md
+- **The disk probe's missing-directory warning names the directory by its role, never by its path** (2026-10-13, backlog B273), **and so do the probes' errors and a no-room refusal** (2026-10-30, B604): **Don't quote a directory in a probe's error or in `InsufficientDiskSpaceError`'s text; name its role, and keep `Dir` for a caller that compares it.** → History-rules-jobs.md
