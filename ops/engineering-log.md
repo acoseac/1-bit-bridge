@@ -66615,3 +66615,133 @@ goes from 18 to 20, with the runbook's five current references, its step 1,
 and a note of what 20 covers.
 
 **Round 2:** an uninterpretable root-hub speed leaves the USB listing incomplete (reader and Resolve regressions red before the fix, green after); PROTOCOL.md now names all three causes of `identity_incomplete`; the qualification note now distinguishes unchanged wire fields and schema from existing `reason` values that may differ.
+
+## 2026-10-30 — B475 route 2: a one-line installer for Linux, attached to every release
+
+The owner asked for an easier way to install the bridge in 0.2.2 (route 2 of
+B475, approved 2026-10-19): `curl -fsSL https://1-bit.app/install.sh | sh`,
+1-bit.app redirecting to `releases/latest/download/install.sh`. The brief was
+amended by two reviews checked against e242ce2c (Codex: the console is
+loopback-only, `bridge init` under sudo installs nothing usable, an upgrade
+needs a discovery contract and must keep `bridge update`'s client gate,
+`latest` is mutable, init's `--yes` needs `--library` before its keep branch,
+there is no non-interactive uninstall, the test isolation and the CI handoff;
+Argon: flags through `sh -s --`, the terminal for prompts, a 32-bit userland,
+Volumio's overlay, the clock, BusyBox's tools, staging and the rename) and by
+the orchestrator's decisions. The rule and its long form: config-lifecycle.md's
+installer bullet, ops/History-rules-config-lifecycle.md ("The one-line
+installer (backlog B475, 2026-10-30)").
+
+**What.** `scripts/install.sh` (POSIX sh; function definitions and one final
+compound command): Linux on amd64 or arm64 only; the release it is stamped
+with, or `--version`'s, downloaded from its own tag and checked against its one
+exact `checksums.txt` line; the program run as that release from beside the
+target, then renamed to `~/.local/bin/bridge`; `bridge init` as the invoking
+user with the box's music folders offered on the terminal (or `--library`, or
+setup deferred, exit 4); lingering turned on, the one root step, after saying
+why; an installed per-user unit upgraded through its own program's `bridge
+update --yes --config`, with the served version read back from `bridge status`;
+every other layout, root, a 32-bit kernel, a volatile HOME and a clock before
+2026 refused with nothing changed (exit 3); the pairing printed as an SSH
+tunnel to the loopback console with its own port, or `bridge pair`;
+`--uninstall` printing the steps, changing nothing. `scripts/stamp-install.sh`
+and three lines of `.goreleaser.yaml` (a before-hook, `release.extra_files`,
+`checksum.extra_files`; `/install.sh` gitignored). `make installer-test` /
+`installer-check` and CI's `installer` job, in the gate's `needs`.
+
+**Tests.** `scripts/install-test` (25 tests, about 15 s under one shell): the
+real script against an HTTPS httptest server of fake releases, in a session of
+its own (no controlling terminal), a temporary HOME, a PATH of linked real
+tools and stubs (systemctl, loginctl, sudo, su, uname, id, getent, getconf,
+date, sleep, ip, hostname), and a fake bridge that refuses undefined flags and
+records its calls. Contract tests against the real code: cmd/bridge's
+`TestTheInstallerCallsTheBridgeWithFlagsItDefines` (every flag the script
+passes or prints is in the subcommand's own `-h`), `TestTheInstallersFakeBridgeTakesOnlyRealFlags`,
+`TestTheInstallerReadsWhatBridgeVersionAndStatusPrint` (the real `bridge
+version` and `writeStatusHuman` output through the script's own parsers) and
+`TestTheInstallerMatchesWhatBridgeUpdatePrints` (updateCmd's literal, by AST);
+internal/packaging's `TestTheInstallerReadsTheUnitInitWrites` (the template
+rendered, read by the script's read_unit; an escaped path refused). Locally on
+orion (macOS) the suite passed under sh, dash, `bash --posix` and ksh.
+Not run here: shellcheck, BusyBox's sh, GNU wget and goreleaser, which this
+host does not have (CI's installer job installs the first three; the snapshot
+is the orchestrator's).
+
+**Negative controls**, on d6e580dd, each restored from git with the tree clean
+after; predicted, then run:
+
+- C1, `run_init` dropped: the fresh-install test red, file and piped, exit 1
+  at "bridge init finished, but … 0 ExecStart lines". As predicted.
+- C2, the unit not looked for: every upgrade subtest red, "in its own place"
+  exit 4, the rest exit 3. As predicted.
+- C3, the SHA-256 comparison off: "tampered archive" alone red, exit 0. As
+  predicted.
+- C4, 32-bit ARM taken as arm64: armv7l and armv6l red, exit 0. As predicted.
+- C5, Darwin let through: Darwin/arm64 alone red, exit 0. As predicted.
+- C6, `--version` ignored: "version 0.2.1", "version v0.2.1" (v0.2.2 asked),
+  "unpublished" (exit 0) and "unstamped" (exit 2) red. As predicted.
+- C7, `--no-init` ignored: red, exit 4. As predicted.
+- C8, the no-terminal path reading standard input: red at the 90 s run
+  timeout. As predicted.
+- C9, a bare `[ … ] || main "$@"` last (a trailing `# }` kept the structural
+  check): red at the 42786-byte prefix ending in `|| main`, which printed the
+  banner and ran. As predicted.
+- C10, the uid 0 check dropped: both root subtests and uninstall-as-root red,
+  exit 0. As predicted.
+- C11, an unchanged version after `bridge update` taken as up to date: the
+  orphan and the failed-check subtests red, exit 0, as predicted, and "the
+  latest already" too, which I had not predicted: the mutation also skipped
+  the "is the latest release" line it asserts.
+- C12, the unit's rm printed before `disable --now`: red, "comes too early".
+  As predicted.
+- C13, the staged program copied over the target: red, "written in place, not
+  renamed into place" (the inode kept; on Linux the copy fails ETXTBSY). As
+  predicted.
+- C14, cleanup keeping the staged file: red, `.bridge.install.<pid>` left. As
+  predicted.
+- C15, `ensure_linger` dropped from the fresh install: the four "by …"
+  lingering subtests, the fresh-install test and "started by lingering" red,
+  as predicted, and "not at all" too, which I had predicted green: it asserts
+  the warning ensure_linger prints.
+- C16, the XDG_RUNTIME_DIR fallback dropped: "through the runtime directory"
+  alone red, exit 4. As predicted.
+- C17, `check_storage` dropped: the three volatile subtests red, Volumio
+  green. As predicted.
+- C18, the stamp also rewriting REPO_URL with its line check off: red, "2
+  lines changed, want 1". As predicted.
+- C19, `install.sh` out of `release.extra_files`: the wiring test red. As
+  predicted.
+- C20, `--music` for `--library`: the cmd/bridge contract test red. As
+  predicted.
+- C21, the template's ExecStart unquoted: packaging's contract test red in its
+  two readable cases. As predicted.
+- C22, any wget taken: "BusyBox wget" red, exit 1. As predicted.
+- C23, the system-unit check off: "a system service" alone red, exit 0. As
+  predicted.
+- C24, `check_clock` dropped: red, exit 0. As predicted.
+
+shellcheck does not run on orion, so the script and the stubs were read for
+what it reports, and four were fixed in 4e50591c: `$(ls -A …)` parsed for an
+empty folder (SC2012, now a loop over the folder's entries), a quoted `'~/'`
+case pattern (SC2088), the update's status shared with the pipeline's
+subshell (SC2030, SC2031), and environment variables read bare (SC2154). Two
+tests were made sharper there, with their own controls, on 4e50591c:
+
+- C25, `folder_is_empty` always true: the terminal test red, "a folder with
+  music in it was called empty". As predicted.
+- C26, `--uninstall` not naming what a linked program leads to: "through a
+  link" red. As predicted.
+
+**Found and not fixed** (backlog, not this PR): packaging writes the user unit
+under `$HOME/.config/systemd/user` while systemd reads
+`$XDG_CONFIG_HOME/systemd/user` when that is set; `uninstallSystemd` ignores a
+failed `systemctl --user disable --now` before it removes the unit; `bridge
+update`'s ErrPathNotWritable advice ("try sudo bridge update") is wrong for a
+per-user install; init's `--yes` requires `--library` before its
+keep-existing-config branch (the installer never runs init over a config, so
+it does not reach it).
+
+**The rules file.** `.claude/rules/` could not be written from the worker's
+headless session (a protected path); the bullet for config-lifecycle.md and its
+`paths:` globs were handed to the orchestrator as an OLD/NEW note, to land in
+this PR with the code.
