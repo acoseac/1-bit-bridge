@@ -321,8 +321,9 @@ check_user() {
 	USER_ID=$(id -u)
 	USER_NAME=$(id -un 2>/dev/null) || USER_NAME=$USER_ID
 	if [ "$USER_ID" = 0 ]; then
-		if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
-			stop 3 "Run this installer without sudo, as $SUDO_USER: it installs the bridge as $SUDO_USER's own service," \
+		cu_sudo_user=${SUDO_USER:-}
+		if [ -n "$cu_sudo_user" ] && [ "$cu_sudo_user" != root ]; then
+			stop 3 "Run this installer without sudo, as $cu_sudo_user: it installs the bridge as $cu_sudo_user's own service," \
 				"and asks for sudo itself for the one step that needs it. Nothing was changed."
 		fi
 		stop 3 "Run this installer as the user the bridge should run as, not as root: it installs the bridge as that user's own service," \
@@ -621,6 +622,16 @@ usable_folder() {
 	[ -d "$1" ] && [ -r "$1" ] && [ -x "$1" ]
 }
 
+# folder_is_empty DIR tells whether DIR holds no entry, dot entries included.
+folder_is_empty() {
+	for fe_entry in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+		if [ -e "$fe_entry" ] || [ -L "$fe_entry" ]; then
+			return 1
+		fi
+	done
+	return 0
+}
+
 # choose_library offers the music folders this kind of box keeps its music in
 # that are here (Volumio's and moOde's own, and ~/Music), or asks for one,
 # and sets LIBRARY to the answer. Without a terminal it asks nothing and only
@@ -656,7 +667,7 @@ choose_library() {
 	for cl_dir in "$@"; do
 		cl_count=$((cl_count + 1))
 		cl_note=''
-		if [ -z "$(ls -A "$cl_dir" 2>/dev/null)" ]; then
+		if folder_is_empty "$cl_dir"; then
 			cl_note=' (empty now)'
 		fi
 		warn "  $cl_count) $cl_dir$cl_note"
@@ -700,7 +711,7 @@ ask_library_path() {
 		IFS= read -r alp_answer <&3 || stop 1 "" "No answer; nothing was installed."
 		case $alp_answer in
 		'~') alp_answer=$HOME ;;
-		'~/'*) alp_answer=$HOME/${alp_answer#'~/'} ;;
+		'~'/*) alp_answer=$HOME/${alp_answer#'~'/} ;;
 		esac
 		[ -n "$alp_answer" ] || continue
 		case $alp_answer in
@@ -1048,10 +1059,12 @@ run_update() {
 	ru_config=$2
 	ru_before=$3
 	say "" "Updating with bridge update, which checks your paired devices before it installs anything:"
+	# The pipeline runs this group in a subshell of its own, so its status
+	# comes back through a file.
 	{
-		ru_status=0
-		"$ru_bin" update --yes --config "$ru_config" </dev/null || ru_status=$?
-		printf '%s\n' "$ru_status" >"$TMP_DIR/update.status"
+		ru_code=0
+		"$ru_bin" update --yes --config "$ru_config" </dev/null || ru_code=$?
+		printf '%s\n' "$ru_code" >"$TMP_DIR/update.status"
 	} 2>&1 | tee "$TMP_DIR/update.log"
 	ru_status=$(cat "$TMP_DIR/update.status" 2>/dev/null) || ru_status=1
 	ru_after=$(bridge_version "$ru_bin") || ru_after=''
@@ -1145,6 +1158,10 @@ print_uninstall() {
 			"  systemctl --user daemon-reload"
 		if [ -n "$INSTALLED_BIN" ]; then
 			say "  rm -f $(sh_quote "$INSTALLED_BIN") $(sh_quote "$INSTALLED_BIN.bak")"
+			pu_real=$(readlink -f "$INSTALLED_BIN" 2>/dev/null) || pu_real=''
+			if [ -n "$pu_real" ] && [ "$pu_real" != "$INSTALLED_BIN" ]; then
+				say "  rm -f $(sh_quote "$pu_real") $(sh_quote "$pu_real.bak")    # the program the link above leads to"
+			fi
 		else
 			say "  and remove the program the service's ExecStart line names, with its .bak beside it"
 		fi
@@ -1166,7 +1183,7 @@ print_uninstall() {
 		say "The bridge is not installed for $USER_NAME here: there is nothing to remove."
 		return 0
 	fi
-	say "" "Lingering stays on for $USER_NAME, since other services of yours may need it; loginctl disable-linger turns it off." \
+	say "" "Lingering is left as it is, since other services of yours may need it (loginctl disable-linger turns it off for all of them)." \
 		"This installer removed nothing."
 }
 

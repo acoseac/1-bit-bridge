@@ -4,13 +4,15 @@
 # or STUB_SELF_LINGER for a session polkit lets turn on its own; it starts the
 # user manager, so the user bus comes up (STUB_STATE/bus-up) unless
 # STUB_LINGER_NO_BUS.
-printf 'loginctl %s\n' "$*" >>"$STUB_LOG"
+log=${STUB_LOG:?}
+state=${STUB_STATE:?}
+printf 'loginctl %s\n' "$*" >>"$log"
 if [ "${1:-}" = --no-ask-password ]; then
 	shift
 fi
 case ${1:-} in
 show-user)
-	if [ -f "$STUB_STATE/linger" ]; then
+	if [ -f "$state/linger" ]; then
 		echo Linger=yes
 	else
 		echo Linger=no
@@ -18,9 +20,9 @@ show-user)
 	;;
 enable-linger)
 	if [ -n "${STUB_AS_ROOT:-}" ] || { [ -z "${2:-}" ] && [ -n "${STUB_SELF_LINGER:-}" ]; }; then
-		touch "$STUB_STATE/linger"
+		touch "$state/linger"
 		if [ -z "${STUB_LINGER_NO_BUS:-}" ]; then
-			touch "$STUB_STATE/bus-up"
+			touch "$state/bus-up"
 		fi
 		exit 0
 	fi

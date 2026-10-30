@@ -1,6 +1,6 @@
 #!/bin/sh
 # getconf for the installer's tests: LONG_BIT is STUB_LONG_BIT, else 64.
-printf 'getconf %s\n' "$*" >>"$STUB_LOG"
+printf 'getconf %s\n' "$*" >>"${STUB_LOG:?}"
 if [ "${1:-}" = LONG_BIT ]; then
 	printf '%s\n' "${STUB_LONG_BIT:-64}"
 	exit 0

@@ -1,6 +1,6 @@
 #!/bin/sh
 # date for the installer's tests: +%Y is STUB_YEAR, else 2026.
-printf 'date %s\n' "$*" >>"$STUB_LOG"
+printf 'date %s\n' "$*" >>"${STUB_LOG:?}"
 if [ "${1:-}" = +%Y ]; then
 	printf '%s\n' "${STUB_YEAR:-2026}"
 	exit 0

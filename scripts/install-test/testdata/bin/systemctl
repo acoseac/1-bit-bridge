@@ -9,7 +9,9 @@
 # STUB_RESTART_FAILS fails a restart; STUB_SERVICE_FAILS makes the service
 # exit as it starts; STUB_SERVED_FROZEN keeps serving the release that ran
 # before.
-printf 'systemctl %s\n' "$*" >>"$STUB_LOG"
+log=${STUB_LOG:?}
+state=${STUB_STATE:?}
+printf 'systemctl %s\n' "$*" >>"$log"
 UNIT=com.acoseac.1-bit-bridge.service
 if [ "${1:-}" != --user ]; then
 	echo 'stub systemctl: only --user' >&2
@@ -18,10 +20,10 @@ fi
 shift
 
 bus_up() {
-	if [ -z "${STUB_NO_BUS:-}" ] || [ -f "$STUB_STATE/bus-up" ]; then
+	if [ -z "${STUB_NO_BUS:-}" ] || [ -f "$state/bus-up" ]; then
 		return 0
 	fi
-	[ -n "${STUB_BUS_RUNTIME:-}" ] && [ "${XDG_RUNTIME_DIR:-}" = "$STUB_BUS_RUNTIME" ]
+	[ -n "${STUB_BUS_RUNTIME:-}" ] && [ "${XDG_RUNTIME_DIR:-}" = "${STUB_BUS_RUNTIME:-}" ]
 }
 
 start_unit() {
@@ -38,15 +40,15 @@ start_unit() {
 		return 5
 	fi
 	if [ -n "${STUB_SERVICE_FAILS:-}" ]; then
-		rm -f "$STUB_STATE/active"
+		rm -f "$state/active"
 		return 0
 	fi
-	touch "$STUB_STATE/active"
-	if [ -n "${STUB_SERVED_FROZEN:-}" ] && [ -f "$STUB_STATE/served" ]; then
+	touch "$state/active"
+	if [ -n "${STUB_SERVED_FROZEN:-}" ] && [ -f "$state/served" ]; then
 		return 0
 	fi
 	bin=$(sed -n 's/^ExecStart="\([^"]*\)".*/\1/p' "$unit")
-	"$bin" version | sed -n 's/^1-bit-bridge \([^ ]*\).*/\1/p' >"$STUB_STATE/served"
+	"$bin" version | sed -n 's/^1-bit-bridge \([^ ]*\).*/\1/p' >"$state/served"
 }
 
 if ! bus_up; then
@@ -82,7 +84,7 @@ is-active)
 	if [ "${1:-}" = --quiet ]; then
 		quiet=1
 	fi
-	if [ -f "$STUB_STATE/active" ]; then
+	if [ -f "$state/active" ]; then
 		[ "$quiet" = 1 ] || echo active
 		exit 0
 	fi

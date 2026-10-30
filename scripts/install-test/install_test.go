@@ -816,7 +816,10 @@ func TestAFreshInstallAsksOnTheTerminal(t *testing.T) {
 			t.Errorf("sudo asked after bridge init:\n%s", calls)
 		}
 		mustSay(t, res, "Found moOde audio player, on Raspbian GNU/Linux 12 (bookworm), amd64.",
-			"1) "+filepath.Join(r.root, "mnt", "SDCARD")+" (empty now)", "2) "+media, "4) another folder")
+			"1) "+filepath.Join(r.root, "mnt", "SDCARD")+" (empty now)", "2) "+media+"\n", "4) another folder")
+		if strings.Contains(res.output(), "2) "+media+" (empty now)") {
+			t.Errorf("a folder with music in it was called empty")
+		}
 	})
 }
 
@@ -1628,6 +1631,20 @@ func TestUninstallPrintsTheStepsAndChangesNothing(t *testing.T) {
 					t.Errorf("--uninstall called %s: %q", who, r.callsTo(who))
 				}
 			}
+		})
+		t.Run("through a link", func(t *testing.T) {
+			r := newRig(t, sh)
+			real := filepath.Join(r.home, "bridge-0.2.1", "bridge")
+			link := filepath.Join(r.home, "bin", "bridge")
+			r.installed("0.2.1", real, r.configFile())
+			writeFile(t, r.unitFile(), []byte(unitText(link, r.configFile())), 0o644)
+			mkdirAll(t, filepath.Dir(link))
+			if err := os.Symlink(real, link); err != nil {
+				t.Fatal(err)
+			}
+			res := r.run("--uninstall")
+			mustExit(t, res, 0)
+			mustSay(t, res, "rm -f "+link+" "+link+".bak", "rm -f "+real+" "+real+".bak")
 		})
 		t.Run("nothing installed", func(t *testing.T) {
 			r := newRig(t, sh)

@@ -24,7 +24,11 @@
 
 VERSION='@VERSION@'
 UNIT=com.acoseac.1-bit-bridge.service
-printf 'bridge %s\n' "$*" >>"$STUB_LOG"
+log=${STUB_LOG:?}
+state=${STUB_STATE:?}
+update=${FAKE_UPDATE:-}
+update_version=${FAKE_UPDATE_VERSION:-}
+printf 'bridge %s\n' "$*" >>"$log"
 
 refuse_flag() {
 	printf 'flag provided but not defined: %s\n' "$1" >&2
@@ -97,7 +101,7 @@ do_init() {
 			name=$answer
 		fi
 	fi
-	printf 'fake init read name %s\n' "$name" >>"$STUB_LOG"
+	printf 'fake init read name %s\n' "$name" >>"$log"
 	if [ -n "${FAKE_INIT_FAILS:-}" ]; then
 		echo '[FAIL] port-api          :7788 in use'
 		echo 'fix the fail(s) above, or re-run with --skip-doctor to bypass.'
@@ -133,7 +137,7 @@ do_update() {
 		exit 2
 	fi
 	echo "Current: $VERSION (channel stable)"
-	case ${FAKE_UPDATE:-} in
+	case $update in
 	latest)
 		echo "Latest:  $VERSION"
 		echo "You're already running the latest release."
@@ -145,7 +149,7 @@ do_update() {
 		exit 0
 		;;
 	compat)
-		echo "Latest:  $FAKE_UPDATE_VERSION"
+		echo "Latest:  $update_version"
 		echo "Install failed: install would orphan a paired iOS client below the candidate's MinClientVersion floor: iPhone (1.0.0)" >&2
 		echo '' >&2
 		echo 'The candidate release would orphan a still-paired older iOS device.' >&2
@@ -154,18 +158,18 @@ do_update() {
 		exit 1
 		;;
 	ok | restartfail)
-		echo "Latest:  $FAKE_UPDATE_VERSION"
+		echo "Latest:  $update_version"
 		real=$(self_path)
 		new=$real.new.$$
-		if ! cp "$FAKE_UPDATE_TO" "$new"; then
+		if ! cp "${FAKE_UPDATE_TO:?}" "$new"; then
 			exit 1
 		fi
 		chmod 0755 "$new"
 		rm -f "$real.bak"
 		ln "$real" "$real.bak"
 		mv -f "$new" "$real"
-		echo "Installed $FAKE_UPDATE_VERSION."
-		if [ "$FAKE_UPDATE" = restartfail ]; then
+		echo "Installed $update_version."
+		if [ "$update" = restartfail ]; then
 			echo 'restart: systemctl --user restart com.acoseac.1-bit-bridge.service: exit status 1' >&2
 			exit 1
 		fi
@@ -194,11 +198,11 @@ do_status() {
 		echo 'status: probe 127.0.0.1:7789: HTTP 401: unauthorized' >&2
 		exit 1
 	fi
-	if [ ! -f "$STUB_STATE/active" ]; then
+	if [ ! -f "$state/active" ]; then
 		echo 'bridge: not running on 127.0.0.1:7789' >&2
 		exit 1
 	fi
-	served=$(cat "$STUB_STATE/served")
+	served=$(cat "$state/served")
 	printf '%-18s %s\n' 'Library:' box 'Server version:' "$served (protocol v1)" 'Uptime:' 1s \
 		'Tracks indexed:' 0 'Scanning:' idle 'Listen address:' ':7788' \
 		'Admin address:' "${FAKE_ADMIN_ADDRESS:-127.0.0.1:7789}" 'Fingerprint:' 'AA:BB:CC'
