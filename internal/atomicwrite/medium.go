@@ -47,6 +47,50 @@ const maxOverlayDepth = 8
 // Exhausting them is inconclusive, never proof of another filesystem.
 const totalsRounds = 3
 
+// Medium is what the medium check found of a root's storage: its verdict,
+// which the strict writer's admission reads (mediumOf), and the name of the
+// storage where the check identified it, which bridge doctor shows
+// (InspectMedium). Both come from one inspection (inspectMedium).
+type Medium struct {
+	// Storage names the storage the check took, where it identified it, and
+	// is empty where it found no volatile layer and says no more.
+	Storage string
+	// Err is nil for a root the check takes, and otherwise its refusal:
+	// ErrVolatile, ErrMediumUnknown (ErrOverlayBind among them), or the
+	// error of a statfs of the root that failed.
+	Err error
+}
+
+// mediumReaders are what the medium check reads: statfs, the mount table, a
+// path's mount ID, which must follow a final link as statfs does
+// (upperMountID on Linux), and the box's own files that show Volumio's boot
+// layout (bootFiles), nil where none are read.
+type mediumReaders struct {
+	statfs    func(string) (fsStat, error)
+	mountinfo func() ([]byte, error)
+	idOf      func(string) (uint64, bool, error)
+	boot      bootFiles
+}
+
+// bootFiles is what the medium check reads of a box, besides statfs and the
+// mount table, to tell Volumio's boot layout: a file's bytes, a directory's
+// entries, where a path leads once its links are resolved, and whether
+// anything is there. Each path is absolute and slash-separated, as Linux
+// names it, whatever the system the tests run on.
+type bootFiles interface {
+	ReadFile(name string) ([]byte, error)
+	ReadDir(name string) ([]bootEntry, error)
+	Resolve(name string) (string, error)
+	Exists(name string) (bool, error)
+}
+
+// bootEntry is one entry of a directory bootFiles lists: its name, and
+// whether it is a directory, never a link to one.
+type bootEntry struct {
+	name string
+	dir  bool
+}
+
 // upperMountID follows an overlay's upper path before reading its mount ID,
 // as statfs and stat do. mountIDOf deliberately does not follow a final link:
 // strictPath uses it to detect mounted entries without walking links. Resolve
@@ -66,19 +110,38 @@ func mediumOn(root string, id uint64, statfs func(string) (fsStat, error), mount
 	return mediumFrom(root, id, statfs, mountinfo, upperMountID)
 }
 
-// mediumFrom is the medium check on what statfs, the mount table and the
-// mount IDs answer: nil for a root on storage the check finds no volatile
-// layer in, ErrVolatile for one that does not keep what is written to it
-// through a reboot, and ErrMediumUnknown where it cannot read what it must,
-// failing closed (strictPath.storage). It refuses what it can tell is
-// volatile and what it cannot read, and does not try to prove every stack
-// persistent, which no check from outside can: ext4 on a zram device or on a
-// loop image kept in tmpfs, and an NFS export written async, read as a disk
-// does (the orchestrator's scope on round 10's review); the data directory
-// must be on persistent storage, and those are the operator's to avoid.
+// mediumFrom is the medium check's verdict (inspectMedium) on what statfs,
+// the mount table and the mount IDs answer, with none of the box's own files
+// read.
+func mediumFrom(root string, id uint64, statfs func(string) (fsStat, error), mountinfo func() ([]byte, error), idOf func(string) (uint64, bool, error)) error {
+	return inspectMedium(root, id, mediumReaders{statfs: statfs, mountinfo: mountinfo, idOf: idOf}).Err
+}
+
+// inspectMedium is the medium check on what r reads: a Medium whose Err is
+// nil for a root on storage the check finds no volatile layer in,
+// ErrVolatile for one that does not keep what is written to it through a
+// reboot, and ErrMediumUnknown where it cannot read what it must, failing
+// closed (strictPath.storage).
+func inspectMedium(root string, id uint64, r mediumReaders) Medium {
+	storage, err := r.medium(root, id)
+	if err != nil {
+		return Medium{Err: err}
+	}
+	return Medium{Storage: storage}
+}
+
+// medium is the medium check itself (inspectMedium), on what r reads: the
+// name of the storage it took, where it identified it, or its refusal. It
+// refuses what it can tell is volatile and what it cannot read, and does not
+// try to prove every stack persistent, which no check from outside can: ext4
+// on a zram device or on a loop image kept in tmpfs, and an NFS export
+// written async, read as a disk does (the orchestrator's scope on round 10's
+// review); the data directory must be on persistent storage, and those are
+// the operator's to avoid.
 //
-// idOf must follow the final symlink, consistently with statfs (upperMountID
-// on Linux). id is the root's mount ID, which the writer already holds.
+// r.idOf must follow the final symlink, consistently with statfs
+// (upperMountID on Linux). id is the root's mount ID, which the writer
+// already holds.
 // tmpfs and ramfs are told by their f_type. An overlay keeps what is written to it in its
 // upper layer: the one the mount table names on the line of the overlay's
 // own mount ID (overlayLayer), never on a line picked by its mount point's
@@ -117,11 +180,11 @@ func mediumOn(root string, id uint64, statfs func(string) (fsStat, error), mount
 // rejected syncing through another mount of the superblock and syncfs, whose
 // errors overlayfs reports only on recent kernels). Our own unit adds no
 // sandboxing, and an overlay root's own mount, Volumio's shape, is taken.
-func mediumFrom(root string, id uint64, statfs func(string) (fsStat, error), mountinfo func() ([]byte, error), idOf func(string) (uint64, bool, error)) error {
+func (r mediumReaders) medium(root string, id uint64) (string, error) {
 	path := root
-	st, err := statfs(path)
+	st, err := r.statfs(path)
 	if err != nil {
-		return err
+		return "", err
 	}
 	// on is the overlays on the way down to the storage, each "an overlay
 	// whose upper layer U is on ".
@@ -139,60 +202,60 @@ func mediumFrom(root string, id uint64, statfs func(string) (fsStat, error), mou
 	for depth := 0; ; depth++ {
 		switch st.Type {
 		case tmpfsMagic:
-			return fmt.Errorf("%w: %s is on %stmpfs", ErrVolatile, root, on)
+			return "", fmt.Errorf("%w: %s is on %stmpfs", ErrVolatile, root, on)
 		case ramfsMagic:
-			return fmt.Errorf("%w: %s is on %sramfs", ErrVolatile, root, on)
+			return "", fmt.Errorf("%w: %s is on %sramfs", ErrVolatile, root, on)
 		case fuseMagic:
-			if err := fuseMedium(root, on, id, mountinfo); err != nil {
-				return err
+			if err := fuseMedium(root, on, id, r.mountinfo); err != nil {
+				return "", err
 			}
-			return taken()
+			return "", taken()
 		case overlayfsMagic:
 		default:
-			return taken()
+			return "", taken()
 		}
 		if depth == maxOverlayDepth {
-			return fmt.Errorf("%w: %s is on %soverlays more than %d deep", ErrMediumUnknown, root, on, maxOverlayDepth)
+			return "", fmt.Errorf("%w: %s is on %soverlays more than %d deep", ErrMediumUnknown, root, on, maxOverlayDepth)
 		}
-		table, err := mountinfo()
+		table, err := r.mountinfo()
 		if err != nil {
-			return fmt.Errorf("%w: %s is on %san overlay, and the mount table that names its upper layer cannot be read: %w", ErrMediumUnknown, root, on, err)
+			return "", fmt.Errorf("%w: %s is on %san overlay, and the mount table that names its upper layer cannot be read: %w", ErrMediumUnknown, root, on, err)
 		}
 		layer, err := overlayLayer(table, id)
 		switch {
 		case err != nil:
-			return fmt.Errorf("%w: %s is on %san overlay: %w", ErrMediumUnknown, root, on, err)
+			return "", fmt.Errorf("%w: %s is on %san overlay: %w", ErrMediumUnknown, root, on, err)
 		case layer.volatile:
-			return fmt.Errorf("%w: %s is on %san overlay mounted volatile, which skips every sync of its upper layer, so nothing written there outlives a crash", ErrVolatile, root, on)
+			return "", fmt.Errorf("%w: %s is on %san overlay mounted volatile, which skips every sync of its upper layer, so nothing written there outlives a crash", ErrVolatile, root, on)
 		case depth == 0 && layer.mountRoot != "/":
 			bound = layer.mountRoot
 		}
 		switch {
 		case layer.upper == "":
 			if depth == 0 {
-				return nil // The root's own mount is read-only; a write fails EROFS.
+				return "", nil // The root's own mount is read-only; a write fails EROFS.
 			}
-			return fmt.Errorf("%w: %s is on %sa read-only overlay: the upper path reaches a read-only overlay, which cannot be a writable overlay's upper layer", ErrMediumUnknown, root, on)
+			return "", fmt.Errorf("%w: %s is on %sa read-only overlay: the upper path reaches a read-only overlay, which cannot be a writable overlay's upper layer", ErrMediumUnknown, root, on)
 		case !strings.HasPrefix(layer.upper, "/"):
 			// The mount table is Linux's, so a path in it is absolute by its
 			// leading slash, never by what filepath says on the system the
 			// tests run on (on Windows it wants a drive).
-			return fmt.Errorf("%w: %s is on %san overlay whose upper layer the mount table names by a relative path, %s, which reaches nothing certain here", ErrMediumUnknown, root, on, layer.upper)
+			return "", fmt.Errorf("%w: %s is on %san overlay whose upper layer the mount table names by a relative path, %s, which reaches nothing certain here", ErrMediumUnknown, root, on, layer.upper)
 		}
-		upper, err := upperAsReached(root, on, path, layer.upper, st, statfs, func(u fsStat) (string, error) {
-			return upperMountEvidence(layer.upper, u.Device, table, idOf)
+		upper, err := upperAsReached(root, on, path, layer.upper, st, r.statfs, func(u fsStat) (string, error) {
+			return upperMountEvidence(layer.upper, u.Device, table, r.idOf)
 		})
 		if err != nil {
-			return err
+			return "", err
 		}
 		on += "an overlay whose upper layer " + layer.upper + " is on "
 		if upper.Type == overlayfsMagic || upper.Type == fuseMagic {
-			next, ok, err := idOf(layer.upper)
+			next, ok, err := r.idOf(layer.upper)
 			switch {
 			case err != nil:
-				return fmt.Errorf("%w: %s is on %sa filesystem whose mount cannot be told: %w", ErrMediumUnknown, root, on, err)
+				return "", fmt.Errorf("%w: %s is on %sa filesystem whose mount cannot be told: %w", ErrMediumUnknown, root, on, err)
 			case !ok:
-				return fmt.Errorf("%w: %s is on %sa filesystem the platform gives no mount ID for", ErrMediumUnknown, root, on)
+				return "", fmt.Errorf("%w: %s is on %sa filesystem the platform gives no mount ID for", ErrMediumUnknown, root, on)
 			}
 			id = next
 		}
