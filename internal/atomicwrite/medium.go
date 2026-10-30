@@ -116,6 +116,42 @@ func platformMedium(root string, mountID uint64) error {
 	return platformInspect(root, mountID).Err
 }
 
+// InspectMedium is the medium check the strict writer makes of root, for a
+// caller that reports what it finds rather than writes (bridge doctor): root
+// made absolute and its links resolved, as the writer resolves a root, the
+// mount it lies on by the identity the platform gives it, and the platform's
+// inspection (platformInspect), the one whose verdict the writer's admission
+// reads (platformMedium), so the two cannot tell one root apart. Its error is
+// a root that cannot be resolved (fs.ErrNotExist for one that is not there)
+// or whose mount the platform cannot tell (ErrMountsUnknown), and the
+// Medium's Err is the check's refusal. It takes every root on macOS, and on
+// Windows, where the writer refuses before it asks (ErrNoDirectoryBarrier),
+// it asks nothing. A Medium the check takes says nothing of the rest of a
+// write's admission: the path below root, its mounts and its barriers.
+func InspectMedium(root string) (Medium, error) {
+	if root == "" {
+		return Medium{}, fmt.Errorf("%w: no root was given", ErrNotUnderRoot)
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return Medium{}, err
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return Medium{}, err
+	}
+	id, ok, err := mountIDOf(resolved)
+	switch {
+	case err != nil:
+		return Medium{}, err
+	case !ok && mountIDsExpected:
+		return Medium{}, fmt.Errorf("%w: the platform gives no mount ID for %s", ErrMountsUnknown, resolved)
+	case !ok:
+		return Medium{}, nil
+	}
+	return platformInspect(resolved, id), nil
+}
+
 // mediumFrom is the medium check's verdict (inspectMedium) on what statfs,
 // the mount table and the mount IDs answer, with none of the box's own files
 // read.
