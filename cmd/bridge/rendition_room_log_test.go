@@ -34,10 +34,14 @@ func blockedUnder(t *testing.T, root string) string {
 }
 
 // probeCause is what a probe's failure says of the OS on this platform: the
-// call that failed.
+// call that failed, "stat" or "statfs" on POSIX. On Windows it is "": which
+// probe fails first there depends on how the OS reads a directory below a
+// file (the free-space probe's GetDiskFreeSpaceEx of the file, or the volume
+// probe's open of the directory), so the role and the absence of the
+// directory are what a Windows run asserts.
 func probeCause() string {
 	if runtime.GOOS == "windows" {
-		return "GetDiskFreeSpaceEx"
+		return ""
 	}
 	return "stat"
 }
