@@ -66615,3 +66615,148 @@ goes from 18 to 20, with the runbook's five current references, its step 1,
 and a note of what 20 covers.
 
 **Round 2:** an uninterpretable root-hub speed leaves the USB listing incomplete (reader and Resolve regressions red before the fix, green after); PROTOCOL.md now names all three causes of `identity_incomplete`; the qualification note now distinguishes unchanged wire fields and schema from existing `reason` values that may differ.
+
+## 2026-10-30 — B604: the 0.2.2 logging audit: no library path, operator directory, config path or client address in a log line or a console body
+
+The release's logging audit (`docs/release-process.md`, Process, step 1)
+was a read-only pass over `v0.2.1..e242ce2c`, amended by two reviews. It
+found no bearer token or pairing code reaching a log or a body, and these
+leaks, each confirmed against the code before it was fixed: the MP4 walks'
+warnings, the on-demand rendition pre-flight's disk errors, the config
+save refusals in console 500s, the DLNA served-address refusal, the strict
+SSDP reply's refusal, and the loopback route's panic line. The CLI's
+stderr paths (`bridge output play`, `output dsd-test`: the operator's own
+files, in output the operator runs, never reached by serve) and the ALSA
+`/proc/asound` and `/dev/snd` paths (system paths) were kept, as the
+review decided.
+
+### Red first (a3ac6809)
+
+Each case drives its site with an error that carries an absolute path or
+a peer address, through the logger the component uses (an injected one
+where it has one) at every level, searches every string a handler could
+write for each record (`loggingtest.Strings`, `Recorder.Carrying`), and
+asserts the line it expects. On e242ce2c, with the test's temp directory
+written `<tmp>`:
+
+- `WARN mp4 codec walk failed; falling back to extension classification
+  path=<tmp>/Private Library/Artist/Album/01 Song.m4a err=read <tmp>/Private
+  Library/Artist/Album/01 Song.m4a: input/output error`, and so for the
+  sample-rate and the ALAC bit-depth walks; the duration, genre, advisory
+  and rating walks named the file relative and the error absolute. The
+  source (`pathFailingSource`) serves a minimal ALAC M4A and fails every
+  read after N walks with an `*fs.PathError`, as an `*os.File` does, and
+  `faultNotingSource` hands that error to the parser unchanged.
+- `statfs "<tmp>/Private Volume/variants": no such file or directory`
+  (AvailableDiskSpace), `stat <tmp>/Private Volume/variants: no such file
+  or directory` (volumeID), and `insufficient disk space: needs … (1.10
+  safety margin) on "<tmp>/Private Volume/variants", … available`.
+- Through the real API handler and adapter (`stampBridge`): `ERROR
+  upscale: enqueue failed path=Fixture/PCM/01.flac err=check free space for
+  the rendition: statfs "<tmp>/Private Volume/a file/variants": not a
+  directory`, the no-room Warn, and a stale download's re-render at Warn
+  and Debug, each with the directory.
+- A console 500 save-config whose message was the refusal's text:
+  `<tmp>/bridge.yaml was changed or removed by another writer …`, and for
+  a filesystem with no lock manager the lock file too (`flock <tmp>/Private
+  Config/.bridge.yaml.lock: no locks available`), with no log line at all.
+- `WARN DLNA refused a connection to an address it does not serve: …
+  address=100.64.0.7 interface=utun7 from=100.64.0.99`, and the same for
+  IPv6, a mapped peer and an M-SEARCH.
+- `err=write udp 192.168.1.20:54321->192.168.1.30:50000: sendmsg: network
+  is unreachable` in the strict reply's refusal, and `err=injected` for an
+  error with no errno.
+- `http: panic serving 127.0.0.1:50811: the test's own panic` from the
+  loopback route's server, which had no `ErrorLog`.
+
+### The fixes (b402d30a)
+
+At the producer where one could be fixed there, with `errors.Is` and
+`errors.As` answering as before:
+
+- The MP4 walks' seven warnings log `trackLogPath` and `walkErrReason`.
+  `walkErrReason` is `fsutil.ErrorWithoutPath` now, one reading for every
+  package (the API's `redactWalkErr` and the scanner's `walkErrReason` were
+  each private to their package, and transcode could reach neither).
+  `faultNotingSource` keeps the error as it is: the read faults decide on
+  it (`readIncompleteError`, `endOfFile`, `seekOffsetRefused`).
+- `AvailableDiskSpace`, `volumeID` and `TotalDiskSpace`, POSIX and
+  Windows, answer a `probeError` (the call and the errno, `Unwrap` the
+  cause, os.Stat's `*fs.PathError` included); `InsufficientDiskSpaceError`
+  carries `Role` and says the role's volume, and keeps `Dir`, which the
+  batch tests compare; `roomOn` names its directory's role, the volume
+  comparison both. `ErrUpscaleNoRoom`'s decision is unchanged.
+- `writeSaveConfigErr` answers 500 save-config with `saveConfigRefusal`'s
+  fixed message by class (busy: try again; no lock manager: mount with
+  local locking or start the lock service; changed outside the holder, in
+  the turn or under a repointed name: restart; a boot read that resolved
+  no file: restart once it resolves; a link to no file: point it;
+  anything else: the log) and logs the error at Error, where the config
+  file may be named (the bridge's own files in fault lines). The settings
+  PATCH, the variants dir, the root add and remove and the three UPnP
+  server writes go through it; a `cfgAbort` answers as it did.
+- `servedAddrs.admit` and `noteRefused` take no peer; neither caller
+  computes one.
+- `noteReplyRefusal` takes the stage and logs `replyFailure`: the
+  operation from an `*net.OpError` and an `*os.SyscallError`, the errno,
+  `timeout`, or `capability` / `unclassified` and `no errno`.
+- The loopback route's server takes `handshakelog.ErrorLog()`.
+
+### Controls (after b402d30a, each restored from HEAD, none committed)
+
+Each predicted, and each matched:
+
+1. The content-rating warning back to `"err", err`: both runs of
+   `TestAnMP4WalkThatCannotReadItsFileNamesNoAbsolutePath` red, on that
+   line alone.
+2. `AvailableDiskSpace` naming its directory again: the transcode probe
+   case and the `AvailableDiskSpaceNearest` assertion red, and in
+   cmd/bridge exactly the two cases that probe a blocked variants
+   directory; the volume-comparison and no-room cases green. 2b,
+   `InsufficientDiskSpaceError` quoting `Dir`: the two transcode no-room
+   cases and the two cmd/bridge no-room cases red.
+3. The console body back to `err.Error()`: all 16 save cases red, `fn`'s
+   own refusal green. 3b, the console's log line removed: the same 16 red
+   on "left no Error line", so the positive half bites.
+4. The refusal's peer put back (`served.go` and its test from a3ac6809,
+   the M-SEARCH caller passing the source again): every peer case red
+   (IPv4, IPv6, the mapped peer, both datagram cases, the listener's, the
+   real-loop M-SEARCH's), the strict reply's case green.
+5. The strict reply logging `err.Error()` again: all seven refusal shapes
+   red, the closed socket green.
+6. The loopback server's `ErrorLog` removed: the panic case red on the
+   missing placeholder and the client's address.
+
+### Rejected
+
+- `handshakelog.RedactPeers` for the strict reply's error: it keeps the
+  local end by design, and the line must name neither end.
+- Wrapping the strict reply's errors in `dialReply` instead: a transport
+  hands the sink whatever it got (the fake transport's errors never pass
+  through `dialReply`), so only the sink's classification holds for all.
+- Fixed messages inside internal/config: the CLI writers print the
+  refusal, path and all, to the operator's own terminal, which may name
+  it; only the console's body may not.
+- A static guard for every `http.Server` in internal/dlna: the
+  MediaServer's own server (`server.go`, since #303) has no `ErrorLog`
+  either, outside this delta; the loopback route has a runtime case.
+
+### Found and not fixed
+
+- The root add's and remove's own 500s for a failed wipe or prefix
+  delete (`wipe-tracks`, `delete-tracks`) still write the store's error
+  (B425's fixed-message rule); no protected value was found in them.
+- The MediaServer's `http.Server` keeps net/http's default logger, so a
+  recovered panic there names a renderer's address (the ContentDirectory's
+  `remoteAddr` class).
+- The other extractors' older warnings still name the absolute path (the
+  FLAC format read's, seen in these tests' own logs), as the privacy page
+  says.
+- The audit's note on `cmd/bridge/serve_player_output.go`'s `dsdPlayback`
+  model text (a port or uniqueModel binding's observed serial) was not
+  examined here.
+
+The rules lines are in `.p2/rules-b604.patch` on the branch (the sandbox
+could not write `.claude/`): scanner.md, jobs.md, admin-console.md,
+dlna-upnp.md, output.md, auth-tls.md and build-ci-tests.md; the long forms
+changed are in History-rules-jobs.md and History-rules-dlna-upnp.md.
