@@ -106,6 +106,14 @@ func TestTheSSDPAdvertiserAnswersOnlyASearchSentToAnAddressItServes(t *testing.T
 			if want := "refused an M-SEARCH to an address it does not serve"; !sink.waitFor(want, 5*time.Second) {
 				t.Errorf("no refusal in the log:\n%s", sink.String())
 			}
+			// The searcher is this test's socket on 127.0.0.1, which the
+			// refusal never names: it names the address searched and the
+			// interface holding it.
+			for _, line := range strings.Split(sink.String(), "\n") {
+				if strings.Contains(line, "refused an M-SEARCH") && strings.Contains(line, "127.0.0.1") {
+					t.Errorf("the refusal names the searcher:\n%s", line)
+				}
+			}
 			if got := firstAnswer(search, 5*defaultMSearchJitter); got != "" {
 				t.Errorf("a search judged as sent to %s was answered %q, want no answer", tc.as, got)
 			}

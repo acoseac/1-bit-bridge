@@ -24,6 +24,8 @@ package loggingtest
 
 import (
 	"context"
+	"encoding"
+	"encoding/json"
 	"fmt"
 	"log"
 	"log/slog"
@@ -47,6 +49,92 @@ func Record(t testing.TB) *Recorder {
 	r := &Recorder{}
 	install(t, recordHandler{r})
 	return r
+}
+
+// NewRecorder returns a Recorder that is not installed as the default, for a
+// component a test hands its logger (Logger) rather than one that reads
+// slog.Default. It changes nothing process-wide, so a parallel test may use
+// it.
+func NewRecorder() *Recorder { return &Recorder{} }
+
+// Logger is a logger whose records r keeps, at every level.
+func (r *Recorder) Logger() *slog.Logger { return slog.New(recordHandler{r}) }
+
+// Records returns a copy of every record kept so far, in the order they were
+// logged: what a test walks with Strings.
+func (r *Recorder) Records() []slog.Record {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]slog.Record, len(r.records))
+	for i, rec := range r.records {
+		out[i] = rec.Clone()
+	}
+	return out
+}
+
+// Strings returns every string a handler could write for rec: its message,
+// and each attribute's key and value, a LogValuer's value as it resolves, a
+// group's attributes walked, and a value of any other kind as %v and %+v
+// format it (the text handler's form, and an error's Error, which for
+// errors.Join's error holds each error it joins), as its MarshalText writes
+// it, and, for a value that is not an error, as JSON encodes it (the JSON
+// handler's form: an error it writes by its Error). A test that must show a
+// value reached no line of a record searches these, whichever handler a
+// bridge runs.
+func Strings(rec slog.Record) []string {
+	out := []string{rec.Message}
+	rec.Attrs(func(a slog.Attr) bool {
+		out = appendAttrStrings(out, a)
+		return true
+	})
+	return out
+}
+
+// appendAttrStrings appends what Strings says of a, and of each attribute a
+// group value holds.
+func appendAttrStrings(out []string, a slog.Attr) []string {
+	out = append(out, a.Key)
+	v := a.Value.Resolve()
+	if v.Kind() == slog.KindGroup {
+		for _, g := range v.Group() {
+			out = appendAttrStrings(out, g)
+		}
+		return out
+	}
+	out = append(out, v.String())
+	if v.Kind() != slog.KindAny {
+		return out
+	}
+	x := v.Any()
+	out = append(out, fmt.Sprintf("%v", x), fmt.Sprintf("%+v", x))
+	if tm, ok := x.(encoding.TextMarshaler); ok {
+		if b, err := tm.MarshalText(); err == nil {
+			out = append(out, string(b))
+		}
+	}
+	if _, isErr := x.(error); !isErr {
+		if b, err := json.Marshal(x); err == nil {
+			out = append(out, string(b))
+		}
+	}
+	return out
+}
+
+// Carrying returns, rendered as Failures renders them, every record kept so
+// far one of whose Strings contains any of values: a test asserts it empty to
+// show none of them reached a log line. An empty value is ignored, since
+// every string contains it.
+func (r *Recorder) Carrying(values ...string) []string {
+	return r.render(func(rec slog.Record) bool {
+		for _, s := range Strings(rec) {
+			for _, v := range values {
+				if v != "" && strings.Contains(s, v) {
+					return true
+				}
+			}
+		}
+		return false
+	})
 }
 
 // keep records one record. Cloned, because a handler must not retain a

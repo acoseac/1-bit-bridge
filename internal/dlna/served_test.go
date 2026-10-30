@@ -307,8 +307,8 @@ func TestAFailedListingKeepsTheSnapshotItWouldReplace(t *testing.T) {
 
 // TestARefusalIsLoggedOncePerKindAndAddress pins the refusal log: one Warn
 // for each kind (a connection, an M-SEARCH) and refused address, naming the
-// address, the interface that holds it and the peer, however often the peer
-// returns.
+// address and the interface that holds it, and never the peer, however often
+// the peer returns.
 func TestARefusalIsLoggedOncePerKindAndAddress(t *testing.T) {
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
@@ -330,17 +330,22 @@ func TestARefusalIsLoggedOncePerKindAndAddress(t *testing.T) {
 	}
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
 	want := []string{
-		`refused a connection to an address it does not serve: it answers only on the LAN-eligible interfaces" address=100.64.0.7 interface=utun7 from=100.64.0.99`,
-		`refused a connection to an address it does not serve: it answers only on the LAN-eligible interfaces" address=fd7a:115c:a1e0::7 interface=utun7 from=fd7a:115c:a1e0::99`,
-		`refused an M-SEARCH to an address it does not serve: it answers only on the LAN-eligible interfaces" address=100.64.0.7 interface=utun7 from=100.64.0.99`,
-		`refused an M-SEARCH to an address it does not serve: it answers only on the LAN-eligible interfaces" address="(not reported)" interface=(none) from=100.64.0.99`,
+		`refused a connection to an address it does not serve: it answers only on the LAN-eligible interfaces" address=100.64.0.7 interface=utun7`,
+		`refused a connection to an address it does not serve: it answers only on the LAN-eligible interfaces" address=fd7a:115c:a1e0::7 interface=utun7`,
+		`refused an M-SEARCH to an address it does not serve: it answers only on the LAN-eligible interfaces" address=100.64.0.7 interface=utun7`,
+		`refused an M-SEARCH to an address it does not serve: it answers only on the LAN-eligible interfaces" address="(not reported)" interface=(none)`,
 	}
 	if len(lines) != len(want) {
 		t.Fatalf("logged %d lines, want %d:\n%s", len(lines), len(want), buf.String())
 	}
 	for i, w := range want {
-		if !strings.Contains(lines[i], "level=WARN") || !strings.Contains(lines[i], w) {
-			t.Errorf("line %d is\n  %s\nwant a WARN carrying\n  %s", i, lines[i], w)
+		if !strings.Contains(lines[i], "level=WARN") || !strings.HasSuffix(lines[i], w) {
+			t.Errorf("line %d is\n  %s\nwant a WARN ending\n  %s", i, lines[i], w)
+		}
+	}
+	for _, peer := range []string{"100.64.0.99", "fd7a:115c:a1e0::99", "192.168.1.30"} {
+		if strings.Contains(buf.String(), peer) {
+			t.Errorf("the refusal log names the peer %s:\n%s", peer, buf.String())
 		}
 	}
 }
