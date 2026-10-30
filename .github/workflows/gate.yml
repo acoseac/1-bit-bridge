@@ -593,11 +593,13 @@ jobs:
   # The one-line installer, scripts/install.sh (backlog B475). `make
   # installer-check` lints it, its stamp and its tests' stubs with
   # shellcheck, then runs its tests (scripts/install-test) under sh (dash
-  # here), bash in POSIX mode and BusyBox's sh, each one required by
+  # here), bash in POSIX mode, BusyBox's sh and ksh93, each one required by
   # INSTALLER_SHELLS, so a shell that went missing fails the job rather than
-  # leaving it untested. The race suite above runs the same tests under sh
-  # alone; this job is where the lint and the other shells run, and wget is
-  # installed so the GNU wget download runs too.
+  # leaving it untested. ksh is there because it found a real defect: ksh93's
+  # predefined alias stop shadowed the installer's function of that name. The
+  # race suite above runs the same tests under sh alone; this job is where the
+  # lint and the other shells run, and wget is installed so the GNU wget
+  # download runs too.
   installer:
     name: installer
     runs-on: ubuntu-latest
@@ -616,9 +618,9 @@ jobs:
       - name: Install shellcheck, the shells and wget
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends shellcheck dash busybox wget
+          sudo apt-get install -y --no-install-recommends shellcheck dash busybox ksh wget
       - name: shellcheck, then the installer's tests under each shell
-        run: make installer-check INSTALLER_SHELLS="sh,dash,bash --posix,busybox sh"
+        run: make installer-check INSTALLER_SHELLS="sh,dash,bash --posix,busybox sh,ksh"
 
   gate:
     name: gate

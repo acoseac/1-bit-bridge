@@ -38,7 +38,7 @@ constants() {
 	TTY_DEVICE=${BRIDGE_INSTALL_TEST_TTY:-/dev/tty}
 	case $DOWNLOAD_BASE in
 	https://*) ;;
-	*) stop 2 "BRIDGE_INSTALL_BASE_URL must be an https:// URL." ;;
+	*) leave 2 "BRIDGE_INSTALL_BASE_URL must be an https:// URL." ;;
 	esac
 }
 
@@ -50,12 +50,14 @@ warn() {
 	printf '%s\n' "$@" >&2
 }
 
-# stop CODE LINE...: prints the lines on stderr and exits with CODE.
-stop() {
-	stop_code=$1
+# leave CODE LINE...: prints the lines on stderr and exits with CODE. Not
+# named stop: ksh93 defines stop as an alias of kill -s STOP, and an alias
+# wins over a function, so a call "stop 1" would send SIGSTOP to process 1.
+leave() {
+	leave_code=$1
 	shift
 	printf '%s\n' "$@" >&2
-	exit "$stop_code"
+	exit "$leave_code"
 }
 
 usage() {
@@ -278,15 +280,15 @@ check_platform() {
 	case $cp_os in
 	Linux) ;;
 	Darwin)
-		stop 3 "This installer is for Linux. On a Mac, download the macOS archive (signed and notarized) from $REPO_URL/releases," \
+		leave 3 "This installer is for Linux. On a Mac, download the macOS archive (signed and notarized) from $REPO_URL/releases," \
 			"unpack it with tar -xzf, and run bridge init from the folder it unpacks to."
 		;;
 	MINGW* | MSYS* | CYGWIN* | Windows_NT)
-		stop 3 "This installer is for Linux. On Windows, download the Windows zip from $REPO_URL/releases," \
+		leave 3 "This installer is for Linux. On Windows, download the Windows zip from $REPO_URL/releases," \
 			"unpack it, and run bridge.exe init."
 		;;
 	*)
-		stop 3 "This installer is for Linux, and this system is $cp_os." \
+		leave 3 "This installer is for Linux, and this system is $cp_os." \
 			"The releases at $REPO_URL/releases have macOS, Linux and Windows builds."
 		;;
 	esac
@@ -295,14 +297,14 @@ check_platform() {
 	x86_64 | amd64) ARCH=amd64 ;;
 	aarch64 | arm64) ARCH=arm64 ;;
 	arm*)
-		stop 3 "This box runs a 32-bit ARM system ($cp_machine), and the bridge is built for 64-bit systems only (arm64 and amd64)." \
+		leave 3 "This box runs a 32-bit ARM system ($cp_machine), and the bridge is built for 64-bit systems only (arm64 and amd64)." \
 			"On a Raspberry Pi 3, 4 or 5, a 64-bit system runs it: Raspberry Pi OS (64-bit), or moOde's 64-bit image."
 		;;
 	i?86 | x86)
-		stop 3 "This box runs a 32-bit x86 system ($cp_machine), and the bridge is built for 64-bit systems only (amd64 and arm64)."
+		leave 3 "This box runs a 32-bit x86 system ($cp_machine), and the bridge is built for 64-bit systems only (amd64 and arm64)."
 		;;
 	*)
-		stop 3 "This box is $cp_machine, and the bridge is built for amd64 and arm64 only."
+		leave 3 "This box is $cp_machine, and the bridge is built for amd64 and arm64 only."
 		;;
 	esac
 	detect_distro
@@ -323,19 +325,19 @@ check_user() {
 	if [ "$USER_ID" = 0 ]; then
 		cu_sudo_user=${SUDO_USER:-}
 		if [ -n "$cu_sudo_user" ] && [ "$cu_sudo_user" != root ]; then
-			stop 3 "Run this installer without sudo, as $cu_sudo_user: it installs the bridge as $cu_sudo_user's own service," \
+			leave 3 "Run this installer without sudo, as $cu_sudo_user: it installs the bridge as $cu_sudo_user's own service," \
 				"and asks for sudo itself for the one step that needs it. Nothing was changed."
 		fi
-		stop 3 "Run this installer as the user the bridge should run as, not as root: it installs the bridge as that user's own service," \
+		leave 3 "Run this installer as the user the bridge should run as, not as root: it installs the bridge as that user's own service," \
 			"and asks for sudo itself for the one step that needs it." \
 			"If this box has only root, add a user first (adduser music), log in as that user over SSH, and run the command again." \
 			"Nothing was changed."
 	fi
-	[ -n "${HOME:-}" ] || stop 3 "HOME is not set, so there is nowhere to install the bridge. Nothing was changed."
+	[ -n "${HOME:-}" ] || leave 3 "HOME is not set, so there is nowhere to install the bridge. Nothing was changed."
 	if command -v getent >/dev/null 2>&1; then
 		cu_home=$(getent passwd "$USER_NAME" 2>/dev/null | cut -d: -f6) || cu_home=''
 		if [ -n "$cu_home" ] && [ "${cu_home%/}" != "${HOME%/}" ]; then
-			stop 3 "HOME is $HOME, but $USER_NAME's home is $cu_home: systemd looks for $USER_NAME's services in the second." \
+			leave 3 "HOME is $HOME, but $USER_NAME's home is $cu_home: systemd looks for $USER_NAME's services in the second." \
 				"Log in as $USER_NAME (not with su or sudo -E) and run this again. Nothing was changed."
 		fi
 	fi
@@ -356,7 +358,7 @@ check_clock() {
 	'' | *[!0-9]*) cc_year=0 ;;
 	esac
 	if [ "$cc_year" -lt 2026 ]; then
-		stop 3 "This box's clock says the year is $cc_year, and secure downloads fail until it is right." \
+		leave 3 "This box's clock says the year is $cc_year, and secure downloads fail until it is right." \
 			"Check it with timedatectl (it should say the clock is synchronized), or set it: sudo date -s 'YYYY-MM-DD HH:MM'" \
 			"Nothing was changed."
 	fi
@@ -413,7 +415,7 @@ check_storage() {
 		fi
 	fi
 	if [ "$cs_volatile" = 1 ]; then
-		stop 3 "This box keeps nothing written to $HOME through a reboot (its root is an overlay in memory, such as Raspberry Pi OS's Overlay File System):" \
+		leave 3 "This box keeps nothing written to $HOME through a reboot (its root is an overlay in memory, such as Raspberry Pi OS's Overlay File System):" \
 			"the bridge, its settings and its service would be gone at the next boot. Turn that off (sudo raspi-config, Performance Options)," \
 			"reboot, and run this again. Nothing was changed."
 	fi
@@ -467,25 +469,25 @@ detect_install() {
 	REPLACING=0
 	for di_unit in "$SYSROOT"/etc/systemd/system/*1-bit-bridge*.service "$SYSROOT"/etc/systemd/system/bridge@.service; do
 		if [ -e "$di_unit" ] || [ -L "$di_unit" ]; then
-			stop 3 "This box runs the bridge as a system service ($di_unit), which this installer does not manage." \
+			leave 3 "This box runs the bridge as a system service ($di_unit), which this installer does not manage." \
 				"Update that install the way it was set up (bridge update, run as that service's user). Nothing was changed."
 		fi
 	done
 	if [ -e "$UNIT_FILE" ] || [ -L "$UNIT_FILE" ]; then
-		read_unit "$UNIT_FILE" || stop 3 "The bridge's service is installed, but $UNIT_PROBLEM" \
+		read_unit "$UNIT_FILE" || leave 3 "The bridge's service is installed, but $UNIT_PROBLEM" \
 			"Update the bridge with bridge update instead. Nothing was changed."
 		if [ ! -f "$INSTALLED_BIN" ] || [ ! -x "$INSTALLED_BIN" ]; then
-			stop 3 "The bridge's service runs $INSTALLED_BIN, which is not there." \
+			leave 3 "The bridge's service runs $INSTALLED_BIN, which is not there." \
 				"Run bridge init again with the program you want it to run (it keeps the settings). Nothing was changed."
 		fi
 		if [ ! -f "$INSTALLED_CONFIG" ]; then
-			stop 3 "The bridge's service reads $INSTALLED_CONFIG, which is not there. Run bridge init again. Nothing was changed."
+			leave 3 "The bridge's service reads $INSTALLED_CONFIG, which is not there. Run bridge init again. Nothing was changed."
 		fi
 		di_real=$(readlink -f "$INSTALLED_BIN" 2>/dev/null) || di_real=''
 		[ -n "$di_real" ] || di_real=$INSTALLED_BIN
 		di_dir=$(dirname "$di_real")
 		if [ ! -w "$di_dir" ]; then
-			stop 3 "The bridge's service runs $di_real, in $di_dir, where $USER_NAME cannot write:" \
+			leave 3 "The bridge's service runs $di_real, in $di_dir, where $USER_NAME cannot write:" \
 				"neither this installer nor bridge update can replace it there." \
 				"Copy it to $BIN_DIR and run bridge init again from there (it keeps the settings), then run this again. Nothing was changed."
 		fi
@@ -493,14 +495,14 @@ detect_install() {
 		return 0
 	fi
 	if [ -e "$CONFIG_FILE" ]; then
-		stop 3 "Found the bridge's settings at $CONFIG_FILE, but no service runs them, so this installer cannot tell which bridge program you use." \
+		leave 3 "Found the bridge's settings at $CONFIG_FILE, but no service runs them, so this installer cannot tell which bridge program you use." \
 			"If you start it yourself, update it with: bridge update" \
 			"To run it as a service, run bridge init with that program (it keeps the settings)." \
 			"For a new install, move $CONFIG_DIR aside first. Nothing was changed."
 	fi
 	if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then
 		if [ -L "$TARGET" ] || [ ! -f "$TARGET" ] || ! grep -q "$MODULE_PATH" "$TARGET" 2>/dev/null; then
-			stop 3 "$TARGET is there, and it is not the 1-bit bridge: move it aside and run this again. Nothing was changed."
+			leave 3 "$TARGET is there, and it is not the 1-bit bridge: move it aside and run this again. Nothing was changed."
 		fi
 		REPLACING=1
 	fi
@@ -520,9 +522,9 @@ open_terminal() {
 }
 
 make_temp_dir() {
-	command -v mktemp >/dev/null 2>&1 || stop 3 "This installer needs mktemp. Nothing was changed."
+	command -v mktemp >/dev/null 2>&1 || leave 3 "This installer needs mktemp. Nothing was changed."
 	TMP_DIR=$( (umask 077 && mktemp -d "${TMPDIR:-/tmp}/1-bit-bridge-install.XXXXXX") 2>/dev/null) ||
-		stop 1 "Could not create a temporary directory in ${TMPDIR:-/tmp}. Nothing was changed."
+		leave 1 "Could not create a temporary directory in ${TMPDIR:-/tmp}. Nothing was changed."
 }
 
 # check_tools finds the downloader and the hash tool, refusing before any
@@ -548,7 +550,7 @@ check_tools() {
 		if [ -n "$ct_note" ]; then
 			warn "$ct_note"
 		fi
-		stop 3 "This installer needs:$ct_missing." \
+		leave 3 "This installer needs:$ct_missing." \
 			"Install them (on Debian, Ubuntu and Raspberry Pi OS: sudo apt install curl coreutils tar) and run it again. Nothing was changed."
 	fi
 }
@@ -611,10 +613,10 @@ resolve_version() {
 	fi
 	if [ -n "$STAMPED_VERSION" ]; then
 		VERSION=$(normalize_version "$STAMPED_VERSION") ||
-			stop 1 "This installer was published with a release it cannot read ($STAMPED_VERSION). Nothing was changed."
+			leave 1 "This installer was published with a release it cannot read ($STAMPED_VERSION). Nothing was changed."
 		return 0
 	fi
-	stop 2 "This copy of the installer is not from a release, so it does not know which release to install." \
+	leave 2 "This copy of the installer is not from a release, so it does not know which release to install." \
 		"Name one with --version X.Y.Z (the releases are at $REPO_URL/releases). Nothing was changed."
 }
 
@@ -678,7 +680,7 @@ choose_library() {
 	while [ "$cl_try" -lt 3 ]; do
 		cl_try=$((cl_try + 1))
 		printf 'Choose [1]: ' >&2
-		IFS= read -r cl_answer <&3 || stop 1 "" "No answer; nothing was installed."
+		IFS= read -r cl_answer <&3 || leave 1 "" "No answer; nothing was installed."
 		case $cl_answer in
 		'') cl_answer=1 ;;
 		*[!0-9]*) cl_answer=0 ;;
@@ -699,7 +701,7 @@ choose_library() {
 		fi
 		warn "Choose a number from 1 to $cl_other."
 	done
-	stop 1 "No music folder chosen; nothing was installed." \
+	leave 1 "No music folder chosen; nothing was installed." \
 		"Run this again with --library /path/to/music, or with --no-init to install the program alone."
 }
 
@@ -708,7 +710,7 @@ ask_library_path() {
 	while [ "$alp_try" -lt 3 ]; do
 		alp_try=$((alp_try + 1))
 		printf 'Music folder (its full path): ' >&2
-		IFS= read -r alp_answer <&3 || stop 1 "" "No answer; nothing was installed."
+		IFS= read -r alp_answer <&3 || leave 1 "" "No answer; nothing was installed."
 		case $alp_answer in
 		'~') alp_answer=$HOME ;;
 		'~'/*) alp_answer=$HOME/${alp_answer#'~'/} ;;
@@ -724,7 +726,7 @@ ask_library_path() {
 		fi
 		warn "$alp_answer is not a folder."
 	done
-	stop 1 "No music folder chosen; nothing was installed." \
+	leave 1 "No music folder chosen; nothing was installed." \
 		"Run this again with --library /path/to/music, or with --no-init to install the program alone."
 }
 
@@ -737,23 +739,23 @@ download_release() {
 	dr_url=$DOWNLOAD_BASE/v$VERSION
 	say "Downloading the bridge $VERSION for linux/$ARCH from $dr_url/"
 	fetch "$dr_url/checksums.txt" "$TMP_DIR/checksums.txt" ||
-		stop 1 "Could not download $dr_url/checksums.txt: is $VERSION a published release? Nothing was installed."
+		leave 1 "Could not download $dr_url/checksums.txt: is $VERSION a published release? Nothing was installed."
 	fetch "$dr_url/$ARCHIVE" "$TMP_DIR/$ARCHIVE" ||
-		stop 1 "Could not download $dr_url/$ARCHIVE. Nothing was installed."
+		leave 1 "Could not download $dr_url/$ARCHIVE. Nothing was installed."
 	dr_want=$(expected_sum "$TMP_DIR/checksums.txt" "$ARCHIVE")
 	[ -n "$dr_want" ] ||
-		stop 1 "The release's checksums.txt does not give $ARCHIVE one SHA-256, so the download cannot be checked. Nothing was installed."
+		leave 1 "The release's checksums.txt does not give $ARCHIVE one SHA-256, so the download cannot be checked. Nothing was installed."
 	dr_got=$(sha256_of "$TMP_DIR/$ARCHIVE" | tr '[:upper:]' '[:lower:]')
 	if [ "$dr_got" != "$dr_want" ]; then
-		stop 1 "The download's SHA-256 is $dr_got, and the release's checksums.txt says $dr_want:" \
+		leave 1 "The download's SHA-256 is $dr_got, and the release's checksums.txt says $dr_want:" \
 			"it is not the release's archive. Nothing was installed."
 	fi
 	say "Its SHA-256 matches the release's checksums.txt."
 	mkdir "$TMP_DIR/unpacked"
 	tar -xzf "$TMP_DIR/$ARCHIVE" -C "$TMP_DIR/unpacked" bridge 2>"$TMP_DIR/tar.err" ||
-		stop 1 "Could not unpack the bridge from $ARCHIVE: $(cat "$TMP_DIR/tar.err") Nothing was installed."
+		leave 1 "Could not unpack the bridge from $ARCHIVE: $(cat "$TMP_DIR/tar.err") Nothing was installed."
 	if [ ! -f "$TMP_DIR/unpacked/bridge" ] || [ -L "$TMP_DIR/unpacked/bridge" ]; then
-		stop 1 "$ARCHIVE holds no bridge program. Nothing was installed."
+		leave 1 "$ARCHIVE holds no bridge program. Nothing was installed."
 	fi
 }
 
@@ -771,17 +773,17 @@ install_binary() {
 			CREATED_LOCAL=$HOME/.local
 		fi
 		CREATED_BIN=$BIN_DIR
-		(umask 022 && mkdir -p "$BIN_DIR") || stop 1 "Could not create $BIN_DIR. Nothing was installed."
+		(umask 022 && mkdir -p "$BIN_DIR") || leave 1 "Could not create $BIN_DIR. Nothing was installed."
 	fi
 	STAGE=$BIN_DIR/.bridge.install.$$
-	cp "$TMP_DIR/unpacked/bridge" "$STAGE" || stop 1 "Could not write $STAGE. Nothing was installed."
-	chmod 0755 "$STAGE" || stop 1 "Could not make $STAGE executable. Nothing was installed."
+	cp "$TMP_DIR/unpacked/bridge" "$STAGE" || leave 1 "Could not write $STAGE. Nothing was installed."
+	chmod 0755 "$STAGE" || leave 1 "Could not make $STAGE executable. Nothing was installed."
 	ib_version=$(bridge_version "$STAGE") ||
-		stop 1 "The downloaded bridge does not run on this system (linux/$ARCH). Nothing was installed."
+		leave 1 "The downloaded bridge does not run on this system (linux/$ARCH). Nothing was installed."
 	if [ "$ib_version" != "$VERSION" ]; then
-		stop 1 "The downloaded program says it is the bridge $ib_version, not $VERSION. Nothing was installed."
+		leave 1 "The downloaded program says it is the bridge $ib_version, not $VERSION. Nothing was installed."
 	fi
-	mv -f "$STAGE" "$TARGET" || stop 1 "Could not move the bridge into place at $TARGET. Nothing was installed."
+	mv -f "$STAGE" "$TARGET" || leave 1 "Could not move the bridge into place at $TARGET. Nothing was installed."
 	STAGE=''
 	INSTALLED=1
 	if [ -n "$ib_previous" ]; then
@@ -915,7 +917,7 @@ run_init() {
 		"$TARGET" init --yes --library "$LIBRARY" </dev/null || ri_status=$?
 	fi
 	if [ "$ri_status" != 0 ]; then
-		stop 1 "" "bridge init stopped (exit $ri_status). The bridge is installed at $TARGET; fix what init says above," \
+		leave 1 "" "bridge init stopped (exit $ri_status). The bridge is installed at $TARGET; fix what init says above," \
 			"then run this installer again, or run: $TARGET init --library $LIBRARY"
 	fi
 }
@@ -946,13 +948,13 @@ wait_served() {
 check_served() {
 	if ! systemctl --user is-active --quiet "$UNIT_NAME"; then
 		say "The bridge's service is not running; starting it (bridge start)."
-		"$1" start </dev/null || stop 1 "bridge start failed (above). See what the bridge logged: $1 logs"
+		"$1" start </dev/null || leave 1 "bridge start failed (above). See what the bridge logged: $1 logs"
 	fi
 	if wait_served "$1" "$2" "$3"; then
 		return 0
 	fi
 	if [ -n "$SERVED" ]; then
-		stop 1 "The service still serves the bridge $SERVED, not $3, 20 seconds on." \
+		leave 1 "The service still serves the bridge $SERVED, not $3, 20 seconds on." \
 			"See what it logged: $1 logs (bridge update keeps the previous program beside it, as $1.bak)."
 	fi
 	if systemctl --user is-active --quiet "$UNIT_NAME"; then
@@ -960,7 +962,7 @@ check_served() {
 		SERVED=$3
 		return 0
 	fi
-	stop 1 "The bridge's service is not running. See what it logged: $1 logs"
+	leave 1 "The bridge's service is not running. See what it logged: $1 logs"
 }
 
 report_outputs() {
@@ -1043,7 +1045,7 @@ fresh_install() {
 			"Log in as $USER_NAME over SSH or at the console (not with su or sudo), and run this installer again."
 	fi
 	run_init
-	read_unit "$UNIT_FILE" || stop 1 "bridge init finished, but $UNIT_PROBLEM"
+	read_unit "$UNIT_FILE" || leave 1 "bridge init finished, but $UNIT_PROBLEM"
 	check_served "$INSTALLED_BIN" "$INSTALLED_CONFIG" "$VERSION"
 	report_outputs
 	say "" "The bridge $SERVED is running as $USER_NAME's service, and starts again when this box boots."
@@ -1070,21 +1072,21 @@ run_update() {
 	ru_after=$(bridge_version "$ru_bin") || ru_after=''
 	if [ "$ru_after" = "$ru_before" ]; then
 		if [ "$ru_status" != 0 ]; then
-			stop 1 "" "bridge update stopped (exit $ru_status), and the bridge is still $ru_before: nothing was changed." \
+			leave 1 "" "bridge update stopped (exit $ru_status), and the bridge is still $ru_before: nothing was changed." \
 				"What it says above is what to do."
 		fi
 		if grep -qF "You're already running the latest release." "$TMP_DIR/update.log"; then
 			say "The bridge $ru_before is the latest release."
 			return 0
 		fi
-		stop 1 "" "bridge update could not find out about a new release (above), and the bridge is still $ru_before:" \
+		leave 1 "" "bridge update could not find out about a new release (above), and the bridge is still $ru_before:" \
 			"nothing was changed. Try again later."
 	fi
 	if [ -z "$ru_after" ]; then
-		stop 1 "" "After bridge update, $ru_bin does not run. Its previous program is kept beside it, as $ru_bin.bak."
+		leave 1 "" "After bridge update, $ru_bin does not run. Its previous program is kept beside it, as $ru_bin.bak."
 	fi
 	if [ "$ru_status" != 0 ]; then
-		stop 1 "" "bridge update installed $ru_after, then stopped (exit $ru_status, above)." \
+		leave 1 "" "bridge update installed $ru_after, then stopped (exit $ru_status, above)." \
 			"Restart the service to run it: systemctl --user restart $UNIT_NAME"
 	fi
 	say "Updated the bridge from $ru_before to $ru_after."
@@ -1094,7 +1096,7 @@ upgrade() {
 	up_bin=$INSTALLED_BIN
 	up_config=$INSTALLED_CONFIG
 	up_before=$(bridge_version "$up_bin") ||
-		stop 3 "The bridge's service runs $up_bin, which does not run here (bridge version fails). Nothing was changed."
+		leave 3 "The bridge's service runs $up_bin, which does not run here (bridge version fails). Nothing was changed."
 	say "Found the bridge $up_before, installed as $USER_NAME's service: $up_bin, with its settings in $up_config."
 	if [ -n "$OPT_LIBRARY" ]; then
 		warn "--library is for a new install, and this bridge keeps its music folders: add one in its console instead."
@@ -1102,7 +1104,7 @@ upgrade() {
 	up_update=1
 	if [ -n "$OPT_VERSION" ]; then
 		if [ "$OPT_VERSION" != "$up_before" ]; then
-			stop 3 "This box runs the bridge $up_before. An installed bridge moves only to the latest release, through bridge update," \
+			leave 3 "This box runs the bridge $up_before. An installed bridge moves only to the latest release, through bridge update," \
 				"which checks your paired devices first; this installer does not install another release over it. Nothing was changed."
 		fi
 		up_update=0
@@ -1112,12 +1114,12 @@ upgrade() {
 		ensure_linger
 	fi
 	require_user_bus ||
-		stop 3 "There is no systemd user session for $USER_NAME, so the bridge's service cannot be restarted from here." \
+		leave 3 "There is no systemd user session for $USER_NAME, so the bridge's service cannot be restarted from here." \
 			"Log in as $USER_NAME over SSH or at the console (not with su or sudo) and run this again. Nothing was changed."
 	if [ "$up_update" = 1 ]; then
 		run_update "$up_bin" "$up_config" "$up_before"
 	fi
-	up_now=$(bridge_version "$up_bin") || stop 1 "$up_bin does not run any more; its previous program is beside it, as $up_bin.bak."
+	up_now=$(bridge_version "$up_bin") || leave 1 "$up_bin does not run any more; its previous program is beside it, as $up_bin.bak."
 	check_served "$up_bin" "$up_config" "$up_now"
 	TARGET=$up_bin
 	say "" "The bridge $SERVED is running as $USER_NAME's service."

@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -1811,6 +1812,35 @@ func TestATruncatedDownloadRunsNothing(t *testing.T) {
 		writeFile(t, prefix, script, 0o644)
 		mustExit(t, r.run("--library", music), 0)
 	})
+}
+
+// shellWords are names a shell gives its own meaning before it looks for a
+// function: POSIX's builtins and reserved words, and ksh93's predefined
+// aliases, which win over a function of the same name (a function named
+// stop, which the installer had, ran ksh93's kill -s STOP).
+var shellWords = strings.Fields(`
+	alias bg break cd command continue eval exec exit export false fc fg getopts hash jobs kill
+	newgrp printf pwd read readonly return set shift test times trap true type ulimit umask
+	unalias unset wait case do done elif else esac fi for function if in select then until while
+	autoload compound float functions history integer nameref nohup r redirect source stop suspend
+	builtin declare echo let local typeset
+`)
+
+// No function of the installer is named after a word a shell keeps for
+// itself: such a function runs only in the shells that do not.
+func TestNoInstallerFunctionIsNamedAfterAShellWord(t *testing.T) {
+	t.Parallel()
+	defined := regexp.MustCompile(`(?m)^([A-Za-z_][A-Za-z0-9_]*)\(\) \{`).FindAllStringSubmatch(readFile(t, repoScript), -1)
+	if len(defined) < 40 {
+		t.Fatalf("found %d function definitions in the installer; the pattern no longer reads them", len(defined))
+	}
+	for _, m := range defined {
+		for _, word := range shellWords {
+			if m[1] == word {
+				t.Errorf("the installer defines a function %s, a word some shell keeps for itself", m[1])
+			}
+		}
+	}
 }
 
 // The release builds the stamped installer and attaches it: goreleaser's
