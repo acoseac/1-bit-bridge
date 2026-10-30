@@ -9,29 +9,28 @@
 package transcode
 
 import (
-	"fmt"
-
 	"golang.org/x/sys/windows"
 )
 
 // volumeID is the serial number of the volume holding dir, for SameVolume:
 // read from a handle to the directory (FILE_FLAG_BACKUP_SEMANTICS opens a
-// directory), as os.SameFile reads a file's identity.
+// directory), as os.SameFile reads a file's identity. A failure names the
+// call and the errno, never dir (probeError).
 func volumeID(dir string) (uint64, error) {
 	p, err := windows.UTF16PtrFromString(dir)
 	if err != nil {
-		return 0, fmt.Errorf("utf16 %q: %w", dir, err)
+		return 0, &probeError{op: "utf16", err: err}
 	}
 	h, err := windows.CreateFile(p, 0,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
 	if err != nil {
-		return 0, fmt.Errorf("open %q: %w", dir, err)
+		return 0, &probeError{op: "open", err: err}
 	}
 	defer func() { _ = windows.CloseHandle(h) }()
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
-		return 0, fmt.Errorf("GetFileInformationByHandle %q: %w", dir, err)
+		return 0, &probeError{op: "GetFileInformationByHandle", err: err}
 	}
 	return uint64(info.VolumeSerialNumber), nil
 }
@@ -40,11 +39,12 @@ func volumeID(dir string) (uint64, error) {
 // containing `dir`. Per the Windows API contract, the first return
 // from GetDiskFreeSpaceEx is the number of bytes free to the calling
 // caller — already quota-aware on a per-user-quota volume, matching
-// what the POSIX implementation reports via statfs's Bavail field.
+// what the POSIX implementation reports via statfs's Bavail field. A
+// failure names the call and the errno, never dir (probeError).
 func AvailableDiskSpace(dir string) (int64, error) {
 	utf16Dir, err := windows.UTF16PtrFromString(dir)
 	if err != nil {
-		return 0, fmt.Errorf("utf16 %q: %w", dir, err)
+		return 0, &probeError{op: "utf16", err: err}
 	}
 	var freeBytesAvailable, totalBytes, totalFreeBytes uint64
 	if err := windows.GetDiskFreeSpaceEx(
@@ -53,7 +53,7 @@ func AvailableDiskSpace(dir string) (int64, error) {
 		&totalBytes,
 		&totalFreeBytes,
 	); err != nil {
-		return 0, fmt.Errorf("GetDiskFreeSpaceEx %q: %w", dir, err)
+		return 0, &probeError{op: "GetDiskFreeSpaceEx", err: err}
 	}
 	if freeBytesAvailable > uint64(1<<63-1) {
 		// Defensive clamp on a volume reporting > 8 EB to a 32-bit

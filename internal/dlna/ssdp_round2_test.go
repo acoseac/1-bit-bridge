@@ -265,8 +265,19 @@ func TestStrictReplyPinFailureSendsNothingAndLogsOnce(t *testing.T) {
 					}
 				}
 			}
-			if leaked := rec.Carrying("192.168.1.30", "192.168.1.20", "54321", "50000", "injected"); len(leaked) != 0 {
-				t.Errorf("a line names a socket's address or an error's text:\n%s", strings.Join(leaked, "\n"))
+			// The refusal alone: the advertiser's own lines name its
+			// LOCATION, the endpoint's address, which is the operator's.
+			for _, r := range rec.Records() {
+				if r.Message != "SSDP strict reply refused: cannot send from its endpoint" {
+					continue
+				}
+				for _, s := range loggingtest.Strings(r) {
+					for _, v := range []string{"192.168.1.30", "192.168.1.20", "54321", "50000", "injected"} {
+						if strings.Contains(s, v) {
+							t.Errorf("the refusal names a socket's address or an error's text (%s): %q", v, s)
+						}
+					}
+				}
 			}
 			if l, s, r := n.openSockets(); l+s+r != 0 {
 				t.Errorf("refusal leaked sockets: %d/%d/%d", l, s, r)

@@ -194,9 +194,13 @@ func TestSearchedForAnswersTheGroupAndJudgesEveryOtherDestination(t *testing.T) 
 	if strings.Contains(log, "address=239.255.255.250") {
 		t.Errorf("a search sent to the group was judged and refused:\n%s", log)
 	}
-	for _, want := range []string{"address=100.64.0.7 interface=utun7 from=192.168.1.30", `address="(not reported)"`} {
+	for _, want := range []string{"address=100.64.0.7 interface=utun7", `address="(not reported)"`} {
 		if !strings.Contains(log, want) {
 			t.Errorf("the log has no refusal carrying %s:\n%s", want, log)
 		}
+	}
+	// The searcher is never named (B604).
+	if strings.Contains(log, "192.168.1.30") {
+		t.Errorf("a refusal names the searcher:\n%s", log)
 	}
 }

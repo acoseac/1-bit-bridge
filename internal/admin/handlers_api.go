@@ -18,6 +18,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/librarycat"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/version"
@@ -76,14 +77,70 @@ func (e *cfgAbort) Error() string { return e.msg }
 
 // writeCfgUpdateErr maps a CfgHolder.Update failure to the handler's
 // error response: fn rejections (*cfgAbort) keep their intended
-// status + wire code; anything else is the Save failure.
+// status + wire code; anything else is the Save failure
+// (writeSaveConfigErr).
 func writeCfgUpdateErr(w http.ResponseWriter, err error) {
 	var abort *cfgAbort
 	if errors.As(err, &abort) {
 		writeError(w, abort.status, abort.code, abort.msg)
 		return
 	}
-	writeError(w, http.StatusInternalServerError, errCodeSaveConfig, err.Error())
+	writeSaveConfigErr(w, err)
+}
+
+// The messages a console save of the config file answers a refusal or a
+// failure with (saveConfigRefusal): each says what the refusal says to do,
+// in words that name no path. The refusals' own texts name the config file
+// (config.BusyError and its kin), the lock beside it or a staged save, and a
+// console response names no path, while the log may name the bridge's own
+// files and keeps the error whole (B604; the body was err.Error() until
+// then).
+var (
+	errMsgSaveConfigBusy = fmt.Sprintf("another bridge command or the running bridge is changing the config file, "+
+		"and held its lock for longer than %s, so nothing was written: try again", config.LockWait)
+	errMsgSaveConfigNoLockManager = "the filesystem holding the config file gave no lock beside it, so nothing was written: " +
+		"it has no working lock manager; mount it with local locking, or start its lock service, and try again"
+	errMsgSaveConfigChangedOutside = "the config file was changed or removed by another writer since this bridge read it " +
+		"(a bridge command such as library add or init, or an edit), or its name now opens another file (a link at it " +
+		"repointed), so this change was not saved, and the file keeps what that writer left: restart the bridge to load " +
+		"the file, then make the change again"
+	errMsgSaveConfigBootUnresolved = "this bridge could not resolve the file its config's name opens when it started, " +
+		"so it cannot say which file its settings were read from, and this change was not saved: restart the bridge " +
+		"once that name resolves, then make the change again"
+	errMsgSaveConfigLinkToNothing = "the config file's name is a symbolic link to a file that is not there, so nothing " +
+		"was written: point the link at the config file, or put the config file where the link is"
+	errMsgSaveConfig = "the bridge could not save the config file, and the bridge's log says why"
+)
+
+// saveConfigRefusal is what the console says of err, a save of the config
+// file that was refused or failed, by its class: try again past another
+// writer's lock, repair the lock manager, restart over a file changed
+// outside the holder (a change in the turn and a repointed name are the
+// holder's own form of it), restart once the name resolves, fix a link to
+// no file, or, for any other failure, read the log.
+func saveConfigRefusal(err error) string {
+	switch {
+	case errors.Is(err, config.ErrBusy):
+		return errMsgSaveConfigBusy
+	case errors.Is(err, config.ErrNoLockManager):
+		return errMsgSaveConfigNoLockManager
+	case errors.Is(err, config.ErrChangedOutside), errors.Is(err, config.ErrChangedInTurn), errors.Is(err, config.ErrNameMoved):
+		return errMsgSaveConfigChangedOutside
+	case errors.Is(err, config.ErrBootUnresolved):
+		return errMsgSaveConfigBootUnresolved
+	case errors.Is(err, fsutil.ErrDanglingLink):
+		return errMsgSaveConfigLinkToNothing
+	}
+	return errMsgSaveConfig
+}
+
+// writeSaveConfigErr answers a save of the config file that was refused or
+// failed: 500 save-config, with what to do in words (saveConfigRefusal), and
+// the error itself in the log, where the config file may be named (the
+// bridge's own files in fault lines).
+func writeSaveConfigErr(w http.ResponseWriter, err error) {
+	logger.Error("admin: the config file was not saved", "err", err)
+	writeError(w, http.StatusInternalServerError, errCodeSaveConfig, saveConfigRefusal(err))
 }
 
 // --- response shapes ---
@@ -1796,7 +1853,7 @@ func (s *Server) applyRootAddition(w http.ResponseWriter, r *http.Request, abs s
 		// The in-flight scan was cancelled. Redo it against the roots
 		// still configured: the save did not move them.
 		s.spawnBackgroundScan("compensating-scan (add)")
-		writeError(w, http.StatusInternalServerError, errCodeSaveConfig, err.Error())
+		writeSaveConfigErr(w, err)
 		return
 	}
 	s.deps.Scanner.SetRoots(newList)
@@ -1982,7 +2039,7 @@ func (s *Server) applyRootRemoval(w http.ResponseWriter, r *http.Request, newLis
 			s.deps.Manifest.RetargetFirstIndexedCarry(r.Context(), carryGen, true)
 		}
 		s.spawnBackgroundScan("compensating-scan (remove)")
-		writeError(w, http.StatusInternalServerError, errCodeSaveConfig, err.Error())
+		writeSaveConfigErr(w, err)
 		return
 	}
 	s.deps.Scanner.SetRoots(newList)
