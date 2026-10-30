@@ -103,11 +103,17 @@ func upperMountID(path string) (uint64, bool, error) {
 	return mountIDOf(resolved)
 }
 
-// mediumOn is the medium check as Linux runs it (platformMedium), with the
+// mediumOn is the medium check as Linux runs it (platformInspect), with the
 // upper path's mount ID read through its symlinks (upperMountID). The tests
 // call it too, so a change to the reader it runs with fails them.
-func mediumOn(root string, id uint64, statfs func(string) (fsStat, error), mountinfo func() ([]byte, error)) error {
-	return mediumFrom(root, id, statfs, mountinfo, upperMountID)
+func mediumOn(root string, id uint64, statfs func(string) (fsStat, error), mountinfo func() ([]byte, error), boot bootFiles) Medium {
+	return inspectMedium(root, id, mediumReaders{statfs: statfs, mountinfo: mountinfo, idOf: upperMountID, boot: boot})
+}
+
+// platformMedium is the medium check's verdict on this platform
+// (platformInspect): the strict writer's admission (mediumOf).
+func platformMedium(root string, mountID uint64) error {
+	return platformInspect(root, mountID).Err
 }
 
 // mediumFrom is the medium check's verdict (inspectMedium) on what statfs,
@@ -180,6 +186,19 @@ func inspectMedium(root string, id uint64, r mediumReaders) Medium {
 // rejected syncing through another mount of the superblock and syncfs, whose
 // errors overlayfs reports only on recent kernels). Our own unit adds no
 // sandboxing, and an overlay root's own mount, Volumio's shape, is taken.
+//
+// An upper layer of the root's own mount that no path here reaches, its
+// first statfs answering ENOENT (upperUnreached), is refused as one that
+// cannot be read here, unless the box's own files show Volumio's boot
+// layout, every fact of it (volumioUpper, B603): the upper layer is then the
+// boot disk's data partition, which Volumio's initramfs mounted before the
+// pivot and nothing has mounted since, and it is taken by the verdict taken
+// gives, so a bind of a directory inside the overlay is still refused, and
+// named. That trusts Volumio's boot layout, the orchestrator's decision. It
+// outranks no other refusal: an overlay mounted volatile, an upper path that
+// reaches tmpfs or ramfs, totals that stay inconclusive, an upper path statfs
+// refuses for any reason but its absence, and an overlay below the root's
+// own mount are refused as they were, without the box's files.
 func (r mediumReaders) medium(root string, id uint64) (string, error) {
 	path := root
 	st, err := r.statfs(path)
@@ -245,7 +264,23 @@ func (r mediumReaders) medium(root string, id uint64) (string, error) {
 		upper, err := upperAsReached(root, on, path, layer.upper, st, r.statfs, func(u fsStat) (string, error) {
 			return upperMountEvidence(layer.upper, u.Device, table, r.idOf)
 		})
-		if err != nil {
+		var unreached *upperUnreached
+		switch {
+		case err == nil:
+		case depth == 0 && errors.As(err, &unreached) && errors.Is(unreached.statfs, fs.ErrNotExist):
+			// No path here reaches the upper layer of the root's own mount:
+			// Volumio's boot layout leaves its root overlay's so, and that
+			// upper layer alone is taken unseen, on the box's evidence
+			// (volumioUpper), the bind refusal still its verdict (taken).
+			storage, why := volumioUpper(table, layer.line, r)
+			if why != nil {
+				return "", fmt.Errorf("%w; and it is not Volumio's data partition, the one upper layer the check takes where no path reaches it: %v", err, why)
+			}
+			if err := taken(); err != nil {
+				return "", err
+			}
+			return storage, nil
+		default:
 			return "", err
 		}
 		on += "an overlay whose upper layer " + layer.upper + " is on "
@@ -268,12 +303,17 @@ func (r mediumReaders) medium(root string, id uint64) (string, error) {
 // medium check; a tmpfs/ramfs path cannot explain moving overlay totals.
 // Exhausted retries remain ErrMediumUnknown. Evidence identifies only the
 // filesystem visible at upper, not an otherwise unreachable backing layer.
+// An upper path its first statfs cannot read is an *upperUnreached.
 func upperAsReached(root, on, path, upper string, first fsStat, statfs func(string) (fsStat, error), evidence func(fsStat) (string, error)) (fsStat, error) {
 	o := first
 	for round := 1; ; round++ {
 		u, err := statfs(upper)
 		if err != nil {
-			return fsStat{}, fmt.Errorf("%w: %s is on %san overlay whose upper layer %s, as the mount table names it, cannot be read here: %w", ErrMediumUnknown, root, on, upper, err)
+			refusal := fmt.Errorf("%w: %s is on %san overlay whose upper layer %s, as the mount table names it, cannot be read here: %w", ErrMediumUnknown, root, on, upper, err)
+			if round == 1 {
+				return fsStat{}, &upperUnreached{refusal: refusal, statfs: err}
+			}
+			return fsStat{}, refusal
 		}
 		if u.sameTotals(o) {
 			return u, nil
@@ -298,6 +338,19 @@ func upperAsReached(root, on, path, upper string, first fsStat, statfs func(stri
 		o = again
 	}
 }
+
+// upperUnreached is upperAsReached's refusal of an upper path whose first
+// statfs failed, so that no read of it here ever answered: it reads as the
+// refusal, and statfs is statfs's own error, which says whether the path
+// reaches nothing at all (ENOENT), the one case the root overlay's upper
+// layer may still be told by the box's own files (volumioUpper).
+type upperUnreached struct {
+	refusal error
+	statfs  error
+}
+
+func (u *upperUnreached) Error() string { return u.refusal.Error() }
+func (u *upperUnreached) Unwrap() error { return u.refusal }
 
 // upperMountEvidence names the filesystem visible at upper by its own mount
 // ID's line. idOf follows the final symlink, just as the statfs evidence does.
@@ -347,11 +400,14 @@ func fuseMedium(root, on string, id uint64, mountinfo func() ([]byte, error)) er
 // mountRecord is one line of a mountinfo table, as the medium check reads it:
 // the directory of its filesystem the mount shows as its own root ("/" for
 // the filesystem's root, another for a bind of a directory inside it), its
-// device (major:minor), filesystem type, source, and super options, split
-// on their commas, each still escaped as the filesystem wrote it.
+// mount point, its device (major:minor), its mount's own options, its
+// filesystem type, source, and super options, each list split on its commas
+// and each option still escaped as the kernel wrote it.
 type mountRecord struct {
 	device string
 	root   string
+	point  string
+	opts   []string
 	fstype string
 	source string
 	super  []string
@@ -373,39 +429,54 @@ type mountRecord struct {
 func mountLine(table []byte, id uint64) (mountRecord, error) {
 	want := strconv.FormatUint(id, 10)
 	for _, line := range strings.Split(string(table), "\n") {
-		fields := strings.Split(line, " ")
-		if fields[0] != want {
+		if first, _, _ := strings.Cut(line, " "); first != want {
 			continue
 		}
-		sep := -1
-		for i := 6; i < len(fields); i++ {
-			if fields[i] == "-" {
-				sep = i
-				break
-			}
-		}
-		if sep < 0 || len(fields) != sep+4 || slices.Contains(fields[:sep+2], "") || fields[sep+3] == "" {
+		rec, ok := parseMountLine(line)
+		if !ok {
 			return mountRecord{}, fmt.Errorf("the mount table's line for mount %d does not read as one", id)
 		}
-		return mountRecord{
-			device: fields[2],
-			root:   unescapeMountInfo(fields[3]),
-			fstype: fields[sep+1],
-			source: unescapeMountInfo(fields[sep+2]),
-			super:  strings.Split(fields[sep+3], ","),
-		}, nil
+		return rec, nil
 	}
 	return mountRecord{}, fmt.Errorf("the mount table lists no mount %d", id)
 }
 
+// parseMountLine reads one line of a mountinfo table as mountLine reads the
+// line it picks, split on the single ASCII space alone; false for a line that
+// does not read as one, whole.
+func parseMountLine(line string) (mountRecord, bool) {
+	fields := strings.Split(line, " ")
+	sep := -1
+	for i := 6; i < len(fields); i++ {
+		if fields[i] == "-" {
+			sep = i
+			break
+		}
+	}
+	if sep < 0 || len(fields) != sep+4 || slices.Contains(fields[:sep+2], "") || fields[sep+3] == "" {
+		return mountRecord{}, false
+	}
+	return mountRecord{
+		device: fields[2],
+		root:   unescapeMountInfo(fields[3]),
+		point:  unescapeMountInfo(fields[4]),
+		opts:   strings.Split(fields[5], ","),
+		fstype: fields[sep+1],
+		source: unescapeMountInfo(fields[sep+2]),
+		super:  strings.Split(fields[sep+3], ","),
+	}, true
+}
+
 // overlayMount is what the medium check reads of an overlay's mount in the
 // mount table: its upper layer as the table names it, "" for a read-only
-// overlay, whether it was mounted volatile, and the directory of the overlay
-// the mount shows as its root, "/" for the overlay's own mount.
+// overlay, whether it was mounted volatile, the directory of the overlay the
+// mount shows as its root, "/" for the overlay's own mount, and the line
+// itself.
 type overlayMount struct {
 	upper     string
 	volatile  bool
 	mountRoot string
+	line      mountRecord
 }
 
 // overlayLayer reads the overlay mounted as id from a mountinfo table, on the
@@ -424,7 +495,7 @@ func overlayLayer(table []byte, id uint64) (overlayMount, error) {
 	if rec.fstype != "overlay" {
 		return overlayMount{}, fmt.Errorf("the mount table names mount %d %s, not an overlay", id, rec.fstype)
 	}
-	m := overlayMount{mountRoot: rec.root}
+	m := overlayMount{mountRoot: rec.root, line: rec}
 	for _, opt := range rec.super {
 		key, value, _ := strings.Cut(opt, "=")
 		switch {

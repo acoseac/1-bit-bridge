@@ -8,10 +8,10 @@ package atomicwrite
 // compares none unless it gives mount IDs itself (mountIDOf).
 const mountIDsExpected = false
 
-// platformMedium takes every root: the strict writer refuses on Windows
+// platformInspect takes every root: the strict writer refuses on Windows
 // before it asks (ErrNoDirectoryBarrier), and a test that sets a barrier asks
 // it nothing unless it gives mount IDs itself.
-func platformMedium(string, uint64) error { return nil }
+func platformInspect(string, uint64) Medium { return Medium{} }
 
 // platformCopyUps is none: nothing copies up on Windows, and the strict writer
 // refuses there before it asks.

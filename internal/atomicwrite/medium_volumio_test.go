@@ -407,7 +407,7 @@ func TestMediumRefusesWhatVolumiosLayoutDoesNotShow(t *testing.T) {
 		}, reason: "no partition 3"},
 		{name: "partition 3 not ext4", change: func(b *volumioBox) {
 			b.boot.files["/run/udev/data/b179:3"] = "E:ID_FS_TYPE=vfat\nE:ID_FS_LABEL=volumio_data\n"
-		}, reason: "is vfat, not ext4"},
+		}, reason: `is "vfat", not ext4`},
 		{name: "partition 3 labelled otherwise", change: func(b *volumioBox) {
 			b.boot.files["/run/udev/data/b179:3"] = "E:ID_FS_TYPE=ext4\nE:ID_FS_LABEL=volumio\n"
 		}, reason: "labelled \"volumio\", not volumio_data"},
