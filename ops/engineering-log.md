@@ -66615,3 +66615,123 @@ goes from 18 to 20, with the runbook's five current references, its step 1,
 and a note of what 20 covers.
 
 **Round 2:** an uninterpretable root-hub speed leaves the USB listing incomplete (reader and Resolve regressions red before the fix, green after); PROTOCOL.md now names all three causes of `identity_incomplete`; the qualification note now distinguishes unchanged wire fields and schema from existing `reason` values that may differ.
+
+## 2026-10-30 — B603: the bridge's own player starts on Volumio, whose root overlay's upper layer no path reaches after boot
+
+**The defect.** On the owner's Volumio 4.231 Raspberry Pi 5 (bridge e242ce2c,
+the 0.2.2 candidate; data directory `/data/1-bit-bridge/config/data`;
+`output.player.enabled: true`) serve logged `player: not started`, reason `the
+player's identity: atomicwrite: whether the root's storage keeps what is
+written to it through a reboot cannot be told:
+/data/1-bit-bridge/config/data is on an overlay whose upper layer
+/mnt/ext/dyn, as the mount table names it, cannot be read here: statfs
+/mnt/ext/dyn: no such file or directory`. Volumio is the main platform for a
+player on a bridge box, so this blocked 0.2.2.
+
+**Measured on the box.** The root is an overlay, `31 1 0:23 / / rw,relatime
+shared:1 - overlay overlay
+rw,lowerdir=/mnt/static,upperdir=/mnt/ext/dyn,workdir=/mnt/ext/work`. Its upper
+layer is on the SD card's partition 3 (`mmcblk0p3`, 179:3, ext4, label
+`volumio_data`), which the initramfs mounted at `/mnt/ext` before the pivot and
+nothing remounts, so no mountinfo line lists 179:3 and `lsblk` shows no mount
+point for it. `/imgpart` is partition 2 (`26 31 179:2 / /imgpart rw,relatime
+shared:3 - ext4 /dev/mmcblk0p2 rw`), the squashfs is `/static`, `/boot`
+partition 1. The NVMe is imaged with Volumio too: its partition 3
+(`nvme0n1p3`, 259:3, at `/media/NVME`) is labelled `volumio_data`, and
+`/dev/disk/by-label/volumio_data` points at it. The service's user (`volumio`)
+reads `/run/udev/data/b179:3` (`E:ID_FS_TYPE=ext4`, `E:ID_FS_LABEL=volumio_data`),
+`/sys/class/block/mmcblk0p3/dev` (`179:3`), and `/sys/fs/ext4`, which listed
+`mmcblk0p2`, `mmcblk0p3` and `nvme0n1p3`. With the orchestrator's workaround
+unmounted, `findmnt /mnt/ext` answered nothing, `grep ' 179:3 '
+/proc/self/mountinfo` counted 0, and `/sys/fs/ext4/mmcblk0p3` still existed:
+the kernel keeps the ext4 entry of the initramfs's hidden mount. The fixtures
+are the box's complete lines (`pi-mountinfo.txt`, `pi-evidence.txt`).
+
+**The decision** (the orchestrator, after Codex's and Argon's review):
+automatic, evidence-based recognition, no operator override in this PR, the
+rule fail-closed for everything else. Where the first statfs of the upper path
+of the root's own mount answers ENOENT, `volumioUpper` reads the box's own
+files and takes the upper layer only when every fact holds, in order (Volumio's
+os-release; the overlay read-write over `/mnt/static` with upperdir
+`/mnt/ext/dyn`, the overlay at `/`; `/imgpart`'s line by its mount ID, partition
+2 of a disk in sysfs; that disk's partition 3, resolved back through
+`/sys/dev/block`, ext4 labelled `volumio_data` in udev's database; its ext4
+superblock live and on no mountinfo line), naming the first that fails. It
+returns `taken()`'s verdict and outranks no other refusal. It is an explicitly
+trusted Volumio boot-layout assumption; the rule is in
+`.claude/rules/config-lifecycle.md` (its long form in
+`ops/History-rules-config-lifecycle.md`, B603). The medium check became an
+inspection (`Medium`: the verdict and the storage's name) that the writer's
+admission and `bridge doctor`'s new `player-storage` line both read
+(`atomicwrite.InspectMedium`; `.claude/rules/cli-serve.md`).
+
+**Red first.** On the commit that added the seam and the tests and changed no
+behaviour (24a73d60), `TestMediumTakesVolumiosHiddenDataPartition` failed with
+main's reason word for word (`… /mnt/ext/dyn, as the mount table names it,
+cannot be read here: statfs /mnt/ext/dyn: no such file or directory, want it
+taken`); every case of `TestMediumRefusesWhatVolumiosLayoutDoesNotShow` was
+already refused with main's sentinel and text and lacked only the new reason;
+of `TestMediumKeepsEveryOtherRefusalBesideVolumiosEvidence` only the bind case
+failed, refused on main for its unreachable upper layer rather than as a bind.
+Every other test in the package passed. They pass from c48ae169 on.
+
+**The cases.** Accepted: the box as measured. Refused, each one fact changed: a
+lookalike upper layer on Raspberry Pi OS (no VOLUMIO_VERSION), an empty
+VOLUMIO_VERSION, no os-release, an unreadable one; the root overlay read-only
+(mount and superblock), its mount read-only over a writable superblock, another
+lower layer, another upper layer, an overlay that is not the one at `/`; the
+NVMe's decoy partition with no `/imgpart` mount, `/imgpart` on partition 4, an
+overmounted `/imgpart`, sysfs naming `/imgpart`'s device as another; partition 3
+absent, not ext4, labelled otherwise, its udev entry unreadable, a sibling whose
+device sysfs puts under the NVMe; no live ext4 superblock (a tmpfs fallback),
+partition 3 visible in mountinfo; two partitions 3, an unreadable partition
+number, a mountinfo line that does not read, an unreadable `/sys/fs/ext4`, an
+`/imgpart` on a whole disk, a disk that is a partition, udev naming no
+filesystem. Beside valid Volumio evidence, a subtree bind (ErrOverlayBind),
+`volatile`, `fsync=volatile`, a reachable tmpfs upper, inconclusive totals, an
+upper statfs refuses with EACCES, a tmpfs root and a ramfs root are refused as
+before, never speaking of Volumio. The production reader on a real tree with
+relative sysfs links takes the measured box, refuses the NVMe sibling and the
+missing superblock, refuses a link out of its root, refuses a named pipe at the
+udev entry without waiting, and refuses a file past its 64 KiB bound. The
+writer through the fallback: the write syncs the root, renames, then the
+file's directory, the root and the directories up to the merged mount's root;
+the probe syncs the same; statfs is asked of the upper path once, by the
+medium; an fsync failure above the root and an unopenable directory there fail
+both; a box that does not show Volumio is refused before anything is created.
+On Linux a namespace scenario detaches the tmpfs under an overlay's upper
+layer after mounting it: the kernel answers ENOENT, and the probe and the write
+refuse, nothing copied up. The doctor: no line for a player left off; off Linux
+not checked; a config refusal a warn; a data directory not there yet not
+checked; one this user cannot inspect a warn; Volumio's data partition named,
+ok; a refusal a fail saying the player will not start, the bind's hint its own;
+the CLI and the console word for word.
+
+**Negative controls**, on 885059f5, each a one-predicate mutation that compiled,
+predicted first, run on the whole package and restored from git, the tree clean
+after: C1 the partition-number check (red: `/imgpart not partition 2`, accepted);
+C2 the common-disk identity (red: the NVMe-sibling case, accepted, and the
+host-reader test's NVMe variant, refused for another reason); C3 the ext4 check
+(red: `partition 3 not ext4`, accepted); C4 the live superblock (red: the
+tmpfs-fallback case, accepted, and the host-reader test's variant); C5 the
+hidden check (red: partition 3 visible in mountinfo); C6 the label (red: the
+label case); C7 the Volumio marker (red: the lookalike and the empty version);
+C8 the bind verdict after the fallback (red: the bind combination, taken); C9
+ENOENT alone opening the fallback (red: the EACCES upper, taken); C10 the
+copy-up syncs after a write lands (red: the new writer test and
+`TestWriteBytesDurable_SyncsUpToTheRootOfItsMountOnAnOverlay`). Each went red
+exactly as predicted and nothing else did.
+
+**Where it ran.** On the worker's Mac: everything portable (the decision
+tests, the fake of the box's files, the production reader on a real tree, the
+writer tests, the doctor). Not here: the Linux-only tests
+(`medium_linux_test.go`, the namespace scenario among them), which run in the
+PR's `gate.yml` on ubuntu, and the box itself, which is the orchestrator's
+check on the Pi.
+
+**Residuals.** A modified boot that keeps every fact and puts a memory
+filesystem at `/mnt/ext`; a partition 3 mounted only in another mount
+namespace beside a tmpfs `/mnt/ext`; a Volumio release that changes these
+paths, refused until taught. The rules text did not land in `.claude/` from the
+worker's sandbox, which could not write there: it is `.p2/rules-b603.patch` on
+the branch, for the orchestrator to apply.

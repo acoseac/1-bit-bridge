@@ -2994,3 +2994,41 @@ the `ReplaceDurable` tests in `internal/atomicwrite/replace_test.go` its
 contract. `TestDiscardRecordsASecondSealBeforeRenamingADamagedOne` refuses
 every rename into the seal's name, so it now drives the double failure, and
 passes unchanged.
+
+## B603 — bridge doctor's player-storage line (2026-10-30)
+
+- **`bridge doctor`'s `player-storage` line is the strict writer's own medium verdict on the data dir (`atomicwrite.InspectMedium`), one source for the CLI and the console's doctor (`doctorPlayerStorage` in `buildDoctorDepsFor`), placed just before the output checklist** (2026-10-30, backlog B603). **Don't give the line a medium check of its own, word a good medium as the player starting (serve's other gates still run), or show a line for a player the config leaves off.**
+
+The orchestrator's amendment 8 to B603: one shared verdict for the writer and
+the doctor, its outcomes defined for a disabled player, an absent data
+directory and an unsupported platform, and a good medium never read as "the
+player will start". `playerStorageCheck` builds the line from the loaded
+config and the platform. A player the config leaves off (`output.player.enabled`
+not true, the block read) has no line, on Linux or off it. Off Linux a player
+the config asks for is "not checked: the bridge's own player runs on Linux
+alone", ok, and nothing is inspected. On Linux a player the config's own
+refusal turns off is not checked, a warn naming `PlayerEnabled`'s reason, which
+names no value (B505). Then `atomicwrite.InspectMedium(cfg.DataDir)`, the
+inspection whose verdict the player's strict writer reads as it starts: an
+`fs.ErrNotExist` is "not checked: the data directory … does not exist yet",
+ok, since `lockServeDataDir` makes it; another error is a warn advising the
+service's user, who may read what this user cannot; a refusal is a fail, "the
+player will not start: " and the writer's own refusal, whose hint puts the data
+directory on persistent storage, or for `ErrOverlayBind` on the overlay's own
+mount or a filesystem that is not an overlay; and storage the check takes is
+ok, "<dataDir> is on <storage>; serve checks the rest as it starts the player",
+the storage "Volumio's data partition (mmcblk0p3, ext4)" where the check names
+it and "storage in which the check finds no volatile layer" otherwise. The
+directories' barriers, the DAC's binding and serve's other gates still decide
+at the start, so no ok line says the player will start. The console's doctor
+(`adminDoctorRunner`) builds the same Deps (`buildDoctorDeps`), so it carries
+the line word for word; `bridge init`'s preflight sets no `PlayerStorage`. Run
+appends the line after its own checks and before the output checklist, which
+stays last. The two seams, `playerStorageGOOS` and `inspectPlayerStorage`, are
+package vars only tests change, never in parallel.
+
+Pinned by `TestThePlayersStorageLineSaysWhatTheWritersCheckFound`,
+`TestBridgeDoctorNamesThePlayersStorage`,
+`TestTheConsolesDoctorNamesThePlayersStorageAsBridgeDoctorDoes` and
+`TestRunPrintsThePlayersStorageBeforeTheChecklist`. The writer's side is
+`ops/History-rules-config-lifecycle.md`, B603.
