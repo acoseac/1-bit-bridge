@@ -66732,6 +66732,29 @@ tests were made sharper there, with their own controls, on 4e50591c:
 - C26, `--uninstall` not naming what a linked program leads to: "through a
   link" red. As predicted.
 
+**ksh found a real defect** (fixed in 64237098). The first run of `make
+installer-test` under every shell this host has (sh, dash, `bash --posix`,
+ksh) failed 66 subtests, all under ksh and all one cause: the script's refusal
+function was named `stop`, and ksh93 predefines `stop` as an alias of `kill -s
+STOP`, which an alias resolves before any function. Every refusal ran `kill -s
+STOP <exit code>`: `stop 1` sent SIGSTOP to process 1, refused only because the
+tests do not run as root, and the installer carried on past what it meant to
+refuse. The function is `leave`; `TestNoInstallerFunctionIsNamedAfterAShellWord`
+holds every function's name off POSIX's builtins and reserved words and ksh93's
+predefined aliases, and CI's installer job runs the tests under ksh as well.
+Its control, on 64237098:
+
+- C27, the function named `stop` again: the guard red, "defines a function
+  stop". As predicted; the behaviour itself was red before the fix (the ksh run
+  of 6c6e82d7 above).
+
+**The gate**, on 64237098, through the shared build lock: `make
+installer-test` (sh, dash, `bash --posix`, ksh; 47.7 s), then `make fmt vet
+test build-all`: `go fmt` rewrote nothing, `go vet` clean, the race suite 80
+packages ok and none failed (`internal/manifest` 1101 s, `internal/admin` 726 s,
+`cmd/bridge` 687 s, `scripts/install-test` 13.5 s under sh), the build-tag census
+and the six cross-builds.
+
 **Found and not fixed** (backlog, not this PR): packaging writes the user unit
 under `$HOME/.config/systemd/user` while systemd reads
 `$XDG_CONFIG_HOME/systemd/user` when that is set; `uninstallSystemd` ignores a
