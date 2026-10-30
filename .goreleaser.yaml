@@ -57,6 +57,15 @@ before:
     # clone without tags, contradicting the release_meta.go contract
     # that version equals the release tag sans leading `v`.
     - sh -c 'printf "{\"version\":\"{{ .Version }}\",\"minClientVersion\":\"%s\",\"protocolVersion\":1}\n" "${MIN_CLIENT_VERSION:-0.0.0}" > release-meta.json'
+    # The one-line installer (curl -fsSL https://1-bit.app/install.sh | sh,
+    # which 1-bit.app redirects to releases/latest/download/install.sh),
+    # stamped with this release's version so that every download it makes
+    # comes from this release's own tag, never `latest`. Written to the repo
+    # root (gitignored) for the reason release-meta.json is; attached by
+    # release.extra_files and listed in checksums.txt by
+    # checksum.extra_files below. scripts/stamp-install.sh fails unless it
+    # changed exactly the one unstamped line.
+    - sh scripts/stamp-install.sh "{{ .Version }}"
 
 builds:
   - id: bridge
@@ -129,6 +138,11 @@ archives:
 
 checksum:
   name_template: checksums.txt
+  # The stamped installer gets a line too, so a copy saved to inspect first
+  # can be checked against the release's checksums.txt. The installer and the
+  # updater read only the line of the archive they name.
+  extra_files:
+    - glob: install.sh
 
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
@@ -157,6 +171,9 @@ release:
   # not dist/, to dodge the "ensuring distribution directory" check).
   extra_files:
     - glob: release-meta.json
+    # The installer the before-hook stamped (scripts/stamp-install.sh): the
+    # asset `releases/latest/download/install.sh` serves.
+    - glob: install.sh
 
 # macOS signing + Apple notarization. `enabled` is gated on env presence
 # so the workflow still produces unsigned builds when the signing

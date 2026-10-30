@@ -1,4 +1,4 @@
-.PHONY: build build-all test test-fast measure-dsd check fmt vet clean run check-go-version check-build-tags check-buildx docker docs-check
+.PHONY: build build-all test test-fast measure-dsd check fmt vet clean run check-go-version check-build-tags check-buildx docker docs-check installer-test installer-check
 
 BINARY      := bridge
 IMAGE       := 1-bit-bridge
@@ -89,6 +89,24 @@ test-fast:
 measure-dsd:
 	BRIDGE_DSD_FIXTURE_TESTS=1 go test -tags "$(GO_TAGS)" ./internal/transcode/ \
 		-run 'TestDSDRender_|TestDSDLowpass|TestRunDSD' -count=1 -v
+
+# The one-line installer, scripts/install.sh. installer-test runs its tests
+# (scripts/install-test) under every POSIX shell of their list this host has
+# (sh, dash, bash --posix, busybox sh, ksh), or the INSTALLER_SHELLS named,
+# comma separated, each then required; make test runs them under sh alone.
+# installer-check lints the installer, its stamp and the tests' stubs with
+# shellcheck first, and fails without shellcheck rather than pass unlinted.
+# CI's installer job runs installer-check on Linux with shellcheck, dash and
+# busybox installed.
+INSTALLER_SHELLS ?= all
+
+installer-test:
+	BRIDGE_INSTALL_TEST_SHELLS="$(INSTALLER_SHELLS)" go test -tags "$(GO_TAGS)" -count=1 ./scripts/install-test/
+
+installer-check:
+	@command -v shellcheck >/dev/null 2>&1 || { echo "installer-check: shellcheck is required and not installed (apt install shellcheck)" >&2; exit 1; }
+	shellcheck -s sh scripts/install.sh scripts/stamp-install.sh scripts/install-test/testdata/bridge scripts/install-test/testdata/bin/*
+	$(MAKE) installer-test
 
 # Per-change gate: format + vet + race tests, WITHOUT the 6-target
 # build-all (the dominant cost). Run the full `make fmt vet test build-all`

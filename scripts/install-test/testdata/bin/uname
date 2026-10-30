@@ -1,0 +1,7 @@
+#!/bin/sh
+# uname for the installer's tests: STUB_UNAME_S and STUB_UNAME_M.
+printf 'uname %s\n' "$*" >>"$STUB_LOG"
+case ${1:-} in
+-m) printf '%s\n' "${STUB_UNAME_M:-x86_64}" ;;
+*) printf '%s\n' "${STUB_UNAME_S:-Linux}" ;;
+esac

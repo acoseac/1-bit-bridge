@@ -1,0 +1,34 @@
+#!/bin/sh
+# loginctl for the installer's tests. Lingering is STUB_STATE/linger.
+# Turning it on takes root (STUB_AS_ROOT, which the sudo and su stubs set),
+# or STUB_SELF_LINGER for a session polkit lets turn on its own; it starts the
+# user manager, so the user bus comes up (STUB_STATE/bus-up) unless
+# STUB_LINGER_NO_BUS.
+printf 'loginctl %s\n' "$*" >>"$STUB_LOG"
+if [ "${1:-}" = --no-ask-password ]; then
+	shift
+fi
+case ${1:-} in
+show-user)
+	if [ -f "$STUB_STATE/linger" ]; then
+		echo Linger=yes
+	else
+		echo Linger=no
+	fi
+	;;
+enable-linger)
+	if [ -n "${STUB_AS_ROOT:-}" ] || { [ -z "${2:-}" ] && [ -n "${STUB_SELF_LINGER:-}" ]; }; then
+		touch "$STUB_STATE/linger"
+		if [ -z "${STUB_LINGER_NO_BUS:-}" ]; then
+			touch "$STUB_STATE/bus-up"
+		fi
+		exit 0
+	fi
+	echo 'Could not enable linger: Access denied' >&2
+	exit 1
+	;;
+*)
+	printf 'stub loginctl: unknown verb %s\n' "${1:-}" >&2
+	exit 1
+	;;
+esac

@@ -1,0 +1,4 @@
+#!/bin/sh
+# ip for the installer's tests: a route whose source is STUB_IP.
+printf 'ip %s\n' "$*" >>"$STUB_LOG"
+printf '1.1.1.1 via 192.0.2.1 dev eth0 src %s uid 1000 \n    cache \n' "${STUB_IP:-192.0.2.10}"

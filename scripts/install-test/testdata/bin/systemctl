@@ -1,0 +1,96 @@
+#!/bin/sh
+# systemctl for the installer's tests: --user only. Each call is logged to
+# STUB_LOG, and the service's state is in STUB_STATE: active, and served, the
+# release the running bridge serves, read from the unit's ExecStart program
+# whenever the service starts.
+#
+# STUB_NO_BUS makes the user bus unreachable, unless lingering started the
+# user manager (STUB_STATE/bus-up) or XDG_RUNTIME_DIR is STUB_BUS_RUNTIME.
+# STUB_RESTART_FAILS fails a restart; STUB_SERVICE_FAILS makes the service
+# exit as it starts; STUB_SERVED_FROZEN keeps serving the release that ran
+# before.
+printf 'systemctl %s\n' "$*" >>"$STUB_LOG"
+UNIT=com.acoseac.1-bit-bridge.service
+if [ "${1:-}" != --user ]; then
+	echo 'stub systemctl: only --user' >&2
+	exit 1
+fi
+shift
+
+bus_up() {
+	if [ -z "${STUB_NO_BUS:-}" ] || [ -f "$STUB_STATE/bus-up" ]; then
+		return 0
+	fi
+	[ -n "${STUB_BUS_RUNTIME:-}" ] && [ "${XDG_RUNTIME_DIR:-}" = "$STUB_BUS_RUNTIME" ]
+}
+
+start_unit() {
+	case ${1:-} in
+	"$UNIT" | com.acoseac.1-bit-bridge) ;;
+	*)
+		printf 'Unit %s not found.\n' "${1:-}" >&2
+		return 5
+		;;
+	esac
+	unit=$HOME/.config/systemd/user/$UNIT
+	if [ ! -f "$unit" ]; then
+		printf 'Unit %s not found.\n' "$UNIT" >&2
+		return 5
+	fi
+	if [ -n "${STUB_SERVICE_FAILS:-}" ]; then
+		rm -f "$STUB_STATE/active"
+		return 0
+	fi
+	touch "$STUB_STATE/active"
+	if [ -n "${STUB_SERVED_FROZEN:-}" ] && [ -f "$STUB_STATE/served" ]; then
+		return 0
+	fi
+	bin=$(sed -n 's/^ExecStart="\([^"]*\)".*/\1/p' "$unit")
+	"$bin" version | sed -n 's/^1-bit-bridge \([^ ]*\).*/\1/p' >"$STUB_STATE/served"
+}
+
+if ! bus_up; then
+	echo 'Failed to connect to bus: No medium found' >&2
+	exit 1
+fi
+
+case ${1:-} in
+show-environment)
+	printf 'HOME=%s\n' "$HOME"
+	;;
+daemon-reload) ;;
+enable)
+	if [ "${2:-}" != --now ]; then
+		echo 'stub systemctl: enable takes --now here' >&2
+		exit 1
+	fi
+	start_unit "${3:-}" || exit "$?"
+	;;
+start)
+	start_unit "${2:-}" || exit "$?"
+	;;
+restart)
+	if [ -n "${STUB_RESTART_FAILS:-}" ]; then
+		echo 'Job for com.acoseac.1-bit-bridge.service failed.' >&2
+		exit 1
+	fi
+	start_unit "${2:-}" || exit "$?"
+	;;
+is-active)
+	shift
+	quiet=0
+	if [ "${1:-}" = --quiet ]; then
+		quiet=1
+	fi
+	if [ -f "$STUB_STATE/active" ]; then
+		[ "$quiet" = 1 ] || echo active
+		exit 0
+	fi
+	[ "$quiet" = 1 ] || echo inactive
+	exit 3
+	;;
+*)
+	printf 'stub systemctl: unknown verb %s\n' "${1:-}" >&2
+	exit 1
+	;;
+esac

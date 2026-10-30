@@ -23,7 +23,25 @@ Companion server for the **[1-bit iOS music player](https://apps.apple.com/us/ap
 
 ## Install
 
-Grab a pre-built binary from the [releases page](https://github.com/acoseac/1-bit-bridge/releases) — no Go toolchain required. Pick your OS + arch, then run `bridge init`.
+**Linux, in one line** (moOde, Raspberry Pi OS, Volumio, Debian, Ubuntu and the rest; 64-bit, amd64 or arm64). Run it as the user the bridge should run as, not as root:
+
+```sh
+curl -fsSL https://1-bit.app/install.sh | sh
+```
+
+It downloads the release it came with (`https://github.com/acoseac/1-bit-bridge/releases/latest/download/install.sh` is the same script), checks the archive's SHA-256 against the release's `checksums.txt`, installs the program as `~/.local/bin/bridge`, and runs `bridge init`, which offers your music folders, writes the settings and installs the per-user systemd service. It asks for `sudo` once, and says why first: to turn on lingering (`loginctl enable-linger`), so the service keeps running after you log out and starts at boot. It finishes with how to pair your phone: the console through an SSH tunnel, or `bridge pair` in the terminal. Run it again later and it upgrades the bridge through `bridge update`, which checks your paired devices first and keeps the previous program for a rollback.
+
+Options go after `sh -s --`, for example `curl -fsSL https://1-bit.app/install.sh | sh -s -- --library /mnt/USB`: `--library PATH` (the music folder; without a terminal to ask, setup waits for it), `--version X.Y.Z` (a new install of that release), `--no-init` (the program only), `--uninstall` (prints the commands that remove the bridge, and changes nothing; your music is never among them) and `--help`, which lists the exit codes too.
+
+To read it before you run it:
+
+```sh
+curl -fsSL https://1-bit.app/install.sh -o install.sh
+less install.sh
+sh install.sh
+```
+
+**By hand, any platform:** grab a pre-built binary from the [releases page](https://github.com/acoseac/1-bit-bridge/releases) — no Go toolchain required. Pick your OS + arch, then run `bridge init`.
 
 **macOS / Linux:**
 

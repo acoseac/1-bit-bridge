@@ -1,0 +1,4 @@
+#!/bin/sh
+# sleep for the installer's tests: logged, and over at once, so a wait the
+# installer gives up on costs the test nothing.
+printf 'sleep %s\n' "$*" >>"$STUB_LOG"
