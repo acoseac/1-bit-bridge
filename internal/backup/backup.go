@@ -960,18 +960,18 @@ var errNotADirectory = errors.New("not a directory")
 // readBackupsDir is the listing of the backups folder List and the orphan
 // sweep take: nothing, and no error, while nothing is there (no snapshot
 // has been taken yet), and an error while something that is not a folder
-// is. os.ReadDir answers a file with ENOTDIR on Linux and macOS, and with
-// ERROR_PATH_NOT_FOUND on Windows, which matches os.ErrNotExist, so a file
+// is. os.ReadDir answers a file with ENOTDIR on every OS, and on Windows
+// ENOTDIR is ERROR_PATH_NOT_FOUND, which matches os.ErrNotExist, so a file
 // where the folder goes listed as no backups on Windows alone (B604's
 // fourth round: the console answered 200 there and 500 elsewhere). A
-// listing that reports nothing there asks Lstat, whose not-exist alone is
-// nothing there. Anything else there fails the listing with the error Linux
-// and macOS give a file (open, ENOTDIR, naming the folder), a link to
-// nothing included, through which a snapshot cannot make the folder either;
-// a folder there was made since the listing, which found none.
+// listing that reports nothing there or not a directory asks Lstat, whose
+// not-exist alone is nothing there. Anything else there, a link to nothing
+// included, through which a snapshot cannot make the folder either, fails
+// the listing with errNotADirectory, naming the folder, on every OS; a
+// folder there was made since the listing, which found none.
 func readBackupsDir(backupsRoot string) ([]os.DirEntry, error) {
 	entries, err := readDir(backupsRoot)
-	if !errors.Is(err, os.ErrNotExist) {
+	if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR) {
 		return entries, err
 	}
 	info, err := os.Lstat(backupsRoot)
@@ -983,7 +983,7 @@ func readBackupsDir(backupsRoot string) ([]os.DirEntry, error) {
 	case info.IsDir():
 		return nil, nil
 	}
-	return nil, &os.PathError{Op: "open", Path: backupsRoot, Err: syscall.ENOTDIR}
+	return nil, &os.PathError{Op: "open", Path: backupsRoot, Err: errNotADirectory}
 }
 
 // ListContext is List, bounded by ctx.
