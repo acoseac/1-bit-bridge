@@ -286,10 +286,15 @@ func TestThePlayerSwitchWritesTheConfigThroughTheHolder(t *testing.T) {
 	// The fake player sounds while the live config has it on, so it stops the
 	// moment the save is stored, as serve's player withholds its output at
 	// once: the answer still says the change interrupted it, from what the
-	// write's turn found just before its save.
+	// write's turn found just before its save. The operator's go-ahead goes
+	// with the write, which would be refused without it.
 	fake.withholds = true
 	fake.sounding = func() bool { return srv.deps.CfgHolder.Load().Output.Player.Enabled }
-	resp := switchTo(false)
+	code, body := playerRequest(t, h, http.MethodPost, "/api/output/player/enabled", `{"enabled":false,"interrupt":true}`, nil)
+	var resp playerChangeResponse
+	if err := json.Unmarshal([]byte(body), &resp); err != nil || code != http.StatusOK {
+		t.Fatalf("POST enabled false with the go-ahead = %d: %s", code, body)
+	}
 	if resp.Status != "restart" || !resp.Interrupted {
 		t.Errorf("turning off a player that plays answered %q, interrupted %v; want restart, interrupted", resp.Status, resp.Interrupted)
 	}
@@ -298,6 +303,85 @@ func TestThePlayerSwitchWritesTheConfigThroughTheHolder(t *testing.T) {
 	}
 	if !resp.Player.Available || resp.Player.Running.State != "playing" {
 		t.Errorf("the answer carries no status after the change: %+v", resp.Player)
+	}
+}
+
+// playerInterruptingWrites are the page's two writes as each stops what the
+// player plays: the switch turning it off (from on), and the choice of a DAC,
+// without the operator's go-ahead and with it.
+var playerInterruptingWrites = []struct {
+	path, body, goAhead string
+}{
+	{"/api/output/player/enabled", `{"enabled":false}`, `{"enabled":false,"interrupt":true}`},
+	{"/api/output/player/dac", `{"selection":"tok-5","binding":"serial"}`, `{"selection":"tok-5","binding":"serial","interrupt":true}`},
+}
+
+// turnPlayerOn turns the player on through the switch, nothing sounding, so a
+// later write can turn it off.
+func turnPlayerOn(t *testing.T, srv *Server) {
+	t.Helper()
+	if code, body := playerRequest(t, srv.Handler(), http.MethodPost, "/api/output/player/enabled", `{"enabled":true}`, nil); code != http.StatusOK {
+		t.Fatalf("turning the player on = %d: %s", code, body)
+	}
+}
+
+// TestAWriteThatWouldStopPlaybackAsksFirst pins the server's confirmation: a
+// write whose change would stop what the player plays or holds paused now (the
+// player sounding in the write's turn, and the change withholding its output)
+// is refused with would_interrupt, in words that say what it stops, and
+// nothing is saved; sent again with the operator's go-ahead (interrupt), it is
+// saved, and the answer says it interrupted.
+func TestAWriteThatWouldStopPlaybackAsksFirst(t *testing.T) {
+	for _, route := range playerInterruptingWrites {
+		t.Run(route.path, func(t *testing.T) {
+			srv, fake, cfgPath := newPlayerTestServer(t)
+			turnPlayerOn(t, srv)
+			fake.withholds = true
+			fake.sounding = func() bool { return true }
+			want := readFileOrNil(cfgPath)
+			player := srv.deps.CfgHolder.Load().Output.Player
+			code, body := playerRequest(t, srv.Handler(), http.MethodPost, route.path, route.body, nil)
+			if code != http.StatusConflict || errorCode(body) != "would_interrupt" || !strings.Contains(body, "stops it at once") {
+				t.Fatalf("a write that would stop playback, without the go-ahead = %d: %s; want 409 would_interrupt saying it stops it at once", code, body)
+			}
+			unchangedConfig(t, srv, cfgPath, want, player, "a write that would stop playback, without the go-ahead")
+			code, body = playerRequest(t, srv.Handler(), http.MethodPost, route.path, route.goAhead, nil)
+			var resp playerChangeResponse
+			if err := json.Unmarshal([]byte(body), &resp); err != nil || code != http.StatusOK || resp.Status != "restart" || !resp.Interrupted {
+				t.Fatalf("the same write with the go-ahead = %d: %s; want 200 restart, interrupted", code, body)
+			}
+			if bytes.Equal(readFileOrNil(cfgPath), want) {
+				t.Errorf("the write with the go-ahead saved nothing")
+			}
+		})
+	}
+}
+
+// TestAWriteThatStopsNothingIsNotAsked: with nothing sounding, or with a change
+// that withholds nothing (the player turned on, or the DAC it started with
+// chosen again), a write is saved at once, the go-ahead neither asked for nor
+// needed.
+func TestAWriteThatStopsNothingIsNotAsked(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		sounding, withholds bool
+	}{
+		{"nothing sounding", false, true},
+		{"a change that withholds nothing", true, false},
+	} {
+		for _, route := range playerInterruptingWrites {
+			t.Run(tc.name+route.path, func(t *testing.T) {
+				srv, fake, _ := newPlayerTestServer(t)
+				turnPlayerOn(t, srv)
+				fake.withholds = tc.withholds
+				fake.sounding = func() bool { return tc.sounding }
+				code, body := playerRequest(t, srv.Handler(), http.MethodPost, route.path, route.body, nil)
+				var resp playerChangeResponse
+				if err := json.Unmarshal([]byte(body), &resp); err != nil || code != http.StatusOK || resp.Status != "restart" || resp.Interrupted {
+					t.Fatalf("= %d: %s; want 200 restart, not interrupted", code, body)
+				}
+			})
+		}
 	}
 }
 
@@ -425,9 +509,11 @@ func TestTheDACChoiceWritesTheBindingItNames(t *testing.T) {
 	h := srv.Handler()
 	// The fake player sounds until the live config names a DAC: it stops the
 	// moment the save is stored, and the answer still says it was interrupted.
+	// The operator's go-ahead goes with the choice, which would be refused
+	// without it.
 	fake.withholds = true
 	fake.sounding = func() bool { return !srv.deps.CfgHolder.Load().Output.Player.Device.Configured() }
-	code, body := playerRequest(t, h, http.MethodPost, "/api/output/player/dac", `{"selection":"tok-5","binding":"serial"}`, nil)
+	code, body := playerRequest(t, h, http.MethodPost, "/api/output/player/dac", `{"selection":"tok-5","binding":"serial","interrupt":true}`, nil)
 	if code != http.StatusOK {
 		t.Fatalf("POST dac = %d: %s", code, body)
 	}

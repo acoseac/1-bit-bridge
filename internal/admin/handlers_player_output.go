@@ -435,6 +435,9 @@ func decodePlayerBody(w http.ResponseWriter, r *http.Request, v any) bool {
 // playerEnabledRequest is POST /api/output/player/enabled's body.
 type playerEnabledRequest struct {
 	Enabled *bool `json:"enabled"`
+	// Interrupt is the operator's go-ahead for a change that stops what the
+	// player plays now (playerWouldInterrupt).
+	Interrupt bool `json:"interrupt"`
 }
 
 // apiPlayerOutputEnabled handles POST /api/output/player/enabled: it turns
@@ -486,7 +489,7 @@ func (s *Server) apiPlayerOutputEnabled(w http.ResponseWriter, r *http.Request) 
 			return err
 		}
 		sounding = s.deps.PlayerOutput.Sounding()
-		return nil
+		return s.playerInterruption(sounding, req.Interrupt, before, next, playerStopsOff)
 	})
 	if err != nil {
 		writeCfgUpdateErr(w, err)
@@ -496,10 +499,13 @@ func (s *Server) apiPlayerOutputEnabled(w http.ResponseWriter, r *http.Request) 
 }
 
 // playerDACRequest is POST /api/output/player/dac's body: a selection token
-// GET /api/output/player/dacs handed out, and the kind of binding.
+// GET /api/output/player/dacs handed out, the kind of binding, and the
+// operator's go-ahead for a change that stops what the player plays now
+// (playerWouldInterrupt).
 type playerDACRequest struct {
 	Selection string `json:"selection"`
 	Binding   string `json:"binding"`
+	Interrupt bool   `json:"interrupt"`
 }
 
 // apiPlayerOutputDAC handles POST /api/output/player/dac: it binds the player
@@ -558,7 +564,7 @@ func (s *Server) apiPlayerOutputDAC(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		sounding = s.deps.PlayerOutput.Sounding()
-		return nil
+		return s.playerInterruption(sounding, req.Interrupt, before, next, playerStopsDAC)
 	})
 	switch {
 	case errors.Is(err, errPlayerUnchanged):
@@ -574,6 +580,32 @@ func (s *Server) apiPlayerOutputDAC(w http.ResponseWriter, r *http.Request) {
 // errPlayerUnchanged ends a DAC choice's turn with nothing saved: the config
 // names the chosen binding already.
 var errPlayerUnchanged = errors.New("the config names that DAC already")
+
+// playerWouldInterrupt is the code of a write refused because it would stop
+// what the player plays or holds paused now and came without the operator's
+// go-ahead (interrupt). The page asks the operator in its message's words and
+// sends the write again with the go-ahead; nothing was saved.
+const playerWouldInterrupt = "would_interrupt"
+
+// What a refused interruption says it stops: the switch turning the player
+// off, and the choice of another DAC than the one it started with.
+const (
+	playerStopsOff = "The player is playing, or holds a pause, now. Turning it off stops it at once: it plays nothing until it is turned on again, and the bridge does not start it at its next restart."
+	playerStopsDAC = "The player is playing, or holds a pause, now. Choosing this DAC stops it at once: it keeps the DAC it started with until the bridge restarts, and plays nothing until then, or until that DAC is chosen again."
+)
+
+// playerInterruption is the last check of a write's turn: a change that
+// withholds the running player's output while it sounds (both read in the
+// turn, just before the save) needs the operator's go-ahead, and without it
+// is refused with what it stops, nothing saved. Asked in the turn, never from
+// the page's last status, which may predate a play an OpenHome controller
+// started since.
+func (s *Server) playerInterruption(sounding, goAhead bool, before, next *config.Config, stops string) error {
+	if !sounding || goAhead || !s.deps.PlayerOutput.Withholds(before, next) {
+		return nil
+	}
+	return &cfgAbort{status: http.StatusConflict, code: playerWouldInterrupt, msg: stops}
+}
 
 // playerChoiceRefusal is the answer to a choice the provider refused: a stale
 // selection, a binding that would not name the card now, a box that could not

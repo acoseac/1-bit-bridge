@@ -7422,12 +7422,26 @@ function renderPlayerOutputPending(pending) {
   panel.hidden = pending.length === 0;
 }
 
-// playerOutputSounds reports whether the player plays, starts or holds a
-// pause: what turning it off, or another DAC, stops at once.
-function playerOutputSounds(st) {
-  const run = st && st.running;
-  if (!run || !run.started) return false;
-  return ["playing", "paused"].includes(run.state) || ["playing", "starting", "paused", "releasing"].includes(run.transport);
+// playerOutputPost sends one of the page's writes. The server refuses a write
+// that would stop what the player plays or holds paused now, in its config
+// turn and with nothing saved (would_interrupt), in words that say what it
+// stops; the page asks the operator in those words, and sends the write again
+// with their go-ahead (interrupt). The page never decides from its last status
+// whether a write stops anything: a controller can start a play after it. It
+// answers the server's answer, or null for a write the operator called off.
+async function playerOutputPost(path, body) {
+  try {
+    return await API.post(path, body);
+  } catch (err) {
+    if (err.code !== "would_interrupt") throw err;
+    if (!confirm(`${err.message}\n\nGo ahead?`)) return null;
+    return await API.post(path, { ...body, interrupt: true });
+  }
+}
+
+// showPlayerOutputKept says a write the operator called off saved nothing.
+function showPlayerOutputKept(msg) {
+  showMsg(msg, "ok", "Not saved: nothing changed.");
 }
 
 // showPlayerOutputChange says what a write did, in the server's words: saved
@@ -7453,7 +7467,8 @@ function showPlayerOutputChange(msg, r) {
 }
 
 // wirePlayerOutputSwitch arms the switch: it turns the player on or off in
-// the config, asking first when that stops what plays.
+// the config, the server asking first when that stops what plays
+// (playerOutputPost).
 function wirePlayerOutputSwitch() {
   const btn = document.getElementById("player-output-switch");
   const msg = document.getElementById("player-output-msg");
@@ -7462,11 +7477,11 @@ function wirePlayerOutputSwitch() {
     const st = playerOutputLatest;
     if (!st || !st.available) return;
     const on = !st.configured.enabled;
-    if (!on && playerOutputSounds(st) &&
-      !confirm("Turn the player off?\n\nThis stops what it is playing now. The player stops when the bridge restarts.")) return;
     setDisabled(btn, true);
     try {
-      showPlayerOutputChange(msg, await API.post("/api/output/player/enabled", { enabled: on }));
+      const r = await playerOutputPost("/api/output/player/enabled", { enabled: on });
+      if (r) showPlayerOutputChange(msg, r);
+      else showPlayerOutputKept(msg);
     } catch (err) {
       showMsg(msg, "err", `Save failed: ${err.message}`);
     } finally {
@@ -7477,8 +7492,9 @@ function wirePlayerOutputSwitch() {
 
 // wirePlayerOutputDACs arms the DAC list and its choice: Find DACs lists the
 // box's cards, and Use this DAC sends the token of the one picked and the
-// kind of binding. A list the box no longer answers for is refused, and the
-// page asks for a new one.
+// kind of binding, the server asking first when the choice stops what plays
+// (playerOutputPost). A list the box no longer answers for is refused, and
+// the page asks for a new one.
 function wirePlayerOutputDACs() {
   const find = document.getElementById("player-output-list");
   const use = document.getElementById("player-output-use");
@@ -7501,11 +7517,11 @@ function wirePlayerOutputDACs() {
       showMsg(msg, "warn", "Choose a DAC in the list first.");
       return;
     }
-    if (playerOutputSounds(playerOutputLatest) &&
-      !confirm("Use this DAC?\n\nUnless it is the DAC the player started with, bound the same way, this stops what the player is playing now. The player opens it when the bridge restarts.")) return;
     setDisabled(use, true);
     try {
-      showPlayerOutputChange(msg, await API.post("/api/output/player/dac", { selection: picked.value, binding: kind }));
+      const r = await playerOutputPost("/api/output/player/dac", { selection: picked.value, binding: kind });
+      if (r) showPlayerOutputChange(msg, r);
+      else showPlayerOutputKept(msg);
     } catch (err) {
       if (err.code === "stale_selection") {
         document.getElementById("player-output-dacs")?.replaceChildren();

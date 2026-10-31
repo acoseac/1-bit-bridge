@@ -116,6 +116,25 @@ type consoleChange struct {
 	Player      admin.PlayerStatus `json:"player"`
 }
 
+// askedFirst sends a write that would stop what the player plays, as the page
+// first does: without the operator's go-ahead, so the console refuses it with
+// would_interrupt and saves nothing (the config file as it was, the engine
+// still sounding).
+func (cs *consoleServe) askedFirst(t *testing.T, path, body string, eng *engine.Engine) {
+	t.Helper()
+	before := readBytes(t, cs.configPath)
+	code, raw := cs.call(t, http.MethodPost, path, body, nil)
+	if code != http.StatusConflict || !strings.Contains(raw, `"would_interrupt"`) || !strings.Contains(raw, "stops it at once") {
+		t.Fatalf("POST %s %s without the go-ahead = %d: %s; want 409 would_interrupt", path, body, code, raw)
+	}
+	if after := readBytes(t, cs.configPath); string(after) != string(before) {
+		t.Errorf("a write refused for want of the go-ahead wrote the config")
+	}
+	if s := eng.Snapshot(); s.State() != engine.Playing {
+		t.Errorf("a write refused for want of the go-ahead stopped the player: %s", s.State())
+	}
+}
+
 // dacRow is the console's DAC list's row for card 5, the GO bar.
 func (cs *consoleServe) dacRow(t *testing.T) admin.PlayerDACCard {
 	t.Helper()
@@ -256,7 +275,9 @@ func TestTheConsoleShowsTheRunningPlayer(t *testing.T) {
 }
 
 // TestTheConsoleTurnsTheRunningPlayerOffAndOnAgain: turned off from the
-// console while it plays, the player's output is withheld at once (disabled):
+// console while it plays, first without the operator's go-ahead, which is
+// refused (would_interrupt) with nothing saved and the player still playing,
+// then with it, the player's output is withheld at once (disabled):
 // playback stops, the answer says it was interrupted, no transport says it
 // plays, and the stop waits for the next start; turned on again before a
 // restart, nothing is pending, and the output comes back, playing nothing
@@ -272,7 +293,8 @@ func TestTheConsoleTurnsTheRunningPlayerOffAndOnAgain(t *testing.T) {
 		t.Fatal(err)
 	}
 	awaitEngine(t, eng, "playing", func(s *engine.Snapshot) bool { return s.State() == engine.Playing })
-	off := cs.change(t, "/api/output/player/enabled", `{"enabled":false}`, "restart")
+	cs.askedFirst(t, "/api/output/player/enabled", `{"enabled":false}`, eng)
+	off := cs.change(t, "/api/output/player/enabled", `{"enabled":false,"interrupt":true}`, "restart")
 	if !off.Interrupted || off.Player.Running.Withheld != "disabled" || strings.Join(pendingChanges(off.Player), ",") != "stop" {
 		t.Errorf("turning the playing player off: interrupted %v, withheld %q, pending %v; want interrupted, disabled, stop",
 			off.Interrupted, off.Player.Running.Withheld, pendingChanges(off.Player))
@@ -300,7 +322,9 @@ func TestTheConsoleTurnsTheRunningPlayerOffAndOnAgain(t *testing.T) {
 }
 
 // TestTheConsoleChoosesAnotherDACAndBack: the GO bar chosen by its model while
-// the player plays it by its serial is another binding: written, the output
+// the player plays it by its serial is another binding: refused without the
+// operator's go-ahead (would_interrupt), nothing saved; with it, written, the
+// output
 // withheld at once (binding_changed), no transport playable, the change
 // pending; chosen again by its serial before a restart, the boot binding is
 // written as the boot snapshot held it, nothing is pending, and the output
@@ -320,7 +344,8 @@ func TestTheConsoleChoosesAnotherDACAndBack(t *testing.T) {
 	if !row.Running || !row.Configured || row.Selection == "" || row.Recommended != config.BindingSerial {
 		t.Fatalf("the GO bar's row: %+v, want the DAC the player plays, configured, with a token", row)
 	}
-	model := cs.change(t, "/api/output/player/dac", `{"selection":"`+row.Selection+`","binding":"uniqueModel"}`, "restart")
+	cs.askedFirst(t, "/api/output/player/dac", `{"selection":"`+row.Selection+`","binding":"uniqueModel"}`, eng)
+	model := cs.change(t, "/api/output/player/dac", `{"selection":"`+row.Selection+`","binding":"uniqueModel","interrupt":true}`, "restart")
 	if !model.Interrupted || model.Player.Running.Withheld != reasonBindingChanged || strings.Join(pendingChanges(model.Player), ",") != "dac" {
 		t.Errorf("another binding while playing: interrupted %v, withheld %q, pending %v", model.Interrupted, model.Player.Running.Withheld, pendingChanges(model.Player))
 	}

@@ -1,11 +1,16 @@
 package admin
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -162,7 +167,7 @@ func TestThePlayerPageOffersNoDSDControl(t *testing.T) {
 		}
 	}
 	js := stripJSComments(readConsoleJS(t, "static/app.js"))
-	writes := regexp.MustCompile(`API\.(?:post|patch|put|del|delete)\("(/api/output/player[^"]*)"`).FindAllStringSubmatch(js, -1)
+	writes := regexp.MustCompile(`(?:API\.(?:post|patch|put|del|delete)|playerOutputPost)\("(/api/output/player[^"]*)"`).FindAllStringSubmatch(js, -1)
 	var got []string
 	for _, w := range writes {
 		got = append(got, w[1])
@@ -170,6 +175,131 @@ func TestThePlayerPageOffersNoDSDControl(t *testing.T) {
 	sort.Strings(got)
 	if strings.Join(got, " ") != "/api/output/player/dac /api/output/player/enabled" {
 		t.Errorf("the page's script writes %v, want the DAC and the switch alone", got)
+	}
+}
+
+// TestThePlayerPageAsksOnlyInTheServersWords pins where the page decides to
+// warn before a write that stops playback: never from its last status, which
+// can predate a play a controller started since, or be missing when a poll
+// failed. Both writes go through playerOutputPost, whose one confirm answers
+// the server's would_interrupt in the server's words and sends the write again
+// with the go-ahead; the switch and the DAC choice ask nothing of their own.
+// TestAWriteThatWouldStopPlaybackAsksFirst pins the server's half, and
+// TestThePlayerPageAsksBeforeAWriteThatStopsPlayback runs the helper under
+// node where node is installed.
+func TestThePlayerPageAsksOnlyInTheServersWords(t *testing.T) {
+	src := readConsoleJS(t, "static/app.js")
+	post := stripJSComments(extractJSFunction(t, src, "playerOutputPost"))
+	for _, want := range []string{`err.code !== "would_interrupt"`, `confirm(`, `err.message`, `interrupt: true`} {
+		if !strings.Contains(post, want) {
+			t.Errorf("playerOutputPost has no %s: the server's refusal is not what the page asks from", want)
+		}
+	}
+	for _, name := range []string{"wirePlayerOutputSwitch", "wirePlayerOutputDACs"} {
+		body := stripJSComments(extractJSFunction(t, src, name))
+		if strings.Contains(body, "confirm(") {
+			t.Errorf("%s asks the operator itself: whether a write stops playback is the server's to say, in its turn", name)
+		}
+		if !strings.Contains(body, `playerOutputPost("/api/output/player/`) {
+			t.Errorf("%s does not send its write through playerOutputPost", name)
+		}
+	}
+}
+
+// TestThePlayerPageAsksBeforeAWriteThatStopsPlayback runs the shipped
+// playerOutputPost under node: a write the server saves is sent once and asks
+// nothing; one the server refuses as would_interrupt asks the operator in the
+// server's words and, with their go-ahead, is sent again with interrupt, or,
+// without it, is not, and saves nothing; any other refusal is the caller's,
+// asking nothing.
+func TestThePlayerPageAsksBeforeAWriteThatStopsPlayback(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; this test executes the shipped console source")
+	}
+	fn := extractJSFunction(t, readConsoleJS(t, "static/app.js"), "playerOutputPost")
+	const stops = "The player is playing, or holds a pause, now. Turning it off stops it at once."
+	driver := `const calls = [];
+const confirms = [];
+let answers = [];
+let goAhead = true;
+globalThis.API = {
+  post: async (path, body) => {
+    calls.push({ path, body });
+    const next = answers.shift();
+    if (next && next.refuse) {
+      const e = new Error(next.refuse.message);
+      e.code = next.refuse.code;
+      throw e;
+    }
+    return next ? next.answer : null;
+  },
+};
+globalThis.confirm = (text) => {
+  confirms.push(text);
+  return goAhead;
+};
+` + fn + `
+const out = [];
+async function run(name, steps, answer) {
+  calls.length = 0;
+  confirms.length = 0;
+  answers = steps;
+  goAhead = answer;
+  let result = null;
+  let refused = "";
+  try {
+    result = await playerOutputPost("/api/output/player/enabled", { enabled: false });
+  } catch (e) {
+    refused = e.code || e.message;
+  }
+  out.push({ name, calls: JSON.parse(JSON.stringify(calls)), confirms: [...confirms], result: result === undefined ? null : result, refused });
+}
+(async () => {
+  await run("saved", [{ answer: { status: "restart" } }], true);
+  await run("asked, then saved", [{ refuse: { code: "would_interrupt", message: ` + strconv.Quote(stops) + ` } }, { answer: { status: "restart", interrupted: true } }], true);
+  await run("asked, called off", [{ refuse: { code: "would_interrupt", message: ` + strconv.Quote(stops) + ` } }], false);
+  await run("refused otherwise", [{ refuse: { code: "player_refused", message: "the player cannot run" } }], true);
+  process.stdout.write(JSON.stringify(out));
+})();
+`
+	dir := t.TempDir()
+	script := filepath.Join(dir, "player_output_post.mjs")
+	if err := os.WriteFile(script, []byte(driver), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := exec.Command(node, script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, raw)
+	}
+	type call struct {
+		Path string         `json:"path"`
+		Body map[string]any `json:"body"`
+	}
+	var runs []struct {
+		Name     string         `json:"name"`
+		Calls    []call         `json:"calls"`
+		Confirms []string       `json:"confirms"`
+		Result   map[string]any `json:"result"`
+		Refused  string         `json:"refused"`
+	}
+	if err := json.Unmarshal(raw, &runs); err != nil || len(runs) != 4 {
+		t.Fatalf("node answered %s: %v", raw, err)
+	}
+	withoutGoAhead := func(c call) bool { _, ok := c.Body["interrupt"]; return !ok && c.Body["enabled"] == false }
+	saved, asked, calledOff, refused := runs[0], runs[1], runs[2], runs[3]
+	if len(saved.Calls) != 1 || !withoutGoAhead(saved.Calls[0]) || len(saved.Confirms) != 0 || saved.Result["status"] != "restart" {
+		t.Errorf("a write the server saves: %+v; want one send without the go-ahead, nothing asked", saved)
+	}
+	if len(asked.Calls) != 2 || !withoutGoAhead(asked.Calls[0]) || asked.Calls[1].Body["interrupt"] != true || asked.Calls[1].Body["enabled"] != false ||
+		len(asked.Confirms) != 1 || !strings.Contains(asked.Confirms[0], stops) || asked.Result["interrupted"] != true {
+		t.Errorf("a write the server refuses as would_interrupt, the operator going ahead: %+v; want it asked in the server's words, then sent again with interrupt", asked)
+	}
+	if len(calledOff.Calls) != 1 || len(calledOff.Confirms) != 1 || calledOff.Result != nil || calledOff.Refused != "" {
+		t.Errorf("a write the operator calls off: %+v; want one send, one question, and nothing more", calledOff)
+	}
+	if len(refused.Calls) != 1 || len(refused.Confirms) != 0 || refused.Refused != "player_refused" {
+		t.Errorf("a write refused otherwise: %+v; want the refusal passed on, nothing asked", refused)
 	}
 }
 
