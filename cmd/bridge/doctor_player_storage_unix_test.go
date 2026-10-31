@@ -149,11 +149,12 @@ func TestServeCannotMakeADataDirectoryThroughALinkToNothing(t *testing.T) {
 // each error its inspection or its walk up the data directory's path meets
 // (B603 round 2, the orchestrator's amendment 3): none is ok. A link cycle,
 // which the medium check's resolution answers as too many links, and an
-// ancestor that is a regular file (ENOTDIR) are not checked, a warn naming
-// the error, whose advice is the path's, not the service user's; and where
-// the inspection answers fs.ErrNotExist, a real ancestor this user cannot
-// search (an Lstat that fails with EACCES on the walk) is not checked
-// either, a warn with the service user's advice, never "not there yet".
+// ancestor that is a regular file (a bare ENOTDIR, which names no entry) are
+// not checked, a warn naming the data directory and the error, whose advice
+// is the path's, not the service user's; and where the inspection answers
+// fs.ErrNotExist, a real ancestor this user cannot search (an Lstat that
+// fails with EACCES on the walk) is not checked either, a warn with the
+// service user's advice, never "not there yet".
 func TestNoErrorOfThePlayersStorageLineReadsAsOK(t *testing.T) {
 	base := t.TempDir()
 	loop1, loop2 := filepath.Join(base, "loop1"), filepath.Join(base, "loop2")
@@ -163,10 +164,10 @@ func TestNoErrorOfThePlayersStorageLineReadsAsOK(t *testing.T) {
 	if err := os.WriteFile(file, []byte("not a directory"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	const pathFix = "mend the entry the error names"
+	const pathFix = "mend what the error names on the way to the data directory"
 	for _, tc := range []struct{ name, dir, says string }{
-		{"a link cycle", filepath.Join(loop1, "data"), "not checked: "},
-		{"an ancestor that is a regular file", filepath.Join(file, "data"), "not a directory"},
+		{"a link cycle", filepath.Join(loop1, "data"), "not checked: the data directory " + filepath.Join(loop1, "data") + " cannot be inspected: "},
+		{"an ancestor that is a regular file", filepath.Join(file, "data"), "not checked: the data directory " + filepath.Join(file, "data") + " cannot be inspected: not a directory"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, ok := playerStorageCheck(playerAt(tc.dir), "linux", atomicwrite.InspectMedium)
@@ -190,6 +191,6 @@ func TestNoErrorOfThePlayersStorageLineReadsAsOK(t *testing.T) {
 			return atomicwrite.Medium{}, &fs.PathError{Op: "lstat", Path: dir, Err: fs.ErrNotExist}
 		}
 		c, ok := playerStorageCheck(playerAt(dir), "linux", notThere)
-		requireStorageLine(t, c, ok, doctor.Warn, "not checked: lstat "+dir+": permission denied", "the user the service runs as")
+		requireStorageLine(t, c, ok, doctor.Warn, "not checked: the data directory "+dir+" cannot be inspected: lstat "+dir+": permission denied", "the user the service runs as")
 	})
 }

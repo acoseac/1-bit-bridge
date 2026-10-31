@@ -76,7 +76,7 @@ func TestThePlayersStorageLineSaysWhatTheWritersCheckFound(t *testing.T) {
 		{name: "a data directory that is not there yet", cfg: player(func(c *config.Config) { c.DataDir = notYet }), goos: "linux", err: &fs.PathError{Op: "lstat", Path: notYet, Err: syscall.ENOENT},
 			status: doctor.OK, says: []string{"not checked: the data directory " + notYet + " does not exist yet; bridge serve makes it"}, inspect: true, dir: notYet},
 		{name: "a data directory this user cannot inspect", cfg: player(nil), goos: "linux", err: &fs.PathError{Op: "lstat", Path: dataDir, Err: syscall.EACCES},
-			status: doctor.Warn, says: []string{"not checked: lstat " + dataDir + ": permission denied"}, hint: "the user the service runs as", inspect: true},
+			status: doctor.Warn, says: []string{"not checked: the data directory " + dataDir + " cannot be inspected: lstat " + dataDir + ": permission denied"}, hint: "the user the service runs as", inspect: true},
 		{name: "Volumio's data partition", cfg: player(nil), goos: "linux", medium: atomicwrite.Medium{Storage: "Volumio's data partition (mmcblk0p3, ext4)"},
 			status: doctor.OK, says: []string{dataDir + " is on Volumio's data partition (mmcblk0p3, ext4); serve checks the rest as it starts the player"}, inspect: true},
 		{name: "storage the check takes and does not name", cfg: player(nil), goos: "linux",
