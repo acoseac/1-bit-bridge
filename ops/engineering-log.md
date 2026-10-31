@@ -66760,3 +66760,141 @@ The rules lines are in `.p2/rules-b604.patch` on the branch (the sandbox
 could not write `.claude/`): scanner.md, jobs.md, admin-console.md,
 dlna-upnp.md, output.md, auth-tls.md and build-ci-tests.md; the long forms
 changed are in History-rules-jobs.md and History-rules-dlna-upnp.md.
+
+## 2026-10-31 — B604, second round: every http.Server's ErrorLog from handshakelog, no path in a console error body, the console's login lines kept
+
+Codex reviewed the integrated branch (the first round with its rules,
+d479ba01) and found five gaps of the first round's classes, each confirmed
+against the code before it was fixed:
+
+1. The DLNA MediaServer's `http.Server` had no `ErrorLog`
+   (`internal/dlna/server.go`), so a handler's recovered panic named the
+   renderer it served. The first round had listed it under "Found and not
+   fixed".
+2. The console's failed and rate-limited login lines log `ip` at Warn
+   (`handlers_login.go`), with no documented exception.
+3. `GET` and `POST /api/backups` answered `backup.List`'s and `Snapshot`'s
+   errors as their 500 bodies: the backups folder, and a file the snapshot
+   copies, the config file among them.
+4. `GET /api/cert` named the certificate's path in its 404 and answered
+   `os.ReadFile`'s error in its 500.
+5. `POST /api/roots` answered the stat's `*fs.PathError` and the path it
+   resolved, so a relative request gave the bridge's working directory
+   away.
+
+A read-only sweep of the console's other 500s that write an error's text
+(52 sites in `internal/admin`) found the same class at the four token
+writes (mint, revoke, rotate and expiry: `auth.Store`'s write wraps the
+`*fs.PathError` of `tokens.json`'s staging file in the data directory,
+which a read-only data directory or a `tokens.json` a root CLI left root's
+(#1048) produces) and in the compaction (`dbFootprint`'s stat of the
+database). Every other site writes the store's SQL or validation text, the
+disk probe's pathless `probeError` (the first round's), or the QR
+encoder's: no path, B425's fixed-message rule aside.
+
+### Red first (ed378312, 83530735)
+
+On d479ba01, with the test's temp directory written `<tmp>`:
+
+- `http: panic serving 127.0.0.1:57949: the test's own panic` from the
+  MediaServer, its artwork route made to panic by the source it asks.
+- The serve guard, widened to the module: `internal/admin/admin.go: the
+  http.Server srv in ServeListener takes its ErrorLog from errorLog,
+  declared without a value, which is nil (net/http's default logger)
+  wherever nothing else assigns it` (the console on plain HTTP) and
+  `internal/dlna/server.go: the http.Server s.httpServer in Start gets no
+  ErrorLog from internal/handshakelog`. The LAN API, the tailnet server,
+  the loopback route and the OpenHome surface passed.
+- 500 bodies `open <tmp>/Private Data/backups: not a directory` (and
+  `permission denied`), `copy bridge.yaml: open <tmp>/Private
+  Config/bridge.yaml: directory is not a file` and `copy tokens.json: open
+  <tmp>/Private Data/tokens.json: permission denied`, with no log line.
+- `no TLS certificate at <tmp>/data/server.crt — run …`, and 500 bodies
+  `read <tmp>/Private Certs/server.crt: is a directory` and `open …:
+  permission denied`.
+- 400 bodies `stat <tmp>/Private Library/Missing: no such file or
+  directory`, `stat <the package's directory>/B604 relative folder: …` for
+  a relative path, `<tmp>/Private Library/track.flac is not a directory` and
+  `stat …: permission denied`, and 409 bodies naming both roots' paths.
+- `temp file: open <tmp>/data/.tokens-<n>.json: permission denied` for each
+  token write, and `manifest: measure before compact: stat
+  <tmp>/data/bridge.db: permission denied`.
+
+The login lines were pinned as they are
+(`TestAConsoleLoginRefusalLogsItsSourceAndNothingElseOfTheRequest`, green
+by design: the exception this round documents).
+
+### The fixes (d01c850a)
+
+- The MediaServer's server takes `handshakelog.ErrorLog()`, and the
+  console's starts from it on plain HTTP (its TLS branch takes Wrap's pair
+  as before). `TestEveryServeHTTPServerRedactsPeerAddresses` sweeps every
+  `http.Server` in the module: a literal's `ErrorLog`, a variable every
+  assignment of which calls into handshakelog, or Wrap's assignment before
+  the first serve; and it requires a server in each package that builds
+  one.
+- Each console error body says what failed and what to do in words that
+  name no path, and the error goes to the log at Error, whole:
+  `backupsListRefusal` and `snapshotRefusal` (a permission; a file held
+  busy past the read's retries, asked first, since on Windows its last
+  error is an access denial and so a permission's too; a stop; or the
+  log, which keeps a player-identity refusal's advice); the certificate's
+  404 keeps `bridge cert rotate` and the pairing warning, its 500 a
+  permission or the log; `rootStatRefusal` (no folder there, a permission
+  on the way, or the stat's answer through `fsutil.ErrorWithoutPath`), a
+  file, a relative path the working directory cannot resolve, and the two
+  basename refusals by the folders' names; `writeTokenStoreFault` (what did
+  not happen, a token not revoked or rotated still working, then a
+  permission or the log); the compaction's 500 the log. Status and error
+  codes are unchanged.
+
+### Decided: the console's login lines keep the source address
+
+Codex asked for a redaction or a documented exception, and the lines are
+kept and documented (auth-tls.md). The console has a login only in public
+mode, where the source of a failed login is what an operator or fail2ban
+blocks, and the address is the limiter's own key. It is
+`ExtractClientIP`'s canonical IP without a port, so a forwarded header's
+own text never reaches the line; the password never does.
+
+### Controls (after d01c850a, each restored from HEAD, none committed)
+
+Each predicted, and each matched:
+
+1. The MediaServer's `ErrorLog` removed: its panic case red (the
+   placeholder missing, the client named) and the guard red on
+   `server.go` alone.
+2. The console's `errorLog` assigned nil after its handshakelog value: the
+   guard red on `admin.go` alone ("assigned something other than a call
+   into internal/handshakelog").
+3. The snapshot's body back to `err.Error()`: the two snapshot subtests
+   red, the two listing subtests green.
+4. The certificate's Error line removed: the two unreadable-certificate
+   subtests red on the log assertion alone, the 404 green.
+5. The root's stat answered with `err.Error()`: the missing, relative and
+   permission subtests red; the file and both basename refusals green.
+6. Permission asked before busy in `snapshotRefusal`: the class table's
+   busy-and-denied row red, nothing else.
+7. The token fault carrying the error's text: all four token subtests red.
+8. The failed-login line logging `r.RemoteAddr`: the five failed-login
+   lines red on `ip`, and the search for the connection's address red; the
+   limiter's line green.
+
+### Found and not fixed
+
+- The 200's `pruneWarning` keeps the prune's and the orphan sweep's error
+  text (`TestPruneWarningTextSurfacesBothErrors` pins it); its paths lie
+  under the `snapshotDir` the same body names.
+- The compaction's 507 writes the headroom guard's text (sizes, no path),
+  and the console's other 500s write the store's error text: B425's rule,
+  no path. A helper every console 500 goes through, with a static guard,
+  would close B425's class in the console.
+- The login lines' username is what the visitor typed (64 bytes at most):
+  a password typed into the username field reaches the Warn line.
+- A success body shows the paths the console was configured with (the
+  roots, `backupsRoot`, `snapshotDir`), deliberately.
+
+The rules lines are `.p2/rules-b604-r2.patch` on the branch (the sandbox
+could not write `.claude/`): admin-console.md, auth-tls.md and
+dlna-upnp.md. The long form of the serve guard's entry changed in
+History-rules-cli-serve.md.
