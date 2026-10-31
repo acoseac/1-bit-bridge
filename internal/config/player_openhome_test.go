@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -219,5 +220,65 @@ func TestAnOpenHomePortServeBindsElsewhereTurnsThePlayerOff(t *testing.T) {
 	}
 	if lines := rec.Failures(playerOffMessage); len(lines) != 1 || !strings.Contains(lines[0], "for dlna.listenAddress") {
 		t.Errorf("logged %q, want one line naming dlna.listenAddress", lines)
+	}
+}
+
+// TestTheOpenHomePortClashIsAskedWhateverThePlayerSays pins the check the
+// console's OpenHome switch asks before it saves the opt-in on (B612):
+// OpenHomePortClash answers the port's clash with another listener of serve
+// as PlayerEnabled does with the player and the surface on, whether the
+// player is on or off and whether the opt-in is on yet, naming the setting
+// and never the port; port 0 and a port of its own clash with nothing.
+// PlayerEnabled itself still asks it only of a player that is on with its
+// surface on: a player that is off is no refusal, whatever its port.
+func TestTheOpenHomePortClashIsAskedWhateverThePlayerSays(t *testing.T) {
+	intp := func(n int) *int { return &n }
+	for _, tc := range []struct {
+		name  string
+		port  *int
+		clash string // the setting the refusal names, "" for none
+	}{
+		{"the default port", nil, ""},
+		{"a port of its own", intp(7800), ""},
+		{"a port the kernel picks", intp(0), ""},
+		{"the API's port", intp(7788), "for listenAddress"},
+		{"the console's port", intp(7789), "for adminAddress"},
+		{"the DLNA listener's default port", intp(7790), "for dlna.listenAddress"},
+		{"the loopback route's default port", intp(7791), "for output.loopbackPort"},
+	} {
+		for _, state := range []struct {
+			name              string
+			enabled, openhome bool
+		}{
+			{"the player off, the opt-in off", false, false},
+			{"the player off, the opt-in on", false, true},
+			{"the player on, the opt-in off", true, false},
+			{"the player on, the opt-in on", true, true},
+		} {
+			t.Run(tc.name+"/"+state.name, func(t *testing.T) {
+				cfg := &Config{ListenAddress: ":7788", AdminAddress: "127.0.0.1:7789", ScanIntervalSec: 3600, LibraryRoots: []string{"/music"},
+					Output: OutputConfig{Player: fullPlayer()}}
+				cfg.Output.Player.Enabled, cfg.Output.Player.OpenHome, cfg.Output.Player.OpenHomePort = state.enabled, state.openhome, tc.port
+				err := cfg.OpenHomePortClash()
+				if tc.clash == "" {
+					if err != nil {
+						t.Fatalf("OpenHomePortClash = %v, want none", err)
+					}
+				} else if err == nil || !strings.Contains(err.Error(), "output.player.openhomePort") || !strings.Contains(err.Error(), tc.clash) {
+					t.Fatalf("OpenHomePortClash = %v; want a refusal naming openhomePort and %q", err, tc.clash)
+				} else if strings.Contains(err.Error(), fmt.Sprint(*tc.port)) {
+					t.Errorf("the refusal quotes the port: %v", err)
+				}
+				on, why := cfg.PlayerEnabled("linux")
+				switch {
+				case !state.enabled && (on || why != nil):
+					t.Errorf("PlayerEnabled of a player that is off = %v, %v; want off with no reason", on, why)
+				case state.enabled && state.openhome && tc.clash != "" && (on || why == nil || why.Error() != err.Error()):
+					t.Errorf("PlayerEnabled = %v, %v; want off with OpenHomePortClash's own reason", on, why)
+				case state.enabled && (!state.openhome || tc.clash == "") && (!on || why != nil):
+					t.Errorf("PlayerEnabled = %v, %v; want on: the surface's port clashes with nothing it binds", on, why)
+				}
+			})
+		}
 	}
 }

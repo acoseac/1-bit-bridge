@@ -123,11 +123,13 @@ type PlayerConfig struct {
 	Mixer PlayerMixer `yaml:"mixer,omitempty"`
 	// OpenHome turns on the player's OpenHome surface on the LAN (B470 PR
 	// 5a2a): a listener of its own on each of the box's LAN addresses, the
-	// device and service descriptions, and the SOAP layer. Off by default,
-	// and it stays off by default until the surface plays (PR 5a4): 1-bit
-	// never probes a host that advertises an OpenHome Source for MPD. Serve
-	// reads it from the boot snapshot, so a change applies at the next start,
-	// and nothing of the surface runs while the player does not.
+	// device and service descriptions, SSDP discovery as an OpenHome Source
+	// and the actions a controller casts with. Off by default, and it stays
+	// off by default until the owner decides it (openhome.md): 1-bit 2.1 and
+	// earlier never probe a host that advertises an OpenHome Source for MPD.
+	// The console's Player page sets it (B612). Serve reads it from the boot
+	// snapshot, so a change applies at the next start, and nothing of the
+	// surface runs while the player does not.
 	OpenHome bool `yaml:"openhome,omitempty"`
 	// OpenHomePort is the surface's TCP port on each LAN address: nil for
 	// DefaultOpenHomePort, 0 for a port the kernel picks for each address,
@@ -538,14 +540,14 @@ func (c *Config) PlayerEnabled(goos string) (bool, error) {
 		return false, errors.New("output.player.enabled: a public bridge has no LAN to play for, and refuses every active output operation: the player stays off")
 	}
 	if p.OpenHome {
-		if err := c.openHomePortClash(); err != nil {
+		if err := c.OpenHomePortClash(); err != nil {
 			return false, err
 		}
 	}
 	return true, nil
 }
 
-// openHomePortClash refuses an OpenHome port another listener of serve
+// OpenHomePortClash refuses an OpenHome port another listener of serve
 // binds: the API's (listenAddress), the console's (adminAddress), the DLNA
 // listener's (dlna.listenAddress, its default included, whether or not
 // DLNA is on, since it can be turned on later) and the loopback track
@@ -554,7 +556,14 @@ func (c *Config) PlayerEnabled(goos string) (bool, error) {
 // fills it. Port 0, a port the kernel picks, clashes with nothing. The
 // refusal names the other setting and never the port: a value a setting
 // holds is not printed (config-lifecycle.md).
-func (c *Config) openHomePortClash() error {
+//
+// It reads the port and the addresses alone, whatever output.player.enabled
+// and .openhome say. PlayerEnabled asks it only of a player that is on with
+// its surface on, and turns the player off over a clash; the console's
+// OpenHome switch (B612) asks it of the config it would save before it
+// turns the opt-in on, the player on or off, and refuses the save over a
+// clash, so the player turned on later finds none.
+func (c *Config) OpenHomePortClash() error {
 	port := c.Output.Player.EffectiveOpenHomePort()
 	if port == 0 {
 		return nil

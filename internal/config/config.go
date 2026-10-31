@@ -1335,10 +1335,45 @@ func (d DeploymentConfig) SettingsImpliedByManagedControls() []string {
 	return out
 }
 
+// managedSettingImplies maps a managed SETTING onto the settings it owns
+// besides itself: a managedSettings entry naming the first makes each of
+// the others the control plane's too, hidden by the console and refused by
+// its route, with no second entry in the list.
+//
+// playerEnabled, whether the bridge's own player runs (the Player page's
+// switch), owns playerOpenHome, whether the player is advertised on the LAN
+// for the 1-bit app to cast to (output.player.openhome, the page's OpenHome
+// switch, B612): the control plane that decides whether the player runs
+// decides whether it is exposed. The other way round implies nothing, so a
+// control plane can own the exposure alone and leave the player's switch to
+// the operator. Derived here, beside managedControlSettings, for the reason
+// that map gives: the refusal comes from the declaration the control plane
+// wrote, not from a second program getting a list right.
+var managedSettingImplies = map[string][]string{
+	"playerEnabled": {"playerOpenHome"},
+}
+
+// SettingsImpliedByManagedSettings returns every settings field this
+// bridge's managed settings own besides themselves (managedSettingImplies),
+// sorted and de-duplicated. Empty when no managed setting implies another.
+func (d DeploymentConfig) SettingsImpliedByManagedSettings() []string {
+	var out []string
+	for _, s := range d.ManagedSettings {
+		for _, f := range managedSettingImplies[s] {
+			if !slices.Contains(out, f) {
+				out = append(out, f)
+			}
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
 // EffectiveManagedSettings is the union the console must be told about:
-// the fields the operator named, plus the ones the declared controls own.
-// Sorted, de-duplicated, and nil when nothing is managed so the wire field
-// stays omitted on every self-hosted install.
+// the fields the operator named, plus the ones the declared controls own and
+// the ones the named fields own (managedSettingImplies). Sorted,
+// de-duplicated, and nil when nothing is managed so the wire field stays
+// omitted on every self-hosted install.
 //
 // The console hides what this names and then drops it from the Save
 // payload, so the widened refusal in managedFieldsIn never fires on an
@@ -1346,7 +1381,7 @@ func (d DeploymentConfig) SettingsImpliedByManagedControls() []string {
 // there is precisely the shape that produced the nineteen-name wall PR #877
 // fixed — a field rendered, submitted, and the whole PATCH refused.
 func (d DeploymentConfig) EffectiveManagedSettings() []string {
-	implied := d.SettingsImpliedByManagedControls()
+	implied := append(d.SettingsImpliedByManagedControls(), d.SettingsImpliedByManagedSettings()...)
 	if len(d.ManagedSettings) == 0 && len(implied) == 0 {
 		return nil
 	}
@@ -1360,15 +1395,18 @@ func (d DeploymentConfig) EffectiveManagedSettings() []string {
 	return out
 }
 
-// IsManagedSettingOrImplied is IsManagedSetting widened by the controls.
-// This is the predicate a settings WRITE path wants; IsManagedSetting
-// alone answers the narrower "did the operator name this field", which is
-// what the console's hide pass and the report want.
+// IsManagedSettingOrImplied is IsManagedSetting widened by the controls and
+// by the settings a managed setting owns (managedSettingImplies: a managed
+// playerEnabled owns playerOpenHome). This is the predicate a settings
+// WRITE path wants; IsManagedSetting alone answers the narrower "did the
+// operator name this field", which is what the console's hide pass and the
+// report want.
 func (d DeploymentConfig) IsManagedSettingOrImplied(field string) bool {
 	if d.IsManagedSetting(field) {
 		return true
 	}
-	return slices.Contains(d.SettingsImpliedByManagedControls(), field)
+	return slices.Contains(d.SettingsImpliedByManagedControls(), field) ||
+		slices.Contains(d.SettingsImpliedByManagedSettings(), field)
 }
 
 // knownManagedControls is the closed set the current build understands.

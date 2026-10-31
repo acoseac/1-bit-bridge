@@ -115,6 +115,51 @@ func TestManagedControlsSurviveClone(t *testing.T) {
 	}
 }
 
+// TestAManagedPlayerSwitchOwnsTheOpenHomeSwitch pins the one implication
+// between settings (managedSettingImplies, B612): managedSettings naming
+// playerEnabled makes playerOpenHome the control plane's too, for the write
+// path's predicate and in what the console is told, while the narrow
+// IsManagedSetting still says the operator did not name it; naming
+// playerOpenHome alone owns that switch and nothing else, and naming another
+// setting, the DAC's among them, implies nothing.
+func TestAManagedPlayerSwitchOwnsTheOpenHomeSwitch(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		managed          []string
+		enabled, openHom bool
+	}{
+		{"playerEnabled", []string{"playerEnabled"}, true, true},
+		{"playerOpenHome alone", []string{"playerOpenHome"}, false, true},
+		{"playerDevice alone", []string{"playerDevice"}, false, false},
+		{"another setting", []string{"libraryName"}, false, false},
+		{"nothing", nil, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := DeploymentConfig{ManagedSettings: tc.managed}
+			if got := d.IsManagedSettingOrImplied("playerEnabled"); got != tc.enabled {
+				t.Errorf("playerEnabled managed: %v, want %v", got, tc.enabled)
+			}
+			if got := d.IsManagedSettingOrImplied("playerOpenHome"); got != tc.openHom {
+				t.Errorf("playerOpenHome managed: %v, want %v", got, tc.openHom)
+			}
+			if got := slices.Contains(d.EffectiveManagedSettings(), "playerOpenHome"); got != tc.openHom {
+				t.Errorf("the console is told playerOpenHome is managed: %v, want %v (%v)", got, tc.openHom, d.EffectiveManagedSettings())
+			}
+			if named := slices.Contains(tc.managed, "playerOpenHome"); d.IsManagedSetting("playerOpenHome") != named {
+				t.Errorf("IsManagedSetting(playerOpenHome) = %v, want %v: it answers what the operator named", !named, named)
+			}
+		})
+	}
+	// A control implies no player setting, and the implication is of a
+	// setting, not a control.
+	d := DeploymentConfig{ManagedControls: []string{ManagedControlRestart, ManagedControlUpdates, ManagedControlRoots, ManagedControlVariantsDir, ManagedControlBackups}}
+	for _, f := range []string{"playerEnabled", "playerOpenHome", "playerDevice"} {
+		if d.IsManagedSettingOrImplied(f) {
+			t.Errorf("every control managed: %s is managed too", f)
+		}
+	}
+}
+
 // TestEffectiveManagedSettingsDeduplicates.
 //
 // The docblock promises a de-duplicated set, and the first draft only checked
