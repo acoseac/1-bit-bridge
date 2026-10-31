@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -137,6 +139,22 @@ func (cs *consoleServe) onDisk(t *testing.T) config.PlayerConfig {
 	return cfg.Output.Player
 }
 
+// goBarTreesWithStream is goBarTrees with a playback stream for the GO bar's
+// card in /proc/asound, which the capture has none of: synthetic altsets, PCM
+// in S32_LE to 384 kHz and native DSD in DSD_U32_BE at three rates, which GET
+// /v1/outputs' DAC read projects as the card's capabilities.
+func goBarTreesWithStream(t *testing.T) outputTrees {
+	t.Helper()
+	trees := goBarTrees(t)
+	stream := "Playback:\n  Status: Stop\n  Interface 1\n    Altset 1\n    Format: S32_LE\n    Channels: 2\n" +
+		"    Rates: 44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000\n    Bits: 32\n" +
+		"  Interface 1\n    Altset 2\n    Format: DSD_U32_BE\n    Channels: 2\n    Rates: 88200, 176400, 352800\n    Bits: 32\n"
+	if err := os.WriteFile(filepath.Join(trees.proc, "asound", "card5", "stream0"), []byte(stream), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return trees
+}
+
 // pendingChanges are the words of what waits for a restart.
 func pendingChanges(st admin.PlayerStatus) []string {
 	var out []string
@@ -148,17 +166,20 @@ func pendingChanges(st admin.PlayerStatus) []string {
 
 // TestTheConsoleShowsTheRunningPlayer pins the Player page's status against a
 // real serve: the player it started from the boot snapshot, the binding by
-// its kind and its serial's label, the DAC the watcher resolved, the track
-// heard named from the library's own row (its path the index stores) with the
-// decoder's report, the three transports, and nothing pending; no answer
-// carries the serial.
+// its kind and its serial's label, the DAC the watcher resolved with the
+// capabilities GET /v1/outputs' read projects, the track heard named from the
+// library's own row (its path the index stores) with the decoder's report,
+// the three transports, each by what the DAC takes, the mode the player runs
+// with and the tuples approved, apart, and nothing pending; no answer carries
+// the serial.
 func TestTheConsoleShowsTheRunningPlayer(t *testing.T) {
 	needsDirectorySync(t)
 	persistentMedium(t)
 	const rel = "Artist/Album (2020)/01 Song.flac"
 	standIn := newPlayerStandIn()
 	standIn.details = &engine.Details{Frames: 96000 * 200, RateHz: 96000, Bits: 24, Channels: 2, Codec: "FLAC", Lossless: true}
-	cs := bootConsoleServe(t, playerServeCase{player: goBarPlayer, standIn: standIn, files: map[string][]byte{rel: []byte("a track")}})
+	cs := bootConsoleServe(t, playerServeCase{player: goBarPlayer, standIn: standIn, files: map[string][]byte{rel: []byte("a track")},
+		with: func(o *serveOpts) { o.playerTrees = goBarTreesWithStream(t) }})
 	eng := cs.runningEngine(t)
 	availableOutput(t, eng)
 	queue(t, eng, 0, library.Reference(rel))
@@ -174,15 +195,28 @@ func TestTheConsoleShowsTheRunningPlayer(t *testing.T) {
 	if b := run.Binding; b == nil || b.Kind != config.BindingSerial || b.USBID != "20b1:3009" || b.SerialLabel != usbid.New(goBarSerial).Label() {
 		t.Errorf("the boot binding: %+v", run.Binding)
 	}
-	if d := run.DAC; d == nil || d.State != "available" || d.USBID != "20b1:3009" {
-		t.Errorf("the DAC: %+v, want the GO bar, available", run.DAC)
+	if d := run.DAC; d == nil || d.State != "available" || d.USBID != "20b1:3009" || d.Name != "iFi (by AMR) HD USB Audio" ||
+		d.MaxPCMRate != 384000 || fmt.Sprint(d.PCMBitDepths) != "[32]" || fmt.Sprint(d.NativeDSDRates) != "[2822400 5644800 11289600]" ||
+		fmt.Sprint(d.DSDFormats) != "[DSD_U32_BE]" {
+		t.Errorf("the DAC: %+v, want the GO bar, available, with its stream's capabilities", run.DAC)
 	}
 	tr := run.Track
 	if tr == nil || !tr.Named || tr.Path != rel || tr.Codec != "FLAC" || tr.RateHz != 96000 || tr.Bits != 24 || tr.Channels != 2 || tr.Duration != 200 {
 		t.Errorf("the track heard: %+v, want %s named from the library's row with the decoder's report", tr, rel)
 	}
 	if len(st.Transports) != 3 || st.Transports[0].Kind != "pcm" || !st.Transports[0].Plays || st.Transports[1].Plays || st.Transports[2].Plays {
-		t.Errorf("the transports: %+v, want pcm playing and no DSD", st.Transports)
+		t.Fatalf("the transports: %+v, want pcm playing and no DSD", st.Transports)
+	}
+	// What the DAC takes, the mode, and the approvals are three facts: the GO
+	// bar's stream takes DoP's 24 bits at 176.4 kHz and native DSD, the player
+	// runs with DSD off, and nothing is approved, so neither plays.
+	for _, tr := range st.Transports {
+		if tr.Capable != "yes" || len(tr.Approved) != 0 {
+			t.Errorf("%s: capable %q, approved %v; want yes, and nothing approved", tr.Kind, tr.Capable, tr.Approved)
+		}
+	}
+	if dop, native := st.Transports[1], st.Transports[2]; dop.Mode != "dsdMode off, allowDoP false" || native.Mode != "dsdMode off" {
+		t.Errorf("the DSD transports' modes: %q and %q, want the boot snapshot's DSD off", dop.Mode, native.Mode)
 	}
 	if !st.Configured.Enabled || !st.Configured.Starts || len(st.Pending) != 0 {
 		t.Errorf("configured %+v, pending %v; want the boot state, nothing pending", st.Configured, st.Pending)
