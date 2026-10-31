@@ -127,8 +127,10 @@ var ErrVolatile = errors.New("atomicwrite: the root is on storage that does not 
 // ErrMediumUnknown is their refusal of a root on storage of which that cannot
 // be told: an overlay whose upper layer the mount table, unreadable, does not
 // name, or names by a path whose relationship to the backing storage cannot
-// be established here. Differing totals alone are inconclusive. They say so
-// rather than take it for storage that outlives a reboot.
+// be established here, one that reaches nothing here among them but on a
+// box whose own files show Volumio's boot layout (volumioUpper). Differing
+// totals alone are inconclusive. They say so rather than take it for storage
+// that outlives a reboot.
 var ErrMediumUnknown = errors.New("atomicwrite: whether the root's storage keeps what is written to it through a reboot cannot be told")
 
 // ErrOverlayBind marks a bind of a writable overlay subtree whose copy-up
@@ -963,10 +965,14 @@ func WriteBytes(path string, data []byte, tmpPrefix string) error {
 // (ErrVolatile): a write on tmpfs, ramfs, or an overlay whose upper layer is
 // one, has every barrier answer and is gone after the reboot, and where what
 // the check must read cannot be read the writer says so (ErrMediumUnknown),
-// failing closed (strictPath.storage, mediumFrom). It refuses what it can
+// failing closed (strictPath.storage, inspectMedium). It refuses what it can
 // tell is volatile, and does not prove every stack persistent: storage that
 // keeps nothing under a filesystem that reads as a disk's is the caller's to
-// avoid. A root on a bind of a directory inside an overlay is refused too
+// avoid. An overlay root's upper layer that no path here reaches is taken on
+// Volumio alone, where the box's own files show its boot layout
+// (volumioUpper), and the directories above root are synced on the overlay's
+// own mount as on any overlay, so no sync reaches for the upper layer. A
+// root on a bind of a directory inside an overlay is refused too
 // (ErrOverlayBind, also matching ErrMediumUnknown): the directories above
 // it that a copy-up creates are out of that mount's reach. A read-only
 // overlay with no upper layer is left to fail EROFS on the write.
