@@ -84,3 +84,15 @@ func TestParseDatagramMetaReadsThisPlatformsPktinfo(t *testing.T) {
 			datagramMetaSpace, unix.CmsgSpace(unix.SizeofInet4Pktinfo))
 	}
 }
+
+// TestParseDatagramMetaHoldsAnIPMessageOfTypeZero pins the nightly fuzz
+// crash of 2026-10-24 to 31 (backlog B610): an IPPROTO_IP control message of
+// type 0, which x/net's parser on Linux hands to a parse function its table
+// leaves unset, reports neither a destination nor an arrival index, and the
+// parser returns.
+func TestParseDatagramMetaHoldsAnIPMessageOfTypeZero(t *testing.T) {
+	oob := unixCmsg(unix.IPPROTO_IP, 0, []byte{192, 168, 1, 20, 7, 0, 0, 0}, -1)
+	if m := parseDatagramMeta(oob); m != (datagramMeta{}) {
+		t.Errorf("an IPPROTO_IP message of type 0 reported %+v, want neither", m)
+	}
+}
