@@ -1333,11 +1333,14 @@ func TestTheManagedPlayerSettingsHideAndRefuseTheOpenHomeSwitch(t *testing.T) {
 // lock on the OpenHome switch (lockPlayerWrite), as on the page's other
 // writes: with the DAC choice or the player switch held inside its config
 // turn, the switch waits for the console's lock (testPlayerWriteWaits) and
-// never reaches bridge.yaml's lock before it; let go, both are saved, each
-// keeping the other's field in the file and the live config, through the
-// holder. Without the lock, the switch's before is read beside a write that
-// changes the block, and a value the other write saves can be answered as
-// unchanged with nothing saved.
+// reads no player configuration (before) until it has it; let go, both are
+// saved, each keeping the other's field in the file and the live config,
+// through the holder. Without the lock, the switch's before is read beside a
+// write that changes the block (its Platform call right after that Load; its
+// first is its check ahead of the lock), and a value the other write saves
+// can be answered as unchanged with nothing saved; it then waits on the
+// holder's own mutex, which UpdateChecked takes before bridge.yaml's lock, so
+// the file's lock is no signal of it.
 func TestTheOpenHomeSwitchWaitsItsTurnBehindAnotherPlayerWrite(t *testing.T) {
 	for _, tc := range []struct {
 		name, path, body string
@@ -1367,8 +1370,6 @@ func TestTheOpenHomeSwitchWaitsItsTurnBehindAnotherPlayerWrite(t *testing.T) {
 			waits := make(chan struct{})
 			var waited sync.Once
 			srv.testPlayerWriteWaits = func() { waited.Do(func() { close(waits) }) }
-			fileWaited, stop := config.LockWaitedForTest(cfgPath)
-			defer stop()
 			h := srv.Handler()
 			parked, release := tc.park(t, fake)
 			var writes sync.WaitGroup
@@ -1400,11 +1401,14 @@ func TestTheOpenHomeSwitchWaitsItsTurnBehindAnotherPlayerWrite(t *testing.T) {
 			case <-playerGiveUp(t):
 				t.Fatal("the first write never reached its turn")
 			}
+			// The parked write made every Platform call of its own before its
+			// turn held: the next two are the switch's.
+			readBefore := fake.platformCall(2)
 			second := send("/api/output/player/openhome", `{"openhome":true}`)
 			select {
 			case <-waits:
-			case <-fileWaited:
-				t.Fatal("the OpenHome switch went to bridge.yaml's lock without waiting for the console's")
+			case <-readBefore:
+				t.Fatal("the OpenHome switch read the player's configuration while another write held its turn, without waiting for the console's lock")
 			case a := <-second:
 				t.Fatalf("the OpenHome switch answered while another write held its turn: %d %s", a.code, a.body)
 			case <-playerGiveUp(t):
