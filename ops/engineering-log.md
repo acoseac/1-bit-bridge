@@ -66783,9 +66783,11 @@ part by part.
 1. (High) A drop-in's `Environment=BRIDGE_DATA_DIR=…` passed: `read_unit` looked
    only for an ExecStart in the adjacent `.d`, and `run_update` ran bridge update
    in the installer's environment, so it read another token store and wrote its
-   marker in another data dir. Now the unit is read as the manager runs it
-   (`systemctl --user cat`, its drop-ins wherever they are: beside it,
-   /etc/systemd/user, /usr/lib/systemd/user, `service.d`), and a unit file the
+   marker in another data dir. Now the unit's files are read wherever they are
+   (`systemctl --user cat`, its drop-ins: beside it, /etc/systemd/user,
+   /usr/lib/systemd/user, `service.d`; this said "as the manager runs it" until
+   round 3, which `cat` does not show: it reads the files on disk, and the
+   manager's loaded unit is `systemctl --user show`'s, below), and a unit file the
    manager reads from elsewhere, an ExecStart set more than once, or any
    Environment=, EnvironmentFile=, PassEnvironment= or UnsetEnvironment= is
    refused, named by key and file, never value; a BRIDGE_ variable this shell
@@ -66911,4 +66913,99 @@ exit 4 every time: `bridge status` sends no session, and public mode's console
 answers it 401. ksh93's `sleep` is a builtin, so the 20 s wait for the served
 release takes 20 real seconds under ksh in the tests that reach it. A printed
 command without `--config` reads `./bridge.yaml` first where the user runs it
-(`resolveConfigPath`), as every plain `bridge` command does.
+(`resolveConfigPath`), as every plain `bridge` command does (round 3 made this
+a fix: every printed command carries `--config` now).
+
+## 2026-10-31 — B475 round 3: the manager's loaded unit, files left for one, --config kept
+
+Codex reviewed round 2's head (66cfeb59) and found one High and two Mediums
+left; each held against the code and systemd. The rule's long form,
+ops/History-rules-config-lifecycle.md ("The one-line installer"), says what
+changed, part by part.
+
+**The findings and what was done.**
+
+1. (High) `systemctl cat` reads the unit's files on disk, which can differ
+   from what the manager has loaded (systemctl(1): "this shows the contents of
+   the backing files on disk, which may not match the system manager's
+   understanding of these units if any unit files were updated on disk and the
+   daemon-reload command wasn't issued since"). An `Environment=BRIDGE_DATA_DIR`
+   drop-in removed without a daemon-reload passed, while the service, and the
+   restart bridge update makes, kept it. Round 2's comment called `cat` the unit
+   "as the manager runs it". Now `inspect_unit` asks for the loaded unit first
+   (`systemctl --user show -p LoadState,FragmentPath,DropInPaths,NeedDaemonReload,Environment,EnvironmentFiles,PassEnvironment,UnsetEnvironment`),
+   and `check_installed_unit` refuses a unit not loaded as it is, one loaded
+   from another file, a pending daemon-reload, and any loaded environment, named
+   by property and by the files that set it, never by value; the files (`cat`)
+   are then what the manager loaded, for the ExecStart count.
+2. (Medium) systemd answers "No files found" for a unit it has not found,
+   before it reads any drop-in (`unit_find_paths`, systemctl-util.c, v252), and
+   round 2's stub printed drop-ins for a unit with no file, so its "drop-in for
+   it elsewhere, none here" test passed on invented behaviour, and files left
+   for the unit passed the new-box check, to apply once bridge init made the
+   unit. The stub now answers as systemd does, and `unit_files_on_disk` reads the
+   directories the manager reads units from (`systemd-analyze --user
+   unit-paths`): a unit file of its name, its drop-ins in `<unit>.d` and in the
+   two directories its dashes name, and the `service.d` drop-ins for every
+   service that set an environment or an ExecStart. Any of them refuses a new
+   box; a search path that cannot be listed is refused too.
+3. (Medium) `bridge_line` left out a `--config` naming the default settings
+   file, and a bridge command without one reads `./bridge.yaml` first where it
+   is run (`resolveConfigPath`, pinned by
+   `TestResolveConfigPathPrefersLocalOverPlatform`), so a printed pair, status
+   or update pasted in another bridge's folder acted on that bridge's settings
+   and its token store. It keeps every `--config` now; an explicit one always
+   wins (`TestResolveConfigPathExplicitAlwaysWins`).
+
+**The stub.** systemctl's stub keeps the manager's loaded unit in
+`STUB_STATE/loaded`, which its `daemon-reload` writes (the fake bridge's init
+runs one, as the real init does), and its `show` reports that unit, with
+NeedDaemonReload yes once the files differ from it (`STUB_RELOAD_UNNOTICED`
+keeps it no, for a loaded environment the files no longer show; `STUB_LOAD_STATE`
+and `STUB_SHOW_FAILS` stand for a unit not loaded as it is and a manager that
+does not answer). A test's `daemonReload` has the rig's manager load the unit
+before the run changes a file. A new stub, systemd-analyze, lists the same
+directories as systemctl's.
+
+**Red first.** The new and changed tests against 66cfeb59's script, with the
+corrected stub: 7 top-level tests red under each of sh, dash, `bash --posix`
+and ksh (27 named subtests a shell, and `TestWithoutSystemdSetupWaits`, which
+has none). Item 1: a drop-in removed or added without a
+daemon-reload, a loaded environment the files no longer show, a unit not
+loaded as it is, a loaded unit that cannot be read (on a new box and an
+install). Item 2: a drop-in left elsewhere (round 2's own test, red once the
+stub answers as systemd does), where init would write the unit, in a
+directory its dashes name, a `service.d` one with an environment, and a search
+path that cannot be listed. Item 3: every printed pair, status, serve and
+update with the default settings, and a new case pasted in a folder holding
+another bridge's `bridge.yaml`. Green on 204f9371 under the four shells
+(57.8 s).
+
+**Negative controls**, on 204f9371, predicted first, each restored from git
+with the tree clean after, under sh:
+
+- R1, the NeedDaemonReload refusal removed: "a drop-in added without a
+  daemon-reload" red, as predicted, and "an environment drop-in removed
+  without a daemon-reload", which I predicted green. It was still refused, by
+  the loaded environment, as I expected, but the test requires the reload
+  refusal's own words, which my prediction left out: the test pins which check
+  refuses.
+- R2, the loaded-environment refusal removed: the four directive cases and
+  the loaded environment the files no longer show red. As predicted.
+- R3, the LoadState check removed: the unit not loaded as it is red. As
+  predicted.
+- R4, the loaded FragmentPath not compared: the unit in the one in HOME's
+  place red. As predicted.
+- R5, a failed `show` taken as an empty answer: both cases red, refused in
+  other words. As predicted.
+- R6, the files left for a unit not refused: the four left-file cases red. As
+  predicted.
+- R7, the dash-prefix directories out of the scan: that case red. As
+  predicted.
+- R8a, `service.d` out of the scan: its environment case red; R8b, every
+  `service.d` drop-in taken as left for the unit: the new box with one of other
+  settings red. As predicted.
+- R9, a failed systemd-analyze taken as an empty list: that case red. As
+  predicted.
+- R10, round 2's dropping of a default `--config` back: exactly the predicted
+  printed-command cases red, the contract test green. As predicted.
