@@ -86,13 +86,16 @@ type consolePlayer struct {
 	// serve decided its OpenHome surface from: a live opt-in that differs
 	// waits for the next start (pending).
 	bootOpenHome bool
-	goos         string
-	lockHeld     bool
-	stateErr     error
-	trees        outputTrees
-	store        consoleTrackStore
-	now          func() time.Time
-	readBound    time.Duration
+	// boot is the boot snapshot, which the running player's admission
+	// judges the OpenHome port clash on (withheld), as serve's player does.
+	boot      *config.Config
+	goos      string
+	lockHeld  bool
+	stateErr  error
+	trees     outputTrees
+	store     consoleTrackStore
+	now       func() time.Time
+	readBound time.Duration
 	// observer reads the box: trees' own, or a test's with its seam.
 	observer func() binding.Observer
 
@@ -143,6 +146,7 @@ func newConsolePlayer(w consolePlayerWiring) *consolePlayer {
 		slot: make(chan struct{}, 1), selections: map[string]consoleSelection{}}
 	c.observer = c.trees.observer
 	if w.Boot != nil {
+		c.boot = w.Boot
 		c.bootDevice = w.Boot.Output.Player.Device
 		c.bootOpenHome = w.Boot.Output.Player.OpenHome
 	}
@@ -272,12 +276,15 @@ func (c *consolePlayer) openHomeDetail(serving bool) string {
 // withheld is why the live config withholds the running player's output
 // now, as serve's player reads it (playerOutput.withheld): turned off first,
 // then another binding than the one it started with; "" for neither, and for
-// a player serve did not start.
+// a player serve did not start. The OpenHome port clash is judged on the
+// boot snapshot, as serve's player judges it (livePlayerSettings): a live
+// listener address or opt-in reaches what runs only at the next start, which
+// nextPlan judges on the live config.
 func (c *consolePlayer) withheld(live *config.Config) string {
 	if !c.plan.start || live == nil {
 		return ""
 	}
-	set := hotplug.SettingsFrom(live, c.goos)
+	set := hotplug.SettingsFrom(live, c.boot, c.goos)
 	switch {
 	case !set.Enabled:
 		return string(binding.StateDisabled)

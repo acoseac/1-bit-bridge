@@ -18,6 +18,10 @@ type playerHotplugWiring struct {
 	// Holder is the live config: the watcher reads output.player from it
 	// on every reading and wakes on its Changed.
 	Holder *config.RuntimeConfig
+	// BootConfig is the boot snapshot of the config, which serve bound its
+	// listeners and started the OpenHome surface from: the watcher's
+	// settings judge the OpenHome port clash on it (livePlayerSettings).
+	BootConfig *config.Config
 	// OpenSource opens the event source; nil is the kernel's netlink
 	// socket.
 	OpenSource func(context.Context) hotplug.Source
@@ -40,24 +44,28 @@ type playerHotplugWiring struct {
 }
 
 // livePlayerSettings reads the live config's player block from holder as a
-// goos host runs it ("" is this host): what the watcher reads on every
-// reading, and serve's player at every change of the config.
-func livePlayerSettings(holder *config.RuntimeConfig, goos string) func() hotplug.Settings {
+// goos host runs it ("" is this host), for the serve whose boot snapshot is
+// boot: what the watcher reads on every reading, and serve's player at every
+// change of the config. The OpenHome port clash is judged on boot, since
+// serve bound its listeners and started the surface from it and a live
+// address or opt-in waits for the next start, and the rest, the switch, the
+// block and the binding, on the live config (hotplug.SettingsFrom).
+func livePlayerSettings(holder *config.RuntimeConfig, boot *config.Config, goos string) func() hotplug.Settings {
 	if goos == "" {
 		goos = runtime.GOOS
 	}
-	return func() hotplug.Settings { return hotplug.SettingsFrom(holder.Load(), goos) }
+	return func() hotplug.Settings { return hotplug.SettingsFrom(holder.Load(), boot, goos) }
 }
 
 // startPlayerHotplug starts the player's hotplug watcher on Linux, where
 // alone the player runs: a service that runs a watch of the box while the
-// live config enables the player (config.PlayerEnabled: enabled, its block
-// valid, not public) and nothing while it does not, so turning the player
-// on or off while serve runs starts or stops the watch. It reads the box
-// through hostTrees, as every reader here does (a boot test's Trees in
-// their place), and opens nothing under /dev/snd. It publishes to w.Feed,
-// which serve's player reads its output reports from when it starts. Off
-// Linux nothing starts.
+// live config enables the player (config.PlayerEnabledAsBooted over
+// w.BootConfig: enabled, its block valid, not public) and nothing while it
+// does not, so turning the player on or off while serve runs starts or
+// stops the watch. It reads the box through hostTrees, as every reader here
+// does (a boot test's Trees in their place), and opens nothing under
+// /dev/snd. It publishes to w.Feed, which serve's player reads its output
+// reports from when it starts. Off Linux nothing starts.
 //
 // stop is serve's teardown, and the one thing that ends the service: it
 // cancels the service and waits for its Run, no longer than shutdownGrace.
@@ -80,7 +88,7 @@ func startPlayerHotplug(ctx context.Context, w playerHotplugWiring) (stop func()
 		observe = w.Observe(observe)
 	}
 	svc := hotplug.NewService(hotplug.Config{
-		Settings:   livePlayerSettings(w.Holder, goos),
+		Settings:   livePlayerSettings(w.Holder, w.BootConfig, goos),
 		Changed:    w.Holder.Changed,
 		Observe:    observe,
 		OpenSource: w.OpenSource,

@@ -585,11 +585,12 @@ type playerOpenHomeRequest struct {
 // It needs no go-ahead (interrupt), since it stops nothing the player plays.
 // Serve reads the opt-in from its boot snapshot alone (planServePlayer), so
 // the surface running now runs until the next start, and none starts before
-// it; the running process reads the live opt-in only through the clash check
-// in config.PlayerEnabled (the watcher's settings, serve's player's
-// withholding, this page's view), which a saved change leaves as it was
-// (turning the opt-in on is refused over a clash) or lifts (turning it off
-// clears one another writer made).
+// it; and the running player's admission (the watcher's settings, serve's
+// player's withholding, this page's view) judges the OpenHome port clash on
+// that snapshot too (config.PlayerEnabledAsBooted, B612's second round), so
+// no live opt-in reaches what runs. The settings save refuses, in its turn,
+// a listener address on the surface's port while the opt-in is on, so the
+// clash this route refuses cannot come the other way.
 func (s *Server) apiPlayerOutputOpenHome(w http.ResponseWriter, r *http.Request) {
 	var req playerOpenHomeRequest
 	if !decodePlayerBody(w, r, &req) {

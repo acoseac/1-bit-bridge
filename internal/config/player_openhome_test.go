@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -282,3 +283,86 @@ func TestTheOpenHomePortClashIsAskedWhateverThePlayerSays(t *testing.T) {
 		}
 	}
 }
+
+// TestTheRunningPlayersOpenHomeClashIsJudgedOnItsBootSnapshot pins
+// PlayerEnabledAsBooted (B612's second round), the running player's
+// admission: the OpenHome port clash is the boot snapshot's alone, and every
+// other check the live config's. A live clash through each of the four
+// settings beside a boot without one lets the player run, since no socket
+// moved, and so does the opt-in turned on live; a boot clash refuses it
+// whatever the live config says; PlayerEnabled, and a nil boot, judge the
+// clash on the config itself, an *OpenHomePortClashError naming its setting;
+// and the live switch, a block the live config refuses, a public bridge and
+// the host still decide beside a boot that runs.
+func TestTheRunningPlayersOpenHomeClashIsJudgedOnItsBootSnapshot(t *testing.T) {
+	base := func() *Config {
+		cfg := &Config{ListenAddress: ":7788", AdminAddress: "127.0.0.1:7789", ScanIntervalSec: 3600, LibraryRoots: []string{"/music"},
+			Output: OutputConfig{Player: fullPlayer()}}
+		cfg.Output.Player.OpenHome = true
+		return cfg
+	}
+	port := DefaultOpenHomePort
+	for _, move := range []struct {
+		setting string
+		set     func(*Config)
+	}{
+		{"listenAddress", func(c *Config) { c.ListenAddress = fmt.Sprintf(":%d", port) }},
+		{"adminAddress", func(c *Config) { c.AdminAddress = fmt.Sprintf("127.0.0.1:%d", port) }},
+		{"dlna.listenAddress", func(c *Config) { c.DLNA.ListenAddress = fmt.Sprintf(":%d", port) }},
+		{"output.loopbackPort", func(c *Config) { c.Output.LoopbackPort = &port }},
+	} {
+		t.Run(move.setting, func(t *testing.T) {
+			boot, live := base(), base()
+			move.set(live)
+			if on, why := live.PlayerEnabledAsBooted("linux", boot); !on || why != nil {
+				t.Errorf("a live clash beside a boot without one = %v, %v; want the player on", on, why)
+			}
+			for _, judged := range []struct {
+				name string
+				why  error
+			}{
+				{"PlayerEnabled of the live config", second(live.PlayerEnabled("linux"))},
+				{"no boot snapshot", second(live.PlayerEnabledAsBooted("linux", nil))},
+				{"a boot with the clash", second(boot.PlayerEnabledAsBooted("linux", live))},
+			} {
+				var clash *OpenHomePortClashError
+				if !errors.As(judged.why, &clash) || clash.Setting != move.setting || judged.why.Error() != clash.Error() {
+					t.Errorf("%s = %v; want the clash, an OpenHomePortClashError naming %s", judged.name, judged.why, move.setting)
+				}
+			}
+		})
+	}
+	t.Run("the opt-in turned on live", func(t *testing.T) {
+		boot, live := base(), base()
+		boot.Output.Player.OpenHome = false
+		boot.ListenAddress = fmt.Sprintf(":%d", port)
+		live.ListenAddress = boot.ListenAddress
+		if on, why := live.PlayerEnabledAsBooted("linux", boot); !on || why != nil {
+			t.Errorf("the opt-in turned on live over a listener on its port = %v, %v; want the player on until the next start", on, why)
+		}
+	})
+	t.Run("what the live config says of the player itself", func(t *testing.T) {
+		boot := base()
+		for _, tc := range []struct {
+			name   string
+			goos   string
+			change func(*Config)
+			off    string // what the reason says, "" for none
+		}{
+			{"switched off", "linux", func(c *Config) { c.Output.Player.Enabled = false }, ""},
+			{"a block it refuses", "linux", func(c *Config) { c.Output.Player.Room = strings.Repeat("r", 65) }, "output.player.room"},
+			{"a public bridge", "linux", func(c *Config) { c.Deployment.Mode = string(DeploymentModePublic) }, "a public bridge"},
+			{"another host", "darwin", func(*Config) {}, "Linux only"},
+		} {
+			live := base()
+			tc.change(live)
+			on, why := live.PlayerEnabledAsBooted(tc.goos, boot)
+			if on || tc.off == "" && why != nil || tc.off != "" && (why == nil || !strings.Contains(why.Error(), tc.off)) {
+				t.Errorf("%s beside a boot that runs = %v, %v; want the player off, saying %q", tc.name, on, why, tc.off)
+			}
+		}
+	})
+}
+
+// second is a two-valued answer's error.
+func second(_ bool, err error) error { return err }

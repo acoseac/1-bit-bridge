@@ -15,7 +15,6 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
-	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
 	"github.com/acoseac/1-bit-bridge/internal/player/lan"
 	"github.com/acoseac/1-bit-bridge/internal/player/openhome"
 )
@@ -23,10 +22,9 @@ import (
 // The console's OpenHome switch (B612) against a real serve: what the
 // running process does with a change of output.player.openhome, and what the
 // next start reads of it. Serve decides its surface once, from the boot
-// snapshot (planServePlayer), and its player and its watcher read the live
-// opt-in only through config.PlayerEnabled's port check (livePlayerSettings,
-// hotplug.SettingsFrom), so a saved change, which the switch refuses over a
-// clash, reaches none of them.
+// snapshot (planServePlayer), and its player and its watcher judge the
+// OpenHome port clash on that snapshot too (livePlayerSettings,
+// config.PlayerEnabledAsBooted), so a saved change reaches none of them.
 
 // reportLog keeps every output report serve's player hands its engine
 // (servePlayerSeams.reports), in order, and wakes a waiter at each.
@@ -111,12 +109,13 @@ func pendingOpenHome(st admin.PlayerStatus) string {
 }
 
 // sameAsBoot fails the test unless the live config's player settings, as
-// serve's player and its watcher read them (livePlayerSettings), are a player
-// that runs, with no reason it is off, bound to the GO bar as goBarPlayer
-// binds it: the inputs of everything that follows the live config.
+// serve's player and its watcher read them (livePlayerSettings, the
+// player's own reader), are a player that runs, with no reason it is off,
+// bound to the GO bar as goBarPlayer binds it: the inputs of everything that
+// follows the live config.
 func sameAsBoot(t *testing.T, cs *consoleServe, what string) {
 	t.Helper()
-	set := hotplug.SettingsFrom(cs.holder.Load(), "linux")
+	set := cs.player.live()
 	if !set.Enabled || set.Off != nil || set.Device.Binding != config.BindingSerial || set.Device.VendorID != "20b1" {
 		t.Errorf("%s: the live player settings are enabled %v, off %v, binding %s", what, set.Enabled, set.Off, set.Device.Binding)
 	}
