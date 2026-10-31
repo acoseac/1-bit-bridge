@@ -66890,6 +66890,14 @@ the rest) and the tests ran through `make installer-test` with
 `INSTALLER_SHELLS`. CI's `installer` job runs both, with BusyBox's sh, and
 installs no wget now.
 
+**The gate**, on d9a979bb, through the shared build lock (75 minutes queued
+behind two other workers): `make installer-test INSTALLER_SHELLS="sh,dash,bash
+--posix,ksh" fmt vet test build-all`, exit 0: the installer suite under the
+four shells (72.6 s), `go fmt` rewrote nothing, `go vet` clean, the race suite
+80 packages ok and none failed (`internal/manifest` 1098 s, `internal/admin`
+711 s, `cmd/bridge` 672 s, `scripts/install-test` 18.7 s under sh), the
+build-tag census and the six cross-builds; `make docs-check` clean.
+
 **Deviations, with the reasons.** This shell's BRIDGE_ variables are refused,
 not unset: an accepted unit has no environment of its own, so every such
 variable is one the service lacks, and a refusal names it where unsetting
