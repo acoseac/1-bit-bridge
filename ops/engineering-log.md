@@ -66852,3 +66852,109 @@ OpenHome play can start in the same window. A play that starts there is
 withheld without the question. The page's restart, and the Settings page's
 (which says nothing of the player), stop playback as before. The Settings
 restart is a follow-up.
+
+## 2026-10-31 — B601 round 3: the Player page's writes keep the console's lock (Gemini and CodeQL on #1371)
+
+**Gemini: "`s.mu` is redundant in both write handlers" (two Mediums). Refuted;
+the lock stays.** Each write loads `before` before its update
+(`before := s.deps.CfgHolder.Load()`) and compares it inside the update with
+the clone it changes (`playerInterruption`: `Withholds(before, next)`) and in
+its answer with `after` (`writePlayerChange`). `CfgHolder.UpdateChecked`
+serialises only from its own lock on (`internal/config/runtime.go`, the
+`r.mu.Lock()` at the top of `UpdateChecked`), which comes after that Load. The
+two writes are the only writers of `output.player` in the process (the
+assignments in `apiPlayerOutputEnabled` and `apiPlayerOutputDAC`; `bridge
+output dac bind` is another process and refuses beside serve), and both hold
+`Server.mu` from the Load to the answer, so `before` is the player
+configuration the update changes. Without the lock: the config is {on, DAC X},
+X not the DAC the player started with, so its output is withheld; a choice of
+the boot DAC starts its update; an "off" without the go-ahead reads `before` =
+{on, X} and waits for the holder; the choice saves, the withholding lifts, a
+play starts; the "off" finds the player sounding, `Withholds(before, next)`
+false (before was withheld already), saves, stops the play unasked, and
+answers `interrupted: false`. A second DAC choice behind the first does the
+same with `binding_changed`, and the DAC route's window is the widest: its
+reading of the box inside its turn (`Chosen`, up to `consoleReadBound`, 3 s).
+The lock holds nothing else of the config as `before` has it: the variants
+folder's PATCH and the UPnP servers' writer update the holder without it, and
+can change other fields before the clone. The bot's reading came from
+`Server.mu`'s comment, which named the roots, the settings PATCH and the tokens
+and not these writes; it names them now, and both lock sites say why.
+
+**The seam, and why the fakes alone could not order the test.** The second
+write blocks on `Server.mu` between its first check (its last provider call
+before the lock) and its Load; a fake cannot see a goroutine wait for a mutex,
+and `config.LockWaitedForTest` hears only bridge.yaml's lock, which a write
+takes inside its update. So the writes take the lock through
+`lockPlayerWrite`, and a per-Server hook, `testPlayerWriteWaits` (nil in
+production, where `lockPlayerWrite` is `mu.Lock`), is told when a write finds
+the lock held (`TryLock` first). It fires only for a lock found held: a hook
+called before every Lock would fire with the choice's lock taken out too,
+where the lock is free, and the test would then let the choice go while the
+second write's Load raced its save, a control that could pass. With a lock
+taken out, the test waits instead for the second write's Platform call right
+after its Load (its first is its check ahead of the lock).
+
+**The test.** `TestAWriteBehindADACChoiceAsksBeforeStoppingThePlayItLetStart`,
+two subtests: the switch turning the player off, and the choice of a third
+DAC, each behind a choice of the boot DAC. The fake answers `Withholds` and
+`Sounding` as serve's player does (`playAsServes`: the output withheld while
+the live config turns the player off or names another binding than the boot
+one, and, under a controller that plays whenever it can, sounding exactly
+while nothing is withheld), so the play starts in the choice's own `Store`,
+inside its update, never at a step of the test's. The choice is parked in its
+`Chosen`, inside its `UpdateChecked` callback, so the holder's lock is held
+while it waits (`parkNextChoice`); it is let go only once the second write
+waits for the console's lock or has read `before`; every wait ends at the test
+binary's deadline less ten seconds (`playerGiveUp`), and the cleanup lets the
+choice go and joins every write on any exit. Asserted in full, as the page's
+contract for a write that would stop playback says (`playerWouldInterrupt`'s
+doc: refused because it would stop what the player plays or holds paused now,
+without the operator's go-ahead; nothing was saved): the choice 200 restart,
+not interrupted; the second write 409 `would_interrupt` with exactly
+`playerStopsOff` or `playerStopsDAC`; the file's bytes and the live config
+those the choice left (read as the choice answers, under its console lock),
+the live config not stored again; the play still sounding. Stable under
+`-race -count=30`.
+
+**Controls**, each on the committed tree (4b240947), restored from git, the
+tree clean after:
+- The switch's lock taken out alone (`lockPlayerWrite` and the deferred unlock
+  in `apiPlayerOutputEnabled`): the switch's subtest red 5 of 5 (200 restart,
+  `interrupted: false`, the play stopped, the file and the live config
+  rewritten to the player off); the DAC subtest green 5 of 5, its route's lock
+  in place. Every other Player and DAC test of `internal/admin` green.
+- The DAC route's lock taken out alone: both subtests red 5 of 5 (a choice
+  that does not hold the lock lets the "off" read `before` during its turn;
+  the third DAC saved unasked); every other Player and DAC test green.
+
+So before this round the suite stayed green with either lock removed: the
+fake's `Withholds` answered a constant.
+
+**Not done, on purpose: the answer's status outside the lock.** It is a second
+hardware read (GET /v1/outputs' DAC read through `bridgeOutput.Facts`, shared
+by concurrent callers, each within its own 500 ms, `dacLimit`), taken after
+the update has let bridge.yaml's lock go and while the console's is held. No
+record shows it costing anything there: the console's lock is contended only
+by the console's own writes (roots, settings, tokens, these two), and the DAC
+choice already holds both locks across its own reading of the box. Moving it
+would add a path to keep consistent with `after` for no measured gain.
+
+**CodeQL `go/log-injection` on the DAC route's
+`logger.Error("player page: a DAC choice failed", "err", err)`: a false
+positive, no change.** That line logs only an error that wraps none of
+`ErrPlayerSelectionStale`, `ErrPlayerBindingRefused` and `ErrPlayerBoxUnread`.
+The production provider (`consolePlayer.Chosen`) returns no other: its token
+refusals wrap the first, its binding refusals the second (the one that names
+the request's kind among them, a kind the route has limited to its three
+literals before it asks the provider anything), and every reading's failure
+the third (`read`, `observeBracketed`). The request's `selection` is a map key
+alone, never in an error's text. Both of `logging.Init`'s handlers are
+slog's own (`TextHandler`, `JSONHandler`), and a run with an error carrying
+`\n`, `\r` and quotes through each, and through slog's default before Init,
+wrote one line a record, the value quoted with `\n`, `\r` and `"` escaped
+(go1.27.3, legion0).
+
+**Qualification.** Nothing here is in `qualificationVersion`'s guarded set
+(`internal/admin` is not among its prefixes), so it stays 21, which this PR
+already raised from 20.
