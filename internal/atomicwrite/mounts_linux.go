@@ -12,11 +12,13 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// platformMedium is the medium check on Linux (mediumFrom): statfs's f_type
-// of the root, and for an overlay the upper layer the kernel's mount table
-// (/proc/self/mountinfo) names on the line of the root's own mount ID.
-func platformMedium(root string, mountID uint64) error {
-	return mediumOn(root, mountID, linuxStatfs, readMountInfo)
+// platformInspect is the medium check on Linux (inspectMedium): statfs's
+// f_type of the root, for an overlay the upper layer the kernel's mount table
+// (/proc/self/mountinfo) names on the line of the root's own mount ID, and,
+// where no path here reaches the upper layer of the root's own mount, the
+// box's own files, which tell Volumio's boot layout (volumioUpper).
+func platformInspect(root string, mountID uint64) Medium {
+	return mediumOn(root, mountID, linuxStatfs, readMountInfo, hostBootFiles{root: "/"})
 }
 
 // linuxStatfs reads the filesystem totals and path's st_dev. The latter is

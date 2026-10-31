@@ -303,6 +303,15 @@ type Deps struct {
 	// manifest and walks no library folder.
 	NameCollisions func(ctx context.Context) (NameCollisions, error)
 
+	// PlayerStorage is the line on the storage under the data directory of
+	// the bridge's own player (B470), from the medium check its strict
+	// writer makes as the player starts (cmd/bridge's doctorPlayerStorage,
+	// over atomicwrite.InspectMedium): the storage named, or why the player
+	// will not start. It returns nothing where the config does not ask for
+	// the player, and a nil func skips it. Run appends it after its own
+	// checks and before the output checklist, which stays last.
+	PlayerStorage func(ctx context.Context) []Check
+
 	// OutputChecklist is the checklist of a bridge that is a player
 	// (internal/outputcheck): Player, DAC, Music and Phone, the lines the
 	// console's checklist panel shows, in the same words. Run appends them
@@ -431,6 +440,9 @@ func Run(ctx context.Context, d Deps) Report {
 	out := make([]Check, 0, len(checks)+4)
 	for _, fn := range checks {
 		out = append(out, fn(ctx, d))
+	}
+	if d.PlayerStorage != nil {
+		out = append(out, d.PlayerStorage(ctx)...)
 	}
 	if d.OutputChecklist != nil {
 		out = append(out, d.OutputChecklist(ctx)...)
