@@ -23,6 +23,8 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // DefaultDiskSafetyMargin is the headroom fraction applied on top of
@@ -206,6 +208,38 @@ func SameVolume(a, b string) (bool, error) {
 	return va == vb, nil
 }
 
+// probeError is a free-space or volume probe that failed: the call that
+// failed and the OS's answer, never the directory the probe was asked about.
+// That directory is the operator's (a variants dir, a render scratch, the
+// data dir), these errors reach the log through the on-demand pre-flight,
+// the batch and the sweep, and the console through its free-space panels,
+// and a log line names such a directory by its role (ProbeRole*), which the
+// caller adds (B604; a POSIX probe said `statfs "<dir>"` until then, and
+// Windows' `GetDiskFreeSpaceEx "<dir>"`). Unwrap is the error the probe got,
+// so errors.Is and errors.As answer as they did when the text quoted the
+// directory: an errno, or os.Stat's *fs.PathError, whose own text names the
+// path and so is never this one's (fsutil.ErrorWithoutPath).
+type probeError struct {
+	// op is the call that failed; "" when err is an *fs.PathError, which
+	// names its own.
+	op  string
+	err error
+}
+
+func (e *probeError) Error() string {
+	cause := fsutil.ErrorWithoutPath(e.err)
+	if e.op == "" {
+		return cause
+	}
+	return e.op + ": " + cause
+}
+
+func (e *probeError) Unwrap() error { return e.err }
+
+// errNoDevice is the POSIX volume probe's answer for a stat that carried no
+// device.
+var errNoDevice = errors.New("no device")
+
 // ErrInsufficientDiskSpace is returned by DiskHasHeadroom when the
 // projected size (after applying the safety margin) exceeds the free
 // space. The error embeds the numbers so the coordinator can surface
@@ -217,20 +251,33 @@ var ErrInsufficientDiskSpace = errors.New("insufficient disk space")
 // Returned alongside ErrInsufficientDiskSpace via errors.As so
 // callers that don't care about the numbers can still match on the
 // sentinel.
+//
+// Its text names the volume by Role, the role of the directory graded, and
+// never by Dir: a log line names an operator's directory by its role
+// (B604; it quoted Dir until then, which the on-demand pre-flight's refusal
+// carried into POST /v1/upscale's Warn and a stale download's Debug). Dir
+// stays for a caller that compares the directory graded.
 type InsufficientDiskSpaceError struct {
 	ProjectedBytes int64
 	RequiredBytes  int64 // projected × (1 + safetyMargin)
 	AvailableBytes int64
 	Dir            string
+	// Role is the role of Dir (ProbeRole*), "" for one a caller did not
+	// say.
+	Role string
 }
 
 func (e *InsufficientDiskSpaceError) Error() string {
+	role := e.Role
+	if role == "" {
+		role = "directory"
+	}
 	return fmt.Sprintf(
-		"%s: needs %d bytes (%.2f safety margin) on %q, %d available",
+		"%s: needs %d bytes (%.2f safety margin) on the %s's volume, %d available",
 		ErrInsufficientDiskSpace.Error(),
 		e.RequiredBytes,
 		float64(e.RequiredBytes)/float64(max(e.ProjectedBytes, 1)),
-		e.Dir,
+		role,
 		e.AvailableBytes,
 	)
 }
@@ -274,6 +321,7 @@ func DiskHasHeadroom(dir string, projectedBytes int64, safetyMargin float64, rol
 			RequiredBytes:  required,
 			AvailableBytes: freeBytes,
 			Dir:            dir,
+			Role:           role,
 		}
 	}
 	return true, freeBytes, nil

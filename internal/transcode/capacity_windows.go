@@ -3,12 +3,11 @@
 package transcode
 
 import (
-	"fmt"
-
 	"golang.org/x/sys/windows"
 )
 
-// TotalDiskSpace returns the capacity of the volume that holds dir.
+// TotalDiskSpace returns the capacity of the volume that holds dir. A
+// failure names the call and the errno, never dir (probeError).
 //
 // GetDiskFreeSpaceEx's second out-parameter is the total number of bytes on
 // the volume available to the caller, which is the counterpart of the
@@ -17,13 +16,13 @@ import (
 func TotalDiskSpace(dir string) (int64, error) {
 	utf16Dir, err := windows.UTF16PtrFromString(dir)
 	if err != nil {
-		return 0, fmt.Errorf("utf16 %q: %w", dir, err)
+		return 0, &probeError{op: "utf16", err: err}
 	}
 	var freeBytesAvailable, totalBytes, totalFreeBytes uint64
 	if err := windows.GetDiskFreeSpaceEx(
 		utf16Dir, &freeBytesAvailable, &totalBytes, &totalFreeBytes,
 	); err != nil {
-		return 0, fmt.Errorf("GetDiskFreeSpaceEx %q: %w", dir, err)
+		return 0, &probeError{op: "GetDiskFreeSpaceEx", err: err}
 	}
 	if totalBytes > uint64(1<<63-1) {
 		return 1<<63 - 1, nil

@@ -630,8 +630,12 @@ func Extract(absPath string, t *Track) error {
 // library-relative path the scanner set on the track before extracting, or
 // the base name when a caller set none, never the absolute path. The
 // bridge's privacy page promises that paths into the library appear
-// library-relative. The older extractor warnings still name the absolute
-// path, and the page says so.
+// library-relative. A line that names a read's failure beside it gives the
+// failure as walkErrReason says it: the file's own read, seek or stat error
+// is an *fs.PathError naming the absolute path (faultNotingSource hands each
+// parser the error as the file gave it), which the MP4 walks' warnings
+// logged whole until B604. The older warnings of the other extractors still
+// name the absolute path, and the page says so.
 func trackLogPath(absPath string, t *Track) string {
 	if t != nil && t.Path != "" {
 		return t.Path
@@ -772,7 +776,7 @@ func extractMP4WithContext(absPath string, t *Track, ec *ExtractContext) error {
 	// through to the extension-derived name.
 	if codec, err := extractMP4Codec(f); err != nil {
 		scanLogger.Warn("mp4 codec walk failed; falling back to extension classification",
-			"path", absPath, "err", err)
+			"path", trackLogPath(absPath, t), "err", walkErrReason(err))
 	} else if codec != "" {
 		t.Codec = codec
 		if codec == "ALAC" {
@@ -795,7 +799,7 @@ func extractMP4WithContext(absPath string, t *Track, ec *ExtractContext) error {
 		}
 		if bits, err := extractALACBitDepth(f); err != nil {
 			scanLogger.Warn("mp4 ALAC bit-depth walk failed; manifest will carry nil bits",
-				"path", absPath, "err", err)
+				"path", trackLogPath(absPath, t), "err", walkErrReason(err))
 		} else if bits > 0 {
 			t.BitsPerSample = &bits
 		}
@@ -810,7 +814,7 @@ func extractMP4WithContext(absPath string, t *Track, ec *ExtractContext) error {
 	}
 	if rate, err := extractMP4SampleRate(f); err != nil {
 		scanLogger.Warn("mp4 sample-rate walk failed; manifest will carry nil sampleRate",
-			"path", absPath, "err", err)
+			"path", trackLogPath(absPath, t), "err", walkErrReason(err))
 	} else if rate > 0 {
 		t.SampleRate = &rate
 	}
@@ -823,7 +827,7 @@ func extractMP4WithContext(absPath string, t *Track, ec *ExtractContext) error {
 	// only a genuine I/O failure is worth an operator's attention.
 	if d, err := extractMP4Duration(f); err != nil {
 		scanLogger.Warn("mp4 duration walk failed; manifest will carry nil duration",
-			"path", trackLogPath(absPath, t), "err", err)
+			"path", trackLogPath(absPath, t), "err", walkErrReason(err))
 	} else if plausibleDuration(d) {
 		t.Duration = &d
 	}
@@ -843,7 +847,7 @@ func extractMP4WithContext(absPath string, t *Track, ec *ExtractContext) error {
 	if t.Genre == "" {
 		if genre, err := extractMP4PredefinedGenre(f); err != nil {
 			scanLogger.Warn("mp4 predefined-genre walk failed; manifest will carry no genre",
-				"path", trackLogPath(absPath, t), "err", err)
+				"path", trackLogPath(absPath, t), "err", walkErrReason(err))
 		} else if genre != "" {
 			t.Genre = genre
 		}
@@ -854,7 +858,7 @@ func extractMP4WithContext(absPath string, t *Track, ec *ExtractContext) error {
 	// a walk that fails leaves the title marker populate already set.
 	if advisory, explicitField, err := extractMP4FreeformAdvisory(f); err != nil {
 		scanLogger.Warn("mp4 freeform-advisory walk failed; the other explicit signals stand",
-			"path", trackLogPath(absPath, t), "err", err)
+			"path", trackLogPath(absPath, t), "err", walkErrReason(err))
 	} else if ExplicitVerdict(ExplicitSignals{ItunesAdvisory: advisory, Explicit: explicitField}) {
 		t.Explicit = true
 	}
@@ -865,7 +869,7 @@ func extractMP4WithContext(absPath string, t *Track, ec *ExtractContext) error {
 	// other signals.
 	if rating, found, err := extractMP4ContentRating(f); err != nil {
 		scanLogger.Warn("mp4 content-rating walk failed; the other explicit signals stand",
-			"path", trackLogPath(absPath, t), "err", err)
+			"path", trackLogPath(absPath, t), "err", walkErrReason(err))
 	} else if found && ExplicitVerdict(ExplicitSignals{Rtng: &rating}) {
 		t.Explicit = true
 	}

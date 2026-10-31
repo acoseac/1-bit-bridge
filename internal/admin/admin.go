@@ -24,7 +24,6 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -2069,10 +2068,12 @@ func (s *Server) ServeListener(ctx context.Context, lis net.Listener) error {
 	// the CLI's own liveness probes of this port (probeAdminRunning on
 	// every launcher repaint, waitForListen after a restart) connect and
 	// close before any ClientHello, and each would otherwise log a
-	// handshake failure. Plain HTTP has no handshake to fail, so its
-	// ErrorLog stays nil — the net/http default.
+	// handshake failure. Plain HTTP has no handshake to fail, but net/http's
+	// other lines name a client too (a handler's recovered panic, "http:
+	// panic serving <addr>"), so its ErrorLog is handshakelog's as well,
+	// never nil, the net/http default (B604's second round).
 	scheme := "http"
-	var errorLog *log.Logger
+	errorLog := handshakelog.ErrorLog()
 	if s.deps.TLSConfig != nil {
 		lis, errorLog = handshakelog.Wrap(lis)
 		lis = tls.NewListener(lis, s.deps.TLSConfig)

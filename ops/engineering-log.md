@@ -66616,6 +66616,1179 @@ and a note of what 20 covers.
 
 **Round 2:** an uninterpretable root-hub speed leaves the USB listing incomplete (reader and Resolve regressions red before the fix, green after); PROTOCOL.md now names all three causes of `identity_incomplete`; the qualification note now distinguishes unchanged wire fields and schema from existing `reason` values that may differ.
 
+## 2026-10-30 — B604: the 0.2.2 logging audit: no library path, operator directory, config path or client address in a log line or a console body
+
+The release's logging audit (`docs/release-process.md`, Process, step 1)
+was a read-only pass over `v0.2.1..e242ce2c`, amended by two reviews. It
+found no bearer token or pairing code reaching a log or a body, and these
+leaks, each confirmed against the code before it was fixed: the MP4 walks'
+warnings, the on-demand rendition pre-flight's disk errors, the config
+save refusals in console 500s, the DLNA served-address refusal, the strict
+SSDP reply's refusal, and the loopback route's panic line. The CLI's
+stderr paths (`bridge output play`, `output dsd-test`: the operator's own
+files, in output the operator runs, never reached by serve) and the ALSA
+`/proc/asound` and `/dev/snd` paths (system paths) were kept, as the
+review decided.
+
+### Red first (a3ac6809)
+
+Each case drives its site with an error that carries an absolute path or
+a peer address, through the logger the component uses (an injected one
+where it has one) at every level, searches every string a handler could
+write for each record (`loggingtest.Strings`, `Recorder.Carrying`), and
+asserts the line it expects. On e242ce2c, with the test's temp directory
+written `<tmp>`:
+
+- `WARN mp4 codec walk failed; falling back to extension classification
+  path=<tmp>/Private Library/Artist/Album/01 Song.m4a err=read <tmp>/Private
+  Library/Artist/Album/01 Song.m4a: input/output error`, and so for the
+  sample-rate and the ALAC bit-depth walks; the duration, genre, advisory
+  and rating walks named the file relative and the error absolute. The
+  source (`pathFailingSource`) serves a minimal ALAC M4A and fails every
+  read after N walks with an `*fs.PathError`, as an `*os.File` does, and
+  `faultNotingSource` hands that error to the parser unchanged.
+- `statfs "<tmp>/Private Volume/variants": no such file or directory`
+  (AvailableDiskSpace), `stat <tmp>/Private Volume/variants: no such file
+  or directory` (volumeID), and `insufficient disk space: needs … (1.10
+  safety margin) on "<tmp>/Private Volume/variants", … available`.
+- Through the real API handler and adapter (`stampBridge`): `ERROR
+  upscale: enqueue failed path=Fixture/PCM/01.flac err=check free space for
+  the rendition: statfs "<tmp>/Private Volume/a file/variants": not a
+  directory`, the no-room Warn, and a stale download's re-render at Warn
+  and Debug, each with the directory.
+- A console 500 save-config whose message was the refusal's text:
+  `<tmp>/bridge.yaml was changed or removed by another writer …`, and for
+  a filesystem with no lock manager the lock file too (`flock <tmp>/Private
+  Config/.bridge.yaml.lock: no locks available`), with no log line at all.
+- `WARN DLNA refused a connection to an address it does not serve: …
+  address=100.64.0.7 interface=utun7 from=100.64.0.99`, and the same for
+  IPv6, a mapped peer and an M-SEARCH.
+- `err=write udp 192.168.1.20:54321->192.168.1.30:50000: sendmsg: network
+  is unreachable` in the strict reply's refusal, and `err=injected` for an
+  error with no errno.
+- `http: panic serving 127.0.0.1:50811: the test's own panic` from the
+  loopback route's server, which had no `ErrorLog`.
+
+### The fixes (b402d30a)
+
+At the producer where one could be fixed there, with `errors.Is` and
+`errors.As` answering as before:
+
+- The MP4 walks' seven warnings log `trackLogPath` and `walkErrReason`.
+  `walkErrReason` is `fsutil.ErrorWithoutPath` now, one reading for every
+  package (the API's `redactWalkErr` and the scanner's `walkErrReason` were
+  each private to their package, and transcode could reach neither).
+  `faultNotingSource` keeps the error as it is: the read faults decide on
+  it (`readIncompleteError`, `endOfFile`, `seekOffsetRefused`).
+- `AvailableDiskSpace`, `volumeID` and `TotalDiskSpace`, POSIX and
+  Windows, answer a `probeError` (the call and the errno, `Unwrap` the
+  cause, os.Stat's `*fs.PathError` included); `InsufficientDiskSpaceError`
+  carries `Role` and says the role's volume, and keeps `Dir`, which the
+  batch tests compare; `roomOn` names its directory's role, the volume
+  comparison both. `ErrUpscaleNoRoom`'s decision is unchanged.
+- `writeSaveConfigErr` answers 500 save-config with `saveConfigRefusal`'s
+  fixed message by class (busy: try again; no lock manager: mount with
+  local locking or start the lock service; changed outside the holder, in
+  the turn or under a repointed name: restart; a boot read that resolved
+  no file: restart once it resolves; a link to no file: point it;
+  anything else: the log) and logs the error at Error, where the config
+  file may be named (the bridge's own files in fault lines). The settings
+  PATCH, the variants dir, the root add and remove and the three UPnP
+  server writes go through it; a `cfgAbort` answers as it did.
+- `servedAddrs.admit` and `noteRefused` take no peer; neither caller
+  computes one.
+- `noteReplyRefusal` takes the stage and logs `replyFailure`: the
+  operation from an `*net.OpError` and an `*os.SyscallError`, the errno,
+  `timeout`, or `capability` / `unclassified` and `no errno`.
+- The loopback route's server takes `handshakelog.ErrorLog()`.
+
+### Controls (after b402d30a, each restored from HEAD, none committed)
+
+Each predicted, and each matched:
+
+1. The content-rating warning back to `"err", err`: both runs of
+   `TestAnMP4WalkThatCannotReadItsFileNamesNoAbsolutePath` red, on that
+   line alone.
+2. `AvailableDiskSpace` naming its directory again: the transcode probe
+   case and the `AvailableDiskSpaceNearest` assertion red, and in
+   cmd/bridge exactly the two cases that probe a blocked variants
+   directory; the volume-comparison and no-room cases green. 2b,
+   `InsufficientDiskSpaceError` quoting `Dir`: the two transcode no-room
+   cases and the two cmd/bridge no-room cases red.
+3. The console body back to `err.Error()`: all 16 save cases red, `fn`'s
+   own refusal green. 3b, the console's log line removed: the same 16 red
+   on "left no Error line", so the positive half bites.
+4. The refusal's peer put back (`served.go` and its test from a3ac6809,
+   the M-SEARCH caller passing the source again): every peer case red
+   (IPv4, IPv6, the mapped peer, both datagram cases, the listener's, the
+   real-loop M-SEARCH's), the strict reply's case green.
+5. The strict reply logging `err.Error()` again: all seven refusal shapes
+   red, the closed socket green.
+6. The loopback server's `ErrorLog` removed: the panic case red on the
+   missing placeholder and the client's address.
+
+### Rejected
+
+- `handshakelog.RedactPeers` for the strict reply's error: it keeps the
+  local end by design, and the line must name neither end.
+- Wrapping the strict reply's errors in `dialReply` instead: a transport
+  hands the sink whatever it got (the fake transport's errors never pass
+  through `dialReply`), so only the sink's classification holds for all.
+- Fixed messages inside internal/config: the CLI writers print the
+  refusal, path and all, to the operator's own terminal, which may name
+  it; only the console's body may not.
+- A static guard for every `http.Server` in internal/dlna: the
+  MediaServer's own server (`server.go`, since #303) has no `ErrorLog`
+  either, outside this delta; the loopback route has a runtime case.
+
+### Found and not fixed
+
+- The root add's and remove's own 500s for a failed wipe or prefix
+  delete (`wipe-tracks`, `delete-tracks`) still write the store's error
+  (B425's fixed-message rule); no protected value was found in them.
+- The MediaServer's `http.Server` keeps net/http's default logger, so a
+  recovered panic there names a renderer's address (the ContentDirectory's
+  `remoteAddr` class).
+- The other extractors' older warnings still name the absolute path (the
+  FLAC format read's, seen in these tests' own logs), as the privacy page
+  says.
+- The audit's note on `cmd/bridge/serve_player_output.go`'s `dsdPlayback`
+  model text (a port or uniqueModel binding's observed serial) was not
+  examined here.
+
+The rules lines are in scanner.md, jobs.md, admin-console.md,
+dlna-upnp.md, output.md, auth-tls.md and build-ci-tests.md; the long forms
+changed are in History-rules-jobs.md and History-rules-dlna-upnp.md.
+
+## 2026-10-31 — B604, second round: every http.Server's ErrorLog from handshakelog, no path in a console error body, the console's login lines kept
+
+Codex reviewed the integrated branch (the first round with its rules,
+d479ba01) and found five gaps of the first round's classes, each confirmed
+against the code before it was fixed:
+
+1. The DLNA MediaServer's `http.Server` had no `ErrorLog`
+   (`internal/dlna/server.go`), so a handler's recovered panic named the
+   renderer it served. The first round had listed it under "Found and not
+   fixed".
+2. The console's failed and rate-limited login lines log `ip` at Warn
+   (`handlers_login.go`), with no documented exception.
+3. `GET` and `POST /api/backups` answered `backup.List`'s and `Snapshot`'s
+   errors as their 500 bodies: the backups folder, and a file the snapshot
+   copies, the config file among them.
+4. `GET /api/cert` named the certificate's path in its 404 and answered
+   `os.ReadFile`'s error in its 500.
+5. `POST /api/roots` answered the stat's `*fs.PathError` and the path it
+   resolved, so a relative request gave the bridge's working directory
+   away.
+
+A read-only sweep of the console's other 500s that write an error's text
+(52 sites in `internal/admin`) found the same class at the four token
+writes (mint, revoke, rotate and expiry: `auth.Store`'s write wraps the
+`*fs.PathError` of `tokens.json`'s staging file in the data directory,
+which a read-only data directory or a `tokens.json` a root CLI left root's
+(#1048) produces) and in the compaction (`dbFootprint`'s stat of the
+database). Every other site writes the store's SQL or validation text, the
+disk probe's pathless `probeError` (the first round's), or the QR
+encoder's: no path, B425's fixed-message rule aside.
+
+### Red first (ed378312, 83530735)
+
+On d479ba01, with the test's temp directory written `<tmp>`:
+
+- `http: panic serving 127.0.0.1:57949: the test's own panic` from the
+  MediaServer, its artwork route made to panic by the source it asks.
+- The serve guard, widened to the module: `internal/admin/admin.go: the
+  http.Server srv in ServeListener takes its ErrorLog from errorLog,
+  declared without a value, which is nil (net/http's default logger)
+  wherever nothing else assigns it` (the console on plain HTTP) and
+  `internal/dlna/server.go: the http.Server s.httpServer in Start gets no
+  ErrorLog from internal/handshakelog`. The LAN API, the tailnet server,
+  the loopback route and the OpenHome surface passed.
+- 500 bodies `open <tmp>/Private Data/backups: not a directory` (and
+  `permission denied`), `copy bridge.yaml: open <tmp>/Private
+  Config/bridge.yaml: directory is not a file` and `copy tokens.json: open
+  <tmp>/Private Data/tokens.json: permission denied`, with no log line.
+- `no TLS certificate at <tmp>/data/server.crt — run …`, and 500 bodies
+  `read <tmp>/Private Certs/server.crt: is a directory` and `open …:
+  permission denied`.
+- 400 bodies `stat <tmp>/Private Library/Missing: no such file or
+  directory`, `stat <the package's directory>/B604 relative folder: …` for
+  a relative path, `<tmp>/Private Library/track.flac is not a directory` and
+  `stat …: permission denied`, and 409 bodies naming both roots' paths.
+- `temp file: open <tmp>/data/.tokens-<n>.json: permission denied` for each
+  token write, and `manifest: measure before compact: stat
+  <tmp>/data/bridge.db: permission denied`.
+
+The login lines were pinned as they are
+(`TestAConsoleLoginRefusalLogsItsSourceAndNothingElseOfTheRequest`, green
+by design: the exception this round documents).
+
+### The fixes (d01c850a)
+
+- The MediaServer's server takes `handshakelog.ErrorLog()`, and the
+  console's starts from it on plain HTTP (its TLS branch takes Wrap's pair
+  as before). `TestEveryServeHTTPServerRedactsPeerAddresses` sweeps every
+  `http.Server` in the module: a literal's `ErrorLog`, a variable every
+  assignment of which calls into handshakelog, or Wrap's assignment before
+  the first serve; and it requires a server in each package that builds
+  one.
+- Each console error body says what failed and what to do in words that
+  name no path, and the error goes to the log at Error, whole:
+  `backupsListRefusal` and `snapshotRefusal` (a permission; a file held
+  busy past the read's retries, asked first, since on Windows its last
+  error is an access denial and so a permission's too; a stop; or the
+  log, which keeps a player-identity refusal's advice); the certificate's
+  404 keeps `bridge cert rotate` and the pairing warning, its 500 a
+  permission or the log; `rootStatRefusal` (no folder there, a permission
+  on the way, or the stat's answer through `fsutil.ErrorWithoutPath`), a
+  file, a relative path the working directory cannot resolve, and the two
+  basename refusals by the folders' names; `writeTokenStoreFault` (what did
+  not happen, a token not revoked or rotated still working, then a
+  permission or the log); the compaction's 500 the log. Status and error
+  codes are unchanged.
+
+### Decided: the console's login lines keep the source address
+
+Codex asked for a redaction or a documented exception, and the lines are
+kept and documented (auth-tls.md). The console has a login only in public
+mode, where the source of a failed login is what an operator or fail2ban
+blocks, and the address is the limiter's own key. It is
+`ExtractClientIP`'s canonical IP without a port, so a forwarded header's
+own text never reaches the line; the password never does.
+
+### Controls (after d01c850a, each restored from HEAD, none committed)
+
+Each predicted, and each matched:
+
+1. The MediaServer's `ErrorLog` removed: its panic case red (the
+   placeholder missing, the client named) and the guard red on
+   `server.go` alone.
+2. The console's `errorLog` assigned nil after its handshakelog value: the
+   guard red on `admin.go` alone ("assigned something other than a call
+   into internal/handshakelog").
+3. The snapshot's body back to `err.Error()`: the two snapshot subtests
+   red, the two listing subtests green.
+4. The certificate's Error line removed: the two unreadable-certificate
+   subtests red on the log assertion alone, the 404 green.
+5. The root's stat answered with `err.Error()`: the missing, relative and
+   permission subtests red; the file and both basename refusals green.
+6. Permission asked before busy in `snapshotRefusal`: the class table's
+   busy-and-denied row red, nothing else.
+7. The token fault carrying the error's text: all four token subtests red.
+8. The failed-login line logging `r.RemoteAddr`: the five failed-login
+   lines red on `ip`, and the search for the connection's address red; the
+   limiter's line green.
+
+### Found and not fixed
+
+- The 200's `pruneWarning` keeps the prune's and the orphan sweep's error
+  text (`TestPruneWarningTextSurfacesBothErrors` pins it); its paths lie
+  under the `snapshotDir` the same body names.
+- The compaction's 507 writes the headroom guard's text (sizes, no path),
+  and the console's other 500s write the store's error text: B425's rule,
+  no path. A helper every console 500 goes through, with a static guard,
+  would close B425's class in the console.
+- The login lines' username is what the visitor typed (64 bytes at most):
+  a password typed into the username field reaches the Warn line.
+- A success body shows the paths the console was configured with (the
+  roots, `backupsRoot`, `snapshotDir`), deliberately.
+
+The rules lines are in admin-console.md, auth-tls.md and dlna-upnp.md. The
+long form of the serve guard's entry changed in History-rules-cli-serve.md.
+
+## 2026-10-31 — B604, third round: the test logger keeps what a derived logger binds
+
+CodeRabbit on #1369 (Major, verified by the orchestrator):
+`internal/logging/loggingtest`'s `recordHandler` and `parkHandler` returned
+themselves from `WithAttrs` and `WithGroup`. So
+`r.Logger().With("path", "/private/file").Info("refused")` kept the
+message alone. Under `Record` and `ParkOn`, every `logging.Component`
+logger replays its op chain onto the installed handler, and that chain,
+`component=` included, vanished too. `Strings` and `Carrying` never saw a
+bound value, while a real Text or JSON handler writes it. Nothing in the
+tree was exposed: the one production `With` that binds a variable
+(`requestLogging`'s request id, method and URL path,
+`internal/api/middleware.go`) has no absence test that sends a
+path-bearing URL through it. A harness fix.
+
+### Red first (267316e2)
+
+On 2c97e94b:
+
+- Strings' table: its three new rows (a `With` value, a `WithGroup` name,
+  a nested `With` → `WithGroup` → `With`) found nothing.
+- Parity with slog's Text and JSON handlers: 16 of 19 chains differed. For
+  example `kept "", want "path=/abs/with"` with `a handler wrote
+  "/abs/with", and Strings does not report it`. An inline group was kept
+  as a group with an empty key. An empty `Attr{}` was kept as `=<nil>`, so
+  Strings reported `""`, `<nil>` and `null`, which no handler writes. A
+  record's own LogValuer was read when the test asserted, after it had
+  changed.
+- Go's handler conformance suite (`testing/slogtest`): 11 of its 15 cases
+  failed.
+- Nothing bound through `slog.Default()` under `Record` or `ParkOn` was
+  kept, nor anything a `Component` made before either was installed
+  bound. A parked record was kept without its logger's bindings, and
+  sibling, repeated and concurrent loggers lost theirs.
+
+### The fix (ffb05178)
+
+One handler, `*recordHandler`, serves `Record`, `NewRecorder`'s `Logger`
+and `ParkOn`. It shares the Recorder and the one Park by pointer, and
+carries an ordered op chain, `dynamicHandler`'s shape:
+
+- `WithAttrs` resolves and copies its attributes into a new slice, and
+  returns the receiver when nothing is left.
+- `WithGroup` returns the receiver for an empty name.
+- Every derivation allocates its chain afresh.
+- `Handle` resolves the record's own attributes and folds the chain over
+  them from the innermost op outward: an attrs op prepends, and a group op
+  wraps what is non-empty so far. It keeps a new record, then parks, with
+  the Recorder's lock released.
+- What slog's Handler contract ignores is dropped: an empty attribute, a
+  group holding nothing (its name included) and an unnamed group. An
+  inline group is flattened.
+
+The semantics were read in Go 1.27.3's `log/slog/handler.go`, `value.go`
+and `record.go`. A bound attribute is formatted at bind time
+(`commonHandler.withAttrs`), and a group applies to everything added
+after it.
+
+### Measured: Go 1.27.3's own handlers against their contract
+
+A probe of the toolchain's handlers. For `l.Info("m",
+slog.Group("/abs/holds-nothing", slog.Attr{}), "k", "v")`:
+
+- The Text handler writes `/abs/holds-nothing.k=v`: the ignored group's
+  name stays in the key prefix of what follows (`handleState.appendAttr`
+  does not undo its `openGroup` when the group turns out empty), and the
+  prefix's later truncation writes garbage keys when the names' lengths
+  differ.
+- The JSON handler writes `"msg":"m""k":"v"`, without its separator.
+- For `WithGroup("p").With(slog.Attr{}, slog.Group("e"))`, the JSON
+  handler writes `"p":{}`, which no `slog.Record` can carry.
+
+The recorder keeps the contract ("If a group has no Attrs (even if it has a
+non-empty key), ignore it"), as the brief's elision rule says.
+`TestSlogsHandlersWriteAnIgnoredGroupAgainstTheContract` pins the defect as
+a tripwire, so the recorder's note goes when a toolchain fixes it.
+
+### Controls (after ffb05178, each restored from HEAD, none committed)
+
+1. `WithAttrs` returns the receiver: every case that binds a value went
+   red (11 parity rows, slogtest's six With cases, two of Strings' rows,
+   the Default, Component and park tests, siblings); the WithGroup-only
+   ones stayed green.
+2. `derive` appends into the parent's chain: siblings overwrote each
+   other's last op, and `-race` reported the concurrent derivations.
+3. No resolution: the three LogValuer rows and slogtest's four resolve
+   cases.
+4. Empty attributes kept: the four `Attr{}` rows, slogtest's empty-attr
+   case and the tripwire's recorder half went red. So did the receiver
+   pin's `WithAttrs(Attr{})` row, which was not predicted: with empties
+   kept, that call derives.
+5. The park before the record is kept: the park test, its parked record
+   unreadable while parked.
+
+### The suite
+
+`buildslot.py b604 make test` at 00e6f5c9: 79 packages ok, 0 failures,
+every package re-run. No absence test found a value it had missed: the new
+recorder sees every bound value and group name, and every absence test
+that uses loggingtest still passes. One cmd/bridge test compared a
+rendered line exactly and now expects the `component=player` that the
+real handler writes too (in ffb05178).
+
+### Also
+
+The first two B604 records said the rules lines were in `.p2/` patches on
+the branch. Both were applied and `.p2/` is gone, so they now name the
+rules files they changed (00e6f5c9). CodeRabbit's other thread on this
+log, which asked to turn three "found and not fixed" entries into backlog
+IDs, was declined by the orchestrator, and they stand.
+
+The rules line is in build-ci-tests.md, one new bullet after the log-leak
+test's.
+
+## 2026-10-31 — B604, fourth round: a file where the backups folder goes fails its listing on every OS; qualification version 21
+
+CI on #1369, three failed jobs (the orchestrator's brief).
+
+### `test (windows-latest)`: a difference in production, not in the test
+
+`TestABackupThatFailsAnswersWithoutAPath/a_listing_that_fails` answered
+`200 ""` on Windows. It wants 500 `list-failed`, a message that says "log",
+and an Error line carrying the error. Its fixture puts a file where the
+backups folder goes.
+
+The orchestrator measured on Windows (nomos, Go 1.27.3, at 2c97e94b):
+`os.ReadDir` of a regular file fails with ERROR_PATH_NOT_FOUND (errno 3),
+which matches both `fs.ErrNotExist` and `syscall.ENOTDIR`. So
+`backup.ListContext` took the file for a folder not made yet and listed
+nothing. GET /api/backups answered 200 with no backups on Windows and 500
+elsewhere.
+
+Read in Go 1.27.3's sources, that is one error, not two:
+
+- `os.ReadDir` opens with `O_DIRECTORY` on every OS (`openDirNolog`). On
+  Windows, `syscall.Open` checks the handle it opened and answers a file
+  with `ENOTDIR` (`syscall_windows.go`).
+- On Windows, `syscall.ENOTDIR` is `Errno(ERROR_PATH_NOT_FOUND)`
+  (`zerrors_windows.go`), and `Errno.Is` counts ERROR_PATH_NOT_FOUND as
+  `ErrNotExist`.
+- On macOS (measured, Go 1.27.3) and Linux the same open answers `open
+  <path>: not a directory`, ENOTDIR, which is no absence there.
+
+So every ENOTDIR is an absence on Windows.
+
+The orchestrator's decision was to make production agree on every OS.
+`readBackupsDir` (`internal/backup/backup.go`) is now the listing that
+`ListContext` and the orphan sweep share. When `os.ReadDir` reports
+not-exist or ENOTDIR, it asks `os.Lstat`:
+
+- Lstat's not-exist: nothing there (no snapshot taken yet), the empty answer
+  as before.
+- Any other Lstat error: returned. A destination that cannot be stated is
+  not nothing there, the trash's rule (B179).
+- A folder: one made since the listing, which found none, so the answer is
+  empty.
+- Anything else: `&os.PathError{Op: "open", Path: root, Err:
+  errNotADirectory}`, a sentinel whose text is ENOTDIR's, `open <path>: not
+  a directory`. It is the same answer on every OS, and an absence on none.
+  It is never `syscall.ENOTDIR`, which on Windows would read as an absence
+  to any caller that asks.
+
+The first form of this fix (c405529d) wrapped `syscall.ENOTDIR`, the error
+Linux and macOS give, and so was itself an absence on Windows. Reading the
+Windows sources before the gate ran found it, and 6f9289aa and aebfe33e
+replaced it.
+
+The orphan sweep (`reapOrphans`) lists the same folder in the same prune,
+just before `ListContext`. Left on `os.ReadDir`, a prune on Windows would have
+found the folder empty for its reaper and unlistable for its keep-policy, so
+the sweep takes the same helper.
+
+**A link to nothing changes on every OS.** Lstat sees the link, so a link
+where the folder goes whose target is missing (an unmounted disk the backups
+were linked to, say) listed nothing on every OS and now fails the listing on
+every OS. A snapshot cannot be written through it either. Measured on macOS:
+`os.MkdirAll` of a link to nothing answers `mkdir <path>: file exists`, and
+`os.ReadDir` of one answers ENOENT. So "no backups yet" there promised a
+folder the next snapshot would not make.
+
+Every caller of `List`, `ListContext` and `Prune` was checked for a reliance
+on Windows' old answer, and none relies on it:
+
+- `apiBackupsList` (GET /api/backups): 500 `list-failed` on every OS, the
+  case CI ran.
+- `getLastBackupAt` (the jobs card): a Warn `jobs: backup list` and the last
+  good value, nil, backed off for a TTL, as on Linux and macOS before.
+- `startupSnapshotShouldSkip` (the backup ticker's boot pass): logs the
+  failed listing and writes the snapshot anyway, which fails as it did
+  before.
+- The prunes after a snapshot (`bridge backup`, the ticker, the console's
+  POST /api/backups): reached only after a snapshot that succeeded, which a
+  file where the folder goes rules out (`MkdirAll` fails first).
+- No test anywhere relied on a file there listing as nothing.
+
+Two residuals:
+
+- A file where an ancestor of the folder goes (the data directory itself)
+  still reads as nothing there on Windows: ERROR_PATH_NOT_FOUND for the path
+  and for its Lstat. On Linux and macOS the open and the Lstat both answer
+  ENOTDIR, and the listing fails with Lstat's error. The folder's parent is
+  the data directory, which holds the database, so a bridge in that state
+  does not start.
+- Lstat's other two branches (another error, and a folder made since the
+  listing) are reachable only by a race, and no test holds them.
+
+#### Red first (3bda0b6c, 6f9289aa), the fix (c405529d, aebfe33e)
+
+`TestWhatIsWhereTheBackupsFolderGoesListsAlikeOnEveryOS` lists two ways: as
+this OS lists, and as Windows lists. The second goes through a package-level
+seam, `readDir` (`os.ReadDir`), which `SetReadDirForTest` replaces and the
+subtest's cleanup restores; no backup test runs in parallel. The seam answers
+every listing with a not-exist `*fs.PathError`.
+
+A folder not made yet lists nothing. A file, and a link to nothing, fail
+`List` and `ReapOrphans` with open and `errNotADirectory` (`ErrNotADirectory`
+in `export_test.go`) naming the path. The answer is never an absence and
+never `syscall.ENOTDIR`. On Windows the test also checks that ENOTDIR is
+still an absence, which is the sentinel's reason.
+
+Red on macOS:
+
+- At 3bda0b6c, whose test wanted ENOTDIR: 6 failures, the Windows shape's
+  file and link and macOS's own listing of the link, each through `List`
+  and `ReapOrphans`. macOS's own listing of the file already failed the
+  listing.
+- At 6f9289aa, the test as it stands: 8 of 8. Every answer was
+  `syscall.ENOTDIR`, macOS's own for the file and c405529d's for the rest.
+
+Controls on aebfe33e (each restored from HEAD, none committed), each
+predicted:
+
+1. The fix's error replaced with the empty answer: 8 failures.
+2. `os.Stat` in place of `os.Lstat`: only the link cases, under both
+   listers (4). The file cases stayed green.
+3. `syscall.ENOTDIR` back in place of the sentinel: 8 failures.
+4. No ENOTDIR routing, so only not-exist asks Lstat: macOS's own file case
+   alone, through `List` and `ReapOrphans` (2), since it then answered with
+   the OS's ENOTDIR. The first run of this control did not build, because
+   `syscall` was left unused, and it was run again with the import kept.
+
+On c405529d, before the correction, controls 1 and 2 gave 6 and 4 failures.
+
+### The cases that make a filesystem operation fail
+
+The cases this PR added, by how they fail:
+
+- Structural, run on every OS:
+  - the backups listing (a file where the folder goes), portable since this
+    fix;
+  - the snapshot (a folder where bridge.yaml goes);
+  - the certificate tile (none there, and a folder where it goes);
+  - the root add (a folder not there, a relative path, a file);
+  - a config whose name is a link to nothing (skipped where the host makes
+    no link);
+  - the disk probes (a missing directory, with the operation's name and
+    `errors.As` per OS);
+  - the rendition cases, where a directory below a file stops the probes:
+    on Windows they assert the role and no directory, not which probe failed
+    first (6c3e4620);
+  - the MP4 walks (an in-memory read fault);
+  - this round's backups listing test.
+- Structural, kept off Windows by a build tag: the DSD volume comparison
+  (`rendition_room_log_unix_test.go`) and `SameVolume`'s stat
+  (`projection_probe_error_unix_test.go`). On Windows a directory below a
+  file resolves to the file, which the volume probe opens.
+- By a mode, skipped on Windows (a mode takes no permission away there) and
+  as root (who is not refused), through `skipWhereModesDoNotRefuse`. These
+  are kept as they are:
+  - in `console_error_paths_test.go`: a listing the bridge may not read
+    (:114), a snapshot it may not read a file for (:143), a certificate it
+    may not read (:194), a folder it may not reach (:247);
+  - in `console_store_error_paths_test.go`: the four token writes, under a
+    data directory at 0o500 (:26), and the compaction (:74).
+
+The six check a permission's answer, which comes from
+`errors.Is(err, fs.ErrPermission)` and does not depend on the OS.
+`TestTheConsoleSaysWhatFailedByItsClass` already injected a permission error
+for the listing, the snapshot and a root. It now does so for the certificate
+tile and the token writes too (a6423ac7), whose answers ran on no Windows
+leg. The certificate's answer moved to `certInspectRefusal`, beside
+`backupsListRefusal`, with no change in what it says.
+
+The control, both permission branches dropped: the two new rows went red,
+and on macOS so did the certificate's and the four token routes' mode
+fixtures. Nothing else did.
+
+### `native qualification evidence`: version 21 (7fa9ac40)
+
+The job failed with "guarded code changed without qualificationVersion
+increase (20 -> 20)". The rule in `version_gate.go` is by path, and against
+e242ce2c, the PR's merge base, its guarded paths and prefixes match six
+files:
+
+- `internal/fsutil/errpath.go` and `errpath_test.go` (`internal/fsutil/`);
+- `internal/manifest/extractors.go`, `scanner.go` and
+  `extract_log_paths_test.go` (`internal/manifest/`);
+- `cmd/bridge/serve_player_openhome_test.go` (`cmd/bridge/serve_player`).
+
+So a change to what a log line says still needs the raise. It follows the
+last two raises (3ac55afa, e242ce2c):
+
+- `version.go`;
+- the runbook's six current references (the header, the current version,
+  the approval's schema, the invalidation, the rerun and the owner's step
+  1), five of which `TestQualificationRunbookVersion` pins to `Version`;
+- a "Version 21 covers" paragraph.
+
+No test or golden asserts the number. No user holds an approval in 0.2.2, so
+none is lost. B601 (#1371) also takes 21, and the merge raises one of the two
+again.
+
+The check ran as gate.yml runs it, on commits (macOS, go1.27.3). Local main
+is e242ce2c, and the branch is linear on it:
+
+```
+$ go run -tags ts_omit_webclient,ts_omit_debugeventbus ./scripts/qualification-version -base e242ce2c4adf9449a3d1f2d8916fe65e5882953a -head d8394aa6
+guarded code changed without qualificationVersion increase (20 -> 20)
+exit status 1
+$ go run -tags ts_omit_webclient,ts_omit_debugeventbus ./scripts/qualification-version -base e242ce2c4adf9449a3d1f2d8916fe65e5882953a -head HEAD   # at 7fa9ac40
+qualification version OK: e242ce2c4adf9449a3d1f2d8916fe65e5882953a..HEAD
+```
+
+The job's other two steps also ran locally, under `-race` and with the
+overlay `scripts/native-integration-overlay.py` writes. In cmd/bridge, 13
+`TestNativeIntegration` tests passed, among them the six the job requires.
+In internal/player/playback, 26 passed, among them the four it requires.
+
+### `test -race (manifest 1/4)`: no log
+
+Nothing to fix. In the manifest package this PR changed seven log lines in
+`extractors.go` and the one-line `walkErrReason` in `scanner.go`, and added
+`extract_log_paths_test.go`.
+
+That test starts no goroutine and calls no `t.Parallel`. Its read seam is on
+the instance (`ExtractContext.openAudio`), and only the test's goroutine
+touches its source's counters. `loggingtest.Record` swaps slog's default
+atomically, and the recorder takes its lock for every record (round 3,
+pinned with `-race` controls).
+
+Shard 1/4 is index 0 of a round-robin over the package's sorted names
+(`.github/scripts/test-shard.sh`). It holds
+`TestNoteUnreadableDescribesAnyErrorWithoutPanicking` (`walkErrReason`),
+`TestTrackLogPath` and the MP4 extractor tests, but not the new test. Those
+tests and the new one, 42 top-level tests, ran 20 times each under `-race`,
+clean. The gate runs the whole package under `-race`.
+
+The rules line is in `.p2/rules-b604r4.patch` until the orchestrator applies
+it: config-lifecycle.md, one new bullet after the empty-root reaper's.
+
+## 2026-10-30 — B603: the bridge's own player starts on Volumio, whose root overlay's upper layer no path reaches after boot
+
+**The defect.** On the owner's Volumio 4.231 Raspberry Pi 5 (bridge e242ce2c,
+the 0.2.2 candidate; data directory `/data/1-bit-bridge/config/data`;
+`output.player.enabled: true`) serve logged `player: not started`, reason `the
+player's identity: atomicwrite: whether the root's storage keeps what is
+written to it through a reboot cannot be told:
+/data/1-bit-bridge/config/data is on an overlay whose upper layer
+/mnt/ext/dyn, as the mount table names it, cannot be read here: statfs
+/mnt/ext/dyn: no such file or directory`. Volumio is the main platform for a
+player on a bridge box, so this blocked 0.2.2.
+
+**Measured on the box.** The root is an overlay, `31 1 0:23 / / rw,relatime
+shared:1 - overlay overlay
+rw,lowerdir=/mnt/static,upperdir=/mnt/ext/dyn,workdir=/mnt/ext/work`. Its upper
+layer is on the SD card's partition 3 (`mmcblk0p3`, 179:3, ext4, label
+`volumio_data`), which the initramfs mounted at `/mnt/ext` before the pivot and
+nothing remounts, so no mountinfo line lists 179:3 and `lsblk` shows no mount
+point for it. `/imgpart` is partition 2 (`26 31 179:2 / /imgpart rw,relatime
+shared:3 - ext4 /dev/mmcblk0p2 rw`), the squashfs is `/static`, `/boot`
+partition 1. The NVMe is imaged with Volumio too: its partition 3
+(`nvme0n1p3`, 259:3, at `/media/NVME`) is labelled `volumio_data`, and
+`/dev/disk/by-label/volumio_data` points at it. The service's user (`volumio`)
+reads `/run/udev/data/b179:3` (`E:ID_FS_TYPE=ext4`, `E:ID_FS_LABEL=volumio_data`),
+`/sys/class/block/mmcblk0p3/dev` (`179:3`), and `/sys/fs/ext4`, which listed
+`mmcblk0p2`, `mmcblk0p3` and `nvme0n1p3`. With the orchestrator's workaround
+unmounted, `findmnt /mnt/ext` answered nothing, `grep ' 179:3 '
+/proc/self/mountinfo` counted 0, and `/sys/fs/ext4/mmcblk0p3` still existed:
+the kernel keeps the ext4 entry of the initramfs's hidden mount. The fixtures
+are the box's complete lines (`pi-mountinfo.txt`, `pi-evidence.txt`).
+
+**The decision** (the orchestrator, after Codex's and Argon's review):
+automatic, evidence-based recognition, no operator override in this PR, the
+rule fail-closed for everything else. Where the first statfs of the upper path
+of the root's own mount answers ENOENT, `volumioUpper` reads the box's own
+files and takes the upper layer only when every fact holds, in order (Volumio's
+os-release; the overlay read-write over `/mnt/static` with upperdir
+`/mnt/ext/dyn`, the overlay at `/`; `/imgpart`'s line by its mount ID, partition
+2 of a disk in sysfs; that disk's partition 3, resolved back through
+`/sys/dev/block`, ext4 labelled `volumio_data` in udev's database; its ext4
+superblock live and on no mountinfo line), naming the first that fails. It
+returns `taken()`'s verdict and outranks no other refusal. It is an explicitly
+trusted Volumio boot-layout assumption; the rule is in
+`.claude/rules/config-lifecycle.md` (its long form in
+`ops/History-rules-config-lifecycle.md`, B603). The medium check became an
+inspection (`Medium`: the verdict and the storage's name) that the writer's
+admission and `bridge doctor`'s new `player-storage` line both read
+(`atomicwrite.InspectMedium`; `.claude/rules/cli-serve.md`).
+
+**Red first.** On the commit that added the seam and the tests and changed no
+behaviour (24a73d60), `TestMediumTakesVolumiosHiddenDataPartition` failed with
+main's reason word for word (`… /mnt/ext/dyn, as the mount table names it,
+cannot be read here: statfs /mnt/ext/dyn: no such file or directory, want it
+taken`); every case of `TestMediumRefusesWhatVolumiosLayoutDoesNotShow` was
+already refused with main's sentinel and text and lacked only the new reason;
+of `TestMediumKeepsEveryOtherRefusalBesideVolumiosEvidence` only the bind case
+failed, refused on main for its unreachable upper layer rather than as a bind.
+Every other test in the package passed. They pass from c48ae169 on.
+
+**The cases.** Accepted: the box as measured. Refused, each one fact changed: a
+lookalike upper layer on Raspberry Pi OS (no VOLUMIO_VERSION), an empty
+VOLUMIO_VERSION, no os-release, an unreadable one; the root overlay read-only
+(mount and superblock), its mount read-only over a writable superblock, another
+lower layer, another upper layer, an overlay that is not the one at `/`; the
+NVMe's decoy partition with no `/imgpart` mount, `/imgpart` on partition 4, an
+overmounted `/imgpart`, sysfs naming `/imgpart`'s device as another; partition 3
+absent, not ext4, labelled otherwise, its udev entry unreadable, a sibling whose
+device sysfs puts under the NVMe; no live ext4 superblock (a tmpfs fallback),
+partition 3 visible in mountinfo; two partitions 3, an unreadable partition
+number, a mountinfo line that does not read, an unreadable `/sys/fs/ext4`, an
+`/imgpart` on a whole disk, a disk that is a partition, udev naming no
+filesystem. Beside valid Volumio evidence, a subtree bind (ErrOverlayBind),
+`volatile`, `fsync=volatile`, a reachable tmpfs upper, inconclusive totals, an
+upper statfs refuses with EACCES, a tmpfs root and a ramfs root are refused as
+before, never speaking of Volumio. The production reader on a real tree with
+relative sysfs links takes the measured box, refuses the NVMe sibling and the
+missing superblock, refuses a link out of its root, refuses a named pipe at the
+udev entry without waiting, and refuses a file past its 64 KiB bound. The
+writer through the fallback: the write syncs the root, renames, then the
+file's directory, the root and the directories up to the merged mount's root;
+the probe syncs the same; statfs is asked of the upper path once, by the
+medium; an fsync failure above the root and an unopenable directory there fail
+both; a box that does not show Volumio is refused before anything is created.
+On Linux a namespace scenario detaches the tmpfs under an overlay's upper
+layer after mounting it: the kernel answers ENOENT, and the probe and the write
+refuse, nothing copied up. The doctor: no line for a player left off; off Linux
+not checked; a config refusal a warn; a data directory not there yet not
+checked; one this user cannot inspect a warn; Volumio's data partition named,
+ok; a refusal a fail saying the player will not start, the bind's hint its own;
+the CLI and the console word for word.
+
+**Negative controls**, on 885059f5, each a one-predicate mutation that compiled,
+predicted first, run on the whole package and restored from git, the tree clean
+after: C1 the partition-number check (red: `/imgpart not partition 2`, accepted);
+C2 the common-disk identity (red: the NVMe-sibling case, accepted, and the
+host-reader test's NVMe variant, refused for another reason); C3 the ext4 check
+(red: `partition 3 not ext4`, accepted); C4 the live superblock (red: the
+tmpfs-fallback case, accepted, and the host-reader test's variant); C5 the
+hidden check (red: partition 3 visible in mountinfo); C6 the label (red: the
+label case); C7 the Volumio marker (red: the lookalike and the empty version);
+C8 the bind verdict after the fallback (red: the bind combination, taken); C9
+ENOENT alone opening the fallback (red: the EACCES upper, taken); C10 the
+copy-up syncs after a write lands (red: the new writer test and
+`TestWriteBytesDurable_SyncsUpToTheRootOfItsMountOnAnOverlay`). Each went red
+exactly as predicted and nothing else did.
+
+**Where it ran.** On the worker's Mac: everything portable (the decision
+tests, the fake of the box's files, the production reader on a real tree, the
+writer tests, the doctor). Not here: the Linux-only tests
+(`medium_linux_test.go`, the namespace scenario among them), which run in the
+PR's `gate.yml` on ubuntu, and the box itself, which is the orchestrator's
+check on the Pi.
+
+**Residuals.** A modified boot that keeps every fact and puts a memory
+filesystem at `/mnt/ext`; a partition 3 mounted only in another mount
+namespace beside a tmpfs `/mnt/ext`; a Volumio release that changes these
+paths, refused until taught.
+
+## 2026-10-31 — B603 round 2: a data directory a link to nothing stands in is no directory serve makes
+
+**The finding** (CodeRabbit on #1368, Minor, verified by the orchestrator).
+Where `atomicwrite.InspectMedium` answered `fs.ErrNotExist`, the doctor's
+`player-storage` line said ok, "the data directory … does not exist yet;
+bridge serve makes it". `InspectMedium` resolves every link in the path
+(`filepath.EvalSymlinks`), so a data directory that is a symbolic link to
+nothing, or one below such a link, answers the same ENOENT. Serve cannot make
+it: `lockServeDataDir`'s `fsutil.MkdirAll` stops at the link with EEXIST
+(`os.MkdirAll` stats ENOENT, its `Mkdir` finds the link's entry, and the Lstat
+after shows a link; as root fsutil's own walk, `mkdirAllAsRoot`, gets the same
+EEXIST from `os.Root.Mkdir` and makes nothing), and serve goes on without its
+lock (deliberately: a bridge whose storage cannot lock still starts), so
+planServePlayer starts no player.
+
+**The fix.** In that branch the line now judges, from the data directory up
+by `os.Lstat`, the nearest entry of its path that is there, the kernel
+resolving the entries above it: a symbolic link there whose `os.Stat` answers
+ENOENT is a fail, "the player will not start: <the link> is a symbolic link to
+nothing, and serve cannot make <dataDir> through it", hint "point the link at a
+directory, or set dataDir in bridge.yaml to one"; it names the entry of the data
+directory's own path, the head of a chain that ends in nothing included, and a
+broken link reached through a live one is found where it sits. Anything else
+there (a directory, a live link to one) leaves only the components below it to
+make, which MkdirAll makes, and stays ok, "not there yet". An Lstat or Stat on
+the way that fails for another reason than an entry's absence, and every
+inspection error, is not checked, a warn, never ok, its summary naming the data
+directory beside the error (EvalSymlinks answers an entry on the way that is no
+directory with a bare ENOTDIR that names none): a permission error keeps the
+service user's advice; a link cycle (EvalSymlinks' "too many links") or a
+non-directory on the way gets the path's ("mend what the error names on the way
+to the data directory, or set dataDir in bridge.yaml to a directory serve can
+make or use").
+
+**Red first.** The cases (`cmd/bridge/doctor_player_storage_unix_test.go`, the
+real inspector) went in first (80b4548d): the data directory a link to nothing,
+an ancestor one, one reached through a live link, and the head of a chain read
+ok and failed; a live link with the data directory below it not made yet read ok
+and passed; the premise, `lockServeDataDir` failing with an error matching
+`fs.ErrExist` on both layouts and making the directory through a live link,
+passed; a link cycle and a regular-file ancestor were a warn with the service
+user's advice and failed on the advice; an injected ENOENT beside an ancestor
+this user cannot search read ok and failed. The table's mocked ENOENT case moved
+from the host's `/data` to a path under `t.TempDir()`. All pass from 2ceba8ea.
+The fix commit sharpened what three of those cases assert, once EvalSymlinks'
+bare ENOTDIR showed that "the entry the error names" named nothing: the
+not-checked summary names the data directory before the error, and the path's
+advice reads "mend what the error names on the way to the data directory" (it
+read "mend the entry the error names"); the table's EACCES case took the new
+summary. R2-C0, below, puts round 1's doctor code under the final tests. The
+premise's half as root (`as root`, through `fsutil.SimulateRootForTest(4242,
+4243)`) followed in 44cdf551 and passed at once, as a premise does.
+
+**Controls**, on 2ceba8ea, predicted, compiled, restored from git: R2-C1, the
+inspection's ENOENT straight to ok again, turned red exactly the four
+link-to-nothing cases and the walk's permission case, the live link and the
+premise green; R2-C2, the service user's advice on every not-checked line,
+turned red exactly the cycle and the regular-file cases. On 44cdf551: R2-C0,
+round 1's `doctor_player_storage.go` (832e117b) under the final tests, turned
+red exactly the four link cases, the cycle, the regular-file ancestor, the
+walk's permission case and the table's EACCES case (its wording), 18 passing,
+the live link and both halves of the premise among them, and what it printed
+is round 1's: ok, "does not exist yet; bridge serve makes it", for each link
+case, and "not checked: EvalSymlinks: too many links" and "not checked: not a
+directory", naming no entry, for the cycle and the file. R2-C3, fsutil's
+`mkdirAsRoot` taking an entry that is there for a directory it made, turned
+red exactly the premise's half as root: the lock then failed opening
+`link/server.lock` and making `dangling/data`, both ENOENT and neither EEXIST,
+and the walk gave both links the simulated owner. So that half runs fsutil's
+own walk, which `os.MkdirAll`'s identical EEXIST could not show.
+
+**Not changed.** Serve itself, which goes on after a lock error that is not
+contention on purpose (`serve_lock.go`, `serve_data_dir_lock_test.go`): telling
+"cannot make the data directory" from "cannot lock it" there is a follow-up.
+The rules line in `cli-serve.md` and its long form change with this round: the
+orchestrator applied the line from `.p2/rules-b603r2.patch` in b8aff55d, and
+the long form is in `ops/History-rules-cli-serve.md`, B603 round 2.
+
+## 2026-10-31 — B603 round 3: the Volumio refusal cases expect statfs's ENOENT in the platform's words
+
+**The failure.** CI's `test (windows-latest)` on #1368 failed at 832e117b, and
+the gate with it: every case of `TestMediumRefusesWhatVolumiosLayoutDoesNotShow`
+stopped at the check of main's refusal (`medium_volumio_test.go:438` there),
+while macOS, `test -race` and the Linux tests passed. On nomos (Go 1.27.3,
+windows/amd64) the orchestrator measured the same at 832e117b: the refusal was
+right, wrapping `ErrMediumUnknown` and `fs.ErrNotExist`, but its text ended
+`statfs /mnt/ext/dyn: The system cannot find the file specified.` where the
+cases wanted `… statfs /mnt/ext/dyn: no such file or directory`.
+
+**Why Windows answered otherwise.** The check is the same there: `volumio.go`,
+`medium.go` and `medium_volumio_test.go` carry no build constraint, and the
+test runs `inspectMedium` on injected readers (`volumioBox.inspect`), never
+Windows' `platformInspect` (`mounts_windows.go`, which takes every root). Its
+fake statfs (`statfsOf`) answers a path it does not hold with
+`&fs.PathError{Op: "statfs", Path: p, Err: syscall.ENOENT}`, which
+`upperAsReached` wraps with `%w`, so the refusal ends with
+`syscall.ENOENT.Error()`. On Windows that errno is `ERROR_FILE_NOT_FOUND`
+(`zerrors_windows.go`: `ENOENT Errno = ERROR_FILE_NOT_FOUND`, and `ENOTDIR` is
+`ERROR_PATH_NOT_FOUND`), whose words `Errno.Error` asks the system for, while
+the errnos Go invents there (`APPLICATION_ERROR` plus n: EACCES, EEXIST, EIO,
+EISDIR, ELOOP and the rest) carry Unix's words from Go's own table. The cases
+spelled out Unix's words twice: in the `today` constant nineteen of them
+share, and in the case "another upper layer"'s own. That check is a
+`t.Fatalf`, so on Windows nothing after it ran: no case's storage or reason
+has been checked there yet.
+
+**The fix** (3140f766) is the expectation alone: `today` and the other upper
+layer's now end with `syscall.ENOENT.Error()`, the errno the fake returns, so
+each platform's words follow from it; the error-chain checks
+(`ErrMediumUnknown`, not `ErrOverlayBind`, `fs.ErrNotExist`), the refusal's
+context and each case's reason are unchanged, and no production code changed.
+Not a build constraint: the file's fixtures (`fakeBoot`, `piBoot`,
+`piVolumio`, `statfsOf`, `volumioBox`) serve `volumio_test.go` and
+`volumio_write_test.go`, which build everywhere, and the unix-only
+`volumio_unix_test.go`, so a Linux tag would leave them undefined on Windows
+and macOS. Not a `runtime.GOOS` skip either. The two EACCES expectations in the
+PR's portable tests, the upper path statfs refuses for another reason
+(`TestMediumKeepsEveryOtherRefusalBesideVolumiosEvidence`) and the doctor
+table's data directory this user cannot inspect
+(`TestThePlayersStorageLineSaysWhatTheWritersCheckFound`), passed on Windows
+only because EACCES is an invented errno there (`EACCES - APPLICATION_ERROR:
+"permission denied"`); they are built from `syscall.EACCES.Error()` the same
+way. The writer test's POSIX permission subtest keeps its Windows skip.
+
+**The PR's tests, by platform.** With no constraint, so on Windows, Linux and
+macOS: `medium_volumio_test.go` (the acceptance, the refusals above, the
+refusals the fallback does not outrank); `volumio_test.go` (the os-release and
+udev parsers, the facts left uncertain, what the check reads, the fake's
+shape, each on fakes, its reasons free of errno words, its `fs.ErrNotExist` an
+`errors.Is` that Windows' ENOENT answers); `volumio_write_test.go` (the strict
+writer through the fallback, its barrier and mount IDs the test's own on
+Windows, its permission subtest skipped there and as root);
+`medium_inspect_test.go` (InspectMedium against the package's own check,
+which on Windows asks nothing, the platform giving no mount ID); the doctor's
+`doctor_player_storage_test.go` (a faked inspector and seams, its one real
+walk a `t.TempDir()` path whose ENOENT Windows answers as `fs.ErrNotExist`,
+and `volumioRefusal` a fixture compared with itself); and `internal/doctor`'s
+`player_storage_test.go` (no host at all). Unix only: `volumio_unix_test.go`
+(real sysfs links named with colons, a FIFO) and
+`doctor_player_storage_unix_test.go` (real links and kernel errors). Linux
+only: `medium_linux_test.go`'s namespace scenario. `medium_test.go`'s one
+changed call keeps B514's Windows skip. Each one's expectations hold where it
+builds, the refusal cases on Windows excepted until this fix.
+
+**What Linux showed** (legion0: Ubuntu 26.04, kernel 7.0, Go 1.27.3, uid
+1000). `internal/atomicwrite` passed, the PR's tests among them. The namespace
+scenarios skipped: a child here cannot make its mounts private ("permission
+denied"), AppArmor restricting unprivileged user namespaces
+(`kernel.apparmor_restrict_unprivileged_userns` 1), so
+`TestWriteBytesDurable_RefusesAnOverlayWhoseUpperLayerIsHidden` has run only on
+CI's ubuntu. The doctor's unix tests passed against the real kernel, in round
+2's words from macOS: mkdir answers a link's entry with EEXIST (`mkdir
+…/link: file exists`, errno 17), for a data directory a link to nothing
+stands in and for one below such a link, as this user and through fsutil's
+own walk as simulated root, which gave no entry an owner;
+`filepath.EvalSymlinks` answers a link to nothing with `lstat <its target>:
+no such file or directory`, a cycle with `EvalSymlinks: too many links`, and a
+regular file on the way with a bare `not a directory` (ENOTDIR, naming no
+entry); and the mode-0 case ran, a warn with the service user's advice
+(`lstat …/locked/data: permission denied`).
+
+**Controls**, on 3140f766, each predicted, compiled (`go vet`), run on the
+whole `internal/atomicwrite` package or on the doctor's player-storage tests,
+and restored from git, the tree clean after. NC1, Windows' words as the
+expectation on Linux (CI's failure, mirrored): red exactly the twenty refusal
+cases, at the check of main's refusal. NC2, the fake statfs's ENOENT as
+`fs.ErrNotExist` ("file does not exist", still not there): red exactly the
+same twenty, on the words alone, the acceptance still taken, so the
+expectation pins statfs's own errno, which a compare up to `statfs
+/mnt/ext/dyn:` would not. NC3, the EACCES case's errno as EPERM: red exactly
+that case. NC4, the doctor table's EACCES as EPERM: red exactly its summary,
+its status and its hint unchanged. Nothing else went red.
+
+**Compiled here, run elsewhere.** `go vet` and `go test -c` of
+`internal/atomicwrite`, `cmd/bridge` and `internal/doctor`, with the release
+tags, for windows/amd64, linux/amd64, linux/arm64 and darwin/arm64: clean. A
+compile cannot check a string, so the orchestrator runs the package's tests on
+nomos before pushing. The rule is a new line in
+`.claude/rules/build-ci-tests.md`, which this round wrote as
+`.p2/rules-b603r3.patch` for the orchestrator to apply.
+## 2026-10-31 — B605: the engine's tests move the fake clock past a call only once the owner has taken its answer
+
+Backlog B605: `TestNativePausedTransitionRearmsDeadline/1s/true` failed in
+the gate's `test -race (rest)` job on main d8b6897c (2026-10-28) and e242ce2c
+(2026-10-29), two of main's last six gate runs: "waited 1m0s for effective
+paused transition deadline; state stopped, selected 4097, pending stop, last
+stop {Reason:backend_timeout Detail:prepare did not answer wi…". The test
+(B470 2c.2) pins the deadline of a transport installed during a pause.
+
+**Reproduced on legion0** (Ubuntu 26.04, x86-64, 16 cores, go1.27.3,
+`-race`), through the build slot: `go test -race -run
+'^TestNativePausedTransitionRearmsDeadline$' -count=200 -timeout 60m -v
+./internal/player/engine/`. Alone: no failure in 200 runs (800 subtests),
+1.7 s. Beside 16 busy loops (`while :; do :; done`, one per core): 3 runs of
+200 (1s/true twice, 1m0s/true once), CI's line each time, 182 s, 180 of it
+three one-minute watchdogs. Beside 32 (`-watchdog=20s`): 1 run of 200
+(1m0s/false). Traced beside 16 (below, `-watchdog=10s`): 10 runs of 400, every
+subtest among them, so CI's two 1s/true were chance.
+
+**The cause: the test moved the fake clock past the deadline of a Prepare whose
+answer was still on its way** (Codex's first hypothesis on the brief). At
+e242ce2c:
+
+1. PlayID answers once the owner has taken the Start's answer
+   (`settleWaiters`, owner.go:620-645). That step's `reconcile` names b after
+   a in a Prepare (`startDone` → `reconcile` → `prepare`, transport.go:1185,
+   838, 883), with CallTimeout's 2 s deadline on the engine's clock and its
+   deadline timer armed (`call`, transport.go:1043-1059, the timer at 1054),
+   on a goroutine of its own (1062-1066).
+2. The test's `s.prepared(s.first.ID, 1)` (fakebackend_test.go:517) waits for
+   the fake's record of that Prepare, which the fake makes before it returns
+   (`b.record(c)`, :273; the hook or the return after it, :279-287). Then the
+   call's goroutine stamps its answer on the engine's clock (transport.go:1064)
+   and posts it (`spawn`, engine.go:784).
+3. The test sets the current occurrence, pauses and sets the next one, none of
+   which waits for that answer, and moves the clock `effective +
+   ReleaseTimeout - 1s` on: 31 s, 2 s or 61 s.
+4. The Prepare's deadline timer fires inside that advance and posts its expiry
+   (transport.go:1057). The owner takes it while the call is still pending
+   (`callExpired`, 1303), ends the play ("prepare did not answer within its
+   deadline", 1310) and releases the session with ReasonTimeout (1330);
+   `releaseSession` stops the pause's timer (581). The fake acknowledges the
+   release at once, the engine stops, and the deadline under test never comes:
+   the test waits out its watchdog.
+5. The answer arrives afterwards and is not taken: stamped late, it is expired
+   by `callDone` (1094-1101); stamped in time but taken after the expiry, it is
+   dropped there (`if c.expired`, 1107).
+
+**Evidence.** A temporary trace, removed before the fix (its patch is beside
+the job's report, outside the tree), logged each step with the real time, the
+goroutine and the fake clock: the fake's Prepare entered, recorded and
+returning; the call's goroutine's return, stamp and post; the deadline timer's
+fire and post; the owner's handling of the answer and of the expiry; and the
+test's steps and advances. In a passing run the owner took the Prepare's answer
+25 µs after `h.playing` returned. All ten failures beside 16 busy loops had one
+order: the deadline timer fired at fake 02.000 inside the test's advance, the
+owner handled the expiry with the call still pending, and the owner took the
+answer 0.5 to 3.3 ms after the expiry, in four of them stamped at 00.000 (in
+time) and posted after it (the goroutine left between its stamp and its post),
+in six stamped late (left before its backend returned or before its stamp).
+The first:
+
+    1.098 ms g1045 fake 00.000  fake backend: Prepare recorded (the test's s.prepared can return)
+    1.147 ms g1045 fake 00.000  call goroutine: prepare call 2's backend returned
+    1.275 ms g671  fake 00.000  test: s.prepared returned
+    1.711 ms g671  fake 00.000  test: Advance(31s) begins
+    1.741 ms g671  fake 02.000  clock: prepare call 2's deadline timer fires
+    1.784 ms g671  fake 02.000  clock: prepare call 2's expiry posted
+    1.984 ms g672  fake 31.000  owner: prepare call 2's expiry handled (still pending true)
+    2.036 ms g672  fake 31.000  owner: release call 4 made, deadline 33.000
+    3.176 ms g1045 fake 32.000  call goroutine: prepare call 2's answer stamped at 00.000 (late false)
+    3.234 ms g672  fake 32.000  owner: prepare call 2's answer handled (stamped 00.000, late false, expired already true)
+
+**The engine is not at fault, and no production deadline changes.** The
+re-arming works: in every run that gets past the Prepare the previous
+transport's timer ends nothing and the transition's own fires at its effective
+PauseRelease plus ReleaseTimeout (`armPauseDeadline`, native.go:294-298, from
+events.go:111). An answer the owner takes after its call's expiry loses
+whatever its stamp, by design: a call past its deadline releases its session,
+whichever message reaches the owner first (Backend's contract, player.md), and
+the expiry cannot wait for an answer that may never come. On the real clock
+that is a call answering in the instant of its deadline; on the fake one the
+test moved 31 s in no real time while the call's goroutine waited for a CPU.
+The rule the test broke was already written (player.md, "The engine's tests
+never sleep": a test that moves the clock past a live session's call deadline
+first waits for that call's answer to be handled), and B470 4b1 round 2 had
+fixed its first instance, `TestAPausesReleaseThatNeverComesIsUnconfirmed`
+(be003a08); the 2c.2 test came later without it.
+
+**Red first** (a4849a6c). Each of the four cases gains a row whose Prepare
+answers only once the test lets it go, or its deadline has passed (the fake's
+`onPrepare`, `answer.wait(ctx, h.be, true)`, then nil): the latest a scheduler
+could leave the call's goroutine. At e242ce2c's order nothing lets it go, so the
+hold ends at the deadline inside the advance: red twenty runs of twenty, every
+held row, at the new checkpoint with CI's signature ("a second before the
+effective deadline: releasing, a release unconfirmed false, last stop
+{Reason:backend_timeout Detail:prepare did not answer within its deadline …}").
+The same commit makes the test reject the wrong kind of release (Codex on the
+brief): a second before the deadline the engine must be still paused with no
+release unconfirmed and no stop recorded; at it the unconfirmed release must be
+the paused session's own (`ReleaseInfo.Paused`, the session's id), the state
+Paused and no stop. And `TestShutdownJoinsWithinItsBound` gains the same held
+row (below), red twenty of twenty.
+
+**The checkpoint's barrier.** The old one, a Pause command, is no barrier for
+the message a timer posts: the owner's loop selects on commands and messages
+together (owner.go:246-248), and Go takes one of several ready cases at random,
+so a command that waits beside a queued message can be taken before it. A
+session position (`Position{}`, which the engine takes for nothing: no
+occurrence 0 is heard) is a message, posted on the test's goroutine after the
+advance's own, and messages reach the owner in the order they were posted
+(native_release_test.go:124's "an ordinary position is a barrier"). The sibling
+`TestNativeEffectivePauseDeadline` said "A command reply is an owner barrier
+after the timer's queued event"; it now reads its checkpoint behind a position
+too, and its end asks the same of the release. This is a guarantee, not a
+measured flake: against a throwaway mutation that keeps a DSD pause on the
+configured PCM deadline, the command barrier caught it 200 runs of 200 alone
+and 2,000 of 2,000 beside 16 busy loops, and so did the position. In practice
+the owner has parked again before the advance posts (Go runs the goroutine a
+reply wakes on the waker's processor once the waker waits), so the window is
+rare; the spec does not promise it.
+
+**The fix** (ea7e8788): the held answer is let go and the test waits for the
+owner to take it (`h.waitApplied("handled call prepare", 0)`) before the clock
+moves, the barrier its sibling had at :19.
+
+**Controls**, on ea7e8788, each restored with `git checkout HEAD --` and the
+tree clean after:
+
+- 1, the fix's wait taken out of `TestNativePausedTransitionRearmsDeadline`
+  (its five lines): predicted, the four held rows red at the checkpoint with
+  CI's signature, every run, and the unheld rows green alone; actual, 80 of 80
+  held rows red in twenty runs, 80 of 80 unheld green.
+- 2, the same wait taken out of `TestShutdownJoinsWithinItsBound`: predicted,
+  the held row red, "2 calls abandoned, want the release that never answered";
+  actual, twenty of twenty, the unheld row green twenty of twenty.
+- 3, the engine recording the paused session's overdue release as an ordinary
+  one (`pauseOverdue`'s `Paused: false`): the new checks red in all ten
+  subtests of the two native deadline tests ("at 32s: paused, unconfirmed
+  {Session:1 … Paused:false}; want session 1's own release of its pause
+  unconfirmed"), and e242ce2c's test file, put back beside the same mutation,
+  green in all six of its subtests: the old checks could not tell the two
+  releases apart.
+
+**Stress**, through the build slot beside 16 busy loops, each binary built
+beforehand with the tree clean (e242ce2c's, and ea7e8788's) and run from the
+package's directory, `-test.count=2000 -watchdog=5s`, one binary after another
+inside one slot:
+
+| Test, binary | Runs failed of 2,000 | Subtests | Wall |
+|---|---|---|---|
+| `TestNativePausedTransitionRearmsDeadline`, e242ce2c | **11** (1s/true 4, 1s/false 3, 1m0s/false 3, 1m0s/true 1), CI's line each, "waited 5s" | 8,000 | 73 s |
+| the same, ea7e8788 | 0 | 16,000, the held rows among them | 35 s |
+| `TestShutdownJoinsWithinItsBound`, e242ce2c | **8**, "2 calls abandoned, want the release that never answered" | — | 6 s |
+| the same, ea7e8788 | 0 | 4,000 | 10 s |
+
+The brief's run, the fixed binary `-test.count=200` beside the same 16 busy
+loops: 200 of 200, 1,600 subtests, none failed.
+
+**The same shape elsewhere: every place an engine test drives the clock.** The
+real-time watchdog (`-watchdog`, harness_test.go:20-23) is a hang detector and
+orders nothing; the clock is the fake's, moved by `Advance`, `Skip`, and the
+harness's `drive` (shutdown, `restart`, `crash`), which fires each pending timer
+in turn until Run returns. At e242ce2c:
+
+| Where | Test | Under way when the clock moves | Verdict |
+|---|---|---|---|
+| native_deadline_test.go:86, :91 | `TestNativePausedTransitionRearmsDeadline` | the session's Prepare of b, never awaited | B605; fixed |
+| lifecycle_test.go:403 (`drive`) | `TestShutdownJoinsWithinItsBound` | the release, held on purpose; the Prepare of b, never awaited, which Run abandons beside it when the grace, fired at once, ends | same defect; fixed |
+| admission_test.go:191, :198, :207 | `TestAParkedEditIsAnsweredWithinReserveTimeoutOfItsPark` | the reservation write, held on purpose; the step that parks the first insert, which arms the bound only after it starts the write (edits.go:192, :197), not awaited before :191 | same defect; fixed |
+| reserve_test.go:47 | `TestAFailingReservationWriteRefusesEdits` | the live session's Prepare, never awaited, an hour past its deadline | breaks the rule, but nothing asserted reads the session; fixed |
+| native_deadline_test.go:21, :27 | `TestNativeEffectivePauseDeadline` | nothing: the Prepare (the end's) awaited at :19, the Pause answered | safe; its barrier replaced (above) |
+| pause_test.go:67 | `TestAPausesReleaseThatNeverComesIsUnconfirmed` | nothing: the Prepare awaited at :65 | safe (the precedent) |
+| session_test.go:353, :357, :375 | `TestALateAnswerIsRefusedWhateverTheOrder` | the call each row holds, on purpose; the Prepare awaited at :248 | safe (the precedent) |
+| session_test.go:92 | `TestALateOpenIsClosedAndNeverWrittenTo` | the Start and the release, both held on purpose; no Prepare, the Start never answered | safe |
+| session_test.go:208 | `TestADeadlineQueuedBehindItsAcknowledgementChangesNothing` | the session releasing, the owner held in a report's admission on purpose; a Prepare answer or expiry acts on the current session alone (transport.go:1118, :1325), which this is not | safe |
+| session_test.go:404 | `TestAStopThatNeverAnswersLeavesTheReleaseUnconfirmed` | the release, held on purpose; the session releasing, so the same | safe |
+| attempt_test.go:193 | `TestAStartPastItsDeadlineIsAFailedAttempt` | the Start, held on purpose; the busy session before it stopped (awaited) | safe |
+| panic_test.go:144 | `TestAPanicInABackendCallIsThatCallsFailure/release` | the release's answer awaited (:143); the session releasing | safe |
+| native_round2_test.go:31 | `TestNativeEarlyReleaseStopsTimer` | the session's release refused unconfirmed; the release timer's absence read directly (:28) | safe |
+| maintenance_test.go:243 | `TestEnteringWhileAReleaseIsUnconfirmedSaysSo` | the release, held on purpose; its deadline armed with `clock.At` from the call's own (transport.go:627), so armed late it fires at once | safe |
+| maintenance_test.go:187, :218 | `TestRenewalKeepsAHold`, `TestAnExpiredHoldEndsByItself` | no session, or one acknowledged (awaited); the hold's timer armed in the step the test awaited | safe |
+| lifecycle_test.go:79 | `TestAHungReservationWriteHoldsOnlyTheEditsThatNeedIt` | the reservation write, held on purpose; the insert's step finished (the report command after it answered); the session stopped | safe |
+| persist_test.go:118, :120, :178, :195, :209, :212, :247, :255, :502; panic_test.go:257, :263, :290 | the queue writer's tests | no session; the writer's instants (`at`, `since`, `retryAt`) are read before the reply or report the test waits for, and armed with `clock.At` (persist.go:367); held writes on purpose | safe |
+| persist_test.go:288 (`drive`) | `TestAMutationDuringTheShutdownFlushIsRefused` | no session; the flush, held on purpose | safe |
+| harness_test.go:399-423 (`drive`, through `shutdown`, `restart`, `crash`) | every test that stops an engine | whatever is under way: the shutdown's bounds are the clock's, so the drive crosses them by design | safe where nothing reads what was abandoned: only `TestShutdownJoinsWithinItsBound` does |
+
+The three fixed beside B605:
+
+- `TestShutdownJoinsWithinItsBound` counts the calls Run abandoned (owner.go:373)
+  and requires one, the release that never answers. The harness's drive fires
+  the release deadline and then the grace (owner.go:352) at once, so a Prepare
+  answer still on its way at the shutdown is abandoned too: "2 calls
+  abandoned". Its held row (the Prepare answers once the test lets it go or the
+  fake closes) is red twenty of twenty without the wait; the test now waits for
+  the owner to take that answer before the shutdown. B526 fixed this test's
+  goroutine count (spawn's order) and did not meet this. Unheld, e242ce2c's
+  test failed 8 runs of 2,000 beside 16 busy loops with that line, and the
+  fixed one none of 2,000 (above): it was flaking already, unreported.
+- `TestAParkedEditIsAnsweredWithinReserveTimeoutOfItsPark` pins the bound
+  ReserveTimeout after the first edit parks, and moved the clock once the
+  reservation write had begun, which `values` starts before it arms the bound:
+  a write under way says nothing of the step that arms it. A throwaway that
+  holds the fake clock's lock (which the bound's `AfterFunc` takes) until the
+  write has begun, and moves the clock 2 s there, as the test's `Advance` does
+  with no timer due, waited out its watchdog five runs of five ("waited 5s for
+  first to answer": the bound came 2 s late); in the fixed order, the lock let
+  go, a command of no lane answered and then the advance, twenty of twenty
+  passed. The test now has that command, as it had for its delete. The window
+  is a few hundred nanoseconds of the owner's against a file read on the
+  write's goroutine, so no stress run is offered for it.
+- `TestAFailingReservationWriteRefusesEdits` moved the clock an hour past its
+  session's Prepare deadline without waiting for the answer. Nothing it
+  asserts reads the session, so it could not fail; it now waits, so the rule
+  holds everywhere.
+
+**qualificationVersion 21**: `internal/player/engine/` is a guarded prefix that
+counts test files (`internal/player/qualification/version_gate.go:15`, its
+check at :33-43, a strict increase at :71-72), so this test-only branch takes
+21 over main's 20: `version.go`, the runbook's six current references (the five
+`TestQualificationRunbookVersion` pins and 2d.2's first owner step), and a note
+of what 21 covers. B601 (#1371) and B604 (#1369) raise it too; their order is
+set at merge.
+
+**Gates**, at 6ca7169f with the tree clean, each through the build slot.
+`make fmt vet test` under legion0's own umask, 002, failed in four packages
+(`cmd/bridge`, `internal/player/openhome`, `internal/player/playback`,
+`internal/player/qualification`), every failure "untrusted approval directory"
+or what follows from it (no approved tuple, so no `dsf` or `dff` codec, a null
+`dsdPlayback`). `t.TempDir()` makes each test's directory with `os.Mkdir(dir,
+0777)`, which umask 002 leaves group-writable, and the approval reader refuses
+a group-writable directory (`trustedFile`, approval.go:425-432), as it should.
+The base's qualification package fails the same way under 002, 43 failures, and
+the branch's passes under 022, CI's umask: the host's, not this change's, and
+handed on as a follow-up (the fixtures could make their state directory 0700).
+Under `umask 022`: `make fmt vet test` passed, 79 packages, the engine in
+26.7 s, and `make fmt` rewrote nothing; `make build-all` passed, its
+`check-build-tags` and the six targets; `make docs-check` passed, its three
+self-tests and the budgets (player.md 98.4%, 98.9% with the rules patch,
+measured over a scratch root by the checker's own functions, since this
+session cannot write `.claude/`). The qualification gate's own command
+(`go run -tags ts_omit_webclient,ts_omit_debugeventbus
+./scripts/qualification-version -base e242ce2c -head HEAD`) says OK, and
+against the red-first commit alone it refuses, 20 -> 20.
+
 ## 2026-10-31 — B601: the console's Player page for the bridge's own player
 
 **What.** The console gains a Player page (`/output`: `templates/output.html`,

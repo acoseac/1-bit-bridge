@@ -187,6 +187,10 @@ func TestAParkedEditIsAnsweredWithinReserveTimeoutOfItsPark(t *testing.T) {
 	first := async(func() error { _, err := h.eng.InsertAfter(bg, 0, ref("x"), nil); return err })
 	h.waitApplied("admitted insert", mark)
 	h.files.waitFor(t, "the reservation write the insert waits for", func() bool { return h.files.reserveCalls > calls })
+	// The insert parks in the step that admits it, which arms the bound only
+	// after it has started the write (values): a write under way says nothing
+	// of the bound, and a command of no lane answers after that step (B605).
+	h.must("a command after the insert", h.eng.SetRepeat(bg, false))
 	const later = 2 * time.Second
 	h.clk.Advance(later)
 	mark = h.appliedMark()

@@ -1107,12 +1107,18 @@ func (a *upscaleEnqueuerAdapter) finalizeAndEnqueue(spec transcode.JobSpec, trac
 // scratches, or one scratch beside the rendition, whichever is larger —
 // a PCM job holds its guard beside the rendition. A probe that cannot
 // read a volume refuses too.
+//
+// Every refusal names a directory by its role, the variants dir or the
+// scratch, never by its path: POST /v1/upscale logs it at Error or Warn and a
+// stale download's re-render at Warn or Debug, and a log line names an
+// operator's directory by its role (B604). The probes' own errors name no
+// path (transcode's probeError).
 func (a *upscaleEnqueuerAdapter) roomForRendition(spec transcode.JobSpec) error {
 	projected := transcode.ProjectedSize(spec.SourceSize, spec.SourceSampleRate, spec.SourceBits,
 		spec.TargetSampleRate, spec.TargetBits, transcode.DefaultCompressionFactor(spec.TargetBits))
 	scratch := spec.TempVolumeBytes()
 	if scratch <= 0 {
-		return a.roomOn(spec.OutputDir, projected)
+		return a.roomOn(spec.OutputDir, transcode.ProbeRoleVariants, projected)
 	}
 	scratchDir := transcode.RenderScratchDir(spec.TempDir)
 	same := a.sameVolume
@@ -1121,33 +1127,36 @@ func (a *upscaleEnqueuerAdapter) roomForRendition(spec transcode.JobSpec) error 
 	}
 	shared, err := same(spec.OutputDir, scratchDir)
 	if err != nil {
-		return fmt.Errorf("check free space for the rendition: %w", err)
+		return fmt.Errorf("check free space for the rendition: compare the %s's volume with the %s's: %w",
+			transcode.ProbeRoleVariants, transcode.ProbeRoleScratch, err)
 	}
 	if shared {
-		return a.roomOn(spec.OutputDir, transcode.RenditionHoldOnOneVolume(projected, spec.RenderScratchBytes(), scratch))
+		return a.roomOn(spec.OutputDir, transcode.ProbeRoleVariants,
+			transcode.RenditionHoldOnOneVolume(projected, spec.RenderScratchBytes(), scratch))
 	}
-	if err := a.roomOn(spec.OutputDir, projected); err != nil {
+	if err := a.roomOn(spec.OutputDir, transcode.ProbeRoleVariants, projected); err != nil {
 		return err
 	}
-	return a.roomOn(scratchDir, scratch)
+	return a.roomOn(scratchDir, transcode.ProbeRoleScratch, scratch)
 }
 
 // roomOn answers whether dir's volume has room for need bytes and the
 // safety margin: nil, api.ErrUpscaleNoRoom wrapping the numbers, or the
-// probe's own failure. A need of 0 (a projection with an unknown factor)
+// probe's own failure, each naming dir by role (ProbeRoleVariants or
+// ProbeRoleScratch). A need of 0 (a projection with an unknown factor)
 // passes once the probe has read the volume.
-func (a *upscaleEnqueuerAdapter) roomOn(dir string, need int64) error {
+func (a *upscaleEnqueuerAdapter) roomOn(dir, role string, need int64) error {
 	free := a.diskFree
 	if free == nil {
 		free = quietDiskFree
 	}
 	have, err := free(dir)
 	if err != nil {
-		return fmt.Errorf("check free space for the rendition: %w", err)
+		return fmt.Errorf("check free space for the rendition: the %s: %w", role, err)
 	}
 	if want := transcode.RequiredBytesWithMargin(need, transcode.DefaultDiskSafetyMargin); want > have {
 		return fmt.Errorf("%w: %w", api.ErrUpscaleNoRoom, &transcode.InsufficientDiskSpaceError{
-			ProjectedBytes: need, RequiredBytes: want, AvailableBytes: have, Dir: dir,
+			ProjectedBytes: need, RequiredBytes: want, AvailableBytes: have, Dir: dir, Role: role,
 		})
 	}
 	return nil

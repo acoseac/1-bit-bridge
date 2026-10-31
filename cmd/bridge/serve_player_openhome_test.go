@@ -343,7 +343,7 @@ func TestServeSaysOnceWhenAnAddressOverrideClashesWithOpenHome(t *testing.T) {
 		t.Fatalf("exit %d: %s", code, ps.stderr.String())
 	}
 	lines := rec.Lines("player: not started")
-	const want = "WARN player: not started reason=output.player.openhomePort: bridge serve binds that port already, for listenAddress, set by --addr: give the OpenHome surface a port of its own"
+	const want = "WARN player: not started component=player reason=output.player.openhomePort: bridge serve binds that port already, for listenAddress, set by --addr: give the OpenHome surface a port of its own"
 	if len(lines) != 1 || lines[0] != want {
 		t.Errorf("override refusal: %q; want exactly %q", lines, want)
 	}

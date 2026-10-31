@@ -73,7 +73,7 @@ func (s *Server) apiTokensRotate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, errCodeUnknownToken, id)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "rotate", err.Error())
+		writeTokenStoreFault(w, "rotate", "the token was not rotated, and the secret it has still works", err)
 		return
 	}
 
@@ -153,7 +153,7 @@ func (s *Server) apiTokensSetLifecycle(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusNotFound, errCodeUnknownToken, id)
 				return
 			}
-			writeError(w, http.StatusInternalServerError, "set-expiry", err.Error())
+			writeTokenStoreFault(w, "set-expiry", "the token's expiry was not changed", err)
 			return
 		}
 		writeJSON(w, http.StatusOK, tokenRow{
