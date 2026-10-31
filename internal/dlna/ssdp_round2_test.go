@@ -1,18 +1,20 @@
 package dlna
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"log/slog"
+	"fmt"
 	"net"
 	"net/netip"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
 // TestCloseJoinsAWithdrawalAlreadySendingByeBye parks Withdraw after it has
@@ -190,19 +192,57 @@ func TestStrictReplyKeepsItsSelectedEndpoint(t *testing.T) {
 
 // TestStrictReplyPinFailureSendsNothingAndLogsOnce exercises refusal at
 // socket setup and at the per-packet send, without falling back to routing.
+// The one Warn a registration gets names the stage, the operation that
+// failed and the errno, or the failure's class where there is none, and
+// never a socket address: a send's *net.OpError names the searching client
+// (its Addr) and the endpoint's own address (its Source), a bind's the
+// endpoint's, and the text of an error with no errno is no class at all.
+// A socket closed under the send is no refusal.
 func TestStrictReplyPinFailureSendsNothingAndLogsOnce(t *testing.T) {
-	for _, atWrite := range []bool{false, true} {
-		t.Run(map[bool]string{false: "setup", true: "write"}[atWrite], func(t *testing.T) {
+	local := &net.UDPAddr{IP: net.IPv4(192, 168, 1, 20), Port: 54321}
+	searcher := net.UDPAddrFromAddrPort(netip.MustParseAddrPort(searchSrc))
+	sendErr := func(err error) error {
+		return &net.OpError{Op: "write", Net: "udp", Source: local, Addr: searcher, Err: err}
+	}
+	cases := []struct {
+		name               string
+		atWrite            bool
+		err                error
+		stage, op, cause   string
+		wantNoRefusalLines bool
+	}{
+		{name: "setup, an error that carries no errno", err: errInjected, stage: "setup", op: "unclassified", cause: "no errno"},
+		{name: "setup, a bind the kernel refuses",
+			err:   &net.OpError{Op: "listen", Net: "udp4", Addr: local, Err: &os.SyscallError{Syscall: "bind", Err: syscall.EADDRNOTAVAIL}},
+			stage: "setup", op: "listen bind", cause: syscall.EADDRNOTAVAIL.Error()},
+		{name: "setup, an endpoint that cannot reply",
+			err:   fmt.Errorf("%w: reply needs an interface and local IPv4 address", ErrSSDPStrictCapability),
+			stage: "setup", op: "capability", cause: "no errno"},
+		{name: "setup, an interface pin the kernel refuses",
+			err:   fmt.Errorf("%w: reply interface: %w", ErrSSDPStrictCapability, syscall.EINVAL),
+			stage: "setup", op: "capability", cause: syscall.EINVAL.Error()},
+		{name: "write, a send the kernel refuses", atWrite: true,
+			err:   sendErr(&os.SyscallError{Syscall: "sendmsg", Err: syscall.ENETUNREACH}),
+			stage: "send", op: "write sendmsg", cause: syscall.ENETUNREACH.Error()},
+		{name: "write, a send past its deadline", atWrite: true, err: sendErr(os.ErrDeadlineExceeded),
+			stage: "send", op: "write", cause: "timeout"},
+		{name: "write, a wrapped socket error", atWrite: true,
+			err:   fmt.Errorf("strict reply: %w", sendErr(&os.SyscallError{Syscall: "sendto", Err: syscall.EHOSTUNREACH})),
+			stage: "send", op: "write sendto", cause: syscall.EHOSTUNREACH.Error()},
+		{name: "write, a socket closed under the send", atWrite: true, err: net.ErrClosed, wantNoRefusalLines: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
 			n := newFakeNet()
-			if atWrite {
-				n.strictWriteErr = errInjected
+			if tc.atWrite {
+				n.strictWriteErr = tc.err
 			} else {
-				n.strictReplyErr = errInjected
+				n.strictReplyErr = tc.err
 			}
 			sub := fakeSubsystem(t, n)
-			var log bytes.Buffer
+			rec := loggingtest.NewRecorder()
 			reg := strictReg(srcUDN, 4, SSDPEndpoint{Interface: en0, Location: srcOnEn0, Local: netip.MustParsePrefix("192.168.1.20/24")})
-			reg.Logger = slog.New(slog.NewTextHandler(&log, nil))
+			reg.Logger = rec.Logger()
 			h, _ := mustRegister(t, sub, reg)
 			for range 3 {
 				if got := sendTo(t, sub, n, "en0", search("ssdp:all"), searchSrc, groupMeta(2)); len(got) != 0 {
@@ -210,8 +250,34 @@ func TestStrictReplyPinFailureSendsNothingAndLogsOnce(t *testing.T) {
 				}
 			}
 			_ = h.Withdraw(context.Background()) // join every logger before reading
-			if got := strings.Count(log.String(), "SSDP strict reply refused"); got != 1 {
-				t.Errorf("refusal warnings = %d, want 1", got)
+			lines := rec.Lines("SSDP strict reply refused: cannot send from its endpoint")
+			if tc.wantNoRefusalLines {
+				if len(lines) != 0 {
+					t.Errorf("a closed socket was reported as a refusal: %q", lines)
+				}
+			} else {
+				if len(lines) != 1 {
+					t.Fatalf("refusal warnings = %d, want 1: %q", len(lines), rec.All())
+				}
+				for _, want := range []string{"WARN ", " stage=" + tc.stage, " op=" + tc.op, " cause=" + tc.cause, " interface=en0"} {
+					if !strings.Contains(lines[0], want) {
+						t.Errorf("the refusal %q does not carry %q", lines[0], want)
+					}
+				}
+			}
+			// The refusal alone: the advertiser's own lines name its
+			// LOCATION, the endpoint's address, which is the operator's.
+			for _, r := range rec.Records() {
+				if r.Message != "SSDP strict reply refused: cannot send from its endpoint" {
+					continue
+				}
+				for _, s := range loggingtest.Strings(r) {
+					for _, v := range []string{"192.168.1.30", "192.168.1.20", "54321", "50000", "injected"} {
+						if strings.Contains(s, v) {
+							t.Errorf("the refusal names a socket's address or an error's text (%s): %q", v, s)
+						}
+					}
+				}
 			}
 			if l, s, r := n.openSockets(); l+s+r != 0 {
 				t.Errorf("refusal leaked sockets: %d/%d/%d", l, s, r)

@@ -8,21 +8,21 @@
 package transcode
 
 import (
-	"fmt"
 	"os"
 	"syscall"
 )
 
 // volumeID is the device holding dir, for SameVolume. Dev is an int32 on
-// darwin and a uint64 on linux; widened, equal devices stay equal.
+// darwin and a uint64 on linux; widened, equal devices stay equal. A stat
+// that fails is os.Stat's *fs.PathError, said without its path (probeError).
 func volumeID(dir string) (uint64, error) {
 	info, err := os.Stat(dir)
 	if err != nil {
-		return 0, err
+		return 0, &probeError{err: err}
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return 0, fmt.Errorf("stat %q: no device", dir)
+		return 0, &probeError{op: "stat", err: errNoDevice}
 	}
 	return uint64(st.Dev), nil
 }
@@ -30,7 +30,8 @@ func volumeID(dir string) (uint64, error) {
 // AvailableDiskSpace returns the number of bytes available to a
 // non-privileged caller on the volume that holds `dir`. The probe is
 // non-recursive — Statfs reads the volume's superblock-equivalent
-// stats, not a per-directory quota.
+// stats, not a per-directory quota. A failure names the call and the
+// errno, never dir (probeError).
 //
 // Bavail (rather than Bfree) is the right choice: Bfree includes
 // reserved space the kernel won't actually let a non-root caller
@@ -40,7 +41,7 @@ func volumeID(dir string) (uint64, error) {
 func AvailableDiskSpace(dir string) (int64, error) {
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(dir, &stat); err != nil {
-		return 0, fmt.Errorf("statfs %q: %w", dir, err)
+		return 0, &probeError{op: "statfs", err: err}
 	}
 	// Bavail / Bsize types vary across platforms (uint64 vs int64);
 	// the multiplication promotes to int64 unambiguously after the

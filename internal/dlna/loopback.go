@@ -18,6 +18,7 @@ import (
 	"syscall"
 
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
+	"github.com/acoseac/1-bit-bridge/internal/handshakelog"
 )
 
 // The loopback route is the file route of the DLNA listener, served on this
@@ -400,13 +401,16 @@ func (s *LoopbackServer) Start() error {
 	}
 	// The DLNA listener's deadlines (B220): a header and a request are
 	// bounded, a response is not, because MPD streams for as long as the
-	// track plays.
+	// track plays. net/http's own lines (a recovered panic names the client
+	// it was serving) go through handshakelog, without the client's address,
+	// as serve's servers' and the OpenHome surface's do (B604).
 	srv := &http.Server{
 		Handler:           LoopbackFileHandler(s.cfg.Library, s.cfg.Roots, s.cfg.Enabled),
 		ReadHeaderTimeout: dlnaReadHeaderTimeout,
 		ReadTimeout:       dlnaReadTimeout,
 		IdleTimeout:       dlnaIdleTimeout,
 		MaxHeaderBytes:    dlnaMaxHeaderBytes,
+		ErrorLog:          handshakelog.ErrorLog(),
 	}
 	s.srv, s.lns = srv, lns
 	for _, ln := range lns {

@@ -798,6 +798,25 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   cannot see the change that matters, a root resolved before the listing.
   The updater's and the orphan sweeper's planted nothing and passed with the
   refusal deleted, and backup's had no test.
+- **…and a listing of the backups folder that `os.ReadDir` answers as not
+  there, or as not a directory, asks Lstat before it answers** (2026-10-31,
+  B604's fourth round). `os.ReadDir` opens with `O_DIRECTORY` and answers a
+  regular file with ENOTDIR on every OS, and on Windows `syscall.ENOTDIR`
+  is `Errno(ERROR_PATH_NOT_FOUND)`, which matches `os.ErrNotExist`, so a
+  file where the folder goes listed as no backups on Windows alone: GET
+  /api/backups answered 200 there and 500 elsewhere. `readBackupsDir`,
+  which `List` and the orphan sweep share, takes only Lstat's not-exist for
+  nothing there, and a folder it finds for one made since the listing;
+  another Lstat error is the listing's. Anything else there, a link to
+  nothing included, which listed nothing on every OS until then and through
+  which a snapshot cannot make the folder either (`MkdirAll` answers
+  EEXIST), fails the listing on every OS with one answer naming the folder,
+  `errNotADirectory` (`open <folder>: not a directory`). **Don't take
+  `os.ReadDir`'s not-exist for nothing there where a file can stand in the
+  folder's place, and don't answer a path that is not a folder with
+  `syscall.ENOTDIR`, which on Windows is an absence.**
+  `TestWhatIsWhereTheBackupsFolderGoesListsAlikeOnEveryOS` pins it on every
+  OS: its seam (`SetReadDirForTest`) lists as Windows does.
 - **The retention reap fails closed on an empty live-token set**, and the two
   empty forms are NOT interchangeable: `nil` deletes zero rows while
   `[]string{}` deletes EVERY row — and the caller builds the dangerous spelling.

@@ -1,12 +1,65 @@
 package admin
 
 import (
+	"context"
+	"errors"
+	"io/fs"
 	"net/http"
 	"path/filepath"
 	"strings"
 
+	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 )
+
+// What the console answers a listing or a snapshot that failed, by what went
+// wrong (backupsListRefusal, snapshotRefusal): each says it in words that
+// name no path, and what to do. The error itself names the backups folder
+// or a file the snapshot copies, the config file among them, and goes to the
+// log, where the bridge's own files may be named (B604's second round: the
+// body was the error's text).
+const (
+	errMsgBackupsNotPermitted = "the bridge is not allowed to read its backups folder: give the user the bridge runs as " +
+		"read access to the backups folder in its data directory"
+	errMsgBackupsNotListed = "the bridge could not list its backups, and the bridge's log says why"
+	errMsgSnapshotBusy     = "a file the backup copies stayed busy (another program, such as an antivirus scan, " +
+		"had it open), so no snapshot was kept: run the backup again"
+	errMsgSnapshotNotPermitted = "the bridge is not allowed to read a file it backs up, or to write in its backups " +
+		"folder, so no snapshot was kept: give the user the bridge runs as access to its data directory and its " +
+		"config file, then run the backup again"
+	errMsgSnapshotStopped = "the backup stopped before it finished (the bridge is shutting down, or the request " +
+		"went away), so no snapshot was kept: run the backup again"
+	errMsgSnapshotFailed = "the bridge could not take the snapshot and kept none of it: the bridge's log says why, " +
+		"and what to do"
+)
+
+// backupsListRefusal is what the console says of err, a listing of the
+// backups folder that failed: a permission it lacks, or, for anything else,
+// read the log.
+func backupsListRefusal(err error) string {
+	if errors.Is(err, fs.ErrPermission) {
+		return errMsgBackupsNotPermitted
+	}
+	return errMsgBackupsNotListed
+}
+
+// snapshotRefusal is what the console says of err, a snapshot that failed:
+// a file held busy past the read's retries (asked first: on Windows a busy
+// read's last error is an access denial, which is also a permission's), a
+// stop before the end, a permission it lacks, or, for anything else, read
+// the log, which also carries the advice a refusal of the player's identity
+// gives (`bridge reset-player`).
+func snapshotRefusal(err error) string {
+	switch {
+	case errors.Is(err, atomicwrite.ErrReadBusy):
+		return errMsgSnapshotBusy
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return errMsgSnapshotStopped
+	case errors.Is(err, fs.ErrPermission):
+		return errMsgSnapshotNotPermitted
+	}
+	return errMsgSnapshotFailed
+}
 
 // backupsListResponse is the shape returned by GET /api/backups —
 // newest-first list of snapshot summaries. The dashboard's Backups
@@ -43,7 +96,8 @@ func (s *Server) apiBackupsList(w http.ResponseWriter, r *http.Request) {
 	root := filepath.Join(s.deps.BackupSources.DataDir, backup.BackupsDirName)
 	entries, err := backup.List(root)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "list-failed", err.Error())
+		logger.Error("admin: the backups could not be listed", "err", err)
+		writeError(w, http.StatusInternalServerError, "list-failed", backupsListRefusal(err))
 		return
 	}
 	out := make([]backupSummary, 0, len(entries))
@@ -119,7 +173,8 @@ func (s *Server) apiBackupsCreate(w http.ResponseWriter, r *http.Request) {
 	src := s.deps.BackupSources
 	dst, err := backup.Snapshot(r.Context(), src)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "snapshot-failed", err.Error())
+		logger.Error("admin: no snapshot was taken", "err", err)
+		writeError(w, http.StatusInternalServerError, "snapshot-failed", snapshotRefusal(err))
 		return
 	}
 	// The jobs card caches the newest snapshot's timestamp; drop it so

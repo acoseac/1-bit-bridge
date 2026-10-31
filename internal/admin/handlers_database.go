@@ -30,6 +30,12 @@ type databaseCompactResponse struct {
 	CheckpointBusy bool `json:"checkpointBusy"`
 }
 
+// errMsgCompactFailed is what the console answers a compaction that failed,
+// in words that name no path (B604's second round: the body was the
+// error, which names the database file when it cannot be measured). The
+// error goes to the log.
+const errMsgCompactFailed = "the bridge could not compact its database, and the bridge's log says why"
+
 // apiDatabaseCompact handles POST /api/database/compact.
 func (s *Server) apiDatabaseCompact(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Manifest == nil {
@@ -55,7 +61,8 @@ func (s *Server) apiDatabaseCompact(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInsufficientStorage, "insufficient-disk-space", err.Error())
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "compact-failed", err.Error())
+		logger.Error("admin: the database was not compacted", "err", err)
+		writeError(w, http.StatusInternalServerError, "compact-failed", errMsgCompactFailed)
 		return
 	}
 	// The one moment the operator is watching this number change; a

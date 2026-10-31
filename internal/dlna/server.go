@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/dlna/discovery"
+	"github.com/acoseac/1-bit-bridge/internal/handshakelog"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/upnpproxy"
 )
@@ -385,6 +386,10 @@ func (s *Server) Start(ctx context.Context) error {
 		idleTO = s.idleTimeout
 	}
 	// WriteTimeout stays unset: a renderer streams for as long as the file takes.
+	// net/http's own lines (a recovered panic names the renderer it was
+	// serving) go through handshakelog, without the renderer's address, as
+	// the loopback route's and serve's servers' do (B604's second round:
+	// this server had no ErrorLog).
 	s.httpServer = &http.Server{
 		Addr:              s.cfg.ListenAddress,
 		Handler:           handler,
@@ -392,6 +397,7 @@ func (s *Server) Start(ctx context.Context) error {
 		ReadTimeout:       readTO,
 		IdleTimeout:       idleTO,
 		MaxHeaderBytes:    dlnaMaxHeaderBytes,
+		ErrorLog:          handshakelog.ErrorLog(),
 	}
 
 	// Eagerly bind the listener so config errors (e.g. port already

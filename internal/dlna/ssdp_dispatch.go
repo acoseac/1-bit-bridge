@@ -6,6 +6,9 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"os"
+	"strings"
+	"syscall"
 	"time"
 )
 
@@ -223,7 +226,8 @@ func (e ssdpTableEntry) legacySelect(t *ssdpTable, l *ssdpListener, kind ssdpSea
 }
 
 // admits is the MediaServer's admission of a datagram of kind, and logs a
-// refusal (servedAddrs.admit). One sent to the SSDP group is admitted: a
+// refusal (servedAddrs.admit) by its destination, never by the searcher
+// that sent it (B604). One sent to the SSDP group is admitted: a
 // group datagram reaches a listener only on the interface it joined (B71).
 // Anything else is a unicast to an address of this host, which the
 // listener's wildcard bind takes on every address, and is admitted only when
@@ -233,17 +237,13 @@ func (e ssdpTableEntry) legacySelect(t *ssdpTable, l *ssdpListener, kind ssdpSea
 // admitted, as every search was before B48. It was the advertiser's
 // searchedFor until B470 PR 5a1, unchanged.
 func (a ssdpServedAdmission) admits(log *slog.Logger, kind ssdpSearchKind, d SSDPDatagram) bool {
-	from := ""
-	if d.Source.IsValid() {
-		from = d.Source.Addr().String()
-	}
 	switch kind {
 	case searchToGroup, searchUnarmed:
 		return true
 	case searchUnicast:
-		return a.served.admit(log, "an M-SEARCH", d.Destination, from)
+		return a.served.admit(log, "an M-SEARCH", d.Destination)
 	}
-	return a.served.admit(log, "an M-SEARCH", netip.Addr{}, from)
+	return a.served.admit(log, "an M-SEARCH", netip.Addr{})
 }
 
 // strictSelect is a strict registration's choice of endpoint
@@ -349,7 +349,7 @@ func (h *SSDPHandle) answer(ep *ssdpEndpoint, targets []NotifyTarget, mx int, to
 	conn, err := h.s.transport.dialReply(to, from)
 	if err != nil {
 		if h.strict() {
-			h.noteReplyRefusal(ep, err)
+			h.noteReplyRefusal(ep, "setup", err)
 			return
 		}
 		h.log.Debug("M-SEARCH response dial failed",
@@ -376,7 +376,7 @@ func (h *SSDPHandle) answer(ep *ssdpEndpoint, targets []NotifyTarget, mx int, to
 		}
 		if err != nil {
 			if h.strict() {
-				h.noteReplyRefusal(ep, err)
+				h.noteReplyRefusal(ep, "send", err)
 				return
 			}
 			h.log.Debug("M-SEARCH response write failed",
@@ -389,12 +389,52 @@ func (h *SSDPHandle) answer(ep *ssdpEndpoint, targets []NotifyTarget, mx int, to
 
 // noteReplyRefusal reports a strict reply's failure once per registration,
 // including a kernel that refuses per-packet interface selection at send time.
-func (h *SSDPHandle) noteReplyRefusal(ep *ssdpEndpoint, err error) {
+// stage is where it failed: "setup", the reply's socket, or "send". The line
+// says what failed as replyFailure reads it, never the error's text: a send's
+// *net.OpError names the searching client's address beside the endpoint's
+// own, and a bind's the endpoint's (B604).
+func (h *SSDPHandle) noteReplyRefusal(ep *ssdpEndpoint, stage string, err error) {
 	if errors.Is(err, net.ErrClosed) {
 		return
 	}
 	h.replyRefusal.Do(func() {
+		op, cause := replyFailure(err)
 		h.log.Warn("SSDP strict reply refused: cannot send from its endpoint",
-			slog.String("registration", h.name), slog.String("interface", ep.key.name), slog.String("err", err.Error()))
+			slog.String("registration", h.name), slog.String("interface", ep.key.name),
+			slog.String("stage", stage), slog.String("op", op), slog.String("cause", cause))
 	})
+}
+
+// replyFailure is what a strict reply's refusal says of err in place of its
+// text. op is the operation that failed as net and os name it (an
+// *net.OpError's Op and an *os.SyscallError's call: "write sendmsg", "listen
+// bind"), "capability" for a refusal of what the endpoint or this platform
+// cannot do (ErrSSDPStrictCapability), or "unclassified". cause is the errno
+// the kernel answered, "timeout" for a deadline, or "no errno".
+func replyFailure(err error) (op, cause string) {
+	var oe *net.OpError
+	if errors.As(err, &oe) {
+		op = oe.Op
+	}
+	var se *os.SyscallError
+	if errors.As(err, &se) {
+		op = strings.TrimSpace(op + " " + se.Syscall)
+	}
+	switch {
+	case op != "":
+	case errors.Is(err, ErrSSDPStrictCapability):
+		op = "capability"
+	default:
+		op = "unclassified"
+	}
+	var errno syscall.Errno
+	switch {
+	case errors.As(err, &errno):
+		cause = errno.Error()
+	case errors.Is(err, os.ErrDeadlineExceeded):
+		cause = "timeout"
+	default:
+		cause = "no errno"
+	}
+	return op, cause
 }
