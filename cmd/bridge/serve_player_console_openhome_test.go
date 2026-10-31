@@ -191,6 +191,11 @@ func TestTheConsolesOpenHomeSwitchLeavesWhatPlaysAsItIs(t *testing.T) {
 				} else if surfaceOf(cs.player) != nil || len(box.Listens()) != 0 {
 					t.Errorf("%s: a surface started for a boot without the opt-in: listens %v", what, box.Listens())
 				}
+				// A change that stopped what played leaves nothing to pause:
+				// the rest of the test would wait out the binary's deadline.
+				if t.Failed() {
+					t.FailNow()
+				}
 			}
 
 			flip := !atBoot
