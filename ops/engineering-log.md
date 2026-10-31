@@ -67093,10 +67093,22 @@ timeout, and `TestFetchAsksCurlForTheShippedBounds` was red in every case):
   `--retry 3` and the HTTPS flags every time, `--speed-time 60` unless the
   setting is valid; and a source check of `SPEED_TIME=60` and fetch's line.
 
-Under sh: the new installer tests take 0.8 to 20 s each (the archive stalled
-every time is the longest, 20 s, for the reason measured above), well under
-the 90 s run timeout; the suite under four shells went from 57.8 s to
-81.2 s, with the 35 s measurement among its parallel tests.
+**Time** (a verbose run of the suite under the four shells, on 641b3eaf):
+each run of the new installer tests, under each shell, takes 3.2 to 5.4 s
+stalled once, 11.7 to 12.0 s (`checksums.txt`) and 19.9 s (the archive, for
+the reason measured above) stalled every time, 0.6 to 1.0 s cut short, and
+6.8 to 6.9 s for the slow download; the recorder's eleven cases take 9.1 to
+9.4 s a shell, and the measurement's longest case, run once, 35.2 s: all well
+under the 90 s run timeout. The suite under the four shells, run back to back
+in one build slot, whole, without round 4's six tests and whole again, took
+80.9, 71.9 and 87.5 s, so the six add about 12 s (9 to 16 s; the two whole
+runs differ by 6.6 s). Runs at different times differ by more than that:
+round 3's suite took 57.8 s in one run and 80.1 s in its gate, so an earlier
+draft of this record, which set round 3's 57.8 s against a round-4 run's
+81.2 s, overstated the cost. Under `make test` (sh alone, `-race`)
+`scripts/install-test` took 42.0 s, against round 3's 18.9 s, its longest
+test the 35 s measurement, beside `internal/manifest`'s 1105 s: the race
+suite takes no longer.
 
 **Negative controls**, on 8634d52b, predicted first, each restored from git
 with the tree clean after, under sh:
@@ -67112,3 +67124,17 @@ with the tree clean after, under sh:
   window green. As predicted.
 - S4, the range check off: the recorder's "zero" and "past sixty" alone red.
   As predicted.
+
+**The gate**, on 641b3eaf (8634d52b is the last code commit; the commits
+after it are docs and the rules patch), through the shared build lock
+(queued 640 s): `make fmt vet test build-all clean docs-check installer-test
+INSTALLER_SHELLS="sh,dash,bash --posix,ksh"`, exit 0: `go fmt` rewrote
+nothing, `go vet` clean, the race suite 80 packages ok and none failed
+(`internal/manifest` 1105 s, `internal/admin` 738 s, `cmd/bridge` 693 s,
+`scripts/install-test` 42.0 s under sh, `internal/packaging` run rather than
+taken from the cache), the census and the six cross-builds, then `make
+clean`; `make docs-check` clean; the installer suite under the four shells
+79.1 s. `make installer-check` stops at its shellcheck requirement: this host
+has no shellcheck, nor BusyBox, so the lint and the BusyBox leg are CI's
+`installer` job's. The rules line is in `.p2/rules-b475r4.patch` until the
+orchestrator applies it.
