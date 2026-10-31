@@ -220,7 +220,7 @@ func (c *consolePlayer) pending(live *config.Config, serving bool) []admin.Playe
 		case player.OpenHome && next.start:
 			text = "Casting from the 1-bit app is turned on: the bridge puts the player on the LAN as " + openhome.FriendlyName(player.Room) + " when it restarts."
 		case player.OpenHome:
-			text = "Casting from the 1-bit app is turned on: the bridge puts the player on the LAN as " + openhome.FriendlyName(player.Room) + " when it restarts with the player on."
+			text = "Casting from the 1-bit app is turned on: the bridge puts the player on the LAN as " + openhome.FriendlyName(player.Room) + " when a restart starts the player."
 		case serving:
 			text = "Casting from the 1-bit app is turned off: the bridge takes the player off the LAN when it restarts. Until then the 1-bit app can still cast to it."
 		default:
