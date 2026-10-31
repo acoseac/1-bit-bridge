@@ -486,6 +486,31 @@ func (r *Resolver) Member(ctx context.Context, id string) (err error) {
 	return err
 }
 
+// StoredPath is the path the library index stores for the track ref names
+// now: the one path, among those the index holds for its id, whose row is
+// still there (pathsOf), at the cost Member pays, which does not grow with the
+// library. ref is either stored form (trackref.ParseStored). It opens nothing
+// and asks nothing else an open asks (routing, an SACD image's virtual track,
+// the roots configured now): it names a track for a reader that shows what the
+// player plays (the console's Player page, B601), and an occurrence's open
+// checks afresh. Its refusals are an open's, not_indexed and
+// ambiguous_reference, an index that cannot be read (logged by its class),
+// ErrCancelled when ctx ended before it could tell, and resolver_failed for a
+// panic; none names a path.
+func (r *Resolver) StoredPath(ctx context.Context, ref engine.Reference) (path string, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			logPanic(r.log, panicMessage, p)
+			path, err = "", refuse(ReasonResolverFailed, "the library resolver failed; the bridge's log has why")
+		}
+	}()
+	id, perr := trackref.ParseStored(ref.String())
+	if perr != nil {
+		return "", refuse(ReasonNotIndexed, "the reference is not one of the library's: a track id, or the canonical URI of a bridge track's /dlna/file/ route")
+	}
+	return r.pathsOf(ctx, id)
+}
+
 // check is what an open and a membership check ask of id short of the file:
 // the one path the index holds for it whose row is there (pathsOf), a row of
 // the bridge's own, not an SACD image's virtual track, in a library root
