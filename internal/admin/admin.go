@@ -1395,9 +1395,14 @@ type Server struct {
 	// mu serializes the roots add/remove critical sections (pre-checks
 	// against Scanner.Roots(), manifest wipe, SetRoots fan-out) and the
 	// settings PATCH's commit→side-effect ordering, plus token
-	// mint/revoke. The config clone→Save→Store sequence itself is
-	// serialized process-wide by CfgHolder.Update's write lock — see
-	// config.RuntimeConfig.
+	// mint/revoke, and the Player page's two writes, the only writers of
+	// output.player in the process: each holds it from its read of the
+	// player configuration its interruption check compares (before) to its
+	// answer (after), so that configuration is the one its update changes
+	// (handlers_player_output.go, lockPlayerWrite). The config
+	// clone→Save→Store sequence itself is serialized process-wide by
+	// CfgHolder.Update's write lock — see config.RuntimeConfig — which
+	// begins after such a read.
 	mu sync.Mutex
 
 	// testExportCap / testExportPage shrink GET /api/export's history
@@ -1412,6 +1417,12 @@ type Server struct {
 	// construction-time convention the other unexported fields here follow.
 	testExportCap  int
 	testExportPage int
+
+	// testPlayerWriteWaits, when set, is told each time one of the Player
+	// page's writes finds mu held and is about to wait for it
+	// (lockPlayerWrite). Tests only: nil in production, and set before the
+	// server serves anything, as the two fields above are.
+	testPlayerWriteWaits func()
 
 	// pageTmpls is one template bundle per page. Each bundle pre-parses
 	// layout.html + the page's own .html file so rendering is a single

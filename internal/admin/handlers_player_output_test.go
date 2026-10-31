@@ -35,6 +35,99 @@ type fakePlayerOutput struct {
 	calls     map[string]int
 	selection string
 	kind      string
+
+	// boot and live, once playAsServes sets them, make Withholds and
+	// Sounding serve's player's own answers, over the binding it started
+	// with and the live config.
+	boot *config.PlayerDevice
+	live func() *config.Config
+	// devices is the binding Chosen answers for a token it holds; a token
+	// it does not hold answers device.
+	devices map[string]config.PlayerDevice
+	// park, while set, holds the next Chosen (parkNextChoice).
+	park *choicePark
+	// onPlatform and onReport, while set, are told of each Platform and
+	// Report call: onPlatform under mu.
+	onPlatform func()
+	onReport   func(live *config.Config)
+}
+
+// choicePark is one Chosen held inside the DAC route's config turn: parked
+// closes once it waits, release lets it go.
+type choicePark struct {
+	parked, release chan struct{}
+	once            sync.Once
+}
+
+// parkNextChoice makes the next Chosen wait, inside the DAC route's config
+// turn, so with the holder's lock held (and the console's, which the route
+// takes first), until release is called. parked closes once it waits.
+// release may be called more than once, and the test's cleanup calls it in
+// any case, so a failure leaves no write held.
+func (f *fakePlayerOutput) parkNextChoice(t *testing.T) (parked <-chan struct{}, release func()) {
+	p := &choicePark{parked: make(chan struct{}), release: make(chan struct{})}
+	f.mu.Lock()
+	f.park = p
+	f.mu.Unlock()
+	release = func() { p.once.Do(func() { close(p.release) }) }
+	t.Cleanup(release)
+	return p.parked, release
+}
+
+// playAsServes makes Withholds and Sounding answer as serve's player does
+// (consolePlayer.Withholds and Sounding, over its withheld) for a player
+// started on boot, under a controller that sends Play whenever the player
+// can take it: its output is withheld while the live config turns it off or
+// names another binding than boot, and it plays exactly while nothing is
+// withheld. So a play starts the moment a save lifts the withholding and
+// stops the moment one withholds it, both at the save's Store, inside the
+// write's update with the holder's lock held, never at a step of the test's
+// own.
+func (f *fakePlayerOutput) playAsServes(boot config.PlayerDevice, live func() *config.Config) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.boot, f.live = &boot, live
+}
+
+// withheld is why cfg withholds the output of a player started on boot, as
+// serve's player hears it: turned off first, then another binding.
+func (f *fakePlayerOutput) withheld(boot config.PlayerDevice, cfg *config.Config) string {
+	switch {
+	case !cfg.Output.Player.Enabled:
+		return "disabled"
+	case !f.SameBinding(cfg.Output.Player.Device, boot):
+		return "binding_changed"
+	}
+	return ""
+}
+
+// model is playAsServes' player, nil boot when none is set.
+func (f *fakePlayerOutput) model() (*config.PlayerDevice, func() *config.Config) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.boot, f.live
+}
+
+// platformCall closes the channel it returns at the nth Platform call from
+// now on.
+func (f *fakePlayerOutput) platformCall(n int) <-chan struct{} {
+	ch := make(chan struct{})
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	calls := 0
+	f.onPlatform = func() {
+		if calls++; calls == n {
+			close(ch)
+		}
+	}
+	return ch
+}
+
+// eachReport makes every later Report call fn with the config it was given.
+func (f *fakePlayerOutput) eachReport(fn func(live *config.Config)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.onReport = fn
 }
 
 func newFakePlayerOutput() *fakePlayerOutput {
@@ -64,10 +157,23 @@ func (f *fakePlayerOutput) called(what string) int {
 	return f.calls[what]
 }
 
-func (f *fakePlayerOutput) Platform() string { return f.platform }
+func (f *fakePlayerOutput) Platform() string {
+	f.mu.Lock()
+	if f.onPlatform != nil {
+		f.onPlatform()
+	}
+	f.mu.Unlock()
+	return f.platform
+}
 
-func (f *fakePlayerOutput) Report(context.Context, *config.Config) PlayerReport {
+func (f *fakePlayerOutput) Report(_ context.Context, live *config.Config) PlayerReport {
 	f.count("report")
+	f.mu.Lock()
+	hook := f.onReport
+	f.mu.Unlock()
+	if hook != nil {
+		hook(live)
+	}
 	return f.report
 }
 
@@ -79,9 +185,19 @@ func (f *fakePlayerOutput) DACs(context.Context, *config.Config) PlayerDACList {
 func (f *fakePlayerOutput) Chosen(_ context.Context, selection, kind string) (config.PlayerDevice, error) {
 	f.count("chosen")
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.selection, f.kind = selection, kind
-	return f.device, f.chosenErr
+	dev, err := f.device, f.chosenErr
+	if d, ok := f.devices[selection]; ok {
+		dev = d
+	}
+	park := f.park
+	f.park = nil
+	f.mu.Unlock()
+	if park != nil {
+		close(park.parked)
+		<-park.release
+	}
+	return dev, err
 }
 
 // answerChosen makes every later choice answer err, as the box does once the
@@ -97,9 +213,19 @@ func (f *fakePlayerOutput) SameBinding(a, b config.PlayerDevice) bool {
 		(a.Serial.Equal(b.Serial) || !a.Serial.Present() && !b.Serial.Present())
 }
 
-func (f *fakePlayerOutput) Sounding() bool { return f.sounding != nil && f.sounding() }
+func (f *fakePlayerOutput) Sounding() bool {
+	if boot, live := f.model(); boot != nil {
+		return f.withheld(*boot, live()) == ""
+	}
+	return f.sounding != nil && f.sounding()
+}
 
-func (f *fakePlayerOutput) Withholds(*config.Config, *config.Config) bool { return f.withholds }
+func (f *fakePlayerOutput) Withholds(before, after *config.Config) bool {
+	if boot, _ := f.model(); boot != nil {
+		return f.withheld(*boot, before) == "" && f.withheld(*boot, after) != ""
+	}
+	return f.withholds
+}
 
 // newPlayerTestServer is newTestServer with the Player page's provider, its
 // holder told the config file as serve's boot read leaves it.
@@ -603,6 +729,165 @@ func TestADACChoiceIsCheckedAgainWhenItsTurnComes(t *testing.T) {
 		t.Fatalf("a choice whose DAC was swapped while it waited = %d: %s; want 409 stale_selection", a.code, a.body)
 	}
 	unchangedConfig(t, srv, cfgPath, want, config.PlayerConfig{}, "the choice of a swapped DAC")
+}
+
+// The DACs the race below binds: the one the player started with, the one
+// the config names instead as the race begins, and a third.
+var (
+	raceBootDAC = config.PlayerDevice{Transport: "usb", Binding: config.BindingSerial, VendorID: "20b1", ProductID: "3009",
+		Serial: usbid.New("GOBAR-7Q2X-91KZ-4471")}
+	raceOtherDAC = config.PlayerDevice{Transport: "usb", Binding: config.BindingSerial, VendorID: "152a", ProductID: "85dd",
+		Serial: usbid.New("HUGO2-5521-0937-1186")}
+	raceThirdDAC = config.PlayerDevice{Transport: "usb", Binding: config.BindingSerial, VendorID: "262a", ProductID: "1048",
+		Serial: usbid.New("MOJO2-3310-7754-0021")}
+)
+
+// playerAnswer is one answer of the console: its status and its body.
+type playerAnswer struct {
+	code int
+	body string
+}
+
+// TestAWriteBehindADACChoiceAsksBeforeStoppingThePlayItLetStart pins the
+// console's lock on the page's two writes (lockPlayerWrite). The player
+// started on one DAC and the config names another, so its output is withheld
+// and nothing plays. A choice of the DAC it started with is in its config
+// turn, parked there (parkNextChoice); its save lifts the withholding, and a
+// play starts in that save (playAsServes: a controller that plays whenever
+// the player can). A second write comes while the choice is parked: the
+// switch turning the player off, or the choice of a third DAC, either of which
+// would stop that play. With the lock, the second write reads the player
+// configuration (before) only once the choice is saved, so its interruption
+// check compares what it would save, and, sent without the operator's
+// go-ahead, it is answered as the page's contract for a write that would stop
+// playback says (playerInterruption): 409 would_interrupt with the words for
+// what it stops, nothing saved over the choice's result, in the file or the
+// live config, and the play still sounding. Without the lock it reads before
+// ahead of the choice's save, finds the output withheld already, and stops
+// the play unasked, answered as not interrupted.
+//
+// The order is the test's, never the scheduler's: the choice is let go only
+// once the second write is known to wait for the console's lock
+// (testPlayerWriteWaits) or, with its lock or the choice's taken out, to have
+// read before (its Platform call right after that Load; its first is its
+// check ahead of the lock).
+func TestAWriteBehindADACChoiceAsksBeforeStoppingThePlayItLetStart(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, body, stops string
+	}{
+		{"the switch turning the player off", "/api/output/player/enabled", `{"enabled":false}`, playerStopsOff},
+		{"the choice of another DAC", "/api/output/player/dac", `{"selection":"tok-third","binding":"serial"}`, playerStopsDAC},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, fake, cfgPath := newPlayerTestServer(t)
+			waits := make(chan struct{})
+			var waited sync.Once
+			srv.testPlayerWriteWaits = func() { waited.Do(func() { close(waits) }) }
+			fake.devices = map[string]config.PlayerDevice{"tok-boot": raceBootDAC, "tok-other": raceOtherDAC, "tok-third": raceThirdDAC}
+			fake.playAsServes(raceBootDAC, srv.deps.CfgHolder.Load)
+			h := srv.Handler()
+
+			// The config names another DAC than the one the player started
+			// with: its output is withheld, and nothing plays.
+			turnPlayerOn(t, srv)
+			if code, body := playerRequest(t, h, http.MethodPost, "/api/output/player/dac", `{"selection":"tok-other","binding":"serial"}`, nil); code != http.StatusOK {
+				t.Fatalf("choosing another DAC than the one the player started with = %d: %s", code, body)
+			}
+			if fake.Sounding() {
+				t.Fatal("the player sounds while the config names another DAC than the one it started with")
+			}
+
+			// Each write runs on a goroutine of its own, and the cleanup lets
+			// the parked choice go and waits for every one of them to end,
+			// whatever ended the test.
+			var writes sync.WaitGroup
+			parked, release := fake.parkNextChoice(t)
+			t.Cleanup(func() {
+				release()
+				ended := make(chan struct{})
+				go func() { writes.Wait(); close(ended) }()
+				select {
+				case <-ended:
+				case <-playerGiveUp(t):
+					t.Error("a write never ended")
+				}
+			})
+			send := func(path, body string) <-chan playerAnswer {
+				answer := make(chan playerAnswer, 1)
+				writes.Add(1)
+				go func() {
+					defer writes.Done()
+					code, body := playerRequest(t, h, http.MethodPost, path, body, nil)
+					answer <- playerAnswer{code, body}
+				}()
+				return answer
+			}
+			// What the choice saved, read as the choice answers with its
+			// status, while it still holds the console's lock: the file and
+			// the live config it stored.
+			var saved struct {
+				once sync.Once
+				file []byte
+				live *config.Config
+			}
+			fake.eachReport(func(live *config.Config) {
+				if live.Output.Player.Enabled && fake.SameBinding(live.Output.Player.Device, raceBootDAC) {
+					saved.once.Do(func() { saved.file, saved.live = readFileOrNil(cfgPath), live })
+				}
+			})
+
+			first := send("/api/output/player/dac", `{"selection":"tok-boot","binding":"serial"}`)
+			select {
+			case <-parked:
+			case a := <-first:
+				t.Fatalf("the choice answered before it reached its choice: %d %s", a.code, a.body)
+			case <-playerGiveUp(t):
+				t.Fatal("the choice never reached its choice")
+			}
+			readBefore := fake.platformCall(2)
+			second := send(tc.path, tc.body)
+			select {
+			case <-waits:
+			case <-readBefore:
+			case a := <-second:
+				t.Fatalf("the second write answered while the choice was in its turn: %d %s", a.code, a.body)
+			case <-playerGiveUp(t):
+				t.Fatal("the second write neither waited for the console's lock nor read the player's configuration")
+			}
+			release()
+			var answers [2]playerAnswer
+			for i, answer := range []<-chan playerAnswer{first, second} {
+				select {
+				case answers[i] = <-answer:
+				case <-playerGiveUp(t):
+					t.Fatalf("write %d never answered", i+1)
+				}
+			}
+
+			var resp playerChangeResponse
+			if err := json.Unmarshal([]byte(answers[0].body), &resp); err != nil || answers[0].code != http.StatusOK ||
+				resp.Status != "restart" || resp.Interrupted {
+				t.Fatalf("the choice of the DAC the player started with = %d: %s; want 200 restart, nothing interrupted",
+					answers[0].code, answers[0].body)
+			}
+			var refusal struct{ Error, Message string }
+			_ = json.Unmarshal([]byte(answers[1].body), &refusal)
+			if answers[1].code != http.StatusConflict || refusal.Error != playerWouldInterrupt || refusal.Message != tc.stops {
+				t.Errorf("the write behind the choice = %d: %s; want 409 %s saying %q", answers[1].code, answers[1].body,
+					playerWouldInterrupt, tc.stops)
+			}
+			if !fake.Sounding() {
+				t.Error("the play the choice let start was stopped")
+			}
+			if saved.live == nil {
+				t.Fatal("the choice answered with no status of the config it saved")
+			}
+			unchangedConfig(t, srv, cfgPath, saved.file, saved.live.Output.Player, "the write behind the choice")
+			if srv.deps.CfgHolder.Load() != saved.live {
+				t.Error("the live config was stored again after the choice's save")
+			}
+		})
+	}
 }
 
 // TestAStaleOrRefusedDACChoiceWritesNothing pins the choice's refusals: a

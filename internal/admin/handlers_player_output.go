@@ -10,11 +10,12 @@
 //
 // The two writes change output.player, which serve decides its player from
 // once, at boot: each goes through the live holder (CfgHolder.UpdateChecked),
-// the turn of bridge.yaml's lock every writer takes, never around it, and the
-// answer says what changes now and what waits for a restart. A change that
-// turns the player off, or names another DAC than the one it started with,
-// stops what it plays at once (serve's player withholds its output, player.md),
-// and the page asks before one.
+// the turn of bridge.yaml's lock every writer takes, never around it, under
+// the console's lock (lockPlayerWrite), and the answer says what changes now
+// and what waits for a restart. A change that turns the player off, or names
+// another DAC than the one it started with, stops what it plays at once
+// (serve's player withholds its output, player.md), and the page asks before
+// one.
 //
 // Every route is eligible only where the player can run, checked here, on the
 // server, before anything is read or written: not on a public bridge, a
@@ -352,6 +353,26 @@ func (s *Server) playerRefusal(cfg *config.Config, field string) *cfgAbort {
 	return nil
 }
 
+// lockPlayerWrite takes the console's lock (Server.mu) for one of the page's
+// two writes, which hold it from their read of the player configuration
+// (before) to their answer. A test that parks one write inside its config
+// turn is told, through testPlayerWriteWaits, that the next found the lock
+// held and waits for it: the one wait no other seam shows, since a write asks
+// its provider nothing between its first check and this lock, and
+// config.LockWaitedForTest hears only bridge.yaml's lock, which a write takes
+// later. A lock it finds free tells the test nothing, so that, with another
+// write's lock taken out, the test waits for this write's read of before
+// instead. With no hook, as in production, it is mu.Lock.
+func (s *Server) lockPlayerWrite() {
+	if waits := s.testPlayerWriteWaits; waits != nil {
+		if s.mu.TryLock() {
+			return
+		}
+		waits()
+	}
+	s.mu.Lock()
+}
+
 // playerStatus is the page's status on cfg. A bridge where the player cannot
 // run reads nothing at all; one whose player block does not read still shows
 // what serve runs.
@@ -461,7 +482,19 @@ func (s *Server) apiPlayerOutputEnabled(w http.ResponseWriter, r *http.Request) 
 		writeError(w, why.status, why.code, why.msg)
 		return
 	}
-	s.mu.Lock()
+	// The console's lock, held from before's Load to the answer. The page's
+	// two writes are the only writers of output.player in the process, and
+	// both hold it, so the player configuration the interruption check
+	// compares (before, and the answer's after) is the one this update
+	// changes: the holder's own lock begins only at the update. Without it,
+	// a DAC choice saved between this Load and the update's clone could lift
+	// a withholding before still shows, and a play started since would be
+	// stopped unasked and answered as not interrupted
+	// (TestAWriteBehindADACChoiceAsksBeforeStoppingThePlayItLetStart). The
+	// lock holds nothing else of the config as before has it: writers that
+	// take no console lock (the variants folder's, the UPnP servers') may
+	// change other fields before the clone.
+	s.lockPlayerWrite()
 	defer s.mu.Unlock()
 	before := s.deps.CfgHolder.Load()
 	if why := s.playerRefusal(before, managedPlayerEnabled); why != nil {
@@ -534,7 +567,14 @@ func (s *Server) apiPlayerOutputDAC(w http.ResponseWriter, r *http.Request) {
 		writeError(w, why.status, why.code, why.msg)
 		return
 	}
-	s.mu.Lock()
+	// The console's lock, held from before's Load to the answer, as the
+	// switch holds it: a write of either route saved between this Load and
+	// the update's clone would leave before showing a withholding the clone
+	// no longer has, so a choice that stops a play started since would be
+	// saved unasked and answered as not interrupted. A choice's turn lasts as
+	// long as its reading of the box (Chosen, bounded by the provider): the
+	// widest window in which another write would read its before.
+	s.lockPlayerWrite()
 	defer s.mu.Unlock()
 	before := s.deps.CfgHolder.Load()
 	if why := s.playerRefusal(before, managedPlayerDevice); why != nil {
