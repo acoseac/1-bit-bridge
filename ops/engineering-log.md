@@ -68786,8 +68786,8 @@ ancillary bytes. It is left to a follow-up of its own, since
 `internal/player/hotplug/` is a qualification-guarded prefix and this change
 touches nothing guarded.
 
-**No network input reaches it.** The bytes are recvmsg's ancillary data,
-which only the kernel writes: a network peer cannot supply them. Every
+**A network peer cannot supply the ancillary bytes.** They are recvmsg's
+out-of-band data, which only the kernel writes. Every
 platform numbers its IPPROTO_IP options from 1 (Linux's `IP_TOS`; Darwin's,
 the BSDs', Solaris' and AIX's `IP_OPTIONS`, by x/sys's constants), so no
 kernel writes a message of type 0. Measured on this host, a UDP socket that
