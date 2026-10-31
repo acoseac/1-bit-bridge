@@ -68902,6 +68902,7 @@ command through the build lock):
   increase (23 -> 23)`, exit 1.
 - Not run here: the node harness and the console's other node tests (no node
   on legion0); CI's legs run them.
+
 ## 2026-10-31 — B610: the SSDP listener's control-data parser holds whatever it is handed
 
 Backlog B610, which blocked the 0.2.2 tag. The nightly `fuzz.yml` failed eight
@@ -69049,3 +69050,158 @@ had joined uncounted); with this one, 65, and 46 with properties.
 **Upstream**: a draft issue for golang/go (x/net) is beside the job's report,
 outside the tree; Parse could skip an entry whose name is 0, as `Marshal` and
 `NewControlMessage` already do.
+
+## 2026-10-31 — B612 round 2: a saved opt-in never reaches the running player through the port check; a save the next start would refuse is refused
+
+**Why.** Codex's review of the branch (Medium, `internal/admin/handlers_player_output.go:629`):
+the opt-in the switch saves still reached playback before a restart, through
+`PlayerEnabled`. A playing bridge booted with OpenHome off; the switch turned
+the opt-in on (saved, waiting for a restart, the surface not running); a
+`PATCH /api/settings` moved `listenAddress` (or `adminAddress`) onto 7792,
+accepted because `Validate` only logs a player's refusal; and
+`livePlayerSettings` → `hotplug.SettingsFrom` → `PlayerEnabled` then found the
+clash in the live config and turned the running player off at once, though
+neither the listener nor the surface had moved. Turning the switch off gave
+the output back, still before any restart. Round 1's report named the path as
+there since 5a2a (backlog B620); B612 made it reachable from the console. It
+split one field's halves (`config-lifecycle.md`): every consumer took the
+opt-in and the listeners' addresses at boot but that check.
+
+**What runs is judged by the boot snapshot.** `config.PlayerEnabledAsBooted(goos, boot)`
+is `PlayerEnabled`'s checks of the live config (the block, `enabled`, the
+host, public) with the OpenHome port clash asked of `boot` alone, and
+`PlayerEnabled` is it on itself. The boot facts are the opt-in and its port,
+`listenAddress` (with any `--addr`), `adminAddress`, `dlna.listenAddress`
+and `output.loopbackPort`: serve bound its listeners from the boot snapshot
+and started the surface from its opt-in, and the loopback route takes its
+port from it too, whenever it starts. The call sites that change, each
+reading the running player's admission:
+- `livePlayerSettings(holder, boot, goos)`, the watcher's settings
+  (`startPlayerHotplug`, through `playerHotplugWiring.BootConfig`) and
+  serve's player's (`servePlayerWiring.Live`, which `bridgePlayer.follow`
+  and `report` hand `playerOutput.readLive`), both given serve's `cfg`;
+- the console's `withheld` (`consolePlayer.boot`, from its wiring's `Boot`),
+  which feeds `Withholds` (the `would_interrupt` question), `running.withheld`
+  and the pending stop text.
+
+Both configs are passed (`hotplug.SettingsFrom(live, boot, goos)`), never
+the boot fields laid over a clone of the live config: an overlay misses
+whatever field the check comes to read, and judges it live without a word.
+Unchanged: the boot plan (`planServePlayer(cfg)`, which judges the boot
+snapshot whole), the console's `configured` and next-plan views (the next
+start reads the saved config), `Validate`'s player-off line (a judgement of
+the config it is given), the enabled route's check of its clone, and the
+CLI's (doctor, bind, `output play`). A player that started booted with no
+clash, its plan having refused one, so its admission never withholds over
+one now; the watcher of a player that did not start judges the boot
+snapshot's latent clash, and nothing plays either way.
+
+**A save the next start would refuse is refused.** While
+`output.player.openhome` is on, the settings PATCH asks
+`config.OpenHomePortClash` of the clone it would save and refuses a clash:
+409 `openhome-port-clash`, naming the setting (the new
+`*config.OpenHomePortClashError`'s `Setting`; its text is the one
+`PlayerEnabled` always gave) and `output.player.openhomePort`, never the
+port, nothing written. It is asked of the whole candidate, never of the
+sockets bound now, and before `Validate`, which logs the player off for a
+config whose player it would refuse and would have logged it for a save
+refused here (`Normalize` changes no address). The routes that can move one
+of the ports: the settings PATCH alone (`listenAddress`, `adminAddress`).
+None writes `dlna.listenAddress` (the PATCH's DLNA field is `dlnaEnabled`),
+`output.loopbackPort` or `output.player.openhomePort`; the roots, the
+variants folder and the UPnP servers' writers move no port; and the player
+routes keep their checks (the switch's own, round 1; the enabled route's
+`PlayerEnabled` of its clone, B601). Outside the console: `bridge init`'s
+address flags, a CLI rewrite that keeps the output block and prints
+`Validate`'s player-off line for a clash; `bridge restore`, which puts a
+whole file back; and serve's own default seed, whose opt-in is off. None of
+them was changed. A config that already clashes (an edit before the start)
+refuses every settings save while the opt-in is on, naming the clash, until
+the save moves the address off the port or the opt-in is turned off on the
+Player page, which the switch allows over a clash. Rejected: refusing only a
+save that changes the clashing setting, which saves a config the next start
+refuses.
+
+**Tests**, red first in d62685fe, each red as predicted (legion0):
+- Serve, Codex's sequence through both addresses (`adminAddress` as
+  `127.0.0.1:7792`: `:7792` is refused in loopback mode first, which would
+  prove address validation; `TestTheConsoleRefusesToMoveAListenerOntoTheOpenHomePort`).
+  Red: 200 `restart`, the file and the live config written, the pending list
+  gaining `stop: The player is turned off: it plays nothing now…`, the engine
+  stopped (`disabled`), the DAC let go. Green: 409, nothing written, the
+  pending list as it was, the engine and the DAC as they were, no withholding
+  report before the barrier.
+- Serve, a clash injected into the live config (`holder.Store`, memory
+  alone) through each of the four settings, the opt-in on at boot
+  (`TestALiveClashWithTheOpenHomePortLeavesTheRunningPlayerAsItIs`). Red: the
+  console withholding `disabled`, the pending list's "plays nothing now", the
+  player-off request without the go-ahead saved unasked. Green: the watcher
+  takes the change and keeps its watch (`Stats.ConfigChanges`), the console
+  says the player plays and that the next start refuses it, naming the
+  setting, the player-off request is asked (`would_interrupt`), the engine
+  plays, the surface listens where it did, and the barrier's binding change
+  is the first report that withholds the output.
+- Serve, beside a clash (`TestTheRunningPlayerStillFollowsTheLiveConfigBesideAClash`):
+  the switch turning the player off with the go-ahead applies at once and is
+  answered interrupted (red: not interrupted), and a live block the config
+  refuses (a 65-character room) turns the player off naming that reason (a
+  guard, green before the fix).
+- Serve, a file edit and a restart through each of the four settings
+  (`TestTheNextStartRefusesThePlayerOverAClashEditedIntoItsFile`): the
+  running player plays on, and the next start refuses the player and says
+  why in the console's status, naming the setting and not the port (green
+  before the fix: a pin of the half that reads the file). Its restart takes
+  listeners the test holds (`playerServeCase.lan`, `.admin`), since
+  `bootPlayerServeAt` wrote a fresh console address over the file's even
+  with `keep` and gave the API an `--addr` of its own, and serve binds the
+  address its file names (`adoptHandedListener`).
+- Admin, the PATCH (`TestASettingsSaveTheNextStartWouldRefuseIsRefused`): a
+  listener address on the port with the opt-in on, the player on or off,
+  alone or beside settings that apply at once (`libraryName`,
+  `mdnsEnabled`, `scanIntervalSec`), is 409 with the file's bytes, the live
+  config, the config the Player page's status is read from and the five
+  callbacks after a save unchanged; with the opt-in off, or a port of the
+  surface's own or 0, the same addresses are saved, the callbacks beside
+  them run.
+- Config (`TestTheRunningPlayersOpenHomeClashIsJudgedOnItsBootSnapshot`):
+  each of the four settings, the opt-in turned on live, a boot clash, a nil
+  boot, and the live switch, a refused block, public and another host beside
+  a boot that runs.
+- `withholdsOnlyForTheBarrier` fails at the first report that withholds the
+  output: a `disabled` before the barrier leaves the barrier no report of
+  its own, and the helper waited out the binary's deadline for one.
+- The other direction, an opt-in turned on over a listener already on the
+  port, is round 1's refusal (`TestTheOpenHomeSwitchRefusesAPortAnotherListenerBinds`).
+
+**Controls**, each on a committed tree, restored with `git checkout`, its
+prediction written first:
+- The PATCH's refusal skipped (`if false && …`): predicted red at the 409 and
+  the writes, not at playback. So it went: both serve cases red at the 409
+  (200 `restart`), the file, the live config and the pending list (`stop:
+  The player stops when the bridge restarts.`), green at the engine, the DAC
+  and the barrier; the admin test's five refusal cases red, its five saves
+  green.
+- The boot judgement reverted to the live config in the wiring (a nil boot in
+  `livePlayerSettings` and in the console's `withheld`): predicted red at the
+  console's status and at playback. So it went: all four injected cases red
+  at the console (`unavailable`, withheld `disabled`), the pending text, the
+  player-off request (saved unasked) and playback (the engine stopped, the
+  DAC let go); the switch-off case red; Codex's sequence, the restart, the
+  guard and the config pin green.
+- `PlayerEnabledAsBooted` judging the clash on itself: predicted red at the
+  four live-clash cases and the live opt-in. Red there, and at the four
+  boot-clash cases too, which I had predicted green: there the boot snapshot
+  is the argument the mutation no longer reads.
+- The watcher's `BootConfig` alone dropped: predicted red at the watcher's
+  check. Red there (stopping, no change taken), and, not predicted, at the
+  console's state, the player-off request and playback, and in the
+  switch-off case: the watcher's `disabled` snapshot withholds the output
+  before the status is read.
+
+**Docs.** `openhome.md`'s opt-in line and its long form, `player.md`'s
+live-config line and its long form, `cli-serve.md`'s watcher bullet,
+`admin-console.md`'s Player page entry (it said the running process reads
+the live opt-in through the port check), the apply matrix's `listenAddress`
+and `adminAddress` rows and the OpenHome switch's, and
+`config/bridge.yaml.example`. The `.claude/` changes went to the
+orchestrator as a patch again. Backlog B620 is fixed here.

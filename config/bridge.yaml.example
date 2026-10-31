@@ -75,7 +75,9 @@ libraryName: "My Music Library"
 #   listing this box's own MPD player while it is on; 1-bit 2.2 lists both.
 #   It runs only while the player does; a change applies when bridge serve
 #   next starts. A port another listener of the bridge binds turns the
-#   player off with a logged reason, and the console's switch refuses it.
+#   player off at the start, with a logged reason, and the console saves
+#   none: its switch refuses the opt-in over one, and its settings save
+#   refuses an address on the port while the opt-in is on.
 #
 # init asks for none of this block, so `bridge init --force` (or a rewrite
 # answered yes at init's prompt) keeps it whole, and says which setting it
