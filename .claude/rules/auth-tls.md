@@ -614,11 +614,37 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   probe's error and a no-room refusal (jobs.md, B273's bullet), the config
   file in a console 500 (admin-console.md), the peer in the DLNA listener's
   refusal and both socket ends in a strict SSDP reply's (dlna-upnp.md), and
-  a client in the loopback route's panic line (output.md). Peers the rules
-  let a line name stay: the ContentDirectory's `remoteAddr`, OpenHome's
-  refused source (openhome.md), the SSDP Debug lines and the GENA and
-  discovery refusals by source (dlna-upnp.md). **A log line names an
-  operator's directory by its role, and a console body names no path.**
+  a client in the loopback route's panic line (output.md). Its second round
+  (2026-10-31, Codex on the integrated branch) found the same client in the
+  MediaServer's and the console's plain-HTTP panic lines (dlna-upnp.md,
+  admin-console.md; every `http.Server` in the module takes its `ErrorLog`
+  from handshakelog now, `TestEveryServeHTTPServerRedactsPeerAddresses`), and
+  a path in the console's other error bodies: the backups, the certificate
+  tile, a root add or remove, the token writes and the compaction
+  (admin-console.md). Peers the rules let a line name stay: the
+  ContentDirectory's `remoteAddr`, OpenHome's refused source (openhome.md),
+  the SSDP Debug lines and the GENA and discovery refusals by source
+  (dlna-upnp.md), and the console's failed and rate-limited logins (the next
+  bullet). **A disk probe's line names the directory it probes by its role,
+  and a console error body names no path: the log keeps the error whole,
+  the bridge's own files in fault lines, and a success body may show a path
+  the console was configured with.**
+- **The console's failed and rate-limited login lines name the source
+  address, at Warn: a security log, and the console's only lines that name
+  a client** (2026-10-31, B604's second round, which kept them rather than
+  redact them; Codex on the integrated branch asked for either). `apiLogin`
+  logs `ip`, `adminauth.ExtractClientIP`'s answer, which is the limiter's
+  own key: the proxy's `X-Real-IP`, or the right-most valid
+  `X-Forwarded-For`, where `deployment.adminTLSTerminatedByProxy` says a
+  proxy terminates TLS, and the connection's host otherwise, canonical
+  (`canonicalIP`) and without a port, so a header's own spelling never
+  reaches the line; beside it the username, at most 64 bytes
+  (`maxLoginUsernameLen`), and never the password. The console has a login
+  only in public mode, where that address is what an operator or fail2ban
+  blocks. **Don't log the connection's address and port, a forwarded
+  header's text or the password there, and don't add a console line that
+  names a client without a bullet here.**
+  `TestAConsoleLoginRefusalLogsItsSourceAndNothingElseOfTheRequest` pins it.
 - **A 5xx body carries a fixed message, never an error's text** (2026-10-16,
   backlog B425). `GET /v1/search` answered a store or FTS failure with the
   error as its message (`search tracks_fts (served): sql: database is

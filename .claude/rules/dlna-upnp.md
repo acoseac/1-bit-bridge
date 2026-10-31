@@ -1223,6 +1223,8 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 
 - **`dlna.Server.AcceptsOn` answers whether the listener takes a connection on an address now, by the listener's own served set (`servedAddrs`) and its bound address (a pinned listener its address alone, `0.0.0.0` IPv4 alone), and nothing once Stop begins or before Start binds; the player's OpenHome Insert takes such an address as one of the bridge's own** (B470 PR 5a4; the confinement's bullet in `openhome.md`). **Don't answer it from a set or a cache of its own, or for a listener that is not up.** `TestAcceptsOnIsTheListenersServedSet`, `TestAcceptsOnFollowsTheServedSnapshot` and `TestAcceptsOnIsTheRunningListeners` pin it.
 
+- **The MediaServer's `http.Server` takes `handshakelog.ErrorLog()`, as the loopback route's does** (2026-10-31, B604's second round; Codex on the integrated branch). net/http logs a handler's recovered panic with the address of the renderer it was serving ("http: panic serving <addr>"), and with no `ErrorLog` that line went to the standard logger whole; through handshakelog it keeps the panic and stands `handshakelog.ClientPlaceholder` where the address was. **Don't leave a server's `ErrorLog` nil**: `TestEveryServeHTTPServerRedactsPeerAddresses` (cmd/bridge) finds every `http.Server` in the module, and `TestAMediaServerPanicIsLoggedWithoutItsClient` drives this one's panic over a real connection.
+
 
 ## Source discovery (B470 PR 5a2b)
 
