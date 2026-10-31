@@ -66895,3 +66895,117 @@ Each predicted, and each matched:
 
 The rules lines are in admin-console.md, auth-tls.md and dlna-upnp.md. The
 long form of the serve guard's entry changed in History-rules-cli-serve.md.
+
+## 2026-10-31 — B604, third round: the test logger keeps what a derived logger binds
+
+CodeRabbit on #1369 (Major, verified by the orchestrator):
+`internal/logging/loggingtest`'s `recordHandler` and `parkHandler` returned
+themselves from `WithAttrs` and `WithGroup`. So
+`r.Logger().With("path", "/private/file").Info("refused")` kept the
+message alone. Under `Record` and `ParkOn`, every `logging.Component`
+logger replays its op chain onto the installed handler, and that chain,
+`component=` included, vanished too. `Strings` and `Carrying` never saw a
+bound value, while a real Text or JSON handler writes it. Nothing in the
+tree was exposed: the one production `With` that binds a variable
+(`requestLogging`'s request id, method and URL path,
+`internal/api/middleware.go`) has no absence test that sends a
+path-bearing URL through it. A harness fix.
+
+### Red first (267316e2)
+
+On 2c97e94b:
+
+- Strings' table: its three new rows (a `With` value, a `WithGroup` name,
+  a nested `With` → `WithGroup` → `With`) found nothing.
+- Parity with slog's Text and JSON handlers: 16 of 19 chains differed. For
+  example `kept "", want "path=/abs/with"` with `a handler wrote
+  "/abs/with", and Strings does not report it`. An inline group was kept
+  as a group with an empty key. An empty `Attr{}` was kept as `=<nil>`, so
+  Strings reported `""`, `<nil>` and `null`, which no handler writes. A
+  record's own LogValuer was read when the test asserted, after it had
+  changed.
+- Go's handler conformance suite (`testing/slogtest`): 11 of its 15 cases
+  failed.
+- Nothing bound through `slog.Default()` under `Record` or `ParkOn` was
+  kept, nor anything a `Component` made before either was installed
+  bound. A parked record was kept without its logger's bindings, and
+  sibling, repeated and concurrent loggers lost theirs.
+
+### The fix (ffb05178)
+
+One handler, `*recordHandler`, serves `Record`, `NewRecorder`'s `Logger`
+and `ParkOn`. It shares the Recorder and the one Park by pointer, and
+carries an ordered op chain, `dynamicHandler`'s shape:
+
+- `WithAttrs` resolves and copies its attributes into a new slice, and
+  returns the receiver when nothing is left.
+- `WithGroup` returns the receiver for an empty name.
+- Every derivation allocates its chain afresh.
+- `Handle` resolves the record's own attributes and folds the chain over
+  them from the innermost op outward: an attrs op prepends, and a group op
+  wraps what is non-empty so far. It keeps a new record, then parks, with
+  the Recorder's lock released.
+- What slog's Handler contract ignores is dropped: an empty attribute, a
+  group holding nothing (its name included) and an unnamed group. An
+  inline group is flattened.
+
+The semantics were read in Go 1.27.3's `log/slog/handler.go`, `value.go`
+and `record.go`. A bound attribute is formatted at bind time
+(`commonHandler.withAttrs`), and a group applies to everything added
+after it.
+
+### Measured: Go 1.27.3's own handlers against their contract
+
+A probe of the toolchain's handlers. For `l.Info("m",
+slog.Group("/abs/holds-nothing", slog.Attr{}), "k", "v")`:
+
+- The Text handler writes `/abs/holds-nothing.k=v`: the ignored group's
+  name stays in the key prefix of what follows (`handleState.appendAttr`
+  does not undo its `openGroup` when the group turns out empty), and the
+  prefix's later truncation writes garbage keys when the names' lengths
+  differ.
+- The JSON handler writes `"msg":"m""k":"v"`, without its separator.
+- For `WithGroup("p").With(slog.Attr{}, slog.Group("e"))`, the JSON
+  handler writes `"p":{}`, which no `slog.Record` can carry.
+
+The recorder keeps the contract ("If a group has no Attrs (even if it has a
+non-empty key), ignore it"), as the brief's elision rule says.
+`TestSlogsHandlersWriteAnIgnoredGroupAgainstTheContract` pins the defect as
+a tripwire, so the recorder's note goes when a toolchain fixes it.
+
+### Controls (after ffb05178, each restored from HEAD, none committed)
+
+1. `WithAttrs` returns the receiver: every case that binds a value went
+   red (11 parity rows, slogtest's six With cases, two of Strings' rows,
+   the Default, Component and park tests, siblings); the WithGroup-only
+   ones stayed green.
+2. `derive` appends into the parent's chain: siblings overwrote each
+   other's last op, and `-race` reported the concurrent derivations.
+3. No resolution: the three LogValuer rows and slogtest's four resolve
+   cases.
+4. Empty attributes kept: the four `Attr{}` rows, slogtest's empty-attr
+   case and the tripwire's recorder half went red. So did the receiver
+   pin's `WithAttrs(Attr{})` row, which was not predicted: with empties
+   kept, that call derives.
+5. The park before the record is kept: the park test, its parked record
+   unreadable while parked.
+
+### The suite
+
+`buildslot.py b604 make test` at 00e6f5c9: 79 packages ok, 0 failures,
+every package re-run. No absence test found a value it had missed: the new
+recorder sees every bound value and group name, and every absence test
+that uses loggingtest still passes. One cmd/bridge test compared a
+rendered line exactly and now expects the `component=player` that the
+real handler writes too (in ffb05178).
+
+### Also
+
+The first two B604 records said the rules lines were in `.p2/` patches on
+the branch. Both were applied and `.p2/` is gone, so they now name the
+rules files they changed (00e6f5c9). CodeRabbit's other thread on this
+log, which asked to turn three "found and not fixed" entries into backlog
+IDs, was declined by the orchestrator, and they stand.
+
+The rules lines are in `.p2/rules-b604r3.patch` until the orchestrator
+applies it: build-ci-tests.md, one new bullet after the log-leak test's.
