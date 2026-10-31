@@ -1,14 +1,23 @@
-// Fuzz coverage for the LAN-facing, UNAUTHENTICATED parsers.
+// Fuzz coverage for the LAN-facing, UNAUTHENTICATED parsers, and for the
+// control data the SSDP listener reads beside each datagram.
 //
-// These sit at the bridge's widest attack surface: SSDP arrives as UDP
-// datagrams from anything on the subnet, and the SOAP action header comes off
-// an HTTP request the DLNA server answers before any identity is established.
-// There is no bearer token in front of either, so unlike the /v1 handlers a
-// panic here is reachable by any device on the LAN.
+// The datagram and SOAP parsers sit at the bridge's widest attack surface:
+// SSDP arrives as UDP datagrams from anything on the subnet, and the SOAP
+// action header comes off an HTTP request the DLNA server answers before any
+// identity is established. There is no bearer token in front of either, so
+// unlike the /v1 handlers a panic in one is reachable by any device on the
+// LAN.
 //
-// A panic in the SSDP listener is worse than a normal handler panic, too: it
-// runs on the read loop rather than under net/http's per-request recovery, so
-// the blast radius is the discovery loop rather than one request.
+// The control data is not: the destination and the arrival index beside a
+// datagram (FuzzParseDatagramMeta, FuzzParseWSAPktinfo) are ancillary bytes
+// the kernel writes, and a network peer cannot supply them. Their parsers are
+// fuzzed because they must hold whatever they are handed all the same
+// (backlog B610).
+//
+// A panic on the SSDP read loop is worse than a handler panic, too: the loop
+// runs on a goroutine of its own with no recovery (SSDPSubsystem.readLoop),
+// not under net/http's per-request recovery, so a panic there ends the
+// process, the whole of bridge serve, rather than one request.
 package dlna
 
 import (
@@ -30,12 +39,15 @@ func FuzzParseMSearchMX(f *testing.F) {
 	f.Fuzz(func(t *testing.T, b []byte) { _ = ParseMSearchMX(b) })
 }
 
-// FuzzParseDatagramMeta feeds this platform's control-message parser (x/net
-// over Linux's and macOS's in_pktinfo, parseWSAPktinfo on Windows) bytes no
-// kernel wrote: the control data beside a datagram is the kernel's, but the
-// parser must hold whatever it is handed. It must not panic, and what it
-// calls reported must be a value the metadata can hold, an IPv4 destination
-// and a positive index, with nothing left in a field it does not report.
+// FuzzParseDatagramMeta feeds this platform's control-message parser (x/net,
+// under a recover of the parser's own, over Linux's and macOS's in_pktinfo,
+// and parseWSAPktinfo on Windows) bytes no kernel wrote: the control data
+// beside a datagram is the kernel's, but the parser must hold whatever it is
+// handed. It must not panic, and what it calls reported must be a value the
+// metadata can hold, an IPv4 destination and a positive index, with nothing
+// left in a field it does not report. Its committed seeds are 64-bit Linux's
+// control data, the nightly's crash of 2026-10-24 to 31 (B610) among them;
+// TestTheDatagramMetaSeedsAreLinuxsControlData says what each decodes to.
 func FuzzParseDatagramMeta(f *testing.F) {
 	f.Add([]byte{})
 	f.Add(make([]byte, 64))
