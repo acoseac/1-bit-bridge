@@ -13,6 +13,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // playerAt is a config that asks for the bridge's own player, with its data
@@ -114,8 +115,9 @@ func TestADataDirectoryALinkToNothingStandsInIsNoneServeMakes(t *testing.T) {
 // of the player-storage line's fail: serve's lock on its data directory
 // (lockServeDataDir), which makes the directory first, fails with an error
 // matching fs.ErrExist for a data directory that is a link to nothing, and
-// for one below such a link, while through a live link it makes the
-// directory and takes the lock.
+// for one below such a link, as this user (os.MkdirAll) and as root
+// (fsutil's own walk, an os.Root on each parent, simulated), making nothing;
+// while through a live link it makes the directory and takes the lock.
 func TestServeCannotMakeADataDirectoryThroughALinkToNothing(t *testing.T) {
 	base := t.TempDir()
 	link := filepath.Join(base, "link")
@@ -129,6 +131,22 @@ func TestServeCannotMakeADataDirectoryThroughALinkToNothing(t *testing.T) {
 			t.Errorf("lockServeDataDir(%s) = %v, want an error matching fs.ErrExist", dir, err)
 		}
 	}
+	t.Run("as root", func(t *testing.T) {
+		// An owner no entry here has, so a walk that took the link's entry
+		// for a directory it made would give the link that owner.
+		changes, restore := fsutil.SimulateRootForTest(4242, 4243)
+		defer restore()
+		for _, dir := range []string{link, filepath.Join(dangling, "data")} {
+			release, err := lockServeDataDir(dir)
+			release()
+			if !errors.Is(err, fs.ErrExist) {
+				t.Errorf("lockServeDataDir(%s) = %v, want an error matching fs.ErrExist", dir, err)
+			}
+		}
+		if made := changes(); len(made) != 0 {
+			t.Errorf("serve gave %v an owner through a link to nothing, want nothing made", made)
+		}
+	})
 	target := filepath.Join(base, "target")
 	if err := os.Mkdir(target, 0o700); err != nil {
 		t.Fatal(err)
