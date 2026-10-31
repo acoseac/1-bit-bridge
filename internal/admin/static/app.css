@@ -2840,6 +2840,22 @@ ul.histogram li {
   .doctor-hint { padding-left: 0; }
 }
 
+/* ---------------- Player page (B601) ---------------- */
+/* The transports and the DAC list are tables of five and six columns: at
+ * 375px they scroll inside their panel rather than widen the page. */
+.player-output-scroll { overflow-x: auto; max-width: 100%; }
+.player-output-scroll table.rows { min-width: 100%; }
+.player-output-scroll td { overflow-wrap: anywhere; }
+/* The binding kind and the button that writes it, under the list. */
+.player-output-choose {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}
+.player-output-choose select { min-width: 0; max-width: 100%; }
+
 /* ---------------- Duplicates page ---------------- */
 /* Policy radios: one option per row, description wraps under the label. */
 .dupes-policy { border: 0; padding: 0; margin: 0; display: grid; gap: 10px; }

@@ -4839,62 +4839,7 @@ function initSettings() {
     }
   });
 
-  // The dataset attribute is rendered by the settings template from
-  // `settingsResponse.IsSupervised`, which the server populates from
-  // `supervision.IsSupervised()`. When false, the bridge isn't under
-  // launchd / systemd / SCM and `os.Exit(0)` won't be relaunched —
-  // pre-fix this confirm dialog claimed otherwise ("until the
-  // service manager relaunches it") and the operator was left
-  // staring at a dead admin page wondering why nothing came back.
-  // Branch on the live flag so the dialog tells the truth.
-  restartBtn?.addEventListener("click", async () => {
-    const supervised = restartBtn.dataset.supervised === "true";
-    const prompt = supervised
-      ? "Restart the bridge now? The page will become unreachable until the service manager relaunches it (~1–2 s)."
-      : "Stop the bridge now? This bridge isn't running under a service manager, so the page will go down and you'll need to start it again manually.";
-    if (!confirm(prompt)) return;
-    showMsg(msg, "warn", "Waiting for in-flight streams to finish…");
-    try {
-      // The handler now waits for /v1/read + /v1/download to drain before
-      // exiting, and only answers once it has. Awaiting it is therefore
-      // the moment the restart is genuinely about to happen — and the
-      // body says whether anyone got cut off.
-      const r = await API.post("/api/restart");
-      // Honoured — the pending-restart debt is settled.
-      markRestartPending(false);
-      let post = supervised
-        ? "Restart signalled. Reload the page in a few seconds."
-        : "Stop signalled. Start the bridge again manually, then reload.";
-      if (r?.drained === false && r.inflight > 0) {
-        // Say it plainly rather than reporting a clean restart: someone
-        // was listening and we went ahead anyway.
-        post = `${post} (${r.inflight} stream${r.inflight === 1 ? "" : "s"} still ` +
-          `in flight after ${Math.round((r.waitedMs || 0) / 1000)}s — interrupted.)`;
-      }
-      showMsg(msg, "warn", post);
-    } catch (err) {
-      if (isExpectedRestartDisconnect(err)) {
-        // The bridge writes 202 then `os.Exit(0)` after a 100 ms
-        // grace window — we may catch the response (`TypeError`
-        // when the connection drops mid-read, or `SyntaxError`
-        // when the empty body fails JSON.parse). Both mean
-        // "request was honoured, server is on its way out."
-        markRestartPending(false);
-        const post = supervised
-          ? "Restart signalled (server went away)."
-          : "Stop signalled (server went away). Start it again manually.";
-        showMsg(msg, "warn", post);
-      } else {
-        // A real HTTP error (4xx/5xx) is wrapped by `errorFrom-
-        // Response` as a plain `Error` whose message starts with
-        // the status code. Don't claim "signalled" — the request
-        // never landed. CodeRabbit on PR #124 caught the prior
-        // catch path conflating these two branches.
-        const verb = supervised ? "Restart" : "Stop";
-        showMsg(msg, "err", `${verb} request failed: ${err.message}`);
-      }
-    }
-  });
+  restartBtn?.addEventListener("click", () => requestBridgeRestart(restartBtn, msg, ""));
 
   // Audio-quality + audio-analysis tiles are driven by the SSE
   // `upscale` / `analysis` events (applyUpscaleStats / applyAnalysisStats)
@@ -4904,6 +4849,69 @@ function initSettings() {
   // post-delete feedback.
   initUpscaleClearAllModal();
   initUpscaleTarget();
+}
+
+// requestBridgeRestart is the console's restart, from the button btn, saying
+// how it went in msg: the Settings page's, and the Player page's, which adds
+// note to the question. One flow, so the two pages cannot word a restart two
+// ways.
+//
+// The dataset attribute is rendered by the template from IsSupervised, which
+// the server populates from `supervision.IsSupervised()`. When false, the
+// bridge isn't under launchd / systemd / SCM and an exit won't be relaunched —
+// pre-fix this confirm dialog claimed otherwise ("until the service manager
+// relaunches it") and the operator was left staring at a dead admin page
+// wondering why nothing came back. Branch on the live flag so the dialog tells
+// the truth. A host that owns restarts (`managedControls: [restart]`) renders
+// no button, and the route refuses one.
+async function requestBridgeRestart(btn, msg, note) {
+  const supervised = btn.dataset.supervised === "true";
+  const prompt = supervised
+    ? "Restart the bridge now? The page will become unreachable until the service manager relaunches it (~1–2 s)."
+    : "Stop the bridge now? This bridge isn't running under a service manager, so the page will go down and you'll need to start it again manually.";
+  if (!confirm(note ? `${prompt}\n\n${note}` : prompt)) return;
+  showMsg(msg, "warn", "Waiting for in-flight streams to finish…");
+  try {
+    // The handler now waits for /v1/read + /v1/download to drain before
+    // exiting, and only answers once it has. Awaiting it is therefore
+    // the moment the restart is genuinely about to happen — and the
+    // body says whether anyone got cut off. It says nothing of the
+    // bridge's own player, which the restart stops.
+    const r = await API.post("/api/restart");
+    // Honoured — the pending-restart debt is settled.
+    markRestartPending(false);
+    let post = supervised
+      ? "Restart signalled. Reload the page in a few seconds."
+      : "Stop signalled. Start the bridge again manually, then reload.";
+    if (r?.drained === false && r.inflight > 0) {
+      // Say it plainly rather than reporting a clean restart: someone
+      // was listening and we went ahead anyway.
+      post = `${post} (${r.inflight} stream${r.inflight === 1 ? "" : "s"} still ` +
+        `in flight after ${Math.round((r.waitedMs || 0) / 1000)}s — interrupted.)`;
+    }
+    showMsg(msg, "warn", post);
+  } catch (err) {
+    if (isExpectedRestartDisconnect(err)) {
+      // The bridge writes 202 then `os.Exit(0)` after a 100 ms
+      // grace window — we may catch the response (`TypeError`
+      // when the connection drops mid-read, or `SyntaxError`
+      // when the empty body fails JSON.parse). Both mean
+      // "request was honoured, server is on its way out."
+      markRestartPending(false);
+      const post = supervised
+        ? "Restart signalled (server went away)."
+        : "Stop signalled (server went away). Start it again manually.";
+      showMsg(msg, "warn", post);
+    } else {
+      // A real HTTP error (4xx/5xx) is wrapped by `errorFrom-
+      // Response` as a plain `Error` whose message starts with
+      // the status code. Don't claim "signalled" — the request
+      // never landed. CodeRabbit on PR #124 caught the prior
+      // catch path conflating these two branches.
+      const verb = supervised ? "Restart" : "Stop";
+      showMsg(msg, "err", `${verb} request failed: ${err.message}`);
+    }
+  }
 }
 
 // Required typed phrase for the "Clear all upscaled variants"
@@ -7168,6 +7176,436 @@ function renderPlayerChecklist(list, lines, openPair) {
   }
 }
 
+// ---- The Player page (B601): the bridge's own player ----
+
+// playerOutputLatest is the status the page last painted, which its
+// controls decide from (on or off; whether a change stops what plays), and
+// playerOutputSeq numbers the paints, so a status fetched before a change
+// cannot paint over the status the change answered.
+let playerOutputLatest = null;
+let playerOutputSeq = 0;
+
+// PLAYER_BINDING_WORDS says what each kind of binding follows, as the page
+// offers it.
+const PLAYER_BINDING_WORDS = {
+  serial: "by serial: this unit, in any port",
+  uniqueModel: "by model: the one unit of its model on the box",
+  port: "by port: whatever unit is in that port",
+};
+
+// initOutput wires the Player page: its status, painted from GET
+// /api/output/player on load, every five seconds while the page is in view,
+// and after each change; the switch; the DAC list and its choice; and the
+// restart. A public bridge's page renders none of it.
+function initOutput() {
+  if (!document.getElementById("player-output-status")) return;
+  playerOutputLatest = null;
+  loadPlayerOutput();
+  pageInterval(() => {
+    if (document.visibilityState === "visible") loadPlayerOutput();
+  }, 5000);
+  document.getElementById("player-output-refresh")?.addEventListener("click", () => loadPlayerOutput());
+  wirePlayerOutputSwitch();
+  wirePlayerOutputDACs();
+  const restart = document.getElementById("player-output-restart");
+  restart?.addEventListener("click", () => requestBridgeRestart(restart, document.getElementById("player-output-msg"),
+    "If the bridge's player is playing, or holds a pause, the restart stops it, and it comes back stopped."));
+}
+
+// loadPlayerOutput fetches the status and paints it, unless a later paint
+// overtook it.
+async function loadPlayerOutput() {
+  const seq = ++playerOutputSeq;
+  const msg = document.getElementById("player-output-msg");
+  try {
+    const st = await API.get("/api/output/player");
+    if (seq === playerOutputSeq) renderPlayerOutput(st);
+  } catch (err) {
+    if (seq === playerOutputSeq) showMsg(msg, "err", `Couldn't read the player: ${err.message}`);
+  }
+}
+
+// renderPlayerOutput paints the status. A bridge where the player cannot run
+// shows why and nothing else; one whose player block does not read shows
+// what serve runs, and no control; a control the control plane owns is not
+// offered. Every string goes in as text.
+function renderPlayerOutput(st) {
+  playerOutputLatest = st;
+  const show = (id, on) => {
+    const el = document.getElementById(id);
+    if (el) el.hidden = !on;
+  };
+  const why = document.getElementById("player-output-why");
+  if (why) {
+    why.textContent = st.why || "";
+    why.dataset.code = st.unavailable || "";
+  }
+  show("player-output-unavailable", !st.available);
+  const shown = st.available || st.unavailable === "player_block_unreadable";
+  show("player-output-status", shown);
+  show("player-output-transports-panel", shown);
+  show("player-output-switch-panel", st.available && !st.managed.enabled);
+  show("player-output-dac-panel", st.available && !st.managed.device);
+  if (!shown) {
+    show("player-output-pending-panel", false);
+    return;
+  }
+  renderPlayerOutputRunning(st.running);
+  renderPlayerOutputTransports(st.transports);
+  renderPlayerOutputConfigured(st.configured);
+  renderPlayerOutputPending(st.pending);
+}
+
+// playerOutputText sets an element's text, by id.
+function playerOutputText(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+
+// playerBindingText words a binding: its kind, model, serial's label, port
+// and stream, each as the server gave it (the serial is its label alone).
+function playerBindingText(kind, usbId, serialLabel, port, endpoint) {
+  const parts = [];
+  if (kind === "port") parts.push(`the port ${port}`);
+  else if (kind === "uniqueModel") parts.push(`the model ${usbId}`);
+  else parts.push(`the unit ${usbId}, ${serialLabel}`);
+  parts.push(`(${PLAYER_BINDING_WORDS[kind] || kind})`);
+  if (endpoint) parts.push(`on ${endpoint}`);
+  return parts.join(" ");
+}
+
+// playerRateText words a PCM rate in kHz.
+function playerRateText(hz) {
+  return hz > 0 ? `${(hz / 1000).toLocaleString(undefined, { maximumFractionDigits: 3 })} kHz` : "—";
+}
+
+// playerDSDRateText words a native DSD rate (bits a second) by its family's
+// name.
+function playerDSDRateText(hz) {
+  if (hz > 0 && hz % 44100 === 0) return `DSD${hz / 44100}`;
+  if (hz > 0 && hz % 48000 === 0) return `DSD${hz / 48000} (48 kHz family)`;
+  return `${hz} bit/s`;
+}
+
+// playerTimeText words seconds as m:ss.
+function playerTimeText(seconds) {
+  const s = Math.max(0, Math.floor(seconds || 0));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+// renderPlayerOutputRunning paints what serve runs: the player, its DAC, the
+// track it plays and what the DAC receives.
+function renderPlayerOutputRunning(run) {
+  const words = { playing: "playing", paused: "paused", stopped: "stopped", unavailable: "not available" };
+  let state;
+  if (!run.started) {
+    state = run.detail ? `Off. ${run.detail}` : "Off.";
+  } else {
+    state = `On, ${words[run.state] || run.state}`;
+    if (run.transport && run.transport !== run.state) state += ` (${run.transport})`;
+    state += ".";
+    if (run.detail) state += ` ${run.detail}`;
+    if (run.withheld && run.reason !== run.withheld) {
+      state += " The config has changed since it started: it plays nothing until the bridge restarts.";
+    }
+    if (run.lastError === "device_busy") state += " Its last play found the DAC held by another program.";
+    if (run.openHome) state += " Its OpenHome source is on the LAN.";
+  }
+  playerOutputText("player-output-state", state.trim());
+  const stateEl = document.getElementById("player-output-state");
+  if (stateEl) stateEl.dataset.reason = run.reason || "";
+
+  const b = run.binding;
+  const d = run.dac;
+  let dac = "No DAC was bound when the bridge started.";
+  if (b) {
+    dac = `Bound to ${playerBindingText(b.kind, b.usbId, b.serialLabel, b.port, b.endpoint)}.`;
+    if (d) {
+      const name = d.name ? `${d.name} (${d.usbId})` : (d.usbId || "The DAC");
+      if (d.state === "available") {
+        dac = `${name}: available. ${dac}`;
+      } else if (d.state) {
+        dac = `${name}: not available (${d.state}): ${d.reason}. ${dac}`;
+      } else {
+        dac = `${d.reason}. ${dac}`;
+      }
+      if (d.stale) dac += " The box could not be read since: this is the last reading that worked.";
+      if (d.maxPCMRate > 0) {
+        dac += ` It takes PCM up to ${playerRateText(d.maxPCMRate)} at ${d.pcmBitDepths.join(", ")} bits`;
+        dac += d.nativeDSDRates.length
+          ? `, and native DSD at ${d.nativeDSDRates.map(playerDSDRateText).join(", ")} (${d.dsdFormats.join(", ")}).`
+          : ", and no native DSD.";
+      }
+    }
+  }
+  playerOutputText("player-output-dac", dac);
+
+  const tr = run.track;
+  let track = "Nothing.";
+  if (tr) {
+    const title = tr.named ? (tr.title || tr.path.split("/").pop()) : `Queue entry ${tr.entry}`;
+    track = title;
+    if (tr.artist) track += ` · ${tr.artist}`;
+    if (tr.album) track += ` · ${tr.album}`;
+    if (tr.codec) {
+      track += ` · ${tr.codec}, ${tr.bits}-bit, ${playerRateText(tr.rateHz)}, ${tr.channels} channels`;
+    }
+    track += tr.duration > 0
+      ? ` · ${playerTimeText(tr.position)} of ${playerTimeText(tr.duration)}`
+      : ` · ${playerTimeText(tr.position)}`;
+  }
+  playerOutputText("player-output-track", track);
+  const trackEl = document.getElementById("player-output-track");
+  if (trackEl) trackEl.title = tr && tr.named ? tr.path : "";
+
+  const sig = run.signal;
+  playerOutputText("player-output-signal", sig
+    ? `${sig.format} at ${sig.transport === "pcm" ? playerRateText(sig.rateHz) : `${sig.rateHz} frames/s`}, ${sig.channels} channels, ${sig.validBits} valid bits (${sig.transport}; the stream is ${sig.state}).`
+    : "Nothing: no stream is open.");
+}
+
+// renderPlayerOutputTransports paints each transport's row: whether it plays,
+// and the three facts it rests on.
+function renderPlayerOutputTransports(transports) {
+  const body = document.getElementById("player-output-transports");
+  if (!body) return;
+  const names = { pcm: "PCM", dop: "DoP", native: "Native DSD" };
+  body.replaceChildren();
+  for (const t of transports) {
+    const tr = document.createElement("tr");
+    const name = document.createElement("td");
+    name.textContent = names[t.kind] || t.kind;
+    if (t.note) {
+      const note = document.createElement("span");
+      note.className = "hint";
+      note.textContent = t.note;
+      name.appendChild(note);
+    }
+    tr.appendChild(name);
+    for (const text of [t.plays ? "yes" : "no", t.capable, t.mode, t.approved.length ? t.approved.join(", ") : "none"]) {
+      const td = document.createElement("td");
+      td.textContent = text;
+      tr.appendChild(td);
+    }
+    body.appendChild(tr);
+  }
+}
+
+// renderPlayerOutputConfigured paints what the config asks for, and the
+// switch's word.
+function renderPlayerOutputConfigured(conf) {
+  const btn = document.getElementById("player-output-switch");
+  if (btn) btn.textContent = conf.enabled ? "Turn off" : "Turn on";
+  let text = conf.enabled ? "The config turns the player on." : "The config turns the player off.";
+  if (conf.starts) text += " The bridge starts it when it starts.";
+  else if (conf.reason) text += ` It does not start: ${conf.reason}.`;
+  playerOutputText("player-output-configured", text);
+  const b = conf.binding;
+  playerOutputText("player-output-bound", b
+    ? `The config binds ${playerBindingText(b.kind, b.usbId, b.serialLabel, b.port, b.endpoint)}.`
+    : "The config binds no DAC yet.");
+}
+
+// renderPlayerOutputPending lists what waits for the next start, in the
+// server's own words, with the restart beside it.
+function renderPlayerOutputPending(pending) {
+  const panel = document.getElementById("player-output-pending-panel");
+  const list = document.getElementById("player-output-pending");
+  if (!panel || !list) return;
+  list.replaceChildren();
+  for (const p of pending) {
+    const li = document.createElement("li");
+    li.dataset.change = p.change;
+    li.textContent = p.text;
+    list.appendChild(li);
+  }
+  panel.hidden = pending.length === 0;
+}
+
+// playerOutputPost sends one of the page's writes. The server refuses a write
+// that would stop what the player plays or holds paused now, in its config
+// turn and with nothing saved (would_interrupt), in words that say what it
+// stops; the page asks the operator in those words, and sends the write again
+// with their go-ahead (interrupt). The page never decides from its last status
+// whether a write stops anything: a controller can start a play after it. It
+// answers the server's answer, or null for a write the operator called off.
+async function playerOutputPost(path, body) {
+  try {
+    return await API.post(path, body);
+  } catch (err) {
+    if (err.code !== "would_interrupt") throw err;
+    if (!confirm(`${err.message}\n\nGo ahead?`)) return null;
+    return await API.post(path, { ...body, interrupt: true });
+  }
+}
+
+// showPlayerOutputKept says a write the operator called off saved nothing.
+function showPlayerOutputKept(msg) {
+  showMsg(msg, "ok", "Not saved: nothing changed.");
+}
+
+// showPlayerOutputChange says what a write did, in the server's words: saved
+// for the next start, whether it stopped what played, and what waits; or
+// nothing to save. A change that waits for a restart marks the console's
+// pending restart, so Settings offers it too.
+function showPlayerOutputChange(msg, r) {
+  if (!r) return;
+  const pending = (r.player && r.player.pending) || [];
+  if (r.status === "unchanged") {
+    showMsg(msg, "ok", "Nothing to save: the config says that already.");
+  } else {
+    let text = "Saved.";
+    if (r.interrupted) text += " Playback stopped.";
+    text += pending.length ? ` ${pending.map((p) => p.text).join(" ")}` : " Nothing waits for a restart.";
+    showMsg(msg, r.interrupted || pending.length ? "warn" : "ok", text);
+    if (pending.length) markRestartPending(true);
+  }
+  if (r.player) {
+    playerOutputSeq++;
+    renderPlayerOutput(r.player);
+  }
+}
+
+// wirePlayerOutputSwitch arms the switch: it turns the player on or off in
+// the config, the server asking first when that stops what plays
+// (playerOutputPost).
+function wirePlayerOutputSwitch() {
+  const btn = document.getElementById("player-output-switch");
+  const msg = document.getElementById("player-output-msg");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    const st = playerOutputLatest;
+    if (!st || !st.available) return;
+    const on = !st.configured.enabled;
+    setDisabled(btn, true);
+    try {
+      const r = await playerOutputPost("/api/output/player/enabled", { enabled: on });
+      if (r) showPlayerOutputChange(msg, r);
+      else showPlayerOutputKept(msg);
+    } catch (err) {
+      showMsg(msg, "err", `Save failed: ${err.message}`);
+    } finally {
+      setDisabled(btn, false);
+    }
+  });
+}
+
+// wirePlayerOutputDACs arms the DAC list and its choice: Find DACs lists the
+// box's cards, and Use this DAC sends the token of the one picked and the
+// kind of binding, the server asking first when the choice stops what plays
+// (playerOutputPost). A list the box no longer answers for is refused, and
+// the page asks for a new one.
+function wirePlayerOutputDACs() {
+  const find = document.getElementById("player-output-list");
+  const use = document.getElementById("player-output-use");
+  const msg = document.getElementById("player-output-dac-msg");
+  if (!find || !use) return;
+  find.addEventListener("click", async () => {
+    setDisabled(find, true);
+    try {
+      renderPlayerOutputDACs(await API.get("/api/output/player/dacs"));
+    } catch (err) {
+      showMsg(msg, "err", `Couldn't list the DACs: ${err.message}`);
+    } finally {
+      setDisabled(find, false);
+    }
+  });
+  use.addEventListener("click", async () => {
+    const picked = document.querySelector('input[name="player-output-dac"]:checked');
+    const kind = document.getElementById("player-output-kind")?.value;
+    if (!picked || !kind) {
+      showMsg(msg, "warn", "Choose a DAC in the list first.");
+      return;
+    }
+    setDisabled(use, true);
+    try {
+      const r = await playerOutputPost("/api/output/player/dac", { selection: picked.value, binding: kind });
+      if (r) showPlayerOutputChange(msg, r);
+      else showPlayerOutputKept(msg);
+    } catch (err) {
+      if (err.code === "stale_selection") {
+        document.getElementById("player-output-dacs")?.replaceChildren();
+        const choose = document.getElementById("player-output-choose");
+        if (choose) choose.hidden = true;
+      }
+      showMsg(msg, "err", `Save failed: ${err.message}`);
+    } finally {
+      setDisabled(use, false);
+    }
+  });
+}
+
+// renderPlayerOutputDACs paints the box's cards: one row per playback
+// stream, a radio for each that can be bound, and why for one that cannot.
+// Picking a row offers its kinds of binding, the server's proposal first.
+function renderPlayerOutputDACs(list) {
+  const host = document.getElementById("player-output-dacs");
+  const choose = document.getElementById("player-output-choose");
+  const kinds = document.getElementById("player-output-kind");
+  const msg = document.getElementById("player-output-dac-msg");
+  if (!host || !choose || !kinds) return;
+  host.replaceChildren();
+  choose.hidden = true;
+  if (!list.read) {
+    showMsg(msg, "err", `The box's sound cards could not be read: ${list.problem}`);
+    return;
+  }
+  if (!list.cards.length) {
+    showMsg(msg, "warn", "This box has no sound card.");
+    return;
+  }
+  showMsg(msg, "ok", "Pick the DAC, then how to bind it.");
+  const table = document.createElement("table");
+  table.className = "rows";
+  const head = document.createElement("tr");
+  for (const h of ["", "Card", "DAC", "Serial", "Port", "Stream", ""]) {
+    const th = document.createElement("th");
+    th.scope = "col";
+    th.textContent = h;
+    head.appendChild(th);
+  }
+  const thead = document.createElement("thead");
+  thead.appendChild(head);
+  table.appendChild(thead);
+  const body = document.createElement("tbody");
+  const offer = (c) => {
+    kinds.replaceChildren();
+    for (const k of c.kinds) {
+      const opt = document.createElement("option");
+      opt.value = k.kind;
+      opt.textContent = k.available ? PLAYER_BINDING_WORDS[k.kind] || k.kind : `${PLAYER_BINDING_WORDS[k.kind] || k.kind}: not now (${k.why})`;
+      opt.disabled = !k.available;
+      opt.selected = k.kind === c.recommended;
+      kinds.appendChild(opt);
+    }
+    choose.hidden = false;
+  };
+  list.cards.forEach((c, i) => {
+    const tr = document.createElement("tr");
+    const pick = document.createElement("td");
+    if (c.selection) {
+      const radio = document.createElement("input");
+      radio.type = "radio";
+      radio.name = "player-output-dac";
+      radio.value = c.selection;
+      radio.id = `player-output-dac-${i}`;
+      radio.setAttribute("aria-label", `Card ${c.card}, ${c.name || c.id}, ${c.endpoint}`);
+      radio.addEventListener("change", () => offer(c));
+      pick.appendChild(radio);
+    }
+    tr.appendChild(pick);
+    const now = c.running ? "the player plays it" : c.configured ? "the config names it" : "";
+    for (const text of [String(c.card), [c.name || c.id, c.usbId].filter(Boolean).join(" · "), c.serialLabel, c.port, c.endpoint, c.why || now]) {
+      const td = document.createElement("td");
+      td.textContent = text || "";
+      tr.appendChild(td);
+    }
+    body.appendChild(tr);
+  });
+  table.appendChild(body);
+  host.appendChild(table);
+}
+
 async function loadDiagnostics() {
   try {
     applyDiagnostics(await API.get("/api/diagnostics"));
@@ -8133,6 +8571,7 @@ function dispatchPageInit(tab) {
     case "history": initHistory(); break;
     case "settings": initSettings(); break;
     case "diagnostics": initDiagnostics(); break;
+    case "output": initOutput(); break;
     // "player" has no per-page initX — that is boot.js's job. Every other
     // tab MUST appear above: a case labelled with a tab no page renders
     // is silent, and leaves its controls dead with correct-looking

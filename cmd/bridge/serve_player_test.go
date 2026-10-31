@@ -48,6 +48,9 @@ import (
 type playerStandIn struct {
 	resolve     bool
 	holdRelease chan struct{}
+	// details, when set, is reported for a session's first occurrence just
+	// before it is heard, as the backend reports the decoder's (B470 PR 5a3).
+	details *engine.Details
 
 	mu      sync.Mutex
 	cfg     playback.Config
@@ -148,6 +151,11 @@ func (b *playerStandIn) Start(ctx context.Context, req engine.StartRequest) erro
 		notify(playback.Note{Session: req.Session, Kind: playback.NoteOpened, Unit: "card 5, the stand-in DAC",
 			Params:    alsapcm.Params{Endpoint: alsapcm.Endpoint{Card: 5, Device: 0}, Format: format.S243LE, Channels: 2, RateHz: 48000},
 			Transport: alsapcm.Transport{Kind: format.KindPCM, RateHz: 48000, Channels: 2, Format: format.S243LE, ValidBits: 24}})
+	}
+	if d, ev := b.details, req.Events; d != nil {
+		if de, ok := ev.(engine.DetailsEvents); ok {
+			de.Details(req.Session, req.First.ID, *d)
+		}
 	}
 	req.Events.Audible(req.Session, req.First.ID)
 	return nil
@@ -274,6 +282,10 @@ type playerServeCase struct {
 	// top is config written after the output block: top-level keys of the
 	// case's own.
 	top string
+	// keep boots on the config file as a first serve of the directories left
+	// it, rather than writing one from player and top: a second start that
+	// reads what the first one's console saved.
+	keep bool
 }
 
 // playerServe is a serve a test booted with its player.
@@ -356,6 +368,21 @@ func bootPlayerServeAt(t *testing.T, c playerServeCase, root, music, dataDir str
 	configPath := filepath.Join(root, "bridge.yaml")
 	text := "libraryRoots:\n  - " + music + "\ndataDir: " + dataDir + "\nadminAddress: " + admin.addr +
 		"\noutput:\n  mpd: off\n  player:\n" + c.player + c.top
+	if c.keep {
+		// The file as it was left, but for the console's address: this boot's
+		// console listens on a port of its own.
+		raw, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(string(raw), "\n")
+		for i, l := range lines {
+			if strings.HasPrefix(l, "adminAddress:") {
+				lines[i] = "adminAddress: " + admin.addr
+			}
+		}
+		text = strings.Join(lines, "\n")
+	}
 	if err := os.WriteFile(configPath, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -485,8 +512,8 @@ func (ps *playerServe) stopServe(t *testing.T) int {
 }
 
 // livePlayer changes output.player in the live config while serve runs,
-// through the holder its watcher and its player read, as the console's DAC
-// page will (6a).
+// through the holder its watcher and its player read, as the console's
+// Player page does (B601).
 func (ps *playerServe) livePlayer(t *testing.T, change func(*config.PlayerConfig)) {
 	t.Helper()
 	if err := ps.holder.Update(ps.configPath, func(c *config.Config) error {

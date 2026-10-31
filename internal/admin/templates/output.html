@@ -1,0 +1,104 @@
+{{define "content"}}
+<section class="page output">
+  <h1>Player</h1>
+  <p class="lede">
+    The bridge's own player: it plays this library, bit-exact, through a DAC
+    plugged into this box. The web player under Browse plays in your browser
+    instead.
+  </p>
+
+  {{- /* Public mode: the player never runs on a public bridge, and every
+      route of this page refuses there, a signed-in session included. The nav
+      entry is hidden by layout.html; this panel covers a bookmarked URL. */ -}}
+  {{if .IsPublic}}
+  <div class="panel" id="player-output-public">
+    <div class="panel-head"><h2>Not available on public deployments</h2></div>
+    <p class="muted">The bridge's own player plays to a DAC on the box it runs on, for the LAN that box is on. A public bridge has neither, so the player stays off here.</p>
+  </div>
+  {{else}}
+  <p class="status" id="player-output-msg" aria-live="polite"></p>
+
+  {{- /* Shown when the player cannot run on this bridge (a host that is not
+      Linux, a player block that does not read, no player wired), in
+      GET /api/output/player's own words. A block that does not read still
+      shows what serve runs below, and no control. */ -}}
+  <div class="panel" id="player-output-unavailable" hidden>
+    <div class="panel-head"><h2>The player cannot be changed here</h2></div>
+    <p id="player-output-why"></p>
+  </div>
+
+  {{- /* Everything below is painted from GET /api/output/player (app.js
+      renderPlayerOutput), on load, every five seconds while the page is in
+      view, and after each change: never seeded, since a change on this page
+      moves it. */ -}}
+  <div class="panel" id="player-output-status" hidden>
+    <div class="panel-head">
+      <h2>Status</h2>
+      <button type="button" id="player-output-refresh" class="btn">Refresh</button>
+    </div>
+    <dl>
+      <dt>Player</dt>
+      <dd id="player-output-state">—</dd>
+      <dt>DAC</dt>
+      <dd id="player-output-dac">—</dd>
+      <dt>Playing</dt>
+      <dd id="player-output-track">—</dd>
+      <dt>The DAC receives</dt>
+      <dd id="player-output-signal">—</dd>
+    </dl>
+  </div>
+
+  <div class="panel" id="player-output-transports-panel" hidden>
+    <div class="panel-head"><h2>Transports on this DAC</h2></div>
+    <p class="hint">What the player plays on the DAC it started with, and the three facts each answer rests on: what the DAC takes, how the player is set, and what the owner has approved.</p>
+    <div class="player-output-scroll">
+      <table class="rows">
+        <thead><tr><th scope="col">Transport</th><th scope="col">Plays</th><th scope="col">The DAC takes it</th><th scope="col">Set to</th><th scope="col">Approved</th></tr></thead>
+        <tbody id="player-output-transports"></tbody>
+      </table>
+    </div>
+    <p class="hint" id="player-output-dsd-later">DSD on this player comes in a later version.</p>
+  </div>
+
+  <div class="panel" id="player-output-switch-panel" hidden>
+    <div class="panel-head">
+      <h2>Turn the player on or off</h2>
+      <button type="button" id="player-output-switch" class="btn">Turn on</button>
+    </div>
+    <p class="hint" id="player-output-configured">—</p>
+  </div>
+
+  <div class="panel" id="player-output-dac-panel" hidden>
+    <div class="panel-head">
+      <h2>Choose the DAC</h2>
+      <button type="button" id="player-output-list" class="btn">Find DACs</button>
+    </div>
+    <p class="hint">The cards on this box now. A binding by <strong>serial</strong> follows this unit to any port; by <strong>model</strong>, the one unit of its model on the box; by <strong>port</strong>, whatever unit is in that port.</p>
+    <p class="hint" id="player-output-bound">—</p>
+    <p class="status" id="player-output-dac-msg" aria-live="polite"></p>
+    <div class="player-output-scroll" id="player-output-dacs"></div>
+    <div class="player-output-choose" id="player-output-choose" hidden>
+      <label for="player-output-kind">Bind it</label>
+      <select id="player-output-kind"></select>
+      <button type="button" id="player-output-use" class="btn primary">Use this DAC</button>
+    </div>
+  </div>
+
+  {{- /* What waits for the next start, and the console's own restart, as
+      Settings offers it (requestBridgeRestart, the same supervision-aware
+      words); none where the host owns restarts. */ -}}
+  <div class="panel" id="player-output-pending-panel" hidden>
+    <div class="panel-head"><h2>Waiting for a restart</h2></div>
+    <ul id="player-output-pending"></ul>
+    {{if .Managed.restart}}
+    <p class="hint" id="player-output-restart-managed">The host restarts this bridge: these changes apply when it next does.</p>
+    {{else}}
+    <p class="hint">If the bridge's player is playing, or holds a pause, a restart stops it, and it comes back stopped.</p>
+    <div class="actions">
+      <button type="button" id="player-output-restart" class="btn" data-supervised="{{if .Data.IsSupervised}}true{{else}}false{{end}}">{{if .Data.IsSupervised}}Restart now{{else}}Stop now{{end}}</button>
+    </div>
+    {{end}}
+  </div>
+  {{end}}
+</section>
+{{end}}

@@ -1,0 +1,510 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/admin"
+	"github.com/acoseac/1-bit-bridge/internal/alsa/sysfstest"
+	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/player/binding"
+	"github.com/acoseac/1-bit-bridge/internal/player/engine"
+	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
+	"github.com/acoseac/1-bit-bridge/internal/player/library"
+	"github.com/acoseac/1-bit-bridge/internal/supervision"
+	"github.com/acoseac/1-bit-bridge/internal/usbid"
+)
+
+// goBarSerial is goBarPlayer's serial, which no answer of the console's may
+// carry.
+const goBarSerial = "GOBAR-7Q2X-91KZ-4471"
+
+// goBarOff is goBarPlayer turned off: the GO bar bound, the player not
+// enabled.
+const goBarOff = "    enabled: false\n    device:\n      binding: serial\n      vendorId: \"20b1\"\n      productId: \"3009\"\n      serial: GOBAR-7Q2X-91KZ-4471\n"
+
+// consoleServe is a serve booted with its player, and its console's address.
+type consoleServe struct {
+	*playerServe
+	console string
+}
+
+// bootConsoleServe boots c and keeps the console listener's address.
+func bootConsoleServe(t *testing.T, c playerServeCase) *consoleServe {
+	t.Helper()
+	var addr string
+	with := c.with
+	c.with = func(o *serveOpts) {
+		addr = o.adminListener.Addr().String()
+		if with != nil {
+			with(o)
+		}
+	}
+	ps := bootPlayerServe(t, c)
+	return &consoleServe{playerServe: ps, console: addr}
+}
+
+// call sends one request to the console as its page does, on a transport of
+// its own, and decodes the answer into out when it is not nil; it answers the
+// status and the body.
+func (cs *consoleServe) call(t *testing.T, method, path, body string, out any) (int, string) {
+	t.Helper()
+	var rd io.Reader
+	if body != "" {
+		rd = strings.NewReader(body)
+	}
+	req, err := http.NewRequest(method, "http://"+cs.console+path, rd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	client := &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), goBarSerial) || strings.Contains(string(raw), goBarSerial[:8]) {
+		t.Fatalf("%s %s answered the serial: %s", method, path, raw)
+	}
+	if out != nil && resp.StatusCode == http.StatusOK {
+		if err := json.Unmarshal(raw, out); err != nil {
+			t.Fatalf("%s %s: %v: %s", method, path, err, raw)
+		}
+	}
+	return resp.StatusCode, string(raw)
+}
+
+// status is GET /api/output/player.
+func (cs *consoleServe) status(t *testing.T) admin.PlayerStatus {
+	t.Helper()
+	var st admin.PlayerStatus
+	if code, body := cs.call(t, http.MethodGet, "/api/output/player", "", &st); code != http.StatusOK {
+		t.Fatalf("GET /api/output/player = %d: %s", code, body)
+	}
+	return st
+}
+
+// change sends a write and requires it saved (restart) or unchanged.
+func (cs *consoleServe) change(t *testing.T, path, body, want string) consoleChange {
+	t.Helper()
+	var resp consoleChange
+	if code, raw := cs.call(t, http.MethodPost, path, body, &resp); code != http.StatusOK || resp.Status != want {
+		t.Fatalf("POST %s %s = %d %q: %s; want %s", path, body, code, resp.Status, raw, want)
+	}
+	return resp
+}
+
+// consoleChange is a write's answer as the page reads it.
+type consoleChange struct {
+	Status      string             `json:"status"`
+	Interrupted bool               `json:"interrupted"`
+	Player      admin.PlayerStatus `json:"player"`
+}
+
+// askedFirst sends a write that would stop what the player plays, as the page
+// first does: without the operator's go-ahead, so the console refuses it with
+// would_interrupt and saves nothing (the config file as it was, the engine
+// still sounding).
+func (cs *consoleServe) askedFirst(t *testing.T, path, body string, eng *engine.Engine) {
+	t.Helper()
+	before := readBytes(t, cs.configPath)
+	code, raw := cs.call(t, http.MethodPost, path, body, nil)
+	if code != http.StatusConflict || !strings.Contains(raw, `"would_interrupt"`) || !strings.Contains(raw, "stops it at once") {
+		t.Fatalf("POST %s %s without the go-ahead = %d: %s; want 409 would_interrupt", path, body, code, raw)
+	}
+	if after := readBytes(t, cs.configPath); string(after) != string(before) {
+		t.Errorf("a write refused for want of the go-ahead wrote the config")
+	}
+	if s := eng.Snapshot(); s.State() != engine.Playing {
+		t.Errorf("a write refused for want of the go-ahead stopped the player: %s", s.State())
+	}
+}
+
+// dacRow is the console's DAC list's row for card 5, the GO bar.
+func (cs *consoleServe) dacRow(t *testing.T) admin.PlayerDACCard {
+	t.Helper()
+	var list admin.PlayerDACList
+	if code, body := cs.call(t, http.MethodGet, "/api/output/player/dacs", "", &list); code != http.StatusOK || !list.Read {
+		t.Fatalf("GET /api/output/player/dacs = %d: %s", code, body)
+	}
+	for _, r := range list.Cards {
+		if r.Card == 5 {
+			return r
+		}
+	}
+	t.Fatalf("the console lists no card 5: %+v", list.Cards)
+	return admin.PlayerDACCard{}
+}
+
+// onDisk is the player block the config file holds now.
+func (cs *consoleServe) onDisk(t *testing.T) config.PlayerConfig {
+	t.Helper()
+	cfg, err := config.Load(cs.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg.Output.Player
+}
+
+// goBarTreesWithStream is goBarTrees with a playback stream for the GO bar's
+// card in /proc/asound, which the capture has none of: synthetic altsets, PCM
+// in S32_LE to 384 kHz and native DSD in DSD_U32_BE at three rates, which GET
+// /v1/outputs' DAC read projects as the card's capabilities.
+func goBarTreesWithStream(t *testing.T) outputTrees {
+	t.Helper()
+	trees := goBarTrees(t)
+	stream := "Playback:\n  Status: Stop\n  Interface 1\n    Altset 1\n    Format: S32_LE\n    Channels: 2\n" +
+		"    Rates: 44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000\n    Bits: 32\n" +
+		"  Interface 1\n    Altset 2\n    Format: DSD_U32_BE\n    Channels: 2\n    Rates: 88200, 176400, 352800\n    Bits: 32\n"
+	if err := os.WriteFile(filepath.Join(trees.proc, "asound", "card5", "stream0"), []byte(stream), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return trees
+}
+
+// transportPlays is each transport's word in st: kind=plays.
+func transportPlays(st admin.PlayerStatus) string {
+	var out []string
+	for _, tr := range st.Transports {
+		out = append(out, fmt.Sprintf("%s=%v", tr.Kind, tr.Plays))
+	}
+	return strings.Join(out, " ")
+}
+
+// requireNothingPlays fails the test unless st lists the three transports
+// and none of them plays.
+func requireNothingPlays(t *testing.T, what string, st admin.PlayerStatus) {
+	t.Helper()
+	if got := transportPlays(st); got != "pcm=false dop=false native=false" {
+		t.Errorf("%s: the transports say %s, want none playing", what, got)
+	}
+}
+
+// requirePCMPlays fails the test unless st lists PCM playing, and no DSD.
+func requirePCMPlays(t *testing.T, what string, st admin.PlayerStatus) {
+	t.Helper()
+	if got := transportPlays(st); got != "pcm=true dop=false native=false" {
+		t.Errorf("%s: the transports say %s, want pcm playing", what, got)
+	}
+}
+
+// pendingChanges are the words of what waits for a restart.
+func pendingChanges(st admin.PlayerStatus) []string {
+	var out []string
+	for _, p := range st.Pending {
+		out = append(out, p.Change)
+	}
+	return out
+}
+
+// TestTheConsoleShowsTheRunningPlayer pins the Player page's status against a
+// real serve: the player it started from the boot snapshot, the binding by
+// its kind and its serial's label, the DAC the watcher resolved with the
+// capabilities GET /v1/outputs' read projects, the track heard named from the
+// library's own row (its path the index stores) with the decoder's report,
+// the three transports, each by what the DAC takes, the mode the player runs
+// with and the tuples approved, apart, and nothing pending; no answer carries
+// the serial.
+func TestTheConsoleShowsTheRunningPlayer(t *testing.T) {
+	needsDirectorySync(t)
+	persistentMedium(t)
+	const rel = "Artist/Album (2020)/01 Song.flac"
+	standIn := newPlayerStandIn()
+	standIn.details = &engine.Details{Frames: 96000 * 200, RateHz: 96000, Bits: 24, Channels: 2, Codec: "FLAC", Lossless: true}
+	cs := bootConsoleServe(t, playerServeCase{player: goBarPlayer, standIn: standIn, files: map[string][]byte{rel: []byte("a track")},
+		with: func(o *serveOpts) { o.playerTrees = goBarTreesWithStream(t) }})
+	eng := cs.runningEngine(t)
+	availableOutput(t, eng)
+	queue(t, eng, 0, library.Reference(rel))
+	if err := eng.Play(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	awaitEngine(t, eng, "the track heard", func(s *engine.Snapshot) bool { _, ok := s.Track(); return ok })
+	st := cs.status(t)
+	run := st.Running
+	if !st.Available || !run.Started || run.State != bridgeStatePlaying || run.Transport != "playing" || run.Withheld != "" {
+		t.Fatalf("the running player: available %v, %+v", st.Available, run)
+	}
+	if b := run.Binding; b == nil || b.Kind != config.BindingSerial || b.USBID != "20b1:3009" || b.SerialLabel != usbid.New(goBarSerial).Label() {
+		t.Errorf("the boot binding: %+v", run.Binding)
+	}
+	if d := run.DAC; d == nil || d.State != "available" || d.USBID != "20b1:3009" || d.Name != "iFi (by AMR) HD USB Audio" ||
+		d.MaxPCMRate != 384000 || fmt.Sprint(d.PCMBitDepths) != "[32]" || fmt.Sprint(d.NativeDSDRates) != "[2822400 5644800 11289600]" ||
+		fmt.Sprint(d.DSDFormats) != "[DSD_U32_BE]" {
+		t.Errorf("the DAC: %+v, want the GO bar, available, with its stream's capabilities", run.DAC)
+	}
+	tr := run.Track
+	if tr == nil || !tr.Named || tr.Path != rel || tr.Codec != "FLAC" || tr.RateHz != 96000 || tr.Bits != 24 || tr.Channels != 2 || tr.Duration != 200 {
+		t.Errorf("the track heard: %+v, want %s named from the library's row with the decoder's report", tr, rel)
+	}
+	if len(st.Transports) != 3 || st.Transports[0].Kind != "pcm" || !st.Transports[0].Plays || st.Transports[1].Plays || st.Transports[2].Plays {
+		t.Fatalf("the transports: %+v, want pcm playing and no DSD", st.Transports)
+	}
+	// What the DAC takes, the mode, and the approvals are three facts: the GO
+	// bar's stream takes DoP's 24 bits at 176.4 kHz and native DSD, the player
+	// runs with DSD off, and nothing is approved, so neither plays.
+	for _, tr := range st.Transports {
+		if tr.Capable != "yes" || len(tr.Approved) != 0 {
+			t.Errorf("%s: capable %q, approved %v; want yes, and nothing approved", tr.Kind, tr.Capable, tr.Approved)
+		}
+	}
+	if dop, native := st.Transports[1], st.Transports[2]; dop.Mode != "dsdMode off, allowDoP false" || native.Mode != "dsdMode off" {
+		t.Errorf("the DSD transports' modes: %q and %q, want the boot snapshot's DSD off", dop.Mode, native.Mode)
+	}
+	if !st.Configured.Enabled || !st.Configured.Starts || len(st.Pending) != 0 {
+		t.Errorf("configured %+v, pending %v; want the boot state, nothing pending", st.Configured, st.Pending)
+	}
+	if code := cs.stopServe(t); code != 0 {
+		t.Fatalf("exit %d; stderr=%s", code, cs.stderr.String())
+	}
+}
+
+// TestTheConsoleTurnsTheRunningPlayerOffAndOnAgain: turned off from the
+// console while it plays, first without the operator's go-ahead, which is
+// refused (would_interrupt) with nothing saved and the player still playing,
+// then with it, the player's output is withheld at once (disabled):
+// playback stops, the answer says it was interrupted, no transport says it
+// plays, and the stop waits for the next start; turned on again before a
+// restart, nothing is pending, and the output comes back, playing nothing
+// until asked, PCM playable again.
+func TestTheConsoleTurnsTheRunningPlayerOffAndOnAgain(t *testing.T) {
+	needsDirectorySync(t)
+	persistentMedium(t)
+	cs := bootConsoleServe(t, playerServeCase{player: goBarPlayer, standIn: newPlayerStandIn()})
+	eng := cs.runningEngine(t)
+	availableOutput(t, eng)
+	queue(t, eng, 0, someReference(t, "0123456789abcdef"))
+	if err := eng.Play(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	awaitEngine(t, eng, "playing", func(s *engine.Snapshot) bool { return s.State() == engine.Playing })
+	cs.askedFirst(t, "/api/output/player/enabled", `{"enabled":false}`, eng)
+	off := cs.change(t, "/api/output/player/enabled", `{"enabled":false,"interrupt":true}`, "restart")
+	if !off.Interrupted || off.Player.Running.Withheld != "disabled" || strings.Join(pendingChanges(off.Player), ",") != "stop" {
+		t.Errorf("turning the playing player off: interrupted %v, withheld %q, pending %v; want interrupted, disabled, stop",
+			off.Interrupted, off.Player.Running.Withheld, pendingChanges(off.Player))
+	}
+	requireNothingPlays(t, "the answer to turning it off", off.Player)
+	awaitEngine(t, eng, "the output withheld, disabled, and playback stopped", func(s *engine.Snapshot) bool {
+		return s.Output().Known && !s.Output().Available && s.Output().Reason == "disabled" && s.State() == engine.Stopped
+	})
+	requireNothingPlays(t, "the player turned off", cs.status(t))
+	if cs.onDisk(t).Enabled {
+		t.Errorf("the file still turns the player on")
+	}
+	on := cs.change(t, "/api/output/player/enabled", `{"enabled":true}`, "restart")
+	if on.Interrupted || on.Player.Running.Withheld != "" || len(on.Player.Pending) != 0 {
+		t.Errorf("turning it on again: interrupted %v, withheld %q, pending %v; want nothing pending", on.Interrupted, on.Player.Running.Withheld, pendingChanges(on.Player))
+	}
+	s := awaitEngine(t, eng, "the output back", func(s *engine.Snapshot) bool { return s.Output().Available })
+	if s.State() != engine.Stopped {
+		t.Errorf("the output's return played: %s", s.State())
+	}
+	requirePCMPlays(t, "the player turned on again, its output back", cs.status(t))
+	if code := cs.stopServe(t); code != 0 {
+		t.Fatalf("exit %d; stderr=%s", code, cs.stderr.String())
+	}
+}
+
+// TestTheConsoleChoosesAnotherDACAndBack: the GO bar chosen by its model while
+// the player plays it by its serial is another binding: refused without the
+// operator's go-ahead (would_interrupt), nothing saved; with it, written, the
+// output
+// withheld at once (binding_changed), no transport playable, the change
+// pending; chosen again by its serial before a restart, the boot binding is
+// written as the boot snapshot held it, nothing is pending, and the output
+// comes back, playing nothing, PCM playable again.
+func TestTheConsoleChoosesAnotherDACAndBack(t *testing.T) {
+	needsDirectorySync(t)
+	persistentMedium(t)
+	cs := bootConsoleServe(t, playerServeCase{player: goBarPlayer, standIn: newPlayerStandIn()})
+	eng := cs.runningEngine(t)
+	availableOutput(t, eng)
+	queue(t, eng, 0, someReference(t, "0123456789abcdef"))
+	if err := eng.Play(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	awaitEngine(t, eng, "playing", func(s *engine.Snapshot) bool { return s.State() == engine.Playing })
+	row := cs.dacRow(t)
+	if !row.Running || !row.Configured || row.Selection == "" || row.Recommended != config.BindingSerial {
+		t.Fatalf("the GO bar's row: %+v, want the DAC the player plays, configured, with a token", row)
+	}
+	cs.askedFirst(t, "/api/output/player/dac", `{"selection":"`+row.Selection+`","binding":"uniqueModel"}`, eng)
+	model := cs.change(t, "/api/output/player/dac", `{"selection":"`+row.Selection+`","binding":"uniqueModel","interrupt":true}`, "restart")
+	if !model.Interrupted || model.Player.Running.Withheld != reasonBindingChanged || strings.Join(pendingChanges(model.Player), ",") != "dac" {
+		t.Errorf("another binding while playing: interrupted %v, withheld %q, pending %v", model.Interrupted, model.Player.Running.Withheld, pendingChanges(model.Player))
+	}
+	requireNothingPlays(t, "the answer to another binding", model.Player)
+	awaitEngine(t, eng, "binding_changed and playback stopped", func(s *engine.Snapshot) bool {
+		return s.Output().Reason == reasonBindingChanged && s.State() == engine.Stopped
+	})
+	requireNothingPlays(t, "another binding", cs.status(t))
+	if d := cs.onDisk(t).Device; d.Binding != config.BindingUniqueModel || d.Serial.Present() || d.VendorID != "20b1" {
+		t.Fatalf("the file's binding: %+v, want the GO bar by its model", d)
+	}
+	back := cs.change(t, "/api/output/player/dac", `{"selection":"`+cs.dacRow(t).Selection+`","binding":"serial"}`, "restart")
+	if back.Interrupted || back.Player.Running.Withheld != "" || len(back.Player.Pending) != 0 {
+		t.Errorf("the boot binding chosen again: interrupted %v, withheld %q, pending %v; want nothing pending", back.Interrupted, back.Player.Running.Withheld, pendingChanges(back.Player))
+	}
+	s := awaitEngine(t, eng, "the output back", func(s *engine.Snapshot) bool { return s.Output().Available })
+	if s.State() != engine.Stopped {
+		t.Errorf("the output's return played: %s", s.State())
+	}
+	requirePCMPlays(t, "the boot binding chosen again, its output back", cs.status(t))
+	if d := cs.onDisk(t).Device; d.Binding != config.BindingSerial || !d.Serial.Equal(usbid.New(goBarSerial)) || d.Transport != "" {
+		t.Errorf("the file's binding: %+v, want the boot binding as written, by serial, no transport", d)
+	}
+	cs.change(t, "/api/output/player/dac", `{"selection":"`+cs.dacRow(t).Selection+`","binding":"serial"}`, "unchanged")
+	if code := cs.stopServe(t); code != 0 {
+		t.Fatalf("exit %d; stderr=%s", code, cs.stderr.String())
+	}
+}
+
+// TestTheConsoleSaysNothingPlaysOnceTheDACIsUnplugged: the GO bar unplugged
+// while the player plays it is device_missing at the watcher's next reading,
+// and the page's status says so: the DAC missing, the player unavailable, and
+// no transport playable.
+func TestTheConsoleSaysNothingPlaysOnceTheDACIsUnplugged(t *testing.T) {
+	needsDirectorySync(t)
+	persistentMedium(t)
+	trees := goBarTrees(t)
+	// A source the test wakes: a note with events lost is read at once.
+	source := &dacEventSource{notes: make(chan struct{}, 1), done: make(chan struct{})}
+	close(source.done)
+	cs := bootConsoleServe(t, playerServeCase{player: goBarPlayer, standIn: newPlayerStandIn(), with: func(o *serveOpts) {
+		o.playerTrees = trees
+		o.hotplugSource = func(context.Context) hotplug.Source { return source }
+	}})
+	eng := cs.runningEngine(t)
+	availableOutput(t, eng)
+	queue(t, eng, 0, someReference(t, "0123456789abcdef"))
+	if err := eng.Play(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	awaitEngine(t, eng, "playing", func(s *engine.Snapshot) bool { return s.State() == engine.Playing })
+	requirePCMPlays(t, "the player playing", cs.status(t))
+	sysfstest.Apply(t, filepath.Dir(trees.proc), "unplug sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1/1-1\n")
+	source.lost.Store(true)
+	source.notes <- struct{}{}
+	awaitEngine(t, eng, "the output gone", func(s *engine.Snapshot) bool { return s.Output().Known && !s.Output().Available })
+	st := cs.status(t)
+	requireNothingPlays(t, "the DAC unplugged", st)
+	if st.Running.State != bridgeStateUnavailable || st.Running.DAC == nil || st.Running.DAC.State != string(binding.StateDeviceMissing) {
+		t.Errorf("the DAC unplugged: state %q, DAC %+v; want unavailable, device_missing", st.Running.State, st.Running.DAC)
+	}
+	if code := cs.stopServe(t); code != 0 {
+		t.Fatalf("exit %d; stderr=%s", code, cs.stderr.String())
+	}
+}
+
+// TestTheConsoleTurnsAPlayerOnForTheNextStart: a player off at boot, turned on
+// from the console, starts nothing now and says it starts at the next start;
+// the next serve of the file the console saved starts it.
+func TestTheConsoleTurnsAPlayerOnForTheNextStart(t *testing.T) {
+	needsDirectorySync(t)
+	persistentMedium(t)
+	cs := bootConsoleServe(t, playerServeCase{player: goBarOff, standIn: newPlayerStandIn()})
+	if eng := cs.engine(t); eng != nil {
+		t.Fatal("a player off at boot started")
+	}
+	st := cs.status(t)
+	if st.Running.Started || st.Running.State != "off" || st.Configured.Enabled || st.Configured.Starts || len(st.Pending) != 0 {
+		t.Fatalf("a player off at boot: running %+v, configured %+v, pending %v", st.Running, st.Configured, st.Pending)
+	}
+	on := cs.change(t, "/api/output/player/enabled", `{"enabled":true}`, "restart")
+	if on.Interrupted || !on.Player.Configured.Starts || strings.Join(pendingChanges(on.Player), ",") != "start" || on.Player.Running.Started {
+		t.Fatalf("turned on: %+v", on)
+	}
+	if cs.player.eng != nil {
+		t.Fatal("the console started the player")
+	}
+	if code := cs.stopServe(t); code != 0 {
+		t.Fatalf("exit %d; stderr=%s", code, cs.stderr.String())
+	}
+	next := bootPlayerServeAt(t, playerServeCase{keep: true, standIn: newPlayerStandIn()}, filepath.Dir(cs.configPath), cs.music, cs.dataDir)
+	next.runningEngine(t)
+	if code := next.stopServe(t); code != 0 {
+		t.Fatalf("exit %d; stderr=%s", code, next.stderr.String())
+	}
+}
+
+// TestARestartFromThePageWhilePlayingComesBackStopped: the page's restart is
+// the console's own (POST /api/restart). Asked while the player plays, it
+// stops the player with the rest of serve, which exits to be started again
+// (supervision.RestartExitCode); the next serve of that data directory starts
+// the player with its queue, stopped, playing nothing once its output is
+// back, as the page's note says.
+func TestARestartFromThePageWhilePlayingComesBackStopped(t *testing.T) {
+	needsDirectorySync(t)
+	persistentMedium(t)
+	cs := bootConsoleServe(t, playerServeCase{player: goBarPlayer, standIn: newPlayerStandIn()})
+	eng := cs.runningEngine(t)
+	availableOutput(t, eng)
+	id := queue(t, eng, 0, someReference(t, "0123456789abcdef"))
+	if err := eng.Play(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	awaitEngine(t, eng, "playing", func(s *engine.Snapshot) bool { return s.State() == engine.Playing })
+	if code, body := cs.call(t, http.MethodPost, "/api/restart", "", nil); code != http.StatusAccepted || !strings.Contains(body, `"restarting":true`) {
+		t.Fatalf("POST /api/restart while playing = %d: %s; want 202 restarting", code, body)
+	}
+	select {
+	case code := <-cs.done:
+		if code != supervision.RestartExitCode {
+			t.Fatalf("serve exited %d after the page's restart, want %d; stderr=%s", code, supervision.RestartExitCode, cs.stderr.String())
+		}
+	case <-serveGiveUp(t):
+		t.Fatalf("serve did not return after the page's restart; stderr=%s\nserve's goroutines:\n%s", cs.stderr.String(), serveStacks())
+	}
+	next := bootPlayerServeAt(t, playerServeCase{keep: true, standIn: newPlayerStandIn()}, filepath.Dir(cs.configPath), cs.music, cs.dataDir)
+	eng = next.runningEngine(t)
+	availableOutput(t, eng)
+	if s := eng.Snapshot(); s.State() != engine.Stopped || s.Len() != 1 || s.IDs()[0] != id {
+		t.Errorf("the player after the restart: %s with %v queued, want stopped with entry %d", s.State(), s.IDs(), id)
+	}
+	if code := next.stopServe(t); code != 0 {
+		t.Fatalf("exit %d; stderr=%s", code, next.stderr.String())
+	}
+}
+
+// TestTheConsoleOffersNoPlayerOffLinux: on a host that is not Linux the page's
+// status says why, and its routes refuse, reading no box and writing nothing.
+func TestTheConsoleOffersNoPlayerOffLinux(t *testing.T) {
+	needsDirectorySync(t)
+	persistentMedium(t)
+	cs := bootConsoleServe(t, playerServeCase{player: goBarOff, goos: "darwin"})
+	if st := cs.status(t); st.Available || st.Unavailable != "player_not_supported" {
+		t.Fatalf("off Linux: available %v, unavailable %q", st.Available, st.Unavailable)
+	}
+	before := readBytes(t, cs.configPath)
+	for _, r := range []struct{ method, path, body string }{
+		{http.MethodGet, "/api/output/player/dacs", ""},
+		{http.MethodPost, "/api/output/player/enabled", `{"enabled":true}`},
+		{http.MethodPost, "/api/output/player/dac", `{"selection":"x","binding":"serial"}`},
+	} {
+		if code, body := cs.call(t, r.method, r.path, r.body, nil); code != http.StatusConflict || !strings.Contains(body, "player_not_supported") {
+			t.Errorf("%s %s off Linux = %d: %s", r.method, r.path, code, body)
+		}
+	}
+	if after := readBytes(t, cs.configPath); string(after) != string(before) {
+		t.Errorf("a refused route wrote the config")
+	}
+	if code := cs.stopServe(t); code != 0 {
+		t.Fatalf("exit %d; stderr=%s", code, cs.stderr.String())
+	}
+}
