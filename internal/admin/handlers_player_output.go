@@ -77,10 +77,15 @@ type PlayerOutput interface {
 	// SameBinding reports whether two bindings name the same thing, so a
 	// choice of what the config names already writes nothing.
 	SameBinding(a, b config.PlayerDevice) bool
-	// Interrupts reports whether a change of the live config from before to
-	// after stops what the running player plays or holds paused now: the
+	// Sounding reports whether the running player plays, or holds a pause,
+	// now. A write asks it in the config's turn, before it saves: serve's
+	// player withholds its output as soon as the save is stored, so asked
+	// after the save it may have stopped already, by the write's own doing.
+	Sounding() bool
+	// Withholds reports whether a change of the live config from before to
+	// after withholds the running player's output where before did not: the
 	// player turned off, or another DAC than the one it started with.
-	Interrupts(before, after *config.Config) bool
+	Withholds(before, after *config.Config) bool
 }
 
 // Chosen's refusals, which the DAC route answers with their own codes.
@@ -463,6 +468,7 @@ func (s *Server) apiPlayerOutputEnabled(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	platform := s.deps.PlayerOutput.Platform()
+	var sounding bool
 	err := s.deps.CfgHolder.UpdateChecked(s.deps.CfgPath, func(next *config.Config, _ func() error) error {
 		if why := s.playerRefusal(next, managedPlayerEnabled); why != nil {
 			return why
@@ -474,13 +480,17 @@ func (s *Server) apiPlayerOutputEnabled(w http.ResponseWriter, r *http.Request) 
 					msg: "the player cannot run on this config: " + why.Error()}
 			}
 		}
-		return validatePlayerClone(next)
+		if err := validatePlayerClone(next); err != nil {
+			return err
+		}
+		sounding = s.deps.PlayerOutput.Sounding()
+		return nil
 	})
 	if err != nil {
 		writeCfgUpdateErr(w, err)
 		return
 	}
-	s.writePlayerChange(w, r, before)
+	s.writePlayerChange(w, r, before, sounding)
 }
 
 // playerDACRequest is POST /api/output/player/dac's body: a selection token
@@ -545,18 +555,23 @@ func (s *Server) apiPlayerOutputDAC(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, playerChangeResponse{Status: string(applyUnchanged), Player: s.playerStatus(r.Context(), before)})
 		return
 	}
+	var sounding bool
 	err = s.deps.CfgHolder.UpdateChecked(s.deps.CfgPath, func(next *config.Config, _ func() error) error {
 		if why := s.playerRefusal(next, managedPlayerDevice); why != nil {
 			return why
 		}
 		next.Output.Player.Device = dev
-		return validatePlayerClone(next)
+		if err := validatePlayerClone(next); err != nil {
+			return err
+		}
+		sounding = s.deps.PlayerOutput.Sounding()
+		return nil
 	})
 	if err != nil {
 		writeCfgUpdateErr(w, err)
 		return
 	}
-	s.writePlayerChange(w, r, before)
+	s.writePlayerChange(w, r, before, sounding)
 }
 
 // validatePlayerClone is the last check of a write's clone: the player block
@@ -573,12 +588,14 @@ func validatePlayerClone(next *config.Config) error {
 }
 
 // writePlayerChange answers a write that saved: restart, whether it stopped
-// what the player played, and the status after it.
-func (s *Server) writePlayerChange(w http.ResponseWriter, r *http.Request, before *config.Config) {
+// what the player played (sounding, as the write's turn found the player just
+// before its save, and the change withholding the output), and the status
+// after it.
+func (s *Server) writePlayerChange(w http.ResponseWriter, r *http.Request, before *config.Config, sounding bool) {
 	after := s.deps.CfgHolder.Load()
 	writeJSON(w, http.StatusOK, playerChangeResponse{
 		Status:      string(applyRestart),
-		Interrupted: s.deps.PlayerOutput.Interrupts(before, after),
+		Interrupted: sounding && s.deps.PlayerOutput.Withholds(before, after),
 		Player:      s.playerStatus(r.Context(), after),
 	})
 }

@@ -21,16 +21,19 @@ import (
 // binding or a refusal, and every call counted, so a refusal can be shown to
 // have read nothing of the box.
 type fakePlayerOutput struct {
-	mu         sync.Mutex
-	platform   string
-	report     PlayerReport
-	list       PlayerDACList
-	device     config.PlayerDevice
-	chosenErr  error
-	interrupts bool
-	calls      map[string]int
-	selection  string
-	kind       string
+	mu        sync.Mutex
+	platform  string
+	report    PlayerReport
+	list      PlayerDACList
+	device    config.PlayerDevice
+	chosenErr error
+	// sounding is what Sounding answers, nil for false; withholds is what
+	// Withholds answers.
+	sounding  func() bool
+	withholds bool
+	calls     map[string]int
+	selection string
+	kind      string
 }
 
 func newFakePlayerOutput() *fakePlayerOutput {
@@ -85,7 +88,9 @@ func (f *fakePlayerOutput) SameBinding(a, b config.PlayerDevice) bool {
 		(a.Serial.Equal(b.Serial) || !a.Serial.Present() && !b.Serial.Present())
 }
 
-func (f *fakePlayerOutput) Interrupts(*config.Config, *config.Config) bool { return f.interrupts }
+func (f *fakePlayerOutput) Sounding() bool { return f.sounding != nil && f.sounding() }
+
+func (f *fakePlayerOutput) Withholds(*config.Config, *config.Config) bool { return f.withholds }
 
 // newPlayerTestServer is newTestServer with the Player page's provider, its
 // holder told the config file as serve's boot read leaves it.
@@ -230,8 +235,9 @@ func TestThePlayerStatusCarriesEveryKey(t *testing.T) {
 }
 
 // TestThePlayerSwitchWritesTheConfigThroughTheHolder pins the switch: on and
-// off reach the file on disk and the live config, each answered restart; a
-// value the config holds already writes nothing and is answered unchanged.
+// off reach the file on disk and the live config, each answered restart, off
+// as interrupting a player that sounded until its save; a value the config
+// holds already writes nothing and is answered unchanged.
 func TestThePlayerSwitchWritesTheConfigThroughTheHolder(t *testing.T) {
 	srv, fake, cfgPath := newPlayerTestServer(t)
 	h := srv.Handler()
@@ -268,7 +274,12 @@ func TestThePlayerSwitchWritesTheConfigThroughTheHolder(t *testing.T) {
 	if got := readFileOrNil(cfgPath); !bytes.Equal(got, saved) {
 		t.Errorf("an unchanged switch rewrote the config file")
 	}
-	fake.interrupts = true
+	// The fake player sounds while the live config has it on, so it stops the
+	// moment the save is stored, as serve's player withholds its output at
+	// once: the answer still says the change interrupted it, from what the
+	// write's turn found just before its save.
+	fake.withholds = true
+	fake.sounding = func() bool { return srv.deps.CfgHolder.Load().Output.Player.Enabled }
 	resp := switchTo(false)
 	if resp.Status != "restart" || !resp.Interrupted {
 		t.Errorf("turning off a player that plays answered %q, interrupted %v; want restart, interrupted", resp.Status, resp.Interrupted)
@@ -397,14 +408,22 @@ func TestThePlayerRoutesRefuseWhereThePlayerCannotRun(t *testing.T) {
 
 // TestTheDACChoiceWritesTheBindingItNames pins the DAC route: the token and
 // the kind go to the provider, whose binding is written to the file and the
-// live config, the serial kept in the file alone and in no answer; choosing
-// the binding the config holds already writes nothing.
+// live config, the serial kept in the file alone and in no answer, and the
+// answer says the choice interrupted a player that sounded until its save;
+// choosing the binding the config holds already writes nothing.
 func TestTheDACChoiceWritesTheBindingItNames(t *testing.T) {
 	srv, fake, cfgPath := newPlayerTestServer(t)
 	h := srv.Handler()
+	// The fake player sounds until the live config names a DAC: it stops the
+	// moment the save is stored, and the answer still says it was interrupted.
+	fake.withholds = true
+	fake.sounding = func() bool { return !srv.deps.CfgHolder.Load().Output.Player.Device.Configured() }
 	code, body := playerRequest(t, h, http.MethodPost, "/api/output/player/dac", `{"selection":"tok-5","binding":"serial"}`, nil)
 	if code != http.StatusOK {
 		t.Fatalf("POST dac = %d: %s", code, body)
+	}
+	if !strings.Contains(body, `"interrupted":true`) {
+		t.Errorf("a choice that stopped the player answered: %s; want interrupted", body)
 	}
 	if fake.selection != "tok-5" || fake.kind != config.BindingSerial {
 		t.Errorf("the provider was asked for %q by %q, want tok-5 by serial", fake.selection, fake.kind)

@@ -544,15 +544,19 @@ func usbTransport(d config.PlayerDevice) config.PlayerDevice {
 	return d
 }
 
-// Interrupts reports whether a change of the live config from before to after
-// stops what the running player plays or holds paused now: its output was not
-// withheld, the engine sounds, and after it is.
-func (c *consolePlayer) Interrupts(before, after *config.Config) bool {
+// Sounding reports whether the running player's engine sounds now (sounding),
+// false for a player that does not run. The console's writes ask it in their
+// config turn, before the save that serve's player withholds its output on.
+func (c *consolePlayer) Sounding() bool {
 	eng := c.engine()
-	if eng == nil {
-		return false
-	}
-	return sounding(eng.Snapshot()) && c.withheld(before) == "" && c.withheld(after) != ""
+	return eng != nil && sounding(eng.Snapshot())
+}
+
+// Withholds reports whether a change of the live config from before to after
+// withholds the running player's output where before did not, as serve's
+// player hears it (withheld).
+func (c *consolePlayer) Withholds(before, after *config.Config) bool {
+	return c.withheld(before) == "" && c.withheld(after) != ""
 }
 
 // DACs lists the box's playback cards from one reading: each USB card's
