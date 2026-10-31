@@ -66839,3 +66839,24 @@ check at :33-43, a strict increase at :71-72), so this test-only branch takes
 `TestQualificationRunbookVersion` pins and 2d.2's first owner step), and a note
 of what 21 covers. B601 (#1371) and B604 (#1369) raise it too; their order is
 set at merge.
+
+**Gates**, at 6ca7169f with the tree clean, each through the build slot.
+`make fmt vet test` under legion0's own umask, 002, failed in four packages
+(`cmd/bridge`, `internal/player/openhome`, `internal/player/playback`,
+`internal/player/qualification`), every failure "untrusted approval directory"
+or what follows from it (no approved tuple, so no `dsf` or `dff` codec, a null
+`dsdPlayback`). `t.TempDir()` makes each test's directory with `os.Mkdir(dir,
+0777)`, which umask 002 leaves group-writable, and the approval reader refuses
+a group-writable directory (`trustedFile`, approval.go:425-432), as it should.
+The base's qualification package fails the same way under 002, 43 failures, and
+the branch's passes under 022, CI's umask: the host's, not this change's, and
+handed on as a follow-up (the fixtures could make their state directory 0700).
+Under `umask 022`: `make fmt vet test` passed, 79 packages, the engine in
+26.7 s, and `make fmt` rewrote nothing; `make build-all` passed, its
+`check-build-tags` and the six targets; `make docs-check` passed, its three
+self-tests and the budgets (player.md 98.4%, 98.9% with the rules patch,
+measured over a scratch root by the checker's own functions, since this
+session cannot write `.claude/`). The qualification gate's own command
+(`go run -tags ts_omit_webclient,ts_omit_debugeventbus
+./scripts/qualification-version -base e242ce2c -head HEAD`) says OK, and
+against the red-first commit alone it refuses, 20 -> 20.
