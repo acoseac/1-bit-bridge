@@ -68876,3 +68876,29 @@ to the orchestrator as a patch.
 
 **Qualification version 24**: `cmd/bridge/serve_player*` and
 `internal/config/` are guarded prefixes; the runbook's five pins follow.
+
+**Checks**, on fa37b47e (legion0, Linux x86-64, go1.27.3, umask 022, each Go
+command through the build lock):
+- `make fmt vet test build-all P=2`: exit 0. 80 packages ok and 13 with no
+  test files, the Linux-only `internal/alsapcm`, `internal/atomicwrite` and
+  `internal/player/hotplug` among them; `cmd/bridge` 771.4 s,
+  `internal/admin` 905.0 s; `check-build-tags: OK` and the six targets built;
+  `make fmt` changed nothing.
+- The first full run, on c3567d3a, failed `scripts/third-party-licenses`
+  (`TestBuildTagsAgree`, `TestRealTreeBuildSiteCensus`): a `go build
+  ./cmd/bridge/` of this session's had left a 75 MB `bridge` binary at the
+  worktree's root, which git ignores and the census walk reads as an
+  unreviewed build site. Removed, with a `scripts/__pycache__` this session's
+  budget checker left by importing `check-doc-budgets.py`, the second run on
+  c3567d3a passed whole, and so did the third, above.
+- `make docs-check`: ok; with the rules patch applied (a shadow tree over the
+  worktree's tracked files): `CLAUDE.md 71.9%; player.md 96.6%; worst load,
+  player_openhome_test.go 61.1%`. The 44 test names the patch cites exist.
+- `TestEveryCitedTestNameExists` and `TestNoDocblockNamesAnotherDeclaration`
+  pass.
+- `scripts/qualification-version -base 8f3d3934 -head HEAD`: `qualification
+  version OK: 8f3d3934..HEAD`; with `-head 582f6b75`, the guarded changes
+  before the raise: `guarded code changed without qualificationVersion
+  increase (23 -> 23)`, exit 1.
+- Not run here: the node harness and the console's other node tests (no node
+  on legion0); CI's legs run them.
