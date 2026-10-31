@@ -171,10 +171,11 @@ type PlayerRunning struct {
 	// OpenHome is the player's OpenHome Source listening on the LAN.
 	OpenHome bool `json:"openHome"`
 	// OpenHomeDetail is why the Source the boot snapshot asked for is not on
-	// the LAN now (no LAN address bound yet, a surface that did not start, a
-	// player that did not), "" while it is and while the boot snapshot did
-	// not ask for it. A restart is not its cure, and the page never offers
-	// one for it.
+	// the LAN now (no LAN address bound yet, a bind that failed, a surface
+	// that did not start, a player that did not), "" while it is and while
+	// the boot snapshot did not ask for it. The surface follows the box's
+	// addresses itself and tries a failed bind again at its next listing, so
+	// the page offers no restart for it.
 	OpenHomeDetail string `json:"openHomeDetail"`
 	// Binding is the binding the player started with, nil for none.
 	Binding *PlayerBinding `json:"binding"`
@@ -604,9 +605,12 @@ func (s *Server) apiPlayerOutputOpenHome(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	// The console's lock, held from before's Load to the answer, as the
-	// other two writes hold it: they are the writers of output.player in the
-	// process, and this one keeps their answers' before and after the
-	// configs their updates changed.
+	// page's other two writes hold it: the three are the writers of
+	// output.player in the process. This one compares nothing for an
+	// interruption, and takes it for its unchanged answer, which reads
+	// before: without it, a second switch's before predates the first's
+	// save, and the change the first saves is answered unchanged, nothing
+	// saved (TestTheOpenHomeSwitchWaitsItsTurnBehindAnotherPlayerWrite).
 	s.lockPlayerWrite()
 	defer s.mu.Unlock()
 	before := s.deps.CfgHolder.Load()

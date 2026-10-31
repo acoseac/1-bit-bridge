@@ -217,6 +217,9 @@ func TestThePlayerPageAsksOnlyInTheServersWords(t *testing.T) {
 		!strings.Contains(openhome, "const on = !st.configured.openHome;") {
 		t.Errorf("the OpenHome switch does not send the opposite of the opt-in the config holds to its route")
 	}
+	if !strings.Contains(openhome, "if (!st || !st.available || st.managed.openHome) return;") {
+		t.Errorf("a click dispatched to the OpenHome switch where the control plane owns it still sends")
+	}
 }
 
 // TestThePlayerPageAsksBeforeAWriteThatStopsPlayback runs the shipped

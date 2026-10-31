@@ -7259,10 +7259,13 @@ function renderPlayerOutput(st) {
   renderPlayerOutputTransports(st.transports);
   renderPlayerOutputConfigured(st.configured);
   renderPlayerOutputOpenHome(st.configured);
+  // The note is a live region and the status is painted every five seconds:
+  // its text is set only when it changes, so it is announced once.
   const note = document.getElementById("player-output-openhome-note");
+  const noteText = playerOpenHomeNote(st.configured, st.running.started, st.pending);
   if (note) {
-    note.textContent = playerOpenHomeNote(st.configured, st.running.started, st.pending);
-    note.hidden = note.textContent === "";
+    if (note.textContent !== noteText) note.textContent = noteText;
+    note.hidden = noteText === "";
   }
   renderPlayerOutputPending(st.pending);
 }
@@ -7321,8 +7324,9 @@ function renderPlayerOutputRunning(run) {
     }
     if (run.lastError === "device_busy") state += " Its last play found the DAC held by another program.";
     // What serves, whatever the config says now: the Source on the LAN, or,
-    // for one the bridge started with and that is not, the server's reason,
-    // which a restart does not cure, so no restart is offered for it.
+    // for one the bridge started with and that is not, the server's reason.
+    // The surface follows the box's addresses itself, so no restart is
+    // offered for it.
     if (run.openHome) state += " Its OpenHome source is on the LAN.";
     else if (run.openHomeDetail) state += ` ${run.openHomeDetail}`;
   }
@@ -7545,14 +7549,15 @@ function wirePlayerOutputSwitch() {
 // switch stops nothing the player plays, so the server never answers it
 // would_interrupt, and its route takes no go-ahead. It asks nothing of its
 // own either: a port another listener binds is the server's refusal, in its
-// words.
+// words. A click dispatched to it while the control plane owns the opt-in
+// sends nothing, as a tray's managed row sends nothing.
 function wirePlayerOutputOpenHome() {
   const btn = document.getElementById("player-output-openhome-switch");
   const msg = document.getElementById("player-output-msg");
   if (!btn) return;
   btn.addEventListener("click", async () => {
     const st = playerOutputLatest;
-    if (!st || !st.available) return;
+    if (!st || !st.available || st.managed.openHome) return;
     const on = !st.configured.openHome;
     setDisabled(btn, true);
     try {

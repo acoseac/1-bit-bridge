@@ -233,11 +233,12 @@ func (c *consolePlayer) pending(live *config.Config, serving bool) []admin.Playe
 
 // openHomeDetail is why the OpenHome Source the player started with is not
 // on the LAN now, "" while it is (serving: GET /v1/outputs' view lists it)
-// and for a player serve started without its opt-in, or did not start (its
-// own status says why). It reads ready before eng, and the surface under the
-// player's mu, as GET /v1/outputs' view does, and the surface's status, which
-// copies. None of its reasons is one a restart cures, and the page offers no
-// restart for it.
+// and for a plan that did not start the player with its opt-in (the player's
+// own status says why it is off). It reads ready before eng, and the surface
+// under the player's mu, as GET /v1/outputs' view does, and the surface's
+// status, which copies. The surface follows the box's addresses itself and
+// tries a failed bind again at its next listing, so the page offers no
+// restart for any of these.
 func (c *consolePlayer) openHomeDetail(serving bool) string {
 	if serving || !c.plan.openhome || c.p == nil {
 		return ""
