@@ -950,6 +950,13 @@ func List(backupsRoot string) ([]snapshotEntry, error) {
 // is not a folder (SetReadDirForTest).
 var readDir = os.ReadDir
 
+// errNotADirectory is what a listing of the backups folder answers when
+// something that is not a folder stands where it goes. It is never
+// syscall.ENOTDIR: on Windows that is Errno(ERROR_PATH_NOT_FOUND), which
+// matches os.ErrNotExist, so a caller asking whether the folder is there
+// would read the answer as no.
+var errNotADirectory = errors.New("not a directory")
+
 // readBackupsDir is the listing of the backups folder List and the orphan
 // sweep take: nothing, and no error, while nothing is there (no snapshot
 // has been taken yet), and an error while something that is not a folder

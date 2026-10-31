@@ -22,6 +22,10 @@ func SetTryLockForTest(fn func(*os.File) error) (restore func()) {
 	return func() { tryLock = prev }
 }
 
+// ErrNotADirectory is what a listing of the backups folder answers when
+// something that is not a folder stands where it goes.
+var ErrNotADirectory = errNotADirectory
+
 // SetReadDirForTest replaces the listing of the backups folder List and the
 // orphan sweep take, and returns the restore.
 func SetReadDirForTest(fn func(name string) ([]os.DirEntry, error)) (restore func()) {

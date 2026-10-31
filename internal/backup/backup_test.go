@@ -881,18 +881,22 @@ func TestListAcceptsMissingDir(t *testing.T) {
 }
 
 // TestWhatIsWhereTheBackupsFolderGoesListsAlikeOnEveryOS: os.ReadDir of a
-// regular file answers ENOTDIR on Linux and macOS, and ERROR_PATH_NOT_FOUND
-// on Windows, which matches os.ErrNotExist, so List took a file where the
-// backups folder goes for a folder not made yet and listed nothing, where
-// Linux and macOS fail the listing: the console answered 200 with no
-// backups on Windows and 500 elsewhere (B604's fourth round, CI's Windows
-// leg of TestABackupThatFailsAnswersWithoutAPath). The seam lists as Windows
-// does, so every OS runs Windows's shape beside its own. A folder not made
-// yet lists nothing. A file there, or a link to nothing, through which a
-// snapshot cannot make the folder either, fails the listing with the error
-// macOS gives a file, never as an absence, and so does the orphan sweep,
-// which lists the same folder.
+// regular file answers ENOTDIR on every OS, and on Windows ENOTDIR is
+// ERROR_PATH_NOT_FOUND, which matches os.ErrNotExist, so List took a file
+// where the backups folder goes for a folder not made yet and listed
+// nothing, where Linux and macOS fail the listing: the console answered 200
+// with no backups on Windows and 500 elsewhere (B604's fourth round, CI's
+// Windows leg of TestABackupThatFailsAnswersWithoutAPath). The seam lists as
+// Windows does, so every OS runs Windows's shape beside its own. A folder
+// not made yet lists nothing. A file there, or a link to nothing, through
+// which a snapshot cannot make the folder either, fails the listing with
+// one answer on every OS, never an absence and never syscall.ENOTDIR, which
+// would be one on Windows; and so does the orphan sweep, which lists the
+// same folder.
 func TestWhatIsWhereTheBackupsFolderGoesListsAlikeOnEveryOS(t *testing.T) {
+	if runtime.GOOS == "windows" && !errors.Is(syscall.ENOTDIR, fs.ErrNotExist) {
+		t.Error("ENOTDIR is no longer an absence on Windows: errNotADirectory's reason is stale")
+	}
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "not made yet")
 	file := filepath.Join(dir, "a file")
@@ -937,13 +941,15 @@ func TestWhatIsWhereTheBackupsFolderGoesListsAlikeOnEveryOS(t *testing.T) {
 	}
 }
 
-// requireNotAFolder fails the test unless err is the error macOS gives a
-// listing of a file: open and ENOTDIR, naming at, and no absence.
+// requireNotAFolder fails the test unless err is the listing's answer for a
+// path where something that is not a folder stands: open and
+// ErrNotADirectory, naming at, and neither an absence nor syscall.ENOTDIR.
 func requireNotAFolder(t *testing.T, call, at string, err error) {
 	t.Helper()
 	var pe *fs.PathError
-	if !errors.As(err, &pe) || pe.Op != "open" || pe.Path != at || !errors.Is(err, syscall.ENOTDIR) || errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("%s of %q = %v; want open and ENOTDIR naming it, and no absence", call, filepath.Base(at), err)
+	if !errors.As(err, &pe) || pe.Op != "open" || pe.Path != at || !errors.Is(err, backup.ErrNotADirectory) ||
+		errors.Is(err, syscall.ENOTDIR) || errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("%s of %q = %v; want open and ErrNotADirectory naming it, and no absence", call, filepath.Base(at), err)
 	}
 }
 
