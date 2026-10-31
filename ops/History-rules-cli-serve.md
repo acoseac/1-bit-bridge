@@ -3014,8 +3014,9 @@ inspection whose verdict the player's strict writer reads as it starts.
 An `fs.ErrNotExist` sends the line up the data directory's path
 (`dataDirNotThere`; round 2, CodeRabbit on #1368). The inspection resolves
 every link in the path, so a link to nothing answers ENOENT as a directory not
-made yet does, while serve's `MkdirAll` stops at such a link with EEXIST
-(`TestServeCannotMakeADataDirectoryThroughALinkToNothing` measures it) and
+made yet does, while serve's `MkdirAll` stops at such a link with EEXIST, as
+this user and as root, whose walk is fsutil's own (`mkdirAllAsRoot`)
+(`TestServeCannotMakeADataDirectoryThroughALinkToNothing` measures both) and
 serve then goes on without its lock and starts no player; until round 2 every
 ENOENT read ok, "serve makes it". From the data directory up, the nearest entry
 of its path that is there (`os.Lstat`, the kernel resolving the entries above

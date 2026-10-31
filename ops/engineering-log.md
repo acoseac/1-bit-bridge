@@ -66744,9 +66744,10 @@ bridge serve makes it". `InspectMedium` resolves every link in the path
 nothing, or one below such a link, answers the same ENOENT. Serve cannot make
 it: `lockServeDataDir`'s `fsutil.MkdirAll` stops at the link with EEXIST
 (`os.MkdirAll` stats ENOENT, its `Mkdir` finds the link's entry, and the Lstat
-after shows a link; as root `os.Root.Mkdir` answers the same), and serve goes
-on without its lock (deliberately: a bridge whose storage cannot lock still
-starts), so planServePlayer starts no player.
+after shows a link; as root fsutil's own walk, `mkdirAllAsRoot`, gets the same
+EEXIST from `os.Root.Mkdir` and makes nothing), and serve goes on without its
+lock (deliberately: a bridge whose storage cannot lock still starts), so
+planServePlayer starts no player.
 
 **The fix.** In that branch the line now judges, from the data directory up
 by `os.Lstat`, the nearest entry of its path that is there, the kernel
@@ -66777,12 +66778,32 @@ passed; a link cycle and a regular-file ancestor were a warn with the service
 user's advice and failed on the advice; an injected ENOENT beside an ancestor
 this user cannot search read ok and failed. The table's mocked ENOENT case moved
 from the host's `/data` to a path under `t.TempDir()`. All pass from 2ceba8ea.
+The fix commit sharpened what three of those cases assert, once EvalSymlinks'
+bare ENOTDIR showed that "the entry the error names" named nothing: the
+not-checked summary names the data directory before the error, and the path's
+advice reads "mend what the error names on the way to the data directory" (it
+read "mend the entry the error names"); the table's EACCES case took the new
+summary. R2-C0, below, puts round 1's doctor code under the final tests. The
+premise's half as root (`as root`, through `fsutil.SimulateRootForTest(4242,
+4243)`) followed in 44cdf551 and passed at once, as a premise does.
 
 **Controls**, on 2ceba8ea, predicted, compiled, restored from git: R2-C1, the
 inspection's ENOENT straight to ok again, turned red exactly the four
 link-to-nothing cases and the walk's permission case, the live link and the
 premise green; R2-C2, the service user's advice on every not-checked line,
-turned red exactly the cycle and the regular-file cases.
+turned red exactly the cycle and the regular-file cases. On 44cdf551: R2-C0,
+round 1's `doctor_player_storage.go` (832e117b) under the final tests, turned
+red exactly the four link cases, the cycle, the regular-file ancestor, the
+walk's permission case and the table's EACCES case (its wording), 18 passing,
+the live link and both halves of the premise among them, and what it printed
+is round 1's: ok, "does not exist yet; bridge serve makes it", for each link
+case, and "not checked: EvalSymlinks: too many links" and "not checked: not a
+directory", naming no entry, for the cycle and the file. R2-C3, fsutil's
+`mkdirAsRoot` taking an entry that is there for a directory it made, turned
+red exactly the premise's half as root: the lock then failed opening
+`link/server.lock` and making `dangling/data`, both ENOENT and neither EEXIST,
+and the walk gave both links the simulated owner. So that half runs fsutil's
+own walk, which `os.MkdirAll`'s identical EEXIST could not show.
 
 **Not changed.** Serve itself, which goes on after a lock error that is not
 contention on purpose (`serve_lock.go`, `serve_data_dir_lock_test.go`): telling
