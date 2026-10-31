@@ -397,9 +397,11 @@ func (c *consolePlayer) name(ctx context.Context, t engine.Track) (consoleNamed,
 // transports is each transport's standing on the running player's DAC: what
 // it plays now, from the three facts it rests on (the DAC's altsets, the mode
 // the player runs with, and the backend's published epoch of approved
-// tuples), never one of them alone.
+// tuples), never one of them alone, and only while the player's output takes
+// playback (outputOpen).
 func (c *consolePlayer) transports(run admin.PlayerRunning, facts api.BridgeOutputFacts, snap *engine.Snapshot) []admin.PlayerTransport {
 	running := snap != nil
+	open, closedBy := outputOpen(run, snap)
 	dac := run.DAC
 	known := dac != nil && dac.Name != ""
 	capable := func(ok bool) string {
@@ -416,7 +418,7 @@ func (c *consolePlayer) transports(run admin.PlayerRunning, facts api.BridgeOutp
 	if facts.Listed {
 		mode, allowDoP = facts.DSDMode, facts.AllowDoP
 	}
-	pcm := admin.PlayerTransport{Kind: "pcm", Plays: running, Approved: []string{}, Mode: "always on: PCM needs no approval",
+	pcm := admin.PlayerTransport{Kind: "pcm", Plays: open, Approved: []string{}, Mode: "always on: PCM needs no approval",
 		Note: "PCM plays bit-exact, as the file holds it: nothing is resampled, converted or mixed."}
 	dop := admin.PlayerTransport{Kind: "dop", Approved: []string{}, Mode: "dsdMode " + mode + ", allowDoP " + fmt.Sprint(allowDoP)}
 	native := admin.PlayerTransport{Kind: "native", Approved: []string{}, Mode: "dsdMode " + mode}
@@ -446,13 +448,42 @@ func (c *consolePlayer) transports(run admin.PlayerRunning, facts api.BridgeOutp
 			native.Note += " No approval is in force (" + p.Reason + ")."
 		}
 	}
-	dop.Plays, native.Plays = running && len(dop.Approved) > 0, running && len(native.Approved) > 0
-	if !running {
-		for _, t := range []*admin.PlayerTransport{&pcm, &dop, &native} {
-			t.Note = "The player is not running, so nothing plays. " + t.Note
-		}
+	dop.Plays, native.Plays = open && len(dop.Approved) > 0, open && len(native.Approved) > 0
+	prefix := ""
+	switch {
+	case !running:
+		prefix = "The player is not running, so nothing plays. "
+	case !open:
+		prefix = "The player's output is not available now (" + closedBy + "), so nothing plays. "
+	}
+	for _, t := range []*admin.PlayerTransport{&pcm, &dop, &native} {
+		t.Note = prefix + t.Note
 	}
 	return []admin.PlayerTransport{pcm, dop, native}
+}
+
+// outputOpen reports whether the running player's output takes playback now,
+// and the word for why not: the live config withholds nothing (the player
+// turned off, another DAC chosen), GET /v1/outputs' element is not
+// unavailable, and the engine's output report is available. An engine runs on
+// while its output is withheld or its DAC is gone, and plays nothing then.
+func outputOpen(run admin.PlayerRunning, snap *engine.Snapshot) (bool, string) {
+	switch {
+	case snap == nil:
+		return false, ""
+	case run.Withheld != "":
+		return false, run.Withheld
+	case run.State == bridgeStateUnavailable:
+		return false, run.Reason
+	case !snap.Output().Known:
+		return false, reasonOutputUnknown
+	case !snap.Output().Available:
+		if r := snap.Output().Reason; r != "" {
+			return false, r
+		}
+		return false, reasonOutputUnavailable
+	}
+	return true, ""
 }
 
 // bootDSDMode and bootAllowDoP are the boot snapshot's DSD settings, which

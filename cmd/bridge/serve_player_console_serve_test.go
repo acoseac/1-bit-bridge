@@ -13,8 +13,11 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/admin"
+	"github.com/acoseac/1-bit-bridge/internal/alsa/sysfstest"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/player/binding"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
+	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
 	"github.com/acoseac/1-bit-bridge/internal/player/library"
 	"github.com/acoseac/1-bit-bridge/internal/supervision"
 	"github.com/acoseac/1-bit-bridge/internal/usbid"
@@ -155,6 +158,32 @@ func goBarTreesWithStream(t *testing.T) outputTrees {
 	return trees
 }
 
+// transportPlays is each transport's word in st: kind=plays.
+func transportPlays(st admin.PlayerStatus) string {
+	var out []string
+	for _, tr := range st.Transports {
+		out = append(out, fmt.Sprintf("%s=%v", tr.Kind, tr.Plays))
+	}
+	return strings.Join(out, " ")
+}
+
+// requireNothingPlays fails the test unless st lists the three transports
+// and none of them plays.
+func requireNothingPlays(t *testing.T, what string, st admin.PlayerStatus) {
+	t.Helper()
+	if got := transportPlays(st); got != "pcm=false dop=false native=false" {
+		t.Errorf("%s: the transports say %s, want none playing", what, got)
+	}
+}
+
+// requirePCMPlays fails the test unless st lists PCM playing, and no DSD.
+func requirePCMPlays(t *testing.T, what string, st admin.PlayerStatus) {
+	t.Helper()
+	if got := transportPlays(st); got != "pcm=true dop=false native=false" {
+		t.Errorf("%s: the transports say %s, want pcm playing", what, got)
+	}
+}
+
 // pendingChanges are the words of what waits for a restart.
 func pendingChanges(st admin.PlayerStatus) []string {
 	var out []string
@@ -228,9 +257,10 @@ func TestTheConsoleShowsTheRunningPlayer(t *testing.T) {
 
 // TestTheConsoleTurnsTheRunningPlayerOffAndOnAgain: turned off from the
 // console while it plays, the player's output is withheld at once (disabled):
-// playback stops, the answer says it was interrupted, and the stop waits for
-// the next start; turned on again before a restart, nothing is pending, and
-// the output comes back, playing nothing until asked.
+// playback stops, the answer says it was interrupted, no transport says it
+// plays, and the stop waits for the next start; turned on again before a
+// restart, nothing is pending, and the output comes back, playing nothing
+// until asked, PCM playable again.
 func TestTheConsoleTurnsTheRunningPlayerOffAndOnAgain(t *testing.T) {
 	needsDirectorySync(t)
 	persistentMedium(t)
@@ -247,9 +277,11 @@ func TestTheConsoleTurnsTheRunningPlayerOffAndOnAgain(t *testing.T) {
 		t.Errorf("turning the playing player off: interrupted %v, withheld %q, pending %v; want interrupted, disabled, stop",
 			off.Interrupted, off.Player.Running.Withheld, pendingChanges(off.Player))
 	}
+	requireNothingPlays(t, "the answer to turning it off", off.Player)
 	awaitEngine(t, eng, "the output withheld, disabled, and playback stopped", func(s *engine.Snapshot) bool {
 		return s.Output().Known && !s.Output().Available && s.Output().Reason == "disabled" && s.State() == engine.Stopped
 	})
+	requireNothingPlays(t, "the player turned off", cs.status(t))
 	if cs.onDisk(t).Enabled {
 		t.Errorf("the file still turns the player on")
 	}
@@ -261,6 +293,7 @@ func TestTheConsoleTurnsTheRunningPlayerOffAndOnAgain(t *testing.T) {
 	if s.State() != engine.Stopped {
 		t.Errorf("the output's return played: %s", s.State())
 	}
+	requirePCMPlays(t, "the player turned on again, its output back", cs.status(t))
 	if code := cs.stopServe(t); code != 0 {
 		t.Fatalf("exit %d; stderr=%s", code, cs.stderr.String())
 	}
@@ -268,9 +301,10 @@ func TestTheConsoleTurnsTheRunningPlayerOffAndOnAgain(t *testing.T) {
 
 // TestTheConsoleChoosesAnotherDACAndBack: the GO bar chosen by its model while
 // the player plays it by its serial is another binding: written, the output
-// withheld at once (binding_changed), the change pending; chosen again by its
-// serial before a restart, the boot binding is written as the boot snapshot
-// held it, nothing is pending, and the output comes back, playing nothing.
+// withheld at once (binding_changed), no transport playable, the change
+// pending; chosen again by its serial before a restart, the boot binding is
+// written as the boot snapshot held it, nothing is pending, and the output
+// comes back, playing nothing, PCM playable again.
 func TestTheConsoleChoosesAnotherDACAndBack(t *testing.T) {
 	needsDirectorySync(t)
 	persistentMedium(t)
@@ -290,9 +324,11 @@ func TestTheConsoleChoosesAnotherDACAndBack(t *testing.T) {
 	if !model.Interrupted || model.Player.Running.Withheld != reasonBindingChanged || strings.Join(pendingChanges(model.Player), ",") != "dac" {
 		t.Errorf("another binding while playing: interrupted %v, withheld %q, pending %v", model.Interrupted, model.Player.Running.Withheld, pendingChanges(model.Player))
 	}
+	requireNothingPlays(t, "the answer to another binding", model.Player)
 	awaitEngine(t, eng, "binding_changed and playback stopped", func(s *engine.Snapshot) bool {
 		return s.Output().Reason == reasonBindingChanged && s.State() == engine.Stopped
 	})
+	requireNothingPlays(t, "another binding", cs.status(t))
 	if d := cs.onDisk(t).Device; d.Binding != config.BindingUniqueModel || d.Serial.Present() || d.VendorID != "20b1" {
 		t.Fatalf("the file's binding: %+v, want the GO bar by its model", d)
 	}
@@ -304,10 +340,48 @@ func TestTheConsoleChoosesAnotherDACAndBack(t *testing.T) {
 	if s.State() != engine.Stopped {
 		t.Errorf("the output's return played: %s", s.State())
 	}
+	requirePCMPlays(t, "the boot binding chosen again, its output back", cs.status(t))
 	if d := cs.onDisk(t).Device; d.Binding != config.BindingSerial || !d.Serial.Equal(usbid.New(goBarSerial)) || d.Transport != "" {
 		t.Errorf("the file's binding: %+v, want the boot binding as written, by serial, no transport", d)
 	}
 	cs.change(t, "/api/output/player/dac", `{"selection":"`+cs.dacRow(t).Selection+`","binding":"serial"}`, "unchanged")
+	if code := cs.stopServe(t); code != 0 {
+		t.Fatalf("exit %d; stderr=%s", code, cs.stderr.String())
+	}
+}
+
+// TestTheConsoleSaysNothingPlaysOnceTheDACIsUnplugged: the GO bar unplugged
+// while the player plays it is device_missing at the watcher's next reading,
+// and the page's status says so: the DAC missing, the player unavailable, and
+// no transport playable.
+func TestTheConsoleSaysNothingPlaysOnceTheDACIsUnplugged(t *testing.T) {
+	needsDirectorySync(t)
+	persistentMedium(t)
+	trees := goBarTrees(t)
+	// A source the test wakes: a note with events lost is read at once.
+	source := &dacEventSource{notes: make(chan struct{}, 1), done: make(chan struct{})}
+	close(source.done)
+	cs := bootConsoleServe(t, playerServeCase{player: goBarPlayer, standIn: newPlayerStandIn(), with: func(o *serveOpts) {
+		o.playerTrees = trees
+		o.hotplugSource = func(context.Context) hotplug.Source { return source }
+	}})
+	eng := cs.runningEngine(t)
+	availableOutput(t, eng)
+	queue(t, eng, 0, someReference(t, "0123456789abcdef"))
+	if err := eng.Play(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	awaitEngine(t, eng, "playing", func(s *engine.Snapshot) bool { return s.State() == engine.Playing })
+	requirePCMPlays(t, "the player playing", cs.status(t))
+	sysfstest.Apply(t, filepath.Dir(trees.proc), "unplug sys/devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1/1-1\n")
+	source.lost.Store(true)
+	source.notes <- struct{}{}
+	awaitEngine(t, eng, "the output gone", func(s *engine.Snapshot) bool { return s.Output().Known && !s.Output().Available })
+	st := cs.status(t)
+	requireNothingPlays(t, "the DAC unplugged", st)
+	if st.Running.State != bridgeStateUnavailable || st.Running.DAC == nil || st.Running.DAC.State != string(binding.StateDeviceMissing) {
+		t.Errorf("the DAC unplugged: state %q, DAC %+v; want unavailable, device_missing", st.Running.State, st.Running.DAC)
+	}
 	if code := cs.stopServe(t); code != 0 {
 		t.Fatalf("exit %d; stderr=%s", code, cs.stderr.String())
 	}
