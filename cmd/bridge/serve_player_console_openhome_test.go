@@ -76,18 +76,20 @@ func (l *reportLog) awaitAfter(t *testing.T, n int, what string, cond func(engin
 
 // withholdsOnlyForTheBarrier changes the live binding to another one of the
 // GO bar's (goBarByModel), which withholds the running player's output as
-// binding_changed (playerOutput.withheld), waits for that report, and fails
-// the test unless every report the player handed its engine after the first
-// n withholds for that reason alone. Serve's player reads the live config at
-// each of its changes, in order, and the latest whenever it wakes, so a
-// change before the barrier that withheld the output (the player turned off
-// by a port clash: disabled, which outranks binding_changed) is a report
-// before the barrier's, or the barrier's own reason.
+// binding_changed (playerOutput.withheld), waits for the first report after
+// the first n that withholds the output, and fails the test unless it, and
+// every other report so far that withholds it, withholds for that reason
+// alone. Serve's player reads the live config at each of its changes, in
+// order, and the latest whenever it wakes, so a change before the barrier
+// that withheld the output (the player turned off by a port clash: disabled,
+// which outranks binding_changed and leaves the barrier no report of its
+// own) is a report before the barrier's, or the barrier's own reason, and
+// fails the test as soon as it is reported.
 func withholdsOnlyForTheBarrier(t *testing.T, cs *consoleServe, reports *reportLog, n int) {
 	t.Helper()
 	cs.livePlayer(t, func(p *config.PlayerConfig) { p.Device = goBarByModel })
-	for _, rp := range reports.awaitAfter(t, n, "the barrier's binding_changed", func(rp engine.OutputReport) bool {
-		return !rp.Available && rp.Reason == reasonBindingChanged
+	for _, rp := range reports.awaitAfter(t, n, "a report that withholds the output", func(rp engine.OutputReport) bool {
+		return !rp.Available
 	}) {
 		if !rp.Available && rp.Reason != reasonBindingChanged {
 			t.Errorf("the output was withheld before the barrier: %+v", rp)

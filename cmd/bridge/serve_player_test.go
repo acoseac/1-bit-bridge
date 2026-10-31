@@ -286,6 +286,12 @@ type playerServeCase struct {
 	// it, rather than writing one from player and top: a second start that
 	// reads what the first one's console saved.
 	keep bool
+	// lan and admin, when set, are listeners the test holds for this boot in
+	// place of fresh ones: the API's and the console's. The file names a held
+	// listener's address itself, as one edited before this start does: keep
+	// writes no console address over a held console's, and a held API
+	// listener is the file's listenAddress, with no --addr override.
+	lan, admin *heldLoopback
 }
 
 // playerServe is a serve a test booted with its player.
@@ -364,20 +370,29 @@ func bootPlayerServe(t *testing.T, c playerServeCase) *playerServe {
 // second serve of one data directory.
 func bootPlayerServeAt(t *testing.T, c playerServeCase, root, music, dataDir string) *playerServe {
 	t.Helper()
-	lan, admin := holdLoopback(t), holdLoopback(t)
+	lan, admin := c.lan, c.admin
+	if lan == nil {
+		held := holdLoopback(t)
+		lan = &held
+	}
+	if admin == nil {
+		held := holdLoopback(t)
+		admin = &held
+	}
 	configPath := filepath.Join(root, "bridge.yaml")
 	text := "libraryRoots:\n  - " + music + "\ndataDir: " + dataDir + "\nadminAddress: " + admin.addr +
 		"\noutput:\n  mpd: off\n  player:\n" + c.player + c.top
 	if c.keep {
 		// The file as it was left, but for the console's address: this boot's
-		// console listens on a port of its own.
+		// console listens on a port of its own, unless the test holds the one
+		// the file names.
 		raw, err := os.ReadFile(configPath)
 		if err != nil {
 			t.Fatal(err)
 		}
 		lines := strings.Split(string(raw), "\n")
 		for i, l := range lines {
-			if strings.HasPrefix(l, "adminAddress:") {
+			if strings.HasPrefix(l, "adminAddress:") && c.admin == nil {
 				lines[i] = "adminAddress: " + admin.addr
 			}
 		}
@@ -412,6 +427,9 @@ func bootPlayerServeAt(t *testing.T, c playerServeCase, root, music, dataDir str
 		},
 		playerSeams:  c.seams,
 		playerBounds: c.bounds,
+	}
+	if c.lan != nil {
+		opts.addrOverride = ""
 	}
 	if c.standIn != nil {
 		opts.playerBackend = c.standIn.build
