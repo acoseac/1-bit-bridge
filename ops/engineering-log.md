@@ -67009,3 +67009,13 @@ with the tree clean after, under sh:
   predicted.
 - R10, round 2's dropping of a default `--config` back: exactly the predicted
   printed-command cases red, the contract test green. As predicted.
+
+**The gate**, on 56864f3f, through the shared build lock: `make installer-test
+INSTALLER_SHELLS="sh,dash,bash --posix,ksh" fmt vet test build-all`, exit 0:
+the installer suite under the four shells (80.1 s), `go fmt` rewrote nothing,
+`go vet` clean, the race suite 80 packages ok and none failed
+(`internal/manifest` 1095 s, `cmd/bridge` 664 s, `scripts/install-test` 18.9 s
+under sh), the census and the six cross-builds; `make docs-check` clean.
+`internal/packaging`'s result came from Go's test cache: its test reads the
+installer through `sh`, which the cache does not see, so it was run again
+uncached on 56864f3f (`go test -count=1 ./internal/packaging`, ok).
