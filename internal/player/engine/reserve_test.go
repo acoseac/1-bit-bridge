@@ -37,7 +37,11 @@ func TestAFailingReservationWriteRefusesEdits(t *testing.T) {
 	h.refused("delete all", h.eng.DeleteAll(bg), ReasonReservation)
 	h.must("repeat, which advances no token", h.eng.SetRepeat(bg, true))
 	h.available()
+	mark := h.appliedMark()
 	h.must("play, which advances no token", h.eng.PlayID(bg, ids[1]))
+	// The session's Prepare answers at once; the hour below passes its
+	// deadline only once the owner has taken that answer (B605).
+	h.waitApplied("handled call prepare", mark)
 	if h.snap().Len() != 2 {
 		t.Fatal("a refused edit changed the queue")
 	}

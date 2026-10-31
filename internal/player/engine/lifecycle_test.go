@@ -364,67 +364,95 @@ func TestAfterRunReturnsEveryCommandIsClosed(t *testing.T) {
 // been read: one still counted after the message Run joined it by is
 // counted, whatever the scheduler does (B526: a goroutine's deferred count
 // ran after Run returned, and CI read two goroutines).
+//
+// The session's Prepare of b answers at once, but its answer can still be on
+// its way when the shutdown begins, and the harness's drive fires the
+// shutdown's grace at once: a call still under way then is abandoned beside
+// the release. So the test runs as the scheduler leaves that Prepare, and with
+// its answer held until the fake is closed or the test lets it go, the latest
+// a scheduler could leave it (B605).
 func TestShutdownJoinsWithinItsBound(t *testing.T) {
-	var holding atomic.Bool
-	var held atomic.Int64
-	ended, release := make(chan struct{}, 1), make(chan struct{})
-	h := newHarness(t)
-	h.tweak = func(c *Config) {
-		c.seams.exiting = func() {
-			if !holding.Load() {
-				return
+	for _, heldPrepare := range []bool{false, true} {
+		name := "as it comes"
+		if heldPrepare {
+			name = "the Prepare answer held"
+		}
+		t.Run(name, func(t *testing.T) {
+			var holding atomic.Bool
+			var held atomic.Int64
+			ended, release := make(chan struct{}, 1), make(chan struct{})
+			h := newHarness(t)
+			h.tweak = func(c *Config) {
+				c.seams.exiting = func() {
+					if !holding.Load() {
+						return
+					}
+					held.Add(1)
+					select {
+					case ended <- struct{}{}:
+					default:
+					}
+					<-release
+				}
 			}
-			held.Add(1)
+			h.boot()
+			var letGo sync.Once
+			t.Cleanup(func() { letGo.Do(func() { close(release) }) })
+			answer := newGate()
+			if heldPrepare {
+				h.be.script(func() {
+					h.be.onPrepare = func(ctx context.Context, _ *fakeSession, _ OccurrenceID, _ *Occurrence) error {
+						_ = answer.wait(ctx, h.be, false)
+						return nil
+					}
+				})
+			}
+			_, s := h.playing(0, "a", "b")
+			h.be.script(func() {
+				h.be.onRelease = func(ctx context.Context, fs *fakeSession) error {
+					<-h.be.cleanup
+					return nil
+				}
+			})
+			stop := async(func() error { return h.eng.Stop(bg) })
+			h.be.waitFor("the release", func() bool { return s.releaseAsked })
+			// The owner takes the Prepare's answer before the shutdown begins,
+			// so the release is the one call under way when its grace ends.
+			answer.open()
+			h.waitApplied("handled call prepare", 0)
+			holding.Store(true)
+			start := h.clk.Now()
+			h.cancel()
+			h.waitSnap("closed", func(sn *Snapshot) bool { return sn.Closed() })
+			_, err := h.eng.InsertAfter(bg, 0, ref("x"), nil)
+			h.refused("an insert during shutdown", err, ReasonClosed)
+			h.drive(h.ran)
+			h.down = true
+			if took := h.clk.Now().Sub(start); took > ReleaseTimeout+shutdownGrace {
+				t.Fatalf("Run took %v of the clock to return, more than %v", took, ReleaseTimeout+shutdownGrace)
+			}
+			_ = h.result("the stop", stop)
+			if n := h.eng.abandoned.Load(); n != 1 {
+				t.Fatalf("%d calls abandoned, want the release that never answered", n)
+			}
+			if n := h.eng.live.Load(); n != 1 {
+				t.Fatalf("%d goroutines still running after Run (%d held at their end), want only the abandoned call", n, held.Load())
+			}
+			if h.logs.count("abandoned") != 1 {
+				t.Fatalf("the abandoned call was not logged once: %v", h.logs.all())
+			}
+			// The writer at least ends once the shutdown has begun, and the seam
+			// holds it at its end until it is let go here.
 			select {
-			case ended <- struct{}{}:
-			default:
+			case <-ended:
+			case <-time.After(*watchdog):
+				t.Fatalf("waited %v for a goroutine to end after the shutdown began", *watchdog)
 			}
-			<-release
-		}
+			letGo.Do(func() { close(release) })
+			h.be.close()
+			h.joined(h.eng)
+		})
 	}
-	h.boot()
-	var letGo sync.Once
-	t.Cleanup(func() { letGo.Do(func() { close(release) }) })
-	_, s := h.playing(0, "a", "b")
-	h.be.script(func() {
-		h.be.onRelease = func(ctx context.Context, fs *fakeSession) error {
-			<-h.be.cleanup
-			return nil
-		}
-	})
-	stop := async(func() error { return h.eng.Stop(bg) })
-	h.be.waitFor("the release", func() bool { return s.releaseAsked })
-	holding.Store(true)
-	start := h.clk.Now()
-	h.cancel()
-	h.waitSnap("closed", func(sn *Snapshot) bool { return sn.Closed() })
-	_, err := h.eng.InsertAfter(bg, 0, ref("x"), nil)
-	h.refused("an insert during shutdown", err, ReasonClosed)
-	h.drive(h.ran)
-	h.down = true
-	if took := h.clk.Now().Sub(start); took > ReleaseTimeout+shutdownGrace {
-		t.Fatalf("Run took %v of the clock to return, more than %v", took, ReleaseTimeout+shutdownGrace)
-	}
-	_ = h.result("the stop", stop)
-	if n := h.eng.abandoned.Load(); n != 1 {
-		t.Fatalf("%d calls abandoned, want the release that never answered", n)
-	}
-	if n := h.eng.live.Load(); n != 1 {
-		t.Fatalf("%d goroutines still running after Run (%d held at their end), want only the abandoned call", n, held.Load())
-	}
-	if h.logs.count("abandoned") != 1 {
-		t.Fatalf("the abandoned call was not logged once: %v", h.logs.all())
-	}
-	// The writer at least ends once the shutdown has begun, and the seam
-	// holds it at its end until it is let go here.
-	select {
-	case <-ended:
-	case <-time.After(*watchdog):
-		t.Fatalf("waited %v for a goroutine to end after the shutdown began", *watchdog)
-	}
-	letGo.Do(func() { close(release) })
-	h.be.close()
-	h.joined(h.eng)
 }
 
 // TestSnapshotsAreImmutable pins the copies: changing what an accessor
