@@ -31,10 +31,12 @@ func platformControlData() []controlDataCase {
 
 // datagramMetaSeeds are the seeds committed in
 // testdata/fuzz/FuzzParseDatagramMeta, each the control data amd64 and arm64
-// Linux lay out, with the metadata it must decode to. The first is the
-// nightly's crash (B610): the target's own Windows-layout seed with its type
-// zeroed, which here reads as one IPPROTO_IP message of type 0 with 8 bytes
-// of data, the unit case's message byte for byte. Then an IP_PKTINFO alone,
+// Linux lay out, with the metadata it must decode to. The first reproduces
+// the nightly's crash (B610), reconstructed rather than taken from the run's
+// artifact, so the stack is the nightly's but the bytes need not be: the
+// target's own Windows-layout seed with its type zeroed, which here reads as
+// one IPPROTO_IP message of type 0 with 8 bytes of data, the unit case's
+// message byte for byte. Then an IP_PKTINFO alone,
 // the messages a socket asking for a timestamp, the packet info and the TTL
 // is handed (SCM_TIMESTAMP, IP_PKTINFO, IP_TTL, in the order the kernel writes
 // them), and an IP_PKTINFO followed by a message of type 0.

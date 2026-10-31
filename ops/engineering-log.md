@@ -68766,8 +68766,11 @@ the nightly's stack.
 Parse consults: darwin (and ios) sets all four; linux (and android) TTL and
 packet info; freebsd, dragonfly, netbsd, openbsd and aix TTL, destination and
 interface; solaris (and illumos) TTL and packet info; zos packet info alone;
-the stub platforms none. So a message of type 0 panics everywhere but on
-Darwin, where it matches no entry and is passed over. x/net's ipv6 Parse
+the stub platforms none. So on every platform with real control messages a
+message of type 0 panics, except Darwin, where it matches no entry and is
+passed over; on the stub platforms the socket header's length is zero, so a
+nonempty buffer fails as an invalid header before any IPv4 entry is consulted
+(Codex's review). x/net's ipv6 Parse
 consults traffic class, hop limit, packet info and path MTU, and every table
 sets all four but z/OS's (no traffic class); nothing in the bridge parses IPv6
 control data. The other x/net call, `ssdp_reply_linux.go`'s, marshals a
