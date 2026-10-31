@@ -56,6 +56,12 @@ func consoleUnit(port int, model, serial string, devnum, card int, pcm string) s
 		card, dir, port, card, card, port, model, pcm)
 }
 
+// consoleUnitNamed is unit, laid out by consoleUnit in port, with its card named
+// name in /proc/asound, as a unit whose product string carries its serial is.
+func consoleUnitNamed(unit string, port int, name string) string {
+	return strings.Replace(unit, fmt.Sprintf("%q", fmt.Sprintf("DAC in port %d", port)), fmt.Sprintf("%q", name), 1)
+}
+
 // consoleUnplug takes the unit in port out of the box, its card with it.
 func consoleUnplug(port int) string { return fmt.Sprintf("unplug %s/1-%d\n", consoleHub, port) }
 
@@ -147,9 +153,10 @@ func noSerialIn(t *testing.T, what string, v any) {
 // for each USB card's playback endpoint, its model, its serial's label and
 // its port, the three kinds of binding with whether each names it now, the
 // one the page proposes, and a selection token; a card that is not USB is
-// listed with why and no token; no serial reaches the list.
+// listed with why and no token; no serial reaches the list, the one the
+// card's name carries included.
 func TestTheConsoleListsEachPlaybackEndpointOfTheBox(t *testing.T) {
-	c, _, _ := consoleView(t, consoleUnit(1, "20b1:3009", consoleSerialA, 2, 5, "0.0"))
+	c, _, _ := consoleView(t, consoleUnitNamed(consoleUnit(1, "20b1:3009", consoleSerialA, 2, 5, "0.0"), 1, "GO bar "+consoleSerialA))
 	list := listOf(t, c)
 	hdmi := rowOf(t, list, 0, "")
 	if hdmi.Selection != "" || hdmi.Why == "" {
@@ -159,7 +166,7 @@ func TestTheConsoleListsEachPlaybackEndpointOfTheBox(t *testing.T) {
 	if len(r.Selection) != 32 || strings.Trim(r.Selection, "0123456789abcdef") != "" {
 		t.Errorf("the GO bar's token is %q, want 32 hexadecimal digits", r.Selection)
 	}
-	if r.USBID != "20b1:3009" || r.SerialLabel != usbid.New(consoleSerialA).Label() || r.Port == "" || r.Name != "DAC in port 1" {
+	if r.USBID != "20b1:3009" || r.SerialLabel != usbid.New(consoleSerialA).Label() || r.Port == "" || !strings.HasPrefix(r.Name, "GO bar ") {
 		t.Errorf("the GO bar's row: %+v", r)
 	}
 	for _, kind := range []string{config.BindingSerial, config.BindingUniqueModel, config.BindingPort} {
@@ -297,9 +304,10 @@ func TestAChoiceOfACardThatChangedSinceTheListIsStale(t *testing.T) {
 // another unit of the same model swapped in at a card's number between the
 // first reading of sysfs and the last, which /proc's usbid cannot tell, is
 // set aside, offered no token, rather than listed with /proc's endpoints of
-// the unit before it.
+// the unit before it; the name /proc gave it, the unit before's, which
+// carries that unit's serial, is listed without it.
 func TestAUnitSwappedWhileTheBoxIsReadIsNotOffered(t *testing.T) {
-	c, root, _ := consoleView(t, consoleUnit(1, "20b1:3009", consoleSerialA, 2, 5, "0.0"))
+	c, root, _ := consoleView(t, consoleUnitNamed(consoleUnit(1, "20b1:3009", consoleSerialA, 2, 5, "0.0"), 1, "GO bar "+consoleSerialA))
 	trees := c.trees
 	var once sync.Once
 	c.observer = func() binding.Observer {
@@ -311,10 +319,30 @@ func TestAUnitSwappedWhileTheBoxIsReadIsNotOffered(t *testing.T) {
 		}
 		return obs
 	}
-	r := rowOf(t, listOf(t, c), 5, "")
+	list := listOf(t, c)
+	r := rowOf(t, list, 5, "")
 	if r.Selection != "" || !strings.Contains(r.Why, "changed while the box was read") {
 		t.Fatalf("a card swapped while the box was read: token %q, why %q; want none, and why", r.Selection, r.Why)
 	}
+	if !strings.HasPrefix(r.Name, "GO bar ") {
+		t.Errorf("the swapped card's name is %q, want /proc's, its serial taken out", r.Name)
+	}
+	noSerialIn(t, "the list", list)
+}
+
+// TestAUnitWhoseEnumerationCannotBeReadIsOfferedNoToken: a unit whose devnum
+// sysfs does not give cannot be checked against the box again at a choice, so
+// it is listed with why and no token, its name without the serial its product
+// string carries.
+func TestAUnitWhoseEnumerationCannotBeReadIsOfferedNoToken(t *testing.T) {
+	unit := consoleUnitNamed(consoleUnit(1, "20b1:3009", consoleSerialA, 2, 5, "0.0"), 1, "GO bar "+consoleSerialA)
+	c, _, _ := consoleView(t, strings.Replace(unit, " devnum=2", "", 1))
+	list := listOf(t, c)
+	r := rowOf(t, list, 5, "")
+	if r.Selection != "" || !strings.Contains(r.Why, "devnum") {
+		t.Fatalf("a unit with no devnum: token %q, why %q; want none, and why", r.Selection, r.Why)
+	}
+	noSerialIn(t, "the list", list)
 }
 
 // TestABoxThatCannotBeReadOffersNothing: with no sysfs to read, the list says

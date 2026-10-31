@@ -620,8 +620,6 @@ func (c *consolePlayer) DACs(ctx context.Context, live *config.Config) admin.Pla
 			}
 			r.Configured, r.Running = names(liveRes, card.Index, ep), names(bootRes, card.Index, ep)
 			switch {
-			case u.DevNum <= 0:
-				r.Why = "its enumeration (sysfs's devnum) cannot be read, so a choice of it could not be checked against the box again: list again"
 			case len(devices) == 0:
 				r.Why = "no binding names it now"
 			default:
@@ -765,8 +763,11 @@ func (c *consolePlayer) read(ctx context.Context) (binding.Inventory, error) {
 // sysfs's identities before /proc is read, as GET /v1/outputs' DAC read is
 // (readPlayerDACObserved): a card whose unit or enumeration moved between the
 // two is set aside as transient, since /proc's endpoints may be another
-// unit's. A reading that is not whole (a card listing cut short, a tree read
-// in part) is no reading.
+// unit's, and so is one whose enumeration (devnum) either reading could not
+// read, which nothing then shows did not move; DACs offers a transient card
+// no token. Its /proc id and name, which the list shows, are redacted of the
+// serials and ports of both readings' units. A reading that is not whole (a
+// card listing cut short, a tree read in part) is no reading.
 func observeBracketed(ctx context.Context, obs binding.Observer) (binding.Inventory, error) {
 	before := obs.Sysfs.ReadContext(ctx)
 	inv, _, err := obs.ObserveWithProc(ctx)
@@ -791,10 +792,22 @@ func observeBracketed(ctx context.Context, obs binding.Observer) (binding.Invent
 			continue
 		}
 		id, ok := earlier[card.Index]
-		if ok && !id.Vanished && id.Kind == alsa.IdentityUSB && id.USB != nil && sameEnumeration(*id.USB, *card.USB) {
+		before := ok && !id.Vanished && id.Kind == alsa.IdentityUSB && id.USB != nil
+		if before && sameEnumeration(*id.USB, *card.USB) {
 			continue
 		}
-		inv.Cards[i].State, inv.Cards[i].Why = binding.CardTransient, "it changed while the box was read: list again"
+		why := "it changed while the box was read: list again"
+		if before && binding.SameUnit(*id.USB, *card.USB) && (id.USB.DevNum <= 0 || card.USB.DevNum <= 0) {
+			why = "its enumeration (sysfs's devnum) cannot be read, so a choice of it could not be checked against the box again"
+		}
+		text := func(s string) string {
+			if before {
+				s = playerDACText(s, *id.USB)
+			}
+			return playerDACText(s, *card.USB)
+		}
+		inv.Cards[i].ID, inv.Cards[i].Name = text(card.ID), text(card.Name)
+		inv.Cards[i].State, inv.Cards[i].Why = binding.CardTransient, why
 		inv.Cards[i].SysfsUSB, inv.Cards[i].USB = card.USB, nil
 	}
 	return inv, nil
