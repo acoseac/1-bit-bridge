@@ -93,7 +93,7 @@
     {{if .Managed.restart}}
     <p class="hint" id="player-output-restart-managed">The host restarts this bridge: these changes apply when it next does.</p>
     {{else}}
-    <p class="hint">Restarting stops what the bridge's player is playing; it comes back stopped.</p>
+    <p class="hint">If the bridge's player is playing, or holds a pause, a restart stops it, and it comes back stopped.</p>
     <div class="actions">
       <button type="button" id="player-output-restart" class="btn" data-supervised="{{if .Data.IsSupervised}}true{{else}}false{{end}}">{{if .Data.IsSupervised}}Restart now{{else}}Stop now{{end}}</button>
     </div>

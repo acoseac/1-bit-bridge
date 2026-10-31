@@ -7209,7 +7209,7 @@ function initOutput() {
   wirePlayerOutputDACs();
   const restart = document.getElementById("player-output-restart");
   restart?.addEventListener("click", () => requestBridgeRestart(restart, document.getElementById("player-output-msg"),
-    "The bridge's player stops what it is playing, and comes back stopped."));
+    "If the bridge's player is playing, or holds a pause, the restart stops it, and it comes back stopped."));
 }
 
 // loadPlayerOutput fetches the status and paints it, unless a later paint
