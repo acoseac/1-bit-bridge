@@ -171,6 +171,8 @@ Classes describe *how the value is consumed*, not how important it is.
 |---|---|
 | `POST` / `DELETE /api/roots` | Hot — `Scanner.SetRoots` + `Resolver.SetRoots` + a background rescan. The single ↔ multi-root storage-form flip is handled by `WipeFilesystemTracks`. |
 | `POST /api/upscale/variants-dir` | Hot — resolved from the live holder per submit and per disk pre-flight. |
+| `POST /api/output/player/enabled` | The Player page's switch (B601), `output.player.enabled`. Answers `restart` (saved; serve decides its player from the boot snapshot, so it starts or stops at the next start) or `unchanged` (nothing written). Turning a running player off withholds its output at once: playback stops, and the answer says `interrupted: true`. Refused on a public bridge, off Linux, over a player block that does not read, and where `managedSettings` names `playerEnabled`. |
+| `POST /api/output/player/dac` | The Player page's DAC choice (B601), `output.player.device`, from a selection token `GET /api/output/player/dacs` handed out. Same answers; a DAC other than the one the running player started with withholds its output at once until the next start, and choosing that one again gives it back. Refused as the switch is, and where `managedSettings` names `playerDevice`. |
 
 ### Not reachable through this surface at all
 
@@ -427,6 +429,13 @@ Three rules:
 
 Empty (the default, and every self-hosted install) manages nothing and changes no
 behaviour.
+
+**The Player page's two writes are named here too** (B601): `playerEnabled`
+(`output.player.enabled`) and `playerDevice` (`output.player.device`). They are
+no `settingsPatch` fields, since the PATCH takes no player setting at all, so
+the reflection above does not reach them: the page hides each control the list
+names, and its route refuses it (403 `managed-setting`). A public bridge, the
+hosted shape, refuses both whatever the list says.
 
 **Two controls hide themselves without needing the list**, because public mode
 already refuses them outright: `dlnaEnabled` (`startDLNAIfEnabled` returns early
