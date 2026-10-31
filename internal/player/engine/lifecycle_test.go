@@ -416,6 +416,10 @@ func TestShutdownJoinsWithinItsBound(t *testing.T) {
 			})
 			stop := async(func() error { return h.eng.Stop(bg) })
 			h.be.waitFor("the release", func() bool { return s.releaseAsked })
+			// The owner takes the Prepare's answer before the shutdown begins,
+			// so the release is the one call under way when its grace ends.
+			answer.open()
+			h.waitApplied("handled call prepare", 0)
 			holding.Store(true)
 			start := h.clk.Now()
 			h.cancel()

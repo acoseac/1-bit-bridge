@@ -20,13 +20,21 @@ func TestNativeEffectivePauseDeadline(t *testing.T) {
 			h.waitApplied("handled call prepare", 0)
 			h.must("pause", h.eng.Pause(bg))
 			h.clk.Advance(3 * time.Second)
-			// A command reply is an owner barrier after the timer's queued event.
-			h.must("pause barrier", h.eng.Pause(bg))
+			// A timer the advance fired has posted its message, and this
+			// position is handled after it: messages reach the owner in order.
+			// A command's reply is no such barrier, since the owner takes a
+			// command and a message both waiting in either order (B605).
+			m := h.appliedMark()
+			s.ev.Position(s.id, Position{})
+			h.waitApplied("handled position", m)
 			if _, ok := h.snap().ReleaseUnconfirmed(); ok {
 				t.Fatal("configured PCM deadline ended a legitimate DSD pause")
 			}
 			h.clk.Advance(29 * time.Second)
-			h.waitSnap("native pause overdue at 32s", func(s *Snapshot) bool { _, ok := s.ReleaseUnconfirmed(); return ok })
+			sn := h.waitSnap("native pause overdue at 32s", func(s *Snapshot) bool { _, ok := s.ReleaseUnconfirmed(); return ok })
+			if info, _ := sn.ReleaseUnconfirmed(); info.Session != s.id || !info.Paused || sn.State() != Paused {
+				t.Fatalf("at 32s: %s, unconfirmed %+v; want session %d's own release of its pause unconfirmed, still paused", sn.State(), info, s.id)
+			}
 		})
 	}
 }
@@ -114,6 +122,11 @@ func TestNativePausedTransitionRearmsDeadline(t *testing.T) {
 					if toNative {
 						effective = 30 * time.Second
 					}
+					// The clock moves past the Prepare's deadline only once the
+					// owner has taken its answer: one still on its way then expires
+					// and releases the session with backend_timeout (B605).
+					answer.open()
+					h.waitApplied("handled call prepare", 0)
 					h.clk.Advance(effective + ReleaseTimeout - time.Second)
 					// Every message the advance's timers posted is handled before
 					// this position, which changes nothing: messages reach the owner
