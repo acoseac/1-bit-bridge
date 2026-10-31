@@ -7,11 +7,11 @@ import (
 	"syscall"
 )
 
-// platformMedium takes every root on macOS: it has neither tmpfs nor
+// platformInspect takes every root on macOS: it has neither tmpfs nor
 // overlayfs, and a RAM disk is a volume like any other, which statfs does not
 // tell from a disk. The player, the strict writer's one caller, runs on Linux
 // alone.
-func platformMedium(string, uint64) error { return nil }
+func platformInspect(string, uint64) Medium { return Medium{} }
 
 // platformCopyUps is none on macOS: nothing there copies up.
 func platformCopyUps(string, uint64) ([]string, error) { return nil, nil }

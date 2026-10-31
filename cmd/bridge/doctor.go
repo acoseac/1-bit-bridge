@@ -352,6 +352,10 @@ func buildDoctorDepsFor(cfgPath string, absentIsPreSetup bool) doctor.Deps {
 			// replaces it with the serving process's own
 			// (adminDoctorRunner).
 			d.OutputChecklist = doctorOutputChecklist(cfg, nil)
+			// The storage under the data directory of the bridge's own player,
+			// from the medium check its strict writer makes (B603), for both
+			// the CLI and the console, which reads these Deps too.
+			d.PlayerStorage = doctorPlayerStorage(cfg)
 			d.LibraryWatchEnabled = cfg.LibraryWatch.Enabled
 			d.UpscaleEnabled = cfg.Upscale.Enabled
 			d.UpscaleTargetBits = cfg.Upscale.EffectiveTargetBits()

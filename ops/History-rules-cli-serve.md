@@ -3001,3 +3001,71 @@ the `ReplaceDurable` tests in `internal/atomicwrite/replace_test.go` its
 contract. `TestDiscardRecordsASecondSealBeforeRenamingADamagedOne` refuses
 every rename into the seal's name, so it now drives the double failure, and
 passes unchanged.
+
+## B603 — bridge doctor's player-storage line (2026-10-30)
+
+- **`bridge doctor`'s `player-storage` line is the strict writer's own medium verdict on the data dir (`atomicwrite.InspectMedium`), one source for the CLI and the console's doctor (`doctorPlayerStorage` in `buildDoctorDepsFor`), placed just before the output checklist** (2026-10-30, backlog B603; round 2, 2026-10-31). **Don't give the line a medium check of its own, word a good medium as the player starting (serve's other gates still run), show a line for a player the config leaves off, call a data dir "not there yet" where the nearest entry of its path that is there is a link to nothing (serve's MkdirAll stops at it), or let an inspection or walk error read as ok.**
+
+The orchestrator's amendment 8 to B603: one shared verdict for the writer and
+the doctor, its outcomes defined for a disabled player, an absent data
+directory and an unsupported platform, and a good medium never read as "the
+player will start". `playerStorageCheck` builds the line from the loaded
+config and the platform. A player the config leaves off (`output.player.enabled`
+not true, the block read) has no line, on Linux or off it. Off Linux a player
+the config asks for is "not checked: the bridge's own player runs on Linux
+alone", ok, and nothing is inspected. On Linux a player the config's own
+refusal turns off is not checked, a warn naming `PlayerEnabled`'s reason, which
+names no value (B505). Then `atomicwrite.InspectMedium(cfg.DataDir)`, the
+inspection whose verdict the player's strict writer reads as it starts.
+
+An `fs.ErrNotExist` sends the line up the data directory's path
+(`dataDirNotThere`; round 2, CodeRabbit on #1368). The inspection resolves
+every link in the path, so a link to nothing answers ENOENT as a directory not
+made yet does, while serve's `MkdirAll` stops at such a link with EEXIST, as
+this user and as root, whose walk is fsutil's own (`mkdirAllAsRoot`)
+(`TestServeCannotMakeADataDirectoryThroughALinkToNothing` measures both) and
+serve then goes on without its lock and starts no player; until round 2 every
+ENOENT read ok, "serve makes it". From the data directory up, the nearest entry
+of its path that is there (`os.Lstat`, the kernel resolving the entries above
+it) is judged: a symbolic link there whose `os.Stat` answers ENOENT is a fail,
+"the player will not start: <the link> is a symbolic link to nothing, and serve
+cannot make <dataDir> through it", hint "point the link at a directory, or set
+dataDir in bridge.yaml to one", naming the entry of the data directory's own
+path (the head of a chain that ends in nothing) and finding a broken link
+reached through a live one where it sits; anything else there (a directory, a
+live link to one) is "not checked: the data directory … does not exist yet",
+ok, since `lockServeDataDir` makes the components below it. Every other error,
+of the inspection or of the walk, is not checked, a warn, never ok
+(`dataDirNotChecked`), its summary naming the data directory beside the error,
+since `filepath.EvalSymlinks` answers an entry on the way that is no directory
+with a bare ENOTDIR that names none: a permission error advises the service's
+user, who may read what this user cannot; any other (a link cycle, which
+EvalSymlinks answers as too many links, or a non-directory on the way) advises
+mending what the error names on the way, or setting dataDir to a directory
+serve can make or use. Serve itself is unchanged: it goes on after a lock error
+that is not contention on purpose, and telling "cannot make the data
+directory" from "cannot lock it" there is a follow-up.
+
+A refusal is a fail, "the
+player will not start: " and the writer's own refusal, whose hint puts the data
+directory on persistent storage, or for `ErrOverlayBind` on the overlay's own
+mount or a filesystem that is not an overlay; and storage the check takes is
+ok, "<dataDir> is on <storage>; serve checks the rest as it starts the player",
+the storage "Volumio's data partition (mmcblk0p3, ext4)" where the check names
+it and "storage in which the check finds no volatile layer" otherwise. The
+directories' barriers, the DAC's binding and serve's other gates still decide
+at the start, so no ok line says the player will start. The console's doctor
+(`adminDoctorRunner`) builds the same Deps (`buildDoctorDeps`), so it carries
+the line word for word; `bridge init`'s preflight sets no `PlayerStorage`. Run
+appends the line after its own checks and before the output checklist, which
+stays last. The two seams, `playerStorageGOOS` and `inspectPlayerStorage`, are
+package vars only tests change, never in parallel.
+
+Pinned by `TestThePlayersStorageLineSaysWhatTheWritersCheckFound`,
+`TestBridgeDoctorNamesThePlayersStorage`,
+`TestTheConsolesDoctorNamesThePlayersStorageAsBridgeDoctorDoes`,
+`TestRunPrintsThePlayersStorageBeforeTheChecklist`, and since round 2
+`TestADataDirectoryALinkToNothingStandsInIsNoneServeMakes`,
+`TestServeCannotMakeADataDirectoryThroughALinkToNothing` and
+`TestNoErrorOfThePlayersStorageLineReadsAsOK` (unix, the real inspector). The
+writer's side is `ops/History-rules-config-lifecycle.md`, B603.

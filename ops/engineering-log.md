@@ -67246,6 +67246,304 @@ clean. The gate runs the whole package under `-race`.
 The rules line is in `.p2/rules-b604r4.patch` until the orchestrator applies
 it: config-lifecycle.md, one new bullet after the empty-root reaper's.
 
+## 2026-10-30 — B603: the bridge's own player starts on Volumio, whose root overlay's upper layer no path reaches after boot
+
+**The defect.** On the owner's Volumio 4.231 Raspberry Pi 5 (bridge e242ce2c,
+the 0.2.2 candidate; data directory `/data/1-bit-bridge/config/data`;
+`output.player.enabled: true`) serve logged `player: not started`, reason `the
+player's identity: atomicwrite: whether the root's storage keeps what is
+written to it through a reboot cannot be told:
+/data/1-bit-bridge/config/data is on an overlay whose upper layer
+/mnt/ext/dyn, as the mount table names it, cannot be read here: statfs
+/mnt/ext/dyn: no such file or directory`. Volumio is the main platform for a
+player on a bridge box, so this blocked 0.2.2.
+
+**Measured on the box.** The root is an overlay, `31 1 0:23 / / rw,relatime
+shared:1 - overlay overlay
+rw,lowerdir=/mnt/static,upperdir=/mnt/ext/dyn,workdir=/mnt/ext/work`. Its upper
+layer is on the SD card's partition 3 (`mmcblk0p3`, 179:3, ext4, label
+`volumio_data`), which the initramfs mounted at `/mnt/ext` before the pivot and
+nothing remounts, so no mountinfo line lists 179:3 and `lsblk` shows no mount
+point for it. `/imgpart` is partition 2 (`26 31 179:2 / /imgpart rw,relatime
+shared:3 - ext4 /dev/mmcblk0p2 rw`), the squashfs is `/static`, `/boot`
+partition 1. The NVMe is imaged with Volumio too: its partition 3
+(`nvme0n1p3`, 259:3, at `/media/NVME`) is labelled `volumio_data`, and
+`/dev/disk/by-label/volumio_data` points at it. The service's user (`volumio`)
+reads `/run/udev/data/b179:3` (`E:ID_FS_TYPE=ext4`, `E:ID_FS_LABEL=volumio_data`),
+`/sys/class/block/mmcblk0p3/dev` (`179:3`), and `/sys/fs/ext4`, which listed
+`mmcblk0p2`, `mmcblk0p3` and `nvme0n1p3`. With the orchestrator's workaround
+unmounted, `findmnt /mnt/ext` answered nothing, `grep ' 179:3 '
+/proc/self/mountinfo` counted 0, and `/sys/fs/ext4/mmcblk0p3` still existed:
+the kernel keeps the ext4 entry of the initramfs's hidden mount. The fixtures
+are the box's complete lines (`pi-mountinfo.txt`, `pi-evidence.txt`).
+
+**The decision** (the orchestrator, after Codex's and Argon's review):
+automatic, evidence-based recognition, no operator override in this PR, the
+rule fail-closed for everything else. Where the first statfs of the upper path
+of the root's own mount answers ENOENT, `volumioUpper` reads the box's own
+files and takes the upper layer only when every fact holds, in order (Volumio's
+os-release; the overlay read-write over `/mnt/static` with upperdir
+`/mnt/ext/dyn`, the overlay at `/`; `/imgpart`'s line by its mount ID, partition
+2 of a disk in sysfs; that disk's partition 3, resolved back through
+`/sys/dev/block`, ext4 labelled `volumio_data` in udev's database; its ext4
+superblock live and on no mountinfo line), naming the first that fails. It
+returns `taken()`'s verdict and outranks no other refusal. It is an explicitly
+trusted Volumio boot-layout assumption; the rule is in
+`.claude/rules/config-lifecycle.md` (its long form in
+`ops/History-rules-config-lifecycle.md`, B603). The medium check became an
+inspection (`Medium`: the verdict and the storage's name) that the writer's
+admission and `bridge doctor`'s new `player-storage` line both read
+(`atomicwrite.InspectMedium`; `.claude/rules/cli-serve.md`).
+
+**Red first.** On the commit that added the seam and the tests and changed no
+behaviour (24a73d60), `TestMediumTakesVolumiosHiddenDataPartition` failed with
+main's reason word for word (`… /mnt/ext/dyn, as the mount table names it,
+cannot be read here: statfs /mnt/ext/dyn: no such file or directory, want it
+taken`); every case of `TestMediumRefusesWhatVolumiosLayoutDoesNotShow` was
+already refused with main's sentinel and text and lacked only the new reason;
+of `TestMediumKeepsEveryOtherRefusalBesideVolumiosEvidence` only the bind case
+failed, refused on main for its unreachable upper layer rather than as a bind.
+Every other test in the package passed. They pass from c48ae169 on.
+
+**The cases.** Accepted: the box as measured. Refused, each one fact changed: a
+lookalike upper layer on Raspberry Pi OS (no VOLUMIO_VERSION), an empty
+VOLUMIO_VERSION, no os-release, an unreadable one; the root overlay read-only
+(mount and superblock), its mount read-only over a writable superblock, another
+lower layer, another upper layer, an overlay that is not the one at `/`; the
+NVMe's decoy partition with no `/imgpart` mount, `/imgpart` on partition 4, an
+overmounted `/imgpart`, sysfs naming `/imgpart`'s device as another; partition 3
+absent, not ext4, labelled otherwise, its udev entry unreadable, a sibling whose
+device sysfs puts under the NVMe; no live ext4 superblock (a tmpfs fallback),
+partition 3 visible in mountinfo; two partitions 3, an unreadable partition
+number, a mountinfo line that does not read, an unreadable `/sys/fs/ext4`, an
+`/imgpart` on a whole disk, a disk that is a partition, udev naming no
+filesystem. Beside valid Volumio evidence, a subtree bind (ErrOverlayBind),
+`volatile`, `fsync=volatile`, a reachable tmpfs upper, inconclusive totals, an
+upper statfs refuses with EACCES, a tmpfs root and a ramfs root are refused as
+before, never speaking of Volumio. The production reader on a real tree with
+relative sysfs links takes the measured box, refuses the NVMe sibling and the
+missing superblock, refuses a link out of its root, refuses a named pipe at the
+udev entry without waiting, and refuses a file past its 64 KiB bound. The
+writer through the fallback: the write syncs the root, renames, then the
+file's directory, the root and the directories up to the merged mount's root;
+the probe syncs the same; statfs is asked of the upper path once, by the
+medium; an fsync failure above the root and an unopenable directory there fail
+both; a box that does not show Volumio is refused before anything is created.
+On Linux a namespace scenario detaches the tmpfs under an overlay's upper
+layer after mounting it: the kernel answers ENOENT, and the probe and the write
+refuse, nothing copied up. The doctor: no line for a player left off; off Linux
+not checked; a config refusal a warn; a data directory not there yet not
+checked; one this user cannot inspect a warn; Volumio's data partition named,
+ok; a refusal a fail saying the player will not start, the bind's hint its own;
+the CLI and the console word for word.
+
+**Negative controls**, on 885059f5, each a one-predicate mutation that compiled,
+predicted first, run on the whole package and restored from git, the tree clean
+after: C1 the partition-number check (red: `/imgpart not partition 2`, accepted);
+C2 the common-disk identity (red: the NVMe-sibling case, accepted, and the
+host-reader test's NVMe variant, refused for another reason); C3 the ext4 check
+(red: `partition 3 not ext4`, accepted); C4 the live superblock (red: the
+tmpfs-fallback case, accepted, and the host-reader test's variant); C5 the
+hidden check (red: partition 3 visible in mountinfo); C6 the label (red: the
+label case); C7 the Volumio marker (red: the lookalike and the empty version);
+C8 the bind verdict after the fallback (red: the bind combination, taken); C9
+ENOENT alone opening the fallback (red: the EACCES upper, taken); C10 the
+copy-up syncs after a write lands (red: the new writer test and
+`TestWriteBytesDurable_SyncsUpToTheRootOfItsMountOnAnOverlay`). Each went red
+exactly as predicted and nothing else did.
+
+**Where it ran.** On the worker's Mac: everything portable (the decision
+tests, the fake of the box's files, the production reader on a real tree, the
+writer tests, the doctor). Not here: the Linux-only tests
+(`medium_linux_test.go`, the namespace scenario among them), which run in the
+PR's `gate.yml` on ubuntu, and the box itself, which is the orchestrator's
+check on the Pi.
+
+**Residuals.** A modified boot that keeps every fact and puts a memory
+filesystem at `/mnt/ext`; a partition 3 mounted only in another mount
+namespace beside a tmpfs `/mnt/ext`; a Volumio release that changes these
+paths, refused until taught.
+
+## 2026-10-31 — B603 round 2: a data directory a link to nothing stands in is no directory serve makes
+
+**The finding** (CodeRabbit on #1368, Minor, verified by the orchestrator).
+Where `atomicwrite.InspectMedium` answered `fs.ErrNotExist`, the doctor's
+`player-storage` line said ok, "the data directory … does not exist yet;
+bridge serve makes it". `InspectMedium` resolves every link in the path
+(`filepath.EvalSymlinks`), so a data directory that is a symbolic link to
+nothing, or one below such a link, answers the same ENOENT. Serve cannot make
+it: `lockServeDataDir`'s `fsutil.MkdirAll` stops at the link with EEXIST
+(`os.MkdirAll` stats ENOENT, its `Mkdir` finds the link's entry, and the Lstat
+after shows a link; as root fsutil's own walk, `mkdirAllAsRoot`, gets the same
+EEXIST from `os.Root.Mkdir` and makes nothing), and serve goes on without its
+lock (deliberately: a bridge whose storage cannot lock still starts), so
+planServePlayer starts no player.
+
+**The fix.** In that branch the line now judges, from the data directory up
+by `os.Lstat`, the nearest entry of its path that is there, the kernel
+resolving the entries above it: a symbolic link there whose `os.Stat` answers
+ENOENT is a fail, "the player will not start: <the link> is a symbolic link to
+nothing, and serve cannot make <dataDir> through it", hint "point the link at a
+directory, or set dataDir in bridge.yaml to one"; it names the entry of the data
+directory's own path, the head of a chain that ends in nothing included, and a
+broken link reached through a live one is found where it sits. Anything else
+there (a directory, a live link to one) leaves only the components below it to
+make, which MkdirAll makes, and stays ok, "not there yet". An Lstat or Stat on
+the way that fails for another reason than an entry's absence, and every
+inspection error, is not checked, a warn, never ok, its summary naming the data
+directory beside the error (EvalSymlinks answers an entry on the way that is no
+directory with a bare ENOTDIR that names none): a permission error keeps the
+service user's advice; a link cycle (EvalSymlinks' "too many links") or a
+non-directory on the way gets the path's ("mend what the error names on the way
+to the data directory, or set dataDir in bridge.yaml to a directory serve can
+make or use").
+
+**Red first.** The cases (`cmd/bridge/doctor_player_storage_unix_test.go`, the
+real inspector) went in first (80b4548d): the data directory a link to nothing,
+an ancestor one, one reached through a live link, and the head of a chain read
+ok and failed; a live link with the data directory below it not made yet read ok
+and passed; the premise, `lockServeDataDir` failing with an error matching
+`fs.ErrExist` on both layouts and making the directory through a live link,
+passed; a link cycle and a regular-file ancestor were a warn with the service
+user's advice and failed on the advice; an injected ENOENT beside an ancestor
+this user cannot search read ok and failed. The table's mocked ENOENT case moved
+from the host's `/data` to a path under `t.TempDir()`. All pass from 2ceba8ea.
+The fix commit sharpened what three of those cases assert, once EvalSymlinks'
+bare ENOTDIR showed that "the entry the error names" named nothing: the
+not-checked summary names the data directory before the error, and the path's
+advice reads "mend what the error names on the way to the data directory" (it
+read "mend the entry the error names"); the table's EACCES case took the new
+summary. R2-C0, below, puts round 1's doctor code under the final tests. The
+premise's half as root (`as root`, through `fsutil.SimulateRootForTest(4242,
+4243)`) followed in 44cdf551 and passed at once, as a premise does.
+
+**Controls**, on 2ceba8ea, predicted, compiled, restored from git: R2-C1, the
+inspection's ENOENT straight to ok again, turned red exactly the four
+link-to-nothing cases and the walk's permission case, the live link and the
+premise green; R2-C2, the service user's advice on every not-checked line,
+turned red exactly the cycle and the regular-file cases. On 44cdf551: R2-C0,
+round 1's `doctor_player_storage.go` (832e117b) under the final tests, turned
+red exactly the four link cases, the cycle, the regular-file ancestor, the
+walk's permission case and the table's EACCES case (its wording), 18 passing,
+the live link and both halves of the premise among them, and what it printed
+is round 1's: ok, "does not exist yet; bridge serve makes it", for each link
+case, and "not checked: EvalSymlinks: too many links" and "not checked: not a
+directory", naming no entry, for the cycle and the file. R2-C3, fsutil's
+`mkdirAsRoot` taking an entry that is there for a directory it made, turned
+red exactly the premise's half as root: the lock then failed opening
+`link/server.lock` and making `dangling/data`, both ENOENT and neither EEXIST,
+and the walk gave both links the simulated owner. So that half runs fsutil's
+own walk, which `os.MkdirAll`'s identical EEXIST could not show.
+
+**Not changed.** Serve itself, which goes on after a lock error that is not
+contention on purpose (`serve_lock.go`, `serve_data_dir_lock_test.go`): telling
+"cannot make the data directory" from "cannot lock it" there is a follow-up.
+The rules line in `cli-serve.md` and its long form change with this round: the
+orchestrator applied the line from `.p2/rules-b603r2.patch` in b8aff55d, and
+the long form is in `ops/History-rules-cli-serve.md`, B603 round 2.
+
+## 2026-10-31 — B603 round 3: the Volumio refusal cases expect statfs's ENOENT in the platform's words
+
+**The failure.** CI's `test (windows-latest)` on #1368 failed at 832e117b, and
+the gate with it: every case of `TestMediumRefusesWhatVolumiosLayoutDoesNotShow`
+stopped at the check of main's refusal (`medium_volumio_test.go:438` there),
+while macOS, `test -race` and the Linux tests passed. On nomos (Go 1.27.3,
+windows/amd64) the orchestrator measured the same at 832e117b: the refusal was
+right, wrapping `ErrMediumUnknown` and `fs.ErrNotExist`, but its text ended
+`statfs /mnt/ext/dyn: The system cannot find the file specified.` where the
+cases wanted `… statfs /mnt/ext/dyn: no such file or directory`.
+
+**Why Windows answered otherwise.** The check is the same there: `volumio.go`,
+`medium.go` and `medium_volumio_test.go` carry no build constraint, and the
+test runs `inspectMedium` on injected readers (`volumioBox.inspect`), never
+Windows' `platformInspect` (`mounts_windows.go`, which takes every root). Its
+fake statfs (`statfsOf`) answers a path it does not hold with
+`&fs.PathError{Op: "statfs", Path: p, Err: syscall.ENOENT}`, which
+`upperAsReached` wraps with `%w`, so the refusal ends with
+`syscall.ENOENT.Error()`. On Windows that errno is `ERROR_FILE_NOT_FOUND`
+(`zerrors_windows.go`: `ENOENT Errno = ERROR_FILE_NOT_FOUND`, and `ENOTDIR` is
+`ERROR_PATH_NOT_FOUND`), whose words `Errno.Error` asks the system for, while
+the errnos Go invents there (`APPLICATION_ERROR` plus n: EACCES, EEXIST, EIO,
+EISDIR, ELOOP and the rest) carry Unix's words from Go's own table. The cases
+spelled out Unix's words twice: in the `today` constant nineteen of them
+share, and in the case "another upper layer"'s own. That check is a
+`t.Fatalf`, so on Windows nothing after it ran: no case's storage or reason
+has been checked there yet.
+
+**The fix** (3140f766) is the expectation alone: `today` and the other upper
+layer's now end with `syscall.ENOENT.Error()`, the errno the fake returns, so
+each platform's words follow from it; the error-chain checks
+(`ErrMediumUnknown`, not `ErrOverlayBind`, `fs.ErrNotExist`), the refusal's
+context and each case's reason are unchanged, and no production code changed.
+Not a build constraint: the file's fixtures (`fakeBoot`, `piBoot`,
+`piVolumio`, `statfsOf`, `volumioBox`) serve `volumio_test.go` and
+`volumio_write_test.go`, which build everywhere, and the unix-only
+`volumio_unix_test.go`, so a Linux tag would leave them undefined on Windows
+and macOS. Not a `runtime.GOOS` skip either. The two EACCES expectations in the
+PR's portable tests, the upper path statfs refuses for another reason
+(`TestMediumKeepsEveryOtherRefusalBesideVolumiosEvidence`) and the doctor
+table's data directory this user cannot inspect
+(`TestThePlayersStorageLineSaysWhatTheWritersCheckFound`), passed on Windows
+only because EACCES is an invented errno there (`EACCES - APPLICATION_ERROR:
+"permission denied"`); they are built from `syscall.EACCES.Error()` the same
+way. The writer test's POSIX permission subtest keeps its Windows skip.
+
+**The PR's tests, by platform.** With no constraint, so on Windows, Linux and
+macOS: `medium_volumio_test.go` (the acceptance, the refusals above, the
+refusals the fallback does not outrank); `volumio_test.go` (the os-release and
+udev parsers, the facts left uncertain, what the check reads, the fake's
+shape, each on fakes, its reasons free of errno words, its `fs.ErrNotExist` an
+`errors.Is` that Windows' ENOENT answers); `volumio_write_test.go` (the strict
+writer through the fallback, its barrier and mount IDs the test's own on
+Windows, its permission subtest skipped there and as root);
+`medium_inspect_test.go` (InspectMedium against the package's own check,
+which on Windows asks nothing, the platform giving no mount ID); the doctor's
+`doctor_player_storage_test.go` (a faked inspector and seams, its one real
+walk a `t.TempDir()` path whose ENOENT Windows answers as `fs.ErrNotExist`,
+and `volumioRefusal` a fixture compared with itself); and `internal/doctor`'s
+`player_storage_test.go` (no host at all). Unix only: `volumio_unix_test.go`
+(real sysfs links named with colons, a FIFO) and
+`doctor_player_storage_unix_test.go` (real links and kernel errors). Linux
+only: `medium_linux_test.go`'s namespace scenario. `medium_test.go`'s one
+changed call keeps B514's Windows skip. Each one's expectations hold where it
+builds, the refusal cases on Windows excepted until this fix.
+
+**What Linux showed** (legion0: Ubuntu 26.04, kernel 7.0, Go 1.27.3, uid
+1000). `internal/atomicwrite` passed, the PR's tests among them. The namespace
+scenarios skipped: a child here cannot make its mounts private ("permission
+denied"), AppArmor restricting unprivileged user namespaces
+(`kernel.apparmor_restrict_unprivileged_userns` 1), so
+`TestWriteBytesDurable_RefusesAnOverlayWhoseUpperLayerIsHidden` has run only on
+CI's ubuntu. The doctor's unix tests passed against the real kernel, in round
+2's words from macOS: mkdir answers a link's entry with EEXIST (`mkdir
+…/link: file exists`, errno 17), for a data directory a link to nothing
+stands in and for one below such a link, as this user and through fsutil's
+own walk as simulated root, which gave no entry an owner;
+`filepath.EvalSymlinks` answers a link to nothing with `lstat <its target>:
+no such file or directory`, a cycle with `EvalSymlinks: too many links`, and a
+regular file on the way with a bare `not a directory` (ENOTDIR, naming no
+entry); and the mode-0 case ran, a warn with the service user's advice
+(`lstat …/locked/data: permission denied`).
+
+**Controls**, on 3140f766, each predicted, compiled (`go vet`), run on the
+whole `internal/atomicwrite` package or on the doctor's player-storage tests,
+and restored from git, the tree clean after. NC1, Windows' words as the
+expectation on Linux (CI's failure, mirrored): red exactly the twenty refusal
+cases, at the check of main's refusal. NC2, the fake statfs's ENOENT as
+`fs.ErrNotExist` ("file does not exist", still not there): red exactly the
+same twenty, on the words alone, the acceptance still taken, so the
+expectation pins statfs's own errno, which a compare up to `statfs
+/mnt/ext/dyn:` would not. NC3, the EACCES case's errno as EPERM: red exactly
+that case. NC4, the doctor table's EACCES as EPERM: red exactly its summary,
+its status and its hint unchanged. Nothing else went red.
+
+**Compiled here, run elsewhere.** `go vet` and `go test -c` of
+`internal/atomicwrite`, `cmd/bridge` and `internal/doctor`, with the release
+tags, for windows/amd64, linux/amd64, linux/arm64 and darwin/arm64: clean. A
+compile cannot check a string, so the orchestrator runs the package's tests on
+nomos before pushing. The rule is a new line in
+`.claude/rules/build-ci-tests.md`, which this round wrote as
+`.p2/rules-b603r3.patch` for the orchestrator to apply.
 ## 2026-10-31 — B605: the engine's tests move the fake clock past a call only once the owner has taken its answer
 
 Backlog B605: `TestNativePausedTransitionRearmsDeadline/1s/true` failed in
