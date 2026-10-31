@@ -68145,3 +68145,66 @@ less the umask: 0775 there (measured), 0755 under 022.
 the fixtures assume a 022 umask. A fix (the fixtures' directories made 0700)
 touches a guarded prefix, so it waits for a backlog entry with its own version
 bump.
+
+## 2026-10-31 — B601: main merged in at e8a89109, and qualification version 23
+
+Since this branch's base (e242ce2c), main merged B605 (#1372, which raised
+`qualificationVersion` from 20 to 21), B603 (#1368) and B604 (#1369, from 21
+to 22). This branch raised it from 20 to 21 in round 1. After the merge, the
+gate compares main's 22 with the PR's head, so B601's guarded changes take 23.
+
+**The merge (a6448510).** Four files conflicted, and every resolution keeps
+both sides. In `version.go` and the runbook's five pinned current-version
+lines, this branch's 21 and main's 22 conflicted; the merge keeps main's 22.
+At the runbook's end, main's version 21 (B605) and 22 (B604) paragraphs stay
+verbatim, followed by this branch's paragraph. In this log and in
+`.claude/rules/admin-console.md`, both sides had appended: main's records and
+entries come first, whole, then this branch's. Six more files changed on both
+sides and merged with no conflict: `cli-serve.md`, `player.md`, `main.go`,
+`admin.go` and the two History files. git merge needs an approval that a
+headless session on legion0 cannot get, so the merge was assembled by hand:
+the files only main changed came from main, and the rest were merged three
+ways from git's own -U0 hunks. It was checked both ways. Against main, the
+merged tree is exactly this branch's change set, except its six 20 -> 21
+version lines. Against this branch, it is exactly main's, except those lines
+and the blank line between the paragraphs appended to the log and the
+runbook, which aligns differently. Each file both sides appended to is, byte
+for byte, main's file with this branch's tail after it (in
+`admin-console.md`, with this branch's one earlier entry where the branch put
+it, too).
+
+**The raise (c4eb4c8c).** `version.go` goes from 22 to 23. So do the runbook's
+six current references: the five that `TestQualificationRunbookVersion` pins,
+and the owner's step 1. This branch's paragraph is relabelled "Version 23
+covers backlog B601". It is still the only one for B601, after B605's 21 and
+B604's 22. The paragraph now names what the raise covers: the guarded
+`cmd/bridge/serve_player` changes (`serve_player.go`, which keeps the
+resolver on `bridgePlayer`; `serve_player_console.go`, with round 1's
+`Sounding` and `Withholds` and round 2's `outputOpen`; and their three test
+files). It names the library resolver's `StoredPath` as accompanying them.
+`internal/player/library/` is not among `version_gate.go`'s guarded prefixes,
+so round 1's record above was wrong to list it there. Round 3's "it stays 21"
+held only until this merge.
+
+**Checks**, on c4eb4c8c (legion0, Linux x86-64, go1.27.3, umask 022, each
+Go command through the build lock):
+
+- The runbook test: `--- PASS: TestQualificationRunbookVersion`, all five
+  subtests.
+- `go run -tags ts_omit_webclient,ts_omit_debugeventbus
+  ./scripts/qualification-version -base e8a89109 -head HEAD` printed
+  `qualification version OK: e8a89109..HEAD`. The same command with `-head
+  a6448510`, the merge alone, printed `guarded code changed without
+  qualificationVersion increase (22 -> 22)` and exited 1.
+- `make test`: 79 packages ok, 13 with no test files. These include the
+  packages with Linux-only tests: `internal/alsapcm` (its kernel seam),
+  `internal/atomicwrite` (the durable writer's medium checks) and
+  `internal/player/hotplug` (the netlink source). They also include
+  `cmd/bridge` (800.5 s) and `internal/admin` (887.4 s).
+- `make build-all`: `check-build-tags: OK`, and all six targets built.
+- `make docs-check`: `check-doc-budgets: ok — CLAUDE.md 71.8%; player.md
+  96.6%; worst load, lan_test.go 60.2%.` Main's `player.md` was at 99.0%, and
+  this branch's condensed lines take the merged file to 96.6%, so no entry had
+  to move.
+- `TestEveryCitedTestNameExists` and `TestNoDocblockNamesAnotherDeclaration`
+  pass, `make vet` is clean, and the pinned gofmt lists no file.
