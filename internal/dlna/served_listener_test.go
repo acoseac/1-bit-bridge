@@ -110,7 +110,8 @@ func TestTheDLNAListenerRefusesAConnectionToAnAddressItDoesNotServe(t *testing.T
 }
 
 // TestTheDLNAListenerLogsARefusedConnection pins that the listener's
-// refusal reaches the server's log, naming the address and its interface.
+// refusal reaches the server's log, naming the address and its interface,
+// and not the peer that connected.
 func TestTheDLNAListenerLogsARefusedConnection(t *testing.T) {
 	var judged judgedAs
 	sink := newLogSink()
@@ -122,8 +123,16 @@ func TestTheDLNAListenerLogsARefusedConnection(t *testing.T) {
 	if want := "refused a connection to an address it does not serve"; !sink.waitFor(want, 5*time.Second) {
 		t.Fatalf("no refusal in the log:\n%s", sink.String())
 	}
-	if got := sink.String(); !strings.Contains(got, "address=100.64.0.7 interface=utun7 from=127.0.0.1") {
-		t.Errorf("the refusal does not name the address, its interface and the peer:\n%s", got)
+	for _, line := range strings.Split(sink.String(), "\n") {
+		if !strings.Contains(line, "refused a connection") {
+			continue
+		}
+		if !strings.Contains(line, "address=100.64.0.7 interface=utun7") {
+			t.Errorf("the refusal does not name the address and its interface:\n%s", line)
+		}
+		if strings.Contains(line, "127.0.0.1") {
+			t.Errorf("the refusal names the peer that connected (127.0.0.1):\n%s", line)
+		}
 	}
 }
 

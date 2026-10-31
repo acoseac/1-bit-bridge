@@ -66615,3 +66615,397 @@ goes from 18 to 20, with the runbook's five current references, its step 1,
 and a note of what 20 covers.
 
 **Round 2:** an uninterpretable root-hub speed leaves the USB listing incomplete (reader and Resolve regressions red before the fix, green after); PROTOCOL.md now names all three causes of `identity_incomplete`; the qualification note now distinguishes unchanged wire fields and schema from existing `reason` values that may differ.
+
+## 2026-10-30 — B604: the 0.2.2 logging audit: no library path, operator directory, config path or client address in a log line or a console body
+
+The release's logging audit (`docs/release-process.md`, Process, step 1)
+was a read-only pass over `v0.2.1..e242ce2c`, amended by two reviews. It
+found no bearer token or pairing code reaching a log or a body, and these
+leaks, each confirmed against the code before it was fixed: the MP4 walks'
+warnings, the on-demand rendition pre-flight's disk errors, the config
+save refusals in console 500s, the DLNA served-address refusal, the strict
+SSDP reply's refusal, and the loopback route's panic line. The CLI's
+stderr paths (`bridge output play`, `output dsd-test`: the operator's own
+files, in output the operator runs, never reached by serve) and the ALSA
+`/proc/asound` and `/dev/snd` paths (system paths) were kept, as the
+review decided.
+
+### Red first (a3ac6809)
+
+Each case drives its site with an error that carries an absolute path or
+a peer address, through the logger the component uses (an injected one
+where it has one) at every level, searches every string a handler could
+write for each record (`loggingtest.Strings`, `Recorder.Carrying`), and
+asserts the line it expects. On e242ce2c, with the test's temp directory
+written `<tmp>`:
+
+- `WARN mp4 codec walk failed; falling back to extension classification
+  path=<tmp>/Private Library/Artist/Album/01 Song.m4a err=read <tmp>/Private
+  Library/Artist/Album/01 Song.m4a: input/output error`, and so for the
+  sample-rate and the ALAC bit-depth walks; the duration, genre, advisory
+  and rating walks named the file relative and the error absolute. The
+  source (`pathFailingSource`) serves a minimal ALAC M4A and fails every
+  read after N walks with an `*fs.PathError`, as an `*os.File` does, and
+  `faultNotingSource` hands that error to the parser unchanged.
+- `statfs "<tmp>/Private Volume/variants": no such file or directory`
+  (AvailableDiskSpace), `stat <tmp>/Private Volume/variants: no such file
+  or directory` (volumeID), and `insufficient disk space: needs … (1.10
+  safety margin) on "<tmp>/Private Volume/variants", … available`.
+- Through the real API handler and adapter (`stampBridge`): `ERROR
+  upscale: enqueue failed path=Fixture/PCM/01.flac err=check free space for
+  the rendition: statfs "<tmp>/Private Volume/a file/variants": not a
+  directory`, the no-room Warn, and a stale download's re-render at Warn
+  and Debug, each with the directory.
+- A console 500 save-config whose message was the refusal's text:
+  `<tmp>/bridge.yaml was changed or removed by another writer …`, and for
+  a filesystem with no lock manager the lock file too (`flock <tmp>/Private
+  Config/.bridge.yaml.lock: no locks available`), with no log line at all.
+- `WARN DLNA refused a connection to an address it does not serve: …
+  address=100.64.0.7 interface=utun7 from=100.64.0.99`, and the same for
+  IPv6, a mapped peer and an M-SEARCH.
+- `err=write udp 192.168.1.20:54321->192.168.1.30:50000: sendmsg: network
+  is unreachable` in the strict reply's refusal, and `err=injected` for an
+  error with no errno.
+- `http: panic serving 127.0.0.1:50811: the test's own panic` from the
+  loopback route's server, which had no `ErrorLog`.
+
+### The fixes (b402d30a)
+
+At the producer where one could be fixed there, with `errors.Is` and
+`errors.As` answering as before:
+
+- The MP4 walks' seven warnings log `trackLogPath` and `walkErrReason`.
+  `walkErrReason` is `fsutil.ErrorWithoutPath` now, one reading for every
+  package (the API's `redactWalkErr` and the scanner's `walkErrReason` were
+  each private to their package, and transcode could reach neither).
+  `faultNotingSource` keeps the error as it is: the read faults decide on
+  it (`readIncompleteError`, `endOfFile`, `seekOffsetRefused`).
+- `AvailableDiskSpace`, `volumeID` and `TotalDiskSpace`, POSIX and
+  Windows, answer a `probeError` (the call and the errno, `Unwrap` the
+  cause, os.Stat's `*fs.PathError` included); `InsufficientDiskSpaceError`
+  carries `Role` and says the role's volume, and keeps `Dir`, which the
+  batch tests compare; `roomOn` names its directory's role, the volume
+  comparison both. `ErrUpscaleNoRoom`'s decision is unchanged.
+- `writeSaveConfigErr` answers 500 save-config with `saveConfigRefusal`'s
+  fixed message by class (busy: try again; no lock manager: mount with
+  local locking or start the lock service; changed outside the holder, in
+  the turn or under a repointed name: restart; a boot read that resolved
+  no file: restart once it resolves; a link to no file: point it;
+  anything else: the log) and logs the error at Error, where the config
+  file may be named (the bridge's own files in fault lines). The settings
+  PATCH, the variants dir, the root add and remove and the three UPnP
+  server writes go through it; a `cfgAbort` answers as it did.
+- `servedAddrs.admit` and `noteRefused` take no peer; neither caller
+  computes one.
+- `noteReplyRefusal` takes the stage and logs `replyFailure`: the
+  operation from an `*net.OpError` and an `*os.SyscallError`, the errno,
+  `timeout`, or `capability` / `unclassified` and `no errno`.
+- The loopback route's server takes `handshakelog.ErrorLog()`.
+
+### Controls (after b402d30a, each restored from HEAD, none committed)
+
+Each predicted, and each matched:
+
+1. The content-rating warning back to `"err", err`: both runs of
+   `TestAnMP4WalkThatCannotReadItsFileNamesNoAbsolutePath` red, on that
+   line alone.
+2. `AvailableDiskSpace` naming its directory again: the transcode probe
+   case and the `AvailableDiskSpaceNearest` assertion red, and in
+   cmd/bridge exactly the two cases that probe a blocked variants
+   directory; the volume-comparison and no-room cases green. 2b,
+   `InsufficientDiskSpaceError` quoting `Dir`: the two transcode no-room
+   cases and the two cmd/bridge no-room cases red.
+3. The console body back to `err.Error()`: all 16 save cases red, `fn`'s
+   own refusal green. 3b, the console's log line removed: the same 16 red
+   on "left no Error line", so the positive half bites.
+4. The refusal's peer put back (`served.go` and its test from a3ac6809,
+   the M-SEARCH caller passing the source again): every peer case red
+   (IPv4, IPv6, the mapped peer, both datagram cases, the listener's, the
+   real-loop M-SEARCH's), the strict reply's case green.
+5. The strict reply logging `err.Error()` again: all seven refusal shapes
+   red, the closed socket green.
+6. The loopback server's `ErrorLog` removed: the panic case red on the
+   missing placeholder and the client's address.
+
+### Rejected
+
+- `handshakelog.RedactPeers` for the strict reply's error: it keeps the
+  local end by design, and the line must name neither end.
+- Wrapping the strict reply's errors in `dialReply` instead: a transport
+  hands the sink whatever it got (the fake transport's errors never pass
+  through `dialReply`), so only the sink's classification holds for all.
+- Fixed messages inside internal/config: the CLI writers print the
+  refusal, path and all, to the operator's own terminal, which may name
+  it; only the console's body may not.
+- A static guard for every `http.Server` in internal/dlna: the
+  MediaServer's own server (`server.go`, since #303) has no `ErrorLog`
+  either, outside this delta; the loopback route has a runtime case.
+
+### Found and not fixed
+
+- The root add's and remove's own 500s for a failed wipe or prefix
+  delete (`wipe-tracks`, `delete-tracks`) still write the store's error
+  (B425's fixed-message rule); no protected value was found in them.
+- The MediaServer's `http.Server` keeps net/http's default logger, so a
+  recovered panic there names a renderer's address (the ContentDirectory's
+  `remoteAddr` class).
+- The other extractors' older warnings still name the absolute path (the
+  FLAC format read's, seen in these tests' own logs), as the privacy page
+  says.
+- The audit's note on `cmd/bridge/serve_player_output.go`'s `dsdPlayback`
+  model text (a port or uniqueModel binding's observed serial) was not
+  examined here.
+
+The rules lines are in scanner.md, jobs.md, admin-console.md,
+dlna-upnp.md, output.md, auth-tls.md and build-ci-tests.md; the long forms
+changed are in History-rules-jobs.md and History-rules-dlna-upnp.md.
+
+## 2026-10-31 — B604, second round: every http.Server's ErrorLog from handshakelog, no path in a console error body, the console's login lines kept
+
+Codex reviewed the integrated branch (the first round with its rules,
+d479ba01) and found five gaps of the first round's classes, each confirmed
+against the code before it was fixed:
+
+1. The DLNA MediaServer's `http.Server` had no `ErrorLog`
+   (`internal/dlna/server.go`), so a handler's recovered panic named the
+   renderer it served. The first round had listed it under "Found and not
+   fixed".
+2. The console's failed and rate-limited login lines log `ip` at Warn
+   (`handlers_login.go`), with no documented exception.
+3. `GET` and `POST /api/backups` answered `backup.List`'s and `Snapshot`'s
+   errors as their 500 bodies: the backups folder, and a file the snapshot
+   copies, the config file among them.
+4. `GET /api/cert` named the certificate's path in its 404 and answered
+   `os.ReadFile`'s error in its 500.
+5. `POST /api/roots` answered the stat's `*fs.PathError` and the path it
+   resolved, so a relative request gave the bridge's working directory
+   away.
+
+A read-only sweep of the console's other 500s that write an error's text
+(52 sites in `internal/admin`) found the same class at the four token
+writes (mint, revoke, rotate and expiry: `auth.Store`'s write wraps the
+`*fs.PathError` of `tokens.json`'s staging file in the data directory,
+which a read-only data directory or a `tokens.json` a root CLI left root's
+(#1048) produces) and in the compaction (`dbFootprint`'s stat of the
+database). Every other site writes the store's SQL or validation text, the
+disk probe's pathless `probeError` (the first round's), or the QR
+encoder's: no path, B425's fixed-message rule aside.
+
+### Red first (ed378312, 83530735)
+
+On d479ba01, with the test's temp directory written `<tmp>`:
+
+- `http: panic serving 127.0.0.1:57949: the test's own panic` from the
+  MediaServer, its artwork route made to panic by the source it asks.
+- The serve guard, widened to the module: `internal/admin/admin.go: the
+  http.Server srv in ServeListener takes its ErrorLog from errorLog,
+  declared without a value, which is nil (net/http's default logger)
+  wherever nothing else assigns it` (the console on plain HTTP) and
+  `internal/dlna/server.go: the http.Server s.httpServer in Start gets no
+  ErrorLog from internal/handshakelog`. The LAN API, the tailnet server,
+  the loopback route and the OpenHome surface passed.
+- 500 bodies `open <tmp>/Private Data/backups: not a directory` (and
+  `permission denied`), `copy bridge.yaml: open <tmp>/Private
+  Config/bridge.yaml: directory is not a file` and `copy tokens.json: open
+  <tmp>/Private Data/tokens.json: permission denied`, with no log line.
+- `no TLS certificate at <tmp>/data/server.crt — run …`, and 500 bodies
+  `read <tmp>/Private Certs/server.crt: is a directory` and `open …:
+  permission denied`.
+- 400 bodies `stat <tmp>/Private Library/Missing: no such file or
+  directory`, `stat <the package's directory>/B604 relative folder: …` for
+  a relative path, `<tmp>/Private Library/track.flac is not a directory` and
+  `stat …: permission denied`, and 409 bodies naming both roots' paths.
+- `temp file: open <tmp>/data/.tokens-<n>.json: permission denied` for each
+  token write, and `manifest: measure before compact: stat
+  <tmp>/data/bridge.db: permission denied`.
+
+The login lines were pinned as they are
+(`TestAConsoleLoginRefusalLogsItsSourceAndNothingElseOfTheRequest`, green
+by design: the exception this round documents).
+
+### The fixes (d01c850a)
+
+- The MediaServer's server takes `handshakelog.ErrorLog()`, and the
+  console's starts from it on plain HTTP (its TLS branch takes Wrap's pair
+  as before). `TestEveryServeHTTPServerRedactsPeerAddresses` sweeps every
+  `http.Server` in the module: a literal's `ErrorLog`, a variable every
+  assignment of which calls into handshakelog, or Wrap's assignment before
+  the first serve; and it requires a server in each package that builds
+  one.
+- Each console error body says what failed and what to do in words that
+  name no path, and the error goes to the log at Error, whole:
+  `backupsListRefusal` and `snapshotRefusal` (a permission; a file held
+  busy past the read's retries, asked first, since on Windows its last
+  error is an access denial and so a permission's too; a stop; or the
+  log, which keeps a player-identity refusal's advice); the certificate's
+  404 keeps `bridge cert rotate` and the pairing warning, its 500 a
+  permission or the log; `rootStatRefusal` (no folder there, a permission
+  on the way, or the stat's answer through `fsutil.ErrorWithoutPath`), a
+  file, a relative path the working directory cannot resolve, and the two
+  basename refusals by the folders' names; `writeTokenStoreFault` (what did
+  not happen, a token not revoked or rotated still working, then a
+  permission or the log); the compaction's 500 the log. Status and error
+  codes are unchanged.
+
+### Decided: the console's login lines keep the source address
+
+Codex asked for a redaction or a documented exception, and the lines are
+kept and documented (auth-tls.md). The console has a login only in public
+mode, where the source of a failed login is what an operator or fail2ban
+blocks, and the address is the limiter's own key. It is
+`ExtractClientIP`'s canonical IP without a port, so a forwarded header's
+own text never reaches the line; the password never does.
+
+### Controls (after d01c850a, each restored from HEAD, none committed)
+
+Each predicted, and each matched:
+
+1. The MediaServer's `ErrorLog` removed: its panic case red (the
+   placeholder missing, the client named) and the guard red on
+   `server.go` alone.
+2. The console's `errorLog` assigned nil after its handshakelog value: the
+   guard red on `admin.go` alone ("assigned something other than a call
+   into internal/handshakelog").
+3. The snapshot's body back to `err.Error()`: the two snapshot subtests
+   red, the two listing subtests green.
+4. The certificate's Error line removed: the two unreadable-certificate
+   subtests red on the log assertion alone, the 404 green.
+5. The root's stat answered with `err.Error()`: the missing, relative and
+   permission subtests red; the file and both basename refusals green.
+6. Permission asked before busy in `snapshotRefusal`: the class table's
+   busy-and-denied row red, nothing else.
+7. The token fault carrying the error's text: all four token subtests red.
+8. The failed-login line logging `r.RemoteAddr`: the five failed-login
+   lines red on `ip`, and the search for the connection's address red; the
+   limiter's line green.
+
+### Found and not fixed
+
+- The 200's `pruneWarning` keeps the prune's and the orphan sweep's error
+  text (`TestPruneWarningTextSurfacesBothErrors` pins it); its paths lie
+  under the `snapshotDir` the same body names.
+- The compaction's 507 writes the headroom guard's text (sizes, no path),
+  and the console's other 500s write the store's error text: B425's rule,
+  no path. A helper every console 500 goes through, with a static guard,
+  would close B425's class in the console.
+- The login lines' username is what the visitor typed (64 bytes at most):
+  a password typed into the username field reaches the Warn line.
+- A success body shows the paths the console was configured with (the
+  roots, `backupsRoot`, `snapshotDir`), deliberately.
+
+The rules lines are in admin-console.md, auth-tls.md and dlna-upnp.md. The
+long form of the serve guard's entry changed in History-rules-cli-serve.md.
+
+## 2026-10-31 — B604, third round: the test logger keeps what a derived logger binds
+
+CodeRabbit on #1369 (Major, verified by the orchestrator):
+`internal/logging/loggingtest`'s `recordHandler` and `parkHandler` returned
+themselves from `WithAttrs` and `WithGroup`. So
+`r.Logger().With("path", "/private/file").Info("refused")` kept the
+message alone. Under `Record` and `ParkOn`, every `logging.Component`
+logger replays its op chain onto the installed handler, and that chain,
+`component=` included, vanished too. `Strings` and `Carrying` never saw a
+bound value, while a real Text or JSON handler writes it. Nothing in the
+tree was exposed: the one production `With` that binds a variable
+(`requestLogging`'s request id, method and URL path,
+`internal/api/middleware.go`) has no absence test that sends a
+path-bearing URL through it. A harness fix.
+
+### Red first (267316e2)
+
+On 2c97e94b:
+
+- Strings' table: its three new rows (a `With` value, a `WithGroup` name,
+  a nested `With` → `WithGroup` → `With`) found nothing.
+- Parity with slog's Text and JSON handlers: 16 of 19 chains differed. For
+  example `kept "", want "path=/abs/with"` with `a handler wrote
+  "/abs/with", and Strings does not report it`. An inline group was kept
+  as a group with an empty key. An empty `Attr{}` was kept as `=<nil>`, so
+  Strings reported `""`, `<nil>` and `null`, which no handler writes. A
+  record's own LogValuer was read when the test asserted, after it had
+  changed.
+- Go's handler conformance suite (`testing/slogtest`): 11 of its 15 cases
+  failed.
+- Nothing bound through `slog.Default()` under `Record` or `ParkOn` was
+  kept, nor anything a `Component` made before either was installed
+  bound. A parked record was kept without its logger's bindings, and
+  sibling, repeated and concurrent loggers lost theirs.
+
+### The fix (ffb05178)
+
+One handler, `*recordHandler`, serves `Record`, `NewRecorder`'s `Logger`
+and `ParkOn`. It shares the Recorder and the one Park by pointer, and
+carries an ordered op chain, `dynamicHandler`'s shape:
+
+- `WithAttrs` resolves and copies its attributes into a new slice, and
+  returns the receiver when nothing is left.
+- `WithGroup` returns the receiver for an empty name.
+- Every derivation allocates its chain afresh.
+- `Handle` resolves the record's own attributes and folds the chain over
+  them from the innermost op outward: an attrs op prepends, and a group op
+  wraps what is non-empty so far. It keeps a new record, then parks, with
+  the Recorder's lock released.
+- What slog's Handler contract ignores is dropped: an empty attribute, a
+  group holding nothing (its name included) and an unnamed group. An
+  inline group is flattened.
+
+The semantics were read in Go 1.27.3's `log/slog/handler.go`, `value.go`
+and `record.go`. A bound attribute is formatted at bind time
+(`commonHandler.withAttrs`), and a group applies to everything added
+after it.
+
+### Measured: Go 1.27.3's own handlers against their contract
+
+A probe of the toolchain's handlers. For `l.Info("m",
+slog.Group("/abs/holds-nothing", slog.Attr{}), "k", "v")`:
+
+- The Text handler writes `/abs/holds-nothing.k=v`: the ignored group's
+  name stays in the key prefix of what follows (`handleState.appendAttr`
+  does not undo its `openGroup` when the group turns out empty), and the
+  prefix's later truncation writes garbage keys when the names' lengths
+  differ.
+- The JSON handler writes `"msg":"m""k":"v"`, without its separator.
+- For `WithGroup("p").With(slog.Attr{}, slog.Group("e"))`, the JSON
+  handler writes `"p":{}`, which no `slog.Record` can carry.
+
+The recorder keeps the contract ("If a group has no Attrs (even if it has a
+non-empty key), ignore it"), as the brief's elision rule says.
+`TestSlogsHandlersWriteAnIgnoredGroupAgainstTheContract` pins the defect as
+a tripwire, so the recorder's note goes when a toolchain fixes it.
+
+### Controls (after ffb05178, each restored from HEAD, none committed)
+
+1. `WithAttrs` returns the receiver: every case that binds a value went
+   red (11 parity rows, slogtest's six With cases, two of Strings' rows,
+   the Default, Component and park tests, siblings); the WithGroup-only
+   ones stayed green.
+2. `derive` appends into the parent's chain: siblings overwrote each
+   other's last op, and `-race` reported the concurrent derivations.
+3. No resolution: the three LogValuer rows and slogtest's four resolve
+   cases.
+4. Empty attributes kept: the four `Attr{}` rows, slogtest's empty-attr
+   case and the tripwire's recorder half went red. So did the receiver
+   pin's `WithAttrs(Attr{})` row, which was not predicted: with empties
+   kept, that call derives.
+5. The park before the record is kept: the park test, its parked record
+   unreadable while parked.
+
+### The suite
+
+`buildslot.py b604 make test` at 00e6f5c9: 79 packages ok, 0 failures,
+every package re-run. No absence test found a value it had missed: the new
+recorder sees every bound value and group name, and every absence test
+that uses loggingtest still passes. One cmd/bridge test compared a
+rendered line exactly and now expects the `component=player` that the
+real handler writes too (in ffb05178).
+
+### Also
+
+The first two B604 records said the rules lines were in `.p2/` patches on
+the branch. Both were applied and `.p2/` is gone, so they now name the
+rules files they changed (00e6f5c9). CodeRabbit's other thread on this
+log, which asked to turn three "found and not fixed" entries into backlog
+IDs, was declined by the orchestrator, and they stand.
+
+The rules lines are in `.p2/rules-b604r3.patch` until the orchestrator
+applies it: build-ci-tests.md, one new bullet after the log-leak test's.

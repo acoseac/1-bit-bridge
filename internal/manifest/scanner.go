@@ -4184,25 +4184,14 @@ func (w *walkTallies) noteUnreadable(rel string, err error) {
 	w.unreadable.note(rel, walkErrReason(err))
 }
 
-// walkErrReason describes err for a scan's line: an *fs.PathError by its
-// operation and cause, without the absolute path it names (a log line names a
-// library file library-relative, #1055, and the line's example already says
-// which).
-//
-// It must not panic, whatever err holds: it runs in the walk's callback,
-// which no recover covers (the workers' per-file recover does not), so a
-// panic there ends the scan and the process with it. An *fs.PathError's own
-// Error() dereferences its cause, so one without a cause (none that os
-// builds) panics in anything that asks it for its text, a guard on the cause
-// included when the text is taken first. Hence fmt, which answers "<nil>"
-// for a nil error and recovers a panicking Error method.
-func walkErrReason(err error) string {
-	var pe *fs.PathError
-	if errors.As(err, &pe) && pe != nil {
-		return pe.Op + ": " + fmt.Sprint(pe.Err)
-	}
-	return fmt.Sprint(err)
-}
+// walkErrReason describes err for a scan's line or an extractor's: an
+// *fs.PathError by its operation and cause, without the absolute path it
+// names (a log line names a library file library-relative, #1055, and the
+// line's example or path already says which). It is fsutil.ErrorWithoutPath,
+// the one reading of it, which never panics whatever err holds: it runs in
+// the walk's callback, which no recover covers (the workers' per-file
+// recover does not), so a panic there ends the scan and the process with it.
+func walkErrReason(err error) string { return fsutil.ErrorWithoutPath(err) }
 
 // noteNotAFile records the entry at rel, whose stat reports m.
 func (w *walkTallies) noteNotAFile(rel string, m fs.FileMode) {
