@@ -68730,3 +68730,149 @@ Go command through the build lock):
   to move.
 - `TestEveryCitedTestNameExists` and `TestNoDocblockNamesAnotherDeclaration`
   pass, `make vet` is clean, and the pinned gofmt lists no file.
+
+## 2026-10-31 — B612: a Player page switch that makes the bridge's player castable
+
+**Why.** At the 0.2.2 release checks the owner found the Player page (B601)
+unable to make the player castable. It sets `output.player.enabled` and the
+DAC alone, and the OpenHome surface the 1-bit app casts to starts only with
+`output.player.openhome: true` (`planServePlayer`), which is off by default
+and which no console route could set: the enabled route's decoder refused
+the key, and the settings PATCH takes no player key. An operator who turned
+the player on from the page alone got a player the app could not reach. The
+owner chose a console switch in 0.2.2; the default stays off
+(`openhome.md`).
+
+**What.** `POST /api/output/player/openhome`, body `{"openhome": true|false}`,
+modelled on the enabled route: the same eligibility (`playerRefusal`: a public
+bridge with or without a session, off Linux, a player block that does not
+read, a managed setting), before anything is read or written and again on the
+clone in the turn; the console's lock (`lockPlayerWrite`) and the live holder
+(`CfgHolder.UpdateChecked`, in `configWriters`); the same answers
+(`writePlayerChange`, `unchanged` for a value held). The page puts the switch
+below the player's own in its panel: "Let the 1-bit app cast to this
+player", with a description built from the status (the friendly name, UDP
+1900 and the TCP port, or "a TCP port chosen for each address" for 0), the
+consequence for 1-bit 2.1 and earlier (they stop listing the box's own MPD
+player while it is on; 1-bit 2.2 lists both, the iOS repo's B550), and a note
+by state. The status carries `managed.openHome`, `configured.openHome`,
+`.openHomePort` and `.openHomeName`, a pending `openHome` entry, and
+`running.openHomeDetail`.
+
+**Decisions.**
+- *Managed and implied.* `playerOpenHome` is its own managed-setting name,
+  and a managed `playerEnabled` implies it: the control plane that owns
+  whether the player runs owns whether it is exposed on the LAN.
+  `SettingsImpliedByManagedControls` iterates the controls, so the
+  implication is a map of its own (`managedSettingImplies`, through
+  `SettingsImpliedByManagedSettings`), which `IsManagedSettingOrImplied` (the
+  routes' predicate) and `EffectiveManagedSettings` (what the console is
+  told) both read. `playerOpenHome` alone implies nothing, so a control plane
+  can own the exposure and leave the player's switch to the operator. The
+  page: `playerEnabled` managed hides the whole switch panel, OpenHome
+  included, as before; `playerOpenHome` alone hides only its switch; neither,
+  both show.
+- *What the running process follows.* Serve reads the opt-in once, from the
+  boot snapshot. The live opt-in reaches the running process in one place,
+  `PlayerEnabled`'s port check, which the hotplug watcher's settings
+  (`hotplug.SettingsFrom` through `livePlayerSettings`), serve's player's
+  withholding (`playerOutput.readLive`, `disabled`) and the console's view all
+  go through: with the opt-in on and a clashing port, the live config turns
+  the player off and its output is withheld at once. The route refuses an
+  enable over a clash, so a saved change leaves that predicate's answer as it
+  was, or lifts a clash another writer made (turning it off). No change of
+  the switch stops what plays, and the route takes no `interrupt`; the serve
+  tests below prove both directions.
+- *The port check whatever `enabled` says.* `PlayerEnabled` returns before
+  the clash check for a player that is off, and `Validate` only logs a
+  player's refusal, so the route asks `config.OpenHomePortClash` (exported
+  from `openHomePortClash`) of the clone itself when it turns the opt-in on,
+  with no temporary enable. Refusing the clash in `PlayerEnabled` whatever
+  the opt-in was rejected in 5a2a and stays rejected: this is a refusal of
+  the save.
+- *Pending is boot against config only.* `consolePlayer.bootOpenHome` is the
+  boot snapshot's opt-in; the pending entry's text says what the next start
+  does (on the LAN under the name, at the first restart that starts the
+  player when the next start runs none; off, with "Until then the 1-bit app
+  can still cast to it" while the surface serves). `pending` is a list of
+  `{change, text}` (B601), so the pinned `pending.openHome` is the entry
+  whose change is `openHome`.
+- *A Source not on the LAN.* `running.openHomeDetail` says why a surface the
+  player started with is not serving (starting, a player that did not start,
+  a surface that did not start, a stop, a bind failure, a listing that
+  failed, no LAN address yet), read from the surface's status under the
+  player's mu after ready; the status line shows it, and no note offers a
+  restart for it. `running.openHome` stays GET /v1/outputs' view.
+- *The body.* `decodePlayerBody` checked trailing input with
+  `Decoder.More`, which answers false for a closing brace or bracket, so
+  `{"enabled":true}}` was saved on B601's two routes. A second decode must
+  now return `io.EOF`.
+
+**Tests.** The route: on, off, unchanged, with a provider that sounds and
+says every change withholds (never asked, never interrupted); on with the
+player off; every refusal, each asserting the file and the live config
+unchanged (public with a session, off Linux, managed, an unreadable block,
+CSRF, an edited config, through `playerWriteRoutes`); the four ports serve
+binds, refused with the player on and off, 0 and a port of its own saved, and
+off over a clash another writer left; sixteen bodies refused (missing, null,
+not a boolean, an array, an unknown field, a go-ahead, trailing JSON, a
+trailing brace or bracket, a cut object, oversized two ways) and the same
+trailing shapes on the enabled and DAC routes; the managed matrix at the
+route, the status and the page's rule; the switch waiting for the console's
+lock behind a DAC choice or the player switch held in its turn, both changes
+kept; the two switches racing in six rounds. Config: the port check whatever
+the player says, and the implication. Serve (`cmd/bridge`, a stand-in
+backend, `lantest` boxes): a valid toggle while playing and back while
+paused, with the surface off and on at boot, leaves the engine, the DAC (its
+opens and releases counted) and the listener as they were, the live settings
+as at boot, and the pending entry there and then cleared; each test then
+moves the live binding, a barrier serve's player must report as
+`binding_changed`, and requires no earlier report to withhold the output. A
+refused enable over the DLNA listener's port writes nothing and stops
+nothing. The saved value is what the next start's plan reads, on and then
+off. The status for a player turned off, one with no DAC bound, a surface
+with no LAN address and one that did not start. The page: the switch's place
+and words in the rendered template, its script's rules and words, and a node
+harness over eleven states (`TestThePlayerPageDrawsTheOpenHomeSwitchStateByState`),
+which skips on legion0 (no node) and runs on CI's legs.
+
+**Controls**, each on a committed tree and restored with `git checkout`:
+- Public mode: the route's public arm dropped (`playerRefusal`, the OpenHome
+  field alone): its "public with a session" case red, 200, the others green.
+- CSRF: the Origin check skipped for the route: its "another origin" and "a
+  null origin" cases red, 200 restart.
+- The console's lock taken out of the route: both cases of
+  `TestTheOpenHomeSwitchWaitsItsTurnBehindAnotherPlayerWrite` red. Its first
+  form waited for bridge.yaml's lock as the sign of a write that had skipped
+  the console's, and red only at the binary's deadline (590 s): the holder's
+  own mutex, which `UpdateChecked` takes before the file's lock, is where
+  such a write waits. It now watches for the write's read of `before` and is
+  red in 0.07 s. The race of the two switches stays green without the lock,
+  as the holder serializes them.
+- The managed refusal dropped for the route: its managed case and both
+  managed cases of the matrix red. The implication emptied: the config test
+  and the matrix's `playerEnabled` case red.
+- `Decoder.More` put back: the trailing brace and bracket cases red on all
+  three routes.
+- The port check skipped: the eight clash cases red, and through serve the
+  enable was saved and the playing player's output withheld at once
+  (`withheld: disabled`, the transport stopped): the live effect the refusal
+  prevents. The check asked through `PlayerEnabled` instead (only with the
+  player on): the four player-off clash cases red.
+- `PlayerEnabled` made to refuse any live opt-in: the toggle test red (the
+  engine stopped, the DAC let go, the live settings off), at first only at the
+  deadline, waiting for a pause that could not come; it stops at its first
+  failed check now (0.5 s).
+- The page's hide rule removed: the field guard ("managed.openHome") and the
+  page test red. The pending entry removed: the four cases that carry one red.
+
+**Docs.** `openhome.md`'s opt-in line and its long form, `admin-console.md`'s
+lock and Player page entries, a `config-lifecycle.md` bullet for the
+implication, `cli-serve.md`'s watcher bullet, the apply matrix's endpoint row
+and managed names, and `config/bridge.yaml.example`, which still said the
+surface answered every action as not implemented and was not advertised. On
+legion0 `.claude/` is refused to the editing tools, so the rules changes went
+to the orchestrator as a patch.
+
+**Qualification version 24**: `cmd/bridge/serve_player*` and
+`internal/config/` are guarded prefixes; the runbook's five pins follow.

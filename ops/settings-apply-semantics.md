@@ -173,6 +173,7 @@ Classes describe *how the value is consumed*, not how important it is.
 | `POST /api/upscale/variants-dir` | Hot — resolved from the live holder per submit and per disk pre-flight. |
 | `POST /api/output/player/enabled` | The Player page's switch (B601), `output.player.enabled`. Answers `restart` (saved; serve decides its player from the boot snapshot, so it starts or stops at the next start) or `unchanged` (nothing written). Turning a running player off withholds its output at once: while it plays or holds a pause (read in the write's config turn), the write is refused with 409 `would_interrupt`, nothing saved, unless the body carries the operator's go-ahead (`interrupt: true`); with it, playback stops and the answer says `interrupted: true`. Refused on a public bridge, off Linux, over a player block that does not read, and where `managedSettings` names `playerEnabled`. |
 | `POST /api/output/player/dac` | The Player page's DAC choice (B601), `output.player.device`, from a selection token `GET /api/output/player/dacs` handed out, checked against the box in the write's config turn, just before the save. Same answers, and the same go-ahead: a DAC other than the one the running player started with withholds its output at once until the next start, and choosing that one again gives it back. Refused as the switch is, and where `managedSettings` names `playerDevice`. |
+| `POST /api/output/player/openhome` | The Player page's OpenHome switch (B612), `output.player.openhome`: whether the next start advertises the player on the LAN for the 1-bit app to cast to. Answers `restart` (saved; serve reads the opt-in from the boot snapshot alone, so the surface starts or stops at the next start, and only with the player) or `unchanged`. It stops nothing and takes no go-ahead. Turning it on asks the surface's port of the config it saves, whatever `enabled` says: a port another listener of the bridge binds is 409 `player_refused`, nothing saved; with the player off it is saved. Refused as the switch is, and where `managedSettings` names `playerOpenHome` or `playerEnabled`, which owns it too. |
 
 ### Not reachable through this surface at all
 
@@ -430,12 +431,17 @@ Three rules:
 Empty (the default, and every self-hosted install) manages nothing and changes no
 behaviour.
 
-**The Player page's two writes are named here too** (B601): `playerEnabled`
-(`output.player.enabled`) and `playerDevice` (`output.player.device`). They are
+**The Player page's three writes are named here too** (B601, B612):
+`playerEnabled` (`output.player.enabled`), `playerOpenHome`
+(`output.player.openhome`) and `playerDevice` (`output.player.device`). They are
 no `settingsPatch` fields, since the PATCH takes no player setting at all, so
 the reflection above does not reach them: the page hides each control the list
-names, and its route refuses it (403 `managed-setting`). A public bridge, the
-hosted shape, refuses both whatever the list says.
+names, and its route refuses it (403 `managed-setting`). **`playerEnabled` owns
+`playerOpenHome`** (`managedSettingImplies` in internal/config): a list naming
+the player's switch makes the OpenHome switch the control plane's too, with no
+second entry, since what decides whether the player runs decides whether it is
+exposed on the LAN; `playerOpenHome` alone owns nothing else. A public bridge,
+the hosted shape, refuses all three whatever the list says.
 
 **Two controls hide themselves without needing the list**, because public mode
 already refuses them outright: `dlnaEnabled` (`startDLNAIfEnabled` returns early
