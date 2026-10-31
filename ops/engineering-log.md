@@ -66958,3 +66958,17 @@ wrote one line a record, the value quoted with `\n`, `\r` and `"` escaped
 **Qualification.** Nothing here is in `qualificationVersion`'s guarded set
 (`internal/admin` is not among its prefixes), so it stays 21, which this PR
 already raised from 20.
+
+**A gate note.** This round's gate ran on a Linux host whose shell umask is
+0002, and there `make test` failed 24 top-level tests this round does not
+touch, in `cmd/bridge`, `internal/player/openhome`, `internal/player/playback`
+and `internal/player/qualification`, every one on "untrusted approval
+directory" or what follows from an approval that did not read. Their fixtures
+hand `t.TempDir()` to `trustedFile`, which refuses a directory a group can
+write (`perm & 0022`), and `t.TempDir()` makes its directory with mode 0777
+less the umask: 0775 there (measured), 0755 under 022.
+`TestApprovedRecordTrust` run alone fails there the same way, and the same
+`make test` under `umask 022` passed every package (79). The check is right;
+the fixtures assume a 022 umask. A fix (the fixtures' directories made 0700)
+touches a guarded prefix, so it waits for a backlog entry with its own version
+bump.
