@@ -68730,3 +68730,151 @@ Go command through the build lock):
   to move.
 - `TestEveryCitedTestNameExists` and `TestNoDocblockNamesAnotherDeclaration`
   pass, `make vet` is clean, and the pinned gofmt lists no file.
+
+## 2026-10-31 — B610: the SSDP listener's control-data parser holds whatever it is handed
+
+Backlog B610, which blocked the 0.2.2 tag. The nightly `fuzz.yml` failed eight
+nights running, from run 40077306390 (2026-10-24) to 41190127175
+(2026-10-31): every night `FuzzParseDatagramMeta` had existed, since B470 PR
+5a1 (#1329, d75ce7c5) landed at 22:37 UTC on 2026-10-23 and the job runs at
+03:20 UTC. Each time, within a second: `panic: runtime error: invalid memory
+address or nil pointer dereference` in `golang.org/x/net/ipv4.(*ControlMessage).Parse`
+(`x/net@v0.61.0/ipv4/control.go:90`), called from `parseDatagramMeta`
+(`internal/dlna/ssdp_dst_other.go:40`), on a 24-byte input. The CI artifact
+was not fetched (this host has no GitHub access); the seed is the 24-byte
+shape the panic needs, built from the target's own seed.
+
+**The cause, reproduced on legion0** (Ubuntu 26.04, Linux 7.0, x86-64,
+go1.27.3; red first in 9b724881, each case run alone). `control.go:90` is
+the destination case of Parse's switch, `ctlOpts[ctlDst].parse(cm,
+m.Data(l))`. x/net keeps a table of the IPPROTO_IP messages it reads, one per
+platform, and Parse compares each IPPROTO_IP message's type and length with
+the entries in turn (TTL, destination, interface, packet info). Linux's table
+(`ipv4/sys_linux.go`) sets only `ctlTTL` and `ctlPacketInfo`, so `ctlDst` is
+the zero `ctlOpt`, name 0, length 0 and parse nil, and `typ == 0 && l >= 0`
+holds for a message of type 0 of any length. The crasher is the target's own
+Windows-layout seed (`wsaCmsg(8, wsaIPProtoIP, wsaIPPktinfo, …)`: cmsg_len
+24, IPPROTO_IP, IP_PKTINFO 19, an IN_PKTINFO for 192.168.1.20 on index 7)
+with its type zeroed, which 64-bit Linux reads as one IPPROTO_IP message of
+type 0 with 8 bytes of data. The committed seed
+(`testdata/fuzz/FuzzParseDatagramMeta/d79af9097d4991c5`) and the unit case
+(`TestParseDatagramMetaHoldsAnIPMessageOfTypeZero`: the same message laid out
+with x/sys/unix, the seed's bytes exactly on 64-bit Linux) each panicked with
+the nightly's stack.
+
+**Every platform's table at v0.61.0** (`ipv4/sys_*.go`), of the four entries
+Parse consults: darwin (and ios) sets all four; linux (and android) TTL and
+packet info; freebsd, dragonfly, netbsd, openbsd and aix TTL, destination and
+interface; solaris (and illumos) TTL and packet info; zos packet info alone;
+the stub platforms none. So on every platform with real control messages a
+message of type 0 panics, except Darwin, where it matches no entry and is
+passed over; on the stub platforms the socket header's length is zero, so a
+nonempty buffer fails as an invalid header before any IPv4 entry is consulted
+(Codex's review). x/net's ipv6 Parse
+consults traffic class, hop limit, packet info and path MTU, and every table
+sets all four but z/OS's (no traffic class); nothing in the bridge parses IPv6
+control data. The other x/net call, `ssdp_reply_linux.go`'s, marshals a
+ControlMessage and parses nothing. The tree's one other control-data parse is
+the hotplug watcher's netlink SCM_CREDENTIALS
+(`internal/player/hotplug/source_linux.go`), through x/sys v0.49.0:
+`ParseSocketControlMessage` bounds every message by the buffer, but
+`ParseUnixCredentials` checks only the level and the type and reads a ucred
+from the payload's first byte, so an SCM_CREDENTIALS message with no payload
+panics (measured: index out of range [0] with length 0) and a short one is
+read past its end. It is this one's class and not reached either: the kernel
+writes a whole ucred there (measured on an AF_UNIX socket with SO_PASSCRED,
+the `scm_recv` path netlink shares: cmsg_len 28, 12 bytes), the watcher
+parses nothing the kernel cut short (`MSG_CTRUNC`), and no peer supplies the
+ancillary bytes. It is left to a follow-up of its own, since
+`internal/player/hotplug/` is a qualification-guarded prefix and this change
+touches nothing guarded.
+
+**A network peer cannot supply the ancillary bytes.** They are recvmsg's
+out-of-band data, which only the kernel writes. Every
+platform numbers its IPPROTO_IP options from 1 (Linux's `IP_TOS`; Darwin's,
+the BSDs', Solaris' and AIX's `IP_OPTIONS`, by x/sys's constants), so no
+kernel writes a message of type 0. Measured on this host, a UDP socket that
+asks for SO_TIMESTAMP, IP_PKTINFO and IP_RECVTTL is handed SCM_TIMESTAMP
+(level 1, type 29, cmsg_len 32), IP_PKTINFO (0, 8, 28) and IP_TTL (0, 2, 20),
+88 bytes, which x/net parses (ttl 64, dst 127.0.0.1, ifindex 1). It is fixed
+all the same: the parser must hold whatever it is handed, and the SSDP read
+loop (`go s.readLoop(l)`, ssdp.go) runs with no recovery, so a panic there
+ends the process. `fuzz_ssdp_soap_test.go`'s header said these parsers'
+panics were LAN-reachable (true of the datagram and SOAP parsers, not of the
+control data) and that the blast radius was the discovery loop; both are
+corrected.
+
+**The policy (the orchestrator's decision) and the mechanism.** On every
+input x/net's parse handles without panicking, `parseDatagramMeta` reports
+exactly what it did; on one that makes it panic, neither. `parseControlMessage`
+runs x/net's parse under a recover scoped to that one call, in
+`ssdp_dst_other.go`, which every platform but Windows builds, so it meets the
+policy whatever a table leaves unset. Declined: a file of Linux's own (the
+BSDs, Solaris, AIX and z/OS would still panic); a filter dropping type-0
+messages before x/net (it would report an IP_PKTINFO beside one, where the
+policy says neither, and needs each platform's unexported table); and
+decoding in_pktinfo by hand (it would replace x/net's reading of Darwin's and
+the BSDs' separate IP_RECVDSTADDR and IP_RECVIF messages). The semantics the
+policy keeps, each checked against `ipv4/control.go` and
+`internal/socket/socket.go` and pinned: a message at another level, or of an
+IPPROTO_IP type x/net does not read, is passed over; an IP_PKTINFO shorter
+than its struct is passed over (`l >= length` fails), so one before it
+stands; a header that does not parse (cmsg_len 0, below a header's or past
+the buffer) makes `socket.ControlMessage.Parse` fail before any message is
+read, so the whole buffer reports neither; of two IP_PKTINFO messages the
+later overwrites both fields; a tail shorter than a header ends the walk;
+and ipi_ifindex is an `int32` in Linux's struct and a `uint32` in Darwin's,
+so 0x80000000 and up are negative on Linux (`cm.IfIndex > 0` fails) and past
+`metaIndex`'s MaxInt32 on Darwin: no index on either.
+
+**Tests (b35cb3e8).** `TestParseDatagramMetaAnswersEveryShapeOfControlData`
+(Linux and macOS) gives each shape the review named explicit metadata, built
+with x/sys/unix for the running platform, says whether x/net panics on it
+there, and requires the answer to be x/net's, or neither where it panics: a
+type x/net does not read (`IP_TOS`) and another level's message of type 0
+(`SOL_SOCKET`), alone and before and after an IP_PKTINFO; an IP_PKTINFO of 8
+bytes alone, before and after a whole one; a cmsg_len past the buffer and one
+below the header, before and after; two IP_PKTINFO that disagree, both ways
+round, and a later one with an index of 0; a 4-byte tail; and the index
+through the real parser at 0, MaxInt32, MaxInt32+1 and MaxUint32 (reported
+at MaxInt32 alone). Linux's rows of type 0 (`ssdp_dst_linux_test.go`: alone,
+before, after, and between two IP_PKTINFO) report neither, x/net panicking;
+macOS's (`ssdp_dst_darwin_test.go`) report the IP_PKTINFO, x/net passing type
+0 over, beside its IP_RECVDSTADDR and IP_RECVIF messages, alone and together.
+`FuzzParseDatagramMetaIsXNetsParse` holds the parser, on any bytes, to the
+parser before B610 run under a test-only recover (`referenceDatagramMeta`),
+every table row a seed. Three native seeds join the crasher: an IP_PKTINFO,
+the 88 bytes above with a zero timestamp, and an IP_PKTINFO then a message of
+type 0. `TestTheDatagramMetaSeedsAreLinuxsControlData` (amd64 and arm64)
+requires each file to hold exactly its bytes in the fuzz engine's format,
+under the name the engine gives a file it writes (the first 16 hex digits of
+its SHA-256), and pins what each decodes to: the target's invariant alone
+accepts metadata that reports nothing. Every existing case is unchanged and
+green.
+
+**The negative control** (b35cb3e8, tree clean): the recover's five lines
+removed, the tests kept. Each run alone,
+`TestParseDatagramMetaHoldsAnIPMessageOfTypeZero`, the seeds d79af9097d4991c5
+and d769af3a4189fd3c, `TestParseDatagramMetaAnswersEveryShapeOfControlData`,
+`FuzzParseDatagramMetaIsXNetsParse` and
+`TestTheDatagramMetaSeedsAreLinuxsControlData` panicked at `control.go:90`,
+and `TestParseDatagramMetaReadsThisPlatformsPktinfo` passed. Restored from
+git; nothing committed.
+
+**Fuzzing** (b35cb3e8, `-tags ts_omit_webclient,ts_omit_debugeventbus`,
+go1.27.3, 8 workers, `-fuzzminimizetime 30s`): `FuzzParseDatagramMeta` for 10
+minutes, 18,134,883 execs; `FuzzParseWSAPktinfo` for 3, 5,410,972;
+`FuzzParseDatagramMetaIsXNetsParse` for 5, 10,064,954. No crasher in any.
+Compiled only: `go vet`, tests included, is clean for darwin, freebsd,
+windows, linux/386 and linux/arm64. Darwin's rows follow from x/net's darwin
+table and x/sys's darwin constants and run only on a Mac; the BSDs are never
+run.
+
+**On the way.** `ops/History-Build.md` counted 60 fuzz targets across
+seventeen packages and 41 with property assertions. The tree held 64 across
+eighteen (5a1's `FuzzSSDPDispatch`, `FuzzParseDatagramMeta` and
+`FuzzParseWSAPktinfo`, and 5a4's `FuzzParse` in `internal/player/trackref`,
+had joined uncounted); with this one, 65, and 46 with properties.
+**Upstream**: a draft issue for golang/go (x/net) is beside the job's report,
+outside the tree; Parse could skip an entry whose name is 0, as `Marshal` and
+`NewControlMessage` already do.
