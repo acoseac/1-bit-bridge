@@ -73,6 +73,7 @@ it).
 | `make run` | `go run ./cmd/bridge serve --config config/bridge.yaml.example`. |
 | `make check-go-version` | Guards that `Dockerfile`'s `ARG GO_VERSION` matches `go.mod`'s major.minor (alpine sets `GOTOOLCHAIN=local`, so a stale ARG fails the image build). |
 | `make docs-check` | Holds `CLAUDE.md`, the rules files and the skills to their byte budgets (`scripts/check-doc-budgets.py`; Python stdlib only), and runs the doc tools' self-tests. CI runs it too. |
+| `make installer-test` / `make installer-check` | The one-line installer, `scripts/install.sh`: its tests (`scripts/install-test`) under every POSIX shell of their list this host has (`INSTALLER_SHELLS` names others); `installer-check` runs shellcheck over it first and requires shellcheck. CI's `installer` job runs `installer-check`. |
 | `make docker` | Builds the container image (runs `check-go-version` first). |
 | `make clean` | Removes `bin/` and `dist/`. |
 
@@ -314,14 +315,16 @@ mode). iOS never talks to the admin listener.
 CI workflows (`.github/workflows/`):
 
 - `gofmt.yml` — read-only formatting check on PRs/pushes to main.
-- `gate.yml` — nine prerequisite jobs (`vet`, `test`, `dsd-measure`,
+- `gate.yml` — ten prerequisite jobs (`vet`, `test`, `dsd-measure`,
   `build-all`, `go-version`, `cross-platform`, `docs-check`, `alsa-abi`,
-  `native-qualification`) with a `gate`
+  `native-qualification`, `installer`) with a `gate`
   fan-in; includes the local pre-push gate.
 - `codeql.yml` — security static analysis (PRs, main, weekly cron).
 - `release.yml` — goreleaser on `v*` tag push: signed + notarized macOS
   archives (Developer ID; Windows Authenticode signing pending via SignPath),
-  unsigned linux/windows archives, draft GitHub Release. A local dry-run:
+  unsigned linux/windows archives, `release-meta.json`, and `install.sh`, the
+  one-line installer stamped with the release's version
+  (`scripts/stamp-install.sh`), in a draft GitHub Release. A local dry-run:
   `goreleaser release --snapshot --clean`.
 - `docker.yml` — multi-arch image `ghcr.io/acoseac/1-bit-bridge` (tags
   `X.Y.Z` / `X.Y` / `latest`) on the same tag push.

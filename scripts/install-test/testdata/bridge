@@ -1,0 +1,277 @@
+#!/bin/sh
+# The fake bridge program the installer's tests publish in their releases. It
+# says its release the way `bridge version` does, and does what the installer
+# runs it for as the real CLI does, as far as the installer can see: init
+# writes the settings and the per-user unit in init's shape and starts the
+# service through systemctl; update replaces the program as bridge update
+# does, keeping it as .bak, and restarts the service, or refuses as its
+# checks do (FAKE_UPDATE); status prints bridge status's rows. Each call is
+# logged to STUB_LOG, and its words to STUB_ARGV, one a line, so that a test
+# can tell where each argument ends.
+#
+# A flag the real subcommand does not define is refused (exit 2), as the
+# real CLI refuses one. The flags each subcommand takes here are on the
+# lines below, which cmd/bridge's installer contract test checks against
+# the real flag sets:
+#
+# flags init: --yes --library
+# flags update: --yes --config
+# flags status: --config
+# flags start:
+# flags version:
+# flags output player:
+# flags output dac:
+
+VERSION='@VERSION@'
+UNIT=com.acoseac.1-bit-bridge.service
+log=${STUB_LOG:?}
+state=${STUB_STATE:?}
+update=${FAKE_UPDATE:-}
+update_version=${FAKE_UPDATE_VERSION:-}
+printf 'bridge %s\n' "$*" >>"$log"
+{
+	echo 'call bridge'
+	for arg in "$@"; do
+		printf 'arg %s\n' "$arg"
+	done
+} >>"${STUB_ARGV:?}"
+
+refuse_flag() {
+	printf 'flag provided but not defined: %s\n' "$1" >&2
+	exit 2
+}
+
+self_path() {
+	readlink -f "$0"
+}
+
+write_unit() {
+	cat >"$1" <<EOF
+[Unit]
+Description=1-bit-bridge — companion server for the 1-bit iOS app
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart="$2" serve --config "$3"
+WorkingDirectory=$4
+Restart=always
+RestartSec=2
+StandardOutput=append:$HOME/.local/state/1-bit-bridge/bridge.log
+StandardError=append:$HOME/.local/state/1-bit-bridge/bridge.log
+
+[Install]
+WantedBy=default.target
+EOF
+}
+
+do_init() {
+	yes=0
+	library=''
+	while [ "$#" -gt 0 ]; do
+		case $1 in
+		--yes | -y)
+			yes=1
+			shift
+			;;
+		--library)
+			library=$2
+			shift 2
+			;;
+		*) refuse_flag "$1" ;;
+		esac
+	done
+	config_dir=${XDG_CONFIG_HOME:-$HOME/.config}/1-bit-bridge
+	config=$config_dir/bridge.yaml
+	if [ "$yes" = 1 ] && [ -z "$library" ]; then
+		echo '--yes requires --library <path>' >&2
+		exit 2
+	fi
+	if [ -z "$library" ]; then
+		printf 'Library folder to expose (absolute path): '
+		if ! IFS= read -r library; then
+			echo 'input closed; aborting.' >&2
+			exit 2
+		fi
+	fi
+	if [ ! -d "$library" ]; then
+		echo "library path: stat $library: no such file or directory" >&2
+		exit 1
+	fi
+	name=box
+	if [ "$yes" = 0 ]; then
+		printf 'Library display name [box]: '
+		IFS= read -r answer || answer=''
+		if [ -n "$answer" ]; then
+			name=$answer
+		fi
+	fi
+	printf 'fake init read name %s\n' "$name" >>"$log"
+	if [ -n "${FAKE_INIT_FAILS:-}" ]; then
+		echo '[FAIL] port-api          :7788 in use'
+		echo 'fix the fail(s) above, or re-run with --skip-doctor to bypass.'
+		exit 1
+	fi
+	mkdir -p "$config_dir/data"
+	printf 'libraryRoots:\n  - %s\nlibraryName: %s\n' "$library" "$name" >"$config"
+	unit_dir=$HOME/.config/systemd/user
+	mkdir -p "$unit_dir"
+	write_unit "$unit_dir/$UNIT" "$(self_path)" "$config" "$config_dir/data"
+	systemctl --user daemon-reload || exit 1
+	if ! systemctl --user enable --now "$UNIT"; then
+		echo 'service install: systemctl --user enable --now failed' >&2
+		exit 1
+	fi
+	echo 'Admin console: http://127.0.0.1:7789/'
+}
+
+do_update() {
+	config=''
+	while [ "$#" -gt 0 ]; do
+		case $1 in
+		--yes | -y) shift ;;
+		--config)
+			config=$2
+			shift 2
+			;;
+		*) refuse_flag "$1" ;;
+		esac
+	done
+	if [ ! -f "$config" ]; then
+		echo "config load failed: open $config: no such file or directory" >&2
+		exit 2
+	fi
+	echo "Current: $VERSION (channel stable)"
+	case $update in
+	latest)
+		echo "Latest:  $VERSION"
+		echo "You're already running the latest release."
+		exit 0
+		;;
+	checkerror)
+		echo 'Check error: github rate limit exceeded'
+		echo 'Latest:  (no release information yet)'
+		exit 0
+		;;
+	compat)
+		echo "Latest:  $update_version"
+		echo "Install failed: install would orphan a paired iOS client below the candidate's MinClientVersion floor: iPhone (1.0.0)" >&2
+		echo '' >&2
+		echo 'The candidate release would orphan a still-paired older iOS device.' >&2
+		echo 'Either update the device to a supported version, or rerun with' >&2
+		echo '  bridge update --yes --override-client-floor' >&2
+		exit 1
+		;;
+	ok | restartfail)
+		echo "Latest:  $update_version"
+		real=$(self_path)
+		new=$real.new.$$
+		if ! cp "${FAKE_UPDATE_TO:?}" "$new"; then
+			exit 1
+		fi
+		chmod 0755 "$new"
+		rm -f "$real.bak"
+		ln "$real" "$real.bak"
+		mv -f "$new" "$real"
+		echo "Installed $update_version."
+		if [ "$update" = restartfail ]; then
+			echo 'restart: systemctl --user restart com.acoseac.1-bit-bridge.service: exit status 1' >&2
+			exit 1
+		fi
+		if ! systemctl --user restart "$UNIT"; then
+			echo 'restart: systemctl --user restart failed' >&2
+			exit 1
+		fi
+		echo 'bridge: service restart requested.'
+		exit 0
+		;;
+	*)
+		echo 'fake bridge: FAKE_UPDATE is not set' >&2
+		exit 1
+		;;
+	esac
+}
+
+do_status() {
+	while [ "$#" -gt 0 ]; do
+		case $1 in
+		--config) shift 2 ;;
+		*) refuse_flag "$1" ;;
+		esac
+	done
+	if [ -n "${FAKE_STATUS_UNREADABLE:-}" ]; then
+		echo 'status: probe 127.0.0.1:7789: HTTP 401: unauthorized' >&2
+		exit 1
+	fi
+	if [ ! -f "$state/active" ]; then
+		echo 'bridge: not running on 127.0.0.1:7789' >&2
+		exit 1
+	fi
+	served=$(cat "$state/served")
+	printf '%-18s %s\n' 'Library:' box 'Server version:' "$served (protocol v1)" 'Uptime:' 1s \
+		'Tracks indexed:' 0 'Scanning:' idle 'Listen address:' ':7788' \
+		'Admin address:' "${FAKE_ADMIN_ADDRESS:-127.0.0.1:7789}" 'Fingerprint:' 'AA:BB:CC'
+}
+
+do_start() {
+	if [ "$#" -gt 0 ]; then
+		refuse_flag "$1"
+	fi
+	systemctl --user start "$UNIT" || exit 1
+	echo 'bridge: service start requested' >&2
+}
+
+do_output() {
+	case ${1:-} in
+	player)
+		if [ "$#" -gt 1 ]; then
+			refuse_flag "$2"
+		fi
+		echo 'Player: moOde 9.1, MPD 0.23.12 on 127.0.0.1:6600'
+		;;
+	dac)
+		if [ "$#" -gt 1 ]; then
+			refuse_flag "$2"
+		fi
+		echo 'card 0: Audio (USB 20b1:3008): PCM to 384 kHz, DSD64 to DSD256'
+		;;
+	*)
+		printf 'unknown output subcommand: %s\n' "${1:-}" >&2
+		exit 2
+		;;
+	esac
+}
+
+case ${1:-} in
+version)
+	if [ "$#" -gt 1 ]; then
+		refuse_flag "$2"
+	fi
+	printf '1-bit-bridge %s (protocol v1)\n' "$VERSION"
+	;;
+init)
+	shift
+	do_init "$@"
+	;;
+update)
+	shift
+	do_update "$@"
+	;;
+status)
+	shift
+	do_status "$@"
+	;;
+start)
+	shift
+	do_start "$@"
+	;;
+output)
+	shift
+	do_output "$@"
+	;;
+*)
+	printf 'unknown subcommand: %s\n' "${1:-}" >&2
+	exit 2
+	;;
+esac

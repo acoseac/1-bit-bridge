@@ -1,0 +1,27 @@
+#!/bin/sh
+# sudo for the installer's tests: runs the command with STUB_AS_ROOT set.
+# STUB_SUDO_FAILS refuses. STUB_SUDO_ASKS says a password is needed: sudo -n
+# then refuses, and plain sudo reads it, a line of its standard input, which
+# the installer must have given the terminal.
+log=${STUB_LOG:?}
+printf 'sudo %s\n' "$*" >>"$log"
+if [ -n "${STUB_SUDO_FAILS:-}" ]; then
+	echo 'sudo: 3 incorrect password attempts' >&2
+	exit 1
+fi
+if [ "${1:-}" = -n ]; then
+	shift
+	if [ -n "${STUB_SUDO_ASKS:-}" ]; then
+		echo 'sudo: a password is required' >&2
+		exit 1
+	fi
+elif [ -n "${STUB_SUDO_ASKS:-}" ]; then
+	if ! IFS= read -r password; then
+		echo 'sudo: no password was provided' >&2
+		exit 1
+	fi
+	printf 'stub sudo read %s\n' "$password" >>"$log"
+fi
+STUB_AS_ROOT=1
+export STUB_AS_ROOT
+exec "$@"

@@ -1,0 +1,235 @@
+#!/bin/sh
+# systemctl for the installer's tests: --user only. Each call is logged to
+# STUB_LOG, and the service's state is in STUB_STATE: active, and served, the
+# release the running bridge serves, read from the unit's ExecStart program
+# whenever the service starts.
+#
+# The bridge's unit is read as a user manager reads it, from the directories
+# it reads units from, in their order (each under BRIDGE_INSTALL_TEST_SYSROOT
+# but HOME's; the systemd-analyze stub lists the same ones): a transient unit
+# in the runtime directory, ~/.config/systemd/user, /etc/systemd/user and
+# /usr/lib/systemd/user. The first that has the unit file gives it, and each
+# gives its drop-ins (service.d, the directories the unit's dashes name,
+# com.acoseac.1-.service.d and com.acoseac.1-bit-.service.d, and <unit>.d),
+# which apply only once there is a unit file.
+#
+# What the manager has loaded is STUB_STATE/loaded, which daemon-reload
+# writes, or the files as they are where no daemon-reload ran. show reports
+# the loaded unit (LoadState, FragmentPath, DropInPaths, the environment
+# properties), with NeedDaemonReload yes once the files differ from it, unless
+# STUB_RELOAD_UNNOTICED; STUB_LOAD_STATE replaces the LoadState it reports.
+# cat prints the files as they are on disk, and "No files found" for a unit
+# the manager has not found, before any drop-in, as systemd does.
+# STUB_SHOW_FAILS and STUB_CAT_FAILS make those fail as a manager that does
+# not answer. show-environment prints STUB_MANAGER_ENV too: lines the manager
+# gives every service of the user.
+#
+# STUB_NO_BUS makes the user bus unreachable, unless lingering started the
+# user manager (STUB_STATE/bus-up) or XDG_RUNTIME_DIR is STUB_BUS_RUNTIME.
+# STUB_RESTART_FAILS fails a restart; STUB_SERVICE_FAILS makes the service
+# exit as it starts; STUB_SERVED_FROZEN keeps serving the release that ran
+# before.
+log=${STUB_LOG:?}
+state=${STUB_STATE:?}
+printf 'systemctl %s\n' "$*" >>"$log"
+UNIT=com.acoseac.1-bit-bridge.service
+if [ "${1:-}" != --user ]; then
+	echo 'stub systemctl: only --user' >&2
+	exit 1
+fi
+shift
+
+bus_up() {
+	if [ -z "${STUB_NO_BUS:-}" ] || [ -f "$state/bus-up" ]; then
+		return 0
+	fi
+	[ -n "${STUB_BUS_RUNTIME:-}" ] && [ "${XDG_RUNTIME_DIR:-}" = "${STUB_BUS_RUNTIME:-}" ]
+}
+
+start_unit() {
+	case ${1:-} in
+	"$UNIT" | com.acoseac.1-bit-bridge) ;;
+	*)
+		printf 'Unit %s not found.\n' "${1:-}" >&2
+		return 5
+		;;
+	esac
+	unit=$HOME/.config/systemd/user/$UNIT
+	if [ ! -f "$unit" ]; then
+		printf 'Unit %s not found.\n' "$UNIT" >&2
+		return 5
+	fi
+	if [ -n "${STUB_SERVICE_FAILS:-}" ]; then
+		rm -f "$state/active"
+		return 0
+	fi
+	touch "$state/active"
+	if [ -n "${STUB_SERVED_FROZEN:-}" ] && [ -f "$state/served" ]; then
+		return 0
+	fi
+	bin=$(sed -n 's/^ExecStart="\([^"]*\)".*/\1/p' "$unit")
+	"$bin" version | sed -n 's/^1-bit-bridge \([^ ]*\).*/\1/p' >"$state/served"
+}
+
+shown=0
+
+# show_file prints a file as systemctl cat does: its path in a comment, a
+# blank line before every file but the first, then the file as it is.
+show_file() {
+	if [ "$shown" -gt 0 ]; then
+		echo
+	fi
+	printf '# %s\n' "$1"
+	cat "$1"
+	shown=$((shown + 1))
+}
+
+# render_unit prints the bridge's unit as its files are now, the way
+# systemctl cat prints them: the unit file, then its drop-ins; nothing where
+# there is no unit file, since no drop-in applies to a unit that is not there.
+render_unit() {
+	shown=0
+	root=${BRIDGE_INSTALL_TEST_SYSROOT:-}
+	set -- "$root/run/user/${STUB_UID:-1000}/systemd/transient" "$HOME/.config/systemd/user" \
+		"$root/etc/systemd/user" "$root/usr/lib/systemd/user"
+	fragment=''
+	for dir in "$@"; do
+		if [ -f "$dir/$UNIT" ]; then
+			fragment=$dir/$UNIT
+			break
+		fi
+	done
+	if [ -z "$fragment" ]; then
+		return 0
+	fi
+	show_file "$fragment"
+	for dir in "$@"; do
+		for dropin in "$dir/service.d"/*.conf "$dir/com.acoseac.1-.service.d"/*.conf \
+			"$dir/com.acoseac.1-bit-.service.d"/*.conf "$dir/$UNIT.d"/*.conf; do
+			if [ -f "$dropin" ]; then
+				show_file "$dropin"
+			fi
+		done
+	done
+}
+
+# loaded_view prints the unit as the manager has it loaded: what the last
+# daemon-reload read, or the files as they are where none ran.
+loaded_view() {
+	if [ -f "$state/loaded" ]; then
+		cat "$state/loaded"
+	else
+		render_unit
+	fi
+}
+
+# joined KEY prints the values the loaded unit's lines give KEY, separated
+# by spaces, as show prints a list.
+joined() {
+	printf '%s\n' "$view" | sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" | tr '\n' ' ' | sed 's/ *$//'
+}
+
+show_unit() {
+	view=$(loaded_view)
+	reload=no
+	if [ -f "$state/loaded" ] && [ "$view" != "$(render_unit)" ] && [ -z "${STUB_RELOAD_UNNOTICED:-}" ]; then
+		reload=yes
+	fi
+	load_state=not-found
+	if [ -n "$view" ]; then
+		load_state=loaded
+	fi
+	headers=$(printf '%s\n' "$view" | sed -n 's/^# \(\/.*\)$/\1/p')
+	printf '%s\n' "$1" | tr ',' '\n' | while IFS= read -r prop; do
+		case $prop in
+		LoadState) printf 'LoadState=%s\n' "${STUB_LOAD_STATE:-$load_state}" ;;
+		FragmentPath) printf 'FragmentPath=%s\n' "$(printf '%s\n' "$headers" | head -n 1)" ;;
+		DropInPaths) printf 'DropInPaths=%s\n' "$(printf '%s\n' "$headers" | sed '1d' | tr '\n' ' ' | sed 's/ *$//')" ;;
+		NeedDaemonReload) printf 'NeedDaemonReload=%s\n' "$reload" ;;
+		Environment | PassEnvironment | UnsetEnvironment) printf '%s=%s\n' "$prop" "$(joined "$prop")" ;;
+		EnvironmentFiles)
+			printf '%s\n' "$view" | sed -n 's/^[[:space:]]*EnvironmentFile[[:space:]]*=[[:space:]]*//p' |
+				while IFS= read -r file; do
+					printf 'EnvironmentFiles=%s (ignore_errors=no)\n' "$file"
+				done
+			;;
+		esac
+	done
+}
+
+if ! bus_up; then
+	echo 'Failed to connect to bus: No medium found' >&2
+	exit 1
+fi
+
+case ${1:-} in
+show-environment)
+	printf 'HOME=%s\n' "$HOME"
+	if [ -n "${STUB_MANAGER_ENV:-}" ]; then
+		printf '%s\n' "$STUB_MANAGER_ENV"
+	fi
+	;;
+show)
+	if [ -n "${STUB_SHOW_FAILS:-}" ]; then
+		echo 'Failed to get properties: Connection timed out' >&2
+		exit 1
+	fi
+	if [ "${2:-}" != -p ] || [ "${4:-}" != "$UNIT" ]; then
+		echo 'stub systemctl: show takes -p PROPERTIES and the bridge unit here' >&2
+		exit 1
+	fi
+	show_unit "$3"
+	;;
+cat)
+	if [ "${2:-}" != "$UNIT" ]; then
+		printf 'No files found for %s.\n' "${2:-}" >&2
+		exit 1
+	fi
+	if [ -n "${STUB_CAT_FAILS:-}" ]; then
+		echo 'Failed to get unit file paths: Connection timed out' >&2
+		exit 1
+	fi
+	if [ -z "$(loaded_view)" ]; then
+		printf 'No files found for %s.\n' "$UNIT" >&2
+		exit 1
+	fi
+	render_unit
+	;;
+daemon-reload)
+	render_unit >"$state/loaded"
+	;;
+enable)
+	if [ "${2:-}" != --now ]; then
+		echo 'stub systemctl: enable takes --now here' >&2
+		exit 1
+	fi
+	start_unit "${3:-}" || exit "$?"
+	;;
+start)
+	start_unit "${2:-}" || exit "$?"
+	;;
+restart)
+	if [ -n "${STUB_RESTART_FAILS:-}" ]; then
+		echo 'Job for com.acoseac.1-bit-bridge.service failed.' >&2
+		exit 1
+	fi
+	start_unit "${2:-}" || exit "$?"
+	;;
+is-active)
+	shift
+	quiet=0
+	if [ "${1:-}" = --quiet ]; then
+		quiet=1
+	fi
+	if [ -f "$state/active" ]; then
+		[ "$quiet" = 1 ] || echo active
+		exit 0
+	fi
+	[ "$quiet" = 1 ] || echo inactive
+	exit 3
+	;;
+*)
+	printf 'stub systemctl: unknown verb %s\n' "${1:-}" >&2
+	exit 1
+	;;
+esac

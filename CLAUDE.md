@@ -19,7 +19,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 | The job pools (upscale, optimize, analysis), renditions and their staleness, the sidecar, variant and artwork reapers | `jobs.md` |
 | Smart mixes: the families and the harmonic engine, the regenerator and its week-seeded windows, the served table and the 7-day exclusion, the regeneration loop | `smart-mixes.md` |
 | DLNA, UPnP and SSDP discovery, the SSDP subsystem every device the bridge advertises registers with (B470 PR 5a1), the upstream ingest and proxy, interface eligibility, mDNS | `dlna-upnp.md` |
-| Config and settings, managed controls, service install and restart, atomic writes and ownership, the self-updater | `config-lifecycle.md` |
+| Config and settings, managed controls, service install and restart, atomic writes and ownership, the self-updater, the one-line installer (`scripts/install.sh`) | `config-lifecycle.md` |
 | SQLite predicates and indexes, compaction and the WAL, retention | `sqlite.md` |
 | The CLI, `bridge init` and `bridge doctor`, and the serve wiring: gates, loops, locks, shutdown | `cli-serve.md` |
 | The box as an audio output: the ALSA reader (`internal/alsa`), the read-only MPD client (`internal/mpd`), `bridge output`, `GET /v1/outputs` and its two gates (MPD's elements, and since B470 PR 5b the bridge's own player's, kind `bridge`), the loopback track route for the MPD beside the bridge, the Player / DAC / Music / Phone checklist (`internal/outputcheck`), and the live reading of the DAC with the bridge's verdict (`GET /v1/outputs/{id}/reading`, `internal/signalpath`); and, for `player.md`'s budget, the sink's cut at a track boundary and its reopen where the binding resolves now (B470 PR 4b2) | `output.md` |
