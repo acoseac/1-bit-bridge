@@ -67,16 +67,19 @@ privacy, link-rendering, and anchor-target issues. The HTML-rendering items now 
 1. **Logging audit before drafting privacy copy.** Grep `internal/pairing/`, `internal/transcode/`, `internal/api/upscale.go`, `internal/api/events.go`, and `internal/admin/handlers_events.go` for `slog.` / `Error(` / `logger.` calls and confirm no formatter feeds raw bearer tokens, client IPs (`r.RemoteAddr`, `RealIP`), or absolute filesystem paths into log lines or `writeError` responses. Privacy-policy claims must hold against the *current* surface, not the v1.0 paths the policy was originally written against. Anything found gets fixed in the same PR — `redactWalkErr` in [internal/api/upscale.go](internal/api/upscale.go) is the canonical helper for `*os.PathError` unwrapping (covers both log AND wire egress channels).
 2. **Edit the docs.** In *this* repo, bump the `README.md` status line. Any user-facing doc change happens in the `1bitapp` repo under `src/pages/bridge/*` (overview / setup / features / download / troubleshooting / privacy).
 3. **Preview the 1bitapp site.** In the `1bitapp` repo, `npm run build` (fails on broken internal links / TS errors) then `npm run preview`, clicking every nav link, cross-page link, external link, and `#anchor`. Anchors that scroll nowhere don't fail the build — verify them by eye.
-4. **Local goreleaser dry-run** (per the v0.1.1 release-pipeline notes — APPLE_TEAM_ID + release-meta.json hooks):
+4. **Local goreleaser dry-run** (per the v0.1.1 release-pipeline notes — APPLE_TEAM_ID + release-meta.json hooks, and the one-line installer's stamp):
    ```sh
-   rm -rf dist release-meta.json
+   rm -rf dist release-meta.json install.sh
    APPLE_TEAM_ID=Y7ZK32ZM7K MACOS_SIGN_P12=fake \
      goreleaser release --snapshot --clean \
      --skip=sign,publish,notarize,announce,validate
    strings dist/bridge_darwin_arm64_v8.0/bridge | grep -c Y7ZK32ZM7K   # → 1
    cat release-meta.json   # → "version" non-empty
-   rm -rf dist release-meta.json
+   grep -n "^[[:space:]]*STAMPED_VERSION=" install.sh   # → the snapshot's version, not ''
+   grep -c ' install.sh$' dist/checksums.txt            # → 1
+   rm -rf dist release-meta.json install.sh
    ```
+   The installer (`scripts/install.sh`) ships as the release asset `install.sh`, stamped with the release's version by `scripts/stamp-install.sh` in a before-hook and attached by `release.extra_files`; a snapshot publishes nothing, so it shows the stamped file at the repository root and its line in `dist/checksums.txt`. `https://1-bit.app/install.sh` redirects to `releases/latest/download/install.sh`.
 5. `make fmt vet test build-all` — clean. Race-enabled tests; cross-compiles to all 6 targets.
 6. **Open PR**, branch + PR convention (never direct to main *for code*; CLAUDE.md alone is the docs-only direct-to-main exception).
 7. **Bot review rounds.** Plan for 2 rounds minimum, expect up to 4 on a docs-touch + privacy-adjacent PR. Greptile finds smaller things each round; CodeRabbit confirms "no actionable" once the security-shaped issues are gone. Address all comments per round in a single fix commit; reject suggestions that contradict deliberate in-code rationale (Gemini flagged "iOS 26.4" as a typo for "16.4" on PR #185 — rejected, iOS 26 is real and Gemini's training cutoff predates it).
@@ -86,7 +89,7 @@ privacy, link-rendering, and anchor-target issues. The HTML-rendering items now 
 ### Gotchas (proven on PR #185)
 
 - **HTML-site rendering gotchas moved to the `1bitapp` repo.** The old GitHub Pages site's hand-rolled traps — `<pre><code>` inside `<li>` rendering light-on-light, `ol.steps` items needing `id="step-N"` for cross-page anchors — were specific to that HTML/CSS. The 1-bit.app docs are Astro; their conventions live in the `1bitapp` repo's `CLAUDE.md`. What survives here: `docs/.nojekyll` **stays** (it lets Pages serve the redirect stubs and `docker.md` without Jekyll), and the 1-bit.app docs link to `docs/docker.md` at the **GitHub blob URL** (`https://github.com/acoseac/1-bit-bridge/blob/main/docs/docker.md`) so GitHub renders the markdown rather than serving it raw.
-- **`./bridge stop` and `./bridge start` are NOT real subcommands.** The bridge is started/stopped via the platform service manager: `launchctl load/unload …plist` on macOS, `systemctl --user start/stop 1-bit-bridge` on Linux, `sc.exe start/stop 1-bit-bridge` on Windows. Don't reintroduce the bogus subcommands in restore / troubleshooting docs (Gemini medium PR #185).
+- **`bridge start`, `bridge stop` and `bridge restart` are real subcommands now** (this said otherwise from PR #185, when they were not). Each drives the service `bridge init` installed through its own manager: the launchd user agent on macOS, the per-user unit `com.acoseac.1-bit-bridge.service` through `systemctl --user` on Linux, the SCM service or the Startup-folder launcher on Windows. A system-level install (a LaunchDaemon, a system unit such as the VPS doc's `1-bit-bridge`) is refused by them and driven with its manager directly.
 - **`*os.PathError`'s `.Error()` string embeds the absolute filesystem path.** `filepath.WalkDir` propagates these for permission-denied / file-not-found failures. Privacy commitment ("absolute filesystem paths are not logged AND not sent over the wire") requires unwrapping for **both** `logger.Error("err", …)` (slog will format the value) AND any `writeError` body. `redactWalkErr` in [internal/api/upscale.go](internal/api/upscale.go) is the canonical helper; reuse it at any new walk-error site (Greptile rounds 1 + 2).
 - **iOS 26.4+ ATS lower-layer enforces 825-day cert validity** independently of `NSAllowsLocalNetworking`. This is real, not a typo for iOS 16.4 — Gemini's training cutoff predates iOS 26 and may flag it. Keep the version as written.
 - **`MIN_CLIENT_VERSION` env var stays unset in `.github/workflows/release.yml`.** The default `0.0.0` ("no floor") is what gets baked into the release. Only set it when the release is wire-incompatible with currently-paired iOS clients — `ProtocolVersion` stays at 1 for additive changes, so most releases leave the floor alone. Setting a floor would orphan any iOS app version below it from the bridge's auto-installer compat gate.

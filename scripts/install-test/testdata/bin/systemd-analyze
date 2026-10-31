@@ -1,0 +1,17 @@
+#!/bin/sh
+# systemd-analyze for the installer's tests: --user unit-paths prints the
+# directories a user manager reads units from, in their order, the ones the
+# systemctl stub reads (each under BRIDGE_INSTALL_TEST_SYSROOT but HOME's).
+# STUB_ANALYZE_FAILS makes it fail.
+printf 'systemd-analyze %s\n' "$*" >>"${STUB_LOG:?}"
+if [ "${1:-}" != --user ] || [ "${2:-}" != unit-paths ]; then
+	echo 'stub systemd-analyze: only --user unit-paths' >&2
+	exit 1
+fi
+if [ -n "${STUB_ANALYZE_FAILS:-}" ]; then
+	echo 'Failed to initialize unit search paths: Invalid argument' >&2
+	exit 1
+fi
+root=${BRIDGE_INSTALL_TEST_SYSROOT:-}
+printf '%s\n' "$root/run/user/${STUB_UID:-1000}/systemd/transient" "$HOME/.config/systemd/user" \
+	"$root/etc/systemd/user" "$root/usr/lib/systemd/user"

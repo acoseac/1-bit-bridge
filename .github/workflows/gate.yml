@@ -77,6 +77,10 @@ name: gate
 # An eighth, `alsa-abi`, holds internal/alsapcm's hand-written Go
 # definitions of the kernel's ALSA PCM interface to the kernel's own
 # header, on both architectures the backend builds for. See its comment.
+#
+# `installer` lints the one-line installer (scripts/install.sh) with
+# shellcheck and runs its tests under each shell it supports
+# (`make installer-check`). See its comment.
 
 on:
   push:
@@ -586,9 +590,41 @@ jobs:
             grep -q "^--- PASS: TestNativeIntegration${name} (" "$RUNNER_TEMP/native-backend-integration.log"
           done
 
+  # The one-line installer, scripts/install.sh (backlog B475). `make
+  # installer-check` lints it, its stamp and its tests' stubs with
+  # shellcheck, then runs its tests (scripts/install-test) under sh (dash
+  # here), bash in POSIX mode, BusyBox's sh and ksh93, each one required by
+  # INSTALLER_SHELLS, so a shell that went missing fails the job rather than
+  # leaving it untested. ksh is there because it found a real defect: ksh93's
+  # predefined alias stop shadowed the installer's function of that name. The
+  # race suite above runs the same tests under sh alone; this job is where the
+  # lint and the other shells run. The installer downloads with curl alone,
+  # so no wget is installed: its tests refuse one with a stub of their own.
+  installer:
+    name: installer
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          cache: false
+      - name: Install shellcheck and the shells
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck dash busybox ksh
+      - name: shellcheck, then the installer's tests under each shell
+        run: make installer-check INSTALLER_SHELLS="sh,dash,bash --posix,busybox sh,ksh"
+
   gate:
     name: gate
-    needs: [vet, test, dsd-measure, build-all, go-version, cross-platform, docs-check, alsa-abi, native-qualification]
+    needs: [vet, test, dsd-measure, build-all, go-version, cross-platform, docs-check, alsa-abi, native-qualification, installer]
     if: always()
     runs-on: ubuntu-latest
     permissions: {}
