@@ -863,7 +863,7 @@ func reapOrphans(ctx context.Context, backupsRoot string, grace time.Duration) (
 	if strings.TrimSpace(backupsRoot) == "" {
 		return 0, errors.New("backup: ReapOrphans requires a non-empty backups root")
 	}
-	entries, err := os.ReadDir(backupsRoot)
+	entries, err := readDir(backupsRoot)
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, nil
 	}
@@ -945,6 +945,11 @@ func List(backupsRoot string) ([]snapshotEntry, error) {
 	return ListContext(context.Background(), backupsRoot)
 }
 
+// readDir is os.ReadDir, the listing of the backups folder List and the
+// orphan sweep take. A test lists through it as Windows lists a path that
+// is not a folder (SetReadDirForTest).
+var readDir = os.ReadDir
+
 // ListContext is List, bounded by ctx.
 //
 // The cancellation point is per-directory, which is where the cost is:
@@ -953,7 +958,7 @@ func List(backupsRoot string) ([]snapshotEntry, error) {
 // arbitrarily long. Callers on a request path (the 10s-polled jobs
 // endpoint) need to be able to stop.
 func ListContext(ctx context.Context, backupsRoot string) ([]snapshotEntry, error) {
-	entries, err := os.ReadDir(backupsRoot)
+	entries, err := readDir(backupsRoot)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
