@@ -66768,3 +66768,139 @@ it does not reach it).
 headless session (a protected path); the bullet for config-lifecycle.md and its
 `paths:` globs were handed to the orchestrator as an OLD/NEW note, to land in
 this PR with the code.
+
+## 2026-10-31 — B475 round 2: the installer's review findings
+
+Codex reviewed the integrated branch (5dbf6f48) and found eight defects; the
+orchestrator decided on them, and Codex's review of that brief added nine
+binding amendments. Each finding was checked against the code first, and all
+eight held. The rule's long form, ops/History-rules-config-lifecycle.md ("The
+one-line installer (backlog B475, 2026-10-30)"), says what round 2 changed,
+part by part.
+
+**The findings and what was done.**
+
+1. (High) A drop-in's `Environment=BRIDGE_DATA_DIR=…` passed: `read_unit` looked
+   only for an ExecStart in the adjacent `.d`, and `run_update` ran bridge update
+   in the installer's environment, so it read another token store and wrote its
+   marker in another data dir. Now the unit is read as the manager runs it
+   (`systemctl --user cat`, its drop-ins wherever they are: beside it,
+   /etc/systemd/user, /usr/lib/systemd/user, `service.d`), and a unit file the
+   manager reads from elsewhere, an ExecStart set more than once, or any
+   Environment=, EnvironmentFile=, PassEnvironment= or UnsetEnvironment= is
+   refused, named by key and file, never value; a BRIDGE_ variable this shell
+   exports or the manager gives every service is refused by its name
+   (amendment 1: `applyEnvOverrides` applies with `--config`). The manager must
+   answer first: its bus found read-only through /run/user/<uid>, a failed
+   `cat` refused, "No files found for" the one answer that means none
+   (amendment 4). `read_unit` keeps its file-only contract for packaging's test.
+2. (High) A standalone `~/.local/bin/bridge` serving settings elsewhere was
+   taken for a new box and replaced, bypassing bridge update. A new install is
+   now for a box with nothing of the bridge on it; anything at that path with no
+   service of the user running it is refused, naming bridge update and bridge
+   init. The runs that leave the program without a service (`--no-init`, no
+   systemd, a failed init) print `bridge init`, never "run this installer
+   again", and a run without a terminal or `--library` is refused before the
+   download, so the next run, given a folder, installs (amendment 2).
+3. (High) `wget -q -O` follows an HTTPS→HTTP redirect. The fallback is gone:
+   curl alone, refused without it (exit 3) with how to install it.
+4. (Medium) An unreadable `bridge status` beside an active unit was success
+   with the expected version assumed. It ends the run incomplete, exit 4, with
+   the command that checks it.
+5. and 6. (Medium) Printed commands lacked `--config` after a custom-path
+   upgrade and were not quoted. Each is a line of its own, built by
+   `command_line` / `bridge_line` (every word through `sh_quote`), with
+   `--config` on pair, status, serve and update where the settings are not the
+   default (amendment 5: logs and the lifecycle commands take no flags, init
+   takes `--dir`).
+7. (Medium) The final line claimed a start at boot whatever lingering was. It
+   now says what lingering is: on (already, or by this run), off, or no
+   loginctl (amendment 8).
+8. (Medium) `--no-init` on an install skipped only lingering, then updated and
+   started a stopped service. It is refused (exit 3) before any of that
+   (amendment 7).
+
+**Red first.** The new and changed tests were run against 5dbf6f48's script
+before any fix (`make installer-test INSTALLER_SHELLS="sh,dash,bash --posix,ksh"`):
+15 top-level tests red under each of the four shells
+(`TestAnInstallWhoseServiceHasAnotherEnvironmentIsRefused`,
+`TestTheServiceManagerIsAskedWhatItRuns`, `TestLayoutsTheInstallerDoesNotManageAreRefused`,
+`TestAProgramAtTheTargetIsNeverReplaced`, `TestARunAfterOneThatDidNotFinish`,
+`TestTheToolsTheDownloadNeedsAreCheckedFirst`, `TestAServiceWhoseReleaseCannotBeReadIsNotReportedRunning`,
+`TestThePrintedCommandsRunAsPrinted`, `TestLingeringIsTurnedOnSoTheServiceOutlivesTheLogin`,
+`TestNoInitInstallsTheProgramAlone`, `TestTheUserManagerIsFoundOrNothingChanges`,
+`TestWithoutATerminalOrALibraryTheInstallerDoesNotWait`, `TestWithoutSystemdSetupWaits`,
+`TestAFreshInstallSetsTheBridgeUpAsTheUsersService`, `TestAnInstalledBridgeIsUpgradedThroughBridgeUpdate`),
+and cmd/bridge's `TestTheInstallerPrintsTheBridgesCommandsQuoted` red at exactly
+the lines Codex named (921, 951, 958, 961, 965, 1004, 1005, 1025, 1031, 1032,
+1035). Green after the fix, 8c404014, under the four shells (72 s).
+`TestADownloadIsHeldToHTTPS` and `TestAnInterruptedInstallLeavesNothing` were
+green before and after: guards of what round 1 already did.
+
+**How the printed commands are tested** (amendment 6). The fake bridge records
+its arguments one a line besides its `$*` log, and every command the installer
+prints is run, under the shell under test, against a recorder put in place of
+each program it can name (`testdata/argv`: the bridge at its path and on PATH,
+systemctl, loginctl, rm, ssh, sudo, and `injected`), with paths holding a
+space, an apostrophe and a semicolon; the recorded words must be exactly the
+ones meant. The contract scanner learned `bridge_line`, refuses a bridge
+command written out around a variable, and requires `--config` on pair,
+status, serve and update.
+
+**Negative controls**, on 8c404014, predicted first, each restored from git
+with the tree clean after (under sh, N10 under all four shells):
+
+- N1, a wget fallback: the GNU and BusyBox wget cases red, exit 1. As predicted.
+- N2a, fetch without `--proto` and `--proto-redir`: both assets red, the plain
+  server asked. As predicted. N2b, without `--proto-redir` alone: green, as
+  predicted: `--proto '=https'` limits redirects too.
+- N3, an existing `~/.local/bin/bridge` taken: the four target layouts, the
+  running-program test and three two-run cases red. As predicted.
+- N4, `--no-init` on an install let through: the four installed-bridge cases
+  and the printed `update --config` red. As predicted.
+- N5, the unit's environment directives let through: the four directive cases
+  red. As predicted.
+- N6a, a failed `cat` taken for none: both "cannot say" cases red (the new box
+  installed). N6b, the fragment's path not compared: the shadowing unit red.
+  N6c, the ExecStart count off: the two drop-in ExecStart cases red. N6d, a
+  unit from elsewhere with none in HOME taken: the two "elsewhere" cases red.
+  All as predicted.
+- N7, this shell's BRIDGE_ variables let through; N8, the manager's: each pair
+  of cases red. As predicted.
+- N9, round 1's assumed version back: both unread-release cases and the printed
+  status case red, exit 0 for 4. As predicted.
+- N10, `sh_quote` quoting nothing, all four shells: the nine predicted printed-
+  command cases and the fresh install's `'My iPhone'` red under each; the
+  recorder named `injected` ran 16 times. As predicted.
+- N11, every `--config` dropped: the three settings-elsewhere cases red, the
+  contract test green. As predicted.
+- N12, a start at boot always claimed: the three lingering-off cases red. As
+  predicted.
+- N13, the no-library refusal removed: both cases red, exit 1. As predicted.
+- N14, a missing manager not refused up front: both cases red, refused in
+  other words. As predicted.
+- N15, one `$1 logs` written out: the contract test red at that line, and the
+  printed-command case for it. As predicted.
+
+**Tools on orion.** `which` finds no wget, shellcheck or busybox, and
+`/opt/homebrew/bin/wget`, which Codex cited, does not exist here (`test -e`).
+`make installer-check` stops at its shellcheck check before any test, so the
+lint was not run here (the script and stubs were read for SC2034, SC2086 and
+the rest) and the tests ran through `make installer-test` with
+`INSTALLER_SHELLS`. CI's `installer` job runs both, with BusyBox's sh, and
+installs no wget now.
+
+**Deviations, with the reasons.** This shell's BRIDGE_ variables are refused,
+not unset: an accepted unit has no environment of its own, so every such
+variable is one the service lacks, and a refusal names it where unsetting
+would drop it unseen. The wait for the manager after lingering went: the
+manager is asked before anything changes, so there is nothing left to wait for
+(amendment 8 kept it); "turned on by this run" stays, in `ensure_linger`, for
+what it says. An unread release is exit 4, the brief's other choice to 1.
+
+**Noted, not changed.** An upgrade of a per-user install in public mode ends
+exit 4 every time: `bridge status` sends no session, and public mode's console
+answers it 401. ksh93's `sleep` is a builtin, so the 20 s wait for the served
+release takes 20 real seconds under ksh in the tests that reach it. A printed
+command without `--config` reads `./bridge.yaml` first where the user runs it
+(`resolveConfigPath`), as every plain `bridge` command does.
