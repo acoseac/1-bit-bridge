@@ -66756,8 +66756,7 @@ Each predicted, and each matched:
   model text (a port or uniqueModel binding's observed serial) was not
   examined here.
 
-The rules lines are in `.p2/rules-b604.patch` on the branch (the sandbox
-could not write `.claude/`): scanner.md, jobs.md, admin-console.md,
+The rules lines are in scanner.md, jobs.md, admin-console.md,
 dlna-upnp.md, output.md, auth-tls.md and build-ci-tests.md; the long forms
 changed are in History-rules-jobs.md and History-rules-dlna-upnp.md.
 
@@ -66894,7 +66893,5 @@ Each predicted, and each matched:
 - A success body shows the paths the console was configured with (the
   roots, `backupsRoot`, `snapshotDir`), deliberately.
 
-The rules lines are `.p2/rules-b604-r2.patch` on the branch (the sandbox
-could not write `.claude/`): admin-console.md, auth-tls.md and
-dlna-upnp.md. The long form of the serve guard's entry changed in
-History-rules-cli-serve.md.
+The rules lines are in admin-console.md, auth-tls.md and dlna-upnp.md. The
+long form of the serve guard's entry changed in History-rules-cli-serve.md.
