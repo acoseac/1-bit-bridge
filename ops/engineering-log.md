@@ -66769,3 +66769,86 @@ second identity layer (the binding the box gives now is the one listed) has no
 test of its own: with the unit and its devnum unchanged it cannot differ. The
 in-turn refusal of each write is likewise behind the holder's comparison of
 the file's bytes.
+
+## 2026-10-31 — B601 round 2: the DAC check in the turn, transports that follow the output, and a confirmation the server asks for
+
+Codex reviewed the PR and found three Medium defects. Each was fixed red first,
+with one negative control.
+
+**1. The DAC choice is checked against the box in the config's turn.** The
+route asked the provider (`Chosen`, a fresh reading of the box) before taking
+the console's lock and bridge.yaml's, so a choice that waited for them behind
+another writer saved the binding it had checked before the wait. A port or
+model binding then named whatever unit had taken the chosen one's place.
+`Chosen` now runs inside `UpdateChecked`'s fn, after the turn's comparison and
+just before the save. The config already naming the chosen binding ends the
+turn with nothing saved (`errPlayerUnchanged`). The reading is bounded (3 s,
+one at a time), and it is now the one wait the turn holds bridge.yaml's lock
+across; other writers wait up to `LockWait` (5 s). Red first:
+`TestADACChoiceIsCheckedAgainWhenItsTurnComes` holds bridge.yaml's lock
+(`config.LockFile`), waits until the request waits for it
+(`config.LockWaitedForTest`), makes the provider answer stale (the DAC swapped
+meanwhile), and releases. Before the fix it answered 200 and saved the stale
+binding; after it, 409 `stale_selection` with nothing written. Control: the
+check moved back before the locks turns exactly that test red.
+
+**2. No transport is playable while the player's output is withheld or gone.**
+The transport rows said PCM plays whenever the engine ran. The engine runs on
+after the player is turned off, another DAC is chosen, or its DAC is
+unplugged, so the table contradicted the status beside it. `outputOpen` now
+gates every row's `Plays`. Playback is open only while the live config
+withholds nothing, GET /v1/outputs' element is not `unavailable`, and the
+engine's output report is available. While it is closed, each row's note
+starts with the reason. Red first: the off and DAC-change serve tests assert
+the rows, in the write's answer and in a fresh status, and they said
+`pcm=true`. A new test, `TestTheConsoleSaysNothingPlaysOnceTheDACIsUnplugged`,
+unplugs the GO bar from its sysfstest tree while the player plays and wakes
+the watcher through a source the test pokes (`dacEventSource`: a note with
+events lost is read at once). It waits for the engine's output to go, then
+reads the status: `device_missing`, unavailable, and no row playing. Control:
+`Plays: running` turns those three tests red, and the running player's test
+stays green.
+
+**3. A write that would stop playback asks first, in the server's turn.** The
+page asked before turning the player off or choosing a DAC only when its last
+status said the player sounded. A play an OpenHome controller started after
+that status, or a poll that failed, let the write stop it with no warning.
+Server-validated confirmation was chosen over always asking. With it, the
+page asks exactly when the write would stop something, in words that say what
+it stops, and a stale page or another client cannot stop playback without the
+go-ahead either. Inside the turn, where it already reads `Sounding`, each
+write now asks `Withholds(before, next)`. A change that withholds the output
+of a player that sounds is refused with 409 `would_interrupt`, nothing saved,
+unless the body carries `interrupt: true` (`playerInterruption`;
+`playerStopsOff`, `playerStopsDAC`). The page's one confirmation is in
+`playerOutputPost`: it answers `would_interrupt` with the server's message and
+sends the write again with the go-ahead, and a write the operator calls off
+saves nothing ("Not saved: nothing changed."). The switch and the DAC choice
+ask nothing of their own. Red first:
+- `TestAWriteThatWouldStopPlaybackAsksFirst` (both routes) answered 200 without
+  the go-ahead.
+- The switch's and the DAC test's go-ahead was refused as an unknown field.
+- `TestAWriteThatStopsNothingIsNotAsked` was green before and after: nothing
+  sounding, or a change that withholds nothing, is saved at once.
+- The serve tests now send the page's sequence (`askedFirst`): refused with
+  nothing written and the engine still playing, then saved with the go-ahead.
+
+The page script is pinned two ways. `TestThePlayerPageAsksOnlyInTheServersWords`
+is structural. `TestThePlayerPageAsksBeforeAWriteThatStopsPlayback` runs the
+shipped `playerOutputPost` under node with stubbed `API.post` and `confirm`,
+covering saved, asked then saved, called off, and refused otherwise. It skips
+on this host, which has no node, so it has not run. Controls:
+- the server's check off: both admin subtests and both serve tests red;
+- a confirmation from the page's last status put back into the switch: the
+  structural test red.
+
+The restart's question and the note under what waits for a restart now say a
+restart stops the player if it is playing or holds a pause, not that it stops
+"what it is playing" whether or not it played.
+
+**What no lock closes.** Hardware can change in the milliseconds between the
+turn's reading of the box (or of `Sounding`) and the save's rename, and an
+OpenHome play can start in the same window. A play that starts there is
+withheld without the question. The page's restart, and the Settings page's
+(which says nothing of the player), stop playback as before. The Settings
+restart is a follow-up.
