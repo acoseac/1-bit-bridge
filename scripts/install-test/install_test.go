@@ -548,9 +548,9 @@ func (r *rig) callsTo(prefix string) []string {
 }
 
 // mutations are the logged calls that change the box: the service
-// manager's but those that only read it (show-environment, cat, is-active),
-// lingering turned on, sudo and su, and the bridge's but those that only
-// read (version, status, output).
+// manager's but those that only read it (show-environment, show, cat,
+// is-active), lingering turned on, sudo and su, and the bridge's but those
+// that only read (version, status, output).
 func (r *rig) mutations() []string {
 	var out []string
 	for _, c := range r.calls() {
@@ -560,7 +560,7 @@ func (r *rig) mutations() []string {
 		}
 		switch f[0] {
 		case "systemctl":
-			if len(f) > 2 && (f[2] == "show-environment" || f[2] == "cat" || f[2] == "is-active") {
+			if len(f) > 2 && (f[2] == "show-environment" || f[2] == "show" || f[2] == "cat" || f[2] == "is-active") {
 				continue
 			}
 		case "loginctl":
@@ -632,20 +632,26 @@ func printed(out string) []string {
 var recorded = []string{"bridge", "injected", "loginctl", "rm", "ssh", "sudo", "systemctl"}
 
 // runPrinted runs each command line as a user pasting it into the shell
-// under test would, with the recorder (testdata/argv) in place of every
-// program it can name: those in recorded, on its PATH, and the bridge at
-// each of programs, its paths. It returns the calls recorded, each the
+// under test in HOME would, with the recorder (testdata/argv) in place of
+// every program it can name: those in recorded, on its PATH, and the bridge
+// at each of programs, its paths. It returns the calls recorded, each the
 // program's name and its arguments, and fails the test for a line the
 // shell does not run to its end.
 func (r *rig) runPrinted(lines []string, programs ...string) [][]string {
+	r.t.Helper()
+	return r.runPrintedIn(r.home, lines, programs...)
+}
+
+// runPrintedIn is runPrinted with the lines pasted in the directory dir.
+func (r *rig) runPrintedIn(dir string, lines []string, programs ...string) [][]string {
 	r.t.Helper()
 	recorder, err := os.ReadFile(filepath.Join("testdata", "argv"))
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	dir := filepath.Join(r.dir, "recorders")
+	recorders := filepath.Join(r.dir, "recorders")
 	for _, name := range recorded {
-		writeFile(r.t, filepath.Join(dir, name), recorder, 0o755)
+		writeFile(r.t, filepath.Join(recorders, name), recorder, 0o755)
 	}
 	for _, p := range programs {
 		writeFile(r.t, p, recorder, 0o755)
@@ -654,8 +660,8 @@ func (r *rig) runPrinted(lines []string, programs ...string) [][]string {
 	writeFile(r.t, log, nil, 0o644)
 	for _, line := range lines {
 		cmd := exec.Command(r.sh.argv[0], append(append([]string{}, r.sh.argv[1:]...), "-c", line)...)
-		cmd.Env = []string{"PATH=" + dir, "HOME=" + r.home, "LC_ALL=C", "STUB_ARGV=" + log}
-		cmd.Dir = r.home
+		cmd.Env = []string{"PATH=" + recorders, "HOME=" + r.home, "LC_ALL=C", "STUB_ARGV=" + log}
+		cmd.Dir = dir
 		if out, err := cmd.CombinedOutput(); err != nil {
 			r.t.Errorf("the printed command %q did not run: %v\n%s", line, err, out)
 		}
@@ -669,6 +675,19 @@ func sameCalls(t *testing.T, got, want [][]string) {
 	t.Helper()
 	if fmt.Sprintf("%q", got) != fmt.Sprintf("%q", want) {
 		t.Errorf("the printed commands ran\n%q\nwant\n%q", got, want)
+	}
+}
+
+// daemonReload has the rig's user manager load the bridge's unit as its
+// files are now (the systemctl stub's daemon-reload), as a box's manager
+// had before the run: a file changed after it is one the manager has not
+// read. The call is not logged as the run's.
+func (r *rig) daemonReload() {
+	r.t.Helper()
+	cmd := exec.Command(filepath.Join(r.bin, "systemctl"), "--user", "daemon-reload")
+	cmd.Env = append(r.environ(), "STUB_LOG="+os.DevNull)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		r.t.Fatalf("daemon-reload: %v\n%s", err, out)
 	}
 }
 
@@ -940,7 +959,7 @@ func TestAFreshInstallSetsTheBridgeUpAsTheUsersService(t *testing.T) {
 					"The bridge 0.2.2 is running as tester's service, and starts again when this box boots.",
 					"ssh -L 7789:127.0.0.1:7789 tester@192.0.2.10",
 					"http://127.0.0.1:7789/",
-					r.target()+" pair --name 'My iPhone'",
+					r.target()+" pair --name 'My iPhone' --config "+r.configFile(),
 				)
 				if entries, _ := os.ReadDir(r.tmp); len(entries) != 0 {
 					t.Errorf("the temporary directory was left behind: %v", entries)
@@ -1092,7 +1111,7 @@ func TestNoInitInstallsTheProgramAlone(t *testing.T) {
 					t.Errorf("lingering was asked about: %q", calls)
 				}
 				sameCalls(t, r.runPrinted(printed(res.output()), r.target()), [][]string{
-					{"bridge", "update"},
+					{"bridge", "update", "--config", r.configFile()},
 				})
 			})
 		}
@@ -1569,7 +1588,7 @@ func TestLayoutsTheInstallerDoesNotManageAreRefused(t *testing.T) {
 						t.Fatal(err)
 					}
 					sameCalls(t, r.runPrinted(printed(res.output()), r.target()), [][]string{
-						{"bridge", "update"},
+						{"bridge", "update", "--config", r.configFile()},
 						{"bridge", "init"},
 					})
 				}
@@ -1786,7 +1805,7 @@ func TestWithoutSystemdSetupWaits(t *testing.T) {
 		}
 		sameCalls(t, r.runPrinted(printed(res.output()), r.target()), [][]string{
 			{"bridge", "init", "--no-service", "--library", "/path/to/music"},
-			{"bridge", "serve"},
+			{"bridge", "serve", "--config", r.configFile()},
 		})
 	})
 }
@@ -2147,7 +2166,7 @@ func TestAServiceWhoseReleaseCannotBeReadIsNotReportedRunning(t *testing.T) {
 				if !exists(filepath.Join(r.state, "active")) {
 					t.Errorf("the service is not active")
 				}
-				sameCalls(t, r.runPrinted(printed(res.output()), r.target()), [][]string{{"bridge", "status"}})
+				sameCalls(t, r.runPrinted(printed(res.output()), r.target()), [][]string{{"bridge", "status", "--config", r.configFile()}})
 			})
 		}
 	})
@@ -2225,18 +2244,30 @@ func TestAnInstallWhoseServiceHasAnotherEnvironmentIsRefused(t *testing.T) {
 	})
 }
 
-// What the user's service manager has of the bridge's unit, wherever its
-// files are (systemctl --user cat), decides as the files in HOME do: a unit
-// of that name or a drop-in for it elsewhere, with none in HOME, is not a
-// new box; a unit the manager runs from elsewhere in place of the one in
-// HOME, or a drop-in elsewhere that sets its ExecStart, is not the install
-// bridge init made; and a manager that cannot say is refused too, all with
-// nothing changed. A drop-in of other settings changes nothing of what the
-// upgrade runs.
+// What the user's service manager has of the bridge's unit decides as the
+// files in HOME do, and is asked two ways, since they can differ: the unit
+// as the manager has it loaded (systemctl --user show), and its files as
+// they are on disk (systemctl --user cat). A unit of that name elsewhere,
+// with none in HOME, is not a new box, and nor are files left for one with
+// no unit (drop-ins the manager would read once bridge init makes it, which
+// systemctl shows nowhere while there is no unit, so the manager's search
+// path is looked through itself); a unit the manager runs from elsewhere in
+// place of the one in HOME, or a drop-in elsewhere that sets its ExecStart,
+// is not the install bridge init made; a unit whose files changed since the
+// manager last read them (a daemon-reload pending), one the manager has not
+// loaded as it is, and one loaded with an environment its files no longer
+// show, are refused; and so is a manager that cannot say, all with nothing
+// changed. A drop-in of other settings changes nothing of what the upgrade
+// runs, nor one for every service of a new box.
 func TestTheServiceManagerIsAskedWhatItRuns(t *testing.T) {
 	elsewhere := func(r *rig, dirs ...string) string {
 		return filepath.Join(append([]string{r.root}, dirs...)...)
 	}
+	userUnits := func(r *rig, names ...string) string {
+		return filepath.Join(append([]string{r.home, ".config", "systemd", "user"}, names...)...)
+	}
+	const leftFor = "would read these files for one once bridge init makes it"
+	envDropIn := []byte("[Service]\nEnvironment=BRIDGE_DATA_DIR=/srv/bridge-data-s3cret\n")
 	cases := []struct {
 		name      string
 		installed bool
@@ -2248,10 +2279,25 @@ func TestTheServiceManagerIsAskedWhatItRuns(t *testing.T) {
 		}, "from files bridge init did not write"},
 		{"a drop-in for it elsewhere, none here", false, func(r *rig) {
 			writeFile(r.t, elsewhere(r, "usr", "lib", "systemd", "user", unitName+".d", "nice.conf"), []byte("[Service]\nNice=5\n"), 0o644)
-		}, "from files bridge init did not write"},
+		}, leftFor},
+		{"a drop-in for it where init would write the unit, none here", false, func(r *rig) {
+			writeFile(r.t, userUnits(r, unitName+".d", "env.conf"), envDropIn, 0o644)
+		}, leftFor},
+		{"a drop-in in a directory its dashes name, none here", false, func(r *rig) {
+			writeFile(r.t, userUnits(r, "com.acoseac.1-bit-.service.d", "nice.conf"), []byte("[Service]\nNice=5\n"), 0o644)
+		}, leftFor},
+		{"a drop-in for every service that sets an environment, none here", false, func(r *rig) {
+			writeFile(r.t, elsewhere(r, "etc", "systemd", "user", "service.d", "env.conf"), envDropIn, 0o644)
+		}, leftFor},
 		{"a manager that cannot say, on a new box", false, func(r *rig) {
 			r.set("STUB_CAT_FAILS", "1")
-		}, "Connection timed out"},
+		}, "systemctl --user cat"},
+		{"a manager whose loaded unit cannot be read, on a new box", false, func(r *rig) {
+			r.set("STUB_SHOW_FAILS", "1")
+		}, "systemctl --user show"},
+		{"a search path that cannot be listed, on a new box", false, func(r *rig) {
+			r.set("STUB_ANALYZE_FAILS", "1")
+		}, "systemd-analyze --user unit-paths"},
 		{"a unit that takes the place of the one here", true, func(r *rig) {
 			writeFile(r.t, elsewhere(r, "run", "user", "1000", "systemd", "transient", unitName), []byte(unitText("/opt/bridge/bridge", r.configFile())), 0o644)
 		}, "runs the bridge's service from " + "TRANSIENT"},
@@ -2260,7 +2306,32 @@ func TestTheServiceManagerIsAskedWhatItRuns(t *testing.T) {
 		}, "sets its ExecStart more than once"},
 		{"a manager that cannot say, with the bridge installed", true, func(r *rig) {
 			r.set("STUB_CAT_FAILS", "1")
-		}, "Connection timed out"},
+		}, "systemctl --user cat"},
+		{"a manager whose loaded unit cannot be read, with the bridge installed", true, func(r *rig) {
+			r.set("STUB_SHOW_FAILS", "1")
+		}, "systemctl --user show"},
+		{"an environment drop-in removed without a daemon-reload", true, func(r *rig) {
+			writeFile(r.t, r.unitFile()+".d/env.conf", envDropIn, 0o644)
+			r.daemonReload()
+			if err := os.Remove(r.unitFile() + ".d/env.conf"); err != nil {
+				r.t.Fatal(err)
+			}
+		}, "NeedDaemonReload=yes"},
+		{"a drop-in added without a daemon-reload", true, func(r *rig) {
+			r.daemonReload()
+			writeFile(r.t, r.unitFile()+".d/nice.conf", []byte("[Service]\nNice=5\n"), 0o644)
+		}, "NeedDaemonReload=yes"},
+		{"an environment loaded that the files no longer show", true, func(r *rig) {
+			writeFile(r.t, r.unitFile()+".d/env.conf", envDropIn, 0o644)
+			r.daemonReload()
+			if err := os.Remove(r.unitFile() + ".d/env.conf"); err != nil {
+				r.t.Fatal(err)
+			}
+			r.set("STUB_RELOAD_UNNOTICED", "1")
+		}, "has an environment of its own (Environment)"},
+		{"a unit the manager has not loaded as it is", true, func(r *rig) {
+			r.set("STUB_LOAD_STATE", "bad-setting")
+		}, "LoadState=bad-setting"},
 	}
 	eachShell(t, func(t *testing.T, sh shell) {
 		for _, c := range cases {
@@ -2277,6 +2348,9 @@ func TestTheServiceManagerIsAskedWhatItRuns(t *testing.T) {
 				mustExit(t, res, 3)
 				mustSay(t, res, strings.Replace(c.say, "TRANSIENT", elsewhere(r, "run", "user", "1000", "systemd", "transient", unitName), 1), "Nothing was changed.")
 				r.unchanged(home, state)
+				if strings.Contains(res.output(), "s3cret") {
+					t.Errorf("the refusal quotes a value:\n%s", res.output())
+				}
 			})
 		}
 		t.Run("a drop-in of other settings", func(t *testing.T) {
@@ -2289,18 +2363,51 @@ func TestTheServiceManagerIsAskedWhatItRuns(t *testing.T) {
 			mustExit(t, res, 0)
 			mustSay(t, res, "Updated the bridge from 0.2.1 to 0.2.2.")
 		})
+		t.Run("a drop-in the manager has read since it changed", func(t *testing.T) {
+			r := newRig(t, sh)
+			r.installed("0.2.1", r.target(), r.configFile())
+			writeFile(t, r.unitFile()+".d/nice.conf", []byte("[Service]\nNice=5\n"), 0o644)
+			r.daemonReload()
+			r.newRelease(stampedRelease)
+			r.set("FAKE_UPDATE", "ok")
+			res := r.run()
+			mustExit(t, res, 0)
+			mustSay(t, res, "Updated the bridge from 0.2.1 to 0.2.2.")
+		})
+		t.Run("a drop-in for every service of other settings, on a new box", func(t *testing.T) {
+			r := newRig(t, sh)
+			writeFile(t, elsewhere(r, "etc", "systemd", "user", "service.d", "nice.conf"), []byte("[Service]\nNice=5\n"), 0o644)
+			res := r.run("--library", r.music("music"))
+			mustExit(t, res, 0)
+			mustSay(t, res, "is running as tester's service")
+		})
 	})
 }
 
 // Every command the installer prints for the user to type runs as printed,
 // pasted into the shell: each word quoted where it needs it, so that a path
 // with a space, an apostrophe or a semicolon in it stays one word and runs
-// nothing else, and the settings named with --config wherever they are not
-// where the bridge looks without it, on the commands that read them (pair,
-// status, serve and update; init, logs and start take no --config).
+// nothing else, and the settings named with --config on the commands that
+// read them (pair, status, serve and update; init, logs and start take no
+// --config), the default ones too: a plain bridge command reads
+// ./bridge.yaml first where it is run (cmd/bridge's resolveConfigPath), so
+// one pasted in another bridge's folder would act on that bridge's settings
+// and its token store.
 func TestThePrintedCommandsRunAsPrinted(t *testing.T) {
 	const odd = "it's; injected ;x"
 	eachShell(t, func(t *testing.T, sh shell) {
+		t.Run("pasted in a folder that holds another bridge's settings", func(t *testing.T) {
+			r := newRig(t, sh)
+			res := r.run("--library", r.music("music"))
+			mustExit(t, res, 0)
+			other := filepath.Join(r.dir, "another bridge")
+			writeFile(t, filepath.Join(other, "bridge.yaml"), []byte("libraryRoots: [/srv/other]\n"), 0o600)
+			sameCalls(t, r.runPrintedIn(other, printed(res.output()), r.target()), [][]string{
+				{"ssh", "-L", "7789:127.0.0.1:7789", "tester@192.0.2.10"},
+				{"bridge", "pair", "--name", "My iPhone", "--config", r.configFile()},
+				{"bridge", "status", "--config", r.configFile()},
+			})
+		})
 		t.Run("after an upgrade of a bridge with its settings elsewhere", func(t *testing.T) {
 			r := newRig(t, sh)
 			bin := filepath.Join(r.home, "apps "+odd, "bridge")
@@ -2323,8 +2430,8 @@ func TestThePrintedCommandsRunAsPrinted(t *testing.T) {
 			mustExit(t, res, 0)
 			sameCalls(t, r.runPrinted(printed(res.output()), r.target()), [][]string{
 				{"ssh", "-L", "7789:127.0.0.1:7789", "tester@192.0.2.10"},
-				{"bridge", "pair", "--name", "My iPhone"},
-				{"bridge", "status"},
+				{"bridge", "pair", "--name", "My iPhone", "--config", r.configFile()},
+				{"bridge", "status", "--config", r.configFile()},
 			})
 		})
 		t.Run("a new install the PATH finds", func(t *testing.T) {
@@ -2332,11 +2439,11 @@ func TestThePrintedCommandsRunAsPrinted(t *testing.T) {
 			r.set("PATH", r.bin+":"+filepath.Dir(r.target()))
 			res := r.run("--library", r.music("music"))
 			mustExit(t, res, 0)
-			mustSay(t, res, "    bridge pair --name 'My iPhone'", "    bridge status")
+			mustSay(t, res, "    bridge pair --name 'My iPhone' --config "+r.configFile(), "    bridge status --config "+r.configFile())
 			sameCalls(t, r.runPrinted(printed(res.output())), [][]string{
 				{"ssh", "-L", "7789:127.0.0.1:7789", "tester@192.0.2.10"},
-				{"bridge", "pair", "--name", "My iPhone"},
-				{"bridge", "status"},
+				{"bridge", "pair", "--name", "My iPhone", "--config", r.configFile()},
+				{"bridge", "status", "--config", r.configFile()},
 			})
 		})
 		t.Run("an init that failed, its library of that name", func(t *testing.T) {
@@ -2359,7 +2466,7 @@ func TestThePrintedCommandsRunAsPrinted(t *testing.T) {
 			mustExit(t, res, 4)
 			sameCalls(t, r.runPrinted(printed(res.output()), r.target()), [][]string{
 				{"bridge", "init", "--no-service", "--library", "/path/to/music"},
-				{"bridge", "serve"},
+				{"bridge", "serve", "--config", r.configFile()},
 			})
 		})
 		t.Run("a service that does not start, its program elsewhere", func(t *testing.T) {

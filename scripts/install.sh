@@ -483,13 +483,27 @@ find_user_bus() {
 	return 1
 }
 
-# inspect_unit asks this user's service manager for the bridge's unit as it
-# runs it, wherever its files are (systemctl --user cat): UNIT_TEXT is what
-# the manager prints, every file under a comment naming it, and UNIT_FILES
-# those files, the unit file first and then its drop-ins; both are empty
-# when the manager has no file of it at all. A manager that cannot say is a
-# refusal: what is installed cannot be told.
+# inspect_unit asks this user's service manager for the bridge's unit, two
+# ways, since they can differ. UNIT_LOADED is the unit as the manager has it
+# loaded, the one a start or a restart runs (systemctl --user show): its
+# LoadState, the files it was read from (FragmentPath, DropInPaths), whether
+# they changed since (NeedDaemonReload), and the environment it gives the
+# service. UNIT_TEXT is its files as they are on disk (systemctl --user cat,
+# which reads the files, not what the manager loaded: systemctl(1)), every
+# file under a comment naming it, and UNIT_FILES those files, the unit file
+# first and then its drop-ins; both are empty for a unit the manager has not
+# found, whose drop-ins it reads nowhere (unit_files_on_disk looks for those).
+# A manager that cannot say is a refusal: what is installed cannot be told.
 inspect_unit() {
+	iu_status=0
+	UNIT_LOADED=$(systemctl --user show \
+		-p LoadState,FragmentPath,DropInPaths,NeedDaemonReload,Environment,EnvironmentFiles,PassEnvironment,UnsetEnvironment \
+		"$UNIT_NAME" 2>&1) || iu_status=$?
+	if [ "$iu_status" != 0 ]; then
+		leave 3 "Asking $USER_NAME's service manager for the bridge's unit failed (systemctl --user show $UNIT_NAME, exit $iu_status):" \
+			"$(printf '%s\n' "$UNIT_LOADED" | head -n 1)" \
+			"so this installer cannot tell how the bridge is installed here. Nothing was changed."
+	fi
 	iu_status=0
 	UNIT_TEXT=$(systemctl --user cat "$UNIT_NAME" 2>&1) || iu_status=$?
 	if [ "$iu_status" != 0 ]; then
@@ -505,6 +519,64 @@ inspect_unit() {
 			"so this installer cannot tell how the bridge is installed here. Nothing was changed."
 	fi
 	UNIT_FILES=$(printf '%s\n' "$UNIT_TEXT" | sed -n 's|^# \(/.*\)$|\1|p')
+}
+
+# loaded PROPERTY prints the value the manager's loaded unit gives PROPERTY
+# (inspect_unit), empty when it gives none.
+loaded() {
+	printf '%s\n' "$UNIT_LOADED" | sed -n "s/^$1=//p" | head -n 1
+}
+
+# loaded_environment prints the environment properties the manager's loaded
+# unit gives the service a value for (Environment, EnvironmentFiles,
+# PassEnvironment, UnsetEnvironment), comma separated: their names, never
+# their values, which can hold a password.
+loaded_environment() {
+	le_set=''
+	for le_key in Environment EnvironmentFiles PassEnvironment UnsetEnvironment; do
+		if printf '%s\n' "$UNIT_LOADED" | grep -q "^$le_key=."; then
+			le_set="$le_set${le_set:+, }$le_key"
+		fi
+	done
+	printf '%s' "$le_set"
+}
+
+# unit_files_on_disk prints, one a line, the files the user's manager would
+# read for the bridge's unit once there is one, wherever they are among the
+# directories it reads units from (systemd-analyze --user unit-paths): a
+# unit file of its name; its drop-ins, in <unit>.d and in the directories
+# its dashes name (com.acoseac.1-bit-.service.d and com.acoseac.1-.service.d:
+# systemd.unit(5)); and the drop-ins for every service (service.d) that set
+# an environment or an ExecStart. It reads the directories themselves:
+# systemctl answers "No files found" for a unit the manager has not found,
+# before it reads any drop-in, so the files left for one show nowhere else
+# until bridge init makes the unit and they apply to it. It fails when the
+# directories cannot be listed.
+unit_files_on_disk() {
+	uf_dirs=$(systemd-analyze --user unit-paths 2>&1) || {
+		printf '%s\n' "$uf_dirs" | head -n 1
+		return 1
+	}
+	printf '%s\n' "$uf_dirs" | while IFS= read -r uf_dir; do
+		case $uf_dir in
+		/*) ;;
+		*) continue ;;
+		esac
+		if [ -e "$uf_dir/$UNIT_NAME" ] || [ -L "$uf_dir/$UNIT_NAME" ]; then
+			printf '%s\n' "$uf_dir/$UNIT_NAME"
+		fi
+		for uf_file in "$uf_dir/$UNIT_NAME.d"/*.conf "$uf_dir/com.acoseac.1-bit-.service.d"/*.conf \
+			"$uf_dir/com.acoseac.1-.service.d"/*.conf; do
+			if [ -e "$uf_file" ] || [ -L "$uf_file" ]; then
+				printf '%s\n' "$uf_file"
+			fi
+		done
+		for uf_file in "$uf_dir/service.d"/*.conf; do
+			if [ -f "$uf_file" ] && grep -Eq '^[[:space:]]*(Environment|EnvironmentFile|PassEnvironment|UnsetEnvironment|ExecStart)[[:space:]]*=' "$uf_file"; then
+				printf '%s\n' "$uf_file"
+			fi
+		done
+	done
 }
 
 # unit_keys KEYS reads systemctl cat's output and prints each line of it
@@ -524,38 +596,50 @@ unit_keys() {
 }
 
 # check_installed_unit takes the unit at UNIT_FILE for an install only when
-# it is the one bridge init writes, the manager runs it as it is, and the
-# program and the settings it names are there: the unit file is the one the
-# manager reads, nothing besides its own line sets its ExecStart, and
-# nothing gives the service an environment of its own (Environment=,
-# EnvironmentFile=, PassEnvironment=, UnsetEnvironment=), which bridge
-# update, run from here, would not have: the bridge takes a BRIDGE_ variable
-# over its settings. And the program's directory must be one its user can
-# write, as bridge update needs. Anything else is refused.
+# it is the one bridge init writes, the manager has it loaded as its files
+# are, and the program and the settings it names are there. The manager's
+# loaded unit (inspect_unit) must be loaded (LoadState), from that file
+# (FragmentPath), with no daemon-reload pending (NeedDaemonReload: a file
+# changed since the manager read it, so a restart would run what the
+# manager holds, not what the files say), and give the service no
+# environment of its own (Environment, EnvironmentFiles, PassEnvironment,
+# UnsetEnvironment), which bridge update, run from here, would not have:
+# the bridge takes a BRIDGE_ variable over its settings. Its files, which
+# are then what it loaded, must set the ExecStart once. And the program's
+# directory must be one its user can write, as bridge update needs.
+# Anything else is refused.
 check_installed_unit() {
 	read_unit "$UNIT_FILE" || leave 3 "The bridge's service is installed, but $UNIT_PROBLEM" \
 		"Update the bridge with bridge update instead. Nothing was changed."
-	ci_first=$(printf '%s\n' "$UNIT_FILES" | head -n 1)
-	if [ -z "$ci_first" ]; then
-		leave 3 "$USER_NAME's service manager finds no file of the bridge's unit, though $UNIT_FILE is there." \
-			"Run systemctl --user daemon-reload, then this again. Nothing was changed."
+	ci_state=$(loaded LoadState)
+	if [ "$ci_state" != loaded ]; then
+		leave 3 "$USER_NAME's service manager does not have the bridge's unit loaded as it is (LoadState=${ci_state:-unknown}), though $UNIT_FILE is there." \
+			"See why with: systemctl --user status $UNIT_NAME, then run this again. Nothing was changed."
 	fi
+	if [ "$(loaded NeedDaemonReload)" != no ]; then
+		leave 3 "The bridge's unit changed on disk since $USER_NAME's service manager last read it (NeedDaemonReload=yes):" \
+			"the manager runs it as it was then, which is not what its files say now." \
+			"Have the manager read it with: systemctl --user daemon-reload, then run this again. Nothing was changed."
+	fi
+	ci_first=$(loaded FragmentPath)
 	ci_real=$(readlink -f "$UNIT_FILE" 2>/dev/null) || ci_real=''
 	if [ "$ci_first" != "$UNIT_FILE" ] && [ "$ci_first" != "$ci_real" ]; then
-		leave 3 "$USER_NAME's service manager runs the bridge's service from $ci_first, not from $UNIT_FILE, which bridge init wrote:" \
+		leave 3 "$USER_NAME's service manager runs the bridge's service from ${ci_first:-a unit with no file}, not from $UNIT_FILE, which bridge init wrote:" \
 			"this installer does not manage that unit. Nothing was changed."
+	fi
+	ci_set=$(loaded_environment)
+	if [ -n "$ci_set" ]; then
+		ci_env=$(printf '%s\n' "$UNIT_TEXT" | unit_keys 'Environment|EnvironmentFile|PassEnvironment|UnsetEnvironment')
+		[ -n "$ci_env" ] || ci_env="  (in no file of the unit as it is now: the manager read them before they changed)"
+		leave 3 "The bridge's service, as $USER_NAME's service manager has it loaded, has an environment of its own ($ci_set)," \
+			"which bridge update, run from here, would not have (the bridge takes a BRIDGE_ variable over its settings), from:" "$ci_env" \
+			"bridge init writes none. Update the bridge with its own bridge update, in that environment," \
+			"or take it out (systemctl --user edit $UNIT_NAME, then systemctl --user daemon-reload) and run this again. Nothing was changed."
 	fi
 	ci_execs=$(printf '%s\n' "$UNIT_TEXT" | unit_keys ExecStart)
 	if [ "$(printf '%s\n' "$ci_execs" | awk 'NF { n++ } END { print n + 0 }')" != 1 ]; then
 		leave 3 "The bridge's service sets its ExecStart more than once, so this installer cannot tell which program it runs:" \
 			"$ci_execs" "Update the bridge with bridge update instead. Nothing was changed."
-	fi
-	ci_env=$(printf '%s\n' "$UNIT_TEXT" | unit_keys 'Environment|EnvironmentFile|PassEnvironment|UnsetEnvironment')
-	if [ -n "$ci_env" ]; then
-		leave 3 "The bridge's service sets an environment of its own, which bridge update, run from here, would not have" \
-			"(the bridge takes a BRIDGE_ variable over its settings):" "$ci_env" \
-			"bridge init writes no such line. Update the bridge with its own bridge update, in that environment," \
-			"or remove those lines (systemctl --user edit $UNIT_NAME) and run this again. Nothing was changed."
 	fi
 	if [ ! -f "$INSTALLED_BIN" ] || [ ! -x "$INSTALLED_BIN" ]; then
 		leave 3 "The bridge's service runs $INSTALLED_BIN, which is not there." \
@@ -618,10 +702,21 @@ detect_install() {
 		INSTALL_STATE=upgrade
 		return 0
 	fi
-	if [ -n "$UNIT_FILES" ] || [ -n "$UNIT_TEXT" ]; then
-		leave 3 "$USER_NAME's service manager has the bridge's unit, $UNIT_NAME, from files bridge init did not write:" \
-			"$(printf '%s\n' "${UNIT_FILES:-$UNIT_TEXT}" | sed 's/^/  /')" \
-			"bridge init writes it at $UNIT_FILE alone. Update that install the way it was set up (bridge update). Nothing was changed."
+	if [ "$SYSTEMD" = 1 ]; then
+		di_state=$(loaded LoadState)
+		if [ "$di_state" != not-found ] || [ -n "$UNIT_FILES" ] || [ -n "$UNIT_TEXT" ]; then
+			leave 3 "$USER_NAME's service manager has the bridge's unit, $UNIT_NAME (LoadState=${di_state:-unknown}), from files bridge init did not write:" \
+				"$(printf '%s\n' "${UNIT_FILES:-$(loaded FragmentPath) $(loaded DropInPaths)}" | sed 's/^/  /')" \
+				"bridge init writes it at $UNIT_FILE alone. Update that install the way it was set up (bridge update). Nothing was changed."
+		fi
+		di_left=$(unit_files_on_disk) ||
+			leave 3 "Listing the directories $USER_NAME's service manager reads units from failed (systemd-analyze --user unit-paths): $di_left" \
+				"so this installer cannot tell whether files are left there for the bridge's unit. Nothing was changed."
+		if [ -n "$di_left" ]; then
+			leave 3 "$USER_NAME's service manager has no unit for the bridge, but would read these files for one once bridge init makes it:" \
+				"$(printf '%s\n' "$di_left" | sed 's/^/  /')" \
+				"so the service bridge init installs would run with what they set. Move them aside, then run this again. Nothing was changed."
+		fi
 	fi
 	if [ -e "$CONFIG_FILE" ]; then
 		leave 3 "Found the bridge's settings at $CONFIG_FILE, but no service runs them, so this installer cannot tell which bridge program you use." \
@@ -632,7 +727,7 @@ detect_install() {
 	if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then
 		leave 3 "$TARGET is there, and the bridge is not installed as $USER_NAME's service (there is no $UNIT_FILE)," \
 			"so this installer cannot tell what runs it, and does not replace it: only a bridge's own bridge update does." \
-			"If it is a bridge you run yourself, update it with (add --config and its settings file, when they are not in $CONFIG_DIR):" \
+			"If it is a bridge you run yourself, update it with its own bridge update (naming the settings it serves, if not these):" \
 			"    $(bridge_line "$TARGET" update --config "$CONFIG_FILE")" \
 			"or make it your service, with:" \
 			"    $(bridge_line "$TARGET" init)" \
@@ -1283,19 +1378,16 @@ command_line() {
 
 # bridge_line BINARY ARG... prints the command that runs the bridge at BINARY
 # with ARG..., for the user to type: the program as their PATH names it
-# (shown_bridge), and every word quoted where it needs it. A --config naming
-# CONFIG_FILE is left out, since the bridge reads that file without one;
-# any other is kept, so a bridge with its settings elsewhere is told where.
+# (shown_bridge), and every word quoted where it needs it. Every --config is
+# kept, the default settings file's too: a bridge command without one reads
+# ./bridge.yaml first where it is run (cmd/bridge's resolveConfigPath), so
+# one pasted in another bridge's folder would act on that bridge's settings
+# and its token store.
 bridge_line() {
 	bl_line=$(shown_bridge "$1")
 	shift
-	while [ "$#" -gt 0 ]; do
-		if [ "$1" = --config ] && [ "$#" -gt 1 ] && [ "$2" = "$CONFIG_FILE" ]; then
-			shift 2
-			continue
-		fi
-		bl_line="$bl_line $(sh_quote "$1")"
-		shift
+	for bl_word in "$@"; do
+		bl_line="$bl_line $(sh_quote "$bl_word")"
 	done
 	printf '%s' "$bl_line"
 }
