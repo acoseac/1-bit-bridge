@@ -66615,3 +66615,227 @@ goes from 18 to 20, with the runbook's five current references, its step 1,
 and a note of what 20 covers.
 
 **Round 2:** an uninterpretable root-hub speed leaves the USB listing incomplete (reader and Resolve regressions red before the fix, green after); PROTOCOL.md now names all three causes of `identity_incomplete`; the qualification note now distinguishes unchanged wire fields and schema from existing `reason` values that may differ.
+
+## 2026-10-31 — B605: the engine's tests move the fake clock past a call only once the owner has taken its answer
+
+Backlog B605: `TestNativePausedTransitionRearmsDeadline/1s/true` failed in
+the gate's `test -race (rest)` job on main d8b6897c (2026-10-28) and e242ce2c
+(2026-10-29), two of main's last six gate runs: "waited 1m0s for effective
+paused transition deadline; state stopped, selected 4097, pending stop, last
+stop {Reason:backend_timeout Detail:prepare did not answer wi…". The test
+(B470 2c.2) pins the deadline of a transport installed during a pause.
+
+**Reproduced on legion0** (Ubuntu 26.04, x86-64, 16 cores, go1.27.3,
+`-race`), through the build slot: `go test -race -run
+'^TestNativePausedTransitionRearmsDeadline$' -count=200 -timeout 60m -v
+./internal/player/engine/`. Alone: no failure in 200 runs (800 subtests),
+1.7 s. Beside 16 busy loops (`while :; do :; done`, one per core): 3 runs of
+200 (1s/true twice, 1m0s/true once), CI's line each time, 182 s, 180 of it
+three one-minute watchdogs. Beside 32 (`-watchdog=20s`): 1 run of 200
+(1m0s/false). Traced beside 16 (below, `-watchdog=10s`): 10 runs of 400, every
+subtest among them, so CI's two 1s/true were chance.
+
+**The cause: the test moved the fake clock past the deadline of a Prepare whose
+answer was still on its way** (Codex's first hypothesis on the brief). At
+e242ce2c:
+
+1. PlayID answers once the owner has taken the Start's answer
+   (`settleWaiters`, owner.go:620-645). That step's `reconcile` names b after
+   a in a Prepare (`startDone` → `reconcile` → `prepare`, transport.go:1185,
+   838, 883), with CallTimeout's 2 s deadline on the engine's clock and its
+   deadline timer armed (`call`, transport.go:1043-1059, the timer at 1054),
+   on a goroutine of its own (1062-1066).
+2. The test's `s.prepared(s.first.ID, 1)` (fakebackend_test.go:517) waits for
+   the fake's record of that Prepare, which the fake makes before it returns
+   (`b.record(c)`, :273; the hook or the return after it, :279-287). Then the
+   call's goroutine stamps its answer on the engine's clock (transport.go:1064)
+   and posts it (`spawn`, engine.go:784).
+3. The test sets the current occurrence, pauses and sets the next one, none of
+   which waits for that answer, and moves the clock `effective +
+   ReleaseTimeout - 1s` on: 31 s, 2 s or 61 s.
+4. The Prepare's deadline timer fires inside that advance and posts its expiry
+   (transport.go:1057). The owner takes it while the call is still pending
+   (`callExpired`, 1303), ends the play ("prepare did not answer within its
+   deadline", 1310) and releases the session with ReasonTimeout (1330);
+   `releaseSession` stops the pause's timer (581). The fake acknowledges the
+   release at once, the engine stops, and the deadline under test never comes:
+   the test waits out its watchdog.
+5. The answer arrives afterwards and is not taken: stamped late, it is expired
+   by `callDone` (1094-1101); stamped in time but taken after the expiry, it is
+   dropped there (`if c.expired`, 1107).
+
+**Evidence.** A temporary trace, removed before the fix (its patch is beside
+the job's report, outside the tree), logged each step with the real time, the
+goroutine and the fake clock: the fake's Prepare entered, recorded and
+returning; the call's goroutine's return, stamp and post; the deadline timer's
+fire and post; the owner's handling of the answer and of the expiry; and the
+test's steps and advances. In a passing run the owner took the Prepare's answer
+25 µs after `h.playing` returned. All ten failures beside 16 busy loops had one
+order: the deadline timer fired at fake 02.000 inside the test's advance, the
+owner handled the expiry with the call still pending, and the owner took the
+answer 0.5 to 3.3 ms after the expiry, in four of them stamped at 00.000 (in
+time) and posted after it (the goroutine left between its stamp and its post),
+in six stamped late (left before its backend returned or before its stamp).
+The first:
+
+    1.098 ms g1045 fake 00.000  fake backend: Prepare recorded (the test's s.prepared can return)
+    1.147 ms g1045 fake 00.000  call goroutine: prepare call 2's backend returned
+    1.275 ms g671  fake 00.000  test: s.prepared returned
+    1.711 ms g671  fake 00.000  test: Advance(31s) begins
+    1.741 ms g671  fake 02.000  clock: prepare call 2's deadline timer fires
+    1.784 ms g671  fake 02.000  clock: prepare call 2's expiry posted
+    1.984 ms g672  fake 31.000  owner: prepare call 2's expiry handled (still pending true)
+    2.036 ms g672  fake 31.000  owner: release call 4 made, deadline 33.000
+    3.176 ms g1045 fake 32.000  call goroutine: prepare call 2's answer stamped at 00.000 (late false)
+    3.234 ms g672  fake 32.000  owner: prepare call 2's answer handled (stamped 00.000, late false, expired already true)
+
+**The engine is not at fault, and no production deadline changes.** The
+re-arming works: in every run that gets past the Prepare the previous
+transport's timer ends nothing and the transition's own fires at its effective
+PauseRelease plus ReleaseTimeout (`armPauseDeadline`, native.go:294-298, from
+events.go:111). An answer the owner takes after its call's expiry loses
+whatever its stamp, by design: a call past its deadline releases its session,
+whichever message reaches the owner first (Backend's contract, player.md), and
+the expiry cannot wait for an answer that may never come. On the real clock
+that is a call answering in the instant of its deadline; on the fake one the
+test moved 31 s in no real time while the call's goroutine waited for a CPU.
+The rule the test broke was already written (player.md, "The engine's tests
+never sleep": a test that moves the clock past a live session's call deadline
+first waits for that call's answer to be handled), and B470 4b1 round 2 had
+fixed its first instance, `TestAPausesReleaseThatNeverComesIsUnconfirmed`
+(be003a08); the 2c.2 test came later without it.
+
+**Red first** (a4849a6c). Each of the four cases gains a row whose Prepare
+answers only once the test lets it go, or its deadline has passed (the fake's
+`onPrepare`, `answer.wait(ctx, h.be, true)`, then nil): the latest a scheduler
+could leave the call's goroutine. At e242ce2c's order nothing lets it go, so the
+hold ends at the deadline inside the advance: red twenty runs of twenty, every
+held row, at the new checkpoint with CI's signature ("a second before the
+effective deadline: releasing, a release unconfirmed false, last stop
+{Reason:backend_timeout Detail:prepare did not answer within its deadline …}").
+The same commit makes the test reject the wrong kind of release (Codex on the
+brief): a second before the deadline the engine must be still paused with no
+release unconfirmed and no stop recorded; at it the unconfirmed release must be
+the paused session's own (`ReleaseInfo.Paused`, the session's id), the state
+Paused and no stop. And `TestShutdownJoinsWithinItsBound` gains the same held
+row (below), red twenty of twenty.
+
+**The checkpoint's barrier.** The old one, a Pause command, is no barrier for
+the message a timer posts: the owner's loop selects on commands and messages
+together (owner.go:246-248), and Go takes one of several ready cases at random,
+so a command that waits beside a queued message can be taken before it. A
+session position (`Position{}`, which the engine takes for nothing: no
+occurrence 0 is heard) is a message, posted on the test's goroutine after the
+advance's own, and messages reach the owner in the order they were posted
+(native_release_test.go:124's "an ordinary position is a barrier"). The sibling
+`TestNativeEffectivePauseDeadline` said "A command reply is an owner barrier
+after the timer's queued event"; it now reads its checkpoint behind a position
+too, and its end asks the same of the release. This is a guarantee, not a
+measured flake: against a throwaway mutation that keeps a DSD pause on the
+configured PCM deadline, the command barrier caught it 200 runs of 200 alone
+and 2,000 of 2,000 beside 16 busy loops, and so did the position. In practice
+the owner has parked again before the advance posts (Go runs the goroutine a
+reply wakes on the waker's processor once the waker waits), so the window is
+rare; the spec does not promise it.
+
+**The fix** (ea7e8788): the held answer is let go and the test waits for the
+owner to take it (`h.waitApplied("handled call prepare", 0)`) before the clock
+moves, the barrier its sibling had at :19.
+
+**Controls**, on ea7e8788, each restored with `git checkout HEAD --` and the
+tree clean after:
+
+- 1, the fix's wait taken out of `TestNativePausedTransitionRearmsDeadline`
+  (its five lines): predicted, the four held rows red at the checkpoint with
+  CI's signature, every run, and the unheld rows green alone; actual, 80 of 80
+  held rows red in twenty runs, 80 of 80 unheld green.
+- 2, the same wait taken out of `TestShutdownJoinsWithinItsBound`: predicted,
+  the held row red, "2 calls abandoned, want the release that never answered";
+  actual, twenty of twenty, the unheld row green twenty of twenty.
+- 3, the engine recording the paused session's overdue release as an ordinary
+  one (`pauseOverdue`'s `Paused: false`): the new checks red in all ten
+  subtests of the two native deadline tests ("at 32s: paused, unconfirmed
+  {Session:1 … Paused:false}; want session 1's own release of its pause
+  unconfirmed"), and e242ce2c's test file, put back beside the same mutation,
+  green in all six of its subtests: the old checks could not tell the two
+  releases apart.
+
+**Stress**, through the build slot beside 16 busy loops, each binary built
+beforehand with the tree clean (e242ce2c's, and ea7e8788's) and run from the
+package's directory, `-test.count=2000 -watchdog=5s`, one binary after another
+inside one slot:
+
+| Test, binary | Runs failed of 2,000 | Subtests | Wall |
+|---|---|---|---|
+| `TestNativePausedTransitionRearmsDeadline`, e242ce2c | **11** (1s/true 4, 1s/false 3, 1m0s/false 3, 1m0s/true 1), CI's line each, "waited 5s" | 8,000 | 73 s |
+| the same, ea7e8788 | 0 | 16,000, the held rows among them | 35 s |
+| `TestShutdownJoinsWithinItsBound`, e242ce2c | **8**, "2 calls abandoned, want the release that never answered" | — | 6 s |
+| the same, ea7e8788 | 0 | 4,000 | 10 s |
+
+The brief's run, the fixed binary `-test.count=200` beside the same 16 busy
+loops: 200 of 200, 1,600 subtests, none failed.
+
+**The same shape elsewhere: every place an engine test drives the clock.** The
+real-time watchdog (`-watchdog`, harness_test.go:20-23) is a hang detector and
+orders nothing; the clock is the fake's, moved by `Advance`, `Skip`, and the
+harness's `drive` (shutdown, `restart`, `crash`), which fires each pending timer
+in turn until Run returns. At e242ce2c:
+
+| Where | Test | Under way when the clock moves | Verdict |
+|---|---|---|---|
+| native_deadline_test.go:86, :91 | `TestNativePausedTransitionRearmsDeadline` | the session's Prepare of b, never awaited | B605; fixed |
+| lifecycle_test.go:403 (`drive`) | `TestShutdownJoinsWithinItsBound` | the release, held on purpose; the Prepare of b, never awaited, which Run abandons beside it when the grace, fired at once, ends | same defect; fixed |
+| admission_test.go:191, :198, :207 | `TestAParkedEditIsAnsweredWithinReserveTimeoutOfItsPark` | the reservation write, held on purpose; the step that parks the first insert, which arms the bound only after it starts the write (edits.go:192, :197), not awaited before :191 | same defect; fixed |
+| reserve_test.go:47 | `TestAFailingReservationWriteRefusesEdits` | the live session's Prepare, never awaited, an hour past its deadline | breaks the rule, but nothing asserted reads the session; fixed |
+| native_deadline_test.go:21, :27 | `TestNativeEffectivePauseDeadline` | nothing: the Prepare (the end's) awaited at :19, the Pause answered | safe; its barrier replaced (above) |
+| pause_test.go:67 | `TestAPausesReleaseThatNeverComesIsUnconfirmed` | nothing: the Prepare awaited at :65 | safe (the precedent) |
+| session_test.go:353, :357, :375 | `TestALateAnswerIsRefusedWhateverTheOrder` | the call each row holds, on purpose; the Prepare awaited at :248 | safe (the precedent) |
+| session_test.go:92 | `TestALateOpenIsClosedAndNeverWrittenTo` | the Start and the release, both held on purpose; no Prepare, the Start never answered | safe |
+| session_test.go:208 | `TestADeadlineQueuedBehindItsAcknowledgementChangesNothing` | the session releasing, the owner held in a report's admission on purpose; a Prepare answer or expiry acts on the current session alone (transport.go:1118, :1325), which this is not | safe |
+| session_test.go:404 | `TestAStopThatNeverAnswersLeavesTheReleaseUnconfirmed` | the release, held on purpose; the session releasing, so the same | safe |
+| attempt_test.go:193 | `TestAStartPastItsDeadlineIsAFailedAttempt` | the Start, held on purpose; the busy session before it stopped (awaited) | safe |
+| panic_test.go:144 | `TestAPanicInABackendCallIsThatCallsFailure/release` | the release's answer awaited (:143); the session releasing | safe |
+| native_round2_test.go:31 | `TestNativeEarlyReleaseStopsTimer` | the session's release refused unconfirmed; the release timer's absence read directly (:28) | safe |
+| maintenance_test.go:243 | `TestEnteringWhileAReleaseIsUnconfirmedSaysSo` | the release, held on purpose; its deadline armed with `clock.At` from the call's own (transport.go:627), so armed late it fires at once | safe |
+| maintenance_test.go:187, :218 | `TestRenewalKeepsAHold`, `TestAnExpiredHoldEndsByItself` | no session, or one acknowledged (awaited); the hold's timer armed in the step the test awaited | safe |
+| lifecycle_test.go:79 | `TestAHungReservationWriteHoldsOnlyTheEditsThatNeedIt` | the reservation write, held on purpose; the insert's step finished (the report command after it answered); the session stopped | safe |
+| persist_test.go:118, :120, :178, :195, :209, :212, :247, :255, :502; panic_test.go:257, :263, :290 | the queue writer's tests | no session; the writer's instants (`at`, `since`, `retryAt`) are read before the reply or report the test waits for, and armed with `clock.At` (persist.go:367); held writes on purpose | safe |
+| persist_test.go:288 (`drive`) | `TestAMutationDuringTheShutdownFlushIsRefused` | no session; the flush, held on purpose | safe |
+| harness_test.go:399-423 (`drive`, through `shutdown`, `restart`, `crash`) | every test that stops an engine | whatever is under way: the shutdown's bounds are the clock's, so the drive crosses them by design | safe where nothing reads what was abandoned: only `TestShutdownJoinsWithinItsBound` does |
+
+The three fixed beside B605:
+
+- `TestShutdownJoinsWithinItsBound` counts the calls Run abandoned (owner.go:373)
+  and requires one, the release that never answers. The harness's drive fires
+  the release deadline and then the grace (owner.go:352) at once, so a Prepare
+  answer still on its way at the shutdown is abandoned too: "2 calls
+  abandoned". Its held row (the Prepare answers once the test lets it go or the
+  fake closes) is red twenty of twenty without the wait; the test now waits for
+  the owner to take that answer before the shutdown. B526 fixed this test's
+  goroutine count (spawn's order) and did not meet this. Unheld, e242ce2c's
+  test failed 8 runs of 2,000 beside 16 busy loops with that line, and the
+  fixed one none of 2,000 (above): it was flaking already, unreported.
+- `TestAParkedEditIsAnsweredWithinReserveTimeoutOfItsPark` pins the bound
+  ReserveTimeout after the first edit parks, and moved the clock once the
+  reservation write had begun, which `values` starts before it arms the bound:
+  a write under way says nothing of the step that arms it. A throwaway that
+  holds the fake clock's lock (which the bound's `AfterFunc` takes) until the
+  write has begun, and moves the clock 2 s there, as the test's `Advance` does
+  with no timer due, waited out its watchdog five runs of five ("waited 5s for
+  first to answer": the bound came 2 s late); in the fixed order, the lock let
+  go, a command of no lane answered and then the advance, twenty of twenty
+  passed. The test now has that command, as it had for its delete. The window
+  is a few hundred nanoseconds of the owner's against a file read on the
+  write's goroutine, so no stress run is offered for it.
+- `TestAFailingReservationWriteRefusesEdits` moved the clock an hour past its
+  session's Prepare deadline without waiting for the answer. Nothing it
+  asserts reads the session, so it could not fail; it now waits, so the rule
+  holds everywhere.
+
+**qualificationVersion 21**: `internal/player/engine/` is a guarded prefix that
+counts test files (`internal/player/qualification/version_gate.go:15`, its
+check at :33-43, a strict increase at :71-72), so this test-only branch takes
+21 over main's 20: `version.go`, the runbook's six current references (the five
+`TestQualificationRunbookVersion` pins and 2d.2's first owner step), and a note
+of what 21 covers. B601 (#1371) and B604 (#1369) raise it too; their order is
+set at merge.
