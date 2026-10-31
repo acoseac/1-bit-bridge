@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/usbid"
@@ -78,9 +79,17 @@ func (f *fakePlayerOutput) DACs(context.Context, *config.Config) PlayerDACList {
 func (f *fakePlayerOutput) Chosen(_ context.Context, selection, kind string) (config.PlayerDevice, error) {
 	f.count("chosen")
 	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.selection, f.kind = selection, kind
-	f.mu.Unlock()
 	return f.device, f.chosenErr
+}
+
+// answerChosen makes every later choice answer err, as the box does once the
+// DAC a token names is swapped.
+func (f *fakePlayerOutput) answerChosen(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.chosenErr = err
 }
 
 func (f *fakePlayerOutput) SameBinding(a, b config.PlayerDevice) bool {
@@ -450,6 +459,64 @@ func TestTheDACChoiceWritesTheBindingItNames(t *testing.T) {
 	if !bytes.Equal(readFileOrNil(cfgPath), saved) {
 		t.Errorf("an unchanged choice rewrote the config file")
 	}
+}
+
+// playerGiveUp fires when a wait in these tests gives up: ten seconds before
+// the test binary's deadline, and never when it has none.
+func playerGiveUp(t *testing.T) <-chan time.Time {
+	deadline, ok := t.Deadline()
+	if !ok {
+		return nil
+	}
+	return time.After(max(time.Until(deadline)-10*time.Second, 0))
+}
+
+// TestADACChoiceIsCheckedAgainWhenItsTurnComes pins where the DAC route checks
+// a choice against the box: in the config's turn, under the console's lock
+// and bridge.yaml's, just before the save. A choice that waits for the file's
+// lock behind another writer while the DAC it names is swapped is refused as
+// stale once its turn comes, and writes nothing.
+func TestADACChoiceIsCheckedAgainWhenItsTurnComes(t *testing.T) {
+	srv, fake, cfgPath := newPlayerTestServer(t)
+	want := readFileOrNil(cfgPath)
+	held, err := config.LockFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var release sync.Once
+	defer release.Do(held.Unlock)
+	waited, stop := config.LockWaitedForTest(cfgPath)
+	defer stop()
+	type answer struct {
+		code int
+		body string
+	}
+	done := make(chan answer, 1)
+	h := srv.Handler()
+	go func() {
+		code, body := playerRequest(t, h, http.MethodPost, "/api/output/player/dac", `{"selection":"tok-5","binding":"port"}`, nil)
+		done <- answer{code, body}
+	}()
+	select {
+	case <-waited:
+	case a := <-done:
+		t.Fatalf("the choice answered without waiting for the file's lock: %d %s", a.code, a.body)
+	case <-playerGiveUp(t):
+		t.Fatal("the choice never waited for the file's lock")
+	}
+	// Another unit takes the card's place while the choice waits.
+	fake.answerChosen(fmt.Errorf("%w: card 5 is another DAC now", ErrPlayerSelectionStale))
+	release.Do(held.Unlock)
+	var a answer
+	select {
+	case a = <-done:
+	case <-playerGiveUp(t):
+		t.Fatal("the choice never answered once the file's lock was free")
+	}
+	if a.code != http.StatusConflict || errorCode(a.body) != "stale_selection" {
+		t.Fatalf("a choice whose DAC was swapped while it waited = %d: %s; want 409 stale_selection", a.code, a.body)
+	}
+	unchangedConfig(t, srv, cfgPath, want, config.PlayerConfig{}, "the choice of a swapped DAC")
 }
 
 // TestAStaleOrRefusedDACChoiceWritesNothing pins the choice's refusals: a

@@ -72,7 +72,9 @@ type PlayerOutput interface {
 	// be the same unit at the same enumeration, and the binding the one the
 	// list offered. A stale token is ErrPlayerSelectionStale, a binding that
 	// would not resolve to the card now ErrPlayerBindingRefused, and a box
-	// that could not be read whole ErrPlayerBoxUnread.
+	// that could not be read whole ErrPlayerBoxUnread. The DAC route asks it
+	// in the config's turn, just before the save, so its reading must be
+	// bounded.
 	Chosen(ctx context.Context, selection, kind string) (config.PlayerDevice, error)
 	// SameBinding reports whether two bindings name the same thing, so a
 	// choice of what the config names already writes nothing.
@@ -526,24 +528,6 @@ func (s *Server) apiPlayerOutputDAC(w http.ResponseWriter, r *http.Request) {
 		writeError(w, why.status, why.code, why.msg)
 		return
 	}
-	// The fresh reading comes before the console's lock: it is bounded, and
-	// no other write need wait for the box.
-	dev, err := s.deps.PlayerOutput.Chosen(r.Context(), req.Selection, req.Binding)
-	switch {
-	case errors.Is(err, ErrPlayerSelectionStale):
-		writeError(w, http.StatusConflict, "stale_selection", err.Error()+": list the DACs again, and choose")
-		return
-	case errors.Is(err, ErrPlayerBindingRefused):
-		writeError(w, http.StatusConflict, "binding_refused", err.Error())
-		return
-	case errors.Is(err, ErrPlayerBoxUnread):
-		writeError(w, http.StatusServiceUnavailable, "box_unread", err.Error())
-		return
-	case err != nil:
-		logger.Error("player page: a DAC choice failed", "err", err)
-		writeError(w, http.StatusInternalServerError, "internal", errMsgInternal)
-		return
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	before := s.deps.CfgHolder.Load()
@@ -551,14 +535,23 @@ func (s *Server) apiPlayerOutputDAC(w http.ResponseWriter, r *http.Request) {
 		writeError(w, why.status, why.code, why.msg)
 		return
 	}
-	if s.deps.PlayerOutput.SameBinding(before.Output.Player.Device, dev) {
-		writeJSON(w, http.StatusOK, playerChangeResponse{Status: string(applyUnchanged), Player: s.playerStatus(r.Context(), before)})
-		return
-	}
+	// The choice is checked against the box in the config's turn, under the
+	// console's lock and bridge.yaml's, just before the save. Checked before
+	// the locks, it went stale while the write waited for them, and a port or
+	// model binding then named whatever unit took the chosen one's place. The
+	// reading is the provider's, bounded, and the one wait the turn holds the
+	// file's lock across.
 	var sounding bool
-	err = s.deps.CfgHolder.UpdateChecked(s.deps.CfgPath, func(next *config.Config, _ func() error) error {
+	err := s.deps.CfgHolder.UpdateChecked(s.deps.CfgPath, func(next *config.Config, _ func() error) error {
 		if why := s.playerRefusal(next, managedPlayerDevice); why != nil {
 			return why
+		}
+		dev, err := s.deps.PlayerOutput.Chosen(r.Context(), req.Selection, req.Binding)
+		if err != nil {
+			return playerChoiceRefusal(err)
+		}
+		if s.deps.PlayerOutput.SameBinding(next.Output.Player.Device, dev) {
+			return errPlayerUnchanged
 		}
 		next.Output.Player.Device = dev
 		if err := validatePlayerClone(next); err != nil {
@@ -567,11 +560,35 @@ func (s *Server) apiPlayerOutputDAC(w http.ResponseWriter, r *http.Request) {
 		sounding = s.deps.PlayerOutput.Sounding()
 		return nil
 	})
-	if err != nil {
+	switch {
+	case errors.Is(err, errPlayerUnchanged):
+		writeJSON(w, http.StatusOK, playerChangeResponse{Status: string(applyUnchanged), Player: s.playerStatus(r.Context(), before)})
+		return
+	case err != nil:
 		writeCfgUpdateErr(w, err)
 		return
 	}
 	s.writePlayerChange(w, r, before, sounding)
+}
+
+// errPlayerUnchanged ends a DAC choice's turn with nothing saved: the config
+// names the chosen binding already.
+var errPlayerUnchanged = errors.New("the config names that DAC already")
+
+// playerChoiceRefusal is the answer to a choice the provider refused: a stale
+// selection, a binding that would not name the card now, a box that could not
+// be read, each with its code; anything else is logged, and internal.
+func playerChoiceRefusal(err error) *cfgAbort {
+	switch {
+	case errors.Is(err, ErrPlayerSelectionStale):
+		return &cfgAbort{status: http.StatusConflict, code: "stale_selection", msg: err.Error() + ": list the DACs again, and choose"}
+	case errors.Is(err, ErrPlayerBindingRefused):
+		return &cfgAbort{status: http.StatusConflict, code: "binding_refused", msg: err.Error()}
+	case errors.Is(err, ErrPlayerBoxUnread):
+		return &cfgAbort{status: http.StatusServiceUnavailable, code: "box_unread", msg: err.Error()}
+	}
+	logger.Error("player page: a DAC choice failed", "err", err)
+	return &cfgAbort{status: http.StatusInternalServerError, code: "internal", msg: errMsgInternal}
 }
 
 // validatePlayerClone is the last check of a write's clone: the player block
