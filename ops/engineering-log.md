@@ -66732,6 +66732,61 @@ check on the Pi.
 **Residuals.** A modified boot that keeps every fact and puts a memory
 filesystem at `/mnt/ext`; a partition 3 mounted only in another mount
 namespace beside a tmpfs `/mnt/ext`; a Volumio release that changes these
-paths, refused until taught. The rules text did not land in `.claude/` from the
-worker's sandbox, which could not write there: it is `.p2/rules-b603.patch` on
-the branch, for the orchestrator to apply.
+paths, refused until taught.
+
+## 2026-10-31 — B603 round 2: a data directory a link to nothing stands in is no directory serve makes
+
+**The finding** (CodeRabbit on #1368, Minor, verified by the orchestrator).
+Where `atomicwrite.InspectMedium` answered `fs.ErrNotExist`, the doctor's
+`player-storage` line said ok, "the data directory … does not exist yet;
+bridge serve makes it". `InspectMedium` resolves every link in the path
+(`filepath.EvalSymlinks`), so a data directory that is a symbolic link to
+nothing, or one below such a link, answers the same ENOENT. Serve cannot make
+it: `lockServeDataDir`'s `fsutil.MkdirAll` stops at the link with EEXIST
+(`os.MkdirAll` stats ENOENT, its `Mkdir` finds the link's entry, and the Lstat
+after shows a link; as root `os.Root.Mkdir` answers the same), and serve goes
+on without its lock (deliberately: a bridge whose storage cannot lock still
+starts), so planServePlayer starts no player.
+
+**The fix.** In that branch the line now judges, from the data directory up
+by `os.Lstat`, the nearest entry of its path that is there, the kernel
+resolving the entries above it: a symbolic link there whose `os.Stat` answers
+ENOENT is a fail, "the player will not start: <the link> is a symbolic link to
+nothing, and serve cannot make <dataDir> through it", hint "point the link at a
+directory, or set dataDir in bridge.yaml to one"; it names the entry of the data
+directory's own path, the head of a chain that ends in nothing included, and a
+broken link reached through a live one is found where it sits. Anything else
+there (a directory, a live link to one) leaves only the components below it to
+make, which MkdirAll makes, and stays ok, "not there yet". An Lstat or Stat on
+the way that fails for another reason than an entry's absence, and every
+inspection error, is not checked, a warn, never ok, its summary naming the data
+directory beside the error (EvalSymlinks answers an entry on the way that is no
+directory with a bare ENOTDIR that names none): a permission error keeps the
+service user's advice; a link cycle (EvalSymlinks' "too many links") or a
+non-directory on the way gets the path's ("mend what the error names on the way
+to the data directory, or set dataDir in bridge.yaml to a directory serve can
+make or use").
+
+**Red first.** The cases (`cmd/bridge/doctor_player_storage_unix_test.go`, the
+real inspector) went in first (80b4548d): the data directory a link to nothing,
+an ancestor one, one reached through a live link, and the head of a chain read
+ok and failed; a live link with the data directory below it not made yet read ok
+and passed; the premise, `lockServeDataDir` failing with an error matching
+`fs.ErrExist` on both layouts and making the directory through a live link,
+passed; a link cycle and a regular-file ancestor were a warn with the service
+user's advice and failed on the advice; an injected ENOENT beside an ancestor
+this user cannot search read ok and failed. The table's mocked ENOENT case moved
+from the host's `/data` to a path under `t.TempDir()`. All pass from 2ceba8ea.
+
+**Controls**, on 2ceba8ea, predicted, compiled, restored from git: R2-C1, the
+inspection's ENOENT straight to ok again, turned red exactly the four
+link-to-nothing cases and the walk's permission case, the live link and the
+premise green; R2-C2, the service user's advice on every not-checked line,
+turned red exactly the cycle and the regular-file cases.
+
+**Not changed.** Serve itself, which goes on after a lock error that is not
+contention on purpose (`serve_lock.go`, `serve_data_dir_lock_test.go`): telling
+"cannot make the data directory" from "cannot lock it" there is a follow-up.
+The rules line in `cli-serve.md` and its long form change with this round: the
+line is in `.p2/rules-b603r2.patch` until the orchestrator applies it, and the
+long form in `ops/History-rules-cli-serve.md`, B603 round 2.
