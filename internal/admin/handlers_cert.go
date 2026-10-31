@@ -22,6 +22,16 @@ const (
 	errMsgCertificateNotRead = "the bridge could not read its TLS certificate, and the bridge's log says why"
 )
 
+// certInspectRefusal is what the console says of err, a certificate that
+// could not be read: a permission it lacks, or, for anything else, read the
+// log.
+func certInspectRefusal(err error) string {
+	if errors.Is(err, fs.ErrPermission) {
+		return errMsgCertificateNotPermitted
+	}
+	return errMsgCertificateNotRead
+}
+
 // apiCertInfo: GET /api/cert
 //
 // Surfaces the live TLS cert's metadata so the dashboard can render
@@ -52,11 +62,7 @@ func (s *Server) apiCertInfo(w http.ResponseWriter, r *http.Request) {
 	info, err := servertls.Inspect(certPath)
 	if err != nil {
 		logger.Error("admin: the TLS certificate could not be read", "err", err)
-		msg := errMsgCertificateNotRead
-		if errors.Is(err, fs.ErrPermission) {
-			msg = errMsgCertificateNotPermitted
-		}
-		writeError(w, http.StatusInternalServerError, "inspect-failed", msg)
+		writeError(w, http.StatusInternalServerError, "inspect-failed", certInspectRefusal(err))
 		return
 	}
 	writeJSON(w, http.StatusOK, info)
