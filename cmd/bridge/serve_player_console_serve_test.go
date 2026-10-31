@@ -14,6 +14,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/library"
+	"github.com/acoseac/1-bit-bridge/internal/supervision"
 	"github.com/acoseac/1-bit-bridge/internal/usbid"
 )
 
@@ -304,6 +305,45 @@ func TestTheConsoleTurnsAPlayerOnForTheNextStart(t *testing.T) {
 	}
 	next := bootPlayerServeAt(t, playerServeCase{keep: true, standIn: newPlayerStandIn()}, filepath.Dir(cs.configPath), cs.music, cs.dataDir)
 	next.runningEngine(t)
+	if code := next.stopServe(t); code != 0 {
+		t.Fatalf("exit %d; stderr=%s", code, next.stderr.String())
+	}
+}
+
+// TestARestartFromThePageWhilePlayingComesBackStopped: the page's restart is
+// the console's own (POST /api/restart). Asked while the player plays, it
+// stops the player with the rest of serve, which exits to be started again
+// (supervision.RestartExitCode); the next serve of that data directory starts
+// the player with its queue, stopped, playing nothing once its output is
+// back, as the page's note says.
+func TestARestartFromThePageWhilePlayingComesBackStopped(t *testing.T) {
+	needsDirectorySync(t)
+	persistentMedium(t)
+	cs := bootConsoleServe(t, playerServeCase{player: goBarPlayer, standIn: newPlayerStandIn()})
+	eng := cs.runningEngine(t)
+	availableOutput(t, eng)
+	id := queue(t, eng, 0, someReference(t, "0123456789abcdef"))
+	if err := eng.Play(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	awaitEngine(t, eng, "playing", func(s *engine.Snapshot) bool { return s.State() == engine.Playing })
+	if code, body := cs.call(t, http.MethodPost, "/api/restart", "", nil); code != http.StatusAccepted || !strings.Contains(body, `"restarting":true`) {
+		t.Fatalf("POST /api/restart while playing = %d: %s; want 202 restarting", code, body)
+	}
+	select {
+	case code := <-cs.done:
+		if code != supervision.RestartExitCode {
+			t.Fatalf("serve exited %d after the page's restart, want %d; stderr=%s", code, supervision.RestartExitCode, cs.stderr.String())
+		}
+	case <-serveGiveUp(t):
+		t.Fatalf("serve did not return after the page's restart; stderr=%s\nserve's goroutines:\n%s", cs.stderr.String(), serveStacks())
+	}
+	next := bootPlayerServeAt(t, playerServeCase{keep: true, standIn: newPlayerStandIn()}, filepath.Dir(cs.configPath), cs.music, cs.dataDir)
+	eng = next.runningEngine(t)
+	availableOutput(t, eng)
+	if s := eng.Snapshot(); s.State() != engine.Stopped || s.Len() != 1 || s.IDs()[0] != id {
+		t.Errorf("the player after the restart: %s with %v queued, want stopped with entry %d", s.State(), s.IDs(), id)
+	}
 	if code := next.stopServe(t); code != 0 {
 		t.Fatalf("exit %d; stderr=%s", code, next.stderr.String())
 	}
