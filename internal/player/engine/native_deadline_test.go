@@ -143,8 +143,8 @@ func TestNativePausedTransitionRearmsDeadline(t *testing.T) {
 						_, overdue := sn.ReleaseUnconfirmed()
 						return overdue || sn.State() != Paused
 					})
-					if info, _ := sn.ReleaseUnconfirmed(); info.Session != s.id || !info.Paused || sn.State() != Paused || sn.LastStop().Reason != "" {
-						t.Fatalf("at the effective deadline: %s, unconfirmed %+v, last stop %+v; want session %d's own release of its pause unconfirmed, still paused, nothing stopped", sn.State(), info, sn.LastStop(), s.id)
+					if info, ok := sn.ReleaseUnconfirmed(); !ok || info.Session != s.id || !info.Paused || sn.State() != Paused || sn.LastStop().Reason != "" {
+						t.Fatalf("at the effective deadline: %s, unconfirmed (ok=%t) %+v, last stop %+v; want session %d's own release of its pause unconfirmed, still paused, nothing stopped", sn.State(), ok, info, sn.LastStop(), s.id)
 					}
 				})
 			}
