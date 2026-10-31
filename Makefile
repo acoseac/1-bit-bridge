@@ -95,9 +95,10 @@ measure-dsd:
 # (sh, dash, bash --posix, busybox sh, ksh), or the INSTALLER_SHELLS named,
 # comma separated, each then required; make test runs them under sh alone.
 # installer-check lints the installer, its stamp and the tests' stubs with
-# shellcheck first, and fails without shellcheck rather than pass unlinted.
-# CI's installer job runs installer-check on Linux with shellcheck, dash and
-# busybox installed.
+# shellcheck first, and fails without shellcheck rather than pass unlinted:
+# on a host without it, run installer-test for the tests alone, and report
+# the lint as not run. CI's installer job runs installer-check on Linux with
+# shellcheck, dash, busybox and ksh installed.
 INSTALLER_SHELLS ?= all
 
 installer-test:
@@ -105,7 +106,7 @@ installer-test:
 
 installer-check:
 	@command -v shellcheck >/dev/null 2>&1 || { echo "installer-check: shellcheck is required and not installed (apt install shellcheck)" >&2; exit 1; }
-	shellcheck -s sh scripts/install.sh scripts/stamp-install.sh scripts/install-test/testdata/bridge scripts/install-test/testdata/bin/*
+	shellcheck -s sh scripts/install.sh scripts/stamp-install.sh scripts/install-test/testdata/bridge scripts/install-test/testdata/argv scripts/install-test/testdata/bin/*
 	$(MAKE) installer-test
 
 # Per-change gate: format + vet + race tests, WITHOUT the 6-target

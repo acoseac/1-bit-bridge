@@ -4,6 +4,16 @@
 # release the running bridge serves, read from the unit's ExecStart program
 # whenever the service starts.
 #
+# cat prints the bridge's unit as systemctl cat prints it, from the
+# directories a user manager reads units from, in their order (each under
+# BRIDGE_INSTALL_TEST_SYSROOT but HOME's): a transient unit in the runtime
+# directory, ~/.config/systemd/user, /etc/systemd/user and
+# /usr/lib/systemd/user. The first that has the unit file gives it, and each
+# gives its drop-ins, the unit's own (<unit>.d/*.conf) and those for every
+# service (service.d/*.conf). STUB_CAT_FAILS makes it fail as a manager that
+# does not answer. show-environment prints STUB_MANAGER_ENV too: lines the
+# manager gives every service of the user.
+#
 # STUB_NO_BUS makes the user bus unreachable, unless lingering started the
 # user manager (STUB_STATE/bus-up) or XDG_RUNTIME_DIR is STUB_BUS_RUNTIME.
 # STUB_RESTART_FAILS fails a restart; STUB_SERVICE_FAILS makes the service
@@ -51,6 +61,50 @@ start_unit() {
 	"$bin" version | sed -n 's/^1-bit-bridge \([^ ]*\).*/\1/p' >"$state/served"
 }
 
+shown=0
+
+# show_file prints a file as systemctl cat does: its path in a comment, a
+# blank line before every file but the first, then the file as it is.
+show_file() {
+	if [ "$shown" -gt 0 ]; then
+		echo
+	fi
+	printf '# %s\n' "$1"
+	cat "$1"
+	shown=$((shown + 1))
+}
+
+cat_unit() {
+	if [ "${1:-}" != "$UNIT" ]; then
+		printf 'No files found for %s.\n' "${1:-}" >&2
+		return 1
+	fi
+	if [ -n "${STUB_CAT_FAILS:-}" ]; then
+		echo 'Failed to get unit file paths: Connection timed out' >&2
+		return 1
+	fi
+	root=${BRIDGE_INSTALL_TEST_SYSROOT:-}
+	set -- "$root/run/user/${STUB_UID:-1000}/systemd/transient" "$HOME/.config/systemd/user" \
+		"$root/etc/systemd/user" "$root/usr/lib/systemd/user"
+	for dir in "$@"; do
+		if [ -f "$dir/$UNIT" ]; then
+			show_file "$dir/$UNIT"
+			break
+		fi
+	done
+	for dir in "$@"; do
+		for dropin in "$dir/service.d"/*.conf "$dir/$UNIT.d"/*.conf; do
+			if [ -f "$dropin" ]; then
+				show_file "$dropin"
+			fi
+		done
+	done
+	if [ "$shown" = 0 ]; then
+		printf 'No files found for %s.\n' "$UNIT" >&2
+		return 1
+	fi
+}
+
 if ! bus_up; then
 	echo 'Failed to connect to bus: No medium found' >&2
 	exit 1
@@ -59,6 +113,12 @@ fi
 case ${1:-} in
 show-environment)
 	printf 'HOME=%s\n' "$HOME"
+	if [ -n "${STUB_MANAGER_ENV:-}" ]; then
+		printf '%s\n' "$STUB_MANAGER_ENV"
+	fi
+	;;
+cat)
+	cat_unit "${2:-}" || exit 1
 	;;
 daemon-reload) ;;
 enable)

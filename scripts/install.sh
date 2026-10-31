@@ -5,15 +5,18 @@
 #   curl -fsSL https://1-bit.app/install.sh | sh
 #   curl -fsSL https://1-bit.app/install.sh | sh -s -- --library /mnt/USB
 #
-# Run it as the user the bridge should run as, not as root. On a new box it
-# downloads the release it came with, checks the archive's SHA-256 against the
-# release's checksums.txt, installs the program as ~/.local/bin/bridge, and runs
+# Run it as the user the bridge should run as, not as root. On a box with
+# nothing of the bridge on it, it downloads the release it came with (with
+# curl, held to HTTPS), checks the archive's SHA-256 against the release's
+# checksums.txt, installs the program as ~/.local/bin/bridge, and runs
 # `bridge init`, which writes the settings and installs the per-user systemd
 # service; it asks for sudo once, and says why first, to turn on lingering so
 # the service outlives the login and starts at boot. On a box where the bridge
 # is installed as that service, it upgrades it through the bridge's own
 # `bridge update`, which checks the paired devices first and keeps the
-# previous program for a rollback. `--help` lists the options and exit codes.
+# previous program for a rollback. Anything else it refuses, with nothing
+# changed, saying what to do instead. `--help` lists the options and exit
+# codes.
 #
 # The script is function definitions and, last, one compound command. A
 # download cut short anywhere before that command's closing brace is a syntax
@@ -30,9 +33,6 @@ constants() {
 	STAMPED_VERSION=''
 	REPO_URL='https://github.com/acoseac/1-bit-bridge'
 	UNIT_NAME='com.acoseac.1-bit-bridge.service'
-	# Every bridge binary carries its module path; checked before this
-	# installer replaces a file it did not place itself.
-	MODULE_PATH='github.com/acoseac/1-bit-bridge'
 	DOWNLOAD_BASE=${BRIDGE_INSTALL_BASE_URL:-$REPO_URL/releases/download}
 	SYSROOT=${BRIDGE_INSTALL_TEST_SYSROOT:-}
 	TTY_DEVICE=${BRIDGE_INSTALL_TEST_TTY:-/dev/tty}
@@ -71,11 +71,12 @@ Run it as that user, not as root.
 
 Options:
   --library PATH   the music folder to serve; without it, the installer asks
-                   when there is a terminal, and leaves setup to you otherwise
+                   when there is a terminal, and refuses otherwise
   --version X.Y.Z  install that release; this copy installs $(stamp_text).
                    A new install only: an installed bridge moves to the latest
                    release through bridge update
-  --no-init        install or upgrade the program only, and set nothing up
+  --no-init        install the program only, and set nothing up; a new
+                   install only
   --uninstall      print the commands that remove the bridge; changes nothing
   -h, --help       this text
 
@@ -83,9 +84,9 @@ Exit codes:
   0  done
   1  a step failed or was stopped; what it changed, if anything, is said
   2  a usage error
-  3  refused, with nothing changed: this system, this user or the install on
-     it is not one this installer handles, and it says what to do instead
-  4  installed, but not set up; the command that finishes it is printed
+  3  refused, with nothing changed: it says why, and what to do instead
+  4  incomplete: the program is installed, but not set up, or its service
+     was not seen serving the release; what to run next is printed
 EOF
 }
 
@@ -423,8 +424,10 @@ check_storage() {
 
 # read_unit FILE reads the binary and the config the service runs from its
 # ExecStart line, which bridge init writes as ExecStart="<binary>" serve
-# --config "<config>". Any other shape (an edit, a drop-in that sets
-# ExecStart, a path that needed escaping) fails, with UNIT_PROBLEM saying why.
+# --config "<config>". Any other shape (an edit, a path that needed
+# escaping) fails, with UNIT_PROBLEM saying why. What the service manager
+# runs besides the file, its drop-ins wherever they are, is
+# check_installed_unit's to read, from the manager.
 read_unit() {
 	ru_file=$1
 	INSTALLED_BIN=''
@@ -454,45 +457,171 @@ read_unit() {
 		return 1
 		;;
 	esac
-	if [ -d "$ru_file.d" ] && grep -qs '^ExecStart' "$ru_file.d"/*.conf; then
-		UNIT_PROBLEM="A drop-in in $ru_file.d sets the service's ExecStart."
-		return 1
-	fi
 	return 0
 }
 
-# detect_install decides, before anything changes, whether this box has the
-# bridge installed as this user's service (an upgrade), nothing of it (a new
-# install), or a layout this installer does not manage (refused).
+user_bus_ok() {
+	systemctl --user show-environment >/dev/null 2>&1
+}
+
+# find_user_bus makes sure systemctl --user reaches this user's service
+# manager, changing nothing on the box: through the runtime directory when
+# the session did not say where it is (su, a script). It fails when there is
+# none to reach.
+find_user_bus() {
+	if user_bus_ok; then
+		return 0
+	fi
+	fb_runtime=$SYSROOT/run/user/$USER_ID
+	if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -S "$fb_runtime/bus" ]; then
+		XDG_RUNTIME_DIR=$fb_runtime
+		export XDG_RUNTIME_DIR
+		if user_bus_ok; then
+			return 0
+		fi
+	fi
+	return 1
+}
+
+# inspect_unit asks this user's service manager for the bridge's unit as it
+# runs it, wherever its files are (systemctl --user cat): UNIT_TEXT is what
+# the manager prints, every file under a comment naming it, and UNIT_FILES
+# those files, the unit file first and then its drop-ins; both are empty
+# when the manager has no file of it at all. A manager that cannot say is a
+# refusal: what is installed cannot be told.
+inspect_unit() {
+	iu_status=0
+	UNIT_TEXT=$(systemctl --user cat "$UNIT_NAME" 2>&1) || iu_status=$?
+	if [ "$iu_status" != 0 ]; then
+		case $UNIT_TEXT in
+		*'No files found for '*)
+			UNIT_TEXT=''
+			UNIT_FILES=''
+			return 0
+			;;
+		esac
+		leave 3 "Asking $USER_NAME's service manager for the bridge's unit failed (systemctl --user cat $UNIT_NAME, exit $iu_status):" \
+			"$(printf '%s\n' "$UNIT_TEXT" | head -n 1)" \
+			"so this installer cannot tell how the bridge is installed here. Nothing was changed."
+	fi
+	UNIT_FILES=$(printf '%s\n' "$UNIT_TEXT" | sed -n 's|^# \(/.*\)$|\1|p')
+}
+
+# unit_keys KEYS reads systemctl cat's output and prints each line of it
+# that sets one of KEYS (an ERE alternation, such as
+# Environment|EnvironmentFile) as the key and the file it is in: never its
+# value, which can be a password.
+unit_keys() {
+	awk -v keys="^[ \t]*($1)[ \t]*=" '
+		/^# \// { file = substr($0, 3); next }
+		$0 ~ keys {
+			key = $0
+			sub(/^[ \t]*/, "", key)
+			sub(/[ \t]*=.*/, "", key)
+			print "  " key ", in " file
+		}
+	'
+}
+
+# check_installed_unit takes the unit at UNIT_FILE for an install only when
+# it is the one bridge init writes, the manager runs it as it is, and the
+# program and the settings it names are there: the unit file is the one the
+# manager reads, nothing besides its own line sets its ExecStart, and
+# nothing gives the service an environment of its own (Environment=,
+# EnvironmentFile=, PassEnvironment=, UnsetEnvironment=), which bridge
+# update, run from here, would not have: the bridge takes a BRIDGE_ variable
+# over its settings. And the program's directory must be one its user can
+# write, as bridge update needs. Anything else is refused.
+check_installed_unit() {
+	read_unit "$UNIT_FILE" || leave 3 "The bridge's service is installed, but $UNIT_PROBLEM" \
+		"Update the bridge with bridge update instead. Nothing was changed."
+	ci_first=$(printf '%s\n' "$UNIT_FILES" | head -n 1)
+	if [ -z "$ci_first" ]; then
+		leave 3 "$USER_NAME's service manager finds no file of the bridge's unit, though $UNIT_FILE is there." \
+			"Run systemctl --user daemon-reload, then this again. Nothing was changed."
+	fi
+	ci_real=$(readlink -f "$UNIT_FILE" 2>/dev/null) || ci_real=''
+	if [ "$ci_first" != "$UNIT_FILE" ] && [ "$ci_first" != "$ci_real" ]; then
+		leave 3 "$USER_NAME's service manager runs the bridge's service from $ci_first, not from $UNIT_FILE, which bridge init wrote:" \
+			"this installer does not manage that unit. Nothing was changed."
+	fi
+	ci_execs=$(printf '%s\n' "$UNIT_TEXT" | unit_keys ExecStart)
+	if [ "$(printf '%s\n' "$ci_execs" | awk 'NF { n++ } END { print n + 0 }')" != 1 ]; then
+		leave 3 "The bridge's service sets its ExecStart more than once, so this installer cannot tell which program it runs:" \
+			"$ci_execs" "Update the bridge with bridge update instead. Nothing was changed."
+	fi
+	ci_env=$(printf '%s\n' "$UNIT_TEXT" | unit_keys 'Environment|EnvironmentFile|PassEnvironment|UnsetEnvironment')
+	if [ -n "$ci_env" ]; then
+		leave 3 "The bridge's service sets an environment of its own, which bridge update, run from here, would not have" \
+			"(the bridge takes a BRIDGE_ variable over its settings):" "$ci_env" \
+			"bridge init writes no such line. Update the bridge with its own bridge update, in that environment," \
+			"or remove those lines (systemctl --user edit $UNIT_NAME) and run this again. Nothing was changed."
+	fi
+	if [ ! -f "$INSTALLED_BIN" ] || [ ! -x "$INSTALLED_BIN" ]; then
+		leave 3 "The bridge's service runs $INSTALLED_BIN, which is not there." \
+			"Run bridge init again with the program you want it to run (it keeps the settings). Nothing was changed."
+	fi
+	if [ ! -f "$INSTALLED_CONFIG" ]; then
+		leave 3 "The bridge's service reads $INSTALLED_CONFIG, which is not there. Run bridge init again. Nothing was changed."
+	fi
+	ci_bin_real=$(readlink -f "$INSTALLED_BIN" 2>/dev/null) || ci_bin_real=''
+	[ -n "$ci_bin_real" ] || ci_bin_real=$INSTALLED_BIN
+	ci_dir=$(dirname "$ci_bin_real")
+	if [ ! -w "$ci_dir" ]; then
+		leave 3 "The bridge's service runs $ci_bin_real, in $ci_dir, where $USER_NAME cannot write:" \
+			"neither this installer nor bridge update can replace it there." \
+			"Copy it to $BIN_DIR and run bridge init again from there (it keeps the settings), then run this again. Nothing was changed."
+	fi
+}
+
+# detect_install decides, before anything changes, what this box has: the
+# bridge installed as this user's service, as bridge init installs it (an
+# upgrade), or nothing of the bridge at all (a new install). Anything else is
+# refused: a system service; a unit the user's service manager has from
+# files bridge init did not write, or runs otherwise than init wrote it
+# (check_installed_unit); settings no service runs; or anything at
+# ~/.local/bin/bridge that no such service runs, which only that program's
+# own bridge update may replace. On a box that runs systemd the manager is
+# asked first, and must answer.
 detect_install() {
 	INSTALL_STATE=fresh
-	REPLACING=0
+	SYSTEMD=0
+	UNIT_TEXT=''
+	UNIT_FILES=''
 	for di_unit in "$SYSROOT"/etc/systemd/system/*1-bit-bridge*.service "$SYSROOT"/etc/systemd/system/bridge@.service; do
 		if [ -e "$di_unit" ] || [ -L "$di_unit" ]; then
 			leave 3 "This box runs the bridge as a system service ($di_unit), which this installer does not manage." \
 				"Update that install the way it was set up (bridge update, run as that service's user). Nothing was changed."
 		fi
 	done
+	di_local=0
 	if [ -e "$UNIT_FILE" ] || [ -L "$UNIT_FILE" ]; then
-		read_unit "$UNIT_FILE" || leave 3 "The bridge's service is installed, but $UNIT_PROBLEM" \
-			"Update the bridge with bridge update instead. Nothing was changed."
-		if [ ! -f "$INSTALLED_BIN" ] || [ ! -x "$INSTALLED_BIN" ]; then
-			leave 3 "The bridge's service runs $INSTALLED_BIN, which is not there." \
-				"Run bridge init again with the program you want it to run (it keeps the settings). Nothing was changed."
+		di_local=1
+	fi
+	if [ -d "$SYSROOT/run/systemd/system" ]; then
+		SYSTEMD=1
+		if ! find_user_bus; then
+			leave 3 "There is no systemd user session for $USER_NAME here (systemctl --user does not reach $USER_NAME's service manager)," \
+				"so this installer can neither see what is installed as $USER_NAME's service nor install it." \
+				"Log in as $USER_NAME over SSH or at the console (not with su or sudo), and run this again;" \
+				"or first turn lingering on, which starts that manager, as root:" \
+				"    $(command_line loginctl enable-linger "$USER_NAME")" \
+				"Nothing was changed."
 		fi
-		if [ ! -f "$INSTALLED_CONFIG" ]; then
-			leave 3 "The bridge's service reads $INSTALLED_CONFIG, which is not there. Run bridge init again. Nothing was changed."
-		fi
-		di_real=$(readlink -f "$INSTALLED_BIN" 2>/dev/null) || di_real=''
-		[ -n "$di_real" ] || di_real=$INSTALLED_BIN
-		di_dir=$(dirname "$di_real")
-		if [ ! -w "$di_dir" ]; then
-			leave 3 "The bridge's service runs $di_real, in $di_dir, where $USER_NAME cannot write:" \
-				"neither this installer nor bridge update can replace it there." \
-				"Copy it to $BIN_DIR and run bridge init again from there (it keeps the settings), then run this again. Nothing was changed."
-		fi
+		inspect_unit
+	elif [ "$di_local" = 1 ]; then
+		leave 3 "The bridge's service unit is at $UNIT_FILE, but this system is not running systemd," \
+			"so this installer can neither ask how it runs nor restart it. Nothing was changed."
+	fi
+	if [ "$di_local" = 1 ]; then
+		check_installed_unit
 		INSTALL_STATE=upgrade
 		return 0
+	fi
+	if [ -n "$UNIT_FILES" ] || [ -n "$UNIT_TEXT" ]; then
+		leave 3 "$USER_NAME's service manager has the bridge's unit, $UNIT_NAME, from files bridge init did not write:" \
+			"$(printf '%s\n' "${UNIT_FILES:-$UNIT_TEXT}" | sed 's/^/  /')" \
+			"bridge init writes it at $UNIT_FILE alone. Update that install the way it was set up (bridge update). Nothing was changed."
 	fi
 	if [ -e "$CONFIG_FILE" ]; then
 		leave 3 "Found the bridge's settings at $CONFIG_FILE, but no service runs them, so this installer cannot tell which bridge program you use." \
@@ -501,10 +630,39 @@ detect_install() {
 			"For a new install, move $CONFIG_DIR aside first. Nothing was changed."
 	fi
 	if [ -e "$TARGET" ] || [ -L "$TARGET" ]; then
-		if [ -L "$TARGET" ] || [ ! -f "$TARGET" ] || ! grep -q "$MODULE_PATH" "$TARGET" 2>/dev/null; then
-			leave 3 "$TARGET is there, and it is not the 1-bit bridge: move it aside and run this again. Nothing was changed."
-		fi
-		REPLACING=1
+		leave 3 "$TARGET is there, and the bridge is not installed as $USER_NAME's service (there is no $UNIT_FILE)," \
+			"so this installer cannot tell what runs it, and does not replace it: only a bridge's own bridge update does." \
+			"If it is a bridge you run yourself, update it with (add --config and its settings file, when they are not in $CONFIG_DIR):" \
+			"    $(bridge_line "$TARGET" update --config "$CONFIG_FILE")" \
+			"or make it your service, with:" \
+			"    $(bridge_line "$TARGET" init)" \
+			"If it is something else, move it aside and run this again. Nothing was changed."
+	fi
+}
+
+# check_environment refuses, before anything changes, a run whose bridge
+# would read other settings than the service does. The bridge takes a
+# BRIDGE_ variable over its bridge.yaml, --config or not, and bridge init,
+# bridge update and bridge status, run here, take this shell's, where the
+# service takes its manager's: so a BRIDGE_ variable this shell exports, or
+# one the manager gives every service of this user, is refused, by its name,
+# never its value. env prints a value's newlines as they are, so a value
+# holding a line that starts BRIDGE_ reads as a variable too: a refusal,
+# never a miss. BRIDGE_INSTALL_* are this installer's own, and the bridge
+# reads none of them.
+check_environment() {
+	ce_here=$(env | sed -n -e '/^BRIDGE_INSTALL_/d' -e 's/^\(BRIDGE_[A-Za-z0-9_]*\)=.*/\1/p' | sort -u | tr '\n' ' ')
+	if [ -n "$ce_here" ]; then
+		leave 3 "This shell exports ${ce_here% }, which the bridge's service would not have: the bridge takes a BRIDGE_ variable over its settings," \
+			"so what this installer runs would read other settings than the service does." \
+			"Run it again from a shell without them (unset ${ce_here% }). Nothing was changed."
+	fi
+	ce_manager=$(systemctl --user show-environment 2>/dev/null | sed -n -e '/^BRIDGE_INSTALL_/d' -e 's/^\(BRIDGE_[A-Za-z0-9_]*\)=.*/\1/p' | sort -u | tr '\n' ' ')
+	if [ -n "$ce_manager" ]; then
+		leave 3 "$USER_NAME's service manager gives every service of $USER_NAME ${ce_manager% } (systemctl --user show-environment)," \
+			"which bridge init and bridge update, run from here, would not have: the service would read other settings than they do." \
+			"Take it out (systemctl --user unset-environment, and where it is set, such as ~/.config/environment.d), then run this again." \
+			"Nothing was changed."
 	fi
 }
 
@@ -527,41 +685,34 @@ make_temp_dir() {
 		leave 1 "Could not create a temporary directory in ${TMPDIR:-/tmp}. Nothing was changed."
 }
 
-# check_tools finds the downloader and the hash tool, refusing before any
-# download when one is missing.
+# check_tools makes sure of the tools the download needs, refusing before
+# any download when one is missing. curl alone downloads, held to HTTPS
+# through every redirect (fetch): GNU wget follows a redirect from HTTPS to
+# plain HTTP, and BusyBox's does not check the server's certificate, so
+# wget is never used in curl's place.
 check_tools() {
 	ct_missing=''
-	ct_note=''
 	command -v tar >/dev/null 2>&1 || ct_missing="$ct_missing tar"
-	if command -v curl >/dev/null 2>&1; then
-		DOWNLOADER=curl
-	elif command -v wget >/dev/null 2>&1 && ! wget --help 2>&1 | grep -qi busybox; then
-		DOWNLOADER=wget
-	else
-		ct_missing="$ct_missing curl"
-		if command -v wget >/dev/null 2>&1; then
-			ct_note="BusyBox's wget does not check the server's certificate, so this installer does not use it."
-		fi
-	fi
+	command -v curl >/dev/null 2>&1 || ct_missing="$ct_missing curl"
 	if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
 		ct_missing="$ct_missing sha256sum"
 	fi
 	if [ -n "$ct_missing" ]; then
-		if [ -n "$ct_note" ]; then
-			warn "$ct_note"
-		fi
-		leave 3 "This installer needs:$ct_missing." \
-			"Install them (on Debian, Ubuntu and Raspberry Pi OS: sudo apt install curl coreutils tar) and run it again. Nothing was changed."
+		ct_why=''
+		case " $ct_missing " in
+		*' curl '*) ct_why=' It downloads with curl alone, which it holds to HTTPS through every redirect; wget is not used in its place.' ;;
+		esac
+		leave 3 "This installer needs:$ct_missing.$ct_why" \
+			"On Debian, Ubuntu and Raspberry Pi OS, install them with:" \
+			"    sudo apt install curl coreutils tar" \
+			"and run it again. Nothing was changed."
 	fi
 }
 
-# fetch URL FILE downloads over HTTPS only, TLS 1.2 or later.
+# fetch URL FILE downloads over HTTPS only, TLS 1.2 or later, every redirect
+# included.
 fetch() {
-	if [ "$DOWNLOADER" = curl ]; then
-		curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL --retry 3 --connect-timeout 30 -o "$2" "$1"
-	else
-		wget -q -O "$2" "$1"
-	fi
+	curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL --retry 3 --connect-timeout 30 -o "$2" "$1"
 }
 
 sha256_of() {
@@ -637,7 +788,7 @@ folder_is_empty() {
 # choose_library offers the music folders this kind of box keeps its music in
 # that are here (Volumio's and moOde's own, and ~/Music), or asks for one,
 # and sets LIBRARY to the answer. Without a terminal it asks nothing and only
-# sets FOUND_FOLDERS, for the message that says how to finish.
+# sets FOUND_FOLDERS, for the refusal that says how to give one.
 choose_library() {
 	case $DISTRO in
 	volumio) set -- /mnt/USB /mnt/NAS /data/INTERNAL ;;
@@ -760,14 +911,10 @@ download_release() {
 }
 
 # install_binary puts the program in place in one rename: it is copied beside
-# the target first, checked to run as the release it should be, then renamed
-# over it, so a running bridge keeps running and the target is never a
-# partial file.
+# the target first and checked to run as the release it should be, then
+# renamed into place, so the target is never a partial file. Nothing was at
+# the target (detect_install refuses otherwise).
 install_binary() {
-	ib_previous=''
-	if [ "$REPLACING" = 1 ]; then
-		ib_previous=$(bridge_version "$TARGET") || ib_previous=''
-	fi
 	if [ ! -d "$BIN_DIR" ]; then
 		if [ ! -d "$HOME/.local" ]; then
 			CREATED_LOCAL=$HOME/.local
@@ -786,11 +933,7 @@ install_binary() {
 	mv -f "$STAGE" "$TARGET" || leave 1 "Could not move the bridge into place at $TARGET. Nothing was installed."
 	STAGE=''
 	INSTALLED=1
-	if [ -n "$ib_previous" ]; then
-		say "Installed the bridge $VERSION at $TARGET, in place of $ib_previous."
-	else
-		say "Installed the bridge $VERSION at $TARGET."
-	fi
+	say "Installed the bridge $VERSION at $TARGET."
 }
 
 linger_on() {
@@ -806,91 +949,77 @@ safe_user_name() {
 
 # ensure_linger turns on systemd's lingering for this user, so that the user
 # manager, and the bridge's service with it, starts at boot and outlives the
-# login. It is the one step that may take root, and it says so first.
+# login. It is the one step that may take root, and it says so first. LINGER
+# is what lingering is once it has run: on (it was, or it is now), off, or
+# none where there is no loginctl to turn it on.
 ensure_linger() {
-	LINGER_NOW=0
+	LINGER=none
 	if ! command -v loginctl >/dev/null 2>&1; then
-		warn "There is no loginctl here, so the bridge stops when you log out, and starts again when you log in."
+		warn "There is no loginctl here, so this installer cannot turn lingering on, which keeps the service running after you log out."
 		return 0
 	fi
+	LINGER=on
 	if linger_on; then
 		return 0
 	fi
 	say "" "So that the bridge keeps running after you log out and starts when this box boots, systemd keeps" \
 		"$USER_NAME's services running (lingering: loginctl enable-linger $USER_NAME)."
 	if loginctl --no-ask-password enable-linger >/dev/null 2>&1 && linger_on; then
-		LINGER_NOW=1
 		say "Lingering is on for $USER_NAME."
 		return 0
 	fi
+	el_now=0
 	if command -v sudo >/dev/null 2>&1; then
 		say "That needs administrator rights: sudo runs loginctl enable-linger $USER_NAME, and may ask for your password."
 		if [ "$INTERACTIVE" = 1 ]; then
 			if sudo loginctl enable-linger "$USER_NAME" <&3 && linger_on; then
-				LINGER_NOW=1
+				el_now=1
 			fi
 		elif sudo -n loginctl enable-linger "$USER_NAME" </dev/null && linger_on; then
-			LINGER_NOW=1
+			el_now=1
 		fi
 	elif [ "$INTERACTIVE" = 1 ] && command -v su >/dev/null 2>&1 && safe_user_name; then
 		say "There is no sudo here: su runs loginctl enable-linger $USER_NAME as root, and asks for root's password."
 		if su root -c "loginctl enable-linger $USER_NAME" <&3 && linger_on; then
-			LINGER_NOW=1
+			el_now=1
 		fi
 	fi
-	if [ "$LINGER_NOW" = 1 ]; then
+	if [ "$el_now" = 1 ]; then
 		say "Lingering is on for $USER_NAME."
 		return 0
 	fi
-	warn "Lingering is not on, so the bridge stops when you log out, and starts only when you log in." \
-		"To turn it on, run as root: loginctl enable-linger $USER_NAME"
+	LINGER=off
+	warn "Lingering is not on, so the bridge stops when you log out, and starts only when you log in. To turn it on, run as root:" \
+		"    $(command_line loginctl enable-linger "$USER_NAME")"
 }
 
-user_bus_ok() {
-	systemctl --user show-environment >/dev/null 2>&1
+# say_running says what runs now and for how long: the service, and whether
+# it outlives the login and starts at boot, which is lingering's
+# (ensure_linger).
+say_running() {
+	case $LINGER in
+	on)
+		say "" "The bridge $SERVED is running as $USER_NAME's service, and starts again when this box boots."
+		;;
+	off)
+		say "" "The bridge $SERVED is running as $USER_NAME's service, until $USER_NAME's last login session on this box ends: lingering is not on," \
+			"so it stops then, and does not start when this box boots (above is how to turn it on)."
+		;;
+	*)
+		say "" "The bridge $SERVED is running as $USER_NAME's service. This box has no loginctl, so lingering is not on:" \
+			"the service may stop when you log out, and not start when this box boots."
+		;;
+	esac
 }
 
-# require_user_bus makes sure systemctl --user reaches this user's manager, as
-# bridge init's service install needs: through the runtime directory when the
-# session did not set it (su, a script), and for a moment after lingering was
-# turned on, which starts the manager.
-require_user_bus() {
-	if user_bus_ok; then
-		return 0
-	fi
-	rb_runtime=$SYSROOT/run/user/$USER_ID
-	if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -S "$rb_runtime/bus" ]; then
-		XDG_RUNTIME_DIR=$rb_runtime
-		export XDG_RUNTIME_DIR
-		if user_bus_ok; then
-			return 0
-		fi
-	fi
-	if [ "${LINGER_NOW:-0}" = 1 ]; then
-		rb_wait=0
-		while [ "$rb_wait" -lt 5 ]; do
-			rb_wait=$((rb_wait + 1))
-			sleep 1
-			if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -S "$rb_runtime/bus" ]; then
-				XDG_RUNTIME_DIR=$rb_runtime
-				export XDG_RUNTIME_DIR
-			fi
-			if user_bus_ok; then
-				return 0
-			fi
-		done
-	fi
-	return 1
-}
-
-# shown_bridge prints how to name the installed program in a command the user
-# types: plain bridge only where the PATH finds this one (on Ubuntu, bridge is
-# also iproute2's program in /usr/sbin).
+# shown_bridge prints how to name the program at BINARY in a command the user
+# types: plain bridge only where the PATH finds this one (on Ubuntu, bridge
+# is also iproute2's program in /usr/sbin), its path quoted otherwise.
 shown_bridge() {
 	if [ "$(command -v bridge 2>/dev/null)" = "$1" ]; then
 		printf 'bridge'
 	else
-		printf '%s' "$1"
+		sh_quote "$1"
 	fi
 }
 
@@ -917,8 +1046,9 @@ run_init() {
 		"$TARGET" init --yes --library "$LIBRARY" </dev/null || ri_status=$?
 	fi
 	if [ "$ri_status" != 0 ]; then
-		leave 1 "" "bridge init stopped (exit $ri_status). The bridge is installed at $TARGET; fix what init says above," \
-			"then run this installer again, or run: $TARGET init --library $LIBRARY"
+		leave 1 "" "bridge init stopped (exit $ri_status). The bridge is installed at $TARGET, and not set up;" \
+			"fix what init says above, then set it up with:" \
+			"    $(bridge_line "$TARGET" init --library "$LIBRARY")"
 	fi
 }
 
@@ -944,25 +1074,28 @@ wait_served() {
 }
 
 # check_served BINARY CONFIG VERSION makes sure the service runs and serves
-# VERSION.
+# VERSION. A service that runs but whose release bridge status cannot read
+# is not taken for one that serves it: the run ends incomplete (exit 4),
+# with the command that checks it.
 check_served() {
 	if ! systemctl --user is-active --quiet "$UNIT_NAME"; then
 		say "The bridge's service is not running; starting it (bridge start)."
-		"$1" start </dev/null || leave 1 "bridge start failed (above). See what the bridge logged: $1 logs"
+		"$1" start </dev/null || leave 1 "bridge start failed (above). See what the bridge logged:" "    $(bridge_line "$1" logs)"
 	fi
 	if wait_served "$1" "$2" "$3"; then
 		return 0
 	fi
 	if [ -n "$SERVED" ]; then
 		leave 1 "The service still serves the bridge $SERVED, not $3, 20 seconds on." \
-			"See what it logged: $1 logs (bridge update keeps the previous program beside it, as $1.bak)."
+			"After an update, the previous program is beside the new one, as $1.bak. See what the bridge logged:" \
+			"    $(bridge_line "$1" logs)"
 	fi
 	if systemctl --user is-active --quiet "$UNIT_NAME"; then
-		warn "The service is running, but bridge status could not say which release it serves; check it with: $1 status"
-		SERVED=$3
-		return 0
+		warn "" "The bridge's service is running, but bridge status could not say which release it serves, so this installer cannot tell whether it runs the bridge $3." \
+			"Check it with:" "    $(bridge_line "$1" status --config "$2")"
+		exit 4
 	fi
-	leave 1 "The bridge's service is not running. See what it logged: $1 logs"
+	leave 1 "The bridge's service is not running. See what it logged:" "    $(bridge_line "$1" logs)"
 }
 
 report_outputs() {
@@ -985,9 +1118,9 @@ box_address() {
 	printf '%s' "${ba_address:-THIS-BOX}"
 }
 
-# print_pairing says how to pair a phone with a headless box: the console is
-# on loopback only, so through an SSH tunnel whose local port is the console's
-# own, or bridge pair in this terminal.
+# print_pairing BINARY CONFIG says how to pair a phone with a headless box:
+# the console is on loopback only, so through an SSH tunnel whose local port
+# is the console's own, or bridge pair in this terminal.
 print_pairing() {
 	pp_address=${ADMIN_ADDR:-127.0.0.1:7789}
 	pp_port=${pp_address##*:}
@@ -995,14 +1128,15 @@ print_pairing() {
 	case $pp_host in
 	'' | 0.0.0.0 | '[::]') pp_host=127.0.0.1 ;;
 	esac
-	pp_bridge=$(shown_bridge "$TARGET")
 	say "" "Pair your iPhone with the 1-bit app:" \
 		"  The bridge's console is reachable on this box only, at http://$pp_host:$pp_port/" \
 		"  From a computer on your network, reach it through SSH (the local port must be $pp_port too):" \
-		"      ssh -L $pp_port:$pp_host:$pp_port $USER_NAME@$(box_address)" \
+		"    $(command_line ssh -L "$pp_port:$pp_host:$pp_port" "$USER_NAME@$(box_address)")" \
 		"  then open http://$pp_host:$pp_port/ on that computer, choose Devices, then Pair new device, and scan the QR code with the app." \
-		"  Or, in this terminal:  $pp_bridge pair --name \"My iPhone\"" \
-		"  and enter the token it prints in the app, with the address and the fingerprint that $pp_bridge status shows."
+		"  Or pair it in this terminal:" \
+		"    $(bridge_line "$1" pair --name 'My iPhone' --config "$2")" \
+		"  and enter the token it prints in the app, with the address and the fingerprint this shows:" \
+		"    $(bridge_line "$1" status --config "$2")"
 }
 
 fresh_install() {
@@ -1011,7 +1145,7 @@ fresh_install() {
 	SETUP=yes
 	if [ "$OPT_NO_INIT" = 1 ]; then
 		SETUP=no
-	elif [ ! -d "$SYSROOT/run/systemd/system" ]; then
+	elif [ "$SYSTEMD" = 0 ]; then
 		SETUP=nosystemd
 	fi
 	LIBRARY=$OPT_LIBRARY
@@ -1019,37 +1153,42 @@ fresh_install() {
 	if [ "$SETUP" = yes ] && [ -z "$LIBRARY" ]; then
 		choose_library
 	fi
+	if [ "$SETUP" = yes ] && [ -z "$LIBRARY" ]; then
+		# Refused before anything is downloaded: a program left behind would
+		# make the run that names a folder refuse it.
+		if [ -n "$FOUND_FOLDERS" ]; then
+			leave 3 "No music folder was given (--library), and there is no terminal to ask for one. Nothing was changed." \
+				"Music folders found here: $FOUND_FOLDERS" \
+				"Give the one to serve with --library, as in:" \
+				"    curl -fsSL https://1-bit.app/install.sh | sh -s -- --library /path/to/music"
+		fi
+		leave 3 "No music folder was given (--library), and there is no terminal to ask for one. Nothing was changed." \
+			"Give the one to serve with --library, as in:" \
+			"    curl -fsSL https://1-bit.app/install.sh | sh -s -- --library /path/to/music"
+	fi
 	download_release
 	install_binary
 	if [ "$SETUP" = no ]; then
-		say "" "Set it up when you are ready: run this installer again without --no-init, or run: $TARGET init"
+		say "" "Set it up when you are ready, with:" "    $(bridge_line "$TARGET" init)"
+		if command -v loginctl >/dev/null 2>&1 && ! linger_on; then
+			say "and so that its service outlives your login and starts when this box boots, turn lingering on, as root:" \
+				"    $(command_line loginctl enable-linger "$USER_NAME")"
+		fi
 		path_note
 		return 0
 	fi
 	if [ "$SETUP" = nosystemd ]; then
 		defer_setup "this system does not run systemd, so the bridge cannot be installed as a service here." \
-			"To run it yourself:  $TARGET init --no-service --library /path/to/music" \
-			"and then:  $TARGET serve --config $CONFIG_FILE"
-	fi
-	if [ -z "$LIBRARY" ]; then
-		fi_finish="Finish by running this installer again with --library /path/to/music, or run: $TARGET init --library /path/to/music"
-		if [ -n "$FOUND_FOLDERS" ]; then
-			defer_setup "no music folder was given (--library), and there is no terminal to ask." \
-				"Music folders found here: $FOUND_FOLDERS" "$fi_finish"
-		fi
-		defer_setup "no music folder was given (--library), and there is no terminal to ask." "$fi_finish"
+			"To run it yourself:" "    $(bridge_line "$TARGET" init --no-service --library /path/to/music)" \
+			"and then:" "    $(bridge_line "$TARGET" serve --config "$CONFIG_FILE")"
 	fi
 	ensure_linger
-	if ! require_user_bus; then
-		defer_setup "there is no systemd user session for $USER_NAME, which its service needs." \
-			"Log in as $USER_NAME over SSH or at the console (not with su or sudo), and run this installer again."
-	fi
 	run_init
 	read_unit "$UNIT_FILE" || leave 1 "bridge init finished, but $UNIT_PROBLEM"
 	check_served "$INSTALLED_BIN" "$INSTALLED_CONFIG" "$VERSION"
 	report_outputs
-	say "" "The bridge $SERVED is running as $USER_NAME's service, and starts again when this box boots."
-	print_pairing
+	say_running
+	print_pairing "$INSTALLED_BIN" "$INSTALLED_CONFIG"
 	path_note
 }
 
@@ -1086,8 +1225,8 @@ run_update() {
 		leave 1 "" "After bridge update, $ru_bin does not run. Its previous program is kept beside it, as $ru_bin.bak."
 	fi
 	if [ "$ru_status" != 0 ]; then
-		leave 1 "" "bridge update installed $ru_after, then stopped (exit $ru_status, above)." \
-			"Restart the service to run it: systemctl --user restart $UNIT_NAME"
+		leave 1 "" "bridge update installed $ru_after, then stopped (exit $ru_status, above). Restart the service to run it:" \
+			"    $(command_line systemctl --user restart "$UNIT_NAME")"
 	fi
 	say "Updated the bridge from $ru_before to $ru_after."
 }
@@ -1110,20 +1249,14 @@ upgrade() {
 		up_update=0
 		say "It is $OPT_VERSION already."
 	fi
-	if [ "$OPT_NO_INIT" = 0 ]; then
-		ensure_linger
-	fi
-	require_user_bus ||
-		leave 3 "There is no systemd user session for $USER_NAME, so the bridge's service cannot be restarted from here." \
-			"Log in as $USER_NAME over SSH or at the console (not with su or sudo) and run this again. Nothing was changed."
+	ensure_linger
 	if [ "$up_update" = 1 ]; then
 		run_update "$up_bin" "$up_config" "$up_before"
 	fi
 	up_now=$(bridge_version "$up_bin") || leave 1 "$up_bin does not run any more; its previous program is beside it, as $up_bin.bak."
 	check_served "$up_bin" "$up_config" "$up_now"
-	TARGET=$up_bin
-	say "" "The bridge $SERVED is running as $USER_NAME's service."
-	print_pairing
+	say_running
+	print_pairing "$up_bin" "$up_config"
 }
 
 # sh_quote VALUE prints VALUE as one word for a shell command line.
@@ -1136,6 +1269,35 @@ sh_quote() {
 		printf '%s' "$1"
 		;;
 	esac
+}
+
+# command_line WORD... prints WORD... as a command line a POSIX shell reads
+# back as those words, each quoted where it needs it (sh_quote).
+command_line() {
+	cmdl_line=''
+	for cmdl_word in "$@"; do
+		cmdl_line="$cmdl_line${cmdl_line:+ }$(sh_quote "$cmdl_word")"
+	done
+	printf '%s' "$cmdl_line"
+}
+
+# bridge_line BINARY ARG... prints the command that runs the bridge at BINARY
+# with ARG..., for the user to type: the program as their PATH names it
+# (shown_bridge), and every word quoted where it needs it. A --config naming
+# CONFIG_FILE is left out, since the bridge reads that file without one;
+# any other is kept, so a bridge with its settings elsewhere is told where.
+bridge_line() {
+	bl_line=$(shown_bridge "$1")
+	shift
+	while [ "$#" -gt 0 ]; do
+		if [ "$1" = --config ] && [ "$#" -gt 1 ] && [ "$2" = "$CONFIG_FILE" ]; then
+			shift 2
+			continue
+		fi
+		bl_line="$bl_line $(sh_quote "$1")"
+		shift
+	done
+	printf '%s' "$bl_line"
 }
 
 # print_uninstall prints the commands that remove the bridge, in the order
@@ -1154,15 +1316,15 @@ print_uninstall() {
 		pu_found=1
 		read_unit "$UNIT_FILE" || INSTALLED_BIN=''
 		say "" "To remove the bridge's service, run these as $USER_NAME, in this order:" \
-			"  systemctl --user disable --now $UNIT_NAME" \
-			"  systemctl --user is-active $UNIT_NAME    # go on only once this says inactive" \
-			"  rm $(sh_quote "$UNIT_FILE")" \
-			"  systemctl --user daemon-reload"
+			"    $(command_line systemctl --user disable --now "$UNIT_NAME")" \
+			"    $(command_line systemctl --user is-active "$UNIT_NAME")    # go on only once this says inactive" \
+			"    $(command_line rm "$UNIT_FILE")" \
+			"    $(command_line systemctl --user daemon-reload)"
 		if [ -n "$INSTALLED_BIN" ]; then
-			say "  rm -f $(sh_quote "$INSTALLED_BIN") $(sh_quote "$INSTALLED_BIN.bak")"
+			say "    $(command_line rm -f "$INSTALLED_BIN" "$INSTALLED_BIN.bak")"
 			pu_real=$(readlink -f "$INSTALLED_BIN" 2>/dev/null) || pu_real=''
 			if [ -n "$pu_real" ] && [ "$pu_real" != "$INSTALLED_BIN" ]; then
-				say "  rm -f $(sh_quote "$pu_real") $(sh_quote "$pu_real.bak")    # the program the link above leads to"
+				say "    $(command_line rm -f "$pu_real" "$pu_real.bak")    # the program the link above leads to"
 			fi
 		else
 			say "  and remove the program the service's ExecStart line names, with its .bak beside it"
@@ -1170,16 +1332,16 @@ print_uninstall() {
 	fi
 	if { [ -e "$TARGET" ] || [ -L "$TARGET" ]; } && [ "$TARGET" != "$INSTALLED_BIN" ]; then
 		pu_found=1
-		say "" "To remove the bridge program at $TARGET:" "  rm -f $(sh_quote "$TARGET") $(sh_quote "$TARGET.bak")"
+		say "" "To remove the bridge program at $TARGET:" "    $(command_line rm -f "$TARGET" "$TARGET.bak")"
 	fi
 	if [ -e "$CONFIG_DIR" ]; then
 		pu_found=1
 		say "" "That leaves your music, and the bridge's settings and data in $CONFIG_DIR: its identity, the phones" \
 			"paired with it and its library index. To remove those too, once the service is gone (a phone pairs" \
-			"again after a reinstall):" "  rm -rf $(sh_quote "$CONFIG_DIR")"
+			"again after a reinstall):" "    $(command_line rm -rf "$CONFIG_DIR")"
 	fi
 	if [ -e "$LOG_DIR" ]; then
-		say "" "Its log:" "  rm -rf $(sh_quote "$LOG_DIR")"
+		say "" "Its log:" "    $(command_line rm -rf "$LOG_DIR")"
 	fi
 	if [ "$pu_found" = 0 ]; then
 		say "The bridge is not installed for $USER_NAME here: there is nothing to remove."
@@ -1209,6 +1371,16 @@ main() {
 	check_clock
 	check_storage
 	detect_install
+	if [ "$INSTALL_STATE" = upgrade ] && [ "$OPT_NO_INIT" = 1 ]; then
+		leave 3 "The bridge is installed here, as $USER_NAME's service ($INSTALLED_BIN, with its settings in $INSTALLED_CONFIG):" \
+			"--no-init is for a new install, and an installed bridge is upgraded through its own bridge update." \
+			"Run this installer without --no-init, or run:" \
+			"    $(bridge_line "$INSTALLED_BIN" update --config "$INSTALLED_CONFIG")" \
+			"Nothing was changed."
+	fi
+	if [ "$SYSTEMD" = 1 ] && [ "$OPT_NO_INIT" = 0 ]; then
+		check_environment
+	fi
 	open_terminal
 	make_temp_dir
 	if [ "$INSTALL_STATE" = upgrade ]; then

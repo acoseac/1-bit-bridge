@@ -1,13 +1,13 @@
 #!/bin/sh
 # The fake bridge program the installer's tests publish in their releases. It
-# carries the module path github.com/acoseac/1-bit-bridge, as every bridge
-# binary does, says its release the way `bridge version` does, and does what
-# the installer runs it for as the real CLI does, as far as the installer can
-# see: init writes the settings and the per-user unit in init's shape and
-# starts the service through systemctl; update replaces the program as
-# bridge update does, keeping it as .bak, and restarts the service, or
-# refuses as its checks do (FAKE_UPDATE); status prints bridge status's
-# rows. Each call is logged to STUB_LOG.
+# says its release the way `bridge version` does, and does what the installer
+# runs it for as the real CLI does, as far as the installer can see: init
+# writes the settings and the per-user unit in init's shape and starts the
+# service through systemctl; update replaces the program as bridge update
+# does, keeping it as .bak, and restarts the service, or refuses as its
+# checks do (FAKE_UPDATE); status prints bridge status's rows. Each call is
+# logged to STUB_LOG, and its words to STUB_ARGV, one a line, so that a test
+# can tell where each argument ends.
 #
 # A flag the real subcommand does not define is refused (exit 2), as the
 # real CLI refuses one. The flags each subcommand takes here are on the
@@ -29,6 +29,12 @@ state=${STUB_STATE:?}
 update=${FAKE_UPDATE:-}
 update_version=${FAKE_UPDATE_VERSION:-}
 printf 'bridge %s\n' "$*" >>"$log"
+{
+	echo 'call bridge'
+	for arg in "$@"; do
+		printf 'arg %s\n' "$arg"
+	done
+} >>"${STUB_ARGV:?}"
 
 refuse_flag() {
 	printf 'flag provided but not defined: %s\n' "$1" >&2

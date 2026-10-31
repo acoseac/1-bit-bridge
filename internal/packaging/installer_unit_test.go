@@ -32,6 +32,7 @@ func TestTheInstallerReadsTheUnitInitWrites(t *testing.T) {
 	}{
 		{"/home/pi/.local/bin/bridge", "/home/pi/.config/1-bit-bridge/bridge.yaml", true},
 		{"/home/pi/My Apps/bridge", "/home/pi/Bridge Settings/bridge.yaml", true},
+		{"/home/pi/Bob's; apps/bridge", "/home/pi/Bob's; settings/bridge.yaml", true},
 		{"/srv/50% off/bridge", "/home/pi/.config/1-bit-bridge/bridge.yaml", false},
 		{"/home/pi/.local/bin/bridge", "/srv/$HOME/bridge.yaml", false},
 		{`/srv/a"b/bridge`, "/home/pi/.config/1-bit-bridge/bridge.yaml", false},

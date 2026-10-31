@@ -30,12 +30,25 @@ var (
 	installerFakePath   = filepath.Join("..", "..", "scripts", "install-test", "testdata", "bridge")
 )
 
+// installerSubcommand is the bridge's subcommands the installer names,
+// output's verbs counted as subcommands of their own.
+const installerSubcommand = `(init|update|status|start|stop|restart|version|output (?:player|dac)|pair|serve|logs)\b`
+
 // installerCall finds a call of the bridge in a line of the installer, run or
-// printed: the program ("$TARGET", $TARGET, bridge), the subcommand (output's
-// verbs counted as subcommands of their own) and the words after it, up to
-// the end of the command.
-var installerCall = regexp.MustCompile(`(?:"\$[A-Za-z_0-9]+"|\$[A-Za-z_0-9]+|\bbridge) ` +
-	`(init|update|status|start|stop|restart|version|output (?:player|dac)|pair|serve|logs)\b([^<>|;&#]*)`)
+// printed: the program (bridge_line "$X", which prints the command for the
+// user to type, or "$TARGET", $TARGET or bridge), the subcommand and the
+// words after it, up to the end of the command.
+var installerCall = regexp.MustCompile(`(?:\bbridge_line "\$[A-Za-z_0-9]+"|"\$[A-Za-z_0-9]+"|\$[A-Za-z_0-9]+|\bbridge) ` +
+	installerSubcommand + `([^<>|;&#]*)`)
+
+// installerPrinted finds a bridge command the installer prints through
+// bridge_line, and installerUnquoted one it writes out around a variable,
+// $TARGET pair, or around a quoted one outside bridge_line,
+// $(sh_quote "$TARGET") pair.
+var (
+	installerPrinted  = regexp.MustCompile(`\bbridge_line "\$[A-Za-z_0-9]+" ` + installerSubcommand + `([^<>|;&#]*)`)
+	installerUnquoted = regexp.MustCompile(`(?:(?:^|[^"A-Za-z_0-9])\$[A-Za-z_0-9]+|\$\(sh_quote "[^"]*"\)) ` + installerSubcommand)
+)
 
 var installerFlag = regexp.MustCompile(`(?:^|\s)(--?[A-Za-z][A-Za-z0-9-]*)`)
 
@@ -81,8 +94,9 @@ func installerBridgeFlags(t *testing.T) map[string][]string {
 
 func TestTheInstallerCallsTheBridgeWithFlagsItDefines(t *testing.T) {
 	calls := installerBridgeFlags(t)
-	// The ones it runs, so a pattern that stopped matching cannot pass here.
-	for _, want := range []string{"init", "update", "status", "start", "version", "output player", "output dac", "pair", "serve"} {
+	// The ones it runs or prints, so a pattern that stopped matching cannot
+	// pass here.
+	for _, want := range []string{"init", "update", "status", "start", "version", "output player", "output dac", "pair", "serve", "logs"} {
 		if _, ok := calls[want]; !ok {
 			t.Errorf("the installer no longer names bridge %s, or this test no longer finds it", want)
 		}
@@ -111,6 +125,44 @@ func TestTheInstallerCallsTheBridgeWithFlagsItDefines(t *testing.T) {
 	}
 	if regexp.MustCompile(`output dac (bind|inspect)`).Match(b) {
 		t.Errorf("the installer binds or inspects a DAC: it configures no output")
+	}
+}
+
+// Every bridge command the installer prints for the user to type goes
+// through bridge_line, which quotes each word: one written out around a
+// variable ($TARGET pair) splits a path at its spaces and runs what follows
+// a semicolon in it. And each printed command that reads the settings
+// (pair, status, serve, update) names them with --config, so that a bridge
+// installed with its settings elsewhere is told where they are; bridge_line
+// leaves out a --config naming the settings file the bridge reads without
+// one. The installer's own tests run what it prints, word for word.
+func TestTheInstallerPrintsTheBridgesCommandsQuoted(t *testing.T) {
+	b, err := os.ReadFile(installerScriptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	printed := map[string]bool{}
+	for i, line := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		if installerUnquoted.MatchString(line) {
+			t.Errorf("line %d writes a bridge command out around a variable, unquoted: %s", i+1, strings.TrimSpace(line))
+		}
+		for _, m := range installerPrinted.FindAllStringSubmatch(line, -1) {
+			printed[m[1]] = true
+			switch m[1] {
+			case "pair", "status", "serve", "update":
+				if !regexp.MustCompile(`(?:^|\s)--config\s`).MatchString(m[2]) {
+					t.Errorf("line %d prints bridge %s without --config: %s", i+1, m[1], strings.TrimSpace(line))
+				}
+			}
+		}
+	}
+	for _, want := range []string{"pair", "status", "serve", "update", "init", "logs"} {
+		if !printed[want] {
+			t.Errorf("the installer prints no bridge %s through bridge_line, or this test no longer finds it", want)
+		}
 	}
 }
 

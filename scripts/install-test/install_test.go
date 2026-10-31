@@ -151,16 +151,17 @@ type releaseServer struct {
 	srv    *httptest.Server
 	caFile string
 
-	mu       sync.Mutex
-	files    map[string][]byte
-	requests []string
+	mu        sync.Mutex
+	files     map[string][]byte
+	redirects map[string]string
+	requests  []string
 }
 
 const releasePath = "/acoseac/1-bit-bridge/releases"
 
 func newReleaseServer(t *testing.T, dir string) *releaseServer {
 	t.Helper()
-	s := &releaseServer{t: t, files: map[string][]byte{}}
+	s := &releaseServer{t: t, files: map[string][]byte{}, redirects: map[string]string{}}
 	s.srv = httptest.NewTLSServer(http.HandlerFunc(s.serve))
 	t.Cleanup(s.srv.Close)
 	s.caFile = filepath.Join(dir, "ca.pem")
@@ -172,12 +173,25 @@ func (s *releaseServer) serve(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.requests = append(s.requests, r.URL.Path)
 	body, ok := s.files[r.URL.Path]
+	target, moved := s.redirects[r.URL.Path]
 	s.mu.Unlock()
+	if moved {
+		http.Redirect(w, r, target, http.StatusFound)
+		return
+	}
 	if !ok {
 		http.NotFound(w, r)
 		return
 	}
 	_, _ = w.Write(body)
+}
+
+// redirect answers a request for path with a redirect to target, a URL the
+// test gives.
+func (s *releaseServer) redirect(path, target string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.redirects[path] = target
 }
 
 func (s *releaseServer) base() string {
@@ -283,30 +297,33 @@ func fakeBridge(t *testing.T, version string) []byte {
 }
 
 // realTools are the programs the installer and the stubs use that a rig
-// links into its PATH from the host's; the rest of the PATH is stubs.
+// links into its PATH from the host's; the rest of the PATH is stubs. wget
+// is not among them: the installer never downloads with it.
 var realTools = []string{
-	"awk", "basename", "cat", "chmod", "cp", "curl", "cut", "dirname", "grep", "gzip", "head", "ln",
-	"ls", "mkdir", "mktemp", "mv", "od", "readlink", "rm", "rmdir", "sed", "sha256sum", "shasum",
-	"tar", "tee", "touch", "tr", "wget",
+	"awk", "basename", "cat", "chmod", "cp", "curl", "cut", "dirname", "env", "grep", "gzip", "head",
+	"ln", "ls", "mkdir", "mktemp", "mv", "od", "readlink", "rm", "rmdir", "sed", "sha256sum", "shasum",
+	"sort", "tar", "tee", "touch", "tr",
 }
 
 // rig is one box for the installer: a HOME, a system root the script reads
 // its /etc, /proc, /run and music folders under, a PATH of real tools and
-// stubs, a release server with stampedRelease published, and the log every
-// stub and the fake bridge append their calls to.
+// stubs, a release server with stampedRelease published, the log every stub
+// and the fake bridge append their calls to, and the fake bridge's record of
+// each call's words.
 type rig struct {
-	t      *testing.T
-	sh     shell
-	dir    string
-	home   string
-	root   string
-	state  string
-	bin    string
-	tmp    string
-	log    string
-	script string
-	server *releaseServer
-	env    map[string]string
+	t       *testing.T
+	sh      shell
+	dir     string
+	home    string
+	root    string
+	state   string
+	bin     string
+	tmp     string
+	log     string
+	argvLog string
+	script  string
+	server  *releaseServer
+	env     map[string]string
 }
 
 // newRig builds a box with a Debian system running systemd, and a PATH
@@ -320,21 +337,23 @@ func newRig(t *testing.T, sh shell, omit ...string) *rig {
 		t.Fatal(err)
 	}
 	r := &rig{
-		t:      t,
-		sh:     sh,
-		dir:    dir,
-		home:   filepath.Join(dir, "home"),
-		root:   filepath.Join(dir, "root"),
-		state:  filepath.Join(dir, "state"),
-		bin:    filepath.Join(dir, "bin"),
-		tmp:    filepath.Join(dir, "tmp"),
-		log:    filepath.Join(dir, "calls.log"),
-		script: stampedScript,
+		t:       t,
+		sh:      sh,
+		dir:     dir,
+		home:    filepath.Join(dir, "home"),
+		root:    filepath.Join(dir, "root"),
+		state:   filepath.Join(dir, "state"),
+		bin:     filepath.Join(dir, "bin"),
+		tmp:     filepath.Join(dir, "tmp"),
+		log:     filepath.Join(dir, "calls.log"),
+		argvLog: filepath.Join(dir, "argv.log"),
+		script:  stampedScript,
 	}
 	for _, d := range []string{r.home, r.state, r.bin, r.tmp, filepath.Join(r.root, "run", "systemd", "system")} {
 		mkdirAll(t, d)
 	}
 	writeFile(t, r.log, nil, 0o644)
+	writeFile(t, r.argvLog, nil, 0o644)
 	r.osRelease("PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\nNAME=\"Debian GNU/Linux\"\nID=debian\n")
 	writeFile(t, filepath.Join(r.root, "proc", "mounts"), []byte("/dev/root / ext4 rw,relatime 0 0\nproc /proc proc rw 0 0\n"), 0o644)
 	writeFile(t, filepath.Join(r.root, "proc", "cmdline"), []byte("console=tty1 root=/dev/mmcblk0p2 rootwait\n"), 0o644)
@@ -372,8 +391,6 @@ func newRig(t *testing.T, sh shell, omit ...string) *rig {
 
 	r.server = newReleaseServer(t, dir)
 	r.server.publish(stampedRelease, nil)
-	wgetrc := filepath.Join(dir, "wgetrc")
-	writeFile(t, wgetrc, []byte("ca_certificate = "+r.server.caFile+"\n"), 0o644)
 	r.env = map[string]string{
 		"HOME":                        r.home,
 		"PATH":                        r.bin,
@@ -385,11 +402,19 @@ func newRig(t *testing.T, sh shell, omit ...string) *rig {
 		"BRIDGE_INSTALL_BASE_URL":     r.server.base(),
 		"BRIDGE_INSTALL_TEST_SYSROOT": r.root,
 		"CURL_CA_BUNDLE":              r.server.caFile,
-		"WGETRC":                      wgetrc,
 		"STUB_LOG":                    r.log,
+		"STUB_ARGV":                   r.argvLog,
 		"STUB_STATE":                  r.state,
 	}
 	return r
+}
+
+// moveHome gives the rig a HOME of another name, made under the rig's
+// directory, before anything is laid out in it.
+func (r *rig) moveHome(name string) {
+	r.home = filepath.Join(r.dir, name)
+	mkdirAll(r.t, r.home)
+	r.set("HOME", r.home)
 }
 
 func (r *rig) osRelease(text string) {
@@ -520,6 +545,131 @@ func (r *rig) callsTo(prefix string) []string {
 		}
 	}
 	return out
+}
+
+// mutations are the logged calls that change the box: the service
+// manager's but those that only read it (show-environment, cat, is-active),
+// lingering turned on, sudo and su, and the bridge's but those that only
+// read (version, status, output).
+func (r *rig) mutations() []string {
+	var out []string
+	for _, c := range r.calls() {
+		f := strings.Fields(c)
+		if len(f) < 2 {
+			continue
+		}
+		switch f[0] {
+		case "systemctl":
+			if len(f) > 2 && (f[2] == "show-environment" || f[2] == "cat" || f[2] == "is-active") {
+				continue
+			}
+		case "loginctl":
+			if !strings.Contains(c, "enable-linger") {
+				continue
+			}
+		case "sudo", "su":
+		case "bridge":
+			if f[1] == "version" || f[1] == "status" || f[1] == "output" {
+				continue
+			}
+		default:
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// readArgv reads what the fake bridge or the recorder (testdata/argv)
+// recorded: each call the program's name, then its arguments, each as the
+// program was given it.
+func readArgv(t *testing.T, path string) [][]string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls [][]string
+	for _, line := range strings.Split(string(b), "\n") {
+		switch {
+		case strings.HasPrefix(line, "call "):
+			calls = append(calls, []string{strings.TrimPrefix(line, "call ")})
+		case strings.HasPrefix(line, "arg ") && len(calls) > 0:
+			calls[len(calls)-1] = append(calls[len(calls)-1], strings.TrimPrefix(line, "arg "))
+		}
+	}
+	return calls
+}
+
+// bridgeCalls are the fake bridge's calls of subcommand sub, each the words
+// it was given, sub's first.
+func (r *rig) bridgeCalls(sub string) [][]string {
+	r.t.Helper()
+	var out [][]string
+	for _, call := range readArgv(r.t, r.argvLog) {
+		if len(call) > 1 && call[1] == sub {
+			out = append(out, call[1:])
+		}
+	}
+	return out
+}
+
+// printed are the commands the installer's output gives the user to type:
+// the lines it indents by four spaces, each a command line as it stands.
+func printed(out string) []string {
+	var lines []string
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "    ") && len(line) > 4 && line[4] != ' ' {
+			lines = append(lines, line[4:])
+		}
+	}
+	return lines
+}
+
+// recorded are the programs a printed command can run that runPrinted puts
+// a recorder in place of on the PATH it runs them with; injected stands for
+// whatever a word split at a semicolon would run.
+var recorded = []string{"bridge", "injected", "loginctl", "rm", "ssh", "sudo", "systemctl"}
+
+// runPrinted runs each command line as a user pasting it into the shell
+// under test would, with the recorder (testdata/argv) in place of every
+// program it can name: those in recorded, on its PATH, and the bridge at
+// each of programs, its paths. It returns the calls recorded, each the
+// program's name and its arguments, and fails the test for a line the
+// shell does not run to its end.
+func (r *rig) runPrinted(lines []string, programs ...string) [][]string {
+	r.t.Helper()
+	recorder, err := os.ReadFile(filepath.Join("testdata", "argv"))
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	dir := filepath.Join(r.dir, "recorders")
+	for _, name := range recorded {
+		writeFile(r.t, filepath.Join(dir, name), recorder, 0o755)
+	}
+	for _, p := range programs {
+		writeFile(r.t, p, recorder, 0o755)
+	}
+	log := filepath.Join(r.dir, "printed.log")
+	writeFile(r.t, log, nil, 0o644)
+	for _, line := range lines {
+		cmd := exec.Command(r.sh.argv[0], append(append([]string{}, r.sh.argv[1:]...), "-c", line)...)
+		cmd.Env = []string{"PATH=" + dir, "HOME=" + r.home, "LC_ALL=C", "STUB_ARGV=" + log}
+		cmd.Dir = r.home
+		if out, err := cmd.CombinedOutput(); err != nil {
+			r.t.Errorf("the printed command %q did not run: %v\n%s", line, err, out)
+		}
+	}
+	return readArgv(r.t, log)
+}
+
+// sameCalls compares the calls the printed commands made with the ones
+// they should have, word for word.
+func sameCalls(t *testing.T, got, want [][]string) {
+	t.Helper()
+	if fmt.Sprintf("%q", got) != fmt.Sprintf("%q", want) {
+		t.Errorf("the printed commands ran\n%q\nwant\n%q", got, want)
+	}
 }
 
 func (r *rig) target() string {
@@ -676,7 +826,8 @@ func mustSay(t *testing.T, res result, parts ...string) {
 
 // nothingInstalled checks that a run left no program, no settings, no unit
 // and no directory of its own in HOME, staged nothing, kept no temporary
-// directory and called no service manager.
+// directory, and changed nothing of the service manager's, lingering's or
+// a bridge's: it may have asked the manager what it has.
 func (r *rig) nothingInstalled() {
 	r.t.Helper()
 	for _, path := range []string{filepath.Join(r.home, ".local"), filepath.Join(r.home, ".config")} {
@@ -687,10 +838,23 @@ func (r *rig) nothingInstalled() {
 	if entries, _ := os.ReadDir(r.tmp); len(entries) != 0 {
 		r.t.Errorf("the temporary directory was left behind: %v", entries)
 	}
-	for _, who := range []string{"systemctl", "loginctl", "sudo", "su", "bridge init"} {
-		if calls := r.callsTo(who); len(calls) != 0 {
-			r.t.Errorf("%s was called: %q", who, calls)
-		}
+	if m := r.mutations(); len(m) != 0 {
+		r.t.Errorf("it changed the box: %q", m)
+	}
+}
+
+// unchanged checks that a refused run changed nothing: HOME and the
+// service's state as they were (home and state, taken before the run),
+// nothing downloaded, and no call that changes the box.
+func (r *rig) unchanged(home, state map[string]string) {
+	r.t.Helper()
+	sameTree(r.t, "HOME", home, tree(r.t, r.home))
+	sameTree(r.t, "the service's state", state, tree(r.t, r.state))
+	if len(r.asked()) != 0 {
+		r.t.Errorf("a refused run downloaded %q", r.asked())
+	}
+	if m := r.mutations(); len(m) != 0 {
+		r.t.Errorf("a refused run changed the box: %q", m)
 	}
 }
 
@@ -745,8 +909,8 @@ func TestAFreshInstallSetsTheBridgeUpAsTheUsersService(t *testing.T) {
 				if got := readFile(t, r.target()); got != string(fakeBridge(t, stampedRelease)) {
 					t.Errorf("the program installed is not the release's")
 				}
-				if got, want := r.callsTo("bridge init"), []string{"bridge init --yes --library " + music}; strings.Join(got, "|") != strings.Join(want, "|") {
-					t.Errorf("bridge init calls %q, want %q", got, want)
+				if got, want := fmt.Sprintf("%q", r.bridgeCalls("init")), fmt.Sprintf("%q", [][]string{{"init", "--yes", "--library", music}}); got != want {
+					t.Errorf("bridge init calls %s, want %s", got, want)
 				}
 				if !strings.Contains(readFile(t, r.configFile()), music) {
 					t.Errorf("the settings do not name the library")
@@ -773,10 +937,10 @@ func TestAFreshInstallSetsTheBridgeUpAsTheUsersService(t *testing.T) {
 					"Its SHA-256 matches the release's checksums.txt.",
 					"Installed the bridge 0.2.2 at "+r.target(),
 					"sudo runs loginctl enable-linger tester",
-					"The bridge 0.2.2 is running as tester's service",
+					"The bridge 0.2.2 is running as tester's service, and starts again when this box boots.",
 					"ssh -L 7789:127.0.0.1:7789 tester@192.0.2.10",
 					"http://127.0.0.1:7789/",
-					r.target()+` pair --name "My iPhone"`,
+					r.target()+" pair --name 'My iPhone'",
 				)
 				if entries, _ := os.ReadDir(r.tmp); len(entries) != 0 {
 					t.Errorf("the temporary directory was left behind: %v", entries)
@@ -833,8 +997,8 @@ func TestAFreshInstallAsksForAFolderWhenItKnowsNone(t *testing.T) {
 		r.terminal(filepath.Join(r.dir, "nowhere"), music, "")
 		res := r.run()
 		mustExit(t, res, 0)
-		if got := r.callsTo("bridge init"); len(got) != 1 || got[0] != "bridge init --library "+music {
-			t.Errorf("bridge init calls %q", got)
+		if got, want := fmt.Sprintf("%q", r.bridgeCalls("init")), fmt.Sprintf("%q", [][]string{{"init", "--library", music}}); got != want {
+			t.Errorf("bridge init calls %s, want %s", got, want)
 		}
 		mustSay(t, res, filepath.Join(r.dir, "nowhere")+" is not a folder.")
 		if len(r.callsTo("sudo")) != 0 {
@@ -843,10 +1007,11 @@ func TestAFreshInstallAsksForAFolderWhenItKnowsNone(t *testing.T) {
 	})
 }
 
-// Without a terminal and without --library, the installer installs the
-// program, asks nothing (it never reads its standard input, which under curl
-// | sh is the script), names the folders it found and the command that
-// finishes, and exits 4.
+// Without a terminal and without --library, the installer asks nothing (it
+// never reads its standard input, which under curl | sh is the script) and
+// refuses before anything is downloaded, naming the folders it found and
+// --library, so that a second run given one installs (a program left behind
+// would make that run refuse).
 func TestWithoutATerminalOrALibraryTheInstallerDoesNotWait(t *testing.T) {
 	eachShell(t, func(t *testing.T, sh shell) {
 		r := newRig(t, sh)
@@ -856,36 +1021,81 @@ func TestWithoutATerminalOrALibraryTheInstallerDoesNotWait(t *testing.T) {
 		}
 		writeFile(t, filepath.Join(r.root, "mnt", "USB", "Drive", "01.flac"), []byte("fLaC"), 0o644)
 		res := r.runHeldOpen()
-		mustExit(t, res, 4)
-		if !exists(r.target()) {
-			t.Errorf("the program was not installed")
+		mustExit(t, res, 3)
+		if len(r.asked()) != 0 {
+			t.Errorf("it downloaded %q", r.asked())
 		}
-		if len(r.callsTo("bridge init")) != 0 || len(r.callsTo("sudo")) != 0 || len(r.callsTo("loginctl")) != 0 {
-			t.Errorf("setup ran without a library: %q", r.calls())
-		}
-		mustSay(t, res, "Found Volumio 3.661, amd64.", "but not set up: no music folder was given",
-			"Music folders found here: "+filepath.Join(r.root, "mnt", "USB"), "--library /path/to/music")
+		r.nothingInstalled()
+		mustSay(t, res, "Found Volumio 3.661, amd64.", "No music folder was given (--library), and there is no terminal to ask for one.",
+			"Music folders found here: "+filepath.Join(r.root, "mnt", "USB"), "--library /path/to/music", "Nothing was changed.")
 	})
 }
 
-// --no-init installs or upgrades the program and sets nothing up.
+// --no-init installs the program alone on a new box, and changes nothing
+// else: no settings, no unit, nothing of the service manager's or
+// lingering's. It prints the commands that set it up (bridge init, and the
+// lingering bridge init does not turn on), never a second run of the
+// installer, which would refuse the program it leaves. On a box where the
+// bridge is installed it is refused with nothing changed, its service
+// running or stopped, and the installed release named or not: no
+// lingering, no bridge update, no start.
 func TestNoInitInstallsTheProgramAlone(t *testing.T) {
 	eachShell(t, func(t *testing.T, sh shell) {
-		r := newRig(t, sh)
-		res := r.runHeldOpen("--no-init")
-		mustExit(t, res, 0)
-		if !exists(r.target()) {
-			t.Fatalf("the program was not installed")
-		}
-		for _, who := range []string{"bridge init", "systemctl", "loginctl", "sudo"} {
-			if len(r.callsTo(who)) != 0 {
-				t.Errorf("%s was called: %q", who, r.callsTo(who))
+		t.Run("a new box", func(t *testing.T) {
+			r := newRig(t, sh)
+			res := r.runHeldOpen("--no-init")
+			mustExit(t, res, 0)
+			if !exists(r.target()) {
+				t.Fatalf("the program was not installed")
 			}
+			if m := r.mutations(); len(m) != 0 {
+				t.Errorf("it changed the box: %q", m)
+			}
+			if exists(r.configFile()) || exists(r.unitFile()) {
+				t.Errorf("settings or a unit were written")
+			}
+			mustSay(t, res, "Set it up when you are ready, with:")
+			if strings.Contains(res.output(), "installer again") {
+				t.Errorf("it says to run the installer again, which would refuse the program it left:\n%s", res.output())
+			}
+			sameCalls(t, r.runPrinted(printed(res.output()), r.target()), [][]string{
+				{"bridge", "init"},
+				{"loginctl", "enable-linger", "tester"},
+			})
+		})
+		for _, c := range []struct {
+			name   string
+			active bool
+			args   []string
+		}{
+			{"an installed bridge, running", true, []string{"--no-init"}},
+			{"an installed bridge, stopped", false, []string{"--no-init"}},
+			{"an installed bridge, running, its release named", true, []string{"--no-init", "--version", "0.2.1"}},
+			{"an installed bridge, stopped, its release named", false, []string{"--no-init", "--version", "0.2.1"}},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				r := newRig(t, sh)
+				r.installed("0.2.1", r.target(), r.configFile())
+				if !c.active {
+					if err := os.Remove(filepath.Join(r.state, "active")); err != nil {
+						t.Fatal(err)
+					}
+				}
+				r.newRelease(stampedRelease)
+				r.set("FAKE_UPDATE", "ok")
+				home, state := tree(t, r.home), tree(t, r.state)
+				res := r.run(c.args...)
+				mustExit(t, res, 3)
+				mustSay(t, res, "--no-init is for a new install", "Nothing was changed.")
+				r.unchanged(home, state)
+				if calls := r.callsTo("loginctl"); len(calls) != 0 {
+					t.Errorf("lingering was asked about: %q", calls)
+				}
+				sameCalls(t, r.runPrinted(printed(res.output()), r.target()), [][]string{
+					{"bridge", "update"},
+				})
+			})
 		}
-		if exists(r.configFile()) || exists(r.unitFile()) {
-			t.Errorf("settings or a unit were written")
-		}
-		mustSay(t, res, "Set it up when you are ready")
 	})
 }
 
@@ -1013,8 +1223,10 @@ func (r *rig) republish(path string, body []byte) {
 }
 
 // A box without what the download needs is refused before anything is
-// downloaded: no SHA-256 tool, no curl and no wget, or BusyBox's wget alone,
-// which does not check certificates. GNU wget does instead of curl.
+// downloaded: no SHA-256 tool, or no curl. wget never downloads in curl's
+// place, GNU's or BusyBox's: GNU wget follows a redirect from HTTPS to plain
+// HTTP, and BusyBox's does not check the server's certificate. The refusal
+// says how to install curl.
 func TestTheToolsTheDownloadNeedsAreCheckedFirst(t *testing.T) {
 	eachShell(t, func(t *testing.T, sh shell) {
 		t.Run("no SHA-256 tool", func(t *testing.T) {
@@ -1027,31 +1239,63 @@ func TestTheToolsTheDownloadNeedsAreCheckedFirst(t *testing.T) {
 			}
 			r.nothingInstalled()
 		})
-		t.Run("no downloader", func(t *testing.T) {
-			r := newRig(t, sh, "curl", "wget")
-			res := r.run("--library", r.music("music"))
-			mustExit(t, res, 3)
-			mustSay(t, res, "This installer needs: curl.")
-			r.nothingInstalled()
-		})
-		t.Run("BusyBox wget", func(t *testing.T) {
-			r := newRig(t, sh, "curl", "wget")
-			writeFile(t, filepath.Join(r.bin, "wget"), []byte("#!/bin/sh\necho 'BusyBox v1.36.1 (2024-01-01) multi-call binary.' >&2\nexit 1\n"), 0o755)
-			res := r.run("--library", r.music("music"))
-			mustExit(t, res, 3)
-			mustSay(t, res, "BusyBox's wget does not check the server's certificate")
-			r.nothingInstalled()
-		})
-		t.Run("GNU wget", func(t *testing.T) {
-			if _, err := exec.LookPath("wget"); err != nil {
-				t.Skip("no wget on this host")
-			}
-			r := newRig(t, sh, "curl")
-			res := r.run("--library", r.music("music"))
-			mustExit(t, res, 0)
-			r.askedOnly(stampedRelease)
-		})
+		for _, c := range []struct{ name, wget string }{
+			{"no curl and no wget", ""},
+			{"no curl, and GNU wget", "GNU Wget 1.21.3, a non-interactive network retriever."},
+			{"no curl, and BusyBox wget", "BusyBox v1.36.1 (2024-01-01) multi-call binary."},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				r := newRig(t, sh, "curl")
+				if c.wget != "" {
+					writeFile(t, filepath.Join(r.bin, "wget"), []byte("#!/bin/sh\nprintf 'wget %s\\n' \"$*\" >>\"$STUB_LOG\"\necho '"+c.wget+"'\nexit 0\n"), 0o755)
+				}
+				res := r.run("--library", r.music("music"))
+				mustExit(t, res, 3)
+				mustSay(t, res, "This installer needs: curl.", "sudo apt install curl", "Nothing was changed.")
+				if len(r.asked()) != 0 {
+					t.Errorf("it downloaded %q", r.asked())
+				}
+				if calls := r.callsTo("wget"); len(calls) != 0 {
+					t.Errorf("wget was run: %q", calls)
+				}
+				r.nothingInstalled()
+			})
+		}
 	})
+}
+
+// Every download is HTTPS to its end: a redirect to plain HTTP is not
+// followed, for checksums.txt or the archive, and the plain server is never
+// asked anything, though it would send the download back to HTTPS.
+func TestADownloadIsHeldToHTTPS(t *testing.T) {
+	t.Parallel()
+	for _, asset := range []string{"checksums.txt", archiveName(stampedRelease, "amd64")} {
+		t.Run(asset, func(t *testing.T) {
+			eachShell(t, func(t *testing.T, sh shell) {
+				r := newRig(t, sh)
+				path := assetPath(stampedRelease, asset)
+				var mu sync.Mutex
+				var plainAsked []string
+				plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+					mu.Lock()
+					plainAsked = append(plainAsked, req.URL.Path)
+					mu.Unlock()
+					http.Redirect(w, req, r.server.srv.URL+"/moved"+path, http.StatusFound)
+				}))
+				t.Cleanup(plain.Close)
+				r.server.redirect(path, plain.URL+"/plain"+path)
+				res := r.run("--library", r.music("music"))
+				mustExit(t, res, 1)
+				mustSay(t, res, "Could not download", "Nothing was installed.")
+				r.nothingInstalled()
+				mu.Lock()
+				defer mu.Unlock()
+				if len(plainAsked) != 0 {
+					t.Errorf("the plain HTTP server was asked for %q", plainAsked)
+				}
+			})
+		})
+	}
 }
 
 // Only Linux on amd64 or arm64 is installed; anything else is refused with
@@ -1129,8 +1373,8 @@ func TestAnInstalledBridgeIsUpgradedThroughBridgeUpdate(t *testing.T) {
 			if len(r.asked()) != 0 {
 				t.Errorf("an upgrade downloaded %q itself", r.asked())
 			}
-			if got := r.callsTo("bridge update"); len(got) != 1 || got[0] != "bridge update --yes --config "+config {
-				t.Errorf("bridge update calls %q", got)
+			if got, want := fmt.Sprintf("%q", r.bridgeCalls("update")), fmt.Sprintf("%q", [][]string{{"update", "--yes", "--config", config}}); got != want {
+				t.Errorf("bridge update calls %s, want %s", got, want)
 			}
 			if len(r.callsTo("bridge init")) != 0 {
 				t.Errorf("an upgrade ran bridge init")
@@ -1143,7 +1387,7 @@ func TestAnInstalledBridgeIsUpgradedThroughBridgeUpdate(t *testing.T) {
 				t.Errorf("an upgrade installed a second program at %s", r.target())
 			}
 			mustSay(t, res, "Found the bridge 0.2.1, installed as tester's service: "+bin,
-				"Updated the bridge from 0.2.1 to 0.2.2.", "The bridge 0.2.2 is running as tester's service.")
+				"Updated the bridge from 0.2.1 to 0.2.2.", "The bridge 0.2.2 is running as tester's service, and starts again when this box boots.")
 		})
 		t.Run("through a link", func(t *testing.T) {
 			r := newRig(t, sh)
@@ -1254,9 +1498,15 @@ func TestAnInstalledBridgeIsUpgradedThroughBridgeUpdate(t *testing.T) {
 
 // What the installer does not manage it refuses, with nothing changed: a
 // system service, a unit changed by hand or naming what is not there, a
-// program in a directory the user cannot write, settings no service runs, or
-// a file at ~/.local/bin/bridge that is not the bridge.
+// unit whose ExecStart a drop-in sets, a program in a directory the user
+// cannot write, settings no service runs, or anything at all at
+// ~/.local/bin/bridge with no service of the user's running it: a new
+// install is for a box with nothing of the bridge on it, and only a
+// bridge's own bridge update replaces a bridge (the bridge itself there,
+// another program, a link or a directory). That refusal names bridge update
+// and bridge init as the way on.
 func TestLayoutsTheInstallerDoesNotManageAreRefused(t *testing.T) {
+	const programThere = "is there, and the bridge is not installed as tester's service"
 	cases := []struct {
 		name  string
 		setup func(r *rig)
@@ -1272,7 +1522,7 @@ func TestLayoutsTheInstallerDoesNotManageAreRefused(t *testing.T) {
 		{"a unit with a drop-in ExecStart", func(r *rig) {
 			r.installed("0.2.1", r.target(), r.configFile())
 			writeFile(r.t, r.unitFile()+".d/override.conf", []byte("[Service]\nExecStart=\nExecStart=/opt/bridge serve\n"), 0o644)
-		}, "sets the service's ExecStart"},
+		}, "sets its ExecStart more than once"},
 		{"a unit whose program is gone", func(r *rig) {
 			r.installed("0.2.1", r.target(), r.configFile())
 			if err := os.Remove(r.target()); err != nil {
@@ -1282,12 +1532,23 @@ func TestLayoutsTheInstallerDoesNotManageAreRefused(t *testing.T) {
 		{"settings no service runs", func(r *rig) {
 			writeFile(r.t, r.configFile(), []byte("libraryRoots: [/srv/music]\n"), 0o600)
 		}, "but no service runs them"},
+		{"the bridge at the target, with no service", func(r *rig) {
+			writeFile(r.t, r.target(), fakeBridge(r.t, "0.2.1"), 0o755)
+		}, programThere},
 		{"another program at the target", func(r *rig) {
 			writeFile(r.t, r.target(), []byte("#!/bin/sh\necho hello\n"), 0o755)
-		}, "is not the 1-bit bridge"},
+		}, programThere},
+		{"a link at the target", func(r *rig) {
+			other := filepath.Join(r.dir, "elsewhere", "bridge")
+			writeFile(r.t, other, fakeBridge(r.t, "0.2.1"), 0o755)
+			mkdirAll(r.t, filepath.Dir(r.target()))
+			if err := os.Symlink(other, r.target()); err != nil {
+				r.t.Fatal(err)
+			}
+		}, programThere},
 		{"a directory at the target", func(r *rig) {
 			mkdirAll(r.t, r.target())
-		}, "is not the 1-bit bridge"},
+		}, programThere},
 	}
 	eachShell(t, func(t *testing.T, sh shell) {
 		for _, c := range cases {
@@ -1296,13 +1557,21 @@ func TestLayoutsTheInstallerDoesNotManageAreRefused(t *testing.T) {
 				r.newRelease(stampedRelease)
 				r.set("FAKE_UPDATE", "ok")
 				c.setup(r)
-				before := tree(t, r.home)
+				home, state := tree(t, r.home), tree(t, r.state)
 				res := r.run("--library", r.music("music"))
 				mustExit(t, res, 3)
 				mustSay(t, res, c.say, "Nothing was changed.")
-				sameTree(t, "the box", before, tree(t, r.home))
-				if len(r.asked()) != 0 || len(r.callsTo("bridge update")) != 0 || len(r.callsTo("bridge init")) != 0 {
-					t.Errorf("a refused layout was acted on: %q %q", r.asked(), r.calls())
+				r.unchanged(home, state)
+				if c.say == programThere {
+					// The commands it prints run the program at the target,
+					// whatever it is: the recorder stands in for it.
+					if err := os.RemoveAll(r.target()); err != nil {
+						t.Fatal(err)
+					}
+					sameCalls(t, r.runPrinted(printed(res.output()), r.target()), [][]string{
+						{"bridge", "update"},
+						{"bridge", "init"},
+					})
 				}
 			})
 		}
@@ -1359,28 +1628,38 @@ func TestRootIsRefused(t *testing.T) {
 // starts it at boot, is turned on the least privileged way that works, after
 // saying why: by the session itself, then sudo (its password asked on the
 // terminal), then su without sudo; failing those, the command is printed and
-// the install goes on.
+// the install goes on. What the run says at its end is what lingering is
+// then: on, already or by this run, it says the bridge starts at boot; off,
+// or with no loginctl to turn it on, it never does.
 func TestLingeringIsTurnedOnSoTheServiceOutlivesTheLogin(t *testing.T) {
+	const boots = "is running as tester's service, and starts again when this box boots."
 	cases := []struct {
 		name     string
+		upgrade  bool
 		omit     []string
 		env      []string
 		terminal []string
 		calls    []string
 		linger   bool
-		say      string
+		say      []string
 	}{
-		{name: "already on", env: nil, linger: true},
+		{name: "already on", linger: true, say: []string{boots}},
 		{name: "by the session", env: []string{"STUB_SELF_LINGER", "1"}, linger: true,
-			calls: []string{"loginctl --no-ask-password enable-linger"}},
+			calls: []string{"loginctl --no-ask-password enable-linger"}, say: []string{boots}},
 		{name: "by sudo without a terminal", linger: true,
-			calls: []string{"sudo -n loginctl enable-linger tester"}, say: "sudo runs loginctl enable-linger tester"},
+			calls: []string{"sudo -n loginctl enable-linger tester"}, say: []string{"sudo runs loginctl enable-linger tester", boots}},
 		{name: "by sudo asking on the terminal", env: []string{"STUB_SUDO_ASKS", "1"}, terminal: []string{"secret", ""}, linger: true,
-			calls: []string{"sudo loginctl enable-linger tester", "stub sudo read secret"}},
+			calls: []string{"sudo loginctl enable-linger tester", "stub sudo read secret"}, say: []string{boots}},
 		{name: "by su without sudo", omit: []string{"sudo"}, terminal: []string{"rootpw", ""}, linger: true,
-			calls: []string{"su root -c loginctl enable-linger tester", "stub su read rootpw"}, say: "There is no sudo here"},
+			calls: []string{"su root -c loginctl enable-linger tester", "stub su read rootpw"}, say: []string{"There is no sudo here", boots}},
 		{name: "not at all", env: []string{"STUB_SUDO_ASKS", "1"}, linger: false,
-			say: "To turn it on, run as root: loginctl enable-linger tester"},
+			say: []string{"To turn it on, run as root:", "    loginctl enable-linger tester",
+				"is running as tester's service, until tester's last login session on this box ends: lingering is not on"}},
+		{name: "not at all, on an upgrade", upgrade: true, env: []string{"STUB_SUDO_ASKS", "1"}, linger: false,
+			say: []string{"    loginctl enable-linger tester",
+				"is running as tester's service, until tester's last login session on this box ends: lingering is not on"}},
+		{name: "no loginctl", omit: []string{"loginctl"}, linger: false,
+			say: []string{"There is no loginctl here", "is running as tester's service. This box has no loginctl, so lingering is not on"}},
 	}
 	eachShell(t, func(t *testing.T, sh shell) {
 		for _, c := range cases {
@@ -1393,7 +1672,14 @@ func TestLingeringIsTurnedOnSoTheServiceOutlivesTheLogin(t *testing.T) {
 				if c.terminal != nil {
 					r.terminal(c.terminal...)
 				}
-				res := r.run("--library", r.music("music"))
+				var res result
+				if c.upgrade {
+					r.installed("0.2.1", r.target(), r.configFile())
+					r.set("FAKE_UPDATE", "latest")
+					res = r.run()
+				} else {
+					res = r.run("--library", r.music("music"))
+				}
 				mustExit(t, res, 0)
 				calls := strings.Join(r.calls(), "\n")
 				for _, want := range c.calls {
@@ -1407,22 +1693,25 @@ func TestLingeringIsTurnedOnSoTheServiceOutlivesTheLogin(t *testing.T) {
 				if got := exists(filepath.Join(r.state, "linger")); got != c.linger {
 					t.Errorf("lingering on: %v, want %v", got, c.linger)
 				}
-				if c.say != "" {
-					mustSay(t, res, c.say)
+				mustSay(t, res, c.say...)
+				if !c.linger && strings.Contains(res.output(), "starts again when this box boots") {
+					t.Errorf("with lingering off, it says the bridge starts at boot:\n%s", res.output())
 				}
-				if len(r.callsTo("bridge init")) != 1 {
-					t.Errorf("bridge init did not run once: %q", r.callsTo("bridge init"))
+				if want := map[bool]int{false: 1, true: 0}[c.upgrade]; len(r.callsTo("bridge init")) != want {
+					t.Errorf("bridge init ran %d times, want %d: %q", len(r.callsTo("bridge init")), want, r.callsTo("bridge init"))
 				}
 			})
 		}
 	})
 }
 
-// bridge init installs the service through the user's systemd manager. The
-// installer finds it through /run/user/<uid> when the session did not say
-// where (su, a script), and waits for it after turning lingering on, which
-// starts it; with none, the program is installed and setup waits (exit 4).
-func TestTheUserManagerIsFoundOrSetupWaits(t *testing.T) {
+// The installer asks the user's systemd manager what it has before anything
+// changes, and bridge init installs the service through it. It finds the
+// manager through /run/user/<uid> when the session did not say where (su, a
+// script), changing nothing; with none, every run is refused with nothing
+// changed (no download, no lingering turned on, which would start the
+// manager), naming the lingering that would.
+func TestTheUserManagerIsFoundOrNothingChanges(t *testing.T) {
 	eachShell(t, func(t *testing.T, sh shell) {
 		t.Run("through the runtime directory", func(t *testing.T) {
 			r := newRig(t, sh)
@@ -1449,27 +1738,37 @@ func TestTheUserManagerIsFoundOrSetupWaits(t *testing.T) {
 				t.Errorf("bridge init did not run")
 			}
 		})
-		t.Run("started by lingering", func(t *testing.T) {
+		t.Run("none, on a new box", func(t *testing.T) {
 			r := newRig(t, sh)
 			r.set("STUB_NO_BUS", "1")
 			res := r.run("--library", r.music("music"))
-			mustExit(t, res, 0)
-		})
-		t.Run("none", func(t *testing.T) {
-			r := newRig(t, sh)
-			r.set("STUB_NO_BUS", "1", "STUB_LINGER_NO_BUS", "1")
-			res := r.run("--library", r.music("music"))
-			mustExit(t, res, 4)
-			mustSay(t, res, "there is no systemd user session for tester", "not with su or sudo")
-			if !exists(r.target()) || len(r.callsTo("bridge init")) != 0 {
-				t.Errorf("want the program installed and init not run: %q", r.calls())
+			mustExit(t, res, 3)
+			mustSay(t, res, "There is no systemd user session for tester here", "not with su or sudo", "Nothing was changed.")
+			if len(r.asked()) != 0 {
+				t.Errorf("it downloaded %q", r.asked())
 			}
+			r.nothingInstalled()
+			if calls := r.callsTo("loginctl"); len(calls) != 0 {
+				t.Errorf("lingering was asked about: %q", calls)
+			}
+			sameCalls(t, r.runPrinted(printed(res.output())), [][]string{{"loginctl", "enable-linger", "tester"}})
+		})
+		t.Run("none, with the bridge installed", func(t *testing.T) {
+			r := newRig(t, sh)
+			r.installed("0.2.1", r.target(), r.configFile())
+			r.newRelease(stampedRelease)
+			r.set("STUB_NO_BUS", "1", "FAKE_UPDATE", "ok")
+			home, state := tree(t, r.home), tree(t, r.state)
+			res := r.run()
+			mustExit(t, res, 3)
+			mustSay(t, res, "There is no systemd user session for tester here", "Nothing was changed.")
+			r.unchanged(home, state)
 		})
 	})
 }
 
 // A system that does not run systemd gets the program and the commands to
-// run it by hand (exit 4).
+// run it by hand (exit 4), and no service manager is asked anything.
 func TestWithoutSystemdSetupWaits(t *testing.T) {
 	eachShell(t, func(t *testing.T, sh shell) {
 		r := newRig(t, sh)
@@ -1482,6 +1781,13 @@ func TestWithoutSystemdSetupWaits(t *testing.T) {
 		if !exists(r.target()) || len(r.callsTo("bridge init")) != 0 || len(r.callsTo("systemctl")) != 0 {
 			t.Errorf("want the program installed and nothing set up: %q", r.calls())
 		}
+		if strings.Contains(res.output(), "installer again") {
+			t.Errorf("it says to run the installer again, which would refuse the program it left:\n%s", res.output())
+		}
+		sameCalls(t, r.runPrinted(printed(res.output()), r.target()), [][]string{
+			{"bridge", "init", "--no-service", "--library", "/path/to/music"},
+			{"bridge", "serve"},
+		})
 	})
 }
 
@@ -1668,11 +1974,12 @@ func TestUninstallPrintsTheStepsAndChangesNothing(t *testing.T) {
 	})
 }
 
-// A program the installer replaces may be running: the new one is put in
-// place by a rename, a new file under the old name, so the running one goes
-// on and nothing writes into it (on Linux, a write into a running program
-// fails with ETXTBSY).
-func TestReplacingAProgramThatIsRunning(t *testing.T) {
+// A program at ~/.local/bin/bridge that no service of the user runs is
+// never replaced, even when it is a bridge and running: only a bridge's own
+// bridge update replaces a bridge, after checking its paired devices and
+// keeping the previous program. The run is refused, the file is the one it
+// was, and the program running from it goes on.
+func TestAProgramAtTheTargetIsNeverReplaced(t *testing.T) {
 	sleep, err := exec.LookPath("sleep")
 	if err != nil {
 		t.Skip("no sleep program to stand in for a running bridge")
@@ -1683,8 +1990,8 @@ func TestReplacingAProgramThatIsRunning(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// A real executable that carries the bridge's module path, as the
-		// installer checks before it replaces a file.
+		// A real executable that carries the bridge's module path, as
+		// every bridge program does.
 		writeFile(t, r.target(), append(program, []byte("github.com/acoseac/1-bit-bridge")...), 0o755)
 		running := exec.Command(r.target(), "60")
 		if err := running.Start(); err != nil {
@@ -1698,8 +2005,11 @@ func TestReplacingAProgramThatIsRunning(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		home, state := tree(t, r.home), tree(t, r.state)
 		res := r.run("--library", r.music("music"))
-		mustExit(t, res, 0)
+		mustExit(t, res, 3)
+		mustSay(t, res, r.target()+" is there", "Nothing was changed.")
+		r.unchanged(home, state)
 		if err := running.Process.Signal(syscall.Signal(0)); err != nil {
 			t.Errorf("the running program did not go on: %v", err)
 		}
@@ -1707,19 +2017,16 @@ func TestReplacingAProgramThatIsRunning(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if os.SameFile(before, after) {
-			t.Errorf("the program was written in place, not renamed into place")
-		}
-		if got := readFile(t, r.target()); got != string(fakeBridge(t, stampedRelease)) {
-			t.Errorf("the program was not replaced")
+		if !os.SameFile(before, after) {
+			t.Errorf("the program's file was replaced")
 		}
 	})
 }
 
-// A run stopped between staging the new program and renaming it into place
-// leaves the program it found, and neither the staged copy nor its
-// temporary directory.
-func TestAnInterruptedReplacementLeavesTheProgramItFound(t *testing.T) {
+// A run stopped between staging the program and renaming it into place
+// leaves nothing: no program, no staged copy, no directory it made for
+// them, no temporary directory, and no setup.
+func TestAnInterruptedInstallLeavesNothing(t *testing.T) {
 	chmod, err := exec.LookPath("chmod")
 	if err != nil {
 		t.Fatal(err)
@@ -1729,26 +2036,388 @@ func TestAnInterruptedReplacementLeavesTheProgramItFound(t *testing.T) {
 		writeFile(t, filepath.Join(r.bin, "chmod"), []byte("#!/bin/sh\n"+
 			"case \"$2\" in */.bridge.install.*) kill -TERM \"$PPID\" ;; esac\n"+
 			"exec "+chmod+" \"$@\"\n"), 0o755)
-		old := string(fakeBridge(t, "0.2.1"))
-		writeFile(t, r.target(), []byte(old), 0o755)
 		res := r.run("--library", r.music("music"))
 		mustExit(t, res, 143)
-		if got := readFile(t, r.target()); got != old {
-			t.Errorf("the program it found was changed")
-		}
-		entries, err := os.ReadDir(filepath.Dir(r.target()))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(entries) != 1 {
-			t.Errorf("left beside the program: %v", entries)
-		}
-		if entries, _ := os.ReadDir(r.tmp); len(entries) != 0 {
-			t.Errorf("the temporary directory was left behind: %v", entries)
-		}
+		r.nothingInstalled()
 		if len(r.callsTo("bridge init")) != 0 {
 			t.Errorf("setup ran after the stop")
 		}
+	})
+}
+
+// What a run leaves decides the next one, which never replaces it. After
+// --no-init, after a box without systemd and after an init that failed, the
+// program is there with no service: the next run refuses with nothing
+// changed, and the first named the commands that finish (bridge init),
+// never a second run. A refusal for want of a library changes nothing, so
+// the next run, given one, installs; and the run after an install upgrades
+// it through bridge update.
+func TestARunAfterOneThatDidNotFinish(t *testing.T) {
+	eachShell(t, func(t *testing.T, sh shell) {
+		refusedNext := func(t *testing.T, r *rig, first result) {
+			t.Helper()
+			if strings.Contains(first.output(), "installer again") {
+				t.Errorf("the first run says to run the installer again, which refuses what it left:\n%s", first.output())
+			}
+			home, state := tree(t, r.home), tree(t, r.state)
+			asked := len(r.asked())
+			calls := len(r.mutations())
+			res := r.run("--library", r.music("music"))
+			mustExit(t, res, 3)
+			mustSay(t, res, r.target()+" is there", "Nothing was changed.")
+			sameTree(t, "HOME", home, tree(t, r.home))
+			sameTree(t, "the service's state", state, tree(t, r.state))
+			if len(r.asked()) != asked || len(r.mutations()) != calls {
+				t.Errorf("the second run acted: %q %q", r.asked()[asked:], r.mutations()[calls:])
+			}
+		}
+		t.Run("after --no-init", func(t *testing.T) {
+			r := newRig(t, sh)
+			first := r.run("--no-init")
+			mustExit(t, first, 0)
+			refusedNext(t, r, first)
+		})
+		t.Run("after a box without systemd", func(t *testing.T) {
+			r := newRig(t, sh)
+			if err := os.RemoveAll(filepath.Join(r.root, "run", "systemd")); err != nil {
+				t.Fatal(err)
+			}
+			first := r.run("--library", r.music("music"))
+			mustExit(t, first, 4)
+			refusedNext(t, r, first)
+		})
+		t.Run("after an init that failed", func(t *testing.T) {
+			r := newRig(t, sh)
+			r.set("FAKE_INIT_FAILS", "1")
+			music := r.music("music")
+			first := r.run("--library", music)
+			mustExit(t, first, 1)
+			mustSay(t, first, "bridge init stopped (exit 1)", "    "+r.target()+" init --library "+music)
+			refusedNext(t, r, first)
+		})
+		t.Run("after a refusal for want of a library", func(t *testing.T) {
+			r := newRig(t, sh)
+			first := r.runHeldOpen()
+			mustExit(t, first, 3)
+			r.nothingInstalled()
+			res := r.run("--library", r.music("music"))
+			mustExit(t, res, 0)
+			mustSay(t, res, "is running as tester's service")
+		})
+		t.Run("after an install", func(t *testing.T) {
+			r := newRig(t, sh)
+			mustExit(t, r.run("--library", r.music("music")), 0)
+			r.set("FAKE_UPDATE", "latest")
+			res := r.run()
+			mustExit(t, res, 0)
+			mustSay(t, res, "Found the bridge 0.2.2, installed as tester's service", "The bridge 0.2.2 is the latest release.")
+			if got, want := fmt.Sprintf("%q", r.bridgeCalls("update")), fmt.Sprintf("%q", [][]string{{"update", "--yes", "--config", r.configFile()}}); got != want {
+				t.Errorf("bridge update calls %s, want %s", got, want)
+			}
+		})
+	})
+}
+
+// A service that runs, but whose release bridge status cannot read, is not
+// reported as running the release: the run ends incomplete (exit 4) with
+// the command that checks it, after an upgrade and after a new install, and
+// nothing after that (no pairing) is said as if it were.
+func TestAServiceWhoseReleaseCannotBeReadIsNotReportedRunning(t *testing.T) {
+	eachShell(t, func(t *testing.T, sh shell) {
+		for _, upgrade := range []bool{true, false} {
+			t.Run(map[bool]string{true: "an upgrade", false: "a new install"}[upgrade], func(t *testing.T) {
+				r := newRig(t, sh)
+				r.set("FAKE_STATUS_UNREADABLE", "1")
+				var res result
+				if upgrade {
+					r.installed("0.2.1", r.target(), r.configFile())
+					r.newRelease(stampedRelease)
+					r.set("FAKE_UPDATE", "ok")
+					res = r.run()
+				} else {
+					res = r.run("--library", r.music("music"))
+				}
+				mustExit(t, res, 4)
+				mustSay(t, res, "bridge status could not say which release it serves", "Check it with:")
+				for _, claim := range []string{"is running as tester's service", "Pair your iPhone"} {
+					if strings.Contains(res.output(), claim) {
+						t.Errorf("an unread release is reported as running (%q):\n%s", claim, res.output())
+					}
+				}
+				if !exists(filepath.Join(r.state, "active")) {
+					t.Errorf("the service is not active")
+				}
+				sameCalls(t, r.runPrinted(printed(res.output()), r.target()), [][]string{{"bridge", "status"}})
+			})
+		}
+	})
+}
+
+// The bridge the installer runs (bridge init, bridge update, bridge status)
+// must read the settings its service reads, and the bridge takes a BRIDGE_
+// variable over its bridge.yaml, --config or not. So a run is refused, with
+// nothing changed, where the service's environment holds what this run's
+// would not, or this run's what the service's would not: an Environment=,
+// EnvironmentFile= or PassEnvironment= line in the unit or in any drop-in,
+// beside it or elsewhere (bridge init writes none), a BRIDGE_ variable the
+// user's service manager gives every service, or one this shell exports.
+// Each is named, never its value.
+func TestAnInstallWhoseServiceHasAnotherEnvironmentIsRefused(t *testing.T) {
+	const secret = "/srv/bridge-data-s3cret"
+	cases := []struct {
+		name  string
+		setup func(r *rig)
+		say   string
+	}{
+		{"Environment= in a drop-in beside the unit", func(r *rig) {
+			writeFile(r.t, r.unitFile()+".d/data.conf", []byte("[Service]\nEnvironment=BRIDGE_DATA_DIR="+secret+"\n"), 0o644)
+		}, "Environment, in " + "UNIT.d/data.conf"},
+		{"EnvironmentFile= in a drop-in elsewhere", func(r *rig) {
+			writeFile(r.t, filepath.Join(r.root, "etc", "systemd", "user", unitName+".d", "env.conf"), []byte("[Service]\nEnvironmentFile="+secret+"/bridge.env\n"), 0o644)
+		}, "EnvironmentFile, in "},
+		{"Environment= in a drop-in for every service", func(r *rig) {
+			writeFile(r.t, filepath.Join(r.home, ".config", "systemd", "user", "service.d", "env.conf"), []byte("[Service]\nEnvironment=\"BRIDGE_ADMIN_ADDRESS=127.0.0.1:7790\" "+secret+"\n"), 0o644)
+		}, "Environment, in "},
+		{"PassEnvironment= in the unit", func(r *rig) {
+			writeFile(r.t, r.unitFile(), []byte(strings.Replace(unitText(r.target(), r.configFile()), "Type=simple\n", "Type=simple\nPassEnvironment=BRIDGE_DATA_DIR "+secret+"\n", 1)), 0o644)
+		}, "PassEnvironment, in "},
+		{"a BRIDGE_ variable of the service manager's", func(r *rig) {
+			r.set("STUB_MANAGER_ENV", "BRIDGE_DATA_DIR="+secret)
+		}, "gives every service of tester BRIDGE_DATA_DIR"},
+		{"a BRIDGE_ variable this shell exports", func(r *rig) {
+			r.set("BRIDGE_DATA_DIR", secret)
+		}, "This shell exports BRIDGE_DATA_DIR"},
+	}
+	eachShell(t, func(t *testing.T, sh shell) {
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				r := newRig(t, sh)
+				r.installed("0.2.1", r.target(), r.configFile())
+				r.newRelease(stampedRelease)
+				r.set("FAKE_UPDATE", "ok")
+				c.setup(r)
+				home, state := tree(t, r.home), tree(t, r.state)
+				res := r.run()
+				mustExit(t, res, 3)
+				mustSay(t, res, strings.Replace(c.say, "UNIT", r.unitFile(), 1), "Nothing was changed.")
+				r.unchanged(home, state)
+				if strings.Contains(res.output(), "s3cret") {
+					t.Errorf("the refusal quotes the value:\n%s", res.output())
+				}
+			})
+		}
+		for _, c := range cases[4:] {
+			t.Run(c.name+", on a new box", func(t *testing.T) {
+				r := newRig(t, sh)
+				c.setup(r)
+				res := r.run("--library", r.music("music"))
+				mustExit(t, res, 3)
+				mustSay(t, res, c.say, "Nothing was changed.")
+				r.nothingInstalled()
+				if len(r.asked()) != 0 {
+					t.Errorf("it downloaded %q", r.asked())
+				}
+				if strings.Contains(res.output(), "s3cret") {
+					t.Errorf("the refusal quotes the value:\n%s", res.output())
+				}
+			})
+		}
+	})
+}
+
+// What the user's service manager has of the bridge's unit, wherever its
+// files are (systemctl --user cat), decides as the files in HOME do: a unit
+// of that name or a drop-in for it elsewhere, with none in HOME, is not a
+// new box; a unit the manager runs from elsewhere in place of the one in
+// HOME, or a drop-in elsewhere that sets its ExecStart, is not the install
+// bridge init made; and a manager that cannot say is refused too, all with
+// nothing changed. A drop-in of other settings changes nothing of what the
+// upgrade runs.
+func TestTheServiceManagerIsAskedWhatItRuns(t *testing.T) {
+	elsewhere := func(r *rig, dirs ...string) string {
+		return filepath.Join(append([]string{r.root}, dirs...)...)
+	}
+	cases := []struct {
+		name      string
+		installed bool
+		setup     func(r *rig)
+		say       string
+	}{
+		{"a unit of that name elsewhere, none here", false, func(r *rig) {
+			writeFile(r.t, elsewhere(r, "etc", "systemd", "user", unitName), []byte(unitText("/opt/bridge/bridge", "/etc/bridge.yaml")), 0o644)
+		}, "from files bridge init did not write"},
+		{"a drop-in for it elsewhere, none here", false, func(r *rig) {
+			writeFile(r.t, elsewhere(r, "usr", "lib", "systemd", "user", unitName+".d", "nice.conf"), []byte("[Service]\nNice=5\n"), 0o644)
+		}, "from files bridge init did not write"},
+		{"a manager that cannot say, on a new box", false, func(r *rig) {
+			r.set("STUB_CAT_FAILS", "1")
+		}, "Connection timed out"},
+		{"a unit that takes the place of the one here", true, func(r *rig) {
+			writeFile(r.t, elsewhere(r, "run", "user", "1000", "systemd", "transient", unitName), []byte(unitText("/opt/bridge/bridge", r.configFile())), 0o644)
+		}, "runs the bridge's service from " + "TRANSIENT"},
+		{"a drop-in elsewhere that sets its ExecStart", true, func(r *rig) {
+			writeFile(r.t, elsewhere(r, "etc", "systemd", "user", unitName+".d", "exec.conf"), []byte("[Service]\nExecStart=\nExecStart=/opt/bridge/bridge serve\n"), 0o644)
+		}, "sets its ExecStart more than once"},
+		{"a manager that cannot say, with the bridge installed", true, func(r *rig) {
+			r.set("STUB_CAT_FAILS", "1")
+		}, "Connection timed out"},
+	}
+	eachShell(t, func(t *testing.T, sh shell) {
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				r := newRig(t, sh)
+				r.newRelease(stampedRelease)
+				r.set("FAKE_UPDATE", "ok")
+				if c.installed {
+					r.installed("0.2.1", r.target(), r.configFile())
+				}
+				c.setup(r)
+				home, state := tree(t, r.home), tree(t, r.state)
+				res := r.run("--library", r.music("music"))
+				mustExit(t, res, 3)
+				mustSay(t, res, strings.Replace(c.say, "TRANSIENT", elsewhere(r, "run", "user", "1000", "systemd", "transient", unitName), 1), "Nothing was changed.")
+				r.unchanged(home, state)
+			})
+		}
+		t.Run("a drop-in of other settings", func(t *testing.T) {
+			r := newRig(t, sh)
+			r.installed("0.2.1", r.target(), r.configFile())
+			writeFile(t, r.unitFile()+".d/nice.conf", []byte("[Service]\nNice=5\nCPUWeight=50\n"), 0o644)
+			r.newRelease(stampedRelease)
+			r.set("FAKE_UPDATE", "ok")
+			res := r.run()
+			mustExit(t, res, 0)
+			mustSay(t, res, "Updated the bridge from 0.2.1 to 0.2.2.")
+		})
+	})
+}
+
+// Every command the installer prints for the user to type runs as printed,
+// pasted into the shell: each word quoted where it needs it, so that a path
+// with a space, an apostrophe or a semicolon in it stays one word and runs
+// nothing else, and the settings named with --config wherever they are not
+// where the bridge looks without it, on the commands that read them (pair,
+// status, serve and update; init, logs and start take no --config).
+func TestThePrintedCommandsRunAsPrinted(t *testing.T) {
+	const odd = "it's; injected ;x"
+	eachShell(t, func(t *testing.T, sh shell) {
+		t.Run("after an upgrade of a bridge with its settings elsewhere", func(t *testing.T) {
+			r := newRig(t, sh)
+			bin := filepath.Join(r.home, "apps "+odd, "bridge")
+			config := filepath.Join(r.home, "settings "+odd, "bridge.yaml")
+			r.installed("0.2.1", bin, config)
+			r.newRelease(stampedRelease)
+			r.set("FAKE_UPDATE", "ok")
+			res := r.run()
+			mustExit(t, res, 0)
+			sameCalls(t, r.runPrinted(printed(res.output()), bin), [][]string{
+				{"ssh", "-L", "7789:127.0.0.1:7789", "tester@192.0.2.10"},
+				{"bridge", "pair", "--name", "My iPhone", "--config", config},
+				{"bridge", "status", "--config", config},
+			})
+		})
+		t.Run("a new install in a HOME of that name", func(t *testing.T) {
+			r := newRig(t, sh)
+			r.moveHome("home " + odd)
+			res := r.run("--library", r.music("music"))
+			mustExit(t, res, 0)
+			sameCalls(t, r.runPrinted(printed(res.output()), r.target()), [][]string{
+				{"ssh", "-L", "7789:127.0.0.1:7789", "tester@192.0.2.10"},
+				{"bridge", "pair", "--name", "My iPhone"},
+				{"bridge", "status"},
+			})
+		})
+		t.Run("a new install the PATH finds", func(t *testing.T) {
+			r := newRig(t, sh)
+			r.set("PATH", r.bin+":"+filepath.Dir(r.target()))
+			res := r.run("--library", r.music("music"))
+			mustExit(t, res, 0)
+			mustSay(t, res, "    bridge pair --name 'My iPhone'", "    bridge status")
+			sameCalls(t, r.runPrinted(printed(res.output())), [][]string{
+				{"ssh", "-L", "7789:127.0.0.1:7789", "tester@192.0.2.10"},
+				{"bridge", "pair", "--name", "My iPhone"},
+				{"bridge", "status"},
+			})
+		})
+		t.Run("an init that failed, its library of that name", func(t *testing.T) {
+			r := newRig(t, sh)
+			r.set("FAKE_INIT_FAILS", "1")
+			music := r.music("music " + odd)
+			res := r.run("--library", music)
+			mustExit(t, res, 1)
+			sameCalls(t, r.runPrinted(printed(res.output()), r.target()), [][]string{
+				{"bridge", "init", "--library", music},
+			})
+		})
+		t.Run("a box without systemd, in a HOME of that name", func(t *testing.T) {
+			r := newRig(t, sh)
+			r.moveHome("home " + odd)
+			if err := os.RemoveAll(filepath.Join(r.root, "run", "systemd")); err != nil {
+				t.Fatal(err)
+			}
+			res := r.run("--library", r.music("music"))
+			mustExit(t, res, 4)
+			sameCalls(t, r.runPrinted(printed(res.output()), r.target()), [][]string{
+				{"bridge", "init", "--no-service", "--library", "/path/to/music"},
+				{"bridge", "serve"},
+			})
+		})
+		t.Run("a service that does not start, its program elsewhere", func(t *testing.T) {
+			r := newRig(t, sh)
+			bin := filepath.Join(r.home, "apps "+odd, "bridge")
+			config := filepath.Join(r.home, "settings "+odd, "bridge.yaml")
+			r.installed("0.2.1", bin, config)
+			if err := os.Remove(filepath.Join(r.state, "active")); err != nil {
+				t.Fatal(err)
+			}
+			r.set("FAKE_UPDATE", "latest", "STUB_SERVICE_FAILS", "1")
+			res := r.run()
+			mustExit(t, res, 1)
+			sameCalls(t, r.runPrinted(printed(res.output()), bin), [][]string{{"bridge", "logs"}})
+		})
+		t.Run("a service whose release cannot be read, its settings elsewhere", func(t *testing.T) {
+			r := newRig(t, sh)
+			bin := filepath.Join(r.home, "apps "+odd, "bridge")
+			config := filepath.Join(r.home, "settings "+odd, "bridge.yaml")
+			r.installed("0.2.1", bin, config)
+			r.set("FAKE_UPDATE", "latest", "FAKE_STATUS_UNREADABLE", "1")
+			res := r.run()
+			mustExit(t, res, 4)
+			sameCalls(t, r.runPrinted(printed(res.output()), bin), [][]string{{"bridge", "status", "--config", config}})
+		})
+		t.Run("a restart that failed", func(t *testing.T) {
+			r := newRig(t, sh)
+			r.installed("0.2.1", r.target(), r.configFile())
+			r.newRelease(stampedRelease)
+			r.set("FAKE_UPDATE", "restartfail")
+			res := r.run()
+			mustExit(t, res, 1)
+			sameCalls(t, r.runPrinted(printed(res.output())), [][]string{{"systemctl", "--user", "restart", unitName}})
+		})
+		t.Run("--no-init on a bridge with its settings elsewhere", func(t *testing.T) {
+			r := newRig(t, sh)
+			bin := filepath.Join(r.home, "apps "+odd, "bridge")
+			config := filepath.Join(r.home, "settings "+odd, "bridge.yaml")
+			r.installed("0.2.1", bin, config)
+			res := r.run("--no-init")
+			mustExit(t, res, 3)
+			sameCalls(t, r.runPrinted(printed(res.output()), bin), [][]string{{"bridge", "update", "--config", config}})
+		})
+		t.Run("--uninstall in a HOME of that name", func(t *testing.T) {
+			r := newRig(t, sh)
+			r.moveHome("home " + odd)
+			r.installed(stampedRelease, r.target(), r.configFile())
+			res := r.run("--uninstall")
+			mustExit(t, res, 0)
+			sameCalls(t, r.runPrinted(printed(res.output())), [][]string{
+				{"systemctl", "--user", "disable", "--now", unitName},
+				{"systemctl", "--user", "is-active", unitName},
+				{"rm", r.unitFile()},
+				{"systemctl", "--user", "daemon-reload"},
+				{"rm", "-f", r.target(), r.target() + ".bak"},
+				{"rm", "-rf", filepath.Dir(r.configFile())},
+			})
+		})
 	})
 }
 

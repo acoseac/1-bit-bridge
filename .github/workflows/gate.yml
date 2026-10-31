@@ -598,8 +598,8 @@ jobs:
   # leaving it untested. ksh is there because it found a real defect: ksh93's
   # predefined alias stop shadowed the installer's function of that name. The
   # race suite above runs the same tests under sh alone; this job is where the
-  # lint and the other shells run, and wget is installed so the GNU wget
-  # download runs too.
+  # lint and the other shells run. The installer downloads with curl alone,
+  # so no wget is installed: its tests refuse one with a stub of their own.
   installer:
     name: installer
     runs-on: ubuntu-latest
@@ -615,10 +615,10 @@ jobs:
           go-version-file: go.mod
           check-latest: true
           cache: false
-      - name: Install shellcheck, the shells and wget
+      - name: Install shellcheck and the shells
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends shellcheck dash busybox ksh wget
+          sudo apt-get install -y --no-install-recommends shellcheck dash busybox ksh
       - name: shellcheck, then the installer's tests under each shell
         run: make installer-check INSTALLER_SHELLS="sh,dash,bash --posix,busybox sh,ksh"
 
