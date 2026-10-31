@@ -57,6 +57,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/adminauth"
@@ -852,7 +853,7 @@ func reapOrphans(ctx context.Context, backupsRoot string, grace time.Duration) (
 	// Refuse an empty root. Not because os.ReadDir("") reads the working
 	// directory, as the post-merge review of #531 said: it fails with ENOENT
 	// on every platform (measured with go1.26.6 on macOS, Linux and Windows),
-	// so an empty root would fall into the not-exist branch below and reap
+	// so an empty root would read as nothing there (readBackupsDir) and reap
 	// nothing, silently. It is refused because an empty backupsRoot is a
 	// misconfiguration the caller should hear about (PruneResult.ReapErr),
 	// and because this check runs before anything can turn "" into the
@@ -863,10 +864,7 @@ func reapOrphans(ctx context.Context, backupsRoot string, grace time.Duration) (
 	if strings.TrimSpace(backupsRoot) == "" {
 		return 0, errors.New("backup: ReapOrphans requires a non-empty backups root")
 	}
-	entries, err := readDir(backupsRoot)
-	if errors.Is(err, os.ErrNotExist) {
-		return 0, nil
-	}
+	entries, err := readBackupsDir(backupsRoot)
 	if err != nil {
 		return 0, err
 	}
@@ -936,7 +934,9 @@ type snapshotEntry struct {
 
 // List returns the snapshots under `backupsRoot`, newest-first.
 // Directories without a readable manifest are skipped (likely
-// in-progress or corrupt — operator can clean them up by hand).
+// in-progress or corrupt — operator can clean them up by hand). A root
+// not made yet lists nothing, and one that is not a folder fails the
+// listing on every OS (readBackupsDir).
 //
 // Equivalent to ListContext with a background context. Kept for callers
 // with no scope to inherit (the CLI) and for the ones where the listing
@@ -950,6 +950,35 @@ func List(backupsRoot string) ([]snapshotEntry, error) {
 // is not a folder (SetReadDirForTest).
 var readDir = os.ReadDir
 
+// readBackupsDir is the listing of the backups folder List and the orphan
+// sweep take: nothing, and no error, while nothing is there (no snapshot
+// has been taken yet), and an error while something that is not a folder
+// is. os.ReadDir answers a file with ENOTDIR on Linux and macOS, and with
+// ERROR_PATH_NOT_FOUND on Windows, which matches os.ErrNotExist, so a file
+// where the folder goes listed as no backups on Windows alone (B604's
+// fourth round: the console answered 200 there and 500 elsewhere). A
+// listing that reports nothing there asks Lstat, whose not-exist alone is
+// nothing there. Anything else there fails the listing with the error Linux
+// and macOS give a file (open, ENOTDIR, naming the folder), a link to
+// nothing included, through which a snapshot cannot make the folder either;
+// a folder there was made since the listing, which found none.
+func readBackupsDir(backupsRoot string) ([]os.DirEntry, error) {
+	entries, err := readDir(backupsRoot)
+	if !errors.Is(err, os.ErrNotExist) {
+		return entries, err
+	}
+	info, err := os.Lstat(backupsRoot)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil, nil
+	case err != nil:
+		return nil, err
+	case info.IsDir():
+		return nil, nil
+	}
+	return nil, &os.PathError{Op: "open", Path: backupsRoot, Err: syscall.ENOTDIR}
+}
+
 // ListContext is List, bounded by ctx.
 //
 // The cancellation point is per-directory, which is where the cost is:
@@ -958,10 +987,7 @@ var readDir = os.ReadDir
 // arbitrarily long. Callers on a request path (the 10s-polled jobs
 // endpoint) need to be able to stop.
 func ListContext(ctx context.Context, backupsRoot string) ([]snapshotEntry, error) {
-	entries, err := readDir(backupsRoot)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
+	entries, err := readBackupsDir(backupsRoot)
 	if err != nil {
 		return nil, err
 	}
