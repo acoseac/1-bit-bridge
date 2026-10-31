@@ -64,6 +64,22 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestServeNamesAManagedControlItDoesNotKnowByItsPlace`). The typo guard therefore
   lives in the program that WRITES the file (the conductor's
   `managed_controls_test.go`), pinned in both directions.
+- **A managed setting can own other settings (`managedSettingImplies`): `playerEnabled` owns `playerOpenHome`**
+  (2026-10-31, B612). The control plane that decides whether the bridge's own
+  player runs decides whether it is exposed on the LAN for the 1-bit app to
+  cast to, so `deployment.managedSettings` naming `playerEnabled` makes the
+  Player page's OpenHome switch the control plane's too, hidden with the
+  player's switch and refused by its route, with no second entry in the
+  list. `IsManagedSettingOrImplied` (the write paths' predicate) and
+  `EffectiveManagedSettings` (what the console is told) answer it beside the
+  controls' `managedControlSettings`, through
+  `SettingsImpliedByManagedSettings`; `IsManagedSetting` still answers what
+  the operator named. `playerOpenHome` alone owns nothing else, so a control
+  plane can own the exposure and leave the player's switch to the operator.
+  **Don't imply a setting the other way, imply a control from a setting, or
+  answer an implied setting in one predicate and not the other.**
+  `TestAManagedPlayerSwitchOwnsTheOpenHomeSwitch` and
+  `TestTheManagedPlayerSettingsHideAndRefuseTheOpenHomeSwitch` pin it.
 - **A managed deployment must not be given advice that needs a shell on the
   host.** `bridge doctor` run as a live tenant produced eleven `ok` and two
   `warn`, both unactionable — "no user systemd session, use `bridge init
