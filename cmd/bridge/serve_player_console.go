@@ -19,6 +19,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/player/binding"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
+	"github.com/acoseac/1-bit-bridge/internal/player/openhome"
 )
 
 // The console's Player page (B601) reads serve's own player through
@@ -81,13 +82,17 @@ type consolePlayer struct {
 	p          *bridgePlayer
 	view       *bridgeOutput
 	bootDevice config.PlayerDevice
-	goos       string
-	lockHeld   bool
-	stateErr   error
-	trees      outputTrees
-	store      consoleTrackStore
-	now        func() time.Time
-	readBound  time.Duration
+	// bootOpenHome is the boot snapshot's output.player.openhome, which
+	// serve decided its OpenHome surface from: a live opt-in that differs
+	// waits for the next start (pending).
+	bootOpenHome bool
+	goos         string
+	lockHeld     bool
+	stateErr     error
+	trees        outputTrees
+	store        consoleTrackStore
+	now          func() time.Time
+	readBound    time.Duration
 	// observer reads the box: trees' own, or a test's with its seam.
 	observer func() binding.Observer
 
@@ -139,6 +144,7 @@ func newConsolePlayer(w consolePlayerWiring) *consolePlayer {
 	c.observer = c.trees.observer
 	if w.Boot != nil {
 		c.bootDevice = w.Boot.Output.Player.Device
+		c.bootOpenHome = w.Boot.Output.Player.OpenHome
 	}
 	return c
 }
@@ -152,7 +158,7 @@ func (c *consolePlayer) Report(ctx context.Context, live *config.Config) admin.P
 	return admin.PlayerReport{
 		Running:    run,
 		Configured: c.configured(live),
-		Pending:    c.pending(live),
+		Pending:    c.pending(live, run.OpenHome),
 		Transports: c.transports(run, facts, snap),
 	}
 }
@@ -167,9 +173,13 @@ func (c *consolePlayer) nextPlan(live *config.Config) servePlayerPlan {
 	return planServePlayer(live, c.goos, c.lockHeld)
 }
 
-// configured is what the live config asks for.
+// configured is what the live config asks for: the player, its binding, and
+// its OpenHome surface, by the port it would take and the name a controller
+// would list it by (openhome.FriendlyName, the description's own).
 func (c *consolePlayer) configured(live *config.Config) admin.PlayerConfigured {
-	conf := admin.PlayerConfigured{Enabled: live.Output.Player.Enabled, Binding: playerBindingView(live.Output.Player.Device)}
+	player := live.Output.Player
+	conf := admin.PlayerConfigured{Enabled: player.Enabled, Binding: playerBindingView(player.Device),
+		OpenHome: player.OpenHome, OpenHomePort: player.EffectiveOpenHomePort(), OpenHomeName: openhome.FriendlyName(player.Room)}
 	next := c.nextPlan(live)
 	switch {
 	case next.start:
@@ -185,8 +195,9 @@ func (c *consolePlayer) configured(live *config.Config) admin.PlayerConfigured {
 }
 
 // pending is what waits for the next start: the next plan beside the boot
-// plan.
-func (c *consolePlayer) pending(live *config.Config) []admin.PlayerPending {
+// plan, and the OpenHome opt-in written beside the boot snapshot's, which
+// serve decided its surface from (serving: the surface is on the LAN now).
+func (c *consolePlayer) pending(live *config.Config, serving bool) []admin.PlayerPending {
 	out := []admin.PlayerPending{}
 	next := c.nextPlan(live)
 	switch {
@@ -203,7 +214,58 @@ func (c *consolePlayer) pending(live *config.Config) []admin.PlayerPending {
 		out = append(out, admin.PlayerPending{Change: "dac",
 			Text: "The player opens the DAC chosen here when the bridge restarts. Until then it plays nothing: the DAC it started with is no longer the one the config names."})
 	}
+	if player := live.Output.Player; player.OpenHome != c.bootOpenHome {
+		var text string
+		switch {
+		case player.OpenHome && next.start:
+			text = "Casting from the 1-bit app is turned on: the bridge puts the player on the LAN as " + openhome.FriendlyName(player.Room) + " when it restarts."
+		case player.OpenHome:
+			text = "Casting from the 1-bit app is turned on: the bridge puts the player on the LAN as " + openhome.FriendlyName(player.Room) + " when it restarts with the player on."
+		case serving:
+			text = "Casting from the 1-bit app is turned off: the bridge takes the player off the LAN when it restarts. Until then the 1-bit app can still cast to it."
+		default:
+			text = "Casting from the 1-bit app is turned off: the bridge leaves the player off the LAN when it restarts."
+		}
+		out = append(out, admin.PlayerPending{Change: "openHome", Text: text})
+	}
 	return out
+}
+
+// openHomeDetail is why the OpenHome Source the player started with is not
+// on the LAN now, "" while it is (serving: GET /v1/outputs' view lists it)
+// and for a player serve started without its opt-in, or did not start (its
+// own status says why). It reads ready before eng, and the surface under the
+// player's mu, as GET /v1/outputs' view does, and the surface's status, which
+// copies. None of its reasons is one a restart cures, and the page offers no
+// restart for it.
+func (c *consolePlayer) openHomeDetail(serving bool) string {
+	if serving || !c.plan.openhome || c.p == nil {
+		return ""
+	}
+	if !signalled(c.p.ready) {
+		return "The player is starting, and its OpenHome source starts with it."
+	}
+	if c.p.eng == nil {
+		return "The player did not start, so neither did its OpenHome source."
+	}
+	c.p.mu.Lock()
+	s := c.p.surface
+	c.p.mu.Unlock()
+	if s == nil {
+		return "Its OpenHome source did not start, and the player runs without it: the bridge's log says why."
+	}
+	st := s.Status()
+	switch {
+	case st.Stopped:
+		return "Its OpenHome source has stopped: the bridge is stopping."
+	case len(st.Failed) > 0:
+		return "Its OpenHome source could not listen on the box's LAN address: the bridge's log says why, and it tries again every few seconds."
+	case st.ListFailure != "":
+		return "Its OpenHome source could not list the box's addresses: the bridge's log says why, and it tries again every few seconds."
+	case st.Reconciles == 0:
+		return "Its OpenHome source is looking for the box's LAN addresses."
+	}
+	return "The box has no LAN address for its OpenHome source yet (an interface that is up, with a private IPv4 address): it goes on the LAN once one comes up."
 }
 
 // withheld is why the live config withholds the running player's output
@@ -263,6 +325,7 @@ func (c *consolePlayer) running(ctx context.Context, live *config.Config) (admin
 		}
 	}
 	run.OpenHome = facts.OpenHome != nil
+	run.OpenHomeDetail = c.openHomeDetail(run.OpenHome)
 	run.Detail = c.reasonText(run.Reason)
 	run.DAC = c.dac(facts)
 	run.Signal = playerSignalView(facts.Playback)

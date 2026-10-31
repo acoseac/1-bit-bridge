@@ -1836,14 +1836,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/database/compact", s.apiDatabaseCompact)
 	mux.HandleFunc("GET /api/doctor", s.apiDoctor)
 	mux.HandleFunc("GET /api/output/checklist", s.apiOutputChecklist)
-	// The Player page's routes (handlers_player_output.go). The two writes
-	// change output.player through the live holder, and each route refuses,
-	// before anything is read or written, where the player cannot run: a
-	// public bridge, a host that is not Linux, a player block that does not
-	// read, a setting the control plane owns.
+	// The Player page's routes (handlers_player_output.go). The three writes
+	// (the switch, the OpenHome switch, the DAC) change output.player
+	// through the live holder, and each route refuses, before anything is
+	// read or written, where the player cannot run: a public bridge, a host
+	// that is not Linux, a player block that does not read, a setting the
+	// control plane owns.
 	mux.HandleFunc("GET /api/output/player", s.apiPlayerOutputStatus)
 	mux.HandleFunc("GET /api/output/player/dacs", s.apiPlayerOutputDACs)
 	mux.HandleFunc("POST /api/output/player/enabled", s.apiPlayerOutputEnabled)
+	mux.HandleFunc("POST /api/output/player/openhome", s.apiPlayerOutputOpenHome)
 	mux.HandleFunc("POST /api/output/player/dac", s.apiPlayerOutputDAC)
 	// Log export. All GET: reads, not mutations, so csrfGuard passes them
 	// through as it does every other read on this listener. The exports are

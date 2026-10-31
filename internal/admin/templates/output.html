@@ -66,6 +66,23 @@
       <button type="button" id="player-output-switch" class="btn">Turn on</button>
     </div>
     <p class="hint" id="player-output-configured">—</p>
+
+    {{- /* The OpenHome switch (B612): output.player.openhome, below the
+        player's own and hidden with this panel (a managed playerEnabled owns
+        it too, a bridge where the player cannot run, a block that does not
+        read), and alone where the control plane owns playerOpenHome alone.
+        Its name and port come from the status (app.js
+        renderPlayerOutputOpenHome), never from here. */ -}}
+    <div class="player-output-openhome" id="player-output-openhome" hidden>
+      <div class="panel-head">
+        <h3 id="player-output-openhome-title">Let the 1-bit app cast to this player</h3>
+        <button type="button" id="player-output-openhome-switch" class="btn" aria-describedby="player-output-openhome-title">Turn on</button>
+      </div>
+      <p class="hint" id="player-output-openhome-about">—</p>
+      <p class="hint" id="player-output-openhome-older">1-bit 2.1 and earlier stop listing this box's own MPD player while this is on, and 1-bit 2.2 lists both.</p>
+      <p class="hint" id="player-output-openhome-configured">—</p>
+      <p class="status" id="player-output-openhome-note" aria-live="polite" hidden></p>
+    </div>
   </div>
 
   <div class="panel" id="player-output-dac-panel" hidden>

@@ -1,21 +1,25 @@
 // The console's Player page (B601): the bridge's own player (B470) as the
 // operator sees it, beside the web player that plays in the browser. It shows
-// the player's status, turns it on or off, and chooses its DAC; it offers no
-// DSD control and no test tone (both later work, B602).
+// the player's status, turns it on or off, lets the 1-bit app cast to it or
+// not (its OpenHome surface, output.player.openhome, B612), and chooses its
+// DAC; it offers no DSD control and no test tone (both later work, B602).
 //
 // The page asks the serving process alone. cmd/bridge implements PlayerOutput
 // over serve's player (its boot plan, its engine, GET /v1/outputs' own view of
 // it) and the box's DAC readings, so this package imports no player package
 // and the console and /v1/outputs say one thing.
 //
-// The two writes change output.player, which serve decides its player from
+// The three writes change output.player, which serve decides its player from
 // once, at boot: each goes through the live holder (CfgHolder.UpdateChecked),
 // the turn of bridge.yaml's lock every writer takes, never around it, under
 // the console's lock (lockPlayerWrite), and the answer says what changes now
 // and what waits for a restart. A change that turns the player off, or names
 // another DAC than the one it started with, stops what it plays at once
 // (serve's player withholds its output, player.md), and the page asks before
-// one.
+// one. The OpenHome switch stops nothing: serve reads the opt-in from its
+// boot snapshot alone, and the running process reads the live one only
+// through the port's clash check (config.PlayerEnabled), which the switch
+// asks before it saves the opt-in on.
 //
 // Every route is eligible only where the player can run, checked here, on the
 // server, before anything is read or written: not on a public bridge, a
@@ -35,11 +39,14 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 )
 
-// The managed-setting names of the page's two writes, as
-// deployment.managedSettings lists them: the switch and the DAC.
+// The managed-setting names of the page's three writes, as
+// deployment.managedSettings lists them: the switch, the DAC and the
+// OpenHome switch. A managed playerEnabled owns playerOpenHome too
+// (config's managedSettingImplies): IsManagedSettingOrImplied answers it.
 const (
-	managedPlayerEnabled = "playerEnabled"
-	managedPlayerDevice  = "playerDevice"
+	managedPlayerEnabled  = "playerEnabled"
+	managedPlayerDevice   = "playerDevice"
+	managedPlayerOpenHome = "playerOpenHome"
 )
 
 // The words an ineligible bridge's status carries (PlayerStatus.Unavailable),
@@ -116,16 +123,20 @@ type PlayerStatus struct {
 	Available   bool   `json:"available"`
 	Unavailable string `json:"unavailable"`
 	Why         string `json:"why"`
-	// Managed is which of the page's two writes the control plane owns.
+	// Managed is which of the page's three writes the control plane owns.
 	Managed PlayerManaged `json:"managed"`
 	PlayerReport
 }
 
 // PlayerManaged says which settings deployment.managedSettings gives the
 // control plane: the page hides that control, and its route refuses it.
+// OpenHome is playerOpenHome's, which a managed playerEnabled implies: the
+// page hides the whole switch panel for Enabled, OpenHome with it, and only
+// the OpenHome switch for OpenHome alone.
 type PlayerManaged struct {
-	Enabled bool `json:"enabled"`
-	Device  bool `json:"device"`
+	Enabled  bool `json:"enabled"`
+	Device   bool `json:"device"`
+	OpenHome bool `json:"openHome"`
 }
 
 // PlayerReport is the player as cmd/bridge reads it from the serving
@@ -159,6 +170,12 @@ type PlayerRunning struct {
 	Withheld string `json:"withheld"`
 	// OpenHome is the player's OpenHome Source listening on the LAN.
 	OpenHome bool `json:"openHome"`
+	// OpenHomeDetail is why the Source the boot snapshot asked for is not on
+	// the LAN now (no LAN address bound yet, a surface that did not start, a
+	// player that did not), "" while it is and while the boot snapshot did
+	// not ask for it. A restart is not its cure, and the page never offers
+	// one for it.
+	OpenHomeDetail string `json:"openHomeDetail"`
 	// Binding is the binding the player started with, nil for none.
 	Binding *PlayerBinding `json:"binding"`
 	// DAC is that binding's DAC, nil before the watcher has read the box.
@@ -249,10 +266,20 @@ type PlayerConfigured struct {
 	Reason string `json:"reason"`
 	// Binding is the live binding, nil for none.
 	Binding *PlayerBinding `json:"binding"`
+	// OpenHome is output.player.openhome as written: whether the next start
+	// advertises the player on the LAN for the 1-bit app to cast to, once the
+	// player runs. OpenHomePort is the port its listener takes on each LAN
+	// address (the effective openhomePort: 0 is a port the kernel picks for
+	// each address), and OpenHomeName the name a controller lists it by
+	// (output.player.room as the surface carries it, or its default).
+	OpenHome     bool   `json:"openHome"`
+	OpenHomePort int    `json:"openHomePort"`
+	OpenHomeName string `json:"openHomeName"`
 }
 
-// PlayerPending is one change that waits for the next start: start, stop or
-// dac, and its sentence.
+// PlayerPending is one change that waits for the next start: start, stop,
+// dac or openHome (the opt-in written differs from the boot snapshot's), and
+// its sentence.
 type PlayerPending struct {
 	Change string `json:"change"`
 	Text   string `json:"text"`
@@ -354,7 +381,7 @@ func (s *Server) playerRefusal(cfg *config.Config, field string) *cfgAbort {
 }
 
 // lockPlayerWrite takes the console's lock (Server.mu) for one of the page's
-// two writes, which hold it from their read of the player configuration
+// three writes, which hold it from their read of the player configuration
 // (before) to their answer. A test that parks one write inside its config
 // turn is told, through testPlayerWriteWaits, that the next found the lock
 // held and waits for it: the one wait no other seam shows, since a write asks
@@ -380,8 +407,9 @@ func (s *Server) playerStatus(ctx context.Context, cfg *config.Config) PlayerSta
 	st := PlayerStatus{PlayerReport: PlayerReport{Pending: []PlayerPending{}, Transports: []PlayerTransport{}}}
 	if cfg != nil {
 		st.Managed = PlayerManaged{
-			Enabled: cfg.Deployment.IsManagedSettingOrImplied(managedPlayerEnabled),
-			Device:  cfg.Deployment.IsManagedSettingOrImplied(managedPlayerDevice),
+			Enabled:  cfg.Deployment.IsManagedSettingOrImplied(managedPlayerEnabled),
+			Device:   cfg.Deployment.IsManagedSettingOrImplied(managedPlayerDevice),
+			OpenHome: cfg.Deployment.IsManagedSettingOrImplied(managedPlayerOpenHome),
 		}
 	}
 	if why := s.playerRefusal(cfg, ""); why != nil {
@@ -432,9 +460,12 @@ func (s *Server) apiPlayerOutputDACs(w http.ResponseWriter, r *http.Request) {
 }
 
 // decodePlayerBody decodes a write's JSON body into v: one object, no key it
-// does not take, nothing after it. A request with no body is refused, so a
-// bodyless POST, which csrfGuard lets through with no Content-Type to check,
-// changes nothing.
+// does not take, nothing after it but white space. A request with no body is
+// refused, so a bodyless POST, which csrfGuard lets through with no
+// Content-Type to check, changes nothing. What follows the object is read as
+// a second value, which must be the end of the body (io.EOF): Decoder.More
+// answers false for a closing brace or bracket, so it let `{...}}` through
+// (B612).
 func decodePlayerBody(w http.ResponseWriter, r *http.Request, v any) bool {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, adminMaxBodyBytes))
 	dec.DisallowUnknownFields()
@@ -446,7 +477,8 @@ func decodePlayerBody(w http.ResponseWriter, r *http.Request, v any) bool {
 		writeError(w, http.StatusBadRequest, errCodeBadJSON, msg)
 		return false
 	}
-	if dec.More() {
+	var after json.RawMessage
+	if err := dec.Decode(&after); !errors.Is(err, io.EOF) {
 		writeError(w, http.StatusBadRequest, errCodeBadJSON, "one JSON object, and nothing after it")
 		return false
 	}
@@ -529,6 +561,81 @@ func (s *Server) apiPlayerOutputEnabled(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	s.writePlayerChange(w, r, before, sounding)
+}
+
+// playerOpenHomeRequest is POST /api/output/player/openhome's body. It has
+// no go-ahead: the switch stops nothing the player plays
+// (apiPlayerOutputOpenHome).
+type playerOpenHomeRequest struct {
+	OpenHome *bool `json:"openhome"`
+}
+
+// apiPlayerOutputOpenHome handles POST /api/output/player/openhome: it turns
+// output.player.openhome, the player's OpenHome surface, on or off in the
+// config, through the live holder, so that the next start advertises the
+// player on the LAN for the 1-bit app to cast to, or does not. Turning it on
+// asks the surface's port of the config it would save
+// (config.OpenHomePortClash), whatever output.player.enabled says: a port
+// another listener of serve binds is refused with its reason, nothing saved,
+// so a player turned on later finds no clash. With the player off it is
+// saved, and the surface starts once the player does. A value the config
+// holds already writes nothing.
+//
+// It needs no go-ahead (interrupt), since it stops nothing the player plays.
+// Serve reads the opt-in from its boot snapshot alone (planServePlayer), so
+// the surface running now runs until the next start, and none starts before
+// it; the running process reads the live opt-in only through the clash check
+// in config.PlayerEnabled (the watcher's settings, serve's player's
+// withholding, this page's view), which a saved change leaves as it was
+// (turning the opt-in on is refused over a clash) or lifts (turning it off
+// clears one another writer made).
+func (s *Server) apiPlayerOutputOpenHome(w http.ResponseWriter, r *http.Request) {
+	var req playerOpenHomeRequest
+	if !decodePlayerBody(w, r, &req) {
+		return
+	}
+	if req.OpenHome == nil {
+		writeError(w, http.StatusBadRequest, errCodeBadJSON, "openhome is required: true or false")
+		return
+	}
+	on := *req.OpenHome
+	if why := s.playerRefusal(s.deps.CfgHolder.Load(), managedPlayerOpenHome); why != nil {
+		writeError(w, why.status, why.code, why.msg)
+		return
+	}
+	// The console's lock, held from before's Load to the answer, as the
+	// other two writes hold it: they are the writers of output.player in the
+	// process, and this one keeps their answers' before and after the
+	// configs their updates changed.
+	s.lockPlayerWrite()
+	defer s.mu.Unlock()
+	before := s.deps.CfgHolder.Load()
+	if why := s.playerRefusal(before, managedPlayerOpenHome); why != nil {
+		writeError(w, why.status, why.code, why.msg)
+		return
+	}
+	if before.Output.Player.OpenHome == on {
+		writeJSON(w, http.StatusOK, playerChangeResponse{Status: string(applyUnchanged), Player: s.playerStatus(r.Context(), before)})
+		return
+	}
+	err := s.deps.CfgHolder.UpdateChecked(s.deps.CfgPath, func(next *config.Config, _ func() error) error {
+		if why := s.playerRefusal(next, managedPlayerOpenHome); why != nil {
+			return why
+		}
+		next.Output.Player.OpenHome = on
+		if on {
+			if err := next.OpenHomePortClash(); err != nil {
+				return &cfgAbort{status: http.StatusConflict, code: "player_refused",
+					msg: "the OpenHome surface cannot run on this config: " + err.Error()}
+			}
+		}
+		return validatePlayerClone(next)
+	})
+	if err != nil {
+		writeCfgUpdateErr(w, err)
+		return
+	}
+	s.writePlayerChange(w, r, before, false)
 }
 
 // playerDACRequest is POST /api/output/player/dac's body: a selection token

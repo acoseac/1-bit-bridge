@@ -270,7 +270,8 @@ func errorCode(body string) string {
 }
 
 // unchangedConfig requires the config file to hold want and the live holder
-// to hold the player block it held: a refused write wrote nothing anywhere.
+// to hold the player block it held, its switch, its OpenHome opt-in and its
+// binding: a refused write wrote nothing anywhere.
 func unchangedConfig(t *testing.T, srv *Server, cfgPath string, want []byte, player config.PlayerConfig, what string) {
 	t.Helper()
 	if got := readFileOrNil(cfgPath); !bytes.Equal(got, want) {
@@ -278,7 +279,7 @@ func unchangedConfig(t *testing.T, srv *Server, cfgPath string, want []byte, pla
 	}
 	live := srv.deps.CfgHolder.Load().Output.Player
 	sameSerial := live.Device.Serial.Equal(player.Device.Serial) || !live.Device.Serial.Present() && !player.Device.Serial.Present()
-	if live.Enabled != player.Enabled || live.Device.Binding != player.Device.Binding || !sameSerial {
+	if live.Enabled != player.Enabled || live.OpenHome != player.OpenHome || live.Device.Binding != player.Device.Binding || !sameSerial {
 		t.Errorf("%s: the live config's player changed: %+v", what, live)
 	}
 }
@@ -332,9 +333,23 @@ func TestThePlayerStatusCarriesEveryKey(t *testing.T) {
 		t.Errorf("a Linux loopback bridge: available %v, unavailable %v", got["available"], got["unavailable"])
 	}
 	running, _ := got["running"].(map[string]any)
-	for _, key := range []string{"started", "state", "reason", "detail", "transport", "lastError", "withheld", "openHome", "binding", "dac", "track", "signal"} {
+	for _, key := range []string{"started", "state", "reason", "detail", "transport", "lastError", "withheld", "openHome", "openHomeDetail", "binding", "dac", "track", "signal"} {
 		if _, ok := running[key]; !ok {
 			t.Errorf("running has no %q: %s", key, body)
+		}
+	}
+	// The OpenHome switch's (B612): who owns it, and what the config asks of
+	// it, beside what runs.
+	configured, _ := got["configured"].(map[string]any)
+	for _, key := range []string{"enabled", "starts", "reason", "binding", "openHome", "openHomePort", "openHomeName"} {
+		if _, ok := configured[key]; !ok {
+			t.Errorf("configured has no %q: %s", key, body)
+		}
+	}
+	managed, _ := got["managed"].(map[string]any)
+	for _, key := range []string{"enabled", "device", "openHome"} {
+		if _, ok := managed[key]; !ok {
+			t.Errorf("managed has no %q: %s", key, body)
 		}
 	}
 
@@ -519,6 +534,7 @@ func TestThePlayerSwitchRefusesAConfigThePlayerCannotRunOn(t *testing.T) {
 	srv, _, cfgPath := newPlayerTestServer(t)
 	writePlayerConfig(t, srv, cfgPath, "output:\n  player:\n    openhome: true\n    openhomePort: 7789\n")
 	want := readFileOrNil(cfgPath)
+	player := srv.deps.CfgHolder.Load().Output.Player
 	code, body := playerRequest(t, srv.Handler(), http.MethodPost, "/api/output/player/enabled", `{"enabled":true}`, nil)
 	if code != http.StatusConflict || errorCode(body) != "player_refused" {
 		t.Fatalf("turning on a player whose OpenHome port the console binds = %d: %s; want 409 player_refused", code, body)
@@ -526,16 +542,16 @@ func TestThePlayerSwitchRefusesAConfigThePlayerCannotRunOn(t *testing.T) {
 	if !strings.Contains(body, "adminAddress") || strings.Contains(body, "7789") {
 		t.Errorf("the refusal should name the setting and never the port: %s", body)
 	}
-	unchangedConfig(t, srv, cfgPath, want, config.PlayerConfig{}, "the refused switch")
+	unchangedConfig(t, srv, cfgPath, want, player, "the refused switch")
 }
 
-// playerWriteRoutes are the page's two writes, each with a body that would
-// change the config, the managed setting that owns it, and the provider calls
-// it makes on its way.
+// playerWriteRoutes are the page's three writes, each with a body that would
+// change the config and the managed setting that owns it.
 var playerWriteRoutes = []struct {
 	path, body, managed string
 }{
 	{"/api/output/player/enabled", `{"enabled":true}`, managedPlayerEnabled},
+	{"/api/output/player/openhome", `{"openhome":true}`, managedPlayerOpenHome},
 	{"/api/output/player/dac", `{"selection":"tok","binding":"serial"}`, managedPlayerDevice},
 }
 
@@ -1016,11 +1032,14 @@ func TestAPlayerWriteAndASettingsSaveBothLand(t *testing.T) {
 
 // TestTheSettingsSaveIsNoRouteToThePlayer: the settings PATCH takes no player
 // setting, so a body naming one changes nothing of output.player, in the file
-// or the live config, on any bridge, a public one included.
+// or the live config, on any bridge, a public one included: not the switch,
+// not the DAC, not the OpenHome opt-in (B612), by the managed-setting names
+// or the config's own keys.
 func TestTheSettingsSaveIsNoRouteToThePlayer(t *testing.T) {
 	srv, _, cfgPath := newPlayerTestServer(t)
 	code, body := playerRequest(t, srv.Handler(), http.MethodPatch, "/api/settings",
-		`{"playerEnabled":true,"playerDevice":{"binding":"port"},"output":{"player":{"enabled":true}}}`, nil)
+		`{"playerEnabled":true,"playerDevice":{"binding":"port"},"playerOpenHome":true,"openhome":true,"openHome":true,`+
+			`"output":{"player":{"enabled":true,"openhome":true,"openhomePort":7800}}}`, nil)
 	if code != http.StatusOK {
 		t.Fatalf("PATCH = %d: %s", code, body)
 	}
@@ -1028,8 +1047,9 @@ func TestTheSettingsSaveIsNoRouteToThePlayer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Output.Player.Enabled || cfg.Output.Player.Device.Configured() || srv.deps.CfgHolder.Load().Output.Player.Enabled {
-		t.Errorf("a settings save changed the player: %+v", cfg.Output.Player)
+	p, live := cfg.Output.Player, srv.deps.CfgHolder.Load().Output.Player
+	if p.Enabled || p.Device.Configured() || p.OpenHome || p.OpenHomePort != nil || live.Enabled || live.OpenHome || live.OpenHomePort != nil {
+		t.Errorf("a settings save changed the player: the file's %+v, the live %+v", p, live)
 	}
 }
 
@@ -1041,5 +1061,403 @@ func TestTheDACListAnswersAListNeverNull(t *testing.T) {
 	code, body := playerRequest(t, srv.Handler(), http.MethodGet, "/api/output/player/dacs", "", nil)
 	if code != http.StatusOK || !strings.Contains(body, `"cards":[]`) || !strings.Contains(body, "cut short") {
 		t.Fatalf("GET dacs = %d: %s; want 200, cards [] and the problem", code, body)
+	}
+}
+
+// openHomeTo sends the OpenHome switch's write with the opt-in on, and
+// requires it answered 200 with want (restart or unchanged).
+func openHomeTo(t *testing.T, h http.Handler, on bool, want string) playerChangeResponse {
+	t.Helper()
+	code, body := playerRequest(t, h, http.MethodPost, "/api/output/player/openhome", fmt.Sprintf(`{"openhome":%v}`, on), nil)
+	var resp playerChangeResponse
+	if err := json.Unmarshal([]byte(body), &resp); err != nil || code != http.StatusOK || resp.Status != want {
+		t.Fatalf("POST openhome %v = %d: %s; want 200 %s", on, code, body, want)
+	}
+	return resp
+}
+
+// playerOnDisk is the player block the config file holds now.
+func playerOnDisk(t *testing.T, cfgPath string) config.PlayerConfig {
+	t.Helper()
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg.Output.Player
+}
+
+// TestTheOpenHomeSwitchWritesTheConfigThroughTheHolder pins the OpenHome
+// switch (B612): on and off reach the file on disk and the live config, each
+// answered restart, and leave the rest of the player block as it was; a value
+// the config holds already writes nothing and is answered unchanged. It asks
+// nothing of the player: a player that sounds, under a provider that says
+// every change withholds its output, is not asked for a go-ahead, and the
+// answer says nothing was interrupted, since the switch stops nothing.
+func TestTheOpenHomeSwitchWritesTheConfigThroughTheHolder(t *testing.T) {
+	srv, fake, cfgPath := newPlayerTestServer(t)
+	h := srv.Handler()
+	turnPlayerOn(t, srv)
+	fake.withholds = true
+	fake.sounding = func() bool { return true }
+	for _, step := range []struct {
+		on   bool
+		want string
+	}{{true, "restart"}, {true, "unchanged"}, {false, "restart"}, {false, "unchanged"}, {true, "restart"}} {
+		saved := readFileOrNil(cfgPath)
+		resp := openHomeTo(t, h, step.on, step.want)
+		if resp.Interrupted {
+			t.Errorf("turning the opt-in %v answered interrupted: the switch stops nothing", step.on)
+		}
+		disk, live := playerOnDisk(t, cfgPath), srv.deps.CfgHolder.Load().Output.Player
+		if disk.OpenHome != step.on || live.OpenHome != step.on {
+			t.Fatalf("turning the opt-in %v: the file holds %v and the live config %v", step.on, disk.OpenHome, live.OpenHome)
+		}
+		if !disk.Enabled || !live.Enabled {
+			t.Errorf("turning the opt-in %v turned the player off", step.on)
+		}
+		if step.want == "unchanged" && !bytes.Equal(readFileOrNil(cfgPath), saved) {
+			t.Errorf("an unchanged opt-in rewrote the config file")
+		}
+		if !resp.Player.Available || resp.Player.Running.State != "playing" {
+			t.Errorf("the answer carries no status after the change: %+v", resp.Player)
+		}
+	}
+	if n := fake.called("chosen") + fake.called("dacs"); n != 0 {
+		t.Errorf("the OpenHome switch read the box: %v", fake.calls)
+	}
+}
+
+// TestTheOpenHomeSwitchTurnsOnWithThePlayerOff: the opt-in turned on while
+// the player is off is saved, the player left off, in the file and the live
+// config: the surface starts once the player does (the status says so,
+// cmd/bridge's console view). The port is still asked of it: a port another
+// listener binds is refused with the player off too
+// (TestTheOpenHomeSwitchRefusesAPortAnotherListenerBinds).
+func TestTheOpenHomeSwitchTurnsOnWithThePlayerOff(t *testing.T) {
+	srv, _, cfgPath := newPlayerTestServer(t)
+	openHomeTo(t, srv.Handler(), true, "restart")
+	disk, live := playerOnDisk(t, cfgPath), srv.deps.CfgHolder.Load().Output.Player
+	if !disk.OpenHome || !live.OpenHome || disk.Enabled || live.Enabled {
+		t.Fatalf("the opt-in on with the player off: the file holds %+v and the live config %+v; want the opt-in on, the player off", disk, live)
+	}
+}
+
+// TestTheOpenHomeSwitchRefusesAPortAnotherListenerBinds pins the switch's
+// check of the port before it saves the opt-in on (B612): a port another
+// listener of serve binds (the API's, the console's, the DLNA listener's
+// default, the loopback route's default) is refused with 409 player_refused
+// and the setting's name, never the port, and nothing is written, whether the
+// player is on or off (config.PlayerEnabled asks it only of a player that is
+// on); port 0 and a port of its own are saved; and turning the opt-in off
+// asks no port, so a clash another writer left is no refusal of it.
+func TestTheOpenHomeSwitchRefusesAPortAnotherListenerBinds(t *testing.T) {
+	for _, tc := range []struct {
+		name, port, setting string
+	}{
+		{"the API's port", "7788", "listenAddress"},
+		{"the console's port", "7789", "adminAddress"},
+		{"the DLNA listener's default port", "7790", "dlna.listenAddress"},
+		{"the loopback route's default port", "7791", "output.loopbackPort"},
+		{"a port of its own", "7800", ""},
+		{"a port the kernel picks for each address", "0", ""},
+	} {
+		for _, playerOn := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, the player on %v", tc.name, playerOn), func(t *testing.T) {
+				srv, _, cfgPath := newPlayerTestServer(t)
+				writePlayerConfig(t, srv, cfgPath, fmt.Sprintf("output:\n  player:\n    enabled: %v\n    openhomePort: %s\n", playerOn, tc.port))
+				want := readFileOrNil(cfgPath)
+				player := srv.deps.CfgHolder.Load().Output.Player
+				code, body := playerRequest(t, srv.Handler(), http.MethodPost, "/api/output/player/openhome", `{"openhome":true}`, nil)
+				if tc.setting == "" {
+					if code != http.StatusOK || !playerOnDisk(t, cfgPath).OpenHome || !srv.deps.CfgHolder.Load().Output.Player.OpenHome {
+						t.Fatalf("the opt-in on with %s = %d: %s; want saved", tc.name, code, body)
+					}
+					return
+				}
+				if code != http.StatusConflict || errorCode(body) != "player_refused" || !strings.Contains(body, tc.setting) || !strings.Contains(body, "openhomePort") {
+					t.Fatalf("the opt-in on with %s = %d: %s; want 409 player_refused naming openhomePort and %s", tc.name, code, body, tc.setting)
+				}
+				if strings.Contains(body, tc.port) {
+					t.Errorf("the refusal quotes the port: %s", body)
+				}
+				unchangedConfig(t, srv, cfgPath, want, player, "the refused opt-in")
+			})
+		}
+	}
+	t.Run("off over a clash another writer left", func(t *testing.T) {
+		srv, _, cfgPath := newPlayerTestServer(t)
+		writePlayerConfig(t, srv, cfgPath, "output:\n  player:\n    openhome: true\n    openhomePort: 7790\n")
+		openHomeTo(t, srv.Handler(), false, "restart")
+		if p := playerOnDisk(t, cfgPath); p.OpenHome || p.EffectiveOpenHomePort() != 7790 {
+			t.Errorf("the opt-in off over a clash: the file holds %+v; want the opt-in off, its port kept", p)
+		}
+	})
+}
+
+// TestTheOpenHomeSwitchTakesOneBooleanAndNothingElse pins the switch's body:
+// one object with openhome true or false and nothing after it but white
+// space. Each of the bodies below is 400 bad_json, nothing written to the
+// file or the live config, and the provider never asked for the box.
+func TestTheOpenHomeSwitchTakesOneBooleanAndNothingElse(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"no openhome", `{}`},
+		{"openhome null", `{"openhome":null}`},
+		{"a null body", `null`},
+		{"openhome a string", `{"openhome":"true"}`},
+		{"openhome a number", `{"openhome":1}`},
+		{"openhome a list", `{"openhome":[true]}`},
+		{"an array", `[{"openhome":true}]`},
+		{"an unknown key", `{"openhome":true,"enabled":true}`},
+		{"a go-ahead it does not take", `{"openhome":true,"interrupt":true}`},
+		{"a second object", `{"openhome":true}{"openhome":false}`},
+		{"a trailing brace", `{"openhome":true}}`},
+		{"a trailing bracket", `{"openhome":true}]`},
+		{"a trailing word", `{"openhome":true} true`},
+		{"a cut object", `{"openhome":true`},
+		{"an oversized object", `{"openhome":true,"x":"` + strings.Repeat("a", adminMaxBodyBytes) + `"}`},
+		{"an object followed by more than the body takes", `{"openhome":true}` + strings.Repeat(" ", adminMaxBodyBytes)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, fake, cfgPath := newPlayerTestServer(t)
+			want := readFileOrNil(cfgPath)
+			code, body := playerRequest(t, srv.Handler(), http.MethodPost, "/api/output/player/openhome", tc.body, nil)
+			if code != http.StatusBadRequest || errorCode(body) != errCodeBadJSON {
+				t.Fatalf("= %d: %.300s; want 400 %s", code, body, errCodeBadJSON)
+			}
+			unchangedConfig(t, srv, cfgPath, want, config.PlayerConfig{}, tc.name)
+			if n := fake.called("chosen") + fake.called("dacs"); n != 0 {
+				t.Errorf("a refused body read the box: %v", fake.calls)
+			}
+		})
+	}
+	t.Run("white space after the object", func(t *testing.T) {
+		srv, _, cfgPath := newPlayerTestServer(t)
+		if code, body := playerRequest(t, srv.Handler(), http.MethodPost, "/api/output/player/openhome", "{\"openhome\":true}\n \t\r\n", nil); code != http.StatusOK {
+			t.Fatalf("an object and white space = %d: %s; want 200", code, body)
+		}
+		if !playerOnDisk(t, cfgPath).OpenHome {
+			t.Errorf("an object and white space saved nothing")
+		}
+	})
+}
+
+// TestAPlayerWriteTakesNothingAfterItsObject is the regression case for the
+// body check of the page's other two writes (B612): Decoder.More answers
+// false for a closing brace or bracket, so `{...}}` passed until then. Each
+// body here is 400 bad_json and writes nothing; the DAC route never asks the
+// provider for a choice.
+func TestAPlayerWriteTakesNothingAfterItsObject(t *testing.T) {
+	for _, route := range []struct{ path, object string }{
+		{"/api/output/player/enabled", `{"enabled":true}`},
+		{"/api/output/player/dac", `{"selection":"tok","binding":"serial"}`},
+	} {
+		for _, tail := range []string{"}", "]", route.object, " true", `"x"`} {
+			t.Run(route.path+" "+tail, func(t *testing.T) {
+				srv, fake, cfgPath := newPlayerTestServer(t)
+				want := readFileOrNil(cfgPath)
+				code, body := playerRequest(t, srv.Handler(), http.MethodPost, route.path, route.object+tail, nil)
+				if code != http.StatusBadRequest || errorCode(body) != errCodeBadJSON {
+					t.Fatalf("= %d: %s; want 400 %s", code, body, errCodeBadJSON)
+				}
+				unchangedConfig(t, srv, cfgPath, want, config.PlayerConfig{}, route.path+tail)
+				if fake.called("chosen") != 0 {
+					t.Errorf("the provider was asked for a choice")
+				}
+			})
+		}
+	}
+}
+
+// TestTheManagedPlayerSettingsHideAndRefuseTheOpenHomeSwitch pins who owns
+// the OpenHome switch (B612) for each managed setting, at the route, in the
+// status, and on the page by the status's flags (the panel shows for an
+// available bridge whose player switch is the operator's, and the OpenHome
+// switch inside it when its own setting is too: renderPlayerOutput, pinned by
+// TestThePlayerPageOffersTheOpenHomeSwitchBelowThePlayersOwn and run by
+// TestThePlayerPageDrawsTheOpenHomeSwitchStateByState). playerEnabled managed
+// owns playerOpenHome too: both routes refuse, and the whole panel is hidden.
+// playerOpenHome managed alone: its route refuses and its switch is hidden,
+// and the player's switch stays the operator's. Neither: both are offered
+// and both routes save.
+func TestTheManagedPlayerSettingsHideAndRefuseTheOpenHomeSwitch(t *testing.T) {
+	for _, tc := range []struct {
+		name                       string
+		managed                    string
+		enabled, openHome          bool // the flags the status carries
+		panelShows, openHomeShows  bool
+		enabledSaves, openHomeSave bool
+	}{
+		{"playerEnabled", "playerEnabled", true, true, false, false, false, false},
+		{"playerOpenHome alone", "playerOpenHome", false, true, true, false, true, false},
+		{"neither", "libraryName", false, false, true, true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _, cfgPath := newPlayerTestServer(t)
+			writePlayerConfig(t, srv, cfgPath, "deployment:\n  managedSettings: ["+tc.managed+"]\n")
+			code, body := playerRequest(t, srv.Handler(), http.MethodGet, "/api/output/player", "", nil)
+			var st PlayerStatus
+			if err := json.Unmarshal([]byte(body), &st); err != nil || code != http.StatusOK {
+				t.Fatalf("GET = %d, %v: %s", code, err, body)
+			}
+			if st.Managed.Enabled != tc.enabled || st.Managed.OpenHome != tc.openHome {
+				t.Errorf("managed %+v; want enabled %v, openHome %v", st.Managed, tc.enabled, tc.openHome)
+			}
+			panel := st.Available && !st.Managed.Enabled
+			if panel != tc.panelShows || (panel && !st.Managed.OpenHome) != tc.openHomeShows {
+				t.Errorf("the page shows the panel %v and the OpenHome switch %v; want %v and %v", panel, panel && !st.Managed.OpenHome, tc.panelShows, tc.openHomeShows)
+			}
+			for _, w := range []struct {
+				path, body string
+				saves      bool
+			}{
+				{"/api/output/player/openhome", `{"openhome":true}`, tc.openHomeSave},
+				{"/api/output/player/enabled", `{"enabled":true}`, tc.enabledSaves},
+			} {
+				want := readFileOrNil(cfgPath)
+				player := srv.deps.CfgHolder.Load().Output.Player
+				code, body := playerRequest(t, srv.Handler(), http.MethodPost, w.path, w.body, nil)
+				switch {
+				case w.saves && code != http.StatusOK:
+					t.Errorf("POST %s = %d: %s; want 200", w.path, code, body)
+				case !w.saves && (code != http.StatusForbidden || errorCode(body) != playerSettingManaged):
+					t.Errorf("POST %s = %d: %s; want 403 %s", w.path, code, body, playerSettingManaged)
+				case !w.saves:
+					unchangedConfig(t, srv, cfgPath, want, player, "the managed "+w.path)
+				}
+			}
+		})
+	}
+}
+
+// TestTheOpenHomeSwitchWaitsItsTurnBehindAnotherPlayerWrite pins the console's
+// lock on the OpenHome switch (lockPlayerWrite), as on the page's other
+// writes: with the DAC choice or the player switch held inside its config
+// turn, the switch waits for the console's lock (testPlayerWriteWaits) and
+// never reaches bridge.yaml's lock before it; let go, both are saved, each
+// keeping the other's field in the file and the live config, through the
+// holder. Without the lock, the switch's before is read beside a write that
+// changes the block, and a value the other write saves can be answered as
+// unchanged with nothing saved.
+func TestTheOpenHomeSwitchWaitsItsTurnBehindAnotherPlayerWrite(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, body string
+		park             func(t *testing.T, fake *fakePlayerOutput) (parked <-chan struct{}, release func())
+		saved            func(p config.PlayerConfig) bool
+	}{
+		{"behind a DAC choice", "/api/output/player/dac", `{"selection":"tok-5","binding":"serial"}`,
+			func(t *testing.T, fake *fakePlayerOutput) (<-chan struct{}, func()) { return fake.parkNextChoice(t) },
+			func(p config.PlayerConfig) bool { return p.Device.Binding == config.BindingSerial }},
+		{"behind the player switch", "/api/output/player/enabled", `{"enabled":true}`,
+			func(t *testing.T, fake *fakePlayerOutput) (<-chan struct{}, func()) {
+				parked, release := make(chan struct{}), make(chan struct{})
+				var once, freed sync.Once
+				fake.sounding = func() bool {
+					once.Do(func() { close(parked) })
+					<-release
+					return false
+				}
+				free := func() { freed.Do(func() { close(release) }) }
+				t.Cleanup(free)
+				return parked, free
+			},
+			func(p config.PlayerConfig) bool { return p.Enabled }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, fake, cfgPath := newPlayerTestServer(t)
+			waits := make(chan struct{})
+			var waited sync.Once
+			srv.testPlayerWriteWaits = func() { waited.Do(func() { close(waits) }) }
+			fileWaited, stop := config.LockWaitedForTest(cfgPath)
+			defer stop()
+			h := srv.Handler()
+			parked, release := tc.park(t, fake)
+			var writes sync.WaitGroup
+			t.Cleanup(func() {
+				release()
+				ended := make(chan struct{})
+				go func() { writes.Wait(); close(ended) }()
+				select {
+				case <-ended:
+				case <-playerGiveUp(t):
+					t.Error("a write never ended")
+				}
+			})
+			send := func(path, body string) <-chan playerAnswer {
+				answer := make(chan playerAnswer, 1)
+				writes.Add(1)
+				go func() {
+					defer writes.Done()
+					code, body := playerRequest(t, h, http.MethodPost, path, body, nil)
+					answer <- playerAnswer{code, body}
+				}()
+				return answer
+			}
+			first := send(tc.path, tc.body)
+			select {
+			case <-parked:
+			case a := <-first:
+				t.Fatalf("the first write answered before its turn held: %d %s", a.code, a.body)
+			case <-playerGiveUp(t):
+				t.Fatal("the first write never reached its turn")
+			}
+			second := send("/api/output/player/openhome", `{"openhome":true}`)
+			select {
+			case <-waits:
+			case <-fileWaited:
+				t.Fatal("the OpenHome switch went to bridge.yaml's lock without waiting for the console's")
+			case a := <-second:
+				t.Fatalf("the OpenHome switch answered while another write held its turn: %d %s", a.code, a.body)
+			case <-playerGiveUp(t):
+				t.Fatal("the OpenHome switch never waited for the console's lock")
+			}
+			release()
+			for i, answer := range []<-chan playerAnswer{first, second} {
+				select {
+				case a := <-answer:
+					var resp playerChangeResponse
+					if err := json.Unmarshal([]byte(a.body), &resp); err != nil || a.code != http.StatusOK || resp.Status != "restart" {
+						t.Errorf("write %d = %d: %s; want 200 restart", i+1, a.code, a.body)
+					}
+				case <-playerGiveUp(t):
+					t.Fatalf("write %d never answered", i+1)
+				}
+			}
+			disk, live := playerOnDisk(t, cfgPath), srv.deps.CfgHolder.Load().Output.Player
+			if !tc.saved(disk) || !tc.saved(live) || !disk.OpenHome || !live.OpenHome {
+				t.Errorf("after both writes: the file holds %+v and the live config %+v; want both changes", disk, live)
+			}
+		})
+	}
+}
+
+// TestTheOpenHomeSwitchAndThePlayerSwitchBothLand: the two switches sent
+// together, round after round, each land, in the file and the live config:
+// the console's lock gives them one turn at a time, and each clones the
+// other's result.
+func TestTheOpenHomeSwitchAndThePlayerSwitchBothLand(t *testing.T) {
+	srv, _, cfgPath := newPlayerTestServer(t)
+	h := srv.Handler()
+	for i := 0; i < 6; i++ {
+		enabled, openHome := i%2 == 0, i%3 != 1
+		var wg sync.WaitGroup
+		codes := make([]int, 2)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			codes[0], _ = playerRequest(t, h, http.MethodPost, "/api/output/player/enabled", fmt.Sprintf(`{"enabled":%v}`, enabled), nil)
+		}()
+		go func() {
+			defer wg.Done()
+			codes[1], _ = playerRequest(t, h, http.MethodPost, "/api/output/player/openhome", fmt.Sprintf(`{"openhome":%v}`, openHome), nil)
+		}()
+		wg.Wait()
+		if codes[0] != http.StatusOK || codes[1] != http.StatusOK {
+			t.Fatalf("round %d: the switch = %d, the OpenHome switch = %d", i, codes[0], codes[1])
+		}
+		disk, live := playerOnDisk(t, cfgPath), srv.deps.CfgHolder.Load().Output.Player
+		if disk.Enabled != enabled || disk.OpenHome != openHome || live.Enabled != enabled || live.OpenHome != openHome {
+			t.Fatalf("round %d: the file holds %v %v and the live config %v %v, want %v %v",
+				i, disk.Enabled, disk.OpenHome, live.Enabled, live.OpenHome, enabled, openHome)
+		}
 	}
 }
