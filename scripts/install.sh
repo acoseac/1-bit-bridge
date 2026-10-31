@@ -40,6 +40,21 @@ constants() {
 	https://*) ;;
 	*) leave 2 "BRIDGE_INSTALL_BASE_URL must be an https:// URL." ;;
 	esac
+	# How many seconds a download may move slower than the speed floor
+	# before fetch takes it for stalled: 60 in a release. The tests shorten
+	# it (BRIDGE_INSTALL_TEST_SPEED_TIME), taken only as a whole number from
+	# 1 to 60, leading zeros dropped; any other value leaves the 60.
+	SPEED_TIME=60
+	st_value=${BRIDGE_INSTALL_TEST_SPEED_TIME:-}
+	case $st_value in
+	'' | *[!0-9]*) ;;
+	*)
+		st_value=${st_value#"${st_value%%[!0]*}"}
+		case $st_value in
+		[1-9] | [1-5][0-9] | 60) SPEED_TIME=$st_value ;;
+		esac
+		;;
+	esac
 }
 
 say() {
@@ -805,9 +820,20 @@ check_tools() {
 }
 
 # fetch URL FILE downloads over HTTPS only, TLS 1.2 or later, every redirect
-# included.
+# included, and gives a download that stalls up rather than wait on it:
+# --connect-timeout bounds the name lookup, the connection and the TLS
+# handshake alone, so a server that answered and then sent nothing would
+# hold the installer with nothing on the screen. A transfer that moves
+# slower than 1 KiB/s for SPEED_TIME seconds (60 in a release) is taken for
+# stalled: curl ends it ("Operation too slow", exit 28), and --retry asks
+# for the whole file again, three times, 1, 2 and 4 seconds apart. The
+# floor is a choice: a download that keeps above it has no cap on its total
+# time (no --max-time), since a slow but moving one, a Pi on Wi-Fi, must
+# finish, and one that moves steadily under 1 KiB/s for a minute is ended
+# as if it had stalled.
 fetch() {
-	curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL --retry 3 --connect-timeout 30 -o "$2" "$1"
+	curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL --retry 3 --connect-timeout 30 \
+		--speed-limit 1024 --speed-time "$SPEED_TIME" -o "$2" "$1"
 }
 
 sha256_of() {

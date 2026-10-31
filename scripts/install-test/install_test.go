@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -154,16 +155,55 @@ type releaseServer struct {
 	mu        sync.Mutex
 	files     map[string][]byte
 	redirects map[string]string
+	stalls    map[string]stall
+	trickles  map[string]trickle
 	requests  []string
+	ranges    []string
+	times     []time.Time
+	// closing ends every request a stall holds, as the server closes.
+	closing chan struct{}
+}
+
+// stallShape is what the release server sends of a request it stalls
+// before it holds it: nothing at all (stallSilent), the headers alone
+// (stallHeaders), or the headers and half the body (stallHalf), each then
+// held, the connection open, until the client gives up; or the headers and
+// half the body, then the connection closed at once (stallCut), a transfer
+// cut short.
+type stallShape int
+
+const (
+	stallSilent stallShape = iota
+	stallHeaders
+	stallHalf
+	stallCut
+)
+
+// stall is how many more requests for a path the server stalls, and how.
+type stall struct {
+	shape stallShape
+	left  int
+}
+
+// trickle sends a path's body chunk bytes at a time, every so long.
+type trickle struct {
+	chunk int
+	every time.Duration
 }
 
 const releasePath = "/acoseac/1-bit-bridge/releases"
 
 func newReleaseServer(t *testing.T, dir string) *releaseServer {
 	t.Helper()
-	s := &releaseServer{t: t, files: map[string][]byte{}, redirects: map[string]string{}}
+	s := &releaseServer{
+		t: t, files: map[string][]byte{}, redirects: map[string]string{},
+		stalls: map[string]stall{}, trickles: map[string]trickle{}, closing: make(chan struct{}),
+	}
 	s.srv = httptest.NewTLSServer(http.HandlerFunc(s.serve))
 	t.Cleanup(s.srv.Close)
+	// Registered after Close, so it runs first: Close waits for the
+	// handlers, and a stalled one waits for this.
+	t.Cleanup(func() { close(s.closing) })
 	s.caFile = filepath.Join(dir, "ca.pem")
 	writeFile(t, s.caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: s.srv.Certificate().Raw}), 0o644)
 	return s
@@ -172,8 +212,18 @@ func newReleaseServer(t *testing.T, dir string) *releaseServer {
 func (s *releaseServer) serve(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.requests = append(s.requests, r.URL.Path)
+	s.ranges = append(s.ranges, r.Header.Get("Range"))
+	s.times = append(s.times, time.Now())
 	body, ok := s.files[r.URL.Path]
 	target, moved := s.redirects[r.URL.Path]
+	st, stalled := s.stalls[r.URL.Path]
+	if stalled && st.left > 0 {
+		st.left--
+		s.stalls[r.URL.Path] = st
+	} else {
+		stalled = false
+	}
+	tr, trickled := s.trickles[r.URL.Path]
 	s.mu.Unlock()
 	if moved {
 		http.Redirect(w, r, target, http.StatusFound)
@@ -183,7 +233,90 @@ func (s *releaseServer) serve(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	if stalled {
+		s.hold(w, r, st.shape, body)
+	}
+	if trickled {
+		s.send(w, r, tr, body)
+		return
+	}
 	_, _ = w.Write(body)
+}
+
+// hold answers a stalled request as its shape says, holds it until the
+// client gives up or the server closes (stallCut not at all), and then
+// aborts the handler, which writes nothing more: a handler that returned
+// would have net/http answer as the client's TLS close lands (the B526
+// rule in build-ci-tests.md). It never returns.
+func (s *releaseServer) hold(w http.ResponseWriter, r *http.Request, shape stallShape, body []byte) {
+	if shape != stallSilent {
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(http.StatusOK)
+		if shape == stallHalf || shape == stallCut {
+			_, _ = w.Write(body[:len(body)/2])
+		}
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+	}
+	if shape != stallCut {
+		select {
+		case <-r.Context().Done():
+		case <-s.closing:
+		}
+	}
+	panic(http.ErrAbortHandler)
+}
+
+// send answers with the whole body, a chunk at a time.
+func (s *releaseServer) send(w http.ResponseWriter, r *http.Request, tr trickle, body []byte) {
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(http.StatusOK)
+	f, _ := w.(http.Flusher)
+	for len(body) > 0 {
+		n := min(tr.chunk, len(body))
+		if _, err := w.Write(body[:n]); err != nil {
+			return
+		}
+		if f != nil {
+			f.Flush()
+		}
+		body = body[n:]
+		select {
+		case <-time.After(tr.every):
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+// stall has the server stall the next times requests for path, in shape.
+func (s *releaseServer) stall(path string, shape stallShape, times int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stalls[path] = stall{shape: shape, left: times}
+}
+
+// trickleOut has the server send path's body chunk bytes at a time, every
+// so long.
+func (s *releaseServer) trickleOut(path string, chunk int, every time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.trickles[path] = trickle{chunk: chunk, every: every}
+}
+
+// served are the requests for path: the Range header each asked with, and
+// when each came, in order.
+func (s *releaseServer) served(path string) (ranges []string, at []time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, p := range s.requests {
+		if p == path {
+			ranges = append(ranges, s.ranges[i])
+			at = append(at, s.times[i])
+		}
+	}
+	return ranges, at
 }
 
 // redirect answers a request for path with a redirect to target, a URL the
@@ -1315,6 +1448,303 @@ func TestADownloadIsHeldToHTTPS(t *testing.T) {
 			})
 		})
 	}
+}
+
+// noise is n bytes that do not compress, so that an archive carrying them is
+// about as large as they are.
+func noise(n int) []byte {
+	var b []byte
+	for i := 0; len(b) < n; i++ {
+		sum := sha256.Sum256([]byte(strconv.Itoa(i)))
+		b = append(b, sum[:]...)
+	}
+	return b[:n]
+}
+
+// curl, run with fetch's flags and a speed window of one second, ends a
+// transfer the server holds open without sending, after its headers, after
+// half its body or before anything, as "Operation too slow" (exit 28),
+// which --retry takes for a transient error: it asks for the whole file
+// again (no Range) three times, and a retry the server answers in full
+// gives the whole file, the -o file started over. A connection the server
+// closes in the middle of the body is another error, a transfer cut short,
+// which --retry need not retry: fetch then fails at once. The code, the
+// requests and the time between them are logged for every shape, and what
+// fetch relies on is required.
+func TestCurlEndsAStalledTransferAsFetchExpects(t *testing.T) {
+	curl, err := exec.LookPath("curl")
+	if err != nil {
+		t.Skip("no curl on this host")
+	}
+	t.Parallel()
+	cases := []struct {
+		name     string
+		shape    stallShape
+		times    int
+		code     int // -1: logged, not required, but not 0
+		requests int // 0: logged, not required
+	}{
+		{"headers, then nothing, every time", stallHeaders, 99, 28, 4},
+		{"half the body, then nothing, every time", stallHalf, 99, 28, 4},
+		{"nothing at all, every time", stallSilent, 99, 28, 4},
+		{"half the body, then nothing, once", stallHalf, 1, 0, 2},
+		{"half the body, then the connection closed, every time", stallCut, 99, -1, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			dir, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := newReleaseServer(t, dir)
+			const path = "/asset"
+			body := noise(24 << 10)
+			s.put(path, body)
+			s.stall(path, c.shape, c.times)
+			out := filepath.Join(dir, "out")
+			ctx, cancel := context.WithTimeout(context.Background(), runTimeout)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, curl, "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2", "-fsSL",
+				"--retry", "3", "--connect-timeout", "30", "--speed-limit", "1024", "--speed-time", "1", "-o", out, s.srv.URL+path)
+			cmd.Env = []string{"HOME=" + dir, "LC_ALL=C", "CURL_CA_BUNDLE=" + s.caFile}
+			start := time.Now()
+			said, err := cmd.CombinedOutput()
+			took := time.Since(start)
+			if ctx.Err() != nil {
+				t.Fatalf("curl was still running after %v", runTimeout)
+			}
+			code := 0
+			var exit *exec.ExitError
+			if errors.As(err, &exit) {
+				code = exit.ExitCode()
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			ranges, at := s.served(path)
+			var gaps []string
+			for i := 1; i < len(at); i++ {
+				gaps = append(gaps, at[i].Sub(at[i-1]).Round(100*time.Millisecond).String())
+			}
+			t.Logf("curl exit %d after %v; %d requests, %v apart, with the ranges %q; it said: %s",
+				code, took.Round(100*time.Millisecond), len(ranges), gaps, ranges, strings.TrimSpace(string(said)))
+			if c.code >= 0 && code != c.code {
+				t.Errorf("curl exit %d, want %d", code, c.code)
+			}
+			if c.code < 0 && code == 0 {
+				t.Errorf("curl took a transfer cut short for a whole one")
+			}
+			if c.requests > 0 && len(ranges) != c.requests {
+				t.Errorf("%d requests, want %d", len(ranges), c.requests)
+			}
+			for _, rg := range ranges {
+				if rg != "" {
+					t.Errorf("a request asked for part of the file (Range: %s)", rg)
+				}
+			}
+			if c.code == 0 {
+				if got, err := os.ReadFile(out); err != nil || !bytes.Equal(got, body) {
+					t.Errorf("the file curl wrote is %d bytes and not the body (%d bytes): %v", len(got), len(body), err)
+				}
+			}
+		})
+	}
+}
+
+// stallAssets are the two downloads the stall tests stall, each the way a
+// server that hangs might: checksums.txt after its headers, the archive
+// after half its body.
+var stallAssets = []struct {
+	name  string
+	asset string
+	shape stallShape
+}{
+	{"checksums.txt, after its headers", "checksums.txt", stallHeaders},
+	{"the archive, after half its body", archiveName(stampedRelease, "amd64"), stallHalf},
+}
+
+// A download that stalls, the server answering and then sending nothing
+// more with the connection held open, is given up once it has moved under
+// the floor for the speed window and asked for again, rather than hanging
+// the installer with nothing on the screen: stalled the first time only, it
+// installs, the stalled file asked for twice, whole each time.
+func TestAStalledDownloadIsAskedForAgain(t *testing.T) {
+	t.Parallel()
+	for _, c := range stallAssets {
+		t.Run(c.name, func(t *testing.T) {
+			eachShell(t, func(t *testing.T, sh shell) {
+				r := newRig(t, sh)
+				r.set("BRIDGE_INSTALL_TEST_SPEED_TIME", "1")
+				path := assetPath(stampedRelease, c.asset)
+				r.server.stall(path, c.shape, 1)
+				res := r.run("--library", r.music("music"))
+				mustExit(t, res, 0)
+				if got := readFile(t, r.target()); got != string(fakeBridge(t, stampedRelease)) {
+					t.Errorf("the program installed is not the release's")
+				}
+				if ranges, _ := r.server.served(path); fmt.Sprintf("%q", ranges) != `["" ""]` {
+					t.Errorf("%s was asked for with the ranges %q, want twice and whole", c.asset, ranges)
+				}
+			})
+		})
+	}
+}
+
+// A download that stalls every time it is asked for ends the run once
+// curl's retries are spent, within four speed windows and curl's waits
+// between them: exit 1, "Could not download", the file asked for four times
+// (once, then three retries), nothing installed, and after checksums.txt no
+// archive asked for at all.
+func TestADownloadThatStallsEveryTimeInstallsNothing(t *testing.T) {
+	t.Parallel()
+	archive := assetPath(stampedRelease, archiveName(stampedRelease, "amd64"))
+	for _, c := range stallAssets {
+		t.Run(c.name, func(t *testing.T) {
+			eachShell(t, func(t *testing.T, sh shell) {
+				r := newRig(t, sh)
+				r.set("BRIDGE_INSTALL_TEST_SPEED_TIME", "1")
+				path := assetPath(stampedRelease, c.asset)
+				r.server.stall(path, c.shape, 99)
+				res := r.run("--library", r.music("music"))
+				mustExit(t, res, 1)
+				mustSay(t, res, "Could not download", "Nothing was installed.")
+				r.nothingInstalled()
+				if ranges, _ := r.server.served(path); len(ranges) != 4 {
+					t.Errorf("%s was asked for %d times, want 4: once, then three retries", c.asset, len(ranges))
+				}
+				if path != archive {
+					if ranges, _ := r.server.served(archive); len(ranges) != 0 {
+						t.Errorf("the archive was asked for after checksums.txt failed, %d times", len(ranges))
+					}
+				}
+			})
+		})
+	}
+}
+
+// A download whose connection the server closes in the middle of the body
+// is no stall: curl takes it for a transfer cut short, which --retry need
+// not take for a transient error, and the run ends as on any failed
+// download, within its bound: exit 1, "Could not download", nothing
+// installed.
+func TestADownloadCutShortEndsTheRun(t *testing.T) {
+	archive := assetPath(stampedRelease, archiveName(stampedRelease, "amd64"))
+	eachShell(t, func(t *testing.T, sh shell) {
+		r := newRig(t, sh)
+		r.set("BRIDGE_INSTALL_TEST_SPEED_TIME", "1")
+		r.server.stall(archive, stallCut, 99)
+		res := r.run("--library", r.music("music"))
+		mustExit(t, res, 1)
+		mustSay(t, res, "Could not download", "Nothing was installed.")
+		r.nothingInstalled()
+		if ranges, _ := r.server.served(archive); len(ranges) < 1 || len(ranges) > 4 {
+			t.Errorf("the archive was asked for %d times", len(ranges))
+		}
+	})
+}
+
+// A slow download that keeps above the floor is never cut off, the floor's
+// other side (no --max-time: a slow but moving download must finish): an
+// archive sent at about eight times the floor, a KiB at a time, for more
+// than twice the speed window, installs.
+func TestASlowDownloadAboveTheFloorFinishes(t *testing.T) {
+	eachShell(t, func(t *testing.T, sh shell) {
+		r := newRig(t, sh)
+		r.set("BRIDGE_INSTALL_TEST_SPEED_TIME", "2")
+		archive := assetPath(stampedRelease, archiveName(stampedRelease, "amd64"))
+		r.republish(archive, tarGz(t, []tarEntry{
+			{"bridge", fakeBridge(t, stampedRelease), 0o755},
+			{"NOTICE", noise(40 << 10), 0o644},
+		}))
+		r.server.trickleOut(archive, 1024, 125*time.Millisecond)
+		start := time.Now()
+		res := r.run("--library", r.music("music"))
+		mustExit(t, res, 0)
+		if took := time.Since(start); took < 4*time.Second {
+			t.Errorf("the run took %v, so the archive did not take more than twice the speed window to come", took)
+		}
+	})
+}
+
+// fetch asks curl for the bounds a release ships, the stamped copy run as a
+// release runs it: HTTPS through every redirect, three retries, and the
+// speed floor, 1 KiB/s for 60 seconds. The test setting
+// (BRIDGE_INSTALL_TEST_SPEED_TIME) shortens the window only when it is a
+// whole number from 1 to 60; unset, empty or anything else, the window is
+// the 60 a release ships, so nothing from the environment reaches curl's
+// arguments but a small number.
+func TestFetchAsksCurlForTheShippedBounds(t *testing.T) {
+	recorder, err := os.ReadFile(filepath.Join("testdata", "argv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := readFile(t, repoScript)
+	if n := strings.Count(source, "\tSPEED_TIME=60\n"); n != 1 {
+		t.Errorf("the installer sets SPEED_TIME=60 %d times, want once", n)
+	}
+	if !strings.Contains(source, `--speed-limit 1024 --speed-time "$SPEED_TIME"`) {
+		t.Errorf(`fetch no longer passes --speed-limit 1024 --speed-time "$SPEED_TIME"`)
+	}
+	cases := []struct {
+		name  string
+		set   bool
+		value string
+		want  string
+	}{
+		{"unset", false, "", "60"},
+		{"empty", true, "", "60"},
+		{"one", true, "1", "1"},
+		{"sixty", true, "60", "60"},
+		{"with leading zeros", true, "007", "7"},
+		{"zero", true, "0", "60"},
+		{"past sixty", true, "61", "60"},
+		{"a word", true, "slow", "60"},
+		{"a command", true, "1;id", "60"},
+		{"negative", true, "-5", "60"},
+		{"a fraction", true, "1.5", "60"},
+	}
+	eachShell(t, func(t *testing.T, sh shell) {
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				r := newRig(t, sh, "curl")
+				writeFile(t, filepath.Join(r.bin, "curl"), recorder, 0o755)
+				if c.set {
+					r.set("BRIDGE_INSTALL_TEST_SPEED_TIME", c.value)
+				}
+				// The recorder downloads nothing, so the run stops at the
+				// checksum, after both downloads.
+				res := r.run("--library", r.music("music"))
+				mustExit(t, res, 1)
+				var runs [][]string
+				for _, call := range readArgv(t, r.argvLog) {
+					if call[0] == "curl" {
+						runs = append(runs, call[1:])
+					}
+				}
+				if len(runs) != 2 {
+					t.Fatalf("curl was run %d times, want 2 (checksums.txt and the archive): %q", len(runs), runs)
+				}
+				for _, args := range runs {
+					for _, want := range [][2]string{{"--proto", "=https"}, {"--proto-redir", "=https"}, {"--retry", "3"},
+						{"--speed-limit", "1024"}, {"--speed-time", c.want}} {
+						if !hasPair(args, want[0], want[1]) {
+							t.Errorf("curl was run without %s %s: %q", want[0], want[1], args)
+						}
+					}
+				}
+			})
+		}
+	})
+}
+
+// hasPair tells whether args hold flag, then value.
+func hasPair(args []string, flag, value string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == value {
+			return true
+		}
+	}
+	return false
 }
 
 // Only Linux on amd64 or arm64 is installed; anything else is refused with
