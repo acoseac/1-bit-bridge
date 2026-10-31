@@ -344,12 +344,19 @@ func TestMediumTakesVolumiosHiddenDataPartition(t *testing.T) {
 // mounted where the process sees it). The refusals are preservation cases:
 // main refused each of them for the same upper layer.
 func TestMediumRefusesWhatVolumiosLayoutDoesNotShow(t *testing.T) {
-	const today = "/data/1-bit-bridge/config/data is on an overlay whose upper layer /mnt/ext/dyn, as the mount table names it, cannot be read here: statfs /mnt/ext/dyn: no such file or directory"
+	// today is main's refusal, which ends with statfs's ENOENT (statfsOf) in
+	// the platform's words: "no such file or directory" on Linux and macOS,
+	// and on Windows, where syscall.ENOENT is ERROR_FILE_NOT_FOUND, the
+	// system's own ("The system cannot find the file specified."). It is
+	// built from the errno, never from Unix's words, on which every case
+	// failed on Windows (B603 round 3).
+	enoent := syscall.ENOENT.Error()
+	today := "/data/1-bit-bridge/config/data is on an overlay whose upper layer /mnt/ext/dyn, as the mount table names it, cannot be read here: statfs /mnt/ext/dyn: " + enoent
 	for _, tc := range []struct {
 		name   string
 		change func(b *volumioBox)
 		reason string
-		// today is main's refusal where it is not the const's: for a case
+		// today is main's refusal where it is not the one above: for a case
 		// that changes the upper layer the table names.
 		today string
 	}{
@@ -377,7 +384,7 @@ func TestMediumRefusesWhatVolumiosLayoutDoesNotShow(t *testing.T) {
 		{name: "another upper layer", change: func(b *volumioBox) {
 			b.line(31, "31 1 0:23 / / rw,relatime shared:1 - overlay overlay rw,lowerdir=/mnt/static,upperdir=/media/root-rw/overlay,workdir=/media/root-rw/work")
 		}, reason: "upper layer is /media/root-rw/overlay, not /mnt/ext/dyn",
-			today: "/data/1-bit-bridge/config/data is on an overlay whose upper layer /media/root-rw/overlay, as the mount table names it, cannot be read here: statfs /media/root-rw/overlay: no such file or directory"},
+			today: "/data/1-bit-bridge/config/data is on an overlay whose upper layer /media/root-rw/overlay, as the mount table names it, cannot be read here: statfs /media/root-rw/overlay: " + enoent},
 		{name: "an overlay that is not the one at /", change: func(b *volumioBox) {
 			b.ids["/"] = 120
 			b.line(120, "120 1 179:2 / / rw,relatime shared:90 - ext4 /dev/mmcblk0p2 rw")
@@ -490,7 +497,7 @@ func TestMediumKeepsEveryOtherRefusalBesideVolumiosEvidence(t *testing.T) {
 				}
 				return statfsOf(map[string]fsStat{piData: piOverlay})(p)
 			}
-		}, ErrMediumUnknown, "cannot be read here: statfs /mnt/ext/dyn: permission denied"},
+		}, ErrMediumUnknown, "cannot be read here: statfs /mnt/ext/dyn: " + syscall.EACCES.Error()},
 		{"a root on tmpfs", func(b *volumioBox) {
 			b.root, b.rootID = "/tmp/1-bit-bridge", 98
 			b.statfs = statfsOf(map[string]fsStat{b.root: tmpfs})
