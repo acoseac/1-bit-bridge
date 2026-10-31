@@ -159,6 +159,82 @@ capability checks must see the same policy. This is pinned by
 `TestAdmissionFormsAreValidatedBeforeOpening` through Register, the fake
 network, dispatch and sender-pin refusal.
 
+**…and the parser of each datagram's control data holds whatever it is
+handed, on every platform: `parseDatagramMeta` reports x/net's answer
+wherever `ipv4.ControlMessage.Parse` returns, and neither a destination nor
+an arrival wherever that parse panics, whatever else the buffer holds**
+(2026-10-31, backlog B610). Windows reads its own `parseWSAPktinfo`, which
+needs no guard. The nightly fuzz job failed eight nights running, every night
+the target had existed, from run 40077306390 (2026-10-24; B470 PR 5a1 brought
+the target at 22:37 UTC the evening before) to 41190127175 (2026-10-31), each
+time `FuzzParseDatagramMeta` within a second:
+x/net's `ipv4.(*ControlMessage).Parse` called a nil function
+(`ipv4/control.go:90`) from `parseDatagramMeta` on a 24-byte input.
+
+x/net's parse alone does not hold. It keeps a table of the IPPROTO_IP
+messages it reads, each platform's own, and compares each message's type and
+length with the entries in turn (TTL, destination, interface, packet info).
+An entry a platform leaves unset has a name and a length of 0 and no parse
+function, so a message of type 0, of any length, matches the first unset
+entry and calls the function it lacks. At v0.61.0 Linux's table
+(`ipv4/sys_linux.go`) sets only its TTL and packet-info entries; FreeBSD's,
+NetBSD's, OpenBSD's, DragonFly's and AIX's leave the packet-info entry unset,
+Solaris' the destination and interface entries, and z/OS's all but packet
+info. Only Darwin's sets all four, and there a message of type 0 is passed
+over like any type x/net does not read. x/net's IPv6 parse consults four
+entries, which Linux's IPv6 table sets (z/OS's alone leaves one unset), and
+the bridge parses no IPv6 control data. (The hotplug watcher's netlink
+credentials go through x/sys, whose `ParseUnixCredentials` does not check
+its payload's length either; that parse is the player's, and its record is
+B610's in `ops/engineering-log.md`.)
+
+**A network peer cannot supply the ancillary bytes.** They are recvmsg's
+out-of-band data, which only the kernel writes, and every platform numbers
+its IPPROTO_IP options from 1 (Linux's IP_TOS, the others' IP_OPTIONS), so no
+kernel writes a message of type 0. The parser is made to hold all the same
+because the SSDP read loop (`SSDPSubsystem.readLoop`) runs on a goroutine with
+no recovery: a panic there ends the process, the whole of `bridge serve`.
+
+**The policy is the orchestrator's decision.** On every input x/net's parse
+handles without panicking, the metadata is what it was, x/net's own
+semantics, each checked against its code: a message at another level, or of
+an IPPROTO_IP type x/net does not read there, is passed over; an IP_PKTINFO
+shorter than its struct is passed over, and one before it stands; a header
+that does not parse (a length of 0, below a header's or past the buffer)
+makes the whole buffer report neither, wherever it sits; of two IP_PKTINFO
+messages the later wins, its index of 0 included; a tail shorter than a
+header is ignored; and the index is in_pktinfo's 32 bits, which Linux reads
+signed and macOS unsigned, so 0x80000000 and up report no index on either.
+On an input that makes x/net's parse panic the metadata is neither, so an
+IP_PKTINFO before or after a message of type 0 is not reported.
+
+**A recover scoped to the one call meets the policy on every platform**
+(`parseControlMessage`, in `ssdp_dst_other.go`, which every platform but
+Windows builds), whatever else a table leaves unset, and what it hides is
+the intended effect: x/net panicking on control data no kernel wrote.
+**Declined**: a file of Linux's own, which leaves the BSDs, Solaris, AIX and
+z/OS panicking; a filter that drops type-0 messages before x/net, which would
+report an IP_PKTINFO beside one and would need a copy of each platform's
+unexported table; and decoding in_pktinfo by hand, which would replace x/net's
+reading of Darwin's and the BSDs' separate IP_RECVDSTADDR and IP_RECVIF
+messages with one of the bridge's.
+
+**Don't call x/net's parse outside that recover, widen the recover past the
+one call, or trade it for a filter of type-0 messages or a fix of Linux's
+alone.** `TestParseDatagramMetaAnswersEveryShapeOfControlData` gives every
+shape its metadata, laid out for the platform it runs on with x/sys/unix,
+and says whether x/net panics on it there (Linux's rows of type 0, in
+`ssdp_dst_linux_test.go`; macOS's, which x/net passes over, beside its
+IP_RECVDSTADDR and IP_RECVIF messages, in `ssdp_dst_darwin_test.go`).
+`FuzzParseDatagramMetaIsXNetsParse` holds the parser, on any bytes, to the
+parser before B610 run under a recover of the test's own.
+`TestTheDatagramMetaSeedsAreLinuxsControlData` pins the committed crasher and
+three native seeds byte for byte, by the name the fuzz engine gives them and
+by what each decodes to. With the recover removed,
+`TestParseDatagramMetaHoldsAnIPMessageOfTypeZero`, both seeds of type 0 and
+each new test panic at `control.go:90`, each run alone, and
+`TestParseDatagramMetaReadsThisPlatformsPktinfo`, unchanged, stays green.
+
 ## Strict aliases and cross-package transport (B470 PR 5a2b)
 
 Strict multicast used to select firstOn and only then ask Source, losing a
