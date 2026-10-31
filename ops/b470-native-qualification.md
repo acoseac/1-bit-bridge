@@ -633,6 +633,21 @@ reading (GET /v1/outputs' player element may carry `identity_incomplete` or
 playback path, PCM or DSD, and no wire field or schema; existing `reason`
 values may now differ as described.
 
+Version 21 covers backlog B605, test files under the guarded
+`internal/player/engine/` prefix (B601, acoseac/1-bit-bridge#1371, and B604,
+#1369, raise the version too; their order is set at merge): four tests no
+longer move the engine's fake clock across a call or a step still on its way.
+`TestNativePausedTransitionRearmsDeadline` and `TestShutdownJoinsWithinItsBound`
+wait for the owner to take the session's Prepare answer before the clock passes
+its deadline, or the shutdown's grace, and each gains a row that holds that
+answer until then; `TestAParkedEditIsAnsweredWithinReserveTimeoutOfItsPark`
+waits for the step that arms the reservation bound, and
+`TestAFailingReservationWriteRefusesEdits` for its session's Prepare. The two
+native deadline tests read their checkpoint behind a session event, never a
+command's reply, and require the paused session's own release unconfirmed,
+still paused. It changes no playback behavior, no PCM or DSD path and no wire
+field.
+
 Version 21 covers backlog B604, the 0.2.2 logging audit
 (acoseac/1-bit-bridge#1369; backlog B601, acoseac/1-bit-bridge#1371, also
 takes 21 and was not merged when this round was written, so the merge raises
