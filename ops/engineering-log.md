@@ -67007,5 +67007,204 @@ rules files they changed (00e6f5c9). CodeRabbit's other thread on this
 log, which asked to turn three "found and not fixed" entries into backlog
 IDs, was declined by the orchestrator, and they stand.
 
-The rules lines are in `.p2/rules-b604r3.patch` until the orchestrator
-applies it: build-ci-tests.md, one new bullet after the log-leak test's.
+The rules line is in build-ci-tests.md, one new bullet after the log-leak
+test's.
+
+## 2026-10-31 — B604, fourth round: a file where the backups folder goes fails its listing on every OS; qualification version 21
+
+CI on #1369, three failed jobs (the orchestrator's brief).
+
+### `test (windows-latest)`: a difference in production, not in the test
+
+`TestABackupThatFailsAnswersWithoutAPath/a_listing_that_fails` answered
+`200 ""` on Windows. It wants 500 `list-failed`, a message that says "log",
+and an Error line carrying the error. Its fixture puts a file where the
+backups folder goes.
+
+The orchestrator measured on Windows (nomos, Go 1.27.3, at 2c97e94b):
+`os.ReadDir` of a regular file fails with ERROR_PATH_NOT_FOUND (errno 3),
+which matches `fs.ErrNotExist`. So `backup.ListContext` took the file for a
+folder not made yet and listed nothing. Measured on macOS (Go 1.27.3):
+`os.ReadDir` opens with `O_DIRECTORY` (`openDirNolog`, the same code on
+Linux), and a file answers `open <path>: not a directory`, ENOTDIR, which is
+no absence. GET /api/backups answered 200 with no backups on Windows and 500
+elsewhere.
+
+The orchestrator's decision was to make production agree on every OS.
+`readBackupsDir` (`internal/backup/backup.go`) is now the listing that
+`ListContext` and the orphan sweep share. When `os.ReadDir` reports
+not-exist, it asks `os.Lstat`:
+
+- Lstat's not-exist: nothing there (no snapshot taken yet), the empty answer
+  as before.
+- Any other Lstat error: returned. A destination that cannot be stated is
+  not nothing there, the trash's rule (B179).
+- A folder: one made since the listing, which found none, so the answer is
+  empty.
+- Anything else: `&os.PathError{Op: "open", Path: root, Err:
+  syscall.ENOTDIR}`, the error Linux and macOS give a file.
+
+The orphan sweep (`reapOrphans`) lists the same folder in the same prune,
+just before `ListContext`. Left on `os.ReadDir`, a prune on Windows would have
+found the folder empty for its reaper and unlistable for its keep-policy, so
+the sweep takes the same helper.
+
+**A link to nothing changes on every OS.** Lstat sees the link, so a link
+where the folder goes whose target is missing (an unmounted disk the backups
+were linked to, say) listed nothing on every OS and now fails the listing on
+every OS. A snapshot cannot be written through it either. Measured on macOS:
+`os.MkdirAll` of a link to nothing answers `mkdir <path>: file exists`, and
+`os.ReadDir` of one answers ENOENT. So "no backups yet" there promised a
+folder the next snapshot would not make.
+
+Every caller of `List`, `ListContext` and `Prune` was checked for a reliance
+on Windows' old answer, and none relies on it:
+
+- `apiBackupsList` (GET /api/backups): 500 `list-failed` on every OS, the
+  case CI ran.
+- `getLastBackupAt` (the jobs card): a Warn `jobs: backup list` and the last
+  good value, nil, backed off for a TTL, as on Linux and macOS before.
+- `startupSnapshotShouldSkip` (the backup ticker's boot pass): logs the
+  failed listing and writes the snapshot anyway, which fails as it did
+  before.
+- The prunes after a snapshot (`bridge backup`, the ticker, the console's
+  POST /api/backups): reached only after a snapshot that succeeded, which a
+  file where the folder goes rules out (`MkdirAll` fails first).
+- No test anywhere relied on a file there listing as nothing.
+
+Two residuals:
+
+- A file where an ancestor of the folder goes (the data directory itself)
+  still reads as nothing there on Windows: ERROR_PATH_NOT_FOUND for the path
+  and for its Lstat, where Linux and macOS fail the open with ENOTDIR. The
+  folder's parent is the data directory, which holds the database, so a
+  bridge in that state does not start.
+- Lstat's other two branches (another error, and a folder made since the
+  listing) are reachable only by a race, and no test holds them.
+
+#### Red first (3bda0b6c), the fix (c405529d)
+
+`TestWhatIsWhereTheBackupsFolderGoesListsAlikeOnEveryOS` lists two ways: as
+this OS lists, and as Windows lists. The second goes through a package-level
+seam, `readDir` (`os.ReadDir`), which `SetReadDirForTest` replaces and the
+subtest's cleanup restores; no backup test runs in parallel. The seam answers
+every listing with a not-exist `*fs.PathError`. A folder not made yet lists
+nothing. A file, and a link to nothing, fail `List` and `ReapOrphans` with
+open and ENOTDIR naming the path, never an absence.
+
+On macOS before the fix there were 6 failures: the Windows shape's file and
+link, and macOS's own listing of the link, each through `List` and
+`ReapOrphans`. macOS's own listing of the file already failed.
+
+Controls (each restored from HEAD, none committed):
+
+1. The fix's error replaced with the empty answer: the same 6 failures.
+2. `os.Stat` in place of `os.Lstat`: only the link cases went red, under both
+   listers (4). The file cases stayed green.
+
+### The cases that make a filesystem operation fail
+
+The cases this PR added, by how they fail:
+
+- Structural, run on every OS:
+  - the backups listing (a file where the folder goes), portable since this
+    fix;
+  - the snapshot (a folder where bridge.yaml goes);
+  - the certificate tile (none there, and a folder where it goes);
+  - the root add (a folder not there, a relative path, a file);
+  - a config whose name is a link to nothing (skipped where the host makes
+    no link);
+  - the disk probes (a missing directory, with the operation's name and
+    `errors.As` per OS);
+  - the rendition cases, where a directory below a file stops the probes:
+    on Windows they assert the role and no directory, not which probe failed
+    first (6c3e4620);
+  - the MP4 walks (an in-memory read fault);
+  - this round's backups listing test.
+- Structural, kept off Windows by a build tag: the DSD volume comparison
+  (`rendition_room_log_unix_test.go`) and `SameVolume`'s stat
+  (`projection_probe_error_unix_test.go`). On Windows a directory below a
+  file resolves to the file, which the volume probe opens.
+- By a mode, skipped on Windows (a mode takes no permission away there) and
+  as root (who is not refused), through `skipWhereModesDoNotRefuse`. These
+  are kept as they are:
+  - in `console_error_paths_test.go`: a listing the bridge may not read
+    (:114), a snapshot it may not read a file for (:143), a certificate it
+    may not read (:194), a folder it may not reach (:247);
+  - in `console_store_error_paths_test.go`: the four token writes, under a
+    data directory at 0o500 (:26), and the compaction (:74).
+
+The six check a permission's answer, which comes from
+`errors.Is(err, fs.ErrPermission)` and does not depend on the OS.
+`TestTheConsoleSaysWhatFailedByItsClass` already injected a permission error
+for the listing, the snapshot and a root. It now does so for the certificate
+tile and the token writes too (a6423ac7), whose answers ran on no Windows
+leg. The certificate's answer moved to `certInspectRefusal`, beside
+`backupsListRefusal`, with no change in what it says.
+
+Control 3, both permission branches dropped: the two new rows went red, and
+on macOS so did the certificate's and the four token routes' mode fixtures.
+Nothing else did.
+
+### `native qualification evidence`: version 21 (7fa9ac40)
+
+The job failed with "guarded code changed without qualificationVersion
+increase (20 -> 20)". The rule in `version_gate.go` is by path, and against
+e242ce2c, the PR's merge base, its guarded paths and prefixes match six
+files:
+
+- `internal/fsutil/errpath.go` and `errpath_test.go` (`internal/fsutil/`);
+- `internal/manifest/extractors.go`, `scanner.go` and
+  `extract_log_paths_test.go` (`internal/manifest/`);
+- `cmd/bridge/serve_player_openhome_test.go` (`cmd/bridge/serve_player`).
+
+So a change to what a log line says still needs the raise. It follows the
+last two raises (3ac55afa, e242ce2c):
+
+- `version.go`;
+- the runbook's six current references (the header, the current version,
+  the approval's schema, the invalidation, the rerun and the owner's step
+  1), five of which `TestQualificationRunbookVersion` pins to `Version`;
+- a "Version 21 covers" paragraph.
+
+No test or golden asserts the number. No user holds an approval in 0.2.2, so
+none is lost. B601 (#1371) also takes 21, and the merge raises one of the two
+again.
+
+The check ran as gate.yml runs it, on commits (macOS, go1.27.3). Local main
+is e242ce2c, and the branch is linear on it:
+
+```
+$ go run -tags ts_omit_webclient,ts_omit_debugeventbus ./scripts/qualification-version -base e242ce2c4adf9449a3d1f2d8916fe65e5882953a -head d8394aa6
+guarded code changed without qualificationVersion increase (20 -> 20)
+exit status 1
+$ go run -tags ts_omit_webclient,ts_omit_debugeventbus ./scripts/qualification-version -base e242ce2c4adf9449a3d1f2d8916fe65e5882953a -head HEAD   # at 7fa9ac40
+qualification version OK: e242ce2c4adf9449a3d1f2d8916fe65e5882953a..HEAD
+```
+
+The job's other two steps also ran locally, under `-race` and with the
+overlay `scripts/native-integration-overlay.py` writes. In cmd/bridge, 13
+`TestNativeIntegration` tests passed, among them the six the job requires.
+In internal/player/playback, 26 passed, among them the four it requires.
+
+### `test -race (manifest 1/4)`: no log
+
+Nothing to fix. In the manifest package this PR changed seven log lines in
+`extractors.go` and the one-line `walkErrReason` in `scanner.go`, and added
+`extract_log_paths_test.go`.
+
+That test starts no goroutine and calls no `t.Parallel`. Its read seam is on
+the instance (`ExtractContext.openAudio`), and only the test's goroutine
+touches its source's counters. `loggingtest.Record` swaps slog's default
+atomically, and the recorder takes its lock for every record (round 3,
+pinned with `-race` controls).
+
+Shard 1/4 is index 0 of a round-robin over the package's sorted names
+(`.github/scripts/test-shard.sh`). It holds
+`TestNoteUnreadableDescribesAnyErrorWithoutPanicking` (`walkErrReason`),
+`TestTrackLogPath` and the MP4 extractor tests, but not the new test. Those
+tests and the new one, 42 top-level tests, ran 20 times each under `-race`,
+clean. The gate runs the whole package under `-race`.
+
+The rules line is in `.p2/rules-b604r4.patch` until the orchestrator applies
+it: config-lifecycle.md, one new bullet after the empty-root reaper's.
