@@ -66615,3 +66615,157 @@ goes from 18 to 20, with the runbook's five current references, its step 1,
 and a note of what 20 covers.
 
 **Round 2:** an uninterpretable root-hub speed leaves the USB listing incomplete (reader and Resolve regressions red before the fix, green after); PROTOCOL.md now names all three causes of `identity_incomplete`; the qualification note now distinguishes unchanged wire fields and schema from existing `reason` values that may differ.
+
+## 2026-10-31 — B601: the console's Player page for the bridge's own player
+
+**What.** The console gains a Player page (`/output`: `templates/output.html`,
+its section of app.js) for the bridge's own player (B470): its status, its
+switch, and the choice of its DAC. Four routes: `GET /api/output/player` (the
+status), `GET /api/output/player/dacs` (one reading of the box's cards, each
+playback endpoint with a selection token), `POST /api/output/player/enabled`
+and `POST /api/output/player/dac`. `internal/admin` imports no player package:
+cmd/bridge implements `admin.PlayerOutput` (`serve_player_console.go`) over
+serve's boot plan, its `bridgePlayer`, GET /v1/outputs' own view
+(`bridgeOutput.Facts`), the engine's snapshot, the hotplug feed's latest
+resolution and the live config. The page reads its status on load, every
+five seconds while it is in view, and after each write (a status reads no
+file of the library but the track heard's row, once an occurrence, and the
+DAC through GET /v1/outputs' own bounded, shared read); it lists the box's
+cards only when asked. The brief's test tone was dropped by the
+orchestrator's decision (it needs a DAC reservation and an identity check the
+PCM harness lacks; B602, 0.2.3). DSD is not offered: the page says "DSD on
+this player comes in a later version." and carries no control or command.
+
+**Decisions.**
+- Dedicated routes, not the settings PATCH, which takes no player key
+  (`TestTheSettingsSaveIsNoRouteToThePlayer`). Every route refuses before it
+  reads the box or the file, and each write again on the clone in its turn: no
+  provider wired (503), a public bridge with or without a session (403
+  `player_not_available`), `deployment.managedSettings` naming `playerEnabled`
+  or `playerDevice` (403 `managed-setting`), a host that is not Linux (409
+  `player_not_supported`), and a player block that does not read (409
+  `player_block_unreadable`: its Go fields are not what the file holds, and a
+  save would write the old text back). Turning the player on also asks
+  `Config.PlayerEnabled` on the clone (409 `player_refused` with its reason).
+- Both writes go through `CfgHolder.UpdateChecked` and are registered in
+  `configWriters`. A write needs a JSON body: `csrfGuard` passes a bodyless
+  POST, and the routes refuse one (`decodePlayerBody`, and each route's
+  required field).
+- Configured and running are apart. Serve decides its player once, at boot;
+  the status carries `running` (the boot plan, the engine, the boot binding)
+  and `configured` (the live block), and the pending list is
+  `planServePlayer`'s answer on the live config against the boot plan
+  (start, stop, dac). The interruption is kept (Codex 5): turning the player
+  off, or naming another DAC, withholds its output at once, as serve's player
+  has since 4b3; the page asks first while the player sounds, and the answer
+  says `interrupted`. Choosing the boot binding again is written as the boot
+  snapshot holds it (`binding.For` writes `transport: usb`, and serve's player
+  compares bindings exactly), so the output comes back from the watcher's next
+  reading, playing nothing.
+- A DAC is chosen by a selection token (128 random bits, 10 minutes, the
+  newest 64 kept) for the unit as one bracketed reading read it, its devnum
+  included, and the binding each kind builds there; a choice reads the box
+  again and requires the same unit at the same devnum building the same
+  binding (`stale_selection` otherwise). No serial leaves the server but as its
+  label.
+- The track heard is named from the library's own row through the resolver's
+  index (`library.Resolver.StoredPath`, opening nothing, at Member's cost).
+- `qualificationVersion` 21: `cmd/bridge/serve_player*` and
+  `internal/player/library` are guarded prefixes; the runbook's pins follow.
+
+**Found by this PR's own negative controls, and fixed.**
+1. The write's `interrupted` read the engine after the save
+   (`Interrupts(before, after)` once `UpdateChecked` had returned). Serve's
+   player withholds the output as soon as the save is stored, since `Store`
+   closes `Changed()` in the same call, so the engine could already be stopped
+   by the write itself and the answer said nothing was interrupted. The serve
+   tests passed because the handler's goroutine almost always reads first.
+   Now the provider answers `Sounding`, which each write asks in its config
+   turn just before the save, and `Withholds`, the configs' change alone; the
+   admin tests' fake stops sounding the moment the save is stored, which the
+   old order answers wrongly (34e3e1a1).
+2. A card the bracket set aside showed /proc's id and name unredacted, which
+   carry the unit's serial where its product string does (a USB row's were
+   redacted), and a unit whose devnum sysfs does not give was set aside as
+   "it changed while the box was read: list again", which listing again never
+   cures; the listing's own branch for an unread devnum was unreachable behind
+   the bracket and is gone (4f129df0).
+3. The bodyless refusal is two layers deep: with `decodePlayerBody`'s EOF
+   refusal removed alone, each route still refuses (its required field).
+
+**Added after the controls.** A restart from the page while the player plays:
+serve exits 75 and the next serve of the data directory finds the player
+stopped with its queue (5375b766). The running player's status with the DAC's
+capabilities: the GO bar capture has no playback stream, so in the serve tests
+GET /v1/outputs' DAC read projected nothing and every transport read
+`unknown`; the test now gives card 5 a synthetic stream and pins the three
+facts of each transport apart (1805e39b). The page's lede no longer says 1-bit
+plays to the player over OpenHome, an opt-in that is off by default; the
+status says so when the source is on (7f1bc67e).
+
+**A gate note.** `make test`'s build-site census (`scripts/third-party-licenses`,
+`TestBuildTagsAgree` and `TestRealTreeBuildSiteCensus`) walks `.tmp`, the
+developer test targets' TMPDIR, so this session's negative-control runner,
+a Python script under `.tmp` that names `go test`, failed it as an unreviewed
+build site ("unreviewed build/test site in .tmp/negctl.py"). Scratch kept
+under `.tmp/_b601`, a directory whose name begins with `_`, which the walk
+skips, passes. A test's own temporary files land in `.tmp` too when TMPDIR is
+unset, and the walk reads them as well; whether that has ever failed a run was
+not measured here.
+
+**Controls**, each on the committed tree and restored from git, the tree clean
+after:
+- CSRF: the Origin check skipped for `/api/output/player*`: the four Origin
+  subtests of `TestThePlayerWritesAreGuardedAgainstAnotherOrigin` red.
+- Bodyless: EOF accepted, green (two layers); EOF accepted and `enabled` no
+  longer required, the switch's no-body subtest red (200 unchanged).
+- Eligibility, each arm disabled alone, in
+  `TestThePlayerRoutesRefuseWhereThePlayerCannotRun`: public, 3 subtests red
+  (the DAC route wrote the binding, 200); managed, 2 red (200 restart); not
+  Linux, 3 red; an unreadable block, 3 red. The DAC route's first refusal
+  removed (the second, under the console's lock, still refuses): 4 subtests
+  red, "the refusal read the box: map[chosen:1]".
+- Around the holder: the switch written through `config.Edit`:
+  `TestThePlayerSwitchWritesTheConfigThroughTheHolder` (the live config still
+  off), `TestAPlayerWriteOverAnEditedConfigIsRefused` (200 over another
+  writer's edit) and `TestAPlayerWriteAndASettingsSaveBothLand` (the settings
+  save then refused) red.
+- The token: `sameEnumeration` dropped from `Chosen`, "another unit at the
+  card's number" (a uniqueModel binding is the same) and "the same unit
+  plugged in again" red; its time ignored, "a token past its time" red; the
+  cap removed, `TestTheTokensAreBounded` red (128 kept).
+- The boot binding's substitution removed: `TestTheConsoleChoosesAnotherDACAndBack`
+  red (withheld `binding_changed`, pending dac, the output never back).
+- The interruption: `Sounding` asked after the save, on each route,
+  `TestThePlayerSwitchWritesTheConfigThroughTheHolder` and
+  `TestTheDACChoiceWritesTheBindingItNames` red; `Withholds` false, both
+  console serve tests red.
+- The bracket: the transient marking skipped,
+  `TestAUnitSwappedWhileTheBoxIsReadIsNotOffered` red; a transient card's
+  redaction skipped, that test and
+  `TestAUnitWhoseEnumerationCannotBeReadIsOfferedNoToken` red; the unread
+  devnum's wording dropped, the latter red; a USB row's redaction skipped,
+  `TestTheConsoleListsEachPlaybackEndpointOfTheBox` red.
+- The pending start dropped: `TestTheConsoleTurnsAPlayerOnForTheNextStart`
+  red. The track's naming skipped, DSD playing without an approval, and DoP's
+  capability judged by the wrong depth: `TestTheConsoleShowsTheRunningPlayer`
+  red each time.
+- `StoredPath` looking a reference up unparsed:
+  `TestStoredPathNamesTheTrackAReferenceNames` red (the URI forms not found).
+- The page: `tr.album` no longer read,
+  `TestEveryPlayerStatusFieldIsRenderedSomewhere` red ("running.track.album");
+  a DSD checkbox on the page, `TestThePlayerPageOffersNoDSDControl` red; the
+  nav entry on a public bridge, `TestThePlayerPageOnAPublicBridge` red; the
+  restart offered where the host owns it,
+  `TestThePlayerPageOffersTheRestartAsSettingsDoes` red.
+
+**Not covered here.** No Node on the build host, so the console's node-run
+tests skip and the page's script is pinned structurally and by the field
+guard; no node-run test of `renderPlayerOutput` exists. No browser: the page
+was not driven or screenshotted. Linux: the serve tests stand in for it
+(`playerGOOS`) over sysfstest trees, and no real /proc, /sys or DAC was read;
+CI's Linux legs and its qualification comparison run on the PR. `Chosen`'s
+second identity layer (the binding the box gives now is the one listed) has no
+test of its own: with the unit and its devnum unchanged it cannot differ. The
+in-turn refusal of each write is likewise behind the holder's comparison of
+the file's bytes.
