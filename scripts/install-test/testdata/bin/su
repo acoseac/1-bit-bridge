@@ -1,0 +1,18 @@
+#!/bin/sh
+# su for the installer's tests: su root -c COMMAND reads root's password, a
+# line of its standard input (which the installer must have given the
+# terminal), and runs COMMAND with STUB_AS_ROOT set.
+log=${STUB_LOG:?}
+printf 'su %s\n' "$*" >>"$log"
+if [ "${1:-}" != root ] || [ "${2:-}" != -c ]; then
+	echo 'stub su: only su root -c COMMAND' >&2
+	exit 1
+fi
+if ! IFS= read -r password; then
+	echo 'su: Authentication failure' >&2
+	exit 1
+fi
+printf 'stub su read %s\n' "$password" >>"$log"
+STUB_AS_ROOT=1
+export STUB_AS_ROOT
+exec /bin/sh -c "$3"

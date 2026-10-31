@@ -1,0 +1,14 @@
+#!/bin/sh
+# The program the installer's tests run the commands the installer prints
+# with: put in place of each program such a command can name (the bridge,
+# systemctl, loginctl, rm, ssh, sudo, and injected, which a path split at a
+# semicolon would run), it records the name it was called by and each of
+# its arguments on a line of its own in STUB_ARGV, so that a test can tell a
+# command's words apart, a space, an apostrophe or a semicolon inside one
+# included.
+{
+	printf 'call %s\n' "${0##*/}"
+	for arg in "$@"; do
+		printf 'arg %s\n' "$arg"
+	done
+} >>"${STUB_ARGV:?}"

@@ -138,6 +138,7 @@ var reviewedBuildSites = map[string][]string{
 		"TMPDIR=\"$(TMPDIR)\" go test -tags \"$(GO_TAGS)\" -p $(P) -race -timeout 30m $(TEST_PKGS)",
 		"TMPDIR=\"$(TMPDIR)\" go test -tags \"$(GO_TAGS)\" -p $(P) $(TEST_PKGS)",
 		"BRIDGE_DSD_FIXTURE_TESTS=1 go test -tags \"$(GO_TAGS)\" ./internal/transcode/ -run 'TestDSDRender_|TestDSDLowpass|TestRunDSD' -count=1 -v",
+		"BRIDGE_INSTALL_TEST_SHELLS=\"$(INSTALLER_SHELLS)\" go test -tags \"$(GO_TAGS)\" -count=1 ./scripts/install-test/",
 		"go vet -tags \"$(GO_TAGS)\" ./...",
 		"go run -tags \"$(GO_TAGS)\" $(PKG) serve --config config/bridge.yaml.example",
 		"go run ./scripts/third-party-licenses -check-build-tags",

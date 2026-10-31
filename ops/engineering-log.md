@@ -66616,6 +66616,528 @@ and a note of what 20 covers.
 
 **Round 2:** an uninterpretable root-hub speed leaves the USB listing incomplete (reader and Resolve regressions red before the fix, green after); PROTOCOL.md now names all three causes of `identity_incomplete`; the qualification note now distinguishes unchanged wire fields and schema from existing `reason` values that may differ.
 
+## 2026-10-30 — B475 route 2: a one-line installer for Linux, attached to every release
+
+The owner asked for an easier way to install the bridge in 0.2.2 (route 2 of
+B475, approved 2026-10-19): `curl -fsSL https://1-bit.app/install.sh | sh`,
+1-bit.app redirecting to `releases/latest/download/install.sh`. The brief was
+amended by two reviews checked against e242ce2c (Codex: the console is
+loopback-only, `bridge init` under sudo installs nothing usable, an upgrade
+needs a discovery contract and must keep `bridge update`'s client gate,
+`latest` is mutable, init's `--yes` needs `--library` before its keep branch,
+there is no non-interactive uninstall, the test isolation and the CI handoff;
+Argon: flags through `sh -s --`, the terminal for prompts, a 32-bit userland,
+Volumio's overlay, the clock, BusyBox's tools, staging and the rename) and by
+the orchestrator's decisions. The rule and its long form: config-lifecycle.md's
+installer bullet, ops/History-rules-config-lifecycle.md ("The one-line
+installer (backlog B475, 2026-10-30)").
+
+**What.** `scripts/install.sh` (POSIX sh; function definitions and one final
+compound command): Linux on amd64 or arm64 only; the release it is stamped
+with, or `--version`'s, downloaded from its own tag and checked against its one
+exact `checksums.txt` line; the program run as that release from beside the
+target, then renamed to `~/.local/bin/bridge`; `bridge init` as the invoking
+user with the box's music folders offered on the terminal (or `--library`, or
+setup deferred, exit 4); lingering turned on, the one root step, after saying
+why; an installed per-user unit upgraded through its own program's `bridge
+update --yes --config`, with the served version read back from `bridge status`;
+every other layout, root, a 32-bit kernel, a volatile HOME and a clock before
+2026 refused with nothing changed (exit 3); the pairing printed as an SSH
+tunnel to the loopback console with its own port, or `bridge pair`;
+`--uninstall` printing the steps, changing nothing. `scripts/stamp-install.sh`
+and three lines of `.goreleaser.yaml` (a before-hook, `release.extra_files`,
+`checksum.extra_files`; `/install.sh` gitignored). `make installer-test` /
+`installer-check` and CI's `installer` job, in the gate's `needs`.
+
+**Tests.** `scripts/install-test` (25 tests, about 15 s under one shell): the
+real script against an HTTPS httptest server of fake releases, in a session of
+its own (no controlling terminal), a temporary HOME, a PATH of linked real
+tools and stubs (systemctl, loginctl, sudo, su, uname, id, getent, getconf,
+date, sleep, ip, hostname), and a fake bridge that refuses undefined flags and
+records its calls. Contract tests against the real code: cmd/bridge's
+`TestTheInstallerCallsTheBridgeWithFlagsItDefines` (every flag the script
+passes or prints is in the subcommand's own `-h`), `TestTheInstallersFakeBridgeTakesOnlyRealFlags`,
+`TestTheInstallerReadsWhatBridgeVersionAndStatusPrint` (the real `bridge
+version` and `writeStatusHuman` output through the script's own parsers) and
+`TestTheInstallerMatchesWhatBridgeUpdatePrints` (updateCmd's literal, by AST);
+internal/packaging's `TestTheInstallerReadsTheUnitInitWrites` (the template
+rendered, read by the script's read_unit; an escaped path refused). Locally on
+orion (macOS) the suite passed under sh, dash, `bash --posix` and ksh.
+Not run here: shellcheck, BusyBox's sh, GNU wget and goreleaser, which this
+host does not have (CI's installer job installs the first three; the snapshot
+is the orchestrator's).
+
+**Negative controls**, on d6e580dd, each restored from git with the tree clean
+after; predicted, then run:
+
+- C1, `run_init` dropped: the fresh-install test red, file and piped, exit 1
+  at "bridge init finished, but … 0 ExecStart lines". As predicted.
+- C2, the unit not looked for: every upgrade subtest red, "in its own place"
+  exit 4, the rest exit 3. As predicted.
+- C3, the SHA-256 comparison off: "tampered archive" alone red, exit 0. As
+  predicted.
+- C4, 32-bit ARM taken as arm64: armv7l and armv6l red, exit 0. As predicted.
+- C5, Darwin let through: Darwin/arm64 alone red, exit 0. As predicted.
+- C6, `--version` ignored: "version 0.2.1", "version v0.2.1" (v0.2.2 asked),
+  "unpublished" (exit 0) and "unstamped" (exit 2) red. As predicted.
+- C7, `--no-init` ignored: red, exit 4. As predicted.
+- C8, the no-terminal path reading standard input: red at the 90 s run
+  timeout. As predicted.
+- C9, a bare `[ … ] || main "$@"` last (a trailing `# }` kept the structural
+  check): red at the 42786-byte prefix ending in `|| main`, which printed the
+  banner and ran. As predicted.
+- C10, the uid 0 check dropped: both root subtests and uninstall-as-root red,
+  exit 0. As predicted.
+- C11, an unchanged version after `bridge update` taken as up to date: the
+  orphan and the failed-check subtests red, exit 0, as predicted, and "the
+  latest already" too, which I had not predicted: the mutation also skipped
+  the "is the latest release" line it asserts.
+- C12, the unit's rm printed before `disable --now`: red, "comes too early".
+  As predicted.
+- C13, the staged program copied over the target: red, "written in place, not
+  renamed into place" (the inode kept; on Linux the copy fails ETXTBSY). As
+  predicted.
+- C14, cleanup keeping the staged file: red, `.bridge.install.<pid>` left. As
+  predicted.
+- C15, `ensure_linger` dropped from the fresh install: the four "by …"
+  lingering subtests, the fresh-install test and "started by lingering" red,
+  as predicted, and "not at all" too, which I had predicted green: it asserts
+  the warning ensure_linger prints.
+- C16, the XDG_RUNTIME_DIR fallback dropped: "through the runtime directory"
+  alone red, exit 4. As predicted.
+- C17, `check_storage` dropped: the three volatile subtests red, Volumio
+  green. As predicted.
+- C18, the stamp also rewriting REPO_URL with its line check off: red, "2
+  lines changed, want 1". As predicted.
+- C19, `install.sh` out of `release.extra_files`: the wiring test red. As
+  predicted.
+- C20, `--music` for `--library`: the cmd/bridge contract test red. As
+  predicted.
+- C21, the template's ExecStart unquoted: packaging's contract test red in its
+  two readable cases. As predicted.
+- C22, any wget taken: "BusyBox wget" red, exit 1. As predicted.
+- C23, the system-unit check off: "a system service" alone red, exit 0. As
+  predicted.
+- C24, `check_clock` dropped: red, exit 0. As predicted.
+
+shellcheck does not run on orion, so the script and the stubs were read for
+what it reports, and four were fixed in 4e50591c: `$(ls -A …)` parsed for an
+empty folder (SC2012, now a loop over the folder's entries), a quoted `'~/'`
+case pattern (SC2088), the update's status shared with the pipeline's
+subshell (SC2030, SC2031), and environment variables read bare (SC2154). Two
+tests were made sharper there, with their own controls, on 4e50591c:
+
+- C25, `folder_is_empty` always true: the terminal test red, "a folder with
+  music in it was called empty". As predicted.
+- C26, `--uninstall` not naming what a linked program leads to: "through a
+  link" red. As predicted.
+
+**ksh found a real defect** (fixed in 64237098). The first run of `make
+installer-test` under every shell this host has (sh, dash, `bash --posix`,
+ksh) failed 66 subtests, all under ksh and all one cause: the script's refusal
+function was named `stop`, and ksh93 predefines `stop` as an alias of `kill -s
+STOP`, which an alias resolves before any function. Every refusal ran `kill -s
+STOP <exit code>`: `stop 1` sent SIGSTOP to process 1, refused only because the
+tests do not run as root, and the installer carried on past what it meant to
+refuse. The function is `leave`; `TestNoInstallerFunctionIsNamedAfterAShellWord`
+holds every function's name off POSIX's builtins and reserved words and ksh93's
+predefined aliases, and CI's installer job runs the tests under ksh as well.
+Its control, on 64237098:
+
+- C27, the function named `stop` again: the guard red, "defines a function
+  stop". As predicted; the behaviour itself was red before the fix (the ksh run
+  of 6c6e82d7 above).
+
+**The gate**, on 64237098, through the shared build lock: `make
+installer-test` (sh, dash, `bash --posix`, ksh; 47.7 s), then `make fmt vet
+test build-all`: `go fmt` rewrote nothing, `go vet` clean, the race suite 80
+packages ok and none failed (`internal/manifest` 1101 s, `internal/admin` 726 s,
+`cmd/bridge` 687 s, `scripts/install-test` 13.5 s under sh), the build-tag census
+and the six cross-builds.
+
+**Found and not fixed** (backlog, not this PR): packaging writes the user unit
+under `$HOME/.config/systemd/user` while systemd reads
+`$XDG_CONFIG_HOME/systemd/user` when that is set; `uninstallSystemd` ignores a
+failed `systemctl --user disable --now` before it removes the unit; `bridge
+update`'s ErrPathNotWritable advice ("try sudo bridge update") is wrong for a
+per-user install; init's `--yes` requires `--library` before its
+keep-existing-config branch (the installer never runs init over a config, so
+it does not reach it).
+
+**The rules file.** `.claude/rules/` could not be written from the worker's
+headless session (a protected path); the bullet for config-lifecycle.md and its
+`paths:` globs were handed to the orchestrator as an OLD/NEW note, to land in
+this PR with the code.
+
+## 2026-10-31 — B475 round 2: the installer's review findings
+
+Codex reviewed the integrated branch (5dbf6f48) and found eight defects; the
+orchestrator decided on them, and Codex's review of that brief added nine
+binding amendments. Each finding was checked against the code first, and all
+eight held. The rule's long form, ops/History-rules-config-lifecycle.md ("The
+one-line installer (backlog B475, 2026-10-30)"), says what round 2 changed,
+part by part.
+
+**The findings and what was done.**
+
+1. (High) A drop-in's `Environment=BRIDGE_DATA_DIR=…` passed: `read_unit` looked
+   only for an ExecStart in the adjacent `.d`, and `run_update` ran bridge update
+   in the installer's environment, so it read another token store and wrote its
+   marker in another data dir. Now the unit's files are read wherever they are
+   (`systemctl --user cat`, its drop-ins: beside it, /etc/systemd/user,
+   /usr/lib/systemd/user, `service.d`; this said "as the manager runs it" until
+   round 3, which `cat` does not show: it reads the files on disk, and the
+   manager's loaded unit is `systemctl --user show`'s, below), and a unit file the
+   manager reads from elsewhere, an ExecStart set more than once, or any
+   Environment=, EnvironmentFile=, PassEnvironment= or UnsetEnvironment= is
+   refused, named by key and file, never value; a BRIDGE_ variable this shell
+   exports or the manager gives every service is refused by its name
+   (amendment 1: `applyEnvOverrides` applies with `--config`). The manager must
+   answer first: its bus found read-only through /run/user/<uid>, a failed
+   `cat` refused, "No files found for" the one answer that means none
+   (amendment 4). `read_unit` keeps its file-only contract for packaging's test.
+2. (High) A standalone `~/.local/bin/bridge` serving settings elsewhere was
+   taken for a new box and replaced, bypassing bridge update. A new install is
+   now for a box with nothing of the bridge on it; anything at that path with no
+   service of the user running it is refused, naming bridge update and bridge
+   init. The runs that leave the program without a service (`--no-init`, no
+   systemd, a failed init) print `bridge init`, never "run this installer
+   again", and a run without a terminal or `--library` is refused before the
+   download, so the next run, given a folder, installs (amendment 2).
+3. (High) `wget -q -O` follows an HTTPS→HTTP redirect. The fallback is gone:
+   curl alone, refused without it (exit 3) with how to install it.
+4. (Medium) An unreadable `bridge status` beside an active unit was success
+   with the expected version assumed. It ends the run incomplete, exit 4, with
+   the command that checks it.
+5. and 6. (Medium) Printed commands lacked `--config` after a custom-path
+   upgrade and were not quoted. Each is a line of its own, built by
+   `command_line` / `bridge_line` (every word through `sh_quote`), with
+   `--config` on pair, status, serve and update where the settings are not the
+   default (amendment 5: logs and the lifecycle commands take no flags, init
+   takes `--dir`).
+7. (Medium) The final line claimed a start at boot whatever lingering was. It
+   now says what lingering is: on (already, or by this run), off, or no
+   loginctl (amendment 8).
+8. (Medium) `--no-init` on an install skipped only lingering, then updated and
+   started a stopped service. It is refused (exit 3) before any of that
+   (amendment 7).
+
+**Red first.** The new and changed tests were run against 5dbf6f48's script
+before any fix (`make installer-test INSTALLER_SHELLS="sh,dash,bash --posix,ksh"`):
+15 top-level tests red under each of the four shells
+(`TestAnInstallWhoseServiceHasAnotherEnvironmentIsRefused`,
+`TestTheServiceManagerIsAskedWhatItRuns`, `TestLayoutsTheInstallerDoesNotManageAreRefused`,
+`TestAProgramAtTheTargetIsNeverReplaced`, `TestARunAfterOneThatDidNotFinish`,
+`TestTheToolsTheDownloadNeedsAreCheckedFirst`, `TestAServiceWhoseReleaseCannotBeReadIsNotReportedRunning`,
+`TestThePrintedCommandsRunAsPrinted`, `TestLingeringIsTurnedOnSoTheServiceOutlivesTheLogin`,
+`TestNoInitInstallsTheProgramAlone`, `TestTheUserManagerIsFoundOrNothingChanges`,
+`TestWithoutATerminalOrALibraryTheInstallerDoesNotWait`, `TestWithoutSystemdSetupWaits`,
+`TestAFreshInstallSetsTheBridgeUpAsTheUsersService`, `TestAnInstalledBridgeIsUpgradedThroughBridgeUpdate`),
+and cmd/bridge's `TestTheInstallerPrintsTheBridgesCommandsQuoted` red at exactly
+the lines Codex named (921, 951, 958, 961, 965, 1004, 1005, 1025, 1031, 1032,
+1035). Green after the fix, 8c404014, under the four shells (72 s).
+`TestADownloadIsHeldToHTTPS` and `TestAnInterruptedInstallLeavesNothing` were
+green before and after: guards of what round 1 already did.
+
+**How the printed commands are tested** (amendment 6). The fake bridge records
+its arguments one a line besides its `$*` log, and every command the installer
+prints is run, under the shell under test, against a recorder put in place of
+each program it can name (`testdata/argv`: the bridge at its path and on PATH,
+systemctl, loginctl, rm, ssh, sudo, and `injected`), with paths holding a
+space, an apostrophe and a semicolon; the recorded words must be exactly the
+ones meant. The contract scanner learned `bridge_line`, refuses a bridge
+command written out around a variable, and requires `--config` on pair,
+status, serve and update.
+
+**Negative controls**, on 8c404014, predicted first, each restored from git
+with the tree clean after (under sh, N10 under all four shells):
+
+- N1, a wget fallback: the GNU and BusyBox wget cases red, exit 1. As predicted.
+- N2a, fetch without `--proto` and `--proto-redir`: both assets red, the plain
+  server asked. As predicted. N2b, without `--proto-redir` alone: green, as
+  predicted: `--proto '=https'` limits redirects too.
+- N3, an existing `~/.local/bin/bridge` taken: the four target layouts, the
+  running-program test and three two-run cases red. As predicted.
+- N4, `--no-init` on an install let through: the four installed-bridge cases
+  and the printed `update --config` red. As predicted.
+- N5, the unit's environment directives let through: the four directive cases
+  red. As predicted.
+- N6a, a failed `cat` taken for none: both "cannot say" cases red (the new box
+  installed). N6b, the fragment's path not compared: the shadowing unit red.
+  N6c, the ExecStart count off: the two drop-in ExecStart cases red. N6d, a
+  unit from elsewhere with none in HOME taken: the two "elsewhere" cases red.
+  All as predicted.
+- N7, this shell's BRIDGE_ variables let through; N8, the manager's: each pair
+  of cases red. As predicted.
+- N9, round 1's assumed version back: both unread-release cases and the printed
+  status case red, exit 0 for 4. As predicted.
+- N10, `sh_quote` quoting nothing, all four shells: the nine predicted printed-
+  command cases and the fresh install's `'My iPhone'` red under each; the
+  recorder named `injected` ran 16 times. As predicted.
+- N11, every `--config` dropped: the three settings-elsewhere cases red, the
+  contract test green. As predicted.
+- N12, a start at boot always claimed: the three lingering-off cases red. As
+  predicted.
+- N13, the no-library refusal removed: both cases red, exit 1. As predicted.
+- N14, a missing manager not refused up front: both cases red, refused in
+  other words. As predicted.
+- N15, one `$1 logs` written out: the contract test red at that line, and the
+  printed-command case for it. As predicted.
+
+**Tools on orion.** `which` finds no wget, shellcheck or busybox, and
+`/opt/homebrew/bin/wget`, which Codex cited, does not exist here (`test -e`).
+`make installer-check` stops at its shellcheck check before any test, so the
+lint was not run here (the script and stubs were read for SC2034, SC2086 and
+the rest) and the tests ran through `make installer-test` with
+`INSTALLER_SHELLS`. CI's `installer` job runs both, with BusyBox's sh, and
+installs no wget now.
+
+**The gate**, on d9a979bb, through the shared build lock (75 minutes queued
+behind two other workers): `make installer-test INSTALLER_SHELLS="sh,dash,bash
+--posix,ksh" fmt vet test build-all`, exit 0: the installer suite under the
+four shells (72.6 s), `go fmt` rewrote nothing, `go vet` clean, the race suite
+80 packages ok and none failed (`internal/manifest` 1098 s, `internal/admin`
+711 s, `cmd/bridge` 672 s, `scripts/install-test` 18.7 s under sh), the
+build-tag census and the six cross-builds; `make docs-check` clean.
+
+**Deviations, with the reasons.** This shell's BRIDGE_ variables are refused,
+not unset: an accepted unit has no environment of its own, so every such
+variable is one the service lacks, and a refusal names it where unsetting
+would drop it unseen. The wait for the manager after lingering went: the
+manager is asked before anything changes, so there is nothing left to wait for
+(amendment 8 kept it); "turned on by this run" stays, in `ensure_linger`, for
+what it says. An unread release is exit 4, the brief's other choice to 1.
+
+**Noted, not changed.** An upgrade of a per-user install in public mode ends
+exit 4 every time: `bridge status` sends no session, and public mode's console
+answers it 401. ksh93's `sleep` is a builtin, so the 20 s wait for the served
+release takes 20 real seconds under ksh in the tests that reach it. A printed
+command without `--config` reads `./bridge.yaml` first where the user runs it
+(`resolveConfigPath`), as every plain `bridge` command does (round 3 made this
+a fix: every printed command carries `--config` now).
+
+## 2026-10-31 — B475 round 3: the manager's loaded unit, files left for one, --config kept
+
+Codex reviewed round 2's head (66cfeb59) and found one High and two Mediums
+left; each held against the code and systemd. The rule's long form,
+ops/History-rules-config-lifecycle.md ("The one-line installer"), says what
+changed, part by part.
+
+**The findings and what was done.**
+
+1. (High) `systemctl cat` reads the unit's files on disk, which can differ
+   from what the manager has loaded (systemctl(1): "this shows the contents of
+   the backing files on disk, which may not match the system manager's
+   understanding of these units if any unit files were updated on disk and the
+   daemon-reload command wasn't issued since"). An `Environment=BRIDGE_DATA_DIR`
+   drop-in removed without a daemon-reload passed, while the service, and the
+   restart bridge update makes, kept it. Round 2's comment called `cat` the unit
+   "as the manager runs it". Now `inspect_unit` asks for the loaded unit first
+   (`systemctl --user show -p LoadState,FragmentPath,DropInPaths,NeedDaemonReload,Environment,EnvironmentFiles,PassEnvironment,UnsetEnvironment`),
+   and `check_installed_unit` refuses a unit not loaded as it is, one loaded
+   from another file, a pending daemon-reload, and any loaded environment, named
+   by property and by the files that set it, never by value; the files (`cat`)
+   are then what the manager loaded, for the ExecStart count.
+2. (Medium) systemd answers "No files found" for a unit it has not found,
+   before it reads any drop-in (`unit_find_paths`, systemctl-util.c, v252), and
+   round 2's stub printed drop-ins for a unit with no file, so its "drop-in for
+   it elsewhere, none here" test passed on invented behaviour, and files left
+   for the unit passed the new-box check, to apply once bridge init made the
+   unit. The stub now answers as systemd does, and `unit_files_on_disk` reads the
+   directories the manager reads units from (`systemd-analyze --user
+   unit-paths`): a unit file of its name, its drop-ins in `<unit>.d` and in the
+   two directories its dashes name, and the `service.d` drop-ins for every
+   service that set an environment or an ExecStart. Any of them refuses a new
+   box; a search path that cannot be listed is refused too.
+3. (Medium) `bridge_line` left out a `--config` naming the default settings
+   file, and a bridge command without one reads `./bridge.yaml` first where it
+   is run (`resolveConfigPath`, pinned by
+   `TestResolveConfigPathPrefersLocalOverPlatform`), so a printed pair, status
+   or update pasted in another bridge's folder acted on that bridge's settings
+   and its token store. It keeps every `--config` now; an explicit one always
+   wins (`TestResolveConfigPathExplicitAlwaysWins`).
+
+**The stub.** systemctl's stub keeps the manager's loaded unit in
+`STUB_STATE/loaded`, which its `daemon-reload` writes (the fake bridge's init
+runs one, as the real init does), and its `show` reports that unit, with
+NeedDaemonReload yes once the files differ from it (`STUB_RELOAD_UNNOTICED`
+keeps it no, for a loaded environment the files no longer show; `STUB_LOAD_STATE`
+and `STUB_SHOW_FAILS` stand for a unit not loaded as it is and a manager that
+does not answer). A test's `daemonReload` has the rig's manager load the unit
+before the run changes a file. A new stub, systemd-analyze, lists the same
+directories as systemctl's.
+
+**Red first.** The new and changed tests against 66cfeb59's script, with the
+corrected stub: 7 top-level tests red under each of sh, dash, `bash --posix`
+and ksh (27 named subtests a shell, and `TestWithoutSystemdSetupWaits`, which
+has none). Item 1: a drop-in removed or added without a
+daemon-reload, a loaded environment the files no longer show, a unit not
+loaded as it is, a loaded unit that cannot be read (on a new box and an
+install). Item 2: a drop-in left elsewhere (round 2's own test, red once the
+stub answers as systemd does), where init would write the unit, in a
+directory its dashes name, a `service.d` one with an environment, and a search
+path that cannot be listed. Item 3: every printed pair, status, serve and
+update with the default settings, and a new case pasted in a folder holding
+another bridge's `bridge.yaml`. Green on 204f9371 under the four shells
+(57.8 s).
+
+**Negative controls**, on 204f9371, predicted first, each restored from git
+with the tree clean after, under sh:
+
+- R1, the NeedDaemonReload refusal removed: "a drop-in added without a
+  daemon-reload" red, as predicted, and "an environment drop-in removed
+  without a daemon-reload", which I predicted green. It was still refused, by
+  the loaded environment, as I expected, but the test requires the reload
+  refusal's own words, which my prediction left out: the test pins which check
+  refuses.
+- R2, the loaded-environment refusal removed: the four directive cases and
+  the loaded environment the files no longer show red. As predicted.
+- R3, the LoadState check removed: the unit not loaded as it is red. As
+  predicted.
+- R4, the loaded FragmentPath not compared: the unit in the one in HOME's
+  place red. As predicted.
+- R5, a failed `show` taken as an empty answer: both cases red, refused in
+  other words. As predicted.
+- R6, the files left for a unit not refused: the four left-file cases red. As
+  predicted.
+- R7, the dash-prefix directories out of the scan: that case red. As
+  predicted.
+- R8a, `service.d` out of the scan: its environment case red; R8b, every
+  `service.d` drop-in taken as left for the unit: the new box with one of other
+  settings red. As predicted.
+- R9, a failed systemd-analyze taken as an empty list: that case red. As
+  predicted.
+- R10, round 2's dropping of a default `--config` back: exactly the predicted
+  printed-command cases red, the contract test green. As predicted.
+
+**The gate**, on 56864f3f, through the shared build lock: `make installer-test
+INSTALLER_SHELLS="sh,dash,bash --posix,ksh" fmt vet test build-all`, exit 0:
+the installer suite under the four shells (80.1 s), `go fmt` rewrote nothing,
+`go vet` clean, the race suite 80 packages ok and none failed
+(`internal/manifest` 1095 s, `cmd/bridge` 664 s, `scripts/install-test` 18.9 s
+under sh), the census and the six cross-builds; `make docs-check` clean.
+`internal/packaging`'s result came from Go's test cache: its test reads the
+installer through `sh`, which the cache does not see, so it was run again
+uncached on 56864f3f (`go test -count=1 ./internal/packaging`, ok).
+
+## 2026-10-31 — B475 round 4: a stalled download fails instead of hanging
+
+CodeRabbit on #1370 (Minor; verified by the orchestrator, and again here
+against the code): `fetch` ran curl with `--connect-timeout 30` and nothing
+else that bounds a transfer. `--connect-timeout` covers the name lookup, the
+connection and the TLS handshake alone, so a server that answered and then
+sent nothing held the installer for good, silent after "Downloading the
+bridge …", under `curl | sh` on a headless box; `fetch` runs twice
+(`checksums.txt`, then the archive), and there is no wget to fall back on. A
+failed fetch already ended on a tested path (`leave 1`, "Could not download
+… Nothing was installed.", the EXIT trap removing the temporary directory).
+
+**The fix.** `--speed-limit 1024 --speed-time 60`: a transfer under 1 KiB/s
+for 60 seconds is taken for stalled, curl ends it (exit 28, "Operation too
+slow"), which `--retry 3` takes for a transient error and asks the whole
+file again for. **The floor is a choice, and the record says so**: a download
+that keeps above 1 KiB/s has no cap on its total time, since a slow but
+moving one (a Pi on Wi-Fi) must finish, which is why it is not `--max-time`;
+one that moves steadily under 1 KiB/s for a minute is ended as if it had
+stalled. The tests shorten the window with `BRIDGE_INSTALL_TEST_SPEED_TIME`,
+which `constants` takes only as a whole number from 1 to 60 (leading zeros
+dropped; anything else leaves the 60), so no environment value reaches
+curl's arguments but a small number; it is not documented for users.
+
+**Measured here** (`TestCurlEndsAStalledTransferAsFetchExpects`, macOS's
+curl, fetch's flags with a one-second window, a 24 KiB body):
+
+- the headers, then nothing, the connection held: exit 28 after 11.1 s, four
+  requests 2, 3 and 5 s apart (the window, then 1, 2 and 4 s of curl's
+  backoff), each without a Range header;
+- nothing at all, held: the same, 11.1 s, four requests;
+- half the body, then nothing, held: exit 28 too, but after 35.3 s, four
+  requests 8.1, 9.1 and 11.1 s apart. curl judges its speed over the last
+  several seconds, so half a body that came at once keeps the transfer above
+  the floor for about 6 s before the window starts: with the shipped 60 s
+  that is about 66 s an attempt, and a run that stalls every time ends after
+  some 4.5 minutes, bounded;
+- half the body, then the connection closed: exit 18 at once ("transfer
+  closed with 12288 bytes remaining to read"), one request, not retried
+  (`--retry` takes only timeouts and some HTTP answers for transient; no
+  `--retry-all-errors` is added), and the run ends at once, as on any failed
+  download;
+- half the body held once, then a whole answer: exit 0 after 8.1 s, two
+  requests, both without a Range header (curl does not resume without `-C`),
+  the server's plain 200 on the retry, and the `-o` file exactly the body:
+  curl started it over.
+
+**Tests** (red first: against 0a2d2235's script all sixteen stall runs, two
+tests of two assets each under four shells, waited out the 90 s run
+timeout, and `TestFetchAsksCurlForTheShippedBounds` was red in every case):
+
+- the release server stalls a path, after nothing, its headers or half its
+  body, then holds the request until the client gives up (or the server
+  closes) and aborts the handler (`panic(http.ErrAbortHandler)`, the B526
+  rule in build-ci-tests.md), or closes the connection mid-body; it can also
+  trickle a body; the stall count is read and spent under its lock;
+- `TestAStalledDownloadIsAskedForAgain`: `checksums.txt` stalled after its
+  headers, and the archive after half its body, the first time only,
+  install, the stalled file asked for twice, whole each time;
+- `TestADownloadThatStallsEveryTimeInstallsNothing`: exit 1, "Could not
+  download", four requests for the stalled file, nothing installed (the
+  program, the temporary directory, the service), and after `checksums.txt`
+  no archive asked for;
+- `TestADownloadCutShortEndsTheRun`: a connection closed mid-body ends the
+  run at once, exit 1, nothing installed;
+- `TestASlowDownloadAboveTheFloorFinishes`: an archive sent a KiB every
+  125 ms (about eight times the floor) for over twice the window installs;
+- `TestFetchAsksCurlForTheShippedBounds`: curl replaced by a recorder of its
+  words, the stamped copy is run with the test setting unset, empty and set
+  (1, 60, 007, 0, 61, a word, a command, -5, 1.5): `--speed-limit 1024`,
+  `--retry 3` and the HTTPS flags every time, `--speed-time 60` unless the
+  setting is valid; and a source check of `SPEED_TIME=60` and fetch's line.
+
+**Time** (a verbose run of the suite under the four shells, on 641b3eaf):
+each run of the new installer tests, under each shell, takes 3.2 to 5.4 s
+stalled once, 11.7 to 12.0 s (`checksums.txt`) and 19.9 s (the archive, for
+the reason measured above) stalled every time, 0.6 to 1.0 s cut short, and
+6.8 to 6.9 s for the slow download; the recorder's eleven cases take 9.1 to
+9.4 s a shell, and the measurement's longest case, run once, 35.2 s: all well
+under the 90 s run timeout. The suite under the four shells, run back to back
+in one build slot, whole, without round 4's six tests and whole again, took
+80.9, 71.9 and 87.5 s, so the six add about 12 s (9 to 16 s; the two whole
+runs differ by 6.6 s). Runs at different times differ by more than that:
+round 3's suite took 57.8 s in one run and 80.1 s in its gate, so an earlier
+draft of this record, which set round 3's 57.8 s against a round-4 run's
+81.2 s, overstated the cost. Under `make test` (sh alone, `-race`)
+`scripts/install-test` took 42.0 s, against round 3's 18.9 s, its longest
+test the 35 s measurement, beside `internal/manifest`'s 1105 s: the race
+suite takes no longer.
+
+**Negative controls**, on 8634d52b, predicted first, each restored from git
+with the tree clean after, under sh:
+
+- S1, the speed flags removed: both stalled-once and both stalled-every-time
+  subtests "still running after 1m30s"; the recorder's eleven cases and its
+  source check red. As predicted.
+- S2, `--retry 3` removed: both stalled-once subtests exit 1 ("Could not
+  download"); both stalled-every-time subtests asked once, not four times;
+  the recorder's cases red. As predicted.
+- S3, the shipped window changed alone (30): the recorder's eight cases that
+  leave the default, and its source check, red; the three that set a valid
+  window green. As predicted.
+- S4, the range check off: the recorder's "zero" and "past sixty" alone red.
+  As predicted.
+
+**The gate**, on 641b3eaf (8634d52b is the last code commit; the commits
+after it are docs and the rules patch), through the shared build lock
+(queued 640 s): `make fmt vet test build-all clean docs-check installer-test
+INSTALLER_SHELLS="sh,dash,bash --posix,ksh"`, exit 0: `go fmt` rewrote
+nothing, `go vet` clean, the race suite 80 packages ok and none failed
+(`internal/manifest` 1105 s, `internal/admin` 738 s, `cmd/bridge` 693 s,
+`scripts/install-test` 42.0 s under sh, `internal/packaging` run rather than
+taken from the cache), the census and the six cross-builds, then `make
+clean`; `make docs-check` clean; the installer suite under the four shells
+79.1 s. `make installer-check` stops at its shellcheck requirement: this host
+has no shellcheck, nor BusyBox, so the lint and the BusyBox leg are CI's
+`installer` job's. The rules line is in `.p2/rules-b475r4.patch` until the
+orchestrator applies it.
 ## 2026-10-30 — B604: the 0.2.2 logging audit: no library path, operator directory, config path or client address in a log line or a console body
 
 The release's logging audit (`docs/release-process.md`, Process, step 1)

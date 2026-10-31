@@ -1,0 +1,8 @@
+#!/bin/sh
+# hostname for the installer's tests: -I is STUB_IP.
+printf 'hostname %s\n' "$*" >>"${STUB_LOG:?}"
+if [ "${1:-}" = -I ]; then
+	printf '%s \n' "${STUB_IP:-192.0.2.10}"
+	exit 0
+fi
+echo box

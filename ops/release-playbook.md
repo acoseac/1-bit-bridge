@@ -112,7 +112,11 @@ The candidate is main's head once every fix in scope has merged. Record its sha.
    ```
 
    Remove `dist/` after this check succeeds. Never use `--skip=before` for
-   a distributable build: dependency bumps rely on the generation hook.
+   a distributable build: dependency bumps rely on the generation hook, and
+   the one-line installer's stamp is a before-hook too. The snapshot leaves
+   `install.sh` at the repository root, stamped with the snapshot's version
+   (`grep -n "^[[:space:]]*STAMPED_VERSION=" install.sh`), with its line in
+   `dist/checksums.txt`; remove it with `release-meta.json`.
 2. **Docker upgrade test** on the Docker test host (`<DOCKER-TEST-SSH>`, `sudo -n docker`):
    - **Build:** clone the repo, check out the candidate, then
      `sudo -n docker buildx build --load -t bridge-p3:rc .` (BuildKit is required; see CLAUDE.md
@@ -195,8 +199,14 @@ The candidate is main's head once every fix in scope has merged. Record its sha.
    `gh run list --limit 10 --json name,headBranch,status,conclusion --jq '.[] | select(.headBranch=="vX.Y.Z")'`.
    They take about 10 minutes.
 4. **Verify the draft release.**
-   - `gh release view vX.Y.Z --json assets` lists 8 assets: macOS, Linux and Windows for amd64
-     and arm64, `checksums.txt` and `release-meta.json`.
+   - `gh release view vX.Y.Z --json assets` lists 9 assets: macOS, Linux and Windows for amd64
+     and arm64, `checksums.txt`, `release-meta.json` and `install.sh`, the one-line installer
+     (scripts/install.sh, stamped by scripts/stamp-install.sh in a before-hook).
+   - `install.sh` is stamped with this release: download it and `checksums.txt`, then
+     `grep -n "^[[:space:]]*STAMPED_VERSION=" install.sh` names `X.Y.Z`, and
+     `shasum -a 256 -c checksums.txt --ignore-missing` passes for it too. Once the release is
+     published as the latest, `https://1-bit.app/install.sh` (the website's redirect to
+     `releases/latest/download/install.sh`) serves the same bytes.
    - Download the macOS arm64 archive and `checksums.txt`, then check:
      - `shasum -a 256 -c checksums.txt --ignore-missing` passes;
      - the binary prints `X.Y.Z (protocol v1)`;
