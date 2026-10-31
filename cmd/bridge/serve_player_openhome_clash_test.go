@@ -13,6 +13,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
+	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
 )
 
 // A clash with the OpenHome surface's port that reaches the config while
@@ -136,8 +137,9 @@ func TestTheConsoleRefusesToMoveAListenerOntoTheOpenHomePort(t *testing.T) {
 // running player's admission against a clash that reaches the live config
 // with no console save, as a holder Store lands (memory alone, the file
 // untouched): with the surface on at boot, each of the four listeners'
-// settings moved onto its port leaves the engine playing, the DAC held and
-// the surface listening where the boot put it, since no socket moved; the
+// settings moved onto its port leaves the watcher watching (it takes the
+// change and stops nothing), the engine playing, the DAC held and the
+// surface listening where the boot put it, since no socket moved; the
 // console says the player plays and withholds nothing, and that the next
 // start refuses it, naming the setting; a player-off request without the
 // operator's go-ahead is still asked first (would_interrupt), since what the
@@ -166,7 +168,15 @@ func TestALiveClashWithTheOpenHomePortLeavesTheRunningPlayerAsItIs(t *testing.T)
 			if err := edited.OpenHomePortClash(); err == nil || !strings.Contains(err.Error(), "for "+clash.setting+":") {
 				t.Fatalf("the edit makes no clash through %s: %v", clash.setting, err)
 			}
+			taken := cs.hotplug.Status().Stats.ConfigChanges
 			cs.holder.Store(edited)
+			// The watcher reads the edit at its Changed: it takes the change
+			// into its watch (ConfigChanges), or stops the watch.
+			if w := waitHotplug(t, cs.hotplug, "the watcher's answer to the edit", func(st hotplug.Status) bool {
+				return st.Stats.ConfigChanges > taken || !st.Running || st.Stopping
+			}); !w.Running || w.Stopping {
+				t.Errorf("the watcher stopped its watch over the edit: %+v", w)
+			}
 
 			st := cs.status(t)
 			if st.Running.State != bridgeStatePlaying || st.Running.Withheld != "" {
