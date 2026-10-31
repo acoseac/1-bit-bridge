@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"testing"
 	"time"
 
@@ -875,6 +877,79 @@ func TestListAcceptsMissingDir(t *testing.T) {
 	}
 	if len(out) != 0 {
 		t.Errorf("List(missing) = %v, want empty", out)
+	}
+}
+
+// TestWhatIsWhereTheBackupsFolderGoesListsAlikeOnEveryOS: os.ReadDir of a
+// regular file answers ENOTDIR on every OS, and on Windows ENOTDIR is
+// ERROR_PATH_NOT_FOUND, which matches os.ErrNotExist, so List took a file
+// where the backups folder goes for a folder not made yet and listed
+// nothing, where Linux and macOS fail the listing: the console answered 200
+// with no backups on Windows and 500 elsewhere (B604's fourth round, CI's
+// Windows leg of TestABackupThatFailsAnswersWithoutAPath). The seam lists as
+// Windows does, so every OS runs Windows's shape beside its own. A folder
+// not made yet lists nothing. A file there, or a link to nothing, through
+// which a snapshot cannot make the folder either, fails the listing with
+// one answer on every OS, never an absence and never syscall.ENOTDIR, which
+// would be one on Windows; and so does the orphan sweep, which lists the
+// same folder.
+func TestWhatIsWhereTheBackupsFolderGoesListsAlikeOnEveryOS(t *testing.T) {
+	if runtime.GOOS == "windows" && !errors.Is(syscall.ENOTDIR, fs.ErrNotExist) {
+		t.Error("ENOTDIR is no longer an absence on Windows: errNotADirectory's reason is stale")
+	}
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "not made yet")
+	file := filepath.Join(dir, "a file")
+	if err := os.WriteFile(file, []byte("not a folder"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	notFolders := []string{file}
+	link := filepath.Join(dir, "a link to nothing")
+	if err := os.Symlink(filepath.Join(dir, "nowhere"), link); err != nil {
+		t.Logf("no link to nothing on this host (%v): the file stands for both", err)
+	} else {
+		notFolders = append(notFolders, link)
+	}
+	// As Windows lists a path that is not a folder: as nothing there.
+	asWindows := func(name string) ([]os.DirEntry, error) {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+	}
+	for _, lister := range []struct {
+		name string
+		seam func(string) ([]os.DirEntry, error)
+	}{
+		{"as this OS lists", nil},
+		{"as Windows lists", asWindows},
+	} {
+		t.Run(lister.name, func(t *testing.T) {
+			if lister.seam != nil {
+				t.Cleanup(backup.SetReadDirForTest(lister.seam))
+			}
+			if out, err := backup.List(missing); err != nil || len(out) != 0 {
+				t.Errorf("List of a folder not made yet = %v, %v; want nothing and no error", out, err)
+			}
+			if n, err := backup.ReapOrphans(missing, 0); err != nil || n != 0 {
+				t.Errorf("ReapOrphans of a folder not made yet = %d, %v; want 0 and no error", n, err)
+			}
+			for _, at := range notFolders {
+				_, err := backup.List(at)
+				requireNotAFolder(t, "List", at, err)
+				_, err = backup.ReapOrphans(at, 0)
+				requireNotAFolder(t, "ReapOrphans", at, err)
+			}
+		})
+	}
+}
+
+// requireNotAFolder fails the test unless err is the listing's answer for a
+// path where something that is not a folder stands: open and
+// ErrNotADirectory, naming at, and neither an absence nor syscall.ENOTDIR.
+func requireNotAFolder(t *testing.T, call, at string, err error) {
+	t.Helper()
+	var pe *fs.PathError
+	if !errors.As(err, &pe) || pe.Op != "open" || pe.Path != at || !errors.Is(err, backup.ErrNotADirectory) ||
+		errors.Is(err, syscall.ENOTDIR) || errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("%s of %q = %v; want open and ErrNotADirectory naming it, and no absence", call, filepath.Base(at), err)
 	}
 }
 

@@ -2251,6 +2251,33 @@
   `ProbeRoleData`, `ProbeRoleLibrary`, `ProbeRoleUpload`; an empty role
   is `"directory"`. Callers that probe on every request keep
   `NearestExistingDir` and log nothing (`quietDiskFree`). The platform
-  probes' returned errors still quote the path they failed to stat;
-  they are not this line. The privacy page is unchanged.
-  (`TestAShortRenditionWhoseScratchIsGoneNamesNoAbsoluteDirectory`.)
+  probes' returned errors still quoted the path they failed to stat
+  until B604, below; they are not this line. The privacy page is
+  unchanged. (`TestAShortRenditionWhoseScratchIsGoneNamesNoAbsoluteDirectory`.)
+  **…and so do the probes' errors and a no-room refusal** (2026-10-30,
+  B604, the 0.2.2 logging audit). The on-demand pre-flight
+  (`roomForRendition`, `roomOn`) handed POST /v1/upscale and a stale
+  download's re-render errors that named the variants directory or the
+  render scratch: AvailableDiskSpace's `statfs %q` (Windows'
+  `GetDiskFreeSpaceEx %q`), the volume probe's `os.Stat` `*fs.PathError`
+  (Windows' `open %q`), and `InsufficientDiskSpaceError`, whose text quoted
+  `Dir`; the request logged them at Error or Warn, the re-render at Warn
+  or Debug. Every probe (`AvailableDiskSpace`, `volumeID`, `TotalDiskSpace`,
+  on both platforms) now answers a `probeError`, the call and the errno
+  (`fsutil.ErrorWithoutPath` for an `*fs.PathError`) and never the
+  directory, whose `Unwrap` is what the probe got, so `errors.Is` and
+  `errors.As` answer as before; `InsufficientDiskSpaceError` carries
+  `Role` and says the role's volume (`DiskHasHeadroom`'s role, the
+  batch's, the adapter's), keeping `Dir`, which the batch tests compare;
+  and `roomOn` names its directory's role, and the volume comparison both
+  roles (`compare the variants dir's volume with the scratch's`). The
+  ErrUpscaleNoRoom decision, the batch's 507 numbers and the sweep's disk
+  floor are unchanged. **Don't quote a directory in a probe's error or in
+  `InsufficientDiskSpaceError`'s text; name its role, and keep `Dir` for a
+  caller that compares it.**
+  (`TestADiskProbeErrorNamesItsOperationAndNotItsDirectory`,
+  `TestNoRoomNamesTheDirectorysRoleAndKeepsItsNumbers`,
+  `TestABatchWithNoRoomNamesTheVariantsDirByItsRole`,
+  `TestAVolumeComparisonThatCannotStatADirectoryNamesNeither` (POSIX),
+  `TestARenditionTheVolumesRefuseNamesNoDirectory`,
+  `TestADSDRequestThatCannotCompareItsVolumesNamesNoDirectory` (POSIX).)

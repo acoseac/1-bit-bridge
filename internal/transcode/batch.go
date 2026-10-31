@@ -398,6 +398,7 @@ func (c *Coordinator) diskPreflight(outputDir string, projected int64, op, role 
 					RequiredBytes:  required,
 					AvailableBytes: available,
 					Dir:            checkDir,
+					Role:           role,
 				}
 			}
 		}

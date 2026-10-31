@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"net"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/librarycat"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/version"
@@ -76,14 +78,70 @@ func (e *cfgAbort) Error() string { return e.msg }
 
 // writeCfgUpdateErr maps a CfgHolder.Update failure to the handler's
 // error response: fn rejections (*cfgAbort) keep their intended
-// status + wire code; anything else is the Save failure.
+// status + wire code; anything else is the Save failure
+// (writeSaveConfigErr).
 func writeCfgUpdateErr(w http.ResponseWriter, err error) {
 	var abort *cfgAbort
 	if errors.As(err, &abort) {
 		writeError(w, abort.status, abort.code, abort.msg)
 		return
 	}
-	writeError(w, http.StatusInternalServerError, errCodeSaveConfig, err.Error())
+	writeSaveConfigErr(w, err)
+}
+
+// The messages a console save of the config file answers a refusal or a
+// failure with (saveConfigRefusal): each says what the refusal says to do,
+// in words that name no path. The refusals' own texts name the config file
+// (config.BusyError and its kin), the lock beside it or a staged save, and a
+// console response names no path, while the log may name the bridge's own
+// files and keeps the error whole (B604; the body was err.Error() until
+// then).
+var (
+	errMsgSaveConfigBusy = fmt.Sprintf("another bridge command or the running bridge is changing the config file, "+
+		"and held its lock for longer than %s, so nothing was written: try again", config.LockWait)
+	errMsgSaveConfigNoLockManager = "the filesystem holding the config file gave no lock beside it, so nothing was written: " +
+		"it has no working lock manager; mount it with local locking, or start its lock service, and try again"
+	errMsgSaveConfigChangedOutside = "the config file was changed or removed by another writer since this bridge read it " +
+		"(a bridge command such as library add or init, or an edit), or its name now opens another file (a link at it " +
+		"repointed), so this change was not saved, and the file keeps what that writer left: restart the bridge to load " +
+		"the file, then make the change again"
+	errMsgSaveConfigBootUnresolved = "this bridge could not resolve the file its config's name opens when it started, " +
+		"so it cannot say which file its settings were read from, and this change was not saved: restart the bridge " +
+		"once that name resolves, then make the change again"
+	errMsgSaveConfigLinkToNothing = "the config file's name is a symbolic link to a file that is not there, so nothing " +
+		"was written: point the link at the config file, or put the config file where the link is"
+	errMsgSaveConfig = "the bridge could not save the config file, and the bridge's log says why"
+)
+
+// saveConfigRefusal is what the console says of err, a save of the config
+// file that was refused or failed, by its class: try again past another
+// writer's lock, repair the lock manager, restart over a file changed
+// outside the holder (a change in the turn and a repointed name are the
+// holder's own form of it), restart once the name resolves, fix a link to
+// no file, or, for any other failure, read the log.
+func saveConfigRefusal(err error) string {
+	switch {
+	case errors.Is(err, config.ErrBusy):
+		return errMsgSaveConfigBusy
+	case errors.Is(err, config.ErrNoLockManager):
+		return errMsgSaveConfigNoLockManager
+	case errors.Is(err, config.ErrChangedOutside), errors.Is(err, config.ErrChangedInTurn), errors.Is(err, config.ErrNameMoved):
+		return errMsgSaveConfigChangedOutside
+	case errors.Is(err, config.ErrBootUnresolved):
+		return errMsgSaveConfigBootUnresolved
+	case errors.Is(err, fsutil.ErrDanglingLink):
+		return errMsgSaveConfigLinkToNothing
+	}
+	return errMsgSaveConfig
+}
+
+// writeSaveConfigErr answers a save of the config file that was refused or
+// failed: 500 save-config, with what to do in words (saveConfigRefusal), and
+// the error itself in the log, where the config file may be named (the
+// bridge's own files in fault lines).
+func writeSaveConfigErr(w http.ResponseWriter, err error) {
+	logger.Error("admin: the config file was not saved", "err", err)
+	writeError(w, http.StatusInternalServerError, errCodeSaveConfig, saveConfigRefusal(err))
 }
 
 // --- response shapes ---
@@ -1636,6 +1694,53 @@ func (s *Server) apiRootsList(w http.ResponseWriter, r *http.Request) {
 
 // --- POST /api/roots {path} ---
 
+// What the console answers a root add or remove whose path it refuses, in
+// words that name no path (B604's second round: the stat's *fs.PathError
+// and the path the handler resolved were the body, and a relative path,
+// resolved against the bridge's working directory, gave that directory away
+// too). A folder's own name, the part of a root the app keys its tracks by,
+// is not a path: the two basename refusals name it.
+const (
+	errMsgRootPathUnresolved = "a relative path is taken from the bridge's working directory, which the bridge " +
+		"cannot read now: type the folder's absolute path"
+	errMsgRootNotFound     = "there is no folder at that path on this machine: check it, and type the folder's absolute path"
+	errMsgRootNotPermitted = "the bridge is not allowed to reach that folder: give the user the bridge runs as " +
+		"permission to open each folder on the way to it, then add it again"
+	errMsgRootNotAFolder = "that path names a file, not a folder: type the path of the folder that holds the music"
+)
+
+// rootStatRefusal is what the console says of err, the stat of a root it was
+// asked to add: no folder there, a permission the bridge lacks on the way to
+// it, or what the stat answered with its path left out.
+func rootStatRefusal(err error) string {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return errMsgRootNotFound
+	case errors.Is(err, fs.ErrPermission):
+		return errMsgRootNotPermitted
+	}
+	return "the bridge could not read that path (" + fsutil.ErrorWithoutPath(err) +
+		"): check it, and type the folder's absolute path"
+}
+
+// rootBasenameCollision is the refusal of abs, whose folder's name folds to
+// the name of a root in current (ValidateRoots, which this asks the same
+// fold), naming the two names and no path. A pair already in current, which
+// a config written before ValidateRoots refused one can carry, is said as
+// that.
+func rootBasenameCollision(abs string, current []string) string {
+	key := bridgefs.FoldRootBasename(abs)
+	for _, other := range current {
+		if bridgefs.FoldRootBasename(other) == key {
+			return fmt.Sprintf("a library root's folder is already named %q, and this one is %q: the app tells "+
+				"roots apart by their folder's name, compared without case, so rename one of the two folders, "+
+				"then add it again", filepath.Base(other), filepath.Base(abs))
+		}
+	}
+	return "two of the library roots already configured have folder names that differ only by case: the app " +
+		"tells roots apart by their folder's name, so rename one of them, then add this one again"
+}
+
 // normalizeRootPathReq trims + absolutizes a library-root path from an
 // admin roots request. On a rejectable input (empty, or unresolvable by
 // filepath.Abs) it writes the error response and returns ok=false so the
@@ -1652,7 +1757,7 @@ func normalizeRootPathReq(w http.ResponseWriter, raw string) (abs string, ok boo
 	}
 	abs, err := filepath.Abs(raw)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, errCodeBadPath, err.Error())
+		writeError(w, http.StatusBadRequest, errCodeBadPath, errMsgRootPathUnresolved)
 		return "", false
 	}
 	return abs, true
@@ -1672,11 +1777,11 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	info, err := os.Stat(abs)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "not-found", err.Error())
+		writeError(w, http.StatusBadRequest, "not-found", rootStatRefusal(err))
 		return
 	}
 	if !info.IsDir() {
-		writeError(w, http.StatusBadRequest, "not-a-dir", abs+" is not a directory")
+		writeError(w, http.StatusBadRequest, "not-a-dir", errMsgRootNotAFolder)
 		return
 	}
 
@@ -1692,7 +1797,7 @@ func (s *Server) apiRootsAdd(w http.ResponseWriter, r *http.Request) {
 	// roots with the same final path segment would mask each other.
 	newList := append(append([]string(nil), current...), abs)
 	if err := bridgefs.ValidateRoots(newList); err != nil {
-		writeError(w, http.StatusConflict, "basename-collision", err.Error())
+		writeError(w, http.StatusConflict, "basename-collision", rootBasenameCollision(abs, current))
 		return
 	}
 
@@ -1796,7 +1901,7 @@ func (s *Server) applyRootAddition(w http.ResponseWriter, r *http.Request, abs s
 		// The in-flight scan was cancelled. Redo it against the roots
 		// still configured: the save did not move them.
 		s.spawnBackgroundScan("compensating-scan (add)")
-		writeError(w, http.StatusInternalServerError, errCodeSaveConfig, err.Error())
+		writeSaveConfigErr(w, err)
 		return
 	}
 	s.deps.Scanner.SetRoots(newList)
@@ -1828,17 +1933,20 @@ func (s *Server) applyRootAddition(w http.ResponseWriter, r *http.Request, abs s
 // (SonarCloud go:S3776, 16 against a ceiling of 15 — a finding that predates
 // #948 and surfaced on it only because the file changed). Named, the guard
 // also reads as the one thing it is.
-func (s *Server) refuseAmbiguousRootBasename(w http.ResponseWriter, abs, removed string, survivors []string) bool {
+//
+// The refusal names the two folders by their names, never by their paths
+// (B604's second round), as the add's basename refusal does.
+func (s *Server) refuseAmbiguousRootBasename(w http.ResponseWriter, removed string, survivors []string) bool {
 	removedKey := bridgefs.FoldRootBasename(removed)
 	for _, other := range survivors {
 		if bridgefs.FoldRootBasename(other) != removedKey {
 			continue
 		}
 		writeError(w, http.StatusConflict, "ambiguous-basename",
-			fmt.Sprintf("can't remove %q: surviving root %q has a basename that differs only by case (%q vs %q). "+
-				"Track paths are keyed by basename, so the removal target is ambiguous — rename one root's directory, "+
-				"or remove both and re-add the one you want to keep.",
-				abs, other, filepath.Base(removed), filepath.Base(other)))
+			fmt.Sprintf("can't remove this root: the root whose folder is named %q stays, and that name differs "+
+				"from this one's, %q, only by case. Track paths are keyed by the folder's name, so the removal "+
+				"target is ambiguous — rename one root's folder, or remove both and re-add the one you want to keep.",
+				filepath.Base(other), filepath.Base(removed)))
 		return true
 	}
 	return false
@@ -1892,7 +2000,7 @@ func (s *Server) apiRootsRemove(w http.ResponseWriter, r *http.Request) {
 	// rescans rather than selecting by basename, and there is nothing to
 	// be ambiguous about. The prefix delete is only reachable when two or
 	// more roots survive.
-	if !willCollapse && s.refuseAmbiguousRootBasename(w, abs, current[idx], newList) {
+	if !willCollapse && s.refuseAmbiguousRootBasename(w, current[idx], newList) {
 		return
 	}
 
@@ -1982,7 +2090,7 @@ func (s *Server) applyRootRemoval(w http.ResponseWriter, r *http.Request, newLis
 			s.deps.Manifest.RetargetFirstIndexedCarry(r.Context(), carryGen, true)
 		}
 		s.spawnBackgroundScan("compensating-scan (remove)")
-		writeError(w, http.StatusInternalServerError, errCodeSaveConfig, err.Error())
+		writeSaveConfigErr(w, err)
 		return
 	}
 	s.deps.Scanner.SetRoots(newList)
@@ -2008,6 +2116,31 @@ func (s *Server) apiTokensList(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// What the console answers a write of the device tokens that failed, after
+// what did not happen: what to do, in words that name no path (B604's second
+// round: the body was the store's error, whose *fs.PathError names
+// tokens.json or its staging file in the data directory, as a read-only data
+// directory or a tokens.json a root CLI left root's produces). A write is
+// adopted only once its rename lands (auth.Store's commitLocked), so a token
+// it would have revoked or rotated still works.
+const (
+	errMsgTokensNotPermitted = "the bridge is not allowed to write its device tokens: give the user the bridge " +
+		"runs as write access to tokens.json and to the data directory that holds it, then try again"
+	errMsgTokensNotSaved = "the bridge could not save its device tokens, and the bridge's log says why"
+)
+
+// writeTokenStoreFault answers a write of the device tokens that failed: 500
+// code, saying outcome (what did not happen) and what to do, with the error
+// itself in the log, where the bridge's own files may be named.
+func writeTokenStoreFault(w http.ResponseWriter, code, outcome string, err error) {
+	logger.Error("admin: the device tokens were not saved", "err", err)
+	msg := errMsgTokensNotSaved
+	if errors.Is(err, fs.ErrPermission) {
+		msg = errMsgTokensNotPermitted
+	}
+	writeError(w, http.StatusInternalServerError, code, outcome+": "+msg)
 }
 
 // --- POST /api/tokens {name, url} ---
@@ -2040,7 +2173,7 @@ func (s *Server) apiTokensMint(w http.ResponseWriter, r *http.Request) {
 
 	rawToken, tok, err := s.deps.Auth.Mint(req.Name)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "mint", err.Error())
+		writeTokenStoreFault(w, "mint", "no device token was made", err)
 		return
 	}
 	// Bake the fingerprint the device will actually capture when it dials
@@ -2083,7 +2216,7 @@ func (s *Server) apiTokensRevoke(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "unknown-token", id)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "revoke", err.Error())
+		writeTokenStoreFault(w, "revoke", "the token was not revoked, and it still works", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

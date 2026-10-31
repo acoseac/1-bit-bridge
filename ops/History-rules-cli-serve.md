@@ -1911,8 +1911,15 @@ mentions across the four `ops/audit-*.md` files.
   AFTER the silent-probe check, which recognises the probe by that address.
   The tailnet server, whose listener yields `*tls.Conn`, takes
   `handshakelog.ErrorLog()`. `TestEveryServeHTTPServerRedactsPeerAddresses`
-  requires every `http.Server` in `cmd/bridge` to get its `ErrorLog` from
-  handshakelog, and an assigned one before the server is first served. **A test that finds a log line by its peer address passes
+  requires every `http.Server` in the module to get its `ErrorLog` from
+  handshakelog: in its literal, through a variable every assignment of
+  which is a call into handshakelog, or by Wrap's assignment before the
+  server is first served. It swept `cmd/bridge` alone until B604's second
+  round (2026-10-31), when the DLNA MediaServer's server had no `ErrorLog`
+  and the console's had none on plain HTTP, so a handler's recovered panic
+  named the client it was serving (Codex on the integrated branch); it now
+  also requires a server in each package that builds one (`cmd/bridge`,
+  `internal/admin`, `internal/dlna`, `internal/player/openhome`). **A test that finds a log line by its peer address passes
   vacuously once the address is redacted**: the probe tests find the
   filtered server's line by the placeholder as well.
 

@@ -23,7 +23,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 
 ## DLNA, UPnP and discovery
 
-- **Every advertised device registers with serve's one SSDP subsystem (B470 PR 5a1). Close owns staged endpoints and withdrawals through their last socket release, under its one deadline; strict replies use their selected endpoint's local address AND outgoing interface, or send nothing and warn once. Refuse strict endpoints without a valid non-unspecified, unmapped IPv4 Local and positive interface index before opening sockets. Clamp every owned sender's installed and future write deadlines to Close's under the same lock. Re-read before byebye to skip and report expiry. Every retirement checks expiry after sender/listener release and reader join against the re-read deadline; Withdraw checks again atomically with handle removal, adding a deadline error only if absent, so Close owns exactly the handles it saw. Keep bind/pin ordering tests portable and expect strict write refusal outside Linux/macOS/Windows. Normalize supported admission pointers before validation and refuse typed nils and unknown implementations before opening anything. Don't unlist a withdrawal before retirement finishes, give a rollback a fresh shutdown budget, or use the MediaServer's routed reply path for a strict registration.** → History-rules-dlna-upnp.md
+- **Every advertised device registers with serve's one SSDP subsystem (B470 PR 5a1). Close owns staged endpoints and withdrawals through their last socket release, under its one deadline; strict replies use their selected endpoint's local address AND outgoing interface, or send nothing and warn once, naming the stage, the operation and the errno and never a socket address (B604). Refuse strict endpoints without a valid non-unspecified, unmapped IPv4 Local and positive interface index before opening sockets. Clamp every owned sender's installed and future write deadlines to Close's under the same lock. Re-read before byebye to skip and report expiry. Every retirement checks expiry after sender/listener release and reader join against the re-read deadline; Withdraw checks again atomically with handle removal, adding a deadline error only if absent, so Close owns exactly the handles it saw. Keep bind/pin ordering tests portable and expect strict write refusal outside Linux/macOS/Windows. Normalize supported admission pointers before validation and refuse typed nils and unknown implementations before opening anything. Don't unlist a withdrawal before retirement finishes, give a rollback a fresh shutdown budget, use the MediaServer's routed reply path for a strict registration, or log a strict reply's error text.** → History-rules-dlna-upnp.md
 - **The three spec-mandatory ContentDirectory introspection actions
   (`GetSearchCapabilities` / `GetSortCapabilities` / `GetSystemUpdateID`) must
   stay declared.** Strict control points poll `GetSystemUpdateID` between
@@ -1066,7 +1066,11 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   at `servedMissRebuild` (1 s), so a new LAN address is served within a
   second and a flood of refusals lists the interfaces once a second; a
   listing that fails keeps the last snapshot. A refusal is one Warn per kind
-  and address, naming the interface that holds it (bounded at 32). **A
+  and address, naming the interface that holds it (bounded at 32), **and
+  never the peer**, for a connection and an M-SEARCH alike: `admit` is not
+  handed one (2026-10-30, B604, the 0.2.2 logging audit; the line named the
+  peer that connected or searched until then, `from`, which no rule
+  allowed, and a tailnet peer or a scanner is exactly whom it refuses). **A
   `dlna.listenAddress` pinned to an address that is not served warns once at
   Start** (`warnIfPinnedOffTheLAN`, the owner's ask of 2026-10-16): the
   listener binds that address alone and refuses every connection on it, so
@@ -1088,9 +1092,10 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   the served set to every address of an eligible interface, don't move the
   check into a handler or the Host check, don't answer a datagram whose
   destination was asked for and not reported** (only a listener that cannot
-  be armed answers as before, with one Warn), **and don't judge a group
+  be armed answers as before, with one Warn), **don't judge a group
   datagram by its destination** (the group is no address of the host; B71's
-  membership keeps it to its interface). **Residuals**: a Docker container
+  membership keeps it to its interface), **and don't name the peer in a
+  refusal**. **Residuals**: a Docker container
   on a bridge network sees a published port's connections on its own eth0
   address after DNAT, so that path works as before and is reachable from
   wherever the HOST's port is, its tailnet included (publish on the LAN
@@ -1111,6 +1116,8 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestARefusalIsLoggedOncePerKindAndAddress`, `TestTheRefusalLogIsBounded`,
   `TestTheDLNAListenerRefusesAConnectionToAnAddressItDoesNotServe`,
   `TestTheDLNAListenerLogsARefusedConnection`,
+  `TestARefusedConnectionNamesItsAddressAndInterfaceAndNeverThePeer` (IPv4,
+  IPv6 and a mapped peer), `TestARefusedMSearchNamesItsDestinationAndNeverItsSource`,
   `TestAListenerPinnedToAnAddressItDoesNotServeWarnsOnceAtStart`,
   `TestTheStartupCheckWarnsOnlyForAPinnedAddressItDoesNotServe`,
   `TestTheSSDPListenerReadsEachDatagramsDestination`, `TestParseWSAPktinfo`,
@@ -1215,6 +1222,8 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 - **The file route's serving half is shared with the loopback track route** (B473 B2c): `serveOpenedFile` (the headers, the adaptive writer, `http.ServeContent`) serves `/dlna/file/` on this listener and the same path on the loopback listener the MPD beside the bridge fetches from, so MPD gets the same type and bytes from either; it was extracted from `serveFromFilesystem` unchanged. The loopback route is not a second DLNA listener: no SSDP, no CDS, no artwork, no renditions, no routed tracks, a stricter containment check, a stricter Host rule (`127.0.0.1`, `[::1]` or `localhost` only) and no forwarded request, a per-request `output.mpd` gate, and typed JSON refusals. Its rules are in `output.md`. **Don't add a serving step to one route that the other does not get, and don't mount another DLNA route on the loopback listener.**
 
 - **`dlna.Server.AcceptsOn` answers whether the listener takes a connection on an address now, by the listener's own served set (`servedAddrs`) and its bound address (a pinned listener its address alone, `0.0.0.0` IPv4 alone), and nothing once Stop begins or before Start binds; the player's OpenHome Insert takes such an address as one of the bridge's own** (B470 PR 5a4; the confinement's bullet in `openhome.md`). **Don't answer it from a set or a cache of its own, or for a listener that is not up.** `TestAcceptsOnIsTheListenersServedSet`, `TestAcceptsOnFollowsTheServedSnapshot` and `TestAcceptsOnIsTheRunningListeners` pin it.
+
+- **The MediaServer's `http.Server` takes `handshakelog.ErrorLog()`, as the loopback route's does** (2026-10-31, B604's second round; Codex on the integrated branch). net/http logs a handler's recovered panic with the address of the renderer it was serving ("http: panic serving <addr>"), and with no `ErrorLog` that line went to the standard logger whole; through handshakelog it keeps the panic and stands `handshakelog.ClientPlaceholder` where the address was. **Don't leave a server's `ErrorLog` nil**: `TestEveryServeHTTPServerRedactsPeerAddresses` (cmd/bridge) finds every `http.Server` in the module, and `TestAMediaServerPanicIsLoggedWithoutItsClient` drives this one's panic over a real connection.
 
 
 ## Source discovery (B470 PR 5a2b)

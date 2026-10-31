@@ -321,7 +321,7 @@ func (s *Server) apiUPnPServerAdd(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ErrUPnPDuplicateUDN):
 			writeError(w, http.StatusConflict, "duplicate", err.Error())
 		default:
-			writeError(w, http.StatusInternalServerError, errCodeSaveConfig, err.Error())
+			writeSaveConfigErr(w, err)
 		}
 		return
 	}
@@ -358,7 +358,7 @@ func (s *Server) apiUPnPServerRemove(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "no_such_server",
 				upnpNoSuchServerMsg)
 		default:
-			writeError(w, http.StatusInternalServerError, errCodeSaveConfig, err.Error())
+			writeSaveConfigErr(w, err)
 		}
 		return
 	}
@@ -398,7 +398,7 @@ func (s *Server) apiUPnPServerUpdate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "no_such_server",
 				upnpNoSuchServerMsg)
 		default:
-			writeError(w, http.StatusInternalServerError, errCodeSaveConfig, err.Error())
+			writeSaveConfigErr(w, err)
 		}
 		return
 	}

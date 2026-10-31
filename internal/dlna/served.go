@@ -97,15 +97,17 @@ func (s *servedAddrs) judge(local netip.Addr) netip.Addr {
 }
 
 // admit judges a connection or a datagram that arrived on the local address
-// local from the peer from (an IP literal, for the log), and logs a refusal
-// (noteRefused) on log. what names it there: "a connection" or "an
-// M-SEARCH".
-func (s *servedAddrs) admit(log *slog.Logger, what string, local netip.Addr, from string) bool {
+// local, and logs a refusal (noteRefused) on log. what names it there: "a
+// connection" or "an M-SEARCH". The peer is not asked for: the refusal names
+// the local address and the interface holding it, the operator's own, and
+// never who connected or searched (B604; a refusal named the peer until
+// then, which no rule allowed).
+func (s *servedAddrs) admit(log *slog.Logger, what string, local netip.Addr) bool {
 	local = s.judge(local)
 	if s.serves(local) {
 		return true
 	}
-	s.noteRefused(log, what, local, from)
+	s.noteRefused(log, what, local)
 	return false
 }
 
@@ -259,9 +261,10 @@ func interfaceAddrKey(a net.Addr, name string) (netip.Addr, bool) {
 }
 
 // noteRefused logs a refusal on log, once per kind and address and within
-// servedRefusedSeenCap. The address is this host's own, so a peer cannot
-// grow the set; the bound is for a host whose addresses churn.
-func (s *servedAddrs) noteRefused(log *slog.Logger, what string, local netip.Addr, from string) {
+// servedRefusedSeenCap: the address and the interface that holds it, never
+// the peer. The address is this host's own, so a peer cannot grow the set;
+// the bound is for a host whose addresses churn.
+func (s *servedAddrs) noteRefused(log *slog.Logger, what string, local netip.Addr) {
 	addr := "(not reported)"
 	if local.IsValid() {
 		addr = local.String()
@@ -282,8 +285,7 @@ func (s *servedAddrs) noteRefused(log *slog.Logger, what string, local netip.Add
 	}
 	log.Warn("DLNA refused "+what+" to an address it does not serve: it answers only on the LAN-eligible interfaces",
 		slog.String("address", addr),
-		slog.String("interface", s.holderOf(local)),
-		slog.String("from", from))
+		slog.String("interface", s.holderOf(local)))
 }
 
 // servedOnlyListener is the DLNA listener as net/http sees it. Accept hands
@@ -303,11 +305,7 @@ func (l servedOnlyListener) Accept() (net.Conn, error) {
 		if err != nil {
 			return nil, err
 		}
-		from := ""
-		if ip := netAddrIP(c.RemoteAddr()); ip.IsValid() {
-			from = ip.Unmap().String()
-		}
-		if l.served.admit(l.log, "a connection", netAddrIP(c.LocalAddr()), from) {
+		if l.served.admit(l.log, "a connection", netAddrIP(c.LocalAddr())) {
 			return c, nil
 		}
 		_ = c.Close()

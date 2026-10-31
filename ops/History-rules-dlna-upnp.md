@@ -117,7 +117,21 @@ privileged bind-to-device operation. Other platforms refuse strict replies.
 An option failure closes the socket without sending; a per-packet selection
 failure stops the burst. A registration warns once for a failed strict reply,
 including send-time refusal, and never retries through the default route.
-Normal socket closure at withdrawal is not a warning.
+Normal socket closure at withdrawal is not a warning. **The warning names the
+stage, the operation and the errno, never the error's text** (2026-10-30, B604,
+the 0.2.2 logging audit). A send's `*net.OpError` names both ends of its
+socket, the searching client and the endpoint's own address, and a bind's
+names the endpoint's; the line carried `err.Error()` until then.
+`noteReplyRefusal` takes the stage (`setup`, the reply's socket, or `send`) and
+logs `replyFailure`'s reading: the operation as net and os name it (an
+`*net.OpError`'s Op and an `*os.SyscallError`'s call, `write sendmsg`, `listen
+bind`), `capability` for an `ErrSSDPStrictCapability` refusal with neither, or
+`unclassified`; and the errno, `timeout` for a deadline, or `no errno`. Once per
+registration and the `net.ErrClosed` suppression are unchanged.
+`TestStrictReplyPinFailureSendsNothingAndLogsOnce` drives every shape: an error
+with no errno, a refused bind, a capability refusal with and without an errno,
+a refused send, a send past its deadline, a wrapped socket error and a closed
+socket.
 
 The MediaServer keeps `net.DialUDP("udp4", nil, searcher)` and its existing
 destination admission, endpoint/LOCATION choice, headers, target order, MX
