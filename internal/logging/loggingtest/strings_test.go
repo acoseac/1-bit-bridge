@@ -23,8 +23,10 @@ type detail struct {
 // TestStringsSaysEverythingAHandlerCouldWrite pins Strings and Carrying: a
 // value is found in a record's message, a plain attribute, an error's text,
 // each error errors.Join joins, a LogValuer's resolved value, a group's
-// attributes, a struct as %v and %+v print it, and a map as JSON encodes it,
-// and a record that carries none of the values is not returned.
+// attributes, a struct as %v and %+v print it, a map as JSON encodes it, an
+// attribute a logger binds with With, the name of a group it opens with
+// WithGroup, and an attribute bound inside such a group, and a record that
+// carries none of the values is not returned.
 func TestStringsSaysEverythingAHandlerCouldWrite(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -45,6 +47,11 @@ func TestStringsSaysEverythingAHandlerCouldWrite(t *testing.T) {
 		{"a map as JSON encodes it", func(l *slog.Logger) {
 			l.Info("m", "m", map[string]string{"dir": "/abs/map"})
 		}, "/abs/map"},
+		{"an attribute With binds", func(l *slog.Logger) { l.With("path", "/abs/with").Info("refused") }, "/abs/with"},
+		{"a group WithGroup opens", func(l *slog.Logger) { l.WithGroup("abs-group").Info("m", "k", "v") }, "abs-group"},
+		{"an attribute bound inside a group, between two Withs", func(l *slog.Logger) {
+			l.With("outer", "a").WithGroup("g").With("inner", "/abs/nested").Info("m", "k", "v")
+		}, "/abs/nested"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
