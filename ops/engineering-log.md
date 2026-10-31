@@ -67023,17 +67023,28 @@ backups folder goes.
 
 The orchestrator measured on Windows (nomos, Go 1.27.3, at 2c97e94b):
 `os.ReadDir` of a regular file fails with ERROR_PATH_NOT_FOUND (errno 3),
-which matches `fs.ErrNotExist`. So `backup.ListContext` took the file for a
-folder not made yet and listed nothing. Measured on macOS (Go 1.27.3):
-`os.ReadDir` opens with `O_DIRECTORY` (`openDirNolog`, the same code on
-Linux), and a file answers `open <path>: not a directory`, ENOTDIR, which is
-no absence. GET /api/backups answered 200 with no backups on Windows and 500
+which matches both `fs.ErrNotExist` and `syscall.ENOTDIR`. So
+`backup.ListContext` took the file for a folder not made yet and listed
+nothing. GET /api/backups answered 200 with no backups on Windows and 500
 elsewhere.
+
+Read in Go 1.27.3's sources, that is one error, not two:
+
+- `os.ReadDir` opens with `O_DIRECTORY` on every OS (`openDirNolog`). On
+  Windows, `syscall.Open` checks the handle it opened and answers a file
+  with `ENOTDIR` (`syscall_windows.go`).
+- On Windows, `syscall.ENOTDIR` is `Errno(ERROR_PATH_NOT_FOUND)`
+  (`zerrors_windows.go`), and `Errno.Is` counts ERROR_PATH_NOT_FOUND as
+  `ErrNotExist`.
+- On macOS (measured, Go 1.27.3) and Linux the same open answers `open
+  <path>: not a directory`, ENOTDIR, which is no absence there.
+
+So every ENOTDIR is an absence on Windows.
 
 The orchestrator's decision was to make production agree on every OS.
 `readBackupsDir` (`internal/backup/backup.go`) is now the listing that
 `ListContext` and the orphan sweep share. When `os.ReadDir` reports
-not-exist, it asks `os.Lstat`:
+not-exist or ENOTDIR, it asks `os.Lstat`:
 
 - Lstat's not-exist: nothing there (no snapshot taken yet), the empty answer
   as before.
@@ -67042,7 +67053,15 @@ not-exist, it asks `os.Lstat`:
 - A folder: one made since the listing, which found none, so the answer is
   empty.
 - Anything else: `&os.PathError{Op: "open", Path: root, Err:
-  syscall.ENOTDIR}`, the error Linux and macOS give a file.
+  errNotADirectory}`, a sentinel whose text is ENOTDIR's, `open <path>: not
+  a directory`. It is the same answer on every OS, and an absence on none.
+  It is never `syscall.ENOTDIR`, which on Windows would read as an absence
+  to any caller that asks.
+
+The first form of this fix (c405529d) wrapped `syscall.ENOTDIR`, the error
+Linux and macOS give, and so was itself an absence on Windows. Reading the
+Windows sources before the gate ran found it, and 6f9289aa and aebfe33e
+replaced it.
 
 The orphan sweep (`reapOrphans`) lists the same folder in the same prune,
 just before `ListContext`. Left on `os.ReadDir`, a prune on Windows would have
@@ -67076,31 +67095,49 @@ Two residuals:
 
 - A file where an ancestor of the folder goes (the data directory itself)
   still reads as nothing there on Windows: ERROR_PATH_NOT_FOUND for the path
-  and for its Lstat, where Linux and macOS fail the open with ENOTDIR. The
-  folder's parent is the data directory, which holds the database, so a
-  bridge in that state does not start.
+  and for its Lstat. On Linux and macOS the open and the Lstat both answer
+  ENOTDIR, and the listing fails with Lstat's error. The folder's parent is
+  the data directory, which holds the database, so a bridge in that state
+  does not start.
 - Lstat's other two branches (another error, and a folder made since the
   listing) are reachable only by a race, and no test holds them.
 
-#### Red first (3bda0b6c), the fix (c405529d)
+#### Red first (3bda0b6c, 6f9289aa), the fix (c405529d, aebfe33e)
 
 `TestWhatIsWhereTheBackupsFolderGoesListsAlikeOnEveryOS` lists two ways: as
 this OS lists, and as Windows lists. The second goes through a package-level
 seam, `readDir` (`os.ReadDir`), which `SetReadDirForTest` replaces and the
 subtest's cleanup restores; no backup test runs in parallel. The seam answers
-every listing with a not-exist `*fs.PathError`. A folder not made yet lists
-nothing. A file, and a link to nothing, fail `List` and `ReapOrphans` with
-open and ENOTDIR naming the path, never an absence.
+every listing with a not-exist `*fs.PathError`.
 
-On macOS before the fix there were 6 failures: the Windows shape's file and
-link, and macOS's own listing of the link, each through `List` and
-`ReapOrphans`. macOS's own listing of the file already failed.
+A folder not made yet lists nothing. A file, and a link to nothing, fail
+`List` and `ReapOrphans` with open and `errNotADirectory` (`ErrNotADirectory`
+in `export_test.go`) naming the path. The answer is never an absence and
+never `syscall.ENOTDIR`. On Windows the test also checks that ENOTDIR is
+still an absence, which is the sentinel's reason.
 
-Controls (each restored from HEAD, none committed):
+Red on macOS:
 
-1. The fix's error replaced with the empty answer: the same 6 failures.
-2. `os.Stat` in place of `os.Lstat`: only the link cases went red, under both
+- At 3bda0b6c, whose test wanted ENOTDIR: 6 failures, the Windows shape's
+  file and link and macOS's own listing of the link, each through `List`
+  and `ReapOrphans`. macOS's own listing of the file already failed the
+  listing.
+- At 6f9289aa, the test as it stands: 8 of 8. Every answer was
+  `syscall.ENOTDIR`, macOS's own for the file and c405529d's for the rest.
+
+Controls on aebfe33e (each restored from HEAD, none committed), each
+predicted:
+
+1. The fix's error replaced with the empty answer: 8 failures.
+2. `os.Stat` in place of `os.Lstat`: only the link cases, under both
    listers (4). The file cases stayed green.
+3. `syscall.ENOTDIR` back in place of the sentinel: 8 failures.
+4. No ENOTDIR routing, so only not-exist asks Lstat: macOS's own file case
+   alone, through `List` and `ReapOrphans` (2), since it then answered with
+   the OS's ENOTDIR. The first run of this control did not build, because
+   `syscall` was left unused, and it was run again with the import kept.
+
+On c405529d, before the correction, controls 1 and 2 gave 6 and 4 failures.
 
 ### The cases that make a filesystem operation fail
 
@@ -67142,9 +67179,9 @@ tile and the token writes too (a6423ac7), whose answers ran on no Windows
 leg. The certificate's answer moved to `certInspectRefusal`, beside
 `backupsListRefusal`, with no change in what it says.
 
-Control 3, both permission branches dropped: the two new rows went red, and
-on macOS so did the certificate's and the four token routes' mode fixtures.
-Nothing else did.
+The control, both permission branches dropped: the two new rows went red,
+and on macOS so did the certificate's and the four token routes' mode
+fixtures. Nothing else did.
 
 ### `native qualification evidence`: version 21 (7fa9ac40)
 
