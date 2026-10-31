@@ -66809,5 +66809,108 @@ own walk, which `os.MkdirAll`'s identical EEXIST could not show.
 contention on purpose (`serve_lock.go`, `serve_data_dir_lock_test.go`): telling
 "cannot make the data directory" from "cannot lock it" there is a follow-up.
 The rules line in `cli-serve.md` and its long form change with this round: the
-line is in `.p2/rules-b603r2.patch` until the orchestrator applies it, and the
-long form in `ops/History-rules-cli-serve.md`, B603 round 2.
+orchestrator applied the line from `.p2/rules-b603r2.patch` in b8aff55d, and
+the long form is in `ops/History-rules-cli-serve.md`, B603 round 2.
+
+## 2026-10-31 — B603 round 3: the Volumio refusal cases expect statfs's ENOENT in the platform's words
+
+**The failure.** CI's `test (windows-latest)` on #1368 failed at 832e117b, and
+the gate with it: every case of `TestMediumRefusesWhatVolumiosLayoutDoesNotShow`
+stopped at the check of main's refusal (`medium_volumio_test.go:438` there),
+while macOS, `test -race` and the Linux tests passed. On nomos (Go 1.27.3,
+windows/amd64) the orchestrator measured the same at 832e117b: the refusal was
+right, wrapping `ErrMediumUnknown` and `fs.ErrNotExist`, but its text ended
+`statfs /mnt/ext/dyn: The system cannot find the file specified.` where the
+cases wanted `… statfs /mnt/ext/dyn: no such file or directory`.
+
+**Why Windows answered otherwise.** The check is the same there: `volumio.go`,
+`medium.go` and `medium_volumio_test.go` carry no build constraint, and the
+test runs `inspectMedium` on injected readers (`volumioBox.inspect`), never
+Windows' `platformInspect` (`mounts_windows.go`, which takes every root). Its
+fake statfs (`statfsOf`) answers a path it does not hold with
+`&fs.PathError{Op: "statfs", Path: p, Err: syscall.ENOENT}`, which
+`upperAsReached` wraps with `%w`, so the refusal ends with
+`syscall.ENOENT.Error()`. On Windows that errno is `ERROR_FILE_NOT_FOUND`
+(`zerrors_windows.go`: `ENOENT Errno = ERROR_FILE_NOT_FOUND`, and `ENOTDIR` is
+`ERROR_PATH_NOT_FOUND`), whose words `Errno.Error` asks the system for, while
+the errnos Go invents there (`APPLICATION_ERROR` plus n: EACCES, EEXIST, EIO,
+EISDIR, ELOOP and the rest) carry Unix's words from Go's own table. The cases
+spelled out Unix's words twice: in the `today` constant nineteen of them
+share, and in the case "another upper layer"'s own. That check is a
+`t.Fatalf`, so on Windows nothing after it ran: no case's storage or reason
+has been checked there yet.
+
+**The fix** (3140f766) is the expectation alone: `today` and the other upper
+layer's now end with `syscall.ENOENT.Error()`, the errno the fake returns, so
+each platform's words follow from it; the error-chain checks
+(`ErrMediumUnknown`, not `ErrOverlayBind`, `fs.ErrNotExist`), the refusal's
+context and each case's reason are unchanged, and no production code changed.
+Not a build constraint: the file's fixtures (`fakeBoot`, `piBoot`,
+`piVolumio`, `statfsOf`, `volumioBox`) serve `volumio_test.go` and
+`volumio_write_test.go`, which build everywhere, and the unix-only
+`volumio_unix_test.go`, so a Linux tag would leave them undefined on Windows
+and macOS. Not a `runtime.GOOS` skip either. The two EACCES expectations in the
+PR's portable tests, the upper path statfs refuses for another reason
+(`TestMediumKeepsEveryOtherRefusalBesideVolumiosEvidence`) and the doctor
+table's data directory this user cannot inspect
+(`TestThePlayersStorageLineSaysWhatTheWritersCheckFound`), passed on Windows
+only because EACCES is an invented errno there (`EACCES - APPLICATION_ERROR:
+"permission denied"`); they are built from `syscall.EACCES.Error()` the same
+way. The writer test's POSIX permission subtest keeps its Windows skip.
+
+**The PR's tests, by platform.** With no constraint, so on Windows, Linux and
+macOS: `medium_volumio_test.go` (the acceptance, the refusals above, the
+refusals the fallback does not outrank); `volumio_test.go` (the os-release and
+udev parsers, the facts left uncertain, what the check reads, the fake's
+shape, each on fakes, its reasons free of errno words, its `fs.ErrNotExist` an
+`errors.Is` that Windows' ENOENT answers); `volumio_write_test.go` (the strict
+writer through the fallback, its barrier and mount IDs the test's own on
+Windows, its permission subtest skipped there and as root);
+`medium_inspect_test.go` (InspectMedium against the package's own check,
+which on Windows asks nothing, the platform giving no mount ID); the doctor's
+`doctor_player_storage_test.go` (a faked inspector and seams, its one real
+walk a `t.TempDir()` path whose ENOENT Windows answers as `fs.ErrNotExist`,
+and `volumioRefusal` a fixture compared with itself); and `internal/doctor`'s
+`player_storage_test.go` (no host at all). Unix only: `volumio_unix_test.go`
+(real sysfs links named with colons, a FIFO) and
+`doctor_player_storage_unix_test.go` (real links and kernel errors). Linux
+only: `medium_linux_test.go`'s namespace scenario. `medium_test.go`'s one
+changed call keeps B514's Windows skip. Each one's expectations hold where it
+builds, the refusal cases on Windows excepted until this fix.
+
+**What Linux showed** (legion0: Ubuntu 26.04, kernel 7.0, Go 1.27.3, uid
+1000). `internal/atomicwrite` passed, the PR's tests among them. The namespace
+scenarios skipped: a child here cannot make its mounts private ("permission
+denied"), AppArmor restricting unprivileged user namespaces
+(`kernel.apparmor_restrict_unprivileged_userns` 1), so
+`TestWriteBytesDurable_RefusesAnOverlayWhoseUpperLayerIsHidden` has run only on
+CI's ubuntu. The doctor's unix tests passed against the real kernel, in round
+2's words from macOS: mkdir answers a link's entry with EEXIST (`mkdir
+…/link: file exists`, errno 17), for a data directory a link to nothing
+stands in and for one below such a link, as this user and through fsutil's
+own walk as simulated root, which gave no entry an owner;
+`filepath.EvalSymlinks` answers a link to nothing with `lstat <its target>:
+no such file or directory`, a cycle with `EvalSymlinks: too many links`, and a
+regular file on the way with a bare `not a directory` (ENOTDIR, naming no
+entry); and the mode-0 case ran, a warn with the service user's advice
+(`lstat …/locked/data: permission denied`).
+
+**Controls**, on 3140f766, each predicted, compiled (`go vet`), run on the
+whole `internal/atomicwrite` package or on the doctor's player-storage tests,
+and restored from git, the tree clean after. NC1, Windows' words as the
+expectation on Linux (CI's failure, mirrored): red exactly the twenty refusal
+cases, at the check of main's refusal. NC2, the fake statfs's ENOENT as
+`fs.ErrNotExist` ("file does not exist", still not there): red exactly the
+same twenty, on the words alone, the acceptance still taken, so the
+expectation pins statfs's own errno, which a compare up to `statfs
+/mnt/ext/dyn:` would not. NC3, the EACCES case's errno as EPERM: red exactly
+that case. NC4, the doctor table's EACCES as EPERM: red exactly its summary,
+its status and its hint unchanged. Nothing else went red.
+
+**Compiled here, run elsewhere.** `go vet` and `go test -c` of
+`internal/atomicwrite`, `cmd/bridge` and `internal/doctor`, with the release
+tags, for windows/amd64, linux/amd64, linux/arm64 and darwin/arm64: clean. A
+compile cannot check a string, so the orchestrator runs the package's tests on
+nomos before pushing. The rule is a new line in
+`.claude/rules/build-ci-tests.md`, which this round wrote as
+`.p2/rules-b603r3.patch` for the orchestrator to apply.
