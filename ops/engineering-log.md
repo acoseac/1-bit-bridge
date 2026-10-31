@@ -67019,3 +67019,96 @@ under sh), the census and the six cross-builds; `make docs-check` clean.
 `internal/packaging`'s result came from Go's test cache: its test reads the
 installer through `sh`, which the cache does not see, so it was run again
 uncached on 56864f3f (`go test -count=1 ./internal/packaging`, ok).
+
+## 2026-10-31 — B475 round 4: a stalled download fails instead of hanging
+
+CodeRabbit on #1370 (Minor; verified by the orchestrator, and again here
+against the code): `fetch` ran curl with `--connect-timeout 30` and nothing
+else that bounds a transfer. `--connect-timeout` covers the name lookup, the
+connection and the TLS handshake alone, so a server that answered and then
+sent nothing held the installer for good, silent after "Downloading the
+bridge …", under `curl | sh` on a headless box; `fetch` runs twice
+(`checksums.txt`, then the archive), and there is no wget to fall back on. A
+failed fetch already ended on a tested path (`leave 1`, "Could not download
+… Nothing was installed.", the EXIT trap removing the temporary directory).
+
+**The fix.** `--speed-limit 1024 --speed-time 60`: a transfer under 1 KiB/s
+for 60 seconds is taken for stalled, curl ends it (exit 28, "Operation too
+slow"), which `--retry 3` takes for a transient error and asks the whole
+file again for. **The floor is a choice, and the record says so**: a download
+that keeps above 1 KiB/s has no cap on its total time, since a slow but
+moving one (a Pi on Wi-Fi) must finish, which is why it is not `--max-time`;
+one that moves steadily under 1 KiB/s for a minute is ended as if it had
+stalled. The tests shorten the window with `BRIDGE_INSTALL_TEST_SPEED_TIME`,
+which `constants` takes only as a whole number from 1 to 60 (leading zeros
+dropped; anything else leaves the 60), so no environment value reaches
+curl's arguments but a small number; it is not documented for users.
+
+**Measured here** (`TestCurlEndsAStalledTransferAsFetchExpects`, macOS's
+curl, fetch's flags with a one-second window, a 24 KiB body):
+
+- the headers, then nothing, the connection held: exit 28 after 11.1 s, four
+  requests 2, 3 and 5 s apart (the window, then 1, 2 and 4 s of curl's
+  backoff), each without a Range header;
+- nothing at all, held: the same, 11.1 s, four requests;
+- half the body, then nothing, held: exit 28 too, but after 35.3 s, four
+  requests 8.1, 9.1 and 11.1 s apart. curl judges its speed over the last
+  several seconds, so half a body that came at once keeps the transfer above
+  the floor for about 6 s before the window starts: with the shipped 60 s
+  that is about 66 s an attempt, and a run that stalls every time ends after
+  some 4.5 minutes, bounded;
+- half the body, then the connection closed: exit 18 at once ("transfer
+  closed with 12288 bytes remaining to read"), one request, not retried
+  (`--retry` takes only timeouts and some HTTP answers for transient; no
+  `--retry-all-errors` is added), and the run ends at once, as on any failed
+  download;
+- half the body held once, then a whole answer: exit 0 after 8.1 s, two
+  requests, both without a Range header (curl does not resume without `-C`),
+  the server's plain 200 on the retry, and the `-o` file exactly the body:
+  curl started it over.
+
+**Tests** (red first: against 0a2d2235's script all sixteen stall runs, two
+tests of two assets each under four shells, waited out the 90 s run
+timeout, and `TestFetchAsksCurlForTheShippedBounds` was red in every case):
+
+- the release server stalls a path, after nothing, its headers or half its
+  body, then holds the request until the client gives up (or the server
+  closes) and aborts the handler (`panic(http.ErrAbortHandler)`, the B526
+  rule in build-ci-tests.md), or closes the connection mid-body; it can also
+  trickle a body; the stall count is read and spent under its lock;
+- `TestAStalledDownloadIsAskedForAgain`: `checksums.txt` stalled after its
+  headers, and the archive after half its body, the first time only,
+  install, the stalled file asked for twice, whole each time;
+- `TestADownloadThatStallsEveryTimeInstallsNothing`: exit 1, "Could not
+  download", four requests for the stalled file, nothing installed (the
+  program, the temporary directory, the service), and after `checksums.txt`
+  no archive asked for;
+- `TestADownloadCutShortEndsTheRun`: a connection closed mid-body ends the
+  run at once, exit 1, nothing installed;
+- `TestASlowDownloadAboveTheFloorFinishes`: an archive sent a KiB every
+  125 ms (about eight times the floor) for over twice the window installs;
+- `TestFetchAsksCurlForTheShippedBounds`: curl replaced by a recorder of its
+  words, the stamped copy is run with the test setting unset, empty and set
+  (1, 60, 007, 0, 61, a word, a command, -5, 1.5): `--speed-limit 1024`,
+  `--retry 3` and the HTTPS flags every time, `--speed-time 60` unless the
+  setting is valid; and a source check of `SPEED_TIME=60` and fetch's line.
+
+Under sh: the new installer tests take 0.8 to 20 s each (the archive stalled
+every time is the longest, 20 s, for the reason measured above), well under
+the 90 s run timeout; the suite under four shells went from 57.8 s to
+81.2 s, with the 35 s measurement among its parallel tests.
+
+**Negative controls**, on 8634d52b, predicted first, each restored from git
+with the tree clean after, under sh:
+
+- S1, the speed flags removed: both stalled-once and both stalled-every-time
+  subtests "still running after 1m30s"; the recorder's eleven cases and its
+  source check red. As predicted.
+- S2, `--retry 3` removed: both stalled-once subtests exit 1 ("Could not
+  download"); both stalled-every-time subtests asked once, not four times;
+  the recorder's cases red. As predicted.
+- S3, the shipped window changed alone (30): the recorder's eight cases that
+  leave the default, and its source check, red; the three that set a valid
+  window green. As predicted.
+- S4, the range check off: the recorder's "zero" and "past sixty" alone red.
+  As predicted.
