@@ -470,7 +470,9 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   writes empty for a filesystem mounted with none: the Claude API on round
   11), and naming no upper layer only for an overlay that is read-only; and
   the path that names it is compared with the overlay's statfs totals,
-  **read for up to three rounds where they differ** (`upperAsReached`).
+  **read for up to three rounds where they differ** (`upperAsReached`); a
+  path that reaches nothing is refused as one that cannot be read here,
+  but on Volumio's evidence (the B603 bullet after this one).
   Agreement, including on the third upper read, is taken; moving overlay
   totals retain the existing check that rules out a tmpfs or ramfs path.
   Exhausting the retries is **inconclusive**, never proof of another
@@ -582,6 +584,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestFdinfoMountIDSaysWhatFailedToRead`, `TestBarrierFailuresAreMarked`,
   `TestProbeDurable_SyncsTheDirectoryItOpened` and
   `TestProbeDurable_AnUnreadableDirectoryIsNoBarrierFailure` pin it.
+- **On Volumio alone, the root overlay's upper layer that no path reaches is taken, on the box's own evidence, an explicitly trusted Volumio boot-layout assumption** (2026-10-30, backlog B603; `volumioUpper`, one inspection the writer and `bridge doctor` share, `atomicwrite.InspectMedium`). Volumio's initramfs mounts the boot disk's partition 3 at `/mnt/ext`, the root overlay's upper layer `/mnt/ext/dyn`, and nothing mounts it after the pivot, so statfs of the upper path answers ENOENT; the fallback takes it only at the root's own mount, on that first ENOENT, with every fact read in order and the refusal naming the first that fails: VOLUMIO_VERSION in `/etc/os-release`; the overlay read-write, mount and superblock, over `/mnt/static` with upperdir `/mnt/ext/dyn`, the overlay at `/`; `/imgpart`'s line, by its mount ID, partition 2 of a disk in sysfs, its `dev` that line's major:minor; the disk's partition 3, the directory `/sys/dev/block` resolves its own major:minor to, ext4 labelled `volumio_data` in udev's database; its ext4 superblock in `/sys/fs/ext4` and its major:minor on no mountinfo line. **Don't take an unreachable upper layer on any other box, at any depth but the root's own mount, or for any statfs failure but ENOENT; don't let it outrank a volatile overlay, a reachable memory upper, inconclusive totals or the bind refusal, and don't return nil where `taken()` decides; don't find the partition by its label (the owner's NVMe shares it), edit a device name as a string, or pick `/imgpart`'s line by its spelling; and don't take a partition 3 that no live ext4 superblock is, or that a mountinfo line lists.** → History-rules-config-lifecycle.md
 - **`atomicwrite.ReplaceDurable` replaces an entry a rename cannot replace in
   one step, a directory included, without a failure emptying its name: after
   WriteBytesDurable's refusals it stages and fsyncs the new bytes beside

@@ -1217,3 +1217,121 @@ Reds on main 2c7be326: `TestAFailedHealKeepsTheSealEntryThroughTheNextStarts` (c
 *Truncation.* The script is function definitions and one final compound command, `{ [ -n "${BRIDGE_INSTALL_TEST_SOURCE:-}" ] || main "$@"; }`: a prefix ending before its closing brace is a syntax error at the end of the file, and a prefix ending between definitions defines and runs nothing. A bare `main "$@"` would not do: its prefix `main` runs the installer with no arguments, an `--uninstall` become an install.
 
 *Tests.* `scripts/install-test` runs the real script against an HTTPS server of fake releases (which can stall a download, sending nothing, its headers or half its body and then holding the connection until the client gives up, or closing it mid-body, and can trickle one), in a session with no controlling terminal, with a temporary HOME and a PATH of real tools and stubs (systemctl, with `cat` over the directories a user manager reads units from, "No files found" for a unit with no file as systemd answers, `show` of a loaded unit that `daemon-reload` snapshots, so a file changed after it is one the manager has not read, and the manager's environment; systemd-analyze, listing those directories; loginctl, sudo, su, uname, id, getent, getconf, date, sleep, ip, hostname), a fake bridge that refuses any flag the real one does not define and records its calls, each word apart, and four test hooks in the script (`BRIDGE_INSTALL_TEST_SYSROOT`, `BRIDGE_INSTALL_TEST_TTY`, `BRIDGE_INSTALL_TEST_SOURCE`, and since round 4 `BRIDGE_INSTALL_TEST_SPEED_TIME`, which shortens the speed window and is taken only as a whole number from 1 to 60) beside the download base `BRIDGE_INSTALL_BASE_URL` (https only). The commands the script prints are run, under the shell under test, against a recorder of each word put in place of every program they can name (`testdata/argv`), with paths holding a space, an apostrophe and a semicolon, and two runs in a row hold each state a run leaves to what the next one does. The same recorder, put in place of curl, reads the words `fetch` gives it, the shipped speed window's included (round 4). Contract tests hold it to the real CLI: the flags it passes and prints, a bridge command printed only through `bridge_line` and with `--config` where it reads the settings, the fake's flags, the output of `bridge version` and `bridge status` read by the script's own parsers, the line of `bridge update` it matches, and the unit `internal/packaging` renders. `make installer-check` runs shellcheck and the tests under every shell; CI's `installer` job runs it with dash, `bash --posix`, BusyBox's sh and ksh, and installs no wget.
+## B603 — the root overlay's upper layer that no path reaches is taken on Volumio alone (2026-10-30)
+
+- **On Volumio alone, the root overlay's upper layer that no path reaches is taken, on the box's own evidence, an explicitly trusted Volumio boot-layout assumption** (2026-10-30, backlog B603; `volumioUpper`, one inspection the writer and `bridge doctor` share, `atomicwrite.InspectMedium`). Volumio's initramfs mounts the boot disk's partition 3 at `/mnt/ext`, the root overlay's upper layer `/mnt/ext/dyn`, and nothing mounts it after the pivot, so statfs of the upper path answers ENOENT; the fallback takes it only at the root's own mount, on that first ENOENT, with every fact read in order and the refusal naming the first that fails: VOLUMIO_VERSION in `/etc/os-release`; the overlay read-write, mount and superblock, over `/mnt/static` with upperdir `/mnt/ext/dyn`, the overlay at `/`; `/imgpart`'s line, by its mount ID, partition 2 of a disk in sysfs, its `dev` that line's major:minor; the disk's partition 3, the directory `/sys/dev/block` resolves its own major:minor to, ext4 labelled `volumio_data` in udev's database; its ext4 superblock in `/sys/fs/ext4` and its major:minor on no mountinfo line. **Don't take an unreachable upper layer on any other box, at any depth but the root's own mount, or for any statfs failure but ENOENT; don't let it outrank a volatile overlay, a reachable memory upper, inconclusive totals or the bind refusal, and don't return nil where `taken()` decides; don't find the partition by its label (the owner's NVMe shares it), edit a device name as a string, or pick `/imgpart`'s line by its spelling; and don't take a partition 3 that no live ext4 superblock is, or that a mountinfo line lists.**
+
+The defect. The owner's Volumio 4.231 on a Raspberry Pi 5 (bridge e242ce2c, the
+0.2.2 candidate; data directory `/data/1-bit-bridge/config/data`;
+`output.player.enabled: true`) logged `player: not started` with the reason
+`the player's identity: atomicwrite: whether the root's storage keeps what is
+written to it through a reboot cannot be told: /data/1-bit-bridge/config/data
+is on an overlay whose upper layer /mnt/ext/dyn, as the mount table names it,
+cannot be read here: statfs /mnt/ext/dyn: no such file or directory`. So on a
+standard Volumio box the bridge's own player never started. Volumio's
+initramfs mounts the boot disk's partition 3 (ext4, label `volumio_data`;
+`mmcblk0p3`, 179:3 on that box) at `/mnt/ext`, mounts the root overlay with
+`lowerdir=/mnt/static,upperdir=/mnt/ext/dyn,workdir=/mnt/ext/work`, mounts the
+image partition (2) at `/imgpart`, and switches root; nothing mounts `/mnt/ext`
+again, so no mountinfo line of the running system lists 179:3 and statfs of
+`/mnt/ext/dyn` answers ENOENT. With the orchestrator's workaround (`mount
+/dev/mmcblk0p3 /mnt/ext`, then a read-only bind remount) the existing
+reachable-path logic took the upper layer and the player started; it is gone
+at reboot. Measured on the box with the workaround unmounted: `findmnt
+/mnt/ext` answered nothing, `grep ' 179:3 ' /proc/self/mountinfo` counted no
+line, and `/sys/fs/ext4/mmcblk0p3` still existed, so the kernel keeps the ext4
+entry of the initramfs's hidden mount. The box also carries an NVMe imaged with
+Volumio, whose partition 3 (`nvme0n1p3`, 259:3, mounted at `/media/NVME`) is
+labelled `volumio_data` too, and `/dev/disk/by-label/volumio_data` points at
+it, not at the card's partition that holds the upper layer.
+
+The decision (the orchestrator, after Codex's and Argon's review): automatic,
+evidence-based recognition, and no operator override in this PR, since Volumio
+must work with no configuration. The fallback (`volumioUpper`) runs only where
+the first statfs of the upper path of the root's own mount, depth 0, answers
+ENOENT (`upperAsReached` gives that refusal as an `*upperUnreached`), and it
+takes the upper layer only when every fact holds, in this order, the reason
+naming the first that does not appended to main's refusal, whose sentinel
+(`ErrMediumUnknown`) and statfs error it keeps:
+
+1. The box is Volumio: `/etc/os-release` names a VOLUMIO_VERSION that is not
+   empty, its last assignment unquoted as the shell unquotes it
+   (`volumioVersion`).
+2. The overlay, the line of the root's own mount ID, is the root overlay as
+   Volumio mounts it: its mount's options and its superblock's both begin `rw`,
+   it names exactly one `lowerdir`, `/mnt/static`, and one `upperdir`,
+   `/mnt/ext/dyn`, and it is the overlay at `/`: the mount `/` lies on, by its
+   mount ID, is an overlay of the same superblock (its mountinfo device) at
+   that superblock's own root.
+3. `/imgpart` is partition 2 of a disk: a mount of its own (not the one `/`
+   lies on), its line chosen by its mount ID, never by its spelling, so an
+   overmount's line is the one read; the line's major:minor resolves through
+   `/sys/dev/block` to a device whose `dev` file gives that major:minor again,
+   whose `partition` file reads 2, and whose directory's parent is a disk (a
+   `dev` file, no `partition` file).
+4. The disk's partition 3 is the data partition: the one directory under the
+   disk in sysfs, never a link, whose `partition` file reads 3 (two are
+   refused); its `dev` file gives a major:minor that `/sys/dev/block` resolves
+   back to that very directory, the common-disk identity; and udev's database
+   entry for it, `/run/udev/data/b<major>:<minor>`, gives `ID_FS_TYPE=ext4` and
+   `ID_FS_LABEL=volumio_data` (an entry that gives a key twice, or has an `E:`
+   line that is no assignment, does not read).
+5. Its ext4 superblock is live and hidden: `/sys/fs/ext4/<kernel name>` exists,
+   and no line of the mount table lists the major:minor (a line that does not
+   read as one leaves that unknown, and refuses). A `/mnt/ext` that fell back to
+   tmpfs, as on a rescue or factory-reset boot, leaves no live ext4 superblock
+   of the partition and is refused; a partition 3 mounted where this process
+   sees it is refused too, and the reachable-path logic decides once it is
+   mounted at `/mnt/ext`, where the upper path reaches it.
+
+A device name is never edited as a string (`mmcblk0p2` to `p3`, `sda2` to
+`sda3`), which `/dev/root` and by-uuid spellings break, and the partition is
+never found by its label. Taken, the check returns `taken()`'s verdict, so a
+bind of a directory inside the root overlay is still `ErrOverlayBind`, and it
+names the storage (`Medium.Storage`, "Volumio's data partition (mmcblk0p3,
+ext4)"). It outranks no other refusal: an overlay mounted `volatile` or
+`fsync=volatile`, an upper path that reaches tmpfs or ramfs, totals that stay
+inconclusive, an upper path statfs refuses for another reason than ENOENT, and
+a root on tmpfs or ramfs are refused as before, without the box's files being
+read.
+
+The write path is unchanged. The merged root is still classified as an overlay
+by its own statfs (`copyUpsFrom`), so every directory above the data directory,
+up to the root of its mount (`/` on Volumio), is synced on the merged mount
+once a write lands and in the probe, and no sync reaches for `/mnt/ext/dyn`.
+The production reader (`hostBootFiles`) reads from `/`: each file opened with
+`fsutil.OpenAsFile`, so a named pipe is refused at once rather than waited on
+(the console's doctor runs the check on a settings render), and read to at
+most 64 KiB; a directory listed with `os.ReadDir`, a link to a directory being
+no partition; links resolved with `filepath.EvalSymlinks`, one that leads out
+of the reader's root refused. One verdict serves the writer and bridge doctor
+(amendment 8): the medium check is an inspection (`inspectMedium`), whose
+`Err` the writer's admission reads (`platformMedium`, `mediumOf`) and which
+`atomicwrite.InspectMedium`, resolving a root as the writer does, gives the
+doctor whole.
+
+Rejected: an operator override that vouches for the medium (not in this PR);
+the label lookup, which names the NVMe; editing device names; the fallback
+below the root's own mount or for a statfs error other than ENOENT; a nil
+straight from the fallback, which skipped the bind refusal (amendment 4).
+
+Residuals, the operator's: a modified boot that keeps every one of these facts
+and puts a memory filesystem at `/mnt/ext` (the check reads the box's files,
+not the hidden mount); a partition 3 mounted only in another mount namespace
+beside a tmpfs `/mnt/ext`, which keeps `/sys/fs/ext4`'s entry live while no line
+of this namespace lists it; and a Volumio whose initramfs changes any of these
+paths, which is refused until the new facts are taught.
+
+Pinned by `TestMediumTakesVolumiosHiddenDataPartition`,
+`TestMediumRefusesWhatVolumiosLayoutDoesNotShow`,
+`TestMediumKeepsEveryOtherRefusalBesideVolumiosEvidence`,
+`TestMediumRefusesWhatTheBoxsFilesLeaveUncertain`,
+`TestTheVolumioCheckReadsNothingButWhatItNames`,
+`TestVolumioVersionReadsOSReleaseAsTheShellDoes`,
+`TestUdevPropertiesAreTheEntrysAssignments`, `TestFakeBootIsTheKernelsShape`,
+`TestTheHostsOwnFilesShowVolumiosLayout`, `TestTheHostsOwnFilesAreNeverWaitedOn`,
+`TestWriteBytesDurable_SyncsThroughTheMergedMountWhereVolumiosUpperIsHidden`,
+`TestWriteBytesDurable_RefusesWhereTheBoxDoesNotShowVolumio`,
+`TestWriteBytesDurable_RefusesAnOverlayWhoseUpperLayerIsHidden` (Linux, a
+namespace) and `TestInspectMediumIsTheWritersOwnVerdict`. The record is in
+`ops/engineering-log.md`, 2026-10-30, B603.
