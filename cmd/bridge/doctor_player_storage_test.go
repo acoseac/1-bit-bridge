@@ -43,6 +43,10 @@ func TestThePlayersStorageLineSaysWhatTheWritersCheckFound(t *testing.T) {
 		}
 		return cfg
 	}
+	// notYet is a data directory not made yet, below a directory that is
+	// there: the line walks the path the inspection found no entry at, so
+	// the case reads the test's own tree, never the host's /data.
+	notYet := filepath.Join(t.TempDir(), "data")
 	zero := 0
 	for _, tc := range []struct {
 		name    string
@@ -55,6 +59,9 @@ func TestThePlayersStorageLineSaysWhatTheWritersCheckFound(t *testing.T) {
 		says    []string
 		hint    string
 		inspect bool
+		// dir is the data directory the case's config names, where it is
+		// not dataDir.
+		dir string
 	}{
 		{name: "a player left off, on Linux", cfg: &config.Config{DataDir: dataDir}, goos: "linux", none: true},
 		{name: "a player left off, off Linux", cfg: &config.Config{DataDir: dataDir}, goos: "darwin", none: true},
@@ -66,8 +73,8 @@ func TestThePlayersStorageLineSaysWhatTheWritersCheckFound(t *testing.T) {
 			status: doctor.Warn, says: []string{"not checked: the player is off: output.player.pauseReleaseSeconds: must be from 1 to 3600"}, hint: "fix output.player"},
 		{name: "a public bridge's player", cfg: player(func(c *config.Config) { c.Deployment.Mode = "public" }), goos: "linux",
 			status: doctor.Warn, says: []string{"not checked: the player is off", "a public bridge"}, hint: "fix output.player"},
-		{name: "a data directory that is not there yet", cfg: player(nil), goos: "linux", err: &fs.PathError{Op: "lstat", Path: dataDir, Err: syscall.ENOENT},
-			status: doctor.OK, says: []string{"not checked: the data directory " + dataDir + " does not exist yet; bridge serve makes it"}, inspect: true},
+		{name: "a data directory that is not there yet", cfg: player(func(c *config.Config) { c.DataDir = notYet }), goos: "linux", err: &fs.PathError{Op: "lstat", Path: notYet, Err: syscall.ENOENT},
+			status: doctor.OK, says: []string{"not checked: the data directory " + notYet + " does not exist yet; bridge serve makes it"}, inspect: true, dir: notYet},
 		{name: "a data directory this user cannot inspect", cfg: player(nil), goos: "linux", err: &fs.PathError{Op: "lstat", Path: dataDir, Err: syscall.EACCES},
 			status: doctor.Warn, says: []string{"not checked: lstat " + dataDir + ": permission denied"}, hint: "the user the service runs as", inspect: true},
 		{name: "Volumio's data partition", cfg: player(nil), goos: "linux", medium: atomicwrite.Medium{Storage: "Volumio's data partition (mmcblk0p3, ext4)"},
@@ -110,8 +117,12 @@ func TestThePlayersStorageLineSaysWhatTheWritersCheckFound(t *testing.T) {
 			if tc.status == doctor.OK && c.Hint != "" || tc.status != doctor.OK && !strings.Contains(c.Hint, tc.hint) {
 				t.Errorf("the hint is %q, want one containing %q for a line that is not ok", c.Hint, tc.hint)
 			}
-			if want := map[bool]int{true: 1, false: 0}[tc.inspect]; len(asked) != want || want == 1 && asked[0] != dataDir {
-				t.Errorf("the check inspected %v, want the data directory %d time(s)", asked, want)
+			dir := dataDir
+			if tc.dir != "" {
+				dir = tc.dir
+			}
+			if want := map[bool]int{true: 1, false: 0}[tc.inspect]; len(asked) != want || want == 1 && asked[0] != dir {
+				t.Errorf("the check inspected %v, want the data directory %s %d time(s)", asked, dir, want)
 			}
 		})
 	}
