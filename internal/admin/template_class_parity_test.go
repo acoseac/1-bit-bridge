@@ -52,6 +52,7 @@ var templateClassNonVisualHooks = map[string]string{
 	"diagnostics-page": "page-scope marker; handlers_partial_test.go asserts on it",
 	"duplicates-page":  "page-scope marker + JS hook",
 	"page-upload":      "page-scope marker",
+	"output":           "page-scope marker (the Player page, B601)",
 
 	// JS query hooks — app.js / the player modules find elements by these.
 	"analysis-stats":   "JS hook: refreshAnalysisStats",

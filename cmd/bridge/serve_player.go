@@ -256,9 +256,12 @@ type bridgePlayer struct {
 
 	// Set before ready closes: the engine and the backend that run and the
 	// identity they run (GET /v1/outputs reads it once ready, B470 PR 5b),
-	// or why the player did not start past its plan.
+	// the library resolver the backend opens through, whose index the
+	// console's Player page names the track heard by (B601), or why the
+	// player did not start past its plan.
 	eng    *engine.Engine
 	be     playBackend
+	res    *library.Resolver
 	id     string
 	failed string
 
@@ -499,7 +502,7 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 		}
 		_ = eng.Run(runCtx)
 	}()
-	p.eng, p.be, p.id = eng, be, id
+	p.eng, p.be, p.res, p.id = eng, be, res, id
 	playerLog.Info("player: started", "uuid", id, "entries", eng.Snapshot().Len(), "pauseRelease", player.PauseRelease())
 	if p.plan.openhome {
 		// The build of the library's index begins first, on a goroutine of its

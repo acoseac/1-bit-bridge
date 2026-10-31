@@ -4249,11 +4249,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// The player's hotplug watcher (B470 PR 4a2), on Linux: it watches
 	// for DACs while the live config enables the player and does nothing
 	// while it does not, reading output.player from the holder on every
-	// reading and waking on its changes. No path changes output.player
-	// while serve runs today (bind refuses a data dir a serve holds); the
-	// console's DAC page will (PR 6a). Its stop, the teardown's, cancels
-	// and joins it; it writes nothing a later close waits for. It
-	// publishes to the player's feed when the player starts.
+	// reading and waking on its changes. The console's Player page changes
+	// output.player while serve runs (B601: its switch and its DAC choice,
+	// through the holder; bind refuses a data dir a serve holds). Its stop,
+	// the teardown's, cancels and joins it; it writes nothing a later close
+	// waits for. It publishes to the player's feed when the player starts.
 	stopPlayerHotplug := startPlayerHotplug(ctx, playerHotplugWiring{
 		GOOS:       opts.playerGOOS,
 		Holder:     cfgHolder,
@@ -4316,7 +4316,16 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// before the API listeners start, whether or not the plan starts it.
 	// It starts no route, probes nothing, and shows no checklist: those
 	// stay on the MPD gate above.
-	apiSrv.WithBridgeOutput(newBridgeOutput(playerPlan, player, cfg))
+	playerView := newBridgeOutput(playerPlan, player, cfg)
+	apiSrv.WithBridgeOutput(playerView)
+	// The console's Player page (B601) reads the same player through the
+	// same view, and the live config the console hands it: its status, the
+	// box's DACs, and what the next start decides.
+	playerConsole := newConsolePlayer(consolePlayerWiring{
+		Plan: playerPlan, Player: player, View: playerView, Boot: cfg,
+		GOOS: opts.playerGOOS, LockHeld: lockErr == nil, StateErr: playerStateErr,
+		Trees: opts.playerTrees, Store: manifestStore,
+	})
 
 	// DLNA MediaServer (opt-in, LAN-only). Starts a parallel
 	// http.Server on its own port + an SSDP advertiser so any DLNA
@@ -5618,6 +5627,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// can only fail against our own listeners.
 		DoctorRun:             adminDoctorRunner(absCfgPath, ownedListenPorts(cfg), checklistDoctorChecks(checklistSrc)),
 		OutputChecklist:       consoleOutputChecklist(checklistSrc),
+		PlayerOutput:          playerConsole,
 		AnalysisSweep:         analysisSweepClosure(analysisSweepState),
 		TriggerAnalysisSweep:  nudgeTriggerClosure(analysisNudge),
 		AnalysisSchemaVersion: analyze.WaveformSchemaVersion,

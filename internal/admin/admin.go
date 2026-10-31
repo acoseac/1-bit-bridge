@@ -489,6 +489,13 @@ type Deps struct {
 	// player, and the dashboard's panel stays hidden; nil hides it too.
 	OutputChecklist func(ctx context.Context) ([]OutputCheckLine, bool)
 
+	// PlayerOutput is the bridge's own player as the console's Player page
+	// asks it (B601, handlers_player_output.go): cmd/bridge implements it
+	// over serve's player, its boot plan and the box's DAC readings, so this
+	// package imports no player package. Nil leaves the page saying that no
+	// player is wired here, and every route of it refusing.
+	PlayerOutput PlayerOutput
+
 	// AnalysisSweep returns the serve-side auto-analysis sweeper's
 	// lifecycle snapshot (running / last sweep timestamps + counts /
 	// next due). Ephemeral "since process start" state recorded by
@@ -1387,9 +1394,14 @@ type Server struct {
 	// mu serializes the roots add/remove critical sections (pre-checks
 	// against Scanner.Roots(), manifest wipe, SetRoots fan-out) and the
 	// settings PATCH's commit→side-effect ordering, plus token
-	// mint/revoke. The config clone→Save→Store sequence itself is
-	// serialized process-wide by CfgHolder.Update's write lock — see
-	// config.RuntimeConfig.
+	// mint/revoke, and the Player page's two writes, the only writers of
+	// output.player in the process: each holds it from its read of the
+	// player configuration its interruption check compares (before) to its
+	// answer (after), so that configuration is the one its update changes
+	// (handlers_player_output.go, lockPlayerWrite). The config
+	// clone→Save→Store sequence itself is serialized process-wide by
+	// CfgHolder.Update's write lock — see config.RuntimeConfig — which
+	// begins after such a read.
 	mu sync.Mutex
 
 	// testExportCap / testExportPage shrink GET /api/export's history
@@ -1404,6 +1416,12 @@ type Server struct {
 	// construction-time convention the other unexported fields here follow.
 	testExportCap  int
 	testExportPage int
+
+	// testPlayerWriteWaits, when set, is told each time one of the Player
+	// page's writes finds mu held and is about to wait for it
+	// (lockPlayerWrite). Tests only: nil in production, and set before the
+	// server serves anything, as the two fields above are.
+	testPlayerWriteWaits func()
 
 	// pageTmpls is one template bundle per page. Each bundle pre-parses
 	// layout.html + the page's own .html file so rendering is a single
@@ -1642,6 +1660,7 @@ var pages = map[string]string{
 	"history":     "history.html",
 	"settings":    "settings.html",
 	"diagnostics": "diagnostics.html",
+	"output":      "output.html",
 	// Rendered by the catch-all below. It is a real page with the real
 	// shell on purpose: the bare `404 page not found` Go writes by
 	// default has no nav, so a mistyped or stale link left the operator
@@ -1719,6 +1738,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /smartmixes", redirectRetiredSmartMixes)
 	mux.HandleFunc("GET /settings", s.pageSettings)
 	mux.HandleFunc("GET /diagnostics", s.pageDiagnostics)
+	// The bridge's own player (B601): its status, its switch and its DAC.
+	mux.HandleFunc("GET /output", s.pageOutput)
 
 	// Orchestrator probes. Registered here, bypassed in
 	// isAuthBypassPath, and deliberately body-less — see
@@ -1815,6 +1836,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/database/compact", s.apiDatabaseCompact)
 	mux.HandleFunc("GET /api/doctor", s.apiDoctor)
 	mux.HandleFunc("GET /api/output/checklist", s.apiOutputChecklist)
+	// The Player page's routes (handlers_player_output.go). The two writes
+	// change output.player through the live holder, and each route refuses,
+	// before anything is read or written, where the player cannot run: a
+	// public bridge, a host that is not Linux, a player block that does not
+	// read, a setting the control plane owns.
+	mux.HandleFunc("GET /api/output/player", s.apiPlayerOutputStatus)
+	mux.HandleFunc("GET /api/output/player/dacs", s.apiPlayerOutputDACs)
+	mux.HandleFunc("POST /api/output/player/enabled", s.apiPlayerOutputEnabled)
+	mux.HandleFunc("POST /api/output/player/dac", s.apiPlayerOutputDAC)
 	// Log export. All GET: reads, not mutations, so csrfGuard passes them
 	// through as it does every other read on this listener. The exports are
 	// downloads rather than JSON a cross-origin page could read back.

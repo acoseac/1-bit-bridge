@@ -66,6 +66,7 @@ func TestEveryAdminPageRenders(t *testing.T) {
 		"history":     "/history",
 		"settings":    "/settings",
 		"diagnostics": "/diagnostics",
+		"output":      "/output",
 		// Rendered by the catch-all, reached below via an unknown path.
 		"notfound": "",
 	}
