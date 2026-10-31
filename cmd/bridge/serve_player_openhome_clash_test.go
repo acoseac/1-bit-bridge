@@ -178,7 +178,16 @@ func TestALiveClashWithTheOpenHomePortLeavesTheRunningPlayerAsItIs(t *testing.T)
 			if len(st.Pending) != 1 || st.Pending[0].Change != "stop" || st.Pending[0].Text != "The player stops when the bridge restarts." {
 				t.Errorf("after the edit: pending %+v; want the player stopping at the restart, and nothing about now", st.Pending)
 			}
-			cs.askedFirst(t, "/api/output/player/enabled", `{"enabled":false}`, eng)
+			// Asked as the page first asks, and not fatal, so that a player the
+			// edit withheld still reaches the playback assertions below.
+			file := readBytes(t, cs.configPath)
+			if code, raw := cs.call(t, http.MethodPost, "/api/output/player/enabled", `{"enabled":false}`, nil); code != http.StatusConflict ||
+				!strings.Contains(raw, `"would_interrupt"`) || !strings.Contains(raw, "stops it at once") {
+				t.Errorf("after the edit, the player turned off without the go-ahead = %d: %s; want 409 would_interrupt", code, raw)
+			}
+			if string(readBytes(t, cs.configPath)) != string(file) {
+				t.Errorf("a player-off request refused for want of the go-ahead wrote the config")
+			}
 			stillPlaying(t, eng, standIn, opened, closed, starts, "after the edit")
 			listensAt(t, s, at, "after the edit")
 			withholdsOnlyForTheBarrier(t, cs, reports, baseline)
