@@ -123,11 +123,13 @@ type PlayerConfig struct {
 	Mixer PlayerMixer `yaml:"mixer,omitempty"`
 	// OpenHome turns on the player's OpenHome surface on the LAN (B470 PR
 	// 5a2a): a listener of its own on each of the box's LAN addresses, the
-	// device and service descriptions, and the SOAP layer. Off by default,
-	// and it stays off by default until the surface plays (PR 5a4): 1-bit
-	// never probes a host that advertises an OpenHome Source for MPD. Serve
-	// reads it from the boot snapshot, so a change applies at the next start,
-	// and nothing of the surface runs while the player does not.
+	// device and service descriptions, SSDP discovery as an OpenHome Source
+	// and the actions a controller casts with. Off by default, and it stays
+	// off by default until the owner decides it (openhome.md): 1-bit 2.1 and
+	// earlier never probe a host that advertises an OpenHome Source for MPD.
+	// The console's Player page sets it (B612). Serve reads it from the boot
+	// snapshot, so a change applies at the next start, and nothing of the
+	// surface runs while the player does not.
 	OpenHome bool `yaml:"openhome,omitempty"`
 	// OpenHomePort is the surface's TCP port on each LAN address: nil for
 	// DefaultOpenHomePort, 0 for a port the kernel picks for each address,
@@ -512,15 +514,34 @@ func (d PlayerDevice) Problem() error {
 // host. It answers false and a nil reason for a player that is simply off
 // (enabled is false), and false with the reason when the block asks for
 // one this config cannot have: the block does not read or is refused
-// (Problem), the host is not Linux, or the bridge is public. A block that
-// does not read is refused whatever its enabled said, since that was not
-// read either. The reason names the field and never quotes a serial.
+// (Problem), the host is not Linux, the bridge is public, or the OpenHome
+// surface is on at a port another listener of serve binds
+// (OpenHomePortClash). A block that does not read is refused whatever its
+// enabled said, since that was not read either. The reason names the field
+// and never quotes a serial.
 //
 // It reads nothing but the config. A LAN interface that is not up yet is
 // the player's runtime state (lan_unavailable, internal/player/lan), never
 // this refusal: on a Raspberry Pi the interface and DHCP often come up
 // after the service starts.
 func (c *Config) PlayerEnabled(goos string) (bool, error) {
+	return c.PlayerEnabledAsBooted(goos, c)
+}
+
+// PlayerEnabledAsBooted is PlayerEnabled for the player of a serve that
+// started from boot, its boot snapshot (B612's second round): c's own
+// checks, the block, enabled, the host and public, with the OpenHome port
+// clash judged on boot alone. Serve binds its listeners once and starts the
+// OpenHome surface from the boot snapshot's opt-in and port, so those are
+// what runs: a live opt-in, a live listener address and a live OpenHome
+// port wait for the next start, as the surface does, which reads the file
+// again and judges the clash there (PlayerEnabled). Judged on c, a clash a
+// save or an edit made would turn the running player off at once over
+// sockets nothing had moved. A nil boot is c.
+func (c *Config) PlayerEnabledAsBooted(goos string, boot *Config) (bool, error) {
+	if boot == nil {
+		boot = c
+	}
 	p := c.Output.Player
 	if p.unread != "" {
 		return false, errors.New(p.unread)
@@ -537,24 +558,47 @@ func (c *Config) PlayerEnabled(goos string) (bool, error) {
 	if c.IsPublic() {
 		return false, errors.New("output.player.enabled: a public bridge has no LAN to play for, and refuses every active output operation: the player stays off")
 	}
-	if p.OpenHome {
-		if err := c.openHomePortClash(); err != nil {
+	if boot.Output.Player.OpenHome {
+		if err := boot.OpenHomePortClash(); err != nil {
 			return false, err
 		}
 	}
 	return true, nil
 }
 
-// openHomePortClash refuses an OpenHome port another listener of serve
+// OpenHomePortClashError is OpenHomePortClash's refusal: Setting is the
+// setting of the other listener whose port the OpenHome surface's is
+// (listenAddress, adminAddress, dlna.listenAddress or output.loopbackPort).
+// It names the setting and never the port.
+type OpenHomePortClashError struct {
+	Setting string
+}
+
+func (e *OpenHomePortClashError) Error() string {
+	return "output.player.openhomePort: bridge serve binds that port already, for " + e.Setting +
+		": give the OpenHome surface a port of its own"
+}
+
+// OpenHomePortClash refuses an OpenHome port another listener of serve
 // binds: the API's (listenAddress), the console's (adminAddress), the DLNA
 // listener's (dlna.listenAddress, its default included, whether or not
 // DLNA is on, since it can be turned on later) and the loopback track
 // route's (output.loopbackPort, which serve binds once output.mpd resolves
 // on, at any time). An empty address is its default, as applyDefaults
 // fills it. Port 0, a port the kernel picks, clashes with nothing. The
-// refusal names the other setting and never the port: a value a setting
-// holds is not printed (config-lifecycle.md).
-func (c *Config) openHomePortClash() error {
+// refusal is an *OpenHomePortClashError, which names the other setting and
+// never the port: a value a setting holds is not printed
+// (config-lifecycle.md).
+//
+// It reads the port and the addresses alone, whatever output.player.enabled
+// and .openhome say. PlayerEnabled asks it only of a player that is on with
+// its surface on, and turns the player off over a clash; a running serve's
+// player asks it of the boot snapshot alone (PlayerEnabledAsBooted). The
+// console asks it of the config it would save: its OpenHome switch (B612)
+// before it turns the opt-in on, the player on or off, and its settings
+// save while the opt-in is on, each refusing the save over a clash, so the
+// next start finds none.
+func (c *Config) OpenHomePortClash() error {
 	port := c.Output.Player.EffectiveOpenHomePort()
 	if port == 0 {
 		return nil
@@ -566,10 +610,7 @@ func (c *Config) openHomePortClash() error {
 	if admin == "" {
 		admin = DefaultAdminAddress
 	}
-	clash := func(setting string) error {
-		return errors.New("output.player.openhomePort: bridge serve binds that port already, for " + setting +
-			": give the OpenHome surface a port of its own")
-	}
+	clash := func(setting string) error { return &OpenHomePortClashError{Setting: setting} }
 	for _, other := range []struct{ setting, addr string }{
 		{"listenAddress", listen},
 		{"adminAddress", admin},

@@ -4251,12 +4251,16 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// while it does not, reading output.player from the holder on every
 	// reading and waking on its changes. The console's Player page changes
 	// output.player while serve runs (B601: its switch and its DAC choice,
-	// through the holder; bind refuses a data dir a serve holds). Its stop,
-	// the teardown's, cancels and joins it; it writes nothing a later close
-	// waits for. It publishes to the player's feed when the player starts.
+	// through the holder; bind refuses a data dir a serve holds). The
+	// OpenHome port clash it judges on cfg, the boot snapshot this serve
+	// binds its listeners and starts its surface from (B612's second
+	// round), as serve's player below does. Its stop, the teardown's,
+	// cancels and joins it; it writes nothing a later close waits for. It
+	// publishes to the player's feed when the player starts.
 	stopPlayerHotplug := startPlayerHotplug(ctx, playerHotplugWiring{
 		GOOS:       opts.playerGOOS,
 		Holder:     cfgHolder,
+		BootConfig: cfg,
 		OpenSource: opts.hotplugSource,
 		Boot:       opts.hotplugBoot,
 		Feed:       playerFeed,
@@ -4298,7 +4302,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		Store:    manifestStore,
 		Paths:    apiSrv.Resolver(),
 		Feed:     playerFeed,
-		Live:     livePlayerSettings(cfgHolder, opts.playerGOOS),
+		Live:     livePlayerSettings(cfgHolder, cfg, opts.playerGOOS),
 		Changed:  cfgHolder.Changed,
 		Trees:    opts.playerTrees,
 		Backend:  opts.playerBackend,

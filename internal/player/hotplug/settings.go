@@ -8,23 +8,28 @@ import "github.com/acoseac/1-bit-bridge/internal/config"
 // of the config, never once at start, so a binding changed while serve
 // runs is what the next reading resolves.
 type Settings struct {
-	// Enabled is config.PlayerEnabled: the player runs on this host.
+	// Enabled is config.PlayerEnabledAsBooted: the player runs on this
+	// host, the OpenHome port clash judged on serve's boot snapshot.
 	Enabled bool
-	// Off is PlayerEnabled's reason when the block asks for a player this
-	// config cannot have, nil when the player is simply off.
+	// Off is its reason when the block asks for a player this config
+	// cannot have, nil when the player is simply off.
 	Off error
 	// Device is output.player.device.
 	Device config.PlayerDevice
 }
 
-// SettingsFrom reads the player's settings from cfg as a goos host runs
-// them. A nil cfg is a player that is off.
-func SettingsFrom(cfg *config.Config, goos string) Settings {
-	if cfg == nil {
+// SettingsFrom reads the player's settings from the live config live as a
+// goos host runs them, for a serve whose boot snapshot is boot: the
+// OpenHome port clash is judged on boot, whose listeners serve bound and
+// whose opt-in its surface started from, and the rest on live
+// (config.PlayerEnabledAsBooted). A nil live is a player that is off; a nil
+// boot judges the clash on live.
+func SettingsFrom(live, boot *config.Config, goos string) Settings {
+	if live == nil {
 		return Settings{}
 	}
-	on, why := cfg.PlayerEnabled(goos)
-	return Settings{Enabled: on, Off: why, Device: cfg.Output.Player.Device}
+	on, why := live.PlayerEnabledAsBooted(goos, boot)
+	return Settings{Enabled: on, Off: why, Device: live.Output.Player.Device}
 }
 
 // offReason is the disabled snapshot's reason, as binding.Status words it.

@@ -67,14 +67,17 @@ libraryName: "My Music Library"
 #   under auto only at a rate the record holds no native policy for; mixer
 #   takes {type: none} alone in this release. The player's UUID is kept in
 #   <dataDir>/player-uuid.
-#   openhome: true turns on the player's OpenHome surface on the LAN (in
-#   development, off by default): its own listener on each LAN address on
-#   openhomePort (default 7792; 0 is a port the kernel picks), with the
-#   device and service descriptions and a SOAP layer that answers every
-#   action as not implemented yet. It is not advertised yet, and it runs
-#   only while the player does; a change applies when bridge serve next
-#   starts. A port another listener of the bridge binds turns the player
-#   off with a logged reason.
+#   openhome: true puts the player on the LAN as an OpenHome renderer that
+#   the 1-bit app lists and casts to (off by default; the console's Player
+#   page has a switch for it): a listener of its own on each LAN address on
+#   openhomePort (default 7792; 0 is a port the kernel picks), advertised
+#   over SSDP and asking no sign-in, like DLNA. 1-bit 2.1 and earlier stop
+#   listing this box's own MPD player while it is on; 1-bit 2.2 lists both.
+#   It runs only while the player does; a change applies when bridge serve
+#   next starts. A port another listener of the bridge binds turns the
+#   player off at the start, with a logged reason, and the console saves
+#   none: its switch refuses the opt-in over one, and its settings save
+#   refuses an address on the port while the opt-in is on.
 #
 # init asks for none of this block, so `bridge init --force` (or a rewrite
 # answered yes at init's prompt) keeps it whole, and says which setting it

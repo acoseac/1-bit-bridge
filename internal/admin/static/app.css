@@ -2855,6 +2855,15 @@ ul.histogram li {
   margin-top: 10px;
 }
 .player-output-choose select { min-width: 0; max-width: 100%; }
+/* The OpenHome switch (B612), a second switch below the player's own in
+ * the same panel. */
+.player-output-openhome {
+  border-top: 1px solid var(--border);
+  margin-top: 18px;
+  padding-top: 18px;
+}
+.player-output-openhome .panel-head { margin-bottom: 8px; }
+.player-output-openhome .panel-head h3 { margin: 0; }
 
 /* ---------------- Duplicates page ---------------- */
 /* Policy radios: one option per row, description wraps under the label. */
