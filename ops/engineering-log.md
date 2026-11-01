@@ -69205,3 +69205,22 @@ the live opt-in through the port check), the apply matrix's `listenAddress`
 and `adminAddress` rows and the OpenHome switch's, and
 `config/bridge.yaml.example`. The `.claude/` changes went to the
 orchestrator as a patch again. Backlog B620 is fixed here.
+
+**Checks**, on bf53c77c (legion0, Linux x86-64, go1.27.3, umask 022, each Go
+command through the build lock):
+- `make fmt vet test build-all P=2`: exit 0. 80 packages ok and 13 with no
+  test files, the Linux-only `internal/alsapcm` (25.7 s),
+  `internal/atomicwrite` (19.1 s) and `internal/player/hotplug` (2.3 s) among
+  them; `cmd/bridge` 787.2 s, `internal/admin` 914.6 s; `check-build-tags:
+  OK` and the six targets built; `make fmt` changed nothing.
+- `make docs-check`: ok, `CLAUDE.md 71.9%; player.md 96.6%; worst load,
+  player_openhome_test.go 61.1%`; with the rules patch applied (a shadow tree
+  over the worktree's tracked files), `player.md 96.8%; worst load 61.3%`.
+  The 46 test names the patch cites exist.
+- `TestEveryCitedTestNameExists` and `TestNoDocblockNamesAnotherDeclaration`
+  pass.
+- `scripts/qualification-version -base c8b95021 -head HEAD`: `qualification
+  version OK: c8b95021..HEAD`. The version stays 24, above the base's 23, so
+  it needs no raise.
+- Not run here: the node harness and the console's other node tests (no node
+  on legion0); CI's legs run them.
