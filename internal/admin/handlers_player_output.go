@@ -17,9 +17,11 @@
 // another DAC than the one it started with, stops what it plays at once
 // (serve's player withholds its output, player.md), and the page asks before
 // one. The OpenHome switch stops nothing: serve reads the opt-in from its
-// boot snapshot alone, and the running process reads the live one only
-// through the port's clash check (config.PlayerEnabled), which the switch
-// asks before it saves the opt-in on.
+// boot snapshot alone, and the running player's admission judges the port's
+// clash on that snapshot too (config.PlayerEnabledAsBooted), so a saved opt-in
+// or a listener move waits for the next start. The switch still asks the
+// clash of the clone before it saves the opt-in on, since the next start
+// would refuse the player over it.
 //
 // Every route is eligible only where the player can run, checked here, on the
 // server, before anything is read or written: not on a public bridge, a
