@@ -139,8 +139,8 @@ Classes describe *how the value is consumed*, not how important it is.
 | `autoOptimizeEnabled` | A | `live` (+reason when sox is unusable) / `restart`+reason | Shared `enabledFn` read per sweep; nudged in both directions. `restart` with a reason when no sweeper is wired. The sweeper's gate is the CarPlay kind's live gate (the upscale gate, sox included) AND this flag; until 2026-09-28 it read the three switches alone, so on a bridge without sox every sweep queued jobs that failed and struck their files. |
 | `mdnsEnabled` | A | `live` / `restart`+reason | `mdnsLifecycle.Set(bool)` — a real start/stop. `restart` with a reason when no lifecycle is wired. |
 | `tailscaleMode` | A / C | `live` (cli→disabled) / `restart`+reason | Only `cli → disabled` hot-applies, via `TailscaleDisable`. Every other transition rewires the auto-pilot and the listener composition; the reason names which transition it was. |
-| `listenAddress` | D | `restart` | The `/v1` listener bind. |
-| `adminAddress` | D | `restart` | The admin listener bind, and the loopback-only enforcement point. |
+| `listenAddress` | D | `restart` | The `/v1` listener bind. While `output.player.openhome` is on, an address on the OpenHome surface's port is refused, 409 `openhome-port-clash`, nothing written: the next start would turn the player off over it (B612). |
+| `adminAddress` | D | `restart` | The admin listener bind, and the loopback-only enforcement point. Refused on the OpenHome surface's port as `listenAddress` is. |
 | `scanIntervalSec` | **A** | `live` | `RunPeriodic` and the analysis sweeper both re-read a provider before each wait; the cadence rearm wakes them so the new value binds now. |
 | `backupIntervalHours` | **A** | `live` | Provider re-read before the startup snapshot and before each wait. The ticker goroutine is now started **unconditionally** and parks when the interval is 0, which is what makes `0 → N` observable; at 0 from boot it parks before its startup snapshot too, so it writes and prunes nothing. Until 2026-10-02 the shared loop swept before it read the interval, so `intervalHours: 0` took a snapshot and pruned at every boot (backlog B209). `TestServeWithBackupsOffTakesNoSnapshotAndFollowsItsCadenceLive` checks the loop itself, not the report: armed after `0 → N`, parked after `N → 0`, no snapshot. |
 | `backupKeep` | **A** | `live` | Read at prune time, which is the only moment retention means anything. No rearm — there is no parked wait to disturb. |
@@ -173,6 +173,7 @@ Classes describe *how the value is consumed*, not how important it is.
 | `POST /api/upscale/variants-dir` | Hot — resolved from the live holder per submit and per disk pre-flight. |
 | `POST /api/output/player/enabled` | The Player page's switch (B601), `output.player.enabled`. Answers `restart` (saved; serve decides its player from the boot snapshot, so it starts or stops at the next start) or `unchanged` (nothing written). Turning a running player off withholds its output at once: while it plays or holds a pause (read in the write's config turn), the write is refused with 409 `would_interrupt`, nothing saved, unless the body carries the operator's go-ahead (`interrupt: true`); with it, playback stops and the answer says `interrupted: true`. Refused on a public bridge, off Linux, over a player block that does not read, and where `managedSettings` names `playerEnabled`. |
 | `POST /api/output/player/dac` | The Player page's DAC choice (B601), `output.player.device`, from a selection token `GET /api/output/player/dacs` handed out, checked against the box in the write's config turn, just before the save. Same answers, and the same go-ahead: a DAC other than the one the running player started with withholds its output at once until the next start, and choosing that one again gives it back. Refused as the switch is, and where `managedSettings` names `playerDevice`. |
+| `POST /api/output/player/openhome` | The Player page's OpenHome switch (B612), `output.player.openhome`: whether the next start advertises the player on the LAN for the 1-bit app to cast to. Answers `restart` (saved; serve reads the opt-in from the boot snapshot alone, so the surface starts or stops at the next start, and only with the player) or `unchanged`. It stops nothing and takes no go-ahead. Turning it on asks the surface's port of the config it saves, whatever `enabled` says: a port another listener of the bridge binds is 409 `player_refused`, nothing saved; with the player off it is saved. The running player judges that clash on its boot snapshot (`config.PlayerEnabledAsBooted`), so no saved opt-in or address reaches it before the next start. Refused as the switch is, and where `managedSettings` names `playerOpenHome` or `playerEnabled`, which owns it too. |
 
 ### Not reachable through this surface at all
 
@@ -430,12 +431,17 @@ Three rules:
 Empty (the default, and every self-hosted install) manages nothing and changes no
 behaviour.
 
-**The Player page's two writes are named here too** (B601): `playerEnabled`
-(`output.player.enabled`) and `playerDevice` (`output.player.device`). They are
+**The Player page's three writes are named here too** (B601, B612):
+`playerEnabled` (`output.player.enabled`), `playerOpenHome`
+(`output.player.openhome`) and `playerDevice` (`output.player.device`). They are
 no `settingsPatch` fields, since the PATCH takes no player setting at all, so
 the reflection above does not reach them: the page hides each control the list
-names, and its route refuses it (403 `managed-setting`). A public bridge, the
-hosted shape, refuses both whatever the list says.
+names, and its route refuses it (403 `managed-setting`). **`playerEnabled` owns
+`playerOpenHome`** (`managedSettingImplies` in internal/config): a list naming
+the player's switch makes the OpenHome switch the control plane's too, with no
+second entry, since what decides whether the player runs decides whether it is
+exposed on the LAN; `playerOpenHome` alone owns nothing else. A public bridge,
+the hosted shape, refuses all three whatever the list says.
 
 **Two controls hide themselves without needing the list**, because public mode
 already refuses them outright: `dlnaEnabled` (`startDLNAIfEnabled` returns early

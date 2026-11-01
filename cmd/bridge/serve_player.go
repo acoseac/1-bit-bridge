@@ -151,11 +151,11 @@ type servePlayerWiring struct {
 	// reports are made from.
 	Feed *hotplug.Feed
 	// Live reads the live config's player block as the watcher does
-	// (livePlayerSettings), and Changed is the holder's channel closed at
-	// its next change: the player follows them itself, so the engine hears
-	// at once that the live config turned it off or names another DAC,
-	// whatever the watcher's readings of the box do. Nil Live is a config
-	// that never changes.
+	// (livePlayerSettings, the OpenHome port clash judged on Cfg), and
+	// Changed is the holder's channel closed at its next change: the player
+	// follows them itself, so the engine hears at once that the live config
+	// turned it off or names another DAC, whatever the watcher's readings of
+	// the box do. Nil Live is a config that never changes.
 	Live    func() hotplug.Settings
 	Changed func() <-chan struct{}
 	// Trees are what the binding locator reads; the zero value is hostTrees.

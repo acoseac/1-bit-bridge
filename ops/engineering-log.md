@@ -68730,3 +68730,497 @@ Go command through the build lock):
   to move.
 - `TestEveryCitedTestNameExists` and `TestNoDocblockNamesAnotherDeclaration`
   pass, `make vet` is clean, and the pinned gofmt lists no file.
+
+## 2026-10-31 — B612: a Player page switch that makes the bridge's player castable
+
+**Why.** At the 0.2.2 release checks the owner found the Player page (B601)
+unable to make the player castable. It sets `output.player.enabled` and the
+DAC alone, and the OpenHome surface the 1-bit app casts to starts only with
+`output.player.openhome: true` (`planServePlayer`), which is off by default
+and which no console route could set: the enabled route's decoder refused
+the key, and the settings PATCH takes no player key. An operator who turned
+the player on from the page alone got a player the app could not reach. The
+owner chose a console switch in 0.2.2; the default stays off
+(`openhome.md`).
+
+**What.** `POST /api/output/player/openhome`, body `{"openhome": true|false}`,
+modelled on the enabled route: the same eligibility (`playerRefusal`: a public
+bridge with or without a session, off Linux, a player block that does not
+read, a managed setting), before anything is read or written and again on the
+clone in the turn; the console's lock (`lockPlayerWrite`) and the live holder
+(`CfgHolder.UpdateChecked`, in `configWriters`); the same answers
+(`writePlayerChange`, `unchanged` for a value held). The page puts the switch
+below the player's own in its panel: "Let the 1-bit app cast to this
+player", with a description built from the status (the friendly name, UDP
+1900 and the TCP port, or "a TCP port chosen for each address" for 0), the
+consequence for 1-bit 2.1 and earlier (they stop listing the box's own MPD
+player while it is on; 1-bit 2.2 lists both, the iOS repo's B550), and a note
+by state. The status carries `managed.openHome`, `configured.openHome`,
+`.openHomePort` and `.openHomeName`, a pending `openHome` entry, and
+`running.openHomeDetail`.
+
+**Decisions.**
+- *Managed and implied.* `playerOpenHome` is its own managed-setting name,
+  and a managed `playerEnabled` implies it: the control plane that owns
+  whether the player runs owns whether it is exposed on the LAN.
+  `SettingsImpliedByManagedControls` iterates the controls, so the
+  implication is a map of its own (`managedSettingImplies`, through
+  `SettingsImpliedByManagedSettings`), which `IsManagedSettingOrImplied` (the
+  routes' predicate) and `EffectiveManagedSettings` (what the console is
+  told) both read. `playerOpenHome` alone implies nothing, so a control plane
+  can own the exposure and leave the player's switch to the operator. The
+  page: `playerEnabled` managed hides the whole switch panel, OpenHome
+  included, as before; `playerOpenHome` alone hides only its switch; neither,
+  both show.
+- *What the running process follows.* Serve reads the opt-in once, from the
+  boot snapshot. The live opt-in reaches the running process in one place,
+  `PlayerEnabled`'s port check, which the hotplug watcher's settings
+  (`hotplug.SettingsFrom` through `livePlayerSettings`), serve's player's
+  withholding (`playerOutput.readLive`, `disabled`) and the console's view all
+  go through: with the opt-in on and a clashing port, the live config turns
+  the player off and its output is withheld at once. The route refuses an
+  enable over a clash, so a saved change leaves that predicate's answer as it
+  was, or lifts a clash another writer made (turning it off). No change of
+  the switch stops what plays, and the route takes no `interrupt`; the serve
+  tests below prove both directions.
+- *The port check whatever `enabled` says.* `PlayerEnabled` returns before
+  the clash check for a player that is off, and `Validate` only logs a
+  player's refusal, so the route asks `config.OpenHomePortClash` (exported
+  from `openHomePortClash`) of the clone itself when it turns the opt-in on,
+  with no temporary enable. Refusing the clash in `PlayerEnabled` whatever
+  the opt-in was rejected in 5a2a and stays rejected: this is a refusal of
+  the save.
+- *Pending is boot against config only.* `consolePlayer.bootOpenHome` is the
+  boot snapshot's opt-in; the pending entry's text says what the next start
+  does (on the LAN under the name, at the first restart that starts the
+  player when the next start runs none; off, with "Until then the 1-bit app
+  can still cast to it" while the surface serves). `pending` is a list of
+  `{change, text}` (B601), so the pinned `pending.openHome` is the entry
+  whose change is `openHome`.
+- *A Source not on the LAN.* `running.openHomeDetail` says why a surface the
+  player started with is not serving (starting, a player that did not start,
+  a surface that did not start, a stop, a bind failure, a listing that
+  failed, no LAN address yet), read from the surface's status under the
+  player's mu after ready; the status line shows it, and no note offers a
+  restart for it. `running.openHome` stays GET /v1/outputs' view.
+- *The body.* `decodePlayerBody` checked trailing input with
+  `Decoder.More`, which answers false for a closing brace or bracket, so
+  `{"enabled":true}}` was saved on B601's two routes. A second decode must
+  now return `io.EOF`.
+
+**Tests.** The route: on, off, unchanged, with a provider that sounds and
+says every change withholds (never asked, never interrupted); on with the
+player off; every refusal, each asserting the file and the live config
+unchanged (public with a session, off Linux, managed, an unreadable block,
+CSRF, an edited config, through `playerWriteRoutes`); the four ports serve
+binds, refused with the player on and off, 0 and a port of its own saved, and
+off over a clash another writer left; sixteen bodies refused (missing, null,
+not a boolean, an array, an unknown field, a go-ahead, trailing JSON, a
+trailing brace or bracket, a cut object, oversized two ways) and the same
+trailing shapes on the enabled and DAC routes; the managed matrix at the
+route, the status and the page's rule; the switch waiting for the console's
+lock behind a DAC choice or the player switch held in its turn, both changes
+kept; the two switches racing in six rounds. Config: the port check whatever
+the player says, and the implication. Serve (`cmd/bridge`, a stand-in
+backend, `lantest` boxes): a valid toggle while playing and back while
+paused, with the surface off and on at boot, leaves the engine, the DAC (its
+opens and releases counted) and the listener as they were, the live settings
+as at boot, and the pending entry there and then cleared; each test then
+moves the live binding, a barrier serve's player must report as
+`binding_changed`, and requires no earlier report to withhold the output. A
+refused enable over the DLNA listener's port writes nothing and stops
+nothing. The saved value is what the next start's plan reads, on and then
+off. The status for a player turned off, one with no DAC bound, a surface
+with no LAN address and one that did not start. The page: the switch's place
+and words in the rendered template, its script's rules and words, and a node
+harness over eleven states (`TestThePlayerPageDrawsTheOpenHomeSwitchStateByState`),
+which skips on legion0 (no node) and runs on CI's legs.
+
+**Controls**, each on a committed tree and restored with `git checkout`:
+- Public mode: the route's public arm dropped (`playerRefusal`, the OpenHome
+  field alone): its "public with a session" case red, 200, the others green.
+- CSRF: the Origin check skipped for the route: its "another origin" and "a
+  null origin" cases red, 200 restart.
+- The console's lock taken out of the route: both cases of
+  `TestTheOpenHomeSwitchWaitsItsTurnBehindAnotherPlayerWrite` red. Its first
+  form waited for bridge.yaml's lock as the sign of a write that had skipped
+  the console's, and red only at the binary's deadline (590 s): the holder's
+  own mutex, which `UpdateChecked` takes before the file's lock, is where
+  such a write waits. It now watches for the write's read of `before` and is
+  red in 0.07 s. The race of the two switches stays green without the lock,
+  as the holder serializes them.
+- The managed refusal dropped for the route: its managed case and both
+  managed cases of the matrix red. The implication emptied: the config test
+  and the matrix's `playerEnabled` case red.
+- `Decoder.More` put back: the trailing brace and bracket cases red on all
+  three routes.
+- The port check skipped: the eight clash cases red, and through serve the
+  enable was saved and the playing player's output withheld at once
+  (`withheld: disabled`, the transport stopped): the live effect the refusal
+  prevents. The check asked through `PlayerEnabled` instead (only with the
+  player on): the four player-off clash cases red.
+- `PlayerEnabled` made to refuse any live opt-in: the toggle test red (the
+  engine stopped, the DAC let go, the live settings off), at first only at the
+  deadline, waiting for a pause that could not come; it stops at its first
+  failed check now (0.5 s).
+- The page's hide rule removed: the field guard ("managed.openHome") and the
+  page test red. The pending entry removed: the four cases that carry one red.
+
+**Docs.** `openhome.md`'s opt-in line and its long form, `admin-console.md`'s
+lock and Player page entries, a `config-lifecycle.md` bullet for the
+implication, `cli-serve.md`'s watcher bullet, the apply matrix's endpoint row
+and managed names, and `config/bridge.yaml.example`, which still said the
+surface answered every action as not implemented and was not advertised. On
+legion0 `.claude/` is refused to the editing tools, so the rules changes went
+to the orchestrator as a patch.
+
+**Qualification version 24**: `cmd/bridge/serve_player*` and
+`internal/config/` are guarded prefixes; the runbook's five pins follow.
+
+**Checks**, on fa37b47e (legion0, Linux x86-64, go1.27.3, umask 022, each Go
+command through the build lock):
+- `make fmt vet test build-all P=2`: exit 0. 80 packages ok and 13 with no
+  test files, the Linux-only `internal/alsapcm`, `internal/atomicwrite` and
+  `internal/player/hotplug` among them; `cmd/bridge` 771.4 s,
+  `internal/admin` 905.0 s; `check-build-tags: OK` and the six targets built;
+  `make fmt` changed nothing.
+- The first full run, on c3567d3a, failed `scripts/third-party-licenses`
+  (`TestBuildTagsAgree`, `TestRealTreeBuildSiteCensus`): a `go build
+  ./cmd/bridge/` of this session's had left a 75 MB `bridge` binary at the
+  worktree's root, which git ignores and the census walk reads as an
+  unreviewed build site. Removed, with a `scripts/__pycache__` this session's
+  budget checker left by importing `check-doc-budgets.py`, the second run on
+  c3567d3a passed whole, and so did the third, above.
+- `make docs-check`: ok; with the rules patch applied (a shadow tree over the
+  worktree's tracked files): `CLAUDE.md 71.9%; player.md 96.6%; worst load,
+  player_openhome_test.go 61.1%`. The 44 test names the patch cites exist.
+- `TestEveryCitedTestNameExists` and `TestNoDocblockNamesAnotherDeclaration`
+  pass.
+- `scripts/qualification-version -base 8f3d3934 -head HEAD`: `qualification
+  version OK: 8f3d3934..HEAD`; with `-head 582f6b75`, the guarded changes
+  before the raise: `guarded code changed without qualificationVersion
+  increase (23 -> 23)`, exit 1.
+- Not run here: the node harness and the console's other node tests (no node
+  on legion0); CI's legs run them.
+
+## 2026-10-31 — B610: the SSDP listener's control-data parser holds whatever it is handed
+
+Backlog B610, which blocked the 0.2.2 tag. The nightly `fuzz.yml` failed eight
+nights running, from run 40077306390 (2026-10-24) to 41190127175
+(2026-10-31): every night `FuzzParseDatagramMeta` had existed, since B470 PR
+5a1 (#1329, d75ce7c5) landed at 22:37 UTC on 2026-10-23 and the job runs at
+03:20 UTC. Each time, within a second: `panic: runtime error: invalid memory
+address or nil pointer dereference` in `golang.org/x/net/ipv4.(*ControlMessage).Parse`
+(`x/net@v0.61.0/ipv4/control.go:90`), called from `parseDatagramMeta`
+(`internal/dlna/ssdp_dst_other.go:40`), on a 24-byte input. The CI artifact
+was not fetched (this host has no GitHub access); the seed is the 24-byte
+shape the panic needs, built from the target's own seed.
+
+**The cause, reproduced on legion0** (Ubuntu 26.04, Linux 7.0, x86-64,
+go1.27.3; red first in 9b724881, each case run alone). `control.go:90` is
+the destination case of Parse's switch, `ctlOpts[ctlDst].parse(cm,
+m.Data(l))`. x/net keeps a table of the IPPROTO_IP messages it reads, one per
+platform, and Parse compares each IPPROTO_IP message's type and length with
+the entries in turn (TTL, destination, interface, packet info). Linux's table
+(`ipv4/sys_linux.go`) sets only `ctlTTL` and `ctlPacketInfo`, so `ctlDst` is
+the zero `ctlOpt`, name 0, length 0 and parse nil, and `typ == 0 && l >= 0`
+holds for a message of type 0 of any length. The crasher is the target's own
+Windows-layout seed (`wsaCmsg(8, wsaIPProtoIP, wsaIPPktinfo, …)`: cmsg_len
+24, IPPROTO_IP, IP_PKTINFO 19, an IN_PKTINFO for 192.168.1.20 on index 7)
+with its type zeroed, which 64-bit Linux reads as one IPPROTO_IP message of
+type 0 with 8 bytes of data. The committed seed
+(`testdata/fuzz/FuzzParseDatagramMeta/d79af9097d4991c5`) and the unit case
+(`TestParseDatagramMetaHoldsAnIPMessageOfTypeZero`: the same message laid out
+with x/sys/unix, the seed's bytes exactly on 64-bit Linux) each panicked with
+the nightly's stack.
+
+**Every platform's table at v0.61.0** (`ipv4/sys_*.go`), of the four entries
+Parse consults: darwin (and ios) sets all four; linux (and android) TTL and
+packet info; freebsd, dragonfly, netbsd, openbsd and aix TTL, destination and
+interface; solaris (and illumos) TTL and packet info; zos packet info alone;
+the stub platforms none. So on every platform with real control messages a
+message of type 0 panics, except Darwin, where it matches no entry and is
+passed over; on the stub platforms the socket header's length is zero, so a
+nonempty buffer fails as an invalid header before any IPv4 entry is consulted
+(Codex's review). x/net's ipv6 Parse
+consults traffic class, hop limit, packet info and path MTU, and every table
+sets all four but z/OS's (no traffic class); nothing in the bridge parses IPv6
+control data. The other x/net call, `ssdp_reply_linux.go`'s, marshals a
+ControlMessage and parses nothing. The tree's one other control-data parse is
+the hotplug watcher's netlink SCM_CREDENTIALS
+(`internal/player/hotplug/source_linux.go`), through x/sys v0.49.0:
+`ParseSocketControlMessage` bounds every message by the buffer, but
+`ParseUnixCredentials` checks only the level and the type and reads a ucred
+from the payload's first byte, so an SCM_CREDENTIALS message with no payload
+panics (measured: index out of range [0] with length 0) and a short one is
+read past its end. It is this one's class and not reached either: the kernel
+writes a whole ucred there (measured on an AF_UNIX socket with SO_PASSCRED,
+the `scm_recv` path netlink shares: cmsg_len 28, 12 bytes), the watcher
+parses nothing the kernel cut short (`MSG_CTRUNC`), and no peer supplies the
+ancillary bytes. It is left to a follow-up of its own, since
+`internal/player/hotplug/` is a qualification-guarded prefix and this change
+touches nothing guarded.
+
+**A network peer cannot supply the ancillary bytes.** They are recvmsg's
+out-of-band data, which only the kernel writes. Every
+platform numbers its IPPROTO_IP options from 1 (Linux's `IP_TOS`; Darwin's,
+the BSDs', Solaris' and AIX's `IP_OPTIONS`, by x/sys's constants), so no
+kernel writes a message of type 0. Measured on this host, a UDP socket that
+asks for SO_TIMESTAMP, IP_PKTINFO and IP_RECVTTL is handed SCM_TIMESTAMP
+(level 1, type 29, cmsg_len 32), IP_PKTINFO (0, 8, 28) and IP_TTL (0, 2, 20),
+88 bytes, which x/net parses (ttl 64, dst 127.0.0.1, ifindex 1). It is fixed
+all the same: the parser must hold whatever it is handed, and the SSDP read
+loop (`go s.readLoop(l)`, ssdp.go) runs with no recovery, so a panic there
+ends the process. `fuzz_ssdp_soap_test.go`'s header said these parsers'
+panics were LAN-reachable (true of the datagram and SOAP parsers, not of the
+control data) and that the blast radius was the discovery loop; both are
+corrected.
+
+**The policy (the orchestrator's decision) and the mechanism.** On every
+input x/net's parse handles without panicking, `parseDatagramMeta` reports
+exactly what it did; on one that makes it panic, neither. `parseControlMessage`
+runs x/net's parse under a recover scoped to that one call, in
+`ssdp_dst_other.go`, which every platform but Windows builds, so it meets the
+policy whatever a table leaves unset. Declined: a file of Linux's own (the
+BSDs, Solaris, AIX and z/OS would still panic); a filter dropping type-0
+messages before x/net (it would report an IP_PKTINFO beside one, where the
+policy says neither, and needs each platform's unexported table); and
+decoding in_pktinfo by hand (it would replace x/net's reading of Darwin's and
+the BSDs' separate IP_RECVDSTADDR and IP_RECVIF messages). The semantics the
+policy keeps, each checked against `ipv4/control.go` and
+`internal/socket/socket.go` and pinned: a message at another level, or of an
+IPPROTO_IP type x/net does not read, is passed over; an IP_PKTINFO shorter
+than its struct is passed over (`l >= length` fails), so one before it
+stands; a header that does not parse (cmsg_len 0, below a header's or past
+the buffer) makes `socket.ControlMessage.Parse` fail before any message is
+read, so the whole buffer reports neither; of two IP_PKTINFO messages the
+later overwrites both fields; a tail shorter than a header ends the walk;
+and ipi_ifindex is an `int32` in Linux's struct and a `uint32` in Darwin's,
+so 0x80000000 and up are negative on Linux (`cm.IfIndex > 0` fails) and past
+`metaIndex`'s MaxInt32 on Darwin: no index on either.
+
+**Tests (b35cb3e8).** `TestParseDatagramMetaAnswersEveryShapeOfControlData`
+(Linux and macOS) gives each shape the review named explicit metadata, built
+with x/sys/unix for the running platform, says whether x/net panics on it
+there, and requires the answer to be x/net's, or neither where it panics: a
+type x/net does not read (`IP_TOS`) and another level's message of type 0
+(`SOL_SOCKET`), alone and before and after an IP_PKTINFO; an IP_PKTINFO of 8
+bytes alone, before and after a whole one; a cmsg_len past the buffer and one
+below the header, before and after; two IP_PKTINFO that disagree, both ways
+round, and a later one with an index of 0; a 4-byte tail; and the index
+through the real parser at 0, MaxInt32, MaxInt32+1 and MaxUint32 (reported
+at MaxInt32 alone). Linux's rows of type 0 (`ssdp_dst_linux_test.go`: alone,
+before, after, and between two IP_PKTINFO) report neither, x/net panicking;
+macOS's (`ssdp_dst_darwin_test.go`) report the IP_PKTINFO, x/net passing type
+0 over, beside its IP_RECVDSTADDR and IP_RECVIF messages, alone and together.
+`FuzzParseDatagramMetaIsXNetsParse` holds the parser, on any bytes, to the
+parser before B610 run under a test-only recover (`referenceDatagramMeta`),
+every table row a seed. Three native seeds join the crasher: an IP_PKTINFO,
+the 88 bytes above with a zero timestamp, and an IP_PKTINFO then a message of
+type 0. `TestTheDatagramMetaSeedsAreLinuxsControlData` (amd64 and arm64)
+requires each file to hold exactly its bytes in the fuzz engine's format,
+under the name the engine gives a file it writes (the first 16 hex digits of
+its SHA-256), and pins what each decodes to: the target's invariant alone
+accepts metadata that reports nothing. Every existing case is unchanged and
+green.
+
+**The negative control** (b35cb3e8, tree clean): the recover's five lines
+removed, the tests kept. Each run alone,
+`TestParseDatagramMetaHoldsAnIPMessageOfTypeZero`, the seeds d79af9097d4991c5
+and d769af3a4189fd3c, `TestParseDatagramMetaAnswersEveryShapeOfControlData`,
+`FuzzParseDatagramMetaIsXNetsParse` and
+`TestTheDatagramMetaSeedsAreLinuxsControlData` panicked at `control.go:90`,
+and `TestParseDatagramMetaReadsThisPlatformsPktinfo` passed. Restored from
+git; nothing committed.
+
+**Fuzzing** (b35cb3e8, `-tags ts_omit_webclient,ts_omit_debugeventbus`,
+go1.27.3, 8 workers, `-fuzzminimizetime 30s`): `FuzzParseDatagramMeta` for 10
+minutes, 18,134,883 execs; `FuzzParseWSAPktinfo` for 3, 5,410,972;
+`FuzzParseDatagramMetaIsXNetsParse` for 5, 10,064,954. No crasher in any.
+Compiled only: `go vet`, tests included, is clean for darwin, freebsd,
+windows, linux/386 and linux/arm64. Darwin's rows follow from x/net's darwin
+table and x/sys's darwin constants and run only on a Mac; the BSDs are never
+run.
+
+**On the way.** `ops/History-Build.md` counted 60 fuzz targets across
+seventeen packages and 41 with property assertions. The tree held 64 across
+eighteen (5a1's `FuzzSSDPDispatch`, `FuzzParseDatagramMeta` and
+`FuzzParseWSAPktinfo`, and 5a4's `FuzzParse` in `internal/player/trackref`,
+had joined uncounted); with this one, 65, and 46 with properties.
+**Upstream**: a draft issue for golang/go (x/net) is beside the job's report,
+outside the tree; Parse could skip an entry whose name is 0, as `Marshal` and
+`NewControlMessage` already do.
+
+## 2026-10-31 — B612 round 2: a saved opt-in never reaches the running player through the port check; a save the next start would refuse is refused
+
+**Why.** Codex's review of the branch (Medium, `internal/admin/handlers_player_output.go:629`):
+the opt-in the switch saves still reached playback before a restart, through
+`PlayerEnabled`. A playing bridge booted with OpenHome off; the switch turned
+the opt-in on (saved, waiting for a restart, the surface not running); a
+`PATCH /api/settings` moved `listenAddress` (or `adminAddress`) onto 7792,
+accepted because `Validate` only logs a player's refusal; and
+`livePlayerSettings` → `hotplug.SettingsFrom` → `PlayerEnabled` then found the
+clash in the live config and turned the running player off at once, though
+neither the listener nor the surface had moved. Turning the switch off gave
+the output back, still before any restart. Round 1's report named the path as
+there since 5a2a (backlog B620); B612 made it reachable from the console. It
+split one field's halves (`config-lifecycle.md`): every consumer took the
+opt-in and the listeners' addresses at boot but that check.
+
+**What runs is judged by the boot snapshot.** `config.PlayerEnabledAsBooted(goos, boot)`
+is `PlayerEnabled`'s checks of the live config (the block, `enabled`, the
+host, public) with the OpenHome port clash asked of `boot` alone, and
+`PlayerEnabled` is it on itself. The boot facts are the opt-in and its port,
+`listenAddress` (with any `--addr`), `adminAddress`, `dlna.listenAddress`
+and `output.loopbackPort`: serve bound its listeners from the boot snapshot
+and started the surface from its opt-in, and the loopback route takes its
+port from it too, whenever it starts. The call sites that change, each
+reading the running player's admission:
+- `livePlayerSettings(holder, boot, goos)`, the watcher's settings
+  (`startPlayerHotplug`, through `playerHotplugWiring.BootConfig`) and
+  serve's player's (`servePlayerWiring.Live`, which `bridgePlayer.follow`
+  and `report` hand `playerOutput.readLive`), both given serve's `cfg`;
+- the console's `withheld` (`consolePlayer.boot`, from its wiring's `Boot`),
+  which feeds `Withholds` (the `would_interrupt` question), `running.withheld`
+  and the pending stop text.
+
+Both configs are passed (`hotplug.SettingsFrom(live, boot, goos)`), never
+the boot fields laid over a clone of the live config: an overlay misses
+whatever field the check comes to read, and judges it live without a word.
+Unchanged: the boot plan (`planServePlayer(cfg)`, which judges the boot
+snapshot whole), the console's `configured` and next-plan views (the next
+start reads the saved config), `Validate`'s player-off line (a judgement of
+the config it is given), the enabled route's check of its clone, and the
+CLI's (doctor, bind, `output play`). A player that started booted with no
+clash (its plan would have refused the player over one), so its admission
+never withholds over one now; the watcher of a player that did not start
+judges the boot snapshot's latent clash, and nothing plays either way.
+
+**A save the next start would refuse is refused.** While
+`output.player.openhome` is on, the settings PATCH asks
+`config.OpenHomePortClash` of the clone it would save and refuses a clash:
+409 `openhome-port-clash`, naming the setting (the new
+`*config.OpenHomePortClashError`'s `Setting`; its text is the one
+`PlayerEnabled` always gave) and `output.player.openhomePort`, never the
+port, nothing written. It is asked of the whole candidate, never of the
+sockets bound now, and before `Validate`, which logs the player off for a
+config whose player it would refuse and would have logged it for a save
+refused here (`Normalize` changes no address). The routes that can move one
+of the ports: the settings PATCH alone (`listenAddress`, `adminAddress`).
+None writes `dlna.listenAddress` (the PATCH's DLNA field is `dlnaEnabled`),
+`output.loopbackPort` or `output.player.openhomePort`; the roots, the
+variants folder and the UPnP servers' writers move no port; and the player
+routes keep their checks (the switch's own, round 1; the enabled route's
+`PlayerEnabled` of its clone, B601). Outside the console: `bridge init`'s
+address flags, a CLI rewrite that keeps the output block and prints
+`Validate`'s player-off line for a clash; `bridge restore`, which puts a
+whole file back; and serve's own default seed, whose opt-in is off. None of
+them was changed. A config that already clashes (an edit before the start)
+refuses every settings save while the opt-in is on, naming the clash, until
+the save moves the address off the port or the opt-in is turned off on the
+Player page, which the switch allows over a clash. Rejected: refusing only a
+save that changes the clashing setting, which saves a config the next start
+refuses.
+
+**Tests**, red first in d62685fe, each red as predicted (legion0):
+- Serve, Codex's sequence through both addresses (`adminAddress` as
+  `127.0.0.1:7792`: `:7792` is refused in loopback mode first, which would
+  prove address validation; `TestTheConsoleRefusesToMoveAListenerOntoTheOpenHomePort`).
+  Red: 200 `restart`, the file and the live config written, the pending list
+  gaining `stop: The player is turned off: it plays nothing now…`, the engine
+  stopped (`disabled`), the DAC let go. Green: 409, nothing written, the
+  pending list as it was, the engine and the DAC as they were, no withholding
+  report before the barrier.
+- Serve, a clash injected into the live config (`holder.Store`, memory
+  alone) through each of the four settings, the opt-in on at boot
+  (`TestALiveClashWithTheOpenHomePortLeavesTheRunningPlayerAsItIs`). Red: the
+  console withholding `disabled`, the pending list's "plays nothing now", the
+  player-off request without the go-ahead saved unasked. Green: the watcher
+  takes the change and keeps its watch (`Stats.ConfigChanges`), the console
+  says the player plays and that the next start refuses it, naming the
+  setting, the player-off request is asked (`would_interrupt`), the engine
+  plays, the surface listens where it did, and the barrier's binding change
+  is the first report that withholds the output.
+- Serve, beside a clash (`TestTheRunningPlayerStillFollowsTheLiveConfigBesideAClash`):
+  the switch turning the player off with the go-ahead applies at once and is
+  answered interrupted (red: not interrupted), and a live block the config
+  refuses (a 65-character room) turns the player off naming that reason (a
+  guard, green before the fix).
+- Serve, a file edit and a restart through each of the four settings
+  (`TestTheNextStartRefusesThePlayerOverAClashEditedIntoItsFile`): the
+  running player plays on, and the next start refuses the player and says
+  why in the console's status, naming the setting and not the port (green
+  before the fix: a pin of the half that reads the file). Its restart takes
+  listeners the test holds (`playerServeCase.lan`, `.admin`), since
+  `bootPlayerServeAt` wrote a fresh console address over the file's even
+  with `keep` and gave the API an `--addr` of its own, and serve binds the
+  address its file names (`adoptHandedListener`).
+- Admin, the PATCH (`TestASettingsSaveTheNextStartWouldRefuseIsRefused`): a
+  listener address on the port with the opt-in on, the player on or off,
+  alone or beside settings that apply at once (`libraryName`,
+  `mdnsEnabled`, `scanIntervalSec`), is 409 with the file's bytes, the live
+  config, the config the Player page's status is read from and the five
+  callbacks after a save unchanged; with the opt-in off, or a port of the
+  surface's own or 0, the same addresses are saved, the callbacks beside
+  them run.
+- Config (`TestTheRunningPlayersOpenHomeClashIsJudgedOnItsBootSnapshot`):
+  each of the four settings, the opt-in turned on live, a boot clash, a nil
+  boot, and the live switch, a refused block, public and another host beside
+  a boot that runs.
+- `withholdsOnlyForTheBarrier` fails at the first report that withholds the
+  output: a `disabled` before the barrier leaves the barrier no report of
+  its own, and the helper waited out the binary's deadline for one.
+- The other direction, an opt-in turned on over a listener already on the
+  port, is round 1's refusal (`TestTheOpenHomeSwitchRefusesAPortAnotherListenerBinds`).
+
+**Controls**, each on a committed tree, restored with `git checkout`, its
+prediction written first:
+- The PATCH's refusal skipped (`if false && …`): predicted red at the 409 and
+  the writes, not at playback. So it went: both serve cases red at the 409
+  (200 `restart`), the file, the live config and the pending list (`stop:
+  The player stops when the bridge restarts.`), green at the engine, the DAC
+  and the barrier; the admin test's five refusal cases red, its five saves
+  green.
+- The boot judgement reverted to the live config in the wiring (a nil boot in
+  `livePlayerSettings` and in the console's `withheld`): predicted red at the
+  console's status and at playback. So it went: all four injected cases red
+  at the console (`unavailable`, withheld `disabled`), the pending text, the
+  player-off request (saved unasked) and playback (the engine stopped, the
+  DAC let go); the switch-off case red; Codex's sequence, the restart, the
+  guard and the config pin green.
+- `PlayerEnabledAsBooted` judging the clash on itself: predicted red at the
+  four live-clash cases and the live opt-in. Red there, and at the four
+  boot-clash cases too, which I had predicted green: there the boot snapshot
+  is the argument the mutation no longer reads.
+- The watcher's `BootConfig` alone dropped: predicted red at the watcher's
+  check. Red there (stopping, no change taken), and, not predicted, at the
+  console's state, the player-off request and playback, and in the
+  switch-off case: the watcher's `disabled` snapshot withholds the output
+  before the status is read.
+
+**Docs.** `openhome.md`'s opt-in line and its long form, `player.md`'s
+live-config line and its long form, `cli-serve.md`'s watcher bullet,
+`admin-console.md`'s Player page entry (it said the running process reads
+the live opt-in through the port check), the apply matrix's `listenAddress`
+and `adminAddress` rows and the OpenHome switch's, and
+`config/bridge.yaml.example`. The `.claude/` changes went to the
+orchestrator as a patch again. Backlog B620 is fixed here.
+
+**Checks**, on bf53c77c (legion0, Linux x86-64, go1.27.3, umask 022, each Go
+command through the build lock):
+- `make fmt vet test build-all P=2`: exit 0. 80 packages ok and 13 with no
+  test files, the Linux-only `internal/alsapcm` (25.7 s),
+  `internal/atomicwrite` (19.1 s) and `internal/player/hotplug` (2.3 s) among
+  them; `cmd/bridge` 787.2 s, `internal/admin` 914.6 s; `check-build-tags:
+  OK` and the six targets built; `make fmt` changed nothing.
+- `make docs-check`: ok, `CLAUDE.md 71.9%; player.md 96.6%; worst load,
+  player_openhome_test.go 61.1%`; with the rules patch applied (a shadow tree
+  over the worktree's tracked files), `player.md 96.8%; worst load 61.3%`.
+  The 46 test names the patch cites exist.
+- `TestEveryCitedTestNameExists` and `TestNoDocblockNamesAnotherDeclaration`
+  pass.
+- `scripts/qualification-version -base c8b95021 -head HEAD`: `qualification
+  version OK: c8b95021..HEAD`. The version stays 24, above the base's 23, so
+  it needs no raise.
+- Not run here: the node harness and the console's other node tests (no node
+  on legion0); CI's legs run them.

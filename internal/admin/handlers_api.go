@@ -2521,6 +2521,30 @@ func resolvedDuplicatesFilter(cfg *config.Config) string {
 	return v
 }
 
+// errCodeOpenHomePortClash is the settings save's refusal of a listener
+// address on the OpenHome surface's port while its opt-in is on
+// (openHomePortClashRefusal).
+const errCodeOpenHomePortClash = "openhome-port-clash"
+
+// openHomePortClashRefusal is the settings save's answer to a config whose
+// listeners take the OpenHome surface's port while output.player.openhome
+// is on, err its config.OpenHomePortClash (B612's second round): saved, it
+// would have the next start turn the player off (config.PlayerEnabled), so
+// it is refused, 409, as the OpenHome switch refuses to turn the opt-in on
+// over a clash. It names the setting and the surface's port setting, never
+// a port.
+func openHomePortClashRefusal(err error) *cfgAbort {
+	setting := "an address of the bridge's own listeners"
+	var clash *config.OpenHomePortClashError
+	if errors.As(err, &clash) {
+		setting = clash.Setting
+	}
+	return &cfgAbort{status: http.StatusConflict, code: errCodeOpenHomePortClash,
+		msg: setting + ": casting from the 1-bit app is on (output.player.openhome), and the player's OpenHome " +
+			"surface takes that port (output.player.openhomePort), so the bridge would not start the player at its " +
+			"next start: nothing was saved. Choose another port, or turn casting off on the Player page first."}
+}
+
 func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	var p settingsPatch
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, adminMaxBodyBytes)).Decode(&p); err != nil {
@@ -3172,6 +3196,21 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// A save the next start would refuse is refused (B612's second
+		// round): while the opt-in is on, a listener address on the OpenHome
+		// surface's port has the next start turn the player off
+		// (config.PlayerEnabled), as an opt-in turned on over one would, which
+		// the OpenHome switch refuses. It is asked of the config this save
+		// would write, the whole of it, never of what serve binds now, which
+		// is the boot snapshot's: the running player judges the clash on that
+		// (config.PlayerEnabledAsBooted). Before Validate, which logs the
+		// player off for a config whose player it would refuse, and so would
+		// log it for a save this refuses; Normalize changes no address.
+		if next.Output.Player.OpenHome {
+			if err := next.OpenHomePortClash(); err != nil {
+				return openHomePortClashRefusal(err)
+			}
+		}
 		// NormalizeAndValidate, not bare Validate: this path PERSISTS `next`,
 		// so it depends on the canonicalisation (customEndpoints prune, enrich
 		// base-URL trimming, autocert-domain trim) landing on the saved YAML.

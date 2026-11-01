@@ -41,21 +41,22 @@ import (
 // (copyFile and writeFrom are listed by name for that reason). That is its
 // one known blind spot.
 var configWriters = map[string]string{
-	"cmd/bridge/library.go:libraryAddCmd":                                    "config.Edit",
-	"cmd/bridge/library.go:libraryRemoveCmd":                                 "config.Edit",
-	"cmd/bridge/init.go:saveInitConfig":                                      "config.LockFile",
-	"cmd/bridge/main.go:writeAutoInitConfig":                                 "config.LockFile",
-	"cmd/bridge/output_dac_bind.go:runDACBind":                               "config.LockFile",
-	"cmd/bridge/upnp_upstream_admin.go:upnpAdminAdapter.updateCfg":           "cfgHolder.Update",
-	"internal/admin/handlers_api.go:Server.applyRootAddition":                "CfgHolder.UpdateChecked",
-	"internal/admin/handlers_api.go:Server.applyRootRemoval":                 "CfgHolder.UpdateChecked",
-	"internal/admin/handlers_api.go:Server.apiSettingsPatch":                 "CfgHolder.Update",
-	"internal/admin/handlers_player_output.go:Server.apiPlayerOutputDAC":     "CfgHolder.UpdateChecked",
-	"internal/admin/handlers_player_output.go:Server.apiPlayerOutputEnabled": "CfgHolder.UpdateChecked",
-	"internal/admin/handlers_variants_dir.go:Server.apiVariantsDirPatch":     "CfgHolder.Update",
-	"internal/backup/backup.go:RestoreWithOptions":                           "config.LockFile",
-	"internal/config/lock.go:Edit":                                           "LockFile",
-	"internal/config/runtime.go:RuntimeConfig.UpdateChecked":                 "LockFile",
+	"cmd/bridge/library.go:libraryAddCmd":                                     "config.Edit",
+	"cmd/bridge/library.go:libraryRemoveCmd":                                  "config.Edit",
+	"cmd/bridge/init.go:saveInitConfig":                                       "config.LockFile",
+	"cmd/bridge/main.go:writeAutoInitConfig":                                  "config.LockFile",
+	"cmd/bridge/output_dac_bind.go:runDACBind":                                "config.LockFile",
+	"cmd/bridge/upnp_upstream_admin.go:upnpAdminAdapter.updateCfg":            "cfgHolder.Update",
+	"internal/admin/handlers_api.go:Server.applyRootAddition":                 "CfgHolder.UpdateChecked",
+	"internal/admin/handlers_api.go:Server.applyRootRemoval":                  "CfgHolder.UpdateChecked",
+	"internal/admin/handlers_api.go:Server.apiSettingsPatch":                  "CfgHolder.Update",
+	"internal/admin/handlers_player_output.go:Server.apiPlayerOutputDAC":      "CfgHolder.UpdateChecked",
+	"internal/admin/handlers_player_output.go:Server.apiPlayerOutputEnabled":  "CfgHolder.UpdateChecked",
+	"internal/admin/handlers_player_output.go:Server.apiPlayerOutputOpenHome": "CfgHolder.UpdateChecked",
+	"internal/admin/handlers_variants_dir.go:Server.apiVariantsDirPatch":      "CfgHolder.Update",
+	"internal/backup/backup.go:RestoreWithOptions":                            "config.LockFile",
+	"internal/config/lock.go:Edit":                                            "LockFile",
+	"internal/config/runtime.go:RuntimeConfig.UpdateChecked":                  "LockFile",
 }
 
 // configSavePrimitive is the config's own save, in internal/config: the

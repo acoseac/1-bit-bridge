@@ -1,6 +1,8 @@
 package config
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -221,3 +223,146 @@ func TestAnOpenHomePortServeBindsElsewhereTurnsThePlayerOff(t *testing.T) {
 		t.Errorf("logged %q, want one line naming dlna.listenAddress", lines)
 	}
 }
+
+// TestTheOpenHomePortClashIsAskedWhateverThePlayerSays pins the check the
+// console's OpenHome switch asks before it saves the opt-in on (B612):
+// OpenHomePortClash answers the port's clash with another listener of serve
+// as PlayerEnabled does with the player and the surface on, whether the
+// player is on or off and whether the opt-in is on yet, naming the setting
+// and never the port; port 0 and a port of its own clash with nothing.
+// PlayerEnabled itself still asks it only of a player that is on with its
+// surface on: a player that is off is no refusal, whatever its port.
+func TestTheOpenHomePortClashIsAskedWhateverThePlayerSays(t *testing.T) {
+	intp := func(n int) *int { return &n }
+	for _, tc := range []struct {
+		name  string
+		port  *int
+		clash string // the setting the refusal names, "" for none
+	}{
+		{"the default port", nil, ""},
+		{"a port of its own", intp(7800), ""},
+		{"a port the kernel picks", intp(0), ""},
+		{"the API's port", intp(7788), "for listenAddress"},
+		{"the console's port", intp(7789), "for adminAddress"},
+		{"the DLNA listener's default port", intp(7790), "for dlna.listenAddress"},
+		{"the loopback route's default port", intp(7791), "for output.loopbackPort"},
+	} {
+		for _, state := range []struct {
+			name              string
+			enabled, openhome bool
+		}{
+			{"the player off, the opt-in off", false, false},
+			{"the player off, the opt-in on", false, true},
+			{"the player on, the opt-in off", true, false},
+			{"the player on, the opt-in on", true, true},
+		} {
+			t.Run(tc.name+"/"+state.name, func(t *testing.T) {
+				cfg := &Config{ListenAddress: ":7788", AdminAddress: "127.0.0.1:7789", ScanIntervalSec: 3600, LibraryRoots: []string{"/music"},
+					Output: OutputConfig{Player: fullPlayer()}}
+				cfg.Output.Player.Enabled, cfg.Output.Player.OpenHome, cfg.Output.Player.OpenHomePort = state.enabled, state.openhome, tc.port
+				err := cfg.OpenHomePortClash()
+				if tc.clash == "" {
+					if err != nil {
+						t.Fatalf("OpenHomePortClash = %v, want none", err)
+					}
+				} else if err == nil || !strings.Contains(err.Error(), "output.player.openhomePort") || !strings.Contains(err.Error(), tc.clash) {
+					t.Fatalf("OpenHomePortClash = %v; want a refusal naming openhomePort and %q", err, tc.clash)
+				} else if strings.Contains(err.Error(), fmt.Sprint(*tc.port)) {
+					t.Errorf("the refusal quotes the port: %v", err)
+				}
+				on, why := cfg.PlayerEnabled("linux")
+				switch {
+				case !state.enabled && (on || why != nil):
+					t.Errorf("PlayerEnabled of a player that is off = %v, %v; want off with no reason", on, why)
+				case state.enabled && state.openhome && tc.clash != "" && (on || why == nil || why.Error() != err.Error()):
+					t.Errorf("PlayerEnabled = %v, %v; want off with OpenHomePortClash's own reason", on, why)
+				case state.enabled && (!state.openhome || tc.clash == "") && (!on || why != nil):
+					t.Errorf("PlayerEnabled = %v, %v; want on: the surface's port clashes with nothing it binds", on, why)
+				}
+			})
+		}
+	}
+}
+
+// TestTheRunningPlayersOpenHomeClashIsJudgedOnItsBootSnapshot pins
+// PlayerEnabledAsBooted (B612's second round), the running player's
+// admission: the OpenHome port clash is the boot snapshot's alone, and every
+// other check the live config's. A live clash through each of the four
+// settings beside a boot without one lets the player run, since no socket
+// moved, and so does the opt-in turned on live; a boot clash refuses it
+// whatever the live config says; PlayerEnabled, and a nil boot, judge the
+// clash on the config itself, an *OpenHomePortClashError naming its setting;
+// and the live switch, a block the live config refuses, a public bridge and
+// the host still decide beside a boot that runs.
+func TestTheRunningPlayersOpenHomeClashIsJudgedOnItsBootSnapshot(t *testing.T) {
+	base := func() *Config {
+		cfg := &Config{ListenAddress: ":7788", AdminAddress: "127.0.0.1:7789", ScanIntervalSec: 3600, LibraryRoots: []string{"/music"},
+			Output: OutputConfig{Player: fullPlayer()}}
+		cfg.Output.Player.OpenHome = true
+		return cfg
+	}
+	port := DefaultOpenHomePort
+	for _, move := range []struct {
+		setting string
+		set     func(*Config)
+	}{
+		{"listenAddress", func(c *Config) { c.ListenAddress = fmt.Sprintf(":%d", port) }},
+		{"adminAddress", func(c *Config) { c.AdminAddress = fmt.Sprintf("127.0.0.1:%d", port) }},
+		{"dlna.listenAddress", func(c *Config) { c.DLNA.ListenAddress = fmt.Sprintf(":%d", port) }},
+		{"output.loopbackPort", func(c *Config) { c.Output.LoopbackPort = &port }},
+	} {
+		t.Run(move.setting, func(t *testing.T) {
+			boot, live := base(), base()
+			move.set(live)
+			if on, why := live.PlayerEnabledAsBooted("linux", boot); !on || why != nil {
+				t.Errorf("a live clash beside a boot without one = %v, %v; want the player on", on, why)
+			}
+			for _, judged := range []struct {
+				name string
+				why  error
+			}{
+				{"PlayerEnabled of the live config", second(live.PlayerEnabled("linux"))},
+				{"no boot snapshot", second(live.PlayerEnabledAsBooted("linux", nil))},
+				{"a boot with the clash", second(boot.PlayerEnabledAsBooted("linux", live))},
+			} {
+				var clash *OpenHomePortClashError
+				if !errors.As(judged.why, &clash) || clash.Setting != move.setting || judged.why.Error() != clash.Error() {
+					t.Errorf("%s = %v; want the clash, an OpenHomePortClashError naming %s", judged.name, judged.why, move.setting)
+				}
+			}
+		})
+	}
+	t.Run("the opt-in turned on live", func(t *testing.T) {
+		boot, live := base(), base()
+		boot.Output.Player.OpenHome = false
+		boot.ListenAddress = fmt.Sprintf(":%d", port)
+		live.ListenAddress = boot.ListenAddress
+		if on, why := live.PlayerEnabledAsBooted("linux", boot); !on || why != nil {
+			t.Errorf("the opt-in turned on live over a listener on its port = %v, %v; want the player on until the next start", on, why)
+		}
+	})
+	t.Run("what the live config says of the player itself", func(t *testing.T) {
+		boot := base()
+		for _, tc := range []struct {
+			name   string
+			goos   string
+			change func(*Config)
+			off    string // what the reason says, "" for none
+		}{
+			{"switched off", "linux", func(c *Config) { c.Output.Player.Enabled = false }, ""},
+			{"a block it refuses", "linux", func(c *Config) { c.Output.Player.Room = strings.Repeat("r", 65) }, "output.player.room"},
+			{"a public bridge", "linux", func(c *Config) { c.Deployment.Mode = string(DeploymentModePublic) }, "a public bridge"},
+			{"another host", "darwin", func(*Config) {}, "Linux only"},
+		} {
+			live := base()
+			tc.change(live)
+			on, why := live.PlayerEnabledAsBooted(tc.goos, boot)
+			if on || tc.off == "" && why != nil || tc.off != "" && (why == nil || !strings.Contains(why.Error(), tc.off)) {
+				t.Errorf("%s beside a boot that runs = %v, %v; want the player off, saying %q", tc.name, on, why, tc.off)
+			}
+		}
+	})
+}
+
+// second is a two-valued answer's error.
+func second(_ bool, err error) error { return err }

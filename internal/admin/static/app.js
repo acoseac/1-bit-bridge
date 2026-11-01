@@ -7195,8 +7195,8 @@ const PLAYER_BINDING_WORDS = {
 
 // initOutput wires the Player page: its status, painted from GET
 // /api/output/player on load, every five seconds while the page is in view,
-// and after each change; the switch; the DAC list and its choice; and the
-// restart. A public bridge's page renders none of it.
+// and after each change; the switch; the OpenHome switch; the DAC list and
+// its choice; and the restart. A public bridge's page renders none of it.
 function initOutput() {
   if (!document.getElementById("player-output-status")) return;
   playerOutputLatest = null;
@@ -7206,6 +7206,7 @@ function initOutput() {
   }, 5000);
   document.getElementById("player-output-refresh")?.addEventListener("click", () => loadPlayerOutput());
   wirePlayerOutputSwitch();
+  wirePlayerOutputOpenHome();
   wirePlayerOutputDACs();
   const restart = document.getElementById("player-output-restart");
   restart?.addEventListener("click", () => requestBridgeRestart(restart, document.getElementById("player-output-msg"),
@@ -7228,7 +7229,10 @@ async function loadPlayerOutput() {
 // renderPlayerOutput paints the status. A bridge where the player cannot run
 // shows why and nothing else; one whose player block does not read shows
 // what serve runs, and no control; a control the control plane owns is not
-// offered. Every string goes in as text.
+// offered: the switch panel, and the OpenHome switch inside it, where it
+// owns the player's switch, which owns the OpenHome switch too, and the
+// OpenHome switch alone where it owns that one alone. Every string goes in
+// as text.
 function renderPlayerOutput(st) {
   playerOutputLatest = st;
   const show = (id, on) => {
@@ -7245,6 +7249,7 @@ function renderPlayerOutput(st) {
   show("player-output-status", shown);
   show("player-output-transports-panel", shown);
   show("player-output-switch-panel", st.available && !st.managed.enabled);
+  show("player-output-openhome", !st.managed.openHome);
   show("player-output-dac-panel", st.available && !st.managed.device);
   if (!shown) {
     show("player-output-pending-panel", false);
@@ -7253,6 +7258,15 @@ function renderPlayerOutput(st) {
   renderPlayerOutputRunning(st.running);
   renderPlayerOutputTransports(st.transports);
   renderPlayerOutputConfigured(st.configured);
+  renderPlayerOutputOpenHome(st.configured);
+  // The note is a live region and the status is painted every five seconds:
+  // its text is set only when it changes, so it is announced once.
+  const note = document.getElementById("player-output-openhome-note");
+  const noteText = playerOpenHomeNote(st.configured, st.running.started, st.pending);
+  if (note) {
+    if (note.textContent !== noteText) note.textContent = noteText;
+    note.hidden = noteText === "";
+  }
   renderPlayerOutputPending(st.pending);
 }
 
@@ -7309,7 +7323,12 @@ function renderPlayerOutputRunning(run) {
       state += " The config has changed since it started: it plays nothing until the bridge restarts.";
     }
     if (run.lastError === "device_busy") state += " Its last play found the DAC held by another program.";
+    // What serves, whatever the config says now: the Source on the LAN, or,
+    // for one the bridge started with and that is not, the server's reason.
+    // The surface follows the box's addresses itself, so no restart is
+    // offered for it.
     if (run.openHome) state += " Its OpenHome source is on the LAN.";
+    else if (run.openHomeDetail) state += ` ${run.openHomeDetail}`;
   }
   playerOutputText("player-output-state", state.trim());
   const stateEl = document.getElementById("player-output-state");
@@ -7406,6 +7425,41 @@ function renderPlayerOutputConfigured(conf) {
     : "The config binds no DAC yet.");
 }
 
+// renderPlayerOutputOpenHome paints the OpenHome switch (B612) from what the
+// config asks for: the opt-in as it holds it, and what it does, by the name
+// and port the status gives. renderPlayerOutput hides it where the control
+// plane owns the opt-in; the switch panel around it is hidden where it owns
+// the player's switch, which owns this one too. What serves now is the
+// status line's (renderPlayerOutputRunning).
+function renderPlayerOutputOpenHome(conf) {
+  const btn = document.getElementById("player-output-openhome-switch");
+  if (btn) btn.textContent = conf.openHome ? "Turn off" : "Turn on";
+  const port = conf.openHomePort > 0 ? `TCP port ${conf.openHomePort}` : "a TCP port chosen for each address";
+  playerOutputText("player-output-openhome-about",
+    `The bridge advertises the player on the LAN as an OpenHome renderer named ${conf.openHomeName}, which the 1-bit app lists and casts to. ` +
+    `Like DLNA, it asks for no sign-in: any device on the LAN can find it and play to it. It uses UDP port 1900 and ${port}.`);
+  playerOutputText("player-output-openhome-configured", conf.openHome
+    ? "The config lets the 1-bit app cast to this player."
+    : "The config keeps the player off the LAN for the 1-bit app.");
+}
+
+// playerOpenHomeNote is the note under the OpenHome switch while the config
+// asks for what does not run yet, "" for none: the opt-in on with the player
+// off (conf, the configured player; started, a player serve runs), with the
+// player switch's own restart line when it waits for one; otherwise an
+// opt-in that waits for a restart, in the server's words, beside the
+// pending list's supervision-aware restart. A steady state has no note.
+function playerOpenHomeNote(conf, started, pending) {
+  const waiting = (change) => pending.find((p) => p.change === change);
+  if (conf.openHome && !(conf.enabled && started)) {
+    const playerSwitch = waiting("start") || waiting("stop");
+    const note = `Saved. The 1-bit app can cast to ${conf.openHomeName} once the player is on.`;
+    return playerSwitch ? `${note} ${playerSwitch.text}` : note;
+  }
+  const optIn = waiting("openHome");
+  return optIn ? optIn.text : "";
+}
+
 // renderPlayerOutputPending lists what waits for the next start, in the
 // server's own words, with the restart beside it.
 function renderPlayerOutputPending(pending) {
@@ -7482,6 +7536,32 @@ function wirePlayerOutputSwitch() {
       const r = await playerOutputPost("/api/output/player/enabled", { enabled: on });
       if (r) showPlayerOutputChange(msg, r);
       else showPlayerOutputKept(msg);
+    } catch (err) {
+      showMsg(msg, "err", `Save failed: ${err.message}`);
+    } finally {
+      setDisabled(btn, false);
+    }
+  });
+}
+
+// wirePlayerOutputOpenHome arms the OpenHome switch: it turns the opt-in on or
+// off in the config. It goes through API.post and never playerOutputPost: the
+// switch stops nothing the player plays, so the server never answers it
+// would_interrupt, and its route takes no go-ahead. It asks nothing of its
+// own either: a port another listener binds is the server's refusal, in its
+// words. A click dispatched to it while the control plane owns the opt-in
+// sends nothing, as a tray's managed row sends nothing.
+function wirePlayerOutputOpenHome() {
+  const btn = document.getElementById("player-output-openhome-switch");
+  const msg = document.getElementById("player-output-msg");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    const st = playerOutputLatest;
+    if (!st || !st.available || st.managed.openHome) return;
+    const on = !st.configured.openHome;
+    setDisabled(btn, true);
+    try {
+      showPlayerOutputChange(msg, await API.post("/api/output/player/openhome", { openhome: on }));
     } catch (err) {
       showMsg(msg, "err", `Save failed: ${err.message}`);
     } finally {
