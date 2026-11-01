@@ -69092,9 +69092,9 @@ snapshot whole), the console's `configured` and next-plan views (the next
 start reads the saved config), `Validate`'s player-off line (a judgement of
 the config it is given), the enabled route's check of its clone, and the
 CLI's (doctor, bind, `output play`). A player that started booted with no
-clash, its plan having refused one, so its admission never withholds over
-one now; the watcher of a player that did not start judges the boot
-snapshot's latent clash, and nothing plays either way.
+clash (its plan would have refused the player over one), so its admission
+never withholds over one now; the watcher of a player that did not start
+judges the boot snapshot's latent clash, and nothing plays either way.
 
 **A save the next start would refuse is refused.** While
 `output.player.openhome` is on, the settings PATCH asks
