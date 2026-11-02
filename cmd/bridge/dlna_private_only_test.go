@@ -169,10 +169,15 @@ func startMediaServerOn(t *testing.T, listenAddress string, at []string, ifs ...
 		t.Fatalf("listen address %q: %v", listenAddress, err)
 	}
 	// What the real bind reports: the unspecified address of the family
-	// the wildcard names, or the address a pin names, unmapped.
+	// the wildcard names, the address a pin names, unmapped, or for a pinned
+	// name the address it resolved to, at's first.
 	bound := netip.IPv6Unspecified()
 	if host != "" {
-		bound = netip.MustParseAddr(host).Unmap()
+		if a, err := netip.ParseAddr(host); err == nil {
+			bound = a.Unmap()
+		} else {
+			bound = netip.MustParseAddr(at[0])
+		}
 	}
 	box := lantest.NewMemory(t)
 	var inner []net.Listener
@@ -310,23 +315,35 @@ func ssdpHeader(pkt, key string) string {
 // sent by then.
 func (r *mediaServerRig) aliveLocations(t *testing.T) []string {
 	t.Helper()
-	want := len(dlna.NotifyTargetsFor("uuid:any"))
+	var locations []string
+	for _, w := range r.aliveNotifies(t, 1) {
+		locations = append(locations, ssdpHeader(w.Pkt, "LOCATION"))
+	}
+	return locations
+}
+
+// aliveNotifies waits for the first alive burst of each of endpoints
+// advertise endpoints (one NOTIFY per target each) and returns every alive
+// NOTIFY sent by then.
+func (r *mediaServerRig) aliveNotifies(t *testing.T, endpoints int) []ssdptest.Write {
+	t.Helper()
+	want := endpoints * len(dlna.NotifyTargetsFor("uuid:any"))
 	give := serveGiveUp(t)
 	for {
 		changed := r.ssdp.Changed()
-		var locations []string
+		var alive []ssdptest.Write
 		for _, w := range r.ssdp.Snapshot() {
 			if w.Kind == "notify" && ssdpHeader(w.Pkt, "NTS") == "ssdp:alive" {
-				locations = append(locations, ssdpHeader(w.Pkt, "LOCATION"))
+				alive = append(alive, w)
 			}
 		}
-		if len(locations) >= want {
-			return locations
+		if len(alive) >= want {
+			return alive
 		}
 		select {
 		case <-changed:
 		case <-give:
-			t.Fatalf("%d alive NOTIFYs, want a burst of %d", len(locations), want)
+			t.Fatalf("%d alive NOTIFYs, want a burst of %d", len(alive), want)
 		}
 	}
 }

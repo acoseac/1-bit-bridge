@@ -1,12 +1,23 @@
 package dlna
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 )
+
+// endpointURLs are the LOCATION bases of cfg's advertise endpoints.
+func endpointURLs(cfg ServerConfig) []string {
+	var out []string
+	for _, ep := range cfg.AdvertiseEndpoints {
+		out = append(out, ep.ServerURL)
+	}
+	return out
+}
 
 // cidrAddrs is the interface addresses cidrs name, each with its prefix.
 func cidrAddrs(t *testing.T, cidrs ...string) []net.Addr {
@@ -132,7 +143,120 @@ func TestNewServerRefusesToAdvertiseAnAddressItWouldNotServe(t *testing.T) {
 				t.Errorf("refused: %v", err)
 			case !tc.ok && err == nil:
 				t.Errorf("NewServer took a configuration that advertises an address the listener does not serve")
+			case err != nil:
+				// The refusal names the field, never the value.
+				for _, raw := range append([]string{tc.cfg.ServerURL}, endpointURLs(tc.cfg)...) {
+					if host := strings.TrimSuffix(strings.TrimPrefix(raw, "http://"), ":7790"); strings.Contains(err.Error(), strings.Trim(host, "[]")) {
+						t.Errorf("the refusal names %s: %v", host, err)
+					}
+				}
 			}
 		})
+	}
+}
+
+// TestTheAddressClassesAndTheOptIn pins the two classifiers B687 adds:
+// IsLANClassAddress, what the listener serves on a member without an
+// opt-in, and PinnedPublicAddress, the one public address it serves at the
+// operator's word. A LAN address is never the opt-in and a public address
+// never of a LAN class; 100.64/10 and Tailscale's ULA are neither, so no
+// tailnet address is served either way; a host name and every spelling of
+// the wildcard opt nothing in; an IPv4-mapped address is judged unmapped.
+func TestTheAddressClassesAndTheOptIn(t *testing.T) {
+	for _, tc := range []struct {
+		addr string
+		lan  bool
+	}{
+		{"192.168.1.20", true}, {"10.0.0.5", true}, {"172.16.0.1", true}, {"172.31.255.255", true},
+		{"169.254.7.8", true}, {"fe80::1", true}, {"fe80::1%eth0", true}, {"fd12:3456::1", true},
+		{"::ffff:192.168.1.20", true},
+		{"172.32.0.1", false}, {"203.0.113.5", false}, {"93.184.216.34", false}, {"2001:db8::1", false},
+		{"100.64.0.1", false}, {"100.127.255.254", false}, {"fd7a:115c:a1e0::7", false},
+		{"::ffff:93.184.216.34", false}, {"127.0.0.1", false}, {"::1", false}, {"0.0.0.0", false},
+		{"::", false}, {"224.0.0.1", false}, {"ff02::c", false},
+	} {
+		if got := IsLANClassAddress(netip.MustParseAddr(tc.addr)); got != tc.lan {
+			t.Errorf("IsLANClassAddress(%s) = %v, want %v", tc.addr, got, tc.lan)
+		}
+	}
+	if IsLANClassAddress(netip.Addr{}) {
+		t.Error("IsLANClassAddress of no address is true")
+	}
+	for _, tc := range []struct{ listen, pin string }{
+		{"203.0.113.5:7790", "203.0.113.5"},
+		{"93.184.216.34:7790", "93.184.216.34"},
+		{"[::ffff:203.0.113.5]:7790", "203.0.113.5"},
+		{"[2001:db8::20]:7790", "2001:db8::20"},
+		{"[2001:db8::20%eth0]:7790", "2001:db8::20"},
+		{"100.63.255.255:7790", "100.63.255.255"}, // just below 100.64/10
+		{"100.128.0.0:7790", "100.128.0.0"},       // just above it
+		{"192.168.1.20:7790", ""}, {"10.0.0.5:7790", ""}, {"169.254.7.8:7790", ""},
+		{"[fd12:3456::5]:7790", ""}, {"[fe80::1%eth0]:7790", ""}, {"127.0.0.1:7790", ""}, {"[::1]:7790", ""},
+		{"100.64.0.7:7790", ""}, {"100.127.255.254:7790", ""}, {"[fd7a:115c:a1e0::7]:7790", ""},
+		{":7790", ""}, {"0.0.0.0:7790", ""}, {"[::]:7790", ""}, {"[::0]:7790", ""}, {"[::ffff:0.0.0.0]:7790", ""},
+		{"music.example:7790", ""}, {"203.0.113.5", ""}, {"224.0.0.1:7790", ""}, {"255.255.255.255:7790", ""},
+	} {
+		got := PinnedPublicAddress(tc.listen)
+		switch {
+		case tc.pin == "" && got.IsValid():
+			t.Errorf("PinnedPublicAddress(%q) = %s, want none", tc.listen, got)
+		case tc.pin != "" && got != netip.MustParseAddr(tc.pin):
+			t.Errorf("PinnedPublicAddress(%q) = %v, want %s", tc.listen, got, tc.pin)
+		}
+	}
+}
+
+// Test_ownHostOnly_TakesThePinnedPublicAddressAlone pins the Host check of a
+// listener dlna.listenAddress pins to a public address: that address is
+// named as a Host and the Browse builds its URLs on it, and another public
+// address of this host is still refused (B687).
+func Test_ownHostOnly_TakesThePinnedPublicAddressAlone(t *testing.T) {
+	s, err := NewServer(ServerConfig{
+		Library:       newTestLib(testTrack("t1", "Test Track")),
+		UDN:           "uuid:test-pinned-host",
+		ListenAddress: "203.0.113.5:7790",
+		ServerURL:     "http://203.0.113.5:7790",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.interfaceAddrs = func() ([]net.Addr, error) {
+		return cidrAddrs(t, "203.0.113.5/24", "203.0.113.6/24", "192.168.1.20/24"), nil
+	}
+	ts := httptest.NewServer(s.handler())
+	t.Cleanup(ts.Close)
+	code, body := sendAs(t, ts, browseRequest(t, ts), "203.0.113.5:7790")
+	if code != http.StatusOK || !strings.Contains(body, "http://203.0.113.5:7790/dlna/file/") {
+		t.Errorf("Browse naming the pinned address: status %d, want 200 and its URLs on that address", code)
+	}
+	if code, _ := sendAs(t, ts, browseRequest(t, ts), "203.0.113.6:7790"); code != http.StatusMisdirectedRequest {
+		t.Errorf("Browse naming another public address of this host: status %d, want 421", code)
+	}
+}
+
+// TestStartRefusesAListenerNotBoundToThePin pins Start's half of the opt-in:
+// the public address dlna.listenAddress names is served only as the address
+// the listener bound, so a listener handed over that stands for another one
+// is refused at Start, before anything is served or announced.
+func TestStartRefusesAListenerNotBoundToThePin(t *testing.T) {
+	l := loopbackListener(t)
+	s, err := NewServer(ServerConfig{
+		Library:       newTestLib(testTrack("t1", "Test Track")),
+		UDN:           "uuid:test-pin-unbound",
+		ListenAddress: "203.0.113.5:7790",
+		Listener:      l,
+		ServerURL:     "http://203.0.113.5:7790",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := s.Start(ctx); err == nil || !strings.Contains(err.Error(), "not bound to the public address") {
+		_ = s.Stop(context.Background())
+		t.Fatalf("Start of a listener on loopback pinned to a public address: %v, want a refusal", err)
+	}
+	if s.AcceptsOn(netip.MustParseAddr("127.0.0.1")) || s.AcceptsOn(netip.MustParseAddr("203.0.113.5")) {
+		t.Error("a refused Start left a listener accepting")
 	}
 }
