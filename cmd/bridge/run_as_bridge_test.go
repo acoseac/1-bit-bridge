@@ -34,10 +34,12 @@ func runAsBridge() int {
 }
 
 // installBridgeCopy puts a copy of the running test binary at path, which
-// runs as this tree's bridge of version v once the caller's environment
-// says so (asBridge), and returns path. A hard link where the host makes
-// one; on Windows a copy, since a link to the mapped test binary cannot be
-// removed by TempDir's cleanup.
+// runs as this tree's bridge of version v for the rest of the test, and
+// returns path. The environment that makes it the bridge is set here with
+// the copy, so that no copy is ever run as the test binary, which would run
+// the whole suite. A hard link where the host makes one; on Windows a copy,
+// since a link to the mapped test binary cannot be removed by TempDir's
+// cleanup.
 func installBridgeCopy(t *testing.T, path, v string) string {
 	t.Helper()
 	exe, err := os.Executable()
@@ -48,14 +50,8 @@ func installBridgeCopy(t *testing.T, path, v string) string {
 		copyExecutable(t, exe, path)
 	}
 	t.Setenv(runAsBridgeVersionEnv, v)
-	return path
-}
-
-// asBridge makes a copy installBridgeCopy made run as the bridge for the
-// rest of the test.
-func asBridge(t *testing.T) {
-	t.Helper()
 	t.Setenv(runAsBridgeEnv, "1")
+	return path
 }
 
 func copyExecutable(t *testing.T, src, dst string) {

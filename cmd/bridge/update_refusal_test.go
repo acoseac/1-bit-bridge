@@ -87,7 +87,6 @@ func TestTheUpdaterReadsWhatThisBridgesSettingsCheckSays(t *testing.T) {
 		name += ".exe"
 	}
 	candidate := installBridgeCopy(t, filepath.Join(t.TempDir(), name), "0.0.0-candidate")
-	asBridge(t)
 
 	valid, _ := checkedSettings(t, "")
 	if got := updater.CheckConfig(t.Context(), candidate, valid); got.Verdict != updater.ConfigValid {

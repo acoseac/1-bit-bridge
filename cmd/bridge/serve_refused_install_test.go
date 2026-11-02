@@ -61,7 +61,6 @@ func newRefusedInstall(t *testing.T, extra string) *refusedInstall {
 		t.Fatal(err)
 	}
 	r.bak = installBridgeCopy(t, r.bin+".bak", previousVersion)
-	asBridge(t)
 	r.marker = updater.State{
 		Status: "installing", TargetVersion: version.ServerVersion, PreviousVersion: previousVersion,
 		AttemptedAt: time.Now().UTC().Add(-time.Minute), SwapStarted: true,
