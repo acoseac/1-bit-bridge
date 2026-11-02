@@ -3375,9 +3375,9 @@ directory serve takes (`TestNotADirectoryTakesAJunctionToADirectory`, Windows
 only, compiled here). The player-storage line judges every path answer of
 its inspection by the same walk (`dataDirOnItsWay`), so the two lines say one
 thing of a data directory serve refuses (the B659 paragraph under B603
-above). `internal/fsutil/` is a guarded prefix: qualificationVersion 26
-(`ops/b470-native-qualification.md`); nothing in the player calls the new
-functions.
+above). `internal/fsutil/` is a guarded prefix: qualificationVersion 27
+(`ops/b470-native-qualification.md`; 26 on its branch, raised at the merge
+over B621's 26); nothing in the player calls the new functions.
 
 Pinned by `TestBothDoctorsFailEveryDataDirectoryServeRefuses` (serve's own
 table, `unusableDataDirs`, with serve's preparation refusing each and no

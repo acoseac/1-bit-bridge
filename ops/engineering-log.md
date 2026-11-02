@@ -69628,7 +69628,8 @@ cannot be inspected: not a directory", the bare ENOTDIR
   walk (`dataDirOnItsWay`) and says what the data-dir line says, so an
   ancestor that is a regular file or a link to one is a fail there too.
   `TestNoErrorOfThePlayersStorageLineReadsAsOK` lost that case, deliberately.
-- qualificationVersion 26 (`internal/fsutil/` is guarded), with a paragraph in
+- qualificationVersion 27 (`internal/fsutil/` is guarded; 26 on the branch,
+  raised at the merge over B621's 26), with a paragraph in
   `ops/b470-native-qualification.md`; nothing in the player calls the new
   functions. The README's sample report shows the line.
 
