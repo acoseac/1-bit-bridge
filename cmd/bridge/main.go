@@ -2135,6 +2135,7 @@ func (a updateInfoAdapter) UpdateInfo() api.UpdateInfo {
 
 func (a updateInfoAdapter) Status() admin.UpdateStatus {
 	s := a.u.Status()
+	rejected, rejectedReason := a.rejection()
 	return admin.UpdateStatus{
 		CurrentVersion:   s.CurrentVersion,
 		LatestVersion:    s.LatestVersion,
@@ -2146,26 +2147,44 @@ func (a updateInfoAdapter) Status() admin.UpdateStatus {
 		MinClientVersion: version.MinClientVersion,
 		CanInstall:       a.canInstall,
 		CanRollback:      a.canRollback(),
-		DeferredReason:   s.DeferredReason,
-		RejectedVersion:  a.rejectedVersion(),
+		DeferredReason:   a.deferredReason(s),
+		RejectedVersion:  rejected,
+		RejectedReason:   rejectedReason,
 	}
 }
 
-// rejectedVersion reads the release the operator rolled back on this
-// host, so the dashboard can explain a bridge that reports an available
-// update and never installs it. Read from the same on-disk marker the
-// auto-install gate consults — deriving it any other way would let the
-// two disagree. Same per-call-read shape as canRollback's stat, and on
-// the same 30 s SSE cadence.
-func (a updateInfoAdapter) rejectedVersion() string {
+// deferredReason is the Updates panel's "Held update" line: the
+// auto-installer's reason from its last cycle in this process, or else the
+// reason recorded with a version held back for refusing this bridge's
+// settings or predating their check (updater.HeldBack), which holds across
+// restarts and whether or not auto-install is on, read from the marker the
+// gate reads, so the two cannot disagree. An operator's rollback is left to
+// the auto-installer's wording, as it was.
+func (a updateInfoAdapter) deferredReason(s updater.Status) string {
+	if s.DeferredReason != "" || !s.UpdateAvailable {
+		return s.DeferredReason
+	}
+	if hold := updater.HeldBack(a.dataDir, a.configPath, s.LatestVersion); hold.Recorded {
+		return hold.Reason
+	}
+	return ""
+}
+
+// rejection reads the release held back on this host and why (a rollback
+// leaves no reason), so the dashboard can explain a bridge that reports an
+// available update and never installs it. Read from the same on-disk
+// marker the auto-install gate consults — deriving it any other way would
+// let the two disagree. Same per-call-read shape as canRollback's stat, and
+// on the same 30 s SSE cadence.
+func (a updateInfoAdapter) rejection() (version, reason string) {
 	if a.dataDir == "" {
-		return ""
+		return "", ""
 	}
 	st, err := updater.LoadState(a.dataDir)
 	if err != nil {
-		return ""
+		return "", ""
 	}
-	return st.RejectedVersion
+	return st.RejectedVersion, st.RejectedReason
 }
 
 // canRollback reports whether the installer's backup of the previous
@@ -2196,7 +2215,9 @@ func (a updateInfoAdapter) Install(ctx context.Context, force bool) (admin.Updat
 		BinaryPath: a.binaryPath,
 		Force:      force,
 		Sessions:   a.sessions,
+		ConfigPath: a.configPath,
 	})
+	rejected, rejectedReason := a.rejection()
 	// The same field set Status() returns, deliberately. Install used to drop
 	// CanRollback, DeferredReason and RejectedVersion — so when an install was
 	// DEFERRED (playback sessions in flight, st.DeferredReason =
@@ -2214,8 +2235,10 @@ func (a updateInfoAdapter) Install(ctx context.Context, force bool) (admin.Updat
 		MinClientVersion: version.MinClientVersion,
 		CanInstall:       a.canInstall,
 		CanRollback:      a.canRollback(),
-		DeferredReason:   st.DeferredReason,
-		RejectedVersion:  a.rejectedVersion(),
+		DeferredReason:   a.deferredReason(st),
+		RejectedVersion:  rejected,
+		RejectedReason:   rejectedReason,
+		InstallWarning:   st.InstallWarning,
 	}, mapUpdaterError(err)
 }
 
@@ -2253,10 +2276,28 @@ func mapUpdaterError(err error) error {
 		return fmt.Errorf(errWrapDetailFormat, admin.ErrUpdateNotSupported, err.Error())
 	case errors.Is(err, updater.ErrPathNotWritable):
 		return fmt.Errorf(errWrapDetailFormat, admin.ErrUpdatePathNotWritable, err.Error())
+	case errors.Is(err, updater.ErrConfigRefused):
+		// The updater's sentence says it whole: the version, that it
+		// refuses the settings, and each reason by line.
+		return detailError{sentinel: admin.ErrUpdateConfigRefused, msg: err.Error()}
+	case errors.Is(err, updater.ErrConfigCheckFailed):
+		return fmt.Errorf(errWrapDetailFormat, admin.ErrUpdateConfigCheckFailed,
+			strings.TrimPrefix(err.Error(), updater.ErrConfigCheckFailed.Error()+": "))
 	default:
 		return err
 	}
 }
+
+// detailError is an admin sentinel with a message of its own: the console
+// classifies it by the sentinel (errors.Is) and shows the message alone.
+type detailError struct {
+	sentinel error
+	msg      string
+}
+
+func (e detailError) Error() string { return e.msg }
+
+func (e detailError) Unwrap() error { return e.sentinel }
 
 // artworkDirBridge lets cmd/bridge expose the enricher's cache dir to
 // internal/api without importing internal/enrich from there.
@@ -2321,6 +2362,21 @@ func maybeRollbackOnBoot(stderr io.Writer, dataDir, binaryPath string) {
 		// Restore the previous binary and clear the marker so the
 		// next exit (planned or via service-manager respawn) lands
 		// us back on the old version.
+		//
+		// Unless a version other than the backup's has opened the data
+		// dir under this marker (disarmEarlyRollback): this boot runs past
+		// the store's migrations, and putting the backup back would be a
+		// downgrade past what that version wrote (backlog B613). Said, and
+		// the marker cleared, as for a restore that failed.
+		if st.DataDirOpenedBy != "" {
+			fmt.Fprintf(stderr, "updater: install of %s did not reach the expected version (running %s); not rolling back to %s.bak, "+
+				"since %s has opened the data dir and its store may hold changes %s does not know: put the backup back by hand if that is safe\n",
+				st.TargetVersion, version.ServerVersion, binaryPath, st.DataDirOpenedBy, st.PreviousVersion)
+			if err := updater.ClearState(dataDir); err != nil {
+				fmt.Fprintf(stderr, "updater: clear state: %v\n", err)
+			}
+			return
+		}
 		fmt.Fprintf(stderr, "updater: install of %s did not reach the expected version (running %s); rolling back to .bak\n",
 			st.TargetVersion, version.ServerVersion)
 		if err := updater.RollbackBinary(binaryPath, ".bak"); err != nil {
@@ -2776,8 +2832,16 @@ func serveCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	configPath := fs.String("config", "", configFlagUsage)
 	addrOverride := fs.String("addr", "", "override listenAddress from config (host:port)")
 	initIfMissing := fs.Bool("init-if-missing", false, "on first run, write a default config if --config is missing, then serve (container convenience; env overrides still apply)")
+	validateConfig := fs.Bool(updater.ConfigCheckFlag, false, "check the config as serve would load it, then exit: 0 when it loads, 78 when it is refused (each reason on stderr), 1 when it cannot be read; writes nothing, opens no store, binds nothing")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	if *validateConfig {
+		if *initIfMissing {
+			fmt.Fprintf(stderr, "serve: --%s writes nothing, so it takes no --init-if-missing\n", updater.ConfigCheckFlag)
+			return 2
+		}
+		return checkServeConfig(*configPath, *addrOverride, stdout, stderr)
 	}
 	return runServe(ctx, serveOpts{configPath: *configPath, addrOverride: *addrOverride, initIfMissing: *initIfMissing}, stdout, stderr)
 }
@@ -3001,6 +3065,16 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	cfg, cfgFile, cfgRead, cfgBootFile, err := loadServeConfigFile(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, configLoadFailedFormat, err)
+		// A config this version refuses at the first start after the
+		// updater installed it: the early rollback puts the previous
+		// binary back when it can prove the install (backlog B613), and
+		// otherwise serve refuses to start, as it always has.
+		var refused *config.RefusedError
+		if errors.As(err, &refused) {
+			if code, acted := recoverRefusedInstall(ctx, *configPath, refused.Reasons(), opts, stderr); acted {
+				return code
+			}
+		}
 		return 2
 	}
 	if opts.afterConfigRead != nil {
@@ -3012,8 +3086,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// the file whose contents `cfg` came from, and the file the admin
 	// console must write back to.
 	*configPath = cfgFile
-	if err := bridgefs.ValidateRoots(cfg.LibraryRoots); err != nil {
-		fmt.Fprintf(stderr, "config: %v\n", err)
+	if refusal := serveConfigRefusal(cfg); refusal != nil {
+		fmt.Fprintln(stderr, refusal.printed)
+		if code, acted := recoverRefusedInstall(ctx, *configPath, []string{refusal.reason}, opts, stderr); acted {
+			return code
+		}
 		return 2
 	}
 	// Runtime library-root accessibility check.
@@ -3100,6 +3177,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// outlived its stop keeps the lock past this return (dataDirHold).
 	dataDirLock := newDataDirHold(releaseDataDir)
 	defer dataDirLock.done()
+	// Before the first write to the data dir, and so before the store's
+	// migrations: an armed install marker records that this version went on
+	// past its config, so neither the early rollback of a later start nor
+	// the boot rollback puts a backup back over what it writes (backlog
+	// B613). Not starting is the answer when that cannot be recorded.
+	if err := disarmEarlyRollback(cfg.DataDir, opts, stderr); err != nil {
+		fmt.Fprintf(stderr, "updater: %v; not starting, so that no rollback to the backup can pass over what this version would write\n", err)
+		return 1
+	}
 	// Adopt pre-floor identities before any live backup can run, even with
 	// playback disabled. A pristine box still gets no player identity here.
 	var playerStateErr error
@@ -3273,17 +3359,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// corruption class this guards (Gemini HIGH, post-merge review of #534).
 	// `WaitGroup.Wait` on a zero counter returns immediately, so exiting before
 	// any writer starts costs nothing.
-	// Fail on an invalid tailscale mode HERE, before the first background
-	// worker is spawned. The check used to live ~160 lines down, next to the
-	// tailscale wiring, by which point RunPeriodic and the artwork rescaler
-	// were already running — so a typo'd mode returned exit 2 having started
-	// real work, then paid a full shutdown drain to stop it. Nothing between
-	// here and there depends on the mode.
-	if _, modeErr := cfg.Tailscale.EffectiveMode(); modeErr != nil {
-		fmt.Fprintf(stderr, "config: %v\n", modeErr)
-		return 2
-	}
-
+	//
+	// An invalid tailscale mode is refused before the data dir's lock, with
+	// the config's other refusals (serveConfigRefusal): it used to be refused
+	// here, after the stores had opened, and before that ~160 lines down,
+	// after RunPeriodic and the artwork rescaler had started.
 	var bgWriters sync.WaitGroup
 	defer func() {
 		done := make(chan struct{})
@@ -3786,6 +3866,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 			BinaryPath: binaryPath,
 			Sessions:   sessions,
 			Force:      false,
+			// The settings file serve loaded: each candidate is checked
+			// against it before its swap (backlog B613).
+			ConfigPath: *configPath,
 		}
 		// On successful auto-install we exit with
 		// supervision.RestartExitCode, and the service manager (launchd
@@ -3824,6 +3907,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		sessions:   sessions,
 		dataDir:    cfg.DataDir,
 		binaryPath: binaryPath,
+		configPath: *configPath,
 		// Phase B-Windows (PR #48) wired the swap path on Windows
 		// alongside darwin/linux. CanInstall is true everywhere
 		// the binary builds.

@@ -96,7 +96,7 @@ func (c *checkedInstall) automatic(t *testing.T) (*Updater, *atomic.Int32) {
 	return upd, restarts
 }
 
-// script sets one of the stand-in's script files.
+// setScript sets one of the stand-in's script files.
 func (c *checkedInstall) setScript(t *testing.T, name, body string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(c.script, name), []byte(body), 0o600); err != nil {

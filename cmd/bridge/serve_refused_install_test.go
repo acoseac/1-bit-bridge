@@ -105,7 +105,7 @@ func (r *refusedInstall) serve(t *testing.T, opts serveOpts) (code int, stderr s
 	return code, errs.String()
 }
 
-// files records each file the test watches, so a test can require them
+// watchedFiles records each file a test watches, so it can require them
 // unchanged.
 type watchedFiles map[string][]byte
 
@@ -272,7 +272,7 @@ func TestServeLeavesAnInstallItCannotProveAsItIs(t *testing.T) {
 		{name: "a marker naming no previous version", lay: func(t *testing.T, r *refusedInstall) {
 			r.marker.PreviousVersion = ""
 			r.saveMarker(t, r.dataDir)
-		}},
+		}, says: "no other version"},
 		{name: "a marker this version already started under", lay: func(t *testing.T, r *refusedInstall) {
 			r.marker.DataDirOpenedBy = version.ServerVersion
 			r.saveMarker(t, r.dataDir)

@@ -3771,6 +3771,12 @@ func classifyUpdateError(err error) (status int, short string) {
 		return http.StatusNotImplemented, "platform-unsupported"
 	case errors.Is(err, ErrUpdatePathNotWritable):
 		return http.StatusForbidden, "path-not-writable"
+	case errors.Is(err, ErrUpdateConfigRefused):
+		// 409: the host's settings are what refuses the install, and the
+		// message says which line.
+		return http.StatusConflict, "config-refused"
+	case errors.Is(err, ErrUpdateConfigCheckFailed):
+		return http.StatusBadGateway, "config-check-failed"
 	default:
 		return http.StatusBadGateway, "install-failed"
 	}

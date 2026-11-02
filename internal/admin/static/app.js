@@ -1350,7 +1350,12 @@ async function runInstall(btn, force) {
   btn.textContent = "Installing…";
   try {
     const path = force ? "/api/updates/install?force=1" : "/api/updates/install";
-    await API.post(path);
+    const installed = await API.post(path);
+    // A version that predates the settings check is installed without
+    // one: say so before the restart that starts it.
+    if (installed?.installWarning) {
+      alert(installed.installWarning);
+    }
     btn.textContent = supervised ? "Restarting…" : "Stopping…";
     // AWAIT the restart now, where the old code deliberately did not.
     // The handler drains in-flight streams first, so the response marks
@@ -1374,7 +1379,9 @@ async function runInstall(btn, force) {
       // from a shell.
     }
   } catch (err) {
-    if (/409/.test(err.message) || /active-sessions/.test(err.message) || /active downloads/i.test(err.message)) {
+    // By the code, never the prose: a refusal of the settings is a 409 too,
+    // and its message names a line, which can be line 409.
+    if (err.code === "active-sessions") {
       const proceed = confirm("Active downloads are in flight — installing now will interrupt them and could glitch any iOS device currently playing a track.\n\nInstall anyway?");
       if (proceed) {
         return runInstall(btn, true);

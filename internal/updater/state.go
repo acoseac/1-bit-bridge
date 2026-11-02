@@ -260,6 +260,24 @@ func ClearState(dataDir string) error {
 	return err
 }
 
+// ClearStateDurably is ClearState, and off Windows an fsync of dataDir, so
+// the removal outlives a power loss as SaveState's rename does: serve removes
+// a marker it cannot read before its first write to the data dir, and the
+// marker must not come back for a later start to act on (cmd/bridge,
+// disarmEarlyRollback).
+func ClearStateDurably(dataDir string) error {
+	if err := ClearState(dataDir); err != nil {
+		return err
+	}
+	if !isWindows() {
+		if d, err := os.Open(dataDir); err == nil {
+			_ = d.Sync()
+			_ = d.Close()
+		}
+	}
+	return nil
+}
+
 // BootAction is the decision the startup housekeeping should take
 // based on the current State + ServerVersion + binary file presence.
 type BootAction int

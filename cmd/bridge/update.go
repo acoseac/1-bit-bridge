@@ -13,6 +13,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/packaging"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
 )
@@ -53,10 +54,16 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		return 2
 	}
 
-	cfg, _, err := loadCLIConfig(*configPath)
+	cfg, cfgPath, err := loadCLIConfig(*configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "config load failed: %v\n", err)
 		return 2
+	}
+	// The candidate is checked against this file before its swap (backlog
+	// B613), and runs from another directory: an absolute path names the
+	// same file there.
+	if abs, err := fsutil.AbsAsWritten(cfgPath); err == nil {
+		cfgPath = abs
 	}
 
 	// Open the token store so the compat gate has a snapshot to
@@ -92,6 +99,11 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	if !st.UpdateAvailable {
 		fmt.Fprintln(stdout, "You're already running the latest release.")
 		return 0
+	}
+	// A version held back for refusing these settings, or for predating
+	// their check: said before the install asks for it again.
+	if hold := updater.HeldBack(cfg.DataDir, cfgPath, st.LatestVersion); hold.Recorded {
+		fmt.Fprintf(stdout, "Held:    %s\n", hold.Reason)
 	}
 	if *check {
 		fmt.Fprintln(stdout, "Update available. Run `bridge update --yes` to install.")
@@ -132,22 +144,16 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 		Sessions:           nil,
 		Force:              true,
 		OverrideCompatGate: *overrideClientFloor,
+		ConfigPath:         cfgPath,
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "Install failed: %v\n", err)
-		if errors.Is(err, updater.ErrInstallNotSupported) {
-			fmt.Fprintln(stderr, "On Windows, stop the bridge service, replace bridge.exe, and start it back up.")
-		}
-		if errors.Is(err, updater.ErrCompatGateRefused) {
-			fmt.Fprintln(stderr, "")
-			fmt.Fprintln(stderr, "The candidate release would orphan a still-paired older iOS device.")
-			fmt.Fprintln(stderr, "Either update the device to a supported version, or rerun with")
-			fmt.Fprintln(stderr, "  bridge update --yes --override-client-floor")
-			fmt.Fprintln(stderr, "to install anyway. Older devices will refuse to authenticate after the swap.")
-		}
+		reportInstallFailure(stderr, err, cfgPath)
 		return 1
 	}
 
+	if st.InstallWarning != "" {
+		fmt.Fprintf(stderr, "warning: %s\n", st.InstallWarning)
+	}
 	fmt.Fprintf(stdout, "Installed %s.\n", st.LatestVersion)
 	fmt.Fprintf(stdout, "A backup of the previous binary is at %s.bak — startup housekeeping will roll back automatically if the new bridge fails to come up at version %s within %s of restart.\n",
 		binaryPath, st.LatestVersion, updater.RecencyWindow())
@@ -196,6 +202,27 @@ func updateCmd(ctx context.Context, args []string, stdin io.Reader, stdout, stde
 	fmt.Fprintln(stdout, "\nRestart the bridge to load the new binary:")
 	printManualRestartHint(stdout, kind)
 	return 0
+}
+
+// reportInstallFailure prints why `bridge update` installed nothing, and what
+// to do: for a version that refuses the settings, each reason it gave by
+// line, and the file to fix (backlog B613).
+func reportInstallFailure(stderr io.Writer, err error, cfgPath string) {
+	fmt.Fprintf(stderr, "Install failed: %v\n", err)
+	if errors.Is(err, updater.ErrConfigRefused) {
+		fmt.Fprintf(stderr, "The running bridge is unchanged. Fix %s, then run `bridge update` again.\n", cfgPath)
+		return
+	}
+	if errors.Is(err, updater.ErrInstallNotSupported) {
+		fmt.Fprintln(stderr, "On Windows, stop the bridge service, replace bridge.exe, and start it back up.")
+	}
+	if errors.Is(err, updater.ErrCompatGateRefused) {
+		fmt.Fprintln(stderr, "")
+		fmt.Fprintln(stderr, "The candidate release would orphan a still-paired older iOS device.")
+		fmt.Fprintln(stderr, "Either update the device to a supported version, or rerun with")
+		fmt.Fprintln(stderr, "  bridge update --yes --override-client-floor")
+		fmt.Fprintln(stderr, "to install anyway. Older devices will refuse to authenticate after the swap.")
+	}
 }
 
 // printManualRestartHint emits the service-restart commands
