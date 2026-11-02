@@ -137,6 +137,17 @@ type State struct {
 	// wrote, and neither the early rollback (EarlyRollback) nor the boot
 	// rollback (BootInstallFailed) restores it.
 	DataDirOpenedBy string `json:"dataDirOpenedBy,omitempty"`
+
+	// RollbackStarted says the early rollback (cmd/bridge) wrote this marker
+	// just before it put the backup back: RejectedVersion's hold, beside the
+	// install it was undoing (TargetVersion over PreviousVersion, at
+	// AttemptedAt, SwapStarted). Status is "", so the binary the backup
+	// restores, whatever its version, takes the marker for no install and
+	// keeps the hold, where 0.2.1's and 0.2.2's boot clears an install
+	// marker it cannot finish and the hold with it; and a start of
+	// TargetVersion that finds it, stopped before the backup was back,
+	// finishes the rollback (EarlyRollback).
+	RollbackStarted bool `json:"rollbackStarted,omitempty"`
 }
 
 // stateFileName is the basename under <dataDir>. Constant so tests
@@ -238,18 +249,20 @@ func SaveState(dataDir string, st State) error {
 	// until the parent dir is fsynced — a crash in that window could
 	// leave the marker missing and the boot-time rollback logic would
 	// skip. Mirrors swapBinary in swap_unix.go, which is likewise
-	// Unix-only. Skipped on Windows, where FlushFileBuffers on a
-	// directory handle always fails (ERROR_INVALID_HANDLE) — NTFS
-	// journaling + the temp fsync above already cover durability there
-	// (Gemini review; isWindows lives in install.go).
-	if !isWindows() {
-		if d, err := os.Open(dataDir); err == nil {
-			_ = d.Sync()
-			_ = d.Close()
-		}
-	}
+	// Unix-only. A no-op on Windows (fsutil.SyncParentDir), where
+	// FlushFileBuffers on a directory handle always fails
+	// (ERROR_INVALID_HANDLE) — NTFS journaling + the temp fsync above
+	// already cover durability there (Gemini review).
+	_ = syncMarkerDir(StatePath(dataDir))
 	return nil
 }
+
+// syncMarkerDir is the directory barrier SaveState and ClearStateDurably run
+// once the marker's directory entry has changed: fsutil.SyncParentDir, which
+// fsyncs the data dir and is a no-op on Windows. A test seam, so a test can
+// make the barrier fail: production code MUST NOT mutate it, and in-package
+// tests override it with a t.Cleanup restore and never call t.Parallel().
+var syncMarkerDir = fsutil.SyncParentDir
 
 // ClearState removes the marker. No-op when the file doesn't exist.
 func ClearState(dataDir string) error {
@@ -269,12 +282,7 @@ func ClearStateDurably(dataDir string) error {
 	if err := ClearState(dataDir); err != nil {
 		return err
 	}
-	if !isWindows() {
-		if d, err := os.Open(dataDir); err == nil {
-			_ = d.Sync()
-			_ = d.Close()
-		}
-	}
+	_ = syncMarkerDir(StatePath(dataDir))
 	return nil
 }
 

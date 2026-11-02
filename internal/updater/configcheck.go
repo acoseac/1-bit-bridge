@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"syscall"
@@ -310,17 +311,22 @@ const configDigestDomain = "1-bit-bridge settings digest v1\n"
 // more often, which costs one more check. No value is kept: the digest is
 // all that is recorded.
 func ConfigDigest(configPath string) (string, error) {
+	return configDigest(configPath, os.Environ(), envNamesFoldCase)
+}
+
+// envNamesFoldCase says whether this platform's environment names compare
+// without regard to case, as Windows' do, so that config's overrides read a
+// variable whatever the case it was set in.
+const envNamesFoldCase = runtime.GOOS == "windows"
+
+// configDigest is ConfigDigest over the environment environ, whose names
+// compare without regard to case where foldCase says so.
+func configDigest(configPath string, environ []string, foldCase bool) (string, error) {
 	raw, err := os.ReadFile(configPath)
 	if err != nil {
 		return "", fmt.Errorf("read the settings: %w", err)
 	}
-	var env []string
-	for _, kv := range os.Environ() {
-		if k, v, ok := strings.Cut(kv, "="); ok && strings.HasPrefix(k, "BRIDGE_") && v != "" {
-			env = append(env, kv)
-		}
-	}
-	sort.Strings(env)
+	env := bridgeEnvironment(environ, foldCase)
 	h := sha256.New()
 	h.Write([]byte(configDigestDomain))
 	fmt.Fprintf(h, "%d\n", len(raw))
@@ -329,6 +335,19 @@ func ConfigDigest(configPath string) (string, error) {
 		fmt.Fprintf(h, "%d\n%s", len(kv), kv)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// bridgeEnvironment is each BRIDGE_ variable of environ that has a value,
+// sorted, as NAME=value.
+func bridgeEnvironment(environ []string, foldCase bool) []string {
+	var env []string
+	for _, kv := range environ {
+		if k, v, ok := strings.Cut(kv, "="); ok && strings.HasPrefix(k, "BRIDGE_") && v != "" {
+			env = append(env, kv)
+		}
+	}
+	sort.Strings(env)
+	return env
 }
 
 // Hold is what holds a candidate back from the automatic install on this
