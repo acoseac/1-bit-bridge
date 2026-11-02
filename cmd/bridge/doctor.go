@@ -329,6 +329,10 @@ func buildDoctorDepsFor(cfgPath string, absentIsPreSetup bool) doctor.Deps {
 		d.ConfigFile.LoadErr = err
 		if err == nil {
 			d.DataDir = cfg.DataDir
+			// Whether serve can prepare that data directory, the player on or
+			// off (B659): what stands on its path, read by the walk serve's
+			// refusal names the entry in its way from.
+			d.DataDirPreparation = doctorDataDir(cfg.DataDir)
 			// The cert pair `bridge serve` would load — an explicit
 			// `tlsCertPath` included, which the cert checks used to
 			// ignore in favour of the DataDir defaults and so graded a
@@ -452,6 +456,13 @@ func buildDoctorDepsFor(cfgPath string, absentIsPreSetup bool) doctor.Deps {
 				}
 			}
 		}
+	}
+	// A config the lookup found, or was named, and could not load names no
+	// data directory the report can trust, so its data-dir line says it was
+	// not checked, and why (B659). A run that finds no config has no such
+	// line: there is no config for serve to refuse.
+	if d.ConfigFile.LoadErr != nil {
+		d.DataDirPreparation = doctorDataDirNotChecked(d.ConfigFile)
 	}
 	return d
 }

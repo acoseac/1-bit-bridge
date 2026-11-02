@@ -128,6 +128,25 @@ func TestThePlayersStorageLineSaysWhatTheWritersCheckFound(t *testing.T) {
 	}
 }
 
+// TestThePlayersStorageLineTrustsNoWalkThatContradictsItsInspection: where
+// the inspection answered that the data directory is not there and the walk
+// up its path then finds it there, the path changed in between, and the line
+// says it was not checked, naming the inspection's error, never "not there
+// yet" (B659). Its unix half is an entry on the way that the inspection found
+// no directory and the walk finds none of
+// (TestThePlayersStorageLineTrustsNoWalkThatFindsNothingInTheWay).
+func TestThePlayersStorageLineTrustsNoWalkThatContradictsItsInspection(t *testing.T) {
+	there := t.TempDir()
+	notThere := &fs.PathError{Op: "lstat", Path: there, Err: syscall.ENOENT}
+	cfg := &config.Config{DataDir: there}
+	cfg.Output.Player.Enabled = true
+	c, ok := playerStorageCheck(cfg, "linux", func(string) (atomicwrite.Medium, error) { return atomicwrite.Medium{}, notThere })
+	want := "not checked: the data directory " + there + " cannot be inspected: " + notThere.Error()
+	if !ok || c.Status != doctor.Warn || c.Summary != want {
+		t.Errorf("the line is %v %s %q, want a warn saying %q", ok, c.Status, c.Summary, want)
+	}
+}
+
 // standInForALinuxBox makes the player-storage line read a Linux box whose
 // player's strict writer answers medium, err for the data directory, and
 // returns what it was asked; production's readers are put back on cleanup.

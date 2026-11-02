@@ -1,6 +1,6 @@
 # B470 native qualification — owner approval and provisional evidence
 
-QualificationVersion is **27**. All older evidence must be rerun, native included. The harness never
+QualificationVersion is **28**. All older evidence must be rerun, native included. The harness never
 creates approval. Production native DSD requires a fresh matching approved record;
 DoP S32_LE auditions are provisional and require both acknowledgements; production DoP plays only
 an approved DoP policy, under `dsdMode: dop` or `auto` with `allowDoP: true` (2d.2, below). Real-ref and Linux hardware gates remain reviewer/owner work.
@@ -169,7 +169,7 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-Historical round 3 used qualificationVersion 4; current version is **27**. A native contact's
+Historical round 3 used qualificationVersion 4; current version is **28**. A native contact's
 Contact.SchemaVersion remains **2**; a DoP contact's is **3**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
@@ -257,7 +257,7 @@ still resolve inside it). `dsdMode: native` or `auto` enables only approved nati
 
 The Go contracts are `qualification.Approval`, `ApprovalBody`, `ApprovedPolicy`, `Edge`
 and `Evidence` in `internal/player/qualification/approval.go`. JSON uses those exact
-exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=27; Revision is the owner's
+exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=28; Revision is the owner's
 revision; Identity is the observed VID/ProductID/manufacturer/product/bcdDevice,
 anchored controller/port, interface, device and subdevice. No serial or card number is
 persistent identity. Unchanged descriptors may retain approval after replug/restart;
@@ -304,7 +304,7 @@ At least one native fixture must finish with measured playback of that tuple.
 NativeTuple and NativeCompleted record that execution; PCM-only lists or completion
 cannot qualify it. LifecycleActions count observed native outcomes: pause/resume,
 release/reopen, navigation between native occurrences, Stop, and natural completion.
-An admitted command alone is insufficient. Version 27 invalidates older evidence.
+An admitted command alone is insufficient. Version 28 invalidates older evidence.
 List all candidate directional edges explicitly. No command generates that record.
 
 ```sh
@@ -343,7 +343,7 @@ or evidence names resolving to the state directory itself before any ancestor
 walk. Native monitoring remains fail-closed without a grace period. The overlay
 generator requires both integration suites before publishing its overlay.
 Guarded API, config, extractor, output-play and approval paths changed; rerun
-qualification with version 27. ExtractorVersion 30 retains the first parsed DFF
+qualification with version 28. ExtractorVersion 30 retains the first parsed DFF
 PROP's known format facts when a later PROP makes compression unsupported.
 
 Version 13 also covers the deterministic PCM trace capture test. It changes no
@@ -696,3 +696,18 @@ whole one carries no credentials, and is dropped as foreign while the socket
 asked for them, as a message with none always was. `source_cred_linux_test.go` tests it, with `FuzzParseCredentials` and
 the seed committed in `testdata/fuzz/FuzzParseCredentials`. It changes no
 playback path, PCM or DSD, no binding state and no wire field.
+
+Version 28 covers backlog B659, bridge doctor's data-dir line (which took 26
+on its branch; B621, acoseac/1-bit-bridge#1378, took 26 on main first, and
+B615 and B616, acoseac/1-bit-bridge#1381, took 27, so its merge raises it to
+28), under the
+guarded `internal/fsutil/` prefix: `fsutil.NotADirectory` and
+`fsutil.BlockingEntry` (`notadir.go`, with its tests) are bridge serve's
+reading of what stands in a data directory's way, moved there from
+`cmd/bridge/serve_lock.go` so serve's refusal and bridge doctor's data-dir and
+player-storage lines read one walk up the path. Serve's refusals name each
+shape as before; whether an entry that is no directory to os.Lstat leads to
+one is now asked of os.Stat, as os.MkdirAll asks it, so a Windows junction to
+a directory is no entry in the way. Nothing in the player reads either
+function. It changes no playback path, PCM or DSD, no binding state, no wire
+field or schema, and no approval record's shape.
