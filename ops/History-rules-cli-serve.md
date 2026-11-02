@@ -1147,9 +1147,9 @@ mentions across the four `ops/audit-*.md` files.
 - **One `bridge serve` per data dir, decided before its first write: runServe
   takes an exclusive kernel lock on `<dataDir>/server.lock`
   (`lockServeDataDir`, over `fsutil.TryLock`) right after the read-only config
-  checks, ahead of the TLS mint, the token store, `server.pid`, the
-  migrations, the updater's boot marker and every sweeper** (2026-10-02,
-  backlog B208). A second serve of a live data dir ran all its wiring and
+  checks and the data dir's preparation, ahead of the TLS mint, the token
+  store, `server.pid`, the migrations, the updater's boot marker and every
+  sweeper** (2026-10-02, backlog B208). A second serve of a live data dir ran all its wiring and
   failed only at the bind. Measured with two runServes on one data dir: its
   batch coordinator's `RecoverInterruptedBatches` marked the live bridge's
   running batch `interrupted` for good, its exit removed the live bridge's
@@ -1166,7 +1166,10 @@ mentions across the four `ops/audit-*.md` files.
   HOLDS refuses**: any other failure (a filesystem that keeps no locks answers
   ENOLCK or EOPNOTSUPP; a lock file this user cannot open) prints one line and
   serves without the check, since a lock that cannot be taken must not stop a
-  bridge from starting. **A kernel lock, not a lock FILE**: the kernel drops it
+  bridge from starting. Since B606 (2026-11-02, the next bullet) that is a lock
+  that cannot be taken on a data dir that is there: a data dir serve cannot
+  prepare refuses before the lock is tried, the lock makes nothing, and the
+  line says which kind of answer the lock met (B537 item 1). **A kernel lock, not a lock FILE**: the kernel drops it
   with the process however it exits, a SIGKILL included (measured on macOS,
   Linux and Windows), so the stale-lockfile objection the next bullet records
   is not about it. The file stays: never unlink a held lock file, or a later
@@ -1200,6 +1203,95 @@ mentions across the four `ops/audit-*.md` files.
   fsutil's `TestTryLockRefusesASecondOpenOfTheFile` and
   `TestALockDiesWithTheProcessThatHeldIt`.
 
+- **…and before that lock serve refuses a data dir it cannot prepare: `prepareServeDataDir` makes it (`fsutil.MkdirAll`, whose walk as root gives what it makes its parent's owner) and then requires a directory there by `os.Stat`, and its `*dataDirUnusableError` names the data dir and the entry in its way (a regular file, a link to one, a link to nothing, at the data dir or above it), exit 1 before the player's state, the TLS mint, the token store, `server.pid` and the migrations; a link that leads to a directory, and a data dir not made yet below one, are taken; and `lockServeDataDir`, which makes nothing, still serves where no lock can be taken on a data dir that is there, saying the kind: a `*dataDirUnlockedError` marked `noLocks` where `fsutil.KeepsNoLocks` reads TryLock's answer, said without claiming the filesystem keeps no locks, which ENOLCK does not show, and every other failure, the lock file's open included, as before** (2026-11-02, backlog B606, the owner's decision of 2026-10-31; B537 item 1). **Don't fold the preparation back into the lock, refuse a data dir that is there over a lock that cannot be taken (a lock file this user cannot open, a read-only filesystem, a directory at `server.lock`), over a link that leads to a directory, or over what cannot be written there (the player's preflight and the doctor say that), or word the no-locks line as proof that the filesystem keeps none.**
+
+  *The defect.* `runServe` went on after every `lockServeDataDir` error that
+  was not contention, and the lock made the data dir first, so MkdirAll's
+  errors were among them: the EEXIST of a data dir where a link to nothing
+  stands, at the data dir or above it, and the ENOTDIR of one that is, or is
+  below, a regular file. Serve then started without its lock, skipped
+  `AdoptPlayerState` and `CheckPlayerStart`, started no player, and went on
+  to its first writes. Measured on the branch's seams (127d1b90, which change
+  no behaviour), with the config keeping the TLS pair outside the data dir,
+  for each of five shapes (a regular file, a link to nothing and a link to a
+  regular file at the data dir; an ancestor that is a regular file or a link
+  to nothing): serve printed "could not lock …", minted the TLS pair, and
+  exited 1 only at the token store ("open token store: stat token store: …
+  not a directory", the file shapes) or at the manifest store ("open manifest
+  store: mkdir store dir: … file exists", the link shapes, after the pid
+  file's warning). The commands that take the lock beside a serve did no
+  better over a data dir that is a regular file: restore and reset-player
+  said the lock could not be taken and to fix its permissions or use storage
+  that supports locking; clear-missing kept the admin probe, passed its
+  prompt and failed at the store; the DAC bind exited 0 having written the
+  binding into bridge.yaml.
+
+  *The decision* (the owner, 2026-10-31): refuse. Serve refuses to start,
+  with an error naming the path, when it cannot prepare its data dir; a lock
+  that cannot be taken on a directory that is there goes on as before, since
+  serve must never fail to start over a lock.
+
+  *The preparation.* `prepareServeDataDir` makes the data dir with
+  `fsutil.MkdirAll` (as root each directory it makes takes the owner of the
+  directory it is made in, `mkdirAllAsRoot`), then asks `os.Stat` again and
+  requires a directory: MkdirAll answers nil for a directory there, and one
+  replaced since is refused all the same (`prepareServeDataDirWith` takes a
+  test's MkdirAll). Its `*dataDirUnusableError` names the data dir and,
+  from what `os.Lstat` and `os.Stat` find at the entry MkdirAll's
+  `*fs.PathError` names (`whyNotMade`, `notADirectory`), the entry in the
+  way: "X is a regular file, not a directory", "X leads to T, a regular
+  file, not a directory", "X is a symbolic link to nothing", MkdirAll's error
+  beside it; any other failure (a parent this user cannot write) is "it could
+  not be made: …". `errors.Is` reaches MkdirAll's error (`fs.ErrExist`,
+  `syscall.ENOTDIR`), and the kinds are `fsutil.EntryKind`'s. runServe asks
+  it right after the read-only checks and exits 1, saying "serve: the data
+  directory D cannot be used: WHY; bridge serve starts only on a data
+  directory it can make or use: move what stands in its way, or set dataDir
+  in bridge.yaml to a directory". A link that leads to a directory is taken,
+  the data dir's own entry or an ancestor's (Linux and NAS installs keep one
+  there, and refusing it would break their upgrades), and so is a data dir
+  not made yet below such a link, which MkdirAll makes through it. What can
+  be written there is not asked: a lock file that cannot be opened in a
+  directory that is there is the lock's fallback, and the player's preflight
+  (`backup.AdoptPlayerState`, `backup.CheckPlayerStart`) and bridge doctor
+  say whether the data dir can be written. The four commands that take the
+  lock beside a serve prepare it first too (the restore bullet below).
+
+  *The lock's answers* (B537 item 1). `lockServeDataDir` makes nothing now:
+  a data dir that is not there is a lock file that cannot be opened. It
+  answers a `*serveDataDirHeldError` for contention (`fsutil.ErrLocked`:
+  EWOULDBLOCK and EAGAIN on unix, ERROR_LOCK_VIOLATION on Windows), and a
+  `*dataDirUnlockedError` for anything else, marked `noLocks` where
+  `fsutil.KeepsNoLocks` reads TryLock's answer (ENOLCK, EOPNOTSUPP, ENOTSUP,
+  `errors.ErrUnsupported`, which ENOSYS matches; Windows' ERROR_NOT_SUPPORTED
+  and ERROR_INVALID_FUNCTION) and never for the lock file's open. Serve
+  serves on after either and says which: "serve: the filesystem gave no lock
+  on L (ERR): a filesystem that keeps no locks answers so, and so do an NFS
+  mount whose lock manager is not running and a kernel out of lock records,
+  so another bridge serve may run on this data dir all the same; serving
+  without the check that none does", worded so because ENOLCK is no proof
+  that the filesystem keeps none (Linux answers it when it cannot allocate a
+  lock record, on a filesystem that keeps locks and while another open holds
+  one: the config lock's `noLockToGive` asks again for that reason); and
+  "serve: could not lock L (ERR); serving without the check that no other
+  bridge serve runs on this data dir" for a permission, I/O or descriptor
+  error and an open that failed, as before. The kinds are told apart in the
+  line alone: what serve does after each is what it did. The migration's
+  ladder lock sorts its answers the same way (scanner.md's ladder bullet).
+
+  Pinned by `TestServeRefusesADataDirectoryItCannotPrepare`,
+  `TestPreparingTheDataDirectoryRefusesWithItsPathAndItsCause`,
+  `TestThePreparationAsksAgainWhatStandsThereOnceItIsMade`,
+  `TestServeStartsOnADataDirectoryALinkLeadsTo`,
+  `TestServeStartsWhereTheDataDirCannotBeLocked`,
+  `TestServeStartsWhereTheLockFileCannotBeOpened`,
+  `TestPreparingTheDataDirectoryAsRootGivesEachDirectoryItMakesItsParentsOwner`,
+  `TestServeSaysWhichKindOfLockItCouldNotTake`,
+  `TestServeSaysNoLockWasGivenWhereTheKernelHadNoneToGive`,
+  `TestTheDataDirsLockSortsEachAnswerIntoItsKind` and fsutil's
+  `TestKeepsNoLocksReadsOnlyTheNoLocksAnswers`; the record is in
+  `ops/engineering-log.md`, 2026-11-02, B606.
+
 - **A lock file is opened through `fsutil.OpenLockFile`, which asks again
   when its create loses a race** (2026-10-14, backlog B185). On macOS 27 an
   openat(2) with O_CREAT that loses a concurrent create of the same name
@@ -1214,8 +1306,8 @@ mentions across the four `ops/audit-*.md` files.
   `TestServesLockingAFreshDataDirAtOnceTakeItOnce`, both red on macOS 27.0.1
   before the retry).
 
-- **`bridge restore` and `bridge manifest clear-missing` hold the data-dir
-  lock for the whole run.** Both mutate the store from a second process,
+- **`bridge restore`, `bridge reset-player` and `bridge manifest clear-missing` hold the data-dir lock for the whole run; restore and reset refuse if the lock cannot be taken, and reset repeats both of restore's admin-port checks around its confirmation; each of them, and `bridge output dac bind`, prepares the data dir first as serve does and refuses one it cannot prepare, before it writes anything (`holdDataDirForMutation`, B606), clear-missing and the bind keeping the admin-port probe where only the lock cannot be taken.**
+  Restore and clear-missing mutate the store from a second process,
   where `Store.mu` does not reach and `busy_timeout` is a retry rather than
   a serializer. Each takes `lockServeDataDir` (the kernel lock `bridge
   serve` holds, the bullet above) before it reads the store or writes, and
@@ -1244,6 +1336,24 @@ mentions across the four `ops/audit-*.md` files.
   2026-10-02 that an interprocess lock was declined because a stale lockfile
   after an unclean exit blocks `restore` at exactly the moment an operator
   needs `restore`: true of a lock FILE, and not of this kernel lock.
+
+  Since B606 (2026-11-02) each of them, and `bridge output dac bind`, first
+  prepares the data dir as serve does (`holdDataDirForMutation` runs
+  `prepareServeDataDir` before the lock) and refuses one it cannot prepare,
+  before its prompt and before anything is written, naming the data dir and
+  what stands in its way ("restore: the data directory D cannot be used: D is
+  a regular file, not a directory (…)", then "Move what stands in its way, or
+  set dataDir in bridge.yaml to a directory, then re-run this command.").
+  Over a data dir that is a regular file, restore and reset-player had said
+  the lock could not be taken and to fix its permissions or use storage that
+  supports locking, clear-missing had kept the admin probe, passed its prompt
+  and failed at the store, and the bind had exited 0 having written the
+  binding into bridge.yaml. A data dir not made yet is still made, so a
+  restore onto a fresh box restores. Their policies for a lock that cannot
+  be taken on a data dir that is there are unchanged: restore and
+  reset-player refuse, clear-missing and the bind keep the admin probe
+  (`TestEveryCommandThatMutatesTheDataDirRefusesOneItCannotPrepare`,
+  `TestEveryCommandThatMutatesTheDataDirKeepsItsLockPolicy`).
 
 - **A snapshot captures the console account and the harvest state, and
   restore brings the account back signed out** (2026-10-13, backlog
@@ -3006,7 +3116,7 @@ passes unchanged.
 
 ## B603 — bridge doctor's player-storage line (2026-10-30)
 
-- **`bridge doctor`'s `player-storage` line is the strict writer's own medium verdict on the data dir (`atomicwrite.InspectMedium`), one source for the CLI and the console's doctor (`doctorPlayerStorage` in `buildDoctorDepsFor`), placed just before the output checklist** (2026-10-30, backlog B603; round 2, 2026-10-31). **Don't give the line a medium check of its own, word a good medium as the player starting (serve's other gates still run), show a line for a player the config leaves off, call a data dir "not there yet" where the nearest entry of its path that is there is a link to nothing (serve's MkdirAll stops at it), or let an inspection or walk error read as ok.**
+- **`bridge doctor`'s `player-storage` line is the strict writer's own medium verdict on the data dir (`atomicwrite.InspectMedium`), one source for the CLI and the console's doctor (`doctorPlayerStorage` in `buildDoctorDepsFor`), placed just before the output checklist; a data dir that is there and is no directory, a regular file, a link to one or a link to nothing (`atomicwrite.ErrRootNotADirectory`, never `fs.ErrNotExist`), and one below a link to nothing, is a fail saying bridge serve will not start, which serve refuses since B606** (2026-10-30, backlog B603; round 2, 2026-10-31; B606, 2026-11-02). **Don't give the line a medium check of its own, word a good medium as the player starting (serve's other gates still run), show a line for a player the config leaves off, call a data dir "not there yet" where the nearest entry of its path that is there is a link to nothing (serve's MkdirAll stops at it), take a data dir that is no directory for storage, or let an inspection or walk error read as ok, or as a fail.**
 
 The orchestrator's amendment 8 to B603: one shared verdict for the writer and
 the doctor, its outcomes defined for a disabled player, an absent data
@@ -3026,17 +3136,20 @@ every link in the path, so a link to nothing answers ENOENT as a directory not
 made yet does, while serve's `MkdirAll` stops at such a link with EEXIST, as
 this user and as root, whose walk is fsutil's own (`mkdirAllAsRoot`)
 (`TestServeCannotMakeADataDirectoryThroughALinkToNothing` measures both) and
-serve then goes on without its lock and starts no player; until round 2 every
+serve then went on without its lock and started no player (since B606 it
+refuses to start); until round 2 every
 ENOENT read ok, "serve makes it". From the data directory up, the nearest entry
 of its path that is there (`os.Lstat`, the kernel resolving the entries above
 it) is judged: a symbolic link there whose `os.Stat` answers ENOENT is a fail,
-"the player will not start: <the link> is a symbolic link to nothing, and serve
-cannot make <dataDir> through it", hint "point the link at a directory, or set
+"bridge serve will not start: <the link> is a symbolic link to nothing, and
+serve cannot make <dataDir> through it" ("the player will not start: …"
+until B606), hint "point the link at a directory, or set
 dataDir in bridge.yaml to one", naming the entry of the data directory's own
 path (the head of a chain that ends in nothing) and finding a broken link
 reached through a live one where it sits; anything else there (a directory, a
 live link to one) is "not checked: the data directory … does not exist yet",
-ok, since `lockServeDataDir` makes the components below it. Every other error,
+ok, since serve's preparation (`prepareServeDataDir`) makes the components
+below it. Every other error,
 of the inspection or of the walk, is not checked, a warn, never ok
 (`dataDirNotChecked`), its summary naming the data directory beside the error,
 since `filepath.EvalSymlinks` answers an entry on the way that is no directory
@@ -3044,9 +3157,45 @@ with a bare ENOTDIR that names none: a permission error advises the service's
 user, who may read what this user cannot; any other (a link cycle, which
 EvalSymlinks answers as too many links, or a non-directory on the way) advises
 mending what the error names on the way, or setting dataDir to a directory
-serve can make or use. Serve itself is unchanged: it goes on after a lock error
-that is not contention on purpose, and telling "cannot make the data
-directory" from "cannot lock it" there is a follow-up.
+serve can make or use. This said until B606 that serve itself was unchanged,
+going on after a lock error that is not contention, and that telling "cannot
+make the data directory" from "cannot lock it" there was a follow-up: that
+was B606, and serve now refuses a data directory it cannot prepare (the B606
+bullet under The CLI and the serve wiring).
+
+*B606 (2026-11-02): a data directory that is there and is no directory.* The
+inspection checked the type of no root: a data directory that is a regular
+file, or a link to one, resolved, and the mount it lies on was inspected as a
+directory's would be, so the line read ok ("… is on storage in which the check
+finds no volatile layer"), and a data directory that is a link to nothing
+answered EvalSymlinks's ENOENT, the absence of a data directory not made yet,
+which the walk above then caught. `InspectMedium` now checks the resolved
+root's type before it reads the mount, as the strict writer's `checkPath`
+does, and refuses a root that is there and is no directory with a
+`*atomicwrite.RootNotADirectoryError` (matching `ErrRootNotADirectory`, and
+never `fs.ErrNotExist`): a regular file or any other entry but a directory
+(`Kind`, `fsutil.EntryKind`'s), a link that leads to one (`Link`, `Target`),
+and a link at the root whose links lead to nothing (the root's own entry a
+link, its resolution ENOENT). The line fails each (`dataDirNotADirectory`),
+saying bridge serve will not start, which serve, refusing a data directory
+it cannot prepare, makes true: "bridge serve will not start: the data
+directory D is a regular file, not a directory", hint "move it aside, or set
+dataDir in bridge.yaml to a directory serve can make or use"; "… the data
+directory D leads to T, a regular file, not a directory" and "bridge serve
+will not start: D is a symbolic link to nothing, and serve cannot make D
+through it", hint "point the link at a directory, or set dataDir in
+bridge.yaml to one". A data directory below a link to nothing is still not
+there to the inspection (its own entry cannot be reached), and the walk
+fails it as before, now saying bridge serve will not start too. An
+inspection or permission error stays a warn, never a fail: the service's
+user may read what this one cannot. Both doctors carry the line word for
+word: `TestADataDirectoryThatIsNoDirectoryFailsThePlayersStorageLine` (the
+real inspector, which never answers a link to nothing there as
+`fs.ErrNotExist`) and
+`TestBothDoctorsJudgeADataDirectoryThatIsNoDirectoryAsServeDoes` (bridge
+doctor's run, exit 1, and the console's, over a regular file; the warn below
+a directory this user cannot search), with atomicwrite's
+`TestInspectMediumRefusesARootThatIsNotADirectory`.
 
 A refusal is a fail, "the
 player will not start: " and the writer's own refusal, whose hint puts the data

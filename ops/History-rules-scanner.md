@@ -1368,8 +1368,8 @@
   `TestARootChangeThroughTheHandlerDoesNotLeaveTheOldRows`,
   `TestAWaitingScanDoesNotHideTheScanARootChangeCancels`.)
 
-- **One opener of a database runs its migration ladder at a time** (2026-10-14,
-  backlog B185). `OpenStore` holds an exclusive kernel lock on
+- **One opener of a database runs its migration ladder at a time, and one whose ladder lock cannot be taken runs it without, saying which kind of failure it met** (2026-10-14, backlog B185; the kinds 2026-11-02, B537 item 1) **Don't fix such a race inside a shipped migration or the frozen column helper, drop the timeout's or a link's refusal, or word the no-locks line as proof that the filesystem keeps none (ENOLCK does not show it)**.
+  `OpenStore` holds an exclusive kernel lock on
   `<db>-migrate.lock` (`lockLadder`, opened through `fsutil.OpenLockFile`) from
   before SQLite opens the database until it returns. A second opener waits up
   to `ladderLockWait` (5 min), then reads the `user_version` the first left
@@ -1394,6 +1394,31 @@
   `TestAnOpenerGivesUpOnALadderLockHeldPastTheBound`,
   `TestOpenStoreRefusesASymlinkAtTheDatabaseOrASidecar`,
   `TestOpenStoreRefusesASymlinkSwappedInBeforeTheOpen`).
+
+  *The lock's answers* (2026-11-02, B537 item 1). A ladder lock that cannot
+  be taken is logged by its kind, and the ladder runs without it either way,
+  as it did: an answer `fsutil.KeepsNoLocks` reads (ENOLCK, EOPNOTSUPP,
+  ENOTSUP, `errors.ErrUnsupported` and the ENOSYS it matches; Windows'
+  ERROR_NOT_SUPPORTED and ERROR_INVALID_FUNCTION) says "the filesystem gave
+  no migration lock: a filesystem that keeps no locks answers so, and so do
+  an NFS mount whose lock manager is not running and a kernel out of lock
+  records, so another opener may be migrating the database all the same;
+  migrating without the lock", worded so because ENOLCK is no proof that the
+  filesystem keeps none (Linux answers it when it cannot allocate a lock
+  record, on a filesystem that keeps locks and while another open holds one);
+  any other failure of the lock (a permission, I/O or descriptor error), and
+  of the lock file's open (a lock file this user cannot open, a directory
+  standing where it goes), says "could not take the migration lock;
+  migrating without it", as before. Until then the two kinds shared that one
+  line, and the line read as though the filesystem kept no locks wherever
+  the lock failed. Contention (`fsutil.ErrLocked`) is still waited for and,
+  past `ladderLockWait`, refused (`errLadderLockTimeout`), and a link at the
+  lock file still refused (`errStoreSymlink`): B185's reasons for both stand.
+  Serve's data-dir lock sorts its answers the same way (cli-serve.md, the
+  B606 bullet). `TestTheMigrationSaysWhichKindOfLockItCouldNotTake` (each
+  answer through `OpenStore` of a database at v44, the try a stand-in,
+  `setLadderTryLock`, and a directory at the lock file) and fsutil's
+  `TestKeepsNoLocksReadsOnlyTheNoLocksAnswers` pin it.
 
 - **Bump `manifest.ExtractorVersion` on EVERY extraction-logic change** (const,
   must stay ≥ 1 — at 0 the `stored >= current` gate never re-extracts), and keep

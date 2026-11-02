@@ -1335,3 +1335,35 @@ Pinned by `TestMediumTakesVolumiosHiddenDataPartition`,
 `TestWriteBytesDurable_RefusesAnOverlayWhoseUpperLayerIsHidden` (Linux, a
 namespace) and `TestInspectMediumIsTheWritersOwnVerdict`. The record is in
 `ops/engineering-log.md`, 2026-10-30, B603.
+
+## B606 — the inspection refuses a root that is no directory (2026-11-02)
+
+- **`atomicwrite.InspectMedium` refuses, as the strict writer's `checkPath` does, a root that is there and is no directory, before it reads the root's mount: a regular file or any other entry but a directory, a link that leads to one, and a link at the root whose links lead to nothing, each a `*RootNotADirectoryError` matching `ErrRootNotADirectory`, never `fs.ErrNotExist`** (2026-11-02, backlog B606; bridge doctor's player-storage line fails them, cli-serve.md). **Don't inspect the mount of a root that is no directory, or answer a link to nothing at the root as a root not made yet.**
+
+The doctor's player-storage line takes its verdict from `InspectMedium`, the
+inspection whose verdict the strict writer's admission reads (B603, above),
+and the inspection checked the type of no root: a root that is a regular
+file, or a link to one, resolved, and the mount it lies on was inspected as a
+directory's would be, so the doctor called a regular file there storage it
+takes; and a root that is a link to nothing answered EvalSymlinks's ENOENT,
+the answer for a root not made yet. The writer itself refused both, at
+`checkPath` (a resolved root that is no directory is ENOTDIR, one that does
+not resolve EvalSymlinks's error), so the inspection and the writer
+disagreed about such a root. `InspectMedium` now asks the root's own entry
+(`os.Lstat`) whether it is a link, and the resolved root (`os.Stat`) whether
+it is a directory, before `mountIDOf`: a link whose resolution answers ENOENT
+is a `*RootNotADirectoryError` with `Link` set and no `Target`; a resolved
+root that is no directory is one with its `Target` and its `Kind`
+(`fsutil.EntryKind`'s, with its article: "a regular file", "a named pipe",
+…), `Link` saying whether the root's entry led there. Its `Is` matches
+`ErrRootNotADirectory` alone and it wraps nothing, so a link to nothing never
+reads as `fs.ErrNotExist`. A root below a link to nothing, whose own entry
+cannot be reached, is still `fs.ErrNotExist`, which bridge doctor's walk up
+the path judges (cli-serve.md, B603). Any other error of the resolution or
+the stat is returned as it is (a permission error among them, which the
+doctor warns of). `TestInspectMediumRefusesARootThatIsNotADirectory` pins it:
+a regular file, a link to one, a link to nothing and a chain of links to
+nothing are refused, each refused by the writer's probe too
+(`ProbeDurable`); a link to a directory is inspected; and a root below a link
+to nothing is still not there. The record is in `ops/engineering-log.md`,
+2026-11-02, B606.
