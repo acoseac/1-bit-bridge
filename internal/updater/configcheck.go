@@ -304,7 +304,8 @@ const configDigestDomain = "1-bit-bridge settings digest v1\n"
 
 // ConfigDigest is a digest of the settings the bridge at configPath loads:
 // the file's bytes and every BRIDGE_ environment variable with a value,
-// which config's overrides read over the file. The automatic install holds
+// which config's overrides read over the file (on Windows, whatever the case
+// of its name). The automatic install holds
 // a refused version back only while the settings have the digest it was
 // refused with (State.RejectedConfigDigest), so a change to either lets it
 // try again. A variable that is not a setting only makes the digest change
@@ -338,12 +339,22 @@ func configDigest(configPath string, environ []string, foldCase bool) (string, e
 }
 
 // bridgeEnvironment is each BRIDGE_ variable of environ that has a value,
-// sorted, as NAME=value.
+// sorted, as NAME=value. Where foldCase says names compare without regard to
+// case (Windows), a name is taken whatever its case and written upper-cased,
+// so one variable is one entry whichever case it was set in (backlog B613's
+// round 2, Codex's finding 9).
 func bridgeEnvironment(environ []string, foldCase bool) []string {
 	var env []string
 	for _, kv := range environ {
-		if k, v, ok := strings.Cut(kv, "="); ok && strings.HasPrefix(k, "BRIDGE_") && v != "" {
-			env = append(env, kv)
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || v == "" {
+			continue
+		}
+		if foldCase {
+			k = strings.ToUpper(k)
+		}
+		if strings.HasPrefix(k, "BRIDGE_") {
+			env = append(env, k+"="+v)
 		}
 	}
 	sort.Strings(env)
@@ -423,13 +434,16 @@ const futureMarkerSlack = time.Minute
 // install of current that reached its swap, recently, over another version
 // it names, and no version but that one has opened the data dir since
 // (State.DataDirOpenedBy): a backup restored over a store a newer version
-// migrated would be a downgrade past its migrations. why is "" when the
-// marker is no install of current, which is nothing to explain.
+// migrated would be a downgrade past its migrations. The early rollback's
+// own record of such an install, written just before its rename
+// (State.RollbackStarted), is the install still: a start that finds it was
+// stopped before the backup was back. why is "" when the marker is no
+// install of current, which is nothing to explain.
 //
 // DecideBootAction's rule is left as it is: its version match counts as the
 // install's success, where this asks about an install that could not start.
 func EarlyRollback(st State, current string, now time.Time) (ok bool, why string) {
-	if st.Status != "installing" || normalizeTag(st.TargetVersion) != normalizeTag(current) {
+	if !InstallArmed(st) || normalizeTag(st.TargetVersion) != normalizeTag(current) {
 		return false, ""
 	}
 	switch {
@@ -458,6 +472,31 @@ func SameVersion(a, b string) bool { return normalizeTag(a) == normalizeTag(b) }
 // yet, and current is not the version the backup holds, whose writes a
 // restore of the backup takes back to its own.
 func ArmsDataDirRecord(st State, current string) bool {
-	return st.Status == "installing" && st.DataDirOpenedBy == "" &&
+	return InstallArmed(st) && st.DataDirOpenedBy == "" &&
 		normalizeTag(st.PreviousVersion) != normalizeTag(current)
+}
+
+// InstallArmed reports whether st records an install that a rollback may still
+// undo: an install marker, or the early rollback's own record of one it was
+// undoing, written just before its rename (State.RollbackStarted), which a
+// start of the install's version finishes.
+func InstallArmed(st State) bool {
+	return st.Status == "installing" || (st.Status == "" && st.RollbackStarted)
+}
+
+// RollbackRecord is the marker the early rollback writes, durably, just before
+// it puts the backup back over the install st describes: rejected held back
+// for reason, against digest, beside the install it undoes
+// (State.RollbackStarted), with no Status. The binary the backup restores
+// takes it for no install and keeps the hold, whatever its version (0.2.1's
+// and 0.2.2's boot clears an install marker it cannot finish, and the hold
+// with it), and a start of the install's version that finds it, the backup
+// not back, finishes the rollback (EarlyRollback). It stays as it is once the
+// backup is back.
+func RollbackRecord(st State, rejected, reason, digest string) State {
+	return State{
+		TargetVersion: st.TargetVersion, PreviousVersion: st.PreviousVersion, AttemptedAt: st.AttemptedAt,
+		SwapStarted: st.SwapStarted, RollbackStarted: true,
+		RejectedVersion: rejected, RejectedReason: reason, RejectedConfigDigest: digest,
+	}
 }

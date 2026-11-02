@@ -2870,6 +2870,11 @@ func (s *Store) migrate() error {
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&current); err != nil {
 		return fmt.Errorf("read user_version: %w", err)
 	}
+	if current < migrations[len(migrations)-1].version {
+		if err := disarmBeforeMigrating(s.path, current); err != nil {
+			return err
+		}
+	}
 	for _, m := range migrations {
 		if m.version <= current {
 			continue

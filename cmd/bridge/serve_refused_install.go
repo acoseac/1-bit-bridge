@@ -74,14 +74,15 @@ func servingBinaryPath(opts serveOpts, stderr io.Writer) string {
 // other serve, restore or clear-missing owns it; and when the backup beside
 // this binary is a regular file whose `version` names the version the
 // marker says the install replaced (updater.ProbeVersion: a version check,
-// not a proof of its bytes). Then the backup is renamed over this binary
-// (updater.RollbackBinary: one rename on Unix; on Windows the running image
-// is moved aside first and put back if the second rename fails), this
-// version is held back from the auto-installer for these settings, and serve
-// exits with supervision.RestartExitCode, which every service definition the
-// bridge installs restarts: systemd's Restart=always, launchd's KeepAlive on
-// an unsuccessful exit, the SCM's recovery actions for a service-specific
-// exit code. The settings are never written.
+// not a proof of its bytes). Then this version is held back from the
+// auto-installer for these settings, recorded durably first (a hold that
+// cannot be recorded leaves the install as it is), the backup is renamed over
+// this binary (updater.RollbackBinary: one rename on Unix; on Windows the
+// running image is moved aside first and put back if the second rename
+// fails), and serve exits with supervision.RestartExitCode, which every
+// service definition the bridge installs restarts: systemd's Restart=always,
+// launchd's KeepAlive on an unsuccessful exit, the SCM's recovery actions for
+// a service-specific exit code. The settings are never written.
 //
 // The store has not been opened when this runs: it runs before the data
 // dir's lock, which comes before serve's first write, so no migration of this
@@ -141,18 +142,15 @@ func recoverRefusedInstall(ctx context.Context, configPath string, reasons []str
 		noRollback(stderr, st, fmt.Sprintf("the backup at %s is %s, where the install replaced %s", backup, got, st.PreviousVersion))
 		return 0, false
 	}
-	restore := opts.restoreBackup
-	if restore == nil {
-		restore = updater.RollbackBinary
-	}
-	if err := restore(binaryPath, ".bak"); err != nil {
-		noRollback(stderr, st, fmt.Sprintf("could not put the backup back: %v", err))
-		return 0, false
-	}
-
-	// The binary is the previous version's now, whatever the record does:
-	// a hold that cannot be written leaves the auto-installer free to try
-	// this version again, which a newer updater's settings check refuses.
+	// The hold first, durably, then the rename (backlog B613's round 2,
+	// Codex's finding 5 and Argon's): the backup is 0.2.1's or 0.2.2's binary
+	// as often as not, whose boot reads an install marker it cannot finish (it
+	// is not the version the marker names, and the backup is gone) as an
+	// install that failed and clears it, so a rename that landed before the
+	// hold was recorded, or a hold that then could not be written, left that
+	// binary free to install this version again, unchecked. The record keeps
+	// the install it undoes (updater.RollbackRecord): a start of this version
+	// that finds it, the backup not back, finishes the rollback.
 	reason := fmt.Sprintf("%s refused this bridge's settings at its first start and was rolled back to %s: %s",
 		version.ServerVersion, st.PreviousVersion, strings.Join(reasons, "; "))
 	digest, err := updater.ConfigDigest(configPath)
@@ -165,9 +163,24 @@ func recoverRefusedInstall(ctx context.Context, configPath string, reasons []str
 	if save == nil {
 		save = updater.SaveState
 	}
-	if err := save(dataDir, updater.State{RejectedVersion: version.ServerVersion, RejectedReason: reason, RejectedConfigDigest: digest}); err != nil {
-		fmt.Fprintf(stderr, "updater: could not record %s as held back (%v), so an automatic install may take it again\n",
-			version.ServerVersion, err)
+	if err := save(dataDir, updater.RollbackRecord(st, version.ServerVersion, reason, digest)); err != nil {
+		noRollback(stderr, st, fmt.Sprintf("could not record %s as held back (%v), and a backup put back without that record would install it again",
+			version.ServerVersion, err))
+		return 0, false
+	}
+	restore := opts.restoreBackup
+	if restore == nil {
+		restore = updater.RollbackBinary
+	}
+	if err := restore(binaryPath, ".bak"); err != nil {
+		// The install marker back as it was, so that a start that gets past
+		// these settings confirms the install as it would have.
+		if perr := save(dataDir, st); perr != nil {
+			noRollback(stderr, st, fmt.Sprintf("could not put the backup back (%v), nor the install marker as it was (%v)", err, perr))
+			return 0, false
+		}
+		noRollback(stderr, st, fmt.Sprintf("could not put the backup back: %v", err))
+		return 0, false
 	}
 	fmt.Fprintf(stderr, "updater: %s refuses this bridge's settings, so the install is rolled back: %s is back at %s and %s is held back from the "+
 		"auto-installer; the settings file is unchanged, so fix it before installing %s again; exiting for the service manager to start %s\n",
@@ -178,7 +191,7 @@ func recoverRefusedInstall(ctx context.Context, configPath string, reasons []str
 // noRollback reports why the early rollback leaves the install st describes,
 // for an install of this version; any other marker is nothing to explain.
 func noRollback(stderr io.Writer, st updater.State, why string) {
-	if why == "" || st.Status != "installing" || !updater.SameVersion(st.TargetVersion, version.ServerVersion) {
+	if why == "" || !updater.InstallArmed(st) || !updater.SameVersion(st.TargetVersion, version.ServerVersion) {
 		return
 	}
 	fmt.Fprintf(stderr, "updater: not rolling back the install of %s: %s\n", st.TargetVersion, why)
@@ -186,40 +199,21 @@ func noRollback(stderr io.Writer, st updater.State, why string) {
 
 // disarmEarlyRollback records, before serve's first write to the data dir and
 // so before the store's migrations, that this version went on past its
-// settings while an install marker was armed (State.DataDirOpenedBy;
-// updater.ArmsDataDirRecord). From then on the early rollback of a later
-// start (recoverRefusedInstall) and the boot rollback (BootInstallFailed)
-// leave the backup where it is: this version's store may hold what the
-// backup's version does not know, so a restore would be a downgrade past
-// it. An earlier start that migrated the store and crashed before its boot
-// rollback ran is the case one start's ordering cannot cover.
-//
-// The record is durable (updater.SaveState syncs the file and its
-// directory), and an error is serve's to refuse to start over: it is called
-// where nothing has been written yet. A marker this process cannot read
-// cannot be told an armed install's or not, so it is removed, durably: the
-// boot rollback cannot read it either, and a later start that could read it
-// again must not take it for an install no start of this version went on
-// past.
+// settings while an install marker was armed (updater.DisarmEarlyRollback,
+// which the store's open asks too before it migrates, for every command that
+// opens it). From then on the early rollback of a later start
+// (recoverRefusedInstall) and the boot rollback (BootInstallFailed) leave
+// the backup where it is: what this version writes may be what the backup's
+// version does not know, so a restore would be a downgrade past it. An error
+// is serve's to refuse to start over: it is called where nothing has been
+// written yet.
 func disarmEarlyRollback(dataDir string, opts serveOpts, stderr io.Writer) error {
-	st, err := updater.LoadState(dataDir)
+	res, err := updater.DisarmEarlyRollback(dataDir, version.ServerVersion, opts.saveUpdateState)
 	if err != nil {
-		if rmErr := updater.ClearStateDurably(dataDir); rmErr != nil {
-			return fmt.Errorf("the install marker can neither be read (%v) nor removed (%v)", err, rmErr)
-		}
-		fmt.Fprintf(stderr, "updater: removed an install marker that could not be read (%v)\n", err)
-		return nil
+		return err
 	}
-	if !updater.ArmsDataDirRecord(st, version.ServerVersion) {
-		return nil
-	}
-	st.DataDirOpenedBy = version.ServerVersion
-	save := opts.saveUpdateState
-	if save == nil {
-		save = updater.SaveState
-	}
-	if err := save(dataDir, st); err != nil {
-		return fmt.Errorf("could not record in the install marker that %s opened the data dir: %w", version.ServerVersion, err)
+	if res.Unreadable != nil {
+		fmt.Fprintf(stderr, "updater: removed an install marker that could not be read (%v)\n", res.Unreadable)
 	}
 	return nil
 }

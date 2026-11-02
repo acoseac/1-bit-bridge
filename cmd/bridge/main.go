@@ -2328,6 +2328,7 @@ const backupShutdownWait = 45 * time.Second
 //     then respawn into the restored old binary on next exit.
 //   - everything else: no-op.
 //
+// Each clear keeps a hold recorded beside the install (updater.ClearInstall).
 // Failures here are logged but non-fatal — a botched rollback still
 // lets the server start up; the operator can recover manually.
 func maybeRollbackOnBoot(stderr io.Writer, dataDir, binaryPath string) {
@@ -2349,11 +2350,13 @@ func maybeRollbackOnBoot(stderr io.Writer, dataDir, binaryPath string) {
 			fmt.Fprintf(stderr, "updater: mark installed: %v\n", err)
 		}
 	case updater.BootCleanupBak:
-		// Second boot after a successful install: clean up.
+		// Second boot after a successful install: clean up. Every clear here
+		// keeps a hold recorded beside the install (updater.ClearInstall): it
+		// is about another version and the settings (backlog B613).
 		if err := updater.RemoveBackup(binaryPath, ".bak"); err != nil {
 			fmt.Fprintf(stderr, "updater: remove .bak: %v\n", err)
 		}
-		if err := updater.ClearState(dataDir); err != nil {
+		if err := updater.ClearInstall(dataDir, st); err != nil {
 			fmt.Fprintf(stderr, "updater: clear state: %v\n", err)
 		}
 	case updater.BootInstallFailed:
@@ -2371,7 +2374,7 @@ func maybeRollbackOnBoot(stderr io.Writer, dataDir, binaryPath string) {
 			fmt.Fprintf(stderr, "updater: install of %s did not reach the expected version (running %s); not rolling back to %s.bak, "+
 				"since %s has opened the data dir and its store may hold changes %s does not know: put the backup back by hand if that is safe\n",
 				st.TargetVersion, version.ServerVersion, binaryPath, st.DataDirOpenedBy, st.PreviousVersion)
-			if err := updater.ClearState(dataDir); err != nil {
+			if err := updater.ClearInstall(dataDir, st); err != nil {
 				fmt.Fprintf(stderr, "updater: clear state: %v\n", err)
 			}
 			return
@@ -2382,7 +2385,7 @@ func maybeRollbackOnBoot(stderr io.Writer, dataDir, binaryPath string) {
 			fmt.Fprintf(stderr, "updater: rollback failed: %v (manual recovery needed at %s)\n",
 				err, binaryPath)
 		}
-		if err := updater.ClearState(dataDir); err != nil {
+		if err := updater.ClearInstall(dataDir, st); err != nil {
 			fmt.Fprintf(stderr, "updater: clear state: %v\n", err)
 		}
 	case updater.BootClearNotSwapped:
@@ -2392,13 +2395,13 @@ func maybeRollbackOnBoot(stderr io.Writer, dataDir, binaryPath string) {
 		// downgrade the host rather than roll it back. Clear only.
 		fmt.Fprintf(stderr, "updater: install of %s never reached the binary swap; leaving %s.bak alone\n",
 			st.TargetVersion, binaryPath)
-		if err := updater.ClearState(dataDir); err != nil {
+		if err := updater.ClearInstall(dataDir, st); err != nil {
 			fmt.Fprintf(stderr, "updater: clear state: %v\n", err)
 		}
 	case updater.BootClearAbandoned:
 		// Marker is older than the recency window — nothing
 		// actionable, just clean up.
-		if err := updater.ClearState(dataDir); err != nil {
+		if err := updater.ClearInstall(dataDir, st); err != nil {
 			fmt.Fprintf(stderr, "updater: clear abandoned state: %v\n", err)
 		}
 	}

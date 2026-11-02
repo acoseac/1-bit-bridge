@@ -253,7 +253,13 @@ func SaveState(dataDir string, st State) error {
 	// FlushFileBuffers on a directory handle always fails
 	// (ERROR_INVALID_HANDLE) — NTFS journaling + the temp fsync above
 	// already cover durability there (Gemini review).
-	_ = syncMarkerDir(StatePath(dataDir))
+	//
+	// A barrier that fails is the write's error, as a failed fsync of the
+	// file above is: the rename has landed, and the marker may not outlive a
+	// power loss, which both rollbacks rest on (backlog B613's round 2).
+	if err := syncMarkerDir(StatePath(dataDir)); err != nil {
+		return fmt.Errorf("sync the data dir after writing the update marker: %w", err)
+	}
 	return nil
 }
 
@@ -274,16 +280,32 @@ func ClearState(dataDir string) error {
 }
 
 // ClearStateDurably is ClearState, and off Windows an fsync of dataDir, so
-// the removal outlives a power loss as SaveState's rename does: serve removes
-// a marker it cannot read before its first write to the data dir, and the
-// marker must not come back for a later start to act on (cmd/bridge,
-// disarmEarlyRollback).
+// the removal outlives a power loss as SaveState's rename does: a marker that
+// cannot be read is removed before the data dir is first written
+// (DisarmEarlyRollback), and it must not come back for a later start to act
+// on. A barrier that fails is its error, as SaveState's is.
 func ClearStateDurably(dataDir string) error {
 	if err := ClearState(dataDir); err != nil {
 		return err
 	}
-	_ = syncMarkerDir(StatePath(dataDir))
+	if err := syncMarkerDir(StatePath(dataDir)); err != nil {
+		return fmt.Errorf("sync the data dir after removing the update marker: %w", err)
+	}
 	return nil
+}
+
+// ClearInstall removes the install marker st, which is the one in dataDir,
+// keeping a hold recorded beside it (RejectedVersion, its reason and its
+// digest): the boot is done with the install, and the hold is about another
+// version and the settings, so dropping it would cost one more download and
+// check of a version that refuses them (backlog B613's round 2). A marker
+// with no hold is removed, as ClearState removes it.
+func ClearInstall(dataDir string, st State) error {
+	if st.RejectedVersion == "" {
+		return ClearState(dataDir)
+	}
+	return SaveState(dataDir, State{RejectedVersion: st.RejectedVersion, RejectedReason: st.RejectedReason,
+		RejectedConfigDigest: st.RejectedConfigDigest})
 }
 
 // BootAction is the decision the startup housekeeping should take
