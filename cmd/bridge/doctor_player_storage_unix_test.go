@@ -293,6 +293,18 @@ func TestBothDoctorsJudgeADataDirectoryThatIsNoDirectoryAsServeDoes(t *testing.T
 	}
 }
 
+// TestThePlayersStorageLineTrustsNoWalkThatFindsNothingInTheWay: where the
+// inspection answered a bare ENOTDIR, an entry on the data directory's way
+// that is no directory, and the walk up its path finds nothing in the way, the
+// path changed in between, and the line says it was not checked, naming the
+// inspection's error, never "not there yet" (B659). Unix's: on Windows
+// syscall.ENOTDIR is ERROR_PATH_NOT_FOUND, an absence.
+func TestThePlayersStorageLineTrustsNoWalkThatFindsNothingInTheWay(t *testing.T) {
+	notYet := filepath.Join(t.TempDir(), "data")
+	c, ok := playerStorageCheck(playerAt(notYet), "linux", func(string) (atomicwrite.Medium, error) { return atomicwrite.Medium{}, syscall.ENOTDIR })
+	requireStorageLine(t, c, ok, doctor.Warn, "not checked: the data directory "+notYet+" cannot be inspected: "+syscall.ENOTDIR.Error(), "mend what the error names on the way to the data directory")
+}
+
 // TestNoErrorOfThePlayersStorageLineReadsAsOK pins the line's outcome for
 // each error its inspection or its walk up the data directory's path meets
 // (B603 round 2, the orchestrator's amendment 3): none is ok. A link cycle,
