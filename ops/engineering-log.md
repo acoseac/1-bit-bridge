@@ -69519,3 +69519,124 @@ Go files. `make docs-check`: ok, `CLAUDE.md 71.9%; player.md 96.8%; worst
 load, player_openhome_test.go 61.3%`; with round 1's and this round's rules
 patches applied, 61.4%. `TestEveryCitedTestNameExists` and
 `TestNoDocblockNamesAnotherDeclaration` pass on 081393c2 with these docs.
+
+## 2026-11-02 — B659: bridge doctor's data-dir line, for every config that loads, from the walk serve's refusal reads
+
+Backlog B659, B606's follow-up (Step 1). The brief, drafted from the code by
+B606's worker, was checked by Codex, whose points were binding: an ancestor
+that is a link to a regular file among the failing shapes; "every config"
+means every config that loads, and one that cannot be loaded is "not
+checked", a warn, never a guess; reuse serve's `blockingEntry` and
+`notADirectory` before writing a new walk; and "the same verdict as serve"
+covers the path's shapes only, a permission or other preparation error
+staying a warn. The owner's decision: an ancestor that is a regular file is a
+fail, matching serve's refusal.
+
+**The gap, measured.** On main (18acfb52), on legion0 (Ubuntu 26.04, Linux
+7.0, x86-64, go1.27.3), through `doctorCmd` with the player off: over a data
+dir below a regular file, "13 ok, 7 warn, 0 fail" and "all clear.", while
+serve refuses that data dir and exits 1 (`TestServeRefusesADataDirectoryItCannotPrepare`'s
+shape). Every one of serve's six shapes (`unusableDataDirs`) read "all
+clear." there, with no fail (13 ok and 7 warn for the file shapes, 16 and 4
+for the links to nothing). The player-storage line, the only one that failed
+such a data dir, is there only for a config that asks for the player on
+Linux; with the player on (a stand-in Linux box, the real inspector), the two
+ancestor shapes, a regular file and a link to one, still read "all clear."
+("13 ok, 8 warn, 0 fail"): the line warned "not checked: the data directory D
+cannot be inspected: not a directory", the bare ENOTDIR
+`filepath.EvalSymlinks` answers, naming no entry.
+
+**The fix.**
+- `dataDirCheck` (cmd/bridge/doctor_data_dir.go), wired by
+  `buildDoctorDepsFor` as `doctor.Deps.DataDirPreparation`, which
+  `doctor.Run` places right after config-dir, so bridge doctor, the console's
+  doctor (`adminDoctorRunner`) and the launcher's row carry it word for word.
+  It walks up the data dir's path to the first entry that is there, by Lstat
+  and Stat, writing nothing: a fail for each shape serve refuses ("bridge
+  serve will not start: the data directory D is a regular file, not a
+  directory"; "… A is a regular file, not a directory, and serve cannot make
+  D below it"; "… A leads to T, a regular file, not a directory, and serve
+  cannot make D through it"; "… L is a symbolic link to nothing, and serve
+  cannot make D through it"), with a link's fix or a file's; ok for a
+  directory or a link to one ("D is a directory") and for a data dir not made
+  yet below one ("D does not exist yet; bridge serve makes it"); a warn, "not
+  checked", naming the data dir and the error, for a walk a permission error
+  or a link cycle stops. A config found or named that does not load is "not
+  checked: the config that sets the data directory does not load" (or "… is
+  not readable by this user", "the named config does not exist"), a warn,
+  its reason config-file's (`doctor.ConfigFile.NotGradedReason`). A run that
+  finds no config has no line, nor does `bridge init`'s preflight (init makes
+  the data dir itself, before it writes the config).
+- One walk: serve's `notADirectory` and `blockingEntry` moved to
+  `internal/fsutil` as `fsutil.NotADirectory` (what stands at an entry,
+  `fsutil.EntryInTheWay`, apart from an entry it cannot read) and
+  `fsutil.BlockingEntry` (the nearest entry there, what stands there, and the
+  walk's error). Serve's refusal reads them and says what it said for every
+  shape; its tests pass unchanged. One reading changed: an entry os.Lstat
+  calls no directory is asked of os.Stat whether it leads to one, as
+  os.MkdirAll asks it, so a Windows junction to a directory (which Go 1.23's
+  os.Lstat reads as an irregular file: a name surrogate gets no ModeDir) is no
+  entry in the way, where the line would have failed a junctioned data dir
+  serve takes; a junction to nothing is still in the way, "an irregular file",
+  as serve named it.
+- The player-storage line sends every path answer of its inspection
+  (`ErrRootNotADirectory`, `fs.ErrNotExist`, the bare ENOTDIR) to the same
+  walk (`dataDirOnItsWay`) and says what the data-dir line says, so an
+  ancestor that is a regular file or a link to one is a fail there too.
+  `TestNoErrorOfThePlayersStorageLineReadsAsOK` lost that case, deliberately.
+- qualificationVersion 26 (`internal/fsutil/` is guarded), with a paragraph in
+  `ops/b470-native-qualification.md`; nothing in the player calls the new
+  functions. The README's sample report shows the line.
+
+**Red first, by name** (03d8e373 on 18acfb52; through the build lock): through
+`doctorCmd` and `adminDoctorRunner`, `TestBothDoctorsFailEveryDataDirectoryServeRefuses`
+(serve's six shapes, `unusableDataDirs`), `TestTheDataDirLineSaysWhatStandsInTheWayAndItsFix`
+(six), `TestBothDoctorsTakeADataDirectoryServeCanPrepare` (four),
+`TestTheDataDirLineIsNotCheckedWhereTheConfigCannotBeLoaded` (two of three: no
+line; the pre-init case, no line, was green as it should be),
+`TestTheDataDirLineIsAWarnWhereThePathCannotBeInspected` (unix, three) and
+`TestThePlayersStorageLineSaysWhatTheDataDirLineSays` (unix, six; the two
+ancestor shapes also because the player-storage line warned). Green after
+(1fefbd80), with the fsutil and doctor unit tests beside them, and the full
+`./cmd/bridge/` suite (269 s).
+
+**The negative controls** (on 1fefbd80, committed first; a script mutated the
+exact text, asserting one occurrence, and `git diff --numstat` showed only the
+mutated file; predictions written before each run, compared leaf by leaf by a
+script; restored from git, the tree clean):
+1. `buildDoctorDepsFor` sets no `DataDirPreparation` (cmd/bridge/doctor.go,
+   -4 lines). Predicted red: the 27 leaves that need a data-dir line through
+   either doctor. Observed over the whole `./cmd/bridge/` suite: those 27 and
+   nothing else (33 FAIL lines with their 6 parents).
+2. `fsutil.BlockingEntry` stops at an ENOTDIR as at any other error, as
+   B603's walk did (internal/fsutil/notadir.go, one line). Predicted red, 11
+   leaves: fsutil's two ancestor cases and its named pipe, both doctor lines'
+   ancestor-that-is-a-regular-file and -a-link-to-one cases (six), and serve's
+   `TestThePreparationNamesTheEntryInTheWayBelowWhichMkdirAllFailed` for a
+   link to a regular file and a regular file (its link to nothing passes
+   ENOENT, green). Observed over `./internal/fsutil/` and `./cmd/bridge/`:
+   those 11 and nothing else (17 FAIL lines). Serve's refusal, the data-dir
+   line and the player-storage line read one walk.
+3. On f23b5c31, which adds two tests for the player-storage line's guard (a
+   walk that finds the data dir there after the inspection answered it not
+   there, and, unix, nothing in the way after a bare ENOTDIR: not checked, a
+   warn naming the inspection's error, never "not there yet"), the guard
+   never fires (cmd/bridge/doctor_player_storage.go, one line). Predicted red:
+   those two. Observed over the whole `./cmd/bridge/` suite: those 2 and
+   nothing else.
+
+**Not covered here.** The Windows halves (`TestNotADirectoryTakesAJunctionToADirectory`,
+a junction to a directory and one to nothing) are compiled, not run: no
+Windows host. Root's view of a mode-0 directory is skipped as root; this host
+ran them as a user the mode bits deny. Whether the service's user can write
+the data dir is not asked, as serve's preparation does not ask it.
+
+**The rules.** This headless session may not write `.claude/`: the new
+data-dir line and the changed player-storage line of `cli-serve.md` are a
+patch beside this job's report (`rules-b659.patch`), built from the long
+forms' heads in `ops/History-rules-cli-serve.md` (the B659 entry, the B603
+entry's new paragraph, the B606 entry's note on the move) and checked with a
+strict applier.
+
+**Commits**: 03d8e373 (red), 1fefbd80 (the fix), f23b5c31 (the guard's
+tests), and this one (docs).

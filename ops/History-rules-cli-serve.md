@@ -1249,7 +1249,12 @@ mentions across the four `ops/audit-*.md` files.
   walks up the data dir's path past every entry Lstat cannot reach to the
   first entry that is there, and names it when it is no directory
   (`blockingEntry`, round 2, Argon): a directory there is no blocker and
-  names nothing. Go 1.27's `os.MkdirAll` names the entry in the way itself,
+  names nothing. Since B659 (2026-11-02) both are fsutil's,
+  `fsutil.NotADirectory` and `fsutil.BlockingEntry`, the one walk bridge
+  doctor's data-dir and player-storage lines read too (the B659 entry, after
+  the B603 one), and whether an entry os.Lstat calls no directory leads to
+  one is asked of os.Stat, as os.MkdirAll asks it (a Windows junction to a
+  directory). Go 1.27's `os.MkdirAll` names the entry in the way itself,
   an ancestor that is a link to a regular file included (measured on
   legion0: for `A/sub` and `A/sub/data` with `A` a link to a regular file it
   answers "mkdir A: not a directory"), so the walk guards another MkdirAll,
@@ -3151,7 +3156,7 @@ passes unchanged.
 
 ## B603 — bridge doctor's player-storage line (2026-10-30)
 
-- **`bridge doctor`'s `player-storage` line is the strict writer's own medium verdict on the data dir (`atomicwrite.InspectMedium`), one source for the CLI and the console's doctor (`doctorPlayerStorage` in `buildDoctorDepsFor`), placed just before the output checklist; a data dir that is there and is no directory, a regular file, a link to one or a link to nothing (`atomicwrite.ErrRootNotADirectory`, never `fs.ErrNotExist`), and one below a link to nothing, is a fail saying bridge serve will not start, which serve refuses since B606** (2026-10-30, backlog B603; round 2, 2026-10-31; B606, 2026-11-02). **Don't give the line a medium check of its own, word a good medium as the player starting (serve's other gates still run), show a line for a player the config leaves off, call a data dir "not there yet" where the nearest entry of its path that is there is a link to nothing (serve's MkdirAll stops at it), take a data dir that is no directory for storage, or let an inspection or walk error read as ok, or as a fail.**
+- **`bridge doctor`'s `player-storage` line is the strict writer's own medium verdict on the data dir (`atomicwrite.InspectMedium`), one source for the CLI and the console's doctor (`doctorPlayerStorage` in `buildDoctorDepsFor`), placed just before the output checklist; a data dir that is there and is no directory, a regular file, a link to one or a link to nothing (`atomicwrite.ErrRootNotADirectory`, never `fs.ErrNotExist`), and one below a link to nothing, a regular file or a link to one, is a fail saying bridge serve will not start, which serve refuses since B606, judged by the data-dir line's walk in its words (`dataDirOnItsWay`)** (2026-10-30, backlog B603; round 2, 2026-10-31; B606, 2026-11-02; B659, 2026-11-02). **Don't give the line a medium check of its own, word a good medium as the player starting (serve's other gates still run), show a line for a player the config leaves off, call a data dir "not there yet" where the nearest entry of its path that is there is no directory (serve's MkdirAll stops at it), take a data dir that is no directory for storage, judge the path's shapes by another walk than the data-dir line's, or let an inspection or walk error that names no entry in the way read as ok, or as a fail.**
 
 The orchestrator's amendment 8 to B603: one shared verdict for the writer and
 the doctor, its outcomes defined for a disabled player, an absent data
@@ -3192,7 +3197,9 @@ with a bare ENOTDIR that names none: a permission error advises the service's
 user, who may read what this user cannot; any other (a link cycle, which
 EvalSymlinks answers as too many links, or a non-directory on the way) advises
 mending what the error names on the way, or setting dataDir to a directory
-serve can make or use. This said until B606 that serve itself was unchanged,
+serve can make or use. (A non-directory on the way is no longer one of these
+since B659: the walk finds it and fails it, the paragraph on B659 below.)
+This said until B606 that serve itself was unchanged,
 going on after a lock error that is not contention, and that telling "cannot
 make the data directory" from "cannot lock it" there was a follow-up: that
 was B606, and serve now refuses a data directory it cannot prepare (the B606
@@ -3232,6 +3239,35 @@ doctor's run, exit 1, and the console's, over a regular file; the warn below
 a directory this user cannot search), with atomicwrite's
 `TestInspectMediumRefusesARootThatIsNotADirectory`.
 
+*B659 (2026-11-02): one walk with the data-dir line.* A data directory below
+a regular file, or below a link to one, was still a warn here, "not checked:
+the data directory D cannot be inspected: not a directory": the inspection's
+`filepath.EvalSymlinks` answers it with a bare ENOTDIR that names no entry,
+while serve refuses it (MkdirAll's ENOTDIR at the entry). Every path answer
+of the inspection (`ErrRootNotADirectory`, `fs.ErrNotExist`, the bare
+ENOTDIR) now sends the line to the walk up the data directory's path that
+bridge doctor's data-dir line takes and serve's refusal reads
+(`dataDirOnItsWay` over `fsutil.BlockingEntry`, the entry B659 below), and
+the line says what the data-dir line says, word for word: such an ancestor is
+a fail, "bridge serve will not start: A is a regular file, not a directory,
+and serve cannot make D below it" (hint "move it aside, …"), or "… A leads to
+T, a regular file, not a directory, and serve cannot make D through it" (hint
+"point the link at a directory, …"); the owner's decision, since serve refuses
+it. The shapes at the data directory and a link to nothing above it keep
+their words (`dataDirNotADirectory` and the walk's own fail are gone into
+`dataDirBlocked`). A walk that finds nothing in the way of what the
+inspection could not reach (the path changed in between) is not checked, a
+warn naming the inspection's error, never "not there yet"
+(`TestThePlayersStorageLineTrustsNoWalkThatContradictsItsInspection`, and its
+unix half `TestThePlayersStorageLineTrustsNoWalkThatFindsNothingInTheWay`,
+since on Windows `syscall.ENOTDIR` is ERROR_PATH_NOT_FOUND, an absence). An inspection or
+walk error that names no entry in the way stays a warn: the link cycle and the
+directory this user cannot search of `TestNoErrorOfThePlayersStorageLineReadsAsOK`,
+whose ancestor-that-is-a-regular-file case went with this change.
+`TestThePlayersStorageLineSaysWhatTheDataDirLineSays` (unix, the player on, a
+stand-in Linux box, the real inspector) requires the two lines to fail every
+shape serve refuses alike.
+
 A refusal is a fail, "the
 player will not start: " and the writer's own refusal, whose hint puts the data
 directory on persistent storage, or for `ErrOverlayBind` on the overlay's own
@@ -3255,3 +3291,105 @@ Pinned by `TestThePlayersStorageLineSaysWhatTheWritersCheckFound`,
 `TestServeCannotMakeADataDirectoryThroughALinkToNothing` and
 `TestNoErrorOfThePlayersStorageLineReadsAsOK` (unix, the real inspector). The
 writer's side is `ops/History-rules-config-lifecycle.md`, B603.
+
+## B659 — bridge doctor's data-dir line (2026-11-02)
+
+- **`bridge doctor`'s `data-dir` line says, for every config that loads, whether serve's preparation (`prepareServeDataDir`) can make or use the data dir, from what stands on its path by Lstat and Stat with no write, one source for the CLI and the console's doctor (`doctorDataDir` in `buildDoctorDepsFor`, `doctor.Deps.DataDirPreparation`), placed right after config-dir: each shape serve refuses (a regular file, a link to one, a link to nothing, at the data dir or above it) is a fail saying bridge serve will not start, naming the entry in the way and its fix; a directory, a link to one, and a data dir not made yet below either are ok; a walk that an error other than an entry's absence stops (a permission error, a link cycle) is not checked, a warn; a config found or named that does not load is not checked, a warn, in config-file's terms (`doctor.ConfigFile.NotGradedReason`); a run that finds no config, and init's preflight, have no line; serve's refusal and both doctor lines read one walk, `fsutil.NotADirectory` and `fsutil.BlockingEntry`, which asks os.Stat, as os.MkdirAll does, whether an entry leads to a directory** (2026-11-02, backlog B659; an ancestor that is a regular file a fail by the owner's decision; Codex's check on the brief). **Don't give the line a write or a walk of its own, judge a data dir from a config that did not load, fail a permission or inspection error, or ask whether the data dir can be written (serve's preparation does not).**
+
+*The gap* (B606's follow-up). bridge doctor had no line on the data
+directory as such. The player-storage line, which since B606 fails a data
+directory serve refuses, exists only for a config that asks for the player on
+Linux, so with the player off a data directory serve will not start on went
+unreported: tls-cert finds no pair there, "absent (init will mint)". Measured
+on main (18acfb52) through `doctorCmd`, the player off and the data directory
+below a regular file: "13 ok, 7 warn, 0 fail" and "all clear.", while serve
+exits 1 on it. `bridge init`'s preflight and the console read the doctor, so
+an operator who set `dataDir` to a file, or whose NAS link dangles at boot,
+saw a passing report and a serve that exits 1 (under systemd, a restart loop
+with serve's refusal in the journal).
+
+*The line.* `dataDirCheck` (`cmd/bridge/doctor_data_dir.go`), which
+`buildDoctorDepsFor` wires as `doctor.Deps.DataDirPreparation` and
+`doctor.Run` places right after config-dir, so bridge doctor's report, the
+console's (`adminDoctorRunner`) and the launcher's row carry it word for
+word. It walks up the data directory's path (`fsutil.BlockingEntry`) to the
+first entry that is there and judges it (`fsutil.NotADirectory`), by Lstat
+and Stat, writing nothing:
+
+- Each shape serve's preparation refuses is a fail, "bridge serve will not
+  start: …" (`dataDirBlocked`): at the data directory, "the data directory D
+  is a regular file, not a directory", "the data directory D leads to T, a
+  regular file, not a directory" and "D is a symbolic link to nothing, and
+  serve cannot make D through it"; above it, "A is a regular file, not a
+  directory, and serve cannot make D below it", "A leads to T, a regular
+  file, not a directory, and serve cannot make D through it" and "A is a
+  symbolic link to nothing, and serve cannot make D through it". A link's fix
+  is "point the link at a directory, or set dataDir in bridge.yaml to one",
+  any other entry's "move it aside, or set dataDir in bridge.yaml to a
+  directory serve can make or use". An ancestor that is a regular file is a
+  fail by the owner's decision, as serve refuses it; a link to a regular file
+  above the data directory is one of the shapes too (Codex's check).
+- A directory there, or a link to one, is ok, "D is a directory", and a data
+  directory not made yet below one is ok, "D does not exist yet; bridge serve
+  makes it".
+- An Lstat on the way, or a Stat of the entry there, that fails for another
+  reason than an entry's absence is not checked, a warn naming the data
+  directory and the error, with the player-storage line's hints
+  (`dataDirNotChecked`): a permission error the service user's, any other (a
+  link cycle, a link through a regular file) the path's. Serve refuses such a
+  path too, its MkdirAll failing, but with no shape it names, and the
+  service's user may read what this one cannot: "the same verdict as serve"
+  covers the path's shapes alone (Codex's check).
+- A config the lookup found or was named and could not load names no data
+  directory the report can trust, so the line is "not checked", a warn
+  (Codex's check), never a verdict on a guess: "not checked: the config that
+  sets the data directory does not load", "… is not readable by this user"
+  or "the named config does not exist", config-file's own reason
+  (`doctor.ConfigFile.NotGradedReason`), hint "config-file above says why;
+  the data directory is checked once the config loads". A run that finds no
+  config, before bridge init, has no line: no config is there for serve to
+  refuse. `bridge init`'s preflight sets none: init makes the data directory
+  itself (`mkdir data dir`, exit 1) before it writes the config.
+
+Whether the data directory can be written is not asked, as serve's
+preparation does not ask it: the lock's fallback and the player's preflight
+say that.
+
+*One walk.* Serve's `notADirectory` and `blockingEntry` moved to
+`internal/fsutil` (Argon's idea on B606; Codex's check: reuse them before
+writing a new walk): `fsutil.NotADirectory` says what stands at an entry
+(`fsutil.EntryInTheWay`: the entry, whether it is a link, where its links
+lead, what it is), and tells an entry it cannot read (its error) from a
+directory (nil, nil); `fsutil.BlockingEntry` answers the nearest entry that
+is there, what stands there and the walk's error apart. Serve's
+`whyNotMade` and `prepareServeDataDirWith` read them and say what they said
+for each shape (`TestPreparingTheDataDirectoryRefusesWithItsPathAndItsCause`
+and `TestThePreparationNamesTheEntryInTheWayBelowWhichMkdirAllFailed` pass
+unchanged). One reading changed: whether an entry os.Lstat calls no directory
+leads to one is asked of os.Stat, as os.MkdirAll asks it, so a Windows
+junction to a directory, which os.Lstat reads as an irregular file since Go
+1.23 (a name surrogate gets no ModeDir), is no entry in the way, and a
+junction whose target is gone is in the way, named "an irregular file" as
+serve named it; the data-dir line would otherwise fail a junctioned data
+directory serve takes (`TestNotADirectoryTakesAJunctionToADirectory`, Windows
+only, compiled here). The player-storage line judges every path answer of
+its inspection by the same walk (`dataDirOnItsWay`), so the two lines say one
+thing of a data directory serve refuses (the B659 paragraph under B603
+above). `internal/fsutil/` is a guarded prefix: qualificationVersion 26
+(`ops/b470-native-qualification.md`); nothing in the player calls the new
+functions.
+
+Pinned by `TestBothDoctorsFailEveryDataDirectoryServeRefuses` (serve's own
+table, `unusableDataDirs`, with serve's preparation refusing each and no
+player-storage line beside it), `TestTheDataDirLineSaysWhatStandsInTheWayAndItsFix`,
+`TestBothDoctorsTakeADataDirectoryServeCanPrepare`,
+`TestTheDataDirLineIsNotCheckedWhereTheConfigCannotBeLoaded`,
+`TestTheDataDirLineIsAWarnWhereThePathCannotBeInspected` (unix),
+`TestThePlayersStorageLineSaysWhatTheDataDirLineSays` (unix), doctor's
+`TestRunPrintsTheDataDirLineAfterTheConfigDir` and
+`TestNotGradedReasonSaysWhyAConfigWasNotGraded`, and fsutil's
+`TestEntryInTheWaySaysWhatStandsThere`,
+`TestNotADirectoryNamesAnEntryThatIsNoDirectory`,
+`TestBlockingEntryFindsTheEntryInThePathsWay` and
+`TestTheWalkUpAPathSaysWhatItCannotRead` (unix); the record is in
+`ops/engineering-log.md`, 2026-11-02, B659.
