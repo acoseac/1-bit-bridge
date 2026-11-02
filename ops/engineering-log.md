@@ -68903,6 +68903,27 @@ command through the build lock):
 - Not run here: the node harness and the console's other node tests (no node
   on legion0); CI's legs run them.
 
+### 2026-11-02 — B607 approval fixtures under umask 0002
+
+On macOS with go1.27.3 and umask 0002, `TestApprovedRecordTrust` and seven
+other top-level qualification tests failed with `untrusted approval directory`.
+Instrumenting `trustedFile` identified the state root made by
+`approvalFixture`'s `t.TempDir()` itself: its effective mode was 0775. The
+production check rightly refuses its group write bit. The approval fixture
+builders in qualification, playback, OpenHome's shared playback fixture and
+the CLI now use one helper that chmods the state directory to 0700; checked
+record and evidence writes already request 0600. No report shape changed.
+
+The test-only paths fall under `version_gate.go`'s guarded prefixes, so
+qualificationVersion rises 24 → 25 and the current runbook pins follow it.
+The qualification package passed with `-race -timeout 30m` under both umask
+0002 and 022. Removing the helper's one chmod call (count asserted) reproduced
+the same eight top-level failures under 0002; restoring it made the package
+green again. Playback's full package and the OpenHome and CLI approval
+consumers passed natively under 0002. Linux and Windows vet passed for all four
+packages. The full OpenHome and CLI suites could not pass in this sandbox:
+unrelated tests bind TCP listeners and receive `operation not permitted`.
+
 ## 2026-10-31 — B610: the SSDP listener's control-data parser holds whatever it is handed
 
 Backlog B610, which blocked the 0.2.2 tag. The nightly `fuzz.yml` failed eight
