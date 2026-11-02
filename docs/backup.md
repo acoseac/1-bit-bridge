@@ -8,7 +8,10 @@ service can be backed up. Protect snapshots: they contain credentials.
 Stop the service, then run
 `bridge restore --config /path/to/bridge.yaml /path/to/snapshot`.
 Restore holds the data directory's exclusive lock and refuses while the
-service runs. `--yes` skips confirmation, not this check.
+service runs. `--yes` skips confirmation, not this check. Like `bridge serve`,
+it makes a data directory that is not there yet, and refuses one it cannot
+make or use (a regular file or a link to nothing where it goes, or above it),
+naming the path, before it writes anything.
 
 The snapshot's player UUID makes the restored player the device controllers
 already know. Without a player UUID, restore leaves the destination's player

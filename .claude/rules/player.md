@@ -97,7 +97,7 @@ The bit-exact OpenHome player inside the bridge (B470), PR by PR. These sections
 
 ## Player hotplug watcher (B470 PR 4a2)
 
-- **The source hears the kernel, and only the kernel.** **Don't join group 2, trust a port id other than 0, read past a message's buffer, wait for the watcher, read on past a cancel, or open anything a uevent names.** → History-rules-player.md
+- **The source hears the kernel, and only the kernel.** **Don't join group 2, trust a port id other than 0, read past a message's buffer, hand x/sys's `ParseUnixCredentials` a payload shorter than a ucred, wait for the watcher, read on past a cancel, or open anything a uevent names.** → History-rules-player.md
 - **One goroutine per watch takes every reading, one at a time, on absolute deadlines.** **Don't take a reading off the watch's goroutine, read per event, read inside an open window, arm a timer for a duration, or schedule what follows a reading from when it began.** → History-rules-player.md
 - **The binding's answer is settled per card, held for a bounded time, and identity_transient is never latched.** **Don't publish an unsettled answer while follow-ups remain and its bound has not come, hold one past its bound, judge the bound at a reading's start, hold back a settled one for an unrelated card, or keep a transient answer past the next reading.** → History-rules-player.md
 - **The generation advances only on what a snapshot says changed, a fast replug is a change, and one replug is one generation.** **Don't compare units without their enumeration, advance the generation for a reading that changed nothing, publish a reading before taking what queued behind it, or set a reading aside twice in a row.** → History-rules-player.md

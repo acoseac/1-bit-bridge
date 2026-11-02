@@ -303,6 +303,16 @@ type Deps struct {
 	// manifest and walks no library folder.
 	NameCollisions func(ctx context.Context) (NameCollisions, error)
 
+	// DataDirPreparation is the line on the data directory as bridge serve
+	// prepares it (cmd/bridge's doctorDataDir, B659): whether serve can make
+	// or use the data directory the config names, from what stands on its
+	// path, or, for a config that could not be loaded, that it was not
+	// checked. A nil func skips it, as `bridge init`'s preflight does: init
+	// makes the data directory itself, before it writes the config. Run
+	// places it right after config-dir, before the TLS pair a data directory
+	// holds by default.
+	DataDirPreparation func(ctx context.Context) Check
+
 	// PlayerStorage is the line on the storage under the data directory of
 	// the bridge's own player (B470), from the medium check its strict
 	// writer makes as the player starts (cmd/bridge's doctorPlayerStorage,
@@ -415,10 +425,14 @@ func (r *Report) PortFailed() bool {
 // request-path goroutine, which is exactly the bug this signature exists to
 // close.
 func Run(ctx context.Context, d Deps) Report {
-	checks := []func(context.Context, Deps) Check{
+	// The checks before the data directory's line, which sits beside
+	// config-dir (Deps.DataDirPreparation), and those after it.
+	head := []func(context.Context, Deps) Check{
 		checkPlatform,
 		checkConfigFile,
 		checkConfigDir,
+	}
+	checks := []func(context.Context, Deps) Check{
 		checkTLSCert,
 		checkTLSCertSANs,
 		checkPairingURL,
@@ -437,7 +451,13 @@ func Run(ctx context.Context, d Deps) Report {
 		checkVariantsIndex,
 		checkNameCollisions,
 	}
-	out := make([]Check, 0, len(checks)+4)
+	out := make([]Check, 0, len(head)+len(checks)+5)
+	for _, fn := range head {
+		out = append(out, fn(ctx, d))
+	}
+	if d.DataDirPreparation != nil {
+		out = append(out, d.DataDirPreparation(ctx))
+	}
 	for _, fn := range checks {
 		out = append(out, fn(ctx, d))
 	}

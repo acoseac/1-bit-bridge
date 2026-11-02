@@ -4,12 +4,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 
+	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
@@ -43,6 +46,124 @@ func (e *serveDataDirHeldError) Error() string {
 	return fmt.Sprintf("%s is already running on the data dir %s", holder, e.dataDir)
 }
 
+// dataDirUnusableError is prepareServeDataDir's refusal of a data dir it
+// cannot prepare: one MkdirAll cannot make, or that is not a directory once
+// made. why says what stands in the way, naming the entry of the path that
+// does, and err is the error that showed it, which errors.Is and errors.As
+// reach: MkdirAll's (the EEXIST of a link to nothing, the ENOTDIR of a
+// regular file), or a stat's.
+type dataDirUnusableError struct {
+	dataDir string
+	why     string
+	err     error
+}
+
+func (e *dataDirUnusableError) Error() string {
+	return fmt.Sprintf("the data directory %s cannot be used: %s", e.dataDir, e.why)
+}
+
+func (e *dataDirUnusableError) Unwrap() error { return e.err }
+
+// dataDirUnlockedError is lockServeDataDir's answer when no lock could be
+// taken on a data dir that is there and no other open holds the lock (B537
+// item 1): lockPath is the lock file; noLocks says that TryLock's answer is
+// one fsutil.KeepsNoLocks reads, a filesystem or platform that gave no lock
+// (ENOLCK, EOPNOTSUPP, ENOTSUP, errors.ErrUnsupported, ENOSYS among them;
+// Windows' ERROR_NOT_SUPPORTED and ERROR_INVALID_FUNCTION); and err is that
+// answer, or any other (a permission, I/O or descriptor error), or the lock
+// file's open that failed, which is never marked noLocks. ENOLCK is no proof
+// that the filesystem keeps no locks: an NFS mount whose lock manager is not
+// running answers it, and so does a Linux kernel out of lock records while
+// another open holds the lock, so a serve that goes on after it may run
+// beside another.
+type dataDirUnlockedError struct {
+	lockPath string
+	noLocks  bool
+	err      error
+}
+
+func (e *dataDirUnlockedError) Error() string {
+	if e.noLocks {
+		return fmt.Sprintf("no lock was granted on %s (%v)", e.lockPath, e.err)
+	}
+	return fmt.Sprintf("could not lock %s (%v)", e.lockPath, e.err)
+}
+
+func (e *dataDirUnlockedError) Unwrap() error { return e.err }
+
+// prepareServeDataDir makes the data dir where it is missing, through every
+// directory above it that is missing too, and then requires a directory
+// there, before anything takes its lock or writes in it (backlog B606, the
+// owner's decision of 2026-10-31: serve refuses a data directory it cannot
+// prepare). Run as root, each directory it makes takes the owner of the
+// directory it is made in (fsutil.MkdirAll), so a `sudo bridge serve` over
+// an install another user owns leaves one that user can write.
+//
+// A link that leads to a directory is taken, the data directory and its
+// ancestors alike (Linux and NAS installs keep one there), and so is a
+// directory not made yet below such a link, which MkdirAll makes through it.
+// What it refuses, with a *dataDirUnusableError naming the data directory
+// and the entry in its way, is an entry of the path that is no directory: a
+// regular file or a link to one, where MkdirAll answers ENOTDIR, or a link to
+// nothing, which MkdirAll stops at (EEXIST) rather than make what it names;
+// and a data directory MkdirAll cannot make for any other reason, a parent
+// this user cannot write included. Whether the data directory can be written is not asked here: a
+// lock file that cannot be opened in a directory that is there is the lock's
+// fallback (lockServeDataDir), and writability is the player's preflight's
+// (backup.AdoptPlayerState, backup.CheckPlayerStart) and bridge doctor's.
+func prepareServeDataDir(dataDir string) error {
+	return prepareServeDataDirWith(dataDir, fsutil.MkdirAll)
+}
+
+// prepareServeDataDirWith is prepareServeDataDir making the directory with
+// mkdirAll: a test's stand-in for a data directory replaced between MkdirAll's
+// answer and the stat after it.
+func prepareServeDataDirWith(dataDir string, mkdirAll func(string, os.FileMode) error) error {
+	if err := mkdirAll(dataDir, 0o700); err != nil {
+		return &dataDirUnusableError{dataDir: dataDir, why: whyNotMade(dataDir, err), err: err}
+	}
+	// MkdirAll answers nil for a directory there, and the stat asks again,
+	// for a directory replaced since.
+	info, err := os.Stat(dataDir)
+	switch {
+	case err != nil:
+		return &dataDirUnusableError{dataDir: dataDir, why: fmt.Sprintf("it cannot be read: %v", err), err: err}
+	case !info.IsDir():
+		why := dataDir + " is not a directory"
+		if inTheWay, _ := fsutil.NotADirectory(dataDir); inTheWay != nil {
+			why = inTheWay.String()
+		}
+		return &dataDirUnusableError{dataDir: dataDir, why: why, err: &fs.PathError{Op: "stat", Path: dataDir, Err: syscall.ENOTDIR}}
+	}
+	return nil
+}
+
+// whyNotMade says what stands in the way of the data directory dataDir that
+// MkdirAll could not make: the entry its error names, when that entry is
+// there and is no directory (fsutil.NotADirectory); for an ENOTDIR whose
+// entry cannot say so, the entry in the way on dataDir's path
+// (fsutil.BlockingEntry, the walk bridge doctor's data-dir line takes too);
+// each with the error beside it; and the error alone otherwise. Go's
+// os.MkdirAll names the entry in the way itself, an ancestor that is a
+// regular file or a link to one included; where an MkdirAll names the entry
+// its own make failed at, below the one in the way, the walk names the one in
+// the way. A directory the walk finds there, or a link to one, is no blocker
+// and names nothing, nor does an entry it cannot read.
+func whyNotMade(dataDir string, err error) string {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		if inTheWay, _ := fsutil.NotADirectory(pe.Path); inTheWay != nil {
+			return fmt.Sprintf("%v (%v)", inTheWay, err)
+		}
+	}
+	if errors.Is(err, syscall.ENOTDIR) {
+		if _, inTheWay, _ := fsutil.BlockingEntry(dataDir); inTheWay != nil {
+			return fmt.Sprintf("%v (%v)", inTheWay, err)
+		}
+	}
+	return fmt.Sprintf("it could not be made: %v", err)
+}
+
 // lockServeDataDir takes the lock that keeps a second `bridge serve` off a
 // data dir a live one serves, and returns what releases it. runServe asks
 // before its first write to the data dir and before it binds anything: a
@@ -52,41 +173,55 @@ func (e *serveDataDirHeldError) Error() string {
 // and rewritten tokens.json, and a second serve on ports of its own never
 // failed at all (backlog B208).
 //
+// dataDir must be one prepareServeDataDir prepared: the lock makes nothing,
+// and a data dir that is not there is a lock file that cannot be opened.
 // It answers a *serveDataDirHeldError when another open holds the lock.
 // For `bridge serve` that is the one answer that refuses. Any other error
-// means no lock could be taken (a filesystem that keeps no locks, a lock
-// file this user cannot open). Serve warns and continues, since a lock
-// that cannot be taken must not stop a bridge from starting; restore and
-// clear-missing fall back to the admin-port probe, and they also probe a
+// is a *dataDirUnlockedError, and means no lock could be taken: a
+// filesystem that gave none (noLocks, the answers fsutil.KeepsNoLocks
+// reads, ENOLCK among them, which does not show that no other open holds
+// it), or any other failure, a lock file this user cannot open (a
+// permission error, a read-only filesystem, a directory standing where it
+// goes), an I/O or a descriptor error (B537 item 1). Serve says which and
+// continues, since a lock that cannot be taken must not stop a bridge from
+// starting; restore and reset-player refuse; clear-missing and the DAC bind
+// fall back to the admin-port probe, and every one of them also probes a
 // fixed admin port when this lock was taken (probeAdminBesideTheLock).
-// release is never nil,
-// and does nothing when no lock was taken.
+// release is never nil, and does nothing when no lock was taken.
 //
 // A kernel lock, not a lock FILE. The kernel drops it with the process
 // however it exits, so a killed holder does not block the next serve,
-// restore, or clear-missing. `bridge restore` and `bridge manifest
-// clear-missing` hold this same lock for their whole run
-// (holdDataDirForMutation).
+// restore, or clear-missing. `bridge restore`, `bridge reset-player`,
+// `bridge manifest clear-missing` and `bridge output dac bind` hold this
+// same lock for their whole run (holdDataDirForMutation).
 func lockServeDataDir(dataDir string) (release func(), err error) {
+	return lockServeDataDirWith(dataDir, nil)
+}
+
+// lockServeDataDirWith is lockServeDataDir taking the lock with try, nil
+// being fsutil.TryLock: a boot test's stand-in for what the filesystem
+// answers (serveOpts.dataDirTryLock).
+func lockServeDataDirWith(dataDir string, try func(*os.File) error) (release func(), err error) {
 	release = func() {
 		// Nothing to release: no lock has been taken.
 	}
-	if err := fsutil.MkdirAll(dataDir, 0o700); err != nil {
-		return release, err
+	if try == nil {
+		try = fsutil.TryLock
 	}
+	lockPath := filepath.Join(dataDir, serveLockFileName)
 	// The data dir's owner's file, never followed out of the data dir,
 	// and opened again when a create races another serve's on macOS 27
 	// (fsutil.OpenLockFile).
 	f, err := fsutil.OpenLockFile(dataDir, serveLockFileName)
 	if err != nil {
-		return release, err
+		return release, &dataDirUnlockedError{lockPath: lockPath, err: err}
 	}
-	if err := fsutil.TryLock(f); err != nil {
+	if err := try(f); err != nil {
 		_ = f.Close()
 		if errors.Is(err, fsutil.ErrLocked) {
 			return release, &serveDataDirHeldError{dataDir: dataDir, pid: recordedServePID(dataDir)}
 		}
-		return release, err
+		return release, &dataDirUnlockedError{lockPath: lockPath, noLocks: fsutil.KeepsNoLocks(err), err: err}
 	}
 	return func() {
 		// Unlock before the close: on Windows the release a close makes
@@ -94,6 +229,22 @@ func lockServeDataDir(dataDir string) (release func(), err error) {
 		_ = fsutil.Unlock(f)
 		_ = f.Close()
 	}, nil
+}
+
+// playerStatePreflight is serve's preflight of the player's state files, run
+// once the data dir is prepared and its lock tried, the player on or off: it
+// adopts a pre-floor identity (backup.AdoptPlayerState) and checks that the
+// player may start (backup.CheckPlayerStart), under the data dir's lock alone
+// (lockHeld), and does nothing without it. Its error turns the player off
+// with that reason, and never stops serve.
+func playerStatePreflight(dataDir string, lockHeld bool) error {
+	if !lockHeld {
+		return nil
+	}
+	if err := backup.AdoptPlayerState(dataDir); err != nil {
+		return err
+	}
+	return backup.CheckPlayerStart(dataDir)
 }
 
 // dataDirHold is serve's lock on its data directory (lockServeDataDir),
@@ -151,18 +302,30 @@ func recordedServePID(dataDir string) int {
 	return pid
 }
 
-// holdDataDirForMutation takes the serve data-dir lock for a command that
-// writes the store from a second process, and keeps it until release.
-// refused means another open already holds the lock: the refusal is the
-// lock's own message, already written to stderr, and the caller stops.
-// fallback means the lock could not be taken at all (a filesystem that
-// keeps no locks, a permissions error, a directory where the lock file
-// goes). The caller then keeps the admin-port probe. A taken lock is
-// held across the caller's confirmation prompt and its last write, and
-// the caller still probes a fixed admin port (probeAdminBesideTheLock):
-// a serve that continued after a lock error other than contention holds
-// no lock. release is never nil.
+// holdDataDirForMutation prepares the serve data dir for a command that
+// writes it from a second process (prepareServeDataDir), takes its lock, and
+// keeps it until release. Its callers are restore, reset-player,
+// clear-missing and the DAC bind. refused means the command stops, its
+// refusal already written to stderr: a data dir that cannot be prepared (a
+// regular file or a link to nothing where it goes, or above it), which every
+// caller refuses before it writes anything, as serve does (backlog B606); or
+// another open already holding the lock, in the lock's own message. fallback
+// means the lock could not be taken at all on a data dir that is there (a
+// filesystem that gave no lock, a permissions error, a directory where the
+// lock file goes): each caller keeps its own policy for that, restore and
+// reset-player refusing, clear-missing and the DAC bind keeping the
+// admin-port probe. A taken lock is held across the caller's confirmation
+// prompt and its last write, and the caller still probes a fixed admin port
+// (probeAdminBesideTheLock): a serve that continued after a lock error other
+// than contention holds no lock. release is never nil.
 func holdDataDirForMutation(dataDir, cmd string, stderr io.Writer) (release func(), fallback, refused bool) {
+	if err := prepareServeDataDir(dataDir); err != nil {
+		fmt.Fprintf(stderr, "%s: %v.\n", cmd, err)
+		fmt.Fprintln(stderr, "Move what stands in its way, or set dataDir in bridge.yaml to a directory, then re-run this command.")
+		return func() {
+			// Nothing to release: no lock has been taken.
+		}, false, true
+	}
 	release, err := lockServeDataDir(dataDir)
 	if err == nil {
 		return release, false, false

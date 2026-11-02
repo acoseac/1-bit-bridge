@@ -401,8 +401,16 @@ func racingHangUpClient(srv *httptest.Server) *http.Client {
 	return &http.Client{Transport: racingHangUp{tls: cfg}}
 }
 
+func racingHangUpRawClient(srv *httptest.Server) *http.Client {
+	cfg := srv.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	return &http.Client{Transport: racingHangUp{tls: cfg, rawReadError: true}}
+}
+
 // racingHangUp is racingHangUpClient's transport.
-type racingHangUp struct{ tls *tls.Config }
+type racingHangUp struct {
+	tls          *tls.Config
+	rawReadError bool
+}
 
 func (rt racingHangUp) RoundTrip(req *http.Request) (*http.Response, error) {
 	conn, err := tls.Dial("tcp", req.URL.Host, rt.tls)
@@ -427,7 +435,7 @@ func (rt racingHangUp) RoundTrip(req *http.Request) (*http.Response, error) {
 	case a = <-got:
 	case <-req.Context().Done():
 		_ = conn.CloseWrite()
-		if a = <-got; a.err != nil {
+		if a = <-got; a.err != nil && !rt.rawReadError {
 			a.err = context.Cause(req.Context())
 		}
 	}

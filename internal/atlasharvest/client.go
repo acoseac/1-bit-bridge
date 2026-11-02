@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -453,6 +454,11 @@ func submitDue(st State, now time.Time, interval time.Duration) bool {
 // reported. Only the loop's own cancellation, a shutdown, is quiet.
 func (c *Client) handleErr(ctx context.Context, phase string, err error) {
 	if errors.Is(err, errUnauthorized) {
+		// An answer to a request abandoned by shutdown cannot revoke the
+		// credential. A per-request timeout leaves this context live.
+		if ctx.Err() != nil {
+			return
+		}
 		c.log().WarnContext(ctx, "atlasharvest.token_rejected", "phase", phase)
 		if cerr := c.State.Clear(); cerr != nil {
 			c.log().WarnContext(ctx, "atlasharvest.clear_failed", "error", cerr)
@@ -669,6 +675,7 @@ func (c *Client) postJSON(ctx context.Context, st State, path string, body, out 
 	if err != nil {
 		return err
 	}
+	loopCtx := ctx
 	ctx, cancel := context.WithTimeout(ctx, c.requestTimeout())
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, joinURL(st.AtlasBaseURL, path), bytes.NewReader(b))
@@ -676,7 +683,7 @@ func (c *Client) postJSON(ctx context.Context, st State, path string, body, out 
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	return c.do(st, req, out)
+	return c.do(loopCtx, st, req, out)
 }
 
 // getJSONCapped GETs with an explicit decode cap and a matching deadline. The
@@ -687,35 +694,67 @@ func (c *Client) postJSON(ctx context.Context, st State, path string, body, out 
 // getJSON wrapper that paired those defaults had no callers and was dropped
 // rather than widened.)
 func (c *Client) getJSONCapped(ctx context.Context, st State, path string, out any, maxDecodeBytes int64, timeout time.Duration) error {
+	loopCtx := ctx
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, joinURL(st.AtlasBaseURL, path), nil)
 	if err != nil {
 		return err
 	}
-	return c.doCapped(st, req, out, maxDecodeBytes)
+	return c.doCapped(loopCtx, st, req, out, maxDecodeBytes)
 }
 
-func (c *Client) do(st State, req *http.Request, out any) error {
-	return c.doCapped(st, req, out, defaultDecodeMaxBytes)
+func (c *Client) do(loopCtx context.Context, st State, req *http.Request, out any) error {
+	return c.doCapped(loopCtx, st, req, out, defaultDecodeMaxBytes)
 }
 
-func (c *Client) doCapped(st State, req *http.Request, out any, maxDecodeBytes int64) error {
+func (c *Client) doCapped(loopCtx context.Context, st State, req *http.Request, out any, maxDecodeBytes int64) error {
 	req.Header.Set("Authorization", "Bearer "+st.Token)
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
+		if loopCtx.Err() != nil {
+			return loopCtx.Err() // transport lost the abandoned request
+		}
 		return err
 	}
 	defer resp.Body.Close()
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		if loopCtx.Err() != nil {
+			return loopCtx.Err() // no credential wipe for an abandoned answer
+		}
 		return errUnauthorized
 	case resp.StatusCode < 200 || resp.StatusCode >= 300:
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return &httpStatusError{Code: resp.StatusCode, Path: req.URL.Path,
 			Body: strings.TrimSpace(string(snippet))}
 	}
-	return json.NewDecoder(io.LimitReader(resp.Body, maxDecodeBytes)).Decode(out)
+	read := &httpBodyRead{Reader: io.LimitReader(resp.Body, maxDecodeBytes)}
+	err = json.NewDecoder(read).Decode(out)
+	if err != nil && loopCtx.Err() != nil && (errors.Is(err, io.EOF) || abandonedBodyRead(read.err)) {
+		return loopCtx.Err()
+	}
+	return err
+}
+
+// httpBodyRead retains the body reader's error so a decoder's unexpected EOF
+// from complete, malformed JSON is not confused with a failed network read.
+type httpBodyRead struct {
+	io.Reader
+	err error
+}
+
+func (r *httpBodyRead) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	if err != nil {
+		r.err = err
+	}
+	return n, err
+}
+
+func abandonedBodyRead(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed)
 }
 
 // httpStatusError carries the upstream STATUS CODE structurally.

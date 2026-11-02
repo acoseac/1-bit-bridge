@@ -703,6 +703,30 @@ func forgetPlayerOffReason(t testing.TB) {
 	t.Cleanup(forget)
 }
 
+// TestQuietCandidateValidationLeavesWarningsAndPlayerDedupUntouched uses
+// Linux admission so a port clash changes the player-off reason even on a
+// macOS test host. A later normal validation must still emit that reason.
+func TestQuietCandidateValidationLeavesWarningsAndPlayerDedupUntouched(t *testing.T) {
+	forgetPlayerOffReason(t)
+	c := &Config{ListenAddress: ":7792", AdminAddress: "127.0.0.1:7789", ScanIntervalSec: 60,
+		LibraryRoots: []string{"/music"}, CustomEndpoints: []string{"http://example.com"},
+		Output: OutputConfig{Player: fullPlayer()}, playerGOOS: "linux"}
+	c.Output.Player.OpenHome = true
+	rec := loggingtest.Record(t)
+	if err := c.NormalizeAndValidateQuiet(); err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.All(); len(got) != 0 {
+		t.Fatalf("quiet candidate validation logged %v", got)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Lines(playerOffMessage); len(got) != 1 || !strings.Contains(got[0], "listenAddress") {
+		t.Fatalf("normal validation after quiet pass logged %v, want one clash reason", got)
+	}
+}
+
 // TestValidateTurnsThePlayerOffWithALoggedReason: Validate never fails a
 // config over its player block; it logs why the player is off, through
 // the GOOS it is given, and the line carries no serial.

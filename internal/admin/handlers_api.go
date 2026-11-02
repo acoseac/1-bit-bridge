@@ -3196,16 +3196,17 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Validate first so an invalid request answers 400 even if its port
+		// also clashes. This pass is quiet: a candidate refused below must
+		// neither log a warning nor change the process-wide player-off reason.
+		// It runs on a clone so the saved candidate still receives the normal
+		// warnings and canonicalisation after the clash check.
+		if err := config.Clone(next).NormalizeAndValidateQuiet(); err != nil {
+			return &cfgAbort{status: http.StatusBadRequest, code: "validate", msg: err.Error()}
+		}
 		// A save the next start would refuse is refused (B612's second
-		// round): while the opt-in is on, a listener address on the OpenHome
-		// surface's port has the next start turn the player off
-		// (config.PlayerEnabled), as an opt-in turned on over one would, which
-		// the OpenHome switch refuses. It is asked of the config this save
-		// would write, the whole of it, never of what serve binds now, which
-		// is the boot snapshot's: the running player judges the clash on that
-		// (config.PlayerEnabledAsBooted). Before Validate, which logs the
-		// player off for a config whose player it would refuse, and so would
-		// log it for a save this refuses; Normalize changes no address.
+		// round). Judge the whole candidate, never the sockets serve bound
+		// from its boot snapshot (config.PlayerEnabledAsBooted).
 		if next.Output.Player.OpenHome {
 			if err := next.OpenHomePortClash(); err != nil {
 				return openHomePortClashRefusal(err)
