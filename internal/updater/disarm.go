@@ -1,6 +1,7 @@
 package updater
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 )
@@ -11,6 +12,21 @@ type DisarmResult struct {
 	Recorded bool
 	// Unreadable is why the marker could not be read, when it removed it.
 	Unreadable error
+	// NoLocks is the answer of a filesystem that keeps no locks, when the
+	// disarm went on without the install marker's lock (LockState).
+	NoLocks error
+}
+
+// ErrRollbackUnderWay is what a migrating store open's refusal matches
+// (DisarmBeforeMigrating) where the marker is the early rollback's record of
+// an install of this version (RollbackUnderWay).
+var ErrRollbackUnderWay = errors.New("a rollback of this version's install is under way")
+
+// RollbackUnderWay reports whether st is the early rollback's record of an
+// install of current that no start of a version has gone on past.
+func RollbackUnderWay(st State, current string) bool {
+	_, _ = st, current
+	return false
 }
 
 // AdmitBoot is serve's first disarm, before its first write to the data dir

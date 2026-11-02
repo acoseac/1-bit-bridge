@@ -3,6 +3,7 @@ package updater
 import (
 	"fmt"
 	"os"
+	"sync/atomic"
 
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
@@ -48,6 +49,15 @@ func syncWithFallback(full, plain func() error) error {
 	_ = plain
 	return full()
 }
+
+// unsupportedDirSyncMessage is the line said once a process where the data
+// dir's filesystem answers a directory's fsync that it cannot do one.
+const unsupportedDirSyncMessage = "the data dir's filesystem cannot fsync a directory, so a change to the install marker " +
+	"may not outlive a power loss there (said once a process)"
+
+// unsupportedDirSyncSaid is whether unsupportedDirSyncMessage has been said
+// in this process. A test resets it with a t.Cleanup restore.
+var unsupportedDirSyncSaid atomic.Bool
 
 // BarrierError is the marker's directory barrier failing: Step is the step
 // that failed, "open", "sync" or "close", and Err its error, which errors.Is

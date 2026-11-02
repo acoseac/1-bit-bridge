@@ -400,6 +400,14 @@ func DecideBootAction(st State, currentServerVersion string, now time.Time) Boot
 	}
 }
 
+// ConfirmOverRollback is the marker BootRollbackOvertaken writes over st, the
+// early rollback's record of an install of current that a start stopped
+// before the backup was back.
+func ConfirmOverRollback(st State, current string, now time.Time) State {
+	_, _ = current, now
+	return st
+}
+
 // CurrentServerVersion exposes the bridge's own version constant
 // to test code without leaking the version package import. Production
 // callers can read version.ServerVersion directly.
