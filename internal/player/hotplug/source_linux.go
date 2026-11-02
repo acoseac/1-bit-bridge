@@ -123,15 +123,26 @@ func (s *linuxSocket) recv(buf []byte) (received, error) {
 		r.pid = sa.Pid
 	}
 	if oobn > 0 && flags&unix.MSG_CTRUNC == 0 {
-		if msgs, err := unix.ParseSocketControlMessage(s.oob[:oobn]); err == nil {
-			for i := range msgs {
-				if c, err := unix.ParseUnixCredentials(&msgs[i]); err == nil {
-					r.cred = &credentials{pid: c.Pid, uid: c.Uid, gid: c.Gid}
-				}
-			}
-		}
+		r.cred = parseCredentials(s.oob[:oobn])
 	}
 	return r, nil
+}
+
+// parseCredentials reads the sender's credentials out of the control data
+// recvmsg returned beside a message: the ucred of the last SCM_CREDENTIALS
+// message in it, or nil when it holds none or does not parse.
+func parseCredentials(oob []byte) *credentials {
+	msgs, err := unix.ParseSocketControlMessage(oob)
+	if err != nil {
+		return nil
+	}
+	var cred *credentials
+	for i := range msgs {
+		if c, err := unix.ParseUnixCredentials(&msgs[i]); err == nil {
+			cred = &credentials{pid: c.Pid, uid: c.Uid, gid: c.Gid}
+		}
+	}
+	return cred
 }
 
 func (s *linuxSocket) close() error {
