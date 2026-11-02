@@ -127,8 +127,7 @@ func lockLadder(dbPath string) (release func(), err error) {
 	// refusal.
 	unlocked := func(noLocks bool, err error) (func(), error) {
 		if noLocks {
-			logger.Warn("the filesystem gave no migration lock: a filesystem that keeps no locks answers so, and so do an NFS mount "+
-				"whose lock manager is not running and a kernel out of lock records, so another opener may be migrating the database all the same; migrating without the lock",
+			logger.Warn("no migration lock was granted: another process may still hold one, and the ladder runs without exclusive use of the database",
 				"lock", name, "err", err)
 			return release, nil
 		}

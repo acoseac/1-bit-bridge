@@ -3079,8 +3079,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// refuses here, naming the path and what stands in its way, before the
 	// lock, the player's state, the TLS mint, the token store, server.pid
 	// and the migrations. Serve used to go on without its lock and its
-	// player, mint the TLS pair and fail further on. Making it is the
-	// first write: everything above only reads.
+	// player, mint the TLS pair and fail further on. The preparation comes
+	// before serve initialises any of its runtime state; the one write
+	// above it is --init-if-missing's seed config (writeAutoInitConfig),
+	// which can make the config's directories and write bridge.yaml, and
+	// only where no config is there.
 	if err := prepareServeDataDir(cfg.DataDir); err != nil {
 		fmt.Fprintf(stderr, "serve: %v; bridge serve starts only on a data directory it can make or use: "+
 			"move what stands in its way, or set dataDir in bridge.yaml to a directory\n", err)
@@ -3102,10 +3105,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	case errors.As(lockErr, &unlocked) && unlocked.noLocks:
 		// Never a refusal, and said its own way (B537 item 1): the answer
 		// of a filesystem that keeps no locks, which ENOLCK, one of these
-		// answers, does not prove, so the line claims nothing of it.
-		fmt.Fprintf(stderr, "serve: %v: a filesystem that keeps no locks answers so, and so do an NFS mount whose lock "+
-			"manager is not running and a kernel out of lock records, so another bridge serve may run on this data dir "+
-			"all the same; serving without the check that none does\n", unlocked)
+		// answers, does not prove, so the line says another process may
+		// still hold one.
+		fmt.Fprintf(stderr, "serve: %v: another process may still hold one, and serve continues without "+
+			"exclusive use of the data dir\n", unlocked)
 	case lockErr != nil:
 		// Never a refusal: a lock that cannot be taken on a data dir that
 		// is there (a lock file this user cannot open, a read-only

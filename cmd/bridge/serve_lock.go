@@ -84,7 +84,7 @@ type dataDirUnlockedError struct {
 
 func (e *dataDirUnlockedError) Error() string {
 	if e.noLocks {
-		return fmt.Sprintf("the filesystem gave no lock on %s (%v)", e.lockPath, e.err)
+		return fmt.Sprintf("no lock was granted on %s (%v)", e.lockPath, e.err)
 	}
 	return fmt.Sprintf("could not lock %s (%v)", e.lockPath, e.err)
 }
@@ -120,7 +120,7 @@ func prepareServeDataDir(dataDir string) error {
 // answer and the stat after it.
 func prepareServeDataDirWith(dataDir string, mkdirAll func(string, os.FileMode) error) error {
 	if err := mkdirAll(dataDir, 0o700); err != nil {
-		return &dataDirUnusableError{dataDir: dataDir, why: whyNotMade(err), err: err}
+		return &dataDirUnusableError{dataDir: dataDir, why: whyNotMade(dataDir, err), err: err}
 	}
 	// MkdirAll answers nil for a directory there, and the stat asks again,
 	// for a directory replaced since.
@@ -138,18 +138,52 @@ func prepareServeDataDirWith(dataDir string, mkdirAll func(string, os.FileMode) 
 	return nil
 }
 
-// whyNotMade says what stands in the way of a data directory MkdirAll could
-// not make: the entry its error names, when that entry is there and is no
-// directory (notADirectory), with the error beside it; and the error alone
-// otherwise.
-func whyNotMade(err error) string {
+// whyNotMade says what stands in the way of the data directory dataDir that
+// MkdirAll could not make: the entry its error names, when that entry is
+// there and is no directory (notADirectory); for an ENOTDIR whose entry
+// cannot say so, the entry in the way on dataDir's path (blockingEntry); each
+// with the error beside it; and the error alone otherwise. Go's os.MkdirAll
+// names the entry in the way itself, an ancestor a regular file or a link to
+// one included; an MkdirAll that names the entry its own make failed at,
+// below the one in the way, is named past.
+func whyNotMade(dataDir string, err error) string {
 	var pe *fs.PathError
 	if errors.As(err, &pe) {
 		if why := notADirectory(pe.Path); why != "" {
 			return fmt.Sprintf("%s (%v)", why, err)
 		}
 	}
+	if errors.Is(err, syscall.ENOTDIR) {
+		if why := blockingEntry(dataDir); why != "" {
+			return fmt.Sprintf("%s (%v)", why, err)
+		}
+	}
 	return fmt.Sprintf("it could not be made: %v", err)
+}
+
+// blockingEntry walks up dataDir's path, as bridge doctor's dataDirNotThere
+// walks for a link to nothing, past every entry Lstat cannot reach (one that
+// is not there, or below an entry that is no directory), to the first entry
+// that is there, and names it when it is the one in the way, no directory
+// (notADirectory: a regular file, a link to one, a link to nothing). A
+// directory there, or a link to one, is no blocker and names nothing, though
+// it is the first entry there; nor does an entry Lstat refuses for another
+// reason.
+func blockingEntry(dataDir string) string {
+	for p := dataDir; ; {
+		_, err := os.Lstat(p)
+		switch {
+		case err == nil:
+			return notADirectory(p)
+		case !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR):
+			return ""
+		}
+		up := filepath.Dir(p)
+		if up == p {
+			return ""
+		}
+		p = up
+	}
 }
 
 // notADirectory says what entry is, when it is there and is no directory: a
