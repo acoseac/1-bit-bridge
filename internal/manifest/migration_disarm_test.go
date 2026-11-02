@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,6 +96,59 @@ func TestAStoreOpenThatMigratesNothingLeavesTheMarkerAsItIs(t *testing.T) {
 	}
 	if after, err := os.ReadFile(updater.StatePath(dataDir)); err != nil || !bytes.Equal(after, before) {
 		t.Errorf("an open that migrated nothing changed the marker (%v): %s", err, after)
+	}
+}
+
+// TestAStoreOpenRefusesToMigrateWhileARollbackOfItsVersionIsUnderWay: the
+// early rollback's record of an install of this version (backlog B613's
+// round 3) says the backup may already be back over this binary, so a
+// command of this version, running from the image it was started with,
+// must not migrate the store past what the restored version knows. An open
+// that migrates nothing is not refused.
+func TestAStoreOpenRefusesToMigrateWhileARollbackOfItsVersionIsUnderWay(t *testing.T) {
+	dataDir := t.TempDir()
+	db := olderStoreIn(t, dataDir)
+	record := updater.RollbackRecord(armedInstall(t, dataDir), version.ServerVersion,
+		version.ServerVersion+" refused this bridge's settings at its first start: line 4: x", "a digest")
+	if err := updater.SaveState(dataDir, record); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(updater.StatePath(dataDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := OpenStore(db)
+	if err == nil {
+		s.Close()
+		t.Fatal("the store opened, and migrated, while a rollback of this version's install was under way")
+	}
+	if !errors.Is(err, updater.ErrRollbackUnderWay) {
+		t.Errorf("OpenStore = %v, want the rollback under way named", err)
+	}
+	if v := versionOnDisk(t, db); v != latestVersion-1 {
+		t.Errorf("user_version %d after the refused open, want %d: a step ran", v, latestVersion-1)
+	}
+	if after, err := os.ReadFile(updater.StatePath(dataDir)); err != nil || !bytes.Equal(after, before) {
+		t.Errorf("the refused open changed the marker (%v): %s", err, after)
+	}
+
+	current := DefaultDBPath(t.TempDir())
+	s, err = OpenStore(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := updater.SaveState(filepath.Dir(current), record); err != nil {
+		t.Fatal(err)
+	}
+	s, err = OpenStore(current)
+	if err != nil {
+		t.Fatalf("an open that migrates nothing beside the record = %v, want it opened", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

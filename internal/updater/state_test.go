@@ -183,3 +183,71 @@ func TestDecideBootAction(t *testing.T) {
 		})
 	}
 }
+
+// TestDecideBootActionReadsAnInterruptedRollbackOnItsOwn: the early
+// rollback's record (Status "", RollbackStarted) is its own case, never an
+// install marker and never a hold alone (backlog B613's round 3). The
+// housekeeping runs only once serve got past its settings, so the install's
+// version booting confirms the install, whatever the record's age (an
+// expired one is confirmed, not cleared); the backup's version booting
+// means the rollback finished, and keeps the hold; any other version, and a
+// hold with no rollback, does nothing.
+func TestDecideBootActionReadsAnInterruptedRollbackOnItsOwn(t *testing.T) {
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	record := RollbackRecord(State{Status: "installing", TargetVersion: "0.2.3", PreviousVersion: "0.2.1",
+		AttemptedAt: now.Add(-time.Minute), SwapStarted: true}, "0.2.3", "0.2.3 refused this bridge's settings: line 4: x", "a digest")
+	expired := record
+	expired.AttemptedAt = now.Add(-recencyWindow - time.Hour)
+	opened := record
+	opened.DataDirOpenedBy = "0.2.3"
+	for _, tc := range []struct {
+		name    string
+		st      State
+		current string
+		want    BootAction
+	}{
+		{"the install's version", record, "0.2.3", BootRollbackOvertaken},
+		{"the install's version, spelled with a v", record, "v0.2.3", BootRollbackOvertaken},
+		{"the install's version, past the boot window", expired, "0.2.3", BootRollbackOvertaken},
+		{"the install's version, admitted", opened, "0.2.3", BootRollbackOvertaken},
+		{"the backup's version", record, "0.2.1", BootRollbackFinished},
+		{"the backup's version, past the boot window", expired, "0.2.1", BootRollbackFinished},
+		{"another version", record, "0.2.9", BootNoop},
+		{"a hold alone", State{RejectedVersion: "0.2.3", RejectedReason: "x"}, "0.2.3", BootNoop},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := DecideBootAction(tc.st, tc.current, now); got != tc.want {
+				t.Errorf("DecideBootAction = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestTheConfirmationOverARollbackKeepsWhatIsNotItsOwn: the install is
+// confirmed (installed, now), the rollback's mark goes, and the hold goes
+// only where it holds this version back; the install and the data dir's
+// record stay, for the boot after it to clean the backup up by.
+func TestTheConfirmationOverARollbackKeepsWhatIsNotItsOwn(t *testing.T) {
+	now := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	record := RollbackRecord(State{Status: "installing", TargetVersion: "0.2.3", PreviousVersion: "0.2.1",
+		AttemptedAt: now.Add(-time.Minute), SwapStarted: true}, "0.2.3", "0.2.3 refused this bridge's settings: line 4: x", "a digest")
+	record.DataDirOpenedBy = "0.2.3"
+	got := ConfirmOverRollback(record, "0.2.3", now)
+	want := State{Status: "installed", TargetVersion: "0.2.3", PreviousVersion: "0.2.1", AttemptedAt: record.AttemptedAt,
+		InstalledAt: now, SwapStarted: true, DataDirOpenedBy: "0.2.3"}
+	if got != want {
+		t.Errorf("ConfirmOverRollback =\n %+v\nwant\n %+v", got, want)
+	}
+	if DecideBootAction(got, "0.2.3", now.Add(time.Hour)) != BootCleanupBak {
+		t.Errorf("the boot after the confirmation does not clean the backup up")
+	}
+	other := record
+	other.RejectedVersion, other.RejectedReason, other.RejectedConfigDigest = "0.2.4", "0.2.4 refuses this bridge's settings: line 9: y", "another digest"
+	got = ConfirmOverRollback(other, "0.2.3", now)
+	if got.RejectedVersion != "0.2.4" || got.RejectedReason != other.RejectedReason || got.RejectedConfigDigest != other.RejectedConfigDigest {
+		t.Errorf("a hold of another version after the confirmation = %+v, want it kept", got)
+	}
+	if got.Status != "installed" || got.RollbackStarted {
+		t.Errorf("the confirmation = %+v, want installed with no rollback started", got)
+	}
+}

@@ -239,6 +239,38 @@ func TestTheSettingsDigestReadsTheBridgeVariablesAsThePlatformNamesThem(t *testi
 	}
 }
 
+// TestTheSettingsDigestKeepsTheVariableTheOSReads: on Windows an environment
+// block can hold one variable twice, in two cases, and config's overrides
+// read it through os.LookupEnv, which asks GetEnvironmentVariable for the
+// first entry its name matches whatever the case, in the order os.Environ
+// lists them; an empty value there is an unset setting, and the second entry
+// is never read. So the digest keeps the first entry of each name, folded,
+// before it drops an empty one (backlog B613's round 3).
+func TestTheSettingsDigestKeepsTheVariableTheOSReads(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		environ []string
+		want    []string
+	}{
+		{"lower case first", []string{"bridge_data_dir=/a", "BRIDGE_DATA_DIR=/b"}, []string{"BRIDGE_DATA_DIR=/a"}},
+		{"upper case first", []string{"BRIDGE_DATA_DIR=/b", "bridge_data_dir=/a"}, []string{"BRIDGE_DATA_DIR=/b"}},
+		{"the first empty", []string{"BRIDGE_DATA_DIR=", "bridge_data_dir=/a"}, nil},
+		{"the second empty", []string{"bridge_data_dir=/a", "BRIDGE_DATA_DIR="}, []string{"BRIDGE_DATA_DIR=/a"}},
+		{"three spellings", []string{"Bridge_Data_Dir=/c", "bridge_data_dir=/a", "BRIDGE_DATA_DIR=/b"}, []string{"BRIDGE_DATA_DIR=/c"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := bridgeEnvironment(tc.environ, true); !slices.Equal(got, tc.want) {
+				t.Errorf("bridgeEnvironment(%q) = %q, want %q", tc.environ, got, tc.want)
+			}
+		})
+	}
+	// Where names are their bytes, two cases are two variables.
+	if got, want := bridgeEnvironment([]string{"BRIDGE_DATA_DIR=/b", "bridge_data_dir=/a"}, false),
+		[]string{"BRIDGE_DATA_DIR=/b"}; !slices.Equal(got, want) {
+		t.Errorf("names that are their bytes: %q, want %q", got, want)
+	}
+}
+
 func TestHeldBackHoldsARefusedVersionOnlyWhileTheSettingsAreUnchanged(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "bridge.yaml")
