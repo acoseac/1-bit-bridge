@@ -1335,6 +1335,39 @@ Pinned by `TestMediumTakesVolumiosHiddenDataPartition`,
 `TestWriteBytesDurable_RefusesAnOverlayWhoseUpperLayerIsHidden` (Linux, a
 namespace) and `TestInspectMediumIsTheWritersOwnVerdict`. The record is in
 `ops/engineering-log.md`, 2026-10-30, B603.
+
+## B606 — the inspection refuses a root that is no directory (2026-11-02)
+
+- **`atomicwrite.InspectMedium` refuses, as the strict writer's `checkPath` does, a root that is there and is no directory, before it reads the root's mount: a regular file or any other entry but a directory, a link that leads to one, and a link at the root whose links lead to nothing, each a `*RootNotADirectoryError` matching `ErrRootNotADirectory`, never `fs.ErrNotExist`** (2026-11-02, backlog B606; bridge doctor's player-storage line fails them, cli-serve.md). **Don't inspect the mount of a root that is no directory, or answer a link to nothing at the root as a root not made yet.**
+
+The doctor's player-storage line takes its verdict from `InspectMedium`, the
+inspection whose verdict the strict writer's admission reads (B603, above),
+and the inspection checked the type of no root: a root that is a regular
+file, or a link to one, resolved, and the mount it lies on was inspected as a
+directory's would be, so the doctor called a regular file there storage it
+takes; and a root that is a link to nothing answered EvalSymlinks's ENOENT,
+the answer for a root not made yet. The writer itself refused both, at
+`checkPath` (a resolved root that is no directory is ENOTDIR, one that does
+not resolve EvalSymlinks's error), so the inspection and the writer
+disagreed about such a root. `InspectMedium` now asks the root's own entry
+(`os.Lstat`) whether it is a link, and the resolved root (`os.Stat`) whether
+it is a directory, before `mountIDOf`: a link whose resolution answers ENOENT
+is a `*RootNotADirectoryError` with `Link` set and no `Target`; a resolved
+root that is no directory is one with its `Target` and its `Kind`
+(`fsutil.EntryKind`'s, with its article: "a regular file", "a named pipe",
+…), `Link` saying whether the root's entry led there. Its `Is` matches
+`ErrRootNotADirectory` alone and it wraps nothing, so a link to nothing never
+reads as `fs.ErrNotExist`. A root below a link to nothing, whose own entry
+cannot be reached, is still `fs.ErrNotExist`, which bridge doctor's walk up
+the path judges (cli-serve.md, B603). Any other error of the resolution or
+the stat is returned as it is (a permission error among them, which the
+doctor warns of). `TestInspectMediumRefusesARootThatIsNotADirectory` pins it:
+a regular file, a link to one, a link to nothing and a chain of links to
+nothing are refused, each refused by the writer's probe too
+(`ProbeDurable`); a link to a directory is inspected; and a root below a link
+to nothing is still not there. The record is in `ops/engineering-log.md`,
+2026-11-02, B606.
+
 ## A candidate's settings check, and the early rollback of an install whose version refuses the settings (backlog B613, 2026-11-02)
 
 - **A candidate is checked against this bridge's settings before its swap, and an install whose version refuses them at its first start is rolled back before serve writes anything** (2026-11-02, backlog B613): 0.2.2 refuses a fraction or a leading zero in a whole-number setting (B528, B533), 0.2.1's updater swapped without asking, and the new serve exited 2 at the load, before the boot rollback, under `Restart=always`. Install stages the verified candidate beside the binary and runs `<candidate> serve --validate-config --config <the settings the bridge loaded>` (`updater.CheckConfig`: 30 s, stdin empty, 64 KiB of each output): 0 swaps; 78 refuses, one `config refused: ` line a reason, naming the line and no path (`config.RefusedError.Reasons`), and the version is recorded as rejected with its reason and a digest of the settings (the file's bytes and every BRIDGE_ variable, `updater.ConfigDigest`), which holds it from the auto-installer while the digest is unchanged, a newer version and a manual install checking again; a 2 carrying the flag package's refusal of the flag is a candidate that predates the check, held from the auto-installer for every setting and installed by hand with a warning; anything else (a timeout, a cancellation, a candidate that will not start, another code) installs and records nothing. The check is serve's own load (`checkServeConfig`: the boot read, Load, `serveConfigRefusal`), which writes, opens and binds nothing, and never a root's reach (`CheckLibraryRootsAccessible` is the host's, and the user's who runs it). Serve, refusing its settings (a `config.RefusedError`, or `serveConfigRefusal`, every one of them before the data dir's lock), reads the data dir from the dataDir key, the default, BRIDGE_DATA_DIR and the settings' directory alone (`config.DataDirOf`), and puts the backup back only for a recent `installing` marker of this version over another, swapped, under which no other version has opened the data dir, with the data dir's lock its own and the backup a regular file whose `version` names the marker's PreviousVersion (`updater.EarlyRollback`, `updater.ProbeVersion`, a version check and not a proof of the bytes); then it records the hold and exits 75 (`supervision.RestartExitCode`), which systemd, launchd and the SCM's recovery all restart; otherwise it refuses as before, saying why when the marker is this version's. Before its first write, serve records in an armed marker that it opened the data dir (`State.DataDirOpenedBy`, `disarmEarlyRollback`; a marker it cannot read is removed) and refuses to start when it cannot, and BootInstallFailed leaves the backup where a version other than the backup's opened the data dir. **Don't swap a candidate whose check did not answer 0, take a failed or stopped check for a refusal or a 2 for "predates" without the flag package's words, record a refusal against no digest or a predates hold against one, change the flag, the codes or the prefix (every later release answers this updater), let the check write, open a store, bind or ask a root's reach, name a path in a reason, find the marker's data dir by anything but Load's rules for that key, restore without the lock, the marker's proof and the backup's version, restore after another version opened the data dir, write the settings, or exit 0 after a restore.** `TestAnInstallWhoseCandidateRefusesTheSettingsSwapsNothing`, `TestAnAutomaticInstallHoldsARefusedVersionBackUntilTheSettingsChange`, `TestAnAutomaticInstallHoldsBackACandidateThatPredatesTheCheck`, `TestACheckThatFailsSwapsNothingAndRecordsNothing`, `TestCheckConfigReadsTheCandidatesAnswerByItsExitCode`, `TestTheSettingsCheckRefusesWhatServeRefuses`, `TestTheUpdaterReadsWhatThisBridgesSettingsCheckSays`, `TestDataDirOfIsTheDataDirLoadGives`, `TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings`, `TestServeLeavesAnInstallItCannotProveAsItIs`, `TestServeDisarmsTheEarlyRollbackBeforeItsFirstStoreAccess`, `TestTheBootRollbackLeavesABackupOnceAnotherVersionOpenedTheDataDir` and `TestEveryInstallTheBridgeStartsNamesItsSettings` pin it.
