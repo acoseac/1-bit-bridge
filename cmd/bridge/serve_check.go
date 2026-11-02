@@ -23,14 +23,16 @@ type serveRefusal struct {
 // serveConfigRefusal is every refusal serve makes from its config alone, past
 // Load's own (the decode, the defaults, the environment, the paths,
 // Normalize and Validate), and before it writes anything: two library roots
-// sharing a folder name, and a Tailscale mode it does not know. runServe asks
-// it right after the load, where the early rollback can still put the
-// previous binary back, and the settings check (`bridge serve
-// --validate-config`) asks the same, so a candidate's check refuses what its
-// serve would. nil when serve takes the config.
+// sharing a folder name. runServe asks it right after the load, where the
+// early rollback can still put the previous binary back, and the settings
+// check (`bridge serve --validate-config`) asks the same, so a candidate's
+// check refuses what its serve would. nil when serve takes the config.
 //
-// The Tailscale mode was refused after the stores had opened until backlog
-// B613; nothing between here and there depends on it.
+// It also asks the Tailscale mode, a second line: Validate refuses a mode it
+// does not know at load already (Gemini on PR #249), so this check refuses
+// nothing today. It is serve's own check of the mode, which ran after the
+// stores had opened until backlog B613 moved it here, before the data dir's
+// lock; nothing between here and there depends on the mode.
 func serveConfigRefusal(cfg *config.Config) *serveRefusal {
 	if err := bridgefs.ValidateRoots(cfg.LibraryRoots); err != nil {
 		// The refusal names the roots, which serve prints for the

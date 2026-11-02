@@ -165,6 +165,21 @@ func TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings(t *testing.T) {
 		{name: "a leading zero", extra: "scanIntervalSec: 010\n", says: []string{"line 7:", "leading zero"}},
 		{name: "a fraction", extra: "scanIntervalSec: 21600.5\n", says: []string{"line 7:", "!!float"}},
 		{name: "a Tailscale mode it does not know", extra: "tailscale:\n  mode: tnset\n", says: []string{"tailscale.mode"}},
+		// Refused past the load, by serveConfigRefusal, before the lock.
+		{name: "two library roots with one folder name", says: []string{"libraryRoots", "one folder name"},
+			lay: func(t *testing.T, r *refusedInstall) {
+				a, b := filepath.Join(r.dir, "a", "Music"), filepath.Join(r.dir, "b", "Music")
+				for _, d := range []string{a, b} {
+					if err := os.MkdirAll(d, 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				body := fmt.Sprintf("libraryRoots:\n  - %s\n  - %s\ndataDir: %s\nlistenAddress: 127.0.0.1:0\nadminAddress: 127.0.0.1:0\ndisableHttp3: true\n",
+					a, b, r.dataDir)
+				if err := os.WriteFile(r.cfg, []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}},
 		{name: "the data dir named relative to the settings", extra: "scanIntervalSec: 010\n", says: []string{"leading zero"},
 			lay: func(t *testing.T, r *refusedInstall) {
 				r.writeSettings(t, "dataDir: data\n", "scanIntervalSec: 010\n")

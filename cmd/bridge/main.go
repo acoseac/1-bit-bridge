@@ -3360,10 +3360,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// `WaitGroup.Wait` on a zero counter returns immediately, so exiting before
 	// any writer starts costs nothing.
 	//
-	// An invalid tailscale mode is refused before the data dir's lock, with
-	// the config's other refusals (serveConfigRefusal): it used to be refused
-	// here, after the stores had opened, and before that ~160 lines down,
-	// after RunPeriodic and the artwork rescaler had started.
+	// An invalid tailscale mode is refused by Validate at load, and serve's
+	// own check of it, a second line, runs before the data dir's lock with
+	// the config's other refusals (serveConfigRefusal): it used to run here,
+	// after the stores had opened, and before that ~160 lines down, after
+	// RunPeriodic and the artwork rescaler had started.
 	var bgWriters sync.WaitGroup
 	defer func() {
 		done := make(chan struct{})
