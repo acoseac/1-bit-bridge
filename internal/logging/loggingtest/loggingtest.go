@@ -228,7 +228,8 @@ func (r *Recorder) render(match func(slog.Record) bool) []string {
 // Go 1.27.3's own handlers write one shape against the contract: a group
 // whose attributes are all empty, followed by another attribute, whose name
 // the Text handler leaves in the prefix of the keys after it and before
-// which the JSON handler drops a separator. The recorder keeps the contract
+// which the JSON handler drops a separator (golang/go#81970, fixed for Go
+// 1.28). The recorder keeps the contract
 // (TestSlogsHandlersWriteAnIgnoredGroupAgainstTheContract).
 //
 // A derivation shares no storage with the handler it derives from: its chain
