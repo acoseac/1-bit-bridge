@@ -1243,19 +1243,51 @@ mentions across the four `ops/audit-*.md` files.
   file, not a directory", "X is a symbolic link to nothing", MkdirAll's error
   beside it; any other failure (a parent this user cannot write) is "it could
   not be made: …". `errors.Is` reaches MkdirAll's error (`fs.ErrExist`,
-  `syscall.ENOTDIR`), and the kinds are `fsutil.EntryKind`'s. runServe asks
-  it right after the read-only checks and exits 1, saying "serve: the data
-  directory D cannot be used: WHY; bridge serve starts only on a data
-  directory it can make or use: move what stands in its way, or set dataDir
-  in bridge.yaml to a directory". A link that leads to a directory is taken,
+  `syscall.ENOTDIR`), and the kinds are `fsutil.EntryKind`'s. Where an
+  ENOTDIR's entry cannot say so, an MkdirAll naming the entry its own make
+  failed at, below the one in the way, which no Lstat reaches, the refusal
+  walks up the data dir's path past every entry Lstat cannot reach to the
+  first entry that is there, and names it when it is no directory
+  (`blockingEntry`, round 2, Argon): a directory there is no blocker and
+  names nothing. Go 1.27's `os.MkdirAll` names the entry in the way itself,
+  an ancestor that is a link to a regular file included (measured on
+  legion0: for `A/sub` and `A/sub/data` with `A` a link to a regular file it
+  answers "mkdir A: not a directory"), so the walk guards another MkdirAll,
+  and `TestThePreparationNamesTheEntryInTheWayBelowWhichMkdirAllFailed`
+  pins it through the seam. runServe asks it right after the read-only
+  checks, before it initialises any of its runtime state (the one write
+  above it is `--init-if-missing`'s seed config, `writeAutoInitConfig`,
+  which can make the config's directories and write bridge.yaml, and only
+  where no config is there), and exits 1, saying "serve: the data directory
+  D cannot be used: WHY; bridge serve starts only on a data directory it can
+  make or use: move what stands in its way, or set dataDir in bridge.yaml to
+  a directory". A link that leads to a directory is taken,
   the data dir's own entry or an ancestor's (Linux and NAS installs keep one
   there, and refusing it would break their upgrades), and so is a data dir
-  not made yet below such a link, which MkdirAll makes through it. What can
-  be written there is not asked: a lock file that cannot be opened in a
+  not made yet below such a link, which MkdirAll makes through it; as root
+  over a data dir that is there, a directory or a link to one, MkdirAll's
+  walk returns at its first stat and neither makes nor chowns anything
+  (`TestPreparingAnExistingDataDirectoryAsRootMakesAndGivesNothing`, which
+  covers the preparation alone, on a directory that can be statted: the lock
+  and serve's later writes on a read-only filesystem are not claimed). What
+  can be written there is not asked: a lock file that cannot be opened in a
   directory that is there is the lock's fallback, and the player's preflight
   (`backup.AdoptPlayerState`, `backup.CheckPlayerStart`) and bridge doctor
   say whether the data dir can be written. The four commands that take the
   lock beside a serve prepare it first too (the restore bullet below).
+
+  *The order* (round 2, Codex). The player's state preflight
+  (`playerStatePreflight`: AdoptPlayerState, then CheckPlayerStart, under
+  the data dir's lock alone) runs on every boot, the player on or off, after
+  the preparation and the lock. The refusal test ran with the player off,
+  where nothing showed the preflight's order, so it would have passed with
+  the preflight moved ahead of the preparation. It now runs a stand-in in
+  the preflight's place (`serveOpts.playerStatePreflight`) that counts its
+  calls and requires none, and
+  `TestServeRunsThePlayersStatePreflightOnceItsDataDirIsPreparedAndLocked`
+  requires its one call to find the data dir made and its lock held. With
+  the preparation moved after the preflight (round 2's negative control),
+  both go red.
 
   *The lock's answers* (B537 item 1). `lockServeDataDir` makes nothing now:
   a data dir that is not there is a lock file that cannot be opened. It
@@ -1265,14 +1297,14 @@ mentions across the four `ops/audit-*.md` files.
   `fsutil.KeepsNoLocks` reads TryLock's answer (ENOLCK, EOPNOTSUPP, ENOTSUP,
   `errors.ErrUnsupported`, which ENOSYS matches; Windows' ERROR_NOT_SUPPORTED
   and ERROR_INVALID_FUNCTION) and never for the lock file's open. Serve
-  serves on after either and says which: "serve: the filesystem gave no lock
-  on L (ERR): a filesystem that keeps no locks answers so, and so do an NFS
-  mount whose lock manager is not running and a kernel out of lock records,
-  so another bridge serve may run on this data dir all the same; serving
-  without the check that none does", worded so because ENOLCK is no proof
-  that the filesystem keeps none (Linux answers it when it cannot allocate a
-  lock record, on a filesystem that keeps locks and while another open holds
-  one: the config lock's `noLockToGive` asks again for that reason); and
+  serves on after either and says which: "serve: no lock was granted on L
+  (ERR): another process may still hold one, and serve continues without
+  exclusive use of the data dir" (round 2's shorter line, Codex; round 1's
+  named the NFS mount and the kernel out of lock records), worded so
+  because ENOLCK is no proof that the filesystem keeps none (Linux answers
+  it when it cannot allocate a lock record, on a filesystem that keeps locks
+  and while another open holds one: the config lock's `noLockToGive` asks
+  again for that reason); and
   "serve: could not lock L (ERR); serving without the check that no other
   bridge serve runs on this data dir" for a permission, I/O or descriptor
   error and an open that failed, as before. The kinds are told apart in the
@@ -1280,8 +1312,11 @@ mentions across the four `ops/audit-*.md` files.
   ladder lock sorts its answers the same way (scanner.md's ladder bullet).
 
   Pinned by `TestServeRefusesADataDirectoryItCannotPrepare`,
+  `TestServeRunsThePlayersStatePreflightOnceItsDataDirIsPreparedAndLocked`,
   `TestPreparingTheDataDirectoryRefusesWithItsPathAndItsCause`,
   `TestThePreparationAsksAgainWhatStandsThereOnceItIsMade`,
+  `TestThePreparationNamesTheEntryInTheWayBelowWhichMkdirAllFailed`,
+  `TestPreparingAnExistingDataDirectoryAsRootMakesAndGivesNothing`,
   `TestServeStartsOnADataDirectoryALinkLeadsTo`,
   `TestServeStartsWhereTheDataDirCannotBeLocked`,
   `TestServeStartsWhereTheLockFileCannotBeOpened`,

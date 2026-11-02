@@ -69406,3 +69406,116 @@ files the branch changed. `make docs-check`: ok, `CLAUDE.md 71.9%; player.md
 96.8%; worst load, player_openhome_test.go 61.3%`; with the rules patch
 applied (a scratch root over the checkout's tracked files) the worst load is
 61.4%.
+
+## 2026-11-02 — B606 round 2: the order pinned, the blocker named past an MkdirAll that misses it, a shorter no-lock line
+
+The code reviews of PR #1377 (Codex, Argon). Codex found no functional
+defect and confirmed every caller's policy; the round takes five small
+points.
+
+**The order (Codex P3).** The refusal test
+(`TestServeRefusesADataDirectoryItCannotPrepare`) ran with the player off,
+and the player's state preflight (AdoptPlayerState, then CheckPlayerStart,
+under the data dir's lock alone) shows nothing there, though it runs on
+every boot: the test would have passed with the preflight moved ahead of the
+preparation. The preflight is now `playerStatePreflight(dataDir, lockHeld)`,
+which serve calls once its data dir is prepared and its lock tried, through
+`serveOpts.playerStatePreflight` where a boot test stands one in (9c69970a,
+no behaviour change: without the lock it does nothing, as before). The
+refusal test's stand-in counts its calls and requires none, and
+`TestServeRunsThePlayersStatePreflightOnceItsDataDirIsPreparedAndLocked`
+requires one call, on a data dir not made yet, finding it made and its lock
+held (another open refused as held). Both pass on the fix's order (696dfad9).
+
+The negative control (on c68f9341, committed first): a script moved
+runServe's preparation, its five-line if statement, from before the lock to
+just after the preflight, and asserted the mutation: main.go alone changed,
+the same lines (5 removed, 5 added, the block now right after the
+preflight's). Predicted red before the run, 11 leaves: the refusal test's six
+shapes (the stand-in called once, lockHeld false, before the moved
+preparation refused, and the lock's warning printed); the wiring test (the
+lock, now first, cannot open its file in a data dir not made yet, so the call
+found no lock, no directory, nothing held); and four boot tests whose data
+dir is not made when the lock is tried, which then meets the open's failure
+in place of the answer they expect:
+`TestServeStartsOnADataDirectoryALinkLeadsTo/a_directory_not_made_yet_below_a_link_to_one`,
+`TestServeSaysWhichKindOfLockItCouldNotTake/another_open_holds_the_lock` and
+`/no_lock_can_be_taken_there`, and
+`TestServeSaysNoLockWasGivenWhereTheKernelHadNoneToGive`. Observed: those 11
+and nothing else, each refusal shape failing on "serve called the player's
+state preflight 1 time(s)". Restored from git; the tree clean.
+
+**The comment above the preparation (Codex P3).** It said everything above
+it only reads, which `serve --init-if-missing` contradicts:
+`writeAutoInitConfig` can make the config's directories and write bridge.yaml
+first. It says now that the preparation comes before serve initialises any
+of its runtime state, the seed config the one write above it, made only
+where no config is there. No behaviour change.
+
+**The blocker under a link to a file (Argon).** The premise, that for a
+data dir `A/sub` with `A` a link to a regular file MkdirAll fails at `A/sub`
+and the refusal falls back to "it could not be made", does not hold for Go
+1.27.3's os.MkdirAll: its fast path's Stat of `A/sub` fails, its recursion's
+Stat of `A` follows the link to the file, and it answers "mkdir A: not a
+directory", which `notADirectory` names (measured on legion0 with a
+throwaway program, for `A/sub`, `A/sub/data` and `A/sub/`;
+fsutil.MkdirAll's walk as root has the same shape). The walk is taken all
+the same, as a guard for an MkdirAll that names the entry its own make failed
+at: on an ENOTDIR whose entry cannot say what is in the way, `whyNotMade`
+walks up the data dir's path past every entry Lstat cannot reach (not there,
+or below an entry that is no directory) to the first entry that is there,
+and names it when it is no directory (`blockingEntry`: a regular file, a link
+to one, a link to nothing); a directory there is no blocker and names
+nothing. Red first through the seam
+(`TestThePreparationNamesTheEntryInTheWayBelowWhichMkdirAllFailed`, an
+MkdirAll naming the data dir itself: its three blocker cases red, "it could
+not be made: …", the directory case green) and green after (c68f9341). An
+ancestor that is a link to a regular file joined the refusal tests' shapes,
+green before and after, since os.MkdirAll names the link.
+
+**Root and a data dir that is there (Argon; Codex confirmed the premise).**
+fsutil.MkdirAll's walk as root returns as soon as os.Stat finds a directory,
+through a link too, and neither makes nor chowns it. No code change:
+`TestPreparingAnExistingDataDirectoryAsRootMakesAndGivesNothing` (unix, root
+simulated) prepares a directory and a link to one and requires no recorded
+change, the link still a link, the directory's mode unchanged and nothing
+made beside or in it. It covers the preparation alone, on a directory that
+can be statted; the lock, and serve's later writes on a read-only
+filesystem, are not claimed. Green before and after.
+
+**The no-lock line (Codex).** Shorter, keeping the path, the error, and the
+distinction between the three kinds: "serve: no lock was granted on L (ERR):
+another process may still hold one, and serve continues without exclusive use
+of the data dir", beside "serve: could not lock L (ERR); serving without the
+check that no other bridge serve runs on this data dir" for any other
+failure and the refusal of a held lock. The migration's ladder lock says "no
+migration lock was granted: another process may still hold one, and the
+ladder runs without exclusive use of the database", beside "could not take
+the migration lock; migrating without it". Red first on the tests' new words
+(`TestServeSaysWhichKindOfLockItCouldNotTake/no_lock_can_be_taken_there`,
+`TestServeSaysNoLockWasGivenWhereTheKernelHadNoneToGive` and
+`TestTheMigrationSaysWhichKindOfLockItCouldNotTake`'s five no-lock answers),
+green after.
+
+**The rules.** The B606 line in cli-serve.md gains the three new tests in
+its pin list; a patch beside this job's report, made against round 1's
+patched copy, which the PR's bfeda0f2 commits. The long forms above are in
+this commit.
+
+**Commits**: 9c69970a (the preflight's seam), 696dfad9 (tests), c68f9341
+(the fix and the comment), 081393c2 (a doc comment), and this one (docs).
+
+**Checks** (legion0, umask 022, go1.27.3,
+`-tags ts_omit_webclient,ts_omit_debugeventbus`, TMPDIR on the worktree's
+disk, every run through the build lock): `go test` of `./cmd/bridge/`,
+`./internal/atomicwrite/`, `./internal/manifest/` and `./internal/fsutil/`:
+ok (304 s, 14 s, 183 s, 0.5 s). `make test`, once (on c68f9341, with these
+docs): all 80 packages ok, under `-race` the touched packages among them
+(cmd/bridge 840 s, internal/manifest 1328 s; atomicwrite 19 s, fsutil 2.7 s),
+the build-site census included this time. `make vet` is clean (linux,
+native), and `go vet` of the four packages for windows and darwin
+(cross-vet, compiled only). gofmt (go1.27.3's) lists none of the branch's 19
+Go files. `make docs-check`: ok, `CLAUDE.md 71.9%; player.md 96.8%; worst
+load, player_openhome_test.go 61.3%`; with round 1's and this round's rules
+patches applied, 61.4%. `TestEveryCitedTestNameExists` and
+`TestNoDocblockNamesAnotherDeclaration` pass on 081393c2 with these docs.

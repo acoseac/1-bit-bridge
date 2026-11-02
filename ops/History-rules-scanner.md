@@ -1399,13 +1399,13 @@
   be taken is logged by its kind, and the ladder runs without it either way,
   as it did: an answer `fsutil.KeepsNoLocks` reads (ENOLCK, EOPNOTSUPP,
   ENOTSUP, `errors.ErrUnsupported` and the ENOSYS it matches; Windows'
-  ERROR_NOT_SUPPORTED and ERROR_INVALID_FUNCTION) says "the filesystem gave
-  no migration lock: a filesystem that keeps no locks answers so, and so do
-  an NFS mount whose lock manager is not running and a kernel out of lock
-  records, so another opener may be migrating the database all the same;
-  migrating without the lock", worded so because ENOLCK is no proof that the
-  filesystem keeps none (Linux answers it when it cannot allocate a lock
-  record, on a filesystem that keeps locks and while another open holds one);
+  ERROR_NOT_SUPPORTED and ERROR_INVALID_FUNCTION) says "no migration lock
+  was granted: another process may still hold one, and the ladder runs
+  without exclusive use of the database" (B606 round 2's shorter line;
+  round 1's named the NFS mount and the kernel out of lock records), worded
+  so because ENOLCK is no proof that the filesystem keeps none (Linux
+  answers it when it cannot allocate a lock record, on a filesystem that
+  keeps locks and while another open holds one);
   any other failure of the lock (a permission, I/O or descriptor error), and
   of the lock file's open (a lock file this user cannot open, a directory
   standing where it goes), says "could not take the migration lock;
