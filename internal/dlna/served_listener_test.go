@@ -182,17 +182,19 @@ func TestAListenerPinnedToAnAddressItDoesNotServeWarnsOnceAtStart(t *testing.T) 
 
 // TestTheStartupCheckWarnsOnlyForAPinnedAddressItDoesNotServe pins which
 // bound addresses warnIfPinnedOffTheLAN warns about: a wildcard is no pin;
-// loopback, a LAN address, a zero-config link's and an address the server
-// advertises on a member are served; the tailnet's addresses and a member's
-// SLAAC address are not, and the warning names the one bound.
+// loopback, a LAN address, a zero-config link's and the public address
+// dlna.listenAddress names as a literal, the operator's opt-in (B687), are
+// served; the tailnet's addresses, a member's SLAAC address, and a member's
+// public address a name resolved to are not, and the warning names the one
+// bound. pinned is the opt-in, PinnedPublicAddress's answer for a literal.
 func TestTheStartupCheckWarnsOnlyForAPinnedAddressItDoesNotServe(t *testing.T) {
 	publicMember := []fakeIface{lan("eth0", "203.0.113.5", "fd12:3456::5")}
 	cases := []struct {
-		name       string
-		host       []fakeIface
-		advertised []string
-		bound      string
-		warn       bool
+		name   string
+		host   []fakeIface
+		pinned []string
+		bound  string
+		warn   bool
 	}{
 		{"ipv4_wildcard", macWithTailscale(), nil, "0.0.0.0", false},
 		{"ipv6_wildcard", macWithTailscale(), nil, "::", false},
@@ -202,7 +204,8 @@ func TestTheStartupCheckWarnsOnlyForAPinnedAddressItDoesNotServe(t *testing.T) {
 		{"tailnet_ipv4", macWithTailscale(), nil, "100.64.0.7", true},
 		{"tailnet_ula", macWithTailscale(), nil, "fd7a:115c:a1e0::7", true},
 		{"lan_slaac_address", macWithTailscale(), nil, "2001:db8::20", true},
-		{"a_public_address_the_server_advertises", publicMember, []string{"203.0.113.5"}, "203.0.113.5", false},
+		{"the_public_address_named_as_a_literal", publicMember, []string{"203.0.113.5"}, "203.0.113.5", false},
+		{"a_public_address_a_name_resolved_to", publicMember, nil, "203.0.113.5", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -210,7 +213,7 @@ func TestTheStartupCheckWarnsOnlyForAPinnedAddressItDoesNotServe(t *testing.T) {
 			s := &Server{
 				cfg:    ServerConfig{ListenAddress: net.JoinHostPort(tc.bound, "7790")},
 				log:    slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})),
-				served: newTestHost(tc.host...).served(nil, tc.advertised...),
+				served: newTestHost(tc.host...).served(nil, tc.pinned...),
 			}
 			s.warnIfPinnedOffTheLAN(&net.TCPAddr{IP: net.ParseIP(tc.bound), Port: 7790})
 			got := buf.String()

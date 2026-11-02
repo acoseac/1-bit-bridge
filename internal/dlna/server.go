@@ -142,9 +142,14 @@ type ServerConfig struct {
 
 	// ListenAddress is the bind address for the HTTP listener (e.g.
 	// "0.0.0.0:7790" or "192.168.0.14:7790"). Whatever it binds, the
-	// listener serves only the LAN-eligible addresses (servedAddrs, backlog
-	// B48), so a wildcard takes a tailnet peer's connection and closes it,
-	// and a listen address pinned to an address off the LAN serves nothing.
+	// listener serves only the private and link-local addresses of the
+	// LAN-eligible interfaces (servedAddrs, backlog B48; B687), so a
+	// wildcard takes a tailnet peer's connection, or one on a LAN
+	// interface's public address, and closes it, and a listen address
+	// pinned to an address off the LAN serves nothing, but for one case:
+	// an IP literal of a public address (PinnedPublicAddress) is the
+	// operator's opt-in, and the listener serves that address alone,
+	// unauthenticated to whoever can reach it.
 	// Public-mode deployments REFUSE DLNA per `shouldEnableDLNA` (PR 1 task
 	// #4 invariant).
 	ListenAddress string
@@ -156,11 +161,17 @@ type ServerConfig struct {
 	//     in ContentDirectoryHandler — defaults to "http://" + r.Host
 	//     which composes naturally with this)
 	//
-	// Typically `"http://" + LAN-IP + ":" + port`. Required.
+	// Typically `"http://" + LAN-IP + ":" + port`. Required. Its host, and
+	// each advertise endpoint's, is a name, loopback, an address of a LAN
+	// class (IsLANClassAddress), or the literal ListenAddress names, as the
+	// operator wrote it. NewServer refuses any other literal (B687),
+	// whatever built the configuration.
 	ServerURL string
 
 	// Interface is the LAN-eligible interface for SSDP multicast
-	// (joined to 239.255.255.250:1900). nil = OS picks (works on
+	// (joined to 239.255.255.250:1900), or, for a listener pinned to a
+	// public address (the operator's opt-in, B687), the interface that
+	// holds that address, eligible or not. nil = OS picks (works on
 	// single-interface hosts). Multi-interface hosts should pick via
 	// `IsLANEligibleInterface`. It chooses where an advertiser joins and
 	// announces; what the listener and the advertisers answer on is
@@ -290,6 +301,13 @@ type Server struct {
 	// test sets one of its own before Start.
 	served *servedAddrs
 
+	// pin is the public address ListenAddress pins, the operator's opt-in
+	// (PinnedPublicAddress, B687), or the zero Addr: NewServer reads it
+	// from the configuration, and Start refuses a listener that is not
+	// bound to it. The Host check and the served addresses take it, and
+	// nothing else of the configuration authorizes a public address.
+	pin netip.Addr
+
 	// accepting is what AcceptsOn reads while the listener is up: set by
 	// Start once the listener is bound, cleared by Stop and by a Start that
 	// fails after the bind. Nil is no listener.
@@ -335,11 +353,50 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.ServerURL == "" {
 		return nil, errors.New("dlna: ServerConfig.ServerURL required")
 	}
+	named := listenLiteral(cfg.ListenAddress)
+	if err := checkAdvertisedHost("ServerConfig.ServerURL", cfg.ServerURL, named); err != nil {
+		return nil, err
+	}
+	for i, ep := range cfg.AdvertiseEndpoints {
+		if err := checkAdvertisedHost(fmt.Sprintf("ServerConfig.AdvertiseEndpoints[%d]", i), ep.ServerURL, named); err != nil {
+			return nil, err
+		}
+	}
 	log := cfg.Logger
 	if log == nil {
 		log = packageLogger
 	}
-	return &Server{cfg: cfg, log: log}, nil
+	return &Server{cfg: cfg, log: log, pin: PinnedPublicAddress(cfg.ListenAddress)}, nil
+}
+
+// checkAdvertisedHost refuses a URL the server would announce or build its
+// URLs on (field names it: its ServerURL, an advertise endpoint's
+// LOCATION) whose host is an IP literal of a class the listener does not
+// serve, unless it is the literal dlna.listenAddress names (named): every
+// literal but loopback and an address of a LAN class (IsLANClassAddress) is
+// then refused (B687), so whatever wiring built the configuration, no
+// renderer is handed a URL on a public address the operator did not name.
+// The literal the operator wrote is announced as written, whatever its
+// class: a public one is the opt-in and served (PinnedPublicAddress), and
+// one of another class off the LAN, the tailnet's say, is served by no one,
+// which Start warns of and starts (warnIfPinnedOffTheLAN). A name is taken,
+// as the listener takes a pinned one: what it resolves to is judged when a
+// connection arrives. The refusal names the field and never the value.
+func checkAdvertisedHost(field, raw string, named netip.Addr) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil
+	}
+	a, err := netip.ParseAddr(u.Hostname())
+	if err != nil {
+		return nil
+	}
+	a = a.Unmap().WithZone("")
+	if a.IsLoopback() || IsLANClassAddress(a) || (named.IsValid() && a == named) {
+		return nil
+	}
+	return fmt.Errorf("dlna: %s names an address the listener does not serve: "+
+		"it serves loopback, this host's private and link-local addresses, and a public address only when dlna.listenAddress names it", field)
 }
 
 // Start binds the HTTP listener, mounts handlers, starts serving in
@@ -357,11 +414,6 @@ func (s *Server) Start(ctx context.Context) error {
 	// at request time) always observe non-nil state once serving begins.
 	s.notifyCtx, s.notifyCancel = context.WithCancel(ctx)
 	s.notifyClient = newNotifyClient()
-	if s.served == nil {
-		s.served = newServedAddrs(s.knownOwnHosts().addrs)
-		s.served.interfaces = s.cfg.Interfaces
-		s.served.addrsOf = s.cfg.InterfaceAddresses
-	}
 
 	// On any error return BEFORE the happy tail hands ownership of the
 	// cancel to Stop(), cancel the derived context so the child isn't
@@ -415,12 +467,29 @@ func (s *Server) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("dlna: bind %s: %w", s.cfg.ListenAddress, err)
 	}
+	// The operator's opt-in is the public address the listener bound
+	// (B687). Binding ListenAddress binds it; a listener handed over
+	// (ServerConfig.Listener, a test's) that stands for another address
+	// is refused, so no LOCATION the configuration pinned names an address
+	// the listener does not take.
+	if s.pin.IsValid() && netAddrIP(bound.Addr()).Unmap().WithZone("") != s.pin {
+		_ = bound.Close()
+		return errors.New("dlna: the listener is not bound to the public address dlna.listenAddress names")
+	}
+	if s.served == nil {
+		s.served = newServedAddrs(s.pin)
+		s.served.interfaces = s.cfg.Interfaces
+		s.served.addrsOf = s.cfg.InterfaceAddresses
+	}
 	// The bind is the configured one, a wildcard by default, which takes a
 	// connection on every address of this host: the tailnet's, a VPN's,
-	// another interface's. The listener serves only the LAN-eligible
+	// another interface's, a LAN interface's public one. The listener
+	// serves only the LAN-eligible interfaces' private and link-local
 	// addresses, and closes every other connection unread (servedAddrs,
-	// backlog B48).
+	// backlog B48; B687), unless the bind is the public address the
+	// operator pinned.
 	s.warnIfPinnedOffTheLAN(bound.Addr())
+	s.warnOfAPublicPin()
 	var listener net.Listener = servedOnlyListener{Listener: bound, served: s.served, log: s.log}
 	s.accepting.Store(&acceptState{served: s.served, bound: netAddrIP(bound.Addr()).Unmap()})
 
@@ -568,8 +637,11 @@ type acceptState struct {
 // check at accept: a new LAN address is served a second after it comes up,
 // and one that goes away stays served until the snapshot that held it is
 // servedMaxAge old). Loopback is served; a caller that must not take it
-// refuses it itself. The player's Insert takes an address the DLNA listener
-// accepts on as one of the bridge's own (B470 PR 5a4).
+// refuses it itself. A LAN interface's public address is not served, and
+// the public address dlna.listenAddress pins is (B687). The player's Insert
+// takes an address the DLNA listener accepts on as one of the bridge's own
+// (B470 PR 5a4); its own listener serves no public address whatever DLNA's
+// pins (internal/player/lan).
 func (s *Server) AcceptsOn(a netip.Addr) bool {
 	st := s.accepting.Load()
 	if st == nil || !a.IsValid() {
@@ -598,8 +670,11 @@ func (s *Server) SSDP() *SSDPSubsystem {
 // one, so DLNA serves no one, and before this a pin to the tailnet's address,
 // say, said so only when a connection arrived. bound is the listener's own
 // address, so a name pinned in the config is judged by the address it bound;
-// a wildcard is no pin. It does not refuse to start: an address can become
-// served later, and every refused connection is still logged under its cap.
+// a wildcard is no pin. A public address the config names as a literal is
+// served (warnOfAPublicPin says so instead), and one a name resolves to is
+// not: a name authorizes no public address (B687). It does not refuse to
+// start: an address can become served later, and every refused connection is
+// still logged under its cap.
 func (s *Server) warnIfPinnedOffTheLAN(bound net.Addr) {
 	a := netAddrIP(bound).Unmap()
 	if !a.IsValid() || a.IsUnspecified() {
@@ -614,6 +689,20 @@ func (s *Server) warnIfPinnedOffTheLAN(bound net.Addr) {
 		slog.String("listenAddress", s.cfg.ListenAddress),
 		slog.String("address", a.String()),
 		slog.String("interface", s.served.holderOf(a)))
+}
+
+// warnOfAPublicPin logs, once at Start, a listener dlna.listenAddress pins
+// to a public address, which DLNA serves at the operator's word alone
+// (B687): the library is then reachable without authentication from
+// wherever that address can be reached, the internet included when it
+// routes there. The line names no address: it is the one the operator
+// wrote, and the started line beside it names the listen address.
+func (s *Server) warnOfAPublicPin() {
+	if !s.pin.IsValid() {
+		return
+	}
+	s.log.Warn("dlna.listenAddress names a public address: DLNA serves it, and anyone who can reach that address " +
+		"can browse and stream the library without signing in")
 }
 
 // advertiseEndpoints returns the SSDP advertise set: the configured

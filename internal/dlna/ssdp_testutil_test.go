@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
@@ -40,7 +41,7 @@ func newTestAdvertiser(cfg testAdvertiserConfig) *testAdvertiser {
 func (c testAdvertiserConfig) registration() SSDPRegistration {
 	served := c.served
 	if served == nil {
-		served = newServedAddrs(nil)
+		served = newServedAddrs(netip.Addr{})
 	}
 	return SSDPRegistration{
 		Name:              "DLNA",

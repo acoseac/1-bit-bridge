@@ -425,8 +425,9 @@ type didlEnv struct {
 // URL the renderer should use for file fetches (typically
 // `"http://" + r.Host` since the DLNA listener is HTTP-only on LAN).
 // Injected as a function rather than a static string so the handler
-// adapts to multi-interface deployments (the renderer might dial us
-// via a Tailscale IP on one request and the LAN IP on another).
+// adapts to multi-interface deployments (one renderer dials us on one
+// LAN address, another on a second interface's). The server's Host
+// check runs first, so the host is one the listener serves (B687).
 //
 // `opts` are the server-level switches: WithAlbumArtURIs makes every item
 // and every folder container that holds tracks carry `<upnp:albumArtURI>`

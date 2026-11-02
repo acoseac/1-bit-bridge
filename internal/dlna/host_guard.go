@@ -11,7 +11,7 @@ import (
 
 // errMsgForeignHost is ownHostOnly's refusal body.
 const errMsgForeignHost = "dlna refused: this server answers only to its own addresses " +
-	"(the address in its SSDP LOCATION, or another address of this host)"
+	"(the address in its SSDP LOCATION, or another private or link-local address of this host)"
 
 // hostRefusedSeenCap bounds the set noteForeignHost logs from. A renderer
 // that sends a name it was never given is one entry; a page that rebinds a
@@ -100,8 +100,16 @@ func foldHostName(host string) string {
 //     connection on every one, and an address that came up after Start is
 //     one too. The connection itself was accepted on an address the
 //     server serves (servedOnlyListener, backlog B48), so this judges only
-//     the name the request used: a LAN client that names this host's
-//     tailnet address is answered, over the LAN.
+//     the name the request used.
+//
+// A literal of either kind passes only when it is an address the listener
+// may serve (mayName, B687): of a LAN class (IsLANClassAddress), or the
+// public address dlna.listenAddress pins. This host's other addresses, a
+// public one, a SLAAC one, the tailnet's, are refused though the host holds
+// them: the ContentDirectory builds its URLs on the Host, so a request over
+// a LAN connection that named one was answered with the library's URLs on
+// an address anyone who can route to it could use, and a LAN client that
+// named the tailnet's was answered until then too.
 //
 // A NAME not in that list is refused, this host's own included. A
 // rebinding page's name is exactly such a name, and a name cannot be judged
@@ -109,7 +117,8 @@ func foldHostName(host string) string {
 // control point pointed at this server by a name by hand, or the iOS app's
 // fallback that composes a renderer URL on the paired host when
 // /v1/health.endpoints names no RFC 1918 address (BridgeDLNAURLResolver):
-// both must use an address.
+// both must use an address, of a LAN class unless dlna.listenAddress pins
+// it.
 func (s *Server) ownHostOnly(next http.Handler) http.Handler {
 	known := s.knownOwnHosts()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -146,13 +155,22 @@ func (s *Server) hostIsOwn(hostport string, known ownHosts) bool {
 	if a.IsLoopback() {
 		return true
 	}
+	if !s.mayName(a) {
+		return false
+	}
 	if _, ok := known.addrs[a]; ok {
 		return true
 	}
-	if a.IsUnspecified() {
-		return false
-	}
 	return s.isInterfaceAddr(a)
+}
+
+// mayName reports whether a Host literal may name the address a (unmapped,
+// without a zone) at all: an address of a class the listener serves on its
+// members (IsLANClassAddress), or the public address dlna.listenAddress pins
+// (Server.pin, B687). No other address is one the listener serves, and the
+// unspecified one is none of these.
+func (s *Server) mayName(a netip.Addr) bool {
+	return IsLANClassAddress(a) || (s.pin.IsValid() && a == s.pin)
 }
 
 // isInterfaceAddr reports whether a is assigned to one of this host's

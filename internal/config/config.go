@@ -1802,11 +1802,12 @@ func (c *Config) IsPublic() bool {
 
 // DLNAConfig governs the opt-in DLNA MediaServer the bridge exposes
 // on its own parallel http.Server, for the home network only: the
-// listener and SSDP serve only the LAN-eligible interfaces' addresses,
-// whatever ListenAddress binds, and refuse a tailnet peer (backlog B48).
-// Disabled by default — operators who pair iOS with a DLNA renderer
-// (Chord 2go, Lumin, dCS Network Bridge, etc.) flip Enabled to
-// advertise.
+// listener and SSDP announce and serve only the LAN-eligible interfaces'
+// private and link-local addresses, and refuse a tailnet peer (backlog
+// B48) and a connection on a LAN interface's public address (B687), but
+// for one address ListenAddress names (below). Disabled by default —
+// operators who pair iOS with a DLNA renderer (Chord 2go, Lumin, dCS
+// Network Bridge, etc.) flip Enabled to advertise.
 //
 // **Public deployment refusal**: even when Enabled is true here, the
 // dlna.ShouldEnableDLNA gate in cmd/bridge/main.go REFUSES to bind
@@ -1821,9 +1822,15 @@ type DLNAConfig struct {
 	// ListenAddress is the TCP bind for the DLNA HTTP server.
 	// Default ":7790" — chosen to sit alongside the existing
 	// :7788 (API) / :7789 (admin) range without colliding with
-	// anything else the bridge binds. A wildcard takes a connection on
-	// every address and serves only the LAN-eligible ones; an address
-	// pinned off the LAN (the tailnet's, say) serves nothing.
+	// anything else the bridge binds. A wildcard (any spelling of it)
+	// takes a connection on every address and serves only the
+	// LAN-eligible interfaces' private and link-local ones; an address
+	// pinned off the LAN (the tailnet's, or one in 100.64/10) serves
+	// nothing. A public address written here as an IP literal is the
+	// one way to have DLNA serve a public address (B687): the listener
+	// serves that address alone, and the library is then reachable
+	// without authentication from wherever that address routes, the
+	// internet included. A host name never opts in.
 	ListenAddress string `yaml:"listenAddress,omitempty"`
 
 	// FriendlyName is the DLNA-advertised device name surfaced

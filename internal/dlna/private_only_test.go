@@ -88,8 +88,10 @@ func Test_ownHostOnly_RefusesAnAddressOfThisHostItDoesNotServe(t *testing.T) {
 // address that was not pinned. Until B687 the server served any address it
 // advertised on an eligible interface, and its wiring advertised a LAN
 // interface's public IPv4 address when the interface listed it first. A
-// LAN address, loopback, link-local, a name, and the public address
-// dlna.listenAddress pins (the operator's opt-in) are taken.
+// LAN address, loopback, link-local, a name, and the literal
+// dlna.listenAddress names are taken: a public one is the operator's opt-in,
+// and one of another class (the tailnet's) is the operator's own pin, which
+// serves no one and warns at Start, and starts.
 func TestNewServerRefusesToAdvertiseAnAddressItWouldNotServe(t *testing.T) {
 	base := func(listen, serverURL string, locations ...string) ServerConfig {
 		cfg := ServerConfig{Library: newTestLib(), UDN: "uuid:test-advertise", ListenAddress: listen, ServerURL: serverURL}
@@ -119,6 +121,9 @@ func TestNewServerRefusesToAdvertiseAnAddressItWouldNotServe(t *testing.T) {
 		{"the_pinned_public_address", base("203.0.113.5:7790", "http://203.0.113.5:7790"), true},
 		{"the_pinned_public_address_mapped", base("[::ffff:203.0.113.5]:7790", "http://[::ffff:203.0.113.5]:7790"), true},
 		{"the_pinned_public_ipv6_address", base("[2001:db8::20]:7790", "http://[2001:db8::20]:7790"), true},
+		{"the_tailnets_ipv4_as_the_listen_address_names_it", base("100.64.0.7:7790", "http://100.64.0.7:7790"), true},
+		{"tailscales_ula_as_the_listen_address_names_it", base("[fd7a:115c:a1e0::7]:7790", "http://[fd7a:115c:a1e0::7]:7790"), true},
+		{"the_tailnets_ipv4_beside_another_pin", base("100.64.0.7:7790", "http://100.64.0.8:7790"), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := NewServer(tc.cfg)

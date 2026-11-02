@@ -143,6 +143,65 @@ func lanAddrKindOf(ip net.IP) lanAddrKind {
 // net.IP.IsPrivate does not count it, so it is already a public address.
 var tailscaleULA = netip.MustParsePrefix("fd7a:115c:a1e0::/48")
 
+// sharedAddressSpace is RFC 6598's 100.64.0.0/10: carrier-grade NAT's, and
+// the range Tailscale numbers every node's IPv4 address from. It is neither
+// private nor public, and no address in it is ever the operator's opt-in
+// (PinnedPublicAddress): a tailnet's address cannot be told from an ISP's by
+// the address alone.
+var sharedAddressSpace = netip.MustParsePrefix("100.64.0.0/10")
+
+// IsLANClassAddress reports whether a is an address of a class the DLNA
+// listener serves on a member of the multicast set without an opt-in
+// (B687): an RFC 1918 IPv4 address, an IPv6 ULA outside Tailscale's range,
+// or a link-local one, lanAddrKindOf's private and link-local kinds. It is
+// what the MediaServer's wiring may announce, of an IPv4 address, and of
+// what a Host literal may name besides loopback. A public address, an
+// address in 100.64/10 and Tailscale's ULA are not of a LAN class, on
+// whatever interface they sit.
+func IsLANClassAddress(a netip.Addr) bool {
+	switch lanAddrKindOf(net.IP(a.Unmap().AsSlice())) {
+	case lanAddrPrivate, lanAddrLinkLocal:
+		return true
+	}
+	return false
+}
+
+// PinnedPublicAddress is the address dlna.listenAddress (listenAddress, as
+// host and port) pins when that is the operator's opt-in to serve a public
+// address (B687), unmapped and without a zone, and the zero Addr when it is
+// none. Only an IP literal opts in, and only one that is globally routable:
+// a unicast address that is not private (RFC 1918, fc00::/7, Tailscale's
+// ULA among it), not link-local, not loopback and not in 100.64/10. A
+// wildcard, however it is spelled, names no address; a host name is no
+// opt-in, so what it resolves to is never authorized by it; and a literal of
+// any other class is served, or not, by its class.
+func PinnedPublicAddress(listenAddress string) netip.Addr {
+	a := listenLiteral(listenAddress)
+	if !a.IsGlobalUnicast() || a.IsPrivate() || sharedAddressSpace.Contains(a) {
+		return netip.Addr{}
+	}
+	return a
+}
+
+// listenLiteral is the address a listen address (host and port) names as an
+// IP literal, unmapped and without a zone, whatever its class, and the zero
+// Addr for a wildcard, however it is spelled, a name, or what does not parse.
+func listenLiteral(listenAddress string) netip.Addr {
+	host, _, err := net.SplitHostPort(listenAddress)
+	if err != nil {
+		return netip.Addr{}
+	}
+	a, err := netip.ParseAddr(host)
+	if err != nil {
+		return netip.Addr{}
+	}
+	a = a.Unmap().WithZone("")
+	if a.IsUnspecified() {
+		return netip.Addr{}
+	}
+	return a
+}
+
 // isTailscaleULA reports whether ip is in tailscaleULA.
 func isTailscaleULA(ip net.IP) bool {
 	addr, ok := netip.AddrFromSlice(ip)
@@ -260,8 +319,10 @@ func lanCandidates(ifaces []net.Interface, addrsOf interfaceAddrs, opts Eligibil
 }
 
 // carriesIPv4 reports whether addrs hold an IPv4 address other than loopback
-// and unspecified, a link-local 169.254/16 one included: the rule by which
-// cmd/bridge's firstIPv4OnInterface picks an SSDP advertiser's address.
+// and unspecified, a link-local 169.254/16 one included. A member whose only
+// IPv4 address is public stays in the set, where the discovery clients run;
+// cmd/bridge's firstLANIPv4OnInterface gives it no SSDP advertiser, whose
+// address must be private or link-local (B687).
 func carriesIPv4(addrs []net.Addr) bool {
 	for _, addr := range addrs {
 		if v4 := ipFromAddr(addr).To4(); v4 != nil && !v4.IsLoopback() && !v4.IsUnspecified() {

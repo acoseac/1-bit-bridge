@@ -270,13 +270,15 @@ func TestTheMediaServerAnnouncesEachEndpointInItsOrder(t *testing.T) {
 // Interface and ServerURL): the LOCATION is ServerURL and the description's
 // path, the host exactly as the wiring wrote it, an IPv4 literal, a
 // bracketed IPv6 literal or a name. SSDP itself stays IPv4: the bursts go
-// to the IPv4 group whatever the LOCATION names.
+// to the IPv4 group whatever the LOCATION names. The IPv6 literal is a ULA:
+// a global one is announced only as the address the listener is pinned to
+// (B687), and this listener is on loopback.
 func TestTheMediaServerAnnouncesItsServerURLAsWritten(t *testing.T) {
 	lo := loopbackInterface(t)
 	capture := ssdpGroupCapture(t, lo)
 	for _, tc := range []struct{ name, host string }{
 		{"ipv4_literal", "192.168.1.42"},
-		{"ipv6_literal", "[2001:db8::42]"},
+		{"ipv6_literal", "[fd12:3456::42]"},
 		{"host_name", "nas.local"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
