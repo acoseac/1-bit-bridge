@@ -116,6 +116,39 @@ func platformMedium(root string, mountID uint64) error {
 	return platformInspect(root, mountID).Err
 }
 
+// ErrRootNotADirectory is what InspectMedium's error matches for a root that
+// is there and is not a directory, which the strict writer refuses too
+// (checkPath): one whose links lead to a regular file, or to any other entry
+// that is not a directory, and one that is a symbolic link whose links lead
+// to nothing. The error is a *RootNotADirectoryError, which says which.
+var ErrRootNotADirectory = errors.New("atomicwrite: the root is not a directory")
+
+// RootNotADirectoryError is InspectMedium's error for a root that is there
+// and is not a directory (ErrRootNotADirectory): Root, the root made
+// absolute; Target, where its links lead, Root itself for a root that is no
+// link, and "" for a link that leads to nothing; and Kind, what stands at
+// Target ("regular file", "named pipe", …), "" for a link to nothing.
+type RootNotADirectoryError struct {
+	Root   string
+	Target string
+	Kind   string
+}
+
+func (e *RootNotADirectoryError) Error() string {
+	switch {
+	case e.Target == "":
+		return fmt.Sprintf("%s is a symbolic link to nothing", e.Root)
+	case e.Target == e.Root:
+		return fmt.Sprintf("%s is a %s, not a directory", e.Root, e.Kind)
+	}
+	return fmt.Sprintf("%s leads to %s, a %s, not a directory", e.Root, e.Target, e.Kind)
+}
+
+// Is makes a *RootNotADirectoryError match ErrRootNotADirectory, and no
+// other error: a link to nothing is there, so it never reads as
+// fs.ErrNotExist, a root not made yet.
+func (e *RootNotADirectoryError) Is(target error) bool { return target == ErrRootNotADirectory }
+
 // InspectMedium is the medium check the strict writer makes of root, for a
 // caller that reports what it finds rather than writes (bridge doctor): root
 // made absolute and its links resolved, as the writer resolves a root, the

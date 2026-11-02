@@ -43,6 +43,46 @@ func (e *serveDataDirHeldError) Error() string {
 	return fmt.Sprintf("%s is already running on the data dir %s", holder, e.dataDir)
 }
 
+// dataDirUnusableError is prepareServeDataDir's refusal of a data dir it
+// cannot make, or that is not a directory once made: why says what stands
+// in the way, and err is the error that showed it, which errors.Is and
+// errors.As reach.
+type dataDirUnusableError struct {
+	dataDir string
+	why     string
+	err     error
+}
+
+func (e *dataDirUnusableError) Error() string {
+	return fmt.Sprintf("the data directory %s cannot be used: %s", e.dataDir, e.why)
+}
+
+func (e *dataDirUnusableError) Unwrap() error { return e.err }
+
+// dataDirUnlockedError is lockServeDataDir's answer when no lock could be
+// taken on a data dir that is there and no other open holds the lock:
+// lockPath is the lock file, noLocks says that TryLock's answer was one
+// fsutil.KeepsNoLocks reads, and err is that answer, or the lock file's
+// open that failed.
+type dataDirUnlockedError struct {
+	lockPath string
+	noLocks  bool
+	err      error
+}
+
+func (e *dataDirUnlockedError) Error() string {
+	return fmt.Sprintf("could not lock %s (%v)", e.lockPath, e.err)
+}
+
+func (e *dataDirUnlockedError) Unwrap() error { return e.err }
+
+// prepareServeDataDir makes the data dir where it is missing, run as root
+// giving each directory it makes the owner of the directory it is made in
+// (fsutil.MkdirAll).
+func prepareServeDataDir(dataDir string) error {
+	return fsutil.MkdirAll(dataDir, 0o700)
+}
+
 // lockServeDataDir takes the lock that keeps a second `bridge serve` off a
 // data dir a live one serves, and returns what releases it. runServe asks
 // before its first write to the data dir and before it binds anything: a
@@ -68,10 +108,20 @@ func (e *serveDataDirHeldError) Error() string {
 // clear-missing` hold this same lock for their whole run
 // (holdDataDirForMutation).
 func lockServeDataDir(dataDir string) (release func(), err error) {
+	return lockServeDataDirWith(dataDir, nil)
+}
+
+// lockServeDataDirWith is lockServeDataDir taking the lock with try, nil
+// being fsutil.TryLock: a boot test's stand-in for what the filesystem
+// answers (serveOpts.dataDirTryLock).
+func lockServeDataDirWith(dataDir string, try func(*os.File) error) (release func(), err error) {
 	release = func() {
 		// Nothing to release: no lock has been taken.
 	}
-	if err := fsutil.MkdirAll(dataDir, 0o700); err != nil {
+	if try == nil {
+		try = fsutil.TryLock
+	}
+	if err := prepareServeDataDir(dataDir); err != nil {
 		return release, err
 	}
 	// The data dir's owner's file, never followed out of the data dir,
@@ -81,7 +131,7 @@ func lockServeDataDir(dataDir string) (release func(), err error) {
 	if err != nil {
 		return release, err
 	}
-	if err := fsutil.TryLock(f); err != nil {
+	if err := try(f); err != nil {
 		_ = f.Close()
 		if errors.Is(err, fsutil.ErrLocked) {
 			return release, &serveDataDirHeldError{dataDir: dataDir, pid: recordedServePID(dataDir)}

@@ -2645,6 +2645,12 @@ type serveOpts struct {
 	// where the port already accepts and the console does not yet
 	// (backlog B313).
 	beforeAdminServe func()
+	// dataDirTryLock stands in for fsutil.TryLock on the data dir's lock
+	// file (lockServeDataDirWith). Nil (the kernel's answer) everywhere
+	// but the boot tests, which answer what a filesystem that keeps no
+	// locks, or one that fails, answers. Per invocation for tailscaleCLI's
+	// reason.
+	dataDirTryLock func(*os.File) error
 	// localOutputsGOOS stands in for runtime.GOOS in the localOutputs
 	// gate (api.LocalOutputsConfig.GOOS), which GET /v1/outputs and the
 	// loopback track route answer to and which is true on Linux only.
@@ -3066,7 +3072,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// the updater's boot marker, the sweepers and the startup scan all
 	// come after this line. Everything above it only reads. Released last,
 	// after every teardown registered below it has run.
-	releaseDataDir, lockErr := lockServeDataDir(cfg.DataDir)
+	releaseDataDir, lockErr := lockServeDataDirWith(cfg.DataDir, opts.dataDirTryLock)
 	var heldErr *serveDataDirHeldError
 	switch {
 	case errors.As(lockErr, &heldErr):

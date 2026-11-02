@@ -3,6 +3,7 @@ package manifest
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -45,10 +46,13 @@ var (
 var errLadderLockTimeout = errors.New("timed out waiting for another process's migration of the database")
 
 // ladderLockWaiting runs once when an opener finds the ladder lock held
-// and starts to wait. Nil in production.
+// and starts to wait. Nil in production. ladderTryLock takes the lock:
+// fsutil.TryLock in production, and a test's stand-in for what a filesystem
+// that keeps no locks, or one that fails, answers.
 var (
 	ladderLockHookMu  sync.Mutex
 	ladderLockWaiting func(path string)
+	ladderTryLock     = fsutil.TryLock
 )
 
 func setLadderLockWaiting(fn func(string)) func() {
@@ -61,6 +65,25 @@ func setLadderLockWaiting(fn func(string)) func() {
 		ladderLockWaiting = prev
 		ladderLockHookMu.Unlock()
 	}
+}
+
+func setLadderTryLock(fn func(*os.File) error) func() {
+	ladderLockHookMu.Lock()
+	prev := ladderTryLock
+	ladderTryLock = fn
+	ladderLockHookMu.Unlock()
+	return func() {
+		ladderLockHookMu.Lock()
+		ladderTryLock = prev
+		ladderLockHookMu.Unlock()
+	}
+}
+
+func tryLadderLock(f *os.File) error {
+	ladderLockHookMu.Lock()
+	try := ladderTryLock
+	ladderLockHookMu.Unlock()
+	return try(f)
 }
 
 func callLadderLockWaiting(path string) {
@@ -109,7 +132,7 @@ func lockLadder(dbPath string) (release func(), err error) {
 	start := time.Now()
 	waiting, said := false, false
 	for {
-		err := fsutil.TryLock(f)
+		err := tryLadderLock(f)
 		if err == nil {
 			return func() {
 				// Unlock before the close: on Windows the release a close
