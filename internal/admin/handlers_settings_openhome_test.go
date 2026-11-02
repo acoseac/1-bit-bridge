@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
 // settingsCallbacks counts the hot-apply callbacks the settings PATCH runs
@@ -15,6 +16,69 @@ import (
 type settingsCallbacks struct {
 	mu                                          sync.Mutex
 	mdns, tailscale, duplicates, cadence, sweep int
+}
+
+// TestSettingsValidationPrecedesOpenHomePortClash checks the whole settings
+// write, including the file, published snapshot and hot-apply callbacks.
+func TestSettingsValidationPrecedesOpenHomePortClash(t *testing.T) {
+	for _, tc := range []struct {
+		name, patch, field string
+		status             int
+		code               string
+		savedAddress       string
+	}{
+		{"invalid admin address on clashing port", `{"adminAddress":"192.0.2.1:7792"}`, "adminAddress", http.StatusBadRequest, "validate", ""},
+		{"invalid interval with clashing listen address", `{"listenAddress":":7792","scanIntervalSec":-1}`, "scanIntervalSec", http.StatusBadRequest, "validate", ""},
+		{"valid clashing listen address", `{"listenAddress":":7792"}`, "listenAddress", http.StatusConflict, "openhome-port-clash", ""},
+		{"valid nonclashing listen address", `{"listenAddress":":7793","customEndpoints":["http://not-https.example","https://bridge.example:7788/"]}`, "", http.StatusOK, "", ":7793"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _, cfgPath := newPlayerTestServer(t)
+			writePlayerConfig(t, srv, cfgPath, "output:\n  player:\n    enabled: true\n    openhome: true\n")
+			var calls settingsCallbacks
+			calls.wire(srv)
+			h := srv.Handler()
+			before, held := readFileOrNil(cfgPath), srv.deps.CfgHolder.Load()
+			logs := loggingtest.Record(t)
+
+			status, body := playerRequest(t, h, http.MethodPatch, "/api/settings", tc.patch, nil)
+			if status != tc.status || (tc.code != "" && errorCode(body) != tc.code) ||
+				(tc.field != "" && !strings.Contains(body, tc.field)) {
+				t.Errorf("PATCH %s = %d: %s; want %d %s naming %s", tc.patch, status, body, tc.status, tc.code, tc.field)
+			}
+			if tc.savedAddress == "" {
+				if got := readFileOrNil(cfgPath); !bytes.Equal(got, before) {
+					t.Errorf("refused PATCH changed the file:\n%s", got)
+				}
+				if srv.deps.CfgHolder.Load() != held {
+					t.Error("refused PATCH changed the published config")
+				}
+				if got := calls.counts(); got != [5]int{} {
+					t.Errorf("refused PATCH ran hot-apply callbacks: %v", got)
+				}
+				if got := logs.Lines("output.player: the player is off"); len(got) != 0 {
+					t.Errorf("refused clone logged player-off: %v", got)
+				}
+				return
+			}
+			if got := srv.deps.CfgHolder.Load().ListenAddress; got != tc.savedAddress {
+				t.Errorf("published listenAddress = %q, want %q", got, tc.savedAddress)
+			}
+			saved, err := config.Load(cfgPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if saved.ListenAddress != tc.savedAddress {
+				t.Errorf("saved listenAddress = %q, want %q", saved.ListenAddress, tc.savedAddress)
+			}
+			if len(saved.CustomEndpoints) != 1 || saved.CustomEndpoints[0] != "https://bridge.example:7788/" {
+				t.Errorf("saved customEndpoints = %v, want the HTTPS entry with the invalid one pruned", saved.CustomEndpoints)
+			}
+			if got := logs.Lines("dropped invalid custom endpoint"); len(got) != 1 {
+				t.Errorf("saved candidate logged %v prune warnings, want one", len(got))
+			}
+		})
+	}
 }
 
 // wire hands srv the counting callbacks.
