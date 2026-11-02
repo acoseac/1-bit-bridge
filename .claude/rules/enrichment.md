@@ -283,6 +283,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestASubmitToTheOldBaseLeavesTheNewBasesFirstSubmitDue`). **Don't give either setter a
   form without the base**: the "Retry missing" reset passes the base it reads, and a switch
   in between has already zeroed the stamp it resets.
+- **An Atlas submit abandoned by the harvest loop's shutdown reports no HTTP-leg failure and cannot wipe its credential** (B538). `doCapped` asks the loop context, never the per-request context: a transport error, empty answer or failed body read after loop cancellation is the stop, while a 500 or malformed complete JSON remains a failure even then. `handleErr` refuses to wipe on an abandoned 401. Keep the classification at this HTTP leg; `ctxerr.WithoutCancellation` still reports unrelated errors that merely arrive after cancellation. `TestSubmitHTTPAnswerAfterShutdown` and `TestSubmitHTTPClassifiesOnlyAbandonedReads` pin it.
 - **A release-search miss must not cost the track its artist resolution** — the
   two halves are independent and the artist search is the cheap reliable one.
 - **`ResetEnrichedMisses` tests THREE arms — artwork, artist AND release MBID.**
