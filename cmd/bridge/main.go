@@ -46,7 +46,6 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/atlasharvest"
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
-	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
@@ -2651,6 +2650,14 @@ type serveOpts struct {
 	// locks, or one that fails, answers. Per invocation for tailscaleCLI's
 	// reason.
 	dataDirTryLock func(*os.File) error
+	// playerStatePreflight stands in for the player's state preflight
+	// (playerStatePreflight), which serve calls once its data dir is
+	// prepared and its lock tried, whether or not the lock was taken. Nil
+	// (the bridge's own) everywhere but the boot tests, which fail on a
+	// call where serve must refuse before the player's state is touched,
+	// or record what the call found. Per invocation for tailscaleCLI's
+	// reason.
+	playerStatePreflight func(dataDir string, lockHeld bool) error
 	// localOutputsGOOS stands in for runtime.GOOS in the localOutputs
 	// gate (api.LocalOutputsConfig.GOOS), which GET /v1/outputs and the
 	// loopback track route answer to and which is true on Linux only.
@@ -3112,17 +3119,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	dataDirLock := newDataDirHold(releaseDataDir)
 	defer dataDirLock.done()
 	// Adopt pre-floor identities before any live backup can run, even with
-	// playback disabled. A pristine box still gets no player identity here.
-	var playerStateErr error
-	if lockErr == nil {
-		if err := backup.AdoptPlayerState(cfg.DataDir); err != nil {
-			playerStateErr = err
-		} else {
-			playerStateErr = backup.CheckPlayerStart(cfg.DataDir)
-		}
-		if playerStateErr != nil {
-			playerLog.Warn("player: not started", "reason", playerStateErr.Error())
-		}
+	// playback disabled, under the data dir's lock alone. A pristine box
+	// still gets no player identity here.
+	preflight := playerStatePreflight
+	if opts.playerStatePreflight != nil {
+		preflight = opts.playerStatePreflight
+	}
+	playerStateErr := preflight(cfg.DataDir, lockErr == nil)
+	if playerStateErr != nil {
+		playerLog.Warn("player: not started", "reason", playerStateErr.Error())
 	}
 
 	// Resolve TLS material (default: dataDir/server.{crt,key}; overridable

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
@@ -245,6 +246,22 @@ func lockServeDataDirWith(dataDir string, try func(*os.File) error) (release fun
 		_ = fsutil.Unlock(f)
 		_ = f.Close()
 	}, nil
+}
+
+// playerStatePreflight is serve's preflight of the player's state files, run
+// once the data dir is prepared and its lock tried, the player on or off: it
+// adopts a pre-floor identity (backup.AdoptPlayerState) and checks that the
+// player may start (backup.CheckPlayerStart), under the data dir's lock alone
+// (lockHeld), and does nothing without it. Its error turns the player off
+// with that reason, and never stops serve.
+func playerStatePreflight(dataDir string, lockHeld bool) error {
+	if !lockHeld {
+		return nil
+	}
+	if err := backup.AdoptPlayerState(dataDir); err != nil {
+		return err
+	}
+	return backup.CheckPlayerStart(dataDir)
 }
 
 // dataDirHold is serve's lock on its data directory (lockServeDataDir),
