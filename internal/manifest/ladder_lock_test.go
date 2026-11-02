@@ -27,7 +27,12 @@ import (
 // whose ladder ended there left it.
 func databaseAtVersion(t *testing.T, head int) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), fmt.Sprintf("v%d.db", head))
+	return databaseAtVersionAt(t, filepath.Join(t.TempDir(), fmt.Sprintf("v%d.db", head)), head)
+}
+
+// databaseAtVersionAt is databaseAtVersion at path.
+func databaseAtVersionAt(t *testing.T, path string, head int) string {
+	t.Helper()
 	db, err := sql.Open("sqlite", dsn.File(path, "_pragma=journal_mode(WAL)"))
 	if err != nil {
 		t.Fatal(err)

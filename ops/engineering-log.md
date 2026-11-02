@@ -69705,7 +69705,9 @@ copy can run the whole suite). On the seams alone:
   (`TestServeDisarmsTheEarlyRollbackBeforeItsFirstStoreAccess`: no record
   after the first boot), the disarm's failure ignored
   (`TestServeDoesNotStartWhereItCannotDisarmTheEarlyRollback` reached TLS),
-  the record's failure (`TestServeRestoresTheBackupEvenWhereItCannotRecordTheRefusal`),
+  the record's failure (a test that restored the backup whether or not the
+  hold was recorded; round 2 below turned it into
+  `TestServeLeavesTheBackupWhereItCannotRecordTheHold`),
   the boot rollback restoring over another version's store
   (`TestTheBootRollbackLeavesABackupOnceAnotherVersionOpenedTheDataDir`), the
   console's Held update row empty

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/dsn"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/supervision"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
@@ -226,8 +228,13 @@ func TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if st.Status == "installing" || st.RejectedVersion != version.ServerVersion || st.RejectedConfigDigest == "" {
+			if st.Status != "" || st.RejectedVersion != version.ServerVersion || st.RejectedConfigDigest == "" {
 				t.Errorf("the marker does not hold this version back for these settings: %+v", st)
+			}
+			// The restored binary's boot, whatever its version, keeps it: an
+			// install marker is what 0.2.1's and 0.2.2's boot clears.
+			if got := updater.DecideBootAction(st, previousVersion, time.Now().UTC()); got != updater.BootNoop {
+				t.Errorf("the restored binary's boot over the marker = %v, want BootNoop", got)
 			}
 			for _, s := range tc.says {
 				if !strings.Contains(st.RejectedReason, s) {
@@ -326,6 +333,13 @@ func TestServeLeavesAnInstallItCannotProveAsItIs(t *testing.T) {
 			r.writeSettings(t, "dataDir: "+filepath.Join(r.dir, "moved")+"\n", "scanIntervalSec: 010\n")
 		}},
 		{name: "a restore that fails", lay: func(t *testing.T, r *refusedInstall) {}, says: "could not put"},
+		{name: "a rollback stopped before its rename, with no backup left", lay: func(t *testing.T, r *refusedInstall) {
+			r.marker = rollbackStoppedBeforeItsRename(r.marker)
+			r.saveMarker(t, r.dataDir)
+			if err := os.Remove(r.bak); err != nil {
+				t.Fatal(err)
+			}
+		}, says: "backup"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -425,20 +439,216 @@ func TestServeDoesNotStartWhereItCannotDisarmTheEarlyRollback(t *testing.T) {
 	requireNoStoreOpened(t, r.dataDir)
 }
 
-func TestServeRestoresTheBackupEvenWhereItCannotRecordTheRefusal(t *testing.T) {
+// The hold is recorded before the backup is put back (backlog B613's round
+// 2, Codex's finding 5 and Argon's): the backup restored is 0.2.1 or 0.2.2,
+// whose boot reads an install marker it cannot finish (its binary is not the
+// version the marker names, and the backup is gone) as an install that
+// failed, and clears it. A rollback that renamed first and then could not
+// record the hold, or stopped between the two, left that binary free to
+// install this version again, unchecked. So the hold goes first, in a form
+// that binary's boot keeps (State.RollbackStarted, Status ""); a hold that
+// cannot be recorded leaves the install as it is; and a start of this version
+// that finds the hold recorded and the backup not back finishes the rollback.
+
+// rollbackStoppedBeforeItsRename is st, an install marker, as the early
+// rollback writes it just before it renames the backup back.
+func rollbackStoppedBeforeItsRename(st updater.State) updater.State {
+	st.Status, st.RollbackStarted = "", true
+	st.RejectedVersion = st.TargetVersion
+	st.RejectedReason = st.TargetVersion + " refused this bridge's settings at its first start and was rolled back to " + st.PreviousVersion
+	st.RejectedConfigDigest = "a digest of the settings"
+	return st
+}
+
+func TestServeLeavesTheBackupWhereItCannotRecordTheHold(t *testing.T) {
 	r := newRefusedInstall(t, "scanIntervalSec: 010\n")
+	files := watch(t, r.bin, r.bak, updater.StatePath(r.dataDir))
 	code, stderr := r.serve(t, serveOpts{saveUpdateState: func(string, updater.State) error {
 		return errors.New("the disk is full")
 	}})
+	if code != 2 {
+		t.Fatalf("serve = %d, want 2, the config refusal as today: a backup put back with no hold recorded installs this version again; stderr=%s",
+			code, stderr)
+	}
+	files.requireUnchanged(t)
+	if said := updaterLines(stderr); !strings.Contains(said, "not rolling back") || !strings.Contains(said, "the disk is full") {
+		t.Errorf("serve did not say the hold could not be recorded, so the backup stays; its updater lines: %q", said)
+	}
+}
+
+func TestTheHoldIsRecordedBeforeTheBackupIsPutBack(t *testing.T) {
+	r := newRefusedInstall(t, "scanIntervalSec: 010\n")
+	var atRename updater.State
+	code, stderr := r.serve(t, serveOpts{restoreBackup: func(binaryPath, suffix string) error {
+		st, err := updater.LoadState(r.dataDir)
+		if err != nil {
+			t.Error(err)
+		}
+		atRename = st
+		return updater.RollbackBinary(binaryPath, suffix)
+	}})
 	if code != supervision.RestartExitCode {
-		t.Fatalf("serve = %d, want %d: the backup is back whether or not the hold is recorded; stderr=%s",
+		t.Fatalf("serve = %d, want %d; stderr=%s", code, supervision.RestartExitCode, stderr)
+	}
+	if atRename.RejectedVersion != version.ServerVersion || atRename.RejectedConfigDigest == "" || !atRename.RollbackStarted {
+		t.Errorf("the marker as the backup was put back = %+v, want this version held back for these settings already", atRename)
+	}
+	// Should the rename land and nothing after it, the restored binary's boot
+	// must keep the hold.
+	if got := updater.DecideBootAction(atRename, previousVersion, time.Now().UTC()); got != updater.BootNoop {
+		t.Errorf("the restored binary's boot over the marker as the backup was put back = %v, want BootNoop", got)
+	}
+}
+
+func TestAStartFinishesARollbackStoppedBeforeItsRename(t *testing.T) {
+	r := newRefusedInstall(t, "scanIntervalSec: 010\n")
+	r.marker = rollbackStoppedBeforeItsRename(r.marker)
+	r.saveMarker(t, r.dataDir)
+	code, stderr := r.serve(t, serveOpts{})
+	if code != supervision.RestartExitCode {
+		t.Fatalf("serve = %d, want %d: the hold is recorded and the backup not back, so this start puts it back; stderr=%s",
 			code, supervision.RestartExitCode, stderr)
 	}
 	if got := reportedVersion(t, r.bin); !strings.Contains(got, previousVersion) {
 		t.Errorf("the binary reports %q, want %s", got, previousVersion)
 	}
-	if !strings.Contains(updaterLines(stderr), "the disk is full") {
-		t.Errorf("serve did not say the hold could not be recorded; stderr=%s", stderr)
+	st, err := updater.LoadState(r.dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Status != "" || st.RejectedVersion != version.ServerVersion || st.RejectedConfigDigest == "" ||
+		!strings.Contains(st.RejectedReason, "leading zero") {
+		t.Errorf("the marker after the rollback = %+v, want this version held back for these settings", st)
+	}
+}
+
+// TestACommandThatMigratesTheStoreDisarmsTheEarlyRollback: a command other
+// than serve can be the first of the new version to open the store, and its
+// open migrates it (`bridge manifest clear-missing` here; doctor, a scan or a
+// backup alike). Its settings load where serve's later may not, by an edit or
+// another environment, and the early rollback must not then put back a
+// backup that predates the migration (backlog B613's round 2, Codex's
+// finding 1).
+func TestACommandThatMigratesTheStoreDisarmsTheEarlyRollback(t *testing.T) {
+	r := newRefusedInstall(t, "")
+	// The store as the previous version left it, one migration behind: made
+	// with no install armed, so the open that makes it records nothing.
+	if err := updater.ClearState(r.dataDir); err != nil {
+		t.Fatal(err)
+	}
+	storeOneMigrationBehind(t, r.dataDir)
+	r.saveMarker(t, r.dataDir)
+
+	var out, errOut bytes.Buffer
+	if code := manifestCmd(t.Context(), []string{"clear-missing", "--yes", "--config", r.cfg}, strings.NewReader(""), &out, &errOut); code != 0 {
+		t.Fatalf("manifest clear-missing = %d; stderr=%s", code, errOut.String())
+	}
+	st, err := updater.LoadState(r.dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.DataDirOpenedBy != version.ServerVersion {
+		t.Fatalf("the marker after a command migrated the store = %+v, want it to record that %s opened the data dir", st, version.ServerVersion)
+	}
+
+	r.writeSettings(t, "dataDir: "+r.dataDir+"\n", "scanIntervalSec: 010\n")
+	files := watch(t, r.bin, r.bak)
+	code, stderr := r.serve(t, serveOpts{})
+	if code != 2 {
+		t.Fatalf("serve = %d, want 2: the backup predates the store's migration; stderr=%s", code, stderr)
+	}
+	files.requireUnchanged(t)
+	if !strings.Contains(updaterLines(stderr), "opened the data dir") {
+		t.Errorf("serve did not say why it kept the new binary; stderr=%s", stderr)
+	}
+}
+
+// storeOneMigrationBehind makes the store in dataDir and sets it back one
+// step of the ladder, which runs again at the next open: every step is
+// idempotent.
+func storeOneMigrationBehind(t *testing.T, dataDir string) {
+	t.Helper()
+	s, err := manifest.OpenStore(manifest.DefaultDBPath(dataDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", dsn.File(manifest.DefaultDBPath(dataDir), "_pragma=busy_timeout(5000)"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var v int
+	if err := raw.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, v-1)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestTheBootKeepsARecordedHoldWhereItClearsAnInstall: each boot step that
+// clears an install marker (the backup's cleanup after a confirmed install,
+// an install past the boot window, one that never reached its swap, one that
+// did not come up) keeps a hold recorded beside it, which is about another
+// version and the settings, not the install; dropping it costs one more
+// download and check of a version that refuses them (backlog B613's round
+// 2, Codex's finding 7).
+func TestTheBootKeepsARecordedHoldWhereItClearsAnInstall(t *testing.T) {
+	hold := updater.State{RejectedVersion: "9.9.9", RejectedReason: "9.9.9 refuses this bridge's settings: line 4: x",
+		RejectedConfigDigest: "a digest of the settings"}
+	now := time.Now().UTC()
+	cases := []struct {
+		name   string
+		marker updater.State
+		// bakGone says the boot step removes or restores the backup.
+		bakGone bool
+	}{
+		{name: "the backup's cleanup after a confirmed install", bakGone: true,
+			marker: updater.State{Status: "installed", TargetVersion: version.ServerVersion, PreviousVersion: previousVersion,
+				AttemptedAt: now.Add(-time.Hour), InstalledAt: now.Add(-time.Minute), SwapStarted: true}},
+		{name: "an install past the boot window",
+			marker: updater.State{Status: "installing", TargetVersion: "9.9.8", PreviousVersion: previousVersion,
+				AttemptedAt: now.Add(-updater.RecencyWindow() - time.Hour), SwapStarted: true}},
+		{name: "an install that never reached its swap",
+			marker: updater.State{Status: "installing", TargetVersion: "9.9.8", PreviousVersion: previousVersion,
+				AttemptedAt: now.Add(-time.Minute)}},
+		{name: "an install that did not come up", bakGone: true,
+			marker: updater.State{Status: "installing", TargetVersion: "9.9.8", PreviousVersion: previousVersion,
+				AttemptedAt: now.Add(-time.Minute), SwapStarted: true}},
+		{name: "an install that did not come up, the data dir opened since",
+			marker: updater.State{Status: "installing", TargetVersion: "9.9.8", PreviousVersion: previousVersion,
+				AttemptedAt: now.Add(-time.Minute), SwapStarted: true, DataDirOpenedBy: "9.9.8"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			dataDir, bin := filepath.Join(dir, "data"), filepath.Join(dir, "bridge")
+			for path, body := range map[string]string{bin: "the running binary", bin + ".bak": "the backup"} {
+				if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			st := tc.marker
+			st.RejectedVersion, st.RejectedReason, st.RejectedConfigDigest = hold.RejectedVersion, hold.RejectedReason, hold.RejectedConfigDigest
+			if err := updater.SaveState(dataDir, st); err != nil {
+				t.Fatal(err)
+			}
+			var stderr bytes.Buffer
+			maybeRollbackOnBoot(&stderr, dataDir, bin)
+			if _, err := os.Lstat(bin + ".bak"); tc.bakGone != os.IsNotExist(err) {
+				t.Fatalf("the backup after the boot step: lstat %v, want it gone %v; stderr=%s", err, tc.bakGone, stderr.String())
+			}
+			got, err := updater.LoadState(dataDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != hold {
+				t.Errorf("the marker after the boot step = %+v, want the hold alone, %+v; stderr=%s", got, hold, stderr.String())
+			}
+		})
 	}
 }
 

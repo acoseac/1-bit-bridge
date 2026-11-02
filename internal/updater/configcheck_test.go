@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -198,6 +199,46 @@ func TestConfigDigestFollowsTheFileAndTheBridgeVariables(t *testing.T) {
 	}
 }
 
+// TestTheSettingsDigestReadsTheBridgeVariablesAsThePlatformNamesThem: on
+// Windows an environment name compares without regard to case, so config's
+// overrides read a BRIDGE_ variable set as bridge_data_dir, and the digest
+// must count it, under one spelling whichever was set. Elsewhere the name is
+// the bytes, and bridge_data_dir is no setting.
+func TestTheSettingsDigestReadsTheBridgeVariablesAsThePlatformNamesThem(t *testing.T) {
+	environ := []string{"bridge_data_dir=/srv/data", "Bridge_Scan_Interval_Sec=10", "BRIDGE_LISTEN_ADDRESS=:7788",
+		"BRIDGE_EMPTY=", "bridge_empty_too=", "PATH=/bin", "=C:=C:\\"}
+	if got, want := bridgeEnvironment(environ, true),
+		[]string{"BRIDGE_DATA_DIR=/srv/data", "BRIDGE_LISTEN_ADDRESS=:7788", "BRIDGE_SCAN_INTERVAL_SEC=10"}; !slices.Equal(got, want) {
+		t.Errorf("names that fold case: %q, want %q", got, want)
+	}
+	if got, want := bridgeEnvironment(environ, false), []string{"BRIDGE_LISTEN_ADDRESS=:7788"}; !slices.Equal(got, want) {
+		t.Errorf("names that are their bytes: %q, want %q", got, want)
+	}
+
+	cfg := filepath.Join(t.TempDir(), "bridge.yaml")
+	if err := os.WriteFile(cfg, []byte("scanIntervalSec: 010\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest := func(environ []string, foldCase bool) string {
+		t.Helper()
+		d, err := configDigest(cfg, environ, foldCase)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	lower, upper := []string{"bridge_data_dir=/srv/data"}, []string{"BRIDGE_DATA_DIR=/srv/data"}
+	if digest(lower, true) == digest(nil, true) {
+		t.Error("on Windows, a BRIDGE_ variable set in lower case did not change the digest")
+	}
+	if digest(lower, true) != digest(upper, true) {
+		t.Error("on Windows, one variable set in two cases gave two digests")
+	}
+	if digest(lower, false) != digest(nil, false) {
+		t.Error("elsewhere, a variable config does not read changed the digest")
+	}
+}
+
 func TestHeldBackHoldsARefusedVersionOnlyWhileTheSettingsAreUnchanged(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "bridge.yaml")
@@ -269,6 +310,22 @@ func TestEarlyRollbackProvesTheInstallFirst(t *testing.T) {
 		{"dated in the future", func(s *State) { s.AttemptedAt = now.Add(time.Hour) }, false, "future"},
 		{"a step of the clock", func(s *State) { s.AttemptedAt = now.Add(30 * time.Second) }, true, ""},
 		{"the data dir opened since", func(s *State) { s.DataDirOpenedBy = "0.2.3" }, false, "opened the data dir"},
+		// The early rollback's own record, written just before its rename: a
+		// start of this version that finds it was stopped before the backup
+		// was back, and finishes the rollback.
+		{"a rollback stopped before its rename", stoppedRollback, true, ""},
+		{"a rollback stopped before its rename, past the window", func(s *State) {
+			stoppedRollback(s)
+			s.AttemptedAt = now.Add(-recencyWindow - time.Second)
+		}, false, "older"},
+		{"a rollback stopped before its rename, the data dir opened since", func(s *State) {
+			stoppedRollback(s)
+			s.DataDirOpenedBy = "0.2.3"
+		}, false, "opened the data dir"},
+		{"a hold alone", func(s *State) { *s = State{RejectedVersion: "0.2.3"} }, false, ""},
+		{"an install already confirmed that says a rollback started", func(s *State) {
+			s.Status, s.RollbackStarted = "installed", true
+		}, false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := armed
@@ -279,6 +336,14 @@ func TestEarlyRollbackProvesTheInstallFirst(t *testing.T) {
 			}
 		})
 	}
+}
+
+// stoppedRollback makes an armed install's marker what the early rollback
+// writes just before it puts the backup back: the hold, beside the install
+// it undoes, with no Status, so the restored binary's boot keeps it.
+func stoppedRollback(s *State) {
+	s.Status, s.RollbackStarted = "", true
+	s.RejectedVersion, s.RejectedReason, s.RejectedConfigDigest = s.TargetVersion, "it refused the settings", "digest"
 }
 
 func TestADataDirRecordIsArmedByAnInstallOfAnotherVersionThanTheBackups(t *testing.T) {
@@ -295,6 +360,9 @@ func TestADataDirRecordIsArmedByAnInstallOfAnotherVersionThanTheBackups(t *testi
 		{"recorded already", func(s *State) { s.DataDirOpenedBy = "0.2.3" }, "0.2.3", false},
 		{"no install armed", func(s *State) { s.Status = "installed" }, "0.2.3", false},
 		{"no marker", func(s *State) { *s = State{} }, "0.2.3", false},
+		{"a rollback stopped before its rename", stoppedRollback, "0.2.3", true},
+		{"a rollback stopped before its rename, by the backup's version", stoppedRollback, "0.2.1", false},
+		{"a hold alone", func(s *State) { *s = State{RejectedVersion: "0.2.3"} }, "0.2.3", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st := armed
