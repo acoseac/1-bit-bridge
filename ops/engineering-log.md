@@ -69103,9 +69103,10 @@ judges the boot snapshot's latent clash, and nothing plays either way.
 `*config.OpenHomePortClashError`'s `Setting`; its text is the one
 `PlayerEnabled` always gave) and `output.player.openhomePort`, never the
 port, nothing written. It is asked of the whole candidate, never of the
-sockets bound now, and before `Validate`, which logs the player off for a
-config whose player it would refuse and would have logged it for a save
-refused here (`Normalize` changes no address). The routes that can move one
+sockets bound now. B621 moved validation before the clash: a quiet
+normalized clone returns 400 for an invalid setting without logging or
+changing the player warning deduplication state; a candidate that clears
+the clash receives ordinary normalization and validation before save. The routes that can move one
 of the ports: the settings PATCH alone (`listenAddress`, `adminAddress`).
 None writes `dlna.listenAddress` (the PATCH's DLNA field is `dlnaEnabled`),
 `output.loopbackPort` or `output.player.openhomePort`; the roots, the
@@ -69519,6 +69520,17 @@ Go files. `make docs-check`: ok, `CLAUDE.md 71.9%; player.md 96.8%; worst
 load, player_openhome_test.go 61.3%`; with round 1's and this round's rules
 patches applied, 61.4%. `TestEveryCitedTestNameExists` and
 `TestNoDocblockNamesAnotherDeclaration` pass on 081393c2 with these docs.
+
+## 2026-11-02 — B621: settings validation precedes OpenHome port clash
+
+The console settings PATCH returned 409 for a clashing port even when the
+admin address or scan interval was invalid. A quiet normalized clone now
+checks validity first; a later 409 leaves the file, live snapshot, hot-apply
+callbacks, logs and player warning deduplication state untouched. The saved
+clone still receives ordinary normalization and warnings.
+`TestSettingsValidationPrecedesOpenHomePortClash` failed red for the two mixed
+invalid requests; `TestQuietCandidateValidationLeavesWarningsAndPlayerDedupUntouched`
+pins the warning state. Restoring clash-first order is the negative control.
 
 ## 2026-11-02 — B615 and B616: x/net v0.62.0, the slog tripwire's citation, and a whole ucred before the credentials parse
 
