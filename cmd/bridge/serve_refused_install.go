@@ -74,7 +74,10 @@ func servingBinaryPath(opts serveOpts, stderr io.Writer) string {
 // other serve, restore or clear-missing owns it; and when the backup beside
 // this binary is a regular file whose `version` names the version the
 // marker says the install replaced (updater.ProbeVersion: a version check,
-// not a proof of its bytes). Then this version is held back from the
+// not a proof of its bytes); and the install marker's lock is this process's
+// too, from the marker's read to the rename and any write after it, so that
+// no store open migrates in between (updater.LockState). Then this version
+// is held back from the
 // auto-installer for these settings, recorded durably first (a hold that
 // cannot be recorded leaves the install as it is), the backup is renamed over
 // this binary (updater.RollbackBinary: one rename on Unix; on Windows the
@@ -118,6 +121,25 @@ func recoverRefusedInstall(ctx context.Context, configPath string, reasons []str
 		return 0, false
 	}
 	defer release()
+	// And the install marker's lock, inside the data dir's (backlog B613's
+	// round 3): a store open of this version that migrates (a `bridge doctor`,
+	// a scan) holds it while it records that it opened the data dir, so that
+	// record cannot land between this read and the rename, and this rollback
+	// holds it from its read through the rename and any write that puts the
+	// install back, so that such an open waits for it and then refuses to
+	// migrate under the version put back (updater.RollbackUnderWay). It is
+	// never held without the exclusion: a lock that cannot be taken, or a
+	// filesystem that keeps none, leaves the install as it is.
+	stateLock, err := updater.LockState(dataDir)
+	if err != nil {
+		noRollback(stderr, st, fmt.Sprintf("the install marker's lock cannot be taken (%v), and only its holder may put the backup back", err))
+		return 0, false
+	}
+	defer stateLock.Release()
+	if !stateLock.Held() {
+		noRollback(stderr, st, "the data dir's filesystem keeps no locks, so nothing would keep a store's migration out while the backup is put back")
+		return 0, false
+	}
 	// The marker as it is now that the data dir is this process's: another
 	// process may have changed it since the first read.
 	if st, err = updater.LoadState(dataDir); err != nil {
@@ -197,15 +219,21 @@ func noRollback(stderr io.Writer, st updater.State, why string) {
 	fmt.Fprintf(stderr, "updater: not rolling back the install of %s: %s\n", st.TargetVersion, why)
 }
 
-// disarmEarlyRollback records, before serve's first write to the data dir and
-// so before the store's migrations, that this version went on past its
-// settings while an install marker was armed (updater.AdmitBoot; the store's
-// open asks updater.DisarmBeforeMigrating before it migrates, for every
-// command that opens it). From then on the early rollback of a later start
+// disarmEarlyRollback is the boot's admission: it records, before serve's
+// first write to the data dir and so before the store's migrations, that this
+// version went on past its settings while an install marker was armed
+// (updater.AdmitBoot, under the install marker's lock, inside the data dir's,
+// released before the store opens; the store's open asks
+// updater.DisarmBeforeMigrating before it migrates, for every command that
+// opens it). From then on the early rollback of a later start
 // (recoverRefusedInstall) and the boot rollback (BootInstallFailed) leave
 // the backup where it is: what this version writes may be what the backup's
-// version does not know, so a restore would be a downgrade past it. An error
-// is serve's to refuse to start over: it is called where nothing has been
+// version does not know, so a restore would be a downgrade past it. Over the
+// early rollback's record of an install of this version, left by a start
+// stopped before the backup was back, the record resolves the rollback, so
+// the store's open migrates after it, and the housekeeping confirms the
+// install (BootRollbackOvertaken; backlog B613's round 3). An error is
+// serve's to refuse to start over: it is called where nothing has been
 // written yet.
 func disarmEarlyRollback(dataDir string, opts serveOpts, stderr io.Writer) error {
 	res, err := updater.AdmitBoot(dataDir, version.ServerVersion, opts.saveUpdateState)

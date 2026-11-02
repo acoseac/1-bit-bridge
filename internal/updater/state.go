@@ -239,7 +239,12 @@ func SaveState(dataDir string, st State) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close tmp: %w", err)
 	}
-	if err := atomicwrite.RenameWithRetry(tmpName, StatePath(dataDir)); err != nil {
+	// The marker's own publication: the rename and its retries
+	// (RenameWithRetry's schedule, for Windows' scan-on-close), with no
+	// barrier but the marker's own below. RenameWithRetry's tolerant barrier
+	// would run first, log the data dir and the error, and be a second
+	// barrier beside it (backlog B613's round 3).
+	if err := atomicwrite.RenameWithRetryUnsynced(tmpName, StatePath(dataDir)); err != nil {
 		return fmt.Errorf("rename: %w", err)
 	}
 	tmpName = ""
@@ -249,14 +254,18 @@ func SaveState(dataDir string, st State) error {
 	// until the parent dir is fsynced — a crash in that window could
 	// leave the marker missing and the boot-time rollback logic would
 	// skip. Mirrors swapBinary in swap_unix.go, which is likewise
-	// Unix-only. A no-op on Windows (fsutil.SyncParentDir), where
+	// Unix-only. A no-op on Windows (markerBarrier), where
 	// FlushFileBuffers on a directory handle always fails
 	// (ERROR_INVALID_HANDLE) — NTFS journaling + the temp fsync above
 	// already cover durability there (Gemini review).
 	//
 	// A barrier that fails is the write's error, as a failed fsync of the
-	// file above is: the rename has landed, and the marker may not outlive a
-	// power loss, which both rollbacks rest on (backlog B613's round 2).
+	// file above is (backlog B613's round 2), but for a filesystem that
+	// cannot fsync a directory at all (syncMarkerDir). The rename has landed
+	// by then: the new marker is live, and may not outlive a power loss. A
+	// caller told the write failed never trusts it later: the disarm runs
+	// this barrier again before it short-cuts on what a marker says
+	// (disarmHeld), refusing while it fails (round 3).
 	if err := syncMarkerDir(dataDir); err != nil {
 		return fmt.Errorf("sync the data dir after writing the update marker: %w", err)
 	}
@@ -276,7 +285,9 @@ func ClearState(dataDir string) error {
 // the removal outlives a power loss as SaveState's rename does: a marker that
 // cannot be read is removed before the data dir is first written (AdmitBoot,
 // DisarmBeforeMigrating), and it must not come back for a later start to act
-// on. A barrier that fails is its error, as SaveState's is.
+// on. A barrier that fails is its error, as SaveState's is, and the barrier
+// runs whether or not there was a marker to remove, so a second clear after a
+// first whose barrier failed is not a no-op.
 func ClearStateDurably(dataDir string) error {
 	if err := ClearState(dataDir); err != nil {
 		return err
@@ -365,6 +376,23 @@ const (
 func DecideBootAction(st State, currentServerVersion string, now time.Time) BootAction {
 	switch st.Status {
 	case "":
+		// The early rollback's own record is its own case, never an install
+		// marker and never a hold alone (backlog B613's round 3). Read before
+		// any window: the housekeeping runs only once serve got past its
+		// settings, so the install's version booting is the install working,
+		// however old the record, and an expired one is confirmed, not
+		// cleared as an abandoned install marker would be; the backup's
+		// version booting is the rollback done. Any other version, and a hold
+		// with no rollback, is nothing to do.
+		if !st.RollbackStarted {
+			return BootNoop
+		}
+		switch {
+		case SameVersion(currentServerVersion, st.TargetVersion):
+			return BootRollbackOvertaken
+		case SameVersion(currentServerVersion, st.PreviousVersion):
+			return BootRollbackFinished
+		}
 		return BootNoop
 	case "installing":
 		if now.Sub(st.AttemptedAt) > recencyWindow {
@@ -402,9 +430,16 @@ func DecideBootAction(st State, currentServerVersion string, now time.Time) Boot
 
 // ConfirmOverRollback is the marker BootRollbackOvertaken writes over st, the
 // early rollback's record of an install of current that a start stopped
-// before the backup was back.
+// before the backup was back: the install confirmed as BootInstallSucceeded
+// confirms one (installed at now, so the boot after it removes the backup),
+// the rollback's mark gone, and its hold gone only where it holds current
+// back, a refusal of another version recorded since staying. The install and
+// the record of the start that went on past it stay as they are.
 func ConfirmOverRollback(st State, current string, now time.Time) State {
-	_, _ = current, now
+	st.Status, st.InstalledAt, st.RollbackStarted = "installed", now, false
+	if SameVersion(st.RejectedVersion, current) {
+		st.RejectedVersion, st.RejectedReason, st.RejectedConfigDigest = "", "", ""
+	}
 	return st
 }
 

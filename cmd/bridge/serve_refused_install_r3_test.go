@@ -146,7 +146,8 @@ func newOnceCloser() *onceCloser { return &onceCloser{ch: make(chan struct{})} }
 
 func (c *onceCloser) close() { c.once.Do(func() { close(c.ch) }) }
 
-// signalOnce is a channel a hook signals without blocking, once is enough.
+// signalOnce signals ch without blocking: a hook's first signal is all a
+// test waits for.
 func signalOnce(ch chan struct{}) {
 	select {
 	case ch <- struct{}{}:

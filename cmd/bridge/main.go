@@ -2326,6 +2326,10 @@ const backupShutdownWait = 45 * time.Second
 //   - first boot after a FAILED install (we're not at TargetVersion):
 //     restore bridge.bak and clear the marker. Service manager will
 //     then respawn into the restored old binary on next exit.
+//   - the early rollback's record of an install a start stopped before
+//     the backup was back: confirm the install when its version boots
+//     (its settings loaded, so the rollback is over), and clear the
+//     install, keeping the hold, when the backup's version does.
 //   - everything else: no-op.
 //
 // Each clear keeps a hold recorded beside the install (updater.ClearInstall).
@@ -2403,6 +2407,25 @@ func maybeRollbackOnBoot(stderr io.Writer, dataDir, binaryPath string) {
 		// actionable, just clean up.
 		if err := updater.ClearInstall(dataDir, st); err != nil {
 			fmt.Fprintf(stderr, "updater: clear abandoned state: %v\n", err)
+		}
+	case updater.BootRollbackOvertaken:
+		// The early rollback's record of an install of this version, left by
+		// a start stopped before the backup was back, and this boot got past
+		// its settings: the rollback will not be finished (the boot's
+		// admission recorded that this version opened the data dir), and the
+		// install is confirmed, however old the record. .bak stays for one
+		// more boot, as after any confirmed install (backlog B613's round 3).
+		fmt.Fprintf(stderr, "updater: %s starts on settings it loads, so the rollback to %s an earlier start began is not finished: "+
+			"the install is confirmed, and %s.bak is kept until the next start\n", version.ServerVersion, st.PreviousVersion, binaryPath)
+		if err := updater.SaveState(dataDir, updater.ConfirmOverRollback(st, version.ServerVersion, time.Now().UTC())); err != nil {
+			fmt.Fprintf(stderr, "updater: mark installed: %v\n", err)
+		}
+	case updater.BootRollbackFinished:
+		// That record, and the version the backup held runs: the rollback was
+		// finished. The install it describes goes, its hold stays, and nothing
+		// is restored.
+		if err := updater.ClearInstall(dataDir, st); err != nil {
+			fmt.Fprintf(stderr, "updater: clear state: %v\n", err)
 		}
 	}
 }

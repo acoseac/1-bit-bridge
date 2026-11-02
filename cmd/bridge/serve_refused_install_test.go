@@ -232,9 +232,12 @@ func TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings(t *testing.T) {
 				t.Errorf("the marker does not hold this version back for these settings: %+v", st)
 			}
 			// The restored binary's boot, whatever its version, keeps it: an
-			// install marker is what 0.2.1's and 0.2.2's boot clears.
-			if got := updater.DecideBootAction(st, previousVersion, time.Now().UTC()); got != updater.BootNoop {
-				t.Errorf("the restored binary's boot over the marker = %v, want BootNoop", got)
+			// install marker is what 0.2.1's and 0.2.2's boot clears, and they
+			// read Status "" as nothing to do; a release with round 3 reads the
+			// record as the rollback finished, which keeps the hold and
+			// restores nothing (BootRollbackFinished).
+			if got := updater.DecideBootAction(st, previousVersion, time.Now().UTC()); got != updater.BootRollbackFinished {
+				t.Errorf("the restored binary's boot over the marker = %v, want BootRollbackFinished", got)
 			}
 			for _, s := range tc.says {
 				if !strings.Contains(st.RejectedReason, s) {
@@ -494,9 +497,13 @@ func TestTheHoldIsRecordedBeforeTheBackupIsPutBack(t *testing.T) {
 		t.Errorf("the marker as the backup was put back = %+v, want this version held back for these settings already", atRename)
 	}
 	// Should the rename land and nothing after it, the restored binary's boot
-	// must keep the hold.
-	if got := updater.DecideBootAction(atRename, previousVersion, time.Now().UTC()); got != updater.BootNoop {
-		t.Errorf("the restored binary's boot over the marker as the backup was put back = %v, want BootNoop", got)
+	// must keep the hold: Status "" for 0.2.1's and 0.2.2's, and the rollback
+	// finished for a release with round 3 (BootRollbackFinished).
+	if atRename.Status != "" {
+		t.Errorf("the marker as the backup was put back has Status %q, which 0.2.1's and 0.2.2's boot acts on", atRename.Status)
+	}
+	if got := updater.DecideBootAction(atRename, previousVersion, time.Now().UTC()); got != updater.BootRollbackFinished {
+		t.Errorf("the restored binary's boot over the marker as the backup was put back = %v, want BootRollbackFinished", got)
 	}
 }
 

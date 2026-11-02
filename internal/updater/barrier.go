@@ -1,9 +1,11 @@
 package updater
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sync/atomic"
+	"syscall"
 
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
@@ -43,11 +45,20 @@ func syncDirDescriptor(d *os.File) error {
 	return syncWithFallback(d.Sync, plainFsync(d))
 }
 
-// syncWithFallback runs full, the directory's fsync as (*os.File).Sync
-// makes it.
+// syncWithFallback runs full, the directory's fsync as (*os.File).Sync makes
+// it, and where that answers EINVAL or ENOTTY and plain is not nil, plain,
+// the ordinary fsync, whose answer is then the barrier's. On darwin Sync asks
+// for F_FULLFSYNC and itself falls back to fsync on ENOTSUP alone (Go's
+// #64215); a full sync a filesystem does not support can answer EINVAL or
+// ENOTTY too, and an ordinary fsync it may still do is asked before
+// anything is taken for a filesystem that cannot fsync a directory. plain is
+// nil off darwin, where Sync is the ordinary fsync already.
 func syncWithFallback(full, plain func() error) error {
-	_ = plain
-	return full()
+	err := full()
+	if plain != nil && (errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTTY)) {
+		return plain()
+	}
+	return err
 }
 
 // unsupportedDirSyncMessage is the line said once a process where the data
@@ -58,6 +69,36 @@ const unsupportedDirSyncMessage = "the data dir's filesystem cannot fsync a dire
 // unsupportedDirSyncSaid is whether unsupportedDirSyncMessage has been said
 // in this process. A test resets it with a t.Cleanup restore.
 var unsupportedDirSyncSaid atomic.Bool
+
+// cannotSyncADirectory names the errno of a directory's fsync that says the
+// filesystem cannot do one, "" for any other answer: EINVAL, ENOTSUP and
+// EOPNOTSUPP (one errno on Linux, two on darwin and the BSDs). Linux's NFS
+// and CIFS/SMB clients treat a directory's fsync as a success that does
+// nothing, and its FUSE turns a filesystem's unimplemented FSYNCDIR into
+// one, so those answer nil there and never come here; this is for the rest,
+// a FUSE daemon or a network filesystem on another kernel that answers the
+// fsync itself. Never ENOSYS, EBADF or anything else: those are failures.
+func cannotSyncADirectory(err error) string {
+	switch {
+	case errors.Is(err, syscall.EINVAL):
+		return "EINVAL"
+	case errors.Is(err, syscall.ENOTSUP):
+		return "ENOTSUP"
+	case errors.Is(err, syscall.EOPNOTSUPP):
+		return "EOPNOTSUPP"
+	}
+	return ""
+}
+
+// sayCannotSyncADirectory says once a process, naming no path and no value
+// but the errno, that the data dir's filesystem cannot fsync a directory, so
+// that the guarantee given up is not given up in silence.
+func sayCannotSyncADirectory(errno string) {
+	if unsupportedDirSyncSaid.Swap(true) {
+		return
+	}
+	logger.Warn(unsupportedDirSyncMessage, "errno", errno)
+}
 
 // BarrierError is the marker's directory barrier failing: Step is the step
 // that failed, "open", "sync" or "close", and Err its error, which errors.Is
@@ -84,10 +125,14 @@ func (e *BarrierError) Unwrap() error { return e.Err }
 
 // syncMarkerDir is the marker's directory barrier: dataDir opened, fsynced
 // and closed, once a write of the marker has renamed a new marker over the
-// old or removed it (SaveState, ClearStateDurably), so that the change
-// outlives a power loss, which both rollbacks rest on. Any step that fails
-// is its *BarrierError. A no-op where the platform has no barrier
-// (markerBarrier nil: Windows).
+// old or removed it (SaveState, ClearStateDurably), and before a disarm
+// trusts what such a write left (disarmHeld), so that the change outlives a
+// power loss, which both rollbacks rest on. A fsync that answers that the
+// filesystem cannot fsync a directory (cannotSyncADirectory) counts as done,
+// said once a process: the marker's writes there are atomic and not
+// durable, and no install is refused for it. Any other failure of the fsync,
+// and any failure of the open or the close, is its *BarrierError. A no-op
+// where the platform has no barrier (markerBarrier nil: Windows).
 func syncMarkerDir(dataDir string) error {
 	b := markerBarrier
 	if b == nil {
@@ -100,7 +145,11 @@ func syncMarkerDir(dataDir string) error {
 	syncErr := b.sync(d)
 	closeErr := b.close(d)
 	if syncErr != nil {
-		return &BarrierError{Step: "sync", Err: syncErr}
+		errno := cannotSyncADirectory(syncErr)
+		if errno == "" {
+			return &BarrierError{Step: "sync", Err: syncErr}
+		}
+		sayCannotSyncADirectory(errno)
 	}
 	if closeErr != nil {
 		return &BarrierError{Step: "close", Err: closeErr}

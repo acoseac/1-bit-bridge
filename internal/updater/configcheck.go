@@ -305,12 +305,12 @@ const configDigestDomain = "1-bit-bridge settings digest v1\n"
 // ConfigDigest is a digest of the settings the bridge at configPath loads:
 // the file's bytes and every BRIDGE_ environment variable with a value,
 // which config's overrides read over the file (on Windows, whatever the case
-// of its name). The automatic install holds
-// a refused version back only while the settings have the digest it was
-// refused with (State.RejectedConfigDigest), so a change to either lets it
-// try again. A variable that is not a setting only makes the digest change
-// more often, which costs one more check. No value is kept: the digest is
-// all that is recorded.
+// of its name, and of two spellings the one the OS reads). The automatic
+// install holds a refused version back only while the settings have the
+// digest it was refused with (State.RejectedConfigDigest), so a change to
+// either lets it try again. A variable that is not a setting only makes the
+// digest change more often, which costs one more check. No value is kept:
+// the digest is all that is recorded.
 func ConfigDigest(configPath string) (string, error) {
 	return configDigest(configPath, os.Environ(), envNamesFoldCase)
 }
@@ -342,18 +342,31 @@ func configDigest(configPath string, environ []string, foldCase bool) (string, e
 // sorted, as NAME=value. Where foldCase says names compare without regard to
 // case (Windows), a name is taken whatever its case and written upper-cased,
 // so one variable is one entry whichever case it was set in (backlog B613's
-// round 2, Codex's finding 9).
+// round 2, Codex's finding 9). A name environ lists twice, in two cases
+// there, is the entry the OS reads for it: config's overrides read a
+// variable through os.LookupEnv, which asks Windows' GetEnvironmentVariable
+// for the first entry of the block that its name matches, in the order
+// os.Environ lists them, so the first entry of each name is kept, before an
+// empty value is dropped, and a later one is never taken in its place (round
+// 3). Not exec.Cmd's last-wins dedup, which is how a child's environment is
+// built, never how this process reads its own. Where names are their bytes,
+// Go keeps a name's first entry too (syscall's copyenv).
 func bridgeEnvironment(environ []string, foldCase bool) []string {
 	var env []string
+	seen := map[string]bool{}
 	for _, kv := range environ {
 		k, v, ok := strings.Cut(kv, "=")
-		if !ok || v == "" {
+		if !ok {
 			continue
 		}
 		if foldCase {
 			k = strings.ToUpper(k)
 		}
-		if strings.HasPrefix(k, "BRIDGE_") {
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		if v != "" && strings.HasPrefix(k, "BRIDGE_") {
 			env = append(env, k+"="+v)
 		}
 	}

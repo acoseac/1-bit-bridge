@@ -32,14 +32,18 @@
 //
 // The barrier lives here, at the single rename chokepoint, precisely
 // so that every persist site in the tree — `config.Save`,
-// `auth.persist`, the updater state file, the adminauth store, backup
-// snapshots, transcode / analyze sidecars, the TLS cert pair, the
-// artwork caches — inherits it with no call-site change and no way to
-// forget it. It is unconditional: there is no opt-out knob, because
-// every current caller is a "commit this file" operation where
-// durability is the whole point, and the added cost is one
-// metadata-only fsync against writes that already fsync their full
-// contents.
+// `auth.persist`, the adminauth store, backup snapshots, transcode /
+// analyze sidecars, the TLS cert pair, the artwork caches — inherits it
+// with no call-site change and no way to forget it. There is one way
+// out of it, `RenameWithRetryUnsynced`, for a caller that runs a strict
+// barrier of its own over the same directory and fails on it: the
+// updater's install marker (internal/updater), whose barrier's failure
+// is its write's, and whose write must not first run a tolerant barrier
+// that logs the path and the error and whose fault no test of the
+// marker's could tell from the marker's own. Every other caller is a
+// "commit this file" operation where durability is the whole point, and
+// the added cost is one metadata-only fsync against writes that already
+// fsync their full contents.
 //
 // What a failed barrier means is the caller's choice. `WriteBytes` and
 // the renames tolerate it (`commitDirEntry`): the write has landed and
@@ -423,6 +427,18 @@ func RenameWithRetryCtx(ctx context.Context, src, dst string) error {
 	// for why a failure here must not fail an already-successful write.
 	commitDirEntry(dst)
 	return nil
+}
+
+// RenameWithRetryUnsynced is RenameWithRetry without its directory barrier
+// (commitDirEntry): the rename and its retries alone, on RenameWithRetry's
+// schedule, for a caller that fsyncs dst's directory itself once the rename
+// lands and fails on that barrier, the updater's install marker
+// (internal/updater). commitDirEntry's tolerant barrier would run first,
+// log the directory and the error, and be a second barrier beside the
+// caller's, so that a fault in the caller's own would not be the only one.
+// A caller that runs no barrier of its own uses RenameWithRetry.
+func RenameWithRetryUnsynced(src, dst string) error {
+	return renameRetry(context.Background(), src, dst)
 }
 
 // RenameWithRetryIf is RenameWithRetryCtx for a rename that is right only
