@@ -113,7 +113,7 @@ lost my library."
 - **Migrations are append-only**; `sql` must be idempotent. A shipped migration
   is never rewritten — both live bridges already ran it, so editing it changes
   only fresh installs while diverging from what deployed DBs did.
-- **One opener of a database runs its migration ladder at a time** (2026-10-14, backlog B185) **Don't fix such a race inside a shipped migration or the frozen column helper** → History-rules-scanner.md
+- **One opener of a database runs its migration ladder at a time, and one whose ladder lock cannot be taken runs it without, saying which kind of failure it met** (2026-10-14, backlog B185; the kinds 2026-11-02, B537 item 1) **Don't fix such a race inside a shipped migration or the frozen column helper, drop the timeout's or a link's refusal, or word the no-locks line as proof that the filesystem keeps none (ENOLCK does not show it)** `TestTheMigrationSaysWhichKindOfLockItCouldNotTake` and fsutil's `TestKeepsNoLocksReadsOnlyTheNoLocksAnswers` pin the kinds. → History-rules-scanner.md
 - **…and an opener's open and ping are tried again while the error's primary code is SQLITE_BUSY, for 5 s from the first busy answer; any other error fails at once** (2026-10-22, `openStoreDB`): a plain code 5 there comes only once busy_timeout's own 5 s have run out, so a budget counted from the first try would never try again. **Don't raise `busy_timeout` instead, and don't widen the retry to the migration's statements without a failure there.**
 - **Column-only columns must never gain `json:` tags or be spliced onto wire
   output**: the v25 format facts, `acoustid_match` (v28), `dupe_*` (v31),
