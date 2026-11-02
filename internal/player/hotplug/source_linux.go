@@ -130,7 +130,17 @@ func (s *linuxSocket) recv(buf []byte) (received, error) {
 
 // parseCredentials reads the sender's credentials out of the control data
 // recvmsg returned beside a message: the ucred of the last SCM_CREDENTIALS
-// message in it, or nil when it holds none or does not parse.
+// message in it whose payload holds a whole one, or nil when it holds none
+// or does not parse.
+//
+// x/sys's ParseUnixCredentials checks a message's level and type alone and
+// then reads a ucred at its payload's first byte, whatever the payload's
+// length (x/sys v0.49.0): an empty payload panics, on the source's read
+// goroutine, where a panic ends the process, and a shorter one is read past
+// its end. The kernel writes a whole ucred, so a message too short to hold
+// one is passed over before the parser (backlog B616): a uevent that comes
+// with no other credentials then carries none, which handle counts as
+// foreign while the socket asked for them.
 func parseCredentials(oob []byte) *credentials {
 	msgs, err := unix.ParseSocketControlMessage(oob)
 	if err != nil {
@@ -138,6 +148,9 @@ func parseCredentials(oob []byte) *credentials {
 	}
 	var cred *credentials
 	for i := range msgs {
+		if len(msgs[i].Data) < unix.SizeofUcred {
+			continue
+		}
 		if c, err := unix.ParseUnixCredentials(&msgs[i]); err == nil {
 			cred = &credentials{pid: c.Pid, uid: c.Uid, gid: c.Gid}
 		}
