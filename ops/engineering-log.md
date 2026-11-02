@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-11-02 — B538: an abandoned Atlas submit's HTTP answer is a shutdown stop](#2026-11-02--b538-an-abandoned-atlas-submits-http-answer-is-a-shutdown-stop)
 - [2026-10-28 — B539: discard syncs a fresh seal before it moves a damaged one, and a stopped discard says to run it again](#2026-10-28--b539-discard-syncs-a-fresh-seal-before-it-moves-a-damaged-one-and-a-stopped-discard-says-to-run-it-again)
 - [2026-10-24 — B470 PR 5a4: the player's OpenHome writes, Insert's Uri confined to the bridge's own tracks, and the owner's dogfood](#2026-10-24--b470-pr-5a4-the-players-openhome-writes-inserts-uri-confined-to-the-bridges-own-tracks-and-the-owners-dogfood)
 - [2026-10-25 — B470 PR 5b: GET /v1/outputs lists the bridge's own player, kind bridge, on a gate of its own](#2026-10-25--b470-pr-5b-get-v1outputs-lists-the-bridges-own-player-kind-bridge-on-a-gate-of-its-own)
@@ -69103,9 +69104,10 @@ judges the boot snapshot's latent clash, and nothing plays either way.
 `*config.OpenHomePortClashError`'s `Setting`; its text is the one
 `PlayerEnabled` always gave) and `output.player.openhomePort`, never the
 port, nothing written. It is asked of the whole candidate, never of the
-sockets bound now, and before `Validate`, which logs the player off for a
-config whose player it would refuse and would have logged it for a save
-refused here (`Normalize` changes no address). The routes that can move one
+sockets bound now. B621 moved validation before the clash: a quiet
+normalized clone returns 400 for an invalid setting without logging or
+changing the player warning deduplication state; a candidate that clears
+the clash receives ordinary normalization and validation before save. The routes that can move one
 of the ports: the settings PATCH alone (`listenAddress`, `adminAddress`).
 None writes `dlna.listenAddress` (the PATCH's DLNA field is `dlnaEnabled`),
 `output.loopbackPort` or `output.player.openhomePort`; the roots, the
@@ -69519,6 +69521,48 @@ Go files. `make docs-check`: ok, `CLAUDE.md 71.9%; player.md 96.8%; worst
 load, player_openhome_test.go 61.3%`; with round 1's and this round's rules
 patches applied, 61.4%. `TestEveryCitedTestNameExists` and
 `TestNoDocblockNamesAnotherDeclaration` pass on 081393c2 with these docs.
+
+## 2026-11-02 — B621: settings validation precedes OpenHome port clash
+
+The console settings PATCH returned 409 for a clashing port even when the
+admin address or scan interval was invalid. A quiet normalized clone now
+checks validity first; a later 409 leaves the file, live snapshot, hot-apply
+callbacks, logs and player warning deduplication state untouched. The saved
+clone still receives ordinary normalization and warnings.
+`TestSettingsValidationPrecedesOpenHomePortClash` failed red for the two mixed
+invalid requests; `TestQuietCandidateValidationLeavesWarningsAndPlayerDedupUntouched`
+pins the warning state. Restoring clash-first order is the negative control.
+
+## 2026-11-02 — B538: an abandoned Atlas submit's HTTP answer is a shutdown stop
+
+B526 observed `atlasharvest.tick_error phase=submit error=EOF` when TLS delivered
+an empty answer after the harvest loop cancelled its submit. Its test handler
+was made to abort, but a real Atlas can still answer in TLS's close window.
+`doCapped` now carries the loop context separately from the request's timeout.
+A transport failure, empty answer, or failed network body read after loop
+cancellation returns that cancellation; an HTTP 500 and a malformed complete
+JSON body remain failures. An abandoned 401 is returned as cancellation before
+`handleErr` can clear the credential, and `handleErr` also guards the wipe.
+This is local to the Atlas HTTP leg: `ctxerr.WithoutCancellation` still reports
+unrelated errors that happen to arrive after cancellation. The per-request
+timeout still reports while the loop is live. No changes were made to the
+plain-HTTP held handlers in enrich or updater.
+
+`TestSubmitHTTPAnswerAfterShutdown` uses a real TLS server and the B526 racing
+transport for an empty answer, a closed connection, an abandoned body read,
+401, 500, and a complete malformed body. `TestSubmitHTTPClassifiesOnlyAbandonedReads`
+pins the same classifications without a listener. The listener test could not
+run in this workspace: `httptest.NewTLSServer` failed to bind `::1` with
+`operation not permitted`. The in-memory race test passed. Its negative control
+replaced the three `loopCtx.Err() != nil` checks with `false` (count asserted):
+`transport_EOF_after_shutdown`, `empty_answer_after_shutdown`,
+`abandoned_body_read`, and `abandoned_401` all went red under `-race` as predicted;
+the production file was restored. `TestSubmitTickStopsQuietlyOnAbandonedAnswer`
+and `TestSubmitPerRequestTimeoutIsReportedWhileLoopLives` passed under `-race`.
+The separately count-asserted `handleErr` guard control made
+`TestHandleErrKeepsCredentialAfterShutdown` red: it logged `token_rejected` and
+wiped the token; that guard was restored too. B526's held-handler test rule
+gains this single deliberate TLS-answer exception.
 
 ## 2026-11-02 — B659: bridge doctor's data-dir line, for every config that loads, from the walk serve's refusal reads
 
