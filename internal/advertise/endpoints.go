@@ -1,7 +1,7 @@
 // Package advertise enumerates every network endpoint a running bridge
 // is reachable at — LAN IPv4 / IPv6, mDNS hostname, Tailscale interface
 // — so /v1/health can self-report the full list to iOS clients, and the
-// admin pairing QR can bake alternates into `bridge://pair?urls=...`.
+// admin pairing QR can bake alternates into `onebit://pair?urls=...`.
 //
 // The enumeration is best-effort and additive: we return what's on the
 // host right now, and never fail the whole function if one piece is
