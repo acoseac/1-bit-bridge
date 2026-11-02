@@ -12,6 +12,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/alsactl"
 	"github.com/acoseac/1-bit-bridge/internal/player/qualification"
+	"github.com/acoseac/1-bit-bridge/internal/player/qualification/approvaltest"
 )
 
 type emptyControls struct{}
@@ -29,7 +30,7 @@ func approvedBackendFixture(t *testing.T) (Config, qualification.Approval) {
 			t.Fatal(e)
 		}
 	}
-	a := &Authorization{Mode: "native", StateDir: t.TempDir(), Record: "approved.json", Sysfs: loc.Observer.Sysfs, Controls: alsactl.Reader{Open: func(int) (alsactl.Device, error) { return emptyControls{}, nil }}}
+	a := &Authorization{Mode: "native", StateDir: approvaltest.TempDir(t), Record: "approved.json", Sysfs: loc.Observer.Sysfs, Controls: alsactl.Reader{Open: func(int) (alsactl.Device, error) { return emptyControls{}, nil }}}
 	u, e := loc.Locate(context.Background())
 	if e != nil {
 		t.Fatal(e)

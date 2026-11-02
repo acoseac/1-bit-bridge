@@ -20,6 +20,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 	"github.com/acoseac/1-bit-bridge/internal/player/qualification"
+	"github.com/acoseac/1-bit-bridge/internal/player/qualification/approvaltest"
 	"github.com/acoseac/1-bit-bridge/internal/usbid"
 )
 
@@ -105,7 +106,7 @@ func ApprovedWith(t *testing.T, state string, opts Options, builders ...func(pla
 	if withDoP {
 		environment = qualification.Digest([]string{"linux/arm64", "test-go", "test-kernel"})
 	}
-	dir := t.TempDir()
+	dir := approvaltest.TempDir(t)
 	for i := range policies {
 		p := &policies[i]
 		for _, scenario := range []string{"matrix", "backend-lifecycle"} {
