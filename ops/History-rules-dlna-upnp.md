@@ -186,7 +186,17 @@ entries, which Linux's IPv6 table sets (z/OS's alone leaves one unset), and
 the bridge parses no IPv6 control data. (The hotplug watcher's netlink
 credentials go through x/sys, whose `ParseUnixCredentials` does not check
 its payload's length either; that parse is the player's, and its record is
-B610's in `ops/engineering-log.md`.)
+B610's in `ops/engineering-log.md`. Backlog B616 guards it since 2026-11-02,
+the hotplug source's rule in `player.md`.)
+
+**x/net v0.62.0 passes such an entry over** (2026-11-02, backlog B615). Its
+`ipv4` and `ipv6` `ControlMessage.Parse` open every case of their switch with
+`ctlOpts[X].name > 0 &&` (upstream's fix, read in the module's own source),
+so a message of type 0 is passed over like any type x/net does not read, on
+every platform, and every entry a v0.62.0 table sets has its parse function.
+No input known reaches the recover now: it stays, as defence in depth, for a
+release that panics on control data again, through an entry set with no
+parse function or anything else.
 
 **A network peer cannot supply the ancillary bytes.** They are recvmsg's
 out-of-band data, which only the kernel writes, and every platform numbers
@@ -205,8 +215,10 @@ makes the whole buffer report neither, wherever it sits; of two IP_PKTINFO
 messages the later wins, its index of 0 included; a tail shorter than a
 header is ignored; and the index is in_pktinfo's 32 bits, which Linux reads
 signed and macOS unsigned, so 0x80000000 and up report no index on either.
-On an input that makes x/net's parse panic the metadata is neither, so an
-IP_PKTINFO before or after a message of type 0 is not reported.
+On an input that makes x/net's parse panic the metadata is neither, so up to
+x/net v0.61.0 an IP_PKTINFO before or after a message of type 0 was not
+reported on Linux; since v0.62.0 x/net passes that message over, and the
+IP_PKTINFO beside it is reported, as Darwin's table always had it (B615).
 
 **A recover scoped to the one call meets the policy on every platform**
 (`parseControlMessage`, in `ssdp_dst_other.go`, which every platform but
@@ -220,20 +232,26 @@ reading of Darwin's and the BSDs' separate IP_RECVDSTADDR and IP_RECVIF
 messages with one of the bridge's.
 
 **Don't call x/net's parse outside that recover, widen the recover past the
-one call, or trade it for a filter of type-0 messages or a fix of Linux's
-alone.** `TestParseDatagramMetaAnswersEveryShapeOfControlData` gives every
+one call, trade it for anything narrower (a filter of type-0 messages, a fix
+of one platform's), or drop it because x/net v0.62.0 no longer panics on a
+message of type 0: it is the defence in depth for whatever else panics
+there.** `TestParseDatagramMetaAnswersEveryShapeOfControlData` gives every
 shape its metadata, laid out for the platform it runs on with x/sys/unix,
-and says whether x/net panics on it there (Linux's rows of type 0, in
-`ssdp_dst_linux_test.go`; macOS's, which x/net passes over, beside its
-IP_RECVDSTADDR and IP_RECVIF messages, in `ssdp_dst_darwin_test.go`).
+and fails on any shape x/net's parse panics on. Since B615 that is none: the
+rows of type 0 are `portableControlData`'s, x/net passing them over on Linux
+as on macOS, and `ssdp_dst_darwin_test.go` keeps macOS's IP_RECVDSTADDR and
+IP_RECVIF messages; until then Linux's rows of type 0, in
+`ssdp_dst_linux_test.go`, said x/net panicked on them.
 `FuzzParseDatagramMetaIsXNetsParse` holds the parser, on any bytes, to the
 parser before B610 run under a recover of the test's own.
 `TestTheDatagramMetaSeedsAreLinuxsControlData` pins the committed crasher and
 three native seeds byte for byte, by the name the fuzz engine gives them and
-by what each decodes to. With the recover removed,
+by what each decodes to. With the recover removed at x/net v0.61.0,
 `TestParseDatagramMetaHoldsAnIPMessageOfTypeZero`, both seeds of type 0 and
-each new test panic at `control.go:90`, each run alone, and
-`TestParseDatagramMetaReadsThisPlatformsPktinfo`, unchanged, stays green.
+each new test panicked at `control.go:90`, each run alone, and
+`TestParseDatagramMetaReadsThisPlatformsPktinfo`, unchanged, stayed green; at
+v0.62.0 every one of them stays green with the recover removed (B615), which
+is what no input reaching it means.
 
 ## Strict aliases and cross-package transport (B470 PR 5a2b)
 
