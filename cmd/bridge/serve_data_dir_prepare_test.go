@@ -208,6 +208,39 @@ func TestPreparingTheDataDirectoryRefusesWithItsPathAndItsCause(t *testing.T) {
 	}
 }
 
+// TestThePreparationAsksAgainWhatStandsThereOnceItIsMade: MkdirAll answers
+// nil for a directory there, and the preparation asks again by a stat, so a
+// data directory replaced by a regular file between that answer and the stat
+// is refused all the same, and one gone by then is refused as one that cannot
+// be read, each naming the data directory.
+func TestThePreparationAsksAgainWhatStandsThereOnceItIsMade(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		replace func(path string) error
+		says    func(dataDir string) string
+		cause   error
+	}{
+		{"replaced by a regular file", func(path string) error { return os.WriteFile(path, []byte("not a directory"), 0o600) },
+			func(dataDir string) string { return dataDir + " is a regular file, not a directory" }, syscall.ENOTDIR},
+		{"gone", func(string) error { return nil },
+			func(string) string { return "it cannot be read: " }, fs.ErrNotExist},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := filepath.Join(t.TempDir(), "data")
+			err := prepareServeDataDirWith(dataDir, func(path string, _ os.FileMode) error { return tc.replace(path) })
+			var unusable *dataDirUnusableError
+			switch {
+			case !errors.As(err, &unusable) || unusable.dataDir != dataDir:
+				t.Fatalf("the preparation = %v, want a *dataDirUnusableError naming %s", err, dataDir)
+			case !strings.Contains(err.Error(), "the data directory "+dataDir+" cannot be used: "+tc.says(dataDir)):
+				t.Errorf("the refusal %q does not say %q", err, tc.says(dataDir))
+			case !errors.Is(err, tc.cause):
+				t.Errorf("the refusal %v does not carry %v", err, tc.cause)
+			}
+		})
+	}
+}
+
 // mutationCommand is a command that writes the data directory from a second
 // process and takes the data dir's lock first (holdDataDirForMutation).
 type mutationCommand struct {

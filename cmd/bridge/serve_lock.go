@@ -111,7 +111,14 @@ func (e *dataDirUnlockedError) Unwrap() error { return e.err }
 // fallback (lockServeDataDir), and writability is the player's preflight's
 // (backup.AdoptPlayerState, backup.CheckPlayerStart) and bridge doctor's.
 func prepareServeDataDir(dataDir string) error {
-	if err := fsutil.MkdirAll(dataDir, 0o700); err != nil {
+	return prepareServeDataDirWith(dataDir, fsutil.MkdirAll)
+}
+
+// prepareServeDataDirWith is prepareServeDataDir making the directory with
+// mkdirAll: a test's stand-in for a data directory replaced between MkdirAll's
+// answer and the stat after it.
+func prepareServeDataDirWith(dataDir string, mkdirAll func(string, os.FileMode) error) error {
+	if err := mkdirAll(dataDir, 0o700); err != nil {
 		return &dataDirUnusableError{dataDir: dataDir, why: whyNotMade(err), err: err}
 	}
 	// MkdirAll answers nil for a directory there, and the stat asks again,
