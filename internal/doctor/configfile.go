@@ -92,6 +92,25 @@ func (c *ConfigFile) ungraded() configProblem {
 	return c.problem()
 }
 
+// NotGradedReason says why a line that grades what the config sets ran
+// without it, in the words the port checks and tls-cert give theirs, from
+// problem(): "the config that sets <what> is not readable by this user", "the
+// named config does not exist", "the config that sets <what> does not load";
+// and "" where the config loaded, or none was named or found. cmd/bridge's
+// data-dir line says it (B659), so that line and config-file cannot disagree
+// about what went wrong.
+func (c *ConfigFile) NotGradedReason(what string) string {
+	switch c.problem() {
+	case configUnreadable:
+		return "the config that sets " + what + " is not readable by this user"
+	case configNotThere:
+		return "the named config does not exist"
+	case configDoesNotLoad:
+		return "the config that sets " + what + " does not load"
+	}
+	return ""
+}
+
 // ranWithoutIt ends the hint on a config that could not be graded. The
 // checks after config-file ran without it: the ones with a default on the
 // default, and the port checks not at all, since a default port is a
