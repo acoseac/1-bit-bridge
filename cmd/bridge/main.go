@@ -46,7 +46,6 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/atlasharvest"
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
-	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
@@ -2645,6 +2644,20 @@ type serveOpts struct {
 	// where the port already accepts and the console does not yet
 	// (backlog B313).
 	beforeAdminServe func()
+	// dataDirTryLock stands in for fsutil.TryLock on the data dir's lock
+	// file (lockServeDataDirWith). Nil (the kernel's answer) everywhere
+	// but the boot tests, which answer what a filesystem that keeps no
+	// locks, or one that fails, answers. Per invocation for tailscaleCLI's
+	// reason.
+	dataDirTryLock func(*os.File) error
+	// playerStatePreflight stands in for the player's state preflight
+	// (playerStatePreflight), which serve calls once its data dir is
+	// prepared and its lock tried, whether or not the lock was taken. Nil
+	// (the bridge's own) everywhere but the boot tests, which fail on a
+	// call where serve must refuse before the player's state is touched,
+	// or record what the call found. Per invocation for tailscaleCLI's
+	// reason.
+	playerStatePreflight func(dataDir string, lockHeld bool) error
 	// localOutputsGOOS stands in for runtime.GOOS in the localOutputs
 	// gate (api.LocalOutputsConfig.GOOS), which GET /v1/outputs and the
 	// loopback track route answer to and which is true on Linux only.
@@ -3060,24 +3073,48 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		cfg.ListenAddress = *addrOverride
 	}
 
+	// A data dir serve can make or use, decided before anything writes
+	// there (backlog B606, the owner's decision of 2026-10-31): a regular
+	// file, a link to one or a link to nothing where it goes, or above it,
+	// refuses here, naming the path and what stands in its way, before the
+	// lock, the player's state, the TLS mint, the token store, server.pid
+	// and the migrations. Serve used to go on without its lock and its
+	// player, mint the TLS pair and fail further on. The preparation comes
+	// before serve initialises any of its runtime state; the one write
+	// above it is --init-if-missing's seed config (writeAutoInitConfig),
+	// which can make the config's directories and write bridge.yaml, and
+	// only where no config is there.
+	if err := prepareServeDataDir(cfg.DataDir); err != nil {
+		fmt.Fprintf(stderr, "serve: %v; bridge serve starts only on a data directory it can make or use: "+
+			"move what stands in its way, or set dataDir in bridge.yaml to a directory\n", err)
+		return 1
+	}
 	// One serve per data dir, decided before anything below writes there
 	// or binds a port (backlog B208): the TLS mint, the token store's
 	// flush, server.pid, the migrations, the batch coordinator's recovery,
 	// the updater's boot marker, the sweepers and the startup scan all
-	// come after this line. Everything above it only reads. Released last,
-	// after every teardown registered below it has run.
-	releaseDataDir, lockErr := lockServeDataDir(cfg.DataDir)
+	// come after this line. Released last, after every teardown registered
+	// below it has run.
+	releaseDataDir, lockErr := lockServeDataDirWith(cfg.DataDir, opts.dataDirTryLock)
 	var heldErr *serveDataDirHeldError
+	var unlocked *dataDirUnlockedError
 	switch {
 	case errors.As(lockErr, &heldErr):
 		fmt.Fprintf(stderr, "serve: %v; stop it first, or give this serve a data dir of its own\n", heldErr)
 		return 1
+	case errors.As(lockErr, &unlocked) && unlocked.noLocks:
+		// Never a refusal, and said its own way (B537 item 1): the answer
+		// of a filesystem that keeps no locks, which ENOLCK, one of these
+		// answers, does not prove, so the line says another process may
+		// still hold one.
+		fmt.Fprintf(stderr, "serve: %v: another process may still hold one, and serve continues without "+
+			"exclusive use of the data dir\n", unlocked)
 	case lockErr != nil:
-		// Never a refusal: a filesystem that keeps no locks must not stop
-		// a bridge from starting. Said once, where the pid file's own
-		// non-fatal failure is said.
-		fmt.Fprintf(stderr, "serve: could not lock %s (%v); serving without the check that no other "+
-			"bridge serve runs on this data dir\n", filepath.Join(cfg.DataDir, serveLockFileName), lockErr)
+		// Never a refusal: a lock that cannot be taken on a data dir that
+		// is there (a lock file this user cannot open, a read-only
+		// filesystem, an I/O error) must not stop a bridge from starting.
+		// Said once, where the pid file's own non-fatal failure is said.
+		fmt.Fprintf(stderr, "serve: %v; serving without the check that no other bridge serve runs on this data dir\n", lockErr)
 	}
 	// Shared with the player, which lets go of its share once nothing it
 	// started may still write the data dir: an engine's state write that
@@ -3085,17 +3122,15 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	dataDirLock := newDataDirHold(releaseDataDir)
 	defer dataDirLock.done()
 	// Adopt pre-floor identities before any live backup can run, even with
-	// playback disabled. A pristine box still gets no player identity here.
-	var playerStateErr error
-	if lockErr == nil {
-		if err := backup.AdoptPlayerState(cfg.DataDir); err != nil {
-			playerStateErr = err
-		} else {
-			playerStateErr = backup.CheckPlayerStart(cfg.DataDir)
-		}
-		if playerStateErr != nil {
-			playerLog.Warn("player: not started", "reason", playerStateErr.Error())
-		}
+	// playback disabled, under the data dir's lock alone. A pristine box
+	// still gets no player identity here.
+	preflight := playerStatePreflight
+	if opts.playerStatePreflight != nil {
+		preflight = opts.playerStatePreflight
+	}
+	playerStateErr := preflight(cfg.DataDir, lockErr == nil)
+	if playerStateErr != nil {
+		playerLog.Warn("player: not started", "reason", playerStateErr.Error())
 	}
 
 	// Resolve TLS material (default: dataDir/server.{crt,key}; overridable

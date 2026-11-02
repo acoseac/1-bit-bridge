@@ -4,6 +4,7 @@ package fsutil
 
 import (
 	"errors"
+	"os"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -40,5 +41,44 @@ func TestLockedErrMapsOnlyAHeldLock(t *testing.T) {
 	}
 	if lockedErr(nil) != nil {
 		t.Fatal("lockedErr(nil) is not nil")
+	}
+}
+
+// TestKeepsNoLocksReadsOnlyTheNoLocksAnswers pins which of flock's answers,
+// as TryLock returns them, say no lock can be taken on the file at all, the
+// one kind serve's data-dir lock and the migration's ladder lock tell apart
+// from contention and from every other failure (B537 item 1): ENOLCK,
+// EOPNOTSUPP and ENOTSUP (one Errno on Linux, two on macOS and the BSDs), and
+// errors.ErrUnsupported, which ENOSYS matches. A held lock, an I/O error, a
+// descriptor the call refuses, an operation it calls invalid, a permission
+// error and an interrupted call are not.
+func TestKeepsNoLocksReadsOnlyTheNoLocksAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		none bool
+	}{
+		{"ENOLCK", unix.ENOLCK, true},
+		{"EOPNOTSUPP", unix.EOPNOTSUPP, true},
+		{"ENOTSUP", unix.ENOTSUP, true},
+		{"ENOSYS", unix.ENOSYS, true},
+		{"ErrUnsupported", errors.ErrUnsupported, true},
+		{"EWOULDBLOCK", unix.EWOULDBLOCK, false},
+		{"ErrLocked", ErrLocked, false},
+		{"EIO", unix.EIO, false},
+		{"EBADF", unix.EBADF, false},
+		{"EINVAL", unix.EINVAL, false},
+		{"EACCES", unix.EACCES, false},
+		{"EINTR", unix.EINTR, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			answer := &os.PathError{Op: "flock", Path: "server.lock", Err: tc.err}
+			if got := KeepsNoLocks(answer); got != tc.none {
+				t.Errorf("KeepsNoLocks(%v) = %v, want %v", answer, got, tc.none)
+			}
+		})
+	}
+	if KeepsNoLocks(nil) {
+		t.Error("KeepsNoLocks(nil) is true")
 	}
 }

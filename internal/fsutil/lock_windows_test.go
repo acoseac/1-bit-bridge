@@ -4,6 +4,7 @@ package fsutil
 
 import (
 	"errors"
+	"os"
 	"testing"
 
 	"golang.org/x/sys/windows"
@@ -38,5 +39,39 @@ func TestLockedErrMapsOnlyAHeldLock(t *testing.T) {
 	}
 	if lockedErr(nil) != nil {
 		t.Fatal("lockedErr(nil) is not nil")
+	}
+}
+
+// TestKeepsNoLocksReadsOnlyTheNoLocksAnswers pins which of LockFileEx's
+// answers, as TryLock returns them, say no lock can be taken on the file at
+// all, the one kind serve's data-dir lock and the migration's ladder lock
+// tell apart from contention and from every other failure (B537 item 1):
+// ERROR_NOT_SUPPORTED, ERROR_INVALID_FUNCTION and errors.ErrUnsupported. A
+// held lock, a sharing violation, a refused access and a handle the call
+// refuses are not.
+func TestKeepsNoLocksReadsOnlyTheNoLocksAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		none bool
+	}{
+		{"ERROR_NOT_SUPPORTED", windows.ERROR_NOT_SUPPORTED, true},
+		{"ERROR_INVALID_FUNCTION", windows.ERROR_INVALID_FUNCTION, true},
+		{"ErrUnsupported", errors.ErrUnsupported, true},
+		{"ERROR_LOCK_VIOLATION", windows.ERROR_LOCK_VIOLATION, false},
+		{"ErrLocked", ErrLocked, false},
+		{"ERROR_SHARING_VIOLATION", windows.ERROR_SHARING_VIOLATION, false},
+		{"ERROR_ACCESS_DENIED", windows.ERROR_ACCESS_DENIED, false},
+		{"ERROR_INVALID_HANDLE", windows.ERROR_INVALID_HANDLE, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			answer := &os.PathError{Op: "LockFileEx", Path: "server.lock", Err: tc.err}
+			if got := KeepsNoLocks(answer); got != tc.none {
+				t.Errorf("KeepsNoLocks(%v) = %v, want %v", answer, got, tc.none)
+			}
+		})
+	}
+	if KeepsNoLocks(nil) {
+		t.Error("KeepsNoLocks(nil) is true")
 	}
 }
