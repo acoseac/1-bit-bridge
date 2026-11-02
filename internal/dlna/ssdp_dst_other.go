@@ -60,21 +60,24 @@ func parseDatagramMeta(oob []byte) datagramMeta {
 // parseControlMessage is x/net's parse of oob, and ok is false when that
 // parse returns an error or panics.
 //
-// x/net's parse alone does not hold. Its table of the IPPROTO_IP messages it
-// reads is each platform's own, and an entry a platform leaves unset has a
-// name and a length of 0 and no parse function. Parse compares each
-// IPPROTO_IP message's type and length with the entries in turn, so a message
-// of type 0 matches the first unset entry and calls the function it lacks.
-// At x/net v0.61.0 only Darwin's table sets every entry: Linux's sets its TTL
-// and packet-info entries alone, and the tables of the BSDs, Solaris, AIX and
-// z/OS each leave one or more unset. No kernel writes such a message beside a
-// datagram (every platform numbers its IPPROTO_IP options from 1), and a
-// network peer cannot supply the ancillary bytes, but a panic here would end
-// the process: the SSDP read loop runs with no recovery.
+// x/net's parse did not hold until v0.62.0 (backlog B610). Its table of the
+// IPPROTO_IP messages it reads is each platform's own, and an entry a
+// platform leaves unset has a name and a length of 0 and no parse function.
+// Parse compares each IPPROTO_IP message's type and length with the entries
+// in turn, so up to v0.61.0 a message of type 0 matched the first unset entry
+// and called the function it lacks: only Darwin's table sets every entry, and
+// those of Linux, the BSDs, Solaris, AIX and z/OS each leave one or more
+// unset. Since v0.62.0 Parse passes over an entry whose name is 0, so such a
+// message is passed over like any type x/net does not read (backlog B615),
+// and every entry a table sets has its parse function. No kernel writes such
+// a message beside a datagram (every platform numbers its IPPROTO_IP options
+// from 1), and a network peer cannot supply the ancillary bytes, but a panic
+// here would end the process: the SSDP read loop runs with no recovery.
 //
-// The recover covers this one call and nothing else, and what it hides is
-// the intended effect: x/net panicking on control data no kernel wrote, which
-// then reports neither, whatever else oob holds.
+// So the recover stays, as defence in depth: a release that panics on
+// control data again, through an entry set with no parse function or
+// anything else, reports neither, whatever else oob holds. It covers this
+// one call and nothing else.
 func parseControlMessage(oob []byte) (cm ipv4.ControlMessage, ok bool) {
 	defer func() {
 		if recover() != nil {

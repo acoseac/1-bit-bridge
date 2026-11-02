@@ -46,8 +46,9 @@ func FuzzParseMSearchMX(f *testing.F) {
 // handed. It must not panic, and what it calls reported must be a value the
 // metadata can hold, an IPv4 destination and a positive index, with nothing
 // left in a field it does not report. Its committed seeds are 64-bit Linux's
-// control data, the nightly's crash of 2026-10-24 to 31 (B610) among them;
-// TestTheDatagramMetaSeedsAreLinuxsControlData says what each decodes to.
+// control data, the nightly's crash of 2026-10-24 to 31 at x/net v0.61.0
+// (B610) among them; TestTheDatagramMetaSeedsAreLinuxsControlData says what
+// each decodes to.
 func FuzzParseDatagramMeta(f *testing.F) {
 	f.Add([]byte{})
 	f.Add(make([]byte, 64))
