@@ -1335,3 +1335,168 @@ Pinned by `TestMediumTakesVolumiosHiddenDataPartition`,
 `TestWriteBytesDurable_RefusesAnOverlayWhoseUpperLayerIsHidden` (Linux, a
 namespace) and `TestInspectMediumIsTheWritersOwnVerdict`. The record is in
 `ops/engineering-log.md`, 2026-10-30, B603.
+## A candidate's settings check, and the early rollback of an install whose version refuses the settings (backlog B613, 2026-11-02)
+
+- **A candidate is checked against this bridge's settings before its swap, and an install whose version refuses them at its first start is rolled back before serve writes anything** (2026-11-02, backlog B613): 0.2.2 refuses a fraction or a leading zero in a whole-number setting (B528, B533), 0.2.1's updater swapped without asking, and the new serve exited 2 at the load, before the boot rollback, under `Restart=always`. Install stages the verified candidate beside the binary and runs `<candidate> serve --validate-config --config <the settings the bridge loaded>` (`updater.CheckConfig`: 30 s, stdin empty, 64 KiB of each output): 0 swaps; 78 refuses, one `config refused: ` line a reason, naming the line and no path (`config.RefusedError.Reasons`), and the version is recorded as rejected with its reason and a digest of the settings (the file's bytes and every BRIDGE_ variable, `updater.ConfigDigest`), which holds it from the auto-installer while the digest is unchanged, a newer version and a manual install checking again; a 2 carrying the flag package's refusal of the flag is a candidate that predates the check, held from the auto-installer for every setting and installed by hand with a warning; anything else (a timeout, a cancellation, a candidate that will not start, another code) installs and records nothing. The check is serve's own load (`checkServeConfig`: the boot read, Load, `serveConfigRefusal`), which writes, opens and binds nothing, and never a root's reach (`CheckLibraryRootsAccessible` is the host's, and the user's who runs it). Serve, refusing its settings (a `config.RefusedError`, or `serveConfigRefusal`, every one of them before the data dir's lock), reads the data dir from the dataDir key, the default, BRIDGE_DATA_DIR and the settings' directory alone (`config.DataDirOf`), and puts the backup back only for a recent `installing` marker of this version over another, swapped, under which no other version has opened the data dir, with the data dir's lock its own and the backup a regular file whose `version` names the marker's PreviousVersion (`updater.EarlyRollback`, `updater.ProbeVersion`, a version check and not a proof of the bytes); then it records the hold and exits 75 (`supervision.RestartExitCode`), which systemd, launchd and the SCM's recovery all restart; otherwise it refuses as before, saying why when the marker is this version's. Before its first write, serve records in an armed marker that it opened the data dir (`State.DataDirOpenedBy`, `disarmEarlyRollback`; a marker it cannot read is removed) and refuses to start when it cannot, and BootInstallFailed leaves the backup where a version other than the backup's opened the data dir. **Don't swap a candidate whose check did not answer 0, take a failed or stopped check for a refusal or a 2 for "predates" without the flag package's words, record a refusal against no digest or a predates hold against one, change the flag, the codes or the prefix (every later release answers this updater), let the check write, open a store, bind or ask a root's reach, name a path in a reason, find the marker's data dir by anything but Load's rules for that key, restore without the lock, the marker's proof and the backup's version, restore after another version opened the data dir, write the settings, or exit 0 after a restore.** `TestAnInstallWhoseCandidateRefusesTheSettingsSwapsNothing`, `TestAnAutomaticInstallHoldsARefusedVersionBackUntilTheSettingsChange`, `TestAnAutomaticInstallHoldsBackACandidateThatPredatesTheCheck`, `TestACheckThatFailsSwapsNothingAndRecordsNothing`, `TestCheckConfigReadsTheCandidatesAnswerByItsExitCode`, `TestTheSettingsCheckRefusesWhatServeRefuses`, `TestTheUpdaterReadsWhatThisBridgesSettingsCheckSays`, `TestDataDirOfIsTheDataDirLoadGives`, `TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings`, `TestServeLeavesAnInstallItCannotProveAsItIs`, `TestServeDisarmsTheEarlyRollbackBeforeItsFirstStoreAccess`, `TestTheBootRollbackLeavesABackupOnceAnotherVersionOpenedTheDataDir` and `TestEveryInstallTheBridgeStartsNamesItsSettings` pin it.
+
+*The defect.* 0.2.2 refuses at load a whole-number setting written as a
+fraction (`21600.5`) or with a leading zero (`060`), which only a hand edit
+or another tool writes (`internal/config/wholenumbers.go`, B528 and B533).
+0.2.1's updater verified the candidate's checksum (and on macOS its
+signature) and swapped it in without ever running it against the settings.
+The new serve exited 2 at `config load failed`, which is before
+`maybeRollbackOnBoot`, the one place that can put the backup back, and
+`Restart=always` started it again every two seconds. `DecideBootAction`
+takes a matching version for the install's success, so even a boot that
+got that far would have confirmed it. The same shape follows any future
+tightening of the settings, so the fix names no setting.
+
+*The check's interface.* A flag of serve, not a subcommand: `bridge serve
+--validate-config [--config PATH] [--addr ADDR]` runs `checkServeConfig`,
+which resolves the config as runServe does (`resolveConfigPath`,
+`fsutil.AbsAsWritten`), reads it through `loadServeConfigFile` (the boot
+read, `config.LoadFileAt`), asks `serveConfigRefusal`, and with `--addr` the
+override's own check, then exits. Its codes and its line prefix live in
+internal/updater (`ConfigCheckFlag`, `ConfigCheckValidExit` 0,
+`ConfigCheckRefusedExit` 78, sysexits.h's EX_CONFIG, `ConfigCheckFailedExit`
+1, `ConfigRefusedPrefix`), where both sides read them, since this updater
+runs every later release as a candidate. 1 is a config it could not read
+(none there, unreadable, a name being repointed): a failed check, never a
+refusal. `--init-if-missing` beside it is a usage error (2): the check
+writes nothing. A release that predates the flag answers the flag
+package's own words ("flag provided but not defined: -validate-config")
+and 2, having run nothing. A refusal's lines come from
+`config.RefusedError`, which `loadData` returns for a decode it refuses and
+for Normalize and Validate: its Error is the text Load always gave (it
+unwraps to it, so errors.Is and errors.As see what they saw), and its
+Reasons are the same without the file's name, a yaml.v3 type error's lines
+(`line 7: …`) or the refusal's own; `serveConfigRefusal`'s two-roots
+refusal names the roots for serve's line and none for the check's.
+
+*Where the candidate runs.* Install stages the verified binary beside the
+one it would replace (`stageForCheck`, `.bridge-check-*`, `.exe` on
+Windows, the destination's mode) and checks it there, then hands that file
+to the swap, which moves it into place within the directory: a data dir
+mounted noexec, or a policy that runs nothing from it (AppLocker), would
+refuse the copy in the scratch dir, never the directory the bridge already
+runs from. The run (`runCandidate`) has its own bound (30 s for the check,
+10 s for a version), standard input empty, each output kept to 64 KiB and
+the rest read and dropped, `Cmd.WaitDelay` 2 s, and starts again on ETXTBSY
+(a file written moments ago can still be open in a child another goroutine
+forked, golang/go#22315). The Tailscale CLI's rule against WaitDelay (under
+The CLI and the serve wiring) is about a join that must outlast a writer;
+a check and a version write nothing, so the bound is what keeps a broken
+candidate from parking an install.
+
+*What Install does with the answer* (`checkCandidate`). Valid: the install
+goes on. Refused: nothing is installed, by hand or automatically, since
+the candidate would not start with these settings; one Warn line names the
+reasons, and the refusal is recorded (`recordRejection`, which keeps the
+rest of the marker, so a refusal before an install leaves the last
+install's "installed" stamp and its backup's cleanup in place) with its
+reason and `ConfigDigest`: the file's bytes and every BRIDGE_ variable with
+a value, since config's overrides read them over the file. The error is a
+sentence naming the version and each reason by line, matching
+`ErrConfigRefused`; the console answers it 409 `config-refused` with that
+sentence alone (`mapUpdaterError`'s `detailError`), and `bridge update`
+prints it and the file to fix. The auto-installer's gate (`HeldBack`) holds
+the version and any older one while the digest is unchanged, so fixing the
+settings lets it try again (Argon's design), a newer version is admitted,
+and a manual install checks again whatever the record says; settings it
+cannot read hold the version back, as an automatic install must not
+guess. The console's Held update row shows a recorded hold through
+`deferredReason` whether or not the auto-installer has run in this
+process, and an operator's rollback keeps the auto-installer's words. A
+check that did not answer installs and records nothing, so the next
+attempt asks again; one its context stopped carries the cancellation,
+which the auto-installer does not log as a failure.
+
+*A candidate that predates the check.* Codex's choice, the brief's binding
+decision: the auto-installer holds it back, recorded for every setting (no
+digest), so it is not downloaded again each poll, and a manual install
+takes it with a warning (`Status.InstallWarning`, which the console alerts
+before its restart and `bridge update` prints), since the operator can
+always choose a version by hand. Argon's alternative, to install it
+automatically with a warning, was not taken: a version that predates the
+check predates the early rollback too, so an automatic install of one that
+refuses the settings would crash-loop with nothing to bring it back. Only
+the flag package's words with an exit of 2 read as "predates": a Go panic
+exits 2 as well, and is a failed check.
+
+*The early rollback, for installs an updater without the check made.* Serve
+asks `recoverRefusedInstall` when its load is a `config.RefusedError` or
+`serveConfigRefusal` refuses; a file it cannot read, no config and a name
+being repointed are not asked about. It finds the data dir without the
+parse that failed (`config.DataDirOf`): the dataDir key as yaml.v3 decodes
+it into the field, aliases, merge keys and tags included, from the file's
+first document, `./data` for an empty or absent key, BRIDGE_DATA_DIR when
+set and not empty, a relative value joined to the directory filepath.Abs
+gives the config's name (never the directory a link there leads to); a
+dataDir written twice, as a list or a map, or a document yaml.v3 cannot
+decode is an error, and nothing is guessed (Codex: no regex, no search). It
+reads the marker there and acts only on a recent install of this version
+over another, which reached its swap, dated no more than a minute ahead of
+the clock, under which no version but the backup's has opened the data dir
+(`updater.EarlyRollback`); takes the data dir's lock (`lockServeDataDir`;
+held by another open, or impossible on a filesystem that keeps no locks,
+and it does nothing); reads the marker again under the lock; requires the
+backup, `<binary>.bak` beside the resolved executable, to be a regular file
+whose `version` (`updater.ProbeVersion`: bounded, stdin empty, its first
+line parsed) names the marker's PreviousVersion. The marker records no
+hash and no path of the backup (Codex, against v0.2.1), so this is a
+version check and not a proof. Then `updater.RollbackBinary` renames the
+backup over the binary: one rename on Unix; on Windows the running image is
+moved aside first and put back if the second rename fails
+(`replaceRunningBinary`, `TestRollbackReplaceRestoresDstWhenTheSecondRenameFails`),
+the SCM stop skipped since this process is the service. It records the hold
+as a fresh marker (Status "", so the restored binary's boot does nothing
+with it; RejectedVersion, the reason with each refused line, and the
+digest), says so in a line that names both versions, and exits 75: systemd's
+`Restart=always` restarts any exit, launchd's KeepAlive restarts an
+unsuccessful one, and the SCM's recovery actions answer a service-specific
+exit code (B201's rule); one restart, well inside systemd's default start
+limit. A record that cannot be written is said, and the exit is 75 all the
+same: the binary is the previous one already. Every other case refuses to
+start with the settings' error, as before, with one `updater: not rolling
+back the install of …` line where the marker is an install of this
+version, and none otherwise. The settings are never written. 0.2.1, once
+restored, reads only RejectedVersion of the record, by its own rule: it
+holds the version back until a newer one, with its own "rolled back"
+words, and a `bridge update` by hand installs it.
+
+*No downgrade past a migration, across starts* (Codex's binding). The early
+rollback runs before the data dir's lock, and every write serve makes comes
+after it, so no migration of this start can have run. An earlier start
+could have migrated the store and crashed before `maybeRollbackOnBoot`, so
+serve records in an armed marker, right after the lock and before its
+first write (`disarmEarlyRollback`, before `backup.AdoptPlayerState`), that
+a version other than the backup's opened the data dir (`DataDirOpenedBy`,
+`ArmsDataDirRecord`), durably (`SaveState`), and refuses to start (1) when
+it cannot. A marker it cannot read is removed, durably
+(`ClearStateDurably`), since it cannot be told an armed install's or not
+and a later start that could read it again must not take it for an install
+no start of this version went past. The boot rollback (BootInstallFailed),
+which restores after the store has opened, leaves the backup where the
+record names a version, and clears the marker. A command of the new
+version that opens the store before its first serve start (a `bridge
+doctor` after `bridge update`) records nothing; the early rollback could
+then still fire if serve's settings, unlike the command's, are refused,
+which needs another environment or an edit in between: named and left.
+
+*The Tailscale mode.* Validate refuses a mode it does not know at load
+already (Gemini on PR #249), so `serveConfigRefusal`'s check of it, which
+ran after the stores had opened until B613 moved it before the lock, is a
+second line that refuses nothing today; the first negative control showed
+it (`TestTheSettingsCheckLoadsTheSettingsAsServeDoesAndWritesNothing`'s
+Tailscale case went red with the load refusal), and the table's
+two-library-roots case is the one that goes through `serveConfigRefusal`.
+
+*Not here.* An install counted healthy only after readiness and a
+probation, rather than at a matching version (B198's scenario, filed
+separately): `DecideBootAction`'s success rule is left as it is, and the
+early rollback asks about an install that could not start, which that
+work does not need to change. Native Windows (the SCM, a mapped image, a
+`.bak` run by CreateProcess under its own name) is cross-vetted only. A
+crash during a check leaves a `.bridge-check-*` beside the binary, as one
+during a swap leaves a `.bridge-swap-*`. The record is in
+`ops/engineering-log.md`, 2026-11-02, B613.

@@ -729,6 +729,53 @@ Grep mechanics that cost time to learn:
   access logger) — absence of those lines is not evidence a renderer
   didn't fetch.
 
+## A self-update the new version refuses (backlog B613)
+
+From the release that carries B613, the updater asks a downloaded,
+verified candidate whether it loads this bridge's settings before it swaps
+anything: `<candidate> serve --validate-config --config <bridge.yaml>`, run
+from beside the installed binary, which writes nothing. What each answer
+does:
+
+- **Refused** (exit 78): nothing is installed, by the console, `bridge
+  update` or the auto-installer, and the running bridge is unchanged. The
+  console's install answers 409 `config-refused` and names each refused line
+  ("0.2.3 refuses this bridge's settings, so it was not installed: line 12:
+  a whole number is written with a leading zero, …"); `bridge update` prints
+  the same and the file to fix; the journal has one Warn
+  `the new version refuses this bridge's settings; it was not installed`.
+  `update-state.json` records `rejectedVersion`, `rejectedReason` and
+  `rejectedConfigDigest`, and the Updates panel's "Held update" row shows the
+  reason. The auto-installer holds that version (and older) back while the
+  settings are unchanged; **fix the line, and it is tried again at the next
+  poll**, as it is at once by "Install" or `bridge update`. A newer release
+  is always tried. The digest covers `bridge.yaml`'s bytes and every
+  `BRIDGE_` variable, so a unit's environment change counts too.
+- **Predates the check** (a release without the flag): the auto-installer
+  holds it back for good (`rejectedReason` says so) and installs the next
+  release; "Install" or `bridge update` takes it, with a warning, and with
+  no check.
+- **No answer** (a timeout of 30 s, a crash, another code): nothing is
+  installed and nothing recorded; the journal's Warn has the candidate's
+  output; the next attempt asks again.
+
+**An install an older updater made (0.2.1, 0.2.2) is rolled back at its first
+start when the new version refuses the settings.** Its serve prints the
+refusal, then, when the marker is a recent install of this version over
+another and the backup beside the binary reports that other version, puts
+the backup back, records the new version as held back, and exits 75 for the
+service manager to start the previous binary:
+`updater: 0.2.3 refuses this bridge's settings, so the install is rolled back: 0.2.2 is back at /…/bridge and 0.2.3 is held back …`.
+The settings are untouched: fix them, then update again. Where it does not
+act it says why on an `updater: not rolling back the install of …` line (no
+backup, a backup of another version, a marker older than 6 h or dated in the
+future, another process on the data dir, or this version already started
+past its settings once, whose store a rollback could downgrade), and serve
+refuses as it always did. The previous binary restored is the old code: it
+shows only that the version "was rolled back" and holds it until a newer
+release, whatever the settings; `bridge update` installs it by hand once they
+are fixed. To see what is recorded: `cat <dataDir>/update-state.json`.
+
 ## After a deploy: expect iOS syncs to quietly defer
 
 **The v0.1.8 → v0.1.9 upgrade runs TWO one-time backfills, and they compound.**

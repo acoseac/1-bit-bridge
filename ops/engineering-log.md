@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-11-02 — B613: a candidate is checked against the settings before its swap, and an install an older updater made is rolled back when its version refuses them](#2026-11-02--b613-a-candidate-is-checked-against-the-settings-before-its-swap-and-an-install-an-older-updater-made-is-rolled-back-when-its-version-refuses-them)
 - [2026-10-28 — B539: discard syncs a fresh seal before it moves a damaged one, and a stopped discard says to run it again](#2026-10-28--b539-discard-syncs-a-fresh-seal-before-it-moves-a-damaged-one-and-a-stopped-discard-says-to-run-it-again)
 - [2026-10-24 — B470 PR 5a4: the player's OpenHome writes, Insert's Uri confined to the bridge's own tracks, and the owner's dogfood](#2026-10-24--b470-pr-5a4-the-players-openhome-writes-inserts-uri-confined-to-the-bridges-own-tracks-and-the-owners-dogfood)
 - [2026-10-25 — B470 PR 5b: GET /v1/outputs lists the bridge's own player, kind bridge, on a gate of its own](#2026-10-25--b470-pr-5b-get-v1outputs-lists-the-bridges-own-player-kind-bridge-on-a-gate-of-its-own)
@@ -69224,3 +69225,231 @@ command through the build lock):
   it needs no raise.
 - Not run here: the node harness and the console's other node tests (no node
   on legion0); CI's legs run them.
+
+## 2026-11-02 — B613: a candidate is checked against the settings before its swap, and an install an older updater made is rolled back when its version refuses them
+
+Backlog B613 (Step 1 stream C, a candidate for the 0.2.2.x patch), on branch
+`fix/b613-update-config-guard` from `main` fe2cb532, worker b613 on orion
+(macOS 27, darwin/arm64, go1.27.3). The brief was settled by Argon's and
+Codex's triage and the self-healing study, and by Codex's and Argon's reviews
+of it against the code (`~/onebit/briefs/b613-*-review.md`), whose ten
+binding decisions won where they differed. The rule is the settings-check
+bullet in `.claude/rules/config-lifecycle.md` and its line in `cli-serve.md`
+(shipped as a checked patch with the report: this worker cannot write
+`.claude/`), and the long form is in `ops/History-rules-config-lifecycle.md`.
+
+**The defect, as verified 2026-10-31.** 0.2.2 refuses at load a whole-number
+setting written as a fraction (`21600.5`) or with a leading zero (`060`),
+B528 and B533, which only a hand edit or another tool writes. 0.2.1's updater
+verifies the candidate's checksum (and, on macOS, its signature) and swaps it
+without running it against the settings. The new serve then exits 2 at
+`config load failed`, before `maybeRollbackOnBoot`, and `Restart=always`
+starts it again every two seconds; `DecideBootAction` counts a matching
+version as the install's success, so even a later boot would have confirmed
+it. Codex, against tag v0.2.1: the marker is `<effective dataDir>/update-state.json`
+(`State`: Status, TargetVersion, PreviousVersion, AttemptedAt, InstalledAt,
+SwapStarted, RejectedVersion; no hash or path of the backup), and the backup
+is `<resolved executable>.bak`; nothing in the updater has changed that shape
+since v0.2.1 but #1168's Windows rollback.
+
+**As built.**
+- *The candidate's half* (`cmd/bridge/serve_check.go`): `bridge serve
+  --validate-config [--config P] [--addr A]` is `checkServeConfig`, serve's
+  own resolution and boot read (`loadServeConfigFile`), Load's decode,
+  defaults, environment, paths, Normalize and Validate, and
+  `serveConfigRefusal` (two library roots with one folder name, and the
+  Tailscale mode as a second line); it exits 0, 78 (EX_CONFIG) with one
+  `config refused: <reason>` line a reason, or 1 when the config cannot be
+  read, and writes, opens and binds nothing. It never asks whether a root can
+  be reached: `CheckLibraryRootsAccessible` is the host's state and the
+  state of the user who runs the check (`sudo bridge update` is root), and
+  `Validate()` stays a pure shape check for that reason (config-lifecycle.md).
+  A refusal's lines are `config.RefusedError.Reasons()`: `loadData` returns a
+  `*RefusedError` for a decode it refuses and for Normalize/Validate, whose
+  Error is the text Load always gave (it unwraps to it) and whose Reasons drop
+  the file's name (a yaml.v3 type error's `line N: …` lines).
+- *The updater's half* (`internal/updater/configcheck.go`, `install.go`): the
+  verified binary is staged beside the installed one (`stageForCheck`,
+  `.bridge-check-*`, `.exe` on Windows, the binary's mode), so a noexec data
+  dir or an AppLocker policy cannot refuse it, and checked there
+  (`CheckConfig`: 30 s, stdin empty, 64 KiB of each output kept,
+  `WaitDelay` 2 s, ETXTBSY retried); the swap then takes that file. 0 swaps;
+  78 refuses: nothing installed, by hand or automatically, one Warn line, the
+  version recorded as rejected (`recordRejection`, which keeps the rest of
+  the marker) with its reason and `ConfigDigest` (SHA-256 over the file's
+  bytes and every non-empty BRIDGE_ variable), and the error a sentence naming
+  each refused line; 2 with "flag provided but not defined:
+  -validate-config" is a candidate that predates the check, held from the
+  auto-installer for every setting and installed by hand with
+  `Status.InstallWarning`; anything else installs and records nothing.
+  `HeldBack` is the one gate: a rejected version (or older) is held while its
+  digest is the settings' now, a rollback's always, and settings that cannot
+  be read hold it. `InstallOptions.ConfigPath` is set by the console's, the
+  auto-installer's and the CLI's installs (an AST test holds all three), and
+  `Automatic` by `maybeAutoInstall`.
+- *The surfaces*: the console answers a refusal 409 `config-refused` with the
+  sentence alone (`mapUpdaterError`'s `detailError`), a failed check 502
+  `config-check-failed`; `UpdateStatus` gains `rejectedReason` and
+  `installWarning`, and its Held update row shows a recorded hold through
+  `deferredReason` whether or not the auto-installer has run in this process;
+  `runInstall` tells active downloads by `err.code` (its `/409/` test of the
+  message would have taken a refusal on line 409 for them) and alerts an
+  install warning before the restart. `bridge update` prints a recorded hold
+  (`Held:`), the refusal and the file to fix, and the warning.
+- *The early rollback* (`cmd/bridge/serve_refused_install.go`): on a
+  `config.RefusedError` from the load, or a `serveConfigRefusal`, serve asks
+  `recoverRefusedInstall`, which reads the data dir from the dataDir key, its
+  default, BRIDGE_DATA_DIR and the settings' directory alone
+  (`config.DataDirOf`, a restricted yaml.v3 decode that keeps aliases and
+  merges and refuses a key written twice or as a list or map), the marker
+  there, and acts on a recent (≤ 6 h, ≤ 1 min ahead of the clock) `installing`
+  marker of this version over another that reached its swap and under which
+  no other version opened the data dir (`EarlyRollback`); it takes the data
+  dir's lock (held, or no locks on the filesystem: nothing), reads the marker
+  again, requires `.bak` beside the resolved binary to be a regular file whose
+  `version` names the marker's PreviousVersion (`ProbeVersion`, bounded),
+  renames it back (`RollbackBinary`), writes a fresh marker holding this
+  version back (reason with each refused line, and the digest), and exits 75.
+  The settings are never written. Otherwise serve refuses as before, with an
+  `updater: not rolling back the install of …` line when the marker is an
+  install of this version.
+- *No downgrade past a migration*: right after the lock and before its first
+  write (`backup.AdoptPlayerState`), serve records in an armed marker that a
+  version other than the backup's opened the data dir (`DataDirOpenedBy`,
+  `disarmEarlyRollback`, durable through `SaveState`), removes durably a
+  marker it cannot read, and exits 1 when it can do neither; the early
+  rollback and BootInstallFailed then leave the backup where it is.
+- *The exit code*: 75 (`supervision.RestartExitCode`): the shipped systemd
+  unit (`Restart=always`, `RestartSec=2`, no start-limit override, so the
+  default five starts in ten seconds, of which the rollback costs one), the
+  LaunchAgent (`KeepAlive {SuccessfulExit: false}`) and the Windows service's
+  recovery actions (restart after 2 s, 2 s, 30 s; `serviceServeResult` maps 75
+  to a service-specific code) all restart it; 0 would leave launchd and the
+  SCM stopped (B201). Docker cannot reach this path: the image's binary is
+  not writable by the service.
+
+**The choice for a candidate that predates the check.** Codex's, the binding
+decision: block it from the auto-installer with the reason recorded (for
+every setting, so it is not downloaded every poll), install it by hand with a
+warning. Argon proposed allowing it with a warning; declined, since a
+version that predates the check predates the early rollback too, and an
+unattended install of one that refuses the settings would loop with nothing
+to bring it back. When it happens: an updater with the check whose latest
+release lacks it, a dev build (`0.0.1`) seeing 0.2.2, or a release built from
+a branch without this change.
+
+**Red first, through the real code** (commits: seams 5c71096b, red e1656765,
+fix 232a61f3, then c069d18c after the first control, and 77623945, which
+makes a copy of the test binary the bridge where the copy is made, so that no
+copy can run the whole suite). On the seams alone:
+- internal/updater: 10 of 11 new Install-level tests red, the candidate a
+  shell script that runs the test binary as a scripted bridge
+  (`standin_test.go`): `TestAnInstallWhoseCandidateRefusesTheSettingsSwapsNothing`
+  (`Install = <nil>, want ErrConfigRefused`: today it swaps),
+  `TestAnAutomaticInstallHoldsARefusedVersionBackUntilTheSettingsChange`
+  (the live binary became the candidate, a backup was made, one restart),
+  `TestAManualInstallTakesARefusedVersionOnceTheSettingsAreFixed`,
+  `TestAnAutomaticInstallHoldsBackACandidateThatPredatesTheCheck`,
+  `TestAManualInstallTakesACandidateThatPredatesTheCheckWithAWarning`,
+  `TestACheckThatFailsSwapsNothingAndRecordsNothing`,
+  `TestACheckThatHangsIsStoppedAtItsBound`,
+  `TestAShutdownDuringTheCheckIsACancellationNotAFailure`,
+  `TestARefusalKeepsTheMarkersInstallBookkeeping` and
+  `TestARefusalThatCannotBeRecordedStillSwapsNothing`;
+  `TestAnAutomaticInstallAdmitsANewerVersionPastARefusal` green, as it must
+  stay.
+- cmd/bridge: `bridge serve --validate-config` an unknown flag (both
+  settings-check tests, every case); serve over the marker and backup 0.2.1
+  leaves, with `scanIntervalSec: 010`, a fraction or another refusal, exits 2
+  and stays (`TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings`, its
+  seven cases then); the disarm absent
+  (`TestServeDisarmsTheEarlyRollbackBeforeItsFirstStoreAccess`: no record
+  after the first boot), the disarm's failure ignored
+  (`TestServeDoesNotStartWhereItCannotDisarmTheEarlyRollback` reached TLS),
+  the record's failure (`TestServeRestoresTheBackupEvenWhereItCannotRecordTheRefusal`),
+  the boot rollback restoring over another version's store
+  (`TestTheBootRollbackLeavesABackupOnceAnotherVersionOpenedTheDataDir`), the
+  console's Held update row empty
+  (`TestTheConsoleShowsAVersionHeldBackForRefusingTheSettings`). Each case of
+  `TestServeLeavesAnInstallItCannotProveAsItIs` that must behave as today was
+  green on the seams (no marker, another version's, a confirmed install, a
+  marker that does not parse, a data dir the settings name in no certain
+  way, settings that name another data dir since the install), and the cases
+  that must also say why were red on that line only. **The first red run
+  caught a weak assertion**: three of those passed today because the
+  expected word ("older", "backup") was a substring of the temp path in the
+  refusal (`/var/folders/…`, `…/no_backup…`); the assertion now reads the
+  `updater: ` lines alone (`updaterLines`), and they went red as they should.
+
+**Negative controls**, each on a committed tree, each mutation alone,
+predicted, observed, and restored with `git checkout --` (the tree clean
+after each):
+
+| # | Mutation | Predicted red | Observed |
+|---|---|---|---|
+| C1 | the check takes a load refusal for valid | 2 settings-check tests (4 + 4 cases) and the CLI contract test | 3 tests, 5 + 5 cases: the Tailscale cases too, since Validate refuses an unknown mode at load (Gemini on PR #249); corrected in c069d18c |
+| C2 | Install skips the check | the 10 red-first Install tests | the 10 |
+| C3 | the hold ignores the digest | 2 (the auto-install retry, `TestHeldBackHoldsARefusedVersionOnlyWhileTheSettingsAreUnchanged`) | the 2 |
+| C4 | no early rollback on a load refusal | 7 rollback cases, the 11 "says why" cases, the disarm's second boot, the record's failure | exactly those |
+| C5 | the backup's version not compared | 1 (a backup of another version) | 1 |
+| C6 | no lock before restoring | 1 (the data dir held by another process) | 1 |
+| C7 | no disarm | 2 (the two-boot test, the failed disarm) | 2 |
+| C8 | `EarlyRollback` ignores `DataDirOpenedBy` | 3 (its table row, the already-started case, the two-boot test) | 3 |
+| C9 | BootInstallFailed restores anyway | 1 | 1 |
+| C10 | `DataDirOf` ignores BRIDGE_DATA_DIR | 18 differential cases, 1 rollback case | 18 + 1 |
+| C11 | serve's second-line Tailscale check removed | 0: Validate refuses first | 0 |
+| C12 | no early rollback on `serveConfigRefusal`'s refusal | 1 (two roots with one folder name) | 1 |
+| C13 | the auto-installer's options without ConfigPath | 1 (`TestEveryInstallTheBridgeStartsNamesItsSettings`, naming main.go's literal) | 1 |
+| C14 | any exit 2 read as "predates" | 1 (a 2 of another kind) | 1 |
+| C15 | the auto-installer's install not marked automatic | 1 (the predates hold) | 1 |
+| C16 | the reasons keep the file's name | 3 config cases, 3 check cases, the CLI contract test | exactly those |
+
+**Checks.** On orion (macOS 27, darwin/arm64, go1.27.3, `GOTOOLCHAIN=local`),
+on the final tree:
+- `make test` once (`-race -timeout 30m`, every package): 79 packages ok, and
+  one failing test outside this change,
+  `TestAJobWhoseToolIsBrokenOrMissingOnTheWayStrikesNoSource/ALAC_with_no_decoder`
+  in internal/transcode (a strike recorded beside the expected tool-unavailable
+  line, under the whole suite's load), whose test binary links none of the
+  packages this change touches (`go list -deps -test`) and which passed 5 of 5
+  alone under `-race`. cmd/bridge took 758.5 s, internal/admin 875.1 s,
+  internal/updater 36.4 s and internal/config 13.5 s.
+- An earlier `-race` run of internal/admin and cmd/bridge together failed once
+  in cmd/bridge, at `TestALiveBindingChangeReportsThePlayersOutputUnavailable`
+  (`play on the boot binding again: … output_unavailable: binding_changed`),
+  in the player's live-binding path, which this change does not touch: 15 of
+  15 alone under `-race`, and green in `make test`. Its likely shape, read from
+  the code and not reproduced: a snapshot the watcher took under the
+  intermediate binding is published after the boot binding is put back and the
+  output restated, and `playerOutput.fromSnapshot` withholds the output again.
+- `go test` without the race detector of internal/updater, cmd/bridge,
+  internal/config and internal/admin: ok (11.9 s, 208.6 s, 8.0 s, 151.7 s).
+- `make vet`, and `go vet ./...` for linux/amd64 and windows/amd64 (test files
+  included): clean. go1.27.3's gofmt on the 25 changed Go files: clean. `make
+  docs-check`: ok. The rules patch, measured in place with the budget script's
+  own functions: config-lifecycle.md 90,261 bytes (90.3 % of its 100 KB;
+  86,140 at HEAD), cli-serve.md 29,981 (30.0 %), the heaviest load 298,335
+  bytes (62.2 % of 480 KB), and all 139 test names it cites declared.
+- Not run here: Linux and Windows natively; the Windows path is cross-vetted
+  only (below).
+
+**For the owner.**
+- The predates choice above (block automatic, warn by hand) is Codex's; an
+  owner who wants Argon's (install automatically with a warning) changes one
+  branch of `checkCandidate`.
+- A 0.2.1 the early rollback restores reads only `rejectedVersion`: it holds
+  the version back until a newer release, with its own "rolled back" words,
+  whatever the settings; `bridge update` by hand installs it once they are
+  fixed. A 0.2.2 restored likewise.
+- Not native here: Linux and Windows (cross-vetted only), above all the
+  Windows path: the SCM, a running image renamed aside, and `.bak` run by
+  CreateProcess under its own name (`TestProbeVersionNamesTheVersionTheBinarySays`
+  runs one named `bridge.exe.bak` on CI's windows leg).
+- Residuals named and left: a command of the new version that opens the
+  store before its first serve start (a `bridge doctor` after `bridge
+  update`) records no `DataDirOpenedBy`; a crash during a check leaves a
+  `.bridge-check-*` beside the binary, as a crash during a swap leaves a
+  `.bridge-swap-*`; the 1-bit.app updater page (the `acoseac/1bitapp` repo)
+  does not yet say what happens to a refused update.
+- Not in this PR, filed separately: an install counted healthy only after
+  readiness and a probation (B198's scenario).
