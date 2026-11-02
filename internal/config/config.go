@@ -3301,6 +3301,12 @@ func RepairLibraryName(name string) string {
 // atomic holder exists to prevent. The copy-on-write sequence is
 // clone → mutate → NormalizeAndValidate → Save → hooks → Store.
 func (c *Config) Normalize() error {
+	return c.normalize(true)
+}
+
+// normalize performs Normalize with optional warnings. A settings candidate
+// can be checked before a later refusal without logging a value never saved.
+func (c *Config) normalize(warn bool) error {
 	// Enrich upstream base URLs: trim whitespace + any trailing slash so a
 	// self-hosted mirror configured as "https://host/ws/2/" doesn't produce
 	// double-slash request paths ("...//release/...").
@@ -3338,7 +3344,7 @@ func (c *Config) Normalize() error {
 		{"enrich.coverArtBaseURL", caaBase},
 		{"atlas.harvestBaseUrl", c.Atlas.CanonicalHarvestBaseURL()},
 	} {
-		if base.value != "" && !baseurl.NamesHost(base.value) {
+		if warn && base.value != "" && !baseurl.NamesHost(base.value) {
 			validateLogger.Warn(baseURLNamesNoHostWarning, "field", base.field, "value", urlOriginForLog(base.value))
 		}
 	}
@@ -3364,11 +3370,15 @@ func (c *Config) Normalize() error {
 		if d != "" {
 			switch host := AutocertHost(d); {
 			case host == "":
-				validateLogger.Warn(autocertDomainNamesNoHost, "field", "autocert.domain")
+				if warn {
+					validateLogger.Warn(autocertDomainNamesNoHost, "field", "autocert.domain")
+				}
 				d = InvalidAutocertDomain
 			case host != d:
-				validateLogger.Warn(autocertDomainServedAsItsHost,
-					"field", urlFieldForLog("autocert.domain", "https://"+hostForURL(host)))
+				if warn {
+					validateLogger.Warn(autocertDomainServedAsItsHost,
+						"field", urlFieldForLog("autocert.domain", "https://"+hostForURL(host)))
+				}
 				d = host
 			}
 		}
@@ -3400,7 +3410,7 @@ func (c *Config) Normalize() error {
 	// so the name is cut or its bytes replaced, and the log says so, since
 	// the operator did not choose the result.
 	name := RepairLibraryName(c.LibraryName)
-	if name != TrimLibraryName(c.LibraryName) {
+	if warn && name != TrimLibraryName(c.LibraryName) {
 		validateLogger.Warn("libraryName is longer than a pairing code carries, or not UTF-8; serving it repaired",
 			"served", name, "runes", utf8.RuneCountInString(c.LibraryName),
 			"validUTF8", utf8.ValidString(c.LibraryName), "max", MaxLibraryNameLength)
@@ -3429,6 +3439,9 @@ func (c *Config) Normalize() error {
 	kept, warns := ValidateCustomEndpoints(c.CustomEndpoints)
 	c.CustomEndpoints = kept
 	for _, w := range warns {
+		if !warn {
+			continue
+		}
 		if errors.Is(w, errCustomEndpointCredentials) {
 			validateLogger.Warn(customEndpointPublishedWithoutCredentials, "err", w)
 			continue
@@ -3451,6 +3464,16 @@ func (c *Config) NormalizeAndValidate() error {
 	return c.Validate()
 }
 
+// NormalizeAndValidateQuiet applies the same checks without warning or
+// changing the process-wide player-off reason. Call it on a private clone
+// when a later condition may refuse the candidate before it is saved.
+func (c *Config) NormalizeAndValidateQuiet() error {
+	if err := c.normalize(false); err != nil {
+		return err
+	}
+	return c.validate(false)
+}
+
 // Validate checks invariants the server relies on. Called automatically by
 // Load (via NormalizeAndValidate); exposed for tests and for callers that
 // construct Config in memory.
@@ -3467,6 +3490,10 @@ func (c *Config) NormalizeAndValidate() error {
 // time the reason changes, not at every Load and settings save
 // (logPlayerOff).
 func (c *Config) Validate() error {
+	return c.validate(true)
+}
+
+func (c *Config) validate(warn bool) error {
 	// Surface deployment.mode typos at load time rather than letting
 	// them silently fall through to "loopback" (IsPublic-returns-false
 	// on unknown values would mask public-mode intent).
@@ -3482,8 +3509,10 @@ func (c *Config) Validate() error {
 	// logged once each time it changes, and names no serial. Nothing here
 	// reads hardware, sysfs or the interfaces: whether a LAN is up yet is the
 	// player's runtime state.
-	_, why := c.PlayerEnabled(c.playerPlatform())
-	logPlayerOff(why)
+	if warn {
+		_, why := c.PlayerEnabled(c.playerPlatform())
+		logPlayerOff(why)
+	}
 
 	// Retention: a NON-ZERO playback-history window below the longest
 	// bounded smart-mix window is REFUSED, not clamped. 30 days would
@@ -3540,7 +3569,9 @@ func (c *Config) Validate() error {
 		if !c.IsPublic() {
 			return errors.New("libraryRoots: must have at least one entry")
 		}
-		validateLogger.Warn("no library roots configured — add via admin or `bridge library add`")
+		if warn {
+			validateLogger.Warn("no library roots configured — add via admin or `bridge library add`")
+		}
 	}
 	for _, r := range c.LibraryRoots {
 		if r == "" {
