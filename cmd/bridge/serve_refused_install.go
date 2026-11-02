@@ -77,15 +77,15 @@ func servingBinaryPath(opts serveOpts, stderr io.Writer) string {
 // not a proof of its bytes); and the install marker's lock is this process's
 // too, from the marker's read to the rename and any write after it, so that
 // no store open migrates in between (updater.LockState). Then this version
-// is held back from the
-// auto-installer for these settings, recorded durably first (a hold that
-// cannot be recorded leaves the install as it is), the backup is renamed over
-// this binary (updater.RollbackBinary: one rename on Unix; on Windows the
-// running image is moved aside first and put back if the second rename
-// fails), and serve exits with supervision.RestartExitCode, which every
-// service definition the bridge installs restarts: systemd's Restart=always,
-// launchd's KeepAlive on an unsuccessful exit, the SCM's recovery actions for
-// a service-specific exit code. The settings are never written.
+// is held back from the auto-installer for these settings, recorded durably
+// first (a hold that cannot be recorded leaves the install as it is), the
+// backup is renamed over this binary (updater.RollbackBinary: one rename on
+// Unix; on Windows the running image is moved aside first and put back if
+// the second rename fails), and serve exits with supervision.RestartExitCode,
+// which every service definition the bridge installs restarts: systemd's
+// Restart=always, launchd's KeepAlive on an unsuccessful exit, the SCM's
+// recovery actions for a service-specific exit code. The settings are never
+// written.
 //
 // The store has not been opened when this runs: it runs before the data
 // dir's lock, which comes before serve's first write, so no migration of this

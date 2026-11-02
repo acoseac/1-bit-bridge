@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -20,6 +21,12 @@ import (
 // means anything, and unlinking a lock file while it is held lets the next
 // taker lock a new file at the same path beside the old holder.
 const stateLockFileName = "update-state.lock"
+
+// StateLockPath is where the install marker's lock lives in dataDir, beside
+// the marker (StatePath).
+func StateLockPath(dataDir string) string {
+	return filepath.Join(dataDir, stateLockFileName)
+}
 
 // stateLockRetry is how often LockState asks for the lock while it waits.
 const stateLockRetry = 50 * time.Millisecond

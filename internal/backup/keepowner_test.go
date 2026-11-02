@@ -10,6 +10,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
+	"github.com/acoseac/1-bit-bridge/internal/updater"
 )
 
 // TestSnapshotAndRestoreAsRootKeepTheInstallOwner pins that a snapshot
@@ -65,6 +66,10 @@ func TestSnapshotAndRestoreAsRootKeepTheInstallOwner(t *testing.T) {
 		// migration lock (manifest's ladderLockSuffix, backlog B185): left
 		// root's, the service could not open it again.
 		src.ManifestDB + "-migrate.lock",
+		// And migrates it (this fixture's database predates the ladder), so
+		// the open's disarm takes the install marker's lock first, whose file
+		// it creates (backlog B613's round 3), likewise.
+		updater.StateLockPath(filepath.Dir(src.ManifestDB)),
 		// The restore takes bridge.yaml's lock (config.LockFile, backlog
 		// B506), whose file it creates when no writer has yet: left root's,
 		// the service's next console save could not open it.
@@ -143,6 +148,7 @@ func TestSnapshotAndRestoreAsRootKeepTheConsoleAccountAndHarvestState(t *testing
 	assertGivenAway(t, changes()[before:], []string{
 		src.ManifestDB, src.TokensJSON, src.ServerCert, src.ServerKey, src.BridgeYAML,
 		src.AdminAuth, src.AtlasHarvest, src.ManifestDB + "-migrate.lock", configLockFile(src.BridgeYAML),
+		updater.StateLockPath(filepath.Dir(src.ManifestDB)),
 	})
 }
 
