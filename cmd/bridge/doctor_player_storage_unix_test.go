@@ -296,26 +296,23 @@ func TestBothDoctorsJudgeADataDirectoryThatIsNoDirectoryAsServeDoes(t *testing.T
 // TestNoErrorOfThePlayersStorageLineReadsAsOK pins the line's outcome for
 // each error its inspection or its walk up the data directory's path meets
 // (B603 round 2, the orchestrator's amendment 3): none is ok. A link cycle,
-// which the medium check's resolution answers as too many links, and an
-// ancestor that is a regular file (a bare ENOTDIR, which names no entry) are
-// not checked, a warn naming the data directory and the error, whose advice
-// is the path's, not the service user's; and where the inspection answers
+// which the medium check's resolution answers as too many links, is not
+// checked, a warn naming the data directory and the error, whose advice is
+// the path's, not the service user's; and where the inspection answers
 // fs.ErrNotExist, a real ancestor this user cannot search (an Lstat that
 // fails with EACCES on the walk) is not checked either, a warn with the
-// service user's advice, never "not there yet".
+// service user's advice, never "not there yet". An ancestor that is a regular
+// file, whose bare ENOTDIR names no entry, was a warn here until B659, which
+// walks the path for the entry in its way and fails it, as serve refuses it
+// (TestThePlayersStorageLineSaysWhatTheDataDirLineSays).
 func TestNoErrorOfThePlayersStorageLineReadsAsOK(t *testing.T) {
 	base := t.TempDir()
 	loop1, loop2 := filepath.Join(base, "loop1"), filepath.Join(base, "loop2")
 	linkTo(t, loop2, loop1)
 	linkTo(t, loop1, loop2)
-	file := filepath.Join(base, "file")
-	if err := os.WriteFile(file, []byte("not a directory"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	const pathFix = "mend what the error names on the way to the data directory"
 	for _, tc := range []struct{ name, dir, says string }{
 		{"a link cycle", filepath.Join(loop1, "data"), "not checked: the data directory " + filepath.Join(loop1, "data") + " cannot be inspected: "},
-		{"an ancestor that is a regular file", filepath.Join(file, "data"), "not checked: the data directory " + filepath.Join(file, "data") + " cannot be inspected: not a directory"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, ok := playerStorageCheck(playerAt(tc.dir), "linux", atomicwrite.InspectMedium)
