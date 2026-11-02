@@ -106,16 +106,32 @@ func callLadderLockWaiting(path string) {
 // since OpenStore's own check, with the refusal a link at the database or
 // another sidecar gets (errStoreSymlink), never taken for a filesystem
 // that keeps no locks (Argon on the B185 PR). A lock that cannot be taken
-// at all (a filesystem that keeps no locks, a lock file this user cannot
-// open) is logged and the ladder runs without it, as before: serve's
+// at all is logged and the ladder runs without it, as before: serve's
 // data-dir lock makes the same call, since a lock that cannot be taken
-// must not stop a bridge from starting.
+// must not stop a bridge from starting. The line says which kind it met
+// (B537 item 1): an answer fsutil.KeepsNoLocks reads, a filesystem that
+// gave no lock (ENOLCK, EOPNOTSUPP, ENOTSUP, errors.ErrUnsupported and the
+// ENOSYS it matches; Windows' ERROR_NOT_SUPPORTED and
+// ERROR_INVALID_FUNCTION), worded to claim nothing of it, since ENOLCK is
+// also an NFS mount whose lock manager is not running and a kernel out of
+// lock records while another opener holds the lock; or any other failure,
+// of the lock (a permission, I/O or descriptor error) or of the lock file's
+// open (a lock file this user cannot open).
 func lockLadder(dbPath string) (release func(), err error) {
 	release = func() {
 		// Nothing to release: no lock has been taken.
 	}
 	dir, name := filepath.Dir(dbPath), filepath.Base(dbPath)+ladderLockSuffix
-	unlocked := func(err error) (func(), error) {
+	// unlocked logs that the ladder runs without its lock, noLocks saying
+	// the lock's answer is one fsutil.KeepsNoLocks reads, and answers no
+	// refusal.
+	unlocked := func(noLocks bool, err error) (func(), error) {
+		if noLocks {
+			logger.Warn("the filesystem gave no migration lock: a filesystem that keeps no locks answers so, and so do an NFS mount "+
+				"whose lock manager is not running and a kernel out of lock records, so another opener may be migrating the database all the same; migrating without the lock",
+				"lock", name, "err", err)
+			return release, nil
+		}
 		logger.Warn("could not take the migration lock; migrating without it", "lock", name, "err", err)
 		return release, nil
 	}
@@ -127,7 +143,7 @@ func lockLadder(dbPath string) (release func(), err error) {
 		if link, ok := symlinkAtStore(dbPath); ok {
 			return release, fmt.Errorf("%w at %s", errStoreSymlink, link)
 		}
-		return unlocked(err)
+		return unlocked(false, err)
 	}
 	start := time.Now()
 	waiting, said := false, false
@@ -143,7 +159,7 @@ func lockLadder(dbPath string) (release func(), err error) {
 		}
 		if !errors.Is(err, fsutil.ErrLocked) {
 			_ = f.Close()
-			return unlocked(err)
+			return unlocked(fsutil.KeepsNoLocks(err), err)
 		}
 		if !waiting {
 			waiting = true

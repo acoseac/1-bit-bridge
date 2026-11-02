@@ -41,6 +41,23 @@ func NotAFile(m fs.FileMode) string {
 	return ""
 }
 
+// EntryKind names the kind of an entry whose stat reports m, with its
+// article: NotAFile's name for one that does not open as a file ("a
+// directory", "a named pipe", …), "a regular file", or "an irregular file"
+// for one Go knows nothing more of (ModeIrregular, a Windows reparse point
+// that names nothing). A refusal of a path that must be a directory says
+// with it what stands there instead (serve's data directory,
+// atomicwrite.InspectMedium's root).
+func EntryKind(m fs.FileMode) string {
+	switch kind := NotAFile(m); {
+	case kind != "":
+		return "a " + kind
+	case m.IsRegular():
+		return "a regular file"
+	}
+	return "an irregular file"
+}
+
 // NotAFileError is OpenAsFile's refusal of an entry that does not open as a
 // file (NotAFile), carried inside the *fs.PathError that names the path.
 type NotAFileError struct {

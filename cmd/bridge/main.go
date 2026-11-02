@@ -3066,24 +3066,45 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		cfg.ListenAddress = *addrOverride
 	}
 
+	// A data dir serve can make or use, decided before anything writes
+	// there (backlog B606, the owner's decision of 2026-10-31): a regular
+	// file, a link to one or a link to nothing where it goes, or above it,
+	// refuses here, naming the path and what stands in its way, before the
+	// lock, the player's state, the TLS mint, the token store, server.pid
+	// and the migrations. Serve used to go on without its lock and its
+	// player, mint the TLS pair and fail further on. Making it is the
+	// first write: everything above only reads.
+	if err := prepareServeDataDir(cfg.DataDir); err != nil {
+		fmt.Fprintf(stderr, "serve: %v; bridge serve starts only on a data directory it can make or use: "+
+			"move what stands in its way, or set dataDir in bridge.yaml to a directory\n", err)
+		return 1
+	}
 	// One serve per data dir, decided before anything below writes there
 	// or binds a port (backlog B208): the TLS mint, the token store's
 	// flush, server.pid, the migrations, the batch coordinator's recovery,
 	// the updater's boot marker, the sweepers and the startup scan all
-	// come after this line. Everything above it only reads. Released last,
-	// after every teardown registered below it has run.
+	// come after this line. Released last, after every teardown registered
+	// below it has run.
 	releaseDataDir, lockErr := lockServeDataDirWith(cfg.DataDir, opts.dataDirTryLock)
 	var heldErr *serveDataDirHeldError
+	var unlocked *dataDirUnlockedError
 	switch {
 	case errors.As(lockErr, &heldErr):
 		fmt.Fprintf(stderr, "serve: %v; stop it first, or give this serve a data dir of its own\n", heldErr)
 		return 1
+	case errors.As(lockErr, &unlocked) && unlocked.noLocks:
+		// Never a refusal, and said its own way (B537 item 1): the answer
+		// of a filesystem that keeps no locks, which ENOLCK, one of these
+		// answers, does not prove, so the line claims nothing of it.
+		fmt.Fprintf(stderr, "serve: %v: a filesystem that keeps no locks answers so, and so do an NFS mount whose lock "+
+			"manager is not running and a kernel out of lock records, so another bridge serve may run on this data dir "+
+			"all the same; serving without the check that none does\n", unlocked)
 	case lockErr != nil:
-		// Never a refusal: a filesystem that keeps no locks must not stop
-		// a bridge from starting. Said once, where the pid file's own
-		// non-fatal failure is said.
-		fmt.Fprintf(stderr, "serve: could not lock %s (%v); serving without the check that no other "+
-			"bridge serve runs on this data dir\n", filepath.Join(cfg.DataDir, serveLockFileName), lockErr)
+		// Never a refusal: a lock that cannot be taken on a data dir that
+		// is there (a lock file this user cannot open, a read-only
+		// filesystem, an I/O error) must not stop a bridge from starting.
+		// Said once, where the pid file's own non-fatal failure is said.
+		fmt.Fprintf(stderr, "serve: %v; serving without the check that no other bridge serve runs on this data dir\n", lockErr)
 	}
 	// Shared with the player, which lets go of its share once nothing it
 	// started may still write the data dir: an engine's state write that

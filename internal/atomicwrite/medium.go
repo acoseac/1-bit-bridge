@@ -4,10 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // fsStat is what the medium check reads of a filesystem: its type, statfs's
@@ -125,23 +128,25 @@ var ErrRootNotADirectory = errors.New("atomicwrite: the root is not a directory"
 
 // RootNotADirectoryError is InspectMedium's error for a root that is there
 // and is not a directory (ErrRootNotADirectory): Root, the root made
-// absolute; Target, where its links lead, Root itself for a root that is no
-// link, and "" for a link that leads to nothing; and Kind, what stands at
-// Target ("regular file", "named pipe", …), "" for a link to nothing.
+// absolute; Link, whether the root's own entry is a symbolic link; Target,
+// where its links lead, "" for a link that leads to nothing; and Kind, what
+// stands at Target, with its article ("a regular file", "a named pipe", …:
+// fsutil.EntryKind), "" for a link to nothing.
 type RootNotADirectoryError struct {
 	Root   string
+	Link   bool
 	Target string
 	Kind   string
 }
 
 func (e *RootNotADirectoryError) Error() string {
 	switch {
-	case e.Target == "":
+	case e.Link && e.Target == "":
 		return fmt.Sprintf("%s is a symbolic link to nothing", e.Root)
-	case e.Target == e.Root:
-		return fmt.Sprintf("%s is a %s, not a directory", e.Root, e.Kind)
+	case e.Link:
+		return fmt.Sprintf("%s leads to %s, %s, not a directory", e.Root, e.Target, e.Kind)
 	}
-	return fmt.Sprintf("%s leads to %s, a %s, not a directory", e.Root, e.Target, e.Kind)
+	return fmt.Sprintf("%s is %s, not a directory", e.Root, e.Kind)
 }
 
 // Is makes a *RootNotADirectoryError match ErrRootNotADirectory, and no
@@ -155,12 +160,18 @@ func (e *RootNotADirectoryError) Is(target error) bool { return target == ErrRoo
 // mount it lies on by the identity the platform gives it, and the platform's
 // inspection (platformInspect), the one whose verdict the writer's admission
 // reads (platformMedium), so the two cannot tell one root apart. Its error is
-// a root that cannot be resolved (fs.ErrNotExist for one that is not there)
-// or whose mount the platform cannot tell (ErrMountsUnknown), and the
-// Medium's Err is the check's refusal. It takes every root on macOS, and on
-// Windows, where the writer refuses before it asks (ErrNoDirectoryBarrier),
-// it asks nothing. A Medium the check takes says nothing of the rest of a
-// write's admission: the path below root, its mounts and its barriers.
+// a root that is there and is not a directory, which the writer refuses too
+// (checkPath), before its mount is read: one whose links lead to a regular
+// file or any other entry but a directory, and a symbolic link to nothing,
+// which is there and never fs.ErrNotExist (*RootNotADirectoryError, matching
+// ErrRootNotADirectory, B606); a root that cannot be resolved for another
+// reason (fs.ErrNotExist for one that is not there, a root below a link to
+// nothing among them, whose own entry cannot be reached); or one whose mount
+// the platform cannot tell (ErrMountsUnknown); and the Medium's Err is the
+// check's refusal. It takes every root on macOS, and on Windows, where the
+// writer refuses before it asks (ErrNoDirectoryBarrier), it asks nothing of
+// the medium. A Medium the check takes says nothing of the rest of a write's
+// admission: the path below root, its mounts and its barriers.
 func InspectMedium(root string) (Medium, error) {
 	if root == "" {
 		return Medium{}, fmt.Errorf("%w: no root was given", ErrNotUnderRoot)
@@ -169,9 +180,25 @@ func InspectMedium(root string) (Medium, error) {
 	if err != nil {
 		return Medium{}, err
 	}
+	link := false
+	if info, err := os.Lstat(abs); err == nil {
+		link = info.Mode()&fs.ModeSymlink != 0
+	}
 	resolved, err := filepath.EvalSymlinks(abs)
-	if err != nil {
+	switch {
+	case link && errors.Is(err, fs.ErrNotExist):
+		// The root's own entry is there, a link whose links lead to nothing:
+		// no root not made yet, which the writer cannot make through it.
+		return Medium{}, &RootNotADirectoryError{Root: abs, Link: true}
+	case err != nil:
 		return Medium{}, err
+	}
+	info, err := os.Stat(resolved)
+	switch {
+	case err != nil:
+		return Medium{}, err
+	case !info.IsDir():
+		return Medium{}, &RootNotADirectoryError{Root: abs, Link: link, Target: resolved, Kind: fsutil.EntryKind(info.Mode())}
 	}
 	id, ok, err := mountIDOf(resolved)
 	switch {
