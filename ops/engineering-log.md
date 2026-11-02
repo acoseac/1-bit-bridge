@@ -69646,7 +69646,7 @@ panic at `sockcmsg_linux.go:34`; the rest of the package, those three
 skipped, passed. Restored from git. **Fuzzing**: `FuzzParseCredentials` 2
 minutes, 17,827,804 execs, no failure.
 
-**qualificationVersion 25**: `internal/player/hotplug/` is a guarded prefix;
+**qualificationVersion 27**: `internal/player/hotplug/` is a guarded prefix;
 the runbook's five pins follow, and its record of versions says what 25
 covers (B612 took 24 on main and wrote no such paragraph).
 
