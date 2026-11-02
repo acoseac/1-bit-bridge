@@ -762,19 +762,33 @@ does:
 **An install an older updater made (0.2.1, 0.2.2) is rolled back at its first
 start when the new version refuses the settings.** Its serve prints the
 refusal, then, when the marker is a recent install of this version over
-another and the backup beside the binary reports that other version, puts
-the backup back, records the new version as held back, and exits 75 for the
-service manager to start the previous binary:
+another and the backup beside the binary reports that other version, records
+the new version as held back (the marker then shows `"rollbackStarted": true`
+and no status), puts the backup back, and exits 75 for the service manager to
+start the previous binary:
 `updater: 0.2.3 refuses this bridge's settings, so the install is rolled back: 0.2.2 is back at /…/bridge and 0.2.3 is held back …`.
-The settings are untouched: fix them, then update again. Where it does not
-act it says why on an `updater: not rolling back the install of …` line (no
-backup, a backup of another version, a marker older than 6 h or dated in the
-future, another process on the data dir, or this version already started
-past its settings once, whose store a rollback could downgrade), and serve
-refuses as it always did. The previous binary restored is the old code: it
-shows only that the version "was rolled back" and holds it until a newer
-release, whatever the settings; `bridge update` installs it by hand once they
-are fixed. To see what is recorded: `cat <dataDir>/update-state.json`.
+The settings are untouched: fix them, then update again. A start stopped
+between the record and the rename finishes the rollback at the next start.
+Where it does not act it says why on an `updater: not rolling back the
+install of …` line (no backup, a backup of another version, a marker older
+than 6 h or dated in the future, another process on the data dir, the hold
+could not be recorded, or this version already opened the data dir once,
+by a serve that got past its settings or by any command whose store open
+migrated the database, `bridge doctor` and `bridge manifest clear-missing`
+among them, whose store a rollback could downgrade), and serve refuses as it
+always did. The previous binary restored is the old code: it shows only that
+the version "was rolled back" and holds it until a newer release, whatever
+the settings; `bridge update` installs it by hand once they are fixed. To see
+what is recorded: `cat <dataDir>/update-state.json`.
+
+**A data dir whose filesystem fails a directory fsync** (some FUSE and
+network mounts): the update marker's write fails there (`sync the data dir
+after writing the update marker`), so the updater refuses to arm an install,
+and a version an older updater installed there refuses to start (`could not
+record in the install marker …`) and any command that would migrate the
+store refuses its open. Put the data dir on a local filesystem; to start the
+installed version as it is, remove `<dataDir>/update-state.json` by hand,
+which gives up the rollback to the backup.
 
 ## After a deploy: expect iOS syncs to quietly defer
 
