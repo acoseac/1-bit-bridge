@@ -768,27 +768,55 @@ and no status), puts the backup back, and exits 75 for the service manager to
 start the previous binary:
 `updater: 0.2.3 refuses this bridge's settings, so the install is rolled back: 0.2.2 is back at /…/bridge and 0.2.3 is held back …`.
 The settings are untouched: fix them, then update again. A start stopped
-between the record and the rename finishes the rollback at the next start.
+between the record and the rename finishes the rollback at the next start
+whose settings are still refused (only on the same proof: recent, swapped,
+the backup's version, no version recorded over it, so a record older than
+6 h is left as it is). If the settings are fixed before that start, the new
+version starts instead, confirms the install (the marker then shows
+`"status": "installed"`, and `.bak` is removed at the start after), and the
+rollback is over. While the record stands and no start has gone on past
+it, a command of the new version that would migrate the store
+(`bridge doctor`, `bridge scan`, …) refuses its open (`open manifest store: …
+a rollback of this version's install is under way …`): start `bridge serve`.
+The rollback and those commands take `<dataDir>/update-state.lock` in turn,
+so one waits up to 30 s for the other; leave that file where it is (it is
+never removed, and only the lock on it means anything).
 Where it does not act it says why on an `updater: not rolling back the
 install of …` line (no backup, a backup of another version, a marker older
-than 6 h or dated in the future, another process on the data dir, the hold
-could not be recorded, or this version already opened the data dir once,
-by a serve that got past its settings or by any command whose store open
-migrated the database, `bridge doctor` and `bridge manifest clear-missing`
-among them, whose store a rollback could downgrade), and serve refuses as it
-always did. The previous binary restored is the old code: it shows only that
-the version "was rolled back" and holds it until a newer release, whatever
-the settings; `bridge update` installs it by hand once they are fixed. To see
-what is recorded: `cat <dataDir>/update-state.json`.
+than 6 h or dated in the future, another process on the data dir or the
+install marker's lock, the hold could not be recorded, or this version
+already opened the data dir once, by a serve that got past its settings or
+by any command whose store open migrated the database, `bridge doctor` and
+`bridge manifest clear-missing` among them, whose store a rollback could
+downgrade), and serve refuses as it always did. The previous binary
+restored is the old code: a 0.2.1 or 0.2.2 shows only that the version "was
+rolled back", reads the record's empty status as nothing to do, and holds
+the version until a newer release, whatever the settings, so fixing them
+does not release its hold (a known limit: `bridge update` installs it by
+hand once they are fixed); a release with this round clears the install
+from the record at its start and keeps the hold, which then follows the
+settings' digest. To see what is recorded: `cat <dataDir>/update-state.json`.
 
-**A data dir whose filesystem fails a directory fsync** (some FUSE and
-network mounts): the update marker's write fails there (`sync the data dir
-after writing the update marker`), so the updater refuses to arm an install,
-and a version an older updater installed there refuses to start (`could not
-record in the install marker …`) and any command that would migrate the
-store refuses its open. Put the data dir on a local filesystem; to start the
-installed version as it is, remove `<dataDir>/update-state.json` by hand,
-which gives up the rollback to the backup.
+**A data dir whose filesystem cannot fsync a directory.** Linux's NFS and
+CIFS/SMB clients treat a directory's fsync as a successful no-op, and its
+FUSE turns a filesystem's unimplemented FSYNCDIR into success, so those
+data dirs see nothing new. A filesystem that answers the fsync with EINVAL,
+ENOTSUP or EOPNOTSUPP (a FUSE daemon or a network filesystem on another
+kernel, a filesystem with no directory fsync) is taken as one that cannot:
+the journal says so once a process (`the data dir's filesystem cannot fsync
+a directory …`, with the errno), nothing is refused, and the marker's
+writes there are atomic but not durable: a power cut soon after an update
+can bring back the marker as it was before its last write, and with it a
+rollback past what the new version's first start wrote. Any other failure
+of that fsync (EIO, ENOSPC, EDQUOT, a permission or read-only error) or of
+the data dir's open or close fails the marker's write (`sync the data dir
+after writing the update marker: …`, or `… may not outlive a power loss: …`
+at a start), and every start that needs the marker refuses until the
+barrier answers: fix the filesystem (a data dir this user can write but
+not read is one), or, to start the installed version as it is, remove
+`<dataDir>/update-state.json` by hand, which gives up the rollback to the
+backup. On a filesystem that keeps no locks the early rollback does not run
+(said once in the journal) and the rest goes on.
 
 ## After a deploy: expect iOS syncs to quietly defer
 

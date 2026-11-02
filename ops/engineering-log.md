@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-11-02 — B613 round 3: the barrier asked again before a disarm trusts the marker, one lock for the rollback and every migration, a directory fsync the filesystem cannot do, an interrupted rollback reconciled at boot](#2026-11-02--b613-round-3-the-barrier-asked-again-before-a-disarm-trusts-the-marker-one-lock-for-the-rollback-and-every-migration-a-directory-fsync-the-filesystem-cannot-do-an-interrupted-rollback-reconciled-at-boot)
 - [2026-11-02 — B613 round 2: the hold before the rename, every store open that migrates disarms, the boot keeps a hold, the marker's barrier fails its write, Windows variable names](#2026-11-02--b613-round-2-the-hold-before-the-rename-every-store-open-that-migrates-disarms-the-boot-keeps-a-hold-the-markers-barrier-fails-its-write-windows-variable-names)
 - [2026-11-02 — B538: an abandoned Atlas submit's HTTP answer is a shutdown stop](#2026-11-02--b538-an-abandoned-atlas-submits-http-answer-is-a-shutdown-stop)
 - [2026-11-02 — B613: a candidate is checked against the settings before its swap, and an install an older updater made is rolled back when its version refuses them](#2026-11-02--b613-a-candidate-is-checked-against-the-settings-before-its-swap-and-an-install-an-older-updater-made-is-rolled-back-when-its-version-refuses-them)
@@ -69925,6 +69926,176 @@ Windows natively.
 **For the owner.** A data dir on a filesystem that fails a directory fsync
 now refuses an install, and an install an older updater made there refuses
 to start (the runbook's remedy: a local filesystem, or remove the marker by
-hand). The rest stands as round 1 left it: the predates choice, Windows
+hand; corrected by round 3, below: a fsync that answers EINVAL, ENOTSUP or
+EOPNOTSUPP counts as done, and Linux's NFS, CIFS/SMB and FUSE never answer
+one). The rest stands as round 1 left it: the predates choice, Windows
 native verification (cross-vetted only), a restored 0.2.1 or 0.2.2
 ignoring the digest, B198.
+
+## 2026-11-02 — B613 round 3: the barrier asked again before a disarm trusts the marker, one lock for the rollback and every migration, a directory fsync the filesystem cannot do, an interrupted rollback reconciled at boot
+
+The reviews of round 2 on PR #1382 (Codex and Argon, of head b774deb3: round
+2 carried over and its rules lines applied), as the orchestrator set them
+out in the brief; worker b613 on legion0 (Ubuntu 26.04, linux/amd64,
+go1.27.3, `GOTOOLCHAIN=local`, umask 022). Commits on that head: seams
+0c014616 and cb908493 (which change nothing), red ec56578a, fix 9d27c51c,
+then this record. The rules are a new bullet after the settings-check
+bullet in `.claude/rules/config-lifecycle.md`, edits to that bullet, and its
+lines in `cli-serve.md` and `scanner.md`, shipped as a checked patch with the
+report (this worker cannot write `.claude/`); the long form is the B613
+sections of `ops/History-rules-config-lifecycle.md` (round 2's
+directory-fsync sentence corrected there, and a section of its own for round
+3).
+
+**What changed.**
+1. *A failed barrier is never trusted later* (P1). `SaveState` renamed its
+   new marker into place and then fsynced the data dir; a barrier that
+   failed left the record live and not durable, the start refused, and the
+   next start read `DataDirOpenedBy` as recorded and went on, migrating
+   with no durable record; a removal's barrier the same, the next start
+   finding no marker. Every disarm that finds nothing to record now runs the
+   barrier first and refuses while it fails (`disarmHeld`,
+   `disarmUnlocked`). The marker's publication is its own:
+   `atomicwrite.RenameWithRetryUnsynced` (the retries alone) and
+   `syncMarkerDir`, whose open, fsync and close are seams
+   (`markerBarrier`, `SetMarkerBarrierForTest`); `RenameWithRetry`'s tolerant
+   barrier had run first and logged the data dir's path and the error.
+   `fsutil.SyncParentDir` is unchanged.
+2. *One lock* (P1). `<dataDir>/update-state.lock` (`updater.LockState`:
+   `fsutil.OpenLockFile`, `TryLock`, 30 s, never the marker, never removed),
+   ordered server.lock, the ladder, then it: the early rollback holds it from
+   its marker read through the rename and any write after
+   (`recoverRefusedInstall`), a migration through its record and barrier
+   (`DisarmBeforeMigrating`), serve's first disarm until its record is
+   durable, let go before the store opens (`AdmitBoot`). Without it no
+   guarded step writes: held past the wait, ENOLCK or a failure refuses the
+   rollback and a disarm that would record or remove, and one with nothing
+   to write goes on; a filesystem that keeps no locks refuses the rollback
+   and lets the disarms go on, said once. A migration of the version an
+   early rollback was undoing refuses (`ErrRollbackUnderWay`,
+   `RollbackUnderWay`) until a start records it went on past its settings.
+3. *A directory fsync the filesystem cannot do.* EINVAL, ENOTSUP and
+   EOPNOTSUPP from the fsync count as done, said once a process naming only
+   the errno (`cannotSyncADirectory`), at the publication's, the removal's
+   and the disarm's barrier; darwin asks an ordinary fsync after a full
+   sync's EINVAL or ENOTTY (`syncWithFallback`); everything else, and any
+   open or close failure, fails. Linux's NFS and CIFS/SMB clients answer a
+   directory's fsync as a no-op success and its FUSE turns an unimplemented
+   FSYNCDIR into one, so the degrade is for the rest, where the marker is
+   atomic and not durable.
+4. *An interrupted rollback, reconciled.* Serve's first disarm is the
+   boot's admission: its record over the rollback's record resolves it, so
+   the store migrates; `DecideBootAction` reads the record as its own case,
+   the target confirming the install however old the record
+   (`BootRollbackOvertaken`, `ConfirmOverRollback`, `.bak` kept one boot),
+   the backup's version clearing the install and keeping the hold
+   (`BootRollbackFinished`), any other version doing nothing; a start still
+   refused finishes the rollback only on `EarlyRollback`'s proof.
+5. *Low items.* The digest keeps a Windows name's first entry, folded,
+   before it drops an empty value (`bridgeEnvironment`), as
+   `GetEnvironmentVariable` reads it; and every store the bridge opens is its
+   data dir's database by `manifest.DefaultDBPath`, documented on `OpenStore`
+   and `disarmBeforeMigrating` and pinned by an AST sweep
+   (`TestEveryStoreTheBridgeOpensIsItsDataDirsDatabase`), which found doctor
+   joining `bridge.db` by hand (now `DefaultDBPath`).
+
+**Decisions of this round.** The barrier on every short cut, not a tombstone
+before a removal: one rule covers both shapes and every later start, at a
+directory fsync a start, and a data dir this user can write and not read
+now refuses a start (its fsync's open fails), which ordinary starts
+tolerated before. A filesystem that keeps no locks lets the disarms go on
+unlocked, since the rollback refuses there (on server.lock first), so no
+rollback can run beside a migration; refusing would stop every start after
+an update on such a data dir. An expired interrupted rollback is confirmed
+when the target starts on settings it loads, cleared of its install when the
+backup's version starts, and left as it is when the target's settings are
+still refused. The data dir's boundary is pinned rather than passed:
+`OpenStore` has a hundred test callers and seven production ones, all of
+which the sweep follows to `DefaultDBPath`. Round 2's two assertions that
+the restored binary's boot over the rollback's record is `BootNoop` now want
+`BootRollbackFinished`, with Status "" asserted for 0.2.1's and 0.2.2's
+boot.
+
+**Red first** (on the seams; the full list in the red commit's message):
+- internal/updater: shape (a), a record whose barrier failed at its open,
+  its fsync or its close, through both disarms
+  (`TestADisarmRunsTheBarrierAgainOverARecordItCouldNotMakeDurable`, 6
+  rows), and shape (b), a removal
+  (`TestADisarmRunsTheBarrierAgainOverARemovalItCouldNotMakeDurable`, 6),
+  each refusing the first attempt and going on unchecked at the second;
+  `TestTheMarkersBarrierTakesOnlyADirectorySyncTheFilesystemCannotDo` (18
+  rows), `TestDarwinsFullSyncFallsBackToAnOrdinaryFsync` (4),
+  `TestTheMarkersWriteRunsOnlyItsOwnBarrier` (atomicwrite's warning with the
+  data dir's path in the log), `TestADisarmWithoutTheLockWritesNothing` (8),
+  `TestAMigrationRefusesWhileARollbackOfItsVersionIsUnderWay` (2),
+  `TestDecideBootActionReadsAnInterruptedRollbackOnItsOwn` (6),
+  `TestTheConfirmationOverARollbackKeepsWhatIsNotItsOwn` and
+  `TestTheSettingsDigestKeepsTheVariableTheOSReads` (4); the lock's own
+  tests and the clear's barrier retry green, guards.
+- internal/manifest: `TestAStoreOpenRefusesToMigrateWhileARollbackOfItsVersionIsUnderWay`.
+- cmd/bridge: `TestServeRefusesUntilTheMarkersBarrierAnswers` (6, the second
+  boot reaching TLS), `TestAMigrationThatHoldsTheMarkersLockFirstStopsTheRollback`
+  (75, the rollback not waiting), `TestARollbackThatHoldsTheMarkersLockFirstStopsTheMigration`
+  (the migration not waiting), `TestACommandOfTheVersionRolledBackRefusesToMigrateItsStore`
+  (`bridge scan` exit 0), `TestATargetWhoseSettingsAreFixedConfirmsAnInterruptedRollback`
+  (2, the record left as it was), `TestAPatchedPreviousVersionKeepsTheHoldOfARollbackThatFinished`
+  and `TestEveryStoreTheBridgeOpensIsItsDataDirsDatabase` (doctor's four
+  opens); `TestARefusedStartFinishesAnInterruptedRollbackOnlyOnItsProof`
+  green, a guard.
+
+**Negative controls**, each alone on the committed fix, predicted by name
+and count, observed, restored with `git checkout --` and the tree clean
+after each (`.tmp/_b613/mutate.py` holds the exact replacements):
+
+| # | Mutation | Predicted and observed red |
+|---|---|---|
+| C1 | the disarm's short cut without the barrier | 3 updater tests, 30 subtests (shapes a and b, 6 each; the errno table's disarm site, 18), and `TestServeRefusesUntilTheMarkersBarrierAnswers`, 6 |
+| C2 | the early rollback takes no install marker's lock | the two interleavings, `TestAMigrationThatHoldsTheMarkersLockFirstStopsTheRollback` and `TestARollbackThatHoldsTheMarkersLockFirstStopsTheMigration` (2); every other B613 serve test green |
+| C3 | every fsync failure taken for one the filesystem cannot do | 6 updater tests, 14 subtests (the errno table's 9 failures, the shapes' 5 sync rows) and round 2's two barrier tests |
+| C4 | the rollback's record read as nothing to do at boot | `TestDecideBootActionReadsAnInterruptedRollbackOnItsOwn` (6), and 4 cmd/bridge tests, 10 subtests (the fixed-settings restart, 2; the patched previous version; round 2's two assertions, 8 and 1) |
+| C5a | the digest keeps every spelling | `TestTheSettingsDigestKeepsTheVariableTheOSReads`, 4 subtests |
+| C5b | doctor joins its store's path by hand | `TestEveryStoreTheBridgeOpensIsItsDataDirsDatabase`, its 4 errors |
+
+**Checks.** On legion0 (Ubuntu 26.04, linux/amd64, 16 cores, go1.27.3,
+`GOTOOLCHAIN=local`, umask 022, TMPDIR on disk), each through the shared
+build lock:
+- `go test -race -count=1 -timeout 90m`, one package at a time, at the fix
+  commit: internal/updater ok (22 s), internal/atomicwrite ok (21 s, its
+  Linux-only medium, mount and durable-writer tests run here), cmd/bridge ok
+  (875 s); internal/manifest and internal/backup each failed on the tests
+  that list exactly what a root open and a root restore give away
+  (`TestOpenStoreAsRootKeepsTheInstallOwner`, and
+  `TestSnapshotAndRestoreAsRootKeepTheInstallOwner` with its console
+  twin), since a migrating open now makes `update-state.lock` too, rightly
+  the install's owner's; they list it since 0ce51e42, and on that tree
+  internal/manifest is ok (1,285 s) and internal/backup ok (260 s).
+- `make test-fast` (every package, no race) on 0ce51e42: 80 packages ok, none
+  failed, 13 with no tests (446 s), the cmd/bridge sweeps over the tracked
+  docs, this record included, among them.
+- `make vet`, `GOOS=windows go vet ./...`, and darwin's vet of the four
+  touched packages (darwin/arm64 for cmd/bridge) and linux/arm64's of
+  internal/updater: clean. `make build-all`, the six targets: ok. go1.27.3's
+  gofmt on every changed Go file: clean.
+- The rules patch, checked with an applier of its own against this tree and
+  measured in place with the budget script's own functions:
+  config-lifecycle.md 94,555 bytes (94.6 %), cli-serve.md 33,711, scanner.md
+  27,346, the heaviest load 303,172 bytes (63.2 %), and all 195 test names it
+  and the long form cite declared.
+- The cost: one directory fsync a migrating store open and a serve start,
+  6.0 ms median (p90 11.6 ms) on this disk while the race runs loaded it.
+- Not run here: macOS and Windows natively. darwin's fallback is
+  `syncWithFallback`, tested on every platform; the barrier's seams run the
+  shape tests on Windows, where the production barrier is skipped.
+
+**For the owner.**
+- The no-locks call above, and the barrier on every start (a data dir this
+  user can write and not read now refuses one).
+- The known limit: a restored 0.2.1 or 0.2.2 cannot reconcile the record
+  (its housekeeping reads Status "" as nothing to do, and its gate reads
+  `rejectedVersion` alone), so fixing the settings does not release its
+  hold until a newer release; `bridge update` by hand installs it.
+- Not taken, as round 2 left them: `bridge update`'s install, the manual
+  Rollback and `maybeRollbackOnBoot` take no install marker's lock (the
+  brief's table names three callers), and native Windows is cross-vetted
+  only. The qualification version is the orchestrator's at merge:
+  internal/manifest is a guarded prefix, so the check asks for a raise.
