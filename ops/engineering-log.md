@@ -69639,4 +69639,21 @@ entry's new paragraph, the B606 entry's note on the move) and checked with a
 strict applier.
 
 **Commits**: 03d8e373 (red), 1fefbd80 (the fix), f23b5c31 (the guard's
-tests), and this one (docs).
+tests), 0f7e161f (docs), and this one (the checks below).
+
+**Checks** (legion0, umask 022, go1.27.3,
+`-tags ts_omit_webclient,ts_omit_debugeventbus`, TMPDIR on the worktree's
+disk, every run through the build lock): `go test` of `./cmd/bridge/` (on
+1fefbd80, 269 s), `./internal/fsutil/`, `./internal/doctor/` and
+`./internal/player/qualification/`: ok. The same four under `-race -timeout
+30m` on 0f7e161f: ok (773 s, 2.8 s, 6.8 s, 3.0 s). `make test`, once, on
+0f7e161f: all 80 packages ok (cmd/bridge 834 s, internal/manifest 1327 s,
+scripts/third-party-licenses 253 s with the build-site census;
+`TestEveryCitedTestNameExists` and `TestNoDocblockNamesAnotherDeclaration`
+over these docs). `make vet` is clean (linux, native), and `go vet` of the
+four packages for windows and darwin (cross-vet, compiled only: the Windows
+junction test never ran). gofmt (go1.27.3's) lists none of the branch's 16
+Go files. `make docs-check`: ok, `CLAUDE.md 71.9%; player.md 96.8%; worst
+load, player_openhome_test.go 61.4%`, the same with the rules patch applied
+(cli-serve.md 34,409 bytes). `scripts/qualification-version -base main -head
+HEAD`: OK.
