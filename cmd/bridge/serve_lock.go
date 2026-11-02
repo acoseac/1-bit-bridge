@@ -143,9 +143,9 @@ func prepareServeDataDirWith(dataDir string, mkdirAll func(string, os.FileMode) 
 // there and is no directory (notADirectory); for an ENOTDIR whose entry
 // cannot say so, the entry in the way on dataDir's path (blockingEntry); each
 // with the error beside it; and the error alone otherwise. Go's os.MkdirAll
-// names the entry in the way itself, an ancestor a regular file or a link to
-// one included; an MkdirAll that names the entry its own make failed at,
-// below the one in the way, is named past.
+// names the entry in the way itself, an ancestor that is a regular file or a
+// link to one included; where an MkdirAll names the entry its own make
+// failed at, below the one in the way, the walk names the one in the way.
 func whyNotMade(dataDir string, err error) string {
 	var pe *fs.PathError
 	if errors.As(err, &pe) {
