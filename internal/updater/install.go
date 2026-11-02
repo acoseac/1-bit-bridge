@@ -67,6 +67,21 @@ type InstallOptions struct {
 	// who flip it accept the orphan-on-purpose UX (older devices
 	// must update before they reconnect).
 	OverrideCompatGate bool
+
+	// ConfigPath is the settings file the running bridge loaded, which
+	// the candidate is checked against before the swap. Every production
+	// caller names it: the console's install, the automatic one and
+	// `bridge update`. Empty skips the check.
+	ConfigPath string
+
+	// Automatic marks the auto-installer's install, which maybeAutoInstall
+	// sets on its copy. A candidate that predates the settings check is
+	// held back from it, and installed with a warning by hand.
+	Automatic bool
+
+	// ConfigCheck overrides the candidate's settings check (CheckConfig).
+	// Production leaves it nil; a test stands in for a candidate.
+	ConfigCheck func(ctx context.Context, candidate, configPath string) ConfigCheck
 }
 
 // Install downloads, verifies, swaps, and arms the rollback marker
@@ -376,6 +391,20 @@ var (
 	// naming it: a second install re-downloads the same bytes and
 	// destroys the .bak the first one created.
 	ErrInstallPendingRestart = errors.New("this release is already installed and waiting for a restart; restart the bridge instead of installing again")
+	// ErrConfigRefused means the candidate's settings check refused this
+	// bridge's settings: it would not start with them, so it was not
+	// installed, and the refusal is recorded (State.RejectedReason). The
+	// remedy is the settings, which the error's reasons name by line.
+	ErrConfigRefused = errors.New("the new version refuses this bridge's settings")
+	// ErrConfigCheckFailed means the candidate's settings check did not
+	// answer (it could not run, ran past its time, or exited another
+	// way). Nothing was installed and nothing recorded: a later attempt
+	// checks again.
+	ErrConfigCheckFailed = errors.New("the new version could not check this bridge's settings")
+	// ErrConfigCheckUnsupported means the candidate predates the settings
+	// check. The auto-installer holds it back; a manual install takes it
+	// with a warning (Status.InstallWarning).
+	ErrConfigCheckUnsupported = errors.New("the new version predates the settings check")
 )
 
 // Rollback restores bridge.bak over the live binary. Used by the

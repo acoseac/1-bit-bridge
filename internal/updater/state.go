@@ -114,6 +114,29 @@ type State struct {
 	// rejection by construction. Carried on a marker whose Status is
 	// "" so DecideBootAction treats it as BootNoop.
 	RejectedVersion string `json:"rejectedVersion,omitempty"`
+
+	// RejectedReason says, in words that name no path and no value, why
+	// RejectedVersion is held back when the hold is not an operator's
+	// rollback: the version refused this bridge's settings, at the check
+	// before its install or at its first start, or it predates that check.
+	// Empty for a rollback, whose wording the gate keeps (HeldBack).
+	RejectedReason string `json:"rejectedReason,omitempty"`
+
+	// RejectedConfigDigest is the ConfigDigest of the settings
+	// RejectedVersion refused. The automatic install holds the version
+	// back only while the settings still have this digest, so fixing them
+	// lets it try again. Empty holds it back whatever the settings are (a
+	// rollback, a candidate that predates the check).
+	RejectedConfigDigest string `json:"rejectedConfigDigest,omitempty"`
+
+	// DataDirOpenedBy is the version, other than PreviousVersion, that got
+	// past its config at boot and went on to write the data dir while this
+	// marker was armed. serve records it durably before its first write
+	// there (disarmEarlyRollback in cmd/bridge), so from then on a restore
+	// of .bak may be a downgrade past what that version's store migrations
+	// wrote, and neither the early rollback (EarlyRollback) nor the boot
+	// rollback (BootInstallFailed) restores it.
+	DataDirOpenedBy string `json:"dataDirOpenedBy,omitempty"`
 }
 
 // stateFileName is the basename under <dataDir>. Constant so tests

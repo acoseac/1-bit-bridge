@@ -2117,6 +2117,10 @@ type updateInfoAdapter struct {
 	dataDir    string
 	binaryPath string
 	canInstall bool
+	// configPath is the settings file serve loaded: a console install
+	// checks the candidate against it, and a version held back for
+	// refusing it is held only while it is unchanged.
+	configPath string
 }
 
 func (a updateInfoAdapter) UpdateInfo() api.UpdateInfo {
@@ -2704,6 +2708,18 @@ type serveOpts struct {
 	dlnaNetwork     *dlnaBootNetwork
 	// upnpStopping observes the upstream stop boundary in boot tests.
 	upnpStopping func()
+	// binaryPath stands in for the binary serve runs as (os.Executable,
+	// its links resolved): the file the updater swaps and the early
+	// rollback restores, with its backup beside it. Empty in production; a
+	// boot test points it at a binary and a backup of its own, so nothing
+	// is ever restored over the test binary. Per invocation for
+	// tailscaleCLI's reason.
+	binaryPath string
+	// restoreBackup and saveUpdateState stand in for updater.RollbackBinary
+	// and updater.SaveState in the early rollback and its disarm, so a
+	// boot test can make either fail. Nil (the updater's) in production.
+	restoreBackup   func(dst, backupExt string) error
+	saveUpdateState func(dataDir string, st updater.State) error
 }
 
 // adoptHandedListener returns lis when it is nil or when its address is
@@ -3679,32 +3695,8 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	sessions := updater.NewTracker()
 
 	// Resolve the running binary path once at startup. Install
-	// swaps the file at this exact path. os.Executable() may
-	// return an error in unusual environments (deleted binary
-	// running, embedded test); fall back to argv[0] so the
-	// failure surfaces later in Install's preflight rather than
-	// blocking the whole server boot.
-	binaryPath, exeErr := os.Executable()
-	if exeErr != nil {
-		fmt.Fprintf(stderr, "updater: os.Executable failed (install path may not work): %v\n", exeErr)
-		binaryPath = os.Args[0]
-	}
-	// Resolve symlinks so a symlinked install swaps the REAL binary, not
-	// the link — matching what update.go, init.go and menu.go already do
-	// at their own os.Executable() sites (update.go's comment: "Mirrors
-	// the binary resolution in init.go's service install"). runServe was
-	// the one that didn't, and this value feeds maybeRollbackOnBoot,
-	// updateInfoAdapter.binaryPath and AutoInstallOpts.BinaryPath.
-	//
-	// On darwin os.Executable returns the INVOCATION path unresolved, so
-	// an admin-console install via /usr/local/bin/bridge -> /opt/.../bridge
-	// replaced the symlink with a regular file: the real binary stayed at
-	// the old version, launchd kept running it, and `bridge version` on
-	// PATH reported the new one. Best-effort — a resolve failure keeps the
-	// unresolved path rather than blocking boot (F0c).
-	if resolved, lerr := filepath.EvalSymlinks(binaryPath); lerr == nil {
-		binaryPath = resolved
-	}
+	// swaps the file at this exact path.
+	binaryPath := servingBinaryPath(opts, stderr)
 
 	// Boot-time rollback housekeeping: read update-state.json and
 	// either confirm the install succeeded (mark installed, retain

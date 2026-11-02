@@ -124,6 +124,11 @@ type Status struct {
 	// install. Reset to "" on each gate cycle so a one-shot
 	// failure doesn't linger after the underlying state changes.
 	DeferredReason string
+
+	// InstallWarning is set on the Status a manual Install returns when
+	// the candidate was installed without its settings check, because it
+	// predates the check. Never set on the cached status.
+	InstallWarning string
 }
 
 // Options configures a new Updater. Zero values pick sane defaults so
