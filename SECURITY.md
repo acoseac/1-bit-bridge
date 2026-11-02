@@ -24,7 +24,7 @@ If GitHub's flow doesn't work for you, email `support@1-bit.app` with the word `
 ## In scope
 
 - The bridge HTTP API (`/v1/*`), the admin console (`/`, `/api/*`, `/static/*`), the manifest store, the auth / token handling, the scanner, the enrichers, and any code path reachable from a request or a config file.
-- The `bridge://pair?…` URL scheme parser in the iOS app if the issue is reachable via a malformed bridge-issued URL.
+- The pairing URL parser in the iOS app (`onebit://pair?…`, and the `bridge://pair?…` form it still accepts) if the issue is reachable via a malformed bridge-issued URL.
 - Install / packaging paths on any supported OS (Developer ID / notarization bypass, launchd / systemd / Windows Service privilege escalation).
 
 ## Out of scope

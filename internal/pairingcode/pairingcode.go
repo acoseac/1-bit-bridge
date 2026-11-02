@@ -1,7 +1,7 @@
 // Package pairingcode holds the one-time codes a pairing link carries beside
 // its bearer token.
 //
-// A `bridge://pair` link (the console's QR, or a link opened on the device)
+// A pairing link (the console's QR, or a link opened on the device)
 // carried the device's long-lived bearer token, so any app that saw the URL
 // saw the token too (the 2026-09-23 external audit's H1). Shipped apps
 // refuse a link without `token=`, so the link keeps it, and gains `code=`: a

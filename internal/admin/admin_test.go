@@ -284,8 +284,8 @@ func TestTokensMintListRevokeFlow(t *testing.T) {
 	if mint.RawToken == "" || mint.ID == "" || mint.PairURL == "" {
 		t.Errorf("mint result incomplete: %+v", mint)
 	}
-	if !strings.HasPrefix(mint.PairURL, "bridge://pair?") {
-		t.Errorf("PairURL = %q, want bridge://pair prefix", mint.PairURL)
+	if !strings.HasPrefix(mint.PairURL, "onebit://pair?") {
+		t.Errorf("PairURL = %q, want onebit://pair prefix", mint.PairURL)
 	}
 	if !strings.HasPrefix(mint.QRDataURL, "data:image/png;base64,") {
 		t.Errorf("QRDataURL missing or malformed: %q", truncForLog(mint.QRDataURL))
