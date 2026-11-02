@@ -223,12 +223,13 @@ func TestServeLockFileThatLinksOutOfTheDataDirIsNotFollowed(t *testing.T) {
 	}
 }
 
-// TestServesLockingAFreshDataDirAtOnceTakeItOnce has three serves take a
-// fresh data dir's lock at once, twenty times, and requires one of them to
-// hold it and the others to be refused as held. On macOS 27 the openat that
-// lost the race to create server.lock answered ENOENT, which a serve takes
-// for a data dir that cannot be locked: it warned and went on unlocked
-// beside the holder (backlog B185, fsutil.OpenLockFile).
+// TestServesLockingAFreshDataDirAtOnceTakeItOnce has three serves prepare a
+// fresh data dir and take its lock at once, as runServe does, twenty times,
+// and requires one of them to hold it and the others to be refused as held.
+// On macOS 27 the openat that lost the race to create server.lock answered
+// ENOENT, which a serve takes for a data dir that cannot be locked: it
+// warned and went on unlocked beside the holder (backlog B185,
+// fsutil.OpenLockFile).
 func TestServesLockingAFreshDataDirAtOnceTakeItOnce(t *testing.T) {
 	const rounds, serves = 20, 3
 	for round := range rounds {
@@ -238,11 +239,14 @@ func TestServesLockingAFreshDataDirAtOnceTakeItOnce(t *testing.T) {
 		errs := make([]error, serves)
 		var wg sync.WaitGroup
 		for i := range serves {
+			releases[i] = func() {}
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				<-start
-				releases[i], errs[i] = lockServeDataDir(dataDir)
+				if errs[i] = prepareServeDataDir(dataDir); errs[i] == nil {
+					releases[i], errs[i] = lockServeDataDir(dataDir)
+				}
 			}()
 		}
 		close(start)

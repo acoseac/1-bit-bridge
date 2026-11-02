@@ -10,6 +10,29 @@ import (
 	"testing"
 )
 
+// TestEntryKindNamesEveryKindWithItsArticle pins the names a refusal of a
+// path that must be a directory gives what stands there (B606): NotAFile's
+// for an entry that does not open as a file, a character device before the
+// device it also is, and a regular file and an irregular one apart.
+func TestEntryKindNamesEveryKindWithItsArticle(t *testing.T) {
+	for _, tc := range []struct {
+		mode fs.FileMode
+		want string
+	}{
+		{0o644, "a regular file"},
+		{fs.ModeDir | 0o755, "a directory"},
+		{fs.ModeNamedPipe, "a named pipe"},
+		{fs.ModeSocket, "a socket"},
+		{fs.ModeDevice | fs.ModeCharDevice, "a character device"},
+		{fs.ModeDevice, "a device"},
+		{fs.ModeIrregular, "an irregular file"},
+	} {
+		if got := EntryKind(tc.mode); got != tc.want {
+			t.Errorf("EntryKind(%v) = %q, want %q", tc.mode, got, tc.want)
+		}
+	}
+}
+
 // TestOpenAsFileOpensAFileRefusesADirectoryAndKeepsTheOpenError pins
 // OpenAsFile on every platform: a file opens with the opened file's own
 // stat, a directory is refused with a *NotAFileError inside the
