@@ -69353,3 +69353,30 @@ hotplug source bullet, as a checked patch (this host's tools refuse
 `.claude/`): `.tmp/_b615/b615-b616-rules.patch` in this worktree, built
 read-only and checked with a strict applier against patched copies;
 `make docs-check` with it applied over a shadow tree: ok, `player.md 96.8%`.
+
+**Checks**, on 1e2c8175 (each Go command through the build lock, umask 022):
+- `make test` (P=4, `-race`): exit 0; 80 packages ok and 13 with no test
+  files, the Linux-only `internal/alsapcm` (29.7 s), `internal/atomicwrite`
+  (19.1 s), `internal/alsa`, `internal/alsactl` and `internal/player/hotplug`
+  (2.3 s) among them; `cmd/bridge` 824.9 s, `internal/admin` 953.7 s.
+- `make vet`: exit 0. `go vet` for `GOOS=windows` and `GOOS=darwin` of
+  `internal/dlna/...`, `internal/player/hotplug/...`,
+  `internal/player/qualification/...` and `internal/logging/...`: clean.
+- `make fmt` changed nothing, and go1.27.3's gofmt lists none of the ten Go
+  files changed; `make build-all`: `check-build-tags: OK` and the six targets
+  built (`dist/` removed after).
+- `make docs-check`: ok, `CLAUDE.md 71.9%; player.md 96.8%; worst load,
+  player_openhome_test.go 61.3%`, and the same with the rules patch applied.
+- `scripts/qualification-version -base fe2cb532 -head HEAD`: `qualification
+  version OK: fe2cb532..HEAD`; with `-head ca56423a`, the guarded changes
+  before the raise: `guarded code changed without qualificationVersion
+  increase (24 -> 24)`, exit 1.
+- Before the gate, per commit: `internal/dlna/...` plain and under `-race`;
+  the other packages that import x/net (`internal/upnp`, `internal/tls`,
+  `internal/mdns`, `internal/dnstest`, `internal/dlna/discovery`); the 17
+  `internal/admin` tests in the three files that parse HTML with
+  `x/net/html` (15 pass, 2 skip without node, as on main);
+  `internal/player/hotplug` and `internal/player/qualification` plain and
+  under `-race`; `internal/logging/...`.
+- Not run here: darwin's rows of the datagram tests (vetted only; they run on
+  a Mac), and the node harness (no node on legion0).
