@@ -128,7 +128,7 @@ automation is unaffected.
 | `internal/enrich` | MusicBrainz + Cover Art Archive + Deezer clients, rate-limited (1.1s / 500ms / 120ms) |
 | `internal/atlasharvest` | Bridge-driven bulk metadata harvest from Atlas (iOS provisions the credential) |
 | `internal/api` | HTTP/2 + HTTP/3 handlers: `/v1/{health,list,stat,read,download,manifest,artwork,...}`; per-route write deadlines; SSE |
-| `internal/admin` | Local web console on `127.0.0.1:7789` — library/devices/stats/settings pages + JSON API + `bridge://` QR pairing |
+| `internal/admin` | Local web console on `127.0.0.1:7789` — library/devices/stats/settings pages + JSON API + `onebit://` QR pairing |
 | `internal/advertise` | Enumerates every reachable endpoint (LAN v4/v6, mDNS, Tailscale) so `/v1/health` self-reports |
 | `internal/mdns` | Bonjour `_onebit-bridge._tcp` advertisement |
 | `internal/packaging` | launchd plist / systemd unit rendering + install/uninstall, used by `bridge init` |
@@ -307,7 +307,8 @@ mode). iOS never talks to the admin listener.
   placeholder defaults, never hardcoded.
 - Client API: HTTPS only (self-signed ECDSA P-256 + SHA-256 fingerprint
   pinning, or public-CA/autocert cert), bearer tokens stored hashed.
-- The `bridge://pair?…` URL parser in the iOS app is in security scope when
+- The pairing URL parser in the iOS app (`onebit://pair?…`, and the
+  `bridge://pair?…` form it still accepts) is in security scope when
   reachable via a malformed bridge-issued URL.
 
 ## CI, release, and deployment

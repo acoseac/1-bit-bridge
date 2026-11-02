@@ -2230,14 +2230,17 @@ Operators can disable it with `limits.write.requestsPerMinute: 0`.
 Out-of-band setup path: the admin console emits a custom-scheme URL that carries everything the iOS app needs to add a bridge share in one tap (QR scan or deep link), so the operator never has to paste three separate fields by hand.
 
 ```text
-bridge://pair?url=<https bridge URL>&token=<base64url bearer>&code=<base64url one-time code>&fingerprint=<AB:CD:…:EF>&name=<library display name>
+onebit://pair?url=<https bridge URL>&urls=<every URL to try, newline-separated>&token=<base64url bearer>&code=<base64url one-time code>&fingerprint=<AB:CD:…:EF>&name=<library display name>
 ```
 
-**Query parameters** — `url`, `token`, `fingerprint` and `name` are required (iOS MUST reject URLs missing any of these); `code` is optional:
+**Scheme.** The iOS app takes the link under two schemes, `onebit://pair` and `bridge://pair`, with the same host (`pair`) and the same query, and reads the two alike: `bridge://pair` from the start, `onebit://pair` since iOS app v2.2. Bridges up to and including v0.2.2 emit `bridge://pair`. The admin console emits `onebit://pair` since the bridge release after v0.2.2, because iOS 27 hands a `bridge://` URL to Apple's Watch app (`com.apple.Bridge`): a `bridge://` QR scanned with the Camera opens that app, not 1-bit. So an app older than v2.2 does not pair from the QR of a bridge after v0.2.2 (the three fields still pair it), while v2.2 and later pair from either bridge's QR. The bridge itself parses no pairing URL of either scheme.
+
+**Query parameters** — `url`, `token`, `fingerprint` and `name` are required (iOS MUST reject URLs missing any of these); `urls` and `code` are optional:
 
 | Name          | Value                                                                 |
 |---------------|-----------------------------------------------------------------------|
 | `url`         | The HTTPS URL iOS should dial, including `https://` scheme and port.  |
+| `urls`        | Optional (additive). Every URL the device may dial, separated by newlines (`%0A` once encoded): `url` first, then the addresses `/v1/health` lists in `endpoints`, each once, so a device paired on one network has the others recorded and can roam without re-pairing. Absent when that list would hold `url` alone; a client that does not read it dials `url` alone. |
 | `token`       | Raw bearer token (the same 43-char base64url string `bridge pair` prints). |
 | `code`        | Optional (additive). A one-time code (the unpadded base64url encoding of 32 bytes: 43 characters, whose shape the bridge judges) that redeems once, within 10 minutes, for the device's token (`POST /v1/pairing/redeem`). Present in the links the admin console makes on a bridge that issues codes. |
 | `fingerprint` | Server TLS cert SHA-256 in colon-delimited uppercase hex. Used for pinning. |
@@ -2253,7 +2256,7 @@ Unknown query parameters MUST be ignored — future additive fields (e.g. a disp
 
 **iOS behaviour**: after parsing, the client runs the same `/v1/health` probe + authed `/v1/manifest?since=<future>` verify steps it uses for manual pairing, then persists the share on success. With a `code`, it redeems the code after the probe and verifies with the redeemed token. A malformed URL (missing fields, token/fingerprint fail regex sanity) is rejected before any network call.
 
-The scheme is **additive** — bridges that don't ship the admin console (pre-0.0.x builds, bespoke integrations) still work fine with the three-field manual paste path.
+The pairing URL is **additive** — bridges that don't ship the admin console (pre-0.0.x builds, bespoke integrations) still work fine with the three-field manual paste path.
 
 ## Golden fixtures
 

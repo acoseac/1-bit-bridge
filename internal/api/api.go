@@ -2300,7 +2300,7 @@ func (s *Server) reachableEndpoints() []string {
 // cheap enough to not warrant caching for the host-network part.
 //
 // Exported because the admin console consumes the same list: the
-// pairing QR bakes it into `bridge://pair?urls=` (so a phone paired on
+// pairing QR bakes it into `onebit://pair?urls=` (so a phone paired on
 // Wi-Fi has the Tailscale fallback recorded and can roam without a
 // re-pair) and the Settings "Reachable endpoints" panel renders it with
 // the class tags. Both used to call `advertise.Endpoints` directly and
