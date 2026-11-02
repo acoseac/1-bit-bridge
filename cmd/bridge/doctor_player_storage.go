@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"io/fs"
-	"os"
-	"path/filepath"
 	"runtime"
+	"syscall"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
 
 // playerStorageCheckName is the doctor's line on the storage under the data
@@ -50,17 +50,19 @@ func doctorPlayerStorage(cfg *config.Config) func(context.Context) []doctor.Chec
 // and its other gates as it starts it. A player cfg leaves off has no line.
 // Off Linux, where the player never runs, a player cfg asks for is not
 // checked, ok; on Linux, one cfg's own refusal turns off is not checked, a
-// warn, naming that refusal (which names no value); a data directory that is
-// there and is not a directory, a regular file, a link to one or a link to
-// nothing (atomicwrite.ErrRootNotADirectory), is a fail saying bridge serve
-// will not start, since serve refuses a data directory it cannot prepare
-// (B606); a data directory the inspection finds no entry at is judged by the
-// nearest entry of its path that is there (dataDirNotThere): a link to
-// nothing there is a fail of the same kind, since serve cannot make the
-// directory through it, and anything else is not checked, ok, since serve
-// makes it; and one the inspection cannot read is not checked, a warn
-// (dataDirNotChecked), never ok, nor a fail, since the service's user may
-// read it.
+// warn, naming that refusal (which names no value). A data directory the
+// inspection finds no directory at, or none on its way to (a root that is
+// there and is no directory, atomicwrite.ErrRootNotADirectory; no entry
+// there, fs.ErrNotExist; an entry on the way that is no directory, a bare
+// ENOTDIR), is judged by the walk up its path the data-dir line takes
+// (dataDirOnItsWay), in the same words: an entry in the way, a regular file,
+// a link to one or a link to nothing, at the data directory or above it, is a
+// fail saying bridge serve will not start, since serve refuses a data
+// directory it cannot prepare (B606; an ancestor that is a regular file, or a
+// link to one, since B659), and a data directory not made yet below a
+// directory is not checked, ok, since serve makes it; and one the inspection
+// or the walk cannot read is not checked, a warn (dataDirNotChecked), never
+// ok, nor a fail, since the service's user may read it.
 func playerStorageCheck(cfg *config.Config, goos string, inspect func(string) (atomicwrite.Medium, error)) (doctor.Check, bool) {
 	line := func(status doctor.Status, summary, hint string) (doctor.Check, bool) {
 		return doctor.Check{Name: playerStorageCheckName, Status: status, Summary: summary, Hint: hint}, true
@@ -80,12 +82,9 @@ func playerStorageCheck(cfg *config.Config, goos string, inspect func(string) (a
 	}
 	dir := cfg.DataDir
 	m, err := inspect(dir)
-	var notDir *atomicwrite.RootNotADirectoryError
 	switch {
-	case errors.As(err, &notDir):
-		return dataDirNotADirectory(dir, notDir, line)
-	case errors.Is(err, fs.ErrNotExist):
-		return dataDirNotThere(dir, line)
+	case errors.Is(err, atomicwrite.ErrRootNotADirectory), errors.Is(err, fs.ErrNotExist), errors.Is(err, syscall.ENOTDIR):
+		return dataDirOnItsWay(dir, err, line)
 	case err != nil:
 		return dataDirNotChecked(dir, err, line)
 	case errors.Is(m.Err, atomicwrite.ErrOverlayBind):
@@ -102,81 +101,30 @@ func playerStorageCheck(cfg *config.Config, goos string, inspect func(string) (a
 	return line(doctor.OK, dir+" is on "+storage+"; serve checks the rest as it starts the player", "")
 }
 
-// storageLine is playerStorageCheck's maker of its line.
-type storageLine func(status doctor.Status, summary, hint string) (doctor.Check, bool)
-
-// linkToNothingHint is the fix for a data directory a link to nothing
-// stands in the way of, or one that is a link to an entry that is not a
-// directory.
-const linkToNothingHint = "point the link at a directory, or set dataDir in bridge.yaml to one"
-
-// dataDirNotADirectory is the line for a data directory that is there and is
-// not a directory, which the inspection proved (notDir): a fail saying bridge
-// serve will not start, since serve refuses a data directory it cannot
-// prepare (B606), naming the data directory, what stands there and the fix.
-// A link to nothing is said as dataDirNotThere says one above the data
-// directory.
-func dataDirNotADirectory(dir string, notDir *atomicwrite.RootNotADirectoryError, line storageLine) (doctor.Check, bool) {
+// dataDirOnItsWay is the line for a data directory the inspection found no
+// directory at, or none on its way to (inspectErr): the walk up its path the
+// data-dir line takes (fsutil.BlockingEntry) judges it, so the two lines say
+// one thing of it. The inspection resolves every link in the path, so it
+// answers a data directory below a link to nothing as fs.ErrNotExist, as it
+// does one not made yet (CodeRabbit on #1368), and one below a regular file
+// or a link to one with a bare ENOTDIR that names no entry; the walk tells
+// them apart. An entry in the way, a regular file, a link to one or a link to
+// nothing, at the data directory or above it, is the data-dir line's fail
+// (dataDirBlocked), which serve refuses (B606). A data directory not made yet
+// below a directory or a link to one is "not there yet", ok, since serve's
+// preparation (prepareServeDataDir) makes it. A walk that fails is not
+// checked (dataDirNotChecked), and so is one that finds nothing in the way of
+// what the inspection could not reach (the path changed in between), named by
+// the inspection's error.
+func dataDirOnItsWay(dir string, inspectErr error, line doctorLine) (doctor.Check, bool) {
+	nearest, inTheWay, err := fsutil.BlockingEntry(dir)
 	switch {
-	case notDir.Link && notDir.Target == "":
-		return line(doctor.Fail, "bridge serve will not start: "+dir+" is a symbolic link to nothing, and serve cannot make "+dir+" through it", linkToNothingHint)
-	case notDir.Link:
-		return line(doctor.Fail, "bridge serve will not start: the data directory "+dir+" leads to "+notDir.Target+", "+notDir.Kind+", not a directory", linkToNothingHint)
+	case err != nil:
+		return dataDirNotChecked(dir, err, line)
+	case inTheWay != nil:
+		return dataDirBlocked(dir, inTheWay, line)
+	case nearest == dir || !errors.Is(inspectErr, fs.ErrNotExist):
+		return dataDirNotChecked(dir, inspectErr, line)
 	}
-	return line(doctor.Fail, "bridge serve will not start: the data directory "+dir+" is "+notDir.Kind+", not a directory",
-		"move it aside, or set dataDir in bridge.yaml to a directory serve can make or use")
-}
-
-// dataDirNotThere is the line for a data directory the inspection finds no
-// entry at (fs.ErrNotExist), which its resolution of every link in the path
-// answers for one below a link that leads to nothing as well (CodeRabbit on
-// #1368; a data directory that is itself such a link the inspection tells
-// apart, dataDirNotADirectory). From dir up, the nearest entry of its path
-// that is there, by os.Lstat (the kernel resolving the entries above it), is
-// judged. A symbolic link there that leads to nothing (os.Stat answers
-// fs.ErrNotExist), however many links it goes through, is a fail naming it:
-// serve's MkdirAll stops at that entry (EEXIST), so serve refuses to start
-// (B606). Anything else there leaves only the components below it to make,
-// which serve's MkdirAll makes: "not there yet", ok. An Lstat or a Stat on
-// the way that fails for another reason than the entry's absence is not
-// checked (dataDirNotChecked), never ok, and so is a path whose root is not
-// there.
-func dataDirNotThere(dir string, line storageLine) (doctor.Check, bool) {
-	for p := dir; ; {
-		info, err := os.Lstat(p)
-		switch {
-		case errors.Is(err, fs.ErrNotExist):
-			if up := filepath.Dir(p); up != p {
-				p = up
-				continue
-			}
-			return dataDirNotChecked(dir, err, line)
-		case err != nil:
-			return dataDirNotChecked(dir, err, line)
-		case info.Mode()&fs.ModeSymlink != 0:
-			switch _, err := os.Stat(p); {
-			case errors.Is(err, fs.ErrNotExist):
-				return line(doctor.Fail, "bridge serve will not start: "+p+" is a symbolic link to nothing, and serve cannot make "+dir+" through it", linkToNothingHint)
-			case err != nil:
-				return dataDirNotChecked(dir, err, line)
-			}
-		}
-		return line(doctor.OK, "not checked: the data directory "+dir+" does not exist yet; bridge serve makes it, and checks its storage as it starts the player", "")
-	}
-}
-
-// dataDirNotChecked is the line for the data directory dir whose
-// inspection, or the walk up its path, failed for another reason than an
-// entry's absence: not checked, a warn naming dir and the error, never ok,
-// since filepath.EvalSymlinks answers an entry on the way that is no
-// directory with a bare ENOTDIR, which names nothing. A permission error is
-// this user's, and the service's user may read what this one cannot; any
-// other, a link cycle (which EvalSymlinks answers as too many links) or an
-// entry on the way that is no directory, stands in the way of the path.
-func dataDirNotChecked(dir string, err error, line storageLine) (doctor.Check, bool) {
-	summary := "not checked: the data directory " + dir + " cannot be inspected: " + err.Error()
-	if errors.Is(err, fs.ErrPermission) {
-		return line(doctor.Warn, summary, "run bridge doctor as the user the service runs as, who can read the data directory")
-	}
-	return line(doctor.Warn, summary, "mend what the error names on the way to the data directory, or set dataDir in bridge.yaml to a directory serve can make or use")
+	return line(doctor.OK, "not checked: the data directory "+dir+" does not exist yet; bridge serve makes it, and checks its storage as it starts the player", "")
 }

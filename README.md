@@ -73,6 +73,7 @@ Before (or any time after) running `bridge init`, `bridge doctor` prints a punch
 ```
 [ok]   platform            darwin/arm64
 [ok]   config-dir          /Users/me/Library/Application Support/1-bit-bridge
+[ok]   data-dir            /Users/me/Library/Application Support/1-bit-bridge/data is a directory
 [ok]   tls-cert            present, expires in 312 days
 [warn] tls-cert-sans       stale — 3 of 4 name(s) and 3 of 6 address(es) this bridge advertises are not in the certificate
   ↳ clients dialling nuc, nuc.local, nuc.tailnet.ts.net, 192.168.50.24, 100.64.0.24, fd7a:115c:a1e0::1 fail TLS
