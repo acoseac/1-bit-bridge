@@ -69858,3 +69858,149 @@ Go files. `make docs-check`: ok, `CLAUDE.md 71.9%; player.md 96.8%; worst
 load, player_openhome_test.go 61.4%`, the same with the rules patch applied
 (cli-serve.md 34,409 bytes). `scripts/qualification-version -base main -head
 HEAD`: OK.
+
+## 2026-11-02 — B687: the DLNA server announces and serves private addresses only, a public one only as dlna.listenAddress names it
+
+Backlog B687, security. The brief, verified against v0.2.2, was reviewed by
+Codex and Argon against main (1a811686), and their notes were binding where
+they differed: define the public opt-in exactly, a public-only host
+included; a precise address policy; every enforcement and URL-producing path
+(ContentDirectory's URLs from `r.Host`, `AcceptsOn`, SSDP unicast and the
+unarmed fallback); tests that cannot pass vacuously; revise the rules'
+conflicting clauses rather than append a rule.
+
+**The defect, on main.** In LAN mode with the wildcard listener (`:7790`),
+four links: an interface that carries a private address is eligible as a
+whole (`IsLANEligibleInterface`, `hasPrivate || …`); the wiring announced
+each member's first IPv4 address, whatever its class (`firstIPv4OnInterface`,
+cmd/bridge/dlna_wiring.go, and the fallback ServerURL alike); `servedAddrs`
+served a member's address the server advertised, whatever its kind (the
+advertised arm, B48's deliberate exception for "an interface eligible
+through a ULA beside a public IPv4"); and the Host check took any address of
+the host (`isInterfaceAddr`). Measured through the real wiring on a stand-in
+host, eth0 listing 203.0.113.5/24 before 192.168.1.20/24 (the red commit):
+all five alive NOTIFYs and the answer to a search of the private address
+named `http://203.0.113.5:7790/dlna/description.xml`; `AcceptsOn(203.0.113.5)`
+was true; a connection arriving on the public address got the description,
+1,566 bytes, whether its Host named the private address, the public one or
+none; an M-SEARCH sent to it was answered; and over the private connection a
+Browse naming `203.0.113.5:7790` came back 200 with `<res>` on the public
+address. Listing the private address first closed every link but the Host
+check's, which took the public address in either order. An interface
+eligible through a ULA whose one IPv4 address is public was announced and
+served on it.
+
+**The policy.**
+
+| class | wildcard `dlna.listenAddress` | pinned literal |
+|---|---|---|
+| loopback | served, a Host; never announced | served |
+| RFC 1918, 169.254/16 | a member's first is announced; served on a member; a Host | served if a member holds it, else a warning at Start |
+| ULA outside Tailscale's, fe80 zoned to its member | served on a member, a Host; never announced (SSDP is IPv4) | as above |
+| public (global unicast, not private), IPv4 or IPv6 | neither announced, served nor a Host, on any interface; said once, value-free | the opt-in: announced, served while an interface holds it, a Host, alone; its advertiser on the interface that holds it, eligible or not |
+| 100.64/10, Tailscale's ULA | refused | announced as written, served by no one; warns at Start and starts |
+
+A host name never opts in. Every spelling of the unspecified address is a
+wildcard. A public-only host does not start with the wildcard (no LAN-eligible
+interface, as before) and is served only through the opt-in; where SSDP cannot
+start on its interface, Start fails and DLNA is off, as for every listener.
+
+**The fix** (154ddf2a; the red commit a4dc1e10 first made the wiring list the
+host once and run its real pickers over that listing,
+`PickLANEligibleInterfaceOf` and `PickAllLANEligibleInterfacesOf`, dropped
+`dlnaBootNetwork`'s `Pick` and `Gather`, which stood approved answers in for
+the selection, and let the Host check read a boot test's host,
+`hostAddrs`; nothing production does changed there):
+- cmd/bridge/dlna_wiring.go: `firstLANIPv4OnInterface` reads every address,
+  takes the first of a LAN class (`dlna.IsLANClassAddress`), and reports a
+  public or 100.64/10 IPv4 address it passed over; the advertise set and the
+  fallback ServerURL both use it, so no public address is the fallback;
+  `publicLeftOutNote` writes one Info line per start, naming no address;
+  `isWildcardHost` takes every unspecified spelling; a public pin's
+  advertiser runs on `interfaceHolding`'s interface, with no pick.
+- internal/dlna/served.go: no advertised arm; the pin is served while an
+  interface holds it (`servedSnapshotOf`). The listener's accept,
+  `AcceptsOn` and the MediaServer's unicast M-SEARCH admission read it.
+- internal/dlna/host_guard.go: `mayName`, a literal of a LAN class or the
+  pin, before ownership. The ContentDirectory builds its `<res>` and
+  albumArtURI on the Host, so it builds none on a public address.
+- internal/dlna/server.go: `checkAdvertisedHost` in NewServer refuses a
+  ServerURL or LOCATION literal of another class unless it is the literal
+  `dlna.listenAddress` names (naming the field, never the value); Start
+  refuses a listener not bound to the pinned public address and says once,
+  at Warn and naming no address, what serving it means.
+- internal/dlna/interfaces.go: `IsLANClassAddress` and `PinnedPublicAddress`
+  (an IP literal, globally routable, not private, not link-local, not
+  loopback, not in 100.64/10).
+- The refusal line says what the listener answers on ("the private and
+  link-local addresses of the LAN-eligible interfaces"); the Host refusal's
+  body likewise. Comments that said a wildcard serves "the LAN-eligible
+  addresses" or that a pin off the LAN serves nothing (config.go,
+  config_gate.go, doc.go, the CDS's serverURLFunc note) were brought up to
+  date, and `config/bridge.yaml.example` gained a `dlna:` block saying what
+  a public `listenAddress` means.
+
+**Decided.** The opt-in is an IP literal only: a host name's answer is the
+resolver's to change. 100.64/10 is RFC 6598's shared space, neither private
+nor public, and holds Tailscale's IPv4 range, which no address-based check
+tells from an ISP's, so it is never the opt-in; a pin to it on a member,
+served until now as an advertised address, serves no one (one narrowing of
+an existing pin, said here so a report of it finds the reason). NewServer
+takes the literal `dlna.listenAddress` names whatever its class, so a pin to
+the tailnet's address still warns and starts, B48's "don't make it refuse".
+Rejecting a mixed interface whole was declined: the shared pickers drive mDNS
+and the renderer and upstream discovery clients, and eligibility is per
+interface while serving is per address. The omission line is Info, not Warn:
+leaving the address out is the bridge doing what it should, every start, on
+a host that keeps its public address. Unchanged: public mode's refusal, the
+Tailscale exclusions, link-local handling, IPv6 (served on a member's ULA and
+fe80, never announced), the unarmed SSDP listener's fallback (it answers a
+unicast unchecked, with its one Warn), and the OpenHome surface, which served
+only IPv4 addresses of the LAN classes already (`internal/player/lan`) and
+reads no DLNA setting; its Insert takes `AcceptsOn`, the listener's own
+served set, the pin included.
+
+**Red first, by name** (a4dc1e10, through the build lock, untagged):
+`TestTheMediaServerServesAMixedInterfaceOnItsPrivateAddressAlone`, public
+first (five NOTIFYs, `AcceptsOn`, three connections with 1,566 bytes back, no
+refused connection logged, the search's answer, no M-SEARCH refusal; the
+private-first order passed, as coverage);
+`TestTheMediaServerAnswersNoRequestNamingItsPublicAddress`, both orders,
+three Hosts each; `TestTheMediaServerFallsBackToNoPublicAddress`;
+`Test_ownHostOnly_RefusesAnAddressOfThisHostItDoesNotServe` (six Hosts of
+this host: public, no port, mapped, SLAAC, the tailnet's two); and
+`TestNewServerRefusesToAdvertiseAnAddressItWouldNotServe` (eight rows). Every
+other test of internal/dlna and of cmd/bridge's DLNA and discovery boot tests
+passed there. Green on 154ddf2a; the opt-in's tests and the rest on eea5a4ce.
+
+**The negative controls** (each on eea5a4ce, uncommitted, one guard at a
+time, run over the whole of internal/dlna and cmd/bridge's DLNA tests under
+`-race`; restored from git, the tree clean after each):
+
+| # | mutation | internal/dlna red (tests/subtests) | cmd/bridge red (tests/subtests) |
+|---|---|---|---|
+| 1 | the selection takes a public IPv4 too | 0 | 6/10 (the mixed host public-first, the Host test public-first, the wildcard spellings, the once-only line, both unit tests) |
+| 1b | 1, and NewServer's check gone | 1/9 | 6/9: the mixed host now fails on its LOCATIONs alone, and the fallback starts on the public address |
+| 2 | the served set serves a member's public address | 4/9 | 4/11, private-first included (no bytes on the public address, the M-SEARCH refusal) |
+| 3 | the Host check's class test gone | 3/0 | 2/3 (both orders of the Host test, the IPv6 Host); the mixed-host test stays green |
+| 4 | a unicast M-SEARCH admitted whatever its destination | 9/5 | 1/2: the M-SEARCH refusal alone |
+| 5 | NewServer's check gone | 1/9 | 0 (the wiring never builds such a configuration) |
+| 6 | the pin not served | 3/5 | 2/4 |
+| 7 | the omission line not deduplicated | 0 | 1/2: written twice, and three times with the fallback |
+| 8 | the wildcard's spellings as before | 0 | 2/3 |
+| 9 | Start takes a listener not bound to the pin | 1/0 | 0 |
+| 10 | the Host check's pin arm gone | 1/0 | 2/4 |
+| 11 | the fallback takes the first IPv4 listed | 0 | 1/0 (NewServer's check is the end-to-end backstop) |
+
+**Records.** `.claude/` cannot be written by this session's tools: the rules
+change is `rules-b687.patch` beside the job's report (B48's and B170's
+bullets revised in place, the eligibility and `AcceptsOn` bullets a sentence
+each, and one line, B48's continuation, after B610's), checked with a strict
+applier and by `check-doc-budgets.py` with it applied. The long form is in
+`ops/History-rules-dlna-upnp.md`, and `ops/History-rules-openhome.md`'s
+restatement of the Host check is corrected. PROTOCOL.md's DLNA listener
+section (the served addresses, and "any internet-reachable deployment")
+changed, so the app's copy follows. `internal/config/config.go` (comments
+only) and `cmd/bridge/serve_player_discovery_test.go` are under qualification
+prefixes (`internal/config/`, `cmd/bridge/serve_player`): the version is
+raised at the merge.
