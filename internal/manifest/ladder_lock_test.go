@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/dsn"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
 
 // Backlog B185: two processes opening an older database at once (a `bridge
@@ -163,6 +166,79 @@ func TestAnOpenerWaitsForAnotherOpenersLadder(t *testing.T) {
 	defer o.s.Close()
 	if v := readUserVersion(t, o.s.db); v != latestVersion {
 		t.Errorf("user_version %d, want %d", v, latestVersion)
+	}
+}
+
+// ladderNoLockMessage and ladderUnlockedMessage are how OpenStore says it
+// migrates without its ladder lock: where the lock's answer is one a
+// filesystem that keeps no locks gives (fsutil.KeepsNoLocks), and where the
+// answer is any other or the lock file could not be opened.
+const (
+	ladderNoLockMessage = "the filesystem gave no migration lock: a filesystem that keeps no locks answers so, and so do an NFS mount " +
+		"whose lock manager is not running and a kernel out of lock records, so another opener may be migrating the database all the same; migrating without the lock"
+	ladderUnlockedMessage = "could not take the migration lock; migrating without it"
+)
+
+// ladderLockKindCase is one answer of the ladder lock's and whether
+// fsutil.KeepsNoLocks reads it.
+type ladderLockKindCase struct {
+	name    string
+	answer  error
+	noLocks bool
+}
+
+// TestTheMigrationSaysWhichKindOfLockItCouldNotTake opens a database at
+// v44 whose ladder lock answers each kind of failure that is not another
+// opener holding it (B537 item 1), and requires the open to migrate without
+// the lock, as before, and to say which kind it met: an answer
+// fsutil.KeepsNoLocks reads (errors.ErrUnsupported, which it reads on every
+// platform; the platform's own in the unix and Windows halves) with a line
+// of its own that does not claim the filesystem keeps no locks, which ENOLCK,
+// one of those answers, does not prove; any other answer (an I/O error), and
+// a lock file that cannot be opened (a directory standing where it goes),
+// with the line it always had. A held lock is waited for
+// (TestAnOpenerWaitsForAnotherOpenersLadder), and past the bound refused
+// (TestAnOpenerGivesUpOnALadderLockHeldPastTheBound).
+func TestTheMigrationSaysWhichKindOfLockItCouldNotTake(t *testing.T) {
+	for _, tc := range append([]ladderLockKindCase{
+		{"no lock on this platform", errors.ErrUnsupported, true},
+		{"an I/O error", syscall.EIO, false},
+	}, platformLadderLockKindCases...) {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Cleanup(setLadderTryLock(func(f *os.File) error { return &os.PathError{Op: "flock", Path: f.Name(), Err: tc.answer} }))
+			requireMigratedSaying(t, databaseAtVersion(t, 44), tc.noLocks)
+		})
+	}
+	t.Run("a lock file that cannot be opened", func(t *testing.T) {
+		path := databaseAtVersion(t, 44)
+		if err := os.Mkdir(path+ladderLockSuffix, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		requireMigratedSaying(t, path, false)
+	})
+}
+
+// requireMigratedSaying opens path, requires the ladder to have run to the
+// latest version, and requires one line of noLocks's kind and none of the
+// other.
+func requireMigratedSaying(t *testing.T, path string, noLocks bool) {
+	t.Helper()
+	rec := loggingtest.Record(t)
+	s, err := OpenStore(path)
+	if err != nil {
+		t.Fatalf("OpenStore without its ladder lock: %v", err)
+	}
+	defer s.Close()
+	if v := readUserVersion(t, s.db); v != latestVersion {
+		t.Errorf("user_version %d, want %d: the ladder did not run without its lock", v, latestVersion)
+	}
+	said, other := rec.Lines(ladderNoLockMessage), rec.Lines(ladderUnlockedMessage)
+	if !noLocks {
+		said, other = other, said
+	}
+	if len(said) != 1 || len(other) != 0 {
+		t.Errorf("the open said %q and %q, want one line of its kind (no locks: %v) and none of the other; every line:\n%s",
+			said, other, noLocks, strings.Join(rec.All(), "\n"))
 	}
 }
 

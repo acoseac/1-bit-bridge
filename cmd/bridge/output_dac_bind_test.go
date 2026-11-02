@@ -372,6 +372,9 @@ func TestOutputDACBindRefusesWhileABridgeServesTheDataDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := prepareServeDataDir(cfg.DataDir); err != nil {
+		t.Fatal(err)
+	}
 	release, err := lockServeDataDir(cfg.DataDir)
 	if err != nil {
 		t.Fatal(err)
