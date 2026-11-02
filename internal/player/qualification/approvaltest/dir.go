@@ -1,4 +1,3 @@
-// Package approvaltest prepares private directories for owner-approval fixtures.
 package approvaltest
 
 import (
