@@ -159,11 +159,7 @@ func (s *Server) hostIsOwn(hostport string, known ownHosts) bool {
 // interfaces now. Asked only for a literal the configuration did not
 // name, so a renderer on the advertised address never pays for it.
 func (s *Server) isInterfaceAddr(a netip.Addr) bool {
-	list := s.interfaceAddrs
-	if list == nil {
-		list = net.InterfaceAddrs
-	}
-	addrs, err := list()
+	addrs, err := s.hostAddrs()
 	if err != nil {
 		return false
 	}
@@ -183,6 +179,36 @@ func (s *Server) isInterfaceAddr(a netip.Addr) bool {
 		}
 	}
 	return false
+}
+
+// hostAddrs lists every address of this host's interfaces: through the
+// per-server seam a test sets (interfaceAddrs), else through the inventory
+// the server's configuration stands in for the host's
+// (ServerConfig.Interfaces and InterfaceAddresses, a boot test's host, which
+// the served addresses read too), else net.InterfaceAddrs. An interface
+// whose addresses cannot be read adds none.
+func (s *Server) hostAddrs() ([]net.Addr, error) {
+	if s.interfaceAddrs != nil {
+		return s.interfaceAddrs()
+	}
+	if s.cfg.Interfaces == nil {
+		return net.InterfaceAddrs()
+	}
+	ifaces, err := s.cfg.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	addrsOf := s.cfg.InterfaceAddresses
+	if addrsOf == nil {
+		addrsOf = hostInterfaceAddrs
+	}
+	var out []net.Addr
+	for i := range ifaces {
+		if addrs, err := addrsOf(&ifaces[i]); err == nil {
+			out = append(out, addrs...)
+		}
+	}
+	return out, nil
 }
 
 // noteForeignHost logs a Host ownHostOnly refused, once per name (bounded

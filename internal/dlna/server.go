@@ -196,7 +196,9 @@ type ServerConfig struct {
 	// Listener is an already-bound HTTP listener; nil binds ListenAddress.
 	Listener net.Listener
 	// Interfaces and InterfaceAddresses replace this server's host inventory
-	// in isolated tests; nil retains the host's enumeration.
+	// in isolated tests: what the listener serves and, with Interfaces set,
+	// the addresses its Host check counts as this host's. nil retains the
+	// host's enumeration.
 	Interfaces         func() ([]net.Interface, error)
 	InterfaceAddresses func(*net.Interface) ([]net.Addr, error)
 
@@ -277,8 +279,10 @@ type Server struct {
 	callbackRefusedSeen map[string]struct{}
 
 	// interfaceAddrs lists this host's addresses for ownHostOnly; nil is
-	// net.InterfaceAddrs. A per-server seam, set before Start by a test
-	// that stands in a host of its own.
+	// the configuration's inventory (Interfaces and InterfaceAddresses)
+	// where it has one, and net.InterfaceAddrs where it has none
+	// (hostAddrs). A per-server seam, set before Start by a test that
+	// stands in a host of its own.
 	interfaceAddrs func() ([]net.Addr, error)
 
 	// served is what the listener and every advertiser serve (servedAddrs,
@@ -1222,4 +1226,19 @@ func PickAllLANEligibleInterfaces(opts EligibilityOpts) []*net.Interface {
 		return nil
 	}
 	return pickAllLANInterfaces(ifaces, hostInterfaceAddrs, opts)
+}
+
+// PickLANEligibleInterfaceOf is PickLANEligibleInterface over one listing of
+// the host's interfaces, ifaces as net.Interfaces gives them and addrsOf
+// reading each one's addresses: the MediaServer's wiring lists the host once
+// and picks from that listing, and a boot test hands it a host of its own.
+func PickLANEligibleInterfaceOf(ifaces []net.Interface, addrsOf func(*net.Interface) ([]net.Addr, error), opts EligibilityOpts) (*net.Interface, error) {
+	return pickLANInterface(ifaces, addrsOf, opts)
+}
+
+// PickAllLANEligibleInterfacesOf is PickAllLANEligibleInterfaces over one
+// listing of the host's interfaces, as PickLANEligibleInterfaceOf is. The
+// members it returns point into ifaces.
+func PickAllLANEligibleInterfacesOf(ifaces []net.Interface, addrsOf func(*net.Interface) ([]net.Addr, error), opts EligibilityOpts) []*net.Interface {
+	return pickAllLANInterfaces(ifaces, addrsOf, opts)
 }

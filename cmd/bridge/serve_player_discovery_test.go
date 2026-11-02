@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"net/netip"
 	"os"
@@ -64,11 +63,9 @@ func bootDiscoveryServe(t *testing.T, root string, media bool, playerBlock, goos
 		},
 		ssdpNetwork:    n.Transport(),
 		playerOpenHome: openhomeWiring{Addresses: box.Addresses, Listen: box.Listen, Limits: openhome.Limits{Rescan: time.Hour}, Started: func(s *openhome.Surface) { started <- s }},
+		// The MediaServer's own selection runs over this host: eth0 is its
+		// pick and its one member, advertised on 192.168.1.20.
 		dlnaNetwork: &dlnaBootNetwork{
-			Pick: func() (*net.Interface, error) { return &iface, nil },
-			Gather: func(bool, int, *slog.Logger) []dlna.AdvertiseEndpoint {
-				return []dlna.AdvertiseEndpoint{{Interface: &iface, ServerURL: "http://192.168.1.20:7790"}}
-			},
 			Interfaces: func() ([]net.Interface, error) { return []net.Interface{iface}, nil },
 			Addrs:      func(*net.Interface) ([]net.Addr, error) { return []net.Addr{prefix}, nil },
 		},

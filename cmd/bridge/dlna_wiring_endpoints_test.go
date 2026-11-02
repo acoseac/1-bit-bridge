@@ -74,7 +74,12 @@ func TestTheMediaServersEndpointsAreOnePerMemberOnItsFirstIPv4(t *testing.T) {
 				got[i].ServerURL, got[i].Interface.Name, want[i].ServerURL, want[i].Interface.Name)
 		}
 	}
-	if eps := gatherAdvertiseEndpoints(false, 7790, slog.New(slog.NewTextHandler(io.Discard, nil))); eps != nil {
+	ifaces := make([]net.Interface, len(members))
+	for i, m := range members {
+		ifaces[i] = *m
+		ifaces[i].Flags = net.FlagUp | net.FlagMulticast
+	}
+	if eps := gatherAdvertiseEndpoints(false, ifaces, addrsOf, 7790, slog.New(slog.NewTextHandler(io.Discard, nil))); eps != nil {
 		t.Errorf("a pinned bind gathered %d endpoints, want none (the single-endpoint fallback)", len(eps))
 	}
 }

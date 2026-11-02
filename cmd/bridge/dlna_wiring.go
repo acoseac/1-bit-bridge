@@ -66,11 +66,13 @@ type dlnaWiring struct {
 	Network *dlnaBootNetwork
 }
 
-// dlnaBootNetwork supplies a boot test's interface inventory and held HTTP
-// listener. Nil retains the production pick, gather and bind paths.
+// dlnaBootNetwork supplies a boot test's host: the interfaces and the
+// addresses the MediaServer's own selection (the pick, the advertise set,
+// the ServerURL) and its served addresses read, and the HTTP listener it
+// holds. There is no seam for the selection itself, so a test runs the one
+// production runs. A nil field retains the host's (net.Interfaces, each
+// interface's Addrs, a bind of dlna.listenAddress).
 type dlnaBootNetwork struct {
-	Pick       func() (*net.Interface, error)
-	Gather     func(bool, int, *slog.Logger) []dlna.AdvertiseEndpoint
 	Interfaces func() ([]net.Interface, error)
 	Addrs      func(*net.Interface) ([]net.Addr, error)
 	Listener   net.Listener
@@ -134,11 +136,23 @@ func startDLNAIfEnabled(ctx context.Context, w dlnaWiring) (lc *dlnaLifecycle, e
 	// picker on LAN-only interfaces (since 2026-09-28: until then
 	// Tailscale's fd7a:115c:a1e0::/48 address admitted its interface
 	// anyway).
-	pick := func() (*net.Interface, error) { return dlna.PickLANEligibleInterface(dlna.EligibilityOpts{}) }
-	if w.Network != nil && w.Network.Pick != nil {
-		pick = w.Network.Pick
+	//
+	// The host is listed once, and the pick, the advertise set and the
+	// fallback ServerURL all read that listing: the host's own, or a boot
+	// test's (dlnaBootNetwork), which runs this same selection.
+	list, addrs := net.Interfaces, (*net.Interface).Addrs
+	if w.Network != nil && w.Network.Interfaces != nil {
+		list = w.Network.Interfaces
 	}
-	iface, ifaceErr := pick()
+	if w.Network != nil && w.Network.Addrs != nil {
+		addrs = w.Network.Addrs
+	}
+	ifaces, listErr := list()
+	if listErr != nil {
+		dlnaLog.Warn("DLNA disabled — no LAN-eligible interface", slog.String("err", "net.Interfaces: "+listErr.Error()))
+		return &dlnaLifecycle{log: dlnaLog}, false
+	}
+	iface, ifaceErr := dlna.PickLANEligibleInterfaceOf(ifaces, addrs, dlna.EligibilityOpts{})
 	if ifaceErr != nil {
 		dlnaLog.Warn("DLNA disabled — no LAN-eligible interface", slog.String("err", ifaceErr.Error()))
 		return &dlnaLifecycle{log: dlnaLog}, false
@@ -154,15 +168,7 @@ func startDLNAIfEnabled(ctx context.Context, w dlnaWiring) (lc *dlnaLifecycle, e
 	// on PR #328). Gathered BEFORE the fallback ServerURL so an IPv6-only
 	// FIRST interface can't false-bail startup when a LATER interface has
 	// a usable IPv4 (CodeRabbit on PR #328).
-	gather := gatherAdvertiseEndpoints
-	if w.Network != nil && w.Network.Gather != nil {
-		gather = w.Network.Gather
-	}
-	endpoints := gather(bindWildcard, port, dlnaLog)
-	addrs := (*net.Interface).Addrs
-	if w.Network != nil && w.Network.Addrs != nil {
-		addrs = w.Network.Addrs
-	}
+	endpoints := gatherAdvertiseEndpoints(bindWildcard, ifaces, addrs, port, dlnaLog)
 
 	// Resolve the fallback ServerURL renderers dial for /dlna/file/ + SOAP
 	// control. Prefer a gathered endpoint's IP (any interface with IPv4),
@@ -309,11 +315,15 @@ func (d *dlnaLifecycle) Stop(ctx context.Context) {
 // "link-local-only" members were skipped, which the code never did). A member
 // with no such address (IPv6-only) is skipped rather than advertised with an
 // unreachable "http://<nil>:port" LOCATION.
-func gatherAdvertiseEndpoints(bindWildcard bool, port int, log *slog.Logger) []dlna.AdvertiseEndpoint {
+//
+// ifaces is the one listing of the host the wiring reads, and addrsOf reads
+// each interface's addresses: the host's, or a boot test's.
+func gatherAdvertiseEndpoints(bindWildcard bool, ifaces []net.Interface, addrsOf func(*net.Interface) ([]net.Addr, error),
+	port int, log *slog.Logger) []dlna.AdvertiseEndpoint {
 	if !bindWildcard {
 		return nil
 	}
-	return advertiseEndpointsOf(dlna.PickAllLANEligibleInterfaces(dlna.EligibilityOpts{}), (*net.Interface).Addrs, port, log)
+	return advertiseEndpointsOf(dlna.PickAllLANEligibleInterfacesOf(ifaces, addrsOf, dlna.EligibilityOpts{}), addrsOf, port, log)
 }
 
 // advertiseEndpointsOf is gatherAdvertiseEndpoints over a given multicast set,
