@@ -171,11 +171,12 @@ func TestAnOpenerWaitsForAnotherOpenersLadder(t *testing.T) {
 
 // ladderNoLockMessage and ladderUnlockedMessage are how OpenStore says it
 // migrates without its ladder lock: where the lock's answer is one a
-// filesystem that keeps no locks gives (fsutil.KeepsNoLocks), and where the
-// answer is any other or the lock file could not be opened.
+// filesystem that keeps no locks gives (fsutil.KeepsNoLocks), saying another
+// process may still hold one, since ENOLCK, one of those answers, does not
+// show it holds none; and where the answer is any other or the lock file
+// could not be opened.
 const (
-	ladderNoLockMessage = "the filesystem gave no migration lock: a filesystem that keeps no locks answers so, and so do an NFS mount " +
-		"whose lock manager is not running and a kernel out of lock records, so another opener may be migrating the database all the same; migrating without the lock"
+	ladderNoLockMessage   = "no migration lock was granted: another process may still hold one, and the ladder runs without exclusive use of the database"
 	ladderUnlockedMessage = "could not take the migration lock; migrating without it"
 )
 

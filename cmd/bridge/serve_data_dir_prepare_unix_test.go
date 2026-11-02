@@ -119,3 +119,56 @@ func TestPreparingTheDataDirectoryAsRootGivesEachDirectoryItMakesItsParentsOwner
 		t.Errorf("preparing a data directory that is there gave %v", got[len(want):])
 	}
 }
+
+// TestPreparingAnExistingDataDirectoryAsRootMakesAndGivesNothing: run as
+// root (simulated) over a data directory that is there, a directory or a
+// link to one, the preparation makes nothing and gives nothing an owner:
+// fsutil.MkdirAll's walk as root returns as soon as os.Stat finds a
+// directory, through a link too, so neither the directory nor the link is
+// made, replaced or chowned, and nothing appears beside them. This covers
+// the preparation alone, on a directory that can be statted: the lock, and
+// serve's later writes there on a read-only filesystem, are not claimed.
+func TestPreparingAnExistingDataDirectoryAsRootMakesAndGivesNothing(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "data")
+	if err := os.Mkdir(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o750); err != nil { // whatever the umask
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadDir(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes, restore := fsutil.SimulateRootForTest(4242, 4243)
+	defer restore()
+	for _, dataDir := range []string{dir, link} {
+		if err := prepareServeDataDir(dataDir); err != nil {
+			t.Errorf("prepareServeDataDir(%s) as root = %v, want the directory taken as it is", dataDir, err)
+		}
+	}
+	if got := changes(); len(got) != 0 {
+		t.Errorf("preparing a data directory that is there as root gave %v, want nothing made and nothing chowned", got)
+	}
+	if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the link at the data directory is no longer a link (lstat: %v)", err)
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() || info.Mode().Perm() != 0o750 {
+		t.Errorf("the data directory changed: %v (stat: %v)", info, err)
+	}
+	after, err := os.ReadDir(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("the preparation made %d entries beside the data directory, want none", len(after)-len(before))
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Errorf("the preparation made %d entries in the data directory (err %v), want none", len(entries), err)
+	}
+}

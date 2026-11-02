@@ -9,7 +9,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -36,7 +39,7 @@ type unusableDataDir struct {
 
 // unusableDataDirs are the shapes B606 names: a regular file at the data
 // directory, a link to nothing there, a link to a regular file there, and an
-// ancestor that is a regular file or a link to nothing.
+// ancestor that is a regular file, a link to one or a link to nothing.
 var unusableDataDirs = []unusableDataDir{
 	{"a regular file at the data directory", syscall.ENOTDIR, func(t *testing.T, base string) (string, string) {
 		file := filepath.Join(base, "data")
@@ -63,6 +66,17 @@ var unusableDataDirs = []unusableDataDir{
 		file := filepath.Join(base, "config")
 		writeFileOrFail(t, file)
 		return filepath.Join(file, "data"), file + " is a regular file, not a directory"
+	}},
+	{"an ancestor that is a link to a regular file", syscall.ENOTDIR, func(t *testing.T, base string) (string, string) {
+		file := filepath.Join(base, "file")
+		writeFileOrFail(t, file)
+		link := filepath.Join(base, "config")
+		symlinkOrSkip(t, file, link)
+		resolved, err := filepath.EvalSymlinks(link)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return filepath.Join(link, "sub", "data"), link + " leads to " + resolved + ", a regular file, not a directory"
 	}},
 	{"an ancestor that is a link to nothing", fs.ErrExist, func(t *testing.T, base string) (string, string) {
 		link := filepath.Join(base, "config")
@@ -105,10 +119,13 @@ func writeServeConfigApart(t *testing.T, path, lib, dataDir, tlsDir string) stri
 // TestServeRefusesADataDirectoryItCannotPrepare runs serve over each shape
 // of a data directory MkdirAll cannot make, and requires it to refuse, exit
 // 1, saying the data directory cannot be used and naming the entry in its
-// way and what it is, before its first write: the TLS pair, which the config
-// keeps outside the data directory, is not minted, and no lock warning is
-// printed, since no lock is tried. Serve used to warn that it could not lock
-// the data directory, mint the pair and fail further on, or serve on.
+// way and what it is, before its first write: the player's state preflight
+// is never called, a stand-in that counts its calls in its place (it runs on
+// every boot, the player on or off, so a fixture that leaves the player off
+// shows nothing of it otherwise), the TLS pair, which the config keeps
+// outside the data directory, is not minted, and no lock warning is printed,
+// since no lock is tried. Serve used to warn that it could not lock the data
+// directory, mint the pair and fail further on, or serve on.
 func TestServeRefusesADataDirectoryItCannotPrepare(t *testing.T) {
 	for _, shape := range unusableDataDirs {
 		t.Run(shape.name, func(t *testing.T) {
@@ -122,18 +139,22 @@ func TestServeRefusesADataDirectoryItCannotPrepare(t *testing.T) {
 			}
 			dataDir, why := shape.lay(t, base)
 			cfg := writeServeConfigApart(t, filepath.Join(base, "bridge.yaml"), lib, dataDir, tlsDir)
-			code, stdout, stderr := runSecondServe(t, "--config", cfg)
+			var preflights atomic.Int32
+			code, served, stdout, stderr := runServeWith(t, serveOpts{configPath: cfg,
+				playerStatePreflight: func(string, bool) error { preflights.Add(1); return nil }})
 			want := "serve: the data directory " + dataDir + " cannot be used: " + why
 			switch {
+			case served:
+				t.Errorf("serve served over %s; stdout=%s", shape.name, stdout)
 			case code != 1:
 				t.Errorf("serve over %s exited %d, want 1; stderr=%s", shape.name, code, stderr)
 			case !strings.Contains(stderr, want):
 				t.Errorf("serve's refusal does not say %q; stderr=%s", want, stderr)
 			}
-			if strings.Contains(stdout, "listening on") {
-				t.Errorf("serve served over %s; stdout=%s", shape.name, stdout)
+			if n := preflights.Load(); n != 0 {
+				t.Errorf("serve called the player's state preflight %d time(s) before it refused the data directory", n)
 			}
-			if strings.Contains(stderr, "could not lock") {
+			if strings.Contains(stderr, couldNotLockLine) || strings.Contains(stderr, noLockLine) {
 				t.Errorf("serve tried the lock of a data directory it could not prepare; stderr=%s", stderr)
 			}
 			for _, name := range []string{"server.crt", "server.key"} {
@@ -142,6 +163,53 @@ func TestServeRefusesADataDirectoryItCannotPrepare(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// preflightCall is what the player's state preflight found when serve called
+// it: the lock as serve says it held it, whether the data directory was a
+// directory then, and whether another open of its lock was refused as held.
+type preflightCall struct {
+	lockHeld, isDir, heldByServe bool
+}
+
+// TestServeRunsThePlayersStatePreflightOnceItsDataDirIsPreparedAndLocked
+// pins the order the refusal test's stand-in relies on from the other side:
+// on a data directory not made yet, serve calls the player's state
+// preflight once, with its lock taken, the data directory made by then and
+// its lock refused to another open, as the preparation and the lock come
+// first. A stand-in in the preflight's place, which records what it finds.
+func TestServeRunsThePlayersStatePreflightOnceItsDataDirIsPreparedAndLocked(t *testing.T) {
+	base := t.TempDir()
+	lib := filepath.Join(base, "Music")
+	if err := os.Mkdir(lib, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := filepath.Join(base, "config", "data")
+	cfg := writeServeConfig(t, filepath.Join(base, "bridge.yaml"), lib, dataDir, "127.0.0.1:0", "127.0.0.1:0")
+	var mu sync.Mutex
+	var calls []preflightCall
+	preflight := func(dir string, lockHeld bool) error {
+		call := preflightCall{lockHeld: lockHeld}
+		if info, err := os.Stat(dir); err == nil {
+			call.isDir = info.IsDir()
+		}
+		release, err := lockServeDataDir(dir)
+		release()
+		var held *serveDataDirHeldError
+		call.heldByServe = errors.As(err, &held)
+		mu.Lock()
+		calls = append(calls, call)
+		mu.Unlock()
+		return nil
+	}
+	launchServe(t, func(ctx context.Context, stdout, stderr io.Writer) int {
+		return runServe(ctx, serveOpts{configPath: cfg, playerStatePreflight: preflight}, stdout, stderr)
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []preflightCall{{lockHeld: true, isDir: true, heldByServe: true}}; !slices.Equal(calls, want) {
+		t.Errorf("serve called the player's state preflight as %+v, want once, with its data directory made and locked: %+v", calls, want)
 	}
 }
 
@@ -172,7 +240,7 @@ func TestServeStartsOnADataDirectoryALinkLeadsTo(t *testing.T) {
 			}
 			cfg := writeServeConfig(t, filepath.Join(base, "bridge.yaml"), lib, dataDir, "127.0.0.1:0", "127.0.0.1:0")
 			served := bootServe(t, "--config", cfg)
-			if s := served.stderr.String(); strings.Contains(s, "cannot be used") || strings.Contains(s, "could not lock") || strings.Contains(s, "gave no lock") {
+			if s := served.stderr.String(); strings.Contains(s, "cannot be used") || strings.Contains(s, couldNotLockLine) || strings.Contains(s, noLockLine) {
 				t.Errorf("serve refused or warned of a data directory a link leads to; stderr=%s", s)
 			}
 			if info, err := os.Stat(filepath.Join(made, serveLockFileName)); err != nil || !info.Mode().IsRegular() {
@@ -236,6 +304,73 @@ func TestThePreparationAsksAgainWhatStandsThereOnceItIsMade(t *testing.T) {
 				t.Errorf("the refusal %q does not say %q", err, tc.says(dataDir))
 			case !errors.Is(err, tc.cause):
 				t.Errorf("the refusal %v does not carry %v", err, tc.cause)
+			}
+		})
+	}
+}
+
+// TestThePreparationNamesTheEntryInTheWayBelowWhichMkdirAllFailed: an
+// MkdirAll whose ENOTDIR names the entry it could not make, below the one in
+// the way, rather than the entry in the way as Go 1.27's os.MkdirAll does,
+// still has the refusal name the entry in the way: the preparation walks up
+// the data directory's path to the first entry that is there, and names it
+// when it is no directory (a regular file, a link to one, a link to
+// nothing), never a directory that merely is there, which leaves the
+// refusal saying the data directory could not be made, and why.
+func TestThePreparationNamesTheEntryInTheWayBelowWhichMkdirAllFailed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// lay makes the entry A below base, and returns what the refusal
+		// says of it, "" for nothing in the way.
+		lay func(t *testing.T, a string) string
+	}{
+		{"a link to a regular file", func(t *testing.T, a string) string {
+			file := filepath.Join(filepath.Dir(a), "file")
+			writeFileOrFail(t, file)
+			symlinkOrSkip(t, file, a)
+			resolved, err := filepath.EvalSymlinks(a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return a + " leads to " + resolved + ", a regular file, not a directory"
+		}},
+		{"a regular file", func(t *testing.T, a string) string {
+			writeFileOrFail(t, a)
+			return a + " is a regular file, not a directory"
+		}},
+		{"a link to nothing", func(t *testing.T, a string) string {
+			symlinkOrSkip(t, filepath.Join(filepath.Dir(a), "nothing"), a)
+			return a + " is a symbolic link to nothing"
+		}},
+		{"a directory, nothing in the way", func(t *testing.T, a string) string {
+			if err := os.Mkdir(a, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return ""
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := filepath.Join(t.TempDir(), "A")
+			says := tc.lay(t, a)
+			dataDir := filepath.Join(a, "sub", "data")
+			// An MkdirAll that names the entry its own make failed at, the
+			// data directory itself, which no Lstat reaches through A.
+			made := func(path string, _ os.FileMode) error {
+				return &fs.PathError{Op: "mkdir", Path: path, Err: syscall.ENOTDIR}
+			}
+			err := prepareServeDataDirWith(dataDir, made)
+			why := says + " (mkdir " + dataDir + ": " + syscall.ENOTDIR.Error() + ")"
+			if says == "" {
+				why = "it could not be made: mkdir " + dataDir + ": " + syscall.ENOTDIR.Error()
+			}
+			var unusable *dataDirUnusableError
+			switch {
+			case !errors.As(err, &unusable):
+				t.Fatalf("the preparation = %v, want a *dataDirUnusableError", err)
+			case err.Error() != "the data directory "+dataDir+" cannot be used: "+why:
+				t.Errorf("the refusal is %q, want it to say %q", err, why)
+			case !errors.Is(err, syscall.ENOTDIR):
+				t.Errorf("the refusal %v does not carry MkdirAll's ENOTDIR", err)
 			}
 		})
 	}
@@ -420,11 +555,12 @@ func lockAnswer(err error) func(*os.File) error {
 
 // noLockLine and couldNotLockLine are how serve says it took no lock on its
 // data directory: where the filesystem's answer is one a filesystem that
-// keeps no locks gives (fsutil.KeepsNoLocks), and for any other answer.
+// keeps no locks gives (fsutil.KeepsNoLocks), the line noLockLineReason
+// ends, which says another process may still hold one, since ENOLCK, one of
+// those answers, does not show it holds none; and for any other answer.
 const (
-	noLockLine       = "serve: the filesystem gave no lock on "
-	noLockLineReason = "a filesystem that keeps no locks answers so, and so do an NFS mount whose lock manager is not running " +
-		"and a kernel out of lock records, so another bridge serve may run on this data dir all the same; serving without the check that none does"
+	noLockLine       = "serve: no lock was granted on "
+	noLockLineReason = "another process may still hold one, and serve continues without exclusive use of the data dir"
 	couldNotLockLine = "serve: could not lock "
 )
 
