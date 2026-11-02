@@ -563,8 +563,12 @@
   runs of twenty, against the aborting one never. The production rule did
   not move: `ctxerr.WithoutCancellation` quiets the cancellation alone, and
   quieting every error that came after the loop's context ended would hide
-  a store write that failed as the shutdown began. **Don't let a held test
-  handler return once its client has hung up.**
+  a store write that failed as the shutdown began. B538's
+  `TestSubmitHTTPAnswerAfterShutdown` deliberately answers after the
+  hang-up over a real TLS server, using the same racing transport, to pin
+  the production HTTP-leg fix; its aborted-connection case still calls
+  `panic(http.ErrAbortHandler)`. **Don't let other held test handlers return
+  once their client has hung up.**
 
 - **A test whose request gets an answer with no body sends it on a transport
   of its own, never `http.DefaultTransport`** (2026-10-18, backlog B456).
