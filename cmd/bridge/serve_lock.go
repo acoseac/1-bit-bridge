@@ -103,10 +103,10 @@ func (e *dataDirUnlockedError) Unwrap() error { return e.err }
 // directory not made yet below such a link, which MkdirAll makes through it.
 // What it refuses, with a *dataDirUnusableError naming the data directory
 // and the entry in its way, is an entry of the path that is no directory: a
-// regular file, a link to one, or a link to nothing, which MkdirAll stops at
-// (EEXIST) rather than make what it names; and a data directory MkdirAll
-// cannot make for any other reason, a parent this user cannot write
-// included. Whether the data directory can be written is not asked here: a
+// regular file or a link to one, where MkdirAll answers ENOTDIR, or a link to
+// nothing, which MkdirAll stops at (EEXIST) rather than make what it names;
+// and a data directory MkdirAll cannot make for any other reason, a parent
+// this user cannot write included. Whether the data directory can be written is not asked here: a
 // lock file that cannot be opened in a directory that is there is the lock's
 // fallback (lockServeDataDir), and writability is the player's preflight's
 // (backup.AdoptPlayerState, backup.CheckPlayerStart) and bridge doctor's.
