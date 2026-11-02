@@ -199,16 +199,16 @@ func noRollback(stderr io.Writer, st updater.State, why string) {
 
 // disarmEarlyRollback records, before serve's first write to the data dir and
 // so before the store's migrations, that this version went on past its
-// settings while an install marker was armed (updater.DisarmEarlyRollback,
-// which the store's open asks too before it migrates, for every command that
-// opens it). From then on the early rollback of a later start
+// settings while an install marker was armed (updater.AdmitBoot; the store's
+// open asks updater.DisarmBeforeMigrating before it migrates, for every
+// command that opens it). From then on the early rollback of a later start
 // (recoverRefusedInstall) and the boot rollback (BootInstallFailed) leave
 // the backup where it is: what this version writes may be what the backup's
 // version does not know, so a restore would be a downgrade past it. An error
 // is serve's to refuse to start over: it is called where nothing has been
 // written yet.
 func disarmEarlyRollback(dataDir string, opts serveOpts, stderr io.Writer) error {
-	res, err := updater.DisarmEarlyRollback(dataDir, version.ServerVersion, opts.saveUpdateState)
+	res, err := updater.AdmitBoot(dataDir, version.ServerVersion, opts.saveUpdateState)
 	if err != nil {
 		return err
 	}

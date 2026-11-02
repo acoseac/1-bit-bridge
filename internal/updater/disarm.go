@@ -1,8 +1,11 @@
 package updater
 
-import "fmt"
+import (
+	"fmt"
+	"sync"
+)
 
-// DisarmResult is what DisarmEarlyRollback did.
+// DisarmResult is what a disarm did (AdmitBoot, DisarmBeforeMigrating).
 type DisarmResult struct {
 	// Recorded says it recorded the version in the marker.
 	Recorded bool
@@ -10,17 +13,16 @@ type DisarmResult struct {
 	Unreadable error
 }
 
-// DisarmEarlyRollback records durably in the install marker in dataDir that
-// current, a version other than the backup's, is about to write the data dir
-// while an install is armed (State.DataDirOpenedBy; ArmsDataDirRecord). From
-// then on neither the early rollback (EarlyRollback) nor the boot rollback
-// (BootInstallFailed) puts the backup back: what current writes, its store's
-// migrations above all, may be what the backup's version does not know, and
-// a restore would be a downgrade past it (backlog B613). serve calls it before
-// its first write to the data dir (cmd/bridge), and the store's open before
-// its first migration step, whichever command opens the store
-// (internal/manifest; B613's round 2, Codex's finding 1). save writes the
-// marker; nil is SaveState, which syncs the file and its directory.
+// AdmitBoot is serve's first disarm, before its first write to the data dir
+// (disarmEarlyRollback in cmd/bridge): it records durably in the install
+// marker in dataDir that current, a version other than the backup's, is
+// about to write the data dir while an install is armed
+// (State.DataDirOpenedBy; ArmsDataDirRecord). From then on neither the early
+// rollback (EarlyRollback) nor the boot rollback (BootInstallFailed) puts the
+// backup back: what current writes, its store's migrations above all, may be
+// what the backup's version does not know, and a restore would be a
+// downgrade past it (backlog B613). save writes the marker; nil is
+// SaveState, which syncs the file and its directory.
 //
 // It does nothing where no install is armed or a version is recorded
 // already. A marker it cannot read cannot be told an armed install's or not,
@@ -29,7 +31,22 @@ type DisarmResult struct {
 // start that could read it again must not take it for an install no start of
 // this version went on past. An error says the record or the removal did not
 // land, durably, and is the caller's to refuse its write over.
-func DisarmEarlyRollback(dataDir, current string, save func(dataDir string, st State) error) (DisarmResult, error) {
+func AdmitBoot(dataDir, current string, save func(dataDir string, st State) error) (DisarmResult, error) {
+	return disarmHeld(dataDir, current, save, false)
+}
+
+// DisarmBeforeMigrating is AdmitBoot for a store's open with a migration step
+// pending, whichever command opens it (internal/manifest; B613's round 2,
+// Codex's finding 1): the record is made before the first step, and an
+// error refuses the open before any step runs.
+func DisarmBeforeMigrating(dataDir, current string) (DisarmResult, error) {
+	return disarmHeld(dataDir, current, nil, true)
+}
+
+// disarmHeld is the disarm itself: AdmitBoot's when migrating is false,
+// DisarmBeforeMigrating's when it is true.
+func disarmHeld(dataDir, current string, save func(dataDir string, st State) error, migrating bool) (DisarmResult, error) {
+	_ = migrating
 	st, err := LoadState(dataDir)
 	if err != nil {
 		if rmErr := ClearStateDurably(dataDir); rmErr != nil {
@@ -40,6 +57,7 @@ func DisarmEarlyRollback(dataDir, current string, save func(dataDir string, st S
 	if !ArmsDataDirRecord(st, current) {
 		return DisarmResult{}, nil
 	}
+	callBeforeDisarmRecord(dataDir)
 	st.DataDirOpenedBy = current
 	if save == nil {
 		save = SaveState
@@ -48,4 +66,38 @@ func DisarmEarlyRollback(dataDir, current string, save func(dataDir string, st S
 		return DisarmResult{}, fmt.Errorf("could not record in the install marker that %s opened the data dir: %w", current, err)
 	}
 	return DisarmResult{Recorded: true}, nil
+}
+
+// beforeDisarmRecord, nil in production, runs just before a disarm writes its
+// record, with the data dir it writes in: a test's hold on a disarm at the
+// point where it has read the marker and decided to record.
+var (
+	disarmHookMu       sync.Mutex
+	beforeDisarmRecord func(dataDir string)
+)
+
+func callBeforeDisarmRecord(dataDir string) {
+	disarmHookMu.Lock()
+	fn := beforeDisarmRecord
+	disarmHookMu.Unlock()
+	if fn != nil {
+		fn(dataDir)
+	}
+}
+
+// SetBeforeDisarmRecordForTest makes fn run just before each disarm writes
+// its record (AdmitBoot, DisarmBeforeMigrating), with the data dir it writes
+// in, for a test in another package that holds a disarm there. It returns
+// what puts the seam before it back. Process-global: a test that uses it
+// MUST NOT call t.Parallel(), and restores it in a t.Cleanup.
+func SetBeforeDisarmRecordForTest(fn func(dataDir string)) (restore func()) {
+	disarmHookMu.Lock()
+	prev := beforeDisarmRecord
+	beforeDisarmRecord = fn
+	disarmHookMu.Unlock()
+	return func() {
+		disarmHookMu.Lock()
+		beforeDisarmRecord = prev
+		disarmHookMu.Unlock()
+	}
 }

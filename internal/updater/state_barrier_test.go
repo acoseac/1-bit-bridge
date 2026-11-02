@@ -3,24 +3,28 @@ package updater
 import (
 	"errors"
 	"os"
-	"path/filepath"
 	"testing"
 )
 
 // errBarrier is the directory barrier's failure in these tests.
 var errBarrier = errors.New("the directory would not sync")
 
-// failMarkerBarrier makes the marker's directory barrier fail for the rest of
-// the test, and records the paths it was asked to sync.
+// failMarkerBarrier makes the marker's directory barrier fail at its fsync
+// for the rest of the test, and records the directories it was asked to
+// sync.
 func failMarkerBarrier(t *testing.T) *[]string {
 	t.Helper()
 	var asked []string
-	prev := syncMarkerDir
-	syncMarkerDir = func(path string) error {
-		asked = append(asked, path)
-		return errBarrier
+	prev := markerBarrier
+	markerBarrier = &dirBarrier{
+		open: func(name string) (*os.File, error) {
+			asked = append(asked, name)
+			return os.Open(name)
+		},
+		sync:  func(*os.File) error { return errBarrier },
+		close: (*os.File).Close,
 	}
-	t.Cleanup(func() { syncMarkerDir = prev })
+	t.Cleanup(func() { markerBarrier = prev })
 	return &asked
 }
 
@@ -35,8 +39,8 @@ func TestSaveStateReportsADirectoryBarrierThatFails(t *testing.T) {
 	if !errors.Is(err, errBarrier) {
 		t.Fatalf("SaveState = %v, want the barrier's failure", err)
 	}
-	if len(*asked) != 1 || filepath.Dir((*asked)[0]) != dir {
-		t.Errorf("the barrier was asked of %q, want the marker in %s", *asked, dir)
+	if len(*asked) != 1 || (*asked)[0] != dir {
+		t.Errorf("the barrier was asked of %q, want the data dir %s", *asked, dir)
 	}
 }
 
@@ -49,8 +53,8 @@ func TestClearStateDurablyReportsADirectoryBarrierThatFails(t *testing.T) {
 	if err := ClearStateDurably(dir); !errors.Is(err, errBarrier) {
 		t.Fatalf("ClearStateDurably = %v, want the barrier's failure", err)
 	}
-	if len(*asked) != 1 || filepath.Dir((*asked)[0]) != dir {
-		t.Errorf("the barrier was asked of %q, want the marker in %s", *asked, dir)
+	if len(*asked) != 1 || (*asked)[0] != dir {
+		t.Errorf("the barrier was asked of %q, want the data dir %s", *asked, dir)
 	}
 	if _, err := os.Lstat(StatePath(dir)); !os.IsNotExist(err) {
 		t.Errorf("the marker is still there (lstat %v)", err)
