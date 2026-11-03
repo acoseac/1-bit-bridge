@@ -26,7 +26,7 @@
 //     neither takes a branch on DaysUntilExpiry, which truncates toward zero
 //     and says nothing at all about NotBefore.
 //   - `bridge cert rotate` CLI + admin "Rotate" button — minting a new cert
-//     forces every paired iOS client to re-pair via `bridge://pair?...`
+//     forces every paired iOS client to re-pair via `onebit://pair?...`
 //     deep-link or admin-console QR.
 package tls
 
@@ -225,7 +225,7 @@ func logIfExpiringSoon(certPath string) {
 // (NotBefore / NotAfter / serial number) and iOS pins the cert,
 // not the key. Operators must re-pair every device after a
 // rotation; the admin console's per-token "Rotate" button or a
-// fresh `bridge://pair?...` deep link is the supported path.
+// fresh `onebit://pair?...` deep link is the supported path.
 // Generate is the legacy 3-arg form. Equivalent to GenerateWithOptions
 // with `GenerateOptions{Hostname: hostname}`. Kept so non-PR-5 call
 // sites (CLI tests, future callers that don't need the broader SAN

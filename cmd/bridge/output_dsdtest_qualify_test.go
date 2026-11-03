@@ -23,6 +23,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/dsdtone"
 	"github.com/acoseac/1-bit-bridge/internal/player/qualification"
+	"github.com/acoseac/1-bit-bridge/internal/player/qualification/approvaltest"
 )
 
 // qualifyGoBar is the GO bar's USB unit in the Pi 5 tree.
@@ -83,7 +84,7 @@ func newQualifyBox(t *testing.T) *qualifyBox {
 		t.Skip("owner approval uses Unix ownership, and the GO bar's sysfs tree cannot be laid out on Windows; the player is Linux only")
 	}
 	persistentMedium(t)
-	q := &qualifyBox{t: t, dir: t.TempDir()}
+	q := &qualifyBox{t: t, dir: approvaltest.TempDir(t)}
 	tree := sysfstest.Build(t, filepath.Join("..", "..", "internal", "alsa", "testdata", "sysfs", "pi5-go-bar.txt"))
 	for k, v := range map[string][]byte{"manufacturer": []byte("iFi"), "product": []byte("GO bar"), "bcdDevice": []byte("0123"), "descriptors": {9, 4, 0, 0, 0, 1, 1, 0, 0}} {
 		if e := os.WriteFile(filepath.Join(tree, "sys", qualifyGoBar, k), v, 0600); e != nil {

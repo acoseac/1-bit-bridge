@@ -193,7 +193,7 @@ func certRotateCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 		fmt.Fprintln(stdout, "Rotating the TLS cert will:")
 		fmt.Fprintln(stdout, "  • Generate a fresh ECDSA P-256 key + 397-day self-signed cert (Apple ATS cap).")
 		fmt.Fprintln(stdout, "  • Invalidate every paired device's pinned fingerprint.")
-		fmt.Fprintln(stdout, "  • Every iOS device must re-pair (admin console QR or bridge:// link).")
+		fmt.Fprintln(stdout, "  • Every iOS device must re-pair (admin console QR or onebit:// link).")
 		fmt.Fprintln(stdout, "  • Restart the bridge to load the new cert.")
 		// Prompt on stderr; the bullet list above stays on stdout. Same
 		// convention update.go states and `restore` now also honours —

@@ -4219,7 +4219,7 @@ function showUpnpRestartBanner() {
 }
 
 // renderPairAlternates populates the Pair-modal "Other URLs the
-// device will try" list. The QR's bridge://pair?...&urls=... payload
+// device will try" list. The QR's onebit://pair?...&urls=... payload
 // already carries every alternate; the displayed list mirrors that
 // so the operator sees what they actually shared with the device
 // (pre-fix the modal showed only the primary URL, which mislead an

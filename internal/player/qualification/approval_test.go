@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/acoseac/1-bit-bridge/internal/player/qualification/approvaltest"
 )
 
 func approvalFixture(t *testing.T) (string, Approval, Identity) {
@@ -16,7 +18,7 @@ func approvalFixture(t *testing.T) (string, Approval, Identity) {
 	if runtime.GOOS == "windows" {
 		t.Skip("production DSD approval uses Unix ownership; player is Linux only")
 	}
-	dir := t.TempDir()
+	dir := approvaltest.TempDir(t)
 	id := Identity{Vendor: "20b1", ProductID: "300a", Manufacturer: "iFi", Product: "GO bar", BCDDevice: "0100", Port: "platform-test/usb-0:1:1.0", Device: 0}
 	p := ApprovedPolicy{ID: "one", Tuple: Tuple{Format: "DSD_U32_BE", BitRate: 2822400, Pause: "kernel"}, Channels: 2, Ordering: "msb", PauseReleaseSeconds: 30}
 	for _, scenario := range []string{"matrix", "backend-lifecycle"} {

@@ -68904,6 +68904,27 @@ command through the build lock):
 - Not run here: the node harness and the console's other node tests (no node
   on legion0); CI's legs run them.
 
+### 2026-11-02 — B607 approval fixtures under umask 0002
+
+On macOS with go1.27.3 and umask 0002, `TestApprovedRecordTrust` and seven
+other top-level qualification tests failed with `untrusted approval directory`.
+Instrumenting `trustedFile` identified the state root made by
+`approvalFixture`'s `t.TempDir()` itself: its effective mode was 0775. The
+production check rightly refuses its group write bit. The approval fixture
+builders in qualification, playback, OpenHome's shared playback fixture and
+the CLI now use one helper that chmods the state directory to 0700; checked
+record and evidence writes already request 0600. No report shape changed.
+
+The test-only paths fall under `version_gate.go`'s guarded prefixes, so
+qualificationVersion rises to 29 (24 → 25 on its branch; B606, B621, B615/B616 and B659 took 25 to 28 on main first, so its merge raises it to 29) and the current runbook pins follow it.
+The qualification package passed with `-race -timeout 30m` under both umask
+0002 and 022. Removing the helper's one chmod call (count asserted) reproduced
+the same eight top-level failures under 0002; restoring it made the package
+green again. Playback's full package and the OpenHome and CLI approval
+consumers passed natively under 0002. Linux and Windows vet passed for all four
+packages. The full OpenHome and CLI suites could not pass in this sandbox:
+unrelated tests bind TCP listeners and receive `operation not permitted`.
+
 ## 2026-10-31 — B610: the SSDP listener's control-data parser holds whatever it is handed
 
 Backlog B610, which blocked the 0.2.2 tag. The nightly `fuzz.yml` failed eight
@@ -69858,6 +69879,86 @@ Go files. `make docs-check`: ok, `CLAUDE.md 71.9%; player.md 96.8%; worst
 load, player_openhome_test.go 61.4%`, the same with the rules patch applied
 (cli-serve.md 34,409 bytes). `scripts/qualification-version -base main -head
 HEAD`: OK.
+
+## 2026-11-02 — B627: the console's pairing QR and links say onebit://pair
+
+Backlog B627, the bridge half; Step 1, a candidate for the 0.2.2.x patch.
+On iOS 27 a `bridge://` URL opens Apple's Watch app (`com.apple.Bridge`), so
+the console's pairing QR, scanned with the Camera, opened that app and not
+1-bit. 1-bit 2.2, live on the App Store, takes `onebit://pair` exactly as it
+takes `bridge://pair`: the app's #2369 put `onebit` beside `bridge` in
+`BridgePairingURL.pairingSchemes`, with the same host, `pair`, and the same
+query.
+
+**The change.** `buildPairURL` writes `onebit://pair?` before the query it
+always wrote, and `apiTokensMint` and `apiTokensRotate` build both the link
+and its QR through it, so the one change covers both QR codes. The bridge
+reads no pairing link (Codex's check; no non-test code compares a scheme
+with `bridge` or a host with `pair`), so nothing on this side has to go on
+accepting `bridge://`. `bridge pair` prints a token, not a link, and the
+console's modal shows the QR beside three copyable fields with no link of
+its own; both were left. `bridge cert rotate`'s preamble said "admin console
+QR or bridge:// link" and now names an `onebit://` link. The comments that
+named `bridge://` follow (api, advertise, tls, the `pairResult` field,
+app.js; pairingcode's history names the link without a scheme), and so do
+AGENTS.md, CLAUDE.md, SECURITY.md (the app's parser for both forms in
+scope) and README.md (1-bit 2.2 or later). PROTOCOL.md's "Pairing URL
+scheme" section gains a **Scheme.** paragraph (the app takes both schemes;
+the console emits `onebit://pair` since the bridge release after v0.2.2, and
+why), its example says `onebit://pair` and carries the optional `urls` it
+omitted, and its table gains a `urls` row. `ProtocolVersion` stays 1: the
+wire did not change. The cost: an app older than 2.2 reads `bridge://`
+alone, so against a bridge after v0.2.2 it pairs through the modal's three
+fields, or after an update.
+
+**Red first.** d6b982c9 holds the tests alone, over f6782cd3's code, where
+four failed on the scheme and on nothing else:
+`TestThePairingLinkIsOnebitPairWithTheQueryItAlwaysCarried` (the whole link
+for one input, everything after the scheme captured from f6782cd3's
+builder), `TestMintAndRotateQRsCarryAnOnebitPairLink` (both handlers: each
+pairURL `onebit://pair` with a query and no other part, and each QR the
+pairURL beside it, the handler's PNG equal to `qrDataURL(pairURL)`, which
+go-qrcode renders alike for one text; that half passed red),
+`TestTokensMintListRevokeFlow` (its prefix check) and
+`TestCertRotateNamesAPairingLinkTheAppOpens` (the CLI's preamble, declined
+at the prompt). All four pass on 2020432f.
+
+**Negative controls**, on 2020432f, each restored with `git checkout --`
+and the tree checked clean after:
+1. The old scheme back, in `buildPairURL` and in the CLI's line, over the
+   whole `internal/admin` and `cmd/bridge` packages: exactly the four
+   predicted tests failed (4 predicted, 4 failed, no other failure), each
+   on the scheme.
+2. `apiTokensMint` rendering its QR from `pairURL + "&x=1"`, over the whole
+   `internal/admin`: exactly one failure, as predicted,
+   `TestMintAndRotateQRsCarryAnOnebitPairLink` on its mint half ("the QR is
+   not the pairURL beside it"), so the QR half has teeth.
+
+**Runs** (legion0, Ubuntu 26.04, x86-64, go1.27.3, umask 022, the
+Makefile's tags, TMPDIR on the worktree's disk, every run through the build
+lock): `go test` of `./cmd/bridge/`,
+`./internal/admin/`, `./internal/api/`, `./internal/advertise/`,
+`./internal/pairingcode/` and `./internal/tls/`: ok (298 s, 214 s, 42 s,
+0.1 s, 0.0 s, 5.0 s); the same under `-race -timeout 30m`: ok (794 s, 917 s,
+110 s, 1.1 s, 1.0 s, 5.3 s). `make test`, twice, on 2020432f. The first was
+ok but for `scripts/third-party-licenses`'s `TestRealTreeBuildSiteCensus`:
+"build site must not be a symlink: .tmp/…/001/other/Linked", in the
+temporary directory of internal/manifest's
+`TestScanner_ARootHoldingOnlyLinksToDirectoriesNamesThem`, the race between
+the census walk and that test's symlink in `.tmp` that B606's round 2
+recorded above (afterwards `.tmp` held empty directories only). The second,
+with `TMPDIR` under `.tmp/_b627/`, a `_` directory the census skips by its
+name, was ok, all 80 packages (cmd/bridge 837 s, internal/admin 959 s,
+internal/manifest 1331 s). `make vet`, and `go vet ./...` with the tags for
+windows and for darwin: clean. go1.27.3's gofmt lists none of the 10 Go
+files the branch changes. `make docs-check`: ok, `CLAUDE.md 71.9%;
+player.md 96.8%; worst load, player_openhome_test.go 61.6%`.
+`scripts/qualification-version -base main -head HEAD`: OK, no guarded path
+changed, so the version stays 26. The rule is one bullet in auth-tls.md,
+under Auth, pairing, TLS and security posture, shipped as a patch beside
+the job's report because `.claude/` cannot be written from this session;
+with it applied, docs-check reads the same (auth-tls.md 48,575 to 49,802
+bytes; its heaviest load 243,597 bytes, at internal/baseurl/baseurl_test.go).
 
 ## 2026-11-02 — B687: the DLNA server announces and serves private addresses only, a public one only as dlna.listenAddress names it
 
