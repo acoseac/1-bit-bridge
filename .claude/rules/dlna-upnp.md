@@ -66,7 +66,13 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   LOCATION, of ServerURL and of a pinned listen address, NAME OR LITERAL
   (`knownOwnHosts`, folded), and any other address of this host's interfaces,
   asked at the request and only for a literal the configuration does not name
-  (`Server.interfaceAddrs`, a per-server seam, nil is `net.InterfaceAddrs`).
+  (`Server.hostAddrs`: the per-server `interfaceAddrs` seam, else the
+  configuration's `Interfaces`, else `net.InterfaceAddrs`). **A literal passes
+  only when it is of a class the listener serves (RFC 1918, a ULA outside
+  Tailscale's, link-local) or is the public address `dlna.listenAddress`
+  pins** (`mayName`, B687, the B48 bullet's continuation): this host's
+  public, SLAAC and tailnet addresses are refused though the host holds them,
+  since a Browse naming one was answered with the library's URLs on it.
   **A name not in that list is refused, this host's own included**: resolving
   it is what the page controls. The cost is a control point pointed at the
   server by a name by hand, and the iOS app's fallback that builds a renderer
@@ -1002,7 +1008,9 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 - **`IsLANEligibleInterface` scans all addresses then decides**
   (`hasPrivate || (hasLinkLocal && !hasPublic)`). The obvious simplification
   regresses the no-usable-address cases, and disqualifying on any public IPv4
-  breaks dual-stack home LANs where SLAAC hands out a public IPv6.
+  breaks dual-stack home LANs where SLAAC hands out a public IPv6. It judges
+  an interface; what is announced and served is judged per address (B687): a
+  mixed interface stays eligible, and its public address is left out.
 - **A Tailscale interface is eligible ONLY through the opt-in
   (`EligibilityOpts.TsnetIfaceName`), and its ULA is what had defeated it**
   (2026-09-28). A Tailscale interface carries an address in
@@ -1054,14 +1062,16 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   loopback (the host itself); an address of a member of the multicast set
   (`pickAllLANInterfaces`, no opt-in) of a LAN kind by the eligibility check's
   own classes (`lanAddrKindOf`: RFC 1918, a ULA outside Tailscale's,
-  link-local, an IPv6 one only with its member as zone); and a member's
-  address the server itself advertises, whatever its kind (its LOCATION may
-  name a public IPv4 on an interface eligible through a ULA). So not a
-  tailnet address (its interface is no member, and its addresses count as
-  public anyway: either half alone refuses them), not another interface's
-  fe80 (a docker veth, awdl0, a link-local tunnel), and not a member's public
-  address the server does not advertise (a dual-stack LAN's SLAAC address,
-  which a router may let the internet reach). A snapshot of the interfaces
+  link-local, an IPv6 one only with its member as zone); and the public
+  address `dlna.listenAddress` names as an IP literal, the operator's opt-in,
+  while an interface holds it (B687, this bullet's continuation after the
+  next; until then a member's address the server advertised was served
+  whatever its kind). So not a tailnet address (its interface is no member,
+  and its addresses count as public anyway: either half alone refuses them),
+  not another interface's fe80 (a docker veth, awdl0, a link-local tunnel),
+  and not a member's public address, whatever the server advertises (a
+  dual-stack LAN's SLAAC address, which a router may let the internet reach;
+  a public IPv4 address beside a private one). A snapshot of the interfaces
   answers, rebuilt at `servedMaxAge` (10 s) and, for an address it refuses,
   at `servedMissRebuild` (1 s), so a new LAN address is served within a
   second and a flood of refusals lists the interfaces once a second; a
@@ -1076,7 +1086,8 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   listener binds that address alone and refuses every connection on it, so
   DLNA serves no one, and before this the first refused connection was the
   only line that said so. It judges the address the listener bound, so a
-  pinned name counts, and a wildcard is no pin. **It warns and starts; don't
+  pinned name counts (a name never opts a public address in, B687), and a
+  wildcard, however it is spelled, is no pin. **It warns and starts; don't
   make it refuse** (an address can become served later), and the
   per-connection Warn keeps its cap beside it.
   **Chosen over binding each served address**, which needs a rebind loop
@@ -1127,6 +1138,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestTheSSDPAdvertiserAnswersASearchSentToTheGroup` (Linux, macOS),
   `TestEveryAdvertiserAnswersByTheServersServedAddrs`.)
 - **…and the parser of each datagram's control data holds whatever it is handed, on every platform: `parseDatagramMeta` reports x/net's answer wherever `ipv4.ControlMessage.Parse` returns, and neither a destination nor an arrival wherever that parse panics, whatever else the buffer holds** (2026-10-31, backlog B610; Windows reads its own `parseWSAPktinfo`). An entry x/net's per-platform table leaves unset has a name and a length of 0 and no parse function (only Darwin's sets every entry), and up to x/net v0.61.0 an IPPROTO_IP message of type 0 called the missing one; v0.62.0 passes such an entry over (backlog B615), so no input known reaches the recover now. No kernel writes such a message and no network peer can supply the ancillary bytes, but the SSDP read loop has no recovery, so a panic there ends the process. **Don't call x/net's parse outside `parseControlMessage`'s recover, widen that recover past the one call, trade it for anything narrower (a filter of type-0 messages, a fix of one platform's), or drop it because x/net v0.62.0 no longer panics on a message of type 0: it is the defence in depth for whatever else panics there.** `TestParseDatagramMetaAnswersEveryShapeOfControlData` (red on any shape x/net panics on again), `FuzzParseDatagramMetaIsXNetsParse` and `TestTheDatagramMetaSeedsAreLinuxsControlData` pin it. → History-rules-dlna-upnp.md
+- **…and both announce and serve only the private (RFC 1918, a ULA outside Tailscale's), link-local and loopback addresses, whichever order an interface lists them in; a public address only as the IP literal `dlna.listenAddress` names, the operator's opt-in, that address alone** (2026-11-02, backlog B687, security). Eligibility stays per interface, and serving is per address: the wiring announces each member's first RFC 1918 or 169.254 IPv4 address (`firstLANIPv4OnInterface`, every address read, and the fallback ServerURL alike, never a public one); `servedAddrs` serves no public address but the pin (`PinnedPublicAddress`: an IP literal, globally routable, never 100.64/10 or Tailscale's ULA, never a name or a wildcard however spelled), while an interface holds it, its advertiser on that interface, eligible or not; the Host check takes a literal only of those classes or the pin (`mayName`), so the ContentDirectory builds no URL on a public address; NewServer refuses a ServerURL or LOCATION literal of another class unless `dlna.listenAddress` names it, so a pin to the tailnet's still warns and starts; Start refuses a listener not bound to the pin, and says once, naming no address, that anyone who can reach it can browse and stream the library; and the wiring says once a start, naming no address, that it left a public IPv4 address out. **Don't serve or announce a public address but the literal `dlna.listenAddress` names, take a name, a wildcard, 100.64/10 or Tailscale's ULA as the opt-in, accept a Host literal of a class the listener does not serve, choose an announced address by its place in the interface's list, fall back to a public one, reject a whole mixed interface (the pickers drive mDNS and discovery too), or name an address in either new line.** `TestTheMediaServerServesAMixedInterfaceOnItsPrivateAddressAlone`, `TestTheMediaServerAnswersNoRequestNamingItsPublicAddress`, `TestTheMediaServerFallsBackToNoPublicAddress`, `TestTheMediaServerServesThePublicAddressItsListenAddressNames`, `TestTheMediaServerTakesNoPublicAddressItsListenAddressDoesNotName`, `TestTheMediaServerSaysOnceAndWithoutTheAddressThatItLeftOutAPublicAddress`, `Test_ownHostOnly_RefusesAnAddressOfThisHostItDoesNotServe`, `TestNewServerRefusesToAdvertiseAnAddressItWouldNotServe` and `TestTheAddressClassesAndTheOptIn` pin it. → History-rules-dlna-upnp.md
 - **Eligibility is the allowlist; SELECTION prefers a real LAN among what it
   admits, and the two stay separate** (2026-09-27). `PickLANEligibleInterface`
   returned the FIRST eligible interface, and macOS enumerates system utuns
@@ -1222,7 +1234,7 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   comment that said "sorted by path". (#919)
 - **The file route's serving half is shared with the loopback track route** (B473 B2c): `serveOpenedFile` (the headers, the adaptive writer, `http.ServeContent`) serves `/dlna/file/` on this listener and the same path on the loopback listener the MPD beside the bridge fetches from, so MPD gets the same type and bytes from either; it was extracted from `serveFromFilesystem` unchanged. The loopback route is not a second DLNA listener: no SSDP, no CDS, no artwork, no renditions, no routed tracks, a stricter containment check, a stricter Host rule (`127.0.0.1`, `[::1]` or `localhost` only) and no forwarded request, a per-request `output.mpd` gate, and typed JSON refusals. Its rules are in `output.md`. **Don't add a serving step to one route that the other does not get, and don't mount another DLNA route on the loopback listener.**
 
-- **`dlna.Server.AcceptsOn` answers whether the listener takes a connection on an address now, by the listener's own served set (`servedAddrs`) and its bound address (a pinned listener its address alone, `0.0.0.0` IPv4 alone), and nothing once Stop begins or before Start binds; the player's OpenHome Insert takes such an address as one of the bridge's own** (B470 PR 5a4; the confinement's bullet in `openhome.md`). **Don't answer it from a set or a cache of its own, or for a listener that is not up.** `TestAcceptsOnIsTheListenersServedSet`, `TestAcceptsOnFollowsTheServedSnapshot` and `TestAcceptsOnIsTheRunningListeners` pin it.
+- **`dlna.Server.AcceptsOn` answers whether the listener takes a connection on an address now, by the listener's own served set (`servedAddrs`) and its bound address (a pinned listener its address alone, the public address `dlna.listenAddress` pins among them since B687, `0.0.0.0` IPv4 alone), and nothing once Stop begins or before Start binds; the player's OpenHome Insert takes such an address as one of the bridge's own** (B470 PR 5a4; the confinement's bullet in `openhome.md`). **Don't answer it from a set or a cache of its own, or for a listener that is not up.** `TestAcceptsOnIsTheListenersServedSet`, `TestAcceptsOnFollowsTheServedSnapshot` and `TestAcceptsOnIsTheRunningListeners` pin it.
 
 - **The MediaServer's `http.Server` takes `handshakelog.ErrorLog()`, as the loopback route's does** (2026-10-31, B604's second round; Codex on the integrated branch). net/http logs a handler's recovered panic with the address of the renderer it was serving ("http: panic serving <addr>"), and with no `ErrorLog` that line went to the standard logger whole; through handshakelog it keeps the panic and stands `handshakelog.ClientPlaceholder` where the address was. **Don't leave a server's `ErrorLog` nil**: `TestEveryServeHTTPServerRedactsPeerAddresses` (cmd/bridge) finds every `http.Server` in the module, and `TestAMediaServerPanicIsLoggedWithoutItsClient` drives this one's panic over a real connection.
 
