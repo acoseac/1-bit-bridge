@@ -71141,8 +71141,9 @@ with it when the paragraph is split.
 **The matrix.** PROTOCOL.md's "Compatibility matrix" still said "Current at
 the time of writing: bridge v0.1.8, iOS app v1.8", as 50652d30 set it on
 2026-08-15. Since then the bridge has shipped v0.2.0 (2026-09-18) and
-v0.2.1 (2026-09-29 to 10-01), v0.2.2's candidate is `rc/v0.2.2` (8f3d3934,
-2026-10-31), and 1-bit 2.2 is on the App Store (B627's entry). This
+v0.2.1 (2026-09-29 to 10-01) and v0.2.2 (2026-11-01, after its candidate
+`rc/v0.2.2`, 8f3d3934, 2026-10-31; Codex's review corrected "candidate"
+from GitHub Releases), and 1-bit 2.2 is on the App Store (B627's entry). This
 clone holds no tags (its git dir has no `refs/tags` and no `packed-refs`),
 so the releases were read from `ops/release-notes-v0.2.0-draft.md`,
 `ops/release-notes-v0.2.2-draft.md`, the playbook's v0.2.1 record and this
