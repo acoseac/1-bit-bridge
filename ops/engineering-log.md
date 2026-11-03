@@ -71171,4 +71171,22 @@ exactly, the tree clean after each (`.tmp/_b692/controls.py`, R1 to R4):
 | R3 | a stop in the restamp's wait still restarts | 1 test, 2 subtests |
 | R4 | a stop in the hold's wait answers the refusal | 1 test, 2 subtests |
 
-**Checks.** CHECKS-PENDING
+**Checks.** On legion0, each through the shared build lock, at a69b9ce3
+(the drain of the stopped-rollback helper added after the first race run:
+`TestEveryBackgroundGoroutineDrainsOnCleanup` refused
+`rollBackFromTheConsoleUntilStopped`, which launched the rollback's
+goroutine without `drainLoopOnCleanup`), with this record in the tree:
+- `go test -race -count=1 -timeout 90m -tags
+  ts_omit_webclient,ts_omit_debugeventbus ./internal/updater/...
+  ./cmd/bridge`: internal/updater ok (26 s), cmd/bridge ok (888 s).
+- `make test-fast`: 80 packages ok, none failed, 14 with no test files, the
+  Linux-only ones among them and the cmd/bridge sweeps over the tracked
+  docs, this record included.
+- `make vet`, and `GOOS=windows go vet` of every package with the tags:
+  clean. go1.27.3's gofmt on every changed Go file: clean.
+- `make docs-check`: ok (config-lifecycle.md 98.0 % as the tree stands, 95.9 %
+  with the round-2 patch, by the budget script's own `measure` and
+  `report`); `verify_moves.py --base HEAD` passes over the move alone, and
+  the only other changes are round 1's bullet in both its copies and round
+  2's bullet and section.
+- The qualification-version check, `-base main -head HEAD`: OK, no raise.
