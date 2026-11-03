@@ -43,7 +43,9 @@ import (
 // Nor does a test bind the host's LAN addresses: hostLAN, the interfaces
 // serve's OpenHome surface serves, is a box with none here, so a serve test
 // that turns the surface on without its own box (playerOpenHome) binds
-// nothing.
+// nothing. Nor does one ask the host's own DAC nodes: hostDACNodes, which the
+// doctor's player-dac line stats and asks faccessat2 of, refuses and records
+// here, as the guard records an open, and the binary fails on either.
 func TestMain(m *testing.M) {
 	// The fingerprint stand-in re-execs this binary as fpcalc. It must
 	// return before the suite starts, or the child runs every test.
@@ -58,6 +60,10 @@ func TestMain(m *testing.M) {
 	}
 	hostTrees = trees
 	hostLAN = func() ([]lan.Interface, error) { return nil, nil }
+	hostDACNodes = dacNodeProbe{
+		stat:   func(path string) (dacNode, error) { recordNodeOpen(path); return dacNode{}, errSuiteAsksNoNode },
+		access: func(path string) error { recordNodeOpen(path); return errSuiteAsksNoNode },
+	}
 	stopOpens := alsapcm.GuardNodeOpens(recordNodeOpen)
 	stopControls := alsactl.GuardNodeOpens(recordNodeOpen)
 	stopReads := alsa.WatchHostReads(recordHostRead)
@@ -67,7 +73,7 @@ func TestMain(m *testing.M) {
 	stopOpens()
 	_ = os.RemoveAll(treesDir)
 	if opened := nodeOpens(); len(opened) > 0 {
-		fmt.Fprintf(os.Stderr, "the suite opened PCM nodes, which no test may: %q\n", opened)
+		fmt.Fprintf(os.Stderr, "the suite opened PCM nodes, or asked the doctor's probe of them, which no test may: %q\n", opened)
 		code = 1
 	}
 	if read := hostReads(); len(read) > 0 {
@@ -123,6 +129,10 @@ func hostReads() []string {
 	defer readRootsMu.Unlock()
 	return append([]string(nil), readRoots...)
 }
+
+// errSuiteAsksNoNode is the suite's answer to the doctor's probe of a DAC
+// node (hostDACNodes): no test asks the host's.
+var errSuiteAsksNoNode = errors.New("this test binary asks no host's DAC node")
 
 // recordNodeOpen is the guard's report.
 func recordNodeOpen(path string) {

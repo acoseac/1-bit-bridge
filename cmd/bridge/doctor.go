@@ -248,6 +248,14 @@ var inContainerFunc = fsutil.InContainer
 // menu cannot see, so it offers Setup) still gets config-file's warn, and
 // config-dir and the port checks grade what Setup's preflight will.
 func buildDoctorDepsFor(cfgPath string, absentIsPreSetup bool) doctor.Deps {
+	return buildDoctorDepsWith(cfgPath, absentIsPreSetup, doctorDACHost())
+}
+
+// buildDoctorDepsWith is buildDoctorDepsFor with the host the player-dac line
+// reads (B676): bridge doctor's own process beside the running bridge
+// (doctorDACHost), or, for the console's doctor, the serving process
+// (servingDACHost, adminDoctorRunnerFor).
+func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAccessHost) doctor.Deps {
 	d := doctor.Deps{
 		// The ports `bridge init` writes, which a run that finds no config
 		// grades. A config that loads replaces them below. One that was
@@ -360,6 +368,10 @@ func buildDoctorDepsFor(cfgPath string, absentIsPreSetup bool) doctor.Deps {
 			// from the medium check its strict writer makes (B603), for both
 			// the CLI and the console, which reads these Deps too.
 			d.PlayerStorage = doctorPlayerStorage(cfg)
+			// Whether the process checked may open the player's DAC node for
+			// playback (B676): bridge doctor's own, beside the running
+			// bridge's groups, or the serving process's, in the console.
+			d.PlayerDAC = doctorPlayerDAC(cfg, dacHost)
 			d.LibraryWatchEnabled = cfg.LibraryWatch.Enabled
 			d.UpscaleEnabled = cfg.Upscale.Enabled
 			d.UpscaleTargetBits = cfg.Upscale.EffectiveTargetBits()
@@ -855,9 +867,20 @@ func printWarnings(w io.Writer, r doctor.Report) {
 //
 // checklist is the player checklist from the serving process's source
 // (checklistDoctorChecks), the lines the dashboard shows; nil adds none.
+//
+// Its player-dac line checks the serving process itself, which is the
+// bridge, over hostTrees (servingDACHost); serve hands adminDoctorRunnerFor
+// the binding its player started with too.
 func adminDoctorRunner(cfgPath string, ownedPorts []int, checklist func(context.Context) []doctor.Check) func(context.Context) *admin.DoctorReport {
+	return adminDoctorRunnerFor(cfgPath, ownedPorts, checklist, servingDACHost(hostTrees, nil))
+}
+
+// adminDoctorRunnerFor is adminDoctorRunner with the player-dac line's host
+// (servingDACHost): the serving process's credentials, and the binding its
+// player started with, which the line tells the config's apart from.
+func adminDoctorRunnerFor(cfgPath string, ownedPorts []int, checklist func(context.Context) []doctor.Check, dacHost dacAccessHost) func(context.Context) *admin.DoctorReport {
 	return func(ctx context.Context) *admin.DoctorReport {
-		d := buildDoctorDeps(cfgPath)
+		d := buildDoctorDepsWith(cfgPath, false, dacHost)
 		d.OwnedPorts = ownedPorts
 		// The player checklist from the serving process's own source, the
 		// one the dashboard's panel shows, rather than the one-shot outputs

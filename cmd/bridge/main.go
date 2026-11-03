@@ -4365,6 +4365,17 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		GOOS: opts.playerGOOS, LockHeld: lockErr == nil, StateErr: playerStateErr,
 		Trees: opts.playerTrees, Store: manifestStore,
 	})
+	// The console's doctor checks the serving process's own access to the
+	// player's DAC node (B676), and says when the config names another DAC
+	// than the one its player started with.
+	doctorDAC := servingDACHost(hostTrees, nil)
+	if playerPlan.start {
+		boot := cfg.Output.Player.Device
+		doctorDAC.boot = &boot
+	}
+	if opts.playerGOOS != "" {
+		doctorDAC.goos = opts.playerGOOS
+	}
 
 	// DLNA MediaServer (opt-in, LAN-only). Starts a parallel
 	// http.Server on its own port + an SSDP advertiser so any DLNA
@@ -5664,7 +5675,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// Ports this process bound, so the console's preflight answers
 		// the port checks from knowledge rather than a bind probe that
 		// can only fail against our own listeners.
-		DoctorRun:             adminDoctorRunner(absCfgPath, ownedListenPorts(cfg), checklistDoctorChecks(checklistSrc)),
+		DoctorRun:             adminDoctorRunnerFor(absCfgPath, ownedListenPorts(cfg), checklistDoctorChecks(checklistSrc), doctorDAC),
 		OutputChecklist:       consoleOutputChecklist(checklistSrc),
 		PlayerOutput:          playerConsole,
 		AnalysisSweep:         analysisSweepClosure(analysisSweepState),
