@@ -27,7 +27,8 @@ import (
 //     marker and compares version.ServerVersion to TargetVersion:
 //     - match → install succeeded → mark Status=installed (kept for
 //     one more boot so a second botched startup can still see why
-//     the .bak is there) and retain bridge.bak.
+//     the .bak is there) and retain bridge.bak. Whatever the
+//     marker's age (backlog B705).
 //     - mismatch → install failed (the new binary didn't actually
 //     come up, or the swap landed something wrong) → restore .bak
 //     and clear the marker. Service manager respawns into the
@@ -38,10 +39,12 @@ import (
 //
 // The 6 h "recent attempt" window (recencyWindow) keeps a long-stale
 // marker (e.g. an attempted install whose service-manager respawn
-// never happened) from triggering rollback hours later when the user
-// finally restarts. If the marker is older than the window AND no
-// install/installed transition has been recorded, treat as abandoned
-// and clear it.
+// never happened, and a version other than TargetVersion booting)
+// from triggering rollback hours later when the user finally
+// restarts: such a marker is treated as abandoned and cleared, with
+// no restore. The window bounds the rollbacks alone: TargetVersion
+// booting is the install working however late it comes, and is
+// confirmed at any age (backlog B705; DecideBootAction says why).
 type State struct {
 	// Status is one of "" / "installing" / "installed". An empty
 	// string means no marker is present; the helpers below normalise
@@ -64,9 +67,14 @@ type State struct {
 	// RE-STAMPED when a deferred auto-install restart finally fires
 	// (restartWhenDrained): the poll cadence between the swap and the
 	// restart can exceed recencyWindow — DefaultCheckInterval EQUALS it
-	// at 6 h — and a marker stamped at swap time would then be read as
-	// abandoned on the very boot it was armed for, skipping both the
-	// success stamp and the .bak cleanup.
+	// at 6 h — and the windows that run from it are the rollbacks': a
+	// marker stamped at swap time would be past them on the very boot it
+	// was armed for, so neither the boot rollback of a restart that does
+	// not come up as TargetVersion nor the early rollback of one whose
+	// settings TargetVersion refuses would put .bak back. TargetVersion's
+	// own boot confirms the install whatever this says (backlog B705);
+	// until B705 it read such a marker as abandoned too, skipping both
+	// the success stamp and the .bak cleanup.
 	AttemptedAt time.Time `json:"attemptedAt,omitempty"`
 
 	// InstalledAt is set on the first successful boot after an
@@ -135,7 +143,11 @@ type State struct {
 	// there (disarmEarlyRollback in cmd/bridge), so from then on a restore
 	// of .bak may be a downgrade past what that version's store migrations
 	// wrote, and neither the early rollback (EarlyRollback) nor the boot
-	// rollback (BootInstallFailed) restores it.
+	// rollback (BootInstallFailed) restores it, nor an operator's
+	// (RollbackRefusal). It outlives the install where a clear at boot
+	// leaves .bak where it is (ClearInstall, beside PreviousVersion), and
+	// goes with the backup's removal after a confirmed install (backlog
+	// B705).
 	DataDirOpenedBy string `json:"dataDirOpenedBy,omitempty"`
 
 	// RollbackStarted says a rollback wrote this marker just before it put
@@ -178,11 +190,12 @@ type State struct {
 const stateFileName = "update-state.json"
 
 // recencyWindow is how long after AttemptedAt we still consider a
-// marker actionable. A marker older than this is treated as
-// abandoned and cleared at boot (no rollback). Generous because the
-// failure mode we're guarding against is "install ran, service
-// failed to restart, operator notices and restarts manually" — that
-// could be hours.
+// marker actionable for a rollback. A marker older than this is
+// treated as abandoned and cleared at boot (no rollback), unless the
+// version booting is the install's, whose boot confirms it whatever
+// the marker's age (backlog B705). Generous because the failure mode
+// we're guarding against is "install ran, service failed to restart,
+// operator notices and restarts manually" — that could be hours.
 const recencyWindow = 6 * time.Hour
 
 // RecencyWindow is the exported view of `recencyWindow` for callers
@@ -330,11 +343,21 @@ func ClearStateDurably(dataDir string) error {
 // about that version's commands, not the install: the housekeeping of the
 // version an early rollback put back clears the rollback's record here, and
 // a command of the version rolled back must still find its migrations
-// refused (round 4). A marker with neither is removed, as ClearState
-// removes it.
+// refused (round 4). And it keeps the record that a version other than the
+// backup's opened the data dir, beside the backup's version (DataDirOpenedBy
+// and PreviousVersion, where RollbackRefusal refuses on them), since a clear
+// may leave the backup where it is (a boot rollback refused on that record,
+// an install abandoned or never swapped), and an operator's rollback of it
+// would then be a downgrade past what the recorded version's store
+// migrations wrote (backlog B705). The backup's cleanup after a confirmed
+// install drops the record before it calls this, once the backup is gone. A
+// marker with none of these is removed, as ClearState removes it.
 func ClearInstall(dataDir string, st State) error {
 	kept := State{RejectedVersion: st.RejectedVersion, RejectedReason: st.RejectedReason,
 		RejectedConfigDigest: st.RejectedConfigDigest, MigrationVeto: st.MigrationVeto}
+	if RollbackRefusal(st) != "" {
+		kept.DataDirOpenedBy, kept.PreviousVersion = st.DataDirOpenedBy, st.PreviousVersion
+	}
 	if kept == (State{}) {
 		return ClearState(dataDir)
 	}
@@ -346,13 +369,17 @@ func ClearInstall(dataDir string, st State) error {
 type BootAction int
 
 const (
-	// BootNoop means no marker is present (or the marker is stale
-	// and abandoned) — nothing for boot to do.
+	// BootNoop means no marker is present, or one that asks nothing of
+	// a boot (a hold alone, an "installed" one without InstalledAt) —
+	// nothing for boot to do. A stale install marker is not one: it is
+	// BootClearAbandoned, or BootInstallSucceeded where its version boots.
 	BootNoop BootAction = iota
 
-	// BootInstallSucceeded means the marker says we just installed
-	// X.Y.Z and ServerVersion matches. Caller should mark
-	// installed=now and retain .bak for one more boot.
+	// BootInstallSucceeded means the marker says we installed X.Y.Z and
+	// ServerVersion matches, however long ago the install was (backlog
+	// B705). Caller should mark installed=now, keeping the rest of the
+	// marker (DataDirOpenedBy above all), and retain .bak for one more
+	// boot.
 	BootInstallSucceeded
 
 	// BootInstallFailed means the marker says we just installed
@@ -367,8 +394,10 @@ const (
 	BootCleanupBak
 
 	// BootClearAbandoned means the marker is older than the recency
-	// window and never reached "installed" — treat as abandoned,
-	// clear it and leave .bak alone (operator can roll back manually).
+	// window, never reached "installed", and the version booting is not
+	// the install's — treat as abandoned, clear it and leave .bak alone
+	// (operator can roll back manually, but not past a version recorded
+	// as having opened the data dir: ClearInstall keeps that record).
 	BootClearAbandoned
 
 	// BootClearNotSwapped means the marker was armed but the install
@@ -414,10 +443,10 @@ func DecideBootAction(st State, currentServerVersion string, now time.Time) Boot
 		// a hold alone (backlog B613's round 3, B692's round 2). Read before
 		// any window: the housekeeping runs only once serve got past its
 		// settings, so the install's version booting is the install working,
-		// however old the record, and an expired one is confirmed, not
-		// cleared as an abandoned install marker would be; the backup's
-		// version booting is the rollback done. Any other version, and a hold
-		// with no rollback, is nothing to do.
+		// however old the record, and an expired one is confirmed, as an
+		// install marker past the window is since B705; the backup's version
+		// booting is the rollback done. Any other version, and a hold with no
+		// rollback, is nothing to do.
 		if !st.RollbackStarted {
 			return BootNoop
 		}
@@ -429,16 +458,29 @@ func DecideBootAction(st State, currentServerVersion string, now time.Time) Boot
 		}
 		return BootNoop
 	case "installing":
-		if now.Sub(st.AttemptedAt) > recencyWindow {
-			return BootClearAbandoned
-		}
-		// Version match wins BEFORE the SwapStarted check on purpose:
-		// we are demonstrably running TargetVersion, so the swap
-		// obviously happened, and a marker written by a pre-SwapStarted
-		// binary (flag absent → false after unmarshal) must still be
-		// stamped installed across the upgrade boundary.
+		// Version match wins BEFORE the window on purpose (backlog B705),
+		// as a rollback's record's does above: the housekeeping runs only
+		// once serve got past its settings, after its admission recorded
+		// that it opened the data dir, so the install's version booting is
+		// the install working however late it comes (`bridge update` with
+		// the service stopped and a start the next day, a crash between the
+		// swap and the restart). Read as abandoned until B705, such an
+		// install was never stamped installed, its .bak never cleaned up,
+		// and the clear dropped the admission's record, so an operator's
+		// rollback put .bak back over the store that version had migrated.
+		//
+		// And BEFORE the SwapStarted check on purpose: we are demonstrably
+		// running TargetVersion, so the swap obviously happened, and a
+		// marker written by a pre-SwapStarted binary (flag absent → false
+		// after unmarshal) must still be stamped installed across the
+		// upgrade boundary.
 		if normalizeTag(currentServerVersion) == normalizeTag(st.TargetVersion) {
 			return BootInstallSucceeded
+		}
+		// Another version booting: no restore past the window, whatever
+		// the swap.
+		if now.Sub(st.AttemptedAt) > recencyWindow {
+			return BootClearAbandoned
 		}
 		if !st.SwapStarted {
 			// Marker armed, filesystem untouched: .bak belongs to an

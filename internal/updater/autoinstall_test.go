@@ -283,10 +283,18 @@ func TestMaybeAutoInstallDefersRestartWhenSessionStartsMidInstall(t *testing.T) 
 // interval, and DefaultCheckInterval (6 h) EQUALS recencyWindow — with
 // quiet hours configured the next in-window tick can be a day out. The
 // marker was stamped at swap time and never re-stamped, so the boot it
-// was armed for read it as abandoned: BootClearAbandoned only clears the
-// marker, so InstalledAt is never set, BootCleanupBak never fires, and a
-// ~30 MiB bridge.bak is never reclaimed (the install also silently loses
+// was armed for read it as abandoned: BootClearAbandoned only cleared the
+// marker, so InstalledAt was never set, BootCleanupBak never fired, and a
+// ~30 MiB bridge.bak was never reclaimed (the install also silently lost
 // its boot-time rollback protection).
+//
+// Since backlog B705 the install's version booting confirms it whatever the
+// marker's age, so that boot's decision no longer shows the restamp: the
+// windows that still run from AttemptedAt are the rollbacks', the boot
+// rollback of a start that does not come up as the version installed and
+// the early rollback. So the restamp is asserted itself: the marker's time is
+// the restart's, and nothing else of it changed, the record a command of the
+// new version made meanwhile included.
 func TestDeferredRestartRefreshesInstallRecency(t *testing.T) {
 	fix := newInstallFixture(t, "0.2.0")
 
@@ -330,7 +338,10 @@ func TestDeferredRestartRefreshesInstallRecency(t *testing.T) {
 	}
 
 	// Age the marker past the recency window — the real elapsed time
-	// between the swap and the next in-window poll tick.
+	// between the swap and the next in-window poll tick — and record in it,
+	// as a store open of the new version that migrated meanwhile does (a
+	// `bridge doctor` run from the binary now in place), that it opened the
+	// data dir.
 	st, err := LoadState(dir)
 	if err != nil {
 		t.Fatal(err)
@@ -339,22 +350,43 @@ func TestDeferredRestartRefreshesInstallRecency(t *testing.T) {
 	if err := SaveState(dir, st); err != nil {
 		t.Fatal(err)
 	}
+	if res, err := DisarmBeforeMigrating(dir, fix.latestVersion); err != nil || !res.Recorded {
+		t.Fatalf("the new version's migrating store open = %+v, %v; want its record", res, err)
+	}
+	aged, err := LoadState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Stream drains; the pending-restart fast path finally restarts.
 	tracker.End()
+	restarting := time.Now().UTC()
 	upd.maybeAutoInstall(context.Background())
 	if got := restartCalls.Load(); got != 1 {
 		t.Fatalf("restarts = %d after the session drained, want 1", got)
 	}
 
-	// The boot this restart leads into must still confirm the install.
 	reloaded, err := LoadState(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := DecideBootAction(reloaded, fix.latestVersion, time.Now().UTC())
-	if got != BootInstallSucceeded {
-		t.Errorf("DecideBootAction after a deferred restart = %v, want BootInstallSucceeded "+
-			"(a marker stamped at swap time reads as abandoned by the time the restart lands)", got)
+	if reloaded.AttemptedAt.Before(restarting) || reloaded.AttemptedAt.After(time.Now().UTC()) {
+		t.Errorf("the marker's time after the deferred restart = %v, want it re-stamped at the restart, %v or after "+
+			"(a marker stamped at swap time is past every window by the time the restart lands)", reloaded.AttemptedAt, restarting)
+	}
+	want := aged
+	want.AttemptedAt = reloaded.AttemptedAt
+	if reloaded != want {
+		t.Errorf("the marker after the restamp = %+v, want it as it was but for its time, %+v", reloaded, want)
+	}
+	// The boot this restart leads into confirms the install, and the
+	// rollback of a boot that does not come up as that version is in its
+	// window.
+	if got := DecideBootAction(reloaded, fix.latestVersion, time.Now().UTC()); got != BootInstallSucceeded {
+		t.Errorf("DecideBootAction of the version installed after a deferred restart = %v, want BootInstallSucceeded", got)
+	}
+	if got := DecideBootAction(reloaded, "0.1.0", time.Now().UTC()); got != BootInstallFailed {
+		t.Errorf("DecideBootAction of another version after a deferred restart = %v, want BootInstallFailed: "+
+			"the boot rollback's window runs from the restart", got)
 	}
 }

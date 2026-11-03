@@ -776,13 +776,14 @@ func recordHold(ctx context.Context, opts InstallOptions, target, reason string,
 //     repeat of the target already on disk is the defect.
 //
 //   - Within recencyWindow. This is what keeps the refusal from becoming
-//     a wedge. Past the window DecideBootAction returns
-//     BootClearAbandoned, so the marker is going to be cleared by the
-//     next boot anyway; refusing on it would block installs on a host
-//     that never restarts, with no way out. The two bounds are the same
-//     constant ON PURPOSE — the refusal expires exactly when boot would
-//     have cleared it, so the engine and the boot path cannot disagree
-//     about whether a marker is still live.
+//     a wedge. Past the window the next boot resolves the marker anyway
+//     (DecideBootAction: the target's boot confirms it, at any age since
+//     backlog B705, and any other version's clears it as abandoned);
+//     refusing on it would block installs on a host that never
+//     restarts, with no way out. The two bounds are the same constant ON
+//     PURPOSE — the refusal expires exactly when a boot stops putting
+//     .bak back, so the engine and the boot path cannot disagree about
+//     whether a marker still guards a restore.
 //
 // A marker that cannot be read is NOT a refusal: LoadState already
 // normalises missing and malformed to the zero State, and failing closed

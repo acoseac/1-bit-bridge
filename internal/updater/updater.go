@@ -659,11 +659,15 @@ func (u *Updater) restartWhenDrained(ctx context.Context) {
 // A restart deferred for an in-flight download waits a full poll
 // interval, and DefaultCheckInterval (6 h) EQUALS recencyWindow — with
 // quiet hours configured the next in-window tick can be a day later. The
-// marker would then read as abandoned on the very boot it was armed
-// for: BootClearAbandoned only clears it, so InstalledAt is never
-// stamped, BootCleanupBak never fires, and a ~30 MiB bridge.bak is never
-// reclaimed (the install also silently loses its boot-time rollback
-// protection).
+// windows that run from the marker's time are the rollbacks': the boot
+// rollback of a restart that does not come up as the version installed
+// (BootInstallFailed) and the early rollback of one whose settings that
+// version refuses (EarlyRollback), and a marker stamped at swap time
+// would be past both on the very boot it was armed for, the install left
+// with no boot-time rollback protection. The boot of the version
+// installed confirms it whatever the marker's age (backlog B705); before
+// B705 it read such a marker as abandoned too, so InstalledAt was never
+// stamped and a ~30 MiB bridge.bak never reclaimed.
 //
 // Best-effort and narrow: only an "installing" marker is touched, and a
 // failure just leaves the pre-existing behaviour. The read and the write
@@ -684,7 +688,7 @@ func (u *Updater) refreshInstallAttemptedAt(ctx context.Context) error {
 		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
 			return err
 		}
-		logger.Warn("could not refresh the install marker before restarting; boot-time confirmation may treat it as abandoned",
+		logger.Warn("could not refresh the install marker before restarting; a boot that does not come up as the version installed may find it past the rollback's window",
 			"err", err)
 		return nil
 	}
@@ -699,7 +703,7 @@ func (u *Updater) refreshInstallAttemptedAt(ctx context.Context) error {
 		save = SaveState
 	}
 	if err := save(dir, st); err != nil {
-		logger.Warn("could not refresh the install marker before restarting; boot-time confirmation may treat it as abandoned",
+		logger.Warn("could not refresh the install marker before restarting; a boot that does not come up as the version installed may find it past the rollback's window",
 			"err", err)
 	}
 	return nil
