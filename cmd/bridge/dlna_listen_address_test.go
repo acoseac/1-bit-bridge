@@ -12,7 +12,7 @@ import (
 
 // The two lines B687 adds, as the MediaServer's wiring and Start write them.
 const (
-	publicLeftOutLine = "DLNA leaves out an IPv4 address of a LAN interface that is neither private nor link-local: " +
+	publicLeftOutLine = "DLNA leaves out an address of a LAN interface that is neither private nor link-local: " +
 		"it announces and serves only this host's private, link-local and loopback addresses"
 	publicPinLine = "dlna.listenAddress names a public address: DLNA serves it, and anyone who can reach that address " +
 		"can browse and stream the library without signing in"
@@ -146,6 +146,27 @@ func TestTheMediaServerTakesNoPublicAddressItsListenAddressDoesNotName(t *testin
 	}
 }
 
+// TestTheMediaServerServesAPinnedNameOnlyOnItsBoundAddress checks the
+// config-to-listener path for a hostname pin, without DNS or real sockets.
+// Another LAN address is served by the address policy, but this listener
+// is bound only to the address the operator's name resolved to.
+func TestTheMediaServerServesAPinnedNameOnlyOnItsBoundAddress(t *testing.T) {
+	rig := startMediaServerOn(t, "music.example:7790", []string{"192.168.1.20"},
+		hostIface{"eth0", mediaServerLANFlags, []string{"192.168.1.20/24", "192.168.1.21/24", "2001:db8::20/64"}})
+	if !rig.enabled {
+		t.Fatalf("DLNA did not start: %s", strings.Join(rig.log.All(), "\n"))
+	}
+	for _, addr := range []string{"192.168.1.20", "192.168.1.21", "2001:db8::20"} {
+		if got, want := rig.lc.server.AcceptsOn(netip.MustParseAddr(addr)), addr == "192.168.1.20"; got != want {
+			t.Errorf("AcceptsOn(%s) = %v, want %v", addr, got, want)
+		}
+	}
+	status, res := rig.browse(t, "192.168.1.50", "192.168.1.20", "music.example:7790")
+	if want := "http://music.example:7790/dlna/file/" + rig.id; status != http.StatusOK || !slices.Contains(res, want) {
+		t.Errorf("Browse on pinned name: status %d, <res> %v, want 200 and %s", status, res, want)
+	}
+}
+
 // TestTheMediaServerRefusesAPinNoInterfaceHolds is the opt-in's last edge: a
 // public address no interface of this host holds has nowhere to advertise
 // from, and DLNA does not start (the bind would fail too).
@@ -246,8 +267,8 @@ func TestTheMediaServerServesAULAAndNotAGlobalIPv6Address(t *testing.T) {
 
 // TestTheMediaServerSaysOnceAndWithoutTheAddressThatItLeftOutAPublicAddress
 // pins the line B687 adds: the advertise set and the fallback ServerURL each
-// read every address of what they look at, two members here each carrying
-// a public IPv4 address (and the fallback a third time where no member
+// read every address of what they look at, members carrying public IPv4
+// or IPv6 addresses (and the fallback again where no member
 // yields a LOCATION), and the line is written once per start, naming none of
 // the addresses, whether DLNA then starts or not.
 func TestTheMediaServerSaysOnceAndWithoutTheAddressThatItLeftOutAPublicAddress(t *testing.T) {
@@ -263,6 +284,9 @@ func TestTheMediaServerSaysOnceAndWithoutTheAddressThatItLeftOutAPublicAddress(t
 			{"eth0", mediaServerLANFlags, []string{"192.168.1.20/24", "93.184.216.34/24"}},
 			{"eth1", mediaServerLANFlags, []string{"198.51.100.7/24", "10.0.0.5/8", "100.64.0.9/10"}},
 		}, []string{"192.168.1.20", "10.0.0.5"}, true, []string{"93.184.216.34", "198.51.100.7", "100.64.0.9"}, []string{"192.168.1.20", "10.0.0.5"}},
+		{"private_ipv4_beside_global_ipv6", []hostIface{
+			{"eth0", mediaServerLANFlags, []string{"192.168.1.20/24", "2001:db8::20/64", "2001:db8::21/64"}},
+		}, []string{"192.168.1.20"}, true, []string{"2001:db8::20", "2001:db8::21"}, []string{"192.168.1.20"}},
 		{"members_with_no_private_ipv4_address", []hostIface{
 			{"eth0", mediaServerLANFlags, []string{"203.0.113.5/24", "fd12:3456::5/64"}},
 			{"eth1", mediaServerLANFlags, []string{"198.51.100.7/24", "fd34:5678::7/64"}},

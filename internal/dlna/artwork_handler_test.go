@@ -34,7 +34,7 @@ func mountedMux(t *testing.T, cfg ServerConfig) http.Handler {
 		cfg.UDN = "uuid:test-artwork"
 	}
 	if cfg.ListenAddress == "" {
-		cfg.ListenAddress = ":0"
+		cfg.ListenAddress = "static.example:0"
 	}
 	if cfg.ServerURL == "" {
 		cfg.ServerURL = "http://static.example"

@@ -99,7 +99,7 @@ func Test_ownHostOnly_RefusesAnAddressOfThisHostItDoesNotServe(t *testing.T) {
 // address that was not pinned. Until B687 the server served any address it
 // advertised on an eligible interface, and its wiring advertised a LAN
 // interface's public IPv4 address when the interface listed it first. A
-// LAN address, loopback, link-local, a name, and the literal
+// LAN address, loopback, link-local, a pinned name, and the literal
 // dlna.listenAddress names are taken: a public one is the operator's opt-in,
 // and one of another class (the tailnet's) is the operator's own pin, which
 // serves no one and warns at Start, and starts.
@@ -128,7 +128,16 @@ func TestNewServerRefusesToAdvertiseAnAddressItWouldNotServe(t *testing.T) {
 		{"a_self_assigned_address", base(":7790", "http://169.254.7.8:7790", "http://169.254.7.8:7790"), true},
 		{"a_ula", base(":7790", "http://[fd12:3456::20]:7790"), true},
 		{"loopback", base("127.0.0.1:7790", "http://127.0.0.1:7790"), true},
-		{"a_name", base(":7790", "http://bridge-box.lan:7790"), true},
+		{"an_unpinned_name", base(":7790", "http://bridge-box.lan:7790"), false},
+		{"an_unpinned_location_name", base("0.0.0.0:7790", "http://192.168.1.20:7790", "http://bridge-box.lan:7790"), false},
+		{"a_name_beside_a_literal_pin", base("192.168.1.20:7790", "http://bridge-box.lan:7790"), false},
+		{"a_name_beside_another_name_pin", base("nas.local:7790", "http://bridge-box.lan:7790"), false},
+		{"the_pinned_name", base("bridge-box.lan:7790", "http://Bridge-Box.lan.:7790", "http://bridge-box.lan:7790"), true},
+		{"an_unparseable_server_url", base(":7790", "http://192.168.1.20:bad-port"), false},
+		{"an_unparseable_location", base(":7790", "http://192.168.1.20:7790", "http://[fe80::1%en0]:7790"), false},
+		{"a_hostless_server_url", base(":7790", "/description.xml"), false},
+		{"a_hostless_location", base(":7790", "http://192.168.1.20:7790", "http://:7790"), false},
+		{"an_empty_location", base(":7790", "http://192.168.1.20:7790", ""), false},
 		{"the_pinned_public_address", base("203.0.113.5:7790", "http://203.0.113.5:7790"), true},
 		{"the_pinned_public_address_mapped", base("[::ffff:203.0.113.5]:7790", "http://[::ffff:203.0.113.5]:7790"), true},
 		{"the_pinned_public_ipv6_address", base("[2001:db8::20]:7790", "http://[2001:db8::20]:7790"), true},
@@ -146,7 +155,7 @@ func TestNewServerRefusesToAdvertiseAnAddressItWouldNotServe(t *testing.T) {
 			case err != nil:
 				// The refusal names the field, never the value.
 				for _, raw := range append([]string{tc.cfg.ServerURL}, endpointURLs(tc.cfg)...) {
-					if host := strings.TrimSuffix(strings.TrimPrefix(raw, "http://"), ":7790"); strings.Contains(err.Error(), strings.Trim(host, "[]")) {
+					if host := strings.TrimSuffix(strings.TrimPrefix(raw, "http://"), ":7790"); host != "" && strings.Contains(err.Error(), strings.Trim(host, "[]")) {
 						t.Errorf("the refusal names %s: %v", host, err)
 					}
 				}
@@ -258,5 +267,38 @@ func TestStartRefusesAListenerNotBoundToThePin(t *testing.T) {
 	}
 	if s.AcceptsOn(netip.MustParseAddr("127.0.0.1")) || s.AcceptsOn(netip.MustParseAddr("203.0.113.5")) {
 		t.Error("a refused Start left a listener accepting")
+	}
+}
+
+// addressOnlyListener needs no socket: Start must reject its wildcard
+// address before it can call Accept or start SSDP.
+type addressOnlyListener struct {
+	net.Listener
+	addr   net.Addr
+	closed bool
+}
+
+func (l *addressOnlyListener) Addr() net.Addr            { return l.addr }
+func (l *addressOnlyListener) Accept() (net.Conn, error) { return nil, net.ErrClosed }
+func (l *addressOnlyListener) Close() error {
+	l.closed = true
+	return nil
+}
+
+func TestStartRefusesANamedListenAddressOnAWildcardListener(t *testing.T) {
+	l := &addressOnlyListener{addr: &net.TCPAddr{IP: net.IPv4zero, Port: 7790}}
+	s, err := NewServer(ServerConfig{
+		Library: newTestLib(), UDN: "uuid:test-name-unbound",
+		ListenAddress: "bridge-box.lan:7790", Listener: l,
+		ServerURL: "http://bridge-box.lan:7790",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Start(context.Background()); err == nil || !strings.Contains(err.Error(), "requires a listener bound to one address") {
+		t.Fatalf("Start with a wildcard listener: %v, want a refusal", err)
+	}
+	if !l.closed || s.AcceptsOn(netip.MustParseAddr("192.168.1.20")) {
+		t.Error("a refused Start left the listener open or accepting")
 	}
 }

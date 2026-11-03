@@ -303,10 +303,13 @@ accept, `AcceptsOn` and the MediaServer's unicast M-SEARCH admission all read;
 the Host check (`mayName`: a literal of those classes or the pin, before
 ownership), so the ContentDirectory, which builds `<res>` and albumArtURI from
 the Host, builds no URL on a public address; NewServer
-(`checkAdvertisedHost`): a ServerURL or LOCATION literal of another class is
-refused unless it is the literal `dlna.listenAddress` names, so a pin to the
-tailnet's address still warns and starts (B48's "don't make it refuse");
-Start: a listener not bound to the pinned public address is refused, and a pin
+(`checkAdvertisedHost`): a malformed or hostless ServerURL or LOCATION is
+refused; a literal of another class is refused unless it is the literal
+`dlna.listenAddress` names; a hostname is taken only when it is the
+configured listen name, so a pin to the tailnet's address still warns and
+starts (B48's "don't make it refuse"); Start: a listener not bound to the
+pinned public address, or a named address handed a wildcard listener, is
+refused, and a pin
 that is served is said once at Warn, naming no address ("anyone who can reach
 that address can browse and stream the library without signing in"). The
 refusal line now says the listener answers on "the private and link-local
@@ -356,7 +359,8 @@ host, beside a private address, on an interface of its own),
 `Test_ownHostOnly_RefusesAnAddressOfThisHostItDoesNotServe`,
 `Test_ownHostOnly_TakesThePinnedPublicAddressAlone`,
 `TestNewServerRefusesToAdvertiseAnAddressItWouldNotServe`,
-`TestStartRefusesAListenerNotBoundToThePin` and
+`TestStartRefusesAListenerNotBoundToThePin`,
+`TestStartRefusesANamedListenAddressOnAWildcardListener` and
 `TestTheAddressClassesAndTheOptIn` pin it, with the B687 rows of
 `TestServedAddrsAreTheLANAddressesOfTheMulticastSet` (its
 `a_members_public_address` row was the advertised exception, served) and

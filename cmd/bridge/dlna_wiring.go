@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -396,12 +397,10 @@ func advertiseEndpointsOf(members []*net.Interface, addrsOf func(*net.Interface)
 func deriveServerURL(rawHost string, bindWildcard bool, port int, endpoints []dlna.AdvertiseEndpoint, iface *net.Interface,
 	addrsOf func(*net.Interface) ([]net.Addr, error), leftOut *publicLeftOutNote) (string, error) {
 	if !bindWildcard {
-		// JoinHostPort brackets an IPv6 literal. Plain Sprintf yields
-		// "http://2001:db8::1:7790", which is not a parseable URL — a
-		// renderer can't tell the port from the address — so an
-		// IPv6-bound DLNA server advertised a location nothing could
-		// fetch.
-		return "http://" + net.JoinHostPort(rawHost, strconv.Itoa(port)), nil
+		// JoinHostPort brackets IPv6; URL.String escapes a link-local
+		// zone's percent sign so the advertised URL parses back to it.
+		u := url.URL{Scheme: "http", Host: net.JoinHostPort(rawHost, strconv.Itoa(port))}
+		return u.String(), nil
 	}
 	if len(endpoints) > 0 {
 		return endpoints[0].ServerURL, nil
@@ -419,8 +418,8 @@ func deriveServerURL(rawHost string, bindWildcard bool, port int, endpoints []dl
 // firstLANIPv4OnInterface returns the first IPv4 address bound to iface, as
 // addrsOf lists them, of a class the DLNA listener serves
 // (dlna.IsLANClassAddress: RFC 1918, or a self-assigned 169.254 one), and
-// whether iface also carries an IPv4 address of another class, global
-// unicast and so left out: a public one, or one in 100.64/10 (B687). Every
+// whether iface also carries a global unicast address of another class,
+// left out: public IPv4 or IPv6, or a tailnet address (B687). Every
 // address is read, so one left out after the address returned is reported
 // too. Returns an error when iface carries no private or link-local IPv4
 // address — caller treats that as "DLNA can't advertise a usable URL", and
@@ -434,15 +433,15 @@ func firstLANIPv4OnInterface(iface *net.Interface, addrsOf func(*net.Interface) 
 		return nil, false, err
 	}
 	for _, a := range addrs {
-		v4 := ipOfAddr(a).To4()
-		if v4 == nil {
+		addr, ok := netip.AddrFromSlice(ipOfAddr(a))
+		if !ok {
 			continue
 		}
-		addr, _ := netip.AddrFromSlice(v4)
+		addr = addr.Unmap()
 		switch {
 		case dlna.IsLANClassAddress(addr):
-			if ip == nil {
-				ip = v4
+			if ip == nil && addr.Is4() {
+				ip = net.IP(addr.AsSlice())
 			}
 		case addr.IsGlobalUnicast():
 			leftOut = true
@@ -500,9 +499,9 @@ func interfaceHolding(ifaces []net.Interface, addrsOf func(*net.Interface) ([]ne
 }
 
 // publicLeftOutNote says, once per DLNA start and without the address, that
-// the MediaServer's selection left out an IPv4 address of an interface it
+// the MediaServer's selection left out an address of an interface it
 // looked at because the address is neither private nor link-local: a public
-// one, or one in 100.64/10 (B687). The advertise set and the fallback
+// IPv4 or IPv6 one, or a tailnet address (B687). The advertise set and the fallback
 // ServerURL read every address of the interfaces they look at, and
 // whichever finds one first says it. Nothing says it again: the served
 // addresses leave such an address out whenever they are read, with no line
@@ -519,7 +518,7 @@ func (n *publicLeftOutNote) note() {
 		return
 	}
 	n.said = true
-	n.log.Info("DLNA leaves out an IPv4 address of a LAN interface that is neither private nor link-local: "+
+	n.log.Info("DLNA leaves out an address of a LAN interface that is neither private nor link-local: "+
 		"it announces and serves only this host's private, link-local and loopback addresses",
 		slog.String("hint", "to serve a public address, name it in dlna.listenAddress: "+
 			"anyone who can reach that address can then browse and stream the library without signing in"))

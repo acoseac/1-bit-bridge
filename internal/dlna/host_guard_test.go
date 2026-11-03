@@ -29,7 +29,7 @@ func hostGuardServer(t *testing.T) (*Server, *httptest.Server, *atomic.Int32) {
 		Library:       newTestLib(testTrack("t1", "Test Track")),
 		UDN:           "uuid:test-host-guard",
 		FriendlyName:  "Test Bridge",
-		ListenAddress: ":7790",
+		ListenAddress: "bridge-box.lan:7790",
 		ServerURL:     "http://192.168.0.10:7790",
 		AdvertiseEndpoints: []AdvertiseEndpoint{
 			{ServerURL: "http://192.168.0.10:7790"},

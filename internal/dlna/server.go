@@ -354,11 +354,12 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, errors.New("dlna: ServerConfig.ServerURL required")
 	}
 	named := listenLiteral(cfg.ListenAddress)
-	if err := checkAdvertisedHost("ServerConfig.ServerURL", cfg.ServerURL, named); err != nil {
+	namedHost, _, _ := net.SplitHostPort(cfg.ListenAddress)
+	if err := checkAdvertisedHost("ServerConfig.ServerURL", cfg.ServerURL, named, namedHost); err != nil {
 		return nil, err
 	}
 	for i, ep := range cfg.AdvertiseEndpoints {
-		if err := checkAdvertisedHost(fmt.Sprintf("ServerConfig.AdvertiseEndpoints[%d]", i), ep.ServerURL, named); err != nil {
+		if err := checkAdvertisedHost(fmt.Sprintf("ServerConfig.AdvertiseEndpoints[%d]", i), ep.ServerURL, named, namedHost); err != nil {
 			return nil, err
 		}
 	}
@@ -379,17 +380,22 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 // The literal the operator wrote is announced as written, whatever its
 // class: a public one is the opt-in and served (PinnedPublicAddress), and
 // one of another class off the LAN, the tailnet's say, is served by no one,
-// which Start warns of and starts (warnIfPinnedOffTheLAN). A name is taken,
-// as the listener takes a pinned one: what it resolves to is judged when a
-// connection arrives. The refusal names the field and never the value.
-func checkAdvertisedHost(field, raw string, named netip.Addr) error {
+// which Start warns of and starts (warnIfPinnedOffTheLAN). A name is taken
+// only if it matches the explicit ListenAddress host (namedHost), folded
+// as the Host guard folds it. It authorizes no public address: the listener
+// binds its resolved address alone, still judged by servedAddrs. A malformed
+// URL or one with no host is refused. Errors name the field, never the value.
+func checkAdvertisedHost(field, raw string, named netip.Addr, namedHost string) error {
 	u, err := url.Parse(raw)
-	if err != nil {
-		return nil
+	if err != nil || u.Hostname() == "" {
+		return fmt.Errorf("dlna: %s must be a parseable URL with a host", field)
 	}
 	a, err := netip.ParseAddr(u.Hostname())
 	if err != nil {
-		return nil
+		if !named.IsValid() && foldHostName(namedHost) != "" && foldHostName(u.Hostname()) == foldHostName(namedHost) {
+			return nil
+		}
+		return fmt.Errorf("dlna: %s names a hostname not pinned by dlna.listenAddress", field)
 	}
 	a = a.Unmap().WithZone("")
 	if a.IsLoopback() || IsLANClassAddress(a) || (named.IsValid() && a == named) {
@@ -475,6 +481,18 @@ func (s *Server) Start(ctx context.Context) error {
 	if s.pin.IsValid() && netAddrIP(bound.Addr()).Unmap().WithZone("") != s.pin {
 		_ = bound.Close()
 		return errors.New("dlna: the listener is not bound to the public address dlna.listenAddress names")
+	}
+	// A configured name is accepted as an advertised host only because its
+	// listener binds one resolved address. A supplied listener, or a name
+	// resolving to an unspecified address, must not turn that into a wildcard.
+	if host, _, splitErr := net.SplitHostPort(s.cfg.ListenAddress); splitErr == nil && host != "" {
+		if _, literalErr := netip.ParseAddr(host); literalErr != nil {
+			boundIP := netAddrIP(bound.Addr()).Unmap()
+			if !boundIP.IsValid() || boundIP.IsUnspecified() {
+				_ = bound.Close()
+				return errors.New("dlna: a named dlna.listenAddress requires a listener bound to one address")
+			}
+		}
 	}
 	if s.served == nil {
 		s.served = newServedAddrs(s.pin)

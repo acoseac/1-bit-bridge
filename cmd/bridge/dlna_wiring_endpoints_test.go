@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/url"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
@@ -129,6 +130,8 @@ func TestTheMediaServersServerURLKeepsAPinnedHostAsWritten(t *testing.T) {
 	}{
 		{"pinned_ipv4", "192.168.1.42", false, nil, picked, "http://192.168.1.42:7790", false, false},
 		{"pinned_ipv6", "2001:db8::1", false, nil, picked, "http://[2001:db8::1]:7790", false, false},
+		{"pinned_link_local_zone", "fe80::1%en0", false, nil, picked, "http://[fe80::1%25en0]:7790", false, false},
+		{"pinned_link_local_windows_zone", "fe80::1%Wi-Fi 4", false, nil, picked, "http://[fe80::1%25Wi-Fi%204]:7790", false, false},
 		{"pinned_name", "nas.local", false, nil, picked, "http://nas.local:7790", false, false},
 		{"pinned_public_ipv4", "203.0.113.5", false, nil, publicFirst, "http://203.0.113.5:7790", false, false},
 		{"wildcard_first_endpoint", "", true, gathered, picked, "http://192.168.1.20:7790", false, false},
@@ -147,6 +150,18 @@ func TestTheMediaServersServerURLKeepsAPinnedHostAsWritten(t *testing.T) {
 		}
 		if note.said != tc.leftOut {
 			t.Errorf("%s: a public address left out said %v, want %v", tc.name, note.said, tc.leftOut)
+		}
+		if !tc.wildcard && err == nil {
+			u, parseErr := url.Parse(got)
+			if parseErr != nil || u.Hostname() != tc.rawHost {
+				t.Errorf("%s: pinned host did not survive URL round trip: %q (%v)", tc.name, got, parseErr)
+			}
+			if _, cfgErr := dlna.NewServer(dlna.ServerConfig{
+				Library: &manifestLibraryAdapter{}, UDN: "uuid:test-pinned-url",
+				ListenAddress: net.JoinHostPort(tc.rawHost, "7790"), ServerURL: got,
+			}); cfgErr != nil {
+				t.Errorf("%s: derived URL refused by NewServer: %v", tc.name, cfgErr)
+			}
 		}
 	}
 }

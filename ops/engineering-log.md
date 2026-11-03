@@ -70106,6 +70106,15 @@ only) and `cmd/bridge/serve_player_discovery_test.go` are under qualification
 prefixes (`internal/config/`, `cmd/bridge/serve_player`): the version is
 raised at the merge.
 
+**PR #1385 round 2.** Review found the protocol's SSDP promise omitted the
+unarmed listener's unchecked fallback; its one-sentence disclosure now names
+that case. The omission Info line also covers global unicast IPv6 beside
+RFC 1918 IPv4, pinned by the mixed-interface once-only row. `NewServer`
+refuses malformed or hostless URLs and unpinned hostnames; a configured name
+is accepted only with a listener bound to one address (the injected wildcard
+listener is refused at Start). A pinned IPv6 link-local zone is URL-escaped
+before advertisement and round-tripped through `url.Parse` and `NewServer`.
+
 **Checks** (on eade4d04; legion0, Ubuntu 26.04, Linux 7.0, x86-64, go1.27.3,
 umask 022, `-tags ts_omit_webclient,ts_omit_debugeventbus`, TMPDIR on the
 worktree's disk, every run through the build lock; the red run and the
