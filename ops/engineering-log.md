@@ -70004,3 +70004,23 @@ changed, so the app's copy follows. `internal/config/config.go` (comments
 only) and `cmd/bridge/serve_player_discovery_test.go` are under qualification
 prefixes (`internal/config/`, `cmd/bridge/serve_player`): the version is
 raised at the merge.
+
+**Checks** (on eade4d04; legion0, Ubuntu 26.04, Linux 7.0, x86-64, go1.27.3,
+umask 022, `-tags ts_omit_webclient,ts_omit_debugeventbus`, TMPDIR on the
+worktree's disk, every run through the build lock; the red run and the
+controls were untagged, and no file of internal/dlna or the DLNA wiring
+carries a tag): `go test -race -timeout 90m ./internal/dlna/... ./cmd/bridge/`:
+ok (internal/dlna 42.6 s, cmd/bridge 790 s). `make fmt`: no change. `make
+test`: all 80 packages ok (cmd/bridge 854 s, internal/manifest 1,328 s,
+scripts/third-party-licenses 254 s with the build-site census;
+`TestEveryCitedTestNameExists` over these docs). `make vet`: clean; `go vet`
+of internal/dlna/..., cmd/bridge and internal/config for windows, darwin and
+linux on amd64, and windows/arm64: clean (compiled only off Linux: the SSDP
+destination readers' Windows and macOS halves did not run). `make
+build-all`: the six targets. `make docs-check`: ok, `CLAUDE.md 71.9%;
+player.md 96.8%; worst load, player_openhome_test.go 61.6%`, and the same
+with the rules patch applied (dlna-upnp.md 95,931 bytes). `go run
+./scripts/qualification-version -base main -head HEAD`: "guarded code changed
+without qualificationVersion increase (28 -> 28)", as expected (the two
+guarded files above). No test reads a real interface: every host is a
+stand-in, its connections lantest's in-memory pipes and its SSDP ssdptest's.
