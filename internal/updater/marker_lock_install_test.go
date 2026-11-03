@@ -292,6 +292,54 @@ func TestAnInstallRefusedForTheMarkersLockSwapsNothing(t *testing.T) {
 	})
 }
 
+// TestAnInstallWhoseSwapFailsPutsTheMarkerBackAsItReadIt: a swap that fails
+// before it changes anything leaves the binaries as they were, so the install
+// puts back the marker it read under the install marker's lock, a hold and a
+// veto an earlier rollback recorded included (backlog B692), and none where
+// there was none, as the swap's failure always left it.
+func TestAnInstallWhoseSwapFailsPutsTheMarkerBackAsItReadIt(t *testing.T) {
+	failTheSwap := func(t *testing.T) {
+		origLink, origRename := linkFunc, renameFunc
+		linkFunc = func(string, string) error { return errors.New("operation not supported") }
+		renameFunc = func(oldname, newname string) error {
+			if filepath.Ext(newname) == ".bak" {
+				return errors.New("rename refused")
+			}
+			return os.Rename(oldname, newname)
+		}
+		t.Cleanup(func() { linkFunc, renameFunc = origLink, origRename })
+	}
+	for _, tc := range []struct {
+		name  string
+		prior *State
+	}{
+		{"over a rollback's hold and veto", &State{RejectedVersion: "0.2.0", MigrationVeto: "0.2.0"}},
+		{"over no marker", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fix := newInstallFixture(t, "0.2.3")
+			dir, live := installLayout(t)
+			if tc.prior != nil {
+				if err := SaveState(dir, *tc.prior); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := readFile(t, StatePath(dir))
+			failTheSwap(t)
+			if _, err := installingUpdater(t, fix, "0.2.1").Install(context.Background(),
+				InstallOptions{DataDir: dir, BinaryPath: live, Force: true, Verifier: noopVerifier}); err == nil {
+				t.Fatal("Install over a swap that fails = nil, want the swap's failure")
+			}
+			if after := readFile(t, StatePath(dir)); after != before {
+				t.Errorf("the marker after the failed swap = %q, want it as the install read it, %q", after, before)
+			}
+			if got := readFile(t, live); got != "bridge-binary-0.2.1" {
+				t.Errorf("the binary is %q, want it as it was", got)
+			}
+		})
+	}
+}
+
 // TestTheHoldOfARefusedCandidateIsRecordedOnlyUnderTheMarkersLock: the
 // settings check's refusal records the version held back by a read, a change
 // and a write of the marker holding the install marker's lock; where it

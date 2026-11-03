@@ -213,6 +213,11 @@ func reportInstallFailure(stderr io.Writer, err error, cfgPath string) {
 		fmt.Fprintf(stderr, "The running bridge is unchanged. Fix %s, then run `bridge update` again.\n", cfgPath)
 		return
 	}
+	if errors.Is(err, updater.ErrMarkerLockUnavailable) {
+		// The error says why and what to do (backlog B692).
+		fmt.Fprintln(stderr, "The running bridge is unchanged.")
+		return
+	}
 	if errors.Is(err, updater.ErrInstallNotSupported) {
 		fmt.Fprintln(stderr, "On Windows, stop the bridge service, replace bridge.exe, and start it back up.")
 	}

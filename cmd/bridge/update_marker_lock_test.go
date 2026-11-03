@@ -18,41 +18,41 @@ import (
 // changing.
 
 // rollBackFromTheConsole runs the operator's rollback of r's install, as the
-// console's does, on a goroutine, with restore putting the backup back (nil
-// is updater.RollbackBinary).
-func rollBackFromTheConsole(t *testing.T, r *refusedInstall, restore func(dst, ext string) error, unhold func()) (<-chan error, <-chan struct{}) {
+// console's does, on a goroutine, held where hold says (before its record
+// once it has read the marker and decided; nil holds it nowhere).
+func rollBackFromTheConsole(t *testing.T, r *refusedInstall, hold func(), unhold func()) (<-chan error, <-chan struct{}) {
 	t.Helper()
 	answer, done := make(chan error, 1), make(chan struct{})
 	go func() {
 		defer close(done)
 		answer <- updater.New(updater.Options{}).Rollback(context.Background(),
-			updater.InstallOptions{DataDir: r.dataDir, BinaryPath: r.bin, Force: true, RestoreBackup: restore})
+			updater.InstallOptions{DataDir: r.dataDir, BinaryPath: r.bin, Force: true, BeforeRollbackRecord: hold})
 	}()
 	drainLoopOnCleanup(t, unhold, done, "the rollback")
 	return answer, done
 }
 
 // TestAManualRollbackThatHoldsTheMarkersLockFirstLeavesTheBootNothingToDo:
-// the operator's rollback holds the install marker's lock from its read
-// through its record and the backup's rename, and the housekeeping of a start
-// of the version installed, arriving meanwhile, waits for it, then reads the
-// rollback's record and does nothing: no install confirmed over the backup
-// put back, the hold and the veto as the rollback recorded them.
+// the operator's rollback holds the install marker's lock from its read of
+// the marker through its record and the backup's rename, and the
+// housekeeping of a start of the version installed, arriving after that read
+// and before the record, waits for it, then reads the rollback's record and
+// does nothing: no install confirmed over the backup put back, the hold and
+// the veto as the rollback recorded them.
 func TestAManualRollbackThatHoldsTheMarkersLockFirstLeavesTheBootNothingToDo(t *testing.T) {
 	r := newRefusedInstall(t, "")
-	atRename, release := newOnceCloser(), newOnceCloser()
-	restore := func(dst, ext string) error {
-		atRename.close()
+	atRecord, release := newOnceCloser(), newOnceCloser()
+	hold := func() {
+		atRecord.close()
 		<-release.ch
-		return updater.RollbackBinary(dst, ext)
 	}
 	waits := make(chan struct{}, 1)
 	t.Cleanup(updater.SetStateLockWaitingForTest(func(string) { signalOnce(waits) }))
-	rolledBack, _ := rollBackFromTheConsole(t, r, restore, release.close)
+	rolledBack, _ := rollBackFromTheConsole(t, r, hold, release.close)
 	select {
-	case <-atRename.ch:
+	case <-atRecord.ch:
 	case <-time.After(withinTheTest):
-		t.Fatal("the rollback never reached its rename")
+		t.Fatal("the rollback never reached its record")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

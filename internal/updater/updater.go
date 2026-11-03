@@ -266,7 +266,10 @@ type Updater struct {
 	// on the .bak rename target and update-state.json. The `bridge
 	// update` CLI is a separate process and can't share this lock —
 	// the per-attempt scratch dir is what keeps its cleanup from
-	// deleting an in-flight install's files.
+	// deleting an in-flight install's files, and the install marker's
+	// lock (update-state.lock, held from Install's decision through its
+	// swap and by Rollback throughout; backlog B692) is what keeps the
+	// two processes' marker writes and swaps apart.
 	installInFlight atomic.Bool
 
 	// pendingRestart is the auto-installer's restart INTENT: "auto-install
@@ -641,12 +644,27 @@ func (u *Updater) restartWhenDrained(ctx context.Context) {
 // protection).
 //
 // Best-effort and narrow: only an "installing" marker is touched, and a
-// failure just leaves the pre-existing behaviour.
-func (u *Updater) refreshInstallAttemptedAt(_ context.Context) {
+// failure just leaves the pre-existing behaviour. The read and the write
+// hold the install marker's lock (backlog B692), so a migrating store open
+// or a start's housekeeping cannot record in between and see its record
+// written over; where the lock cannot be held (another holder past the
+// wait, no lock to give, a failure, a filesystem that keeps none) the marker
+// is left as it is and the restart goes on, and a stop in the wait says
+// nothing.
+func (u *Updater) refreshInstallAttemptedAt(ctx context.Context) {
 	if u.autoInstallOpts == nil || u.autoInstallOpts.DataDir == "" {
 		return
 	}
 	dir := u.autoInstallOpts.DataDir
+	lock, err := lockMarkerForUpdate(ctx, dir, "the install marker was not re-stamped before the restart")
+	if err != nil {
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+			logger.Warn("could not refresh the install marker before restarting; boot-time confirmation may treat it as abandoned",
+				"err", failure)
+		}
+		return
+	}
+	defer lock.Release()
 	st, err := LoadState(dir)
 	if err != nil || st.Status != "installing" {
 		return

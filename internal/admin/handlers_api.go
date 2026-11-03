@@ -3700,7 +3700,10 @@ func (s *Server) apiUpdatesCheck(w http.ResponseWriter, r *http.Request) {
 //   - 200 with the post-install Status on success
 //   - 400 when no update is available
 //   - 409 when downloads are inflight (use ?force=1 to override) or
-//     another install is already in progress (retry once it finishes)
+//     another install is already in progress (retry once it finishes),
+//     or the install marker's lock cannot be held (`marker-locked`:
+//     another process holds it, or the data dir's filesystem keeps no
+//     locks; backlog B692)
 //   - 501 on Windows (Phase B is darwin/linux; Windows is a follow-up)
 //   - 403 when the binary path isn't writable (system install needs sudo)
 //   - 502 on download / verify / swap failures
@@ -3729,7 +3732,11 @@ func (s *Server) apiUpdatesInstall(w http.ResponseWriter, r *http.Request) {
 //
 // Returns:
 //   - 204 on success (no body — operator clicks Restart next)
-//   - 409 when downloads are inflight (use ?force=1)
+//   - 409 when downloads are inflight (use ?force=1), the install
+//     marker's lock cannot be held (`marker-locked`), or the version
+//     rolled back from has opened the data dir, so its store may hold
+//     what the backup's version does not read (`rollback-refused`;
+//     backlog B692)
 //   - 501 on Windows
 //   - 502 on rollback I/O failure (.bak missing, etc.)
 func (s *Server) apiUpdatesRollback(w http.ResponseWriter, r *http.Request) {
@@ -3778,6 +3785,14 @@ func classifyUpdateError(err error) (status int, short string) {
 		return http.StatusConflict, "config-refused"
 	case errors.Is(err, ErrUpdateConfigCheckFailed):
 		return http.StatusBadGateway, "config-check-failed"
+	case errors.Is(err, ErrUpdateMarkerLocked):
+		// 409: another process holds the install marker's lock, or the data
+		// dir's filesystem keeps none; nothing was done (backlog B692).
+		return http.StatusConflict, "marker-locked"
+	case errors.Is(err, ErrUpdateRollbackRefused):
+		// 409: a newer version opened the data dir, so putting the backup
+		// back would be a downgrade past its store; nothing was done.
+		return http.StatusConflict, "rollback-refused"
 	default:
 		return http.StatusBadGateway, "install-failed"
 	}

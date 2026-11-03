@@ -2282,6 +2282,12 @@ func mapUpdaterError(err error) error {
 	case errors.Is(err, updater.ErrConfigCheckFailed):
 		return fmt.Errorf(errWrapDetailFormat, admin.ErrUpdateConfigCheckFailed,
 			strings.TrimPrefix(err.Error(), updater.ErrConfigCheckFailed.Error()+": "))
+	case errors.Is(err, updater.ErrMarkerLockUnavailable):
+		// The updater's sentence says what was not done and why, naming no
+		// path (backlog B692).
+		return detailError{sentinel: admin.ErrUpdateMarkerLocked, msg: err.Error()}
+	case errors.Is(err, updater.ErrRollbackRefused):
+		return detailError{sentinel: admin.ErrUpdateRollbackRefused, msg: err.Error()}
 	default:
 		return err
 	}

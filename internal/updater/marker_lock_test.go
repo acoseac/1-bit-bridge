@@ -440,6 +440,18 @@ func TestARollbackRefusedForTheMarkersLockWritesNothing(t *testing.T) {
 	})
 }
 
+// TestAnSCMStopFitsInsideTheMarkersLockWait: an install or an operator's
+// rollback on Windows holds the install marker's lock while it waits for the
+// SCM to stop the service, and every other taker of the lock waits
+// defaultStateLockWait for it, so that stop takes at most half the wait,
+// leaving the other half for the marker's writes and the renames.
+func TestAnSCMStopFitsInsideTheMarkersLockWait(t *testing.T) {
+	if 2*scmStopWait > defaultStateLockWait {
+		t.Fatalf("scmStopWait %s is more than half the install marker's lock's wait %s: a migrating store open or a start "+
+			"would give up on the lock while an install on Windows still waits for the service to stop", scmStopWait, defaultStateLockWait)
+	}
+}
+
 // TestTheRestampRefusedForTheMarkersLockWritesNothing: the auto-installer's
 // restamp before its restart reads and writes the marker only holding the
 // install marker's lock, and leaves it as it is where it cannot hold it.
