@@ -361,7 +361,15 @@ const consoleLastErrorDenied = "permission_denied"
 // otherwise. Never LastStop, which a start that succeeds leaves, nor an
 // error's words.
 func consoleLastError(a engine.Attempt) string {
-	return playerLastError(a)
+	switch {
+	case !a.Failed:
+		return ""
+	case a.Busy:
+		return lastErrorDeviceBusy
+	case a.Denied:
+		return consoleLastErrorDenied
+	}
+	return ""
 }
 
 // reasonText is the sentence beside an unavailable player's word.

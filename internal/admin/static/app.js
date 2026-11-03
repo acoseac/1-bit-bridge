@@ -7322,7 +7322,12 @@ function renderPlayerOutputRunning(run) {
     if (run.withheld && run.reason !== run.withheld) {
       state += " The config has changed since it started: it plays nothing until the bridge restarts.";
     }
+    // The cause of the last play that failed, while no later one succeeded
+    // (B676): the DAC another program holds, or the DAC's node this process
+    // may not open, whose user and group, and the commands that fix it, the
+    // doctor's line names.
     if (run.lastError === "device_busy") state += " Its last play found the DAC held by another program.";
+    else if (run.lastError === "permission_denied") state += " Its last play was refused the DAC: the bridge's user may not open the DAC's node, which the audio group owns on most boxes. The checks on the Diagnostics page (bridge doctor) name the user and the group, and the commands that let it open the node.";
     // What serves, whatever the config says now: the Source on the LAN, or,
     // for one the bridge started with and that is not, the server's reason.
     // The surface follows the box's addresses itself, so no restart is

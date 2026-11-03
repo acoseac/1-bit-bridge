@@ -1341,7 +1341,11 @@ func (e *Engine) callExpired(c *call) {
 // busy or a denied record. It moves no generation.
 func (e *Engine) attempted(err error, resume bool) {
 	o := &e.o
-	o.attempt = Attempt{Seq: o.attempt.Seq + 1, Failed: err != nil, Busy: errors.Is(err, ErrDeviceBusy)}
+	a := Attempt{Seq: o.attempt.Seq + 1, Failed: err != nil, Resume: resume}
+	if err != nil {
+		a.Busy, a.Denied, a.Detail = errors.Is(err, ErrDeviceBusy), errors.Is(err, ErrDeviceDenied), err.Error()
+	}
+	o.attempt = a
 	e.touched()
 }
 
