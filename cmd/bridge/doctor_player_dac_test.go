@@ -608,6 +608,9 @@ func TestTheDefaultConsoleDoctorChecksTheServingProcessOverTheHostsTrees(t *test
 	standInForALinuxBox(t, ext4Storage, nil)
 	h := servingDACHost(hostTrees, nil)
 	h.goos = "linux"
+	// A Linux process's credentials, so the empty trees decide the line on
+	// every host: Windows has no getgroups, and would stop the line there.
+	h.creds = func() (dacCreds, error) { return dacCreds{euid: 1000, name: "bridge"}, nil }
 	var line *doctor.Check
 	for _, c := range adminDoctorRunnerFor(path, nil, nil, h)(context.Background()).Checks {
 		if c.Name == playerDACCheckName {
