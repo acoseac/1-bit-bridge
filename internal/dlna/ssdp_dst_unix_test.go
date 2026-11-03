@@ -90,9 +90,10 @@ func TestParseDatagramMetaReadsThisPlatformsPktinfo(t *testing.T) {
 
 // TestParseDatagramMetaHoldsAnIPMessageOfTypeZero pins the nightly fuzz
 // crash of 2026-10-24 to 31 (backlog B610): an IPPROTO_IP control message of
-// type 0, which x/net's parser on Linux hands to a parse function its table
-// leaves unset, reports neither a destination nor an arrival index, and the
-// parser returns.
+// type 0, which x/net's parser on Linux handed to a parse function its table
+// leaves unset until v0.62.0, reports neither a destination nor an arrival
+// index, and the parser returns. Since v0.62.0 x/net passes it over itself
+// (backlog B615).
 func TestParseDatagramMetaHoldsAnIPMessageOfTypeZero(t *testing.T) {
 	oob := unixCmsg(unix.IPPROTO_IP, 0, []byte{192, 168, 1, 20, 7, 0, 0, 0}, -1)
 	if m := parseDatagramMeta(oob); m != (datagramMeta{}) {
@@ -126,13 +127,11 @@ func referenceDatagramMeta(oob []byte) (m datagramMeta, panicked bool) {
 }
 
 // controlDataCase is one shape of control data, laid out for this platform
-// (unixCmsg), with the metadata parseDatagramMeta must report for it and
-// whether x/net's own parse panics on it here.
+// (unixCmsg), with the metadata parseDatagramMeta must report for it.
 type controlDataCase struct {
-	name   string
-	oob    []byte
-	want   datagramMeta
-	panics bool
+	name string
+	oob  []byte
+	want datagramMeta
 }
 
 // ssdpGroup4 and peer4 are the destinations pktinfoAt's messages carry: the
@@ -155,56 +154,62 @@ func pktinfoMeta(dst [4]byte, idx int) datagramMeta {
 	return datagramMeta{dst: netip.AddrFrom4(dst), dstOK: true, ifIndex: idx, ifOK: idx > 0}
 }
 
-// portableControlData is every shape of control data whose metadata and
-// whose x/net verdict are the same on Linux and macOS: B610's policy, on
-// each shape its review named. x/net's answer stands wherever its parse
-// returns. A message at another level, or of an IPPROTO_IP type x/net does
-// not read here, is passed over, before or after an IP_PKTINFO; so is an
-// IP_PKTINFO shorter than its struct, and one before it stands. A header
-// whose length runs past the buffer or stops short of a header makes the
-// whole buffer report neither, before or after an IP_PKTINFO. Of two
-// IP_PKTINFO messages the later wins, its index of 0 included. A tail
-// shorter than a header is ignored. And the index is in_pktinfo's 32 bits,
-// reported only from 1 to MaxInt32 (Linux reads it signed, macOS unsigned,
-// and metaIndex refuses the rest). The IPPROTO_IP messages of type 0 are
-// platformControlData's, since x/net panics on them on Linux and not on
-// macOS.
+// portableControlData is every shape of control data whose metadata is the
+// same on Linux and macOS: B610's policy, on each shape its review named,
+// at x/net v0.62.0, whose parse panics on none of them. x/net's answer stands
+// wherever its parse returns. A message at another level, or of an
+// IPPROTO_IP type x/net does not read here, is passed over, before or after
+// an IP_PKTINFO; so is an IP_PKTINFO shorter than its struct, and one before
+// it stands. A message of type 0 is such a type on both since v0.62.0
+// (backlog B615), alone, before, after or between IP_PKTINFOs: on Linux
+// x/net's parse panicked on it until then (B610), and the recover reported
+// neither. A header whose length runs past the buffer or stops short of a
+// header makes the whole buffer report neither, before or after an
+// IP_PKTINFO. Of two IP_PKTINFO messages the later wins, its index of 0
+// included. A tail shorter than a header is ignored. And the index is
+// in_pktinfo's 32 bits, reported only from 1 to MaxInt32 (Linux reads it
+// signed, macOS unsigned, and metaIndex refuses the rest).
 func portableControlData() []controlDataCase {
 	pkt := pktinfoAt(7, ssdpGroup4)
 	tos := unixCmsg(unix.IPPROTO_IP, unix.IP_TOS, []byte{0x10, 0, 0, 0}, -1)
 	sock := unixCmsg(unix.SOL_SOCKET, 0, make([]byte, 8), -1)
+	zero := unixCmsg(unix.IPPROTO_IP, 0, []byte{0, 0, 0, 0}, -1)
 	short := unixCmsg(unix.IPPROTO_IP, unix.IP_PKTINFO, inetPktinfo(9, [4]byte{192, 168, 1, 20}, peer4)[:8], -1)
 	past := unixCmsg(unix.IPPROTO_IP, unix.IP_TTL, []byte{64, 0, 0, 0}, 1<<20)
 	below := unixCmsg(unix.IPPROTO_IP, unix.IP_TTL, []byte{64, 0, 0, 0}, 4)
 	return []controlDataCase{
-		{"a_type_x_net_does_not_read_alone", tos, datagramMeta{}, false},
-		{"a_type_x_net_does_not_read_before_a_pktinfo", slices.Concat(tos, pkt), pktinfoMeta(ssdpGroup4, 7), false},
-		{"a_type_x_net_does_not_read_after_a_pktinfo", slices.Concat(pkt, tos), pktinfoMeta(ssdpGroup4, 7), false},
-		{"another_levels_type_0_before_a_pktinfo", slices.Concat(sock, pkt), pktinfoMeta(ssdpGroup4, 7), false},
-		{"another_levels_type_0_after_a_pktinfo", slices.Concat(pkt, sock), pktinfoMeta(ssdpGroup4, 7), false},
-		{"a_short_pktinfo_alone", short, datagramMeta{}, false},
-		{"a_short_pktinfo_before_a_whole_one", slices.Concat(short, pkt), pktinfoMeta(ssdpGroup4, 7), false},
-		{"a_short_pktinfo_after_a_whole_one", slices.Concat(pkt, short), pktinfoMeta(ssdpGroup4, 7), false},
-		{"a_length_past_the_buffer_before_a_pktinfo", slices.Concat(past, pkt), datagramMeta{}, false},
-		{"a_length_past_the_buffer_after_a_pktinfo", slices.Concat(pkt, past), datagramMeta{}, false},
-		{"a_length_below_the_header_before_a_pktinfo", slices.Concat(below, pkt), datagramMeta{}, false},
-		{"a_length_below_the_header_after_a_pktinfo", slices.Concat(pkt, below), datagramMeta{}, false},
-		{"two_pktinfos_that_disagree", slices.Concat(pkt, pktinfoAt(9, peer4)), pktinfoMeta(peer4, 9), false},
-		{"the_same_two_the_other_way_round", slices.Concat(pktinfoAt(9, peer4), pkt), pktinfoMeta(ssdpGroup4, 7), false},
-		{"a_later_pktinfo_with_an_index_of_0", slices.Concat(pkt, pktinfoAt(0, peer4)), pktinfoMeta(peer4, 0), false},
-		{"a_tail_shorter_than_a_header_after_a_pktinfo", slices.Concat(pkt, []byte{1, 2, 3, 4}), pktinfoMeta(ssdpGroup4, 7), false},
-		{"an_index_of_0", pktinfoAt(0, ssdpGroup4), pktinfoMeta(ssdpGroup4, 0), false},
-		{"an_index_of_maxint32", pktinfoAt(math.MaxInt32, ssdpGroup4), pktinfoMeta(ssdpGroup4, math.MaxInt32), false},
-		{"an_index_of_maxint32_plus_1", pktinfoAt(math.MaxInt32+1, ssdpGroup4), pktinfoMeta(ssdpGroup4, 0), false},
-		{"an_index_of_maxuint32", pktinfoAt(math.MaxUint32, ssdpGroup4), pktinfoMeta(ssdpGroup4, 0), false},
+		{"a_type_x_net_does_not_read_alone", tos, datagramMeta{}},
+		{"a_type_x_net_does_not_read_before_a_pktinfo", slices.Concat(tos, pkt), pktinfoMeta(ssdpGroup4, 7)},
+		{"a_type_x_net_does_not_read_after_a_pktinfo", slices.Concat(pkt, tos), pktinfoMeta(ssdpGroup4, 7)},
+		{"another_levels_type_0_before_a_pktinfo", slices.Concat(sock, pkt), pktinfoMeta(ssdpGroup4, 7)},
+		{"another_levels_type_0_after_a_pktinfo", slices.Concat(pkt, sock), pktinfoMeta(ssdpGroup4, 7)},
+		{"type_0_alone", zero, datagramMeta{}},
+		{"type_0_before_a_pktinfo", slices.Concat(zero, pkt), pktinfoMeta(ssdpGroup4, 7)},
+		{"type_0_after_a_pktinfo", slices.Concat(pkt, zero), pktinfoMeta(ssdpGroup4, 7)},
+		{"type_0_between_two_pktinfos", slices.Concat(pkt, zero, pktinfoAt(9, peer4)), pktinfoMeta(peer4, 9)},
+		{"a_short_pktinfo_alone", short, datagramMeta{}},
+		{"a_short_pktinfo_before_a_whole_one", slices.Concat(short, pkt), pktinfoMeta(ssdpGroup4, 7)},
+		{"a_short_pktinfo_after_a_whole_one", slices.Concat(pkt, short), pktinfoMeta(ssdpGroup4, 7)},
+		{"a_length_past_the_buffer_before_a_pktinfo", slices.Concat(past, pkt), datagramMeta{}},
+		{"a_length_past_the_buffer_after_a_pktinfo", slices.Concat(pkt, past), datagramMeta{}},
+		{"a_length_below_the_header_before_a_pktinfo", slices.Concat(below, pkt), datagramMeta{}},
+		{"a_length_below_the_header_after_a_pktinfo", slices.Concat(pkt, below), datagramMeta{}},
+		{"two_pktinfos_that_disagree", slices.Concat(pkt, pktinfoAt(9, peer4)), pktinfoMeta(peer4, 9)},
+		{"the_same_two_the_other_way_round", slices.Concat(pktinfoAt(9, peer4), pkt), pktinfoMeta(ssdpGroup4, 7)},
+		{"a_later_pktinfo_with_an_index_of_0", slices.Concat(pkt, pktinfoAt(0, peer4)), pktinfoMeta(peer4, 0)},
+		{"a_tail_shorter_than_a_header_after_a_pktinfo", slices.Concat(pkt, []byte{1, 2, 3, 4}), pktinfoMeta(ssdpGroup4, 7)},
+		{"an_index_of_0", pktinfoAt(0, ssdpGroup4), pktinfoMeta(ssdpGroup4, 0)},
+		{"an_index_of_maxint32", pktinfoAt(math.MaxInt32, ssdpGroup4), pktinfoMeta(ssdpGroup4, math.MaxInt32)},
+		{"an_index_of_maxint32_plus_1", pktinfoAt(math.MaxInt32+1, ssdpGroup4), pktinfoMeta(ssdpGroup4, 0)},
+		{"an_index_of_maxuint32", pktinfoAt(math.MaxUint32, ssdpGroup4), pktinfoMeta(ssdpGroup4, 0)},
 	}
 }
 
 // TestParseDatagramMetaAnswersEveryShapeOfControlData pins B610's policy on
 // each shape portableControlData and this platform's platformControlData
-// lay out: the metadata each must report, whether x/net's own parse panics
-// on it here, and that the metadata is x/net's answer, or neither where that
-// parse panics (referenceDatagramMeta).
+// lay out: the metadata each must report, that x/net's own parse panics on
+// none of them here (since v0.62.0, backlog B615), and that the metadata is
+// x/net's answer (referenceDatagramMeta).
 func TestParseDatagramMetaAnswersEveryShapeOfControlData(t *testing.T) {
 	for _, tc := range slices.Concat(portableControlData(), platformControlData()) {
 		got := parseDatagramMeta(tc.oob)
@@ -212,10 +217,11 @@ func TestParseDatagramMetaAnswersEveryShapeOfControlData(t *testing.T) {
 			t.Errorf("%s: reported %+v, want %+v", tc.name, got, tc.want)
 		}
 		ref, panicked := referenceDatagramMeta(tc.oob)
-		if panicked != tc.panics {
-			// A release of x/net that stops panicking on this shape makes
-			// its answer the policy's, and this case's metadata with it.
-			t.Errorf("%s: x/net's parse panicked %v, want %v", tc.name, panicked, tc.panics)
+		if panicked {
+			// A release of x/net that panics on this shape again is
+			// answered neither by parseControlMessage's recover, whatever
+			// else the buffer holds, and this case's metadata with it.
+			t.Errorf("%s: x/net's parse panicked", tc.name)
 		}
 		if got != ref {
 			t.Errorf("%s: reported %+v, where x/net's parse reports %+v (panicked %v)", tc.name, got, ref, panicked)

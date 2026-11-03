@@ -22,17 +22,25 @@ import (
 // share one literal.
 const httpsScheme = "https://"
 
-// buildPairURL composes the bridge://pair?... URL that the iOS app
+// buildPairURL composes the onebit://pair?... URL that the iOS app
 // consumes via its onOpenURL handler. Shape is deliberately flat and
 // additive so the iOS side can tolerate future fields by ignoring them.
 //
-//	bridge://pair
+//	onebit://pair
 //	  ?url=<https URL to the bridge — primary/most-likely>
 //	  &urls=<newline-joined alternates including the primary>
 //	  &token=<base64url bearer token>
 //	  &code=<base64url one-time pairing code, when the bridge issues one>
 //	  &fingerprint=<AB:CD:...:EF>
 //	  &name=<library display name>
+//
+// The scheme is onebit, not bridge (B627). iOS 27 hands a bridge:// URL to
+// Apple's Watch app (com.apple.Bridge), so the Camera opened the console's
+// QR there and not in 1-bit. The app's #2369 put onebit beside bridge in
+// BridgePairingURL.pairingSchemes, with the same host and query, so 1-bit
+// 2.2 takes either link alike, and an app older than 2.2 pairs only from a
+// bridge:// one. Behind the scheme the link is byte for byte what it was.
+// Nothing in the bridge reads a pairing link of either scheme.
 //
 // `code` (internal/pairingcode) lets an app that understands it trade the
 // link for a token that never travelled in it: it redeems the code over
@@ -72,7 +80,7 @@ func buildPairURL(bridgeURL, rawToken, code, fingerprint, libraryName string, al
 	}
 	q.Set("fingerprint", fingerprint)
 	q.Set("name", libraryName)
-	return "bridge://pair?" + urlquery.Encode(q)
+	return "onebit://pair?" + urlquery.Encode(q)
 }
 
 // PairingCodeIssuer issues the one-time code a pairing link carries for a

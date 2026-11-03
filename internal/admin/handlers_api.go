@@ -283,7 +283,7 @@ type pairResult struct {
 	Name        string `json:"name"`
 	Fingerprint string `json:"fingerprint"`
 	URL         string `json:"url"`     // operator-supplied bridge URL (head of Alternates)
-	PairURL     string `json:"pairURL"` // bridge://pair?... for QR
+	PairURL     string `json:"pairURL"` // onebit://pair?... for QR
 	// Alternates is the full ordered URL list baked into the
 	// QR's `urls=` field — operator-supplied URL first, then every
 	// other reachable endpoint the bridge self-discovered (LAN IPv4/

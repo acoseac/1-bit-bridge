@@ -129,9 +129,9 @@ func prepareServeDataDirWith(dataDir string, mkdirAll func(string, os.FileMode) 
 	case err != nil:
 		return &dataDirUnusableError{dataDir: dataDir, why: fmt.Sprintf("it cannot be read: %v", err), err: err}
 	case !info.IsDir():
-		why := notADirectory(dataDir)
-		if why == "" {
-			why = dataDir + " is not a directory"
+		why := dataDir + " is not a directory"
+		if inTheWay, _ := fsutil.NotADirectory(dataDir); inTheWay != nil {
+			why = inTheWay.String()
 		}
 		return &dataDirUnusableError{dataDir: dataDir, why: why, err: &fs.PathError{Op: "stat", Path: dataDir, Err: syscall.ENOTDIR}}
 	}
@@ -140,79 +140,28 @@ func prepareServeDataDirWith(dataDir string, mkdirAll func(string, os.FileMode) 
 
 // whyNotMade says what stands in the way of the data directory dataDir that
 // MkdirAll could not make: the entry its error names, when that entry is
-// there and is no directory (notADirectory); for an ENOTDIR whose entry
-// cannot say so, the entry in the way on dataDir's path (blockingEntry); each
-// with the error beside it; and the error alone otherwise. Go's os.MkdirAll
-// names the entry in the way itself, an ancestor that is a regular file or a
-// link to one included; where an MkdirAll names the entry its own make
-// failed at, below the one in the way, the walk names the one in the way.
+// there and is no directory (fsutil.NotADirectory); for an ENOTDIR whose
+// entry cannot say so, the entry in the way on dataDir's path
+// (fsutil.BlockingEntry, the walk bridge doctor's data-dir line takes too);
+// each with the error beside it; and the error alone otherwise. Go's
+// os.MkdirAll names the entry in the way itself, an ancestor that is a
+// regular file or a link to one included; where an MkdirAll names the entry
+// its own make failed at, below the one in the way, the walk names the one in
+// the way. A directory the walk finds there, or a link to one, is no blocker
+// and names nothing, nor does an entry it cannot read.
 func whyNotMade(dataDir string, err error) string {
 	var pe *fs.PathError
 	if errors.As(err, &pe) {
-		if why := notADirectory(pe.Path); why != "" {
-			return fmt.Sprintf("%s (%v)", why, err)
+		if inTheWay, _ := fsutil.NotADirectory(pe.Path); inTheWay != nil {
+			return fmt.Sprintf("%v (%v)", inTheWay, err)
 		}
 	}
 	if errors.Is(err, syscall.ENOTDIR) {
-		if why := blockingEntry(dataDir); why != "" {
-			return fmt.Sprintf("%s (%v)", why, err)
+		if _, inTheWay, _ := fsutil.BlockingEntry(dataDir); inTheWay != nil {
+			return fmt.Sprintf("%v (%v)", inTheWay, err)
 		}
 	}
 	return fmt.Sprintf("it could not be made: %v", err)
-}
-
-// blockingEntry walks up dataDir's path, as bridge doctor's dataDirNotThere
-// walks for a link to nothing, past every entry Lstat cannot reach (one that
-// is not there, or below an entry that is no directory), to the first entry
-// that is there, and names it when it is the one in the way, no directory
-// (notADirectory: a regular file, a link to one, a link to nothing). A
-// directory there, or a link to one, is no blocker and names nothing, though
-// it is the first entry there; nor does an entry Lstat refuses for another
-// reason.
-func blockingEntry(dataDir string) string {
-	for p := dataDir; ; {
-		_, err := os.Lstat(p)
-		switch {
-		case err == nil:
-			return notADirectory(p)
-		case !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, syscall.ENOTDIR):
-			return ""
-		}
-		up := filepath.Dir(p)
-		if up == p {
-			return ""
-		}
-		p = up
-	}
-}
-
-// notADirectory says what entry is, when it is there and is no directory: a
-// regular file or another kind of entry, a symbolic link that leads to one,
-// named with where it leads, or a symbolic link to nothing. It answers "" for
-// a directory, a link to one, and an entry it cannot read.
-func notADirectory(entry string) string {
-	info, err := os.Lstat(entry)
-	switch {
-	case err != nil:
-		return ""
-	case info.Mode()&fs.ModeSymlink == 0:
-		if info.IsDir() {
-			return ""
-		}
-		return fmt.Sprintf("%s is %s, not a directory", entry, fsutil.EntryKind(info.Mode()))
-	}
-	target, err := os.Stat(entry)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return entry + " is a symbolic link to nothing"
-	case err != nil || target.IsDir():
-		return ""
-	}
-	resolved, err := filepath.EvalSymlinks(entry)
-	if err != nil {
-		return fmt.Sprintf("%s is a symbolic link to %s, not a directory", entry, fsutil.EntryKind(target.Mode()))
-	}
-	return fmt.Sprintf("%s leads to %s, %s, not a directory", entry, resolved, fsutil.EntryKind(target.Mode()))
 }
 
 // lockServeDataDir takes the lock that keeps a second `bridge serve` off a

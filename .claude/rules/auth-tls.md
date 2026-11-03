@@ -579,6 +579,24 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `[primary] + /v1/health.endpoints`. Public mode keeps its own explicit-
   `:443` synthesis in `pairAlternates` on purpose (the iOS 7788-default bug)
   and never consults the provider. (#936)
+- **The pairing link is `onebit://pair`, never `bridge://pair`** (2026-11-02,
+  backlog B627). iOS 27 hands a `bridge://` URL to Apple's Watch app
+  (`com.apple.Bridge`), so the console's QR, scanned with the Camera, opened
+  that app and not 1-bit. 1-bit 2.2 takes `onebit://pair` exactly as it takes
+  `bridge://pair` (the app's #2369 put `onebit` beside `bridge` in
+  `BridgePairingURL.pairingSchemes`: the same host and query); an app older
+  than 2.2 reads `bridge://` alone, so against a bridge after v0.2.2 it pairs
+  through the modal's three fields, or after an update. `buildPairURL` is the
+  one writer, for the mint's QR and the rotation's alike, and behind the
+  scheme the link is byte for byte what it was; nothing in the bridge parses
+  a pairing link of either scheme. PROTOCOL.md's "Pairing URL scheme" says
+  the same. **Don't write `bridge://` back, in the link or in a line that
+  sends a device to one.**
+  `TestThePairingLinkIsOnebitPairWithTheQueryItAlwaysCarried` (the whole
+  link for one input, captured before the change),
+  `TestMintAndRotateQRsCarryAnOnebitPairLink` (both handlers, each QR the
+  link beside it) and `TestCertRotateNamesAPairingLinkTheAppOpens` (the CLI's
+  re-pair line) pin it.
 - **`atlas.harvestBaseUrl` pins the host a credential POST may set** — the body
   carries the base URL, so whoever sets it chooses where bios come from, and
   those render as an attacker-chosen "Read more on …" link. A pin binds in every

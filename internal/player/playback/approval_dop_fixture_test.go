@@ -18,6 +18,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/qualification"
+	"github.com/acoseac/1-bit-bridge/internal/player/qualification/approvaltest"
 )
 
 // policySpec is one policy of an approved fixture record: its ID and tuple,
@@ -65,7 +66,7 @@ func approvedDSDFixture(t *testing.T, mode string, allowDoP bool, edges []qualif
 			t.Fatal(e)
 		}
 	}
-	a := &Authorization{Mode: mode, AllowDoP: allowDoP, StateDir: t.TempDir(), Record: "approved.json", Sysfs: loc.Observer.Sysfs, Controls: alsactl.Reader{Open: func(int) (alsactl.Device, error) { return emptyControls{}, nil }}}
+	a := &Authorization{Mode: mode, AllowDoP: allowDoP, StateDir: approvaltest.TempDir(t), Record: "approved.json", Sysfs: loc.Observer.Sysfs, Controls: alsactl.Reader{Open: func(int) (alsactl.Device, error) { return emptyControls{}, nil }}}
 	u, e := loc.Locate(context.Background())
 	if e != nil {
 		t.Fatal(e)

@@ -68908,6 +68908,27 @@ command through the build lock):
 - Not run here: the node harness and the console's other node tests (no node
   on legion0); CI's legs run them.
 
+### 2026-11-02 — B607 approval fixtures under umask 0002
+
+On macOS with go1.27.3 and umask 0002, `TestApprovedRecordTrust` and seven
+other top-level qualification tests failed with `untrusted approval directory`.
+Instrumenting `trustedFile` identified the state root made by
+`approvalFixture`'s `t.TempDir()` itself: its effective mode was 0775. The
+production check rightly refuses its group write bit. The approval fixture
+builders in qualification, playback, OpenHome's shared playback fixture and
+the CLI now use one helper that chmods the state directory to 0700; checked
+record and evidence writes already request 0600. No report shape changed.
+
+The test-only paths fall under `version_gate.go`'s guarded prefixes, so
+qualificationVersion rises to 29 (24 → 25 on its branch; B606, B621, B615/B616 and B659 took 25 to 28 on main first, so its merge raises it to 29) and the current runbook pins follow it.
+The qualification package passed with `-race -timeout 30m` under both umask
+0002 and 022. Removing the helper's one chmod call (count asserted) reproduced
+the same eight top-level failures under 0002; restoring it made the package
+green again. Playback's full package and the OpenHome and CLI approval
+consumers passed natively under 0002. Linux and Windows vet passed for all four
+packages. The full OpenHome and CLI suites could not pass in this sandbox:
+unrelated tests bind TCP listeners and receive `operation not permitted`.
+
 ## 2026-10-31 — B610: the SSDP listener's control-data parser holds whatever it is handed
 
 Backlog B610, which blocked the 0.2.2 tag. The nightly `fuzz.yml` failed eight
@@ -69567,6 +69588,381 @@ The separately count-asserted `handleErr` guard control made
 `TestHandleErrKeepsCredentialAfterShutdown` red: it logged `token_rejected` and
 wiped the token; that guard was restored too. B526's held-handler test rule
 gains this single deliberate TLS-answer exception.
+
+## 2026-11-02 — B615 and B616: x/net v0.62.0, the slog tripwire's citation, and a whole ucred before the credentials parse
+
+Backlogs B615 and B616 (Step 1, stream C; candidates for the 0.2.2.x patch),
+on `fix/b615-b616-xnet-ucred` from main fe2cb532, on legion0 (Ubuntu 26.04,
+Linux 7.0, x86-64, go1.27.3, umask 022).
+
+**x/net v0.62.0, read in its own source.** Its `ipv4/control.go:87-93` and
+`ipv6/control.go:133-139` open every case of `ControlMessage.Parse`'s switch
+with `ctlOpts[X].name > 0 &&`, so an entry a platform's table leaves unset is
+passed over and an IPPROTO_IP message of type 0 no longer calls the parse
+function it lacks (B610's crash). Every entry a v0.62.0 table sets has its
+parse function (ipv4: aix, the BSDs, darwin, dragonfly, freebsd, linux,
+solaris, zos; ipv6 likewise). The brief names the upstream commit 4b10404ac8;
+the module zip carries no history, so that hash is the brief's, while the
+code is checked (the tag's commit, by the `.info`, is 3de643db). The rest of
+the diff from v0.61.0 that the bridge's code reaches: Linux's IP_TTL is read
+as a 4-byte int (`ctlTTL` length 4; the bridge reads no TTL), the socket
+header parse refuses a platform with no header layout, and `html` coalesces
+text and escapes raw text under foreign content more strictly (the admin
+tests that parse HTML pass). x/net v0.62.0's bare ipv4 parse, no recover
+around it, fuzzed 3 minutes from B610's shapes (a throwaway target, deleted):
+6,053,898 execs, no panic.
+
+**The bump** (74a50568). `go get golang.org/x/net@v0.62.0`: go.mod moves
+v0.61.0 to v0.62.0, and go.sum takes v0.62.0's two lines in place of
+v0.61.0's (`h1:18ELalfM5+XNRwzM2nYqXsZQ9ByS1uhj2O/U7+5jqRY=`, and the go.mod
+hash both versions share, their go.mod files byte for byte the same: x/crypto
+0.58.0, x/sys 0.49.0, x/term 0.47.0, x/text 0.43.0). No other module moves.
+`go mod tidy` cannot run on this host: it fails offline at main and on the
+branch alike, on the same 64 packages (test dependencies of other modules
+the cache does not hold, aws-sdk-go-v2 and google/pprof among them). So
+go.sum is what #1336's tidy did for the last x/net bump, by hand, and checked:
+`go mod graph` names no v0.61.0, `go mod verify` says all modules verified,
+`go list -deps -test ./...` loads under `-mod=readonly`. GOSUMDB is off here:
+the h1 was computed from the cached zip (recomputed by hand over its 836
+entries) and not checked against sum.golang.org; CI's download checks it.
+
+**This host's module cache held a shallow copy of v0.62.0.** Its download
+files (`.info`, `.mod`, `.zip`, `.ziphash`) and its extracted directory were
+written at 12:37:41-42 UTC, before this session, and not by the go command
+(no `.lock`): the directory held the 9 top-level files and 23 empty
+directories, while the zip was whole. `go mod verify` called it modified, and
+`go get`'s load at 13:26:57 indexed that tree into GOCACHE's module index
+(651 bytes; for the module cache the index is keyed by the directory's path,
+never its contents), so every load then answered "cannot find module
+providing package golang.org/x/net/ipv4", the directory re-extracted or not.
+`GODEBUG=goindex=0` loaded the packages, which told the cause. Repaired: the
+shallow directory moved to this worktree's `.tmp/_b615/quarantine` (refused
+unless it was still exactly that shape), `go mod download` extracted the zip
+again, and the one stale index action file (`a8a068e6…-a`) moved there too;
+the index was rebuilt from the whole tree (151,251 bytes). Another cache
+filled the same way needs the same.
+
+**B610's tripwires went red on the bump, as they said they would.**
+Predicted on Linux, then seen exactly: `TestParseDatagramMetaAnswersEveryShapeOfControlData`'s
+four rows of type 0 (no panic, and three of them reporting the IP_PKTINFO
+beside the message) and `TestTheDatagramMetaSeedsAreLinuxsControlData`'s two
+seeds of type 0. The rows of type 0 are `portableControlData`'s now, with
+x/net's answer, Darwin's all along; Linux's `platformControlData` is empty,
+macOS's keeps IP_RECVDSTADDR and IP_RECVIF, the panics column is gone, and
+the shape test fails on any shape x/net's parse panics on again. The policy
+is B610's: x/net's answer wherever its parse returns, so an IP_PKTINFO beside
+a message of type 0 is reported on Linux now; no kernel writes one.
+`parseControlMessage` keeps its recover, as defence in depth, and its doc
+says why. **Control** (74a50568, tree clean): its five lines removed by a
+script that refused unless they occurred once; predicted green, and every
+datagram test stayed green, so no input known reaches the recover at
+v0.62.0, which the rule line now says. Restored from git.
+
+**The slog tripwire** (a6d1afaa).
+`TestSlogsHandlersWriteAnIgnoredGroupAgainstTheContract` cites golang/go#81970
+("attributes after a group that turns out to be empty are written
+incorrectly", 2026-10-02), fixed by CL 844165 for Go 1.28 with no backport to
+1.27: it goes red on Go 1.28, as expected, and is deleted then with the note
+in `recordHandler`'s doc that names it, which cites the issue too. Comments
+only; the issue's facts are the brief's (no network here).
+
+**B616: the credentials parse.** The hotplug source's `recv` handed each
+control message beside a uevent to x/sys's `ParseUnixCredentials`, which
+(x/sys v0.49.0, `unix/sockcmsg_linux.go:27-36`) checks the level and the type
+and reads a ucred at `&m.Data[0]` whatever the payload's length;
+`ParseSocketControlMessage` bounds each message by the buffer, so the hole is
+a payload shorter than 12 bytes in a message that parses. **Red first**
+(ca56423a; the parse moved, unchanged, into `parseCredentials`), each run
+alone, predicted and then seen: `TestParseCredentialsReadsOnlyAWholeUcred`
+red in 6 of 16 subtests (`an_empty_payload`,
+`an_empty_payload_after_a_whole_ucred` and
+`a_whole_ucred_after_an_empty_payload` panicked, index out of range [0] with
+length 0 at `sockcmsg_linux.go:34`; `a_short_payload` and
+`a_short_payload_after_a_whole_ucred` read `pid=666 uid=0 gid=0xa5a5a5a5`, a
+4-byte payload, then its own message's padding as uid 0, then the buffer
+past the message; `a_payload_one_byte_short` read one byte of padding),
+`TestTheCommittedCredentialsSeedIsAnEmptyPayload` red (the panic), and
+`FuzzParseCredentials` crashed at seed#4. Uid 0 is what `handle`'s
+credentials check asks for, so the padding a short payload was read into
+would have passed it (the port id check, 0, stands apart). The short reads
+stay inside the test's own allocation (`inBuffer`), so `-race`'s checkptr
+does not fault on them. **The guard** (187404f5): `parseCredentials` passes
+over a control message whose payload is shorter than `unix.SizeofUcred`
+before the parser. A uevent with no whole ucred then carries no credentials,
+which `handle` already counts as `Foreign` while SO_PASSCRED is on; no
+counter or logging was added (`recv` has no logger). The kernel writes a
+whole ucred (cmsg_len 28, 12 bytes: B610's measurement), so nothing it sends
+reads differently. The messages are x/sys's own layout (`UnixCredentials`),
+which the test checks first. **Negative control** (187404f5, tree clean): the
+guard's three lines removed by a script that refused unless they occurred
+once, and checked that the payload's length was then read nowhere and
+`unix.SizeofUcred` was left only in the source's buffer sizing. Predicted:
+those six subtests and their test, the seed test, and the fuzz target with
+seed#4, 10 failure lines. Seen: exactly those 10 (compared by script), the
+panic at `sockcmsg_linux.go:34`; the rest of the package, those three
+skipped, passed. Restored from git. **Fuzzing**: `FuzzParseCredentials` 2
+minutes, 17,827,804 execs, no failure.
+
+**qualificationVersion 27**: `internal/player/hotplug/` is a guarded prefix;
+the runbook's five pins follow, and its record of versions says what 25
+covers (B612 took 24 on main and wrote no such paragraph).
+
+**Docs.** `ops/History-rules-dlna-upnp.md` (B610's long form: v0.62.0's fix,
+the policy's answer beside a message of type 0, the Don't and what its tests
+pin now), `ops/History-rules-player.md` (the hotplug source's long form, with
+the credentials), `ops/History-Build.md` (the fuzz census: 66 targets by
+file and name, 65 by name, eighteen packages, forty-seven with properties),
+and the two rules lines, `dlna-upnp.md`'s B610 bullet and `player.md`'s
+hotplug source bullet, as a checked patch (this host's tools refuse
+`.claude/`): `.tmp/_b615/b615-b616-rules.patch` in this worktree, built
+read-only and checked with a strict applier against patched copies;
+`make docs-check` with it applied over a shadow tree: ok, `player.md 96.8%`.
+
+**Checks**, on 1e2c8175 (each Go command through the build lock, umask 022):
+- `make test` (P=4, `-race`): exit 0; 80 packages ok and 13 with no test
+  files, the Linux-only `internal/alsapcm` (29.7 s), `internal/atomicwrite`
+  (19.1 s), `internal/alsa`, `internal/alsactl` and `internal/player/hotplug`
+  (2.3 s) among them; `cmd/bridge` 824.9 s, `internal/admin` 953.7 s.
+- `make vet`: exit 0. `go vet` for `GOOS=windows` and `GOOS=darwin` of
+  `internal/dlna/...`, `internal/player/hotplug/...`,
+  `internal/player/qualification/...` and `internal/logging/...`: clean.
+- `make fmt` changed nothing, and go1.27.3's gofmt lists none of the ten Go
+  files changed; `make build-all`: `check-build-tags: OK` and the six targets
+  built (`dist/` removed after).
+- `make docs-check`: ok, `CLAUDE.md 71.9%; player.md 96.8%; worst load,
+  player_openhome_test.go 61.3%`, and the same with the rules patch applied.
+- `scripts/qualification-version -base fe2cb532 -head HEAD`: `qualification
+  version OK: fe2cb532..HEAD`; with `-head ca56423a`, the guarded changes
+  before the raise: `guarded code changed without qualificationVersion
+  increase (24 -> 24)`, exit 1.
+- Before the gate, per commit: `internal/dlna/...` plain and under `-race`;
+  the other packages that import x/net (`internal/upnp`, `internal/tls`,
+  `internal/mdns`, `internal/dnstest`, `internal/dlna/discovery`); the 17
+  `internal/admin` tests in the three files that parse HTML with
+  `x/net/html` (15 pass, 2 skip without node, as on main);
+  `internal/player/hotplug` and `internal/player/qualification` plain and
+  under `-race`; `internal/logging/...`.
+- Not run here: darwin's rows of the datagram tests (vetted only; they run on
+  a Mac), and the node harness (no node on legion0).
+
+## 2026-11-02 — B659: bridge doctor's data-dir line, for every config that loads, from the walk serve's refusal reads
+
+Backlog B659, B606's follow-up (Step 1). The brief, drafted from the code by
+B606's worker, was checked by Codex, whose points were binding: an ancestor
+that is a link to a regular file among the failing shapes; "every config"
+means every config that loads, and one that cannot be loaded is "not
+checked", a warn, never a guess; reuse serve's `blockingEntry` and
+`notADirectory` before writing a new walk; and "the same verdict as serve"
+covers the path's shapes only, a permission or other preparation error
+staying a warn. The owner's decision: an ancestor that is a regular file is a
+fail, matching serve's refusal.
+
+**The gap, measured.** On main (18acfb52), on legion0 (Ubuntu 26.04, Linux
+7.0, x86-64, go1.27.3), through `doctorCmd` with the player off: over a data
+dir below a regular file, "13 ok, 7 warn, 0 fail" and "all clear.", while
+serve refuses that data dir and exits 1 (`TestServeRefusesADataDirectoryItCannotPrepare`'s
+shape). Every one of serve's six shapes (`unusableDataDirs`) read "all
+clear." there, with no fail (13 ok and 7 warn for the file shapes, 16 and 4
+for the links to nothing). The player-storage line, the only one that failed
+such a data dir, is there only for a config that asks for the player on
+Linux; with the player on (a stand-in Linux box, the real inspector), the two
+ancestor shapes, a regular file and a link to one, still read "all clear."
+("13 ok, 8 warn, 0 fail"): the line warned "not checked: the data directory D
+cannot be inspected: not a directory", the bare ENOTDIR
+`filepath.EvalSymlinks` answers, naming no entry.
+
+**The fix.**
+- `dataDirCheck` (cmd/bridge/doctor_data_dir.go), wired by
+  `buildDoctorDepsFor` as `doctor.Deps.DataDirPreparation`, which
+  `doctor.Run` places right after config-dir, so bridge doctor, the console's
+  doctor (`adminDoctorRunner`) and the launcher's row carry it word for word.
+  It walks up the data dir's path to the first entry that is there, by Lstat
+  and Stat, writing nothing: a fail for each shape serve refuses ("bridge
+  serve will not start: the data directory D is a regular file, not a
+  directory"; "… A is a regular file, not a directory, and serve cannot make
+  D below it"; "… A leads to T, a regular file, not a directory, and serve
+  cannot make D through it"; "… L is a symbolic link to nothing, and serve
+  cannot make D through it"), with a link's fix or a file's; ok for a
+  directory or a link to one ("D is a directory") and for a data dir not made
+  yet below one ("D does not exist yet; bridge serve makes it"); a warn, "not
+  checked", naming the data dir and the error, for a walk a permission error
+  or a link cycle stops. A config found or named that does not load is "not
+  checked: the config that sets the data directory does not load" (or "… is
+  not readable by this user", "the named config does not exist"), a warn,
+  its reason config-file's (`doctor.ConfigFile.NotGradedReason`). A run that
+  finds no config has no line, nor does `bridge init`'s preflight (init makes
+  the data dir itself, before it writes the config).
+- One walk: serve's `notADirectory` and `blockingEntry` moved to
+  `internal/fsutil` as `fsutil.NotADirectory` (what stands at an entry,
+  `fsutil.EntryInTheWay`, apart from an entry it cannot read) and
+  `fsutil.BlockingEntry` (the nearest entry there, what stands there, and the
+  walk's error). Serve's refusal reads them and says what it said for every
+  shape; its tests pass unchanged. One reading changed: an entry os.Lstat
+  calls no directory is asked of os.Stat whether it leads to one, as
+  os.MkdirAll asks it, so a Windows junction to a directory (which Go 1.23's
+  os.Lstat reads as an irregular file: a name surrogate gets no ModeDir) is no
+  entry in the way, where the line would have failed a junctioned data dir
+  serve takes; a junction to nothing is still in the way, "an irregular file",
+  as serve named it.
+- The player-storage line sends every path answer of its inspection
+  (`ErrRootNotADirectory`, `fs.ErrNotExist`, the bare ENOTDIR) to the same
+  walk (`dataDirOnItsWay`) and says what the data-dir line says, so an
+  ancestor that is a regular file or a link to one is a fail there too.
+  `TestNoErrorOfThePlayersStorageLineReadsAsOK` lost that case, deliberately.
+- qualificationVersion 27 (`internal/fsutil/` is guarded; 26 on the branch,
+  raised at the merge over B621's 26), with a paragraph in
+  `ops/b470-native-qualification.md`; nothing in the player calls the new
+  functions. The README's sample report shows the line.
+
+**Red first, by name** (03d8e373 on 18acfb52; through the build lock): through
+`doctorCmd` and `adminDoctorRunner`, `TestBothDoctorsFailEveryDataDirectoryServeRefuses`
+(serve's six shapes, `unusableDataDirs`), `TestTheDataDirLineSaysWhatStandsInTheWayAndItsFix`
+(six), `TestBothDoctorsTakeADataDirectoryServeCanPrepare` (four),
+`TestTheDataDirLineIsNotCheckedWhereTheConfigCannotBeLoaded` (two of three: no
+line; the pre-init case, no line, was green as it should be),
+`TestTheDataDirLineIsAWarnWhereThePathCannotBeInspected` (unix, three) and
+`TestThePlayersStorageLineSaysWhatTheDataDirLineSays` (unix, six; the two
+ancestor shapes also because the player-storage line warned). Green after
+(1fefbd80), with the fsutil and doctor unit tests beside them, and the full
+`./cmd/bridge/` suite (269 s).
+
+**The negative controls** (on 1fefbd80, committed first; a script mutated the
+exact text, asserting one occurrence, and `git diff --numstat` showed only the
+mutated file; predictions written before each run, compared leaf by leaf by a
+script; restored from git, the tree clean):
+1. `buildDoctorDepsFor` sets no `DataDirPreparation` (cmd/bridge/doctor.go,
+   -4 lines). Predicted red: the 27 leaves that need a data-dir line through
+   either doctor. Observed over the whole `./cmd/bridge/` suite: those 27 and
+   nothing else (33 FAIL lines with their 6 parents).
+2. `fsutil.BlockingEntry` stops at an ENOTDIR as at any other error, as
+   B603's walk did (internal/fsutil/notadir.go, one line). Predicted red, 11
+   leaves: fsutil's two ancestor cases and its named pipe, both doctor lines'
+   ancestor-that-is-a-regular-file and -a-link-to-one cases (six), and serve's
+   `TestThePreparationNamesTheEntryInTheWayBelowWhichMkdirAllFailed` for a
+   link to a regular file and a regular file (its link to nothing passes
+   ENOENT, green). Observed over `./internal/fsutil/` and `./cmd/bridge/`:
+   those 11 and nothing else (17 FAIL lines). Serve's refusal, the data-dir
+   line and the player-storage line read one walk.
+3. On f23b5c31, which adds two tests for the player-storage line's guard (a
+   walk that finds the data dir there after the inspection answered it not
+   there, and, unix, nothing in the way after a bare ENOTDIR: not checked, a
+   warn naming the inspection's error, never "not there yet"), the guard
+   never fires (cmd/bridge/doctor_player_storage.go, one line). Predicted red:
+   those two. Observed over the whole `./cmd/bridge/` suite: those 2 and
+   nothing else.
+
+**Not covered here.** The Windows halves (`TestNotADirectoryTakesAJunctionToADirectory`,
+a junction to a directory and one to nothing) are compiled, not run: no
+Windows host. Root's view of a mode-0 directory is skipped as root; this host
+ran them as a user the mode bits deny. Whether the service's user can write
+the data dir is not asked, as serve's preparation does not ask it.
+
+**The rules.** This headless session may not write `.claude/`: the new
+data-dir line and the changed player-storage line of `cli-serve.md` are a
+patch beside this job's report (`rules-b659.patch`), built from the long
+forms' heads in `ops/History-rules-cli-serve.md` (the B659 entry, the B603
+entry's new paragraph, the B606 entry's note on the move) and checked with a
+strict applier.
+
+**Commits**: 03d8e373 (red), 1fefbd80 (the fix), f23b5c31 (the guard's
+tests), 0f7e161f (docs), and this one (the checks below).
+
+**Checks** (legion0, umask 022, go1.27.3,
+`-tags ts_omit_webclient,ts_omit_debugeventbus`, TMPDIR on the worktree's
+disk, every run through the build lock): `go test` of `./cmd/bridge/` (on
+1fefbd80, 269 s), `./internal/fsutil/`, `./internal/doctor/` and
+`./internal/player/qualification/`: ok. The same four under `-race -timeout
+30m` on 0f7e161f: ok (773 s, 2.8 s, 6.8 s, 3.0 s). `make test`, once, on
+0f7e161f: all 80 packages ok (cmd/bridge 834 s, internal/manifest 1327 s,
+scripts/third-party-licenses 253 s with the build-site census;
+`TestEveryCitedTestNameExists` and `TestNoDocblockNamesAnotherDeclaration`
+over these docs). `make vet` is clean (linux, native), and `go vet` of the
+four packages for windows and darwin (cross-vet, compiled only: the Windows
+junction test never ran). gofmt (go1.27.3's) lists none of the branch's 16
+Go files. `make docs-check`: ok, `CLAUDE.md 71.9%; player.md 96.8%; worst
+load, player_openhome_test.go 61.4%`, the same with the rules patch applied
+(cli-serve.md 34,409 bytes). `scripts/qualification-version -base main -head
+HEAD`: OK.
+
+## 2026-11-02 — B627: the console's pairing QR and links say onebit://pair
+
+Backlog B627, the bridge half; Step 1, a candidate for the 0.2.2.x patch.
+On iOS 27 a `bridge://` URL opens Apple's Watch app (`com.apple.Bridge`), so
+the console's pairing QR, scanned with the Camera, opened that app and not
+1-bit. 1-bit 2.2, live on the App Store, takes `onebit://pair` exactly as it
+takes `bridge://pair`: the app's #2369 put `onebit` beside `bridge` in
+`BridgePairingURL.pairingSchemes`, with the same host, `pair`, and the same
+query.
+
+**The change.** `buildPairURL` writes `onebit://pair?` before the query it
+always wrote, and `apiTokensMint` and `apiTokensRotate` build both the link
+and its QR through it, so the one change covers both QR codes. The bridge
+reads no pairing link (Codex's check; no non-test code compares a scheme
+with `bridge` or a host with `pair`), so nothing on this side has to go on
+accepting `bridge://`. `bridge pair` prints a token, not a link, and the
+console's modal shows the QR beside three copyable fields with no link of
+its own; both were left. `bridge cert rotate`'s preamble said "admin console
+QR or bridge:// link" and now names an `onebit://` link. The comments that
+named `bridge://` follow (api, advertise, tls, the `pairResult` field,
+app.js; pairingcode's history names the link without a scheme), and so do
+AGENTS.md, CLAUDE.md, SECURITY.md (the app's parser for both forms in
+scope) and README.md (1-bit 2.2 or later). PROTOCOL.md's "Pairing URL
+scheme" section gains a **Scheme.** paragraph (the app takes both schemes;
+the console emits `onebit://pair` since the bridge release after v0.2.2, and
+why), its example says `onebit://pair` and carries the optional `urls` it
+omitted, and its table gains a `urls` row. `ProtocolVersion` stays 1: the
+wire did not change. The cost: an app older than 2.2 reads `bridge://`
+alone, so against a bridge after v0.2.2 it pairs through the modal's three
+fields, or after an update.
+
+**Red first.** d6b982c9 holds the tests alone, over f6782cd3's code, where
+four failed on the scheme and on nothing else:
+`TestThePairingLinkIsOnebitPairWithTheQueryItAlwaysCarried` (the whole link
+for one input, everything after the scheme captured from f6782cd3's
+builder), `TestMintAndRotateQRsCarryAnOnebitPairLink` (both handlers: each
+pairURL `onebit://pair` with a query and no other part, and each QR the
+pairURL beside it, the handler's PNG equal to `qrDataURL(pairURL)`, which
+go-qrcode renders alike for one text; that half passed red),
+`TestTokensMintListRevokeFlow` (its prefix check) and
+`TestCertRotateNamesAPairingLinkTheAppOpens` (the CLI's preamble, declined
+at the prompt). All four pass on 2020432f.
+
+**Negative controls**, on 2020432f, each restored with `git checkout --`
+and the tree checked clean after:
+1. The old scheme back, in `buildPairURL` and in the CLI's line, over the
+   whole `internal/admin` and `cmd/bridge` packages: exactly the four
+   predicted tests failed (4 predicted, 4 failed, no other failure), each
+   on the scheme.
+2. `apiTokensMint` rendering its QR from `pairURL + "&x=1"`, over the whole
+   `internal/admin`: exactly one failure, as predicted,
+   `TestMintAndRotateQRsCarryAnOnebitPairLink` on its mint half ("the QR is
+   not the pairURL beside it"), so the QR half has teeth.
+
+**Runs** (legion0, Ubuntu 26.04, x86-64, go1.27.3, umask 022, the
+Makefile's tags, TMPDIR on the worktree's disk, every run through the build
+lock): `go test` of `./cmd/bridge/`,
+`./internal/admin/`, `./internal/api/`, `./internal/advertise/`,
+`./internal/pairingcode/` and `./internal/tls/`: ok (298 s, 214 s, 42 s,
+0.1 s, 0.0 s, 5.0 s); the same under `-race -timeout 30m`: ok (794 s, 917 s,
+110 s, 1.1 s, 1.0 s, 5.3 s). `make test`, twice, on 2020432f. The first was
+ok but for `scripts/third-party-licenses`'s `TestRealTreeBuildSiteCensus`:
+"build site must not be a symlink: .tmp/…/001/other/Linked", in the
+temporary directory of internal/manifest's
+`TestScanner_ARootHoldingOnlyLinksToDirectoriesNamesThem`, the race between
+the census walk and that test's symlink in `.tmp` that B606's round 2
+recorded above (afterwards `.tmp` held empty directories only). The second,
+with `TMPDIR` under `.tmp/_b627/`, a `_` directory the census skips by its
+name, was ok, all 80 packages (cmd/bridge 837 s, internal/admin 959 s,
+internal/manifest 1331 s). `make vet`, and `go vet ./...` with the tags for
+windows and for darwin: clean. go1.27.3's gofmt lists none of the 10 Go
+files the branch changes. `make docs-check`: ok, `CLAUDE.md 71.9%;
+player.md 96.8%; worst load, player_openhome_test.go 61.6%`.
+`scripts/qualification-version -base main -head HEAD`: OK, no guarded path
+changed, so the version stays 26. The rule is one bullet in auth-tls.md,
+under Auth, pairing, TLS and security posture, shipped as a patch beside
+the job's report because `.claude/` cannot be written from this session;
+with it applied, docs-check reads the same (auth-tls.md 48,575 to 49,802
+bytes; its heaviest load 243,597 bytes, at internal/baseurl/baseurl_test.go).
 
 ## 2026-11-02 — B613: a candidate is checked against the settings before its swap, and an install an older updater made is rolled back when its version refuses them
 

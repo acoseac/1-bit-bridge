@@ -29,6 +29,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback/playbacktest"
 	"github.com/acoseac/1-bit-bridge/internal/player/qualification"
+	"github.com/acoseac/1-bit-bridge/internal/player/qualification/approvaltest"
 )
 
 // dsdFactsOf is the element's dsdPlayback for a ready player on b, as GET
@@ -282,6 +283,7 @@ func goBarIdentityFiles(t *testing.T, trees outputTrees) {
 // (dop64) for it, with its synthetic reports.
 func dopRecordIn(t *testing.T, dir string, trees outputTrees) {
 	t.Helper()
+	approvaltest.SecureDir(t, dir)
 	goBarIdentityFiles(t, trees)
 	qi, e := (alsa.SysfsReader{Root: trees.sysfs}).Qualification(5)
 	if e != nil {

@@ -54,7 +54,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 | `internal/manifest` | SQLite library index + tag extractors (FLAC / DSF / MP3 / M4A) + JSON serializer; Scanner roots are hot-reloadable |
 | `internal/enrich` | MusicBrainz + Cover Art Archive + Deezer clients, rate-limited (1.1s / 500ms / 120ms) |
 | `internal/api` | HTTP/2 handlers: `/v1/{health,list,stat,read,download,manifest,artwork/{mbid},artist-image/{mbid}}` |
-| `internal/admin` | Local web console on 127.0.0.1:7789 — library/devices/stats/settings pages + JSON API + bridge:// QR pair URL. Loopback-only, no auth. |
+| `internal/admin` | Local web console on 127.0.0.1:7789 — library/devices/stats/settings pages + JSON API + onebit:// QR pair URL. Loopback-only, no auth. |
 | `internal/packaging` | launchd plist + systemd unit templates + install/uninstall helpers, used by `bridge init` |
 | `internal/alsa` | Reads the box's ALSA state from a `/proc` tree: the cards, a USB card's id and stream altsets, what an open playback substream was opened with, and the thread and process holding it (`bridge output dac`); the ALSA configuration under `etc` (`PCMConfig`: the card a device names, its chain, and the first stage on its way that changes samples); and from sysfs (`SysfsReader`, bounded and confined to its root), each card's USB unit and anchored port (B470 PR 4a) |
 | `internal/usbid` | What names a USB unit for the player: `Serial`, the password-class guard that prints and encodes as a redaction everywhere but the config file; `ParseHex16`; `Port`, the anchored port path grammar |
