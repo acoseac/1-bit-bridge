@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -110,13 +109,13 @@ func TestTheMigrationVetoOutlivesTheRollbacksHousekeeping(t *testing.T) {
 	}
 }
 
-// TestOnlyTheVetoedVersionsOwnStartOrAReinstallLiftsTheVeto: serve's
-// admission of the vetoed version, a start that got past its settings, lifts
-// the veto, recording over an armed install in the same write, under the
-// install marker's lock (one it cannot take refuses and writes nothing); the
-// version put back and any other leave it; and a new install's marker, a
-// fresh one, carries none.
-func TestOnlyTheVetoedVersionsOwnStartOrAReinstallLiftsTheVeto(t *testing.T) {
+// TestOnlyTheVetoedVersionsOwnStartLiftsTheVeto: serve's admission of the
+// vetoed version, a start that got past its settings, lifts the veto,
+// recording over an armed install in the same write, under the install
+// marker's lock (one it cannot take refuses and writes nothing); the version
+// put back and any other leave it. A new install's fresh marker carries none
+// (TestANewInstallsMarkerCarriesNoVeto).
+func TestOnlyTheVetoedVersionsOwnStartLiftsTheVeto(t *testing.T) {
 	t.Run("the version put back, and another", func(t *testing.T) {
 		dir := t.TempDir()
 		finishedRollback(t, dir)
@@ -187,25 +186,6 @@ func TestOnlyTheVetoedVersionsOwnStartOrAReinstallLiftsTheVeto(t *testing.T) {
 		finishedRollback(t, dir)
 		if res, err := AdmitBoot(context.Background(), dir, "0.2.3", nil); err != nil || !res.VetoLifted || res.NoLocks == nil {
 			t.Errorf("the admission where no lock can be had = %+v, %v; want the veto lifted, saying no lock was had", res, err)
-		}
-	})
-	t.Run("a reinstall", func(t *testing.T) {
-		fix := newInstallFixture(t, "0.2.3")
-		dir := t.TempDir()
-		finishedRollback(t, dir)
-		live := filepath.Join(dir, "bridge")
-		if err := os.WriteFile(live, []byte("bridge-binary-0.2.1"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		upd := New(Options{RepoOverride: "fake/repo", Client: NewClient("fake/repo", time.Second).WithBaseURL(fix.server.URL)})
-		upd.mu.Lock()
-		upd.status.CurrentVersion, upd.status.LatestVersion, upd.status.UpdateAvailable = "0.2.1", "0.2.3", true
-		upd.mu.Unlock()
-		if _, err := upd.Install(context.Background(), InstallOptions{DataDir: dir, BinaryPath: live, Force: true, Verifier: noopVerifier}); err != nil {
-			t.Fatalf("Install = %v", err)
-		}
-		if st, err := LoadState(dir); err != nil || st.MigrationVeto != "" || st.Status != "installing" {
-			t.Errorf("the marker after a reinstall = %+v (%v), want a fresh install marker with no veto", st, err)
 		}
 	})
 }
