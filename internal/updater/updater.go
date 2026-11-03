@@ -306,6 +306,11 @@ type Updater struct {
 	// swapAwaitingRestart has matched the target: consulted before, it
 	// refused a genuinely newer release.
 	swapPending atomic.Bool
+
+	// restampSave, nil in production (SaveState), is the auto-installer's
+	// restamp's write of the marker (refreshInstallAttemptedAt): a test's
+	// stand-in for a write that is under way when a stop lands.
+	restampSave func(dataDir string, st State) error
 }
 
 // New builds an Updater. The poller is not started — call Run on it
@@ -681,7 +686,11 @@ func (u *Updater) refreshInstallAttemptedAt(ctx context.Context) error {
 		return nil
 	}
 	st.AttemptedAt = time.Now().UTC()
-	if err := SaveState(dir, st); err != nil {
+	save := u.restampSave
+	if save == nil {
+		save = SaveState
+	}
+	if err := save(dir, st); err != nil {
 		logger.Warn("could not refresh the install marker before restarting; boot-time confirmation may treat it as abandoned",
 			"err", err)
 	}
