@@ -1367,3 +1367,59 @@ nothing are refused, each refused by the writer's probe too
 (`ProbeDurable`); a link to a directory is inspected; and a root below a link
 to nothing is still not there. The record is in `ops/engineering-log.md`,
 2026-11-02, B606.
+
+## B676 — the installer says what lets the player open the DAC (2026-11-03)
+
+- **…and the installer says what lets the bridge's own player open the DAC, and runs none of it** (2026-11-03, backlog B676): on a box with an ALSA playback node (`/dev/snd/pcmC*D*p`) whose group (`ls -ld`'s) neither every user nor the account (`id -nG USER`, never this process's groups) is given, a new install, an upgrade and `--no-init` print `usermod -aG <group> <user>` and `systemctl restart user@<uid>.service   # or reboot`, through sudo where the box has it, each word quoted (`root_line`, `command_line`), and a line on what the restart costs; an account in the group whose login is not gets the restart alone; the non-systemd set-up gets the usermod and a new login; a node every user may open, root's group, no node, and `--uninstall` get nothing. **Don't run usermod or the restart, write a user or a group, print a placeholder or a `$USER` a root shell would expand, judge the account by this process's groups, or advise on a box with no playback node.**
+
+*Why.* The player opens the DAC's node for reading and writing; the audio
+group owns it on Debian, Ubuntu, Raspberry Pi OS, Volumio and moOde, and a
+desktop's seat ACL, which lets a desktop login open it, is not a lingering
+service's. Nothing put the bridge's user in the group, and the installer
+neither did it nor said to, so a box set up by the installer played nothing
+on the bridge's own player, the reason in the log alone.
+
+*The restart.* A systemd user service takes the groups of its user manager:
+`user@.service` is a system unit with `User=%i` (`PAMName=systemd-user`), so
+the system manager sets the manager's supplementary groups from the group
+database (`initgroups`) when it starts it, and the manager, unprivileged,
+cannot change them for the services it starts. A lingering manager is
+started at boot and outlives every login, so a usermod after it reaches none
+of its services, and restarting the bridge's own unit inside it would not
+either; the user's next login does not restart it. Root's `systemctl restart
+user@<uid>.service` starts a new manager, whose groups are read again, and
+the bridge's unit, enabled for `default.target`
+(`internal/packaging/systemd.service.tmpl`), starts with it. A `reload`
+would not do: `user@.service`'s ReloadSignal re-executes the manager in
+place, its credentials kept. The groups' half is systemd's exec code as the
+brief's reviewers read it (a unit with `User=` gets its user's groups by
+`initgroups` at its exec); the unit's half is
+`/usr/lib/systemd/system/user@.service` on Ubuntu 26.04 (systemd 259):
+`User=%i`, `PAMName=systemd-user`, and `ReloadSignal=RTMIN+25`, "reexecute
+the manager on service reload". Neither was tried on a box: the session that
+wrote it may not change a host's users, groups or services. The restart stops every service of the user's, a desktop
+or terminal session under the manager included, so it is printed with that
+cost and the advice to run it from another administrative session; a reboot
+is the alternative printed beside it.
+
+*Where.* A new install prints it after the box's sound cards are reported
+(`report_outputs`), an upgrade after its service is seen serving, `--no-init`
+after the lingering line, and the deferred set-up on a box without systemd,
+where its user starts the bridge, prints the usermod and a new login instead
+of the restart (`audio_advice self`). `--uninstall` prints none of it.
+Nothing is said on a box with no playback node: there is no DAC for the
+player to open, and no node to read the group from (a group named on another
+distribution's nodes would be a guess); a DAC plugged in later is the
+doctor's (`player-dac`) and the console's Player page's to name.
+
+*Conventions.* As the lingering line, print-only for what is root's, and
+each command on a line of its own, built by `command_line` (through
+`root_line`, sudo first only where the box has sudo) with the values
+resolved: the user's name and uid, and the node's group as `ls -ld` names
+it, never a placeholder and never a `$USER` a root shell would expand
+(Codex). `TestTheInstallerSaysWhatLetsThePlayerOpenTheDAC` runs the printed
+lines as printed against the recorder (`testdata/argv`, its allowlist with
+`usermod` beside `systemctl`) and requires neither to have run (a `usermod`
+stub logs any call, and `mutations` counts it); the `id` stub answers `-nG
+USER` from the account's groups and `-nG` from this process's. The record
+is in `ops/engineering-log.md`, 2026-11-03, B676.

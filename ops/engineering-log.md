@@ -69959,3 +69959,122 @@ under Auth, pairing, TLS and security posture, shipped as a patch beside
 the job's report because `.claude/` cannot be written from this session;
 with it applied, docs-check reads the same (auth-tls.md 48,575 to 49,802
 bytes; its heaviest load 243,597 bytes, at internal/baseurl/baseurl_test.go).
+
+## 2026-11-03 — B676: the bridge's player says when the audio group keeps it from the DAC
+
+Backlog B676. On Linux the bridge's own player (B470) opens the DAC's node
+under `/dev/snd`, which the audio group owns. A desktop login opens it
+through logind's seat ACL; the bridge runs as a systemd user service kept
+alive by lingering, often with nobody at the seat, so it has neither the ACL
+nor the group, and nothing put its user in the group: the installer neither
+did it nor said to. The brief was checked by Codex and Argon, whose notes
+were binding.
+
+**Where the cause surfaced, measured on main (29a426ba).** alsapcm types
+EACCES and EPERM at the open alike, `permission_denied` ("this process may
+not open /dev/snd/pcmC5D0p (the audio group owns it)"), and playback's
+resume code is `permission_denied` too; but the engine's last attempt knew
+busy alone (`Attempt{Seq, Failed, Busy}`), so: a start refused for
+permission was logged by its stop ("player: playback stopped",
+reason=backend_error, its detail the alsapcm error) and said nowhere else;
+a resume refused for it moved no generation, so `logPlayerChanges` logged
+nothing at all; GET /api/output/player's `running.lastError` copied GET
+/v1/outputs' (`device_busy` or ""), and the Player page had a sentence for
+device_busy alone; `/v1/outputs`' `lastError` was null; neither doctor had a
+line on the player's DAC (the checklist is MPD's); OpenHome answers a backend
+failure 501 Action Failed, which this job leaves.
+
+**The fix.**
+- *The cause, typed.* `engine.ErrDeviceDenied` beside `ErrDeviceBusy`; the
+  backend's `busy` became `deviceCause`, mapping alsapcm's permission reason
+  to it as its busy reason to the other, at a start and at a resume's
+  reopen, from alsapcm's own error, never a code or words (`causeError`
+  keeps the alsapcm error's text). The last attempt gained `Denied`,
+  `Resume` (a Resume, refused or past its deadline) and `Detail` (the
+  failure's words, for a log line alone). Serve's `logPlayerResume` logs a
+  failed resume once, with its cause and words, whatever the generation.
+- *The console.* GET /v1/outputs' view hands the console the attempt of the
+  snapshot its facts were read from (`bridgeOutput.facts`), and
+  `consoleLastError` words it `device_busy` or `permission_denied`; the
+  Player page names the cause and points at the doctor's line. The wire's
+  `lastError` keeps PROTOCOL.md's closed list (`device_busy` or null): the
+  decision on the brief (Argon's recommendation), so no PROTOCOL.md change,
+  no ProtocolVersion bump and no iOS mirror.
+- *The doctors.* A `player-dac` line, on Linux for a config that asks for
+  the player (`doctor.Deps.PlayerDAC`, right after player-storage): the
+  binding resolved by `playback.BindingLocator` over the box's trees within
+  3 s, one reading at a time; the endpoint's own node lstat'ed for its
+  group; the raw `faccessat2` with R_OK|W_OK and AT_EACCESS, which opens
+  nothing (never `unix.Faccessat`, whose ENOSYS and EPERM fallback reads the
+  mode bits and ignores an ACL). Refused is a fail by its cause with the
+  installer's two lines; allowed is ok, never a word that the DAC plays;
+  bridge doctor warns where its login has the group and the running bridge
+  (`server.pid`, `/proc/<pid>/status`'s Groups) does not; the console's
+  checks the serving process. Absent or ambiguous DACs, a missing node,
+  ENOSYS, EPERM, root and another user are not checked, a warn.
+- *The installer.* On a box with an ALSA playback node whose group neither
+  every user nor the account (`id -nG USER`) is given, a new install, an
+  upgrade and `--no-init` print `sudo usermod -aG <group> <user>` and `sudo
+  systemctl restart user@<uid>.service   # or reboot` (sudo only where the
+  box has it), with what the restart costs; an account in the group whose
+  login is not, the restart alone; a box without systemd, the usermod and a
+  new login. It runs none of them.
+
+**The restart, read and not tried.** A lingering `user@<uid>.service` keeps
+the groups it started with and its services take them: `user@.service` is a
+system unit with `User=%i` and `PAMName=systemd-user` (read on this host,
+systemd 259), whose exec gives it its user's groups at its start (the
+brief's reviewers read systemd's exec code), and its `ReloadSignal=RTMIN+25`
+re-executes it in place, credentials kept, so only root's restart, or a
+reboot, gives the bridge's service a new group. This session may not change
+a host's users, groups or services, so the claim is source-verified, not
+live-tested.
+
+**This host (legion0, Ubuntu 26.04, Linux 7.0, x86-64), read only.** `id`:
+uid 1000 (user), in audio (29) among eleven groups. `/dev/snd`: every node
+`crw-rw----` root:audio, no POSIX ACL (no seat session); the probe's own
+calls on two of them, `pcmC0D3p` and `pcmC2D0p`: lstat gid 29, a character
+device, faccessat2(R_OK|W_OK, AT_EACCESS) nil; on a node not there, ENOENT.
+getfacl is not installed; the ACL was read as its xattr
+(`system.posix_acl_access`), which none of the nodes has.
+
+**Red first** (each committed before its fix): 53ec09c3 (the cause, over
+stubs: five engine tests, five backend leaves, the console's word, the serve
+test and the page's), 46b95878 (the doctor's line, over a skeleton: nine
+tests), 4c69329d (the installer, over main's: six of eleven cases under each
+of sh, dash and bash). Fixes: 98b0e55b, 6100c069, 71d310f2.
+
+**Negative controls** (each on its fix committed, one exact occurrence
+mutated by a script, `git diff --numstat` naming that file alone, the
+prediction written before the run, restored with `git checkout --`, the tree
+clean after; every one matched): A, the backend's permission mapping
+dropped: 5 predicted, 5 red (internal/alsapcm, playback, engine); B, the
+engine's sentinel ignored: 12 and 12; C, the console's word dropped: 2 and
+2, over the whole `./cmd/bridge/`; D, the resume's log line dropped: 1 and
+1 (the log wait); E, the page's branch broken: 1 and 1 over the whole
+`./internal/admin/`; F, a user in the group in an older process judged as
+not in it: 5 and 5; G, bridge doctor's comparison with the running bridge
+dropped: 2 and 2; H, the line wired into neither doctor: 2 and 2 over the
+whole `./cmd/bridge/`; I, the probe asking read alone: 1 and 1 (the real
+faccessat2 on this kernel); J, ENOSYS taken for a refusal: 2 and 2; K, the
+installer judging the account by this process's groups: 10 and 10 (three
+shells); L, the installer's restart line dropped: 16 and 16.
+
+**BusyBox on this host.** Ubuntu 26.04's busybox runs its own applets ahead
+of PATH (`id`, `ip`, `uname`, `date`), so the rig's stubs are not the ones
+its sh runs, and the real user and address replace the stubs': at main, 17
+of the installer suite's tests fail under it (74 lines), every one of them
+still failing on this branch, which adds its new test's leaves alone (85
+lines). The suite's sh, dash and `bash --posix` legs are this job's
+evidence; CI's installer job runs its own busybox. shellcheck is not
+installed here, so `make installer-check` cannot run; each shell's `-n`
+parses the script and the stubs.
+
+The rules are a patch beside the job's report (`.claude/` cannot be written
+from this session): player.md's attempt line and a new line for the resume's
+log, output.md's element line (a denied attempt is null on the wire),
+cli-serve.md's player-dac line, config-lifecycle.md's installer line, and
+admin-console.md's Player page line; their long forms are in
+`ops/History-rules-output.md`, `ops/History-rules-cli-serve.md` and
+`ops/History-rules-config-lifecycle.md`, and the README's player section has
+the manual step as the installer prints it.
