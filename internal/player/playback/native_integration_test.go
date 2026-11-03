@@ -1939,3 +1939,259 @@ func TestNativeIntegrationApprovedDoPConstructor(t *testing.T) {
 		})
 	}
 }
+
+// nativeFence is a Start's engine.StartRequest.Released that the test closes
+// itself (take), as the engine does in the step that takes the session's
+// release, before any Release reaches the backend (B674 round 3), and the
+// steps the backend refused for it (Seams.Fenced); first is closed at the
+// first.
+type nativeFence struct {
+	released chan struct{}
+	first    chan struct{}
+	once     sync.Once
+	mu       sync.Mutex
+	steps    []string
+}
+
+func newNativeFence() *nativeFence {
+	return &nativeFence{released: make(chan struct{}), first: make(chan struct{})}
+}
+
+func (f *nativeFence) take() { close(f.released) }
+
+func (f *nativeFence) fenced(step string) {
+	f.mu.Lock()
+	f.steps = append(f.steps, step)
+	f.mu.Unlock()
+	f.once.Do(func() { close(f.first) })
+}
+
+func (f *nativeFence) refused() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.steps)
+}
+
+// TestNativeIntegrationFenceOpensNoDevice pins the native open (B674 round
+// 3): the Start's content read held, the release taken and its Release still
+// to come, and the Start let on opens no device.
+func TestNativeIntegrationFenceOpensNoDevice(t *testing.T) {
+	k := alsapcm.NewFakeKernel(t)
+	k.HardwareFormats(49, 50, 52)
+	k.Free()
+	stalled := &nativeStalledReader{Reader: bytes.NewReader(nativeDSF(t, 31)), entered: make(chan struct{}), gate: make(chan struct{})}
+	var free sync.Once
+	unblock := func() { free.Do(func() { close(stalled.gate) }) }
+	defer unblock()
+	fence := newNativeFence()
+	b, e := New(Config{Resolver: nativeStalledResolver{held: map[string]*nativeStalledReader{"a": stalled}}, Locator: nativeLocator{}, Seams: &Seams{Fenced: fence.fenced}})
+	if e != nil {
+		t.Fatal(e)
+	}
+	AdmitNativeForIntegration(b, nativeTestPlan, k.OpenNativeSink)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ref, _ := engine.NewReference("a")
+	answer := make(chan error, 1)
+	go func() {
+		answer <- b.Start(ctx, engine.StartRequest{Session: 1, First: engine.Occurrence{ID: 1, Entry: 1, Ref: ref}, Events: &nativeEvents{done: make(chan struct{})}, Released: fence.released})
+	}()
+	select {
+	case <-stalled.entered:
+	case <-ctx.Done():
+		t.Fatal("the start's read did not stall")
+	}
+	fence.take()
+	unblock()
+	select {
+	case e = <-answer:
+	case <-ctx.Done():
+		t.Fatal("the start did not answer")
+	}
+	if !errors.Is(e, errReleased) {
+		t.Errorf("the start answered %v once its release was taken; want errReleased", e)
+	}
+	if v := k.View(); v.Opens != 0 {
+		t.Errorf("the start opened the device %d times once its release was taken; want none", v.Opens)
+	}
+	if got := fence.refused(); !slices.Equal(got, []string{"open"}) {
+		t.Errorf("the steps refused: %q, want open", got)
+	}
+	if e = b.Release(ctx, 1); e != nil {
+		t.Fatal(e)
+	}
+	if e = b.Wait(ctx); e != nil {
+		t.Fatal(e)
+	}
+	k.CheckClosedEach(t)
+}
+
+// TestNativeIntegrationFenceRefusesActivation pins the native activation, the
+// first write to the device (its prefill): its check after open held, the
+// release taken and its Release still to come, and the check refuses it, so
+// nothing is written.
+func TestNativeIntegrationFenceRefusesActivation(t *testing.T) {
+	k := alsapcm.NewFakeKernel(t)
+	k.HardwareFormats(49, 50, 52)
+	k.Free()
+	fence := newNativeFence()
+	b, e := New(Config{Resolver: nativeFiles{"a": nativeDSF(t, 31)}, Locator: nativeLocator{}, Seams: &Seams{Fenced: fence.fenced}})
+	if e != nil {
+		t.Fatal(e)
+	}
+	entered, gate := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(gate) }) }
+	defer unblock()
+	AdmitNativeForIntegration(b, func(d format.NativeDSD) (engine.NativePlan, error) {
+		p, _ := nativeTestPlan(d)
+		p.Prefill = time.Millisecond
+		return p, nil
+	}, func(ctx context.Context, c alsapcm.DSDConfig) (*alsapcm.DSDSink, error) {
+		before := c.Check
+		calls := 0
+		c.Check = func(n alsapcm.NodeInfo) error {
+			calls++
+			if calls == 2 {
+				close(entered)
+				<-gate
+			}
+			return before(n)
+		}
+		return k.OpenNativeSink(ctx, c)
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ref, _ := engine.NewReference("a")
+	answer := make(chan error, 1)
+	go func() {
+		answer <- b.Start(ctx, engine.StartRequest{Session: 1, First: engine.Occurrence{ID: 1, Ref: ref}, Events: &nativeEvents{done: make(chan struct{})}, Released: fence.released})
+	}()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("the activation's check after open did not park")
+	}
+	fence.take()
+	unblock()
+	select {
+	case e = <-answer:
+	case <-ctx.Done():
+		t.Fatal("the start did not answer")
+	}
+	if e == nil {
+		t.Errorf("the start answered success once its release was taken")
+	}
+	if v := k.View(); v.Writes != 0 {
+		t.Errorf("the activation wrote to the device %d times once the release was taken; want nothing written", v.Writes)
+	}
+	if got := fence.refused(); !slices.Equal(got, []string{"admit"}) {
+		t.Errorf("the steps refused: %q, want admit", got)
+	}
+	_ = b.Release(ctx, 1)
+	if e = b.Wait(ctx); e != nil {
+		t.Fatal(e)
+	}
+	k.CheckClosedEach(t)
+}
+
+// nativeTwoStalls is content whose reads at or past at[i] wait for gate[i],
+// entered[i] closed at the first: the later stall is asked first.
+type nativeTwoStalls struct {
+	*bytes.Reader
+	at      [2]int64
+	entered [2]chan struct{}
+	gate    [2]chan struct{}
+	once    [2]sync.Once
+	opened  [2]sync.Once
+}
+
+// letGo opens gate i, once.
+func (r *nativeTwoStalls) letGo(i int) { r.opened[i].Do(func() { close(r.gate[i]) }) }
+
+func (r *nativeTwoStalls) ReadAt(p []byte, off int64) (int, error) {
+	for i := len(r.at) - 1; i >= 0; i-- {
+		if off >= r.at[i] {
+			r.once[i].Do(func() { close(r.entered[i]) })
+			<-r.gate[i]
+			break
+		}
+	}
+	return r.Reader.ReadAt(p, off)
+}
+
+type nativeTwoStallsResolver struct{ r *nativeTwoStalls }
+
+func (s nativeTwoStallsResolver) Open(context.Context, engine.Reference) (Content, error) {
+	return Content{Data: s.r, Size: s.r.Size()}, nil
+}
+
+// TestNativeIntegrationFenceStopsTheWrites pins the native writes after the
+// first chunk: the producer's read of the second chunk held, the release
+// taken and its Release still to come, and the producer let on hands the
+// native sink nothing more: it never reads the third.
+func TestNativeIntegrationFenceStopsTheWrites(t *testing.T) {
+	k := alsapcm.NewFakeKernel(t)
+	k.HardwareFormats(49, 50, 52)
+	k.Free()
+	// DSF blocks are 4,096 bytes a channel, two channels interleaved after a
+	// 92-byte header: the producer's chunk k (4,096 bytes a channel) is read
+	// at 92 + k * 8,192; the Start reads chunk 0 at its open.
+	content := &nativeTwoStalls{Reader: bytes.NewReader(nativeDSF(t, 106304)), at: [2]int64{92 + 8192, 92 + 2*8192}}
+	for i := range content.at {
+		content.entered[i], content.gate[i] = make(chan struct{}), make(chan struct{})
+	}
+	defer content.letGo(1)
+	defer content.letGo(0)
+	fence := newNativeFence()
+	b, e := New(Config{Resolver: nativeTwoStallsResolver{content}, Locator: nativeLocator{}, Seams: &Seams{Fenced: fence.fenced}})
+	if e != nil {
+		t.Fatal(e)
+	}
+	AdmitNativeForIntegration(b, nativeTestPlan, k.OpenNativeSink)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ref, _ := engine.NewReference("a")
+	if e = b.Start(ctx, engine.StartRequest{Session: 1, First: engine.Occurrence{ID: 1, Entry: 1, Ref: ref}, Events: &nativeEvents{done: make(chan struct{})}, Released: fence.released}); e != nil {
+		t.Fatal(e)
+	}
+	select {
+	case <-content.entered[0]:
+	case <-ctx.Done():
+		t.Fatal("the producer's read of the second chunk did not stall")
+	}
+	submitted := func() int64 {
+		s := b.known(1)
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.outs[0].native.Position().Submitted
+	}
+	before := submitted()
+	fence.take()
+	content.letGo(0)
+	select {
+	case <-fence.first:
+	case <-content.entered[1]:
+	case <-ctx.Done():
+		t.Fatal("the producer neither wrote the second chunk nor refused it")
+	}
+	select {
+	case <-content.entered[1]:
+		t.Errorf("the producer handed the native sink the second chunk once the release was taken, and read the third")
+	default:
+	}
+	if after := submitted(); after != before {
+		t.Errorf("the native sink took %d bits more once the release was taken; want none", after-before)
+	}
+	if got := fence.refused(); !slices.Equal(got, []string{"write"}) {
+		t.Errorf("the steps refused: %q, want write", got)
+	}
+	content.letGo(1)
+	if e = b.Release(ctx, 1); e != nil {
+		t.Fatal(e)
+	}
+	if e = b.Wait(ctx); e != nil {
+		t.Fatal(e)
+	}
+	k.CheckClosedEach(t)
+}
