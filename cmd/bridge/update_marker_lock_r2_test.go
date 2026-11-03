@@ -28,6 +28,8 @@ func rollBackFromTheConsoleUntilStopped(t *testing.T, r *refusedInstall, restore
 		_ = updater.New(updater.Options{}).Rollback(context.Background(),
 			updater.InstallOptions{DataDir: r.dataDir, BinaryPath: r.bin, Force: true, RestoreBackup: restore})
 	}()
+	// Nothing holds it: it ends by itself, at restore's Goexit or its return.
+	drainLoopOnCleanup(t, func() {}, done, "the rollback")
 	select {
 	case <-done:
 	case <-time.After(withinTheTest):
