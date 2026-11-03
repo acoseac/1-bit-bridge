@@ -71598,3 +71598,59 @@ while no player runs or it is shutting down, while maintenance holds it, and
 when it was not admitted or was overtaken while waiting behind a pause, a
 resume or a start; one admitted and still waiting when its budget ends answers
 success. The sentence now says so. No test reads it.
+
+**Round 2: a Stop during a seek's reopen wrote to the device.** GitHub's
+`test -race (rest)` job at d1c19413 failed
+`TestPlaybackStopsDuringASeeksReopen` (the runs at d1991ac2 and cfb603dc
+passed): the seek's reopened device was given 16,384 bytes, its first
+chunk, after the Stop. It was a real race, not an early read. The engine
+takes a Stop in one step (`releaseSession`: the session releasing, the
+snapshot showing Releasing with a pending stop) and makes the Release call
+on a goroutine of its own (`e.call`). So a Start held in its check after
+open could pass its only fence, the backend's `releasing` flag that
+Release sets, after the snapshot showed the Stop and before the call
+reached the backend, and it then started its producer, which wrote. On
+legion0 (16 cores), 500 runs at each of `-cpu 1,2,4` beside 16 busy loops
+failed 12 of 1,500 times (0, 7 and 5), each on CI's assertion, with 16,384
+to 35,280 bytes given.
+
+The fix is a fence closed in the step that takes the release, before its
+snapshot. The engine hands each Start a channel, `StartRequest.Released`,
+and closes it in `releaseSession`, the one place a session becomes
+releasing. The backend reads it beside its own flag, under the session's
+lock, where Start decides to write (`releaseTaken`), and closes what it
+opened, never written to. A context could not carry it: a call's context
+closes its Done on a goroutine of its own (`callCtx`'s AfterFunc), and the
+context the backend derives from it (`bound`) learns of a cancel on
+another, so a check of either could still pass after the snapshot. Named,
+not changed: inside a session already playing, a resume's reopen and the
+producer's open of a new transport still read the backend's own flag
+alone, so the same window can let frames reach a device after a Stop is
+taken; neither is a seek's reopen.
+
+The test now lands the Stop in that window in every run. The open is held
+in its check after open (the node open and nothing written, asserted), and
+the engine's Release call is held short of the backend (the rig's
+`tee.Release`, `holdNextRelease`) until the Start has answered. Before the
+fix it failed 20 of 20 runs with no load: the Start answered success, and
+the device was given 16,384 bytes. The engine's half,
+`TestAReleaseTheEngineTookFencesAnOpenBeforeItsCallArrives`, holds the
+Release short of the fake (`beforeRelease`) and requires the fence closed
+once a snapshot shows the release, and the open closed unwritten; the
+fake's open reads the fence. Negative controls on the committed tree, 20
+runs each: without the backend's read of the fence, the playback test
+failed 20 of 20 and the engine's passed 20 of 20; without the engine's
+close, both failed 20 of 20. After the fix, under the same load, the held
+test passed 2,100 of 2,100 (700 at each `-cpu`), and so did the PR head's
+unheld test, compiled beside it from a file never committed.
+
+The two recovered panics in CI's log are deliberate injections.
+`TestPlaybackOwnsASinkBeforeItsOpenedNote`'s Notify hook panics
+(`playback_round2_test.go`, line 55): inside Start in its first subtest
+("the backend's start"), and inside the producer in its successor subtest
+("the producer"). That test does not capture its log; a verbose run of the
+package attributed each line to it. `playback_panic_test.go`'s producer
+and start tests (lines 116 and 324) inject the same two panics and capture
+theirs. The paths are qualification-guarded, and the version stays 33, past
+main's 32. The two `player.md` rule lines this changes (the engine's
+contract and the backend's start) are `rules-b674-r2.patch`.
