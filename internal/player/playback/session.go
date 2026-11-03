@@ -38,6 +38,10 @@ type session struct {
 	// Set by Start before anything is opened, then only read.
 	ev   engine.Events
 	opts engine.SessionOptions
+	// released is closed once the engine has taken the session's release,
+	// which may be before its Release comes (engine.StartRequest.Released);
+	// nil, never closed, for a request without one.
+	released <-chan struct{}
 
 	mu              sync.Mutex
 	started         bool
@@ -375,7 +379,7 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 		s.b.letGo(s, true)
 		return errReleased
 	}
-	s.ev, s.opts = req.Events, req.Options
+	s.ev, s.opts, s.released = req.Events, req.Options, req.Released
 	first := s.newOccLocked(req.First)
 	first.from = req.From
 	s.mu.Unlock()
@@ -446,9 +450,12 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 		return fmt.Errorf("player backend: the device could not be opened: %w", deviceCause(err))
 	}
 	s.mu.Lock()
-	if s.releasing {
-		// The release came while the device opened: what was opened is
-		// closed at once, never written to.
+	if s.releasing || s.releaseTaken() {
+		// The release came while the device opened, or the engine took it
+		// (a Stop) and its call has not come yet: what was opened is closed
+		// at once, never written to. This is where Start decides to write:
+		// past it the producer starts and gives the sink the first chunk
+		// (B674 round 2).
 		s.mu.Unlock()
 		s.closeOutput(out)
 		return errReleased
@@ -481,6 +488,17 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 		return s.firstErr
 	case <-cctx.Done():
 		return cctx.Err()
+	}
+}
+
+// releaseTaken reports whether the engine has taken the session's release
+// (engine.StartRequest.Released), whether or not its Release has come.
+func (s *session) releaseTaken() bool {
+	select {
+	case <-s.released:
+		return true
+	default:
+		return false
 	}
 }
 

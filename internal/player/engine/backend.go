@@ -69,6 +69,15 @@ type StartRequest struct {
 	Options SessionOptions
 	// Events is where the session's events go.
 	Events Events
+	// Released is closed by the engine in the step that releases the session
+	// (a Stop, a skip, a seek, the output gone, a fault), before any snapshot
+	// shows the release, while the Release call goes to the backend on a
+	// goroutine of its own and may not have reached it yet (B674 round 2):
+	// Start looks at it, beside a Release that came, where it decides to
+	// write, so a release the engine has taken writes nothing to a device
+	// Start opened. Nil in a request the engine did not make, which nothing
+	// closes.
+	Released <-chan struct{}
 }
 
 // TimeSeek reports whether a seek within a track takes content of a kind
@@ -249,11 +258,16 @@ var ErrDeviceDenied = errors.New("player: this process may not open the device")
 // release is acknowledged only after that. Because each call runs on a
 // goroutine of its own, that Release may even reach the backend before its
 // Start has begun: the backend must then make that Start acquire nothing,
-// and may acknowledge as soon as nothing is held. Prepare, Cut, Pause and
-// Resume come only after Start has returned nil. The engine starts a
-// session only once the previous session's release is acknowledged, so two
-// of its own sessions never hold or race for the device: on the real sink
-// the second open would get its busy refusal from the bridge's own process.
+// and may acknowledge as soon as nothing is held. Or it may reach the
+// backend only after a snapshot has shown the release: the engine therefore
+// also closes StartRequest.Released in the step that takes the release, and
+// a Start that finds it closed where it decides to write closes what it
+// opened, never written to, as when the Release has come (B674 round 2).
+// Prepare, Cut, Pause and Resume come only after Start has returned nil.
+// The engine starts a session only once the previous session's release is
+// acknowledged, so two of its own sessions never hold or race for the
+// device: on the real sink the second open would get its busy refusal from
+// the bridge's own process.
 //
 // Release is confirmed or it is not. Release returns nil once its session
 // holds nothing: the device and the decoders closed and its goroutines

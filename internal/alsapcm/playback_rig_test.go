@@ -395,6 +395,30 @@ type recorder struct {
 	// the delivery holdAfterNext waits to hold.
 	opened int
 	hold   *heldDelivery
+	// release is the engine's next Release call to hold short of the
+	// backend (holdNextRelease).
+	release *heldRelease
+}
+
+// heldRelease is a Release call the engine made, held short of the backend
+// (holdNextRelease): held is closed once the call waits there, and gate lets
+// it on.
+type heldRelease struct {
+	held, gate chan struct{}
+	once       sync.Once
+}
+
+// holdNextRelease holds the engine's next Release call short of the backend
+// until letGo, the backend not told of it: the engine has taken the release
+// (a Stop, which its snapshot shows) and the call, on a goroutine of its own,
+// has not reached the backend yet, as a scheduler can leave it (B674 round 2).
+// held is closed once the call waits.
+func (r *recorder) holdNextRelease() (held <-chan struct{}, letGo func()) {
+	h := &heldRelease{held: make(chan struct{}), gate: make(chan struct{})}
+	r.mu.Lock()
+	r.release = h
+	r.mu.Unlock()
+	return h.held, func() { h.once.Do(func() { close(h.gate) }) }
 }
 
 // heldDelivery is a reporter held in the delivery of one event once the
@@ -595,6 +619,20 @@ func (b tee) Cut(ctx context.Context, s engine.SessionID, from engine.Occurrence
 	ok, err := b.Backend.Cut(ctx, s, from)
 	b.r.note(func() { b.r.calls = append(b.r.calls, call{kind: "cut", s: s, from: from, ok: ok, err: err}) })
 	return ok, err
+}
+
+// Release is the backend's, held short of it first when the test holds the
+// next one (holdNextRelease).
+func (b tee) Release(ctx context.Context, s engine.SessionID) error {
+	b.r.mu.Lock()
+	h := b.r.release
+	b.r.release = nil
+	b.r.mu.Unlock()
+	if h != nil {
+		close(h.held)
+		<-h.gate
+	}
+	return b.Backend.Release(ctx, s)
 }
 
 // nopEvents is the engine's side of a session a test drives itself.

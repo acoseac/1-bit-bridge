@@ -56,6 +56,10 @@ type fakeBackend struct {
 	// of it, so a test can hold a Prepare the engine has made that has not
 	// reached the backend yet (B579).
 	beforePrepare func(id SessionID, after OccurrenceID, next *Occurrence)
+	// beforeRelease runs on a Release's goroutine before the fake records any
+	// of it, so a test can hold a Release the engine has asked for that has
+	// not reached the backend yet, after a snapshot shows it (B674 round 2).
+	beforeRelease func(id SessionID)
 	// waiting runs each time waitFor finds its condition false, before it
 	// waits for the fake to change: a test that holds a call short of the
 	// fake until a reader waits for it, the latest a scheduler could leave
@@ -73,6 +77,9 @@ type fakeSession struct {
 	from int64
 	opts SessionOptions
 	ev   Events
+	// released is its Start's StartRequest.Released, which the engine closes
+	// as it takes the session's release.
+	released <-chan struct{}
 
 	// Under b.mu.
 	started               bool
@@ -215,7 +222,7 @@ func (b *fakeBackend) Start(ctx context.Context, req StartRequest) error {
 	if s.started {
 		b.violations = append(b.violations, fmt.Sprintf("session %d started twice", s.id))
 	}
-	s.started, s.first, s.from, s.opts, s.ev = true, req.First, req.From, req.Options, req.Events
+	s.started, s.first, s.from, s.opts, s.ev, s.released = true, req.First, req.From, req.Options, req.Events, req.Released
 	b.order = append(b.order, s)
 	b.record(fakeCall{kind: "start", session: s.id, entry: req.First.Entry, occ: req.First.ID})
 	hook, details := b.onStart, b.startDetails
@@ -243,7 +250,8 @@ func (b *fakeBackend) script(f func()) {
 
 // open is the session's device open, the default Start: an entry scripted
 // unplayable is refused before anything opens, and a session asked to
-// release while it opened closes at once and writes nothing.
+// release while it opened, or whose release the engine has taken
+// (StartRequest.Released), closes at once and writes nothing.
 func (s *fakeSession) open() error {
 	b := s.b
 	b.mu.Lock()
@@ -253,12 +261,22 @@ func (s *fakeSession) open() error {
 		return &u
 	}
 	s.opened = true
-	if s.releaseAsked {
+	if s.releaseAsked || s.fenced() {
 		s.closed = true
 		return nil
 	}
 	s.wrote = true
 	return nil
+}
+
+// fenced reports whether the engine has closed s's StartRequest.Released.
+func (s *fakeSession) fenced() bool {
+	select {
+	case <-s.released:
+		return true
+	default:
+		return false
+	}
 }
 
 func (b *fakeBackend) Prepare(ctx context.Context, id SessionID, after OccurrenceID, next *Occurrence) error {
@@ -341,6 +359,12 @@ func (b *fakeBackend) Resume(ctx context.Context, id SessionID) (ResumeResult, e
 }
 
 func (b *fakeBackend) Release(ctx context.Context, id SessionID) error {
+	b.mu.Lock()
+	before := b.beforeRelease
+	b.mu.Unlock()
+	if before != nil {
+		before(id)
+	}
 	s := b.session(id)
 	b.mu.Lock()
 	b.record(fakeCall{kind: "release", session: id})
@@ -585,6 +609,14 @@ func (s *fakeSession) state() (opened, closed, wrote bool) {
 	s.b.mu.Lock()
 	defer s.b.mu.Unlock()
 	return s.opened, s.closed, s.wrote
+}
+
+// isFenced is fenced, for a test: whether the engine has closed s's
+// StartRequest.Released.
+func (s *fakeSession) isFenced() bool {
+	s.b.mu.Lock()
+	defer s.b.mu.Unlock()
+	return s.fenced()
 }
 
 func (s *fakeSession) submitted(o OccurrenceID) { s.ev.Submitted(s.id, o) }

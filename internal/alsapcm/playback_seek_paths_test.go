@@ -202,22 +202,42 @@ func TestPlaybackPlaysOnlyTheLastOfRepeatedSeeks(t *testing.T) {
 }
 
 // TestPlaybackStopsDuringASeeksReopen pins a Stop while the session started
-// for a seek opens the device: held in its check after open, the open is
-// closed unwritten once the Stop releases the session, the seek answers
-// superseded, and nothing of the target is given or heard.
+// for a seek opens the device: held in its check after open, the node open
+// and nothing written to it, the engine takes the Stop, and the backend
+// hears of it only once the Start has decided whether to write, the engine's
+// Release call held short of the backend as a scheduler can leave it (B674
+// round 2: GitHub's race job met that window). The Start sees the release the
+// engine took (engine.StartRequest.Released) and answers an error, the open
+// is closed unwritten, the seek answers superseded, and nothing of the target
+// is given or heard.
 func TestPlaybackStopsDuringASeeksReopen(t *testing.T) {
-	r := aHeard(t, pattern(1, 4*44100, 16))
-	held, release := r.unit.holdNextAdmit()
-	t.Cleanup(release)
+	const rate = 44100
+	r := aHeard(t, pattern(1, 4*rate, 16))
+	held, admit := r.unit.holdNextAdmit()
+	t.Cleanup(admit)
 	seek := make(chan error, 1)
 	go func() { seek <- r.eng.SeekAbsolute(bg, 2) }()
 	receiveIn(t, held, "the seek's open held in its check after open")
+	if v := r.k.View(); !v.Open || v.Opens != 2 || len(v.OpenAt) != 2 || v.OpenAt[1] != v.GivenBytes {
+		t.Fatalf("the seek's open held: open %v after %d opens, given %d bytes from %v; want the node open and nothing written", v.Open, v.Opens, v.GivenBytes, v.OpenAt)
+	}
+	release, letRelease := r.rec.holdNextRelease()
+	t.Cleanup(letRelease)
 	stop := make(chan error, 1)
 	go func() { stop <- r.eng.Stop(bg) }()
 	r.waitSnap("the stop applied", func(s *engine.Snapshot) bool {
 		return s.State() == engine.Releasing && s.Pending() == engine.IntentStop
 	})
-	release()
+	receiveIn(t, release, "the engine's release of the seek's session held short of the backend")
+	admit()
+	start := r.waitCall("the seek's start answered", func(c call) bool { return c.kind == "start" && c.at == 2*rate })
+	if start.err == nil {
+		// It wrote: the device takes what the producer gave the sink while the
+		// release is held, so the device shows it too.
+		r.k.Await(t, "the seek's open written", func(v alsapcm.KernelView) bool { return len(v.OpenAt) == 2 && v.GivenBytes > v.OpenAt[1] })
+		t.Errorf("the seek's start answered success after the engine took the stop: it gave the device the target")
+	}
+	letRelease()
 	if err := receiveIn(t, stop, "the stop"); err != nil {
 		t.Fatalf("stop: %v", err)
 	}

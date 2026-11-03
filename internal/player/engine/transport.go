@@ -99,6 +99,9 @@ type session struct {
 	retiring                  *retiringLedger
 	releaseCall               *call
 	releaseTimer              timer
+	// released is the session's StartRequest.Released, closed in the step
+	// that releases the session (releaseSession) and then nil.
+	released chan struct{}
 }
 
 // index is where occurrence id is in the chain, or -1.
@@ -577,7 +580,7 @@ func (e *Engine) startSession(target uint32) {
 	}
 	o.seek = nil
 	o.nextSess++
-	s := &session{id: SessionID(o.nextSess), phase: sessStarting}
+	s := &session{id: SessionID(o.nextSess), phase: sessStarting, released: make(chan struct{})}
 	for i := range o.waiters {
 		if w := &o.waiters[i]; w.play && w.sess == 0 {
 			w.sess, w.carried = s.id, false
@@ -612,11 +615,12 @@ func (e *Engine) startSession(target uint32) {
 	e.selectEntry(target)
 	e.visible()
 	req := StartRequest{
-		Session: s.id,
-		First:   first.public(),
-		From:    first.from,
-		Options: SessionOptions{PauseRelease: e.cfg.PauseRelease, DSD: e.cfg.DSD},
-		Events:  e.evts,
+		Session:  s.id,
+		First:    first.public(),
+		From:     first.from,
+		Options:  SessionOptions{PauseRelease: e.cfg.PauseRelease, DSD: e.cfg.DSD},
+		Events:   e.evts,
+		Released: s.released,
 	}
 	e.call(callStart, s, StartTimeout, func(ctx context.Context) callResult { return callResult{err: e.be.Start(ctx, req)} })
 }
@@ -646,6 +650,15 @@ func (e *Engine) releaseSession(s *session, then Intent, why StopInfo) {
 		}
 	}
 	s.phase = sessReleasing
+	// The backend learns of the release here, in this step, before its
+	// snapshot shows the release: the Release call below goes on a goroutine
+	// of its own and can reach the backend later than that, after a Start
+	// still opening has decided to write (StartRequest.Released, B674 round
+	// 2).
+	if s.released != nil {
+		close(s.released)
+		s.released = nil
+	}
 	s.stopPause()
 	if tc := s.transportCall; tc != nil && tc.waiter != nil {
 		var err error
