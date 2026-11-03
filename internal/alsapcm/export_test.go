@@ -198,6 +198,21 @@ func (tk *FakeKernel) Busy(on bool) {
 	})
 }
 
+// Deny makes every open refused as a node this process may not open is,
+// with EACCES, or EPERM with eperm set (the audio group owns the node, and
+// the process is not in it), until it is called with on false.
+func (tk *FakeKernel) Deny(on, eperm bool) {
+	tk.k.inspect(func(k *fakeKernel) {
+		k.openErr = nil
+		switch {
+		case on && eperm:
+			k.openErr = errnoEPERM
+		case on:
+			k.openErr = errnoEACCES
+		}
+	})
+}
+
 // Unplug is the device going away: ENODEV to every call from now on.
 func (tk *FakeKernel) Unplug() { tk.k.unplug() }
 
