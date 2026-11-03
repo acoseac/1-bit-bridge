@@ -215,7 +215,8 @@ func LockState(ctx context.Context, dataDir string) (*StateLock, error) {
 			_ = f.Close()
 			noLocksSaid.Do(func() {
 				logger.Warn("the data dir's filesystem keeps no locks, so nothing keeps a store's migration and an install's rollback "+
-					"apart there: the early rollback does not run, and the rest goes on without the install marker's lock",
+					"apart there: neither the early rollback nor a start's housekeeping of the install marker runs, "+
+					"and the rest goes on without the install marker's lock",
 					"lock", stateLockFileName, "reason", fsutil.ErrorWithoutPath(err))
 			})
 			return &StateLock{unheld: err}, nil
