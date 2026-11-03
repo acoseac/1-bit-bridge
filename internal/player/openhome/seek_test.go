@@ -96,6 +96,17 @@ func TestASeekWithinTheTrackIsTheEnginesSeek(t *testing.T) {
 	if _, _, seconds := timeNow(t, h); seconds != "32" {
 		t.Errorf("two seconds past the target: Seconds %s, want 32", seconds)
 	}
+	// Once the session at the target is heard too: the released session's
+	// position of the same occurrence and its end, then a report of the new
+	// session's, which the engine handles after them.
+	s1.position(x, 55*44100, 44100)
+	s1.ev.Finished(s1.id)
+	later := minute
+	later.Bits = 24
+	p.detailed(s2, x, later)
+	if _, _, seconds := timeNow(t, h); seconds != "32" || state(t, h) != "Playing" {
+		t.Errorf("after the released session's late position and end: Seconds %s, %s; want 32, Playing", seconds, state(t, h))
+	}
 
 	read(t, h, playlist, "SeekSecondRelative", "Value", "-5")
 	s3 := p.be.session(t, 3)

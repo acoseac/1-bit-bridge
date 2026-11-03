@@ -394,10 +394,11 @@ func TestTheOutputGoingAwayDropsASeek(t *testing.T) {
 }
 
 // TestTheReleasedSessionsEventsAreNotTheTracks pins the session as a seek's
-// fence: what the released session reports after the seek, a position, a
-// boundary into its successor, a fault and its end, reaches the engine before
-// the new session's events and changes none of the track, its position, the
-// selection or the transport.
+// fence: what the released session reports after the seek (a position of
+// the occurrence the seek continues, under the same ID, a boundary into its
+// successor, a fault and its end), while the session at the target starts and
+// once it is heard and measured, changes none of the track, its position, the
+// selection or the transport: the owner handles each and discards it.
 func TestTheReleasedSessionsEventsAreNotTheTracks(t *testing.T) {
 	h := startHarness(t)
 	ids, s := h.heardAt(0, pcmMinute, 5*44100, "a", "b")
@@ -406,13 +407,28 @@ func TestTheReleasedSessionsEventsAreNotTheTracks(t *testing.T) {
 	s.submitted(next.ID)
 	h.must("seek", h.eng.SeekAbsolute(bg, 30))
 	s2 := h.be.nth(2)
-	s.position(x, 50*44100)
-	s.audible(next.ID)
-	s.fault(Fault{Reason: ReasonXrun, Occurrence: next.ID, Frames: 10})
-	s.finished()
-	sn := h.heard(s2, x)
-	if p := sn.Position(); p != (Position{Occurrence: x, Frames: 30 * 44100, RateHz: 44100}) {
-		t.Errorf("the position after the released session's events: %+v, want the target", p)
+	stale := func(frames int64) {
+		t.Helper()
+		mark := h.appliedMark()
+		s.position(x, frames)
+		s.audible(next.ID)
+		s.fault(Fault{Reason: ReasonXrun, Occurrence: next.ID, Frames: 10})
+		s.finished()
+		for _, what := range []string{"position", "audible", "fault", "finished"} {
+			h.waitApplied("handled "+what, mark)
+		}
+	}
+	stale(50 * 44100)
+	if sn := h.snap(); sn.State() != Playing || !sn.Starting() || sn.Selected() != ids[0] || len(sn.Faults()) != 0 || sn.Position().Frames != 30*44100 {
+		t.Errorf("the released session's events while the target's session starts: %s (starting %v) at %d, %d faults, position %+v; want it starting at a, the target",
+			sn.State(), sn.Starting(), sn.Selected(), len(sn.Faults()), sn.Position())
+	}
+	h.heard(s2, x)
+	h.measure(s2, x, 31*44100)
+	stale(55 * 44100)
+	sn := h.snap()
+	if p := sn.Position(); p != (Position{Occurrence: x, Frames: 31 * 44100, RateHz: 44100}) {
+		t.Errorf("the position after the released session's events: %+v, want the session at the target's, 31 s", p)
 	}
 	if sn.Selected() != ids[0] || sn.State() != Playing || len(sn.Faults()) != 0 || sn.TrackCount() != 1 {
 		t.Errorf("after the released session's events: %s at %d, %d faults, %d tracks; want playing a, none, 1", sn.State(), sn.Selected(), len(sn.Faults()), sn.TrackCount())

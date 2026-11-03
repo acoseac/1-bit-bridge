@@ -254,6 +254,7 @@ func TestPlaybackRefusesAFromItCannotTakeAsAFailure(t *testing.T) {
 			d := newDirect(t, nil)
 			d.files.add("x", c.data)
 			err := d.startFrom(1, "x", c.from)
+			d.release(1)
 			var u *engine.Unplayable
 			if err == nil || errors.As(err, &u) {
 				t.Fatalf("a start from %d: %v, want a failure that is no refusal", c.from, err)
@@ -261,7 +262,6 @@ func TestPlaybackRefusesAFromItCannotTakeAsAFailure(t *testing.T) {
 			if v := d.k.View(); v.Opens != 0 {
 				t.Errorf("a start from a frame the content cannot take opened the device %d times", v.Opens)
 			}
-			d.release(1)
 			d.files.allClosed(t)
 		})
 	}
