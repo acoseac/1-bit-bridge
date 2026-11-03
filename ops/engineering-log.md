@@ -70058,15 +70058,49 @@ dropped: 2 and 2; H, the line wired into neither doctor: 2 and 2 over the
 whole `./cmd/bridge/`; I, the probe asking read alone: 1 and 1 (the real
 faccessat2 on this kernel); J, ENOSYS taken for a refusal: 2 and 2; K, the
 installer judging the account by this process's groups: 10 and 10 (three
-shells); L, the installer's restart line dropped: 16 and 16.
+shells); L, the installer's restart line dropped: 16 and 16; M, on
+06b897c2, a resume past its deadline recorded as a start: 1 and 1.
+
+**A test of this job's own that raced.** `make test-fast` failed
+TestAResumePastItsDeadlineIsAFailedResume once, after the watchdog's
+minute. The test moved the engine's clock past its held resume's deadline
+while the session's Prepare (nothing follows a) could still be unanswered,
+its deadline armed at the same fake time, so the Prepare expired too and
+released the session before the owner took the resume's expiry, which then
+recorded no attempt: `callExpired` records one for the current session
+alone. The engine's B605 rule says it, and pause_test.go's test waits as
+it says: 06b897c2 waits for `handled call prepare` first. At `-cpu 1` the
+race is no rarity: with `-watchdog=2s`, 266 of 266 runs failed before the
+fix (`-count=1000 -cpu 1,2,4,8`, cut at nine minutes while still at
+`-cpu 1`), and 4,000 of 4,000 passed after. Every test this job added or
+changed then ran at `-cpu 1` and at 8 (the engine's 300 times each,
+alsapcm's 100, the doctor's 200, cmd/bridge's and the console's 20, the
+installer's 3) with no failure, and the engine's whole package passes at
+`-cpu 1`.
+
+**Runs**, at 06b897c2 unless said: `go test -race -timeout 90m` of every
+touched package (the engine 27.4 s, playback 2.1 s, alsapcm 30.0 s;
+internal/admin 918.6 s, internal/doctor 6.9 s, cmd/bridge 798.1 s and
+scripts/install-test 36.3 s at c9675663, which the test's fix alone
+follows); `make test-fast`, 80 packages ok, with TMPDIR under `.tmp/_b676`
+(the census skips a `_` name; a run killed at this session's ten-minute
+limit had left its temp trees, symlinks and all, in `.tmp`, and the census
+failed on them once); `make vet`, and `go vet ./...` for windows and
+darwin with the release tags; `make build-all`; `make docs-check`; the
+pinned gofmt on every changed Go file. TestThePlayerPageSaysWhyItsLastPlayFailed
+skips here, with no node on this host: its structural twin runs, and E
+turned it red. `scripts/qualification-version -base 29a426ba` says guarded
+code changed at version 29, which the owner raises at the merge.
 
 **BusyBox on this host.** Ubuntu 26.04's busybox runs its own applets ahead
 of PATH (`id`, `ip`, `uname`, `date`), so the rig's stubs are not the ones
 its sh runs, and the real user and address replace the stubs': at main, 17
 of the installer suite's tests fail under it (74 lines), every one of them
 still failing on this branch, which adds its new test's leaves alone (85
-lines). The suite's sh, dash and `bash --posix` legs are this job's
-evidence; CI's installer job runs its own busybox. shellcheck is not
+lines; at 06b897c2 busybox sh's 67 failing leaves are main's 57, the same
+by name, and the new test's 10). The suite's sh, dash and `bash --posix`
+legs are this job's evidence, 184 leaves each and all passing; CI's
+installer job runs its own busybox. shellcheck is not
 installed here, so `make installer-check` cannot run; each shell's `-n`
 parses the script and the stubs.
 
