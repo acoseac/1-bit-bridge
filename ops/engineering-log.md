@@ -69998,7 +69998,7 @@ served on it.
 | loopback | served, a Host; never announced | served |
 | RFC 1918, 169.254/16 | a member's first is announced; served on a member; a Host | served if a member holds it, else a warning at Start |
 | ULA outside Tailscale's, fe80 zoned to its member | served on a member, a Host; never announced (SSDP is IPv4) | as above |
-| public (global unicast, not private), IPv4 or IPv6 | neither announced, served nor a Host, on any interface; said once, value-free | the opt-in: announced, served while an interface holds it, a Host, alone; its advertiser on the interface that holds it, eligible or not |
+| public (global unicast, not private), IPv4 or IPv6 | neither announced, served nor a Host, on any interface; said once, value-free | the opt-in: served while an interface holds it, a Host, alone; SSDP over IPv4 carries its literal in LOCATION (IPv6 bracketed), with the description's relative service URLs resolving there; its advertiser is on the holding interface, eligible or not |
 | 100.64/10, Tailscale's ULA | refused | announced as written, served by no one; warns at Start and starts |
 
 A host name never opts in. Every spelling of the unspecified address is a
@@ -70055,8 +70055,10 @@ interface while serving is per address. The omission line is Info, not Warn:
 leaving the address out is the bridge doing what it should, every start, on
 a host that keeps its public address. Unchanged: public mode's refusal, the
 Tailscale exclusions, link-local handling, IPv6 (served on a member's ULA and
-fe80, never announced), the unarmed SSDP listener's fallback (it answers a
-unicast unchecked, with its one Warn), and the OpenHome surface, which served
+fe80; wildcard announcements name only IPv4, while a pinned IPv6 literal is
+bracketed in SSDP LOCATION over the IPv4 transport, and the description's
+relative service URLs resolve against that IPv6 authority), the unarmed SSDP
+listener's fallback (it answers a unicast unchecked, with its one Warn), and the OpenHome surface, which served
 only IPv4 addresses of the LAN classes already (`internal/player/lan`) and
 reads no DLNA setting; its Insert takes `AcceptsOn`, the listener's own
 served set, the pin included.
@@ -70132,5 +70134,43 @@ player.md 96.8%; worst load, player_openhome_test.go 61.6%`, and the same
 with the rules patch applied (dlna-upnp.md 95,931 bytes). `go run
 ./scripts/qualification-version -base main -head HEAD`: "guarded code changed
 without qualificationVersion increase (28 -> 28)", as expected (the two
-guarded files above). No test reads a real interface: every host is a
-stand-in, its connections lantest's in-memory pipes and its SSDP ssdptest's.
+guarded files above). The B687 fixtures read no real interface: their hosts
+are stand-ins. `lantest.NewMemory` supplies listeners and connections backed
+by in-memory pipes. `ssdptest` supplies the in-memory SSDP transport, records
+outgoing datagrams and delivers injected searches. This claim applies to the
+B687 fixtures, not to every test in the suites listed above.
+
+
+## 2026-11-03 — B687 round 3: ContentDirectory URLs follow a bound listener
+
+`Server.pin` is only the public opt-in; `Start` records every actual bind in
+`accepting`. The handlers now capture the bound listener's address and port
+before serving, so Browse and Search return file and artwork URLs there for
+private, loopback and public binds, including IPv6 brackets and escaped
+zones; a pinned name keeps its name, as LOCATION announces it, on the bound
+port, which `TestTheMediaServerServesAPinnedNameOnlyOnItsBoundAddress` pins. The capture survives Stop clearing `accepting`. Wildcard
+listeners retain per-request Host URLs and the ServerURL fallback for no Host.
+`hostIsOwn` is unchanged: empty Host and localhost still pass; foreign names,
+unowned LAN addresses, unpinned public addresses and tailnet addresses do not.
+`mayName` is unchanged too: its sole caller, `hostIsOwn`, unmaps and removes
+the zone before calling it.
+
+`TestContentDirectoryURLsFollowTheBoundListener` failed before the fix for
+all seven specific-bind rows, in Browse and Search; the three original
+wildcard rows passed. After the fix it passes, also covering a mapped wildcard
+and a retained handler after Stop. All HTTP requests use recorders against
+Start's handler, with a stand-in listener, interfaces and SSDP; no socket is
+opened. The address-family comment now distinguishes IPv4-only from dual-stack
+wildcards; the tailnet comments describe local destinations and subnet routing;
+the earlier IPv6 policy row and summary distinguish the IPv4 SSDP transport
+from its bracketed IPv6 LOCATION and relative description URLs; the earlier
+fixture claim is scoped to B687 and names the helpers' roles. The DLNA rule
+and its long form track the URL change. PROTOCOL.md is untouched; the owner
+will open the iOS mirror PR after merge.
+
+Validation uses Go 1.27.3 with `GOTOOLCHAIN=local`, `GOPROXY=off`, the supplied
+cache and `-tags ts_omit_webclient,ts_omit_debugeventbus`: focused regression
+red then green; the existing artwork route/URI gating and request-Host tests
+pass; `go vet ./...` is clean on macOS and with `GOOS=windows`;
+`make docs-check` passes (DLNA rules at 96.9% of budget). The owner runs the
+socket-binding and race suites before committing.

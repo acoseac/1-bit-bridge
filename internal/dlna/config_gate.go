@@ -45,9 +45,11 @@ type DLNAConfig struct {
 // would let any internet user enumerate and download the library.
 // DLNA is for the home network only: even in loopback mode the listener
 // and SSDP serve only the LAN-eligible interfaces' private and link-local
-// addresses (servedAddrs, backlog B48; B687), so a tailnet peer is refused
-// too, and so is a connection on a LAN interface's public address. This
-// said until 2026-10-16 that an operator should reach DLNA over
+// addresses (servedAddrs, backlog B48; B687), so connections to this host's
+// tailnet addresses are refused, as are connections to a LAN interface's
+// public address. The check is on the local destination, not the peer:
+// a tailnet peer can still reach a served private address through a subnet
+// router. This said until 2026-10-16 that an operator should reach DLNA over
 // Tailscale, and every tailnet peer, a node shared from another account
 // included, could; `dlna.allowTsnet` is reserved for an opt-in that does
 // not exist yet and has no effect. In loopback mode one public address can

@@ -144,7 +144,7 @@ type ServerConfig struct {
 	// "0.0.0.0:7790" or "192.168.0.14:7790"). Whatever it binds, the
 	// listener serves only the private and link-local addresses of the
 	// LAN-eligible interfaces (servedAddrs, backlog B48; B687), so a
-	// wildcard takes a tailnet peer's connection, or one on a LAN
+	// wildcard takes a connection to a tailnet address, or to a LAN
 	// interface's public address, and closes it, and a listen address
 	// pinned to an address off the LAN serves nothing, but for one case:
 	// an IP literal of a public address (PinnedPublicAddress) is the
@@ -158,8 +158,8 @@ type ServerConfig struct {
 	// fetches + service control. Surfaced in:
 	//   - SSDP NOTIFY LOCATION header
 	//   - DIDL-Lite <res> file URLs (via the per-request serverURLFunc
-	//     in ContentDirectoryHandler — defaults to "http://" + r.Host
-	//     which composes naturally with this)
+	//     in ContentDirectoryHandler — the bound address and port for a
+	//     specific listener, or "http://" + r.Host for a wildcard)
 	//
 	// Typically `"http://" + LAN-IP + ":" + port`. Required. Its host, and
 	// each advertise endpoint's, is a name, loopback, an address of a LAN
@@ -437,8 +437,6 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}()
 
-	handler := s.handler()
-
 	readTO := dlnaReadTimeout
 	idleTO := dlnaIdleTimeout
 	if s.readTimeout > 0 {
@@ -454,7 +452,6 @@ func (s *Server) Start(ctx context.Context) error {
 	// this server had no ErrorLog).
 	s.httpServer = &http.Server{
 		Addr:              s.cfg.ListenAddress,
-		Handler:           handler,
 		ReadHeaderTimeout: dlnaReadHeaderTimeout,
 		ReadTimeout:       readTO,
 		IdleTimeout:       idleTO,
@@ -510,6 +507,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.warnOfAPublicPin()
 	var listener net.Listener = servedOnlyListener{Listener: bound, served: s.served, log: s.log}
 	s.accepting.Store(&acceptState{served: s.served, bound: netAddrIP(bound.Addr()).Unmap()})
+	s.httpServer.Handler = s.handlerOn(bound.Addr())
 
 	// Run HTTP server in a goroutine. Serve() blocks until Shutdown()
 	// is called externally; the returned ErrServerClosed is expected
@@ -811,8 +809,14 @@ func (s *Server) withdrawSSDP(ctx context.Context) {
 // check sits inside telemetry so a refused request is recorded with its
 // 421, which is what a report of "the renderer cannot play" needs to see.
 func (s *Server) handler() http.Handler {
+	return s.handlerOn(nil)
+}
+
+// handlerOn captures the bound listener for URL construction before serving.
+// A nil address supports handlers exercised without starting a listener.
+func (s *Server) handlerOn(bound net.Addr) http.Handler {
 	s.mux = http.NewServeMux()
-	s.mountHandlers()
+	s.mountHandlers(s.serverURLFunc(bound))
 	return TelemetryMiddleware(s.cfg.TelemetryStore, s.ownHostOnly(s.mux))
 }
 
@@ -837,7 +841,7 @@ func (s *Server) handler() http.Handler {
 // evented state is intentionally static (SystemUpdateID = 1; fixed
 // *ProtocolInfo), so there's nothing to push. Refusing SUBSCRIBE with
 // 404 is NOT an option (some renderers blacklist the service).
-func (s *Server) mountHandlers() {
+func (s *Server) mountHandlers(serverURLFunc func(*http.Request) string) {
 	deviceOpts := DeviceDescriptionOpts{
 		UDN:              s.cfg.UDN,
 		FriendlyName:     s.cfg.FriendlyName,
@@ -855,27 +859,7 @@ func (s *Server) mountHandlers() {
 	if s.cfg.Artwork != nil {
 		cdsOpts = append(cdsOpts, WithAlbumArtURIs())
 	}
-	cdsHandler := ContentDirectoryHandler(s.cfg.Library, func(r *http.Request) string {
-		// Per-request serverURL — PREFER the request's Host header so the
-		// DIDL <res> file URLs are reachable from whichever interface /
-		// subnet the renderer actually used to reach us. On a
-		// multi-interface host the SSDP LOCATION is now per-interface
-		// (each advertiser announces its own IP), so the renderer's
-		// subsequent SOAP request carries that same host — echoing it
-		// back keeps every <res> URL self-consistent with the discovery
-		// path. A static ServerURL would hand a secondary-subnet renderer
-		// URLs pointing at the primary interface's IP, which fails when
-		// cross-subnet routing is restricted. Fall back to the static
-		// ServerURL only when Host is empty OR carries characters that
-		// would corrupt the constructed URL (path / query / fragment
-		// separators — a Host-header-injection guard; net/http normally
-		// rejects these, but defense-in-depth is cheap on a URL we embed
-		// verbatim in every <res>). Per gemini-code-assist on PR #328.
-		if r.Host != "" && !strings.ContainsAny(r.Host, "/\\?#") {
-			return "http://" + r.Host
-		}
-		return s.cfg.ServerURL
-	}, cdsOpts...)
+	cdsHandler := ContentDirectoryHandler(s.cfg.Library, serverURLFunc, cdsOpts...)
 	s.mux.Handle("/dlna/cds/control", cdsHandler)
 	s.mux.Handle("/dlna/cm/control", ConnectionManagerHandler())
 

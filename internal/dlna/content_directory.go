@@ -427,7 +427,12 @@ type didlEnv struct {
 // Injected as a function rather than a static string so the handler
 // adapts to multi-interface deployments (one renderer dials us on one
 // LAN address, another on a second interface's). The server's Host
-// check runs first, so the host is one the listener serves (B687).
+// check runs first and admits only this host's permitted names and address
+// classes (B687); it does not check the listener's exact address or port.
+// For a specifically bound listener the server therefore ignores r.Host and
+// uses the actual bound address and port (a pinned name keeps its name, on
+// the bound port), including for an empty Host or localhost. Wildcard
+// listeners keep the per-request Host behavior.
 //
 // `opts` are the server-level switches: WithAlbumArtURIs makes every item
 // and every folder container that holds tracks carry `<upnp:albumArtURI>`

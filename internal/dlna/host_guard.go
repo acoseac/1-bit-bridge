@@ -83,13 +83,13 @@ func foldHostName(host string) string {
 // That is a Browse of the whole library and a GET of any file, from a page
 // on the internet. The name is what gives it away: the browser sends it in
 // Host, and nothing the page can do changes that. It is also what the
-// ContentDirectory builds every `<res>` and albumArtURI from, so an
+// wildcard ContentDirectory builds every `<res>` and albumArtURI from, so an
 // unchecked Host was handed back as the URL of every track.
 //
 // What passes, with any port or none:
 //
 //   - an EMPTY Host: every browser sends one, and an HTTP/1.0 renderer may
-//     not (the ContentDirectory then builds its URLs on ServerURL);
+//     not (a wildcard uses ServerURL; a bound listener uses its address);
 //   - "localhost" and a loopback literal;
 //   - the host of a LOCATION this server advertises, of its ServerURL, or of
 //     a listen address pinned to one host, name or literal (knownOwnHosts):
@@ -258,4 +258,34 @@ func (s *Server) noteForeignHost(hostport string) {
 		slog.String("host", name),
 		slog.String("hint", "the DLNA listener answers only to this host's addresses; "+
 			"point a control point or renderer at the address in its SSDP LOCATION"))
+}
+
+// serverURLFunc captures a specific listener's actual bound address and port
+// for both file and artwork URLs. A name dlna.listenAddress pins keeps its
+// name, as the SSDP LOCATION announces it, on the port the listener bound;
+// an IP literal is the bound address itself. The Host guard still runs first:
+// accepting an empty Host, localhost or another own LAN address does not mean
+// a bound listener serves that authority. A wildcard keeps the request's Host
+// so renderers on different subnets get URLs on the interface they reached.
+func (s *Server) serverURLFunc(bound net.Addr) func(*http.Request) string {
+	if a := netAddrIP(bound).Unmap(); a.IsValid() && !a.IsUnspecified() {
+		authority := bound.String()
+		if host, _, err := net.SplitHostPort(s.cfg.ListenAddress); err == nil && host != "" {
+			if _, literalErr := netip.ParseAddr(host); literalErr != nil {
+				if _, port, portErr := net.SplitHostPort(authority); portErr == nil {
+					authority = net.JoinHostPort(host, port)
+				}
+			}
+		}
+		base := (&url.URL{Scheme: "http", Host: authority}).String()
+		return func(*http.Request) string { return base }
+	}
+	return func(r *http.Request) string {
+		// Keep the URL-injection guard beside the Host check. An empty
+		// Host (an HTTP/1.0 renderer) falls back to the configured URL.
+		if r.Host != "" && !strings.ContainsAny(r.Host, "/\\?#") {
+			return "http://" + r.Host
+		}
+		return s.cfg.ServerURL
+	}
 }

@@ -301,8 +301,20 @@ address, from the advertise set and the fallback alike); `servedSnapshotOf`
 (no advertised arm; the pin while `holder` has it), which the listener's
 accept, `AcceptsOn` and the MediaServer's unicast M-SEARCH admission all read;
 the Host check (`mayName`: a literal of those classes or the pin, before
-ownership), so the ContentDirectory, which builds `<res>` and albumArtURI from
-the Host, builds no URL on a public address; NewServer
+ownership), so a wildcard ContentDirectory, which builds `<res>` and
+albumArtURI from the Host, builds no URL on an unpinned public address;
+a specifically bound listener captures its actual address and port before
+serving and builds both URLs on that authority, regardless of the accepted
+Host (B687 round 3). Private, loopback and public binds use their address,
+with IPv6 bracketed and zones URL-escaped; a pinned name keeps its name, as
+the SSDP LOCATION announces it, on the bound port
+(`TestTheMediaServerServesAPinnedNameOnlyOnItsBoundAddress`). The capture survives Stop
+clearing `accepting`, so in-flight responses keep the same URLs. Empty Host
+and localhost still pass the unchanged Host check; only a wildcard uses
+ServerURL for an empty Host and the Host itself for localhost. The regression
+`TestContentDirectoryURLsFollowTheBoundListener` exercises Start with stand-in
+TCP and SSDP transports, then Browse and Search for file and artwork URLs;
+NewServer
 (`checkAdvertisedHost`): a malformed or hostless ServerURL or LOCATION is
 refused; a literal of another class is refused unless it is the literal
 `dlna.listenAddress` names; a hostname is taken only when it is the
@@ -336,7 +348,9 @@ that cannot be armed answers a unicast M-SEARCH unchecked, with its one Warn;
 Docker's DNAT, a subnet router, a port forward or a proxy can carry anyone to
 a private address; a VPN numbered in RFC 1918 or ULA space is a member; IPv6
 on a SLAAC-only LAN is served on fe80 alone (no ULA), and the MediaServer
-announces IPv4 only.
+announces IPv4 addresses only for wildcard listeners. A pinned IPv6 literal
+is bracketed in LOCATION over the IPv4 SSDP transport; the description's
+relative service URLs resolve against that IPv6 authority.
 
 **Don't serve or announce a public address but the literal `dlna.listenAddress`
 names, take a name, a wildcard, 100.64/10 or Tailscale's ULA as the opt-in,

@@ -1803,9 +1803,11 @@ func (c *Config) IsPublic() bool {
 // DLNAConfig governs the opt-in DLNA MediaServer the bridge exposes
 // on its own parallel http.Server, for the home network only: the
 // listener and SSDP announce and serve only the LAN-eligible interfaces'
-// private and link-local addresses, and refuse a tailnet peer (backlog
-// B48) and a connection on a LAN interface's public address (B687), but
-// for one address ListenAddress names (below). Disabled by default —
+// private and link-local addresses, and refuse connections to this host's
+// tailnet addresses (backlog B48) and to a LAN interface's public address
+// (B687), except for one address ListenAddress names (below). This checks
+// the local destination, not the peer: a tailnet peer can still reach a
+// served private address through a subnet router. Disabled by default —
 // operators who pair iOS with a DLNA renderer (Chord 2go, Lumin, dCS
 // Network Bridge, etc.) flip Enabled to advertise.
 //
