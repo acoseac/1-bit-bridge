@@ -70922,3 +70922,7 @@ red then green; the existing artwork route/URI gating and request-Host tests
 pass; `go vet ./...` is clean on macOS and with `GOOS=windows`;
 `make docs-check` passes (DLNA rules at 96.9% of budget). The owner runs the
 socket-binding and race suites before committing.
+
+qualificationVersion rises to 31 at the merge (`internal/config/config.go`
+and `cmd/bridge/serve_player_discovery_test.go` are guarded; main had 30
+after B613), and the runbook's current-version pins follow it.
