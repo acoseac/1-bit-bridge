@@ -448,11 +448,12 @@ const futureMarkerSlack = time.Minute
 // install of current that reached its swap, recently, over another version
 // it names, and no version but that one has opened the data dir since
 // (State.DataDirOpenedBy): a backup restored over a store a newer version
-// migrated would be a downgrade past its migrations. The early rollback's
-// own record of such an install, written just before its rename
-// (State.RollbackStarted), is the install still: a start that finds it was
-// stopped before the backup was back. why is "" when the marker is no
-// install of current, which is nothing to explain.
+// migrated would be a downgrade past its migrations. A rollback's own record
+// of such an install, written just before its rename (State.RollbackStarted:
+// the early rollback's, or an operator's still under way, B692's round 2), is
+// the install still: a start that finds it was stopped before the backup was
+// back. why is "" when the marker is no install of current, which is nothing
+// to explain.
 //
 // DecideBootAction's rule is left as it is: its version match counts as the
 // install's success, where this asks about an install that could not start.
@@ -491,9 +492,10 @@ func ArmsDataDirRecord(st State, current string) bool {
 }
 
 // InstallArmed reports whether st records an install that a rollback may still
-// undo: an install marker, or the early rollback's own record of one it was
-// undoing, written just before its rename (State.RollbackStarted), which a
-// start of the install's version finishes.
+// undo: an install marker, or a rollback's own record of one it was undoing,
+// written just before its rename (State.RollbackStarted: the early
+// rollback's, or an operator's until its rename has landed, B692's round 2),
+// which the version that runs next finishes.
 func InstallArmed(st State) bool {
 	return st.Status == "installing" || (st.Status == "" && st.RollbackStarted)
 }

@@ -916,7 +916,7 @@ func TestInstallConcurrentRollbackSerialized(t *testing.T) {
 		Force:      true,
 	}
 
-	if err := parked.upd.Rollback(rollbackOpts); !errors.Is(err, ErrInstallInFlight) {
+	if err := parked.upd.Rollback(context.Background(), rollbackOpts); !errors.Is(err, ErrInstallInFlight) {
 		t.Errorf("Rollback during Install: err = %v, want ErrInstallInFlight", err)
 	}
 	parked.release()
@@ -926,7 +926,7 @@ func TestInstallConcurrentRollbackSerialized(t *testing.T) {
 
 	// Lock released: the rollback proceeds (the just-completed install
 	// left a .bak) and restores the previous binary.
-	if err := parked.upd.Rollback(rollbackOpts); err != nil {
+	if err := parked.upd.Rollback(context.Background(), rollbackOpts); err != nil {
 		t.Fatalf("Rollback after Install completed: %v (lock not released?)", err)
 	}
 	got, err := os.ReadFile(parked.livePath)

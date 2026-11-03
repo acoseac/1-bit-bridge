@@ -15,13 +15,9 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/packaging"
 )
 
-// scmStopWait is how long we wait for the SCM service to reach the
-// Stopped state after we send svc.Stop. Long enough for an in-flight
-// `/v1/download` to flush (the active-sessions gate above us already
-// refused if any are in flight, but transient TCP teardown can still
-// take a beat); short enough that an operator running `bridge update`
-// gets feedback within a typical patience window.
-const scmStopWait = 15 * time.Second
+// scmStopWait, how long the swap and the rollback wait for the SCM to stop
+// the service, is in swapbound.go, where its bound against the install
+// marker's lock's wait is checked on every platform.
 
 // swapBinary atomically replaces the running bridge.exe on Windows.
 //

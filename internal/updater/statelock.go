@@ -14,10 +14,10 @@ import (
 )
 
 // stateLockFileName is the file in the data dir on which the early rollback,
-// a store open that migrates, serve's first disarm and the boot's
-// housekeeping hold an exclusive kernel lock (fsutil.TryLock) while each
-// reads and writes the install marker (LockState; backlog B613's rounds 3
-// and 4). Never update-state.json
+// a store open that migrates, serve's first disarm, the boot's housekeeping
+// and the updater's own install, rollback, hold and restamp hold an exclusive
+// kernel lock (fsutil.TryLock) while each reads and writes the install marker
+// (LockState; backlog B613's rounds 3 and 4, B692). Never update-state.json
 // itself: every write of the marker renames a new file over it, and a lock
 // on the old file would not follow. Never removed: only the lock on it
 // means anything, and unlinking a lock file while it is held lets the next
@@ -33,18 +33,25 @@ func StateLockPath(dataDir string) string {
 // stateLockRetry is how often LockState asks for the lock while it waits.
 const stateLockRetry = 50 * time.Millisecond
 
-// stateLockHookMu guards the test seams below: stateLockWait, which bounds
-// how long LockState waits for another holder (the early rollback holds the
-// lock across its backup's version, ProbeVersion's 10 s at most, a record and
-// a rename; a disarm, across one marker write; the boot's housekeeping,
-// across two marker writes and a rename or the backup's removal), and which a test shortens
+// defaultStateLockWait is how long LockState waits for another holder (the
+// early rollback holds the lock across its backup's version, ProbeVersion's
+// 10 s at most, a record and a rename; a disarm, across one marker write; the
+// boot's housekeeping, across two marker writes and a rename or the backup's
+// removal; an install, across a marker read, two marker writes and its swap,
+// which on Windows first waits up to scmStopWait for the SCM to stop the
+// service; an operator's rollback, across a read, a write and the backup's
+// rename, with the same stop on Windows).
+const defaultStateLockWait = 30 * time.Second
+
+// stateLockHookMu guards the test seams below: stateLockWait,
+// defaultStateLockWait in production, which a test shortens
 // (SetStateLockWaitForTest); stateTryLock, fsutil.TryLock in production and
 // a test's stand-in for what a filesystem answers; and stateLockWaiting, nil
 // in production, run once when a taker finds the lock held and starts to
 // wait. Production code MUST NOT mutate them.
 var (
 	stateLockHookMu  sync.Mutex
-	stateLockWait    = 30 * time.Second
+	stateLockWait    = defaultStateLockWait
 	stateTryLock     = fsutil.TryLock
 	stateLockWaiting func(dataDir string)
 )
@@ -143,14 +150,17 @@ var noLocksSaid sync.Once
 
 // LockState takes the exclusive lock on <dataDir>/update-state.lock, the one
 // lock the early rollback, every store open that migrates, serve's first
-// disarm and the boot's housekeeping share around their reads and writes of
-// the install marker (backlog B613's rounds 3 and 4): a rollback holds it
-// from its marker read through the backup's rename and any write that puts
-// the install back, a migration through its durable record and its barrier,
-// serve's first disarm until its record is durable, and the housekeeping
-// from its marker read through its decision, its writes and the backup's
-// rename or removal (maybeRollbackOnBoot in cmd/bridge, which takes it
-// inside the data dir's, once the store's open has let the ladder go). The order of the locks is serve's data dir lock
+// disarm, the boot's housekeeping and the updater's own writes share around
+// their reads and writes of the install marker (backlog B613's rounds 3 and
+// 4, B692): a rollback holds it from its marker read through the backup's
+// rename and any write that puts the install back, a migration through its
+// durable record and its barrier, serve's first disarm until its record is
+// durable, the housekeeping from its marker read through its decision, its
+// writes and the backup's rename or removal (maybeRollbackOnBoot in
+// cmd/bridge, which takes it inside the data dir's, once the store's open has
+// let the ladder go), and the updater's install, operator's rollback, hold
+// and restamp from their read through their writes and swap
+// (lockMarkerForUpdate, which refuses where the filesystem keeps none). The order of the locks is serve's data dir lock
 // (server.lock), then the store's migration lock (the ladder, beside the
 // database), then this one; a caller takes the ones it needs in that order,
 // and nothing that holds this one takes either of the others. A caller takes
@@ -171,9 +181,9 @@ var noLocksSaid sync.Once
 // Windows' ERROR_NOT_SUPPORTED and ERROR_INVALID_FUNCTION; never ENOLCK) is
 // a hold that is not held (Held false, Unheld its answer), said once a
 // process: there no process can hold the lock, and a caller that needs it to
-// exclude another refuses (the early rollback, the boot's housekeeping),
-// where one that only writes beside other writers of its kind goes on (a
-// disarm). The lock file is opened through
+// exclude another refuses (the early rollback, the boot's housekeeping, the
+// updater's install, rollback, hold and restamp), where one that only writes
+// beside other writers of its kind goes on (a disarm). The lock file is opened through
 // fsutil.OpenLockFile, so a link there is refused and a root caller makes it
 // the data dir's owner's.
 func LockState(ctx context.Context, dataDir string) (*StateLock, error) {
@@ -216,6 +226,7 @@ func LockState(ctx context.Context, dataDir string) (*StateLock, error) {
 			noLocksSaid.Do(func() {
 				logger.Warn("the data dir's filesystem keeps no locks, so nothing keeps a store's migration and an install's rollback "+
 					"apart there: neither the early rollback nor a start's housekeeping of the install marker runs, "+
+					"the updater neither installs nor rolls back (update with the bridge stopped, by hand), "+
 					"and the rest goes on without the install marker's lock",
 					"lock", stateLockFileName, "reason", fsutil.ErrorWithoutPath(err))
 			})

@@ -138,15 +138,23 @@ type State struct {
 	// rollback (BootInstallFailed) restores it.
 	DataDirOpenedBy string `json:"dataDirOpenedBy,omitempty"`
 
-	// RollbackStarted says the early rollback (cmd/bridge) wrote this marker
-	// just before it put the backup back: RejectedVersion's hold, beside the
-	// install it was undoing (TargetVersion over PreviousVersion, at
-	// AttemptedAt, SwapStarted). Status is "", so the binary the backup
-	// restores, whatever its version, takes the marker for no install and
-	// keeps the hold, where 0.2.1's and 0.2.2's boot clears an install
-	// marker it cannot finish and the hold with it; and a start of
-	// TargetVersion that finds it, stopped before the backup was back,
-	// finishes the rollback (EarlyRollback).
+	// RollbackStarted says a rollback wrote this marker just before it put
+	// the backup back, and may not have put it back: RejectedVersion's hold,
+	// beside the install it was undoing (TargetVersion over PreviousVersion,
+	// at AttemptedAt, SwapStarted). The early rollback (cmd/bridge) writes it
+	// and leaves it; an operator's (Rollback, since backlog B692's round 2)
+	// writes it and clears it once its rename has landed. Status is "", so
+	// the binary the backup restores, whatever its version, takes the marker
+	// for no install and keeps the hold, where 0.2.1's and 0.2.2's boot
+	// clears an install marker it cannot finish and the hold with it. Until
+	// it is cleared the record is the install still (InstallArmed), and the
+	// version that runs finishes it: a start of TargetVersion stopped before
+	// the backup was back finishes the rollback where its settings are still
+	// refused (EarlyRollback), and where they load records that it opened the
+	// data dir (AdmitBoot), after which no rollback restores and its
+	// housekeeping confirms the install (BootRollbackOvertaken); a start of
+	// PreviousVersion, the backup back, ends the record as a rollback done
+	// (BootRollbackFinished).
 	RollbackStarted bool `json:"rollbackStarted,omitempty"`
 
 	// MigrationVeto names the version whose store migrations are refused
@@ -154,7 +162,8 @@ type State struct {
 	// pending refuses (DisarmBeforeMigrating, MigrationVetoed). A rollback
 	// that puts the backup back over that version's binary writes it before
 	// its rename (the early rollback's RollbackRecord; the boot's
-	// BootInstallFailed), since a command of that version may still be
+	// BootInstallFailed; the operator's Rollback, OperatorRollbackRecord,
+	// since backlog B692), since a command of that version may still be
 	// running from its image, its store open waiting, and must not migrate
 	// the store past the version put back. It outlives the rollback: every
 	// clear keeps it (ClearInstall), as a refusal recorded since does
@@ -373,10 +382,11 @@ const (
 	// State.SwapStarted.
 	BootClearNotSwapped
 
-	// BootRollbackOvertaken means the marker is the early rollback's own
-	// record (State.RollbackStarted, Status ""), left by a start of the
-	// install's version that was stopped before the backup was back, and
-	// this boot is of that version: the housekeeping runs only once serve
+	// BootRollbackOvertaken means the marker is a rollback's own record
+	// (State.RollbackStarted, Status ""), left by a start of the install's
+	// version that was stopped before the backup was back, or by an
+	// operator's rollback stopped before its rename (backlog B692's round 2),
+	// and this boot is of that version: the housekeeping runs only once serve
 	// got past its settings, so the rollback will not be finished. Caller
 	// confirms the install as for BootInstallSucceeded, whatever the record's
 	// age, on the record its admission made of this version opening the data
@@ -386,9 +396,10 @@ const (
 	BootRollbackOvertaken
 
 	// BootRollbackFinished means the marker is that record and the version
-	// the backup held runs: the rollback was finished. Caller clears the
-	// install the record describes and keeps its hold and its veto
-	// (ClearInstall); nothing is restored.
+	// the backup held runs: the rollback was finished (the early rollback's,
+	// or an operator's stopped after its rename and before it cleared its
+	// record). Caller clears the install the record describes and keeps its
+	// hold and its veto (ClearInstall); nothing is restored.
 	BootRollbackFinished
 )
 
@@ -398,8 +409,9 @@ const (
 func DecideBootAction(st State, currentServerVersion string, now time.Time) BootAction {
 	switch st.Status {
 	case "":
-		// The early rollback's own record is its own case, never an install
-		// marker and never a hold alone (backlog B613's round 3). Read before
+		// A rollback's own record (the early rollback's, or an operator's
+		// still under way) is its own case, never an install marker and never
+		// a hold alone (backlog B613's round 3, B692's round 2). Read before
 		// any window: the housekeeping runs only once serve got past its
 		// settings, so the install's version booting is the install working,
 		// however old the record, and an expired one is confirmed, not
@@ -450,9 +462,10 @@ func DecideBootAction(st State, currentServerVersion string, now time.Time) Boot
 	}
 }
 
-// ConfirmOverRollback is the marker BootRollbackOvertaken writes over st, the
-// early rollback's record of an install of current that a start stopped
-// before the backup was back: the install confirmed as BootInstallSucceeded
+// ConfirmOverRollback is the marker BootRollbackOvertaken writes over st, a
+// rollback's record of an install of current that was stopped before the
+// backup was back (the early rollback's, or an operator's): the install
+// confirmed as BootInstallSucceeded
 // confirms one (installed at now, so the boot after it removes the backup),
 // the rollback's mark gone, and its hold and its veto gone only where they
 // name current, a refusal of another version recorded since staying. The
@@ -477,6 +490,56 @@ func ConfirmOverRollback(st State, current string, now time.Time) (State, error)
 		st.MigrationVeto = ""
 	}
 	return st, nil
+}
+
+// RollbackRefusal says why an operator's rollback (Rollback) must not put the
+// backup back over the install st describes, "" where it may (backlog B692):
+// st records that a version other than the backup's opened the data dir under
+// the install (State.DataDirOpenedBy: serve's admission at that version's
+// start, or a store open of it that migrated), so its store may hold what the
+// backup's version does not read, and the rollback would be a downgrade past
+// it, as the early rollback and the boot's refuse one. In every flow the
+// updater makes, that version is the one the rollback would roll back from.
+// A forced downgrade is not offered.
+func RollbackRefusal(st State) string {
+	if st.DataDirOpenedBy == "" || SameVersion(st.DataDirOpenedBy, st.PreviousVersion) {
+		return ""
+	}
+	back := st.PreviousVersion
+	if back == "" {
+		back = "the backup's version"
+	}
+	return fmt.Sprintf("%s has opened the data dir since the install, so its store may hold changes %s does not read, "+
+		"and a rollback would be a downgrade past them", st.DataDirOpenedBy, back)
+}
+
+// OperatorRollbackRecord is the marker an operator's rollback writes,
+// durably, just before it puts the backup back (Rollback; backlog B692): st,
+// as the rollback read it under the install marker's lock, with its Status ""
+// (InstalledAt cleared), rejected held back as an operator's rollback
+// (RejectedVersion, with no reason and no digest, which the gate words
+// itself) and rejected's store migrations vetoed (State.MigrationVeto), since
+// a command of rejected may still be running from its image. Where st records
+// the install it undoes (TargetVersion), the record says the rollback is under
+// way (State.RollbackStarted, round 2), and Rollback clears that only once its
+// rename has landed: a rollback the process's end stops after this write and
+// before the rename leaves the version it rolls back from in place, and its
+// record must stay that install, armed, for the version that runs to finish
+// (DecideBootAction's BootRollbackOvertaken and BootRollbackFinished), and
+// for that version's start to record that it opened the data dir before its
+// store migrates (AdmitBoot), so a later rollback refuses (RollbackRefusal):
+// a record that said no rollback was under way let its start lift the veto
+// and migrate unrecorded, and a second rollback put the backup back over the
+// migrated store (Codex on #1387). Every other field is kept as it was: the
+// install's versions, time and swap, and DataDirOpenedBy, empty by
+// RollbackRefusal. One veto is kept at a time, so a veto of another version
+// is replaced.
+func OperatorRollbackRecord(st State, rejected string) State {
+	st.Status, st.InstalledAt = "", time.Time{}
+	st.RollbackStarted = st.TargetVersion != ""
+	st.RejectedVersion, st.RejectedReason, st.RejectedConfigDigest = rejected, "", ""
+	st.MigrationVeto = rejected
+	return st
 }
 
 // CurrentServerVersion exposes the bridge's own version constant
