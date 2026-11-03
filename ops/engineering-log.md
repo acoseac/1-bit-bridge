@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-11-03 — B692 round 3: a stop during the restamp's write requests no restart](#2026-11-03--b692-round-3-a-stop-during-the-restamps-write-requests-no-restart)
 - [2026-11-03 — B692 round 2: an operator's rollback stays under way until its rename, and the stops in the updater's lock waits are stops](#2026-11-03--b692-round-2-an-operators-rollback-stays-under-way-until-its-rename-and-the-stops-in-the-updaters-lock-waits-are-stops)
 - [2026-11-03 — B692: the updater's own install, rollback, hold and restamp hold the install marker's lock](#2026-11-03--b692-the-updaters-own-install-rollback-hold-and-restamp-hold-the-install-markers-lock)
 - [2026-11-03 — B613 round 4: the migration veto outlives the rollback's record, the boot's housekeeping holds the marker's lock, a stop ends that lock's wait, an interrupted rollback is confirmed only on the install's own record](#2026-11-03--b613-round-4-the-migration-veto-outlives-the-rollbacks-record-the-boots-housekeeping-holds-the-markers-lock-a-stop-ends-that-locks-wait-an-interrupted-rollback-is-confirmed-only-on-the-installs-own-record)
@@ -71393,3 +71394,40 @@ goroutine without `drainLoopOnCleanup`), with this record in the tree:
   the only other changes are round 1's bullet in both its copies and round
   2's bullet and section.
 - The qualification-version check, `-base main -head HEAD`: OK, no raise.
+
+## 2026-11-03 — B692 round 3: a stop during the restamp's write requests no restart
+
+Codex's review of round 2 at b83ac427 (Argon: no findings); worker b692 on
+legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`, umask
+022). The branch went to the PR head by its loose ref, as in round 2 (`git
+merge` needs an approval this session cannot give): the old value checked,
+the tree clean, the 43 paths the fast-forward changes checked out, no
+deletions among them. Commits: the seam c5f802bb (`Updater.restampSave`,
+which changes nothing), red 432db42a, fix f1741165, then this record. The
+rule's change is round 2's bullet ("a stop while the restamp waits or
+writes requests no restart"), in its line and its long form's copy, shipped
+as a checked patch (`rules-b692-r3.patch`), with a round-3 paragraph in
+round 2's long form.
+
+**The defect** (P2). `refreshInstallAttemptedAt` returned the stop only from
+its wait for the install marker's lock. A stop that landed during its
+write, the lock held, was swallowed, and `restartWhenDrained` requested the
+restart: exit 75, and a supervisor's restart of a service the operator
+stopped.
+
+**The fix.** `restartWhenDrained` asks the context again once the restamp has
+returned, just before it requests the restart, and requests none after a
+stop. Left: the few statements between that ask and the request, since
+`serveRestart.request` marks any request it gets.
+
+**Red first** (432db42a on c5f802bb): `TestAStopWhileTheRestampWaitsRequestsNoRestart`,
+its new subtest "stopped during its write" (the seam holds the write until
+serve's context ends): one restart requested, want none; its three other
+subtests green.
+
+**Negative control**, alone on f1741165, the file put back with `git
+checkout --` and the tree clean after it (`.tmp/_b692/controls.py` R5): the
+ask after the restamp taken out, predicted and observed red on that one
+subtest (1 test, 1 subtest).
+
+**Checks.** CHECKS-PENDING

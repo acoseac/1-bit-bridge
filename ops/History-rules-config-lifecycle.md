@@ -2148,7 +2148,7 @@ is in `ops/engineering-log.md`, 2026-11-03, B692.
 
 ## An operator's rollback under way until its rename, and the stops in the updater's lock waits (backlog B692's round 2, 2026-11-03)
 
-- **…and an operator's rollback stays under way until its rename has landed, and a stop in the updater's lock waits is a stop: the rollback's record carries `RollbackStarted` where the marker names the install, and `Rollback` clears it only after the rename, so a rollback the process's end stops between the two is finished by the version that runs next, by B613's rule for a rollback's record: on the target still in place, its commands' migrations refuse under the veto and its serve admission records `DataDirOpenedBy` and lifts the veto in one write, after which every rollback refuses and its housekeeping confirms the install (`BootRollbackOvertaken`); on the previous version, the backup back, its housekeeping ends the record as a rollback done (`BootRollbackFinished`); a stop while the restamp waits requests no restart, and one while a hold's record waits is the install's answer, the context's error** (2026-11-03, backlog B692's round 2). **Don't clear the under-way mark before the rename has landed, lift a veto at the target's admission without recording that it opened the data dir, request a restart after a stop, or answer a stop with a refusal.** `TestARollbackStoppedBeforeItsRenameStaysAnInstallTheTargetsStartResolves`, `TestARollbackStoppedAfterItsRenameIsFinishedByTheVersionThatRuns`, `TestARollbackClearsItsRecordOnceItsRenameHasLanded`, `TestAManualRollbackStoppedBeforeItsRenameKeepsTheStoreFromASecondRollback`, `TestAManualRollbackStoppedAfterItsRenameIsFinishedByThePreviousVersionsBoot`, `TestAStopWhileTheRestampWaitsRequestsNoRestart` and `TestAStopWhileTheHoldWaitsIsTheInstallsAnswer` pin it. → History-rules-config-lifecycle.md
+- **…and an operator's rollback stays under way until its rename has landed, and a stop in the updater's lock waits is a stop: the rollback's record carries `RollbackStarted` where the marker names the install, and `Rollback` clears it only after the rename, so a rollback the process's end stops between the two is finished by the version that runs next, by B613's rule for a rollback's record: on the target still in place, its commands' migrations refuse under the veto and its serve admission records `DataDirOpenedBy` and lifts the veto in one write, after which every rollback refuses and its housekeeping confirms the install (`BootRollbackOvertaken`); on the previous version, the backup back, its housekeeping ends the record as a rollback done (`BootRollbackFinished`); a stop while the restamp waits or writes requests no restart, and one while a hold's record waits is the install's answer, the context's error** (2026-11-03, backlog B692's round 2). **Don't clear the under-way mark before the rename has landed, lift a veto at the target's admission without recording that it opened the data dir, request a restart after a stop, or answer a stop with a refusal.** `TestARollbackStoppedBeforeItsRenameStaysAnInstallTheTargetsStartResolves`, `TestARollbackStoppedAfterItsRenameIsFinishedByTheVersionThatRuns`, `TestARollbackClearsItsRecordOnceItsRenameHasLanded`, `TestAManualRollbackStoppedBeforeItsRenameKeepsTheStoreFromASecondRollback`, `TestAManualRollbackStoppedAfterItsRenameIsFinishedByThePreviousVersionsBoot`, `TestAStopWhileTheRestampWaitsRequestsNoRestart` (its write's stop since round 3) and `TestAStopWhileTheHoldWaitsIsTheInstallsAnswer` pin it. → History-rules-config-lifecycle.md
 
 *The defect* (Codex on #1387, P1). Round 1's record (`OperatorRollbackRecord`)
 cleared Status and `RollbackStarted` before the rename. A rollback the
@@ -2231,6 +2231,19 @@ to finish it and no record of the data dir to keep, as before. The words
 of the housekeeping's confirmation and of the vetoed migration's refusal
 now name any rollback ("begun before this start", "a rollback of the
 install"). PROTOCOL.md says nothing round 2 changes.
+
+*Round 3* (Codex on round 2, P2). The restamp returned the stop only from
+its lock's wait: one that landed during its write, the lock held, was
+swallowed, and the restart was requested, exit 75 and a supervisor's
+restart of a service the operator stopped. `restartWhenDrained` asks the
+context again once the restamp has returned, just before it requests the
+restart, and requests none after a stop; what is left is the few
+statements between that ask and the request (`serveRestart.request` marks
+any request it gets). Red first on the seam that changes nothing
+(`Updater.restampSave`, the write's stand-in, held until serve's context
+ends): `TestAStopWhileTheRestampWaitsRequestsNoRestart`'s "stopped during
+its write", one restart requested; and one negative control, the ask
+taken out, red on that subtest alone (the log's round-3 entry).
 ## Config, settings and process lifecycle
 
 - **An install of a target already staged on disk is REFUSED, and the refusal
