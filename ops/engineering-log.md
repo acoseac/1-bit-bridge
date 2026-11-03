@@ -71129,3 +71129,142 @@ bound a socket and no commit was made.
   host and with GOOS=windows. `make docs-check` passed. Both rules files
   were writable, so the corrections and their long forms are in the tree;
   no fallback rules patch was needed.
+
+
+## 2026-11-03 — B674: the player seeks within a track
+
+Playlist's SeekSecondAbsolute and SeekSecondRelative answered 803 without
+touching the engine (`playlistSeekSecond`), and neither the engine's
+transport table nor the backend contract had a seek within a track, so
+1-bit's resume at a position, a SeekSecondAbsolute sent as Play answers,
+played every track from its start. Each is now the engine's own command.
+
+**The design: a seek is a session of its own that continues the occurrence
+heard.** The engine releases the session that holds the track and, once the
+release is acknowledged, starts one whose first occurrence is the one
+heard, under its ID, from `StartRequest.From`, the target's frame. A seek
+inside the live session was considered and rejected on what the code
+shows: `alsapcm.Sink` takes nothing back from the kernel short of DROP,
+which closes the device, so a seek inside the session reopens the device
+anyway; inside it the producer is the decoder's sole reader, the reporter
+counts boundaries and positions from each occurrence's sink start, an
+occurrence written whole has its decoder closed at its end of file while
+its last two seconds or so are still in the sink, and every event would
+need an epoch the backend tags and the engine checks through refusals and
+late answers. A release and a start are the backend contract's own terms,
+each already pinned: the release drops every sink with the frames the DAC
+had not played and every successor handed off, joins the session's
+goroutines and closes everything before its acknowledgement; the start
+comes only after it, locates the binding again, checks the node after open
+and positions the decoder (`decode.Decoder.Seek`, exact) on Start's own
+goroutine before the first chunk and before the producer exists, so no
+Seek races a ReadFrames. The session is the seek's fence, the explicit
+monotonic counter Argon's note 3 asked for: every event names its session,
+the engine takes events only from the current one, and a seek's session is
+new. Reusing the occurrence's ID keeps the track heard, TrackCount and
+DetailsCount as they were (`hear` finds the same occurrence), which a
+controller reads as one track, not two.
+
+**The contract** (Argon's note 1): the target is seconds from the start,
+or signed seconds from the position the backend measured (the target of a
+seek under way; where the hand-off started while nothing is measured),
+times the content's rate (`Details.RateHz`), every product and sum checked
+(`seekFrame`). 0 is the start. A relative target before the start is the
+start. A target at or past the decoder's length (`Details.Frames`), so the
+exact end, where nothing would be left to play, an absolute one before the
+start, overflow and content of no known length or rate are
+`seek_out_of_range`; DSD, native or DoP, known by the occurrence's native
+plan, its Details (`DSD`, one bit) or the session's transport, never by a
+PCM carrier (note 4), is `seek_unsupported` before anything else is asked;
+no track to seek in (stopped, a release that stops or plays another entry,
+a pause with no session no seek made, a track the backend reported nothing
+of) is `seek_unavailable`. Each refusal changes nothing; OpenHome answers
+the three with 803 on the two seeks alone, every other refusal by its row.
+Playing or starting, a seek releases to play at the target; paused, it
+releases and stays paused at the target with no session, where Play
+starts one. A seek waits, as Pause does, behind a start, a Pause or a
+Resume; a backend reports a session's first PCM occurrence's Details
+before its Start returns (once), so 1-bit's seek, sent as Play answers,
+knows the content. Another seek during the release, or at a paused target,
+moves the target with no call; Play keeps it; Stop, Next, Previous, PlayID
+(its own entry's from the start), PlayIndex, a deletion of the entry,
+DeleteAll, the output going away, maintenance, a release past its deadline
+and the shutdown drop it (`seekPending`, asked after every step), so
+superseded work never plays. Successors are named again by the session at
+the target (note 2: the gapless lookahead resumes from the new position);
+nothing is re-initialized but the sink, opened in the packing the unit
+took, and nothing converts a sample.
+
+`GET /v1/outputs`' kind bridge element carries the optional
+`bridge.timeSeek`, `{"pcm":"supported","dsd":"unsupported"}`, from
+`engine.TimeSeek` (the seek's refusal reads the same), through
+`BridgeOutputFacts` as plain words; an absent object or member, or an
+unknown word, is unknown to a client; it states the implementation in
+every state. MPD elements' bytes are unchanged
+(`TestAnMPDElementsBytesAreMains`). PROTOCOL.md documents it beside the
+bridge object with its word table and example; ProtocolVersion stays 1.
+
+Evidence, on legion0 (Linux, Go 1.27.3, GOTOOLCHAIN=local, umask 022):
+
+- Red first (09f12530, over stubs that compiled): the SOAP seek answered
+  803 where a response was wanted (`TestASeekWithinTheTrackIsTheEnginesSeek`);
+  every golden started from frame 1 gave the DAC its whole decode, "1024
+  samples, not the 1022 of the content from there"
+  (`TestPlaybackStartsAtItsFromBitExactly`); the engine refused the seek in
+  `TestPlaybackSeeksWithinATrackThroughTheEngine` (WAV, AIFF, FLAC). The
+  fake DAC takes 44.1 kHz and up only, so the synthesized tracks are 4 s at
+  44.1 kHz; the FLAC is mewkiz's verbatim encoding with no SEEKTABLE, so its
+  seek is the decoder's forward scan.
+- Green (531b1e5d, e4335950): the engine's table with its Seek row in every
+  state; `TestASeekPlaysTheTrackHeardFromItsTarget`,
+  `TestARelativeSeekCountsFromThePosition`, `TestTheSeeksBoundaries`,
+  `TestAPausedSeekStaysPausedAtItsTarget`, `TestARepeatedSeekMovesItsTarget`,
+  `TestWhatSupersedesASeekDropsIt`, `TestTheOutputGoingAwayDropsASeek`,
+  `TestTheReleasedSessionsEventsAreNotTheTracks`, `TestASeekWaitsItsTurn`,
+  `TestDSDRefusesASeekAndChangesNothing`, `TestASeekWhoseStartFailsStops`;
+  through the real sink and the fake kernel, every PR 1 golden (FLAC, WAV,
+  AIFF, AIFC, ALAC, an edited one) from frames 1, its middle and its last
+  matching the reference-verified decode from there, and through the
+  engine forward, back and relative, paused, twice in a row, with a
+  buffered successor, with a Stop during the reopen, and a From the content
+  cannot take failing the Start with no refusal and no open; through SOAP,
+  success, Time's Seconds, TrackCount, 1-bit's resume at a position, DSD and
+  DoP 803 with no backend call, and the budget's admission; the
+  capability's presence, omission and word table. Targeted `-race`:
+  the engine's seek and table tests twice, the backend's seek tests five
+  times, clean.
+- Negative controls, each alone on the committed tree, one exact-string
+  mutation each, reverted from HEAD: the blanket 803 restored failed five
+  OpenHome tests by assertion ("fault 803, want a response"; one by its
+  1-minute wait for an engine call that never came); the decoder's
+  positioning bypassed failed every golden of the From test and every
+  engine-level path test on its bytes, and the out-of-reach From test on
+  "want a failure that is no refusal"; positions taken from any session
+  stayed green at first, because the stale position reached the engine
+  before the new session's Audible, which resets the position to the
+  target, so e4335950 sends the released session's events once the new
+  session is heard and measured, behind a barrier (the owner's handled
+  notes; in OpenHome, a later report of the new session's), and then both
+  went red (Seconds 55 where 32 was due, and a relative seek counted from
+  the stale 55 s); ends taken from any session failed both on the
+  transport stopped by the released session's Finished.
+- qualificationVersion 33 (main had 32 after B676; the engine, playback,
+  OpenHome, `internal/api/outputs_bridge` and `cmd/bridge/serve_player`
+  paths are guarded), the runbook's five current references with it.
+- `.claude/` is unwritable to this session: the rules changes (openhome.md,
+  player.md, output.md, wire.md) are `rules-b674.patch`, proved by a strict
+  applier of its own (`git apply --check` needs approval here), with the
+  budgets measured over the patched files: player.md 98.9% of its budget.
+  Their long forms are in `ops/History-rules-openhome.md` and
+  `ops/History-rules-player.md`.
+
+Named limits: a paused seek lets the device go at once, where the paused
+session would have held it for `pauseReleaseSeconds`, so another process
+can take it before Play; a FLAC with no SEEKTABLE is sought by the forward
+scan inside StartTimeout (5 s); a Pause sent during a seek's release to play
+changes nothing, as during SeekId's. The iOS companion (docs/BridgeProtocol.md
+copied from PROTOCOL.md, the fixtures exported again with
+BRIDGE_EXPORT_IOS_FIXTURES, `timeSeek` decoded optional with unknown for an
+absent member or word, and #2377's `BridgeOutputPlayer.refusesTimeSeek` seam
+read from it) is not opened: legion0 has no iOS checkout and this session
+neither pushes nor reaches GitHub.
