@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"os/exec"
 	"os/user"
@@ -638,6 +639,11 @@ func parseProcStatusCreds(status string) (dacService, bool) {
 				return dacService{}, false
 			}
 			if key == "Uid" {
+				// A uid that does not fit an int32 does not parse: int is 32
+				// bits on the bridge's 32-bit builds, where it would wrap.
+				if n > math.MaxInt32 {
+					return dacService{}, false
+				}
 				s.euid, uid = int(n), true
 			} else {
 				s.egid, gid = uint32(n), true

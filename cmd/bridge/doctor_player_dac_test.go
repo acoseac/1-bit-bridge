@@ -636,3 +636,17 @@ func appendDACBinding(t *testing.T, path string) {
 // ext4Storage is a medium the player-storage line takes, for a run whose
 // subject is the player-dac line.
 var ext4Storage = atomicwrite.Medium{Storage: "ext4"}
+
+// TestProcStatusCredsRefuseAUidPastInt32 pins the bound CodeQL asked for on
+// #1386: an effective uid that does not fit an int32 does not parse, on every
+// platform, rather than wrapping negative where int is 32 bits.
+func TestProcStatusCredsRefuseAUidPastInt32(t *testing.T) {
+	valid := "Uid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\nGroups:\t29 1000\n"
+	if s, parsed := parseProcStatusCreds(valid); !parsed || s.euid != 1000 {
+		t.Fatalf("a valid status: parsed %v, euid %d", parsed, s.euid)
+	}
+	past := "Uid:\t1000\t4294967294\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\n"
+	if _, parsed := parseProcStatusCreds(past); parsed {
+		t.Fatal("an effective uid past MaxInt32 parsed")
+	}
+}
