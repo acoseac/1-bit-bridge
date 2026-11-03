@@ -70671,5 +70671,6 @@ build lock:
   before the rename, whose settings load once it takes the data dir, counts
   as its admission. No backlog entry was written: the backlog file is not on
   this host.
-- The qualification version is the orchestrator's at merge (internal/manifest
-  is a guarded prefix).
+- qualificationVersion rises to 30 at the merge (`internal/manifest/` and
+  `internal/fsutil/` are guarded prefixes; main had 29 after B607), and the
+  runbook's current-version pins follow it.
