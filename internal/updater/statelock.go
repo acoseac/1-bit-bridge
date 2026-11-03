@@ -1,6 +1,7 @@
 package updater
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -163,7 +164,8 @@ var noLocksSaid sync.Once
 // beside other writers of its kind goes on. The lock file is opened through
 // fsutil.OpenLockFile, so a link there is refused and a root caller makes it
 // the data dir's owner's.
-func LockState(dataDir string) (*StateLock, error) {
+func LockState(ctx context.Context, dataDir string) (*StateLock, error) {
+	_ = ctx
 	f, err := fsutil.OpenLockFile(dataDir, stateLockFileName)
 	if err != nil {
 		return nil, &StateLockError{Err: err}

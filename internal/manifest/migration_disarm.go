@@ -19,7 +19,7 @@ import (
 // so an open that migrates nothing leaves the marker alone. An error refuses
 // the open before any step runs, as serve refuses to start over a record it
 // cannot make, and so does the early rollback's record of an install of this
-// version that no start has gone on past (updater.ErrRollbackUnderWay; round
+// version that no start has gone on past (updater.ErrMigrationVetoed; round
 // 3): the backup may be back over this binary already.
 //
 // The data dir is the database's own directory. That is the boundary this

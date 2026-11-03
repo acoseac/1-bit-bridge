@@ -1,6 +1,7 @@
 package updater
 
 import (
+	"context"
 	"errors"
 	"os"
 	"runtime"
@@ -68,7 +69,9 @@ var theDisarms = []struct {
 	name string
 	run  func(dataDir, current string) (DisarmResult, error)
 }{
-	{"serve's admission", func(dataDir, current string) (DisarmResult, error) { return AdmitBoot(dataDir, current, nil) }},
+	{"serve's admission", func(dataDir, current string) (DisarmResult, error) {
+		return AdmitBoot(context.Background(), dataDir, current, nil)
+	}},
 	{"a migration's", DisarmBeforeMigrating},
 }
 
@@ -255,7 +258,7 @@ func TestTheMarkersBarrierTakesOnlyADirectorySyncTheFilesystemCannotDo(t *testin
 			}{
 				{"the publication", func() error { return SaveState(dir, armedForBarrier()) }},
 				{"the removal", func() error { return ClearStateDurably(dir) }},
-				{"the disarm's own", func() error { _, err := AdmitBoot(dir, "0.2.3", nil); return err }},
+				{"the disarm's own", func() error { _, err := AdmitBoot(context.Background(), dir, "0.2.3", nil); return err }},
 			}
 			for _, s := range sites {
 				runs := fault.runs

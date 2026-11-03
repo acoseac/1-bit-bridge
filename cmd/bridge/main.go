@@ -2335,16 +2335,29 @@ const backupShutdownWait = 45 * time.Second
 // Each clear keeps a hold recorded beside the install (updater.ClearInstall).
 // Failures here are logged but non-fatal — a botched rollback still
 // lets the server start up; the operator can recover manually.
-func maybeRollbackOnBoot(stderr io.Writer, dataDir, binaryPath string) {
+func maybeRollbackOnBoot(ctx context.Context, stderr io.Writer, dataDir, binaryPath string) {
+	_ = bootHousekeeping(ctx, stderr, dataDir, binaryPath, version.ServerVersion, nil)
+}
+
+// bootHousekeeping is maybeRollbackOnBoot as the boot of version current,
+// which puts the backup back through restore (nil is updater.RollbackBinary):
+// a test runs it as the version a rollback put back, or holds it in its
+// restore. It returns why it did nothing, where it did nothing for a reason
+// of its own.
+func bootHousekeeping(ctx context.Context, stderr io.Writer, dataDir, binaryPath, current string, restore func(dst, suffix string) error) error {
+	_ = ctx
+	if restore == nil {
+		restore = updater.RollbackBinary
+	}
 	st, err := updater.LoadState(dataDir)
 	if err != nil {
 		fmt.Fprintf(stderr, "updater: load state: %v\n", err)
-		return
+		return nil
 	}
-	action := updater.DecideBootAction(st, version.ServerVersion, time.Now().UTC())
+	action := updater.DecideBootAction(st, current, time.Now().UTC())
 	switch action {
 	case updater.BootNoop:
-		return
+		return nil
 	case updater.BootInstallSucceeded:
 		// New binary booted; record installedAt so the NEXT boot
 		// knows it can clean up the .bak.
@@ -2377,15 +2390,15 @@ func maybeRollbackOnBoot(stderr io.Writer, dataDir, binaryPath string) {
 		if st.DataDirOpenedBy != "" {
 			fmt.Fprintf(stderr, "updater: install of %s did not reach the expected version (running %s); not rolling back to %s.bak, "+
 				"since %s has opened the data dir and its store may hold changes %s does not know: put the backup back by hand if that is safe\n",
-				st.TargetVersion, version.ServerVersion, binaryPath, st.DataDirOpenedBy, st.PreviousVersion)
+				st.TargetVersion, current, binaryPath, st.DataDirOpenedBy, st.PreviousVersion)
 			if err := updater.ClearInstall(dataDir, st); err != nil {
 				fmt.Fprintf(stderr, "updater: clear state: %v\n", err)
 			}
-			return
+			return nil
 		}
 		fmt.Fprintf(stderr, "updater: install of %s did not reach the expected version (running %s); rolling back to .bak\n",
-			st.TargetVersion, version.ServerVersion)
-		if err := updater.RollbackBinary(binaryPath, ".bak"); err != nil {
+			st.TargetVersion, current)
+		if err := restore(binaryPath, ".bak"); err != nil {
 			fmt.Fprintf(stderr, "updater: rollback failed: %v (manual recovery needed at %s)\n",
 				err, binaryPath)
 		}
@@ -2415,9 +2428,15 @@ func maybeRollbackOnBoot(stderr io.Writer, dataDir, binaryPath string) {
 		// admission recorded that this version opened the data dir), and the
 		// install is confirmed, however old the record. .bak stays for one
 		// more boot, as after any confirmed install (backlog B613's round 3).
+		confirmed, err := updater.ConfirmOverRollback(st, current, time.Now().UTC())
+		if err != nil {
+			fmt.Fprintf(stderr, "updater: not confirming the install of %s over the rollback an earlier start began: %v; "+
+				"the install marker is left as it is\n", current, err)
+			return nil
+		}
 		fmt.Fprintf(stderr, "updater: %s starts on settings it loads, so the rollback to %s an earlier start began is not finished: "+
-			"the install is confirmed, and %s.bak is kept until the next start\n", version.ServerVersion, st.PreviousVersion, binaryPath)
-		if err := updater.SaveState(dataDir, updater.ConfirmOverRollback(st, version.ServerVersion, time.Now().UTC())); err != nil {
+			"the install is confirmed, and %s.bak is kept until the next start\n", current, st.PreviousVersion, binaryPath)
+		if err := updater.SaveState(dataDir, confirmed); err != nil {
 			fmt.Fprintf(stderr, "updater: mark installed: %v\n", err)
 		}
 	case updater.BootRollbackFinished:
@@ -2428,6 +2447,7 @@ func maybeRollbackOnBoot(stderr io.Writer, dataDir, binaryPath string) {
 			fmt.Fprintf(stderr, "updater: clear state: %v\n", err)
 		}
 	}
+	return nil
 }
 
 func main() {
@@ -3245,7 +3265,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// past its config, so neither the early rollback of a later start nor
 	// the boot rollback puts a backup back over what it writes (backlog
 	// B613). Not starting is the answer when that cannot be recorded.
-	if err := disarmEarlyRollback(cfg.DataDir, opts, stderr); err != nil {
+	if err := disarmEarlyRollback(ctx, cfg.DataDir, opts, stderr); err != nil {
 		fmt.Fprintf(stderr, "updater: %v; not starting, so that no rollback to the backup can pass over what this version would write\n", err)
 		return 1
 	}
@@ -3845,7 +3865,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// .bak for one boot) or restore .bak when the new version
 	// failed to come up cleanly. Failures are logged but
 	// non-fatal — operator can still recover by hand.
-	maybeRollbackOnBoot(stderr, cfg.DataDir, binaryPath)
+	maybeRollbackOnBoot(ctx, stderr, cfg.DataDir, binaryPath)
 
 	// Background updater: polls GitHub Releases on a configurable
 	// cadence (Phase A), exposes operator-triggered Install via the

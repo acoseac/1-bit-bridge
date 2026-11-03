@@ -288,7 +288,7 @@ func TestARollbackThatHoldsTheMarkersLockFirstStopsTheMigration(t *testing.T) {
 	if code := <-codes; code != supervision.RestartExitCode {
 		t.Fatalf("serve = %d, want %d; stderr=%s", code, supervision.RestartExitCode, stderr.String())
 	}
-	if err := <-migrated; !errors.Is(err, updater.ErrRollbackUnderWay) {
+	if err := <-migrated; !errors.Is(err, updater.ErrMigrationVetoed) {
 		t.Fatalf("the migration after the rollback = %v, want it refused", err)
 	}
 	if v := storeVersion(t, r.dataDir); v != before {

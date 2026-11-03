@@ -30,28 +30,12 @@ func databaseAtVersion(t *testing.T, head int) string {
 	return databaseAtVersionAt(t, filepath.Join(t.TempDir(), fmt.Sprintf("v%d.db", head)), head)
 }
 
-// databaseAtVersionAt is databaseAtVersion at path.
+// databaseAtVersionAt is databaseAtVersion at path, through the one writer of
+// an older database other packages' tests use too
+// (WriteDatabaseAtVersionForTest).
 func databaseAtVersionAt(t *testing.T, path string, head int) string {
 	t.Helper()
-	db, err := sql.Open("sqlite", dsn.File(path, "_pragma=journal_mode(WAL)"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	for _, m := range migrations {
-		if m.version > head {
-			continue
-		}
-		if _, err := db.Exec(m.sql); err != nil {
-			t.Fatalf("apply migration %d (%s): %v", m.version, m.name, err)
-		}
-		if m.post != nil {
-			if err := m.post(db); err != nil {
-				t.Fatalf("migration %d (%s) post: %v", m.version, m.name, err)
-			}
-		}
-	}
-	if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, head)); err != nil {
+	if err := WriteDatabaseAtVersionForTest(path, head); err != nil {
 		t.Fatal(err)
 	}
 	return path

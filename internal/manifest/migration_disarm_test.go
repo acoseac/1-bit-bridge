@@ -122,7 +122,7 @@ func TestAStoreOpenRefusesToMigrateWhileARollbackOfItsVersionIsUnderWay(t *testi
 		s.Close()
 		t.Fatal("the store opened, and migrated, while a rollback of this version's install was under way")
 	}
-	if !errors.Is(err, updater.ErrRollbackUnderWay) {
+	if !errors.Is(err, updater.ErrMigrationVetoed) {
 		t.Errorf("OpenStore = %v, want the rollback under way named", err)
 	}
 	if v := versionOnDisk(t, db); v != latestVersion-1 {

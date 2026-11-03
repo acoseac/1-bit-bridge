@@ -1,6 +1,7 @@
 package updater
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -39,7 +40,7 @@ func stubStateTryLock(t *testing.T, err error) {
 func TestTheInstallMarkersLockIsAFileOfItsOwn(t *testing.T) {
 	dir := t.TempDir()
 	shortStateLockWait(t, 200*time.Millisecond)
-	first, err := LockState(dir)
+	first, err := LockState(context.Background(), dir)
 	if err != nil || !first.Held() {
 		t.Fatalf("LockState = %+v, %v; want the lock held", first, err)
 	}
@@ -52,7 +53,7 @@ func TestTheInstallMarkersLockIsAFileOfItsOwn(t *testing.T) {
 	}
 	waited := 0
 	t.Cleanup(SetStateLockWaitingForTest(func(string) { waited++ }))
-	second, err := LockState(dir)
+	second, err := LockState(context.Background(), dir)
 	if !errors.Is(err, ErrStateLockHeld) || second != nil {
 		t.Fatalf("a second LockState while the first holds = %+v, %v; want ErrStateLockHeld after the wait", second, err)
 	}
@@ -63,7 +64,7 @@ func TestTheInstallMarkersLockIsAFileOfItsOwn(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(dir, stateLockFileName)); err != nil {
 		t.Fatalf("the lock file after its release: %v, want it left where it is", err)
 	}
-	third, err := LockState(dir)
+	third, err := LockState(context.Background(), dir)
 	if err != nil || !third.Held() {
 		t.Fatalf("LockState once released = %+v, %v; want the lock held", third, err)
 	}
@@ -87,7 +88,7 @@ func TestTheInstallMarkersLockSortsEachAnswer(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stubStateTryLock(t, tc.err)
-			l, err := LockState(t.TempDir())
+			l, err := LockState(context.Background(), t.TempDir())
 			switch {
 			case tc.refused && err == nil:
 				t.Fatalf("LockState = %+v, want a refusal", l)
@@ -183,12 +184,12 @@ func TestAMigrationRefusesWhileARollbackOfItsVersionIsUnderWay(t *testing.T) {
 			if err := SaveState(dir, record); err != nil {
 				t.Fatal(err)
 			}
-			if got := RollbackUnderWay(record, tc.current); got != tc.refused {
-				t.Errorf("RollbackUnderWay = %v, want %v", got, tc.refused)
+			if got := MigrationVetoed(record, tc.current); got != tc.refused {
+				t.Errorf("MigrationVetoed = %v, want %v", got, tc.refused)
 			}
 			before, _ := os.ReadFile(StatePath(dir))
 			_, err := DisarmBeforeMigrating(dir, tc.current)
-			if tc.refused != errors.Is(err, ErrRollbackUnderWay) {
+			if tc.refused != errors.Is(err, ErrMigrationVetoed) {
 				t.Fatalf("DisarmBeforeMigrating = %v, want refused %v", err, tc.refused)
 			}
 			if after, _ := os.ReadFile(StatePath(dir)); tc.refused && string(after) != string(before) {
@@ -201,7 +202,7 @@ func TestAMigrationRefusesWhileARollbackOfItsVersionIsUnderWay(t *testing.T) {
 		if err := SaveState(dir, record); err != nil {
 			t.Fatal(err)
 		}
-		res, err := AdmitBoot(dir, "0.2.3", nil)
+		res, err := AdmitBoot(context.Background(), dir, "0.2.3", nil)
 		if err != nil || !res.Recorded {
 			t.Fatalf("AdmitBoot over the record = %+v, %v; want this version recorded", res, err)
 		}
@@ -209,17 +210,17 @@ func TestAMigrationRefusesWhileARollbackOfItsVersionIsUnderWay(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if RollbackUnderWay(st, "0.2.3") {
+		if MigrationVetoed(st, "0.2.3") {
 			t.Errorf("the record after the admission %+v still reads as a rollback under way", st)
 		}
 		if _, err := DisarmBeforeMigrating(dir, "0.2.3"); err != nil {
 			t.Errorf("a migration after the admission = %v, want it to go on", err)
 		}
 	})
-	if RollbackUnderWay(State{Status: "installing", TargetVersion: "0.2.3", SwapStarted: true}, "0.2.3") {
+	if MigrationVetoed(State{Status: "installing", TargetVersion: "0.2.3", SwapStarted: true}, "0.2.3") {
 		t.Error("an install marker reads as a rollback under way")
 	}
-	if RollbackUnderWay(State{RejectedVersion: "0.2.3"}, "0.2.3") {
+	if MigrationVetoed(State{RejectedVersion: "0.2.3"}, "0.2.3") {
 		t.Error("a hold alone reads as a rollback under way")
 	}
 }

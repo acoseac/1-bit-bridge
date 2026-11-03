@@ -1,6 +1,7 @@
 package updater
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sync"
@@ -17,20 +18,21 @@ type DisarmResult struct {
 	NoLocks error
 }
 
-// ErrRollbackUnderWay is what a migrating store open's refusal matches
-// (DisarmBeforeMigrating) where the marker is the early rollback's record of
-// an install of this version (RollbackUnderWay).
-var ErrRollbackUnderWay = errors.New("a rollback of this version's install is under way")
+// ErrMigrationVetoed is what a migrating store open's refusal matches
+// (DisarmBeforeMigrating) where the marker vetoes this version's migrations
+// (MigrationVetoed).
+var ErrMigrationVetoed = errors.New("this version's store migrations are vetoed")
 
-// RollbackUnderWay reports whether st is the early rollback's record of an
-// install of current (State.RollbackStarted, Status "": RollbackRecord) that
-// no start has gone on past (no State.DataDirOpenedBy): the backup may be
-// back over current's binary already, or about to be, so current, running
-// from the image it was started with, must not migrate the store past what
-// that version knows (backlog B613's round 3). Serve's admission (AdmitBoot)
-// ends it: its record of a start that got past its settings vetoes the
-// rollback for good (EarlyRollback).
-func RollbackUnderWay(st State, current string) bool {
+// MigrationVetoed reports whether st refuses current's store migrations: the
+// early rollback's record of an install of current (State.RollbackStarted,
+// Status "": RollbackRecord) that no start has gone on past (no
+// State.DataDirOpenedBy): the backup may be back over current's binary
+// already, or about to be, so current, running from the image it was started
+// with, must not migrate the store past what that version knows (backlog
+// B613's round 3). Serve's admission (AdmitBoot) ends it: its record of a
+// start that got past its settings vetoes the rollback for good
+// (EarlyRollback).
+func MigrationVetoed(st State, current string) bool {
 	return st.Status == "" && st.RollbackStarted && SameVersion(st.TargetVersion, current) && st.DataDirOpenedBy == ""
 }
 
@@ -47,7 +49,7 @@ func RollbackUnderWay(st State, current string) bool {
 // directory.
 //
 // The early rollback's own record of an install of current, left by a start
-// stopped before the backup was back (RollbackUnderWay), is armed, so the
+// stopped before the backup was back (MigrationVetoed), is armed, so the
 // admission records over it too, and that record resolves it: no rollback
 // can finish after it, and the store's migrations may run (round 3). The
 // install's confirmation is left to the housekeeping after the store opens
@@ -74,8 +76,8 @@ func RollbackUnderWay(st State, current string) bool {
 // as before where it has nothing to write (no install armed, or one recorded
 // already). On a filesystem that keeps no locks, where no process can hold
 // one and the early rollback refuses, it goes on, saying so in NoLocks.
-func AdmitBoot(dataDir, current string, save func(dataDir string, st State) error) (DisarmResult, error) {
-	return disarm(dataDir, current, save, false)
+func AdmitBoot(ctx context.Context, dataDir, current string, save func(dataDir string, st State) error) (DisarmResult, error) {
+	return disarm(ctx, dataDir, current, save, false)
 }
 
 // DisarmBeforeMigrating is AdmitBoot for a store's open with a migration step
@@ -84,18 +86,18 @@ func AdmitBoot(dataDir, current string, save func(dataDir string, st State) erro
 // error refuses the open before any step runs. It takes the install
 // marker's lock inside the store's own migration lock (the ladder), which
 // it holds already. Unlike serve's admission it refuses, with
-// ErrRollbackUnderWay, where the marker is the early rollback's record of an
-// install of current that no start has gone on past (RollbackUnderWay): a
+// ErrMigrationVetoed, where the marker is the early rollback's record of an
+// install of current that no start has gone on past (MigrationVetoed): a
 // command's settings loading says nothing of serve's, and the binary on disk
 // may be the backup's version already (round 3).
 func DisarmBeforeMigrating(dataDir, current string) (DisarmResult, error) {
-	return disarm(dataDir, current, nil, true)
+	return disarm(context.Background(), dataDir, current, nil, true)
 }
 
 // disarm takes the install marker's lock and runs the disarm under it
 // (disarmHeld), or without it where it cannot be taken (disarmUnlocked).
-func disarm(dataDir, current string, save func(dataDir string, st State) error, migrating bool) (DisarmResult, error) {
-	lock, err := LockState(dataDir)
+func disarm(ctx context.Context, dataDir, current string, save func(dataDir string, st State) error, migrating bool) (DisarmResult, error) {
+	lock, err := LockState(ctx, dataDir)
 	if err != nil {
 		return disarmUnlocked(dataDir, current, migrating, err)
 	}
@@ -114,8 +116,8 @@ func disarmUnlocked(dataDir, current string, migrating bool, lockErr error) (Dis
 	switch {
 	case err != nil:
 		return DisarmResult{}, fmt.Errorf("the install marker cannot be read (%v), nor removed without its lock: %w", err, lockErr)
-	case migrating && RollbackUnderWay(st, current):
-		return DisarmResult{}, rollbackUnderWayError(st)
+	case migrating && MigrationVetoed(st, current):
+		return DisarmResult{}, migrationVetoedError(st)
 	case ArmsDataDirRecord(st, current):
 		return DisarmResult{}, fmt.Errorf("could not record in the install marker that %s opened the data dir, "+
 			"since its lock cannot be taken: %w", current, lockErr)
@@ -137,8 +139,8 @@ func disarmHeld(dataDir, current string, save func(dataDir string, st State) err
 		}
 		return DisarmResult{Unreadable: err}, nil
 	}
-	if migrating && RollbackUnderWay(st, current) {
-		return DisarmResult{}, rollbackUnderWayError(st)
+	if migrating && MigrationVetoed(st, current) {
+		return DisarmResult{}, migrationVetoedError(st)
 	}
 	if !ArmsDataDirRecord(st, current) {
 		// Nothing to record, which this start may take only once what an
@@ -161,12 +163,12 @@ func disarmHeld(dataDir, current string, save func(dataDir string, st State) err
 	return DisarmResult{Recorded: true}, nil
 }
 
-// rollbackUnderWayError is a migration's refusal over the early rollback's
+// migrationVetoedError is a migration's refusal over the early rollback's
 // record st: it names the versions and what ends it, never a path.
-func rollbackUnderWayError(st State) error {
+func migrationVetoedError(st State) error {
 	return fmt.Errorf("%w: the early rollback of the install of %s to %s was started and no start has gone on past it, "+
 		"so the store is not migrated: start bridge serve, which finishes the rollback where %s still refuses the settings "+
-		"and confirms the install where it loads them", ErrRollbackUnderWay, st.TargetVersion, st.PreviousVersion, st.TargetVersion)
+		"and confirms the install where it loads them", ErrMigrationVetoed, st.TargetVersion, st.PreviousVersion, st.TargetVersion)
 }
 
 // beforeDisarmRecord, nil in production, runs just before a disarm writes its

@@ -644,7 +644,7 @@ func TestTheBootKeepsARecordedHoldWhereItClearsAnInstall(t *testing.T) {
 				t.Fatal(err)
 			}
 			var stderr bytes.Buffer
-			maybeRollbackOnBoot(&stderr, dataDir, bin)
+			maybeRollbackOnBoot(t.Context(), &stderr, dataDir, bin)
 			if _, err := os.Lstat(bin + ".bak"); tc.bakGone != os.IsNotExist(err) {
 				t.Fatalf("the backup after the boot step: lstat %v, want it gone %v; stderr=%s", err, tc.bakGone, stderr.String())
 			}
@@ -670,7 +670,7 @@ func TestTheBootRollbackLeavesABackupOnceAnotherVersionOpenedTheDataDir(t *testi
 	r.saveMarker(t, r.dataDir)
 	files := watch(t, r.bin, r.bak)
 	var stderr bytes.Buffer
-	maybeRollbackOnBoot(&stderr, r.dataDir, r.bin)
+	maybeRollbackOnBoot(t.Context(), &stderr, r.dataDir, r.bin)
 	files.requireUnchanged(t)
 	if st, err := updater.LoadState(r.dataDir); err != nil || st.Status != "" {
 		t.Errorf("the marker = %+v (%v), want it cleared", st, err)

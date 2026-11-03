@@ -148,6 +148,11 @@ type State struct {
 	// TargetVersion that finds it, stopped before the backup was back,
 	// finishes the rollback (EarlyRollback).
 	RollbackStarted bool `json:"rollbackStarted,omitempty"`
+
+	// MigrationVeto names the version whose store migrations are refused
+	// here: a store open of that version with a step pending refuses
+	// (DisarmBeforeMigrating, MigrationVetoed).
+	MigrationVeto string `json:"migrationVeto,omitempty"`
 }
 
 // stateFileName is the basename under <dataDir>. Constant so tests
@@ -434,13 +439,14 @@ func DecideBootAction(st State, currentServerVersion string, now time.Time) Boot
 // confirms one (installed at now, so the boot after it removes the backup),
 // the rollback's mark gone, and its hold gone only where it holds current
 // back, a refusal of another version recorded since staying. The install and
-// the record of the start that went on past it stay as they are.
-func ConfirmOverRollback(st State, current string, now time.Time) State {
+// the record of the start that went on past it stay as they are. An error
+// says it does not confirm, the marker to be left as it is.
+func ConfirmOverRollback(st State, current string, now time.Time) (State, error) {
 	st.Status, st.InstalledAt, st.RollbackStarted = "installed", now, false
 	if SameVersion(st.RejectedVersion, current) {
 		st.RejectedVersion, st.RejectedReason, st.RejectedConfigDigest = "", "", ""
 	}
-	return st
+	return st, nil
 }
 
 // CurrentServerVersion exposes the bridge's own version constant

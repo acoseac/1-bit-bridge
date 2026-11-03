@@ -127,10 +127,10 @@ func recoverRefusedInstall(ctx context.Context, configPath string, reasons []str
 	// record cannot land between this read and the rename, and this rollback
 	// holds it from its read through the rename and any write that puts the
 	// install back, so that such an open waits for it and then refuses to
-	// migrate under the version put back (updater.RollbackUnderWay). It is
+	// migrate under the version put back (updater.MigrationVetoed). It is
 	// never held without the exclusion: a lock that cannot be taken, or a
 	// filesystem that keeps none, leaves the install as it is.
-	stateLock, err := updater.LockState(dataDir)
+	stateLock, err := updater.LockState(ctx, dataDir)
 	if err != nil {
 		noRollback(stderr, st, fmt.Sprintf("the install marker's lock cannot be taken (%v), and only its holder may put the backup back", err))
 		return 0, false
@@ -235,8 +235,8 @@ func noRollback(stderr io.Writer, st updater.State, why string) {
 // install (BootRollbackOvertaken; backlog B613's round 3). An error is
 // serve's to refuse to start over: it is called where nothing has been
 // written yet.
-func disarmEarlyRollback(dataDir string, opts serveOpts, stderr io.Writer) error {
-	res, err := updater.AdmitBoot(dataDir, version.ServerVersion, opts.saveUpdateState)
+func disarmEarlyRollback(ctx context.Context, dataDir string, opts serveOpts, stderr io.Writer) error {
+	res, err := updater.AdmitBoot(ctx, dataDir, version.ServerVersion, opts.saveUpdateState)
 	if err != nil {
 		return err
 	}

@@ -232,7 +232,10 @@ func TestTheConfirmationOverARollbackKeepsWhatIsNotItsOwn(t *testing.T) {
 	record := RollbackRecord(State{Status: "installing", TargetVersion: "0.2.3", PreviousVersion: "0.2.1",
 		AttemptedAt: now.Add(-time.Minute), SwapStarted: true}, "0.2.3", "0.2.3 refused this bridge's settings: line 4: x", "a digest")
 	record.DataDirOpenedBy = "0.2.3"
-	got := ConfirmOverRollback(record, "0.2.3", now)
+	got, err := ConfirmOverRollback(record, "0.2.3", now)
+	if err != nil {
+		t.Fatalf("ConfirmOverRollback = %v", err)
+	}
 	want := State{Status: "installed", TargetVersion: "0.2.3", PreviousVersion: "0.2.1", AttemptedAt: record.AttemptedAt,
 		InstalledAt: now, SwapStarted: true, DataDirOpenedBy: "0.2.3"}
 	if got != want {
@@ -243,7 +246,10 @@ func TestTheConfirmationOverARollbackKeepsWhatIsNotItsOwn(t *testing.T) {
 	}
 	other := record
 	other.RejectedVersion, other.RejectedReason, other.RejectedConfigDigest = "0.2.4", "0.2.4 refuses this bridge's settings: line 9: y", "another digest"
-	got = ConfirmOverRollback(other, "0.2.3", now)
+	got, err = ConfirmOverRollback(other, "0.2.3", now)
+	if err != nil {
+		t.Fatalf("ConfirmOverRollback = %v", err)
+	}
 	if got.RejectedVersion != "0.2.4" || got.RejectedReason != other.RejectedReason || got.RejectedConfigDigest != other.RejectedConfigDigest {
 		t.Errorf("a hold of another version after the confirmation = %+v, want it kept", got)
 	}
