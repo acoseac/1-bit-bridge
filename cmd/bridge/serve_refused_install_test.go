@@ -600,7 +600,12 @@ func storeOneMigrationBehind(t *testing.T, dataDir string) {
 // version and the settings, not the install; dropping it costs one more
 // download and check of a version that refuses them (backlog B613's round
 // 2, Codex's finding 7). The step that puts the backup back leaves the veto
-// of the replaced install's store migrations beside the hold (round 4).
+// of the replaced install's store migrations beside the hold (round 4). And
+// each step that leaves the backup where it is keeps the record that a
+// version other than the backup's opened the data dir, beside the backup's
+// version, which an operator's rollback of that backup refuses on (backlog
+// B705): until B705 the refused boot rollback's clear dropped it, and this
+// test asserted that it did, as the rule then said.
 func TestTheBootKeepsARecordedHoldWhereItClearsAnInstall(t *testing.T) {
 	hold := updater.State{RejectedVersion: "9.9.9", RejectedReason: "9.9.9 refuses this bridge's settings: line 4: x",
 		RejectedConfigDigest: "a digest of the settings"}
@@ -612,20 +617,33 @@ func TestTheBootKeepsARecordedHoldWhereItClearsAnInstall(t *testing.T) {
 		bakGone bool
 		// veto is the version whose store migrations the step leaves vetoed.
 		veto string
+		// opened is the version the step leaves recorded as having opened
+		// the data dir, beside the backup's.
+		opened string
 	}{
 		{name: "the backup's cleanup after a confirmed install", bakGone: true,
 			marker: updater.State{Status: "installed", TargetVersion: version.ServerVersion, PreviousVersion: previousVersion,
 				AttemptedAt: now.Add(-time.Hour), InstalledAt: now.Add(-time.Minute), SwapStarted: true}},
+		{name: "the backup's cleanup after a confirmed install whose version opened the data dir", bakGone: true,
+			marker: updater.State{Status: "installed", TargetVersion: version.ServerVersion, PreviousVersion: previousVersion,
+				AttemptedAt: now.Add(-time.Hour), InstalledAt: now.Add(-time.Minute), SwapStarted: true,
+				DataDirOpenedBy: version.ServerVersion}},
 		{name: "an install past the boot window",
 			marker: updater.State{Status: "installing", TargetVersion: "9.9.8", PreviousVersion: previousVersion,
 				AttemptedAt: now.Add(-updater.RecencyWindow() - time.Hour), SwapStarted: true}},
+		{name: "an install past the boot window, the data dir opened since", opened: "9.9.8",
+			marker: updater.State{Status: "installing", TargetVersion: "9.9.8", PreviousVersion: previousVersion,
+				AttemptedAt: now.Add(-updater.RecencyWindow() - time.Hour), SwapStarted: true, DataDirOpenedBy: "9.9.8"}},
 		{name: "an install that never reached its swap",
 			marker: updater.State{Status: "installing", TargetVersion: "9.9.8", PreviousVersion: previousVersion,
 				AttemptedAt: now.Add(-time.Minute)}},
+		{name: "an install that never reached its swap, the data dir opened since", opened: version.ServerVersion,
+			marker: updater.State{Status: "installing", TargetVersion: "9.9.8", PreviousVersion: previousVersion,
+				AttemptedAt: now.Add(-time.Minute), DataDirOpenedBy: version.ServerVersion}},
 		{name: "an install that did not come up", bakGone: true, veto: "9.9.8",
 			marker: updater.State{Status: "installing", TargetVersion: "9.9.8", PreviousVersion: previousVersion,
 				AttemptedAt: now.Add(-time.Minute), SwapStarted: true}},
-		{name: "an install that did not come up, the data dir opened since",
+		{name: "an install that did not come up, the data dir opened since", opened: "9.9.8",
 			marker: updater.State{Status: "installing", TargetVersion: "9.9.8", PreviousVersion: previousVersion,
 				AttemptedAt: now.Add(-time.Minute), SwapStarted: true, DataDirOpenedBy: "9.9.8"}},
 	}
@@ -654,8 +672,15 @@ func TestTheBootKeepsARecordedHoldWhereItClearsAnInstall(t *testing.T) {
 			}
 			want := hold
 			want.MigrationVeto = tc.veto
+			if tc.opened != "" {
+				want.DataDirOpenedBy, want.PreviousVersion = tc.opened, previousVersion
+			}
 			if got != want {
-				t.Errorf("the marker after the boot step = %+v, want the hold and no more but its veto, %+v; stderr=%s", got, want, stderr.String())
+				t.Errorf("the marker after the boot step = %+v, want the hold and no more but its veto and the data dir's record, %+v; stderr=%s",
+					got, want, stderr.String())
+			}
+			if refused := updater.RollbackRefusal(got) != ""; refused != (tc.opened != "") {
+				t.Errorf("an operator's rollback over the marker the boot step leaves refuses: %v, want %v", refused, tc.opened != "")
 			}
 		})
 	}
@@ -664,7 +689,9 @@ func TestTheBootKeepsARecordedHoldWhereItClearsAnInstall(t *testing.T) {
 // TestTheBootRollbackLeavesABackupOnceAnotherVersionOpenedTheDataDir is the
 // boot rollback's half of the same rule: a version that is not the backup's
 // has written the data dir under this marker, so putting the backup back
-// would be a downgrade past what it wrote.
+// would be a downgrade past what it wrote. The install is cleared and its
+// record of the data dir kept, so the console's Roll back of the backup the
+// boot left refuses for the same reason (backlog B705).
 func TestTheBootRollbackLeavesABackupOnceAnotherVersionOpenedTheDataDir(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	r.marker.TargetVersion = "9.9.9"
@@ -674,10 +701,15 @@ func TestTheBootRollbackLeavesABackupOnceAnotherVersionOpenedTheDataDir(t *testi
 	var stderr bytes.Buffer
 	maybeRollbackOnBoot(t.Context(), &stderr, r.dataDir, r.bin)
 	files.requireUnchanged(t)
-	if st, err := updater.LoadState(r.dataDir); err != nil || st.Status != "" {
-		t.Errorf("the marker = %+v (%v), want it cleared", st, err)
+	if st, err := updater.LoadState(r.dataDir); err != nil || st.Status != "" || st.DataDirOpenedBy != version.ServerVersion {
+		t.Errorf("the marker = %+v (%v), want the install cleared and its record that %s opened the data dir kept", st, err, version.ServerVersion)
 	}
 	if !strings.Contains(updaterLines(stderr.String()), "opened the data dir") {
 		t.Errorf("the boot rollback did not say why it left the backup; stderr=%s", stderr.String())
 	}
+	files = watchInstall(t, r)
+	if err := rollBackNow(t, r); !errors.Is(err, updater.ErrRollbackRefused) {
+		t.Fatalf("the console's rollback after the boot left the backup = %v, want it refused", err)
+	}
+	files.requireUnchanged(t)
 }
