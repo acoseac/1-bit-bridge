@@ -363,6 +363,10 @@ type call struct {
 	from  engine.OccurrenceID
 	ok    bool
 	err   error
+	// first and at are a start's first occurrence and the content frame it
+	// starts at (engine.StartRequest.From).
+	first engine.OccurrenceID
+	at    int64
 }
 
 // reported is one occurrence's Details as the backend reported them, and at
@@ -570,7 +574,9 @@ type tee struct {
 func (b tee) Start(ctx context.Context, req engine.StartRequest) error {
 	req.Events = &recEvents{r: b.r, next: req.Events}
 	err := b.Backend.Start(ctx, req)
-	b.r.note(func() { b.r.calls = append(b.r.calls, call{kind: "start", s: req.Session, err: err}) })
+	b.r.note(func() {
+		b.r.calls = append(b.r.calls, call{kind: "start", s: req.Session, err: err, first: req.First.ID, at: req.From})
+	})
 	return err
 }
 

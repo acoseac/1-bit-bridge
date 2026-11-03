@@ -62,7 +62,10 @@ type fakeSession struct {
 	b     *fakeBackend
 	id    engine.SessionID
 	first engine.Occurrence
-	ev    engine.Events
+	// from is the content frame its Start asked the first occurrence to
+	// start at (engine.StartRequest.From).
+	from int64
+	ev   engine.Events
 	// next is each Prepare's successor, in order (nil: nothing follows).
 	next []*engine.Occurrence
 }
@@ -100,7 +103,7 @@ func wait(ctx context.Context, hold chan struct{}) error {
 
 func (b *fakeBackend) Start(ctx context.Context, req engine.StartRequest) error {
 	b.mu.Lock()
-	b.sessions = append(b.sessions, &fakeSession{b: b, id: req.Session, first: req.First, ev: req.Events})
+	b.sessions = append(b.sessions, &fakeSession{b: b, id: req.Session, first: req.First, from: req.From, ev: req.Events})
 	hold, refuse := b.call("Start", b.startHold), b.refuseStart
 	b.mu.Unlock()
 	if err := wait(ctx, hold); err != nil {

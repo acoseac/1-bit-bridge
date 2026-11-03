@@ -471,6 +471,17 @@ func (e *Engine) PlayIndex(ctx context.Context, index int, conds ...Cond) error 
 	return e.do(&command{op: opPlayIndex, ctx: ctx, conds: conds, index: index}).err
 }
 
+// SeekAbsolute plays the track heard from seconds after its start (B674).
+func (e *Engine) SeekAbsolute(ctx context.Context, seconds int64, conds ...Cond) error {
+	return refuse("seek absolute", ReasonSeekUnavailable, "a seek within a track is not built yet")
+}
+
+// SeekRelative plays the track heard from seconds, signed, after its
+// position (B674).
+func (e *Engine) SeekRelative(ctx context.Context, seconds int64, conds ...Cond) error {
+	return refuse("seek relative", ReasonSeekUnavailable, "a seek within a track is not built yet")
+}
+
 // InsertAfter inserts an entry after afterID, at the head when afterID is
 // 0, and returns its ID. meta is copied before the owner sees it, so the
 // caller may reuse it as soon as InsertAfter returns, whatever it returned;

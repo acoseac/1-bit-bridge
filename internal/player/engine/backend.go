@@ -58,10 +58,25 @@ type SessionOptions struct {
 type StartRequest struct {
 	Session SessionID
 	First   Occurrence
+	// From is the content frame First starts at: 0, its start, or a seek's
+	// target (B674), where the session started for a seek continues the
+	// occurrence heard, under its ID. The backend positions the content there
+	// before it decodes a frame, so nothing before From reaches the sink, and
+	// counts First's Position from it (Position.Frames). Only PCM is started
+	// past 0: content that is not (DSD, native or DoP) is refused with an
+	// error, never as Unplayable, and so is a From the content does not reach.
+	From    int64
 	Options SessionOptions
 	// Events is where the session's events go.
 	Events Events
 }
+
+// TimeSeek reports whether a seek within a track takes content of a kind
+// (B674): PCM is positioned at any frame before its end, and DSD, native or
+// DoP, at none (DoP is DSD carried in PCM words, whatever its carrier). A
+// seek in DSD is refused with ReasonSeekUnsupported before anything changes,
+// and GET /v1/outputs states the same (bridge.timeSeek).
+func TimeSeek(dsd bool) bool { return !dsd }
 
 // Join is how a successor follows the content before it.
 type Join struct {
