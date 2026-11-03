@@ -321,8 +321,14 @@ func TestPlaybackReopensNothingForAResumeOnceTheReleaseIsTaken(t *testing.T) {
 func TestPlaybackResumesNoSinkOnceTheReleaseIsTaken(t *testing.T) {
 	cmd := newOneShot()
 	r, _ := pausedRig(t, func(o *rigOptions) {
-		o.seams = &playback.Seams{SinkCall: func(context.Context) func(error) {
-			cmd.take()
+		o.seams = &playback.Seams{SinkCall: func(ctx context.Context) func(error) {
+			// Only a call the engine bounds, the resume's: the producer's
+			// drain, which a pause refuses and the producer asks again, runs
+			// on the session's life, which has no deadline, and can come
+			// after the hold is armed.
+			if _, ok := ctx.Deadline(); ok {
+				cmd.take()
+			}
 			return nil
 		}}
 	})
@@ -424,6 +430,9 @@ func TestPlaybackCutsNothingOnceTheReleaseIsTaken(t *testing.T) {
 	ids := r.insert("a", "b")
 	r.play()
 	ob := r.submittedOcc(ids[1])
+	// The engine has taken b's Submitted, so the deletion asks for a Cut:
+	// one that came first would replace b, not cut it.
+	r.handedOff(ob)
 	held, letCut := r.rec.holdNextCut()
 	t.Cleanup(letCut)
 	deleted := make(chan error, 1)
