@@ -1350,6 +1350,13 @@ var (
 	// ErrUpdateConfigCheckFailed: the new version's settings check did not
 	// answer, so nothing was installed; trying again checks again.
 	ErrUpdateConfigCheckFailed = errors.New("the new version could not check this bridge's settings")
+	// ErrUpdateMarkerLocked: the install marker's lock could not be held
+	// (another process holds it, or the data dir's filesystem keeps no
+	// locks), so nothing was installed or rolled back (backlog B692).
+	ErrUpdateMarkerLocked = errors.New("the install marker's lock cannot be held")
+	// ErrUpdateRollbackRefused: the rollback would put the backup back over
+	// a store a newer version may have changed, so nothing was rolled back.
+	ErrUpdateRollbackRefused = errors.New("the rollback was refused")
 )
 
 // UpdateStatus is the wire shape /api/updates returns. Decoupled from

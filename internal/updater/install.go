@@ -441,6 +441,14 @@ var (
 	// check. The auto-installer holds it back; a manual install takes it
 	// with a warning (Status.InstallWarning).
 	ErrConfigCheckUnsupported = errors.New("the new version predates the settings check")
+	// ErrMarkerLockUnavailable means an install, a rollback, a hold's record
+	// or a restamp was refused because the install marker's lock
+	// (update-state.lock) could not be held: nothing was written or swapped.
+	ErrMarkerLockUnavailable = errors.New("the install marker's lock cannot be held")
+	// ErrRollbackRefused means the operator's rollback would put the backup
+	// back over a store a newer version may have changed: nothing was
+	// written or swapped.
+	ErrRollbackRefused = errors.New("the rollback was refused")
 )
 
 // Rollback restores bridge.bak over the live binary. Used by the
