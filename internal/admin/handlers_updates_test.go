@@ -25,6 +25,10 @@ func TestClassifyUpdateError(t *testing.T) {
 		{"install-in-flight", ErrUpdateInstallInFlight, http.StatusConflict, "install-in-flight"},
 		{"platform-unsupported", ErrUpdateNotSupported, http.StatusNotImplemented, "platform-unsupported"},
 		{"path-not-writable", ErrUpdatePathNotWritable, http.StatusForbidden, "path-not-writable"},
+		// The new version refuses the host's settings: a conflict with them,
+		// its own code, never the generic install-failed.
+		{"config-refused", ErrUpdateConfigRefused, http.StatusConflict, "config-refused"},
+		{"config-check-failed", ErrUpdateConfigCheckFailed, http.StatusBadGateway, "config-check-failed"},
 		{"wrapped install-in-flight",
 			fmt.Errorf("%w: an install is already in progress", ErrUpdateInstallInFlight),
 			http.StatusConflict, "install-in-flight"},

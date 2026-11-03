@@ -1367,3 +1367,525 @@ nothing are refused, each refused by the writer's probe too
 (`ProbeDurable`); a link to a directory is inspected; and a root below a link
 to nothing is still not there. The record is in `ops/engineering-log.md`,
 2026-11-02, B606.
+
+## A candidate's settings check, and the early rollback of an install whose version refuses the settings (backlog B613, 2026-11-02)
+
+- **A candidate is checked against this bridge's settings before its swap, and an install whose version refuses them at its first start is rolled back before serve writes anything** (2026-11-02, backlog B613, five rounds): 0.2.2 refuses a fraction or a leading zero in a whole-number setting (B528, B533), 0.2.1's updater swapped without asking, and the new serve exited 2 at the load, before the boot rollback, under `Restart=always`. Install stages the verified candidate beside the binary and runs `<candidate> serve --validate-config --config <the settings the bridge loaded>` (`updater.CheckConfig`: 30 s, stdin empty, 64 KiB of each output): 0 swaps; 78 refuses, one `config refused: ` line a reason, naming the line and no path (`config.RefusedError.Reasons`), and the version is recorded as rejected with its reason and a digest of the settings (the file's bytes and every BRIDGE_ variable, on Windows whatever its name's case, `updater.ConfigDigest`), which holds it from the auto-installer while the digest is unchanged, a newer version and a manual install checking again; a 2 carrying the flag package's refusal of the flag is a candidate that predates the check, held from the auto-installer for every setting and installed by hand with a warning; for anything else (a timeout, a cancellation, a candidate that will not start, another code), nothing is swapped, installed or recorded. The check is serve's own load (`checkServeConfig`: the boot read, Load, `serveConfigRefusal`), which writes, opens and binds nothing, and never a root's reach (`CheckLibraryRootsAccessible` is the host's, and the user's who runs it). Serve, refusing its settings (a `config.RefusedError`, or `serveConfigRefusal`, every one of them before the data dir's lock), reads the data dir from the dataDir key, the default, BRIDGE_DATA_DIR and the settings' directory alone (`config.DataDirOf`), and puts the backup back only for a recent `installing` marker of this version over another, or its own record of one (`State.RollbackStarted`), swapped, under which no other version has opened the data dir, with the data dir's lock its own and the backup a regular file whose `version` names the marker's PreviousVersion (`updater.EarlyRollback`, `updater.ProbeVersion`, a version check and not a proof of the bytes); it records the hold durably before the rename, in the form the restored binary's boot keeps, Status "" beside the install it undoes (`updater.RollbackRecord`; 0.2.1's and 0.2.2's boot clears an install marker it cannot finish), so a start of this version that finds it with the backup not back finishes the rollback; a hold it cannot record leaves the install as it is, and a rename that fails puts the install marker back; then it exits 75 (`supervision.RestartExitCode`), which systemd, launchd and the SCM's recovery all restart; otherwise it refuses as before, saying why when the marker is this version's. Before its first write, serve records in an armed marker that it opened the data dir (`State.DataDirOpenedBy`, `updater.AdmitBoot`; a marker it cannot read is removed) and refuses to start when it cannot, and every store open with a migration step pending does the same before the step, whichever command opens the store (`updater.DisarmBeforeMigrating`, `manifest.OpenStore` refusing); BootInstallFailed leaves the backup where a version other than the backup's opened the data dir, and every clear at boot keeps a hold, and a veto of a rolled-back version's store migrations, recorded beside the install (`updater.ClearInstall`); and a directory barrier that fails is the marker's write's error (`SaveState`, `ClearStateDurably`), but where the filesystem cannot fsync a directory (the next bullet). **Don't swap a candidate whose check did not answer 0, take a failed or stopped check for a refusal or a 2 for "predates" without the flag package's words, record a refusal against no digest or a predates hold against one, change the flag, the codes or the prefix (every later release answers this updater), let the check write, open a store, bind or ask a root's reach, name a path in a reason, find the marker's data dir by anything but Load's rules for that key, restore without the lock, the marker's proof and the backup's version, or before the hold is recorded durably, restore after another version opened the data dir, migrate the store before recording that this version opened it, drop a recorded hold or veto at boot, ignore the marker's directory barrier, write the settings, or exit 0 after a restore.** `TestAnInstallWhoseCandidateRefusesTheSettingsSwapsNothing`, `TestAnAutomaticInstallHoldsARefusedVersionBackUntilTheSettingsChange`, `TestAnAutomaticInstallHoldsBackACandidateThatPredatesTheCheck`, `TestACheckThatFailsSwapsNothingAndRecordsNothing`, `TestCheckConfigReadsTheCandidatesAnswerByItsExitCode`, `TestTheSettingsCheckRefusesWhatServeRefuses`, `TestTheUpdaterReadsWhatThisBridgesSettingsCheckSays`, `TestDataDirOfIsTheDataDirLoadGives`, `TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings`, `TestServeLeavesAnInstallItCannotProveAsItIs`, `TestServeDisarmsTheEarlyRollbackBeforeItsFirstStoreAccess`, `TestTheBootRollbackLeavesABackupOnceAnotherVersionOpenedTheDataDir`, `TestEveryInstallTheBridgeStartsNamesItsSettings`, `TestTheHoldIsRecordedBeforeTheBackupIsPutBack`, `TestServeLeavesTheBackupWhereItCannotRecordTheHold`, `TestAStartFinishesARollbackStoppedBeforeItsRename`, `TestACommandThatMigratesTheStoreDisarmsTheEarlyRollback`, `TestAStoreOpenThatMigratesRecordsItInAnArmedInstallMarker`, `TestTheBootKeepsARecordedHoldWhereItClearsAnInstall`, `TestSaveStateReportsADirectoryBarrierThatFails` and `TestTheSettingsDigestReadsTheBridgeVariablesAsThePlatformNamesThem` pin it.
+
+*The defect.* 0.2.2 refuses at load a whole-number setting written as a
+fraction (`21600.5`) or with a leading zero (`060`), which only a hand edit
+or another tool writes (`internal/config/wholenumbers.go`, B528 and B533).
+0.2.1's updater verified the candidate's checksum (and on macOS its
+signature) and swapped it in without ever running it against the settings.
+The new serve exited 2 at `config load failed`, which is before
+`maybeRollbackOnBoot`, the one place that can put the backup back, and
+`Restart=always` started it again every two seconds. `DecideBootAction`
+takes a matching version for the install's success, so even a boot that
+got that far would have confirmed it. The same shape follows any future
+tightening of the settings, so the fix names no setting.
+
+*The check's interface.* A flag of serve, not a subcommand: `bridge serve
+--validate-config [--config PATH] [--addr ADDR]` runs `checkServeConfig`,
+which resolves the config as runServe does (`resolveConfigPath`,
+`fsutil.AbsAsWritten`), reads it through `loadServeConfigFile` (the boot
+read, `config.LoadFileAt`), asks `serveConfigRefusal`, and with `--addr` the
+override's own check, then exits. Its codes and its line prefix live in
+internal/updater (`ConfigCheckFlag`, `ConfigCheckValidExit` 0,
+`ConfigCheckRefusedExit` 78, sysexits.h's EX_CONFIG, `ConfigCheckFailedExit`
+1, `ConfigRefusedPrefix`), where both sides read them, since this updater
+runs every later release as a candidate. 1 is a config it could not read
+(none there, unreadable, a name being repointed): a failed check, never a
+refusal. `--init-if-missing` beside it is a usage error (2): the check
+writes nothing. A release that predates the flag answers the flag
+package's own words ("flag provided but not defined: -validate-config")
+and 2, having run nothing. A refusal's lines come from
+`config.RefusedError`, which `loadData` returns for a decode it refuses and
+for Normalize and Validate: its Error is the text Load always gave (it
+unwraps to it, so errors.Is and errors.As see what they saw), and its
+Reasons are the same without the file's name, a yaml.v3 type error's lines
+(`line 7: …`) or the refusal's own; `serveConfigRefusal`'s two-roots
+refusal names the roots for serve's line and none for the check's.
+
+*Where the candidate runs.* Install stages the verified binary beside the
+one it would replace (`stageForCheck`, `.bridge-check-*`, `.exe` on
+Windows, the destination's mode) and checks it there, then hands that file
+to the swap, which moves it into place within the directory: a data dir
+mounted noexec, or a policy that runs nothing from it (AppLocker), would
+refuse the copy in the scratch dir, never the directory the bridge already
+runs from. The run (`runCandidate`) has its own bound (30 s for the check,
+10 s for a version), standard input empty, each output kept to 64 KiB and
+the rest read and dropped, `Cmd.WaitDelay` 2 s, and starts again on ETXTBSY
+(a file written moments ago can still be open in a child another goroutine
+forked, golang/go#22315). The Tailscale CLI's rule against WaitDelay (under
+The CLI and the serve wiring) is about a join that must outlast a writer;
+a check and a version write nothing, so the bound is what keeps a broken
+candidate from parking an install.
+
+*What Install does with the answer* (`checkCandidate`). Valid: the install
+goes on. Refused: nothing is installed, by hand or automatically, since
+the candidate would not start with these settings; one Warn line names the
+reasons, and the refusal is recorded (`recordRejection`, which keeps the
+rest of the marker, so a refusal before an install leaves the last
+install's "installed" stamp and its backup's cleanup in place) with its
+reason and `ConfigDigest`: the file's bytes and every BRIDGE_ variable with
+a value, since config's overrides read them over the file. The error is a
+sentence naming the version and each reason by line, matching
+`ErrConfigRefused`; the console answers it 409 `config-refused` with that
+sentence alone (`mapUpdaterError`'s `detailError`), and `bridge update`
+prints it and the file to fix. The auto-installer's gate (`HeldBack`) holds
+the version and any older one while the digest is unchanged, so fixing the
+settings lets it try again (Argon's design), a newer version is admitted,
+and a manual install checks again whatever the record says; settings it
+cannot read hold the version back, as an automatic install must not
+guess. The console's Held update row shows a recorded hold through
+`deferredReason` whether or not the auto-installer has run in this
+process, and an operator's rollback keeps the auto-installer's words. A
+check that did not answer installs and records nothing, so the next
+attempt asks again; one its context stopped carries the cancellation,
+which the auto-installer does not log as a failure.
+
+*A candidate that predates the check.* Codex's choice, the brief's binding
+decision: the auto-installer holds it back, recorded for every setting (no
+digest), so it is not downloaded again each poll, and a manual install
+takes it with a warning (`Status.InstallWarning`, which the console alerts
+before its restart and `bridge update` prints), since the operator can
+always choose a version by hand. Argon's alternative, to install it
+automatically with a warning, was not taken: a version that predates the
+check predates the early rollback too, so an automatic install of one that
+refuses the settings would crash-loop with nothing to bring it back. Only
+the flag package's words with an exit of 2 read as "predates": a Go panic
+exits 2 as well, and is a failed check.
+
+*The early rollback, for installs an updater without the check made.* Serve
+asks `recoverRefusedInstall` when its load is a `config.RefusedError` or
+`serveConfigRefusal` refuses; a file it cannot read, no config and a name
+being repointed are not asked about. It finds the data dir without the
+parse that failed (`config.DataDirOf`): the dataDir key as yaml.v3 decodes
+it into the field, aliases, merge keys and tags included, from the file's
+first document, `./data` for an empty or absent key, BRIDGE_DATA_DIR when
+set and not empty, a relative value joined to the directory filepath.Abs
+gives the config's name (never the directory a link there leads to); a
+dataDir written twice, as a list or a map, or a document yaml.v3 cannot
+decode is an error, and nothing is guessed (Codex: no regex, no search). It
+reads the marker there and acts only on a recent install of this version
+over another, which reached its swap, dated no more than a minute ahead of
+the clock, under which no version but the backup's has opened the data dir
+(`updater.EarlyRollback`); takes the data dir's lock (`lockServeDataDir`;
+held by another open, or impossible on a filesystem that keeps no locks,
+and it does nothing); reads the marker again under the lock; requires the
+backup, `<binary>.bak` beside the resolved executable, to be a regular file
+whose `version` (`updater.ProbeVersion`: bounded, stdin empty, its first
+line parsed) names the marker's PreviousVersion. The marker records no
+hash and no path of the backup (Codex, against v0.2.1), so this is a
+version check and not a proof. Then it records the hold, durably, before
+anything moves (round 2, below): the marker becomes `updater.RollbackRecord`,
+Status "" so the restored binary's boot does nothing with it, RejectedVersion,
+the reason with each refused line and the digest, beside the install it
+undoes (TargetVersion, PreviousVersion, AttemptedAt, SwapStarted) and
+`RollbackStarted`. A hold that cannot be recorded leaves everything as it
+is: the backup put back without it would be free to install this version
+again. Then `updater.RollbackBinary` renames the backup over the binary: one
+rename on Unix; on Windows the running image is moved aside first and put
+back if the second rename fails (`replaceRunningBinary`,
+`TestRollbackReplaceRestoresDstWhenTheSecondRenameFails`), the SCM stop
+skipped since this process is the service. A rename that fails puts the
+install marker back as it was, so a start that gets past the settings
+confirms the install as it would have. It says so in a line that names
+both versions, and exits 75: systemd's `Restart=always` restarts any exit,
+launchd's KeepAlive restarts an unsuccessful one, and the SCM's recovery
+actions answer a service-specific exit code (B201's rule); one restart,
+well inside systemd's default start limit. Every other case refuses to
+start with the settings' error, as before, with one `updater: not rolling
+back the install of …` line where the marker is an install of this
+version (or the rollback's own record of one), and none otherwise. The
+settings are never written. 0.2.1, once restored, reads only
+RejectedVersion of the record, by its own rule: it holds the version back
+until a newer one, with its own "rolled back" words, and a `bridge update`
+by hand installs it.
+
+*No downgrade past a migration, across starts* (Codex's binding). The early
+rollback runs before the data dir's lock, and every write serve makes comes
+after it, so no migration of this start can have run. An earlier start
+could have migrated the store and crashed before `maybeRollbackOnBoot`, so
+serve records in an armed marker, right after the lock and before its
+first write (`disarmEarlyRollback`, before `backup.AdoptPlayerState`), that
+a version other than the backup's opened the data dir (`DataDirOpenedBy`,
+`ArmsDataDirRecord`), durably (`SaveState`), and refuses to start (1) when
+it cannot. A marker it cannot read is removed, durably
+(`ClearStateDurably`), since it cannot be told an armed install's or not
+and a later start that could read it again must not take it for an install
+no start of this version went past. The boot rollback (BootInstallFailed),
+which restores after the store has opened, leaves the backup where the
+record names a version, and clears the marker. Since round 2 the record is
+`updater.DisarmEarlyRollback` (since round 3 two functions over one disarm:
+`updater.AdmitBoot` for serve, `updater.DisarmBeforeMigrating` for the
+store's open), and the store's open asks it too, under the
+ladder lock, before its first migration step and only while one is pending
+(`disarmBeforeMigrating` in internal/manifest), refusing the open when it
+cannot record: a command of the new version that opens the store before
+any serve of it starts (`bridge doctor` after `bridge update`,
+`clear-missing`, a scan, a backup) migrates it, and its settings can load
+where serve's later do not (an edit, or the unit's environment beside a
+shell's), so a rollback after it would have been a downgrade past the
+migration (Codex's finding 1). An open that migrates nothing reads no
+marker.
+
+*The Tailscale mode.* Validate refuses a mode it does not know at load
+already (Gemini on PR #249), so `serveConfigRefusal`'s check of it, which
+ran after the stores had opened until B613 moved it before the lock, is a
+second line that refuses nothing today; the first negative control showed
+it (`TestTheSettingsCheckLoadsTheSettingsAsServeDoesAndWritesNothing`'s
+Tailscale case went red with the load refusal), and the table's
+two-library-roots case is the one that goes through `serveConfigRefusal`.
+
+*Round 2* (the reviews of PR #1382, Codex's and Argon's). The hold is
+recorded before the rename (Codex 5, Argon 5): round 1 renamed first and
+recorded after, and the backup it restores is 0.2.1's or 0.2.2's as often
+as not, whose boot reads the install marker it finds (its binary is not the
+version the marker names, the backup is gone) as an install that failed:
+"rollback failed … manual recovery needed", then the marker cleared, hold
+and all. A crash between the rename and the record, or a record that could
+not be written, so left that binary free to install the refused version
+again, unchecked. The record goes first, in a form that boot keeps (Status
+"": `DecideBootAction`'s BootNoop, on every version, and json drops none of
+it on a read), and since a crash can now fall between the record and the
+rename, the record keeps the install it undoes and `EarlyRollback` takes it
+for the install still (`InstallArmed`), so the next start of the refused
+version finishes the rollback; `ArmsDataDirRecord` arms on it alike, so a
+start that gets past the settings meanwhile records that it opened the data
+dir. Every store open that migrates disarms (Codex 1, above). Every clear at
+boot keeps a recorded hold (`updater.ClearInstall`; Codex 7): the backup's
+cleanup after a confirmed install dropped a refusal `recordRejection` had
+recorded beside it, and so did the clears of an abandoned, an unswapped and
+a failed install, the same shape (the rule's "grep for the pattern"). The
+marker's directory barrier (`syncMarkerDir`, `fsutil.SyncParentDir`) failing
+is its write's error, as the file's own fsync failing always was (Codex 4).
+Round 2 said that a data dir on a filesystem that fails every directory
+fsync (some FUSE and network mounts) then refused to arm an install, and an
+install an older updater made there refused to start until the marker was
+removed by hand; round 3 corrects it (below): a fsync that answers that the
+filesystem cannot do one (EINVAL, ENOTSUP, EOPNOTSUPP) counts as done, and
+Linux's NFS, CIFS/SMB and FUSE clients never answer one, so no install is
+refused for it. And the digest reads a Windows variable's name in any case, upper-cased
+(`bridgeEnvironment`; Codex 9): config's overrides read it so there. Left,
+for the follow-up list: the console's and the CLI's manual Rollback do not
+ask `DataDirOpenedBy` (Codex 2, operator-initiated, pre-existing); the early
+rollback's lock does not exclude a concurrent `bridge update` (Codex 3, the
+updater keeps no cross-process lock); the digest is taken after the check
+rather than before (Codex 6); a restored 0.2.1 or 0.2.2 ignores the digest
+(Codex 8, the owner item); the check's copy and the swap's own staging are
+two copies of the candidate beside the binary (Argon), `--addr` is not
+passed to the check (Argon, no shipped unit passes one), and the backup's
+version is read by running it, where `debug/buildinfo` could read it
+without (Argon; it would need release-built test binaries, not taken here).
+
+*Not here.* An install counted healthy only after readiness and a
+probation, rather than at a matching version (B198's scenario, filed
+separately): `DecideBootAction`'s success rule is left as it is, and the
+early rollback asks about an install that could not start, which that
+work does not need to change. Native Windows (the SCM, a mapped image, a
+`.bak` run by CreateProcess under its own name) is cross-vetted only. A
+crash during a check leaves a `.bridge-check-*` beside the binary, as one
+during a swap leaves a `.bridge-swap-*`. The record is in
+`ops/engineering-log.md`, 2026-11-02, B613 (and its rounds 2 and 3).
+
+## A marker's write trusted once its barrier answered, one lock for the rollback and every migration, and the interrupted rollback reconciled (backlog B613's round 3, 2026-11-02)
+
+- **…and a marker's write is trusted only once its barrier has answered, one lock (`<dataDir>/update-state.lock`, `updater.LockState`) keeps the early rollback and every store open that migrates apart, a directory fsync the filesystem cannot do (EINVAL, ENOTSUP, EOPNOTSUPP) is taken as done, said once, and the boot reconciles an interrupted rollback** (2026-11-02, backlog B613's round 3). **Don't trust a marker a failed barrier left without the barrier again, take any other fsync answer, or an open or a close failing, for a filesystem that cannot fsync a directory, publish the marker through a rename that runs a barrier of its own, lock `update-state.json` or remove the lock file, take the lock before server.lock or the ladder or either while holding it, write the marker in a guarded step without it, migrate under a rollback of the running version under way, stamp an interrupted rollback installed before the store opens, read it as an install marker or a hold alone, restore from it at boot, keep a later spelling of a Windows variable, or open a store anywhere but `manifest.DefaultDBPath(dataDir)`.** `TestADisarmRunsTheBarrierAgainOverARecordItCouldNotMakeDurable`, `TestADisarmRunsTheBarrierAgainOverARemovalItCouldNotMakeDurable`, `TestServeRefusesUntilTheMarkersBarrierAnswers`, `TestTheMarkersBarrierTakesOnlyADirectorySyncTheFilesystemCannotDo`, `TestDarwinsFullSyncFallsBackToAnOrdinaryFsync`, `TestTheMarkersWriteRunsOnlyItsOwnBarrier`, `TestADisarmWithoutTheLockWritesNothing`, `TestAMigrationThatHoldsTheMarkersLockFirstStopsTheRollback`, `TestARollbackThatHoldsTheMarkersLockFirstStopsTheMigration`, `TestAMigrationRefusesWhileARollbackOfItsVersionIsUnderWay`, `TestATargetWhoseSettingsAreFixedConfirmsAnInterruptedRollback`, `TestARefusedStartFinishesAnInterruptedRollbackOnlyOnItsProof`, `TestAPatchedPreviousVersionKeepsTheHoldOfARollbackThatFinished`, `TestTheSettingsDigestKeepsTheVariableTheOSReads` and `TestEveryStoreTheBridgeOpensIsItsDataDirsDatabase` pin it.
+
+*A failed barrier, trusted later* (Codex's and Argon's P1 on round 2). The
+marker's write renames its new file into place and then fsyncs the data
+dir; a barrier that fails after the rename leaves the new marker live and
+not durable, and the write's caller is told it failed. Round 2 refused the
+start there, and the next start read the record (`DataDirOpenedBy`) as
+recorded and went on unchecked, so the store's migrations ran with no
+durable record, and a power loss could bring back the armed marker and a
+rollback past them; a removal whose barrier failed (a marker that could not
+be read) had the same shape, the next start finding no marker. Every disarm
+that finds nothing to record (a version recorded already, no marker, no
+install armed, the backup's own version) now runs the barrier before it
+trusts what it read, and refuses while it fails (`disarmHeld`,
+`disarmUnlocked`); a second `ClearStateDurably` runs it too. The tombstone
+before a removal was the alternative; the barrier on every short cut was
+taken, since it covers both shapes and every later start with one rule, at
+the cost of one directory fsync a start, and a data dir this user can write
+and not read now refuses a start (the fsync's open fails), which the owner
+should know. The marker's publication is its own
+(`atomicwrite.RenameWithRetryUnsynced`, then `syncMarkerDir`): through
+`RenameWithRetry`, atomicwrite's tolerant barrier ran first, logged the
+data dir's path and the error once a process, and was a second barrier
+beside the marker's, so a fault in the marker's own was not the only one
+(`TestTheMarkersWriteRunsOnlyItsOwnBarrier`, a data dir mode 0300, read the
+path in the log on round 2's code). The barrier is three seams, the open,
+the fsync and the close, so a test fails each after the rename or the
+unlink, and `SetMarkerBarrierForTest` lets cmd/bridge's boots do the same
+on every platform. `fsutil.SyncParentDir` is unchanged: its other callers
+want it strict.
+
+*What a directory's fsync answers.* A fsync that answers EINVAL, ENOTSUP or
+EOPNOTSUPP is a filesystem that cannot fsync a directory, and counts as
+done, said once a process naming the errno and nothing else
+(`cannotSyncADirectory`, `sayCannotSyncADirectory`), at the publication's,
+the removal's and the disarm's barrier alike; EBADF, EIO, ENOSPC, EDQUOT,
+EACCES, EPERM, EROFS, anything unlisted, and any open or close failure, are
+the barrier's failure. On darwin, `(*os.File).Sync` asks for F_FULLFSYNC and
+falls back to fsync on ENOTSUP alone (Go's #64215); a full sync a
+filesystem does not support can answer EINVAL or ENOTTY too, so an ordinary
+fsync is asked then, and its answer is decided (`syncWithFallback`,
+`plainFsync`). Windows keeps its compile-time skip (`markerBarrier` nil).
+Which filesystems this is for, from what the kernels do: Linux's NFS client
+treats a directory's fsync as a successful no-op (`nfs_fsync_dir`: every
+directory operation is synchronous there), so does its CIFS/SMB client, and
+its FUSE turns a filesystem's unimplemented FSYNCDIR into success
+(`fc->no_fsyncdir`); a filesystem with no fsync operation answers EINVAL
+(`vfs_fsync_range`). So the degrade is for the rest: a FUSE daemon or a
+network filesystem on another kernel that answers the fsync itself, and a
+filesystem with no fsync for directories. There the marker's writes are
+atomic and not durable: a power cut soon after a write can bring back the
+marker as it was before it, and with it a rollback past what the start
+after it wrote. No install is refused for that, and no data dir needs
+`update-state.json` removed by hand, which round 2's refusal asked.
+
+*One lock for the rollback and every migration.* The early rollback held
+the data dir's lock (server.lock), and a migration the ladder (beside the
+database), so a `bridge scan` or `bridge doctor` could record its migration
+after the rollback's last read of the marker and migrate, and the rollback
+then wrote its record from its stale read (`RollbackRecord(st, …)`) over it
+and put the old binary back over a migrated store. `<dataDir>/update-state.lock`
+(`LockState`: `fsutil.OpenLockFile`, `TryLock`, a 30 s wait asking every
+50 ms) is the one lock: never `update-state.json` itself, which every write
+renames over, and never removed. The order is server.lock, the ladder, then
+it, each caller taking only what it needs, and nothing that holds it takes
+either of the others: the early rollback takes server.lock then it, and
+holds it from its marker read through the backup's rename and any write
+that puts the install back; a migrating store open takes the ladder then
+it, through its record and barrier (`DisarmBeforeMigrating`); serve's first
+disarm takes server.lock then it, until its record is durable, and lets it
+go before the store opens (`AdmitBoot`). The helpers under it take no lock
+(`disarmHeld`). Where it cannot be taken a guarded step never writes as if
+it held it: a lock held past the wait, every try answering ENOLCK (which
+does not show the filesystem keeps none), or any other failure refuses the
+rollback, and refuses a disarm that would record or remove, while one with
+nothing to write goes on as before (an ordinary start, no install armed).
+A filesystem whose lock says it keeps none (EOPNOTSUPP, ENOTSUP,
+`errors.ErrUnsupported`, Windows' two answers) is a hold that is not held:
+the rollback refuses there (it refuses on server.lock first anyway), so no
+rollback can run beside a migration, and the disarms go on and record, said
+once. That last is this round's own call, flagged for the owner: refusing
+there would stop every start after an update on such a data dir, which
+round 3's degrade removes for the barrier. A migrating open of the version
+an early rollback was undoing (`RollbackUnderWay`: the record, Status "",
+`RollbackStarted`, this version its target, no version recorded over it)
+refuses with `ErrRollbackUnderWay` (round 4: `MigrationVetoed` and `ErrMigrationVetoed`, the veto a field of
+its own that outlives the record): the backup may be back over its binary
+already, and a command still running from its old image must not migrate
+the store past the version put back. Both acquisition orders are pinned:
+the migration first, and the rollback waits, reads the record, and leaves
+the install; the rollback first, and the migration waits, then refuses.
+
+*The interrupted rollback, reconciled.* A crash after the rollback's record
+and before the rename, then settings fixed: the target ran, and
+`DecideBootAction` read Status "" as nothing to do for good, so the install
+was never confirmed, and with the migration's refusal its own boot would
+have refused its store. Serve's first disarm is the boot's admission: under
+the lock, for a start whose settings loaded, it records that this version
+opened the data dir over the record, which `ArmsDataDirRecord` arms on, and
+that record resolves the rollback (`EarlyRollback` vetoes after it), so the
+store's open migrates. The confirmation is left to the housekeeping after
+the store opens (stamped at the admission, the same boot's housekeeping
+would remove the backup). `DecideBootAction` reads the record as its own
+case, before any window: the target booting is `BootRollbackOvertaken`,
+confirmed however old the record (`ConfirmOverRollback`: installed now,
+`RollbackStarted` cleared, the hold cleared only where it holds this
+version back, the install and the data dir's record kept, so the next boot
+removes `.bak`); the backup's version booting is `BootRollbackFinished`
+(the rollback done: the install cleared, the hold kept, nothing restored,
+never `BootInstallFailed`); any other version, and a hold with no
+rollback, is `BootNoop`. A start of the target still refused finishes the
+rollback only on `EarlyRollback`'s proof (recent, swapped, the backup's
+version, no version recorded over it). An expired interrupted rollback is
+confirmed when the target starts on settings it loads (an `installing`
+marker past the window is cleared as abandoned; this is not one), clears
+its install when the backup's version starts, and is left as it is, with
+`not rolling back … older than 6h0m0s`, when the target's settings are
+still refused. Not reconcilable at all: a restored 0.2.1 or 0.2.2, whose
+housekeeping reads Status "" as nothing to do and whose gate reads
+`rejectedVersion` alone, so fixing the settings does not release its hold
+until a newer release (`bridge update` by hand installs it).
+
+*The digest's variable, and the store's data dir.* Two entries of one name
+in two cases can stand in a Windows environment block, and config's
+overrides read a variable through `os.LookupEnv`, which asks
+`GetEnvironmentVariable` for the first entry its name matches in block
+order (`os.Environ`'s order): the digest keeps each name's first entry,
+folded, before it drops an empty value, so an empty winner is no setting
+and its later twin is not taken (`bridgeEnvironment`). `exec.Cmd`'s
+last-wins dedup builds a child's environment and is not how this process
+reads its own. And `disarmBeforeMigrating` takes the data dir as the
+database's directory, since `OpenStore` is never given it: the boundary is
+documented on both, and `TestEveryStoreTheBridgeOpensIsItsDataDirsDatabase`
+follows every production open of the store, through locals and parameters,
+to `manifest.DefaultDBPath`, and the one it cannot follow, the restore's
+`ResetBackupEpoch`, to every `backup.Targets` naming the database by it
+(doctor joined `bridge.db` by hand, and now asks `DefaultDBPath`).
+
+## The migration veto past the rollback's record, the boot's housekeeping under the marker's lock, a stop in that lock's wait, and the confirmation on the install's own record (backlog B613's round 4, 2026-11-03)
+
+- **…and the veto of a rolled-back version's store migrations (`State.MigrationVeto`) outlives the rollback's record, the boot's housekeeping holds the install marker's lock, that lock's wait ends with serve's stop, and an interrupted rollback is confirmed only on the install's own record** (2026-11-03, backlog B613's round 4). **Don't drop the veto at a clear or a refusal's record, lift it anywhere but at the vetoed version's own serve admission (never without the lock, but where the filesystem keeps none) or by a new install's fresh marker, let a store open of the vetoed version migrate with the lock or without, put a backup back before its veto is recorded, read, write or swap at boot without holding `update-state.lock` (a filesystem that keeps none, or a holder past the wait, leaves the marker and the binaries as they are), take a stop in that lock's wait for a lock that could not be taken, or confirm an interrupted rollback on less than the record its admission made.** `TestTheMigrationVetoOutlivesTheRollbacksHousekeeping`, `TestOnlyTheVetoedVersionsOwnStartLiftsTheVeto`, `TestANewInstallsMarkerCarriesNoVeto`, `TestALaterCommandOfTheVersionRolledBackRefusesToMigrateOnceThePreviousVersionBoots`, `TestAMigrationThatHoldsTheMarkersLockFirstStopsTheBootRollback`, `TestABootRollbackThatHoldsTheMarkersLockFirstStopsTheMigration`, `TestTheBootLeavesTheInstallWhereItCannotHoldTheMarkersLock`, `TestTheMarkersLockWaitEndsWithItsCallersContext`, `TestADisarmStoppedInItsWaitReturnsTheStop`, `TestAStopWhileServeWaitsForTheMarkersLockEndsTheStartThere`, `TestTheConfirmationNeedsTheInstallsOwnRecordOfTheDataDir` and `TestTheBootConfirmsAnInterruptedRollbackOnlyOnTheInstallsOwnRecord` pin it. → History-rules-config-lifecycle.md
+
+*The veto that went with the record* (round 3's review, P1).
+Round 3's migrating open refused where the marker was the early rollback's
+record of its own version (`RollbackUnderWay`: Status "", `RollbackStarted`,
+the target this version, no version recorded over it). That record is the
+install the rollback undoes, and the previous version's first start, a
+release with round 3, clears that install at its housekeeping
+(`BootRollbackFinished`, `ClearInstall`) and keeps only the hold, so from
+then on nothing refused the target's migrations: a command of the target
+still running from its image (a `bridge doctor` or a scan started before the
+rollback, held anywhere before its migration, as one waits for the ladder
+behind another opener's migration) migrated the store past the version put
+back. The veto is a field of its own now, `MigrationVeto`, naming the
+version whose binary the rollback replaces: the early rollback's record
+carries it (`RollbackRecord`), written durably before the rename as the hold
+is, and every clear keeps it beside the hold (`ClearInstall`), as a refusal
+recorded since does (`recordRejection` keeps the rest of the marker). A store
+open of that version with a step pending refuses with `ErrMigrationVetoed`,
+holding the marker's lock or not (`disarmHeld`, `disarmUnlocked`: Codex's
+note), and the version put back, or any other, migrates; the previous
+version's admission writes nothing over the veto. The hold alone could not
+serve: it is the auto-installer's, follows the settings' digest, is cleared
+by a confirmation and kept for an operator's rollback, and names a version
+for another reason (a candidate's refused check) where no rollback ran. Only
+the vetoed version's own serve admission lifts the veto (`AdmitBoot`, in one
+write with its record where it makes one): a serve of that version whose
+settings loaded is the start the rollback waited for, where a command's
+settings say nothing of serve's. The lift is a write, so a lock that cannot
+be taken refuses it, but on a filesystem that keeps none, as for a record. A
+new install's marker is a fresh one (`Install` writes the whole struct), so
+an explicit reinstall carries no veto; `TestANewInstallsMarkerCarriesNoVeto`
+runs the real `Install` over a finished rollback, off Windows as every
+install test. Keyed on the target version, not on
+anything newer than the version put back (Argon's alternative): the
+processes that can still be running from a replaced image are that
+version's, a version newer than both arrives only by an install, whose fresh
+marker is a decision of its own, and an exact name needs no ordering of
+development and pre-release versions. Pinned end to end by the later
+arrival: a command held before the ladder, the early rollback, the previous
+version's start (its admission, a migration of its own, its housekeeping),
+then the command's migration, refused, the store left at v59 with v60's
+columns and index absent; then this version's admission lifts the veto and
+the store migrates.
+
+*The boot rollback vetoes too.* `BootInstallFailed` puts `.bak` back over the
+running binary when the install did not come up as its version. Since round
+2's admission records every other version that starts, it restores only
+where the running version is the backup's (the swap never landed) or where
+an install landed beside a running boot (a `bridge update` then), and in
+that case the binary replaced is the install's: the housekeeping records the
+veto of `TargetVersion` durably before the rename, and a veto it cannot
+record leaves the install as it is. It names the marker's target, never the
+version the replaced binary reports; a binary whose version is not its
+release's tag is the residual.
+
+*The housekeeping under the lock* (Argon's High). `maybeRollbackOnBoot` read
+the marker, decided, wrote and renamed with no lock, so a migrating open
+could record its migration between that read and the rename, and the boot
+rollback put the backup back over a migrated store. `bootHousekeeping` takes
+`update-state.lock` before its read, inside the data dir's lock and after
+the store's open has let the ladder go, as the documented order has it
+(server.lock, the ladder, then this one), holds it through the decision, its
+writes and the backup's rename or removal, and lets it go when it returns;
+nothing it calls takes another lock. A lock it cannot hold, for any reason
+(another holder past the 30 s wait, ENOLCK, a failure, serve's stop, and a
+filesystem that keeps none, where `LockState`'s hold is not held: Argon's and
+Codex's notes), leaves the marker and both binaries as they are, said on one
+line, and returns the refusal; a later start asks again. A marker that asks
+nothing of the boot (`BootNoop` on a read before the lock) takes no lock, so
+a filesystem that keeps none, or a lock another process holds, costs an
+ordinary start no wait and no line; what the boot acts on is read again
+under the lock and decided there. The cost of refusing where the filesystem
+keeps no locks: there an install is not stamped installed and its `.bak`
+stays until the data dir is on a filesystem that keeps them, which the
+runbook says, and LockState's once-a-process line says too. Both
+acquisition orders are pinned against a real migrating open: the migration
+first, and the housekeeping waits, reads the record and puts nothing back;
+the housekeeping first, and the migration waits, then refuses under the
+veto, so the store is never migrated under the binary put back.
+
+*A stop in that lock's wait* (Medium). `LockState` waited its 30 s whatever its
+caller's state, and a disarm whose wait ran out took the unlocked path,
+which goes on where it has nothing to write, so serve stopped in its
+admission's wait went on to boot. The wait now ends with its caller's
+context, returning the context's error and never a `*StateLockError`, and
+keeps its bound (`sleepUnlessDone`); a context that has ended does not stop a
+take that needs no wait. The callers that pass one are serve's: its
+admission (`AdmitBoot` returns the stop as it is, never the unlocked
+disarm's answer, and `runServe` exits 0 with nothing written), its early
+rollback (the install left as it is, saying the start was stopped, and
+serve's exit 2 as for any refused settings) and its housekeeping (the marker
+left). A store's open has no context, so `DisarmBeforeMigrating` keeps the
+bound alone.
+
+*The confirmation on the install's own record* (Medium). `ConfirmOverRollback` confirmed whatever the record held. The target's
+housekeeping reaches it only after its admission recorded that the target
+opened the data dir, so a record without that line is one no admission of
+the target wrote, and no proof the rollback is over. It confirms now only
+where `DataDirOpenedBy` names the install's version and the version
+confirming is that one, and otherwise returns an error with the marker as it
+was, which the housekeeping leaves as it is, naming why.
+
+*A store genuinely older* (P3). The restart fixture set `user_version`
+back on a store this build had made, so v60's columns and index were there
+before the restart and its migration ran over a schema that had them, which
+no store a release left looks like. `manifest.WriteDatabaseAtVersionForTest`
+writes a store as a ladder ending one step short leaves it (the ladder
+test's own helper, moved to a file other packages' tests can reach), and the
+restart test asserts v60's two columns and its index absent before and
+present after.
+
+*Not changed: `Updater.Install` and `Updater.Rollback`* (Codex's audit). Both
+write the marker without `update-state.lock`, in serve and in `bridge
+update`'s own process, and swap with it unheld; they are serialised against
+each other in-process (`installInFlight`) and against nothing else. Install
+writes a fresh marker, which lifts a veto by design: a vetoed command
+waiting at that moment then finds the install armed and records its
+migration as an admission would, and in every flow the updater offers the
+version it runs is the install's or older. Rollback is the operator's own,
+a downgrade by choice after the new version ran. The residual is a marker
+write an operator's install or rollback makes at the moment another process
+records or decides. Two more stand beside it: a marker that cannot be read
+is still removed by the disarm that finds it, a migration's included, and a
+veto in it with it, as a malformed one reads as none (`LoadState`); and a
+serve of the vetoed version started from its image before the rollback's
+rename, whose settings load by the time it takes the data dir's lock, is
+taken for that version's admission.
+
+## An install marker's errors without their paths (backlog B613's round 5, 2026-11-03)
+
+- **An install marker's read and removal errors name no path in a refusal, log line or stderr; the refusal keeps its causes through `Unwrap`, and `DisarmResult.Unreadable` keeps the original read error for code** (2026-11-03, B613 round 5). **Render `Unreadable` through `fsutil.ErrorWithoutPath` only where it is printed or logged; never replace it with a string error.** `TestDisarmRefusalsKeepCausesWithoutPaths`, `TestDisarmUnreadableKeepsTheOriginalPathError`, `TestMigrationMarkerDiagnosticsCarryNoPaths` and `TestServeMarkerDiagnosticsCarryNoPaths` pin it.
+
+*The defect* (CodeRabbit on #1382, CWE-532). `LoadState` wraps the
+`*fs.PathError` from reading `update-state.json`, and the marker's removal
+wraps the unlink's, so the data dir's absolute path reached the store open's
+warning (`internal/manifest/migration_disarm.go`), serve's stderr lines
+(`cmd/bridge/serve_refused_install.go`, and the boot's housekeeping in
+`cmd/bridge/main.go`) and the refusals `disarmUnlocked` and `disarmHeld`
+return, which serve and every migrating store open print. The bridge logs
+value-free.
+
+*The fix.* `markerIOError` (`internal/updater/disarm.go`) renders a marker's
+file error through `fsutil.ErrorWithoutPath` and keeps it for `errors.Is`
+and `errors.As` through `Unwrap`; both refusals wrap their causes through
+it, `disarmHeld`'s with two `%w`. `DisarmResult.Unreadable` keeps the read's
+own error for code, and the lines that print or log it render it through
+`fsutil.ErrorWithoutPath`. `StateLockError` already rendered its cause
+without a path.
+
+*Tests.* `TestDisarmRefusalsKeepCausesWithoutPaths` covers a read and a
+removal failing with distinct causes (on Unix the fixture's read answers
+EISDIR and its removal ENOTEMPTY, since `os.Remove` returns rmdir's error
+unless it is ENOTDIR), a removal whose barrier fails, and the three lock
+refusals: no path in the text, every cause kept.
+`TestDisarmUnreadableKeepsTheOriginalPathError`,
+`TestMigrationMarkerDiagnosticsCarryNoPaths` and
+`TestServeMarkerDiagnosticsCarryNoPaths` pin the rest.

@@ -20,7 +20,7 @@ import (
 
 // TestMain lowers the bcrypt work factor for this package's suite, guards
 // every open of a PCM node, and returns first when this process was
-// re-exec'd as the fpcalc stand-in.
+// re-exec'd as the fpcalc stand-in or as the bridge itself.
 //
 // `bridge admin reset-password` and the public-mode startup paths hash real
 // passwords, and bcrypt's deliberate ~250 ms is multiplied by roughly eight
@@ -45,10 +45,14 @@ import (
 // that turns the surface on without its own box (playerOpenHome) binds
 // nothing.
 func TestMain(m *testing.M) {
-	// The fingerprint stand-in re-execs this binary as fpcalc. It must
-	// return before the suite starts, or the child runs every test.
+	// The fingerprint stand-in re-execs this binary as fpcalc, and the
+	// updater's tests as the bridge itself (runAsBridge). Each must return
+	// before the suite starts, or the child runs every test.
 	if os.Getenv(fpcalcStandInEnv) != "" {
 		os.Exit(runFpcalcStandIn())
+	}
+	if os.Getenv(runAsBridgeEnv) != "" {
+		os.Exit(runAsBridge())
 	}
 	adminauth.SetTestHashCost(bcrypt.MinCost)
 	trees, treesDir, err := emptyHostTrees()

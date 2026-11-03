@@ -53,7 +53,28 @@ var renameFunc = os.Rename
 //
 // mode 0 skips the chmod — NTFS has no executable bit to set.
 func stageIntoDir(src, dst string, mode os.FileMode) (staged string, err error) {
-	tmp, err := os.CreateTemp(filepath.Dir(dst), ".bridge-swap-*")
+	return stageIntoDirNamed(src, dst, mode, ".bridge-swap-*")
+}
+
+// stageForCheck returns the verified candidate moved beside dst for its
+// settings check, which the swap then takes as its new binary and moves
+// into place within the directory. The check runs the candidate
+// from where it will run: a data dir mounted noexec, or a policy that runs
+// nothing from it (AppLocker), refuses the copy in the scratch dir, never the
+// directory the bridge already runs from. On Windows the name ends in .exe,
+// so the candidate runs as any program there does.
+func stageForCheck(src, dst string) (string, error) {
+	pattern := ".bridge-check-*"
+	if isWindows() {
+		pattern += ".exe"
+	}
+	return stageIntoDirNamed(src, dst, installedMode(dst), pattern)
+}
+
+// stageIntoDirNamed is stageIntoDir, the staged file named after pattern as
+// os.CreateTemp names it.
+func stageIntoDirNamed(src, dst string, mode os.FileMode, pattern string) (staged string, err error) {
+	tmp, err := os.CreateTemp(filepath.Dir(dst), pattern)
 	if err != nil {
 		return "", fmt.Errorf("create staging file beside %s: %w", dst, err)
 	}
