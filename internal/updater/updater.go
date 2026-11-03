@@ -630,13 +630,21 @@ func rejectionBlocks(candidate, rejected string) bool {
 // restamp waits for the install marker's lock, or had ended before its
 // take, no restart is requested, which would turn the operator's or the
 // service manager's stop into supervision.RestartExitCode and a
-// supervisor's restart; the next start finds the install as it is.
+// supervisor's restart; the next start finds the install as it is. So
+// where it ends while the restamp writes, holding the lock (round 3,
+// Codex on round 2): ctx is asked again once the restamp has returned,
+// just before the restart is requested. What is left is the few
+// statements from that ask to the request.
 func (u *Updater) restartWhenDrained(ctx context.Context) {
 	if n := u.inflightSessions(); n > 0 {
 		logger.Info("auto-install restart deferred", "reason", activeDownloadsReason, "inflight", n)
 		return
 	}
-	if err := u.refreshInstallAttemptedAt(ctx); err != nil {
+	err := u.refreshInstallAttemptedAt(ctx)
+	if err == nil {
+		err = ctx.Err()
+	}
+	if err != nil {
 		logger.Info("auto-install restart not requested: the bridge is stopping")
 		return
 	}
