@@ -833,6 +833,29 @@ hand once they are fixed); a release with this round clears the install
 from the record at its start and keeps the hold, which then follows the
 settings' digest. To see what is recorded: `cat <dataDir>/update-state.json`.
 
+**From the release that carries B705, the new version's first start completes
+its install however late it comes.** A `bridge update` with the service
+stopped and a start the next day, or a crash between the swap and the
+restart, brings the new version up more than 6 h after the marker was
+written. Before B705 that start read the marker as abandoned and cleared it:
+the install was never stamped installed, `.bak` was never removed, and the
+record that the new version opened the data dir (`"dataDirOpenedBy"`) went
+with the marker, so the console's Roll back then put `.bak` back over the
+store the new version had just migrated. Now that start confirms the install
+as any start of the new version does (the marker shows `"status":
+"installed"` and keeps `"dataDirOpenedBy"`; Roll back answers 409
+`rollback-refused`), and `.bak` is removed at the start after. A removal that
+fails (Windows can fail one) leaves the marker as it is, with `updater: remove
+.bak: …; the install marker is left as it is, for the next start to remove
+it`, and the next start tries again. The 6 h limits above still stand: they
+bound the rollbacks, the early one and the boot's, and a start of another
+version past them clears the install without putting `.bak` back. That clear,
+the one of an install that never reached its swap, and a boot rollback
+refused because a version opened the data dir now keep that record beside
+the hold (no status, `"dataDirOpenedBy"` and `"previousVersion"`), so a Roll
+back of the `.bak` they leave stays refused until a new install, or `.bak`
+removed by hand.
+
 **A data dir whose filesystem cannot fsync a directory.** Linux's NFS and
 CIFS/SMB clients treat a directory's fsync as a successful no-op, and its
 FUSE turns a filesystem's unimplemented FSYNCDIR into success, so those

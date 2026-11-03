@@ -71440,3 +71440,162 @@ go1.27.3's gofmt on the changed Go files: clean; `make docs-check` ok, and
 config-lifecycle.md at 97.3 % of its budget with the round-3 patch, by the
 budget script's own `measure` and `report`. cmd/bridge's code is unchanged
 since round 2's gates.
+
+## 2026-11-03 — B705: a late first boot of the installed version completes its install
+
+Backlog B705, found while verifying a review finding on B692 and read from
+the code; the tests below reproduce it. Worker b705 on legion0 (Ubuntu
+26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`, umask 022), branch
+`fix/b705-late-boot-completes-install` from main f6a885c7 (B692 merged), the
+brief with Codex's and Argon's binding notes. Commits: the seam 1b3e4cc8
+(`bootHousekeepingWith`: the boot's removal of `.bak` as a parameter, which
+changes nothing), red 156d9059, fix 32f734b8, then this record. The rule is a
+new bullet after B692 round 2's in `.claude/rules/config-lifecycle.md`,
+shipped as a checked patch (`rules-b705.patch`; this worker cannot write
+`.claude/`), which leaves the file at 98,531 bytes, 98.5 % of its budget; the
+long form is B705's section of `ops/History-rules-config-lifecycle.md`,
+where three sentences the fix made false are corrected (B613's boot rollback
+that "clears the marker", round 3's "an `installing` marker past the window
+is cleared as abandoned", the staged-install entry's refusal that "expires
+exactly when boot would clear the marker"); the runbook's B613 section gains
+a paragraph, its six-hour statements (the early rollback's) left as they
+are.
+
+**The defect.** `DecideBootAction`'s `installing` case read the recency
+window (6 h) before the version, so the installed version's first start
+more than 6 h after its install (`bridge update` with the service stopped
+and a start the next day, a crash between the swap and the restart) took
+`BootClearAbandoned`. By then its admission had recorded `DataDirOpenedBy`
+and its store had migrated; `ClearInstall` dropped the record with
+`TargetVersion` while `bridge.bak` stayed, so the console's Roll back passed
+`RollbackRefusal` (a missing marker loads as empty) and put `.bak` back over
+the migrated store, and the install was never stamped `installed`, so
+`BootCleanupBak` never removed `.bak`.
+
+**The order**, read from the code (`cmd/bridge/main.go` at 32f734b8; main's
+lines in brackets): the settings' load and `serveConfigRefusal`, whose
+refusals ask the early rollback (`recoverRefusedInstall`, before the data
+dir's lock: 3220 and 3237 [3189, 3206]); `server.lock`
+(`lockServeDataDirWith`, 3324 [3293]); the admission (`disarmEarlyRollback`,
+`updater.AdmitBoot`, 3357 [3326]), which records over any armed install
+whatever its age (`ArmsDataDirRecord` asks no window); the player's
+preflight, TLS, the token store; the store's open and migrations
+(`manifest.OpenStore`, 3505 [3474]); the housekeeping (`maybeRollbackOnBoot`,
+3961 [3930]), under `update-state.lock`. The late boot's record is therefore
+in the marker when the housekeeping reads it, and `BootInstallSucceeded`'s
+write keeps it.
+
+**What changed.**
+1. `DecideBootAction` (`internal/updater/state.go:475`): the version first,
+   `BootInstallSucceeded` whatever the marker's age (and its `SwapStarted`, as
+   before); any other version the window (`:480`), then `SwapStarted`, then
+   `BootInstallFailed`.
+2. `ClearInstall` (`state.go:355`) keeps `DataDirOpenedBy` and
+   `PreviousVersion` beside the hold and the veto where `RollbackRefusal`
+   refuses on them: the refused boot rollback, the abandoned and the
+   not-swapped clears leave `.bak` where it is, and dropped the record an
+   operator's rollback of it refuses on.
+3. `BootCleanupBak` (`main.go:2425`): a removal that fails leaves the marker
+   as it is and says so, for the next boot to try again (Windows'
+   `RemoveBackup` returns a deletion's failure); one that lands drops the
+   record before the clear.
+4. The explanations of the abandonment and the restamp (`State`'s doc,
+   `AttemptedAt`, `recencyWindow`, `BootClearAbandoned`,
+   `refreshInstallAttemptedAt` and its two Warn lines, `swapAwaitingRestart`)
+   now say what the window bounds: the rollbacks.
+
+**The other paths** (the brief's item 3), each read for whether it can drop
+`DataDirOpenedBy` for a version that opened the data dir:
+- `ClearInstall`'s callers: the refused boot rollback, the abandoned and
+  the not-swapped clears and the failed cleanup could, and are fixed (2 and
+  3); `BootInstallFailed`'s restore runs only where none is recorded, and
+  `BootRollbackFinished`'s record holds none but in B613's round-4 residual;
+  the successful cleanup drops it with `.bak`, by design.
+- The restamp (`refreshInstallAttemptedAt`, `internal/updater/updater.go`):
+  cannot. Under the lock it rewrites an `installing` marker with its time
+  alone changed; `TestDeferredRestartRefreshesInstallRecency` now asserts
+  that directly (the time is the restart's, the rest unchanged, a record a
+  migrating command made meanwhile included, a boot of another version still
+  `BootInstallFailed`), since after the reorder the target's boot no longer
+  shows it.
+- The early rollback (`recoverRefusedInstall`, `EarlyRollback`): cannot. It
+  refuses on a recorded admission, asks again under both locks, writes its
+  record only where none is recorded, and puts back the marker it read when
+  the rename fails; its age and future-date checks are unchanged.
+
+**Decisions.** The record kept by a clear is the two fields
+`RollbackRefusal` reads, in a marker with no status and no
+`RollbackStarted`, which no boot acts on and which arms nothing; it goes
+with a new install's fresh marker or with `.bak`'s removal. Keeping the
+whole marker at the refused boot rollback was the alternative: every boot
+inside the window would decide `BootInstallFailed` again and say so again.
+The removal's failure gets a test seam (`bootHousekeepingWith`) rather than a
+read-only directory, so the test runs on Windows and as root. Argon's late
+start that dies before its housekeeping is decided by the same rule: the
+version put back by hand keeps the record inside the window and past it,
+where it carries B705.
+
+**Red first** (156d9059 on the seam, so as on main): internal/updater,
+`TestALateFirstBootOfTheInstalledVersionConfirmsTheInstall` (6 of 13
+subtests; its 7 controls, another version past the window, the not-swapped
+and failed answers inside it and the target inside it, green) and
+`TestAClearAtBootKeepsTheRecordARollbackRefusesOn` (2 of 4); cmd/bridge,
+`TestALateFirstStartOfTheInstalledVersionCompletesItsInstall` (the marker
+cleared, then the rollback put `.bak` back),
+`TestAFailedRemovalOfTheBackupLeavesTheInstallForTheNextStart`,
+`TestAStartOfAnotherVersionKeepsTheRecordOfALateStartThatDied` (2 of 2),
+`TestTheBootKeepsARecordedHoldWhereItClearsAnInstall` (3 of 8) and
+`TestTheBootRollbackLeavesABackupOnceAnotherVersionOpenedTheDataDir`. The
+case of `TestTheBootKeepsARecordedHoldWhereItClearsAnInstall` that asserted
+the loss ("an install that did not come up, the data dir opened since")
+was corrected in the red commit, which says why.
+`TestDeferredRestartRefreshesInstallRecency`, strengthened, was green before
+as a pin.
+
+**Negative controls**, each alone on the committed fix (32f734b8), predicted
+by test and subtest and observed exactly, the file put back with `git
+checkout --` and the tree clean after each (`.tmp/_b705/controls.py`:
+internal/updater whole each time; cmd/bridge whole for N1, its updater test
+files for the others):
+
+| # | Mutation | Predicted and observed red |
+|---|---|---|
+| N1 | the window checked again ahead of the version match | 2 tests, 6 subtests: the 6 late subtests of the decision's table, and the end-to-end late start (its marker not installed, `.bak` never cleaned up) |
+| N2 | `ClearInstall` keeps no record | 4 tests, 7 subtests: the clear's 2, the boot steps' 3, the refused boot rollback, the late start that died (2) |
+| N3 | a failed removal falls through to the clear | 1 test |
+| N4 | the cleanup keeps the record once `.bak` is gone | 4 tests, 3 subtests: the cleanup's boot step, the end-to-end late start, the failed removal's next start, and B613's fixed-settings confirmation (2) |
+| N5 | the restamp writes no new time | 2 tests, 1 subtest: the deferred restart's, and the restamp's lock-free row |
+
+**Checks.** On legion0 (Ubuntu 26.04, linux/amd64, go1.27.3,
+`GOTOOLCHAIN=local`, umask 022, TMPDIR on disk under `.tmp/_b705`), each
+through the shared build lock, at 32f734b8 with this record in the tree:
+- `go test -race -count=1 -timeout 90m -tags
+  ts_omit_webclient,ts_omit_debugeventbus ./internal/updater/...
+  ./cmd/bridge/...`: internal/updater ok (26 s), cmd/bridge ok (903 s).
+- `make test-fast` (every package, no race): 80 packages ok, none failed, 14
+  with no test files; the Linux-only ones among them (internal/alsa,
+  alsactl, alsapcm, atomicwrite's durable writer, backup's identity paths,
+  the player's binding and hotplug), and the cmd/bridge sweeps over the
+  tracked docs, this record included.
+- `make vet`, and `GOOS=windows go vet ./...` with the tags: clean.
+  go1.27.3's gofmt on every changed Go file: clean.
+- `make docs-check`: ok (config-lifecycle.md at 97.3 % as the tree stands);
+  with the rules patch 98.5 %, by the budget script's own `measure` and
+  `report` over the patched copy, the patch checked by a strict applier.
+- The qualification-version check, `-base main -head HEAD` (this clone has
+  no `origin/main`; main is f6a885c7): OK, no raise.
+- Not run here: macOS and Windows natively; Windows' vet alone ran.
+
+**For the owner.**
+- The console's Roll back button still follows `.bak`'s presence
+  (`canRollback`), so where a clear keeps the record it shows, and answers
+  409 `rollback-refused`, until a new install or `.bak` removed by hand (B692
+  left it so).
+- A version put back by hand that predates B705 clears the marker by its own
+  rule, record and all: the late start that died before its housekeeping is
+  covered only where the version that starts next carries B705.
+- `config-lifecycle.md` is at 98.5 % of its budget with this patch: the next
+  entry there needs a move first (`scripts/doc-split/move_entry.py`).
+- No PROTOCOL.md statement changes: its Updates paragraph says the next boot
+  confirms the install or restores `.bak`, now true at any age.
+- No backlog entry was written: the backlog file is not on this host.

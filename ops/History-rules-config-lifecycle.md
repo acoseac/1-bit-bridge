@@ -1516,8 +1516,10 @@ it cannot. A marker it cannot read is removed, durably
 and a later start that could read it again must not take it for an install
 no start of this version went past. The boot rollback (BootInstallFailed),
 which restores after the store has opened, leaves the backup where the
-record names a version, and clears the marker. Since round 2 the record is
-`updater.DisarmEarlyRollback` (since round 3 two functions over one disarm:
+record names a version, and clears the marker (since B705 the install
+alone: the record stays beside the backup, B705's section). Since round 2
+the record is `updater.DisarmEarlyRollback` (since round 3 two functions
+over one disarm:
 `updater.AdmitBoot` for serve, `updater.DisarmBeforeMigrating` for the
 store's open), and the store's open asks it too, under the
 ladder lock, before its first migration step and only while one is pending
@@ -1710,8 +1712,9 @@ never `BootInstallFailed`); any other version, and a hold with no
 rollback, is `BootNoop`. A start of the target still refused finishes the
 rollback only on `EarlyRollback`'s proof (recent, swapped, the backup's
 version, no version recorded over it). An expired interrupted rollback is
-confirmed when the target starts on settings it loads (an `installing`
-marker past the window is cleared as abandoned; this is not one), clears
+confirmed when the target starts on settings it loads (as an `installing`
+marker past the window is since B705, which until then cleared one as
+abandoned), clears
 its install when the backup's version starts, and is left as it is, with
 `not rolling back … older than 6h0m0s`, when the target's settings are
 still refused. Not reconcilable at all: a restored 0.2.1 or 0.2.2, whose
@@ -2244,6 +2247,133 @@ any request it gets). Red first on the seam that changes nothing
 ends): `TestAStopWhileTheRestampWaitsRequestsNoRestart`'s "stopped during
 its write", one restart requested; and one negative control, the ask
 taken out, red on that subtest alone (the log's round-3 entry).
+
+## A late first boot of the installed version completes its install (backlog B705, 2026-11-03)
+
+- **The version installed is confirmed at its first boot however late it comes, and no clear at boot drops the record that a version other than the backup's opened the data dir while `.bak` may stand: `DecideBootAction` asks the version before the window (any other version: the window, then `SwapStarted`, then `BootInstallFailed`); `ClearInstall` keeps `DataDirOpenedBy` and `PreviousVersion` where `RollbackRefusal` refuses on them; a removal of `.bak` that fails leaves the marker for the next boot, and one that lands drops the record** (2026-11-03, backlog B705). **Don't read the window before the version, drop the record in a clear that leaves `.bak`, clear the marker after a removal that failed, or keep the record once `.bak` is gone.** `TestALateFirstBootOfTheInstalledVersionConfirmsTheInstall`, `TestAClearAtBootKeepsTheRecordARollbackRefusesOn`, `TestDeferredRestartRefreshesInstallRecency`, `TestALateFirstStartOfTheInstalledVersionCompletesItsInstall`, `TestAFailedRemovalOfTheBackupLeavesTheInstallForTheNextStart`, `TestAStartOfAnotherVersionKeepsTheRecordOfALateStartThatDied`, `TestTheBootKeepsARecordedHoldWhereItClearsAnInstall` and `TestTheBootRollbackLeavesABackupOnceAnotherVersionOpenedTheDataDir` pin it. → History-rules-config-lifecycle.md
+
+*The defect* (found while verifying a review finding on B692, read from
+the code; this section's tests reproduce it). `DecideBootAction`'s
+`installing` case checked the recency window (6 h) before the version, so
+an install marker older than the window was `BootClearAbandoned` whatever
+version booted. serve's start runs, in this order: the early rollback, only
+where the settings are refused, before the data dir's lock
+(`recoverRefusedInstall`); `server.lock`; the boot's admission
+(`disarmEarlyRollback`, `updater.AdmitBoot`), which records
+`DataDirOpenedBy` over any armed install whatever its age, since
+`ArmsDataDirRecord` asks no window; the player's preflight, the TLS pair and
+the token store; the store's open and its migrations (`manifest.OpenStore`,
+whose `DisarmBeforeMigrating` finds the record made and adds nothing); and
+last the housekeeping (`maybeRollbackOnBoot`, `bootHousekeeping`), under
+`update-state.lock`. So the installed version's first start past the window
+(`bridge update` with the service stopped and a start the next day, or a
+crash between the swap and the restart) recorded that it opened the data
+dir, migrated the store, then cleared the marker as abandoned, and
+`ClearInstall` dropped the record with `TargetVersion` while `bridge.bak`
+stayed. A missing marker loads as empty, so the console's Roll back passed
+`RollbackRefusal` (B692) and put `.bak` back over the migrated store; and
+the install was never stamped `installed`, so `BootCleanupBak` never
+removed `.bak` and the console kept offering the rollback. A rollback's
+record (`Status ""`, B613's round 3) already read the install's version
+booting as the install working, however old the record.
+
+*The reorder.* The version first: the install's version booting is
+`BootInstallSucceeded` whatever the marker's age, and before `SwapStarted`
+as it already was (a marker an updater before `SwapStarted` wrote); any
+other version keeps the window (abandoned past it, swapped or not), then
+`SwapStarted` (Windows' SCM-stop window, `BootClearNotSwapped`), then
+`BootInstallFailed`. A stale marker whose version matches is success on
+purpose: the housekeeping runs only once serve's settings loaded and its
+admission recorded. The existing abandonment cases run another version, so
+they stand. The success write keeps the rest of the marker, its record
+included; `RollbackRefusal` refuses on it while the status is `installed`;
+and the boot after it removes `.bak` (`BootCleanupBak`) as after any
+confirmed install. A success write that fails leaves the marker
+`installing`, and the next boot, of any age now, confirms it again.
+
+*The record, wherever `.bak` stays* (the brief's binding goal, Codex's
+note: the manual rollback's refusal holds whenever `.bak` remains and a
+version other than its own opened the data dir). Three more paths dropped
+it, each keeping its action:
+- the refused boot rollback (`BootInstallFailed` over `DataDirOpenedBy`):
+  it refused because the record exists, then cleared the marker, record and
+  all, so a later Roll back went on;
+- the abandoned and the not-swapped clears, the same shape;
+- a cleanup of `.bak` whose removal failed (`BootCleanupBak`), which went on
+  to `ClearInstall` and left `.bak` with no record; on Windows
+  `RemoveBackup` returns a deletion's failure (`swap_windows.go`).
+`ClearInstall` keeps `DataDirOpenedBy` and `PreviousVersion` beside the hold
+and the veto where `RollbackRefusal` refuses on them. That marker has
+`Status ""` and no `RollbackStarted`: no boot acts on it (`BootNoop`), it
+arms nothing (`InstallArmed` is false, so the early rollback and the
+admission leave it), and an operator's rollback refuses on it. A cleanup
+whose removal failed leaves the marker as it is, `installed`, says so, and
+returns, so the next boot tries the removal again; one whose removal landed
+drops the record before `ClearInstall`, since nothing is left for it to
+guard. A new install's fresh marker drops it by design: its swap makes a new
+`.bak` of the version running then. The restore paths (`BootInstallFailed`'s
+rename, `BootRollbackFinished`) have no record to keep: the first runs only
+where none is recorded, and a rollback's record holds none but in B613's
+round-4 residual.
+
+*The late start that dies before its housekeeping* (Argon). The version
+installed starts late, its admission records, its store migrates, and it
+ends before the housekeeping; the operator puts the old binary back by hand,
+keeping `.bak`, and starts it: another version over the marker, inside the
+window (`BootInstallFailed`, refused on the record) or past it
+(`BootClearAbandoned`). Both keep the record now, so a Roll back of `.bak`
+refuses. That holds where the version put back carries B705: an older
+release's housekeeping clears the marker by its own rule.
+
+*The other paths that can clear an install marker while its version runs*
+(the brief's item 3):
+- the restamp before a deferred auto-install restart
+  (`refreshInstallAttemptedAt`): under the lock it reads the marker, touches
+  only an `installing` one and writes it back with its time alone changed,
+  so it cannot drop `DataDirOpenedBy`. After the reorder it is what keeps
+  the rollbacks' windows (the boot rollback's, the early rollback's) running
+  from the restart, and `TestDeferredRestartRefreshesInstallRecency` asserts
+  that itself: the marker's time is the restart's, the rest is as it was,
+  a record a migrating command of the new version made meanwhile included,
+  and a boot of another version is still `BootInstallFailed`;
+- the early rollback (`recoverRefusedInstall`, `EarlyRollback`): it refuses
+  on a recorded admission, asks again under both locks, writes
+  `RollbackRecord` only where no version is recorded, and puts back the
+  marker it read when the rename fails, so it cannot drop one; its age and
+  future-date checks are unchanged;
+- `ClearInstall`'s callers: above.
+Beside them, and unchanged: a marker that cannot be read is removed by the
+disarm that finds it (B613), and a record in it with it.
+
+*Tests.* Red first on the seam that changes nothing (1b3e4cc8:
+`bootHousekeepingWith`, a removal `BootCleanupBak` takes as a parameter),
+so as on main: `TestALateFirstBootOfTheInstalledVersionConfirmsTheInstall`
+(6 of 13 subtests: the install's version past the window, swapped or not,
+spelled with a v on either side, its admission recorded; its 7 controls
+green), `TestAClearAtBootKeepsTheRecordARollbackRefusesOn` (2 of 4),
+`TestALateFirstStartOfTheInstalledVersionCompletesItsInstall` (this build's
+real serve over an install armed 30 h ago and a store a migration behind:
+the admission, the migration, the housekeeping, then `Updater.Rollback`
+refused with both binaries unchanged, then the next start's cleanup),
+`TestAFailedRemovalOfTheBackupLeavesTheInstallForTheNextStart`,
+`TestAStartOfAnotherVersionKeepsTheRecordOfALateStartThatDied` (2),
+`TestTheBootKeepsARecordedHoldWhereItClearsAnInstall` (3 of 8) and
+`TestTheBootRollbackLeavesABackupOnceAnotherVersionOpenedTheDataDir`.
+`TestTheBootKeepsARecordedHoldWhereItClearsAnInstall`'s case "an install
+that did not come up, the data dir opened since" asserted the loss (the
+hold and nothing more) and is corrected on purpose. Five negative controls,
+each observed exactly as predicted (the log's entry has the table).
+
+*Left.* The console's Roll back button follows `.bak`'s presence
+(`canRollback`), so where a clear keeps the record it shows and answers 409
+`rollback-refused` until `.bak` goes, by hand or with a new install, as
+B692 left it. `swapAwaitingRestart` still expires at the window outside
+the process that swapped, as before: the window bounds what a boot puts
+back, and the refusal expires with it. PROTOCOL.md's Updates paragraph says
+the next boot confirms the install or restores `.bak`, which is now true at
+any age: no change there. The record is in `ops/engineering-log.md`,
+2026-11-03, B705.
+
 ## Config, settings and process lifecycle
 
 - **An install of a target already staged on disk is REFUSED, and the refusal
@@ -2263,8 +2393,10 @@ taken out, red on that subtest alone (the log's round-3 entry).
   `BootClearNotSwapped`); **the SAME target**, because refusing a newer release
   would strand the host on a version it has not booted; and **within
   `recencyWindow`**, the same constant `DecideBootAction` uses for
-  `BootClearAbandoned`, so the refusal expires exactly when boot would clear the
-  marker and the two cannot disagree about whether it is live. **Marker, not the
+  `BootClearAbandoned`, so the refusal expires exactly when a boot stops putting
+  `.bak` back (one of another version clears the marker then, and since B705
+  the target's confirms it at any age) and the two cannot disagree about
+  whether it still guards a restore. **Marker, not the
   in-memory `pendingRestart` flag** — the flag records THAT a swap landed and
   not WHICH version, so refusing on it blocked a legitimate newer install (caught
   by the positive control), and `bridge update` is a separate PROCESS that sees
