@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-11-03 — B613 round 4: the migration veto outlives the rollback's record, the boot's housekeeping holds the marker's lock, a stop ends that lock's wait, an interrupted rollback is confirmed only on the install's own record](#2026-11-03--b613-round-4-the-migration-veto-outlives-the-rollbacks-record-the-boots-housekeeping-holds-the-markers-lock-a-stop-ends-that-locks-wait-an-interrupted-rollback-is-confirmed-only-on-the-installs-own-record)
 - [2026-11-02 — B613 round 3: the barrier asked again before a disarm trusts the marker, one lock for the rollback and every migration, a directory fsync the filesystem cannot do, an interrupted rollback reconciled at boot](#2026-11-02--b613-round-3-the-barrier-asked-again-before-a-disarm-trusts-the-marker-one-lock-for-the-rollback-and-every-migration-a-directory-fsync-the-filesystem-cannot-do-an-interrupted-rollback-reconciled-at-boot)
 - [2026-11-02 — B613 round 2: the hold before the rename, every store open that migrates disarms, the boot keeps a hold, the marker's barrier fails its write, Windows variable names](#2026-11-02--b613-round-2-the-hold-before-the-rename-every-store-open-that-migrates-disarms-the-boot-keeps-a-hold-the-markers-barrier-fails-its-write-windows-variable-names)
 - [2026-11-02 — B538: an abandoned Atlas submit's HTTP answer is a shutdown stop](#2026-11-02--b538-an-abandoned-atlas-submits-http-answer-is-a-shutdown-stop)
@@ -70099,3 +70100,180 @@ build lock:
   brief's table names three callers), and native Windows is cross-vetted
   only. The qualification version is the orchestrator's at merge:
   internal/manifest is a guarded prefix, so the check asks for a raise.
+
+## 2026-11-03 — B613 round 4: the migration veto outlives the rollback's record, the boot's housekeeping holds the marker's lock, a stop ends that lock's wait, an interrupted rollback is confirmed only on the install's own record
+
+The reviews of round 3 on PR #1382 (head b085f5e0: round 3's six commits
+and the orchestrator's application of its rules patch), as the brief set
+them out with Codex's and Argon's binding notes; worker b613 on legion0
+(Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`, umask 022),
+fast-forwarded to b085f5e0 first. Commits: seams 7fcd3f21 (which change
+nothing), red a45bbc00, fix b2d7a744, the no-locks warning's words 4dddb827,
+the reinstall's test moved off Windows 5249bd49, then this record. The rules
+are a new bullet after round 3's in
+`.claude/rules/config-lifecycle.md`, edits to the settings-check bullet
+there, and its lines in `cli-serve.md` and `scanner.md`, shipped as a checked
+patch with the report (this worker cannot write `.claude/`); the long form is
+round 4's section of `ops/History-rules-config-lifecycle.md`, where round 3's
+renamed symbols are corrected too. Two decisions were the brief's: the
+no-lock exception stays narrow (only a filesystem that keeps no locks lets a
+disarm go on unlocked; the early rollback and now the boot's housekeeping
+refuse there; contention, ENOLCK and every other failure refuse), and the
+barrier stays on every start, the readability it needs said plainly in the
+runbook.
+
+**What changed.**
+1. *The veto outlives the record* (P1). Round 3's migrating open refused
+   only while the marker was the early rollback's record of its version;
+   the previous version's first start clears that record's install at its
+   housekeeping (`BootRollbackFinished`, `ClearInstall`), keeping the hold
+   alone, so a command of the rolled-back version still running from its
+   image migrated the store past the version put back. `State.MigrationVeto`
+   names the version: the record carries it (`RollbackRecord`), every clear
+   keeps it (`ClearInstall`), so does a refusal recorded since
+   (`recordRejection`), a store open of that version refuses with
+   `ErrMigrationVetoed` holding the lock or not (`disarmHeld`,
+   `disarmUnlocked`), and only that version's serve admission lifts it
+   (`AdmitBoot`, `DisarmResult.VetoLifted`, in one write with its record),
+   or a reinstall's fresh marker. `MigrationVetoed` and `ErrMigrationVetoed`
+   replace round 3's `RollbackUnderWay` and `ErrRollbackUnderWay`.
+2. *The boot's housekeeping under the lock* (Argon's High).
+   `bootHousekeeping` (what `maybeRollbackOnBoot` runs, as a version of a
+   test's choosing) takes `update-state.lock` before its read, after the
+   store's open has let the ladder go, and holds it through the decision,
+   its writes and the backup's rename or removal; a lock it cannot hold for
+   any reason, a filesystem that keeps none included, leaves the marker and
+   both binaries as they are. `BootInstallFailed` records the veto of the
+   install's version durably before its rename, and a veto it cannot record
+   leaves the install as it is. A marker that asks nothing of the boot asks
+   for no lock.
+3. *A stop in the lock's wait* (Medium). `LockState` takes its caller's
+   context: the wait ends with it, returning the context's error and never a
+   `*StateLockError`, and keeps its 30 s bound (`sleepUnlessDone`). The
+   callers that pass serve's own: its admission, which returns the stop as it
+   is (`disarm` sends only a `*StateLockError` down the unlocked path), and
+   runServe then exits 0 with nothing written; its early rollback, which
+   leaves the install and says it was stopped; its housekeeping, which
+   leaves the marker. A store's open has no context, and
+   `DisarmBeforeMigrating` keeps the bound alone.
+4. *The confirmation on the install's own record* (Medium).
+   `ConfirmOverRollback` returns an error, and the record as it was, unless
+   `DataDirOpenedBy` names the install's version and the version confirming
+   is it; the housekeeping then leaves the marker as it is and says why.
+5. *The runbook* (P2). The advice to remove `update-state.json` by hand to
+   get past a failing barrier is gone: it never helped, since the barrier is
+   the data dir's and a start with no marker runs it too, and the marker
+   holds the rollback's record and the veto. In its place: repair the
+   storage or its permissions, or move the data dir; and plainly, the
+   barrier runs at every start, so a data dir the service's user can write
+   and not read refuses every start. The veto, its lift, the housekeeping's
+   lock and the no-locks consequences are described.
+6. *A store genuinely older* (P3). The restart fixture set `user_version`
+   back on a store this build made, so v60's columns and index were there
+   before the restart. `manifest.WriteDatabaseAtVersionForTest` (the ladder
+   test's helper, moved to a non-test file) writes the store a ladder ending
+   one step short leaves, and the restart test asserts v60's two columns and
+   its index absent before the restart and present after.
+
+**Decisions of this round.** The veto is keyed on the rolled-back version,
+not on anything newer than the version put back: the processes still
+running from a replaced image are that version's, a newer one arrives only
+by an install, and an exact name needs no ordering of development builds.
+The boot rollback vetoes the marker's `TargetVersion`, never the running
+version, which in the one case where its restore replaces nothing new is
+the backup's own. The housekeeping refuses on a filesystem that keeps no
+locks, as Argon's note asked (Codex's asked it of the swap): there an
+install is no longer stamped installed
+and `.bak` stays, where round 3 ran the housekeeping unlocked. The
+housekeeping's read before the lock (a marker asking nothing takes no lock)
+keeps an ordinary start on such a filesystem free of a line and a wait; the
+decision is the read under the lock. A stop in the early rollback's wait
+exits 2, the refused settings' code as for any rollback not made.
+`Updater.Install` and `Updater.Rollback` stay outside the lock (Codex's
+audit; the long form says why and what is left).
+
+**Red first** (a45bbc00, on the seams; the full list in its message):
+- internal/updater: `TestTheMigrationVetoOutlivesTheRollbacksHousekeeping`
+  (the record without a veto), the lift's test, now
+  `TestOnlyTheVetoedVersionsOwnStartLiftsTheVeto` (4 rows: nothing lifted,
+  and nothing refused without the lock),
+  `TestADisarmStoppedInItsWaitReturnsTheStop` (2: the unlocked disarm's
+  answer after the bound), `TestTheMarkersLockWaitEndsWithItsCallersContext`
+  (the bound's refusal after a stop) and
+  `TestTheConfirmationNeedsTheInstallsOwnRecordOfTheDataDir` (3); the
+  lift test's reinstall row green, a guard, which 5249bd49 made a test of its
+  own, `TestANewInstallsMarkerCarriesNoVeto`, off Windows as every install
+  test (the round's Windows vet caught it calling a fixture built off
+  Windows alone).
+- cmd/bridge: the later arrival,
+  `TestALaterCommandOfTheVersionRolledBackRefusesToMigrateOnceThePreviousVersionBoots`
+  (the command migrated); `TestAMigrationThatHoldsTheMarkersLockFirstStopsTheBootRollback`
+  and `TestABootRollbackThatHoldsTheMarkersLockFirstStopsTheMigration` (no
+  wait either way); `TestTheBootLeavesTheInstallWhereItCannotHoldTheMarkersLock`
+  (4, each restored); `TestAStopWhileServeWaitsForTheMarkersLockEndsTheStartThere`
+  (3: serve booted and wrote its store, tokens and certificate after the
+  stop; the rollback said the lock could not be taken; the housekeeping
+  restored without waiting); `TestTheBootConfirmsAnInterruptedRollbackOnlyOnTheInstallsOwnRecord`;
+  and the changed expectations, `TestATargetWhoseSettingsAreFixedConfirmsAnInterruptedRollback`
+  (2: v60 there before the restart, the veto after the confirmation),
+  `TestAPatchedPreviousVersionKeepsTheHoldOfARollbackThatFinished`,
+  `TestTheBootKeepsARecordedHoldWhereItClearsAnInstall` (its restore row),
+  `TestTheHoldIsRecordedBeforeTheBackupIsPutBack` and
+  `TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings` (8).
+
+**Negative controls**, each alone on the committed fix, predicted by test and
+subtest, observed exactly, put back with `git checkout --` and the tree clean
+after each (`.tmp/_b613/mutate_r4.py` holds the replacements,
+`controls_r4.py` the runs: internal/updater whole, internal/manifest's store
+opens, cmd/bridge's B613 tests):
+
+| # | Mutation | Predicted and observed red |
+|---|---|---|
+| N1 | the clear drops the veto | 6 tests, 4 subtests: the updater's two veto tests (3 rows of the lift), the later arrival, the patched previous version, the hold test's restore row, and the boot rollback holding the lock first |
+| N2 | a migration without the lock asks no veto | 1 test, its unlocked row |
+| N3 | the vetoed version's admission never lifts | 4 tests, 6 subtests: the lift's 3 rows, round 3's after-admission row, the later arrival, the fixed-settings restart (2) |
+| N4 | the housekeeping takes no lock | 4 tests, 5 subtests: both interleavings, the 4 refusals, the stop's housekeeping row |
+| N5 | the boot rollback records no veto | 2 tests, 1 subtest: the boot rollback holding the lock first, the hold test's restore row |
+| N6 | the wait ignores its context | 3 tests, 5 subtests: the lock's own, the admission's 2, serve's 3 |
+| N7 | a stop falls through to the unlocked disarm | 2 tests, 2 subtests: no install armed, in the updater and in serve |
+| N8 | the confirmation asks nothing of the record | 2 tests, 3 subtests |
+| N9 | the older store set back from a latest one | 2 tests, 2 subtests: the fixed-settings restart (2) and the later arrival |
+
+**Checks.** On legion0 (Ubuntu 26.04, linux/amd64, go1.27.3,
+`GOTOOLCHAIN=local`, umask 022, TMPDIR on disk), each through the shared
+build lock:
+- `go test -race -count=1 -timeout 90m`, one package at a time, at 4dddb827
+  with this record in the tree: internal/updater ok (25 s),
+  internal/manifest ok (1,292 s), cmd/bridge ok (875 s); internal/updater
+  again at 5249bd49, ok (23 s).
+- `make test-fast` (every package, no race) at 4dddb827 and again at
+  5249bd49: 80 packages ok, none failed, 13 with no tests (443 s, 438 s),
+  the Linux-only ones among them (internal/alsa, alsapcm, atomicwrite's
+  durable writer, backup's identity paths, the player's binding and
+  hotplug), and the cmd/bridge sweeps over the tracked docs, this record
+  included.
+- `make vet`: clean. `GOOS=windows go vet ./...` failed at 4dddb827, the
+  lift test's reinstall row calling `newInstallFixture`, which install_test.go
+  builds off Windows alone, and is clean at 5249bd49; darwin/arm64's vet of
+  the three touched packages and linux/arm64's of internal/updater and
+  cmd/bridge: clean. `make build-all`, the six targets: ok. go1.27.3's gofmt
+  on every changed Go file: clean. `make docs-check`: ok.
+- The rules patch, checked with the strict applier against this tree and
+  measured in place with the budget script's own functions:
+  config-lifecycle.md 96,370 bytes (96.4 %), cli-serve.md 34,107, scanner.md
+  27,662, the heaviest load 304,987 bytes (63.5 %), and all 207 test names it
+  and the long form cite declared.
+- Not run here: macOS and Windows natively, whose builds and vets alone ran.
+
+**For the owner.**
+- The no-locks call: on a filesystem that keeps no locks the housekeeping
+  no longer runs, so an install there stays unstamped and keeps `.bak`.
+- The residuals the long form names: `bridge update`'s install and the
+  console's rollback write the marker outside the lock; a disarm still
+  removes a marker it cannot read, a veto with it, and a malformed marker
+  reads as none; a serve of the vetoed version started from its image
+  before the rename, whose settings load once it takes the data dir, counts
+  as its admission. No backlog entry was written: the backlog file is not on
+  this host.
+- The qualification version is the orchestrator's at merge (internal/manifest
+  is a guarded prefix).

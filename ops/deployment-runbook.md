@@ -774,13 +774,25 @@ the backup's version, no version recorded over it, so a record older than
 6 h is left as it is). If the settings are fixed before that start, the new
 version starts instead, confirms the install (the marker then shows
 `"status": "installed"`, and `.bak` is removed at the start after), and the
-rollback is over. While the record stands and no start has gone on past
-it, a command of the new version that would migrate the store
-(`bridge doctor`, `bridge scan`, …) refuses its open (`open manifest store: …
-a rollback of this version's install is under way …`): start `bridge serve`.
-The rollback and those commands take `<dataDir>/update-state.lock` in turn,
-so one waits up to 30 s for the other; leave that file where it is (it is
-never removed, and only the lock on it means anything).
+rollback is over. From the record on, the new version's store migrations
+are vetoed (`"migrationVeto"` in the marker), and the veto outlives the
+record, which the previous version's first start clears: a command of the
+new version that would migrate the store (`bridge doctor`, `bridge scan`,
+…), one still running from the new binary after the rollback included,
+refuses its open (`open manifest store: … this version's store migrations
+are vetoed: …`), while the previous version's own commands and starts are
+not refused. A start of the new version's `bridge serve` on settings it
+loads lifts the veto (`updater: … the veto of its store migrations that a
+rollback left is lifted`), and so does a new install. A boot rollback, a
+start that came up as another version than the one installed, vetoes the
+installed version's migrations the same way before it puts `.bak` back.
+The rollback, those commands and every start's housekeeping of the marker
+take `<dataDir>/update-state.lock` in turn, so one waits up to 30 s for the
+other (a stop ends a start's wait at once); leave that file where it is (it
+is never removed, and only the lock on it means anything). A start's
+housekeeping that cannot hold that lock leaves the marker and both binaries
+as they are (`updater: not acting on the install marker at this start, …`)
+for a later start.
 Where it does not act it says why on an `updater: not rolling back the
 install of …` line (no backup, a backup of another version, a marker older
 than 6 h or dated in the future, another process on the data dir or the
@@ -811,12 +823,22 @@ rollback past what the new version's first start wrote. Any other failure
 of that fsync (EIO, ENOSPC, EDQUOT, a permission or read-only error) or of
 the data dir's open or close fails the marker's write (`sync the data dir
 after writing the update marker: …`, or `… may not outlive a power loss: …`
-at a start), and every start that needs the marker refuses until the
-barrier answers: fix the filesystem (a data dir this user can write but
-not read is one), or, to start the installed version as it is, remove
-`<dataDir>/update-state.json` by hand, which gives up the rollback to the
-backup. On a filesystem that keeps no locks the early rollback does not run
-(said once in the journal) and the rest goes on.
+at a start), and `bridge serve` does not start until the barrier answers.
+**The barrier runs at every start**, whether an install is armed or not,
+and at every store open that migrates, so the data dir must be readable as
+well as writable by the service's user: one it can write and not read (mode
+0300, say) refuses every start. To get past a barrier that fails, repair
+the storage or its permissions (the data dir `rwx` for the service's user,
+owned by it, its filesystem mounted read-write and healthy), or move the
+data dir to storage that works (`dataDir` in bridge.yaml, or
+`BRIDGE_DATA_DIR`, with the data dir's files moved with it). Don't remove
+`<dataDir>/update-state.json` to get past it: the barrier is the data
+dir's, so a start without the marker refuses the same way, and the marker
+holds a rollback's record and the veto of a rolled-back version's store
+migrations. On a filesystem that keeps no locks neither the early rollback
+nor a start's housekeeping of the marker runs (said in the journal): an
+install there is not stamped installed and its `.bak` stays until the data
+dir is on a filesystem that keeps locks, and the rest goes on.
 
 ## After a deploy: expect iOS syncs to quietly defer
 
