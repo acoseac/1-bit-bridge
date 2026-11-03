@@ -11,7 +11,7 @@ import (
 
 // errMsgForeignHost is ownHostOnly's refusal body.
 const errMsgForeignHost = "dlna refused: this server answers only to its own addresses " +
-	"(the address in its SSDP LOCATION, or another address of this host)"
+	"(the address in its SSDP LOCATION, or another private or link-local address of this host)"
 
 // hostRefusedSeenCap bounds the set noteForeignHost logs from. A renderer
 // that sends a name it was never given is one entry; a page that rebinds a
@@ -83,13 +83,13 @@ func foldHostName(host string) string {
 // That is a Browse of the whole library and a GET of any file, from a page
 // on the internet. The name is what gives it away: the browser sends it in
 // Host, and nothing the page can do changes that. It is also what the
-// ContentDirectory builds every `<res>` and albumArtURI from, so an
+// wildcard ContentDirectory builds every `<res>` and albumArtURI from, so an
 // unchecked Host was handed back as the URL of every track.
 //
 // What passes, with any port or none:
 //
 //   - an EMPTY Host: every browser sends one, and an HTTP/1.0 renderer may
-//     not (the ContentDirectory then builds its URLs on ServerURL);
+//     not (a wildcard uses ServerURL; a bound listener uses its address);
 //   - "localhost" and a loopback literal;
 //   - the host of a LOCATION this server advertises, of its ServerURL, or of
 //     a listen address pinned to one host, name or literal (knownOwnHosts):
@@ -100,8 +100,16 @@ func foldHostName(host string) string {
 //     connection on every one, and an address that came up after Start is
 //     one too. The connection itself was accepted on an address the
 //     server serves (servedOnlyListener, backlog B48), so this judges only
-//     the name the request used: a LAN client that names this host's
-//     tailnet address is answered, over the LAN.
+//     the name the request used.
+//
+// A literal of either kind passes only when it is an address the listener
+// may serve (mayName, B687): of a LAN class (IsLANClassAddress), or the
+// public address dlna.listenAddress pins. This host's other addresses, a
+// public one, a SLAAC one, the tailnet's, are refused though the host holds
+// them: the ContentDirectory builds its URLs on the Host, so a request over
+// a LAN connection that named one was answered with the library's URLs on
+// an address anyone who can route to it could use, and a LAN client that
+// named the tailnet's was answered until then too.
 //
 // A NAME not in that list is refused, this host's own included. A
 // rebinding page's name is exactly such a name, and a name cannot be judged
@@ -109,7 +117,8 @@ func foldHostName(host string) string {
 // control point pointed at this server by a name by hand, or the iOS app's
 // fallback that composes a renderer URL on the paired host when
 // /v1/health.endpoints names no RFC 1918 address (BridgeDLNAURLResolver):
-// both must use an address.
+// both must use an address, of a LAN class unless dlna.listenAddress pins
+// it.
 func (s *Server) ownHostOnly(next http.Handler) http.Handler {
 	known := s.knownOwnHosts()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -146,24 +155,29 @@ func (s *Server) hostIsOwn(hostport string, known ownHosts) bool {
 	if a.IsLoopback() {
 		return true
 	}
+	if !s.mayName(a) {
+		return false
+	}
 	if _, ok := known.addrs[a]; ok {
 		return true
 	}
-	if a.IsUnspecified() {
-		return false
-	}
 	return s.isInterfaceAddr(a)
+}
+
+// mayName reports whether a Host literal may name the address a (unmapped,
+// without a zone) at all: an address of a class the listener serves on its
+// members (IsLANClassAddress), or the public address dlna.listenAddress pins
+// (Server.pin, B687). No other address is one the listener serves, and the
+// unspecified one is none of these.
+func (s *Server) mayName(a netip.Addr) bool {
+	return IsLANClassAddress(a) || (s.pin.IsValid() && a == s.pin)
 }
 
 // isInterfaceAddr reports whether a is assigned to one of this host's
 // interfaces now. Asked only for a literal the configuration did not
 // name, so a renderer on the advertised address never pays for it.
 func (s *Server) isInterfaceAddr(a netip.Addr) bool {
-	list := s.interfaceAddrs
-	if list == nil {
-		list = net.InterfaceAddrs
-	}
-	addrs, err := list()
+	addrs, err := s.hostAddrs()
 	if err != nil {
 		return false
 	}
@@ -183,6 +197,36 @@ func (s *Server) isInterfaceAddr(a netip.Addr) bool {
 		}
 	}
 	return false
+}
+
+// hostAddrs lists every address of this host's interfaces: through the
+// per-server seam a test sets (interfaceAddrs), else through the inventory
+// the server's configuration stands in for the host's
+// (ServerConfig.Interfaces and InterfaceAddresses, a boot test's host, which
+// the served addresses read too), else net.InterfaceAddrs. An interface
+// whose addresses cannot be read adds none.
+func (s *Server) hostAddrs() ([]net.Addr, error) {
+	if s.interfaceAddrs != nil {
+		return s.interfaceAddrs()
+	}
+	if s.cfg.Interfaces == nil {
+		return net.InterfaceAddrs()
+	}
+	ifaces, err := s.cfg.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	addrsOf := s.cfg.InterfaceAddresses
+	if addrsOf == nil {
+		addrsOf = hostInterfaceAddrs
+	}
+	var out []net.Addr
+	for i := range ifaces {
+		if addrs, err := addrsOf(&ifaces[i]); err == nil {
+			out = append(out, addrs...)
+		}
+	}
+	return out, nil
 }
 
 // noteForeignHost logs a Host ownHostOnly refused, once per name (bounded
@@ -214,4 +258,34 @@ func (s *Server) noteForeignHost(hostport string) {
 		slog.String("host", name),
 		slog.String("hint", "the DLNA listener answers only to this host's addresses; "+
 			"point a control point or renderer at the address in its SSDP LOCATION"))
+}
+
+// serverURLFunc captures a specific listener's actual bound address and port
+// for both file and artwork URLs. A name dlna.listenAddress pins keeps its
+// name, as the SSDP LOCATION announces it, on the port the listener bound;
+// an IP literal is the bound address itself. The Host guard still runs first:
+// accepting an empty Host, localhost or another own LAN address does not mean
+// a bound listener serves that authority. A wildcard keeps the request's Host
+// so renderers on different subnets get URLs on the interface they reached.
+func (s *Server) serverURLFunc(bound net.Addr) func(*http.Request) string {
+	if a := netAddrIP(bound).Unmap(); a.IsValid() && !a.IsUnspecified() {
+		authority := bound.String()
+		if host, _, err := net.SplitHostPort(s.cfg.ListenAddress); err == nil && host != "" {
+			if _, literalErr := netip.ParseAddr(host); literalErr != nil {
+				if _, port, portErr := net.SplitHostPort(authority); portErr == nil {
+					authority = net.JoinHostPort(host, port)
+				}
+			}
+		}
+		base := (&url.URL{Scheme: "http", Host: authority}).String()
+		return func(*http.Request) string { return base }
+	}
+	return func(r *http.Request) string {
+		// Keep the URL-injection guard beside the Host check. An empty
+		// Host (an HTTP/1.0 renderer) falls back to the configured URL.
+		if r.Host != "" && !strings.ContainsAny(r.Host, "/\\?#") {
+			return "http://" + r.Host
+		}
+		return s.cfg.ServerURL
+	}
 }

@@ -61,7 +61,7 @@ func Test_NewServer_RequiresConfigFields(t *testing.T) {
 
 func Test_NewServer_ReturnsServerForValidConfig(t *testing.T) {
 	s, err := NewServer(ServerConfig{
-		Library: newTestLib(), UDN: "uuid:x", ListenAddress: ":0", ServerURL: "http://x",
+		Library: newTestLib(), UDN: "uuid:x", ListenAddress: ":0", ServerURL: "http://127.0.0.1",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -212,7 +212,7 @@ func failedStartServer(t *testing.T, udn string) *Server {
 
 func Test_Server_StopBeforeStartIsSafe(t *testing.T) {
 	s, err := NewServer(ServerConfig{
-		Library: newTestLib(), UDN: "uuid:x", ListenAddress: ":0", ServerURL: "http://x",
+		Library: newTestLib(), UDN: "uuid:x", ListenAddress: ":0", ServerURL: "http://127.0.0.1",
 	})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)

@@ -12,8 +12,8 @@ import (
 
 // The refusal lines servedAddrs logs, as noteRefused writes them.
 const (
-	connectionRefusedLine = "DLNA refused a connection to an address it does not serve: it answers only on the LAN-eligible interfaces"
-	msearchRefusedLine    = "DLNA refused an M-SEARCH to an address it does not serve: it answers only on the LAN-eligible interfaces"
+	connectionRefusedLine = "DLNA refused a connection to an address it does not serve: it answers only on the private and link-local addresses of the LAN-eligible interfaces"
+	msearchRefusedLine    = "DLNA refused an M-SEARCH to an address it does not serve: it answers only on the private and link-local addresses of the LAN-eligible interfaces"
 )
 
 // peerConn is a connection a test hands servedOnlyListener: its two ends,

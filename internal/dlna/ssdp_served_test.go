@@ -136,8 +136,11 @@ func TestEveryAdvertiserAnswersByTheServersServedAddrs(t *testing.T) {
 	if a, ok := s.ssdpHandle.admission.(ssdpServedAdmission); !ok || a.served != s.served {
 		t.Errorf("the MediaServer's SSDP registration answers by %#v, not the server's servedAddrs", s.ssdpHandle.admission)
 	}
-	if _, ok := s.served.advertised[netipAddrOfURL(t, s.cfg.ServerURL)]; !ok {
-		t.Errorf("the server's own address (%s) is not among what it advertises: %v", s.cfg.ServerURL, s.served.advertised)
+	if own := netipAddrOfURL(t, s.cfg.ServerURL); !s.served.serves(own) {
+		t.Errorf("the server's own address (%s) is not among what it serves", s.cfg.ServerURL)
+	}
+	if s.served.pinned.IsValid() {
+		t.Errorf("a listener pinned to loopback serves a public address at the operator's word: %s", s.served.pinned)
 	}
 }
 

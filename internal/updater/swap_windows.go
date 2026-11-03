@@ -163,6 +163,10 @@ func swapBinary(dst, newBinary, backupExt string, markSwapStarted func() error) 
 	return nil
 }
 
+// installedMode is the permission bits a staged binary takes: none, since
+// NTFS has no executable bit to set (stageIntoDir's mode 0).
+func installedMode(string) os.FileMode { return 0 }
+
 // scmStopHandle bundles the SCM connection + service handle the
 // caller needs to keep alive across the rename + restart pair.
 // The defer in swapBinary closes both — operators don't see this

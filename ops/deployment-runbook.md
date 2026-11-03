@@ -729,6 +729,117 @@ Grep mechanics that cost time to learn:
   access logger) — absence of those lines is not evidence a renderer
   didn't fetch.
 
+## A self-update the new version refuses (backlog B613)
+
+From the release that carries B613, the updater asks a downloaded,
+verified candidate whether it loads this bridge's settings before it swaps
+anything: `<candidate> serve --validate-config --config <bridge.yaml>`, run
+from beside the installed binary, which writes nothing. What each answer
+does:
+
+- **Refused** (exit 78): nothing is installed, by the console, `bridge
+  update` or the auto-installer, and the running bridge is unchanged. The
+  console's install answers 409 `config-refused` and names each refused line
+  ("0.2.3 refuses this bridge's settings, so it was not installed: line 12:
+  a whole number is written with a leading zero, …"); `bridge update` prints
+  the same and the file to fix; the journal has one Warn
+  `the new version refuses this bridge's settings; it was not installed`.
+  `update-state.json` records `rejectedVersion`, `rejectedReason` and
+  `rejectedConfigDigest`, and the Updates panel's "Held update" row shows the
+  reason. The auto-installer holds that version (and older) back while the
+  settings are unchanged; **fix the line, and it is tried again at the next
+  poll**, as it is at once by "Install" or `bridge update`. A newer release
+  is always tried. The digest covers `bridge.yaml`'s bytes and every
+  `BRIDGE_` variable, so a unit's environment change counts too.
+- **Predates the check** (a release without the flag): the auto-installer
+  holds it back for good (`rejectedReason` says so) and installs the next
+  release; "Install" or `bridge update` takes it, with a warning, and with
+  no check.
+- **No answer** (a timeout of 30 s, a crash, another code): nothing is
+  installed and nothing recorded; the journal's Warn has the candidate's
+  output; the next attempt asks again.
+
+**An install an older updater made (0.2.1, 0.2.2) is rolled back at its first
+start when the new version refuses the settings.** Its serve prints the
+refusal, then, when the marker is a recent install of this version over
+another and the backup beside the binary reports that other version, records
+the new version as held back (the marker then shows `"rollbackStarted": true`
+and no status), puts the backup back, and exits 75 for the service manager to
+start the previous binary:
+`updater: 0.2.3 refuses this bridge's settings, so the install is rolled back: 0.2.2 is back at /…/bridge and 0.2.3 is held back …`.
+The settings are untouched: fix them, then update again. A start stopped
+between the record and the rename finishes the rollback at the next start
+whose settings are still refused (only on the same proof: recent, swapped,
+the backup's version, no version recorded over it, so a record older than
+6 h is left as it is). If the settings are fixed before that start, the new
+version starts instead, confirms the install (the marker then shows
+`"status": "installed"`, and `.bak` is removed at the start after), and the
+rollback is over. From the record on, the new version's store migrations
+are vetoed (`"migrationVeto"` in the marker), and the veto outlives the
+record, which the previous version's first start clears: a command of the
+new version that would migrate the store (`bridge doctor`, `bridge scan`,
+…), one still running from the new binary after the rollback included,
+refuses its open (`open manifest store: … this version's store migrations
+are vetoed: …`), while the previous version's own commands and starts are
+not refused. A start of the new version's `bridge serve` on settings it
+loads lifts the veto (`updater: … the veto of its store migrations that a
+rollback left is lifted`), and so does a new install. A boot rollback, a
+start that came up as another version than the one installed, vetoes the
+installed version's migrations the same way before it puts `.bak` back.
+The rollback, those commands and every start's housekeeping of the marker
+take `<dataDir>/update-state.lock` in turn, so one waits up to 30 s for the
+other (a stop ends a start's wait at once); leave that file where it is (it
+is never removed, and only the lock on it means anything). A start's
+housekeeping that cannot hold that lock leaves the marker and both binaries
+as they are (`updater: not acting on the install marker at this start, …`)
+for a later start.
+Where it does not act it says why on an `updater: not rolling back the
+install of …` line (no backup, a backup of another version, a marker older
+than 6 h or dated in the future, another process on the data dir or the
+install marker's lock, the hold could not be recorded, or this version
+already opened the data dir once, by a serve that got past its settings or
+by any command whose store open migrated the database, `bridge doctor` and
+`bridge manifest clear-missing` among them, whose store a rollback could
+downgrade), and serve refuses as it always did. The previous binary
+restored is the old code: a 0.2.1 or 0.2.2 shows only that the version "was
+rolled back", reads the record's empty status as nothing to do, and holds
+the version until a newer release, whatever the settings, so fixing them
+does not release its hold (a known limit: `bridge update` installs it by
+hand once they are fixed); a release with this round clears the install
+from the record at its start and keeps the hold, which then follows the
+settings' digest. To see what is recorded: `cat <dataDir>/update-state.json`.
+
+**A data dir whose filesystem cannot fsync a directory.** Linux's NFS and
+CIFS/SMB clients treat a directory's fsync as a successful no-op, and its
+FUSE turns a filesystem's unimplemented FSYNCDIR into success, so those
+data dirs see nothing new. A filesystem that answers the fsync with EINVAL,
+ENOTSUP or EOPNOTSUPP (a FUSE daemon or a network filesystem on another
+kernel, a filesystem with no directory fsync) is taken as one that cannot:
+the journal says so once a process (`the data dir's filesystem cannot fsync
+a directory …`, with the errno), nothing is refused, and the marker's
+writes there are atomic but not durable: a power cut soon after an update
+can bring back the marker as it was before its last write, and with it a
+rollback past what the new version's first start wrote. Any other failure
+of that fsync (EIO, ENOSPC, EDQUOT, a permission or read-only error) or of
+the data dir's open or close fails the marker's write (`sync the data dir
+after writing the update marker: …`, or `… may not outlive a power loss: …`
+at a start), and `bridge serve` does not start until the barrier answers.
+**The barrier runs at every start**, whether an install is armed or not,
+and at every store open that migrates, so the data dir must be readable as
+well as writable by the service's user: one it can write and not read (mode
+0300, say) refuses every start. To get past a barrier that fails, repair
+the storage or its permissions (the data dir `rwx` for the service's user,
+owned by it, its filesystem mounted read-write and healthy), or move the
+data dir to storage that works (`dataDir` in bridge.yaml, or
+`BRIDGE_DATA_DIR`, with the data dir's files moved with it). Don't remove
+`<dataDir>/update-state.json` to get past it: the barrier is the data
+dir's, so a start without the marker refuses the same way, and the marker
+holds a rollback's record and the veto of a rolled-back version's store
+migrations. On a filesystem that keeps no locks neither the early rollback
+nor a start's housekeeping of the marker runs (said in the journal): an
+install there is not stamped installed and its `.bak` stays until the data
+dir is on a filesystem that keeps locks, and the rest goes on.
+
 ## After a deploy: expect iOS syncs to quietly defer
 
 **The v0.1.8 → v0.1.9 upgrade runs TWO one-time backfills, and they compound.**

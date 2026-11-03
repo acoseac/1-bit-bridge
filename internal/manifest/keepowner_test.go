@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
+	"github.com/acoseac/1-bit-bridge/internal/updater"
 )
 
 // TestOpenStoreAsRootKeepsTheInstallOwner pins that a store OpenStore
@@ -45,6 +46,9 @@ func TestOpenStoreAsRootKeepsTheInstallOwner(t *testing.T) {
 		// The migration lock beside it (backlog B185): left root's, the
 		// service could not open it again.
 		{Dst: path + ladderLockSuffix, UID: 4242, GID: 4243},
+		// The install marker's lock, which the open's disarm takes before
+		// its first migration step (backlog B613's round 3), likewise.
+		{Dst: updater.StateLockPath(dir), UID: 4242, GID: 4243},
 	}
 	got := changes()
 	if len(got) != len(want) {

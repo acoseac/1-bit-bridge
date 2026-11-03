@@ -46,6 +46,16 @@ type installFixture struct {
 
 func newInstallFixture(t *testing.T, latestVersion string) *installFixture {
 	t.Helper()
+	// The archive holds one file named "bridge" whose contents identify
+	// the version. The post-swap test reads the live binary and compares
+	// against this body.
+	return newInstallFixtureWith(t, latestVersion, []byte("bridge-binary-"+latestVersion))
+}
+
+// newInstallFixtureWith is newInstallFixture with the archive's "bridge"
+// holding binaryBody: a candidate that runs, for the settings check.
+func newInstallFixtureWith(t *testing.T, latestVersion string, binaryBody []byte) *installFixture {
+	t.Helper()
 	osName := runtime.GOOS
 	if osName == "darwin" {
 		osName = "macos"
@@ -53,10 +63,6 @@ func newInstallFixture(t *testing.T, latestVersion string) *installFixture {
 	archiveName := fmt.Sprintf("1-bit-bridge_%s_%s_%s.tar.gz",
 		latestVersion, osName, runtime.GOARCH)
 
-	// Build the tar.gz containing one file named "bridge" whose
-	// contents identify the version. The post-swap test reads the
-	// live binary and compares against this body.
-	binaryBody := []byte("bridge-binary-" + latestVersion)
 	var tarBuf bytes.Buffer
 	gz := gzip.NewWriter(&tarBuf)
 	tw := tar.NewWriter(gz)

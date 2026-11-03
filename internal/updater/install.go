@@ -67,6 +67,21 @@ type InstallOptions struct {
 	// who flip it accept the orphan-on-purpose UX (older devices
 	// must update before they reconnect).
 	OverrideCompatGate bool
+
+	// ConfigPath is the settings file the running bridge loaded, which
+	// the candidate is checked against before the swap. Every production
+	// caller names it: the console's install, the automatic one and
+	// `bridge update`. Empty skips the check.
+	ConfigPath string
+
+	// Automatic marks the auto-installer's install, which maybeAutoInstall
+	// sets on its copy. A candidate that predates the settings check is
+	// held back from it, and installed with a warning by hand.
+	Automatic bool
+
+	// ConfigCheck overrides the candidate's settings check (CheckConfig).
+	// Production leaves it nil; a test stands in for a candidate.
+	ConfigCheck func(ctx context.Context, candidate, configPath string) ConfigCheck
 }
 
 // Install downloads, verifies, swaps, and arms the rollback marker
@@ -306,6 +321,30 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 		return status, fmt.Errorf("verify: %w", err)
 	}
 
+	// The candidate's settings check (backlog B613), once it is verified
+	// and before anything is armed. A version that refuses this bridge's
+	// settings exits at their load at its first start, before the boot
+	// rollback runs, and its service manager starts it again and again;
+	// the check asks it first, through its own loader, so a tightening of
+	// any setting (B528's fraction, B533's leading zero, or the next one)
+	// keeps the binary where it is.
+	candidate := extracted
+	if opts.ConfigPath != "" {
+		staged, err := stageForCheck(extracted, opts.BinaryPath)
+		if err != nil {
+			return status, fmt.Errorf("stage the candidate for its settings check: %w", err)
+		}
+		// Gone once the swap has moved it into place; removed here on
+		// every other way out.
+		defer func() { _ = os.Remove(staged) }()
+		warning, err := u.checkCandidate(ctx, opts, staged, status.LatestVersion)
+		if err != nil {
+			return status, err
+		}
+		status.InstallWarning = warning
+		candidate = staged
+	}
+
 	// Marker first (see method-doc rationale). This is the boot
 	// contract: Status="installing" + TargetVersion → next boot
 	// expects to be running TargetVersion or rolls back.
@@ -334,7 +373,7 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 		state.SwapStarted = true
 		return SaveState(opts.DataDir, state)
 	}
-	if err := swapBinary(opts.BinaryPath, extracted, ".bak", markSwapStarted); err != nil {
+	if err := swapBinary(opts.BinaryPath, candidate, ".bak", markSwapStarted); err != nil {
 		// Swap failed — clear the marker so the next boot doesn't
 		// roll back something that didn't actually change.
 		_ = ClearState(opts.DataDir)
@@ -376,6 +415,20 @@ var (
 	// naming it: a second install re-downloads the same bytes and
 	// destroys the .bak the first one created.
 	ErrInstallPendingRestart = errors.New("this release is already installed and waiting for a restart; restart the bridge instead of installing again")
+	// ErrConfigRefused means the candidate's settings check refused this
+	// bridge's settings: it would not start with them, so it was not
+	// installed, and the refusal is recorded (State.RejectedReason). The
+	// remedy is the settings, which the error's reasons name by line.
+	ErrConfigRefused = errors.New("the new version refuses this bridge's settings")
+	// ErrConfigCheckFailed means the candidate's settings check did not
+	// answer (it could not run, ran past its time, or exited another
+	// way). Nothing was installed and nothing recorded: a later attempt
+	// checks again.
+	ErrConfigCheckFailed = errors.New("the new version could not check this bridge's settings")
+	// ErrConfigCheckUnsupported means the candidate predates the settings
+	// check. The auto-installer holds it back; a manual install takes it
+	// with a warning (Status.InstallWarning).
+	ErrConfigCheckUnsupported = errors.New("the new version predates the settings check")
 )
 
 // Rollback restores bridge.bak over the live binary. Used by the
@@ -435,6 +488,112 @@ func (u *Updater) Rollback(opts InstallOptions) error {
 		_ = ClearState(opts.DataDir)
 	}
 	return nil
+}
+
+// checkCandidate runs the staged candidate's settings check against the
+// settings the bridge loaded, and decides what the install does with its
+// answer (backlog B613):
+//
+//   - valid: the install goes on.
+//   - refused: nothing is installed, for a manual install as for an
+//     automatic one, since the candidate would not start with these
+//     settings; the refusal is recorded against a digest of them, which
+//     holds the version back from the auto-installer until they change.
+//   - unsupported, a candidate that predates the check: the auto-installer
+//     holds it back, recorded whatever the settings are; a manual install
+//     takes it, with a warning (the operator can always choose a version).
+//   - failed: nothing is installed and nothing recorded, so the next
+//     attempt checks again; a check the context stopped carries the
+//     cancellation, which the auto-installer does not count as a failure.
+func (u *Updater) checkCandidate(ctx context.Context, opts InstallOptions, staged, target string) (warning string, err error) {
+	check := opts.ConfigCheck
+	if check == nil {
+		check = CheckConfig
+	}
+	res := check(ctx, staged, opts.ConfigPath)
+	switch res.Verdict {
+	case ConfigValid:
+		return "", nil
+	case ConfigRefused:
+		logger.Warn("the new version refuses this bridge's settings; it was not installed",
+			"version", target, "reasons", strings.Join(res.Reasons, "; "))
+		recordHold(opts, target, refusedReason(target, res.Reasons), true)
+		return "", &holdError{sentinel: ErrConfigRefused,
+			reason: target + " refuses this bridge's settings, so it was not installed: " + reasonText(res.Reasons)}
+	case ConfigCheckUnsupported:
+		if !opts.Automatic {
+			logger.Warn("installing a version that predates the settings check, without it", "version", target)
+			return fmt.Sprintf("%s predates the settings check, so it was installed without one: "+
+				"if it refuses this bridge's settings it will not start until they are fixed", target), nil
+		}
+		reason := fmt.Sprintf("%s predates the settings check, so it cannot say whether it loads this bridge's settings "+
+			"and is not installed automatically: install it by hand to take it", target)
+		recordHold(opts, target, reason, false)
+		return "", &holdError{sentinel: ErrConfigCheckUnsupported, reason: reason}
+	}
+	if res.Err != nil {
+		return "", fmt.Errorf("%w: %w", ErrConfigCheckFailed, res.Err)
+	}
+	logger.Warn("the new version's settings check did not answer; nothing was installed",
+		"version", target, "detail", res.Detail, "output", res.Output)
+	return "", fmt.Errorf("%w: %s: %s; nothing was installed, and the bridge log has the check's output",
+		ErrConfigCheckFailed, target, res.Detail)
+}
+
+// holdError is the check's refusal, or a candidate the auto-installer holds
+// back because it predates the check: a sentence that says so and why, the
+// reason the console and `bridge update` show, matching its sentinel through
+// errors.Is.
+type holdError struct {
+	sentinel error
+	reason   string
+}
+
+func (e *holdError) Error() string { return e.reason }
+
+func (e *holdError) Unwrap() error { return e.sentinel }
+
+// RefusalReason is the reason err carries when it is the settings check's
+// refusal, or a hold of a candidate that predates the check.
+func RefusalReason(err error) (string, bool) {
+	var he *holdError
+	if errors.As(err, &he) {
+		return he.reason, true
+	}
+	return "", false
+}
+
+// refusedReason is the recorded reason a version refused the settings.
+func refusedReason(target string, reasons []string) string {
+	return target + " refuses this bridge's settings: " + reasonText(reasons)
+}
+
+// reasonText is a refusal's reasons on one line.
+func reasonText(reasons []string) string {
+	if len(reasons) == 0 {
+		return "it gave no reason"
+	}
+	return strings.Join(reasons, "; ")
+}
+
+// recordHold records target as held back for reason: against the digest
+// of the settings for a refusal of them, whatever the settings are
+// otherwise. A record that cannot be made is said and skipped: the install
+// is refused all the same, and the next attempt checks again.
+func recordHold(opts InstallOptions, target, reason string, onSettings bool) {
+	digest := ""
+	if onSettings {
+		d, err := ConfigDigest(opts.ConfigPath)
+		if err != nil {
+			logger.Warn("could not read the settings to hold the refused version back against; the next check asks again",
+				"version", target, "err", err)
+			return
+		}
+		digest = d
+	}
+	if err := recordRejection(opts.DataDir, target, reason, digest); err != nil {
+		logger.Warn("could not record the version held back; the next check asks again", "version", target, "err", err)
+	}
 }
 
 // swapAwaitingRestart reports whether a swap for `target` has ALREADY

@@ -107,6 +107,28 @@ libraryName: "My Music Library"
 #   #   openhome: false
 #   #   openhomePort: 7792
 
+# dlna: the bridge as a UPnP/DLNA MediaServer that renderers on the LAN
+#   (TVs, network players) find over SSDP and stream from, with no sign-in:
+#   a renderer cannot send a token, so reach is the only gate. Off by
+#   default; never on a public bridge.
+#
+# listenAddress: where its HTTP listener binds, ":7790" by default. With
+#   a wildcard it serves only this host's private (RFC 1918, an IPv6 ULA
+#   outside Tailscale's), link-local and loopback addresses, within the
+#   socket's address families: ":7790" and "[::]:7790" are dual-stack in Go;
+#   "0.0.0.0:7790" is IPv4-only, so cannot receive IPv6 ULA or ::1 traffic.
+#   Wildcard SSDP announcements name only IPv4 addresses. A public address
+#   on the same network interface is left out, whichever the OS lists
+#   first, and the log says
+#   so once. Write a public address here as an IP literal to serve it:
+#   the listener then serves that address alone, and anyone who can reach
+#   it (the internet, when it routes there) can browse and stream the
+#   library without signing in. A host name never opts in.
+# dlna:
+#   enabled: false
+#   # listenAddress: ":7790"
+#   # friendlyName: "1-bit Bridge"
+
 # deployment.mode: "loopback" (default) | "public"
 #
 # loopback (default): admin console binds 127.0.0.1, no auth — the
