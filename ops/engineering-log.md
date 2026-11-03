@@ -71059,7 +71059,29 @@ internal/admin's classification):
 | N17 | `scmStopWait` 20 s | 1 test |
 | N18 | serve's stop takes the lock | 1 test (cmd/bridge) |
 
-**Checks.** CHECKS-PENDING
+**Checks.** On legion0 (Ubuntu 26.04, linux/amd64, go1.27.3,
+`GOTOOLCHAIN=local`, umask 022, TMPDIR on disk under `.tmp/_b692`), each
+through the shared build lock, at 633c9e6e with this record in the tree:
+- `go test -race -count=1 -timeout 90m -tags
+  ts_omit_webclient,ts_omit_debugeventbus ./internal/updater/... ./cmd/bridge
+  ./internal/admin/...`: internal/updater ok (25 s), cmd/bridge ok (904 s),
+  internal/admin ok (920 s).
+- `make test-fast` (every package, no race): 80 packages ok, none failed, 14
+  with no test files; the Linux-only ones among them (internal/alsa, alsapcm,
+  atomicwrite's durable writer, backup's identity paths, the player's binding
+  and hotplug), and the cmd/bridge sweeps over the tracked docs, this record
+  included.
+- `make vet`, and `GOOS=windows go vet` of every package with the tags: clean.
+  `make build-all`, the six targets: ok. go1.27.3's gofmt on every changed Go
+  file: clean.
+- `make docs-check`: ok (config-lifecycle.md at 97.0 % as the tree stands);
+  with the rules patch, 98.0 %, measured by the budget script's own `measure`
+  and `report` over the patched copy, and `scripts/doc-split/verify_moves.py
+  --base main` passes over it, naming the three long-form edits.
+- The qualification-version check, `-base main -head HEAD` (this clone has no
+  `origin/main`; main is 4f44a926): OK, no raise.
+- Not run here: macOS and Windows natively, whose builds (and Windows' vet)
+  alone ran.
 
 **For the owner.**
 - PROTOCOL.md's Updates paragraph says a manual rollback via `POST
