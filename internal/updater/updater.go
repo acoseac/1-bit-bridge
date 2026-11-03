@@ -620,12 +620,21 @@ func rejectionBlocks(candidate, rejected string) bool {
 // downloads are inflight — logs and defers to the next poll cycle.
 // Shared by the pending-restart fast path and the tail of a fresh
 // install; the caller guarantees an install candidate is on disk.
+//
+// A stop is a stop (backlog B692's round 2): where ctx ends while the
+// restamp waits for the install marker's lock, or had ended before its
+// take, no restart is requested, which would turn the operator's or the
+// service manager's stop into supervision.RestartExitCode and a
+// supervisor's restart; the next start finds the install as it is.
 func (u *Updater) restartWhenDrained(ctx context.Context) {
 	if n := u.inflightSessions(); n > 0 {
 		logger.Info("auto-install restart deferred", "reason", activeDownloadsReason, "inflight", n)
 		return
 	}
-	u.refreshInstallAttemptedAt(ctx)
+	if err := u.refreshInstallAttemptedAt(ctx); err != nil {
+		logger.Info("auto-install restart not requested: the bridge is stopping")
+		return
+	}
 	logger.Info("auto-install complete; restarting to load new binary")
 	u.autoInstallRestart()
 }
@@ -649,31 +658,34 @@ func (u *Updater) restartWhenDrained(ctx context.Context) {
 // or a start's housekeeping cannot record in between and see its record
 // written over; where the lock cannot be held (another holder past the
 // wait, no lock to give, a failure, a filesystem that keeps none) the marker
-// is left as it is and the restart goes on, and a stop in the wait says
-// nothing.
-func (u *Updater) refreshInstallAttemptedAt(ctx context.Context) {
+// is left as it is and the restart goes on. A stop in the wait, or one
+// before an uncontended take, writes nothing and is returned, ctx's error,
+// for the caller to request no restart (round 2); it returns nothing else.
+func (u *Updater) refreshInstallAttemptedAt(ctx context.Context) error {
 	if u.autoInstallOpts == nil || u.autoInstallOpts.DataDir == "" {
-		return
+		return nil
 	}
 	dir := u.autoInstallOpts.DataDir
 	lock, err := lockMarkerForUpdate(ctx, dir, "the install marker was not re-stamped before the restart")
 	if err != nil {
-		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
-			logger.Warn("could not refresh the install marker before restarting; boot-time confirmation may treat it as abandoned",
-				"err", failure)
+		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+			return err
 		}
-		return
+		logger.Warn("could not refresh the install marker before restarting; boot-time confirmation may treat it as abandoned",
+			"err", err)
+		return nil
 	}
 	defer lock.Release()
 	st, err := LoadState(dir)
 	if err != nil || st.Status != "installing" {
-		return
+		return nil
 	}
 	st.AttemptedAt = time.Now().UTC()
 	if err := SaveState(dir, st); err != nil {
 		logger.Warn("could not refresh the install marker before restarting; boot-time confirmation may treat it as abandoned",
 			"err", err)
 	}
+	return nil
 }
 
 // recordDeferredReason persists a single-line explanation of why

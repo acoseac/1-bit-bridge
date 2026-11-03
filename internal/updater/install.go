@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
@@ -527,11 +526,14 @@ var (
 // backup's opened the data dir (RollbackRefusal: its store may hold what
 // the backup's version does not read; no forced downgrade is offered),
 // and otherwise records, durably and before the rename, the marker it
-// read with the install ended, the version rolled back from held back
-// and its store migrations vetoed (OperatorRollbackRecord), so a command
-// of that version still running from its image cannot migrate the store
-// past the version put back. A rename that fails puts the marker back as
-// it was read. A lock it cannot hold refuses with
+// read with the version rolled back from held back, its store
+// migrations vetoed and the rollback under way (OperatorRollbackRecord),
+// so a command of that version still running from its image cannot
+// migrate the store past the version put back, and clears the under-way
+// mark only once the rename has landed (round 2): a rollback the
+// process's end stops between the two leaves a record the version that
+// runs next finishes. A rename that fails puts the marker back as it was
+// read. A lock it cannot hold refuses with
 // ErrMarkerLockUnavailable, and a stop in its wait returns ctx's error,
 // nothing read, written or renamed either way.
 //
@@ -600,6 +602,18 @@ func (u *Updater) Rollback(ctx context.Context, opts InstallOptions) error {
 		}
 		return err
 	}
+	// The backup is back: the rollback is no longer under way (round 2). A
+	// record this write cannot clear is finished by the boot of the version
+	// put back (BootRollbackFinished), and the rollback stands meanwhile, its
+	// hold and its veto with it, so its failure is said and not returned.
+	done := OperatorRollbackRecord(st, rejected)
+	if done.RollbackStarted {
+		done.RollbackStarted = false
+		if err := SaveState(opts.DataDir, done); err != nil {
+			logger.Warn("the rollback is done, and its record could not be cleared; the next start finishes it",
+				"version", rejected, "err", markerIOError{err})
+		}
+	}
 	// A restart deferred by the auto-installer would now bounce the
 	// process for a binary that is no longer on disk. Nothing is
 	// pending any more.
@@ -623,6 +637,10 @@ func (u *Updater) Rollback(ctx context.Context, opts InstallOptions) error {
 //   - failed: nothing is installed and nothing recorded, so the next
 //     attempt checks again; a check the context stopped carries the
 //     cancellation, which the auto-installer does not count as a failure.
+//
+// A stop while a hold's record waits for the install marker's lock is the
+// answer too, ctx's error, never the refusal's (backlog B692's round 2):
+// nothing was recorded, and a caller stopped there is told it was stopped.
 func (u *Updater) checkCandidate(ctx context.Context, opts InstallOptions, staged, target string) (warning string, err error) {
 	check := opts.ConfigCheck
 	if check == nil {
@@ -635,7 +653,9 @@ func (u *Updater) checkCandidate(ctx context.Context, opts InstallOptions, stage
 	case ConfigRefused:
 		logger.Warn("the new version refuses this bridge's settings; it was not installed",
 			"version", target, "reasons", strings.Join(res.Reasons, "; "))
-		recordHold(ctx, opts, target, refusedReason(target, res.Reasons), true)
+		if err := recordHold(ctx, opts, target, refusedReason(target, res.Reasons), true); err != nil {
+			return "", err
+		}
 		return "", &holdError{sentinel: ErrConfigRefused,
 			reason: target + " refuses this bridge's settings, so it was not installed: " + reasonText(res.Reasons)}
 	case ConfigCheckUnsupported:
@@ -646,7 +666,9 @@ func (u *Updater) checkCandidate(ctx context.Context, opts InstallOptions, stage
 		}
 		reason := fmt.Sprintf("%s predates the settings check, so it cannot say whether it loads this bridge's settings "+
 			"and is not installed automatically: install it by hand to take it", target)
-		recordHold(ctx, opts, target, reason, false)
+		if err := recordHold(ctx, opts, target, reason, false); err != nil {
+			return "", err
+		}
 		return "", &holdError{sentinel: ErrConfigCheckUnsupported, reason: reason}
 	}
 	if res.Err != nil {
@@ -701,30 +723,34 @@ func reasonText(reasons []string) string {
 // a read, a change and a write of the marker (recordRejection) holding the
 // install marker's lock (backlog B692), taken here and nowhere else on the
 // way, so a lock that cannot be held (another holder past the wait, no lock
-// to give, a failure, a filesystem that keeps none) records nothing either,
-// and a stop in its wait says nothing.
-func recordHold(ctx context.Context, opts InstallOptions, target, reason string, onSettings bool) {
+// to give, a failure, a filesystem that keeps none) records nothing either.
+// A stop in its wait, or one before an uncontended take, records nothing and
+// is returned, ctx's error, for the install to answer (round 2); it returns
+// nothing else.
+func recordHold(ctx context.Context, opts InstallOptions, target, reason string, onSettings bool) error {
 	digest := ""
 	if onSettings {
 		d, err := ConfigDigest(opts.ConfigPath)
 		if err != nil {
 			logger.Warn("could not read the settings to hold the refused version back against; the next check asks again",
 				"version", target, "err", err)
-			return
+			return nil
 		}
 		digest = d
 	}
 	lock, err := lockMarkerForUpdate(ctx, opts.DataDir, "the version held back was not recorded")
 	if err != nil {
-		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
-			logger.Warn("could not record the version held back; the next check asks again", "version", target, "err", failure)
+		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+			return err
 		}
-		return
+		logger.Warn("could not record the version held back; the next check asks again", "version", target, "err", err)
+		return nil
 	}
 	defer lock.Release()
 	if err := recordRejection(opts.DataDir, target, reason, digest); err != nil {
 		logger.Warn("could not record the version held back; the next check asks again", "version", target, "err", err)
 	}
+	return nil
 }
 
 // swapAwaitingRestart reports whether a swap for `target` has ALREADY
