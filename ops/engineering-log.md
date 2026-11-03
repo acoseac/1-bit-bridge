@@ -71268,3 +71268,16 @@ BRIDGE_EXPORT_IOS_FIXTURES, `timeSeek` decoded optional with unknown for an
 absent member or word, and #2377's `BridgeOutputPlayer.refusesTimeSeek` seam
 read from it) is not opened: legion0 has no iOS checkout and this session
 neither pushes nor reaches GitHub.
+
+The gate, on 6a4efcad, with umask 022 and TMPDIR in a scratch directory the
+build-site census skips: `make fmt vet test build-all` passed (`go fmt`
+rewrote nothing; vet clean; under `-race`, 80 packages ok and 14 with no test
+files, `cmd/bridge` in 947 s, `internal/manifest` in 1,349 s,
+`internal/player/engine` in 31 s and `internal/player/openhome` in 38 s;
+`check-build-tags` OK; all six targets built). `go vet ./...` was clean for
+windows, darwin and linux, and for linux/arm64 over the changed packages;
+`make docs-check` passed; `go run ./scripts/qualification-version -base
+b9a37584 -head HEAD` passed. The companion's material, this head's
+`PROTOCOL.md` as `docs/BridgeProtocol.md`, its diff from main and the
+fixtures exported from this head (the manifest package, then the API
+package), went to the orchestrator with the report, for the iOS PR to land.
