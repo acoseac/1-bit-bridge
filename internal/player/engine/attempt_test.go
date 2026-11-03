@@ -303,6 +303,11 @@ func TestALaterFailureForAnotherReasonEndsDenied(t *testing.T) {
 func TestAResumePastItsDeadlineIsAFailedResume(t *testing.T) {
 	h := startHarness(t)
 	_, s := h.playing(0, "a")
+	// The session's Prepare (nothing follows a) answers at once; the clock
+	// moves past the held resume's deadline only once the owner has taken
+	// that answer, or the Prepare's deadline passes with the resume's and
+	// stops the session first (B605's rule: at -cpu 1 it did every time).
+	h.waitApplied("handled call prepare", 0)
 	start := h.waitAttempt(1)
 	h.must("pause", h.eng.Pause(bg))
 	s.deviceReleased()
