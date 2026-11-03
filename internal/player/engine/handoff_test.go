@@ -197,6 +197,14 @@ func TestAFailedCutStopsWhenTheRemovedEntryBecomesAudible(t *testing.T) {
 // selection never names an entry outside the queue, and the next start loads
 // the queue. An entry made no longer next is still in the queue, so only the
 // mark can stop it.
+//
+// With a Prepare of it held, nothing the test does between a's report and its
+// mark goes through the owner, which publishes the snapshot that report made
+// before it notes the report: the test can take its mark before that note.
+// That case runs twice: as the scheduler leaves the owner, and held at its
+// note of a's report until the test has taken its mark and at its note of b's
+// Submitted until the test waits for a note, the latest a scheduler could
+// leave it (B709: CI's race leg).
 func TestAnEntryHeardWhileItsCallIsUnderWayStops(t *testing.T) {
 	type edit struct {
 		name string
@@ -221,11 +229,14 @@ func TestAnEntryHeardWhileItsCallIsUnderWayStops(t *testing.T) {
 		// cut is what the held Cut answers.
 		prepare int
 		cut     bool
+		// late holds the owner at its notes of a's report and b's Submitted.
+		late bool
 	}{
-		{"a cut that answers it could", true, 0, true},
-		{"a cut that answers it could not", true, 0, false},
-		{"a prepare of it", false, 1, false},
-		{"a prepare of what follows it", true, 2, false},
+		{"a cut that answers it could", true, 0, true, false},
+		{"a cut that answers it could not", true, 0, false, false},
+		{"a prepare of it", false, 1, false, false},
+		{"a prepare of it/the owner held at its notes", false, 1, false, true},
+		{"a prepare of what follows it", true, 2, false, false},
 	} {
 		for _, ed := range edits {
 			t.Run(ed.name+"/"+tc.name, func(t *testing.T) {
@@ -250,8 +261,16 @@ func TestAnEntryHeardWhileItsCallIsUnderWayStops(t *testing.T) {
 						return tc.cut, nil
 					}
 				})
+				var reported *noteHold
+				if tc.late {
+					reported = h.holdNote("handled audible")
+					h.holdNote("handled submitted")
+				}
 				ids, s, _, b := handoff(t, h, tc.submitted, "a", "b", "c")
 				mark := h.appliedMark()
+				if reported != nil {
+					h.letGo(reported)
+				}
 				queue := ed.run(h, ids)
 				if tc.prepare == 0 {
 					h.be.waitFor("the cut", func() bool { return h.be.countLocked("cut") == 1 })

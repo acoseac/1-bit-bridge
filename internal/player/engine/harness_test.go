@@ -289,6 +289,11 @@ type harness struct {
 	appliedMu  sync.Mutex
 	appliedOps []string
 	appliedCh  chan struct{}
+	// holds are the notes the owner is held at (holdNote), in the order they
+	// were armed, and waiting the test's waits for a note under way
+	// (waitAppliedTimes), during which no hold holds.
+	holds   []*noteHold
+	waiting int
 }
 
 // newHarness is a harness that has not built its engine yet: set its
@@ -490,12 +495,63 @@ func (h *harness) hangReservations() (g gate, calls int) {
 	return g, h.files.reserveCalls
 }
 
+// noteHold holds the owner at a note: in the step that handled or applied
+// what, once the step has published its snapshot and sent its replies, and
+// before the harness records the note (noteApplied). A scheduler can leave
+// the owner there for as long as the test does not need it, so the hold lasts
+// until the test lets it go (letGo), waits for a note, or ends.
+type noteHold struct {
+	what     string
+	reached  bool // the owner has come to it
+	released bool // its gate is open
+	gate     gate
+}
+
+// holdNote holds the owner at the next note named what (noteHold).
+func (h *harness) holdNote(what string) *noteHold {
+	hd := &noteHold{what: what, gate: newGate()}
+	h.appliedMu.Lock()
+	h.holds = append(h.holds, hd)
+	h.appliedMu.Unlock()
+	h.t.Cleanup(func() { h.letGo(hd) })
+	return hd
+}
+
+// letGo lets the owner on past hd, at once or when it comes there.
+func (h *harness) letGo(hd *noteHold) {
+	h.appliedMu.Lock()
+	defer h.appliedMu.Unlock()
+	h.letGoLocked(hd)
+}
+
+// letGoLocked is letGo with h.appliedMu held.
+func (h *harness) letGoLocked(hd *noteHold) {
+	if !hd.released {
+		hd.released = true
+		hd.gate.open()
+	}
+}
+
 // noteApplied records a command the owner has applied, a message it has
 // handled ("handled " and its name) or a command it is admitting
-// ("admitted " and its op), as the owner reaches it.
+// ("admitted " and its op), as the owner reaches it; a hold of the note
+// (holdNote) keeps the owner here first, unless the test is waiting for a
+// note.
 func (h *harness) noteApplied(op string) {
 	h.appliedMu.Lock()
 	defer h.appliedMu.Unlock()
+	for _, hd := range h.holds {
+		if hd.what != op || hd.reached {
+			continue
+		}
+		hd.reached = true
+		if h.waiting == 0 {
+			h.appliedMu.Unlock()
+			<-hd.gate
+			h.appliedMu.Lock()
+		}
+		break
+	}
 	h.appliedOps = append(h.appliedOps, op)
 	close(h.appliedCh)
 	h.appliedCh = make(chan struct{})
@@ -516,17 +572,35 @@ func (h *harness) waitApplied(op string, since int) {
 }
 
 // waitAppliedTimes waits until the owner has applied op, or handled it, n
-// times after the first since.
+// times after the first since. While it waits, the owner is needed: it lets
+// go the holds the owner has come to, and no hold holds it.
 func (h *harness) waitAppliedTimes(op string, since, n int) {
 	h.t.Helper()
 	timer := time.NewTimer(*watchdog)
 	defer timer.Stop()
+	waiting := false
+	defer func() {
+		if waiting {
+			h.appliedMu.Lock()
+			h.waiting--
+			h.appliedMu.Unlock()
+		}
+	}()
 	for {
 		h.appliedMu.Lock()
 		ch, count := h.appliedCh, 0
 		for _, a := range h.appliedOps[min(since, len(h.appliedOps)):] {
 			if a == op {
 				count++
+			}
+		}
+		if count < n && !waiting {
+			waiting = true
+			h.waiting++
+			for _, hd := range h.holds {
+				if hd.reached {
+					h.letGoLocked(hd)
+				}
 			}
 		}
 		h.appliedMu.Unlock()
