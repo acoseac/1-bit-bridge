@@ -71441,6 +71441,106 @@ config-lifecycle.md at 97.3 % of its budget with the round-3 patch, by the
 budget script's own `measure` and `report`. cmd/bridge's code is unchanged
 since round 2's gates.
 
+## 2026-11-03 — B688: PROTOCOL.md's compatibility section points at the release notes, and the DLNA listener's first paragraph is a list
+
+Backlog B688, docs only, on `docs/b688-protocol-matrix` from main b9a37584.
+Argon's notes on the brief were binding: name no app version this repo does
+not record; read "the site no longer links it" as context, since the site
+is another repo; and keep each fact's condition, and any MUST or SHOULD,
+with it when the paragraph is split.
+
+**The matrix.** PROTOCOL.md's "Compatibility matrix" still said "Current at
+the time of writing: bridge v0.1.8, iOS app v1.8", as 50652d30 set it on
+2026-08-15. Since then the bridge has shipped v0.2.0 (2026-09-18) and
+v0.2.1 (2026-09-29 to 10-01) and v0.2.2 (2026-11-01, after its candidate
+`rc/v0.2.2`, 8f3d3934, 2026-10-31; Codex's review corrected "candidate"
+from GitHub Releases), and 1-bit 2.2 is on the App Store (B627's entry). This
+clone holds no tags (its git dir has no `refs/tags` and no `packed-refs`),
+so the releases were read from `ops/release-notes-v0.2.0-draft.md`,
+`ops/release-notes-v0.2.2-draft.md`, the playbook's v0.2.1 record and this
+log. The section is now "Compatibility", three sentences and no table:
+every bridge release speaks `protocolVersion` 1, a pairing whose integers
+differ is refused at the health check, and every pairing within it
+interoperates, though an app older than 2.2 pairs with a bridge after
+v0.2.2 through the three fields and not its QR code ("Pairing URL scheme",
+B627); features are gated by `features[]` keys, never by version
+comparisons; and what each release adds is in its release notes, the
+bridge's on GitHub Releases and the app's in its App Store version history.
+"Line 8 above" and the note that the rows were advisory went with the rows.
+A pointer rather than a new table, because no table can be kept true here:
+- Nothing in it varies by release. `ProtocolVersion` has been 1 since #5
+  (`git log -S` finds no other change), and no release has set a client
+  floor: `MIN_CLIENT_VERSION` has never been in
+  `.github/workflows/release.yml` (`git log -S`), so each release carries
+  goreleaser's default `0.0.0`, as docs/release-process.md says to leave
+  it. Each minimum-version column of the old tables held one value in
+  every row.
+- The app's half cannot be read from here. This repo names a 2.x app
+  release only in passing (the lyrics heading's v2.0, the favorites PUT
+  2.1 sends, 2.1 and 2.2 beside the OpenHome switch, 2.2 and
+  `onebit://pair`), not the 2.x releases or what each needs of a bridge,
+  and wire.md's rule is to label the spec with nothing this side cannot
+  verify.
+- No release step would keep it. docs/release-process.md lists PROTOCOL.md
+  under "Files NOT to touch per release", and each edit of it is a
+  Mirror-PR whose copy the app pins by SHA-256; so the table's "current"
+  line stood through the whole 0.2.x line.
+
+The heading's anchor moves from `#compatibility-matrix` to
+`#compatibility`. No file of this repo links either; the iOS repo's links
+were not checked from here.
+
+**The DLNA listener paragraph** (the first of
+`### DLNA listener: GET /dlna/artwork/{key}`, as B687 left it): its first
+sentence is the lead, and the rest are ten bullets in their old order, word
+for word but for two
+changes: "another host than" is "a host other than", and the connection
+sentence's "and SSDP, when destination reporting is armed, …" clause is a
+sentence of its own, in one bullet with the unarmed case, so each condition
+stays beside what it governs. The paragraph has no MUST or SHOULD. A script
+compared the words: the lead and the bullets, joined, are the old paragraph
+with those two changes, and no line of PROTOCOL.md outside the two sections
+changed. The code comments that say "another host than"
+(`internal/dlna/discovery`, `internal/upnp`) were left: the brief named the
+paragraph.
+
+**The mirror.** The app's `docs/BridgeProtocol.md` follows byte for byte,
+and the app pins its SHA-256; the owner opens that PR after the merge. No
+wire change: `ProtocolVersion` stays 1 and no feature key moves.
+
+**Checks** (legion0, Ubuntu 26.04, Linux 7.0, x86-64, go1.27.3,
+`GOTOOLCHAIN=local`, umask 022, the Makefile's tags, TMPDIR under the
+worktree's `.tmp/_b688/`, each run through the build lock):
+`make docs-check`: ok, "CLAUDE.md 71.9%; config-lifecycle.md 98.3%; worst load,
+player_openhome_test.go 64.2%" (config-lifecycle.md was that close
+before). PROTOCOL.md cites no test name, so `TestEveryCitedTestNameExists`
+had none of its to check; it ran for this entry's names: ok, with the five
+fixture tests beside it. `go test` of internal/api (35.4 s) and
+internal/analyze (5.4 s): ok, and by name the eight guards there that read
+PROTOCOL.md passed, none skipped: `TestEveryDocumentedEndpointIsRouted`,
+`TestEveryRoutedEndpointIsDocumented`,
+`TestEverySentErrorCodeIsInTheProtocolTable`,
+`TestEveryProtocolErrorRowIsSent`, `TestEveryReadingCodeIsInTheProtocol`,
+`TestDSDOutputProtocolTokens`, `TestDSDOutputProtocolMembers` and
+`TestProtocolDocFormatVersionsMatchTheCode`. cmd/bridge's
+`TestEveryBridgeWordIsInTheProtocol`,
+`TestThePermissionCauseIsTheConsolesWordAlone` and
+`TestTheCodecsAreTheManifestsCodecsThePlayerPlays`: ok.
+scripts/third-party-licenses' `TestRealTreeBuildSiteCensus`, whose walk
+reads PROTOCOL.md, and `TestBuildTagsAgree`: ok. No Go file changed, so
+gofmt, vet, `make test` and `make build-all` were not run.
+
+**Negative controls** (each on 31cc9ac5: one exact occurrence mutated by a
+script that refuses any other count, `git diff --numstat` naming that file
+alone, restored with `git checkout --`, the tree clean after; each predicted
+red before its run, and each was): 1, the connection bullet's "closed
+before a byte is read" made "after": the word comparison failed at that
+word; 2, "a host other than" put back to "another host than": it failed
+there; 3, the public-mode bullet dropped: it failed at that bullet's place,
+351 words against 359; 4, a test name nothing defines added to this entry:
+`TestEveryCitedTestNameExists` failed with that name alone, cited by
+ops/engineering-log.md.
+
 ## 2026-11-03 — B674: the player seeks within a track
 
 Playlist's SeekSecondAbsolute and SeekSecondRelative answered 803 without
