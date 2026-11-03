@@ -344,8 +344,12 @@ func TestARollbackRecordsItsHoldAndVetoBeforeThePutBackAndKeepsTheRest(t *testin
 	want.Status = ""
 	want.RejectedVersion, want.RejectedReason, want.RejectedConfigDigest = "0.2.3", "", ""
 	want.MigrationVeto = "0.2.3"
-	if !sameState(atRename, want) {
-		t.Errorf("the marker at the rename = %+v, want %+v: the hold and the veto recorded first, the rest kept", atRename, want)
+	// Under way at the rename, and no more once it has landed (round 2).
+	wantAtRename := want
+	wantAtRename.RollbackStarted = true
+	if !sameState(atRename, wantAtRename) {
+		t.Errorf("the marker at the rename = %+v, want %+v: the hold and the veto recorded first, the rollback under way, the rest kept",
+			atRename, wantAtRename)
 	}
 	got, err := LoadState(l.dataDir)
 	if err != nil || !sameState(got, want) {
