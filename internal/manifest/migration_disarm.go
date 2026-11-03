@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
@@ -34,7 +35,7 @@ func disarmBeforeMigrating(dbPath string, from int) error {
 		return fmt.Errorf("record in the install marker that the store is migrated from version %d: %w", from, err)
 	}
 	if res.Unreadable != nil {
-		logger.Warn("removed an install marker that could not be read before migrating the store", "err", res.Unreadable)
+		logger.Warn("removed an install marker that could not be read before migrating the store", "err", fsutil.ErrorWithoutPath(res.Unreadable))
 	}
 	return nil
 }

@@ -5,7 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 )
+
+// markerIOError describes a marker's file error without its path while
+// keeping the original cause available to errors.Is and errors.As. Use it
+// in refusals, never in DisarmResult.Unreadable, which stays the read's error.
+type markerIOError struct{ err error }
+
+func (e markerIOError) Error() string { return fsutil.ErrorWithoutPath(e.err) }
+func (e markerIOError) Unwrap() error { return e.err }
 
 // DisarmResult is what a disarm did (AdmitBoot, DisarmBeforeMigrating).
 type DisarmResult struct {
@@ -139,7 +149,7 @@ func disarmUnlocked(dataDir, current string, migrating bool, lockErr error) (Dis
 	st, err := LoadState(dataDir)
 	switch {
 	case err != nil:
-		return DisarmResult{}, fmt.Errorf("the install marker cannot be read (%v), nor removed without its lock: %w", err, lockErr)
+		return DisarmResult{}, fmt.Errorf("the install marker cannot be read (%w), nor removed without its lock: %w", markerIOError{err}, lockErr)
 	case migrating && MigrationVetoed(st, current):
 		return DisarmResult{}, migrationVetoedError(st, current)
 	case MigrationVetoed(st, current):
@@ -162,7 +172,7 @@ func disarmHeld(dataDir, current string, save func(dataDir string, st State) err
 	st, err := LoadState(dataDir)
 	if err != nil {
 		if rmErr := ClearStateDurably(dataDir); rmErr != nil {
-			return DisarmResult{}, fmt.Errorf("the install marker can neither be read (%v) nor removed (%w)", err, rmErr)
+			return DisarmResult{}, fmt.Errorf("the install marker can neither be read (%w) nor removed (%w)", markerIOError{err}, markerIOError{rmErr})
 		}
 		return DisarmResult{Unreadable: err}, nil
 	}

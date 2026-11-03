@@ -2380,7 +2380,7 @@ func bootHousekeeping(ctx context.Context, stderr io.Writer, dataDir, binaryPath
 	defer lock.Release()
 	st, err := updater.LoadState(dataDir)
 	if err != nil {
-		fmt.Fprintf(stderr, "updater: load state: %v\n", err)
+		fmt.Fprintf(stderr, "updater: load state: %s\n", fsutil.ErrorWithoutPath(err))
 		return nil
 	}
 	action := updater.DecideBootAction(st, current, time.Now().UTC())

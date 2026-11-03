@@ -70019,7 +70019,7 @@ since v0.2.1 but #1168's Windows rollback.
   each refused line; 2 with "flag provided but not defined:
   -validate-config" is a candidate that predates the check, held from the
   auto-installer for every setting and installed by hand with
-  `Status.InstallWarning`; anything else installs and records nothing.
+  `Status.InstallWarning`; for anything else, nothing is swapped, installed or recorded.
   `HeldBack` is the one gate: a rejected version (or older) is held while its
   digest is the settings' now, a rollback's always, and settings that cannot
   be read hold it. `InstallOptions.ConfigPath` is set by the console's, the
@@ -70515,8 +70515,9 @@ renamed symbols are corrected too. Two decisions were the brief's: the
 no-lock exception stays narrow (only a filesystem that keeps no locks lets a
 disarm go on unlocked; the early rollback and now the boot's housekeeping
 refuse there; contention, ENOLCK and every other failure refuse), and the
-barrier stays on every start, the readability it needs said plainly in the
-runbook.
+barrier stays on every start; the runbook states that the data dir must be
+readable as well as writable by the service’s user, even with no install
+armed.
 
 **What changed.**
 1. *The veto outlives the record* (P1). Round 3's migrating open refused
@@ -70674,3 +70675,35 @@ build lock:
 - qualificationVersion rises to 30 at the merge (`internal/manifest/` and
   `internal/fsutil/` are guarded prefixes; main had 29 after B607), and the
   runbook's current-version pins follow it.
+
+## 2026-11-03 — B613 round 5: install-marker diagnostics without paths
+
+The disarm's unreadable-marker refusals now wrap each file error in
+`markerIOError`: its text uses `fsutil.ErrorWithoutPath`, while `Unwrap`
+keeps the original cause. Both the read and the blocking removal or lock
+error remain reachable. `DisarmResult.Unreadable` stays the original read
+error; the migration warning and serve's removal notice strip its path only
+at output. The early rollback's reread and boot housekeeping's read also
+print the pathless reason. Serve's admission and store-open refusals inherit
+the pathless error without flattening their chains.
+
+The settings-check rule and its long form now say that a failed check swaps,
+installs and records nothing; the older log's wording matches. Round 4's
+runbook summary now states that the service user needs read and write access
+to the data dir even with no install armed.
+
+Validation on darwin/arm64 with Go 1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`
+and the supplied cache: the new diagnostic tests were written first and
+failed against unchanged production code at every requested output site.
+`TestDisarmRefusalsKeepCausesWithoutPaths`,
+`TestDisarmUnreadableKeepsTheOriginalPathError`,
+`TestMigrationMarkerDiagnosticsCarryNoPaths` and
+`TestServeMarkerDiagnosticsCarryNoPaths` now pass, as do the focused existing
+migration-veto, lock and removal-barrier tests. The checks cover both data-dir
+and marker paths, the warning's presence, the original unreadable error,
+`fs.ErrNotExist`, lock causes and `ErrMigrationVetoed`. Both native and
+`GOOS=windows` vet with `ts_omit_webclient,ts_omit_debugeventbus` pass.
+An accidentally included older installer test tried to bind its HTTP fixture
+and was denied by the sandbox; it was excluded from the passing focused run.
+`make docs-check` passes, including budgets and doc-tool self-tests.
+The race suite and native Windows execution remain for the owner.

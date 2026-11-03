@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/supervision"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
 	"github.com/acoseac/1-bit-bridge/internal/version"
@@ -152,7 +153,7 @@ func recoverRefusedInstall(ctx context.Context, configPath string, reasons []str
 	// process may have changed it since the first read.
 	if st, err = updater.LoadState(dataDir); err != nil {
 		noRollback(stderr, updater.State{Status: "installing", TargetVersion: version.ServerVersion},
-			fmt.Sprintf("the install marker cannot be read again (%v)", err))
+			fmt.Sprintf("the install marker cannot be read again (%s)", fsutil.ErrorWithoutPath(err)))
 		return 0, false
 	}
 	if ok, why := updater.EarlyRollback(st, version.ServerVersion, time.Now().UTC()); !ok {
@@ -252,7 +253,7 @@ func disarmEarlyRollback(ctx context.Context, dataDir string, opts serveOpts, st
 		return err
 	}
 	if res.Unreadable != nil {
-		fmt.Fprintf(stderr, "updater: removed an install marker that could not be read (%v)\n", res.Unreadable)
+		fmt.Fprintf(stderr, "updater: removed an install marker that could not be read (%s)\n", fsutil.ErrorWithoutPath(res.Unreadable))
 	}
 	if res.VetoLifted {
 		fmt.Fprintf(stderr, "updater: %s starts on settings it loads, so the veto of its store migrations that a rollback left is lifted\n",
