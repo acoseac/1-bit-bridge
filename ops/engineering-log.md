@@ -71754,3 +71754,150 @@ and start tests (lines 116 and 324) inject the same two panics and capture
 theirs. The paths are qualification-guarded, and the version stays 33, past
 main's 32. The two `player.md` rule lines this changes (the engine's
 contract and the backend's start) are `rules-b674-r2.patch`.
+
+**Round 3: every step that would acquire, open, adopt, resume, cut or write
+reads the fence.** Codex (P2) and Argon, reviewing 11e966f9, found round 2's
+fence on one decision alone, the write Start makes. Once the engine had taken
+the release, a resume's reopen after a pause's release and the producer's open
+of another transport admitted a node without asking it (round 2 named both and
+left them), a resume of a sink a pause held resumed it, and Start acquired the
+device's hold, the content and a decoder before it asked. The backend now asks
+`StartRequest.Released`, with
+its own `releasing` under the session's lock (`releasedLocked`), at each of
+these steps, refuses each with `errReleased`, and names the step through
+`Seams.Fenced`, which the tests read:
+
+- Start's outset (`session.start`), before anything is acquired;
+- before each open: the PCM open loop (`openOutput`, which Start, the
+  producer's next transport and a resume between transports share) and the
+  native open (`openNativeOutput`);
+- the check after open (`output.admit`), which the sink runs at an open, at a
+  reopen after a pause's release and at a native activation, each its last
+  step before a frame: it refuses the node, and the sink closes it unwritten.
+  It reads the fence and the session's life without the session's lock, since
+  a sink asks it with none of its own locks held;
+- adoption under the session's lock, closing what it refuses before it
+  answers: Start's (round 2's), the producer's (`transition`: a sink it
+  opened, or one a resume handed it) and a resume's between two transports;
+  the native open's own begins the native sink's release, its life not the
+  session's, and its caller's adoption then closes it;
+- a resume of a sink a pause holds, inside the command `call` runs, after the
+  `SinkCall` seam, so a Stop taken once Resume was called is seen where the
+  command runs; sink commands stay outside the session's lock;
+- every write: the producer's `writeAll` and the native `writeNativeChunk`;
+- a stale Cut, which cuts nothing. Cut opens and writes nothing, so this is a
+  stale call's fence, not cover for the writes. Prepare and Pause share
+  `callableLocked` and keep it alone: neither opens a sink or writes (Prepare
+  opens a decoder, and its successor's sink opens through the fenced open).
+
+No sleep or deadline was added. `releaseTaken` takes no lock, the engine's or
+the session's: `released` is set once, by Start under the session's lock,
+before anything that reads it starts. The fence is one session's and
+terminal, so a resume of a session whose release was not taken is never
+refused (`TestPlaybackResumesASessionWhoseReleaseIsNotTaken`: continued, then
+reopened, nothing refused).
+
+Red first (76019a67): eleven tests in `internal/alsapcm/playback_fence_test.go`
+through the engine's real Run, the real sink and the fake kernel, and three in
+`internal/player/playback/native_integration_test.go` through CI's overlay.
+Each holds its step (Start or a Cut short of the backend, the content's open,
+the `NoteOpened`, `NoteInstalled`, `TransportDrained` or `SinkCall` seam, the
+unit's check after open, a stalled read) and the engine's Release short of the
+backend, so the backend learns of the release through the fence alone. Against
+the code before the fix every test but the last PCM one failed by its
+assertion: Start's outset opened the content and the device; Start's open
+opened the device; the producer opened the device for b, a second open; its
+adoption gave b's sink 14,400 bytes; a resume's reopen answered reopened and
+gave the device 43,200 bytes; a paused sink's resume answered continued and
+ran; a resume between transports answered reopened, b's sink open; a gapless b
+was submitted and the device given 4,000 samples where a's 2,000 were due; the
+stale Cut answered true; natively, Start opened the device, the activation
+wrote once and Start answered success, and the writes took 32,768 bits more and
+read the third chunk. Start's adoption, round 2's check, failed on the seam's
+assertion alone.
+
+The fix (6e3ebc77) passed them all, 20 runs each. Negative controls, each alone
+on the committed tree, one exact-string mutation, 20 runs, each predicted
+failure line counted 20 times, the file restored from HEAD and the tree checked
+clean:
+
+- Start's outset reading `releasing` alone:
+  `TestPlaybackStartAcquiresNothingOnceItsReleaseIsTaken` failed 20 of 20, the
+  content opened once and the device not at all, the step refused "open": the
+  open's check stops the device, not the content.
+- The open's check out: `TestPlaybackStartOpensNoDeviceOnceItsReleaseIsTaken`
+  and `TestPlaybackOpensNoNextTransportOnceTheReleaseIsTaken` failed 20 of 20,
+  one open and two, each node refused at its check after open ("admit"); the
+  outset's test passed 20 of 20.
+- The admission's fence out:
+  `TestPlaybackReopensNothingForAResumeOnceTheReleaseIsTaken` failed 20 of 20,
+  the resume answered reopened, and `TestNativeIntegrationFenceRefusesActivation`
+  20 of 20, the activation writing once; round 2's
+  `TestPlaybackStopsDuringASeeksReopen` passed 20 of 20: Start's adoption
+  covers it.
+- Start's adoption reading `releasing` alone:
+  `TestPlaybackStartClosesItsSinkAtOnceOnceItsReleaseIsTaken` failed 20 of 20,
+  the sink left open, unwritten only because the producer's write refused it
+  ("write").
+- The producer's adoption out:
+  `TestPlaybackClosesTheNextTransportsSinkAtOnceOnceTheReleaseIsTaken` failed
+  20 of 20, b's sink open after one close ("write").
+- The resume's command check out:
+  `TestPlaybackResumesNoSinkOnceTheReleaseIsTaken` failed 20 of 20, answered
+  continued, the stream RUNNING.
+- A resume's adoption between transports reading `releasing` alone:
+  `TestPlaybackResumeBetweenTransportsAdoptsNothingOnceTheReleaseIsTaken`
+  failed 20 of 20, answered reopened.
+- The producer's write fence out:
+  `TestPlaybackHandsTheSinkNothingOnceTheReleaseIsTaken` failed 20 of 20, b's
+  frames handed to the sink, nothing refused.
+- The Cut's out: `TestPlaybackCutsNothingOnceTheReleaseIsTaken` failed 20 of
+  20, answered true.
+- The native open's out: `TestNativeIntegrationFenceOpensNoDevice` failed 20 of
+  20, one open, refused at its check ("admit").
+- The native write's reading `releasing` alone:
+  `TestNativeIntegrationFenceStopsTheWrites` failed 20 of 20, 32,768 bits more
+  and the third chunk read.
+
+The native open's own adoption check has no control of its own: no test holds
+its window, and its caller's adoption refuses the same sink there.
+
+Stress on 6e3ebc77, 500 runs at each of `-cpu 1,2,4` beside 16 busy loops on
+legion0's 16 cores: nine of the PCM tests and the three native ones passed
+1,500 of 1,500 each. Two failed by their setups, not the backend.
+`TestPlaybackCutsNothingOnceTheReleaseIsTaken` failed 10 of 1,500 (7, 1 and
+2), each waiting a minute for a Cut the engine never asked: it waited for b's
+Submitted as the recorder saw it, not for the engine to take it, so the
+deletion could reach the owner first and replace b.
+`TestPlaybackResumesNoSinkOnceTheReleaseIsTaken` failed 2 of 1,500, both at
+`-cpu 2`, waiting a minute for a Resume the engine never called: its one-shot
+hold could take a call before the resume's (the producer's drain, which a
+pause refuses and the producer asks again), so the test took the Stop before
+the engine had called Resume, and the Stop overtook the Play. fa94ee4d waits
+for the engine's Prepare after b (`handedOff`), as `playback_cut_test.go`'s
+tests do, and holds only a call the engine bounds with its deadline, the
+resume's. On fa94ee4d the two controls again failed 20 of 20 each, with their
+predicted lines, and the two tests passed 1,500 of 1,500 each under the same
+stress.
+
+Runs on fa94ee4d: `go test -race` with the release tags over
+`./internal/alsapcm/... ./internal/player/...` passed (12 packages, four of
+them unchanged and from the test cache); the native overlay's
+`^TestNativeIntegration` suites passed, 29 tests in `internal/player/playback`
+and 13 in `cmd/bridge`; `make test-fast` passed, 80 packages and 14 with no
+test files (`cmd/bridge` in 403 s); `make vet`, `GOOS=windows go vet` with the
+release tags and `make docs-check` were clean; and `go run
+./scripts/qualification-version -base main -head HEAD` passed, the version 33,
+past main's 32, over the guarded playback paths this round changes.
+
+`.claude/` is unwritable here: `rules-b674-r3.patch` carries the two
+`player.md` lines and the long form in `ops/History-rules-player.md`, one
+commit. The round's lines took `player.md` past its budget, so the backend's
+"Calls honour their contexts" entry moved to its long form with
+`move_entry.py` (its line keeps its title and its Don't, which now names every
+step), and round 3's steps and tests are there; `player.md` goes from 99,477
+to 98,179 bytes (98.2%), proved with a strict applier, `git apply --check` on
+fa94ee4d and the budgets measured over the patched files. The largest movable
+entry, the check after open (5,481 bytes), stayed: the pointer `move_entry.py`
+proposed for it dropped its Don't sentence, which is longer than the 600
+characters the tool matches.
