@@ -2367,8 +2367,18 @@ func maybeRollbackOnBoot(ctx context.Context, stderr io.Writer, dataDir, binaryP
 // reason of its own: the install marker's lock it could not hold, or an
 // interrupted rollback's record it would not confirm.
 func bootHousekeeping(ctx context.Context, stderr io.Writer, dataDir, binaryPath, current string, restore func(dst, suffix string) error) error {
+	return bootHousekeepingWith(ctx, stderr, dataDir, binaryPath, current, restore, nil)
+}
+
+// bootHousekeepingWith is bootHousekeeping removing the backup after a
+// confirmed install through remove (nil is updater.RemoveBackup): a test runs
+// it with a removal that fails, as one can on Windows.
+func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binaryPath, current string, restore, remove func(dst, suffix string) error) error {
 	if restore == nil {
 		restore = updater.RollbackBinary
+	}
+	if remove == nil {
+		remove = updater.RemoveBackup
 	}
 	// A marker that asks nothing of this boot asks for no lock: a filesystem
 	// that keeps none, or a lock another process holds, costs a boot with
@@ -2408,7 +2418,7 @@ func bootHousekeeping(ctx context.Context, stderr io.Writer, dataDir, binaryPath
 		// Second boot after a successful install: clean up. Every clear here
 		// keeps a hold recorded beside the install (updater.ClearInstall): it
 		// is about another version and the settings (backlog B613).
-		if err := updater.RemoveBackup(binaryPath, ".bak"); err != nil {
+		if err := remove(binaryPath, ".bak"); err != nil {
 			fmt.Fprintf(stderr, "updater: remove .bak: %v\n", err)
 		}
 		if err := updater.ClearInstall(dataDir, st); err != nil {
