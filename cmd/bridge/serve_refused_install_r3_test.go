@@ -354,19 +354,24 @@ func TestATargetWhoseSettingsAreFixedConfirmsAnInterruptedRollback(t *testing.T)
 			r.marker = rollbackStoppedBeforeItsRename(r.marker)
 			r.saveMarker(t, r.dataDir)
 			files := watch(t, r.bin, r.bak)
+			// The store as the version before this one left it, genuinely:
+			// the last migration's columns and index are not there yet (round
+			// 4), so the restart runs that migration's own steps.
+			requireTheLatestSchema(t, r.dataDir, false)
 
 			r.bootAndStop(t)
 			files.requireUnchanged(t)
 			if v := storeVersion(t, r.dataDir); v != latest {
 				t.Errorf("the store is at %d, want %d", v, latest)
 			}
+			requireTheLatestSchema(t, r.dataDir, true)
 			st, err := updater.LoadState(r.dataDir)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if st.Status != "installed" || st.InstalledAt.IsZero() || st.RollbackStarted || st.DataDirOpenedBy != version.ServerVersion ||
-				st.RejectedVersion != "" || st.RejectedReason != "" || st.RejectedConfigDigest != "" {
-				t.Fatalf("the marker after the boot = %+v, want the install confirmed, the rollback's mark and its hold of this version gone", st)
+				st.RejectedVersion != "" || st.RejectedReason != "" || st.RejectedConfigDigest != "" || st.MigrationVeto != "" {
+				t.Fatalf("the marker after the boot = %+v, want the install confirmed, the rollback's mark, its hold of this version and its veto gone", st)
 			}
 
 			r.bootAndStop(t)
@@ -434,7 +439,8 @@ func TestARefusedStartFinishesAnInterruptedRollbackOnlyOnItsProof(t *testing.T) 
 // TestAPatchedPreviousVersionKeepsTheHoldOfARollbackThatFinished: the
 // rollback's record, and the version the backup held runs, a release with
 // this round: the rollback was finished. Its boot clears the install the
-// record describes and keeps the hold, and never tries a restore.
+// record describes and keeps the hold and the veto of the rolled-back
+// version's store migrations (round 4), and never tries a restore.
 func TestAPatchedPreviousVersionKeepsTheHoldOfARollbackThatFinished(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	r.marker = updater.State{Status: "installing", TargetVersion: "9.9.9", PreviousVersion: version.ServerVersion,
@@ -449,9 +455,9 @@ func TestAPatchedPreviousVersionKeepsTheHoldOfARollbackThatFinished(t *testing.T
 		t.Fatal(err)
 	}
 	want := updater.State{RejectedVersion: r.marker.RejectedVersion, RejectedReason: r.marker.RejectedReason,
-		RejectedConfigDigest: r.marker.RejectedConfigDigest}
+		RejectedConfigDigest: r.marker.RejectedConfigDigest, MigrationVeto: "9.9.9"}
 	if st != want {
-		t.Errorf("the marker after the boot = %+v, want the hold alone, %+v", st, want)
+		t.Errorf("the marker after the boot = %+v, want the hold and the veto alone, %+v", st, want)
 	}
 	if said := updaterLines(stderr); strings.Contains(said, "rolling back") || strings.Contains(said, "rollback failed") {
 		t.Errorf("the boot tried a restore: %s", said)

@@ -231,6 +231,9 @@ func TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings(t *testing.T) {
 			if st.Status != "" || st.RejectedVersion != version.ServerVersion || st.RejectedConfigDigest == "" {
 				t.Errorf("the marker does not hold this version back for these settings: %+v", st)
 			}
+			if st.MigrationVeto != version.ServerVersion {
+				t.Errorf("the marker does not veto this version's store migrations: %+v", st)
+			}
 			// The restored binary's boot, whatever its version, keeps it: an
 			// install marker is what 0.2.1's and 0.2.2's boot clears, and they
 			// read Status "" as nothing to do; a release with round 3 reads the
@@ -454,12 +457,14 @@ func TestServeDoesNotStartWhereItCannotDisarmTheEarlyRollback(t *testing.T) {
 // that finds the hold recorded and the backup not back finishes the rollback.
 
 // rollbackStoppedBeforeItsRename is st, an install marker, as the early
-// rollback writes it just before it renames the backup back.
+// rollback writes it just before it renames the backup back: the hold, and
+// the veto of the install's version's store migrations (round 4).
 func rollbackStoppedBeforeItsRename(st updater.State) updater.State {
 	st.Status, st.RollbackStarted = "", true
 	st.RejectedVersion = st.TargetVersion
 	st.RejectedReason = st.TargetVersion + " refused this bridge's settings at its first start and was rolled back to " + st.PreviousVersion
 	st.RejectedConfigDigest = "a digest of the settings"
+	st.MigrationVeto = st.TargetVersion
 	return st
 }
 
@@ -495,6 +500,12 @@ func TestTheHoldIsRecordedBeforeTheBackupIsPutBack(t *testing.T) {
 	}
 	if atRename.RejectedVersion != version.ServerVersion || atRename.RejectedConfigDigest == "" || !atRename.RollbackStarted {
 		t.Errorf("the marker as the backup was put back = %+v, want this version held back for these settings already", atRename)
+	}
+	// And this version's store migrations vetoed, before the rename too
+	// (round 4): a command of this version, running from its image, must
+	// find the veto however this start ends after the rename.
+	if atRename.MigrationVeto != version.ServerVersion {
+		t.Errorf("the marker as the backup was put back = %+v, want this version's store migrations vetoed already", atRename)
 	}
 	// Should the rename land and nothing after it, the restored binary's boot
 	// must keep the hold: Status "" for 0.2.1's and 0.2.2's, and the rollback
@@ -602,7 +613,8 @@ func storeOneMigrationBehind(t *testing.T, dataDir string) {
 // did not come up) keeps a hold recorded beside it, which is about another
 // version and the settings, not the install; dropping it costs one more
 // download and check of a version that refuses them (backlog B613's round
-// 2, Codex's finding 7).
+// 2, Codex's finding 7). The step that puts the backup back leaves the veto
+// of the replaced install's store migrations beside the hold (round 4).
 func TestTheBootKeepsARecordedHoldWhereItClearsAnInstall(t *testing.T) {
 	hold := updater.State{RejectedVersion: "9.9.9", RejectedReason: "9.9.9 refuses this bridge's settings: line 4: x",
 		RejectedConfigDigest: "a digest of the settings"}
@@ -612,6 +624,8 @@ func TestTheBootKeepsARecordedHoldWhereItClearsAnInstall(t *testing.T) {
 		marker updater.State
 		// bakGone says the boot step removes or restores the backup.
 		bakGone bool
+		// veto is the version whose store migrations the step leaves vetoed.
+		veto string
 	}{
 		{name: "the backup's cleanup after a confirmed install", bakGone: true,
 			marker: updater.State{Status: "installed", TargetVersion: version.ServerVersion, PreviousVersion: previousVersion,
@@ -622,7 +636,7 @@ func TestTheBootKeepsARecordedHoldWhereItClearsAnInstall(t *testing.T) {
 		{name: "an install that never reached its swap",
 			marker: updater.State{Status: "installing", TargetVersion: "9.9.8", PreviousVersion: previousVersion,
 				AttemptedAt: now.Add(-time.Minute)}},
-		{name: "an install that did not come up", bakGone: true,
+		{name: "an install that did not come up", bakGone: true, veto: "9.9.8",
 			marker: updater.State{Status: "installing", TargetVersion: "9.9.8", PreviousVersion: previousVersion,
 				AttemptedAt: now.Add(-time.Minute), SwapStarted: true}},
 		{name: "an install that did not come up, the data dir opened since",
@@ -652,8 +666,10 @@ func TestTheBootKeepsARecordedHoldWhereItClearsAnInstall(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got != hold {
-				t.Errorf("the marker after the boot step = %+v, want the hold alone, %+v; stderr=%s", got, hold, stderr.String())
+			want := hold
+			want.MigrationVeto = tc.veto
+			if got != want {
+				t.Errorf("the marker after the boot step = %+v, want the hold and no more but its veto, %+v; stderr=%s", got, want, stderr.String())
 			}
 		})
 	}

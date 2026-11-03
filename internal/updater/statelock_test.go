@@ -26,15 +26,7 @@ func shortStateLockWait(t *testing.T, d time.Duration) {
 // the test.
 func stubStateTryLock(t *testing.T, err error) {
 	t.Helper()
-	stateLockHookMu.Lock()
-	prev := stateTryLock
-	stateTryLock = func(*os.File) error { return err }
-	stateLockHookMu.Unlock()
-	t.Cleanup(func() {
-		stateLockHookMu.Lock()
-		stateTryLock = prev
-		stateLockHookMu.Unlock()
-	})
+	t.Cleanup(SetStateTryLockForTest(func(*os.File) error { return err }))
 }
 
 func TestTheInstallMarkersLockIsAFileOfItsOwn(t *testing.T) {
@@ -101,6 +93,58 @@ func TestTheInstallMarkersLockSortsEachAnswer(t *testing.T) {
 				t.Fatalf("LockState = %+v, %v; want a hold that is not held, saying why", l, err)
 			}
 		})
+	}
+}
+
+// TestTheMarkersLockWaitEndsWithItsCallersContext: a taker waiting for
+// another holder stops when its context ends, with the context's error and
+// no refusal of the lock's (*StateLockError), at once where the context had
+// ended before the wait began; a wait whose context does not end keeps its
+// bound (backlog B613's round 4).
+func TestTheMarkersLockWaitEndsWithItsCallersContext(t *testing.T) {
+	dir := t.TempDir()
+	shortStateLockWait(t, 2*time.Second)
+	holder, err := LockState(context.Background(), dir)
+	if err != nil || !holder.Held() {
+		t.Fatalf("hold the lock: %+v, %v", holder, err)
+	}
+	defer holder.Release()
+	waits := make(chan struct{}, 1)
+	t.Cleanup(SetStateLockWaitingForTest(func(string) {
+		select {
+		case waits <- struct{}{}:
+		default:
+		}
+	}))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type taken struct {
+		l   *StateLock
+		err error
+	}
+	got := make(chan taken, 1)
+	go func() {
+		l, err := LockState(ctx, dir)
+		got <- taken{l, err}
+	}()
+	select {
+	case <-waits:
+	case <-time.After(20 * time.Second):
+		t.Fatal("the taker never waited for the held lock")
+	}
+	cancel()
+	g := <-got
+	var refusal *StateLockError
+	if g.l != nil || !errors.Is(g.err, context.Canceled) || errors.As(g.err, &refusal) {
+		t.Fatalf("LockState stopped in its wait = %+v, %v; want the context's error, and no refusal of the lock's", g.l, g.err)
+	}
+	ended, end := context.WithCancel(context.Background())
+	end()
+	if l, err := LockState(ended, dir); l != nil || !errors.Is(err, context.Canceled) {
+		t.Errorf("LockState on a context that had ended, the lock held = %+v, %v; want the context's error", l, err)
+	}
+	if l, err := LockState(context.Background(), dir); l != nil || !errors.Is(err, ErrStateLockHeld) {
+		t.Errorf("LockState on a context that does not end = %+v, %v; want the bound's refusal", l, err)
 	}
 }
 

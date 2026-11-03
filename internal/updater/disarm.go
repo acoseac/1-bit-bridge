@@ -16,6 +16,9 @@ type DisarmResult struct {
 	// NoLocks is the answer of a filesystem that keeps no locks, when the
 	// disarm went on without the install marker's lock (LockState).
 	NoLocks error
+	// VetoLifted says serve's admission lifted the marker's veto of this
+	// version's store migrations (State.MigrationVeto).
+	VetoLifted bool
 }
 
 // ErrMigrationVetoed is what a migrating store open's refusal matches

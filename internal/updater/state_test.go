@@ -257,3 +257,36 @@ func TestTheConfirmationOverARollbackKeepsWhatIsNotItsOwn(t *testing.T) {
 		t.Errorf("the confirmation = %+v, want installed with no rollback started", got)
 	}
 }
+
+// TestTheConfirmationNeedsTheInstallsOwnRecordOfTheDataDir: an install is
+// confirmed over the early rollback's record only on the record serve's
+// admission makes of the install's own version opening the data dir (backlog
+// B613's round 4); with none, or another version's, ConfirmOverRollback
+// refuses, and its caller leaves the marker as it is.
+func TestTheConfirmationNeedsTheInstallsOwnRecordOfTheDataDir(t *testing.T) {
+	now := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	record := RollbackRecord(State{Status: "installing", TargetVersion: "0.2.3", PreviousVersion: "0.2.1",
+		AttemptedAt: now.Add(-time.Minute), SwapStarted: true}, "0.2.3", "0.2.3 refused this bridge's settings: line 4: x", "a digest")
+	for _, tc := range []struct {
+		name, openedBy string
+		confirms       bool
+	}{
+		{"no version recorded", "", false},
+		{"the backup's version recorded", "0.2.1", false},
+		{"another version recorded", "0.2.9", false},
+		{"the install's own version recorded", "0.2.3", true},
+		{"the install's own version, spelled with a v", "v0.2.3", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := record
+			st.DataDirOpenedBy = tc.openedBy
+			got, err := ConfirmOverRollback(st, "0.2.3", now)
+			switch {
+			case tc.confirms && (err != nil || got.Status != "installed"):
+				t.Errorf("ConfirmOverRollback with %q recorded = %+v, %v; want the install confirmed", tc.openedBy, got, err)
+			case !tc.confirms && err == nil:
+				t.Errorf("ConfirmOverRollback with %q recorded = %+v, want a refusal", tc.openedBy, got)
+			}
+		})
+	}
+}

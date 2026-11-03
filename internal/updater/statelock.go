@@ -229,6 +229,23 @@ func SetStateLockWaitingForTest(fn func(dataDir string)) (restore func()) {
 	}
 }
 
+// SetStateTryLockForTest makes every try at the install marker's lock answer
+// what try answers, in place of fsutil.TryLock, for a test in another package
+// that stands in for what a filesystem answers (no lock to give, none kept, a
+// failure). It returns what puts the seam before it back. Process-global, as
+// SetStateLockWaitingForTest is.
+func SetStateTryLockForTest(try func(*os.File) error) (restore func()) {
+	stateLockHookMu.Lock()
+	prev := stateTryLock
+	stateTryLock = try
+	stateLockHookMu.Unlock()
+	return func() {
+		stateLockHookMu.Lock()
+		stateTryLock = prev
+		stateLockHookMu.Unlock()
+	}
+}
+
 // SetStateLockWaitForTest shortens LockState's wait for a test in another
 // package. It returns what puts the wait before it back. Process-global, as
 // SetStateLockWaitingForTest is.
