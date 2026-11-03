@@ -71281,3 +71281,10 @@ b9a37584 -head HEAD` passed. The companion's material, this head's
 `PROTOCOL.md` as `docs/BridgeProtocol.md`, its diff from main and the
 fixtures exported from this head (the manifest package, then the API
 package), went to the orchestrator with the report, for the iOS PR to land.
+
+**Review (CodeRabbit, checked against the code).** PROTOCOL.md said an
+`unsupported` kind's seek is "always" fault 803. A seek is 501 instead
+while no player runs or it is shutting down, while maintenance holds it, and
+when it was not admitted or was overtaken while waiting behind a pause, a
+resume or a start; one admitted and still waiting when its budget ends answers
+success. The sentence now says so. No test reads it.
