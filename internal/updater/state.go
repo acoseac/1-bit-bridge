@@ -150,8 +150,17 @@ type State struct {
 	RollbackStarted bool `json:"rollbackStarted,omitempty"`
 
 	// MigrationVeto names the version whose store migrations are refused
-	// here: a store open of that version with a step pending refuses
-	// (DisarmBeforeMigrating, MigrationVetoed).
+	// here (backlog B613's round 4): a store open of that version with a step
+	// pending refuses (DisarmBeforeMigrating, MigrationVetoed). A rollback
+	// that puts the backup back over that version's binary writes it before
+	// its rename (the early rollback's RollbackRecord; the boot's
+	// BootInstallFailed), since a command of that version may still be
+	// running from its image, its store open waiting, and must not migrate
+	// the store past the version put back. It outlives the rollback: every
+	// clear keeps it (ClearInstall), as a refusal recorded since does
+	// (recordRejection). Only that version's own serve, at its admission
+	// once its settings loaded (AdmitBoot), lifts it, and a new install's
+	// marker, a fresh one, carries none.
 	MigrationVeto string `json:"migrationVeto,omitempty"`
 }
 
@@ -307,14 +316,20 @@ func ClearStateDurably(dataDir string) error {
 // keeping a hold recorded beside it (RejectedVersion, its reason and its
 // digest): the boot is done with the install, and the hold is about another
 // version and the settings, so dropping it would cost one more download and
-// check of a version that refuses them (backlog B613's round 2). A marker
-// with no hold is removed, as ClearState removes it.
+// check of a version that refuses them (backlog B613's round 2). It keeps
+// the veto of a version's store migrations too (MigrationVeto), which is
+// about that version's commands, not the install: the housekeeping of the
+// version an early rollback put back clears the rollback's record here, and
+// a command of the version rolled back must still find its migrations
+// refused (round 4). A marker with neither is removed, as ClearState
+// removes it.
 func ClearInstall(dataDir string, st State) error {
-	if st.RejectedVersion == "" {
+	kept := State{RejectedVersion: st.RejectedVersion, RejectedReason: st.RejectedReason,
+		RejectedConfigDigest: st.RejectedConfigDigest, MigrationVeto: st.MigrationVeto}
+	if kept == (State{}) {
 		return ClearState(dataDir)
 	}
-	return SaveState(dataDir, State{RejectedVersion: st.RejectedVersion, RejectedReason: st.RejectedReason,
-		RejectedConfigDigest: st.RejectedConfigDigest})
+	return SaveState(dataDir, kept)
 }
 
 // BootAction is the decision the startup housekeeping should take
@@ -364,14 +379,16 @@ const (
 	// this boot is of that version: the housekeeping runs only once serve
 	// got past its settings, so the rollback will not be finished. Caller
 	// confirms the install as for BootInstallSucceeded, whatever the record's
-	// age (ConfirmOverRollback: installed now, RollbackStarted and a hold of
-	// this version cleared), and retains .bak for one more boot.
+	// age, on the record its admission made of this version opening the data
+	// dir and on no less (ConfirmOverRollback: installed now, RollbackStarted
+	// and a hold and a veto of this version cleared), and retains .bak for
+	// one more boot.
 	BootRollbackOvertaken
 
 	// BootRollbackFinished means the marker is that record and the version
 	// the backup held runs: the rollback was finished. Caller clears the
-	// install the record describes and keeps its hold (ClearInstall); nothing
-	// is restored.
+	// install the record describes and keeps its hold and its veto
+	// (ClearInstall); nothing is restored.
 	BootRollbackFinished
 )
 
@@ -437,14 +454,27 @@ func DecideBootAction(st State, currentServerVersion string, now time.Time) Boot
 // early rollback's record of an install of current that a start stopped
 // before the backup was back: the install confirmed as BootInstallSucceeded
 // confirms one (installed at now, so the boot after it removes the backup),
-// the rollback's mark gone, and its hold gone only where it holds current
-// back, a refusal of another version recorded since staying. The install and
-// the record of the start that went on past it stay as they are. An error
-// says it does not confirm, the marker to be left as it is.
+// the rollback's mark gone, and its hold and its veto gone only where they
+// name current, a refusal of another version recorded since staying. The
+// install and the record of the start that went on past it stay as they are.
+//
+// It confirms only on that record: st must name the install's version as the
+// one that opened the data dir (State.DataDirOpenedBy), which serve's
+// admission writes before the store opens (AdmitBoot), and current must be
+// that version (backlog B613's round 4). Otherwise it returns an error and st
+// as it was, for the caller to leave the marker as it is: a start that cannot
+// show its own admission has not shown that the rollback is over.
 func ConfirmOverRollback(st State, current string, now time.Time) (State, error) {
+	if st.DataDirOpenedBy == "" || !SameVersion(current, st.TargetVersion) || !SameVersion(st.DataDirOpenedBy, st.TargetVersion) {
+		return st, fmt.Errorf("the record does not name %s as the version that opened the data dir, as its admission records before the store opens",
+			current)
+	}
 	st.Status, st.InstalledAt, st.RollbackStarted = "installed", now, false
 	if SameVersion(st.RejectedVersion, current) {
 		st.RejectedVersion, st.RejectedReason, st.RejectedConfigDigest = "", "", ""
+	}
+	if SameVersion(st.MigrationVeto, current) {
+		st.MigrationVeto = ""
 	}
 	return st, nil
 }

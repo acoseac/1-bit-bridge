@@ -127,11 +127,19 @@ func recoverRefusedInstall(ctx context.Context, configPath string, reasons []str
 	// record cannot land between this read and the rename, and this rollback
 	// holds it from its read through the rename and any write that puts the
 	// install back, so that such an open waits for it and then refuses to
-	// migrate under the version put back (updater.MigrationVetoed). It is
-	// never held without the exclusion: a lock that cannot be taken, or a
-	// filesystem that keeps none, leaves the install as it is.
+	// migrate under the version put back (updater.MigrationVetoed: the record
+	// vetoes this version's store migrations, and the veto outlives it, round
+	// 4). It is never held without the exclusion: a lock that cannot be
+	// taken, or a filesystem that keeps none, leaves the install as it is, and
+	// so does serve's stop while it waits.
 	stateLock, err := updater.LockState(ctx, dataDir)
 	if err != nil {
+		var refused *updater.StateLockError
+		if !errors.As(err, &refused) {
+			// Serve's own stop, while it waited (round 4).
+			noRollback(stderr, st, "this start was stopped while it waited for the install marker's lock")
+			return 0, false
+		}
 		noRollback(stderr, st, fmt.Sprintf("the install marker's lock cannot be taken (%v), and only its holder may put the backup back", err))
 		return 0, false
 	}
@@ -232,8 +240,11 @@ func noRollback(stderr io.Writer, st updater.State, why string) {
 // early rollback's record of an install of this version, left by a start
 // stopped before the backup was back, the record resolves the rollback, so
 // the store's open migrates after it, and the housekeeping confirms the
-// install (BootRollbackOvertaken; backlog B613's round 3). An error is
-// serve's to refuse to start over: it is called where nothing has been
+// install (BootRollbackOvertaken; backlog B613's round 3). It lifts a veto of
+// this version's store migrations that a rollback left (round 4): this start
+// got past its settings, which is what the veto waited for. An error is
+// serve's to refuse to start over, but for ctx's own (serve's stop while it
+// waits for the install marker's lock): it is called where nothing has been
 // written yet.
 func disarmEarlyRollback(ctx context.Context, dataDir string, opts serveOpts, stderr io.Writer) error {
 	res, err := updater.AdmitBoot(ctx, dataDir, version.ServerVersion, opts.saveUpdateState)
@@ -242,6 +253,10 @@ func disarmEarlyRollback(ctx context.Context, dataDir string, opts serveOpts, st
 	}
 	if res.Unreadable != nil {
 		fmt.Fprintf(stderr, "updater: removed an install marker that could not be read (%v)\n", res.Unreadable)
+	}
+	if res.VetoLifted {
+		fmt.Fprintf(stderr, "updater: %s starts on settings it loads, so the veto of its store migrations that a rollback left is lifted\n",
+			version.ServerVersion)
 	}
 	return nil
 }

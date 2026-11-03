@@ -52,9 +52,11 @@ func requireTheLatestSchema(t *testing.T, dataDir string, present bool) {
 }
 
 // openStoreIn opens dataDir's store on a goroutine of the test's, as a
-// command of this version would, and returns where its answer comes and the
+// command of this version would, and drains it on cleanup: unhold, which
+// lets go of whatever the test holds the open in, is the drain's cancel,
+// since an open takes no context. It returns where its answer comes and the
 // channel closed once it has returned.
-func openStoreIn(t *testing.T, dataDir string) (opened <-chan error, done <-chan struct{}) {
+func openStoreIn(t *testing.T, dataDir string, unhold func()) (opened <-chan error, done <-chan struct{}) {
 	t.Helper()
 	answer, finished := make(chan error, 1), make(chan struct{})
 	go func() {
@@ -65,6 +67,7 @@ func openStoreIn(t *testing.T, dataDir string) (opened <-chan error, done <-chan
 		}
 		answer <- err
 	}()
+	drainLoopOnCleanup(t, unhold, finished, "the store's open")
 	return answer, finished
 }
 
@@ -92,9 +95,7 @@ func TestALaterCommandOfTheVersionRolledBackRefusesToMigrateOnceThePreviousVersi
 		held.close()
 		<-release.ch
 	}))
-	migrated, migrationDone := openStoreIn(t, r.dataDir)
-	// Its release is what ends the held open.
-	drainLoopOnCleanup(t, release.close, migrationDone, "the held store open")
+	migrated, _ := openStoreIn(t, r.dataDir, release.close)
 	select {
 	case <-held.ch:
 	case <-time.After(withinTheTest):
@@ -133,7 +134,7 @@ func TestALaterCommandOfTheVersionRolledBackRefusesToMigrateOnceThePreviousVersi
 	if res, err := updater.AdmitBoot(t.Context(), r.dataDir, version.ServerVersion, nil); err != nil || !res.VetoLifted {
 		t.Fatalf("this version's admission = %+v, %v; want the veto lifted", res, err)
 	}
-	reopened, _ := openStoreIn(t, r.dataDir)
+	reopened, _ := openStoreIn(t, r.dataDir, func() {})
 	if err := <-reopened; err != nil {
 		t.Fatalf("the store open after this version's admission = %v", err)
 	}
@@ -161,8 +162,7 @@ func TestAMigrationThatHoldsTheMarkersLockFirstStopsTheBootRollback(t *testing.T
 	t.Cleanup(updater.SetStateLockWaitingForTest(func(string) { signalOnce(waits) }))
 
 	ctx, cancel := context.WithCancel(context.Background())
-	migrated, migrationDone := openStoreIn(t, r.dataDir)
-	drainLoopOnCleanup(t, cancel, migrationDone, "the migrating store open")
+	migrated, _ := openStoreIn(t, r.dataDir, release.close)
 	select {
 	case <-held.ch:
 	case <-time.After(withinTheTest):
@@ -236,8 +236,7 @@ func TestABootRollbackThatHoldsTheMarkersLockFirstStopsTheMigration(t *testing.T
 		t.Fatal("the housekeeping never reached its rename")
 	}
 
-	migrated, migrationDone := openStoreIn(t, r.dataDir)
-	drainLoopOnCleanup(t, cancel, migrationDone, "the migrating store open")
+	migrated, migrationDone := openStoreIn(t, r.dataDir, release.close)
 	t.Cleanup(release.close)
 	select {
 	case <-waits:

@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -13,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/acoseac/1-bit-bridge/internal/dsn"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/supervision"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
@@ -581,28 +579,16 @@ func TestACommandThatMigratesTheStoreDisarmsTheEarlyRollback(t *testing.T) {
 	}
 }
 
-// storeOneMigrationBehind makes the store in dataDir and sets it back one
-// step of the ladder, which runs again at the next open: every step is
-// idempotent.
+// storeOneMigrationBehind writes the store in dataDir as the version before
+// this one left it, one step of the ladder behind: every step but the last,
+// and user_version there, so the last step's columns and index are not
+// there yet (manifest.WriteDatabaseAtVersionForTest). Until round 4 it set
+// user_version back on a store this build had made, which left them in
+// place, and the open after it ran the step over a schema that had it
+// already: no store a release left looks like that.
 func storeOneMigrationBehind(t *testing.T, dataDir string) {
 	t.Helper()
-	s, err := manifest.OpenStore(manifest.DefaultDBPath(dataDir))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatal(err)
-	}
-	raw, err := sql.Open("sqlite", dsn.File(manifest.DefaultDBPath(dataDir), "_pragma=busy_timeout(5000)"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer raw.Close()
-	var v int
-	if err := raw.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := raw.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, v-1)); err != nil {
+	if err := manifest.WriteDatabaseAtVersionForTest(manifest.DefaultDBPath(dataDir), latestStoreVersion(t)-1); err != nil {
 		t.Fatal(err)
 	}
 }

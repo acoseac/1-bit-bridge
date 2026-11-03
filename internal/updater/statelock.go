@@ -14,9 +14,10 @@ import (
 )
 
 // stateLockFileName is the file in the data dir on which the early rollback,
-// a store open that migrates and serve's first disarm hold an exclusive
-// kernel lock (fsutil.TryLock) while each reads and writes the install
-// marker (LockState; backlog B613's round 3). Never update-state.json
+// a store open that migrates, serve's first disarm and the boot's
+// housekeeping hold an exclusive kernel lock (fsutil.TryLock) while each
+// reads and writes the install marker (LockState; backlog B613's rounds 3
+// and 4). Never update-state.json
 // itself: every write of the marker renames a new file over it, and a lock
 // on the old file would not follow. Never removed: only the lock on it
 // means anything, and unlinking a lock file while it is held lets the next
@@ -35,7 +36,8 @@ const stateLockRetry = 50 * time.Millisecond
 // stateLockHookMu guards the test seams below: stateLockWait, which bounds
 // how long LockState waits for another holder (the early rollback holds the
 // lock across its backup's version, ProbeVersion's 10 s at most, a record and
-// a rename; a disarm, across one marker write), and which a test shortens
+// a rename; a disarm, across one marker write; the boot's housekeeping,
+// across two marker writes and a rename or the backup's removal), and which a test shortens
 // (SetStateLockWaitForTest); stateTryLock, fsutil.TryLock in production and
 // a test's stand-in for what a filesystem answers; and stateLockWaiting, nil
 // in production, run once when a taker finds the lock held and starts to
@@ -140,12 +142,15 @@ func (e *StateLockError) Unwrap() error { return e.Err }
 var noLocksSaid sync.Once
 
 // LockState takes the exclusive lock on <dataDir>/update-state.lock, the one
-// lock the early rollback, every store open that migrates and serve's first
-// disarm share around their reads and writes of the install marker (backlog
-// B613's round 3): a rollback holds it from its marker read through the
-// backup's rename and any write that puts the install back, a migration
-// through its durable record and its barrier, and serve's first disarm until
-// its record is durable. The order of the locks is serve's data dir lock
+// lock the early rollback, every store open that migrates, serve's first
+// disarm and the boot's housekeeping share around their reads and writes of
+// the install marker (backlog B613's rounds 3 and 4): a rollback holds it
+// from its marker read through the backup's rename and any write that puts
+// the install back, a migration through its durable record and its barrier,
+// serve's first disarm until its record is durable, and the housekeeping
+// from its marker read through its decision, its writes and the backup's
+// rename or removal (maybeRollbackOnBoot in cmd/bridge, which takes it
+// inside the data dir's, once the store's open has let the ladder go). The order of the locks is serve's data dir lock
 // (server.lock), then the store's migration lock (the ladder, beside the
 // database), then this one; a caller takes the ones it needs in that order,
 // and nothing that holds this one takes either of the others. A caller takes
@@ -155,17 +160,23 @@ var noLocksSaid sync.Once
 // It waits up to stateLockWait for another holder, asking every
 // stateLockRetry, and refuses with a *StateLockError: the lock held for the
 // whole wait, every try answered ENOLCK, the lock file's open failed, or the
-// lock failed another way. A filesystem whose lock says it keeps none
+// lock failed another way. The wait ends sooner when ctx does, with ctx's
+// error, never a *StateLockError, so a caller tells its own stop from a lock
+// it could not take (backlog B613's round 4): serve passes its own context
+// from its admission (AdmitBoot), its early rollback and its boot's
+// housekeeping, and a store open, which has none, keeps the bound alone
+// (DisarmBeforeMigrating). A context that has ended does not stop a take
+// that needs no wait. A filesystem whose lock says it keeps none
 // (fsutil.KeepsNoLocks's EOPNOTSUPP, ENOTSUP and errors.ErrUnsupported,
 // Windows' ERROR_NOT_SUPPORTED and ERROR_INVALID_FUNCTION; never ENOLCK) is
 // a hold that is not held (Held false, Unheld its answer), said once a
 // process: there no process can hold the lock, and a caller that needs it to
-// exclude another refuses (the early rollback), where one that only writes
-// beside other writers of its kind goes on. The lock file is opened through
+// exclude another refuses (the early rollback, the boot's housekeeping),
+// where one that only writes beside other writers of its kind goes on (a
+// disarm). The lock file is opened through
 // fsutil.OpenLockFile, so a link there is refused and a root caller makes it
 // the data dir's owner's.
 func LockState(ctx context.Context, dataDir string) (*StateLock, error) {
-	_ = ctx
 	f, err := fsutil.OpenLockFile(dataDir, stateLockFileName)
 	if err != nil {
 		return nil, &StateLockError{Err: err}
@@ -196,7 +207,10 @@ func LockState(ctx context.Context, dataDir string) (*StateLock, error) {
 				}
 				return nil, &StateLockError{noLock: true, Wait: wait, Err: noLock}
 			}
-			time.Sleep(stateLockRetry)
+			if err := sleepUnlessDone(ctx, stateLockRetry); err != nil {
+				_ = f.Close()
+				return nil, err
+			}
 		case fsutil.KeepsNoLocks(err):
 			_ = f.Close()
 			noLocksSaid.Do(func() {
@@ -209,6 +223,18 @@ func LockState(ctx context.Context, dataDir string) (*StateLock, error) {
 			_ = f.Close()
 			return nil, &StateLockError{Err: err}
 		}
+	}
+}
+
+// sleepUnlessDone waits d, or until ctx ends, whose error it then returns.
+func sleepUnlessDone(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

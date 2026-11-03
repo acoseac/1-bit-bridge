@@ -2332,9 +2332,21 @@ const backupShutdownWait = 45 * time.Second
 //     install, keeping the hold, when the backup's version does.
 //   - everything else: no-op.
 //
-// Each clear keeps a hold recorded beside the install (updater.ClearInstall).
+// Each clear keeps a hold recorded beside the install, and a veto of a
+// version's store migrations (updater.ClearInstall).
 // Failures here are logged but non-fatal — a botched rollback still
 // lets the server start up; the operator can recover manually.
+//
+// All of it runs holding the install marker's lock (updater.LockState), from
+// the marker's read through the decision, every write and the backup's
+// rename or removal (backlog B613's round 4), so that no store open that
+// migrates (a `bridge doctor`, a scan) records or migrates in between: it is
+// taken inside the data dir's lock, once the store's open has let its ladder
+// go, as the documented order has it, and let go when this returns. A lock
+// that cannot be held, for any reason (another holder past the wait, no lock
+// to give, a filesystem that keeps none, a failure, serve's stop), leaves the
+// marker and both binaries as they are, said on one line: the boot after it
+// asks again.
 func maybeRollbackOnBoot(ctx context.Context, stderr io.Writer, dataDir, binaryPath string) {
 	_ = bootHousekeeping(ctx, stderr, dataDir, binaryPath, version.ServerVersion, nil)
 }
@@ -2342,13 +2354,30 @@ func maybeRollbackOnBoot(ctx context.Context, stderr io.Writer, dataDir, binaryP
 // bootHousekeeping is maybeRollbackOnBoot as the boot of version current,
 // which puts the backup back through restore (nil is updater.RollbackBinary):
 // a test runs it as the version a rollback put back, or holds it in its
-// restore. It returns why it did nothing, where it did nothing for a reason
-// of its own.
+// restore. It returns why it left the marker as it is, where it did for a
+// reason of its own: the install marker's lock it could not hold, or an
+// interrupted rollback's record it would not confirm.
 func bootHousekeeping(ctx context.Context, stderr io.Writer, dataDir, binaryPath, current string, restore func(dst, suffix string) error) error {
-	_ = ctx
 	if restore == nil {
 		restore = updater.RollbackBinary
 	}
+	// A marker that asks nothing of this boot asks for no lock: a filesystem
+	// that keeps none, or a lock another process holds, costs a boot with
+	// nothing to do no wait and no line. What a boot acts on is read again
+	// under the lock, and decided there.
+	if st, err := updater.LoadState(dataDir); err == nil && updater.DecideBootAction(st, current, time.Now().UTC()) == updater.BootNoop {
+		return nil
+	}
+	lock, err := updater.LockState(ctx, dataDir)
+	if err == nil && !lock.Held() {
+		err = fmt.Errorf("the data dir's filesystem keeps no locks (%s), so nothing would keep a store's migration out", fsutil.ErrorWithoutPath(lock.Unheld()))
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "updater: not acting on the install marker at this start, since its lock cannot be held (%v): "+
+			"the install is left as it is, for a later start\n", err)
+		return err
+	}
+	defer lock.Release()
 	st, err := updater.LoadState(dataDir)
 	if err != nil {
 		fmt.Fprintf(stderr, "updater: load state: %v\n", err)
@@ -2396,13 +2425,27 @@ func bootHousekeeping(ctx context.Context, stderr io.Writer, dataDir, binaryPath
 			}
 			return nil
 		}
+		// The veto of the install's version's store migrations first,
+		// durably, then the rename (round 4): a command of that version may be
+		// running from its image, its store open waiting for this lock, and
+		// must find its migrations refused once the backup is back, however
+		// this start ends after the rename. A veto that cannot be recorded
+		// leaves the install as it is.
+		vetoed := st
+		vetoed.MigrationVeto = st.TargetVersion
+		if err := updater.SaveState(dataDir, vetoed); err != nil {
+			fmt.Fprintf(stderr, "updater: install of %s did not reach the expected version (running %s); not rolling back to %s.bak, "+
+				"since the veto of %s's store migrations could not be recorded (%v), and a command of it could migrate the store past the backup\n",
+				st.TargetVersion, current, binaryPath, st.TargetVersion, err)
+			return nil
+		}
 		fmt.Fprintf(stderr, "updater: install of %s did not reach the expected version (running %s); rolling back to .bak\n",
 			st.TargetVersion, current)
 		if err := restore(binaryPath, ".bak"); err != nil {
 			fmt.Fprintf(stderr, "updater: rollback failed: %v (manual recovery needed at %s)\n",
 				err, binaryPath)
 		}
-		if err := updater.ClearInstall(dataDir, st); err != nil {
+		if err := updater.ClearInstall(dataDir, vetoed); err != nil {
 			fmt.Fprintf(stderr, "updater: clear state: %v\n", err)
 		}
 	case updater.BootClearNotSwapped:
@@ -2428,11 +2471,13 @@ func bootHousekeeping(ctx context.Context, stderr io.Writer, dataDir, binaryPath
 		// admission recorded that this version opened the data dir), and the
 		// install is confirmed, however old the record. .bak stays for one
 		// more boot, as after any confirmed install (backlog B613's round 3).
+		// Only on that record (round 4): a record no admission of this
+		// version wrote is left as it is.
 		confirmed, err := updater.ConfirmOverRollback(st, current, time.Now().UTC())
 		if err != nil {
 			fmt.Fprintf(stderr, "updater: not confirming the install of %s over the rollback an earlier start began: %v; "+
 				"the install marker is left as it is\n", current, err)
-			return nil
+			return err
 		}
 		fmt.Fprintf(stderr, "updater: %s starts on settings it loads, so the rollback to %s an earlier start began is not finished: "+
 			"the install is confirmed, and %s.bak is kept until the next start\n", current, st.PreviousVersion, binaryPath)
@@ -3264,8 +3309,14 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// migrations: an armed install marker records that this version went on
 	// past its config, so neither the early rollback of a later start nor
 	// the boot rollback puts a backup back over what it writes (backlog
-	// B613). Not starting is the answer when that cannot be recorded.
+	// B613). Not starting is the answer when that cannot be recorded. A stop
+	// while it waits for the install marker's lock ends the start there, with
+	// nothing written: a stop's exit (round 4).
 	if err := disarmEarlyRollback(ctx, cfg.DataDir, opts, stderr); err != nil {
+		if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+			fmt.Fprintf(stderr, "serve: stopped before it started, while it waited for the install marker's lock\n")
+			return 0
+		}
 		fmt.Fprintf(stderr, "updater: %v; not starting, so that no rollback to the backup can pass over what this version would write\n", err)
 		return 1
 	}

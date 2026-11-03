@@ -423,7 +423,8 @@ func HeldBack(dataDir, configPath, candidate string) Hold {
 // settings digest (empty holds it whatever the settings are), keeping the
 // rest of the marker as it is, so a refusal before an install leaves the
 // last install's bookkeeping (its "installed" stamp, the cleanup of its
-// backup) in place. A marker that cannot be read is replaced.
+// backup) and a veto of a version's store migrations (State.MigrationVeto)
+// in place. A marker that cannot be read is replaced.
 func recordRejection(dataDir, version, reason, digest string) error {
 	st, err := LoadState(dataDir)
 	if err != nil {
@@ -500,16 +501,18 @@ func InstallArmed(st State) bool {
 // RollbackRecord is the marker the early rollback writes, durably, just before
 // it puts the backup back over the install st describes: rejected held back
 // for reason, against digest, beside the install it undoes
-// (State.RollbackStarted), with no Status. The binary the backup restores
-// takes it for no install and keeps the hold, whatever its version (0.2.1's
-// and 0.2.2's boot clears an install marker it cannot finish, and the hold
-// with it), and a start of the install's version that finds it, the backup
-// not back, finishes the rollback (EarlyRollback). It stays as it is once the
-// backup is back.
+// (State.RollbackStarted), with no Status, and the store migrations of the
+// install's version vetoed (State.MigrationVeto; backlog B613's round 4). The
+// binary the backup restores takes it for no install and keeps the hold,
+// whatever its version (0.2.1's and 0.2.2's boot clears an install marker it
+// cannot finish, and the hold with it), and a start of the install's version
+// that finds it, the backup not back, finishes the rollback (EarlyRollback).
+// It stays as it is once the backup is back.
 func RollbackRecord(st State, rejected, reason, digest string) State {
 	return State{
 		TargetVersion: st.TargetVersion, PreviousVersion: st.PreviousVersion, AttemptedAt: st.AttemptedAt,
 		SwapStarted: st.SwapStarted, RollbackStarted: true,
 		RejectedVersion: rejected, RejectedReason: reason, RejectedConfigDigest: digest,
+		MigrationVeto: st.TargetVersion,
 	}
 }
