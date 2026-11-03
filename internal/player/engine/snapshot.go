@@ -230,14 +230,22 @@ type StopInfo struct {
 // failed: a Start that returned an error, refused its first entry or passed
 // its deadline, or a Resume the backend refused or that passed its
 // deadline. Busy is a failure whose error wraps ErrDeviceBusy: another
-// process held the device. Each attempt replaces the last, so a later one
-// that succeeded, or failed for another reason, clears a busy one, whatever
-// happened in between. LastStop is no such record: a Start that succeeds
-// stops nothing, so it leaves the last stop as it was.
+// process held the device. Denied is a failure whose error wraps
+// ErrDeviceDenied: this process may not open the device's node (B676).
+// Resume is an attempt that was a paused session's Resume, false for a
+// session's Start, and Detail a failure's words, for a log line alone: the
+// cause is Busy's and Denied's, never the words'. Each attempt replaces the
+// last, so a later one that succeeded, or failed for another reason, clears a
+// busy or a denied one, whatever happened in between. LastStop is no such
+// record: a Start that succeeds stops nothing, so it leaves the last stop as
+// it was.
 type Attempt struct {
 	Seq    uint64
 	Failed bool
 	Busy   bool
+	Denied bool
+	Resume bool
+	Detail string
 }
 
 // EditState says whether inserts and the other token-advancing edits are
@@ -434,8 +442,9 @@ func (s *Snapshot) LastResume() (ResumeResult, string) { return s.resumed, s.res
 func (s *Snapshot) LastStop() StopInfo { return s.lastStop }
 
 // LastAttempt is the last play attempt and how it went (Attempt): what says
-// whether the last Start or Resume found the device busy, which LastStop
-// cannot, since a Start that succeeds does not replace it.
+// whether the last Start or Resume found the device busy, or its node refused
+// to this process, which LastStop cannot, since a Start that succeeds does
+// not replace it.
 func (s *Snapshot) LastAttempt() Attempt { return s.attempt }
 
 // Skipped is why entry id was skipped, when it was.

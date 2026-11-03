@@ -338,6 +338,13 @@ check_platform() {
 check_user() {
 	USER_ID=$(id -u)
 	USER_NAME=$(id -un 2>/dev/null) || USER_NAME=$USER_ID
+	USER_NAME_RESOLVED=1
+	case $USER_NAME in
+	'') USER_NAME_RESOLVED=0 ;;
+	*[!0-9]*) ;;
+	*) USER_NAME_RESOLVED=0 ;;
+	esac
+	[ "$USER_NAME_RESOLVED" = 1 ] || USER_NAME=$USER_ID
 	if [ "$USER_ID" = 0 ]; then
 		cu_sudo_user=${SUDO_USER:-}
 		if [ -n "$cu_sudo_user" ] && [ "$cu_sudo_user" != root ]; then
@@ -1114,6 +1121,105 @@ ensure_linger() {
 		"    $(command_line loginctl enable-linger "$USER_NAME")"
 }
 
+# playback_node prints the first ALSA playback node this box has (a DAC, or
+# any sound card, under /dev/snd), and fails where it has none: there is then
+# nothing for the bridge's own player to open, and no node to read the group
+# from that the advice below is about.
+playback_node() {
+	for pn_node in "$SYSROOT"/dev/snd/pcmC*D*p; do
+		if [ -e "$pn_node" ]; then
+			printf '%s' "$pn_node"
+			return 0
+		fi
+	done
+	return 1
+}
+
+# root_line WORD... prints WORD... as root types it: through sudo where the
+# box has sudo, as it stands otherwise (command_line).
+root_line() {
+	if command -v sudo >/dev/null 2>&1; then
+		command_line sudo "$@"
+	else
+		command_line "$@"
+	fi
+}
+
+# audio_advice HOW says what lets the bridge's own player (B470, off until it
+# is turned on in the console's Player page) open the DAC, where this box has
+# an ALSA playback node whose group neither every user nor this account is
+# given, or this login does not have yet. The player opens the node for
+# reading and writing; the audio group owns it on Debian, Ubuntu, Raspberry
+# Pi OS, Volumio and moOde, and a desktop's seat ACL, which lets a desktop
+# login open it, is not a lingering service's. The account's groups are the
+# group database's (id -nG USER), never this process's, which a login started
+# before a change keeps. Nothing is run here: adding a user to a group is
+# root's, and this installer changes no user and no group. HOW is service,
+# for a bridge its user's systemd manager runs, whose services keep the
+# groups the manager started with (a lingering user@UID.service started at
+# boot), so a restart of the bridge's own service would not give it the
+# group: the manager is restarted, as root, or the box rebooted; or self,
+# for a bridge its user starts, which a new login gives the group. A node
+# with no group, or one root's group owns, gets no advice. An unresolved
+# account keeps its uid for the manager, but gets no usermod command.
+audio_advice() {
+	aa_node=$(playback_node) || return 0
+	aa_listing=$(ls -ld -- "$aa_node" 2>/dev/null) || return 0
+	aa_mode=${aa_listing%% *}
+	case $aa_mode in
+	???????rw*) return 0 ;;
+	esac
+	aa_group=$(printf '%s\n' "$aa_listing" | awk '{ print $4 }')
+	case $aa_group in
+	'' | root | 0) return 0 ;;
+	esac
+	aa_account=$(id -nG "$USER_NAME" 2>/dev/null) || {
+		[ "$USER_NAME_RESOLVED" = 0 ] || return 0
+		aa_account=''
+	}
+	aa_process=$(id -nG 2>/dev/null) || aa_process=''
+	aa_in_account=0
+	case " $aa_account " in
+	*" $aa_group "*) aa_in_account=1 ;;
+	esac
+	if [ "$aa_in_account" = 1 ]; then
+		case " $aa_process " in
+		*" $aa_group "*) return 0 ;;
+		esac
+	fi
+	aa_restart=$(root_line systemctl restart "user@$USER_ID.service")
+	aa_cost="Restarting the service manager avoids a reboot, but it stops every service of $USER_NAME's, a desktop or terminal session under it included: run it from another administrative session. The bridge's service starts again with it."
+	if [ "$aa_in_account" = 0 ]; then
+		say "" "The bridge's own player (off until you turn it on, on the console's Player page) opens the DAC's node, $aa_node,"
+		if [ "$USER_NAME_RESOLVED" = 1 ]; then
+			say "which the $aa_group group owns, and $USER_NAME is not in $aa_group: the player could not open the DAC. To let it, add $USER_NAME to $aa_group, as root:" \
+				"    $(root_line usermod -aG "$aa_group" "$USER_NAME")"
+		else
+			say "which the $aa_group group owns. This account's user name could not be resolved;" \
+				"add the account with uid $USER_ID to $aa_group by its user name, as root;"
+		fi
+		if [ "$1" = self ]; then
+			say "then log in again (or reboot) before you start the bridge, so that it runs with the group."
+			return 0
+		fi
+		say "and, so that the bridge's service runs with the group, restart $USER_NAME's service manager, whose services keep the groups it started with" \
+			"(restarting the bridge's own service is not enough), as root, or reboot:" \
+			"    $aa_restart   # or reboot" \
+			"$aa_cost"
+		return 0
+	fi
+	if [ "$1" = self ]; then
+		say "" "$USER_NAME is in $aa_group, which owns the DAC's node ($aa_node), but this login started before $USER_NAME joined it:" \
+			"log in again (or reboot) before you start the bridge, so that its player runs with the group and can open the DAC."
+		return 0
+	fi
+	say "" "$USER_NAME is in $aa_group, which owns the DAC's node ($aa_node), but this login started before $USER_NAME joined it, and so did" \
+		"$USER_NAME's service manager, whose services keep the groups it started with: so that the bridge's own player can open the DAC," \
+		"restart that manager, as root, or reboot:" \
+		"    $aa_restart   # or reboot" \
+		"$aa_cost"
+}
+
 # say_running says what runs now and for how long: the service, and whether
 # it outlives the login and starts at boot, which is lingering's
 # (ensure_linger).
@@ -1150,10 +1256,14 @@ path_note() {
 	fi
 }
 
+# defer_setup REASON LINE... says the program is installed and not set up,
+# on a box that does not run systemd, and how to run it there, which its user
+# starts (audio_advice's self), and ends the run incomplete.
 defer_setup() {
 	say "" "The bridge $VERSION is installed at $TARGET, but not set up: $1"
 	shift
 	say "$@"
+	audio_advice self
 	path_note
 	exit 4
 }
@@ -1290,10 +1400,16 @@ fresh_install() {
 	download_release
 	install_binary
 	if [ "$SETUP" = no ]; then
-		say "" "Set it up when you are ready, with:" "    $(bridge_line "$TARGET" init)"
-		if command -v loginctl >/dev/null 2>&1 && ! linger_on; then
-			say "and so that its service outlives your login and starts when this box boots, turn lingering on, as root:" \
-				"    $(command_line loginctl enable-linger "$USER_NAME")"
+		if [ "$SYSTEMD" = 1 ]; then
+			say "" "Set it up when you are ready, with:" "    $(bridge_line "$TARGET" init)"
+			if command -v loginctl >/dev/null 2>&1 && ! linger_on; then
+				say "and so that its service outlives your login and starts when this box boots, turn lingering on, as root:" \
+					"    $(command_line loginctl enable-linger "$USER_NAME")"
+			fi
+			audio_advice service
+		else
+			say "" "Set it up when you are ready, with:" "    $(bridge_line "$TARGET" init --no-service)"
+			audio_advice self
 		fi
 		path_note
 		return 0
@@ -1308,6 +1424,7 @@ fresh_install() {
 	read_unit "$UNIT_FILE" || leave 1 "bridge init finished, but $UNIT_PROBLEM"
 	check_served "$INSTALLED_BIN" "$INSTALLED_CONFIG" "$VERSION"
 	report_outputs
+	audio_advice service
 	say_running
 	print_pairing "$INSTALLED_BIN" "$INSTALLED_CONFIG"
 	path_note
@@ -1376,6 +1493,7 @@ upgrade() {
 	fi
 	up_now=$(bridge_version "$up_bin") || leave 1 "$up_bin does not run any more; its previous program is beside it, as $up_bin.bak."
 	check_served "$up_bin" "$up_config" "$up_now"
+	audio_advice service
 	say_running
 	print_pairing "$up_bin" "$up_config"
 }

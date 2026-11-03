@@ -165,7 +165,10 @@ type PlayerRunning struct {
 	// paused, releasing, maintenance), "" with no engine.
 	Transport string `json:"transport"`
 	// LastError is the last play attempt's failure while no later one
-	// succeeded (device_busy), "" otherwise.
+	// succeeded or failed otherwise: device_busy (another process holds the
+	// DAC), or permission_denied (this process may not open the DAC's node,
+	// B676), "" otherwise. The second is this page's alone: GET /v1/outputs'
+	// lastError never carries it.
 	LastError string `json:"lastError"`
 	// Withheld is why the live config withholds the output now, whatever the
 	// DAC does: disabled, binding_changed, or "".

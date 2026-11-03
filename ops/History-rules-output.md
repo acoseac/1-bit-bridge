@@ -460,6 +460,43 @@ the start (E3) or the resume (E4) goes red. The engine imports neither ALSA
 package (`TestTheEngineImportsNoALSAPackage`, every source file whatever its
 build constraint), so its darwin and windows builds are as they were.
 
+*B676 (2026-11-03): a node refused to this process, by its sentinel too.*
+**Never derive a denied device from `LastStop`, playback's `permission_denied`
+code or an error's text: the attempt is denied only when its error wraps
+`engine.ErrDeviceDenied`, which the backend maps from alsapcm's permission
+reason (EACCES and EPERM alike, `openError`), at a start and at a resume's
+reopen, as it maps busy.** On Linux the audio group owns the DAC's node; a
+desktop login opens it through logind's seat ACL, and a systemd user service
+kept alive by lingering, often with nobody at the seat, has neither the ACL
+nor, until its user joins the group and its user manager restarts, the
+group. The open then failed with the cause lost on the way: the attempt knew
+busy alone, so `/api/output/player` and the console's Player page said
+nothing, and a refused resume, which moves no generation, was logged nowhere.
+The backend's `busy` and `busyError` became `deviceCause` and `causeError`,
+one wrap for either sentinel, the text still the alsapcm error's. The attempt
+gained `Denied`, `Resume` (a paused session's Resume, a refused one and one
+past its deadline alike; false for a Start) and `Detail`, the failure's words,
+which serve's `logPlayerResume` logs and nothing decides from. A later attempt
+that succeeds, or fails for another reason (an entry refused, a busy device,
+words alone that say permission), clears a denied one, as it clears busy.
+GET /v1/outputs' `lastError` keeps PROTOCOL.md's closed list, `device_busy` or
+null, so a denied attempt is null there; the console's view reads the
+attempt of the same snapshot (`bridgeOutput.facts`) and words it
+`permission_denied` (`consoleLastError`), the decision on B676's brief (Argon's
+recommendation): no wire change and no iOS mirror. Pinned by
+`TestADeniedStartIsTheLastAttemptUntilAStartSucceeds`,
+`TestADeniedResumeIsTheLastAttemptUntilAResumeSucceeds`,
+`TestALaterFailureForAnotherReasonEndsDenied`,
+`TestAResumePastItsDeadlineIsAFailedResume`, through the real chain over the
+fake kernel's EACCES and EPERM by
+`TestPlaybackStartOnADeniedDeviceIsTheEnginesDeniedAttempt` and
+`TestPlaybackDeniedResumeAfterTheReleaseIsTheEnginesDeniedAttempt`, the
+words-alone guards `TestPlaybackARefusalThatSaysPermissionIsNoDeniedAttempt`
+and `TestPlaybackARefusalThatSaysBusyIsNoBusyAttempt` (whose permission decoy
+is now denied, as it should be), and in serve by
+`TestThePermissionCauseIsTheConsolesWordAlone` and
+`TestThePlayersPermissionCauseReachesTheConsoleAndTheLog`.
+
 ### The codecs, one source
 
 **List the containers `playback.PlayedContainers` names, which the open's

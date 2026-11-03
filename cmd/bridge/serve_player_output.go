@@ -137,16 +137,25 @@ func (b *bridgeOutput) Enabled() bool { return b != nil && b.plan.lists }
 // Facts is the player now: no element while the gate is off or the player
 // has no identity.
 func (b *bridgeOutput) Facts(ctx context.Context) api.BridgeOutputFacts {
+	f, _ := b.facts(ctx)
+	return f
+}
+
+// facts is Facts and the last play attempt of the one engine snapshot they
+// were read from, the zero Attempt with no engine (B676): the console's view
+// words its own lastError from that attempt (consoleLastError), which GET
+// /v1/outputs' closed list does not name.
+func (b *bridgeOutput) facts(ctx context.Context) (api.BridgeOutputFacts, engine.Attempt) {
 	if !b.Enabled() || b.p == nil {
-		return api.BridgeOutputFacts{}
+		return api.BridgeOutputFacts{}, engine.Attempt{}
 	}
 	ready := signalled(b.p.ready)
 	id, ok := b.identity(ready)
 	if !ok {
-		return api.BridgeOutputFacts{}
+		return api.BridgeOutputFacts{}, engine.Attempt{}
 	}
-	state, reason, lastErr := b.state(ready)
-	facts := api.BridgeOutputFacts{Listed: true, UUID: id, State: state, Reason: reason, LastError: lastErr,
+	state, reason, attempt := b.state(ready)
+	facts := api.BridgeOutputFacts{Listed: true, UUID: id, State: state, Reason: reason, LastError: playerLastError(attempt),
 		DAC:      b.dac(ctx, state),
 		OpenHome: b.openHome(id), Codecs: playedCodecs(), FixedVolume: b.fixedVolume, DSDMode: b.dsdMode, AllowDoP: b.allowDoP}
 	if ready {
@@ -159,7 +168,7 @@ func (b *bridgeOutput) Facts(ctx context.Context) api.BridgeOutputFacts {
 			}
 		}
 	}
-	return facts
+	return facts, attempt
 }
 
 // bridgeDSDFacts is the element's dsdPlayback and playback from one read of
@@ -212,28 +221,29 @@ func (b *bridgeOutput) identity(ready bool) (string, bool) {
 	return id, err == nil
 }
 
-// state is the element's state, reason and lastError: the plan's refusal
-// first (ready may never close for it), then the start's outcome, then one
-// snapshot of the engine.
-func (b *bridgeOutput) state(ready bool) (state, reason, lastError string) {
+// state is the element's state and reason, and the last play attempt its
+// lastError is read from: the plan's refusal first (ready may never close for
+// it), then the start's outcome, then one snapshot of the engine, the attempt
+// its own (the zero Attempt before an engine runs).
+func (b *bridgeOutput) state(ready bool) (state, reason string, attempt engine.Attempt) {
 	if !b.plan.start {
 		why := b.plan.refused
 		if why == "" {
 			why = refusedConfigInvalid
 		}
-		return bridgeStateUnavailable, why, ""
+		return bridgeStateUnavailable, why, engine.Attempt{}
 	}
 	if !ready {
-		return bridgeStateUnavailable, reasonStarting, ""
+		return bridgeStateUnavailable, reasonStarting, engine.Attempt{}
 	}
 	eng := b.p.eng
 	if eng == nil {
-		return bridgeStateUnavailable, reasonStartFailed, ""
+		return bridgeStateUnavailable, reasonStartFailed, engine.Attempt{}
 	}
 	snap := eng.Snapshot()
 	closed := signalled(eng.Done()) || snap.Closed()
 	state, reason = playerState(snap, closed)
-	return state, reason, playerLastError(snap)
+	return state, reason, snap.LastAttempt()
 }
 
 // playerSnapshot is what the element reads of an engine snapshot
@@ -244,7 +254,6 @@ type playerSnapshot interface {
 	Output() engine.OutputState
 	Maintenance() (engine.MaintenanceInfo, bool)
 	ReleaseUnconfirmed() (engine.ReleaseInfo, bool)
-	LastAttempt() engine.Attempt
 }
 
 // playerState is the element's state and reason from a running engine's
@@ -297,11 +306,13 @@ func outputReason(r string) string {
 	return reasonOutputUnavailable
 }
 
-// playerLastError is device_busy while the last play attempt failed for a
+// playerLastError is device_busy while the last play attempt a failed for a
 // busy device, "" otherwise: the engine's record of the last attempt, never
-// LastStop, which a start that succeeds does not replace.
-func playerLastError(s playerSnapshot) string {
-	if a := s.LastAttempt(); a.Failed && a.Busy {
+// LastStop, which a start that succeeds does not replace. An attempt denied
+// the device's node is "" here too: that cause is the console's alone
+// (consoleLastError), never a word of PROTOCOL.md's closed list (B676).
+func playerLastError(a engine.Attempt) string {
+	if a.Failed && a.Busy {
 		return lastErrorDeviceBusy
 	}
 	return ""
