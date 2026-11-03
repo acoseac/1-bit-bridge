@@ -71289,11 +71289,12 @@ through the shared build lock, at 633c9e6e with this record in the tree:
   alone ran.
 
 **For the owner.**
-- PROTOCOL.md's Updates paragraph says a manual rollback via `POST
+- PROTOCOL.md's Updates paragraph said a manual rollback via `POST
   /api/updates/rollback` stays possible for one boot after a successful
   install; since B692 it is refused once the new version has opened the data
-  dir, which its start records. That sentence changes with the iOS mirror PR,
-  not here.
+  dir, which its start records. This PR changes that sentence (fb0d3bbe, after
+  this entry was written); the app's copy, `docs/BridgeProtocol.md`, follows
+  in its iOS mirror PR (CodeRabbit corrected this line).
 - The console's Roll back button still follows `.bak`'s presence
   (`canRollback`), so it shows where the rollback now refuses with 409 and the
   reason; hiding it there would be a console change of its own.
