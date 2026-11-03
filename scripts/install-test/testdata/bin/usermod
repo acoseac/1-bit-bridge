@@ -1,0 +1,7 @@
+#!/bin/sh
+# usermod for the installer's tests: it logs its call and changes nothing.
+# The installer runs no usermod (adding a user to a group is root's, and it
+# prints the command instead), so a call here is a defect the tests report.
+printf 'usermod %s\n' "$*" >>"${STUB_LOG:?}"
+echo 'usermod: Permission denied.' >&2
+exit 1
