@@ -71430,4 +71430,12 @@ checkout --` and the tree clean after it (`.tmp/_b692/controls.py` R5): the
 ask after the restamp taken out, predicted and observed red on that one
 subtest (1 test, 1 subtest).
 
-**Checks.** CHECKS-PENDING
+**Checks.** On legion0, through the shared build lock, at 14ddd6f0 with this
+record in the tree: `go test -race -count=1 -timeout 90m -tags
+ts_omit_webclient,ts_omit_debugeventbus ./internal/updater/...` ok (26 s);
+cmd/bridge's `TestEveryCitedTestNameExists` over the changed records ok;
+`make vet` and `GOOS=windows go vet` of every package with the tags: clean;
+go1.27.3's gofmt on the changed Go files: clean; `make docs-check` ok, and
+config-lifecycle.md at 97.3 % of its budget with the round-3 patch, by the
+budget script's own `measure` and `report`. cmd/bridge's code is unchanged
+since round 2's gates.
