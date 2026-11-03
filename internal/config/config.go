@@ -3014,7 +3014,8 @@ func loadData(path string, data []byte) (*Config, error) {
 	if err := DecodeFile(data, &cfg); err != nil {
 		// Without the file's text: yaml.v3 quotes what it cannot decode,
 		// and that is often a password or a serial on the wrong line.
-		return nil, fmt.Errorf("parse config %q: %w", path, ValueFreeYAMLError(err))
+		reason := ValueFreeYAMLError(err)
+		return nil, &RefusedError{err: fmt.Errorf("parse config %q: %w", path, reason), reason: reason}
 	}
 	cfg.applyDefaults()
 	cfg.applyEnvOverrides()
@@ -3028,7 +3029,7 @@ func loadData(path string, data []byte) (*Config, error) {
 	// of what "loaded config" means to every downstream consumer. `cfg` is
 	// local to this call, so the in-place rewrite is safe.
 	if err := cfg.NormalizeAndValidate(); err != nil {
-		return nil, err
+		return nil, &RefusedError{err: err, reason: err}
 	}
 	return &cfg, nil
 }

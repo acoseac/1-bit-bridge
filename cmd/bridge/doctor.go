@@ -400,7 +400,10 @@ func buildDoctorDepsFor(cfgPath string, absentIsPreSetup bool) doctor.Deps {
 			// keep a handle open across the rest of the report. A failure to
 			// open is returned, not swallowed — the check treats an error as
 			// "don't know" and stays silent rather than guessing.
-			dbPath := filepath.Join(cfg.DataDir, "bridge.db")
+			// The data dir's own database, by manifest.DefaultDBPath: a store
+			// open that migrates records it in the install marker beside it
+			// (TestEveryStoreTheBridgeOpensIsItsDataDirsDatabase).
+			dbPath := manifest.DefaultDBPath(cfg.DataDir)
 			d.LibraryHasCodec = func(ctx context.Context, codec string) (bool, error) {
 				// The stat looks redundant against OpenStore's own error and
 				// was flagged as such — it is NOT. `OpenStore` on a missing

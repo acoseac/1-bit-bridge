@@ -273,6 +273,11 @@ func symlinkAtStore(path string) (string, bool) {
 // or -shm is also refused by SQLite's own open (O_NOFOLLOW). -journal is
 // not opened in WAL mode. None of the four is a symlink in any supported
 // layout (backlog B262, B346).
+//
+// path's directory is taken for the data dir: an open with a migration step
+// pending records it in the install marker there (disarmBeforeMigrating), so
+// the bridge opens its store at DefaultDBPath(dataDir) and nowhere else
+// (backlog B613's round 3).
 func OpenStore(path string) (*Store, error) {
 	if err := fsutil.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir store dir: %w", err)
@@ -2869,6 +2874,11 @@ func (s *Store) migrate() error {
 	var current int
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&current); err != nil {
 		return fmt.Errorf("read user_version: %w", err)
+	}
+	if current < migrations[len(migrations)-1].version {
+		if err := disarmBeforeMigrating(s.path, current); err != nil {
+			return err
+		}
 	}
 	for _, m := range migrations {
 		if m.version <= current {

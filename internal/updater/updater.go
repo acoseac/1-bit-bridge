@@ -124,6 +124,11 @@ type Status struct {
 	// install. Reset to "" on each gate cycle so a one-shot
 	// failure doesn't linger after the underlying state changes.
 	DeferredReason string
+
+	// InstallWarning is set on the Status a manual Install returns when
+	// the candidate was installed without its settings check, because it
+	// predates the check. Never set on the cached status.
+	InstallWarning string
 }
 
 // Options configures a new Updater. Zero values pick sane defaults so
@@ -474,13 +479,18 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 	if !st.UpdateAvailable || st.LatestVersion == "" {
 		return
 	}
-	// Operator-rollback gate, ahead of every other gate INCLUDING the
+	// The rejection gate, ahead of every other gate INCLUDING the
 	// pending-restart fast path: a rejected release must not be
-	// re-installed, and a restart still pending for one must not fire.
-	if rejected := u.rejectedCandidate(st.LatestVersion); rejected != "" {
-		reason := fmt.Sprintf("%s was rolled back on this host; auto-install resumes at the next newer release", rejected)
-		u.recordDeferredReason(reason)
-		logger.Info(autoInstallDeferredMessage, "reason", "operator rolled this release back", "version", rejected)
+	// re-installed, and a restart still pending for one must not fire. A
+	// release the operator rolled back is held until a newer one; one that
+	// refused this bridge's settings, until they change (HeldBack).
+	if hold := u.heldBack(st.LatestVersion); hold.Version != "" {
+		u.recordDeferredReason(hold.Reason)
+		why := "operator rolled this release back"
+		if hold.Recorded {
+			why = "this release refuses the settings, or predates their check"
+		}
+		logger.Info(autoInstallDeferredMessage, "reason", why, "version", hold.Version)
 		return
 	}
 	if !u.inAllowedWindow(u.now()) {
@@ -504,13 +514,24 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 	}
 
 	logger.Info("auto-installing", "from", st.CurrentVersion, "to", st.LatestVersion)
-	if _, err := u.Install(ctx, *u.autoInstallOpts); err != nil {
+	opts := *u.autoInstallOpts
+	opts.Automatic = true
+	if _, err := u.Install(ctx, opts); err != nil {
 		// Compat-gate refusals are a normal deferred state; the
 		// Install path has already populated DeferredReason. Other
 		// failures (download, verify, swap) are operator-actionable
 		// and stay in the log without polluting the dashboard's
 		// held-update card.
-		if errors.Is(err, ErrCompatGateRefused) || errors.Is(err, ErrInstallPendingRestart) {
+		if reason, ok := RefusalReason(err); ok {
+			// The candidate refused the settings, or predates their
+			// check: the hold is on disk now, and the gate above says it
+			// from the next poll; this one says it too.
+			if hold := u.heldBack(st.LatestVersion); hold.Version != "" {
+				reason = hold.Reason
+			}
+			u.recordDeferredReason(reason)
+			logger.Info(autoInstallDeferredMessage, "err", err)
+		} else if errors.Is(err, ErrCompatGateRefused) || errors.Is(err, ErrInstallPendingRestart) {
 			// Both are normal deferred states, not failures.
 			//
 			// ErrInstallPendingRestart is reachable here BECAUSE intent
@@ -553,27 +574,22 @@ func (u *Updater) inflightSessions() int64 {
 	return u.autoInstallOpts.Sessions.Inflight()
 }
 
-// rejectedCandidate reports the rolled-back release blocking
-// `candidate`, or "" when nothing blocks it. The rejection lives in
+// heldBack reports what holds `candidate` back from the auto-installer
+// (HeldBack): a release the operator rolled back, or one that refused this
+// bridge's settings or predates their check. The rejection lives in
 // update-state.json (State.RejectedVersion) because it has to survive
 // the restart the rollback needs to take effect.
 //
 // Read at the gate rather than cached on the Updater: the gate runs at
 // most once per poll interval (6 h by default), so the cost is one tiny
-// file read, and there is no cache to go stale against a rollback
-// performed by the `bridge update` CLI in another process.
-func (u *Updater) rejectedCandidate(candidate string) string {
-	if u.autoInstallOpts == nil || u.autoInstallOpts.DataDir == "" {
-		return ""
+// file read and a digest of the settings, and there is no cache to go
+// stale against a rollback performed by the `bridge update` CLI in another
+// process, or against settings an operator just fixed.
+func (u *Updater) heldBack(candidate string) Hold {
+	if u.autoInstallOpts == nil {
+		return Hold{}
 	}
-	st, err := LoadState(u.autoInstallOpts.DataDir)
-	if err != nil || st.RejectedVersion == "" {
-		return ""
-	}
-	if !rejectionBlocks(candidate, st.RejectedVersion) {
-		return ""
-	}
-	return st.RejectedVersion
+	return HeldBack(u.autoInstallOpts.DataDir, u.autoInstallOpts.ConfigPath, candidate)
 }
 
 // rejectionBlocks reports whether an operator rollback of `rejected`

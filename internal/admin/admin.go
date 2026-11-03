@@ -1340,6 +1340,14 @@ var (
 	ErrUpdatePendingRestart  = errors.New("this release is already installed and waiting for a restart")
 	ErrUpdateNotSupported    = errors.New("self-install not supported on this platform")
 	ErrUpdatePathNotWritable = errors.New("binary path not writable")
+	// ErrUpdateConfigRefused: the new version's settings check refused
+	// this bridge's settings, so nothing was installed (backlog B613). Its
+	// own code, a 409, since the remedy is the settings, which the detail
+	// names by line, and nothing went wrong in the install itself.
+	ErrUpdateConfigRefused = errors.New("the new version refuses this bridge's settings")
+	// ErrUpdateConfigCheckFailed: the new version's settings check did not
+	// answer, so nothing was installed; trying again checks again.
+	ErrUpdateConfigCheckFailed = errors.New("the new version could not check this bridge's settings")
 )
 
 // UpdateStatus is the wire shape /api/updates returns. Decoupled from
@@ -1385,6 +1393,15 @@ type UpdateStatus struct {
 	// cmd/bridge adapter from the updater's on-disk marker — the same
 	// place the auto-install gate reads it, so the two can't disagree.
 	RejectedVersion string `json:"rejectedVersion,omitempty"`
+	// RejectedReason says why RejectedVersion is held back when it is not
+	// an operator's rollback: it refused this bridge's settings, before
+	// its install or at its first start (naming the line), or it predates
+	// the settings check (backlog B613). Names no path and no value. The
+	// "Held update" row shows it through DeferredReason while it holds.
+	RejectedReason string `json:"rejectedReason,omitempty"`
+	// InstallWarning is set on an install's answer when the new version
+	// was installed without its settings check, because it predates it.
+	InstallWarning string `json:"installWarning,omitempty"`
 }
 
 // Server owns the admin listener + mux. One per process.
