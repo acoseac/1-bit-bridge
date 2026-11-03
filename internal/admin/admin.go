@@ -1303,7 +1303,9 @@ type TailscaleStatus struct {
 // UpdateProvider is the read-side of the updater used by the admin
 // console. Implemented by the adapter in cmd/bridge/main.go around
 // internal/updater.Updater. CheckNow takes a context so a slow GitHub
-// response can be cancelled if the operator's browser disconnects.
+// response can be cancelled if the operator's browser disconnects, and
+// Install and Rollback take the request's, which ends their wait for
+// the install marker's lock.
 //
 // Install and Rollback return errors the admin handler classifies
 // via errors.Is against the package-level sentinels below
@@ -1315,7 +1317,7 @@ type UpdateProvider interface {
 	Status() UpdateStatus
 	CheckNow(ctx context.Context) UpdateStatus
 	Install(ctx context.Context, force bool) (UpdateStatus, error)
-	Rollback(force bool) error
+	Rollback(ctx context.Context, force bool) error
 }
 
 // Sentinel errors for the install / rollback paths. Defined in
@@ -1348,6 +1350,13 @@ var (
 	// ErrUpdateConfigCheckFailed: the new version's settings check did not
 	// answer, so nothing was installed; trying again checks again.
 	ErrUpdateConfigCheckFailed = errors.New("the new version could not check this bridge's settings")
+	// ErrUpdateMarkerLocked: the install marker's lock could not be held
+	// (another process holds it, or the data dir's filesystem keeps no
+	// locks), so nothing was installed or rolled back (backlog B692).
+	ErrUpdateMarkerLocked = errors.New("the install marker's lock cannot be held")
+	// ErrUpdateRollbackRefused: the rollback would put the backup back over
+	// a store a newer version may have changed, so nothing was rolled back.
+	ErrUpdateRollbackRefused = errors.New("the rollback was refused")
 )
 
 // UpdateStatus is the wire shape /api/updates returns. Decoupled from

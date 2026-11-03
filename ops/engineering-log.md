@@ -25,6 +25,9 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-11-03 — B692 round 3: a stop during the restamp's write requests no restart](#2026-11-03--b692-round-3-a-stop-during-the-restamps-write-requests-no-restart)
+- [2026-11-03 — B692 round 2: an operator's rollback stays under way until its rename, and the stops in the updater's lock waits are stops](#2026-11-03--b692-round-2-an-operators-rollback-stays-under-way-until-its-rename-and-the-stops-in-the-updaters-lock-waits-are-stops)
+- [2026-11-03 — B692: the updater's own install, rollback, hold and restamp hold the install marker's lock](#2026-11-03--b692-the-updaters-own-install-rollback-hold-and-restamp-hold-the-install-markers-lock)
 - [2026-11-03 — B613 round 4: the migration veto outlives the rollback's record, the boot's housekeeping holds the marker's lock, a stop ends that lock's wait, an interrupted rollback is confirmed only on the install's own record](#2026-11-03--b613-round-4-the-migration-veto-outlives-the-rollbacks-record-the-boots-housekeeping-holds-the-markers-lock-a-stop-ends-that-locks-wait-an-interrupted-rollback-is-confirmed-only-on-the-installs-own-record)
 - [2026-11-02 — B613 round 3: the barrier asked again before a disarm trusts the marker, one lock for the rollback and every migration, a directory fsync the filesystem cannot do, an interrupted rollback reconciled at boot](#2026-11-02--b613-round-3-the-barrier-asked-again-before-a-disarm-trusts-the-marker-one-lock-for-the-rollback-and-every-migration-a-directory-fsync-the-filesystem-cannot-do-an-interrupted-rollback-reconciled-at-boot)
 - [2026-11-02 — B613 round 2: the hold before the rename, every store open that migrates disarms, the boot keeps a hold, the marker's barrier fails its write, Windows variable names](#2026-11-02--b613-round-2-the-hold-before-the-rename-every-store-open-that-migrates-disarms-the-boot-keeps-a-hold-the-markers-barrier-fails-its-write-windows-variable-names)
@@ -71129,3 +71132,311 @@ bound a socket and no commit was made.
   host and with GOOS=windows. `make docs-check` passed. Both rules files
   were writable, so the corrections and their long forms are in the tree;
   no fallback rules patch was needed.
+
+## 2026-11-03 — B692: the updater's own install, rollback, hold and restamp hold the install marker's lock
+
+Backlog B692, the residual B613's round 4 named: `Updater.Install` and
+`Updater.Rollback` wrote `update-state.json` and swapped the binary outside
+`update-state.lock`, which B613 had made the one lock of the early rollback,
+serve's admission, the boot's housekeeping and every migrating store open.
+Worker b692 on legion0 (Ubuntu 26.04, linux/amd64, go1.27.3,
+`GOTOOLCHAIN=local`, umask 022), branch `fix/b692-install-rollback-under-lock`
+from main 4f44a926, the brief with Codex's and Argon's binding notes.
+Commits: seams bb6d5023 (which change nothing), red 0115ef7a, fix 94bc6fdd,
+the no-backup pin a37ed402, then this record. The rule is a new bullet after
+B613 round 5's in `.claude/rules/config-lifecycle.md`, with the staged-install
+entry ("An install of a target already staged on disk is REFUSED…") moved to
+its long form to keep the file under its budget (98,000 bytes, 98.0 %),
+shipped as a checked patch with the report (this worker cannot write
+`.claude/`); the long form is B692's section of
+`ops/History-rules-config-lifecycle.md`, where round 3's sentence naming the
+lock's three callers, round 2's follow-up (which named a CLI rollback that
+does not exist) and round 4's "Not changed" paragraph are corrected.
+
+**The paths.**
+
+| Path | File | Process | Locks it held already |
+|---|---|---|---|
+| `Install` from `bridge update` | `cmd/bridge/update.go` (`updateCmd`), `internal/updater/install.go` (`Install`) | its own | none (its Updater's `installInFlight`) |
+| `Install` from the console | `internal/admin/handlers_api.go` (`apiUpdatesInstall`), `cmd/bridge/main.go` (`updateInfoAdapter.Install`) | serve | `server.lock`; the ladder let go at the store's open |
+| `Install` from the auto-installer | `internal/updater/updater.go` (`maybeAutoInstall`) | serve, Run on `scanCtx` | `server.lock` |
+| `Rollback` from the console (no CLI rollback) | `handlers_api.go` (`apiUpdatesRollback`), `main.go` (`updateInfoAdapter.Rollback`), `install.go` (`Rollback`) | serve | `server.lock` |
+| the hold | `install.go` (`recordHold`), `internal/updater/configcheck.go` (`recordRejection`) | the install's | the install's |
+| the restamp | `updater.go` (`restartWhenDrained`, `refreshInstallAttemptedAt`) | serve | `server.lock` |
+
+**What changed.**
+1. `lockMarkerForUpdate` (`internal/updater/markerlock.go`): `LockState`, a
+   refusal (`*markerLockError`, matching `ErrMarkerLockUnavailable`, in words
+   that name no path) for a holder past the 30 s wait, ENOLCK, any other
+   failure and a filesystem that keeps no locks, the caller's own stop
+   returned as it is, and the context asked again once an uncontended lock is
+   taken.
+2. Install takes it after the download, the verification and the settings
+   check, decides again under it (`decideUnderLock`: the swap awaiting its
+   restart, whichever process made it; the auto-installer's hold recorded
+   since its gate, `ErrInstallHeldBack`), holds it through the marker's two
+   writes and the swap, and on a swap that fails puts back the marker it read
+   (`putMarkerBack`) where it used to remove it.
+3. Rollback takes the request's context and the lock; refuses where
+   `DataDirOpenedBy` names a version other than the backup's
+   (`RollbackRefusal`, `ErrRollbackRefused`), where the marker cannot be read
+   and where there is no backup; records durably before the rename the marker
+   it read with the install ended, the version held back and its store
+   migrations vetoed (`OperatorRollbackRecord`); puts the marker back if the
+   rename fails.
+4. The hold and the restamp read and write under the lock, and skip, said
+   (a stop says nothing), where they cannot hold it.
+5. The console: `UpdateProvider.Rollback(ctx, force)`, 409 `marker-locked` and
+   `rollback-refused` (`mapUpdaterError`, `classifyUpdateError`); `bridge
+   update` says the running bridge is unchanged.
+6. Windows: `scmStopWait` moves to `swapbound.go`, which every platform
+   builds, and a test holds it to half the lock's wait; a serve test pins that
+   serve's stop takes no part of the lock.
+
+**Decisions.** The brief's (Codex and Argon): a filesystem that keeps no
+locks refuses every one of these writes, migrations going on unlocked there;
+Install decides again under the lock and never holds it through the
+download; a rollback after the version it rolls back from opened the data
+dir is refused, with no confirmation flow, and one that goes on vetoes that
+version's migrations by a read, a change and a write that keep the marker's
+other fields. This worker's: a failed swap puts the marker back rather than
+removing it, so a hold or a veto survives a failed attempt; the
+auto-installer's hold is part of the decision made again; a missing backup
+refuses before anything is written, in words without the backup's path; the
+round-3 entry's rules line is left as it was (its lock does keep those two
+apart, and `verify_moves.py` cannot account for one rewrite of a block that
+stands in two files), its long form's three-caller sentence corrected. The
+first hold for the rollback-first housekeeping test was the rollback's
+rename (`RestoreBackup`); with the fix the record comes first, the
+housekeeping read it there and rightly did nothing without waiting, so the
+hold moved between the read and the record (`BeforeRollbackRecord`), and the
+red was observed again on the red commit's rollback with that hold.
+
+**Red first** (0115ef7a on the seams, so as on main): internal/updater, 12
+tests (`TestAnInstallThatHoldsTheMarkersLockFirstKeepsTheMigrationWaiting`,
+`TestAMigrationThatHoldsTheMarkersLockFirstIsReadByTheInstallsDecision`,
+`TestASecondProcesssInstallDecidesAgainUnderTheMarkersLock`,
+`TestAnAutomaticInstallDecidesAgainOnAHoldRecordedWhileItDownloaded`,
+`TestAnInstallRefusedForTheMarkersLockSwapsNothing` (6),
+`TestTheHoldOfARefusedCandidateIsRecordedOnlyUnderTheMarkersLock` (4 of 5),
+`TestARollbackThatHoldsTheMarkersLockFirstVetoesTheMigration`,
+`TestAMigrationThatHoldsTheMarkersLockFirstRefusesTheRollback`,
+`TestARollbackIsRefusedOnceTheVersionItRollsBackFromOpenedTheDataDir` (2),
+`TestARollbackRecordsItsHoldAndVetoBeforeThePutBackAndKeepsTheRest`,
+`TestARollbackRefusedForTheMarkersLockWritesNothing` (6),
+`TestTheRestampRefusedForTheMarkersLockWritesNothing` (4 of 5)); cmd/bridge,
+`TestAManualRollbackThatHoldsTheMarkersLockFirstLeavesTheBootNothingToDo`,
+`TestABootThatHoldsTheMarkersLockFirstLeavesTheManualRollbackNothingToPutBack`,
+`TestTheConsolesRollbackIsRefusedOverAStoreTheInstalledVersionOpened` and
+`TestMapUpdaterError`'s two new rows; internal/admin,
+`TestClassifyUpdateError`'s two new rows. Green on main as pins:
+`TestARollbackWhoseRenameFailsPutsTheMarkerBack` and
+`TestServeStopsWhileAnotherProcessHoldsTheMarkersLock`. Added with the fix:
+`TestAnInstallWhoseSwapFailsPutsTheMarkerBackAsItReadIt`,
+`TestAnSCMStopFitsInsideTheMarkersLockWait` and
+`TestARollbackWithNoBackupRefusesWithoutAPath`.
+
+**Negative controls**, each alone on the committed fix (a37ed402), predicted
+by test and subtest and observed exactly, the files put back with `git
+checkout --` and the tree clean after each (`.tmp/_b692/controls.py` holds
+the mutations and the runs: internal/updater whole; cmd/bridge's update,
+rollback, marker, veto and disarm tests where the mutation reaches them;
+internal/admin's classification):
+
+| # | Mutation | Predicted and observed red |
+|---|---|---|
+| N1 | Install takes no lock | 3 tests, 6 subtests: the install-first and migration-first interleavings, every lock row of the install |
+| N2 | Install decides nothing again | 3 tests: the migration-first interleaving, the second process, the hold recorded meanwhile |
+| N3 | a failed swap clears the marker | 1 test, 1 subtest: the hold and veto row |
+| N4 | the context not asked after the take | 2 tests, 2 subtests: the uncontended take's rows, install and rollback |
+| N5 | an unheld lock taken as held | 4 tests, 4 subtests: the no-locks rows of the install, the rollback, the hold and the restamp |
+| N6 | Rollback takes no lock | 3 tests, 6 subtests in internal/updater; 2 tests in cmd/bridge (both housekeeping orders) |
+| N7 | Rollback refuses nothing over a store a newer version opened | 2 tests, 2 subtests; 1 test in cmd/bridge |
+| N8 | the rollback vetoes nothing | 2 tests; 1 test in cmd/bridge |
+| N9 | the rollback renames before it records | 1 test |
+| N10 | the rollback keeps none of the other fields | 1 test |
+| N11 | a failed rename leaves the rollback's record | 1 test |
+| N12 | the hold recorded without the lock | 1 test, 4 subtests |
+| N13 | the restamp writes without the lock | 1 test, 4 subtests |
+| N14 | the rollback asks nothing of the backup first | 1 test |
+| N15 | the console maps neither refusal | 2 tests, 2 subtests (cmd/bridge) |
+| N16 | the console classifies neither refusal | 1 test, 2 subtests (internal/admin) |
+| N17 | `scmStopWait` 20 s | 1 test |
+| N18 | serve's stop takes the lock | 1 test (cmd/bridge) |
+
+**Checks.** On legion0 (Ubuntu 26.04, linux/amd64, go1.27.3,
+`GOTOOLCHAIN=local`, umask 022, TMPDIR on disk under `.tmp/_b692`), each
+through the shared build lock, at 633c9e6e with this record in the tree:
+- `go test -race -count=1 -timeout 90m -tags
+  ts_omit_webclient,ts_omit_debugeventbus ./internal/updater/... ./cmd/bridge
+  ./internal/admin/...`: internal/updater ok (25 s), cmd/bridge ok (904 s),
+  internal/admin ok (920 s).
+- `make test-fast` (every package, no race): 80 packages ok, none failed, 14
+  with no test files; the Linux-only ones among them (internal/alsa, alsapcm,
+  atomicwrite's durable writer, backup's identity paths, the player's binding
+  and hotplug), and the cmd/bridge sweeps over the tracked docs, this record
+  included.
+- `make vet`, and `GOOS=windows go vet` of every package with the tags: clean.
+  `make build-all`, the six targets: ok. go1.27.3's gofmt on every changed Go
+  file: clean.
+- `make docs-check`: ok (config-lifecycle.md at 97.0 % as the tree stands);
+  with the rules patch, 98.0 %, measured by the budget script's own `measure`
+  and `report` over the patched copy, and `scripts/doc-split/verify_moves.py
+  --base main` passes over it, naming the three long-form edits.
+- The qualification-version check, `-base main -head HEAD` (this clone has no
+  `origin/main`; main is 4f44a926): OK, no raise.
+- Not run here: macOS and Windows natively, whose builds (and Windows' vet)
+  alone ran.
+
+**For the owner.**
+- PROTOCOL.md's Updates paragraph said a manual rollback via `POST
+  /api/updates/rollback` stays possible for one boot after a successful
+  install; since B692 it is refused once the new version has opened the data
+  dir, which its start records. This PR changes that sentence (fb0d3bbe, after
+  this entry was written); the app's copy, `docs/BridgeProtocol.md`, follows
+  in its iOS mirror PR (CodeRabbit corrected this line).
+- The console's Roll back button still follows `.bak`'s presence
+  (`canRollback`), so it shows where the rollback now refuses with 409 and the
+  reason; hiding it there would be a console change of its own.
+- The console's 502 bodies for a swap or a rename that fails still carry the
+  binary's path, from `swapBinary`'s and `RollbackBinary`'s errors (before
+  B692 too).
+- One migration veto at a time: an operator's rollback replaces an earlier
+  veto of another version.
+- A store's open waits for the lock with no context, so a serve the SCM stops
+  while its store's open waits for `bridge update`'s lock stops when that wait
+  ends, at most when the CLI's own SCM wait gives up.
+- No backlog entry was written: the backlog file is not on this host.
+
+## 2026-11-03 — B692 round 2: an operator's rollback stays under way until its rename, and the stops in the updater's lock waits are stops
+
+Codex's review of PR #1387 at fb0d3bbe (Argon found nothing), with Argon's
+binding notes on the first finding; worker b692 on legion0 (Ubuntu 26.04,
+linux/amd64, go1.27.3, `GOTOOLCHAIN=local`, umask 022). The branch went to
+the PR head first: `git merge --ff-only` and `git update-ref` need an
+approval this headless session cannot give, so the branch's loose ref was
+written to fb0d3bbe (its old value checked first, the tree clean, the
+two files the PR's commits change checked out). Commits: red 8ba970a7, fix
+f98d5e8d, then this record. The rules are a round-2 bullet after round 1's
+in `.claude/rules/config-lifecycle.md` and round 1's "with the install
+ended" corrected in both its copies, with the entry "…and a job or database
+CLI run as root gives every entry it CREATES the install's owner" moved to
+its long form to keep the file at 95.9 % of its budget, shipped as a checked
+patch (`rules-b692-r2.patch`); the long form is round 2's section of
+`ops/History-rules-config-lifecycle.md`.
+
+**What changed.**
+1. *P1, the rollback stopped after its record.* The record says the
+   rollback is under way (`RollbackStarted`, where the marker names the
+   install), and `Rollback` clears that only once its rename has landed.
+   The record is then B613's rollback record, finished by the version that
+   runs: on the target still in place, its commands' migrations refuse
+   under the veto, its serve admission records `DataDirOpenedBy` and lifts
+   the veto in one write (after which every rollback refuses), and its
+   housekeeping confirms the install (`BootRollbackOvertaken`); on the
+   previous version, the backup back, its housekeeping ends the record as
+   a rollback done (`BootRollbackFinished`, Argon's mirror window).
+2. *P2.* `refreshInstallAttemptedAt` returns a stop in its lock's wait, or
+   before an uncontended take, and `restartWhenDrained` then requests no
+   restart.
+3. *P3.* `recordHold` returns the same stop, and `checkCandidate` answers
+   the install with it.
+
+**Decisions.** Argon asked for one rule on the still-new binary among three:
+the veto kept through the target's admission, `DataDirOpenedBy` recorded at
+a migrating open, or the migration refused. The rule taken is B613's own
+for a rollback's record: a command's migrating open refuses (it cannot tell
+a rollback stopped before its rename from one stopped after it), and the
+target's serve admission records `DataDirOpenedBy` and lifts the veto. The
+veto kept through the admission would leave the target unable to open its
+store while a step is pending, with no console to finish the rollback. A
+rollback with no install recorded is not marked under way (no target to
+finish it). No PROTOCOL.md statement changes.
+
+**Red first** (8ba970a7, on fb0d3bbe, no seams added; a rollback is stopped
+where the process would end it by `runtime.Goexit` inside `RestoreBackup`):
+internal/updater, `TestARollbackStoppedBeforeItsRenameStaysAnInstallTheTargetsStartResolves`,
+`TestARollbackStoppedAfterItsRenameIsFinishedByTheVersionThatRuns`,
+`TestARollbackRecordsItsHoldAndVetoBeforeThePutBackAndKeepsTheRest` (the
+record at the rename, under way now), `TestAStopWhileTheRestampWaitsRequestsNoRestart`
+(2 of 3 subtests) and `TestAStopWhileTheHoldWaitsIsTheInstallsAnswer` (2);
+cmd/bridge, `TestAManualRollbackStoppedBeforeItsRenameKeepsTheStoreFromASecondRollback`
+(the restart test: no record of the data dir after this build's real serve
+started over the stopped rollback, so the second rollback would have gone
+on) and `TestAManualRollbackStoppedAfterItsRenameIsFinishedByThePreviousVersionsBoot`.
+Green before, a pin: `TestARollbackClearsItsRecordOnceItsRenameHasLanded`.
+
+**Negative controls**, each alone on f98d5e8d, predicted and observed
+exactly, the tree clean after each (`.tmp/_b692/controls.py`, R1 to R4):
+
+| # | Mutation | Predicted and observed red |
+|---|---|---|
+| R1 | the record says no rollback is under way | 3 tests in internal/updater; 2 in cmd/bridge (both stopped-rollback restarts) |
+| R2 | the record is never cleared after the rename | 2 tests in internal/updater; 1 in cmd/bridge (the rollback-first housekeeping interleaving) |
+| R3 | a stop in the restamp's wait still restarts | 1 test, 2 subtests |
+| R4 | a stop in the hold's wait answers the refusal | 1 test, 2 subtests |
+
+**Checks.** On legion0, each through the shared build lock, at a69b9ce3
+(the drain of the stopped-rollback helper added after the first race run:
+`TestEveryBackgroundGoroutineDrainsOnCleanup` refused
+`rollBackFromTheConsoleUntilStopped`, which launched the rollback's
+goroutine without `drainLoopOnCleanup`), with this record in the tree:
+- `go test -race -count=1 -timeout 90m -tags
+  ts_omit_webclient,ts_omit_debugeventbus ./internal/updater/...
+  ./cmd/bridge`: internal/updater ok (26 s), cmd/bridge ok (888 s).
+- `make test-fast`: 80 packages ok, none failed, 14 with no test files, the
+  Linux-only ones among them and the cmd/bridge sweeps over the tracked
+  docs, this record included.
+- `make vet`, and `GOOS=windows go vet` of every package with the tags:
+  clean. go1.27.3's gofmt on every changed Go file: clean.
+- `make docs-check`: ok (config-lifecycle.md 98.0 % as the tree stands, 95.9 %
+  with the round-2 patch, by the budget script's own `measure` and
+  `report`); `verify_moves.py --base HEAD` passes over the move alone, and
+  the only other changes are round 1's bullet in both its copies and round
+  2's bullet and section.
+- The qualification-version check, `-base main -head HEAD`: OK, no raise.
+
+## 2026-11-03 — B692 round 3: a stop during the restamp's write requests no restart
+
+Codex's review of round 2 at b83ac427 (Argon: no findings); worker b692 on
+legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`, umask
+022). The branch went to the PR head by its loose ref, as in round 2 (`git
+merge` needs an approval this session cannot give): the old value checked,
+the tree clean, the 43 paths the fast-forward changes checked out, no
+deletions among them. Commits: the seam c5f802bb (`Updater.restampSave`,
+which changes nothing), red 432db42a, fix f1741165, then this record. The
+rule's change is round 2's bullet ("a stop while the restamp waits or
+writes requests no restart"), in its line and its long form's copy, shipped
+as a checked patch (`rules-b692-r3.patch`), with a round-3 paragraph in
+round 2's long form.
+
+**The defect** (P2). `refreshInstallAttemptedAt` returned the stop only from
+its wait for the install marker's lock. A stop that landed during its
+write, the lock held, was swallowed, and `restartWhenDrained` requested the
+restart: exit 75, and a supervisor's restart of a service the operator
+stopped.
+
+**The fix.** `restartWhenDrained` asks the context again once the restamp has
+returned, just before it requests the restart, and requests none after a
+stop. Left: the few statements between that ask and the request, since
+`serveRestart.request` marks any request it gets.
+
+**Red first** (432db42a on c5f802bb): `TestAStopWhileTheRestampWaitsRequestsNoRestart`,
+its new subtest "stopped during its write" (the seam holds the write until
+serve's context ends): one restart requested, want none; its three other
+subtests green.
+
+**Negative control**, alone on f1741165, the file put back with `git
+checkout --` and the tree clean after it (`.tmp/_b692/controls.py` R5): the
+ask after the restamp taken out, predicted and observed red on that one
+subtest (1 test, 1 subtest).
+
+**Checks.** On legion0, through the shared build lock, at 14ddd6f0 with this
+record in the tree: `go test -race -count=1 -timeout 90m -tags
+ts_omit_webclient,ts_omit_debugeventbus ./internal/updater/...` ok (26 s);
+cmd/bridge's `TestEveryCitedTestNameExists` over the changed records ok;
+`make vet` and `GOOS=windows go vet` of every package with the tags: clean;
+go1.27.3's gofmt on the changed Go files: clean; `make docs-check` ok, and
+config-lifecycle.md at 97.3 % of its budget with the round-3 patch, by the
+budget script's own `measure` and `report`. cmd/bridge's code is unchanged
+since round 2's gates.

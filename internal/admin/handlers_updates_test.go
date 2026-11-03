@@ -29,6 +29,12 @@ func TestClassifyUpdateError(t *testing.T) {
 		// its own code, never the generic install-failed.
 		{"config-refused", ErrUpdateConfigRefused, http.StatusConflict, "config-refused"},
 		{"config-check-failed", ErrUpdateConfigCheckFailed, http.StatusBadGateway, "config-check-failed"},
+		// The install marker's lock another process holds, or that the data
+		// dir's filesystem cannot give, and a rollback over a store a newer
+		// version opened (backlog B692): the host's state refuses them, and
+		// nothing was done.
+		{"marker-locked", ErrUpdateMarkerLocked, http.StatusConflict, "marker-locked"},
+		{"rollback-refused", ErrUpdateRollbackRefused, http.StatusConflict, "rollback-refused"},
 		{"wrapped install-in-flight",
 			fmt.Errorf("%w: an install is already in progress", ErrUpdateInstallInFlight),
 			http.StatusConflict, "install-in-flight"},

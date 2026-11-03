@@ -214,13 +214,14 @@ func disarmHeld(dataDir, current string, save func(dataDir string, st State) err
 
 // migrationVetoedError is a migration's refusal under st's veto of current's
 // store migrations: it names the versions and what ends it, never a path.
-// Under the early rollback's record, the backup perhaps not back, a start of
-// bridge serve settles it; once the record is finished, the binary in place
+// Under a rollback's record still under way (the early rollback's, or an
+// operator's: B692's round 2), the backup perhaps not back, a start of bridge
+// serve settles it; once the record is finished, the binary in place
 // is the version put back, and a new install, or a start of current's own
 // serve on settings it loads, lifts it.
 func migrationVetoedError(st State, current string) error {
 	if st.RollbackStarted && SameVersion(st.TargetVersion, current) {
-		return fmt.Errorf("%w: the early rollback of the install of %s to %s was started and no start has gone on past it, "+
+		return fmt.Errorf("%w: a rollback of the install of %s to %s was started and no start has gone on past it, "+
 			"so the store is not migrated: start bridge serve, which finishes the rollback where %s still refuses the settings "+
 			"and confirms the install where it loads them", ErrMigrationVetoed, st.TargetVersion, st.PreviousVersion, st.TargetVersion)
 	}
