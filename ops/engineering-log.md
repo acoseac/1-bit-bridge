@@ -71217,3 +71217,14 @@ PROTOCOL.md passed, none skipped: `TestEveryDocumentedEndpointIsRouted`,
 scripts/third-party-licenses' `TestRealTreeBuildSiteCensus`, whose walk
 reads PROTOCOL.md, and `TestBuildTagsAgree`: ok. No Go file changed, so
 gofmt, vet, `make test` and `make build-all` were not run.
+
+**Negative controls** (each on 31cc9ac5: one exact occurrence mutated by a
+script that refuses any other count, `git diff --numstat` naming that file
+alone, restored with `git checkout --`, the tree clean after; each predicted
+red before its run, and each was): 1, the connection bullet's "closed
+before a byte is read" made "after": the word comparison failed at that
+word; 2, "a host other than" put back to "another host than": it failed
+there; 3, the public-mode bullet dropped: it failed at that bullet's place,
+351 words against 359; 4, a test name nothing defines added to this entry:
+`TestEveryCitedTestNameExists` failed with that name alone, cited by
+ops/engineering-log.md.
