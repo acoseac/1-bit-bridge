@@ -50,7 +50,13 @@
 // goroutine it starts and every sink it opens ends with. A Release that
 // comes before its Start leaves a record the Start finds, which then opens
 // nothing; one that comes while Start opens makes Start close what it
-// opened without writing to it. The backend refuses a Start while another
+// opened without writing to it. So does the engine's taking the release
+// before its Release comes (engine.StartRequest.Released, B674 rounds 2 and
+// 3), at every step that would acquire, open, adopt, resume or write: a Start
+// acquires nothing, an open is refused before it or at its check after open
+// (output.admit, which the sink closes unwritten), a sink opened is closed
+// at once rather than adopted, a resume resumes nothing, and the producer
+// hands the sink nothing more. The backend refuses a Start while another
 // session still holds the device (ErrOverlap, Stats.Overlaps): under the
 // engine's contract it never happens, so a defect shows as a refusal a test
 // sees, never as the kernel's busy refusal of the bridge's own second open.

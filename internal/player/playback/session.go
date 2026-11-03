@@ -127,8 +127,26 @@ type output struct {
 }
 
 // admit is the sink's check after open: the check of the unit the sink is
-// opening now.
+// opening now, at the open, at a reopen after a pause's release, and at a
+// native activation, each the last step before the sink writes to the node.
+// A session released since (its Release come, its life ended, or the
+// engine's taking it, engine.StartRequest.Released) admits no node, which
+// the sink then closes unwritten (B674 round 3). It takes no session lock:
+// a sink asks it with none of its own locks held, from a goroutine that may
+// be the sink's, and the fence and the life are read without one.
 func (o *output) admit(n alsapcm.NodeInfo) error {
+	if err := o.check(n); err != nil {
+		return err
+	}
+	if o.s.releaseTaken() || o.s.ctx.Err() != nil {
+		o.s.b.fenced("admit")
+		return errReleased
+	}
+	return nil
+}
+
+// check is the unit's check of the node opened, and the DSD permission's.
+func (o *output) check(n alsapcm.NodeInfo) error {
 	o.umu.Lock()
 	u := o.unit
 	o.umu.Unlock()
@@ -370,16 +388,24 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 		return fmt.Errorf("player backend: session %d started twice", s.id)
 	}
 	s.started = true
-	if s.releasing {
+	s.ev, s.opts, s.released = req.Events, req.Options, req.Released
+	if s.releasedLocked() {
 		req.First.Reservation.ReleaseBackend()
-		// Its release came first and holds nothing: this Start acquires
-		// nothing either.
+		came := s.releasing
 		s.mu.Unlock()
 		close(s.startDone)
-		s.b.letGo(s, true)
+		if came {
+			// Its release came first and holds nothing: this Start acquires
+			// nothing either.
+			s.b.letGo(s, true)
+		} else {
+			// The engine took its release before this Start began, and the
+			// Release is still to come, to this record: nothing is acquired,
+			// not the device, the content or a decoder (B674 round 3).
+			s.b.fenced("start")
+		}
 		return errReleased
 	}
-	s.ev, s.opts, s.released = req.Events, req.Options, req.Released
 	first := s.newOccLocked(req.First)
 	first.from = req.From
 	s.mu.Unlock()
@@ -443,6 +469,11 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	}
 	out, err := s.openOutput(cctx, first)
 	if err != nil {
+		if errors.Is(err, errReleased) {
+			// Released before the open, or at its check after open, which
+			// closed the node unwritten (B674 round 3).
+			return errReleased
+		}
 		var te *transportError
 		if errors.As(err, &te) {
 			return &engine.Unplayable{Reason: ReasonTransport, Detail: te.Error()}
@@ -450,7 +481,7 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 		return fmt.Errorf("player backend: the device could not be opened: %w", deviceCause(err))
 	}
 	s.mu.Lock()
-	if s.releasing || s.releaseTaken() {
+	if s.releasedLocked() {
 		// The release came while the device opened, or the engine took it
 		// (a Stop) and its call has not come yet: what was opened is closed
 		// at once, never written to. This is where Start decides to write:
@@ -458,6 +489,7 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 		// (B674 round 2).
 		s.mu.Unlock()
 		s.closeOutput(out)
+		s.b.fenced("adopt")
 		return errReleased
 	}
 	s.cur = out
@@ -492,7 +524,9 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 }
 
 // releaseTaken reports whether the engine has taken the session's release
-// (engine.StartRequest.Released), whether or not its Release has come.
+// (engine.StartRequest.Released), whether or not its Release has come. It
+// takes no lock: released is set once, by Start under s.mu, before anything
+// that asks it is started.
 func (s *session) releaseTaken() bool {
 	select {
 	case <-s.released:
@@ -500,6 +534,19 @@ func (s *session) releaseTaken() bool {
 	default:
 		return false
 	}
+}
+
+// releasedLocked reports whether the session is released: its Release came
+// (releasing), or the engine took it before that (releaseTaken). Every step
+// that would acquire, open, adopt, resume or write asks it, under the lock
+// the step decides under, and refuses (B674 round 3). s.mu is held.
+func (s *session) releasedLocked() bool { return s.releasing || s.releaseTaken() }
+
+// isReleased is releasedLocked under the session's lock.
+func (s *session) isReleased() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.releasedLocked()
 }
 
 // signalFirst tells Start its first frames are in the sink (err nil), or
@@ -546,6 +593,14 @@ func (s *session) openOutput(ctx context.Context, o *occ) (*output, error) {
 	for _, f := range s.b.formatsFor(rate, bits) {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		if s.isReleased() {
+			// The session was released while the unit was located, or the
+			// content before it opened: nothing is opened (B674 round 3). A
+			// node opened past here is refused at its check after open
+			// (output.admit), and one adopted, by its caller.
+			s.b.fenced("open")
+			return nil, errReleased
 		}
 		transport := transportFor(rate, bits, f)
 		if err := s.b.checkEdge(transport, nil, nil); err != nil {
@@ -784,6 +839,14 @@ func (s *session) cut(ctx context.Context, from engine.OccurrenceID) (ok bool, e
 	defer s.mu.Unlock()
 	if err := s.callableLocked(); err != nil {
 		return false, err
+	}
+	if s.releaseTaken() {
+		// A Cut the engine asked before it took the session's release, come
+		// after: the session cuts nothing (B674 round 3). It opens and writes
+		// nothing either way; Prepare and Pause, which share callableLocked,
+		// open no sink and write nothing, and keep it alone.
+		s.b.fenced("cut")
+		return false, errReleased
 	}
 	o := s.find(from)
 	switch {
@@ -1180,7 +1243,20 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 	l.unlock()
 	if out != nil {
 		released := out.sink.Position().State == alsapcm.SinkReleased
-		err := s.call(ctx, func() error { return out.resume(ctx) })
+		err := s.call(ctx, func() error {
+			// Asked here, where the command runs, which can be after a Stop
+			// the engine took once this Resume was called: a session released
+			// resumes no sink (B674 round 3). A reopen it makes is asked again
+			// at its check after open (output.admit).
+			if s.isReleased() {
+				s.b.fenced("resume")
+				return errReleased
+			}
+			return out.resume(ctx)
+		})
+		if errors.Is(err, errReleased) {
+			return 0, errReleased
+		}
 		if err == nil {
 			l.lock()
 			if err := s.unpausedLocked(); err != nil {
@@ -1249,6 +1325,9 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 	defer stop()
 	next, err := s.openOutput(cctx, between)
 	if err != nil {
+		if errors.Is(err, errReleased) {
+			return 0, errReleased
+		}
 		var te *transportError
 		if !errors.As(err, &te) {
 			return 0, resumeError(err)
@@ -1268,7 +1347,15 @@ func (s *session) resume(ctx context.Context) (how engine.ResumeResult, err erro
 		return engine.ResumeContinued, nil
 	}
 	l.lock()
-	if s.releasing || s.between != between || between.dropped {
+	if s.releasedLocked() {
+		// Released while the sink opened: it is closed at once, never written
+		// to, and nothing is handed to the producer (B674 round 3).
+		l.unlock()
+		s.closeOutput(next)
+		s.b.fenced("adopt")
+		return 0, errReleased
+	}
+	if s.between != between || between.dropped {
 		l.unlock()
 		s.closeOutput(next)
 		l.lock()

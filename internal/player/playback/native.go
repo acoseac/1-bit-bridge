@@ -199,6 +199,13 @@ func (s *session) openNativeOutput(ctx context.Context, o *occ) (*output, error)
 	if open == nil {
 		open = alsapcm.OpenDSDSink
 	}
+	if s.isReleased() {
+		// Released since the open began: nothing is opened (B674 round 3).
+		// The native sink's life is its own, not the session's, so its open
+		// is fenced here and at its check after open (output.admit).
+		s.b.fenced("open")
+		return nil, errReleased
+	}
 	// Native lifetime survives the producer cancellation during TrackChange.
 	life, cancel := context.WithCancel(context.Background())
 	out.nativeCancel = cancel
@@ -212,9 +219,14 @@ func (s *session) openNativeOutput(ctx context.Context, o *occ) (*output, error)
 	out.sink = out.adapter
 	s.mu.Lock()
 	s.outs = append(s.outs, out)
-	releasing := s.releasing
+	released := s.releasedLocked()
 	s.mu.Unlock()
-	if releasing || ctx.Err() != nil {
+	if released || ctx.Err() != nil {
+		// Owned, so the teardown closes it, and released at once: its life is
+		// not the session's, so it begins its own release (B674 round 3).
+		if released {
+			s.b.fenced("adopt")
+		}
 		sink.BeginRelease(alsapcm.Immediate)
 	}
 	s.b.notify(Note{Session: s.id, Occurrence: o.id, output: out, Kind: NoteOpened, Params: sink.Params(), Transport: out.transport, Unit: u.Label})
@@ -270,7 +282,14 @@ func (s *session) writeNativeChunk(o *occ) bool {
 	for offset := 0; offset < bits; {
 		s.mu.Lock()
 		s.serveLocked()
-		if s.releasing || s.ctx.Err() != nil {
+		if s.releasedLocked() {
+			// Released, by its Release or the engine's taking it: no more is
+			// handed to the native sink (B674 round 3).
+			s.mu.Unlock()
+			s.b.fenced("write")
+			return false
+		}
+		if s.ctx.Err() != nil {
 			s.mu.Unlock()
 			return false
 		}

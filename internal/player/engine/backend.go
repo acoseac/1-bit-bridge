@@ -72,11 +72,13 @@ type StartRequest struct {
 	// Released is closed by the engine in the step that releases the session
 	// (a Stop, a skip, a seek, the output gone, a fault), before any snapshot
 	// shows the release, while the Release call goes to the backend on a
-	// goroutine of its own and may not have reached it yet (B674 round 2):
-	// Start looks at it, beside a Release that came, where it decides to
-	// write, so a release the engine has taken writes nothing to a device
-	// Start opened. Nil in a request the engine did not make, which nothing
-	// closes.
+	// goroutine of its own and may not have reached it yet (B674 round 2).
+	// The backend looks at it, beside a Release that came, at every step of
+	// the session that would acquire, open, adopt, resume or write to a
+	// device, and refuses each (round 3): a Start that finds it closed
+	// acquires nothing, a node opened past it is closed unwritten, and no
+	// frame is handed to a sink past it. Nil in a request the engine did not
+	// make, which nothing closes.
 	Released <-chan struct{}
 }
 
@@ -261,8 +263,11 @@ var ErrDeviceDenied = errors.New("player: this process may not open the device")
 // and may acknowledge as soon as nothing is held. Or it may reach the
 // backend only after a snapshot has shown the release: the engine therefore
 // also closes StartRequest.Released in the step that takes the release, and
-// a Start that finds it closed where it decides to write closes what it
-// opened, never written to, as when the Release has come (B674 round 2).
+// from then on the session acquires, opens, adopts, resumes and writes
+// nothing, as when the Release has come: a Start that finds it closed
+// acquires nothing, a node opened is closed unwritten, and no frame is handed
+// to a sink (B674 rounds 2 and 3). What the session decided before it closed
+// goes on until the Release ends it.
 // Prepare, Cut, Pause and Resume come only after Start has returned nil.
 // The engine starts a session only once the previous session's release is
 // acknowledged, so two of its own sessions never hold or race for the

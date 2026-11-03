@@ -57,6 +57,22 @@ func (r *rig) wantFenced(steps ...string) {
 	}
 }
 
+// wantFencedWith fails the test unless the backend refused step, and nothing
+// else but the steps also names: a producer still handing a's later chunks to
+// the store when the Stop comes refuses its next write too, which the timing
+// of a test's setup decides.
+func (r *rig) wantFencedWith(step string, also ...string) {
+	r.t.Helper()
+	got := r.rec.fencedSteps()
+	ok := slices.Contains(got, step)
+	for _, g := range got {
+		ok = ok && (g == step || slices.Contains(also, g))
+	}
+	if !ok {
+		r.t.Errorf("the steps refused for the release: %q, want %q and none but %q beside it", got, step, also)
+	}
+}
+
 // waitFencedOr waits until the backend has refused a step for the release,
 // or cond holds.
 func (r *rig) waitFencedOr(what string, cond func() bool) {
@@ -293,7 +309,7 @@ func TestPlaybackReopensNothingForAResumeOnceTheReleaseIsTaken(t *testing.T) {
 	if v := r.k.View(); v.Open || v.Closes != 2 || v.OpenAt[1] != v.GivenBytes {
 		t.Errorf("the reopen, the release held: open %v after %d closes, given %d bytes from %v; want closed unwritten", v.Open, v.Closes, v.GivenBytes, v.OpenAt)
 	}
-	r.wantFenced("admit")
+	r.wantFencedWith("admit", "write")
 	r.finishStop(stop, letRelease)
 	receiveIn(t, resume, "the resume's play")
 }
@@ -328,7 +344,7 @@ func TestPlaybackResumesNoSinkOnceTheReleaseIsTaken(t *testing.T) {
 	if v := r.k.View(); v.State != "PAUSED" || v.GivenBytes != given {
 		t.Errorf("the stream, the release held: %s, given %d bytes more; want still paused, given nothing", v.State, v.GivenBytes-given)
 	}
-	r.wantFenced("resume")
+	r.wantFencedWith("resume", "write")
 	r.finishStop(stop, letRelease)
 	receiveIn(t, resume, "the resume's play")
 }
