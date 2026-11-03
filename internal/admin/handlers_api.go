@@ -3738,7 +3738,7 @@ func (s *Server) apiUpdatesRollback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	force := r.URL.Query().Get("force") == "1"
-	if err := s.deps.Updater.Rollback(force); err != nil {
+	if err := s.deps.Updater.Rollback(r.Context(), force); err != nil {
 		code, short := classifyUpdateError(err)
 		writeError(w, code, short, err.Error())
 		return

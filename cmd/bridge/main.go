@@ -2241,8 +2241,8 @@ func (a updateInfoAdapter) Install(ctx context.Context, force bool) (admin.Updat
 	}, mapUpdaterError(err)
 }
 
-func (a updateInfoAdapter) Rollback(force bool) error {
-	return mapUpdaterError(a.u.Rollback(updater.InstallOptions{
+func (a updateInfoAdapter) Rollback(ctx context.Context, force bool) error {
+	return mapUpdaterError(a.u.Rollback(ctx, updater.InstallOptions{
 		DataDir:    a.dataDir,
 		BinaryPath: a.binaryPath,
 		Force:      force,

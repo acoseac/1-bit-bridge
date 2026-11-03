@@ -503,7 +503,7 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 	// + verify per poll cycle) — just wait for sessions to drain,
 	// then restart into the binary already on disk.
 	if u.pendingRestart.Load() {
-		u.restartWhenDrained()
+		u.restartWhenDrained(ctx)
 		return
 	}
 	// Sessions inflight gate: refuse cleanly. The next poll cycle
@@ -560,7 +560,7 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 	// gates at entry, and the auto-installer's opts carry
 	// Force=false). Restarting now would kill it — defer to the next
 	// poll cycle, which takes the pending-restart fast path above.
-	u.restartWhenDrained()
+	u.restartWhenDrained(ctx)
 }
 
 // inflightSessions reports the auto-installer session tracker's
@@ -617,12 +617,12 @@ func rejectionBlocks(candidate, rejected string) bool {
 // downloads are inflight — logs and defers to the next poll cycle.
 // Shared by the pending-restart fast path and the tail of a fresh
 // install; the caller guarantees an install candidate is on disk.
-func (u *Updater) restartWhenDrained() {
+func (u *Updater) restartWhenDrained(ctx context.Context) {
 	if n := u.inflightSessions(); n > 0 {
 		logger.Info("auto-install restart deferred", "reason", activeDownloadsReason, "inflight", n)
 		return
 	}
-	u.refreshInstallAttemptedAt()
+	u.refreshInstallAttemptedAt(ctx)
 	logger.Info("auto-install complete; restarting to load new binary")
 	u.autoInstallRestart()
 }
@@ -642,7 +642,7 @@ func (u *Updater) restartWhenDrained() {
 //
 // Best-effort and narrow: only an "installing" marker is touched, and a
 // failure just leaves the pre-existing behaviour.
-func (u *Updater) refreshInstallAttemptedAt() {
+func (u *Updater) refreshInstallAttemptedAt(_ context.Context) {
 	if u.autoInstallOpts == nil || u.autoInstallOpts.DataDir == "" {
 		return
 	}

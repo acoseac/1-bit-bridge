@@ -82,6 +82,15 @@ type InstallOptions struct {
 	// ConfigCheck overrides the candidate's settings check (CheckConfig).
 	// Production leaves it nil; a test stands in for a candidate.
 	ConfigCheck func(ctx context.Context, candidate, configPath string) ConfigCheck
+
+	// RestoreBackup overrides the rename that puts the backup back over the
+	// binary in an operator's Rollback (RollbackBinary). Production leaves
+	// it nil; a test holds a rollback in it.
+	RestoreBackup func(dst, backupExt string) error
+
+	// holdBeforeSwap, nil in production, runs in Install just before the
+	// swap, its marker armed: a test's hold on an install there.
+	holdBeforeSwap func()
 }
 
 // Install downloads, verifies, swaps, and arms the rollback marker
@@ -373,6 +382,9 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 		state.SwapStarted = true
 		return SaveState(opts.DataDir, state)
 	}
+	if opts.holdBeforeSwap != nil {
+		opts.holdBeforeSwap()
+	}
 	if err := swapBinary(opts.BinaryPath, candidate, ".bak", markSwapStarted); err != nil {
 		// Swap failed — clear the marker so the next boot doesn't
 		// roll back something that didn't actually change.
@@ -446,7 +458,7 @@ var (
 // Errors: ErrInstallInFlight when an Install (or another Rollback)
 // is already running on this Updater, ErrActiveSessions when Force
 // is false and Sessions.Inflight() is nonzero.
-func (u *Updater) Rollback(opts InstallOptions) error {
+func (u *Updater) Rollback(ctx context.Context, opts InstallOptions) error {
 	// Phase B-Windows (PR #48) implements the rollback rename
 	// alongside darwin/linux — no platform guard needed here. The
 	// Windows-side `RollbackBinary` handles the SCM-stop dance
@@ -468,7 +480,11 @@ func (u *Updater) Rollback(opts InstallOptions) error {
 	// "installing", still running the old binary; and marker
 	// "installed", running the new one).
 	rejected := rejectedVersionFor(opts.DataDir)
-	if err := RollbackBinary(opts.BinaryPath, ".bak"); err != nil {
+	restore := opts.RestoreBackup
+	if restore == nil {
+		restore = RollbackBinary
+	}
+	if err := restore(opts.BinaryPath, ".bak"); err != nil {
 		return err
 	}
 	// A restart deferred by the auto-installer would now bounce the
@@ -517,7 +533,7 @@ func (u *Updater) checkCandidate(ctx context.Context, opts InstallOptions, stage
 	case ConfigRefused:
 		logger.Warn("the new version refuses this bridge's settings; it was not installed",
 			"version", target, "reasons", strings.Join(res.Reasons, "; "))
-		recordHold(opts, target, refusedReason(target, res.Reasons), true)
+		recordHold(ctx, opts, target, refusedReason(target, res.Reasons), true)
 		return "", &holdError{sentinel: ErrConfigRefused,
 			reason: target + " refuses this bridge's settings, so it was not installed: " + reasonText(res.Reasons)}
 	case ConfigCheckUnsupported:
@@ -528,7 +544,7 @@ func (u *Updater) checkCandidate(ctx context.Context, opts InstallOptions, stage
 		}
 		reason := fmt.Sprintf("%s predates the settings check, so it cannot say whether it loads this bridge's settings "+
 			"and is not installed automatically: install it by hand to take it", target)
-		recordHold(opts, target, reason, false)
+		recordHold(ctx, opts, target, reason, false)
 		return "", &holdError{sentinel: ErrConfigCheckUnsupported, reason: reason}
 	}
 	if res.Err != nil {
@@ -580,7 +596,7 @@ func reasonText(reasons []string) string {
 // of the settings for a refusal of them, whatever the settings are
 // otherwise. A record that cannot be made is said and skipped: the install
 // is refused all the same, and the next attempt checks again.
-func recordHold(opts InstallOptions, target, reason string, onSettings bool) {
+func recordHold(_ context.Context, opts InstallOptions, target, reason string, onSettings bool) {
 	digest := ""
 	if onSettings {
 		d, err := ConfigDigest(opts.ConfigPath)

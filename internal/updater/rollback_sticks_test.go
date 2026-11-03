@@ -87,7 +87,7 @@ func TestRollbackSurvivesTheNextAutoInstallPoll(t *testing.T) {
 	}
 
 	// 2. Operator finds it broken and rolls it back.
-	if err := h.upd.Rollback(h.rollbackOpts()); err != nil {
+	if err := h.upd.Rollback(context.Background(), h.rollbackOpts()); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 	if got := h.liveBody(t); got != "bridge-binary-0.1.0" {
@@ -125,7 +125,7 @@ func TestRollbackRecordsRejectedVersion(t *testing.T) {
 	}
 	dir := filepath.Dir(livePath)
 
-	if err := upd.Rollback(InstallOptions{DataDir: dir, BinaryPath: livePath, Force: true}); err != nil {
+	if err := upd.Rollback(context.Background(), InstallOptions{DataDir: dir, BinaryPath: livePath, Force: true}); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 

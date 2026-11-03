@@ -1303,7 +1303,9 @@ type TailscaleStatus struct {
 // UpdateProvider is the read-side of the updater used by the admin
 // console. Implemented by the adapter in cmd/bridge/main.go around
 // internal/updater.Updater. CheckNow takes a context so a slow GitHub
-// response can be cancelled if the operator's browser disconnects.
+// response can be cancelled if the operator's browser disconnects, and
+// Install and Rollback take the request's, which ends their wait for
+// the install marker's lock.
 //
 // Install and Rollback return errors the admin handler classifies
 // via errors.Is against the package-level sentinels below
@@ -1315,7 +1317,7 @@ type UpdateProvider interface {
 	Status() UpdateStatus
 	CheckNow(ctx context.Context) UpdateStatus
 	Install(ctx context.Context, force bool) (UpdateStatus, error)
-	Rollback(force bool) error
+	Rollback(ctx context.Context, force bool) error
 }
 
 // Sentinel errors for the install / rollback paths. Defined in
