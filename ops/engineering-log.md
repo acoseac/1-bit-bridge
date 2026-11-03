@@ -71079,3 +71079,8 @@ admin-console.md's Player page line; their long forms are in
 `ops/History-rules-output.md`, `ops/History-rules-cli-serve.md` and
 `ops/History-rules-config-lifecycle.md`, and the README's player section has
 the manual step as the installer prints it.
+
+qualificationVersion rises to 32 at the merge (`internal/player/engine/`,
+`internal/player/playback/`, `internal/alsapcm/` and `cmd/bridge/serve_player*`
+are guarded; main had 31 after B687), and the runbook's current-version pins
+follow it.
