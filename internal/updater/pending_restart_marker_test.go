@@ -27,8 +27,9 @@ import (
 // are asserted here rather than assumed: the marker expires at
 // recencyWindow — the SAME constant DecideBootAction uses for
 // BootClearAbandoned, so the engine and the boot path cannot disagree
-// about whether a marker is still live — and a serve boot clears it
-// outright.
+// about whether a marker still guards a restore — and a serve boot
+// resolves it outright: one of any other version clears it, as asserted
+// here, and one of the target confirms it (backlog B705).
 func TestAnInterruptedInstallDoesNotWedgeTheEngine(t *testing.T) {
 	dir := t.TempDir()
 	upd := New(Options{})
