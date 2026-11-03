@@ -2326,9 +2326,11 @@ const backupShutdownWait = 45 * time.Second
 // maybeRollbackOnBoot consults <dataDir>/update-state.json and acts
 // on whatever the previous install attempt's outcome was:
 //
-//   - first boot after a successful install: stamp installedAt and
-//     retain bridge.bak for one more boot.
-//   - boot after that: delete bridge.bak.
+//   - first boot after a successful install, however late it comes
+//     (backlog B705): stamp installedAt and retain bridge.bak for one
+//     more boot.
+//   - boot after that: delete bridge.bak, and clear the marker once it
+//     is gone; a removal that fails leaves the marker for the next boot.
 //   - first boot after a FAILED install (we're not at TargetVersion):
 //     restore bridge.bak and clear the marker. Service manager will
 //     then respawn into the restored old binary on next exit.
@@ -2341,8 +2343,10 @@ const backupShutdownWait = 45 * time.Second
 //     version does.
 //   - everything else: no-op.
 //
-// Each clear keeps a hold recorded beside the install, and a veto of a
-// version's store migrations (updater.ClearInstall).
+// Each clear keeps a hold recorded beside the install, a veto of a
+// version's store migrations, and, where it leaves bridge.bak, the record
+// that a version other than the backup's opened the data dir, which an
+// operator's rollback refuses on (updater.ClearInstall; backlog B705).
 // Failures here are logged but non-fatal — a botched rollback still
 // lets the server start up; the operator can recover manually.
 //
@@ -2407,8 +2411,12 @@ func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binary
 	case updater.BootNoop:
 		return nil
 	case updater.BootInstallSucceeded:
-		// New binary booted; record installedAt so the NEXT boot
-		// knows it can clean up the .bak.
+		// New binary booted, however long after its install (backlog
+		// B705); record installedAt so the NEXT boot knows it can clean
+		// up the .bak. The rest of the marker stays as it is, the record
+		// this boot's admission made that this version opened the data
+		// dir included, so an operator's rollback of the .bak refuses
+		// until that cleanup (updater.RollbackRefusal).
 		st.Status = "installed"
 		st.InstalledAt = time.Now().UTC()
 		if err := updater.SaveState(dataDir, st); err != nil {
@@ -2417,10 +2425,17 @@ func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binary
 	case updater.BootCleanupBak:
 		// Second boot after a successful install: clean up. Every clear here
 		// keeps a hold recorded beside the install (updater.ClearInstall): it
-		// is about another version and the settings (backlog B613).
+		// is about another version and the settings (backlog B613). A removal
+		// that fails leaves the marker as it is (backlog B705): the backup is
+		// still there, the marker's record that the version installed opened
+		// the data dir is what refuses an operator's rollback of it, and the
+		// next boot tries the removal again. Once the backup is gone the
+		// record has nothing left to guard, and goes with the install.
 		if err := remove(binaryPath, ".bak"); err != nil {
-			fmt.Fprintf(stderr, "updater: remove .bak: %v\n", err)
+			fmt.Fprintf(stderr, "updater: remove .bak: %v; the install marker is left as it is, for the next start to remove it\n", err)
+			return nil
 		}
+		st.DataDirOpenedBy = ""
 		if err := updater.ClearInstall(dataDir, st); err != nil {
 			fmt.Fprintf(stderr, "updater: clear state: %v\n", err)
 		}
@@ -2434,7 +2449,10 @@ func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binary
 		// dir under this marker (disarmEarlyRollback): this boot runs past
 		// the store's migrations, and putting the backup back would be a
 		// downgrade past what that version wrote (backlog B613). Said, and
-		// the marker cleared, as for a restore that failed.
+		// the install cleared, as for a restore that failed, its record of
+		// the data dir kept beside the backup left where it is
+		// (updater.ClearInstall), so an operator's rollback of that backup
+		// refuses for the same reason (backlog B705).
 		if st.DataDirOpenedBy != "" {
 			fmt.Fprintf(stderr, "updater: install of %s did not reach the expected version (running %s); not rolling back to %s.bak, "+
 				"since %s has opened the data dir and its store may hold changes %s does not know: put the backup back by hand if that is safe\n",
@@ -2478,8 +2496,11 @@ func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binary
 			fmt.Fprintf(stderr, "updater: clear state: %v\n", err)
 		}
 	case updater.BootClearAbandoned:
-		// Marker is older than the recency window — nothing
-		// actionable, just clean up.
+		// Marker is older than the recency window and this boot is not
+		// of the install's version, whose own boot confirms it at any age
+		// (backlog B705) — no restore so long after, just clean up,
+		// keeping the record of the data dir beside the backup left where
+		// it is (updater.ClearInstall).
 		if err := updater.ClearInstall(dataDir, st); err != nil {
 			fmt.Fprintf(stderr, "updater: clear abandoned state: %v\n", err)
 		}
