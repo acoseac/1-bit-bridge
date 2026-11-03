@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io/fs"
 	"os"
+	"os/user"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -93,6 +95,7 @@ func (b *dacBox) host() dacAccessHost {
 		creds:         func() (dacCreds, error) { return b.creds, nil },
 		accountGroups: func(string) ([]uint32, error) { return b.account, b.accountErr },
 		sudo:          func() bool { return !b.noSudo },
+		systemd:       func() bool { return true },
 		slot:          make(chan struct{}, 1),
 	}
 	if !b.serving {
@@ -160,6 +163,57 @@ const (
 	dacJoinCommand    = "sudo usermod -aG audio tester"
 	dacRestartCommand = "sudo systemctl restart user@1000.service"
 )
+
+// TestDACAdviceKeepsAnUnresolvedUID checks LookupId failure through the line:
+// its verdict and numeric manager unit survive, but no account-edit command
+// can use a display label in place of a resolved user name.
+func TestDACAdviceKeepsAnUnresolvedUID(t *testing.T) {
+	c := (dacCreds{euid: 1000, egid: gidUser}).withUserName(func(uid string) (*user.User, error) {
+		return nil, fmt.Errorf("lookup uid %s: unavailable", uid)
+	})
+	if c.name != "" || c.euid != 1000 || c.egid != gidUser {
+		t.Fatalf("lookup failure lost the effective uid or supplied a name: %+v", c)
+	}
+	for _, serving := range []bool{false, true} {
+		b := newDACBox()
+		b.serving, b.creds = serving, c
+		wantDACLine(t, dacLine(t, playerDACConfig(), b), doctor.Fail,
+			[]string{"uid 1000", "add the account with uid 1000 to audio by its user name", dacRestartCommand},
+			[]string{"usermod"})
+	}
+}
+
+// TestDACAdviceWithoutSystemd preserves each access verdict while directing
+// a non-systemd host to start the bridge from a new login.
+func TestDACAdviceWithoutSystemd(t *testing.T) {
+	for _, serving := range []bool{false, true} {
+		for _, state := range []string{"join", "stale", "running stale"} {
+			if serving && state == "running stale" {
+				continue // Only the CLI compares with a separate serving process.
+			}
+			t.Run(fmt.Sprintf("%s/serving=%t", state, serving), func(t *testing.T) {
+				b := newDACBox()
+				b.serving = serving
+				status := doctor.Fail
+				says := []string{"log in again (or reboot)", "start the bridge"}
+				if state == "join" {
+					says = append(says, dacJoinCommand)
+				} else {
+					b.account = []uint32{gidUser, gidAudio}
+				}
+				if state == "running stale" {
+					b.accessErr, b.creds.groups = nil, []uint32{gidAudio}
+					b.service = &dacService{pid: 4242, euid: 1000, egid: gidUser}
+					status = doctor.Warn
+				}
+				h := b.host()
+				h.systemd = func() bool { return false }
+				wantDACLine(t, dacLineOf(t, h), status, says,
+					[]string{"systemctl", "user manager", "starts again with it"})
+			})
+		}
+	}
+}
 
 // TestThePlayersDACLineSaysWhatTheNodeAllows pins the console's line, made
 // in the serving process of itself, over each answer the node's probe can

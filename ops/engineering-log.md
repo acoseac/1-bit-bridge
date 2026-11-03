@@ -71084,3 +71084,48 @@ qualificationVersion rises to 32 at the merge (`internal/player/engine/`,
 `internal/player/playback/`, `internal/alsapcm/` and `cmd/bridge/serve_player*`
 are guarded; main had 31 after B687), and the runbook's current-version pins
 follow it.
+
+
+## 2026-11-03 — B676 round 2: command advice follows the host and resolved account
+
+`--no-init` selected service advice before considering SYSTEMD=0, printed
+`bridge init` without `--no-service`, and offered lingering when elogind
+provided loginctl without systemd. It now chooses setup, lingering and DAC
+advice from SYSTEMD: no-service init and a new login without systemd, the
+existing service advice with it. `detect_install` already initializes
+SYSTEMD before main calls `fresh_install`; the ordering finding needed no
+code change. The installer resolves names with `id -un`, never `$USER`;
+its numeric fallback, a numeric answer and an empty answer now withhold
+usermod and ask to add the uid's account to the group by its user name.
+
+The doctor's restart hint likewise used its display label (`uid 1000`) as
+a usermod operand when LookupId failed. It now keeps that uid for the
+summary and `user@1000.service`, withholding usermod until a name resolves.
+A directory at `/run/systemd/system`, the installer's evidence too, selects
+manager restart advice; without it, both doctors advise a new login and a
+bridge start from it, without a manager claim. All FAIL/WARN verdicts stay.
+
+Validation used Go 1.27.3 at the supplied absolute path with
+GOTOOLCHAIN=local, GOPROXY=off and the supplied scratchpad cache. No test
+bound a socket and no commit was made.
+
+- Red before fixes: `TestNoInitAdviceMatchesTheHost` failed on non-systemd
+  setup/restart/lingering advice and unresolved names. The first doctor
+  control had a test compilation error (the UnknownUserIdError conversion),
+  so it was not counted; after correcting the fixture, both
+  `TestDACAdviceKeepsAnUnresolvedUID` and `TestDACAdviceWithoutSystemd`
+  failed on the intended hint assertions.
+- Green: the three new tests and existing
+  `TestThePlayersDACLineSaysWhatTheNodeAllows` and
+  `TestBridgeDoctorComparesItsAccessWithTheRunningBridges`, with
+  `go test -tags ts_omit_webclient,ts_omit_debugeventbus` on
+  `./scripts/install-test/ ./cmd/bridge/`, selecting those five names,
+  `-count=1`, and BRIDGE_INSTALL_TEST_SHELLS=all. The installer cases use
+  `newRigFiles` (no HTTPS server), run main through the existing source hook
+  with download and installation stubbed, replay printed lines against the
+  argument recorder, and require no mutation commands. The existing HTTPS
+  installer tests were not run under the no-sockets constraint.
+- `go vet -tags ts_omit_webclient,ts_omit_debugeventbus ./...` passed for the
+  host and with GOOS=windows. `make docs-check` passed. Both rules files
+  were writable, so the corrections and their long forms are in the tree;
+  no fallback rules patch was needed.

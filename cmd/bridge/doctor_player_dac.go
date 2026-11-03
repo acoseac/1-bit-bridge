@@ -117,6 +117,9 @@ type dacAccessHost struct {
 	// sudo reports whether the box has sudo, which the fix's commands are
 	// written with; without it they are root's to run as they stand.
 	sudo func() bool
+	// systemd reports whether this host runs systemd, not just whether its
+	// client tools are installed. Nil gives new-login advice.
+	systemd func() bool
 	// slot is the one reading of the box under way, taken before a reading
 	// starts and let go when it returns, which a reading stuck in the kernel
 	// may do after the line has gone; nil holds nothing back.
@@ -136,6 +139,7 @@ func hostDACAccess(trees outputTrees) dacAccessHost {
 		creds:         processCreds,
 		accountGroups: lookupAccountGroups,
 		sudo:          func() bool { _, err := exec.LookPath("sudo"); return err == nil },
+		systemd:       func() bool { info, err := os.Stat("/run/systemd/system"); return err == nil && info.IsDir() },
 		slot:          make(chan struct{}, 1),
 	}
 }
@@ -376,8 +380,12 @@ func (j dacJudgement) allowed(line func(doctor.Status, string, string) (doctor.C
 	if !j.h.serving {
 		switch {
 		case j.running && j.cr.in(j.gid) && !j.svc.in(j.gid):
-			return line(doctor.Warn, fmt.Sprintf("%s may open %s through the %s group, but the running bridge (pid %d) is not in %s: it keeps the groups its user manager started with, so its player may not open the DAC",
-				j.who(), j.node, j.group, j.svc.pid, j.group), j.restartHint("restart"))
+			groups := "it keeps the groups it started with"
+			if j.h.systemd != nil && j.h.systemd() {
+				groups = "it keeps the groups its user manager started with"
+			}
+			return line(doctor.Warn, fmt.Sprintf("%s may open %s through the %s group, but the running bridge (pid %d) is not in %s: %s, so its player may not open the DAC",
+				j.who(), j.node, j.group, j.svc.pid, j.group, groups), j.restartHint("restart"))
 		case j.running && j.svc.in(j.gid):
 			summary += fmt.Sprintf("; the running bridge (pid %d) is in %s too", j.svc.pid, j.group)
 		case j.running:
@@ -410,7 +418,7 @@ func (j dacJudgement) denied(line func(doctor.Status, string, string) (doctor.Ch
 			j.who(), j.node, user, group, user, j.svc.pid, group), "log in again, and run bridge doctor again")
 	case inAccount:
 		hint := j.restartHint("restart")
-		if !j.h.serving {
+		if !j.h.serving && j.h.systemd != nil && j.h.systemd() {
 			hint = "log in again for this shell; for the bridge's service, " + hint
 		}
 		return line(doctor.Fail, fmt.Sprintf("the player cannot open its DAC: %s is in %s, which owns %s, but %s started before %s joined it, and keeps the groups it started with",
@@ -425,6 +433,8 @@ func (j dacJudgement) denied(line func(doctor.Status, string, string) (doctor.Ch
 // service manager, user@<uid>.service, whose services keep the groups it
 // started with, so a restart of the bridge's own service alone is not enough;
 // or reboot; and what the restart costs.
+// Without systemd, start the bridge from a new login instead. An unresolved
+// account is named by uid, but only a resolved name may enter usermod.
 func (j dacJudgement) restartHint(what string) string {
 	user, group := userWord(j.cr), j.group
 	root := func(words ...string) string {
@@ -437,13 +447,24 @@ func (j dacJudgement) restartHint(what string) string {
 	if j.h.sudo == nil || !j.h.sudo() {
 		asRoot = " as root"
 	}
+	join := ""
+	if what == "join" {
+		if j.cr.name == "" {
+			join = fmt.Sprintf("add the account with uid %d to %s by its user name, as root; then ", j.cr.euid, group)
+		} else {
+			join = fmt.Sprintf("add %s to %s; run%s: %s; then ", user, group, asRoot, root("usermod", "-aG", group, j.cr.name))
+		}
+	}
+	if j.h.systemd == nil || !j.h.systemd() {
+		return join + "log in again (or reboot), then start the bridge from that new login so it runs with the group"
+	}
 	restart := root("systemctl", "restart", "user@"+strconv.Itoa(j.cr.euid)+".service")
 	cost := "restarting it stops every service of " + user + "'s, a desktop or terminal session under it included, so run it from another administrative session; the bridge's service starts again with it"
-	if what == "join" {
+	if what == "join" && j.cr.name != "" {
 		return fmt.Sprintf("add %s to %s, then restart %s's user manager, whose services keep the groups it started with; run%s: %s, then %s, or reboot; %s",
 			user, group, user, asRoot, root("usermod", "-aG", group, user), restart, cost)
 	}
-	return fmt.Sprintf("restart %s's user manager, whose services keep the groups it started with; run%s: %s, or reboot; %s", user, asRoot, restart, cost)
+	return join + fmt.Sprintf("restart %s's user manager, whose services keep the groups it started with; run%s: %s, or reboot; %s", user, asRoot, restart, cost)
 }
 
 // bootNote says, in the console's doctor, that the config names another DAC
@@ -511,10 +532,16 @@ func processCreds() (dacCreds, error) {
 	for _, id := range ids {
 		c.groups = append(c.groups, uint32(id))
 	}
-	if u, err := user.LookupId(strconv.Itoa(c.euid)); err == nil {
+	return c.withUserName(user.LookupId), nil
+}
+
+// withUserName resolves the effective uid without replacing the kernel's
+// credentials when the account database cannot name it.
+func (c dacCreds) withUserName(lookup func(string) (*user.User, error)) dacCreds {
+	if u, err := lookup(strconv.Itoa(c.euid)); err == nil {
 		c.name = u.Username
 	}
-	return c, nil
+	return c
 }
 
 // lookupAccountGroups are the gids of the groups the user named belongs to in

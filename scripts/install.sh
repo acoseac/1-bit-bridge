@@ -338,6 +338,13 @@ check_platform() {
 check_user() {
 	USER_ID=$(id -u)
 	USER_NAME=$(id -un 2>/dev/null) || USER_NAME=$USER_ID
+	USER_NAME_RESOLVED=1
+	case $USER_NAME in
+	'') USER_NAME_RESOLVED=0 ;;
+	*[!0-9]*) ;;
+	*) USER_NAME_RESOLVED=0 ;;
+	esac
+	[ "$USER_NAME_RESOLVED" = 1 ] || USER_NAME=$USER_ID
 	if [ "$USER_ID" = 0 ]; then
 		cu_sudo_user=${SUDO_USER:-}
 		if [ -n "$cu_sudo_user" ] && [ "$cu_sudo_user" != root ]; then
@@ -1153,7 +1160,8 @@ root_line() {
 # boot), so a restart of the bridge's own service would not give it the
 # group: the manager is restarted, as root, or the box rebooted; or self,
 # for a bridge its user starts, which a new login gives the group. A node
-# with no group, or one root's group owns, gets no advice.
+# with no group, or one root's group owns, gets no advice. An unresolved
+# account keeps its uid for the manager, but gets no usermod command.
 audio_advice() {
 	aa_node=$(playback_node) || return 0
 	aa_listing=$(ls -ld -- "$aa_node" 2>/dev/null) || return 0
@@ -1165,7 +1173,10 @@ audio_advice() {
 	case $aa_group in
 	'' | root | 0) return 0 ;;
 	esac
-	aa_account=$(id -nG "$USER_NAME" 2>/dev/null) || return 0
+	aa_account=$(id -nG "$USER_NAME" 2>/dev/null) || {
+		[ "$USER_NAME_RESOLVED" = 0 ] || return 0
+		aa_account=''
+	}
 	aa_process=$(id -nG 2>/dev/null) || aa_process=''
 	aa_in_account=0
 	case " $aa_account " in
@@ -1179,9 +1190,14 @@ audio_advice() {
 	aa_restart=$(root_line systemctl restart "user@$USER_ID.service")
 	aa_cost="Restarting the service manager avoids a reboot, but it stops every service of $USER_NAME's, a desktop or terminal session under it included: run it from another administrative session. The bridge's service starts again with it."
 	if [ "$aa_in_account" = 0 ]; then
-		say "" "The bridge's own player (off until you turn it on, on the console's Player page) opens the DAC's node, $aa_node," \
-			"which the $aa_group group owns, and $USER_NAME is not in $aa_group: the player could not open the DAC. To let it, add $USER_NAME to $aa_group, as root:" \
-			"    $(root_line usermod -aG "$aa_group" "$USER_NAME")"
+		say "" "The bridge's own player (off until you turn it on, on the console's Player page) opens the DAC's node, $aa_node,"
+		if [ "$USER_NAME_RESOLVED" = 1 ]; then
+			say "which the $aa_group group owns, and $USER_NAME is not in $aa_group: the player could not open the DAC. To let it, add $USER_NAME to $aa_group, as root:" \
+				"    $(root_line usermod -aG "$aa_group" "$USER_NAME")"
+		else
+			say "which the $aa_group group owns. This account's user name could not be resolved;" \
+				"add the account with uid $USER_ID to $aa_group by its user name, as root;"
+		fi
 		if [ "$1" = self ]; then
 			say "then log in again (or reboot) before you start the bridge, so that it runs with the group."
 			return 0
@@ -1384,12 +1400,17 @@ fresh_install() {
 	download_release
 	install_binary
 	if [ "$SETUP" = no ]; then
-		say "" "Set it up when you are ready, with:" "    $(bridge_line "$TARGET" init)"
-		if command -v loginctl >/dev/null 2>&1 && ! linger_on; then
-			say "and so that its service outlives your login and starts when this box boots, turn lingering on, as root:" \
-				"    $(command_line loginctl enable-linger "$USER_NAME")"
+		if [ "$SYSTEMD" = 1 ]; then
+			say "" "Set it up when you are ready, with:" "    $(bridge_line "$TARGET" init)"
+			if command -v loginctl >/dev/null 2>&1 && ! linger_on; then
+				say "and so that its service outlives your login and starts when this box boots, turn lingering on, as root:" \
+					"    $(command_line loginctl enable-linger "$USER_NAME")"
+			fi
+			audio_advice service
+		else
+			say "" "Set it up when you are ready, with:" "    $(bridge_line "$TARGET" init --no-service)"
+			audio_advice self
 		fi
-		audio_advice service
 		path_note
 		return 0
 	fi

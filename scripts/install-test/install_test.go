@@ -463,6 +463,16 @@ type rig struct {
 // without the tools omit names.
 func newRig(t *testing.T, sh shell, omit ...string) *rig {
 	t.Helper()
+	r := newRigFiles(t, sh, omit...)
+	r.server = newReleaseServer(t, r.dir)
+	r.server.publish(stampedRelease, nil)
+	r.set("BRIDGE_INSTALL_BASE_URL", r.server.base(), "CURL_CA_BUNDLE", r.server.caFile)
+	return r
+}
+
+// newRigFiles prepares the host and tools without opening a release server.
+func newRigFiles(t *testing.T, sh shell, omit ...string) *rig {
+	t.Helper()
 	// Resolved, as bridge init resolves the program's path it writes into the
 	// unit (macOS's temporary directory is under the /var link).
 	dir, err := filepath.EvalSymlinks(t.TempDir())
@@ -522,8 +532,6 @@ func newRig(t *testing.T, sh shell, omit ...string) *rig {
 		writeFile(t, filepath.Join(r.bin, stub.Name()), b, 0o755)
 	}
 
-	r.server = newReleaseServer(t, dir)
-	r.server.publish(stampedRelease, nil)
 	r.env = map[string]string{
 		"HOME":                        r.home,
 		"PATH":                        r.bin,
@@ -532,9 +540,7 @@ func newRig(t *testing.T, sh shell, omit ...string) *rig {
 		"LC_ALL":                      "C",
 		"USER":                        "tester",
 		"LOGNAME":                     "tester",
-		"BRIDGE_INSTALL_BASE_URL":     r.server.base(),
 		"BRIDGE_INSTALL_TEST_SYSROOT": r.root,
-		"CURL_CA_BUNDLE":              r.server.caFile,
 		"STUB_LOG":                    r.log,
 		"STUB_ARGV":                   r.argvLog,
 		"STUB_STATE":                  r.state,

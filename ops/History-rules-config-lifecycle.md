@@ -1892,7 +1892,7 @@ refusals: no path in the text, every cause kept.
 
 ## B676 — the installer says what lets the player open the DAC (2026-11-03)
 
-- **…and the installer says what lets the bridge's own player open the DAC, and runs none of it** (2026-11-03, backlog B676): on a box with an ALSA playback node (`/dev/snd/pcmC*D*p`) whose group (`ls -ld`'s) neither every user nor the account (`id -nG USER`, never this process's groups) is given, a new install, an upgrade and `--no-init` print `usermod -aG <group> <user>` and `systemctl restart user@<uid>.service   # or reboot`, through sudo where the box has it, each word quoted (`root_line`, `command_line`), and a line on what the restart costs; an account in the group whose login is not gets the restart alone; the non-systemd set-up gets the usermod and a new login; a node every user may open, root's group, no node, and `--uninstall` get nothing. **Don't run usermod or the restart, write a user or a group, print a placeholder or a `$USER` a root shell would expand, judge the account by this process's groups, or advise on a box with no playback node.**
+- **…and the installer says what lets the bridge's own player open the DAC, and runs none of it** (2026-11-03, backlog B676): on a box with an ALSA playback node (`/dev/snd/pcmC*D*p`) whose group (`ls -ld`'s) neither every user nor the account (`id -nG USER`, never this process's groups) is given, on systemd a new install, an upgrade and `--no-init` print `usermod -aG <group> <user>` and `systemctl restart user@<uid>.service   # or reboot`, through sudo where the box has it, each word quoted (`root_line`, `command_line`), and a line on what the restart costs; an account in the group whose login is not gets the restart alone; without systemd, deferred set-up and `--no-init` get a new login instead of a manager restart; `--no-init` prints `init --no-service` and no lingering advice there, even with elogind; an unresolved user name (failed, empty or numeric `id -un`) withholds usermod and asks to add the account to the group by name; a node every user may open, root's group, no node, and `--uninstall` get nothing. **Don't run usermod or the restart, write a user or a group, print a placeholder or a `$USER` a root shell would expand, judge the account by this process's groups, or advise on a box with no playback node.**
 
 *Why.* The player opens the DAC's node for reading and writing; the audio
 group owns it on Debian, Ubuntu, Raspberry Pi OS, Volumio and moOde, and a
@@ -1926,9 +1926,11 @@ is the alternative printed beside it.
 
 *Where.* A new install prints it after the box's sound cards are reported
 (`report_outputs`), an upgrade after its service is seen serving, `--no-init`
-after the lingering line, and the deferred set-up on a box without systemd,
-where its user starts the bridge, prints the usermod and a new login instead
-of the restart (`audio_advice self`). `--uninstall` prints none of it.
+after the lingering line on systemd. Without systemd, both `--no-init` and
+the deferred set-up print a new login instead of the manager restart
+(`audio_advice self`). `--no-init` prints `bridge init --no-service` there,
+with no lingering advice even when elogind provides loginctl. `detect_install`
+sets SYSTEMD before `fresh_install` reads it; no reordering is needed. `--uninstall` prints none of it.
 Nothing is said on a box with no playback node: there is no DAC for the
 player to open, and no node to read the group from (a group named on another
 distribution's nodes would be a guess); a DAC plugged in later is the
@@ -1945,3 +1947,13 @@ lines as printed against the recorder (`testdata/argv`, its allowlist with
 stub logs any call, and `mutations` counts it); the `id` stub answers `-nG
 USER` from the account's groups and `-nG` from this process's. The record
 is in `ops/engineering-log.md`, 2026-11-03, B676.
+
+*Round 2.* `check_user` distinguishes a resolved `id -un` name from its
+numeric fallback, an empty answer and an all-numeric answer; it never trusts
+`$USER`. Without a resolved name, the DAC advice keeps the uid and asks to
+add the account to the node's group by its user name, withholding usermod.
+A group lookup that fails for that unresolved account does not hide the
+advice. A systemd manager is still named by uid. The socket-free
+`TestNoInitAdviceMatchesTheHost` runs main with only download and installation
+stubbed, exercises both systemd states and all four name answers, executes
+printed commands against the argument recorder and requires no mutations.
