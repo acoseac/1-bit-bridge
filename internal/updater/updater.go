@@ -266,7 +266,10 @@ type Updater struct {
 	// on the .bak rename target and update-state.json. The `bridge
 	// update` CLI is a separate process and can't share this lock —
 	// the per-attempt scratch dir is what keeps its cleanup from
-	// deleting an in-flight install's files.
+	// deleting an in-flight install's files, and the install marker's
+	// lock (update-state.lock, held from Install's decision through its
+	// swap and by Rollback throughout; backlog B692) is what keeps the
+	// two processes' marker writes and swaps apart.
 	installInFlight atomic.Bool
 
 	// pendingRestart is the auto-installer's restart INTENT: "auto-install
@@ -303,6 +306,11 @@ type Updater struct {
 	// swapAwaitingRestart has matched the target: consulted before, it
 	// refused a genuinely newer release.
 	swapPending atomic.Bool
+
+	// restampSave, nil in production (SaveState), is the auto-installer's
+	// restamp's write of the marker (refreshInstallAttemptedAt): a test's
+	// stand-in for a write that is under way when a stop lands.
+	restampSave func(dataDir string, st State) error
 }
 
 // New builds an Updater. The poller is not started — call Run on it
@@ -503,7 +511,7 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 	// + verify per poll cycle) — just wait for sessions to drain,
 	// then restart into the binary already on disk.
 	if u.pendingRestart.Load() {
-		u.restartWhenDrained()
+		u.restartWhenDrained(ctx)
 		return
 	}
 	// Sessions inflight gate: refuse cleanly. The next poll cycle
@@ -560,7 +568,7 @@ func (u *Updater) maybeAutoInstall(ctx context.Context) {
 	// gates at entry, and the auto-installer's opts carry
 	// Force=false). Restarting now would kill it — defer to the next
 	// poll cycle, which takes the pending-restart fast path above.
-	u.restartWhenDrained()
+	u.restartWhenDrained(ctx)
 }
 
 // inflightSessions reports the auto-installer session tracker's
@@ -617,12 +625,29 @@ func rejectionBlocks(candidate, rejected string) bool {
 // downloads are inflight — logs and defers to the next poll cycle.
 // Shared by the pending-restart fast path and the tail of a fresh
 // install; the caller guarantees an install candidate is on disk.
-func (u *Updater) restartWhenDrained() {
+//
+// A stop is a stop (backlog B692's round 2): where ctx ends while the
+// restamp waits for the install marker's lock, or had ended before its
+// take, no restart is requested, which would turn the operator's or the
+// service manager's stop into supervision.RestartExitCode and a
+// supervisor's restart; the next start finds the install as it is. So
+// where it ends while the restamp writes, holding the lock (round 3,
+// Codex on round 2): ctx is asked again once the restamp has returned,
+// just before the restart is requested. What is left is the few
+// statements from that ask to the request.
+func (u *Updater) restartWhenDrained(ctx context.Context) {
 	if n := u.inflightSessions(); n > 0 {
 		logger.Info("auto-install restart deferred", "reason", activeDownloadsReason, "inflight", n)
 		return
 	}
-	u.refreshInstallAttemptedAt()
+	err := u.refreshInstallAttemptedAt(ctx)
+	if err == nil {
+		err = ctx.Err()
+	}
+	if err != nil {
+		logger.Info("auto-install restart not requested: the bridge is stopping")
+		return
+	}
 	logger.Info("auto-install complete; restarting to load new binary")
 	u.autoInstallRestart()
 }
@@ -641,21 +666,43 @@ func (u *Updater) restartWhenDrained() {
 // protection).
 //
 // Best-effort and narrow: only an "installing" marker is touched, and a
-// failure just leaves the pre-existing behaviour.
-func (u *Updater) refreshInstallAttemptedAt() {
+// failure just leaves the pre-existing behaviour. The read and the write
+// hold the install marker's lock (backlog B692), so a migrating store open
+// or a start's housekeeping cannot record in between and see its record
+// written over; where the lock cannot be held (another holder past the
+// wait, no lock to give, a failure, a filesystem that keeps none) the marker
+// is left as it is and the restart goes on. A stop in the wait, or one
+// before an uncontended take, writes nothing and is returned, ctx's error,
+// for the caller to request no restart (round 2); it returns nothing else.
+func (u *Updater) refreshInstallAttemptedAt(ctx context.Context) error {
 	if u.autoInstallOpts == nil || u.autoInstallOpts.DataDir == "" {
-		return
+		return nil
 	}
 	dir := u.autoInstallOpts.DataDir
+	lock, err := lockMarkerForUpdate(ctx, dir, "the install marker was not re-stamped before the restart")
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+			return err
+		}
+		logger.Warn("could not refresh the install marker before restarting; boot-time confirmation may treat it as abandoned",
+			"err", err)
+		return nil
+	}
+	defer lock.Release()
 	st, err := LoadState(dir)
 	if err != nil || st.Status != "installing" {
-		return
+		return nil
 	}
 	st.AttemptedAt = time.Now().UTC()
-	if err := SaveState(dir, st); err != nil {
+	save := u.restampSave
+	if save == nil {
+		save = SaveState
+	}
+	if err := save(dir, st); err != nil {
 		logger.Warn("could not refresh the install marker before restarting; boot-time confirmation may treat it as abandoned",
 			"err", err)
 	}
+	return nil
 }
 
 // recordDeferredReason persists a single-line explanation of why

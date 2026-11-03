@@ -18,7 +18,7 @@ func (s stubUpdater) CheckNow(context.Context) UpdateStatus { return s.st }
 func (s stubUpdater) Install(context.Context, bool) (UpdateStatus, error) {
 	return s.st, nil
 }
-func (s stubUpdater) Rollback(bool) error { return nil }
+func (s stubUpdater) Rollback(context.Context, bool) error { return nil }
 
 // dtBeforeDD matches a <dt> immediately followed by the <dd> carrying the
 // given id, allowing only whitespace between them. Group 1 is the <dt>'s

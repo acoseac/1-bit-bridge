@@ -82,6 +82,21 @@ type InstallOptions struct {
 	// ConfigCheck overrides the candidate's settings check (CheckConfig).
 	// Production leaves it nil; a test stands in for a candidate.
 	ConfigCheck func(ctx context.Context, candidate, configPath string) ConfigCheck
+
+	// RestoreBackup overrides the rename that puts the backup back over the
+	// binary in an operator's Rollback (RollbackBinary). Production leaves
+	// it nil; a test holds a rollback in it.
+	RestoreBackup func(dst, backupExt string) error
+
+	// BeforeRollbackRecord, nil in production, runs in an operator's
+	// Rollback once it has read the marker and decided, just before it
+	// writes its record, the install marker's lock held: a test's hold on a
+	// rollback there.
+	BeforeRollbackRecord func()
+
+	// holdBeforeSwap, nil in production, runs in Install just before the
+	// swap, its marker armed: a test's hold on an install there.
+	holdBeforeSwap func()
 }
 
 // Install downloads, verifies, swaps, and arms the rollback marker
@@ -110,6 +125,13 @@ type InstallOptions struct {
 //   - ErrPathNotWritable when the running binary's parent directory
 //     isn't writable by the bridge process (returned by preflightWritable
 //     before any irreversible work begins).
+//   - ErrMarkerLockUnavailable when the install marker's lock cannot be
+//     held (another process past its wait, no lock to give, a failure, a
+//     filesystem that keeps none), and ctx's error for a stop in its
+//     wait: nothing armed or swapped (backlog B692).
+//   - ErrInstallPendingRestart, as above, and for the auto-installer
+//     ErrInstallHeldBack (a holdError), when the decision made again
+//     under that lock refuses (decideUnderLock).
 //   - Any download / verify / swap / state-save error returned verbatim
 //     with a wrapped context prefix.
 //
@@ -126,6 +148,18 @@ type InstallOptions struct {
 // rollback). The reverse ordering would leave a marker without a
 // matching swap (would trigger a spurious rollback on next boot).
 // We pick the lesser of two evils.
+//
+// The marker's read, the decision, the marker's writes and the swap
+// all run holding the install marker's lock (backlog B692;
+// lockMarkerForUpdate), taken only once the download, its
+// verification and the settings check are done: never through them,
+// since a migrating store open and every start wait at most
+// stateLockWait for it, and the download alone may take
+// downloadTimeout. Under it Install decides again on the marker as it
+// is then (decideUnderLock), since another process may have installed
+// or recorded a hold meanwhile. Where the lock cannot be held it
+// refuses with ErrMarkerLockUnavailable, nothing armed or swapped; a
+// stop in its wait returns ctx's error.
 func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, error) {
 	status := u.Status()
 	if !status.UpdateAvailable || status.LatestVersion == "" {
@@ -174,6 +208,12 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 	// before every swap, and is visible to the CLI's separate process —
 	// so it is strictly stronger here, and the flag keeps its one real
 	// job: the auto-installer's pending-restart fast path.
+	//
+	// Read here without the install marker's lock, to spare a download
+	// it would refuse; the decision that binds is made again under the
+	// lock, before the marker's write (decideUnderLock, backlog B692),
+	// since `bridge update` and serve's own install share no
+	// installInFlight and either may install while the other downloads.
 	if u.swapAwaitingRestart(opts.DataDir, status.LatestVersion) {
 		return status, fmt.Errorf("%w: %s is already staged on disk", ErrInstallPendingRestart, status.LatestVersion)
 	}
@@ -345,6 +385,21 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 		candidate = staged
 	}
 
+	// The install marker's lock (backlog B692), from here through the swap:
+	// taken in the documented order, since this process holds server.lock
+	// (serve) or nothing (`bridge update`), never the ladder, and takes
+	// neither under it. Windows' swap stops the service first, for up to
+	// scmStopWait, with the lock held: serve's stop takes no part of it.
+	lock, err := lockMarkerForUpdate(ctx, opts.DataDir, "nothing was installed")
+	if err != nil {
+		return status, err
+	}
+	defer lock.Release()
+	prior, priorErr := LoadState(opts.DataDir)
+	if err := u.decideUnderLock(opts, status.LatestVersion); err != nil {
+		return status, err
+	}
+
 	// Marker first (see method-doc rationale). This is the boot
 	// contract: Status="installing" + TargetVersion → next boot
 	// expects to be running TargetVersion or rolls back.
@@ -373,10 +428,17 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 		state.SwapStarted = true
 		return SaveState(opts.DataDir, state)
 	}
+	if opts.holdBeforeSwap != nil {
+		opts.holdBeforeSwap()
+	}
 	if err := swapBinary(opts.BinaryPath, candidate, ".bak", markSwapStarted); err != nil {
-		// Swap failed — clear the marker so the next boot doesn't
-		// roll back something that didn't actually change.
-		_ = ClearState(opts.DataDir)
+		// Swap failed — the marker back as this install read it under the
+		// lock, so the next boot doesn't roll back something that didn't
+		// actually change, and a hold or a veto it carried stays (backlog
+		// B692; none where there was no marker to read, as before).
+		if perr := putMarkerBack(opts.DataDir, prior, priorErr); perr != nil {
+			logger.Warn("could not put the install marker back after a swap that failed", "err", perr)
+		}
 		return status, fmt.Errorf("swap: %w", err)
 	}
 
@@ -429,6 +491,19 @@ var (
 	// check. The auto-installer holds it back; a manual install takes it
 	// with a warning (Status.InstallWarning).
 	ErrConfigCheckUnsupported = errors.New("the new version predates the settings check")
+	// ErrInstallHeldBack means the auto-installer's install found, under the
+	// install marker's lock, a hold of its candidate that another process
+	// recorded after the auto-installer's gate read the marker (HeldBack):
+	// nothing was installed.
+	ErrInstallHeldBack = errors.New("the version is held back from the auto-installer")
+	// ErrMarkerLockUnavailable means an install, a rollback, a hold's record
+	// or a restamp was refused because the install marker's lock
+	// (update-state.lock) could not be held: nothing was written or swapped.
+	ErrMarkerLockUnavailable = errors.New("the install marker's lock cannot be held")
+	// ErrRollbackRefused means the operator's rollback would put the backup
+	// back over a store a newer version may have changed: nothing was
+	// written or swapped.
+	ErrRollbackRefused = errors.New("the rollback was refused")
 )
 
 // Rollback restores bridge.bak over the live binary. Used by the
@@ -443,17 +518,37 @@ var (
 // it within seconds — the operator's only escape being to hand-edit
 // bridge.yaml. A strictly newer release still installs normally.
 //
+// Since backlog B692 it holds the install marker's lock
+// (lockMarkerForUpdate) from its read of the marker through its record
+// and the backup's rename, so no migrating store open records, and no
+// start's housekeeping decides, in between. Under it the rollback
+// refuses where the marker records that a version other than the
+// backup's opened the data dir (RollbackRefusal: its store may hold what
+// the backup's version does not read; no forced downgrade is offered),
+// and otherwise records, durably and before the rename, the marker it
+// read with the version rolled back from held back, its store
+// migrations vetoed and the rollback under way (OperatorRollbackRecord),
+// so a command of that version still running from its image cannot
+// migrate the store past the version put back, and clears the under-way
+// mark only once the rename has landed (round 2): a rollback the
+// process's end stops between the two leaves a record the version that
+// runs next finishes. A rename that fails puts the marker back as it was
+// read. A lock it cannot hold refuses with
+// ErrMarkerLockUnavailable, and a stop in its wait returns ctx's error,
+// nothing read, written or renamed either way.
+//
 // Errors: ErrInstallInFlight when an Install (or another Rollback)
 // is already running on this Updater, ErrActiveSessions when Force
-// is false and Sessions.Inflight() is nonzero.
-func (u *Updater) Rollback(opts InstallOptions) error {
+// is false and Sessions.Inflight() is nonzero, ErrMarkerLockUnavailable,
+// and ErrRollbackRefused.
+func (u *Updater) Rollback(ctx context.Context, opts InstallOptions) error {
 	// Phase B-Windows (PR #48) implements the rollback rename
 	// alongside darwin/linux — no platform guard needed here. The
 	// Windows-side `RollbackBinary` handles the SCM-stop dance
 	// transparently.
 	//
 	// Serialise against Install with the same try-lock: rollback
-	// renames .bak over the live binary and clears update-state.json
+	// renames .bak over the live binary and rewrites update-state.json
 	// — the exact swap targets an in-flight install is mutating.
 	if !u.installInFlight.CompareAndSwap(false, true) {
 		return ErrInstallInFlight
@@ -463,30 +558,67 @@ func (u *Updater) Rollback(opts InstallOptions) error {
 		return fmt.Errorf("%w: %d inflight download(s)",
 			ErrActiveSessions, opts.Sessions.Inflight())
 	}
+	lock, err := lockMarkerForUpdate(ctx, opts.DataDir, "nothing was rolled back")
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
 	// Read the marker BEFORE the swap undoes it — TargetVersion is the
 	// release being rejected in both reachable rollback windows (marker
 	// "installing", still running the old binary; and marker
 	// "installed", running the new one).
-	rejected := rejectedVersionFor(opts.DataDir)
-	if err := RollbackBinary(opts.BinaryPath, ".bak"); err != nil {
+	st, err := LoadState(opts.DataDir)
+	if err != nil {
+		return fmt.Errorf("%w: the install marker cannot be read (%w), so whether a version other than the backup's "+
+			"has opened the data dir cannot be told; nothing was rolled back", ErrRollbackRefused, markerIOError{err})
+	}
+	if why := RollbackRefusal(st); why != "" {
+		return fmt.Errorf("%w: %s; nothing was rolled back", ErrRollbackRefused, why)
+	}
+	if fi, err := os.Stat(opts.BinaryPath + ".bak"); err != nil || fi.IsDir() {
+		return errors.New("there is no backup of the previous binary beside this one to put back; nothing was rolled back")
+	}
+	rejected := rejectedVersionOf(st)
+	if opts.BeforeRollbackRecord != nil {
+		opts.BeforeRollbackRecord()
+	}
+	// The hold and the veto first, durably, then the rename (as the early
+	// rollback and the boot's do): a rename that landed before them would
+	// leave the version rolled back free to install again, and its
+	// commands to migrate the store past the binary put back.
+	if err := SaveState(opts.DataDir, OperatorRollbackRecord(st, rejected)); err != nil {
+		return fmt.Errorf("the rollback of %s could not be recorded (%w), and a backup put back without that record could be "+
+			"installed over again, or migrated past by that version's commands; nothing was rolled back", rejected, markerIOError{err})
+	}
+	restore := opts.RestoreBackup
+	if restore == nil {
+		restore = RollbackBinary
+	}
+	if err := restore(opts.BinaryPath, ".bak"); err != nil {
+		// The binary in place is still the one rolled back from: the
+		// marker back as it was read.
+		if perr := putMarkerBack(opts.DataDir, st, nil); perr != nil {
+			return fmt.Errorf("%w; nor could the install marker be put back as it was (%w)", err, markerIOError{perr})
+		}
 		return err
+	}
+	// The backup is back: the rollback is no longer under way (round 2). A
+	// record this write cannot clear is finished by the boot of the version
+	// put back (BootRollbackFinished), and the rollback stands meanwhile, its
+	// hold and its veto with it, so its failure is said and not returned.
+	done := OperatorRollbackRecord(st, rejected)
+	if done.RollbackStarted {
+		done.RollbackStarted = false
+		if err := SaveState(opts.DataDir, done); err != nil {
+			logger.Warn("the rollback is done, and its record could not be cleared; the next start finishes it",
+				"version", rejected, "err", markerIOError{err})
+		}
 	}
 	// A restart deferred by the auto-installer would now bounce the
 	// process for a binary that is no longer on disk. Nothing is
 	// pending any more.
 	u.pendingRestart.Store(false)
 	u.swapPending.Store(false)
-	// Status "" so DecideBootAction reads this as BootNoop — the marker
-	// survives purely to carry the rejection.
-	if err := SaveState(opts.DataDir, State{RejectedVersion: rejected}); err != nil {
-		// Falling back to the pre-rejection behaviour is strictly no
-		// worse than before: the auto-installer may re-install, but a
-		// stale "installing" marker must not be left behind to drive a
-		// spurious boot-time rollback.
-		logger.Warn("could not record the rolled-back version; auto-install may re-install it",
-			"version", rejected, "err", err)
-		_ = ClearState(opts.DataDir)
-	}
 	return nil
 }
 
@@ -505,6 +637,10 @@ func (u *Updater) Rollback(opts InstallOptions) error {
 //   - failed: nothing is installed and nothing recorded, so the next
 //     attempt checks again; a check the context stopped carries the
 //     cancellation, which the auto-installer does not count as a failure.
+//
+// A stop while a hold's record waits for the install marker's lock is the
+// answer too, ctx's error, never the refusal's (backlog B692's round 2):
+// nothing was recorded, and a caller stopped there is told it was stopped.
 func (u *Updater) checkCandidate(ctx context.Context, opts InstallOptions, staged, target string) (warning string, err error) {
 	check := opts.ConfigCheck
 	if check == nil {
@@ -517,7 +653,9 @@ func (u *Updater) checkCandidate(ctx context.Context, opts InstallOptions, stage
 	case ConfigRefused:
 		logger.Warn("the new version refuses this bridge's settings; it was not installed",
 			"version", target, "reasons", strings.Join(res.Reasons, "; "))
-		recordHold(opts, target, refusedReason(target, res.Reasons), true)
+		if err := recordHold(ctx, opts, target, refusedReason(target, res.Reasons), true); err != nil {
+			return "", err
+		}
 		return "", &holdError{sentinel: ErrConfigRefused,
 			reason: target + " refuses this bridge's settings, so it was not installed: " + reasonText(res.Reasons)}
 	case ConfigCheckUnsupported:
@@ -528,7 +666,9 @@ func (u *Updater) checkCandidate(ctx context.Context, opts InstallOptions, stage
 		}
 		reason := fmt.Sprintf("%s predates the settings check, so it cannot say whether it loads this bridge's settings "+
 			"and is not installed automatically: install it by hand to take it", target)
-		recordHold(opts, target, reason, false)
+		if err := recordHold(ctx, opts, target, reason, false); err != nil {
+			return "", err
+		}
 		return "", &holdError{sentinel: ErrConfigCheckUnsupported, reason: reason}
 	}
 	if res.Err != nil {
@@ -579,21 +719,38 @@ func reasonText(reasons []string) string {
 // recordHold records target as held back for reason: against the digest
 // of the settings for a refusal of them, whatever the settings are
 // otherwise. A record that cannot be made is said and skipped: the install
-// is refused all the same, and the next attempt checks again.
-func recordHold(opts InstallOptions, target, reason string, onSettings bool) {
+// is refused all the same, and the next attempt checks again. The record is
+// a read, a change and a write of the marker (recordRejection) holding the
+// install marker's lock (backlog B692), taken here and nowhere else on the
+// way, so a lock that cannot be held (another holder past the wait, no lock
+// to give, a failure, a filesystem that keeps none) records nothing either.
+// A stop in its wait, or one before an uncontended take, records nothing and
+// is returned, ctx's error, for the install to answer (round 2); it returns
+// nothing else.
+func recordHold(ctx context.Context, opts InstallOptions, target, reason string, onSettings bool) error {
 	digest := ""
 	if onSettings {
 		d, err := ConfigDigest(opts.ConfigPath)
 		if err != nil {
 			logger.Warn("could not read the settings to hold the refused version back against; the next check asks again",
 				"version", target, "err", err)
-			return
+			return nil
 		}
 		digest = d
 	}
+	lock, err := lockMarkerForUpdate(ctx, opts.DataDir, "the version held back was not recorded")
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+			return err
+		}
+		logger.Warn("could not record the version held back; the next check asks again", "version", target, "err", err)
+		return nil
+	}
+	defer lock.Release()
 	if err := recordRejection(opts.DataDir, target, reason, digest); err != nil {
 		logger.Warn("could not record the version held back; the next check asks again", "version", target, "err", err)
 	}
+	return nil
 }
 
 // swapAwaitingRestart reports whether a swap for `target` has ALREADY
@@ -659,15 +816,36 @@ func (u *Updater) swapAwaitingRestart(dataDir, target string) bool {
 	return u.swapPending.Load() || u.now().Sub(st.AttemptedAt) <= recencyWindow
 }
 
-// rejectedVersionFor names the release a rollback is rejecting. The
-// install marker's TargetVersion is authoritative — version.ServerVersion
-// is only correct once the operator has already restarted onto the new
-// binary, and the admin "Roll back" button is reachable before that too.
-// Falls back to the running version when no marker survives (a
-// hand-staged .bak, or a rollback after BootCleanupBak retired the
-// marker).
-func rejectedVersionFor(dataDir string) string {
-	if st, err := LoadState(dataDir); err == nil && st.TargetVersion != "" {
+// decideUnderLock makes Install's decisions again on the marker in
+// opts.DataDir as it is once the install marker's lock is held (backlog
+// B692): Install read it before its download, and another process may have
+// changed it since, since `bridge update` and serve's own install share no
+// installInFlight. A swap of target waiting for its restart refuses
+// (swapAwaitingRestart), whichever process made it, so the second install
+// stops before it eats the first one's backup; and for the auto-installer, a
+// hold of target recorded since its gate read the marker refuses too
+// (HeldBack), as the gate would have. The lock is the caller's.
+func (u *Updater) decideUnderLock(opts InstallOptions, target string) error {
+	if u.swapAwaitingRestart(opts.DataDir, target) {
+		return fmt.Errorf("%w: %s is already staged on disk", ErrInstallPendingRestart, target)
+	}
+	if opts.Automatic {
+		if hold := HeldBack(opts.DataDir, opts.ConfigPath, target); hold.Version != "" {
+			return &holdError{sentinel: ErrInstallHeldBack, reason: hold.Reason}
+		}
+	}
+	return nil
+}
+
+// rejectedVersionOf names the release a rollback of the marker st is
+// rejecting. The install marker's TargetVersion is authoritative —
+// version.ServerVersion is only correct once the operator has already
+// restarted onto the new binary, and the admin "Roll back" button is
+// reachable before that too. Falls back to the running version when no
+// install is recorded (a hand-staged .bak, or a rollback after
+// BootCleanupBak retired the marker).
+func rejectedVersionOf(st State) string {
+	if st.TargetVersion != "" {
 		return normalizeTag(st.TargetVersion)
 	}
 	return normalizeTag(version.ServerVersion)

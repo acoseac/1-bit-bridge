@@ -25,6 +25,8 @@ func TestMapUpdaterError(t *testing.T) {
 		{"install-in-flight", updater.ErrInstallInFlight, admin.ErrUpdateInstallInFlight},
 		{"platform-unsupported", updater.ErrInstallNotSupported, admin.ErrUpdateNotSupported},
 		{"path-not-writable", updater.ErrPathNotWritable, admin.ErrUpdatePathNotWritable},
+		{"marker-locked", updater.ErrMarkerLockUnavailable, admin.ErrUpdateMarkerLocked},
+		{"rollback-refused", updater.ErrRollbackRefused, admin.ErrUpdateRollbackRefused},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
