@@ -833,8 +833,10 @@ func (p *bridgePlayer) note(n playback.Note) {
 
 // logPlayerChanges logs what s changed since last, at each new generation:
 // the transport's state, a stop with its reason, each fault and each entry
-// skipped. Nothing logs a position, which moves no generation.
+// skipped; and, whatever the generation, a resume that failed
+// (logPlayerResume). Nothing logs a position, which moves no generation.
 func logPlayerChanges(last, s *engine.Snapshot) {
+	logPlayerResume(last, s)
 	if last != nil && last.Generation() == s.Generation() {
 		return
 	}
@@ -862,6 +864,21 @@ func logPlayerChanges(last, s *engine.Snapshot) {
 		}
 		playerLog.Info("player: an entry was skipped", "entry", id, "reason", string(sk.Reason), "detail", clipDetail(sk.Detail))
 	}
+}
+
+// logPlayerResume logs the last play attempt once, when it is a resume that
+// failed (B676): a refused one moves no generation and stops nothing, so no
+// other line says it, and one past its deadline is said before the stop it
+// causes. The line carries the cause by the engine's word for it
+// (consoleLastError: device_busy, permission_denied, or none) and the
+// failure's words, clipped as a stop's are; a start that failed is said by
+// its stop.
+func logPlayerResume(last, s *engine.Snapshot) {
+	a := s.LastAttempt()
+	if !a.Failed || !a.Resume || (last != nil && last.LastAttempt().Seq == a.Seq) {
+		return
+	}
+	playerLog.Warn("player: a resume failed", "cause", consoleLastError(a), "detail", clipDetail(a.Detail))
 }
 
 // hasFault reports whether faults holds f.

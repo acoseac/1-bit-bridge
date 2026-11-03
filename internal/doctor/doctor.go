@@ -322,6 +322,17 @@ type Deps struct {
 	// checks and before the output checklist, which stays last.
 	PlayerStorage func(ctx context.Context) []Check
 
+	// PlayerDAC is the line on whether the bridge's own player may open its
+	// DAC's node for playback (B676): the binding resolved to the node it
+	// names now, and the node's group and access asked of the kernel, opening
+	// nothing (cmd/bridge's doctorPlayerDAC): a fail naming the user, the group
+	// and the fix where the node is refused to the process it checks, ok where
+	// it is not, and not checked where the DAC is not connected or the check
+	// cannot say. It returns nothing off Linux and where the config does not
+	// ask for the player, and a nil func skips it. Run appends it right after
+	// PlayerStorage, before the output checklist, which stays last.
+	PlayerDAC func(ctx context.Context) []Check
+
 	// OutputChecklist is the checklist of a bridge that is a player
 	// (internal/outputcheck): Player, DAC, Music and Phone, the lines the
 	// console's checklist panel shows, in the same words. Run appends them
@@ -463,6 +474,9 @@ func Run(ctx context.Context, d Deps) Report {
 	}
 	if d.PlayerStorage != nil {
 		out = append(out, d.PlayerStorage(ctx)...)
+	}
+	if d.PlayerDAC != nil {
+		out = append(out, d.PlayerDAC(ctx)...)
 	}
 	if d.OutputChecklist != nil {
 		out = append(out, d.OutputChecklist(ctx)...)

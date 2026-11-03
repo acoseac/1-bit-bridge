@@ -189,6 +189,16 @@ var ErrSessionEnding = errors.New("player: the session is playing out its last c
 // (Snapshot.LastAttempt).
 var ErrDeviceBusy = errors.New("player: another process holds the device")
 
+// ErrDeviceDenied is what the error of a Start, or of a Resume that opens the
+// device again, wraps when this process may not open the device's node (EACCES
+// or EPERM at the open: on Linux the audio group owns the node, and a service
+// whose user is not in it, with no seat's ACL either, is refused it): the
+// backend maps its device layer's permission refusal to it as it maps a busy
+// one to ErrDeviceBusy, so the engine knows the cause by this sentinel alone,
+// never by the backend's codes or text (B676). The engine records it as the
+// last play attempt's cause (Snapshot.LastAttempt).
+var ErrDeviceDenied = errors.New("player: this process may not open the device")
+
 // Backend is what plays: PR 4b2 implements it over internal/player/decode
 // and alsapcm.Sink, and this package's tests over a fake. It is a contract,
 // and these are its terms.

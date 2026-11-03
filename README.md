@@ -41,6 +41,16 @@ less install.sh
 sh install.sh
 ```
 
+**The bridge's own player and the `audio` group (Linux).** The player (off until you turn it on, on the console's Player page) opens the DAC's node under `/dev/snd`, which the `audio` group owns. A desktop login opens it through its seat's ACL; the bridge's service, which lingering keeps running with nobody at the seat, opens it only when the bridge's user is in that group. When the box has a DAC node and your user is not in its group, the installer says so and prints the two commands below with your user's name, uid and the node's group filled in; it runs neither (adding a user to a group is root's). By hand, as the user the bridge runs as (each asks sudo for root):
+
+```sh
+id -nG "$USER"                                  # the account's groups: is audio among them?
+sudo usermod -aG audio "$USER"                  # if not
+sudo systemctl restart user@"$(id -u)".service  # or reboot
+```
+
+The restart is the user's service manager's, `user@<uid>.service`: a lingering manager keeps the groups it started with, and so does every service it runs, so restarting the bridge's own service is not enough, and logging in again does not restart it. Restarting it avoids a reboot, but it stops every service of yours, a desktop or terminal session under it included: run it from another administrative session (in a root shell, put the user's name and uid in place of `"$USER"` and `$(id -u)`). The bridge's service starts again with it. That a lingering manager keeps its groups, and that root's restart of it gives its services the new ones, is read from systemd, not tried on a box. If your user is in the group and you joined it since you logged in, the restart alone is needed. `bridge doctor`'s `player-dac` line, and the console's Diagnostics page, say whether the bridge may open the DAC's node and why not, and the Player page names the cause when a play was refused for it.
+
 **By hand, any platform:** grab a pre-built binary from the [releases page](https://github.com/acoseac/1-bit-bridge/releases) — no Go toolchain required. Pick your OS + arch, then run `bridge init`.
 
 **macOS / Linux:**

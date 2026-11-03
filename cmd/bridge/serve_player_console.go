@@ -321,10 +321,11 @@ func (c *consolePlayer) running(ctx context.Context, live *config.Config) (admin
 	}
 	run.Withheld = c.withheld(live)
 	var facts api.BridgeOutputFacts
+	var attempt engine.Attempt
 	if c.view != nil {
-		facts = c.view.Facts(ctx)
+		facts, attempt = c.view.facts(ctx)
 	}
-	run.State, run.Reason, run.LastError = facts.State, facts.Reason, facts.LastError
+	run.State, run.Reason, run.LastError = facts.State, facts.Reason, consoleLastError(attempt)
 	if !facts.Listed {
 		// No identity read yet: the start has not made it, or failed first.
 		run.State, run.Reason = bridgeStateUnavailable, reasonStarting
@@ -345,6 +346,30 @@ func (c *consolePlayer) running(ctx context.Context, live *config.Config) (admin
 	run.Transport = engineTransportWord(snap)
 	run.Track = c.track(ctx, snap)
 	return run, facts, snap
+}
+
+// consoleLastErrorDenied is the console's lastError for a last play attempt
+// whose device node this process may not open (engine.Attempt.Denied, B676):
+// the Player page's word alone, never GET /v1/outputs', whose lastError keeps
+// the closed list PROTOCOL.md names (bridgeOutputLastErrors).
+const consoleLastErrorDenied = "permission_denied"
+
+// consoleLastError is the Player page's lastError for the last play attempt
+// a, read from the snapshot the page's facts were (bridgeOutput.facts):
+// device_busy while it failed for a device another process holds, and
+// permission_denied while it failed for a node this process may not open; ""
+// otherwise. Never LastStop, which a start that succeeds leaves, nor an
+// error's words.
+func consoleLastError(a engine.Attempt) string {
+	switch {
+	case !a.Failed:
+		return ""
+	case a.Busy:
+		return lastErrorDeviceBusy
+	case a.Denied:
+		return consoleLastErrorDenied
+	}
+	return ""
 }
 
 // reasonText is the sentence beside an unavailable player's word.

@@ -92,10 +92,113 @@ func TestPlaybackBusyResumeAfterTheReleaseIsTheEnginesBusyAttempt(t *testing.T) 
 	r.heardAll(format.S243LE, 24, a)
 }
 
+// TestPlaybackStartOnADeniedDeviceIsTheEnginesDeniedAttempt pins the
+// permission cause at a start, through the real chain (B676): the fake kernel
+// refuses the open with EACCES, and with EPERM, which alsapcm types alike, as
+// for a node the audio group owns and the process is not in; the backend maps
+// alsapcm's permission reason to engine.ErrDeviceDenied, and the engine
+// records a denied start, not a busy one. A retry the node lets the process
+// open succeeds and is no denied attempt, nor is the pause that follows it.
+func TestPlaybackStartOnADeniedDeviceIsTheEnginesDeniedAttempt(t *testing.T) {
+	for _, eperm := range []bool{false, true} {
+		t.Run(map[bool]string{false: "EACCES", true: "EPERM"}[eperm], func(t *testing.T) {
+			r := newRig(t, func(o *rigOptions) { o.pauseRelease = time.Second })
+			a := pattern(1, 48000, 24)
+			r.files.add("a", wav(48000, 24, a))
+			r.insert("a")
+			r.k.Deny(true, eperm)
+			err := r.eng.Play(bg)
+			if !errors.Is(err, engine.ErrDeviceDenied) || errors.Is(err, engine.ErrDeviceBusy) || alsapcm.ReasonOf(err) != alsapcm.ReasonPermission {
+				t.Fatalf("a start on a node this process may not open answered %v; want alsapcm's permission refusal and engine.ErrDeviceDenied alone", err)
+			}
+			if at := r.waitAttempt(1); !at.Failed || !at.Denied || at.Busy || at.Resume {
+				t.Fatalf("the denied start's attempt: %+v, want a start, failed and denied", at)
+			}
+			r.waitStopped(engine.ReasonBackend)
+
+			r.k.Deny(false, false)
+			r.play()
+			if at := r.waitAttempt(2); at.Failed || at.Denied {
+				t.Fatalf("the retry's attempt: %+v, want neither failed nor denied", at)
+			}
+			r.k.Await(t, "the writer to fill the hardware buffer and wait on the DAC", runningAndWaiting)
+			r.k.Play(t, 100*time.Millisecond)
+			if err := r.eng.Pause(bg); err != nil {
+				t.Fatalf("pause: %v", err)
+			}
+			s := r.waitSnap("paused", func(s *engine.Snapshot) bool { return s.State() == engine.Paused })
+			if at := s.LastAttempt(); at.Seq != 2 || at.Failed || at.Denied {
+				t.Fatalf("after the pause: %+v, want attempt 2, neither failed nor denied", at)
+			}
+			r.play()
+			r.heardAll(format.S243LE, 24, a)
+		})
+	}
+}
+
+// TestPlaybackDeniedResumeAfterTheReleaseIsTheEnginesDeniedAttempt pins the
+// cause at a resume after the pause released the DAC, through the real
+// chain: the node now refuses this process (its seat's ACL gone, say), the
+// reopen is refused for permission, the backend's ResumeError
+// (permission_denied) maps the alsapcm error, not its code, to
+// engine.ErrDeviceDenied, and the engine records a denied resume with the
+// session paused; the resume once the node lets the process open it plays
+// every frame once and ends it.
+func TestPlaybackDeniedResumeAfterTheReleaseIsTheEnginesDeniedAttempt(t *testing.T) {
+	r, a := pausedRig(t)
+	r.releaseDevice()
+	start := r.eng.Snapshot().LastAttempt()
+	if start.Failed {
+		t.Fatalf("the start's attempt: %+v", start)
+	}
+	r.k.Deny(true, false)
+	err := r.eng.Play(bg)
+	var re *playback.ResumeError
+	if !errors.As(err, &re) || re.Code != "permission_denied" || !errors.Is(err, engine.ErrDeviceDenied) || errors.Is(err, engine.ErrDeviceBusy) {
+		t.Fatalf("a resume on a node this process may not open answered %v; want a ResumeError, permission_denied, and engine.ErrDeviceDenied alone", err)
+	}
+	if at := r.waitAttempt(start.Seq + 1); !at.Failed || !at.Denied || at.Busy || !at.Resume {
+		t.Fatalf("the denied resume's attempt: %+v, want a resume, failed and denied", at)
+	}
+	if s := r.eng.Snapshot(); s.State() != engine.Paused {
+		t.Fatalf("after the denied resume: %s, want paused", s.State())
+	}
+	r.k.Deny(false, false)
+	r.play()
+	if at := r.waitAttempt(start.Seq + 2); at.Failed || at.Denied || !at.Resume {
+		t.Fatalf("the resume's attempt once the node is open to the process: %+v, want a resume, neither failed nor denied", at)
+	}
+	r.heardAll(format.S243LE, 24, a)
+}
+
+// TestPlaybackARefusalThatSaysPermissionIsNoDeniedAttempt: the backend maps
+// alsapcm's permission reason alone, never the error's words, so an open
+// refused for another reason whose detail says permission is a failed
+// attempt and not a denied one.
+func TestPlaybackARefusalThatSaysPermissionIsNoDeniedAttempt(t *testing.T) {
+	r := newRig(t, func(o *rigOptions) {
+		o.openSink = func(open func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error)) func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error) {
+			return func(_ context.Context, cfg alsapcm.SinkConfig) (*alsapcm.Sink, error) {
+				return nil, &alsapcm.Error{Reason: alsapcm.ReasonKernel, Op: "open", Endpoint: cfg.Endpoint,
+					Detail: "permission_denied: the audio group owns it, says the decoy"}
+			}
+		}
+	})
+	r.files.add("a", wav(48000, 24, pattern(1, 4800, 24)))
+	r.insert("a")
+	if err := r.eng.Play(bg); err == nil || errors.Is(err, engine.ErrDeviceDenied) {
+		t.Fatalf("a kernel refusal that says permission answered %v; want a refusal that is not the denied error", err)
+	}
+	if at := r.waitAttempt(1); !at.Failed || at.Denied || at.Busy {
+		t.Fatalf("its attempt: %+v, want failed, neither denied nor busy", at)
+	}
+	r.waitStopped(engine.ReasonBackend)
+}
+
 // TestPlaybackARefusalThatSaysBusyIsNoBusyAttempt: the backend maps
 // alsapcm's busy reason alone, never the error's words, so an open refused
 // for another reason whose detail says busy is a failed attempt and not a
-// busy one.
+// busy one: here alsapcm's permission refusal, which is the denied one.
 func TestPlaybackARefusalThatSaysBusyIsNoBusyAttempt(t *testing.T) {
 	r := newRig(t, func(o *rigOptions) {
 		o.openSink = func(open func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error)) func(context.Context, alsapcm.SinkConfig) (*alsapcm.Sink, error) {
@@ -110,8 +213,8 @@ func TestPlaybackARefusalThatSaysBusyIsNoBusyAttempt(t *testing.T) {
 	if err := r.eng.Play(bg); err == nil || errors.Is(err, engine.ErrDeviceBusy) {
 		t.Fatalf("a permission refusal that says busy answered %v; want a refusal that is not the busy error", err)
 	}
-	if at := r.waitAttempt(1); !at.Failed || at.Busy {
-		t.Fatalf("its attempt: %+v, want failed and not busy", at)
+	if at := r.waitAttempt(1); !at.Failed || at.Busy || !at.Denied {
+		t.Fatalf("its attempt: %+v, want failed and denied, not busy", at)
 	}
 	r.waitStopped(engine.ReasonBackend)
 }

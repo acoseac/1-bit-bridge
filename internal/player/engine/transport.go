@@ -1187,7 +1187,7 @@ func (e *Engine) startDone(s *session, r callResult) {
 	if s.phase != sessStarting || o.sess != s {
 		return
 	}
-	e.attempted(r.err)
+	e.attempted(r.err, false)
 	if r.err == nil {
 		s.phase = sessLive
 		if s.chain[0].stage < stageSubmitted {
@@ -1279,7 +1279,7 @@ func (e *Engine) resumeDone(c *call, r callResult) {
 		}
 		return
 	}
-	e.attempted(r.err)
+	e.attempted(r.err, true)
 	if r.err != nil {
 		o.resumeErr = r.err.Error()
 		e.touched()
@@ -1324,7 +1324,7 @@ func (e *Engine) callExpired(c *call) {
 	}
 	if e.current(s.id) == s {
 		if c.kind == callStart || c.kind == callResume {
-			e.attempted(refuse("play", ReasonTimeout, why))
+			e.attempted(refuse("play", ReasonTimeout, why), c.kind == callResume)
 		}
 		e.playFailed(refuse("play", ReasonTimeout, why))
 		e.releaseSession(s, IntentStop, StopInfo{Reason: ReasonTimeout, Detail: why})
@@ -1332,14 +1332,20 @@ func (e *Engine) callExpired(c *call) {
 }
 
 // attempted records the outcome of a play attempt whose answer the owner
-// took (Snapshot.LastAttempt, B470 PR 5b): a session's Start or a Resume,
-// err its failure or nil. The attempt is busy when err wraps ErrDeviceBusy,
-// the backend's mapping of its device layer's busy refusal, and never by
-// the error's text. It replaces the last attempt, so a later one that
-// succeeds, or fails otherwise, ends a busy record. It moves no generation.
-func (e *Engine) attempted(err error) {
+// took (Snapshot.LastAttempt, B470 PR 5b): a session's Start or, resume set,
+// a Resume, err its failure or nil. The attempt is busy when err wraps
+// ErrDeviceBusy and denied when it wraps ErrDeviceDenied (B676), the
+// backend's mappings of its device layer's busy and permission refusals, and
+// never by the error's text, which it keeps for a log line alone. It replaces
+// the last attempt, so a later one that succeeds, or fails otherwise, ends a
+// busy or a denied record. It moves no generation.
+func (e *Engine) attempted(err error, resume bool) {
 	o := &e.o
-	o.attempt = Attempt{Seq: o.attempt.Seq + 1, Failed: err != nil, Busy: errors.Is(err, ErrDeviceBusy)}
+	a := Attempt{Seq: o.attempt.Seq + 1, Failed: err != nil, Resume: resume}
+	if err != nil {
+		a.Busy, a.Denied, a.Detail = errors.Is(err, ErrDeviceBusy), errors.Is(err, ErrDeviceDenied), err.Error()
+	}
+	o.attempt = a
 	e.touched()
 }
 

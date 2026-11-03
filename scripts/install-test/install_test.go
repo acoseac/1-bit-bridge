@@ -463,6 +463,16 @@ type rig struct {
 // without the tools omit names.
 func newRig(t *testing.T, sh shell, omit ...string) *rig {
 	t.Helper()
+	r := newRigFiles(t, sh, omit...)
+	r.server = newReleaseServer(t, r.dir)
+	r.server.publish(stampedRelease, nil)
+	r.set("BRIDGE_INSTALL_BASE_URL", r.server.base(), "CURL_CA_BUNDLE", r.server.caFile)
+	return r
+}
+
+// newRigFiles prepares the host and tools without opening a release server.
+func newRigFiles(t *testing.T, sh shell, omit ...string) *rig {
+	t.Helper()
 	// Resolved, as bridge init resolves the program's path it writes into the
 	// unit (macOS's temporary directory is under the /var link).
 	dir, err := filepath.EvalSymlinks(t.TempDir())
@@ -522,8 +532,6 @@ func newRig(t *testing.T, sh shell, omit ...string) *rig {
 		writeFile(t, filepath.Join(r.bin, stub.Name()), b, 0o755)
 	}
 
-	r.server = newReleaseServer(t, dir)
-	r.server.publish(stampedRelease, nil)
 	r.env = map[string]string{
 		"HOME":                        r.home,
 		"PATH":                        r.bin,
@@ -532,9 +540,7 @@ func newRig(t *testing.T, sh shell, omit ...string) *rig {
 		"LC_ALL":                      "C",
 		"USER":                        "tester",
 		"LOGNAME":                     "tester",
-		"BRIDGE_INSTALL_BASE_URL":     r.server.base(),
 		"BRIDGE_INSTALL_TEST_SYSROOT": r.root,
-		"CURL_CA_BUNDLE":              r.server.caFile,
 		"STUB_LOG":                    r.log,
 		"STUB_ARGV":                   r.argvLog,
 		"STUB_STATE":                  r.state,
@@ -682,8 +688,8 @@ func (r *rig) callsTo(prefix string) []string {
 
 // mutations are the logged calls that change the box: the service
 // manager's but those that only read it (show-environment, show, cat,
-// is-active), lingering turned on, sudo and su, and the bridge's but those
-// that only read (version, status, output).
+// is-active), lingering turned on, sudo and su, usermod, and the bridge's
+// but those that only read (version, status, output).
 func (r *rig) mutations() []string {
 	var out []string
 	for _, c := range r.calls() {
@@ -700,7 +706,7 @@ func (r *rig) mutations() []string {
 			if !strings.Contains(c, "enable-linger") {
 				continue
 			}
-		case "sudo", "su":
+		case "sudo", "su", "usermod":
 		case "bridge":
 			if f[1] == "version" || f[1] == "status" || f[1] == "output" {
 				continue
@@ -761,8 +767,10 @@ func printed(out string) []string {
 
 // recorded are the programs a printed command can run that runPrinted puts
 // a recorder in place of on the PATH it runs them with; injected stands for
-// whatever a word split at a semicolon would run.
-var recorded = []string{"bridge", "injected", "loginctl", "rm", "ssh", "sudo", "systemctl"}
+// whatever a word split at a semicolon would run. usermod and systemctl are
+// root's commands the installer prints for the bridge's own player's DAC
+// (B676), with sudo where the box has it and without it where it has none.
+var recorded = []string{"bridge", "injected", "loginctl", "rm", "ssh", "sudo", "systemctl", "usermod"}
 
 // runPrinted runs each command line as a user pasting it into the shell
 // under test in HOME would, with the recorder (testdata/argv) in place of
@@ -2954,6 +2962,205 @@ func TestThePrintedCommandsRunAsPrinted(t *testing.T) {
 				{"rm", "-f", r.target(), r.target() + ".bak"},
 				{"rm", "-rf", filepath.Dir(r.configFile())},
 			})
+		})
+	})
+}
+
+// playbackNode lays out an ALSA playback node of mode under the rig's system
+// root, /dev/snd/pcmC5D0p, as a regular file of its own, and returns its path
+// and its group as ls -ld names it, the reading the installer takes.
+func (r *rig) playbackNode(mode os.FileMode) (node, group string) {
+	r.t.Helper()
+	node = filepath.Join(r.root, "dev", "snd", "pcmC5D0p")
+	writeFile(r.t, node, nil, mode)
+	ls, err := exec.LookPath("ls")
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	out, err := exec.Command(ls, "-ld", "--", node).Output()
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) < 4 || fields[3] == "" {
+		r.t.Fatalf("ls -ld %s: %q", node, out)
+	}
+	return node, fields[3]
+}
+
+// ranNoAudioCommand fails the test unless the installer ran neither of the
+// two commands it prints for the player's DAC: no usermod at all, through sudo
+// or not, and no restart of the user's service manager.
+func (r *rig) ranNoAudioCommand() {
+	r.t.Helper()
+	for _, c := range r.calls() {
+		if strings.Contains(c, "usermod") || strings.Contains(c, "user@1000.service") {
+			r.t.Errorf("the installer ran %q, which it only prints", c)
+		}
+	}
+}
+
+// The commands the installer prints for the bridge's own player's DAC
+// (B676), as they run pasted, for the rig's user tester (uid 1000).
+func audioCommands(group string) (join, restart []string) {
+	return []string{"sudo", "usermod", "-aG", group, "tester"}, []string{"sudo", "systemctl", "restart", "user@1000.service"}
+}
+
+// TestTheInstallerSaysWhatLetsThePlayerOpenTheDAC pins the installer's
+// advice for the bridge's own player's DAC (B676): on a box with an ALSA
+// playback node whose group neither every user nor the account is given,
+// it prints, beside its other commands, the two root's commands that let the
+// player open the node, each word quoted, with sudo where the box has it:
+// the usermod, then the restart of the user's service manager (whose
+// services keep the groups it started with, so a restart of the bridge's
+// own service would not do) or a reboot, and what the restart costs; an
+// account in the group whose login is not gets the restart alone; an
+// account and a login in it, a node every user may open, a box with no
+// playback node, and --uninstall get none of it; a box without systemd gets
+// the usermod and a new login. The account's groups are id -nG USER's, never
+// this process's. It runs none of them.
+func TestTheInstallerSaysWhatLetsThePlayerOpenTheDAC(t *testing.T) {
+	ssh := []string{"ssh", "-L", "7789:127.0.0.1:7789", "tester@192.0.2.10"}
+	eachShell(t, func(t *testing.T, sh shell) {
+		t.Run("a new install, the account not in the node's group", func(t *testing.T) {
+			r := newRig(t, sh)
+			node, group := r.playbackNode(0o660)
+			res := r.run("--library", r.music("music"))
+			mustExit(t, res, 0)
+			mustSay(t, res, "opens the DAC's node, "+node+",", "which the "+group+" group owns, and tester is not in "+group+": the player could not open the DAC",
+				"restart tester's service manager, whose services keep the groups it started with", "(restarting the bridge's own service is not enough)",
+				"Restarting the service manager avoids a reboot, but it stops every service of tester's, a desktop or terminal session under it included: run it from another administrative session. The bridge's service starts again with it.",
+				"    sudo systemctl restart user@1000.service   # or reboot")
+			join, restart := audioCommands(group)
+			sameCalls(t, r.runPrinted(printed(res.output()), r.target()), [][]string{join, restart, ssh,
+				{"bridge", "pair", "--name", "My iPhone", "--config", r.configFile()},
+				{"bridge", "status", "--config", r.configFile()},
+			})
+			r.ranNoAudioCommand()
+			if got := r.callsTo("id -nG"); len(got) != 2 || got[0] != "id -nG tester" || got[1] != "id -nG" {
+				t.Errorf("the installer asked id %q, want the account's groups (id -nG tester), then this login's", got)
+			}
+		})
+		t.Run("a new install, the account in the group and this login not", func(t *testing.T) {
+			r := newRig(t, sh)
+			node, group := r.playbackNode(0o660)
+			r.set("STUB_GROUPS", "tester "+group, "STUB_PROCESS_GROUPS", "tester")
+			res := r.run("--library", r.music("music"))
+			mustExit(t, res, 0)
+			mustSay(t, res, "tester is in "+group+", which owns the DAC's node ("+node+"), but this login started before tester joined it, and so did")
+			_, restart := audioCommands(group)
+			sameCalls(t, r.runPrinted(printed(res.output()), r.target()), [][]string{restart, ssh,
+				{"bridge", "pair", "--name", "My iPhone", "--config", r.configFile()},
+				{"bridge", "status", "--config", r.configFile()},
+			})
+			r.ranNoAudioCommand()
+		})
+		for _, c := range []struct {
+			name string
+			mode os.FileMode
+			node bool
+			in   bool
+		}{
+			{"the account and this login in the group", 0o660, true, true},
+			{"a node every user may open", 0o666, true, false},
+			{"a box with no playback node", 0, false, false},
+		} {
+			t.Run("a new install, "+c.name, func(t *testing.T) {
+				r := newRig(t, sh)
+				if c.node {
+					_, group := r.playbackNode(c.mode)
+					if c.in {
+						r.set("STUB_GROUPS", "tester "+group)
+					}
+				}
+				res := r.run("--library", r.music("music"))
+				mustExit(t, res, 0)
+				if strings.Contains(res.output(), "the DAC's node") || strings.Contains(res.output(), "usermod") {
+					t.Errorf("the installer advised on the DAC's node:\n%s", res.output())
+				}
+				sameCalls(t, r.runPrinted(printed(res.output()), r.target()), [][]string{ssh,
+					{"bridge", "pair", "--name", "My iPhone", "--config", r.configFile()},
+					{"bridge", "status", "--config", r.configFile()},
+				})
+				if !c.node && len(r.callsTo("id -nG")) != 0 {
+					t.Errorf("on a box with no playback node the installer asked id %q", r.callsTo("id -nG"))
+				}
+			})
+		}
+		t.Run("an upgrade, the account not in the group", func(t *testing.T) {
+			r := newRig(t, sh)
+			r.installed("0.2.1", r.target(), r.configFile())
+			r.newRelease(stampedRelease)
+			r.set("FAKE_UPDATE", "ok")
+			_, group := r.playbackNode(0o660)
+			res := r.run()
+			mustExit(t, res, 0)
+			join, restart := audioCommands(group)
+			sameCalls(t, r.runPrinted(printed(res.output()), r.target()), [][]string{join, restart, ssh,
+				{"bridge", "pair", "--name", "My iPhone", "--config", r.configFile()},
+				{"bridge", "status", "--config", r.configFile()},
+			})
+			r.ranNoAudioCommand()
+		})
+		t.Run("--no-init, the account not in the group", func(t *testing.T) {
+			r := newRig(t, sh)
+			_, group := r.playbackNode(0o660)
+			res := r.runHeldOpen("--no-init")
+			mustExit(t, res, 0)
+			join, restart := audioCommands(group)
+			sameCalls(t, r.runPrinted(printed(res.output()), r.target()), [][]string{
+				{"bridge", "init"},
+				{"loginctl", "enable-linger", "tester"},
+				join, restart,
+			})
+			r.ranNoAudioCommand()
+		})
+		t.Run("a box without systemd, the account not in the group", func(t *testing.T) {
+			r := newRig(t, sh)
+			if err := os.RemoveAll(filepath.Join(r.root, "run", "systemd")); err != nil {
+				t.Fatal(err)
+			}
+			_, group := r.playbackNode(0o660)
+			res := r.run("--library", r.music("music"))
+			mustExit(t, res, 4)
+			mustSay(t, res, "then log in again (or reboot) before you start the bridge, so that it runs with the group.")
+			join, _ := audioCommands(group)
+			sameCalls(t, r.runPrinted(printed(res.output()), r.target()), [][]string{
+				{"bridge", "init", "--no-service", "--library", "/path/to/music"},
+				{"bridge", "serve", "--config", r.configFile()},
+				join,
+			})
+			if strings.Contains(res.output(), "systemctl restart") {
+				t.Errorf("a box without systemd was told to restart a service manager:\n%s", res.output())
+			}
+			r.ranNoAudioCommand()
+		})
+		t.Run("a box with no sudo, the account not in the group", func(t *testing.T) {
+			r := newRig(t, sh, "sudo")
+			r.set("STUB_SELF_LINGER", "1")
+			_, group := r.playbackNode(0o660)
+			res := r.run("--library", r.music("music"))
+			mustExit(t, res, 0)
+			mustSay(t, res, "add tester to "+group+", as root:", "    systemctl restart user@1000.service   # or reboot")
+			sameCalls(t, r.runPrinted(printed(res.output()), r.target()), [][]string{
+				{"usermod", "-aG", group, "tester"},
+				{"systemctl", "restart", "user@1000.service"},
+				ssh,
+				{"bridge", "pair", "--name", "My iPhone", "--config", r.configFile()},
+				{"bridge", "status", "--config", r.configFile()},
+			})
+			r.ranNoAudioCommand()
+		})
+		t.Run("--uninstall, the account not in the group", func(t *testing.T) {
+			r := newRig(t, sh)
+			r.installed(stampedRelease, r.target(), r.configFile())
+			r.playbackNode(0o660)
+			res := r.run("--uninstall")
+			mustExit(t, res, 0)
+			if strings.Contains(res.output(), "usermod") || strings.Contains(res.output(), "user@1000.service") {
+				t.Errorf("--uninstall advised on the DAC's node:\n%s", res.output())
+			}
+			r.ranNoAudioCommand()
 		})
 	})
 }

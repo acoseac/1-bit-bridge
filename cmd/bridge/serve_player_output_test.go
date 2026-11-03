@@ -103,7 +103,6 @@ type fakeSnap struct {
 	out         engine.OutputState
 	maint       bool
 	unconfirmed bool
-	attempt     engine.Attempt
 }
 
 func (s fakeSnap) State() engine.State        { return s.state }
@@ -115,7 +114,6 @@ func (s fakeSnap) Maintenance() (engine.MaintenanceInfo, bool) {
 func (s fakeSnap) ReleaseUnconfirmed() (engine.ReleaseInfo, bool) {
 	return engine.ReleaseInfo{Session: 1}, s.unconfirmed
 }
-func (s fakeSnap) LastAttempt() engine.Attempt { return s.attempt }
 
 // available is an output reported available.
 var available = engine.OutputState{Known: true, Available: true, Generation: 1}
@@ -125,7 +123,8 @@ var available = engine.OutputState{Known: true, Available: true, Generation: 1}
 // output not known or unavailable by its report's word, maintenance, a
 // release not confirmed, then the transport, starting read as playing and a
 // release by what follows it; and lastError device_busy only for a last
-// attempt that failed busy.
+// attempt that failed busy, never for one denied the device's node, whose
+// word is the console's alone (B676).
 func TestThePlayersStateFromOneSnapshot(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -169,9 +168,47 @@ func TestThePlayersStateFromOneSnapshot(t *testing.T) {
 		{engine.Attempt{Seq: 3}, ""},
 		{engine.Attempt{Seq: 3, Failed: true}, ""},
 		{engine.Attempt{Seq: 3, Failed: true, Busy: true}, "device_busy"},
+		{engine.Attempt{Seq: 3, Failed: true, Busy: true, Resume: true}, "device_busy"},
+		{engine.Attempt{Seq: 3, Failed: true, Denied: true}, ""},
+		{engine.Attempt{Seq: 3, Failed: true, Denied: true, Resume: true}, ""},
 	} {
-		if got := playerLastError(fakeSnap{attempt: tc.attempt}); got != tc.want {
+		if got := playerLastError(tc.attempt); got != tc.want {
 			t.Errorf("the last attempt %+v: lastError %q, want %q", tc.attempt, got, tc.want)
+		}
+	}
+}
+
+// TestThePermissionCauseIsTheConsolesWordAlone pins the decision on B676's
+// brief (Argon's recommendation): a last play attempt denied the device's
+// node is the console's permission_denied (consoleLastError), beside its
+// device_busy, while GET /v1/outputs' lastError, a closed list PROTOCOL.md's
+// bridge section names, stays device_busy or null: no wire change, no iOS
+// mirror. A later attempt that succeeds, or fails otherwise, says neither.
+func TestThePermissionCauseIsTheConsolesWordAlone(t *testing.T) {
+	if slices.Contains(bridgeOutputLastErrors(), consoleLastErrorDenied) {
+		t.Fatalf("GET /v1/outputs' lastError list %v names %s, the console's word alone", bridgeOutputLastErrors(), consoleLastErrorDenied)
+	}
+	if strings.Contains(bridgeObjectSection(t), "`"+consoleLastErrorDenied+"`") {
+		t.Errorf("PROTOCOL.md's bridge object section names `%s`: the wire's lastError does not carry it", consoleLastErrorDenied)
+	}
+	for _, tc := range []struct {
+		attempt       engine.Attempt
+		wire, console string
+	}{
+		{engine.Attempt{}, "", ""},
+		{engine.Attempt{Seq: 2}, "", ""},
+		{engine.Attempt{Seq: 2, Resume: true}, "", ""},
+		{engine.Attempt{Seq: 2, Failed: true}, "", ""},
+		{engine.Attempt{Seq: 2, Failed: true, Busy: true}, "device_busy", "device_busy"},
+		{engine.Attempt{Seq: 2, Failed: true, Denied: true}, "", "permission_denied"},
+		{engine.Attempt{Seq: 2, Failed: true, Denied: true, Resume: true}, "", "permission_denied"},
+		{engine.Attempt{Seq: 2, Denied: true}, "", ""},
+	} {
+		if got := playerLastError(tc.attempt); got != tc.wire {
+			t.Errorf("the last attempt %+v: GET /v1/outputs' lastError %q, want %q", tc.attempt, got, tc.wire)
+		}
+		if got := consoleLastError(tc.attempt); got != tc.console {
+			t.Errorf("the last attempt %+v: the console's lastError %q, want %q", tc.attempt, got, tc.console)
 		}
 	}
 }

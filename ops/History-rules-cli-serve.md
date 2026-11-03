@@ -3393,3 +3393,103 @@ player-storage line beside it), `TestTheDataDirLineSaysWhatStandsInTheWayAndItsF
 `TestBlockingEntryFindsTheEntryInThePathsWay` and
 `TestTheWalkUpAPathSaysWhatItCannotRead` (unix); the record is in
 `ops/engineering-log.md`, 2026-11-02, B659.
+
+## B676 — bridge doctor's player-dac line (2026-11-03)
+
+- **`bridge doctor`'s `player-dac` line says, on Linux for a config that asks for the player, whether the process it checks may open the player's DAC node for playback, one source for the CLI and the console's doctor (`doctorPlayerDAC`, `doctor.Deps.PlayerDAC`, placed right after player-storage): the config's binding resolved by the player's own machinery (`playback.BindingLocator` over the box's trees, one bounded reading at a time), the endpoint's own node (`alsapcm.Endpoint.Path`) lstat'ed for its group (named by its gid, `audio` only where the group database names none) and asked with the raw `faccessat2` (R_OK|W_OK, AT_EACCESS), which opens nothing; refused is a fail by its cause (the user not in the group and no ACL: usermod only for a resolved user name (otherwise add the account to the group by name), then the restart of `user@<uid>.service` on systemd, or a new login and bridge start without systemd; in it, in a process older than the membership: the restart; refused despite the group: the mode, the ACL or a security module); allowed is ok, never a word on the DAC being free; bridge doctor checks its own credentials and warns where its login has the group and the running bridge (`server.pid`, `/proc/<pid>/status`'s Groups) does not; the console's doctor checks the serving process, and says when the config names another DAC than its player started with; ENOSYS or EPERM from the check, a DAC not connected or ambiguous, a missing node, and, for `bridge doctor`, root or another user than the running bridge's are not checked, a warn (the console's doctor in a serving process that runs as root reports the access that process has)** (2026-11-03, backlog B676; Codex's and Argon's notes on the brief). **Don't fall back to the mode bits (`unix.Faccessat`), open or hold the node, take the control node for the playback one, call an absent DAC a permission failure, word ok as the player playing, or ask the host's `/dev/snd` from a test (`hostDACNodes`, which the suite's TestMain refuses and records).**
+
+*The gap.* On Linux the player opens its DAC's node under `/dev/snd`, which
+the audio group owns. A desktop login opens it through logind's seat ACL; the
+bridge runs as a systemd user service kept alive by lingering, often with
+nobody at the seat, so it has neither the ACL nor, until its user joins the
+group and its user manager restarts, the group. Nothing said so before a
+play: the doctor's player checklist is MPD's alone (`output_checklist.go`),
+and the player's open refused the node with `permission_denied` in the log
+alone.
+
+*The line.* `playerDACCheck` (`cmd/bridge/doctor_player_dac.go`), which
+`buildDoctorDepsWith` wires as `doctor.Deps.PlayerDAC` for every config that
+loads and `doctor.Run` places right after the player's storage line, before
+the output checklist. No line off Linux, nor for a config whose player is off
+or refused (the storage line says why). A player with no DAC bound is not
+checked, saying how to bind one. Otherwise:
+
+- The binding is resolved as the player's backend resolves it at every open,
+  `playback.BindingLocator` over the box's `/proc` and `/sys` (hostTrees), on
+  one reading within 3 s, on a goroutine of its own and one at a time (a
+  slot per host, as the console's readings take one): a reading the kernel
+  holds is abandoned to return on its own and its slot let go then, and the
+  next line says an earlier reading has not returned. Every state but
+  available (`device_missing`, `device_ambiguous`, …) is "the bound DAC is
+  not connected now", a warn, never a permission failure (Codex).
+- The node is the endpoint's own, `/dev/snd/pcmC<card>D<device>p`, the one
+  `alsapcm` opens O_RDWR; the control node is not an equivalent test
+  (Codex). lstat, its link not followed as the open's, gives its group and
+  whether it is a character device: a node not there is not connected, and
+  one that is no character device is not checked.
+- The access is the raw `faccessat2(AT_FDCWD, node, R_OK|W_OK, AT_EACCESS)`:
+  the effective uid and gid and the supplementary groups, and the node's
+  ACL, judged as an open judges them, and nothing opened, so no stream the
+  player or another process holds is disturbed. Never `unix.Faccessat`,
+  which on ENOSYS or EPERM falls back to the mode bits and so ignores an
+  ACL; ENOSYS (before Linux 5.8) and EPERM (a seccomp filter, say) are not
+  checked, never ok and never a fail (Codex).
+- The group is named by its gid from the group database, `audio` only where
+  it names none (Argon).
+- Refused (EACCES) is a fail by its cause: the account not in the group
+  (os/user's GroupIds, the group database's, never the process's) and no ACL
+  letting it, whose fix is the installer's two lines (`sudo usermod -aG
+  <group> <user>`, then `sudo systemctl restart user@<uid>.service`, or a
+  reboot, sudo written only where the box has it, and what the restart
+  costs). The restart is printed only where `/run/systemd/system` is a
+  directory, as in the installer, never on the presence of systemctl or
+  loginctl alone. Without systemd, log in again (or reboot) and start the
+  bridge from that new login. If LookupId fails, keep the uid in the
+  diagnosis and the manager unit, but withhold usermod and ask to add the
+  account to the group by its user name. Neither changes the verdict;
+  the account in it, the process not, a process started before the
+  user joined, whose fix is the restart; the process in it and still
+  refused, the node's mode, its ACL or a security module (AppArmor,
+  SELinux), whose fix is to read them.
+- Allowed is ok, saying it was asked with faccessat2, which opens nothing,
+  and that whether the DAC is free, and plays, the player finds as it opens
+  it (Argon): never a word that playback will work.
+
+*Bridge doctor and the console.* The console's doctor (`adminDoctorRunnerFor`,
+on `servingDACHost`) runs in the serving process, whose credentials are the
+bridge's, so its probe is the service's own (Codex). Bridge doctor checks its
+own credentials (`cliDACHost`), and beside them reads the running bridge:
+the pid its pid file holds, taken only for a process whose command line is a
+bridge serve, its effective uid and gid and its Groups line from
+`/proc/<pid>/status`, through hostTrees' `/proc`. It warns where its own
+access comes through the node's group and the running bridge is not in it,
+the case a fresh SSH login after the usermod shows while the lingering
+service still fails (Argon); and where its own login is the one older than
+the membership while the running bridge has the group, it warns rather than
+fail, since the player would open the node. Run as root, which may open any
+node, or as another user than the running bridge's, it is not checked. The
+saved settings and the boot binding: both doctors grade the config's binding,
+what the next start opens, as every other line grades the config; the
+console's line says when the running player started with another, which it
+opens until the restart (Codex P2: the console tells them apart, as
+`serve_player_console.go`'s `pending` does).
+
+*Tests.* The judgement runs on a fake box (`dacBox`), each seam a test's: the
+cases the brief names (access by an ACL, stale process groups, an absent or
+an ambiguous DAC, a missing node, an unsupported probe, denial despite
+membership) and the rest above. The real calls run on Linux over files of
+the test's own (`TestAccessForPlaybackAsksTheKernelAsAnOpenWould`: read and
+write allowed, read alone, write alone and neither EACCES, a missing file
+ENOENT, lstat a link's own). The wiring runs the real locator over the GO
+bar's trees to card 5's node through both doctors, and the console's default
+host over the suite's empty hostTrees. `hostDACNodes`, the one name for the
+host's nodes, refuses and records in the suite's TestMain, which fails the
+binary on a record, as it does on a PCM open. The record is in
+`ops/engineering-log.md`, 2026-11-03, B676.
+
+*Round 2 tests.* `TestDACAdviceKeepsAnUnresolvedUID` injects a failed user
+lookup, retains the kernel credentials and checks both doctors' FAIL line,
+no usermod, and the numeric manager unit. `TestDACAdviceWithoutSystemd`
+checks joining, stale process groups, and a CLI login whose groups are newer
+than the running bridge's, preserving FAIL/WARN and asking for a new login
+without a systemd command or manager claim. These cases bind no sockets.
