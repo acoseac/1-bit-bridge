@@ -201,4 +201,34 @@ func TestAStopWhileTheRestampWaitsRequestsNoRestart(t *testing.T) {
 			t.Errorf("a restart with the lock free requested %d restart(s), want one", n)
 		}
 	})
+	// Round 3 (Codex on round 2): the lock taken, the stop lands while the
+	// restamp's write is under way, and the write finishes; the restart is
+	// still not requested.
+	t.Run("stopped during its write", func(t *testing.T) {
+		u, _, restarts := setUp(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		atWrite := newGate()
+		u.restampSave = func(dataDir string, st State) error {
+			atWrite.open()
+			<-ctx.Done()
+			return SaveState(dataDir, st)
+		}
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			u.restartWhenDrained(ctx)
+		}()
+		drainOnCleanup(t, cancel, done, "the restart")
+		awaitGate(t, atWrite, "the restamp's write")
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(withinTheTest):
+			t.Fatal("the restart did not return after its stop")
+		}
+		if n := restarts.Load(); n != 0 {
+			t.Errorf("a stop during the restamp's write requested %d restart(s), want none", n)
+		}
+	})
 }
