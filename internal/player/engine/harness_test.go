@@ -719,7 +719,10 @@ func (h *harness) refused(what string, err error, reason Reason) {
 
 // playing inserts refs, reports the output available, plays the entry at
 // index i, reports its first occurrence audible and returns the IDs and
-// the session.
+// the session once the owner has noted that report. It publishes the
+// snapshot the report made before it notes the report, so a test that took
+// its mark at the snapshot could find this note after it, and take it for a
+// later report's (B709).
 func (h *harness) playing(i int, refs ...string) ([]uint32, *fakeSession) {
 	h.t.Helper()
 	ids := h.insert(refs...)
@@ -727,7 +730,9 @@ func (h *harness) playing(i int, refs ...string) ([]uint32, *fakeSession) {
 	n := h.be.starts()
 	h.must("play", h.eng.PlayID(bg, ids[i]))
 	s := h.be.nth(n + 1)
+	mark := h.appliedMark()
 	s.audible(s.first.ID)
+	h.waitApplied("handled audible", mark)
 	h.waitSnap("the first occurrence audible", func(sn *Snapshot) bool {
 		a, ok := sn.Audible()
 		return ok && a.Occurrence == s.first.ID

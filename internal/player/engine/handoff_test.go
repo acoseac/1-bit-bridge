@@ -200,11 +200,13 @@ func TestAFailedCutStopsWhenTheRemovedEntryBecomesAudible(t *testing.T) {
 //
 // With a Prepare of it held, nothing the test does between a's report and its
 // mark goes through the owner, which publishes the snapshot that report made
-// before it notes the report: the test can take its mark before that note.
-// That case runs twice: as the scheduler leaves the owner, and held at its
-// note of a's report until the test has taken its mark and at its note of b's
-// Submitted until the test waits for a note, the latest a scheduler could
-// leave it (B709: CI's race leg).
+// before it notes the report: a mark taken at that snapshot could come before
+// the note, and the wait for b's report then took a's note for b's and read
+// the snapshot before b was heard (B709: CI's race leg). playing returns once
+// the report is noted. That case runs twice: as the scheduler leaves the
+// owner, and held at its note of a's report until the test has taken its mark
+// and at its note of b's Submitted until the test waits for a note, the
+// latest a scheduler could leave it.
 func TestAnEntryHeardWhileItsCallIsUnderWayStops(t *testing.T) {
 	type edit struct {
 		name string

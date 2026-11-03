@@ -119,12 +119,17 @@ func TestDetailsReportedOnceTheOccurrenceIsHeardAreItsTrack(t *testing.T) {
 	}
 	gen := sn.Generation()
 	d := Details{Frames: 1000, RateHz: 48_000, Bits: 24, Channels: 2, Codec: "AIFF", Lossless: true}
+	// The owner notes a report after it publishes the snapshot the report
+	// made, so the next report's mark comes once this one is noted: a wait
+	// that took this note for the next one's would read before it (B709).
+	mark := h.appliedMark()
 	s.details(s.first.ID, d)
+	h.waitApplied("handled details", mark)
 	sn = h.waitSnap("the details the track's", func(sn *Snapshot) bool { tr, _ := sn.Track(); return tr.HasDetails })
 	if tr := trackOf(t, sn); tr.Details != d || sn.DetailsCount() != 1 || sn.Generation() != gen {
 		t.Errorf("details after the occurrence was heard: %+v, %d changes, generation %s (was %s); want them, 1, unmoved", tr, sn.DetailsCount(), sn.Generation(), gen)
 	}
-	mark := h.appliedMark()
+	mark = h.appliedMark()
 	s.details(s.first.ID, d)
 	h.waitApplied("handled details", mark)
 	if n := h.snap().DetailsCount(); n != 1 {
