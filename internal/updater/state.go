@@ -369,8 +369,10 @@ func ClearInstall(dataDir string, st State) error {
 type BootAction int
 
 const (
-	// BootNoop means no marker is present (or the marker is stale
-	// and abandoned) — nothing for boot to do.
+	// BootNoop means no marker is present, or one that asks nothing of
+	// a boot (a hold alone, an "installed" one without InstalledAt) —
+	// nothing for boot to do. A stale install marker is not one: it is
+	// BootClearAbandoned, or BootInstallSucceeded where its version boots.
 	BootNoop BootAction = iota
 
 	// BootInstallSucceeded means the marker says we installed X.Y.Z and

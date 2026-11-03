@@ -71502,7 +71502,9 @@ write keeps it.
 4. The explanations of the abandonment and the restamp (`State`'s doc,
    `AttemptedAt`, `recencyWindow`, `BootClearAbandoned`,
    `refreshInstallAttemptedAt` and its two Warn lines, `swapAwaitingRestart`)
-   now say what the window bounds: the rollbacks.
+   now say what the window bounds: the rollbacks. `BootNoop`'s doc, which
+   said a stale and abandoned marker is one, says what it is (a comment-only
+   commit after the checks below, vetted, formatted and its package run).
 
 **The other paths** (the brief's item 3), each read for whether it can drop
 `DataDirOpenedBy` for a version that opened the data dir:
