@@ -242,8 +242,11 @@ func TestThePlayersDACLineIsInconclusiveWithoutTheDAC(t *testing.T) {
 			b.locateErr = &playback.UnitError{State: binding.StateDeviceAmbiguous, Reason: "two units of the bound model are connected"}
 		}, "not checked: the bound DAC is not connected now (device_ambiguous: two units of the bound model are connected)", ""},
 		{"a box whose cards cannot be read", func(b *dacBox) {
-			b.locateErr = &playback.UnitError{Reason: "the box's sound cards could not be read"}
-		}, "not checked: the box's sound cards could not be read: the box's sound cards could not be read", ""},
+			b.locateErr = &playback.UnitError{Reason: "the box's sound cards could not be read", Err: syscall.EIO}
+		}, "not checked: the box's sound cards could not be read: " + syscall.EIO.Error(), ""},
+		{"a box not read whole", func(b *dacBox) {
+			b.locateErr = &playback.UnitError{Reason: "the box could not be read whole (card 5's devices could not be listed): resolve again"}
+		}, "not checked: the box could not be read whole (card 5's devices could not be listed): resolve again", ""},
 		{"the node not there", func(b *dacBox) {
 			b.statErr = &fs.PathError{Op: "lstat", Path: goBarNode, Err: syscall.ENOENT}
 		}, "not checked: " + goBarNode + " is not there: the DAC is not connected now", "stat " + goBarNode},

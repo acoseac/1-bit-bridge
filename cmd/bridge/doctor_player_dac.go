@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/user"
@@ -14,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
@@ -206,7 +208,73 @@ const dacConnectHint = "connect the DAC and power it on, then run bridge doctor 
 // running bridge, are not checked, a warn, never a fail and never ok. No
 // line off Linux, nor for a config that leaves the player off.
 func playerDACCheck(ctx context.Context, cfg *config.Config, h dacAccessHost) (doctor.Check, bool) {
-	return doctor.Check{}, false
+	line := func(status doctor.Status, summary, hint string) (doctor.Check, bool) {
+		return doctor.Check{Name: playerDACCheckName, Status: status, Summary: summary, Hint: hint}, true
+	}
+	notChecked := func(why, hint string) (doctor.Check, bool) {
+		return line(doctor.Warn, "not checked: "+why, hint)
+	}
+	if h.goos != "linux" {
+		return doctor.Check{}, false
+	}
+	if on, _ := cfg.PlayerEnabled(h.goos); !on {
+		return doctor.Check{}, false
+	}
+	dev := cfg.Output.Player.Device
+	if !dev.Configured() {
+		return notChecked("no DAC is bound to the player", "bind one on the console's Player page, or with bridge output dac bind")
+	}
+	cr, err := h.creds()
+	if err != nil {
+		return notChecked("this process's credentials could not be read: "+err.Error(), "")
+	}
+	var svc dacService
+	running := false
+	if !h.serving {
+		if cr.euid == 0 {
+			return notChecked("bridge doctor runs as root, which may open any node", "run bridge doctor as the user the bridge runs as")
+		}
+		if h.service != nil {
+			svc, running = h.service(cfg.DataDir)
+		}
+		if running && svc.euid != cr.euid {
+			return notChecked(fmt.Sprintf("bridge doctor runs as %s, and the running bridge (pid %d) as another user (uid %d)", userWord(cr), svc.pid, svc.euid),
+				"run bridge doctor as the user the bridge runs as")
+		}
+	}
+	unit, err := h.locateWithin(ctx, dev)
+	if err != nil {
+		return dacNotLocated(err, notChecked)
+	}
+	node := unit.Endpoint.Path()
+	n, err := h.nodes.stat(node)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return notChecked(node+" is not there: the DAC is not connected now", dacConnectHint)
+	case err != nil:
+		return notChecked(node+" could not be read: "+err.Error(), "")
+	case !n.char:
+		return notChecked(node+" is not a character device, which the player opens", "")
+	}
+	group := h.groupName(n.gid)
+	if group == "" {
+		group = "audio"
+	}
+	j := dacJudgement{h: h, cr: cr, svc: svc, running: running, node: node, gid: n.gid, group: group, dev: dev}
+	err = h.nodes.access(node)
+	switch {
+	case err == nil:
+		return j.allowed(line)
+	case errors.Is(err, syscall.EACCES):
+		return j.denied(line)
+	case errors.Is(err, syscall.ENOSYS):
+		return notChecked("this kernel has no faccessat2 (Linux 5.8 or later), the one access check that reads a node's ACL as an open does", "")
+	case errors.Is(err, syscall.EPERM):
+		return notChecked("a security policy refused the access check on "+node+" (EPERM)", "")
+	case errors.Is(err, fs.ErrNotExist):
+		return notChecked(node+" is not there: the DAC is not connected now", dacConnectHint)
+	}
+	return notChecked("the access check on "+node+" failed: "+err.Error(), "")
 }
 
 // dacNotLocated is the line for a binding that resolved to no unit to check:
@@ -221,7 +289,11 @@ func dacNotLocated(err error, notChecked func(why, hint string) (doctor.Check, b
 	case errors.As(err, &ue) && ue.State != "":
 		return notChecked(fmt.Sprintf("the bound DAC is not connected now (%s: %s)", ue.State, ue.Reason), dacConnectHint)
 	case errors.As(err, &ue):
-		return notChecked("the box's sound cards could not be read: "+ue.Reason, "")
+		why := ue.Reason
+		if ue.Err != nil {
+			why += ": " + ue.Err.Error()
+		}
+		return notChecked(why, "")
 	}
 	return notChecked("the bound DAC could not be found: "+err.Error(), "")
 }

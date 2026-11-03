@@ -475,6 +475,9 @@ func Run(ctx context.Context, d Deps) Report {
 	if d.PlayerStorage != nil {
 		out = append(out, d.PlayerStorage(ctx)...)
 	}
+	if d.PlayerDAC != nil {
+		out = append(out, d.PlayerDAC(ctx)...)
+	}
 	if d.OutputChecklist != nil {
 		out = append(out, d.OutputChecklist(ctx)...)
 	}
