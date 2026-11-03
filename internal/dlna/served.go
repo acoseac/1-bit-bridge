@@ -33,7 +33,8 @@ const (
 // every tailnet peer reached the unauthenticated listener on the host's
 // tailnet address. The listener now judges each connection by the address it
 // was accepted on, and each advertiser each M-SEARCH by the address it was
-// sent to, and both ask this.
+// sent to, and both ask this. Eligibility is per interface and serving per
+// address: an eligible interface's public address is not served (B687).
 //
 // One servedAddrs belongs to one Server, shared by its listener and its
 // advertisers. It reads the host's interfaces into a snapshot: rebuilt when
@@ -50,10 +51,14 @@ type servedAddrs struct {
 	// now is the clock the snapshot ages by; nil is time.Now.
 	now func() time.Time
 
-	// advertised holds the literal hosts the server advertises
-	// (knownOwnHosts: its ServerURL, each advertise endpoint's LOCATION and
-	// a pinned listen address), unmapped and without a zone.
-	advertised map[netip.Addr]struct{}
+	// pinned is the public address dlna.listenAddress pins and the listener
+	// bound, the operator's opt-in (PinnedPublicAddress, B687), unmapped
+	// and without a zone; the zero Addr for none. What the server
+	// advertises serves nothing of its own: until B687 a member's address
+	// it advertised was served whatever its kind, and its wiring advertised
+	// a LAN interface's public IPv4 address when the interface listed it
+	// first.
+	pinned netip.Addr
 
 	// judgeAs, when set, replaces the address admit is asked about. A
 	// test's connection and datagram arrive on loopback, and this is how one
@@ -80,9 +85,10 @@ type servedSnapshot struct {
 }
 
 // newServedAddrs returns the served addresses of this host for a server
-// that advertises the literal hosts in advertised.
-func newServedAddrs(advertised map[netip.Addr]struct{}) *servedAddrs {
-	return &servedAddrs{advertised: advertised}
+// whose listener is pinned to the public address pinned at the operator's
+// word (the zero Addr for none).
+func newServedAddrs(pinned netip.Addr) *servedAddrs {
+	return &servedAddrs{pinned: pinned}
 }
 
 // judge is the address a connection, a datagram or a listener on the local
@@ -120,19 +126,22 @@ func (s *servedAddrs) admit(log *slog.Logger, what string, local netip.Addr) boo
 //   - an address of a member of the multicast set (pickAllLANInterfaces with
 //     no opt-in, the interfaces every advertiser and discovery client runs
 //     on) that the eligibility check counts as a LAN address
-//     (lanAddrKindOf): RFC 1918, a ULA outside Tailscale's, or link-local,
-//     an IPv6 one only with that member as its zone;
-//   - an address of a member that the server itself advertises, whatever
-//     its kind, so it never announces an address it refuses (an interface
-//     can be eligible through a ULA beside the public IPv4 its LOCATION
-//     names).
+//     (lanAddrKindOf, IsLANClassAddress): RFC 1918, a ULA outside
+//     Tailscale's, or link-local, an IPv6 one only with that member as its
+//     zone;
+//   - the public address dlna.listenAddress pins (pinned), while an
+//     interface of this host holds it, a member or not: the operator's
+//     opt-in (B687), which the listener bound and so takes connections on
+//     alone.
 //
 // Nothing else: not a tailnet address (Tailscale's interface is not a member
 // without the opt-in, and its 100.64/10 and ULA addresses count as public in
 // any case), not another interface's address (a docker veth's fe80, awdl0's,
-// a link-local tunnel's), and not a public address of a member that the
-// server does not advertise, such as a dual-stack LAN's SLAAC address, which
-// the router may let the internet reach.
+// a link-local tunnel's), and not a public address of a member, whatever the
+// server advertises: a dual-stack LAN's SLAAC address, which the router may
+// let the internet reach, or a public IPv4 address beside a private one,
+// which the wiring advertised until B687 when its interface listed it
+// first.
 func (s *servedAddrs) serves(a netip.Addr) bool {
 	if !a.IsValid() {
 		return false
@@ -186,13 +195,14 @@ func (s *servedAddrs) rebuildLocked(now time.Time) {
 	if addrsOf == nil {
 		addrsOf = hostInterfaceAddrs
 	}
-	s.snap = servedSnapshotOf(ifaces, addrsOf, s.advertised)
+	s.snap = servedSnapshotOf(ifaces, addrsOf, s.pinned)
 }
 
 // servedSnapshotOf reads which addresses a host whose interfaces are ifaces
-// serves (servedAddrs.serves). Each interface's addresses are read once, and
-// the multicast set is chosen from that same reading.
-func servedSnapshotOf(ifaces []net.Interface, addrsOf interfaceAddrs, advertised map[netip.Addr]struct{}) servedSnapshot {
+// serves (servedAddrs.serves), pinned the public address dlna.listenAddress
+// pins or the zero Addr. Each interface's addresses are read once, and the
+// multicast set is chosen from that same reading.
+func servedSnapshotOf(ifaces []net.Interface, addrsOf interfaceAddrs, pinned netip.Addr) servedSnapshot {
 	type reading struct {
 		addrs []net.Addr
 		err   error
@@ -225,12 +235,12 @@ func servedSnapshotOf(ifaces []net.Interface, addrsOf interfaceAddrs, advertised
 			switch lanAddrKindOf(ipFromAddr(a)) {
 			case lanAddrPrivate, lanAddrLinkLocal:
 				snap.served[k] = struct{}{}
-			case lanAddrPublic:
-				if _, adv := advertised[k.WithZone("")]; adv {
-					snap.served[k] = struct{}{}
-				}
 			}
 		}
+	}
+	// The pin is global unicast, so its key has no zone to match.
+	if _, held := snap.holder[pinned]; held && pinned.IsValid() {
+		snap.served[pinned] = struct{}{}
 	}
 	return snap
 }
@@ -283,7 +293,7 @@ func (s *servedAddrs) noteRefused(log *slog.Logger, what string, local netip.Add
 	if seen || full {
 		return
 	}
-	log.Warn("DLNA refused "+what+" to an address it does not serve: it answers only on the LAN-eligible interfaces",
+	log.Warn("DLNA refused "+what+" to an address it does not serve: it answers only on the private and link-local addresses of the LAN-eligible interfaces",
 		slog.String("address", addr),
 		slog.String("interface", s.holderOf(local)))
 }

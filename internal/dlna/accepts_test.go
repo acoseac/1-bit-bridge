@@ -16,24 +16,27 @@ import (
 // tailnet's two, the SLAAC address, an address the host does not hold), an
 // IPv4 wildcard on no IPv6 address; a listener pinned to the LAN address
 // accepts on that address alone; one pinned to the tailnet's accepts on
-// nothing, since it refuses every connection there; and a server whose
-// listener is not up accepts on nothing.
+// nothing, since it refuses every connection there; one pinned to the SLAAC
+// address as the operator's opt-in (B687, pinned) accepts on it alone; and a
+// server whose listener is not up accepts on nothing.
 func TestAcceptsOnIsTheListenersServedSet(t *testing.T) {
 	asked := []string{"127.0.0.1", "::1", "192.168.1.20", "169.254.7.8", "100.64.0.7", "fd7a:115c:a1e0::7",
 		"2001:db8::20", "192.168.1.99", "10.0.0.5"}
 	for _, tc := range []struct {
 		name    string
 		bound   string
+		pinned  []string
 		accepts []string
 	}{
-		{"an IPv4 wildcard", "0.0.0.0", []string{"127.0.0.1", "192.168.1.20", "169.254.7.8"}},
-		{"a dual-stack wildcard", "::", []string{"127.0.0.1", "::1", "192.168.1.20", "169.254.7.8"}},
-		{"pinned to the LAN address", "192.168.1.20", []string{"192.168.1.20"}},
-		{"pinned to the tailnet's address", "100.64.0.7", nil},
-		{"no listener", "", nil},
+		{"an IPv4 wildcard", "0.0.0.0", nil, []string{"127.0.0.1", "192.168.1.20", "169.254.7.8"}},
+		{"a dual-stack wildcard", "::", nil, []string{"127.0.0.1", "::1", "192.168.1.20", "169.254.7.8"}},
+		{"pinned to the LAN address", "192.168.1.20", nil, []string{"192.168.1.20"}},
+		{"pinned to the tailnet's address", "100.64.0.7", nil, nil},
+		{"pinned to the global address as the opt-in", "2001:db8::20", []string{"2001:db8::20"}, []string{"2001:db8::20"}},
+		{"no listener", "", nil, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := &Server{served: newTestHost(macWithTailscale()...).served(nil)}
+			s := &Server{served: newTestHost(macWithTailscale()...).served(nil, tc.pinned...)}
 			if tc.bound != "" {
 				s.accepting.Store(&acceptState{served: s.served, bound: netip.MustParseAddr(tc.bound)})
 			}

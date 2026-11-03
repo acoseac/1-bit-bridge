@@ -21,18 +21,19 @@ import (
 // are a stand-in list: 10.1.2.3 and fe80::1, neither of which the
 // configuration names. calls counts the times the guard asked for the
 // interface list. It is served through handler(), the tree Start serves,
-// without the SSDP half Start needs multicast for.
+// without the SSDP half Start needs multicast for. Its LOCATIONs are
+// private addresses: NewServer refuses one it would not serve (B687).
 func hostGuardServer(t *testing.T) (*Server, *httptest.Server, *atomic.Int32) {
 	t.Helper()
 	s, err := NewServer(ServerConfig{
 		Library:       newTestLib(testTrack("t1", "Test Track")),
 		UDN:           "uuid:test-host-guard",
 		FriendlyName:  "Test Bridge",
-		ListenAddress: ":7790",
-		ServerURL:     "http://192.0.2.10:7790",
+		ListenAddress: "bridge-box.lan:7790",
+		ServerURL:     "http://192.168.0.10:7790",
 		AdvertiseEndpoints: []AdvertiseEndpoint{
-			{ServerURL: "http://192.0.2.10:7790"},
-			{ServerURL: "http://198.51.100.7:7790"},
+			{ServerURL: "http://192.168.0.10:7790"},
+			{ServerURL: "http://10.7.0.7:7790"},
 			{ServerURL: "http://Bridge-Box.lan.:7790"},
 		},
 	})
@@ -97,9 +98,10 @@ func Test_ownHostOnly_RefusesAHostThatIsNotThisHosts(t *testing.T) {
 	for _, host := range []string{
 		"evil.example:7790",
 		"evil.example",
-		"192.0.2.10.nip.io:7790",   // a public name that resolves to the LOCATION address
+		"192.168.0.10.nip.io:7790", // a public name that resolves to the LOCATION address
 		"bridge-box.lan.evil:7790", // the advertised name as a label
 		"203.0.113.5:7790",         // an address that is not this host's
+		"10.9.9.9:7790",            // a private address that is not this host's
 		"0.0.0.0:7790",
 		"[::]:7790",
 	} {
@@ -126,9 +128,9 @@ func Test_ownHostOnly_RefusesAHostThatIsNotThisHosts(t *testing.T) {
 func Test_ownHostOnly_AnswersThisHostsAddresses(t *testing.T) {
 	_, ts, _ := hostGuardServer(t)
 	for _, host := range []string{
-		"192.0.2.10:7790",   // ServerURL and the first LOCATION
-		"192.0.2.10",        // no port
-		"198.51.100.7:7790", // a second interface's LOCATION
+		"192.168.0.10:7790", // ServerURL and the first LOCATION
+		"192.168.0.10",      // no port
+		"10.7.0.7:7790",     // a second interface's LOCATION
 		"bridge-box.lan:7790",
 		"BRIDGE-BOX.LAN.:7790", // the advertised name, folded
 		"10.1.2.3:7790",        // an address of this host no LOCATION names
@@ -179,18 +181,20 @@ func Test_ownHostOnly_AnswersARequestWithNoHost(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("an HTTP/1.0 Browse with no Host: status %d, want 200", resp.StatusCode)
 	}
-	if !strings.Contains(string(got), "http://192.0.2.10:7790/dlna/file/") {
+	if !strings.Contains(string(got), "http://192.168.0.10:7790/dlna/file/") {
 		t.Errorf("an HTTP/1.0 Browse with no Host: <res> not built on the ServerURL")
 	}
 }
 
 // Test_ownHostOnly_AsksTheInterfacesOnlyForAnUnnamedLiteral pins the cost:
 // a renderer on a host the configuration names (its LOCATION, the
-// ServerURL, loopback) and a name are judged without listing the
-// interfaces; only a literal the configuration does not name is.
+// ServerURL, loopback), a name, and a literal of a class the listener does
+// not serve (B687) are judged without listing the interfaces; only a LAN
+// literal the configuration does not name is.
 func Test_ownHostOnly_AsksTheInterfacesOnlyForAnUnnamedLiteral(t *testing.T) {
 	_, ts, calls := hostGuardServer(t)
-	for _, host := range []string{"192.0.2.10:7790", "198.51.100.7:7790", "bridge-box.lan:7790", "127.0.0.1:7790", "evil.example:7790", ""} {
+	for _, host := range []string{"192.168.0.10:7790", "10.7.0.7:7790", "bridge-box.lan:7790", "127.0.0.1:7790", "evil.example:7790", "",
+		"203.0.113.5:7790", "[2001:db8::20]:7790", "100.64.0.7:7790"} {
 		sendAs(t, ts, descriptionRequest(t, ts), host)
 	}
 	if n := calls.Load(); n != 0 {

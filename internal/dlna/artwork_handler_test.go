@@ -25,7 +25,7 @@ func (s *recordingArtworkSource) ServeArtwork(w http.ResponseWriter, r *http.Req
 }
 
 // mountedMux builds the server's REAL handler tree — mountHandlers is what
-// Start runs before wrapping the mux in telemetry and binding the listener.
+// Start runs after binding, before wrapping the mux in telemetry.
 // SSDP multicast is what a test host usually lacks, and it is not what is
 // under test here; the routing table is.
 func mountedMux(t *testing.T, cfg ServerConfig) http.Handler {
@@ -34,7 +34,7 @@ func mountedMux(t *testing.T, cfg ServerConfig) http.Handler {
 		cfg.UDN = "uuid:test-artwork"
 	}
 	if cfg.ListenAddress == "" {
-		cfg.ListenAddress = ":0"
+		cfg.ListenAddress = "static.example:0"
 	}
 	if cfg.ServerURL == "" {
 		cfg.ServerURL = "http://static.example"
@@ -44,7 +44,7 @@ func mountedMux(t *testing.T, cfg ServerConfig) http.Handler {
 		t.Fatalf("NewServer: %v", err)
 	}
 	s.mux = http.NewServeMux()
-	s.mountHandlers()
+	s.mountHandlers(s.serverURLFunc(nil))
 	return s.mux
 }
 

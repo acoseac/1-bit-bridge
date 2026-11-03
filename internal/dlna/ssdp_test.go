@@ -3,6 +3,7 @@ package dlna
 import (
 	"context"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 )
@@ -40,7 +41,7 @@ func Test_NewSSDPAdvertiser_DefaultsAdvertiseInterval(t *testing.T) {
 // silently break SSDP advertisement.
 func Test_NewSSDPAdvertiser_PopulatesNotifyTargets(t *testing.T) {
 	const udn = "uuid:f1b3a5c2-8e7d-4f3b-9c1a-0d2e3f4a5b6c"
-	s := &Server{cfg: ServerConfig{UDN: udn}, served: newServedAddrs(nil)}
+	s := &Server{cfg: ServerConfig{UDN: udn}, served: newServedAddrs(netip.Addr{})}
 	got := s.mediaServerRegistration(nil).Targets
 	want := NotifyTargetsFor(udn)
 	if len(got) != len(want) {

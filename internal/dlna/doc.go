@@ -15,9 +15,14 @@
 // wildcard by default, and each SSDP listener (one per interface, shared
 // by every device of the SSDP subsystem, SSDPSubsystem) 0.0.0.0:1900, and
 // both serve the MediaServer only on the LAN addresses of those interfaces
-// (servedAddrs): a connection accepted on any other address of the host,
-// a tailnet's included, is closed unread, and a search sent to one is not
-// answered (backlog B48). The tsnet opt-in (EligibilityOpts.TsnetIfaceName,
+// (servedAddrs: RFC 1918, a ULA outside Tailscale's, link-local), which are
+// all it announces: a connection accepted on any other address of the host,
+// a tailnet's or a LAN interface's public one included, is closed unread,
+// and a search sent to one is not answered (backlog B48; B687). The one
+// public address DLNA serves is an IP literal `dlna.listenAddress` names
+// (PinnedPublicAddress), the operator's opt-in, after which whoever can
+// reach that address can browse and stream the library without
+// authentication. The tsnet opt-in (EligibilityOpts.TsnetIfaceName,
 // `dlna.allowTsnet`) is reserved and opts nothing in. Public
 // deployment mode REFUSES to bind DLNA regardless of the operator-supplied
 // `cfg.DLNA.Enabled` value — exposing an unauthenticated ContentDirectory

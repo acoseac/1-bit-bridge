@@ -187,7 +187,9 @@ func goldenServer(t *testing.T, udn string, cfg ServerConfig) (*Server, string) 
 	cfg.UDN = udn
 	cfg.FriendlyName = "Golden"
 	cfg.ModelNumber = goldenModelNumber
-	cfg.ListenAddress = addr
+	if cfg.ListenAddress == "" {
+		cfg.ListenAddress = addr
+	}
 	cfg.Listener = l
 	if cfg.ServerURL == "" {
 		cfg.ServerURL = "http://" + addr
@@ -269,20 +271,23 @@ func TestTheMediaServerAnnouncesEachEndpointInItsOrder(t *testing.T) {
 // fallback, which a pinned dlna.listenAddress takes (no AdvertiseEndpoints:
 // Interface and ServerURL): the LOCATION is ServerURL and the description's
 // path, the host exactly as the wiring wrote it, an IPv4 literal, a
-// bracketed IPv6 literal or a name. SSDP itself stays IPv4: the bursts go
-// to the IPv4 group whatever the LOCATION names.
+// bracketed IPv6 literal or a name, which NewServer takes only as the name
+// dlna.listenAddress pins (B687). SSDP itself stays IPv4: the bursts go
+// to the IPv4 group whatever the LOCATION names. The IPv6 literal is a ULA:
+// a global one is announced only as the address the listener is pinned to
+// (B687), and this listener is on loopback.
 func TestTheMediaServerAnnouncesItsServerURLAsWritten(t *testing.T) {
 	lo := loopbackInterface(t)
 	capture := ssdpGroupCapture(t, lo)
-	for _, tc := range []struct{ name, host string }{
-		{"ipv4_literal", "192.168.1.42"},
-		{"ipv6_literal", "[2001:db8::42]"},
-		{"host_name", "nas.local"},
+	for _, tc := range []struct{ name, host, listen string }{
+		{"ipv4_literal", "192.168.1.42", ""},
+		{"ipv6_literal", "[fd12:3456::42]", ""},
+		{"host_name", "nas.local", "nas.local:7790"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			udn := goldenUDN(t)
 			serverURL := "http://" + tc.host + ":7790"
-			s, _ := goldenServer(t, udn, ServerConfig{Interface: lo, ServerURL: serverURL})
+			s, _ := goldenServer(t, udn, ServerConfig{Interface: lo, ServerURL: serverURL, ListenAddress: tc.listen})
 			if err := s.Start(context.Background()); err != nil {
 				t.Skipf("the server did not start on %s: %v", lo.Name, err)
 			}

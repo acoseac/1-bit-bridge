@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -66,11 +68,13 @@ type dlnaWiring struct {
 	Network *dlnaBootNetwork
 }
 
-// dlnaBootNetwork supplies a boot test's interface inventory and held HTTP
-// listener. Nil retains the production pick, gather and bind paths.
+// dlnaBootNetwork supplies a boot test's host: the interfaces and the
+// addresses the MediaServer's own selection (the pick, the advertise set,
+// the ServerURL) and its served addresses read, and the HTTP listener it
+// holds. There is no seam for the selection itself, so a test runs the one
+// production runs. A nil field retains the host's (net.Interfaces, each
+// interface's Addrs, a bind of dlna.listenAddress).
 type dlnaBootNetwork struct {
-	Pick       func() (*net.Interface, error)
-	Gather     func(bool, int, *slog.Logger) []dlna.AdvertiseEndpoint
 	Interfaces func() ([]net.Interface, error)
 	Addrs      func(*net.Interface) ([]net.Addr, error)
 	Listener   net.Listener
@@ -123,8 +127,14 @@ func startDLNAIfEnabled(ctx context.Context, w dlnaWiring) (lc *dlnaLifecycle, e
 
 	// Pick a LAN-eligible interface for SSDP multicast. DLNA serves the
 	// home network only (backlog B48): the listener and SSDP serve only
-	// the LAN-eligible interfaces' addresses (dlna's servedAddrs), so a
-	// tailnet peer is refused whatever listenAddress binds.
+	// the LAN-eligible interfaces' private and link-local addresses (dlna's
+	// servedAddrs), so a tailnet peer is refused whatever listenAddress
+	// binds, and so is a connection on a LAN interface's public address
+	// (B687). The one public address DLNA serves is an IP literal
+	// listenAddress pins (dlna.PinnedPublicAddress), the operator's
+	// opt-in, whose one advertiser runs on the interface that holds it,
+	// eligible or not, with no pick: a host whose only network is public
+	// is served only that way.
 	// `cfg.DLNA.AllowTsnet` is reserved and read by nothing: a real
 	// opt-in would need the live tsnet interface name, passed here and
 	// to what the listener serves, and none exists. Phase 0 confirmed
@@ -134,41 +144,59 @@ func startDLNAIfEnabled(ctx context.Context, w dlnaWiring) (lc *dlnaLifecycle, e
 	// picker on LAN-only interfaces (since 2026-09-28: until then
 	// Tailscale's fd7a:115c:a1e0::/48 address admitted its interface
 	// anyway).
-	pick := func() (*net.Interface, error) { return dlna.PickLANEligibleInterface(dlna.EligibilityOpts{}) }
-	if w.Network != nil && w.Network.Pick != nil {
-		pick = w.Network.Pick
+	//
+	// The host is listed once, and the pick, the advertise set and the
+	// fallback ServerURL all read that listing: the host's own, or a boot
+	// test's (dlnaBootNetwork), which runs this same selection.
+	list, addrs := net.Interfaces, (*net.Interface).Addrs
+	if w.Network != nil && w.Network.Interfaces != nil {
+		list = w.Network.Interfaces
 	}
-	iface, ifaceErr := pick()
-	if ifaceErr != nil {
-		dlnaLog.Warn("DLNA disabled — no LAN-eligible interface", slog.String("err", ifaceErr.Error()))
+	if w.Network != nil && w.Network.Addrs != nil {
+		addrs = w.Network.Addrs
+	}
+	ifaces, listErr := list()
+	if listErr != nil {
+		dlnaLog.Warn("DLNA disabled — no LAN-eligible interface", slog.String("err", "net.Interfaces: "+listErr.Error()))
 		return &dlnaLifecycle{log: dlnaLog}, false
 	}
 
 	listenAddr := cfg.DLNA.EffectiveDLNAListenAddress()
 	port := portFromListenAddr(listenAddr)
 	rawHost, _, splitErr := net.SplitHostPort(listenAddr)
-	bindWildcard := splitErr != nil || rawHost == "" || rawHost == "0.0.0.0" || rawHost == "::"
+	bindWildcard := splitErr != nil || isWildcardHost(rawHost)
+	pin := dlna.PinnedPublicAddress(listenAddr)
+
+	var iface *net.Interface
+	if pin.IsValid() {
+		if iface = interfaceHolding(ifaces, addrs, pin); iface == nil {
+			dlnaLog.Warn("DLNA disabled — no interface of this host holds the address dlna.listenAddress names")
+			return &dlnaLifecycle{log: dlnaLog}, false
+		}
+	} else {
+		var ifaceErr error
+		if iface, ifaceErr = dlna.PickLANEligibleInterfaceOf(ifaces, addrs, dlna.EligibilityOpts{}); ifaceErr != nil {
+			dlnaLog.Warn("DLNA disabled — no LAN-eligible interface", slog.String("err", ifaceErr.Error()))
+			return &dlnaLifecycle{log: dlnaLog}, false
+		}
+	}
 
 	// Multi-interface SSDP advertise set (wildcard bind only; extracted
 	// to keep this function's cognitive complexity in check — Sonar S3776
 	// on PR #328). Gathered BEFORE the fallback ServerURL so an IPv6-only
 	// FIRST interface can't false-bail startup when a LATER interface has
-	// a usable IPv4 (CodeRabbit on PR #328).
-	gather := gatherAdvertiseEndpoints
-	if w.Network != nil && w.Network.Gather != nil {
-		gather = w.Network.Gather
-	}
-	endpoints := gather(bindWildcard, port, dlnaLog)
-	addrs := (*net.Interface).Addrs
-	if w.Network != nil && w.Network.Addrs != nil {
-		addrs = w.Network.Addrs
-	}
+	// a usable IPv4 (CodeRabbit on PR #328). Both announce a private or
+	// link-local IPv4 address alone, and say once if they leave out
+	// another (leftOut, B687).
+	leftOut := &publicLeftOutNote{log: dlnaLog}
+	endpoints := gatherAdvertiseEndpoints(bindWildcard, ifaces, addrs, port, leftOut, dlnaLog)
 
 	// Resolve the fallback ServerURL renderers dial for /dlna/file/ + SOAP
-	// control. Prefer a gathered endpoint's IP (any interface with IPv4),
-	// then a pinned bind host, then the picked interface's IPv4 as a last
-	// resort. DLNA disables only when NONE yield a dialable host.
-	serverURL, urlErr := deriveServerURL(rawHost, bindWildcard, port, endpoints, iface, addrs)
+	// control. Prefer a gathered endpoint's IP (any interface with a LAN
+	// IPv4), then a pinned bind host, then the picked interface's LAN IPv4
+	// as a last resort. DLNA disables only when NONE yield a dialable host:
+	// a public IPv4 address is never the fallback.
+	serverURL, urlErr := deriveServerURL(rawHost, bindWildcard, port, endpoints, iface, addrs, leftOut)
 	if urlErr != nil {
 		dlnaLog.Warn("DLNA disabled — couldn't resolve a dialable server URL",
 			slog.String("iface", iface.Name),
@@ -303,29 +331,39 @@ func (d *dlnaLifecycle) Stop(ctx context.Context) {
 // falls back to its single-advertiser path (Interface + ServerURL).
 //
 // One endpoint per member of the multicast set, in the set's order, on the
-// member's FIRST IPv4 address that is neither loopback nor unspecified
-// (firstIPv4OnInterface): a member with aliases is advertised once, on the first, and
-// a self-assigned 169.254 address counts like any other (this said
-// "link-local-only" members were skipped, which the code never did). A member
-// with no such address (IPv6-only) is skipped rather than advertised with an
-// unreachable "http://<nil>:port" LOCATION.
-func gatherAdvertiseEndpoints(bindWildcard bool, port int, log *slog.Logger) []dlna.AdvertiseEndpoint {
+// member's FIRST IPv4 address that is private or link-local
+// (firstLANIPv4OnInterface): a member with aliases is advertised once, on
+// the first, and a self-assigned 169.254 address counts like any other. A
+// member's public IPv4 address is never its LOCATION, wherever the member
+// lists it (B687: a public address it listed first was, and the listener
+// served it), and a member with no private or link-local IPv4 address (an
+// IPv6-only one, or one whose only IPv4 address is public) is skipped
+// rather than advertised on an address the listener refuses. leftOut says
+// once that a member's IPv4 address was left out.
+//
+// ifaces is the one listing of the host the wiring reads, and addrsOf reads
+// each interface's addresses: the host's, or a boot test's.
+func gatherAdvertiseEndpoints(bindWildcard bool, ifaces []net.Interface, addrsOf func(*net.Interface) ([]net.Addr, error),
+	port int, leftOut *publicLeftOutNote, log *slog.Logger) []dlna.AdvertiseEndpoint {
 	if !bindWildcard {
 		return nil
 	}
-	return advertiseEndpointsOf(dlna.PickAllLANEligibleInterfaces(dlna.EligibilityOpts{}), (*net.Interface).Addrs, port, log)
+	return advertiseEndpointsOf(dlna.PickAllLANEligibleInterfacesOf(ifaces, addrsOf, dlna.EligibilityOpts{}), addrsOf, port, leftOut, log)
 }
 
 // advertiseEndpointsOf is gatherAdvertiseEndpoints over a given multicast set,
 // whose members' addresses addrsOf reads, so a test can hand it interfaces of
 // its own instead of the host's.
 func advertiseEndpointsOf(members []*net.Interface, addrsOf func(*net.Interface) ([]net.Addr, error),
-	port int, log *slog.Logger) []dlna.AdvertiseEndpoint {
+	port int, leftOut *publicLeftOutNote, log *slog.Logger) []dlna.AdvertiseEndpoint {
 	var endpoints []dlna.AdvertiseEndpoint
 	for _, ai := range members {
-		ip, ipErr := firstIPv4OnInterface(ai, addrsOf)
+		ip, left, ipErr := firstLANIPv4OnInterface(ai, addrsOf)
+		if left {
+			leftOut.note()
+		}
 		if ipErr != nil {
-			log.Debug("DLNA SSDP: skipping interface with no usable IPv4",
+			log.Debug("DLNA SSDP: skipping interface with no private or link-local IPv4",
 				slog.String("iface", ai.Name),
 				slog.String("err", ipErr.Error()))
 			continue
@@ -342,69 +380,148 @@ func advertiseEndpointsOf(members []*net.Interface, addrsOf func(*net.Interface)
 // (LOCATION's host on the single-advertiser path, and the serverURLFunc
 // fallback when a renderer's Host header is empty). Priority:
 //
-//  1. Pinned bind host ("192.168.1.42:7790") → advertise exactly that.
+//  1. Pinned bind host ("192.168.1.42:7790") → advertise exactly that,
+//     a public address among them only as the operator's opt-in
+//     (dlna.PinnedPublicAddress).
 //  2. Wildcard bind with ≥1 gathered endpoint → the first endpoint's URL
-//     (its IP is already a usable LAN IPv4; this is what lets an IPv6-only
-//     FIRST interface not block startup — CodeRabbit on PR #328).
-//  3. Wildcard bind, no endpoints → the picked interface's IPv4 as a last
-//     resort; errors only when even that has no usable IPv4.
+//     (its IP is already a private or link-local IPv4; this is what lets an
+//     IPv6-only FIRST interface not block startup — CodeRabbit on PR #328).
+//  3. Wildcard bind, no endpoints → the picked interface's private or
+//     link-local IPv4 as a last resort (firstLANIPv4OnInterface, every
+//     address read, one it leaves out said once through leftOut); errors
+//     when even that has none, never falling back to a public address
+//     (B687).
 //
 // addrsOf reads an interface's addresses: (*net.Interface).Addrs, or a
 // test's own.
 func deriveServerURL(rawHost string, bindWildcard bool, port int, endpoints []dlna.AdvertiseEndpoint, iface *net.Interface,
-	addrsOf func(*net.Interface) ([]net.Addr, error)) (string, error) {
+	addrsOf func(*net.Interface) ([]net.Addr, error), leftOut *publicLeftOutNote) (string, error) {
 	if !bindWildcard {
-		// JoinHostPort brackets an IPv6 literal. Plain Sprintf yields
-		// "http://2001:db8::1:7790", which is not a parseable URL — a
-		// renderer can't tell the port from the address — so an
-		// IPv6-bound DLNA server advertised a location nothing could
-		// fetch.
-		return "http://" + net.JoinHostPort(rawHost, strconv.Itoa(port)), nil
+		// JoinHostPort brackets IPv6; URL.String escapes a link-local
+		// zone's percent sign so the advertised URL parses back to it.
+		u := url.URL{Scheme: "http", Host: net.JoinHostPort(rawHost, strconv.Itoa(port))}
+		return u.String(), nil
 	}
 	if len(endpoints) > 0 {
 		return endpoints[0].ServerURL, nil
 	}
-	ip, err := firstIPv4OnInterface(iface, addrsOf)
+	ip, left, err := firstLANIPv4OnInterface(iface, addrsOf)
+	if left {
+		leftOut.note()
+	}
 	if err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("http://%s:%d", ip.String(), port), nil
 }
 
-// firstIPv4OnInterface returns the first IPv4 address bound to iface, as
-// addrsOf lists them, that is NOT loopback / unspecified: a link-local
-// 169.254 address qualifies. Returns an error when no suitable address is
-// found — caller treats that as "DLNA can't advertise a usable URL, skip
-// startup".
-func firstIPv4OnInterface(iface *net.Interface, addrsOf func(*net.Interface) ([]net.Addr, error)) (net.IP, error) {
+// firstLANIPv4OnInterface returns the first IPv4 address bound to iface, as
+// addrsOf lists them, of a class the DLNA listener serves
+// (dlna.IsLANClassAddress: RFC 1918, or a self-assigned 169.254 one), and
+// whether iface also carries a global unicast address of another class,
+// left out: public IPv4 or IPv6, or a tailnet address (B687). Every
+// address is read, so one left out after the address returned is reported
+// too. Returns an error when iface carries no private or link-local IPv4
+// address — caller treats that as "DLNA can't advertise a usable URL", and
+// skips the interface or the startup.
+func firstLANIPv4OnInterface(iface *net.Interface, addrsOf func(*net.Interface) ([]net.Addr, error)) (ip net.IP, leftOut bool, err error) {
 	if iface == nil {
-		return nil, errors.New("nil interface")
+		return nil, false, errors.New("nil interface")
 	}
 	addrs, err := addrsOf(iface)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	for _, a := range addrs {
-		var ip net.IP
-		switch v := a.(type) {
-		case *net.IPNet:
-			ip = v.IP
-		case *net.IPAddr:
-			ip = v.IP
-		}
-		if ip == nil {
+		addr, ok := netip.AddrFromSlice(ipOfAddr(a))
+		if !ok {
 			continue
 		}
-		v4 := ip.To4()
-		if v4 == nil {
-			continue
+		addr = addr.Unmap()
+		switch {
+		case dlna.IsLANClassAddress(addr):
+			if ip == nil && addr.Is4() {
+				ip = net.IP(addr.AsSlice())
+			}
+		case addr.IsGlobalUnicast():
+			leftOut = true
 		}
-		if v4.IsLoopback() || v4.IsUnspecified() {
-			continue
-		}
-		return v4, nil
 	}
-	return nil, fmt.Errorf("no usable IPv4 address on interface %s", iface.Name)
+	if ip == nil {
+		return nil, leftOut, fmt.Errorf("no private or link-local IPv4 address on interface %s", iface.Name)
+	}
+	return ip, leftOut, nil
+}
+
+// ipOfAddr is the IP address of an interface address, nil for one that is
+// not an IP.
+func ipOfAddr(a net.Addr) net.IP {
+	switch v := a.(type) {
+	case *net.IPNet:
+		return v.IP
+	case *net.IPAddr:
+		return v.IP
+	}
+	return nil
+}
+
+// isWildcardHost reports whether a dlna.listenAddress host binds every
+// address: none (":7790"), or the unspecified address however it is spelled
+// ("0.0.0.0", "::", "::0", "0:0:0:0:0:0:0:0", "::ffff:0.0.0.0"). Writing the
+// wildcard out names no address, a public one least of all (B687): until
+// then a spelling other than "0.0.0.0" and "::" read as a pin, advertised as
+// "http://[::0]:7790", which no renderer can dial.
+func isWildcardHost(host string) bool {
+	if host == "" {
+		return true
+	}
+	a, err := netip.ParseAddr(host)
+	return err == nil && a.WithZone("").Unmap().IsUnspecified()
+}
+
+// interfaceHolding is the first interface of ifaces, in the order listed,
+// that holds the address a (unmapped and without a zone, as
+// dlna.PinnedPublicAddress gives it), or nil: where the advertiser of a
+// listener pinned to a runs, whatever its eligibility.
+func interfaceHolding(ifaces []net.Interface, addrsOf func(*net.Interface) ([]net.Addr, error), a netip.Addr) *net.Interface {
+	for i := range ifaces {
+		addrs, err := addrsOf(&ifaces[i])
+		if err != nil {
+			continue
+		}
+		for _, ia := range addrs {
+			if b, ok := netip.AddrFromSlice(ipOfAddr(ia)); ok && b.Unmap().WithZone("") == a {
+				return &ifaces[i]
+			}
+		}
+	}
+	return nil
+}
+
+// publicLeftOutNote says, once per DLNA start and without the address, that
+// the MediaServer's selection left out an address of an interface it
+// looked at because the address is neither private nor link-local: a public
+// IPv4 or IPv6 one, or a tailnet address (B687). The advertise set and the fallback
+// ServerURL read every address of the interfaces they look at, and
+// whichever finds one first says it. Nothing says it again: the served
+// addresses leave such an address out whenever they are read, with no line
+// of their own, and a connection or an M-SEARCH refused on one is the
+// listener's line (it names the address, which is this host's own).
+type publicLeftOutNote struct {
+	log  *slog.Logger
+	said bool
+}
+
+// note writes the line the first time it is called.
+func (n *publicLeftOutNote) note() {
+	if n.said {
+		return
+	}
+	n.said = true
+	n.log.Info("DLNA leaves out an address of a LAN interface that is neither private nor link-local: "+
+		"it announces and serves only this host's private, link-local and loopback addresses",
+		slog.String("hint", "to serve a public address, name it in dlna.listenAddress: "+
+			"anyone who can reach that address can then browse and stream the library without signing in"))
 }
 
 // portFromListenAddr extracts the port number from a ":7790" or

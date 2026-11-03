@@ -253,6 +253,134 @@ each new test panicked at `control.go:90`, each run alone, and
 v0.62.0 every one of them stays green with the recover removed (B615), which
 is what no input reaching it means.
 
+**…and both announce and serve only the private (RFC 1918, a ULA outside
+Tailscale's), link-local and loopback addresses, whichever order an interface
+lists them in; a public address only as the IP literal `dlna.listenAddress`
+names, the operator's opt-in, that address alone** (2026-11-02, backlog B687,
+security; Codex's and Argon's notes on the brief were binding). In LAN mode
+with the wildcard listener, B48 kept a tailnet peer out and still exposed the
+library on a public IPv4 address: an interface that carries a private address
+is eligible as a whole (`IsLANEligibleInterface`), the wiring announced each
+member's first IPv4 address whatever its class (`firstIPv4OnInterface`, and
+the fallback ServerURL alike), `servedAddrs` served a member's address the
+server advertised whatever its kind, and the Host check took any address of
+the host (`isInterfaceAddr`). On a LAN interface that listed a public IPv4
+address before its private one, every NOTIFY and every search's answer named
+the public address, the listener answered a connection there whatever Host it
+named (1,566 bytes of description), and a Browse over a private connection
+naming the public address got the library's URLs on it: whoever could route
+to that address browsed and streamed the library, unauthenticated. With the
+private address first, only the Host link was open.
+
+**The policy**, of an address of this host:
+
+| class | wildcard `dlna.listenAddress` | pinned literal |
+|---|---|---|
+| loopback | served, a Host; never announced | the pin is served (loopback) |
+| RFC 1918 IPv4, 169.254/16 | a member's first is announced; served on a member; a Host | served if a member holds it (warns and starts if not) |
+| ULA outside Tailscale's, fe80 (zoned to its member) | served on a member, a Host; never announced (SSDP is IPv4) | as the row above |
+| public, IPv4 or IPv6 (global unicast, not private) | neither announced nor served nor a Host, on whatever interface; left out, said once a start | **the opt-in**: announced, served while an interface holds it, a Host, that address alone, its advertiser on the interface that holds it, eligible or not |
+| 100.64/10 (CGNAT, Tailscale's IPv4), Tailscale's ULA | refused | announced as written, served by no one: warns at Start and starts |
+
+A host name never opts in: what it resolves to is served only by its class.
+Every spelling of the unspecified address is a wildcard (`::0`,
+`0:0:0:0:0:0:0:0` and `::ffff:0.0.0.0` read as pins until B687 and were
+announced as `http://[::0]:7790`). A host whose only network is public
+(its interface public plus fe80 is not LAN-eligible) does not start with the
+wildcard, as before, and is served only through the opt-in. An interface
+eligible through a ULA whose one IPv4 address is public gets no LOCATION, and
+with no other DLNA does not start (the fallback ServerURL never takes a public
+address). Where every SSDP endpoint fails, Start fails and DLNA is off, the
+pin included, as before.
+
+**Where it is enforced**, each guard pinned on its own (the controls in the
+log's record): the wiring's selection (`firstLANIPv4OnInterface`,
+`dlna.IsLANClassAddress`, reading every address so one left out after the
+chosen one is still said; `publicLeftOutNote`, Info, once per start, naming no
+address, from the advertise set and the fallback alike); `servedSnapshotOf`
+(no advertised arm; the pin while `holder` has it), which the listener's
+accept, `AcceptsOn` and the MediaServer's unicast M-SEARCH admission all read;
+the Host check (`mayName`: a literal of those classes or the pin, before
+ownership), so a wildcard ContentDirectory, which builds `<res>` and
+albumArtURI from the Host, builds no URL on an unpinned public address;
+a specifically bound listener captures its actual address and port before
+serving and builds both URLs on that authority, regardless of the accepted
+Host (B687 round 3). Private, loopback and public binds use their address,
+with IPv6 bracketed and zones URL-escaped; a pinned name keeps its name, as
+the SSDP LOCATION announces it, on the bound port
+(`TestTheMediaServerServesAPinnedNameOnlyOnItsBoundAddress`). The capture survives Stop
+clearing `accepting`, so in-flight responses keep the same URLs. Empty Host
+and localhost still pass the unchanged Host check; only a wildcard uses
+ServerURL for an empty Host and the Host itself for localhost. The regression
+`TestContentDirectoryURLsFollowTheBoundListener` exercises Start with stand-in
+TCP and SSDP transports, then Browse and Search for file and artwork URLs;
+NewServer
+(`checkAdvertisedHost`): a malformed or hostless ServerURL or LOCATION is
+refused; a literal of another class is refused unless it is the literal
+`dlna.listenAddress` names; a hostname is taken only when it is the
+configured listen name, so a pin to the tailnet's address still warns and
+starts (B48's "don't make it refuse"); Start: a listener not bound to the
+pinned public address, or a named address handed a wildcard listener, is
+refused, and a pin
+that is served is said once at Warn, naming no address ("anyone who can reach
+that address can browse and stream the library without signing in"). The
+refusal line now says the listener answers on "the private and link-local
+addresses of the LAN-eligible interfaces"; it still names the host's own
+refused address, as B604 allows. The Host check reads a boot test's host when
+the configuration stands one in (`hostAddrs`, `ServerConfig.Interfaces`), and
+the wiring lists the host once and runs its real pickers over that listing
+(`PickLANEligibleInterfaceOf`, `PickAllLANEligibleInterfacesOf`), so
+`dlnaBootNetwork` lost its `Pick` and `Gather` overrides: no test stands an
+approved answer in for the selection.
+
+**Decided, and declined.** The opt-in is an IP literal only (a name's
+resolution is the resolver's to change), globally routable only: 100.64/10 is
+shared space, not public (RFC 6598), and holds Tailscale's IPv4 range, which no
+address-based check tells from an ISP's, so it is never the opt-in, and a pin
+to it on a member, served until B687 as an advertised address, now serves no
+one. Rejecting a mixed interface whole was declined: the shared pickers drive
+mDNS and the renderer and upstream discovery clients too, and eligibility is
+per interface while serving is per address. The OpenHome surface already
+served IPv4 addresses of the LAN classes alone (`internal/player/lan`), and no
+DLNA setting reaches it; its Insert takes `AcceptsOn`, which follows the
+listener's served set, the pin included. **Residuals**, unchanged: a listener
+that cannot be armed answers a unicast M-SEARCH unchecked, with its one Warn;
+Docker's DNAT, a subnet router, a port forward or a proxy can carry anyone to
+a private address; a VPN numbered in RFC 1918 or ULA space is a member; IPv6
+on a SLAAC-only LAN is served on fe80 alone (no ULA), and the MediaServer
+announces IPv4 addresses only for wildcard listeners. A pinned IPv6 literal
+is bracketed in LOCATION over the IPv4 SSDP transport; the description's
+relative service URLs resolve against that IPv6 authority.
+
+**Don't serve or announce a public address but the literal `dlna.listenAddress`
+names, take a name, a wildcard, 100.64/10 or Tailscale's ULA as the opt-in,
+accept a Host literal of a class the listener does not serve, choose an
+announced address by its place in the interface's list, fall back to a public
+one, reject a whole mixed interface, or name an address in either new line.**
+`TestTheMediaServerServesAMixedInterfaceOnItsPrivateAddressAlone` (both
+orders, through the real wiring: NOTIFY, AcceptsOn, Browse and the file on the
+private address, no byte on the public one whatever its Host, the M-SEARCH to
+it refused), `TestTheMediaServerAnswersNoRequestNamingItsPublicAddress`,
+`TestTheMediaServerFallsBackToNoPublicAddress`,
+`TestTheMediaServerServesThePublicAddressItsListenAddressNames` (a public-only
+host, beside a private address, on an interface of its own),
+`TestTheMediaServerTakesNoPublicAddressItsListenAddressDoesNotName`,
+`TestTheMediaServerRefusesAPinNoInterfaceHolds`,
+`TestTheMediaServerServesAPrivateOnlyHostAsBefore`,
+`TestTheMediaServerServesAULAAndNotAGlobalIPv6Address`,
+`TestTheMediaServerSaysOnceAndWithoutTheAddressThatItLeftOutAPublicAddress`,
+`TestTheMediaServerTakesEverySpellingOfTheWildcardAsOne`,
+`Test_ownHostOnly_RefusesAnAddressOfThisHostItDoesNotServe`,
+`Test_ownHostOnly_TakesThePinnedPublicAddressAlone`,
+`TestNewServerRefusesToAdvertiseAnAddressItWouldNotServe`,
+`TestStartRefusesAListenerNotBoundToThePin`,
+`TestStartRefusesANamedListenAddressOnAWildcardListener` and
+`TestTheAddressClassesAndTheOptIn` pin it, with the B687 rows of
+`TestServedAddrsAreTheLANAddressesOfTheMulticastSet` (its
+`a_members_public_address` row was the advertised exception, served) and
+`TestAcceptsOnIsTheListenersServedSet`. The record is in
+`ops/engineering-log.md`, "2026-11-02 — B687".
+
 ## Strict aliases and cross-package transport (B470 PR 5a2b)
 
 Strict multicast used to select firstOn and only then ask Source, losing a

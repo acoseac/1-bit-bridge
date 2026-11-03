@@ -59,12 +59,13 @@ func (h *testHost) listed() int {
 	return h.listings
 }
 
-// served returns a servedAddrs that reads this host, advertising the given
-// literal hosts, on the clock now (nil: time.Now).
-func (h *testHost) served(now func() time.Time, advertised ...string) *servedAddrs {
-	adv := map[netip.Addr]struct{}{}
-	for _, a := range advertised {
-		adv[netip.MustParseAddr(a)] = struct{}{}
+// served returns a servedAddrs that reads this host, on the clock now (nil:
+// time.Now), for a listener pinned to the public address pinned names, at
+// most one, as PinnedPublicAddress gives it (none: no pin).
+func (h *testHost) served(now func() time.Time, pinned ...string) *servedAddrs {
+	var pin netip.Addr
+	if len(pinned) > 0 {
+		pin = netip.MustParseAddr(pinned[0])
 	}
 	return &servedAddrs{
 		interfaces: func() ([]net.Interface, error) {
@@ -83,8 +84,8 @@ func (h *testHost) served(now func() time.Time, advertised ...string) *servedAdd
 			defer h.mu.Unlock()
 			return h.addrsOf(ifi)
 		},
-		now:        now,
-		advertised: adv,
+		now:    now,
+		pinned: pin,
 	}
 }
 
@@ -110,23 +111,27 @@ func (c *testClock) advance(d time.Duration) {
 
 // TestServedAddrsAreTheLANAddressesOfTheMulticastSet pins what the DLNA
 // listener and its advertisers serve (backlog B48): loopback, the LAN
-// addresses of the multicast set's members, and a member's address the
-// server advertises. A tailnet address is refused on each platform's shape,
-// and so are another interface's link-local address and a member's public
-// address. A link-local IPv6 address is served only with its own interface
-// as its zone.
+// addresses of the multicast set's members, and the public address
+// dlna.listenAddress pins, the operator's opt-in (B687). A tailnet address
+// is refused on each platform's shape, and so are another interface's
+// link-local address and a member's public address, whatever the server
+// advertises: until B687 a member's address the server advertised was
+// served whatever its kind (the row a_members_public_address, where it
+// was). A link-local IPv6 address is served only with its own interface as
+// its zone. listen is dlna.listenAddress, the pin what PinnedPublicAddress
+// makes of it.
 func TestServedAddrsAreTheLANAddressesOfTheMulticastSet(t *testing.T) {
 	windowsTailscale := fakeIface{name: "Tailscale", flags: net.FlagUp | net.FlagRunning | net.FlagMulticast,
 		addrs: []string{"fe80::d12", "100.64.0.7", "fd7a:115c:a1e0::7"}}
 	windowsWireGuard := fakeIface{name: "WireGuard", flags: net.FlagUp | net.FlagRunning, addrs: []string{"10.8.0.2"}}
 	cases := []struct {
-		name       string
-		host       []fakeIface
-		advertised []string
-		served     []string
-		refused    []string
+		name    string
+		host    []fakeIface
+		listen  string
+		served  []string
+		refused []string
 	}{
-		{"macos_with_tailscale", macWithTailscale(), nil,
+		{"macos_with_tailscale", macWithTailscale(), ":7790",
 			[]string{"192.168.1.20", "fe80::e0%en0", "169.254.7.8", "fe80::13%en13", "::ffff:192.168.1.20"},
 			[]string{
 				"100.64.0.7", "fd7a:115c:a1e0::7", "fe80::d7%utun7", // Tailscale's interface
@@ -140,7 +145,7 @@ func TestServedAddrsAreTheLANAddressesOfTheMulticastSet(t *testing.T) {
 			lan("docker0", "172.17.0.1", "fe80::17"),
 			lan("veth1a2b3c", "fe80::bb"),
 			tunnel("tailscale0", "100.64.0.24", "fd7a:115c:a1e0::24", "fe80::7"),
-		}, nil,
+		}, ":7790",
 			[]string{"192.168.50.24", "fe80::24%enp1s0f0", "172.17.0.1", "fe80::17%docker0"},
 			[]string{"100.64.0.24", "fd7a:115c:a1e0::24", "fe80::7%tailscale0", "fe80::bb%veth1a2b3c", "2001:db8:50::24"}},
 		// Wintun has no point-to-point flag; Tailscale's adapter is refused by
@@ -151,7 +156,7 @@ func TestServedAddrsAreTheLANAddressesOfTheMulticastSet(t *testing.T) {
 			windowsTailscale,
 			lan("Ethernet", "192.168.0.208", "fe80::208"),
 			windowsWireGuard,
-		}, nil,
+		}, ":7790",
 			[]string{"192.168.0.208", "fe80::208%Ethernet", "10.8.0.2"},
 			[]string{"100.64.0.7", "fd7a:115c:a1e0::7", "fe80::d12%Tailscale"}},
 		// A container on a Docker bridge network: a connection to a published
@@ -159,29 +164,69 @@ func TestServedAddrsAreTheLANAddressesOfTheMulticastSet(t *testing.T) {
 		{"container_on_a_bridge_network", []fakeIface{
 			{name: "lo", flags: net.FlagUp | net.FlagLoopback, addrs: []string{"127.0.0.1", "::1"}},
 			lan("eth0", "172.18.0.5", "fe80::5"),
-		}, nil,
+		}, ":7790",
 			[]string{"172.18.0.5", "fe80::5%eth0", "127.0.0.1", "::1"},
 			nil},
-		// Eligible through its ULA, with the public IPv4 its LOCATION names.
-		{"a_member_whose_advertised_address_is_public", []fakeIface{
+		// Eligible through its ULA, with a public IPv4 address, which the
+		// wiring announced and so the listener served until B687.
+		{"a_members_public_address", []fakeIface{
 			lan("eth0", "203.0.113.5", "fd12:3456::5"),
-		}, []string{"203.0.113.5"},
-			[]string{"203.0.113.5", "fd12:3456::5"},
-			nil},
-		{"a_members_public_address_the_server_does_not_advertise", []fakeIface{
-			lan("eth0", "203.0.113.5", "fd12:3456::5"),
-		}, nil,
+		}, ":7790",
 			[]string{"fd12:3456::5"},
 			[]string{"203.0.113.5"}},
-		// A listen address pinned to the tailnet: advertised, and still not
-		// served, since its interface is not a member.
-		{"an_advertised_address_off_the_set", macWithTailscale(), []string{"100.64.0.7"},
+		// A private and a public IPv4 address on one member, either order:
+		// the private one is served and the public one is not.
+		{"a_mixed_members_public_address", []fakeIface{
+			lan("eth0", "93.184.216.34", "192.168.1.20", "fe80::20"),
+			lan("eth1", "10.0.0.5", "198.51.100.1"),
+		}, "0.0.0.0:7790",
+			[]string{"192.168.1.20", "fe80::20%eth0", "10.0.0.5"},
+			[]string{"93.184.216.34", "198.51.100.1", "::ffff:93.184.216.34"}},
+		// The operator's opt-in: the public address dlna.listenAddress names
+		// is served, a member's or not, while an interface holds it.
+		{"the_public_address_the_listen_address_pins", []fakeIface{
+			lan("eth0", "203.0.113.5", "fd12:3456::5"),
+		}, "203.0.113.5:7790",
+			[]string{"203.0.113.5", "::ffff:203.0.113.5", "fd12:3456::5"},
+			nil},
+		{"a_pinned_public_address_off_the_set", []fakeIface{
+			lan("eth0", "192.168.1.20"),
+			lan("eth1", "203.0.113.9", "fe80::9"),
+		}, "203.0.113.9:7790",
+			[]string{"203.0.113.9", "192.168.1.20"},
+			[]string{"fe80::9%eth1"}},
+		{"a_pinned_public_address_no_interface_holds", []fakeIface{
+			lan("eth0", "192.168.1.20"),
+		}, "203.0.113.77:7790",
 			[]string{"192.168.1.20"},
-			[]string{"100.64.0.7"}},
+			[]string{"203.0.113.77"}},
+		{"a_pinned_global_ipv6_address", macWithTailscale(), "[2001:db8::20]:7790",
+			[]string{"2001:db8::20", "192.168.1.20"},
+			[]string{"100.64.0.7", "fd7a:115c:a1e0::7"}},
+		// A pin to the tailnet is no opt-in, so its interface not being a
+		// member is what refuses it, as before B687.
+		{"a_listen_address_pinned_to_the_tailnet", macWithTailscale(), "100.64.0.7:7790",
+			[]string{"192.168.1.20"},
+			[]string{"100.64.0.7", "fd7a:115c:a1e0::7"}},
+		{"a_listen_address_pinned_to_tailscales_ula", macWithTailscale(), "[fd7a:115c:a1e0::7]:7790",
+			[]string{"192.168.1.20"},
+			[]string{"100.64.0.7", "fd7a:115c:a1e0::7"}},
+		// A pin to a 100.64/10 address on a member is no opt-in either (a
+		// tailnet's cannot be told from an ISP's): it was served until B687,
+		// as an address the server advertised.
+		{"a_listen_address_pinned_to_100_64_on_a_member", []fakeIface{
+			lan("eth0", "192.168.1.20", "100.70.0.1"),
+		}, "100.70.0.1:7790",
+			[]string{"192.168.1.20"},
+			[]string{"100.70.0.1"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newTestHost(tc.host...).served(nil, tc.advertised...)
+			var pin []string
+			if a := PinnedPublicAddress(tc.listen); a.IsValid() {
+				pin = append(pin, a.String())
+			}
+			s := newTestHost(tc.host...).served(nil, pin...)
 			for _, a := range tc.served {
 				if !s.serves(netip.MustParseAddr(a)) {
 					t.Errorf("%s is refused, want served", a)
@@ -331,11 +376,12 @@ func TestARefusalIsLoggedOncePerKindAndAddress(t *testing.T) {
 		t.Fatal("a connection to the LAN address was refused")
 	}
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	const why = "it answers only on the private and link-local addresses of the LAN-eligible interfaces"
 	want := []string{
-		`refused a connection to an address it does not serve: it answers only on the LAN-eligible interfaces" address=100.64.0.7 interface=utun7`,
-		`refused a connection to an address it does not serve: it answers only on the LAN-eligible interfaces" address=fd7a:115c:a1e0::7 interface=utun7`,
-		`refused an M-SEARCH to an address it does not serve: it answers only on the LAN-eligible interfaces" address=100.64.0.7 interface=utun7`,
-		`refused an M-SEARCH to an address it does not serve: it answers only on the LAN-eligible interfaces" address="(not reported)" interface=(none)`,
+		`refused a connection to an address it does not serve: ` + why + `" address=100.64.0.7 interface=utun7`,
+		`refused a connection to an address it does not serve: ` + why + `" address=fd7a:115c:a1e0::7 interface=utun7`,
+		`refused an M-SEARCH to an address it does not serve: ` + why + `" address=100.64.0.7 interface=utun7`,
+		`refused an M-SEARCH to an address it does not serve: ` + why + `" address="(not reported)" interface=(none)`,
 	}
 	if len(lines) != len(want) {
 		t.Fatalf("logged %d lines, want %d:\n%s", len(lines), len(want), buf.String())
