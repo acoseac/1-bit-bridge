@@ -793,6 +793,24 @@ is never removed, and only the lock on it means anything). A start's
 housekeeping that cannot hold that lock leaves the marker and both binaries
 as they are (`updater: not acting on the install marker at this start, …`)
 for a later start.
+**From the release that carries B692, the updater's own install and rollback
+take that lock too**: `bridge update`, the console's Install and Roll back and
+the auto-installer read and write the marker and swap the binary only while
+they hold it, never through the download, and decide again under it, so a
+`bridge update` beside a serve that installed the same release meanwhile
+stops with `this release is already installed and waiting for a restart`
+and swaps nothing. Where the lock cannot be held they refuse with nothing
+written or swapped: another process holding it past 30 s (`… held the
+install marker's lock for 30s (…): try again once it is done`; the console
+answers 409 `marker-locked`), or a filesystem that gives no lock (the next
+paragraph). **The console's Roll back is refused once the version it would
+roll back from has opened the data dir**, which that version's start
+records (`"dataDirOpenedBy"` in the marker; 409 `rollback-refused`, `… has
+opened the data dir since the install, so its store may hold changes … does
+not read`), so in practice the button works before the restart into the new
+version and not after: past that, a downgrade is the operator's to make by
+hand. A rollback that goes on records the version it rolls back from as
+held back, and vetoes its store migrations, before it puts `.bak` back.
 Where it does not act it says why on an `updater: not rolling back the
 install of …` line (no backup, a backup of another version, a marker older
 than 6 h or dated in the future, another process on the data dir or the
@@ -836,9 +854,13 @@ data dir to storage that works (`dataDir` in bridge.yaml, or
 dir's, so a start without the marker refuses the same way, and the marker
 holds a rollback's record and the veto of a rolled-back version's store
 migrations. On a filesystem that keeps no locks neither the early rollback
-nor a start's housekeeping of the marker runs (said in the journal): an
-install there is not stamped installed and its `.bak` stays until the data
-dir is on a filesystem that keeps locks, and the rest goes on.
+nor a start's housekeeping of the marker runs (said in the journal), and
+since B692 neither `bridge update`, the console's Install and Roll back nor
+the auto-installer installs or rolls back (`… the data dir's filesystem
+keeps no locks …: stop the bridge and replace its binary by hand`): **on
+such a mount, update with the service stopped**, the binary replaced by
+hand. An install there is not stamped installed and its `.bak` stays until
+the data dir is on a filesystem that keeps locks, and the rest goes on.
 
 ## After a deploy: expect iOS syncs to quietly defer
 

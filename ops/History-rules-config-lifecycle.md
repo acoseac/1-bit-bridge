@@ -1569,7 +1569,8 @@ Linux's NFS, CIFS/SMB and FUSE clients never answer one, so no install is
 refused for it. And the digest reads a Windows variable's name in any case, upper-cased
 (`bridgeEnvironment`; Codex 9): config's overrides read it so there. Left,
 for the follow-up list: the console's and the CLI's manual Rollback do not
-ask `DataDirOpenedBy` (Codex 2, operator-initiated, pre-existing); the early
+ask `DataDirOpenedBy` (Codex 2, operator-initiated, pre-existing; there is no CLI rollback,
+and since B692 the console's asks it and refuses); the early
 rollback's lock does not exclude a concurrent `bridge update` (Codex 3, the
 updater keeps no cross-process lock); the digest is taken after the check
 rather than before (Codex 6); a restored 0.2.1 or 0.2.2 ignores the digest
@@ -1661,7 +1662,12 @@ holds it from its marker read through the backup's rename and any write
 that puts the install back; a migrating store open takes the ladder then
 it, through its record and barrier (`DisarmBeforeMigrating`); serve's first
 disarm takes server.lock then it, until its record is durable, and lets it
-go before the store opens (`AdmitBoot`). The helpers under it take no lock
+go before the store opens (`AdmitBoot`); since round 4 the
+boot's housekeeping takes server.lock then it, once the store's open
+has let the ladder go (`bootHousekeeping`), and since B692 the
+updater's install, operator's rollback, hold and restamp take it
+alone in `bridge update`'s process or under serve's server.lock
+(`lockMarkerForUpdate`; B692's section, after round 5's). The helpers under it take no lock
 (`disarmHeld`). Where it cannot be taken a guarded step never writes as if
 it held it: a lock held past the wait, every try answering ENOLCK (which
 does not show the filesystem keeps none), or any other failure refuses the
@@ -1843,7 +1849,7 @@ test's own helper, moved to a file other packages' tests can reach), and the
 restart test asserts v60's two columns and its index absent before and
 present after.
 
-*Not changed: `Updater.Install` and `Updater.Rollback`* (Codex's audit). Both
+*Not changed: `Updater.Install` and `Updater.Rollback`* (Codex's audit; B692 changed both, its section after round 5's). Both
 write the marker without `update-state.lock`, in serve and in `bridge
 update`'s own process, and swap with it unheld; they are serialised against
 each other in-process (`installInFlight`) and against nothing else. Install
@@ -1889,3 +1895,214 @@ refusals: no path in the text, every cause kept.
 `TestDisarmUnreadableKeepsTheOriginalPathError`,
 `TestMigrationMarkerDiagnosticsCarryNoPaths` and
 `TestServeMarkerDiagnosticsCarryNoPaths` pin the rest.
+
+
+## The updater's own install, rollback, hold and restamp under the install marker's lock (backlog B692, 2026-11-03)
+
+- **The updater's own install, rollback, hold and restamp hold the install marker's lock: `Updater.Install` (`bridge update`, the console's, the auto-installer's) takes `update-state.lock` only after its download, verification and settings check, decides again under it (`decideUnderLock`: a swap of that release waiting for its restart, whichever process made it; for the auto-installer, a hold recorded since its gate) and holds it through its marker writes and swap, a failed swap putting back the marker it read; the console's `Updater.Rollback(ctx, …)` holds it from its read through its record and rename, refuses where `DataDirOpenedBy` names a version other than the backup's (`RollbackRefusal`), and records durably before the rename the marker it read with the install ended, the version held back and its migrations vetoed (`OperatorRollbackRecord`); the refused candidate's hold and the restamp write only under it; a lock that cannot be held (another holder past the 30 s wait, ENOLCK, a failure, a filesystem that keeps none) refuses before any write or swap, naming no path (`ErrMarkerLockUnavailable`; the console's 409s `marker-locked` and `rollback-refused`), and a stop in its wait returns the stop** (2026-11-03, backlog B692). **Don't hold the lock through a download, take it twice on one path or take server.lock or the ladder under it, write the marker or swap on these paths without it (a filesystem that keeps none included), skip the decision under it, act on a context that ended before an uncontended take, roll back over a store a newer version opened or before the veto is recorded, drop the marker's other fields at a rollback, let serve's stop take the lock, or let `scmStopWait` pass half its wait.** `TestAnInstallThatHoldsTheMarkersLockFirstKeepsTheMigrationWaiting`, `TestAMigrationThatHoldsTheMarkersLockFirstIsReadByTheInstallsDecision`, `TestASecondProcesssInstallDecidesAgainUnderTheMarkersLock`, `TestAnAutomaticInstallDecidesAgainOnAHoldRecordedWhileItDownloaded`, `TestAnInstallRefusedForTheMarkersLockSwapsNothing`, `TestAnInstallWhoseSwapFailsPutsTheMarkerBackAsItReadIt`, `TestTheHoldOfARefusedCandidateIsRecordedOnlyUnderTheMarkersLock`, `TestTheRestampRefusedForTheMarkersLockWritesNothing`, `TestARollbackThatHoldsTheMarkersLockFirstVetoesTheMigration`, `TestAMigrationThatHoldsTheMarkersLockFirstRefusesTheRollback`, `TestARollbackIsRefusedOnceTheVersionItRollsBackFromOpenedTheDataDir`, `TestARollbackRecordsItsHoldAndVetoBeforeThePutBackAndKeepsTheRest`, `TestARollbackRefusedForTheMarkersLockWritesNothing`, `TestAManualRollbackThatHoldsTheMarkersLockFirstLeavesTheBootNothingToDo`, `TestABootThatHoldsTheMarkersLockFirstLeavesTheManualRollbackNothingToPutBack`, `TestServeStopsWhileAnotherProcessHoldsTheMarkersLock` and `TestAnSCMStopFitsInsideTheMarkersLockWait` pin it. → History-rules-config-lifecycle.md
+
+*The residual.* B613 serialized four writers of `update-state.json` on one
+persistent lock, `<dataDir>/update-state.lock` (`updater.LockState`): the
+early rollback, the boot's housekeeping, serve's admission and every
+migrating store open (`updater.DisarmBeforeMigrating`). The updater's own
+paths still read and wrote the marker, and swapped the binary, without it:
+`Updater.Install`, `Updater.Rollback`, the refused candidate's hold
+(`recordHold`, `recordRejection`) and the auto-installer's restamp before
+its restart (`refreshInstallAttemptedAt`). So an install could arm its
+marker, a migrating open record that it opened the data dir over it, and
+the install's record of its swap (`markSwapStarted`, written from its own
+copy of the marker) take the record away, on Windows across a window of up
+to `scmStopWait`; a second process's install (`bridge update` beside
+serve's own; the two share no `installInFlight`) could swap again over the
+first one's and replace its backup with a copy of what was live; a
+rollback could rename the backup back while a migration of the version it
+rolled back from recorded, or read the marker while the boot's
+housekeeping decided on it. Round 4's long form named this as the
+residual.
+
+*Where each path runs, and what it holds.* Read from the code before the
+change (Codex's table, the brief's binding note 4):
+
+| Path | Process | Locks it holds already |
+|---|---|---|
+| `Install` from `bridge update` (`cmd/bridge/update.go`) | its own | none: its own Updater's `installInFlight` |
+| `Install` from the console (`apiUpdatesInstall`, `updateInfoAdapter.Install`) | serve | `server.lock` for serve's life; the store's open at start has let the ladder go |
+| `Install` from the auto-installer (`maybeAutoInstall`, on Run's `scanCtx`) | serve | `server.lock` |
+| `Rollback` from the console (`apiUpdatesRollback`, `updateInfoAdapter.Rollback`) | serve | `server.lock`; there is no CLI rollback |
+| the hold (`recordHold`, inside `Install`'s settings check) | the install's | as the install's |
+| the restamp (`restartWhenDrained`) | serve | `server.lock` |
+
+Taking `update-state.lock` on these paths inverts nothing, since the
+documented order is server.lock, the ladder, then this one, and nothing
+under it on these paths opens a store or takes `server.lock`: Install's
+held section is a marker read, the decision (whose `HeldBack` reads the
+settings file for its digest), two marker writes and the swap (a staged
+rename, a link or two renames, a directory fsync, and on Windows the SCM's
+stop first); Rollback's is a read, a stat of the backup, a write and the
+rename; the hold's a read and a write; the restamp's a read and a write.
+The console's install inside serve satisfies the order as it stands:
+serve took `server.lock` first, for its life, and holds no ladder then.
+Each path takes the lock once (`lockMarkerForUpdate`), and the helpers it
+runs under it (`decideUnderLock`, `swapAwaitingRestart`, `HeldBack`,
+`recordRejection`, `putMarkerBack`) take none.
+
+*Decided again under the lock* (the brief's binding decision 2). Install
+takes the lock only once the download, its verification and the settings
+check are done: never through the download, which may run for
+`downloadTimeout` (15 minutes) while every migrating store open and every
+start waits at most 30 s for the lock. Under it, it reads the marker again
+and makes the decisions that read it (`decideUnderLock`): a swap of the
+same release waiting for its restart refuses (`swapAwaitingRestart`,
+`ErrInstallPendingRestart`), whichever process made it, so the second of
+two processes stops before it replaces the first one's backup; and for the
+auto-installer, a hold of the candidate recorded since its gate read the
+marker refuses as the gate would have (`HeldBack`, `ErrInstallHeldBack`, a
+`holdError` the auto-installer logs as deferred). The checks before the
+download stay, unlocked: they spare a download, and the decision that
+binds is the one under the lock. A swap that fails puts back the marker
+the install read under the lock (`putMarkerBack`), where it used to
+remove it: the binaries are as they were, and a hold or a veto an earlier
+rollback recorded must not go with a failed attempt (B613's "Don't drop
+the veto at a clear"); where there was no marker, none is left, as
+before.
+
+*The rollback after a migration* (decision 3). The rollback refuses where
+the marker records that a version other than the backup's opened the data
+dir under the install (`RollbackRefusal`: `DataDirOpenedBy`, which serve's
+admission writes at that version's start and a store open of it writes
+before it migrates), since that version's migrations may have changed the
+store beyond what the restored binary reads; the early rollback and the
+boot's refuse the same. In every flow the updater makes, that version is
+the one the rollback would roll back from. No confirmation flow and no
+forced downgrade: that would be a brief of its own. Where it may go on, it
+records, durably and before the rename, the marker it read with the
+install ended (Status "", InstalledAt and RollbackStarted cleared, so no
+boot acts on it), the version rolled back from held back as an operator's
+rollback (no reason, no digest: the gate words it) and its store
+migrations vetoed (`MigrationVeto`), so a command of that version still
+running from its image cannot migrate the store past the version put back
+(`OperatorRollbackRecord`); the install's versions, time and swap stay
+beside the record. It used to replace the marker with `RejectedVersion`
+alone, after the rename. A rename that fails puts the marker back as it was
+read. A marker it cannot read refuses it (whether a newer version opened
+the data dir cannot be told), and so does a missing backup, in words that
+name no path where `RollbackBinary`'s own error names the backup's. One
+veto is kept at a time: a rollback's replaces an earlier one.
+
+*Where the lock cannot be held* (decision 1). Another holder past the
+wait, every try answering ENOLCK, and any other failure refuse each path
+before its first write or swap, with `ErrMarkerLockUnavailable` in words
+that name no path (`markerLockError`, wrapping the `*StateLockError`); a
+filesystem that keeps no locks (EOPNOTSUPP, ENOTSUP,
+`errors.ErrUnsupported`: `LockState`'s hold that is not held) refuses them
+too, an explicit install, the auto-installer, the operator's rollback, the
+hold and the restamp alike, so these writes join the early rollback and the
+boot's housekeeping, which refuse there since round 4, while a migrating
+store open goes on unlocked there as round 3 decided. On such a mount the
+bridge updates only with the service stopped, its binary replaced by hand
+(the runbook says so, and LockState's once-a-process line). The hold and
+the restamp were best-effort and stay so: a hold not recorded means the
+next check asks again, a restamp not made leaves the pre-restamp
+behaviour, and the restart goes on. The console answers the two refusals
+409 `marker-locked` and `rollback-refused`, with the updater's words
+(`mapUpdaterError`, `classifyUpdateError`); `bridge update` adds that the
+running bridge is unchanged.
+
+*A stop, and the uncontended take.* The wait keeps its 30 s bound and ends
+with its caller's context (round 4): the console's install and rollback
+pass the request's, the auto-installer, its hold and its restamp serve's
+`scanCtx`, and `bridge update` its signal context. Since `LockState` takes
+a lock no one holds whatever the context says, `lockMarkerForUpdate` asks
+the context again once the lock is taken, so a caller stopped by then
+mutates nothing. The console had no whole-handler timeout, and
+`UpdateProvider.Rollback` took no context: it takes the request's now.
+
+*Windows* (decision 5). A swap and a rollback stop the SCM service first
+(`stopServiceIfRunning`, up to `scmStopWait`, 15 s) with the lock held, so
+two things must hold, and both are pinned. Serve's stop never takes
+`update-state.lock`: its takers in a serve process are its start (the early
+rollback before the data dir's lock, the admission, the store's open, the
+housekeeping) and the updater's paths, which run on a request's context
+or on `scanCtx` and end with them, and serve's shutdown joins neither past
+its grace; `TestServeStopsWhileAnotherProcessHoldsTheMarkersLock` holds the
+lock, with a 10-minute wait, while serve stops, and fails if any taker
+waits. And the stop fits the wait: `scmStopWait` moves to a file every
+platform builds (`swapbound.go`), and
+`TestAnSCMStopFitsInsideTheMarkersLockWait` holds it to at most half of
+`defaultStateLockWait`, leaving the other half for the marker's writes and
+the renames (every production install names its settings, so the
+candidate is staged beside the binary for its check before the lock, and
+the swap's staging is a rename in that directory). One wait has no
+context: a store's open
+(`DisarmBeforeMigrating`). A serve the SCM stops while its store's open
+waits for `bridge update`'s lock stops when that wait ends, which is when
+the CLI lets the lock go: its own SCM wait ends at `scmStopWait`, and an
+install whose stop timed out fails, its marker put back. Not a deadlock;
+the install fails, as it did before B692 for a service that stopped late.
+
+*Tests.* Red first on the seams commit (bb6d5023: `Rollback` takes a
+context, `InstallOptions.RestoreBackup` and a hold before Install's swap;
+nothing changed), so as on main, for every interleaving in both orders:
+the install that holds the lock and the migration that waits, then records
+over the install's whole marker; the migration that holds it and the
+second process's install that waits, then refuses as waiting for a
+restart, the record and the backup intact; the second process's install
+alone; the auto-installer over a hold recorded meanwhile; the rollback that
+holds it and the migration that waits, then refuses under the veto; the
+migration that holds it and the rollback that waits, then refuses; and
+against the boot's housekeeping, the rollback held between its read and
+its record (`InstallOptions.BeforeRollbackRecord`: held at its rename, the
+housekeeping read the record and rightly did nothing) and the housekeeping
+held at its rename, the rollback then finding no backup. The red for the
+housekeeping pair was observed again on the red commit's rollback with the
+hold moved before its record. Each lock outcome is a row on each path
+(contention, ENOLCK, a failure, a filesystem that keeps none, a stop while
+waiting, a stop before an uncontended take). Pins of the new order, green
+before and after: `TestARollbackWhoseRenameFailsPutsTheMarkerBack` and
+`TestServeStopsWhileAnotherProcessHoldsTheMarkersLock`;
+`TestARollbackWithNoBackupRefusesWithoutAPath`,
+`TestTheConsolesRollbackIsRefusedOverAStoreTheInstalledVersionOpened`,
+`TestMapUpdaterError` and `TestClassifyUpdateError` carry the console's
+words and codes. Eighteen negative controls, one a guarded path, each
+observed exactly as predicted (the log's entry has the table).
+
+*Left as it is.* The checks before the download, the console's reads for
+display (`rejection`, `deferredReason`, `canRollback`) and `bridge
+update`'s "Held:" line read the marker without the lock, deciding nothing.
+The console's Roll back button still follows `.bak`'s presence
+(`canRollback`), so it shows where the rollback now refuses, and the click
+answers 409 with the reason. PROTOCOL.md's Updates paragraph says a manual
+rollback stays possible for one boot after a successful install; since
+B692 it is refused once the new version opened the data dir, which its
+start records: that sentence changes with the iOS mirror, not here. The
+console's 502 bodies for a swap or a rename that fails still carry the
+binary's path from `swapBinary`'s and `RollbackBinary`'s errors. The record
+is in `ops/engineering-log.md`, 2026-11-03, B692.
+## Config, settings and process lifecycle
+
+- **An install of a target already staged on disk is REFUSED, and the refusal
+  reads the PERSISTED marker.** `swapBinary`'s EEXIST retry does
+  `os.Remove(bak)` before re-linking, so a SECOND install of the same version
+  destroys the operator's rollback target and replaces it with a copy of what is
+  already live — while `canRollback()` keeps reporting true, because it only
+  stats for the file's existence. Measured, not argued: with the guard removed
+  the test's `.bak` goes from `0.1.0` to `0.2.0`. Reachable through the ORDINARY
+  console flow — `apiUpdatesInstall` does **not** restart (restart is a separate
+  operator action), and `u.status.CurrentVersion` is written ONCE at
+  construction (`Install` only decorates the local copy it returns), so
+  `UpdateAvailable` stays true for the process lifetime and the console keeps
+  inviting the click. Three terms, each load-bearing: **`Status=="installing"`
+  AND `SwapStarted`** (an armed-but-unswapped marker mutated nothing — the
+  Windows SCM-stop window — and `DecideBootAction` reads it as
+  `BootClearNotSwapped`); **the SAME target**, because refusing a newer release
+  would strand the host on a version it has not booted; and **within
+  `recencyWindow`**, the same constant `DecideBootAction` uses for
+  `BootClearAbandoned`, so the refusal expires exactly when boot would clear the
+  marker and the two cannot disagree about whether it is live. **Marker, not the
+  in-memory `pendingRestart` flag** — the flag records THAT a swap landed and
+  not WHICH version, so refusing on it blocked a legitimate newer install (caught
+  by the positive control), and `bridge update` is a separate PROCESS that sees
+  no `atomic.Bool` anyway. `Install` now sets `pendingRestart` for EVERY path;
+  it used to be set by `maybeAutoInstall` after the fact, so the admin and CLI
+  installs — the two that never restart — left it false. An unreadable marker is
+  NOT a refusal: failing closed there would block every install on the host.
