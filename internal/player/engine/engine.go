@@ -471,15 +471,23 @@ func (e *Engine) PlayIndex(ctx context.Context, index int, conds ...Cond) error 
 	return e.do(&command{op: opPlayIndex, ctx: ctx, conds: conds, index: index}).err
 }
 
-// SeekAbsolute plays the track heard from seconds after its start (B674).
+// SeekAbsolute plays the track heard from seconds after its start (B674): a
+// session started at the target continues the occurrence heard, playing or
+// paused as the transport was (the package documentation's Seek row and
+// "Seeks"). A target before the start, at or past the end of the content, or
+// in content of no known length is refused with ReasonSeekOutOfRange, DSD
+// with ReasonSeekUnsupported, and a seek with no track to seek in with
+// ReasonSeekUnavailable, each changing nothing.
 func (e *Engine) SeekAbsolute(ctx context.Context, seconds int64, conds ...Cond) error {
-	return refuse("seek absolute", ReasonSeekUnavailable, "a seek within a track is not built yet")
+	return e.do(&command{op: opSeekAbsolute, ctx: ctx, conds: conds, seconds: seconds}).err
 }
 
-// SeekRelative plays the track heard from seconds, signed, after its
-// position (B674).
+// SeekRelative plays the track heard from its position plus seconds, signed
+// (B674): the position the backend last measured of the occurrence, or a
+// seek's target while one is under way, and a target before the start is the
+// start. Otherwise it is SeekAbsolute.
 func (e *Engine) SeekRelative(ctx context.Context, seconds int64, conds ...Cond) error {
-	return refuse("seek relative", ReasonSeekUnavailable, "a seek within a track is not built yet")
+	return e.do(&command{op: opSeekRelative, ctx: ctx, conds: conds, seconds: seconds}).err
 }
 
 // InsertAfter inserts an entry after afterID, at the head when afterID is
@@ -565,10 +573,13 @@ const (
 	opEnterMaint
 	opRenewMaint
 	opExitMaint
+	opSeekAbsolute
+	opSeekRelative
 )
 
 var opNames = [...]string{"play", "pause", "stop", "next", "previous", "play id", "play index", "insert", "delete", "delete all",
-	"set repeat", "set shuffle", "report output", "enter maintenance", "renew maintenance", "exit maintenance"}
+	"set repeat", "set shuffle", "report output", "enter maintenance", "renew maintenance", "exit maintenance",
+	"seek absolute", "seek relative"}
 
 func (o op) String() string { return opNames[o] }
 
@@ -589,6 +600,9 @@ type command struct {
 	lease   Lease
 	reason  string
 	want    Generation
+	// seconds is a seek's value: from the track's start, or signed, from its
+	// position.
+	seconds int64
 
 	reply   chan reply
 	replied bool

@@ -82,10 +82,14 @@ func selected(t *testing.T, h *handler) string {
 // SetRepeat 1 (the whole queue on the player), then Play: Id is the first
 // entry as Play answers, TransportState Buffering until it is heard, then
 // Playing, Repeat 1 and Shuffle 0; SeekSecondAbsolute, sent when resuming at
-// a position, is 803, which 1-bit only logs, and playback goes on; Read
-// gives each Uri back byte for byte.
+// a position as Play answers, while nothing is heard yet (803 until B674,
+// which 1-bit only logged, and the track played from its start), plays the
+// first entry from there: the backend reported its content as the start
+// answered, and the session started at the target continues its occurrence;
+// Read gives each Uri back byte for byte.
 func TestOneBitsCastStartThroughTheWrites(t *testing.T) {
 	p := newTestPlayer(t)
+	p.be.startDetails = &details
 	h := p.handler("Living Room")
 	if got := read(t, h, product, "Standby")["Value"]; got != "0" {
 		t.Fatalf("Standby %s: 1-bit would send SetStandby 0", got)
@@ -105,12 +109,15 @@ func TestOneBitsCastStartThroughTheWrites(t *testing.T) {
 	if got := state(t, h); got != "Buffering" {
 		t.Errorf("TransportState %s before anything is heard, want Buffering", got)
 	}
-	if r := soapFault(t, h, playlist, "SeekSecondAbsolute", "Value", "42"); r.fault != 803 {
-		t.Errorf("SeekSecondAbsolute: fault %d, want 803", r.fault)
+	first := p.be.session(t, 1)
+	read(t, h, playlist, "SeekSecondAbsolute", "Value", "42")
+	s := p.be.session(t, 2)
+	if s.first.Entry != ids[0] || s.first.ID != first.first.ID || s.from != 42*44_100 {
+		t.Fatalf("the resume at 42 s started occurrence %d of %d from %d; want the first entry's, %d of %d, from %d",
+			s.first.ID, s.first.Entry, s.from, first.first.ID, ids[0], 42*44_100)
 	}
-	s := p.be.session(t, 1)
-	if s.first.Entry != ids[0] {
-		t.Fatalf("the session started %d, want %d", s.first.Entry, ids[0])
+	if got := state(t, h); got != "Buffering" {
+		t.Errorf("TransportState %s while the session at the target starts, want Buffering", got)
 	}
 	s.hear(s.first.ID, &details)
 	p.heardNow(s.first.ID)

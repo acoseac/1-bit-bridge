@@ -53,6 +53,10 @@ type fakeBackend struct {
 	// cutTooLate, while set, makes Cut answer false: the occurrence's
 	// frames are the kernel's already.
 	cutTooLate bool
+	// startDetails, while set, is reported of each session's first
+	// occurrence before its Start answers, as the backend reports PCM's
+	// (engine.DetailsEvents, B674).
+	startDetails *engine.Details
 	// begun counts the calls begun, by method (callsBegun).
 	begun map[string]int
 }
@@ -104,13 +108,16 @@ func wait(ctx context.Context, hold chan struct{}) error {
 func (b *fakeBackend) Start(ctx context.Context, req engine.StartRequest) error {
 	b.mu.Lock()
 	b.sessions = append(b.sessions, &fakeSession{b: b, id: req.Session, first: req.First, from: req.From, ev: req.Events})
-	hold, refuse := b.call("Start", b.startHold), b.refuseStart
+	hold, refuse, details := b.call("Start", b.startHold), b.refuseStart, b.startDetails
 	b.mu.Unlock()
 	if err := wait(ctx, hold); err != nil {
 		return err
 	}
 	if refuse != nil {
 		return refuse(req)
+	}
+	if details != nil {
+		req.Events.(engine.DetailsEvents).Details(req.Session, req.First.ID, *details)
 	}
 	return nil
 }
@@ -261,6 +268,18 @@ func closeOnce(g chan struct{}) {
 	default:
 		close(g)
 	}
+}
+
+// callCounts is the calls begun so far, by method, in a map of the caller's
+// own.
+func (b *fakeBackend) callCounts() map[string]int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make(map[string]int, len(b.begun))
+	for op, n := range b.begun {
+		out[op] = n
+	}
+	return out
 }
 
 // sessionCount is how many sessions the engine has started.

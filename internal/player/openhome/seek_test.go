@@ -1,7 +1,10 @@
 package openhome
 
 import (
+	"errors"
+	"net/http"
 	"testing"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 )
@@ -14,6 +17,17 @@ func timeNow(t *testing.T, h *handler) (tracks, duration, seconds string) {
 	t.Helper()
 	got := read(t, h, timeSvc, "Time")
 	return got["TrackCount"], got["Duration"], got["Seconds"]
+}
+
+// detailed reports d of o's content through s, as the backend does, and
+// waits until the engine's track heard holds them.
+func (p *testPlayer) detailed(s *fakeSession, o engine.OccurrenceID, d engine.Details) {
+	p.tb.Helper()
+	s.ev.(engine.DetailsEvents).Details(s.id, o, d)
+	p.waitSnap("the details reported", func(sn *engine.Snapshot) bool {
+		tr, ok := sn.Track()
+		return ok && tr.Occurrence == o && tr.HasDetails && tr.Details == d
+	})
 }
 
 // measured reports frames of o's content played through s, and waits until
@@ -116,4 +130,74 @@ func TestASeekWithinTheTrackIsTheEnginesSeek(t *testing.T) {
 	if tracks, _, seconds := timeNow(t, h); tracks != "1" || seconds != "0" {
 		t.Errorf("after every seek: Time %s tracks at %s s; want the one track at 0", tracks, seconds)
 	}
+}
+
+// TestASeekWhilePausedStaysPausedAtItsTarget pins a seek while paused through
+// the SOAP layer: success, TransportState Paused and Time's Seconds the
+// target at once, no session started until Play, which starts one at the
+// target that continues the occurrence heard.
+func TestASeekWhilePausedStaysPausedAtItsTarget(t *testing.T) {
+	p := newTestPlayer(t)
+	h := p.handler("")
+	p.add(uriOf(goldenID), nil)
+	read(t, h, playlist, "Play")
+	s := p.be.session(t, 1)
+	s.hear(s.first.ID, &minute)
+	p.heardNow(s.first.ID)
+	p.measured(s, s.first.ID, 10*44100)
+	read(t, h, playlist, "Pause")
+	read(t, h, playlist, "SeekSecondAbsolute", "Value", "20")
+	if got := state(t, h); got != "Paused" {
+		t.Errorf("TransportState %s after a seek while paused, want Paused", got)
+	}
+	if tracks, _, seconds := timeNow(t, h); tracks != "1" || seconds != "20" {
+		t.Errorf("paused at the target: Time %s tracks at %s s, want 1 at 20", tracks, seconds)
+	}
+	if n := p.be.sessionCount(); n != 1 {
+		t.Errorf("%d sessions after a seek while paused, want the first alone", n)
+	}
+	read(t, h, playlist, "Play")
+	if s2 := p.be.session(t, 2); s2.first.ID != s.first.ID || s2.from != 20*44100 {
+		t.Errorf("Play at the target started %d from %d, want %d from %d", s2.first.ID, s2.from, s.first.ID, 20*44100)
+	}
+}
+
+// TestASeekIsATransportWrite pins the seeks as the transport writes they are
+// (B674), within the same budget and admission: one parked behind a Pause
+// under way answers success once its budget (1 s) ends, the engine having
+// admitted it; a Stop then overtakes it, and the reads show it never ran: no
+// session at its target, the position where it was, Stopped.
+func TestASeekIsATransportWrite(t *testing.T) {
+	p := newTestPlayer(t)
+	spy := newSpy(p.eng)
+	h := p.handlerWith("", spy, Limits{Write: 2 * time.Second}.orDefaults())
+	p.add(uriOf(goldenID), nil)
+	read(t, h, playlist, "Play")
+	s := p.be.session(t, 1)
+	s.hear(s.first.ID, &minute)
+	p.heardNow(s.first.ID)
+	p.measured(s, s.first.ID, 10*44100)
+	p.be.holdPauses(t)
+	pause := send(h, playlist, "Pause")
+	p.be.callsBegun(t, "Pause", 1)
+	seeks := spy.watch("SeekAbsolute")
+	seek := send(h, playlist, "SeekSecondAbsolute", "Value", "30")
+	admitted(t, seeks)
+	if r := seek.answer(t); r.status != http.StatusOK {
+		t.Fatalf("a seek parked past its budget: %d, fault %d, want success", r.status, r.fault)
+	}
+	if got := spy.answered("SeekAbsolute"); len(got) != 1 || engine.ReasonOf(got[0]) != engine.ReasonCancelled || errors.Is(got[0], engine.ErrNotAdmitted) {
+		t.Fatalf("the engine answered %v, want a cancellation of a command it admitted", got)
+	}
+	read(t, h, playlist, "Stop")
+	if n := p.be.sessionCount(); n != 1 {
+		t.Errorf("%d sessions started, want the first alone: the overtaken seek ran", n)
+	}
+	if got := state(t, h); got != "Stopped" {
+		t.Errorf("TransportState %s, want Stopped", got)
+	}
+	if pos := p.eng.Snapshot().Position(); pos.Frames != 10*44100 {
+		t.Errorf("the position after the overtaken seek: %+v, want where it was, 10 s", pos)
+	}
+	pause.answer(t)
 }

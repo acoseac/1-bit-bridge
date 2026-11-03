@@ -377,6 +377,7 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	}
 	s.ev, s.opts = req.Events, req.Options
 	first := s.newOccLocked(req.First)
+	first.from = req.From
 	s.mu.Unlock()
 	defer close(s.startDone)
 	if err := s.b.hold(s); err != nil {
@@ -414,8 +415,24 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 		u := *first.refused
 		return &u
 	}
+	if first.fromErr != nil {
+		// A seek's target the content does not take: the Start fails, and the
+		// entry is no skip (engine.StartRequest.From).
+		return fmt.Errorf("player backend: the session could not start its occurrence at frame %d: %w", first.from, first.fromErr)
+	}
 	if first.plan == nil {
 		first.transport = transportFor(first.pcm.RateHz, first.pcm.ValidBits, s.b.preferred(first.pcm.RateHz, first.pcm.ValidBits))
+		// The first occurrence's Details, before Start answers, so a seek
+		// that comes while the session starts knows the content's rate and
+		// length (engine.DetailsEvents, B674); the reporter reports them no
+		// more.
+		if de, ok := s.ev.(engine.DetailsEvents); ok {
+			s.mu.Lock()
+			first.repDetails = true
+			d := first.details()
+			s.mu.Unlock()
+			de.Details(s.id, first.id, d)
+		}
 	}
 	if ev, ok := s.ev.(engine.NativePlanEvents); ok && first.plan != nil {
 		ev.NativePlan(s.id, first.id, *first.plan)

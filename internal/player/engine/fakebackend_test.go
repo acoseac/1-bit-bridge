@@ -35,13 +35,17 @@ type fakeBackend struct {
 	closing bool
 
 	unplayable map[string]Unplayable
-	onStart    func(ctx context.Context, s *fakeSession) error
-	onPrepare  func(ctx context.Context, s *fakeSession, after OccurrenceID, next *Occurrence) error
-	onCut      func(ctx context.Context, s *fakeSession, from OccurrenceID) (bool, error)
-	onPause    func(ctx context.Context, s *fakeSession) error
-	onResume   func(ctx context.Context, s *fakeSession) (ResumeResult, error)
-	onRelease  func(ctx context.Context, s *fakeSession) error
-	onDiscard  func(ctx context.Context) error
+	// startDetails, when set, is reported of a session's first occurrence
+	// before its Start answers nil, as the backend reports PCM's
+	// (DetailsEvents, B674).
+	startDetails *Details
+	onStart      func(ctx context.Context, s *fakeSession) error
+	onPrepare    func(ctx context.Context, s *fakeSession, after OccurrenceID, next *Occurrence) error
+	onCut        func(ctx context.Context, s *fakeSession, from OccurrenceID) (bool, error)
+	onPause      func(ctx context.Context, s *fakeSession) error
+	onResume     func(ctx context.Context, s *fakeSession) (ResumeResult, error)
+	onRelease    func(ctx context.Context, s *fakeSession) error
+	onDiscard    func(ctx context.Context) error
 
 	// beforeStart runs on a Start's goroutine before the fake records any of
 	// it, so a test can hold a Start that has not reached the backend yet:
@@ -64,8 +68,11 @@ type fakeSession struct {
 	b     *fakeBackend
 	id    SessionID
 	first Occurrence
-	opts  SessionOptions
-	ev    Events
+	// from is the content frame its Start asked the first occurrence to
+	// start at (StartRequest.From).
+	from int64
+	opts SessionOptions
+	ev   Events
 
 	// Under b.mu.
 	started               bool
@@ -208,16 +215,19 @@ func (b *fakeBackend) Start(ctx context.Context, req StartRequest) error {
 	if s.started {
 		b.violations = append(b.violations, fmt.Sprintf("session %d started twice", s.id))
 	}
-	s.started, s.first, s.opts, s.ev = true, req.First, req.Options, req.Events
+	s.started, s.first, s.from, s.opts, s.ev = true, req.First, req.From, req.Options, req.Events
 	b.order = append(b.order, s)
 	b.record(fakeCall{kind: "start", session: s.id, entry: req.First.Entry, occ: req.First.ID})
-	hook := b.onStart
+	hook, details := b.onStart, b.startDetails
 	b.mu.Unlock()
 	var err error
 	if hook != nil {
 		err = hook(ctx, s)
 	} else {
 		err = s.open()
+	}
+	if err == nil && details != nil {
+		s.ev.(DetailsEvents).Details(s.id, s.first.ID, *details)
 	}
 	close(s.startDone)
 	return err

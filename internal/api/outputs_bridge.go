@@ -31,7 +31,19 @@ const (
 	LibraryScopeSelf = "self"
 	// BridgeStateUnavailable is the state a reason comes with.
 	BridgeStateUnavailable = "unavailable"
+	// TimeSeekSupported, TimeSeekUnsupported and TimeSeekUnknown are the
+	// words bridge.timeSeek says of a kind of content (B674): whether the
+	// player seeks within a track of it.
+	TimeSeekSupported   = "supported"
+	TimeSeekUnsupported = "unsupported"
+	TimeSeekUnknown     = "unknown"
 )
+
+// TimeSeekWords is every word bridge.timeSeek sends or names, in
+// PROTOCOL.md's order.
+func TimeSeekWords() []string {
+	return []string{TimeSeekSupported, TimeSeekUnsupported, TimeSeekUnknown}
+}
 
 // OutputBridge is the bridge's own player, the object of an element of kind
 // bridge. Every key is present: OpenHome, Reason and LastError are null
@@ -60,6 +72,21 @@ type OutputBridge struct {
 	// DSDMode and AllowDoP are the player's DSD settings as it runs.
 	DSDMode  string `json:"dsdMode"`
 	AllowDoP bool   `json:"allowDoP"`
+	// TimeSeek is whether the player seeks within a track, by the kind of
+	// content (B674): optional, omitted when no fact says it, as an older
+	// bridge omits it.
+	TimeSeek *OutputTimeSeek `json:"timeSeek,omitempty"`
+}
+
+// OutputTimeSeek is what the player's implementation does with a seek within
+// a track (OpenHome's SeekSecondAbsolute and SeekSecondRelative), by the kind
+// of content: pcm and dsd (DSD native or in DoP), each supported, unsupported
+// or unknown (TimeSeekWords), and omitted when no fact says it. It describes
+// what the player can do, not whether a seek can be made now: a player
+// stopped, or with nothing heard, refuses a seek it supports.
+type OutputTimeSeek struct {
+	PCM string `json:"pcm,omitempty"`
+	DSD string `json:"dsd,omitempty"`
 }
 
 // OutputOpenHome is the player's OpenHome Source: its UDN, and the
@@ -87,6 +114,10 @@ type BridgeOutputFacts struct {
 	FixedVolume bool
 	DSDMode     string
 	AllowDoP    bool
+	// TimeSeekPCM and TimeSeekDSD are whether the player seeks within a
+	// track of PCM and of DSD, each a TimeSeekWords word; "" says nothing,
+	// and both "" leave bridge.timeSeek out (B674).
+	TimeSeekPCM, TimeSeekDSD string
 	// DAC is the boot binding's resolved card, projected by cmd/bridge.
 	// It contains no device identity; IsMPDsOutput is always nil.
 	DAC *OutputDAC
@@ -160,6 +191,9 @@ func (s *Server) bridgeElement(ctx context.Context) (OutputInfo, bool) {
 	}
 	if oh := f.OpenHome; oh != nil && len(oh.Endpoints) > 0 {
 		b.OpenHome = &OutputOpenHome{UDN: oh.UDN, Endpoints: append([]string{}, oh.Endpoints...)}
+	}
+	if f.TimeSeekPCM != "" || f.TimeSeekDSD != "" {
+		b.TimeSeek = &OutputTimeSeek{PCM: f.TimeSeekPCM, DSD: f.TimeSeekDSD}
 	}
 	return OutputInfo{
 		ID:        bridgeOutputIDPrefix + f.UUID,

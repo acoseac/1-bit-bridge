@@ -239,8 +239,8 @@ func (s *session) failDecode(o *occ, err error) {
 	if o.dropped || s.writing != o {
 		return
 	}
-	s.decodeErr = &engine.Fault{Reason: engine.ReasonDecodeFailed, Occurrence: o.id, Frames: o.written,
-		Detail: fmt.Sprintf("decoding occurrence %d failed after %d frames: %v", o.id, o.written, err)}
+	s.decodeErr = &engine.Fault{Reason: engine.ReasonDecodeFailed, Occurrence: o.id, Frames: o.from + o.written,
+		Detail: fmt.Sprintf("decoding occurrence %d failed after %d frames: %v", o.id, o.from+o.written, err)}
 	s.writing = nil
 	s.closeOcc(o)
 }
