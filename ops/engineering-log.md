@@ -25,6 +25,7 @@ reaches a session that has not gone looking for it.
 ---
 
 ## Index
+- [2026-11-03 — B692 round 2: an operator's rollback stays under way until its rename, and the stops in the updater's lock waits are stops](#2026-11-03--b692-round-2-an-operators-rollback-stays-under-way-until-its-rename-and-the-stops-in-the-updaters-lock-waits-are-stops)
 - [2026-11-03 — B692: the updater's own install, rollback, hold and restamp hold the install marker's lock](#2026-11-03--b692-the-updaters-own-install-rollback-hold-and-restamp-hold-the-install-markers-lock)
 - [2026-11-03 — B613 round 4: the migration veto outlives the rollback's record, the boot's housekeeping holds the marker's lock, a stop ends that lock's wait, an interrupted rollback is confirmed only on the install's own record](#2026-11-03--b613-round-4-the-migration-veto-outlives-the-rollbacks-record-the-boots-housekeeping-holds-the-markers-lock-a-stop-ends-that-locks-wait-an-interrupted-rollback-is-confirmed-only-on-the-installs-own-record)
 - [2026-11-02 — B613 round 3: the barrier asked again before a disarm trusts the marker, one lock for the rollback and every migration, a directory fsync the filesystem cannot do, an interrupted rollback reconciled at boot](#2026-11-02--b613-round-3-the-barrier-asked-again-before-a-disarm-trusts-the-marker-one-lock-for-the-rollback-and-every-migration-a-directory-fsync-the-filesystem-cannot-do-an-interrupted-rollback-reconciled-at-boot)
@@ -71101,3 +71102,73 @@ through the shared build lock, at 633c9e6e with this record in the tree:
   while its store's open waits for `bridge update`'s lock stops when that wait
   ends, at most when the CLI's own SCM wait gives up.
 - No backlog entry was written: the backlog file is not on this host.
+
+## 2026-11-03 — B692 round 2: an operator's rollback stays under way until its rename, and the stops in the updater's lock waits are stops
+
+Codex's review of PR #1387 at fb0d3bbe (Argon found nothing), with Argon's
+binding notes on the first finding; worker b692 on legion0 (Ubuntu 26.04,
+linux/amd64, go1.27.3, `GOTOOLCHAIN=local`, umask 022). The branch went to
+the PR head first: `git merge --ff-only` and `git update-ref` need an
+approval this headless session cannot give, so the branch's loose ref was
+written to fb0d3bbe (its old value checked first, the tree clean, the
+two files the PR's commits change checked out). Commits: red 8ba970a7, fix
+f98d5e8d, then this record. The rules are a round-2 bullet after round 1's
+in `.claude/rules/config-lifecycle.md` and round 1's "with the install
+ended" corrected in both its copies, with the entry "…and a job or database
+CLI run as root gives every entry it CREATES the install's owner" moved to
+its long form to keep the file at 95.9 % of its budget, shipped as a checked
+patch (`rules-b692-r2.patch`); the long form is round 2's section of
+`ops/History-rules-config-lifecycle.md`.
+
+**What changed.**
+1. *P1, the rollback stopped after its record.* The record says the
+   rollback is under way (`RollbackStarted`, where the marker names the
+   install), and `Rollback` clears that only once its rename has landed.
+   The record is then B613's rollback record, finished by the version that
+   runs: on the target still in place, its commands' migrations refuse
+   under the veto, its serve admission records `DataDirOpenedBy` and lifts
+   the veto in one write (after which every rollback refuses), and its
+   housekeeping confirms the install (`BootRollbackOvertaken`); on the
+   previous version, the backup back, its housekeeping ends the record as
+   a rollback done (`BootRollbackFinished`, Argon's mirror window).
+2. *P2.* `refreshInstallAttemptedAt` returns a stop in its lock's wait, or
+   before an uncontended take, and `restartWhenDrained` then requests no
+   restart.
+3. *P3.* `recordHold` returns the same stop, and `checkCandidate` answers
+   the install with it.
+
+**Decisions.** Argon asked for one rule on the still-new binary among three:
+the veto kept through the target's admission, `DataDirOpenedBy` recorded at
+a migrating open, or the migration refused. The rule taken is B613's own
+for a rollback's record: a command's migrating open refuses (it cannot tell
+a rollback stopped before its rename from one stopped after it), and the
+target's serve admission records `DataDirOpenedBy` and lifts the veto. The
+veto kept through the admission would leave the target unable to open its
+store while a step is pending, with no console to finish the rollback. A
+rollback with no install recorded is not marked under way (no target to
+finish it). No PROTOCOL.md statement changes.
+
+**Red first** (8ba970a7, on fb0d3bbe, no seams added; a rollback is stopped
+where the process would end it by `runtime.Goexit` inside `RestoreBackup`):
+internal/updater, `TestARollbackStoppedBeforeItsRenameStaysAnInstallTheTargetsStartResolves`,
+`TestARollbackStoppedAfterItsRenameIsFinishedByTheVersionThatRuns`,
+`TestARollbackRecordsItsHoldAndVetoBeforeThePutBackAndKeepsTheRest` (the
+record at the rename, under way now), `TestAStopWhileTheRestampWaitsRequestsNoRestart`
+(2 of 3 subtests) and `TestAStopWhileTheHoldWaitsIsTheInstallsAnswer` (2);
+cmd/bridge, `TestAManualRollbackStoppedBeforeItsRenameKeepsTheStoreFromASecondRollback`
+(the restart test: no record of the data dir after this build's real serve
+started over the stopped rollback, so the second rollback would have gone
+on) and `TestAManualRollbackStoppedAfterItsRenameIsFinishedByThePreviousVersionsBoot`.
+Green before, a pin: `TestARollbackClearsItsRecordOnceItsRenameHasLanded`.
+
+**Negative controls**, each alone on f98d5e8d, predicted and observed
+exactly, the tree clean after each (`.tmp/_b692/controls.py`, R1 to R4):
+
+| # | Mutation | Predicted and observed red |
+|---|---|---|
+| R1 | the record says no rollback is under way | 3 tests in internal/updater; 2 in cmd/bridge (both stopped-rollback restarts) |
+| R2 | the record is never cleared after the rename | 2 tests in internal/updater; 1 in cmd/bridge (the rollback-first housekeeping interleaving) |
+| R3 | a stop in the restamp's wait still restarts | 1 test, 2 subtests |
+| R4 | a stop in the hold's wait answers the refusal | 1 test, 2 subtests |
+
+**Checks.** CHECKS-PENDING

@@ -1899,7 +1899,7 @@ refusals: no path in the text, every cause kept.
 
 ## The updater's own install, rollback, hold and restamp under the install marker's lock (backlog B692, 2026-11-03)
 
-- **The updater's own install, rollback, hold and restamp hold the install marker's lock: `Updater.Install` (`bridge update`, the console's, the auto-installer's) takes `update-state.lock` only after its download, verification and settings check, decides again under it (`decideUnderLock`: a swap of that release waiting for its restart, whichever process made it; for the auto-installer, a hold recorded since its gate) and holds it through its marker writes and swap, a failed swap putting back the marker it read; the console's `Updater.Rollback(ctx, …)` holds it from its read through its record and rename, refuses where `DataDirOpenedBy` names a version other than the backup's (`RollbackRefusal`), and records durably before the rename the marker it read with the install ended, the version held back and its migrations vetoed (`OperatorRollbackRecord`); the refused candidate's hold and the restamp write only under it; a lock that cannot be held (another holder past the 30 s wait, ENOLCK, a failure, a filesystem that keeps none) refuses before any write or swap, naming no path (`ErrMarkerLockUnavailable`; the console's 409s `marker-locked` and `rollback-refused`), and a stop in its wait returns the stop** (2026-11-03, backlog B692). **Don't hold the lock through a download, take it twice on one path or take server.lock or the ladder under it, write the marker or swap on these paths without it (a filesystem that keeps none included), skip the decision under it, act on a context that ended before an uncontended take, roll back over a store a newer version opened or before the veto is recorded, drop the marker's other fields at a rollback, let serve's stop take the lock, or let `scmStopWait` pass half its wait.** `TestAnInstallThatHoldsTheMarkersLockFirstKeepsTheMigrationWaiting`, `TestAMigrationThatHoldsTheMarkersLockFirstIsReadByTheInstallsDecision`, `TestASecondProcesssInstallDecidesAgainUnderTheMarkersLock`, `TestAnAutomaticInstallDecidesAgainOnAHoldRecordedWhileItDownloaded`, `TestAnInstallRefusedForTheMarkersLockSwapsNothing`, `TestAnInstallWhoseSwapFailsPutsTheMarkerBackAsItReadIt`, `TestTheHoldOfARefusedCandidateIsRecordedOnlyUnderTheMarkersLock`, `TestTheRestampRefusedForTheMarkersLockWritesNothing`, `TestARollbackThatHoldsTheMarkersLockFirstVetoesTheMigration`, `TestAMigrationThatHoldsTheMarkersLockFirstRefusesTheRollback`, `TestARollbackIsRefusedOnceTheVersionItRollsBackFromOpenedTheDataDir`, `TestARollbackRecordsItsHoldAndVetoBeforeThePutBackAndKeepsTheRest`, `TestARollbackRefusedForTheMarkersLockWritesNothing`, `TestAManualRollbackThatHoldsTheMarkersLockFirstLeavesTheBootNothingToDo`, `TestABootThatHoldsTheMarkersLockFirstLeavesTheManualRollbackNothingToPutBack`, `TestServeStopsWhileAnotherProcessHoldsTheMarkersLock` and `TestAnSCMStopFitsInsideTheMarkersLockWait` pin it. → History-rules-config-lifecycle.md
+- **The updater's own install, rollback, hold and restamp hold the install marker's lock: `Updater.Install` (`bridge update`, the console's, the auto-installer's) takes `update-state.lock` only after its download, verification and settings check, decides again under it (`decideUnderLock`: a swap of that release waiting for its restart, whichever process made it; for the auto-installer, a hold recorded since its gate) and holds it through its marker writes and swap, a failed swap putting back the marker it read; the console's `Updater.Rollback(ctx, …)` holds it from its read through its record and rename, refuses where `DataDirOpenedBy` names a version other than the backup's (`RollbackRefusal`), and records durably before the rename the marker it read with the version held back and its migrations vetoed (`OperatorRollbackRecord`); the refused candidate's hold and the restamp write only under it; a lock that cannot be held (another holder past the 30 s wait, ENOLCK, a failure, a filesystem that keeps none) refuses before any write or swap, naming no path (`ErrMarkerLockUnavailable`; the console's 409s `marker-locked` and `rollback-refused`), and a stop in its wait returns the stop** (2026-11-03, backlog B692). **Don't hold the lock through a download, take it twice on one path or take server.lock or the ladder under it, write the marker or swap on these paths without it (a filesystem that keeps none included), skip the decision under it, act on a context that ended before an uncontended take, roll back over a store a newer version opened or before the veto is recorded, drop the marker's other fields at a rollback, let serve's stop take the lock, or let `scmStopWait` pass half its wait.** `TestAnInstallThatHoldsTheMarkersLockFirstKeepsTheMigrationWaiting`, `TestAMigrationThatHoldsTheMarkersLockFirstIsReadByTheInstallsDecision`, `TestASecondProcesssInstallDecidesAgainUnderTheMarkersLock`, `TestAnAutomaticInstallDecidesAgainOnAHoldRecordedWhileItDownloaded`, `TestAnInstallRefusedForTheMarkersLockSwapsNothing`, `TestAnInstallWhoseSwapFailsPutsTheMarkerBackAsItReadIt`, `TestTheHoldOfARefusedCandidateIsRecordedOnlyUnderTheMarkersLock`, `TestTheRestampRefusedForTheMarkersLockWritesNothing`, `TestARollbackThatHoldsTheMarkersLockFirstVetoesTheMigration`, `TestAMigrationThatHoldsTheMarkersLockFirstRefusesTheRollback`, `TestARollbackIsRefusedOnceTheVersionItRollsBackFromOpenedTheDataDir`, `TestARollbackRecordsItsHoldAndVetoBeforeThePutBackAndKeepsTheRest`, `TestARollbackRefusedForTheMarkersLockWritesNothing`, `TestAManualRollbackThatHoldsTheMarkersLockFirstLeavesTheBootNothingToDo`, `TestABootThatHoldsTheMarkersLockFirstLeavesTheManualRollbackNothingToPutBack`, `TestServeStopsWhileAnotherProcessHoldsTheMarkersLock` and `TestAnSCMStopFitsInsideTheMarkersLockWait` pin it. → History-rules-config-lifecycle.md
 
 *The residual.* B613 serialized four writers of `update-state.json` on one
 persistent lock, `<dataDir>/update-state.lock` (`updater.LockState`): the
@@ -2078,6 +2078,92 @@ start records: that sentence changes with the iOS mirror, not here. The
 console's 502 bodies for a swap or a rename that fails still carry the
 binary's path from `swapBinary`'s and `RollbackBinary`'s errors. The record
 is in `ops/engineering-log.md`, 2026-11-03, B692.
+
+## An operator's rollback under way until its rename, and the stops in the updater's lock waits (backlog B692's round 2, 2026-11-03)
+
+- **…and an operator's rollback stays under way until its rename has landed, and a stop in the updater's lock waits is a stop: the rollback's record carries `RollbackStarted` where the marker names the install, and `Rollback` clears it only after the rename, so a rollback the process's end stops between the two is finished by the version that runs next, by B613's rule for a rollback's record: on the target still in place, its commands' migrations refuse under the veto and its serve admission records `DataDirOpenedBy` and lifts the veto in one write, after which every rollback refuses and its housekeeping confirms the install (`BootRollbackOvertaken`); on the previous version, the backup back, its housekeeping ends the record as a rollback done (`BootRollbackFinished`); a stop while the restamp waits requests no restart, and one while a hold's record waits is the install's answer, the context's error** (2026-11-03, backlog B692's round 2). **Don't clear the under-way mark before the rename has landed, lift a veto at the target's admission without recording that it opened the data dir, request a restart after a stop, or answer a stop with a refusal.** `TestARollbackStoppedBeforeItsRenameStaysAnInstallTheTargetsStartResolves`, `TestARollbackStoppedAfterItsRenameIsFinishedByTheVersionThatRuns`, `TestARollbackClearsItsRecordOnceItsRenameHasLanded`, `TestAManualRollbackStoppedBeforeItsRenameKeepsTheStoreFromASecondRollback`, `TestAManualRollbackStoppedAfterItsRenameIsFinishedByThePreviousVersionsBoot`, `TestAStopWhileTheRestampWaitsRequestsNoRestart` and `TestAStopWhileTheHoldWaitsIsTheInstallsAnswer` pin it. → History-rules-config-lifecycle.md
+
+*The defect* (Codex on #1387, P1). Round 1's record (`OperatorRollbackRecord`)
+cleared Status and `RollbackStarted` before the rename. A rollback the
+process's end stopped after that write and before the rename left the
+version it rolled back from, the install's target, in place under a record
+no step read as an install: the target's next serve admission lifted the
+veto, its own version's, and since `InstallArmed` was false neither the
+admission nor a migrating open recorded `DataDirOpenedBy`, so the store
+migrated, and a second manual rollback, finding no record of the data dir,
+put the backup back over the migrated store.
+
+*The fix.* The record says the rollback is under way (`RollbackStarted`,
+where the marker names the install it undoes), and `Rollback` clears that
+only once its rename has landed, in a second write under the lock. A clear
+that fails is said and not returned: the rollback stands, its hold and its
+veto with it, and the boot of the version put back finishes the record.
+This is the early rollback's record form (B613's round 3), whose finishing
+B613 had already built: no new boot code, and Argon's two cases are the
+two the boot reads by the version that runs (`DecideBootAction`).
+
+*On the still-new binary* (Argon's binding note: one rule, said and tested
+step by step). The rule is B613's for a rollback's record, which the
+operator's now is: until a start of the target goes on past it, the record
+is the install still (`InstallArmed`), so
+- a migrating store open of the target, a command running from its image,
+  refuses under the veto (`ErrMigrationVetoed`): it cannot tell a rollback
+  stopped before its rename from one whose rename landed and whose clear
+  did not;
+- the target's serve admission, the one start that shows the target in
+  place and its settings loading, records that it opened the data dir and
+  lifts the veto in the same write (`AdmitBoot`), after which its store
+  migrates and every rollback refuses (`RollbackRefusal`);
+- its housekeeping confirms the install on that record
+  (`BootRollbackOvertaken`, `ConfirmOverRollback`), `.bak` kept for one
+  more boot, as after any confirmed install;
+- a second manual rollback after that admission refuses.
+Argon's first option, the veto kept through the target's admission, was not
+taken: with a migration step pending the target's serve could not open its
+store, and with no console up nothing would finish the rollback. Refusing
+the commands' migrations and recording the serve's start keeps the store
+from a downgrade in either order, and it is the rule B613's round 4 already
+holds for every vetoed version's own admission.
+
+*The mirror window* (Argon). The rename landed and the process ended before
+the clear: the backup's version runs next, its housekeeping ends the record
+as a rollback done (`BootRollbackFinished`: the install cleared, the hold
+and the veto kept), its admission writes nothing, and a command of the
+target meanwhile still refuses to migrate. Where the target runs instead (a
+serve of it started from its image before the rename, B613's round 4
+residual), its admission records and its housekeeping confirms, as above.
+
+*Stops are stops* (Codex, the two P2s). `refreshInstallAttemptedAt` returned
+nothing, so a stop while the restamp waited for the lock, or before an
+uncontended take, was swallowed and `restartWhenDrained` requested the
+restart: an operator's or the SCM's stop became exit 75 and a supervisor's
+restart. It returns the stop now, and no restart is requested. `recordHold`
+swallowed a stop the same way, and `Install` answered `ErrConfigRefused` or
+`ErrConfigCheckUnsupported`; it returns the stop, and `checkCandidate`
+answers with it, the context's error, which the auto-installer reads as no
+failure. Other failures stay best-effort, as round 1 left them: a hold not
+recorded is said and the next check asks again, a restamp not made is said
+and the restart goes on.
+
+*Tests.* Red first on fb0d3bbe, with no seams added: a rollback is stopped
+where the process would end it, by `runtime.Goexit` inside `RestoreBackup`
+(its deferred release of the lock runs, nothing after it does), before the
+rename or just after it. The steps on the still-new binary in
+internal/updater, and the restart test in cmd/bridge (the console's
+rollback stopped before its rename; a command's store open vetoed; this
+build's real serve started over the record, its admission's record, its
+store's migration and its confirmation; a second rollback refused, the
+binaries untouched), and the mirror window with the previous version's
+real housekeeping. `TestARollbackClearsItsRecordOnceItsRenameHasLanded`, a
+pin, was green before. Four negative controls, each observed exactly as
+predicted (the log's round-2 entry).
+
+*Left.* A rollback with no install recorded (a hand-staged `.bak`, or one
+after the marker was cleared) is not marked under way: there is no target
+to finish it and no record of the data dir to keep, as before. The words
+of the housekeeping's confirmation and of the vetoed migration's refusal
+now name any rollback ("begun before this start", "a rollback of the
+install"). PROTOCOL.md says nothing round 2 changes.
 ## Config, settings and process lifecycle
 
 - **An install of a target already staged on disk is REFUSED, and the refusal
@@ -2106,3 +2192,59 @@ is in `ops/engineering-log.md`, 2026-11-03, B692.
   it used to be set by `maybeAutoInstall` after the fact, so the admin and CLI
   installs — the two that never restart — left it false. An unreadable marker is
   NOT a refusal: failing closed there would block every install on the host.
+
+- **…and a job or database CLI run as root gives every entry it CREATES
+  the install's owner** (2026-09-28, backlog B17). Measured the same way
+  (`TestJobCLIsRunAsRootKeepTheInstallOwner`, as root with sox and ffmpeg
+  on dido), 51 entries came back root's on main: every directory and file
+  `scan` (the artwork cache, 0700), `upscale` / `optimize` / `render` (the
+  variants tree and each rendition, `--force` ones included), `analyze`
+  (the waveform tree, 0700, and each curve, 0600), `backup` (a snapshot the
+  service's own prune cannot remove) and `variants move` create; the five
+  files `restore` replaces (config, store, token file, TLS pair, root's
+  0600: the service does not start); a store a root CLI creates; and the
+  render scratch `1-bit-bridge-render`, root's 0700 in the shared temp dir,
+  where every later DSD render of the service failed. **SQLite's `-wal` and
+  `-shm` were never part of it**: its unix VFS gives both the database
+  file's owner whenever it opens them as root (`robustFchown`, carried in
+  modernc's transpile), measured with the store open; the one SQLite hole
+  is a database root CREATES. **A new entry takes the owner of the
+  directory it is created in**, #1048's rule for a file with nothing to
+  replace. `fsutil.MkdirAll` / `Mkdir` make each directory through an
+  `os.Root` on its parent and read the owner through that descriptor, so a
+  directory only ever goes to the owner of the directory actually holding
+  it, who could have made it anyway, never to the owner of a path looked
+  up beforehand; one it cannot give away (root_squash) is removed again.
+  Files the bridge stages take `fsutil.KeepOwner` (a cover, a curve, a
+  snapshot's copies and manifest, a restored file). **A file another writer
+  creates is precreated** (`fsutil.Precreate`: `O_EXCL`, the owner looked
+  up BEFORE the file exists; a render's sidecar and scratch since B211 by
+  `transcode.createOutput`, `O_EXCL` then `KeepOwner`, which creates them
+  for every user so a folder that refuses them fails by type, the
+  output-fault bullet under **Job pools**): sox fills its output with `O_TRUNC`, SQLite
+  opens an existing empty database, `VACUUM INTO` writes into an empty
+  file, and each keeps the owner (all measured). **Two directories take a
+  reference's owner, because there the parent's says nothing about who uses
+  them**: the render scratch, when created in a directory anyone may create
+  entries in (other-writable and -searchable, as /tmp is), takes the
+  variants directory's (`fsutil.MkdirAllShared`; only there, since the temp
+  dir comes from the config the service user can write), and a `variants
+  move --to` directory takes the owner of the variants directory it
+  replaces, as `mv` keeps it (`fsutil.MkdirAllLike`; the command line names
+  that path). A cross-device copy in the move keeps its source's owner.
+  `TestJobWritersKeepTheInstallOwner` sweeps the writers
+  (`internal/{atomicwrite,manifest,transcode,analyze,backup}`,
+  `cmd/bridge/variants.go`) and fails on `os.MkdirAll` / `Mkdir` /
+  `MkdirTemp` / `WriteFile` / `Create`, or on `os.CreateTemp` /
+  `os.OpenFile(O_CREATE)` in a function with no `fsutil.KeepOwner`: **a
+  new writer there makes its directories through fsutil and gives its files
+  an owner**. What a child process creates the sweep cannot see; that is
+  `Precreate`'s, and the root test pins it. **Not covered**: `bridge tsnet
+  auth` (internal/tsnet makes `<dataDir>/tailscale` with `os.MkdirAll`,
+  `assertSecureDir` then requires it to be the RUNNING uid's, and the tsnet
+  library writes its state there: a root run over the service's state
+  refuses, and one on a fresh install leaves a state the service's node
+  refuses; read from the code, not measured). **Root's by the rule**: a
+  configured `variantsDir` or `tempDir` a root CLI creates under a parent
+  root owns that is not shared, where the service's own attempt would fail
+  too.

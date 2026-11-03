@@ -810,7 +810,13 @@ opened the data dir since the install, so its store may hold changes … does
 not read`), so in practice the button works before the restart into the new
 version and not after: past that, a downgrade is the operator's to make by
 hand. A rollback that goes on records the version it rolls back from as
-held back, and vetoes its store migrations, before it puts `.bak` back.
+held back, and vetoes its store migrations, before it puts `.bak` back,
+and until that rename has landed the marker says the rollback is under way
+(`"rollbackStarted": true`): a rollback the process's end stops there is
+finished by the next start, as a rollback done where `.bak` is back, or as
+none where the version installed is still in place, whose start records
+that it opened the data dir, after which no rollback restores over its
+store (round 2 of B692).
 Where it does not act it says why on an `updater: not rolling back the
 install of …` line (no backup, a backup of another version, a marker older
 than 6 h or dated in the future, another process on the data dir or the
