@@ -391,6 +391,25 @@ func TestARollbackWhoseRenameFailsPutsTheMarkerBack(t *testing.T) {
 	l.requireUnchanged(t, before)
 }
 
+// TestARollbackWithNoBackupRefusesWithoutAPath: with no backup beside the
+// binary there is nothing to put back, and the rollback says so in words that
+// name no path, before it writes anything.
+func TestARollbackWithNoBackupRefusesWithoutAPath(t *testing.T) {
+	l := newRollbackLayout(t)
+	if err := os.Remove(l.live + ".bak"); err != nil {
+		t.Fatal(err)
+	}
+	before := l.files()
+	err := New(Options{}).Rollback(context.Background(), l.opts())
+	if err == nil {
+		t.Fatal("a rollback with no backup = nil, want its refusal")
+	}
+	if strings.Contains(err.Error(), filepath.Dir(l.live)) || strings.Contains(err.Error(), l.dataDir) {
+		t.Errorf("the refusal %q names a path", err)
+	}
+	l.requireUnchanged(t, before)
+}
+
 // TestARollbackRefusedForTheMarkersLockWritesNothing: an operator's rollback
 // that cannot hold the install marker's lock, for another process holding it
 // past the wait, no lock to give, a failure, or a filesystem that keeps none,
