@@ -2,9 +2,11 @@
 
 Design and PR plan, 2026-11-04. This round writes no code.
 
-**Status.** For review. The decision this implements is binding: the owner decided it on
+**Status.** For review, round 2. The decision this implements is binding: the owner decided it on
 2026-11-04, after the Argon and Codex consult, and the reviewers' notes on the brief are folded in
-(Codex 1 to 3 and Argon 2 to 5). Every current behaviour this design changes is cited as
+(Codex 1 to 3 and Argon 2 to 5). Round 2 folds in Codex's and Argon's reviews of this design, and
+the owner's four decisions on its open points; both are listed at the end of §11. Every current
+behaviour this design changes is cited as
 `path:line` at bridge main `1df423fc`. iOS citations read `(iOS) path:line` at iOS main
 `cea8bdf6`, with paths relative to the app's source directory unless they begin with `.claude/`,
 `docs/` or `Tests/`.
@@ -48,7 +50,7 @@ Evidence is held per DAC model identity (§2.2), transport (`native` or `dop`) a
 | `reported` | The profile database (§2) names the transport at that rate for this identity: DoP from the iOS registry's evidence, native from the kernel's DSD quirk for the device | Someone characterized this model somewhere else | Anything about this box, this unit, its firmware mode or its settings |
 | `driver_accepted` | The silent probe's `HW_REFINE` (§5), or a real open whose `HW_PARAMS` committed exactly the format, rate and channels asked (`internal/alsapcm/device.go:374-399`, read back at `:461-500`) | The kernel's driver takes that exact format at that rate on this endpoint. For DoP: only that it takes the PCM carrier, S32_LE at rate ÷ 16 with at least 24 significant bits | That the DAC decodes it. For DoP it says nothing about DSD at all |
 | `streaming_observed` | An occurrence of that tuple played until the kernel established 5 s of its content played (`Position.Played`), with no xrun, fault or unconfirmed release | The transport ran on this box at that rate without a fault | That the DAC made music of it. On iOS the DoP "lock" counts the packer's own frames and hears nothing back ((iOS) `PlayerService.swift:28786-28799`). The feedback endpoint measures frame rate, not interpretation (`internal/alsa/stream.go:41-55`) |
-| `listener_confirmed` | A person answered "clean" to the optional chime (§6) for this transport, rate, identity and firmware | A listener heard the chime as a chime, on a date | Bit-exactness, or anything about other rates, modes or firmware |
+| `listener_confirmed` | A person answered "clean" to the optional chime (§6) for this transport, rate, identity and firmware, and no later answer replaced it (§1.2) | A listener heard the chime as a chime, on a date | Bit-exactness, or anything about other rates, modes or firmware |
 
 `driver_accepted`, `streaming_observed` and `listener_confirmed` order what has been established on
 this box. `reported` stands apart as the database's claim. A tuple publishes its highest rung. A
@@ -62,8 +64,11 @@ DAC nobody has characterized or probed publishes none, and the member is absent.
   confirmation lapses (§3.2) and first use re-arms (§6).
 - **Kernel release.** The probe's `driver_accepted` also records the kernel release. A new kernel
   is probed again.
-- **Listener rejection.** A `noise` or `nothing` answer (§6) takes that transport and rate out of
-  `auto` for the identity until the user chooses that mode again.
+- **Listener answers.** Each transport, rate and bcdDevice holds one listener answer, the latest.
+  A `noise` or `nothing` answer (§6) replaces an earlier `clean` one, so the confirmation is gone.
+  It refuses that transport at that rate in every mode (§3.2) and re-arms that transport's first
+  use. Only a later write that chooses that mode explicitly clears it, carrying the first-use
+  acknowledgement again (§7.2).
 - **Code changes.** Nothing lapses on a code change. `qualificationVersion` binds only the
   harness's own reports (§8).
 
@@ -106,6 +111,7 @@ decision names. Its USB identity is a placeholder until a capture supplies it (�
         "heardMaxBitRate": 11289600,
         "statedMaxBitRate": 11289600,
         "refusedBitRates": [],
+        "analogVolumeControls": [],
         "source": { "kind": "ios-registry", "ref": "DACProfile.swift fiio.qx13 at iOS <commit>" }
       },
       "timing": { "dsdPrefillMs": 400, "pcmEntryMs": 800 },
@@ -131,9 +137,13 @@ Fields:
 - **`dop`** gives:
   - `heardMaxBitRate`: on-device listening evidence;
   - `statedMaxBitRate`: the maker's figure;
-  - `refusedBitRates`: rates refused on a device, or heard as silence.
+  - `refusedBitRates`: rates refused on a device, or heard as silence;
+  - `analogVolumeControls`: the mixer controls this model is known to apply after its DoP decoder,
+    such as an analogue `Master Playback Volume` beside a digital `PCM Playback Volume`. Each one is
+    named by interface, name and index, with its own provenance line. The DoP gain check (§3.4)
+    passes these over, and checks every other control as strictly as for an unknown DAC.
 
-  Its source is the iOS registry at a named commit.
+  Its source is the iOS registry at a named commit, and a capture for the volume controls.
 - **`timing.dsdPrefillMs`** is the DSD silence written before content in each hardware run. It is
   seeded from the registry's resync delays ((iOS) `DACProfile.swift:217-275`) and defaults to 400 ms,
   iOS's DSD resync default ((iOS) `DACProfile.swift:152-183`).
@@ -229,6 +239,7 @@ does a shared reference ID without a product string. The live altsets still deci
 ```json
 {
   "schemaVersion": 1,
+  "defaultMode": "auto",
   "dacs": [
     {
       "key": { "vendorId": "<vid>", "productId": "<pid>", "interface": 1, "product": "<product>" },
@@ -238,13 +249,19 @@ does a shared reference ID without a product string. The live altsets still deci
       "evidence": [
         { "transport": "native", "format": "DSD_U32_BE", "bitRate": 2822400, "bcdDevice": "<bcd>",
           "driverAcceptedAt": "…", "kernel": "<release>", "streamingObservedAt": "…",
-          "listenerConfirmedOn": "2026-11-05", "listenerRejectedOn": null }
+          "listener": { "answer": "clean", "on": "2026-11-05" } }
       ]
     }
   ],
   "migratedFrom": null
 }
 ```
+
+- **The choice that applies.** A DAC's own `choice` applies when it has one. A DAC with none takes
+  `defaultMode`: `auto` on a fresh install, or `off` where an explicit `dsdMode: off` was migrated
+  (§3.6).
+- **One listener answer per tuple.** `listener` holds the latest answer for the transport, rate and
+  bcdDevice: `clean`, `noise` or `nothing` (§1.2).
 
 - **Why the data directory and not `bridge.yaml`.** A paired app sets the choice, per DAC, as it
   does the queue the player keeps (the queue bullets in `.claude/rules/player.md`). The evidence
@@ -255,9 +272,11 @@ does a shared reference ID without a product string. The live altsets still deci
   `atomicwrite.WriteBytesDurable`, the writer the player's ID reservations use; the data directory
   must already be on storage that outlives a reboot (the reservation bullet in
   `.claude/rules/player.md`). A `noise` answer lost to a crash would otherwise put DoP back.
-- **A file that does not read** is moved aside with a timestamp and never deleted, as the queue
-  file is. The player then runs on the defaults: unknown DACs convert, and known DACs convert until
-  a client acknowledges first use again.
+- **A file that does not read** is moved aside with a timestamp and never deleted, as the queue file
+  is. DSD is then refused at every rate (`dsd_state_unreadable`) until a choice is written again,
+  and PCM plays. Falling back to the defaults would turn conversion on for a user whose file held
+  `defaultMode: off`. A missing file is not a damaged one: it means the defaults, and the migration
+  (§3.6) runs again from any legacy key still set.
 - **No serial, port, card number or devnum** is stored. A test reads the file for them.
 - **Backup and restore.** A backup carries the file. A restore installs the choices, DoP
   confirmations, first-use acknowledgements and listener answers. It drops `driverAcceptedAt` and
@@ -292,31 +311,40 @@ Definitions, for a rate r:
 - **DoP carrier offered:** S32_LE at r ÷ 16 with at least 24 significant bits, the packer's
   requirement (`ops/b470-native-qualification.md:355-359`), and not refused by the probe.
 - **DoP gain at unity:** §3.4.
-- **Acknowledged:** first use of the transport acknowledged under the current bcdDevice (§6).
+- **Acknowledged:** first use of the transport acknowledged under the current bcdDevice, and not
+  re-armed since by a rejection (§6).
+- **No rejection:** the latest listener answer for that transport at r under this bcdDevice is not
+  `noise` or `nothing` (§1.2). A rejection outranks every positive input: a profile claim, a driver
+  acceptance, streaming observed, and an earlier `clean`.
 - **Conversion offered:** the DAC takes a target of §4.3.
+
+The choice is the DAC's own, or the state's `defaultMode` for a DAC with none (§2.5).
 
 | Choice | Plays native at r when | Plays DoP at r when | Otherwise, at r |
 |---|---|---|---|
-| `auto`, known DAC | native offered; acknowledged | the profile heard DoP at r, or the user confirmed DoP; carrier offered; gain at unity; acknowledged; no listener rejection | converted |
-| `auto`, unknown DAC | a listener confirmation for native at r under this bcdDevice; native offered; acknowledged | a listener confirmation for DoP at r; DoP confirmed; carrier offered; gain at unity; acknowledged | converted |
-| `native` | native offered; r ≤ `maxBitRate` | never | refused: `native_not_offered`, `dsd_rate_above_choice` |
-| `dop` | never | carrier offered; r ≤ `maxBitRate`; gain at unity; the profile heard or stated DoP at r, or DoP confirmed; no listener rejection | refused: `dop_not_offered`, `dop_gain_not_unity`, `dop_gain_unverifiable`, `dop_confirmation_required`, `dsd_rate_above_choice`, `listener_rejected` |
+| `auto`, known DAC | native offered; acknowledged; no rejection | the profile heard DoP at r, or the user confirmed DoP; carrier offered; gain at unity; acknowledged; no rejection | converted |
+| `auto`, unknown DAC | the latest listener answer for native at r is `clean`; native offered; acknowledged | the latest listener answer for DoP at r is `clean`; DoP confirmed; carrier offered; gain at unity; acknowledged | converted |
+| `native` | native offered; r ≤ `maxBitRate`; acknowledged; no rejection | never | refused: `native_not_offered`, `dsd_rate_above_choice`, `first_use_pending`, `listener_rejected` |
+| `dop` | never | carrier offered; r ≤ `maxBitRate`; gain at unity; the profile heard or stated DoP at r, or DoP confirmed; acknowledged; no rejection | refused: `dop_not_offered`, `dop_gain_not_unity`, `dop_gain_unverifiable`, `dop_confirmation_required`, `dsd_rate_above_choice`, `first_use_pending`, `listener_rejected` |
 | `convert` | never | never | converted (refused as `conversion_not_offered` if the DAC takes no target) |
 | `off` | never | never | refused: `dsd_off_by_choice` |
 
 - **`auto` means no explicit choice.** It is the preselection the decision asks for. The app shows
   the mode it resolves to, and the user may keep it.
+- **After a rejection under `auto`,** that transport is out at that rate. `auto` tries the next one
+  (DoP after native), which needs its own first use, or converts.
 - **Native comes before DoP** under `auto` where both qualify at a rate, today's preference
   (`authorization.go:258-269`).
 - **The cap under `auto`:** a `maxBitRate` caps native and DoP, and rates above it are converted
   (§3.3).
 - **Explicit `native` or `dop`** carries its first-use acknowledgement in the same write (§7.2), so
-  it never meets a pending first use. A bcdDevice change that lapses it refuses as
-  `first_use_pending` until the app acknowledges again.
+  it starts acknowledged. A bcdDevice change, or a rejection, re-arms first use. The mode then
+  refuses as `first_use_pending` or `listener_rejected` until the app writes it again with the
+  acknowledgement.
 - **A known DAC with no DoP claim at r** treats DoP as an unknown DAC does: `auto` needs the user's
   confirmation, and an explicit `dop` write without `confirmDoP` is refused (§7.2).
-- **The listener-confirmation clause** under `auto` on an unknown DAC is what keeps a migrated
-  owner approval (§3.6), and a DAC whose chime the user passed, on what they were heard on.
+- **The listener-answer clause** under `auto` on an unknown DAC keeps a migrated owner approval
+  (§3.6), and a DAC whose chime the user passed, on what was heard. A later `noise` takes it away.
 - **One effective set** feeds both selection and publication, as today
   (`authorization.go:202-213`, R10 and R11). The `effectiveSet` shape stays, gaining the converted
   rates.
@@ -340,20 +368,45 @@ offer.
   `ops/b470-native-qualification.md:132`), and its player has no mixer
   (`internal/config/player.go:121-123`). A write would set a level the user did not choose, for
   every later PCM track too, and the DAC's own volume may be the only one the user has.
-- **So: detect, and refuse.** The backend reads the bound card's controls through `alsactl.Reader`
-  (bounded and read-only; `internal/alsactl/control.go:58-113`):
+- **So: detect, and refuse, failing closed.** The backend reads the bound card's controls through
+  `alsactl.Reader` (bounded and read-only; `internal/alsactl/control.go:58-113`) and its descriptors
+  through `QualificationGain` (`internal/alsa/qualification_gain.go:9-58`). It does so:
   - before a DoP occurrence is admitted;
   - at the check after its open;
   - on the 100 ms monitor while it plays (today's tick, `authorization.go:457-474`).
 
-  Every MIXER-interface control named `… Playback Volume` must read 0 dB on every channel by its dB
-  TLV (`Control.TLV`, `internal/alsactl/control.go:26`). B5 parses `DB_SCALE`, `DB_MINMAX`
-  (with its mute variant), `DB_LINEAR` and `DB_RANGE`.
-  - A control that reads otherwise refuses DoP as `dop_gain_not_unity`.
-  - One with no dB scale, or that cannot be read, refuses it as `dop_gain_unverifiable`.
-  - A muted playback switch is silence, not corruption, and is allowed.
-- **A change while DoP plays** revokes the occurrence, as a constraint change does today: an
-  immediate stop, and that rate out of the epoch (`PROTOCOL.md:1020`).
+  B5 narrows the descriptor scan to the feature units on the playback path: those between the
+  streaming interface's input terminal and its output terminal. Today's scan counts any feature
+  unit on the device. A "level control" below is a MIXER-interface integer control whose name does
+  not mark it as a capture control, whatever else its name says, not only `… Playback Volume`.
+
+  DoP passes only in one of two topologies:
+  1. **No gain stage.** The playback path has no feature unit, and the card has no level control.
+     This is the topology today's unconstrained policies require (`authorization.go:161-174`;
+     `internal/player/qualification/approval.go:218-229`).
+  2. **Every gain stage visible and at unity.** Each level control either reads 0 dB on every
+     channel by its dB TLV, or is one of the profile's `analogVolumeControls` (§2.1). If the
+     playback path has a feature unit with a volume control, at least one level control exists. The
+     TLV is `Control.TLV` (`internal/alsactl/control.go:26`); B5 parses `DB_SCALE`, `DB_MINMAX`
+     (with its mute variant), `DB_LINEAR` and `DB_RANGE`.
+
+  Anything else refuses:
+  - a level control off 0 dB refuses as `dop_gain_not_unity`;
+  - these refuse as `dop_gain_unverifiable`:
+    - a level control with no dB scale, or one that cannot be read;
+    - a feature unit on the playback path with no visible level control;
+    - descriptors that cannot be read or parsed.
+
+  A missing control never stands for unity while the descriptors show a gain stage. Switches and
+  enumerations are not gains, and are allowed: a muted switch is silence, not corruption, and an
+  enumeration that selects a DSP mode is the profile caveats' domain.
+- **The analogue allowlist** (Argon). Some DACs expose an analogue attenuator after their DoP
+  decoder, as a `Master Playback Volume` beside a digital `PCM Playback Volume`. Requiring 0 dB on
+  it would make the user run the analogue stage at full level, against the first-use guidance. A
+  profile names such controls in `dop.analogVolumeControls`, with provenance, and the check passes
+  them over. An unknown DAC has none, so every level control must read 0 dB on it.
+- **A change while DoP plays** revokes the occurrence: an immediate stop, and that rate out of the
+  epoch (`PROTOCOL.md:1020`). It is a safety revocation, which needs no consent (§3.5).
 - **What this cannot see:** a DAC's own DSP, such as a PEQ mode or a firmware EQ. That is why
   profiles carry caveats and why first use exists.
 - **Native DSD has no such requirement.** A DSD-capable chip's own DSD volume is its own
@@ -369,9 +422,28 @@ offer.
 - the reconciliation keyed on the record's hash (`:551-582`).
 
 It is read again at the same points: every session, every activation, the 100 ms tick and the
-supervisor's refresh (`cmd/bridge/serve_player.go:526-534`). The new "replaced" is a change of
-the DSD state's revision, of the profile match or of the live capabilities, and it revokes as a
-replaced record does now.
+supervisor's refresh (`cmd/bridge/serve_player.go:526-534`).
+
+**Reconciled per occurrence, never wholesale.** Today a replaced record revokes every DSD
+occurrence (`authorization.go:551-582`). B728 instead judges each occurrence of the session against
+the new set whenever the effective set changes: a choice write, a probe answer, the gain check, a
+hotplug or an identity change. Each occurrence is:
+
+- **kept,** if its plan's tuple is still in the set (same transport, format, rate and timing). It
+  plays on, untouched.
+- **re-planned,** if its plan left the set and no frame of it is the kernel's yet. The backend asks
+  the engine to hand it off again, through the path an edit after hand-off already takes: a
+  successor not yet submitted is replaced, and a submitted one is cut
+  (`.claude/rules/player.md:116`). It then plays under the new set, and is never skipped for the
+  change.
+- **revoked,** if its plan left the set and it is heard, or a frame of it is the kernel's. It stops
+  at once, as today.
+
+A choice write (§7.2) needs the user's `interrupt` if it would revoke the occurrence heard, or
+re-plan one whose frames are already in a sink. Without `interrupt` it changes nothing. So a write
+that changes only an unused rate cap revokes nothing, and asks nothing. A safety change revokes
+without asking: the gain leaving 0 dB, the identity changing, the DAC leaving, or the state
+becoming unreadable.
 
 **Kept, unchanged:**
 
@@ -387,9 +459,24 @@ replaced record does now.
 
 **Kept for the harness only:**
 
-- `qualification.ReadApproval` and `ReadCandidate`;
+- `qualification.ReadApproval` and `ReadCandidate`, which require the current version
+  (`internal/player/qualification/approval.go:113`, and each report's at `:178`);
 - `NewQualificationBackend` and `NewTransitionQualificationBackend` (`authorization.go:509-547`);
 - the approval contract (`ops/b470-native-qualification.md:248-295`).
+
+**The legacy reader, for the cutover alone** (§3.6, §11). `qualification.ReadLegacyApproval` runs
+`readApproval`'s checks with two of them made parameters:
+
+- **the version:** at least `LegacyVersion` (35, frozen), for the record and its reports, where
+  `ReadApproval` requires the current version;
+- **the identity comparison:** production keeps today's full comparison, port included, until B7.
+  The migration (§3.6) compares the model alone: vendor and product IDs, manufacturer, product,
+  interface, device and subdevice, with no port.
+
+Everything else stays: trust, the strict decode, the digest, schema, bounds, the evidence hashes,
+the executed edges and the constraints (`:95-253`). Production reads through it from B1 to B7, so
+no version bump stops an owner's record from playing before it is migrated. After B7 the migration
+is its only caller.
 
 **Dropped for users:** approval records, manual promotion, the anchored port in identity, edge
 approval between transports, and invalidation on every code change.
@@ -412,20 +499,31 @@ policy would convert.
 - **The three keys stay** in `playerKeys`. The reader refuses an unknown key, and an unread block
   turns the player off (`internal/config/player.go:744-795`), so removing them would turn off every
   player that sets them.
-- **They are migrated once,** at the first start of a B728 bridge whose block sets any of them,
-  into the state of the DAC the binding resolves to. A migration waits for that DAC.
+- **They are migrated once,** at the first start of a bridge carrying B6 whose block sets any of
+  them. The migration runs whenever the state holds no `migratedFrom`, so a state file deleted by
+  hand is migrated again from the keys still set. It writes `defaultMode` at once. Anything for a
+  particular DAC waits for that DAC to be the one the binding resolves to.
+- **Unset and explicit `off` differ.** The raw field tells them apart: `""` is unset and `"off"` is
+  written (`internal/config/player.go:110-114`, mapped together at `:220-227`). Today both refuse DSD
+  (`authorization.go:119`). B728 keeps the explicit opt-out and gives the unset key the new
+  defaults.
 
 | Legacy | And | Migrates to |
 |---|---|---|
-| `dsdMode` unset or `off` | — | nothing: the defaults (§3.2) |
-| `native` | a record that reads for this unit's model identity (the port no longer compared) | choice `native`; each approved native tuple `listener_confirmed` on the record's `QualifiedOn` (schema 2) or undated (schema 1); first use acknowledged |
-| `dop` | `allowDoP: true` and such a record | choice `dop`; DoP confirmed; the DoP tuples confirmed; first use acknowledged |
-| `dop` | `allowDoP: false` | nothing (today it refuses DoP as `dop_not_allowed`, `authorization.go:250-252`) |
-| `auto` | such a record | choice `auto`; its tuples confirmed, so `auto` plays them even on an unknown DAC (§3.2); DoP confirmed only with `allowDoP: true` |
-| any | no record, or one that does not read | nothing; one Warn naming the reason |
+| `dsdMode` unset | — | nothing: the defaults (§3.2) |
+| `dsdMode: off`, written | — | `defaultMode: off`: every DAC with no choice of its own refuses DSD (`dsd_off_by_choice`), a DAC bound later included, until an explicit per-DAC choice in the app or the console |
+| `native` | a record the legacy reader takes for this unit's model (§3.5) | choice `native`; each approved native tuple's listener answer `clean`, on the record's `QualifiedOn` (schema 2) or undated (schema 1); first use acknowledged |
+| `dop` | `allowDoP: true` and such a record | choice `dop`; DoP confirmed; the DoP tuples `clean`; first use acknowledged |
+| `dop` | `allowDoP: false` | `defaultMode: off`: today this refuses all DSD as `dop_not_allowed` (`authorization.go:250-252`), and converting would play what the operator held back |
+| `auto` | such a record | choice `auto`; its tuples `clean`, so `auto` plays them even on an unknown DAC (§3.2); first use acknowledged for native, and for DoP only with `allowDoP: true`, which also confirms DoP. With `false`, DoP stays out until the app acknowledges its first use, an explicit act |
+| `native` | no record, or one the legacy reader refuses | choice `native` with no answers and first use not acknowledged: it refuses (`first_use_pending`) until the app acknowledges, and never converts. One Warn names the reason |
+| `dop` | `allowDoP: true`, and no record or a refused one | choice `dop`, DoP not confirmed: it refuses until the app confirms and acknowledges. One Warn |
+| `auto` | no record, or a refused one | nothing: the defaults. One Warn |
 
-- **The record is read once,** by the harness's reader, and never again. The state records its
-  digest (`migratedFrom`).
+- **The record is read through the legacy reader** (§3.5), with the model comparison: the port is
+  not compared, and versions from 35 on are taken. The record's bcdDevice is recorded with each
+  answer it migrates, which therefore publishes only on that firmware (§1.2). The state keeps the
+  record's digest in `migratedFrom`, and nothing reads the record again.
 - **Validate warns once** for each legacy key while it is set, saying it was migrated and is no
   longer read. `logPlayerOff`'s once-per-reason rule (`internal/config/player.go:52-81`) is the
   model.
@@ -484,12 +582,14 @@ The chain, for 176.4 kHz output:
   100 dB down.
 - **44.1 kHz output** takes the compact tier's band: stage 3 becomes 20 kHz pass and 22.05 kHz
   stop.
-- **Start.** The delay lines start full of DSD silence, `0x69`
-  (`internal/alsapcm/sink_dsd_writer.go:302-306`), never zero bits: all-zero bits are a full-scale
-  negative offset (the DSD silence bullet in `.claude/rules/dlna-upnp.md`).
+- **Start.** The delay lines start at numeric zero in the filter's arithmetic, which is silence. They
+  never start with zero bits, which map to −1.0, a full-scale negative offset (the DSD silence bullet
+  in `.claude/rules/dlna-upnp.md`). DSD's own silence pattern, `0x69`
+  (`internal/alsapcm/sink_dsd_writer.go:302-306`), filters to the same within the stopband. Exact
+  zeros keep the joins of §4.7 exact by linearity.
 - **End.** Bits past `Frames`, such as a DSF's padding in its last byte
-  (`internal/player/format/pcm.go:105-108`), read as silence. The group delay is flushed with
-  silence, as frames of the occurrence.
+  (`internal/player/format/pcm.go:105-108`), are not read. The group delay is flushed with numeric
+  zeros, as frames of the occurrence.
 - **Frames.** The output has `Frames ÷ D` frames, where D is the total ratio (16 for DSD64 to
   176.4 kHz). With the group delay compensated, output frame k is centred on input bit k · D, so
   positions stay exact to one output frame.
@@ -504,8 +604,8 @@ The chain, for 176.4 kHz output:
 - **Integer ratios only,** so there is no resampler. 176.4 kHz / 24-bit is also the faithful
   rendition's target (`pcm-v2-176400-24`; `internal/transcode/dsd_render.go:20`, `:69-79`).
 - **Why not 352.8 kHz.** Nothing passes the 40 kHz stop that 176.4 kHz cannot carry, and stage 3 at
-  352.8 kHz costs about twice as much. Adding it later is one table row and a new CPU measurement,
-  if the owner wants it (§11, owner decisions).
+  352.8 kHz costs about twice as much. The owner decided on 2026-11-04 to cap conversion at
+  176.4 kHz (§11). Going higher later would be one table row and a new CPU measurement.
 
 ### 4.4 Gain, headroom and clipping
 
@@ -517,7 +617,8 @@ The chain, for 176.4 kHz output:
   Legal content therefore peaks below about −2 dBFS, with no gain applied.
 - **No +6 dB.** The offline chain adds it only after measuring the whole file's true peak
   (`dsd_render_chain.go:37-50`; `ClipGuardedGainDB`, `:171-178`), which a player that starts at once
-  cannot do. Unity gain also keeps every track of a gapless album at one level.
+  cannot do. Unity gain also keeps every track of a gapless album at one level. The owner decided on
+  unity gain for live conversion on 2026-11-04 (§11).
 - **Clipping.** A sample past full scale, from an overmodulated stream, saturates at ±(2²³ − 1) and
   is counted. The count belongs to the occurrence (`playback.converted.clippedSamples`, §7.1), with
   one Info line per occurrence that clipped. There is no limiter or compressor.
@@ -560,18 +661,53 @@ These figures are estimates. B11 measures them before it merges.
 
 ### 4.7 Gapless, Stop, pause and seek
 
-- **Gapless.** A converted occurrence is a PCM transport: rate, channels, packing and valid bits
-  (`.claude/rules/player.md:80`, `:135`).
-  - Converted occurrences joined at one DSD rate and one target share one converter instance. The
-    next track's bits enter the same delay lines, so the join has no gap and no restart transient,
-    as the DSD stream would play natively.
-  - A converted occurrence ahead of a PCM successor of the same transport flushes its group delay
-    with silence, as frames of its own. The PCM frames then follow in the same sink.
-  - Another transport means drain, close and reopen: an honest gap (`Transport.Join`).
-- **The boundary** is the first output frame whose centre bit belongs to the next track. Position
-  and Audible are exact to one output frame.
-- **Stop and Cut** are the PCM sink's, unchanged: Drop is immediate, and Cut works at a content
-  frame. The converter's lookahead, under 1 ms, lives in the producer, never in the sink.
+**Joins.** A converted occurrence is a PCM transport for the sink: rate, channels, packing and valid
+bits (`.claude/rules/player.md:80`, `:135`). A join is one of three kinds:
+
+| The successor | The join | At the boundary |
+|---|---|---|
+| converted, at the same DSD rate under the same plan (target and filter) | **continuous** | One converter carries its delay lines across. The boundary's frames are exactly the filtering of the continuous bit stream, as native playback sounds. |
+| converted at another DSD rate onto the same PCM transport (Argon's case), or PCM of the same transport | **abutting** | The same open sink: no drain and no reopen. The predecessor's converter flushes its group delay with numeric zeros, and a new converter, primed with zeros, starts the successor. Nothing is inserted, so the join is gapless, but it is not sample-continuous. That is acceptable, since a continuous recording does not change its DSD rate or its codec mid-stream. |
+| another PCM transport | **reopen** | Drain, close and reopen: an honest gap (`Transport.Join`). |
+
+The boundary is the first output frame whose centre bit belongs to the next track. Position and
+Audible are exact to one output frame.
+
+**The join window, and Cut.** With the group delay compensated (§4.2), a continuous join makes the
+predecessor's last H output frames depend on the successor's first bits. H is the composite
+filter's half-length in output frames: about 70 at 176.4 kHz, or 0.4 ms. Today's Cut drops a
+successor from its own first frame (`internal/player/playback/session.go:903-921`; the sink's Cut
+at `o.start`, `:915`). Here that would leave the cut successor's onset folded into the
+predecessor's last 0.4 ms, with the converter's state advanced past it. So:
+
+- **Hold back.** The producer holds a converted occurrence's last H frames, with a snapshot of its
+  converter taken before any successor bit enters, until the successor settles:
+  - a continuous successor: the frames are computed with its bits;
+  - an abutting successor, or none: they are computed from the snapshot with zero padding.
+
+  The producer waits for that only while the sink's lookahead stays above a floor (100 ms). Below
+  it, the window is finished as an end, and a successor that arrives later joins abutting.
+- **Replacing or cutting the successor before the window is submitted** recomputes the window from
+  the snapshot, for the new successor or for none. Nothing reached the sink, so nothing is rolled
+  back.
+- **After the window is submitted,** a cut of the successor puts the sink's marker at the window's
+  first frame (the successor's first frame − H), not at the successor's own:
+  1. it drops the window and everything after it;
+  2. it submits the window again, recomputed from the snapshot;
+  3. then the replacement, if there is one.
+
+  The window's frames count as the predecessor's in every count, so the boundary stays at the
+  successor's first frame.
+- **Too late.** If any frame from that marker on is already the kernel's, the sink refuses the cut
+  (`internal/alsapcm/sink.go:679`) and drops nothing. As with any late cut, the engine then stops
+  playback when the successor is heard (`removed_entry_audible`; `.claude/rules/player.md:116`).
+- **B11's tests delete, and replace,** a prepared converted successor at three moments: before the
+  window is submitted; after it is submitted and before the kernel has it; and once the kernel has
+  it. In each, the DAC's bytes must equal an oracle that converts the predecessor alone, zero-padded,
+  followed by the replacement, or else show the late cut's stop.
+
+**Stop** is the PCM sink's Drop, unchanged and immediate. The converter's lookahead, under 1 ms,
+lives in the producer, never in the sink.
 - **Pause and release** are the PCM sink's: PAUSE, or zeros. After `pauseReleaseSeconds` the release
   keeps the unplayed frames in the store, and a resume writes them (the sink's pause bullet in
   `.claude/rules/player.md`). The converter takes no part in a resume.
@@ -581,20 +717,25 @@ These figures are estimates. B11 measures them before it merges.
 
 ### 4.8 What Signal Path may claim
 
-- **The observation** says `transport: converted`, with the source DSD rate, the target rate and
-  bits, the filter, the gain (0 dB) and the clipped count (§7.1).
-- **Details:** codec `DSD`, the target rate, 24 bits and `Lossless: false`, so OpenHome Info's
-  Details say lossless 0 (the Time and Info bullet in `.claude/rules/openhome.md`).
-- **The app** says "DSD converted to PCM by the bridge's player · DSD64 → 176.4 kHz / 24-bit", and
-  never bit-exact. Its "Converted" status already exists ((iOS) `SignalPath.swift:479`).
+Every claim is read from the occurrence's actual conversion plan, never from the 176.4 kHz / 24-bit
+case. The plan is its target rate (176.4, 88.2 or 44.1 kHz, §4.3), its valid bits (24 or 16), its
+passband (30 kHz, or 20 kHz at 44.1 kHz, §4.2), its dither (none at 24 bits, TPDF at 16, §4.5) and
+its gain (0 dB). The plan is fixed when the occurrence opens.
+
+- **The observation** says `transport: converted` and carries the plan with the source DSD rate and
+  the clipped count (§7.1).
+- **Details:** codec `DSD`, the plan's rate and valid bits, and `Lossless: false`, so OpenHome
+  Info's Details say lossless 0 (the Time and Info bullet in `.claude/rules/openhome.md`).
+- **The app** composes its line from those members, for example "DSD converted to PCM by the
+  bridge's player · DSD64 → 44.1 kHz / 16-bit · 20 kHz low-pass · TPDF dither". It never says
+  bit-exact. Its "Converted" status already exists ((iOS) `SignalPath.swift:479`).
 
 ### 4.9 Relation to `upscale`'s DSD render
 
 **Shared with the offline render:**
 
 - the target response (30 kHz pass / 40 kHz stop, at least 100 dB; `dsd_render_chain.go:119-125`);
-- the 176.4 kHz / 24-bit faithful target (`dsd_render.go:20`, `:69-79`);
-- DSD silence as `0x69`.
+- the 176.4 kHz / 24-bit faithful target (`dsd_render.go:20`, `:69-79`).
 
 **Different:** the render runs offline, through ffmpeg and sox behind the exec boundary (GPL tools,
 optional on a host; `internal/config/config.go:2069-2099`). It measures the whole file first,
@@ -672,18 +813,22 @@ kernel's rules across altsets, and gets the kernel's own answer rather than a pa
 
 ### 6.1 The app's half
 
-**Before the first DSD play** on a newly enabled native or DoP transport. That is either a write
-that selects it, or `auto` resolving to it with `firstUse` pending.
+The acknowledgement sheet and the large Stop ship with the mode UI in I4, so no build of the app can
+enable native or DoP without them. Only the optional chime waits for I5 (§11).
+
+**Before the first DSD play** on a newly enabled native or DoP transport (I4). That is either a
+write that selects it, or `auto` resolving to it with `firstUse` pending.
 
 - The app shows a sheet: turn the amplifier or the headphones down before the first DSD track; a
   large Stop stays on screen.
 - DoP on an unknown DAC adds the confirmation (§7.4).
 - The write then carries `firstUseAcknowledged` (§7.2).
 
-**During that first play** (first use `acknowledged`, not yet `observed`), the bridge player's
-now-playing view shows a large Stop.
+**During that first play** (I4), while first use is `acknowledged` and not yet `observed`, the
+bridge player's now-playing view shows a large Stop. It is OpenHome's Stop, the engine's immediate
+release.
 
-**The optional check:**
+**The optional check (I5):**
 
 1. "Play a test chime" sends POST check.
 2. While the chime plays, a large Stop sends DELETE check.
@@ -693,10 +838,22 @@ now-playing view shows a large Stop.
 
 ### 6.2 The bridge's half
 
-**The check.** One runs at a time.
+**First use and `streaming_observed`** (B7, published by B8). The backend records
+`streaming_observed` when an occurrence of a native or DoP tuple has played 5 s of content without a
+fault (§1.1), and first use then becomes `observed`. B9's write takes the acknowledgement. So the
+safety half the app needs is on the bridge before the app's I4 ships.
 
+**The check (B12).** One runs at a time.
+
+- **Admission is the effective policy's.** The tuple asked for, transport and rate, must be one the
+  effective set plays now for this DAC (§3.2): offered, gain at unity, first use acknowledged, DoP
+  confirmed where the DAC has no DoP claim, and no rejection. Being merely offered is not enough. A
+  tuple outside the set is refused, `check_unavailable` with the set's reason. So the check cannot
+  play anything an ordinary track could not. To check native on an unknown DAC, the user first
+  chooses native, with its acknowledgement, which makes native the set's for this DAC.
 - If something is playing, the request needs `interrupt: true`, or it gets 409 `would_interrupt`.
-- The bridge stops the engine and waits for the release's acknowledgement.
+- The bridge prepares the chime (below) before it stops anything.
+- It stops the engine and waits for the release's acknowledgement.
 - It enters maintenance: the engine's own hold, which closes mutations; exit leaves the transport
   stopped and never autoplays (the maintenance bullet in `.claude/rules/player.md`).
 - It plays the chime through the transport and rate under test, with that tuple's plan.
@@ -713,15 +870,20 @@ now-playing view shows a large Stop.
 - 20 ms raised-cosine edges, and a peak of −30 dBFS of the one-bit full scale, the harness's
   listening level (`ops/b470-native-qualification.md:20-21`).
 
-It is modulated once, at DSD64, by B725's modulator, in a production package by then.
-`internal/dsdtone` is first-order, with a −45 dBFS noise floor, and is for tests only
-(`internal/dsdtone/dsdtone.go:1-14`). For DSD128 and DSD256 the DSD64 chime is repeated bit for bit:
-a valid stream at that rate, which exercises the DAC's decoding there with DSD64's content. It is
-held in memory (DSD256: about 1.4 MB per channel per second, 7 MB stereo for 2.4 s), and nothing is
-embedded in the binary.
+The two tones are modulated natively at the check's rate, by B725's modulator, which will be in a
+production package by then. `internal/dsdtone` is first-order, with a −45 dBFS noise floor, and is
+for tests only (`internal/dsdtone/dsdtone.go:1-14`).
 
-**`streaming_observed`** is recorded by the backend when an occurrence of a native or DoP tuple has
-played 5 s of content without a fault (§1.1). First use then becomes `observed`.
+The silent channel during each tone, and the two pads, are `0x69` bytes at that rate. Nothing is
+repeated bit for bit. Repetition is a zero-order hold in the one-bit domain: `0x69` with each bit
+doubled reads `00111100…`, which moves the silence's idle tone down toward the audio band and
+raises its local offset (Argon).
+
+Modulating 0.7 s of one channel at DSD256 is about 7.9 M modulator steps. At an estimated
+20–50 ns a step in scalar Go on a Pi 4, the two tones take 0.3–0.8 s. Each rate's chime is made once
+per process and kept in memory (DSD256: 2.4 s of stereo, about 6.8 MB). Nothing is embedded in the
+binary. The check reports `preparing` until the chime is ready, bounded at 2 s, and B12 measures
+the time on a Pi 4.
 
 ### 6.3 Stop paths
 
@@ -745,8 +907,8 @@ release.
 |---|---|
 | First use acknowledged | `firstUse[transport].acknowledgedAt`, with the bcdDevice |
 | 5 s of content played without a fault | `evidence.streamingObservedAt`; first use `observedAt` |
-| The chime completes and the answer is clean | `listenerConfirmedOn` (a date) for the transport, rate and bcdDevice |
-| The chime completes and the answer is noise or nothing | `listenerRejectedOn`; that transport and rate leave `auto` (§3.2) until chosen again |
+| The chime completes and the answer is clean | `listener: {answer: clean, on}` for the transport, rate and bcdDevice, replacing any earlier answer |
+| The chime completes and the answer is noise or nothing | `listener: {answer: noise or nothing, on}`, replacing an earlier `clean`. That transport is refused at that rate in every mode, and its first use re-arms (§3.2), until a write chooses that mode again |
 | The chime is stopped or fails | nothing but the check's own state; an answer to it is refused (`check_not_answerable`) |
 
 Never recorded: who answered, beyond `app` or `console`; a device token; a serial; a port.
@@ -768,7 +930,7 @@ All additions are additive, and `ProtocolVersion` stays 1 (the `/v1/outputs` bul
       { "format": "DSD_U32_BE", "bitRate": 2822400, "channels": 2, "policyId": "native/DSD_U32_BE/2822400",
         "pause": "kernel", "tailMs": 100, "prefillMs": 400, "evidence": "streaming_observed", "evidenceOn": "2026-11-05" }
     ],
-    "converted": [ { "bitRate": 11289600, "rateHz": 176400, "validBits": 24, "filter": "dsdconv-1" } ],
+    "converted": [ { "bitRate": 11289600, "rateHz": 176400, "validBits": 24, "passbandHz": 30000, "dither": "none", "filter": "dsdconv-1" } ],
     "refused": [],
     "model": "<manufacturer and product>", "bcdDevice": "<bcd>"
   },
@@ -781,14 +943,14 @@ All additions are additive, and `ProtocolVersion` stays 1 (the `/v1/outputs` bul
       { "mode": "native", "offered": true, "rates": [ { "bitRate": 2822400, "evidence": "streaming_observed" } ] },
       { "mode": "dop", "offered": true, "needsConfirmation": false, "blocked": "dop_gain_not_unity",
         "rates": [ { "bitRate": 2822400, "evidence": "reported" } ] },
-      { "mode": "convert", "offered": true, "rateHz": 176400, "validBits": 24 },
+      { "mode": "convert", "offered": true, "rateHz": 176400, "validBits": 24, "passbandHz": 30000, "dither": "none" },
       { "mode": "off", "offered": true }
     ],
     "firstUse": [ { "transport": "native", "state": "observed" }, { "transport": "dop", "state": "pending" } ],
     "check": null
   },
   "playback": { "transport": "converted", "format": "S24_3LE", "rateHz": 176400, "validBits": 24, "logicalRate": 0,
-    "converted": { "fromBitRate": 2822400, "filter": "dsdconv-1", "gainDB": 0, "clippedSamples": 0 } }
+    "converted": { "fromBitRate": 2822400, "filter": "dsdconv-1", "passbandHz": 30000, "dither": "none", "gainDB": 0, "clippedSamples": 0 } }
 }
 ```
 
@@ -815,20 +977,28 @@ All additions are additive, and `ProtocolVersion` stays 1 (the `/v1/outputs` bul
 
 **New members:**
 
-- **`dsdPlayback.converted`** (optional array): `{bitRate, rateHz, validBits, filter}` for each
-  converted rate. An older bridge omits it; it is `[]` when no rate converts.
+- **`dsdPlayback.converted`** (optional array): each converted rate's plan (§4.8), as `{bitRate,
+  rateHz, validBits, passbandHz, dither, filter}`:
+  - `validBits` is 24 or 16;
+  - `passbandHz` is 30000, or 20000 at 44.1 kHz;
+  - `dither` is `none` or `tpdf`.
+
+  An older bridge omits it; it is `[]` when no rate converts.
 - **`dsdPlayback.refused`** (optional array): `{bitRate, reason}` for each rate from DSD64 to DSD256
   that plays neither way, with `reason` from §3.2's closed list.
 - **`dsdDAC`** (optional object): the bound DAC's key; its profile (id, name, caveats); the choice
   and its revision; the options for each mode (offered, rates with evidence, `needsConfirmation`,
   `blocked`); first use per transport; and the running or last check. It is omitted while no DAC is
   available.
-- **`playback`:** `transport` gains `converted`, with `format`, `rateHz` and `validBits` the PCM's
-  and `logicalRate` 0. A new optional `converted` object gives `{fromBitRate, filter, gainDB,
-  clippedSamples}`. A native or DoP occurrence gets an optional `evidence` member.
-- **Health flags:** `bridgeDSDChoice` (the PUT) and `bridgeDSDCheck` (the check routes), each
-  advertised while the player's gate holds and the routes are wired. A client keys on the flags,
-  never on a version ("Don't label a spec section with a version", `.claude/rules/wire.md`).
+- **`playback`:** `transport` gains `converted`, with `format`, `rateHz` and `validBits` the PCM's,
+  the plan's actual values, and `logicalRate` 0. A new optional `converted` object gives the plan's
+  `{fromBitRate, filter, passbandHz, dither, gainDB, clippedSamples}`. A native or DoP occurrence
+  gets an optional `evidence` member.
+- **Health flags.** `bridgeDSDChoice` arrives with the PUT (B9) and `bridgeDSDCheck` with the check
+  routes (B12). Each is advertised while the player's gate holds and its route is mounted, and is
+  absent before (Argon). B8 publishes the read members alone, so no client sees a flag for a route
+  that is not mounted. A client keys on the flags, never on a version ("Don't label a spec section
+  with a version", `.claude/rules/wire.md`).
 
 ### 7.2 The write side
 
@@ -853,24 +1023,38 @@ Checks, in order:
 6. DoP on a DAC whose profile has no DoP claim carries `confirmDoP` (409
    `dop_confirmation_required`).
 7. Native or DoP whose first use is not acknowledged under this bcdDevice carries
-   `firstUseAcknowledged` (409 `first_use_unacknowledged`).
-8. A change that would stop what plays, because the occurrence's transport leaves the effective
-   set, carries `interrupt` (409 `would_interrupt`, nothing changed). This is the console's rule and
-   its word (the console bullet in `.claude/rules/player.md`).
+   `firstUseAcknowledged` (409 `first_use_unacknowledged`). A rejection re-arms first use (§1.2),
+   so a write that chooses a rejected transport again always carries it, and that write clears the
+   rejection.
+8. The write would leave alone what plays, or carries `interrupt` (409 `would_interrupt`, nothing
+   changed). The test is §3.5's per-occurrence predicate, computed against the set the write would
+   publish: would it revoke the occurrence heard, or re-plan one whose frames are already in a sink?
+   A write that changes only an unused rate cap, or an unused mode, therefore needs no `interrupt`.
+   This is the console's rule and its word (the console bullet in `.claude/rules/player.md`).
 
 Then the bridge:
 
 1. writes the state durably (500 `persist_failed`, nothing changed);
 2. probes the DAC if it is free;
 3. recomputes and publishes the effective set (`policyGeneration` + 1);
-4. revokes what left it;
+4. reconciles each occurrence (§3.5): it keeps what stays in the set, re-plans successors that left
+   it, and revokes only what step 8 allowed;
 5. answers 200 with `{dsdDAC, dsdPlayback}`, read from the published epoch.
 
 That read-back is the effective choice, exactly as `GET` returns it afterwards.
 
 **`POST /v1/outputs/{id}/dsd/check`.** Body: `{dacKey, transport, bitRate, interrupt}`. Answers 202
-`{check}`. Refusals: 409 `dac_changed`, `would_interrupt`, `check_running`, or `check_unavailable`
-(the tuple is not offered now, its gain is not at unity, or the device is busy).
+`{check}`, whose state goes `preparing`, `playing`, then `complete`, `stopped` or `failed`.
+
+Admission is the effective policy's (§6.2). The tuple must be one the effective set plays now, so
+first use acknowledged, DoP confirmed where the DAC has no DoP claim, gain at unity and no rejection
+all hold. Being merely offered is not enough.
+
+Refusals:
+- 409 `dac_changed`, `would_interrupt` or `check_running`;
+- 409 `check_unavailable`, for a tuple outside the effective set (with the set's reason for it,
+  such as `first_use_pending`, `dop_confirmation_required` or `dop_gain_not_unity`), or a busy
+  device.
 
 **`DELETE /v1/outputs/{id}/dsd/check`.** Answers 204 once the check's release is confirmed, or at
 once when no check runs.
@@ -936,10 +1120,18 @@ and two units of one model share one choice, as the phone's per-DAC choice does 
   (firmware <bcd>)".
 - **What stays:** the transport lines ("Opened DAC transport: native DSD …", "… DoP …"; `:70-77`) and
   the footer (`:89`).
-- **Converted** gets "DSD converted to PCM by the bridge's player", with "DSD64 → PCM 176.4 kHz /
-  24-bit · 30 kHz low-pass · unity gain", and "<n> samples clipped" when any clipped. It stays
-  distinct from the rendition's "DSD converted to PCM on the bridge" and the phone's "on this
-  iPhone" ((iOS) `SignalPath.swift:556-558`).
+- **Converted** gets "DSD converted to PCM by the bridge's player". Its detail is composed from the
+  observation's plan (§4.8, §7.1), never from fixed text:
+  - "<source> → PCM <rateHz> / <validBits>-bit";
+  - "<passbandHz> low-pass";
+  - "TPDF dither", when `dither` is `tpdf`;
+  - "unity gain";
+  - "<n> samples clipped", when any clipped.
+
+  For example, "DSD64 → PCM 176.4 kHz / 24-bit · 30 kHz low-pass · unity gain", or "DSD128 → PCM
+  44.1 kHz / 16-bit · 20 kHz low-pass · TPDF dither · unity gain". It stays distinct from the
+  rendition's "DSD converted to PCM on the bridge" and the phone's "on this iPhone" ((iOS)
+  `SignalPath.swift:556-558`).
 - **Never,** for DSD on the bridge's player: verified, decoded, bit-exact, seal or lock. The copy
   table's header rule extends to it.
 
@@ -956,8 +1148,8 @@ and two units of one model share one choice, as the phone's per-DAC choice does 
 **B728:**
 
 - **Step 8** also passes a row when a `dsdPlayback.converted` entry has its exact `bitRate`, with
-  positive `rateHz` and `validBits`, from the same grant's set. `converted` lives inside
-  `dsdPlayback`, so I3b's epoch and freshness rules cover it unchanged.
+  positive `rateHz`, a `validBits` of 24 or 16, and a known `dither` word, from the same grant's
+  set. `converted` lives inside `dsdPlayback`, so I3b's epoch and freshness rules cover it unchanged.
 - **With neither,** the reason is `.dsdRateNotPlayable(label)`, with the copy "<title> is <rate>, a
   rate <player> isn't set to play." When `refused` names the rate, its reason's sentence follows.
 - **`codecs`** keeps gating: the grant's codecs must list `dsf` or `dff`, which the bridge does
@@ -981,8 +1173,24 @@ each bump makes all owner evidence stale (`ops/b470-native-qualification.md:3-4`
 were mostly test, logging and console changes that changed no DSD byte
 (`ops/b470-native-qualification.md:600-713`).
 
-**After B728** the version binds only the harness's own reports and records. B1 narrows the guard to
-the code that changes DSD bytes or the harness's evidence:
+**After B728** the version binds only the harness's own reports and records. The owner decided on
+2026-11-04 to narrow the guard as proposed here (§11).
+
+**The cutover's order (Codex).** Until B7, production still reads the owner's record, and
+`ReadApproval` refuses a record of another version or another identity
+(`internal/player/qualification/approval.go:113`, `:132`, and each report's at `:178`). So any bump
+merged before B7 would stop that record from playing before B6 migrated it. B1 therefore does three
+things in one PR:
+
+1. it adds the legacy reader (§3.5), whose version and identity checks are parameters;
+2. it switches production's read to it, taking version 35 and later, so no later bump strands the
+   record;
+3. it narrows the guard and takes version 36.
+
+B6 then migrates through the same reader with the model comparison. B7 is the first PR in which
+production reads no record. No guarded change merges before B1, since B1 comes first.
+
+B1 narrows the guard to the code that changes DSD bytes or the harness's evidence:
 
 - **Paths:** `internal/player/format/dsd_pack.go`, `internal/player/format/dop_pack.go`,
   `internal/player/playback/native.go`, `internal/player/playback/edges.go`,
@@ -995,15 +1203,19 @@ the code that changes DSD bytes or the harness's evidence:
 
 | PR | Guarded paths it touches | Version |
 |---|---|---|
-| B1 | `internal/player/qualification/version_gate.go` | 36 |
+| B1 | `internal/player/qualification/approval.go` (the legacy reader) and `version_gate.go`. Production's switch to the legacy reader is in `authorization.go`, which is unguarded once B1's own narrowing applies | 36 |
 | B4, the probe | `internal/alsapcm/` | 37 |
-| B7, the policy wired | `internal/player/playback/native.go` and `edges.go` (plan construction) | 38 |
-| B12, the check | `native.go`, and `internal/alsapcm/` if the check needs a sink seam | 39 |
-| every other PR | none | unchanged |
+| B7, the cutover | `internal/player/playback/native.go` and `edges.go` (plan construction) | 38 |
+| B11, conversion wired | `native.go`, whose DSD open (`internal/player/playback/native.go:23-74`) is where a convert plan branches off | 39 |
+| B12, the check | `native.go`, and `internal/alsapcm/` if the check needs a sink seam | 40 |
+| every other PR (B2, B3, B5, B6, B8, B9, B10, B13) | none. Their code is in new packages or paths B1 unguards | unchanged |
 
 Two PRs that take the same number collide at merge, as they do today, and the later one raises it
-at merge (`ops/b470-native-qualification.md:651-655`). B1 also rewrites the runbook's header: no
-production path reads an approval record, and the version invalidates harness evidence alone.
+at merge (`ops/b470-native-qualification.md:651-655`). The runbook's header changes twice:
+
+- in B1: production reads an approval record only through the legacy reader, until B7, and the
+  version invalidates harness evidence alone;
+- in B7: no production path reads an approval record.
 
 ## 9. Rules to change (proposed wording, not applied)
 
@@ -1070,13 +1282,16 @@ rule that permits it.
    keep a packing past `Discard`.**"
 8. **`.claude/rules/player.md:135`**, gapless (B11). The title becomes: "**A successor of the same
    transport follows in the same sink with nothing between, and one of another transport plays after
-   a drain, a close and a new sink, an honest gap its `Join` names; converted DSD occurrences joined
-   at one DSD rate share one converter, which carries its delay lines across each join, and a
-   converted occurrence ahead of anything else flushes its group delay with DSD silence as frames of
-   its own** (B728)." It adds: "a converted occurrence's transport is the PCM it becomes." The Don't
-   becomes: "**Don't write anything between two occurrences of one transport, report a join gapless
-   across transports, restart the converter inside a run of joined converted occurrences, or count
-   its flush as the successor's.**" The sink's own gapless bullet (`:80`) is unchanged: the sink is.
+   a drain, a close and a new sink, an honest gap its `Join` names. Converted DSD occurrences joined
+   at one DSD rate under one plan share one converter, whose last H frames before the join wait for
+   the successor to settle; any other successor on the same transport abuts, each side zero-padded,
+   in the same sink** (B728)." It adds: "a converted occurrence's transport is the PCM it becomes;
+   the join window's frames are the predecessor's." The Don't becomes: "**Don't write anything
+   between two occurrences of one transport, report a join gapless across transports, restart the
+   converter inside a continuous join, submit a converted occurrence's join window before its
+   successor settles (or the lookahead reaches its floor), or cut a converted successor at its own
+   first frame once its window is submitted: cut at the window and submit it again.**" The sink's
+   own gapless bullet (`:80`) is unchanged, since the sink is.
 9. **`.claude/rules/player.md:187`, `:189` and `:197`**, with their long forms at
    `ops/History-rules-player.md:805-847` and `:1001-1007` and in `ops/History-b470-native.md` under
    "Owner approval (2c.2b)" (B7):
@@ -1088,41 +1303,58 @@ rule that permits it.
    - `:197` becomes "**DoP (B470 2d.2, B728): one effective set over the profile × the live
      capabilities × the DAC's choice feeds selection and the published epoch.** `auto` plays native
      first where the kernel offers it, DoP where the profile heard it or the user confirmed it, and
-     converts the rest; an explicit `native` or `dop` refuses what it cannot play; DoP needs its
-     carrier with at least 24 significant bits, every playback volume control of the card at 0 dB,
-     and its first use acknowledged. A native↔DoP edge needs no report in production; the
-     transition scenario is the harness's. **Don't play DoP on a DAC with no DoP claim without the
-     user's confirmation, with a volume control off 0 dB or unreadable, or before its first use was
-     acknowledged; fall back to another transport at run time; publish anything but the effective
-     set; join same-carrier PCM and DoP; or put the USB port or serial on the wire.**"
+     converts the rest; an explicit `native` or `dop` refuses what it cannot play. DoP needs three
+     things: its carrier with at least 24 significant bits; a gain topology §3.4 passes (no gain
+     stage, or every level control at 0 dB or on the profile's analogue list); and its first use
+     acknowledged. A listener's rejection refuses a transport at a rate in every mode. A native↔DoP
+     edge needs no report in production; the transition scenario is the harness's. **Don't play DoP
+     on a DAC with no DoP claim without the user's confirmation, with a level control off 0 dB,
+     unreadable or missing beside a gain stage, or before its first use was acknowledged; play a
+     transport a listener rejected; fall back to another transport at run time; publish anything
+     but the effective set; join same-carrier PCM and DoP; or put the USB port or serial on the
+     wire.**"
 10. **A new section in `.claude/rules/player.md`, "Player DSD by capability and choice (B728)".**
     Each bullet lands with its code:
+    - B1: "**Until B7, production reads an approval record only through the legacy reader, which
+      takes version 35 and later; the migration reads it the same way, comparing the model and not
+      the port.** **Don't bump `qualificationVersion` while production reads through `ReadApproval`,
+      or re-validate a record being migrated against the current version or its port.**"
     - B2: "**The DAC profile database matches by USB identity, never by name: vendor and product
       IDs, the interface, and the product string, which a shared reference ID needs; bcdDevice only
       narrows.** **Don't match a profile by its name, add a claim without its provenance, let two
       profiles match one identity, or import from the iOS registry anything but its DoP evidence
       and caveats.**"
-    - B3: "**The player's DSD state (`player-dsd.json`) keys each DAC by its model identity, and a
-      write is durable before it is answered.** **Don't store a serial, a port, a card number or a
-      devnum, answer a write before it is durable, or delete a state file that does not read: move
-      it aside.**"
+    - B3: "**The player's DSD state (`player-dsd.json`) keys each DAC by its model identity, keeps
+      a bridge-wide `defaultMode`, and makes a write durable before it is answered. A state that
+      does not read refuses DSD until a choice is written again.** **Don't store a serial, a port, a
+      card number or a devnum, answer a write before it is durable, delete a state file that does
+      not read (move it aside), or fall back to the defaults over one.**"
     - B4: "**The silent probe opens the bound node only while it is free and no session holds it,
       refines each candidate, and closes.** **Don't send HW_PARAMS, SW_PARAMS, PREPARE, a write or
       a control write from it, wait on a busy node, or probe on a timer.**"
     - B5: "**The evidence ladder is reported, driver accepted, streaming observed, listener
-      confirmed, and no word claims that a DAC decodes DSD.** **Don't word a rung as verified,
-      decoded, bit-exact or a lock, count a rung across a bcdDevice change, or publish DoP's driver
-      acceptance as more than its carrier's.**"
-    - B7: "**DoP plays only while every MIXER-interface playback volume control of the bound card
-      reads 0 dB by its dB scale.** **Don't write a control, take a control with no dB scale as
-      unity, or keep DoP playing once a control leaves 0 dB.**"
+      confirmed, and no word claims that a DAC decodes DSD. The latest listener answer stands, and a
+      rejection outranks every positive input.** **Don't word a rung as verified, decoded,
+      bit-exact or a lock, count a rung across a bcdDevice change, publish DoP's driver acceptance
+      as more than its carrier's, or let an earlier `clean` survive a later `noise`.**"
+    - B7: "**DoP plays only where the playback path shows no gain stage, or every level control
+      reads 0 dB by its dB scale or is on the profile's analogue list; a policy change is reconciled
+      per occurrence (kept, re-planned or revoked), and a user's write revokes only with
+      `interrupt`.** **Don't write a control, take a missing control or one with no dB scale for
+      unity, keep DoP playing once a control leaves 0 dB, revoke an occurrence the new set still
+      plays, or skip a successor a change re-planned.**"
     - B10: "**`dsdconv` is linear phase and unity gain, 30 kHz pass / 40 kHz stop at 100 dB or
-      more, starts and ends on DSD silence, saturates and counts, and rounds 24-bit output with no
-      added dither (TPDF at 16 bits).** **Don't add gain the stream was not measured for, limit or
-      compress, prime a delay line with zero bits, or read past `Frames`.**"
-    - B12: "**The check plays its chime through the transport under test inside the engine's
-      maintenance hold, for at most 10 s, and every Stop ends it.** **Don't touch the queue,
-      autoplay after it, or record listener confirmed for a check that did not play to its end.**"
+      more (20 kHz at 44.1 kHz), starts and ends at numeric zero, saturates and counts, and rounds
+      24-bit output with no added dither (TPDF at 16 bits).** **Don't add gain the stream was not
+      measured for, limit or compress, prime a delay line with zero bits, or read past `Frames`.**"
+    - B11: "**A converted occurrence's claims (Details, the observation, `converted`) are its
+      plan's: rate, valid bits, passband and dither.** **Don't state 24 bits, 30 kHz or 176.4 kHz
+      for a plan that is not.**"
+    - B12: "**The check admits only a tuple the effective set plays now, prepares a chime modulated
+      natively at that rate, and plays it inside the engine's maintenance hold, for at most 10 s;
+      every Stop ends it.** **Don't play a tuple that is merely offered, repeat a lower rate's bits
+      for a higher one, touch the queue, autoplay after it, or record an answer for a check that did
+      not play to its end.**"
 11. **`.claude/rules/output.md`**, the codecs bullet (B11). The title becomes: "**The element's codecs
     are `playback.PlayedContainers` (flac, wav, aiff, alac) and, while the effective set names a
     tuple or a converted rate, dsf and dff (B728); …**" The Never adds: "**…list dsf or dff while
@@ -1138,17 +1370,20 @@ rule that permits it.
     Stop ends the check and answers success; every other write answers 501, as in maintenance**
     (B728). **Don't let a Stop wait past the sink's release bound, or start anything when the check
     ends.**"
-14. **`ops/b470-native-qualification.md:1-10`** (B1): "Since B728 no production path reads an
-    approval record or a candidate: the player plays DSD by its effective policy
-    (`ops/b728-dsd-capability-design.md`). This runbook is the engineering harness's. Its evidence
-    binds `qualificationVersion`, whose guard covers the DSD byte path and the harness alone."
+14. **`ops/b470-native-qualification.md:1-10`**, in two steps:
+    - B1: "Production reads an approval record only through the legacy reader, which takes version 35
+      and later, until B728's cutover (`ops/b728-dsd-capability-design.md`). This runbook's evidence
+      binds `qualificationVersion`, whose guard covers the DSD byte path and the harness alone."
+    - B7: "Since B728 no production path reads an approval record or a candidate: the player plays
+      DSD by its effective policy. This runbook is the engineering harness's."
 
 ### 9.2 iOS
 
 1. **(iOS) `.claude/rules/bridge-player.md:64`**, I3a and R12 (I2). Step 8 becomes: "a tuple of that
    `bitRate` with `channels == 2` whose B574 eligibility is native or DoP, or a
-   `dsdPlayback.converted` entry of that `bitRate` with positive `rateHz` and `validBits` (B728)
-   (`.dsdRateNotPlayable(label)`, or `.dsdUnplayable` with neither at any rate)". The Don't
+   `dsdPlayback.converted` entry of that `bitRate` with positive `rateHz`, a `validBits` of 24 or 16
+   and a known `dither` word (B728) (`.dsdRateNotPlayable(label)`, or `.dsdUnplayable` with neither
+   at any rate)". The Don't
    becomes: "**Don't admit DSD by anything but the grant's tuples and `converted` entries (no MPD
    gate, DAC altset, renderer capability, `dsdDAC`, `dsdMode` or `allowDoP`), …**"
 2. **(iOS) `.claude/rules/bridge-player.md:60`**, B574 (I1). It adds: "playback's `dop`, `pcm`,
@@ -1159,15 +1394,17 @@ rule that permits it.
    way to the evidence line. The Don't becomes: "**…or say bit-exact, bit-perfect, verified,
    decoded, a seal or a lock of DSD on the bridge's player, or show a converted occurrence as
    bit-exact (the footer says what is not checked).**"
-4. **New** (I4): "**The bridge player's DSD choice is written only by `PUT /v1/outputs/{id}/dsd`,
-   with the DAC key and revision just read, after the first-use sheet for native or DoP, and after
-   the confirmation for DoP on a DAC the bridge's database does not know.** **Don't send native or
-   DoP without `firstUseAcknowledged`, DoP without `confirmDoP` where the bridge asks for it, or a
-   choice for a DAC the app did not just read, and don't decide eligibility from the choice.**"
-5. **New** (I5): "**The first DSD play on a newly enabled native or DoP mode keeps a large Stop on
-   screen until the bridge reports first use observed, and a chime's answer is sent only for a check
-   that completed.** **Don't hide the Stop before `observed`, answer for a stopped check, or present
-   a listener confirmation as a verification.**"
+4. **New** (I4, which ships the sheet and the Stop with the mode UI): "**The bridge player's DSD
+   choice is written only by `PUT /v1/outputs/{id}/dsd`, with the DAC key and revision just read,
+   after the first-use sheet for native or DoP, and after the confirmation for DoP on a DAC the
+   bridge's database does not know; the first DSD play on a newly enabled native or DoP mode keeps a
+   large Stop on screen until the bridge reports first use `observed`.** **Don't send native or DoP
+   without `firstUseAcknowledged` from a sheet the user saw, DoP without `confirmDoP` where the
+   bridge asks for it, or a choice for a DAC the app did not just read; don't hide the Stop before
+   `observed`, and don't decide eligibility from the choice.**"
+5. **New** (I5, the optional chime alone): "**A chime is offered only for a tuple the bridge plays
+   now, and its answer is sent only for a check that completed.** **Don't answer for a stopped
+   check, or present a listener confirmation as a verification.**"
 6. **(iOS) `.claude/rules/settings-ui.md:123`**, B677 (I4). Its statement about bridge 0.2.2's player
    playing PCM becomes: the player plays PCM, and DSD as the bridge's per-DAC choice allows.
 7. **(iOS) `docs/BridgeProtocol.md`**, in each mirror.
@@ -1184,9 +1421,11 @@ rule that permits it.
 | Conversion quality | Aliasing or a weak stopband | The response from the coefficients; aliasing measured as a differential and the stopband on a steady state (the lessons in `ops/History-rules-jobs.md` under the decimation and `sox stats` bullets); a golden | The filter's documented shape |
 | Profile database errors | A wrong ID or a shared ID preselects the wrong mode | Product strings for shared IDs, captures, provenance, review, lint; first use still applies | A wrong capture that passes review |
 | iOS evidence used on Linux | Kernel quirks, implicit feedback or class compliance differ | Only DoP evidence is imported (DoP decoding is the DAC's, whatever the host); provenance says "heard on iOS"; first use | A DAC that behaves differently under Linux |
-| False refusals from the mixer check | A feature unit placed after DoP detection, or a missing dB TLV, refuses DoP needlessly | The reason tells the user to set 0 dB, or to choose native or convert | Inconvenience only |
+| False refusals from the mixer check | DoP refused needlessly by a feature unit placed after DoP detection, a missing dB TLV, an analogue attenuator on an unprofiled DAC, or a feature unit the playback-path parse cannot place | The reason says which; a profile's `analogVolumeControls`; native or convert | Inconvenience only: the check fails closed by design |
+| The cutover strands an owner's record | A version bump before B7 would refuse the record, and the owner's DSD would stop before it was migrated | B1 switches production to the legacy reader (version 35 on) before any bump; B6 migrates before B7 stops reading (§8) | none |
+| A converted successor cut near its boundary | Its onset folded into the predecessor's last 0.4 ms | The join window is held back and recomputed on a cut (§4.7) | A cut too late stops playback at the boundary, as any late cut does |
 | An older app with a B728 bridge | — | Native and DoP start only after a new client acknowledges first use; converted rates are invisible to the old grant; no qualification line is shown | none |
-| The state file lost or damaged | Choices or answers lost | Durable writes; a damaged file is moved aside; the defaults are the conservative ones | Re-acknowledging first use |
+| The state file lost or damaged | Choices or answers lost | Durable writes. A damaged file is moved aside, and DSD is refused until a choice is written again, so a migrated `off` never becomes conversion. A missing file migrates again from the keys still set | Choosing again after damage |
 | Privacy | — | `dacKey` is a hash; no serial or port is stored or sent; redaction is kept | none |
 | A check while something plays | Playback interrupted | `interrupt` is explicit; maintenance never autoplays | none |
 | A click at a probe (wake from autosuspend) | One click on some DACs | The probe runs only at the moments in §5 | A click on such DACs |
@@ -1232,47 +1471,75 @@ Each PR is about a day of worker time. Tests marked red first fail on the tree b
 
 | # | Repo | PR | Depends on | Tests, red first | Tier |
 |---|---|---|---|---|---|
-| B1 | bridge | The qualification guard narrows to the DSD byte path and the harness (§8); version 36; the runbook's header (§9.1, item 14) | none | `TestQualificationVersionGate` gains two rows: a change under `internal/config/` passes without a bump (red before), and one to `internal/alsapcm/sink_dsd_writer.go` is still refused without one | player |
-| B2 | bridge | `internal/player/dacprofile`: schema, embedded JSON, matcher, lint; the kernel-quirk seed; iOS DoP evidence for captured models; `dac inspect --json` gains `manufacturer`, `product` and `bcdDevice`; its bullet in the new section (§9.1, item 10) | none | `TestAProfileMatchesByUSBIdentityNeverByName`, `TestASharedReferenceIDNeedsItsProductString`, `TestNoTwoProfilesMatchOneIdentity`, `TestEveryClaimNamesItsProvenance`, `TestTheQX13CarriesItsHiddenModeCaveat`, `TestDACInspectPrintsTheModelIdentity` | standard |
-| B3 | bridge | The player's DSD state store (§2.5) and its migration reader: pure, not wired; its bullet in the new section | B2 | `TestAWriteIsDurableBeforeItReturns`, `TestAStateFileThatDoesNotReadIsMovedAside`, `TestNoDSDStateHoldsASerialOrAPort`, `TestTheMigrationTable` (every row of §3.6), `TestABackupCarriesTheChoicesAndRestoreDropsThisBoxsEvidence` | standard |
-| B4 | bridge | The silent probe (`alsapcm.Probe`) and its cache (§5); version 37; its bullet in the new section | B1 | `TestTheProbeRefinesAndNeverCommits` (the fake kernel records no HW_PARAMS, SW_PARAMS, PREPARE or WRITEI, one open and one close), `TestTheProbeLeavesABusyNodeAlone`, `TestTheProbeReadsTheDoPCarriersSignificantBits`, `TestNoProbeWhileASessionHoldsTheDevice` | player |
-| B5 | bridge | `policy.Effective` and the DoP gain check (§3.2 to §3.4): pure, not wired; the evidence-ladder bullet | B2, B3 | `TestTheEffectivePolicyTable` (every row of §3.2), `TestAutoConvertsAboveTheCapAndAnExplicitChoiceRefuses`, `TestDoPNeedsEveryPlaybackVolumeAtZeroDB` (each TLV kind, no TLV, unreadable), `TestNoDoPOnAnUnknownDACWithoutConfirmation`, `TestAutoOnAnUnknownDACPlaysOnlyWhatAListenerConfirmed` | standard |
-| B6 | bridge | Migration at serve's player start; the legacy keys still taken, each warned once; config words (§3.6); the rule at `player.md:86` | B3 | `TestLegacyDSDKeysStillLoadAndAreWarnedOnce`, `TestAnApprovedRecordMigratesToListenerConfirmed`, `TestTheMigrationRunsOnceAndWaitsForTheDAC`, `TestAPlayerBlockWithLegacyKeysNeverTurnsThePlayerOff` | standard |
-| B7 | bridge | The effective policy replaces `readPermission` in serve's backend and in `output play`; the approval readers stay the harness's; until B11 a converted rate refuses as `dsd_not_in_this_release`; version 38; the rules at `player.md:133`, `:187`, `:189` and `:197`, and the DoP-gain bullet | B4, B5, B6 | `TestServeReadsNoApprovalRecord`, `TestSelectionAndPublicationReadOneSet` (kept from 2d.2), `TestTheOpenedNodeMustBeTheIdentityThePolicyWasComputedFor`, `TestAStateChangeRevokesWhatLeftTheSet`, `TestNoTransportFallsBackAtRunTime`, `TestAMigratedOwnerSetupPlaysAsBefore` | player |
-| B8 | bridge | The read side (§7.1): `dsdDAC`, `evidence`, `converted` (empty until B11), `refused`, the `converted` playback token, the health flags; PROTOCOL.md; fixtures; the `wire.md` DSD bullet | B7 | `TestTheBridgeElementCarriesTheDACChoice`, `TestDSDOutputProtocolMembers` and `TestDSDOutputProtocolTokens` (new rows), `TestNoDACKeyOrModelCarriesASerialOrAPort`, the fixture exporter | standard, mirror (I1) |
-| B9 | bridge | `PUT /v1/outputs/{id}/dsd` (§7.2): CAS, key binding, confirmation, acknowledgement, `would_interrupt`, durable write, read-back; the `wire.md` bullet completed | B8 | `TestTheChoiceIsDurableBeforeItIsAnswered`, `TestAStaleRevisionChangesNothing`, `TestAChoiceForAnotherDACIsRefused`, `TestDoPOnAnUnknownDACNeedsConfirmation`, `TestNativeOrDoPNeedsFirstUseAcknowledged`, `TestAChoiceThatWouldStopPlaybackNeedsTheGoAhead`, `TestTheAnswerIsTheEffectiveChoice`; the route classification and error-table guards | standard, mirror (I4) |
-| B10 | bridge | `internal/player/dsdconv` (§4.2 to §4.5), not wired; the rules at `player.md:27` and `:36`, and the converter's bullet | none | `TestTheResponseMeetsItsMask` (from the coefficients), `TestAliasingIsADifferential` (CIFF fixtures, `internal/transcode/testdata/gen/dsd_fixtures.py`, or B725's), `TestUnityGainLevels` (a −20 dBFS `dsdtone` sine gives −20 dBFS ± 0.05), `TestOvermodulationSaturatesAndCounts`, `TestDelayLinesStartOnSilence`, `TestPaddingPastFramesIsSilence`, `TestTwoTracksContinueWithoutATransient`, `TestTheOutputIsDeterministic`, `BenchmarkConvert{DSD64,DSD128,DSD256}` | standard |
-| B11 | bridge | Conversion in the player: open, transport, joins, flush, observation and Details (§4.1, §4.7, §4.8); the rules at CLAUDE.md:91, `jobs.md:132`, `player.md:133-135` and `output.md` | B7, B10 | `TestAnUnknownDACPlaysDSDConverted`, `TestConvertedDSDReachesTheDACPackedByTheTable`, `TestConvertedTracksJoinInOneSinkWithoutAGap`, `TestAConvertedTrackFlushesBeforeAPCMSuccessor`, `TestStopDuringConversionIsBounded`, `TestTheObservationSaysConverted`, `TestAConvertedTrackIsNotLossless`, `TestNoConvertedStreamIsServed` | player, hardware (CPU and xruns on a Pi 4 and a Pi 5, §4.6; a listening pass) |
-| B12 | bridge | First use, `streaming_observed`, the check and its answer (§6); an OpenHome Stop ends a check; PROTOCOL.md; version 39; the `openhome.md` rule and the check's bullet | B9, B11, B725's modulator in a production package | `TestTheCheckPlaysOnlyItsTupleAndLeavesTheQueue`, `TestEveryStopEndsTheCheckWithinItsBound`, `TestTheCheckNeverAutoplays`, `TestOnlyACompleteCheckIsAnswered`, `TestANoiseAnswerTakesTheTransportOutOfAuto`, `TestStreamingObservedNeedsFiveSecondsWithoutAFault` | player, hardware (the owner hears the chime on a real DAC), mirror (I5) |
-| B13 | bridge | The console's Player page shows and sets the per-DAC choice and evidence (`cmd/bridge/serve_player_console.go:517-559`, the wording at `:532`) | B9 | the console's view and write tests for each state | standard |
-| I1 | iOS | Mirror of B8: PROTOCOL.md copied; DTOs for `dsdDAC`, `evidence`, `converted`, `refused` and the `converted` playback token; fixtures | B8 | decode tests: a malformed new member withholds only its own object (I1's rule); `converted` reads as its own token | full suite |
+| B1 | bridge | The cutover's first step (§8): `qualification.ReadLegacyApproval`, with the version and the identity comparison as parameters (§3.5). Production reads through it, taking version 35 and later. The guard narrows; version 36; the runbook's first header (§9.1, item 14); the legacy reader's bullet | none | `TestProductionStillPlaysAVersion35RecordAfterTheBump` (red before: `stale approval version`), `TestTheLegacyReaderRefusesBelowVersion35`, `TestTheLegacyReaderKeepsEveryOtherCheck` (a tampered body, a changed evidence byte, an unexecuted edge), and `TestQualificationVersionGate`: a change under `internal/config/` passes without a bump (red before), and one to `internal/alsapcm/sink_dsd_writer.go` still needs one | player |
+| B2 | bridge | `internal/player/dacprofile`: schema with `analogVolumeControls`, embedded JSON, matcher, lint; the kernel-quirk seed; iOS DoP evidence for captured models; `dac inspect --json` gains `manufacturer`, `product` and `bcdDevice`; its bullet (§9.1, item 10) | B1 (its `dac inspect` change is guarded until B1) | `TestAProfileMatchesByUSBIdentityNeverByName`, `TestASharedReferenceIDNeedsItsProductString`, `TestNoTwoProfilesMatchOneIdentity`, `TestEveryClaimNamesItsProvenance`, `TestAnAnalogueControlNeedsItsProvenance`, `TestTheQX13CarriesItsHiddenModeCaveat`, `TestDACInspectPrintsTheModelIdentity` | standard |
+| B3 | bridge | The player's DSD state (§2.5: `defaultMode`, the latest listener answer, a damaged file refuses DSD) and the migration's logic through the legacy reader with the model comparison (§3.6): pure, not wired; its bullet | B1, B2 | `TestAWriteIsDurableBeforeItReturns`, `TestADamagedStateRefusesDSDAndIsMovedAside`, `TestNoDSDStateHoldsASerialOrAPort`, `TestTheMigrationTable` (every row of §3.6, explicit `off` among them), `TestTheMigrationIgnoresThePortAndTakesVersion35`, `TestABackupCarriesTheChoicesAndRestoreDropsThisBoxsEvidence` | standard |
+| B4 | bridge | The silent probe (`alsapcm.Probe`) and its cache (§5); version 37; its bullet | B1 | `TestTheProbeRefinesAndNeverCommits` (the fake kernel records no HW_PARAMS, SW_PARAMS, PREPARE or WRITEI, one open and one close), `TestTheProbeLeavesABusyNodeAlone`, `TestTheProbeReadsTheDoPCarriersSignificantBits`, `TestNoProbeWhileASessionHoldsTheDevice` | player |
+| B5 | bridge | `policy.Effective`: the §3.2 table with the rejection rule and `defaultMode`; the DoP gain topology (§3.4: the playback-path descriptor parse, every level control, the analogue list); the per-occurrence reconciliation predicate (§3.5). Pure, not wired; the evidence-ladder bullet | B2, B3 | `TestTheEffectivePolicyTable` (every row of §3.2), `TestARejectionOutranksEveryPositiveInput` (native under `auto` on a known and an unknown DAC, after an earlier `clean`), `TestAutoConvertsAboveTheCapAndAnExplicitChoiceRefuses`, `TestAMissingControlIsNotUnity` (a playback feature unit with no visible level control), `TestEveryLevelControlCountsWhateverItsName`, `TestTheAnalogueListIsTheOnlyExemption`, `TestNoDoPOnAnUnknownDACWithoutConfirmation`, `TestAChangeIsReconciledPerOccurrence` | standard |
+| B6 | bridge | The migration at serve's player start (§3.6): explicit `off` becomes `defaultMode: off`; the legacy keys still taken, each warned once; config words; the rule at `player.md:86`. Production still reads the record through the legacy reader | B3 | `TestAnExplicitOffSurvivesAsTheDefault` (red before: unset and `off` both refuse, and nothing tells them apart), `TestAVersion35RecordOnAnotherPortMigrates`, `TestTheMigrationRunsOnceAndAgainAfterTheStateIsDeleted`, `TestLegacyDSDKeysStillLoadAndAreWarnedOnce`, `TestAPlayerBlockWithLegacyKeysNeverTurnsThePlayerOff` | standard |
+| B7 | bridge | The cutover: the effective policy replaces `readPermission` in serve and in `output play`; per-occurrence reconciliation, with prepared successors re-planned through the engine's hand-off path; `driver_accepted` from real opens; `streaming_observed` and first use `observed` recorded; until B11 a converted rate refuses as `dsd_not_in_this_release`; the runbook's second header; version 38; the rules at `player.md:133`, `:187`, `:189` and `:197`, and the DoP-topology bullet | B4, B5, B6 | `TestServeReadsNoApprovalRecord`, `TestSelectionAndPublicationReadOneSet` (kept from 2d.2), `TestTheOpenedNodeMustBeTheIdentityThePolicyWasComputedFor`, `TestAnUnusedRateCapChangeRevokesNothing`, `TestAChangedChoiceReplansThePreparedSuccessorAndSkipsNothing`, `TestAGainChangeRevokesDoPWithoutConsent`, `TestStreamingObservedNeedsFiveSecondsWithoutAFault`, `TestNoTransportFallsBackAtRunTime`, `TestAMigratedOwnerSetupPlaysAsBefore` | player |
+| B10 | bridge | `internal/player/dsdconv` (§4.2 to §4.5), not wired, with the join-window snapshot and recompute (§4.7); the rules at `player.md:27` and `:36`, and the converter's bullet | none | `TestTheResponseMeetsItsMask` (from the coefficients, the 30 kHz and the 20 kHz plans), `TestAliasingIsADifferential` (CIFF fixtures, `internal/transcode/testdata/gen/dsd_fixtures.py`, or B725's), `TestUnityGainLevels` (a −20 dBFS `dsdtone` sine gives −20 dBFS ± 0.05), `TestOvermodulationSaturatesAndCounts`, `TestDelayLinesStartAtNumericZero`, `TestPaddingPastFramesIsNotRead`, `TestTheJoinWindowRecomputesFromTheSnapshot`, `TestAnAbuttingJoinIsZeroPadded`, `TestTheOutputIsDeterministic`, `BenchmarkConvert{DSD64,DSD128,DSD256}` | standard |
+| B11 | bridge | Conversion in the player: `native.go`'s DSD open branches for a convert plan; continuous, abutting and reopen joins (DSD64 then DSD128 on one sink included); the join window held back and recomputed on a cut; the observation and Details from the plan (§4.1, §4.7, §4.8); version 39; the rules at CLAUDE.md:91, `jobs.md:132`, `player.md:133-135` and `output.md`, and the claims bullet | B7, B10 | `TestAnUnknownDACPlaysDSDConverted`, `TestConvertedDSDReachesTheDACPackedByTheTable`, `TestConvertedTracksJoinContinuouslyAtOneRate`, `TestDSD64ThenDSD128ConvertedShareTheSink` (no reopen), `TestDeletingOrReplacingAPreparedConvertedSuccessor` (the three moments of §4.7, against the oracle), `TestStopDuringConversionIsBounded`, `TestTheClaimsAreThePlans` (a 44.1 kHz, 16-bit DAC is said to get 16 bits, 20 kHz and TPDF), `TestAConvertedTrackIsNotLossless`, `TestNoConvertedStreamIsServed` | player, hardware (CPU and xruns on a Pi 4 and a Pi 5, §4.6; a listening pass) |
+| B8 | bridge | The read side (§7.1): `dsdDAC` with first use, `evidence`, `converted` with each plan, `refused`, the `converted` playback token and plan; no health flag yet; PROTOCOL.md; fixtures; the `wire.md` DSD bullet | B11 | `TestTheBridgeElementCarriesTheDACChoice`, `TestDSDOutputProtocolMembers` and `TestDSDOutputProtocolTokens` (new rows), `TestAConvertedEntryCarriesItsPlan`, `TestNoHealthFlagBeforeItsRoute`, `TestNoDACKeyOrModelCarriesASerialOrAPort`, the fixture exporter | standard, mirror (I1) |
+| B9 | bridge | `PUT /v1/outputs/{id}/dsd` (§7.2): CAS, key binding, confirmation, acknowledgement, the per-occurrence `would_interrupt`, durable write, read-back; the `bridgeDSDChoice` flag; the `wire.md` bullet completed | B8 | `TestTheChoiceIsDurableBeforeItIsAnswered`, `TestAStaleRevisionChangesNothing`, `TestAChoiceForAnotherDACIsRefused`, `TestDoPOnAnUnknownDACNeedsConfirmation`, `TestNativeOrDoPNeedsFirstUseAcknowledged`, `TestChoosingARejectedTransportAgainClearsTheRejection`, `TestOnlyAWriteThatInterruptsNeedsTheGoAhead`, `TestTheAnswerIsTheEffectiveChoice`, `TestTheChoiceFlagArrivesWithItsRoute`; the route classification and error-table guards | standard, mirror (I4) |
+| B12 | bridge | The check (§6.2, §7.2): admission by the effective policy, the chime modulated at its own rate, the `preparing` state, the answer, the `bridgeDSDCheck` flag; an OpenHome Stop ends a check; PROTOCOL.md; version 40; the `openhome.md` rule and the check's bullet | B9, B11, B725's modulator in a production package | `TestTheCheckAdmitsOnlyWhatTheSetPlays` (red before: an offered tuple with first use unacknowledged, and unconfirmed DoP), `TestTheChimeIsModulatedAtItsOwnRate` (no repeated bits; the pads are `0x69`), `TestEveryStopEndsTheCheckWithinItsBound`, `TestTheCheckNeverAutoplays`, `TestOnlyACompleteCheckIsAnswered`, `TestANoiseAnswerRefusesTheTransportInEveryMode`, `TestTheCheckFlagArrivesWithItsRoute` | player, hardware (the owner hears the chime on a real DAC), mirror (I5) |
+| B13 | bridge | The console's Player page shows and sets the per-DAC choice and evidence, with the same first-use sheet (`cmd/bridge/serve_player_console.go:517-559`, the wording at `:532`) | B9 | the console's view and write tests for each state | standard |
+| I1 | iOS | Mirror of B8: PROTOCOL.md copied; DTOs for `dsdDAC` with first use, `evidence`, `converted` with its plan, `refused`, and the `converted` playback token; fixtures | B8 | decode tests: a malformed new member withholds only its own object (I1's rule); `converted` reads as its own token | full suite |
 | I2 | iOS | R12 admits converted rates; the refusal copy (§7.6) | I1 | `testAConvertedRateIsEligibleUnderAFreshGrant`, `testAConvertedEntryFromAnotherEpochAdmitsNothing`, `testNoConvertedEntryKeepsTheRateRefused`, `testARefusedRateSaysItsReason` | full suite |
-| I3 | iOS | Signal Path: the converted card and the evidence line (§7.5) | I1 | copy-table pins with no forbidden word for DSD on the bridge's player; `testAConvertedOccurrenceIsNeverBitExact` | full suite |
-| I4 | iOS | The per-DAC mode UI (§7.4); mirror of B9 | B9, I1 | view-model tests for each state (known and unknown, offered and blocked, `stale`, `dac_changed`, `would_interrupt`) | full suite, mirror |
-| I5 | iOS | The first-use sheet, the large Stop, the chime and its answer (§6.1); mirror of B12 | B12, I4 | flow state-machine tests: the Stop stays until `observed`; no answer for a stopped check | full suite, mirror; the owner's hardware run |
+| I3 | iOS | Signal Path: the converted card composed from the plan, and the evidence line (§7.5) | I1 | copy-table pins with no forbidden word for DSD on the bridge's player; `testTheConvertedLineIsThePlans`; `testAConvertedOccurrenceIsNeverBitExact` | full suite |
+| I4 | iOS | The per-DAC mode UI (§7.4) with the first-use sheet and the large Stop (§6.1); mirror of B9 | B9, I1 | view-model tests for each state (known and unknown, offered and blocked, `stale`, `dac_changed`, `would_interrupt`); `testNativeOrDoPIsNeverSentWithoutTheSheet`; `testTheStopStaysUntilObserved` | full suite, mirror |
+| I5 | iOS | The optional chime and its answer (§6.1); mirror of B12 | B12, I4 | `testAChimeIsOfferedOnlyForATupleTheBridgePlays`, `testNoAnswerForAStoppedCheck` | full suite, mirror; the owner's hardware run |
 
 ### Order and parallelism
 
+**The merge order:** B1, B2, B3, B4, B5, B6, B7, B10, B11, B8 with I1, B9 with I4, B12 with I5,
+B13. I2 and I3 follow I1. B10 can be written from day one, but merges before B11.
+
 **Tracks:**
 
-- **Policy:** B2 → B3 → B5 → B6 → B7 → B8 → B9 → B13.
-- **Probe:** B1 → B4, which joins at B7.
-- **Conversion:** B10 from day one; B11 once B7 has merged.
-- **First use:** B12, after B9 and B11.
-- **iOS:** I1 after B8; then I2 and I3; I4 after B9; I5 after B12 and I4.
+- **The cutover:** B1, then B2, B3, B5 and B6, with B4 beside them; B7 joins them.
+- **Conversion, then the protocol:** B10 → B11 → B8 → B9 (Argon). `converted` is published only
+  once the player converts, and `mode: convert` is writable only once `converted` is published. No
+  build shows a rate the player refuses.
+- **First use:** B7 records `observed`; B9 takes the acknowledgement; I4 ships the sheet and the
+  Stop with the mode UI (Codex); B12 and I5 add the optional chime.
+- **iOS:** I1 after B8; I2 and I3 after I1; I4 after B9; I5 after B12 and I4.
 
-**The critical path** is B2, B3, B5, B6, B7, B8, B9, B12, I5: nine PRs in sequence. Merge B11 before
-B9 where the two are ready together, so a `convert` choice plays on the day the PUT ships.
+**The critical path** is B1, B2, B3, B5, B6, B7, B11, B8, B9, B12 and I5: eleven PRs in sequence.
 
-**Nothing changes for an unconfigured user until B11:** until then a rate the policy would convert
-is refused as today. Migrated owner setups keep playing native and DoP from B7 on.
+**What changes for whom, and when:**
 
-**Owner decisions to confirm before B1 merges:**
+- Until B11, a rate the policy would convert is refused, as today. From B11, an unknown DAC's DSD
+  plays converted for every controller, unless an explicit `off` was migrated.
+- A known DAC converts until its first use is acknowledged, which needs B9 and I4.
+- Migrated owner setups keep playing native and DoP throughout: through the legacy reader until B7,
+  then from their migrated state.
 
-1. Narrowing the qualification guard (§8).
-2. The 176.4 kHz cap on the conversion target (§4.3).
+**Decided** (the owner, 2026-11-04, taking Argon's recommendations):
+
+1. Narrow the qualification guard as §8 proposes.
+2. Cap conversion at 176.4 kHz (§4.3).
 3. Unity gain for live conversion (§4.4).
-4. That native and DoP play only after a client acknowledges first use, even on a known DAC (§3.2).
+4. First-use acknowledgement before native or DoP, even on a known DAC (§3.2).
 
-**Owner work the plan depends on:** captures of real units for the iOS-profiled models (§2.3), and
-the hardware runs of B11 and B12.
+**Owner work the plan depends on:** captures of real units for the iOS-profiled models, and their
+analogue volume controls where there are any (§2.3); and the hardware runs of B11 and B12.
+
+### Round 2: the reviews
+
+| Finding | Change |
+|---|---|
+| Codex P1: B1 invalidates production approvals before migration | §3.5, §3.6, §8: the legacy reader, with version and identity as parameters; production switches to it in B1 itself, before any bump; B6 migrates through it by model; B7 cuts over |
+| Codex P1: native `auto` ignores a listener's rejection | §1.2, §3.2, §6.4: one answer per tuple, the latest; a rejection outranks every positive input in every row and re-arms first use |
+| Codex P1: the enabling UI comes before its safety flow | §6.1, §6.2, §11: B7 records `observed`, B9 takes the acknowledgement, I4 ships the sheet and the Stop; only the chime waits for I5 |
+| Codex P1: the check bypasses acknowledgement | §6.2, §7.2: the effective policy admits the check |
+| Codex P1: an empty control match reads as unity | §3.4: two topologies, failing closed; every level control counts whatever its name; a feature unit with no visible control refuses |
+| Codex P2: explicit Off is lost | §2.5, §3.6: explicit `off` becomes `defaultMode: off`; a damaged state refuses DSD |
+| Codex P2: revision invalidation contradicts `interrupt` | §3.5, §7.2: reconciliation per occurrence; one predicate for the reconciliation and `would_interrupt` |
+| Codex P2: shared filter state needs new Cut semantics | §4.7: the join window held back, recomputed from a snapshot, cut at the window with the sink's marker; three-moment tests |
+| Codex P2: conversion claims ignore fallback targets | §4.8, §7.1, §7.5: every claim is read from the plan |
+| Argon 2: the chime's bit repetition | §6.2: each rate modulated natively; `0x69` pads; no repetition |
+| Argon 3: post-decoder analogue controls | §2.1, §3.4: `analogVolumeControls`, per profile, with provenance |
+| Argon 4: converted DSD64 to DSD128 | §4.7: an abutting join in the same sink |
+| Argon 5: health flags before their routes | §7.1, §11: `bridgeDSDChoice` in B9, `bridgeDSDCheck` in B12 |
+| Argon 6: the PR order | §11: B10 → B11 → B8 → B9 |
