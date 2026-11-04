@@ -27,9 +27,10 @@ import (
 // the record is a file beside the config, in the directory a write of the
 // config lands in (fsutil.ResolveParent, where the config's lock is), named
 // after it: `.bridge.yaml.datadir` beside bridge.yaml, holding the data dir's
-// path. Serve's is beside the file its boot read of the config was of
-// (serveDataDirRecord), for its check and its write alike, never beside the
-// file the config's name opens by then.
+// path as its config gave it and where that led (dataDirRecord). Serve's is
+// beside the file its boot read of the config was of (serveDataDirRecord), for
+// its check and its write alike, never beside the file the config's name
+// opens by then.
 //
 // Serve writes it once its database is open and its lock file is there
 // (recordServeDataDir), and, before it prepares the data dir, refuses one the
@@ -55,11 +56,33 @@ const dataDirRecordSuffix = ".datadir"
 // dataDirRecordMax is the most of a record readDataDirRecord reads.
 const dataDirRecordMax = 64 << 10
 
-// dataDirRecord is what the record holds.
+// dataDirRecord is what the record holds: the data dir serve opened its
+// database in, in both of its spellings (B651's fifth round, CodeRabbit on
+// #1397). config.ResolvePath cleans a path and resolves no link, so the
+// config's spelling can run through a link on the data dir's own volume, which
+// nothing resolves once the volume is away; where it led is kept beside it,
+// read while the volume was there. A record written before the fifth round
+// holds DataDir alone, and reads as that one spelling.
 type dataDirRecord struct {
-	// DataDir is the data dir serve opened its database in, as its config
-	// resolved it.
+	// DataDir is the data dir as its config gave it.
 	DataDir string `json:"dataDir"`
+	// Resolved is where DataDir led, through its links, when serve wrote the
+	// record (fsutil.ResolveLinks); "" where it did not resolve.
+	Resolved string `json:"resolved,omitempty"`
+}
+
+// names reports whether the record names dataDir, by either of its
+// spellings: each is compared with dataDir as the directory they name
+// (fsutil.SamePath, which resolves what still resolves on either side, a link
+// at the mount point among it with the volume away, and the strings are equal
+// where nothing does).
+func (r dataDirRecord) names(dataDir string) bool {
+	for _, spelling := range []string{r.DataDir, r.Resolved} {
+		if spelling != "" && fsutil.SamePath(spelling, dataDir) {
+			return true
+		}
+	}
+	return false
 }
 
 // dataDirRecordPath is where the record of the config at cfgFile is: beside
@@ -95,24 +118,24 @@ func serveDataDirRecord(boot config.BootFile) string {
 	return dataDirRecordBeside(file)
 }
 
-// readDataDirRecord answers the data dir the record at path names, "" for no
-// record, or one that does not read as one: such a record names nothing, and
-// the next serve that opens its database writes it again.
-func readDataDirRecord(path string) string {
+// readDataDirRecord answers what the record at path holds, the zero record
+// for no record, or one that does not read as one: such a record names
+// nothing, and the next serve that opens its database writes it again.
+func readDataDirRecord(path string) dataDirRecord {
 	f, _, err := fsutil.OpenAsFile(path)
 	if err != nil {
-		return ""
+		return dataDirRecord{}
 	}
 	defer f.Close()
 	b, err := io.ReadAll(io.LimitReader(f, dataDirRecordMax))
 	if err != nil {
-		return ""
+		return dataDirRecord{}
 	}
 	var r dataDirRecord
-	if json.Unmarshal(b, &r) != nil {
-		return ""
+	if json.Unmarshal(b, &r) != nil || r.DataDir == "" {
+		return dataDirRecord{}
 	}
-	return r.DataDir
+	return r
 }
 
 // dataDirGoneError is serve's refusal of a data dir its record names and that
@@ -152,18 +175,18 @@ func (e *dataDirGoneError) fix() string {
 // holding neither is not the one serve served from. Asked before serve
 // prepares the data dir, so a data dir that is not there is refused and never
 // made. The record and the config may spell one data dir two ways (through a
-// link, or in another case on a volume that folds case), so the two are
-// compared as the directory they name (fsutil.SamePath), never as strings.
-// Anything else is no refusal: no record (path "" included), or one that does
-// not read or names another data dir (the config's dataDir changed), a
-// database or a lock file there, and an error other than an entry's absence,
-// which serve's preparation, its lock and its store answer.
+// link, or in another case on a volume that folds case), so the record names
+// dataDir by either of its spellings, each compared as the directory it names
+// (dataDirRecord.names), never as a string alone. Anything else is no
+// refusal: no record (path "" included), or one that does not read or names
+// another data dir (the config's dataDir changed), a database or a lock file
+// there, and an error other than an entry's absence, which serve's
+// preparation, its lock and its store answer.
 func checkServeDataDirRecord(path, dataDir string) error {
 	if path == "" {
 		return nil
 	}
-	recorded := readDataDirRecord(path)
-	if recorded == "" || !fsutil.SamePath(recorded, dataDir) {
+	if !readDataDirRecord(path).names(dataDir) {
 		return nil
 	}
 	for _, p := range []string{manifest.DefaultDBPath(dataDir), filepath.Join(dataDir, serveLockFileName)} {
@@ -175,19 +198,19 @@ func checkServeDataDirRecord(path, dataDir string) error {
 }
 
 // recordServeDataDir writes the record at path naming dataDir, once serve's
-// database is open there and its lock file is too, and only when the record
-// does not name it already, in any spelling of it (fsutil.SamePath). No path
-// (a boot read that resolved no file), or a
-// record serve cannot write (a config directory it may not write), is said
-// once, at Warn, and the start goes on: a later start cannot then tell that
-// data dir's volume missing.
+// database is open there and its lock file is too: dataDir as its config gave
+// it and where it leads now, through its links, while the volume it is on is
+// there to resolve them (dataDirRecord). It writes only when the record does
+// not hold exactly those two already, so a record that names the data dir in
+// another spelling, or in one alone (a record written before B651's fifth
+// round), is written again in both of this config's. No path (a boot read that
+// resolved no file), or a record serve cannot write (a config directory it may
+// not write), is said once, at Warn, and the start goes on: a later start
+// cannot then tell that data dir's volume missing.
 func recordServeDataDir(path, dataDir string) {
 	if path == "" {
 		logger.Warn("could not record the data directory beside the config: serve's boot read resolved no file for the config's name, so a later start cannot tell the data directory's volume missing from a fresh install",
 			"dataDir", dataDir)
-		return
-	}
-	if recorded := readDataDirRecord(path); recorded != "" && fsutil.SamePath(recorded, dataDir) {
 		return
 	}
 	for _, p := range []string{manifest.DefaultDBPath(dataDir), filepath.Join(dataDir, serveLockFileName)} {
@@ -197,7 +220,14 @@ func recordServeDataDir(path, dataDir string) {
 			return
 		}
 	}
-	b, err := json.Marshal(dataDirRecord{DataDir: dataDir})
+	want := dataDirRecord{DataDir: dataDir}
+	if resolved, err := fsutil.ResolveLinks(dataDir); err == nil {
+		want.Resolved = resolved
+	}
+	if readDataDirRecord(path) == want {
+		return
+	}
+	b, err := json.Marshal(want)
 	if err == nil {
 		err = atomicwrite.WriteBytes(path, append(b, '\n'), ".bridge-datadir-*.tmp")
 	}

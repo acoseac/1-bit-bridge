@@ -447,6 +447,42 @@ func TestTheRecordRefusesOnlyTheDataDirItNamesWhileItHoldsNeitherFile(t *testing
 			t.Fatal(err)
 		}
 	}
+
+	// A record of both spellings (B651's fifth round) names the data dir by
+	// either, and refuses it on the same terms; one naming two other data
+	// dirs refuses nothing.
+	writeDataDirRecordSpellings(t, cfg, filepath.Join(base, "elsewhere"), filepath.Join(base, "other"))
+	if refused() {
+		t.Error("the check refused a data dir neither of its record's spellings names")
+	}
+	writeDataDirRecordSpellings(t, cfg, filepath.Join(base, "elsewhere"), dataDir)
+	if !refused() {
+		t.Error("the check took a data dir its record names by where it led, holding neither file")
+	}
+	p := filepath.Join(dataDir, serveLockFileName)
+	if err := os.WriteFile(p, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if refused() {
+		t.Errorf("the check refused a data dir its record names by where it led, holding %s", serveLockFileName)
+	}
+}
+
+// writeDataDirRecordSpellings writes the record beside cfg naming a data dir
+// as its config gave it, dataDir, and where it led, resolved, as a serve of
+// B651's fifth round writes it.
+func writeDataDirRecordSpellings(t *testing.T, cfg, dataDir, resolved string) {
+	t.Helper()
+	b, err := json.Marshal(struct {
+		DataDir  string `json:"dataDir"`
+		Resolved string `json:"resolved"`
+	}{dataDir, resolved})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dataDirRecordFile(cfg), append(b, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestTheRecordIsBesideTheFileTheConfigsNameOpens: a config named through a
