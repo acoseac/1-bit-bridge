@@ -719,10 +719,10 @@ func (h *harness) refused(what string, err error, reason Reason) {
 
 // playing inserts refs, reports the output available, plays the entry at
 // index i, reports its first occurrence audible and returns the IDs and
-// the session once the owner has noted that report. It publishes the
-// snapshot the report made before it notes the report, so a test that took
-// its mark at the snapshot could find this note after it, and take it for a
-// later report's (B709).
+// the session once the owner has noted that report. The owner publishes the
+// snapshot a report made before it notes the report, so a mark taken at the
+// snapshot could come before this note, and a wait for a later report's note
+// take this one for it (B709).
 func (h *harness) playing(i int, refs ...string) ([]uint32, *fakeSession) {
 	h.t.Helper()
 	ids := h.insert(refs...)
