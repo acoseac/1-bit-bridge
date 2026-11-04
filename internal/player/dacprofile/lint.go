@@ -46,6 +46,13 @@ var (
 	// design's section 1.3), with their inflections: no note claims a DAC
 	// decodes DSD.
 	reNeverSaid = regexp.MustCompile(`(?i)\b(verif(?:y|ies|ied)|decod(?:e|es|ed|ing)|bit-exact|bit-perfect|lock(?:s|ed|ing)?|seal(?:s|ed)?|qualif(?:y|ies|ied))\b`)
+	// reHeard and reRefusal are what a dop provenance line says of a heard
+	// rate and of a refused one: that it was heard, a listening, never a
+	// negotiation or a DoP lock (section 1.1: the iOS lock counts the packer's
+	// own frames and hears nothing back); and that a device refused it or
+	// played it as silence.
+	reHeard   = regexp.MustCompile(`(?i)\bheard\b`)
+	reRefusal = regexp.MustCompile(`(?i)\b(?:refus\w*|silen\w*)\b`)
 )
 
 // linter collects a database's problems.
@@ -136,6 +143,7 @@ func (l *linter) profile(who string, p *Profile, shared map[[2]uint16]bool) {
 	}
 	if p.DoP != nil {
 		l.dop(who, p.DoP)
+		l.dopEvidence(who, p)
 	}
 	if p.Timing != nil {
 		l.timing(who, p.Timing)
@@ -290,6 +298,25 @@ func (l *linter) dop(who string, d *DoP) {
 		}
 		l.firmware(cw, c.BCDDevice, true)
 		l.evidence(cw, c)
+	}
+}
+
+// dopEvidence asks a DoP claim's provenance for the evidence its rates are of
+// the kind their fields name: a heard rate a dop line that says it was heard,
+// and a refused rate one that says a device refused it or played it as
+// silence. A negotiation, a hardware confirmation or a DoP lock is evidence
+// of the transport, which no field here holds (the review of #1402).
+func (l *linter) dopEvidence(who string, p *Profile) {
+	says := func(re *regexp.Regexp) bool {
+		return slices.ContainsFunc(p.Provenance, func(line string) bool {
+			return strings.HasPrefix(line, "dop: ") && re.MatchString(line)
+		})
+	}
+	if p.DoP.HeardMaxBitRate != 0 && !says(reHeard) {
+		l.add("%s: a heard DoP rate is a listening, and no dop provenance line says it was heard: a negotiation, a hardware confirmation or a DoP lock hears nothing (section 1.1)", who)
+	}
+	if len(p.DoP.RefusedBitRates) > 0 && !says(reRefusal) {
+		l.add("%s: a refused DoP rate is one a device refused or played as silence, and no dop provenance line says refused or silence", who)
 	}
 }
 

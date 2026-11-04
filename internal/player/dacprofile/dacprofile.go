@@ -31,10 +31,11 @@
 //     and seeds nothing, and neither does a shared reference ID without its
 //     product string. The live altsets still decide what is offered: the
 //     claim makes the model known.
-//   - DoP: the rates heard on a device, the maker's stated rate and the rates
-//     a device refused, from the iOS registry at a named commit, which is the
-//     only thing imported from it beside its caveats; and the model's level
-//     controls the DoP gain check passes over (AnalogVolumeControls,
+//   - DoP: the rates a listening heard on a device (never one a negotiation or
+//     a DoP lock reached: those hear nothing), the maker's stated rate and the
+//     rates a device refused, from the iOS registry at a named commit, which
+//     is the only thing imported from it beside its caveats; and the model's
+//     level controls the DoP gain check passes over (AnalogVolumeControls,
 //     UnityAtRawMax), each with its own provenance or evidence.
 //   - Timing: the DSD silence each hardware run starts with.
 //   - Caveats, codes from a closed list, each with its note.
@@ -136,7 +137,10 @@ type Match struct {
 // Native is a claim that the model plays native DSD.
 type Native struct {
 	// MaxBitRate is the highest one-bit rate of the 44.1 kHz family its source
-	// shows, or 0 where the source states none, as a kernel quirk does.
+	// shows, or 0 where the source states none, as a kernel quirk does: 0 is
+	// unspecified, never unlimited. The rates offered are the live altsets'
+	// and the probe's, and no rate's evidence is made of a claim that states
+	// none.
 	MaxBitRate int `json:"maxBitRate"`
 	// Formats are ALSA's DSD formats the source names (DSD_U32_BE, …).
 	Formats []string `json:"formats"`
@@ -145,11 +149,14 @@ type Native struct {
 
 // DoP is what is known of the model's DSD over PCM.
 type DoP struct {
-	// HeardMaxBitRate is the highest rate on-device evidence reached,
-	// StatedMaxBitRate the maker's figure; 0 is none.
+	// HeardMaxBitRate is the highest rate a listening on a device heard,
+	// never one a negotiation, a hardware confirmation or a DoP lock reached
+	// (section 1.1: the iOS lock hears nothing back), and its dop provenance
+	// line says heard; StatedMaxBitRate is the maker's figure; 0 is none.
 	HeardMaxBitRate  int `json:"heardMaxBitRate"`
 	StatedMaxBitRate int `json:"statedMaxBitRate"`
-	// RefusedBitRates are the rates a device refused, or played as silence.
+	// RefusedBitRates are the rates a device refused, or played as silence,
+	// as a dop provenance line says.
 	RefusedBitRates []int `json:"refusedBitRates"`
 	// AnalogVolumeControls are the controls this model applies after its DoP
 	// decoder, which the DoP gain check passes over.
@@ -216,7 +223,8 @@ type Timing struct {
 	// run; 0 is DefaultDSDPrefillMs.
 	DSDPrefillMs int `json:"dsdPrefillMs"`
 	// PCMEntryMs is the settle the model needs before PCM after DSD; 0 is
-	// none given.
+	// none given. It is in the design's example and read by nothing, so no
+	// seed sets it until its meaning and its reader are specified.
 	PCMEntryMs int `json:"pcmEntryMs"`
 }
 

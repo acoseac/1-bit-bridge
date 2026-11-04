@@ -10,11 +10,13 @@ database PR read the registry at that commit and check that no imported DoP rate
 
 For each profile whose DoP source is the iOS registry it finds the row by its id in the registry's
 profiles list, reads the row's maxDSDRate (.dsd64 is 64 times 44100 one-bit samples a second, and
-so on; .none is no DoP at all), and checks that the heard and the stated rate are at or below it,
-and that each rate a device refused lies above it, where the row does not reach. It prints one line
-a profile and exits 1 on a violation, a row or a commit the database names that the file is not,
-or a file it cannot read. Paste its output into the PR. The registry's prose is never read: only
-each row's id and its maxDSDRate.
+so on; .none is no DoP at all), and checks that the heard and the stated rate are at or below it.
+A rate a device refused is not compared with the row, which may keep a published maximum beside a
+refusal at or below it (ifi.generic does); its evidence is in the row's comments, and the
+database's lint holds it to the profile's own provenance. It prints one line a profile and exits 1
+on a violation, a row or a commit the database names that the file is not, or a file it cannot
+read. Paste its output into the PR. The registry's prose is never read: only each row's id and its
+maxDSDRate. `--self-test` pins the reader and the check on a synthetic registry.
 """
 
 import argparse
@@ -97,9 +99,11 @@ def check(profiles, rows, commit):
         for name in ("heardMaxBitRate", "statedMaxBitRate"):
             if dop[name] > cap:
                 problems.append("%s %d exceeds the row's %d" % (name, dop[name], cap))
-        for refused in dop["refusedBitRates"]:
-            if refused <= cap:
-                problems.append("refused %d is a rate the row reaches (%d)" % (refused, cap))
+        # A refusal is not compared with the row: a row may keep a published
+        # maximum beside a refusal measured at or below it (ifi.generic keeps
+        # DSD256 while both measured units refused it), and the evidence for a
+        # refusal is in the row's comments, which this reads none of. The lint
+        # holds each refusal to the profile's own provenance.
         verdict = "FAIL" if problems else "ok"
         ok = ok and not problems
         lines.append("%s %s: row %s, maxDSDRate %d; heard %d, stated %d, refused %s%s" % (

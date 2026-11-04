@@ -2,9 +2,19 @@
   "schemaVersion": 1,
   "sharedReferenceIds": [
     {
+      "vendorId": "0d8c",
+      "productId": "0316",
+      "why": "C-Media's vendor ID with a product ID more than one maker's units ship: the kernel gives it a DSD quirk under one maker's name (Linux kernel sound/usb/quirks.c, v6.12), and another maker's firmware note names it too (the review of PR #1402, 2026-11-04); a profile on it waits for a captured product string"
+    },
+    {
       "vendorId": "16d0",
       "productId": "071a",
       "why": "the Amanero Combo384, a USB interface board DACs of several makers are built on: the kernel's DSD quirk for this ID follows the board's firmware, its bcdDevice, alone (Linux kernel sound/usb/quirks.c, v6.12)"
+    },
+    {
+      "vendorId": "20a0",
+      "productId": "4143",
+      "why": "the WaveIO, a USB interface board other makers' DACs are built on, as its maker describes it (the review of PR #1402, 2026-11-04); the kernel gives the board's altsetting 3 a DSD quirk (Linux kernel sound/usb/quirks.c, v6.12); a profile on it waits for a captured product string"
     },
     {
       "vendorId": "20b1",
@@ -56,17 +66,7 @@
         }
       ],
       "native": null,
-      "dop": {
-        "heardMaxBitRate": 11289600,
-        "statedMaxBitRate": 0,
-        "refusedBitRates": [],
-        "analogVolumeControls": [],
-        "unityAtRawMax": [],
-        "source": {
-          "kind": "ios-registry",
-          "ref": "DACProfile.swift chord.hugo2 at iOS cd125088"
-        }
-      },
+      "dop": null,
       "timing": {
         "dsdPrefillMs": 700,
         "pcmEntryMs": 0
@@ -74,7 +74,6 @@
       "caveats": [],
       "provenance": [
         "identity: owner capture, Linux, 2026-11-04: 245f:0815, the card its audio control interface 1, product string Hugo2, on bcdDevice 0197",
-        "dop: iOS profile chord.hugo2, DSD256 hardware-confirmed on 2026-08-29 (iOS cd125088); on Linux its one playback altset, S32_LE with 32 bits, takes 705600, the DSD256 carrier, and lists no DSD format (owner capture, Linux, 2026-11-04)",
         "timing: iOS profile chord.hugo2's DSD resync delay, 0.7 s (iOS cd125088)"
       ]
     },
@@ -196,36 +195,6 @@
       "provenance": [
         "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 0644:806b",
         "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on the last altsetting, after the vendor mode switch"
-      ]
-    },
-    {
-      "id": "kernel.0d8c-0316",
-      "name": "USB audio device 0d8c:0316",
-      "match": [
-        {
-          "vendorId": "0d8c",
-          "productId": "0316",
-          "interface": null,
-          "product": null,
-          "bcdDevice": null
-        }
-      ],
-      "native": {
-        "maxBitRate": 0,
-        "formats": [
-          "DSD_U32_BE"
-        ],
-        "source": {
-          "kind": "kernel-quirk",
-          "ref": "sound/usb/quirks.c at v6.12"
-        }
-      },
-      "dop": null,
-      "timing": null,
-      "caveats": [],
-      "provenance": [
-        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 0d8c:0316",
-        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
       ]
     },
     {
@@ -739,36 +708,6 @@
       ]
     },
     {
-      "id": "kernel.20a0-4143",
-      "name": "USB audio device 20a0:4143",
-      "match": [
-        {
-          "vendorId": "20a0",
-          "productId": "4143",
-          "interface": null,
-          "product": null,
-          "bcdDevice": null
-        }
-      ],
-      "native": {
-        "maxBitRate": 0,
-        "formats": [
-          "DSD_U32_BE"
-        ],
-        "source": {
-          "kind": "kernel-quirk",
-          "ref": "sound/usb/quirks.c at v6.12"
-        }
-      },
-      "dop": null,
-      "timing": null,
-      "caveats": [],
-      "provenance": [
-        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 20a0:4143",
-        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
-      ]
-    },
-    {
       "id": "kernel.20b1-3089",
       "name": "USB audio device 20b1:3089",
       "match": [
@@ -1241,7 +1180,7 @@
         }
       },
       "dop": {
-        "heardMaxBitRate": 5644800,
+        "heardMaxBitRate": 0,
         "statedMaxBitRate": 0,
         "refusedBitRates": [
           11289600
@@ -1258,7 +1197,7 @@
       "provenance": [
         "identity: owner capture, Linux, 2026-11-04: 25ce:0025, the card its audio control interface 0, product string Brooklyn DAC+, on bcdDevice 0100",
         "native: owner capture, Linux, 2026-11-04: the playback stream's interface 2, altset 2, lists DSD_U32_BE at frame rates up to 352800, DSD256",
-        "dop: iOS profile mytek.brooklyn.dac.plus, confirmed on hardware on iOS, the row's log of 2026-06-21: DSD128 played over DoP and the unit refused DSD256's 705.6 kHz carrier (iOS cd125088); on Linux its S32_LE altset stops at 384000, below that carrier (owner capture, Linux, 2026-11-04)"
+        "dop: iOS profile mytek.brooklyn.dac.plus, on a device on iOS, the row's log of 2026-06-21: the unit refused DSD256's 705.6 kHz carrier, which it would not negotiate (iOS cd125088); DSD128's carrier reached a DoP lock there, which is no listening, so no rate is held as heard; on Linux its S32_LE altset stops at 384000, below the DSD256 carrier (owner capture, Linux, 2026-11-04)"
       ]
     }
   ]

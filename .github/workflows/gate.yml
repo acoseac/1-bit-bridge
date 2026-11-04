@@ -441,6 +441,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: bash scripts/dac-profiles/kernel-check.sh
+      - name: the iOS DoP check's self-test
+        # The check itself reads an iOS checkout at the commit the profiles
+        # name, which CI has none of (the author runs it); its self-test pins
+        # the registry reader and the rate checks on a synthetic registry.
+        run: python3 scripts/dac-profiles/ios-check.py --self-test
 
   # Executes the suite on the two platforms `build-all` only ever
   # CROSS-COMPILES. ~1,600 lines are behind `//go:build windows`
