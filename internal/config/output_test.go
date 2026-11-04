@@ -146,7 +146,7 @@ func TestOutputRefusalsCarryNoValue(t *testing.T) {
 		{"a negative port", OutputConfig{LoopbackPort: &negative}, "output.loopbackPort", "-5"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.output.LoopbackPort == &digits && serial > math.MaxInt {
+			if tc.name == "a serial of digits as the port" && serial > math.MaxInt {
 				t.Skip("an int this size cannot hold the serial")
 			}
 			cfg := base

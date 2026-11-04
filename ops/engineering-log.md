@@ -72551,14 +72551,9 @@ guarded values feed (pidAlive's pid, `LoopbackPort`, `RequestsPerMinute`)
 holds what a real pidfile or setting holds. Past 2^31-1 a 32-bit build
 refuses the value where it is parsed (Atoi, yaml.v3), value free, so it never
 reaches the int; the one difference is that a limit past 2^31-1 requests a
-minute loads on 64-bit and is refused on 32-bit. Off the brief's targets,
-`GOOS=windows GOARCH=386 go build ./...` fails in production code:
-internal/doctor/doctor_windows.go:81, `pid > math.MaxUint32`, "math.MaxUint32
-(untyped int constant 4294967295) overflows int". With that line as
-`uint64(pid) > math.MaxUint32`, which answers as before on 64-bit, windows/386
-builds and vets, tests included (measured uncommitted, then put back). The
-bridge ships no windows/386 and no CI leg vets it, so it is a follow-up, not
-fixed here.
+minute loads on 64-bit and is refused on 32-bit. Off the brief's targets, a
+windows/386 build problem was found and left as a follow-up, backlog B713;
+the bridge ships no windows/386 and no CI leg vets it.
 
 **The CI step** (ff084901). gate.yml's vet job runs, after `make vet`, "vet
 for 32-bit targets (portability)": `GOOS=linux GOARCH=arm make vet`, then
