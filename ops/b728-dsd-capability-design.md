@@ -2,11 +2,11 @@
 
 Design and PR plan, 2026-11-04. This round writes no code.
 
-**Status.** For review, round 2. The decision this implements is binding: the owner decided it on
+**Status.** For review, round 3. The decision this implements is binding: the owner decided it on
 2026-11-04, after the Argon and Codex consult, and the reviewers' notes on the brief are folded in
-(Codex 1 to 3 and Argon 2 to 5). Round 2 folds in Codex's and Argon's reviews of this design, and
-the owner's four decisions on its open points; both are listed at the end of §11. Every current
-behaviour this design changes is cited as
+(Codex 1 to 3 and Argon 2 to 5). Round 2 folds in Codex's and Argon's reviews of this design and the
+owner's four decisions on its open points. Round 3 folds in the last points from Codex and Gemini.
+All of these are listed at the end of §11. Every current behaviour this design changes is cited as
 `path:line` at bridge main `1df423fc`. iOS citations read `(iOS) path:line` at iOS main
 `cea8bdf6`, with paths relative to the app's source directory unless they begin with `.claude/`,
 `docs/` or `Tests/`.
@@ -112,6 +112,7 @@ decision names. Its USB identity is a placeholder until a capture supplies it (�
         "statedMaxBitRate": 11289600,
         "refusedBitRates": [],
         "analogVolumeControls": [],
+        "unityAtRawMax": [],
         "source": { "kind": "ios-registry", "ref": "DACProfile.swift fiio.qx13 at iOS <commit>" }
       },
       "timing": { "dsdPrefillMs": 400, "pcmEntryMs": 800 },
@@ -142,6 +143,20 @@ Fields:
     such as an analogue `Master Playback Volume` beside a digital `PCM Playback Volume`. Each one is
     named by interface, name and index, with its own provenance line. The DoP gain check (§3.4)
     passes these over, and checks every other control as strictly as for an unknown DAC.
+  - `unityAtRawMax`: level controls with no dB scale whose raw maximum is unity on this model (Gemini).
+    Each is `{interface, name, index, rawMax, bcdDevice, evidence}`. The DoP gain check (§3.4)
+    admits such a control only while it reads exactly `rawMax` on every channel and its range's
+    maximum is still `rawMax`, on a firmware `bcdDevice` lists.
+
+    The `evidence` must be one of two kinds:
+    - `document`: the maker's documentation that this control's maximum passes samples unchanged,
+      cited by its title and section;
+    - `measured`: a capture showing it. Either the unit's digital output or loopback, at the raw
+      maximum, compared byte for byte with PCM sent in; or a DoP stream at the raw maximum that the
+      DAC's own indicator reports as DSD and that is heard clean.
+
+    A `measured` entry names the bcdDevice it was taken on. The lint refuses an entry with neither
+    kind, or with no bcdDevice.
 
   Its source is the iOS registry at a named commit, and a capture for the volume controls.
 - **`timing.dsdPrefillMs`** is the DSD silence written before content in each hardware run. It is
@@ -167,8 +182,26 @@ Fields:
   ((iOS) `DACProfile.swift:204-208`, `:449-450`, `:1408-1412`), because iOS exposes no USB IDs
   ((iOS) `DACProfile.swift:723-731`). The bridge reads the IDs from sysfs and imports nothing of
   that matcher.
-- **On the wire** a DAC is named by `dacKey`: `d1-` followed by the first 16 hex digits of the
-  SHA-256 of the four key fields. It carries no serial or port.
+- **On the wire** a DAC is named by `dacKey`: `d1-` followed by the lowercase hex of the first 8
+  bytes (16 hex digits) of the SHA-256 of the key's canonical form. It carries no serial or port.
+- **The canonical form** (Gemini) is five lines of UTF-8, joined by a single LF (0x0A), with no
+  trailing LF:
+  1. `dacKey/1`, the form's version.
+  2. The vendor ID, as four lowercase hex digits (`usbid.Hex16`).
+  3. The product ID, likewise.
+  4. The interface: `=` and its number in decimal (no sign, no leading zero, `=0` for zero), or a
+     lone `-` when the reading has none. Null and absent are the same, `-`.
+  5. The product string: `=` and the string exactly as the sysfs reader returns it, or a lone `-`
+     when the unit has none. The reader trims surrounding white space and refuses an empty value
+     and any NUL, CR or LF (`internal/alsa/qualification.go:43-46`), so a field holds no LF and
+     the lines cannot run together. Nothing else is normalized: no case folding and no Unicode
+     normalization.
+
+  The `=` prefix keeps a present value apart from absence, so a product named `-` is `=-`. The
+  state file's `key` object holds the same fields, with `null` for an absent interface or product.
+  A key is compared by its canonical form, never field by field, and the form's version changes
+  only with a new `d` prefix. B2 pins it with test vectors, an absent interface and a product of
+  `-` among them.
 
 ### 2.3 Seeding
 
@@ -245,7 +278,7 @@ does a shared reference ID without a product string. The live altsets still deci
       "key": { "vendorId": "<vid>", "productId": "<pid>", "interface": 1, "product": "<product>" },
       "choice": { "mode": "auto", "maxBitRate": 0, "revision": 4, "setAt": "2026-11-05T10:00:00Z", "setBy": "app" },
       "dopConfirmed": null,
-      "firstUse": [ { "transport": "native", "bcdDevice": "<bcd>", "acknowledgedAt": "…", "observedAt": "…" } ],
+      "firstUse": [ { "transport": "native", "bcdDevice": "<bcd>", "bitRates": [2822400], "acknowledgedAt": "…", "observedAt": "…" } ],
       "evidence": [
         { "transport": "native", "format": "DSD_U32_BE", "bitRate": 2822400, "bcdDevice": "<bcd>",
           "driverAcceptedAt": "…", "kernel": "<release>", "streamingObservedAt": "…",
@@ -253,7 +286,8 @@ does a shared reference ID without a product string. The live altsets still deci
       ]
     }
   ],
-  "migratedFrom": null
+  "migratedFrom": null,
+  "warnings": [ { "code": "migration_record_refused", "reason": "stale_version", "at": "…" } ]
 }
 ```
 
@@ -262,6 +296,15 @@ does a shared reference ID without a product string. The live altsets still deci
   (§3.6).
 - **One listener answer per tuple.** `listener` holds the latest answer for the transport, rate and
   bcdDevice: `clean`, `noise` or `nothing` (§1.2).
+- **What an acknowledgement covers.** A `firstUse` entry with no `bitRates` covers every rate: a
+  write that carried `firstUseAcknowledged` made it (§7.2). One with `bitRates` covers those rates
+  alone: a migrated record made it, and lists the rates the record approved (§3.6). A later
+  acknowledgement of the transport, or a write that chooses the mode again, replaces the entry with
+  one covering every rate.
+- **Warnings** record what the app must be able to explain: a migration that could not carry a
+  record over, and a damaged state moved aside. Each has a code and, where one applies, a reason
+  word (§7.1). They are kept across restarts, and a write that chooses for the DAC concerned clears
+  that DAC's warnings.
 
 - **Why the data directory and not `bridge.yaml`.** A paired app sets the choice, per DAC, as it
   does the queue the player keeps (the queue bullets in `.claude/rules/player.md`). The evidence
@@ -273,8 +316,9 @@ does a shared reference ID without a product string. The live altsets still deci
   must already be on storage that outlives a reboot (the reservation bullet in
   `.claude/rules/player.md`). A `noise` answer lost to a crash would otherwise put DoP back.
 - **A file that does not read** is moved aside with a timestamp and never deleted, as the queue file
-  is. DSD is then refused at every rate (`dsd_state_unreadable`) until a choice is written again,
-  and PCM plays. Falling back to the defaults would turn conversion on for a user whose file held
+  is. In its place the player durably writes a fresh state that holds only the `state_unreadable`
+  warning, so the refusal survives a restart. DSD is then refused at every rate
+  (`dsd_state_unreadable`) until a choice is written again, and PCM plays. Falling back to the defaults would turn conversion on for a user whose file held
   `defaultMode: off`. A missing file is not a damaged one: it means the defaults, and the migration
   (§3.6) runs again from any legacy key still set.
 - **No serial, port, card number or devnum** is stored. A test reads the file for them.
@@ -311,8 +355,10 @@ Definitions, for a rate r:
 - **DoP carrier offered:** S32_LE at r ÷ 16 with at least 24 significant bits, the packer's
   requirement (`ops/b470-native-qualification.md:355-359`), and not refused by the probe.
 - **DoP gain at unity:** §3.4.
-- **Acknowledged:** first use of the transport acknowledged under the current bcdDevice, and not
-  re-armed since by a rejection (§6).
+- **Acknowledged at r:** first use of the transport acknowledged under the current bcdDevice by an
+  entry that covers r, and not re-armed since by a rejection (§6). A write's acknowledgement covers
+  every rate; a migrated one covers only the rates its record approved (§2.5, §3.6). So an owner who
+  approved DSD64 alone gets no DSD128 until the app acknowledges again.
 - **No rejection:** the latest listener answer for that transport at r under this bcdDevice is not
   `noise` or `nothing` (§1.2). A rejection outranks every positive input: a profile claim, a driver
   acceptance, streaming observed, and an earlier `clean`.
@@ -322,10 +368,10 @@ The choice is the DAC's own, or the state's `defaultMode` for a DAC with none (�
 
 | Choice | Plays native at r when | Plays DoP at r when | Otherwise, at r |
 |---|---|---|---|
-| `auto`, known DAC | native offered; acknowledged; no rejection | the profile heard DoP at r, or the user confirmed DoP; carrier offered; gain at unity; acknowledged; no rejection | converted |
-| `auto`, unknown DAC | the latest listener answer for native at r is `clean`; native offered; acknowledged | the latest listener answer for DoP at r is `clean`; DoP confirmed; carrier offered; gain at unity; acknowledged | converted |
-| `native` | native offered; r ≤ `maxBitRate`; acknowledged; no rejection | never | refused: `native_not_offered`, `dsd_rate_above_choice`, `first_use_pending`, `listener_rejected` |
-| `dop` | never | carrier offered; r ≤ `maxBitRate`; gain at unity; the profile heard or stated DoP at r, or DoP confirmed; acknowledged; no rejection | refused: `dop_not_offered`, `dop_gain_not_unity`, `dop_gain_unverifiable`, `dop_confirmation_required`, `dsd_rate_above_choice`, `first_use_pending`, `listener_rejected` |
+| `auto`, known DAC | native offered; acknowledged at r; no rejection | the profile heard DoP at r, or the user confirmed DoP; carrier offered; gain at unity; acknowledged at r; no rejection | converted |
+| `auto`, unknown DAC | the latest listener answer for native at r is `clean`; native offered; acknowledged at r | the latest listener answer for DoP at r is `clean`; DoP confirmed; carrier offered; gain at unity; acknowledged at r | converted |
+| `native` | native offered; r ≤ `maxBitRate`; acknowledged at r; no rejection | never | refused: `native_not_offered`, `dsd_rate_above_choice`, `first_use_pending`, `listener_rejected` |
+| `dop` | never | carrier offered; r ≤ `maxBitRate`; gain at unity; the profile heard or stated DoP at r, or DoP confirmed; acknowledged at r; no rejection | refused: `dop_not_offered`, `dop_gain_not_unity`, `dop_gain_unverifiable`, `dop_confirmation_required`, `dsd_rate_above_choice`, `first_use_pending`, `listener_rejected` |
 | `convert` | never | never | converted (refused as `conversion_not_offered` if the DAC takes no target) |
 | `off` | never | never | refused: `dsd_off_by_choice` |
 
@@ -338,9 +384,13 @@ The choice is the DAC's own, or the state's `defaultMode` for a DAC with none (�
 - **The cap under `auto`:** a `maxBitRate` caps native and DoP, and rates above it are converted
   (§3.3).
 - **Explicit `native` or `dop`** carries its first-use acknowledgement in the same write (§7.2), so
-  it starts acknowledged. A bcdDevice change, or a rejection, re-arms first use. The mode then
-  refuses as `first_use_pending` or `listener_rejected` until the app writes it again with the
-  acknowledgement.
+  it starts acknowledged at every rate. A bcdDevice change, or a rejection, re-arms first use. The
+  mode then refuses as `first_use_pending` or `listener_rejected` until the app writes it again with
+  the acknowledgement.
+- **A migrated `native` or `dop`** (§3.6) starts acknowledged only at the rates its record approved.
+  Any other offered rate refuses as `first_use_pending` under the explicit mode, or converts under
+  `auto`, until the user acknowledges the transport or chooses the mode again. Either write widens
+  the acknowledgement to every rate (§2.5).
 - **A known DAC with no DoP claim at r** treats DoP as an unknown DAC does: `auto` needs the user's
   confirmation, and an explicit `dop` write without `confirmDoP` is refused (§7.2).
 - **The listener-answer clause** under `auto` on an unknown DAC keeps a migrated owner approval
@@ -384,16 +434,26 @@ offer.
   1. **No gain stage.** The playback path has no feature unit, and the card has no level control.
      This is the topology today's unconstrained policies require (`authorization.go:161-174`;
      `internal/player/qualification/approval.go:218-229`).
-  2. **Every gain stage visible and at unity.** Each level control either reads 0 dB on every
-     channel by its dB TLV, or is one of the profile's `analogVolumeControls` (§2.1). If the
-     playback path has a feature unit with a volume control, at least one level control exists. The
-     TLV is `Control.TLV` (`internal/alsactl/control.go:26`); B5 parses `DB_SCALE`, `DB_MINMAX`
-     (with its mute variant), `DB_LINEAR` and `DB_RANGE`.
+  2. **Every gain stage visible and at unity.** Each level control is at unity in one of three
+     ways:
+     - it reads 0 dB on every channel by its dB TLV;
+     - it is one of the profile's `analogVolumeControls` (§2.1);
+     - it is one of the profile's `unityAtRawMax` controls (§2.1), reads exactly its `rawMax` on
+       every channel, its range's maximum is still `rawMax`, and the firmware is one the entry
+       lists.
+
+     If the playback path has a feature unit with a volume control, at least one level control
+     exists. The TLV is `Control.TLV` (`internal/alsactl/control.go:26`); B5 parses `DB_SCALE`,
+     `DB_MINMAX` (with its mute variant), `DB_LINEAR` and `DB_RANGE`.
 
   Anything else refuses:
-  - a level control off 0 dB refuses as `dop_gain_not_unity`;
+  - a level control off 0 dB, or a `unityAtRawMax` control below its `rawMax`, refuses as
+    `dop_gain_not_unity`;
   - these refuse as `dop_gain_unverifiable`:
-    - a level control with no dB scale, or one that cannot be read;
+    - a level control with no dB scale that is not a `unityAtRawMax` control, or a control that
+      cannot be read;
+    - a `unityAtRawMax` control whose range's maximum is no longer `rawMax`, or on a firmware the
+      entry does not list;
     - a feature unit on the playback path with no visible level control;
     - descriptors that cannot be read or parsed.
 
@@ -405,6 +465,15 @@ offer.
   it would make the user run the analogue stage at full level, against the first-use guidance. A
   profile names such controls in `dop.analogVolumeControls`, with provenance, and the check passes
   them over. An unknown DAC has none, so every level control must read 0 dB on it.
+- **The raw-maximum flag** (Gemini). A known DAC can expose a digital level control with no dB
+  scale whose raw maximum is unity. Without the flag it refuses DoP as `dop_gain_unverifiable`,
+  which stays the default. A profile names such a control in `dop.unityAtRawMax`, and DoP is
+  admitted only at that raw maximum, as the analogue allowlist admits its controls.
+
+  Setting the flag needs evidence (§2.1): the maker's documentation, or a measurement on a named
+  bcdDevice. The measurement is a byte-for-byte digital capture at the raw maximum, or a DoP stream
+  the DAC's own indicator reports as DSD and that is heard clean. An unknown DAC, or a firmware the
+  entry does not list, gets no such pass.
 - **A change while DoP plays** revokes the occurrence: an immediate stop, and that rate out of the
   epoch (`PROTOCOL.md:1020`). It is a safety revocation, which needs no consent (§3.5).
 - **What this cannot see:** a DAC's own DSP, such as a PEQ mode or a firmware EQ. That is why
@@ -511,19 +580,27 @@ policy would convert.
 | Legacy | And | Migrates to |
 |---|---|---|
 | `dsdMode` unset | — | nothing: the defaults (§3.2) |
-| `dsdMode: off`, written | — | `defaultMode: off`: every DAC with no choice of its own refuses DSD (`dsd_off_by_choice`), a DAC bound later included, until an explicit per-DAC choice in the app or the console |
-| `native` | a record the legacy reader takes for this unit's model (§3.5) | choice `native`; each approved native tuple's listener answer `clean`, on the record's `QualifiedOn` (schema 2) or undated (schema 1); first use acknowledged |
-| `dop` | `allowDoP: true` and such a record | choice `dop`; DoP confirmed; the DoP tuples `clean`; first use acknowledged |
-| `dop` | `allowDoP: false` | `defaultMode: off`: today this refuses all DSD as `dop_not_allowed` (`authorization.go:250-252`), and converting would play what the operator held back |
-| `auto` | such a record | choice `auto`; its tuples `clean`, so `auto` plays them even on an unknown DAC (§3.2); first use acknowledged for native, and for DoP only with `allowDoP: true`, which also confirms DoP. With `false`, DoP stays out until the app acknowledges its first use, an explicit act |
-| `native` | no record, or one the legacy reader refuses | choice `native` with no answers and first use not acknowledged: it refuses (`first_use_pending`) until the app acknowledges, and never converts. One Warn names the reason |
-| `dop` | `allowDoP: true`, and no record or a refused one | choice `dop`, DoP not confirmed: it refuses until the app confirms and acknowledges. One Warn |
-| `auto` | no record, or a refused one | nothing: the defaults. One Warn |
+| `dsdMode: off`, written | — | `defaultMode: off`: every DAC with no choice of its own refuses DSD (`dsd_off_by_choice`), a DAC bound later included, until an explicit per-DAC choice in the app or the console. Warning `migrated_off` |
+| `native` | a record the legacy reader takes for this unit's model (§3.5) | choice `native`; each approved native tuple's listener answer `clean`, on the record's `QualifiedOn` (schema 2) or undated (schema 1); first use acknowledged at the approved rates alone (`bitRates`, §2.5) |
+| `dop` | `allowDoP: true` and such a record | choice `dop`; DoP confirmed; the DoP tuples `clean`; first use acknowledged at the approved rates alone |
+| `dop` | `allowDoP: false` | `defaultMode: off`: today this refuses all DSD as `dop_not_allowed` (`authorization.go:250-252`), and converting would play what the operator held back. Warning `migrated_off` |
+| `auto` | such a record | choice `auto`; its tuples `clean`, so `auto` plays them even on an unknown DAC (§3.2); first use acknowledged at the approved rates alone, for native, and for DoP only with `allowDoP: true`, which also confirms DoP. With `false`, DoP stays out until the app acknowledges its first use, an explicit act |
+| `native` | no record, or one the legacy reader refuses | choice `native` with no answers and first use not acknowledged: it refuses (`first_use_pending`) until the app acknowledges, and never converts. Warning `migration_record_refused`, or `migration_record_missing` |
+| `dop` | `allowDoP: true`, and no record or a refused one | choice `dop`, DoP not confirmed: it refuses until the app confirms and acknowledges. The same warning |
+| `auto` | no record, or a refused one | nothing: the defaults. The same warning, which is how the app explains why DSD now plays converted |
 
 - **The record is read through the legacy reader** (§3.5), with the model comparison: the port is
   not compared, and versions from 35 on are taken. The record's bcdDevice is recorded with each
   answer it migrates, which therefore publishes only on that firmware (§1.2). The state keeps the
   record's digest in `migratedFrom`, and nothing reads the record again.
+- **The approval's rate limits survive** (Codex). The migrated acknowledgement lists the rates the
+  record approved (`bitRates`), and admission is per rate (§3.2). A rate the record did not approve
+  stays `first_use_pending` until the user acknowledges the transport or chooses the mode again.
+- **A failure is a warning the app can read, not only a log line** (Gemini). A refused record
+  carries its reason word (`stale_version`, `identity_mismatch`, `hash_mismatch`, `unreadable`); a
+  missing record is `migration_record_missing`; a migrated opt-out is `migrated_off`. Each is
+  written into the state's `warnings` (§2.5) beside the Warn line, and B8 publishes it in
+  `dsdPlayback.warnings` (§7.1).
 - **Validate warns once** for each legacy key while it is set, saying it was migrated and is no
   longer read. `logPlayerOff`'s once-per-reason rule (`internal/config/player.go:52-81`) is the
   model.
@@ -905,7 +982,7 @@ release.
 
 | Event | Recorded in the DSD state |
 |---|---|
-| First use acknowledged | `firstUse[transport].acknowledgedAt`, with the bcdDevice |
+| First use acknowledged | `firstUse[transport].acknowledgedAt`, with the bcdDevice and, for a migration, the `bitRates` it covers (§2.5) |
 | 5 s of content played without a fault | `evidence.streamingObservedAt`; first use `observedAt` |
 | The chime completes and the answer is clean | `listener: {answer: clean, on}` for the transport, rate and bcdDevice, replacing any earlier answer |
 | The chime completes and the answer is noise or nothing | `listener: {answer: noise or nothing, on}`, replacing an earlier `clean`. That transport is refused at that rate in every mode, and its first use re-arms (§3.2), until a write chooses that mode again |
@@ -932,6 +1009,7 @@ All additions are additive, and `ProtocolVersion` stays 1 (the `/v1/outputs` bul
     ],
     "converted": [ { "bitRate": 11289600, "rateHz": 176400, "validBits": 24, "passbandHz": 30000, "dither": "none", "filter": "dsdconv-1" } ],
     "refused": [],
+    "warnings": [ { "code": "migration_record_refused", "reason": "stale_version" } ],
     "model": "<manufacturer and product>", "bcdDevice": "<bcd>"
   },
   "dsdDAC": {
@@ -946,7 +1024,7 @@ All additions are additive, and `ProtocolVersion` stays 1 (the `/v1/outputs` bul
       { "mode": "convert", "offered": true, "rateHz": 176400, "validBits": 24, "passbandHz": 30000, "dither": "none" },
       { "mode": "off", "offered": true }
     ],
-    "firstUse": [ { "transport": "native", "state": "observed" }, { "transport": "dop", "state": "pending" } ],
+    "firstUse": [ { "transport": "native", "state": "observed", "bitRates": [2822400] }, { "transport": "dop", "state": "pending" } ],
     "check": null
   },
   "playback": { "transport": "converted", "format": "S24_3LE", "rateHz": 176400, "validBits": 24, "logicalRate": 0,
@@ -986,9 +1064,21 @@ All additions are additive, and `ProtocolVersion` stays 1 (the `/v1/outputs` bul
   An older bridge omits it; it is `[]` when no rate converts.
 - **`dsdPlayback.refused`** (optional array): `{bitRate, reason}` for each rate from DSD64 to DSD256
   that plays neither way, with `reason` from §3.2's closed list.
+- **`dsdPlayback.warnings`** (optional array, Gemini): `{code, reason}` for what the app must be able
+  to explain, from the state's `warnings` (§2.5). The codes are a closed list:
+  - `migration_record_refused`, with the legacy reader's reason word (`stale_version`,
+    `identity_mismatch`, `hash_mismatch`, `unreadable`);
+  - `migration_record_missing`;
+  - `migrated_off`;
+  - `state_unreadable`, a damaged state moved aside, with DSD refused until a choice is written.
+
+  It sits in `dsdPlayback`, which is published whenever the backend is ready. A damaged state
+  therefore shows even while no DAC is available and `dsdDAC` is omitted. It is `[]` when there is
+  nothing to explain, and an older bridge omits it.
 - **`dsdDAC`** (optional object): the bound DAC's key; its profile (id, name, caveats); the choice
   and its revision; the options for each mode (offered, rates with evidence, `needsConfirmation`,
-  `blocked`); first use per transport; and the running or last check. It is omitted while no DAC is
+  `blocked`); first use per transport, with `bitRates` listing the rates a migrated acknowledgement
+  covers (absent: every rate); and the running or last check. It is omitted while no DAC is
   available.
 - **`playback`:** `transport` gains `converted`, with `format`, `rateHz` and `validBits` the PCM's,
   the plan's actual values, and `logicalRate` 0. A new optional `converted` object gives the plan's
@@ -1111,6 +1201,13 @@ and two units of one model share one choice, as the phone's per-DAC choice does 
   the app reads again and shows the current state. On `would_interrupt` it asks "Stop the DSD
   that's playing?"
 - **Evidence** shows per rate, in §1.3's words.
+- **A rate a migrated acknowledgement does not cover** (`firstUse.bitRates`) asks for the first-use
+  sheet again before the app sends that rate's write.
+- **Warnings** (`dsdPlayback.warnings`) each have a sentence. For example, for
+  `migration_record_refused`: "Your earlier approval for this DAC couldn't be carried over (it was
+  made by another version), so DSD plays as set here until you choose a mode." For
+  `state_unreadable`: "The bridge couldn't read its DSD settings, so DSD is off until you choose
+  again."
 
 ### 7.5 iOS: Signal Path labels
 
@@ -1321,14 +1418,18 @@ rule that permits it.
       or re-validate a record being migrated against the current version or its port.**"
     - B2: "**The DAC profile database matches by USB identity, never by name: vendor and product
       IDs, the interface, and the product string, which a shared reference ID needs; bcdDevice only
-      narrows.** **Don't match a profile by its name, add a claim without its provenance, let two
-      profiles match one identity, or import from the iOS registry anything but its DoP evidence
-      and caveats.**"
+      narrows. A `dacKey` hashes the key's canonical form, five LF-joined lines with `=` before a
+      present optional field and `-` for an absent one.** **Don't match a profile by its name, add a
+      claim without its provenance, let two profiles match one identity, import from the iOS
+      registry anything but its DoP evidence and caveats, compare keys field by field, or let an
+      absent interface or product hash like a present one.**"
     - B3: "**The player's DSD state (`player-dsd.json`) keys each DAC by its model identity, keeps
-      a bridge-wide `defaultMode`, and makes a write durable before it is answered. A state that
+      a bridge-wide `defaultMode`, records which rates each acknowledgement covers and which
+      warnings the app must explain, and makes a write durable before it is answered. A state that
       does not read refuses DSD until a choice is written again.** **Don't store a serial, a port, a
       card number or a devnum, answer a write before it is durable, delete a state file that does
-      not read (move it aside), or fall back to the defaults over one.**"
+      not read (move it aside), fall back to the defaults over one, or widen a migrated
+      acknowledgement past its record's rates without a write.**"
     - B4: "**The silent probe opens the bound node only while it is free and no session holds it,
       refines each candidate, and closes.** **Don't send HW_PARAMS, SW_PARAMS, PREPARE, a write or
       a control write from it, wait on a busy node, or probe on a timer.**"
@@ -1337,12 +1438,14 @@ rule that permits it.
       rejection outranks every positive input.** **Don't word a rung as verified, decoded,
       bit-exact or a lock, count a rung across a bcdDevice change, publish DoP's driver acceptance
       as more than its carrier's, or let an earlier `clean` survive a later `noise`.**"
-    - B7: "**DoP plays only where the playback path shows no gain stage, or every level control
-      reads 0 dB by its dB scale or is on the profile's analogue list; a policy change is reconciled
-      per occurrence (kept, re-planned or revoked), and a user's write revokes only with
-      `interrupt`.** **Don't write a control, take a missing control or one with no dB scale for
-      unity, keep DoP playing once a control leaves 0 dB, revoke an occurrence the new set still
-      plays, or skip a successor a change re-planned.**"
+    - B7: "**Admission is per rate. DoP plays only where the playback path shows no gain stage,
+      or every level control reads 0 dB by its dB scale, is on the profile's analogue list, or is a
+      raw-maximum control at its raw maximum on a listed firmware. A policy change is reconciled per
+      occurrence (kept, re-planned or revoked), and a user's write revokes only with
+      `interrupt`.** **Don't admit a rate a migrated acknowledgement does not cover, write a
+      control, take a missing control or one with no dB scale for unity unless the profile's
+      evidence says its raw maximum is, keep DoP playing once a control leaves unity, revoke an
+      occurrence the new set still plays, or skip a successor a change re-planned.**"
     - B10: "**`dsdconv` is linear phase and unity gain, 30 kHz pass / 40 kHz stop at 100 dB or
       more (20 kHz at 44.1 kHz), starts and ends at numeric zero, saturates and counts, and rounds
       24-bit output with no added dither (TPDF at 16 bits).** **Don't add gain the stream was not
@@ -1472,22 +1575,22 @@ Each PR is about a day of worker time. Tests marked red first fail on the tree b
 | # | Repo | PR | Depends on | Tests, red first | Tier |
 |---|---|---|---|---|---|
 | B1 | bridge | The cutover's first step (§8): `qualification.ReadLegacyApproval`, with the version and the identity comparison as parameters (§3.5). Production reads through it, taking version 35 and later. The guard narrows; version 36; the runbook's first header (§9.1, item 14); the legacy reader's bullet | none | `TestProductionStillPlaysAVersion35RecordAfterTheBump` (red before: `stale approval version`), `TestTheLegacyReaderRefusesBelowVersion35`, `TestTheLegacyReaderKeepsEveryOtherCheck` (a tampered body, a changed evidence byte, an unexecuted edge), and `TestQualificationVersionGate`: a change under `internal/config/` passes without a bump (red before), and one to `internal/alsapcm/sink_dsd_writer.go` still needs one | player |
-| B2 | bridge | `internal/player/dacprofile`: schema with `analogVolumeControls`, embedded JSON, matcher, lint; the kernel-quirk seed; iOS DoP evidence for captured models; `dac inspect --json` gains `manufacturer`, `product` and `bcdDevice`; its bullet (§9.1, item 10) | B1 (its `dac inspect` change is guarded until B1) | `TestAProfileMatchesByUSBIdentityNeverByName`, `TestASharedReferenceIDNeedsItsProductString`, `TestNoTwoProfilesMatchOneIdentity`, `TestEveryClaimNamesItsProvenance`, `TestAnAnalogueControlNeedsItsProvenance`, `TestTheQX13CarriesItsHiddenModeCaveat`, `TestDACInspectPrintsTheModelIdentity` | standard |
-| B3 | bridge | The player's DSD state (§2.5: `defaultMode`, the latest listener answer, a damaged file refuses DSD) and the migration's logic through the legacy reader with the model comparison (§3.6): pure, not wired; its bullet | B1, B2 | `TestAWriteIsDurableBeforeItReturns`, `TestADamagedStateRefusesDSDAndIsMovedAside`, `TestNoDSDStateHoldsASerialOrAPort`, `TestTheMigrationTable` (every row of §3.6, explicit `off` among them), `TestTheMigrationIgnoresThePortAndTakesVersion35`, `TestABackupCarriesTheChoicesAndRestoreDropsThisBoxsEvidence` | standard |
+| B2 | bridge | `internal/player/dacprofile`: schema with `analogVolumeControls`, embedded JSON, matcher, lint; the kernel-quirk seed; iOS DoP evidence for captured models; `dac inspect --json` gains `manufacturer`, `product` and `bcdDevice`; its bullet (§9.1, item 10) | B1 (its `dac inspect` change is guarded until B1) | `TestAProfileMatchesByUSBIdentityNeverByName`, `TestASharedReferenceIDNeedsItsProductString`, `TestNoTwoProfilesMatchOneIdentity`, `TestEveryClaimNamesItsProvenance`, `TestAnAnalogueControlNeedsItsProvenance`, `TestAUnityAtRawMaxEntryNeedsItsEvidenceAndFirmware`, `TestTheDACKeyMatchesItsVectors` (§2.2: an absent interface, an absent product, a product of `-`), `TestTheQX13CarriesItsHiddenModeCaveat`, `TestDACInspectPrintsTheModelIdentity` | standard |
+| B3 | bridge | The player's DSD state (§2.5: `defaultMode`, the latest listener answer, an acknowledgement's `bitRates`, `warnings`, a damaged file refuses DSD) and the migration's logic through the legacy reader with the model comparison (§3.6): pure, not wired; its bullet | B1, B2 | `TestAWriteIsDurableBeforeItReturns`, `TestADamagedStateRefusesDSDAndIsMovedAside`, `TestNoDSDStateHoldsASerialOrAPort`, `TestTheMigrationTable` (every row of §3.6, explicit `off` among them), `TestTheMigrationIgnoresThePortAndTakesVersion35`, `TestAMigratedAcknowledgementListsItsRecordsRates`, `TestAMigrationFailureIsAWarningInTheState`, `TestABackupCarriesTheChoicesAndRestoreDropsThisBoxsEvidence` | standard |
 | B4 | bridge | The silent probe (`alsapcm.Probe`) and its cache (§5); version 37; its bullet | B1 | `TestTheProbeRefinesAndNeverCommits` (the fake kernel records no HW_PARAMS, SW_PARAMS, PREPARE or WRITEI, one open and one close), `TestTheProbeLeavesABusyNodeAlone`, `TestTheProbeReadsTheDoPCarriersSignificantBits`, `TestNoProbeWhileASessionHoldsTheDevice` | player |
-| B5 | bridge | `policy.Effective`: the §3.2 table with the rejection rule and `defaultMode`; the DoP gain topology (§3.4: the playback-path descriptor parse, every level control, the analogue list); the per-occurrence reconciliation predicate (§3.5). Pure, not wired; the evidence-ladder bullet | B2, B3 | `TestTheEffectivePolicyTable` (every row of §3.2), `TestARejectionOutranksEveryPositiveInput` (native under `auto` on a known and an unknown DAC, after an earlier `clean`), `TestAutoConvertsAboveTheCapAndAnExplicitChoiceRefuses`, `TestAMissingControlIsNotUnity` (a playback feature unit with no visible level control), `TestEveryLevelControlCountsWhateverItsName`, `TestTheAnalogueListIsTheOnlyExemption`, `TestNoDoPOnAnUnknownDACWithoutConfirmation`, `TestAChangeIsReconciledPerOccurrence` | standard |
-| B6 | bridge | The migration at serve's player start (§3.6): explicit `off` becomes `defaultMode: off`; the legacy keys still taken, each warned once; config words; the rule at `player.md:86`. Production still reads the record through the legacy reader | B3 | `TestAnExplicitOffSurvivesAsTheDefault` (red before: unset and `off` both refuse, and nothing tells them apart), `TestAVersion35RecordOnAnotherPortMigrates`, `TestTheMigrationRunsOnceAndAgainAfterTheStateIsDeleted`, `TestLegacyDSDKeysStillLoadAndAreWarnedOnce`, `TestAPlayerBlockWithLegacyKeysNeverTurnsThePlayerOff` | standard |
-| B7 | bridge | The cutover: the effective policy replaces `readPermission` in serve and in `output play`; per-occurrence reconciliation, with prepared successors re-planned through the engine's hand-off path; `driver_accepted` from real opens; `streaming_observed` and first use `observed` recorded; until B11 a converted rate refuses as `dsd_not_in_this_release`; the runbook's second header; version 38; the rules at `player.md:133`, `:187`, `:189` and `:197`, and the DoP-topology bullet | B4, B5, B6 | `TestServeReadsNoApprovalRecord`, `TestSelectionAndPublicationReadOneSet` (kept from 2d.2), `TestTheOpenedNodeMustBeTheIdentityThePolicyWasComputedFor`, `TestAnUnusedRateCapChangeRevokesNothing`, `TestAChangedChoiceReplansThePreparedSuccessorAndSkipsNothing`, `TestAGainChangeRevokesDoPWithoutConsent`, `TestStreamingObservedNeedsFiveSecondsWithoutAFault`, `TestNoTransportFallsBackAtRunTime`, `TestAMigratedOwnerSetupPlaysAsBefore` | player |
+| B5 | bridge | `policy.Effective`: the §3.2 table with the rejection rule and `defaultMode`; the DoP gain topology (§3.4: the playback-path descriptor parse, every level control, the analogue list); the per-occurrence reconciliation predicate (§3.5). Pure, not wired; the evidence-ladder bullet | B2, B3 | `TestTheEffectivePolicyTable` (every row of §3.2), `TestARejectionOutranksEveryPositiveInput` (native under `auto` on a known and an unknown DAC, after an earlier `clean`), `TestAutoConvertsAboveTheCapAndAnExplicitChoiceRefuses`, `TestAMissingControlIsNotUnity` (a playback feature unit with no visible level control), `TestEveryLevelControlCountsWhateverItsName`, `TestTheAnalogueListAndTheRawMaxFlagAreTheOnlyExemptions`, `TestARawMaxControlPassesOnlyAtItsRawMaximum` (below it, a changed range and an unlisted firmware refuse), `TestAdmissionIsPerRateForAMigratedAcknowledgement`, `TestNoDoPOnAnUnknownDACWithoutConfirmation`, `TestAChangeIsReconciledPerOccurrence` | standard |
+| B6 | bridge | The migration at serve's player start (§3.6): explicit `off` becomes `defaultMode: off`; an approval's acknowledgement covers its approved rates alone; each failure is written as a warning beside its Warn line; the legacy keys still taken, each warned once; config words; the rule at `player.md:86`. Production still reads the record through the legacy reader | B3 | `TestAnExplicitOffSurvivesAsTheDefault` (red before: unset and `off` both refuse, and nothing tells them apart), `TestAMigratedApprovalCoversOnlyItsRates` (red before: a DSD64 approval's transport-wide acknowledgement admits DSD128), `TestAVersion35RecordOnAnotherPortMigrates`, `TestARefusedRecordLeavesAWarning`, `TestTheMigrationRunsOnceAndAgainAfterTheStateIsDeleted`, `TestLegacyDSDKeysStillLoadAndAreWarnedOnce`, `TestAPlayerBlockWithLegacyKeysNeverTurnsThePlayerOff` | standard |
+| B7 | bridge | The cutover: the effective policy replaces `readPermission` in serve and in `output play`, with admission per rate (a migrated choice plays only the rates its record approved); per-occurrence reconciliation, with prepared successors re-planned through the engine's hand-off path; `driver_accepted` from real opens; `streaming_observed` and first use `observed` recorded; until B11 a converted rate refuses as `dsd_not_in_this_release`; the runbook's second header; version 38; the rules at `player.md:133`, `:187`, `:189` and `:197`, and the DoP-topology bullet | B4, B5, B6 | `TestServeReadsNoApprovalRecord`, `TestSelectionAndPublicationReadOneSet` (kept from 2d.2), `TestTheOpenedNodeMustBeTheIdentityThePolicyWasComputedFor`, `TestAnUnusedRateCapChangeRevokesNothing`, `TestAChangedChoiceReplansThePreparedSuccessorAndSkipsNothing`, `TestAGainChangeRevokesDoPWithoutConsent`, `TestStreamingObservedNeedsFiveSecondsWithoutAFault`, `TestNoTransportFallsBackAtRunTime`, `TestAMigratedOwnerSetupPlaysAsBefore`, `TestAMigratedChoicePlaysOnlyItsApprovedRatesUntilAcknowledged` | player |
 | B10 | bridge | `internal/player/dsdconv` (§4.2 to §4.5), not wired, with the join-window snapshot and recompute (§4.7); the rules at `player.md:27` and `:36`, and the converter's bullet | none | `TestTheResponseMeetsItsMask` (from the coefficients, the 30 kHz and the 20 kHz plans), `TestAliasingIsADifferential` (CIFF fixtures, `internal/transcode/testdata/gen/dsd_fixtures.py`, or B725's), `TestUnityGainLevels` (a −20 dBFS `dsdtone` sine gives −20 dBFS ± 0.05), `TestOvermodulationSaturatesAndCounts`, `TestDelayLinesStartAtNumericZero`, `TestPaddingPastFramesIsNotRead`, `TestTheJoinWindowRecomputesFromTheSnapshot`, `TestAnAbuttingJoinIsZeroPadded`, `TestTheOutputIsDeterministic`, `BenchmarkConvert{DSD64,DSD128,DSD256}` | standard |
 | B11 | bridge | Conversion in the player: `native.go`'s DSD open branches for a convert plan; continuous, abutting and reopen joins (DSD64 then DSD128 on one sink included); the join window held back and recomputed on a cut; the observation and Details from the plan (§4.1, §4.7, §4.8); version 39; the rules at CLAUDE.md:91, `jobs.md:132`, `player.md:133-135` and `output.md`, and the claims bullet | B7, B10 | `TestAnUnknownDACPlaysDSDConverted`, `TestConvertedDSDReachesTheDACPackedByTheTable`, `TestConvertedTracksJoinContinuouslyAtOneRate`, `TestDSD64ThenDSD128ConvertedShareTheSink` (no reopen), `TestDeletingOrReplacingAPreparedConvertedSuccessor` (the three moments of §4.7, against the oracle), `TestStopDuringConversionIsBounded`, `TestTheClaimsAreThePlans` (a 44.1 kHz, 16-bit DAC is said to get 16 bits, 20 kHz and TPDF), `TestAConvertedTrackIsNotLossless`, `TestNoConvertedStreamIsServed` | player, hardware (CPU and xruns on a Pi 4 and a Pi 5, §4.6; a listening pass) |
-| B8 | bridge | The read side (§7.1): `dsdDAC` with first use, `evidence`, `converted` with each plan, `refused`, the `converted` playback token and plan; no health flag yet; PROTOCOL.md; fixtures; the `wire.md` DSD bullet | B11 | `TestTheBridgeElementCarriesTheDACChoice`, `TestDSDOutputProtocolMembers` and `TestDSDOutputProtocolTokens` (new rows), `TestAConvertedEntryCarriesItsPlan`, `TestNoHealthFlagBeforeItsRoute`, `TestNoDACKeyOrModelCarriesASerialOrAPort`, the fixture exporter | standard, mirror (I1) |
-| B9 | bridge | `PUT /v1/outputs/{id}/dsd` (§7.2): CAS, key binding, confirmation, acknowledgement, the per-occurrence `would_interrupt`, durable write, read-back; the `bridgeDSDChoice` flag; the `wire.md` bullet completed | B8 | `TestTheChoiceIsDurableBeforeItIsAnswered`, `TestAStaleRevisionChangesNothing`, `TestAChoiceForAnotherDACIsRefused`, `TestDoPOnAnUnknownDACNeedsConfirmation`, `TestNativeOrDoPNeedsFirstUseAcknowledged`, `TestChoosingARejectedTransportAgainClearsTheRejection`, `TestOnlyAWriteThatInterruptsNeedsTheGoAhead`, `TestTheAnswerIsTheEffectiveChoice`, `TestTheChoiceFlagArrivesWithItsRoute`; the route classification and error-table guards | standard, mirror (I4) |
+| B8 | bridge | The read side (§7.1): `dsdDAC` with first use and its `bitRates`, `evidence`, `converted` with each plan, `refused`, `warnings` (migration failures and a damaged state), the `converted` playback token and plan; no health flag yet; PROTOCOL.md; fixtures; the `wire.md` DSD bullet | B11 | `TestTheBridgeElementCarriesTheDACChoice`, `TestDSDOutputProtocolMembers` and `TestDSDOutputProtocolTokens` (new rows), `TestAConvertedEntryCarriesItsPlan`, `TestAMigrationFailureIsPublished`, `TestADamagedStateIsPublishedWithNoDAC`, `TestNoHealthFlagBeforeItsRoute`, `TestNoDACKeyOrModelCarriesASerialOrAPort`, the fixture exporter | standard, mirror (I1) |
+| B9 | bridge | `PUT /v1/outputs/{id}/dsd` (§7.2): CAS, key binding, confirmation, acknowledgement, the per-occurrence `would_interrupt`, durable write, read-back; the `bridgeDSDChoice` flag; the `wire.md` bullet completed | B8 | `TestTheChoiceIsDurableBeforeItIsAnswered`, `TestAStaleRevisionChangesNothing`, `TestAChoiceForAnotherDACIsRefused`, `TestDoPOnAnUnknownDACNeedsConfirmation`, `TestNativeOrDoPNeedsFirstUseAcknowledged`, `TestChoosingARejectedTransportAgainClearsTheRejection`, `TestAnAcknowledgementWidensAMigratedChoiceToEveryRate`, `TestAWriteClearsItsDACsWarnings`, `TestOnlyAWriteThatInterruptsNeedsTheGoAhead`, `TestTheAnswerIsTheEffectiveChoice`, `TestTheChoiceFlagArrivesWithItsRoute`; the route classification and error-table guards | standard, mirror (I4) |
 | B12 | bridge | The check (§6.2, §7.2): admission by the effective policy, the chime modulated at its own rate, the `preparing` state, the answer, the `bridgeDSDCheck` flag; an OpenHome Stop ends a check; PROTOCOL.md; version 40; the `openhome.md` rule and the check's bullet | B9, B11, B725's modulator in a production package | `TestTheCheckAdmitsOnlyWhatTheSetPlays` (red before: an offered tuple with first use unacknowledged, and unconfirmed DoP), `TestTheChimeIsModulatedAtItsOwnRate` (no repeated bits; the pads are `0x69`), `TestEveryStopEndsTheCheckWithinItsBound`, `TestTheCheckNeverAutoplays`, `TestOnlyACompleteCheckIsAnswered`, `TestANoiseAnswerRefusesTheTransportInEveryMode`, `TestTheCheckFlagArrivesWithItsRoute` | player, hardware (the owner hears the chime on a real DAC), mirror (I5) |
 | B13 | bridge | The console's Player page shows and sets the per-DAC choice and evidence, with the same first-use sheet (`cmd/bridge/serve_player_console.go:517-559`, the wording at `:532`) | B9 | the console's view and write tests for each state | standard |
-| I1 | iOS | Mirror of B8: PROTOCOL.md copied; DTOs for `dsdDAC` with first use, `evidence`, `converted` with its plan, `refused`, and the `converted` playback token; fixtures | B8 | decode tests: a malformed new member withholds only its own object (I1's rule); `converted` reads as its own token | full suite |
+| I1 | iOS | Mirror of B8: PROTOCOL.md copied; DTOs for `dsdDAC` with first use and its `bitRates`, `evidence`, `converted` with its plan, `refused`, `warnings`, and the `converted` playback token; fixtures | B8 | decode tests: a malformed new member withholds only its own object (I1's rule); `converted` reads as its own token | full suite |
 | I2 | iOS | R12 admits converted rates; the refusal copy (§7.6) | I1 | `testAConvertedRateIsEligibleUnderAFreshGrant`, `testAConvertedEntryFromAnotherEpochAdmitsNothing`, `testNoConvertedEntryKeepsTheRateRefused`, `testARefusedRateSaysItsReason` | full suite |
 | I3 | iOS | Signal Path: the converted card composed from the plan, and the evidence line (§7.5) | I1 | copy-table pins with no forbidden word for DSD on the bridge's player; `testTheConvertedLineIsThePlans`; `testAConvertedOccurrenceIsNeverBitExact` | full suite |
-| I4 | iOS | The per-DAC mode UI (§7.4) with the first-use sheet and the large Stop (§6.1); mirror of B9 | B9, I1 | view-model tests for each state (known and unknown, offered and blocked, `stale`, `dac_changed`, `would_interrupt`); `testNativeOrDoPIsNeverSentWithoutTheSheet`; `testTheStopStaysUntilObserved` | full suite, mirror |
+| I4 | iOS | The per-DAC mode UI (§7.4) with the first-use sheet and the large Stop (§6.1), the sheet shown again for a rate a migrated acknowledgement does not cover, and each warning's sentence; mirror of B9 | B9, I1 | view-model tests for each state (known and unknown, offered and blocked, `stale`, `dac_changed`, `would_interrupt`); `testNativeOrDoPIsNeverSentWithoutTheSheet`; `testTheStopStaysUntilObserved`; `testAnUncoveredRateAsksForTheSheet`; `testAWarningShowsItsSentence` | full suite, mirror |
 | I5 | iOS | The optional chime and its answer (§6.1); mirror of B12 | B12, I4 | `testAChimeIsOfferedOnlyForATupleTheBridgePlays`, `testNoAnswerForAStoppedCheck` | full suite, mirror; the owner's hardware run |
 
 ### Order and parallelism
@@ -1543,3 +1646,13 @@ analogue volume controls where there are any (§2.3); and the hardware runs of B
 | Argon 4: converted DSD64 to DSD128 | §4.7: an abutting join in the same sink |
 | Argon 5: health flags before their routes | §7.1, §11: `bridgeDSDChoice` in B9, `bridgeDSDCheck` in B12 |
 | Argon 6: the PR order | §11: B10 → B11 → B8 → B9 |
+
+### Round 3: the last review points
+
+| Finding | Change |
+|---|---|
+| Codex P1: migration loses the approval's rate limits | §2.5, §3.2, §3.6, B6, B7: a migrated acknowledgement lists its record's rates (`bitRates`), and admission is per rate; another rate stays `first_use_pending` until the user acknowledges or chooses the mode again |
+| Gemini: `dacKey` with an absent interface | §2.2: the canonical form, five LF-joined lines, `=` before a present optional field and `-` for an absent one; test vectors in B2 |
+| Gemini: DoP and a level control with no dB scale | §2.1, §3.4: fail-closed by default; a profile's `unityAtRawMax` admits DoP only at the documented or measured raw maximum, on a listed firmware, with its evidence required |
+| Gemini: migration failures only logged | §2.5, §3.6, §7.1, B8: `dsdPlayback.warnings` (`migration_record_refused` with its reason, `migration_record_missing`, `migrated_off`, `state_unreadable`), kept in the state |
+| Gemini: a limiter or default attenuation | Declined, and answered on the thread: unity gain is the owner's decision, and saturations are counted and shown (§4.4). Nothing changed |
