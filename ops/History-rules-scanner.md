@@ -2634,7 +2634,11 @@
   `rootOf`, the dispatch's look, the scans dropped under a held root, and
   `ScanSubtree`'s owner and its spelling of the root's own part) folds an
   element only where its folder is established to fold case and the two
-  spellings, where both are there, are one entry. What is spared and passed
+  spellings, where both are there, are one entry; where one or neither is
+  there the folder's answer decides, and a lookup of either that fails
+  otherwise (a permission refused, a transient error) decides nothing, so the
+  two stay two (round 8, Codex on round 7: any error counted as one entry,
+  and routed a path to a root it may not be in). What is spared and passed
   over (`caseLook.mayBeOneName`, element by element through `spareFolds`: the
   protection before the walk, which records every spelling of a nested root's
   prefix the index holds that may be its folder (`protectSpellings`), the
@@ -2653,9 +2657,16 @@
   handed (B219's bullet). This host's tests stand in for other volumes through
   a per-scanner seam (`foldingHook`), and some ask this host's volume itself,
   which folds case on CI's macOS and Windows legs; a Windows-only test makes a
-  folder case-sensitive where the host allows it. A look is a stat, one batch
-  of 64 entries of the root's listing (`dirHoldsLibraryContent`) and, for a
-  root holding nothing, one count. A root that reads as it did is
+  folder case-sensitive where the host allows it. A stand-in answers each
+  folder as the volume it stands for compares names, and a test leaves to this
+  host's disk nothing that disk answers otherwise: round 7's watcher test held
+  its nested root only where the disk did not fold case, its configured
+  `LIBRARY` no folder there, and on macOS, where it is the full `library`,
+  no hold came and its wait ran out the package's deadline, starving the
+  tests after it (round 8, Codex on round 7's brief). A test that waits for a
+  hold reads the look first (`mustReadAsNotMounted`). A look is a stat, one
+  batch of 64 entries of the root's listing (`dirHoldsLibraryContent`) and,
+  for a root holding nothing, one count. A root that reads as it did is
   watched again where it is now, and a scan of it is asked for, since nothing
   saw what changed meanwhile. Each change is said once: held at Warn with
   what the look found, and again when that changes, and watched again at
@@ -2729,8 +2740,9 @@
   how a folder compares names by anything but the names in it (not its own
   name in the folder above, not one folder for a whole path, not a write),
   fold a case-only difference for which root a path is where its folder is not
-  established to fold, or keep one exact for what is spared where its folder
-  may fold (an Unknown answer, a folder not there, or one that holds neither
+  established to fold or a lookup there failed otherwise than for a name not
+  being there, or keep one exact for what is spared where its folder may
+  fold (an Unknown answer, a folder not there, or one that holds neither
   the name, another spelling of it nor library content), turn the check of the
   roots' own watches off on kqueue (it drops a renamed root's watch without a
   word too), keep the record in the data dir or in bridge.yaml, or of one
@@ -2771,6 +2783,7 @@
   `TestTwoRootsSpelledAlikeStayTwoWhereTheirFolderIsNotEstablishedToFoldCase`,
   `TestTwoRootsThatAreTwoFoldersStayTwoWhateverTheirFolderAnswers`,
   `TestTwoRootsSpelledAlikeInACaseSensitiveFolderStayTwo`,
+  `TestALookupThatFailsIsNoProofThatTwoSpellingsAreOneRoot`,
   fsutil's `TestFoldingIsJudgedByTheNamesInTheFolderItself`,
   `TestFoldingIsUnknownWhereTheFolderCannotTell` and
   `TestFoldingInWritesNothing`,

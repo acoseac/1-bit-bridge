@@ -74663,3 +74663,121 @@ which root a path is only where its folder is established to fold; and none
 stays exact for what is spared where its folder may fold. It adds the glob,
 with the long form in `ops/History-rules-scanner.md`, whose B219 bullet says
 when a subtree scan spells a root's own part.
+
+## 2026-11-04 — B651 round 8: round 7 on macOS
+
+Round 8, on a Mac (macOS, APFS that folds case, Homebrew's go1.27.3 with
+`GOTOOLCHAIN=local`), from the PR's head, da48fa02 (round 7 and its rules
+line). The brief: in `go test ./internal/manifest/`,
+`TestTheWatcherPassesOverAHeldRootOnAVolumeThatFoldsCaseMountedInOneThatDoesNot`
+ran 533 s, until the package's 600 s timeout, and
+`TestKqueueWatcherOpensAFolderMovedInOnce`,
+`TestKqueueWatcherReleasesAFolderFsnotifyDroppedWithoutAnEvent` and
+`TestKqueueWatcherStopsWhenFilesTakeItPastItsBudget` failed, all three green at
+round 6. Codex's and Argon's notes on the brief, and its decisions, bind.
+
+**The kqueue tests were starved, not broken.** Each alone on da48fa02, as the
+brief asked first (Argon 1): green, in 0.43 s, 0.35 s and 0.14 s. The watcher
+test alone, under `-timeout 90s`, failed at 60 s ("the watcher never held the
+nested root"): its wait is the binary's deadline less the 30 s reserve
+(`watchGiveUp`), so under the default timeout it takes all but the last 30 s
+of the package's run. The whole package on da48fa02, under `-timeout 480s`:
+the watcher test took 415 s, the three kqueue tests passed in the 30 s left,
+and the tests the window's end fell on,
+`TestTheWatcherWaitsForAnUnmountedRootAndWatchesWhatIsMountedThere`'s
+bare-mount-point leg and `TestTheWatcherDispatchesNoScanForARootWhoseContentWent`,
+failed in 0.10 s and 0.04 s on their give-up messages before the timeout's
+panic. Where that window falls moves with the host's load; in the brief's run
+it fell on the three kqueue tests. Nothing leaked into them: `startWatcher`'s
+cleanup cancels and joins Run, which closes fsnotify (`defer wt.w.Close()`),
+and the kqueue tests count only descriptors on their own library's inodes and
+passed after the hang in that run. Of Argon 1's two causes, the starved
+timeout, not leaked descriptors.
+
+**1. The watcher test could not hold on a disk that folds case (Codex 1).**
+Real. `foldingHook` stood in for `music` (case-sensitive) and `music/usb`
+(folding), but `lookAtRoot` reads the disk: on Linux the configured
+`music/usb/LIBRARY` is no folder, so the root read as not mounted and was
+held; on APFS it is the folder `library`, full of music, so the root read as
+it is, and no hold ever came. The hold had come from the disk contradicting
+the stand-in. The held root is now the mount point of a volume of its own,
+away: `library` is moved aside and left bare, so the root reads as not
+mounted on either kind of disk (empty while the index holds its rows where
+`LIBRARY` is `library`, unreachable where it is no folder), and the startup
+walk reaches `library` and must pass over it. `mustReadAsNotMounted` checks
+the look before the watcher starts, so a scenario that cannot hold fails at
+once: round 7's, put back, fails in 0.07 s on this Mac ("premise:
+…/music/usb/LIBRARY reads as it is on this host"), where it waited 533 s.
+`TestTheWatcherKeepsAHeldRootSpelledInAnotherCaseWhereTheVolumeFoldsCase`,
+round 6's, which waits for a hold its stand-in sets up as well, checks it too;
+its hold comes on both kinds of disk. The fixture's `answer` answered every
+folder but two by this host's probe, so on macOS the bare mount point holding
+`@eaDir` answered case-insensitive, for APFS, where
+`TestAScanSparesANestedRootOnAVolumeThatFoldsCaseMountedInOneThatDoesNot` says
+it answers case-sensitive, for the volume it is on; its `@eaDir` legs took
+another path there, and round 7's control F1c left them green on this Mac. The
+hook answers each folder as the volume it stands for now: Unknown where this
+host's probe can read nothing in the folder, else case-insensitive at or under
+the mount point while its volume is mounted and case-sensitive elsewhere; the
+test checks the scanner's answer for the mount point (Unknown when empty,
+case-sensitive holding `@eaDir`).
+
+**2. `sameName` took any lookup's error for one entry (Codex 3).** Real:
+`return errx != nil || erry != nil || os.SameFile(fx, fy)` (nested_roots.go:82
+on da48fa02). In a folder established to fold case, a lookup refused (EACCES)
+or failed transiently made two spellings one root's, which routes a path, and
+a subtree scan's owning root, to a root it may not be in. A spelling that is
+not there (`fs.ErrNotExist`) is still the folder's answer to decide; any other
+error keeps the two two (`thereOrNot`). `TestALookupThatFailsIsNoProofThatTwoSpellingsAreOneRoot`
+stands in for the folder's answer (case-insensitive) and makes `music`
+unsearchable (mode 0600; skipped on Windows and as root): `music/usb/Band`
+stays `music`'s. Red on da48fa02 (`music/USB`'s). Its sibling, neither
+spelling there, runs everywhere and keeps the path the nested root's.
+
+**Round 7's invariant holds** (Argon 2, Codex 3): Unknown folds for what is
+spared and stays case-sensitive for which root a path is; the fix narrows
+only which root a path is, toward two.
+
+**Negative controls**, each on 9be1165d, one at a time, every file put back
+from HEAD:
+
+| Control | Red |
+|---|---|
+| C1 `sameName` as on da48fa02 (any error, one entry) | the new test's refused leg |
+| C2 every lookup error keeps two spellings two, not there included | its "neither spelling there" leg |
+| C3 the watcher test's `library` left full (round 7's simulation) | the premise, in 0.07 s |
+| C4 `heldBelow` compares a held root's path exactly | the watcher test: `music/usb/library` watched |
+| C5 each element asked of the walked root's folder (`mayBeOneName(dir, e)` in `spareFolds`) | every leg of the mounted scan test, and the watcher test |
+| C6 a case-sensitive answer trusted from a folder that holds nothing of the volume (round 7's F1c) | the mounted scan test's two `@eaDir` legs; with round 7's two test files put back, nothing |
+
+C5 with only the folding answer taken from the walked root's folder reddens
+the watcher test alone: the scan test's bare mount point, holding nothing,
+still folds there.
+
+**Gates**, on this Mac with go1.27.3, through the build lock: `go test` without
+race of internal/manifest (77 s), internal/fsutil (0.6 s) and cmd/bridge
+(220 s) passed. Under `-race` one run of internal/manifest outlasted the
+570 s that the session's ten-minute foreground limit allows, with no failure
+before it, so both big packages ran in four shards by name
+(`^(TestA|Fuzz|Example)`, `^Test[B-E]`, `^Test[F-R]`, `^Test[^A-R]` for
+internal/manifest: 195 s, 126 s, 256 s, 502 s; `^(TestA|Fuzz|Example)`,
+`^Test[B-I]`, `^Test[J-R]`, `^Test[^A-R]` for cmd/bridge: 261 s, 129 s,
+134 s, 308 s). Every shard passed, and their top-level counts sum to
+`go test -list`'s, 1,428 and 1,183. internal/fsutil passed under race (2.9 s).
+`make test-fast` passed (81 packages). `make vet` was clean native (darwin)
+and for linux, windows and linux/386. go1.27.3's gofmt lists none of the
+three Go files round 8 changed. `make docs-check` passes on the branch; with
+the patch applied in a scratch copy of the instruction files (scanner.md
+29,897 to 29,964 bytes, build-ci-tests.md 24,922 to 25,504, the worst load
+305,389 bytes), the budgets pass, and `mdblocks.dropped_donts` finds the long
+form's Don't whole in the patched line and the line's in the long form, while
+it reports the unpatched line as dropping it. `scripts/qualification-version`
+ebe71366..HEAD (main's head) is OK.
+
+**The rules**: `rules-b651-r8.patch` adds to the B651 line's clause on which
+root a path is a lookup that failed otherwise than for a name not being there,
+and adds to `build-ci-tests.md`, after the watcher-test wait, that a test
+checks first that the event can come where a seam stands in for the host's
+disk, leaving to that disk no answer the stand-in contradicts, and never calls
+a test that failed after another waited out the deadline broken before it
+fails alone. The long form is in `ops/History-rules-scanner.md`.
