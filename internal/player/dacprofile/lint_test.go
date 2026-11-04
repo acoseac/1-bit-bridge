@@ -1,6 +1,8 @@
 package dacprofile
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -132,10 +134,11 @@ func TestEveryClaimNamesItsProvenance(t *testing.T) {
 
 // TestAHeardRateIsAHearingNeverALock: a heard DoP rate is on-device
 // listening evidence (the design's sections 1.1 and 2.1), so the lint asks a
-// DoP claim with a heard rate for a dop line that says it was heard; a line
-// that says the rate was negotiated, confirmed on hardware or reached a DoP
-// lock, which section 1.1 says hears nothing back, is no hearing. A claim
-// with no heard rate, a refusal alone, needs none.
+// DoP claim with a heard rate for a dop line that names that rate and says
+// it was heard; a line that says the rate was negotiated, confirmed on
+// hardware or reached a DoP lock, which section 1.1 says hears nothing back,
+// is no hearing, and nor is a hearing of another rate. A claim with no heard
+// rate, a refusal alone, needs none.
 func TestAHeardRateIsAHearingNeverALock(t *testing.T) {
 	dopLine := func(text string) func(p *Profile) {
 		return func(p *Profile) { p.Provenance[2] = "dop: iOS profile fixture.dac, " + text + " (iOS cd125088)" }
@@ -144,6 +147,7 @@ func TestAHeardRateIsAHearingNeverALock(t *testing.T) {
 		{"confirmed on hardware", dopLine("DSD128 hardware-confirmed, DSD256 refused"), "heard"},
 		{"a DoP lock", dopLine("DSD128 reached DoP lock, DSD256 refused"), "heard"},
 		{"a negotiation", dopLine("DSD128's carrier negotiated exactly, DSD256 refused"), "heard"},
+		{"a hearing of another rate", dopLine("heard at DSD64, DSD256 refused"), "DSD128"},
 	})
 	p := fixtureProfile("fixture.dac", "00d1")
 	p.DoP.HeardMaxBitRate = 0
@@ -154,18 +158,56 @@ func TestAHeardRateIsAHearingNeverALock(t *testing.T) {
 }
 
 // TestARefusedRateNamesItsRefusal: a refused rate is one a device refused,
-// or played as silence (section 2.1), so the lint asks a DoP claim with
-// refused rates for a dop line that says refused or silence.
+// or played as silence (section 2.1), so the lint asks a DoP claim, for each
+// rate it lists as refused, for a dop line that names that rate and says
+// refused or silence: a refusal of another rate is not its evidence.
 func TestARefusedRateNamesItsRefusal(t *testing.T) {
 	runLintCases(t, []lintCase{
 		{"a line that names no refusal", func(p *Profile) {
 			p.Provenance[2] = "dop: iOS profile fixture.dac, heard at DSD128, DSD256 not (iOS cd125088)"
 		}, "refused"},
+		{"a refusal of another rate", func(p *Profile) {
+			p.Provenance[2] = "dop: iOS profile fixture.dac, heard at DSD128, DSD512 refused (iOS cd125088)"
+		}, "DSD256"},
 	})
 	p := fixtureProfile("fixture.dac", "00d1")
 	p.Provenance[2] = "dop: iOS profile fixture.dac, heard at DSD128, DSD256 played as silence (iOS cd125088)"
 	if problems := fixture(nil, p).Lint(); len(problems) > 0 {
 		t.Errorf("a refusal heard as silence lints as %v", problems)
+	}
+}
+
+// TestNoEmbeddedDoPLineReadsAsAHearing: a profile whose DoP evidence holds no
+// heard rate (the Mytek's: a refusal, beside a DoP lock that hears nothing)
+// has no dop line that reads as a hearing, so a heard rate added to it below
+// its refusals, with no listening behind it, is refused by the lint.
+func TestNoEmbeddedDoPLineReadsAsAHearing(t *testing.T) {
+	db, err := Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tried := 0
+	for _, p := range db.Profiles {
+		if p.DoP == nil || p.DoP.HeardMaxBitRate != 0 {
+			continue
+		}
+		for _, r := range dsdRates {
+			if slices.ContainsFunc(p.DoP.RefusedBitRates, func(refused int) bool { return refused <= r }) {
+				break
+			}
+			d := *p.DoP
+			d.HeardMaxBitRate = r
+			q := p
+			q.DoP = &d
+			want := fmt.Sprintf("names DSD%d and says it was heard", r/44100)
+			if problems := fixture(db.SharedReferenceIDs, q).Lint(); !lintSays(problems, q.ID, want) {
+				t.Errorf("%s given a heard rate of %d lints as %v, want a problem saying %q", q.ID, r, problems, want)
+			}
+			tried++
+		}
+	}
+	if tried == 0 {
+		t.Fatal("no embedded profile holds DoP evidence without a heard rate, so nothing was checked")
 	}
 }
 
