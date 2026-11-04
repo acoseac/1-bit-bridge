@@ -1298,7 +1298,10 @@ B1 narrows the guard to the code that changes DSD bytes or the harness's evidenc
   DSD bytes or their count, `internal/player/decode/dsd.go`, `dsf.go`, `dff.go`,
   `pcm_region.go` and `offset.go`, and `internal/player/format/pcm.go`; and the helpers the
   harness's readers take evidence and a unit's identity through, `internal/fsutil/notafile.go`
-  and `notafile_unix.go`, and `internal/usbid/port.go`.
+  and `notafile_unix.go`, and `internal/usbid/port.go`. Round 3 added the last two the audit
+  flagged: `internal/alsa/sysfs.go`, the sysfs reader the unit's identity is read from, and
+  `internal/alsactl/constraints.go`, `CheckConstraints`, which holds an approval's mixer
+  constraints at play time.
 - **Prefixes:** `internal/alsapcm/`, `internal/player/qualification/` and `cmd/bridge/output_dsdtest`.
 - **Dropped:** everything else in today's two lists.
 

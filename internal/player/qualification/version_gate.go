@@ -14,9 +14,10 @@ import (
 // the player's DSD open and its plans' edges, the DSF and DFF demuxers, the
 // reads they share and the ID3 offset view every read of a tagged file goes
 // through, and the canonical DSD form, whose byte count sets how many bytes a
-// DSF yields. For the harness: the ALSA qualification identity, the control
-// UAPI and reader, the file open its readers take evidence through, and the
-// USB ID and port parsing a unit's identity is read with.
+// DSF yields. For the harness: the ALSA qualification identity and the sysfs
+// reader it is read from, the control UAPI, reader and constraint check, the
+// file open its readers take evidence through, and the USB ID and port
+// parsing a unit's identity is read with.
 var GuardedPaths = []string{
 	"internal/player/format/dsd_pack.go", "internal/player/format/dop_pack.go",
 	"internal/player/playback/native.go", "internal/player/playback/edges.go",
@@ -24,6 +25,7 @@ var GuardedPaths = []string{
 	"internal/player/decode/pcm_region.go", "internal/player/decode/offset.go", "internal/player/format/pcm.go",
 	"internal/alsa/qualification.go", "internal/alsactl/control.go", "internal/alsactl/control_linux.go", "internal/alsactl/uapi.go",
 	"internal/fsutil/notafile.go", "internal/fsutil/notafile_unix.go", "internal/usbid/port.go",
+	"internal/alsa/sysfs.go", "internal/alsactl/constraints.go",
 }
 
 // Prefixes are the ALSA PCM backend and its sinks, the qualification package

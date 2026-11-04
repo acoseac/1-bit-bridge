@@ -11,7 +11,9 @@ import (
 // backend's files; the DSD demuxers', their shared reads', the ID3 offset
 // view's and the canonical DSD form's, which shape the DSD bytes a DAC is
 // sent or their count; and the helpers the harness's readers open evidence
-// and read a unit's identity through (B728 B1, round 2). The PCM decoders,
+// and read a unit's identity through (B728 B1, round 2), the sysfs reader
+// that identity is read from and the constraint check its mixer state is
+// held to (round 3). The PCM decoders,
 // the binding and the CLI's shared code do not
 // (TestAChangeOutsideTheDSDBytePathNeedsNoBump).
 func TestQualificationDependencyGate(t *testing.T) {
@@ -20,6 +22,7 @@ func TestQualificationDependencyGate(t *testing.T) {
 		"internal/player/decode/dsd.go", "internal/player/decode/dsf.go", "internal/player/decode/dff.go",
 		"internal/player/decode/pcm_region.go", "internal/player/decode/offset.go", "internal/player/format/pcm.go",
 		"internal/fsutil/notafile.go", "internal/fsutil/notafile_unix.go", "internal/usbid/port.go",
+		"internal/alsa/sysfs.go", "internal/alsactl/constraints.go",
 	} {
 		t.Run(filepath.Base(p), func(t *testing.T) {
 			dir := t.TempDir()

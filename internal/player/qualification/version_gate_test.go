@@ -183,10 +183,10 @@ func TestAChangeOutsideTheDSDBytePathNeedsNoBump(t *testing.T) {
 		"internal/player/hotplug/feed.go", "internal/player/openhome/handler.go", "internal/player/openhome/listener.go", "internal/player/openhome/actions.go",
 		"internal/api/outputs_bridge.go", "internal/manifest/types.go", "internal/manifest/extractors.go",
 		"internal/player/playback/authorization.go", "internal/player/playback/live.go", "internal/player/playback/approval_dop_fixture_test.go", "internal/player/playback/dop_select_test.go",
-		"internal/player/binding/binding.go", "internal/alsa/sysfs.go", "internal/alsa/qualification_gain.go",
+		"internal/player/binding/binding.go", "internal/alsa/qualification_gain.go",
 		"internal/player/decode/bounds.go", "internal/player/decode/sniff.go", "internal/player/decode/decoder.go", "internal/player/decode/flac.go",
 		"internal/player/format/format.go", "internal/player/format/pack.go",
-		"internal/alsactl/constraints.go", "internal/fsutil/notafile_other.go", "internal/usbid/serial.go", "internal/config/player.go",
+		"internal/fsutil/notafile_other.go", "internal/usbid/serial.go", "internal/config/player.go",
 		"cmd/bridge/output_play_report.go", "cmd/bridge/output_pcmtest_keys_unix.go", "cmd/bridge/output_host.go",
 	} {
 		t.Run(path, func(t *testing.T) {
