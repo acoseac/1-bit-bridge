@@ -92,6 +92,22 @@ func ReadApproval(stateDir, name string, identity Identity) (Approval, error) {
 func ReadCandidate(stateDir, name string, identity Identity) (Approval, error) {
 	return readApproval(stateDir, name, identity, true)
 }
+
+// IdentityMatch is the legacy reader's identity comparison: whether a
+// record's identity, or a report's, is the unit's (live).
+type IdentityMatch func(recorded, live Identity) bool
+
+// SameIdentity compares every field, the anchored port included:
+// ReadApproval's comparison, and production's through ReadLegacyApproval
+// until B728's cutover.
+func SameIdentity(recorded, live Identity) bool { return recorded == live }
+
+// ReadLegacyApproval is the reader of B728's cutover (the design's §3.5),
+// whose version and identity rules land with the reader itself; until then
+// it reads as ReadApproval does.
+func ReadLegacyApproval(stateDir, name string, identity Identity, same IdentityMatch) (Approval, error) {
+	return ReadApproval(stateDir, name, identity)
+}
 func readApproval(stateDir, name string, identity Identity, candidate bool) (Approval, error) {
 	var a Approval
 	b, err := trustedFile(stateDir, name)
