@@ -6,8 +6,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/fsnotify/fsnotify"
 
 	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 )
@@ -241,24 +245,66 @@ func TestTheWatcherDispatchesNoScanForARootWhoseContentWent(t *testing.T) {
 	mustSayOnce(t, rec)
 }
 
+// runParker parks Run's goroutine in the handling of the next event once it is
+// armed, until it is freed, and drops that event: a test does there what must
+// reach the watcher as one step. Made before Run starts (dropEventForTests).
+type runParker struct {
+	armed    atomic.Bool
+	parked   chan struct{}
+	released chan struct{}
+	once     sync.Once
+}
+
+func parkRun(w *Watcher) *runParker {
+	p := &runParker{parked: make(chan struct{}), released: make(chan struct{})}
+	w.dropEventForTests = func(fsnotify.Event) bool {
+		if !p.armed.CompareAndSwap(true, false) {
+			return false
+		}
+		close(p.parked)
+		<-p.released
+		return true
+	}
+	return p
+}
+
+// free lets Run's goroutine go on; a second call does nothing.
+func (p *runParker) free() { p.once.Do(func() { close(p.released) }) }
+
 // TestTheWatcherHoldsARootWhoseWatchesWentWithoutAWord pins the check of the
 // roots' own watches: Linux drops every inotify watch on a volume as it is
 // unmounted and says nothing (IN_UNMOUNT, which fsnotify swallows), so a
 // root whose own watch is gone is looked at, held while it reads as a volume
 // not mounted, and watched again once the volume is back. The test drops the
 // watches itself, as the unmount does, and takes the volume away under no
-// watch.
+// watch, while Run's goroutine is parked in an event's handling: the unmount
+// takes the watches and the volume at once, and a check between the test's
+// two steps would find the root's own watch gone with its volume still there,
+// watch it again, and, its walk meeting the bare mount point, keep that
+// watched.
 func TestTheWatcherHoldsARootWhoseWatchesWentWithoutAWord(t *testing.T) {
 	if kqueueBackend {
 		t.Skip("kqueue keeps the watched folders of an unmounted volume open, and the watcher's account of them")
 	}
 	f := newLateMountFixture(t)
+	park := parkRun(f.w)
 	held, resumed := f.hooks()
 	startWatcher(t, f.w)
+	t.Cleanup(park.free)
+	park.armed.Store(true)
+	if err := os.Mkdir(filepath.Join(f.root, "Artist", "Album", "park"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-park.parked:
+	case <-watchGiveUp(t, watchWaitReserve):
+		t.Fatal("no event reached the watcher's loop to park it")
+	}
 	for _, p := range f.w.w.WatchList() {
 		_ = f.w.w.Remove(p)
 	}
 	f.unmount(t, true)
+	park.free()
 	if got := waitForRoot(t, held, "the watcher never held a root whose watches went"); got != f.root {
 		t.Errorf("the watcher held %q, want %q", got, f.root)
 	}
@@ -306,42 +352,52 @@ func armedUnder(w *Watcher, root string) []string {
 }
 
 // TestTheWatcherDropsTheScansArmedUnderARootItHolds: a root the watcher holds
-// loses the debounced scans armed for folders under it. Each would look at
-// the root again as it fell due, a stat, a listing and a count for nothing,
-// and ask for the hold again (Argon on #1397); the scan of the whole root the
-// watcher asks for once the root reads as it did covers them. The scan here
-// is armed for an hour, so only the hold can take it away; the unmount takes
-// the root's watches first, as Linux's does, and the check of the roots' own
-// watches holds the root.
+// loses the debounced scans armed for folders under it, and no other root
+// loses one. Each would look at the root again as it fell due, a stat, a
+// listing and a count for nothing, and ask for the hold again (Argon on
+// #1397); the scan of the whole root the watcher asks for once the root reads
+// as it did covers them. The hold is the watcher's own step, taken here on the
+// test's goroutine with no Run, so nothing arms, fires or holds meanwhile:
+// driven through Run, a check of the roots' own watches could look at the
+// root between the test taking its watches and taking its volume, and a real
+// unmount takes both at once. The scans are armed for an hour.
 func TestTheWatcherDropsTheScansArmedUnderARootItHolds(t *testing.T) {
-	f := newLateMountFixture(t)
-	f.w.debounce = time.Hour
-	held, resumed := f.hooks()
-	startWatcher(t, f.w)
-	album := filepath.Join(f.root, "Artist", "Album")
-	if err := os.WriteFile(filepath.Join(album, "02.flac"), []byte("not a real flac"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	watchWaitUntil(t, func() bool { return slices.Contains(armedUnder(f.w, f.root), album) }, nil,
-		"the watcher armed no scan of the folder a file was dropped into")
-	for _, p := range f.w.w.WatchList() {
-		if pathAtOrUnder(filepath.Clean(p), f.root) {
-			_ = f.w.w.Remove(p)
+	dir := t.TempDir()
+	away, kept := filepath.Join(dir, "usb", "music"), filepath.Join(dir, "disk", "music2")
+	awayAlbum, keptAlbum := filepath.Join(away, "Artist", "Album"), filepath.Join(kept, "Artist", "Album")
+	for _, album := range []string{awayAlbum, keptAlbum} {
+		if err := os.MkdirAll(album, 0o755); err != nil {
+			t.Fatal(err)
 		}
 	}
-	f.unmount(t, true)
-	if got := waitForRoot(t, held, "the watcher never held a root whose volume went"); got != f.root {
-		t.Errorf("the watcher held %q, want %q", got, f.root)
+	store, err := OpenStore(filepath.Join(dir, "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := armedUnder(f.w, f.root); len(got) != 0 {
+	t.Cleanup(func() { _ = store.Close() })
+	w, err := NewWatcher(NewScanner([]string{away, kept}, store, ""), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		w.cancelAllPending()
+		_ = w.w.Close()
+	})
+	for _, d := range []string{away, awayAlbum, keptAlbum} {
+		w.scheduleScan(context.Background(), d)
+	}
+	if got := armedUnder(w, away); !slices.Equal(got, []string{away, awayAlbum}) {
+		t.Fatalf("premise: the scans armed under %s are %q", away, got)
+	}
+	if !w.holdRoot(away, rootLook{absent: true, reason: rootAbsentEmpty, rows: 1}) {
+		t.Fatalf("premise: %s was held already", away)
+	}
+	if got := armedUnder(w, away); len(got) != 0 {
 		t.Errorf("the watcher kept %d scan(s) armed under a root it holds: %q", len(got), got)
 	}
-	f.mount(t)
-	waitForRoot(t, resumed, "the watcher never watched the root again once its volume was back")
-	if got := armedUnder(f.w, f.root); !slices.Equal(got, []string{f.root}) {
-		t.Errorf("once it watched the root again the watcher had scans armed for %q, want the root's alone", got)
+	if got := armedUnder(w, kept); !slices.Equal(got, []string{keptAlbum}) {
+		t.Errorf("holding %s left the scans armed under %s, a root it still watches, as %q, want %q", away, kept, got, []string{keptAlbum})
 	}
-	f.mustHold(t, lateMountTrack)
 }
 
 // TestTheWatcherLooksAgainAtARootWhoseOwnWatchKqueueDropped pins the check of
