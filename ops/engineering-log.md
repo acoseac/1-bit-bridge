@@ -72601,3 +72601,192 @@ clean after each:
   holds the raise alone, so it can be dropped if the version is set at merge.
 - No backlog entry was written: the backlog file is not on this host. The
   windows/386 build failure above is the follow-up.
+
+## 2026-11-04 — B711: the rules quote their Don'ts verbatim again
+
+Backlog B711, on `docs/b711-restore-donts` from main eba78fdc: the work
+B710's record left for a change of its own. Codex and Argon reviewed the
+brief against eba78fdc, and their notes were binding: player.md's identity
+line keeps its prohibition on replacing a file that does not hold one UUID,
+which no Don't sentence of its long form holds; a long form's sentence,
+wrapped at 80 columns, is compared with its line whitespace-collapsed, as
+the doc-split checks compare; every check runs with the patch applied, in a
+temporary copy of the worktree that is removed afterwards. This worker
+cannot write `.claude/`, so the rules change ships as a checked patch,
+`rules-b711.patch`, relative to the repository's root. The branch commits
+the History edit the move makes, and this record.
+
+**The eight lines** (`.claude/rules/`, line numbers at eba78fdc; the patch
+moves none but config-lifecycle.md's after L862, up by 66):
+- scanner.md L174, `Track.Compilation`, gets back **Don't make it a
+  `*bool` or emit `false`**, which #1275's condensation lost (the old
+  pattern stopped at the `*`).
+- scanner.md L165 merged its long form's two sentences ("Don't move it into
+  `tags_json`, and don't leave it out …"); it now quotes **Don't move it
+  into `tags_json`** and **Don't leave it out of a track write or the stamp
+  leg**. L166 and L168 had each dropped its sentence's closing period.
+- build-ci-tests.md L70 read "held handlers" where its long form says "held
+  test handlers"; the sentence is now a span of its own, beside the B538
+  exception, which stays. L71's "Don't put such a client back on the default
+  transport, and don't hunt the window by oversubscribing HTTP tests." is now
+  its long form's **Don't oversubscribe HTTP tests to hunt it**; the first
+  half restated the title, whose "never `http.DefaultTransport`" stays.
+- cli-serve.md L41 gains **never a value**, the one of its long form's six
+  sentences it lacked.
+- player.md L94 (820 bytes) quoted its Don't reworded: "replace one that
+  does not hold one UUID" added, and its queue and reset clauses in other
+  words. It now holds the title; the long form's own words for that
+  prohibition, from its first sentence, since no Don't sentence of the long
+  form holds it ("a file that does not hold one UUID, followed by nothing but
+  white space (an editor's CR LF), is refused, never replaced."); and the
+  Don't verbatim: 548 bytes. The line has no room for the rest, which stays
+  in the long form: the title's parenthetical (who makes the UUID, under the
+  data dir's lock), and the two bold statements B525 kept in the line, that
+  backup and restore carry it (B505) and that its one reader opens it through
+  `fsutil.OpenAsFile` (B525, whose prohibition the Don't keeps: "read it
+  through a plain open"). With B505's statement the line would be 652 bytes.
+
+Each line was checked against its long form, found by title in
+`ops/History-rules-*.md`: each of the long form's Don't sentences,
+whitespace-collapsed, is byte-equal to one of the line's bold spans; no bold
+span of the line starts with a Don't word unless it is one of them;
+`mdblocks.dropped_donts` and `validate_overrides.problems` find nothing; and
+the line is at most 600 bytes. The byte-equality check fails all eight of
+eba78fdc's lines.
+
+**The move.** config-lifecycle.md L863 (4,756 bytes), its largest entry,
+moved verbatim to the end of `## Config, settings and process lifecycle` in
+`ops/History-rules-config-lifecycle.md`, through `move_entry.plan` with a
+`--text` line. Without one the move is refused: the title and the
+408-character Don't make an 801-byte pointer. The line keeps the title up to
+its colon, whose list the Don't repeats, and the Don't verbatim: 585 bytes,
+where the title's date and backlog number would make 626. config-lifecycle.md
+goes from 98,531 to 94,360 bytes (94.4%), and player.md, at 98,139 bytes
+(98.1%), is now the fullest rules file.
+
+**Checks**, in a copy of the worktree (its `.git` file kept, so git there
+reads this worktree's index and history), the patch applied by a strict
+applier of this worker's: every hunk matched byte for byte at its line, and
+the results equal the files the build computed. The copy was removed after.
+- `make docs-check`: ok, "CLAUDE.md 72.3%; player.md 98.1%; worst load,
+  player_openhome_test.go 63.9%".
+- `verify_moves.py --base eba78fdc`, with an `--edit` for each of the eight
+  lines: PASS. One block moved (4,756 bytes), the eight edits print as
+  diffs, the move's line is the one new block, and none of the 34 cited
+  phrases broke.
+- `validate_overrides.py --base eba78fdc --file … config-lifecycle`, the
+  move's line keyed by the start of its entry: 1 line, 0 rejected.
+- `TestEveryCitedTestNameExists` and the citation scan's own tests (`go
+  test` of cmd/bridge with the Makefile's tags, `-count=1`): pass with this
+  record in place, in the copy and in the worktree.
+- A survey matched each one-line pointer of CLAUDE.md and the rules files to
+  its long form by title, whole or as the start of the long form's: 431
+  pointers at eba78fdc, 369 of them matched. Nine leave out one of their long
+  form's sentences: these eight and config-lifecycle.md L930 (below). With
+  the patch only L930 is left.
+
+**Negative controls**, on the copy: one exact occurrence mutated, the check
+run, the file restored byte for byte. Each turned exactly its check red, and
+the copy's files equalled the build's after:
+- the byte-equality check, four times: L174 without its sentence, L166
+  without its period, L70 back to "held handlers", and L94 without the
+  never-replaced clause, each turning only its own line red;
+- `verify_moves.py` without cli-serve.md L41's `--edit`: the old line
+  MISSING;
+- the History file without the moved entry: the entry MISSING;
+- `validate_overrides.py` on a `--text` line whose Don't lost its last
+  clause: 1 rejected, "dropped Don't";
+- a citation of a test that nothing defines, planted in the patched
+  player.md line: `TestEveryCitedTestNameExists` fails naming
+  `.claude/rules/player.md`, so the run read the copy;
+- the strict applier on the patch with one context byte changed: refused,
+  "does not match the file".
+
+**The thirteen entries with a Don't over 600 characters** (B710's list, at
+eba78fdc):
+- Eight carry a `→ History-` pointer already, and none is a pointer that
+  fits. Seven are single lines ending in one, each over 600 bytes because
+  each keeps its whole sentence: config-lifecycle.md L274 (5,731 bytes; its
+  longest Don't 1,826 characters), L847 (5,769; 813), L848 (2,036; 720), L849
+  (1,750; 654) and L931 (5,536; 1,230; L865 with the patch), output.md L68
+  (1,580; 1,416) and player.md L91 (801; 711). config-lifecycle.md L370
+  (16,490 bytes in 233 lines; 1,496) is a whole entry that names its History
+  file in its middle ("B514 evidence and refusal details → …"), so
+  `move_entry` takes it for a pointer and never offers it.
+- Five are whole entries whose Don't alone is more than a pointer holds:
+  admin-console.md L768, output.md L48, L67 and L69, and player.md L92. They
+  stay: rewording a rule is the owner's. Proposed, each keeping every
+  prohibition, the sizes measured and every code span the entry's own:
+  - admin-console.md L768, 614 characters to 552 (a 593-byte pointer
+    without its title): "Don't give the page a second status source,
+    write `output.player` around the holder or by the settings PATCH, ask if
+    the player sounded after a save, check a DAC choice outside the write's
+    turn, stop playback without the operator's go-ahead or ask for it from
+    the last status, take a DAC's card number from the browser, let a
+    refused route read the box or the file, word a restart a second way, add
+    a DSD control, give the OpenHome switch a go-ahead it has no case for,
+    save its opt-in on over a port clash, or offer a restart for a Source
+    off the LAN."
+  - output.md L48, 670 to 563 (597 bytes without its title): "Don't serve a
+    rendition, a routed track, a listing or a second route there, leave its
+    server's `ErrorLog` nil, drop the remote-address check for a loopback
+    bind, decide whether it serves only at listener start or from the stored
+    probe over the gate's last answer, let an older verdict overwrite a
+    newer, take an abandoned inspection for a verdict, let a request dial
+    MPD to decide, answer a non-loopback Host or a forwarded request, open
+    before the first containment check, or confirm the opened file by
+    `os.Stat`, which follows a link swapped in after the check."
+  - output.md L67, 650 to 565 (599 bytes without its title): "Don't add a
+    sampler or background read, join or double a running read, read a file
+    outside `boundedStep`, keep a session a written command failed or
+    panicked on, take `mpd.conf` from the probe's copy, read it or the ALSA
+    configuration inside the bracket, resolve an id from an ALSA
+    configuration not had, read a setting the verdict or its warnings read
+    on one side of the `/proc` read only, name a file the bridge's row by its
+    suffix, read the row in two statements, take its file for a file by
+    `IsRegular`, or put an `alsa`, `mpd` or `signalpath` type on the wire."
+  - output.md L69, 1,172 characters, about twenty prohibitions that no
+    pointer holds together, as two entries. The verdict's claims and codes,
+    under its own title (426 characters, a 593-byte pointer with the title):
+    "Don't let a verdict survive a song change, a seek or a pause, judge an
+    output the owner's thread does not name, call an MPD output's verdict
+    bit-exact or give one without `bitExactness`, make a setting a reason or
+    present a warning, or its absence, as proof, warn from what was not
+    read, count a lossy or unknown codec, give the DAC's mixer a code, or add
+    a code that is a sentence or that PROTOCOL.md's section does not name."
+    And the DoP evidence, under a new title such as "…and DoP is claimed only
+    from a stream watched opening" (564 characters, 598 bytes without the
+    title): "Don't call DoP decoded or locked, read it from `dop` while the
+    live `allowed_formats` names a format or from the file's, claim it for
+    settings the stream was not watched opening with, take a restart
+    (`trigger_time`, `hw_ptr`) for an open, carry a mark across another
+    `trigger_time`, one no start stamped or one a reading found under
+    `runFloor` in, keep as evidence a run or a stream the reading cannot
+    tell, drop a part-read card's record because no pick names it, or end
+    the record before such a reading unless it saw MPD's settings change or
+    could not read them."
+  - player.md L92, 658 to 508 (598 bytes with its title): "Don't take a
+    device's card from the endpoint it was opened by, hold a port binding to
+    its resolved unit, rule out a card it cannot identify or place, let the
+    recorded interface admit a card beside one being added or removed, check
+    a port binding on sysfs alone, a card listing not whole or an unreadable
+    /proc/asound, admit its card where the USB listing lacks the bound
+    controller or the card its bound stream, let the check and Resolve
+    disagree on one reading under a port binding, or reopen without Admit."
+
+**Left for a change of its own.**
+- config-lifecycle.md L930 (L864 with the patch), the whole-number entry:
+  its line words its long form's Don't another way (`DecodeFile` for
+  `config.DecodeFile`, and without "(the decoder maps the shadow itself)"),
+  inside a span that also carries B533's rule, and at 2,367 bytes it cannot
+  become a pointer that fits without shortening what it says. B710's survey
+  matched titles whole, and this line's title lacks its long form's period.
+- Five pointers bold a Don't that their long form does not state, in bold
+  or in plain text: build-ci-tests.md L72 and L73, dlna-upnp.md L1150 and
+  L1151, and openhome.md L21. Three more merge their long form's sentences
+  into one span that keeps each whole: cli-serve.md L105, scanner.md L164
+  and L167. Nothing checks a line against its long form in that direction.
+- 62 of the 431 pointers have no long form of their title in the History
+  file they name, so neither survey checked them.
+- The five proposals, for the owner. No backlog entry was written: the
+  backlog file is not on this host.

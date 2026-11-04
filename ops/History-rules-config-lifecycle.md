@@ -2460,3 +2460,71 @@ any age: no change there. The record is in `ops/engineering-log.md`,
   configured `variantsDir` or `tempDir` a root CLI creates under a parent
   root owns that is not shared, where the service's own attempt would fail
   too.
+
+- **No refusal, warning or log line of the config path prints a value that
+  can hold a secret or text pasted where it does not belong: a password, a
+  token, a serial, a URL's credentials, a value a setting refused, an entry
+  of a list this build does not know, or a key; a path the operator
+  configured excepted** (2026-10-22, backlog B505 rounds 2 to 5). What a
+  config refuses is often something pasted onto the
+  wrong line, MPD's password or a DAC's serial, and `bridge serve`, `bridge
+  doctor` and init print the refusal, which a service's journal keeps.
+  **A path the operator configured is outside the rule** (the orchestrator's
+  decision on round 4, declining Codex's finding that a password pasted onto
+  `libraryRoots` reaches `LibraryRootError`): a library root that is missing
+  or a data directory init cannot make is named by its path, with the
+  filesystem's error, which repeats it (`LibraryRootError`, which `bridge
+  serve` prints in loopback mode and logs in public mode; init's `mkdir
+  data dir`), since the path is what the operator needs to find and fix,
+  and a path is not a secret the config path guards. Round 2 made
+  `OutputConfig.Problem` return an `*OutputProblem`, the setting and a
+  reason with no value in it, after Validate's refusal quoted a refused mpd
+  (`%q`) and printed a refused port (`%d`); init's rewrite builds its
+  warning lines from its parts. Round 3 took yaml.v3's own errors, which
+  Load printed (the Claude API and Codex on round 2): v3.0.1 quotes a value
+  it cannot decode, whole up to ten bytes and its first seven past that,
+  writes a value tagged `!!map` or `!!seq` whole and unquoted, prints whole
+  a value its explicit tag does not fit, names the anchor of an alias that
+  names none (an unquoted password starting with `*`), and names a key it
+  does not take or finds twice. `config.ValueFreeYAMLError` rebuilds each
+  message from its line, the Go type, a standard tag and the decoder's own
+  words; the parser's own messages (a line and a problem from its fixed
+  set) stay, and any other error, a type's own unmarshaler's, is replaced.
+  Load and init's read of the config it replaces print it. A key goes as a
+  value does, named by its line: a scalar written alone in a flow block is
+  a key, and the player block's reasons say "that key" for the same reason.
+  That line is the key's own, the second key's for one written twice:
+  v3.0.1's `decoder.mappingStruct` prints `ni.Line`, which is 1-based, and
+  the Claude API's reading on round 3 that it prints `ni.Line+1` was
+  yaml.v2's (declined on round 4, measured). Validate's refusals name the
+  setting and what it takes, never what it holds: no `got %d`, no quoted
+  mode, address or quiet-hours window, no effective durations, no
+  `net.SplitHostPort` error, which repeats the address (`splitHostPortWhy`
+  keeps its reason), a library root and an upstream server by their index;
+  Load's own refusals print no path either, though the rule does not ask
+  it. An unparseable `BRIDGE_*` variable's warning names the variable alone,
+  never its value or strconv's error, which repeats it. An entry of
+  `deployment.managedControls` this build does not know is named by its
+  place in the list, by serve's startup warning and by init's refusal
+  (round 4, Codex); the names it knows are a fixed set. Left as they were:
+  init's `--listen-address` and `--admin-address` refusals, which name what
+  the operator typed on that command line; a URL's scheme and host
+  (`urlFieldForLog`, B54); and the `libraryName` and autocert host Load
+  serves, which are published. **Don't print a password, a token, a serial,
+  a URL's user name, password, query or fragment, a value a setting
+  refused, an entry of a list this build does not know, or a key, in a
+  refusal, a warning or a log line, a path the operator configured
+  excepted (`LibraryRootError` and init's directory errors name the path
+  the operator must find and fix); and don't print yaml.v3's error without
+  `ValueFreeYAMLError`.** `TestNoLoadRefusalOrWarningCarriesAValue` (a word
+  and a serial of digits on every setting `envBindings` knows, and on each
+  setting Validate checks only beside another, with that one set; it holds
+  Load to more than the rule, paths included),
+  `TestOutputRefusalsCarryNoValue` (each yaml.v3 shape, checked to carry the
+  value in yaml.v3's own error first),
+  `TestNoEnvironmentOverrideWarningCarriesAValue`,
+  `TestARefusalOfAKeyWrittenTwiceNamesTheSecondKeysOwnLine`,
+  `TestInitRefusalOfAConfigThatDoesNotDecodeQuotesNothingOfIt`,
+  `TestInitRefusalNamesAManagedControlItDoesNotKnowByItsPlace`,
+  `TestServeNamesAManagedControlItDoesNotKnowByItsPlace` and
+  `TestInitRewriteDropsAnOutputSettingThatDoesNotReadAndSaysSo` pin it.
