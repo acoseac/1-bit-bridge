@@ -19,8 +19,10 @@ import (
 // not watched, not even by the walk of a root it is nested in (heldBelow), its
 // events are dropped and no scan is dispatched for it, until a look finds it
 // as it was. A path is the deepest configured root's that holds it
-// (configuredRootOf), so a held root nested in another keeps its own events
-// and scans. It is looked at:
+// (Scanner.rootOf), so a held root nested in another keeps its own events
+// and scans, compared as its volume compares names: where it folds case, a
+// root configured as USB holds the folder the walks list as usb. It is looked
+// at:
 //
 //   - at the start, before any watch is added (holdAbsentRoots);
 //   - when a debounced scan of a folder under it is due, before the scan is
@@ -129,23 +131,6 @@ func (wt *Watcher) watchSet() map[string]struct{} {
 	return set
 }
 
-// configuredRootOf returns the configured root name is at or under, the
-// deepest where roots nest (deepestRootOf, the containment ScanSubtree takes
-// its owning root by), and whether name is that root itself; "" when it is
-// under none.
-func configuredRootOf(roots []string, name string) (root string, itself bool) {
-	absName, err := filepath.Abs(name)
-	if err != nil {
-		return "", false
-	}
-	root, absRoot := deepestRootOf(roots, absName)
-	if root == "" {
-		return "", false
-	}
-	rel, err := filepath.Rel(absRoot, absName)
-	return root, err == nil && rel == "."
-}
-
 // holdRoot holds root on what look found. A root that was watched lets its
 // watches go (releaseRoot) and the scans armed under it (dropScansUnder), and
 // the next look at the held roots is due recheckFirst from now. The hold is
@@ -183,21 +168,30 @@ func (wt *Watcher) holdRoot(root string, look rootLook) bool {
 // what fsnotify still holds on the volume's folders, by the names they had,
 // and on kqueue the account of them too (releaseTree). A watch fsnotify has
 // dropped already answers its Remove with an error, which says nothing here.
-// The root's alias stays, so an event already queued under the name it
-// resolved to is still named back under the root, and dropped as a held
-// root's; watchAgain notes it afresh.
+// Where the volume folds case, so are the watches the walk of a root it is
+// nested in added at its folder in the volume's spelling, usb for a root
+// configured as USB (B651's sixth round). The root's alias stays, so an event
+// already queued under the name it resolved to is still named back under the
+// root, and dropped as a held root's; watchAgain notes it afresh.
 func (wt *Watcher) releaseRoot(root string) {
 	rw := wt.rootWatchPath(root)
 	delete(wt.rootWatches, root)
+	fold := wt.scanner.foldsCase(rw)
 	if wt.fds != nil {
 		if !wt.fds.off {
-			wt.releaseTree(rw)
-			wt.fds.dropPending(rw)
+			for _, p := range wt.fds.spellings(rw, fold) {
+				wt.releaseTree(p)
+				wt.fds.dropPending(p)
+			}
 		}
 		return
 	}
 	for p := range wt.watchSet() {
-		if pathAtOrUnder(p, rw) {
+		at := pathAtOrUnder(p, rw)
+		if !at && fold {
+			_, at = foldedTail(rw, p)
+		}
+		if at {
 			_ = wt.w.Remove(p)
 		}
 	}
@@ -214,7 +208,7 @@ func (wt *Watcher) dropScansUnder(root string) {
 	wt.mu.Lock()
 	defer wt.mu.Unlock()
 	for dir, ps := range wt.pending {
-		if r, _ := configuredRootOf(roots, dir); r == root {
+		if r, _ := wt.scanner.rootIn(roots, dir); r == root {
 			ps.timer.Stop()
 			delete(wt.pending, dir)
 		}
@@ -341,7 +335,7 @@ func (wt *Watcher) lookAgain(ctx context.Context, root, msg string) {
 // it reads as a volume not mounted. A dir under no root is left to
 // ScanSubtree, which refuses it. Called on the dispatch's own goroutine.
 func (wt *Watcher) absentRootOf(ctx context.Context, dir string) (string, rootLook, bool) {
-	root, _ := configuredRootOf(wt.scanner.Roots(), dir)
+	root, _ := wt.scanner.rootOf(dir)
 	if root == "" {
 		return "", rootLook{}, false
 	}

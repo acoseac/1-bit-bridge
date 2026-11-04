@@ -215,6 +215,12 @@ type Scanner struct {
 	// Nil in production.
 	beforeScanLock atomic.Pointer[func()]
 
+	// foldsCaseHook, when set, answers in foldsCase's place: a test stands
+	// in for a volume that folds case, which this host's may not be. Per
+	// instance; nil in production. Read on the scan's goroutine and the
+	// watcher's, so a test sets it before either runs, or between scans.
+	foldsCaseHook func(path string) bool
+
 	// postScanHook, when set, fires after every successful full Scan —
 	// see SetPostScanHook. atomic.Pointer so the boot-time SetPostScanHook
 	// can't race a startup scan already in flight on another goroutine.
@@ -1010,7 +1016,11 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	for _, root := range roots {
 		rootSentinel := relPath(root, root, multiRoot)
 		linksBefore := len(tallies.dirLinks.rels)
-		observed, err := s.walkRoot(ctx, root, nestedRootsUnder(roots, root), multiRoot, seen, seenFolders, errorSubtrees, playlists, &tallies, paths)
+		// The roots nested in this one that read as not mounted are spared
+		// before the walk, reached by it or not (protectNestedRoots).
+		pass := s.protectNestedRoots(ctx, root, s.nestedRootsUnder(roots, root), multiRoot,
+			[]map[string]struct{}{beforeSet, beforeFolderSet}, errorSubtrees)
+		observed, err := s.walkRoot(ctx, root, pass, multiRoot, seen, seenFolders, errorSubtrees, playlists, &tallies, paths)
 		if err != nil {
 			walkErr = err
 			break
@@ -2803,11 +2813,19 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// through the OS path APIs so platform-native casing semantics are
 	// preserved. The deepest, where roots nest: a folder under a root
 	// configured inside another is that root's, whichever is listed first
-	// (B651's fifth round; nested_roots.go).
-	_, owningRoot := deepestRootOf(roots, absDir)
+	// (B651's fifth round; nested_roots.go). And compared folded where the
+	// volume folds case (underRoot, the sixth round): a nested root
+	// configured as USB is the folder the outer root's walk spells usb.
+	_, owningRoot, tail := s.deepestRootOf(roots, absDir)
 	if owningRoot == "" {
 		return 0, fmt.Errorf("dir %q is not under any configured library root", dir)
 	}
+	// The root's own part of absDir in the root's configured spelling, so the
+	// rows this scan writes carry the prefix the root's full scan gives them;
+	// the part below the root stays as it was handed, the walk's own spelling
+	// (B219: no respelling here). Where Rel found absDir under the root, this
+	// is absDir as it was, but for the case of the root's part on Windows.
+	absDir = filepath.Join(owningRoot, tail)
 
 	// A subtree scan OF the root walks the root as Scan does: through it,
 	// when the root is a link to a directory (fsutil.WalkableRoot, the
@@ -2837,9 +2855,15 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// so set membership in `seen`/`seenFolders` is directly
 	// comparable against the snapshot keys.
 	relScope := relPath(owningRoot, absDir, multiRoot)
-	// The roots configured inside the owning root, which the walk below
-	// passes over while one reads as not mounted (spareNestedRoot).
-	nested := nestedRootsUnder(roots, owningRoot)
+	// The roots configured inside the owning root at or below the folder this
+	// scan walks, which it spares while one reads as not mounted, reached by
+	// the walk or not (protectNestedRoots, after the snapshots below).
+	var nested []nestedRoot
+	for _, n := range s.nestedRootsUnder(roots, owningRoot) {
+		if _, ok := s.underRoot(absDir, n.abs); ok {
+			nested = append(nested, n)
+		}
+	}
 
 	// Subtree-scoped "before" snapshots. Smaller than Scan's whole-
 	// library snapshot — one query per scope — and the deletion pass
@@ -2864,6 +2888,8 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	seen := make(map[string]struct{}, len(beforeTrackSet))
 	seenFolders := make(map[string]struct{}, len(beforeFolderSet))
 	errorSubtrees := make(map[string]struct{})
+	pass := s.protectNestedRoots(ctx, owningRoot, nested, multiRoot,
+		[]map[string]struct{}{beforeTrackSet, beforeFolderSet}, errorSubtrees)
 	// The playlist files this walk passes, for the scoped playlist-file
 	// pass after the deletion passes (backlog B431).
 	playlists := make(map[string]playlistSighting)
@@ -2944,8 +2970,8 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 			// Reachable when a configured root is itself dot-named.
 			if abs != walkFrom {
 				// A root nested in this one that reads as not mounted:
-				// walkRoot's decision (spareNestedRoot).
-				if s.spareNestedRoot(ctx, nested, abs) {
+				// walkRoot's decision (protectNestedRoots).
+				if pass.has(abs) {
 					errorSubtrees[relPath(owningRoot, abs, multiRoot)] = struct{}{}
 					return filepath.SkipDir
 				}
@@ -3321,7 +3347,7 @@ func (s *Scanner) auditSubtreeMiss(ctx context.Context, abs, owningRoot string, 
 // scan that its mount looked empty. A link that dangles (the mount it
 // points into went away) is the unreachable case above, never an
 // empty library.
-func (s *Scanner) walkRoot(ctx context.Context, root string, nested map[string]string, multiRoot bool, seen, seenFolders, errorSubtrees map[string]struct{}, playlists map[string]playlistSighting, tallies *walkTallies, paths chan<- pathInfo) (int, error) {
+func (s *Scanner) walkRoot(ctx context.Context, root string, pass nestedPass, multiRoot bool, seen, seenFolders, errorSubtrees map[string]struct{}, playlists map[string]playlistSighting, tallies *walkTallies, paths chan<- pathInfo) (int, error) {
 	walkFrom, err := fsutil.WalkableRoot(root)
 	if err != nil {
 		scanLogger.Error("root unreachable", rootLineAttrs(root, rootLinkTarget(root), "err", err,
@@ -3382,10 +3408,10 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, nested map[string]s
 			if abs != walkFrom {
 				// A root configured inside this one that reads as a volume
 				// not mounted is passed over, and the rows this root holds
-				// under it are spared: its bare mount point is no evidence
-				// that the files under it are gone (spareNestedRoot,
-				// B651's fifth round).
-				if s.spareNestedRoot(ctx, nested, abs) {
+				// under it are spared (recorded before the walk): its bare
+				// mount point is no evidence that the files under it are
+				// gone (protectNestedRoots, B651's fifth and sixth rounds).
+				if pass.has(abs) {
 					errorSubtrees[relPath(root, abs, multiRoot)] = struct{}{}
 					return filepath.SkipDir
 				}

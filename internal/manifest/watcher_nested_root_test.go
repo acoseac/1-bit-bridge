@@ -180,8 +180,8 @@ func TestANestedRootsPathsAndEventsAreItsOwn(t *testing.T) {
 		{n.inner, n.inner, true},
 		{filepath.Join(n.inner, "Band", "Record"), n.inner, false},
 	} {
-		if root, itself := configuredRootOf(roots, c.name); root != c.root || itself != c.itself {
-			t.Errorf("configuredRootOf(%s) = %q, itself %v; want %q, itself %v", c.name, root, itself, c.root, c.itself)
+		if root, itself := n.scanner.rootIn(roots, c.name); root != c.root || itself != c.itself {
+			t.Errorf("rootIn(%s) = %q, itself %v; want %q, itself %v", c.name, root, itself, c.root, c.itself)
 		}
 	}
 

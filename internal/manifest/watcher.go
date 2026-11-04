@@ -672,26 +672,36 @@ func (wt *Watcher) addTree(root string, isConfiguredRoot bool) error {
 // passes over each, watching nothing at or under it, as no walk watches a held
 // root (B651's fifth round, CodeRabbit on #1397): the startup walk of the
 // outer root, a resume's, and a new folder's under it. root is named in its
-// configured spelling first (configuredName), as the held roots are. nil when
-// there is none, which is every walk but one of a root a held root is nested
-// in.
-type heldBelow map[string]struct{}
+// configured spelling first (configuredName), as the held roots are. Compared
+// as the volume compares names (Scanner.underRoot): where it folds case, a
+// held root configured as USB is the folder the walk lists as usb (B651's
+// sixth round, Codex on round 5). Empty when there is none, which is every
+// walk but one of a root a held root is nested in.
+type heldBelow struct {
+	rels []string
+	fold bool
+}
 
 func (wt *Watcher) heldBelow(root string) heldBelow {
 	if len(wt.held) == 0 {
-		return nil
+		return heldBelow{}
 	}
-	named := wt.configuredName(root)
+	named, err := filepath.Abs(wt.configuredName(root))
+	if err != nil {
+		return heldBelow{}
+	}
 	var out heldBelow
 	for h := range wt.held {
-		rel, err := filepath.Rel(named, h)
-		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		a, err := filepath.Abs(h)
+		if err != nil {
 			continue
 		}
-		if out == nil {
-			out = make(heldBelow)
+		if rel, ok := wt.scanner.underRoot(named, a); ok && rel != "." {
+			out.rels = append(out.rels, rel)
 		}
-		out[rel] = struct{}{}
+	}
+	if len(out.rels) > 0 {
+		out.fold = wt.scanner.foldsCase(named)
 	}
 	return out
 }
@@ -699,15 +709,20 @@ func (wt *Watcher) heldBelow(root string) heldBelow {
 // passes reports whether a walk that started at the folder base passes over
 // the folder at path: a held root below it.
 func (h heldBelow) passes(base, path string) bool {
-	if len(h) == 0 {
+	if len(h.rels) == 0 {
 		return false
 	}
 	rel, err := filepath.Rel(base, path)
 	if err != nil {
 		return false
 	}
-	_, ok := h[rel]
-	return ok
+	// Both are clean, so folding the whole of each folds each element.
+	for _, r := range h.rels {
+		if rel == r || h.fold && strings.EqualFold(rel, r) {
+			return true
+		}
+	}
+	return false
 }
 
 // noteAlias records a configured root that is watched where it resolves to,
@@ -963,7 +978,7 @@ func (wt *Watcher) handleEvent(ctx context.Context, ev fsnotify.Event) {
 	// for a look at that root, never for a scan of the folder above it,
 	// which no root holds (watcher_hold.go).
 	name := wt.configuredName(ev.Name)
-	if root, itself := configuredRootOf(wt.scanner.Roots(), name); root != "" {
+	if root, itself := wt.scanner.rootOf(name); root != "" {
 		if _, held := wt.held[root]; held {
 			return
 		}

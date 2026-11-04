@@ -110,6 +110,13 @@ func IsUnderAny(candidate string, roots []string) string {
 	return ""
 }
 
+// FoldsCase reports whether the volume holding p, or the nearest ancestor of
+// p that exists, folds case (caseInsensitiveFS): probed on the volume itself,
+// so a path that is not there yet is judged by the folder it would be made in,
+// never taken for case-sensitive for being absent. The platform's default
+// answers only where nothing can be probed (caseInsensitiveFS says when).
+func FoldsCase(p string) bool { return caseInsensitiveFS(p) }
+
 // caseInsensitiveFS reports whether the volume holding p (or its nearest
 // existing ancestor) treats names case-insensitively. It probes EMPIRICALLY —
 // stat the ancestor's base name and its case-swapped sibling, then compare via

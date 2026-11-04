@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -285,6 +286,37 @@ func (f *watchFDs) release(p string) []string {
 		}
 	}
 	drop(p)
+	return out
+}
+
+// spellings is p and, where the volume folds case (fold), every path the
+// account holds that is p in another case: the folder a walk of the root it is
+// in listed as the volume spells it. p first; each one's subtree is recorded
+// under its own spelling, so releasing each releases them all. The account's
+// paths are clean, as p is, so folding the whole of each folds each element.
+func (f *watchFDs) spellings(p string, fold bool) []string {
+	out := []string{p}
+	if !fold {
+		return out
+	}
+	seen := map[string]struct{}{p: {}}
+	note := func(q string) {
+		if _, ok := seen[q]; ok {
+			return
+		}
+		if strings.EqualFold(p, q) {
+			seen[q] = struct{}{}
+			out = append(out, q)
+		}
+	}
+	for q := range f.tops {
+		note(q)
+	}
+	for _, k := range f.kids {
+		for q := range k {
+			note(q)
+		}
+	}
 	return out
 }
 
