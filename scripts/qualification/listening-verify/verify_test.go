@@ -1239,7 +1239,14 @@ func checkDir(dir string, limits limits) (report, problems []string) {
 	manifests := map[string]qualification.Manifest{}
 	type pair struct{ dsd, ref string }
 	pairs := map[pair][]string{}
-	dsdFiles := map[string]qualification.Fixture{}
+	// Every fixture that names a file is held to it: two fixtures of one
+	// file, or of one manifest and another, may declare it differently.
+	type named struct {
+		manifest string
+		f        qualification.Fixture
+	}
+	var fixtures []named
+	dsdFiles := map[string][]named{}
 	for _, name := range names {
 		base := filepath.Base(name)
 		b, err := os.ReadFile(name)
@@ -1270,45 +1277,46 @@ func checkDir(dir string, limits limits) (report, problems []string) {
 			byID[f.ID] = f
 		}
 		for _, f := range m.Fixtures {
+			fixtures = append(fixtures, named{base, f})
 			if f.Container == "WAV" {
 				continue
 			}
-			dsdFiles[f.Path] = f
+			dsdFiles[f.Path] = append(dsdFiles[f.Path], named{base, f})
 			ref := byID[f.PCMReference]
 			pairs[pair{f.Path, ref.Path}] = append(pairs[pair{f.Path, ref.Path}], base+" "+f.ID)
 		}
 		say("%s: %d fixtures; schema, ReadManifest and CheckAssets pass; sha256 %s", base, len(m.Fixtures), fileDigest(b))
 	}
-	headers := func(f qualification.Fixture) {
-		path := filepath.Join(assets, f.Path)
-		if f.Container == "WAV" {
-			_, p, err := readBridgeWAV(path)
-			if err == nil && (p.RateHz != f.Rate || p.Channels != f.Channels || p.Frames != f.Frames) {
+	// The headers, as dsd-test checks each fixture it plays and its
+	// reference (verifyNativeFixture): each file decoded once.
+	pcmHeaders, dsdHeaders := map[string]format.PCM{}, map[string]format.NativeDSD{}
+	headerErr := map[string]error{}
+	for _, n := range fixtures {
+		f, path := n.f, filepath.Join(assets, n.f.Path)
+		if _, ok := headerErr[f.Path]; !ok {
+			var err error
+			if f.Container == "WAV" {
+				_, pcmHeaders[f.Path], err = readBridgeWAV(path)
+			} else {
+				_, dsdHeaders[f.Path], err = readBridgeDSD(path)
+			}
+			headerErr[f.Path] = err
+		}
+		err := headerErr[f.Path]
+		if err == nil && f.Container == "WAV" {
+			if p := pcmHeaders[f.Path]; p.RateHz != f.Rate || p.Channels != f.Channels || p.Frames != f.Frames {
 				err = errors.New("PCM reference header disagrees with manifest")
 			}
-			if err != nil {
-				bad("%s: %v", f.Path, err)
+		} else if err == nil {
+			if p := dsdHeaders[f.Path]; p.BitRateHz != f.Rate || p.Channels != f.Channels || p.Frames != f.Frames || !strings.EqualFold(string(p.Container), f.Container) {
+				err = errors.New("DSD fixture header disagrees with manifest")
 			}
-			return
-		}
-		_, p, err := readBridgeDSD(path)
-		if err == nil && (p.BitRateHz != f.Rate || p.Channels != f.Channels || p.Frames != f.Frames || !strings.EqualFold(string(p.Container), f.Container)) {
-			err = errors.New("DSD fixture header disagrees with manifest")
 		}
 		if err != nil {
-			bad("%s: %v", f.Path, err)
+			bad("%s %s (%s): %v", n.manifest, f.ID, f.Path, err)
 		}
 	}
-	seen := map[string]bool{}
-	for _, m := range manifests {
-		for _, f := range m.Fixtures {
-			if !seen[f.Path] {
-				seen[f.Path] = true
-				headers(f)
-			}
-		}
-	}
-	say("headers: %d files decode with the bridge's decoders as their manifests declare", len(seen))
+	say("headers: %d fixtures of %d files decode with the bridge's decoders as their manifests declare", len(fixtures), len(headerErr))
 	decodedDSD := map[string]*decoded{}
 	paths := make([]string, 0, len(dsdFiles))
 	for p := range dsdFiles {
@@ -1345,12 +1353,14 @@ func checkDir(dir string, limits limits) (report, problems []string) {
 		if d == nil {
 			continue
 		}
-		f := dsdFiles[p]
-		if d.order != f.Order {
-			bad("%s: decoded channel order %q, the manifest says %q", p, d.order, f.Order)
-		}
-		if order, ran, err := ffmpegOrder(filepath.Join(assets, p)); ran && (err != nil || order != f.Order) {
-			bad("%s: ffmpeg's decode: order %q, %v", p, order, err)
+		ffOrder, ran, ffErr := ffmpegOrder(filepath.Join(assets, p))
+		for _, n := range dsdFiles[p] {
+			if d.order != n.f.Order {
+				bad("%s %s (%s): decoded channel order %q, the manifest says %q", n.manifest, n.f.ID, p, d.order, n.f.Order)
+			}
+			if ran && (ffErr != nil || ffOrder != n.f.Order) {
+				bad("%s %s (%s): ffmpeg's decode: order %q, %v", n.manifest, n.f.ID, p, ffOrder, ffErr)
+			}
 		}
 		decodedDSD[p] = d
 		say("%s: %d bits a channel at %d, bridge decoder and independent reader agree; order %s; longest run %d; density %.6f/%.6f",

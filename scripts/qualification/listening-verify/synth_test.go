@@ -168,6 +168,10 @@ func synthManifest(dsdHash, refHash string) map[string]any {
 type synthSet struct {
 	msb, swap bool
 	declared  uint32
+	// step, when set, makes the left channel's last 10 ms (3528 bytes,
+	// one analysis block) 0xEE: density three quarters, a DC step at the
+	// file's end, no long run, and no tone in the block's bins.
+	step bool
 }
 
 func (s synthSet) build(t *testing.T) string {
@@ -185,7 +189,13 @@ func (s synthSet) build(t *testing.T) string {
 			declared = 8
 		}
 	}
-	writeDSF(t, filepath.Join(assets, "dsd.dsf"), synthDSD(bits), bits, s.msb, declared, s.swap)
+	ch := synthDSD(bits)
+	if s.step {
+		for i := len(ch[0]) - 3528; i < len(ch[0]); i++ {
+			ch[0][i] = 0xEE
+		}
+	}
+	writeDSF(t, filepath.Join(assets, "dsd.dsf"), ch, bits, s.msb, declared, s.swap)
 	writeWAV(t, filepath.Join(assets, "ref.wav"), 44100, 2*44100)
 	hash := func(name string) string {
 		b, err := os.ReadFile(filepath.Join(assets, name))
@@ -245,7 +255,7 @@ func TestTheCheckPassesASoundSet(t *testing.T) {
 func TestTheCheckCatchesASwappedChannelPair(t *testing.T) {
 	t.Parallel()
 	_, problems := checkDir(synthSet{swap: true}.build(t), synthetic)
-	for _, want := range []string{`dsd.dsf: decoded channel order "RL", the manifest says "LR"`, `the DSD's channel order is "RL", its reference's "LR"`} {
+	for _, want := range []string{`manifest.json dsd (dsd.dsf): decoded channel order "RL", the manifest says "LR"`, `the DSD's channel order is "RL", its reference's "LR"`} {
 		if !has(problems, want) {
 			t.Fatalf("a swapped fixture is not caught as %q: %q", want, problems)
 		}
@@ -259,6 +269,17 @@ func TestTheCheckCatchesTheWrongBitOrder(t *testing.T) {
 	_, problems := checkDir(synthSet{declared: 8}.build(t), synthetic)
 	if !has(problems, "against the reference's") {
 		t.Fatalf("a fixture of the wrong bit order passed: %q", problems)
+	}
+}
+
+// TestTheCheckCatchesAStepAtAFilesEnd: a file that ends off its own mean
+// clicks where the sink joins it to its 0x69 tail, and the boundary check
+// says so, when nothing else in the fixture is wrong.
+func TestTheCheckCatchesAStepAtAFilesEnd(t *testing.T) {
+	t.Parallel()
+	_, problems := checkDir(synthSet{step: true}.build(t), synthetic)
+	if len(problems) != 1 || !has(problems, "the boundaries of dsd: boundary 1 holds") {
+		t.Fatalf("a step at the file's end is not the one problem caught: %q", problems)
 	}
 }
 

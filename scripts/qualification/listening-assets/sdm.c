@@ -1343,6 +1343,33 @@ static int selftest_main(int argc, char **argv) {
 			check(fabs(area) < 0.01, what);
 		}
 	}
+	/* The boundaries: a quiet tail's stream, whose decaying bursts need
+	 * their zero-area phase as much as their ends need the search, starts
+	 * and ends on its own mean and leaves at most BOUNDARY_CLICK against
+	 * 0x69 on either side. */
+	{
+		const long long rate = 2822400;
+		segment_t seg = {&contents[1], 0, 6 * rate};
+		long long P[2] = {0, seg.frames};
+		stream_t out;
+		out.bits = seg.frames;
+		for (int c = 0; c < 2; c++) {
+			out.ch[c] = calloc((size_t)((seg.frames + 7) / 8), 1);
+			if (!out.ch[c])
+				die("%s", "out of memory");
+		}
+		double amp = 0.5 * pow(10, -30 / 20.0);
+		for (int c = 0; c < 2; c++) {
+			sdm_t m;
+			boundary_t b[2];
+			search_stream(&m, &t, da.dither, 77 + (uint64_t)c, &seg, P, 1, c, amp, rate, &out, b);
+			snprintf(what, sizeof what, "quiet-tail channel %d starts within %.1f dB SA-CD of 0x69 and ends within %.1f (sums %+.4f, %+.4f)", c,
+			         b[0].startClick, b[1].endClick, b[0].start, b[1].end);
+			check(b[0].startClick <= BOUNDARY_CLICK && b[1].endClick <= BOUNDARY_CLICK && fabs(b[0].start) <= BOUNDARY_EPS && fabs(b[1].end) <= BOUNDARY_EPS, what);
+		}
+		free(out.ch[0]);
+		free(out.ch[1]);
+	}
 	/* Determinism: the same seed gives the same bits. */
 	sdm_t a, b;
 	sdm_init(&a, &t, da.dither, 99);
