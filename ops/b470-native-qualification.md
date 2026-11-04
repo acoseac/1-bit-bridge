@@ -47,6 +47,73 @@ On-ear audition starts only at the recorded position; never raise the knob durin
 A receipt missing either exact entry is incomplete. Receipts survive separate CLI invocations on the
 same live attachment, not host reboot/re-enumeration or changed mixer/manifest/policy.
 
+## Preparing listening assets
+
+`scripts/qualification/listening-assets` makes the assets above, sharing nothing with the bridge or
+its decoder goldens: `sdm.c` (C99, the system compiler) renders each programme as 1-bit DSD through a
+modulator of its own and as integer PCM, and writes DSF (LSB- and MSB-first), DSDIFF and
+WAVE_FORMAT_EXTENSIBLE files; `generate.py` builds it, runs its self-test, and writes the assets,
+their manifests and `runs.json`, the session's runs. The modulator is a 1-bit error-feedback loop,
+its NTF a synthesizeNTF design: order 5, Legendre-root zeros across the band at OSR 64 (the
+band edge is the rate / 128 at every rate), |H(-1)| = 1.4, signal transfer exactly 1, in-loop TPDF
+dither of peak 0.4 (0.1 left a quarter-rate idle line in silence; the loop held to 0.7). Silence is
+that loop with a zero input, never a constant byte. DSD peaks are -30 dB re 0 dB SA-CD (a sine of
+half the +-1 range), PCM peaks -30 dBFS: a DAC that takes 0 dB SA-CD as PCM full scale plays both
+at one level, one that maps full modulation to full scale plays the DSD 6.02 dB quieter, never
+louder. Each burst rises and falls over 10 ms, the same in DSD and PCM, and has no net area. Every
+file boundary at an even bit is re-dithered to leave at most -100 dB SA-CD in the audio band where a
+sink joins it to another file or to its 0x69 silence (the least of 2000 tries where none does). The
+manifest's `calibration.reference` says all of this, with the sha256 of `sdm.c` and `generate.py`
+and the compiler.
+
+```sh
+python3 scripts/qualification/listening-assets/generate.py --self-test
+G=$(mktemp -d) && cp scripts/qualification/listening-assets/sdm.c scripts/qualification/listening-assets/generate.py "$G"
+python3 "$G/generate.py"
+GOTOOLCHAIN=go1.27.3 go test -tags ts_omit_webclient,ts_omit_debugeventbus ./scripts/qualification/listening-verify -count=1 -v -args -listening-assets="$G/out"
+```
+
+`generate.py` never writes inside a Git checkout: the assets are some 550 MB and never committed.
+It runs `sdm` inside `out/` on paths relative to it, so no file it writes (`generation.json`, which
+records each run's arguments, included) names an absolute path, the user or the host; its self-test
+renders a small set and reads every file for them.
+Its plan (`build_plan`) is a DAC with native DSD_U32_BE at DSD64, 128 and 256, DoP at DSD64 and 128,
+and S32_LE alone for PCM; change it for another DAC (dsd-test opens a 24-bit reference as S24_3LE,
+a 32-bit one as S32_LE).
+- `manifest.json` is the qualification manifest. One approval binds one manifest
+  (`ApprovalBody.ManifestHash`) and DoP needs references at its carrier, so DSD64's fixtures
+  reference 176.4 kHz WAVs, DSD128's 352.8 kHz and DSD256's 352.8 kHz (384 kHz for the odd and
+  sub-byte lengths, which have no 176.4 or 352.8 kHz length of their own). Every reference is
+  32-bit; `wav44`, `wav88`, `wav176`, `wav352` and `wav384` (`pcmNN.wav`) are 24-bit PCM edges.
+- `manifest-edge44.json` and `manifest-edge384.json` hold the same DSD files with 44.1 and 384 kHz
+  references: the matrix's PCM rate edges, each with contacts of its own.
+- Per rate NN: `dsdNN-lr-lsb`, `dsdNN-rl-lsb`, `dsdNN-lr-msb`, `dsdNN-lr-dff` and `dsdNN-rl-dff` are
+  the 8 s programme; an RL DSF carries the LR streams swapped, and the RL DFF lists CHNL SRGT SLFT
+  over the LR DFF's storage, so both play RL. `dsdNN-quiet-tail` decays both tones to silence. The
+  chain `dsdNN-odd`, `dsdNN-subbyte`, `dsdNN-continuous-split` is one modulation in three files:
+  odd ends after an odd number of 16-bit groups (an odd DoP carrier frame), subbyte inside a byte at
+  an odd bit, which only its continuation joins cleanly, and continuous-split ends it on a whole
+  32-bit word, so no run here leaves the sink a partial word to pad.
+- A DoP run takes neither subbyte nor continuous-split: a DoP reference is at the carrier with the
+  fixture's exact duration, so a DoP fixture is a whole number of carrier frames. DoP's joins run
+  is `dsdNN-quiet-tail dsdNN-odd dsdNN-odd`, its second join on an odd carrier frame.
+
+TestListeningAssets holds the directory to what dsd-test and this runbook take: every manifest
+through `qualification.ReadManifest`, `CheckAssets` and `manifest-v1.schema.json`; every fixture's
+header as dsd-test checks it; every DSD fixture through the bridge's decoder and an independent
+DSF/DSDIFF reader, bit for bit; each against its reference in 10 ms blocks, its tones 6.02 dB down
+within 0.05 dB and 0.01 Hz, no tone above -100 dBFS where the reference has none, its silences under
+-100 dB SA-CD from 20 Hz to 20 kHz, its channel order its manifest's, the noise from 20 to 100 kHz
+under -18, -45 and -80 dB SA-CD at DSD64, 128 and 256 and within 1.5 dB in silence and tones, no line
+from 20 to 150 kHz 10 dB over its neighbours, no run of more than 16 equal bits, and a density of
+one half; ffmpeg's `dsd_*` decoders as a third reading when ffmpeg is on PATH; each run of
+`runs.json` under dsd-test's fixture-list rules; every boundary those runs make a sink play (its
+0x69 prefill, each join, its 0x69 tail) under -90 dB SA-CD; and no file beside the assets, nor the
+tar's headers, naming an absolute path, the user or the host. With the directory given, the package's
+costly tests run beside it: each builds a two-second set and catches an LR fixture swapped as RL,
+LSB-first bytes declared MSB-first or a step at a file's end. The default run (`make test`) keeps to a
+quarter-second order check and cases of the metadata scan, the schema and the run rules.
+
 ## Commands on the Pi (Bash; execute one command and inspect its result at a time)
 
 Set B to the candidate and C to a complete bound loopback configuration (`listenAddress:

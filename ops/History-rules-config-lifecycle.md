@@ -2442,8 +2442,11 @@ rollback would run.
 caller, and the refusals a status cannot foresee answer as they did:
 another install or rollback in flight, downloads in flight without
 `?force=1`, the marker's lock held past its wait. A Check-now request that
-fails still renders a partial status (`{lastError}`), which hides Roll back
-and every row until the next frame, as it hid the button before.
+failed still rendered a partial status (`{lastError}`), which hid Roll back
+and every row until the next frame, as it hid the button before; since B720
+(2026-11-04) it renders no status, and shows its error in the Last error row
+beside the rows the last status rendered (the bullet at the end of
+`.claude/rules/admin-console.md`).
 
 *Tests.* Red first on a seam that changes nothing (cab93107: the field,
 filled by nothing), so as on main:
