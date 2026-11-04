@@ -73125,3 +73125,139 @@ sentence does not fit a 600-byte pointer beside the entry's others, so the entry
 player.md verbatim and its History copy is gone. L146's pointer gains its long form's
 "It reports nothing until the watcher has published, and its first report is the first
 snapshot's, whatever it says." (481 bytes). player.md ends at 93711 bytes (93.7%).
+
+## 2026-11-04 — B728 B1: production reads through the legacy reader, and the qualification guard narrows
+
+PR B1 of the DSD capability plan (`ops/plan-b728-dsd-capability-design.md`:
+its sections 3.5 and 8, and B1's row of section 11), on
+`feat/b728-b1-qualification-guard` from main 7684d916. Codex and Argon
+reviewed the brief against 7684d916, and the orchestrator's decisions on
+their notes were binding: the gate is the player tier in full; the rules
+change ships as `rules-b728-b1.patch`, which the orchestrator applies
+before pushing, while its History entries and this record are committed
+here; the qualification check is expected to pass at 36; the red tests are
+a commit of their own.
+
+**Why first.** Until B7 production read the owner's approval through
+`ReadApproval`, which refuses a record, or a report it holds, of any
+version but the current one (Codex's P1 in the design's second round). So
+any guarded change merged before B7, each of which raises
+`qualificationVersion`, would have stopped an owner's native and DoP DSD
+before B6 migrated the record. B1 makes production's read take older
+versions in the PR that raises the version, and narrows the guard there.
+
+**What changed.**
+- `qualification.ReadLegacyApproval(stateDir, name, identity, same)`
+  makes every check `ReadApproval` makes but two, which the reader beneath
+  both now takes as parameters (`evidenceRule`): the version, any from
+  `LegacyVersion` (35, frozen) on, for the record and every report it
+  holds (a matrix, lifecycle or transition report, a DoP experiment, an
+  experiment's contact); and the identity comparison (`IdentityMatch`),
+  the caller's, asked of the record and of every report. The harness's
+  entry points (`ReadApproval`, `ReadCandidate`, `CheckDoPExperiments`,
+  `Contact.Validate`) keep the current version and every field
+  (`harnessRule`). An experiment's contact is compared with its own
+  experiment's identity, no longer with the unit's: the same check under
+  every field compared, and the one that lets B6's comparison of the model
+  take a contact made on another port. A nil comparison is refused.
+- `playback`'s `readPermission` reads production's record (`New`: serve
+  and `bridge output play`) through it with `SameIdentity`, the port
+  included, until B7; the candidate backend keeps `ReadCandidate` and the
+  transition backend `ReadApproval`.
+- `version_gate.go`: `GuardedPaths` are `internal/player/format/dsd_pack.go`
+  and `dop_pack.go`, `internal/player/playback/native.go` and `edges.go`,
+  `internal/alsa/qualification.go`, and `internal/alsactl/control.go`,
+  `control_linux.go` and `uapi.go`; the prefixes `internal/alsapcm/`,
+  `internal/player/qualification/` and `cmd/bridge/output_dsdtest`. The
+  rest of the two lists is dropped (the owner's decision 1 of 2026-11-04).
+- qualificationVersion 36, with the runbook's five mentions. The runbook's
+  header carries the design's B1 sentence (its section 9.1, item 14),
+  "fresh" leaves production's record there, and its paragraphs on the
+  guard and on staleness say what both are now.
+- Rules: the patch adds player.md's section "Player DSD by capability and
+  choice (B728)" with the design's B1 bullet, and corrects the "Native
+  engine hand-off" line, whose "Version 12 guards admission, health and
+  surfaces" B1 made false; both long forms are in
+  `ops/History-rules-player.md`.
+
+**Commits.** 0aedd16a the seam and the bump: `ReadLegacyApproval` reading
+as `ReadApproval` does, version 36 and the runbook's mentions, so that
+commit reads a record as main would after a bump; 71cd5e19 the red tests;
+f9766b85 the fix; fd0afd6b and 9dfbaffa two tests the controls' design
+found missing (a nil comparison; the exported harness checks' version);
+this record.
+
+**Red first** (71cd5e19, on 0aedd16a):
+- `TestProductionStillPlaysAVersion35RecordAfterTheBump`: "production
+  refused an owner's record of version 35 after the bump to 36: stale
+  approval version", the design's red. In the playback overlay,
+  `TestNativeIntegrationApprovedConstructor/legacy_version`: "unplayable:
+  dsd_approval_unavailable: the approved record does not read: stale
+  approval version".
+- `TestTheLegacyReaderRefusesBelowVersion35`: the rows at 35 and at 37,
+  and each report below 35, on "stale approval version"; the rows at 36
+  green, which shows the three fixtures read, a DoP record's experiments
+  and a transition included, and the rows at 34 green.
+- `TestTheLegacyReaderKeepsEveryOtherCheck`: red where the version check
+  comes first; its digest and trust rows green on both sides.
+- `TestTheLegacyReaderComparesTheIdentityItIsGiven`: "got stale approval
+  version, want the refusal "stale approval identity"".
+- `TestQualificationVersionGate/config_unbumped` and every row of
+  `TestAChangeOutsideTheDSDBytePathNeedsNoBump`: "guarded code changed
+  without qualificationVersion increase (36 -> 36)".
+- Green on both sides, as pins: `TestTheHarnessBackendsReadOnlyTheCurrentVersion`,
+  `TestQualificationVersionGate/dsd_writer_unbumped`, the three gate tests
+  trimmed to what stays guarded (`TestQualificationEnginePlaybackGate`,
+  `TestQualificationDependencyGate`, `TestQualificationApprovedDoPGuardedPaths`),
+  and the `stale` rows of `TestBridgeDSDCodecVocabulary` and
+  `TestDSDPolicyProtocolInfo`, whose fixture state now writes its record
+  below 35.
+
+**Negative controls**, by a runner outside the tree: each made exact,
+once-only replacements, built the affected test binaries, ran the named
+tests alone, and restored the bytes from memory, checked by SHA-256; a
+baseline of every named test was green first, and `git status` was clean
+after. All 22 went red. Designing C19, C21 and C22 found no test that
+would turn red: fd0afd6b and 9dfbaffa added them before the runs.
+
+| # | Mutation | Red |
+|---|---|---|
+| C1 | production back on `ReadApproval` | `TestProductionStillPlaysAVersion35RecordAfterTheBump` ("stale approval version"); the overlay's `TestNativeIntegrationApprovedConstructor/legacy_version` |
+| C2 | the transition backend on the legacy reader | `TestTheHarnessBackendsReadOnlyTheCurrentVersion/transition` (read, `<nil>`) |
+| C3 | the candidate backend on the legacy reader | `TestTheHarnessBackendsReadOnlyTheCurrentVersion/candidate` ("owner approval incomplete") |
+| C4 | the floor `v > LegacyVersion` | the rows at 35 of the three kinds and each report below 35; the production test |
+| C5 | the floor `v >= LegacyVersion-1` | the rows at 34 of the three kinds ("got <nil>") |
+| C6 | a matrix or lifecycle report on the current version | the rows at 35 and 37 ("report does not execute approved policy") |
+| C7 | a transition report on the current version | `transition_at_35`, `transition_at_37` |
+| C8 | a DoP experiment on the current version | `dop_experiments_at_35` and `_at_37` ("DoP experiment context mismatch") |
+| C9 | an experiment's contact on the current version | `dop_experiments_at_35` and `_at_37` ("contact version mismatch") |
+| C10 | a report's identity compared field by field | `TestTheLegacyReaderComparesTheIdentityItIsGiven/native`, `dop_experiments`, `transition` |
+| C11 | a transition report's identity, field by field | `TestTheLegacyReaderComparesTheIdentityItIsGiven/transition` |
+| C12 | an experiment's identity, field by field | `TestTheLegacyReaderComparesTheIdentityItIsGiven/dop_experiments` ("DoP experiment context mismatch") |
+| C13 | the contact compared with the unit's port, as on main | `TestTheLegacyReaderComparesTheIdentityItIsGiven/dop_experiments` ("DoP experiment attachment mismatch") |
+| C14 | a legacy reader that checks the version alone | every refusal row of `TestTheLegacyReaderKeepsEveryOtherCheck`, and each report below 35 |
+| C15 | the guard takes `internal/config/` back | `TestQualificationVersionGate/config_unbumped`; `TestAChangeOutsideTheDSDBytePathNeedsNoBump/internal/config/player.go` |
+| C16 | the guard drops `internal/alsapcm/` | `TestQualificationVersionGate/dsd_writer_unbumped` |
+| C17 | the guard drops `playback/native.go` | `TestQualificationEnginePlaybackGate/playback_native.go` |
+| C18 | `LegacyVersion` 36 | `TestTheLegacyReaderRefusesBelowVersion35` ("frozen at 35"); the production test ("no bump") |
+| C19 | no refusal of a nil comparison | `TestTheLegacyReaderComparesTheIdentityItIsGiven/no_comparison` (a nil-pointer panic) |
+| C20 | playbacktest's stale state at 35 | `TestDSDPolicyProtocolInfo/stale` and `TestBridgeDSDCodecVocabulary/stale` (dsf and dff served) |
+| C21 | the exported `CheckDoPExperiments` takes 35 | `TestTheLegacyReaderRefusesBelowVersion35/the_harness_readers` |
+| C22 | the exported `Contact.Validate` takes 35 on | `the_harness_readers`; `TestQualificationContact/version` |
+
+Without a mutation, `go run ./scripts/qualification-version -base 0aedd16a
+-head f9766b85` refuses: "guarded code changed without
+qualificationVersion increase (36 -> 36)", the guarded fix two commits
+after the seam took 36; `-base main -head 71cd5e19` passes.
+
+**For the owner.**
+- qualificationVersion 36 invalidates every harness report, candidate and
+  contact recorded at 35: the harness's readers take the current version
+  alone. An approved record of 35 or later keeps playing in serve and
+  `bridge output play` through the legacy reader until B7.
+- The narrowed guard drops `internal/player/decode/`, whose DSF demuxer
+  reverses an LSB-first file's bytes into native DSD's canonical order,
+  bytes the DAC is sent. The design's section 8 drops it with the rest of
+  the two lists, leaving the decoders to their goldens; this names it in
+  case that was not meant.
+- No backlog entry was written: the backlog file is not on this host.
