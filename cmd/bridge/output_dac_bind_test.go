@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/netip"
@@ -18,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/alsa"
 	"github.com/acoseac/1-bit-bridge/internal/alsa/sysfstest"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/player/lan"
@@ -340,6 +342,64 @@ func TestDACInspectPrintsTheModelIdentity(t *testing.T) {
 	if dacLeaks(out, dacSerial) {
 		t.Errorf("--json printed the serial:\n%s", out)
 	}
+}
+
+// TestDACInspectShowsNoModelOfAUnitThatChangedWhileRead: the model
+// identity is read after the inventory, so inspect keeps it only for the
+// unit the inventory holds, at its port, on its interface and in its
+// enumeration: a second reading that finds another enumeration (a replug
+// between the two), another port or another interface shows no strings,
+// and says so.
+func TestDACInspectShowsNoModelOfAUnitThatChangedWhileRead(t *testing.T) {
+	root := dacTree(t)
+	obs, ok := addDACTreeFlagsFor(root).observer(dacEnv(), "output dac inspect", io.Discard)
+	if !ok {
+		t.Fatal("no observer")
+	}
+	inv, err := obs.Observe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	card, ok := inv.Card(5)
+	if !ok || card.USB == nil {
+		t.Fatal("no USB card 5 in the GO bar tree")
+	}
+	read := func(change func(q *alsa.QualificationIdentity)) dacModelReader {
+		return func(int) (alsa.QualificationIdentity, error) {
+			q := alsa.QualificationIdentity{Manufacturer: "iFi (by AMR)", Product: "iFi (by AMR) HD USB Audio", BCDDevice: "0170",
+				Port: card.USB.Port, DevNum: card.USB.DevNum, Interface: card.USB.Interface}
+			change(&q)
+			return q, nil
+		}
+	}
+	model := func(r dacModelReader) dacCardView {
+		for _, c := range dacInspect(dacEnv(), dacConfig(t, ""), inv, r).Cards {
+			if c.Index == 5 {
+				return c
+			}
+		}
+		t.Fatal("no card 5 in the report")
+		return dacCardView{}
+	}
+	if c := model(read(func(*alsa.QualificationIdentity) {})); c.Product == nil || *c.Product != "iFi (by AMR) HD USB Audio" || c.ModelProblem != "" {
+		t.Fatalf("the unit the inventory holds: %+v", c)
+	}
+	for name, change := range map[string]func(q *alsa.QualificationIdentity){
+		"another enumeration": func(q *alsa.QualificationIdentity) { q.DevNum++ },
+		"another port":        func(q *alsa.QualificationIdentity) { q.Port = "platform-xhci-hcd.0/usb2-2:1.0" },
+		"another interface":   func(q *alsa.QualificationIdentity) { q.Interface++ },
+	} {
+		c := model(read(change))
+		if c.Manufacturer != nil || c.Product != nil || c.BCDDevice != nil || c.ModelProblem != "not read: the card changed while it was read" {
+			t.Errorf("%s: %+v", name, c)
+		}
+	}
+}
+
+// addDACTreeFlagsFor is the tree flags naming root's two trees.
+func addDACTreeFlagsFor(root string) dacTreeFlags {
+	proc, sysfs := filepath.Join(root, "proc"), filepath.Join(root, "sys")
+	return dacTreeFlags{proc: &proc, sysfs: &sysfs}
 }
 
 // TestOutputDACBindWritesTheSerialToTheFileAndPrintsNone: bind writes the
