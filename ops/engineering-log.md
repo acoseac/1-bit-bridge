@@ -72396,3 +72396,84 @@ their own:
 `verify_moves.py` still proves blocks, not pointers, so a pointer written by
 hand that drops a Don't passes it. The iOS repo's copy of these scripts, from
 which this one was ported, was not read from here.
+
+## 2026-11-04 — B710 round 2: no Don't is too short to count, and one rule says what a line keeps
+
+PR #1392 at 4da48d2e: round 1's four commits and a merge of main (B709).
+The brief's `git merge --ff-only pr/1392` needs approval on legion0, and so
+do `git reset --keep` and `git update-ref`. So the nine files the merge
+changes were checked out from 4da48d2e and the branch's ref was written to
+it. HEAD then read 4da48d2e, with no diff from it and nothing staged: the
+fast-forward's state, less a reflog line. Codex found two P2s on the PR.
+
+**A short prohibition was skipped.** `dont_sentences` kept the old pattern's
+`{4,}` as `DONT_MIN_TAIL`, so a bold span with fewer than four characters
+after its Don't word (`**Never X.**`) was no sentence. `condense_entry` then
+listed none, and both `validate_overrides` and `verify()` took a pointer
+without it. Every bold span that starts with a Don't word is now a sentence,
+however short, the word alone (`**Never**`) included.
+
+No threshold stays. The tracked markdown holds four such spans, none in
+CLAUDE.md or a rules file:
+- PROTOCOL.md L1505: `**never** reports mismatch …`, a description;
+- this log's L4721: `**Do NOT** set db.SetMaxOpenConns(1)`;
+- ops/plan-2026-09-06-loupe-cmdbridge.md L164: `**never** WipeAllTracks`;
+- scripts/doc-split/README.md L162: `**don't …**`, a mention.
+
+Two of the four are prohibitions whose bold holds only the word, which any
+threshold would skip again. A bare word kept as `**Never**` says less than
+its sentence, but it is what the entry bolded. The inputs #1275 condensed
+(6f816e49's CLAUDE.md, step 1's rules files) hold none.
+
+**A kept sentence was refused.** `validate_overrides` checked its caller's
+list as `**sentence**` in the line, while `dropped_donts` takes a sentence
+kept whole inside a longer bold span. So `**Rule A. Never undo A.**` was
+rejected though it keeps "Never undo A.". `dropped_donts` is now the one
+rule: it takes the caller's list beside the entry's own sentences, and
+`validate_overrides` asks it alone. `refuse_unfit` follows it too. The
+shortest line it reports is now one bold span holding every sentence, so an
+entry whose sentences fit in one span but not in two is offered `--text`
+instead of being told to stay.
+
+**Red first.** On d33e68cc, which holds the new cases and none of the fix,
+`move_entry.py --self-test` printed exactly its 8 new FAIL lines, and every
+earlier case passed. The cases:
+- the short Don't stays in the pointer;
+- a `--text` line without it is refused, and `validate_overrides` itself
+  rejects that line;
+- the bare word stays in the pointer;
+- a `--text` line keeping a Don't inside a longer span moves, and
+  `validate_overrides` itself accepts it;
+- two 284-character Don'ts that fit in one span but not in two are offered
+  `--text`, and that one-span line moves.
+
+dc1307eb adds a guard, green before and after: `validate_overrides` holds a
+line to its caller's list too.
+
+**On the tree.** All 552 entries were dry-run on 4da48d2e and on ab0fff47.
+No verdict changed: the same 501 pointers and the same 51 refusals. The
+seven refusals for length word their advice anew, and wire.md L600's
+shortest line is 528 bytes rather than 532, since its two sentences now
+share a span. `--largest` over every file changed only those seven reason
+lines. The #1275 reproduction is byte-identical, with every committed
+override passing. Over the 75 tracked markdown files (14,822 blocks before
+this entry), only the four short spans above are new sentences, and the one
+refusal (CLAUDE.md L135) is as before.
+
+**Negative controls**, on dc1307eb, by the script round 1 used (one exact
+occurrence each, files restored byte for byte, the tree clean after). Each
+turned exactly its predicted cases red:
+- C0, round 1's 600-character cap, ported to the new code: round 1's six
+  long-sentence cases;
+- C1, the four-character tail put back: the four short-sentence cases;
+- C2, the exact `**sentence**` check put back in `validate_overrides`: the
+  three cases that keep a sentence inside a longer span;
+- C3, `refuse_unfit`'s shortest line back to one span per sentence: the
+  offer of `--text` (1);
+- C4, `dropped_donts` ignoring its caller's list: the guard (1).
+
+**Checks** (legion0, Python 3.14.4): `--self-test` passed; `make docs-check`
+was ok ("CLAUDE.md 72.3%; config-lifecycle.md 98.5%; worst load,
+player_openhome_test.go 64.7%"); every doc-split module imports with
+`-W error`; `TestEveryCitedTestNameExists`, which this entry names, passed
+with the entry in place.
