@@ -209,6 +209,17 @@ type dacCardView struct {
 	PortProblem string   `json:"portProblem"`
 	Interface   *int     `json:"interface"`
 	Playback    []string `json:"playback"`
+	// Manufacturer, Product and BCDDevice are a USB card's unit's descriptor
+	// strings and firmware code as the sysfs reader returns them
+	// (alsa.Qualification: white space trimmed, refused empty or holding a
+	// NUL, CR or LF), the model identity the DAC profile database keys by
+	// with the IDs and the interface (internal/player/dacprofile, B728 B2).
+	// Null for a card that is not USB, and for a USB card whose three were
+	// not all read, which ModelProblem says why.
+	Manufacturer *string `json:"manufacturer"`
+	Product      *string `json:"product"`
+	BCDDevice    *string `json:"bcdDevice"`
+	ModelProblem string  `json:"modelProblem"`
 }
 
 // dacVerifyView is --verify-card's answer.
@@ -249,7 +260,7 @@ func runDACInspect(args []string, env outputBindEnv, stdout, stderr io.Writer) i
 		reportDACReadError(stderr, err)
 		return 1
 	}
-	rep := dacInspect(env, *configPath, inv)
+	rep := dacInspect(env, *configPath, inv, obs.Sysfs.Qualification)
 	code := 0
 	if *verify >= 0 {
 		rep.Verify = dacVerify(obs, rep.resolved, *verify, rep.Binding != nil)
@@ -267,8 +278,13 @@ func runDACInspect(args []string, env outputBindEnv, stdout, stderr io.Writer) i
 	return code
 }
 
-// dacInspect builds inspect's report over inv.
-func dacInspect(env outputBindEnv, configPath string, inv binding.Inventory) dacInspectReport {
+// dacModelReader reads a card's unit's descriptor strings and firmware code:
+// alsa.SysfsReader.Qualification over the tree inspect read.
+type dacModelReader func(card int) (alsa.QualificationIdentity, error)
+
+// dacInspect builds inspect's report over inv, each USB card's model
+// identity through model.
+func dacInspect(env outputBindEnv, configPath string, inv binding.Inventory, model dacModelReader) dacInspectReport {
 	rep := dacInspectReport{ReadAt: stampOf(env.now()), Cards: []dacCardView{}, Problems: append([]string{}, inv.Problems...)}
 	rep.Resolution = dacResolutionView{Matches: []int{}}
 	cfg, path, err := loadCLIConfig(configPath)
@@ -328,6 +344,7 @@ func dacInspect(env outputBindEnv, configPath string, inv binding.Inventory) dac
 			id, label, iface := u.ID.String(), u.Serial.Label(), u.Interface
 			v.USBID, v.SerialLabel, v.Interface = &id, &label, &iface
 			v.Port, v.PortProblem = u.Port, u.PortProblem
+			v.readModel(model, c.Index, u)
 		}
 		for _, e := range c.Endpoints {
 			v.Playback = append(v.Playback, e.String())
@@ -335,6 +352,29 @@ func dacInspect(env outputBindEnv, configPath string, inv binding.Inventory) dac
 		rep.Cards = append(rep.Cards, v)
 	}
 	return rep
+}
+
+// readModel reads a USB card's model identity, the descriptor strings and
+// firmware code beside its IDs, through the reader the harness's unit
+// identity is read with, all three or none; and keeps them only when the
+// unit read is the one the inventory holds, at its port, on its interface,
+// in its enumeration (its device number), so a unit replugged between the
+// two readings shows another's strings nowhere.
+func (v *dacCardView) readModel(read dacModelReader, card int, u *alsa.USBIdentity) {
+	q, err := read(card)
+	switch {
+	case err != nil:
+		v.ModelProblem = "not read: " + err.Error()
+		return
+	case q.Port != u.Port || q.Interface != u.Interface || q.DevNum != u.DevNum:
+		v.ModelProblem = "not read: the card changed while it was read"
+		return
+	}
+	bcd := q.BCDDevice
+	if n, err := usbid.ParseHex16(bcd); err == nil {
+		bcd = usbid.Hex16(n)
+	}
+	v.Manufacturer, v.Product, v.BCDDevice = &q.Manufacturer, &q.Product, &bcd
 }
 
 // dacVerify is --verify-card: the check after open, run against the trees
@@ -435,6 +475,12 @@ func renderDACInspect(w io.Writer, rep dacInspectReport) {
 			fmt.Fprintln(w, "  playback:  none")
 		} else {
 			fmt.Fprintf(w, "  playback:  %s\n", strings.Join(c.Playback, ", "))
+		}
+		switch {
+		case c.Manufacturer != nil && c.Product != nil && c.BCDDevice != nil:
+			fmt.Fprintf(w, "  model:     manufacturer %q, product %q, bcdDevice %s\n", *c.Manufacturer, *c.Product, *c.BCDDevice)
+		case c.ModelProblem != "":
+			fmt.Fprintf(w, "  model:     %s\n", c.ModelProblem)
 		}
 	}
 }
