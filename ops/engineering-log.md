@@ -73425,3 +73425,22 @@ red:
 | G1 to G9 | each of the nine new paths dropped from `GuardedPaths`, one at a time | its own row of `TestQualificationDependencyGate` ("dependency changed without version bump"), and no other |
 | U1 | the upper bound removed (`LegacyVersion <= v`) | all six rows of `TestTheLegacyReaderRefusesAVersionNewerThanThisBuild`; the rows at 37 of `TestTheLegacyReaderRefusesBelowVersion35`; `TestProductionRefusesARecordNewerThanThisBuild/version_37`; the overlay's `newer_version` |
 | U2 | the bound one short (`v < Version`) | the rows at 36 of `TestTheLegacyReaderRefusesBelowVersion35`; `TestProductionRefusesARecordNewerThanThisBuild/version_36` |
+
+**Checks**, on legion0 through the shared build lock with TMPDIR under
+`.tmp/_b728-b1`, at b1fff479:
+- `make test` (race): 80 packages ok, none failed, 14 with no test files;
+  cmd/bridge 986 s; internal/player/decode, format and usbid answered from
+  Go's test cache, their inputs unchanged since round 1's race run.
+- `make build-all`: ok, its `dist/` removed after.
+- `make vet` natively and with `GOOS=windows`, `GOOS=linux GOARCH=386`
+  and `GOOS=linux GOARCH=arm`: clean. go1.27.3's gofmt on cmd, internal
+  and scripts: clean.
+- `make docs-check`: ok as the tree stands, and in a copy with
+  `rules-b728-b1-r2.patch` applied (player.md 94,214 bytes; the worst
+  load 63.4%).
+- The qualification check against main: OK, the version 36.
+- Both native integration overlays, under the race detector: 13 and 29
+  `TestNativeIntegration` tests passed, every one CI's job names among
+  them, `legacy_version` and `newer_version` with them.
+- `scripts/alsa-abi/check.sh` on linux/amd64: the pinned v6.12 header's
+  252 facts agree. Not run here: arm64, macOS and Windows natively.
