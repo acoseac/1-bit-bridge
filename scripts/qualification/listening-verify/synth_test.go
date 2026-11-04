@@ -188,6 +188,21 @@ type synthSet struct {
 	// one analysis block) 0xEE: density three quarters, a DC step at the
 	// file's end, no long run, and no tone in the block's bins.
 	step bool
+	// twin, when set, adds twin.dsf, the DSF's stream with step's end, and
+	// manifest-twin.json, which gives it the DSF's ID, dsd, beside the same
+	// reference: one ID for two files whose joins differ. runs.json plays
+	// manifest-twin.json's dsd after manifest.json's.
+	twin bool
+}
+
+// stepAtTheEnd is a copy of ch whose left channel's last 10 ms (3528
+// bytes) are 0xEE: synthSet's step.
+func stepAtTheEnd(ch [2][]byte) [2][]byte {
+	left := append([]byte(nil), ch[0]...)
+	for i := len(left) - 3528; i < len(left); i++ {
+		left[i] = 0xEE
+	}
+	return [2][]byte{left, ch[1]}
 }
 
 func (s synthSet) build(t *testing.T) string {
@@ -207,9 +222,7 @@ func (s synthSet) build(t *testing.T) string {
 	}
 	ch := synthDSD(bits)
 	if s.step {
-		for i := len(ch[0]) - 3528; i < len(ch[0]); i++ {
-			ch[0][i] = 0xEE
-		}
+		ch = stepAtTheEnd(ch)
 	}
 	writeDSF(t, filepath.Join(assets, "dsd.dsf"), ch, bits, s.msb, declared, s.swap)
 	writeWAV(t, filepath.Join(assets, "ref.wav"), 44100, 2*44100)
@@ -230,7 +243,17 @@ func (s synthSet) build(t *testing.T) string {
 		}
 	}
 	put("manifest.json", synthManifest(hash("dsd.dsf"), hash("ref.wav")))
-	put("runs.json", map[string]any{"runs": []run{{Manifest: "manifest.json", Transport: "native", Format: "DSD_U32_BE", Rate: synthRate, Scenario: "matrix", Fixtures: []string{"dsd"}}}})
+	runs := []run{{Manifest: "manifest.json", Transport: "native", Format: "DSD_U32_BE", Rate: synthRate, Scenario: "matrix", Fixtures: []string{"dsd"}}}
+	if s.twin {
+		writeDSF(t, filepath.Join(assets, "twin.dsf"), stepAtTheEnd(ch), bits, s.msb, declared, s.swap)
+		twin := synthManifest(hash("twin.dsf"), hash("ref.wav"))
+		twin["fixtures"].([]any)[0].(map[string]any)["Path"] = "twin.dsf"
+		put("manifest-twin.json", twin)
+		second := runs[0]
+		second.Manifest = "manifest-twin.json"
+		runs = append(runs, second)
+	}
+	put("runs.json", map[string]any{"runs": runs})
 	return dir
 }
 
@@ -394,6 +417,29 @@ func TestTheCheckCatchesAStepAtAFilesEnd(t *testing.T) {
 	_, problems := checkDir(synthSet{step: true}.build(t), synthetic)
 	if len(problems) != 1 || !has(problems, "the boundaries of dsd: boundary 1 holds") {
 		t.Fatalf("a step at the file's end is not the one problem caught: %q", problems)
+	}
+}
+
+// TestTheCheckCatchesAStepInASecondFileOfOneID: two manifests may give one
+// ID to two files, and the joins are the files'. With manifest.json's dsd
+// clean and manifest-twin.json's ending in a step, the second run's
+// boundaries are measured though a run of the same ID was measured before
+// it, and its step is the one problem caught.
+func TestTheCheckCatchesAStepInASecondFileOfOneID(t *testing.T) {
+	costly(t)
+	t.Parallel()
+	report, problems := checkDir(synthSet{twin: true}.build(t), synthetic)
+	if len(problems) != 1 || !has(problems, "the boundaries of dsd: boundary 1 holds") {
+		t.Fatalf("the second file's step is not the one problem caught: %q", problems)
+	}
+	measured := 0
+	for _, line := range report {
+		if strings.HasPrefix(line, "boundaries of dsd ") {
+			measured++
+		}
+	}
+	if measured != 2 {
+		t.Fatalf("the boundaries of %d runs were measured, not 2: %q", measured, report)
 	}
 }
 

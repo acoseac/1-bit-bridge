@@ -255,10 +255,15 @@ def build_plan() -> Plan:
 
 
 def find_cc() -> str:
+    """The C compiler PATH names, made absolute and normalised, never
+    followed through a link: a wrapper such as ccache is linked as cc and
+    compiles only when run by that name. Run by its target's name, ccache
+    takes -std=c99 for the compiler, and its --version, which build
+    records as the manifests' compiler, is ccache's own."""
     cc = shutil.which("cc") or shutil.which("gcc") or shutil.which("clang")
     if not cc:
         raise SystemExit("no C compiler (cc, gcc or clang) on PATH")
-    return str(Path(cc).resolve())
+    return os.path.abspath(cc)
 
 
 def build(work: Path) -> tuple[Path, str]:

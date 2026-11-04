@@ -24,5 +24,6 @@
 // -listening-assets the costly ones run too, beside the directory's check:
 // they build a two-second set in the test's own directory, pass it, and
 // require the check to refuse it once its channels are swapped, its bit
-// order is wrong or a step ends it.
+// order is wrong or a step ends it, or ends a second file that a second
+// manifest gives the same ID.
 package listeningverify

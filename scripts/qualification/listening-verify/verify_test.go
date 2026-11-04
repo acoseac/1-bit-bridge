@@ -1442,6 +1442,10 @@ func checkDir(dir string, limits limits) (report, problems []string) {
 		bad("runs.json: %v", err)
 		return
 	}
+	// measured holds each stretch measured, by its files' paths in order,
+	// joined by NUL, which no path CheckAssets opened holds: two manifests
+	// may give one ID to two files, whose joins differ, so a stretch's IDs
+	// name it only in the messages.
 	measured := map[string]bool{}
 	for i, r := range runs.Runs {
 		m, ok := manifests[r.Manifest]
@@ -1462,11 +1466,19 @@ func checkDir(dir string, limits limits) (report, problems []string) {
 		var stretch []string
 		flush := func() {
 			defer func() { stretch = nil }()
-			key := strings.Join(stretch, " ")
-			if len(stretch) == 0 || measured[key] {
+			if len(stretch) == 0 {
 				return
 			}
-			measured[key] = true
+			files := make([]string, len(stretch))
+			for j, id := range stretch {
+				files[j] = byID[id].Path
+			}
+			fileKey := strings.Join(files, "\x00")
+			if measured[fileKey] {
+				return
+			}
+			measured[fileKey] = true
+			key := strings.Join(stretch, " ")
 			var parts []*decoded
 			var bits int64
 			for _, id := range stretch {
