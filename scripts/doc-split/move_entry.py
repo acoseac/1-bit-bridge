@@ -521,6 +521,96 @@ def self_test():
             expect("a hand-written line with an invented symbol is refused", False)
         except MoveError:
             pass
+
+        # Every bolded Don't/Never sentence of an entry, however long and whatever it holds, stays
+        # verbatim in its pointer, or the entry does not move and the refusal names it (B710).
+        import contextlib
+        import io
+        import condense_rules
+        import validate_overrides
+        long_dont = "Don't " + ", ".join("skip step %d" % k for k in range(60)) + "."
+        fixtures = [
+            ("long", "- **Rule L keeps its long sentence.** **%s** " % long_dont + "l" * 300),
+            ("unbalanced", "- **Rule M has broken bold.** **Never undo rule M, " + "m" * 500),
+            ("triple", "- **Rule N stays binding.** **Don't commit the memory *files*** into a folder. " + "n" * 500),
+            ("nested", "- **Rule T stays binding.** **Never do X. **Y** more.** " + "t" * 500),
+            ("star", "- **Rule P puts a flag on the wire.** **Don't make it a `*bool` or emit `false`**: " + "p" * 500),
+            ("code", "- **Rule S stays binding.** **Never write `**` around a word in a title.** " + "s" * 500),
+            ("title", "- **Never undo rule Q.** " + "q" * 500),
+        ]
+        head = '---\npaths:\n  - "x/**"\n---\n# R\n\n## Section\n\n'
+        rules = head + "\n".join(text for _, text in fixtures) + "\n"
+        rules_path = os.path.join(root, ".claude", "rules", "r.md")
+        with open(rules_path, "w", encoding="utf-8") as f:
+            f.write(rules)
+        at = {key: line_of(rules, text[:14]) for key, text in fixtures}
+
+        def attempt(key, **kw):
+            """(the refusal, or None; the pointer, or None) for a dry run on fixture KEY."""
+            try:
+                return None, plan(root, rules_path, at[key], **kw)["line"]
+            except MoveError as e:
+                return str(e), None
+
+        why, _ = attempt("long")
+        expect("a Don't over 600 characters is refused by its line, never left out",
+               why is not None and "L%d" % at["long"] in why and "600" in why)
+        why, _ = attempt("long", text="- **Rule L keeps its long sentence.** → History-rules-r.md")
+        expect("a --text line that leaves out a Don't over 600 characters is refused",
+               why is not None and "dropped Don't" in why)
+        item = next(it for it in document(rules)[2] if it["type"] == "block" and it["text"].startswith("- **Rule L"))
+        mech, _, donts = condense_entry(item, "History-rules-r.md")
+        short = "- **Rule L keeps its long sentence.** → History-rules-r.md"
+        rejects = lambda listed: any(e.startswith("dropped Don't") for e in validate_overrides.problems(
+            {"block": item, "mechanical_line": mech, "donts": listed}, short))
+        expect("validate_overrides rejects a line without a Don't over 600 characters", rejects(donts))
+        expect("even when its caller lists no Don't", rejects([]))
+        for key, what in (("unbalanced", "unbalanced bold"), ("triple", "a run of three *"),
+                          ("nested", "bold inside bold")):
+            why, _ = attempt(key)
+            expect("%s around a Don't stops the move, naming the entry" % what,
+                   why is not None and "L%d" % at[key] in why and "bold" in why)
+        _, line = attempt("star")
+        expect("a Don't holding a `*` in a code span stays in the pointer",
+               line is not None and "**Don't make it a `*bool` or emit `false`**" in line)
+        _, line = attempt("code")
+        expect("a Don't holding `**` in a code span stays whole in the pointer",
+               line is not None and "**Never write `**` around a word in a title.**" in line)
+        real_problems = validate_overrides.problems
+        validate_overrides.problems = lambda entry, line: []
+        try:
+            why, _ = attempt("star", text="- **Rule P puts a flag on the wire.** → History-rules-r.md")
+        finally:
+            validate_overrides.problems = real_problems
+        expect("the move's own check refuses a line without a Don't, whatever the line check said",
+               why is not None and "Don't make it a" in why)
+        why, _ = attempt("title", text="- **Rule Q, reworded.** → History-rules-r.md")
+        expect("a --text line that rewrites a title that is a Don't is refused",
+               why is not None and "Never undo rule Q." in why)
+        _, line = attempt("title")
+        expect("a title that is a Don't still moves under its own line",
+               line == "- **Never undo rule Q.** → History-rules-r.md")
+
+        def condensed(key):
+            """condense_rules' rules file for fixture KEY alone, or how it stopped."""
+            try:
+                return condense_rules.build("0" * 40, "r", "2026-01-01", raw=head + dict(fixtures)[key] + "\n",
+                                            overrides={})[0]
+            except SystemExit as e:
+                return "exit: %s" % e
+        expect("condense_rules keeps a Don't over 600 characters in the entry's line",
+               "**%s**" % long_dont in condensed("long"))
+        got = condensed("unbalanced")
+        expect("condense_rules stops on unreadable bold, naming the entry's line",
+               got.startswith("exit:") and "L%d" % line_of(head + dict(fixtures)["unbalanced"], "- **Rule M") in got)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            list_largest(root, rules_path, 10)
+        listing = out.getvalue().split("\n")
+        first = next((k for k, l in enumerate(listing) if l.startswith("  L%-5d" % at["long"])), None)
+        shown = "\n".join(listing[first:first + 3]) if first is not None else ""
+        expect("--largest says why an entry cannot move instead of offering its command",
+               "cannot move" in shown and "--line %d" % at["long"] not in shown)
     finally:
         shutil.rmtree(root)
     print("self-test:", "PASS" if ok else "FAIL")
