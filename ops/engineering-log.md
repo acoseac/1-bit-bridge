@@ -72949,6 +72949,183 @@ through the shared build lock, at a854595d with this record in the tree:
   protocol). No backlog entry was written: the backlog file is not on this
   host.
 
+## 2026-11-04 — B718: output.md's two long Don'ts shortened as reviewed, their entries moved; player.md relieved
+
+Backlog B718, on `docs/b718-output-player-moves` from main cde731e2. B711's
+record (above) proposed shorter wording for five entries whose Don't no
+pointer can hold. Codex checked each proposal against the current text and
+accepted two, output.md L48 and L67, as keeping every prohibition with the
+same meaning and scope; admin-console.md L768, output.md L69 and player.md
+L92 stay as they are, since their proposals change what they say and no
+budget needs them. Codex's and Argon's notes on the brief were binding:
+player.md's target became under 93%, since 92% is out of reach while L30
+stays, and L30 stays because its binding decode rules outside its bold
+spans do not fit a pointer; a reworded sentence is the long form's and the
+pointer's both, so the original wording survives only in the word diffs
+below; and every `.claude/` edit and `move_entry.py` run happened in a
+temporary copy of the worktree. This worker cannot write `.claude/`, so the
+rules change ships as a patch, `rules-b718.patch`, relative to the
+repository's root; the branch commits what the moves wrote to the History
+files, and this record.
+
+**The two rewordings** (line numbers at cde731e2). Each entry's one bolded
+Don't was replaced byte for byte with the reviewed text, its bold kept, and
+the entry then moved verbatim to the end of its section, "The ALSA reader,
+the MPD client and `bridge output`", in `ops/History-rules-output.md`,
+through `move_entry.py --line N --text` with a pointer that is the new
+sentence alone in bold, without the title. The long form's Don't and the
+pointer's one bold span each equal the reviewed text byte for byte. Word
+diffs, original to new, in `git diff --word-diff`'s notation:
+- L48, the loopback track route: 670 bytes to 563, a 597-byte pointer.
+  Don't serve a rendition, a routed track, a listing or a second route
+  [-there; don't-]{+there,+} leave its server's `ErrorLog`
+  [-nil; don't-]{+nil,+} drop the remote-address check
+  [-because the bind is loopback; don't-]{+for a loopback bind,+} decide
+  whether [-the route-]{+it+} serves only [-when its-]{+at+} listener
+  [-starts,-]{+start+} or from the stored probe [-rather than-]{+over+} the
+  gate's last answer, [-don't-] let an older verdict overwrite a
+  [-newer one, don't-]{+newer,+} take an abandoned inspection for a
+  verdict, [-and don't-] let a request dial MPD to
+  [-decide it; don't-]{+decide,+} answer a {+non-loopback+} Host
+  [-that is not loopback-] or a forwarded [-request; don't-]{+request,+}
+  open before the first containment [-check; and don't-]{+check, or+}
+  confirm the opened file [-with-]{+by+} `os.Stat`, which follows a link
+  swapped in after the check.
+- L67, `GET /v1/outputs/{id}/reading`: 650 bytes to 565, a 599-byte
+  pointer. Don't add a sampler or [-a-] background read, [-don't-] join or
+  double a [-read that is still running, don't-]{+running read,+} read a
+  file outside `boundedStep`, [-don't-] keep a session a written command
+  failed or panicked on, [-don't-] take `mpd.conf` from the probe's
+  [-copy or-]{+copy,+} read it or the ALSA configuration inside the
+  bracket, [-don't-] resolve an id from an ALSA configuration not had,
+  [-don't-] read a setting the verdict or its warnings read on one side of
+  the `/proc` read only, [-don't-] name a file the bridge's row by its
+  suffix, [-don't-] read the row in two statements, [-don't-] take
+  [-the row's-]{+its+} file for a file by `IsRegular`, [-and don't-]{+or+}
+  put an `alsa`, `mpd` or `signalpath` type on the wire.
+
+**The player.md moves.** The pointer `move_entry` proposes keeps an entry's
+title and its bolded Don't/Never sentences, so each candidate was read
+against it first. A sentence that states a rule with only, alone, never,
+nothing, none, neither, no other or must, and that neither the title nor a
+clause of a Don't states, must be in the pointer verbatim; where they do
+not all fit in 600 bytes the entry stays and the next of `--largest`'s
+candidates is read. Five moved, each to the end of its section in
+`ops/History-rules-player.md`, by `move_entry.py --line N --text` with the
+proposed line plus any such sentence:
+- L77, the xrun (1,600 bytes; a 482-byte pointer), keeps before its Don't
+  "The kernel stops a stream once its pointer reaches the last frame
+  written, so those frames count as played; what the DAC was sent between
+  the underrun and the stop is the driver's, and the sink claims nothing
+  about it." Its title holds "never concealed" and "only when asked", and
+  its Don't's clauses "`Recover` alone issues PREPARE", "plays on from the
+  next content frame", "writing nothing until `Resume`" and "(none lost)".
+- L89, the port binding (1,607; 521), keeps after its Don't, whose last
+  clause names the unit that "such a unit" means, "bind writes the port
+  alone, and the suffix only for such a unit, whose cards no other binding
+  tells apart." and "A controller under another subsystem has none: its
+  cards bind by serial or model." Its "is only a preference" and "never
+  its first card" are the Don't's second and third clauses.
+- L138, the backend's release (1,814; 449, the proposed line): "nothing is
+  closed under it" is the Don't's first clause, "once nothing is held" and
+  "That release is never acknowledged" its last, and "only then
+  acknowledges" the title's.
+- L140, retirement (1,500; 526), keeps before its Don't "The retirement
+  watermark only rises (`max`): the last occurrence before the one heard
+  can be an open still under way, passed over and kept, and a later step
+  that hears the same occurrence passes over it again (round 7, Codex)."
+  Its "neither the one the producer writes nor the one paused between two
+  transports" is the title's, and "retirement reads none of it" the
+  Don't's second clause.
+- L146, the Reporter (1,504; 365, the proposed line): "never freezes the
+  engine's input" is the title's generation of its own and the Don't's
+  first clause, "It reports nothing until the watcher has published" the
+  second, "is no report" the third, and "The Reporter sends nothing but
+  reports" the fifth.
+
+Five stayed, their binding sentences too long for a pointer (the size is
+the pointer with them):
+- L78, Drop and Drain (838 bytes): its third sentence ends "so a cancel
+  that comes between the writer's look at the drain and its next wait is
+  never lost (#1303's review)"; the Don't keeps a Drain's cancel from
+  reaching another Drain's wait, not from being lost.
+- L111, the owner goroutine (867): "A command whose context ended before
+  the owner admitted it does not run", and "Stop, output reports,
+  maintenance and the modes never wait", whose sentence ends "the Stop
+  itself is never answered `ReasonOvertaken`".
+- L133, content refusals (904): "`engine.ReasonDSDOff` is no backend's
+  here", "each refused open closed unwritten" and "As a successor, a
+  refusal is reported `Refused` and never `Submitted`."
+- L113, `Backend`'s contract (1,299): one 939-byte sentence, with "closed
+  at once, never written to", "writes nothing" and "an event counts only
+  while its session is current".
+- L75, the pause (781): "`PauseKernel` refuses hardware without PAUSE at
+  open; `PauseZeros` always writes zeros", "is refused, typed, when they
+  are not free" and "ends the sink rather than skip them".
+
+L30 stays, as the brief's notes decided, and L92 is untouched.
+
+**Sizes.** output.md 83,342 → 67,825 bytes (83.3% → 67.8% of 100,000);
+player.md 98,191 → 92,509 (98.2% → 92.5%); CLAUDE.md 46,286 (72.3% of
+64,000), unchanged; the worst load, player_openhome_test.go's, 63.9% →
+62.7% of 480,000. The fullest rules file is now dlna-upnp.md, at 97.0%.
+
+**Checks**, in a copy of the branch with `rules-b718.patch` applied by a
+strict applier: every hunk matched byte for byte at its line, and the
+copy's `.claude/` then equalled the `.claude/` the moves wrote. Each copy's
+git was a detached HEAD and a copy of this worktree's index over the
+repository's objects and refs; the copies were removed after.
+- `make docs-check`: ok, "CLAUDE.md 72.3%; dlna-upnp.md 97.0%; worst load,
+  player_openhome_test.go 62.7%".
+- `verify_moves.py --base main` (cde731e2; this repository has no
+  `origin/main`), with an `--edit` for each reworded entry: PASS. Five
+  blocks moved (8,025 bytes), the two edits print as the diffs above, the
+  seven pointers are the new blocks (3,539 bytes), and none of the 34
+  cited phrases broke.
+- `validate_overrides.py --base main --file … player`, the five pointers
+  keyed by their entries' starts: 5 lines, 0 rejected. No commit holds
+  output.md's reworded entries uncondensed, so for its two pointers
+  validate_overrides' own `build` and `problems` ran on main's output.md
+  with the two reviewed sentences in place: 2 lines, 0 rejected.
+- `go test ./... -run TestEveryCitedTestNameExists` could not run on this
+  host: `go.mod` requires golang.org/x/net v0.62.0 (#1381), the host's
+  module cache lacks it and the module proxy is off, so `cmd/bridge` and
+  every package that imports x/net fail at setup, the unchanged
+  worktree's too. In its place the test's markdown half ran as a script
+  (the tracked `.md` files, an ASCII form of `citedRe`, its exemptions and
+  its prefix rule), with this record in place: 3,950 names cited at main
+  and the same 3,950 with the patch, 85 of them now cited from other files
+  than before, and none that no test defines. The Go comments it also
+  reads are unchanged here.
+
+**Negative controls**, on the patched copy: one exact occurrence mutated,
+the check run, the file put back byte for byte (checked by SHA-256), the
+check green again:
+- item 1's pointer without its clause "open before the first containment
+  check,": validate_overrides, 1 rejected, "dropped Don't";
+- the same pointer, whole, at 601 bytes (four bytes of plain text before
+  its arrow): 1 rejected, "601 bytes > 600", its only error;
+- `verify_moves.py` without the loopback entry's `--edit`: FAIL, the
+  original entry MISSING;
+- the History file without L146's long form: FAIL, that entry MISSING;
+- the strict applier on the patch with one context byte changed: refused,
+  "does not match the file";
+- a citation of a test that nothing defines, planted in a patched
+  player.md pointer: the script reports that name, cited by
+  `.claude/rules/player.md` and defined by no test, so it read the copy.
+
+**Left for a change of its own.** The five player.md entries that stayed
+move only once their binding sentences are shorter, a rewording for the
+owner, as L48's and L67's were. No backlog entry was written: the backlog
+file is outside this worker's reach.
+
+**Review (Codex).** L89's pointer left out its long form's rule that a unit with two cards
+is `device_ambiguous` when the recorded interface is absent or names no card on it. That
+sentence does not fit a 600-byte pointer beside the entry's others, so the entry is back in
+player.md verbatim and its History copy is gone. L146's pointer gains its long form's
+"It reports nothing until the watcher has published, and its first report is the first
+snapshot's, whatever it says." (481 bytes). player.md ends at 93711 bytes (93.7%).
+
 ## 2026-11-04 — B651: a volume mounted after the bridge starts is never taken for an empty library or a fresh install
 
 Backlog B651, on `fix/b651-late-mount-guard` from main cde731e2. On a NAS
