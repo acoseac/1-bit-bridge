@@ -50,7 +50,13 @@
 // goroutine it starts and every sink it opens ends with. A Release that
 // comes before its Start leaves a record the Start finds, which then opens
 // nothing; one that comes while Start opens makes Start close what it
-// opened without writing to it. The backend refuses a Start while another
+// opened without writing to it. So does the engine's taking the release
+// before its Release comes (engine.StartRequest.Released, B674 rounds 2 and
+// 3), at every step that would acquire, open, adopt, resume or write: a Start
+// acquires nothing, an open is refused before it or at its check after open
+// (output.admit, which the sink closes unwritten), a sink opened is closed
+// at once rather than adopted, a resume resumes nothing, and the producer
+// hands the sink nothing more. The backend refuses a Start while another
 // session still holds the device (ErrOverlap, Stats.Overlaps): under the
 // engine's contract it never happens, so a defect shows as a refusal a test
 // sees, never as the kernel's busy refusal of the bridge's own second open.
@@ -86,7 +92,10 @@
 // Just before an occurrence's Audible, to a session's Events that takes
 // them (engine.DetailsEvents, B470 PR 5a3), the reporter reports its
 // Details: the decoder's own length (its total frames) and format, the
-// codec content inspection chose, and lossless.
+// codec content inspection chose, and lossless. A session's first
+// occurrence's, when it is PCM, Start reports before it answers, so a seek
+// that comes while the session starts knows the content (B674), and the
+// reporter reports them no more: each occurrence's once.
 // The sink measures nothing while the kernel drains a sink's last hardware
 // buffer (alsapcm.Sink.Drain), so a boundary in a sink's last 200 ms or so
 // is reported when that drain ends. Prepare answers engine.ErrSessionEnding
@@ -98,6 +107,23 @@
 // sink at its first frame (alsapcm.Sink.Cut), which answers false when a
 // frame at or after it is the kernel's or is in the write under way, and
 // then nothing is dropped.
+//
+// Seeks (B674): a seek within a track is the engine's release of the
+// session and a Start whose first occurrence continues the one heard from
+// engine.StartRequest.From, so the release's terms hold for it (its sinks
+// dropped with the frames the DAC had not played, its successors with them,
+// everything joined and closed before the acknowledgement), and so do the
+// start's (the binding located again, the node checked after open). Start
+// positions the decoder at From with its exact Seek, on Start's goroutine,
+// before it decodes the first chunk and before the session's producer
+// exists, so no Seek races a ReadFrames and nothing before From reaches the
+// sink; the samples after it are the decoder's as at any start, bit for bit.
+// The reporter counts the occurrence's position from From (From plus what its
+// sink has played of it), and a decode failure's frames the same. A From
+// that DSD content would need (any but 0: a demuxer's byte position is no
+// time seek), a frame the decoder does not reach, or one with nothing after
+// it fails the Start with an error, never a refusal, so the entry is not
+// skipped, before the unit is located or the device opened.
 //
 // Pause and resume: Pause is the sink's (the kernel's PAUSE, or zeros), and
 // after SessionOptions.PauseRelease the sink lets the device go itself,

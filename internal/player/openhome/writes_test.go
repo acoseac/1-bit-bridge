@@ -180,6 +180,9 @@ func (e *spyEngine) Stop(ctx context.Context, c ...engine.Cond) error {
 func (e *spyEngine) PlayID(ctx context.Context, id uint32, c ...engine.Cond) error {
 	return e.note("PlayID", e.Engine.PlayID(e.ctx("PlayID", ctx), id, c...))
 }
+func (e *spyEngine) SeekAbsolute(ctx context.Context, seconds int64, c ...engine.Cond) error {
+	return e.note("SeekAbsolute", e.Engine.SeekAbsolute(e.ctx("SeekAbsolute", ctx), seconds, c...))
+}
 func (e *spyEngine) InsertAfter(ctx context.Context, after uint32, ref engine.Reference, meta []byte, c ...engine.Cond) (uint32, error) {
 	if e.beforeInsert != nil {
 		if err := e.beforeInsert(ctx); err != nil {
@@ -228,7 +231,10 @@ func queueOf(t *testing.T, h *handler) []uint32 {
 // Previous, SeekId and SeekIndex are the engine's transport, each starting the
 // session the engine starts (SeekId of an ID not held 800, SeekIndex past the
 // queue 802, the ui4 maximum among them, starting nothing and changing
-// nothing); the seeks within a track are 803, changing nothing; and Product's
+// nothing); the seeks within a track are the engine's SeekAbsolute and
+// SeekRelative (B674), 803 in a track the backend has reported nothing of,
+// changing nothing, and otherwise each starting a session at its target that
+// continues the occurrence heard; and Product's
 // writes: SetStandby(0) succeeds and SetStandby(1) is 899, Standby staying 0
 // and the transport as it was (no Stop is made of it); SetSourceIndex(0) and
 // SetSourceIndexByName(Playlist) succeed, and any other index or name is 801,
@@ -320,11 +326,26 @@ func TestEachWriteIsItsEngineCommand(t *testing.T) {
 	before = p.eng.Snapshot().Generation()
 	for _, seek := range []struct{ action, value string }{{"SeekSecondAbsolute", "30"}, {"SeekSecondRelative", "-5"}} {
 		if r := soapFault(t, h, playlist, seek.action, "Value", seek.value); r.fault != 803 || r.description != "Seek failed" {
-			t.Errorf("%s: %d %q, want 803", seek.action, r.fault, r.description)
+			t.Errorf("%s in a track the backend has reported nothing of: %d %q, want 803", seek.action, r.fault, r.description)
 		}
 	}
 	if p.eng.Snapshot().Generation() != before {
-		t.Errorf("a seek within the track changed the engine")
+		t.Errorf("a seek refused changed the engine")
+	}
+	cur := p.be.session(t, started)
+	p.detailed(cur, cur.first.ID, minute)
+	for _, seek := range []struct {
+		action, value string
+		from          int64
+	}{{"SeekSecondAbsolute", "30", 30 * 44100}, {"SeekSecondRelative", "-5", 25 * 44100}} {
+		read(t, h, playlist, seek.action, "Value", seek.value)
+		started++
+		if s := p.be.session(t, started); s.first.ID != cur.first.ID || s.first.Entry != b || s.from != seek.from {
+			t.Errorf("%s: session %d started occurrence %d of %d from %d; want %d of b from %d", seek.action, started, s.first.ID, s.first.Entry, s.from, cur.first.ID, seek.from)
+		}
+		if got := read(t, h, playlist, "Id")["Value"]; got != u(b) {
+			t.Errorf("%s: Id %s, want b", seek.action, got)
+		}
 	}
 	read(t, h, playlist, "Stop")
 	state("Stopped", "Stop")
@@ -381,6 +402,12 @@ func (e commandless) PlayID(context.Context, uint32, ...engine.Cond) error {
 func (e commandless) PlayIndex(context.Context, int, ...engine.Cond) error {
 	return e.called("PlayIndex")
 }
+func (e commandless) SeekAbsolute(context.Context, int64, ...engine.Cond) error {
+	return e.called("SeekAbsolute")
+}
+func (e commandless) SeekRelative(context.Context, int64, ...engine.Cond) error {
+	return e.called("SeekRelative")
+}
 func (e commandless) InsertAfter(context.Context, uint32, engine.Reference, []byte, ...engine.Cond) (uint32, error) {
 	return 0, e.called("InsertAfter")
 }
@@ -396,11 +423,12 @@ func (e commandless) SetShuffle(context.Context, bool, ...engine.Cond) error {
 }
 
 // TestTheWritesThatNeedNoCommandMakeNone pins the writes the engine is not
-// asked for: SetShuffle(1), 804; the seeks within a track, 803; and Product's
-// writes, SetStandby(0) and (1), SetSourceIndex and SetSourceIndexByName, a
-// success or their fault, answered without a command, so no budget applies
-// and nothing of the engine moves; and an Insert refused by its confinement
-// or its metadata never reaches it either.
+// asked for: SetShuffle(1), 804; and Product's writes, SetStandby(0) and (1),
+// SetSourceIndex and SetSourceIndexByName, a success or their fault, answered
+// without a command, so no budget applies and nothing of the engine moves;
+// and an Insert refused by its confinement or its metadata never reaches it
+// either. The seeks within a track, 803 without the engine until B674, are
+// the engine's own commands (TestEachWriteIsItsEngineCommand).
 func TestTheWritesThatNeedNoCommandMakeNone(t *testing.T) {
 	p := newTestPlayer(t)
 	h := p.handlerWith("", commandless{Engine: p.eng, tb: t}, DefaultLimits.orDefaults())
@@ -410,8 +438,6 @@ func TestTheWritesThatNeedNoCommandMakeNone(t *testing.T) {
 		fault int
 	}{
 		{playlist, []string{"SetShuffle", "Value", "1"}, 804},
-		{playlist, []string{"SeekSecondAbsolute", "Value", "10"}, 803},
-		{playlist, []string{"SeekSecondRelative", "Value", "-10"}, 803},
 		{product, []string{"SetStandby", "Value", "0"}, 0},
 		{product, []string{"SetStandby", "Value", "1"}, 899},
 		{product, []string{"SetSourceIndex", "Value", "0"}, 0},
@@ -515,11 +541,12 @@ func reasonsOf(t *testing.T, path string) map[string]engine.Reason {
 // a row; ohPipeline's codes are answered where it has the condition, and only
 // on the action that has it (800 Id not found wherever an ID is named; 801
 // Playlist full on Insert alone, so 1-bit never takes another refusal for a
-// full player and plays what is in; 802 on SeekIndex; 804 on SetShuffle), a
-// metadata too large is 605, String Argument Too Long, and every other reason
-// is 501, Action Failed, the resolver's and the backend's own among them
-// (internal/player/library's and playback's, read from their sources) and one
-// nobody wrote; and the two 801s are each their service's.
+// full player and plays what is in; 802 on SeekIndex; 803 Seek failed on the
+// two seeks within a track, for the seek's three reasons, B674; 804 on
+// SetShuffle), a metadata too large is 605, String Argument Too Long, and
+// every other reason is 501, Action Failed, the resolver's and the backend's
+// own among them (internal/player/library's and playback's, read from their
+// sources) and one nobody wrote; and the two 801s are each their service's.
 func TestEveryEngineReasonHasItsFault(t *testing.T) {
 	var reasons []engine.Reason
 	for name, reason := range reasonsOf(t, filepath.Join("..", "engine", "errors.go")) {
@@ -555,6 +582,9 @@ func TestEveryEngineReasonHasItsFault(t *testing.T) {
 				want = faultPlaylistFull
 			case reason == engine.ReasonIndexNotFound && name == "SeekIndex":
 				want = faultIndexNotFound
+			case (reason == engine.ReasonSeekUnavailable || reason == engine.ReasonSeekOutOfRange || reason == engine.ReasonSeekUnsupported) &&
+				(name == "SeekSecondAbsolute" || name == "SeekSecondRelative"):
+				want = faultSeekFailed
 			case reason == engine.ReasonNotInRelease && name == "SetShuffle":
 				want = faultShuffle
 			}

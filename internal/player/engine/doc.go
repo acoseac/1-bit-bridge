@@ -74,6 +74,8 @@
 //	PlayID    select, start    select, release,    select, release,     select, start       select, pending:      refused
 //	                           play                play                                     play
 //	PlayIndex as PlayID, with the ID at the index, which the owner looks up as it plays it
+//	Seek (5)  refused          seek: release,      seek: release,       retarget (6),       retarget (6),         refused
+//	                           play                pause                or refused          or refused
 //
 // (1) The selection, or the first entry when there is none; an empty queue
 // is refused and nothing changes. (2) At the paused position: the backend
@@ -81,15 +83,22 @@
 // reason. (3) Past the end (the last entry selected, repeat off): stopped,
 // nothing; playing or paused, release and stop with the selection on the
 // last entry; paused with no session, stop; releasing, pending: stop. (4)
-// At the head Previous restarts the selection. In every state Play, PlayID,
-// PlayIndex, Next and Previous are refused while a release is unconfirmed;
-// whatever starts a session, or will, is refused while the output is
-// unknown or unavailable (Next and Previous with it, past the end aside),
-// and an empty queue refuses it; and everything is refused once shutdown
-// begins. The policy function, policy, is the table: Next and Previous
-// select and play in every state, paused and stopped included, as PlayID
-// and PlayIndex do, as controllers use them and SeekId and SeekIndex, and
-// as OpenHome's reference Playlist source (ohPipeline's SourcePlaylist)
+// At the head Previous restarts the selection. (5) SeekAbsolute and
+// SeekRelative (B674, "Seeks" below): refused with ReasonSeekUnavailable
+// where there is no track to seek in; otherwise the release plays, or
+// pauses, at the target, in a session of its own that continues the
+// occurrence heard. (6) The target of a seek no session plays yet (the
+// release the seek made, or the transport paused at its target with no
+// session) moves, with no call; any other release, or a pause with no
+// session no seek made, refuses. In every state Play, PlayID, PlayIndex,
+// Next, Previous and a seek that plays are refused while a release is
+// unconfirmed; whatever starts a session, or will, is refused while the
+// output is unknown or unavailable (Next and Previous with it, past the end
+// aside), and an empty queue refuses it; and everything is refused once
+// shutdown begins. The policy function, policy, is the table: Next and
+// Previous select and play in every state, paused and stopped included, as
+// PlayID and PlayIndex do, as controllers use them and SeekId and SeekIndex,
+// and as OpenHome's reference Playlist source (ohPipeline's SourcePlaylist)
 // plays after both. Release 5a may adjust it after testing named
 // controllers.
 //
@@ -146,6 +155,50 @@
 // playback and freezes the position; while nothing plays it drops a pending
 // play and what the backend prepared (Backend.Discard). Its return plays
 // nothing.
+//
+// # Seeks
+//
+// A seek within a track (B674: SeekAbsolute and SeekRelative, OpenHome's
+// SeekSecondAbsolute and SeekSecondRelative) takes the track the session
+// holds, its first occurrence, the one heard or the one starting. Its target
+// is seconds from the start, or signed seconds from the position, the one
+// the backend last measured of the occurrence (the target of a seek under
+// way, or where the occurrence's hand-off started, while nothing of it is
+// measured), times the rate the backend reported of the content (Details),
+// every product and sum checked. 0 is the start: the track plays again from
+// its first frame. A relative target before the start is the start. A target
+// at or past the end of the content, the decoder's length (Details.Frames),
+// so the exact end too, where nothing would be left to play, an absolute one
+// before the start, one the arithmetic cannot hold, and any in content of no
+// known length or rate are refused with ReasonSeekOutOfRange; DSD, native or
+// DoP, known by the occurrence's native plan or Details or the session's
+// transport, never by a PCM carrier, with ReasonSeekUnsupported (TimeSeek),
+// before anything else is asked; and a track the backend has reported
+// nothing of with ReasonSeekUnavailable. A refusal changes nothing.
+//
+// A seek keeps the transport as it was: playing (or starting), it releases
+// the session and, once the release is acknowledged, starts one at the
+// target; paused with a session, it releases the session and the transport
+// stays paused at the target with no session, where Play starts one. The
+// session started for a seek continues the occurrence, under its ID, from
+// the target's frame (StartRequest.From), so the track heard, its count and
+// its details stay as they were, the queue, the selection and the token
+// untouched; the position reads the target from the seek's step, and the
+// target plus what is measured once that session is heard. A seek waits, as
+// Pause does, behind a start, a Pause or a Resume under way: it then finds
+// what the backend reported as the start answered (a backend reports a
+// session's first occurrence's Details before its Start returns). While the
+// release a seek made is under way, or the transport is paused at its target
+// with no session, another seek moves the target with no call; a Play keeps
+// it, playing at the target; a Pause during the release to play changes
+// nothing, as for any release that plays; and Stop, Next, Previous, PlayID
+// (its own entry's included, which plays from the start), PlayIndex, a
+// deletion of its entry, DeleteAll, the output going away, maintenance, a
+// release past its deadline and the shutdown drop it, and the track it kept
+// with it (seekPending), so superseded work never plays. The session is a
+// seek's fence: every event names its session, the engine takes only the
+// current one's, and the released session's position, boundary or end is
+// never the track's.
 //
 // # The queue
 //
@@ -271,7 +324,9 @@
 // # OpenHome
 //
 // Release 5a maps Playlist:1 onto this API: Play, Pause, Stop, Next and
-// Previous; SeekId and SeekIndex to PlayID and PlayIndex; Insert to
+// Previous; SeekId and SeekIndex to PlayID and PlayIndex; SeekSecondAbsolute
+// and SeekSecondRelative to SeekAbsolute and SeekRelative (B674), fault 803
+// from the seek's three reasons; Insert to
 // InsertAfter, once the URI is confined and made a Reference; DeleteId,
 // DeleteAll; Read, ReadList, IdArray (Snapshot.IDArray, base64 big-endian),
 // IdArrayChanged (Snapshot.Token); Repeat, SetRepeat, Shuffle, SetShuffle;

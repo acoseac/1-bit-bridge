@@ -107,13 +107,18 @@ var tableCommands = []struct {
 	{"previous", func(h *harness, ids []uint32) error { return h.eng.Previous(bg) }},
 	{"play id c", func(h *harness, ids []uint32) error { return h.eng.PlayID(bg, ids[2]) }},
 	{"play index 0", func(h *harness, ids []uint32) error { return h.eng.PlayIndex(bg, 0) }},
+	{"seek 30 s", func(h *harness, ids []uint32) error { return h.eng.SeekAbsolute(bg, 30) }},
 }
 
 // tableOps names each row's command as the owner does.
 var tableOps = map[string]string{
 	"play": "play", "pause": "pause", "stop": "stop", "next": "next", "previous": "previous",
-	"play id c": "play id", "play index 0": "play index",
+	"play id c": "play id", "play index 0": "play index", "seek 30 s": "seek absolute",
 }
+
+// tableDetails is what the table's backend reports of every entry's content
+// as its session starts: a minute of PCM, so a seek has a track to seek in.
+var tableDetails = Details{Frames: 60 * 44100, RateHz: 44100, Bits: 16, Channels: 2, Codec: "FLAC", Lossless: true}
 
 // tableCells is the table, by state and then command. Calls name entries
 // a, b and c.
@@ -126,6 +131,7 @@ var tableCells = map[string]map[string]tableCell{
 		"previous":     {state: Playing, sel: "a", calls: []string{"start a"}},
 		"play id c":    {state: Playing, sel: "c", calls: []string{"start c"}},
 		"play index 0": {state: Playing, sel: "a", calls: []string{"start a"}},
+		"seek 30 s":    {err: ReasonSeekUnavailable, state: Stopped, sel: "b"},
 	},
 	"playing": {
 		"play":         {state: Playing, sel: "b"},
@@ -135,6 +141,7 @@ var tableCells = map[string]map[string]tableCell{
 		"previous":     {state: Playing, sel: "a", calls: []string{"release", "start a"}},
 		"play id c":    {state: Playing, sel: "c", calls: []string{"release", "start c"}},
 		"play index 0": {state: Playing, sel: "a", calls: []string{"release", "start a"}},
+		"seek 30 s":    {state: Playing, sel: "b", calls: []string{"release", "start b"}},
 	},
 	"starting": {
 		"play":         {state: Playing, sel: "b"},
@@ -144,6 +151,7 @@ var tableCells = map[string]map[string]tableCell{
 		"previous":     {state: Playing, sel: "a", calls: []string{"release", "start a"}},
 		"play id c":    {state: Playing, sel: "c", calls: []string{"release", "start c"}},
 		"play index 0": {state: Playing, sel: "a", calls: []string{"release", "start a"}},
+		"seek 30 s":    {state: Playing, sel: "b", calls: []string{"release", "start b"}},
 	},
 	"paused": {
 		"play":         {state: Playing, sel: "b", calls: []string{"resume"}},
@@ -153,6 +161,7 @@ var tableCells = map[string]map[string]tableCell{
 		"previous":     {state: Playing, sel: "a", calls: []string{"release", "start a"}},
 		"play id c":    {state: Playing, sel: "c", calls: []string{"release", "start c"}},
 		"play index 0": {state: Playing, sel: "a", calls: []string{"release", "start a"}},
+		"seek 30 s":    {state: Paused, sel: "b", calls: []string{"release"}},
 	},
 	"paused with no session": {
 		"play":         {state: Playing, sel: "b", calls: []string{"start b"}},
@@ -162,6 +171,7 @@ var tableCells = map[string]map[string]tableCell{
 		"previous":     {state: Playing, sel: "a", calls: []string{"start a"}},
 		"play id c":    {state: Playing, sel: "c", calls: []string{"start c"}},
 		"play index 0": {state: Playing, sel: "a", calls: []string{"start a"}},
+		"seek 30 s":    {err: ReasonSeekUnavailable, state: Paused, sel: "b"},
 	},
 	"releasing": {
 		"play":         {state: Playing, sel: "b", calls: []string{"start b"}},
@@ -171,6 +181,7 @@ var tableCells = map[string]map[string]tableCell{
 		"previous":     {state: Playing, sel: "a", calls: []string{"start a"}},
 		"play id c":    {state: Playing, sel: "c", calls: []string{"start c"}},
 		"play index 0": {state: Playing, sel: "a", calls: []string{"start a"}},
+		"seek 30 s":    {err: ReasonSeekUnavailable, state: Stopped, sel: "b"},
 	},
 	"maintenance": {
 		"play":         {err: ReasonMaintenance, state: Maintenance, sel: "b"},
@@ -180,12 +191,15 @@ var tableCells = map[string]map[string]tableCell{
 		"previous":     {err: ReasonMaintenance, state: Maintenance, sel: "b"},
 		"play id c":    {err: ReasonMaintenance, state: Maintenance, sel: "b"},
 		"play index 0": {err: ReasonMaintenance, state: Maintenance, sel: "b"},
+		"seek 30 s":    {err: ReasonMaintenance, state: Maintenance, sel: "b"},
 	},
 }
 
 // TestTheStateCommandTable pins every cell of the package documentation's
 // table: each command in each state, what it answers, the state and
-// selection it settles in, and the backend calls it makes.
+// selection it settles in, and the backend calls it makes. The backend
+// reports each entry's content as its session starts, so a seek (B674) has a
+// track to seek in wherever a session holds one.
 func TestTheStateCommandTable(t *testing.T) {
 	for _, st := range tableStates {
 		for _, cmd := range tableCommands {
@@ -195,6 +209,7 @@ func TestTheStateCommandTable(t *testing.T) {
 					t.Fatalf("the table has no cell for %s in %s", cmd.name, st.name)
 				}
 				h := startHarness(t)
+				h.be.script(func() { h.be.startDetails = &tableDetails })
 				ids := h.insert("a", "b", "c")
 				name := map[uint32]string{ids[0]: "a", ids[1]: "b", ids[2]: "c"}
 				h.available()

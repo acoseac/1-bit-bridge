@@ -58,10 +58,36 @@ type SessionOptions struct {
 type StartRequest struct {
 	Session SessionID
 	First   Occurrence
+	// From is the content frame First starts at: 0, its start, or a seek's
+	// target (B674), where the session started for a seek continues the
+	// occurrence heard, under its ID. The backend positions the content there
+	// before it decodes a frame, so nothing before From reaches the sink, and
+	// counts First's Position from it (Position.Frames). Only PCM is started
+	// past 0: content that is not (DSD, native or DoP) is refused with an
+	// error, never as Unplayable, and so is a From the content does not reach.
+	From    int64
 	Options SessionOptions
 	// Events is where the session's events go.
 	Events Events
+	// Released is closed by the engine in the step that releases the session
+	// (a Stop, a skip, a seek, the output gone, a fault), before any snapshot
+	// shows the release, while the Release call goes to the backend on a
+	// goroutine of its own and may not have reached it yet (B674 round 2).
+	// The backend looks at it, beside a Release that came, at every step of
+	// the session that would acquire, open, adopt, resume or write to a
+	// device, and refuses each (round 3): a Start that finds it closed
+	// acquires nothing, a node opened past it is closed unwritten, and no
+	// frame is handed to a sink past it. Nil in a request the engine did not
+	// make, which nothing closes.
+	Released <-chan struct{}
 }
+
+// TimeSeek reports whether a seek within a track takes content of a kind
+// (B674): PCM is positioned at any frame before its end, and DSD, native or
+// DoP, at none (DoP is DSD carried in PCM words, whatever its carrier). A
+// seek in DSD is refused with ReasonSeekUnsupported before anything changes,
+// and GET /v1/outputs states the same (bridge.timeSeek).
+func TimeSeek(dsd bool) bool { return !dsd }
 
 // Join is how a successor follows the content before it.
 type Join struct {
@@ -75,7 +101,9 @@ type Join struct {
 
 // Position is the content of one occurrence the hardware has played, as
 // the backend establishes it from the sink's Position.Played: frames, never
-// silence, and never more than was measured.
+// silence, and never more than was measured, counted from the content's
+// start, so an occurrence a session started at a frame (StartRequest.From)
+// counts that frame and what has been played since (B674).
 type Position struct {
 	Occurrence OccurrenceID
 	Frames     int64
@@ -116,10 +144,13 @@ type Details struct {
 // DetailsEvents is an Events that takes an occurrence's Details too (B470
 // PR 5a3): an addition, which Events' other implementers need not make. A
 // backend whose session's Events implements it reports an occurrence's
-// Details before it reports the occurrence Audible, from the goroutine that
-// reports Audible, so the engine holds them as the occurrence is heard. The
-// engine's own Events implements it, and keeps the Details of the occurrence
-// heard in its snapshot (Snapshot.Track).
+// Details once, before it reports the occurrence Audible: a session's first
+// occurrence's, when it is PCM, before Start returns, so a seek that comes
+// while the session starts knows the content's rate and length (B674); every
+// other's from the goroutine that reports Audible. Either way the engine
+// holds them as the occurrence is heard. The engine's own Events implements
+// it, and keeps the Details of the occurrence heard in its snapshot
+// (Snapshot.Track).
 type DetailsEvents interface {
 	Details(s SessionID, o OccurrenceID, d Details)
 }
@@ -229,11 +260,19 @@ var ErrDeviceDenied = errors.New("player: this process may not open the device")
 // release is acknowledged only after that. Because each call runs on a
 // goroutine of its own, that Release may even reach the backend before its
 // Start has begun: the backend must then make that Start acquire nothing,
-// and may acknowledge as soon as nothing is held. Prepare, Cut, Pause and
-// Resume come only after Start has returned nil. The engine starts a
-// session only once the previous session's release is acknowledged, so two
-// of its own sessions never hold or race for the device: on the real sink
-// the second open would get its busy refusal from the bridge's own process.
+// and may acknowledge as soon as nothing is held. Or it may reach the
+// backend only after a snapshot has shown the release: the engine therefore
+// also closes StartRequest.Released in the step that takes the release, and
+// from then on the session acquires, opens, adopts, resumes and writes
+// nothing, as when the Release has come: a Start that finds it closed
+// acquires nothing, a node opened is closed unwritten, and no frame is handed
+// to a sink (B674 rounds 2 and 3). What the session decided before it closed
+// goes on until the Release ends it.
+// Prepare, Cut, Pause and Resume come only after Start has returned nil.
+// The engine starts a session only once the previous session's release is
+// acknowledged, so two of its own sessions never hold or race for the
+// device: on the real sink the second open would get its busy refusal from
+// the bridge's own process.
 //
 // Release is confirmed or it is not. Release returns nil once its session
 // holds nothing: the device and the decoders closed and its goroutines
@@ -300,6 +339,23 @@ var ErrDeviceDenied = errors.New("player: this process may not open the device")
 //
 // Finished is everything handed off played out, after a Prepare with no
 // successor.
+//
+// Seeks. A seek within a track is a session of its own (B674): the engine
+// releases the session that plays the track, under every term above (the
+// device closed, the frames the DAC had not played and every successor
+// handed off dropped with it), and once that release is acknowledged starts
+// another whose first occurrence continues the one heard, under its ID, from
+// StartRequest.From, the target's frame; the binding is resolved and the
+// node checked after open as at any start. The backend positions the content
+// at From with the decoder's exact Seek in Start, on Start's goroutine, before
+// it decodes a frame and before the session's producer exists, so no seek
+// races a read and nothing before From reaches the sink; it counts the
+// occurrence's Position from From; and its successors are named again by
+// Prepare as at any start. A From the content does not reach, and any From
+// past 0 for DSD (native or DoP: its demuxer's byte position is no time
+// seek), make Start return an error, never an *Unplayable, so the entry is
+// never skipped for it. Every event names its session, and a seek's is a new
+// one, so nothing the released session still reports is taken for the track.
 //
 // Discard drops whatever the backend prepared outside a session (a cached
 // resolution of the bound unit, an opened file): the engine calls it when

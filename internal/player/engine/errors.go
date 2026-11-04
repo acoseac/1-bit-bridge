@@ -91,6 +91,24 @@ const (
 	ReasonOvertaken Reason = "overtaken"
 )
 
+// The reasons a seek within a track is refused (B674). A refused seek
+// changes nothing: not the transport, the track heard or its position.
+const (
+	// ReasonSeekUnavailable is a seek with no track to seek in: the
+	// transport stopped, a release that stops or plays another entry, a
+	// pause that holds nothing, or a track the backend has reported nothing
+	// of yet (Details).
+	ReasonSeekUnavailable Reason = "seek_unavailable"
+	// ReasonSeekOutOfRange is a seek whose target is at or past the end of
+	// the content, or that the arithmetic cannot hold, or in content of no
+	// known length or rate.
+	ReasonSeekOutOfRange Reason = "seek_out_of_range"
+	// ReasonSeekUnsupported is a seek in DSD, native or DoP (DoP is DSD,
+	// whatever its PCM carrier): the player does not position DSD in time
+	// (TimeSeek).
+	ReasonSeekUnsupported Reason = "seek_unsupported"
+)
+
 // The reasons playback stops on its own, recorded in Snapshot.LastStop.
 const (
 	// ReasonStopped is a Stop, a DeleteAll or another command.

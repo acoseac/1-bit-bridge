@@ -71702,6 +71702,367 @@ through the shared build lock, at 32f734b8 with this record in the tree:
   confirms the install or restores `.bak`, now true at any age.
 - No backlog entry was written: the backlog file is not on this host.
 
+## 2026-11-03 — B674: the player seeks within a track
+
+Playlist's SeekSecondAbsolute and SeekSecondRelative answered 803 without
+touching the engine (`playlistSeekSecond`), and neither the engine's
+transport table nor the backend contract had a seek within a track, so
+1-bit's resume at a position, a SeekSecondAbsolute sent as Play answers,
+played every track from its start. Each is now the engine's own command.
+
+**The design: a seek is a session of its own that continues the occurrence
+heard.** The engine releases the session that holds the track and, once the
+release is acknowledged, starts one whose first occurrence is the one
+heard, under its ID, from `StartRequest.From`, the target's frame. A seek
+inside the live session was considered and rejected on what the code
+shows: `alsapcm.Sink` takes nothing back from the kernel short of DROP,
+which closes the device, so a seek inside the session reopens the device
+anyway; inside it the producer is the decoder's sole reader, the reporter
+counts boundaries and positions from each occurrence's sink start, an
+occurrence written whole has its decoder closed at its end of file while
+its last two seconds or so are still in the sink, and every event would
+need an epoch the backend tags and the engine checks through refusals and
+late answers. A release and a start are the backend contract's own terms,
+each already pinned: the release drops every sink with the frames the DAC
+had not played and every successor handed off, joins the session's
+goroutines and closes everything before its acknowledgement; the start
+comes only after it, locates the binding again, checks the node after open
+and positions the decoder (`decode.Decoder.Seek`, exact) on Start's own
+goroutine before the first chunk and before the producer exists, so no
+Seek races a ReadFrames. The session is the seek's fence, the explicit
+monotonic counter Argon's note 3 asked for: every event names its session,
+the engine takes events only from the current one, and a seek's session is
+new. Reusing the occurrence's ID keeps the track heard, TrackCount and
+DetailsCount as they were (`hear` finds the same occurrence), which a
+controller reads as one track, not two.
+
+**The contract** (Argon's note 1): the target is seconds from the start,
+or signed seconds from the position the backend measured (the target of a
+seek under way; where the hand-off started while nothing is measured),
+times the content's rate (`Details.RateHz`), every product and sum checked
+(`seekFrame`). 0 is the start. A relative target before the start is the
+start. A target at or past the decoder's length (`Details.Frames`), so the
+exact end, where nothing would be left to play, an absolute one before the
+start, overflow and content of no known length or rate are
+`seek_out_of_range`; DSD, native or DoP, known by the occurrence's native
+plan, its Details (`DSD`, one bit) or the session's transport, never by a
+PCM carrier (note 4), is `seek_unsupported` before anything else is asked;
+no track to seek in (stopped, a release that stops or plays another entry,
+a pause with no session no seek made, a track the backend reported nothing
+of) is `seek_unavailable`. Each refusal changes nothing; OpenHome answers
+the three with 803 on the two seeks alone, every other refusal by its row.
+Playing or starting, a seek releases to play at the target; paused, it
+releases and stays paused at the target with no session, where Play
+starts one. A seek waits, as Pause does, behind a start, a Pause or a
+Resume; a backend reports a session's first PCM occurrence's Details
+before its Start returns (once), so 1-bit's seek, sent as Play answers,
+knows the content. Another seek during the release, or at a paused target,
+moves the target with no call; Play keeps it; Stop, Next, Previous, PlayID
+(its own entry's from the start), PlayIndex, a deletion of the entry,
+DeleteAll, the output going away, maintenance, a release past its deadline
+and the shutdown drop it (`seekPending`, asked after every step), so
+superseded work never plays. Successors are named again by the session at
+the target (note 2: the gapless lookahead resumes from the new position);
+nothing is re-initialized but the sink, opened in the packing the unit
+took, and nothing converts a sample.
+
+`GET /v1/outputs`' kind bridge element carries the optional
+`bridge.timeSeek`, `{"pcm":"supported","dsd":"unsupported"}`, from
+`engine.TimeSeek` (the seek's refusal reads the same), through
+`BridgeOutputFacts` as plain words; an absent object or member, or an
+unknown word, is unknown to a client; it states the implementation in
+every state. MPD elements' bytes are unchanged
+(`TestAnMPDElementsBytesAreMains`). PROTOCOL.md documents it beside the
+bridge object with its word table and example; ProtocolVersion stays 1.
+
+Evidence, on legion0 (Linux, Go 1.27.3, GOTOOLCHAIN=local, umask 022):
+
+- Red first (09f12530, over stubs that compiled): the SOAP seek answered
+  803 where a response was wanted (`TestASeekWithinTheTrackIsTheEnginesSeek`);
+  every golden started from frame 1 gave the DAC its whole decode, "1024
+  samples, not the 1022 of the content from there"
+  (`TestPlaybackStartsAtItsFromBitExactly`); the engine refused the seek in
+  `TestPlaybackSeeksWithinATrackThroughTheEngine` (WAV, AIFF, FLAC). The
+  fake DAC takes 44.1 kHz and up only, so the synthesized tracks are 4 s at
+  44.1 kHz; the FLAC is mewkiz's verbatim encoding with no SEEKTABLE, so its
+  seek is the decoder's forward scan.
+- Green (531b1e5d, e4335950): the engine's table with its Seek row in every
+  state; `TestASeekPlaysTheTrackHeardFromItsTarget`,
+  `TestARelativeSeekCountsFromThePosition`, `TestTheSeeksBoundaries`,
+  `TestAPausedSeekStaysPausedAtItsTarget`, `TestARepeatedSeekMovesItsTarget`,
+  `TestWhatSupersedesASeekDropsIt`, `TestTheOutputGoingAwayDropsASeek`,
+  `TestTheReleasedSessionsEventsAreNotTheTracks`, `TestASeekWaitsItsTurn`,
+  `TestDSDRefusesASeekAndChangesNothing`, `TestASeekWhoseStartFailsStops`;
+  through the real sink and the fake kernel, every PR 1 golden (FLAC, WAV,
+  AIFF, AIFC, ALAC, an edited one) from frames 1, its middle and its last
+  matching the reference-verified decode from there, and through the
+  engine forward, back and relative, paused, twice in a row, with a
+  buffered successor, with a Stop during the reopen, and a From the content
+  cannot take failing the Start with no refusal and no open; through SOAP,
+  success, Time's Seconds, TrackCount, 1-bit's resume at a position, DSD and
+  DoP 803 with no backend call, and the budget's admission; the
+  capability's presence, omission and word table. Targeted `-race`:
+  the engine's seek and table tests twice, the backend's seek tests five
+  times, clean.
+- Negative controls, each alone on the committed tree, one exact-string
+  mutation each, reverted from HEAD: the blanket 803 restored failed five
+  OpenHome tests by assertion ("fault 803, want a response"; one by its
+  1-minute wait for an engine call that never came); the decoder's
+  positioning bypassed failed every golden of the From test and every
+  engine-level path test on its bytes, and the out-of-reach From test on
+  "want a failure that is no refusal"; positions taken from any session
+  stayed green at first, because the stale position reached the engine
+  before the new session's Audible, which resets the position to the
+  target, so e4335950 sends the released session's events once the new
+  session is heard and measured, behind a barrier (the owner's handled
+  notes; in OpenHome, a later report of the new session's), and then both
+  went red (Seconds 55 where 32 was due, and a relative seek counted from
+  the stale 55 s); ends taken from any session failed both on the
+  transport stopped by the released session's Finished.
+- qualificationVersion 33 (main had 32 after B676; the engine, playback,
+  OpenHome, `internal/api/outputs_bridge` and `cmd/bridge/serve_player`
+  paths are guarded), the runbook's five current references with it.
+- `.claude/` is unwritable to this session: the rules changes (openhome.md,
+  player.md, output.md, wire.md) are `rules-b674.patch`, proved by a strict
+  applier of its own (`git apply --check` needs approval here), with the
+  budgets measured over the patched files: player.md 98.9% of its budget.
+  Their long forms are in `ops/History-rules-openhome.md` and
+  `ops/History-rules-player.md`.
+
+Named limits: a paused seek lets the device go at once, where the paused
+session would have held it for `pauseReleaseSeconds`, so another process
+can take it before Play; a FLAC with no SEEKTABLE is sought by the forward
+scan inside StartTimeout (5 s); a Pause sent during a seek's release to play
+changes nothing, as during SeekId's. The iOS companion (docs/BridgeProtocol.md
+copied from PROTOCOL.md, the fixtures exported again with
+BRIDGE_EXPORT_IOS_FIXTURES, `timeSeek` decoded optional with unknown for an
+absent member or word, and #2377's `BridgeOutputPlayer.refusesTimeSeek` seam
+read from it) is not opened: legion0 has no iOS checkout and this session
+neither pushes nor reaches GitHub.
+
+The gate, on 6a4efcad, with umask 022 and TMPDIR in a scratch directory the
+build-site census skips: `make fmt vet test build-all` passed (`go fmt`
+rewrote nothing; vet clean; under `-race`, 80 packages ok and 14 with no test
+files, `cmd/bridge` in 947 s, `internal/manifest` in 1,349 s,
+`internal/player/engine` in 31 s and `internal/player/openhome` in 38 s;
+`check-build-tags` OK; all six targets built). `go vet ./...` was clean for
+windows, darwin and linux, and for linux/arm64 over the changed packages;
+`make docs-check` passed; `go run ./scripts/qualification-version -base
+b9a37584 -head HEAD` passed. The companion's material, this head's
+`PROTOCOL.md` as `docs/BridgeProtocol.md`, its diff from main and the
+fixtures exported from this head (the manifest package, then the API
+package), went to the orchestrator with the report, for the iOS PR to land.
+
+**Review (CodeRabbit, checked against the code).** PROTOCOL.md said an
+`unsupported` kind's seek is "always" fault 803. A seek is 501 instead
+while no player runs or it is shutting down, while maintenance holds it, and
+when it was not admitted or was overtaken while waiting behind a pause, a
+resume or a start; one admitted and still waiting when its budget ends answers
+success. The sentence now says so. No test reads it.
+
+**Round 2: a Stop during a seek's reopen wrote to the device.** GitHub's
+`test -race (rest)` job at d1c19413 failed
+`TestPlaybackStopsDuringASeeksReopen` (the runs at d1991ac2 and cfb603dc
+passed): the seek's reopened device was given 16,384 bytes, its first
+chunk, after the Stop. It was a real race, not an early read. The engine
+takes a Stop in one step (`releaseSession`: the session releasing, the
+snapshot showing Releasing with a pending stop) and makes the Release call
+on a goroutine of its own (`e.call`). So a Start held in its check after
+open could pass its only fence, the backend's `releasing` flag that
+Release sets, after the snapshot showed the Stop and before the call
+reached the backend, and it then started its producer, which wrote. On
+legion0 (16 cores), 500 runs at each of `-cpu 1,2,4` beside 16 busy loops
+failed 12 of 1,500 times (0, 7 and 5), each on CI's assertion, with 16,384
+to 35,280 bytes given.
+
+The fix is a fence closed in the step that takes the release, before its
+snapshot. The engine hands each Start a channel, `StartRequest.Released`,
+and closes it in `releaseSession`, the one place a session becomes
+releasing. The backend reads it beside its own flag, under the session's
+lock, where Start decides to write (`releaseTaken`), and closes what it
+opened, never written to. A context could not carry it: a call's context
+closes its Done on a goroutine of its own (`callCtx`'s AfterFunc), and the
+context the backend derives from it (`bound`) learns of a cancel on
+another, so a check of either could still pass after the snapshot. Named,
+not changed: inside a session already playing, a resume's reopen and the
+producer's open of a new transport still read the backend's own flag
+alone, so the same window can let frames reach a device after a Stop is
+taken; neither is a seek's reopen.
+
+The test now lands the Stop in that window in every run. The open is held
+in its check after open (the node open and nothing written, asserted), and
+the engine's Release call is held short of the backend (the rig's
+`tee.Release`, `holdNextRelease`) until the Start has answered. Before the
+fix it failed 20 of 20 runs with no load: the Start answered success, and
+the device was given 16,384 bytes. The engine's half,
+`TestAReleaseTheEngineTookFencesAnOpenBeforeItsCallArrives`, holds the
+Release short of the fake (`beforeRelease`) and requires the fence closed
+once a snapshot shows the release, and the open closed unwritten; the
+fake's open reads the fence. Negative controls on the committed tree, 20
+runs each: without the backend's read of the fence, the playback test
+failed 20 of 20 and the engine's passed 20 of 20; without the engine's
+close, both failed 20 of 20. After the fix, under the same load, the held
+test passed 2,100 of 2,100 (700 at each `-cpu`), and so did the PR head's
+unheld test, compiled beside it from a file never committed.
+
+The two recovered panics in CI's log are deliberate injections.
+`TestPlaybackOwnsASinkBeforeItsOpenedNote`'s Notify hook panics
+(`playback_round2_test.go`, line 55): inside Start in its first subtest
+("the backend's start"), and inside the producer in its successor subtest
+("the producer"). That test does not capture its log; a verbose run of the
+package attributed each line to it. `playback_panic_test.go`'s producer
+and start tests (lines 116 and 324) inject the same two panics and capture
+theirs. The paths are qualification-guarded, and the version stays 33, past
+main's 32. The two `player.md` rule lines this changes (the engine's
+contract and the backend's start) are `rules-b674-r2.patch`.
+
+**Round 3: every step that would acquire, open, adopt, resume, cut or write
+reads the fence.** Codex (P2) and Argon, reviewing 11e966f9, found round 2's
+fence on one decision alone, the write Start makes. Once the engine had taken
+the release, a resume's reopen after a pause's release and the producer's open
+of another transport admitted a node without asking it (round 2 named both and
+left them), a resume of a sink a pause held resumed it, and Start acquired the
+device's hold, the content and a decoder before it asked. The backend now asks
+`StartRequest.Released`, with
+its own `releasing` under the session's lock (`releasedLocked`), at each of
+these steps, refuses each with `errReleased`, and names the step through
+`Seams.Fenced`, which the tests read:
+
+- Start's outset (`session.start`), before anything is acquired;
+- before each open: the PCM open loop (`openOutput`, which Start, the
+  producer's next transport and a resume between transports share) and the
+  native open (`openNativeOutput`);
+- the check after open (`output.admit`), which the sink runs at an open, at a
+  reopen after a pause's release and at a native activation, each its last
+  step before a frame: it refuses the node, and the sink closes it unwritten.
+  It reads the fence and the session's life without the session's lock, since
+  a sink asks it with none of its own locks held;
+- adoption under the session's lock, closing what it refuses before it
+  answers: Start's (round 2's), the producer's (`transition`: a sink it
+  opened, or one a resume handed it) and a resume's between two transports;
+  the native open's own begins the native sink's release, its life not the
+  session's, and its caller's adoption then closes it;
+- a resume of a sink a pause holds, inside the command `call` runs, after the
+  `SinkCall` seam, so a Stop taken once Resume was called is seen where the
+  command runs; sink commands stay outside the session's lock;
+- every write: the producer's `writeAll` and the native `writeNativeChunk`;
+- a stale Cut, which cuts nothing. Cut opens and writes nothing, so this is a
+  stale call's fence, not cover for the writes. Prepare and Pause share
+  `callableLocked` and keep it alone: neither opens a sink or writes (Prepare
+  opens a decoder, and its successor's sink opens through the fenced open).
+
+No sleep or deadline was added. `releaseTaken` takes no lock, the engine's or
+the session's: `released` is set once, by Start under the session's lock,
+before anything that reads it starts. The fence is one session's and
+terminal, so a resume of a session whose release was not taken is never
+refused (`TestPlaybackResumesASessionWhoseReleaseIsNotTaken`: continued, then
+reopened, nothing refused).
+
+Red first (76019a67): eleven tests in `internal/alsapcm/playback_fence_test.go`
+through the engine's real Run, the real sink and the fake kernel, and three in
+`internal/player/playback/native_integration_test.go` through CI's overlay.
+Each holds its step (Start or a Cut short of the backend, the content's open,
+the `NoteOpened`, `NoteInstalled`, `TransportDrained` or `SinkCall` seam, the
+unit's check after open, a stalled read) and the engine's Release short of the
+backend, so the backend learns of the release through the fence alone. Against
+the code before the fix every test but the last PCM one failed by its
+assertion: Start's outset opened the content and the device; Start's open
+opened the device; the producer opened the device for b, a second open; its
+adoption gave b's sink 14,400 bytes; a resume's reopen answered reopened and
+gave the device 43,200 bytes; a paused sink's resume answered continued and
+ran; a resume between transports answered reopened, b's sink open; a gapless b
+was submitted and the device given 4,000 samples where a's 2,000 were due; the
+stale Cut answered true; natively, Start opened the device, the activation
+wrote once and Start answered success, and the writes took 32,768 bits more and
+read the third chunk. Start's adoption, round 2's check, failed on the seam's
+assertion alone.
+
+The fix (6e3ebc77) passed them all, 20 runs each. Negative controls, each alone
+on the committed tree, one exact-string mutation, 20 runs, each predicted
+failure line counted 20 times, the file restored from HEAD and the tree checked
+clean:
+
+- Start's outset reading `releasing` alone:
+  `TestPlaybackStartAcquiresNothingOnceItsReleaseIsTaken` failed 20 of 20, the
+  content opened once and the device not at all, the step refused "open": the
+  open's check stops the device, not the content.
+- The open's check out: `TestPlaybackStartOpensNoDeviceOnceItsReleaseIsTaken`
+  and `TestPlaybackOpensNoNextTransportOnceTheReleaseIsTaken` failed 20 of 20,
+  one open and two, each node refused at its check after open ("admit"); the
+  outset's test passed 20 of 20.
+- The admission's fence out:
+  `TestPlaybackReopensNothingForAResumeOnceTheReleaseIsTaken` failed 20 of 20,
+  the resume answered reopened, and `TestNativeIntegrationFenceRefusesActivation`
+  20 of 20, the activation writing once; round 2's
+  `TestPlaybackStopsDuringASeeksReopen` passed 20 of 20: Start's adoption
+  covers it.
+- Start's adoption reading `releasing` alone:
+  `TestPlaybackStartClosesItsSinkAtOnceOnceItsReleaseIsTaken` failed 20 of 20,
+  the sink left open, unwritten only because the producer's write refused it
+  ("write").
+- The producer's adoption out:
+  `TestPlaybackClosesTheNextTransportsSinkAtOnceOnceTheReleaseIsTaken` failed
+  20 of 20, b's sink open after one close ("write").
+- The resume's command check out:
+  `TestPlaybackResumesNoSinkOnceTheReleaseIsTaken` failed 20 of 20, answered
+  continued, the stream RUNNING.
+- A resume's adoption between transports reading `releasing` alone:
+  `TestPlaybackResumeBetweenTransportsAdoptsNothingOnceTheReleaseIsTaken`
+  failed 20 of 20, answered reopened.
+- The producer's write fence out:
+  `TestPlaybackHandsTheSinkNothingOnceTheReleaseIsTaken` failed 20 of 20, b's
+  frames handed to the sink, nothing refused.
+- The Cut's out: `TestPlaybackCutsNothingOnceTheReleaseIsTaken` failed 20 of
+  20, answered true.
+- The native open's out: `TestNativeIntegrationFenceOpensNoDevice` failed 20 of
+  20, one open, refused at its check ("admit").
+- The native write's reading `releasing` alone:
+  `TestNativeIntegrationFenceStopsTheWrites` failed 20 of 20, 32,768 bits more
+  and the third chunk read.
+
+The native open's own adoption check has no control of its own: no test holds
+its window, and its caller's adoption refuses the same sink there.
+
+Stress on 6e3ebc77, 500 runs at each of `-cpu 1,2,4` beside 16 busy loops on
+legion0's 16 cores: nine of the PCM tests and the three native ones passed
+1,500 of 1,500 each. Two failed by their setups, not the backend.
+`TestPlaybackCutsNothingOnceTheReleaseIsTaken` failed 10 of 1,500 (7, 1 and
+2), each waiting a minute for a Cut the engine never asked: it waited for b's
+Submitted as the recorder saw it, not for the engine to take it, so the
+deletion could reach the owner first and replace b.
+`TestPlaybackResumesNoSinkOnceTheReleaseIsTaken` failed 2 of 1,500, both at
+`-cpu 2`, waiting a minute for a Resume the engine never called: its one-shot
+hold could take a call before the resume's (the producer's drain, which a
+pause refuses and the producer asks again), so the test took the Stop before
+the engine had called Resume, and the Stop overtook the Play. fa94ee4d waits
+for the engine's Prepare after b (`handedOff`), as `playback_cut_test.go`'s
+tests do, and holds only a call the engine bounds with its deadline, the
+resume's. On fa94ee4d the two controls again failed 20 of 20 each, with their
+predicted lines, and the two tests passed 1,500 of 1,500 each under the same
+stress.
+
+Runs on fa94ee4d: `go test -race` with the release tags over
+`./internal/alsapcm/... ./internal/player/...` passed (12 packages, four of
+them unchanged and from the test cache); the native overlay's
+`^TestNativeIntegration` suites passed, 29 tests in `internal/player/playback`
+and 13 in `cmd/bridge`; `make test-fast` passed, 80 packages and 14 with no
+test files (`cmd/bridge` in 403 s); `make vet`, `GOOS=windows go vet` with the
+release tags and `make docs-check` were clean; and `go run
+./scripts/qualification-version -base main -head HEAD` passed, the version 33,
+past main's 32, over the guarded playback paths this round changes.
+
+`.claude/` is unwritable here: `rules-b674-r3.patch` carries the two
+`player.md` lines and the long form in `ops/History-rules-player.md`, one
+commit. The round's lines took `player.md` past its budget, so the backend's
+"Calls honour their contexts" entry moved to its long form with
+`move_entry.py` (its line keeps its title and its Don't, which now names every
+step), and round 3's steps and tests are there; `player.md` goes from 99,477
+to 98,179 bytes (98.2%), proved with a strict applier, `git apply --check` on
+fa94ee4d and the budgets measured over the patched files. The largest movable
+entry, the check after open (5,481 bytes), stayed: the pointer `move_entry.py`
+proposed for it dropped its Don't sentence, which is longer than the 600
+characters the tool matches.
+
 ## 2026-11-03 — B709: the engine's handoff test read b's report before the owner had handled it
 
 Backlog B709: CI's `test -race (rest)` job on #1390 (B705, which touched no

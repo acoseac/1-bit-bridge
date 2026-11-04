@@ -40,6 +40,9 @@ func TestExportIOSOutputFixtures(t *testing.T) {
 		}}
 		f.Codecs = append(f.Codecs, "dsf", "dff")
 		f.Playback = &OutputPlayback{BootID: "fixture-boot", PolicyGeneration: 8, Session: 41, Occurrence: 51, State: "open", Format: "DSD_U32_BE", RateHz: 88200, LogicalRate: 2822400, Channels: 2, ValidBits: 1, PolicyID: "native-be"}
+		// What a seek within a track takes (B674), which this bridge states in
+		// every state; no_backend below has none, as a bridge before B674.
+		f.TimeSeekPCM, f.TimeSeekDSD = TimeSeekSupported, TimeSeekUnsupported
 		switch name {
 		case "dsd_open":
 			f.State = "playing"
@@ -73,6 +76,7 @@ func TestExportIOSOutputFixtures(t *testing.T) {
 			f.Codecs = listedPlayer().Codecs
 			f.State = "unavailable"
 			f.Reason = "starting"
+			f.TimeSeekPCM, f.TimeSeekDSD = "", ""
 		case "dop_open":
 			// dsdMode auto with allowDoP (B470 2d.2): DoP where the record
 			// holds no native policy, the epoch's qualification, and a DoP
@@ -108,6 +112,13 @@ func TestExportIOSOutputFixtures(t *testing.T) {
 		}
 		if !reflect.DeepEqual(decoded.DSDPlayback, f.DSDPlayback) || !reflect.DeepEqual(decoded.Playback, f.Playback) {
 			t.Fatalf("%s: serialized policy or occurrence differs from source facts", name)
+		}
+		var wantSeek *OutputTimeSeek
+		if f.TimeSeekPCM != "" || f.TimeSeekDSD != "" {
+			wantSeek = &OutputTimeSeek{PCM: f.TimeSeekPCM, DSD: f.TimeSeekDSD}
+		}
+		if !reflect.DeepEqual(decoded.TimeSeek, wantSeek) {
+			t.Fatalf("%s: serialized timeSeek %+v differs from source facts", name, decoded.TimeSeek)
 		}
 		var bridge map[string]json.RawMessage
 		if err := json.Unmarshal(elements[0]["bridge"], &bridge); err != nil {

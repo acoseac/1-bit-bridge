@@ -51,7 +51,12 @@ type occ struct {
 	meta    []byte
 	details *Details
 	plan    *NativePlan
-	stage   stage
+	// from is the content frame the hand-off starts at: 0, or a seek's target
+	// (B674), counted at rate, from which the occurrence's position counts
+	// once it is heard.
+	from  int64
+	rate  int
+	stage stage
 	// unwanted is why it must not be heard: an edit removed it, or made it
 	// no longer follow the occurrence before it. reconcile sets it in the
 	// edit's own step, even while a Prepare or a Cut is under way, and clears
@@ -94,6 +99,9 @@ type session struct {
 	retiring                  *retiringLedger
 	releaseCall               *call
 	releaseTimer              timer
+	// released is the session's StartRequest.Released, closed in the step
+	// that releases the session (releaseSession) and then nil.
+	released chan struct{}
 }
 
 // index is where occurrence id is in the chain, or -1.
@@ -136,13 +144,16 @@ const (
 type act int
 
 const (
-	actNothing act = iota
-	actStart       // start a session at the selection, the first entry when none
-	actResume      // resume the paused session
-	actPause       // pause the session
-	actRelease     // release the session; the rule's then follows
-	actIntent      // set the pending intent while releasing
-	actStop        // stop a transport that holds no session
+	actNothing  act = iota
+	actStart        // start a session at the selection, the first entry when none
+	actResume       // resume the paused session
+	actPause        // pause the session
+	actRelease      // release the session; the rule's then follows
+	actIntent       // set the pending intent while releasing
+	actStop         // stop a transport that holds no session
+	actSeek         // release the session to play or pause at a seek's target (then)
+	actRetarget     // move the target of a seek no session plays yet
+	actRefuse       // refuse the command with the rule's reason, changing nothing
 )
 
 // rule is what one transport command does in one state.
@@ -153,18 +164,26 @@ type rule struct {
 	// output is a rule that starts a session, or will: refused while the
 	// output is unknown or unavailable.
 	output bool
+	// refuse is actRefuse's reason.
+	refuse Reason
 }
 
 // policy is the package documentation's table, in one place: what op does
 // in state st, where live is a session held (false for paused at the start
-// of the selection, with none) and atEnd a Next whose selection is the last
-// entry with repeat off. Next and Previous select and play in every state,
-// as PlayID and PlayIndex do, as their OpenHome actions (Next, Previous,
-// SeekId, SeekIndex) are used to: OpenHome's reference Playlist source
-// (ohPipeline's SourcePlaylist) plays after Next and Previous, paused and
-// stopped included. A Next past the end follows the end of the queue's
-// rule. Release 5a may adjust it once named controllers have been tested.
-func policy(op op, st State, live, atEnd bool) rule {
+// of the selection, with none), atEnd a Next whose selection is the last
+// entry with repeat off, and seeking a seek's target that no session plays
+// yet (o.seek: the release the seek made, or the pause at its target with no
+// session). Next and Previous select and play in every state, as PlayID and
+// PlayIndex do, as their OpenHome actions (Next, Previous, SeekId,
+// SeekIndex) are used to: OpenHome's reference Playlist source (ohPipeline's
+// SourcePlaylist) plays after Next and Previous, paused and stopped
+// included. A Next past the end follows the end of the queue's rule. A seek
+// within a track (B674) releases the session that holds the track to play
+// or pause at its target, as the transport was, moves the target of a seek
+// no session plays yet, and is refused in every other state: there is no
+// track to seek in. Release 5a may adjust it once named controllers have
+// been tested.
+func policy(op op, st State, live, atEnd, seeking bool) rule {
 	held := st == Playing || (st == Paused && live)
 	switch op {
 	case opPlay:
@@ -216,6 +235,16 @@ func policy(op op, st State, live, atEnd bool) rule {
 		case st == Releasing:
 			return rule{move: mv, act: actIntent, then: IntentPlay, output: true}
 		}
+	case opSeekAbsolute, opSeekRelative:
+		switch {
+		case st == Playing && live:
+			return rule{act: actSeek, then: IntentPlay, output: true}
+		case st == Paused && live:
+			return rule{act: actSeek, then: IntentPause}
+		case seeking && (st == Paused || st == Releasing):
+			return rule{act: actRetarget}
+		}
+		return rule{act: actRefuse, refuse: ReasonSeekUnavailable}
 	}
 	return rule{}
 }
@@ -227,6 +256,9 @@ func (e *Engine) transport(c *command) {
 	o := &e.o
 	name := c.op.String()
 	switch c.op {
+	case opSeekAbsolute, opSeekRelative:
+		e.seek(c)
+		return
 	case opStop:
 		e.supersedeParked(func(p *command) error {
 			return refuse(p.op.String(), ReasonOvertaken, "a stop ran before it, so it did not run")
@@ -255,7 +287,7 @@ func (e *Engine) transport(c *command) {
 	}
 	live := o.sess != nil && (o.sess.phase == sessStarting || o.sess.phase == sessLive)
 	atEnd := c.op == opNext && o.selected != 0 && o.q.after(o.selected, o.repeat) == 0
-	r := policy(c.op, o.state, live, atEnd)
+	r := policy(c.op, o.state, live, atEnd, o.seek != nil)
 	if r.output {
 		if why := e.outputRefusal(name); why != nil {
 			e.answer(c, reply{err: why})
@@ -279,6 +311,13 @@ func (e *Engine) transport(c *command) {
 			e.answer(c, reply{err: refuse(name, ReasonEmptyQueue, "the queue is empty")})
 			return
 		}
+	}
+	if o.seek != nil && c.op != opPlay && c.op != opPause && c.op != opStop {
+		// Next, Previous, PlayID and PlayIndex play an entry from its start,
+		// the seek's own included: the target of a seek no session plays yet
+		// goes, and the play commands carried to it with it (B674).
+		e.replacedCarry(name)
+		e.dropSeek()
 	}
 	moved := sel != o.selected
 	e.selectEntry(sel)
@@ -469,7 +508,12 @@ func (e *Engine) stopped(why StopInfo) {
 }
 
 // newOcc is a new hand-off of entry id.
-func (e *Engine) newOcc(id uint32) *occ {
+func (e *Engine) newOcc(id uint32) *occ { return e.handOff(id, 0) }
+
+// handOff is a hand-off of entry id as occurrence oid, a new occurrence when
+// oid is 0: the session started for a seek hands the occurrence it continues
+// off again, under its ID (B674).
+func (e *Engine) handOff(id uint32, oid OccurrenceID) *occ {
 	o := &e.o
 	var reservation *OccurrenceReservation
 	if e.occurrenceBudget != nil {
@@ -482,9 +526,12 @@ func (e *Engine) newOcc(id uint32) *occ {
 			reservation = e.occurrenceBudget.Unclassified()
 		}
 	}
-	o.nextOcc++
+	if oid == 0 {
+		o.nextOcc++
+		oid = OccurrenceID(o.nextOcc)
+	}
 	en, _ := o.q.get(id)
-	return &occ{reservation: reservation, id: OccurrenceID(o.nextOcc), entry: id, ref: en.ref, meta: en.meta}
+	return &occ{reservation: reservation, id: oid, entry: id, ref: en.ref, meta: en.meta}
 }
 
 // hear makes oc the occurrence heard, or nothing (nil): the audible
@@ -519,19 +566,40 @@ func (e *Engine) hear(oc *occ) {
 // startSession starts a session at entry target, for the play commands
 // waiting with none started for them: the one that starts it, and those
 // that waited behind the release before it. The owner starts one only with
-// no other session unacknowledged.
+// no other session unacknowledged. A seek's target that no session plays
+// yet (o.seek) is this session's to play: its first occurrence continues
+// the occurrence the seek took, under its ID, from the target's frame, with
+// what the backend reported of the content, and the track it kept stays the
+// one heard (B674).
 func (e *Engine) startSession(target uint32) {
 	o := &e.o
+	sk := o.seek
+	if sk != nil && sk.entry != target {
+		e.dropSeek()
+		sk = nil
+	}
+	o.seek = nil
 	o.nextSess++
-	s := &session{id: SessionID(o.nextSess), phase: sessStarting}
+	s := &session{id: SessionID(o.nextSess), phase: sessStarting, released: make(chan struct{})}
 	for i := range o.waiters {
 		if w := &o.waiters[i]; w.play && w.sess == 0 {
 			w.sess, w.carried = s.id, false
 		}
 	}
-	first := e.newOcc(target)
+	var first *occ
+	if sk != nil {
+		if first = e.handOff(target, sk.occ); first != nil {
+			d := sk.details
+			first.from, first.rate, first.details = sk.frame, d.RateHz, &d
+		}
+	} else {
+		first = e.newOcc(target)
+	}
 	if first == nil {
 		e.playFailed(refuse("play", Reason("occurrence_budget_exceeded"), "outstanding occurrence bound"))
+		if sk != nil {
+			e.hear(nil)
+		}
 		o.state = Stopped
 		e.visible()
 		return
@@ -540,15 +608,19 @@ func (e *Engine) startSession(target uint32) {
 	o.sess = s
 	o.sessions[s.id] = s
 	o.state, o.starting, o.then = Playing, true, IntentStop
-	e.hear(nil)
+	if sk == nil {
+		e.hear(nil)
+	}
 	o.join = nil
 	e.selectEntry(target)
 	e.visible()
 	req := StartRequest{
-		Session: s.id,
-		First:   first.public(),
-		Options: SessionOptions{PauseRelease: e.cfg.PauseRelease, DSD: e.cfg.DSD},
-		Events:  e.evts,
+		Session:  s.id,
+		First:    first.public(),
+		From:     first.from,
+		Options:  SessionOptions{PauseRelease: e.cfg.PauseRelease, DSD: e.cfg.DSD},
+		Events:   e.evts,
+		Released: s.released,
 	}
 	e.call(callStart, s, StartTimeout, func(ctx context.Context) callResult { return callResult{err: e.be.Start(ctx, req)} })
 }
@@ -578,6 +650,15 @@ func (e *Engine) releaseSession(s *session, then Intent, why StopInfo) {
 		}
 	}
 	s.phase = sessReleasing
+	// The backend learns of the release here, in this step, before its
+	// snapshot shows the release: the Release call below goes on a goroutine
+	// of its own and can reach the backend later than that, after a Start
+	// still opening has decided to write (StartRequest.Released, B674 round
+	// 2).
+	if s.released != nil {
+		close(s.released)
+		s.released = nil
+	}
 	s.stopPause()
 	if tc := s.transportCall; tc != nil && tc.waiter != nil {
 		var err error
@@ -601,7 +682,9 @@ func (e *Engine) releaseSession(s *session, then Intent, why StopInfo) {
 		o.state = Releasing
 	}
 	o.starting, o.join = false, nil
-	if !native {
+	// A seek's release keeps the track heard: the session started at its
+	// target continues the occurrence (o.seek, set before the release).
+	if !native && (o.seek == nil || then == IntentStop) {
 		e.hear(nil)
 	}
 	e.visible()
@@ -1381,7 +1464,8 @@ func (e *Engine) onAudible(id SessionID, oid OccurrenceID) {
 	s.chain = s.chain[i:]
 	oc.stage = stageAudible
 	e.hear(oc)
-	o.pos = Position{Occurrence: oc.id}
+	// Heard from where its hand-off starts: its start, or a seek's target.
+	o.pos = Position{Occurrence: oc.id, Frames: oc.from, RateHz: oc.rate}
 	o.starting = false
 	e.playBegan(s)
 	if _, ok := o.skips[oc.entry]; ok {

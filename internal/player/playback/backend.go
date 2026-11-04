@@ -74,6 +74,22 @@ type Seams struct {
 	// one, before the producer closes it and records the occurrence it opens
 	// a sink for next.
 	TransportDrained func()
+	// Fenced runs where the backend finds the session released, by its
+	// Release or by the engine's taking it before that Release came
+	// (engine.StartRequest.Released), at a step that would acquire, open,
+	// admit, adopt, resume, write or cut, and refuses that step (B674 round
+	// 3): step names it ("start", "open", "admit", "adopt", "resume",
+	// "write", "cut"). A sink refused at its adoption is closed before it
+	// runs; one refused at its check after open is closed by the sink after
+	// it. It must not call the backend.
+	Fenced func(step string)
+}
+
+// fenced is the Fenced seam.
+func (b *Backend) fenced(step string) {
+	if sm := b.cfg.Seams; sm != nil && sm.Fenced != nil {
+		sm.Fenced(step)
+	}
 }
 
 // pauseRefused is the PauseRefused seam.

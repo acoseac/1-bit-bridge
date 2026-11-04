@@ -16,10 +16,11 @@ import (
 )
 
 // The write actions (B470 PR 5a4). Each is one engine command, or, for the
-// Product writes that change nothing and the seeks the engine cannot make,
-// none, answered as OpenHome's reference player answers it (ohPipeline,
-// read at master c1047a8dc801, 2026-10-21) where it has an answer, and UPnP's
-// 501 Action Failed (UDA 1.1, §3.2.2) where it has none.
+// Product writes that change nothing, none, answered as OpenHome's reference
+// player answers it (ohPipeline, read at master c1047a8dc801, 2026-10-21)
+// where it has an answer, and UPnP's 501 Action Failed (UDA 1.1, §3.2.2)
+// where it has none. The seeks within a track are the engine's SeekAbsolute
+// and SeekRelative since B674.
 //
 // A write waits for the engine's own answer, as the engine's callers do,
 // within one budget: from the request's arrival at the handler, the
@@ -129,10 +130,14 @@ var writes = map[string]map[string]writer{
 		"SetRepeat": transport(func(ctx context.Context, e Engine, args []string) error {
 			return e.SetRepeat(ctx, booleanOf(args[0]))
 		}),
-		"SetShuffle":         playlistSetShuffle,
-		"SeekSecondAbsolute": playlistSeekSecond,
-		"SeekSecondRelative": playlistSeekSecond,
-		"Insert":             playlistInsert,
+		"SetShuffle": playlistSetShuffle,
+		"SeekSecondAbsolute": transport(func(ctx context.Context, e Engine, args []string) error {
+			return e.SeekAbsolute(ctx, int64(ui4Of(args[0])))
+		}),
+		"SeekSecondRelative": transport(func(ctx context.Context, e Engine, args []string) error {
+			return e.SeekRelative(ctx, i4Of(args[0]))
+		}),
+		"Insert": playlistInsert,
 		"DeleteId": edit(func(ctx context.Context, e Engine, args []string) error {
 			return e.Delete(ctx, ui4Of(args[0]))
 		}),
@@ -148,6 +153,12 @@ func booleanOf(text string) bool {
 		return true
 	}
 	return false
+}
+
+// i4Of is an in-argument's text as the i4 row 9 passed it.
+func i4Of(text string) int64 {
+	v, _ := strconv.ParseInt(text, 10, 32)
+	return v
 }
 
 // indexOf is an in-argument's text as the ui4 row 9 passed it, as an index
@@ -258,6 +269,12 @@ var reasonFaults = map[engine.Reason]faultReply{
 	engine.ReasonIndexNotFound:    faultIndexNotFound,
 	engine.ReasonMetadataTooLarge: {code: errStringTooLong},
 	engine.ReasonNotInRelease:     faultShuffle,
+	// A seek within a track the engine refuses (B674): no track to seek in,
+	// a target outside the content, or DSD, which it does not position in
+	// time; as ohPipeline answers a seek it cannot make.
+	engine.ReasonSeekUnavailable: faultSeekFailed,
+	engine.ReasonSeekOutOfRange:  faultSeekFailed,
+	engine.ReasonSeekUnsupported: faultSeekFailed,
 	// The engine closing between the no-engine check and the command: 5a3's
 	// no-engine fault.
 	engine.ReasonClosed: {code: errActionFailed},
@@ -298,8 +315,9 @@ var reasonFaults = map[engine.Reason]faultReply{
 
 // faultOf is the fault a's engine refusal of reason answers: the table's, an
 // OpenHome code only on the action that has it (801 on Insert, 802 on
-// SeekIndex, 804 on SetShuffle; 800 on every action that names an ID), and
-// 501 for every other reason, one outside the table included.
+// SeekIndex, 803 on SeekSecondAbsolute and SeekSecondRelative, 804 on
+// SetShuffle; 800 on every action that names an ID), and 501 for every other
+// reason, one outside the table included.
 func faultOf(a *action, reason engine.Reason) faultReply {
 	f, ok := reasonFaults[reason]
 	if !ok {
@@ -308,6 +326,7 @@ func faultOf(a *action, reason engine.Reason) faultReply {
 	switch {
 	case f == faultPlaylistFull && a.name != "Insert",
 		f == faultIndexNotFound && a.name != "SeekIndex",
+		f == faultSeekFailed && a.name != "SeekSecondAbsolute" && a.name != "SeekSecondRelative",
 		f == faultShuffle && a.name != "SetShuffle":
 		return faultReply{code: errActionFailed}
 	}
@@ -353,12 +372,6 @@ func playlistSetShuffle(wr writeRequest) ([][]byte, *faultReply) {
 	}
 	return nil, transportFault(wr.action, wr.h.engine.SetShuffle(wr.ctx, false))
 }
-
-// playlistSeekSecond is Playlist's SeekSecondAbsolute and SeekSecondRelative:
-// the engine has no seek within a track (release 7a's), so every value is
-// 803, Seek failed, as ohPipeline answers a seek it cannot make, without the
-// engine. 1-bit logs it, and the track plays from its start.
-func playlistSeekSecond(writeRequest) ([][]byte, *faultReply) { return nil, &faultSeekFailed }
 
 // playlistInsert is Playlist's Insert(AfterId, Uri, Metadata): the URI
 // confined to this bridge's own tracks (confine), the metadata checked

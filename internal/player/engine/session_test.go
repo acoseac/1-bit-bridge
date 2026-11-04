@@ -115,6 +115,44 @@ func TestALateOpenIsClosedAndNeverWrittenTo(t *testing.T) {
 	}
 }
 
+// TestAReleaseTheEngineTookFencesAnOpenBeforeItsCallArrives pins the
+// release's fence (StartRequest.Released, B674 round 2): the engine closes it
+// in the step that takes a Stop, so once a snapshot shows the release, a
+// Start still opening sees it, though the Release call, on a goroutine of its
+// own, has not reached the backend; the open that completes is closed and
+// never written to, and the Release, once it comes, is acknowledged.
+func TestAReleaseTheEngineTookFencesAnOpenBeforeItsCallArrives(t *testing.T) {
+	h := startHarness(t)
+	h.insert("a")
+	h.available()
+	open, release := newGate(), newGate()
+	h.be.script(func() {
+		h.be.onStart = func(ctx context.Context, s *fakeSession) error {
+			if err := open.wait(ctx, h.be, false); err != nil {
+				return err
+			}
+			return s.open()
+		}
+		h.be.beforeRelease = func(SessionID) { _ = release.wait(bg, h.be, false) }
+	})
+	play := async(func() error { return h.eng.Play(bg) })
+	s := h.be.nth(1)
+	stop := async(func() error { return h.eng.Stop(bg) })
+	h.waitSnap("the stop taken", func(sn *Snapshot) bool { return sn.State() == Releasing && sn.Pending() == IntentStop })
+	if fenced, n := s.isFenced(), h.be.count("release"); !fenced || n != 0 {
+		t.Fatalf("a snapshot shows the release: the start's fence closed %v, %d releases at the backend; want closed, none", fenced, n)
+	}
+	open.open()
+	h.be.waitFor("the start's open", func() bool { return s.opened })
+	release.open()
+	h.must("stop", h.result("stop", stop))
+	_ = h.result("play", play)
+	h.waitSnap("stopped", func(sn *Snapshot) bool { return sn.State() == Stopped })
+	if opened, closed, wrote := s.state(); !opened || !closed || wrote {
+		t.Fatalf("the open the stop overtook: opened %v closed %v written %v; want opened, closed, never written", opened, closed, wrote)
+	}
+}
+
 // TestALateEventFromAnOldSessionIsDiscarded pins the session check: an old
 // session's audible report, position, fault and finish change nothing.
 func TestALateEventFromAnOldSessionIsDiscarded(t *testing.T) {
