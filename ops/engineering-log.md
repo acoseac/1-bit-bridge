@@ -73125,3 +73125,109 @@ sentence does not fit a 600-byte pointer beside the entry's others, so the entry
 player.md verbatim and its History copy is gone. L146's pointer gains its long form's
 "It reports nothing until the watcher has published, and its first report is the first
 snapshot's, whatever it says." (481 bytes). player.md ends at 93711 bytes (93.7%).
+
+## 2026-11-04 — B725: listening assets for a DAC's DSD qualification, and their decode check
+
+The owner's qualification of a DAC's DSD (ops/b470-native-qualification.md,
+QualificationVersion 35) needs independent listening assets: DSF and DSDIFF
+fixtures at DSD64, 128 and 256, each with a matched PCM reference of the same
+duration, in manifest-v1 manifests whose hashes bind them. B725 adds the
+generator (`scripts/qualification/listening-assets`: `sdm.c` and
+`generate.py`), its decode check (`scripts/qualification/listening-verify`,
+`TestListeningAssets`) and the runbook's "Preparing listening assets"; the
+assets, their manifests and the session plan stay outside the repository.
+
+**The modulator.** A 1-bit error-feedback loop, v = u + (H - 1)e, y = sign(v +
+d), its NTF designed at run time by Schreier's synthesizeNTF: order 5, zeros
+at the Legendre roots across the band at OSR 64 (the band edge the rate / 128
+at every rate), maximally flat poles with |H(-1)| = 1.4, a margin under Lee's
+1.5, and in-loop TPDF dither. The dither was measured, not chosen: at 0.1 the
+loop's silence carried a line at a quarter of the rate 30 dB over its noise,
+at 0.3 one of 10 dB, from 0.4 none; at |H(-1)| 1.5 a dither of 0.6 left the
+loop's bounds, at 1.4 it held to 0.7 and left them from 0.8, so the defaults
+are 1.4 and 0.4 and the self-test runs silence at 0.6. A 1-bit loop's error
+is not white, so the self-test's noise bounds are one-sided (under a bound,
+and no more than 1 dB over the white-error prediction): in band -108.0 dB
+SA-CD against a bound of -100, 20 to 100 kHz -21.4 against -18, 100 kHz to
+1.4 MHz 9.0 against 9.5, every third-octave band in the audio range at most
+-4.0 dB over white error, and the largest out-of-band line 2.9 dB over its
+neighbours against a bound of 10.
+
+**Clicks where a file ends.** A file is cut from a running loop, and a sink
+joins its ends to another file or to its own 0x69 silence. Cut where the
+running sum of the bits happened to stand, a join clicked up to -54 dB SA-CD
+in the audio band (DSD128's main programme ended its left channel on "11").
+At each boundary at an even bit the generator re-dithers the 10 ms before it
+until the sum stands within 0.02 of its mean over 0.5 ms either side and the
+bits either side leave at most -100 dB SA-CD against 0x69 (a 20 kHz Kaiser
+probe), or keeps the least of 2000 tries; a first bound on the sum alone
+still left -81 dB at DSD64's ends, hence the probe. At an odd bit the sum
+always stands one off its mean, since the loop's silence is bit pairs of one
+1 and one 0, so the chain odd, sub-byte, continuous-split is one modulation in
+three files: the sub-byte file's end, at an odd bit, is clean only as the
+loop's own continuation, and continuous-split ends the chain on a whole
+32-bit word, so no run leaves the sink a partial word to pad with 0x69. The
+quiet tail's decaying bursts first left that file's end stuck off its mean at
+every trial, by an amount that grew with the rate: a 1-bit loop keeps an
+input's fractional net area for good, and a burst that decays from phase
+zero has one. `burst_phase` starts each decaying burst at the phase that
+leaves it none (computed from the envelope's integral at 1 MHz), and the
+self-test checks every content's net area. The worst boundary a run of
+`runs.json` makes a sink play, measured by the decode check: -100.1, -101.1
+and -104.5 dB SA-CD at DSD64, 128 and 256.
+
+**DoP.** dsd-test refuses a DoP fixture whose PCM reference is not at the
+carrier (the rate / 16), and the manifest refuses a reference whose duration
+is not the fixture's exactly, so a DoP fixture is a whole number of 16-bit
+carrier frames and cannot end inside a byte: DoP's joins run is quiet-tail,
+odd, odd, its second join on an odd carrier frame. DoP's references are at
+176.4 kHz (DoP64) and 352.8 kHz (DoP128), 32-bit; there is no DoP256 where
+705.6 kHz is not offered.
+
+**The decode check.** `TestListeningAssets -args -listening-assets=DIR` reads
+each manifest through the JSON schema, `ReadManifest` and `CheckAssets`, each
+fixture's header as dsd-test reads it, each DSD fixture through the bridge's
+decoder and an independent DSF and DSDIFF reader bit for bit, and compares it
+with its reference in 10 ms blocks after a Kaiser-windowed decimation to
+352.8 kHz: tones
+6.02 dB down within 0.05 dB and 0.01 Hz, silences under -100 dB SA-CD from 20
+Hz to 20 kHz, the channel order its manifest's, 20 to 100 kHz under -18, -45
+and -80 dB SA-CD and within 1.5 dB in silence and tones, no line 10 dB over
+its neighbours, no run of more than 16 equal bits, a density of one half; and
+every run of `runs.json` against dsd-test's fixture-list rules and every
+boundary it plays. A rectangular window read the ramps' leakage as tones of
+-86 to -98 dBFS where the reference had none, in every run; the blocks are
+Hann-windowed. An order test that wanted one channel 1e6 over the other read
+every fixture as unordered (the ramps' leakage again); it wants 1e3. On the
+set made for the Mytek Brooklyn DAC+ (51 files, 57 fixture pairs): tone
+blocks within 0.0024, 0.0013 and 0.0002 dB, frequencies within 2e-6 Hz,
+silences at most -107.9, -111.1 and -116.0 dB SA-CD, 20 to 100 kHz -21.3,
+-51.9 and -96.4 dB SA-CD in silence and tones alike, runs of at most 6 bits,
+the density 0.500000. ffmpeg was not on the host, so its dsd_* decoders were
+not run.
+
+**Negative controls**, each restored byte for byte after: the order read
+swapped (`TestTheCheckCatchesASwappedChannelPair` red), the independent DSF
+reader without its bit reversal (`TestTheCheckPassesASoundSet` red), the
+schema's unknown keys allowed (`TestTheSchemaRefusesWhatTheLoaderTakes` red),
+the DoP carrier rule dropped (`TestTheRunsAreHeldToTheHarnessRules` red), the
+boundary bound lifted (`TestTheCheckCatchesAStepAtAFilesEnd` red), the block
+levels uncompared (`TestTheCheckCatchesTheWrongBitOrder` red); the generator's
+self-test failed for an LSB-first DSF written MSB-first, a dither of 0.1, a
+decaying burst at phase zero and a boundary search of one try; a manifest
+naming the RL DSF as the LR fixture, its hash right, was caught as RL; and
+the runbook's go test line unregistered, or changed without the registry,
+turned the build-site census red.
+
+**Follow-ups named for the orchestrator** (no backlog file on the host): the
+runbook's DoP interactive example names `dsd64-subbyte`, which no manifest
+can make playable over DoP; its DoP lifecycle and transition examples omit
+`--mixer-experiments`, which the approval reader requires on every DoP
+matrix, lifecycle and transition report of a DAC with a feature unit; its
+step 5 names records `Q/…json` that production reads inside `cfg.DataDir`
+alone, so the configs' data directory must be Q (and a serving copy's state
+directory needs copies of the record and its reports); its DoP lifecycle
+example passes no PCM 44.1 → DoP64 edge, which its dop.yaml output-play block
+needs; the `capture` prompt still names the GO bar; and a DAC that offers PCM
+only as S32_LE plays no 16-bit track, since the player packs 16 bits as
+S16_LE alone.

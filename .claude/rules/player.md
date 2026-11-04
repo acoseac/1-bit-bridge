@@ -15,6 +15,7 @@ paths:
   - "scripts/player-pcm-goldens/**"
   - "scripts/player-dsd-goldens/**"
   - "scripts/player-alac-goldens/**"
+  - "scripts/qualification/**"
   - "internal/usbid/**"
   - "internal/config/player*.go"
 ---
@@ -195,3 +196,7 @@ The bit-exact OpenHome player inside the bridge (B470), PR by PR. These sections
 
 - **Provisional DoP (B470 2d.1) is explicit S32_LE: `00 b a marker`, canonical bit 7 earliest, one shared 05/FA marker per stereo frame.** Keep 16 logical bits, four canonical bytes and eight hardware bytes separate; the writer owns phase, advances it only by accepted frames and starts every hardware run at 05 before its prefill. Recheck 24..32 significant bits and disabled SW fill before any initial/reopen write; refuse DSD512 at admission. Contact needs both acknowledgements, one silence-bounded fixture, same-carrier S32 reference, DSD indication and listening observations; readers bind schema, geometry and experiment hashes. **Don't pin a DoP rule by its markers alone: compare every byte given with an independent bit-level oracle across an odd-index boundary.** Version 14 invalidated prior evidence; in 2d.1 production stayed native-only (2d.2, the next bullet). → History-rules-player.md, “Provisional DoP”.
 - **Approved DoP (B470 2d.2): one effective set over dsdMode × allowDoP feeds selection and the published epoch.** native plays DSD_U32_BE, DSD_U32_LE, DSD_U16_LE; dop the approved S32_LE DoP policies with allowDoP alone; auto native first, DoP only at a rate holding no native policy. Refusals are named; allowDoP false loads and PCM plays. A native↔DoP edge needs a transition report in schema 2's Transitions. **Don't play DoP at a rate holding a native policy, its constraints drifted included, fall back to DoP at run time, publish anything but the effective set, join same-carrier PCM and DoP, or put the USB port or serial on the wire.** Version 17. → History-rules-player.md, “Approved DoP (B470 2d.2)”.
+
+## The DSD qualification's listening assets (B725)
+
+- **A DAC's DSD qualification is listened to on assets from `scripts/qualification/listening-assets` alone, checked by `TestListeningAssets` (B725).** **Don't commit the assets or make one from a golden, drop the boundary re-dither or a decaying burst's zero-area phase, take decoded DSD 6.02 dB under its reference for a fault, give DoP a sub-byte fixture, or hand a session assets the check has not passed.** → History-rules-player.md
