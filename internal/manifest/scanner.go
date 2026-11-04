@@ -215,11 +215,13 @@ type Scanner struct {
 	// Nil in production.
 	beforeScanLock atomic.Pointer[func()]
 
-	// foldsCaseHook, when set, answers in foldsCase's place: a test stands
-	// in for a volume that folds case, which this host's may not be. Per
-	// instance; nil in production. Read on the scan's goroutine and the
-	// watcher's, so a test sets it before either runs, or between scans.
-	foldsCaseHook func(path string) bool
+	// foldingHook, when set, answers in fsutil.FoldingIn's place for how a
+	// folder compares the names in it (Scanner.foldingIn): a test stands in
+	// for volumes this host does not have, one that folds case, one mounted
+	// inside another, one that cannot tell. Per instance; nil in production.
+	// Read on the scan's goroutine and the watcher's, so a test sets it
+	// before either runs, or between scans.
+	foldingHook func(dir string) fsutil.CaseFolding
 
 	// postScanHook, when set, fires after every successful full Scan —
 	// see SetPostScanHook. atomic.Pointer so the boot-time SetPostScanHook
@@ -2803,19 +2805,19 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("resolve %q: %w", dir, err)
 	}
-	// The owning root is the deepest configured root that holds absDir, by
-	// `filepath.Rel` (deepestRootOf): a path starting with ".." climbs out of
-	// a root, i.e. is NOT under it. This is the idiomatic cross-platform
-	// containment check — pre-fix strings.HasPrefix was byte-exact, which
-	// broke on case-insensitive filesystems where an event for
-	// `/Music/Album/track.flac` could surface against a configured root path
-	// `/music` and false-negative (Gemini High on PR #79). filepath.Rel routes
-	// through the OS path APIs so platform-native casing semantics are
-	// preserved. The deepest, where roots nest: a folder under a root
-	// configured inside another is that root's, whichever is listed first
-	// (B651's fifth round; nested_roots.go). And compared folded where the
-	// volume folds case (underRoot, the sixth round): a nested root
-	// configured as USB is the folder the outer root's walk spells usb.
+	// The owning root is the deepest configured root that holds absDir
+	// (deepestRootOf), compared element by element: pre-fix strings.HasPrefix
+	// was byte-exact, which broke on case-insensitive filesystems where an
+	// event for `/Music/Album/track.flac` could surface against a configured
+	// root path `/music` and false-negative (Gemini High on PR #79). The
+	// deepest, where roots nest: a folder under a root configured inside
+	// another is that root's, whichever is listed first (B651's fifth round;
+	// nested_roots.go). An element that differs in case alone matches only
+	// where the folder it is looked up in is established to fold case, never
+	// by filepath.Rel, which on Windows folds in a case-sensitive folder too
+	// (B651's sixth and seventh rounds): a nested root configured as USB is
+	// the folder a walk spells usb on a volume that folds case, and on one
+	// that does not, or cannot tell, another folder.
 	_, owningRoot, tail := s.deepestRootOf(roots, absDir)
 	if owningRoot == "" {
 		return 0, fmt.Errorf("dir %q is not under any configured library root", dir)
@@ -2823,8 +2825,10 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// The root's own part of absDir in the root's configured spelling, so the
 	// rows this scan writes carry the prefix the root's full scan gives them;
 	// the part below the root stays as it was handed, the walk's own spelling
-	// (B219: no respelling here). Where Rel found absDir under the root, this
-	// is absDir as it was, but for the case of the root's part on Windows.
+	// (B219: no respelling here). It differs from absDir's own in case alone,
+	// and only where that names the same folder: the folder above it folds
+	// case, established, and the two spellings, where both are there, are one
+	// folder, so this never sends the scan into another root's folder.
 	absDir = filepath.Join(owningRoot, tail)
 
 	// A subtree scan OF the root walks the root as Scan does: through it,
@@ -2842,7 +2846,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// walked, by this scan or by Scan.
 	walkFrom := absDir
 	atRoot := false
-	if rel, relErr := filepath.Rel(owningRoot, absDir); relErr == nil && rel == "." {
+	if tail == "." {
 		atRoot = true
 		if walkFrom, err = fsutil.WalkableRoot(absDir); err != nil {
 			return 0, fmt.Errorf("library root %q cannot be seen: %w", owningRoot, err)
@@ -2855,13 +2859,19 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// so set membership in `seen`/`seenFolders` is directly
 	// comparable against the snapshot keys.
 	relScope := relPath(owningRoot, absDir, multiRoot)
-	// The roots configured inside the owning root at or below the folder this
-	// scan walks, which it spares while one reads as not mounted, reached by
-	// the walk or not (protectNestedRoots, after the snapshots below).
-	var nested []nestedRoot
+	// The roots configured inside the owning root that are, or may be, at or
+	// below the folder this scan walks, which it spares while one reads as not
+	// mounted, reached by the walk or not (protectNestedRoots, after the
+	// snapshots below); and those that may hold the folder in another
+	// spelling, which the owning root took it from only because folding was
+	// not established (holding, below).
+	c := s.caseLook()
+	var nested, holding []nestedRoot
 	for _, n := range s.nestedRootsUnder(roots, owningRoot) {
-		if _, ok := s.underRoot(absDir, n.abs); ok {
+		if _, ok := c.under(absDir, n.abs, true); ok {
 			nested = append(nested, n)
+		} else if _, ok := c.under(n.abs, absDir, true); ok {
+			holding = append(holding, n)
 		}
 	}
 
@@ -2890,6 +2900,16 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	errorSubtrees := make(map[string]struct{})
 	pass := s.protectNestedRoots(ctx, owningRoot, nested, multiRoot,
 		[]map[string]struct{}{beforeTrackSet, beforeFolderSet}, errorSubtrees)
+	// A nested root that may hold this folder in another spelling, where
+	// which root it is could not be established (caseLook.sameName counts an
+	// Unknown answer as two folders, what is spared as one): while it reads
+	// as not mounted, this scan reaps nothing (B651's seventh round).
+	for _, n := range holding {
+		if s.lookAtRoot(ctx, n.root).absent {
+			errorSubtrees[relScope] = struct{}{}
+			break
+		}
+	}
 	// The playlist files this walk passes, for the scoped playlist-file
 	// pass after the deletion passes (backlog B431).
 	playlists := make(map[string]playlistSighting)

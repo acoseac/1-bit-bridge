@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -14,62 +15,140 @@ import (
 // nested root's, the deepest root that holds it, whatever order the roots are
 // listed in: the watcher's events, the looks its dispatches make and the scans
 // it drops under a root it holds (rootOf), and a subtree scan's owning root
-// (ScanSubtree), all go through deepestRootOf. Before, each took the first root listed that held the path,
-// so with the outer root listed first a nested root's events, held or not,
-// went to the outer one, and so did its subtree scans, indexing its files
-// under the outer root's path. A walk of the outer root still passes through
-// a nested root, as it always has, unless the nested root reads as a volume
-// that is not mounted (protectNestedRoots).
+// (ScanSubtree), all go through deepestRootOf. Before, each took the first
+// root listed that held the path, so with the outer root listed first a nested
+// root's events, held or not, went to the outer one, and so did its subtree
+// scans, indexing its files under the outer root's path. A walk of the outer
+// root still passes through a nested root, as it always has, unless the nested
+// root reads as a volume that is not mounted (protectNestedRoots).
 //
-// Every comparison of a path with a root folds case where the volume does
-// (underRoot, B651's sixth round, Codex on round 5): on Windows' volumes and
-// macOS's default one a root configured as C:\music\USB is the folder the
-// volume spells usb, and the walks, which spell a folder as the volume lists
-// it, would miss it by its configured spelling. Whether the volume folds case
-// is the volume's own answer (foldsCase), and never taken as case-sensitive
-// for a root that is not there: its nearest ancestor that is answers for it.
+// A path is compared with a root element by element, and an element that
+// differs in case alone is judged by the folder it is looked up in, as that
+// folder compares names (fsutil.FoldingIn: Sensitive, Insensitive or Unknown;
+// B651's sixth and seventh rounds, Codex on rounds 5 and 6): a volume mounted
+// inside another compares the names in it as it does, and Windows can make a
+// single folder case-sensitive. The two questions asked count Unknown in
+// opposite ways (Argon on the seventh round's brief). Which root a path is
+// (caseLook.sameName) folds an element only where its folder is established to
+// fold case, so two roots spelled alike are never taken for one and a subtree
+// scan is never sent into another root's folder. What a scan spares and a walk
+// passes over (caseLook.mayBeOneName) folds an element wherever its folder may
+// fold, so the rows of a nested root whose volume went are spared in every
+// spelling the walks may have given them.
 
-// foldsCase reports whether the volume holding path, or the nearest ancestor
-// of path that exists, folds case (fsutil.FoldsCase): probed on the volume, so
-// a path that is not there is judged by the folder it would be in, and the
-// platform's default answers only where nothing there can be probed.
-func (s *Scanner) foldsCase(path string) bool {
-	if h := s.foldsCaseHook; h != nil {
-		return h(path)
+// foldingIn is how the folder dir compares the names in it
+// (fsutil.FoldingIn), or a test's stand-in for it (foldingHook).
+func (s *Scanner) foldingIn(dir string) fsutil.CaseFolding {
+	if h := s.foldingHook; h != nil {
+		return h(dir)
 	}
-	return fsutil.FoldsCase(path)
+	return fsutil.FoldingIn(dir)
 }
 
-// underRoot reports whether abs is at or under the folder dir, and abs's own
-// spelling of the path below it ("." for dir itself): by filepath.Rel, or,
-// where the two differ in case alone and the volume folds case (foldsCase of
-// abs, asked only then), element by element with case folded.
-func (s *Scanner) underRoot(dir, abs string) (tail string, ok bool) {
-	if rel, err := filepath.Rel(dir, abs); err == nil && !climbsOut(rel) {
-		return rel, true
-	}
-	tail, ok = foldedTail(dir, abs)
-	if !ok || !s.foldsCase(abs) {
-		return "", false
-	}
-	return tail, true
+// caseLook compares paths as their folders compare names, for the length of
+// one task (a lookup of a path's root, a scan's protection, a hold's release),
+// asking each folder once.
+type caseLook struct {
+	s    *Scanner
+	seen map[string]fsutil.CaseFolding
 }
 
-// climbsOut reports whether a filepath.Rel answer leaves the folder it was
-// asked from.
-func climbsOut(rel string) bool {
-	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
+func (s *Scanner) caseLook() *caseLook { return &caseLook{s: s} }
+
+// folding is foldingIn of dir, asked once per caseLook.
+func (c *caseLook) folding(dir string) fsutil.CaseFolding {
+	dir = filepath.Clean(dir)
+	if f, ok := c.seen[dir]; ok {
+		return f
+	}
+	f := c.s.foldingIn(dir)
+	if c.seen == nil {
+		c.seen = make(map[string]fsutil.CaseFolding)
+	}
+	c.seen[dir] = f
+	return f
 }
 
-// foldedTail reports whether abs is at or under dir with case folded, element
-// by element, and abs's elements below dir, joined ("." for dir itself).
-func foldedTail(dir, abs string) (string, bool) {
+// sameName reports whether x and y, names that differ in case alone, name one
+// entry of the folder parent, for which root a path is: only where the folder
+// is established to fold case (an Unknown answer keeps them two) and, where
+// both spellings are there, they are one entry.
+func (c *caseLook) sameName(parent, x, y string) bool {
+	if c.folding(parent) != fsutil.CaseInsensitive {
+		return false
+	}
+	fx, errx := os.Lstat(filepath.Join(parent, x))
+	fy, erry := os.Lstat(filepath.Join(parent, y))
+	return errx != nil || erry != nil || os.SameFile(fx, fy)
+}
+
+// mayBeOneName reports whether a name that differs from x in case alone may
+// name the entry x names in the folder parent, for what a scan spares and a
+// walk passes over: unless the folder answers that it is case-sensitive and is
+// the folder the rows were written through, which it is where it holds x,
+// another spelling of x, or library content. A folder that answers Unknown or
+// is not there may fold, and so may one that holds none of these: a mount
+// point a volume left bare answers for the folder it covers, not for the
+// volume that was mounted on it (Codex on round 6).
+func (c *caseLook) mayBeOneName(parent, x string) bool {
+	if c.folding(parent) != fsutil.CaseSensitive {
+		return true
+	}
+	if _, err := os.Lstat(filepath.Join(parent, x)); err == nil {
+		return false
+	}
+	return !holdsSpellingOrContent(parent, x)
+}
+
+// holdsSpellingOrContent reports whether the folder dir holds a spelling of x
+// in another case, or library content (isLibraryEntry), reading its listing
+// rootLookBatch entries at a time; false where it cannot be read.
+func holdsSpellingOrContent(dir, x string) bool {
+	f, err := fsutil.OpenDir(dir)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	for {
+		entries, err := f.ReadDir(rootLookBatch)
+		for _, e := range entries {
+			if e.Name() != x && strings.EqualFold(e.Name(), x) {
+				return true
+			}
+		}
+		if holdsLibraryContent(dir, entries) {
+			return true
+		}
+		if err != nil {
+			return false // the listing's end (io.EOF), or a failed read
+		}
+	}
+}
+
+// under reports whether abs is at or under the folder dir, and abs's own
+// spelling of the path below it ("." for dir itself), element by element: one
+// that differs from dir's in case alone matches where the folder it is looked
+// up in, in abs's spelling, names one entry by both, established (sameName),
+// or, for what is spared (spare), may (mayBeOneName).
+func (c *caseLook) under(dir, abs string, spare bool) (string, bool) {
 	d, a := pathElements(dir), pathElements(abs)
 	if len(a) < len(d) {
 		return "", false
 	}
 	for i := range d {
+		if d[i] == a[i] {
+			continue
+		}
 		if !strings.EqualFold(d[i], a[i]) {
+			return "", false
+		}
+		if i == 0 {
+			// A volume, a drive letter or a share, which Windows never tells
+			// apart by case.
+			continue
+		}
+		parent := filepath.Join(a[:i]...)
+		if spare && !c.mayBeOneName(parent, d[i]) || !spare && !c.sameName(parent, d[i], a[i]) {
 			return "", false
 		}
 	}
@@ -77,6 +156,37 @@ func foldedTail(dir, abs string) (string, bool) {
 		return ".", true
 	}
 	return filepath.Join(a[len(d):]...), true
+}
+
+// spareFolds is, for each element of tail (a path below the folder dir, in a
+// configured root's spelling), whether a walk's spelling of it may differ in
+// case alone (mayBeOneName in the folder it is looked up in): each element is
+// judged by its own folder, so a volume that folds case mounted inside one
+// that does not, or the other way round, is judged as it compares names
+// (Argon on the seventh round's brief).
+func (c *caseLook) spareFolds(dir, tail string) []bool {
+	elems := strings.Split(tail, string(filepath.Separator))
+	folds := make([]bool, len(elems))
+	parent := dir
+	for i, e := range elems {
+		folds[i] = c.mayBeOneName(parent, e)
+		parent = filepath.Join(parent, e)
+	}
+	return folds
+}
+
+// spelledAs reports whether the elements got are want's, each the same or,
+// where folds says it may be spelled otherwise, the same with case folded.
+func spelledAs(got, want []string, folds []bool) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] && (!folds[i] || !strings.EqualFold(got[i], want[i])) {
+			return false
+		}
+	}
+	return true
 }
 
 // pathElements is a path's elements, cleaned: its volume and leading
@@ -101,16 +211,19 @@ func pathElements(p string) []string {
 
 // deepestRootOf returns the configured root abs is at or under, the deepest
 // where roots nest, as configured and as filepath.Abs gives it, and abs's own
-// spelling of the path below it (underRoot, so folded where the volume folds
-// case); "" for none. abs must be absolute.
+// spelling of the path below it (caseLook.under, as which root a path is
+// compares: never by filepath.Rel, which on Windows folds case in every
+// folder, a case-sensitive one included; Codex on round 6); "" for none. abs
+// must be absolute.
 func (s *Scanner) deepestRootOf(roots []string, abs string) (root, absRoot, tail string) {
+	c := s.caseLook()
 	depth := -1
 	for _, r := range roots {
 		a, err := filepath.Abs(r)
 		if err != nil {
 			continue
 		}
-		t, ok := s.underRoot(a, abs)
+		t, ok := c.under(a, abs, false)
 		if !ok {
 			continue
 		}
@@ -147,40 +260,56 @@ type nestedRoot struct {
 	root, abs, tail string
 }
 
-// nestedRootsUnder lists the configured roots strictly below root, which a
-// walk of root reaches as folders of its own, compared as underRoot compares;
-// nil when there is none, which is every library but one with nested roots.
+// nestedRootsUnder lists the configured roots that are, or may be, strictly
+// below root (caseLook.under, as what is spared compares), which a walk of
+// root reaches as folders of its own; nil when there is none, which is every
+// library but one with nested roots.
 func (s *Scanner) nestedRootsUnder(roots []string, root string) []nestedRoot {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil
 	}
+	c := s.caseLook()
 	var out []nestedRoot
 	for _, r := range roots {
 		a, err := filepath.Abs(r)
 		if err != nil {
 			continue
 		}
-		if tail, ok := s.underRoot(absRoot, a); ok && tail != "." {
+		if tail, ok := c.under(absRoot, a, true); ok && tail != "." {
 			out = append(out, nestedRoot{root: r, abs: a, tail: tail})
 		}
 	}
 	return out
 }
 
-// nestedPass is the nested roots a walk passes over, by the folder each is
-// below the walked root, matched as the volume compares names.
+// nestedPass is the folders of nested roots a walk passes over.
 type nestedPass struct {
-	folders []string
-	fold    bool
+	folders []sparedFolder
+}
+
+// sparedFolder is a nested root's folder: its path, its elements, and for each
+// whether a walk's spelling of it may differ in case alone (spareFolds; the
+// walked root's own never does).
+type sparedFolder struct {
+	path  string
+	elems []string
+	folds []bool
 }
 
 // has reports whether the folder at abs, which a walk reaches, is one of them.
-// Both are clean, so folding the whole of each folds each element.
 func (p nestedPass) has(abs string) bool {
+	if len(p.folders) == 0 {
+		return false
+	}
 	abs = filepath.Clean(abs)
 	for _, f := range p.folders {
-		if abs == f || p.fold && strings.EqualFold(abs, f) {
+		if abs == f.path {
+			return true
+		}
+		// Both are clean, so the whole of each folds as each element does: a
+		// path this does not match matches no spelling of the folder.
+		if strings.EqualFold(abs, f.path) && spelledAs(pathElements(abs), f.elems, f.folds) {
 			return true
 		}
 	}
@@ -194,12 +323,12 @@ func (p nestedPass) has(abs string) bool {
 // with it, and a walk that only spared what it reached spared nothing then
 // (B651's sixth round, Codex on round 5). Each one's prefix below root is
 // recorded as a subtree the walk could not see, so the deletion pass leaves
-// every row under it as it is, its missing count untouched; where the volume
-// folds case (foldsCase of root, a folder that is there), so is every spelling
-// of that prefix the index holds (rows: the walks wrote them as the volume
-// spells its folders, which the configured spelling may not be). It returns
-// them, for the walk to pass over where it reaches them. A nested root that
-// reads as it is is walked, as before.
+// every row under it as it is, its missing count untouched, and so is every
+// spelling of that prefix the index holds that may be the same folder, each
+// element judged by its own folder (spareFolds): the walks wrote the rows as
+// the volume spells its folders, which the configured spelling may not be. It
+// returns their folders, for the walk to pass over where it reaches them in
+// any such spelling. A nested root that reads as it is is walked, as before.
 func (s *Scanner) protectNestedRoots(ctx context.Context, root string, nested []nestedRoot, multiRoot bool, rows []map[string]struct{}, errorSubtrees map[string]struct{}) nestedPass {
 	var pass nestedPass
 	if len(nested) == 0 {
@@ -209,7 +338,8 @@ func (s *Scanner) protectNestedRoots(ctx context.Context, root string, nested []
 	if err != nil {
 		return pass
 	}
-	var prefixes []string
+	rootElems := len(pathElements(absRoot))
+	c := s.caseLook()
 	for _, n := range nested {
 		if !s.lookAtRoot(ctx, n.root).absent {
 			continue
@@ -217,42 +347,47 @@ func (s *Scanner) protectNestedRoots(ctx context.Context, root string, nested []
 		folder := filepath.Join(absRoot, n.tail)
 		prefix := relPath(absRoot, folder, multiRoot)
 		errorSubtrees[prefix] = struct{}{}
-		prefixes = append(prefixes, prefix)
-		pass.folders = append(pass.folders, folder)
-	}
-	if len(prefixes) == 0 {
-		return pass
-	}
-	pass.fold = s.foldsCase(absRoot)
-	if pass.fold {
-		for _, prefix := range prefixes {
-			for _, set := range rows {
-				protectFoldedPrefix(prefix, set, errorSubtrees)
-			}
+		folds := c.spareFolds(absRoot, n.tail)
+		pass.folders = append(pass.folders, sparedFolder{
+			path:  folder,
+			elems: pathElements(folder),
+			folds: append(make([]bool, rootElems), folds...),
+		})
+		for _, set := range rows {
+			protectSpellings(prefix, folds, set, errorSubtrees)
 		}
 	}
 	return pass
 }
 
-// protectFoldedPrefix records, as a subtree the walk could not see, every
-// spelling of prefix, with case folded element by element, that a path of
-// rows begins with.
-func protectFoldedPrefix(prefix string, rows map[string]struct{}, errorSubtrees map[string]struct{}) {
+// protectSpellings records, as a subtree the walk could not see, every
+// spelling of prefix that a path of rows begins with, the prefix's last
+// len(folds) elements each the same or, where folds says it may be spelled
+// otherwise, the same with case folded, and the elements before them (the
+// root's own name) the same.
+func protectSpellings(prefix string, folds []bool, rows map[string]struct{}, errorSubtrees map[string]struct{}) {
+	if !anyFolds(folds) {
+		return
+	}
 	want := strings.Split(prefix, "/")
+	all := append(make([]bool, len(want)-len(folds)), folds...)
 	for p := range rows {
 		got := strings.SplitN(p, "/", len(want)+1)
 		if len(got) < len(want) {
 			continue
 		}
-		same := true
-		for i := range want {
-			if !strings.EqualFold(got[i], want[i]) {
-				same = false
-				break
-			}
-		}
-		if same {
+		if spelledAs(got[:len(want)], want, all) {
 			errorSubtrees[strings.Join(got[:len(want)], "/")] = struct{}{}
 		}
 	}
+}
+
+// anyFolds reports whether any element may be spelled otherwise.
+func anyFolds(folds []bool) bool {
+	for _, f := range folds {
+		if f {
+			return true
+		}
+	}
+	return false
 }

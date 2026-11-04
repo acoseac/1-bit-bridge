@@ -289,22 +289,20 @@ func (f *watchFDs) release(p string) []string {
 	return out
 }
 
-// spellings is p and, where the volume folds case (fold), every path the
-// account holds that is p in another case: the folder a walk of the root it is
-// in listed as the volume spells it. p first; each one's subtree is recorded
+// spellings is p and every path the account holds that is p in another case
+// and that same says may be p's folder: the folder a walk of the root it is in
+// listed as the volume spells it. p first; each one's subtree is recorded
 // under its own spelling, so releasing each releases them all. The account's
-// paths are clean, as p is, so folding the whole of each folds each element.
-func (f *watchFDs) spellings(p string, fold bool) []string {
+// paths are clean, as p is, so a path whose whole does not match p's with case
+// folded is no spelling of it, and same is asked of the others alone.
+func (f *watchFDs) spellings(p string, same func(q string) bool) []string {
 	out := []string{p}
-	if !fold {
-		return out
-	}
 	seen := map[string]struct{}{p: {}}
 	note := func(q string) {
 		if _, ok := seen[q]; ok {
 			return
 		}
-		if strings.EqualFold(p, q) {
+		if strings.EqualFold(p, q) && same(q) {
 			seen[q] = struct{}{}
 			out = append(out, q)
 		}

@@ -168,18 +168,23 @@ func (wt *Watcher) holdRoot(root string, look rootLook) bool {
 // what fsnotify still holds on the volume's folders, by the names they had,
 // and on kqueue the account of them too (releaseTree). A watch fsnotify has
 // dropped already answers its Remove with an error, which says nothing here.
-// Where the volume folds case, so are the watches the walk of a root it is
-// nested in added at its folder in the volume's spelling, usb for a root
-// configured as USB (B651's sixth round). The root's alias stays, so an event
-// already queued under the name it resolved to is still named back under the
-// root, and dropped as a held root's; watchAgain notes it afresh.
+// So are the watches the walk of a root it is nested in added at its folder in
+// another spelling where that may be the same folder, usb for a root
+// configured as USB, as what is spared compares (caseLook.under; B651's sixth
+// and seventh rounds). The root's alias stays, so an event already queued
+// under the name it resolved to is still named back under the root, and
+// dropped as a held root's; watchAgain notes it afresh.
 func (wt *Watcher) releaseRoot(root string) {
 	rw := wt.rootWatchPath(root)
 	delete(wt.rootWatches, root)
-	fold := wt.scanner.foldsCase(rw)
+	c := wt.scanner.caseLook()
 	if wt.fds != nil {
 		if !wt.fds.off {
-			for _, p := range wt.fds.spellings(rw, fold) {
+			same := func(q string) bool {
+				tail, ok := c.under(rw, q, true)
+				return ok && tail == "."
+			}
+			for _, p := range wt.fds.spellings(rw, same) {
 				wt.releaseTree(p)
 				wt.fds.dropPending(p)
 			}
@@ -187,11 +192,9 @@ func (wt *Watcher) releaseRoot(root string) {
 		return
 	}
 	for p := range wt.watchSet() {
-		at := pathAtOrUnder(p, rw)
-		if !at && fold {
-			_, at = foldedTail(rw, p)
-		}
-		if at {
+		if pathAtOrUnder(p, rw) {
+			_ = wt.w.Remove(p)
+		} else if _, ok := c.under(rw, p, true); ok {
 			_ = wt.w.Remove(p)
 		}
 	}

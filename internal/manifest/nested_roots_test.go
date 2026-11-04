@@ -225,18 +225,25 @@ func newFoldedNested(t *testing.T) *foldedNested {
 	return n
 }
 
-// foldCase has the scanner answer that its volume folds case: a test stands
+// foldCase has the scanner answer that every folder folds case: a test stands
 // in for macOS's default volume or Windows', which this host's may not be.
-func (n *foldedNested) foldCase() { n.scanner.foldsCaseHook = func(string) bool { return true } }
+func (n *foldedNested) foldCase() { answerFolding(n.scanner, fsutil.CaseInsensitive) }
+
+// answerFolding has the scanner answer f for how every folder compares names
+// (foldingHook).
+func answerFolding(s *Scanner, f fsutil.CaseFolding) {
+	s.foldingHook = func(string) fsutil.CaseFolding { return f }
+}
 
 // takeAway takes the nested root's volume away, leaving its bare mount point
 // when bare, stamped an hour before the tracks so that a walk into it shows in
-// its folder row; has the scanner answer that the volume folds case
-// (foldCase); and has a row reaped at its third missed scan. On this host's
-// case-sensitive disk the configured spelling is no folder at all, so the
-// nested root reads as not mounted, as its bare mount point does where the
-// volume folds case.
-func (n *foldedNested) takeAway(t *testing.T, bare bool) {
+// its folder row; has the scanner answer folding for how every folder compares
+// names (answerFolding: CaseInsensitive stands in for a volume that folds
+// case, CaseUnknown for one whose folders cannot tell); and has a row reaped
+// at its third missed scan. On this host's case-sensitive disk the configured
+// spelling is no folder at all, so the nested root reads as not mounted, as
+// its bare mount point does where the volume folds case.
+func (n *foldedNested) takeAway(t *testing.T, bare bool, folding fsutil.CaseFolding) {
 	t.Helper()
 	moveAway(t, n.disk, filepath.Join(n.dir, "gone"), bare)
 	if bare {
@@ -245,7 +252,7 @@ func (n *foldedNested) takeAway(t *testing.T, bare bool) {
 			t.Fatal(err)
 		}
 	}
-	n.foldCase()
+	answerFolding(n.scanner, folding)
 	n.scanner.SetDeleteThreshold(3)
 }
 
@@ -269,10 +276,10 @@ func (n *foldedNested) mustHoldTheVolumesRows(t *testing.T) {
 	}
 }
 
-// foldedScans runs scan's cases: with the nested root's bare mount point
-// there, which a walk of the outer root reaches and passes over, and with its
-// folder gone, which no walk reaches.
-func foldedScans(t *testing.T, scan func(ctx context.Context, n *foldedNested) error) {
+// foldedScans runs scan's cases, every folder answering folding: with the
+// nested root's bare mount point there, which a walk of the outer root reaches
+// and passes over, and with its folder gone, which no walk reaches.
+func foldedScans(t *testing.T, folding fsutil.CaseFolding, scan func(ctx context.Context, n *foldedNested) error) {
 	for _, bare := range []bool{true, false} {
 		name := "folder gone"
 		if bare {
@@ -280,7 +287,7 @@ func foldedScans(t *testing.T, scan func(ctx context.Context, n *foldedNested) e
 		}
 		t.Run(name, func(t *testing.T) {
 			n := newFoldedNested(t)
-			n.takeAway(t, bare)
+			n.takeAway(t, bare, folding)
 			for range 4 {
 				if err := scan(context.Background(), n); err != nil {
 					t.Fatal(err)
@@ -299,19 +306,24 @@ func foldedScans(t *testing.T, scan func(ctx context.Context, n *foldedNested) e
 // point or its folder went (Codex on round 5). The volume's answer is stood in
 // for (takeAway).
 func TestASubtreeScanSparesANestedRootSpelledInAnotherCaseWhereTheVolumeFoldsCase(t *testing.T) {
-	foldedScans(t, func(ctx context.Context, n *foldedNested) error {
-		_, err := n.scanner.ScanSubtree(ctx, n.outer)
-		return err
-	})
+	foldedScans(t, fsutil.CaseInsensitive, subtreeScanOfTheOuterRoot)
 }
 
 // TestAFullScanSparesANestedRootSpelledInAnotherCaseWhereTheVolumeFoldsCase:
 // the same, for full scans (Codex on round 5).
 func TestAFullScanSparesANestedRootSpelledInAnotherCaseWhereTheVolumeFoldsCase(t *testing.T) {
-	foldedScans(t, func(ctx context.Context, n *foldedNested) error {
-		_, err := n.scanner.Scan(ctx)
-		return err
-	})
+	foldedScans(t, fsutil.CaseInsensitive, fullScan)
+}
+
+// subtreeScanOfTheOuterRoot and fullScan are the scans foldedScans runs.
+func subtreeScanOfTheOuterRoot(ctx context.Context, n *foldedNested) error {
+	_, err := n.scanner.ScanSubtree(ctx, n.outer)
+	return err
+}
+
+func fullScan(ctx context.Context, n *foldedNested) error {
+	_, err := n.scanner.Scan(ctx)
+	return err
 }
 
 // TestASubtreeScanUnderANestedRootSpelledInAnotherCaseIsItsOwn: on a volume
@@ -324,7 +336,7 @@ func TestAFullScanSparesANestedRootSpelledInAnotherCaseWhereTheVolumeFoldsCase(t
 // is stood in for (takeAway).
 func TestASubtreeScanUnderANestedRootSpelledInAnotherCaseIsItsOwn(t *testing.T) {
 	n := newFoldedNested(t)
-	n.takeAway(t, true)
+	n.takeAway(t, true, fsutil.CaseInsensitive)
 	band := filepath.Join(n.disk, "Band")
 	for range 4 {
 		// The nested root's scan refuses a folder under a root that reads as
@@ -452,7 +464,7 @@ func TestHoldingANestedRootSpelledInAnotherCaseLetsGoOfTheWatchesUnderIt(t *test
 }
 
 // TestANestedRootSpelledInAnotherCaseIsTheVolumesFolderOnlyWhereItFoldsCase is
-// the comparisons on this host's own volume (fsutil.FoldsCase, probed): where
+// the comparisons on this host's own volume (fsutil.FoldingIn, probed): where
 // it folds case (macOS's default, Windows'), a nested root configured as
 // music/USB is the folder spelled usb, so a subtree scan there is the nested
 // root's, and with its volume away the outer root's scans spare its rows;
@@ -461,7 +473,7 @@ func TestHoldingANestedRootSpelledInAnotherCaseLetsGoOfTheWatchesUnderIt(t *test
 // its files (Codex on round 5).
 func TestANestedRootSpelledInAnotherCaseIsTheVolumesFolderOnlyWhereItFoldsCase(t *testing.T) {
 	n := newFoldedNested(t)
-	folds := fsutil.FoldsCase(n.disk)
+	folds := fsutil.FoldingIn(n.outer) == fsutil.CaseInsensitive
 	ctx := context.Background()
 	record := filepath.Join(n.disk, "Band", "Record")
 	writeTracks(t, filepath.Join(record, "02.flac"))
@@ -494,15 +506,16 @@ func TestANestedRootSpelledInAnotherCaseIsTheVolumesFolderOnlyWhereItFoldsCase(t
 // TestAFolderUnderAGoneNestedRootSpelledInAnotherCaseIsItsOwnOnlyWhereTheVolumeFoldsCase
 // asks this host's volume, as the test above does, about a nested root whose
 // folder went with its volume: whether a folder there, named in the volume's
-// spelling, is the nested root's is answered by the nearest folder that is
-// still there (fsutil.FoldsCase), never taken as case-sensitive for being gone
-// (Argon on the brief). Where the volume folds case, a subtree scan of such a
-// folder is the nested root's, which refuses a root it cannot see, so the rows
-// the outer root holds there stay; where it does not (Linux's), the folder is
-// the outer root's, gone, and its rows go with it.
+// spelling, is the nested root's is answered by the folder its name is looked
+// up in, which is still there (fsutil.FoldingIn), never taken as
+// case-sensitive for the nested root's being gone (Argon on the sixth round's
+// brief). Where the volume folds case, a subtree scan of such a folder is the
+// nested root's, which refuses a root it cannot see, so the rows the outer root
+// holds there stay; where it does not (Linux's), the folder is the outer
+// root's, gone, and its rows go with it.
 func TestAFolderUnderAGoneNestedRootSpelledInAnotherCaseIsItsOwnOnlyWhereTheVolumeFoldsCase(t *testing.T) {
 	n := newFoldedNested(t)
-	folds := fsutil.FoldsCase(n.disk)
+	folds := fsutil.FoldingIn(n.outer) == fsutil.CaseInsensitive
 	ctx := context.Background()
 	moveAway(t, n.disk, filepath.Join(n.dir, "gone"), false)
 	// The nested root's scan refuses a folder under a root it cannot see;
