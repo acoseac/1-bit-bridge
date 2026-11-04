@@ -73291,3 +73291,137 @@ build lock with TMPDIR under `.tmp/_b728-b1`, at dd59fb91:
   definitions, the control UAPI's among them.
 - Not run here: macOS and Windows natively, the alsa-abi job on arm64, and
   any hardware (B1's tier is the player's, which has no hardware run).
+
+## 2026-11-04 — B728 B1, round 2: the DSD demuxers' files are guarded, and the legacy reader stops at this build's version
+
+The findings on #1400, with the orchestrator's decisions on them and on
+Codex's and Argon's notes on the task, binding: the narrowed guard missed
+files that shape the native DSD bytes (Codex P2, Argon 1); the legacy
+reader took a version past this build's (Argon 2). The branch was
+fast-forwarded to d214aeec (round 1 and its rules patch applied) by taking
+its one changed file and writing the branch's loose ref, since `git merge`
+needs an approval this host cannot give; `git status` was clean and `git
+diff d214aeec` empty after.
+
+**The audit**, of the calls from the DSF and DFF demuxers' reads and the
+native and DoP packers down to the sink's write, and of the two helpers
+the decision on Codex's third note names. A file is guarded when a change
+to it can change the DSD bytes a DAC is sent, or their count, without a
+refusal, or decides which evidence the harness's readers take or which
+identity it binds to:
+- `internal/player/decode/dsd.go`: guarded. `bitReverse` turns an
+  LSB-first DSF byte into canonical order; `checkDSDBuf` sets the
+  per-channel length every read fills.
+- `internal/player/decode/dsf.go`: guarded. Bit order (`bitReverse` or a
+  copy), the block-group extraction and its absolute offsets, the count
+  from `BytesPerChannel`.
+- `internal/player/decode/dff.go`: guarded. The channel deinterleave in
+  CHNL's order, the sound region's bounds and its frame count.
+- `internal/player/decode/pcm_region.go`: guarded. `readLinear` and
+  `seekFrame` read DFF's sample bytes, cut them short and end them
+  (dff.go:314, :334).
+- `internal/player/decode/offset.go`: guarded. Every read and seek of an
+  ID3-tagged DSF or DFF goes through its arithmetic, so a wrong mapping of
+  a large offset reads other bytes once the header has parsed.
+- `internal/player/format/pcm.go`: guarded. `NativeDSD.BytesPerChannel`
+  is how many bytes per channel a DSF yields, and its decoder's end.
+- `internal/fsutil/notafile.go`: guarded (the decision on Codex 3).
+  `OpenAsFile` is how `trustedFile` (approval.go:481) and
+  `ReadEvidenceFile` open evidence, refusing what is not a file, and
+  `NotAFile` judges the manifest's fixtures (`fixtureKind`).
+- `internal/fsutil/notafile_unix.go`: guarded. `OpenAsFile`'s open on
+  Linux (`openNoWait`, `setBlocking`), the harness's only platform.
+- `internal/usbid/port.go`: guarded (the decision on Codex 3).
+  `ParseHex16` is the bcdDevice check at alsa/qualification.go:49 and the
+  sysfs reader's parse of the vendor and product IDs (sysfs.go:510), and
+  `Port` the port path it reads (sysfs.go:564, :580): what the identity
+  evidence binds to.
+- `internal/player/decode/bounds.go`: not guarded (named, as Codex 1
+  asked). `framesPerRead` (pcm_region.go:84) sizes one DFF read: inside its
+  contract, 1 to framesWant, `readLinear` loops to the same bytes and
+  count; outside it, DFF's emit indexes past `dst` and panics, a fault,
+  never other bytes.
+- `internal/player/decode/decoder.go`: not guarded. `Open` dispatches by
+  the sniffed kind and wraps the offset view; a wrong kind or origin meets
+  the demuxers' own magic and structure checks, and is refused.
+- `internal/player/decode/sniff.go`: not guarded. It classifies and finds
+  the origin after an ID3 tag; openDSF and openDFF check "DSD " and "FRM8"
+  at that origin and refuse any other.
+- `internal/player/decode/` `refuse.go`, `sample.go`, `doc.go` and the PCM
+  decoders (`flac.go`, `wav.go`, `aiff.go`, `m4a.go`, `alac.go`,
+  `alac_cookie.go`): not guarded. Refusals and PCM alone.
+- `internal/player/format/pack.go`: not guarded. The PCM packers (`Pack`,
+  `PackedBytes`, S16 to S32); DoP packs in dop_pack.go, guarded since round
+  1; `ALSAFormat` is a name.
+- `internal/player/playback/open.go`: not guarded (as decided). It opens
+  the content through a SectionReader of [0, Size), routes a `DSDDecoder`
+  to native.go and refuses a From; a wrong bound refuses (DFF's form
+  against the physical end) or ends in a fault (a truncated read), and
+  `chunkFrames` sizes native.go's reads, chunking alone, the sink carrying
+  bits across writes.
+- `internal/player/playback/producer.go`: not guarded (as decided). Its DSD
+  part revokes on a changed authorization; every DSD read and write is
+  native.go's (:68, :276, :306).
+- `internal/player/playback/session.go`: not guarded (as decided). It
+  revokes, releases, faults and waits on native sinks; it touches no byte.
+- `internal/player/playback/content.go`: not guarded. The `Content`
+  contract and `BindingLocator`, which DAC, not which bytes.
+- `internal/player/playback/` `backend.go`, `authorization.go`, `live.go`,
+  `reporter.go`, `packing.go`, `codecs.go`, `doc.go`: not guarded. Wiring,
+  admission, observation, events, the PCM packings, the containers.
+- `internal/player/engine/` and `internal/player/library/`: not guarded.
+  References, cuts and positions; the file a reference names, not its
+  bytes.
+- `internal/fsutil/notafile_other.go`: not guarded. `OpenAsFile`'s open off
+  unix, where no harness runs.
+- Flagged, not guarded: `internal/alsa/sysfs.go`, which reads the vendor
+  and product IDs, the port and the interface the qualification identity
+  binds to, and `internal/alsactl/constraints.go`, whose `CheckConstraints`
+  decides whether a report's mixer snapshots hold its policy's
+  constraints. By this round's rule both are helpers of the harness's
+  readers, like the two above, but section 8 drops them and neither the
+  brief nor the decisions name them: the orchestrator's to decide.
+- Guarded since round 1, unchanged: `playback/native.go` and `edges.go`,
+  `format/dsd_pack.go` and `dop_pack.go`, `internal/alsapcm/`.
+
+Not taken, as decided: `producer.go`, `open.go` and `session.go` (Argon
+1), whose audit above found no byte they change; the whole `fsutil/` and
+`usbid/` prefixes; and Argon 2's note on a DoP record's experiments under a
+looser comparison, which is B6's.
+
+**The upper bound.** The legacy reader takes versions from `LegacyVersion`
+to this build's `Version` and none past it (`LegacyVersion <= v && v <=
+Version`), through the one rule beneath it, for the record and for every
+report, DoP experiment and contact it holds: a newer bridge's evidence,
+written before a downgrade, is nothing this code can vouch for. The
+version stays 36.
+
+**Commits.** dfbc46f5 the red tests, on d214aeec; 049c46b8 the fix, with
+the runbook and the design (sections 3.5, 3.6 and 8, items 10 and 14 of
+9.1, the cutover's risk row, B1's row in 11); this record, with the long
+form of the rules line `rules-b728-b1-r2.patch` changes ("which takes
+versions from 35 to the build's own").
+
+**Red first** (dfbc46f5, on d214aeec):
+- `TestQualificationDependencyGate`, its nine new rows: "dependency
+  changed without version bump"; `alsapcm/sink_run.go` green.
+- `TestTheLegacyReaderRefusesBelowVersion35`, its rows at 37, now
+  refusals: "got <nil>, want the refusal "stale approval version"".
+- `TestTheLegacyReaderRefusesAVersionNewerThanThisBuild`: the record, a
+  matrix, lifecycle or transition report, an experiment and a contact at
+  37, each in a record otherwise valid at 36, all six read ("got <nil>").
+- `TestProductionRefusesARecordNewerThanThisBuild/version_37`: "1 tuples
+  published"; its rows at 35 and 36 green. In the playback overlay,
+  `TestNativeIntegrationApprovedConstructor/newer_version`: "start=<nil>".
+- `TestAChangeOutsideTheDSDBytePathNeedsNoBump`, which no longer lists
+  dsf.go, dff.go and notafile.go and gains the files the audit left out:
+  green on both sides.
+
+**Negative controls**, by round 1's runner with a table of its own, each
+red:
+
+| # | Mutation | Red |
+|---|---|---|
+| G1 to G9 | each of the nine new paths dropped from `GuardedPaths`, one at a time | its own row of `TestQualificationDependencyGate` ("dependency changed without version bump"), and no other |
+| U1 | the upper bound removed (`LegacyVersion <= v`) | all six rows of `TestTheLegacyReaderRefusesAVersionNewerThanThisBuild`; the rows at 37 of `TestTheLegacyReaderRefusesBelowVersion35`; `TestProductionRefusesARecordNewerThanThisBuild/version_37`; the overlay's `newer_version` |
+| U2 | the bound one short (`v < Version`) | the rows at 36 of `TestTheLegacyReaderRefusesBelowVersion35`; `TestProductionRefusesARecordNewerThanThisBuild/version_36` |
