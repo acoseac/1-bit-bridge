@@ -3,7 +3,9 @@ package qualification
 // qualificationVersion changes whenever a guarded implementation changes.
 const qualificationVersion = 36
 
-// Version binds provisional reports and production approval to this implementation.
+// Version binds the harness's reports and records to this implementation
+// (ReadApproval, ReadCandidate); production reads an owner's approval through
+// ReadLegacyApproval, from LegacyVersion on (B728).
 const Version = qualificationVersion
 
 // LegacyVersion is the oldest version of an owner's approval that production

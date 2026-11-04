@@ -173,11 +173,18 @@ func (m Manifest) CheckAssets(root string) error {
 
 // Validate checks a receipt against the current tuple and live attachment.
 func (c Contact) Validate(t Tuple, a Attachment, device, subdevice int, mixer, manifest string) error {
+	return c.validate(t, a, device, subdevice, mixer, manifest, harnessRule.version)
+}
+
+// validate is Validate taking the receipt's version as version does: the
+// current one, or, for an experiment the legacy reader reads, any from
+// LegacyVersion on.
+func (c Contact) validate(t Tuple, a Attachment, device, subdevice int, mixer, manifest string, version func(int) bool) error {
 	schema := 2
 	if t.Transport == "dop" {
 		schema = 3
 	}
-	if c.SchemaVersion != schema || c.QualificationVersion != Version {
+	if c.SchemaVersion != schema || !version(c.QualificationVersion) {
 		return errors.New("contact version mismatch")
 	}
 	if c.Device == nil || c.Subdevice == nil || *c.Device != device || *c.Subdevice != subdevice || device < 0 || subdevice < 0 {

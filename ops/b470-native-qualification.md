@@ -1,7 +1,10 @@
 # B470 native qualification — owner approval and provisional evidence
 
-QualificationVersion is **36**. All older evidence must be rerun, native included. The harness never
-creates approval. Production native DSD requires a fresh matching approved record;
+QualificationVersion is **36**. All older evidence must be rerun for the harness, native included. The
+harness never creates approval. Production reads an approval record only through the legacy reader,
+which takes version 35 and later, until B728's cutover (`ops/plan-b728-dsd-capability-design.md`).
+This runbook's evidence binds `qualificationVersion`, whose guard covers the DSD byte path and the
+harness alone. Production native DSD requires a matching approved record;
 DoP S32_LE auditions are provisional and require both acknowledgements; production DoP plays only
 an approved DoP policy, under `dsdMode: dop` or `auto` with `allowDoP: true` (2d.2, below). Real-ref and Linux hardware gates remain reviewer/owner work.
 
@@ -151,11 +154,13 @@ The gate's `native-qualification` job runs real-sink CLI integration on PRs and 
 Its CheckVersion step runs on PRs only: full history, the actual PR head and fetched
 origin/main, then merge-base..HEAD. Missing main/history/merge-base fails; it never skips.
 The job is a dependency of `gate`. The guarded implementation files are enumerated in
-`internal/player/qualification/version_gate.go`: native and DoP packing, the DoP evidence
-reader; ALSA UAPI, PCM device,
-native device, params, sys_linux/sys_other, ring, both sinks and writers, native opening;
-all three dsd-test files; alsactl control/control_linux/uapi; ALSA qualification identity;
-qualification inputs and the version checker itself. Changes require a version increase.
+`internal/player/qualification/version_gate.go`, since B728's B1 the DSD byte path and the
+harness alone: native and DoP packing; the player's DSD open and its plans' edges
+(`internal/player/playback/native.go`, `edges.go`); alsactl control/control_linux/uapi;
+ALSA qualification identity; everything under `internal/alsapcm/` (ALSA UAPI, PCM device,
+native device, params, sys_linux/sys_other, ring, both sinks and writers, native opening);
+the qualification package (the approval and DoP evidence readers, the inputs and the version
+checker itself); and every dsd-test file. Changes require a version increase.
 
 The integration overlay exposes the existing ALSA _test.go fake only to this test command.
 The injected PCM opener is below descriptor verification and binding admission; production
@@ -212,9 +217,10 @@ and descriptor flags. Injected in-memory readers are nonblocking; other injected
 an Interrupt method through an adapter, which owns its cancellation policy. Asset checks use the shared explicit special-file list,
 which accepts cloud placeholders; the CLI itself still requires Linux.
 
-The version gate additionally guards binding, ALSA identity, decoder, format,
+The version gate additionally guarded binding, ALSA identity, decoder, format,
 control, configuration, USB identity and file-reader directories, plus the shared
-CLI output/input code and config-path resolver. Overlay generation fails for a missing/changed or residual build tag,
+CLI output/input code and config-path resolver, until B728's B1 narrowed it (the
+gate's paragraph above). Overlay generation fails for a missing/changed or residual build tag,
 or missing fake support. CI also requires a passing NativeIntegration test line.
 Linux amd64/arm64 execution and ABI gates above remain pending on this Darwin host.
 
@@ -241,8 +247,8 @@ Confirmation input preserves every echoed printable ASCII byte, including spaces
 Backspace/Ctrl-H removes the preceding byte. CR, LF and CRLF each terminate one line,
 including a split CRLF arriving at the next prompt. Tabs and non-ASCII input fail
 with a visible printable-ASCII diagnostic. Nothing is silently trimmed or discarded.
-The version gate also guards the shared CLI filename and platform config-directory
-resolver; configpath and host-tree wiring remain guarded.
+The version gate also guarded the shared CLI filename and platform config-directory
+resolver, configpath and the host-tree wiring, until B728's B1 narrowed it.
 
 
 ## 0.2.2 local approval contract
@@ -274,8 +280,9 @@ Missing fields, invented combinations of pause/tail/prefill, incomplete/cancelle
 unverified builds and unexecuted edges refuse. Promotion is a separate reviewed manual
 step; neither harness nor production writes, signs, repairs or auto-promotes an approval.
 
-Tampered means wrong owner/mode or body/evidence hash mismatch. Stale means version or
-observed identity mismatch. Every session and activation rereads and verifies; a 100 ms
+Tampered means wrong owner/mode or body/evidence hash mismatch. Stale means a version the
+reader does not take (the harness's, any but the current one; production's legacy reader,
+any below 35) or an observed identity mismatch. Every session and activation rereads and verifies; a 100 ms
 monitor also detects deletion/replacement, health failure and constrained-control drift.
 An identical inode replacement still revokes the old permission. Recovery publishes new
 capability only, never Play. Descriptors and mixer reads never write controls.
