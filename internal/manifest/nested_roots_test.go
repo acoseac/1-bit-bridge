@@ -356,6 +356,7 @@ func TestTheWatcherKeepsAHeldRootSpelledInAnotherCaseWhereTheVolumeFoldsCase(t *
 	n := newFoldedNested(t)
 	moveAway(t, n.disk, filepath.Join(n.dir, "gone"), true)
 	n.foldCase()
+	mustReadAsNotMounted(t, n.scanner, n.configured)
 	w, err := NewWatcher(n.scanner, time.Hour)
 	if err != nil {
 		t.Fatal(err)

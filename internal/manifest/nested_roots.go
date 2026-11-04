@@ -2,6 +2,8 @@ package manifest
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,11 +32,12 @@ import (
 // single folder case-sensitive. The two questions asked count Unknown in
 // opposite ways (Argon on the seventh round's brief). Which root a path is
 // (caseLook.sameName) folds an element only where its folder is established to
-// fold case, so two roots spelled alike are never taken for one and a subtree
-// scan is never sent into another root's folder. What a scan spares and a walk
-// passes over (caseLook.mayBeOneName) folds an element wherever its folder may
-// fold, so the rows of a nested root whose volume went are spared in every
-// spelling the walks may have given them.
+// fold case, and never on a lookup there that failed (B651's eighth round), so
+// two roots spelled alike are never taken for one and a subtree scan is never
+// sent into another root's folder. What a scan spares and a walk passes over
+// (caseLook.mayBeOneName) folds an element wherever its folder may fold, so the
+// rows of a nested root whose volume went are spared in every spelling the
+// walks may have given them.
 
 // foldingIn is how the folder dir compares the names in it
 // (fsutil.FoldingIn), or a test's stand-in for it (foldingHook).
@@ -72,14 +75,27 @@ func (c *caseLook) folding(dir string) fsutil.CaseFolding {
 // sameName reports whether x and y, names that differ in case alone, name one
 // entry of the folder parent, for which root a path is: only where the folder
 // is established to fold case (an Unknown answer keeps them two) and, where
-// both spellings are there, they are one entry.
+// both spellings are there, they are one entry. Where one or neither is there,
+// the folder's answer decides. A lookup that fails otherwise (a permission
+// refused, a transient error) cannot tell, and keeps them two: taking them for
+// one on it would route a scan to a root the path may not be in (Codex on
+// round 7).
 func (c *caseLook) sameName(parent, x, y string) bool {
 	if c.folding(parent) != fsutil.CaseInsensitive {
 		return false
 	}
 	fx, errx := os.Lstat(filepath.Join(parent, x))
 	fy, erry := os.Lstat(filepath.Join(parent, y))
-	return errx != nil || erry != nil || os.SameFile(fx, fy)
+	if errx == nil && erry == nil {
+		return os.SameFile(fx, fy)
+	}
+	return thereOrNot(errx) && thereOrNot(erry)
+}
+
+// thereOrNot reports whether a lookup's error says the name is there or is
+// not, and nothing else: nil, or not there.
+func thereOrNot(err error) bool {
+	return err == nil || errors.Is(err, fs.ErrNotExist)
 }
 
 // mayBeOneName reports whether a name that differs from x in case alone may

@@ -2,8 +2,11 @@ package manifest
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -19,7 +22,8 @@ import (
 // mountedNested is a library root, music, holding the mount point music/usb of
 // another volume, and a root of its own on that volume configured as
 // music/usb/LIBRARY, a folder the volume lists as library; indexed through the
-// outer root's walk while the volume was there.
+// outer root's walk while the volume was there (where this host's disk folds
+// case, the nested root's own walk indexes it too).
 type mountedNested struct {
 	dir, outer, mount, configured string
 	store                         *Store
@@ -42,20 +46,37 @@ func newMountedNested(t *testing.T) *mountedNested {
 	return n
 }
 
-// answer has the scanner answer that music, the outer root's volume, is
-// case-sensitive, that the mount point folds case where mountFolds says so
-// (the volume mounted there folding the names in it), and every other folder
-// as this host's probe reads it: a bare mount point, holding nothing, answers
-// Unknown.
-func (n *mountedNested) answer(mountFolds bool) {
+// answer has the scanner answer for each folder as the volume it is on
+// compares names: the outer root's volume does not fold case, and the one
+// mounted at music/usb does, while mounted says it is there. Whether a folder
+// can tell at all is read from its own listing on this host
+// (fsutil.FoldingIn): one that offers no name to look up, an empty one or a
+// bare mount point among them, answers Unknown on any volume, and one that can
+// answers as its volume compares, never as this host's disk does, which folds
+// case on macOS and Windows where the outer volume stands for one that does
+// not (B651's eighth round: a bare mount point holding an index folder of its
+// own answered there for the host's disk, case-insensitive).
+func (n *mountedNested) answer(mounted bool) {
 	n.scanner.foldingHook = func(d string) fsutil.CaseFolding {
 		switch {
-		case d == n.outer:
-			return fsutil.CaseSensitive
-		case d == n.mount && mountFolds:
+		case fsutil.FoldingIn(d) == fsutil.CaseUnknown:
+			return fsutil.CaseUnknown
+		case mounted && pathAtOrUnder(d, n.mount):
 			return fsutil.CaseInsensitive
 		}
-		return fsutil.FoldingIn(d)
+		return fsutil.CaseSensitive
+	}
+}
+
+// mustReadAsNotMounted fails the test at once unless the nested root reads as
+// a volume that is not mounted (Scanner.lookAtRoot, the look the watcher holds
+// a root on), where the test is about to wait for its hold: a hold the
+// scenario cannot give is otherwise waited for until the test binary's
+// deadline, and every test after it is starved (B651's eighth round).
+func mustReadAsNotMounted(t *testing.T, s *Scanner, root string) {
+	t.Helper()
+	if look := s.lookAtRoot(context.Background(), root); !look.absent {
+		t.Fatalf("premise: %s reads as it is on this host, so no watcher holds it", root)
 	}
 }
 
@@ -96,15 +117,17 @@ func TestAScanSparesANestedRootOnAVolumeThatFoldsCaseMountedInOneThatDoesNot(t *
 			t.Run(name, func(t *testing.T) {
 				n := newMountedNested(t)
 				moveAway(t, n.mount, filepath.Join(n.dir, "gone"), true)
+				want := fsutil.CaseUnknown
 				if junk != "" {
 					if err := os.Mkdir(filepath.Join(n.mount, junk), 0o755); err != nil {
 						t.Fatal(err)
 					}
-					if got := fsutil.FoldingIn(n.mount); got == fsutil.CaseUnknown {
-						t.Fatalf("premise: the mount point holding %s answered %s", junk, got)
-					}
+					want = fsutil.CaseSensitive
 				}
 				n.answer(false)
+				if got := n.scanner.foldingIn(n.mount); got != want {
+					t.Fatalf("premise: the bare mount point answered %s, want %s", got, want)
+				}
 				n.scanner.SetDeleteThreshold(3)
 				for range 4 {
 					if err := c.scan(context.Background(), n); err != nil {
@@ -124,10 +147,19 @@ func TestAScanSparesANestedRootOnAVolumeThatFoldsCaseMountedInOneThatDoesNot(t *
 // does, mounted at music/usb, in the volume's spelling library: the held
 // root's path is judged element by element, each by its own folder, never by
 // the walked root's volume alone (Codex on round 6). The folder above it is
-// still watched.
+// still watched. The held root is the mount point of a volume of its own,
+// which is away: its bare mount point, which the volume at music/usb lists as
+// library, holds nothing while the index holds the root's tracks, so the root
+// reads as not mounted where LIBRARY is library (a disk that folds case, this
+// host's on macOS and Windows) and where LIBRARY is no folder at all (one
+// that does not). With library left full, the root reads as it is on a disk
+// that folds case, and no hold comes (Codex on round 7).
 func TestTheWatcherPassesOverAHeldRootOnAVolumeThatFoldsCaseMountedInOneThatDoesNot(t *testing.T) {
 	n := newMountedNested(t)
+	library := filepath.Join(n.mount, "library")
+	moveAway(t, library, filepath.Join(n.dir, "gone"), true)
 	n.answer(true)
+	mustReadAsNotMounted(t, n.scanner, n.configured)
 	w, err := NewWatcher(n.scanner, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +171,6 @@ func TestTheWatcherPassesOverAHeldRootOnAVolumeThatFoldsCaseMountedInOneThatDoes
 	if got := waitForRoot(t, held, "the watcher never held the nested root"); got != n.configured {
 		t.Errorf("the watcher held %q, want %q", got, n.configured)
 	}
-	library := filepath.Join(n.mount, "library")
 	watchesMount := false
 	for _, p := range w.w.WatchList() {
 		p = filepath.Clean(p)
@@ -275,6 +306,61 @@ func TestTwoRootsSpelledAlikeStayTwoWhereTheirFolderIsNotEstablishedToFoldCase(t
 			mustHoldRows(t, store, "usb/Band/Record/01.flac")
 			if got, _ := store.GetTrack(ctx, "USB/Band/Record/01.flac"); got != nil {
 				t.Errorf("a subtree scan of %s indexed its file under %s", record, upper)
+			}
+		})
+	}
+}
+
+// TestALookupThatFailsIsNoProofThatTwoSpellingsAreOneRoot: in a folder
+// established to fold case, two spellings of a name that differ in case alone
+// are one entry, for which root a path is, where both are there as one file or
+// where the folder's answer decides it, one or neither being there; a lookup
+// that fails otherwise (a permission refused, a transient error) cannot tell,
+// and they stay two (caseLook.sameName; Codex on round 7). A path the volume
+// spells music/usb/Band stays the outer root's then, never the nested root's
+// configured as music/USB: no scan is routed to a root on a lookup that
+// failed, nor sent into a folder that may be another by the rewrite of the
+// root's own part. The folder's answer is stood in for (answerFolding), as one
+// read before its permissions changed; the lookups are refused by this host's
+// disk, the folder made unsearchable, which neither Windows nor root refuses.
+// The sibling, neither spelling there, runs everywhere: the folder's answer
+// makes the path the nested root's, as before.
+func TestALookupThatFailsIsNoProofThatTwoSpellingsAreOneRoot(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		refused bool
+	}{
+		{"a lookup refused", true},
+		{"neither spelling there", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if c.refused && (runtime.GOOS == "windows" || os.Geteuid() == 0) {
+				t.Skip("a folder's permissions refuse no lookup to Windows or to root")
+			}
+			dir := t.TempDir()
+			music := filepath.Join(dir, "music")
+			nested := filepath.Join(music, "USB")
+			band := filepath.Join(music, "usb", "Band")
+			files := []string{filepath.Join(music, "Artist", "Album", "01.flac")}
+			if c.refused {
+				files = append(files, filepath.Join(band, "Record", "01.flac"))
+			}
+			writeTracks(t, files...)
+			scanner := NewScanner([]string{music, nested}, openStoreIn(t, dir), "")
+			answerFolding(scanner, fsutil.CaseInsensitive)
+			want := nested
+			if c.refused {
+				if err := os.Chmod(music, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(music, 0o755) })
+				if _, err := os.Lstat(filepath.Join(music, "usb")); err == nil || errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("premise: a lookup in %s, made unsearchable, answered %v", music, err)
+				}
+				want = music
+			}
+			if got, _ := scanner.rootOf(band); got != want {
+				t.Errorf("%s is %q's, want %q's", band, got, want)
 			}
 		})
 	}
