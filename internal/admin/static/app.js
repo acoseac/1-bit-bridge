@@ -188,7 +188,12 @@ function wireUpdatePanel() {
   }
 
   // "Check now" forces a fresh GitHub poll. The handler returns the
-  // post-check status so the tile refreshes in one trip.
+  // post-check status so the tile refreshes in one trip, a poll that
+  // failed upstream included: that answer is a 200 whose status carries
+  // its own lastError. Only a request that fails (no answer, or one that
+  // is not a 2xx) reaches the catch, and it renders no status: the rows
+  // stay as the last status rendered them, with the error beside them
+  // (showUpdateCheckFailure, backlog B720).
   const updateCheckBtn = document.getElementById("update-check");
   if (updateCheckBtn) {
     updateCheckBtn.addEventListener("click", async () => {
@@ -199,7 +204,7 @@ function wireUpdatePanel() {
         const u = await API.post("/api/updates/check");
         renderUpdateTile(u);
       } catch (err) {
-        renderUpdateTile({ lastError: err.message });
+        showUpdateCheckFailure(err?.message);
       } finally {
         updateCheckBtn.textContent = oldText;
         setDisabled(updateCheckBtn, false);
@@ -1394,10 +1399,12 @@ async function runInstall(btn, force) {
   }
 }
 
-// renderUpdateTile mutates the dashboard's Updates panel from a Status
-// payload. Tolerates partial input (Check-now error path passes only
-// {lastError}). Mirrors the server-rendered first paint in
-// templates/dashboard.html.
+// renderUpdateTile writes the Settings page's Updates panel from a whole
+// status, as an updates frame or a Check now answer carries it. Every row
+// is written from what the status says, so a status that leaves a field
+// out hides that field's row: hand it nothing partial (a Check now whose
+// request fails shows its error through showUpdateCheckFailure instead).
+// Mirrors the server-rendered first paint in templates/settings.html.
 //
 // The release-notes anchor is created fresh on each render rather than
 // preserved from the prior tree — `status.innerHTML = ...` wipes the
@@ -1406,7 +1413,7 @@ async function runInstall(btn, force) {
 // or "check failed", a subsequent "update available" response could no
 // longer surface the link.
 function renderUpdateTile(u) {
-  // Jobs-page status line (guarded — the dashboard tile below has its
+  // Jobs-page status line (guarded — the Settings panel below has its
   // own richer rendering).
   if (u && document.getElementById("job-upd-status")) {
     setText("job-upd-status", updateStatusLine(u));
@@ -1545,6 +1552,28 @@ function renderUpdateTile(u) {
       if (dt) dt.hidden = true;
     }
   }
+}
+
+// showUpdateCheckFailure shows why a Check now's request failed (the
+// bridge not reached, or an answer that is not a 2xx) in the Updates
+// panel's Last error row, with its label, and leaves every other row as
+// the last status rendered it (backlog B720). It renders no status. The
+// catch used to hand renderUpdateTile the error alone, which hid Roll
+// back, Install and the Held update and Rollback rows and read "check
+// failed" and "Last check: never"; and the stream sends an updates frame
+// only when the status's bytes change, so nothing put them back while the
+// status stood. The next status rendered, from an updates frame or the
+// next Check now's answer, writes this row from what that status carries;
+// no timer clears it.
+function showUpdateCheckFailure(message) {
+  const lastError = document.getElementById("update-last-error");
+  if (!lastError) return;
+  lastError.innerHTML = message
+    ? `Check now failed: <code>${escapeHTML(message)}</code>`
+    : "Check now failed.";
+  lastError.hidden = false;
+  const dt = lastError.previousElementSibling;
+  if (dt) dt.hidden = false;
 }
 
 function escapeHTML(s) {
