@@ -65,6 +65,61 @@ func dataDirGoneLine(dataDir string) string {
 	return "serve: the data directory " + dataDir + " held this bridge's database"
 }
 
+// goneRefusal reads a refusal of a data dir its record names, serve's or the
+// data-dir line's (dataDirGoneError): the data dir it names and the record it
+// says to remove, as the text spells them. A test compares the message's own
+// paths with what it configured and wrote, never with a path it spells
+// itself: the record is named where it is, beside the file the config's name
+// opens through whatever links lead there (macOS's /var is /private/var, and
+// a Windows temp directory has a short name and a long one).
+func goneRefusal(t *testing.T, text string) (dataDir, record string) {
+	t.Helper()
+	const lead = "the data directory "
+	before, _, ok := strings.Cut(text, " held this bridge's database")
+	i := strings.LastIndex(before, lead)
+	if !ok || i < 0 {
+		t.Fatalf("no refusal of a data directory in %q", text)
+	}
+	dataDir = before[i+len(lead):]
+	_, after, ok := strings.Cut(text, "moved on purpose, remove ")
+	if !ok {
+		t.Fatalf("the refusal names no record to remove: %q", text)
+	}
+	record, _, _ = strings.Cut(after, " and start bridge serve again")
+	record, _, _ = strings.Cut(record, "\n")
+	return dataDir, record
+}
+
+// mustNameTheRecord fails the test unless record, the path a refusal says to
+// remove, opens the record at want: the two may spell it differently.
+func mustNameTheRecord(t *testing.T, record, want string) {
+	t.Helper()
+	got, err := os.Stat(record)
+	if err != nil {
+		t.Errorf("the refusal says to remove %s, which cannot be opened: %v", record, err)
+		return
+	}
+	w, err := os.Stat(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(got, w) {
+		t.Errorf("the refusal says to remove %s, which is not the record %s", record, want)
+	}
+}
+
+// mustRefuseAsConfigured fails the test unless text refuses the data dir
+// dataDir by the name its config gives it, byte for byte, and names the
+// record at record as the one to remove.
+func mustRefuseAsConfigured(t *testing.T, text, dataDir, record string) {
+	t.Helper()
+	gotDir, gotRecord := goneRefusal(t, text)
+	if gotDir != dataDir {
+		t.Errorf("the refusal names the data directory %q, want %q, as its config gives it", gotDir, dataDir)
+	}
+	mustNameTheRecord(t, gotRecord, record)
+}
+
 // TestServeRefusesTheDataDirItServedFromWhileItsVolumeIsAway runs a serve
 // over a data dir below a volume's mount point, takes the volume away, and
 // requires the next serves to refuse, exit 1, naming the data dir, and make
@@ -111,8 +166,10 @@ func TestServeRefusesTheDataDirItServedFromWhileItsVolumeIsAway(t *testing.T) {
 				t.Errorf("serve served while its data dir's volume was away; stdout=%s", stdout)
 			case code != 1:
 				t.Errorf("serve exited %d while its data dir's volume was away, want 1; stderr=%s", code, stderr)
-			case !strings.Contains(stderr, dataDirGoneLine(dataDir)):
-				t.Errorf("serve's refusal does not say %q; stderr=%s", dataDirGoneLine(dataDir), stderr)
+			case !strings.Contains(stderr, "serve: the data directory "):
+				t.Errorf("serve's refusal is not the data directory's; stderr=%s", stderr)
+			default:
+				mustRefuseAsConfigured(t, stderr, dataDir, dataDirRecordFile(cfg))
 			}
 			if n := preflights.Load(); n != 0 {
 				t.Errorf("serve called the player's state preflight %d time(s) before it refused the data dir", n)
@@ -175,8 +232,10 @@ func TestServeRefusesADataDirItsRecordNamesThatHoldsNeitherFile(t *testing.T) {
 				t.Errorf("serve served over a data dir its record names that holds neither file; stdout=%s", stdout)
 			case code != 1:
 				t.Errorf("serve exited %d, want 1; stderr=%s", code, stderr)
-			case !strings.Contains(stderr, dataDirGoneLine(dataDir)) || !strings.Contains(stderr, "remove "+dataDirRecordFile(cfg)):
-				t.Errorf("serve's refusal does not say %q and name the record to remove; stderr=%s", dataDirGoneLine(dataDir), stderr)
+			case !strings.Contains(stderr, "serve: the data directory "):
+				t.Errorf("serve's refusal is not the data directory's; stderr=%s", stderr)
+			default:
+				mustRefuseAsConfigured(t, stderr, dataDir, dataDirRecordFile(cfg))
 			}
 			entries, err := os.ReadDir(dataDir)
 			switch {
@@ -260,12 +319,10 @@ func TestBothDoctorsFailADataDirItsRecordNamesWhileItsVolumeIsAway(t *testing.T)
 			writeDataDirRecord(t, cfg, dataDir)
 			said := askBothDoctors(t, cfg)
 			c := said.requireLine(t, dataDirCheckSlug, doctor.Fail)
-			if want := "bridge serve will not start: the data directory " + dataDir + " held this bridge's database"; !strings.HasPrefix(c.Summary, want) {
+			if want := "bridge serve will not start: the data directory "; !strings.HasPrefix(c.Summary, want) {
 				t.Errorf("the data-dir line says %q, want it to start %q", c.Summary, want)
 			}
-			if !strings.Contains(c.Hint, dataDirRecordFile(cfg)) {
-				t.Errorf("the data-dir line's fix %q does not name the record %s", c.Hint, dataDirRecordFile(cfg))
-			}
+			mustRefuseAsConfigured(t, c.Summary+"\n"+c.Hint, dataDir, dataDirRecordFile(cfg))
 			said.requirePrinted(t, c)
 			if said.code != 1 {
 				t.Errorf("bridge doctor exited %d over a data dir serve refuses, want 1", said.code)
@@ -279,6 +336,55 @@ func TestBothDoctorsFailADataDirItsRecordNamesWhileItsVolumeIsAway(t *testing.T)
 			}
 			askBothDoctors(t, cfg).requireLine(t, dataDirCheckSlug, doctor.OK)
 		})
+	}
+}
+
+// TestTheRecordNamesItsDataDirInAnySpellingOfIt: the record and the config
+// can spell one data dir two ways (a bridge.yaml edited to name it through a
+// link, or BRIDGE_DATA_DIR set so), and the check takes them for the one
+// directory they name (fsutil.SamePath), either way round, refusing it while
+// it holds neither file, by the name the config gives it. Two spellings that
+// differ in case alone are one data dir where the volume folds case
+// (Windows', macOS's by default) and two where it does not. Until B651's third
+// round the check compared the strings, and a spelling through a link read as
+// a record naming another data dir, which refuses nothing.
+func TestTheRecordNamesItsDataDirInAnySpellingOfIt(t *testing.T) {
+	base := t.TempDir()
+	mnt := filepath.Join(base, "mnt")
+	if err := os.Mkdir(mnt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(base, "link")
+	symlinkOrSkip(t, mnt, link)
+	cfg := filepath.Join(base, "bridge.yaml")
+	viaLink, viaMnt := filepath.Join(link, "usb", "bridge"), filepath.Join(mnt, "usb", "bridge")
+	for _, c := range []struct{ recorded, configured string }{{viaLink, viaMnt}, {viaMnt, viaLink}} {
+		writeDataDirRecord(t, cfg, c.recorded)
+		var gone *dataDirGoneError
+		switch err := checkServeDataDirRecord(dataDirRecordFile(cfg), c.configured); {
+		case !errors.As(err, &gone):
+			t.Errorf("a record naming %s took %s, the same data dir through a link, for another (%v)", c.recorded, c.configured, err)
+		case gone.dataDir != c.configured:
+			t.Errorf("the refusal names the data dir %q, want %q, as the config gives it", gone.dataDir, c.configured)
+		}
+	}
+
+	// Whether this volume folds case, as it answers itself: a directory and
+	// its name in the other case, the same entry or not.
+	probe := filepath.Join(mnt, "Probe")
+	if err := os.Mkdir(probe, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	asMade, err := os.Stat(probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := os.Stat(filepath.Join(mnt, "probe"))
+	folds := err == nil && os.SameFile(asMade, other)
+	writeDataDirRecord(t, cfg, viaMnt)
+	upper := filepath.Join(mnt, "USB", "bridge")
+	if refused := checkServeDataDirRecord(dataDirRecordFile(cfg), upper) != nil; refused != folds {
+		t.Errorf("a record naming %s and a config naming %s: refused %v, on a volume that folds case: %v", viaMnt, upper, refused, folds)
 	}
 }
 

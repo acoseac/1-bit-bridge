@@ -51,6 +51,21 @@ func EvalSymlinksOrClean(p string) string {
 	}
 }
 
+// SamePath reports whether a and b name one path once each is resolved as
+// EvalSymlinksOrClean resolves it (its links, and on Windows its junctions,
+// through its nearest ancestor that exists, so neither need exist yet),
+// compared in the case sensitivity of the volume that holds it
+// (caseInsensitiveFS, probed, as IsUnderAny compares): a path spelled through
+// a link, or in another case on a volume that folds case, is the same path,
+// and the strings themselves are not compared.
+func SamePath(a, b string) bool {
+	ra, rb := EvalSymlinksOrClean(a), EvalSymlinksOrClean(b)
+	if ra == rb {
+		return true
+	}
+	return caseInsensitiveFS(ra) && strings.ToLower(ra) == strings.ToLower(rb)
+}
+
 // IsUnderAny reports whether candidate resolves AT or UNDER any of roots,
 // resolving links (symlinks, and on Windows junctions and mounted folders)
 // on BOTH sides via EvalSymlinksOrClean before the filepath.Rel comparison. Returns the resolved (cleaned) root it matched, or

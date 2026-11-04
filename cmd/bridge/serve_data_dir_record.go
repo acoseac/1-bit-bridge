@@ -118,7 +118,11 @@ func readDataDirRecord(path string) string {
 // dataDirGoneError is serve's refusal of a data dir its record names and that
 // holds neither its database nor its lock file (checkServeDataDirRecord).
 type dataDirGoneError struct {
-	// dataDir is the data dir, and record the record that names it.
+	// dataDir is the data dir as the config gives it, never as the record or
+	// a resolution spells it: what bridge.yaml says, which is what the
+	// operator looks for. record is the record that names it, where it is:
+	// beside the file the config's name opens, through whatever links lead
+	// there.
 	dataDir, record string
 }
 
@@ -147,16 +151,19 @@ func (e *dataDirGoneError) fix() string {
 // a serve that opened its database there took its lock first, so a data dir
 // holding neither is not the one serve served from. Asked before serve
 // prepares the data dir, so a data dir that is not there is refused and never
-// made. Anything else is no refusal: no record (path "" included), or one
-// that does not read or names another data dir (the config's dataDir
-// changed), a database or a lock file there, and an error other than an
-// entry's absence, which serve's preparation, its lock and its store answer.
+// made. The record and the config may spell one data dir two ways (through a
+// link, or in another case on a volume that folds case), so the two are
+// compared as the directory they name (fsutil.SamePath), never as strings.
+// Anything else is no refusal: no record (path "" included), or one that does
+// not read or names another data dir (the config's dataDir changed), a
+// database or a lock file there, and an error other than an entry's absence,
+// which serve's preparation, its lock and its store answer.
 func checkServeDataDirRecord(path, dataDir string) error {
 	if path == "" {
 		return nil
 	}
 	recorded := readDataDirRecord(path)
-	if recorded == "" || filepath.Clean(recorded) != filepath.Clean(dataDir) {
+	if recorded == "" || !fsutil.SamePath(recorded, dataDir) {
 		return nil
 	}
 	for _, p := range []string{manifest.DefaultDBPath(dataDir), filepath.Join(dataDir, serveLockFileName)} {
@@ -169,7 +176,8 @@ func checkServeDataDirRecord(path, dataDir string) error {
 
 // recordServeDataDir writes the record at path naming dataDir, once serve's
 // database is open there and its lock file is too, and only when the record
-// does not name it already. No path (a boot read that resolved no file), or a
+// does not name it already, in any spelling of it (fsutil.SamePath). No path
+// (a boot read that resolved no file), or a
 // record serve cannot write (a config directory it may not write), is said
 // once, at Warn, and the start goes on: a later start cannot then tell that
 // data dir's volume missing.
@@ -179,7 +187,7 @@ func recordServeDataDir(path, dataDir string) {
 			"dataDir", dataDir)
 		return
 	}
-	if recorded := readDataDirRecord(path); recorded != "" && filepath.Clean(recorded) == filepath.Clean(dataDir) {
+	if recorded := readDataDirRecord(path); recorded != "" && fsutil.SamePath(recorded, dataDir) {
 		return
 	}
 	for _, p := range []string{manifest.DefaultDBPath(dataDir), filepath.Join(dataDir, serveLockFileName)} {

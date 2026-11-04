@@ -83,9 +83,10 @@ func TestServeChecksTheRecordBesideTheFileItsBootReadOpened(t *testing.T) {
 		t.Errorf("serve served over the data dir its record names while it holds neither file; stdout=%s", stdout)
 	case code != 1:
 		t.Errorf("serve exited %d, want 1; stderr=%s", code, stderr)
-	case !strings.Contains(stderr, dataDirGoneLine(l.firstData)) || !strings.Contains(stderr, "remove "+dataDirRecordFile(l.first)):
-		t.Errorf("serve's refusal does not say %q and name the record to remove, %s; stderr=%s",
-			dataDirGoneLine(l.firstData), dataDirRecordFile(l.first), stderr)
+	case !strings.Contains(stderr, "serve: the data directory "):
+		t.Errorf("serve's refusal is not the data directory's; stderr=%s", stderr)
+	default:
+		mustRefuseAsConfigured(t, stderr, l.firstData, dataDirRecordFile(l.first))
 	}
 	if _, err := os.Lstat(l.firstData); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("serve made the data dir its record names (%v)", err)
