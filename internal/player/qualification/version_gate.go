@@ -10,10 +10,21 @@ import (
 
 // GuardedPaths enumerates the files outside guardedPrefixes whose change
 // invalidates the harness's evidence: since B728's B1, the DSD byte path and
-// the harness alone (the native DSD and DoP packers, the player's DSD open and
-// its plans' edges, the ALSA qualification identity, the control UAPI and
-// reader).
-var GuardedPaths = []string{"internal/player/format/dsd_pack.go", "internal/player/format/dop_pack.go", "internal/player/playback/native.go", "internal/player/playback/edges.go", "internal/alsa/qualification.go", "internal/alsactl/control.go", "internal/alsactl/control_linux.go", "internal/alsactl/uapi.go"}
+// the harness alone. On the DSD byte path: the native DSD and DoP packers,
+// the player's DSD open and its plans' edges, the DSF and DFF demuxers, the
+// reads they share and the ID3 offset view every read of a tagged file goes
+// through, and the canonical DSD form, whose byte count sets how many bytes a
+// DSF yields. For the harness: the ALSA qualification identity, the control
+// UAPI and reader, the file open its readers take evidence through, and the
+// USB ID and port parsing a unit's identity is read with.
+var GuardedPaths = []string{
+	"internal/player/format/dsd_pack.go", "internal/player/format/dop_pack.go",
+	"internal/player/playback/native.go", "internal/player/playback/edges.go",
+	"internal/player/decode/dsd.go", "internal/player/decode/dsf.go", "internal/player/decode/dff.go",
+	"internal/player/decode/pcm_region.go", "internal/player/decode/offset.go", "internal/player/format/pcm.go",
+	"internal/alsa/qualification.go", "internal/alsactl/control.go", "internal/alsactl/control_linux.go", "internal/alsactl/uapi.go",
+	"internal/fsutil/notafile.go", "internal/fsutil/notafile_unix.go", "internal/usbid/port.go",
+}
 
 // Prefixes are the ALSA PCM backend and its sinks, the qualification package
 // (the harness's readers and inputs, and this checker) and the dsd-test

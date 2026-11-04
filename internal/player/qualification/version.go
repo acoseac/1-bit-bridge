@@ -5,7 +5,7 @@ const qualificationVersion = 36
 
 // Version binds the harness's reports and records to this implementation
 // (ReadApproval, ReadCandidate); production reads an owner's approval through
-// ReadLegacyApproval, from LegacyVersion on (B728).
+// ReadLegacyApproval, from LegacyVersion to Version (B728).
 const Version = qualificationVersion
 
 // LegacyVersion is the oldest version of an owner's approval that production

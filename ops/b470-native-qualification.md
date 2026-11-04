@@ -2,7 +2,7 @@
 
 QualificationVersion is **36**. All older evidence must be rerun for the harness, native included. The
 harness never creates approval. Production reads an approval record only through the legacy reader,
-which takes version 35 and later, until B728's cutover (`ops/plan-b728-dsd-capability-design.md`).
+which takes versions from 35 to this build's own and none past it, until B728's cutover (`ops/plan-b728-dsd-capability-design.md`).
 This runbook's evidence binds `qualificationVersion`, whose guard covers the DSD byte path and the
 harness alone. Production native DSD requires a matching approved record;
 DoP S32_LE auditions are provisional and require both acknowledgements; production DoP plays only
@@ -156,11 +156,16 @@ origin/main, then merge-base..HEAD. Missing main/history/merge-base fails; it ne
 The job is a dependency of `gate`. The guarded implementation files are enumerated in
 `internal/player/qualification/version_gate.go`, since B728's B1 the DSD byte path and the
 harness alone: native and DoP packing; the player's DSD open and its plans' edges
-(`internal/player/playback/native.go`, `edges.go`); alsactl control/control_linux/uapi;
-ALSA qualification identity; everything under `internal/alsapcm/` (ALSA UAPI, PCM device,
-native device, params, sys_linux/sys_other, ring, both sinks and writers, native opening);
-the qualification package (the approval and DoP evidence readers, the inputs and the version
-checker itself); and every dsd-test file. Changes require a version increase.
+(`internal/player/playback/native.go`, `edges.go`); the DSF and DFF demuxers, the reads
+they share, the ID3 offset view and the canonical DSD form (`internal/player/decode/dsd.go`,
+`dsf.go`, `dff.go`, `pcm_region.go`, `offset.go`, `internal/player/format/pcm.go`);
+alsactl control/control_linux/uapi; ALSA qualification identity; the file open the
+harness's readers take evidence through (`internal/fsutil/notafile.go`, `notafile_unix.go`)
+and the USB ID and port parsing a unit's identity is read with (`internal/usbid/port.go`);
+everything under `internal/alsapcm/` (ALSA UAPI, PCM device, native device, params,
+sys_linux/sys_other, ring, both sinks and writers, native opening); the qualification
+package (the approval and DoP evidence readers, the inputs and the version checker itself);
+and every dsd-test file. Changes require a version increase.
 
 The integration overlay exposes the existing ALSA _test.go fake only to this test command.
 The injected PCM opener is below descriptor verification and binding admission; production
@@ -282,7 +287,7 @@ step; neither harness nor production writes, signs, repairs or auto-promotes an 
 
 Tampered means wrong owner/mode or body/evidence hash mismatch. Stale means a version the
 reader does not take (the harness's, any but the current one; production's legacy reader,
-any below 35) or an observed identity mismatch. Every session and activation rereads and verifies; a 100 ms
+any below 35 or past this build's) or an observed identity mismatch. Every session and activation rereads and verifies; a 100 ms
 monitor also detects deletion/replacement, health failure and constrained-control drift.
 An identical inode replacement still revokes the old permission. Recovery publishes new
 capability only, never Play. Descriptors and mixer reads never write controls.

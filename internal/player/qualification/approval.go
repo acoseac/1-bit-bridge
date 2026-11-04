@@ -109,15 +109,16 @@ func SameIdentity(recorded, live Identity) bool { return recorded == live }
 // every check ReadApproval makes but two: the record and each report it holds
 // (each policy's matrix and lifecycle report, each transition report, each
 // DoP experiment and each experiment's contact) may state any version from
-// LegacyVersion on, and their identity is the unit's as same compares them,
-// an experiment's contact being taken at its own experiment's. Production
-// passes SameIdentity, the port included, until B7; the migration compares
-// the model alone.
+// LegacyVersion to this build's Version, never one past it, which a newer
+// bridge wrote before a downgrade and this code cannot vouch for; and their
+// identity is the unit's as same compares them, an experiment's contact being
+// taken at its own experiment's. Production passes SameIdentity, the port
+// included, until B7; the migration compares the model alone.
 func ReadLegacyApproval(stateDir, name string, identity Identity, same IdentityMatch) (Approval, error) {
 	if same == nil {
 		return Approval{}, errors.New("no identity comparison")
 	}
-	return readApproval(stateDir, name, identity, false, evidenceRule{version: func(v int) bool { return v >= LegacyVersion }, identity: same})
+	return readApproval(stateDir, name, identity, false, evidenceRule{version: func(v int) bool { return LegacyVersion <= v && v <= Version }, identity: same})
 }
 
 // evidenceRule is what a reader takes of the version and the identity that a

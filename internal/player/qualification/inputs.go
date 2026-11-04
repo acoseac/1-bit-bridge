@@ -178,7 +178,7 @@ func (c Contact) Validate(t Tuple, a Attachment, device, subdevice int, mixer, m
 
 // validate is Validate taking the receipt's version as version does: the
 // current one, or, for an experiment the legacy reader reads, any from
-// LegacyVersion on.
+// LegacyVersion to Version.
 func (c Contact) validate(t Tuple, a Attachment, device, subdevice int, mixer, manifest string, version func(int) bool) error {
 	schema := 2
 	if t.Transport == "dop" {
