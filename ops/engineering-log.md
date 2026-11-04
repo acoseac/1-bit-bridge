@@ -73118,3 +73118,10 @@ check green again:
 move only once their binding sentences are shorter, a rewording for the
 owner, as L48's and L67's were. No backlog entry was written: the backlog
 file is outside this worker's reach.
+
+**Review (Codex).** L89's pointer left out its long form's rule that a unit with two cards
+is `device_ambiguous` when the recorded interface is absent or names no card on it. That
+sentence does not fit a 600-byte pointer beside the entry's others, so the entry is back in
+player.md verbatim and its History copy is gone. L146's pointer gains its long form's
+"It reports nothing until the watcher has published, and its first report is the first
+snapshot's, whatever it says." (481 bytes). player.md ends at 93711 bytes (93.7%).
