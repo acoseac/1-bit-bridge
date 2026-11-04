@@ -67,7 +67,10 @@ func (n *mountedNested) answer(mountFolds bool) {
 // that spelling are spared, by subtree scans of the outer root and of the
 // mount point and by full scans, past the reap threshold: each element of the
 // nested root's path is judged by its own folder, never by the outer root's
-// volume alone (Codex on round 6).
+// volume alone (Codex on round 6). A bare mount point that holds an index
+// folder of its own (Synology's @eaDir) answers case-sensitive for the folder
+// it is on, not for the volume, and holding no library content it is not
+// trusted for the volume's spelling either.
 func TestAScanSparesANestedRootOnAVolumeThatFoldsCaseMountedInOneThatDoesNot(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -85,19 +88,33 @@ func TestAScanSparesANestedRootOnAVolumeThatFoldsCaseMountedInOneThatDoesNot(t *
 			return err
 		}},
 	} {
-		t.Run(c.name, func(t *testing.T) {
-			n := newMountedNested(t)
-			moveAway(t, n.mount, filepath.Join(n.dir, "gone"), true)
-			n.answer(false)
-			n.scanner.SetDeleteThreshold(3)
-			for range 4 {
-				if err := c.scan(context.Background(), n); err != nil {
-					t.Fatal(err)
-				}
+		for _, junk := range []string{"", "@eaDir"} {
+			name := c.name + ", an empty mount point"
+			if junk != "" {
+				name = c.name + ", a mount point holding " + junk
 			}
-			mustHoldRows(t, n.store, "music/Artist/Album/01.flac", "music/usb/library/Band/Record/01.flac")
-			mustHaveMissingCount(t, n.store, "folders", "music/usb/library/Band/Record", 0)
-		})
+			t.Run(name, func(t *testing.T) {
+				n := newMountedNested(t)
+				moveAway(t, n.mount, filepath.Join(n.dir, "gone"), true)
+				if junk != "" {
+					if err := os.Mkdir(filepath.Join(n.mount, junk), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if got := fsutil.FoldingIn(n.mount); got == fsutil.CaseUnknown {
+						t.Fatalf("premise: the mount point holding %s answered %s", junk, got)
+					}
+				}
+				n.answer(false)
+				n.scanner.SetDeleteThreshold(3)
+				for range 4 {
+					if err := c.scan(context.Background(), n); err != nil {
+						t.Fatal(err)
+					}
+				}
+				mustHoldRows(t, n.store, "music/Artist/Album/01.flac", "music/usb/library/Band/Record/01.flac")
+				mustHaveMissingCount(t, n.store, "folders", "music/usb/library/Band/Record", 0)
+			})
+		}
 	}
 }
 
@@ -261,4 +278,36 @@ func TestTwoRootsSpelledAlikeStayTwoWhereTheirFolderIsNotEstablishedToFoldCase(t
 			}
 		})
 	}
+}
+
+// TestTwoRootsThatAreTwoFoldersStayTwoWhateverTheirFolderAnswers: two roots
+// configured as music/USB and music/usb that are both there as two folders are
+// two roots even where their folder answers that it folds case: the answer is
+// read from one name in the folder, and two entries that are not one file are
+// the folder's own word that these two are not one name (caseLook.sameName).
+// Two such folders can be made on a case-sensitive volume alone; the answer is
+// stood in for (answerFolding).
+func TestTwoRootsThatAreTwoFoldersStayTwoWhateverTheirFolderAnswers(t *testing.T) {
+	dir := t.TempDir()
+	music := filepath.Join(dir, "music")
+	upper, lower := filepath.Join(music, "USB"), filepath.Join(music, "usb")
+	writeTracks(t, filepath.Join(upper, "Band", "Record", "01.flac"))
+	if err := os.Mkdir(lower, 0o755); err != nil {
+		t.Skipf("this host's volume holds one of two spellings of a name: %v", err)
+	}
+	writeTracks(t, filepath.Join(lower, "Band", "Record", "01.flac"))
+	store := openStoreIn(t, dir)
+	scanner := NewScanner([]string{upper, lower}, store, "")
+	answerFolding(scanner, fsutil.CaseInsensitive)
+	ctx := context.Background()
+	for _, root := range []string{upper, lower} {
+		band := filepath.Join(root, "Band")
+		if got, _ := scanner.rootOf(band); got != root {
+			t.Errorf("%s is %q's, want %q's", band, got, root)
+		}
+		if _, err := scanner.ScanSubtree(ctx, band); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mustHoldRows(t, store, "USB/Band/Record/01.flac", "usb/Band/Record/01.flac")
 }
