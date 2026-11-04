@@ -809,8 +809,14 @@ records (`"dataDirOpenedBy"` in the marker; 409 `rollback-refused`, `… has
 opened the data dir since the install, so its store may hold changes … does
 not read`), so in practice the button works before the restart into the new
 version and not after: past that, a downgrade is the operator's to make by
-hand. A rollback that goes on records the version it rolls back from as
-held back, and vetoes its store migrations, before it puts `.bak` back,
+hand. **From the release that carries B707 the console does not offer it
+then**: the Updates panel (Settings) hides Roll back and shows a
+**Rollback** row, `unavailable`, with that reason, or, where the install
+marker cannot be read, that whether a version other than the backup's
+opened the data dir cannot be told; `POST /api/updates/rollback` still
+answers 409 for any other caller. A rollback that goes on records the
+version it rolls back from as held back, and vetoes its store migrations,
+before it puts `.bak` back,
 and until that rename has landed the marker says the rollback is under way
 (`"rollbackStarted": true`): a rollback the process's end stops there is
 finished by the next start, as a rollback done where `.bak` is back, or as
@@ -854,7 +860,8 @@ the one of an install that never reached its swap, and a boot rollback
 refused because a version opened the data dir now keep that record beside
 the hold (no status, `"dataDirOpenedBy"` and `"previousVersion"`), so a Roll
 back of the `.bak` they leave stays refused until a new install, or `.bak`
-removed by hand.
+removed by hand (since B707 the console does not offer it, and its Rollback
+row says why).
 
 **A data dir whose filesystem cannot fsync a directory.** Linux's NFS and
 CIFS/SMB clients treat a directory's fsync as a successful no-op, and its

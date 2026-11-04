@@ -72791,6 +72791,164 @@ eba78fdc):
 - The five proposals, for the owner. No backlog entry was written: the
   backlog file is not on this host.
 
+## 2026-11-04 — B707: the console offers Roll back only where the rollback would run
+
+Backlog B707, the follow-up B705's record named ("the console's Roll back
+button still follows `.bak`'s presence"). Worker b707 on legion0 (Ubuntu
+26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`, umask 022), branch
+`fix/b707-console-rollback-refusal` from main cde731e2, the brief with
+Codex's and Argon's binding notes. Commits: the seam cab93107
+(`admin.UpdateStatus.RollbackRefusal`, filled by nothing, so every status
+and page is as on main), red b310749c, fix 7f88963d, the node test's markup
+step a854595d, then this record. The rule is a new bullet after B705's in
+`.claude/rules/config-lifecycle.md`, shipped as a checked patch
+(`rules-b707.patch`; this worker cannot write `.claude/`), which leaves the
+file at 95,806 bytes, 95.8 % of its budget; the long form is B707's section
+of `ops/History-rules-config-lifecycle.md`, where three passages the fix
+made false are corrected (B692's and B705's "Left", which said the button
+follows `.bak`'s presence, and the staged-install entry's `canRollback()`,
+a function now named `backupPresent`); the runbook's B692 and B705
+paragraphs say what the console shows now.
+
+**The defect.** Since B692 the operator's rollback (`Updater.Rollback`)
+refuses, 409 `rollback-refused` with its reason, where the install marker
+records that a version other than the backup's opened the data dir
+(`RollbackRefusal`) and where the marker cannot be read, and since B705
+that record outlives every clear at boot that leaves `.bak`. The console's
+Updates panel offered Roll back wherever `.bak` stood beside the binary
+(`updateInfoAdapter.canRollback`, a stat alone, in `Status` and in an
+install's answer, `cmd/bridge/main.go:2148` and `:2236` on main). The
+version installed records its admission at its first start, so once it
+ran, the case the button exists for, the button showed and the click
+answered 409.
+
+**What changed.**
+1. `updater.RollbackRefusalOn(st, readErr)` (`internal/updater/state.go`):
+   the refusal the rollback makes on its read of the marker, before it
+   looks for the backup: `RollbackRefusal(st)` for a marker it read, and
+   for one it cannot read a fixed sentence ("whether a version other than
+   the backup's has opened the data dir cannot be told, since the install
+   marker cannot be read"), naming no path and no error's text.
+2. `Rollback` (`install.go`) asks it itself, so the panel and the rollback
+   cannot decide apart. Its 409 for an unreadable marker is those words with
+   the read's error after them in brackets (`markerIOError`: no path, kept
+   for code through `Unwrap`), where the cause used to sit inside the
+   sentence; the code, the status and the order of its checks are as they
+   were.
+3. The adapter (`cmd/bridge/main.go`): `readMarker` reads the marker once
+   per status, and the release held back (`RejectedVersion`,
+   `RejectedReason`, `rejection`'s until now) and the rollback offered are
+   both of that read, in `Status` and in an install's answer (Codex's note
+   1). `rollback(m)` gives `CanRollback` (`.bak` present, `backupPresent`,
+   and no refusal) and `RollbackRefusal` (the refusal, only where `.bak` is
+   there: Argon's note 2). A read error refuses (Codex's note 2) and holds
+   no release back, as `rejection` read it.
+4. The console: `admin.UpdateStatus.RollbackRefusal` (JSON
+   `rollbackRefusal`, omitempty); in `settings.html` a Rollback row after
+   Held update, badge `unavailable` and the reason, its label and value
+   hidden together in the first paint as the other two rows; and
+   `renderUpdateTile` toggles it with its label, the reason through
+   `escapeHTML`. Roll back is still revealed from `canRollback` alone.
+
+**Decisions.**
+- Hidden, not disabled. In this panel an action that cannot run is absent
+  (Install without an update or a platform, Roll back without a backup) and
+  a row says why one is not taken (Held update), which is the pattern Codex
+  pointed at. A disabled button would also fight the click handler, which
+  disables it around its request and enables it after a failure through
+  `setDisabled`. The title's "offers only when" and the evidence's "shows
+  the reason" both hold (Argon's note 1).
+- The reason for an unreadable marker is fixed words: the status is sent
+  every 30 s to the page, and the brief keeps it value-free; the 409 keeps
+  the cause for a caller that acts.
+- The display read takes no lock (as `rejection` did): the rollback decides
+  again under it, so a version that opens the data dir between the two (a
+  CLI command whose store migrates) still gets its 409, and the panel
+  catches up at the next updates frame.
+- The button's first paint stays hidden; the first updates frame reveals
+  it, as before. Not changed: the transient refusals a status cannot foresee
+  (an install or rollback in flight, downloads without `?force=1`, the
+  marker's lock held past its wait), and a Check-now request that fails,
+  which renders `{lastError}` alone and so hides Roll back and every row
+  until the next frame, as it hid the button before.
+
+**Red first** (b310749c on the seam, so as on main): cmd/bridge,
+`TestTheUpdatesPanelOffersRollBackOnlyWhereTheRollbackWouldRun` (3 of 9
+subtests: the version installed opened the data dir, the record a clear at
+boot kept beside the backup, a marker that cannot be read; each offered
+Roll back while the rollback answered 409; its six allowed and no-backup
+cases green, a rollback that runs in each allowed one) and
+`TestTheConsoleOffersRollBackOnlyWhereTheRollbackWouldRun` (this build's
+real serve and console over its own install, confirmed at its start with
+its admission's record: GET /api/updates offered Roll back with no reason
+and the Settings page had no row, while POST /api/updates/rollback answered
+409 `rollback-refused` and left both binaries and the marker as they were;
+its other case, a backup and no marker, green: offered, and the POST puts
+the backup back); internal/admin,
+`TestSettingsUpdateRowsRenderOnceAndKeepDTAdjacency` (5 of 5, on the new
+row alone), `TestTheSettingsPageSaysWhyRollBackIsNotOffered` (3 of 3) and
+`TestTheUpdatesPanelScriptShowsWhyRollBackIsNotOffered`.
+`TestTheRollbacksRefusalOnItsReadOfTheMarkerIsTheConsoles` (internal/updater)
+came with the fix. `TestTheUpdatesPanelShowsRollBackOrWhyNot` runs the
+shipped `renderUpdateTile` under node and skipped here: legion0 has no node.
+
+**Negative controls**, each alone on the committed fix (7f88963d), predicted
+by test and subtest and observed exactly, the file put back with `git
+checkout --` and the tree clean after each (`.tmp/_b707/controls.py`, over
+the B707 tests and their neighbours in internal/admin, internal/updater and
+cmd/bridge; the base run green):
+
+| # | Mutation | Predicted and observed red |
+|---|---|---|
+| N1 | the adapter offers Roll back from `.bak` alone, its refusal ignored | 2 tests, 4 subtests: the panel's three refused cases, and the real serve's refused case |
+| N2 | an install's answer offers Roll back from `.bak` alone | 1 test, 3 subtests: the panel's three refused cases, on the answer |
+| N3 | the adapter asks `RollbackRefusal` alone, a marker it cannot read taken for none | 1 test, 1 subtest: the unreadable marker |
+| N4 | the Settings page's first paint drops the reason after the badge | 2 tests, 3 subtests: the first paint's two refusals, the real serve's refused case |
+| N5 | `renderUpdateTile` writes the reason without `escapeHTML` | 1 test: the structural one (the node test, which skips here, then read the reason back the same way; a854595d gives it a reason that carries markup) |
+| N6 | `Rollback` refuses an unreadable marker in its old words, not `RollbackRefusalOn`'s | 2 tests, 1 subtest: the updater's, and the panel's unreadable case |
+
+**Checks.** On legion0 (Ubuntu 26.04, linux/amd64, go1.27.3,
+`GOTOOLCHAIN=local`, umask 022, TMPDIR on disk under `.tmp/_b707`), each
+through the shared build lock, at a854595d with this record in the tree:
+- `go test -race -count=1 -p 4 -timeout 90m -tags
+  ts_omit_webclient,ts_omit_debugeventbus ./internal/updater/
+  ./internal/admin/ ./cmd/bridge/`: internal/updater ok (27 s),
+  internal/admin ok (927 s), cmd/bridge ok (928 s).
+- `make test-fast` (every package, no race): 80 packages ok, none failed, 14
+  with no test files; the Linux-only ones among them (internal/alsa,
+  alsactl, alsapcm, atomicwrite's durable writer, backup's identity paths,
+  the player's binding and hotplug), and the cmd/bridge sweeps over the
+  tracked docs, this record included.
+- `make vet`, `GOOS=windows go vet ./...` and `GOOS=linux GOARCH=386 go vet
+  ./...`, with the tags: clean. go1.27.3's gofmt on the nine changed Go
+  files: clean.
+- `make docs-check`: ok (config-lifecycle.md at 94.4 % as the tree stands);
+  with the rules patch 95.8 %, by the budget script's own `measure` and by
+  `make docs-check` in a copy of the tree with the patch applied by a
+  strict applier, where `TestEveryCitedTestNameExists` passed, and failed on
+  a ghost citation planted in the patched line.
+- The qualification-version check, `-base main -head HEAD` (main is
+  cde731e2, at 35): OK, no raise.
+- Not run here: macOS and Windows natively (Windows' vet alone ran), and the
+  node test.
+
+**For the owner.**
+- The JavaScript was not executed here (no node on legion0):
+  `TestTheUpdatesPanelShowsRollBackOrWhyNot` runs in CI where node is
+  installed, and here the structural test and N5 stand for it. Not seen in
+  a browser.
+- The 409's sentence for an unreadable marker reads in a new order (the
+  cause after the sentence, in brackets); a caller matching the old words
+  would see the change. Nothing in this repo did.
+- After a "Check now" whose request fails (a check that fails answers a
+  whole status), `renderUpdateTile({lastError})` hides Roll back and every
+  row, and the updates frame is sent again only when the status's bytes
+  change, so the panel can stay so until then: older than B707, left as it
+  was, a follow-up for the orchestrator to file.
+- No PROTOCOL.md statement changes (the console's API is not the wire
+  protocol). No backlog entry was written: the backlog file is not on this
+  host.
+
 ## 2026-11-04 — B651: a volume mounted after the bridge starts is never taken for an empty library or a fresh install
 
 Backlog B651, on `fix/b651-late-mount-guard` from main cde731e2. On a NAS

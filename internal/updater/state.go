@@ -555,6 +555,24 @@ func RollbackRefusal(st State) string {
 		"and a rollback would be a downgrade past them", st.DataDirOpenedBy, back)
 }
 
+// RollbackRefusalOn is the refusal an operator's rollback (Rollback) makes on
+// its read of the install marker, before it looks for the backup: why it
+// would not put the backup back, given the marker it read (st) or the error
+// LoadState answered (readErr), "" where it would go on. A marker that cannot
+// be read cannot say whether a version other than the backup's opened the
+// data dir, so the rollback refuses it as it refuses one that says so
+// (RollbackRefusal). The console's Updates panel asks it of its own read of
+// the marker, so that it offers Roll back only where the rollback would run
+// and says why not where the backup is there (backlog B707). Its words name
+// no path and no error's text: Rollback's refusal adds the read's error.
+func RollbackRefusalOn(st State, readErr error) string {
+	if readErr != nil {
+		return "whether a version other than the backup's has opened the data dir cannot be told, " +
+			"since the install marker cannot be read"
+	}
+	return RollbackRefusal(st)
+}
+
 // OperatorRollbackRecord is the marker an operator's rollback writes,
 // durably, just before it puts the backup back (Rollback; backlog B692): st,
 // as the rollback read it under the install marker's lock, with its Status ""
