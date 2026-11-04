@@ -1,6 +1,7 @@
 package config
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,7 +127,11 @@ func TestOutputModeRejectsAnythingElse(t *testing.T) {
 // Each of those is checked to carry the value in yaml.v3's own error first,
 // so the case is one the refusal has to change.
 func TestOutputRefusalsCarryNoValue(t *testing.T) {
-	digits, past, negative := 202311050044, 70000, -5
+	// serial is a DAC's serial of digits, twelve of them: more than a 32-bit
+	// int holds. A 32-bit build's yaml.v3 refuses it at the decode, before
+	// Validate, so its case is skipped there.
+	serial := int64(202311050044)
+	digits, past, negative := int(serial), 70000, -5
 	base := Config{ListenAddress: ":7788", AdminAddress: "127.0.0.1:7789", ScanIntervalSec: 3600, LibraryRoots: []string{"/music"}}
 	for _, tc := range []struct {
 		name            string
@@ -141,6 +146,9 @@ func TestOutputRefusalsCarryNoValue(t *testing.T) {
 		{"a negative port", OutputConfig{LoopbackPort: &negative}, "output.loopbackPort", "-5"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.output.LoopbackPort == &digits && serial > math.MaxInt {
+				t.Skip("an int this size cannot hold the serial")
+			}
 			cfg := base
 			cfg.Output = tc.output
 			err := cfg.Validate()

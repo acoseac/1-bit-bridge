@@ -312,7 +312,7 @@ func TestAnUnlistedFloorTheSnapshotDoesNotHoldIsStillAbsent(t *testing.T) {
 				t.Fatalf("an older writer's floorless snapshot: %d %s %s", code, out, stderr)
 			}
 			floor, err := engine.ReadReservation(filepath.Join(dstDir, playerReservationFile))
-			const want = 1<<31 + 1<<24 + 1<<24
+			const want uint32 = 1<<31 + 1<<24 + 1<<24
 			if err != nil || floor.IDs != want || floor.Tokens != want {
 				t.Fatalf("restored floor %+v %v, want %d on both counters", floor, err, want)
 			}

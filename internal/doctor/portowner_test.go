@@ -208,10 +208,10 @@ func TestPIDAlive_SelfAndBounds(t *testing.T) {
 	// on Windows, where the pid is cast to a DWORD: 4294967297 truncates
 	// to 1, a pid that very much exists, so an unbounded cast turns a
 	// corrupt pidfile into "alive". readPID parses with strconv.Atoi into
-	// an int, so a 64-bit host really can carry this value here.
-	if pidAlive(math.MaxUint32 + 1) {
-		t.Errorf("pidAlive(%d) = true; a pid past the platform's range must not be truncated into a live one",
-			uint64(math.MaxUint32)+1)
+	// an int, so a 64-bit host really can carry this value here; where an
+	// int is 32 bits it cannot, and Atoi refuses the pidfile as out of range.
+	if pid := int64(math.MaxUint32 + 1); strconv.IntSize == 64 && pidAlive(int(pid)) {
+		t.Errorf("pidAlive(%d) = true; a pid past the platform's range must not be truncated into a live one", pid)
 	}
 
 	// The EPERM-means-alive branch, which is the one the whole fix leans
