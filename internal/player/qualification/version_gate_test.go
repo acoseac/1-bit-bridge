@@ -66,9 +66,12 @@ func gitCommit(t *testing.T, dir string, files map[string]string) string {
 }
 
 // TestQualificationVersionGate exercises real read-only Git diffs of temporary
-// repositories: guarded change, version bump, unguarded change, rename/deletion.
+// repositories: guarded change, version bump, unguarded change, rename/deletion;
+// and since B728's B1, which narrowed the guard to the DSD byte path and the
+// harness, a change under internal/config/ alone passes without a bump, and
+// one to the DSD sink's writer still needs one.
 func TestQualificationVersionGate(t *testing.T) {
-	for _, name := range []string{"guarded_unchanged", "guarded_bumped", "unguarded", "rename_delete"} {
+	for _, name := range []string{"guarded_unchanged", "guarded_bumped", "unguarded", "rename_delete", "config_unbumped", "dsd_writer_unbumped"} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			if e := os.MkdirAll(filepath.Join(dir, ".git", "refs", "heads"), 0755); e != nil {
@@ -79,7 +82,8 @@ func TestQualificationVersionGate(t *testing.T) {
 			}
 			v := "internal/player/qualification/version.go"
 			g := GuardedPaths[0]
-			files := map[string]string{v: "const qualificationVersion = 1\n", g: "base\n"}
+			config, writer := "internal/config/player.go", "internal/alsapcm/sink_dsd_writer.go"
+			files := map[string]string{v: "const qualificationVersion = 1\n", g: "base\n", config: "base\n", writer: "base\n"}
 			base := gitCommit(t, dir, files)
 			switch name {
 			case "guarded_unchanged":
@@ -92,13 +96,17 @@ func TestQualificationVersionGate(t *testing.T) {
 			case "rename_delete":
 				delete(files, g)
 				files["elsewhere.go"] = "base\n"
+			case "config_unbumped":
+				files[config] = "changed\n"
+			case "dsd_writer_unbumped":
+				files[writer] = "changed\n"
 			}
 			head := gitCommit(t, dir, files)
 			if e := os.WriteFile(filepath.Join(dir, ".git", "refs", "heads", "main"), []byte(head+"\n"), 0644); e != nil {
 				t.Fatal(e)
 			}
 			e := CheckVersion(dir, base, head)
-			wantErr := name == "guarded_unchanged" || name == "rename_delete"
+			wantErr := name == "guarded_unchanged" || name == "rename_delete" || name == "dsd_writer_unbumped"
 			if (e != nil) != wantErr {
 				t.Fatalf("gate=%v, want refusal=%v", e, wantErr)
 			}
@@ -130,10 +138,12 @@ func TestQualificationDoPGuardedPaths(t *testing.T) {
 	}
 }
 
-// TestQualificationApprovedDoPGuardedPaths: each file B470 2d.2 adds is
-// guarded, so a change to it alone needs a qualification version increase.
+// TestQualificationApprovedDoPGuardedPaths: each file B470 2d.2 adds to the
+// harness is guarded, so a change to it alone needs a qualification version
+// increase; its serve and playback test files are not since B728's B1
+// (TestAChangeOutsideTheDSDBytePathNeedsNoBump).
 func TestQualificationApprovedDoPGuardedPaths(t *testing.T) {
-	for _, path := range []string{"cmd/bridge/output_dsdtest_qualify_test.go", "cmd/bridge/serve_player_dop_test.go", "internal/player/playback/approval_dop_fixture_test.go", "internal/player/playback/dop_select_test.go", "internal/player/qualification/transition_test.go"} {
+	for _, path := range []string{"cmd/bridge/output_dsdtest_qualify_test.go", "internal/player/qualification/transition_test.go"} {
 		t.Run(path, func(t *testing.T) {
 			dir := t.TempDir()
 			if e := os.MkdirAll(filepath.Join(dir, ".git", "refs", "heads"), 0755); e != nil {
@@ -151,6 +161,51 @@ func TestQualificationApprovedDoPGuardedPaths(t *testing.T) {
 			}
 			if e := CheckVersion(dir, base, head); e == nil {
 				t.Fatalf("a change to %s alone escaped the qualification gate", path)
+			}
+		})
+	}
+}
+
+// TestAChangeOutsideTheDSDBytePathNeedsNoBump: since B728's B1 the guard is
+// the DSD byte path and the harness alone (the design's section 8), so a
+// change to anything else the two lists named until then, alone, needs no
+// qualification version increase: each path B1 dropped from GuardedPaths,
+// and files under each prefix it dropped, beside the paths it keeps there;
+// and what round 2's audit of the DSD byte path looked at and left out (a
+// read's chunk size, the sniff and the dispatch, the PCM decoders and
+// packers, the evidence open where no harness runs).
+func TestAChangeOutsideTheDSDBytePathNeedsNoBump(t *testing.T) {
+	for _, path := range []string{
+		"internal/player/engine/transport.go", "internal/player/engine/events.go", "internal/player/engine/backend.go",
+		"internal/player/playback/session.go", "internal/player/playback/open.go", "internal/player/playback/producer.go", "internal/player/playback/reporter.go",
+		"cmd/bridge/configpath.go", "cmd/bridge/cli_consts.go", "internal/packaging/packaging.go",
+		"cmd/bridge/serve_player.go", "cmd/bridge/serve_player_output.go", "cmd/bridge/serve_player_openhome.go", "cmd/bridge/serve_player_dop_test.go",
+		"internal/player/hotplug/feed.go", "internal/player/openhome/handler.go", "internal/player/openhome/listener.go", "internal/player/openhome/actions.go",
+		"internal/api/outputs_bridge.go", "internal/manifest/types.go", "internal/manifest/extractors.go",
+		"internal/player/playback/authorization.go", "internal/player/playback/live.go", "internal/player/playback/approval_dop_fixture_test.go", "internal/player/playback/dop_select_test.go",
+		"internal/player/binding/binding.go",
+		"internal/player/decode/bounds.go", "internal/player/decode/sniff.go", "internal/player/decode/decoder.go", "internal/player/decode/flac.go",
+		"internal/player/format/format.go", "internal/player/format/pack.go",
+		"internal/fsutil/notafile_other.go", "internal/usbid/serial.go", "internal/config/player.go",
+		"cmd/bridge/output_play_report.go", "cmd/bridge/output_pcmtest_keys_unix.go", "cmd/bridge/output_host.go",
+	} {
+		t.Run(path, func(t *testing.T) {
+			dir := t.TempDir()
+			if e := os.MkdirAll(filepath.Join(dir, ".git", "refs", "heads"), 0755); e != nil {
+				t.Fatal(e)
+			}
+			if e := os.WriteFile(filepath.Join(dir, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0644); e != nil {
+				t.Fatal(e)
+			}
+			files := map[string]string{"internal/player/qualification/version.go": "const qualificationVersion = 36\n", path: "base"}
+			base := gitCommit(t, dir, files)
+			files[path] = "changed"
+			head := gitCommit(t, dir, files)
+			if e := os.WriteFile(filepath.Join(dir, ".git", "refs", "heads", "main"), []byte(head+"\n"), 0644); e != nil {
+				t.Fatal(e)
+			}
+			if e := CheckVersion(dir, base, head); e != nil {
+				t.Fatalf("a change to %s alone, outside the DSD byte path and the harness, needed a bump: %v", path, e)
 			}
 		})
 	}

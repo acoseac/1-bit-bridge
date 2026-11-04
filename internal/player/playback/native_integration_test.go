@@ -1339,15 +1339,22 @@ func TestNativeIntegrationFaultThenExplicitPCM(t *testing.T) {
 }
 
 func TestNativeIntegrationApprovedConstructor(t *testing.T) {
-	for _, mode := range []string{"valid", "missing", "version", "identity", "tampered", "candidate", "replaced_before_activation", "revoke_before_publication"} {
+	for _, mode := range []string{"valid", "legacy_version", "newer_version", "missing", "version", "identity", "tampered", "candidate", "replaced_before_activation", "revoke_before_publication"} {
 		t.Run(mode, func(t *testing.T) {
 			cfg, record := approvedBackendFixture(t)
 			cfg.Resolver = nativeFiles{"a": nativeDSF(t, 31)}
 			switch mode {
+			case "legacy_version":
+				// An owner's record of LegacyVersion plays after a bump (B728 B1).
+				recordAtVersion(t, cfg.Authorization, &record, qualification.LegacyVersion)
+			case "newer_version":
+				// A record past this build's version, which it cannot vouch for.
+				recordAtVersion(t, cfg.Authorization, &record, qualification.Version+1)
 			case "missing":
 				os.Remove(cfg.Authorization.path())
 			case "version":
-				record.Body.QualificationVersion--
+				// Below LegacyVersion, which production no longer takes.
+				record.Body.QualificationVersion = qualification.LegacyVersion - 1
 				saveApprovedFixture(t, cfg.Authorization, record)
 			case "identity":
 				record.Body.Identity.BCDDevice = "ffff"
@@ -1380,13 +1387,14 @@ func TestNativeIntegrationApprovedConstructor(t *testing.T) {
 			ref, _ := engine.NewReference("a")
 			ev := &nativeEvents{done: make(chan struct{})}
 			e = b.Start(ctx, engine.StartRequest{Session: 1, First: engine.Occurrence{ID: 1, Ref: ref}, Events: ev})
-			if (e == nil) != (mode == "valid") {
+			plays := mode == "valid" || mode == "legacy_version"
+			if (e == nil) != plays {
 				t.Fatalf("start=%v", e)
 			}
-			if mode != "valid" && k.View().Writes != 0 {
+			if !plays && k.View().Writes != 0 {
 				t.Fatal("invalid approval wrote hardware")
 			}
-			if mode != "valid" && mode != "replaced_before_activation" && mode != "revoke_before_publication" && k.View().Opens != 0 {
+			if !plays && mode != "replaced_before_activation" && mode != "revoke_before_publication" && k.View().Opens != 0 {
 				t.Fatal("invalid approval opened hardware")
 			}
 			if err := b.Release(ctx, 1); err != nil {
