@@ -1010,7 +1010,7 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	for _, root := range roots {
 		rootSentinel := relPath(root, root, multiRoot)
 		linksBefore := len(tallies.dirLinks.rels)
-		observed, err := s.walkRoot(ctx, root, multiRoot, seen, seenFolders, errorSubtrees, playlists, &tallies, paths)
+		observed, err := s.walkRoot(ctx, root, nestedRootsUnder(roots, root), multiRoot, seen, seenFolders, errorSubtrees, playlists, &tallies, paths)
 		if err != nil {
 			walkErr = err
 			break
@@ -2793,33 +2793,18 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("resolve %q: %w", dir, err)
 	}
-	var owningRoot string
-	for _, root := range roots {
-		absRoot, err := filepath.Abs(root)
-		if err != nil {
-			continue
-		}
-		// `filepath.Rel(absRoot, absDir)` returns a relative path
-		// from absRoot to absDir (e.g. "Genre/Artist/Album" or
-		// "."). A path starting with ".." means absDir climbs out
-		// of absRoot — i.e. NOT under it. This is the idiomatic
-		// cross-platform containment check — pre-fix
-		// strings.HasPrefix was byte-exact, which broke on
-		// case-insensitive filesystems where an event for
-		// `/Music/Album/track.flac` could surface against a
-		// configured root path `/music` and false-negative
-		// (Gemini High on PR #79). filepath.Rel routes through
-		// the OS path APIs so platform-native casing semantics
-		// are preserved.
-		rel, err := filepath.Rel(absRoot, absDir)
-		if err != nil {
-			continue
-		}
-		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			owningRoot = absRoot
-			break
-		}
-	}
+	// The owning root is the deepest configured root that holds absDir, by
+	// `filepath.Rel` (deepestRootOf): a path starting with ".." climbs out of
+	// a root, i.e. is NOT under it. This is the idiomatic cross-platform
+	// containment check — pre-fix strings.HasPrefix was byte-exact, which
+	// broke on case-insensitive filesystems where an event for
+	// `/Music/Album/track.flac` could surface against a configured root path
+	// `/music` and false-negative (Gemini High on PR #79). filepath.Rel routes
+	// through the OS path APIs so platform-native casing semantics are
+	// preserved. The deepest, where roots nest: a folder under a root
+	// configured inside another is that root's, whichever is listed first
+	// (B651's fifth round; nested_roots.go).
+	_, owningRoot := deepestRootOf(roots, absDir)
 	if owningRoot == "" {
 		return 0, fmt.Errorf("dir %q is not under any configured library root", dir)
 	}
@@ -2852,6 +2837,9 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// so set membership in `seen`/`seenFolders` is directly
 	// comparable against the snapshot keys.
 	relScope := relPath(owningRoot, absDir, multiRoot)
+	// The roots configured inside the owning root, which the walk below
+	// passes over while one reads as not mounted (spareNestedRoot).
+	nested := nestedRootsUnder(roots, owningRoot)
 
 	// Subtree-scoped "before" snapshots. Smaller than Scan's whole-
 	// library snapshot — one query per scope — and the deletion pass
@@ -2955,6 +2943,12 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 			// descendants, never the explicitly-targeted directory.
 			// Reachable when a configured root is itself dot-named.
 			if abs != walkFrom {
+				// A root nested in this one that reads as not mounted:
+				// walkRoot's decision (spareNestedRoot).
+				if s.spareNestedRoot(ctx, nested, abs) {
+					errorSubtrees[relPath(owningRoot, abs, multiRoot)] = struct{}{}
+					return filepath.SkipDir
+				}
 				if !isLibraryEntry(abs, d.Name(), true) {
 					return filepath.SkipDir
 				}
@@ -3327,7 +3321,7 @@ func (s *Scanner) auditSubtreeMiss(ctx context.Context, abs, owningRoot string, 
 // scan that its mount looked empty. A link that dangles (the mount it
 // points into went away) is the unreachable case above, never an
 // empty library.
-func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, seen, seenFolders, errorSubtrees map[string]struct{}, playlists map[string]playlistSighting, tallies *walkTallies, paths chan<- pathInfo) (int, error) {
+func (s *Scanner) walkRoot(ctx context.Context, root string, nested map[string]string, multiRoot bool, seen, seenFolders, errorSubtrees map[string]struct{}, playlists map[string]playlistSighting, tallies *walkTallies, paths chan<- pathInfo) (int, error) {
 	walkFrom, err := fsutil.WalkableRoot(root)
 	if err != nil {
 		scanLogger.Error("root unreachable", rootLineAttrs(root, rootLinkTarget(root), "err", err,
@@ -3386,6 +3380,15 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 			// root in multi-root mode, so the guard would never fire
 			// there.
 			if abs != walkFrom {
+				// A root configured inside this one that reads as a volume
+				// not mounted is passed over, and the rows this root holds
+				// under it are spared: its bare mount point is no evidence
+				// that the files under it are gone (spareNestedRoot,
+				// B651's fifth round).
+				if s.spareNestedRoot(ctx, nested, abs) {
+					errorSubtrees[relPath(root, abs, multiRoot)] = struct{}{}
+					return filepath.SkipDir
+				}
 				if !isLibraryEntry(abs, d.Name(), true) {
 					return filepath.SkipDir
 				}

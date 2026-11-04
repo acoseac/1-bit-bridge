@@ -424,16 +424,30 @@ func (wt *Watcher) addTreeWithinBudget(root string, isConfiguredRoot bool) error
 
 // planWatches walks a tree as addTree would (walkWatchTree) and lists what
 // asking for its watches makes fsnotify hold, in walk order, each folder
-// ahead of the entries in it. The walk stops with errWatchBudget once the
-// paths the account does not hold yet pass what is left of the budget.
+// ahead of the entries in it. A root the watcher holds that is nested below
+// root (heldBelow) is not listed and not walked into: it is held as an entry
+// of the folder above it, which fsnotify opens with every other entry there.
+// The walk stops with errWatchBudget once the paths the account does not hold
+// yet pass what is left of the budget.
 func (wt *Watcher) planWatches(root string, isConfiguredRoot bool) (plan []plannedWatch, rootWatch string, err error) {
 	f := wt.fds
+	pass := wt.heldBelow(root)
+	var base string
 	room, need := f.budget-f.n, 0
 	rootWatch, err = walkWatchTree(root, isConfiguredRoot, func(path string, d fs.DirEntry, watch bool) error {
 		if !kqueueHoldsEntry(d.Type()) {
 			return nil
 		}
 		path = filepath.Clean(path)
+		passed := false
+		if watch {
+			if base == "" {
+				// The walk's first folder is its root.
+				base = path
+			} else if pass.passes(base, path) {
+				watch, passed = false, true
+			}
+		}
 		if !f.held(path) {
 			need++
 			if need > room {
@@ -441,6 +455,9 @@ func (wt *Watcher) planWatches(root string, isConfiguredRoot bool) (plan []plann
 			}
 		}
 		plan = append(plan, plannedWatch{path: path, watch: watch})
+		if passed {
+			return filepath.SkipDir
+		}
 		return nil
 	})
 	return plan, rootWatch, err

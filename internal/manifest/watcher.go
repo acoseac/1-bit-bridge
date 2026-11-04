@@ -626,7 +626,8 @@ func (g *loopGate) waitIdle() {
 }
 
 // addTree adds a watch on every directory of the tree at root, as
-// walkWatchTree walks it. Stops walking on the first ENOSPC ("watch
+// walkWatchTree walks it, passing over a root the watcher holds that is
+// nested below it (heldBelow). Stops walking on the first ENOSPC ("watch
 // limit reached") to avoid spamming the log once per directory — the
 // operator gets one clear signal that the kernel limit needs raising.
 // Where fsnotify holds an open file per watched entry (kqueue) the tree
@@ -636,10 +637,18 @@ func (wt *Watcher) addTree(root string, isConfiguredRoot bool) error {
 	if wt.fds != nil {
 		return wt.addTreeWithinBudget(root, isConfiguredRoot)
 	}
+	pass := wt.heldBelow(root)
+	var base string
 	limitHit := false
 	rootWatch, err := walkWatchTree(root, isConfiguredRoot, func(path string, _ fs.DirEntry, watch bool) error {
 		if !watch {
 			return nil
+		}
+		if base == "" {
+			// The walk's first folder is its root.
+			base = path
+		} else if pass.passes(base, path) {
+			return filepath.SkipDir
 		}
 		if limitHit {
 			// Every subsequent Add would fail the same way, so there
@@ -656,6 +665,49 @@ func (wt *Watcher) addTree(root string, isConfiguredRoot bool) error {
 	})
 	wt.noteAlias(root, rootWatch)
 	return err
+}
+
+// heldBelow is the roots the watcher holds strictly below root (a root
+// configured inside another), by their paths relative to root: a walk of root
+// passes over each, watching nothing at or under it, as no walk watches a held
+// root (B651's fifth round, CodeRabbit on #1397): the startup walk of the
+// outer root, a resume's, and a new folder's under it. root is named in its
+// configured spelling first (configuredName), as the held roots are. nil when
+// there is none, which is every walk but one of a root a held root is nested
+// in.
+type heldBelow map[string]struct{}
+
+func (wt *Watcher) heldBelow(root string) heldBelow {
+	if len(wt.held) == 0 {
+		return nil
+	}
+	named := wt.configuredName(root)
+	var out heldBelow
+	for h := range wt.held {
+		rel, err := filepath.Rel(named, h)
+		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		if out == nil {
+			out = make(heldBelow)
+		}
+		out[rel] = struct{}{}
+	}
+	return out
+}
+
+// passes reports whether a walk that started at the folder base passes over
+// the folder at path: a held root below it.
+func (h heldBelow) passes(base, path string) bool {
+	if len(h) == 0 {
+		return false
+	}
+	rel, err := filepath.Rel(base, path)
+	if err != nil {
+		return false
+	}
+	_, ok := h[rel]
+	return ok
 }
 
 // noteAlias records a configured root that is watched where it resolves to,

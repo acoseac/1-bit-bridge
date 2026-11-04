@@ -5,7 +5,6 @@ import (
 	"maps"
 	"path/filepath"
 	"slices"
-	"strings"
 	"time"
 )
 
@@ -17,8 +16,11 @@ import (
 // mount then hides, so nothing the volume holds is ever seen, and a root that
 // could not be walked at the start was never watched at all. So a configured
 // root that reads as a volume not mounted (Scanner.lookAtRoot) is held: it is
-// not watched, its events are dropped and no scan is dispatched for it, until
-// a look finds it as it was. It is looked at:
+// not watched, not even by the walk of a root it is nested in (heldBelow), its
+// events are dropped and no scan is dispatched for it, until a look finds it
+// as it was. A path is the deepest configured root's that holds it
+// (configuredRootOf), so a held root nested in another keeps its own events
+// and scans. It is looked at:
 //
 //   - at the start, before any watch is added (holdAbsentRoots);
 //   - when a debounced scan of a folder under it is due, before the scan is
@@ -127,26 +129,21 @@ func (wt *Watcher) watchSet() map[string]struct{} {
 	return set
 }
 
-// configuredRootOf returns the configured root name is at or under, by
-// filepath.Rel (the containment ScanSubtree uses), and whether name is that
-// root itself; "" when it is under none.
+// configuredRootOf returns the configured root name is at or under, the
+// deepest where roots nest (deepestRootOf, the containment ScanSubtree takes
+// its owning root by), and whether name is that root itself; "" when it is
+// under none.
 func configuredRootOf(roots []string, name string) (root string, itself bool) {
 	absName, err := filepath.Abs(name)
 	if err != nil {
 		return "", false
 	}
-	for _, r := range roots {
-		absRoot, err := filepath.Abs(r)
-		if err != nil {
-			continue
-		}
-		rel, err := filepath.Rel(absRoot, absName)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			continue
-		}
-		return r, rel == "."
+	root, absRoot := deepestRootOf(roots, absName)
+	if root == "" {
+		return "", false
 	}
-	return "", false
+	rel, err := filepath.Rel(absRoot, absName)
+	return root, err == nil && rel == "."
 }
 
 // holdRoot holds root on what look found. A root that was watched lets its
