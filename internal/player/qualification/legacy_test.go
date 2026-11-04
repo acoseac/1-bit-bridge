@@ -290,13 +290,18 @@ func TestTheLegacyReaderKeepsEveryOtherCheck(t *testing.T) {
 // every field compared refuses it; a report whose identity that comparison
 // does not take is refused all the same; and an experiment's contact is
 // compared with its own experiment's identity, which the comparison has
-// matched to the unit's.
+// matched to the unit's. With no comparison at all it refuses the record.
 func TestTheLegacyReaderComparesTheIdentityItIsGiven(t *testing.T) {
 	withoutPort := func(recorded, live Identity) bool {
 		recorded.Port, live.Port = "", ""
 		return recorded == live
 	}
 	elsewhere := func(id Identity) Identity { id.Port = "platform-test/usb-0:1:2.0"; return id }
+	t.Run("no_comparison", func(t *testing.T) {
+		dir, _, id := versioned(t, "native", LegacyVersion)
+		_, e := ReadLegacyApproval(dir, "approved.json", id, nil)
+		refusedFor(t, e, "no identity comparison")
+	})
 	for _, kind := range legacyKinds {
 		t.Run(kind, func(t *testing.T) {
 			dir, _, id := versioned(t, kind, LegacyVersion)
