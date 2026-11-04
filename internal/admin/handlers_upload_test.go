@@ -481,7 +481,7 @@ func TestUploadSessionListsTheResumeIdentity(t *testing.T) {
 		"path":        "Album/01.flac",
 		"size":        64,
 		"digest":      strings.ToUpper(digest),
-		"modified":    1_700_000_000_000,
+		"modified":    int64(1_700_000_000_000),
 		"fingerprint": strings.ToUpper(fp),
 	}}, nil)
 	f := firstFile(t, sess)

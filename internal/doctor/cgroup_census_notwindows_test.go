@@ -167,7 +167,7 @@ func (c cgroupCase) sighting(t *testing.T) (bool, ownerSighting, error) {
 	}
 	created := map[string]uint64{}
 	for inode, cg := range c.created {
-		id := uint64(1<<62 + inode)
+		id := uint64(1<<62) + uint64(inode)
 		if cg != "?" {
 			id = f.id(t, cg)
 		}

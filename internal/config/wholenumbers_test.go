@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -169,8 +170,9 @@ func TestAWholeNumberSettingTakesWhatDecodesUnchanged(t *testing.T) {
 	const path = "limits.manifest.requestsPerMinute"
 	for _, tc := range []struct {
 		name, value string
-		// rpm is the limit as Load reads it, for a value it takes.
-		rpm     int
+		// rpm is the limit as Load reads it, for a value it takes: an int64,
+		// for 2^53, which a 32-bit int cannot hold.
+		rpm     int64
 		refused bool
 	}{
 		{"an integer", "6", 6, false},
@@ -203,11 +205,13 @@ func TestAWholeNumberSettingTakesWhatDecodesUnchanged(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			file, line := configSetting(t, path, tc.value)
 			cfg, err := Load(file)
-			if !tc.refused {
+			// A whole number past what an int holds (2^53 where an int is 32
+			// bits) is a float outside the setting's range, refused as one.
+			if !tc.refused && tc.rpm <= math.MaxInt {
 				if err != nil {
 					t.Fatalf("Load = %v", err)
 				}
-				if got := cfg.Limits.Manifest.EffectiveRPM(); got != tc.rpm {
+				if got := cfg.Limits.Manifest.EffectiveRPM(); int64(got) != tc.rpm {
 					t.Errorf("the limit loads as %d, want %d", got, tc.rpm)
 				}
 				return

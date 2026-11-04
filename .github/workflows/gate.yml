@@ -125,6 +125,21 @@ jobs:
             ${{ runner.os }}-gobuild-vet-
       - name: vet
         run: make vet
+      # A portability check, not a release target: the bridge ships amd64
+      # and arm64 alone (.goreleaser.yaml, the Makefile's build-all), so no
+      # other job builds anything where an int is 32 bits. A test's untyped
+      # constant past 2^31 that met an int (1<<62 in an int sum, a
+      # millisecond timestamp in a map[string]any) compiled for every target
+      # CI built, and kept its package's tests from building for linux/arm
+      # and linux/386 (backlog B694). vet type-checks every package with its
+      # tests, which is all this asks. make vet, so the tags are its own
+      # (GO_TAGS, which check-build-tags holds to GoReleaser's); GOOS=linux
+      # on both, so neither takes the runner's OS. Locally:
+      # GOOS=linux GOARCH=386 make vet.
+      - name: vet for 32-bit targets (portability)
+        run: |
+          GOOS=linux GOARCH=arm make vet
+          GOOS=linux GOARCH=386 make vet
 
   # The race suite, SHARDED. `make test` remains the local gate and the
   # single source of the flags; `.github/scripts/test-shard.sh` runs the

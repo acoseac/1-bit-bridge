@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"strconv"
 	"syscall"
 	"testing"
 )
@@ -113,13 +114,20 @@ func TestPIDAliveReapedChildReadsDead(t *testing.T) {
 // reports a plainly bogus pid as ALIVE, which in checkPort means a real
 // port conflict is softened to a Warn on the strength of a corrupt
 // pidfile. Observed failing on darwin before the bound was added.
+//
+// Only where an int is 64 bits: a 32-bit int is pid_t's own width, so no
+// pid past it reaches pidAlive, and readPID's strconv.Atoi refuses a pidfile
+// that names one as out of range.
 func TestPIDAliveRejectsOutOfRangePID(t *testing.T) {
-	for _, pid := range []int{
+	if strconv.IntSize < 64 {
+		t.Skip("a 32-bit int holds no pid past pid_t: strconv.Atoi refuses one in readPID")
+	}
+	for _, pid := range []int64{
 		math.MaxInt32 + 1,  // first value past pid_t
 		math.MaxUint32 + 1, // truncates to 0 -> kill(0,0) -> process group
 		math.MaxUint32 + 2, // truncates to 1 -> init, which exists
 	} {
-		if pidAlive(pid) {
+		if pidAlive(int(pid)) {
 			t.Errorf("pidAlive(%d) = true; an out-of-range pid must not be truncated into a live one", pid)
 		}
 	}
