@@ -99,9 +99,10 @@ rebasing any relative link (`mdblocks.rebase_links`), and prove the move with
    bold): leave that entry and move another. `--largest` prints the reason in place of its command.
 3. `--text "…"` replaces the generated pointer line with a better one; it is checked like a
    polished line (same pointer, every "Don't" kept, no invented symbols). When only the title makes
-   the pointer too long, the refusal says so: a `--text` line with a shorter title and every
-   sentence verbatim moves the entry. Whatever the checks say, the move itself refuses a line
-   that does not hold each of the entry's own sentences in a bold span.
+   the pointer too long, the refusal says so: a `--text` line with a shorter title, or none, and
+   every sentence verbatim moves the entry, one bold span holding several if need be. Whatever the
+   checks say, the move itself refuses a line that does not hold each of the entry's own sentences
+   whole inside one of its bold spans.
 
 The History file is written and read back before the source changes, so an interruption can
 leave an entry in both files but never in neither. A condensed file is never re-condensed:
@@ -126,11 +127,13 @@ or moved since.
 7. Commit (docs-only), and add the file and its base to the table below.
 
 What `validate_overrides.py` rejects: a changed bullet/paragraph shape or pointer suffix; a dropped
-"Don't" sentence, of any length, its title's included, read from the entry itself rather than
-from the list its caller passes (each must stand whole inside one of the line's bold spans), or
-bold it cannot read safely; a `code span` (single or double backticks) or `#number` that isn't in the
-entry's original text as a whole identifier (the guard against invented or truncated symbols:
-`cached` does not pass for `cachedThumbnail`); unbalanced markdown; more than 600 bytes.
+"Don't" sentence, of any length, its title's included, read from the entry itself as well as from
+the list its caller passes, by the one rule `mdblocks.dropped_donts` applies everywhere (each must
+stand whole inside one of the line's bold spans, its own or a longer one, so
+`**Rule A. Never undo A.**` keeps "Never undo A."), or bold it cannot read safely; a `code span`
+(single or double backticks) or `#number` that isn't in the entry's original text as a whole
+identifier (the guard against invented or truncated symbols: `cached` does not pass for
+`cachedThumbnail`); unbalanced markdown; more than 600 bytes.
 
 What `verify_rules.py` requires: every original block is a whole block of the rules file or its
 long form, byte for byte and as many times as the original has it (a block that grew by one word
@@ -160,13 +163,18 @@ A reproduction matches only until someone edits the files by hand, which is expe
 - An automatic "(PR #…)" suffix attached PR numbers an entry only *cites*; only the title's own
   parenthetical is kept now.
 - A lowercase bolded "**don't …**" mid-sentence is a separate rule, so the pattern matches both cases.
-- The "Don't" pattern capped a sentence at 600 characters and stopped at any `*`, so a longer
-  sentence, or one holding `` `*bool` ``, was left out of the line and out of the check that compares
-  the line with the entry (B710). scanner.md's `Track.Compilation` line lost its "Don't make it a
-  `*bool`" that way in the 2026-10-18 condensation, and thirteen entries in the rules files had a
-  sentence over 600 characters, for five of which `move_entry.py` offered a pointer without it.
-  `mdblocks.dont_sentences` now pairs `**` outside code spans and takes any length; where the
-  pairing could slip, it refuses the entry instead.
+- The "Don't" pattern skipped a sentence of fewer than four characters after its word or more
+  than 600, and stopped at any `*`, so such a sentence (`**Never X.**`, or one holding
+  `` `*bool` ``) was left out of the line and out of the check that compares the line with the
+  entry (B710). scanner.md's `Track.Compilation` line lost its "Don't make it a `*bool`" that way
+  in the 2026-10-18 condensation, and thirteen entries in the rules files had a sentence over 600
+  characters, for five of which `move_entry.py` offered a pointer without it.
+  `mdblocks.dont_sentences` now pairs `**` outside code spans and takes every span that starts with
+  a Don't word, however short or long; where the pairing could slip, it refuses the entry instead.
+- Two rules for "the line keeps the sentence" disagree, and the stricter one refuses a good line:
+  `validate_overrides` wanted each sentence as a bold span of its own while the move's check took it
+  inside a longer span, so `**Rule A. Never undo A.**` was rejected (B710, round 2). Every check
+  now asks `mdblocks.dropped_donts`.
 - About 20% of long entries have no bold title; their first sentence is often a field report or a
   test list, which is why the polish step exists. A bold title that does not start with "Don't" or
   "Never" carries no rule into the line either (`**Copy the file; never rewrite it on one side.**`):

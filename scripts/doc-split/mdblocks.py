@@ -39,13 +39,12 @@ BULLET_RE = re.compile(r"^(?:[-*] |\d+\. )")
 
 # A block's bold title, plus an immediately-following "(PR #…)" parenthetical.
 TITLE_RE = re.compile(r"^(?:[-*] |\d+\. )?\*\*(.+?)\*\*(\s*\([^()]{1,160}\))?")
-# The entry's own bolded prohibitions, copied verbatim into its one-line form: a bold span whose
-# text starts with one of these words and runs on for DONT_MIN_TAIL more characters, of any length
-# and holding anything, `*` in a code span included (dont_sentences). The pattern this replaced
-# capped a sentence at 600 characters and stopped at any `*`, so it left such a sentence out of
-# the line and out of the line's check (B710).
+# The entry's own bolded prohibitions, copied verbatim into its one-line form: every bold span
+# whose text starts with one of these words, of any length (`**Never X.**`, `**Never**` alone) and
+# holding anything, `*` in a code span included (dont_sentences). The pattern this replaced
+# skipped a sentence of fewer than four characters after its word or more than 600, and stopped
+# at any `*`, so it left such a sentence out of the line and out of the line's check (B710).
 DONT_WORD_RE = re.compile(r"(?:[Dd]on['’]t|[Dd]o NOT|[Dd]o not|[Nn]ever|NEVER)\b")
-DONT_MIN_TAIL = 4
 ESCAPABLE = frozenset(string.punctuation)  # what a backslash escapes in markdown
 RULES_RE = re.compile(r"\.claude/rules/([a-z0-9-]+\.md)")
 DOC_RE = re.compile(r"docs/([A-Za-z0-9_.-]+\.md)")
@@ -181,11 +180,11 @@ def bold_spans(text):
 
 def dont_sentences(text):
     """TEXT's own bolded "Don't…/Never…" sentences, whitespace-collapsed, each once, in order: every
-    bold span (bold_spans) whose text starts with a DONT_WORD_RE word and has DONT_MIN_TAIL more
-    characters, however long it is. Raises BoldError when a `**` stands before such a word and the
-    bold cannot be read safely, or that `**` does not open a span, since a line built from what
-    could be read might leave a sentence out or cut one short. Bold with no Don't word in it is
-    never refused."""
+    bold span (bold_spans) whose text starts with a DONT_WORD_RE word, however short or long it is,
+    the word alone included. Raises BoldError when a `**` stands before such a word and the bold
+    cannot be read safely, or that `**` does not open a span, since a line built from what could be
+    read might leave a sentence out or cut one short. Bold with no Don't word in it is never
+    refused."""
     marks = [e for s, e in star_runs(text) if e - s >= 2 and DONT_WORD_RE.match(text, e)]
     if not marks:
         return []
@@ -198,8 +197,7 @@ def dont_sentences(text):
             raise BoldError("the ** before %s does not open bold" % _near(text, e))
     found = []
     for s, e in spans:
-        m = DONT_WORD_RE.match(text, s)
-        if m and e - m.end() >= DONT_MIN_TAIL:
+        if DONT_WORD_RE.match(text, s):
             sentence = re.sub(r"\s+", " ", text[s:e]).strip()
             if sentence not in found:
                 found.append(sentence)
@@ -214,12 +212,14 @@ def appears_whole(part, text):
     return re.search(before + re.escape(part) + after, text) is not None
 
 
-def dropped_donts(text, line):
-    """The Don't sentences of the entry TEXT (dont_sentences) that its one-line form LINE leaves
-    out. Each must stand whole inside one of LINE's own bold spans: as a span of its own, or within
-    a longer one, such as the title it came from. Raises BoldError when the bold of TEXT, or of a
-    LINE that has sentences to keep, cannot be read safely."""
+def dropped_donts(text, line, listed=()):
+    """The Don't sentences of the entry TEXT (dont_sentences), and any LISTED beside them, that its
+    one-line form LINE leaves out. This is the one rule for what a line keeps: each sentence must
+    stand whole inside one of LINE's own bold spans, as a span of its own or within a longer one,
+    such as the title it came from or a span joining it to the next. Raises BoldError when the bold
+    of TEXT, or of a LINE that has sentences to keep, cannot be read safely."""
     wanted = dont_sentences(text)
+    wanted += [d for d in listed if d not in wanted]
     if not wanted:
         return []
     spans, problems = bold_spans(line)

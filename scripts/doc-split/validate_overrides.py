@@ -47,13 +47,15 @@ def shape_problems(entry, line, suffix):
         errs.append("bullet/paragraph shape")
     if not line.endswith(suffix):
         errs.append("pointer suffix changed")
-    # The caller's list must stand as its own spans; and every sentence the entry itself holds,
-    # however long, the title's too, must stand in the line, so a short list cannot excuse a loss.
-    dropped = [d for d in entry["donts"] if "**%s**" % d not in line]
+    # Every sentence the entry itself holds, of any length and the title's too, and any the caller
+    # lists beside them, by dropped_donts' one rule: whole inside one of the line's bold spans, its
+    # own or a longer one. A short list cannot excuse a loss, and a sentence kept inside a longer
+    # span is no loss (B710, round 2).
     try:
-        dropped += [d for d in dropped_donts(entry["block"]["text"], line) if d not in dropped]
+        dropped = dropped_donts(entry["block"]["text"], line, entry["donts"])
     except BoldError as e:
         errs.append("bold that cannot be read safely: %s" % e)
+        dropped = []
     errs += ["dropped Don't: %s" % d[:60] for d in dropped]
     size = len(line.encode("utf-8"))
     if size > MAX_BYTES:

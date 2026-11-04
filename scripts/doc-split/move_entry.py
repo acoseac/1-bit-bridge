@@ -11,10 +11,11 @@ sentences and `→ History-….md` — or LINE, a hand-written replacement, chec
 validate_overrides.py checks polished lines (same shape, same pointer suffix, every "Don't" kept,
 no invented symbols).
 
-A pointer never leaves out one of the entry's own "Don't" sentences, however long. An entry whose
-sentences would not all fit in a pointer (600 bytes), or whose bold cannot be read safely, is
-refused by its line and section, and --largest says so in place of its command: leave it, or pass
---text with a shorter title and every sentence verbatim when they fit.
+A pointer never leaves out one of the entry's own "Don't" sentences, however short or long. An
+entry whose sentences would not all fit in a pointer (600 bytes), or whose bold cannot be read
+safely, is refused by its line and section, and --largest says so in place of its command: leave
+it, or, when they fit, pass --text with a shorter title, or none, and every sentence verbatim, one
+bold span holding several if need be.
 
 Where the entry goes:
   --to ops/History-X.md      an existing History file
@@ -39,7 +40,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from mdblocks import (parse, split_frontmatter, movable, condense_entry, read_text, write_text,  # noqa: E402
-                      load_claim_regex, docs_in, dont_sentences, dropped_donts, BoldError, HISTORY_DIR)
+                      load_claim_regex, docs_in, dont_sentences, dropped_donts, appears_whole, BoldError,
+                      HISTORY_DIR)
 
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 POINTER_RE = re.compile(r"→ (History-[A-Za-z0-9-]+\.md)")
@@ -161,14 +163,16 @@ def with_entry(hist_text, label, block_text):
 def refuse_unfit(what, item, line, limit):
     """Raise DontRefusal when LINE, the pointer that keeps every one of ITEM's own Don't sentences
     verbatim, is over LIMIT bytes: a pointer never leaves one out (CLAUDE.md, "Over budget, never
-    cut"), so the entry stays where it is, unless a --text line with a shorter title holds them all."""
+    cut"), so the entry stays where it is, unless a --text line with a shorter title, or none, holds
+    them all. By dropped_donts' rule one bold span may hold several, so the shortest such line is one
+    span holding every sentence the others do not already hold."""
     donts = dont_sentences(item["text"])
     size = len(line.encode("utf-8"))
     if not donts or size <= limit:
         return
-    kept = [d for d in donts if not any(d != o and d in o for o in donts)]
+    kept = [d for d in donts if not any(d != o and appears_whole(d, o) for o in donts)]
     suffix = line[line.index(" → History-"):]  # as validate_overrides.problems finds it
-    least = ("- " if item["kind"] == "bullet" else "") + " ".join("**%s**" % d for d in kept) + suffix
+    least = ("- " if item["kind"] == "bullet" else "") + "**%s**" % " ".join(kept) + suffix
     least_size = len(least.encode("utf-8"))
     if len(kept) == 1:
         sentences, verb = "its own bolded Don't/Never sentence (%d characters)" % len(kept[0]), "s"
@@ -181,9 +185,9 @@ def refuse_unfit(what, item, line, limit):
                           "another (--largest lists them), or shorten what it says in a change of its own"
                           % (sentences, verb, least_size, limit))
     raise DontRefusal(what, "with its title, %s make%s a %d-byte pointer, over the %d bytes a pointer may hold, "
-                      "and a pointer never leaves one out: pass --text with a shorter title and every sentence "
-                      "verbatim (%d bytes at the least), or leave the entry where it is"
-                      % (sentences, verb, size, limit, least_size))
+                      "and a pointer never leaves one out: pass --text with a shorter title, or none, and every "
+                      "sentence verbatim, one bold span holding several if need be (%d bytes at the least), or "
+                      "leave the entry where it is" % (sentences, verb, size, limit, least_size))
 
 
 def plan(root, source_path, line_no, to=None, new=None, title=None, text=None, date=None):
