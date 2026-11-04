@@ -269,9 +269,13 @@ func TestTheWatcherHoldsARootWhoseWatchesWentWithoutAWord(t *testing.T) {
 // TestTheWatcherHoldsARootThatWentAndWatchesWhatComesBack pins the look an
 // event naming a root itself asks for: the root moved away (its own watch's
 // Rename), the watcher holds it, and once another directory is there, as a
-// mount puts one, that directory is watched.
+// mount puts one, that directory is watched. The check of the roots' own
+// watches would find it too, since inotify's backend drops a watch that
+// moved (IN_MOVE_SELF), so it runs here an hour apart: the event alone holds
+// the root.
 func TestTheWatcherHoldsARootThatWentAndWatchesWhatComesBack(t *testing.T) {
 	f := newLateMountFixture(t)
+	f.w.rootCheckEvery = time.Hour
 	held, resumed := f.hooks()
 	startWatcher(t, f.w)
 	f.unmount(t, false)

@@ -64,6 +64,12 @@ func TestAScanSparesARootBelowAVolumeThatIsNotMountedYet(t *testing.T) {
 		t.Errorf("%d scans of a root whose volume is not mounted said %q %d times, want once each:\n%v",
 			scans, msgRootUnreachable, len(got), got)
 	}
+	// A root that is not there is spared as one the scan cannot see, never
+	// as a clean-empty mount, the guard behind it, which says another thing
+	// to the operator: two layers, and this one is the first.
+	if got := rec.Failures(msgCleanEmpty); len(got) != 0 {
+		t.Errorf("a root that is not there was taken for a clean-empty mount:\n%v", got)
+	}
 	if _, err := sc.ScanSubtree(ctx, root); err == nil {
 		t.Error("a subtree scan of a root whose volume is not mounted answered nil; it must stop before its deletion pass")
 	}
