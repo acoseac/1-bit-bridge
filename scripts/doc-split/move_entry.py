@@ -688,6 +688,56 @@ def self_test():
         shown = "\n".join(listing[first:first + 3]) if first is not None else ""
         expect("--largest says why an entry cannot move instead of offering its command",
                "cannot move" in shown and "--line %d" % at["long"] not in shown)
+
+        # No Don't is too short to count, and a line that keeps a sentence whole inside a longer
+        # bold span is not refused: one rule, dropped_donts', decides what a line keeps (B710).
+        half = lambda word, n: word + " " + "z" * (n - len(word) - 2) + "."
+        pair = (half("Never", 284), half("Don't", 284))  # one bold span holding both fits; two do not
+        more = [
+            ("short", "- **Rule V stays binding.** **Never X.** " + "v" * 500),
+            ("bare", "- **Rule W stays binding.** **Never** wobble at the edges. " + "w" * 500),
+            ("merge", "- **Rule G stays binding.** **Never undo G.** " + "g" * 500),
+            ("pair", "- **Rule K.** **%s** **%s** " % pair + "k" * 100),
+        ]
+        rules2 = head + "\n".join(text for _, text in more) + "\n"
+        rules2_path = os.path.join(root, ".claude", "rules", "s.md")
+        with open(rules2_path, "w", encoding="utf-8") as f:
+            f.write(rules2)
+        at2 = {key: line_of(rules2, text[:14]) for key, text in more}
+
+        def attempt2(key, **kw):
+            try:
+                return None, plan(root, rules2_path, at2[key], **kw)["line"]
+            except MoveError as e:
+                return str(e), None
+
+        def checked(key, line):
+            """validate_overrides.problems on fixture KEY's entry, its list from condense_entry."""
+            _, _, items2, off2 = document(rules2)
+            it = next(i for i in items2 if i["type"] == "block" and i["start"] + 1 + off2 == at2[key])
+            mech, _, listed = condense_entry(it, "History-rules-s.md")
+            return validate_overrides.problems({"block": it, "mechanical_line": mech, "donts": listed}, line)
+
+        _, line = attempt2("short")
+        expect("a Don't of a few characters stays in the pointer", line is not None and "**Never X.**" in line)
+        omitted = "- **Rule V stays binding.** → History-rules-s.md"
+        why, _ = attempt2("short", text=omitted)
+        expect("a --text line that leaves out a Don't of a few characters is refused",
+               why is not None and "dropped Don't" in why)
+        expect("validate_overrides itself rejects that line", "dropped Don't: Never X." in checked("short", omitted))
+        _, line = attempt2("bare")
+        expect("a bolded Don't word alone stays in the pointer", line is not None and "**Never**" in line)
+        merged = "- **Rule G. Never undo G.** → History-rules-s.md"
+        _, line = attempt2("merge", text=merged)
+        expect("a --text line keeping a Don't inside a longer bold span moves", line == merged)
+        expect("validate_overrides itself accepts that line",
+               not [e for e in checked("merge", merged) if e.startswith("dropped Don't")])
+        why, _ = attempt2("pair")
+        expect("a pointer too long for two Don'ts in two spans offers --text when one span holds both",
+               why is not None and "pass --text" in why)
+        both = "- **%s %s** → History-rules-s.md" % pair
+        _, line = attempt2("pair", text=both)
+        expect("and that line moves", line == both)
     finally:
         shutil.rmtree(root)
     print("self-test:", "PASS" if ok else "FAIL")
