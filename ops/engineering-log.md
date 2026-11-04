@@ -72230,3 +72230,132 @@ through the shared build lock, at 48c2f569 with this record in the tree:
 - `player.md` is at 98.0 % of its budget with the patch: the next entry there
   needs a move first (`scripts/doc-split/move_entry.py`).
 - No backlog entry was written: the backlog file is not on this host.
+
+## 2026-11-04 — B694: every package's tests compile and vet for linux/arm and linux/386
+
+Backlog B694: `GOOS=linux GOARCH=arm` and `GOARCH=386` `go vet -tags
+ts_omit_webclient,ts_omit_debugeventbus ./...` failed on test files. The
+bridge ships amd64 and arm64 alone (`.goreleaser.yaml`, the Makefile's
+`build-all`), so no CI job built anything where an int is 32 bits: this is a
+portability check, not a release target.
+
+Worker b694 on legion0 (Ubuntu 26.04, linux/amd64, go1.27.3,
+`GOTOOLCHAIN=local`, umask 022), branch `fix/b694-32bit-test-vet` from main
+0d60e83d, the brief with Codex's binding notes. Commits: the tests 982eaa8b,
+the CI step ff084901, qualificationVersion 2be50b07, then this record. The
+rule is a new bullet in `.claude/rules/build-ci-tests.md`, shipped as a
+checked patch (`rules-b694.patch`; this worker cannot write `.claude/`).
+
+**What failed.** vet stops at a package's first type error, so it named four
+sites, the brief's three and internal/config's; compiling every test binary
+for each target with `-gcflags=-e` (`go test -vet=off -run '^$' -exec
+/bin/true ./...`) named the rest: nine constants in four packages, the same
+nine on arm and on 386.
+
+| Site (main) | The constant | What it meets |
+|---|---|---|
+| cmd/bridge/player_round11_test.go:315 | `const want = 1<<31 + 1<<24 + 1<<24`, then an argument to `t.Fatalf` | the reservation's `uint32` counters (internal/player/engine/reserve.go:52) |
+| internal/admin/handlers_upload_test.go:484 | `"modified": 1_700_000_000_000` in a `map[string]any` | the upload file's `Modified int64` |
+| internal/doctor/cgroup_census_notwindows_test.go:170 | `uint64(1<<62 + inode)`, summed in the inode's `int` | the source map's `uint64` |
+| internal/doctor/pidalive_notwindows_test.go:118-120 | `math.MaxInt32 + 1`, `math.MaxUint32 + 1` and `+ 2` in a `[]int` | `pidAlive(int)` |
+| internal/doctor/portowner_test.go:212 | `pidAlive(math.MaxUint32 + 1)` | `pidAlive(int)` |
+| internal/config/output_test.go:129 | 202311050044, a serial of digits, as `&digits` | `OutputConfig.LoopbackPort *int` |
+| internal/config/wholenumbers_test.go:196 | 9007199254740992 (2^53) in the case's `rpm int` | `EffectiveRPM() int` |
+
+**The fix** (982eaa8b). Three constants take the type they meet, their
+values unchanged: `want` is a `uint32`, `modified` an `int64(…)`, and the
+cgroup id `uint64(1<<62) + uint64(inode)`, which unsigned arithmetic makes the
+old sum for every inode. The other four feed an int on purpose, a value past
+its range, so each value is kept as an `int64` and converted only where an int
+holds it:
+- pidAlive's pid_t bound: `TestPIDAliveRejectsOutOfRangePID` skips where
+  `strconv.IntSize < 64`, saying why, and `TestPIDAlive_SelfAndBounds` asks
+  the out-of-range pid only where an int is 64 bits and keeps its other
+  checks. A 32-bit int is pid_t's own width, so no int is past it, and readPID's
+  `strconv.Atoi` refuses a pidfile that names one: on linux/386,
+  `strconv.Atoi("4294967296")` answers "value out of range".
+- `output.loopbackPort`: the serial is an `int64`, and Validate's case for it
+  skips where `serial > math.MaxInt`, since a 32-bit build's yaml.v3 refuses
+  it at the decode, value free (below).
+- `limits.manifest.requestsPerMinute`: `rpm` is an `int64`, and where an int
+  cannot hold a case's value the case expects the refusal a float outside the
+  setting's range gets, the test's own rule and what a 32-bit build says
+  (below).
+
+**Measured on linux/386, natively**: this host runs 386 binaries (`GOARCH=386
+go run` printed "linux 386 int bits: 32"). A scratch program, never
+committed, loaded a config through `config.Load` on each arch:
+
+| The setting | amd64 | 386 |
+|---|---|---|
+| `output.loopbackPort: 202311050044` | Validate: "output.loopbackPort: that value is not a port (0 to 65535)" | the decode: "line 6: cannot unmarshal a !!int value into int" |
+| `requestsPerMinute: 9007199254740992.0` | loads, 9007199254740992 | "line 7: cannot unmarshal a !!float value into int" |
+| `requestsPerMinute: 2147483648` | loads | "line 7: cannot unmarshal a !!int value into int" |
+| `requestsPerMinute: 2147483647` | loads | loads |
+
+After the fix, on 386: `TestOutputRefusalsCarryNoValue`'s serial case skips,
+`TestAWholeNumberSettingTakesWhatDecodesUnchanged`'s 2^53 case passes through
+the refusal, `TestPIDAliveRejectsOutOfRangePID` skips, and
+`TestPIDAlive_SelfAndBounds`, the cgroup census test, the upload test and
+cmd/bridge's floor test pass. On amd64 each of them runs and passes.
+
+**No 32-bit production defect on the targets vetted.** Each `int` the four
+guarded values feed (pidAlive's pid, `LoopbackPort`, `RequestsPerMinute`)
+holds what a real pidfile or setting holds. Past 2^31-1 a 32-bit build
+refuses the value where it is parsed (Atoi, yaml.v3), value free, so it never
+reaches the int; the one difference is that a limit past 2^31-1 requests a
+minute loads on 64-bit and is refused on 32-bit. Off the brief's targets,
+`GOOS=windows GOARCH=386 go build ./...` fails in production code:
+internal/doctor/doctor_windows.go:81, `pid > math.MaxUint32`, "math.MaxUint32
+(untyped int constant 4294967295) overflows int". With that line as
+`uint64(pid) > math.MaxUint32`, which answers as before on 64-bit, windows/386
+builds and vets, tests included (measured uncommitted, then put back). The
+bridge ships no windows/386 and no CI leg vets it, so it is a follow-up, not
+fixed here.
+
+**The CI step** (ff084901). gate.yml's vet job runs, after `make vet`, "vet
+for 32-bit targets (portability)": `GOOS=linux GOARCH=arm make vet`, then
+`GOOS=linux GOARCH=386 make vet`. GOOS is set on both, so 386 does not take
+the runner's OS (the brief's review), and make vet's GO_TAGS are the release
+tags, which `check-build-tags` holds to `.goreleaser.yaml`'s. A make line
+names no go executable, so the reviewed build-site census needs no new line
+(`make check-build-tags`: OK). Run as CI runs it, under `bash -e`: both ok.
+
+**Controls**, each uncommitted and put back with `git checkout --`, the tree
+clean after each:
+
+| # | Mutation | Observed |
+|---|---|---|
+| 1 | the upload test's `modified` untyped again (the brief's control) | `GOOS=linux GOARCH=arm make vet` and `GOARCH=386`: exit 2, "handlers_upload_test.go:484:18: cannot use 1_700_000_000_000 (untyped int constant 1700000000000) as int value in map literal (overflows)", as before the fix; native `make vet` ok |
+| 2 | the 2^53 case's guard taken out (`math.MaxInt > 0`) | 386: "a whole number a float64 holds exactly" fails, "Load = … unmarshal errors"; amd64 ok |
+| 3 | `TestPIDAliveRejectsOutOfRangePID`'s skip taken out (`strconv.IntSize < 32`) | 386: "pidAlive(4294967297) = true": the test's own conversion cuts the pid to 1, init; amd64 ok |
+
+**Checks.** On legion0, each through the shared build lock, TMPDIR under
+`.tmp/_b694`:
+- `GOOS=linux GOARCH=arm` and `GOARCH=386` `go vet -tags
+  ts_omit_webclient,ts_omit_debugeventbus ./...`: clean, no output.
+- `make test-fast` at 2be50b07 (every package, no race): 80 packages ok, none
+  failed, 14 with no test files; the Linux-only ones among them
+  (internal/alsa, alsactl, alsapcm, atomicwrite's durable writer, backup's
+  identity paths, the player's binding and hotplug). The touched packages:
+  cmd/bridge 407 s, internal/admin 248 s, internal/config, internal/doctor,
+  internal/player/qualification.
+- `make vet`, and `GOOS=windows go vet ./...` with the tags and without:
+  clean. go1.27.3's gofmt on every changed Go file: clean.
+- `make docs-check`: ok as the tree stands, and with the rules patch applied
+  (`build-ci-tests.md` 24,139 to 24,983 bytes), by the budget script's own
+  `measure` and `report` over the patched copy; the patch checked by a strict
+  applier.
+- The qualification check, `go run ./scripts/qualification-version -base
+  main -head HEAD` with the tags: "guarded code changed without
+  qualificationVersion increase (34 -> 34)" at ff084901, because the two
+  config test files are under the guarded prefix `internal/config/`; OK at
+  2be50b07, which raises it to 35 with the runbook's five mentions, as B709
+  did for the engine's tests.
+- Not run here: macOS and Windows natively; arm only by vet (386 ran).
+
+**For the owner.**
+- qualificationVersion 35 invalidates evidence recorded at 34. 2be50b07
+  holds the raise alone, so it can be dropped if the version is set at merge.
+- No backlog entry was written: the backlog file is not on this host. The
+  windows/386 build failure above is the follow-up.
