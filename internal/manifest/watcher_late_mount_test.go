@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -285,5 +286,59 @@ func TestTheWatcherHoldsARootThatWentAndWatchesWhatComesBack(t *testing.T) {
 	f.mount(t)
 	waitForRoot(t, resumed, "the watcher never watched the root again once it was back")
 	f.drop(t, "02.flac", "a file dropped into the root once it was back never reached the manifest")
+	f.mustHold(t, lateMountTrack)
+}
+
+// armedUnder is the folders at or under root that a debounced scan is armed
+// for, sorted.
+func armedUnder(w *Watcher, root string) []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var dirs []string
+	for dir := range w.pending {
+		if pathAtOrUnder(dir, root) {
+			dirs = append(dirs, dir)
+		}
+	}
+	slices.Sort(dirs)
+	return dirs
+}
+
+// TestTheWatcherDropsTheScansArmedUnderARootItHolds: a root the watcher holds
+// loses the debounced scans armed for folders under it. Each would look at
+// the root again as it fell due, a stat, a listing and a count for nothing,
+// and ask for the hold again (Argon on #1397); the scan of the whole root the
+// watcher asks for once the root reads as it did covers them. The scan here
+// is armed for an hour, so only the hold can take it away; the unmount takes
+// the root's watches first, as Linux's does, and the check of the roots' own
+// watches holds the root.
+func TestTheWatcherDropsTheScansArmedUnderARootItHolds(t *testing.T) {
+	f := newLateMountFixture(t)
+	f.w.debounce = time.Hour
+	held, resumed := f.hooks()
+	startWatcher(t, f.w)
+	album := filepath.Join(f.root, "Artist", "Album")
+	if err := os.WriteFile(filepath.Join(album, "02.flac"), []byte("not a real flac"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	watchWaitUntil(t, func() bool { return slices.Contains(armedUnder(f.w, f.root), album) }, nil,
+		"the watcher armed no scan of the folder a file was dropped into")
+	for _, p := range f.w.w.WatchList() {
+		if pathAtOrUnder(filepath.Clean(p), f.root) {
+			_ = f.w.w.Remove(p)
+		}
+	}
+	f.unmount(t, true)
+	if got := waitForRoot(t, held, "the watcher never held a root whose volume went"); got != f.root {
+		t.Errorf("the watcher held %q, want %q", got, f.root)
+	}
+	if got := armedUnder(f.w, f.root); len(got) != 0 {
+		t.Errorf("the watcher kept %d scan(s) armed under a root it holds: %q", len(got), got)
+	}
+	f.mount(t)
+	waitForRoot(t, resumed, "the watcher never watched the root again once its volume was back")
+	if got := armedUnder(f.w, f.root); !slices.Equal(got, []string{f.root}) {
+		t.Errorf("once it watched the root again the watcher had scans armed for %q, want the root's alone", got)
+	}
 	f.mustHold(t, lateMountTrack)
 }

@@ -148,10 +148,11 @@ func configuredRootOf(roots []string, name string) (root string, itself bool) {
 }
 
 // holdRoot holds root on what look found. A root that was watched lets its
-// watches go (releaseRoot), and the next look at the held roots is due
-// recheckFirst from now. The hold is said once, and again when what the look
-// found changes; a look that finds what the last one found says nothing. It
-// reports whether root was newly held.
+// watches go (releaseRoot) and the scans armed under it (dropScansUnder), and
+// the next look at the held roots is due recheckFirst from now. The hold is
+// said once, and again when what the look found changes; a look that finds
+// what the last one found says nothing. It reports whether root was newly
+// held.
 func (wt *Watcher) holdRoot(root string, look rootLook) bool {
 	prev, was := wt.held[root]
 	wt.held[root] = look
@@ -160,6 +161,7 @@ func (wt *Watcher) holdRoot(root string, look rootLook) bool {
 	}
 	if !was {
 		wt.releaseRoot(root)
+		wt.dropScansUnder(root)
 		wt.recheckDelay, wt.rearm = wt.recheckFirst, true
 	}
 	attrs := []any{"root", root, "reads", look.reason}
@@ -198,6 +200,24 @@ func (wt *Watcher) releaseRoot(root string) {
 	for p := range wt.watchSet() {
 		if pathAtOrUnder(p, rw) {
 			_ = wt.w.Remove(p)
+		}
+	}
+}
+
+// dropScansUnder stops the debounced scans armed for folders under root, the
+// root the dispatch would look at (absentRootOf), once the watcher holds it:
+// each would look at the root again as it fell due, for nothing, and ask for
+// the hold again, and the scan watchAgain asks for once the root reads as it
+// did covers every folder under it. A scan whose timer has fired already finds
+// its entry gone, and its look still runs.
+func (wt *Watcher) dropScansUnder(root string) {
+	roots := wt.scanner.Roots()
+	wt.mu.Lock()
+	defer wt.mu.Unlock()
+	for dir, ps := range wt.pending {
+		if r, _ := configuredRootOf(roots, dir); r == root {
+			ps.timer.Stop()
+			delete(wt.pending, dir)
 		}
 	}
 }
