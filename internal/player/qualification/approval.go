@@ -82,17 +82,58 @@ const ApprovalPhrase = "I approve these complete matrix and backend-lifecycle re
 // Digest returns the SHA-256 of encoding/json's canonical struct representation.
 func Digest(v any) string { b, _ := json.Marshal(v); return fmt.Sprintf("%x", sha256.Sum256(b)) }
 
-// ReadApproval verifies a local record and its complete evidence under stateDir.
+// ReadApproval verifies a local record and its complete evidence under
+// stateDir, at the current Version alone, every identity field compared: the
+// harness's reader.
 func ReadApproval(stateDir, name string, identity Identity) (Approval, error) {
-	return readApproval(stateDir, name, identity, false)
+	return readApproval(stateDir, name, identity, false, harnessRule)
 }
 
 // ReadCandidate validates a visibly non-approved CLI candidate against its
 // matrix report. An integrated lifecycle report does not yet exist.
 func ReadCandidate(stateDir, name string, identity Identity) (Approval, error) {
-	return readApproval(stateDir, name, identity, true)
+	return readApproval(stateDir, name, identity, true, harnessRule)
 }
-func readApproval(stateDir, name string, identity Identity, candidate bool) (Approval, error) {
+
+// IdentityMatch is the legacy reader's identity comparison: whether a
+// record's identity, or a report's, is the unit's (live).
+type IdentityMatch func(recorded, live Identity) bool
+
+// SameIdentity compares every field, the anchored port included:
+// ReadApproval's comparison, and production's through ReadLegacyApproval
+// until B728's cutover.
+func SameIdentity(recorded, live Identity) bool { return recorded == live }
+
+// ReadLegacyApproval is the reader of B728's cutover (the design's §3.5):
+// production's until the cutover (B7), and from B6 the migration's. It makes
+// every check ReadApproval makes but two: the record and each report it holds
+// (each policy's matrix and lifecycle report, each transition report, each
+// DoP experiment and each experiment's contact) may state any version from
+// LegacyVersion to this build's Version, never one past it, which a newer
+// bridge wrote before a downgrade and this code cannot vouch for; and their
+// identity is the unit's as same compares them, an experiment's contact being
+// taken at its own experiment's. Production passes SameIdentity, the port
+// included, until B7; the migration compares the model alone.
+func ReadLegacyApproval(stateDir, name string, identity Identity, same IdentityMatch) (Approval, error) {
+	if same == nil {
+		return Approval{}, errors.New("no identity comparison")
+	}
+	return readApproval(stateDir, name, identity, false, evidenceRule{version: func(v int) bool { return LegacyVersion <= v && v <= Version }, identity: same})
+}
+
+// evidenceRule is what a reader takes of the version and the identity that a
+// record and each report it holds state.
+type evidenceRule struct {
+	version  func(int) bool
+	identity IdentityMatch
+}
+
+// harnessRule is ReadApproval's and ReadCandidate's, CheckDoPExperiments' and
+// Contact.Validate's: the current Version alone, every identity field
+// compared.
+var harnessRule = evidenceRule{version: func(v int) bool { return v == Version }, identity: SameIdentity}
+
+func readApproval(stateDir, name string, identity Identity, candidate bool, take evidenceRule) (Approval, error) {
 	var a Approval
 	b, err := trustedFile(stateDir, name)
 	if err != nil {
@@ -110,7 +151,7 @@ func readApproval(stateDir, name string, identity Identity, candidate bool) (App
 	if a.SHA256 != Digest(body) {
 		return a, errors.New("approval hash mismatch")
 	}
-	if body.QualificationVersion != Version {
+	if !take.version(body.QualificationVersion) {
 		return a, errors.New("stale approval version")
 	}
 	switch body.SchemaVersion {
@@ -129,7 +170,7 @@ func readApproval(stateDir, name string, identity Identity, candidate bool) (App
 	default:
 		return a, errors.New("stale approval version")
 	}
-	if body.Identity != identity || !identity.valid() {
+	if !take.identity(body.Identity, identity) || !identity.valid() {
 		return a, errors.New("stale approval identity")
 	}
 	phrase := ApprovalPhrase
@@ -175,7 +216,7 @@ func readApproval(stateDir, name string, identity Identity, candidate bool) (App
 			if err = json.Unmarshal(report, &r); err != nil {
 				return a, err
 			}
-			if r.QualificationVersion != Version || r.Tuple != t || r.Identity != identity || r.ManifestHash != body.ManifestHash || r.Environment != body.Environment || r.Scenario != scenario || r.End != "complete" || r.Error != "" || r.Modified || r.BuildSHA == "" || r.BuildSHA == "unverified" || r.PauseReleaseSeconds != 30 || r.PCMTimePolicy != [2]int{} || len(r.Completed) == 0 {
+			if !take.version(r.QualificationVersion) || r.Tuple != t || !take.identity(r.Identity, identity) || r.ManifestHash != body.ManifestHash || r.Environment != body.Environment || r.Scenario != scenario || r.End != "complete" || r.Error != "" || r.Modified || r.BuildSHA == "" || r.BuildSHA == "unverified" || r.PauseReleaseSeconds != 30 || r.PCMTimePolicy != [2]int{} || len(r.Completed) == 0 {
 				return a, errors.New("report does not execute approved policy")
 			}
 			if t.Transport == "dop" {
@@ -211,7 +252,7 @@ func readApproval(stateDir, name string, identity Identity, candidate bool) (App
 				return a, errors.New("missing USB gain evidence")
 			}
 			if t.Transport == "dop" && *r.FeatureUnit {
-				if err := CheckDoPExperiments(stateDir, r.Experiments, t, identity, body.ManifestHash, body.Environment); err != nil {
+				if err := checkDoPExperiments(stateDir, r.Experiments, t, identity, body.ManifestHash, body.Environment, take); err != nil {
 					return a, err
 				}
 			}
@@ -236,7 +277,7 @@ func readApproval(stateDir, name string, identity Identity, candidate bool) (App
 		}
 	}
 	for _, ev := range body.Transitions {
-		if err := checkTransition(stateDir, ev, body, identity, executedEdges); err != nil {
+		if err := checkTransition(stateDir, ev, body, identity, executedEdges, take); err != nil {
 			return a, err
 		}
 	}
@@ -261,8 +302,9 @@ func readApproval(stateDir, name string, identity Identity, candidate bool) (App
 // occurrence to its end, moved across the transports by next and previous,
 // stopped, and passed both edges. Its endpoints are named by their
 // canonical digests, so a record whose policy differs from the one the
-// transition played, by a byte, is refused.
-func checkTransition(stateDir string, ev Evidence, body ApprovalBody, identity Identity, executed map[Edge]bool) error {
+// transition played, by a byte, is refused. Its version and identity are
+// taken as take takes the record's.
+func checkTransition(stateDir string, ev Evidence, body ApprovalBody, identity Identity, executed map[Edge]bool, take evidenceRule) error {
 	report, err := trustedFile(stateDir, ev.Path)
 	if err != nil {
 		return err
@@ -274,7 +316,7 @@ func checkTransition(stateDir string, ev Evidence, body ApprovalBody, identity I
 	if err = json.Unmarshal(report, &r); err != nil {
 		return err
 	}
-	if r.QualificationVersion != Version || r.Identity != identity || r.ManifestHash != body.ManifestHash || r.Environment != body.Environment || r.Scenario != TransitionScenario || r.End != "complete" || r.Error != "" || r.Modified || r.BuildSHA == "" || r.BuildSHA == "unverified" || r.PauseReleaseSeconds != 30 || r.PCMTimePolicy != [2]int{} || len(r.Completed) != 3 || r.NativeCompleted <= 0 {
+	if !take.version(r.QualificationVersion) || !take.identity(r.Identity, identity) || r.ManifestHash != body.ManifestHash || r.Environment != body.Environment || r.Scenario != TransitionScenario || r.End != "complete" || r.Error != "" || r.Modified || r.BuildSHA == "" || r.BuildSHA == "unverified" || r.PauseReleaseSeconds != 30 || r.PCMTimePolicy != [2]int{} || len(r.Completed) != 3 || r.NativeCompleted <= 0 {
 		// The scenario plays three fixtures, native, DoP, native, and the runner
 		// writes "complete" only when all three finished and an endpoint played
 		// to its end; the lifecycle report is held to the same completion.
@@ -307,7 +349,7 @@ func checkTransition(stateDir string, ev Evidence, body ApprovalBody, identity I
 		return errors.New("missing USB gain evidence")
 	}
 	if *r.FeatureUnit {
-		if err := CheckDoPExperiments(stateDir, r.Experiments, dop.Tuple, identity, body.ManifestHash, body.Environment); err != nil {
+		if err := checkDoPExperiments(stateDir, r.Experiments, dop.Tuple, identity, body.ManifestHash, body.Environment, take); err != nil {
 			return err
 		}
 	}

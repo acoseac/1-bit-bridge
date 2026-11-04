@@ -145,7 +145,9 @@ func ApprovedWith(t *testing.T, state string, opts Options, builders ...func(pla
 	a := qualification.Approval{Body: qualification.ApprovalBody{SchemaVersion: schema, QualificationVersion: qualification.Version, Confirmation: qualification.ApprovalPhrase, Revision: "r1", Identity: id, ManifestHash: qualification.Digest("fixtures"), Environment: environment, Policies: policies, QualifiedOn: opts.QualifiedOn}}
 	switch state {
 	case "stale":
-		a.Body.QualificationVersion--
+		// Below LegacyVersion: production reads an owner's record of
+		// LegacyVersion or later (B728 B1).
+		a.Body.QualificationVersion = qualification.LegacyVersion - 1
 	case "binding_mismatch":
 		a.Body.Identity.BCDDevice = "ffff"
 	case "empty":

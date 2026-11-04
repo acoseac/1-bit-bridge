@@ -6,8 +6,25 @@ import (
 	"testing"
 )
 
+// TestQualificationDependencyGate: what the DSD bytes and the harness's
+// readers depend on outside the guarded prefixes needs a bump: the ALSA PCM
+// backend's files; the DSD demuxers', their shared reads', the ID3 offset
+// view's and the canonical DSD form's, which shape the DSD bytes a DAC is
+// sent or their count; and the helpers the harness's readers open evidence
+// and read a unit's identity through (B728 B1, round 2), every file of the
+// ALSA reader of the hardware and the constraint check an approval's mixer
+// state is held to (round 3). The PCM decoders,
+// the binding and the CLI's shared code do not
+// (TestAChangeOutsideTheDSDBytePathNeedsNoBump).
 func TestQualificationDependencyGate(t *testing.T) {
-	for _, p := range []string{"internal/player/binding/binding.go", "internal/alsa/sysfs.go", "internal/player/decode/dsf.go", "internal/player/decode/dff.go", "internal/player/format/format.go", "internal/fsutil/notafile.go", "internal/alsapcm/sink_run.go", "cmd/bridge/output_pcmtest_keys_unix.go", "cmd/bridge/configpath.go", "cmd/bridge/cli_consts.go", "cmd/bridge/output_host.go", "internal/packaging/packaging.go"} {
+	for _, p := range []string{
+		"internal/alsapcm/sink_run.go",
+		"internal/player/decode/dsd.go", "internal/player/decode/dsf.go", "internal/player/decode/dff.go",
+		"internal/player/decode/pcm_region.go", "internal/player/decode/offset.go", "internal/player/format/pcm.go",
+		"internal/fsutil/notafile.go", "internal/fsutil/notafile_unix.go", "internal/usbid/port.go",
+		"internal/alsa/sysfs.go", "internal/alsa/tree.go", "internal/alsa/open.go", "internal/alsa/qualification_gain.go",
+		"internal/alsactl/constraints.go",
+	} {
 		t.Run(filepath.Base(p), func(t *testing.T) {
 			dir := t.TempDir()
 			if e := os.MkdirAll(filepath.Join(dir, ".git/refs/heads"), 0755); e != nil {
