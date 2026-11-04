@@ -2598,7 +2598,16 @@
   its data dir and write its data dir into that config's record (round 2,
   Codex on #1397). A boot read that resolved no file keeps no record, said at
   Warn; `bridge doctor`, which reads the config once, asks the file the name
-  opens (`dataDirRecordPath`).
+  opens (`dataDirRecordPath`). The record and the config can spell one data
+  dir two ways (through a link, or in another case on a volume that folds
+  case), so the check and the record's write compare them as the directory
+  they name (`fsutil.SamePath`: each resolved through its nearest existing
+  ancestor, folded where the volume answers that it folds case), never as
+  strings; and the refusal and the doctor's line name the data dir as its
+  config gives it, which is what bridge.yaml says, and the record where it is
+  (round 3: CI's macOS and Windows legs, where `/var` is `/private/var` and a
+  temp directory has a short name and a long one, named the record in
+  another spelling than the tests rebuilt).
   Before `prepareServeDataDir`, so before the lock, the TLS mint, the token
   store, `server.pid` and the migrations, serve refuses a data dir the record
   names that holds neither `bridge.db` nor `server.lock`
@@ -2643,6 +2652,9 @@
   `TestServeStartsAgainOverADatabaseRemovedOnPurpose`,
   `TestServeRecordsItsDataDirBesideTheFileItsBootReadOpened`,
   `TestServeChecksTheRecordBesideTheFileItsBootReadOpened`,
+  `TestTheRecordNamesItsDataDirInAnySpellingOfIt`, fsutil's
+  `TestSamePathResolvesEachSpellingThroughItsLinks` and
+  `TestSamePathFoldsCaseWhereTheVolumeDoes`,
   `TestInitAndTheServeAfterItStartAsBefore`,
   `TestTheRecordRefusesOnlyTheDataDirItNamesWhileItHoldsNeitherFile`,
   `TestTheRecordIsBesideTheFileTheConfigsNameOpens` and

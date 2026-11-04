@@ -73441,3 +73441,83 @@ host):
   folder. On Windows, ReadDirectoryChangesW reports no rename of a watched
   folder itself, and whether NTFS lets a folder be renamed while folders below
   it are watched was not measured here: CI's Windows leg answers both.
+
+## 2026-11-04 — B651 round 3: the record's path on CI's macOS and Windows legs
+
+Round 3, fast-forwarded first to the PR's head, 7ae2dc08 (round 2, its rules
+patch, and main merged), as round 2 was: the files the head changed checked
+out and the branch's loose ref written. CI's `test (macos-latest)` and
+`test (windows-latest)` failed `TestServeRefusesADataDirItsRecordNamesThatHoldsNeitherFile`
+and `TestBothDoctorsFailADataDirItsRecordNamesWhileItsVolumeIsAway`, both
+subtests of each, and nothing else: round 1's watcher tests that rename a
+watched folder pass on Windows, which answers round 2's open question.
+
+**Reproduced on Linux** with TMPDIR a link to a real directory, as macOS's
+`/var` is `/private/var`: all four subtests red on 7ae2dc08. The refusal named
+the data dir as its config gives it (`…/symlink/…/usb/bridge`), which the tests
+matched, and the record to remove where it is, beside the file the config's
+name opens through the links on the way (`fsutil.ResolveParent`:
+`…/symreal/…/.bridge.yaml.datadir`), while the tests rebuilt the record's path
+in their own spelling. On Windows the record is named by the handle
+(`GetFinalPathNameByHandle`), the long name of a temp directory the tests spell
+with its 8.3 name. Round 1's doctor and refusal resolved the record's path the
+same way, so these had failed there since round 1.
+
+**The messages** still name the data dir as its config gives it
+(`dataDirGoneError.dataDir` is `cfg.DataDir` as Load resolves it, never
+resolved through its links), which is what bridge.yaml says, and the record
+where it is, which a link at the config's name can put in another directory
+than the name's.
+
+**The comparisons.** The record and the config may spell one data dir two
+ways, through a link or in another case on a volume that folds case (a
+bridge.yaml edited to name it so, BRIDGE_DATA_DIR), and the check and the
+record's write compared the strings, so such a record read as one naming
+another data dir, which refuses nothing. They compare with `fsutil.SamePath`
+now: each side resolved through its nearest existing ancestor
+(`EvalSymlinksOrClean`: links, and on Windows junctions and the long name),
+and folded where the volume itself answers that it folds case
+(`caseInsensitiveFS`, probed, as `IsUnderAny` compares), so NTFS and a default
+APFS fold and ext4 does not.
+
+**The tests** read the refusal's own paths (`goneRefusal`,
+`mustRefuseAsConfigured`): the data dir must be the configured one byte for
+byte, and the record the refusal names must open the one the test wrote
+(`os.SameFile`); round 2's link test does the same. New:
+`TestTheRecordNamesItsDataDirInAnySpellingOfIt` (a record and a config naming
+the data dir through a link and not, either way round, refused by the
+config's spelling; two spellings that differ in case refused exactly where
+the volume folds case, as a probe of it answers),
+`TestSamePathResolvesEachSpellingThroughItsLinks` and
+`TestSamePathFoldsCaseWhereTheVolumeDoes`.
+
+**Red, then green**: with the symlinked TMPDIR, the two CI tests' four
+subtests red on 7ae2dc08 and green on 06258f91, and the whole cmd/bridge
+package passed under `-race` with that TMPDIR (917 s).
+
+**Negative controls**, with the symlinked TMPDIR, each on 06258f91, one
+mutation, each test alone, the file put back byte for byte:
+
+| Control | Red |
+|---|---|
+| K1 the check compares the strings, as 7ae2dc08 did | `TestTheRecordNamesItsDataDirInAnySpellingOfIt` |
+| K2 `SamePath` resolves no link | `TestSamePathResolvesEachSpellingThroughItsLinks`; `TestTheRecordNamesItsDataDirInAnySpellingOfIt` |
+| K3 the refusal names the data dir resolved | the three refusal tests and the spelling test |
+| K4 the refusal names another record than it read | the three refusal tests and round 2's link check |
+| K5 `SamePath` folds case on every volume | `TestSamePathFoldsCaseWhereTheVolumeDoes`; `TestTheRecordNamesItsDataDirInAnySpellingOfIt` |
+| C8 to C12, R4, R5 (rounds 1 and 2) | their tests, as before |
+
+The fold's own half goes red only on a volume that folds case, so it is
+asserted on CI's Windows and macOS legs, not here.
+
+**Gates**, through the build lock, on 06258f91 with this record in the tree:
+the whole cmd/bridge package under `-race` with the symlinked TMPDIR, above;
+`make test-fast` (TMPDIR under `.tmp/_b651`) passed all 80 packages,
+cmd/bridge in 412 s, the Linux-only alsapcm and durable-writer packages
+running here; `make vet` was clean for linux, windows, darwin and linux/386;
+go1.27.3's gofmt lists none of the five Go files round 3 changed;
+`make docs-check`'s four commands pass; `scripts/qualification-version`
+1df423fc..HEAD (the main the branch merged; main since adds a plan document
+alone) is OK at 36, `internal/fsutil` changed. The rules line is unchanged:
+the long form in `ops/History-rules-scanner.md` takes the comparison and the
+naming, outside its Don't.
