@@ -73261,3 +73261,33 @@ after the seam took 36; `-base main -head 71cd5e19` passes.
   the two lists, leaving the decoders to their goldens; this names it in
   case that was not meant.
 - No backlog entry was written: the backlog file is not on this host.
+
+**Checks**, on legion0 (Linux, amd64, Go 1.27.3), each through the shared
+build lock with TMPDIR under `.tmp/_b728-b1`, at dd59fb91:
+- `make test` (race, `-timeout 30m`): 80 packages ok, none failed, 14 with
+  no test files; the Linux-only ones ran (internal/alsa, alsactl,
+  alsapcm, atomicwrite's durable writer, backup's identity paths, the
+  player's binding and hotplug). cmd/bridge 977 s, internal/player/
+  qualification 3.4 s, playback 2.3 s, openhome 38.6 s.
+- `make build-all`: check-build-tags and the six targets, ok; its `dist/`
+  removed after.
+- `make vet` natively, and with `GOOS=windows`, `GOOS=linux GOARCH=386`
+  and `GOOS=linux GOARCH=arm`: clean.
+- go1.27.3's gofmt on every changed Go file, and on cmd, internal and
+  scripts: clean.
+- `make docs-check`: ok as the tree stands, and in a copy with the patch
+  applied (CLAUDE.md 72.3%, player.md 94.2%, the worst load,
+  player_openhome_test.go's, 63.4%).
+- The qualification check, `go run ./scripts/qualification-version -base
+  main -head HEAD` with the tags (this clone has no `origin/main`; main is
+  7684d916): OK.
+- Both native integration overlays as CI's job runs them, under the race
+  detector: `./cmd/bridge` (with `-watchdog 10s`), 13 `TestNativeIntegration`
+  tests passed, CI's six named among them; `./internal/player/playback`,
+  29, CI's four named among them, with
+  `TestNativeIntegrationApprovedConstructor/legacy_version`.
+- `scripts/alsa-abi/check.sh` on linux/amd64: the pinned v6.12 `asound.h`
+  fetched (git blob 4cd51321), its 252 facts agreeing with the Go
+  definitions, the control UAPI's among them.
+- Not run here: macOS and Windows natively, the alsa-abi job on arm64, and
+  any hardware (B1's tier is the player's, which has no hardware run).
