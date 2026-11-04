@@ -205,7 +205,7 @@ func TestTheWatcherWaitsForAnUnmountedRootAndWatchesWhatIsMountedThere(t *testin
 // track where it was.
 func TestTheWatcherDispatchesNoScanForARootWhoseContentWent(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("Windows refuses to rename a folder while the watcher's ReadDirectoryChangesW handles are open under it (Access is denied), so the move that stands for an unmount here cannot run while the root is watched; the dispatch's look at the root is the same code on every platform")
+		t.Skip("Windows refuses to rename a folder while the watcher's ReadDirectoryChangesW handles are open under it (Access is denied), so the move that stands for an unmount here cannot run while the root is watched; TestTheWatcherDispatchesNoScanForARootWhoseOnlyFileWent takes the root's content away by deleting its one file, which Windows allows, and runs there")
 	}
 	f := newLateMountFixture(t)
 	dispatched := make(chan struct{}, 16)
@@ -246,6 +246,79 @@ func TestTheWatcherDispatchesNoScanForARootWhoseContentWent(t *testing.T) {
 	}
 	f.mustHold(t, lateMountTrack)
 	mustSayOnce(t, rec)
+}
+
+// TestTheWatcherDispatchesNoScanForARootWhoseOnlyFileWent is the dispatch's
+// check on every platform, Windows included, where the test above cannot
+// move a folder out from under the watcher's handles (B651's fifth round,
+// Codex on round 4): the root holds its one track directly, with no folder,
+// and the track is deleted, which Windows allows under a watch. The root then
+// holds nothing while the index holds its track, and the scan its event asked
+// for is not dispatched: the watcher holds the root. Once the file is written
+// back, the root is watched again, with a scan that finds it.
+func TestTheWatcherDispatchesNoScanForARootWhoseOnlyFileWent(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "usb", "music")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	track := filepath.Join(root, "01.flac")
+	body := []byte("not a real flac")
+	if err := os.WriteFile(track, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenStore(filepath.Join(dir, "bridge.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	scanner := NewScanner([]string{root}, store, "")
+	if _, err := scanner.Scan(context.Background()); err != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+	mustHaveMissingCount(t, store, "tracks", "01.flac", 0)
+	w, err := NewWatcher(scanner, 50*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.recheckFirst, w.recheckMax, w.rootCheckEvery = 20*time.Millisecond, 100*time.Millisecond, 20*time.Millisecond
+	dispatched := make(chan struct{}, 16)
+	w.afterDispatchHookForTests = func() {
+		select {
+		case dispatched <- struct{}{}:
+		default:
+		}
+	}
+	held, resumed := make(chan string, 8), make(chan string, 8)
+	w.afterHoldForTests = func(root string) { held <- root }
+	w.afterResumeForTests = func(root string) { resumed <- root }
+	startWatcher(t, w)
+	if err := os.Remove(track); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-dispatched:
+		t.Fatal("the watcher dispatched a scan of a root that reads as a volume not mounted")
+	case got := <-held:
+		if got != root {
+			t.Errorf("the watcher held %q, want %q", got, root)
+		}
+	case <-watchGiveUp(t, watchWaitReserve):
+		t.Fatal("the watcher neither held the root nor dispatched its scan")
+	}
+	mustHaveMissingCount(t, store, "tracks", "01.flac", 0)
+	if err := os.WriteFile(track, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := waitForRoot(t, resumed, "the watcher never watched the root again once its file was back"); got != root {
+		t.Errorf("the watcher watched %q again, want %q", got, root)
+	}
+	select {
+	case <-dispatched:
+	case <-watchGiveUp(t, watchWaitReserve):
+		t.Fatal("the watcher asked for no scan of a root it watched again")
+	}
+	mustHaveMissingCount(t, store, "tracks", "01.flac", 0)
 }
 
 // runParker parks Run's goroutine in the handling of the next event once it is
