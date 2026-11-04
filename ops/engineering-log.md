@@ -74114,3 +74114,175 @@ build lock, with TMPDIR under `.tmp/_b728-b2`, at c67ab94f:
 - Not run here: macOS and Windows natively, the new `dac-profiles` job on
   CI's runner (its script ran here both ways), and any hardware (B2's tier
   is the standard one).
+
+## 2026-11-04 — B728 B2 round 2: no profile on a shared ID, no heard rate from a lock, a refusal held to its own evidence
+
+The review of #1402 (Codex and Argon, on 36b5cb7b: B2's branch with its
+rules patch applied and main ebe71366 merged, which this branch
+fast-forwarded to) found three P2s, and the orchestrator's decisions on
+them were binding: `0d8c:0316` and `20a0:4143` get no profile until their
+product strings are known, both listed as shared in the data the lint reads,
+and `20b1:3089` stays device-specific; `ios-check.py` takes a documented
+refusal at or below a row's maximum, its ceiling on heard and stated rates
+kept, with a regression case; and the Hugo 2's and the Mytek's DoP evidence
+takes the class section 1.1 gives a transport result, never
+`heardMaxBitRate` (Codex: remove the Hugo 2's DoP claim unless listening
+evidence exists, and keep the Mytek's documented refusal without a heard
+maximum). The rules change ships as `rules-b728-b2-r2.patch` (outside the
+tree): the B2 line's Don't, amended; its long form is committed here.
+
+**The findings, each verified before its fix.**
+- Shared IDs seeded as device-specific. v6.12's `quirks.c` gives 0d8c:0316
+  and 20a0:4143 DSD quirks under one model each, and the round-1 seed took
+  each for that model's alone (round 1 left it open: "What makes an ID a
+  shared reference ID"). The review shows 0d8c:0316, a C-Media vendor ID,
+  in another maker's firmware note, and 20a0:4143 is the WaveIO, an
+  interface board other makers' DACs carry, as its maker describes it.
+  Every unit on either matched the kernel profile: red in 88c481a5,
+  `TestASharedReferenceIDNeedsItsProductString`, "the database does not list
+  0d8c:0316 as a shared reference ID", "a unit on the shared ID 20a0:4143 is
+  known as "kernel.20a0-4143"". 20b1:3089 stays device-specific on the
+  present evidence: the kernel names one model for it, and an XMOS vendor ID
+  alone does not establish sharing.
+- Transport evidence imported as heard. The iOS rows at cd125088 say the
+  Hugo 2's DSD256 "reached DoP LOCK" after a rate-lock sweep and the Mytek's
+  DSD128 carrier "locks cleanly"; neither says heard (`ifi.golink`'s row
+  does: "HEARD … clean tones"), and section 1.1 says the iOS lock counts the
+  packer's own frames and hears nothing back. Round 1 had promoted both to
+  `heardMaxBitRate` (its record: "as section 2.3 reads hardware-confirmed").
+  Red in 88c481a5: `TestTheCapturedModelsAreSeededAsTheirEvidenceSays` (no
+  DoP claim for the Hugo 2, no heard rate for the Mytek, its DSD256 refusal
+  kept), `TestAHeardRateIsAHearingNeverALock` (a heard rate's dop line that
+  says hardware-confirmed, a DoP lock or negotiated: the lint said nothing)
+  and `TestARefusedRateNamesItsRefusal`.
+- The iOS checker refused faithful refusals. It took every rate at or below
+  a row's `maxDSDRate` for one the row reaches, so an import of
+  `ifi.generic` (DSD256 published, refused on both measured units) failed,
+  reproduced on the registry at cd125088: "refused 11289600 is a rate the
+  row reaches (11289600)". Its new `--self-test`, on a synthetic registry,
+  was red on the two refusal cases (at a row's maximum, below it), the other
+  nine green.
+- One of this round's own, found by its first fix: the lint took "heard",
+  "refused" or "silence" anywhere in any dop line, so a hearing or a
+  refusal of another rate passed for the rate claimed, and the Mytek's own
+  new line, which said its DSD128 lock was "no listening, so no rate is held
+  as heard", passed for a heard DSD128 or DSD64 added to it. Red in
+  aa998f77: `TestAHeardRateIsAHearingNeverALock` ("a hearing of another
+  rate: the lint says [], want a problem saying "DSD128""),
+  `TestARefusedRateNamesItsRefusal` (the same, "DSD256") and
+  `TestNoEmbeddedDoPLineReadsAsAHearing` ("mytek.brooklyn.dac.plus given a
+  heard rate of 5644800 lints as []", and of 2822400). Its first fix,
+  asking the rate's name beside the word, left the Mytek at DSD128 passing
+  (the clause named DSD128 and said heard), as predicted, until its line was
+  reworded; and a79feeee pins the clause, which no case had told from the
+  line: red against aa998f77's lint and under R4 below.
+
+**What changed.**
+- `profiles.json`: the profiles `kernel.0d8c-0316` and `kernel.20a0-4143`
+  removed (36 kernel-seeded profiles, 39 in all); `sharedReferenceIds`
+  0d8c:0316, 16d0:071a, 20a0:4143 and 20b1:0010, each with its why; the
+  Hugo 2 imports no DoP claim (its identity and its prefill of 700 ms
+  stay); the Mytek's DoP is its refused DSD256 alone (heard 0, stated 0),
+  its dop line saying the unit refused DSD256's 705.6 kHz carrier, which it
+  would not negotiate, and that DSD128's carrier reached a DoP lock,
+  transport evidence that is no listening.
+- The lint (`dopEvidence`): for the heard rate and for each refused one, a
+  clause of a dop line (the text between two semicolons) that names the rate
+  (DSD128) and says heard, or refused or silence. No field holds transport
+  evidence; a negotiation or a lock is said in the line and claims nothing.
+- `ios-check.py`: no refusal compared with its row (a row may keep a
+  published maximum beside a refusal at or below it); the ceiling on heard
+  and stated rates kept; `--self-test` (11 cases) in CI's `dac-profiles`
+  job.
+- Doc comments: `Native.MaxBitRate`'s 0 is unspecified, never unlimited
+  (open question 3: the rates offered are the live altsets' and the probe's,
+  and nothing makes per-rate evidence of a claim that states none);
+  `PCMEntryMs` is read by nothing and no seed sets it (question 5); the DoP
+  fields' evidence. The README and the B2 long form follow.
+
+**Open questions, as decided.**
+1. Kernel-seeded profiles keep their neutral `kernel.<vid>-<pid>` names.
+2. Shared IDs: as above.
+3. A kernel claim's rate of 0: unspecified, never unlimited (above).
+4. For B5: a known DAC with no native claim follows section 3.2 as written,
+   and DoP provenance never becomes native provenance. The Hugo 2 now has
+   neither claim, only its identity and its prefill.
+5. `pcmEntryMs` stays unset and inert.
+6. The absent-product reader is left to a later PR: `alsa.Qualification`
+   takes the manufacturer, product and bcdDevice all or nothing, and a
+   reader that takes each alone, telling absence from a failed read, is in
+   `internal/alsa/`, guarded whole since B1's round 3, so that PR takes a
+   qualification bump.
+
+**Commits.** 88c481a5 the red tests for the three findings; aabb9be7 their
+fix, with the CI step, the README and the long form; aa998f77 the red tests
+for the lint's words; 3be967ed the clause and the rate's name, the Mytek's
+line reworded; a79feeee the clause's two cases; this record.
+
+**Negative controls**, by a runner outside the tree, as round 1's: exact,
+once-only replacements (B0 a whole file), each affected test binary built
+and each named test run alone with `-test.v`, the Python checks run as CI
+and the author run them, the bytes put back from memory and checked by
+SHA-256; the baseline of the 20 named tests and the two Python checks green
+first, `git status` clean after. All 36 went red, 50 runs: the twelve below
+and round 1's C1 to C24 again on this round's tree, C21 moved to
+10cb:0103's altsetting 3, since 0d8c:0316's profile is gone. The kernel
+test's controls were run again to print their failing lines, not the facts
+the test logs first.
+
+| # | Mutation | Red |
+|---|---|---|
+| B0 | lint.go as at aa998f77 | `TestAHeardRateIsAHearingNeverALock` ("a hearing of another rate"), `TestARefusedRateNamesItsRefusal`, `TestNoEmbeddedDoPLineReadsAsAHearing` |
+| R1 | no evidence asked of a heard rate | `TestAHeardRateIsAHearingNeverALock` ("confirmed on hardware"); `TestNoEmbeddedDoPLineReadsAsAHearing` ("given a heard rate of 2822400 lints as []") |
+| R2 | no evidence asked of a refused rate | `TestARefusedRateNamesItsRefusal` ("a line that names no refusal") |
+| R3 | the clause need not name the rate | `TestAHeardRateIsAHearingNeverALock` ("a hearing of another rate"); `TestARefusedRateNamesItsRefusal` ("a refusal of another rate") |
+| R4 | the rate and the word anywhere in one line | the same two ("another rate heard and this one's lock, a clause each"; "another rate refused …") |
+| R5 | 0d8c:0316 not listed as shared | `TestASharedReferenceIDNeedsItsProductString`; `TestTheKernelSeedIsThePinnedTags` ("0d8c:0316: the tag's device-specific DSD quirk is neither seeded nor a shared reference ID") |
+| R6 | 20a0:4143 not listed as shared | the same two (20a0:4143) |
+| R7 | the Mytek's line says again that no rate is held as heard | `TestNoEmbeddedDoPLineReadsAsAHearing` ("given a heard rate of 5644800 lints as []") |
+| R8 | a heard DSD128 added to the Mytek | `TestTheCapturedModelsAreSeededAsTheirEvidenceSays` (the database does not parse: "no clause of a dop provenance line names DSD128 and says it was heard") |
+| R9 | the Hugo 2's DoP claim back, a heard DSD256 with a dop line the lint takes | the same ("chord.hugo2's DoP is &{HeardMaxBitRate:11289600 …}, want <nil>"): only the seed test holds it |
+| R10 | ios-check compares a refusal with its row again | `--self-test` ("FAIL a published maximum with a refusal at it (ifi.generic's shape)"); `ifi.generic` on the registry exits 1 |
+| R11 | ios-check drops its heard and stated ceiling | `--self-test` ("FAIL a heard rate above the row's maximum") |
+
+**The iOS check** against the registry at cd125088:
+
+    iOS registry at cd125088: 20 rows; profiles.json
+      ok mytek.brooklyn.dac.plus: row mytek.brooklyn.dac.plus, maxDSDRate 5644800; heard 0, stated 0, refused [11289600]
+
+The review's case, `ifi.generic` imported faithfully into a copy (stated
+DSD256, refused DSD256): "ok fixture.ifi.generic: row ifi.generic,
+maxDSDRate 11289600; heard 0, stated 11289600, refused [11289600]". The
+ceiling on a copy whose Mytek states DSD512 exits 1 ("statedMaxBitRate
+22579200 exceeds the row's 5644800"), and the database read against another
+commit exits 1. `--self-test`: PASS, 11 cases.
+
+**Checks**, on legion0 (Linux, amd64, Go 1.27.3), in one turn of the shared
+build lock, with TMPDIR under `.tmp/_b728-b2`, at a79feeee:
+- `make test` (race, `-timeout 30m`): 83 packages ok, none failed, 14 with
+  no test files; the Linux-only ones ran (internal/alsa, alsapcm,
+  atomicwrite's durable writer, backup's identity paths, the player's
+  binding and hotplug; alsactl's result came from the test cache, its
+  inputs unchanged, and a fresh `-race -count=1` run after was ok).
+  cmd/bridge 986 s, internal/player/dacprofile 1.2 s,
+  scripts/third-party-licenses (the build-site census) 268 s.
+- `make build-all`: check-build-tags OK and the six targets; its `dist/`
+  removed after.
+- `make vet` natively, and with `GOOS=windows`, `GOOS=linux GOARCH=386` and
+  `GOOS=linux GOARCH=arm`: clean.
+- go1.27.3's gofmt on cmd, internal and scripts: clean.
+- `make docs-check`: ok as the tree stands (CLAUDE.md 73.6%), and in a copy
+  with `rules-b728-b2-r2.patch` applied (player.md 95,569 bytes, 95.6%; the worst load,
+  player_openhome_test.go's, 63.8%); `git apply --check` takes
+  `rules-b728-b2-r2.patch`, and the doc tools' `dropped_donts` finds every
+  Don't of the amended line in its long form.
+- The qualification check, main to HEAD with the tags: "qualification
+  version OK: main..HEAD", at 36: no guarded path changed.
+- `scripts/dac-profiles/kernel-check.sh`, by its own fetch at v6.12, as CI
+  runs it: blob c5fd1803, sha256 26cfb822, 2,373 lines, PASS (39 facts, 19
+  vendor-wide rules; the two shared IDs unseeded); the controls read the
+  same bytes, fetched through the build slot into `.tmp`, deleted after.
+- `ios-check.py` against the registry at cd125088, its `--self-test`, the
+  review's `ifi.generic` case and the ceiling on a copy: as above.
+- Not run here: macOS and Windows natively, CI's runner, and any hardware
+  (B2's tier is the standard one).
