@@ -15,6 +15,7 @@ paths:
   - "scripts/player-pcm-goldens/**"
   - "scripts/player-dsd-goldens/**"
   - "scripts/player-alac-goldens/**"
+  - "scripts/dac-profiles/**"
   - "internal/usbid/**"
   - "internal/config/player*.go"
 ---
@@ -199,3 +200,4 @@ The bit-exact OpenHome player inside the bridge (B470), PR by PR. These sections
 ## Player DSD by capability and choice (B728)
 
 - **Until B7, production reads an approval record only through the legacy reader, which takes versions from 35 to the build's own; the migration reads it the same way, comparing the model and not the port.** **Don't bump `qualificationVersion` while production reads through `ReadApproval`, or re-validate a record being migrated against the current version or its port.** → History-rules-player.md
+- **The DAC profile database matches by USB identity, never by name: vendor and product IDs, the interface, and the product string, which a shared reference ID needs; bcdDevice only narrows. A `dacKey` hashes the key's canonical form, five LF-joined lines with `=` before a present optional field and `-` for an absent one.** **Don't match a profile by its name, add a claim without its provenance, let two profiles match one identity, import from the iOS registry anything but its DoP evidence and caveats, compare keys field by field, or let an absent interface or product hash like a present one.** → History-rules-player.md
