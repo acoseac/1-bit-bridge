@@ -72912,11 +72912,11 @@ player.md 98,191 → 92,509 (98.2% → 92.5%); CLAUDE.md 46,286 (72.3% of
 64,000), unchanged; the worst load, player_openhome_test.go's, 63.9% →
 62.7% of 480,000. The fullest rules file is now dlna-upnp.md, at 97.0%.
 
-**Checks**, in a second copy made from this commit with `rules-b718.patch`
-applied by a strict applier: every hunk matched byte for byte at its line,
-and the copy's `.claude/` then equalled the first copy's. Each copy's git
-was a detached HEAD and a copy of this worktree's index over the
-repository's objects and refs; both copies were removed after.
+**Checks**, in a copy of the branch with `rules-b718.patch` applied by a
+strict applier: every hunk matched byte for byte at its line, and the
+copy's `.claude/` then equalled the `.claude/` the moves wrote. Each copy's
+git was a detached HEAD and a copy of this worktree's index over the
+repository's objects and refs; the copies were removed after.
 - `make docs-check`: ok, "CLAUDE.md 72.3%; dlna-upnp.md 97.0%; worst load,
   player_openhome_test.go 62.7%".
 - `verify_moves.py --base main` (cde731e2; this repository has no
@@ -72929,10 +72929,18 @@ repository's objects and refs; both copies were removed after.
   output.md's reworded entries uncondensed, so for its two pointers
   validate_overrides' own `build` and `problems` ran on main's output.md
   with the two reviewed sentences in place: 2 lines, 0 rejected.
-- `go test ./... -run TestEveryCitedTestNameExists`, with the Makefile's
-  tags, through the build lock: ok, with this record in place.
+- `go test ./... -run TestEveryCitedTestNameExists` could not run on this
+  host: `go.mod` requires golang.org/x/net v0.62.0 (#1381), the host's
+  module cache lacks it and the module proxy is off, so `cmd/bridge` and
+  every package that imports x/net fail at setup, the unchanged
+  worktree's too. In its place the test's markdown half ran as a script
+  (the tracked `.md` files, an ASCII form of `citedRe`, its exemptions and
+  its prefix rule), with this record in place: 3,950 names cited at main
+  and the same 3,950 with the patch, 85 of them now cited from other files
+  than before, and none that no test defines. The Go comments it also
+  reads are unchanged here.
 
-**Negative controls**, on the second copy: one exact occurrence mutated,
+**Negative controls**, on the patched copy: one exact occurrence mutated,
 the check run, the file put back byte for byte (checked by SHA-256), the
 check green again:
 - item 1's pointer without its clause "open before the first containment
@@ -72945,8 +72953,8 @@ check green again:
 - the strict applier on the patch with one context byte changed: refused,
   "does not match the file";
 - a citation of a test that nothing defines, planted in a patched
-  player.md pointer: `TestEveryCitedTestNameExists` fails naming
-  `.claude/rules/player.md`, so the run read the copy.
+  player.md pointer: the script reports that name, cited by
+  `.claude/rules/player.md` and defined by no test, so it read the copy.
 
 **Left for a change of its own.** The five player.md entries that stayed
 move only once their binding sentences are shorter, a rewording for the
