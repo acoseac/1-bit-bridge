@@ -96,6 +96,7 @@ var reviewedBuildSites = map[string][]string{
 		"GOTOOLCHAIN=go1.27.3 go test -tags=@TAGS@ ./internal/player/qualification -run '^TestQualificationVersionGate$' -count=1",
 		"GOTOOLCHAIN=go1.27.3 go run -tags @TAGS@ ./scripts/qualification-version -base \"$BASE\" -head HEAD",
 		"GOTOOLCHAIN=go1.27.3 go test -race -tags @TAGS@ -overlay /tmp/native-overlay.json ./cmd/bridge -run '^TestNativeIntegration' -timeout 5m -watchdog 10s",
+		"GOTOOLCHAIN=go1.27.3 go test -tags @TAGS@ ./scripts/qualification/listening-verify -run '^TestListeningAssets$' -count=1 -v -args -listening-assets=\"$G/out\"",
 	},
 	"scripts/native-integration-overlay.py": {
 		"\"\"\"Expose the existing ALSA fake ONLY in an explicit Go test overlay.",
