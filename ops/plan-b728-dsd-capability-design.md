@@ -536,8 +536,9 @@ becoming unreadable.
 **The legacy reader, for the cutover alone** (§3.6, §11). `qualification.ReadLegacyApproval` runs
 `readApproval`'s checks with two of them made parameters:
 
-- **the version:** at least `LegacyVersion` (35, frozen), for the record and its reports, where
-  `ReadApproval` requires the current version;
+- **the version:** from `LegacyVersion` (35, frozen) to the build's own `Version`, never past it
+  (B1's review: a newer bridge's evidence, written before a downgrade, is nothing this code can
+  vouch for), for the record and its reports, where `ReadApproval` requires the current version;
 - **the identity comparison:** production keeps today's full comparison, port included, until B7.
   The migration (§3.6) compares the model alone: vendor and product IDs, manufacturer, product,
   interface, device and subdevice, with no port.
@@ -590,7 +591,7 @@ policy would convert.
 | `auto` | no record, or a refused one | nothing: the defaults. The same warning, which is how the app explains why DSD now plays converted |
 
 - **The record is read through the legacy reader** (§3.5), with the model comparison: the port is
-  not compared, and versions from 35 on are taken. The record's bcdDevice is recorded with each
+  not compared, and versions from 35 to the build's own are taken. The record's bcdDevice is recorded with each
   answer it migrates, which therefore publishes only on that firmware (§1.2). The state keeps the
   record's digest in `migratedFrom`, and nothing reads the record again.
 - **The approval's rate limits survive** (Codex). The migrated acknowledgement lists the rates the
@@ -1280,8 +1281,8 @@ merged before B7 would stop that record from playing before B6 migrated it. B1 t
 things in one PR:
 
 1. it adds the legacy reader (§3.5), whose version and identity checks are parameters;
-2. it switches production's read to it, taking version 35 and later, so no later bump strands the
-   record;
+2. it switches production's read to it, taking versions from 35 to its own, so no later bump strands
+   the record;
 3. it narrows the guard and takes version 36.
 
 B6 then migrates through the same reader with the model comparison. B7 is the first PR in which
@@ -1291,9 +1292,20 @@ B1 narrows the guard to the code that changes DSD bytes or the harness's evidenc
 
 - **Paths:** `internal/player/format/dsd_pack.go`, `internal/player/format/dop_pack.go`,
   `internal/player/playback/native.go`, `internal/player/playback/edges.go`,
-  `internal/alsa/qualification.go`, and `internal/alsactl/control.go`, `control_linux.go` and
-  `uapi.go`.
-- **Prefixes:** `internal/alsapcm/`, `internal/player/qualification/` and `cmd/bridge/output_dsdtest`.
+  and `internal/alsactl/control.go`, `control_linux.go` and
+  `uapi.go`. B1's review added, by an audit of the calls from the DSF and DFF demuxers' reads to
+  the sink's write (the record is in `ops/engineering-log.md`): the files that shape the native
+  DSD bytes or their count, `internal/player/decode/dsd.go`, `dsf.go`, `dff.go`,
+  `pcm_region.go` and `offset.go`, and `internal/player/format/pcm.go`; and the helpers the
+  harness's readers take evidence and a unit's identity through, `internal/fsutil/notafile.go`
+  and `notafile_unix.go`, and `internal/usbid/port.go`. Round 3 added `internal/alsactl/constraints.go`,
+  `CheckConstraints`, which holds an approval's mixer constraints at play time.
+- **Prefixes:** `internal/alsapcm/`, `internal/alsa/`, `internal/player/qualification/` and
+  `cmd/bridge/output_dsdtest`. Round 3 put `internal/alsa/` back whole: the qualification identity,
+  the sysfs reader and its tree reads, the capabilities and the qualification gain are all
+  evidence the harness rests on, and since B1's legacy reader takes every version from 35 to the
+  build's own, a bump no longer strands the owner's record; it costs only the harness's
+  in-flight contacts, candidates and reports.
 - **Dropped:** everything else in today's two lists.
 
 **What this plan touches, after B1:**
@@ -1413,9 +1425,10 @@ rule that permits it.
 10. **A new section in `.claude/rules/player.md`, "Player DSD by capability and choice (B728)".**
     Each bullet lands with its code:
     - B1: "**Until B7, production reads an approval record only through the legacy reader, which
-      takes version 35 and later; the migration reads it the same way, comparing the model and not
-      the port.** **Don't bump `qualificationVersion` while production reads through `ReadApproval`,
-      or re-validate a record being migrated against the current version or its port.**"
+      takes versions from 35 to the build's own; the migration reads it the same way, comparing
+      the model and not the port.** **Don't bump `qualificationVersion` while production reads
+      through `ReadApproval`, or re-validate a record being migrated against the current version or
+      its port.**"
     - B2: "**The DAC profile database matches by USB identity, never by name: vendor and product
       IDs, the interface, and the product string, which a shared reference ID needs; bcdDevice only
       narrows. A `dacKey` hashes the key's canonical form, five LF-joined lines with `=` before a
@@ -1474,9 +1487,10 @@ rule that permits it.
     (B728). **Don't let a Stop wait past the sink's release bound, or start anything when the check
     ends.**"
 14. **`ops/b470-native-qualification.md:1-10`**, in two steps:
-    - B1: "Production reads an approval record only through the legacy reader, which takes version 35
-      and later, until B728's cutover (`ops/plan-b728-dsd-capability-design.md`). This runbook's evidence
-      binds `qualificationVersion`, whose guard covers the DSD byte path and the harness alone."
+    - B1: "Production reads an approval record only through the legacy reader, which takes versions
+      from 35 to this build's own and none past it, until B728's cutover
+      (`ops/plan-b728-dsd-capability-design.md`). This runbook's evidence binds `qualificationVersion`,
+      whose guard covers the DSD byte path and the harness alone."
     - B7: "Since B728 no production path reads an approval record or a candidate: the player plays
       DSD by its effective policy. This runbook is the engineering harness's."
 
@@ -1525,7 +1539,7 @@ rule that permits it.
 | Profile database errors | A wrong ID or a shared ID preselects the wrong mode | Product strings for shared IDs, captures, provenance, review, lint; first use still applies | A wrong capture that passes review |
 | iOS evidence used on Linux | Kernel quirks, implicit feedback or class compliance differ | Only DoP evidence is imported (DoP decoding is the DAC's, whatever the host); provenance says "heard on iOS"; first use | A DAC that behaves differently under Linux |
 | False refusals from the mixer check | DoP refused needlessly by a feature unit placed after DoP detection, a missing dB TLV, an analogue attenuator on an unprofiled DAC, or a feature unit the playback-path parse cannot place | The reason says which; a profile's `analogVolumeControls`; native or convert | Inconvenience only: the check fails closed by design |
-| The cutover strands an owner's record | A version bump before B7 would refuse the record, and the owner's DSD would stop before it was migrated | B1 switches production to the legacy reader (version 35 on) before any bump; B6 migrates before B7 stops reading (§8) | none |
+| The cutover strands an owner's record | A version bump before B7 would refuse the record, and the owner's DSD would stop before it was migrated | B1 switches production to the legacy reader (versions 35 to its own) before any bump; B6 migrates before B7 stops reading (§8) | none |
 | A converted successor cut near its boundary | Its onset folded into the predecessor's last 0.4 ms | The join window is held back and recomputed on a cut (§4.7) | A cut too late stops playback at the boundary, as any late cut does |
 | An older app with a B728 bridge | — | Native and DoP start only after a new client acknowledges first use; converted rates are invisible to the old grant; no qualification line is shown | none |
 | The state file lost or damaged | Choices or answers lost | Durable writes. A damaged file is moved aside, and DSD is refused until a choice is written again, so a migrated `off` never becomes conversion. A missing file migrates again from the keys still set | Choosing again after damage |
@@ -1574,7 +1588,7 @@ Each PR is about a day of worker time. Tests marked red first fail on the tree b
 
 | # | Repo | PR | Depends on | Tests, red first | Tier |
 |---|---|---|---|---|---|
-| B1 | bridge | The cutover's first step (§8): `qualification.ReadLegacyApproval`, with the version and the identity comparison as parameters (§3.5). Production reads through it, taking version 35 and later. The guard narrows; version 36; the runbook's first header (§9.1, item 14); the legacy reader's bullet | none | `TestProductionStillPlaysAVersion35RecordAfterTheBump` (red before: `stale approval version`), `TestTheLegacyReaderRefusesBelowVersion35`, `TestTheLegacyReaderKeepsEveryOtherCheck` (a tampered body, a changed evidence byte, an unexecuted edge), and `TestQualificationVersionGate`: a change under `internal/config/` passes without a bump (red before), and one to `internal/alsapcm/sink_dsd_writer.go` still needs one | player |
+| B1 | bridge | The cutover's first step (§8): `qualification.ReadLegacyApproval`, with the version and the identity comparison as parameters (§3.5). Production reads through it, taking versions from 35 to its own. The guard narrows to §8's paths and prefixes; version 36; the runbook's first header (§9.1, item 14); the legacy reader's bullet | none | `TestProductionStillPlaysAVersion35RecordAfterTheBump` (red before: `stale approval version`), `TestTheLegacyReaderRefusesBelowVersion35`, `TestTheLegacyReaderKeepsEveryOtherCheck` (a tampered body, a changed evidence byte, an unexecuted edge), and `TestQualificationVersionGate`: a change under `internal/config/` passes without a bump (red before), and one to `internal/alsapcm/sink_dsd_writer.go` still needs one | player |
 | B2 | bridge | `internal/player/dacprofile`: schema with `analogVolumeControls`, embedded JSON, matcher, lint; the kernel-quirk seed; iOS DoP evidence for captured models; `dac inspect --json` gains `manufacturer`, `product` and `bcdDevice`; its bullet (§9.1, item 10) | B1 (its `dac inspect` change is guarded until B1) | `TestAProfileMatchesByUSBIdentityNeverByName`, `TestASharedReferenceIDNeedsItsProductString`, `TestNoTwoProfilesMatchOneIdentity`, `TestEveryClaimNamesItsProvenance`, `TestAnAnalogueControlNeedsItsProvenance`, `TestAUnityAtRawMaxEntryNeedsItsEvidenceAndFirmware`, `TestTheDACKeyMatchesItsVectors` (§2.2: an absent interface, an absent product, a product of `-`), `TestTheQX13CarriesItsHiddenModeCaveat`, `TestDACInspectPrintsTheModelIdentity` | standard |
 | B3 | bridge | The player's DSD state (§2.5: `defaultMode`, the latest listener answer, an acknowledgement's `bitRates`, `warnings`, a damaged file refuses DSD) and the migration's logic through the legacy reader with the model comparison (§3.6): pure, not wired; its bullet | B1, B2 | `TestAWriteIsDurableBeforeItReturns`, `TestADamagedStateRefusesDSDAndIsMovedAside`, `TestNoDSDStateHoldsASerialOrAPort`, `TestTheMigrationTable` (every row of §3.6, explicit `off` among them), `TestTheMigrationIgnoresThePortAndTakesVersion35`, `TestAMigratedAcknowledgementListsItsRecordsRates`, `TestAMigrationFailureIsAWarningInTheState`, `TestABackupCarriesTheChoicesAndRestoreDropsThisBoxsEvidence` | standard |
 | B4 | bridge | The silent probe (`alsapcm.Probe`) and its cache (§5); version 37; its bullet | B1 | `TestTheProbeRefinesAndNeverCommits` (the fake kernel records no HW_PARAMS, SW_PARAMS, PREPARE or WRITEI, one open and one close), `TestTheProbeLeavesABusyNodeAlone`, `TestTheProbeReadsTheDoPCarriersSignificantBits`, `TestNoProbeWhileASessionHoldsTheDevice` | player |

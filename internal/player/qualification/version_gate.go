@@ -8,11 +8,32 @@ import (
 	"strings"
 )
 
-// GuardedPaths enumerates implementation files whose change invalidates evidence.
-var GuardedPaths = []string{"internal/player/format/dop_pack.go", "internal/player/qualification/dop.go", "internal/player/engine/transport.go", "internal/player/engine/events.go", "internal/player/engine/backend.go", "internal/player/playback/session.go", "internal/player/playback/open.go", "internal/player/playback/producer.go", "internal/player/playback/reporter.go", "internal/player/format/dsd_pack.go", "internal/alsapcm/uapi.go", "internal/alsapcm/device.go", "internal/alsapcm/params.go", "internal/alsapcm/sink.go", "internal/alsapcm/sink_ring.go", "internal/alsapcm/sink_writer.go", "internal/alsapcm/sink_dsd.go", "internal/alsapcm/sink_dsd_open.go", "internal/alsapcm/sink_dsd_writer.go", "cmd/bridge/output_dsdtest.go", "cmd/bridge/output_dsdtest_run.go", "cmd/bridge/output_dsdtest_input.go", "internal/alsapcm/device_native.go", "internal/alsapcm/sys_linux.go", "internal/alsapcm/sys_other.go", "internal/alsactl/control.go", "internal/alsactl/control_linux.go", "internal/alsactl/uapi.go", "internal/alsa/qualification.go", "internal/player/qualification/inputs.go", "internal/player/qualification/version_gate.go", "cmd/bridge/configpath.go", "cmd/bridge/cli_consts.go", "internal/packaging/packaging.go"}
+// GuardedPaths enumerates the files outside guardedPrefixes whose change
+// invalidates the harness's evidence: since B728's B1, the DSD byte path and
+// the harness alone. On the DSD byte path: the native DSD and DoP packers,
+// the player's DSD open and its plans' edges, the DSF and DFF demuxers, the
+// reads they share and the ID3 offset view every read of a tagged file goes
+// through, and the canonical DSD form, whose byte count sets how many bytes a
+// DSF yields. For the harness: the control UAPI, reader and constraint
+// check, the file open its readers take evidence through, and the USB ID and
+// port parsing a unit's identity is read with.
+var GuardedPaths = []string{
+	"internal/player/format/dsd_pack.go", "internal/player/format/dop_pack.go",
+	"internal/player/playback/native.go", "internal/player/playback/edges.go",
+	"internal/player/decode/dsd.go", "internal/player/decode/dsf.go", "internal/player/decode/dff.go",
+	"internal/player/decode/pcm_region.go", "internal/player/decode/offset.go", "internal/player/format/pcm.go",
+	"internal/alsactl/control.go", "internal/alsactl/control_linux.go", "internal/alsactl/uapi.go",
+	"internal/fsutil/notafile.go", "internal/fsutil/notafile_unix.go", "internal/usbid/port.go",
+	"internal/alsactl/constraints.go",
+}
 
-// Prefixes include the transitive file/identity readers and shared key reader.
-var guardedPrefixes = []string{"cmd/bridge/serve_player", "internal/player/hotplug/", "internal/player/openhome/", "internal/api/outputs_bridge", "internal/manifest/", "internal/player/engine/", "internal/player/playback/", "internal/player/binding/", "internal/alsa/", "internal/player/decode/", "internal/player/format/", "internal/player/qualification/", "internal/alsapcm/", "internal/alsactl/", "internal/fsutil/", "internal/usbid/", "internal/config/", "cmd/bridge/output_"}
+// Prefixes are the ALSA PCM backend and its sinks; the ALSA reader of the
+// hardware, whose every file the harness's evidence rests on (the
+// qualification identity, the sysfs reader and its tree reads, the
+// capabilities and the qualification gain; B728 B1, round 3); the
+// qualification package (the harness's readers and inputs, and this
+// checker); and the dsd-test harness.
+var guardedPrefixes = []string{"internal/alsapcm/", "internal/alsa/", "internal/player/qualification/", "cmd/bridge/output_dsdtest"}
 
 // CheckVersion compares read-only Git refs; guarded rename/deletion counts too.
 func CheckVersion(dir, base, head string) error {
