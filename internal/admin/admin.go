@@ -1386,6 +1386,11 @@ type UpdateStatus struct {
 	// they expected a recovery. Filled by the cmd/bridge adapter, which
 	// stats the .bak the installer leaves beside the live binary.
 	CanRollback bool `json:"canRollback"`
+	// RollbackRefusal says why Roll back is not offered beside a backup
+	// that is on disk, where the rollback would refuse to put it back
+	// (backlog B707). Empty where the rollback would run, and where there
+	// is no backup. Names no path.
+	RollbackRefusal string `json:"rollbackRefusal,omitempty"`
 	// DeferredReason is the most-recent gate-refusal explanation
 	// from the auto-installer. Empty when the previous cycle
 	// either installed the candidate, found no candidate, or
