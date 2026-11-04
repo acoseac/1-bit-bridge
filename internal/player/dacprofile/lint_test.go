@@ -148,6 +148,8 @@ func TestAHeardRateIsAHearingNeverALock(t *testing.T) {
 		{"a DoP lock", dopLine("DSD128 reached DoP lock, DSD256 refused"), "heard"},
 		{"a negotiation", dopLine("DSD128's carrier negotiated exactly, DSD256 refused"), "heard"},
 		{"a hearing of another rate", dopLine("heard at DSD64, DSD256 refused"), "DSD128"},
+		{"another rate heard and this one's lock, a clause each",
+			dopLine("heard at DSD64; DSD128 reached a DoP lock; DSD256 refused"), "DSD128"},
 	})
 	p := fixtureProfile("fixture.dac", "00d1")
 	p.DoP.HeardMaxBitRate = 0
@@ -168,6 +170,9 @@ func TestARefusedRateNamesItsRefusal(t *testing.T) {
 		}, "refused"},
 		{"a refusal of another rate", func(p *Profile) {
 			p.Provenance[2] = "dop: iOS profile fixture.dac, heard at DSD128, DSD512 refused (iOS cd125088)"
+		}, "DSD256"},
+		{"another rate refused and this one's lock, a clause each", func(p *Profile) {
+			p.Provenance[2] = "dop: iOS profile fixture.dac, heard at DSD128; DSD512 refused; DSD256 reached a DoP lock (iOS cd125088)"
 		}, "DSD256"},
 	})
 	p := fixtureProfile("fixture.dac", "00d1")
