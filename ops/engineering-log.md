@@ -73444,3 +73444,26 @@ red:
   them, `legacy_version` and `newer_version` with them.
 - `scripts/alsa-abi/check.sh` on linux/amd64: the pinned v6.12 header's
   252 facts agree. Not run here: arm64, macOS and Windows natively.
+
+## 2026-11-04 — B728 B1 round 3: the sysfs reader and the constraint check are guarded
+
+Round 2's audit of the DSD byte path and the harness's readers flagged two
+files that fall under the rule it applied, though §8 had dropped them:
+- `internal/alsa/sysfs.go`, the sysfs reader that a unit's identity
+  (vendor and product IDs, serial, port, interface) is read from. A change
+  there changes what the identity evidence binds to, as one to
+  `internal/usbid/port.go` does, which round 2 guarded.
+- `internal/alsactl/constraints.go`, `CheckConstraints`. It holds an
+  approval's mixer constraints, both in the harness's reader
+  (`qualification/approval.go` ~271, ~274) and in production's
+  authorization (`playback/authorization.go` ~185, ~457).
+
+Both join `GuardedPaths` and `TestQualificationDependencyGate`'s rows, and
+leave `TestAChangeOutsideTheDSDBytePathNeedsNoBump`'s list. The runbook and
+§8 of the design name them. The version stays 36.
+
+**Checks** (macOS, Go 1.27.3):
+- `go test ./internal/player/qualification/` ok.
+- **Negative control:** with both paths dropped from `GuardedPaths`, exactly
+  `TestQualificationDependencyGate/sysfs.go` and `/constraints.go` failed;
+  restored clean.
