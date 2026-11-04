@@ -28,7 +28,8 @@ func dtBeforeDD(id string) *regexp.Regexp {
 }
 
 // TestSettingsUpdateRowsRenderOnceAndKeepDTAdjacency pins the shape the
-// Updates panel's two conditional rows must hold in BOTH states.
+// Updates panel's conditional rows must hold in BOTH states: the last error,
+// the held update, and since backlog B707 the rollback the status refuses.
 //
 // The rows used to be written as {{if}}/{{else}} pairs that repeated the whole
 // <dt>/<dd> in each arm. That renders correctly but repeats the id in the
@@ -47,10 +48,10 @@ func dtBeforeDD(id string) *regexp.Regexp {
 //     safe; slipping any real element between them would silently strand the
 //     label visible above a hidden value.
 func TestSettingsUpdateRowsRenderOnceAndKeepDTAdjacency(t *testing.T) {
-	// Each row carries its OWN expectation, and the table includes the two
-	// one-sided cases. A shared want-hidden would let both rows be wired to
+	// Each row carries its OWN expectation, and the table includes the
+	// one-sided cases. A shared want-hidden would let two rows be wired to
 	// the same field — a realistic copy-paste slip in a rewrite that made
-	// these two rows structurally identical — and the test would still pass:
+	// these rows structurally identical — and the test would still pass:
 	// verified by pointing update-deferred at LastError, which the shared
 	// form accepted and this form rejects.
 	cases := []struct {
@@ -58,26 +59,30 @@ func TestSettingsUpdateRowsRenderOnceAndKeepDTAdjacency(t *testing.T) {
 		st                UpdateStatus
 		wantErrorHidden   bool
 		wantDeferalHidden bool
+		wantRefusalHidden bool
 	}{
 		{
 			name:              "nothing to report",
 			st:                UpdateStatus{CurrentVersion: "v0.1.9", Channel: "stable"},
 			wantErrorHidden:   true,
 			wantDeferalHidden: true,
+			wantRefusalHidden: true,
 		},
 		{
-			name: "error and deferral present",
+			name: "every row present",
 			st: UpdateStatus{
-				CurrentVersion: "v0.1.9",
-				Channel:        "stable",
-				LastError:      "dial tcp: connection refused",
-				DeferredReason: "outside quiet hours",
+				CurrentVersion:  "v0.1.9",
+				Channel:         "stable",
+				LastError:       "dial tcp: connection refused",
+				DeferredReason:  "outside quiet hours",
+				RollbackRefusal: reasonOpened,
 			},
 			wantErrorHidden:   false,
 			wantDeferalHidden: false,
+			wantRefusalHidden: false,
 		},
 		{
-			// Discriminates the two rows: only an error.
+			// Discriminates the rows: only an error.
 			name: "error only",
 			st: UpdateStatus{
 				CurrentVersion: "v0.1.9",
@@ -86,9 +91,10 @@ func TestSettingsUpdateRowsRenderOnceAndKeepDTAdjacency(t *testing.T) {
 			},
 			wantErrorHidden:   false,
 			wantDeferalHidden: true,
+			wantRefusalHidden: true,
 		},
 		{
-			// The mirror case: only a deferral.
+			// Only a deferral.
 			name: "deferral only",
 			st: UpdateStatus{
 				CurrentVersion: "v0.1.9",
@@ -97,6 +103,19 @@ func TestSettingsUpdateRowsRenderOnceAndKeepDTAdjacency(t *testing.T) {
 			},
 			wantErrorHidden:   true,
 			wantDeferalHidden: false,
+			wantRefusalHidden: true,
+		},
+		{
+			// Only a rollback the status refuses, beside a backup.
+			name: "rollback refusal only",
+			st: UpdateStatus{
+				CurrentVersion:  "v0.1.9",
+				Channel:         "stable",
+				RollbackRefusal: reasonOpened,
+			},
+			wantErrorHidden:   true,
+			wantDeferalHidden: true,
+			wantRefusalHidden: false,
 		},
 	}
 
@@ -117,6 +136,7 @@ func TestSettingsUpdateRowsRenderOnceAndKeepDTAdjacency(t *testing.T) {
 
 			assertUpdateRow(t, body, "update-last-error", tc.wantErrorHidden)
 			assertUpdateRow(t, body, "update-deferred", tc.wantDeferalHidden)
+			assertUpdateRow(t, body, "update-rollback-refused", tc.wantRefusalHidden)
 		})
 	}
 }

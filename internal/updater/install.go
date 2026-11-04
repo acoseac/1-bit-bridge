@@ -181,8 +181,9 @@ func (u *Updater) Install(ctx context.Context, opts InstallOptions) (Status, err
 	// download, and — worse — swapBinary's EEXIST retry does
 	// os.Remove(bak) before re-linking, so the SECOND install destroys
 	// the operator's rollback target and replaces it with a copy of what
-	// is already live. canRollback() keeps reporting true throughout,
-	// because it only stats for the file's existence.
+	// is already live. The console's canRollback keeps reporting true
+	// throughout: the backup is there, and nothing the marker records
+	// refuses its rollback, since the version installed has not started.
 	//
 	// Reachable through the ordinary console flow, not an exotic one:
 	// apiUpdatesInstall does NOT restart (restart is a separate operator
@@ -523,19 +524,20 @@ var (
 // and the backup's rename, so no migrating store open records, and no
 // start's housekeeping decides, in between. Under it the rollback
 // refuses where the marker records that a version other than the
-// backup's opened the data dir (RollbackRefusal: its store may hold what
-// the backup's version does not read; no forced downgrade is offered),
-// and otherwise records, durably and before the rename, the marker it
-// read with the version rolled back from held back, its store
-// migrations vetoed and the rollback under way (OperatorRollbackRecord),
-// so a command of that version still running from its image cannot
-// migrate the store past the version put back, and clears the under-way
-// mark only once the rename has landed (round 2): a rollback the
-// process's end stops between the two leaves a record the version that
-// runs next finishes. A rename that fails puts the marker back as it was
-// read. A lock it cannot hold refuses with
-// ErrMarkerLockUnavailable, and a stop in its wait returns ctx's error,
-// nothing read, written or renamed either way.
+// backup's opened the data dir, or cannot be read (RollbackRefusalOn,
+// which the console's Updates panel asks of its own read, backlog B707:
+// that version's store may hold what the backup's version does not
+// read; no forced downgrade is offered), and otherwise records, durably
+// and before the rename, the marker it read with the version rolled
+// back from held back, its store migrations vetoed and the rollback
+// under way (OperatorRollbackRecord), so a command of that version
+// still running from its image cannot migrate the store past the
+// version put back, and clears the under-way mark only once the rename
+// has landed (round 2): a rollback the process's end stops between the
+// two leaves a record the version that runs next finishes. A rename
+// that fails puts the marker back as it was read. A lock it cannot hold
+// refuses with ErrMarkerLockUnavailable, and a stop in its wait returns
+// ctx's error, nothing read, written or renamed either way.
 //
 // Errors: ErrInstallInFlight when an Install (or another Rollback)
 // is already running on this Updater, ErrActiveSessions when Force
@@ -568,11 +570,11 @@ func (u *Updater) Rollback(ctx context.Context, opts InstallOptions) error {
 	// "installing", still running the old binary; and marker
 	// "installed", running the new one).
 	st, err := LoadState(opts.DataDir)
-	if err != nil {
-		return fmt.Errorf("%w: the install marker cannot be read (%w), so whether a version other than the backup's "+
-			"has opened the data dir cannot be told; nothing was rolled back", ErrRollbackRefused, markerIOError{err})
-	}
-	if why := RollbackRefusal(st); why != "" {
+	if why := RollbackRefusalOn(st, err); why != "" {
+		if err != nil {
+			// The read's own error, kept for code and said without its path.
+			return fmt.Errorf("%w: %s (%w); nothing was rolled back", ErrRollbackRefused, why, markerIOError{err})
+		}
 		return fmt.Errorf("%w: %s; nothing was rolled back", ErrRollbackRefused, why)
 	}
 	if fi, err := os.Stat(opts.BinaryPath + ".bak"); err != nil || fi.IsDir() {

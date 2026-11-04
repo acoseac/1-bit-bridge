@@ -2134,7 +2134,8 @@ func (a updateInfoAdapter) UpdateInfo() api.UpdateInfo {
 
 func (a updateInfoAdapter) Status() admin.UpdateStatus {
 	s := a.u.Status()
-	rejected, rejectedReason := a.rejection()
+	m := a.readMarker()
+	canRollback, rollbackRefusal := a.rollback(m)
 	return admin.UpdateStatus{
 		CurrentVersion:   s.CurrentVersion,
 		LatestVersion:    s.LatestVersion,
@@ -2145,10 +2146,11 @@ func (a updateInfoAdapter) Status() admin.UpdateStatus {
 		LastError:        s.LastError,
 		MinClientVersion: version.MinClientVersion,
 		CanInstall:       a.canInstall,
-		CanRollback:      a.canRollback(),
+		CanRollback:      canRollback,
+		RollbackRefusal:  rollbackRefusal,
 		DeferredReason:   a.deferredReason(s),
-		RejectedVersion:  rejected,
-		RejectedReason:   rejectedReason,
+		RejectedVersion:  m.st.RejectedVersion,
+		RejectedReason:   m.st.RejectedReason,
 	}
 }
 
@@ -2169,33 +2171,58 @@ func (a updateInfoAdapter) deferredReason(s updater.Status) string {
 	return ""
 }
 
-// rejection reads the release held back on this host and why (a rollback
-// leaves no reason), so the dashboard can explain a bridge that reports an
-// available update and never installs it. Read from the same on-disk
-// marker the auto-install gate consults — deriving it any other way would
-// let the two disagree. Same per-call-read shape as canRollback's stat, and
-// on the same 30 s SSE cadence.
-func (a updateInfoAdapter) rejection() (version, reason string) {
-	if a.dataDir == "" {
-		return "", ""
-	}
-	st, err := updater.LoadState(a.dataDir)
-	if err != nil {
-		return "", ""
-	}
-	return st.RejectedVersion, st.RejectedReason
+// markerRead is one read of the install marker for the Updates panel: the
+// marker, or the error LoadState answered for it.
+type markerRead struct {
+	st  updater.State
+	err error
 }
 
-// canRollback reports whether the installer's backup of the previous
+// readMarker reads the install marker once for each status the panel is
+// sent, and both the release held back on this host and why (a rollback
+// leaves no reason), which explain a bridge that reports an available
+// update and never installs it, and the rollback the panel offers, are of
+// that one read (backlog B707), so the two cannot disagree. It is the
+// marker the auto-install gate and the rollback consult, read without its
+// lock: a read for display decides nothing, and the rollback decides again
+// under the lock. Per call, on the updates frame's 30 s cadence. A marker
+// that cannot be read holds no release back here, and refuses the rollback.
+func (a updateInfoAdapter) readMarker() markerRead {
+	if a.dataDir == "" {
+		return markerRead{}
+	}
+	st, err := updater.LoadState(a.dataDir)
+	return markerRead{st: st, err: err}
+}
+
+// rollback is what the Updates panel offers of the backup beside the binary,
+// from the marker read m: Roll back where the console's rollback would put
+// the backup back (Updater.Rollback), and where the backup is there and that
+// rollback would refuse on the marker, why, in the rollback's own words,
+// which name no path (updater.RollbackRefusalOn); with no backup, nothing,
+// and no reason. Since B692 and B705 the rollback refuses once a version
+// other than the backup's has opened the data dir, so a Roll back offered
+// from the backup alone showed, and then answered 409 (backlog B707).
+func (a updateInfoAdapter) rollback(m markerRead) (can bool, refusal string) {
+	if !a.backupPresent() {
+		return false, ""
+	}
+	if why := updater.RollbackRefusalOn(m.st, m.err); why != "" {
+		return false, why
+	}
+	return true, ""
+}
+
+// backupPresent reports whether the installer's backup of the previous
 // binary is present. RollbackBinary renames "<binary>.bak" over the live
-// path, so the presence of that file IS the precondition — deriving it
-// any other way (a flag in update-state.json, say) would let the two
-// disagree after a manual cleanup.
+// path, so the presence of that file IS the rollback's precondition on
+// disk — deriving it any other way (a flag in update-state.json, say)
+// would let the two disagree after a manual cleanup.
 //
 // Conservative on a stat error: an unreadable path means we cannot
 // promise a rollback would work, and offering one we can't honour is the
-// failure this flag exists to prevent.
-func (a updateInfoAdapter) canRollback() bool {
+// failure the panel's canRollback exists to prevent.
+func (a updateInfoAdapter) backupPresent() bool {
 	if a.binaryPath == "" {
 		return false
 	}
@@ -2216,7 +2243,9 @@ func (a updateInfoAdapter) Install(ctx context.Context, force bool) (admin.Updat
 		Sessions:   a.sessions,
 		ConfigPath: a.configPath,
 	})
-	rejected, rejectedReason := a.rejection()
+	// The marker as the install left it, read once, as Status reads it.
+	m := a.readMarker()
+	canRollback, rollbackRefusal := a.rollback(m)
 	// The same field set Status() returns, deliberately. Install used to drop
 	// CanRollback, DeferredReason and RejectedVersion — so when an install was
 	// DEFERRED (playback sessions in flight, st.DeferredReason =
@@ -2233,10 +2262,11 @@ func (a updateInfoAdapter) Install(ctx context.Context, force bool) (admin.Updat
 		LastError:        st.LastError,
 		MinClientVersion: version.MinClientVersion,
 		CanInstall:       a.canInstall,
-		CanRollback:      a.canRollback(),
+		CanRollback:      canRollback,
+		RollbackRefusal:  rollbackRefusal,
 		DeferredReason:   a.deferredReason(st),
-		RejectedVersion:  rejected,
-		RejectedReason:   rejectedReason,
+		RejectedVersion:  m.st.RejectedVersion,
+		RejectedReason:   m.st.RejectedReason,
 		InstallWarning:   st.InstallWarning,
 	}, mapUpdaterError(err)
 }
