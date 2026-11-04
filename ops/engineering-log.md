@@ -73265,3 +73265,80 @@ step with the runbook failed `TestRealTreeBuildSiteCensus`. A first run of
 the third control emptied the read text by dropping its only use of the
 variable, failed to build, and proved nothing; it was rerun with a mutation
 that compiles.
+
+**Round 3 (CodeRabbit and Gemini on #1399).** `find_cc` made `shutil.which`'s
+answer absolute through `Path.resolve`, which follows a link: a compiler
+wrapper linked as `cc` that dispatches on the name it is run by (ccache) was
+run by its target's name, which ccache reads as `-std=c99` being the
+compiler, and its `--version` would have been the manifests' "compiled with".
+It returns `os.path.abspath(cc)` now, absolute and normalised (Argon:
+`Path.absolute` keeps a relative PATH entry's `.` and `..`), following no
+link. Nothing else the generator executes is resolved: `HERE`, the digest of
+generate.py and the scan's directories are, and none of them runs; `sdm`
+runs from the build directory's path as made. Shown in `$D`, a fresh
+temporary directory: `$D/wrap/ccwrap` logs the name it is run by; as `cc` it
+runs the real compiler (`/usr/bin/cc`, Apple clang 21.0.0), `--version`
+included, and by any other name it answers `--version` with a line of its
+own and refuses to compile (a variant compiles by any name). `$D/bin/cc`
+links to it (`../wrap/ccwrap`), `$D/bin` is first on PATH, and generate.py
+at 8765d690 and as fixed are each copied beside their sdm.c. `--self-test`
+at 8765d690 failed at the compile, with the wrapper run as `ccwrap`; as fixed
+it passed and printed the compiler as Apple clang 21.0.0, with the wrapper
+run as `cc` for the compile and for `--version`. Through the module
+(`find_cc`, `build`, `render(mini_plan())`), at 8765d690 `find_cc` named
+`$D/wrap/ccwrap`, the build failed, and with the variant the manifest's
+reference said "compiled with ccwrap 1.0 (…)"; as fixed it named
+`$D/bin/cc`, and the reference said "compiled with Apple clang version
+21.0.0 (clang-2100.4.1.1)" with either wrapper. A PATH entry `./sub/../bin`,
+with `$D` the working directory, gave `$D/wrap/ccwrap` at 8765d690 and
+`$D/bin/cc` as fixed. The system's `cc` is no link, so nothing else changes:
+the runbook's generation (`G=$(mktemp -d)`, the two files copied in,
+`python3 "$G/generate.py"`, 30 s) by 8765d690's generator and by round 3's
+wrote the same 51 assets byte for byte; README.txt and the three manifests
+differ, whose reference carries generate.py's digest.
+
+`checkDir` measured each stretch of a run's DSD fixtures once for its IDs,
+in one map across every manifest, so a manifest giving an ID that another
+manifest gave to another file had that file's joins skipped as measured.
+The generator never writes such a set, since an ID names one file in every
+manifest it writes, but the check reads sets it did not write. The key is
+now the stretch's files' paths in order, joined by NUL, which no path
+`CheckAssets` opened holds (Codex: a join by spaces lets two lists of paths
+with spaces collide); the IDs still name the stretch in the messages.
+`TestTheCheckCatchesAStepInASecondFileOfOneID`, a costly test: a synthetic
+set whose `manifest-twin.json` gives `dsd` to `twin.dsf`, the set's DSF with
+the step `TestTheCheckCatchesAStepAtAFilesEnd` puts at its end, played after
+`manifest.json`'s clean `dsd`. Red first, run with `-run` naming it and
+`-listening-assets` lifting the skip: "the second file's step is not the one
+problem caught: []", the set passing whole. Green after, the step the one
+problem and two runs' boundaries in the report. Control, on the commit: the
+key back to `strings.Join(stretch, " ")`; of the package's tests run with
+the flag, `TestListeningAssets` aside, only that one failed, with the same
+message, and the file was restored (its SHA-256 HEAD's). On the generated
+set the two keys measure the same: `TestListeningAssets`'s 112 report
+lines, 18 of them boundaries, are identical under either. On this host's
+set the check passed: tone blocks
+within 0.0024, 0.0008 and 0.0002 dB, bursts within 2.6e-6 Hz, silences at
+most -107.9, -111.1 and -116.0 dB SA-CD in band, 20 to 100 kHz at most
+-21.3, -51.9 and -96.4, no line over 2.3 dB, and boundaries at most -99.7,
+-101.0 and -103.7 dB SA-CD at DSD64, 128 and 256 (bound -90). Round 1's
+set, made on another host, measured -100.1, -101.1 and -104.5 at its
+boundaries; on this host 8765d690's generator writes round 3's assets, so
+the difference is the host's. Gemini's `strings.IndexByte` in `matchHex64`
+is a style choice in a test helper and was not taken; the orchestrator
+answers it on the PR.
+
+The gate, here (Go 1.27.3, GOPROXY=off): gofmt and `make docs-check` clean;
+the package in 0.27 s plain and 2.0 s under -race with the costly tests
+skipped, and every test passing with `-listening-assets` on the generated
+set (`TestListeningAssets` 30.3 s). `make test-fast` passed 63 packages;
+18 failed at setup, and `TestRealReleaseGraphEmbeds` failed, all on
+`golang.org/x/net` v0.62.0, which go.mod requires and this host's module
+cache does not hold (v0.59.0 and v0.61.0 only). So `cmd/bridge`, and
+`TestEveryCitedTestNameExists` with it, did not build here. `make vet`
+stops at the same load, so `go vet` ran on the 77 packages whose tests
+load: clean for darwin, linux/386 and windows (76 there: `fsutiltest` has
+no Windows file). A first `make test-fast` also failed `TestBuildTagsAgree`
+and `TestRealTreeBuildSiteCensus`: the census walks `.tmp/`, which git
+ignores and the test targets' TMPDIR is, and read this round's scratch
+Python there as unreviewed build sites. Moved out of the tree, both passed.
