@@ -175,16 +175,19 @@ func TestAProfileMatchesByUSBIdentityNeverByName(t *testing.T) {
 }
 
 // TestASharedReferenceIDNeedsItsProductString: the database lists the XMOS
-// reference ID the captured iFi unit carries (20b1:0010) and the Amanero
-// board's (16d0:071a), each with why; the iFi unit is unknown, since its
-// capture establishes no DoP, raw-maximum or native claim; a profile on a
-// shared ID without its product string is refused by the lint, and with it
-// knows the unit that carries it and no other on the ID; and Match asks again,
-// so a database built past the lint knows no unit on a shared ID by an
-// alternative without its product string.
+// reference ID the captured iFi unit carries (20b1:0010), the Amanero board's
+// (16d0:071a), the C-Media ID the kernel gives a DSD quirk under one maker's
+// name while another maker's units ship it too (0d8c:0316), and the WaveIO
+// board's (20a0:4143), each with why; a unit on any of them is unknown, the
+// iFi unit included (its capture establishes no DoP, raw-maximum or native
+// claim), whatever product string it carries, until a capture gives one; a
+// profile on a shared ID without its product string is refused by the lint,
+// and with it knows the unit that carries it and no other on the ID; and Match
+// asks again, so a database built past the lint knows no unit on a shared ID by
+// an alternative without its product string.
 func TestASharedReferenceIDNeedsItsProductString(t *testing.T) {
 	db := mustDefault(t)
-	for _, want := range [][2]string{{"20b1", "0010"}, {"16d0", "071a"}} {
+	for _, want := range [][2]string{{"20b1", "0010"}, {"16d0", "071a"}, {"0d8c", "0316"}, {"20a0", "4143"}} {
 		i := slices.IndexFunc(db.SharedReferenceIDs, func(s SharedID) bool { return s.VendorID == want[0] && s.ProductID == want[1] })
 		if i < 0 {
 			t.Errorf("the database does not list %s:%s as a shared reference ID", want[0], want[1])
@@ -195,6 +198,17 @@ func TestASharedReferenceIDNeedsItsProductString(t *testing.T) {
 	ifi := capturedIFi(t)
 	if got := matched(db, ifi); got != "" {
 		t.Errorf("the captured iFi unit is known as %q; its capture establishes no claim", got)
+	}
+	for _, u := range []Unit{
+		unit(t, 0x0d8c, 0x0316, ptr(0), ptr("USB Audio"), "0100"),
+		unit(t, 0x0d8c, 0x0316, ptr(1), nil, ""),
+		unit(t, 0x20a0, 0x4143, ptr(0), ptr("A DAC built on the board"), "0100"),
+		unit(t, 0x20a0, 0x4143, nil, nil, ""),
+		unit(t, 0x16d0, 0x071a, ptr(0), ptr("Combo384"), "019b"),
+	} {
+		if got := matched(db, u); got != "" {
+			t.Errorf("a unit on the shared ID %04x:%04x is known as %q", u.Key.VendorID(), u.Key.ProductID(), got)
+		}
 	}
 	for _, p := range db.Profiles {
 		for _, m := range p.Match {
@@ -348,11 +362,13 @@ func TestTheQX13CarriesItsHiddenModeCaveat(t *testing.T) {
 // profile holds what its capture and its iOS row establish, and nothing they
 // do not: the AURALiC native DSD to DSD512 from its stream file and no DoP
 // claim (it has no iOS row); the Mytek native DSD to DSD256 from its stream
-// file, and DoP heard to DSD128 with DSD256 refused (iOS
-// mytek.brooklyn.dac.plus); the Hugo 2 no native claim (its stream file lists
-// PCM alone), DoP heard to DSD256 (iOS chord.hugo2, 2026-08-29) and its DSD
-// resync delay as the prefill; none states a rate its iOS row does not, and
-// none lists an analogue or raw-maximum control, which no capture showed.
+// file, and DoP refused at DSD256 (its carrier refused on a device, iOS
+// mytek.brooklyn.dac.plus) with no rate heard, since the row's DSD128 is a
+// DoP lock, which section 1.1 says hears nothing; the Hugo 2 no native claim
+// (its stream file lists PCM alone) and no DoP claim (its row's DSD256 is a
+// negotiation and a DoP lock, not a hearing), with its DSD resync delay as the
+// prefill; none states a rate its iOS row does not, and none lists an analogue
+// or raw-maximum control, which no capture showed.
 func TestTheCapturedModelsAreSeededAsTheirEvidenceSays(t *testing.T) {
 	db := mustDefault(t)
 	byID := map[string]Profile{}
@@ -378,9 +394,9 @@ func TestTheCapturedModelsAreSeededAsTheirEvidenceSays(t *testing.T) {
 		{"auralic.altair.g1", Match{VendorID: "1511", ProductID: "0062", Product: ptr("ALTAIR G1 USB Audio 2.0")},
 			native(22579200, SourceCapture), nil, 0, 0},
 		{"mytek.brooklyn.dac.plus", Match{VendorID: "25ce", ProductID: "0025", Product: ptr("Brooklyn DAC+")},
-			native(11289600, SourceCapture), dop(5644800, 0, []int{11289600}, "mytek.brooklyn.dac.plus"), 0, 0},
+			native(11289600, SourceCapture), dop(0, 0, []int{11289600}, "mytek.brooklyn.dac.plus"), 0, 0},
 		{"chord.hugo2", Match{VendorID: "245f", ProductID: "0815", Product: ptr("Hugo2")},
-			nil, dop(11289600, 0, []int{}, "chord.hugo2"), 700, 0},
+			nil, nil, 700, 0},
 	} {
 		p, ok := byID[tc.id]
 		if !ok {

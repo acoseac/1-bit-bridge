@@ -110,12 +110,81 @@ def check(profiles, rows, commit):
     return lines, ok
 
 
+# The self-test's registry: three rows, synthetic, in the shape registry_rows
+# reads, with a comment and a string that name a rate and must not be read.
+SELF_TEST_REGISTRY = """
+struct DACProfile { let maxDSDRate: DSDRateCapability }
+nonisolated enum DACProfileRegistry {
+    static let profiles: [DACProfile] = [
+        DACProfile(
+            id: "fixture.published",
+            // a comment naming maxDSDRate: .dsd512, which is never read
+            maxDSDRate: .dsd256,
+            notes: ["a note // with maxDSDRate: .dsd64 in it"]
+        ),
+        DACProfile(
+            id: "fixture.lowered",
+            maxDSDRate: .dsd128
+        ),
+        DACProfile(
+            id: "fixture.pcm",
+            maxDSDRate: .none
+        )
+    ]
+}
+"""
+
+# (name, dop's heard, stated and refused rates, its row, the verdict wanted).
+SELF_TEST_CASES = [
+    ("a published maximum with a refusal at it (ifi.generic's shape)", 0, 11289600, [11289600], "fixture.published", True),
+    ("a refusal below the row's maximum", 2822400, 0, [5644800], "fixture.published", True),
+    ("a refusal above the row's maximum (the Mytek's shape)", 0, 0, [11289600], "fixture.lowered", True),
+    ("a heard rate at the row's maximum", 5644800, 0, [], "fixture.lowered", True),
+    ("a heard rate above the row's maximum", 11289600, 0, [], "fixture.lowered", False),
+    ("a stated rate above the row's maximum", 0, 11289600, [], "fixture.lowered", False),
+    ("a heard rate from a row with no DoP", 2822400, 0, [], "fixture.pcm", False),
+    ("a row the registry does not have", 2822400, 0, [], "fixture.absent", False),
+]
+
+
+def self_test():
+    """Pin the registry reader and the check on the synthetic registry: 0 when every case holds."""
+    failures = []
+    rows = registry_rows(SELF_TEST_REGISTRY)
+    if rows != {"fixture.published": 256 * 44100, "fixture.lowered": 128 * 44100, "fixture.pcm": 0}:
+        failures.append("the registry read as %r" % rows)
+    for name, heard, stated, refused, row, want in SELF_TEST_CASES:
+        dop = {"heardMaxBitRate": heard, "statedMaxBitRate": stated, "refusedBitRates": refused,
+               "source": {"kind": "ios-registry", "ref": "DACProfile.swift %s at iOS cd125088" % row}}
+        lines, ok = check([{"id": "fixture.profile", "dop": dop}], rows, "cd125088")
+        if ok != want:
+            failures.append("%s: %s, want %s (%s)" % (name, ok, want, "; ".join(lines)))
+    dop = {"heardMaxBitRate": 0, "statedMaxBitRate": 0, "refusedBitRates": [11289600],
+           "source": {"kind": "ios-registry", "ref": "DACProfile.swift fixture.lowered at iOS cd125088"}}
+    if check([{"id": "fixture.profile", "dop": dop}], rows, "cea8bdf6")[1]:
+        failures.append("a registry read at another commit than the profile names passes")
+    try:
+        registry_rows(SELF_TEST_REGISTRY.replace("maxDSDRate: .dsd128", "notes: []"))
+        failures.append("a row with no maxDSDRate before the next row reads")
+    except ValueError:
+        pass
+    for f in failures:
+        print("ios-check self-test: FAIL " + f)
+    print("ios-check self-test: %s (%d cases)" % ("FAIL" if failures else "PASS", len(SELF_TEST_CASES) + 3))
+    return 1 if failures else 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--registry", required=True, help="DACProfile.swift at the commit the profiles name")
-    ap.add_argument("--commit", required=True, help="the iOS commit the registry file is at")
+    ap.add_argument("--registry", help="DACProfile.swift at the commit the profiles name")
+    ap.add_argument("--commit", help="the iOS commit the registry file is at")
     ap.add_argument("--profiles", default=str(PROFILES), help="the database (default: the embedded profiles.json)")
+    ap.add_argument("--self-test", action="store_true", help="pin the reader and the check on a synthetic registry")
     args = ap.parse_args()
+    if args.self_test:
+        return self_test()
+    if not args.registry or not args.commit:
+        ap.error("--registry and --commit are required, unless --self-test")
     try:
         rows = registry_rows(pathlib.Path(args.registry).read_text(encoding="utf-8"))
         profiles = json.loads(pathlib.Path(args.profiles).read_text(encoding="utf-8"))["profiles"]

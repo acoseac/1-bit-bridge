@@ -130,6 +130,45 @@ func TestEveryClaimNamesItsProvenance(t *testing.T) {
 	}
 }
 
+// TestAHeardRateIsAHearingNeverALock: a heard DoP rate is on-device
+// listening evidence (the design's sections 1.1 and 2.1), so the lint asks a
+// DoP claim with a heard rate for a dop line that says it was heard; a line
+// that says the rate was negotiated, confirmed on hardware or reached a DoP
+// lock, which section 1.1 says hears nothing back, is no hearing. A claim
+// with no heard rate, a refusal alone, needs none.
+func TestAHeardRateIsAHearingNeverALock(t *testing.T) {
+	dopLine := func(text string) func(p *Profile) {
+		return func(p *Profile) { p.Provenance[2] = "dop: iOS profile fixture.dac, " + text + " (iOS cd125088)" }
+	}
+	runLintCases(t, []lintCase{
+		{"confirmed on hardware", dopLine("DSD128 hardware-confirmed, DSD256 refused"), "heard"},
+		{"a DoP lock", dopLine("DSD128 reached DoP lock, DSD256 refused"), "heard"},
+		{"a negotiation", dopLine("DSD128's carrier negotiated exactly, DSD256 refused"), "heard"},
+	})
+	p := fixtureProfile("fixture.dac", "00d1")
+	p.DoP.HeardMaxBitRate = 0
+	dopLine("DSD256's carrier refused on a device, DSD128 a DoP lock and no hearing")(&p)
+	if problems := fixture(nil, p).Lint(); len(problems) > 0 {
+		t.Errorf("a refusal with no heard rate lints as %v", problems)
+	}
+}
+
+// TestARefusedRateNamesItsRefusal: a refused rate is one a device refused,
+// or played as silence (section 2.1), so the lint asks a DoP claim with
+// refused rates for a dop line that says refused or silence.
+func TestARefusedRateNamesItsRefusal(t *testing.T) {
+	runLintCases(t, []lintCase{
+		{"a line that names no refusal", func(p *Profile) {
+			p.Provenance[2] = "dop: iOS profile fixture.dac, heard at DSD128, DSD256 not (iOS cd125088)"
+		}, "refused"},
+	})
+	p := fixtureProfile("fixture.dac", "00d1")
+	p.Provenance[2] = "dop: iOS profile fixture.dac, heard at DSD128, DSD256 played as silence (iOS cd125088)"
+	if problems := fixture(nil, p).Lint(); len(problems) > 0 {
+		t.Errorf("a refusal heard as silence lints as %v", problems)
+	}
+}
+
 // TestAnAnalogueControlNeedsItsProvenance: an analogue control a profile
 // lists for the DoP gain check to pass over is named by its interface, name
 // and index and carries a provenance line of its own, dated; the lint refuses
