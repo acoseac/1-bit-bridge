@@ -72062,3 +72062,171 @@ fa94ee4d and the budgets measured over the patched files. The largest movable
 entry, the check after open (5,481 bytes), stayed: the pointer `move_entry.py`
 proposed for it dropped its Don't sentence, which is longer than the 600
 characters the tool matches.
+
+## 2026-11-03 — B709: the engine's handoff test read b's report before the owner had handled it
+
+Backlog B709: CI's `test -race (rest)` job on #1390 (B705, which touched no
+player code) failed on main's code; the re-run passed:
+
+    --- FAIL: TestAnEntryHeardWhileItsCallIsUnderWayStops (0.04s)
+        --- FAIL: TestAnEntryHeardWhileItsCallIsUnderWayStops/deleted/a_prepare_of_it (0.00s)
+            handoff_test.go:266: b was heard with its call under way: selected 4097 (b is 4098), playing, last stop {Reason: Detail: Entry:0 At:0001-01-01 00:00:00 +0000 UTC}
+
+Worker b709 on legion0 (Ubuntu 26.04, linux/amd64, 16 cores, go1.27.3,
+`GOTOOLCHAIN=local`, umask 022), branch `fix/b709-handoff-heard-under-call`
+from main ffb4b3c1, the brief with Codex's binding notes (Argon was
+unavailable). Commits: red dcfbe2a6, fix 48c2f569, a comment-only 13de49d2,
+then this record. The rule is a new clause in `.claude/rules/player.md`'s
+"Player test ordering" bullet, shipped as a checked patch
+(`rules-b709.patch`; this worker cannot write `.claude/`), which leaves the
+file at 98,004 bytes, 98.0 % of its budget; its long form is B709's
+paragraph under that title in `ops/History-rules-player.md`.
+
+**Reproduced** through the build slot beside 16 busy loops (`while :; do :;
+done`, each under `timeout`): main's race binary, built with the tree clean,
+run from the package's directory with `-test.run
+'^TestAnEntryHeardWhileItsCallIsUnderWayStops$' -test.v -watchdog 20s`, one
+process per `-test.cpu`, TMPDIR on tmpfs. On the worktree's disk a subtest
+took 50 ms, most of it fsyncs, ten times CI's (0.04 s for the whole test);
+tmpfs gives CI's pace. Every failure was CI's line, and only the two "a
+prepare of it" subtests ever failed:
+
+| Runs | -cpu | Failed | deleted/a prepare of it | no longer next/a prepare of it |
+|---|---|---|---|---|
+| 500 | 1 | 0 | 0 | 0 |
+| 500 | 2 | 5 | 1 | 4 |
+| 500 | 4 | 2 | 1 | 1 |
+| 1,500 | 1 | 0 | 0 | 0 |
+| 1,500 | 2 | 22 | 12 | 10 |
+| 1,500 | 4 | 21 | 12 | 9 |
+
+**The cause: the test took its mark before the owner had noted a's report,
+and its wait for b's report took a's note for b's** (Codex's first hypothesis
+on the brief). At ffb4b3c1:
+
+1. `playing` (harness_test.go:649) posts a's Audible (:656) and returns once a
+   snapshot shows a audible (`waitSnap`, :657).
+2. The owner handles the report (events.go:146, `onAudible`) and, in `advance`
+   (owner.go:278), publishes the step's snapshot (`publishIfDirty`, :281)
+   before `sendReplies` (:292) gives the seams the step's notes, the replies
+   first and the notes after them (engine.go:718, :727-731). The harness
+   records "handled audible" there (`noteApplied`, through the `handled` seam,
+   harness_test.go:328).
+3. With b not yet submitted ("a prepare of it"), nothing `handoff`
+   (handoff_test.go:16) does after `playing` goes through the owner:
+   `s.prepared(a, 1)` (:20) reads the fake's record of b's Prepare, made in the
+   step that took the Start's answer (`startDone` → `reconcile` → `prepare`,
+   transport.go:1200, 883), and `s.preparedEvent` (:24) is a post
+   (events.go:13). So the subtest's mark (handoff_test.go:254) can be taken
+   before a's note is recorded.
+4. The edit marks b in its own step with b's Prepare held (`reconcile`,
+   transport.go:838-853, ahead of the `succCall` check at 854). The test posts
+   b's Submitted and Audible and waits for "handled audible" after its mark
+   (:263); a's note, recorded after the mark, satisfies it, and the snapshot
+   (:264) is read before b's report is handled: a selected, playing, no stop,
+   CI's line.
+5. Where b is submitted, `handoff` first waits for the Prepare of c after b,
+   which the owner makes in b's Submitted step, after a's step and its notes:
+   those cases never failed.
+
+**The engine is not at fault.** b's report, once handled, stops playback on
+b's mark (`onAudible`'s crossing loop, transport.go:1369), and a deleted b's
+on the queue check as well (:1376), so the deleted case, CI's, could show that
+line only if both failed. An engine that heard b unmarked would have moved the
+selection to b (`selectEntry`, :1390): control 2 below gives exactly that
+signature, "selected 4098 (b is 4098)", where CI's was 4097, a.
+
+**Red first** (dcfbe2a6). The harness gains a hold of a note (`holdNote`,
+`noteHold`, `letGo`): the owner, in the step that handled or applied what,
+once the step's snapshot is published and its replies sent, waits there before
+the harness records the note, until the test lets it go, waits for a note
+(`waitAppliedTimes` lets every hold the owner has reached go, and none holds
+while a wait is under way), or ends. The "a prepare of it" case runs a second
+time, "the owner held at its notes": held at its note of a's report until the
+test has taken its mark, and at its note of b's Submitted until the test waits
+for a note, the latest a scheduler could leave it. At main's `playing` both
+held rows are red every run with CI's line, 60 of 60 each (20 runs at each of
+`-cpu` 1, 2 and 4), the unheld rows green.
+
+**The fix** (48c2f569). `playing` marks before its report and waits for the
+owner's note of it (`waitApplied("handled audible", mark)`), then reads the
+snapshot as before, so a mark a caller takes after it is past that note. Each
+`playing` call's report is the first its engine is sent (every call follows
+`startHarness` or a boot, with nothing reported before it), so the first
+"handled audible" after its mark is its report's. The held rows pass, and so
+does the whole engine package (381 tests and subtests).
+
+**Controls**, on 48c2f569, each uncommitted and put back with `git checkout
+HEAD --`, the tree clean after each; 20 runs at each of `-cpu` 1, 2 and 4:
+
+| # | Mutation | Predicted | Observed |
+|---|---|---|---|
+| 1 | the fix undone: `playing` waits for the snapshot alone | both held rows red every run with CI's line, every other row green | 120 failures, 60 of 60 in each held row, "selected 4097 (b is 4098), playing"; none elsewhere |
+| 2 | the engine marks nothing while a call is under way (`reconcile` returns at `succCall` before its marking loop) | the three no-longer-next Prepare rows red every run with b selected; the deleted rows green behind the queue check, the Cut rows green (their Cut is asked for after the mark) | 180 failures, 60 of 60 in each of those three, "selected 4098 (b is 4098), playing"; none elsewhere |
+
+Control 2 is 4b1's "no mark while a call is under way" on the fixed test: it
+still pins the engine's rule, and the selection tells the engine's fault from
+the test's.
+
+**Stress after the fix**, the binary built with the tree clean at 48c2f569,
+the same 16 busy loops and TMPDIR: 1,500 runs at each of `-cpu` 1, 2 and 4,
+none failed in any subtest (each held row 1,500 of 1,500 too). The whole
+engine package, 10 runs at each `-cpu` beside the same loops: 3,810 tests and
+subtests passed at each, none failed.
+
+**The same order elsewhere: every mark an engine test takes.** A step's
+snapshot and its replies come before its notes, so a mark taken at a step's
+snapshot, at its reply, or at a fake's record of a call the step made can come
+before that step's note; a wait for a note of the same name can then take it.
+Each of the 77 `appliedMark` calls in the engine's tests at ffb4b3c1 was read
+for the last thing the test saw of the owner before it, and for the notes it
+then waits for:
+
+| Where | Test | The mark follows | Verdict |
+|---|---|---|---|
+| handoff_test.go:254 | `TestAnEntryHeardWhileItsCallIsUnderWayStops`, a prepare of it | a's report's snapshot (`playing`), no owner round trip | B709; fixed |
+| track_test.go:127 | `TestDetailsReportedOnceTheOccurrenceIsHeardAreItsTrack` | the first Details' snapshot (:123) | same order: its wait for the second Details could take the first's note, and the count, read before the second was handled, passes whatever the engine made of the same details again; fixed |
+| table_test.go:196 | `TestTheStateCommandTable`, the releasing state | its setup Stop's snapshot (:60) and the fake's record of the release | same order: the releasing/stop cell's wait (:199) could take the setup's note and open the held release before its own Stop ran, so the cell could pass having run that Stop once stopped; fixed |
+| handoff_test.go:379 | `TestAPrepareRefusedAfterItsSuccessorWasHeardKeepsTheChain` | a's report's snapshot (`playing`) | same order; nothing it reads before its next wait depends on b; covered by `playing` now |
+| advance_test.go:642, :645 | `TestAnAudibleFromAReleasingSessionDecidesNoPlayCommand` | a's report's snapshot; then the PlayID's note | the first wait is for "play id", the second mark after that note: safe |
+| the other 71 | | a note awaited, an admission (noted as the owner admits the command, before anything of it is visible), a later step the test saw, or a waited name no step before the mark records | safe |
+
+`heard` (advance_test.go:968) keeps the snapshot-only wait `playing` had: no
+caller of it waits for a report's note after it.
+
+**Checks.** On legion0 (Ubuntu 26.04, linux/amd64, go1.27.3,
+`GOTOOLCHAIN=local`, umask 022, TMPDIR on disk under `.tmp/_b709`), each
+through the shared build lock, at 48c2f569 with this record in the tree:
+- `go test -race -count=1 -timeout 30m -tags
+  ts_omit_webclient,ts_omit_debugeventbus ./internal/player/...`: 11
+  packages ok, 3 with no test files (engine 27 s).
+- `make test-fast` (every package, no race): 80 packages ok, none failed, 14
+  with no test files; the Linux-only ones among them (internal/alsa,
+  alsactl, alsapcm, atomicwrite's durable writer, backup's identity paths,
+  the player's binding and hotplug), and cmd/bridge's sweeps over the
+  tracked docs, this record included.
+- `make vet`, and `GOOS=windows go vet ./...` with the tags: clean.
+  go1.27.3's gofmt on every changed Go file: clean.
+- `make docs-check`: ok as the tree stands; with the rules patch player.md
+  is 98,004 bytes, 98.0 %, by the budget script's own `measure` and `report`
+  over the patched copy, and docs-check is ok; the patch checked by a strict
+  applier.
+- The qualification-version check, `go run ./scripts/qualification-version
+  -base main -head HEAD` with the tags: "guarded code changed without
+  qualificationVersion increase (32 -> 32)", exit 1 (below).
+- 13de49d2, comment only, after them: formatted, vetted, and the engine
+  package run under `-race`, ok.
+- At the merge, qualificationVersion rises to 34 (main had 33 after B674),
+  with the native-qualification runbook's five mentions, because the
+  engine's tests are under the guarded prefix `internal/player/engine/`.
+- Not run here: macOS and Windows natively; Windows' vet alone ran.
+
+**For the owner.**
+- The qualification check fails, as it must: `internal/player/engine/` is a
+  guarded prefix (`guardedPrefixes`, version_gate.go), its test files
+  included, and the version stays at main's 32 (the brief: set at merge).
+  B579 and B605, test-only too, raised it and pinned
+  `ops/b470-native-qualification.md` to the new version.
+- `player.md` is at 98.0 % of its budget with the patch: the next entry there
+  needs a move first (`scripts/doc-split/move_entry.py`).
+- No backlog entry was written: the backlog file is not on this host.
