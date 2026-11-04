@@ -73490,3 +73490,265 @@ in-flight contacts, candidates and reports. `alsa/qualification.go` and
 `internal/alsa` rows of `TestQualificationDependencyGate` and
 `TestQualificationActivationPaths/internal/alsa/qualification.go` failed;
 restored clean.
+
+## 2026-11-04 — B728 B2: the DAC profile database
+
+PR B2 of the DSD capability plan (`ops/plan-b728-dsd-capability-design.md`:
+its section 2, item 10 of section 9.1, and B2's row of section 11), on
+`feat/b728-b2-dac-profiles` from main 5d38fa43, which holds B1 (#1400).
+Codex and Argon reviewed the brief against #1400's head, and the
+orchestrator's decisions on their notes were binding: the iFi capture tests
+shared-ID matching and establishes no DoP, raw-maximum or native claim for
+its unit; no QX13 profile ships while its identity is a placeholder, and its
+test uses a fixture; section 2.4's two checks are part of the PR, the
+kernel-derived entries against the pinned tag (named, not "v6.x") and the
+imported DoP rates against their iOS rows, the latter against the registry
+file at iOS cd125088 the brief supplies, since this host has no iOS
+checkout; and the seed's raw text (the captures, the iOS rows' prose) is
+input alone, never profile prose or committed evidence. The rules change
+ships as `rules-b728-b2.patch` (outside the tree), its long form and this
+record committed here.
+
+**What changed.**
+- `internal/player/dacprofile` (new, unguarded): schema 1 as section 2.1
+  gives it, `analogVolumeControls` and `unityAtRawMax` with their evidence
+  included; `Parse` (a strict decode, then the lint, refusing the database
+  on any problem) and `Default` over the embedded `profiles.json`; `Lint`;
+  `Match`; `Key` with its canonical form, `dacKey` and `Equal`.
+- `bridge output dac inspect --json` gains `manufacturer`, `product`,
+  `bcdDevice` and `modelProblem` per card, and the text form a `model:`
+  line. They come through `alsa.SysfsReader.Qualification`, the reader
+  section 2.3 names, so nothing under `internal/alsa/` (guarded whole since
+  B1's round 3) changed, and the qualification version stays 36; that reader
+  is all or nothing (below). A unit the second reading finds at another
+  port, interface or enumeration than the inventory's shows none.
+- `scripts/dac-profiles/kernel-check.sh` (CI's new `dac-profiles` job, in
+  the gate's fan-in; its `go test` line in the build-site census) and
+  `scripts/dac-profiles/ios-check.py` (the author's), with a README.
+- `CLAUDE.md`: the package's architecture row, and its routing to
+  `player.md`. `ops/History-rules-player.md`: the B2 bullet's long form.
+  The patch adds the bullet (section 9.1, item 10, verbatim) to player.md's
+  B728 section and `scripts/dac-profiles/**` to its paths.
+
+**What each seed DAC's profile became.**
+- AURALiC Altair G1, `auralic.altair.g1` (1511:0062, product `ALTAIR G1
+  USB Audio 2.0`): native `DSD_U32_BE` to DSD512 (22579200), from its
+  capture's stream file (interface 1, altset 3, frame rates to 705600).
+  No DoP claim: it has no iOS row. The kernel's `DSD_RAW` flag for vendor
+  1511 is vendor-wide and seeds nothing.
+- Mytek Brooklyn DAC+, `mytek.brooklyn.dac.plus` (25ce:0025, product
+  `Brooklyn DAC+`): native `DSD_U32_BE` to DSD256 (11289600) from its
+  capture (interface 2, altset 2, to 352800); DoP heard to DSD128
+  (5644800) with DSD256 refused, from iOS `mytek.brooklyn.dac.plus` at
+  cd125088 (confirmed on hardware, the row's log of 2026-06-21), and on
+  Linux its S32_LE altset stops at 384000, below DSD256's 705600 carrier.
+  No stated rate: the row's DSD256 is a comment, not a DoP figure.
+- Chord Hugo 2, `chord.hugo2` (245f:0815, product `Hugo2`): no native
+  claim, since its stream file lists S32_LE alone; DoP heard to DSD256
+  (11289600), iOS `chord.hugo2` at cd125088, hardware-confirmed
+  2026-08-29, and its Linux altset takes the 705600 carrier at 32 bits;
+  `dsdPrefillMs` 700, the row's DSD resync delay of 0.7 s.
+- The iFi unit on 20b1:0010 (product `iFi (by AMR) HD USB Audio`): no
+  profile. 20b1:0010 is a shared reference ID, and the capture establishes
+  no claim (full speed, PCM to 96 kHz, no DSD altset, so not even DSD64's
+  176.4 kHz DoP carrier; the iOS `ifi.golink` and `ifi.generic` rows are
+  other models'), so the unit reads as unknown. An identity-only profile
+  was not made: it would make the model "known" while claiming nothing,
+  and section 3.2's `auto` row for a known DAC plays native wherever the
+  kernel offers it.
+- Shared reference IDs: 20b1:0010 (the owner's identification, the iFi
+  capture) and 16d0:071a, the Amanero Combo384 board, whose kernel quirk
+  follows the board's bcdDevice alone, so it seeds nothing.
+- The kernel seed: 38 profiles, `kernel.<vid>-<pid>`, each named by its ID
+  ("USB audio device 0644:8043"), since the kernel names models only in
+  comments, which nothing here copies; `DSD_U32_BE` with no rate, product
+  string, interface or firmware list.
+
+**The kernel seed, at v6.12**, the tag `scripts/alsa-abi` pins
+(`uapiKernel` in `internal/alsapcm/uapi.go`). `sound/usb/quirks.c` there is
+git blob c5fd1803, sha256 26cfb822, 2,373 lines. A direct curl was refused
+by the sandbox, so it was fetched through the build slot, as B1's alsa-abi
+run fetched its header, into `.tmp` (never committed); `kernel-check.sh`'s
+own fetch got the same bytes. `TestTheKernelSeedIsThePinnedTags` read 39
+device-specific DSD facts and 19 vendor-wide rules from it, every fact
+`DSD_U32_BE` but one of the Amanero board's:
+- the format quirk's switch on the unit's ID: altsetting 2 for 139f:5504,
+  16d0:0a23, 20b1:3089, 2522:0007, 2522:0009, 2522:0012 and 2772:0230;
+  altsetting 3 for 0d8c:0316, 10cb:0103, 16d0:06b2, 16d0:06b4, 16d0:0733,
+  16d0:09d8, 16d0:09db, 16d0:09dd, 1db5:0003, 20a0:4143, 22e1:ca01,
+  249c:9326, 2616:0106, 2622:0041, 278b:5100, 27f7:3002, 29a2:0086 and
+  6b42:0042; and 16d0:071a by its bcdDevice (0199 `DSD_U32_LE`, 019b and
+  0203 `DSD_U32_BE`), the shared Amanero board, not seeded;
+- the flags table's `ITF_USB_DSD_DAC` device entries, `DSD_U32_BE` on the
+  last altsetting after the vendor mode switch: 0644:8043, 0644:8044,
+  0644:804a, 0644:806b, 154e:1002, 154e:1003, 154e:3005, 154e:3006,
+  1852:5062 and 1852:5065. Section 2.3's parenthesis names the format quirk
+  and the `DSD_RAW` table; these are device-specific DSD quirks of the same
+  file, so the seed takes them;
+- the flags table's `DSD_RAW` device entries, `DSD_U32_BE` on each
+  altsetting whose descriptor marks raw data: 154e:300b, 21b4:0230 and
+  21b4:0232;
+- vendor-wide, seeding nothing: the format quirk's rule for vendor 23ba
+  (products below 0110), and `DSD_RAW` for vendors 1511 (the AURALiC's),
+  152a, 18d1, 20b1, 21ed, 22d9, 23ba, 25ce (the Mytek's), 278b, 292b,
+  2972, 2ab6, 2afd, 2d87, 3336, 3353, 35f4, 3842 and c502.
+The reader blanks the file's comments before it reads anything, refuses a
+shape it does not know rather than leave a fact out, and is test code alone:
+`TestTheKernelQuirkReaderReadsEachShape` holds it to a synthetic file of
+made-up IDs on every test run.
+
+**The iOS check**, `python3 scripts/dac-profiles/ios-check.py --registry
+<seed>/DACProfile-cd125088.swift --commit cd125088`:
+
+    iOS registry at cd125088: 20 rows; profiles.json
+      ok chord.hugo2: row chord.hugo2, maxDSDRate 11289600; heard 11289600, stated 0, refused []
+      ok mytek.brooklyn.dac.plus: row mytek.brooklyn.dac.plus, maxDSDRate 5644800; heard 5644800, stated 0, refused [11289600]
+
+**What the design left open**, for the owner or a later PR:
+- A kernel-seeded profile's name: the kernel names its models only in
+  comments, which the brief bars copying, and the design does not say where
+  the name comes from; each is named by its ID, and section 7.4 shows the
+  profile's name.
+- Which rates a kernel claim reports: the kernel states none, while the
+  `reported` rung (section 1.1) is per rate; `maxBitRate` is 0 for every
+  kernel-seeded profile.
+- Section 3.2's `auto` row for a known DAC asks only that native be offered,
+  not that the profile claim it, so a profile with a DoP claim alone (the
+  Hugo 2) makes native preselectable wherever the kernel offers it (moot on
+  its capture, which has no DSD altset). B5 decides.
+- `pcmEntryMs` is in section 2.1's example but section 2.3 says resync
+  delays seed the prefill alone, and nothing reads it: the schema keeps it,
+  no seed sets it.
+- What makes an ID a shared reference ID: the design gives no test. Two are
+  listed, on the evidence above; 0d8c:0316 and 20b1:3089 are on chip
+  makers' vendor IDs (C-Media's, XMOS's) and 20a0:4143 is the WaveIO board,
+  each seeded as the kernel lists it; if one is shared, its claim is still
+  its firmware's, but other products on it would read as known.
+- The model identity's reader: `alsa.Qualification` takes the three strings
+  all or nothing, so a unit with no manufacturer string shows none, and it
+  cannot give the "-" a dacKey needs for an absent product. A reader that
+  takes each alone is in `internal/alsa/`, guarded since B1's round 3, so
+  the PR that needs it (B3, B5 or B7) takes a qualification bump that
+  section 8's table, which puts B2 to B13 outside the guard, did not plan.
+- The DoP gain check (B5) will refuse the Hugo 2 and the Mytek as captured:
+  each one's `PCM Playback Volume` read below its maximum (27646 of 32767,
+  20224 of 25344), and no capture shows either control after the DoP
+  decoder, so neither is on the analogue list.
+- `heardMaxBitRate` holds the iOS rows' on-device evidence, as section 2.3
+  reads "hardware-confirmed": for the Hugo 2 and the Mytek that is DoP
+  reaching the rate on hardware, which section 1.1 calls the packer's own
+  count on iOS, not a listening.
+
+**Commits.** e9af4cd8 the seam: the schema and the API, `Lint` finding
+nothing, `Match` knowing nothing, `Key` giving no form, an empty database;
+39ce04d8 the red tests; b1e2ae3b the lint, the matcher, the key and the
+seed; 15820cfe `dac inspect`; 1ee40148 the two checks, the CI job and the
+census; dada0f5c the long form and CLAUDE.md; c67ab94f a test the controls'
+design found missing (`readModel`'s bracket, which 15820cfe added untested);
+this record.
+
+**Red first** (39ce04d8, on e9af4cd8), each for its own reason:
+- `TestAProfileMatchesByUSBIdentityNeverByName`: "the Hugo 2: matched "",
+  want "chord.hugo2"", every captured and kernel-seeded unit and the
+  narrowing rows; the never-by-name rows green on both sides, as pins.
+- `TestASharedReferenceIDNeedsItsProductString`: "the database does not
+  list 20b1:0010 as a shared reference ID"; "a profile on 20b1:0010 without
+  its product string lints as []".
+- `TestNoTwoProfilesMatchOneIdentity`: "one product string and none:
+  refused false, want true".
+- `TestEveryClaimNamesItsProvenance`, `TestAnAnalogueControlNeedsItsProvenance`,
+  `TestAUnityAtRawMaxEntryNeedsItsEvidenceAndFirmware`,
+  `TestTheCaveatCodesAreAClosedList`, `TestTheSchemaRefusesWhatItDoesNotDescribe`:
+  "the lint says [], want a problem saying …", row by row.
+- `TestTheDACKeyMatchesItsVectors`: "the Hugo 2: canonical form "", want
+  "dacKey/1\n245f\n0815\n=1\n=Hugo2""; the ten vectors were computed with
+  Python's hashlib over the forms written out, and two again with
+  coreutils' sha256sum (`d1-ed3dc7cedf69d4df`, `d1-e74237462b8b0ad2`), never
+  with this package. `TestAKeyHoldsOnlyWhatTheReaderReturns`,
+  `TestKeysCompareByTheirCanonicalForm` likewise.
+- `TestTheQX13CarriesItsHiddenModeCaveat`: "the fixture's unit matched "",
+  false".
+- `TestTheCapturedModelsAreSeededAsTheirEvidenceSays`, `TestMatchHandsOutACopy`,
+  `TestTheKernelSeedNamesTheTagAlsaABIPins`: the database empty.
+- `TestTheKernelSeedIsThePinnedTags` with v6.12's file: all 39 facts
+  "neither seeded nor a shared reference ID". Green on both sides, as pins:
+  `TestTheKernelQuirkReaderReadsEachShape` (the reader is test code) and
+  `TestTheEmbeddedDatabaseIsWrittenInItsCanonicalForm`.
+- cmd/bridge `TestDACInspectPrintsTheModelIdentity`: no model line, the
+  keys absent; the other dac tests green on both sides.
+
+**Negative controls**, by a runner outside the tree: each made exact,
+once-only replacements, built the affected test binary, ran each named test
+alone (with `-test.v`, a pass that printed no PASS line counting as not
+run), and put the bytes back from memory, checked by SHA-256; a baseline of
+all 16 named tests was green first, and `git status` was clean after. All
+24 went red. The brief's three are C1 and C2 (a matcher by name), C3 to C5
+(a shared ID without its product string: the lint's side, Match's and the
+data) and C6 to C8 (two profiles one identity: the lint's side and
+Match's).
+
+| # | Mutation | Red |
+|---|---|---|
+| C1 | Match also knows a unit whose product string is a profile's name | `TestAProfileMatchesByUSBIdentityNeverByName` ("another ID with the Hugo 2's profile name: matched "chord.hugo2"") |
+| C2 | Match compares product strings as iOS's matcher does, folded, by substring | the same ("the Hugo 2's IDs in capitals: matched "chord.hugo2"") |
+| C3 | the lint takes an alternative on a shared ID without its product string | `TestASharedReferenceIDNeedsItsProductString` ("lints as []") |
+| C4 | Match does not ask again of a shared ID | the same ("past the lint … matched "fixture.ifi"") |
+| C5 | profiles.json lists 0011, not 0010 | the same ("does not list 20b1:0010") |
+| C6 | the lint lets two profiles match one identity | `TestNoTwoProfilesMatchOneIdentity` ("refused false, want true") |
+| C7 | Match takes the first of two profiles | the same ("a unit two profiles match is known as "fixture.first"") |
+| C8 | the overlap test reads an unset interface as a value of its own | the same ("one interface and none") |
+| C9 | no provenance line asked of a claim | `TestEveryClaimNamesItsProvenance` ("no identity line") |
+| C10 | a provenance line needs no date or version | the same; `TestAnAnalogueControlNeedsItsProvenance` |
+| C11 | an analogue control needs no provenance | `TestAnAnalogueControlNeedsItsProvenance` ("no provenance") |
+| C12 | a measurement's firmware need not be one the entry lists | `TestAUnityAtRawMaxEntryNeedsItsEvidenceAndFirmware` |
+| C13 | a raw-maximum entry needs no firmware | the same ("no firmware") |
+| C14 | an absent interface hashes as "=0" | `TestTheDACKeyMatchesItsVectors` ("no interface"); `TestKeysCompareByTheirCanonicalForm` |
+| C15 | a present product string written without its "=" | the same two ("an absent product string and one of -") |
+| C16 | keys compared field by field | `TestKeysCompareByTheirCanonicalForm` ("an absent interface and interface 0 compare equal") |
+| C17 | NewKey takes white space around a product string | `TestAKeyHoldsOnlyWhatTheReaderReturns`; `TestTheSchemaRefusesWhatItDoesNotDescribe` |
+| C18 | a caveat's note may say verified, lock or bit-exact | `TestTheCaveatCodesAreAClosedList` ("a note saying verified") |
+| C19 | Match's copy shares the database's formats | `TestMatchHandsOutACopy` |
+| C20 | kernel.0644-8043 claims 0644:8045 | `TestTheKernelSeedIsThePinnedTags` ("v6.12 gives 0644:8045 no device-specific DSD quirk", and 0644:8043 "neither seeded nor a shared reference ID") |
+| C21 | kernel.0d8c-0316's native line says altsetting 2 | the same ("does not say "altsetting 3" at v6.12") |
+| C22 | the kernel reader drops the flags table's DSD_RAW devices | the same (36 facts); `TestTheKernelQuirkReaderReadsEachShape` |
+| C23 | inspect keeps the model of a unit that changed while read | `TestDACInspectShowsNoModelOfAUnitThatChangedWhileRead` ("another enumeration") |
+| C24 | inspect never sets the model's strings | `TestDACInspectPrintsTheModelIdentity`; the bracket test |
+
+The iOS check's control, on a copy of the database in `.tmp`: the Hugo 2's
+heard rate at DSD512 and the Mytek's refusal at DSD128 exit 1 ("heardMaxBitRate
+22579200 exceeds the row's 11289600"; "refused 5644800 is a rate the row
+reaches"), and a registry read at another commit is refused for both rows.
+
+**For the owner.**
+- The database is not wired: nothing plays by it until B5 and B7.
+- Captures for the iOS-profiled models without one (the QX13 first) let a
+  later database PR import their DoP evidence and caveats; each needs
+  `bridge output dac inspect --json` (now with the strings) beside the
+  card's stream file and its amixer state.
+- No backlog entry was written: the backlog file is not on this host.
+
+**Checks**, on legion0 (Linux, amd64, Go 1.27.3), in one turn of the shared
+build lock, with TMPDIR under `.tmp/_b728-b2`, at c67ab94f:
+- `make test` (race, `-timeout 30m`): 81 packages ok, none failed, 14 with
+  no test files; the Linux-only ones ran (internal/alsa, alsactl, alsapcm,
+  atomicwrite's durable writer, backup's identity paths, the player's
+  binding and hotplug). cmd/bridge 974 s, internal/player/dacprofile 1.2 s,
+  scripts/third-party-licenses (the build-site census, the new script's
+  site in it) 260 s.
+- `make build-all`: check-build-tags OK and the six targets; its `dist/`
+  removed after.
+- `make vet` natively, and with `GOOS=windows`, `GOOS=linux GOARCH=386` and
+  `GOOS=linux GOARCH=arm`: clean.
+- go1.27.3's gofmt on cmd, internal and scripts: clean.
+- `make docs-check`: ok as the tree stands (CLAUDE.md 73.6%), and in a copy
+  with the patch applied (player.md 94,874 bytes, 94.9%; the worst load,
+  player_openhome_test.go's, 63.7%).
+- The qualification check, `go run ./scripts/qualification-version -base
+  main -head HEAD` with the tags: "qualification version OK: main..HEAD",
+  at 36, since no guarded path changed.
+- `scripts/dac-profiles/kernel-check.sh`, with the v6.12 copy and with its
+  own fetch: ok, blob c5fd1803 both times; `ios-check.py` against the
+  registry at cd125088: ok.
+- Not run here: macOS and Windows natively, the new `dac-profiles` job on
+  CI's runner (its script ran here both ways), and any hardware (B2's tier
+  is the standard one).
