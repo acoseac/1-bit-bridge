@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
@@ -26,7 +27,9 @@ import (
 // the record is a file beside the config, in the directory a write of the
 // config lands in (fsutil.ResolveParent, where the config's lock is), named
 // after it: `.bridge.yaml.datadir` beside bridge.yaml, holding the data dir's
-// path.
+// path. Serve's is beside the file its boot read of the config was of
+// (serveDataDirRecord), for its check and its write alike, never beside the
+// file the config's name opens by then.
 //
 // Serve writes it once its database is open and its lock file is there
 // (recordServeDataDir), and, before it prepares the data dir, refuses one the
@@ -60,14 +63,36 @@ type dataDirRecord struct {
 }
 
 // dataDirRecordPath is where the record of the config at cfgFile is: beside
-// the file the OS opens for the name, as the config's lock is
-// (config.LockFile), named after it.
+// the file the OS opens for the name now, as the config's lock is
+// (config.LockFile), named after it. bridge doctor asks it as it reads the
+// config; serve keeps to the file its boot read was of (serveDataDirRecord).
 func dataDirRecordPath(cfgFile string) (string, error) {
 	dir, name, err := fsutil.ResolveParent(cfgFile)
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "."+name+dataDirRecordSuffix), nil
+	return dataDirRecordBeside(filepath.Join(dir, name)), nil
+}
+
+// dataDirRecordBeside is the record of the config file file: beside it, named
+// after it.
+func dataDirRecordBeside(file string) string {
+	return filepath.Join(filepath.Dir(file), "."+filepath.Base(file)+dataDirRecordSuffix)
+}
+
+// serveDataDirRecord is serve's record: beside the file its boot read of the
+// config was of (config.LoadFileAt), never the file the config's name opens by
+// the time serve checks the record or writes it. A link at the name can be
+// repointed in between (a dotfiles restow, a home-manager switch during
+// serve's boot), and serve then checked another config's record for its data
+// dir and wrote its data dir into that config's record (Codex on #1397). ""
+// where the boot read resolved no file: serve keeps no record then.
+func serveDataDirRecord(boot config.BootFile) string {
+	file, ok := boot.File()
+	if !ok {
+		return ""
+	}
+	return dataDirRecordBeside(file)
 }
 
 // readDataDirRecord answers the data dir the record at path names, "" for no
@@ -117,18 +142,17 @@ func (e *dataDirGoneError) fix() string {
 }
 
 // checkServeDataDirRecord refuses the data dir dataDir, with a
-// *dataDirGoneError, when the record beside the config at cfgFile names it
-// and it holds neither its database nor its lock file: neither is ever
-// removed by the bridge, and a serve that opened its database there took its
-// lock first, so a data dir holding neither is not the one serve served from.
-// Asked before serve prepares the data dir, so a data dir that is not there
-// is refused and never made. Anything else is no refusal: no record, or one
+// *dataDirGoneError, when the record at path names it and it holds neither
+// its database nor its lock file: neither is ever removed by the bridge, and
+// a serve that opened its database there took its lock first, so a data dir
+// holding neither is not the one serve served from. Asked before serve
+// prepares the data dir, so a data dir that is not there is refused and never
+// made. Anything else is no refusal: no record (path "" included), or one
 // that does not read or names another data dir (the config's dataDir
 // changed), a database or a lock file there, and an error other than an
 // entry's absence, which serve's preparation, its lock and its store answer.
-func checkServeDataDirRecord(cfgFile, dataDir string) error {
-	path, err := dataDirRecordPath(cfgFile)
-	if err != nil {
+func checkServeDataDirRecord(path, dataDir string) error {
+	if path == "" {
 		return nil
 	}
 	recorded := readDataDirRecord(path)
@@ -143,16 +167,16 @@ func checkServeDataDirRecord(cfgFile, dataDir string) error {
 	return &dataDirGoneError{dataDir: dataDir, record: path}
 }
 
-// recordServeDataDir writes the record beside the config at cfgFile naming
-// dataDir, once serve's database is open there and its lock file is too, and
-// only when the record does not name it already. A record serve cannot write
-// (a config directory it may not write) is said once, at Warn, and the start
-// goes on: a later start cannot then tell that data dir's volume missing.
-func recordServeDataDir(cfgFile, dataDir string) {
-	path, err := dataDirRecordPath(cfgFile)
-	if err != nil {
-		logger.Warn("could not find where to record the data directory beside the config: a later start cannot tell the data directory's volume missing from a fresh install",
-			"dataDir", dataDir, "err", err)
+// recordServeDataDir writes the record at path naming dataDir, once serve's
+// database is open there and its lock file is too, and only when the record
+// does not name it already. No path (a boot read that resolved no file), or a
+// record serve cannot write (a config directory it may not write), is said
+// once, at Warn, and the start goes on: a later start cannot then tell that
+// data dir's volume missing.
+func recordServeDataDir(path, dataDir string) {
+	if path == "" {
+		logger.Warn("could not record the data directory beside the config: serve's boot read resolved no file for the config's name, so a later start cannot tell the data directory's volume missing from a fresh install",
+			"dataDir", dataDir)
 		return
 	}
 	if recorded := readDataDirRecord(path); recorded != "" && filepath.Clean(recorded) == filepath.Clean(dataDir) {

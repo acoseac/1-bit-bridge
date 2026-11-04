@@ -3347,8 +3347,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// (a NAS that starts the bridge before its disks), which a fresh data dir
 	// on the system disk would hide under a new TLS pair and no paired device
 	// (backlog B651, serve_data_dir_record.go). Its service manager starts
-	// serve again until the volume is there.
-	if err := checkServeDataDirRecord(*configPath, cfg.DataDir); err != nil {
+	// serve again until the volume is there. The record is the one beside the
+	// file the boot read was of, here and where serve writes it below, never
+	// beside the file the config's name opens by then (serveDataDirRecord).
+	dataDirRecord := serveDataDirRecord(cfgBootFile)
+	if err := checkServeDataDirRecord(dataDirRecord, cfg.DataDir); err != nil {
 		fmt.Fprintf(stderr, "serve: %v\n", err)
 		return 1
 	}
@@ -3551,9 +3554,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	}
 	defer manifestStore.Close()
 	// The database is there now, and the lock file beside it: the record
-	// beside the config names this data dir for the check at the next start
-	// (backlog B651).
-	recordServeDataDir(*configPath, cfg.DataDir)
+	// beside the file the boot read was of names this data dir for the check
+	// at the next start (backlog B651).
+	recordServeDataDir(dataDirRecord, cfg.DataDir)
 	// bgWriters tracks the background goroutines that WRITE the manifest store
 	// (periodic scanner, enricher, fs watcher, atlas harvester, and the admin
 	// server whose bgScans drain is the SQLite guard). On shutdown they MUST

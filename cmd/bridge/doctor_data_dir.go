@@ -66,14 +66,15 @@ func doctorDataDirNotChecked(lookup *doctor.ConfigFile) func(context.Context) do
 //
 // Before all of that, the check serve makes ahead of its preparation
 // (checkServeDataDirRecord, backlog B651): a data directory the record beside
-// the config at cfgFile names that holds neither its database nor its lock
-// file, whether it is there or not, is a fail in the refusal's words.
+// the file the config's name at cfgFile opens (dataDirRecordPath) names that
+// holds neither its database nor its lock file, whether it is there or not,
+// is a fail in the refusal's words.
 func dataDirCheck(cfgFile, dir string) (doctor.Check, bool) {
 	line := func(status doctor.Status, summary, hint string) (doctor.Check, bool) {
 		return doctor.Check{Name: dataDirCheckName, Status: status, Summary: summary, Hint: hint}, true
 	}
 	var gone *dataDirGoneError
-	if errors.As(checkServeDataDirRecord(cfgFile, dir), &gone) {
+	if record, err := dataDirRecordPath(cfgFile); err == nil && errors.As(checkServeDataDirRecord(record, dir), &gone) {
 		return line(doctor.Fail, "bridge serve will not start: "+gone.what(), gone.fix())
 	}
 	nearest, inTheWay, err := fsutil.BlockingEntry(dir)

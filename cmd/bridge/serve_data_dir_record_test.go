@@ -297,7 +297,7 @@ func TestTheRecordRefusesOnlyTheDataDirItNamesWhileItHoldsNeitherFile(t *testing
 	refused := func() bool {
 		t.Helper()
 		var gone *dataDirGoneError
-		err := checkServeDataDirRecord(cfg, dataDir)
+		err := checkServeDataDirRecord(dataDirRecordFile(cfg), dataDir)
 		if err != nil && !errors.As(err, &gone) {
 			t.Fatalf("the check answered %v, want nil or a *dataDirGoneError", err)
 		}
@@ -319,6 +319,9 @@ func TestTheRecordRefusesOnlyTheDataDirItNamesWhileItHoldsNeitherFile(t *testing
 	writeDataDirRecord(t, cfg, dataDir)
 	if !refused() {
 		t.Error("the check took a data dir its record names that is not there")
+	}
+	if err := checkServeDataDirRecord("", dataDir); err != nil {
+		t.Errorf("the check with no record to read (a boot read that resolved no file) answered %v, want nil", err)
 	}
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatal(err)
