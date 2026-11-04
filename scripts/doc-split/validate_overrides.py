@@ -5,7 +5,9 @@
   validate_overrides.py --base REV --file F NAME      check a candidate JSON file for one NAME
 
 A line is rejected when it: breaks the bullet/paragraph shape; doesn't end with the entry's
-pointer suffix; drops one of the entry's own bolded "Don't…/Never…" sentences; carries a code
+pointer suffix; drops one of the entry's own bolded "Don't…/Never…" sentences, of any length and
+its title's included, read from the entry itself (each must stand whole inside one of the line's
+bold spans, and an entry or line whose bold cannot be read safely is rejected too); carries a code
 span (of any backtick length) or #number that is not in the original entry as a whole
 identifier (the guard against invented or truncated symbols); has unbalanced ** or backticks,
 a line break, or more than 600 bytes; or copies a test-count claim (a check kept from the iOS
@@ -21,20 +23,13 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from condense_rules import build, REPO  # noqa: E402
-from mdblocks import existing_file, load_claim_regex, read_text, rules_names, safe_rev  # noqa: E402
+from mdblocks import (BoldError, appears_whole, dropped_donts, existing_file, load_claim_regex,  # noqa: E402
+                      read_text, rules_names, safe_rev)
 
 CLAIM = load_claim_regex(REPO)
 # A CommonMark code span: a run of N backticks, its content, and the next run of exactly N.
 SPAN_RE = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)")
 MAX_BYTES = 600
-
-
-def appears_whole(span, text):
-    """SPAN occurs in TEXT without being part of a longer identifier: `Dashboard` does not match
-    DashboardController, while `seek(to:)` still matches PlayerService.seek(to:)."""
-    before = r"(?<!\w)" if re.match(r"\w", span) else ""
-    after = r"(?!\w)" if re.search(r"\w$", span) else ""
-    return re.search(before + re.escape(span) + after, text) is not None
 
 
 def span_content(inner):
@@ -52,7 +47,16 @@ def shape_problems(entry, line, suffix):
         errs.append("bullet/paragraph shape")
     if not line.endswith(suffix):
         errs.append("pointer suffix changed")
-    errs += ["dropped Don't: %s" % d[:60] for d in entry["donts"] if "**%s**" % d not in line]
+    # Every sentence the entry itself holds, of any length and the title's too, and any the caller
+    # lists beside them, by dropped_donts' one rule: whole inside one of the line's bold spans, its
+    # own or a longer one. A short list cannot excuse a loss, and a sentence kept inside a longer
+    # span is no loss (B710, round 2).
+    try:
+        dropped = dropped_donts(entry["block"]["text"], line, entry["donts"])
+    except BoldError as e:
+        errs.append("bold that cannot be read safely: %s" % e)
+        dropped = []
+    errs += ["dropped Don't: %s" % d[:60] for d in dropped]
     size = len(line.encode("utf-8"))
     if size > MAX_BYTES:
         errs.append("%d bytes > %d" % (size, MAX_BYTES))

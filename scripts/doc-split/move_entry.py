@@ -11,6 +11,12 @@ sentences and `→ History-….md` — or LINE, a hand-written replacement, chec
 validate_overrides.py checks polished lines (same shape, same pointer suffix, every "Don't" kept,
 no invented symbols).
 
+A pointer never leaves out one of the entry's own "Don't" sentences, however short or long. An
+entry whose sentences would not all fit in a pointer (600 bytes), or whose bold cannot be read
+safely, is refused by its line and section, and --largest says so in place of its command: leave
+it, or, when they fit, pass --text with a shorter title, or none, and every sentence verbatim, one
+bold span holding several if need be.
+
 Where the entry goes:
   --to ops/History-X.md      an existing History file
   --new ops/History-Y.md     a new one, created with a short header (--title names its topic)
@@ -34,7 +40,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from mdblocks import (parse, split_frontmatter, movable, condense_entry, read_text, write_text,  # noqa: E402
-                      load_claim_regex, docs_in, HISTORY_DIR)
+                      load_claim_regex, docs_in, dont_sentences, dropped_donts, appears_whole, BoldError,
+                      HISTORY_DIR)
 
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 POINTER_RE = re.compile(r"→ (History-[A-Za-z0-9-]+\.md)")
@@ -44,6 +51,15 @@ PLACEHOLDER = "History-X.md"  # the orientation paragraph's example, not a real 
 
 class MoveError(Exception):
     """A move that must not happen; the message says why."""
+
+
+class DontRefusal(MoveError):
+    """An entry that cannot move because its pointer could not keep all of its own Don't
+    sentences: WHAT names the entry, WHY says what stops it."""
+
+    def __init__(self, what, why):
+        super().__init__("%s cannot move: %s" % (what, why))
+        self.why = why
 
 
 def source_of(path, root):
@@ -144,6 +160,36 @@ def with_entry(hist_text, label, block_text):
     return "\n".join(lines[:end] + [""] + block_text.split("\n") + tail) + "\n"
 
 
+def refuse_unfit(what, item, line, limit):
+    """Raise DontRefusal when LINE, the pointer that keeps every one of ITEM's own Don't sentences
+    verbatim, is over LIMIT bytes: a pointer never leaves one out (CLAUDE.md, "Over budget, never
+    cut"), so the entry stays where it is, unless a --text line with a shorter title, or none, holds
+    them all. By dropped_donts' rule one bold span may hold several, so the shortest such line is one
+    span holding every sentence the others do not already hold."""
+    donts = dont_sentences(item["text"])
+    size = len(line.encode("utf-8"))
+    if not donts or size <= limit:
+        return
+    kept = [d for d in donts if not any(d != o and appears_whole(d, o) for o in donts)]
+    suffix = line[line.index(" → History-"):]  # as validate_overrides.problems finds it
+    least = ("- " if item["kind"] == "bullet" else "") + "**%s**" % " ".join(kept) + suffix
+    least_size = len(least.encode("utf-8"))
+    if len(kept) == 1:
+        sentences, verb = "its own bolded Don't/Never sentence (%d characters)" % len(kept[0]), "s"
+    else:
+        sentences, verb = "its %d own bolded Don't/Never sentences (the longest %d characters)" % (
+            len(kept), max(len(d) for d in kept)), ""
+    if least_size > limit:
+        raise DontRefusal(what, "%s need%s a %d-byte pointer even without its title, over the %d bytes a pointer "
+                          "may hold, and a pointer never leaves one out: leave the entry where it is and move "
+                          "another (--largest lists them), or shorten what it says in a change of its own"
+                          % (sentences, verb, least_size, limit))
+    raise DontRefusal(what, "with its title, %s make%s a %d-byte pointer, over the %d bytes a pointer may hold, "
+                      "and a pointer never leaves one out: pass --text with a shorter title, or none, and every "
+                      "sentence verbatim, one bold span holding several if need be (%d bytes at the least), or "
+                      "leave the entry where it is" % (sentences, verb, size, limit, least_size))
+
+
 def plan(root, source_path, line_no, to=None, new=None, title=None, text=None, date=None):
     """Everything a move writes, computed and verified in memory. Returns a dict with the source
     and History paths, their old and new texts, the one-line replacement and the entry."""
@@ -170,10 +216,19 @@ def plan(root, source_path, line_no, to=None, new=None, title=None, text=None, d
     if os.path.islink(hist_path):
         raise MoveError("%s is a symlink" % hist_path)
 
-    mechanical, fallback, donts = condense_entry(item, hist, self_rules=name + ".md" if name else None,
-                                                 known_docs=docs_in(root))
-    one_liner = text if text is not None else mechanical
+    section = label_of(item)
+    what = "%s L%d (%s)" % (rel, line_no, "top of file" if section == "(top of file)" else section)
+    try:
+        mechanical, fallback, donts = condense_entry(item, hist, self_rules=name + ".md" if name else None,
+                                                     known_docs=docs_in(root))
+    except BoldError as e:
+        raise DontRefusal(what, "its bold cannot be read safely (%s), so its pointer could leave out or cut short "
+                          "one of its own bolded Don't/Never sentences; fix the markdown first, in a change of "
+                          "its own" % e)
     import validate_overrides  # noqa: E402 — shares the polished-line checks, loaded only when needed
+    if text is None:
+        refuse_unfit(what, item, mechanical, validate_overrides.MAX_BYTES)
+    one_liner = text if text is not None else mechanical
     errs = validate_overrides.problems({"block": item, "mechanical_line": mechanical, "donts": donts}, one_liner)
     if errs:
         raise MoveError("the one-line replacement would be rejected: " + "; ".join(errs))
@@ -192,8 +247,17 @@ def plan(root, source_path, line_no, to=None, new=None, title=None, text=None, d
 
 
 def verify(move):
-    """Raise MoveError unless the move keeps every block, heading and test-count claim."""
+    """Raise MoveError unless the one-line replacement keeps every one of the entry's own Don't
+    sentences (whatever the line checks said), and the move keeps every block, heading and
+    test-count claim."""
     entry, line = move["item"]["text"], move["line"]
+    try:
+        lost = dropped_donts(entry, line)
+    except BoldError as e:
+        raise MoveError("the one-line replacement cannot be checked for the entry's Don't sentences: %s" % e)
+    if lost:
+        raise MoveError("the one-line replacement would leave out the entry's own %s" % "; ".join(
+            "**%s**" % (d if len(d) <= 80 else d[:80] + "…") for d in lost))
     before_src, after_src = collections.Counter(blocks(move["src_old"])), collections.Counter(blocks(move["src_new"]))
     before_src[entry] -= 1
     before_src[line] += 1
@@ -232,10 +296,22 @@ def list_largest(root, source_path, n):
         try:
             dest = default_destination(items, it, name, root)
         except MoveError:
-            dest = "(needs --to or --new)"
-        print("  L%-5d %6d B → %-32s %s" % (line, len(it["text"].encode("utf-8")), dest, label_of(it)[:60]))
+            dest = None
+        refusal = None
+        if dest:
+            try:
+                plan(root, source_path, line)
+            except DontRefusal as e:
+                refusal = e.why
+            except MoveError:
+                pass  # any other refusal is the command's to give, as before
+        print("  L%-5d %6d B → %-32s %s" % (line, len(it["text"].encode("utf-8")), dest or "(needs --to or --new)",
+                                           label_of(it)[:60]))
         print("         %s" % re.sub(r"\s+", " ", it["text"])[:110])
-        print("         scripts/doc-split/move_entry.py %s --line %d" % (rel, line))
+        if refusal:
+            print("         cannot move: %s" % refusal)
+        else:
+            print("         scripts/doc-split/move_entry.py %s --line %d" % (rel, line))
     if not found:
         print("  none: every long entry is already a one-line pointer. Shorten a pointer line's")
         print("  \"Don't\" list, or split a section into its own rules file.")
@@ -521,6 +597,156 @@ def self_test():
             expect("a hand-written line with an invented symbol is refused", False)
         except MoveError:
             pass
+
+        # Every bolded Don't/Never sentence of an entry, however long and whatever it holds, stays
+        # verbatim in its pointer, or the entry does not move and the refusal names it (B710).
+        import contextlib
+        import io
+        import condense_rules
+        import validate_overrides
+        long_dont = "Don't " + ", ".join("skip step %d" % k for k in range(60)) + "."
+        fixtures = [
+            ("long", "- **Rule L keeps its long sentence.** **%s** " % long_dont + "l" * 300),
+            ("unbalanced", "- **Rule M has broken bold.** **Never undo rule M, " + "m" * 500),
+            ("triple", "- **Rule N stays binding.** **Don't commit the memory *files*** into a folder. " + "n" * 500),
+            ("nested", "- **Rule T stays binding.** **Never do X. **Y** more.** " + "t" * 500),
+            ("star", "- **Rule P puts a flag on the wire.** **Don't make it a `*bool` or emit `false`**: " + "p" * 500),
+            ("code", "- **Rule S stays binding.** **Never write `**` around a word in a title.** " + "s" * 500),
+            ("title", "- **Never undo rule Q.** " + "q" * 500),
+        ]
+        head = '---\npaths:\n  - "x/**"\n---\n# R\n\n## Section\n\n'
+        rules = head + "\n".join(text for _, text in fixtures) + "\n"
+        rules_path = os.path.join(root, ".claude", "rules", "r.md")
+        with open(rules_path, "w", encoding="utf-8") as f:
+            f.write(rules)
+        at = {key: line_of(rules, text[:14]) for key, text in fixtures}
+
+        def attempt(key, **kw):
+            """(the refusal, or None; the pointer, or None) for a dry run on fixture KEY."""
+            try:
+                return None, plan(root, rules_path, at[key], **kw)["line"]
+            except MoveError as e:
+                return str(e), None
+
+        why, _ = attempt("long")
+        expect("a Don't over 600 characters is refused by its line, never left out",
+               why is not None and "L%d" % at["long"] in why and "600" in why)
+        why, _ = attempt("long", text="- **Rule L keeps its long sentence.** → History-rules-r.md")
+        expect("a --text line that leaves out a Don't over 600 characters is refused",
+               why is not None and "dropped Don't" in why)
+        item = next(it for it in document(rules)[2] if it["type"] == "block" and it["text"].startswith("- **Rule L"))
+        mech, _, donts = condense_entry(item, "History-rules-r.md")
+        short = "- **Rule L keeps its long sentence.** → History-rules-r.md"
+        rejects = lambda listed: any(e.startswith("dropped Don't") for e in validate_overrides.problems(
+            {"block": item, "mechanical_line": mech, "donts": listed}, short))
+        expect("validate_overrides rejects a line without a Don't over 600 characters", rejects(donts))
+        expect("even when its caller lists no Don't", rejects([]))
+        for key, what in (("unbalanced", "unbalanced bold"), ("triple", "a run of three *"),
+                          ("nested", "bold inside bold")):
+            why, _ = attempt(key)
+            expect("%s around a Don't stops the move, naming the entry" % what,
+                   why is not None and "L%d" % at[key] in why and "bold" in why)
+        _, line = attempt("star")
+        expect("a Don't holding a `*` in a code span stays in the pointer",
+               line is not None and "**Don't make it a `*bool` or emit `false`**" in line)
+        _, line = attempt("code")
+        expect("a Don't holding `**` in a code span stays whole in the pointer",
+               line is not None and "**Never write `**` around a word in a title.**" in line)
+        real_problems = validate_overrides.problems
+        validate_overrides.problems = lambda entry, line: []
+        try:
+            why, _ = attempt("star", text="- **Rule P puts a flag on the wire.** → History-rules-r.md")
+        finally:
+            validate_overrides.problems = real_problems
+        expect("the move's own check refuses a line without a Don't, whatever the line check said",
+               why is not None and "Don't make it a" in why)
+        why, _ = attempt("title", text="- **Rule Q, reworded.** → History-rules-r.md")
+        expect("a --text line that rewrites a title that is a Don't is refused",
+               why is not None and "Never undo rule Q." in why)
+        item = next(it for it in document(rules)[2] if it["type"] == "block" and it["text"].startswith("- **Never"))
+        mech, _, donts = condense_entry(item, "History-rules-r.md")
+        expect("validate_overrides itself rejects a line that rewrites a title that is a Don't",
+               "dropped Don't: Never undo rule Q." in validate_overrides.problems(
+                   {"block": item, "mechanical_line": mech, "donts": donts}, "- **Rule Q, reworded.** → History-rules-r.md"))
+        _, line = attempt("title")
+        expect("a title that is a Don't still moves under its own line",
+               line == "- **Never undo rule Q.** → History-rules-r.md")
+
+        def condensed(key):
+            """condense_rules' rules file for fixture KEY alone, or how it stopped."""
+            try:
+                return condense_rules.build("0" * 40, "r", "2026-01-01", raw=head + dict(fixtures)[key] + "\n",
+                                            overrides={})[0]
+            except SystemExit as e:
+                return "exit: %s" % e
+        expect("condense_rules keeps a Don't over 600 characters in the entry's line",
+               "**%s**" % long_dont in condensed("long"))
+        got = condensed("unbalanced")
+        expect("condense_rules stops on unreadable bold, naming the entry's line",
+               got.startswith("exit:") and "L%d" % line_of(head + dict(fixtures)["unbalanced"], "- **Rule M") in got)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            list_largest(root, rules_path, 10)
+        listing = out.getvalue().split("\n")
+        first = next((k for k, l in enumerate(listing) if l.startswith("  L%-5d" % at["long"])), None)
+        shown = "\n".join(listing[first:first + 3]) if first is not None else ""
+        expect("--largest says why an entry cannot move instead of offering its command",
+               "cannot move" in shown and "--line %d" % at["long"] not in shown)
+
+        # No Don't is too short to count, and a line that keeps a sentence whole inside a longer
+        # bold span is not refused: one rule, dropped_donts', decides what a line keeps (B710).
+        half = lambda word, n: word + " " + "z" * (n - len(word) - 2) + "."
+        pair = (half("Never", 284), half("Don't", 284))  # one bold span holding both fits; two do not
+        more = [
+            ("short", "- **Rule V stays binding.** **Never X.** " + "v" * 500),
+            ("bare", "- **Rule W stays binding.** **Never** wobble at the edges. " + "w" * 500),
+            ("merge", "- **Rule G stays binding.** **Never undo G.** " + "g" * 500),
+            ("pair", "- **Rule K.** **%s** **%s** " % pair + "k" * 100),
+        ]
+        rules2 = head + "\n".join(text for _, text in more) + "\n"
+        rules2_path = os.path.join(root, ".claude", "rules", "s.md")
+        with open(rules2_path, "w", encoding="utf-8") as f:
+            f.write(rules2)
+        at2 = {key: line_of(rules2, text[:14]) for key, text in more}
+
+        def attempt2(key, **kw):
+            try:
+                return None, plan(root, rules2_path, at2[key], **kw)["line"]
+            except MoveError as e:
+                return str(e), None
+
+        def checked(key, line):
+            """validate_overrides.problems on fixture KEY's entry, its list from condense_entry."""
+            _, _, items2, off2 = document(rules2)
+            it = next(i for i in items2 if i["type"] == "block" and i["start"] + 1 + off2 == at2[key])
+            mech, _, listed = condense_entry(it, "History-rules-s.md")
+            return validate_overrides.problems({"block": it, "mechanical_line": mech, "donts": listed}, line)
+
+        _, line = attempt2("short")
+        expect("a Don't of a few characters stays in the pointer", line is not None and "**Never X.**" in line)
+        omitted = "- **Rule V stays binding.** → History-rules-s.md"
+        why, _ = attempt2("short", text=omitted)
+        expect("a --text line that leaves out a Don't of a few characters is refused",
+               why is not None and "dropped Don't" in why)
+        expect("validate_overrides itself rejects that line", "dropped Don't: Never X." in checked("short", omitted))
+        _, line = attempt2("bare")
+        expect("a bolded Don't word alone stays in the pointer", line is not None and "**Never**" in line)
+        merged = "- **Rule G. Never undo G.** → History-rules-s.md"
+        _, line = attempt2("merge", text=merged)
+        expect("a --text line keeping a Don't inside a longer bold span moves", line == merged)
+        expect("validate_overrides itself accepts that line",
+               not [e for e in checked("merge", merged) if e.startswith("dropped Don't")])
+        why, _ = attempt2("pair")
+        expect("a pointer too long for two Don'ts in two spans offers --text when one span holds both",
+               why is not None and "pass --text" in why)
+        both = "- **%s %s** → History-rules-s.md" % pair
+        _, line = attempt2("pair", text=both)
+        expect("and that line moves", line == both)
+        _, _, items2, off2 = document(rules2)
+        it = next(i for i in items2 if i["type"] == "block" and i["start"] + 1 + off2 == at2["merge"])
+        expect("validate_overrides holds a line to its caller's list too, by the same rule",
+               "dropped Don't: Never do Z." in validate_overrides.problems(
+                   {"block": it, "mechanical_line": merged, "donts": ["Never do Z."]}, merged))
     finally:
         shutil.rmtree(root)
     print("self-test:", "PASS" if ok else "FAIL")
