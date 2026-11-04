@@ -38,6 +38,7 @@ paths:
   - "internal/fsutil/spelling*.go"
   - "internal/fsutil/lock*.go"
   - "internal/fs/**"
+  - "cmd/bridge/serve_data_dir_record*.go"
 ---
 # Scanner, deletion passes and manifest writes
 
@@ -204,3 +205,5 @@ lost my library."
 - **ExtractorVersion 29 validates DSF fmt channels and persists DFF `raw`/`missing`/`unsupported` evidence.** Duplicate/conflicting/short CMPR, multiple PROP and malformed trailing properties are unsupported, never raw. Version 30 keeps the first parsed PROP's known format facts across duplicate PROP as well as malformed later properties; evidence still says unsupported. Stale scan updates full/delta once. → History-b470-native.md, “Owner approval (2c.2b)”.
 
 - **An extractor's warning names its file by `trackLogPath` and a read's failure by `walkErrReason`, never by the error whole** (2026-10-30, B604, the 0.2.2 logging audit). `faultNotingSource` hands each parser the file's own read, seek or stat error, an `*fs.PathError` naming the absolute path, and keeps it as it is, since the read faults decide on it (`readIncompleteError`); the MP4 walks' seven warnings (codec, ALAC bit depth, sample rate, duration, genre, advisory, rating) logged it whole, beside a relative path in four and the absolute path in three. They log `walkErrReason` now, which is `fsutil.ErrorWithoutPath`: the operation and the errno. The other extractors' older warnings still name the absolute path, which the privacy page says (`auth-tls.md`, #1055). **Don't log a read's error whole beside a file, and don't flatten it into a string where it is made: the read faults decide on it.** `TestAnMP4WalkThatCannotReadItsFileNamesNoAbsolutePath` pins it.
+
+- **A library root or data dir on a volume mounted after the bridge starts is never taken for an empty library or a fresh install: the scan spares the rows of a root it cannot see or that holds no library content while the index holds its tracks; the library watcher holds such a root (`Scanner.lookAtRoot`, read as the scan's guards read it) and watches it again, with a scan of it, only once a look finds it as it was; and serve refuses, before it makes or writes anything there, a data dir the record beside the config names (`.bridge.yaml.datadir`) that holds neither `bridge.db` nor `server.lock`** (2026-11-04, backlog B651) **Don't persist a device number or judge a mount by a device or the immediate parent, write into a library root, dispatch a scan for a root that reads as not mounted or watch one before a look finds it as it was, keep the record in the data dir or in bridge.yaml, refuse a data dir its record does not name or one whose lock file is there (the `rm bridge.db*` reset), or prepare the data dir before the check.** → History-rules-scanner.md
