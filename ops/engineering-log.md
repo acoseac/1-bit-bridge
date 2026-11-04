@@ -72790,3 +72790,212 @@ eba78fdc):
   file they name, so neither survey checked them.
 - The five proposals, for the owner. No backlog entry was written: the
   backlog file is not on this host.
+
+## 2026-11-04 — B651: a volume mounted after the bridge starts is never taken for an empty library or a fresh install
+
+Backlog B651, on `fix/b651-late-mount-guard` from main cde731e2. On a NAS
+reboot systemd or Docker can start the bridge before its USB, RAID or network
+volumes are mounted, so a library root or the data dir on such a volume is not
+there (a directory on the volume) or reads as the bare mount point, empty. A
+study of 2026-11-02 had found the variant integrity watcher's guards and left
+open whether the primary scan, the library watcher and the database open were
+guarded. Codex and Argon reviewed the brief against cde731e2 and their notes
+were binding: the scan already spares an unreachable, unreadable or
+clean-but-empty root, so no second empty-root rule, only a test of a root whose
+own path is gone; no persisted device number and no immediate-parent check,
+the content and database-history checks being the guard; the watcher needs a
+recovery path, a look as the debounce timer fires and a bounded retry; each
+variant and waveform deletion path is judged on its own terms; the database's
+"initialised before" signal cannot live in the data dir and goes before the
+token store, the PID file and the MkdirAll, with first run, `bridge init` and
+Windows explicit, and no improvised config write; Docker fails fast for its
+restart policy to retry, and the runbook says a default `rprivate` bind mount
+never sees a later host mount. This worker cannot write `.claude/`, so the
+rules change ships as a checked patch, `rules-b651.patch`.
+
+**What happened at cde731e2** (a root or the data dir that is not there, or an
+empty directory at its path):
+
+| Path | What happened | Guards |
+|---|---|---|
+| Full scan | Every row under such a root spared, said at Error on every scan; a loopback serve refuses to start over a root that is not there (exit 2) | walkRoot's `fsutil.WalkableRoot` sentinel ("root unreachable", scanner.go:3238-3243) and, behind it, the clean-empty guard (:1041-1043, `emptyRootMustBeSpared` :1306-1338, `.bridge-allow-empty` :3424); "library root unreadable" (:1029-1035); the deletion pass asks `isUnderErroredSubtree` first (:1130, folders :1190); `CheckLibraryRootsAccessible` (main.go:3273-3285) |
+| Subtree scan | Refused before any row is touched | the root not seen (scanner.go:2749-2754); a missing subtree audits its owning root (:2843-2845, `auditOwningRootOnSubtreeMiss` :3466-3491); the clean-empty guard at the root (:2985-2989) |
+| Library watcher | Watched the bare mount point, which the mount then hides, so the volume's changes were never seen; a root it could not walk at the start was logged once and never looked at again; on Linux an unmount dropped every watch with no event (IN_UNMOUNT, which fsnotify swallows: backend_inotify.go:446-449); a dispatched scan of an emptied root was spared by the scan's guards | none of its own (watcher.go:234-261, 836-871, 885-931) |
+| Variant watcher | Tick skipped while the variants dir is missing, empty or holds no rendition; refused while it changes under the tick, or while a mass deletion leaves sidecars | `VariantsDirSweepBlock` (integrity/variants.go:480-487, variantsdir.go:94-119), `VariantsDirChanged` (:540, :610), `MassDeleteRefusal` (:513, locate.go:312-329, from 10 rows) |
+| Orphan sidecar sweep | Unlinks only files that are there; empty-catalog, mass-orphan and partial-walk refusals | integrity/sidecars.go:558, :565, :585 |
+| `upscale`/`optimize`/`render --gc` | Refused over a missing or rendition-less dir with rows, `--allow-mass-delete` the one way past | cmd/bridge/upscale.go:1739 (the probe), :1484 (`MassDeleteRefusal`), the identity checks |
+| Serve reap, variant delete | Row kept, 410, while the dir is unavailable | api/files.go:528; api/upscale_delete.go:742-755 |
+| Waveforms | `analyze --gc`: a missing dir is "nothing to do", identity and empty-catalog refusals, no row deleted; no background sweeper | cmd/bridge/analyze.go:352-360, :405-411 |
+| Data dir, serve | Made in its place on the system disk (`prepareServeDataDir`'s MkdirAll), a new TLS pair minted, an empty token store and an empty database opened: every paired device's pin and token refused | B606's preparation refuses only a file or a link to nothing in the way (serve_lock.go:121-138); nothing told "initialised before" (main.go:3313, :3390, :3463, :3497, :3505; store.go:282-292) |
+| `bridge init` | A rewrite makes the data dir (init.go:718) and mints a pair where the old one is not visible (:881); no database | none; the doctor's data-dir line said "does not exist yet; bridge serve makes it" (doctor_data_dir.go:77) |
+
+The variant and waveform paths were each pinned already, on their own terms
+(`TestVariantWatcherRefusesAMountpointHoldingNoRendition`,
+`TestVariantsDirSweepBlockReason`,
+`TestRunGCRefusesAnUnmountedVolumeWhoseMountpointHoldsNoRendition`,
+`TestOrphanSidecarSweepIsQuietOnAnEmptyCatalogAndAnEmptyDir`,
+`TestTakeSidecarInventoryTreatsAMissingRootAsNothingToDo`,
+`TestServeVariantKeepsTheRowWhenTheVariantsDirIsUnavailable`,
+`TestUpscaleDeleteKeepsRowsWhileTheVariantsDirIsUnavailable`,
+`TestAnalyzeGCRefusesASweepOnAReplacedDirectory`). The defaults put the
+variants dir and the waveforms under the data dir (`<dataDir>/transcoded`,
+`<dataDir>/waveforms`), so serve's refusal below stops their sweeps with the
+rest of serve while the data dir's volume is away.
+
+**The scan** is unchanged. `TestAScanSparesARootBelowAVolumeThatIsNotMountedYet`
+pins a root below a mount point that is not there: three full scans with a
+threshold of 1 keep its row, each says "root unreachable" and none says
+"suspected clean-empty mount failure", and a subtree scan of the root and one
+below it both refuse. Not added: a mount check against the last good scan (a
+Docker bind mount shares its parent's device, a mount boundary can sit above
+the immediate parent, and a USB or network volume's device number changes
+across a reboot), and a second mass-deletion guard (the clean-empty guard is
+the one for an emptied root, and a percentage would refuse a legitimate
+removal).
+
+**The watcher** (`internal/manifest/watcher_hold.go`; `Scanner.lookAtRoot`
+and `dirHoldsLibraryContent` in scanner.go) holds a configured root that reads
+as a volume not mounted, as the scan's guards read it: it cannot be seen
+(`reads=unreachable`), its listing fails (`unreadable`), or it holds no library
+content and no `.bridge-allow-empty` while the index holds tracks under it
+(`empty`, with `rows_in_db`) or the count fails (`uncounted`). A held root is
+not watched, its events are dropped, and no scan is dispatched for it. It is
+looked at at the start, before any watch; as a debounced scan under it is due,
+on the dispatch's goroutine, which hands the root to Run's goroutine without
+blocking; when an event names the root itself, removed or moved away; every
+30 s for a watched root whose own watch fsnotify no longer holds (not on
+kqueue, which drops none unasked and keeps an unmounted volume's folders
+open); and, while held, 5 s after the hold, then twice as long each time, 5 min
+at most. A look is a stat, one batch of 64 entries of the root's listing and,
+for a root holding nothing, one count. A root that reads as it did is watched
+again where it is now (the alias of a linked root noted afresh) and a scan of
+it is asked for. Held is said once at Warn, again when what the look found
+changes, and watched again once at Info. A root the index holds nothing of (a
+fresh install) reads as it is and is watched.
+
+**The database** (`cmd/bridge/serve_data_dir_record.go`): nothing in the data
+dir can say it was there before, since the whole of it may be on the missing
+volume, and B506's list of bridge.yaml's writers has no place for a write at
+every start, so the signal is a record beside the config, in the directory a
+write of the config lands in (`fsutil.ResolveParent`, as the config's lock),
+named after it: `.bridge.yaml.datadir`, the data dir's path as JSON. Serve
+writes it once its database is open and its lock file is there
+(`recordServeDataDir`), and only when it names another data dir or none; the
+config-writers sweep lists that function among `notConfigWriters`. Before
+`prepareServeDataDir`, so before the lock, the TLS mint, the token store,
+server.pid and the migrations, serve refuses a data dir the record names that
+holds neither `bridge.db` nor `server.lock` (`checkServeDataDirRecord`,
+`*dataDirGoneError`), exit 1, and the service manager starts it again until the
+volume is mounted (the unit `bridge init` writes restarts every 2 s, under
+systemd's default start limit of 5 in 10 s; launchd's KeepAlive; the Windows
+service's recovery actions; a container's restart policy, whose restart binds
+the container's mounts again). The lock file is the second half of the test
+because the bridge removes neither file and a serve that opened its database
+took its lock first, so a data dir holding neither is not the one served from,
+while the local fixture's reset (`rm bridge.db*`, the lock file kept) still
+starts and makes a new database, as the skill says. A first run has no record:
+a fresh install and `bridge init` (the data dir and its TLS pair, no database,
+no record) start as before, the first serve writing the record. A data dir
+removed or moved on purpose is refused, saying to remove the record. Plain
+file I/O, the same on Windows. Rejected: a marker inside the data dir (gone
+with the volume), a field in bridge.yaml (a new writer at every start), and a
+wait inside serve (a container's default bind never sees the mount; a refusal
+lets the supervisor retry).
+
+**What says so**: the watcher's two lines; serve's refusal; bridge doctor's
+data-dir line, both doctors, fails the same state in the refusal's words
+(B659's line, one source: `dataDirCheck` asks `checkServeDataDirRecord`
+first); the library-roots line's hints name the mount. The console's Jobs
+card has no place for a held root (its scanner block shows the watcher's
+switch alone), so nothing was added there. The runbook's B651 section says
+what the bridge does and the Docker remedies (restart the container once the
+volume is mounted, start it after the mount, or `--mount type=bind`, which
+refuses a missing source, where `-v` makes one, root's, on the system disk).
+`qualificationVersion` is 36: the gate asked, internal/manifest being a
+guarded prefix.
+
+**Red first.** The watcher's four tests ran against main's behaviour with the
+seams alone (the per-instance intervals and hooks, and the message constants)
+under `-timeout 50s`: `TestTheWatcherWaitsForAnUnmountedRootAndWatchesWhatIsMountedThere`
+"the watcher never held a root that reads as a volume not mounted" (both
+shapes, 37.6 s), `TestTheWatcherDispatchesNoScanForARootWhoseContentWent`
+"the watcher dispatched a scan of a root that reads as a volume not mounted"
+(0.17 s), `TestTheWatcherHoldsARootWhoseWatchesWentWithoutAWord` "never held a
+root whose watches went" and `TestTheWatcherHoldsARootThatWentAndWatchesWhatComesBack`
+"never held a root that went". The database's, with the record helpers in the
+tree and nothing calling them: `TestServeRefusesADataDirItsRecordNamesThatHoldsNeitherFile`
+"serve served over a data dir its record names that holds neither file",
+then "serve made the data dir (10 entries)" and "wrote into the empty directory
+at the data dir's path (10 entries)", the defect itself;
+`TestServeRefusesTheDataDirItServedFromWhileItsVolumeIsAway` and
+`TestInitAndTheServeAfterItStartAsBefore`: no record after the first serve;
+`TestBothDoctorsFailADataDirItsRecordNamesWhileItsVolumeIsAway`: the line was
+ok ("does not exist yet; bridge serve makes it", "is a directory") and bridge
+doctor exited 0. The scan's test was green at main, as Codex said: its red is
+the controls'. Green after: internal/manifest whole under `-race` (1292 s),
+the watcher and scan tests three times more under `-race`, the database tests,
+the cmd/bridge data-dir, doctor and config-writer tests, internal/doctor and
+internal/player/qualification.
+
+**Negative controls**, each on a committed tree, one mutation (or two where
+named), every test below run alone, the file put back byte for byte:
+
+| Control | Red |
+|---|---|
+| C1 walkRoot sentinels no unreachable root | `TestAScanSparesARootBelowAVolumeThatIsNotMountedYet` (taken for a clean-empty mount) |
+| C1b C1 and no clean-empty guard | it, `TestScannerSparesRowsUnderUnreachableRoot`, `TestScannerSparesRowsOnCleanEmptyMount` (rows wiped) |
+| C1c no clean-empty guard alone | `TestScannerSparesRowsOnCleanEmptyMount` |
+| C2 the owning-root audit trusts every miss | the ENOENT scan test, `TestScanSubtreeHardErrorOnDroppedMount`, `TestScanSubtreeHardErrorOnCleanUnmountLoophole` |
+| C3 no hold at the start | `TestTheWatcherWaitsForAnUnmountedRootAndWatchesWhatIsMountedThere` |
+| C4 no look before a dispatch | `TestTheWatcherDispatchesNoScanForARootWhoseContentWent` |
+| C5 no check of the roots' own watches | `TestTheWatcherHoldsARootWhoseWatchesWentWithoutAWord` |
+| C6 no look at a root an event names | `TestTheWatcherHoldsARootThatWentAndWatchesWhatComesBack` |
+| C56 neither | the two |
+| C7 no retry of the held roots | the four watcher tests |
+| C8 no record check before the preparation | `TestServeRefusesTheDataDirItServedFromWhileItsVolumeIsAway`, `TestServeRefusesADataDirItsRecordNamesThatHoldsNeitherFile` |
+| C9 no record written | `TestServeRefusesTheDataDirItServedFromWhileItsVolumeIsAway`, `TestInitAndTheServeAfterItStartAsBefore` |
+| C10 the check asks the database alone | `TestServeStartsAgainOverADatabaseRemovedOnPurpose`, `TestTheRecordRefusesOnlyTheDataDirItNamesWhileItHoldsNeitherFile` |
+| C11 the doctor asks no record | `TestBothDoctorsFailADataDirItsRecordNamesWhileItsVolumeIsAway` |
+| C12 the record beside the config's name | `TestTheRecordIsBesideTheFileTheConfigsNameOpens` |
+
+The first round found two tests passing through a second layer: C1 left the
+scan test green (the clean-empty guard spares a root it cannot see, since
+that root holds no content), and C6 left the moved-root test green (inotify's
+backend drops a watch that moved, IN_MOVE_SELF, so the root-watch check holds
+the root too). The scan test now also requires a root that is not there to be
+reported unreachable and never as a clean-empty mount, and the moved-root test
+runs the root-watch check an hour apart; C1b, C1c and C56 show each layer.
+
+**Gates**, through the build lock, on 271e7b93: `make test-fast` (TMPDIR
+under `.tmp/_b651`) passed all 80 packages, cmd/bridge in 418 s and
+internal/manifest in 248 s, the Linux-only ALSA, alsapcm, durable-writer and
+identity packages running here; `make vet` was clean for linux, windows,
+linux/386 and darwin; go1.27.3's gofmt lists no file under cmd, internal or
+scripts; `make docs-check`'s four commands pass on the branch, and with the
+patch applied in a copy of the tree (scanner.md 28,823 bytes, cli-serve.md
+39,159; CLAUDE.md at 72.3 %, the worst load 63.9 %), which an 80 KB ghost
+planted in that copy failed; `scripts/qualification-version` cde731e2..HEAD
+is OK at 36.
+
+**Left open** (the backlog file is not on this host; named for the
+orchestrator):
+- A render while a variants dir on a volume of its own is away remakes that
+  dir in the bare mount point (transcode.go:1185) and writes a rendition
+  there; the probe then reads the dir as healthy, and the serve reap, and the
+  watcher below `MassDeleteRefusal`'s floor of 10, delete the rows of
+  renditions that are on the absent volume. A render could refuse to make a
+  missing variants dir that holds renditions by the catalog, as serve now
+  refuses its data dir.
+- The other commands that open the store (`bridge scan`, `upscale`,
+  `analyze`, … through `manifest.OpenStore`, which makes a missing database)
+  make a data dir and a database during an outage, after which serve's check
+  passes; and `bridge init`'s rewrite makes the data dir and mints a pair
+  without asking the record (B664 is init's keep path).
+- A mount point that holds library content of its own while the volume is
+  away defeats the clean-empty guard and the watcher's look alike.
+- A fresh install whose volume is mounted after the bridge starts has its
+  root watched where the mount then hides it, until a restart; and a hard
+  network mount that hangs a stat holds Run's goroutine during a retry, as it
+  holds the watcher's start today.
+- A refusal at every 2 s start writes a line to the log file each time while
+  the volume stays away.
