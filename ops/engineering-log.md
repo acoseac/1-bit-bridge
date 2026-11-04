@@ -73555,3 +73555,120 @@ Here, Windows does not allow the step that stands for the unmount.
 **Runs** (the Windows host, Go 1.27.3, vendored and offline):
 - `-run TestTheWatcher ./internal/manifest/`: 3 passed, 3 skipped, 0 failed.
 - The whole `internal/manifest` package: ok (143 s), nothing failed.
+
+## 2026-11-04 — B651 round 5: CodeRabbit's three findings, and the dispatch check on Windows
+
+Round 5, fast-forwarded first to the PR's head, 95f14ca8 (round 3, a merge of
+main, and round 4), as rounds 2 and 3 were: the files the head changed checked
+out and the branch's loose ref written. CodeRabbit's three findings on the head
+were checked against the code before anything changed, and all three hold;
+Codex's and Argon's notes on the brief bind the fixes.
+
+**Round 4's record, corrected.** Listing what still runs on Windows with two
+tests skipped there, it said: "The dispatch's look at the root is the same
+code on every platform." That overstated it (Codex on round 4): the code is
+the same, but with `TestTheWatcherDispatchesNoScanForARootWhoseContentWent`
+skipped there, no Windows test reached the debounced dispatch's look at the
+root. `TestTheWatcherDispatchesNoScanForARootWhoseOnlyFileWent` does now, on
+every platform: the root holds its one track directly, with no folder, and the
+track is deleted (`os.Remove`, which Windows allows under a watch), so the root
+holds nothing while the index holds its track, and the scan its event asked
+for is not dispatched; the test waits for the hold before it writes the file
+back (`os.WriteFile`), then for the resume and the scan that finds it. It
+passes here; the orchestrator runs it on the Windows host. Round 1's C4 (no
+look before a dispatch) turns it red. The skipped test's reason names it.
+
+**1. The record kept one spelling of the data dir (Major).** Real.
+`config.ResolvePath` cleans a path and resolves no link, so serve recorded the
+data dir in its config's spelling (serve_data_dir_record.go:59 at 95f14ca8),
+and the check compared it with `fsutil.SamePath` (:165), whose resolution
+through the nearest existing ancestor (symlink.go:33) has nothing to resolve
+once a link on the data dir's own volume goes with the volume. Red on 95f14ca8,
+the volume taken away as an unmount takes it (the mount point left bare, the
+link `current` → `real` gone with the volume, which round 3's spelling tests
+left resolvable): recorded through the link and configured by its target
+(`TestServeRefusesTheDataDirItRecordedThroughALinkOnItsVolumeByItsTarget`),
+and recorded by the target, configured through the link and served once over
+the volume (`TestServeRefusesTheDataDirItRecordedByItsTargetThroughALinkOnItsVolume`:
+that serve kept the target's record, SamePath taking the two spellings for
+one), serve served and wrote into the bare mount point. The record now holds
+the data dir as its config gave it and where it led (`fsutil.ResolveLinks`,
+read while the volume is there), names a data dir by either spelling
+(`dataDirRecord.names`, each through SamePath), and serve writes it whenever it
+does not hold exactly this config's two. A record of one spelling, written by
+rounds 1 to 4, reads as that spelling with no error and is written in both by
+the next serve that opens its database (Argon 1;
+`TestServeWritesARecordOfOneSpellingAgainInBoth`, red on 95f14ca8). A link at
+the mount point, outside the volume, still resolves with the volume away
+(Argon 2) and was refused before: `TestServeRefusesTheDataDirThroughALinkAtItsMountPoint`
+pins it both ways, green on 95f14ca8 and after. What no record can tell: a
+config changed, while the volume is away, to a spelling through a link on the
+volume that no serve has run with, which nothing resolves then. The
+unrelated-dir and lock-file cases stay, and
+`TestTheRecordRefusesOnlyTheDataDirItNamesWhileItHoldsNeitherFile` now also
+reads a record of two spellings.
+
+**2. The startup walk watched a held nested root (Minor).** Real. Run leaves a
+held root out of the roots it walks (watcher.go:269), but the outer root's
+walk descends into a held nested root's bare mount point (walkWatchTree,
+:731). Every watcher walk now passes over a held root below the root it walks
+(`heldBelow`: addTree, and on kqueue `planWatches`, which holds it as an entry
+of the folder above, which fsnotify opens with every other entry there). Red on
+95f14ca8: `TestTheWatcherWatchesNothingOfANestedRootItHolds` ("the watcher
+watches …/music/usb, at or under …/music/usb, a root it holds"); it also
+requires the outer root watched, and the nested one watched again once its
+volume is back.
+
+**3. A nested root's paths went to the root listed first (Minor).** Real:
+nothing refuses a root inside another. `Validate` checks a root for being
+empty alone (config.go:3591-3595), and the console's root add
+(handlers_api.go:1791-1802) and `bridge library add` (library.go:119-127)
+refuse a root already there and two of one folder name. The watcher's
+`configuredRootOf` (watcher_hold.go:131-148) and `ScanSubtree`'s owning root
+(scanner.go:2796-2822) took the first root listed that held a path; both take
+the deepest now (`deepestRootOf`, nested_roots.go). And a scan of the outer
+root, from an event outside the nested root or the full scan, walked into the
+nested root's bare mount point and reaped the rows the outer root holds under
+it (Argon 3): both walks pass over a nested root that reads as not mounted
+(`spareNestedRoot`, the look its own guards and the watcher's hold read) as a
+subtree they could not see, which the deletion pass spares. A nested root that
+reads as it is is walked as before: a library with nested roots has indexed
+the nested root's files under both roots' paths since before B651, which this
+round leaves as it is. Red on 95f14ca8, the outer root listed first:
+`TestANestedRootsPathsAndEventsAreItsOwn` (configuredRootOf named the outer
+root for the nested one, and the dispatch's look read the outer root),
+`TestAScanUnderANestedRootIsItsOwn` (a new file indexed under `music/usb/…`,
+not `usb/…`) and `TestAScanOfARootSparesANestedRootThatReadsAsNotMounted`
+(`music/usb/Band/Record/01.flac` reaped by the outer root's subtree scan).
+
+**Negative controls**, each on 6210ec01, one mutation, each test alone, the
+file put back byte for byte:
+
+| Control | Red |
+|---|---|
+| F1a the record names the data dir by its configured spelling alone | the link-recorded test, the one-spelling rewrite test, the record-check test |
+| F1b serve records no resolved spelling | the link-recorded test, the rewrite test |
+| F1c serve keeps a record that names the data dir already (round 3's skip) | the target-recorded test, the rewrite test |
+| F2 the watcher's walks pass over no held nested root | `TestTheWatcherWatchesNothingOfANestedRootItHolds` |
+| F3a a path goes to the first root that holds it | `TestANestedRootsPathsAndEventsAreItsOwn`, `TestAScanUnderANestedRootIsItsOwn` |
+| F3b1 the subtree scan walks into a nested root that reads as not mounted | `TestAScanOfARootSparesANestedRootThatReadsAsNotMounted`, after its subtree scan |
+| F3b2 the full scan does | the same test, after its full scan |
+| C4 (round 1) no look before a dispatch | `TestTheWatcherDispatchesNoScanForARootWhoseOnlyFileWent`, `TestTheWatcherDispatchesNoScanForARootWhoseContentWent`, `TestANestedRootsPathsAndEventsAreItsOwn` |
+
+**Gates**, through the build lock, on 6210ec01 with this record in the tree:
+`make test` (race) for internal/manifest (1339 s) and cmd/bridge (956 s)
+passed; `make vet` was clean native and for windows, darwin and linux/386;
+go1.27.3's gofmt lists none of the ten Go files round 5 changed; `make
+docs-check`'s four commands pass on the branch and, with the patch applied in
+a copy of the tree (scanner.md 29,062 to 29,327 bytes), there too, where an
+80 KB ghost failed the budget, and `mdblocks.dropped_donts` finds the long
+form's Don't whole in the patched line and the line's in the long form;
+`scripts/qualification-version` 7684d916..HEAD (CI's merge base) is OK at 36.
+Main has since moved to 5d38fa43 (B728 B1), which sets the version to 36 too
+and changes the gate, so the next merge of main asks the gate again.
+
+**The rules**: `rules-b651-r5.patch` grows the B651 line's Don't by four (the
+walk of a root a held root is nested in, a path given to any root but the
+deepest, a scan walking into or reaping under a nested root that reads as not
+mounted, and a record of one spelling alone), with its long form in
+`ops/History-rules-scanner.md`.

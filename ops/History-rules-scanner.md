@@ -2575,7 +2575,20 @@
   A hold stops the debounced scans armed under the root (`dropScansUnder`),
   each of which would look at the root again for nothing and ask for the
   hold again (round 2, Argon on #1397): the scan of the root once it reads as
-  it did covers them. A look is a
+  it did covers them. Library roots may nest (no root add refuses a root
+  inside another, and `Validate` checks a root for being empty alone): a
+  path is the deepest configured root's that holds it, for the watcher's
+  events and looks (`configuredRootOf`) and for a subtree scan's owning root
+  (`ScanSubtree`), both through `deepestRootOf`; the watcher's walks pass
+  over a held root nested below the root they walk (`heldBelow`; on kqueue
+  the folder above still opens it, as one of its entries); and a scan's walk
+  of the outer root, the full scan's and a subtree scan's, passes over a
+  nested root that reads as not mounted, its rows under that path spared as a
+  subtree the walk could not see (`spareNestedRoot`) (round 5, CodeRabbit and
+  Argon on #1397: the first root listed took a nested root's events and
+  scans, the outer root's startup walk watched a held nested root's bare
+  mount point, and a scan of the outer root reaped the rows under it). A
+  look is a
   stat, one batch of 64 entries of the root's listing (`dirHoldsLibraryContent`)
   and, for a root holding nothing, one count. A root that reads as it did is
   watched again where it is now, and a scan of it is asked for, since nothing
@@ -2589,8 +2602,9 @@
   directory a write of the config lands in (`fsutil.ResolveParent`, as the
   config's lock), named after it: `.bridge.yaml.datadir`, the data dir's path
   as JSON, written once the database is open and the lock file is there
-  (`recordServeDataDir`), and only when it names another data dir or none.
-  Serve's check and its write both take the record beside the file its boot
+  (`recordServeDataDir`), and only when it does not hold this config's two
+  spellings of the data dir already (below; until round 5, when it named
+  another data dir or none). Serve's check and its write both take the record beside the file its boot
   read was of (`serveDataDirRecord`, over `config.BootFile.File`), never
   beside the file the config's name opens by then: round 1 resolved the name
   again at each, and a link at it repointed after the boot read (a dotfiles
@@ -2607,7 +2621,17 @@
   config gives it, which is what bridge.yaml says, and the record where it is
   (round 3: CI's macOS and Windows legs, where `/var` is `/private/var` and a
   temp directory has a short name and a long one, named the record in
-  another spelling than the tests rebuilt).
+  another spelling than the tests rebuilt). The record holds both spellings
+  of the data dir: as its config gave it and where that led through its
+  links (`fsutil.ResolveLinks`), read while the volume is there, and names a
+  data dir by either (`dataDirRecord.names`): `config.ResolvePath` cleans a
+  path and resolves no link, a spelling through a link on the data dir's own
+  volume resolves to nothing once the volume is away, and a config changed to
+  the other spelling read as naming another data dir, which refuses nothing
+  (round 5, CodeRabbit on #1397; a link at the mount point, outside the
+  volume, still resolves with it away, and was refused before). A record of
+  one spelling, written before round 5, reads as that spelling, with no
+  error, and the next serve that opens its database writes it in both.
   Before `prepareServeDataDir`, so before the lock, the TLS mint, the token
   store, `server.pid` and the migrations, serve refuses a data dir the record
   names that holds neither `bridge.db` nor `server.lock`
@@ -2633,13 +2657,16 @@
   is not there. **Don't persist a device number or judge a mount by a device
   or the immediate parent, write into a library root, dispatch a scan for a
   root that reads as not mounted or watch one before a look finds it as it
-  was, keep a scan armed under a root the watcher holds, turn the check of
-  the roots' own watches off on kqueue (it drops a renamed root's watch
-  without a word too), keep the record in the data dir or in bridge.yaml,
-  check or write serve's record beside any file but the one its boot read
-  was of, refuse a data dir its record does not name or one whose lock file
-  is there (the `rm bridge.db*` reset), or prepare the data dir before the
-  check.** Tests:
+  was, the walk of a root it is nested in included, keep a scan armed under a
+  root the watcher holds, give a path to any root but the deepest that holds
+  it, let a scan walk into or reap under a nested root that reads as not
+  mounted, turn the check of the roots' own watches off on kqueue (it drops a
+  renamed root's watch without a word too), keep the record in the data dir
+  or in bridge.yaml, or of one spelling of the data dir alone (it holds the
+  configured one and where it led), check or write serve's record beside any
+  file but the one its boot read was of, refuse a data dir its record does
+  not name or one whose lock file is there (the `rm bridge.db*` reset), or
+  prepare the data dir before the check.** Tests:
   `TestAScanSparesARootBelowAVolumeThatIsNotMountedYet`,
   `TestTheWatcherWaitsForAnUnmountedRootAndWatchesWhatIsMountedThere`,
   `TestTheWatcherDispatchesNoScanForARootWhoseContentWent`,
@@ -2647,6 +2674,15 @@
   `TestTheWatcherHoldsARootThatWentAndWatchesWhatComesBack`,
   `TestTheWatcherDropsTheScansArmedUnderARootItHolds`,
   `TestTheWatcherLooksAgainAtARootWhoseOwnWatchKqueueDropped`,
+  `TestTheWatcherDispatchesNoScanForARootWhoseOnlyFileWent` (the dispatch's
+  look on Windows too), `TestTheWatcherWatchesNothingOfANestedRootItHolds`,
+  `TestANestedRootsPathsAndEventsAreItsOwn`,
+  `TestAScanUnderANestedRootIsItsOwn`,
+  `TestAScanOfARootSparesANestedRootThatReadsAsNotMounted`,
+  `TestServeRefusesTheDataDirItRecordedThroughALinkOnItsVolumeByItsTarget`,
+  `TestServeRefusesTheDataDirItRecordedByItsTargetThroughALinkOnItsVolume`,
+  `TestServeRefusesTheDataDirThroughALinkAtItsMountPoint`,
+  `TestServeWritesARecordOfOneSpellingAgainInBoth`,
   `TestServeRefusesTheDataDirItServedFromWhileItsVolumeIsAway`,
   `TestServeRefusesADataDirItsRecordNamesThatHoldsNeitherFile`,
   `TestServeStartsAgainOverADatabaseRemovedOnPurpose`,
