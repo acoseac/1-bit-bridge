@@ -160,7 +160,8 @@ harness alone: native and DoP packing; the player's DSD open and its plans' edge
 they share, the ID3 offset view and the canonical DSD form (`internal/player/decode/dsd.go`,
 `dsf.go`, `dff.go`, `pcm_region.go`, `offset.go`, `internal/player/format/pcm.go`);
 alsactl control/control_linux/uapi and the constraint check (`internal/alsactl/constraints.go`);
-the ALSA qualification identity and the sysfs reader it is read from (`internal/alsa/sysfs.go`); the file open the
+everything under `internal/alsa/`, the reader of the hardware (the qualification identity, the
+sysfs reader it is read from and its tree reads, the capabilities and the qualification gain); the file open the
 harness's readers take evidence through (`internal/fsutil/notafile.go`, `notafile_unix.go`)
 and the USB ID and port parsing a unit's identity is read with (`internal/usbid/port.go`);
 everything under `internal/alsapcm/` (ALSA UAPI, PCM device, native device, params,

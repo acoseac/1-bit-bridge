@@ -1292,17 +1292,20 @@ B1 narrows the guard to the code that changes DSD bytes or the harness's evidenc
 
 - **Paths:** `internal/player/format/dsd_pack.go`, `internal/player/format/dop_pack.go`,
   `internal/player/playback/native.go`, `internal/player/playback/edges.go`,
-  `internal/alsa/qualification.go`, and `internal/alsactl/control.go`, `control_linux.go` and
+  and `internal/alsactl/control.go`, `control_linux.go` and
   `uapi.go`. B1's review added, by an audit of the calls from the DSF and DFF demuxers' reads to
   the sink's write (the record is in `ops/engineering-log.md`): the files that shape the native
   DSD bytes or their count, `internal/player/decode/dsd.go`, `dsf.go`, `dff.go`,
   `pcm_region.go` and `offset.go`, and `internal/player/format/pcm.go`; and the helpers the
   harness's readers take evidence and a unit's identity through, `internal/fsutil/notafile.go`
-  and `notafile_unix.go`, and `internal/usbid/port.go`. Round 3 added the last two the audit
-  flagged: `internal/alsa/sysfs.go`, the sysfs reader the unit's identity is read from, and
-  `internal/alsactl/constraints.go`, `CheckConstraints`, which holds an approval's mixer
-  constraints at play time.
-- **Prefixes:** `internal/alsapcm/`, `internal/player/qualification/` and `cmd/bridge/output_dsdtest`.
+  and `notafile_unix.go`, and `internal/usbid/port.go`. Round 3 added `internal/alsactl/constraints.go`,
+  `CheckConstraints`, which holds an approval's mixer constraints at play time.
+- **Prefixes:** `internal/alsapcm/`, `internal/alsa/`, `internal/player/qualification/` and
+  `cmd/bridge/output_dsdtest`. Round 3 put `internal/alsa/` back whole: the qualification identity,
+  the sysfs reader and its tree reads, the capabilities and the qualification gain are all
+  evidence the harness rests on, and since B1's legacy reader takes every version from 35 to the
+  build's own, a bump no longer strands the owner's record; it costs only the harness's
+  in-flight contacts, candidates and reports.
 - **Dropped:** everything else in today's two lists.
 
 **What this plan touches, after B1:**

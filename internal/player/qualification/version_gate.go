@@ -14,24 +14,26 @@ import (
 // the player's DSD open and its plans' edges, the DSF and DFF demuxers, the
 // reads they share and the ID3 offset view every read of a tagged file goes
 // through, and the canonical DSD form, whose byte count sets how many bytes a
-// DSF yields. For the harness: the ALSA qualification identity and the sysfs
-// reader it is read from, the control UAPI, reader and constraint check, the
-// file open its readers take evidence through, and the USB ID and port
-// parsing a unit's identity is read with.
+// DSF yields. For the harness: the control UAPI, reader and constraint
+// check, the file open its readers take evidence through, and the USB ID and
+// port parsing a unit's identity is read with.
 var GuardedPaths = []string{
 	"internal/player/format/dsd_pack.go", "internal/player/format/dop_pack.go",
 	"internal/player/playback/native.go", "internal/player/playback/edges.go",
 	"internal/player/decode/dsd.go", "internal/player/decode/dsf.go", "internal/player/decode/dff.go",
 	"internal/player/decode/pcm_region.go", "internal/player/decode/offset.go", "internal/player/format/pcm.go",
-	"internal/alsa/qualification.go", "internal/alsactl/control.go", "internal/alsactl/control_linux.go", "internal/alsactl/uapi.go",
+	"internal/alsactl/control.go", "internal/alsactl/control_linux.go", "internal/alsactl/uapi.go",
 	"internal/fsutil/notafile.go", "internal/fsutil/notafile_unix.go", "internal/usbid/port.go",
-	"internal/alsa/sysfs.go", "internal/alsactl/constraints.go",
+	"internal/alsactl/constraints.go",
 }
 
-// Prefixes are the ALSA PCM backend and its sinks, the qualification package
-// (the harness's readers and inputs, and this checker) and the dsd-test
-// harness.
-var guardedPrefixes = []string{"internal/alsapcm/", "internal/player/qualification/", "cmd/bridge/output_dsdtest"}
+// Prefixes are the ALSA PCM backend and its sinks; the ALSA reader of the
+// hardware, whose every file the harness's evidence rests on (the
+// qualification identity, the sysfs reader and its tree reads, the
+// capabilities and the qualification gain; B728 B1, round 3); the
+// qualification package (the harness's readers and inputs, and this
+// checker); and the dsd-test harness.
+var guardedPrefixes = []string{"internal/alsapcm/", "internal/alsa/", "internal/player/qualification/", "cmd/bridge/output_dsdtest"}
 
 // CheckVersion compares read-only Git refs; guarded rename/deletion counts too.
 func CheckVersion(dir, base, head string) error {
