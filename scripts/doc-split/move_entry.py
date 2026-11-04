@@ -742,6 +742,11 @@ def self_test():
         both = "- **%s %s** → History-rules-s.md" % pair
         _, line = attempt2("pair", text=both)
         expect("and that line moves", line == both)
+        _, _, items2, off2 = document(rules2)
+        it = next(i for i in items2 if i["type"] == "block" and i["start"] + 1 + off2 == at2["merge"])
+        expect("validate_overrides holds a line to its caller's list too, by the same rule",
+               "dropped Don't: Never do Z." in validate_overrides.problems(
+                   {"block": it, "mechanical_line": merged, "donts": ["Never do Z."]}, merged))
     finally:
         shutil.rmtree(root)
     print("self-test:", "PASS" if ok else "FAIL")
