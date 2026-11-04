@@ -157,9 +157,11 @@ console.log(JSON.stringify(out));
 // the updates frames bring them: a rollback refused (Roll back hidden, the
 // row and its label shown with the reason after its badge, its apostrophe
 // read back from the escape), then offered (Roll back shown, the row hidden
-// and emptied), refused again, and no backup (nothing shown). Each status
-// travels through json.Marshal of UpdateStatus, so a Go tag and a JS read
-// that disagree about a name fail here too.
+// and emptied), refused again, refused with a reason that carries markup
+// (shown as text: an unescaped reason loses its tags to the page), and no
+// backup (nothing shown). Each status travels through json.Marshal of
+// UpdateStatus, so a Go tag and a JS read that disagree about a name fail
+// here too.
 func TestTheUpdatesPanelShowsRollBackOrWhyNot(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -185,6 +187,9 @@ func TestTheUpdatesPanelShowsRollBackOrWhyNot(t *testing.T) {
 		{"refused: the install marker cannot be read",
 			UpdateStatus{CurrentVersion: "0.2.4", Channel: "stable", RollbackRefusal: reasonUnreadable},
 			shown{ButtonHidden: true, Text: rollbackUnavailable + " " + reasonUnreadable}},
+		{"refused: a reason that carries markup",
+			UpdateStatus{CurrentVersion: "0.2.4", Channel: "stable", RollbackRefusal: reasonOpened + " <b>&</b>"},
+			shown{ButtonHidden: true, Text: rollbackUnavailable + " " + reasonOpened + " <b>&</b>"}},
 		{"no backup",
 			UpdateStatus{CurrentVersion: "0.2.4", Channel: "stable"},
 			shown{ButtonHidden: true, RowHidden: true, LabelHidden: true}},
