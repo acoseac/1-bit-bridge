@@ -1,6 +1,7 @@
 package listeningverify
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -15,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -683,6 +685,24 @@ func decodeDSD(path string, limits limits) (*decoded, []string) {
 	return d, problems
 }
 
+// named is a fixture and the manifest that declares it.
+type named struct {
+	manifest string
+	f        qualification.Fixture
+}
+
+// orderProblems are the fixtures naming the decoded DSD file at path whose
+// manifest declares another channel order than its tones show.
+func orderProblems(d *decoded, path string, fixtures []named) []string {
+	var out []string
+	for _, n := range fixtures {
+		if d.order != n.f.Order {
+			out = append(out, fmt.Sprintf("%s %s (%s): decoded channel order %q, the manifest says %q", n.manifest, n.f.ID, path, d.order, n.f.Order))
+		}
+	}
+	return out
+}
+
 // fixtureReport is what compareToReference measured, for the report.
 type fixtureReport struct {
 	level, freqOff, silence, hfSilence, hfTones, line, lineAt float64
@@ -1241,10 +1261,6 @@ func checkDir(dir string, limits limits) (report, problems []string) {
 	pairs := map[pair][]string{}
 	// Every fixture that names a file is held to it: two fixtures of one
 	// file, or of one manifest and another, may declare it differently.
-	type named struct {
-		manifest string
-		f        qualification.Fixture
-	}
 	var fixtures []named
 	dsdFiles := map[string][]named{}
 	for _, name := range names {
@@ -1287,6 +1303,12 @@ func checkDir(dir string, limits limits) (report, problems []string) {
 		}
 		say("%s: %d fixtures; schema, ReadManifest and CheckAssets pass; sha256 %s", base, len(m.Fixtures), fileDigest(b))
 	}
+	// What the generation wrote beside the assets names no directory of the
+	// machine that made it, nor its user or host: a copied directory says
+	// nothing of where it was made.
+	meta, read := metadataProblems(dir, identifyingNames())
+	problems = append(problems, meta...)
+	say("metadata: %d files beside the assets hold no absolute path, user or host name (%d found)", read, len(meta))
 	// The headers, as dsd-test checks each fixture it plays and its
 	// reference (verifyNativeFixture): each file decoded once.
 	pcmHeaders, dsdHeaders := map[string]format.PCM{}, map[string]format.NativeDSD{}
@@ -1354,10 +1376,8 @@ func checkDir(dir string, limits limits) (report, problems []string) {
 			continue
 		}
 		ffOrder, ran, ffErr := ffmpegOrder(filepath.Join(assets, p))
+		problems = append(problems, orderProblems(d, p, dsdFiles[p])...)
 		for _, n := range dsdFiles[p] {
-			if d.order != n.f.Order {
-				bad("%s %s (%s): decoded channel order %q, the manifest says %q", n.manifest, n.f.ID, p, d.order, n.f.Order)
-			}
 			if ran && (ffErr != nil || ffOrder != n.f.Order) {
 				bad("%s %s (%s): ffmpeg's decode: order %q, %v", n.manifest, n.f.ID, p, ffOrder, ffErr)
 			}
@@ -1504,6 +1524,125 @@ func checkDir(dir string, limits limits) (report, problems []string) {
 }
 
 func fileDigest(b []byte) string { return fmt.Sprintf("%x", sha256.Sum256(b)) }
+
+// ------------------------------------------------------------- metadata
+
+// absolutePath finds an absolute path starting a word of a generated file's
+// text: POSIX, a drive's, a share's, or one under ~. A slash inside a word
+// ("rate/128", "pi/64", "assets/x.dsf") starts none.
+var absolutePath = regexp.MustCompile(`(?:^|[\s"'=:(\[,])(/[^\s"',)\]]+|[A-Za-z]:[\\/][^\s"',)\]]*|\\\\[^\s"',)\]]+|~[A-Za-z0-9_.-]*/[^\s"',)\]]*)`)
+
+// exposure is what of text could say where, or by whom, a file was made:
+// the absolute paths it holds, and each of names it holds as a word. A name
+// shorter than four characters is too likely a word of the text's own.
+func exposure(text string, names []string) []string {
+	var found []string
+	for _, m := range absolutePath.FindAllStringSubmatch(text, -1) {
+		found = append(found, m[1])
+	}
+	for _, name := range names {
+		if len(name) < 4 {
+			continue
+		}
+		if regexp.MustCompile(`(?:^|[^A-Za-z0-9_])` + regexp.QuoteMeta(name) + `(?:$|[^A-Za-z0-9_])`).MatchString(text) {
+			found = append(found, name)
+		}
+	}
+	return found
+}
+
+// identifyingNames are the names a generated file must not carry: the
+// user's, as the environment and the home directory give it, and the host's.
+func identifyingNames() []string {
+	set := map[string]bool{}
+	for _, v := range []string{"USER", "LOGNAME", "USERNAME"} {
+		set[os.Getenv(v)] = true
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		set[filepath.Base(home)] = true
+	}
+	if host, err := os.Hostname(); err == nil {
+		set[host] = true
+		set[strings.SplitN(host, ".", 2)[0]] = true
+	}
+	delete(set, "")
+	names := make([]string, 0, len(set))
+	for n := range set {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// metadataProblems reads the files a generation writes beside its assets,
+// its JSON and text files whole and its tar's headers, for what exposure
+// finds in them, and says how many it read.
+func metadataProblems(dir string, names []string) (problems []string, read int) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return []string{err.Error()}, 0
+	}
+	for _, e := range entries {
+		name, path := e.Name(), filepath.Join(dir, e.Name())
+		switch {
+		case !e.Type().IsRegular():
+			continue
+		case name == "assets.tar":
+			p, err := tarProblems(path, names)
+			if err != nil {
+				p = append(p, fmt.Sprintf("%s: %v", name, err))
+			}
+			problems = append(problems, p...)
+		case strings.HasSuffix(name, ".json") || strings.HasSuffix(name, ".txt") || name == "SHA256SUMS":
+			b, err := os.ReadFile(path)
+			if err != nil {
+				problems = append(problems, fmt.Sprintf("%s: %v", name, err))
+				continue
+			}
+			for _, hit := range exposure(string(b), names) {
+				problems = append(problems, fmt.Sprintf("%s names %q, which says where or by whom it was made", name, hit))
+			}
+		default:
+			continue
+		}
+		read++
+	}
+	return problems, read
+}
+
+// tarProblems reads a tar's headers, and none of its contents: each
+// member's name, link, owner and PAX records, for what exposure finds, and
+// any owner a member keeps.
+func tarProblems(path string, names []string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var problems []string
+	tr := tar.NewReader(f)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			return problems, nil
+		}
+		if err != nil {
+			return problems, err
+		}
+		fields := []string{h.Name, h.Linkname, h.Uname, h.Gname}
+		for _, v := range h.PAXRecords {
+			fields = append(fields, v)
+		}
+		for _, field := range fields {
+			for _, hit := range exposure(field, names) {
+				problems = append(problems, fmt.Sprintf("assets.tar member %s names %q", h.Name, hit))
+			}
+		}
+		if h.Uid != 0 || h.Gid != 0 || h.Uname != "" || h.Gname != "" {
+			problems = append(problems, fmt.Sprintf("assets.tar member %s has an owner", h.Name))
+		}
+	}
+}
 
 // TestListeningAssets checks the generated directory -listening-assets
 // names (see the package doc), and logs what it measured.

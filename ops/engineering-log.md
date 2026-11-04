@@ -73138,10 +73138,11 @@ generator (`scripts/qualification/listening-assets`: `sdm.c` and
 assets, their manifests and the session plan stay outside the repository.
 
 **The modulator.** A 1-bit error-feedback loop, v = u + (H - 1)e, y = sign(v +
-d), its NTF designed at run time by Schreier's synthesizeNTF: order 5, zeros
-at the Legendre roots across the band at OSR 64 (the band edge the rate / 128
-at every rate), maximally flat poles with |H(-1)| = 1.4, a margin under Lee's
-1.5, and in-loop TPDF dither. The dither was measured, not chosen: at 0.1 the
+d), its NTF designed at run time by the synthesizeNTF procedure: order 5,
+zeros at the Legendre roots across the band at OSR 64 (the band edge the rate
+/ 128 at every rate), maximally flat poles with |H(-1)| = 1.4, a margin under
+the 1.5 a 1-bit loop is held to, and in-loop TPDF dither. The dither was
+measured, not chosen: at 0.1 the
 loop's silence carried a line at a quarter of the rate 30 dB over its noise,
 at 0.3 one of 10 dB, from 0.4 none; at |H(-1)| 1.5 a dither of 0.6 left the
 loop's bounds, at 1.4 it held to 0.7 and left them from 0.8, so the defaults

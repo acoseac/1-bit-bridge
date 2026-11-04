@@ -14,9 +14,15 @@
 // the bitstream's runs and density, and the joins the session's runs make.
 // ffmpeg's dsd_* decoders, when ffmpeg is on PATH, decode each fixture a
 // third way. Every run of runs.json is held to the fixture-list rules
-// bridge output dsd-test applies before it opens anything.
+// bridge output dsd-test applies before it opens anything, and no file
+// beside the assets, nor the tar's headers, may name an absolute path, the
+// user or the host.
 //
-// The other tests need no assets: they build a small set in the test's own
-// directory, pass it, and require the check to refuse it once its channels
-// are swapped, its bit order is wrong or its manifest breaks the schema.
+// The other tests need no assets. By default they decode a quarter-second
+// stream and catch it once its channels are swapped, and hold the metadata
+// scan, the schema and the run rules to cases of their own. With
+// -listening-assets the costly ones run too, beside the directory's check:
+// they build a two-second set in the test's own directory, pass it, and
+// require the check to refuse it once its channels are swapped, its bit
+// order is wrong or a step ends it.
 package listeningverify

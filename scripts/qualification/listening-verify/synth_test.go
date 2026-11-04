@@ -1,6 +1,7 @@
 package listeningverify
 
 import (
+	"archive/tar"
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
@@ -22,30 +23,45 @@ var synthetic = limits{silence: -40, hf: map[int]float64{2822400: 10}, hfSpread:
 
 const synthRate = 2822400
 
-// synthProgramme is a 2 s programme: 0.6 s silence, 0.3 s left 1 kHz, 0.1 s
-// silence, 0.3 s right 2 kHz, silence; 10 ms raised-cosine ramps.
-func synthProgramme(channel int, t float64) float64 {
-	burst := func(start, end, f float64) float64 {
-		if t < start || t >= end {
-			return 0
-		}
-		env := 1.0
-		if in := t - start; in < 0.01 {
-			env = 0.5 * (1 - math.Cos(math.Pi*in/0.01))
-		} else if out := end - t; out < 0.01 {
-			env = 0.5 * (1 - math.Cos(math.Pi*out/0.01))
-		}
-		return env * math.Sin(2*math.Pi*f*(t-start))
+// burst is a sine of frequency f from start to end, at phase zero at its
+// start, rising and falling over 10 ms raised-cosine ramps.
+func burst(t, start, end, f float64) float64 {
+	if t < start || t >= end {
+		return 0
 	}
-	if channel == 0 {
-		return burst(0.6, 0.9, 1000)
+	env := 1.0
+	if in := t - start; in < 0.01 {
+		env = 0.5 * (1 - math.Cos(math.Pi*in/0.01))
+	} else if out := end - t; out < 0.01 {
+		env = 0.5 * (1 - math.Cos(math.Pi*out/0.01))
 	}
-	return burst(1.0, 1.3, 2000)
+	return env * math.Sin(2*math.Pi*f*(t-start))
 }
 
-// synthDSD modulates the programme with a second-order 1-bit loop, NTF
+// synthProgramme is a 2 s programme: 0.6 s silence, 0.3 s left 1 kHz, 0.1 s
+// silence, 0.3 s right 2 kHz, silence.
+func synthProgramme(channel int, t float64) float64 {
+	if channel == 0 {
+		return burst(t, 0.6, 0.9, 1000)
+	}
+	return burst(t, 1.0, 1.3, 2000)
+}
+
+// shortProgramme is the default run's quarter second: 40 ms silence, 80 ms
+// left 1 kHz, 20 ms silence, 80 ms right 2 kHz, silence.
+func shortProgramme(channel int, t float64) float64 {
+	if channel == 0 {
+		return burst(t, 0.04, 0.12, 1000)
+	}
+	return burst(t, 0.14, 0.22, 2000)
+}
+
+// synthDSD is the 2 s programme's stream.
+func synthDSD(bits int) [2][]byte { return synthStream(bits, synthProgramme) }
+
+// synthStream modulates a programme with a second-order 1-bit loop, NTF
 // (1 - z^-1)^2, dithered: canonical bytes per channel, bit 7 earliest.
-func synthDSD(bits int) [2][]byte {
+func synthStream(bits int, programme func(channel int, t float64) float64) [2][]byte {
 	var out [2][]byte
 	seed := uint64(0x9e3779b97f4a7c15)
 	next := func() float64 {
@@ -58,7 +74,7 @@ func synthDSD(bits int) [2][]byte {
 		out[c] = make([]byte, (bits+7)/8)
 		e1, e2 := 0.0, 0.0
 		for k := 0; k < bits; k++ {
-			u := 0.5 * math.Pow(10, -1.5) * synthProgramme(c, float64(k)/synthRate)
+			u := 0.5 * math.Pow(10, -1.5) * programme(c, float64(k)/synthRate)
 			v := u - 2*e1 + e2 // y = u + (1 - z^-1)^2 e
 			y := -1.0
 			if v+0.1*(next()-next()) >= 0 {
@@ -227,10 +243,104 @@ func has(problems []string, want string) bool {
 	return false
 }
 
+// costly skips a test that builds and checks a two-second set, about a
+// second of a core and six under -race, unless -listening-assets names a
+// directory: these are the check's controls, run beside the check of a
+// generated directory, and the default run keeps to the quarter-second
+// TestTheOrderCheckCatchesASwappedChannelPair.
+func costly(t *testing.T) {
+	t.Helper()
+	if *assetDir == "" {
+		t.Skip("builds and checks a two-second set: runs with -listening-assets")
+	}
+}
+
+// TestTheOrderCheckCatchesASwappedChannelPair is the default run's control
+// of the channel order, a quarter second long: an LR stream passes a fixture
+// that declares LR, and the same stream with its channels swapped is caught
+// as RL, through decodeDSD (the bridge's decoder and the independent reader)
+// and orderProblems, as checkDir checks every DSD file.
+func TestTheOrderCheckCatchesASwappedChannelPair(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	bits := synthRate / 4
+	ch := synthStream(bits, shortProgramme)
+	lr := []named{{"manifest.json", qualification.Fixture{ID: "dsd", Path: "dsd.dsf", Order: "LR"}}}
+	for _, c := range []struct {
+		swap bool
+		want string
+	}{
+		{false, ""},
+		{true, `manifest.json dsd (dsd.dsf): decoded channel order "RL", the manifest says "LR"`},
+	} {
+		path := filepath.Join(dir, fmt.Sprintf("swap-%t.dsf", c.swap))
+		writeDSF(t, path, ch, bits, false, 1, c.swap)
+		d, probs := decodeDSD(path, synthetic)
+		if d == nil || len(probs) != 0 {
+			t.Fatalf("swap %t: the quarter second does not decode cleanly: %q", c.swap, probs)
+		}
+		got := orderProblems(d, "dsd.dsf", lr)
+		if (c.want == "") != (len(got) == 0) || (c.want != "" && !has(got, c.want)) {
+			t.Fatalf("swap %t: order %q, problems %q", c.swap, d.order, got)
+		}
+	}
+}
+
+// TestTheMetadataScanFindsAPathOrAName: exposure finds an absolute path of
+// each kind and a name standing as a word, and nothing in a line of the
+// generator's own text; metadataProblems finds them in the files beside the
+// assets and in the tar's headers, with any owner a member keeps.
+func TestTheMetadataScanFindsAPathOrAName(t *testing.T) {
+	for _, p := range []string{"/home/someone/out", `C:\Users\someone`, `\\share\dir`, "~/out", "~someone/x"} {
+		if got := exposure(`"--out", "`+p+`"`, nil); len(got) != 1 || got[0] != p {
+			t.Errorf("%s: found %q", p, got)
+		}
+	}
+	clean := "rate/128, 0..pi/64, 60 dB/s, +-1, assets/dsd64-lr-lsb.dsf, dsf-lsb:0:assets/a.dsf, 10^(-30/20)"
+	if got := exposure(clean, []string{"someone", "box"}); len(got) != 0 {
+		t.Errorf("a clean line: found %q", got)
+	}
+	if got := exposure("made by someone on box0.", []string{"someone", "box0"}); len(got) != 2 {
+		t.Errorf("two names standing as words: found %q", got)
+	}
+	dir := t.TempDir()
+	write := func(name, text string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("generation.json", `{"args": ["--write", "dsf-lsb:0:/home/someone/out/assets/x.dsf"]}`)
+	write("manifest.json", `{"reference": "made on box0"}`)
+	write("runs.json", `{"runs": []}`)
+	var b bytes.Buffer
+	tw := tar.NewWriter(&b)
+	if err := tw.WriteHeader(&tar.Header{Name: "x", Mode: 0o600, Size: 1, Uname: "someone", Format: tar.FormatPAX}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte{0}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	write("assets.tar", b.String())
+	problems, read := metadataProblems(dir, []string{"someone", "box0"})
+	for _, want := range []string{`generation.json names "/home/someone/out/assets/x.dsf"`, `manifest.json names "box0"`,
+		`assets.tar member x names "someone"`, "assets.tar member x has an owner"} {
+		if !has(problems, want) {
+			t.Errorf("not found: %s, in %q", want, problems)
+		}
+	}
+	if read != 4 || has(problems, "runs.json") {
+		t.Errorf("read %d files, found %q", read, problems)
+	}
+}
+
 // TestTheCheckPassesASoundSet: a fixture whose channels, levels, timing and
 // framing match its reference and its manifest passes, and the report names
 // what it measured.
 func TestTheCheckPassesASoundSet(t *testing.T) {
+	costly(t)
 	t.Parallel()
 	report, problems := checkDir(synthSet{}.build(t), synthetic)
 	if len(problems) != 0 {
@@ -238,6 +348,7 @@ func TestTheCheckPassesASoundSet(t *testing.T) {
 	}
 	for _, want := range []string{
 		"manifest.json: 2 fixtures; schema, ReadManifest and CheckAssets pass",
+		"metadata: 2 files beside the assets hold no absolute path, user or host name (0 found)",
 		"dsd.dsf: 5644800 bits a channel at 2822400, bridge decoder and independent reader agree; order LR",
 		"dsd.dsf against ref.wav",
 		"boundaries of dsd (0x69, the joins, 0x69)",
@@ -253,6 +364,7 @@ func TestTheCheckPassesASoundSet(t *testing.T) {
 // fixture whose channels were swapped, its manifest and reference still
 // saying LR, is caught as RL.
 func TestTheCheckCatchesASwappedChannelPair(t *testing.T) {
+	costly(t)
 	t.Parallel()
 	_, problems := checkDir(synthSet{swap: true}.build(t), synthetic)
 	for _, want := range []string{`manifest.json dsd (dsd.dsf): decoded channel order "RL", the manifest says "LR"`, `the DSD's channel order is "RL", its reference's "LR"`} {
@@ -265,6 +377,7 @@ func TestTheCheckCatchesASwappedChannelPair(t *testing.T) {
 // TestTheCheckCatchesTheWrongBitOrder: LSB-first bytes declared MSB-first
 // decode as noise, not the reference's tones.
 func TestTheCheckCatchesTheWrongBitOrder(t *testing.T) {
+	costly(t)
 	t.Parallel()
 	_, problems := checkDir(synthSet{declared: 8}.build(t), synthetic)
 	if !has(problems, "against the reference's") {
@@ -276,6 +389,7 @@ func TestTheCheckCatchesTheWrongBitOrder(t *testing.T) {
 // clicks where the sink joins it to its 0x69 tail, and the boundary check
 // says so, when nothing else in the fixture is wrong.
 func TestTheCheckCatchesAStepAtAFilesEnd(t *testing.T) {
+	costly(t)
 	t.Parallel()
 	_, problems := checkDir(synthSet{step: true}.build(t), synthetic)
 	if len(problems) != 1 || !has(problems, "the boundaries of dsd: boundary 1 holds") {

@@ -12,11 +12,11 @@
  * The modulator is a 1-bit error-feedback loop: v = u + (H - 1)e, y =
  * sign(v + d), e = y - v, so y = u + He with a signal transfer of exactly 1
  * and the noise transfer function H. H is designed here, at run time, by
- * Schreier's synthesizeNTF procedure for a lowpass NTF: its zeros are the
+ * the synthesizeNTF procedure for a lowpass NTF: its zeros are the
  * optimised ones (the roots of the Legendre polynomial of its order, on the
  * unit circle across the band 0..pi/OSR), its poles the maximally flat set
  * whose out-of-band gain |H(-1)| is Hinf. The defaults are order 5, OSR 64
- * and Hinf 1.4, a margin under Lee's 1.5 for a 1-bit loop, and the same
+ * and Hinf 1.4, a margin under the 1.5 a 1-bit loop is held to, and the same
  * design is used at every DSD rate, so its band edge is the rate / 128
  * (22.05 kHz at DSD64, 44.1 kHz at DSD128, 88.2 kHz at DSD256). d is in-loop
  * TPDF dither whose peak is --dither (default 0.4, in units of the +-1
@@ -150,7 +150,7 @@ typedef struct {
 } ntf_t;
 
 /* legendre_roots puts the n roots of the Legendre polynomial P_n in x,
- * ascending: Schreier's optimised zeros (ds_optzeros) on the band edge. */
+ * ascending: the optimised zeros (ds_optzeros) on the band edge. */
 static void legendre_roots(int n, double *x) {
 	for (int i = 1; i <= n; i++) {
 		double r = cos(M_PI * (i - 0.25) / (n + 0.5));

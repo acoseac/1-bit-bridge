@@ -36,7 +36,9 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -267,8 +269,8 @@ def build(work: Path) -> tuple[Path, str]:
     return exe, version
 
 
-def run_json(cmd: list[str]) -> dict:
-    out = subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
+def run_json(cmd: list[str], cwd: Path | None = None) -> dict:
+    out = subprocess.run(cmd, check=True, capture_output=True, text=True, cwd=cwd).stdout
     return json.loads(out.strip().splitlines()[-1])
 
 
@@ -292,7 +294,7 @@ def reference_text(design: dict, cc_version: str, digests: dict) -> str:
         f"Generator: scripts/qualification/listening-assets sdm.c version {design['version']} (sha256 {digests['sdm.c']}) "
         f"driven by generate.py (sha256 {digests['generate.py']}), compiled with {cc_version} {' '.join(CFLAGS)}. "
         f"DSD: a 1-bit error-feedback sigma-delta modulator of order {design['order']}, its noise transfer function by "
-        f"Schreier's synthesizeNTF (zeros at the Legendre roots across 0..pi/{design['osr']:g}, maximally flat poles, "
+        f"the synthesizeNTF procedure (zeros at the Legendre roots across 0..pi/{design['osr']:g}, maximally flat poles, "
         f"|H(-1)| = {design['hinf']:g}), the same design at every rate so its band edge is the rate/128, signal transfer "
         f"exactly 1, in-loop TPDF dither of peak {design['dither']:g} (units of the +-1 output), xorshift64* seeded per "
         "job from the CRC-32 of its name, each channel its own; silences are that loop with a zero input. PCM references: "
@@ -334,72 +336,130 @@ def generate() -> None:
     try:
         exe, cc_version = build(work)
         subprocess.run([str(exe), "selftest"], check=True)
-        design = run_json([str(exe), "design"])
-        for k, v in DESIGN.items():
-            if design[k] != v:
-                raise SystemExit(f"sdm design says {k} {design[k]}, the plan {v}")
-        assets = OUT / ASSETS
-        assets.mkdir(parents=True)
-        record = {"design": design, "compiler": cc_version, "cflags": CFLAGS, "dsd": [], "wav": []}
-        for job in plan.dsd_jobs:
-            cmd = [str(exe), "dsd", "--rate", str(job["rate"]), "--seed", str(seed_of(job["name"]))]
-            for content, frames in job["content"]:
-                cmd += ["--content", f"{content}:{frames}"]
-            for kind, seg, name in job["write"]:
-                cmd += ["--write", f"{kind}:{seg}:{assets / name}"]
-            print("dsd", job["name"], flush=True)
-            summary = run_json(cmd)
-            if max(summary["vmax"]) >= 3 or max(summary["longestRun"]) > 16:
-                raise SystemExit(f"{job['name']}: the loop left its bounds: {summary}")
-            record["dsd"].append({"job": job["name"], "args": cmd[1:], "summary": summary})
-        for name, w in sorted(plan.wavs.items()):
-            cmd = [str(exe), "wav", "--rate", str(w["rate"]), "--bits", str(w["bits"]), "--seed", str(seed_of(name)),
-                   "--content", f"{w['content']}:{w['frames']}", "--out", str(assets / name)]
-            print("wav", name, flush=True)
-            record["wav"].append({"file": name, "args": cmd[1:], "summary": run_json(cmd)})
-        digests = {"sdm.c": sha256(SOURCE), "generate.py": sha256(Path(__file__).resolve())}
-        reference = reference_text(design, cc_version, digests)
-        hashes = {name: sha256(assets / name) for name in sorted(os.listdir(assets))}
-        for manifest, entries in plan.manifests.items():
-            fixtures = []
-            for e in entries:
-                f = plan.fixtures[e["Path"]]
-                fixtures.append({"ID": e["ID"], "Path": e["Path"], "SHA256": hashes[e["Path"]], "Container": f["Container"],
-                                 "Order": f["Order"], "PCMReference": e["PCMReference"], "Rate": f["Rate"], "Channels": 2,
-                                 "Frames": f["Frames"]})
-            doc = {"schemaVersion": 1,
-                   "calibration": {"reference": reference, "peakDBFS": PEAK_DBFS, "leadingSilenceMS": 1000,
-                                   "trailingSilenceMS": 1000, "attestation": CALIBRATION_PHRASE},
-                   "fixtures": fixtures}
-            (OUT / manifest).write_text(json.dumps(doc, indent=2) + "\n")
-        (OUT / "runs.json").write_text(json.dumps({"runs": plan.runs}, indent=2) + "\n")
-        record["digests"] = digests
-        (OUT / "generation.json").write_text(json.dumps(record, indent=2) + "\n")
-        readme = [
-            "DSD qualification listening assets (manifest-v1), from scripts/qualification/listening-assets.",
-            "Extract into the evidence directory Q, then: cd \"$Q\" && sha256sum -c SHA256SUMS",
-            "manifest.json is the qualification manifest; manifest-edge44.json and manifest-edge384.json",
-            "are the matrix's PCM-edge manifests; runs.json lists the session's runs; assets/ is --fixtures.",
-            "",
-            reference,
-        ]
-        (OUT / "README.txt").write_text("\n".join(readme) + "\n")
-        members = sorted(["README.txt", "runs.json", *plan.manifests] + [f"{ASSETS}/{n}" for n in hashes])
-        sums = [f"{sha256(OUT / m)}  {m}" for m in members]
-        (OUT / "SHA256SUMS").write_text("\n".join(sums) + "\n")
-        with tarfile.open(OUT / "assets.tar", "w", format=tarfile.PAX_FORMAT) as tar:
-            def owned(info: tarfile.TarInfo) -> tarfile.TarInfo:
-                info.uid = info.gid = 0
-                info.uname = info.gname = ""
-                info.mtime = 0
-                info.mode = 0o700 if info.isdir() else 0o600
-                return info
-            tar.add(OUT / ASSETS, arcname=ASSETS, recursive=False, filter=owned)
-            for m in members + ["SHA256SUMS"]:
-                tar.add(OUT / m, arcname=m, filter=owned)
-        print(f"wrote {len(hashes)} assets, {len(plan.manifests)} manifests and {len(plan.runs)} runs under {OUT}")
+        n = render(plan, OUT, exe, cc_version)
+        print(f"wrote {n} assets, {len(plan.manifests)} manifests and {len(plan.runs)} runs under {OUT}")
     finally:
         shutil.rmtree(work)
+
+
+def render(plan: Plan, out: Path, exe: Path, cc_version: str) -> int:
+    """Write plan's assets, manifests, runs.json, generation.json, README.txt,
+    SHA256SUMS and assets.tar into out, which must not exist yet, and answer
+    how many assets it wrote. sdm runs inside out on paths relative to it, so
+    generation.json records each run's arguments as they were given, and no
+    file written names out, a directory above it, the user or the host."""
+    design = run_json([str(exe), "design"])
+    for k, v in DESIGN.items():
+        if design[k] != v:
+            raise SystemExit(f"sdm design says {k} {design[k]}, the plan {v}")
+    assets = out / ASSETS
+    assets.mkdir(parents=True)
+    record = {"design": design, "compiler": cc_version, "cflags": CFLAGS, "dsd": [], "wav": []}
+    for job in plan.dsd_jobs:
+        args = ["dsd", "--rate", str(job["rate"]), "--seed", str(seed_of(job["name"]))]
+        for content, frames in job["content"]:
+            args += ["--content", f"{content}:{frames}"]
+        for kind, seg, name in job["write"]:
+            args += ["--write", f"{kind}:{seg}:{ASSETS}/{name}"]
+        print("dsd", job["name"], flush=True)
+        summary = run_json([str(exe), *args], cwd=out)
+        if max(summary["vmax"]) >= 3 or max(summary["longestRun"]) > 16:
+            raise SystemExit(f"{job['name']}: the loop left its bounds: {summary}")
+        record["dsd"].append({"job": job["name"], "args": args, "summary": summary})
+    for name, w in sorted(plan.wavs.items()):
+        args = ["wav", "--rate", str(w["rate"]), "--bits", str(w["bits"]), "--seed", str(seed_of(name)),
+                "--content", f"{w['content']}:{w['frames']}", "--out", f"{ASSETS}/{name}"]
+        print("wav", name, flush=True)
+        record["wav"].append({"file": name, "args": args, "summary": run_json([str(exe), *args], cwd=out)})
+    digests = {"sdm.c": sha256(SOURCE), "generate.py": sha256(Path(__file__).resolve())}
+    reference = reference_text(design, cc_version, digests)
+    hashes = {name: sha256(assets / name) for name in sorted(os.listdir(assets))}
+    for manifest, entries in plan.manifests.items():
+        fixtures = []
+        for e in entries:
+            f = plan.fixtures[e["Path"]]
+            fixtures.append({"ID": e["ID"], "Path": e["Path"], "SHA256": hashes[e["Path"]], "Container": f["Container"],
+                             "Order": f["Order"], "PCMReference": e["PCMReference"], "Rate": f["Rate"], "Channels": 2,
+                             "Frames": f["Frames"]})
+        doc = {"schemaVersion": 1,
+               "calibration": {"reference": reference, "peakDBFS": PEAK_DBFS, "leadingSilenceMS": 1000,
+                               "trailingSilenceMS": 1000, "attestation": CALIBRATION_PHRASE},
+               "fixtures": fixtures}
+        (out / manifest).write_text(json.dumps(doc, indent=2) + "\n")
+    (out / "runs.json").write_text(json.dumps({"runs": plan.runs}, indent=2) + "\n")
+    record["digests"] = digests
+    (out / "generation.json").write_text(json.dumps(record, indent=2) + "\n")
+    readme = [
+        "DSD qualification listening assets (manifest-v1), from scripts/qualification/listening-assets.",
+        "Extract into the evidence directory Q, then: cd \"$Q\" && sha256sum -c SHA256SUMS",
+        "manifest.json is the qualification manifest; manifest-edge44.json and manifest-edge384.json",
+        "are the matrix's PCM-edge manifests; runs.json lists the session's runs; assets/ is --fixtures.",
+        "",
+        reference,
+    ]
+    (out / "README.txt").write_text("\n".join(readme) + "\n")
+    members = sorted(["README.txt", "runs.json", *plan.manifests] + [f"{ASSETS}/{n}" for n in hashes])
+    sums = [f"{sha256(out / m)}  {m}" for m in members]
+    (out / "SHA256SUMS").write_text("\n".join(sums) + "\n")
+    with tarfile.open(out / "assets.tar", "w", format=tarfile.PAX_FORMAT) as tar:
+        def owned(info: tarfile.TarInfo) -> tarfile.TarInfo:
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            info.mtime = 0
+            info.mode = 0o700 if info.isdir() else 0o600
+            return info
+        tar.add(out / ASSETS, arcname=ASSETS, recursive=False, filter=owned)
+        for m in members + ["SHA256SUMS"]:
+            tar.add(out / m, arcname=m, filter=owned)
+    return len(hashes)
+
+
+# What of a generated file's text could say where, or by whom, it was made:
+# an absolute path, POSIX, a drive's, a share's or one under ~, starting a
+# word. A slash inside a word ("rate/128", "pi/64", "assets/x.dsf") is none.
+ABSOLUTE = re.compile(r"""(?:^|[\s"'=:(\[,])(/[^\s"',)\]]+|[A-Za-z]:[\\/][^\s"',)\]]*|\\\\[^\s"',)\]]+|~[A-Za-z0-9_.-]*/[^\s"',)\]]*)""")
+
+
+def exposure(text: str, names: list[str]) -> list[str]:
+    """The absolute paths text holds, and each of names (the user's and the
+    host's) it holds as a word; a name shorter than four characters is too
+    likely a word of the text's own to be read as one."""
+    found = [m.group(1) for m in ABSOLUTE.finditer(text)]
+    for name in names:
+        if len(name) >= 4 and re.search(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])", text):
+            found.append(name)
+    return found
+
+
+def identifying_names() -> list[str]:
+    """The names a generated file must not carry: the user's, as the
+    environment and the home directory give it, and the host's."""
+    names = [os.environ.get(v, "") for v in ("USER", "LOGNAME", "USERNAME")] + [Path.home().name]
+    host = socket.gethostname()
+    names += [host, host.split(".")[0]]
+    return sorted({n for n in names if n})
+
+
+def exposures(out: Path, names: list[str]) -> list[str]:
+    """What of every file render wrote into out says where or by whom it was
+    made: the text files read whole, the assets for the directories' own
+    absolute paths, and each tar member's name, link, owner and PAX records."""
+    dirs = [str(out.resolve()), str(HERE), str(Path.home()), tempfile.gettempdir()]
+    found = []
+    for path in sorted(p for p in out.rglob("*") if p.is_file()):
+        rel = path.relative_to(out).as_posix()
+        if path.suffix in (".dsf", ".dff", ".wav", ".tar"):
+            data = path.read_bytes()
+            found += [f"{rel} holds {d}" for d in dirs if len(d) > 4 and d.encode() in data]
+            continue
+        found += [f"{rel} names {hit}" for hit in exposure(path.read_text(), names)]
+    with tarfile.open(out / "assets.tar") as tar:
+        for m in tar.getmembers():
+            for field in (m.name, m.linkname, m.uname, m.gname, *m.pax_headers.values()):
+                found += [f"assets.tar member {m.name} names {hit}" for hit in exposure(field, names)]
+            if m.uid or m.gid or m.uname or m.gname:
+                found.append(f"assets.tar member {m.name} has an owner")
+    return found
 
 
 # ------------------------------------------------------------- self-test
@@ -491,6 +551,26 @@ def bits_of(ch: bytes, n: int) -> list[int]:
     return [(ch[k >> 3] >> (7 - (k & 7))) & 1 for k in range(n)]
 
 
+def mini_plan() -> Plan:
+    """A quarter-second plan, one DSD job written as DSF and DFF beside its
+    reference: what the self-test renders to read what a generation writes."""
+    p = Plan()
+    p.manifests = {"manifest.json": []}
+    rate = DSD[64]
+    frames = rate // 4
+    p.dsd_jobs.append({"name": "mini", "rate": rate, "content": [("short", frames)],
+                       "write": [("dsf-lsb", 0, "mini.dsf"), ("dff", 0, "mini.dff")]})
+    for name, container in (("mini.dsf", "DSF"), ("mini.dff", "DFF")):
+        p.fixtures[name] = {"Container": container, "Order": "LR", "Rate": rate, "Frames": frames, "content": "short"}
+    ref = p.wav("ref44-mini.wav", "short", 44_100, ref_frames(frames, rate, 44_100), 32)
+    for fid, name in (("mini-dsf", "mini.dsf"), ("mini-dff", "mini.dff")):
+        p.add("manifest.json", fid, name, Path(ref).stem)
+    p.add("manifest.json", Path(ref).stem, ref)
+    p.runs.append({"manifest": "manifest.json", "transport": "native", "format": "DSD_U32_BE", "rate": rate,
+                   "scenario": "matrix", "fixtures": ["mini-dsf", "mini-dff"], "purpose": "the self-test's"})
+    return p
+
+
 def self_test() -> None:
     plan = build_plan()
     for name, f in plan.fixtures.items():
@@ -549,6 +629,23 @@ def self_test() -> None:
         w = read_wav(wav)
         peak = 20 * math.log10(w["peak"] / 2 ** 23)
         checks.append((f"a 24-bit WAV reference peaks at -30 dBFS ({peak:.3f})", w["frames"] == 352800 and abs(peak + 30) < 0.01))
+        # What a generation writes says nothing of where or by whom it was
+        # made: the scan, on planted paths and names, then a small plan
+        # rendered as a generation renders, every file it wrote read.
+        planted = ["/home/someone/out", "C:\\Users\\someone", "\\\\share\\dir", "~/out", "~someone/x"]
+        clean = "rate/128, 0..pi/64, 60 dB/s, +-1, assets/dsd64-lr-lsb.dsf, dsf-lsb:0:assets/a.dsf, 10^(-30/20)"
+        checks.append(("the scan finds a planted absolute path of each kind and nothing in a clean line",
+                       all(exposure(f"x {p} y", []) == [p] for p in planted) and exposure(clean, []) == []))
+        who = identifying_names()
+        checks.append((f"the scan finds this user's and this host's names standing as words ({len(who)} names)",
+                       all(exposure(f"by {n}.", [n]) == [n] for n in who if len(n) >= 4)))
+        out = work / "out"
+        render(mini_plan(), out, exe, cc_version)
+        found = exposures(out, who)
+        wrote = sum(1 for p in out.rglob("*") if p.is_file())
+        checks.append((f"no file of a generation names an absolute path, the user or the host ({wrote} files read)", not found))
+        for f in found[:8]:
+            print("      ", f, flush=True)
         failed = 0
         for what, ok in checks:
             print(f"  {'ok  ' if ok else 'FAIL'} {what}", flush=True)

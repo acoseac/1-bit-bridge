@@ -51,7 +51,7 @@ its decoder goldens: `sdm.c` (C99, the system compiler) renders each programme a
 modulator of its own and as integer PCM, and writes DSF (LSB- and MSB-first), DSDIFF and
 WAVE_FORMAT_EXTENSIBLE files; `generate.py` builds it, runs its self-test, and writes the assets,
 their manifests and `runs.json`, the session's runs. The modulator is a 1-bit error-feedback loop,
-its NTF Schreier's synthesizeNTF design: order 5, Legendre-root zeros across the band at OSR 64 (the
+its NTF a synthesizeNTF design: order 5, Legendre-root zeros across the band at OSR 64 (the
 band edge is the rate / 128 at every rate), |H(-1)| = 1.4, signal transfer exactly 1, in-loop TPDF
 dither of peak 0.4 (0.1 left a quarter-rate idle line in silence; the loop held to 0.7). Silence is
 that loop with a zero input, never a constant byte. DSD peaks are -30 dB re 0 dB SA-CD (a sine of
@@ -67,10 +67,13 @@ and the compiler.
 python3 scripts/qualification/listening-assets/generate.py --self-test
 G=$(mktemp -d) && cp scripts/qualification/listening-assets/sdm.c scripts/qualification/listening-assets/generate.py "$G"
 python3 "$G/generate.py"
-GOTOOLCHAIN=go1.27.3 go test -tags ts_omit_webclient,ts_omit_debugeventbus ./scripts/qualification/listening-verify -run '^TestListeningAssets$' -count=1 -v -args -listening-assets="$G/out"
+GOTOOLCHAIN=go1.27.3 go test -tags ts_omit_webclient,ts_omit_debugeventbus ./scripts/qualification/listening-verify -count=1 -v -args -listening-assets="$G/out"
 ```
 
 `generate.py` never writes inside a Git checkout: the assets are some 550 MB and never committed.
+It runs `sdm` inside `out/` on paths relative to it, so no file it writes (`generation.json`, which
+records each run's arguments, included) names an absolute path, the user or the host; its self-test
+renders a small set and reads every file for them.
 Its plan (`build_plan`) is a DAC with native DSD_U32_BE at DSD64, 128 and 256, DoP at DSD64 and 128,
 and S32_LE alone for PCM; change it for another DAC (dsd-test opens a 24-bit reference as S24_3LE,
 a 32-bit one as S32_LE).
@@ -101,9 +104,12 @@ within 0.05 dB and 0.01 Hz, no tone above -100 dBFS where the reference has none
 under -18, -45 and -80 dB SA-CD at DSD64, 128 and 256 and within 1.5 dB in silence and tones, no line
 from 20 to 150 kHz 10 dB over its neighbours, no run of more than 16 equal bits, and a density of
 one half; ffmpeg's `dsd_*` decoders as a third reading when ffmpeg is on PATH; each run of
-`runs.json` under dsd-test's fixture-list rules; and every boundary those runs make a sink play
-(its 0x69 prefill, each join, its 0x69 tail) under -90 dB SA-CD. Its other tests build a small set
-and catch an LR fixture swapped as RL, LSB-first bytes declared MSB-first and a step at a file's end.
+`runs.json` under dsd-test's fixture-list rules; every boundary those runs make a sink play (its
+0x69 prefill, each join, its 0x69 tail) under -90 dB SA-CD; and no file beside the assets, nor the
+tar's headers, naming an absolute path, the user or the host. With the directory given, the package's
+costly tests run beside it: each builds a two-second set and catches an LR fixture swapped as RL,
+LSB-first bytes declared MSB-first or a step at a file's end. The default run (`make test`) keeps to a
+quarter-second order check and cases of the metadata scan, the schema and the run rules.
 
 ## Commands on the Pi (Bash; execute one command and inspect its result at a time)
 
