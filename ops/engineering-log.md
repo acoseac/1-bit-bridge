@@ -73126,6 +73126,371 @@ player.md verbatim and its History copy is gone. L146's pointer gains its long f
 "It reports nothing until the watcher has published, and its first report is the first
 snapshot's, whatever it says." (481 bytes). player.md ends at 93711 bytes (93.7%).
 
+## 2026-11-04 — B728 B1: production reads through the legacy reader, and the qualification guard narrows
+
+PR B1 of the DSD capability plan (`ops/plan-b728-dsd-capability-design.md`:
+its sections 3.5 and 8, and B1's row of section 11), on
+`feat/b728-b1-qualification-guard` from main 7684d916. Codex and Argon
+reviewed the brief against 7684d916, and the orchestrator's decisions on
+their notes were binding: the gate is the player tier in full; the rules
+change ships as `rules-b728-b1.patch`, which the orchestrator applies
+before pushing, while its History entries and this record are committed
+here; the qualification check is expected to pass at 36; the red tests are
+a commit of their own.
+
+**Why first.** Until B7 production read the owner's approval through
+`ReadApproval`, which refuses a record, or a report it holds, of any
+version but the current one (Codex's P1 in the design's second round). So
+any guarded change merged before B7, each of which raises
+`qualificationVersion`, would have stopped an owner's native and DoP DSD
+before B6 migrated the record. B1 makes production's read take older
+versions in the PR that raises the version, and narrows the guard there.
+
+**What changed.**
+- `qualification.ReadLegacyApproval(stateDir, name, identity, same)`
+  makes every check `ReadApproval` makes but two, which the reader beneath
+  both now takes as parameters (`evidenceRule`): the version, any from
+  `LegacyVersion` (35, frozen) on, for the record and every report it
+  holds (a matrix, lifecycle or transition report, a DoP experiment, an
+  experiment's contact); and the identity comparison (`IdentityMatch`),
+  the caller's, asked of the record and of every report. The harness's
+  entry points (`ReadApproval`, `ReadCandidate`, `CheckDoPExperiments`,
+  `Contact.Validate`) keep the current version and every field
+  (`harnessRule`). An experiment's contact is compared with its own
+  experiment's identity, no longer with the unit's: the same check under
+  every field compared, and the one that lets B6's comparison of the model
+  take a contact made on another port. A nil comparison is refused.
+- `playback`'s `readPermission` reads production's record (`New`: serve
+  and `bridge output play`) through it with `SameIdentity`, the port
+  included, until B7; the candidate backend keeps `ReadCandidate` and the
+  transition backend `ReadApproval`.
+- `version_gate.go`: `GuardedPaths` are `internal/player/format/dsd_pack.go`
+  and `dop_pack.go`, `internal/player/playback/native.go` and `edges.go`,
+  `internal/alsa/qualification.go`, and `internal/alsactl/control.go`,
+  `control_linux.go` and `uapi.go`; the prefixes `internal/alsapcm/`,
+  `internal/player/qualification/` and `cmd/bridge/output_dsdtest`. The
+  rest of the two lists is dropped (the owner's decision 1 of 2026-11-04).
+- qualificationVersion 36, with the runbook's five mentions. The runbook's
+  header carries the design's B1 sentence (its section 9.1, item 14),
+  "fresh" leaves production's record there, and its paragraphs on the
+  guard and on staleness say what both are now.
+- Rules: the patch adds player.md's section "Player DSD by capability and
+  choice (B728)" with the design's B1 bullet, and corrects the "Native
+  engine hand-off" line, whose "Version 12 guards admission, health and
+  surfaces" B1 made false; both long forms are in
+  `ops/History-rules-player.md`.
+
+**Commits.** 0aedd16a the seam and the bump: `ReadLegacyApproval` reading
+as `ReadApproval` does, version 36 and the runbook's mentions, so that
+commit reads a record as main would after a bump; 71cd5e19 the red tests;
+f9766b85 the fix; fd0afd6b and 9dfbaffa two tests the controls' design
+found missing (a nil comparison; the exported harness checks' version);
+this record.
+
+**Red first** (71cd5e19, on 0aedd16a):
+- `TestProductionStillPlaysAVersion35RecordAfterTheBump`: "production
+  refused an owner's record of version 35 after the bump to 36: stale
+  approval version", the design's red. In the playback overlay,
+  `TestNativeIntegrationApprovedConstructor/legacy_version`: "unplayable:
+  dsd_approval_unavailable: the approved record does not read: stale
+  approval version".
+- `TestTheLegacyReaderRefusesBelowVersion35`: the rows at 35 and at 37,
+  and each report below 35, on "stale approval version"; the rows at 36
+  green, which shows the three fixtures read, a DoP record's experiments
+  and a transition included, and the rows at 34 green.
+- `TestTheLegacyReaderKeepsEveryOtherCheck`: red where the version check
+  comes first; its digest and trust rows green on both sides.
+- `TestTheLegacyReaderComparesTheIdentityItIsGiven`: "got stale approval
+  version, want the refusal "stale approval identity"".
+- `TestQualificationVersionGate/config_unbumped` and every row of
+  `TestAChangeOutsideTheDSDBytePathNeedsNoBump`: "guarded code changed
+  without qualificationVersion increase (36 -> 36)".
+- Green on both sides, as pins: `TestTheHarnessBackendsReadOnlyTheCurrentVersion`,
+  `TestQualificationVersionGate/dsd_writer_unbumped`, the three gate tests
+  trimmed to what stays guarded (`TestQualificationEnginePlaybackGate`,
+  `TestQualificationDependencyGate`, `TestQualificationApprovedDoPGuardedPaths`),
+  and the `stale` rows of `TestBridgeDSDCodecVocabulary` and
+  `TestDSDPolicyProtocolInfo`, whose fixture state now writes its record
+  below 35.
+
+**Negative controls**, by a runner outside the tree: each made exact,
+once-only replacements, built the affected test binaries, ran the named
+tests alone, and restored the bytes from memory, checked by SHA-256; a
+baseline of every named test was green first, and `git status` was clean
+after. All 22 went red. Designing C19, C21 and C22 found no test that
+would turn red: fd0afd6b and 9dfbaffa added them before the runs.
+
+| # | Mutation | Red |
+|---|---|---|
+| C1 | production back on `ReadApproval` | `TestProductionStillPlaysAVersion35RecordAfterTheBump` ("stale approval version"); the overlay's `TestNativeIntegrationApprovedConstructor/legacy_version` |
+| C2 | the transition backend on the legacy reader | `TestTheHarnessBackendsReadOnlyTheCurrentVersion/transition` (read, `<nil>`) |
+| C3 | the candidate backend on the legacy reader | `TestTheHarnessBackendsReadOnlyTheCurrentVersion/candidate` ("owner approval incomplete") |
+| C4 | the floor `v > LegacyVersion` | the rows at 35 of the three kinds and each report below 35; the production test |
+| C5 | the floor `v >= LegacyVersion-1` | the rows at 34 of the three kinds ("got <nil>") |
+| C6 | a matrix or lifecycle report on the current version | the rows at 35 and 37 ("report does not execute approved policy") |
+| C7 | a transition report on the current version | `transition_at_35`, `transition_at_37` |
+| C8 | a DoP experiment on the current version | `dop_experiments_at_35` and `_at_37` ("DoP experiment context mismatch") |
+| C9 | an experiment's contact on the current version | `dop_experiments_at_35` and `_at_37` ("contact version mismatch") |
+| C10 | a report's identity compared field by field | `TestTheLegacyReaderComparesTheIdentityItIsGiven/native`, `dop_experiments`, `transition` |
+| C11 | a transition report's identity, field by field | `TestTheLegacyReaderComparesTheIdentityItIsGiven/transition` |
+| C12 | an experiment's identity, field by field | `TestTheLegacyReaderComparesTheIdentityItIsGiven/dop_experiments` ("DoP experiment context mismatch") |
+| C13 | the contact compared with the unit's port, as on main | `TestTheLegacyReaderComparesTheIdentityItIsGiven/dop_experiments` ("DoP experiment attachment mismatch") |
+| C14 | a legacy reader that checks the version alone | every refusal row of `TestTheLegacyReaderKeepsEveryOtherCheck`, and each report below 35 |
+| C15 | the guard takes `internal/config/` back | `TestQualificationVersionGate/config_unbumped`; `TestAChangeOutsideTheDSDBytePathNeedsNoBump/internal/config/player.go` |
+| C16 | the guard drops `internal/alsapcm/` | `TestQualificationVersionGate/dsd_writer_unbumped` |
+| C17 | the guard drops `playback/native.go` | `TestQualificationEnginePlaybackGate/playback_native.go` |
+| C18 | `LegacyVersion` 36 | `TestTheLegacyReaderRefusesBelowVersion35` ("frozen at 35"); the production test ("no bump") |
+| C19 | no refusal of a nil comparison | `TestTheLegacyReaderComparesTheIdentityItIsGiven/no_comparison` (a nil-pointer panic) |
+| C20 | playbacktest's stale state at 35 | `TestDSDPolicyProtocolInfo/stale` and `TestBridgeDSDCodecVocabulary/stale` (dsf and dff served) |
+| C21 | the exported `CheckDoPExperiments` takes 35 | `TestTheLegacyReaderRefusesBelowVersion35/the_harness_readers` |
+| C22 | the exported `Contact.Validate` takes 35 on | `the_harness_readers`; `TestQualificationContact/version` |
+
+Without a mutation, `go run ./scripts/qualification-version -base 0aedd16a
+-head f9766b85` refuses: "guarded code changed without
+qualificationVersion increase (36 -> 36)", the guarded fix two commits
+after the seam took 36; `-base main -head 71cd5e19` passes.
+
+**For the owner.**
+- qualificationVersion 36 invalidates every harness report, candidate and
+  contact recorded at 35: the harness's readers take the current version
+  alone. An approved record of 35 or later keeps playing in serve and
+  `bridge output play` through the legacy reader until B7.
+- The narrowed guard drops `internal/player/decode/`, whose DSF demuxer
+  reverses an LSB-first file's bytes into native DSD's canonical order,
+  bytes the DAC is sent. The design's section 8 drops it with the rest of
+  the two lists, leaving the decoders to their goldens; this names it in
+  case that was not meant.
+- No backlog entry was written: the backlog file is not on this host.
+
+**Checks**, on legion0 (Linux, amd64, Go 1.27.3), each through the shared
+build lock with TMPDIR under `.tmp/_b728-b1`, at dd59fb91:
+- `make test` (race, `-timeout 30m`): 80 packages ok, none failed, 14 with
+  no test files; the Linux-only ones ran (internal/alsa, alsactl,
+  alsapcm, atomicwrite's durable writer, backup's identity paths, the
+  player's binding and hotplug). cmd/bridge 977 s, internal/player/
+  qualification 3.4 s, playback 2.3 s, openhome 38.6 s.
+- `make build-all`: check-build-tags and the six targets, ok; its `dist/`
+  removed after.
+- `make vet` natively, and with `GOOS=windows`, `GOOS=linux GOARCH=386`
+  and `GOOS=linux GOARCH=arm`: clean.
+- go1.27.3's gofmt on every changed Go file, and on cmd, internal and
+  scripts: clean.
+- `make docs-check`: ok as the tree stands, and in a copy with the patch
+  applied (CLAUDE.md 72.3%, player.md 94.2%, the worst load,
+  player_openhome_test.go's, 63.4%).
+- The qualification check, `go run ./scripts/qualification-version -base
+  main -head HEAD` with the tags (this clone has no `origin/main`; main is
+  7684d916): OK.
+- Both native integration overlays as CI's job runs them, under the race
+  detector: `./cmd/bridge` (with `-watchdog 10s`), 13 `TestNativeIntegration`
+  tests passed, CI's six named among them; `./internal/player/playback`,
+  29, CI's four named among them, with
+  `TestNativeIntegrationApprovedConstructor/legacy_version`.
+- `scripts/alsa-abi/check.sh` on linux/amd64: the pinned v6.12 `asound.h`
+  fetched (git blob 4cd51321), its 252 facts agreeing with the Go
+  definitions, the control UAPI's among them.
+- Not run here: macOS and Windows natively, the alsa-abi job on arm64, and
+  any hardware (B1's tier is the player's, which has no hardware run).
+
+## 2026-11-04 — B728 B1, round 2: the DSD demuxers' files are guarded, and the legacy reader stops at this build's version
+
+The findings on #1400, with the orchestrator's decisions on them and on
+Codex's and Argon's notes on the task, binding: the narrowed guard missed
+files that shape the native DSD bytes (Codex P2, Argon 1); the legacy
+reader took a version past this build's (Argon 2). The branch was
+fast-forwarded to d214aeec (round 1 and its rules patch applied) by taking
+its one changed file and writing the branch's loose ref, since `git merge`
+needs an approval this host cannot give; `git status` was clean and `git
+diff d214aeec` empty after.
+
+**The audit**, of the calls from the DSF and DFF demuxers' reads and the
+native and DoP packers down to the sink's write, and of the two helpers
+the decision on Codex's third note names. A file is guarded when a change
+to it can change the DSD bytes a DAC is sent, or their count, without a
+refusal, or decides which evidence the harness's readers take or which
+identity it binds to:
+- `internal/player/decode/dsd.go`: guarded. `bitReverse` turns an
+  LSB-first DSF byte into canonical order; `checkDSDBuf` sets the
+  per-channel length every read fills.
+- `internal/player/decode/dsf.go`: guarded. Bit order (`bitReverse` or a
+  copy), the block-group extraction and its absolute offsets, the count
+  from `BytesPerChannel`.
+- `internal/player/decode/dff.go`: guarded. The channel deinterleave in
+  CHNL's order, the sound region's bounds and its frame count.
+- `internal/player/decode/pcm_region.go`: guarded. `readLinear` and
+  `seekFrame` read DFF's sample bytes, cut them short and end them
+  (dff.go:314, :334).
+- `internal/player/decode/offset.go`: guarded. Every read and seek of an
+  ID3-tagged DSF or DFF goes through its arithmetic, so a wrong mapping of
+  a large offset reads other bytes once the header has parsed.
+- `internal/player/format/pcm.go`: guarded. `NativeDSD.BytesPerChannel`
+  is how many bytes per channel a DSF yields, and its decoder's end.
+- `internal/fsutil/notafile.go`: guarded (the decision on Codex 3).
+  `OpenAsFile` is how `trustedFile` (approval.go:481) and
+  `ReadEvidenceFile` open evidence, refusing what is not a file, and
+  `NotAFile` judges the manifest's fixtures (`fixtureKind`).
+- `internal/fsutil/notafile_unix.go`: guarded. `OpenAsFile`'s open on
+  Linux (`openNoWait`, `setBlocking`), the harness's only platform.
+- `internal/usbid/port.go`: guarded (the decision on Codex 3).
+  `ParseHex16` is the bcdDevice check at alsa/qualification.go:49 and the
+  sysfs reader's parse of the vendor and product IDs (sysfs.go:510), and
+  `Port` the port path it reads (sysfs.go:564, :580): what the identity
+  evidence binds to.
+- `internal/player/decode/bounds.go`: not guarded (named, as Codex 1
+  asked). `framesPerRead` (pcm_region.go:84) sizes one DFF read: inside its
+  contract, 1 to framesWant, `readLinear` loops to the same bytes and
+  count; outside it, DFF's emit indexes past `dst` and panics, a fault,
+  never other bytes.
+- `internal/player/decode/decoder.go`: not guarded. `Open` dispatches by
+  the sniffed kind and wraps the offset view; a wrong kind or origin meets
+  the demuxers' own magic and structure checks, and is refused.
+- `internal/player/decode/sniff.go`: not guarded. It classifies and finds
+  the origin after an ID3 tag; openDSF and openDFF check "DSD " and "FRM8"
+  at that origin and refuse any other.
+- `internal/player/decode/` `refuse.go`, `sample.go`, `doc.go` and the PCM
+  decoders (`flac.go`, `wav.go`, `aiff.go`, `m4a.go`, `alac.go`,
+  `alac_cookie.go`): not guarded. Refusals and PCM alone.
+- `internal/player/format/pack.go`: not guarded. The PCM packers (`Pack`,
+  `PackedBytes`, S16 to S32); DoP packs in dop_pack.go, guarded since round
+  1; `ALSAFormat` is a name.
+- `internal/player/playback/open.go`: not guarded (as decided). It opens
+  the content through a SectionReader of [0, Size), routes a `DSDDecoder`
+  to native.go and refuses a From; a wrong bound refuses (DFF's form
+  against the physical end) or ends in a fault (a truncated read), and
+  `chunkFrames` sizes native.go's reads, chunking alone, the sink carrying
+  bits across writes.
+- `internal/player/playback/producer.go`: not guarded (as decided). Its DSD
+  part revokes on a changed authorization; every DSD read and write is
+  native.go's (:68, :276, :306).
+- `internal/player/playback/session.go`: not guarded (as decided). It
+  revokes, releases, faults and waits on native sinks; it touches no byte.
+- `internal/player/playback/content.go`: not guarded. The `Content`
+  contract and `BindingLocator`, which DAC, not which bytes.
+- `internal/player/playback/` `backend.go`, `authorization.go`, `live.go`,
+  `reporter.go`, `packing.go`, `codecs.go`, `doc.go`: not guarded. Wiring,
+  admission, observation, events, the PCM packings, the containers.
+- `internal/player/engine/` and `internal/player/library/`: not guarded.
+  References, cuts and positions; the file a reference names, not its
+  bytes.
+- `internal/fsutil/notafile_other.go`: not guarded. `OpenAsFile`'s open off
+  unix, where no harness runs.
+- Flagged, not guarded: `internal/alsa/sysfs.go`, which reads the vendor
+  and product IDs, the port and the interface the qualification identity
+  binds to, and `internal/alsactl/constraints.go`, whose `CheckConstraints`
+  decides whether a report's mixer snapshots hold its policy's
+  constraints. By this round's rule both are helpers of the harness's
+  readers, like the two above, but section 8 drops them and neither the
+  brief nor the decisions name them: the orchestrator's to decide.
+- Guarded since round 1, unchanged: `playback/native.go` and `edges.go`,
+  `format/dsd_pack.go` and `dop_pack.go`, `internal/alsapcm/`.
+
+Not taken, as decided: `producer.go`, `open.go` and `session.go` (Argon
+1), whose audit above found no byte they change; the whole `fsutil/` and
+`usbid/` prefixes; and Argon 2's note on a DoP record's experiments under a
+looser comparison, which is B6's.
+
+**The upper bound.** The legacy reader takes versions from `LegacyVersion`
+to this build's `Version` and none past it (`LegacyVersion <= v && v <=
+Version`), through the one rule beneath it, for the record and for every
+report, DoP experiment and contact it holds: a newer bridge's evidence,
+written before a downgrade, is nothing this code can vouch for. The
+version stays 36.
+
+**Commits.** dfbc46f5 the red tests, on d214aeec; 049c46b8 the fix, with
+the runbook and the design (sections 3.5, 3.6 and 8, items 10 and 14 of
+9.1, the cutover's risk row, B1's row in 11); this record, with the long
+form of the rules line `rules-b728-b1-r2.patch` changes ("which takes
+versions from 35 to the build's own").
+
+**Red first** (dfbc46f5, on d214aeec):
+- `TestQualificationDependencyGate`, its nine new rows: "dependency
+  changed without version bump"; `alsapcm/sink_run.go` green.
+- `TestTheLegacyReaderRefusesBelowVersion35`, its rows at 37, now
+  refusals: "got <nil>, want the refusal "stale approval version"".
+- `TestTheLegacyReaderRefusesAVersionNewerThanThisBuild`: the record, a
+  matrix, lifecycle or transition report, an experiment and a contact at
+  37, each in a record otherwise valid at 36, all six read ("got <nil>").
+- `TestProductionRefusesARecordNewerThanThisBuild/version_37`: "1 tuples
+  published"; its rows at 35 and 36 green. In the playback overlay,
+  `TestNativeIntegrationApprovedConstructor/newer_version`: "start=<nil>".
+- `TestAChangeOutsideTheDSDBytePathNeedsNoBump`, which no longer lists
+  dsf.go, dff.go and notafile.go and gains the files the audit left out:
+  green on both sides.
+
+**Negative controls**, by round 1's runner with a table of its own, each
+red:
+
+| # | Mutation | Red |
+|---|---|---|
+| G1 to G9 | each of the nine new paths dropped from `GuardedPaths`, one at a time | its own row of `TestQualificationDependencyGate` ("dependency changed without version bump"), and no other |
+| U1 | the upper bound removed (`LegacyVersion <= v`) | all six rows of `TestTheLegacyReaderRefusesAVersionNewerThanThisBuild`; the rows at 37 of `TestTheLegacyReaderRefusesBelowVersion35`; `TestProductionRefusesARecordNewerThanThisBuild/version_37`; the overlay's `newer_version` |
+| U2 | the bound one short (`v < Version`) | the rows at 36 of `TestTheLegacyReaderRefusesBelowVersion35`; `TestProductionRefusesARecordNewerThanThisBuild/version_36` |
+
+**Checks**, on legion0 through the shared build lock with TMPDIR under
+`.tmp/_b728-b1`, at b1fff479:
+- `make test` (race): 80 packages ok, none failed, 14 with no test files;
+  cmd/bridge 986 s; internal/player/decode, format and usbid answered from
+  Go's test cache, their inputs unchanged since round 1's race run.
+- `make build-all`: ok, its `dist/` removed after.
+- `make vet` natively and with `GOOS=windows`, `GOOS=linux GOARCH=386`
+  and `GOOS=linux GOARCH=arm`: clean. go1.27.3's gofmt on cmd, internal
+  and scripts: clean.
+- `make docs-check`: ok as the tree stands, and in a copy with
+  `rules-b728-b1-r2.patch` applied (player.md 94,214 bytes; the worst
+  load 63.4%).
+- The qualification check against main: OK, the version 36.
+- Both native integration overlays, under the race detector: 13 and 29
+  `TestNativeIntegration` tests passed, every one CI's job names among
+  them, `legacy_version` and `newer_version` with them.
+- `scripts/alsa-abi/check.sh` on linux/amd64: the pinned v6.12 header's
+  252 facts agree. Not run here: arm64, macOS and Windows natively.
+
+## 2026-11-04 — B728 B1 round 3: the sysfs reader and the constraint check are guarded
+
+Round 2's audit of the DSD byte path and the harness's readers flagged two
+files that fall under the rule it applied, though §8 had dropped them:
+- `internal/alsa/sysfs.go`, the sysfs reader that a unit's identity
+  (vendor and product IDs, serial, port, interface) is read from. A change
+  there changes what the identity evidence binds to, as one to
+  `internal/usbid/port.go` does, which round 2 guarded.
+- `internal/alsactl/constraints.go`, `CheckConstraints`. It holds an
+  approval's mixer constraints, both in the harness's reader
+  (`qualification/approval.go` ~271, ~274) and in production's
+  authorization (`playback/authorization.go` ~185, ~457).
+
+Both join `GuardedPaths` and `TestQualificationDependencyGate`'s rows, and
+leave `TestAChangeOutsideTheDSDBytePathNeedsNoBump`'s list. The runbook and
+§8 of the design name them. The version stays 36.
+
+**Checks** (macOS, Go 1.27.3):
+- `go test ./internal/player/qualification/` ok.
+- **Negative control:** with both paths dropped from `GuardedPaths`, exactly
+  `TestQualificationDependencyGate/sysfs.go` and `/constraints.go` failed;
+  restored clean.
+
+## 2026-11-04 — B728 B1 round 3, second part: `internal/alsa/` is guarded whole
+
+Codex (astra) on round 3 found more of the same class still unguarded:
+- `internal/alsa/qualification_gain.go`: its `FeatureUnit` decides whether
+  an approval needs the DoP attenuation experiments, and the no-bump test
+  listed it.
+- `tree.go` and `open.go`: the guarded sysfs reader's path resolution,
+  bounded reads and file admission.
+
+Rather than keep adding the package one file at a time, `internal/alsa/` is a
+guarded prefix again, as before B1. The cost that made B1 narrow the guard is
+gone: the legacy reader takes every version from 35 to the build's own, so a
+bump no longer strands the owner's record. It invalidates only the harness's
+in-flight contacts, candidates and reports. `alsa/qualification.go` and
+`alsa/sysfs.go` leave `GuardedPaths`, since the prefix covers them.
+`TestQualificationDependencyGate` gains rows for `tree.go`, `open.go` and
+`qualification_gain.go`, and the no-bump list loses `qualification_gain.go`.
+
+**Negative control:** with the prefix dropped, exactly the four
+`internal/alsa` rows of `TestQualificationDependencyGate` and
+`TestQualificationActivationPaths/internal/alsa/qualification.go` failed;
+restored clean.
+
 ## 2026-11-04 — B720: a Check now that fails keeps the Updates panel's rows
 
 Backlog B720, the follow-up B707's record named in its "For the owner".

@@ -140,9 +140,19 @@ func (b *Backend) readPermission(ctx context.Context) (*permission, error) {
 	if e != nil {
 		return nil, e
 	}
-	readerApproval := qualification.ReadApproval
-	if b.cliCandidate {
+	// Production (serve and output play, New) reads the owner's record through
+	// the legacy reader, from qualification.LegacyVersion to this build's
+	// Version and every identity field compared, until B728's cutover, so no
+	// version bump before it strands a record; the harness's backends take the
+	// current version alone.
+	readerApproval := func(stateDir, name string, id qualification.Identity) (qualification.Approval, error) {
+		return qualification.ReadLegacyApproval(stateDir, name, id, qualification.SameIdentity)
+	}
+	switch {
+	case b.cliCandidate:
 		readerApproval = qualification.ReadCandidate
+	case b.transitions != nil:
+		readerApproval = qualification.ReadApproval
 	}
 	record, e := readerApproval(a.StateDir, a.Record, id)
 	if e != nil {

@@ -47,6 +47,13 @@ func (t Tuple) ValidTransport() bool {
 // CheckDoPExperiments binds reviewed changed-state contacts to report bytes.
 // Each file remains under the same owner-controlled evidence root.
 func CheckDoPExperiments(root string, refs []Evidence, tuple Tuple, id Identity, manifest, environment string) error {
+	return checkDoPExperiments(root, refs, tuple, id, manifest, environment, harnessRule)
+}
+
+// checkDoPExperiments is CheckDoPExperiments taking each experiment's
+// version and identity, and its contact's version, as take does; a contact
+// is taken at its own experiment's identity, which take has matched to id.
+func checkDoPExperiments(root string, refs []Evidence, tuple Tuple, id Identity, manifest, environment string, take evidenceRule) error {
 	if len(refs) < 2 || len(refs) > 16 {
 		return errors.New("DoP feature unit requires bounded experiment references")
 	}
@@ -69,7 +76,7 @@ func CheckDoPExperiments(root string, refs []Evidence, tuple Tuple, id Identity,
 		if e = json.Unmarshal(b, &r); e != nil {
 			return e
 		}
-		if r.SchemaVersion != 2 || r.QualificationVersion != Version || r.Tuple != tuple || r.Identity != id || r.ManifestHash != manifest || r.Environment != environment || r.End != "complete" || r.Error != "" || r.Contact == nil || r.Scenario != "level-check" {
+		if r.SchemaVersion != 2 || !take.version(r.QualificationVersion) || r.Tuple != tuple || !take.identity(r.Identity, id) || r.ManifestHash != manifest || r.Environment != environment || r.End != "complete" || r.Error != "" || r.Contact == nil || r.Scenario != "level-check" {
 			return errors.New("DoP experiment context mismatch")
 		}
 		if e = r.DoP.Validate(); e != nil {
@@ -81,14 +88,14 @@ func CheckDoPExperiments(root string, refs []Evidence, tuple Tuple, id Identity,
 		if r.Modified || r.BuildSHA == "" || r.BuildSHA == "unverified" || r.FeatureUnit == nil || !*r.FeatureUnit || len(r.Completed) != 1 || !r.Completed[0] {
 			return errors.New("DoP experiment was not completely observed")
 		}
-		c := r.Contact
-		if c.Device == nil || c.Subdevice == nil || *c.Device != id.Device || *c.Subdevice != id.Subdevice {
+		c, own := r.Contact, r.Identity
+		if c.Device == nil || c.Subdevice == nil || *c.Device != own.Device || *c.Subdevice != own.Subdevice {
 			return errors.New("DoP experiment endpoint missing")
 		}
-		if c.Attachment.Port != id.Port || c.Attachment.Manufacturer != id.Manufacturer || c.Attachment.Product != id.Product || c.Attachment.BCDDevice != id.BCDDevice || c.Attachment.Interface != id.Interface {
+		if c.Attachment.Port != own.Port || c.Attachment.Manufacturer != own.Manufacturer || c.Attachment.Product != own.Product || c.Attachment.BCDDevice != own.BCDDevice || c.Attachment.Interface != own.Interface {
 			return errors.New("DoP experiment attachment mismatch")
 		}
-		if e = c.Validate(tuple, c.Attachment, *c.Device, *c.Subdevice, r.Before.Hash(), manifest); e != nil {
+		if e = c.validate(tuple, c.Attachment, *c.Device, *c.Subdevice, r.Before.Hash(), manifest, take.version); e != nil {
 			return e
 		}
 		for _, snap := range []alsactl.Snapshot{r.Before, r.After} {

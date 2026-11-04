@@ -1,7 +1,10 @@
 # B470 native qualification — owner approval and provisional evidence
 
-QualificationVersion is **35**. All older evidence must be rerun, native included. The harness never
-creates approval. Production native DSD requires a fresh matching approved record;
+QualificationVersion is **36**. All older evidence must be rerun for the harness, native included. The
+harness never creates approval. Production reads an approval record only through the legacy reader,
+which takes versions from 35 to this build's own and none past it, until B728's cutover (`ops/plan-b728-dsd-capability-design.md`).
+This runbook's evidence binds `qualificationVersion`, whose guard covers the DSD byte path and the
+harness alone. Production native DSD requires a matching approved record;
 DoP S32_LE auditions are provisional and require both acknowledgements; production DoP plays only
 an approved DoP policy, under `dsdMode: dop` or `auto` with `allowDoP: true` (2d.2, below). Real-ref and Linux hardware gates remain reviewer/owner work.
 
@@ -151,11 +154,20 @@ The gate's `native-qualification` job runs real-sink CLI integration on PRs and 
 Its CheckVersion step runs on PRs only: full history, the actual PR head and fetched
 origin/main, then merge-base..HEAD. Missing main/history/merge-base fails; it never skips.
 The job is a dependency of `gate`. The guarded implementation files are enumerated in
-`internal/player/qualification/version_gate.go`: native and DoP packing, the DoP evidence
-reader; ALSA UAPI, PCM device,
-native device, params, sys_linux/sys_other, ring, both sinks and writers, native opening;
-all three dsd-test files; alsactl control/control_linux/uapi; ALSA qualification identity;
-qualification inputs and the version checker itself. Changes require a version increase.
+`internal/player/qualification/version_gate.go`, since B728's B1 the DSD byte path and the
+harness alone: native and DoP packing; the player's DSD open and its plans' edges
+(`internal/player/playback/native.go`, `edges.go`); the DSF and DFF demuxers, the reads
+they share, the ID3 offset view and the canonical DSD form (`internal/player/decode/dsd.go`,
+`dsf.go`, `dff.go`, `pcm_region.go`, `offset.go`, `internal/player/format/pcm.go`);
+alsactl control/control_linux/uapi and the constraint check (`internal/alsactl/constraints.go`);
+everything under `internal/alsa/`, the reader of the hardware (the qualification identity, the
+sysfs reader it is read from and its tree reads, the capabilities and the qualification gain); the file open the
+harness's readers take evidence through (`internal/fsutil/notafile.go`, `notafile_unix.go`)
+and the USB ID and port parsing a unit's identity is read with (`internal/usbid/port.go`);
+everything under `internal/alsapcm/` (ALSA UAPI, PCM device, native device, params,
+sys_linux/sys_other, ring, both sinks and writers, native opening); the qualification
+package (the approval and DoP evidence readers, the inputs and the version checker itself);
+and every dsd-test file. Changes require a version increase.
 
 The integration overlay exposes the existing ALSA _test.go fake only to this test command.
 The injected PCM opener is below descriptor verification and binding admission; production
@@ -169,7 +181,7 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-Historical round 3 used qualificationVersion 4; current version is **35**. A native contact's
+Historical round 3 used qualificationVersion 4; current version is **36**. A native contact's
 Contact.SchemaVersion remains **2**; a DoP contact's is **3**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
@@ -212,9 +224,10 @@ and descriptor flags. Injected in-memory readers are nonblocking; other injected
 an Interrupt method through an adapter, which owns its cancellation policy. Asset checks use the shared explicit special-file list,
 which accepts cloud placeholders; the CLI itself still requires Linux.
 
-The version gate additionally guards binding, ALSA identity, decoder, format,
+The version gate additionally guarded binding, ALSA identity, decoder, format,
 control, configuration, USB identity and file-reader directories, plus the shared
-CLI output/input code and config-path resolver. Overlay generation fails for a missing/changed or residual build tag,
+CLI output/input code and config-path resolver, until B728's B1 narrowed it (the
+gate's paragraph above). Overlay generation fails for a missing/changed or residual build tag,
 or missing fake support. CI also requires a passing NativeIntegration test line.
 Linux amd64/arm64 execution and ABI gates above remain pending on this Darwin host.
 
@@ -241,8 +254,8 @@ Confirmation input preserves every echoed printable ASCII byte, including spaces
 Backspace/Ctrl-H removes the preceding byte. CR, LF and CRLF each terminate one line,
 including a split CRLF arriving at the next prompt. Tabs and non-ASCII input fail
 with a visible printable-ASCII diagnostic. Nothing is silently trimmed or discarded.
-The version gate also guards the shared CLI filename and platform config-directory
-resolver; configpath and host-tree wiring remain guarded.
+The version gate also guarded the shared CLI filename and platform config-directory
+resolver, configpath and the host-tree wiring, until B728's B1 narrowed it.
 
 
 ## 0.2.2 local approval contract
@@ -257,7 +270,7 @@ still resolve inside it). `dsdMode: native` or `auto` enables only approved nati
 
 The Go contracts are `qualification.Approval`, `ApprovalBody`, `ApprovedPolicy`, `Edge`
 and `Evidence` in `internal/player/qualification/approval.go`. JSON uses those exact
-exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=35; Revision is the owner's
+exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=36; Revision is the owner's
 revision; Identity is the observed VID/ProductID/manufacturer/product/bcdDevice,
 anchored controller/port, interface, device and subdevice. No serial or card number is
 persistent identity. Unchanged descriptors may retain approval after replug/restart;
@@ -274,8 +287,9 @@ Missing fields, invented combinations of pause/tail/prefill, incomplete/cancelle
 unverified builds and unexecuted edges refuse. Promotion is a separate reviewed manual
 step; neither harness nor production writes, signs, repairs or auto-promotes an approval.
 
-Tampered means wrong owner/mode or body/evidence hash mismatch. Stale means version or
-observed identity mismatch. Every session and activation rereads and verifies; a 100 ms
+Tampered means wrong owner/mode or body/evidence hash mismatch. Stale means a version the
+reader does not take (the harness's, any but the current one; production's legacy reader,
+any below 35 or past this build's) or an observed identity mismatch. Every session and activation rereads and verifies; a 100 ms
 monitor also detects deletion/replacement, health failure and constrained-control drift.
 An identical inode replacement still revokes the old permission. Recovery publishes new
 capability only, never Play. Descriptors and mixer reads never write controls.
@@ -304,7 +318,7 @@ At least one native fixture must finish with measured playback of that tuple.
 NativeTuple and NativeCompleted record that execution; PCM-only lists or completion
 cannot qualify it. LifecycleActions count observed native outcomes: pause/resume,
 release/reopen, navigation between native occurrences, Stop, and natural completion.
-An admitted command alone is insufficient. Version 35 invalidates older evidence.
+An admitted command alone is insufficient. Version 36 invalidates older evidence.
 List all candidate directional edges explicitly. No command generates that record.
 
 ```sh
@@ -343,7 +357,7 @@ or evidence names resolving to the state directory itself before any ancestor
 walk. Native monitoring remains fail-closed without a grace period. The overlay
 generator requires both integration suites before publishing its overlay.
 Guarded API, config, extractor, output-play and approval paths changed; rerun
-qualification with version 35. ExtractorVersion 30 retains the first parsed DFF
+qualification with version 36. ExtractorVersion 30 retains the first parsed DFF
 PROP's known format facts when a later PROP makes compression unsupported.
 
 Version 13 also covers the deterministic PCM trace capture test. It changes no
