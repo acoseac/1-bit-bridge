@@ -1421,9 +1421,11 @@ function renderUpdateTile(u) {
   // the platform supports self-install AND an update is available.
   // Without this, a "checking…" → "update available" transition
   // mid-session would leave a paired client without a button.
-  // Roll back is revealed only when a previous binary is actually on
-  // disk. It is deliberately NOT gated on updateAvailable: the case it
-  // exists for is "the version I just installed is broken", where by
+  // Roll back is revealed only where the rollback would run: a previous
+  // binary actually on disk, and an install marker that does not refuse
+  // it (canRollback; where the marker refuses, the Rollback row below
+  // says why). It is deliberately NOT gated on updateAvailable: the case
+  // it exists for is "the version I just installed is broken", where by
   // definition there is no newer release to offer.
   const rollbackBtn = document.getElementById("update-rollback");
   if (rollbackBtn) rollbackBtn.hidden = !u?.canRollback;
@@ -1522,6 +1524,24 @@ function renderUpdateTile(u) {
       deferred.hidden = true;
       deferred.innerHTML = "";
       const dt = deferred.previousElementSibling;
+      if (dt) dt.hidden = true;
+    }
+  }
+  // RollbackRefusal: a previous binary is on disk and the rollback would
+  // refuse to put it back (the version installed has opened the data dir,
+  // or the install marker cannot be read), so Roll back stays hidden and
+  // this row says why, in the rollback's own words (backlog B707).
+  const refusal = document.getElementById("update-rollback-refused");
+  if (refusal) {
+    if (u?.rollbackRefusal) {
+      refusal.innerHTML = `<span class="badge idle">unavailable</span> ${escapeHTML(u.rollbackRefusal)}`;
+      refusal.hidden = false;
+      const dt = refusal.previousElementSibling;
+      if (dt) dt.hidden = false;
+    } else {
+      refusal.hidden = true;
+      refusal.innerHTML = "";
+      const dt = refusal.previousElementSibling;
       if (dt) dt.hidden = true;
     }
   }

@@ -41,8 +41,9 @@ func retryOptsFor(livePath string) InstallOptions {
 // The second install then re-ran the whole download and reached
 // swapBinary, whose EEXIST retry does os.Remove(bak) before re-linking:
 // .bak went from holding 0.1.0 (the operator's real rollback target) to
-// holding 0.2.0, a copy of what was already live. canRollback() reported
-// true throughout, because it only stats for the file's existence.
+// holding 0.2.0, a copy of what was already live. The console's canRollback
+// reported true throughout, because it only statted for the file's
+// existence.
 func TestSecondInstallWithoutARestartKeepsTheRollbackTarget(t *testing.T) {
 	fix := newInstallFixture(t, "0.2.0")
 	livePath, upd, err := fix.install(t, "0.1.0")

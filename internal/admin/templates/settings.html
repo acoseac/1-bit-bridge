@@ -748,11 +748,14 @@
             <button type="button" id="update-install" class="btn btn-primary" data-supervised="{{if .Data.IsSupervised}}true{{else}}false{{end}}">Install &amp; {{if .Data.IsSupervised}}restart{{else}}stop{{end}}</button>
           {{end}}
           <button type="button" id="update-check" class="btn">Check now</button>
-          {{/* Rollback: revealed by applyUpdates only when a .bak of the
-               previous binary is actually on disk. POST /api/updates/rollback
+          {{/* Rollback: revealed by renderUpdateTile only where the rollback
+               would run: a .bak of the previous binary on disk, and an install
+               marker that does not refuse it. POST /api/updates/rollback
                shipped with no caller, so a bad update was undoable only by
                curl — but a button offered with nothing staged would turn a
-               recovery into an error, hence the CanRollback gate. */}}
+               recovery into an error, hence the CanRollback gate; and one
+               offered where the marker refuses answered 409, so the Rollback
+               row below says why instead (backlog B707). */}}
           <button type="button" id="update-rollback" class="btn" hidden>Roll back</button>
         </span>
       </div>
@@ -807,9 +810,9 @@
         </dd>
         <dt>Last check</dt>
         <dd id="update-last-check">{{timeAgoPtr .Data.Update.LastCheck}}</dd>
-        {{- /* These two rows are toggled in place by app.js, which
+        {{- /* These three rows are toggled in place by app.js, which
                resolves each dd by id and then hides or reveals it
-               together with its previousElementSibling dt. So both
+               together with its previousElementSibling dt. So each
                must exist on every first paint, and each id must be
                emitted exactly once — an if/else that repeats the
                element in both arms reads to a static HTML analyser as
@@ -826,6 +829,8 @@
         <dd id="update-last-error"{{if not .Data.Update.LastError}} hidden{{end}}>{{if .Data.Update.LastError}}<code>{{.Data.Update.LastError}}</code>{{end}}</dd>
         <dt{{if not .Data.Update.DeferredReason}} hidden{{end}}>Held update</dt>
         <dd id="update-deferred"{{if not .Data.Update.DeferredReason}} hidden{{end}}>{{if .Data.Update.DeferredReason}}<span class="badge running">deferred</span> {{.Data.Update.DeferredReason}}{{end}}</dd>
+        <dt{{if not .Data.Update.RollbackRefusal}} hidden{{end}}>Rollback</dt>
+        <dd id="update-rollback-refused"{{if not .Data.Update.RollbackRefusal}} hidden{{end}}>{{if .Data.Update.RollbackRefusal}}<span class="badge idle">unavailable</span> {{.Data.Update.RollbackRefusal}}{{end}}</dd>
       </dl>
       <p class="panel-note">Install downloads the release archive, verifies the SHA-256 from <code>checksums.txt</code>, swaps the binary, and arms a rollback marker. {{if .Data.IsSupervised}}The bridge restarts automatically to load the new version.{{else}}The bridge stops after install — start it again manually to load the new version.{{end}} Active downloads block install (use the override only when nothing critical is in flight).</p>
     </div>
