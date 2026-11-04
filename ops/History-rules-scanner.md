@@ -1309,10 +1309,15 @@
   directory order and stops at the exact name), and a Speller remembers
   each folder it spelled, so the folders above a path's last component are
   listed once per batch while the folder holding that component is listed
-  per path. **Don't respell inside `ScanSubtree`**: its
-  deletion scope is a byte range over the spelling it is handed, and the
-  watcher and the rescanner hand it the walk's own. Rows an older build
-  already wrote heal at the next full scan. The rename reap takes the
+  per path. **Don't respell inside `ScanSubtree`**: its deletion scope is a
+  byte range over the spelling it is handed, and the watcher and the rescanner
+  hand it the walk's own. Rows an older build already wrote heal at the next
+  full scan. B651's sixth round puts only the root's own part of the folder a
+  subtree scan is handed in the root's configured spelling, the prefix every
+  row of that root carries (`relPath` names the root by its own name), which
+  differs from the handed part in case alone, on a volume that folds case; the
+  part below the root, which the scope's byte range is over, stays as handed.
+  The rename reap takes the
   case variants and the composition variants (NFC beside NFD, U+0130
   beside I+U+0307) on that scan: `renameFold` composes first, then the
   Unicode lowercase `pathFold` uses (backlog B267, 2026-10-12). A plain
@@ -2576,21 +2581,52 @@
   each of which would look at the root again for nothing and ask for the
   hold again (round 2, Argon on #1397): the scan of the root once it reads as
   it did covers them. Library roots may nest (no root add refuses a root
-  inside another, and `Validate` checks a root for being empty alone): a
-  path is the deepest configured root's that holds it, for the watcher's
-  events and looks (`configuredRootOf`) and for a subtree scan's owning root
-  (`ScanSubtree`), both through `deepestRootOf`; the watcher's walks pass
-  over a held root nested below the root they walk (`heldBelow`; on kqueue
-  the folder above still opens it, as one of its entries); and a scan's walk
-  of the outer root, the full scan's and a subtree scan's, passes over a
-  nested root that reads as not mounted, its rows under that path spared as a
-  subtree the walk could not see (`spareNestedRoot`) (round 5, CodeRabbit and
-  Argon on #1397: the first root listed took a nested root's events and
-  scans, the outer root's startup walk watched a held nested root's bare
-  mount point, and a scan of the outer root reaped the rows under it). A
-  look is a
-  stat, one batch of 64 entries of the root's listing (`dirHoldsLibraryContent`)
-  and, for a root holding nothing, one count. A root that reads as it did is
+  inside another, and `Validate` checks a root for being empty alone): a path
+  is the deepest configured root's that holds it, for the watcher's events,
+  looks and dropped scans (`Scanner.rootOf`) and for a subtree scan's owning
+  root (`ScanSubtree`), both through `deepestRootOf`; the watcher's walks pass
+  over a held root nested below the root they walk (`heldBelow`; on kqueue the
+  folder above still opens it, as one of its entries); and a scan's walk of
+  the outer root, the full scan's and a subtree scan's, passes over a nested
+  root that reads as not mounted, its rows under that path spared as a subtree
+  the walk could not see (round 5, CodeRabbit and Argon on #1397: the first
+  root listed took a nested root's events and scans, the outer root's startup
+  walk watched a held nested root's bare mount point, and a scan of the outer
+  root reaped the rows under it). Round 5 decided that where a walk reached
+  the nested root's folder (`spareNestedRoot`), and an unmount above a nested
+  root (roots `music` and `music/usb/library`, the volume at `music/usb`)
+  takes the folder with it, so no walk reached it and the outer root's scans
+  reaped every row under it at the threshold (round 6, Codex on round 5). Both
+  walks decide before they start now (`protectNestedRoots`): each root nested
+  in the one walked, at or below the folder a subtree scan walks, is looked
+  at, and one that reads as not mounted has its prefix recorded as a subtree
+  the walk could not see, reached or not; a walk that reaches its folder
+  passes over it (`nestedPass`). The watcher needed nothing for it: a held
+  root whose folder went has nothing to watch, and the walk of the folder it
+  comes back in passes over it (`heldBelow`). Every comparison of a path with
+  a root was byte-exact off Windows (round 6, Codex on round 5), so on macOS's
+  default volume a nested root configured as `music/USB`, the folder the
+  volume lists as `usb`, had none of this: it was no nested root to the outer
+  walk, its events and subtree scans went to the outer root, the startup walk
+  watched it while it was held, and its hold left the outer walk's watches on
+  it. Each comparison goes through `Scanner.underRoot` now: `filepath.Rel`,
+  or, where the two differ in case alone and the volume folds case, element by
+  element with case folded; `deepestRootOf`, `nestedRootsUnder` and the walks'
+  pass, `heldBelow`, and `releaseRoot`, on kqueue's account too (`spellings`).
+  Whether the volume folds case is its own answer (`fsutil.FoldsCase`, the
+  probe `IsUnderAny` and `SamePath` make), asked of the nearest folder there
+  for a root that is not (Argon on the brief: never taken as case-sensitive
+  for being gone), the platform's default only where nothing can be probed; a
+  case-sensitive volume keeps the two spellings two folders. The protection
+  before the walk also covers the rows the outer root wrote in the volume's
+  spelling (`protectFoldedPrefix`). A subtree scan puts the root's own part of
+  the folder it is handed in the root's configured spelling, the prefix every
+  row of that root carries, and keeps the part below as handed (B219's
+  bullet). This host's tests stand in for a volume that folds case through a
+  per-scanner seam (`foldsCaseHook`), and two ask the volume itself, which
+  folds case on CI's macOS and Windows legs. A look is a stat, one batch of 64
+  entries of the root's listing (`dirHoldsLibraryContent`) and, for a root
+  holding nothing, one count. A root that reads as it did is
   watched again where it is now, and a scan of it is asked for, since nothing
   saw what changed meanwhile. Each change is said once: held at Warn with
   what the look found, and again when that changes, and watched again at
@@ -2660,13 +2696,15 @@
   was, the walk of a root it is nested in included, keep a scan armed under a
   root the watcher holds, give a path to any root but the deepest that holds
   it, let a scan walk into or reap under a nested root that reads as not
-  mounted, turn the check of the roots' own watches off on kqueue (it drops a
-  renamed root's watch without a word too), keep the record in the data dir
-  or in bridge.yaml, or of one spelling of the data dir alone (it holds the
-  configured one and where it led), check or write serve's record beside any
-  file but the one its boot read was of, refuse a data dir its record does
-  not name or one whose lock file is there (the `rm bridge.db*` reset), or
-  prepare the data dir before the check.** Tests:
+  mounted (decided before the walk, which may never reach its folder), compare
+  a path with a root byte for byte where the volume folds case or folded where
+  it does not, turn the check of the roots' own watches off on kqueue (it
+  drops a renamed root's watch without a word too), keep the record in the
+  data dir or in bridge.yaml, or of one spelling of the data dir alone (it
+  holds the configured one and where it led), check or write serve's record
+  beside any file but the one its boot read was of, refuse a data dir its
+  record does not name or one whose lock file is there (the `rm bridge.db*`
+  reset), or prepare the data dir before the check.** Tests:
   `TestAScanSparesARootBelowAVolumeThatIsNotMountedYet`,
   `TestTheWatcherWaitsForAnUnmountedRootAndWatchesWhatIsMountedThere`,
   `TestTheWatcherDispatchesNoScanForARootWhoseContentWent`,
@@ -2679,6 +2717,17 @@
   `TestANestedRootsPathsAndEventsAreItsOwn`,
   `TestAScanUnderANestedRootIsItsOwn`,
   `TestAScanOfARootSparesANestedRootThatReadsAsNotMounted`,
+  `TestASubtreeScanSparesANestedRootWhoseDirectoryWent`,
+  `TestAFullScanSparesANestedRootWhoseDirectoryWent`,
+  `TestTheWatcherHoldsANestedRootWhoseDirectoryWentAndWatchesItOnceItIsBack`,
+  `TestASubtreeScanSparesANestedRootSpelledInAnotherCaseWhereTheVolumeFoldsCase`,
+  `TestAFullScanSparesANestedRootSpelledInAnotherCaseWhereTheVolumeFoldsCase`,
+  `TestASubtreeScanUnderANestedRootSpelledInAnotherCaseIsItsOwn`,
+  `TestTheWatcherKeepsAHeldRootSpelledInAnotherCaseWhereTheVolumeFoldsCase`,
+  `TestAnEventUnderANestedRootSpelledInAnotherCaseIsItsOwn`,
+  `TestHoldingANestedRootSpelledInAnotherCaseLetsGoOfTheWatchesUnderIt`,
+  `TestANestedRootSpelledInAnotherCaseIsTheVolumesFolderOnlyWhereItFoldsCase`,
+  `TestAFolderUnderAGoneNestedRootSpelledInAnotherCaseIsItsOwnOnlyWhereTheVolumeFoldsCase`,
   `TestServeRefusesTheDataDirItRecordedThroughALinkOnItsVolumeByItsTarget`,
   `TestServeRefusesTheDataDirItRecordedByItsTargetThroughALinkOnItsVolume`,
   `TestServeRefusesTheDataDirThroughALinkAtItsMountPoint`,

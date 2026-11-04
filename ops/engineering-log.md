@@ -74037,3 +74037,129 @@ walk of a root a held root is nested in, a path given to any root but the
 deepest, a scan walking into or reaping under a nested root that reads as not
 mounted, and a record of one spelling alone), with its long form in
 `ops/History-rules-scanner.md`.
+
+## 2026-11-04 — B651 round 6: Codex's two findings on round 5
+
+Round 6, fast-forwarded first to the PR's head, 319524e2 (round 5, its rules
+line, and a merge of main 5d38fa43, B728 B1), as before: the files the head
+changed checked out and the branch's loose ref written. Codex's two findings on
+round 5 were checked against the code before anything changed, and both hold;
+Codex's and Argon's notes on the brief bind the fixes.
+
+**1. A nested root whose folder went was not spared (P2).** Real. Round 5
+spared a nested root only where a walk of the outer root reached its folder
+(`spareNestedRoot`, at scanner.go:2948 in ScanSubtree's walk and :3388 in
+walkRoot on 319524e2). With roots `music` and `music/usb/library` and the
+volume at `music/usb`, an unmount takes `library` with it: no walk reaches it,
+and the outer root's scans counted every row it holds under
+`music/usb/library` missing and reaped them at the threshold. Both walks now
+decide before they start (`protectNestedRoots`, nested_roots.go): each root
+nested in the one walked, at or below the folder a subtree scan walks, is
+looked at (`lookAtRoot`, the look the watcher's hold and its own scans' guards
+read), and one that reads as not mounted has its prefix recorded as a subtree
+the walk could not see before the walk starts, so the deletion pass leaves
+every row under it with its missing count untouched, whether or not the walk
+reaches the folder; a walk that reaches it passes over it (`nestedPass.has`).
+Red on 319524e2's logic: `TestASubtreeScanSparesANestedRootWhoseDirectoryWent`
+(subtree scans of the outer root and of the bare mount point, four of each,
+past a threshold of three) and `TestAFullScanSparesANestedRootWhoseDirectoryWent`
+(four full scans): "the store does not hold
+music/usb/library/Band/Record/01.flac", the folder row gone with it. The
+watcher needed nothing (Argon 1): a held root whose folder went has nothing to
+walk, and when its volume comes back the walk of the folder it comes back in
+passes over it (`heldBelow`) until a look finds it as it was;
+`TestTheWatcherHoldsANestedRootWhoseDirectoryWentAndWatchesItOnceItIsBack`
+pins that, green on 319524e2 and after.
+
+**2. A root was compared byte for byte where the volume folds case (P2).**
+Real, and at more sites than the finding's two. On 319524e2 every comparison of
+a path with a root went through `filepath.Rel`, exact off Windows, or a map
+keyed by exact paths: `nestedRootsUnder`'s keys and `spareNestedRoot`'s lookup
+(nested_roots.go:84), `heldBelow` and its `passes` (watcher.go:705),
+`deepestRootOf` (nested_roots.go:26, Codex's note on the brief), and
+`releaseRoot`'s `pathAtOrUnder`. On macOS's default volume, with roots `music`
+and `music/USB` and the folder listed as `usb`, the outer walk writes its rows
+as `music/usb/…`: the nested root was no nested root to it, so its rows were
+reaped while its volume was away; an event or a subtree scan under `music/usb`
+went to the outer root; the startup walk watched the held root's folder; and
+its hold left the outer walk's watches there. Each comparison goes through
+`Scanner.underRoot` now: `filepath.Rel`, or, where the two differ in case
+alone and the volume folds case, element by element with case folded
+(`foldedTail`; `strings.EqualFold` over whole clean paths where only equality
+is asked). Whether the volume folds case is its own answer, `fsutil.FoldsCase`
+(the probe `IsUnderAny` and `SamePath` make), asked of the nearest folder that
+exists for a path that does not (Argon 2), the platform's default only where
+nothing can be probed (no folder, or a name with no letter in it). The sites:
+`deepestRootOf`, and through it `Scanner.rootOf` and `rootIn` (the watcher's
+events, its dispatch's look, the scans it drops under a held root) and
+`ScanSubtree`'s owning root; `nestedRootsUnder` and the walks' pass;
+`heldBelow`; and `releaseRoot`, on kqueue's account too
+(`watchFDs.spellings`). The protection before the walk also records each
+spelling of a nested root's prefix that the index's rows begin with
+(`protectFoldedPrefix`): the outer walk wrote them as the volume lists its
+folders. A subtree scan puts the root's own part of the folder it is handed in
+the root's configured spelling, the prefix every row of that root carries,
+and keeps the part below as handed (B219's long form says so now).
+
+No volume here folds case: unprivileged user namespaces are refused
+(`unshare`: "write failed /proc/self/uid_map: Operation not permitted"), this
+filesystem refuses the casefold flag (`FS_IOC_SETFLAGS` with `FS_CASEFOLD_FL`:
+EOPNOTSUPP), and no case-insensitive FUSE filesystem is installed. So the
+folding tests stand in for the volume's answer through a per-scanner seam,
+`foldsCaseHook` (nil in production), and two tests ask the real volume:
+`TestANestedRootSpelledInAnotherCaseIsTheVolumesFolderOnlyWhereItFoldsCase`
+and `TestAFolderUnderAGoneNestedRootSpelledInAnotherCaseIsItsOwnOnlyWhereTheVolumeFoldsCase`
+check the folding on CI's macOS leg and the orchestrator's Windows host, and
+here that the two spellings stay two folders. Red on 319524e2's logic with only
+the seam added: `TestASubtreeScanSparesANestedRootSpelledInAnotherCaseWhereTheVolumeFoldsCase`
+and `TestAFullScanSparesANestedRootSpelledInAnotherCaseWhereTheVolumeFoldsCase`,
+both legs, the bare mount point there and the folder gone ("the store does not
+hold music/usb/Band/Record/01.flac", and in the first leg the walk went into
+the bare mount point); `TestASubtreeScanUnderANestedRootSpelledInAnotherCaseIsItsOwn`
+(the outer root's scan of `music/usb/Band` reaped it);
+`TestTheWatcherKeepsAHeldRootSpelledInAnotherCaseWhereTheVolumeFoldsCase` (the
+startup walk watched `music/usb`, and the dispatch's look found no root);
+`TestAnEventUnderANestedRootSpelledInAnotherCaseIsItsOwn` (an event there armed
+a scan of `music/usb/Band/Record`); and
+`TestHoldingANestedRootSpelledInAnotherCaseLetsGoOfTheWatchesUnderIt`, both
+legs (the watches on `music/usb`, `Band` and `Record` stayed, and kqueue's
+account kept them).
+
+**The rules file's globs.** `scripts/rules-for.py internal/manifest/nested_roots.go`
+named no rules file: round 5 added the file and none of scanner.md's globs
+matched it, so a session that Read it loaded no B651 rule. The patch adds
+`internal/manifest/nested_roots*.go`.
+
+**Negative controls**, each on d4bdac5b, one control's edits at a time, each
+test or leg alone, every file put back byte for byte:
+
+| Control | Red |
+|---|---|
+| F1a the full scan protects no nested root before its walk | the full-scan directory-gone test, both legs of the folded full scan, `TestAScanOfARootSparesANestedRootThatReadsAsNotMounted` |
+| F1b the subtree scan protects none | the subtree directory-gone test, both legs of the folded subtree scan, `TestAScanOfARootSparesANestedRootThatReadsAsNotMounted` |
+| F1c a nested root is spared only where a walk reaches its folder (round 5) | both directory-gone tests, the folder-gone leg of both folded scans |
+| F2a `deepestRootOf` compares by `filepath.Rel` alone | the folded subtree routing, the watcher's look, the event |
+| F2b `heldBelow` compares exactly | `TestTheWatcherKeepsAHeldRootSpelledInAnotherCaseWhereTheVolumeFoldsCase` |
+| F2c the walks' pass compares exactly | the bare-mount-point leg of both folded scans (the walk went in) |
+| F2d the protection before the walk covers the configured spelling alone | the folder-gone leg of both folded scans |
+| F2e `releaseRoot` releases the configured spelling alone | both legs of the release test |
+| F2f kqueue's account releases the configured spelling alone | the release test's kqueue leg |
+| F2g `underRoot` never folds case | the folded subtree routing, the watcher's look, the event |
+
+**Gates**, through the build lock, on d4bdac5b with this record in the tree:
+`make test` (race) for internal/manifest (1353 s), internal/fsutil (3 s) and
+cmd/bridge (956 s) passed; `make vet` was clean native and for windows,
+darwin and linux/386; go1.27.3's gofmt lists none of the eight Go files round 6
+changed; `make docs-check`'s four commands pass on the branch and, with the
+patch applied in a copy of the tree (scanner.md 29,327 to 29,526 bytes), there
+too, where an 80 KB ghost failed the budget, and `mdblocks.dropped_donts`
+finds the long form's Don't whole in the patched line and the line's in the
+long form; `scripts/qualification-version` 5d38fa43..HEAD (main's head; since
+B1 the guard covers fsutil's `notafile.go` and `notafile_unix.go` alone, and
+round 6 changes neither) is OK.
+
+**The rules**: `rules-b651-r6.patch` grows the B651 line's Don't by two (a
+nested root's protection decided before the walk, which may never reach its
+folder, and a path compared with a root byte for byte where the volume folds
+case, or folded where it does not) and adds the glob, with the long form in
+`ops/History-rules-scanner.md`.
