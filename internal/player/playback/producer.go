@@ -239,8 +239,8 @@ func (s *session) failDecode(o *occ, err error) {
 	if o.dropped || s.writing != o {
 		return
 	}
-	s.decodeErr = &engine.Fault{Reason: engine.ReasonDecodeFailed, Occurrence: o.id, Frames: o.written,
-		Detail: fmt.Sprintf("decoding occurrence %d failed after %d frames: %v", o.id, o.written, err)}
+	s.decodeErr = &engine.Fault{Reason: engine.ReasonDecodeFailed, Occurrence: o.id, Frames: o.from + o.written,
+		Detail: fmt.Sprintf("decoding occurrence %d failed after %d frames: %v", o.id, o.from+o.written, err)}
 	s.writing = nil
 	s.closeOcc(o)
 }
@@ -262,6 +262,14 @@ func (s *session) writeAll(o *occ, b []byte) bool {
 		}
 		if s.ctx.Err() != nil {
 			l.unlock()
+			return false
+		}
+		if s.releasedLocked() {
+			// The session is released, by the engine's taking it before its
+			// Release came or by that Release: the producer hands the sink
+			// nothing more, at this write or any after it (B674 round 3).
+			l.unlock()
+			s.b.fenced("write")
 			return false
 		}
 		if s.wctx == nil || s.wctx.Err() != nil {
@@ -382,6 +390,14 @@ func (s *session) transition(o *occ) bool {
 			l.unlock()
 			s.closeOutput(out)
 			return true
+		case s.releasedLocked():
+			// Released since the sink opened, by the producer or by a Resume
+			// (handed): it is closed at once, never written to, and is never
+			// the current one (B674 round 3).
+			l.unlock()
+			s.closeOutput(out)
+			s.b.fenced("adopt")
+			return false
 		case s.paused == sinkPaused:
 			s.currentLocked(o, out, sinkPaused)
 			l.unlock()
@@ -430,7 +446,9 @@ func (s *session) currentLocked(o *occ, out *output, paused bool) {
 // waits for what follows; any other refusal (busy, the check after open, the
 // unit gone) ends the session with a fault, after content played.
 func (s *session) openFailed(o *occ, err error) bool {
-	if s.ctx.Err() != nil {
+	if s.ctx.Err() != nil || errors.Is(err, errReleased) {
+		// The session ends, released before or at the open (B674 round 3):
+		// no fault.
 		return false
 	}
 	var te *transportError

@@ -26,9 +26,13 @@ type owner struct {
 	shuffle  bool
 	res      reservation
 
-	state       State
-	then        Intent
-	starting    bool
+	state    State
+	then     Intent
+	starting bool
+	// seek is a seek's target while no session plays it: during the release
+	// the seek made, and while the transport is paused at it with no session
+	// (seek.go). The session started at the target takes it.
+	seek        *seekTarget
 	sess        *session               // the session starting, live or releasing
 	sessions    map[SessionID]*session // every session whose release is not yet acknowledged
 	unconfirmed *ReleaseInfo
@@ -273,10 +277,12 @@ func (e *Engine) abandon() {
 	e.doneOnce.Do(func() { close(e.done) })
 }
 
-// advance does what the last step made possible: parked commands, waiters
-// whose transport has settled, and the next steps of a shutdown.
+// advance does what the last step made possible: parked commands, a seek's
+// target nothing is to play any more, waiters whose transport has settled,
+// and the next steps of a shutdown.
 func (e *Engine) advance() {
 	e.drainParked()
+	e.settleSeek()
 	e.settleWaiters()
 	e.publishIfDirty()
 	if e.o.closing {
@@ -397,8 +403,9 @@ const (
 	// laneValues is the edits that take new IDs or tokens: they wait for a
 	// reservation write that has not landed, at most ReserveTimeout.
 	laneValues
-	// laneTransport is the transport commands but Stop: Play and Pause wait
-	// for a Pause or a Resume under way, and Pause for a start.
+	// laneTransport is the transport commands but Stop: Play, Pause and the
+	// seeks wait for a Pause or a Resume under way, and Pause and the seeks
+	// for a start.
 	laneTransport
 	lanes
 )
@@ -408,7 +415,7 @@ func (o op) lane() lane {
 	switch o {
 	case opInsert, opDelete, opDeleteAll:
 		return laneValues
-	case opPlay, opPause, opNext, opPrevious, opPlayID, opPlayIndex:
+	case opPlay, opPause, opNext, opPrevious, opPlayID, opPlayIndex, opSeekAbsolute, opSeekRelative:
 		return laneTransport
 	}
 	return laneNone
@@ -459,17 +466,18 @@ func (e *Engine) waits(c *command) bool {
 }
 
 // blocked reports a command that must wait now: an edit that takes new
-// values while a reservation write is awaited, and Play and Pause while a
-// pause or a resume is under way (or, for Pause, while the session is still
-// starting).
+// values while a reservation write is awaited, and Play, Pause and the seeks
+// while a pause or a resume is under way (or, for Pause and the seeks, while
+// the session is still starting: a seek then finds what the backend reported
+// of the content as its Start answered).
 func (e *Engine) blocked(c *command) bool {
 	o := &e.o
 	switch c.op.lane() {
 	case laneValues:
 		return o.res.awaiting
 	case laneTransport:
-		if s := o.sess; s != nil && (c.op == opPlay || c.op == opPause) {
-			return s.transportCall != nil || (c.op == opPause && s.phase == sessStarting)
+		if s := o.sess; s != nil && (c.op == opPlay || c.op == opPause || c.op.seek()) {
+			return s.transportCall != nil || ((c.op == opPause || c.op.seek()) && s.phase == sessStarting)
 		}
 	}
 	return false

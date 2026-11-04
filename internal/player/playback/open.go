@@ -76,6 +76,12 @@ type occ struct {
 	// with an error).
 	first    []int32
 	firstErr error
+	// from is the content frame a session's first occurrence starts at
+	// (engine.StartRequest.From: a seek's target, B674), set before its open,
+	// and fromErr why the open could not position the content there, which
+	// fails the Start without refusing the occurrence.
+	from    int64
+	fromErr error
 
 	// Under the session's lock from here.
 	transport alsapcm.Transport // what it plays as
@@ -88,8 +94,9 @@ type occ struct {
 	crossed   bool              // the played content has crossed its first frame
 	closed    bool              // its decoder and content are closed
 
-	// What the reporter has reported of it.
-	repPrepared, repRefused, repSubmitted, repAudible bool
+	// What the reporter has reported of it; repDetails also a session's first
+	// occurrence's Details, which its Start reports.
+	repPrepared, repRefused, repSubmitted, repAudible, repDetails bool
 }
 
 // opened reports whether the open has finished.
@@ -104,8 +111,14 @@ func (o *occ) opened() bool {
 
 // open opens o's content and its decoder and decodes its first chunk, or
 // refuses it: everything that is not stereo integer PCM at a rate the ALSA
-// backend opens, with its kind's reason, before any of it plays. It owns
-// what it opens until it returns, and leaves it on o.
+// backend opens, with its kind's reason, before any of it plays. A first
+// occurrence a session starts at a frame (o.from, a seek's target) has its
+// decoder positioned there before that chunk, with the decoder's exact Seek,
+// on the goroutine that opens it: no producer reads it yet. Content that
+// cannot be positioned there (DSD, whose demuxer's byte position is no time
+// seek; a frame its decoder does not reach, or reaches with nothing after
+// it) is fromErr, not a refusal. It owns what it opens until it returns, and
+// leaves it on o.
 func (b *Backend) open(ctx context.Context, o *occ) {
 	refuse := func(reason engine.Reason, detail string) {
 		o.refused = &engine.Unplayable{Reason: reason, Detail: detail}
@@ -131,6 +144,11 @@ func (b *Backend) open(ctx context.Context, o *occ) {
 		return
 	}
 	if d, ok := src.(decode.DSDDecoder); ok {
+		if o.from != 0 {
+			o.dsd = d
+			o.fromErr = fmt.Errorf("DSD is not positioned in time: frame %d asked", o.from)
+			return
+		}
 		b.openNativeContent(ctx, o, d)
 		return
 	}
@@ -156,8 +174,18 @@ func (b *Backend) open(ctx context.Context, o *occ) {
 		refuse(engine.ReasonRefusedContent, fmt.Sprintf("%d valid bits has no packing", pcm.ValidBits))
 		return
 	}
+	if o.from != 0 {
+		if err := d.Seek(ctx, o.from); err != nil {
+			o.fromErr = fmt.Errorf("the decoder could not be positioned at frame %d: %w", o.from, err)
+			return
+		}
+	}
 	buf := make([]int32, chunkFrames*pcm.Channels)
 	n, err := d.ReadFrames(ctx, buf)
+	if n == 0 && o.from != 0 {
+		o.fromErr = fmt.Errorf("nothing of the content follows frame %d (%v)", o.from, err)
+		return
+	}
 	switch {
 	case n > 0:
 		o.first = buf[:n]

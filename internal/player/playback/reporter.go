@@ -119,8 +119,9 @@ func (s *session) reportStep() bool {
 		oid := o.id
 		// What the decoder gave of its content goes first, to an Events that
 		// takes it (B470 PR 5a3), so the engine holds it as the occurrence
-		// is heard.
-		if de, ok := s.ev.(engine.DetailsEvents); ok {
+		// is heard: once, a session's first occurrence's at its Start.
+		if de, ok := s.ev.(engine.DetailsEvents); ok && !o.repDetails {
+			o.repDetails = true
 			d := o.details()
 			evs = append(evs, func() { de.Details(id, oid, d) })
 		}
@@ -133,10 +134,11 @@ func (s *session) reportStep() bool {
 			evs = append(evs, func() { s.ev.Position(id, pos) })
 		}
 	}
-	// What is heard: its content played, at most what it gave the sink.
+	// What is heard: its content played, at most what it gave the sink,
+	// counted from the frame it started at (its from, a seek's target).
 	if heard != nil {
 		p := posOf(heard.out)
-		frames := min(max(p.Played-heard.start, 0), heard.written)
+		frames := heard.from + min(max(p.Played-heard.start, 0), heard.written)
 		if heard.id != s.posOcc || frames != s.posFrames {
 			s.posOcc, s.posFrames = heard.id, frames
 			pos := engine.Position{Occurrence: heard.id, Frames: frames, RateHz: heard.out.logicalRate(), Measured: p.Measured}

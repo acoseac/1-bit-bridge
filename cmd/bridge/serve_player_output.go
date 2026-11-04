@@ -157,7 +157,8 @@ func (b *bridgeOutput) facts(ctx context.Context) (api.BridgeOutputFacts, engine
 	state, reason, attempt := b.state(ready)
 	facts := api.BridgeOutputFacts{Listed: true, UUID: id, State: state, Reason: reason, LastError: playerLastError(attempt),
 		DAC:      b.dac(ctx, state),
-		OpenHome: b.openHome(id), Codecs: playedCodecs(), FixedVolume: b.fixedVolume, DSDMode: b.dsdMode, AllowDoP: b.allowDoP}
+		OpenHome: b.openHome(id), Codecs: playedCodecs(), FixedVolume: b.fixedVolume, DSDMode: b.dsdMode, AllowDoP: b.allowDoP,
+		TimeSeekPCM: timeSeekWord(engine.TimeSeek(false)), TimeSeekDSD: timeSeekWord(engine.TimeSeek(true))}
 	if ready {
 		if be, ok := b.p.be.(*playback.Backend); ok {
 			policy, live := be.Facts()
@@ -337,6 +338,17 @@ func (b *bridgeOutput) openHome(id string) *api.BridgeOpenHomeFacts {
 		return nil
 	}
 	return &api.BridgeOpenHomeFacts{UDN: openhome.UDN(id), Endpoints: eps}
+}
+
+// timeSeekWord is bridge.timeSeek's word for whether the player seeks within
+// a track of a kind of content, as its engine says (engine.TimeSeek, which
+// the seek's refusal reads; B674): what this build implements, the same in
+// every state of the player, never whether a seek can be made now.
+func timeSeekWord(supported bool) string {
+	if supported {
+		return api.TimeSeekSupported
+	}
+	return api.TimeSeekUnsupported
 }
 
 // playedCodecs is the containers the player plays in this release

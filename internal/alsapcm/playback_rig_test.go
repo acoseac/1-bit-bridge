@@ -62,6 +62,7 @@ type files struct {
 	fail    map[string]error
 	opened  []*tracked
 	block   map[string]chan struct{} // an open that waits for the channel's close
+	blockIn map[string]chan struct{} // closed once an open waits on its block (holdOpen)
 	stalls  map[string]*stall        // reads that do not return (stall)
 	changed chan struct{}            // closed and replaced at each content's close
 	// The panics a test asks for: an open of the reference, a read of its
@@ -74,7 +75,7 @@ type files struct {
 
 func newFiles() *files {
 	return &files{content: map[string][]byte{}, fail: map[string]error{}, block: map[string]chan struct{}{},
-		stalls: map[string]*stall{}, changed: make(chan struct{}),
+		blockIn: map[string]chan struct{}{}, stalls: map[string]*stall{}, changed: make(chan struct{}),
 		panicOpen: map[string]bool{}, panicRead: map[string]int64{}, panicClose: map[string]bool{}}
 }
 
@@ -225,11 +226,16 @@ func (f *files) Open(ctx context.Context, ref engine.Reference) (playback.Conten
 	b, ok := f.content[ref.String()]
 	fail := f.fail[ref.String()]
 	block := f.block[ref.String()]
+	in := f.blockIn[ref.String()]
+	delete(f.blockIn, ref.String())
 	st := f.stalls[ref.String()]
 	panicOpen, panicClose := f.panicOpen[ref.String()], f.panicClose[ref.String()]
 	f.mu.Unlock()
 	if panicOpen {
 		panic(panicValue)
+	}
+	if in != nil {
+		close(in)
 	}
 	if block != nil {
 		select {
@@ -254,6 +260,24 @@ func (f *files) Open(ctx context.Context, ref engine.Reference) (playback.Conten
 	}
 	data = panickyReader{r: data, f: f, ref: ref.String()}
 	return playback.Content{Data: data, Size: int64(len(b)), Closer: c}, nil
+}
+
+// holdOpen holds the next open of ref's content until release, as a
+// resolver on a slow mount does: held is closed once the open waits.
+func (f *files) holdOpen(ref string) (held <-chan struct{}, release func()) {
+	in, gate := make(chan struct{}), make(chan struct{})
+	f.mu.Lock()
+	f.block[ref], f.blockIn[ref] = gate, in
+	f.mu.Unlock()
+	var once sync.Once
+	return in, func() { once.Do(func() { close(gate) }) }
+}
+
+// openedCount is the contents handed out.
+func (f *files) openedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.opened)
 }
 
 // allClosed fails the test unless every content handed out was closed.
@@ -363,6 +387,12 @@ type call struct {
 	from  engine.OccurrenceID
 	ok    bool
 	err   error
+	// first and at are a start's first occurrence and the content frame it
+	// starts at (engine.StartRequest.From).
+	first engine.OccurrenceID
+	at    int64
+	// how is a resume's answer.
+	how engine.ResumeResult
 }
 
 // reported is one occurrence's Details as the backend reported them, and at
@@ -391,6 +421,66 @@ type recorder struct {
 	// the delivery holdAfterNext waits to hold.
 	opened int
 	hold   *heldDelivery
+	// release, start and cut are the engine's next call of each kind to hold
+	// short of the backend (holdNextRelease, holdNextStart, holdNextCut).
+	release, start, cut *heldCall
+	// fenced is the steps the backend refused for a session released
+	// (playback.Seams.Fenced), in order.
+	fenced []string
+}
+
+// heldCall is a call the engine made, held short of the backend: held is
+// closed once the call waits there, and gate lets it on.
+type heldCall struct {
+	held, gate chan struct{}
+	once       sync.Once
+}
+
+// holdCall arms h as the next call of its kind to hold, and returns its
+// held channel and the function that lets it on.
+func (r *recorder) holdCall(h **heldCall) (held <-chan struct{}, letGo func()) {
+	c := &heldCall{held: make(chan struct{}), gate: make(chan struct{})}
+	r.mu.Lock()
+	*h = c
+	r.mu.Unlock()
+	return c.held, func() { c.once.Do(func() { close(c.gate) }) }
+}
+
+// take takes the hold armed at h, nil for none, and waits there when there is
+// one.
+func (r *recorder) take(h **heldCall) {
+	r.mu.Lock()
+	c := *h
+	*h = nil
+	r.mu.Unlock()
+	if c != nil {
+		close(c.held)
+		<-c.gate
+	}
+}
+
+// holdNextRelease holds the engine's next Release call short of the backend
+// until letGo, the backend not told of it: the engine has taken the release
+// (a Stop, which its snapshot shows) and the call, on a goroutine of its own,
+// has not reached the backend yet, as a scheduler can leave it (B674 round 2).
+// held is closed once the call waits.
+func (r *recorder) holdNextRelease() (held <-chan struct{}, letGo func()) {
+	return r.holdCall(&r.release)
+}
+
+// holdNextStart holds the engine's next Start call short of the backend
+// until letGo, as a scheduler can leave a call's goroutine (B674 round 3).
+func (r *recorder) holdNextStart() (held <-chan struct{}, letGo func()) { return r.holdCall(&r.start) }
+
+// holdNextCut holds the engine's next Cut call short of the backend until
+// letGo (B674 round 3).
+func (r *recorder) holdNextCut() (held <-chan struct{}, letGo func()) { return r.holdCall(&r.cut) }
+
+// fencedSteps is the steps the backend refused for a session released.
+func (r *recorder) fencedSteps() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.fenced)
 }
 
 // heldDelivery is a reporter held in the delivery of one event once the
@@ -568,9 +658,12 @@ type tee struct {
 }
 
 func (b tee) Start(ctx context.Context, req engine.StartRequest) error {
+	b.r.take(&b.r.start)
 	req.Events = &recEvents{r: b.r, next: req.Events}
 	err := b.Backend.Start(ctx, req)
-	b.r.note(func() { b.r.calls = append(b.r.calls, call{kind: "start", s: req.Session, err: err}) })
+	b.r.note(func() {
+		b.r.calls = append(b.r.calls, call{kind: "start", s: req.Session, err: err, first: req.First.ID, at: req.From})
+	})
 	return err
 }
 
@@ -586,9 +679,24 @@ func (b tee) Prepare(ctx context.Context, s engine.SessionID, after engine.Occur
 }
 
 func (b tee) Cut(ctx context.Context, s engine.SessionID, from engine.OccurrenceID) (bool, error) {
+	b.r.take(&b.r.cut)
 	ok, err := b.Backend.Cut(ctx, s, from)
 	b.r.note(func() { b.r.calls = append(b.r.calls, call{kind: "cut", s: s, from: from, ok: ok, err: err}) })
 	return ok, err
+}
+
+// Release is the backend's, held short of it first when the test holds the
+// next one (holdNextRelease).
+func (b tee) Release(ctx context.Context, s engine.SessionID) error {
+	b.r.take(&b.r.release)
+	return b.Backend.Release(ctx, s)
+}
+
+// Resume is the backend's, its answer recorded.
+func (b tee) Resume(ctx context.Context, s engine.SessionID) (engine.ResumeResult, error) {
+	how, err := b.Backend.Resume(ctx, s)
+	b.r.note(func() { b.r.calls = append(b.r.calls, call{kind: "resume", s: s, how: how, err: err}) })
+	return how, err
 }
 
 // nopEvents is the engine's side of a session a test drives itself.
@@ -713,6 +821,9 @@ type rigOptions struct {
 	log          *slog.Logger
 	// notify, when set, is told of each note before the rig keeps it.
 	notify func(playback.Note)
+	// installed, when set, is told of each occurrence a sink installs
+	// (playback.Config.Installed), on the goroutine that installs it.
+	installed func(playback.Note)
 	// onTick, when set, runs as a reporter takes its tick, at its start.
 	onTick func()
 }
@@ -741,8 +852,17 @@ func newRig(t *testing.T, opts ...func(*rigOptions)) *rig {
 	if o.openSink != nil {
 		open = o.openSink(open)
 	}
+	// Every rig records the steps the backend refuses for a session released
+	// (B674 round 3), beside any seam the test set.
+	seams := o.seams
+	if seams == nil {
+		seams = &playback.Seams{}
+	}
+	if seams.Fenced == nil {
+		seams.Fenced = func(step string) { r.rec.note(func() { r.rec.fenced = append(r.rec.fenced, step) }) }
+	}
 	cfg := playback.Config{
-		Resolver: r.files, Locator: loc, OpenSink: open, AfterFunc: o.afterFunc, Seams: o.seams, Log: o.log,
+		Resolver: r.files, Locator: loc, OpenSink: open, AfterFunc: o.afterFunc, Seams: seams, Log: o.log, Installed: o.installed,
 		Notify: func(n playback.Note) {
 			if o.notify != nil {
 				o.notify(n)

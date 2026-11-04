@@ -43,6 +43,8 @@ type Engine interface {
 	Previous(ctx context.Context, conds ...engine.Cond) error
 	PlayID(ctx context.Context, id uint32, conds ...engine.Cond) error
 	PlayIndex(ctx context.Context, index int, conds ...engine.Cond) error
+	SeekAbsolute(ctx context.Context, seconds int64, conds ...engine.Cond) error
+	SeekRelative(ctx context.Context, seconds int64, conds ...engine.Cond) error
 	InsertAfter(ctx context.Context, afterID uint32, ref engine.Reference, meta []byte, conds ...engine.Cond) (uint32, error)
 	Delete(ctx context.Context, id uint32, conds ...engine.Cond) error
 	DeleteAll(ctx context.Context, conds ...engine.Cond) error
