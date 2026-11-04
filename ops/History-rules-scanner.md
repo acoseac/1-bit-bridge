@@ -2564,9 +2564,18 @@
   which hands the root to Run's goroutine without blocking, `askHold`); when
   an event names the root itself, removed or moved away (`lookAgain`); every
   `rootWatchCheckEvery` (30 s) for a watched root whose own watch fsnotify no
-  longer holds (`checkRootWatches`; not on kqueue, which drops none unasked);
-  and, while held, `heldRecheckFirst` (5 s) after the hold, then twice as long
-  each time, `heldRecheckMax` (5 min) at most (`recheckHeld`). A look is a
+  longer holds (`checkRootWatches`), on every platform: inotify drops a
+  volume's watches as it is unmounted, and kqueue the watch of a folder
+  renamed after a change in it and before fsnotify read the change, a root's
+  own included, both without a word (round 2, Codex on #1397: the check was
+  off on kqueue, on the claim that kqueue drops no watch unasked, and the
+  account's reconcile let a dropped root's watches go and watched nothing
+  again); and, while held, `heldRecheckFirst` (5 s) after the hold, then
+  twice as long each time, `heldRecheckMax` (5 min) at most (`recheckHeld`).
+  A hold stops the debounced scans armed under the root (`dropScansUnder`),
+  each of which would look at the root again for nothing and ask for the
+  hold again (round 2, Argon on #1397): the scan of the root once it reads as
+  it did covers them. A look is a
   stat, one batch of 64 entries of the root's listing (`dirHoldsLibraryContent`)
   and, for a root holding nothing, one count. A root that reads as it did is
   watched again where it is now, and a scan of it is asked for, since nothing
@@ -2581,6 +2590,15 @@
   config's lock), named after it: `.bridge.yaml.datadir`, the data dir's path
   as JSON, written once the database is open and the lock file is there
   (`recordServeDataDir`), and only when it names another data dir or none.
+  Serve's check and its write both take the record beside the file its boot
+  read was of (`serveDataDirRecord`, over `config.BootFile.File`), never
+  beside the file the config's name opens by then: round 1 resolved the name
+  again at each, and a link at it repointed after the boot read (a dotfiles
+  restow, a home-manager switch) had serve check another config's record for
+  its data dir and write its data dir into that config's record (round 2,
+  Codex on #1397). A boot read that resolved no file keeps no record, said at
+  Warn; `bridge doctor`, which reads the config once, asks the file the name
+  opens (`dataDirRecordPath`).
   Before `prepareServeDataDir`, so before the lock, the TLS mint, the token
   store, `server.pid` and the migrations, serve refuses a data dir the record
   names that holds neither `bridge.db` nor `server.lock`
@@ -2606,17 +2624,25 @@
   is not there. **Don't persist a device number or judge a mount by a device
   or the immediate parent, write into a library root, dispatch a scan for a
   root that reads as not mounted or watch one before a look finds it as it
-  was, keep the record in the data dir or in bridge.yaml, refuse a data dir
-  its record does not name or one whose lock file is there (the
-  `rm bridge.db*` reset), or prepare the data dir before the check.** Tests:
+  was, keep a scan armed under a root the watcher holds, turn the check of
+  the roots' own watches off on kqueue (it drops a renamed root's watch
+  without a word too), keep the record in the data dir or in bridge.yaml,
+  check or write serve's record beside any file but the one its boot read
+  was of, refuse a data dir its record does not name or one whose lock file
+  is there (the `rm bridge.db*` reset), or prepare the data dir before the
+  check.** Tests:
   `TestAScanSparesARootBelowAVolumeThatIsNotMountedYet`,
   `TestTheWatcherWaitsForAnUnmountedRootAndWatchesWhatIsMountedThere`,
   `TestTheWatcherDispatchesNoScanForARootWhoseContentWent`,
   `TestTheWatcherHoldsARootWhoseWatchesWentWithoutAWord`,
   `TestTheWatcherHoldsARootThatWentAndWatchesWhatComesBack`,
+  `TestTheWatcherDropsTheScansArmedUnderARootItHolds`,
+  `TestTheWatcherLooksAgainAtARootWhoseOwnWatchKqueueDropped`,
   `TestServeRefusesTheDataDirItServedFromWhileItsVolumeIsAway`,
   `TestServeRefusesADataDirItsRecordNamesThatHoldsNeitherFile`,
   `TestServeStartsAgainOverADatabaseRemovedOnPurpose`,
+  `TestServeRecordsItsDataDirBesideTheFileItsBootReadOpened`,
+  `TestServeChecksTheRecordBesideTheFileItsBootReadOpened`,
   `TestInitAndTheServeAfterItStartAsBefore`,
   `TestTheRecordRefusesOnlyTheDataDirItNamesWhileItHoldsNeitherFile`,
   `TestTheRecordIsBesideTheFileTheConfigsNameOpens` and

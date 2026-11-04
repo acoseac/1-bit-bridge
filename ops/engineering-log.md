@@ -73157,3 +73157,110 @@ orchestrator):
   holds the watcher's start today.
 - A refusal at every 2 s start writes a line to the log file each time while
   the volume stays away.
+
+## 2026-11-04 — B651 round 2: the reviews of #1397
+
+Round 2 on `fix/b651-late-mount-guard`, fast-forwarded first to the PR's head,
+97e2020a (round 1, its rules patch applied, and main 3f663370 merged with both
+log entries kept): `git merge --ff-only` asks for approval on this host, so
+every file the head changed was checked out and the branch's loose ref written
+with the head's sha, `git diff 97e2020a` empty after. Codex and Argon reviewed
+the PR. Each finding got a test meant to go red on 97e2020a: the three that did
+were fixed, and the three that stayed green are refuted here by the code that
+answers them, with nothing changed for them.
+
+**Confirmed, red on 97e2020a, fixed:**
+
+| Finding | Red | Fix |
+|---|---|---|
+| Codex: the check of the roots' own watches was off where the watcher keeps kqueue's account (`watcher.go:342-343`), on the claim that kqueue drops no watch unasked; it does, for a folder renamed after a change in it and before fsnotify read the change (`reconcileWatches`' own doc), a root's own folder included, and the reconcile then let the root's watches go and watched nothing again | `TestTheWatcherLooksAgainAtARootWhoseOwnWatchKqueueDropped`, the account kept by hand on Linux, which runs kqueue's loop: "a file dropped into a root whose own watch went without a word never reached the manifest" (20.4 s under `-timeout 40s`); its twin without the account passed on the same tree in 1.0 s | the check runs on every platform; the comments that said kqueue is not checked say why it is (624e71e2) |
+| Codex: the record's check and its write each resolved the config's name again (`serve_data_dir_record.go:130`, `:152`), so a link at the name repointed after the boot read (a dotfiles restow, a home-manager switch) had serve check another config's record for its data dir and write its data dir into that record | `TestServeRecordsItsDataDirBesideTheFileItsBootReadOpened`: the record beside the file read named "", the other config's named the first's data dir; `TestServeChecksTheRecordBesideTheFileItsBootReadOpened`: serve served over the data dir its record names, and made it | serve takes the record beside the file its boot read was of, once, for both (`serveDataDirRecord` over a new `config.BootFile.File`); a boot read that resolved no file keeps none, said at Warn; the doctor still asks the file the name opens; `recordServeDataDir` names no config path any more, so the config-writer sweep's excusal of it went (0c1b0893) |
+| Argon 2: the debounced scans armed under a root stayed armed once it was held, each looking at the root again as it fell due (a stat, a listing, a count) and asking for the hold again | `TestTheWatcherDropsTheScansArmedUnderARootItHolds`: "the watcher kept 1 scan(s) armed under a root it holds" | `holdRoot` stops them as it first holds the root (`dropScansUnder`, by the containment the dispatch looks with, `configuredRootOf`); the root's scan once it reads as it did covers them (f71561b3) |
+
+`scripts/qualification-version` 3f663370..HEAD is OK at 36 with
+`internal/config` and `internal/manifest` changed: no raise.
+
+**Refuted** (each attempt green on 97e2020a, and not committed):
+- Argon 1, every root held at the start: off kqueue `watchRoots` answers true
+  for an empty list (`watcher.go:291-297`), and on kqueue
+  `watchRootsWithinBudget` answers false only where the open-file limit cannot
+  be read (`watcher_fds.go:349-352`), which keeps the watcher off for every
+  root alike, since a count of nothing never exceeds the budget (`:362`). Two roots held
+  at the start, with the account and without, were both watched again once
+  mounted, and a file dropped into each was indexed.
+- Argon 3, a linked root's `.bridge-allow-empty`: the look (`scanner.go:1393`)
+  and the scan's clean-empty guard (`:1041`) both ask `hasAllowEmptySentinel`
+  of the configured root, which stats `filepath.Join(root, sentinel)`
+  (`:3518`), and a link at the root resolves there as a path element, so the
+  sentinel read is the one in the directory the walk lists (`WalkableRoot`
+  only appends a separator, fsutil/walkroot.go:111). A root linked to an
+  emptied directory: with the sentinel the look read it as it is and the scan
+  deleted its row; without, the look held it and the scan spared the row.
+- Argon 4, a relative data dir: `loadData` takes `filepath.Abs` of the
+  config's path (`config.go:3022`) and `resolvePaths` resolves `dataDir`
+  against it (`:3026`, `:3132`; `ResolvePath`, `:3162-3170`), so serve's check
+  and its record compare absolute, cleaned paths, and the doctor reads the
+  same Load.
+
+**A race in the tests.** A two-root version of the armed-scans test failed one
+run in three: it took a root's watches and then its volume in two steps, and
+the check of the roots' own watches, on a 20 ms ticker in phase with the
+test's 20 ms polls, looked at the root between them, found its own watch gone
+with its volume still there, and watched it again, its walk meeting the bare
+mount point the test had made meanwhile: that watch stayed, and the root was
+never held. A real unmount takes the watches and the content at once. The
+armed-scans test now takes the hold itself, `holdRoot` with no Run, over scans
+armed for an hour under two roots, so a hold that dropped every armed scan
+fails it too; round 1's `TestTheWatcherHoldsARootWhoseWatchesWentWithoutAWord`
+parks Run's goroutine in an event's handling while it takes the watches and
+the volume (`runParker`, over `dropEventForTests`), and the check is still its
+only way to the hold (30e5e30a). Each passed 30 runs of 30 under `-race`, the
+kqueue test with them, and round 1's other three late-mount tests 20 of 20.
+The product keeps a narrower form: a volume that goes in the milliseconds
+between a look that finds it and the walk that watches it leaves the bare
+mount point watched (left open, below).
+
+**Negative controls**, each on a committed tree, one mutation (two for C1b and
+C56), each test alone, the file put back byte for byte; round 1's ran again,
+the snippets round 2 moved updated:
+
+| Control | Red |
+|---|---|
+| C1 to C7, C10 to C12, C56 | as in round 1, with C5 and C56 also `TestTheWatcherLooksAgainAtARootWhoseOwnWatchKqueueDropped` (the check is what finds that root) |
+| C8 no record check before the preparation | round 1's two, and `TestServeChecksTheRecordBesideTheFileItsBootReadOpened` |
+| C9 no record written | round 1's two, and `TestServeRecordsItsDataDirBesideTheFileItsBootReadOpened` |
+| R1 a hold drops no armed scan | `TestTheWatcherDropsTheScansArmedUnderARootItHolds` |
+| R2 a hold drops every armed scan | `TestTheWatcherDropsTheScansArmedUnderARootItHolds` |
+| R3 the root-watch check off on kqueue | `TestTheWatcherLooksAgainAtARootWhoseOwnWatchKqueueDropped` |
+| R4 serve checks the record beside the file the name opens now | `TestServeChecksTheRecordBesideTheFileItsBootReadOpened` |
+| R5 serve writes it there | `TestServeRecordsItsDataDirBesideTheFileItsBootReadOpened` |
+
+**Gates**, through the build lock, on 30e5e30a with this record in the tree:
+`make test-fast` (TMPDIR under `.tmp/_b651`) passed all 80 packages,
+cmd/bridge in 416 s and internal/manifest in 248 s, the Linux-only ALSA,
+alsapcm, durable-writer and backup packages running here; `make vet` was clean
+for linux, windows, darwin and linux/386; go1.27.3's gofmt lists none of the
+eleven Go files round 2 changed; `make docs-check`'s four commands pass on the
+branch and, with the patch applied in a copy of the tree (scanner.md 28,823 to
+29,062 bytes), there too, where an 80 KB ghost failed the budget; and
+`mdblocks.dropped_donts` finds the long form's Don't whole in the patched line,
+and the line's in the long form.
+
+The rules line's Don't grows by the three (`rules-b651-r2.patch`, the long form
+in `ops/History-rules-scanner.md` with it): no scan kept armed under a held
+root, the check not turned off on kqueue, serve's record beside no file but
+the one its boot read was of.
+
+**Left open** (named for the orchestrator; the backlog file is not on this
+host):
+- The window between a look that finds a root as it was and the walk that
+  watches it (`resumeRoot`, `lookAgain`): a volume unmounted inside it leaves
+  the bare mount point watched and nothing looking again until a restart.
+  Comparing the directory the walk watched with the one the look found, by
+  `os.SameFile` kept for the process's life and never persisted, would close
+  it.
+- Round 1's `TestTheWatcherHoldsARootThatWentAndWatchesWhatComesBack` and
+  `TestTheWatcherDispatchesNoScanForARootWhoseContentWent` rename a watched
+  folder. On Windows, ReadDirectoryChangesW reports no rename of a watched
+  folder itself, and whether NTFS lets a folder be renamed while folders below
+  it are watched was not measured here: CI's Windows leg answers both.
