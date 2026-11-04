@@ -72216,6 +72216,9 @@ through the shared build lock, at 48c2f569 with this record in the tree:
   qualificationVersion increase (32 -> 32)", exit 1 (below).
 - 13de49d2, comment only, after them: formatted, vetted, and the engine
   package run under `-race`, ok.
+- At the merge, qualificationVersion rises to 34 (main had 33 after B674),
+  with the native-qualification runbook's five mentions, because the
+  engine's tests are under the guarded prefix `internal/player/engine/`.
 - Not run here: macOS and Windows natively; Windows' vet alone ran.
 
 **For the owner.**
