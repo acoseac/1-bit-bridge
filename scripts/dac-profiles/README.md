@@ -70,10 +70,13 @@ A rate a device refused is not compared with the row, which may keep a
 published maximum beside a refusal at or below it (`ifi.generic` keeps DSD256
 while both its measured units refused it); the refusal's evidence is in the
 row's comments, and the database's lint holds it to the profile's own
-provenance, which says refused or silence. A heard rate is a listening: a row
+provenance: a clause of a dop line (the text between two semicolons) that
+names the rate and says refused or silence. A heard rate is a listening: a row
 whose rate a negotiation, a hardware confirmation or a DoP lock reached gives
 no heard rate (the design's section 1.1: the iOS lock hears nothing back), and
-the lint asks a heard rate's provenance to say heard. It prints one line a
+the lint asks for a clause that names the heard rate and says heard, so a
+line that tells of one rate's refusal and another's lock is evidence of the
+refusal alone. It prints one line a
 profile and exits 1 on a violation; paste its output into the PR. The
 registry's prose is never read, only each row's id and its `maxDSDRate`, and
 only a row's DoP evidence and caveats are imported, never

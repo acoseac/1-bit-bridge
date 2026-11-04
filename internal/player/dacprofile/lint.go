@@ -46,14 +46,18 @@ var (
 	// design's section 1.3), with their inflections: no note claims a DAC
 	// decodes DSD.
 	reNeverSaid = regexp.MustCompile(`(?i)\b(verif(?:y|ies|ied)|decod(?:e|es|ed|ing)|bit-exact|bit-perfect|lock(?:s|ed|ing)?|seal(?:s|ed)?|qualif(?:y|ies|ied))\b`)
-	// reHeard and reRefusal are what a dop provenance line says of a heard
-	// rate and of a refused one: that it was heard, a listening, never a
-	// negotiation or a DoP lock (section 1.1: the iOS lock counts the packer's
-	// own frames and hears nothing back); and that a device refused it or
-	// played it as silence.
+	// reHeard and reRefusal are what a clause of a dop provenance line says of
+	// a heard rate and of a refused one, beside the rate's name: that it was
+	// heard, a listening, never a negotiation or a DoP lock (section 1.1: the
+	// iOS lock counts the packer's own frames and hears nothing back); and
+	// that a device refused it or played it as silence.
 	reHeard   = regexp.MustCompile(`(?i)\bheard\b`)
 	reRefusal = regexp.MustCompile(`(?i)\b(?:refus\w*|silen\w*)\b`)
 )
+
+// dsdName is a rate of dsdRates as a claim names it: DSD and the rate's
+// multiple of 44.1 kHz (DSD128).
+func dsdName(rate int) string { return fmt.Sprintf("DSD%d", rate/44100) }
 
 // linter collects a database's problems.
 type linter struct{ problems []error }
@@ -301,22 +305,37 @@ func (l *linter) dop(who string, d *DoP) {
 	}
 }
 
-// dopEvidence asks a DoP claim's provenance for the evidence its rates are of
-// the kind their fields name: a heard rate a dop line that says it was heard,
-// and a refused rate one that says a device refused it or played it as
-// silence. A negotiation, a hardware confirmation or a DoP lock is evidence
-// of the transport, which no field here holds (the review of #1402).
+// dopEvidence asks a DoP claim's provenance for the evidence each of its
+// rates is of the kind its field names: for the heard rate, a clause of a dop
+// line (the text between two semicolons) that names the rate and says it was
+// heard, and for each refused rate, one that names it and says a device
+// refused it or played it as silence. The word and the rate share a clause,
+// so a line that tells of one rate's refusal and another's lock is evidence
+// of the refusal alone. A negotiation, a hardware confirmation or a DoP lock
+// is evidence of the transport, which no field here holds (the review of
+// #1402). A rate dop refuses as no DSD rate is not asked for again.
 func (l *linter) dopEvidence(who string, p *Profile) {
-	says := func(re *regexp.Regexp) bool {
-		return slices.ContainsFunc(p.Provenance, func(line string) bool {
-			return strings.HasPrefix(line, "dop: ") && re.MatchString(line)
-		})
+	says := func(rate int, re *regexp.Regexp) bool {
+		name := regexp.MustCompile(`\b` + dsdName(rate) + `\b`)
+		for _, line := range p.Provenance {
+			if !strings.HasPrefix(line, "dop: ") {
+				continue
+			}
+			for _, clause := range strings.Split(line, ";") {
+				if name.MatchString(clause) && re.MatchString(clause) {
+					return true
+				}
+			}
+		}
+		return false
 	}
-	if p.DoP.HeardMaxBitRate != 0 && !says(reHeard) {
-		l.add("%s: a heard DoP rate is a listening, and no dop provenance line says it was heard: a negotiation, a hardware confirmation or a DoP lock hears nothing (section 1.1)", who)
+	if h := p.DoP.HeardMaxBitRate; slices.Contains(dsdRates, h) && !says(h, reHeard) {
+		l.add("%s: a heard DoP rate is a listening, and no clause of a dop provenance line names %s and says it was heard: a negotiation, a hardware confirmation or a DoP lock hears nothing (section 1.1)", who, dsdName(h))
 	}
-	if len(p.DoP.RefusedBitRates) > 0 && !says(reRefusal) {
-		l.add("%s: a refused DoP rate is one a device refused or played as silence, and no dop provenance line says refused or silence", who)
+	for _, r := range p.DoP.RefusedBitRates {
+		if slices.Contains(dsdRates, r) && !says(r, reRefusal) {
+			l.add("%s: refused rate %s is one a device refused or played as silence, and no clause of a dop provenance line names it and says refused or silence", who, dsdName(r))
+		}
 	}
 }
 

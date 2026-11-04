@@ -151,12 +151,14 @@ type Native struct {
 type DoP struct {
 	// HeardMaxBitRate is the highest rate a listening on a device heard,
 	// never one a negotiation, a hardware confirmation or a DoP lock reached
-	// (section 1.1: the iOS lock hears nothing back), and its dop provenance
-	// line says heard; StatedMaxBitRate is the maker's figure; 0 is none.
+	// (section 1.1: the iOS lock hears nothing back), and a clause of a dop
+	// provenance line (the text between two semicolons) names it and says
+	// heard; StatedMaxBitRate is the maker's figure; 0 is none.
 	HeardMaxBitRate  int `json:"heardMaxBitRate"`
 	StatedMaxBitRate int `json:"statedMaxBitRate"`
 	// RefusedBitRates are the rates a device refused, or played as silence,
-	// as a dop provenance line says.
+	// each named, beside refused or silence, in a clause of a dop provenance
+	// line.
 	RefusedBitRates []int `json:"refusedBitRates"`
 	// AnalogVolumeControls are the controls this model applies after its DoP
 	// decoder, which the DoP gain check passes over.
