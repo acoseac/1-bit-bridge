@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net"
 	"net/netip"
@@ -243,6 +244,101 @@ func TestOutputDACInspectWorksWithoutAConfigOrABinding(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "resolves: not_configured: no device is bound: bridge output dac bind <card>") ||
 		!strings.Contains(out, "player: off (output.player.enabled is not true)") {
 		t.Errorf("no binding: exit %d:\n%s", code, out)
+	}
+}
+
+// TestDACInspectPrintsTheModelIdentity: inspect prints a USB card's model
+// identity beside its IDs and its interface, the manufacturer and product
+// strings and the bcdDevice the DAC profile database keys a model by
+// (internal/player/dacprofile), as the sysfs reader returns them (white space
+// trimmed), as text and as JSON, where every card carries the four keys; a
+// USB card whose strings cannot all be read has the three null and says why;
+// a card that is not USB has none and no problem; and the serial is still
+// printed nowhere.
+func TestDACInspectPrintsTheModelIdentity(t *testing.T) {
+	root := dacTree(t)
+	goBar, hugo := dacUSB1+"/1-1", dacUSB1+"/1-2"
+	sysfstest.Apply(t, root, "file "+goBar+"/manufacturer iFi (by AMR)\n"+
+		"file "+goBar+`/product "iFi (by AMR) HD USB Audio \n"`+"\n"+
+		"file "+goBar+"/bcdDevice 0170\n"+
+		// A Hugo 2 on the bus's second port, card 6 on its interface 1, whose
+		// unit has no manufacturer string.
+		dacPlugOn(hugo, 1, 6, "245f", "0815", "")+
+		"file "+hugo+"/devnum 3\nfile "+hugo+"/product Hugo2\nfile "+hugo+"/bcdDevice 0197\n")
+	args := append([]string{"inspect", "--config", dacConfig(t, "")}, treeFlags(root)...)
+	out, errOut, code := runDAC(t, dacEnv(), args...)
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, errOut)
+	}
+	card := func(n int) string {
+		_, rest, _ := strings.Cut(out, fmt.Sprintf("\ncard %d: ", n))
+		block, _, _ := strings.Cut(rest, "\n\n")
+		return block
+	}
+	if want := "  model:     manufacturer \"iFi (by AMR)\", product \"iFi (by AMR) HD USB Audio\", bcdDevice 0170"; !strings.Contains(card(5), want) {
+		t.Errorf("card 5 lacks %q:\n%s", want, out)
+	}
+	if b := card(6); !strings.Contains(b, "  model:     not read: ") || !strings.Contains(b, "manufacturer") {
+		t.Errorf("card 6 does not say its model was not read, and why:\n%s", out)
+	}
+	if b := card(0); b == "" || strings.Contains(b, "model:") {
+		t.Errorf("the HDMI card shows a model:\n%s", out)
+	}
+	if dacLeaks(out+errOut, dacSerial) {
+		t.Errorf("inspect printed the serial:\n%s", out)
+	}
+
+	out, errOut, code = runDAC(t, dacEnv(), append(args, "--json")...)
+	if code != 0 {
+		t.Fatalf("json: exit %d, stderr %q", code, errOut)
+	}
+	var rep struct {
+		Cards []map[string]json.RawMessage `json:"cards"`
+	}
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	type model struct {
+		Index        int     `json:"index"`
+		Interface    *int    `json:"interface"`
+		USBID        *string `json:"usbId"`
+		Manufacturer *string `json:"manufacturer"`
+		Product      *string `json:"product"`
+		BCDDevice    *string `json:"bcdDevice"`
+		ModelProblem string  `json:"modelProblem"`
+	}
+	got := map[int]model{}
+	for _, raw := range rep.Cards {
+		for _, key := range []string{"manufacturer", "product", "bcdDevice", "modelProblem"} {
+			if _, ok := raw[key]; !ok {
+				t.Errorf("a card has no %q key: %s", key, out)
+			}
+		}
+		b, _ := json.Marshal(raw)
+		var m model
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatal(err)
+		}
+		got[m.Index] = m
+	}
+	str := func(p *string) string {
+		if p == nil {
+			return "null"
+		}
+		return *p
+	}
+	if c := got[5]; str(c.USBID) != "20b1:3009" || c.Interface == nil || *c.Interface != 0 || str(c.Manufacturer) != "iFi (by AMR)" ||
+		str(c.Product) != "iFi (by AMR) HD USB Audio" || str(c.BCDDevice) != "0170" || c.ModelProblem != "" {
+		t.Errorf("card 5: %s %s %s %s %q", str(c.USBID), str(c.Manufacturer), str(c.Product), str(c.BCDDevice), c.ModelProblem)
+	}
+	if c := got[6]; str(c.USBID) != "245f:0815" || c.Manufacturer != nil || c.Product != nil || c.BCDDevice != nil || !strings.Contains(c.ModelProblem, "manufacturer") {
+		t.Errorf("card 6: %s %s %s %s %q", str(c.USBID), str(c.Manufacturer), str(c.Product), str(c.BCDDevice), c.ModelProblem)
+	}
+	if c := got[0]; c.Manufacturer != nil || c.Product != nil || c.BCDDevice != nil || c.ModelProblem != "" {
+		t.Errorf("the HDMI card: %+v", c)
+	}
+	if dacLeaks(out, dacSerial) {
+		t.Errorf("--json printed the serial:\n%s", out)
 	}
 }
 
