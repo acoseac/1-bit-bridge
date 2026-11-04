@@ -73521,3 +73521,37 @@ go1.27.3's gofmt lists none of the five Go files round 3 changed;
 alone) is OK at 36, `internal/fsutil` changed. The rules line is unchanged:
 the long form in `ops/History-rules-scanner.md` takes the comparison and the
 naming, outside its Don't.
+
+## 2026-11-04 — B651 round 4: two watcher tests skip on Windows
+
+CI's `test (windows-latest)` failed on 5efb4622 with
+`TestTheWatcherDispatchesNoScanForARootWhoseContentWent` and
+`TestTheWatcherHoldsARootThatWentAndWatchesWhatComesBack`, and nothing else.
+Each failed at its first rename with "Access is denied". **Round 3's record
+was wrong** to say that round 1's watcher tests pass on Windows: round 2's run
+failed both the same way. Its log lists them after the two data-dir tests that
+round 3 fixed.
+
+**The cause.** Windows refuses to rename a folder while a handle is open
+in it, and the watcher holds a ReadDirectoryChangesW handle on every folder it
+watches. So the move that stands for an unmount in both tests cannot run while
+the root is watched: in the first test the move of the root's one folder, in
+the second the move of the root itself. Reproduced on a Windows 11 host
+(Go 1.27.3): both tests red, with the same words.
+
+**The change.** Both tests skip on Windows and say why, as
+`TestTheWatcherLooksAgainAtARootWhoseOwnWatchKqueueDropped` beside them does.
+What they pin still runs on Windows:
+- `TestTheWatcherHoldsARootWhoseWatchesWentWithoutAWord` takes the root away
+  under no watch, and passes there.
+- So do `TestTheWatcherWaitsForAnUnmountedRootAndWatchesWhatIsMountedThere`
+  and `TestTheWatcherDropsTheScansArmedUnderARootItHolds`.
+- The dispatch's look at the root is the same code on every platform.
+
+This is not the case `build-ci-tests.md` forbids skipping by `runtime.GOOS`,
+an errno's words: there the test's words were wrong and the behaviour right.
+Here, Windows does not allow the step that stands for the unmount.
+
+**Runs** (the Windows host, Go 1.27.3, vendored and offline):
+- `-run TestTheWatcher ./internal/manifest/`: 3 passed, 3 skipped, 0 failed.
+- The whole `internal/manifest` package: ok (143 s), nothing failed.

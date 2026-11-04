@@ -204,6 +204,9 @@ func TestTheWatcherWaitsForAnUnmountedRootAndWatchesWhatIsMountedThere(t *testin
 // and watches it again once the folder is back, with a scan that finds the
 // track where it was.
 func TestTheWatcherDispatchesNoScanForARootWhoseContentWent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows refuses to rename a folder while the watcher's ReadDirectoryChangesW handles are open under it (Access is denied), so the move that stands for an unmount here cannot run while the root is watched; the dispatch's look at the root is the same code on every platform")
+	}
 	f := newLateMountFixture(t)
 	dispatched := make(chan struct{}, 16)
 	f.w.afterDispatchHookForTests = func() {
@@ -322,6 +325,9 @@ func TestTheWatcherHoldsARootWhoseWatchesWentWithoutAWord(t *testing.T) {
 // moved (IN_MOVE_SELF), so it runs here an hour apart: the event alone holds
 // the root.
 func TestTheWatcherHoldsARootThatWentAndWatchesWhatComesBack(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows refuses to rename a folder while the watcher's ReadDirectoryChangesW handles are open under it (Access is denied), so the root cannot move away while it is watched; TestTheWatcherHoldsARootWhoseWatchesWentWithoutAWord takes it away under no watch, and runs on Windows")
+	}
 	f := newLateMountFixture(t)
 	f.w.rootCheckEvery = time.Hour
 	held, resumed := f.hooks()
