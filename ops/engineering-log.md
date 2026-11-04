@@ -73467,3 +73467,26 @@ leave `TestAChangeOutsideTheDSDBytePathNeedsNoBump`'s list. The runbook and
 - **Negative control:** with both paths dropped from `GuardedPaths`, exactly
   `TestQualificationDependencyGate/sysfs.go` and `/constraints.go` failed;
   restored clean.
+
+## 2026-11-04 — B728 B1 round 3, second part: `internal/alsa/` is guarded whole
+
+Codex (astra) on round 3 found more of the same class still unguarded:
+- `internal/alsa/qualification_gain.go`: its `FeatureUnit` decides whether
+  an approval needs the DoP attenuation experiments, and the no-bump test
+  listed it.
+- `tree.go` and `open.go`: the guarded sysfs reader's path resolution,
+  bounded reads and file admission.
+
+Rather than keep adding the package one file at a time, `internal/alsa/` is a
+guarded prefix again, as before B1. The cost that made B1 narrow the guard is
+gone: the legacy reader takes every version from 35 to the build's own, so a
+bump no longer strands the owner's record. It invalidates only the harness's
+in-flight contacts, candidates and reports. `alsa/qualification.go` and
+`alsa/sysfs.go` leave `GuardedPaths`, since the prefix covers them.
+`TestQualificationDependencyGate` gains rows for `tree.go`, `open.go` and
+`qualification_gain.go`, and the no-bump list loses `qualification_gain.go`.
+
+**Negative control:** with the prefix dropped, exactly the four
+`internal/alsa` rows of `TestQualificationDependencyGate` and
+`TestQualificationActivationPaths/internal/alsa/qualification.go` failed;
+restored clean.
