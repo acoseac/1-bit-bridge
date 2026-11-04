@@ -1315,8 +1315,11 @@
   full scan. B651's sixth round puts only the root's own part of the folder a
   subtree scan is handed in the root's configured spelling, the prefix every
   row of that root carries (`relPath` names the root by its own name), which
-  differs from the handed part in case alone, on a volume that folds case; the
-  part below the root, which the scope's byte range is over, stays as handed.
+  differs from the handed part in case alone, and, since the seventh round,
+  only where the folder above it is established to fold case and the two
+  spellings, where both are there, are one folder, so the scan is never sent
+  into another root's folder; the part below the root, which the scope's byte
+  range is over, stays as handed.
   The rename reap takes the
   case variants and the composition variants (NFC beside NFD, U+0130
   beside I+U+0307) on that scan: `renameFold` composes first, then the
@@ -2609,24 +2612,50 @@
   volume lists as `usb`, had none of this: it was no nested root to the outer
   walk, its events and subtree scans went to the outer root, the startup walk
   watched it while it was held, and its hold left the outer walk's watches on
-  it. Each comparison goes through `Scanner.underRoot` now: `filepath.Rel`,
-  or, where the two differ in case alone and the volume folds case, element by
-  element with case folded; `deepestRootOf`, `nestedRootsUnder` and the walks'
-  pass, `heldBelow`, and `releaseRoot`, on kqueue's account too (`spellings`).
-  Whether the volume folds case is its own answer (`fsutil.FoldsCase`, the
-  probe `IsUnderAny` and `SamePath` make), asked of the nearest folder there
-  for a root that is not (Argon on the brief: never taken as case-sensitive
-  for being gone), the platform's default only where nothing can be probed; a
-  case-sensitive volume keeps the two spellings two folders. The protection
-  before the walk also covers the rows the outer root wrote in the volume's
-  spelling (`protectFoldedPrefix`). A subtree scan puts the root's own part of
-  the folder it is handed in the root's configured spelling, the prefix every
-  row of that root carries, and keeps the part below as handed (B219's
-  bullet). This host's tests stand in for a volume that folds case through a
-  per-scanner seam (`foldsCaseHook`), and two ask the volume itself, which
-  folds case on CI's macOS and Windows legs. A look is a stat, one batch of 64
-  entries of the root's listing (`dirHoldsLibraryContent`) and, for a root
-  holding nothing, one count. A root that reads as it did is
+  it. Round 6 folded case where one answer said so, the outer root's volume's
+  for every nested root, read by a probe that looked a folder's own name up in
+  the folder above, and took `filepath.Rel` first (round 7, Codex on round 6):
+  a volume that folds case can be mounted inside one that does not, the name
+  of its mount point living on the volume above; the probe answered the
+  platform's default where it could not tell; and Windows' `filepath.Rel`
+  folds case in every folder, a case-sensitive one included, so two roots
+  `USB` and `usb` went to the one listed first. Now a path is compared with a
+  root element by element, exactly first (`caseLook.under`), and an element
+  that differs in case alone is judged by the folder it is looked up in, by
+  the names in that folder (`fsutil.FoldingIn`: an entry with an ASCII letter
+  in its name looked up again with those letters' case swapped, `Lstat` and
+  `os.SameFile`; `CaseSensitive`, `CaseInsensitive`, or `CaseUnknown` where
+  nothing there can tell, never a guess). The probe never writes, where the
+  decisions allowed a temporary name in a writable folder: every folder the
+  scanner asks about is in a library root, the volume may be read-only, and
+  the watcher would see the write (Argon on the seventh round's brief). The
+  two questions count `CaseUnknown` in opposite directions (Argon on the
+  brief). Which root a path is (`caseLook.sameName`: `deepestRootOf`, so
+  `rootOf`, the dispatch's look, the scans dropped under a held root, and
+  `ScanSubtree`'s owner and its spelling of the root's own part) folds an
+  element only where its folder is established to fold case and the two
+  spellings, where both are there, are one entry. What is spared and passed
+  over (`caseLook.mayBeOneName`, element by element through `spareFolds`: the
+  protection before the walk, which records every spelling of a nested root's
+  prefix the index holds that may be its folder (`protectSpellings`), the
+  walks' pass, `heldBelow`, `releaseRoot` and kqueue's `spellings`) folds an
+  element wherever its folder may fold: one that answers Unknown, one that is
+  not there, and one that answers case-sensitive while it holds neither the
+  element, another spelling of it nor library content, as a mount point a
+  volume left bare does, for such a folder answers for the folder it covers,
+  not for the volume (Codex on round 6). A subtree scan the outer root owns,
+  of a folder an absent nested root may hold in another spelling, spares its
+  whole scope while that root reads as not mounted (`ScanSubtree`'s holding):
+  which root the folder is was not established, and what is spared counts it
+  as the nested root's. A subtree scan puts the root's own part of the folder
+  it is handed in the root's configured spelling, which differs from the
+  handed one only where both name one folder, and keeps the part below as
+  handed (B219's bullet). This host's tests stand in for other volumes through
+  a per-scanner seam (`foldingHook`), and some ask this host's volume itself,
+  which folds case on CI's macOS and Windows legs; a Windows-only test makes a
+  folder case-sensitive where the host allows it. A look is a stat, one batch
+  of 64 entries of the root's listing (`dirHoldsLibraryContent`) and, for a
+  root holding nothing, one count. A root that reads as it did is
   watched again where it is now, and a scan of it is asked for, since nothing
   saw what changed meanwhile. Each change is said once: held at Warn with
   what the look found, and again when that changes, and watched again at
@@ -2696,15 +2725,20 @@
   was, the walk of a root it is nested in included, keep a scan armed under a
   root the watcher holds, give a path to any root but the deepest that holds
   it, let a scan walk into or reap under a nested root that reads as not
-  mounted (decided before the walk, which may never reach its folder), compare
-  a path with a root byte for byte where the volume folds case or folded where
-  it does not, turn the check of the roots' own watches off on kqueue (it
-  drops a renamed root's watch without a word too), keep the record in the
-  data dir or in bridge.yaml, or of one spelling of the data dir alone (it
-  holds the configured one and where it led), check or write serve's record
-  beside any file but the one its boot read was of, refuse a data dir its
-  record does not name or one whose lock file is there (the `rm bridge.db*`
-  reset), or prepare the data dir before the check.** Tests:
+  mounted (decided before the walk, which may never reach its folder), judge
+  how a folder compares names by anything but the names in it (not its own
+  name in the folder above, not one folder for a whole path, not a write),
+  fold a case-only difference for which root a path is where its folder is not
+  established to fold, or keep one exact for what is spared where its folder
+  may fold (an Unknown answer, a folder not there, or one that holds neither
+  the name, another spelling of it nor library content), turn the check of the
+  roots' own watches off on kqueue (it drops a renamed root's watch without a
+  word too), keep the record in the data dir or in bridge.yaml, or of one
+  spelling of the data dir alone (it holds the configured one and where it
+  led), check or write serve's record beside any file but the one its boot
+  read was of, refuse a data dir its record does not name or one whose lock
+  file is there (the `rm bridge.db*` reset), or prepare the data dir before
+  the check.** Tests:
   `TestAScanSparesARootBelowAVolumeThatIsNotMountedYet`,
   `TestTheWatcherWaitsForAnUnmountedRootAndWatchesWhatIsMountedThere`,
   `TestTheWatcherDispatchesNoScanForARootWhoseContentWent`,
@@ -2728,6 +2762,18 @@
   `TestHoldingANestedRootSpelledInAnotherCaseLetsGoOfTheWatchesUnderIt`,
   `TestANestedRootSpelledInAnotherCaseIsTheVolumesFolderOnlyWhereItFoldsCase`,
   `TestAFolderUnderAGoneNestedRootSpelledInAnotherCaseIsItsOwnOnlyWhereTheVolumeFoldsCase`,
+  `TestAScanSparesANestedRootOnAVolumeThatFoldsCaseMountedInOneThatDoesNot`,
+  `TestTheWatcherPassesOverAHeldRootOnAVolumeThatFoldsCaseMountedInOneThatDoesNot`,
+  `TestADistinctFolderSpelledLikeAnAbsentNestedRootIsWalkedWhereItsFolderIsCaseSensitive`,
+  `TestASubtreeScanSparesANestedRootInEverySpellingWhereFoldingIsUnknown`,
+  `TestAFullScanSparesANestedRootInEverySpellingWhereFoldingIsUnknown`,
+  `TestASubtreeScanOfAFolderAnAbsentNestedRootMayHoldReapsNothing`,
+  `TestTwoRootsSpelledAlikeStayTwoWhereTheirFolderIsNotEstablishedToFoldCase`,
+  `TestTwoRootsThatAreTwoFoldersStayTwoWhateverTheirFolderAnswers`,
+  `TestTwoRootsSpelledAlikeInACaseSensitiveFolderStayTwo`,
+  fsutil's `TestFoldingIsJudgedByTheNamesInTheFolderItself`,
+  `TestFoldingIsUnknownWhereTheFolderCannotTell` and
+  `TestFoldingInWritesNothing`,
   `TestServeRefusesTheDataDirItRecordedThroughALinkOnItsVolumeByItsTarget`,
   `TestServeRefusesTheDataDirItRecordedByItsTargetThroughALinkOnItsVolume`,
   `TestServeRefusesTheDataDirThroughALinkAtItsMountPoint`,

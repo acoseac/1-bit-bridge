@@ -74525,3 +74525,141 @@ nested root's protection decided before the walk, which may never reach its
 folder, and a path compared with a root byte for byte where the volume folds
 case, or folded where it does not) and adds the glob, with the long form in
 `ops/History-rules-scanner.md`.
+
+## 2026-11-04 — B651 round 7: Codex's three findings on round 6
+
+Round 7, fast-forwarded first to the PR's head, d6d7247c (round 6, its rules
+line, and a merge of main ebe71366), as before: the files the head changed
+checked out and the branch's loose ref written. Codex's three findings on
+round 6 were checked against the code before anything changed, and all three
+hold; Codex's and Argon's notes on the brief, and its decisions, bind the
+fixes.
+
+**1. One folding answer served every nested root (P2).** Real.
+`protectNestedRoots` asked the outer root's volume once for every nested
+root (nested_roots.go:226 on d6d7247c), and so did `heldBelow`
+(watcher.go:704). A volume that folds case mounted at `music/usb` inside a
+case-sensitive outer root, with a nested root configured as
+`music/usb/LIBRARY` that the outer walk indexed as `music/usb/library`, had
+those rows reaped while the volume was away, and the startup walk watched the
+held root's folder. Each element of a nested root's path is judged now by the
+folder it is looked up in (`caseLook.spareFolds`, Argon 3), and where that
+folder cannot tell how its volume compared names, the element folds (Codex
+1): the folder answers Unknown, is not there, or answers case-sensitive while
+holding neither the element, another spelling of it nor library content, as
+a mount point a volume left bare does (one holding Synology's `@eaDir` among
+them). The protection before the walk records every spelling the index holds
+that may be the folder (`protectSpellings`), and the walks pass over it in
+any of them (`nestedPass`, `heldBelow`, `releaseRoot`, kqueue's
+`spellings`). The opposite direction stays: where the folder answers
+case-sensitive and holds another spelling of the element, that spelling is
+another folder, walked, indexed and reaped as before
+(`TestADistinctFolderSpelledLikeAnAbsentNestedRootIsWalkedWhereItsFolderIsCaseSensitive`).
+
+**2. The probe judged a folder by its own name in its parent (P2).** Real:
+`caseInsensitiveFS` (symlink.go:146-154) looked the nearest existing folder's
+own name up again in the folder above, which another volume compares where a
+volume is mounted on the folder (an exFAT mount point's name lives on the ext4
+folder above it), and answered the platform's default where it could not
+probe. `fsutil.FoldingIn` (casefold.go) judges a folder by the names in it:
+an entry with an ASCII letter in its name is looked up again with the case of
+those letters swapped (`Lstat`, then `os.SameFile`), and a folder whose
+listing offers no such name (an empty one, names without a letter) or that is
+gone or cannot be read answers `CaseUnknown`, never a guess. It is passive
+only. The decisions allowed a temporary name where nothing passive can tell
+and the folder is writable; the probe writes nothing, since every folder the
+scanner asks about is in a library root and B651's rule is never to write into
+one (Argon 1 adds read-only volumes and the watcher's own events). `IsUnderAny`
+and `SamePath` keep `caseInsensitiveFS`, which answers for a path's last
+element from its parent, as their callers compare.
+
+**3. Windows' `filepath.Rel` decided before any probe (P2).** Real:
+`underRoot` returned on `filepath.Rel` first (nested_roots.go:48), and Go's
+Windows `Rel` compares with `sameWord`, `strings.EqualFold`
+(path_windows.go:116-118, path.go:219 in go1.27.3), in every folder, a
+case-sensitive one included: roots `USB` and `usb` went to the one listed
+first, and `ScanSubtree`'s rewrite of the root's own part (scanner.go:2828)
+sent the scan into the other root's folder. Paths are compared element by
+element, exactly first (`caseLook.under`), and an element that differs in case
+alone matches, for which root a path is, only where its folder is established
+to fold case and the two spellings, where both are there, are one entry
+(`caseLook.sameName`).
+
+**The two directions** (Argon 2): Unknown counts as folding for what is
+spared and as case-sensitive for which root a path is. Between the two, the
+outer root can own a subtree scan of a folder an absent nested root may hold in
+another spelling; that scan spares its whole scope while the nested root reads
+as not mounted (`ScanSubtree`'s holding,
+`TestASubtreeScanOfAFolderAnAbsentNestedRootMayHoldReapsNothing`).
+
+**No such volumes here.** This host's volume is case-sensitive, refuses the
+casefold flag and offers no case-insensitive FUSE filesystem (round 6's
+record). The scanner's tests stand in through `foldingHook` (three answers,
+per folder), the probe's through an injected filesystem (`foldingFS`, a
+stand-in that folds in the folders it names over a real temporary tree).
+Red on d6d7247c's logic with only the seam added (the three-state API over
+its probe, `foldingHook` consulted by its `foldsCase`; go test -race):
+`TestFoldingIsJudgedByTheNamesInTheFolderItself`, both directions;
+`TestFoldingIsUnknownWhereTheFolderCannotTell`, all four folders (empty,
+caseless, missing, unreadable) answering case-sensitive;
+`TestAScanSparesANestedRootOnAVolumeThatFoldsCaseMountedInOneThatDoesNot`,
+every leg, the bare mount point empty and holding Synology's `@eaDir` ("the
+store does not hold music/usb/library/Band/Record/01.flac");
+`TestTheWatcherPassesOverAHeldRootOnAVolumeThatFoldsCaseMountedInOneThatDoesNot`
+(the walk watched `music/usb/library`, `Band` and `Record`);
+`TestASubtreeScanSparesANestedRootInEverySpellingWhereFoldingIsUnknown` and
+`TestAFullScanSparesANestedRootInEverySpellingWhereFoldingIsUnknown`, both
+legs; `TestASubtreeScanOfAFolderAnAbsentNestedRootMayHoldReapsNothing`;
+`TestTwoRootsThatAreTwoFoldersStayTwoWhateverTheirFolderAnswers`
+(`music/usb/Band` went to the root listed first, under an answer that their
+folder folds case). Linux's `filepath.Rel` is exact, so finding 3's
+`TestTwoRootsSpelledAlikeStayTwoWhereTheirFolderIsNotEstablishedToFoldCase`
+is green there and goes red on Windows, where the orchestrator runs it with
+`TestTwoRootsSpelledAlikeInACaseSensitiveFolderStayTwo` (Windows only, run
+where the host lets a folder be made case-sensitive); its control here is
+F3a below, which lets a case-only element match without its folder's answer,
+as Windows' `Rel` did.
+
+**The rules file's globs.** casefold.go matches none of scanner.md's globs;
+the patch adds `internal/fsutil/casefold*.go`.
+
+**Negative controls**, each on f3f22bfb, one control's edits at a time, each
+test or leg alone, every file put back byte for byte:
+
+| Control | Red |
+|---|---|
+| F1a each element of a nested root's path judged by the walked root's folder | every leg of the mounted test, the watcher's pass over the held root |
+| F1b a folder that cannot tell counts as case-sensitive for what is spared | both legs of both Unknown-spelling tests, the may-hold subtree scan |
+| F1c a case-sensitive answer trusted from a folder that holds nothing of the volume | the mounted test's two `@eaDir` legs |
+| F1d a case-sensitive folder's own word not taken (an element not there always folds) | 23 tests and legs, both legs of the case-sensitive direction among them: the walks passed over real folders, another spelling of an absent nested root's, which the fixtures index before the volume goes |
+| F1e the protection before the walk records the configured spelling alone | every leg of the mounted test, the folder-gone legs of the Unknown tests and of round 6's folded tests |
+| F1f the walks pass over the configured spelling alone | the bare-mount-point legs of the Unknown tests and of round 6's folded tests |
+| F1g `heldBelow` compares a held root's path exactly | the watcher's pass over the held root, round 6's held-root walk |
+| F1h no spare for a folder an absent nested root may hold | `TestASubtreeScanOfAFolderAnAbsentNestedRootMayHoldReapsNothing` |
+| F1i `releaseRoot` lets go of the configured spelling's watches alone | both legs of round 6's release test |
+| F2a the probe judges the folder above | four of fsutil's six probe tests |
+| F2b a probe that cannot tell answers case-sensitive | `TestFoldingIsUnknownWhereTheFolderCannotTell` |
+| F2c the probe makes a name to look up where none can tell | `TestFoldingInWritesNothing`, and round 6's `TestTheWatcherHoldsANestedRootWhoseDirectoryWentAndWatchesItOnceItIsBack`: the name left in the bare mount point kept the volume from coming back there |
+| F3a a case-only element matches without its folder's answer, as Windows' `filepath.Rel` did | both legs of the alike-roots test, the may-hold scan's premise, round 6's two tests on this host's volume |
+| F3b an Unknown answer counts as folding for which root a path is | the alike-roots test's Unknown leg, the may-hold scan's premise |
+| F3c two spellings that are two entries taken for one | `TestTwoRootsThatAreTwoFoldersStayTwoWhateverTheirFolderAnswers` |
+
+**Gates**, through the build lock, on f3f22bfb with this record in the tree:
+`make test` (race) for internal/manifest (1377 s), internal/fsutil (3 s) and
+cmd/bridge (963 s) passed; `make vet` was clean native and for windows,
+darwin and linux/386; go1.27.3's gofmt lists none of the eleven Go files round
+7 changed; `make docs-check`'s four commands pass on the branch and, with the
+patch applied in a copy of the tree (scanner.md 29,526 to 29,897 bytes), there
+too, where an 80 KB ghost failed the budget, and `mdblocks.dropped_donts`
+finds the long form's Don't whole in the patched line and the line's in the
+long form; `scripts/qualification-version` ebe71366..HEAD (main's head) is
+OK.
+
+**The rules**: `rules-b651-r7.patch` replaces the B651 line's clause on
+comparing a path with a root (round 6's) with three: how a folder compares
+names is judged by the names in it (not its own name in the folder above, not
+one folder for a whole path, not a write); a case-only difference folds for
+which root a path is only where its folder is established to fold; and none
+stays exact for what is spared where its folder may fold. It adds the glob,
+with the long form in `ops/History-rules-scanner.md`, whose B219 bullet says
+when a subtree scan spells a root's own part.
