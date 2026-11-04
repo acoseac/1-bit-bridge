@@ -73125,3 +73125,148 @@ sentence does not fit a 600-byte pointer beside the entry's others, so the entry
 player.md verbatim and its History copy is gone. L146's pointer gains its long form's
 "It reports nothing until the watcher has published, and its first report is the first
 snapshot's, whatever it says." (481 bytes). player.md ends at 93711 bytes (93.7%).
+
+## 2026-11-04 — B720: a Check now that fails keeps the Updates panel's rows
+
+Backlog B720, the follow-up B707's record named in its "For the owner".
+Worker b720 on orion (macOS 27, darwin/arm64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`), branch `fix/b720-check-now-keeps-rows` from main 7684d916,
+the brief with Codex's and Argon's binding notes. Commits: the tests
+257b420a, the fix 2d3fb040, then this record. The rule is a new bullet at
+the end of `.claude/rules/admin-console.md`, shipped as a checked patch
+(`rules-b720.patch`; this worker cannot write `.claude/`), which takes the
+file from 69,787 to 71,235 bytes (71.2 % of its budget). B707's long form in
+`ops/History-rules-config-lifecycle.md` said under "Not changed" that a
+failed Check now still renders a partial status; it now says what B720
+changed.
+
+**The defect.** The Check now click's catch (`wireUpdatePanel`, app.js:202
+on main) called `renderUpdateTile({ lastError: err.message })`, and
+`renderUpdateTile` writes every row from the status it is given. A request
+with no answer (fetch's TypeError) or with an answer that is not a 2xx
+(`errorFromResponse`'s Error) therefore hid Roll back, removed Install &
+restart, hid and emptied the Held update and Rollback rows, and set Status
+to "check failed" and Last check to "never", over a status that had not
+changed. The server sends an updates frame on a connection only when the
+marshalled status differs from the last one it sent there
+(`marshalAndPublish`, handlers_events.go:150; `TestEventsStreamDiffSuppression`),
+and the failed request changed nothing on the server, so no frame put the
+rows back while the status stood: only a change of status, or a new
+connection's first frame (a reload, or the visibility restore after a minute
+away), did.
+
+**What changed.**
+1. The catch calls `showUpdateCheckFailure(err?.message)` and renders no
+   status. `showUpdateCheckFailure` (app.js, after `renderUpdateTile`)
+   writes "Check now failed:" and the error, through `escapeHTML`, into the
+   Last error row (in `<code>`, as a status's own lastError), reveals the row
+   with its label, and touches nothing else, so every other row stays as the
+   last status rendered it, the server's first paint included.
+2. `renderUpdateTile` is unchanged. Its docblock said it tolerates the
+   Check-now error path's partial input; it now says it takes a whole status,
+   and names the Settings page, where it said the dashboard.
+
+**Decisions** (the brief's, on Codex's and Argon's notes).
+- No reliance on a next frame (Codex's note 2): the rows stay as they were at
+  once, and nothing waits for a frame to repair them.
+- The error stays readable (Argon's note 1): until the next status rendered,
+  an updates frame (on a change of status or a new connection) or the next
+  Check now's answer, and no timer clears it. This path is the client's
+  failed request alone: a poll that fails upstream answers 200 with the
+  post-check status and its own lastError (handlers_api.go:3685), the success
+  branch, unchanged.
+- The error goes in the Last error row, where the partial status put it, so a
+  delivered status replaces it with what it carries (its own lastError, or the
+  row hidden), as the brief's decision asks. "Check now failed:" leads it,
+  since the Status row beside it no longer says "check failed". A status's own
+  Last error gives way to the click's until the next status. A row of the
+  click's own was weighed and not taken: a fourth conditional row in the
+  template, which every delivered status would have to hide anyway.
+- The tests drive the caller and the ingest (Codex's note 1, Argon's note 2),
+  below.
+
+**Tests.** The node harness in `settings_rollback_row_test.go`
+(`updatesPanelRun`) now wires the panel with the shipped `wireUpdatePanel`,
+clicks Check now through the shipped `API` const and `errorFromResponse` over
+a fetch the run answers, and hands each status to the shipped
+`startEventStream`'s own updates listener (`safeApply`, `renderUpdateTile`)
+over an EventSource the run holds. `withReachedFunctions` extracts every
+top-level function those reach by bare calls, transitively, so the run
+executes whatever the handlers call, under whatever name. The 503 and the 200
+a Check now gets are taken from the real handler (`checkNowAnswer`). B707's
+`TestTheUpdatesPanelShowsRollBackOrWhyNot` delivers its statuses through the
+stream now, its expectations unchanged.
+- `TestACheckNowThatFailsKeepsTheRowsTheLastStatusRendered` (node), twelve
+  steps: the first paint; a request that fails before any frame (the first
+  paint's rows kept); a status that offers Roll back, holds an update and
+  offers Install; a request that fails (its rows kept, the error shown); the
+  same status delivered again (the error replaced); a status whose rollback is
+  refused; the handler's own 503 with no updater, and a 500 whose message
+  carries markup (the rows kept, the message as text); a status with a
+  lastError of its own, a request that fails beside it (the click's error
+  takes the row), and that status again (its own error back); a Check now
+  answered 200 (rendered whole).
+- `TestACheckNowThatFailsRendersNoStatus` (no node): the catch calls
+  `showUpdateCheckFailure(err?.message)` and no `renderUpdateTile`, while the
+  try still renders `u`; `showUpdateCheckFailure` reaches `update-last-error`
+  alone, writes through `escapeHTML`, reveals the row and its label, and
+  renders no status.
+
+**Red first, and what could not run here.** `internal/admin` does not build on
+orion: `go.mod` requires golang.org/x/net v0.62.0 (#1381), the module cache
+holds v0.59.0 and v0.61.0 only, and the proxy is off (`go vet
+./internal/admin/` stops at internal/tls/manager.go:12, "module lookup
+disabled by GOPROXY=off"). Orion has no node, and JavaScriptCore's `jsc` and
+Chrome need an approval this headless run cannot give. So no Go test of this
+change ran here, the node tests ran nowhere, and the console was not driven
+in a browser. What ran: a replay of `TestACheckNowThatFailsRendersNoStatus`'s
+string checks in a stdlib-only scratch program outside the build (its helpers
+copied from the package's tests), red on 257b420a's app.js (the catch renders
+a status, and there is no `showUpdateCheckFailure`) and green on 2d3fb040's.
+The node test's red on 257b420a is predicted at steps 1, 3, 6, 7 and 9, each a
+request that fails (Status "check failed", Last check "never", Roll back and
+Install gone, the Held update and Rollback rows hidden, the error without its
+lead), and its other steps green: traced by hand against both versions of
+app.js, not run.
+
+**Negative controls**, each alone on 2d3fb040, app.js put back with `git
+checkout --` and the tree clean after each, observed through the replay; the
+node test's outcome is predicted:
+
+| # | Mutation | Replay (observed) | Node test (predicted) |
+|---|---|---|---|
+| N1 | the catch hands `renderUpdateTile` the error alone again | red: the catch renders a status and does not call `showUpdateCheckFailure` | red at steps 1, 3, 6, 7 and 9 |
+| N2 | `showUpdateCheckFailure` writes the error unescaped | red: no `escapeHTML(message)` | red at step 7 alone (the markup's tags lost) |
+| N3 | it reveals the row and not its label | red: no `if (dt) dt.hidden = false;` | red at steps 1, 3, 6 and 7 (at step 9 the label is already shown, by step 8's status) |
+| N4 | it also hides Roll back | red: it reaches `update-rollback` too | red at step 3 alone (the one failed request beside an offered Roll back) |
+
+**Checks.** On orion:
+- go1.27.3's gofmt (`/opt/homebrew/bin/gofmt`, the Cellar's 1.27.3) on the
+  changed Go file: clean.
+- `make docs-check`: ok as the tree stands. With the rules patch, the budget
+  script's own `measure` and `report` over a copy of CLAUDE.md, the rules and
+  the skills with the patch applied, against this checkout's 2,952 tracked
+  files: ok, admin-console.md at 71.2 %, the worst load unchanged at 63.3 %.
+- The patch: a strict applier (every hunk's context byte for byte at its
+  line) reproduces the patched file exactly, and refuses the patch with one
+  context byte changed.
+- The test names the bullet, this record and the History change cite: each
+  defined by a `func` in a `_test.go` file, by a script over the added text
+  (`TestEveryCitedTestNameExists` is in cmd/bridge, which does not build
+  here).
+- Not run: `make test-fast`, `make vet` (native and `GOOS=windows`), any `go
+  test`, the node tests, the browser drive.
+
+**For the owner.**
+- On a host with golang.org/x/net v0.62.0 and node: `go test ./internal/admin/
+  -run 'CheckNow|UpdatesPanel|SettingsPage|SettingsUpdateRows'` on 2d3fb040
+  (green expected) and on 257b420a (red expected at the steps above), then
+  the gate.
+- Drive the console in a browser on a throwaway bridge whose status shows Roll
+  back or the Rollback row beside a Held update, make POST
+  /api/updates/check itself fail by intercepting it (Codex's note 3: an update
+  URL at a closed port takes the 200 path), and check that the rows stay, with
+  "Check now failed:" in Last error, until the next frame or Check now.
+- Orion's module cache lacks golang.org/x/net v0.62.0, so nothing that imports
+  it builds there (B718's record found the same).
+- No PROTOCOL.md change: the console's API is not the wire protocol.
