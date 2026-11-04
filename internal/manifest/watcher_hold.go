@@ -28,9 +28,11 @@ import (
 //   - when an event names the root itself, removed or moved away (lookAgain;
 //     Windows says so of a watched directory that went);
 //   - every rootCheckEvery, when a watched root's own watch is one fsnotify no
-//     longer holds (checkRootWatches): inotify drops every watch on a volume as
-//     it is unmounted and sends nothing (IN_UNMOUNT, which fsnotify swallows);
-//     kqueue drops none unasked, and is not checked;
+//     longer holds (checkRootWatches), on every platform: inotify drops every
+//     watch on a volume as it is unmounted and sends nothing (IN_UNMOUNT, which
+//     fsnotify swallows), and kqueue drops a folder's watch and sends nothing
+//     when the folder is renamed after a change in it and before fsnotify read
+//     the change (reconcileWatches), a root's own folder as much as any;
 //   - and, while it is held, on a bounded retry (recheckHeld): recheckFirst
 //     after a root is held, then twice as long each time, recheckMax at most,
 //     each look a stat, one batch of the root's listing and, for a root that
@@ -283,10 +285,13 @@ func (wt *Watcher) recheckHeld(ctx context.Context) {
 // checkRootWatches looks at each watched root whose own watch fsnotify no
 // longer holds though nothing said so: inotify drops every watch on a volume
 // as it is unmounted and sends no event (IN_UNMOUNT, which fsnotify
-// swallows). A root that reads as a volume not mounted is held. One that
-// reads as it did was replaced under its watch (unmounted and mounted again
-// between two checks): what is left of its watches goes, and it is watched
-// again where it is now, with a scan.
+// swallows), and kqueue drops the watch of a root renamed after a change in
+// it and before fsnotify read the change, sending nothing either, while its
+// reconcile lets go only what is left under it (reconcileWatches). A root
+// that reads as a volume not mounted is held. One that reads as it did was
+// replaced under its watch (unmounted and mounted again between two checks,
+// or moved away and another folder put at its path): what is left of its
+// watches goes, and it is watched again where it is now, with a scan.
 func (wt *Watcher) checkRootWatches(ctx context.Context) {
 	if len(wt.rootWatches) == 0 {
 		return

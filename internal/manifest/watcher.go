@@ -330,18 +330,16 @@ func (wt *Watcher) loop(ctx context.Context) error {
 		defer wt.closeFlushSignal()
 	}
 	// The held roots' retry, armed only while a hold or a retry asks for it
-	// (rearmRecheck), and the wake for the roots a dispatch found absent, on
-	// every platform; and the check of the watched roots' own watches, which
-	// kqueue never drops unasked, elsewhere (watcher_hold.go).
+	// (rearmRecheck), the wake for the roots a dispatch found absent, and the
+	// check of the watched roots' own watches, on every platform: inotify
+	// drops a volume's watches as it is unmounted, and kqueue a renamed
+	// folder's, with no event either way (watcher_hold.go).
 	recheck := time.NewTimer(wt.recheckFirst)
 	recheck.Stop()
 	defer recheck.Stop()
 	rootCheck := time.NewTicker(wt.rootCheckEvery)
 	defer rootCheck.Stop()
 	holdWake, recheckC, rootCheckC := wt.holdWake, recheck.C, rootCheck.C
-	if wt.fds != nil {
-		rootCheckC = nil
-	}
 	wt.rearmRecheck(recheck)
 	// flushAsked is set when the quiet timer has written the signal and the
 	// event that watches the waiting folders has not been read yet. Arming

@@ -530,7 +530,9 @@ func (wt *Watcher) releaseTree(p string) {
 // read that change (measured: an album folder that gained a file and was
 // then renamed while nothing read fsnotify's events reached the reader as no
 // event at all), so no event says to release them. Run calls it every
-// reconcileEvery.
+// reconcileEvery. A configured root dropped this way is looked at again, and
+// held or watched again where it is now, by the check of the roots' own
+// watches (checkRootWatches), which no reconcile stands in for.
 func (wt *Watcher) reconcileWatches() {
 	f := wt.fds
 	if f == nil || f.off {

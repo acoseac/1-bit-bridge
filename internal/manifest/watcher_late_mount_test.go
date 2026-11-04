@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 	"time"
@@ -341,4 +342,41 @@ func TestTheWatcherDropsTheScansArmedUnderARootItHolds(t *testing.T) {
 		t.Errorf("once it watched the root again the watcher had scans armed for %q, want the root's alone", got)
 	}
 	f.mustHold(t, lateMountTrack)
+}
+
+// TestTheWatcherLooksAgainAtARootWhoseOwnWatchKqueueDropped pins the check of
+// the roots' own watches where the watcher keeps kqueue's account
+// (watcher_fds.go): fsnotify's kqueue backend drops a folder's watch, and
+// sends nothing, when the folder is renamed after a change in it and before
+// fsnotify read that change (reconcileWatches), a library root's own folder
+// as much as any, and the reconcile then lets every watch under it go and
+// watches nothing again (Codex on #1397). The root is looked at again and
+// watched where it is now, with a scan, so a file dropped into it reaches the
+// manifest. The test drops the root's own watch as fsnotify does; off kqueue
+// it keeps the account itself, which runs the loop kqueue runs.
+func TestTheWatcherLooksAgainAtARootWhoseOwnWatchKqueueDropped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("kqueue's account runs where fsnotify watches through kqueue; Linux's inotify stands in for it here, and ReadDirectoryChangesW is never paired with it")
+	}
+	f := newLateMountFixture(t)
+	if f.w.fds == nil {
+		f.w.fds = newWatchFDs(WatchFDLimits{Process: 1 << 20}, nil)
+	}
+	f.w.reconcileEvery = 20 * time.Millisecond
+	rec := loggingtest.Record(t)
+	startWatcher(t, f.w)
+	if err := f.w.w.Remove(f.root); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.root, "02.flac"), []byte("not a real flac"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	watchWaitUntil(t, func() bool {
+		got, _ := f.store.GetTrack(context.Background(), "02.flac")
+		return got != nil
+	}, nil, "a file dropped into a root whose own watch went without a word never reached the manifest")
+	f.mustHold(t, lateMountTrack)
+	if got := rec.Lines(msgWatchRootRewatched); len(got) != 1 {
+		t.Errorf("the watcher said it watched the root again %d times, want once:\n%v", len(got), got)
+	}
 }
