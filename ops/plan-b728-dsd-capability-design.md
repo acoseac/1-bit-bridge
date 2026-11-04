@@ -1475,7 +1475,7 @@ rule that permits it.
     ends.**"
 14. **`ops/b470-native-qualification.md:1-10`**, in two steps:
     - B1: "Production reads an approval record only through the legacy reader, which takes version 35
-      and later, until B728's cutover (`ops/b728-dsd-capability-design.md`). This runbook's evidence
+      and later, until B728's cutover (`ops/plan-b728-dsd-capability-design.md`). This runbook's evidence
       binds `qualificationVersion`, whose guard covers the DSD byte path and the harness alone."
     - B7: "Since B728 no production path reads an approval record or a candidate: the player plays
       DSD by its effective policy. This runbook is the engineering harness's."
