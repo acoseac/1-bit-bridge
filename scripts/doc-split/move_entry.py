@@ -659,6 +659,11 @@ def self_test():
         why, _ = attempt("title", text="- **Rule Q, reworded.** → History-rules-r.md")
         expect("a --text line that rewrites a title that is a Don't is refused",
                why is not None and "Never undo rule Q." in why)
+        item = next(it for it in document(rules)[2] if it["type"] == "block" and it["text"].startswith("- **Never"))
+        mech, _, donts = condense_entry(item, "History-rules-r.md")
+        expect("validate_overrides itself rejects a line that rewrites a title that is a Don't",
+               "dropped Don't: Never undo rule Q." in validate_overrides.problems(
+                   {"block": item, "mechanical_line": mech, "donts": donts}, "- **Rule Q, reworded.** → History-rules-r.md"))
         _, line = attempt("title")
         expect("a title that is a Don't still moves under its own line",
                line == "- **Never undo rule Q.** → History-rules-r.md")
