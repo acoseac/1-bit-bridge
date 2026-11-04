@@ -231,7 +231,8 @@ type Caveat struct {
 //go:embed profiles.json
 var embedded []byte
 
-// Default is the embedded database, parsed and linted.
+// Default is the embedded database, parsed and linted afresh at each call,
+// so no caller shares it with another.
 func Default() (*Database, error) {
 	return Parse(embedded)
 }
@@ -253,24 +254,4 @@ func Parse(data []byte) (*Database, error) {
 		return nil, fmt.Errorf("dacprofile: %w", errors.Join(problems...))
 	}
 	return &db, nil
-}
-
-// Lint is every problem the database has.
-func (db *Database) Lint() []error {
-	return nil
-}
-
-// Unit is a unit's model identity and firmware, as the sysfs reader returns
-// them: what Match is asked of.
-type Unit struct {
-	Key Key
-	// BCDDevice is the unit's descriptor firmware code, four hexadecimal
-	// digits, or "" where it was not read, which matches no alternative that
-	// lists firmware.
-	BCDDevice string
-}
-
-// Match is the profile that knows u, and whether exactly one does.
-func (db *Database) Match(u Unit) (Profile, bool) {
-	return Profile{}, false
 }
