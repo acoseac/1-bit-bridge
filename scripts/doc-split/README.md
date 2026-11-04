@@ -31,7 +31,10 @@ once per file.
   when Claude **Reads** a matching file, so a rule for code nobody Reads first belongs in `CLAUDE.md`.
 - **Always-loaded file** (`CLAUDE.md`, or a condensed rules file): one line per entry, made of its
   bold title (which states the rule), its own bolded "Don't…/Never…" sentences, and `→ History-X.md`.
-  Entries of 450 bytes or less may stay whole.
+  Entries of 450 bytes or less may stay whole. A line never leaves out one of the entry's own
+  sentences: `move_entry.py` leaves whole an entry whose sentences do not fit in a 600-byte pointer,
+  and `condense_rules.py` keeps them in its line however long that makes it (#1275 wrote two lines
+  over 600 bytes).
 - **Long form** (reasoning, measurements, rejected alternatives, incident history):
   `ops/History-*.md` for `CLAUDE.md` entries, `ops/History-rules-<name>.md` for a condensed rules
   file. **Change an entry's line and its long form in the same commit.** The dated evidence still
@@ -90,9 +93,15 @@ rebasing any relative link (`mdblocks.rebase_links`), and prove the move with
    would leave; drop `--dry-run` to move. The entry lands verbatim, under a heading naming its
    section, in the History file its neighbours already point to (a rules file's goes to
    `ops/History-rules-<name>.md`, created if missing). `--to ops/History-X.md` adds it to a
-   file you choose; `--new ops/History-Y.md --title "…"` creates one.
+   file you choose; `--new ops/History-Y.md --title "…"` creates one. It refuses, naming the
+   entry's line and section, an entry whose own "Don't" sentences would not all fit in a pointer
+   (600 bytes) or whose bold it cannot read safely (unbalanced `**`, a run of three `*`, bold inside
+   bold): leave that entry and move another. `--largest` prints the reason in place of its command.
 3. `--text "…"` replaces the generated pointer line with a better one; it is checked like a
-   polished line (same pointer, every "Don't" kept, no invented symbols).
+   polished line (same pointer, every "Don't" kept, no invented symbols). When only the title makes
+   the pointer too long, the refusal says so: a `--text` line with a shorter title and every
+   sentence verbatim moves the entry. Whatever the checks say, the move itself refuses a line
+   that does not hold each of the entry's own sentences in a bold span.
 
 The History file is written and read back before the source changes, so an interruption can
 leave an entry in both files but never in neither. A condensed file is never re-condensed:
@@ -117,7 +126,9 @@ or moved since.
 7. Commit (docs-only), and add the file and its base to the table below.
 
 What `validate_overrides.py` rejects: a changed bullet/paragraph shape or pointer suffix; a dropped
-"Don't" sentence; a `code span` (single or double backticks) or `#number` that isn't in the
+"Don't" sentence, of any length, its title's included, read from the entry itself rather than
+from the list its caller passes (each must stand whole inside one of the line's bold spans), or
+bold it cannot read safely; a `code span` (single or double backticks) or `#number` that isn't in the
 entry's original text as a whole identifier (the guard against invented or truncated symbols:
 `cached` does not pass for `cachedThumbnail`); unbalanced markdown; more than 600 bytes.
 
@@ -149,6 +160,13 @@ A reproduction matches only until someone edits the files by hand, which is expe
 - An automatic "(PR #…)" suffix attached PR numbers an entry only *cites*; only the title's own
   parenthetical is kept now.
 - A lowercase bolded "**don't …**" mid-sentence is a separate rule, so the pattern matches both cases.
+- The "Don't" pattern capped a sentence at 600 characters and stopped at any `*`, so a longer
+  sentence, or one holding `` `*bool` ``, was left out of the line and out of the check that compares
+  the line with the entry (B710). scanner.md's `Track.Compilation` line lost its "Don't make it a
+  `*bool`" that way in the 2026-10-18 condensation, and thirteen entries in the rules files had a
+  sentence over 600 characters, for five of which `move_entry.py` offered a pointer without it.
+  `mdblocks.dont_sentences` now pairs `**` outside code spans and takes any length; where the
+  pairing could slip, it refuses the entry instead.
 - About 20% of long entries have no bold title; their first sentence is often a field report or a
   test list, which is why the polish step exists. A bold title that does not start with "Don't" or
   "Never" carries no rule into the line either (`**Copy the file; never rewrite it on one side.**`):

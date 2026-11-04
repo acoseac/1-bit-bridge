@@ -11,6 +11,11 @@ sentences and `→ History-….md` — or LINE, a hand-written replacement, chec
 validate_overrides.py checks polished lines (same shape, same pointer suffix, every "Don't" kept,
 no invented symbols).
 
+A pointer never leaves out one of the entry's own "Don't" sentences, however long. An entry whose
+sentences would not all fit in a pointer (600 bytes), or whose bold cannot be read safely, is
+refused by its line and section, and --largest says so in place of its command: leave it, or pass
+--text with a shorter title and every sentence verbatim when they fit.
+
 Where the entry goes:
   --to ops/History-X.md      an existing History file
   --new ops/History-Y.md     a new one, created with a short header (--title names its topic)
@@ -34,7 +39,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from mdblocks import (parse, split_frontmatter, movable, condense_entry, read_text, write_text,  # noqa: E402
-                      load_claim_regex, docs_in, HISTORY_DIR)
+                      load_claim_regex, docs_in, dont_sentences, dropped_donts, BoldError, HISTORY_DIR)
 
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 POINTER_RE = re.compile(r"→ (History-[A-Za-z0-9-]+\.md)")
@@ -44,6 +49,15 @@ PLACEHOLDER = "History-X.md"  # the orientation paragraph's example, not a real 
 
 class MoveError(Exception):
     """A move that must not happen; the message says why."""
+
+
+class DontRefusal(MoveError):
+    """An entry that cannot move because its pointer could not keep all of its own Don't
+    sentences: WHAT names the entry, WHY says what stops it."""
+
+    def __init__(self, what, why):
+        super().__init__("%s cannot move: %s" % (what, why))
+        self.why = why
 
 
 def source_of(path, root):
@@ -144,6 +158,34 @@ def with_entry(hist_text, label, block_text):
     return "\n".join(lines[:end] + [""] + block_text.split("\n") + tail) + "\n"
 
 
+def refuse_unfit(what, item, line, limit):
+    """Raise DontRefusal when LINE, the pointer that keeps every one of ITEM's own Don't sentences
+    verbatim, is over LIMIT bytes: a pointer never leaves one out (CLAUDE.md, "Over budget, never
+    cut"), so the entry stays where it is, unless a --text line with a shorter title holds them all."""
+    donts = dont_sentences(item["text"])
+    size = len(line.encode("utf-8"))
+    if not donts or size <= limit:
+        return
+    kept = [d for d in donts if not any(d != o and d in o for o in donts)]
+    suffix = line[line.index(" → History-"):]  # as validate_overrides.problems finds it
+    least = ("- " if item["kind"] == "bullet" else "") + " ".join("**%s**" % d for d in kept) + suffix
+    least_size = len(least.encode("utf-8"))
+    if len(kept) == 1:
+        sentences, verb = "its own bolded Don't/Never sentence (%d characters)" % len(kept[0]), "s"
+    else:
+        sentences, verb = "its %d own bolded Don't/Never sentences (the longest %d characters)" % (
+            len(kept), max(len(d) for d in kept)), ""
+    if least_size > limit:
+        raise DontRefusal(what, "%s need%s a %d-byte pointer even without its title, over the %d bytes a pointer "
+                          "may hold, and a pointer never leaves one out: leave the entry where it is and move "
+                          "another (--largest lists them), or shorten what it says in a change of its own"
+                          % (sentences, verb, least_size, limit))
+    raise DontRefusal(what, "with its title, %s make%s a %d-byte pointer, over the %d bytes a pointer may hold, "
+                      "and a pointer never leaves one out: pass --text with a shorter title and every sentence "
+                      "verbatim (%d bytes at the least), or leave the entry where it is"
+                      % (sentences, verb, size, limit, least_size))
+
+
 def plan(root, source_path, line_no, to=None, new=None, title=None, text=None, date=None):
     """Everything a move writes, computed and verified in memory. Returns a dict with the source
     and History paths, their old and new texts, the one-line replacement and the entry."""
@@ -170,10 +212,19 @@ def plan(root, source_path, line_no, to=None, new=None, title=None, text=None, d
     if os.path.islink(hist_path):
         raise MoveError("%s is a symlink" % hist_path)
 
-    mechanical, fallback, donts = condense_entry(item, hist, self_rules=name + ".md" if name else None,
-                                                 known_docs=docs_in(root))
-    one_liner = text if text is not None else mechanical
+    section = label_of(item)
+    what = "%s L%d (%s)" % (rel, line_no, "top of file" if section == "(top of file)" else section)
+    try:
+        mechanical, fallback, donts = condense_entry(item, hist, self_rules=name + ".md" if name else None,
+                                                     known_docs=docs_in(root))
+    except BoldError as e:
+        raise DontRefusal(what, "its bold cannot be read safely (%s), so its pointer could leave out or cut short "
+                          "one of its own bolded Don't/Never sentences; fix the markdown first, in a change of "
+                          "its own" % e)
     import validate_overrides  # noqa: E402 — shares the polished-line checks, loaded only when needed
+    if text is None:
+        refuse_unfit(what, item, mechanical, validate_overrides.MAX_BYTES)
+    one_liner = text if text is not None else mechanical
     errs = validate_overrides.problems({"block": item, "mechanical_line": mechanical, "donts": donts}, one_liner)
     if errs:
         raise MoveError("the one-line replacement would be rejected: " + "; ".join(errs))
@@ -192,8 +243,17 @@ def plan(root, source_path, line_no, to=None, new=None, title=None, text=None, d
 
 
 def verify(move):
-    """Raise MoveError unless the move keeps every block, heading and test-count claim."""
+    """Raise MoveError unless the one-line replacement keeps every one of the entry's own Don't
+    sentences (whatever the line checks said), and the move keeps every block, heading and
+    test-count claim."""
     entry, line = move["item"]["text"], move["line"]
+    try:
+        lost = dropped_donts(entry, line)
+    except BoldError as e:
+        raise MoveError("the one-line replacement cannot be checked for the entry's Don't sentences: %s" % e)
+    if lost:
+        raise MoveError("the one-line replacement would leave out the entry's own %s" % "; ".join(
+            "**%s**" % (d if len(d) <= 80 else d[:80] + "…") for d in lost))
     before_src, after_src = collections.Counter(blocks(move["src_old"])), collections.Counter(blocks(move["src_new"]))
     before_src[entry] -= 1
     before_src[line] += 1
@@ -232,10 +292,22 @@ def list_largest(root, source_path, n):
         try:
             dest = default_destination(items, it, name, root)
         except MoveError:
-            dest = "(needs --to or --new)"
-        print("  L%-5d %6d B → %-32s %s" % (line, len(it["text"].encode("utf-8")), dest, label_of(it)[:60]))
+            dest = None
+        refusal = None
+        if dest:
+            try:
+                plan(root, source_path, line)
+            except DontRefusal as e:
+                refusal = e.why
+            except MoveError:
+                pass  # any other refusal is the command's to give, as before
+        print("  L%-5d %6d B → %-32s %s" % (line, len(it["text"].encode("utf-8")), dest or "(needs --to or --new)",
+                                           label_of(it)[:60]))
         print("         %s" % re.sub(r"\s+", " ", it["text"])[:110])
-        print("         scripts/doc-split/move_entry.py %s --line %d" % (rel, line))
+        if refusal:
+            print("         cannot move: %s" % refusal)
+        else:
+            print("         scripts/doc-split/move_entry.py %s --line %d" % (rel, line))
     if not found:
         print("  none: every long entry is already a one-line pointer. Shorten a pointer line's")
         print("  \"Don't\" list, or split a section into its own rules file.")

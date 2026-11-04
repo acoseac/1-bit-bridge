@@ -14,12 +14,17 @@ byte for byte: no platform newline translation.
 A *block* is a top-level bullet (with its indented continuation and sub-bullets), a
 paragraph, a table, or a fenced code block. Headings are separate items. `text` is the
 exact original lines joined with "\n" — the unit the lossless checks compare byte-for-byte.
+
+An entry's *Don't sentences* are its bold spans that start with "Don't", "Never" and the like
+(dont_sentences): its one-line form keeps each verbatim, however long, and an entry whose bold
+cannot be read safely is refused rather than condensed without one (B710).
 """
 import argparse
 import errno
 import fnmatch
 import os
 import re
+import string
 import subprocess
 import sys
 import tempfile
@@ -34,8 +39,14 @@ BULLET_RE = re.compile(r"^(?:[-*] |\d+\. )")
 
 # A block's bold title, plus an immediately-following "(PR #…)" parenthetical.
 TITLE_RE = re.compile(r"^(?:[-*] |\d+\. )?\*\*(.+?)\*\*(\s*\([^()]{1,160}\))?")
-# The entry's own bolded prohibitions, copied verbatim into its one-line form.
-DONT_RE = re.compile(r"\*\*((?:[Dd]on['’]t|[Dd]o NOT|[Dd]o not|[Nn]ever|NEVER)\b[^*]{4,600}?)\*\*")
+# The entry's own bolded prohibitions, copied verbatim into its one-line form: a bold span whose
+# text starts with one of these words and runs on for DONT_MIN_TAIL more characters, of any length
+# and holding anything, `*` in a code span included (dont_sentences). The pattern this replaced
+# capped a sentence at 600 characters and stopped at any `*`, so it left such a sentence out of
+# the line and out of the line's check (B710).
+DONT_WORD_RE = re.compile(r"(?:[Dd]on['’]t|[Dd]o NOT|[Dd]o not|[Nn]ever|NEVER)\b")
+DONT_MIN_TAIL = 4
+ESCAPABLE = frozenset(string.punctuation)  # what a backslash escapes in markdown
 RULES_RE = re.compile(r"\.claude/rules/([a-z0-9-]+\.md)")
 DOC_RE = re.compile(r"docs/([A-Za-z0-9_.-]+\.md)")
 KEEP_MAX = 450  # blocks at or under this many bytes stay verbatim
@@ -113,12 +124,119 @@ def movable(block):
     return block["kind"] not in ("table", "code") and len(block["text"].encode("utf-8")) + 1 > KEEP_MAX
 
 
+class BoldError(ValueError):
+    """Bold that cannot be read safely around a Don't word, so one of the entry's own Don't
+    sentences could be missed or cut short; the message says what is wrong and where."""
+
+
+def _near(text, i):
+    """TEXT around offset I, whitespace-collapsed and quoted: where a BoldError's problem is."""
+    return repr(re.sub(r"\s+", " ", text[max(0, i - 25):i + 25]))
+
+
+def star_runs(text):
+    """[(start, end)] of each run of `*` in TEXT that markdown can read as emphasis: not inside a
+    code span (a run of N backticks up to the next run of exactly N; a run without one is literal)
+    and not escaped by a backslash."""
+    runs, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\" and i + 1 < n and text[i + 1] in ESCAPABLE:
+            i += 2
+        elif c in "`*":
+            j = i
+            while j < n and text[j] == c:
+                j += 1
+            if c == "*":
+                runs.append((i, j))
+                i = j
+            else:
+                close = re.compile(r"(?<!`)%s(?!`)" % ("`" * (j - i))).search(text, j)
+                i = close.end() if close else j
+        else:
+            i += 1
+    return runs
+
+
+def bold_spans(text):
+    """([(start, end)] of the text inside each bold span of TEXT, [problems]). The `**` runs
+    (star_runs) pair in order, each opening one closing. PROBLEMS says why that pairing cannot be
+    trusted, empty when it can: a run of three or more `*`, which can open or close bold as well; an
+    odd number of `**`; or a `**` that opens before whitespace or closes after it, which markdown
+    does not read as bold, so the pairing has slipped (bold inside bold, say)."""
+    runs = star_runs(text)
+    problems = ["a run of %d * at %s" % (e - s, _near(text, s)) for s, e in runs if e - s > 2]
+    pairs = [(s, e) for s, e in runs if e - s == 2]
+    if len(pairs) % 2:
+        problems.append("an odd number of ** (%d)" % len(pairs))
+    spans = []
+    for (_, start), (end, _) in zip(pairs[::2], pairs[1::2]):
+        if text[start].isspace():
+            problems.append("a ** that opens before whitespace at %s" % _near(text, start))
+        if text[end - 1].isspace():
+            problems.append("a ** that closes after whitespace at %s" % _near(text, end))
+        spans.append((start, end))
+    return spans, problems
+
+
+def dont_sentences(text):
+    """TEXT's own bolded "Don't…/Never…" sentences, whitespace-collapsed, each once, in order: every
+    bold span (bold_spans) whose text starts with a DONT_WORD_RE word and has DONT_MIN_TAIL more
+    characters, however long it is. Raises BoldError when a `**` stands before such a word and the
+    bold cannot be read safely, or that `**` does not open a span, since a line built from what
+    could be read might leave a sentence out or cut one short. Bold with no Don't word in it is
+    never refused."""
+    marks = [e for s, e in star_runs(text) if e - s >= 2 and DONT_WORD_RE.match(text, e)]
+    if not marks:
+        return []
+    spans, problems = bold_spans(text)
+    if problems:
+        raise BoldError("; ".join(problems))
+    opens = {s for s, _ in spans}
+    for e in marks:
+        if e not in opens:
+            raise BoldError("the ** before %s does not open bold" % _near(text, e))
+    found = []
+    for s, e in spans:
+        m = DONT_WORD_RE.match(text, s)
+        if m and e - m.end() >= DONT_MIN_TAIL:
+            sentence = re.sub(r"\s+", " ", text[s:e]).strip()
+            if sentence not in found:
+                found.append(sentence)
+    return found
+
+
+def appears_whole(part, text):
+    """PART occurs in TEXT without being part of a longer identifier: `Dashboard` does not match
+    DashboardController, while `seek(to:)` still matches PlayerService.seek(to:)."""
+    before = r"(?<!\w)" if re.match(r"\w", part) else ""
+    after = r"(?!\w)" if re.search(r"\w$", part) else ""
+    return re.search(before + re.escape(part) + after, text) is not None
+
+
+def dropped_donts(text, line):
+    """The Don't sentences of the entry TEXT (dont_sentences) that its one-line form LINE leaves
+    out. Each must stand whole inside one of LINE's own bold spans: as a span of its own, or within
+    a longer one, such as the title it came from. Raises BoldError when the bold of TEXT, or of a
+    LINE that has sentences to keep, cannot be read safely."""
+    wanted = dont_sentences(text)
+    if not wanted:
+        return []
+    spans, problems = bold_spans(line)
+    if problems:
+        raise BoldError("in the line: " + "; ".join(problems))
+    held = [re.sub(r"\s+", " ", line[s:e]).strip() for s, e in spans]
+    return [d for d in wanted if not any(appears_whole(d, h) for h in held)]
+
+
 def condense_entry(block, hist_name, self_rules=None, known_docs=None):
     """One-line form of a moved block: whole bold title (or first sentence), the entry's own
     bolded Don't/Never sentences verbatim, and `→ hist_name` plus rules/doc refs. KNOWN_DOCS, when
     given, limits the doc refs to those names (this repo's docs/*.md: an entry here also cites the
     iOS repo's docs/BridgeProtocol.md, which is no doc of this repo).
-    Returns (line, used_fallback_title, donts_in_line)."""
+    Returns (line, used_fallback_title, donts_in_line); the line can be longer than a pointer may
+    be, since it keeps every sentence however long. Raises BoldError when the entry's bold cannot be
+    read safely (dont_sentences)."""
     flat = re.sub(r"\s+", " ", block["text"])
     m = TITLE_RE.match(flat)
     if m:
@@ -133,11 +251,7 @@ def condense_entry(block, hist_name, self_rules=None, known_docs=None):
         if title.count("**") % 2:
             title += "**"
         plain = title
-    donts = []
-    for d in DONT_RE.finditer(block["text"]):
-        s = re.sub(r"\s+", " ", d.group(1)).strip()
-        if s not in donts and s not in plain:
-            donts.append(s)
+    donts = [s for s in dont_sentences(block["text"]) if s not in plain]
     rules = sorted({r for r in RULES_RE.findall(block["text"]) if r != self_rules})
     docs = [x for x in dict.fromkeys(DOC_RE.findall(block["text"]))
             if not x.startswith("History-") and (known_docs is None or x in known_docs)][:2]
