@@ -56,7 +56,13 @@ var tableStates = []tableState{
 	{"releasing", func(h *harness, ids []uint32) gate {
 		h.must("play b", h.eng.PlayID(bg, ids[1]))
 		g := holdReleases(h)
+		// The owner notes the stop after it publishes the release the stop
+		// began, so the cell's mark comes once the stop is noted: a cell's
+		// wait for its own stop could take this note for it and open the hold
+		// before that stop ran (B709).
+		mark := h.appliedMark()
 		stop := async(func() error { return h.eng.Stop(bg) })
+		h.waitApplied("stop", mark)
 		h.waitSnap("releasing", func(sn *Snapshot) bool { return sn.State() == Releasing })
 		h.be.waitFor("the release", func() bool {
 			for _, c := range h.be.calls {
