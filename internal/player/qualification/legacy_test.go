@@ -212,6 +212,25 @@ func TestTheLegacyReaderRefusesBelowVersion35(t *testing.T) {
 		writeApproval(t, dir, a)
 		_, e = ReadCandidate(dir, "approved.json", id)
 		refusedFor(t, e, "stale approval version")
+		dir, a, id = versioned(t, "dop_experiments", LegacyVersion)
+		var refs []Evidence
+		for _, state := range []string{"nonzero-attenuation", "restored"} {
+			name := "experiment-" + state + ".json"
+			b, e := os.ReadFile(filepath.Join(dir, name))
+			if e != nil {
+				t.Fatal(e)
+			}
+			refs = append(refs, Evidence{Path: name, SHA256: hashBytes(b)})
+		}
+		refusedFor(t, CheckDoPExperiments(dir, refs, a.Body.Policies[0].Tuple, id, a.Body.ManifestHash, a.Body.Environment), "DoP experiment context mismatch")
+		tuple := Tuple{Transport: "dop", Format: "S32_LE", BitRate: 2822400, Pause: "kernel"}
+		attach := Attachment{BootID: "boot", Port: "port", Manufacturer: "m", Product: "p", BCDDevice: "1", DevNum: 1}
+		c := Contact{SchemaVersion: 3, QualificationVersion: LegacyVersion, Device: new(int), Subdevice: new(int), Tuple: tuple, Attachment: attach, MixerHash: "m", ManifestHash: "f", KnobPosition: "1", PCMAudible: PCMConfirmation, DSDMatched: DSDConfirmation, DoP: dopObserved()}
+		refusedFor(t, c.Validate(tuple, attach, 0, 0, "m", "f"), "contact version mismatch")
+		c.QualificationVersion = Version
+		if e = c.Validate(tuple, attach, 0, 0, "m", "f"); e != nil {
+			t.Fatalf("a contact of the current version refused: %v", e)
+		}
 	})
 }
 
