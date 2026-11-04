@@ -117,7 +117,8 @@ var comparedSaves = map[string]string{
 // instead. The sweep requires each to still be one of those, so an entry
 // cannot outlive the reason it was written for.
 var notConfigWriters = map[string]string{
-	"internal/backup/backup.go:Snapshot": "reads bridge.yaml into a snapshot, and writes the snapshot's own files",
+	"internal/backup/backup.go:Snapshot":                     "reads bridge.yaml into a snapshot, and writes the snapshot's own files",
+	"cmd/bridge/serve_data_dir_record.go:recordServeDataDir": "writes the data dir's record beside bridge.yaml (dataDirRecordPath, backlog B651), never bridge.yaml",
 }
 
 // configPathNames are the names this tree gives a config file's path: a

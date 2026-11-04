@@ -1337,6 +1337,99 @@ func (s *Scanner) emptyRootMustBeSpared(ctx context.Context, root string, multiR
 	return false
 }
 
+// rootLook is what a look at a configured library root found
+// (Scanner.lookAtRoot): whether it reads as a volume that is not mounted, the
+// way the scan's guards read it, and how.
+type rootLook struct {
+	// absent: the root reads as a volume that is not mounted. reason says
+	// how (the rootAbsent constants), "" when it does not.
+	absent bool
+	reason string
+	// rows is the number of tracks the index holds under the root, when the
+	// look counted them.
+	rows int
+	// err is what showed it: the root's stat or listing, or the count.
+	err error
+}
+
+// The ways a root reads as a volume that is not mounted (rootLook.reason).
+const (
+	// rootAbsentUnreachable: the root cannot be stat'ed through, the scan's
+	// "root unreachable" (walkRoot): not there, a link to nothing.
+	rootAbsentUnreachable = "unreachable"
+	// rootAbsentUnreadable: its listing could not be read, which the scan's
+	// walk records as an errored subtree.
+	rootAbsentUnreadable = "unreadable"
+	// rootAbsentEmpty: it holds no library content while the index holds
+	// tracks under it and no .bridge-allow-empty says it is empty on purpose,
+	// the scan's suspected clean-empty mount (emptyRootMustBeSpared).
+	rootAbsentEmpty = "empty"
+	// rootAbsentUncounted: it holds no library content and the tracks under
+	// it could not be counted, which the scan takes as the clean-empty case.
+	rootAbsentUncounted = "uncounted"
+)
+
+// lookAtRoot reads a configured root as the scan's guards read it, for a
+// caller that must not act on a root whose volume is not mounted: the library
+// watcher, which neither watches such a root nor scans it, and looks again
+// until it reads as it did (B651, watcher_hold.go). It is absent where the
+// full scan would spare every row under it: a root it cannot see (walkRoot's
+// fsutil.WalkableRoot), one whose listing fails, and one that holds no
+// library content (isLibraryEntry) and no .bridge-allow-empty while the index
+// holds tracks under it, or cannot count them (emptyRootMustBeSpared). A root
+// that holds content, the sentinel, or nothing the index knows of (a fresh
+// install) reads as it is. The listing is read a batch at a time, so a root
+// of thousands of folders is answered by its first entries, and it logs
+// nothing: the caller says what it does about the answer.
+func (s *Scanner) lookAtRoot(ctx context.Context, root string) rootLook {
+	walkFrom, err := fsutil.WalkableRoot(root)
+	if err != nil {
+		return rootLook{absent: true, reason: rootAbsentUnreachable, err: err}
+	}
+	holds, err := dirHoldsLibraryContent(walkFrom)
+	if err != nil {
+		return rootLook{absent: true, reason: rootAbsentUnreadable, err: err}
+	}
+	if holds || hasAllowEmptySentinel(root) {
+		return rootLook{}
+	}
+	n, err := s.store.CountTracksUnderRoot(ctx, root, len(s.Roots()) > 1)
+	switch {
+	case err != nil:
+		return rootLook{absent: true, reason: rootAbsentUncounted, err: err}
+	case n == 0:
+		return rootLook{}
+	}
+	return rootLook{absent: true, reason: rootAbsentEmpty, rows: n}
+}
+
+// rootLookBatch is how many entries of a root's listing dirHoldsLibraryContent
+// reads at a time.
+const rootLookBatch = 64
+
+// dirHoldsLibraryContent reports whether the directory dir holds library
+// content (holdsLibraryContent), reading its listing rootLookBatch entries at
+// a time and stopping at the first batch that holds some.
+func dirHoldsLibraryContent(dir string) (bool, error) {
+	f, err := fsutil.OpenDir(dir)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	for {
+		entries, err := f.ReadDir(rootLookBatch)
+		if holdsLibraryContent(dir, entries) {
+			return true, nil
+		}
+		if errors.Is(err, io.EOF) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+	}
+}
+
 // rootLineAttrs is a log line's attributes about a library root: the root,
 // then what it links to when target (rootLinkTarget) is not "", then attrs.
 // A line about what a walk of the root saw names the directory the walk

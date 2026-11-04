@@ -2525,3 +2525,99 @@
   `TestThePlaylistPassWritesEachWindowBeforeReadingTheNext`,
   `TestThePlaylistFeedAnswersTheSameInAnyBatchSize`,
   `TestPlaylistFolderEvidenceIsWholeOnlyWhenTheWalkSawAllOfIt`.
+
+- **A library root or data dir on a volume mounted after the bridge starts is
+  never taken for an empty library or a fresh install: the scan spares the
+  rows of a root it cannot see or that holds no library content while the
+  index holds its tracks; the library watcher holds such a root
+  (`Scanner.lookAtRoot`, read as the scan's guards read it) and watches it
+  again, with a scan of it, only once a look finds it as it was; and serve
+  refuses, before it makes or writes anything there, a data dir the record
+  beside the config names (`.bridge.yaml.datadir`) that holds neither
+  `bridge.db` nor `server.lock`** (2026-11-04, backlog B651; Codex's and
+  Argon's notes on the brief). On a NAS reboot systemd or Docker can start the
+  bridge before a USB, RAID or network volume is mounted, so a path on it is
+  not there (a directory on the volume) or reads as the bare mount point,
+  empty. **The scan** needed nothing new: walkRoot's upfront
+  `fsutil.WalkableRoot` sentinels a root it cannot see ("root unreachable"),
+  `emptyRootMustBeSpared` one holding no library content while the index
+  holds rows for it and no `.bridge-allow-empty` says it is empty on purpose
+  ("suspected clean-empty mount failure"), and ScanSubtree refuses a root it
+  cannot see and audits the owning root of a subtree that is not there
+  (`auditOwningRootOnSubtreeMiss`); `TestAScanSparesARootBelowAVolumeThatIsNotMountedYet`
+  pins a root below a mount point that is not there. No mount check was
+  added: a Docker bind mount can share its parent's device, a library on the
+  system disk must keep working, a mount boundary can sit above the
+  immediate parent, and a device number does not survive a reboot of a USB
+  or network volume. A mount point that holds library content of its own
+  while the volume is away defeats this guard and the watcher's alike.
+  **The watcher** watched the bare mount point, a directory the mount then
+  hides, so nothing the volume held was ever seen; it logged a root it could
+  not walk at the start once and never looked again; and on Linux it lost
+  every watch on a volume unmounted under it with no event (IN_UNMOUNT,
+  which fsnotify swallows). It now holds a configured root that
+  `Scanner.lookAtRoot` reads as absent (`reads=unreachable`, `unreadable`,
+  `empty` with `rows_in_db`, or `uncounted`): it is not watched, its events
+  are dropped, and no scan is dispatched for it. It is looked at again at the
+  start, before any watch is added (`holdAbsentRoots`); as a debounced scan of
+  a folder under it is due (`absentRootOf`, on the dispatch's goroutine,
+  which hands the root to Run's goroutine without blocking, `askHold`); when
+  an event names the root itself, removed or moved away (`lookAgain`); every
+  `rootWatchCheckEvery` (30 s) for a watched root whose own watch fsnotify no
+  longer holds (`checkRootWatches`; not on kqueue, which drops none unasked);
+  and, while held, `heldRecheckFirst` (5 s) after the hold, then twice as long
+  each time, `heldRecheckMax` (5 min) at most (`recheckHeld`). A look is a
+  stat, one batch of 64 entries of the root's listing (`dirHoldsLibraryContent`)
+  and, for a root holding nothing, one count. A root that reads as it did is
+  watched again where it is now, and a scan of it is asked for, since nothing
+  saw what changed meanwhile. Each change is said once: held at Warn with
+  what the look found, and again when that changes, and watched again at
+  Info. A root the index holds nothing of (a fresh install) is watched as it
+  is, and a mount over it hides that watch until the next restart. **The
+  database**: nothing in the data dir can say it was there before, the whole
+  of it may be on the missing volume, and serve may not write bridge.yaml
+  (B506's writers), so serve keeps a record beside the config, in the
+  directory a write of the config lands in (`fsutil.ResolveParent`, as the
+  config's lock), named after it: `.bridge.yaml.datadir`, the data dir's path
+  as JSON, written once the database is open and the lock file is there
+  (`recordServeDataDir`), and only when it names another data dir or none.
+  Before `prepareServeDataDir`, so before the lock, the TLS mint, the token
+  store, `server.pid` and the migrations, serve refuses a data dir the record
+  names that holds neither `bridge.db` nor `server.lock`
+  (`checkServeDataDirRecord`, `*dataDirGoneError`), exit 1, and the service
+  manager starts it again (`Restart=always` with `RestartSec=2`, launchd's
+  KeepAlive, the SCM's recovery actions, a container's restart policy) until
+  the volume is mounted; serve never waits in-process. The bridge removes
+  neither file, and a serve that opened its database took its lock first, so
+  a data dir holding neither is not the one it served from: a database
+  removed on purpose with the lock file kept (the local fixture's
+  `rm bridge.db*` reset) starts as before. A first run has no record, so a
+  fresh install, and `bridge init` (the data dir and its TLS pair, no
+  database and no record), start as before, the first serve writing the
+  record. A data dir removed or moved on purpose is refused with what to do:
+  remove the record. The record is plain file I/O, so Windows behaves alike,
+  a record that does not read names nothing, and a config directory serve
+  cannot write keeps none, said once a start. `bridge doctor`'s data-dir line
+  fails the same state in the refusal's words (cli-serve.md, B659's line).
+  In a container whose config and data dir share one volume (the image's
+  `/data`) the record is on that volume too and cannot catch a missing
+  `/data`; the runbook says to keep `/data` on a named volume or the system
+  disk, or to bind it with `--mount type=bind`, which refuses a source that
+  is not there. **Don't persist a device number or judge a mount by a device
+  or the immediate parent, write into a library root, dispatch a scan for a
+  root that reads as not mounted or watch one before a look finds it as it
+  was, keep the record in the data dir or in bridge.yaml, refuse a data dir
+  its record does not name or one whose lock file is there (the
+  `rm bridge.db*` reset), or prepare the data dir before the check.** Tests:
+  `TestAScanSparesARootBelowAVolumeThatIsNotMountedYet`,
+  `TestTheWatcherWaitsForAnUnmountedRootAndWatchesWhatIsMountedThere`,
+  `TestTheWatcherDispatchesNoScanForARootWhoseContentWent`,
+  `TestTheWatcherHoldsARootWhoseWatchesWentWithoutAWord`,
+  `TestTheWatcherHoldsARootThatWentAndWatchesWhatComesBack`,
+  `TestServeRefusesTheDataDirItServedFromWhileItsVolumeIsAway`,
+  `TestServeRefusesADataDirItsRecordNamesThatHoldsNeitherFile`,
+  `TestServeStartsAgainOverADatabaseRemovedOnPurpose`,
+  `TestInitAndTheServeAfterItStartAsBefore`,
+  `TestTheRecordRefusesOnlyTheDataDirItNamesWhileItHoldsNeitherFile`,
+  `TestTheRecordIsBesideTheFileTheConfigsNameOpens` and
+  `TestBothDoctorsFailADataDirItsRecordNamesWhileItsVolumeIsAway`.

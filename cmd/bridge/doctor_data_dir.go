@@ -26,12 +26,12 @@ const (
 // no line.
 type doctorLine func(status doctor.Status, summary, hint string) (doctor.Check, bool)
 
-// doctorDataDir is doctor.Deps.DataDirPreparation for a config that loaded,
-// whose data directory is dir: the one source bridge doctor and the console's
-// doctor read (buildDoctorDepsFor).
-func doctorDataDir(dir string) func(context.Context) doctor.Check {
+// doctorDataDir is doctor.Deps.DataDirPreparation for a config at cfgFile
+// that loaded, whose data directory is dir: the one source bridge doctor and
+// the console's doctor read (buildDoctorDepsFor).
+func doctorDataDir(cfgFile, dir string) func(context.Context) doctor.Check {
 	return func(context.Context) doctor.Check {
-		c, _ := dataDirCheck(dir)
+		c, _ := dataDirCheck(cfgFile, dir)
 		return c
 	}
 }
@@ -63,9 +63,18 @@ func doctorDataDirNotChecked(lookup *doctor.ConfigFile) func(context.Context) do
 // nor a fail: the service's user may read what this one cannot, and serve's
 // refusal of such a path is no shape it names. Whether the data directory can
 // be written is not asked, as serve's preparation does not ask it.
-func dataDirCheck(dir string) (doctor.Check, bool) {
+//
+// Before all of that, the check serve makes ahead of its preparation
+// (checkServeDataDirRecord, backlog B651): a data directory the record beside
+// the config at cfgFile names that holds neither its database nor its lock
+// file, whether it is there or not, is a fail in the refusal's words.
+func dataDirCheck(cfgFile, dir string) (doctor.Check, bool) {
 	line := func(status doctor.Status, summary, hint string) (doctor.Check, bool) {
 		return doctor.Check{Name: dataDirCheckName, Status: status, Summary: summary, Hint: hint}, true
+	}
+	var gone *dataDirGoneError
+	if errors.As(checkServeDataDirRecord(cfgFile, dir), &gone) {
+		return line(doctor.Fail, "bridge serve will not start: "+gone.what(), gone.fix())
 	}
 	nearest, inTheWay, err := fsutil.BlockingEntry(dir)
 	switch {
