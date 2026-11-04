@@ -24,7 +24,7 @@ const rollbackUnavailable = "unavailable"
 // cannot be read (with an apostrophe, which both renderers escape).
 const (
 	reasonOpened     = "0.2.4 has opened the data dir since the install, so its store may hold changes 0.2.3 does not read, and a rollback would be a downgrade past them"
-	reasonUnreadable = "the install marker cannot be read, so whether a version other than the backup's has opened the data dir cannot be told"
+	reasonUnreadable = "whether a version other than the backup's has opened the data dir cannot be told, since the install marker cannot be read"
 )
 
 // renderSettingsWith renders the Settings page over an updater whose status

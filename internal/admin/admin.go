@@ -1378,18 +1378,23 @@ type UpdateStatus struct {
 	LastError        string     `json:"lastError,omitempty"`
 	MinClientVersion string     `json:"minClientVersion,omitempty"`
 	CanInstall       bool       `json:"canInstall"`
-	// CanRollback reports whether a previous binary is actually on disk
-	// to roll back TO. POST /api/updates/rollback has existed with no
-	// caller since it shipped, and adding a button without this flag
-	// would have been worse than no button: rollback is a binary swap,
-	// so an operator pressing it with nothing staged gets an error where
-	// they expected a recovery. Filled by the cmd/bridge adapter, which
-	// stats the .bak the installer leaves beside the live binary.
+	// CanRollback reports whether POST /api/updates/rollback would put a
+	// previous binary back: one is on disk to roll back TO, and the install
+	// marker does not refuse it. POST /api/updates/rollback has existed
+	// with no caller since it shipped, and adding a button without this
+	// flag would have been worse than no button: rollback is a binary
+	// swap, so an operator pressing it with nothing staged gets an error
+	// where they expected a recovery. Filled by the cmd/bridge adapter,
+	// which stats the .bak the installer leaves beside the live binary and
+	// asks the rollback's own check of the marker (backlog B707).
 	CanRollback bool `json:"canRollback"`
 	// RollbackRefusal says why Roll back is not offered beside a backup
-	// that is on disk, where the rollback would refuse to put it back
-	// (backlog B707). Empty where the rollback would run, and where there
-	// is no backup. Names no path.
+	// that is on disk: the rollback would refuse to put it back, since the
+	// version installed has opened the data dir, so its store may hold
+	// changes the backup's version does not read, or the install marker
+	// cannot be read (backlog B707). The Updates panel shows it in a row of
+	// its own, as it shows a held update. Empty where the rollback would
+	// run, and where there is no backup. Names no path.
 	RollbackRefusal string `json:"rollbackRefusal,omitempty"`
 	// DeferredReason is the most-recent gate-refusal explanation
 	// from the auto-installer. Empty when the previous cycle
