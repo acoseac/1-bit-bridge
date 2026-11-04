@@ -186,6 +186,9 @@ var reviewedBuildSites = map[string][]string{
 	"scripts/alsa-abi/check.sh": {
 		"go test -tags @TAGS@ ./internal/alsapcm -run '^TestUAPIMatchesTheKernelHeader$' -count=1 -v -args -abi-probe=\"$work/probe.txt\" | tee \"$work/go-test.txt\"",
 	},
+	"scripts/dac-profiles/kernel-check.sh": {
+		"go test -tags @TAGS@ ./internal/player/dacprofile -run '^TestTheKernelSeedIsThePinnedTags$' -count=1 -v -args -kernel-quirks=\"$quirks\" | tee \"$work/go-test.txt\"",
+	},
 	"scripts/player-dsd-goldens/generate.py": {
 		"\"with go test ./internal/player/decode -args -dsd-goldens=DIR\",",
 	},

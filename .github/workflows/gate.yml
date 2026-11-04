@@ -78,6 +78,10 @@ name: gate
 # definitions of the kernel's ALSA PCM interface to the kernel's own
 # header, on both architectures the backend builds for. See its comment.
 #
+# `dac-profiles` holds the DAC profile database's kernel-seeded claims to
+# the kernel's own USB audio DSD quirks, at the tag alsa-abi pins. See its
+# comment.
+#
 # `installer` lints the one-line installer (scripts/install.sh) with
 # shellcheck and runs its tests under each shell it supports
 # (`make installer-check`). See its comment.
@@ -400,6 +404,44 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: bash scripts/alsa-abi/check.sh
 
+  # internal/player/dacprofile, the bridge player's DAC profile database
+  # (B728), seeds native DSD claims from the Linux kernel's own USB audio
+  # quirks (sound/usb/quirks.c), at the kernel tag internal/alsapcm/uapi.go
+  # pins (uapiKernel), the one alsa-abi checks. This job holds the seed to
+  # that file: scripts/dac-profiles/kernel-check.sh fetches it at the tag
+  # and runs TestTheKernelSeedIsThePinnedTags, which compares every
+  # device-specific DSD fact the file gives with the database's
+  # kernel-seeded profiles, both ways: no claim the tag does not make, and
+  # no device-specific quirk of the tag neither seeded nor listed as a
+  # shared reference ID. The script fails unless that test ran and passed:
+  # without its -kernel-quirks file the test skips, and a skip looks like a
+  # pass. The file is fetched, never vendored; the run prints its git blob
+  # id and sha256 and the facts the test read, never its text.
+  dac-profiles:
+    name: dac-profiles (kernel seed)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          check-latest: true
+          # One small package compiles in seconds; no cache to keep warm.
+          cache: false
+      - name: compare the kernel-seeded profiles with the pinned sound/usb/quirks.c
+        # The job's read-only token authenticates the download, as
+        # alsa-abi's does; kernel-check.sh writes it into a private curl
+        # config and drops it from the environment before it runs anything
+        # else.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash scripts/dac-profiles/kernel-check.sh
+
   # Executes the suite on the two platforms `build-all` only ever
   # CROSS-COMPILES. ~1,600 lines are behind `//go:build windows`
   # (service install, SCM lifecycle, binary swap, startup launcher,
@@ -639,7 +681,7 @@ jobs:
 
   gate:
     name: gate
-    needs: [vet, test, dsd-measure, build-all, go-version, cross-platform, docs-check, alsa-abi, native-qualification, installer]
+    needs: [vet, test, dsd-measure, build-all, go-version, cross-platform, docs-check, alsa-abi, dac-profiles, native-qualification, installer]
     if: always()
     runs-on: ubuntu-latest
     permissions: {}
