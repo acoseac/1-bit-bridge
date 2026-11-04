@@ -10,7 +10,9 @@ REV is a commit holding the UNCONDENSED rules file (the script refuses an alread
 Every heading and the `paths:` frontmatter stay. Blocks of KEEP_MAX bytes or less (and tables /
 code) stay verbatim. Longer blocks move byte-for-byte to ops/History-rules-<name>.md and leave
 one line: the whole bold title (or the first sentence), the entry's own bolded "Don't…" sentences
-verbatim, and a pointer. Hand-polished lines come from overrides/<name>.json. A key there is the
+verbatim however long, and a pointer; an entry whose bold cannot be read safely stops the run, by
+its line, rather than leave one out. Hand-polished lines come from overrides/<name>.json, which
+validate_overrides.py vets first (README.md, step 4). A key there is the
 start of the block's text (whitespace-collapsed; it must match exactly one block), so the same
 file still applies when the rules file is regenerated on a newer base; a key of digits alone is
 the block's first line number in REV's version of the file, as in the iOS copy. See README.md.
@@ -28,7 +30,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from mdblocks import (parse, split_frontmatter, movable, condense_entry, read_text, write_text,  # noqa: E402
-                      rules_names, iso_date, safe_rev, git_show, staging_dir, docs_in, HISTORY_DIR)
+                      rules_names, iso_date, safe_rev, git_show, staging_dir, docs_in, BoldError, HISTORY_DIR)
 
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 MARK = "> **Condensed "
@@ -122,7 +124,12 @@ def build(sha, name, date, raw=None, overrides=None):
             out.append((it["gap"], it["text"]))
             continue
         label = " › ".join(t for lvl, t in it["path"] if lvl >= 2) or "(top of file)"
-        line, fallback, donts = condense_entry(it, hist, self_rules=name + ".md", known_docs=docs_in(REPO))
+        try:
+            line, fallback, donts = condense_entry(it, hist, self_rules=name + ".md", known_docs=docs_in(REPO))
+        except BoldError as e:
+            sys.exit("%s.md at %s, L%d (%s): its bold cannot be read safely (%s), so its line could leave out or "
+                     "cut short one of its own bolded Don't/Never sentences; fix the markdown first"
+                     % (name, sha[:8], key, label, e))
         moved.append((label, it))
         entries.append({"key": key, "block": it, "mechanical_line": line, "fallback": fallback,
                         "donts": donts, "override": overrides.get(key)})

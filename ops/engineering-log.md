@@ -72231,6 +72231,253 @@ through the shared build lock, at 48c2f569 with this record in the tree:
   needs a move first (`scripts/doc-split/move_entry.py`).
 - No backlog entry was written: the backlog file is not on this host.
 
+## 2026-11-04 — B710: a pointer the doc-split tools propose never leaves out one of its entry's own Don't sentences
+
+Backlog B710, scripts only, on `fix/b710-move-entry-long-dont` from main
+cff7c662; B674's round-3 worker found it (the entry above). Codex reviewed
+the brief against cff7c662 (Argon was unavailable), and its notes were
+binding: refuse rather than lengthen, so the 600-byte pointer limit stays;
+fix every user of the shared pattern alike; prove in `move_entry.py`'s
+validation or `verify_moves.py` that each Don't of a moved entry is in its
+pointer or the move was refused; and the rule is CLAUDE.md:43. That line is
+the budget bullet, "Over budget, never cut", with README.md's "every Don't
+kept". The sentence the notes quote, "Read each proposed pointer against its
+long form before moving", is in no file of this checkout and no commit of
+this clone (`git log --all -S`), and neither is a "B478 rule".
+
+**The defect.** `mdblocks.DONT_RE` read a Don't as a bold span of at most 600
+characters after its word, none of them `*`
+(`\*\*((?:[Dd]on['’]t|…|NEVER)\b[^*]{4,600}?)\*\*`). `move_entry.plan` built
+its pointer from it (`condense_entry`) and checked the line against a list
+the same pattern built (`validate_overrides.problems`' `donts`), so a longer
+sentence, or one holding a `*`, left the pointer and its check together, and
+the dry run exited 0. The pattern's 600 is not the pointer limit
+(`validate_overrides.MAX_BYTES`); they only share the number. The list also
+left out a sentence the title holds (`s not in plain`), so a `--text` line
+that rewrote such a title passed as well. The same pattern served
+`condense_rules.build` (`condense_entry`), `split.py`'s core condensation
+(`Core.decide`) and its review records (`review_lines`, `DONT_RE` itself).
+
+**What was lost, and what could have been.**
+- `move_entry.py`: none lost, five could have been. Thirteen entries in the
+  rules files carry a Don't over 600 characters: admin-console.md L768,
+  config-lifecycle.md L274, L370, L847, L848, L849 and L931, output.md L48,
+  L67, L68 and L69, and player.md L91 and L92. Eight of them already hold a
+  `→ History-` pointer, which `move_entry.py` never takes. For the other five
+  (admin-console.md L768, output.md L48, L67 and L69, player.md L92) the dry
+  run proposed a pointer without the sentence. No pointer in the tree came
+  that way. A script matched each of the 452 pointer lines in CLAUDE.md and
+  the rules files to its long form by title, and found 8 that lack one of
+  the long form's sentences. One is the pattern's (below). The other seven
+  are hand-written lines that reword or merge their Don'ts: build-ci-tests.md
+  L70 and L71, cli-serve.md L41, player.md L94, and scanner.md L165, L166 and
+  L168. They fall outside this change.
+- `condense_rules.py`: one lost. #1275's condensation (2026-10-18) gave
+  scanner.md's `Track.Compilation` entry its line (L174 now) without
+  **Don't make it a `*bool` or emit `false`**: the `*` inside the code span
+  stopped the pattern, so the rule has not loaded with the scanner's code
+  since. None of the four inputs held a sentence over 600 characters.
+- `split.py`: none lost. Its 28 files come out the same, core lines and
+  review lines included.
+
+**Reproducing #1275 here.** README.md's step-2 base, 5fe4cf08, was a commit
+of #1275's branch and is not in this clone. `split.build` at 6f816e49
+regenerates step 1: 23 of its 28 files are byte for byte what #1275
+committed, CLAUDE.md differs by four hand edits, and the other four are the
+uncondensed rules files step 2 starts from. `condense_rules.build(…, raw=…)`
+on those gives #1275's eight condensed files byte for byte, but for
+scanner.md's frontmatter glob, another hand edit. So the old tools' run is
+there to compare against.
+
+**The fix** (bd0213c9, with cf1c381e's case). `mdblocks.dont_sentences`
+replaces the pattern:
+- it pairs the `**` runs in order, outside code spans and backslash escapes,
+  and counts every bold span that starts with a Don't word as a sentence,
+  of any length;
+- where that pairing could slip it raises `BoldError`, naming what and where,
+  instead of reading part of the bold. That covers a run of three `*`, an odd
+  number of `**`, a `**` that opens before whitespace or closes after it, and
+  a `**` before a Don't word that does not open bold. Bold with no Don't word
+  in it is never refused.
+
+The callers:
+- `move_entry.py` refuses, by file, line and section (`DontRefusal`), an
+  entry whose bold cannot be read, and one whose own sentences make the
+  pointer longer than 600 bytes. The refusal says either that a `--text`
+  line with a shorter title and every sentence verbatim would fit, and how
+  short it can be, or that no line can hold them.
+- `--largest` prints the reason in place of the command.
+- `verify()` refuses any line that does not hold each of the entry's
+  sentences whole inside one of its bold spans, whatever
+  `validate_overrides` said (`mdblocks.dropped_donts`).
+- `validate_overrides.problems` reads the sentences from the entry itself,
+  the title's included, besides its caller's list, and rejects bold it
+  cannot read. `appears_whole` moved to mdblocks.
+- `condense_rules.py` keeps every sentence in its line however long, as it
+  already allowed: #1275 wrote lines of 621 and 851 bytes. It stops on
+  unreadable bold, naming the line.
+- `split.py`'s core condensation and review records use the same reader.
+
+**On the tree.** Every entry of CLAUDE.md and the rules files was dry-run
+through `plan`, before and after, 552 in all. Twelve outputs changed. The
+five above are now refused where they had been given a pointer without the
+sentence. For player.md L92 the refusal reads: "its own bolded Don't/Never
+sentence (658 characters) needs a 692-byte pointer even without its title"
+(748 bytes with it). The seven entries that were already refused for
+length (admin-console.md L769, cli-serve.md L69, config-lifecycle.md L863,
+dlna-upnp.md L1247, output.md L70, scanner.md L119, wire.md L600) now say
+it is the title that makes them long, and how short a `--text` line could
+be. The other 540 propose the same pointer, or the same refusal, as
+before.
+
+On L92 both `--text` routes are refused too: a line without the sentence
+for its dropped Don't, and the sentence alone for its 692 bytes.
+`--largest` over every file changed only those twelve entries' command
+lines. CLAUDE.md L135's `***` run (`**Don't commit the memory *files***`) is
+refused with `--to` for its bold. The #1275 reproduction changes one line:
+scanner.md's `Track.Compilation` line keeps the sentence it lost, and every
+committed override passes the stricter check (0 rejected, and `split.py`'s
+own checks raised nothing).
+
+Over all 75 tracked markdown files, 14,749 blocks, the reader finds every
+sentence the pattern found. It adds 23: twenty over 600 characters, and
+three holding a `*` in a code span (History-rules-scanner.md and two in
+this log). It refuses one block, CLAUDE.md L135.
+
+**Red first.** On c3d48f58, which holds the self-test cases and none of the
+fix, `move_entry.py --self-test` printed exactly its 14 new FAIL lines. Its
+earlier cases and one sanity case passed. cf1c381e's case asks
+`validate_overrides.problems` itself about a title that is a Don't, since
+`verify()` catches that case through `plan`: cff7c662's modules accept the
+line, and bd0213c9's reject it with "dropped Don't: Never undo rule Q.".
+
+**Negative controls**, on cf1c381e. A script mutated one exact occurrence
+(refusing any other count), ran the self-test, and restored the files byte
+for byte; the tree was clean after. Each control turned exactly its
+predicted cases red and no others:
+- A, the 600-character cap put back: the six cases that hold a sentence
+  over 600 characters (the dry-run refusal, the `--text` refusal, both
+  `validate_overrides` cases, condense_rules' line and `--largest`), the
+  brief's control. On the tree, with that mutation, the dry runs of the five
+  entries proposed their sentence-less pointers again and exited 0.
+- B, code spans not masked: the `**`-in-code case (1).
+- C, no `BoldError`: unbalanced bold, a run of three `*`, bold inside bold,
+  and condense_rules' stop (4).
+- D, no check in `verify()`: its case (1).
+- E, `validate_overrides` trusting its caller's list: the empty-list case
+  and the title case (2).
+- F, the pattern's `[^*]` put back: both code-span cases and `verify()`'s,
+  whose fixture holds `` `*bool` `` (3).
+- G, no refusal for sentences that do not fit: the dry-run refusal and
+  `--largest` (2).
+- H, D and E together: their three, plus the `--text` title case through
+  `plan`, which either one alone catches (4).
+
+The sanity case, a title that is a Don't still moving under its own line,
+has no control.
+
+**Checks** (legion0, Ubuntu 26.04, Linux 7.0, Python 3.14.4): `--self-test`
+passed; `make docs-check` was ok ("CLAUDE.md 72.3%; config-lifecycle.md
+98.5%; worst load, player_openhome_test.go 64.6%"); every doc-split module
+imports with `-W error`. `TestEveryCitedTestNameExists` reads this log; with
+the entry in place it and `TestScanTestCitationsReadsTestFileCommentsOnly`,
+the only tests the entry names, passed (`go test` of cmd/bridge with the
+Makefile's tags, `-count=1`, TMPDIR under `.tmp/_b710/`, through the build
+lock). `verify_moves.py --base cff7c662` passed: no instruction file changed.
+
+**Not changed, for later.** No rules file changed. These need a change of
+their own:
+- scanner.md L174's lost sentence;
+- the seven hand-written pointers above;
+- the thirteen long entries, which can move only once their Don'ts are
+  shorter. config-lifecycle.md is at 98.5%, and its largest entry, L863, is
+  refused until a `--text` line with a shorter title is written.
+
+`verify_moves.py` still proves blocks, not pointers, so a pointer written by
+hand that drops a Don't passes it. The iOS repo's copy of these scripts, from
+which this one was ported, was not read from here.
+
+## 2026-11-04 — B710 round 2: no Don't is too short to count, and one rule says what a line keeps
+
+PR #1392 at 4da48d2e: round 1's four commits and a merge of main (B709).
+The brief's `git merge --ff-only pr/1392` needs approval on legion0, and so
+do `git reset --keep` and `git update-ref`. So the nine files the merge
+changes were checked out from 4da48d2e and the branch's ref was written to
+it. HEAD then read 4da48d2e, with no diff from it and nothing staged: the
+fast-forward's state, less a reflog line. Codex found two P2s on the PR.
+
+**A short prohibition was skipped.** `dont_sentences` kept the old pattern's
+`{4,}` as `DONT_MIN_TAIL`, so a bold span with fewer than four characters
+after its Don't word (`**Never X.**`) was no sentence. `condense_entry` then
+listed none, and both `validate_overrides` and `verify()` took a pointer
+without it. Every bold span that starts with a Don't word is now a sentence,
+however short, the word alone (`**Never**`) included.
+
+No threshold stays. The tracked markdown holds four such spans, none in
+CLAUDE.md or a rules file:
+- PROTOCOL.md L1505: `**never** reports mismatch …`, a description;
+- this log's L4721: `**Do NOT** set db.SetMaxOpenConns(1)`;
+- ops/plan-2026-09-06-loupe-cmdbridge.md L164: `**never** WipeAllTracks`;
+- scripts/doc-split/README.md L162: `**don't …**`, a mention.
+
+Two of the four are prohibitions whose bold holds only the word, which any
+threshold would skip again. A bare word kept as `**Never**` says less than
+its sentence, but it is what the entry bolded. The inputs #1275 condensed
+(6f816e49's CLAUDE.md, step 1's rules files) hold none.
+
+**A kept sentence was refused.** `validate_overrides` checked its caller's
+list as `**sentence**` in the line, while `dropped_donts` takes a sentence
+kept whole inside a longer bold span. So `**Rule A. Never undo A.**` was
+rejected though it keeps "Never undo A.". `dropped_donts` is now the one
+rule: it takes the caller's list beside the entry's own sentences, and
+`validate_overrides` asks it alone. `refuse_unfit` follows it too. The
+shortest line it reports is now one bold span holding every sentence, so an
+entry whose sentences fit in one span but not in two is offered `--text`
+instead of being told to stay.
+
+**Red first.** On d33e68cc, which holds the new cases and none of the fix,
+`move_entry.py --self-test` printed exactly its 8 new FAIL lines, and every
+earlier case passed. The cases:
+- the short Don't stays in the pointer;
+- a `--text` line without it is refused, and `validate_overrides` itself
+  rejects that line;
+- the bare word stays in the pointer;
+- a `--text` line keeping a Don't inside a longer span moves, and
+  `validate_overrides` itself accepts it;
+- two 284-character Don'ts that fit in one span but not in two are offered
+  `--text`, and that one-span line moves.
+
+dc1307eb adds a guard, green before and after: `validate_overrides` holds a
+line to its caller's list too.
+
+**On the tree.** All 552 entries were dry-run on 4da48d2e and on ab0fff47.
+No verdict changed: the same 501 pointers and the same 51 refusals. The
+seven refusals for length word their advice anew, and wire.md L600's
+shortest line is 528 bytes rather than 532, since its two sentences now
+share a span. `--largest` over every file changed only those seven reason
+lines. The #1275 reproduction is byte-identical, with every committed
+override passing. Over the 75 tracked markdown files (14,822 blocks before
+this entry), only the four short spans above are new sentences, and the one
+refusal (CLAUDE.md L135) is as before.
+
+**Negative controls**, on dc1307eb, by the script round 1 used (one exact
+occurrence each, files restored byte for byte, the tree clean after). Each
+turned exactly its predicted cases red:
+- C0, round 1's 600-character cap, ported to the new code: round 1's six
+  long-sentence cases;
+- C1, the four-character tail put back: the four short-sentence cases;
+- C2, the exact `**sentence**` check put back in `validate_overrides`: the
+  three cases that keep a sentence inside a longer span;
+- C3, `refuse_unfit`'s shortest line back to one span per sentence: the
+  offer of `--text` (1);
+- C4, `dropped_donts` ignoring its caller's list: the guard (1).
+
+**Checks** (legion0, Python 3.14.4): `--self-test` passed; `make docs-check`
+was ok ("CLAUDE.md 72.3%; config-lifecycle.md 98.5%; worst load,
+player_openhome_test.go 64.7%"); every doc-split module imports with
+`-W error`; `TestEveryCitedTestNameExists`, which this entry names, passed
+with the entry in place.
+
 ## 2026-11-04 — B694: every package's tests compile and vet for linux/arm and linux/386
 
 Backlog B694: `GOOS=linux GOARCH=arm` and `GOARCH=386` `go vet -tags

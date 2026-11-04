@@ -44,7 +44,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 from mdblocks import (parse, movable, condense_entry, rebase_links, read_text, write_text,  # noqa: E402
-                      safe_rev, git_show, staging_dir, clear_stage, HISTORY_DIR, DONT_RE)
+                      safe_rev, git_show, staging_dir, clear_stage, HISTORY_DIR, dont_sentences, BoldError)
 import routes  # noqa: E402
 import prose  # noqa: E402
 
@@ -179,7 +179,11 @@ class Core:
         if keeps_whole(it, d) or not movable(it):
             return it["text"]
         hist = history_for(it, d)
-        mech, fallback, donts = condense_entry(it, hist, known_docs=self.known_docs)
+        try:
+            mech, fallback, donts = condense_entry(it, hist, known_docs=self.known_docs)
+        except BoldError as e:
+            die("L%d (%s): its bold cannot be read safely (%s), so its line could leave out one of its own "
+                "bolded Don't/Never sentences" % (it["start"] + 1, label_of(it), e))
         keys = [k for k in self.overrides if norm(it["text"]).startswith(norm(k))]
         if len(keys) > 1:
             die("two core_overrides.json keys match the block on line %d" % (it["start"] + 1))
@@ -324,11 +328,10 @@ def review_lines(records, items):
         key = one_key(h["title"], prose.REVIEW_LINES)
         line = prose.REVIEW_LINES[key]
         text = h["title"] + "\n\n" + body
-        donts = []
-        for m in DONT_RE.finditer(text):
-            s = norm(m.group(1))
-            if s not in donts:
-                donts.append(s)
+        try:
+            donts = dont_sentences(text)
+        except BoldError as e:
+            die("the record %r: its bold cannot be read safely (%s)" % (key[:50], e))
         mech = "- **%s** → %s" % (key, REVIEWS_FILE)
         errs = problems({"block": {"text": text, "kind": "bullet"}, "mechanical_line": mech, "donts": donts}, line)
         if errs:
