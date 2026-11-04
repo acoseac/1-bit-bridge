@@ -77,6 +77,37 @@ func TestProductionStillPlaysAVersion35RecordAfterTheBump(t *testing.T) {
 	}
 }
 
+// TestProductionRefusesARecordNewerThanThisBuild: production's read (New)
+// plays an owner's record of qualification.LegacyVersion and one of this
+// build's Version, and refuses one of Version+1 with the version's refusal,
+// publishing no tuple: a newer bridge's evidence, written before a
+// downgrade, that this code cannot vouch for (B728 B1, round 2).
+func TestProductionRefusesARecordNewerThanThisBuild(t *testing.T) {
+	for _, v := range []int{qualification.LegacyVersion, qualification.Version, qualification.Version + 1} {
+		t.Run(fmt.Sprintf("version_%d", v), func(t *testing.T) {
+			cfg, record := approvedBackendFixture(t)
+			cfg.Resolver = edgeContent(nil)
+			recordAtVersion(t, cfg.Authorization, &record, v)
+			b, e := New(cfg)
+			if e != nil {
+				t.Fatal(e)
+			}
+			_, e = b.readPermission(context.Background())
+			b.RefreshAuthorization(context.Background())
+			tuples := len(b.Policy().Tuples)
+			if v <= qualification.Version {
+				if e != nil || tuples != 1 {
+					t.Fatalf("a record of version %d: %v, %d tuples published; want it read and its tuple published", v, e, tuples)
+				}
+				return
+			}
+			if e == nil || e.Error() != "stale approval version" || tuples != 0 {
+				t.Fatalf("a record of version %d, past this build's %d: %v, %d tuples published; want the refusal \"stale approval version\" and none", v, qualification.Version, e, tuples)
+			}
+		})
+	}
+}
+
 // TestTheHarnessBackendsReadOnlyTheCurrentVersion: the CLI's candidate and
 // transition backends (NewQualificationBackend,
 // NewTransitionQualificationBackend) read through ReadCandidate and

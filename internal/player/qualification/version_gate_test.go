@@ -170,7 +170,10 @@ func TestQualificationApprovedDoPGuardedPaths(t *testing.T) {
 // the DSD byte path and the harness alone (the design's section 8), so a
 // change to anything else the two lists named until then, alone, needs no
 // qualification version increase: each path B1 dropped from GuardedPaths,
-// and files under each prefix it dropped, beside the paths it keeps there.
+// and files under each prefix it dropped, beside the paths it keeps there;
+// and what round 2's audit of the DSD byte path looked at and left out (a
+// read's chunk size, the sniff and the dispatch, the PCM decoders and
+// packers, the evidence open where no harness runs).
 func TestAChangeOutsideTheDSDBytePathNeedsNoBump(t *testing.T) {
 	for _, path := range []string{
 		"internal/player/engine/transport.go", "internal/player/engine/events.go", "internal/player/engine/backend.go",
@@ -181,8 +184,9 @@ func TestAChangeOutsideTheDSDBytePathNeedsNoBump(t *testing.T) {
 		"internal/api/outputs_bridge.go", "internal/manifest/types.go", "internal/manifest/extractors.go",
 		"internal/player/playback/authorization.go", "internal/player/playback/live.go", "internal/player/playback/approval_dop_fixture_test.go", "internal/player/playback/dop_select_test.go",
 		"internal/player/binding/binding.go", "internal/alsa/sysfs.go", "internal/alsa/qualification_gain.go",
-		"internal/player/decode/dsf.go", "internal/player/decode/dff.go", "internal/player/format/format.go",
-		"internal/alsactl/constraints.go", "internal/fsutil/notafile.go", "internal/usbid/serial.go", "internal/config/player.go",
+		"internal/player/decode/bounds.go", "internal/player/decode/sniff.go", "internal/player/decode/decoder.go", "internal/player/decode/flac.go",
+		"internal/player/format/format.go", "internal/player/format/pack.go",
+		"internal/alsactl/constraints.go", "internal/fsutil/notafile_other.go", "internal/usbid/serial.go", "internal/config/player.go",
 		"cmd/bridge/output_play_report.go", "cmd/bridge/output_pcmtest_keys_unix.go", "cmd/bridge/output_host.go",
 	} {
 		t.Run(path, func(t *testing.T) {

@@ -1339,7 +1339,7 @@ func TestNativeIntegrationFaultThenExplicitPCM(t *testing.T) {
 }
 
 func TestNativeIntegrationApprovedConstructor(t *testing.T) {
-	for _, mode := range []string{"valid", "legacy_version", "missing", "version", "identity", "tampered", "candidate", "replaced_before_activation", "revoke_before_publication"} {
+	for _, mode := range []string{"valid", "legacy_version", "newer_version", "missing", "version", "identity", "tampered", "candidate", "replaced_before_activation", "revoke_before_publication"} {
 		t.Run(mode, func(t *testing.T) {
 			cfg, record := approvedBackendFixture(t)
 			cfg.Resolver = nativeFiles{"a": nativeDSF(t, 31)}
@@ -1347,6 +1347,9 @@ func TestNativeIntegrationApprovedConstructor(t *testing.T) {
 			case "legacy_version":
 				// An owner's record of LegacyVersion plays after a bump (B728 B1).
 				recordAtVersion(t, cfg.Authorization, &record, qualification.LegacyVersion)
+			case "newer_version":
+				// A record past this build's version, which it cannot vouch for.
+				recordAtVersion(t, cfg.Authorization, &record, qualification.Version+1)
 			case "missing":
 				os.Remove(cfg.Authorization.path())
 			case "version":

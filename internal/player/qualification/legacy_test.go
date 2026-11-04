@@ -126,17 +126,19 @@ func versioned(t *testing.T, kind string, v int) (string, Approval, Identity) {
 
 // TestTheLegacyReaderRefusesBelowVersion35: the legacy reader takes a record
 // whose version, and every report's it holds, is LegacyVersion, frozen at
-// 35, or later, and refuses one below it, by the record's version check or
-// by that of the report below it: each policy's matrix and lifecycle
-// report, a transition report, a DoP experiment and an experiment's
-// contact. The harness's readers still take the current version alone
-// (B728 B1).
+// 35, or later up to this build's Version, and refuses one below it, by the
+// record's version check or by that of the report below it: each policy's
+// matrix and lifecycle report, a transition report, a DoP experiment and an
+// experiment's contact; and a record whose version is past this build's
+// (TestTheLegacyReaderRefusesAVersionNewerThanThisBuild for each nested
+// kind). The harness's readers still take the current version alone (B728
+// B1).
 func TestTheLegacyReaderRefusesBelowVersion35(t *testing.T) {
 	if LegacyVersion != 35 {
 		t.Fatalf("LegacyVersion = %d; it is frozen at 35, the version every owner's record held when B728's design merged", LegacyVersion)
 	}
 	for _, kind := range legacyKinds {
-		for _, v := range []int{LegacyVersion, Version, Version + 1} {
+		for _, v := range []int{LegacyVersion, Version} {
 			t.Run(fmt.Sprintf("%s_at_%d", kind, v), func(t *testing.T) {
 				dir, _, id := versioned(t, kind, v)
 				if _, e := ReadLegacyApproval(dir, "approved.json", id, SameIdentity); e != nil {
@@ -144,11 +146,13 @@ func TestTheLegacyReaderRefusesBelowVersion35(t *testing.T) {
 				}
 			})
 		}
-		t.Run(fmt.Sprintf("%s_at_%d", kind, LegacyVersion-1), func(t *testing.T) {
-			dir, _, id := versioned(t, kind, LegacyVersion-1)
-			_, e := ReadLegacyApproval(dir, "approved.json", id, SameIdentity)
-			refusedFor(t, e, "stale approval version")
-		})
+		for _, v := range []int{LegacyVersion - 1, Version + 1} {
+			t.Run(fmt.Sprintf("%s_at_%d", kind, v), func(t *testing.T) {
+				dir, _, id := versioned(t, kind, v)
+				_, e := ReadLegacyApproval(dir, "approved.json", id, SameIdentity)
+				refusedFor(t, e, "stale approval version")
+			})
+		}
 	}
 	below := func(r map[string]any) { r["QualificationVersion"] = LegacyVersion - 1 }
 	for _, tc := range []struct {
@@ -232,6 +236,61 @@ func TestTheLegacyReaderRefusesBelowVersion35(t *testing.T) {
 			t.Fatalf("a contact of the current version refused: %v", e)
 		}
 	})
+}
+
+// TestTheLegacyReaderRefusesAVersionNewerThanThisBuild: the legacy reader
+// takes no version past this build's (Version): one a newer bridge wrote
+// before a downgrade, whose evidence this code cannot vouch for. In a record
+// otherwise valid at Version, each kind at Version+1 on its own is refused
+// by its own check: the record, a matrix or a lifecycle report, a
+// transition report, a DoP experiment and an experiment's contact (B728 B1,
+// round 2).
+func TestTheLegacyReaderRefusesAVersionNewerThanThisBuild(t *testing.T) {
+	above := func(r map[string]any) { r["QualificationVersion"] = Version + 1 }
+	report := func(kind string, ev func(a *Approval) *Evidence) func(t *testing.T) (string, Approval, Identity) {
+		return func(t *testing.T) (string, Approval, Identity) {
+			dir, a, id := versioned(t, kind, Version)
+			rewriteReport(t, dir, ev(&a), above)
+			a.SHA256 = Digest(a.Body)
+			writeApproval(t, dir, a)
+			return dir, a, id
+		}
+	}
+	experiment := func(change func(r *executedReport)) func(t *testing.T) (string, Approval, Identity) {
+		return func(t *testing.T) (string, Approval, Identity) {
+			dir, a, id := dopExperimentFixture(t, func(state string, r *executedReport) {
+				r.QualificationVersion, r.Contact.QualificationVersion = Version, Version
+				if state == "restored" {
+					change(r)
+				}
+			})
+			atVersion(t, dir, &a, Version)
+			return dir, a, id
+		}
+	}
+	for _, tc := range []struct {
+		name, want string
+		record     func(t *testing.T) (string, Approval, Identity)
+	}{
+		{name: "record", want: "stale approval version", record: func(t *testing.T) (string, Approval, Identity) {
+			dir, a, id := versioned(t, "native", Version)
+			a.Body.QualificationVersion = Version + 1
+			a.SHA256 = Digest(a.Body)
+			writeApproval(t, dir, a)
+			return dir, a, id
+		}},
+		{name: "matrix_report", want: "report does not execute approved policy", record: report("native", func(a *Approval) *Evidence { return &a.Body.Policies[0].Matrix })},
+		{name: "lifecycle_report", want: "report does not execute approved policy", record: report("native", func(a *Approval) *Evidence { return &a.Body.Policies[0].Lifecycle })},
+		{name: "transition_report", want: "transition report does not execute approved policies", record: report("transition", func(a *Approval) *Evidence { return &a.Body.Transitions[0] })},
+		{name: "experiment", want: "DoP experiment context mismatch", record: experiment(func(r *executedReport) { r.QualificationVersion = Version + 1 })},
+		{name: "contact", want: "contact version mismatch", record: experiment(func(r *executedReport) { r.Contact.QualificationVersion = Version + 1 })},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, _, id := tc.record(t)
+			_, e := ReadLegacyApproval(dir, "approved.json", id, SameIdentity)
+			refusedFor(t, e, tc.want)
+		})
+	}
 }
 
 // TestTheLegacyReaderKeepsEveryOtherCheck: at LegacyVersion, where the

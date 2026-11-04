@@ -6,11 +6,21 @@ import (
 	"testing"
 )
 
-// TestQualificationDependencyGate: the ALSA PCM backend's files still need a
-// bump; the binding, the decoders, the file readers and the CLI's shared
-// code do not since B728's B1 (TestAChangeOutsideTheDSDBytePathNeedsNoBump).
+// TestQualificationDependencyGate: what the DSD bytes and the harness's
+// readers depend on outside the guarded prefixes needs a bump: the ALSA PCM
+// backend's files; the DSD demuxers', their shared reads', the ID3 offset
+// view's and the canonical DSD form's, which shape the DSD bytes a DAC is
+// sent or their count; and the helpers the harness's readers open evidence
+// and read a unit's identity through (B728 B1, round 2). The PCM decoders,
+// the binding and the CLI's shared code do not
+// (TestAChangeOutsideTheDSDBytePathNeedsNoBump).
 func TestQualificationDependencyGate(t *testing.T) {
-	for _, p := range []string{"internal/alsapcm/sink_run.go"} {
+	for _, p := range []string{
+		"internal/alsapcm/sink_run.go",
+		"internal/player/decode/dsd.go", "internal/player/decode/dsf.go", "internal/player/decode/dff.go",
+		"internal/player/decode/pcm_region.go", "internal/player/decode/offset.go", "internal/player/format/pcm.go",
+		"internal/fsutil/notafile.go", "internal/fsutil/notafile_unix.go", "internal/usbid/port.go",
+	} {
 		t.Run(filepath.Base(p), func(t *testing.T) {
 			dir := t.TempDir()
 			if e := os.MkdirAll(filepath.Join(dir, ".git/refs/heads"), 0755); e != nil {
