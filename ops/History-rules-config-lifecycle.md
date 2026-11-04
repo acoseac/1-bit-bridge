@@ -2137,17 +2137,20 @@ words and codes. Eighteen negative controls, one a guarded path, each
 observed exactly as predicted (the log's entry has the table).
 
 *Left as it is.* The checks before the download, the console's reads for
-display (`rejection`, `deferredReason`, `canRollback`) and `bridge
-update`'s "Held:" line read the marker without the lock, deciding nothing.
-The console's Roll back button still follows `.bak`'s presence
-(`canRollback`), so it shows where the rollback now refuses, and the click
-answers 409 with the reason. PROTOCOL.md's Updates paragraph says a manual
-rollback stays possible for one boot after a successful install; since
-B692 it is refused once the new version opened the data dir, which its
-start records: that sentence changes with the iOS mirror, not here. The
-console's 502 bodies for a swap or a rename that fails still carry the
-binary's path from `swapBinary`'s and `RollbackBinary`'s errors. The record
-is in `ops/engineering-log.md`, 2026-11-03, B692.
+display (`rejection`, `deferredReason`, `canRollback`; since B707
+`readMarker`, one read for the release held back and the rollback offered,
+and `deferredReason`) and `bridge update`'s "Held:" line read the marker
+without the lock, deciding nothing. The console's Roll back button followed
+`.bak`'s presence (`canRollback`), so it showed where the rollback now
+refuses, and the click answered 409 with the reason, until B707 (its
+section below): the panel offers it only where the rollback would run, and
+says why not. PROTOCOL.md's Updates paragraph says a manual rollback stays
+possible for one boot after a successful install; since B692 it is refused
+once the new version opened the data dir, which its start records: that
+sentence changes with the iOS mirror, not here. The console's 502 bodies
+for a swap or a rename that fails still carry the binary's path from
+`swapBinary`'s and `RollbackBinary`'s errors. The record is in
+`ops/engineering-log.md`, 2026-11-03, B692.
 
 ## An operator's rollback under way until its rename, and the stops in the updater's lock waits (backlog B692's round 2, 2026-11-03)
 
@@ -2364,15 +2367,102 @@ that did not come up, the data dir opened since" asserted the loss (the
 hold and nothing more) and is corrected on purpose. Five negative controls,
 each observed exactly as predicted (the log's entry has the table).
 
-*Left.* The console's Roll back button follows `.bak`'s presence
-(`canRollback`), so where a clear keeps the record it shows and answers 409
-`rollback-refused` until `.bak` goes, by hand or with a new install, as
-B692 left it. `swapAwaitingRestart` still expires at the window outside
-the process that swapped, as before: the window bounds what a boot puts
-back, and the refusal expires with it. PROTOCOL.md's Updates paragraph says
-the next boot confirms the install or restores `.bak`, which is now true at
-any age: no change there. The record is in `ops/engineering-log.md`,
-2026-11-03, B705.
+*Left.* The console's Roll back button followed `.bak`'s presence
+(`canRollback`), so where a clear kept the record it showed and answered
+409 `rollback-refused` until `.bak` went, by hand or with a new install, as
+B692 left it, until B707 (its section below): the panel offers it only
+where the rollback would run, and says why not. `swapAwaitingRestart` still
+expires at the window outside the process that swapped, as before: the
+window bounds what a boot puts back, and the refusal expires with it.
+PROTOCOL.md's Updates paragraph says the next boot confirms the install or
+restores `.bak`, which is now true at any age: no change there. The record
+is in `ops/engineering-log.md`, 2026-11-03, B705.
+
+## The console's Roll back offered only where the rollback would run (backlog B707, 2026-11-04)
+
+- **The console's Updates panel offers Roll back only where the operator's rollback would run, from one read of the install marker per status: `CanRollback` is `.bak` present and no refusal from `updater.RollbackRefusalOn`, which `Rollback` asks itself of its own read (`RollbackRefusal`'s, or a fixed sentence for a marker that cannot be read), for `Status` and for an install's answer alike; where `.bak` is there and the rollback would refuse, Roll back stays hidden and a Rollback row beside Held update says why (`RollbackRefusal`, JSON `rollbackRefusal`), in the rollback's words and naming no path, at the first paint and in `renderUpdateTile`; with no `.bak` nothing is said, and the API keeps its 409** (2026-11-04, backlog B707). **Don't offer Roll back from `.bak` alone, decide it by any check but `RollbackRefusalOn`, read the marker twice for one status, take a marker that cannot be read for none, show a reason where there is no backup, or put an error's text or a path in it.** `TestTheUpdatesPanelOffersRollBackOnlyWhereTheRollbackWouldRun`, `TestTheConsoleOffersRollBackOnlyWhereTheRollbackWouldRun`, `TestTheRollbacksRefusalOnItsReadOfTheMarkerIsTheConsoles`, `TestTheSettingsPageSaysWhyRollBackIsNotOffered`, `TestSettingsUpdateRowsRenderOnceAndKeepDTAdjacency`, `TestTheUpdatesPanelScriptShowsWhyRollBackIsNotOffered` and `TestTheUpdatesPanelShowsRollBackOrWhyNot` (under node) pin it. → History-rules-config-lifecycle.md
+
+*The defect* (B705's "Left", read from the code; this section's tests
+reproduce it). Since B692 an operator's rollback refuses, 409
+`rollback-refused` with its reason, where the install marker records that a
+version other than the backup's opened the data dir (`RollbackRefusal`),
+and where the marker cannot be read; since B705 that record outlives every
+clear at boot that leaves `.bak` where it is. The console's Updates panel
+still offered Roll back wherever `.bak` stood beside the binary
+(`canRollback`, a stat of it alone). Once the version installed has
+started, its admission has recorded that it opened the data dir, so in the
+case the button exists for ("the version I just installed is broken") it
+showed, and its click answered 409.
+
+*One check, asked by both.* `updater.RollbackRefusalOn(st, readErr)` is
+the refusal the rollback makes on its read of the marker, before it looks
+for the backup: `RollbackRefusal(st)` for a marker it read, and for one it
+cannot read a fixed sentence, "whether a version other than the backup's
+has opened the data dir cannot be told, since the install marker cannot be
+read", naming no path and no error's text. `Rollback` asks it itself, so
+the panel and the rollback cannot decide apart; its 409 is those words with
+the read's error after them, said without its path (`markerIOError`) and
+kept for code through `Unwrap` (B613's round 5). Until B707 the 409 put the
+cause inside the sentence, which the panel could not quote; the status, the
+refusal's code and the order of the checks are unchanged.
+
+*One read per status* (Codex on the brief). The adapter
+(`updateInfoAdapter`, cmd/bridge) reads the marker once for each status it
+builds (`readMarker`), and the release held back (`RejectedVersion`,
+`RejectedReason`) and the rollback offered are both of that read, for
+`Status` and for an install's answer alike: both filled `CanRollback`, and
+an install's answer is a status too, so neither can bring the button back.
+`CanRollback` is `.bak` present (`backupPresent`, the old stat) and no
+refusal; `RollbackRefusal`, a new `admin.UpdateStatus` field (JSON
+`rollbackRefusal`, omitempty), carries the refusal where `.bak` is there,
+and nothing where it is not, the ordinary state with nothing to say (Argon
+on the brief). A marker that cannot be read refuses (Codex: checking only a
+nonempty `RollbackRefusal` would have left the defect there) and holds no
+release back, as `rejection` read it. The read takes no lock: a read for
+display decides nothing, and the rollback decides again under the lock, so
+a version that opens the data dir between the two (a CLI command whose
+store migrates) still gets the 409, and the panel catches up at the next
+updates frame, 30 s on.
+
+*Hidden, not disabled* (the brief's choice). This panel's way with an
+action that cannot run is to leave it out and say why in a row: Install is
+absent without an update or a platform that installs, Roll back without a
+backup, and Held update says why an available update is not taken. So Roll
+back stays hidden where the marker refuses it, and a Rollback row beside
+Held update says why, badge `unavailable`, the reason as text: in the first
+paint (`settings.html`, its label and its value hidden together, as the
+other two rows', so `previousElementSibling` reaches the label) and in
+`renderUpdateTile`, through `escapeHTML`. A disabled button would also
+fight the click handler, which disables it around its request and enables
+it again after a failure (`setDisabled`). The button's own first paint
+stays hidden, as before; the first updates frame reveals it where the
+rollback would run.
+
+*Not changed.* `POST /api/updates/rollback` keeps its 409 for any other
+caller, and the refusals a status cannot foresee answer as they did:
+another install or rollback in flight, downloads in flight without
+`?force=1`, the marker's lock held past its wait. A Check-now request that
+fails still renders a partial status (`{lastError}`), which hides Roll back
+and every row until the next frame, as it hid the button before.
+
+*Tests.* Red first on a seam that changes nothing (cab93107: the field,
+filled by nothing), so as on main:
+`TestTheUpdatesPanelOffersRollBackOnlyWhereTheRollbackWouldRun` (3 of 9
+subtests: the version installed opened the data dir, the record a clear at
+boot kept beside the backup, a marker that cannot be read; its six allowed
+and no-backup cases green),
+`TestTheConsoleOffersRollBackOnlyWhereTheRollbackWouldRun` (this build's
+real serve over its own install: GET /api/updates offered Roll back and the
+Settings page had no row, while the POST answered 409; its other case, a
+backup and no marker, green: offered, and the rollback runs),
+`TestSettingsUpdateRowsRenderOnceAndKeepDTAdjacency` (5 of 5, on the new
+row alone), `TestTheSettingsPageSaysWhyRollBackIsNotOffered` (3 of 3) and
+`TestTheUpdatesPanelScriptShowsWhyRollBackIsNotOffered`.
+`TestTheRollbacksRefusalOnItsReadOfTheMarkerIsTheConsoles` came with the
+fix. `TestTheUpdatesPanelShowsRollBackOrWhyNot` runs the shipped
+`renderUpdateTile` under node and skips without it. Six negative controls,
+each observed exactly as predicted (the log's entry has the table). The
+record is in `ops/engineering-log.md`, 2026-11-04, B707.
 
 ## Config, settings and process lifecycle
 
@@ -2380,9 +2470,11 @@ any age: no change there. The record is in `ops/engineering-log.md`,
   reads the PERSISTED marker.** `swapBinary`'s EEXIST retry does
   `os.Remove(bak)` before re-linking, so a SECOND install of the same version
   destroys the operator's rollback target and replaces it with a copy of what is
-  already live — while `canRollback()` keeps reporting true, because it only
-  stats for the file's existence. Measured, not argued: with the guard removed
-  the test's `.bak` goes from `0.1.0` to `0.2.0`. Reachable through the ORDINARY
+  already live — while the console's `canRollback` keeps reporting true,
+  because the backup is still there (since B707 it asks the marker too,
+  which refuses nothing before the version installed starts). Measured, not
+  argued: with the guard removed the test's `.bak` goes from `0.1.0` to
+  `0.2.0`. Reachable through the ORDINARY
   console flow — `apiUpdatesInstall` does **not** restart (restart is a separate
   operator action), and `u.status.CurrentVersion` is written ONCE at
   construction (`Install` only decorates the local copy it returns), so
