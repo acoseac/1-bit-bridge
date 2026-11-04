@@ -892,10 +892,12 @@ static int dsd_main(int argc, char **argv) {
 	 * 0x69 silence. So at each boundary at an even position the loop is
 	 * re-dithered, from 10 ms before it, until the sum there is within
 	 * BOUNDARY_EPS of its mean over the 0.5 ms before (a file's end) and the
-	 * 0.5 ms after (a file's start); at the stream's start its first dither
-	 * seed is chosen the same way. An odd position cannot be (search_stream
-	 * says why). Each boundary is reported: searched or not, its trials and
-	 * both offsets. */
+	 * 0.5 ms after (a file's start) and the bits either side leave at most
+	 * BOUNDARY_CLICK in the audio band against 0x69, or else the least of
+	 * BOUNDARY_TRIALS re-ditherings is kept; at the stream's start its first
+	 * dither seed is chosen the same way. An odd position cannot be
+	 * (search_stream says why). Each boundary is reported: searched or not,
+	 * its trials, both offsets and both clicks. */
 	boundary_t bounds[2][9];
 	sdm_t m[2];
 	for (int c = 0; c < 2; c++) {
