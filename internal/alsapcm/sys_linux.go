@@ -30,8 +30,21 @@ func Open(ep Endpoint, cfg Config) (*Device, error) {
 	return open(linuxSys{}, time.Now, ep, cfg)
 }
 
-// Probe is the silent probe of the endpoint's playback node.
+// Probe is the silent probe (B728's design, section 5) of the endpoint's
+// playback node: opened as Open opens it, non-blocking and exclusive;
+// PVERSION and INFO; cfg.Admit, the check after open; one HW_REFINE a
+// candidate, asking what an open asks; and the close. It sends no HW_PARAMS,
+// SW_PARAMS, PREPARE, HW_FREE or PAUSE, writes nothing and touches no
+// control, so nothing is committed. A busy node (another process holding
+// it) is answered at once, ReasonBusy, every candidate not probed, and
+// nothing waits for it. Like Open, it refuses what GuardNodeOpens guards
+// before anything is opened. Nothing in serve calls it before B728's B7,
+// which calls it through the player's backend (playback.Backend.Probe), the
+// device slot held.
 func Probe(ep Endpoint, cfg ProbeConfig) (ProbeReport, error) {
+	if err := guarded(ep); err != nil {
+		return notAsked(ep, cfg), err
+	}
 	return probe(linuxSys{}, ep, cfg)
 }
 

@@ -77,7 +77,10 @@ type session struct {
 	reqs    []*cutRequest
 
 	paused bool
-	// pausedFlag is paused for a reader that may not take the session's lock.
+	// pausedFlag is paused as a reader that may not take the session's lock
+	// sees it: the probe's gate (Backend.reserveProbe), under the backend's
+	// lock, which a session takes under its own and never the reverse.
+	// Written with paused, under s.mu.
 	pausedFlag atomic.Bool
 	pauseSeq   int
 	// The pause of a session that holds no device (paused between two
@@ -1086,6 +1089,7 @@ func (s *session) pausedLocked(noDevice bool) error {
 		return errors.New(s.fault.Detail)
 	}
 	s.paused = true
+	s.pausedFlag.Store(true)
 	s.pauseSeq++
 	s.relSent, s.relFired = false, false
 	if noDevice {
@@ -1138,6 +1142,7 @@ func (s *session) unpausedLocked() error {
 		return errors.New(s.fault.Detail)
 	}
 	s.paused = false
+	s.pausedFlag.Store(false)
 	s.relSent, s.relFired = false, false
 	return nil
 }

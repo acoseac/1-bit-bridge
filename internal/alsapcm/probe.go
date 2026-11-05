@@ -1,7 +1,6 @@
 package alsapcm
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
@@ -69,8 +68,13 @@ type ProbeResult struct {
 // (dopBits). It says only that the kernel takes the PCM carrier; nothing in
 // it says the DAC decodes DSD.
 func (r ProbeResult) DoPCarrier() bool {
-	return false
+	return r.Answer == ProbeAccepted && r.Candidate.Format == format.S32LE && dopBits(r.Msbits)
 }
+
+// dopBits reports whether a setup's significant bits carry DoP: 24 to 32,
+// the bits a DoP word's marker and payload take. The DoP sink's open
+// (dopPrecision) and the probe's carrier (DoPCarrier) ask it alike.
+func dopBits(msbits int) bool { return msbits >= 24 && msbits <= 32 }
 
 // MaxProbeCandidates bounds a probe: one open, PVERSION, INFO, one HW_REFINE
 // a candidate, and a close.
@@ -123,16 +127,147 @@ func notAsked(ep Endpoint, cfg ProbeConfig) ProbeReport {
 	return rep
 }
 
-// ProbeCandidates is the design's section 5 set for DSD64, DSD128 and
-// DSD256 (DSD512 is refused in every mode, and never probed).
+// probeBitRates are the DSD rates a probe asks about, one-bit rates a
+// channel: DSD64, DSD128 and DSD256. DSD512 is refused in every mode
+// (rate_not_supported) and never probed.
+var probeBitRates = []int{2822400, 5644800, 11289600}
+
+// probeTargets are the conversion targets of the design's section 4.3: the
+// 44.1 kHz family to 176.4 kHz, best first, each in the 24-bit packings in
+// the backend's order and then in 16 bits, for a DAC that takes no 24-bit
+// target.
+var probeTargets = struct {
+	rates   []int
+	formats []format.ALSAFormat
+}{[]int{176400, 88200, 44100}, []format.ALSAFormat{format.S243LE, format.S24LE, format.S32LE, format.S16LE}}
+
+// ProbeCandidates is the design's section 5 set, for DSD64, DSD128 and
+// DSD256: each native DSD format at the one-bit rate over its width
+// (DSD_U32_BE and DSD_U32_LE at r/32, DSD_U16_LE at r/16), in the order the
+// player prefers them; S32_LE at each DoP carrier, r/16, whose answer carries
+// the significant bits; and the conversion targets of section 4.3, 176.4,
+// 88.2 and 44.1 kHz in S24_3LE, S24_LE, S32_LE and S16_LE. A candidate two of
+// those name (S32_LE at 176.4 kHz, DSD64's carrier and a target) is listed
+// once, in its first place. Each call returns a list of its own.
 func ProbeCandidates() []ProbeCandidate {
-	return nil
+	var out []ProbeCandidate
+	seen := map[ProbeCandidate]bool{}
+	add := func(c ProbeCandidate) {
+		if !seen[c] {
+			seen[c] = true
+			out = append(out, c)
+		}
+	}
+	for _, r := range probeBitRates {
+		for _, f := range []format.ALSAFormat{format.DSDU32BE, format.DSDU32LE, format.DSDU16LE} {
+			add(ProbeCandidate{Format: f, RateHz: r / (8 * format.DSDWordBytes(f))})
+		}
+	}
+	for _, r := range probeBitRates {
+		add(ProbeCandidate{Format: format.S32LE, RateHz: r / 16})
+	}
+	for _, rate := range probeTargets.rates {
+		for _, f := range probeTargets.formats {
+			add(ProbeCandidate{Format: f, RateHz: rate})
+		}
+	}
+	return out
 }
 
-// errProbeNotBuilt stands for the probe until it is built.
-var errProbeNotBuilt = errors.New("alsapcm: the silent probe is not built yet")
+// resolve checks the candidates and returns each one's format code.
+func (cfg ProbeConfig) resolve(ep Endpoint) ([]uint32, error) {
+	bad := func(detail string) ([]uint32, error) {
+		return nil, &Error{Reason: ReasonBadConfig, Op: "probe", Endpoint: ep, Detail: detail}
+	}
+	switch n := len(cfg.Candidates); {
+	case n == 0:
+		return bad("a probe asks one candidate at least")
+	case n > MaxProbeCandidates:
+		return bad(fmt.Sprintf("%d candidates: a probe asks %d at most", n, MaxProbeCandidates))
+	}
+	codes := make([]uint32, len(cfg.Candidates))
+	seen := make(map[ProbeCandidate]bool, len(cfg.Candidates))
+	for i, c := range cfg.Candidates {
+		sf, ok := sampleFormats[c.Format]
+		if !ok {
+			sf, ok = nativeFormats[c.Format]
+		}
+		switch {
+		case !ok:
+			return bad(fmt.Sprintf("format %q is neither a PCM format this backend packs nor a native DSD format", c.Format))
+		case c.RateHz < MinRateHz || c.RateHz > MaxRateHz:
+			return bad(fmt.Sprintf("rate %d Hz is outside %d..%d", c.RateHz, MinRateHz, MaxRateHz))
+		case seen[c]:
+			return bad(c.String() + " is asked twice")
+		}
+		seen[c] = true
+		codes[i] = sf.code
+	}
+	return codes, nil
+}
 
-// probe is Probe over a kernel seam.
-func probe(_ sys, ep Endpoint, cfg ProbeConfig) (ProbeReport, error) {
-	return notAsked(ep, cfg), errProbeNotBuilt
+// probe is Probe over a kernel seam: the node opened as Open opens it, once;
+// PVERSION and INFO, as an open checks them; the check after open; one
+// HW_REFINE a candidate, its answer recorded; and the close, once, on every
+// way out, a panic's included. Nothing else is sent: no HW_PARAMS, so the
+// kernel commits nothing and the stream stays OPEN, and so no SW_PARAMS,
+// PREPARE, write, PAUSE, DROP or HW_FREE. An open refused EBUSY is answered
+// at once (ReasonBusy, every candidate not probed): nothing waits for a busy
+// node, and its holder is left alone. Only EINVAL refuses a candidate; any
+// other error ends the probe, typed, and leaves that candidate and the rest
+// not probed. The report holds what was established whatever the error.
+func probe(s sys, ep Endpoint, cfg ProbeConfig) (rep ProbeReport, err error) {
+	rep = notAsked(ep, cfg)
+	if err := ep.validate(); err != nil {
+		return rep, err
+	}
+	codes, err := cfg.resolve(ep)
+	if err != nil {
+		return rep, err
+	}
+	fd, err := s.open(ep.Path())
+	if err != nil {
+		return rep, openError(ep, err)
+	}
+	rep.Opened = true
+	// A Device that never set the hardware: its release is the close alone.
+	d := &Device{sys: s, fd: fd, params: Params{Endpoint: ep}}
+	defer func() {
+		if cerr := d.release(); cerr != nil && err == nil {
+			err = cerr
+		}
+	}()
+	if err := d.checkProtocol(); err != nil {
+		return rep, err
+	}
+	if err := d.checkInfo(); err != nil {
+		return rep, err
+	}
+	rep.Node = NodeInfo{Card: ep.Card, Device: ep.Device, Subdevice: d.params.Subdevice, Playback: true, ID: d.params.ID, Name: d.params.Name}
+	if cfg.Admit != nil {
+		if err := cfg.Admit(rep.Node); err != nil {
+			return rep, &Error{Reason: ReasonWrongDevice, Op: "probe", Endpoint: ep,
+				Detail: "the check after open refused the node: nothing was asked of it", Err: err}
+		}
+	}
+	for i, code := range codes {
+		hw := exactParams(code, uint32(cfg.Candidates[i].RateHz))
+		// The kernel fills both in its answer (HW_REFINE resets msbits and
+		// computes it, and gives the setup's info); zeroed, a kernel that
+		// did not would read as unknown bits and no PAUSE, never as the
+		// request's.
+		hw.info, hw.msbits = 0, 0
+		err := d.refine(&hw)
+		res := &rep.Results[i]
+		if err == nil {
+			res.Answer, res.Msbits, res.Pause = ProbeAccepted, int(hw.msbits), hw.info&infoPause != 0
+			continue
+		}
+		if n, _ := errnoOf(err); n == errnoEINVAL {
+			res.Answer = ProbeRefused
+			continue
+		}
+		return rep, d.kernelError("hw_refine", err)
+	}
+	return rep, nil
 }

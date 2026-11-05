@@ -187,10 +187,12 @@ type Backend struct {
 	mu       sync.Mutex
 	sessions map[engine.SessionID]*session
 	// holder is the session that holds the device or is opening it, until
-	// its release is done: a Start beside it is refused (ErrOverlap).
+	// its release is done: a Start beside it is refused (ErrOverlap), and so
+	// is a probe (Probe).
 	holder *session
 	// probing is the silent probe that holds the device slot, nil while none
-	// does (Probe).
+	// does (Probe): a Start waits for it, at most ProbeWait, and no other
+	// probe starts beside it.
 	probing             *probeHold
 	took                map[packKey]format.ALSAFormat
 	overlaps            int
@@ -375,20 +377,51 @@ func errUnknownSession(id engine.SessionID) error {
 var errReleased = errors.New("player backend: the session's release came first: nothing was opened")
 
 // hold makes s the session that holds the device, refusing when another
-// does (ErrOverlap).
-func (b *Backend) hold(_ context.Context, s *session) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.terminalUnconfirmed {
-		return engine.ErrReleaseUnconfirmed
+// does (ErrOverlap). A silent probe that holds the device slot (Probe) is
+// waited for, holding nothing, and the slot taken in the step that finds it
+// free; the wait lasts at most ProbeWait, armed on Config.AfterFunc, and
+// then the device is busy (engine.ErrDeviceBusy), the probe's node still
+// open. ctx's end, and s's release, end the wait too.
+func (b *Backend) hold(ctx context.Context, s *session) error {
+	var expired chan struct{}
+	stop := func() bool { return false }
+	defer func() { stop() }()
+	for {
+		b.mu.Lock()
+		if b.terminalUnconfirmed {
+			b.mu.Unlock()
+			return engine.ErrReleaseUnconfirmed
+		}
+		p := b.probing
+		if p == nil {
+			if h := b.holder; h != nil && h != s {
+				b.overlaps++
+				b.log.Error("player backend: a session started while another still held the device", "session", uint64(s.id), "holder", uint64(h.id))
+				b.mu.Unlock()
+				return fmt.Errorf("%w: session %d has not released it", ErrOverlap, h.id)
+			}
+			b.holder = s
+			b.mu.Unlock()
+			return nil
+		}
+		b.mu.Unlock()
+		if expired == nil {
+			ch := make(chan struct{})
+			stop = b.cfg.AfterFunc(ProbeWait, func() { close(ch) })
+			expired = ch
+		}
+		select {
+		case <-p.done:
+		case <-expired:
+			return fmt.Errorf("player backend: the device is busy: the silent probe has held it for %v: %w", ProbeWait, engine.ErrDeviceBusy)
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-s.ctx.Done():
+			return errReleased
+		case <-s.released:
+			return errReleased
+		}
 	}
-	if h := b.holder; h != nil && h != s {
-		b.overlaps++
-		b.log.Error("player backend: a session started while another still held the device", "session", uint64(s.id), "holder", uint64(h.id))
-		return fmt.Errorf("%w: session %d has not released it", ErrOverlap, h.id)
-	}
-	b.holder = s
-	return nil
 }
 
 // letGo ends s's hold, and its record once its Start has come.
