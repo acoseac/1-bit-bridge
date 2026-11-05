@@ -76821,3 +76821,65 @@ applier of the worker's own gives a file byte-identical to the intended one.
 The negative controls ran at f500838f, the unmutated tree green first. The
 tree is clean after. Not run here: Windows and macOS natively, CI's runners,
 and any hardware.
+
+## 2026-11-05 — B728 B3 round 2: four review points on #1405
+
+Worker b728-b3 on legion0, fast-forwarded to the orchestrator's dfa6e602 (the
+branch, its rules patch applied, main merged). Codex and the Claude API
+reviewer found four points on #1405; each was checked on the tree before any
+fix, and each held.
+
+**A link to nothing read as a fresh install.** `readBounded` opens through
+`fsutil.OpenAsFile`, which follows a link, so a dangling link answered
+`fs.ErrNotExist`, Open served the defaults (`Missing`), and the first write
+replaced the link. Now an `Lstat` decides: no entry is `Missing`; an entry
+that leads nowhere is `Unread`, refused, and not written over.
+`TestADanglingLinkIsAnEntryThatDoesNotRead`.
+
+**The fallback used up a record it never applied.** The model comparison
+reads the PCM device and the manufacturer string, which `dacprofile.Key` does
+not hold, so the record's own model can be refused (`identity_mismatch`) as a
+unit of the same key: that unit got the fallback's choice, and when the
+record's unit was bound the migration took the fallback for a choice of the
+DAC's own, wrote nothing, and ended the wait. `ownChoice` is now any choice
+but the migration's at its first revision; `recordRows` replaces the fallback
+at the next revision and drops that key's migration warning; a choice the app
+or the console writes in between, a first one at revision 1 included, still
+wins. `TestTheRecordsOwnModelTakesTheRecordOverItsFallback` (another PCM
+device; another manufacturer string; a user's choice in between) and
+`TestTheMigrationNeverOverwritesAChoice` (the app's and the console's first
+choice, and a later one).
+
+**A write could leave a file the next start refuses.** The structural bounds
+let a state through whose file passes the 1 MiB Open reads (Codex: 100 DACs of
+64 answers, about 1.1 MB); `Update` made it durable and answered nil, and the
+next start left it `Unread`, refusing DSD and every write. `encode` now
+refuses past the bound (`ErrTooLarge`). What is refused is the write that
+would cross it, whole: trimming answers or warnings would drop what the app
+showed. The state stays as it was, and the app sees B9's answer for a write
+not made, 500 `persist_failed`, nothing changed.
+`TestAWriteTheReaderWouldRefuseIsNotMade`: a file of exactly 1 MiB is written
+and reads back; one byte more is refused, the state and the file unchanged.
+
+**An unreadable state stayed unwritable after it was moved.** `blocked` was
+set at Open and never cleared, so every write answered `ErrNotWritable` until
+a restart. A blocked write now looks again: an entry still at the name, or a
+look that fails, is refused; no entry clears the block and the write is made
+on the refusing state, so a choice clears `state_unreadable`.
+`TestAnUnreadableStateMovedAwayIsWritableAgain`.
+
+The design's section 8 and section 11 rows for B4, B7, B11 and B12 now take
+the next free version at their merge (B735 took 37 and B3 takes 38, the
+numbers first planned for B4 and B7), and section 3.6 says the record's model
+takes its rows over the fallback. The rule's line is unchanged; its long form
+says the four behaviours.
+
+Red first at cba3cf46, each test failing on the tree before the fix for its
+point's reason. The fixes are 6de60864, and c2a29e49 extends the guard to a
+user's first choice. **Negative controls**, ten, each red: the `Lstat`
+dropped; any choice taken for the DAC's own; any choice taken for the
+fallback (a user's choice in between overwritten); the fallback's warning
+kept; the record's choice at the fallback's revision; the writer not asked (a
+user's first choice taken for the fallback); the bound check removed; the
+bound one byte off; a blocked store that never looks again; a blocked store
+unblocked whatever is still there.
