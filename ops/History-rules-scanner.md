@@ -2613,7 +2613,14 @@
   path is another folder put there, and the root is looked at again
   (`lookAgain`) and watched where it is now, or held (round 11, Claude on
   round 10: the Create was dropped, and the folder put there went unwatched
-  until `checkRootWatches` came round); and a scan's walk of
+  until `checkRootWatches` came round). On kqueue that look waits for the
+  flush a new folder's watch waits for (`watchFDs.looks`, B212's rule): the
+  look Adds the root, and fsnotify watches the folder at its path itself
+  right after sending the Create, so an Add from the handler races that and
+  can leave a descriptor nothing closes; the flush skips a root held since
+  or whose own watch is back (`lookAgainAfterCreate`), and the quiet timer
+  arms for a waiting look as for a waiting folder (round 12, Codex on round
+  11); and a scan's walk of
   the outer root, the full scan's and a subtree scan's, passes over a nested
   root that reads as not mounted, its rows under that path spared as a subtree
   the walk could not see (round 5, CodeRabbit and Argon on #1397: the first
@@ -2805,7 +2812,8 @@
   mount point, which a mount since covers), watch a nested root under another
   spelling than the walk of the root it is nested in reaches its folder by
   (kqueue keys a watch by its spelling), take a Create of a watched root for a
-  new folder, or ignore one once the root's own watch is gone, keep a scan
+  new folder, or ignore one once the root's own watch is gone (on kqueue its
+  look waits for the flush a new folder's watch waits for), keep a scan
   armed under a root the watcher holds, give a path to
   any root but the deepest that holds it (a share's root, spelled with its
   separator or without, holds the paths below it), let a scan walk into or
@@ -2872,7 +2880,8 @@
   `TestAnEntryThatChangesBetweenTheLookupsTellsNothing`,
   `TestAListingThatChangedBeforeItsReReadTellsNothing`,
   `TestANestedRootInAnotherCaseIsWatchedOnceOnAVolumeThatFoldsCase` and
-  `TestAReplacedNestedRootIsWatchedAgainOnItsCreate` (macOS, kqueue),
+  `TestAReplacedNestedRootIsWatchedAgainOnItsCreate`,
+  `TestAReplacedRootsCreateLeavesItsLookToTheFlush` (macOS, kqueue),
   `TestANestedRootIsWalkedAsItsFolderListsItOnlyWhereTheFolderTakesBothSpellingsForOne`,
   `TestServeRefusesTheDataDirItRecordedThroughALinkOnItsVolumeByItsTarget`,
   `TestServeRefusesTheDataDirItRecordedByItsTargetThroughALinkOnItsVolume`,

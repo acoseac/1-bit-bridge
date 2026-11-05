@@ -76501,3 +76501,71 @@ copy, the budgets pass (scanner.md 30,531 to 30,599 bytes), and
 `mdblocks.dropped_donts` finds the long form's Don't whole in the patched
 line and the line's in the long form, while it reports the unpatched line as
 dropping it.
+
+## 2026-11-05 — B651 round 12: a replaced root's look waits for kqueue's flush
+
+Round 12, from the PR's head, 7f0be757 (round 11, its rules and a merge of
+main). Codex on round 11: once a watched root's own watch had gone, the
+Create naming it was handled by `lookAgain` → `watchAgain` → `addTree`, which
+Adds the root from the Create's handler. Real, and the rule B212 wrote
+(**Never Add a folder from its Create handler on kqueue**): the pinned
+backend's Events channel is unbuffered, and `sendCreateIfNew` sends the
+Create and then runs `internalWatch` on the same path on its own goroutine,
+so the handler's Add and fsnotify's open can both pass `byPath` and leave a
+descriptor nothing closes. `WatchList` lacking the root shows only that no
+user watch is there. The Remove and Rename handlers keep their look: while
+one runs, fsnotify is still blocked on its next send, so it cannot be
+opening the root's folder.
+
+On kqueue the handler now records the root (`watchFDs.looks`), and the look
+runs from `flushPendingAdds`, after the waiting folders: at the next event,
+read only after fsnotify has watched the folder, or at the quiet timer's
+file outside the library, which arms for a waiting look too (`waiting`). The
+flush skips a root held since, or whose own watch is back
+(`lookAgainAfterCreate`). Elsewhere nothing changed.
+
+The race has no seam (fsnotify's goroutine cannot be held between its send
+and its open), so `TestAReplacedRootsCreateLeavesItsLookToTheFlush` drives
+the handler directly on this Mac's kqueue: red on 7f0be757, where the
+handler watched the root itself; three cases after (nothing since, the
+root's own watch back, the root held). Round 11's real-kqueue test now waits
+for the look with nothing else changing in the library and without the
+test-only immediate flush, so the loop's own timer asks for it (0.31 s).
+Round 10's doubling tests pass in every leg.
+
+| Control | Red |
+|---|---|
+| C1 the handler looks itself on kqueue (round 11) | all three new cases: the handler watched the root |
+| C2 the flush drops the waiting looks | "nothing since", and round 11's test (its wait gave up at 90 s) |
+| C3 the quiet timer arms for folders alone | round 11's test, at 90 s |
+| C4 the flush looks at a root held since | "held since" |
+| C5 the flush looks at a root whose watch is back | "its own watch back since" |
+
+**Gates**, on this Mac with go1.27.3, on 528144ba. The one build slot was
+held for over an hour by an app worker's long-lived server, so the
+single-package runs went outside the lock (the lock's rule names `make
+test`, `build-all` and multi-package runs): `go test` without race of
+internal/manifest (78 s) and internal/fsutil (0.8 s) passed; under `-race`,
+internal/manifest's five shards (304 s, 158 s, 333 s, 378 s, 182 s; 243 +
+318 + 402 + 273 + 199 = 1,435 tests, `go test -list`'s count, each run once
+by name) and internal/fsutil passed. Through the lock, `make vet` was clean
+native (darwin) and for linux, windows and linux/386. `make test-fast` failed
+once, in `scripts/third-party-licenses` alone, on no file of this round's:
+its build-tag census walks the tree on disk, `.tmp/` included, which `make
+test-fast` makes every package's temp directory, and met the symbolic link
+`scripts/install-test`'s `TestTheUserManagerIsFoundOrNothingChanges` makes
+there (`run/user/1000/bus`) while the two packages ran side by side
+("build site must not be a symlink"); nothing of it was left after the run,
+the package passed alone (21.7 s), and the 81 other packages passed. A rerun
+queued for the lock was stopped at 16:45 before it had the slot, the lock's
+note saying the orchestrator reruns `make test-fast` on the merged head
+before any push. go1.27.3's gofmt
+lists none of the five Go files the round changed; `make docs-check` passes;
+`scripts/qualification-version` 49d438fc..HEAD (main's head as merged) is OK.
+
+**The rules**: `rules-b651-r12.patch` adds to the B651 line's Don't "(on
+kqueue its look waits for the flush a new folder's watch waits for)" after
+its clause on a Create once the root's own watch is gone, with the long form
+beside it; applied strictly to HEAD's scanner.md it is the edited copy byte
+for byte, the budgets pass (30,599 to 30,671 bytes), and the Don't lists
+match both ways.
