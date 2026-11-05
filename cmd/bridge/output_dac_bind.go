@@ -385,7 +385,16 @@ func dacInspect(env outputBindEnv, configPath string, inv binding.Inventory, mod
 // Without a port, nothing else tells two units of one model with no serial
 // apart: on two buses, which number their devices alone, they can share the
 // interface and the device number (Codex on #1402). Two directories that
-// could not be resolved are no match.
+// could not be resolved are no match, and a directory that could not be
+// resolved, in either reading, is said as that, never as a change, which a
+// user whose directory never resolves would read on every run.
+//
+// The strings themselves come from the reader's own resolve of the card's
+// device link, which names no directory (alsa.QualificationIdentity), so two
+// rebinds within one read (the card to another unit and back before the
+// reading again) could still show the other unit's strings. Closing that
+// window needs the reader to say the directory it read them from, a change
+// in guarded internal/alsa that a later PR may make.
 func (v *dacCardView) readModel(read dacModelReader, card int, u *alsa.USBIdentity, dir string) {
 	q, err := read.descriptors(card)
 	switch {
@@ -396,8 +405,16 @@ func (v *dacCardView) readModel(read dacModelReader, card int, u *alsa.USBIdenti
 		v.ModelProblem = "not read: the card changed while it was read"
 		return
 	}
-	if again, ok := read.card(card); !ok || again.Kind != alsa.IdentityUSB || again.USB == nil || again.Vanished ||
-		!binding.SameUnit(*again.USB, *u) || again.USB.DevNum != u.DevNum || dir == "" || again.Dir != dir {
+	again, ok := read.card(card)
+	switch {
+	case !ok || again.Kind != alsa.IdentityUSB || again.USB == nil || again.Vanished ||
+		!binding.SameUnit(*again.USB, *u) || again.USB.DevNum != u.DevNum:
+		v.ModelProblem = "not read: the card changed while it was read"
+		return
+	case dir == "" || again.Dir == "":
+		v.ModelProblem = "not read: the card's directory could not be resolved"
+		return
+	case again.Dir != dir:
 		v.ModelProblem = "not read: the card changed while it was read"
 		return
 	}
