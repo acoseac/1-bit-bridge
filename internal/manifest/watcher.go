@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -156,6 +157,30 @@ type Watcher struct {
 	// watch is registered and again after the file is closed. The loop
 	// writes it and a test reads it.
 	flushPath atomic.Value
+
+	// held are the configured roots the watcher holds while they read as a
+	// volume that is not mounted, each with what the look that held it found,
+	// and rootWatches the watched roots by the path each one's own watch is
+	// registered as (watcher_hold.go). recheckDelay is how long after the
+	// last hold or retry the next retry of the held roots is due, and rearm
+	// says the retry's timer is to be armed for it. Run's goroutine alone.
+	held         map[string]rootLook
+	rootWatches  map[string]string
+	recheckDelay time.Duration
+	rearm        bool
+	// holdAsks are the roots a debounced dispatch found absent, for Run's
+	// goroutine to hold, under mu; holdWake wakes Run's loop to take them.
+	holdAsks map[string]rootLook
+	holdWake chan struct{}
+	// recheckFirst, recheckMax and rootCheckEvery are the package constants
+	// heldRecheckFirst, heldRecheckMax and rootWatchCheckEvery, per instance
+	// so a test can shorten them before Run starts (watcher_hold.go).
+	recheckFirst, recheckMax, rootCheckEvery time.Duration
+	// afterHoldForTests fires on Run's goroutine once a configured root is
+	// held, and afterResumeForTests once a held root is watched again
+	// (watcher_hold.go). Per instance and set before Run starts, for
+	// afterDispatchHookForTests' reason; nil in production.
+	afterHoldForTests, afterResumeForTests func(root string)
 }
 
 // rootAlias pairs the directory a linked configured root resolves to with
@@ -188,6 +213,12 @@ func NewWatcher(scanner *Scanner, debounce time.Duration) (*Watcher, error) {
 		pending:         make(map[string]*pendingScan),
 		deferredAddWait: deferredAddWait,
 		reconcileEvery:  reconcileEvery,
+		held:            make(map[string]rootLook),
+		rootWatches:     make(map[string]string),
+		holdWake:        make(chan struct{}, 1),
+		recheckFirst:    heldRecheckFirst,
+		recheckMax:      heldRecheckMax,
+		rootCheckEvery:  rootWatchCheckEvery,
 	}
 	if kqueueBackend {
 		wt.fds = newWatchFDs(WatchFileLimits())
@@ -218,6 +249,11 @@ func NewWatcher(scanner *Scanner, debounce time.Duration) (*Watcher, error) {
 // On Create events for directories, the watcher recursively adds
 // watches for the new subtree so newly-mkdir'd folders inside an
 // already-watched root get picked up automatically.
+//
+// A root that reads as a volume that is not mounted (not there, or the bare
+// mount point holding nothing while the index holds its tracks) is held
+// rather than watched, and watched once it reads as it did (B651,
+// watcher_hold.go).
 func (wt *Watcher) Run(ctx context.Context) error {
 	// Stop armed debounce timers on EVERY exit path — ctx cancel AND the
 	// fsnotify Events/Errors channels closing (an internal fatal error) —
@@ -231,11 +267,13 @@ func (wt *Watcher) Run(ctx context.Context) error {
 	}()
 	defer wt.w.Close()
 
-	if !wt.watchRoots(wt.scanner.Roots()) {
+	roots := wt.holdAbsentRoots(ctx, wt.scanner.Roots())
+	if !wt.watchRoots(roots) {
 		// Logged: the watcher stays off, holding nothing, and the
 		// periodic scan picks up changes. No scan is pending yet.
 		return nil
 	}
+	wt.noteRootWatches(roots)
 	if hook := wt.afterInitialWalkHookForTests; hook != nil {
 		hook()
 	}
@@ -270,7 +308,9 @@ func (wt *Watcher) watchRoots(roots []string) bool {
 // already asked for still runs and still finishes before the caller closes
 // the store. Elsewhere quiet and reconcile stay nil, and the loop is what
 // it was: inotify and ReadDirectoryChangesW never open the signal file,
-// because fds is nil there, and a new folder is watched from its Create.
+// because fds is nil there, and a new folder is watched from its Create. On
+// every platform it also holds the roots a dispatch found absent, retries the
+// held roots, and checks the watched roots' own watches (watcher_hold.go).
 func (wt *Watcher) loop(ctx context.Context) error {
 	events, errs := wt.w.Events, wt.w.Errors
 	// quiet is wait's channel while new folders wait for their watch, nil
@@ -290,6 +330,18 @@ func (wt *Watcher) loop(ctx context.Context) error {
 		wt.openFlushSignal()
 		defer wt.closeFlushSignal()
 	}
+	// The held roots' retry, armed only while a hold or a retry asks for it
+	// (rearmRecheck), the wake for the roots a dispatch found absent, and the
+	// check of the watched roots' own watches, on every platform: inotify
+	// drops a volume's watches as it is unmounted, and kqueue a renamed
+	// folder's, with no event either way (watcher_hold.go).
+	recheck := time.NewTimer(wt.recheckFirst)
+	recheck.Stop()
+	defer recheck.Stop()
+	rootCheck := time.NewTicker(wt.rootCheckEvery)
+	defer rootCheck.Stop()
+	holdWake, recheckC, rootCheckC := wt.holdWake, recheck.C, rootCheck.C
+	wt.rearmRecheck(recheck)
 	// flushAsked is set when the quiet timer has written the signal and the
 	// event that watches the waiting folders has not been read yet. Arming
 	// the timer again before that event would write on every tick.
@@ -298,6 +350,16 @@ func (wt *Watcher) loop(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-holdWake:
+			wt.loopGate.enter()
+			wt.takeHoldAsks()
+		case <-recheckC:
+			wt.loopGate.enter()
+			wt.recheckHeld(ctx)
+			wt.heldRetried()
+		case <-rootCheckC:
+			wt.loopGate.enter()
+			wt.checkRootWatches(ctx)
 		case ev, ok := <-events:
 			if !ok {
 				return nil
@@ -313,27 +375,31 @@ func (wt *Watcher) loop(ctx context.Context) error {
 			quiet = nil
 			flushAsked = false
 			wt.loopGate.enter()
-			wt.flushPendingAdds()
+			wt.flushPendingAdds(ctx)
 			watcherLogger.Warn("fsnotify error", "err", err)
 		case <-quiet:
 			quiet = nil
 			wt.loopGate.enter()
-			flushAsked = wt.askFlush()
+			flushAsked = wt.askFlush(ctx)
 		case <-reconcile:
 			wt.loopGate.enter()
 			wt.reconcileWatches()
 		}
 		wt.loopGate.leave()
-		if !flushAsked && wt.flushNowForTests() {
+		if !flushAsked && wt.flushNowForTests(ctx) {
 			flushAsked = true
 		}
 		switch {
 		case wt.fds == nil:
 		case wt.fds.off:
 			events, errs, quiet, reconcile = nil, nil, nil, nil
-		case quiet == nil && !flushAsked && len(wt.fds.pending) > 0:
+			holdWake, recheckC, rootCheckC = nil, nil, nil
+		case quiet == nil && !flushAsked && wt.fds.waiting():
 			wait.Reset(wt.deferredAddWait)
 			quiet = wait.C
+		}
+		if recheckC != nil {
+			wt.rearmRecheck(recheck)
 		}
 	}
 }
@@ -346,10 +412,10 @@ func (wt *Watcher) loop(ctx context.Context) error {
 // Rename of the file replaces it and leaves the folders waiting, because
 // watching them from this event is the race the file exists to avoid.
 func (wt *Watcher) receive(ctx context.Context, ev fsnotify.Event) {
-	if wt.ownFlushEvent(ev) {
+	if wt.ownFlushEvent(ctx, ev) {
 		return
 	}
-	wt.flushPendingAdds()
+	wt.flushPendingAdds(ctx)
 	if drop := wt.dropEventForTests; drop != nil && drop(ev) {
 		return
 	}
@@ -360,7 +426,7 @@ func (wt *Watcher) receive(ctx context.Context, ev fsnotify.Event) {
 // the folders that are waiting. A removal replaces the file. Any other
 // event for it is ignored, so a change of mode does not scan the temp
 // directory.
-func (wt *Watcher) ownFlushEvent(ev fsnotify.Event) bool {
+func (wt *Watcher) ownFlushEvent(ctx context.Context, ev fsnotify.Event) bool {
 	path := wt.signalPath()
 	if path == "" || filepath.Clean(ev.Name) != filepath.Clean(path) {
 		return false
@@ -370,7 +436,7 @@ func (wt *Watcher) ownFlushEvent(ev fsnotify.Event) bool {
 		return true
 	}
 	if ev.Has(fsnotify.Write) {
-		wt.flushPendingAdds()
+		wt.flushPendingAdds(ctx)
 	}
 	return true
 }
@@ -442,18 +508,18 @@ func (wt *Watcher) replaceFlushSignal() {
 // are waiting. It reports whether that write is what will watch them. A
 // file that is gone is replaced first. A write that still does not land
 // watches them here, and the timer may run again.
-func (wt *Watcher) askFlush() bool {
+func (wt *Watcher) askFlush(ctx context.Context) bool {
 	if !wt.flushFileCurrent() {
 		wt.replaceFlushSignal()
 	}
 	if !wt.flushFileCurrent() {
-		wt.flushPendingAdds()
+		wt.flushPendingAdds(ctx)
 		return false
 	}
 	if _, err := wt.flushFile.WriteAt([]byte{1}, 0); err != nil {
 		wt.replaceFlushSignal()
 		if !wt.flushFileCurrent() || writeFlush(wt.flushFile) != nil {
-			wt.flushPendingAdds()
+			wt.flushPendingAdds(ctx)
 			return false
 		}
 	}
@@ -470,12 +536,12 @@ func writeFlush(f *os.File) error {
 // The double-open test sets immediateFlushForTests. Production waits
 // deferredAddWait. It reports whether the signal write is what will watch
 // the folder.
-func (wt *Watcher) flushNowForTests() bool {
-	if !wt.immediateFlushForTests || wt.fds == nil || wt.fds.off || len(wt.fds.pending) == 0 {
+func (wt *Watcher) flushNowForTests(ctx context.Context) bool {
+	if !wt.immediateFlushForTests || wt.fds == nil || wt.fds.off || !wt.fds.waiting() {
 		return false
 	}
 	wt.loopGate.enter()
-	asked := wt.askFlush()
+	asked := wt.askFlush(ctx)
 	wt.loopGate.leave()
 	return asked
 }
@@ -561,7 +627,8 @@ func (g *loopGate) waitIdle() {
 }
 
 // addTree adds a watch on every directory of the tree at root, as
-// walkWatchTree walks it. Stops walking on the first ENOSPC ("watch
+// walkWatchTree walks it, passing over a root the watcher holds that is
+// nested below it (heldBelow). Stops walking on the first ENOSPC ("watch
 // limit reached") to avoid spamming the log once per directory — the
 // operator gets one clear signal that the kernel limit needs raising.
 // Where fsnotify holds an open file per watched entry (kqueue) the tree
@@ -571,10 +638,18 @@ func (wt *Watcher) addTree(root string, isConfiguredRoot bool) error {
 	if wt.fds != nil {
 		return wt.addTreeWithinBudget(root, isConfiguredRoot)
 	}
+	pass := wt.heldBelow(root)
+	var base string
 	limitHit := false
-	rootWatch, err := walkWatchTree(root, isConfiguredRoot, func(path string, _ fs.DirEntry, watch bool) error {
+	rootWatch, err := walkWatchTree(wt.walkRootOf(root, isConfiguredRoot), isConfiguredRoot, func(path string, _ fs.DirEntry, watch bool) error {
 		if !watch {
 			return nil
+		}
+		if base == "" {
+			// The walk's first folder is its root.
+			base = path
+		} else if pass.passes(base, path) {
+			return filepath.SkipDir
 		}
 		if limitHit {
 			// Every subsequent Add would fail the same way, so there
@@ -591,6 +666,76 @@ func (wt *Watcher) addTree(root string, isConfiguredRoot bool) error {
 	})
 	wt.noteAlias(root, rootWatch)
 	return err
+}
+
+// heldBelow is the roots the watcher holds strictly below root (a root
+// configured inside another), by their paths relative to root: a walk of root
+// passes over each, watching nothing at or under it, as no walk watches a held
+// root (B651's fifth round, CodeRabbit on #1397): the startup walk of the
+// outer root, a resume's, and a new folder's under it. root is named in its
+// configured spelling first (configuredName), as the held roots are. Compared
+// as what is spared compares (caseLook.under and spareFolds), each element of
+// a held root's path by the folder it is looked up in: where that folder folds
+// case, or may, a held root configured as USB is the folder the walk lists as
+// usb (B651's sixth and seventh rounds, Codex on rounds 5 and 6). Empty when
+// there is none, which is every walk but one of a root a held root is nested
+// in.
+type heldBelow struct {
+	held []heldFolder
+}
+
+// heldFolder is a held root's path below the walked root, in the configured
+// spelling, element by element, and for each whether a walk's spelling of it
+// may differ in case alone.
+type heldFolder struct {
+	elems []string
+	folds []bool
+}
+
+func (wt *Watcher) heldBelow(root string) heldBelow {
+	if len(wt.held) == 0 {
+		return heldBelow{}
+	}
+	named, err := filepath.Abs(wt.configuredName(root))
+	if err != nil {
+		return heldBelow{}
+	}
+	c := wt.scanner.caseLook()
+	var out heldBelow
+	for h := range wt.held {
+		a, err := filepath.Abs(h)
+		if err != nil {
+			continue
+		}
+		tail, ok := c.under(named, a, true)
+		if !ok || tail == "." {
+			continue
+		}
+		out.held = append(out.held, heldFolder{
+			elems: strings.Split(tail, string(filepath.Separator)),
+			folds: c.spareFolds(named, tail),
+		})
+	}
+	return out
+}
+
+// passes reports whether a walk that started at the folder base passes over
+// the folder at path: a held root below it.
+func (h heldBelow) passes(base, path string) bool {
+	if len(h.held) == 0 {
+		return false
+	}
+	rel, err := filepath.Rel(base, path)
+	if err != nil {
+		return false
+	}
+	got := strings.Split(rel, string(filepath.Separator))
+	for _, f := range h.held {
+		if spelledAs(got, f.elems, f.folds) {
+			return true
+		}
+	}
+	return false
 }
 
 // noteAlias records a configured root that is watched where it resolves to,
@@ -738,6 +883,63 @@ func watchWalkStart(root string, isConfiguredRoot bool) (walkFrom, rootWatch str
 	return walkFrom, root, nil
 }
 
+// walkRootOf is where a walk of root starts: a configured root's listedRoot,
+// and a folder that appeared at runtime as it is.
+func (wt *Watcher) walkRootOf(root string, isConfiguredRoot bool) string {
+	if !isConfiguredRoot {
+		return root
+	}
+	return wt.listedRoot(root)
+}
+
+// listedRoot is the path the walk of the root a configured root is nested in
+// reaches the nested root's folder by, which the nested root's own walk starts
+// from: where that walk starts (its own listedRoot, then watchWalkStart), and
+// below it each element as the folder above lists it, where the folder takes
+// the configured spelling for that name (caseLook.listedName). A root nested
+// in none, and one whose own folder is no plain directory (a link, which no
+// walk of another root descends), is as configured; so is any element a
+// folder does not establish as the listed one. fsnotify's kqueue backend and
+// the watcher's account key a watch by its path's spelling, so a nested root
+// configured as music/USB and watched so, where music lists usb, was a second
+// tree beside the one the outer walk watches, from the start, and again after
+// each resume, the next change in music sending a Create for usb (B651's
+// tenth round, Codex on round 9). Events under it are named back under the
+// configured root (noteAlias, configuredName).
+func (wt *Watcher) listedRoot(root string) string {
+	roots := wt.scanner.Roots()
+	return wt.listedRootIn(roots, root, len(roots))
+}
+
+// listedRootIn is listedRoot among roots, following at most depth roots out.
+func (wt *Watcher) listedRootIn(roots []string, root string, depth int) string {
+	if depth <= 0 {
+		return root
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return root
+	}
+	others := slices.DeleteFunc(slices.Clone(roots), func(r string) bool { return r == root })
+	outer, _, tail := wt.scanner.deepestRootOf(others, abs)
+	if outer == "" || tail == "." {
+		return root
+	}
+	if info, err := wt.scanner.lstat(abs); err != nil || !info.IsDir() {
+		return root
+	}
+	walkFrom, _, err := watchWalkStart(wt.listedRootIn(roots, outer, depth-1), true)
+	if err != nil {
+		return root
+	}
+	c := wt.scanner.caseLook()
+	p := walkFrom
+	for _, e := range strings.Split(tail, string(filepath.Separator)) {
+		p = filepath.Join(p, c.listedName(p, e))
+	}
+	return p
+}
+
 // configuredName is an event's path in the spelling of the configured root it
 // is under: a path under a linked root's resolved directory is renamed onto
 // the root as configured (the longest resolved directory that holds it, should
@@ -840,6 +1042,47 @@ func (wt *Watcher) handleEvent(ctx context.Context, ev fsnotify.Event) {
 	if ev.Op&(fsnotify.Create|fsnotify.Write|fsnotify.Rename|fsnotify.Remove) == 0 {
 		return
 	}
+	// In the configured spelling, which is the one ScanSubtree finds under a
+	// configured root. A held root's events are dropped: the retry looks at
+	// it again. An event naming a root itself, removed or moved away, asks
+	// for a look at that root, never for a scan of the folder above it,
+	// which no root holds (watcher_hold.go).
+	name := wt.configuredName(ev.Name)
+	if root, itself := wt.scanner.rootOf(name); root != "" {
+		if _, held := wt.held[root]; held {
+			return
+		}
+		if itself && ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+			wt.lookAgain(ctx, root, msgWatchRootRewatched)
+			return
+		}
+		// A Create of a root the watcher watches is the folder above naming
+		// it again: fsnotify's kqueue backend forgets having seen a path it
+		// stops watching (a hold's release, a resume's) and sends a Create
+		// for it at the next change there. The root's tree is watched, and
+		// watching it asked for its scan (B651's tenth round). Which root it
+		// is was decided as every path's is (rootOf), never by a fold of
+		// names alone. That holds only while the root's own watch is still
+		// fsnotify's: kqueue drops a renamed root's watch without a word, and
+		// a Create at its path is then another folder put there, which is
+		// looked at and watched where it is now, or held (B651's eleventh
+		// round, Claude on round 10). On kqueue the look waits for the flush,
+		// as a new folder's watch does (below): fsnotify watches the folder at
+		// the root's path itself right after sending this event, and the
+		// look's Add would race that (B651's twelfth round, Codex on round
+		// 11).
+		if rw, watched := wt.rootWatches[root]; itself && watched && ev.Op&fsnotify.Create != 0 {
+			if _, installed := wt.watchSet()[rw]; installed {
+				return
+			}
+			if wt.fds != nil {
+				wt.fds.waitLook(root)
+				return
+			}
+			wt.lookAgain(ctx, root, msgWatchRootRewatched)
+			return
+		}
+	}
 	if ev.Op&fsnotify.Create != 0 {
 		if info, err := dirStat(ev.Name); err == nil && info.IsDir() {
 			// New subtree under a watched root — start watching it.
@@ -861,9 +1104,7 @@ func (wt *Watcher) handleEvent(ctx context.Context, ev fsnotify.Event) {
 			}
 		}
 	}
-	// The scan is asked for in the configured spelling, which is the one
-	// ScanSubtree finds under a configured root.
-	dir := filepath.Dir(wt.configuredName(ev.Name))
+	dir := filepath.Dir(name)
 	wt.scheduleScan(ctx, dir)
 	if hook := wt.afterEventForTests; hook != nil {
 		hook(ev)
@@ -915,6 +1156,15 @@ func (wt *Watcher) scheduleScan(ctx context.Context, dir string) {
 		wt.mu.Unlock()
 		defer wt.scanWG.Done()
 		if ctx.Err() != nil {
+			return
+		}
+		// The root the scan is under is looked at as the scan is due: an
+		// unmount takes the volume's content from under the watches, and the
+		// watch left on the bare mount point is what sent the event. A root
+		// that reads as a volume not mounted gets no scan, and Run's
+		// goroutine holds it (watcher_hold.go).
+		if root, look, absent := wt.absentRootOf(ctx, dir); absent {
+			wt.askHold(root, look)
 			return
 		}
 		watcherLogger.Info("subtree scan", "dir", dir)

@@ -3340,6 +3340,21 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// above it is --init-if-missing's seed config (writeAutoInitConfig),
 	// which can make the config's directories and write bridge.yaml, and
 	// only where no config is there.
+	//
+	// Ahead of it, a data dir the record beside the config names (the data
+	// dir a serve opened its database in) that holds neither its database nor
+	// its lock file is refused, never made: that is a volume not mounted yet
+	// (a NAS that starts the bridge before its disks), which a fresh data dir
+	// on the system disk would hide under a new TLS pair and no paired device
+	// (backlog B651, serve_data_dir_record.go). Its service manager starts
+	// serve again until the volume is there. The record is the one beside the
+	// file the boot read was of, here and where serve writes it below, never
+	// beside the file the config's name opens by then (serveDataDirRecord).
+	dataDirRecord := serveDataDirRecord(cfgBootFile)
+	if err := checkServeDataDirRecord(dataDirRecord, cfg.DataDir); err != nil {
+		fmt.Fprintf(stderr, "serve: %v\n", err)
+		return 1
+	}
 	if err := prepareServeDataDir(cfg.DataDir); err != nil {
 		fmt.Fprintf(stderr, "serve: %v; bridge serve starts only on a data directory it can make or use: "+
 			"move what stands in its way, or set dataDir in bridge.yaml to a directory\n", err)
@@ -3538,6 +3553,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		return 1
 	}
 	defer manifestStore.Close()
+	// The database is there now, and the lock file beside it: the record
+	// beside the file the boot read was of names this data dir for the check
+	// at the next start (backlog B651).
+	recordServeDataDir(dataDirRecord, cfg.DataDir)
 	// bgWriters tracks the background goroutines that WRITE the manifest store
 	// (periodic scanner, enricher, fs watcher, atlas harvester, and the admin
 	// server whose bgScans drain is the SQLite guard). On shutdown they MUST

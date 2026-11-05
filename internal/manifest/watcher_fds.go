@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"maps"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -209,6 +211,11 @@ type watchFDs struct {
 	// pending holds the new folders that wait for their watch
 	// (flushPendingAdds).
 	pending map[string]struct{}
+	// looks holds the configured roots a Create named while their own watch
+	// was gone, whose look waits as a new folder's watch does: fsnotify
+	// watches the folder now at the root's path itself right after sending
+	// the Create (handleEvent, lookAgainAfterCreate).
+	looks map[string]struct{}
 	// off says the watcher has released its watches for good.
 	off bool
 }
@@ -221,6 +228,7 @@ func newWatchFDs(limits WatchFDLimits, limitErr error) *watchFDs {
 		kids:     make(map[string]map[string]struct{}),
 		tops:     make(map[string]struct{}),
 		pending:  make(map[string]struct{}),
+		looks:    make(map[string]struct{}),
 	}
 }
 
@@ -288,6 +296,35 @@ func (f *watchFDs) release(p string) []string {
 	return out
 }
 
+// spellings is p and every path the account holds that is p in another case
+// and that same says may be p's folder: the folder a walk of the root it is in
+// listed as the volume spells it. p first; each one's subtree is recorded
+// under its own spelling, so releasing each releases them all. The account's
+// paths are clean, as p is, so a path whose whole does not match p's with case
+// folded is no spelling of it, and same is asked of the others alone.
+func (f *watchFDs) spellings(p string, same func(q string) bool) []string {
+	out := []string{p}
+	seen := map[string]struct{}{p: {}}
+	note := func(q string) {
+		if _, ok := seen[q]; ok {
+			return
+		}
+		if strings.EqualFold(p, q) && same(q) {
+			seen[q] = struct{}{}
+			out = append(out, q)
+		}
+	}
+	for q := range f.tops {
+		note(q)
+	}
+	for _, k := range f.kids {
+		for q := range k {
+			note(q)
+		}
+	}
+	return out
+}
+
 // dropPending forgets the new folders at or below p that wait for their watch.
 func (f *watchFDs) dropPending(p string) {
 	for d := range f.pending {
@@ -307,6 +344,7 @@ func (f *watchFDs) forget() {
 	clear(f.kids)
 	clear(f.tops)
 	clear(f.pending)
+	clear(f.looks)
 	f.n = 0
 }
 
@@ -327,6 +365,29 @@ func (f *watchFDs) wait(dir string) {
 		f.pending[filepath.Clean(dir)] = struct{}{}
 	}
 }
+
+// waitLook records a configured root whose look waits, as a new folder's
+// watch does, for fsnotify to have watched the folder now at its path itself
+// (flushPendingAdds).
+func (f *watchFDs) waitLook(root string) {
+	if !f.off {
+		f.looks[root] = struct{}{}
+	}
+}
+
+// lookWaits reports whether root's look waits for the flush. A nil account,
+// where fsnotify holds no open file per watched entry, has none waiting.
+func (f *watchFDs) lookWaits(root string) bool {
+	if f == nil {
+		return false
+	}
+	_, waits := f.looks[root]
+	return waits
+}
+
+// waiting reports whether a new folder's watch or a root's look waits for the
+// flush.
+func (f *watchFDs) waiting() bool { return len(f.pending) > 0 || len(f.looks) > 0 }
 
 // plannedWatch is a path asking for a tree's watches makes fsnotify hold:
 // a folder the watcher asks it to watch (watch), or an entry fsnotify opens
@@ -424,16 +485,30 @@ func (wt *Watcher) addTreeWithinBudget(root string, isConfiguredRoot bool) error
 
 // planWatches walks a tree as addTree would (walkWatchTree) and lists what
 // asking for its watches makes fsnotify hold, in walk order, each folder
-// ahead of the entries in it. The walk stops with errWatchBudget once the
-// paths the account does not hold yet pass what is left of the budget.
+// ahead of the entries in it. A root the watcher holds that is nested below
+// root (heldBelow) is not listed and not walked into: it is held as an entry
+// of the folder above it, which fsnotify opens with every other entry there.
+// The walk stops with errWatchBudget once the paths the account does not hold
+// yet pass what is left of the budget.
 func (wt *Watcher) planWatches(root string, isConfiguredRoot bool) (plan []plannedWatch, rootWatch string, err error) {
 	f := wt.fds
+	pass := wt.heldBelow(root)
+	var base string
 	room, need := f.budget-f.n, 0
-	rootWatch, err = walkWatchTree(root, isConfiguredRoot, func(path string, d fs.DirEntry, watch bool) error {
+	rootWatch, err = walkWatchTree(wt.walkRootOf(root, isConfiguredRoot), isConfiguredRoot, func(path string, d fs.DirEntry, watch bool) error {
 		if !kqueueHoldsEntry(d.Type()) {
 			return nil
 		}
 		path = filepath.Clean(path)
+		passed := false
+		if watch {
+			if base == "" {
+				// The walk's first folder is its root.
+				base = path
+			} else if pass.passes(base, path) {
+				watch, passed = false, true
+			}
+		}
 		if !f.held(path) {
 			need++
 			if need > room {
@@ -441,6 +516,9 @@ func (wt *Watcher) planWatches(root string, isConfiguredRoot bool) (plan []plann
 			}
 		}
 		plan = append(plan, plannedWatch{path: path, watch: watch})
+		if passed {
+			return filepath.SkipDir
+		}
 		return nil
 	})
 	return plan, rootWatch, err
@@ -457,16 +535,27 @@ func (wt *Watcher) planWatches(root string, isConfiguredRoot bool) (plan []plann
 // has finished, and it is what calls this. A Remove or Rename of that file
 // replaces it and does not call this; the next write of the new file does.
 // A folder that has gone, or cannot
-// be read, is left to the scan its Create asked for.
-func (wt *Watcher) flushPendingAdds() {
+// be read, is left to the scan its Create asked for. The roots whose look
+// waits are looked at after the folders (lookAgainAfterCreate): a look that
+// watches a root again Adds it, which the handler of the Create that named it
+// must not (B651's twelfth round, Codex on round 11).
+func (wt *Watcher) flushPendingAdds(ctx context.Context) {
 	f := wt.fds
-	if f == nil || f.off || len(f.pending) == 0 {
+	if f == nil || f.off || !f.waiting() {
 		return
 	}
 	dirs := f.pendingInOrder()
 	clear(f.pending)
 	for _, d := range dirs {
 		_ = wt.addTree(d, false)
+		if f.off {
+			return
+		}
+	}
+	roots := slices.Sorted(maps.Keys(f.looks))
+	clear(f.looks)
+	for _, root := range roots {
+		wt.lookAgainAfterCreate(ctx, root)
 		if f.off {
 			return
 		}
@@ -530,7 +619,9 @@ func (wt *Watcher) releaseTree(p string) {
 // read that change (measured: an album folder that gained a file and was
 // then renamed while nothing read fsnotify's events reached the reader as no
 // event at all), so no event says to release them. Run calls it every
-// reconcileEvery.
+// reconcileEvery. A configured root dropped this way is looked at again, and
+// held or watched again where it is now, by the check of the roots' own
+// watches (checkRootWatches), which no reconcile stands in for.
 func (wt *Watcher) reconcileWatches() {
 	f := wt.fds
 	if f == nil || f.off {

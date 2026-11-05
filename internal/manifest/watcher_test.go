@@ -569,7 +569,7 @@ func TestWatcherRuntimeDotDirGetsNoRootExemption(t *testing.T) {
 	// the folder itself (flushPendingAdds), which Run would ask for at the
 	// next event; elsewhere the flush has nothing to do.
 	w.handleEvent(context.Background(), fsnotify.Event{Name: trash, Op: fsnotify.Create})
-	w.flushPendingAdds()
+	w.flushPendingAdds(context.Background())
 
 	for _, p := range w.w.WatchList() {
 		if p == trash || strings.HasPrefix(p, trash+string(os.PathSeparator)) {
