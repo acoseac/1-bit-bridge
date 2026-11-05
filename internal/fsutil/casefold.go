@@ -133,13 +133,20 @@ func foldingIn(fsys foldingFS, dir string) CaseFolding {
 			// that no longer holds the probed name says the entry changed
 			// since the lookups (renamed to its other spelling, or gone), and
 			// tells nothing either way (B651's tenth round, Codex and Claude
-			// on round 9).
+			// on round 9). One that lacks the swapped spelling answers only
+			// once a lookup of it after the listing still finds the file: on
+			// a case-sensitive volume a hard link's second name unlinked
+			// since the lookups is gone from the listing and from a lookup
+			// alike, where a volume that folds still finds the entry (B651's
+			// eleventh round, Codex and Claude on round 10).
 			hasName, hasSwapped, known := listsSpellings(fsys, dir, entries, whole, name, swapped)
 			switch {
 			case !known || !hasName:
 				continue
 			case hasSwapped:
 				return CaseSensitive
+			case !stillFound(fsys, dir, swapped, other):
+				continue
 			}
 			return CaseInsensitive
 		case errors.Is(otherErr, fs.ErrNotExist):
