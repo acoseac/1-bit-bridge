@@ -365,12 +365,12 @@ func TestDACInspectShowsNoModelOfAUnitThatChangedWhileRead(t *testing.T) {
 		t.Fatal("no USB card 5 in the GO bar tree")
 	}
 	read := func(change func(q *alsa.QualificationIdentity)) dacModelReader {
-		return func(int) (alsa.QualificationIdentity, error) {
+		return dacModelReader{descriptors: func(int) (alsa.QualificationIdentity, error) {
 			q := alsa.QualificationIdentity{Manufacturer: "iFi (by AMR)", Product: "iFi (by AMR) HD USB Audio", BCDDevice: "0170",
 				Port: card.USB.Port, DevNum: card.USB.DevNum, Interface: card.USB.Interface}
 			change(&q)
 			return q, nil
-		}
+		}, card: obs.Sysfs.Card}
 	}
 	model := func(r dacModelReader) dacCardView {
 		for _, c := range dacInspect(dacEnv(), dacConfig(t, ""), inv, r).Cards {
@@ -431,7 +431,7 @@ func TestDACInspectShowsNoModelOfAUnitReplacedAsItsStringsWereRead(t *testing.T)
 		return alsa.QualificationIdentity{Manufacturer: "Synthetic Audio", Product: "Synthetic DAC", BCDDevice: "0100",
 			Port: u.Port, DevNum: u.DevNum, Interface: u.Interface}, nil
 	}
-	for _, c := range dacInspect(dacEnv(), dacConfig(t, ""), inv, read).Cards {
+	for _, c := range dacInspect(dacEnv(), dacConfig(t, ""), inv, dacModelReader{descriptors: read, card: obs.Sysfs.Card}).Cards {
 		if c.Index != 5 {
 			continue
 		}
