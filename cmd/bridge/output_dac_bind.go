@@ -349,7 +349,7 @@ func dacInspect(env outputBindEnv, configPath string, inv binding.Inventory, mod
 			id, label, iface := u.ID.String(), u.Serial.Label(), u.Interface
 			v.USBID, v.SerialLabel, v.Interface = &id, &label, &iface
 			v.Port, v.PortProblem = u.Port, u.PortProblem
-			v.readModel(model, c.Index, u)
+			v.readModel(model, c.Index, u, c.Dir)
 		}
 		for _, e := range c.Endpoints {
 			v.Playback = append(v.Playback, e.String())
@@ -377,7 +377,16 @@ func dacInspect(env outputBindEnv, configPath string, inv binding.Inventory, mod
 // strings; inspect, which binds nothing, keeps them for a card the inventory
 // holds with no port either (portlessReading), with the device number and
 // interface checks any card has.
-func (v *dacCardView) readModel(read dacModelReader, card int, u *alsa.USBIdentity) {
+//
+// The reading again is held to the card's place too: dir, the card's
+// directory with its links resolved as the inventory read it (binding.Card's
+// Dir), and the same directory resolved afresh, never the link's own name
+// (class/sound/cardN), which a unit that takes the card's number inherits.
+// Without a port, nothing else tells two units of one model with no serial
+// apart: on two buses, which number their devices alone, they can share the
+// interface and the device number (Codex on #1402). Two directories that
+// could not be resolved are no match.
+func (v *dacCardView) readModel(read dacModelReader, card int, u *alsa.USBIdentity, dir string) {
 	q, err := read.descriptors(card)
 	switch {
 	case err != nil && !portlessReading(q, u):
@@ -388,7 +397,7 @@ func (v *dacCardView) readModel(read dacModelReader, card int, u *alsa.USBIdenti
 		return
 	}
 	if again, ok := read.card(card); !ok || again.Kind != alsa.IdentityUSB || again.USB == nil || again.Vanished ||
-		!binding.SameUnit(*again.USB, *u) || again.USB.DevNum != u.DevNum {
+		!binding.SameUnit(*again.USB, *u) || again.USB.DevNum != u.DevNum || dir == "" || again.Dir != dir {
 		v.ModelProblem = "not read: the card changed while it was read"
 		return
 	}
