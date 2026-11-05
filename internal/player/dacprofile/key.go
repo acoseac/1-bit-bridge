@@ -71,8 +71,10 @@ func checkProduct(p string) error {
 	return nil
 }
 
-// VendorID and ProductID are the model's USB IDs.
-func (k Key) VendorID() uint16  { return k.vendorID }
+// VendorID is the model's USB vendor ID.
+func (k Key) VendorID() uint16 { return k.vendorID }
+
+// ProductID is the model's USB product ID.
 func (k Key) ProductID() uint16 { return k.productID }
 
 // Interface is the USB interface the card is, and whether the key has one.
