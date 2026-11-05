@@ -11,13 +11,16 @@ type ALSAFormat string
 const (
 	// S16LE is two little-endian bytes per signed sample.
 	S16LE ALSAFormat = "S16_LE"
-	// S243LE is three little-endian bytes per signed sample.
+	// S243LE is three little-endian bytes per signed sample. A 16-bit source
+	// is shifted left eight bits, the low byte zero.
 	S243LE ALSAFormat = "S24_3LE"
-	// S24LE is a four-byte container with the low 24 bits significant.
+	// S24LE is a four-byte container with the low 24 bits significant. A
+	// 16-bit source is shifted left eight bits within them, the low byte zero.
 	S24LE ALSAFormat = "S24_LE"
 	// S32LE is four little-endian bytes per signed sample. When packing a
 	// 24-bit source, samples are shifted left eight bits and the low byte is
-	// zero so every source bit is preserved under lossless widening.
+	// zero, and a 16-bit source sixteen, the low two bytes zero, so every
+	// source bit is preserved under lossless widening.
 	S32LE ALSAFormat = "S32_LE"
 )
 
@@ -25,7 +28,11 @@ const (
 // in the named ALSA layout. n is the number of sample values (channels ×
 // frames). dst must have room for the packed size; use PackedBytes.
 //
-// Lossless widening preserves the normalized value and every source bit.
+// Lossless widening preserves the normalized value and every source bit: a
+// container wider than the samples takes them shifted to its top, the bits
+// below them zero. S16_LE packs 16 valid bits; S24_3LE and S24_LE 16 or 24;
+// S32_LE 16, 24 or 32 (B735: a DAC with no S16_LE plays 16 bits in a wider
+// container).
 func Pack(dst []byte, samples []int32, validBits int, alsa ALSAFormat) (int, error) {
 	if err := checkValidBits(validBits); err != nil {
 		return 0, err
@@ -46,27 +53,35 @@ func Pack(dst []byte, samples []int32, validBits int, alsa ALSAFormat) (int, err
 			binary.LittleEndian.PutUint16(dst[i*2:], uint16(int16(s)))
 		}
 	case S243LE:
-		if validBits != 24 {
-			return 0, fmt.Errorf("player format: S24_3LE requires 24 valid bits, got %d", validBits)
+		shift, err := into24(alsa, validBits)
+		if err != nil {
+			return 0, err
 		}
 		for i, s := range samples {
-			v := uint32(s) & 0xFFFFFF
+			v := (uint32(s) << shift) & 0xFFFFFF
 			off := i * 3
 			dst[off] = byte(v)
 			dst[off+1] = byte(v >> 8)
 			dst[off+2] = byte(v >> 16)
 		}
 	case S24LE:
-		if validBits != 24 {
-			return 0, fmt.Errorf("player format: S24_LE requires 24 valid bits, got %d", validBits)
+		shift, err := into24(alsa, validBits)
+		if err != nil {
+			return 0, err
 		}
 		for i, s := range samples {
 			// Four-byte container, low 24 bits significant; high byte zero
-			// (LSB-aligned). Sign is in bit 23.
-			binary.LittleEndian.PutUint32(dst[i*4:], uint32(s)&0xFFFFFF)
+			// (LSB-aligned), for a negative sample too. Sign is in bit 23.
+			binary.LittleEndian.PutUint32(dst[i*4:], (uint32(s)<<shift)&0xFFFFFF)
 		}
 	case S32LE:
 		switch validBits {
+		case 16:
+			for i, s := range samples {
+				// Shift left sixteen; low two bytes zero. Preserves all 16
+				// source bits.
+				binary.LittleEndian.PutUint32(dst[i*4:], uint32(s)<<16)
+			}
 		case 24:
 			for i, s := range samples {
 				// Shift left eight; low byte zero. Preserves all 24 source bits.
@@ -77,7 +92,7 @@ func Pack(dst []byte, samples []int32, validBits int, alsa ALSAFormat) (int, err
 				binary.LittleEndian.PutUint32(dst[i*4:], uint32(s))
 			}
 		default:
-			return 0, fmt.Errorf("player format: S32_LE packing accepts 24 or 32 valid bits, got %d", validBits)
+			return 0, fmt.Errorf("player format: S32_LE packing accepts 16, 24 or 32 valid bits, got %d", validBits)
 		}
 	default:
 		return 0, fmt.Errorf("player format: unknown ALSA format %q", alsa)
@@ -98,6 +113,19 @@ func PackedBytes(n int, alsa ALSAFormat) int {
 	default:
 		return -1
 	}
+}
+
+// into24 is the shift that packs validBits-bit samples into f, a container
+// with 24 significant bits: eight for 16 bits, the low byte zero; none for
+// 24. It refuses 32, which a 24-bit container cannot carry.
+func into24(f ALSAFormat, validBits int) (uint, error) {
+	switch validBits {
+	case 16:
+		return 8, nil
+	case 24:
+		return 0, nil
+	}
+	return 0, fmt.Errorf("player format: %s packs 16 or 24 valid bits, got %d", f, validBits)
 }
 
 func checkValidBits(v int) error {

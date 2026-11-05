@@ -10,6 +10,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/player/decode"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
+	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 	"github.com/acoseac/1-bit-bridge/internal/player/qualification"
 	"io"
 	"os"
@@ -500,20 +501,32 @@ func playNativeReference(ctx context.Context, root string, fixture qualification
 	if e := ctx.Err(); e != nil {
 		return e
 	}
-	f := format.S32LE
-	if p.ValidBits == 16 {
-		f = format.S16LE
-	}
-	if p.ValidBits == 24 {
-		f = format.S243LE
-	}
+	// The packings the backend offers the reference's depth, in its order
+	// (playback.Packings): the depth's own container first, then the wider
+	// ones, each the hardware refuses closed unwritten before the next, so a
+	// DAC with no S16_LE, or no S24_3LE, plays a reference shifted into
+	// S32_LE (B735). A DoP reference is S32_LE alone, DoP's own carrier, from
+	// 24 or 32 bits, as the runbook asks of it.
+	formats := playback.Packings(p.ValidBits)
 	if len(forceS32) > 0 && forceS32[0] {
 		if p.ValidBits != 24 && p.ValidBits != 32 {
 			return errors.New("DoP reference requires 24 or 32-bit PCM for S32_LE")
 		}
-		f = format.S32LE
+		formats = []format.ALSAFormat{format.S32LE}
 	}
-	s, e := open(ctx, alsapcm.SinkConfig{Endpoint: ep, Admit: check, Transport: alsapcm.Transport{Kind: format.KindPCM, Format: f, RateHz: p.RateHz, Channels: p.Channels, ValidBits: p.ValidBits}})
+	if len(formats) == 0 {
+		return fmt.Errorf("reference has %d valid bits, which no packing carries", p.ValidBits)
+	}
+	var (
+		s nativePCMSink
+		f format.ALSAFormat
+	)
+	for _, f = range formats {
+		s, e = open(ctx, alsapcm.SinkConfig{Endpoint: ep, Admit: check, Transport: alsapcm.Transport{Kind: format.KindPCM, Format: f, RateHz: p.RateHz, Channels: p.Channels, ValidBits: p.ValidBits}})
+		if r := alsapcm.ReasonOf(e); e == nil || (r != alsapcm.ReasonNotSupported && r != alsapcm.ReasonMismatch) {
+			break
+		}
+	}
 	if e != nil {
 		return e
 	}

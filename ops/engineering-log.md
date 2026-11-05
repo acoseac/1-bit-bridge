@@ -73993,6 +73993,1181 @@ package green again, and `git status` empty.
 - Not run: `make test` (the race suite) and `make build-all`, which the brief
   did not ask for.
 
+## 2026-11-05 — B735: 16-bit PCM widens into S24_3LE, S24_LE and S32_LE on a DAC with no S16_LE
+
+Backlog B735, from the owner's Pi with a Mytek Brooklyn DAC+ (bridge
+v0.2.2-20) on 2026-11-05: "1-bit Bridge Player couldn't play this track" on a
+44.1 kHz, 16-bit FLAC. Worker b735 on legion0 (Ubuntu 26.04, linux/amd64,
+go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`), branch
+`fix/b735-sixteen-bits-in-wider-containers` from main 1a78b58a, the
+orchestrator's brief with Codex's and the Claude API reviewer's binding notes.
+Commits: the red test 197f72be, the fix b74bd9f3, then this record. The rules
+go into `.claude/rules/player.md` through a checked patch (`rules-b735.patch`:
+PR 1a's packers bullet and PR 4b2's "Samples reach the DAC" bullet; this
+worker cannot write `.claude/`).
+
+**What the owner hit.** The journal: `transport_not_supported`, "the DAC takes
+16-bit PCM at 44100 Hz in none of S16_LE: … the hardware does not take S16_LE,
+2 channels, 44100 Hz: it offers S32_LE (and formats 31, 52, which this backend
+does not pack)", then `all_unplayable`. The same session played 24-bit tracks
+at 96 and 44.1 kHz in S32_LE. The DAC's `stream0` lists S32_LE and DSD_U32_BE
+at 44.1 to 384 kHz (format 31 is SNDRV_PCM_FORMAT_SPECIAL, 52 DSD_U32_BE).
+B470's §1 table packed 16 bits as S16_LE alone (`packings[16]`) where 24 bits
+could go in S24_3LE, S24_LE or S32_LE, so on that DAC, and any whose PCM
+formats lack S16_LE, every CD-quality track was refused. Released in v0.2.2.
+
+**Red first.** `TestPlaybackPlaysSixteenBitsOnADACWithoutS16LE` gives the fake
+DAC that very format mask (`HardwareFormats(10, 31, 52)`) and plays a 16-bit,
+44.1 kHz WAV through the engine's `Run`, the backend and the real sink. At
+197f72be, the test alone on main's code (run in a copy of the tree holding
+that commit's files), Play answered `all_unplayable` and the entry's skip
+read "transport_not_supported: the DAC takes 16-bit PCM at 44100 Hz in none
+of S16_LE: alsapcm: card 5 device 0: hw_refine: parameters_not_supported: the
+hardware does not take S16_LE, 2 channels, 44100 Hz: it offers S32_LE (and
+formats 31, 52, which this backend does not pack), 2 channels, 44100..384000
+Hz": the owner's line. At b74bd9f3 it plays: S32_LE committed in four opens
+(S16_LE, S24_3LE and S24_LE refused at the refine, each closed unwritten), the
+first two frames' sixteen bytes as the test spells them out, every sample
+unpacked and hashed equal, the open's note S32_LE from 16 valid bits, and the
+backend's facts S32_LE, 16, `pcm`.
+
+**The fix: three gates, together.**
+- `packings[16]` (internal/player/playback/packing.go) is S16_LE, S24_3LE,
+  S24_LE, S32_LE: the depth's own container first, then the wider ones
+  narrowest first, the 24-bit row's order. `formatsFor` is unchanged, so a
+  packing the unit took for a rate and depth still comes before the table
+  until `Discard`: "S16_LE first" holds before a packing is remembered. A DAC
+  that takes S16_LE is offered it first and opens once, no change there
+  (`TestPlaybackPrefersTheDepthsOwnContainer`, now for each depth).
+- `carries` (internal/alsapcm/sink.go): S24_3LE and S24_LE carry 16 or 24
+  valid bits, S32_LE 16, 24 or 32.
+- `format.Pack` (internal/player/format/pack.go): 16 bits into S24_3LE and
+  S24_LE shift left eight (`into24`), masked to 24 bits, so the low byte is
+  zero and S24_LE's top byte stays zero for a negative sample too, its sign at
+  bit 23, the 24-bit path's layout byte for byte; into S32_LE `uint32(s)<<16`,
+  the low two bytes zero. S24_3LE and S24_LE follow the rule as cleanly as
+  S32_LE, and nothing in the design or the code excludes them, so they are in
+  the table: a DAC that offers S24_3LE and no S16_LE gets 16 bits there before
+  S32_LE.
+- `playback.Packings` hands out a row of the table, copied, for the
+  qualification harness (below).
+
+**What reports the playback.** The transport keeps the source's 16 valid bits
+(`transportFor`). The open's `Note` carries the kernel's committed `Params`
+(format S32_LE) and that transport, so serve's "player: the DAC is opened"
+logs `format=S32_LE` and `validBits=16`, `output play` prints "S32_LE, 2
+channels, 44100 Hz, 16 valid bits", and GET /v1/outputs' `playback`
+(`PlaybackFacts`, from the sink's transport) says `format` S32_LE, `validBits`
+16, `transport` pcm. The hardware's precision stays apart from the source's:
+`alsapcm.Config` has no valid bits, `setHW` refines the format, the STD
+subformat, the channels and the rate, and `readBack` records `hw.msbits` as
+`Params.Msbits`; nothing sets SAMPLE_BITS or msbits. Only the DoP sink reads
+`Msbits` (24 to 32), unchanged. **PROTOCOL.md needs no line**:
+`playback.validBits` is an always-present integer apart from `format`, and
+S32_LE is among its PCM format tokens already; no wire change, no
+`ProtocolVersion` bump, no mirror PR. The iOS app's reading of `playback`
+could not be checked here (there is no iOS checkout on legion0): owed in the
+companion repo, to confirm it reads `validBits` and infers no depth from
+`format`.
+
+**The audit.**
+- `bridge output pcm-test`: `pcmTestPacks` took 16 bits in S16_LE alone. It
+  takes them in all four now, its defaults unchanged (S16_LE for 16 bits,
+  S24_3LE for 24, S32_LE for 32), and its refusals say what each format
+  carries (`pcmTestCarries`). A DAC with no S16_LE runs the tone with `--bits
+  16 --format S32_LE` (or S24_3LE, S24_LE), and `--file` with `--format
+  S32_LE` plays 16- and 24-bit files. The harness still asks the hardware for
+  exactly what it is told, as its help says; the help names the widening.
+- `--sink`'s file default (output_pcmtest_sink.go): unchanged, the depth's own
+  container, with `--format` as above.
+- `bridge output dsd-test`'s native PCM reference (`playNativeReference`): it
+  took S16_LE for 16 bits and S24_3LE for 24, one offer each, so a DAC with
+  S32_LE alone could run neither reference. It is offered `playback.Packings`
+  in order now, passing over a refusal the hardware gives
+  (`parameters_not_supported`, `parameters_mismatch`); any other refusal ends
+  it at once, and a DAC that takes the depth's own container is asked for it
+  alone, as before. The DoP reference stays S32_LE alone from 24 or 32 bits
+  (the runbook: "PCM references must be 24- or 32-bit WAV at the exact
+  carrier"): a DAC with S32_LE alone runs it already, and taking 16-bit DoP
+  references would change the qualification's documented contract, which is
+  the owner's call. The dsd-test's backend-lifecycle scenario plays its PCM
+  fixtures through the real backend, widened as serve's are.
+- `bridge output play`: the shared backend, no packing of its own.
+- The tests' own decoders: the rig's `unpack` (playback_rig_test.go) read
+  S24_3LE and S24_LE as 24-bit values and reversed only 24 bits in S32_LE, and
+  pcm-test's `unpackPCMTest` likewise. Both decode by arithmetic now, apart
+  from the packer: the container's significant bytes as a signed value of its
+  width, divided exactly by 2 to the bits below the sample, those bits zero,
+  and S24_LE's top byte zero, before any hash is compared.
+- "Shifted left eight" claims that now meet 16 bits: pack.go's format docs,
+  packing.go's and playback's doc.go, sink.go's `Transport` and `carries`
+  docs, and player.md's two bullets (the patch). `signalpath`, the MPD
+  reading's verdict, already calls a 16-bit file in a wider container
+  `format_preserved`; unchanged.
+- No volume, gain or dither exists or was added; a DAC's own volume path is
+  untouched.
+- Still refused: 8, 12 and 20 bits (no decoder gives them; `Pack` and
+  `carries` refuse them), and any depth in a narrower container (24 or 32
+  bits in S16_LE, 32 in either 24-bit layout).
+
+**A consequence for DSD after a 16-bit track.** A PCM edge key names the
+packing and the valid bits (`pcm/FORMAT/RATE/CHANNELS/VALIDBITS/zero`), and
+the backend opens a DSD occurrence after PCM only along an edge its approval's
+lifecycle passed (`checkEdge`; the runbook: "Edges must occur in the lifecycle
+reports"). On a DAC with no S16_LE a 16-bit track is now installed as
+`pcm/S32_LE/44100/2/16/zero`, so DSD straight after one opens only under an
+approval whose lifecycle passed that edge, as for every PCM key. Before B735
+no such track played there, so no approval holds that edge: on the Mytek a
+DSD track that follows a 16-bit one may now be refused at its open, where it
+used to follow the skipped track. The gate is unchanged (PCM opens never
+depend on DSD approval or edges); listed for the owner.
+
+**The qualification.** `internal/alsapcm/` and `cmd/bridge/output_dsdtest` are
+guarded, their tests included: `qualificationVersion` 36 to 37, the runbook's
+five mentions (`TestQualificationRunbookVersion`) and its "Version 37 covers
+backlog B735" entry. `LegacyVersion` stays 35, so production still reads an
+owner's approval of versions 35 to 37 through `ReadLegacyApproval`
+(`TestProductionStillPlaysAVersion35RecordAfterTheBump` and the legacy tests,
+which take the versions as parameters, pass at 37): no owner re-qualifies,
+while the harness's own evidence of version 36 (contacts, matrix and
+lifecycle reports, candidates) is stale to the harness, as at every bump.
+format/pack.go and playback/packing.go are outside the guard by B728 B1's
+design (`TestAChangeOutsideTheDSDBytePathNeedsNoBump`). B728's plan names 37
+for its B4 (38 for B7, 39 for B11): whichever merges second takes the next.
+
+**The tests.**
+- `TestPlaybackIsBitExactThroughTheEngine`: every PR 1 golden in every
+  packing of its depth, through the engine's `Run`, the fifteen 16-bit
+  goldens (FLAC, WAV, AIFF, AIFC and ALAC) now in all four: 99 leaves (60 for
+  16 bits, 36 for 24, 3 for 32) where there were 54; each fake DAC takes one
+  packing, and the opens before it are the refused offers.
+- `TestPlaybackWidensSixteenBitsIntoTheContainerTheDACTakes`: for each wider
+  container, a DAC that takes it alone hears the first two frames (−0x1235,
+  0x1234, −32768, 32767) byte for byte, then the rest hashed.
+- `TestPlaybackPlaysSixteenBitsOnADACWithoutS16LE` (the red), and
+  `TestPlaybackPrefersTheDepthsOwnContainer` (16, 24 and 32 bits, one open
+  each).
+- `TestPackSixteenBitsInEveryWiderContainer` (literal bytes, negative samples
+  among them), `TestPackEverySixteenBitValueKeepsItsValue` (all 65,536
+  values, each container read back by arithmetic) and
+  `TestPackRefusesMismatchedBits` (what stays refused).
+- `TestTheSinkCarriesWhatTheFormatPackagePacks` (the sink's gate is the
+  packer's, for each format and depth, and a sink opens for 16 bits in each
+  wider container) and `TestSinkRefusesWhatItCannotPlay` (24 bits in S16_LE,
+  32 in S24_LE, 8 in S32_LE and 20 in S24_3LE, where it had 16 in S24_3LE).
+- `TestThePackingsAreTheDesignsTable`: the new row, each pair one the packer
+  packs, and `Packings` a copy.
+- The contract test's transport refusal is 24 bits on a DAC with S16_LE alone
+  (its 16-bit row now plays).
+- cmd/bridge: `TestOutputPCMTestPlaysSixteenBitsInAWiderFormat`,
+  `TestOutputPCMTestSinkPlaysSixteenBitsInS32LE`,
+  `TestOutputPCMTestToneIsQuietAndSeamless` (16 bits in each wider format),
+  `TestOutputPCMTestSinkRefusesWhatItCannotPlay` (a 24-bit file in S16_LE) and
+  `TestTheNativeReferenceIsOfferedTheBackendsPackings`.
+
+**Negative controls**, on b74bd9f3, by a runner in the worker's scratch that
+made each exact-once replacement, built the test binaries of the packages it
+touches, ran format's, playback's and alsapcm's tests whole and cmd/bridge's
+pcm-test and reference tests, and put the bytes back from memory. The
+baseline was green in all four (16, 36, 249 and 30 top-level tests).
+
+| Mutation | Red |
+|---|---|
+| C1: 16 bits in S32_LE shifted eight, not sixteen | format: `TestPackSixteenBitsInEveryWiderContainer`, `TestPackEverySixteenBitValueKeepsItsValue`; alsapcm: `TestPlaybackIsBitExactThroughTheEngine` (the fifteen 16-bit S32_LE leaves), `TestPlaybackWidensSixteenBitsIntoTheContainerTheDACTakes` (S32_LE), `TestPlaybackPlaysSixteenBitsOnADACWithoutS16LE`; cmd/bridge: `TestOutputPCMTestToneIsQuietAndSeamless`, `TestOutputPCMTestPlaysSixteenBitsInAWiderFormat`, `TestOutputPCMTestSinkPlaysSixteenBitsInS32LE`, `TestTheNativeReferenceIsOfferedTheBackendsPackings` |
+| C2: S32_LE offered before S16_LE | playback: `TestThePackingsAreTheDesignsTable`; alsapcm: 17 tests, among them `TestPlaybackPrefersTheDepthsOwnContainer`, `TestPlaybackIsBitExactThroughTheEngine`'s 16-bit leaves and every test whose 16-bit content the default fake (S16_LE, S24_3LE, S32_LE) then took in S32_LE, before `TestPlaybackDiscardsBufferedSuccessorsAtASeek` panicked on its own S16_LE-sized slice of what the DAC heard and ended that binary (exit 2); cmd/bridge: `TestTheNativeReferenceIsOfferedTheBackendsPackings` (S32_LE asked first) |
+| C3a: S32_LE's low two bytes the sample again | format: the two widening tests; alsapcm and cmd/bridge: the same as C1 |
+| C3b: S24_3LE's low byte the sample's low byte | format: the two widening tests; alsapcm: `TestPlaybackIsBitExactThroughTheEngine` (the fifteen 16-bit S24_3LE leaves), `TestPlaybackWidensSixteenBitsIntoTheContainerTheDACTakes` (S24_3LE); cmd/bridge: `TestOutputPCMTestToneIsQuietAndSeamless` |
+| C4: S24_LE's high byte sign-extended (the 24-bit mask gone) | format: the two widening tests and `TestPackS24LELow24`; alsapcm: `TestPlaybackIsBitExactThroughTheEngine` (every S24_LE leaf, 16- and 24-bit), `TestPlaybackWidensSixteenBitsIntoTheContainerTheDACTakes` (S24_LE); cmd/bridge: `TestOutputPCMTestToneIsQuietAndSeamless` |
+| C5: the sink's `carries` as before B735 | alsapcm: `TestTheSinkCarriesWhatTheFormatPackagePacks`, the widened leaves of `TestPlaybackIsBitExactThroughTheEngine`, `TestPlaybackWidensSixteenBitsIntoTheContainerTheDACTakes`, `TestPlaybackPlaysSixteenBitsOnADACWithoutS16LE` and `TestProductionNegotiationCannotSelectNative` (a sink's `bad_config` is no transport refusal): the second gate is load-bearing alone |
+| C6: the reference offered its first packing alone | cmd/bridge: `TestTheNativeReferenceIsOfferedTheBackendsPackings`, its 16- and 24-bit rows on a DAC with S32_LE alone |
+| C7: `pcmTestPacks` as before B735 | cmd/bridge: `TestOutputPCMTestPlaysSixteenBitsInAWiderFormat`, `TestOutputPCMTestSinkPlaysSixteenBitsInS32LE` |
+
+After each restore the five files were their committed bytes, and `git
+status` was empty at the end.
+
+**Checks.** On legion0:
+- `make test-fast TMPDIR=<worktree>/.tmp/_b735/gotmp` (a `_` directory, which
+  the build-site census skips): 81 packages ok, 14 with no test files, none
+  failed, in 463 s. The Linux-only packages ran here, not only vetted:
+  alsapcm, alsa, atomicwrite and the engine among them.
+- `go test -race ./internal/player/... ./internal/alsapcm/...`: the twelve
+  packages with tests ok.
+- `make vet`, native, `GOOS=windows`, `GOOS=darwin`, and `GOOS=linux` with
+  `GOARCH=386` and with `GOARCH=arm64`, the Pi's: clean.
+- go1.27.3's gofmt on the changed Go files: clean.
+- The native-integration overlay (`scripts/native-integration-overlay.py`),
+  then `go test -race -tags ts_omit_webclient,ts_omit_debugeventbus -overlay
+  <it> ./cmd/bridge -run '^TestNativeIntegration' -timeout 5m -watchdog 10s`
+  (13 tests) and the same over `./internal/player/playback` (29): ok.
+- The qualification check, `go run -tags
+  ts_omit_webclient,ts_omit_debugeventbus ./scripts/qualification-version
+  -base 1a78b58a -head HEAD`: "qualification version OK: 1a78b58a..HEAD".
+- `make docs-check`: ok (CLAUDE.md 72.3 %, the largest rules file,
+  dlna-upnp.md, 97.0 %, the worst load, player_openhome_test.go's, 63.5 %); in
+  a copy of the tree with the rules patch applied, ok, player.md from 94,737
+  to 95,986 bytes (96.0 %), the worst load 63.8 %.
+- The rules patch: a strict applier (each hunk's context and removed lines
+  byte for byte at the line it states) reproduces the patched file and refuses
+  the patch with one context byte changed, and `git apply --check` takes it.
+  In that copy `TestEveryCitedTestNameExists` passes; with a citation of a
+  test that does not exist planted in its player.md, and another in this
+  record, it fails naming both, so the sweep read the patched files.
+- Not run: `make test` (the whole race suite) and `make build-all`, which the
+  brief did not ask for.
+
+**Owed on hardware.** The owner's Mytek Brooklyn DAC+, by ear, with a test
+build the orchestrator deploys there with the owner's OK: a 16-bit FLAC plays
+at its usual level, clean; `/proc/asound/card5/pcm0p/sub0/hw_params` reads
+`format: S32_LE` at the file's rate while it plays; the journal says "player:
+the DAC is opened" with `format=S32_LE` and `validBits=16`. The failure modes
+to listen for: a wrong shift plays the right waveform far too quietly (eight
+bits instead of sixteen in S32_LE is −48 dB), and a byte-order error is noise.
+And a DSD track straight after a 16-bit one, for the edge above.
+
+## 2026-11-04 — B728 B2: the DAC profile database
+
+PR B2 of the DSD capability plan (`ops/plan-b728-dsd-capability-design.md`:
+its section 2, item 10 of section 9.1, and B2's row of section 11), on
+`feat/b728-b2-dac-profiles` from main 5d38fa43, which holds B1 (#1400).
+Codex and Argon reviewed the brief against #1400's head, and the
+orchestrator's decisions on their notes were binding: the iFi capture tests
+shared-ID matching and establishes no DoP, raw-maximum or native claim for
+its unit; no QX13 profile ships while its identity is a placeholder, and its
+test uses a fixture; section 2.4's two checks are part of the PR, the
+kernel-derived entries against the pinned tag (named, not "v6.x") and the
+imported DoP rates against their iOS rows, the latter against the registry
+file at iOS cd125088 the brief supplies, since this host has no iOS
+checkout; and the seed's raw text (the captures, the iOS rows' prose) is
+input alone, never profile prose or committed evidence. The rules change
+ships as `rules-b728-b2.patch` (outside the tree), its long form and this
+record committed here.
+
+**What changed.**
+- `internal/player/dacprofile` (new, unguarded): schema 1 as section 2.1
+  gives it, `analogVolumeControls` and `unityAtRawMax` with their evidence
+  included; `Parse` (a strict decode, then the lint, refusing the database
+  on any problem) and `Default` over the embedded `profiles.json`; `Lint`;
+  `Match`; `Key` with its canonical form, `dacKey` and `Equal`.
+- `bridge output dac inspect --json` gains `manufacturer`, `product`,
+  `bcdDevice` and `modelProblem` per card, and the text form a `model:`
+  line. They come through `alsa.SysfsReader.Qualification`, the reader
+  section 2.3 names, so nothing under `internal/alsa/` (guarded whole since
+  B1's round 3) changed, and the qualification version stays 36; that reader
+  is all or nothing (below). A unit the second reading finds at another
+  port, interface or enumeration than the inventory's shows none.
+- `scripts/dac-profiles/kernel-check.sh` (CI's new `dac-profiles` job, in
+  the gate's fan-in; its `go test` line in the build-site census) and
+  `scripts/dac-profiles/ios-check.py` (the author's), with a README.
+- `CLAUDE.md`: the package's architecture row, and its routing to
+  `player.md`. `ops/History-rules-player.md`: the B2 bullet's long form.
+  The patch adds the bullet (section 9.1, item 10, verbatim) to player.md's
+  B728 section and `scripts/dac-profiles/**` to its paths.
+
+**What each seed DAC's profile became.**
+- AURALiC Altair G1, `auralic.altair.g1` (1511:0062, product `ALTAIR G1
+  USB Audio 2.0`): native `DSD_U32_BE` to DSD512 (22579200), from its
+  capture's stream file (interface 1, altset 3, frame rates to 705600).
+  No DoP claim: it has no iOS row. The kernel's `DSD_RAW` flag for vendor
+  1511 is vendor-wide and seeds nothing.
+- Mytek Brooklyn DAC+, `mytek.brooklyn.dac.plus` (25ce:0025, product
+  `Brooklyn DAC+`): native `DSD_U32_BE` to DSD256 (11289600) from its
+  capture (interface 2, altset 2, to 352800); DoP heard to DSD128
+  (5644800) with DSD256 refused, from iOS `mytek.brooklyn.dac.plus` at
+  cd125088 (confirmed on hardware, the row's log of 2026-06-21), and on
+  Linux its S32_LE altset stops at 384000, below DSD256's 705600 carrier.
+  No stated rate: the row's DSD256 is a comment, not a DoP figure.
+- Chord Hugo 2, `chord.hugo2` (245f:0815, product `Hugo2`): no native
+  claim, since its stream file lists S32_LE alone; DoP heard to DSD256
+  (11289600), iOS `chord.hugo2` at cd125088, hardware-confirmed
+  2026-08-29, and its Linux altset takes the 705600 carrier at 32 bits;
+  `dsdPrefillMs` 700, the row's DSD resync delay of 0.7 s.
+- The iFi unit on 20b1:0010 (product `iFi (by AMR) HD USB Audio`): no
+  profile. 20b1:0010 is a shared reference ID, and the capture establishes
+  no claim (full speed, PCM to 96 kHz, no DSD altset, so not even DSD64's
+  176.4 kHz DoP carrier; the iOS `ifi.golink` and `ifi.generic` rows are
+  other models'), so the unit reads as unknown. An identity-only profile
+  was not made: it would make the model "known" while claiming nothing,
+  and section 3.2's `auto` row for a known DAC plays native wherever the
+  kernel offers it.
+- Shared reference IDs: 20b1:0010 (the owner's identification, the iFi
+  capture) and 16d0:071a, the Amanero Combo384 board, whose kernel quirk
+  follows the board's bcdDevice alone, so it seeds nothing.
+- The kernel seed: 38 profiles, `kernel.<vid>-<pid>`, each named by its ID
+  ("USB audio device 0644:8043"), since the kernel names models only in
+  comments, which nothing here copies; `DSD_U32_BE` with no rate, product
+  string, interface or firmware list.
+
+**The kernel seed, at v6.12**, the tag `scripts/alsa-abi` pins
+(`uapiKernel` in `internal/alsapcm/uapi.go`). `sound/usb/quirks.c` there is
+git blob c5fd1803, sha256 26cfb822, 2,373 lines. A direct curl was refused
+by the sandbox, so it was fetched through the build slot, as B1's alsa-abi
+run fetched its header, into `.tmp` (never committed); `kernel-check.sh`'s
+own fetch got the same bytes. `TestTheKernelSeedIsThePinnedTags` read 39
+device-specific DSD facts and 19 vendor-wide rules from it, every fact
+`DSD_U32_BE` but one of the Amanero board's:
+- the format quirk's switch on the unit's ID: altsetting 2 for 139f:5504,
+  16d0:0a23, 20b1:3089, 2522:0007, 2522:0009, 2522:0012 and 2772:0230;
+  altsetting 3 for 0d8c:0316, 10cb:0103, 16d0:06b2, 16d0:06b4, 16d0:0733,
+  16d0:09d8, 16d0:09db, 16d0:09dd, 1db5:0003, 20a0:4143, 22e1:ca01,
+  249c:9326, 2616:0106, 2622:0041, 278b:5100, 27f7:3002, 29a2:0086 and
+  6b42:0042; and 16d0:071a by its bcdDevice (0199 `DSD_U32_LE`, 019b and
+  0203 `DSD_U32_BE`), the shared Amanero board, not seeded;
+- the flags table's `ITF_USB_DSD_DAC` device entries, `DSD_U32_BE` on the
+  last altsetting after the vendor mode switch: 0644:8043, 0644:8044,
+  0644:804a, 0644:806b, 154e:1002, 154e:1003, 154e:3005, 154e:3006,
+  1852:5062 and 1852:5065. Section 2.3's parenthesis names the format quirk
+  and the `DSD_RAW` table; these are device-specific DSD quirks of the same
+  file, so the seed takes them;
+- the flags table's `DSD_RAW` device entries, `DSD_U32_BE` on each
+  altsetting whose descriptor marks raw data: 154e:300b, 21b4:0230 and
+  21b4:0232;
+- vendor-wide, seeding nothing: the format quirk's rule for vendor 23ba
+  (products below 0110), and `DSD_RAW` for vendors 1511 (the AURALiC's),
+  152a, 18d1, 20b1, 21ed, 22d9, 23ba, 25ce (the Mytek's), 278b, 292b,
+  2972, 2ab6, 2afd, 2d87, 3336, 3353, 35f4, 3842 and c502.
+The reader blanks the file's comments before it reads anything, refuses a
+shape it does not know rather than leave a fact out, and is test code alone:
+`TestTheKernelQuirkReaderReadsEachShape` holds it to a synthetic file of
+made-up IDs on every test run.
+
+**The iOS check**, `python3 scripts/dac-profiles/ios-check.py --registry
+<seed>/DACProfile-cd125088.swift --commit cd125088`:
+
+    iOS registry at cd125088: 20 rows; profiles.json
+      ok chord.hugo2: row chord.hugo2, maxDSDRate 11289600; heard 11289600, stated 0, refused []
+      ok mytek.brooklyn.dac.plus: row mytek.brooklyn.dac.plus, maxDSDRate 5644800; heard 5644800, stated 0, refused [11289600]
+
+**What the design left open**, for the owner or a later PR:
+- A kernel-seeded profile's name: the kernel names its models only in
+  comments, which the brief bars copying, and the design does not say where
+  the name comes from; each is named by its ID, and section 7.4 shows the
+  profile's name.
+- Which rates a kernel claim reports: the kernel states none, while the
+  `reported` rung (section 1.1) is per rate; `maxBitRate` is 0 for every
+  kernel-seeded profile.
+- Section 3.2's `auto` row for a known DAC asks only that native be offered,
+  not that the profile claim it, so a profile with a DoP claim alone (the
+  Hugo 2) makes native preselectable wherever the kernel offers it (moot on
+  its capture, which has no DSD altset). B5 decides.
+- `pcmEntryMs` is in section 2.1's example but section 2.3 says resync
+  delays seed the prefill alone, and nothing reads it: the schema keeps it,
+  no seed sets it.
+- What makes an ID a shared reference ID: the design gives no test. Two are
+  listed, on the evidence above; 0d8c:0316 and 20b1:3089 are on chip
+  makers' vendor IDs (C-Media's, XMOS's) and 20a0:4143 is the WaveIO board,
+  each seeded as the kernel lists it; if one is shared, its claim is still
+  its firmware's, but other products on it would read as known.
+- The model identity's reader: `alsa.Qualification` takes the three strings
+  all or nothing, so a unit with no manufacturer string shows none, and it
+  cannot give the "-" a dacKey needs for an absent product. A reader that
+  takes each alone is in `internal/alsa/`, guarded since B1's round 3, so
+  the PR that needs it (B3, B5 or B7) takes a qualification bump that
+  section 8's table, which puts B2 to B13 outside the guard, did not plan.
+- The DoP gain check (B5) will refuse the Hugo 2 and the Mytek as captured:
+  each one's `PCM Playback Volume` read below its maximum (27646 of 32767,
+  20224 of 25344), and no capture shows either control after the DoP
+  decoder, so neither is on the analogue list.
+- `heardMaxBitRate` holds the iOS rows' on-device evidence, as section 2.3
+  reads "hardware-confirmed": for the Hugo 2 and the Mytek that is DoP
+  reaching the rate on hardware, which section 1.1 calls the packer's own
+  count on iOS, not a listening.
+
+**Commits.** e9af4cd8 the seam: the schema and the API, `Lint` finding
+nothing, `Match` knowing nothing, `Key` giving no form, an empty database;
+39ce04d8 the red tests; b1e2ae3b the lint, the matcher, the key and the
+seed; 15820cfe `dac inspect`; 1ee40148 the two checks, the CI job and the
+census; dada0f5c the long form and CLAUDE.md; c67ab94f a test the controls'
+design found missing (`readModel`'s bracket, which 15820cfe added untested);
+this record.
+
+**Red first** (39ce04d8, on e9af4cd8), each for its own reason:
+- `TestAProfileMatchesByUSBIdentityNeverByName`: "the Hugo 2: matched "",
+  want "chord.hugo2"", every captured and kernel-seeded unit and the
+  narrowing rows; the never-by-name rows green on both sides, as pins.
+- `TestASharedReferenceIDNeedsItsProductString`: "the database does not
+  list 20b1:0010 as a shared reference ID"; "a profile on 20b1:0010 without
+  its product string lints as []".
+- `TestNoTwoProfilesMatchOneIdentity`: "one product string and none:
+  refused false, want true".
+- `TestEveryClaimNamesItsProvenance`, `TestAnAnalogueControlNeedsItsProvenance`,
+  `TestAUnityAtRawMaxEntryNeedsItsEvidenceAndFirmware`,
+  `TestTheCaveatCodesAreAClosedList`, `TestTheSchemaRefusesWhatItDoesNotDescribe`:
+  "the lint says [], want a problem saying …", row by row.
+- `TestTheDACKeyMatchesItsVectors`: "the Hugo 2: canonical form "", want
+  "dacKey/1\n245f\n0815\n=1\n=Hugo2""; the ten vectors were computed with
+  Python's hashlib over the forms written out, and two again with
+  coreutils' sha256sum (`d1-ed3dc7cedf69d4df`, `d1-e74237462b8b0ad2`), never
+  with this package. `TestAKeyHoldsOnlyWhatTheReaderReturns`,
+  `TestKeysCompareByTheirCanonicalForm` likewise.
+- `TestTheQX13CarriesItsHiddenModeCaveat`: "the fixture's unit matched "",
+  false".
+- `TestTheCapturedModelsAreSeededAsTheirEvidenceSays`, `TestMatchHandsOutACopy`,
+  `TestTheKernelSeedNamesTheTagAlsaABIPins`: the database empty.
+- `TestTheKernelSeedIsThePinnedTags` with v6.12's file: all 39 facts
+  "neither seeded nor a shared reference ID". Green on both sides, as pins:
+  `TestTheKernelQuirkReaderReadsEachShape` (the reader is test code) and
+  `TestTheEmbeddedDatabaseIsWrittenInItsCanonicalForm`.
+- cmd/bridge `TestDACInspectPrintsTheModelIdentity`: no model line, the
+  keys absent; the other dac tests green on both sides.
+
+**Negative controls**, by a runner outside the tree: each made exact,
+once-only replacements, built the affected test binary, ran each named test
+alone (with `-test.v`, a pass that printed no PASS line counting as not
+run), and put the bytes back from memory, checked by SHA-256; a baseline of
+all 16 named tests was green first, and `git status` was clean after. All
+24 went red. The brief's three are C1 and C2 (a matcher by name), C3 to C5
+(a shared ID without its product string: the lint's side, Match's and the
+data) and C6 to C8 (two profiles one identity: the lint's side and
+Match's).
+
+| # | Mutation | Red |
+|---|---|---|
+| C1 | Match also knows a unit whose product string is a profile's name | `TestAProfileMatchesByUSBIdentityNeverByName` ("another ID with the Hugo 2's profile name: matched "chord.hugo2"") |
+| C2 | Match compares product strings as iOS's matcher does, folded, by substring | the same ("the Hugo 2's IDs in capitals: matched "chord.hugo2"") |
+| C3 | the lint takes an alternative on a shared ID without its product string | `TestASharedReferenceIDNeedsItsProductString` ("lints as []") |
+| C4 | Match does not ask again of a shared ID | the same ("past the lint … matched "fixture.ifi"") |
+| C5 | profiles.json lists 0011, not 0010 | the same ("does not list 20b1:0010") |
+| C6 | the lint lets two profiles match one identity | `TestNoTwoProfilesMatchOneIdentity` ("refused false, want true") |
+| C7 | Match takes the first of two profiles | the same ("a unit two profiles match is known as "fixture.first"") |
+| C8 | the overlap test reads an unset interface as a value of its own | the same ("one interface and none") |
+| C9 | no provenance line asked of a claim | `TestEveryClaimNamesItsProvenance` ("no identity line") |
+| C10 | a provenance line needs no date or version | the same; `TestAnAnalogueControlNeedsItsProvenance` |
+| C11 | an analogue control needs no provenance | `TestAnAnalogueControlNeedsItsProvenance` ("no provenance") |
+| C12 | a measurement's firmware need not be one the entry lists | `TestAUnityAtRawMaxEntryNeedsItsEvidenceAndFirmware` |
+| C13 | a raw-maximum entry needs no firmware | the same ("no firmware") |
+| C14 | an absent interface hashes as "=0" | `TestTheDACKeyMatchesItsVectors` ("no interface"); `TestKeysCompareByTheirCanonicalForm` |
+| C15 | a present product string written without its "=" | the same two ("an absent product string and one of -") |
+| C16 | keys compared field by field | `TestKeysCompareByTheirCanonicalForm` ("an absent interface and interface 0 compare equal") |
+| C17 | NewKey takes white space around a product string | `TestAKeyHoldsOnlyWhatTheReaderReturns`; `TestTheSchemaRefusesWhatItDoesNotDescribe` |
+| C18 | a caveat's note may say verified, lock or bit-exact | `TestTheCaveatCodesAreAClosedList` ("a note saying verified") |
+| C19 | Match's copy shares the database's formats | `TestMatchHandsOutACopy` |
+| C20 | kernel.0644-8043 claims 0644:8045 | `TestTheKernelSeedIsThePinnedTags` ("v6.12 gives 0644:8045 no device-specific DSD quirk", and 0644:8043 "neither seeded nor a shared reference ID") |
+| C21 | kernel.0d8c-0316's native line says altsetting 2 | the same ("does not say "altsetting 3" at v6.12") |
+| C22 | the kernel reader drops the flags table's DSD_RAW devices | the same (36 facts); `TestTheKernelQuirkReaderReadsEachShape` |
+| C23 | inspect keeps the model of a unit that changed while read | `TestDACInspectShowsNoModelOfAUnitThatChangedWhileRead` ("another enumeration") |
+| C24 | inspect never sets the model's strings | `TestDACInspectPrintsTheModelIdentity`; the bracket test |
+
+The iOS check's control, on a copy of the database in `.tmp`: the Hugo 2's
+heard rate at DSD512 and the Mytek's refusal at DSD128 exit 1 ("heardMaxBitRate
+22579200 exceeds the row's 11289600"; "refused 5644800 is a rate the row
+reaches"), and a registry read at another commit is refused for both rows.
+
+**For the owner.**
+- The database is not wired: nothing plays by it until B5 and B7.
+- Captures for the iOS-profiled models without one (the QX13 first) let a
+  later database PR import their DoP evidence and caveats; each needs
+  `bridge output dac inspect --json` (now with the strings) beside the
+  card's stream file and its amixer state.
+- B737: the rebind window round 5 leaves (below).
+
+**Checks**, on legion0 (Linux, amd64, Go 1.27.3), in one turn of the shared
+build lock, with TMPDIR under `.tmp/_b728-b2`, at c67ab94f:
+- `make test` (race, `-timeout 30m`): 81 packages ok, none failed, 14 with
+  no test files; the Linux-only ones ran (internal/alsa, alsactl, alsapcm,
+  atomicwrite's durable writer, backup's identity paths, the player's
+  binding and hotplug). cmd/bridge 974 s, internal/player/dacprofile 1.2 s,
+  scripts/third-party-licenses (the build-site census, the new script's
+  site in it) 260 s.
+- `make build-all`: check-build-tags OK and the six targets; its `dist/`
+  removed after.
+- `make vet` natively, and with `GOOS=windows`, `GOOS=linux GOARCH=386` and
+  `GOOS=linux GOARCH=arm`: clean.
+- go1.27.3's gofmt on cmd, internal and scripts: clean.
+- `make docs-check`: ok as the tree stands (CLAUDE.md 73.6%), and in a copy
+  with the patch applied (player.md 94,874 bytes, 94.9%; the worst load,
+  player_openhome_test.go's, 63.7%).
+- The qualification check, `go run ./scripts/qualification-version -base
+  main -head HEAD` with the tags: "qualification version OK: main..HEAD",
+  at 36, since no guarded path changed.
+- `scripts/dac-profiles/kernel-check.sh`, with the v6.12 copy and with its
+  own fetch: ok, blob c5fd1803 both times; `ios-check.py` against the
+  registry at cd125088: ok.
+- Not run here: macOS and Windows natively, the new `dac-profiles` job on
+  CI's runner (its script ran here both ways), and any hardware (B2's tier
+  is the standard one).
+
+## 2026-11-04 — B728 B2 round 2: no profile on a shared ID, no heard rate from a lock, a refusal held to its own evidence
+
+The review of #1402 (Codex and Argon, on 36b5cb7b: B2's branch with its
+rules patch applied and main ebe71366 merged, which this branch
+fast-forwarded to) found three P2s, and the orchestrator's decisions on
+them were binding: `0d8c:0316` and `20a0:4143` get no profile until their
+product strings are known, both listed as shared in the data the lint reads,
+and `20b1:3089` stays device-specific; `ios-check.py` takes a documented
+refusal at or below a row's maximum, its ceiling on heard and stated rates
+kept, with a regression case; and the Hugo 2's and the Mytek's DoP evidence
+takes the class section 1.1 gives a transport result, never
+`heardMaxBitRate` (Codex: remove the Hugo 2's DoP claim unless listening
+evidence exists, and keep the Mytek's documented refusal without a heard
+maximum). The rules change ships as `rules-b728-b2-r2.patch` (outside the
+tree): the B2 line's Don't, amended; its long form is committed here.
+
+**The findings, each verified before its fix.**
+- Shared IDs seeded as device-specific. v6.12's `quirks.c` gives 0d8c:0316
+  and 20a0:4143 DSD quirks under one model each, and the round-1 seed took
+  each for that model's alone (round 1 left it open: "What makes an ID a
+  shared reference ID"). The review shows 0d8c:0316, a C-Media vendor ID,
+  in another maker's firmware note, and 20a0:4143 is the WaveIO, an
+  interface board other makers' DACs carry, as its maker describes it.
+  Every unit on either matched the kernel profile: red in 88c481a5,
+  `TestASharedReferenceIDNeedsItsProductString`, "the database does not list
+  0d8c:0316 as a shared reference ID", "a unit on the shared ID 20a0:4143 is
+  known as "kernel.20a0-4143"". 20b1:3089 stays device-specific on the
+  present evidence: the kernel names one model for it, and an XMOS vendor ID
+  alone does not establish sharing.
+- Transport evidence imported as heard. The iOS rows at cd125088 say the
+  Hugo 2's DSD256 "reached DoP LOCK" after a rate-lock sweep and the Mytek's
+  DSD128 carrier "locks cleanly"; neither says heard (`ifi.golink`'s row
+  does: "HEARD … clean tones"), and section 1.1 says the iOS lock counts the
+  packer's own frames and hears nothing back. Round 1 had promoted both to
+  `heardMaxBitRate` (its record: "as section 2.3 reads hardware-confirmed").
+  Red in 88c481a5: `TestTheCapturedModelsAreSeededAsTheirEvidenceSays` (no
+  DoP claim for the Hugo 2, no heard rate for the Mytek, its DSD256 refusal
+  kept), `TestAHeardRateIsAHearingNeverALock` (a heard rate's dop line that
+  says hardware-confirmed, a DoP lock or negotiated: the lint said nothing)
+  and `TestARefusedRateNamesItsRefusal`.
+- The iOS checker refused faithful refusals. It took every rate at or below
+  a row's `maxDSDRate` for one the row reaches, so an import of
+  `ifi.generic` (DSD256 published, refused on both measured units) failed,
+  reproduced on the registry at cd125088: "refused 11289600 is a rate the
+  row reaches (11289600)". Its new `--self-test`, on a synthetic registry,
+  was red on the two refusal cases (at a row's maximum, below it), the other
+  nine green.
+- One of this round's own, found by its first fix: the lint took "heard",
+  "refused" or "silence" anywhere in any dop line, so a hearing or a
+  refusal of another rate passed for the rate claimed, and the Mytek's own
+  new line, which said its DSD128 lock was "no listening, so no rate is held
+  as heard", passed for a heard DSD128 or DSD64 added to it. Red in
+  aa998f77: `TestAHeardRateIsAHearingNeverALock` ("a hearing of another
+  rate: the lint says [], want a problem saying "DSD128""),
+  `TestARefusedRateNamesItsRefusal` (the same, "DSD256") and
+  `TestNoEmbeddedDoPLineReadsAsAHearing` ("mytek.brooklyn.dac.plus given a
+  heard rate of 5644800 lints as []", and of 2822400). Its first fix,
+  asking the rate's name beside the word, left the Mytek at DSD128 passing
+  (the clause named DSD128 and said heard), as predicted, until its line was
+  reworded; and a79feeee pins the clause, which no case had told from the
+  line: red against aa998f77's lint and under R4 below.
+
+**What changed.**
+- `profiles.json`: the profiles `kernel.0d8c-0316` and `kernel.20a0-4143`
+  removed (36 kernel-seeded profiles, 39 in all); `sharedReferenceIds`
+  0d8c:0316, 16d0:071a, 20a0:4143 and 20b1:0010, each with its why; the
+  Hugo 2 imports no DoP claim (its identity and its prefill of 700 ms
+  stay); the Mytek's DoP is its refused DSD256 alone (heard 0, stated 0),
+  its dop line saying the unit refused DSD256's 705.6 kHz carrier, which it
+  would not negotiate, and that DSD128's carrier reached a DoP lock,
+  transport evidence that is no listening.
+- The lint (`dopEvidence`): for the heard rate and for each refused one, a
+  clause of a dop line (the text between two semicolons) that names the rate
+  (DSD128) and says heard, or refused or silence. No field holds transport
+  evidence; a negotiation or a lock is said in the line and claims nothing.
+- `ios-check.py`: no refusal compared with its row (a row may keep a
+  published maximum beside a refusal at or below it); the ceiling on heard
+  and stated rates kept; `--self-test` (11 cases) in CI's `dac-profiles`
+  job.
+- Doc comments: `Native.MaxBitRate`'s 0 is unspecified, never unlimited
+  (open question 3: the rates offered are the live altsets' and the probe's,
+  and nothing makes per-rate evidence of a claim that states none);
+  `PCMEntryMs` is read by nothing and no seed sets it (question 5); the DoP
+  fields' evidence. The README and the B2 long form follow.
+
+**Open questions, as decided.**
+1. Kernel-seeded profiles keep their neutral `kernel.<vid>-<pid>` names.
+2. Shared IDs: as above.
+3. A kernel claim's rate of 0: unspecified, never unlimited (above).
+4. For B5: a known DAC with no native claim follows section 3.2 as written,
+   and DoP provenance never becomes native provenance. The Hugo 2 now has
+   neither claim, only its identity and its prefill.
+5. `pcmEntryMs` stays unset and inert.
+6. The absent-product reader is left to a later PR: `alsa.Qualification`
+   takes the manufacturer, product and bcdDevice all or nothing, and a
+   reader that takes each alone, telling absence from a failed read, is in
+   `internal/alsa/`, guarded whole since B1's round 3, so that PR takes a
+   qualification bump.
+
+**Commits.** 88c481a5 the red tests for the three findings; aabb9be7 their
+fix, with the CI step, the README and the long form; aa998f77 the red tests
+for the lint's words; 3be967ed the clause and the rate's name, the Mytek's
+line reworded; a79feeee the clause's two cases; this record.
+
+**Negative controls**, by a runner outside the tree, as round 1's: exact,
+once-only replacements (B0 a whole file), each affected test binary built
+and each named test run alone with `-test.v`, the Python checks run as CI
+and the author run them, the bytes put back from memory and checked by
+SHA-256; the baseline of the 20 named tests and the two Python checks green
+first, `git status` clean after. All 36 went red, 50 runs: the twelve below
+and round 1's C1 to C24 again on this round's tree, C21 moved to
+10cb:0103's altsetting 3, since 0d8c:0316's profile is gone. The kernel
+test's controls were run again to print their failing lines, not the facts
+the test logs first.
+
+| # | Mutation | Red |
+|---|---|---|
+| B0 | lint.go as at aa998f77 | `TestAHeardRateIsAHearingNeverALock` ("a hearing of another rate"), `TestARefusedRateNamesItsRefusal`, `TestNoEmbeddedDoPLineReadsAsAHearing` |
+| R1 | no evidence asked of a heard rate | `TestAHeardRateIsAHearingNeverALock` ("confirmed on hardware"); `TestNoEmbeddedDoPLineReadsAsAHearing` ("given a heard rate of 2822400 lints as []") |
+| R2 | no evidence asked of a refused rate | `TestARefusedRateNamesItsRefusal` ("a line that names no refusal") |
+| R3 | the clause need not name the rate | `TestAHeardRateIsAHearingNeverALock` ("a hearing of another rate"); `TestARefusedRateNamesItsRefusal` ("a refusal of another rate") |
+| R4 | the rate and the word anywhere in one line | the same two ("another rate heard and this one's lock, a clause each"; "another rate refused …") |
+| R5 | 0d8c:0316 not listed as shared | `TestASharedReferenceIDNeedsItsProductString`; `TestTheKernelSeedIsThePinnedTags` ("0d8c:0316: the tag's device-specific DSD quirk is neither seeded nor a shared reference ID") |
+| R6 | 20a0:4143 not listed as shared | the same two (20a0:4143) |
+| R7 | the Mytek's line says again that no rate is held as heard | `TestNoEmbeddedDoPLineReadsAsAHearing` ("given a heard rate of 5644800 lints as []") |
+| R8 | a heard DSD128 added to the Mytek | `TestTheCapturedModelsAreSeededAsTheirEvidenceSays` (the database does not parse: "no clause of a dop provenance line names DSD128 and says it was heard") |
+| R9 | the Hugo 2's DoP claim back, a heard DSD256 with a dop line the lint takes | the same ("chord.hugo2's DoP is &{HeardMaxBitRate:11289600 …}, want <nil>"): only the seed test holds it |
+| R10 | ios-check compares a refusal with its row again | `--self-test` ("FAIL a published maximum with a refusal at it (ifi.generic's shape)"); `ifi.generic` on the registry exits 1 |
+| R11 | ios-check drops its heard and stated ceiling | `--self-test` ("FAIL a heard rate above the row's maximum") |
+
+**The iOS check** against the registry at cd125088:
+
+    iOS registry at cd125088: 20 rows; profiles.json
+      ok mytek.brooklyn.dac.plus: row mytek.brooklyn.dac.plus, maxDSDRate 5644800; heard 0, stated 0, refused [11289600]
+
+The review's case, `ifi.generic` imported faithfully into a copy (stated
+DSD256, refused DSD256): "ok fixture.ifi.generic: row ifi.generic,
+maxDSDRate 11289600; heard 0, stated 11289600, refused [11289600]". The
+ceiling on a copy whose Mytek states DSD512 exits 1 ("statedMaxBitRate
+22579200 exceeds the row's 5644800"), and the database read against another
+commit exits 1. `--self-test`: PASS, 11 cases.
+
+**Checks**, on legion0 (Linux, amd64, Go 1.27.3), in one turn of the shared
+build lock, with TMPDIR under `.tmp/_b728-b2`, at a79feeee:
+- `make test` (race, `-timeout 30m`): 83 packages ok, none failed, 14 with
+  no test files; the Linux-only ones ran (internal/alsa, alsapcm,
+  atomicwrite's durable writer, backup's identity paths, the player's
+  binding and hotplug; alsactl's result came from the test cache, its
+  inputs unchanged, and a fresh `-race -count=1` run after was ok).
+  cmd/bridge 986 s, internal/player/dacprofile 1.2 s,
+  scripts/third-party-licenses (the build-site census) 268 s.
+- `make build-all`: check-build-tags OK and the six targets; its `dist/`
+  removed after.
+- `make vet` natively, and with `GOOS=windows`, `GOOS=linux GOARCH=386` and
+  `GOOS=linux GOARCH=arm`: clean.
+- go1.27.3's gofmt on cmd, internal and scripts: clean.
+- `make docs-check`: ok as the tree stands (CLAUDE.md 73.6%), and in a copy
+  with `rules-b728-b2-r2.patch` applied (player.md 95,569 bytes, 95.6%; the worst load,
+  player_openhome_test.go's, 63.8%); `git apply --check` takes
+  `rules-b728-b2-r2.patch`, and the doc tools' `dropped_donts` finds every
+  Don't of the amended line in its long form.
+- The qualification check, main to HEAD with the tags: "qualification
+  version OK: main..HEAD", at 36: no guarded path changed.
+- `scripts/dac-profiles/kernel-check.sh`, by its own fetch at v6.12, as CI
+  runs it: blob c5fd1803, sha256 26cfb822, 2,373 lines, PASS (39 facts, 19
+  vendor-wide rules; the two shared IDs unseeded); the controls read the
+  same bytes, fetched through the build slot into `.tmp`, deleted after.
+- `ios-check.py` against the registry at cd125088, its `--self-test`, the
+  review's `ifi.generic` case and the ceiling on a copy: as above.
+- Not run here: macOS and Windows natively, CI's runner, and any hardware
+  (B2's tier is the standard one).
+
+## 2026-11-05 — B728 B2 round 3: negated evidence, the Windows leg, and three of CodeRabbit's comments
+
+The review of #1402 at 94d80518 (round 2 and its rules line, main ebe71366
+in it), to which this branch fast-forwarded: Codex's P2 on the lint,
+CodeRabbit's three functional comments, and the red Windows leg. Each was
+verified first, by a test that fails on 94d80518 for the stated reason,
+then fixed, then controlled. CodeRabbit's two Major comments (SonarCloud's
+complexity numbers for `dacInspect` and its test) are the orchestrator's to
+answer. The rules change ships as `rules-b728-b2-r3.patch` (outside the
+tree), its long form committed here.
+
+**The points.**
+- A negated clause passed as evidence (Codex, `lint.go:325`): confirmed.
+  `dopEvidence` took a clause that names the rate and holds the keyword,
+  so "DSD128 was not heard" read as a hearing. In cb5ce652
+  `…ANegatedWordIsNoEvidence`'s 23 negated wordings (round 4 removed the
+  test, its wordings table cases of the fixed form; not, never, no,
+  neither and nor, none, nothing, without, cannot, n't contractions with
+  either apostrophe, "heard: no", "heard nothing", for heard, refused and
+  silence) each linted as []. Fixed in 2999526a: a keyword counts only when
+  nothing negates it, a negator among the four words before it, back to the
+  mark or the joining word that starts its phrase, or after it nothing,
+  none or an answer after a colon, an equals sign or a dash. The negation
+  must govern the keyword: five clauses whose negation belongs to another
+  verb lint clean on both sides, the Mytek's seed line among them ("the
+  unit refused DSD256's 705.6 kHz carrier, which it would not negotiate"),
+  and every dop line of the embedded database still reads as its claims.
+  Within reach, a negator of another word ("not only heard") still reads
+  as the keyword's: the lint then asks for other words, and never takes a
+  negated one.
+- The Windows leg (`test (windows-latest)`, and `gate` with it): confirmed
+  in the worktree, with no clone. `profiles.json` checked out again under
+  `core.autocrlf=true`, as windows-latest's checkout is, held 1,204 CRLF in
+  1,204 lines, and `TestTheEmbeddedDatabaseIsWrittenInItsCanonicalForm`
+  failed ("profiles.json is not in its canonical form"). With e0939071's
+  `.gitattributes` line the same checkout holds none and the test passes.
+  It is the one file of the PR compared byte for byte: `qx13.json` is
+  parsed and a substring of one of its lines replaced, which CRLF does not
+  change, and the build-site census reads `kernel-check.sh` with CRLF folded
+  to LF.
+- `readModel` could show one unit's model under another's IDs (CodeRabbit,
+  `output_dac_bind.go:369`): confirmed twice.
+  `alsa.SysfsReader.Qualification` reads the card's attachment, then
+  resolves `cardN/device` again for the strings; in cb5ce652
+  `TestDACInspectShowsNoModelOfAUnitReplacedAsItsStringsWereRead`, standing
+  in for the reader across a replug into the same port, showed the
+  replacement's strings under the GO bar's IDs, and a scratch test outside
+  the tree that flipped `sys/class/sound/card5` between two units under the
+  real reader read one unit's port and device number with the other's
+  product in 20 of 37 readings. The reader is guarded (`internal/alsa/`,
+  the qualification version), and section 8 keeps B2 clear of a bump, so
+  the fix (e19fbeff) is inspect's, after the reader: the card read again
+  once the strings are read (`alsa.SysfsReader.Card`), the strings kept
+  only for the same unit (`binding.SameUnit`) in the same enumeration (the
+  device number). 57b6207c pins the device number's half (the same unit
+  enumerated anew, its firmware updated) and ce99d23a the unit's (another
+  model at the same device number, which a bus gives out again after its
+  127th).
+- The kernel reader could leave a format out (CodeRabbit,
+  `kernel_test.go:290`): confirmed. In an arm with no bcdDevice switch, a
+  format returned outside any altsetting test, or under a test the reader
+  does not read, beside one it reads kept the counts of returns and format
+  returns equal: `TestTheKernelQuirkReaderReadsEachShape`'s two mutations,
+  "the reader takes the file". Fixed in ff303831: every format return of
+  such an arm lies inside an altsetting test the reader made a fact of. The
+  real file is the control that the check refuses no shape today's kernel
+  uses: `kernel-check.sh` at v6.12 reads its 39 facts and 19 vendor-wide
+  rules and passes.
+- A portless unit's model was not shown (CodeRabbit,
+  `output_dac_bind.go:263`): confirmed, the card reaches `readModel`. A USB
+  card whose controller sits under something the port grammar does not
+  name (a virtual machine's virtio) has no port, and the reader refuses it
+  once it has read and checked the strings: `TestDACInspectPrintsAPortlessUnitsModel`,
+  "not read: qualification attachment unknown". Fixed in e19fbeff, for
+  inspect only (`portlessReading`): the reader sets the attachment last,
+  after the strings pass its checks, so strings, a device number and no
+  port are a reading refused for its port alone, kept for a card the
+  inventory holds with no port either, the device number and interface
+  checks and the reading again as any card has. The reader's own refusal
+  stands (the test asks it), since the qualification's evidence needs a
+  port that persists; a portless unit whose device number cannot be read
+  shows no model. Reading the reader's result beside its error rests on
+  that order, which the portless test pins; the alternative, a reader that
+  takes an empty port, is a change in `internal/alsa/` and a qualification
+  bump.
+
+**Negative controls**, by a runner outside the tree: exact, once-only
+replacements, each affected test binary built and each named test run
+alone with `-test.v`, the bytes put back from memory and checked by
+SHA-256; the eight named tests and the CRLF checkout green first, `git
+status` clean after. All 20 went red, 24 runs.
+
+| # | Mutation | Red |
+|---|---|---|
+| N1 | a negated keyword counts | `…ANegatedWordIsNoEvidence` ("not heard: the lint says []", and the rest) |
+| N2 | no negator before the keyword is read | the same |
+| N3 | a contraction in n't is no negator | the same ("wasn't heard", "didn't refuse") |
+| N4 | the typographic apostrophe is not read as one | the same ("wasn’t heard") |
+| N5 | a joining word does not end the negator's reach | the same: "would not negotiate and was refused" lints as a missing refusal |
+| N6 | any negation in the clause negates its keyword (a whole-clause ban) | the same, the Mytek-shaped clause; and the embedded database no longer parses |
+| N7 | a negator reaches three words, not four | the same ("did not play it as silence") |
+| N8 | an answer after a colon does not negate | the same ("heard: no", "refused: none") |
+| N9 | nothing or none after the keyword does not negate | the same ("heard nothing") |
+| R1 to R4 | round 2's evidence rules (no heard evidence, no refusal evidence, no rate's name, a line for a clause), on round 3's `says` | `TestAHeardRateIsAHearingNeverALock`, `TestARefusedRateNamesItsRefusal`, `TestNoEmbeddedDoPLineReadsAsAHearing` |
+| E1 | no `eol=lf` line for profiles.json | the CRLF checkout: 1,204 CRLF, the canonical-form test FAIL |
+| K1 | a format returned outside an altsetting test let through | `TestTheKernelQuirkReaderReadsEachShape` (both mutations taken) |
+| A1 | no reading of the card after its strings | `TestDACInspectShowsNoModelOfAUnitReplacedAsItsStringsWereRead` |
+| A2 | the reading after compares no device number | the same ("the same unit enumerated anew, its firmware updated") |
+| A3 | the reading after compares no unit | the same ("another model at the same device number") |
+| P1 | no portless reading kept | `TestDACInspectPrintsAPortlessUnitsModel` |
+| P2 | a portless reading needs no device number | the same ("a portless unit whose device number cannot be read") |
+
+Two conditions of `portlessReading` have no control, each a second layer:
+its `u.Port == ""` is what the comparison after it enforces for any card
+(no input tells them apart), and its string checks are masked by the device
+number, which the reader sets only after the strings pass.
+
+**The rules patch**, `rules-b728-b2-r3.patch`: the B2 line's Don't gains
+"take a word its clause negates for evidence" (player.md 95,569 to 95,614
+bytes); its blank context line keeps its leading space, `git apply --check`
+takes it, `dropped_donts` finds every Don't in the long form, and
+docs-check passes on a copy with it applied.
+
+**Checks**, on legion0 (Linux, amd64, Go 1.27.3), in one turn of the shared
+build lock, with TMPDIR under `.tmp/_b728-b2`, at 02167338:
+- `go test -count=1` of `./internal/player/dacprofile/`, `./internal/alsa/`
+  and `./cmd/bridge/`: ok (cmd/bridge 305 s); and under `-race`: ok
+  (cmd/bridge 905 s, internal/alsa 1.7 s).
+- `make test-fast`: 82 packages ok, none failed, none cached, 14 with no
+  test files; the Linux-only ones ran (internal/alsa, alsactl, alsapcm,
+  atomicwrite's durable writer, backup's identity paths, the player's
+  binding and hotplug).
+- `make vet` natively, and with `GOOS=windows` and `GOOS=darwin`: clean.
+- go1.27.3's gofmt on cmd, internal and scripts: clean.
+- `make docs-check`: ok as the tree stands (CLAUDE.md 73.6%), and with the
+  patch applied (above).
+- The qualification check with the tags, from main and from ebe71366, the
+  main the PR merged: "qualification version OK", at 36: no guarded path
+  changed.
+- `scripts/dac-profiles/kernel-check.sh`, by its own fetch at v6.12: blob
+  c5fd1803, 39 facts, 19 vendor-wide rules, PASS; `ios-check.py` against
+  the registry at cd125088 and its `--self-test` (11 cases): ok.
+- `profiles.json` checked out under `core.autocrlf=true` at the head: no
+  CRLF, the canonical-form test PASS.
+- Not run here: Windows and macOS natively (the orchestrator's proof and
+  CI's legs), and any hardware (B2's tier is the standard one).
+
+**Commits.** cb5ce652 the red tests; 2999526a the negation; e0939071 the
+attribute; ff303831 the kernel reader; e19fbeff inspect's reading again and
+its portless units; 57b6207c and ce99d23a the reading again's two pins;
+02167338 the long form; this record.
+
+## 2026-11-05 — B728 B2 round 4: a dop line's evidence in one fixed form, and a portless reading tied to its place
+
+The review of #1402 at 4153f229 (round 3 and its rules line), to which this
+branch fast-forwarded. The rules change ships as `rules-b728-b2-r4.patch`
+(outside the tree), its long form committed here.
+
+**The lint stops reading English** (the orchestrator's decision, not a
+finding to verify). Round 3 taught `dopEvidence` to read negation, and Codex
+and the Claude API reviewer broke it from both sides, each round's fix bound
+to invite the next: it rejected true lines (`DSD256 refused: no supported
+705.6 kHz altsetting`, `DSD128 heard: no clicks or dropouts`, `DSD256 played
+as silence: no audio output`) and accepted false ones (`heard at DSD64 but not
+at DSD128` as a hearing of DSD128, `the unit refused DSD512, not DSD256` as
+DSD256's refusal, `DSD128 was a DoP lock, not "heard"`, `heard at DSD128, the
+unit did not play the DSD256 file as silence`, `DSD128 locked yes, heard no`).
+So the prose is made regular, and only the form counts:
+- a dop line's clauses are the text after `dop: `, split on `;`, each
+  trimmed;
+- a clause that starts with a marker, `heard`, `refused` or `silence at`
+  (any case, a word boundary after it), must be `marker rate(, rate)*` and
+  then `:` or the clause's end (`reEvidence`), and credits those rates alone,
+  as heard, or as refused (`refused` and `silence at` alike); the free text
+  after the colon is read by nothing, so it may negate anything;
+- a clause that starts with no marker is free text and evidence of nothing;
+- a marker clause of any other shape, a rate past DSD64 to DSD512, and one
+  rate under two markers in a profile's provenance are problems, which show
+  the form to write ("heard DSD64, DSD128: <source>"; for a rate no clause
+  credits, `write "heard DSD128: <source>"`);
+- `reNeverSaid` stays on caveat notes, never provenance.
+
+`negated`, `negatorReach`, the negators, the joiners and the token reader are
+removed (0f079403). The lines rewritten in the form, every fact and citation
+kept: the Mytek's seed line (`refused DSD256: ` before its old text, which
+follows the colon unread), the QX13 fixture's (`heard DSD64, DSD128, DSD256:
+iOS profile fiio.qx13, with PEQ off (iOS cd125088)`), the fixture profile's,
+and the design's section 2.1 example (`heard DSD64, DSD128, DSD256: clean with
+PEQ off on iOS; noise with PEQ on (iOS 2.0.1 report)`). The form is described
+where the old reading was: `dacprofile.go` (its Provenance and DoP fields and
+package doc), `scripts/dac-profiles/README.md`, and the design's sections 2.1
+(the provenance definition) and 2.4. `ios-check.py` reads the profiles' DoP
+fields and never these lines: its self-test and the registry at cd125088
+still pass. `TestADopClauseCreditsOnlyTheRatesItsFormLists` (eeba5011) holds
+every wording rounds 2 and 3 tried and the reviewers' lists as cases of what
+credits what, beside the form's own (`refused DSD256: no supported altsetting`
+must pass); on 4153f229's reading it was red by logic on the five "accepted
+though false" lines, the must-reject marker clauses (`heard DSD64 but not at
+DSD128`, `heard DSD128 not`, `heard DSD64 and DSD128`, `heard at DSD128`,
+`heard DSD128,`), `refusal of DSD256`, the contradictions and round 3's own
+pins, and by its words alone where round 3 refused too.
+
+**A portless replacement on another bus** (Codex, P2,
+`cmd/bridge/output_dac_bind.go:390-391`): confirmed. Two serialless units of
+one model, each under a controller the port grammar does not name, on two
+buses and enumerated third on each, share the IDs, no serial, no port, the
+interface and the device number, since a bus numbers its devices alone. In
+6dc90748 `TestDACInspectTiesAPortlessReadingToItsPlace` read A as card 4, then
+had B take card 4 (`class/sound/card4` the same name, resolved to B's place):
+`portlessReading`, `binding.SameUnit` and the device number passed, and
+inspect showed "Other Audio Other DAC 0200" under A's card, red; its
+preconditions asserted B read as A's unit and enumeration at another resolved
+directory. `TestDACInspectTakesNoTwoUnknownPlacesForOne` showed a model for a
+card whose directory resolved in neither reading, red. Fixed in ae3ecebc:
+`readModel` takes the card's directory with its links resolved as the
+inventory read it (`binding.Card.Dir`, the reader's `t.resolve` of
+`class/sound/cardN`), and the reading again's must be that directory and not
+empty.
+
+**Negative controls**, by a runner outside the tree, as before: the three
+named tests green first, every file restored by SHA-256 after. All 7 went
+red.
+
+| # | Mutation | Red |
+|---|---|---|
+| F1 | a marker clause that does not match the form is accepted, its rates read wherever they stand | `TestADopClauseCreditsOnlyTheRatesItsFormLists`, 37 failing lines ("heard at DSD64 but not at DSD128 lints as []") |
+| F2 | a clause that starts with no marker credits the rates it names beside a marker's word | the same, 17 ("DSD256 refused: no supported 705.6 kHz altsetting lints as []") |
+| F3 | a rate under two markers is accepted | the same, 4 (the three contradictions, and the one across two dop lines) |
+| F4 | a rate past DSD64 to DSD512 is let through | the same, 1 ("heard DSD1024") |
+| F5 | the clauses are not trimmed | the same, 3 (a marker clause after a semicolon reads as free text) |
+| D1 | the reading again compares the card's link by its unresolved name, `class/sound/cardN` | `TestDACInspectTiesAPortlessReadingToItsPlace` ("Other Audio Other DAC 0200") |
+| D2 | two directories that could not be resolved match | `TestDACInspectTakesNoTwoUnknownPlacesForOne` |
+
+**The rules patch**, `rules-b728-b2-r4.patch`: the B2 line's Don't trades "take
+a word its clause negates for evidence" for "credit a DoP rate from a dop
+clause not in its fixed form (`heard DSD128: <source>`)" (player.md 95,614 to
+95,655 bytes); its blank context line keeps its leading space, `git apply
+--check` takes it, `dropped_donts` finds every Don't in the long form, and
+docs-check passes on a copy with it applied.
+
+**Checks**, on legion0 (Linux, amd64, Go 1.27.3), with TMPDIR under
+`.tmp/_b728-b2`. The gate's first turn, at 2899d15f, failed one test in its
+three test steps, `TestEveryCitedTestNameExists`: round 3's record (above)
+cited the negation test 0f079403 removed. c4a2ab1f elides its `Test` prefix
+there, the rule for a note that must name a test that no longer exists (the
+TRACKED `.md` docs bullet in `History-rules-build-ci-tests.md`), and the test
+steps ran again at the head that carries this record:
+- `go test -count=1` of `./internal/player/dacprofile/`, `./internal/alsa/`
+  and `./cmd/bridge/`, and the same under `-race`: ok at 3e6a9a55 (cmd/bridge
+  306 s, and 903 s under race; internal/alsa 1.7 s under race).
+- `make test-fast`, at 3e6a9a55: 82 packages ok, none failed, 14 with no
+  test files; 32 results came from the test cache, packages round 4 does not
+  touch whose inputs had not changed, and internal/alsactl, the one
+  Linux-only package among them, then ran fresh with `-race -count=1`, ok.
+- At 2899d15f, the steps the record does not touch: `make vet` natively and
+  with `GOOS=windows` and `GOOS=darwin`, clean; go1.27.3's gofmt on cmd,
+  internal and scripts, clean; `make docs-check`, ok (and with the patch
+  applied, above); the qualification check from main and from ebe71366,
+  "qualification version OK", at 36; `kernel-check.sh` by its own fetch at
+  v6.12, blob c5fd1803, 39 facts, PASS; `ios-check.py` against the registry
+  at cd125088 and its `--self-test`, ok; and `make test-fast`'s other 81
+  packages, ok, the Linux-only ones among them.
+- Not run here: Windows and macOS natively, CI's runner, and any hardware.
+
+**Commits.** eeba5011 the form's red tests; 6dc90748 the place's red tests;
+0f079403 the form, the negation reading removed, the lines rewritten;
+ae3ecebc the place; 2899d15f the long form; c4a2ab1f the elided citation;
+this record.
+
+## 2026-11-05 — B728 B2 round 5: heard against a refusal, an unresolved directory said as that, and the window left
+
+The review of #1402 at a681d3ff (round 4, its rules line, and main
+1a78b58a), to which this branch fast-forwarded; three small points from the
+Claude API reviewer, Codex having none of its own. No rules line changes, so
+no patch this round: the B2 line names none of these, and its long form
+carries them.
+
+- **refused and silence at on one rate are one result** (`lint.go`, the
+  contradiction): confirmed. Round 4 refused any two markers on one rate,
+  its brief's sentence taken literally; but both markers credit
+  `RefusedBitRates` ("refused, or played as silence"), so two units that
+  refused one rate in two ways could not be written. In 28385736
+  `TestADopClauseCreditsOnlyTheRatesItsFormLists` wanted "refused DSD256;
+  silence at DSD256" and the brief's two-unit line (`refused DSD256: unit 1
+  would not negotiate (…); silence at DSD256: unit 2 played it silent (…)`)
+  clean: red ("under two markers"). Fixed in 1b660056: the lint compares the
+  results, a rate both heard and refused (by `refused` or `silence at`) is
+  the contradiction, said as that ("both heard and refused"); heard beside
+  either is still refused. The wording followed in `lint.go`'s and
+  `dacprofile.go`'s comments, the README, the design's section 2.1 and the
+  long form.
+- **An unresolved directory read as a card that changed**
+  (`output_dac_bind.go`): confirmed. In 28385736
+  `TestDACInspectTakesNoTwoUnknownPlacesForOne` wanted "not read: the card's
+  directory could not be resolved" where the inventory's directory, the
+  reading again's, or both are empty, and fails on a missing card 5 rather
+  than passing vacuously: red, "not read: the card changed while it was
+  read" in each case, which a user whose directory never resolves would read
+  on every run. Fixed in fe1531eb: an empty directory in either reading is
+  said as that; two that resolved and differ are still a change.
+- **The strings are tied to a place only through the card before and after
+  the read**: not fixed, the known remaining window. The reader reads the
+  strings through its own resolve of the card's device link, and
+  `alsa.QualificationIdentity` names no directory (Codex, on the brief), so
+  two rebinds within one read (the card to unit B and back to A before the
+  reading again) could still show B's strings under A. Closing it needs the
+  reader to return the directory it read the strings from, a change in
+  guarded `internal/alsa/` and a qualification bump, which section 8 keeps
+  B2 clear of: it waits for the later PR that changes that reader (the
+  absent-product reader the B2 review left to one). `readModel`'s comment
+  and the long form say so.
+
+**Negative controls**, by a runner outside the tree, as before, the two
+named tests green first and both files restored by SHA-256 after: all 5
+went red.
+
+| # | Mutation | Red |
+|---|---|---|
+| C1 | refused and silence at on one rate count as two results again (any two markers) | `TestADopClauseCreditsOnlyTheRatesItsFormLists`, 2 failing lines (the two cases that are one result) |
+| C2 | heard beside a refusal is no contradiction | the same, 3 (heard and silence at, heard and refused, and the one across two dop lines) |
+| C3 | an unresolved directory reads as a card that changed | `TestDACInspectTakesNoTwoUnknownPlacesForOne`, its three cases |
+| C4 | only the inventory's directory is asked whether it resolved | the same, the reading again's case |
+| C5 | only the reading again's directory is asked whether it resolved | the same, the inventory's case |
+
+**Checks**, on legion0 (Linux, amd64, Go 1.27.3), in one turn of the shared
+build lock, with TMPDIR under `.tmp/_b728-b2`, at a5e3a1d2:
+- `go test -count=1` of `./internal/player/dacprofile/` and `./cmd/bridge/`,
+  and the same under `-race`: ok (cmd/bridge 304 s, and 906 s under race).
+- `make test-fast`: 82 packages ok, none failed, 14 with no test files; 28
+  results came from the test cache, packages this round does not touch, and
+  internal/alsactl, the one Linux-only package among them, then ran fresh
+  with `-race -count=1`, ok.
+- `make vet` natively, and with `GOOS=windows` and `GOOS=darwin`: clean.
+- go1.27.3's gofmt on cmd, internal and scripts: clean.
+- `make docs-check`: ok (CLAUDE.md 73.6%; the rules line unchanged).
+- The qualification check, from main and from ebe71366: "qualification
+  version OK", at 36: no guarded path changed.
+- `kernel-check.sh` by its own fetch at v6.12, PASS; `ios-check.py` against
+  the registry at cd125088 and its `--self-test`, ok; `profiles.json`
+  checked out under `core.autocrlf=true`, no CRLF, its test PASS.
+- Not run here: Windows and macOS natively, CI's runner, and any hardware.
+
+**Commits.** 28385736 the red tests; 1b660056 heard against a refusal;
+fe1531eb the unresolved directory, and the window named; a5e3a1d2 the long
+form; this record.
+
+## 2026-11-05 — B728 B2 round 6: an arm read only whole, the registry's block comments, and the iOS resync delay as timing
+
+The review of #1402 at 98456243 (round 5), which this branch already was, so
+the fast-forward moved nothing; three points. The rules change ships as
+`rules-b728-b2-r6.patch` (outside the tree), its long form committed here.
+
+**A bcdDevice arm read past what it reads** (CodeRabbit, `kernel_test.go`,
+`readArm`): confirmed. The bcdDevice branch read from the switch's opening
+brace to the arm's end, so a format returned before the switch, on another
+altsetting, was no fact while the counts of returns and of format returns
+still agreed, and a second altsetting with a switch of its own had its cases
+read as the first altsetting's. In d3bbb919
+`TestTheKernelQuirkReaderReadsEachShape` gained those two mutations of the
+synthetic file and four of the same class in either shape, a statement the
+reader does not read beside the ones it reads, which changes what they mean:
+a statement inside the switch, a format the switch returns by default beside
+a case (read as that case's alone), a statement beside an altsetting test,
+and an altsetting test under a test the reader does not read. The reader
+took all six. Fixed in 60103980: an arm's statements are one of two shapes,
+each matched whole (`reAltArm`: tests of an altsetting, each returning a
+format, then the arm's break; `reBCDArm`: one altsetting's test holding only
+the switch on the unit's bcdDevice, then the arm's break), the switch holding
+nothing but its cases, format returns, default and breaks (`reBCDToken`), a
+format returned by default refused, and anything else an error. Round 3's
+check that every format return lies in an altsetting test is gone: the whole
+match covers it. v6.12's `quirks.c` (blob c5fd1803) still reads, 39
+device-specific facts and 19 vendor-wide rules as before, and the comparison
+with the database passes both ways (`kernel-check.sh`, PASS).
+
+**ios-check read a block comment** (`ios-check.py`, `strip_comments`):
+confirmed. It blanked line comments alone, and `registry_rows` takes the
+first `maxDSDRate:` after each `id:`, so a block comment naming a higher rate
+before a row's real one raised the row's cap and a violation printed ok, and
+a row a block comment held was read as a row. In d3bbb919 the self-test's
+registry gained such a comment before a row's real rate, a row only a block
+comment holds, a nested comment whose tail, past its inner close, names a
+rate and a row, and a `/*` in a string and in a line comment, which must open
+none, with cases on each; and five shapes the reader must refuse: a row with
+no rate before the next (the old case), a block comment left open, a
+multi-line string, an interpolation and a raw string. At the base it failed
+11 of its 18 cases, the heard and the stated rate past the row's maximum
+behind the comment both printing ok. Fixed in dfce8fd9: block comments are
+blanked as line comments are, nesting as Swift's do, and only outside string
+literals; what the reader does not read is refused, never read past: a block
+comment left open, a string not closed on its line (a multi-line string is
+one), an interpolation, whose nested quotes the scanner would take for the
+string's end, and a raw string. The last three are past the brief's letter,
+under the kernel reader's own rule (a shape the reader does not know is an
+error): each would show the reader a string's text as code. The registry at
+cd125088 holds none of them, no `/*`, `"""`, `#"` or interpolation, and still
+reads, 20 rows, the Mytek ok.
+
+**The iOS resync delay as timing** (`player.md`'s B2 line,
+`dacprofile.go`'s package doc): confirmed. Both said DoP evidence and caveats
+were all that is imported from the iOS registry, while `profiles.json` seeds
+`chord.hugo2`'s `timing.dsdPrefillMs` (700) from its row's DSD resync delay,
+which `TestTheCapturedModelsAreSeededAsTheirEvidenceSays` pins. The value is
+measured evidence and stays. In 92444e5a the package doc, the README, the
+design's draft of the line and its risk table, and the long form allow a DSD
+resync delay as timing, the prefill alone, never a policy beyond it (the long
+form already said "no resync delay but the prefill's seed"); the long form
+and the README also say what this round's two fixes do.
+
+**Negative controls**, by a runner outside the tree, as before: the kernel
+reader's test and the self-test green first, both files restored by SHA-256
+after. All 12 went red.
+
+| # | Mutation | Red |
+|---|---|---|
+| K1 | an arm is read by its altsetting tests, not whole | `TestTheKernelQuirkReaderReadsEachShape`, 5 mutations taken (round 3's two, the format before the switch, the statement beside an altsetting test, the test under another test) |
+| K2 | a bcdDevice arm need not end at its altsetting test's close and its break | the same, 1 (the second altsetting's switch) |
+| K3 | a bcdDevice arm need not start at its altsetting test | the same, 2 (the format before the switch, the second altsetting's switch) |
+| K4 | a statement in the switch beside its cases and returns is let through | the same, 1 |
+| K5 | a format returned by default is taken for the cases before it | the same, 1 |
+| I1 | block comments are not blanked | `ios-check.py --self-test`, 8 failing lines (the rows read; the two maxima behind the comments, the two rows only comments hold; the comment left open) |
+| I2 | block comments do not nest | the same, 3 (the nested row's cap read from the tail, and the row the tail names) |
+| I3 | a block comment left open is blanked to the end | the same, 1 |
+| I4 | a string's text is scanned as code, so its `/*` opens a comment | the same, 6 (the registry does not read: the comment the string opened is left open) |
+| I5 | a string may run past its line | the same, 1 (the multi-line string reads) |
+| I6 | an interpolation is read as an escape | the same, 1 |
+| I7 | a raw string is read | the same, 1 |
+
+**The rules patch**, `rules-b728-b2-r6.patch`: the B2 line's Don't reads
+"import from the iOS registry anything but its DoP evidence, its caveats and
+a DSD resync delay as timing (`dsdPrefillMs`)" (player.md 95,655 to 95,706
+bytes); its blank context line keeps its leading space, `git apply --check`
+takes it, `dropped_donts` finds every Don't in the long form, and docs-check
+passes on a copy with it applied.
+
+**Checks**, on legion0 (Linux, amd64, Go 1.27.3), in one turn of the shared
+build lock, with TMPDIR under `.tmp/_b728-b2`, at 92444e5a:
+- `go test -count=1 ./internal/player/dacprofile/`, and the same under
+  `-race`: ok.
+- `ios-check.py` against the registry at cd125088, ok (20 rows), and its
+  `--self-test`, PASS (18 cases).
+- `kernel-check.sh` by its own fetch at v6.12, blob c5fd1803: 39
+  device-specific facts and 19 vendor-wide rules, PASS.
+- `make test-fast`: 82 packages ok, none failed, 14 with no test files; 31
+  results came from the test cache, packages this round does not touch, and
+  internal/alsactl, the one Linux-only package among them, then ran fresh
+  with `-race -count=1`, ok. cmd/bridge ran (410 s), and its
+  `TestEveryCitedTestNameExists` ran again with this record in the log, ok.
+- `make vet` natively, and with `GOOS=windows` and `GOOS=darwin`: clean.
+- go1.27.3's gofmt on cmd, internal and scripts: clean.
+- `make docs-check`: ok (and with the patch applied, above).
+- The qualification check, from main and from ebe71366: "qualification
+  version OK": no guarded path changed.
+- Not run here: Windows and macOS natively, CI's runner, and any hardware.
+
+**Commits.** d3bbb919 the red tests; 60103980 the kernel reader; dfce8fd9
+ios-check; 92444e5a the docs and the long form; this record.
+
+## 2026-11-05 — B728 B2 round 7: a note's text never read as a field, ProductID's own doc, and the long form under its section
+
+CodeRabbit's last comments on #1402 at a8f0961c (round 6 and its rules
+line), to which this branch fast-forwarded. The rules change ships as
+`rules-b728-b2-r7.patch` (outside the tree).
+
+- **A note's rate read as its row's** (`ios-check.py`): confirmed.
+  `strip_comments` keeps string literals whole, and `registry_rows` takes
+  the first `maxDSDRate:` after each `id:`, so a note naming a rate before
+  its row's own field set the row's cap. In 349c1824 the self-test's
+  published row has its notes line first, the note naming DSD512 above the
+  row's DSD256, with a case for a heard DSD512 against that row: red, the
+  cap read as DSD512 and the violation printing ok. Fixed in 922cdb98:
+  `blank_strings` empties every string literal but the one an id label
+  stands just before (`ID_LABEL`, the label `ROW_ID` reads), before the rows
+  are parsed. The registry at cd125088 reads the same 20 rows at the same
+  rates as before, and the only strings it keeps are its 20 ids. Two
+  controls went red: every literal kept whole (the rows read and the new
+  case), and every literal blanked, an id's too (no row read).
+- **ProductID's doc** (`key.go`): the comment before `VendorID` named both
+  accessors and attached to `VendorID` alone; each has its own (584b4cc8).
+- **The long form under its section** (`ops/History-rules-player.md`): it
+  sat under the B725 heading, because the B2 line had landed at the end of
+  player.md, after B725's section. 7065c80e moves it unchanged to the B728
+  section, after B1, and `verify_moves.py --base HEAD --moves` passes.
+  `rules-b728-b2-r7.patch` moves the line the same way, so the line and its
+  long form sit under one heading: `git apply --check` takes it,
+  `dropped_donts` is empty, and docs-check and `verify_moves.py` pass on a
+  copy with it applied (player.md 95,707 bytes).
+- **Not taken**: CodeRabbit's ask to replace round 5's description of the
+  rebind window with a backlog reference. That rule is for a security
+  weakness, and this is a rare wrong model string in a local diagnostic
+  (the orchestrator's decision), so the paragraph stays; round 1's note
+  that no backlog entry was written now names B737, the entry the
+  orchestrator filed.
+
+**Checks**, on legion0 (Linux, amd64, Go 1.27.3), in one turn of the shared
+build lock, at 7065c80e with the B737 note: `go test -count=1` of
+`./internal/player/dacprofile/` and under `-race`, ok, and its vet, clean;
+`ios-check.py` against the registry at cd125088, ok (20 rows), and its
+`--self-test`, PASS (19 cases); cmd/bridge's
+`TestNoDocblockNamesAnotherDeclaration` and `TestEveryCitedTestNameExists`,
+ok, the second again with this record in the log; go1.27.3's gofmt on cmd,
+internal and scripts, clean; `make docs-check`, ok; `verify_moves.py
+--base a8f0961c --moves`, PASS; the qualification check from main and
+from ebe71366, "qualification version OK". Not run here: Windows and macOS
+natively, CI's runner, and any hardware.
+
+**Commits.** 349c1824 the red self-test; 922cdb98 the strings blanked;
+584b4cc8 ProductID's doc; 7065c80e the long form moved; this record, with
+the B737 note.
+
 ## 2026-11-04 — B651: a volume mounted after the bridge starts is never taken for an empty library or a fresh install
 
 Backlog B651, on `fix/b651-late-mount-guard` from main cde731e2. On a NAS

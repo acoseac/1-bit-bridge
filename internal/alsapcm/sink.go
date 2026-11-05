@@ -42,7 +42,8 @@ const (
 // Transport is what a sink sends the DAC: the representation (PCM; native
 // DSD and DoP are later PRs), the frame rate, the channels, the ALSA
 // format, and the valid bits the samples were packed from, which is the
-// packing together with the format (24 valid bits in S32_LE is not 32).
+// packing together with the format (16 or 24 valid bits in S32_LE is not
+// 32).
 // Two tracks of one transport follow each other with nothing between
 // them; any difference needs a drain, a reopen and a refill (B470 §3).
 type Transport struct {
@@ -101,15 +102,17 @@ func (t Transport) Join(next Transport) Join {
 }
 
 // carries reports whether the format package packs validBits-bit samples
-// as f: S16_LE carries 16, S24_3LE and S24_LE 24, S32_LE 24 or 32.
+// as f: S16_LE carries 16, S24_3LE and S24_LE 16 or 24, S32_LE 16, 24 or
+// 32; samples narrower than their container shifted to its top, the bits
+// below them zero (B735).
 func carries(f format.ALSAFormat, validBits int) bool {
 	switch f {
 	case format.S16LE:
 		return validBits == 16
 	case format.S243LE, format.S24LE:
-		return validBits == 24
+		return validBits == 16 || validBits == 24
 	case format.S32LE:
-		return validBits == 24 || validBits == 32
+		return validBits == 16 || validBits == 24 || validBits == 32
 	}
 	return false
 }
@@ -453,7 +456,7 @@ func (cfg SinkConfig) resolve() (SinkConfig, error) {
 	case t.Channels != Channels:
 		return bad("the sink plays %d channels, not %d", Channels, t.Channels)
 	case !carries(t.Format, t.ValidBits):
-		return bad("%s does not carry %d valid bits: S16_LE carries 16, S24_3LE and S24_LE 24, S32_LE 24 or 32", t.Format, t.ValidBits)
+		return bad("%s does not carry %d valid bits: S16_LE carries 16, S24_3LE and S24_LE 16 or 24, S32_LE 16, 24 or 32", t.Format, t.ValidBits)
 	}
 	if cfg.Lookahead == 0 {
 		cfg.Lookahead = DefaultLookahead

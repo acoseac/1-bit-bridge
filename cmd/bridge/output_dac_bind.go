@@ -209,6 +209,17 @@ type dacCardView struct {
 	PortProblem string   `json:"portProblem"`
 	Interface   *int     `json:"interface"`
 	Playback    []string `json:"playback"`
+	// Manufacturer, Product and BCDDevice are a USB card's unit's descriptor
+	// strings and firmware code as the sysfs reader returns them
+	// (alsa.Qualification: white space trimmed, refused empty or holding a
+	// NUL, CR or LF), the model identity the DAC profile database keys by
+	// with the IDs and the interface (internal/player/dacprofile, B728 B2).
+	// Null for a card that is not USB, and for a USB card whose three were
+	// not all read, which ModelProblem says why.
+	Manufacturer *string `json:"manufacturer"`
+	Product      *string `json:"product"`
+	BCDDevice    *string `json:"bcdDevice"`
+	ModelProblem string  `json:"modelProblem"`
 }
 
 // dacVerifyView is --verify-card's answer.
@@ -249,7 +260,7 @@ func runDACInspect(args []string, env outputBindEnv, stdout, stderr io.Writer) i
 		reportDACReadError(stderr, err)
 		return 1
 	}
-	rep := dacInspect(env, *configPath, inv)
+	rep := dacInspect(env, *configPath, inv, dacModelReader{descriptors: obs.Sysfs.Qualification, card: obs.Sysfs.Card})
 	code := 0
 	if *verify >= 0 {
 		rep.Verify = dacVerify(obs, rep.resolved, *verify, rep.Binding != nil)
@@ -267,8 +278,18 @@ func runDACInspect(args []string, env outputBindEnv, stdout, stderr io.Writer) i
 	return code
 }
 
-// dacInspect builds inspect's report over inv.
-func dacInspect(env outputBindEnv, configPath string, inv binding.Inventory) dacInspectReport {
+// dacModelReader reads a card's model identity over the tree inspect read:
+// its unit's descriptor strings and firmware code
+// (alsa.SysfsReader.Qualification), and the card's identity again once they
+// are read (alsa.SysfsReader.Card).
+type dacModelReader struct {
+	descriptors func(card int) (alsa.QualificationIdentity, error)
+	card        func(card int) (alsa.Identity, bool)
+}
+
+// dacInspect builds inspect's report over inv, each USB card's model
+// identity through model.
+func dacInspect(env outputBindEnv, configPath string, inv binding.Inventory, model dacModelReader) dacInspectReport {
 	rep := dacInspectReport{ReadAt: stampOf(env.now()), Cards: []dacCardView{}, Problems: append([]string{}, inv.Problems...)}
 	rep.Resolution = dacResolutionView{Matches: []int{}}
 	cfg, path, err := loadCLIConfig(configPath)
@@ -328,6 +349,7 @@ func dacInspect(env outputBindEnv, configPath string, inv binding.Inventory) dac
 			id, label, iface := u.ID.String(), u.Serial.Label(), u.Interface
 			v.USBID, v.SerialLabel, v.Interface = &id, &label, &iface
 			v.Port, v.PortProblem = u.Port, u.PortProblem
+			v.readModel(model, c.Index, u, c.Dir)
 		}
 		for _, e := range c.Endpoints {
 			v.Playback = append(v.Playback, e.String())
@@ -335,6 +357,83 @@ func dacInspect(env outputBindEnv, configPath string, inv binding.Inventory) dac
 		rep.Cards = append(rep.Cards, v)
 	}
 	return rep
+}
+
+// readModel reads a USB card's model identity, the descriptor strings and
+// firmware code beside its IDs, through the reader the harness's unit
+// identity is read with, all three or none; and keeps them only when the
+// unit read is the one the inventory holds, at its port, on its interface,
+// in its enumeration (its device number), both as that reader found it and
+// as the card reads again once the strings are read, so a unit replugged
+// between the readings shows another's strings nowhere. The reader reads the
+// card, then its strings through the card's device link again: a unit that
+// replaced the card between the two (a replug into the same port) gives the
+// inventory's attachment with its own strings, which only the reading after
+// them tells (CodeRabbit on #1402).
+//
+// A unit with no port (its controller under something the port grammar does
+// not name, a virtual machine's virtio) is refused by that reader, whose
+// evidence needs a port that persists, once it has read and checked the
+// strings; inspect, which binds nothing, keeps them for a card the inventory
+// holds with no port either (portlessReading), with the device number and
+// interface checks any card has.
+//
+// The reading again is held to the card's place too: dir, the card's
+// directory with its links resolved as the inventory read it (binding.Card's
+// Dir), and the same directory resolved afresh, never the link's own name
+// (class/sound/cardN), which a unit that takes the card's number inherits.
+// Without a port, nothing else tells two units of one model with no serial
+// apart: on two buses, which number their devices alone, they can share the
+// interface and the device number (Codex on #1402). Two directories that
+// could not be resolved are no match, and a directory that could not be
+// resolved, in either reading, is said as that, never as a change, which a
+// user whose directory never resolves would read on every run.
+//
+// The strings themselves come from the reader's own resolve of the card's
+// device link, which names no directory (alsa.QualificationIdentity), so two
+// rebinds within one read (the card to another unit and back before the
+// reading again) could still show the other unit's strings. Closing that
+// window needs the reader to say the directory it read them from, a change
+// in guarded internal/alsa that a later PR may make.
+func (v *dacCardView) readModel(read dacModelReader, card int, u *alsa.USBIdentity, dir string) {
+	q, err := read.descriptors(card)
+	switch {
+	case err != nil && !portlessReading(q, u):
+		v.ModelProblem = "not read: " + err.Error()
+		return
+	case q.Port != u.Port || q.Interface != u.Interface || q.DevNum != u.DevNum:
+		v.ModelProblem = "not read: the card changed while it was read"
+		return
+	}
+	again, ok := read.card(card)
+	switch {
+	case !ok || again.Kind != alsa.IdentityUSB || again.USB == nil || again.Vanished ||
+		!binding.SameUnit(*again.USB, *u) || again.USB.DevNum != u.DevNum:
+		v.ModelProblem = "not read: the card changed while it was read"
+		return
+	case dir == "" || again.Dir == "":
+		v.ModelProblem = "not read: the card's directory could not be resolved"
+		return
+	case again.Dir != dir:
+		v.ModelProblem = "not read: the card changed while it was read"
+		return
+	}
+	bcd := q.BCDDevice
+	if n, err := usbid.ParseHex16(bcd); err == nil {
+		bcd = usbid.Hex16(n)
+	}
+	v.Manufacturer, v.Product, v.BCDDevice = &q.Manufacturer, &q.Product, &bcd
+}
+
+// portlessReading reports whether q, which the qualification's reader
+// refused, is its reading of a unit with no port, for a card the inventory
+// holds with no port: the reader checks the three strings before it reads
+// the attachment and refuses the attachment last, so strings that passed its
+// checks, a device number and no port are a reading refused for its port
+// alone. A reading refused before that holds no device number.
+func portlessReading(q alsa.QualificationIdentity, u *alsa.USBIdentity) bool {
+	_, err := usbid.ParseHex16(q.BCDDevice)
+	return u.Port == "" && q.Port == "" && q.DevNum != 0 && q.Manufacturer != "" && q.Product != "" && err == nil
 }
 
 // dacVerify is --verify-card: the check after open, run against the trees
@@ -435,6 +534,12 @@ func renderDACInspect(w io.Writer, rep dacInspectReport) {
 			fmt.Fprintln(w, "  playback:  none")
 		} else {
 			fmt.Fprintf(w, "  playback:  %s\n", strings.Join(c.Playback, ", "))
+		}
+		switch {
+		case c.Manufacturer != nil && c.Product != nil && c.BCDDevice != nil:
+			fmt.Fprintf(w, "  model:     manufacturer %q, product %q, bcdDevice %s\n", *c.Manufacturer, *c.Product, *c.BCDDevice)
+		case c.ModelProblem != "":
+			fmt.Fprintf(w, "  model:     %s\n", c.ModelProblem)
 		}
 	}
 }

@@ -10,6 +10,7 @@ var buildSiteFiles = []string{
 	".goreleaser.yaml", "go.mod", "Makefile", "Dockerfile",
 	"deploy/linux/deploy-bridge-vps.sh", "deploy/windows/setup-bridge-windows.ps1", "deploy/windows/update-bridge-windows.ps1",
 	".github/scripts/test-shard.sh", ".github/workflows/gate.yml", ".github/workflows/fuzz.yml", "scripts/alsa-abi/check.sh",
+	"scripts/dac-profiles/kernel-check.sh",
 	"scripts/player-dsd-goldens/generate.py", "internal/player/hotplug/testdata/uevent/reconstruct.py",
 	"ops/deployment-runbook.md", "ops/release-playbook.md", "README.md",
 	"deploy/windows/firewall-bridge-windows.ps1", "docs/LoupeReviewCycle.md",
