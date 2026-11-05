@@ -77,11 +77,15 @@ var (
 	reCaseID     = regexp.MustCompile(`case\s+USB_ID\s*\(\s*0x([0-9a-fA-F]{4})\s*,\s*0x([0-9a-fA-F]{4})\s*\)\s*:`)
 	reDefault    = regexp.MustCompile(`default\s*:`)
 	reAltReturn  = regexp.MustCompile(`if\s*\(\s*fp->altsetting\s*==\s*(\d+)\s*\)\s*return\s+SNDRV_PCM_FMTBIT_(\w+)\s*;`)
-	reAltOpen    = regexp.MustCompile(`if\s*\(\s*fp->altsetting\s*==\s*(\d+)\s*\)\s*\{`)
-	reBCDSwitch  = regexp.MustCompile(`switch\s*\(\s*le16_to_cpu\s*\(\s*chip->dev->descriptor\.bcdDevice\s*\)\s*\)\s*\{`)
-	reBCDCase    = regexp.MustCompile(`case\s+0x([0-9a-fA-F]+)\s*:`)
+	// An arm's statements are one of two shapes, each whole: tests of an
+	// altsetting, each returning a format, then the arm's break (reAltArm);
+	// or a test of one altsetting holding only a switch on the unit's
+	// bcdDevice, then the arm's break (reBCDArm), the switch holding only
+	// its cases, format returns, default and breaks (reBCDToken).
+	reAltArm     = regexp.MustCompile(`^\s*(?:if\s*\(\s*fp->altsetting\s*==\s*\d+\s*\)\s*return\s+SNDRV_PCM_FMTBIT_\w+\s*;\s*)+break\s*;\s*$`)
+	reBCDArm     = regexp.MustCompile(`^\s*if\s*\(\s*fp->altsetting\s*==\s*(\d+)\s*\)\s*\{\s*switch\s*\(\s*le16_to_cpu\s*\(\s*chip->dev->descriptor\.bcdDevice\s*\)\s*\)\s*\{([^{}]*)\}\s*\}\s*break\s*;\s*$`)
+	reBCDToken   = regexp.MustCompile(`case\s+0x([0-9a-fA-F]+)\s*:|return\s+SNDRV_PCM_FMTBIT_(\w+)\s*;|default\s*:|break\s*;`)
 	reReturnFmt  = regexp.MustCompile(`return\s+SNDRV_PCM_FMTBIT_(\w+)\s*;`)
-	reReturn     = regexp.MustCompile(`\breturn\b`)
 	reITFRule    = regexp.MustCompile(`if\s*\(\s*chip->quirk_flags\s*&\s*QUIRK_FLAG_ITF_USB_DSD_DAC\s*\)\s*\{`)
 	reLastAlt    = regexp.MustCompile(`fp->altsetting\s*==\s*iface->num_altsetting\s*-\s*1`)
 	reRawRule    = regexp.MustCompile(`if\s*\(\s*\(\s*chip->quirk_flags\s*&\s*QUIRK_FLAG_DSD_RAW\s*\)\s*&&\s*fp->dsd_raw\s*\)\s*return\s+SNDRV_PCM_FMTBIT_(\w+)\s*;`)
@@ -240,65 +244,60 @@ func readArms(f *kernelFacts, arms string) error {
 	return nil
 }
 
-// readArm reads one arm's statements: a return of a format on an altsetting,
-// or on an altsetting by the unit's bcdDevice; each fact is a format and how.
+// readArm reads one arm's statements, whole, in one of the two shapes it
+// knows (reAltArm, reBCDArm): a return of a format on an altsetting, or on an
+// altsetting by the unit's bcdDevice; each fact is a format and how. Any other
+// statement, beside the ones it reads or around them, is an error, since it
+// can return a format no fact records or change what one means: a format
+// returned outside an altsetting test or under a test the reader does not
+// read (CodeRabbit on #1402), or beside a bcdDevice switch, and a second
+// altsetting's switch, whose cases were read as the first's (its round 5).
 func readArm(stmts string) ([][2]string, error) {
 	var facts [][2]string
-	if reBCDSwitch.MatchString(stmts) {
-		alt := reAltOpen.FindStringSubmatch(stmts)
-		if alt == nil {
-			return nil, errors.New("a bcdDevice switch with no altsetting")
+	if reAltArm.MatchString(stmts) {
+		for _, m := range reAltReturn.FindAllStringSubmatch(stmts, -1) {
+			n, _ := strconv.Atoi(m[1])
+			facts = append(facts, [2]string{m[2], howAltsetting(n)})
 		}
-		n, _ := strconv.Atoi(alt[1])
-		inner := stmts[reBCDSwitch.FindStringIndex(stmts)[1]:]
-		type tok struct {
-			at          int
-			bcd, format string
-		}
-		var toks []tok
-		for _, m := range reBCDCase.FindAllStringSubmatchIndex(inner, -1) {
-			toks = append(toks, tok{at: m[0], bcd: inner[m[2]:m[3]]})
-		}
-		for _, m := range reReturnFmt.FindAllStringSubmatchIndex(inner, -1) {
-			toks = append(toks, tok{at: m[0], format: inner[m[2]:m[3]]})
-		}
-		sort.Slice(toks, func(i, j int) bool { return toks[i].at < toks[j].at })
-		var pending []uint16
-		for _, t := range toks {
-			if t.format == "" {
-				v, err := strconv.ParseUint(t.bcd, 16, 16)
-				if err != nil {
-					return nil, err
-				}
-				pending = append(pending, uint16(v))
-				continue
+		return facts, nil
+	}
+	arm := reBCDArm.FindStringSubmatch(stmts)
+	if arm == nil {
+		return nil, errors.New("statements the reader does not read")
+	}
+	n, _ := strconv.Atoi(arm[1])
+	if strings.TrimSpace(reBCDToken.ReplaceAllString(arm[2], "")) != "" {
+		return nil, errors.New("a bcdDevice switch holding statements the reader does not read")
+	}
+	var pending []uint16
+	byDefault := false
+	for _, t := range reBCDToken.FindAllStringSubmatch(arm[2], -1) {
+		switch {
+		case t[1] != "":
+			v, err := strconv.ParseUint(t[1], 16, 16)
+			if err != nil {
+				return nil, err
+			}
+			pending = append(pending, uint16(v))
+		case t[2] != "":
+			if byDefault {
+				return nil, errors.New("a format the bcdDevice switch returns by default")
 			}
 			if len(pending) == 0 {
 				return nil, errors.New("a return under no bcdDevice")
 			}
 			for _, bcd := range pending {
-				facts = append(facts, [2]string{t.format, howBCD(n, bcd)})
+				facts = append(facts, [2]string{t[2], howBCD(n, bcd)})
 			}
 			pending = nil
-		}
-	} else {
-		alts := reAltReturn.FindAllStringSubmatchIndex(stmts, -1)
-		for _, m := range alts {
-			n, _ := strconv.Atoi(stmts[m[2]:m[3]])
-			facts = append(facts, [2]string{stmts[m[4]:m[5]], howAltsetting(n)})
-		}
-		// Every format the arm returns is one of those facts: one returned
-		// outside an altsetting test, or under a test the reader does not
-		// read, beside one it reads keeps the counts below equal and would be
-		// left out (CodeRabbit on #1402).
-		for _, r := range reReturnFmt.FindAllStringIndex(stmts, -1) {
-			if !slices.ContainsFunc(alts, func(m []int) bool { return m[0] <= r[0] && r[1] <= m[1] }) {
-				return nil, errors.New("a format returned outside an altsetting test")
-			}
+		case strings.HasPrefix(t[0], "default"):
+			byDefault = true
+		default: // a break: the labels before it return nothing
+			pending, byDefault = nil, false
 		}
 	}
-	if len(facts) == 0 || len(reReturn.FindAllStringIndex(stmts, -1)) != len(reReturnFmt.FindAllStringIndex(stmts, -1)) {
-		return nil, errors.New("statements the reader does not read")
+	if len(facts) == 0 {
+		return nil, errors.New("a bcdDevice switch returning no format")
 	}
 	return facts, nil
 }
