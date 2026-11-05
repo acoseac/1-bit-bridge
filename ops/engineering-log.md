@@ -76875,3 +76875,5 @@ pass too; the qualification check (`scripts/qualification-version`,
 files answering `Ð\u0091Ä¯U`, the nine packages of round 1): 0 failing
 tests. Not run here: macOS and Windows natively, CI's runners and the iOS
 app.
+
+**B739, a last point (the orchestrator; Codex and the Claude API reviewer on round 2):** a listener bound to loopback, a name or a link-local address fell through to the walk's first LAN address, where nothing answers. Only a listener on every address takes the walk now; any other takes a dialable custom endpoint or the refusal that asks for one. `TestTheLANFallbackIsTheAddressTheListenerIsBoundTo`'s three rows were red first. Test-fast on the Mac whose real host name has this problem: 83 of 83 packages, no IA5 error, against about 202 failures on main.

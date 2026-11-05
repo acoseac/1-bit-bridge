@@ -477,8 +477,8 @@ func PairingPrimary(cfg *config.Config) (dial, why string) {
 //     loopback and not IPv6 link-local (whose zone names this host's
 //     interface). The walk's other addresses are not where it listens;
 //   - else the first customEndpoints entry a phone can dial;
-//   - else the first LAN IPv4 address of the interface walk, which a
-//     certificate this bridge mints names;
+//   - else, for a listener on every address, the first LAN IPv4 address of the
+//     interface walk, which a certificate this bridge mints names;
 //   - else "", which the pairing page, a refused mint and bridge doctor
 //     answer with advertise.PairingNeedsEndpoint.
 //
@@ -490,8 +490,11 @@ func PairingPrimary(cfg *config.Config) (dial, why string) {
 // and sorts that class ahead of the others; bridge doctor, which has no
 // serving process to ask, asks this same function (PairingPrimary).
 func lanPairingURL(cfg *config.Config, port string) string {
-	if host, _, err := net.SplitHostPort(cfg.ListenAddress); err == nil {
-		if bound, err := netip.ParseAddr(host); err == nil {
+	onEveryAddress := true
+	if host, _, err := net.SplitHostPort(cfg.ListenAddress); err == nil && host != "" {
+		bound, err := netip.ParseAddr(host)
+		onEveryAddress = err == nil && bound.Unmap().IsUnspecified()
+		if err == nil {
 			bound = bound.Unmap()
 			if !bound.IsUnspecified() && !bound.IsLoopback() && bound.Zone() == "" &&
 				!(bound.Is6() && bound.IsLinkLocalUnicast()) {
@@ -501,6 +504,11 @@ func lanPairingURL(cfg *config.Config, port string) string {
 	}
 	if u := firstDialableCustom(cfg.CustomEndpoints); u != "" {
 		return explicitHTTPSPort(u)
+	}
+	// A listener bound to loopback, a name or a link-local address isn't on
+	// the walk's addresses, so nothing would answer there.
+	if !onEveryAddress {
+		return ""
 	}
 	p, _ := strconv.Atoi(port)
 	for _, e := range advertise.Endpoints(advertise.Params{Port: p, CustomEndpoints: cfg.CustomEndpoints}) {
