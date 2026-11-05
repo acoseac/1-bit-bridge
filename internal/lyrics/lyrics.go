@@ -128,10 +128,22 @@ func Pick(cands []Candidate) (Candidate, bool) {
 	if len(cands) == 0 {
 		return Candidate{}, false
 	}
-	seen := map[string]int{}
+	// The key is a struct, never Source and Body joined into one string: a
+	// separator either field can hold makes two documents one key. Joined
+	// with a NUL, Source `""` with Body `"\x00\x000"` and Source `"\x00\x00"`
+	// with Body `"0"` were both `"\x00\x00\x000"`, so the second folded into
+	// the first and the winner was whichever arrived first (the nightly
+	// FuzzPickIsShuffleInvariant, B611). No Source this package defines holds
+	// a NUL, so no scan met it; Pick is exported, and its order property must
+	// not rest on that.
+	type docKey struct {
+		source Source
+		body   string
+	}
+	seen := map[docKey]int{}
 	out := cands[:0:0]
 	for _, c := range cands {
-		key := string(c.Source) + "\x00" + c.Doc.Body
+		key := docKey{source: c.Source, body: c.Doc.Body}
 		if i, dup := seen[key]; dup {
 			out[i] = mergeDuplicate(out[i], c)
 			continue

@@ -230,6 +230,32 @@ func TestPickIsDeterministicUnderShuffle(t *testing.T) {
 	}
 }
 
+// TestPickNeverMergesTwoDifferentDocuments pins, as a readable case, the shape
+// the nightly FuzzPickIsShuffleInvariant found (its corpus entry
+// f2df0898144cb13b, B611).
+//
+// Pick keyed its dedup on Source and Body joined by a NUL, and a Source can
+// hold a NUL as well: Source "" with Body "\x00\x000" and Source "\x00\x00"
+// with Body "0" made the same key, so the second folded into the first and the
+// winner was whichever arrived first. As two documents, the comparator decides
+// (equal rank, equal priority, then the longer body), in either order.
+func TestPickNeverMergesTwoDifferentDocuments(t *testing.T) {
+	long := Candidate{Source: "", Doc: Doc{Body: "\x00\x000"}}
+	short := Candidate{Source: "\x00\x00", Doc: Doc{Body: "0"}}
+	for _, cands := range [][]Candidate{{long, short}, {short, long}} {
+		got, ok := Pick(cands)
+		if !ok {
+			t.Fatal("Pick refused a non-empty set")
+		}
+		if got.Source != long.Source || got.Doc.Body != long.Doc.Body {
+			t.Fatalf("Pick, arriving as %q then %q: got Source %q Body %q, want Source %q "+
+				"Body %q. Two different documents were folded into one, and the first to "+
+				"arrive won.", cands[0].Source, cands[1].Source, got.Source, got.Doc.Body,
+				long.Source, long.Doc.Body)
+		}
+	}
+}
+
 // TestStripBOMsIsLinearOnNestedBOMs is the regression for the quadratic
 // fixed-point loop both PR bots caught on #851.
 //
