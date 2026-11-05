@@ -1,6 +1,6 @@
 # B470 native qualification — owner approval and provisional evidence
 
-QualificationVersion is **36**. All older evidence must be rerun for the harness, native included. The
+QualificationVersion is **37**. All older evidence must be rerun for the harness, native included. The
 harness never creates approval. Production reads an approval record only through the legacy reader,
 which takes versions from 35 to this build's own and none past it, until B728's cutover (`ops/plan-b728-dsd-capability-design.md`).
 This runbook's evidence binds `qualificationVersion`, whose guard covers the DSD byte path and the
@@ -248,7 +248,7 @@ GOTOOLCHAIN=go1.27.3 go test -race -tags ts_omit_webclient,ts_omit_debugeventbus
 
 ## Round 3 evidence rules
 
-Historical round 3 used qualificationVersion 4; current version is **36**. A native contact's
+Historical round 3 used qualificationVersion 4; current version is **37**. A native contact's
 Contact.SchemaVersion remains **2**; a DoP contact's is **3**. All older
 contacts are invalid; repeat contact on this build. Required Device and Subdevice
 fields bind the configured PCM endpoint, including a nonzero subdevice, before
@@ -337,7 +337,7 @@ still resolve inside it). `dsdMode: native` or `auto` enables only approved nati
 
 The Go contracts are `qualification.Approval`, `ApprovalBody`, `ApprovedPolicy`, `Edge`
 and `Evidence` in `internal/player/qualification/approval.go`. JSON uses those exact
-exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=36; Revision is the owner's
+exported field names. SchemaVersion=1, or 2 with Transitions and QualifiedOn (2d.2, below); QualificationVersion=37; Revision is the owner's
 revision; Identity is the observed VID/ProductID/manufacturer/product/bcdDevice,
 anchored controller/port, interface, device and subdevice. No serial or card number is
 persistent identity. Unchanged descriptors may retain approval after replug/restart;
@@ -385,7 +385,7 @@ At least one native fixture must finish with measured playback of that tuple.
 NativeTuple and NativeCompleted record that execution; PCM-only lists or completion
 cannot qualify it. LifecycleActions count observed native outcomes: pause/resume,
 release/reopen, navigation between native occurrences, Stop, and natural completion.
-An admitted command alone is insufficient. Version 36 invalidates older evidence.
+An admitted command alone is insufficient. Version 37 invalidates older evidence.
 List all candidate directional edges explicitly. No command generates that record.
 
 ```sh
@@ -424,7 +424,7 @@ or evidence names resolving to the state directory itself before any ancestor
 walk. Native monitoring remains fail-closed without a grace period. The overlay
 generator requires both integration suites before publishing its overlay.
 Guarded API, config, extractor, output-play and approval paths changed; rerun
-qualification with version 36. ExtractorVersion 30 retains the first parsed DFF
+qualification with version 37. ExtractorVersion 30 retains the first parsed DFF
 PROP's known format facts when a later PROP makes compression unsupported.
 
 Version 13 also covers the deterministic PCM trace capture test. It changes no
@@ -792,3 +792,24 @@ one is now asked of os.Stat, as os.MkdirAll asks it, so a Windows junction to
 a directory is no entry in the way. Nothing in the player reads either
 function. It changes no playback path, PCM or DSD, no binding state, no wire
 field or schema, and no approval record's shape.
+
+Version 37 covers backlog B735 (B728's design names 37 for its B4, whose merge
+then takes the next), under the guarded `internal/alsapcm/` and
+`cmd/bridge/output_dsdtest` prefixes: the player plays 16-bit PCM on a DAC with
+no S16_LE, as the Mytek Brooklyn DAC+, whose one PCM format is S32_LE, refused
+every 16-bit track. 16 bits widen without a value changed: into S24_3LE or
+S24_LE shifted left eight, the low byte zero (S24_LE's high byte zero too), or
+into S32_LE shifted left sixteen, the low two bytes zero, offered after S16_LE
+in that order; the PCM sink carries them (`carries`), and the harness's native
+PCM reference is offered its depth's packings in the backend's order
+(`playback.Packings`), so a DAC with no S16_LE, or no S24_3LE, plays it
+widened where its open was refused. A DoP reference stays S32_LE alone, from 24
+or 32 bits. It changes no DSD byte path (no native or DoP packer or sink), no
+wire field or schema, and no approval record's shape. Production still reads an
+owner's approval of version 35 to this build's through the legacy reader
+(`LegacyVersion` stays 35), so no approval needs a new qualification; the
+harness's own evidence of version 36 (contacts, matrix and lifecycle reports,
+candidates) is stale to the harness, as at every bump. A PCM edge key names
+the packing and the valid bits, so on such a DAC a 16-bit track is
+`pcm/S32_LE/RATE/2/16/zero`, and DSD straight after one opens only under an
+approval whose lifecycle passed that edge, as for every PCM key.

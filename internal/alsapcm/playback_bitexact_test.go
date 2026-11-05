@@ -1,6 +1,7 @@
 package alsapcm_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
+	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 )
 
 // goldens are PR 1's PCM fixtures that decode, from both manifests: their
@@ -68,17 +70,24 @@ func goldens(t *testing.T) []golden {
 // TestPlaybackIsBitExactThroughTheEngine pins the backend's purpose: every
 // PR 1 golden, FLAC, WAV, AIFF, AIFC and ALAC, played end to end through the
 // engine's Run, the backend and the real sink, for each packing a DAC may
-// take for its depth (S16_LE; S24_3LE, S24_LE and S32_LE shifted left eight
-// for 24 bits; S32_LE), reaches the fake DAC as samples whose hash is the
-// reference tools': nothing resampled, dithered, scaled or dropped, and the
-// bytes a packing leaves zero zero. A DAC that takes the depth's first
-// packing gets it; one that takes only a later one gets that one.
+// take for its depth (S16_LE, then S24_3LE and S24_LE shifted left eight and
+// S32_LE shifted left sixteen for 16 bits, since B735; S24_3LE, S24_LE and
+// S32_LE shifted left eight for 24 bits; S32_LE), reaches the fake DAC as
+// samples whose hash is the reference tools': nothing resampled, dithered,
+// scaled or dropped, and the bytes a packing leaves zero zero. A DAC that
+// takes the depth's first packing gets it; one that takes only a later one
+// gets that one.
 func TestPlaybackIsBitExactThroughTheEngine(t *testing.T) {
+	table := map[int][]format.ALSAFormat{
+		16: {format.S16LE, format.S243LE, format.S24LE, format.S32LE},
+		24: {format.S243LE, format.S24LE, format.S32LE},
+		32: {format.S32LE},
+	}
 	for _, g := range goldens(t) {
 		if g.refusal != "" {
 			continue
 		}
-		for i, f := range map[int][]format.ALSAFormat{16: {format.S16LE}, 24: {format.S243LE, format.S24LE, format.S32LE}, 32: {format.S32LE}}[g.bits] {
+		for i, f := range table[g.bits] {
 			t.Run(filepath.Base(g.file)+"/"+string(f), func(t *testing.T) {
 				r := newRig(t)
 				r.k.Formats(f)
@@ -102,18 +111,31 @@ func TestPlaybackIsBitExactThroughTheEngine(t *testing.T) {
 }
 
 // TestPlaybackPrefersTheDepthsOwnContainer pins the packing's order: a DAC
-// that takes every packing of 24 bits gets S24_3LE, the container as wide as
-// the samples.
+// that takes every packing gets each depth's own container, the one as wide
+// as the samples, in one open: 16 bits as S16_LE (B735's wider containers
+// come after it, so a DAC that takes S16_LE sees no change), 24 as S24_3LE,
+// 32 as S32_LE.
 func TestPlaybackPrefersTheDepthsOwnContainer(t *testing.T) {
-	r := newRig(t)
-	r.k.Formats(format.S16LE, format.S243LE, format.S24LE, format.S32LE)
-	r.k.Free()
-	r.files.add("a", wav(48000, 24, pattern(1, 3000, 24)))
-	r.insert("a")
-	r.play()
-	r.waitStopped(engine.ReasonEndOfQueue)
-	if v := r.k.View(); v.Committed != format.S243LE {
-		t.Errorf("24-bit content went out as %s, want S24_3LE", v.Committed)
+	for _, c := range []struct {
+		bits int
+		want format.ALSAFormat
+	}{{16, format.S16LE}, {24, format.S243LE}, {32, format.S32LE}} {
+		t.Run(string(c.want), func(t *testing.T) {
+			r := newRig(t)
+			r.k.Formats(format.S16LE, format.S243LE, format.S24LE, format.S32LE)
+			r.k.Free()
+			a := pattern(1, 3000, c.bits)
+			r.files.add("a", wav(48000, c.bits, a))
+			r.insert("a")
+			r.play()
+			r.waitStopped(engine.ReasonEndOfQueue)
+			if v := r.k.View(); v.Committed != c.want || v.Opens != 1 {
+				t.Errorf("%d-bit content went out as %s in %d opens, want %s in one", c.bits, v.Committed, v.Opens, c.want)
+			}
+			if got := unpack(t, r.k.Heard(), c.want, c.bits); sumOf(got) != sumOf(a) {
+				t.Errorf("the DAC heard %d samples, not the %d written", len(got), len(a))
+			}
+		})
 	}
 }
 
@@ -204,5 +226,114 @@ func TestPlaybackReopensForAnotherTransport(t *testing.T) {
 	}
 	if !joined {
 		t.Errorf("b was never reported prepared: %s", kinds(r.rec.events()))
+	}
+}
+
+// TestPlaybackWidensSixteenBitsIntoTheContainerTheDACTakes pins B735's
+// bytes through the engine's Run, one wider container at a time: a DAC that
+// takes it alone hears each 16-bit sample at the container's top, in
+// S24_3LE and S24_LE shifted left eight with the low byte zero (S24_LE's
+// high byte zero, for a negative sample too), in S32_LE shifted left
+// sixteen with the low two bytes zero, every byte of the first two frames
+// as written here; after the packings before it were offered and refused,
+// one open each.
+func TestPlaybackWidensSixteenBitsIntoTheContainerTheDACTakes(t *testing.T) {
+	for _, c := range []struct {
+		f     format.ALSAFormat
+		opens int
+		want  []byte
+	}{
+		{format.S243LE, 2, []byte{0x00, 0xcb, 0xed, 0x00, 0x34, 0x12, 0x00, 0x00, 0x80, 0x00, 0xff, 0x7f}},
+		{format.S24LE, 3, []byte{0x00, 0xcb, 0xed, 0x00, 0x00, 0x34, 0x12, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0xff, 0x7f, 0x00}},
+		{format.S32LE, 4, []byte{0x00, 0x00, 0xcb, 0xed, 0x00, 0x00, 0x34, 0x12, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0xff, 0x7f}},
+	} {
+		t.Run(string(c.f), func(t *testing.T) {
+			r := newRig(t)
+			r.k.Formats(c.f)
+			r.k.Free()
+			// -0x1235 is 0xedcb: a negative sample whose two bytes differ.
+			samples := append([]int32{-0x1235, 0x1234, -32768, 32767}, pattern(2, 3000, 16)...)
+			r.files.add("a", wav(44100, 16, samples))
+			r.insert("a")
+			r.play()
+			r.waitStopped(engine.ReasonEndOfQueue)
+			if v := r.k.View(); v.Committed != c.f || v.Opens != c.opens {
+				t.Errorf("the DAC committed %s in %d opens, want %s in %d", v.Committed, v.Opens, c.f, c.opens)
+			}
+			heard := r.k.Heard()
+			if len(heard) < len(c.want) || !bytes.Equal(heard[:len(c.want)], c.want) {
+				t.Fatalf("16 bits in %s: the DAC's first two frames are % x, want % x", c.f, heard[:min(len(heard), len(c.want))], c.want)
+			}
+			if got := unpack(t, heard, c.f, 16); sumOf(got) != sumOf(samples) {
+				t.Errorf("the DAC heard %d samples hashing %s; want the %d written, %s", len(got), sumOf(got), len(samples), sumOf(samples))
+			}
+		})
+	}
+}
+
+// TestPlaybackPlaysSixteenBitsOnADACWithoutS16LE pins B735: a DAC whose
+// stream offers S32_LE and no S16_LE, as the Mytek Brooklyn DAC+'s does
+// (S32_LE, SPECIAL and DSD_U32_BE: formats 10, 31 and 52), plays 16-bit
+// content through the engine's Run as 16 valid bits in S32_LE, each sample
+// shifted left sixteen bits with its low two bytes zero, once the packings
+// before it (S16_LE, S24_3LE, S24_LE) were each refused at the open and
+// closed unwritten; and what the backend says of the open, the note serve
+// logs and the facts GET /v1/outputs serves, is S32_LE from 16 valid bits.
+// Before B735 the table packed 16 bits as S16_LE alone, and the entry was
+// refused as transport_not_supported.
+func TestPlaybackPlaysSixteenBitsOnADACWithoutS16LE(t *testing.T) {
+	r := newRig(t)
+	r.k.HardwareFormats(10, 31, 52)
+	r.k.Free()
+	// A negative sample whose two bytes differ, a positive one and the
+	// extremes lead, so the DAC's first bytes can be read off one by one.
+	samples := append([]int32{-0x1235, 0x1234, -32768, 32767}, pattern(1, 3000, 16)...)
+	r.files.add("cd", wav(44100, 16, samples))
+	ids := r.insert("cd")
+	if err := r.eng.Play(bg); err != nil {
+		sk, _ := r.eng.Snapshot().Skipped(ids[0])
+		t.Fatalf("play: %v; the 16-bit entry was refused, %s: %s", err, sk.Reason, sk.Detail)
+	}
+	s := r.waitSnap("playback to stop", func(s *engine.Snapshot) bool {
+		return s.State() == engine.Stopped && s.LastStop().Reason != ""
+	})
+	if sk, ok := s.Skipped(ids[0]); ok {
+		t.Fatalf("the 16-bit entry was refused, %s: %s", sk.Reason, sk.Detail)
+	}
+	if got := s.LastStop(); got.Reason != engine.ReasonEndOfQueue {
+		t.Fatalf("playback stopped for %s (%s); want end_of_queue", got.Reason, got.Detail)
+	}
+	if v := r.k.View(); v.Committed != format.S32LE || v.Opens != 4 {
+		t.Errorf("the DAC committed %s in %d opens; want S32_LE in 4, S16_LE, S24_3LE and S24_LE each refused first", v.Committed, v.Opens)
+	}
+	heard := r.k.Heard()
+	want := []byte{
+		0x00, 0x00, 0xcb, 0xed, // -0x1235, which is 0xedcb
+		0x00, 0x00, 0x34, 0x12, // 0x1234
+		0x00, 0x00, 0x00, 0x80, // -32768
+		0x00, 0x00, 0xff, 0x7f, // 32767
+	}
+	if len(heard) < len(want) || !bytes.Equal(heard[:len(want)], want) {
+		t.Fatalf("the DAC's first two frames are % x; want % x", heard[:min(len(heard), len(want))], want)
+	}
+	if got := unpack(t, heard, format.S32LE, 16); sumOf(got) != sumOf(samples) {
+		t.Errorf("the DAC heard %d samples hashing %s; want the %d written, %s", len(got), sumOf(got), len(samples), sumOf(samples))
+	}
+	var opened *playback.Note
+	for drained := false; !drained; {
+		select {
+		case n := <-r.notes:
+			if n.Kind == playback.NoteOpened {
+				opened = &n
+			}
+		default:
+			drained = true
+		}
+	}
+	if opened == nil || opened.Params.Format != format.S32LE || opened.Transport.Format != format.S32LE || opened.Transport.ValidBits != 16 {
+		t.Errorf("the open was noted as %+v; want S32_LE committed, from 16 valid bits", opened)
+	}
+	if _, live := r.be.Facts(); live == nil || live.Format != string(format.S32LE) || live.ValidBits != 16 || live.Transport != playback.TransportPCM {
+		t.Errorf("the playback facts are %+v; want S32_LE from 16 valid bits, pcm", live)
 	}
 }

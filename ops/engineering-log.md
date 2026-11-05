@@ -73993,6 +73993,237 @@ package green again, and `git status` empty.
 - Not run: `make test` (the race suite) and `make build-all`, which the brief
   did not ask for.
 
+## 2026-11-05 — B735: 16-bit PCM widens into S24_3LE, S24_LE and S32_LE on a DAC with no S16_LE
+
+Backlog B735, from the owner's Pi with a Mytek Brooklyn DAC+ (bridge
+v0.2.2-20) on 2026-11-05: "1-bit Bridge Player couldn't play this track" on a
+44.1 kHz, 16-bit FLAC. Worker b735 on legion0 (Ubuntu 26.04, linux/amd64,
+go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`), branch
+`fix/b735-sixteen-bits-in-wider-containers` from main 1a78b58a, the
+orchestrator's brief with Codex's and the Claude API reviewer's binding notes.
+Commits: the red test 197f72be, the fix b74bd9f3, then this record. The rules
+go into `.claude/rules/player.md` through a checked patch (`rules-b735.patch`:
+PR 1a's packers bullet and PR 4b2's "Samples reach the DAC" bullet; this
+worker cannot write `.claude/`).
+
+**What the owner hit.** The journal: `transport_not_supported`, "the DAC takes
+16-bit PCM at 44100 Hz in none of S16_LE: … the hardware does not take S16_LE,
+2 channels, 44100 Hz: it offers S32_LE (and formats 31, 52, which this backend
+does not pack)", then `all_unplayable`. The same session played 24-bit tracks
+at 96 and 44.1 kHz in S32_LE. The DAC's `stream0` lists S32_LE and DSD_U32_BE
+at 44.1 to 384 kHz (format 31 is SNDRV_PCM_FORMAT_SPECIAL, 52 DSD_U32_BE).
+B470's §1 table packed 16 bits as S16_LE alone (`packings[16]`) where 24 bits
+could go in S24_3LE, S24_LE or S32_LE, so on that DAC, and any whose PCM
+formats lack S16_LE, every CD-quality track was refused. Released in v0.2.2.
+
+**Red first.** `TestPlaybackPlaysSixteenBitsOnADACWithoutS16LE` gives the fake
+DAC that very format mask (`HardwareFormats(10, 31, 52)`) and plays a 16-bit,
+44.1 kHz WAV through the engine's `Run`, the backend and the real sink. At
+197f72be, the test alone on main's code (run in a copy of the tree holding
+that commit's files), Play answered `all_unplayable` and the entry's skip
+read "transport_not_supported: the DAC takes 16-bit PCM at 44100 Hz in none
+of S16_LE: alsapcm: card 5 device 0: hw_refine: parameters_not_supported: the
+hardware does not take S16_LE, 2 channels, 44100 Hz: it offers S32_LE (and
+formats 31, 52, which this backend does not pack), 2 channels, 44100..384000
+Hz": the owner's line. At b74bd9f3 it plays: S32_LE committed in four opens
+(S16_LE, S24_3LE and S24_LE refused at the refine, each closed unwritten), the
+first two frames' sixteen bytes as the test spells them out, every sample
+unpacked and hashed equal, the open's note S32_LE from 16 valid bits, and the
+backend's facts S32_LE, 16, `pcm`.
+
+**The fix: three gates, together.**
+- `packings[16]` (internal/player/playback/packing.go) is S16_LE, S24_3LE,
+  S24_LE, S32_LE: the depth's own container first, then the wider ones
+  narrowest first, the 24-bit row's order. `formatsFor` is unchanged, so a
+  packing the unit took for a rate and depth still comes before the table
+  until `Discard`: "S16_LE first" holds before a packing is remembered. A DAC
+  that takes S16_LE is offered it first and opens once, no change there
+  (`TestPlaybackPrefersTheDepthsOwnContainer`, now for each depth).
+- `carries` (internal/alsapcm/sink.go): S24_3LE and S24_LE carry 16 or 24
+  valid bits, S32_LE 16, 24 or 32.
+- `format.Pack` (internal/player/format/pack.go): 16 bits into S24_3LE and
+  S24_LE shift left eight (`into24`), masked to 24 bits, so the low byte is
+  zero and S24_LE's top byte stays zero for a negative sample too, its sign at
+  bit 23, the 24-bit path's layout byte for byte; into S32_LE `uint32(s)<<16`,
+  the low two bytes zero. S24_3LE and S24_LE follow the rule as cleanly as
+  S32_LE, and nothing in the design or the code excludes them, so they are in
+  the table: a DAC that offers S24_3LE and no S16_LE gets 16 bits there before
+  S32_LE.
+- `playback.Packings` hands out a row of the table, copied, for the
+  qualification harness (below).
+
+**What reports the playback.** The transport keeps the source's 16 valid bits
+(`transportFor`). The open's `Note` carries the kernel's committed `Params`
+(format S32_LE) and that transport, so serve's "player: the DAC is opened"
+logs `format=S32_LE` and `validBits=16`, `output play` prints "S32_LE, 2
+channels, 44100 Hz, 16 valid bits", and GET /v1/outputs' `playback`
+(`PlaybackFacts`, from the sink's transport) says `format` S32_LE, `validBits`
+16, `transport` pcm. The hardware's precision stays apart from the source's:
+`alsapcm.Config` has no valid bits, `setHW` refines the format, the STD
+subformat, the channels and the rate, and `readBack` records `hw.msbits` as
+`Params.Msbits`; nothing sets SAMPLE_BITS or msbits. Only the DoP sink reads
+`Msbits` (24 to 32), unchanged. **PROTOCOL.md needs no line**:
+`playback.validBits` is an always-present integer apart from `format`, and
+S32_LE is among its PCM format tokens already; no wire change, no
+`ProtocolVersion` bump, no mirror PR. The iOS app's reading of `playback`
+could not be checked here (there is no iOS checkout on legion0): owed in the
+companion repo, to confirm it reads `validBits` and infers no depth from
+`format`.
+
+**The audit.**
+- `bridge output pcm-test`: `pcmTestPacks` took 16 bits in S16_LE alone. It
+  takes them in all four now, its defaults unchanged (S16_LE for 16 bits,
+  S24_3LE for 24, S32_LE for 32), and its refusals say what each format
+  carries (`pcmTestCarries`). A DAC with no S16_LE runs the tone with `--bits
+  16 --format S32_LE` (or S24_3LE, S24_LE), and `--file` with `--format
+  S32_LE` plays 16- and 24-bit files. The harness still asks the hardware for
+  exactly what it is told, as its help says; the help names the widening.
+- `--sink`'s file default (output_pcmtest_sink.go): unchanged, the depth's own
+  container, with `--format` as above.
+- `bridge output dsd-test`'s native PCM reference (`playNativeReference`): it
+  took S16_LE for 16 bits and S24_3LE for 24, one offer each, so a DAC with
+  S32_LE alone could run neither reference. It is offered `playback.Packings`
+  in order now, passing over a refusal the hardware gives
+  (`parameters_not_supported`, `parameters_mismatch`); any other refusal ends
+  it at once, and a DAC that takes the depth's own container is asked for it
+  alone, as before. The DoP reference stays S32_LE alone from 24 or 32 bits
+  (the runbook: "PCM references must be 24- or 32-bit WAV at the exact
+  carrier"): a DAC with S32_LE alone runs it already, and taking 16-bit DoP
+  references would change the qualification's documented contract, which is
+  the owner's call. The dsd-test's backend-lifecycle scenario plays its PCM
+  fixtures through the real backend, widened as serve's are.
+- `bridge output play`: the shared backend, no packing of its own.
+- The tests' own decoders: the rig's `unpack` (playback_rig_test.go) read
+  S24_3LE and S24_LE as 24-bit values and reversed only 24 bits in S32_LE, and
+  pcm-test's `unpackPCMTest` likewise. Both decode by arithmetic now, apart
+  from the packer: the container's significant bytes as a signed value of its
+  width, divided exactly by 2 to the bits below the sample, those bits zero,
+  and S24_LE's top byte zero, before any hash is compared.
+- "Shifted left eight" claims that now meet 16 bits: pack.go's format docs,
+  packing.go's and playback's doc.go, sink.go's `Transport` and `carries`
+  docs, and player.md's two bullets (the patch). `signalpath`, the MPD
+  reading's verdict, already calls a 16-bit file in a wider container
+  `format_preserved`; unchanged.
+- No volume, gain or dither exists or was added; a DAC's own volume path is
+  untouched.
+- Still refused: 8, 12 and 20 bits (no decoder gives them; `Pack` and
+  `carries` refuse them), and any depth in a narrower container (24 or 32
+  bits in S16_LE, 32 in either 24-bit layout).
+
+**A consequence for DSD after a 16-bit track.** A PCM edge key names the
+packing and the valid bits (`pcm/FORMAT/RATE/CHANNELS/VALIDBITS/zero`), and
+the backend opens a DSD occurrence after PCM only along an edge its approval's
+lifecycle passed (`checkEdge`; the runbook: "Edges must occur in the lifecycle
+reports"). On a DAC with no S16_LE a 16-bit track is now installed as
+`pcm/S32_LE/44100/2/16/zero`, so DSD straight after one opens only under an
+approval whose lifecycle passed that edge, as for every PCM key. Before B735
+no such track played there, so no approval holds that edge: on the Mytek a
+DSD track that follows a 16-bit one may now be refused at its open, where it
+used to follow the skipped track. The gate is unchanged (PCM opens never
+depend on DSD approval or edges); listed for the owner.
+
+**The qualification.** `internal/alsapcm/` and `cmd/bridge/output_dsdtest` are
+guarded, their tests included: `qualificationVersion` 36 to 37, the runbook's
+five mentions (`TestQualificationRunbookVersion`) and its "Version 37 covers
+backlog B735" entry. `LegacyVersion` stays 35, so production still reads an
+owner's approval of versions 35 to 37 through `ReadLegacyApproval`
+(`TestProductionStillPlaysAVersion35RecordAfterTheBump` and the legacy tests,
+which take the versions as parameters, pass at 37): no owner re-qualifies,
+while the harness's own evidence of version 36 (contacts, matrix and
+lifecycle reports, candidates) is stale to the harness, as at every bump.
+format/pack.go and playback/packing.go are outside the guard by B728 B1's
+design (`TestAChangeOutsideTheDSDBytePathNeedsNoBump`). B728's plan names 37
+for its B4 (38 for B7, 39 for B11): whichever merges second takes the next.
+
+**The tests.**
+- `TestPlaybackIsBitExactThroughTheEngine`: every PR 1 golden in every
+  packing of its depth, through the engine's `Run`, the fifteen 16-bit
+  goldens (FLAC, WAV, AIFF, AIFC and ALAC) now in all four: 99 leaves (60 for
+  16 bits, 36 for 24, 3 for 32) where there were 54; each fake DAC takes one
+  packing, and the opens before it are the refused offers.
+- `TestPlaybackWidensSixteenBitsIntoTheContainerTheDACTakes`: for each wider
+  container, a DAC that takes it alone hears the first two frames (−0x1235,
+  0x1234, −32768, 32767) byte for byte, then the rest hashed.
+- `TestPlaybackPlaysSixteenBitsOnADACWithoutS16LE` (the red), and
+  `TestPlaybackPrefersTheDepthsOwnContainer` (16, 24 and 32 bits, one open
+  each).
+- `TestPackSixteenBitsInEveryWiderContainer` (literal bytes, negative samples
+  among them), `TestPackEverySixteenBitValueKeepsItsValue` (all 65,536
+  values, each container read back by arithmetic) and
+  `TestPackRefusesMismatchedBits` (what stays refused).
+- `TestTheSinkCarriesWhatTheFormatPackagePacks` (the sink's gate is the
+  packer's, for each format and depth, and a sink opens for 16 bits in each
+  wider container) and `TestSinkRefusesWhatItCannotPlay` (24 bits in S16_LE,
+  32 in S24_LE, 8 in S32_LE and 20 in S24_3LE, where it had 16 in S24_3LE).
+- `TestThePackingsAreTheDesignsTable`: the new row, each pair one the packer
+  packs, and `Packings` a copy.
+- The contract test's transport refusal is 24 bits on a DAC with S16_LE alone
+  (its 16-bit row now plays).
+- cmd/bridge: `TestOutputPCMTestPlaysSixteenBitsInAWiderFormat`,
+  `TestOutputPCMTestSinkPlaysSixteenBitsInS32LE`,
+  `TestOutputPCMTestToneIsQuietAndSeamless` (16 bits in each wider format),
+  `TestOutputPCMTestSinkRefusesWhatItCannotPlay` (a 24-bit file in S16_LE) and
+  `TestTheNativeReferenceIsOfferedTheBackendsPackings`.
+
+**Negative controls**, on b74bd9f3, by a runner in the worker's scratch that
+made each exact-once replacement, built the test binaries of the packages it
+touches, ran format's, playback's and alsapcm's tests whole and cmd/bridge's
+pcm-test and reference tests, and put the bytes back from memory. The
+baseline was green in all four (16, 36, 249 and 30 top-level tests).
+
+| Mutation | Red |
+|---|---|
+| C1: 16 bits in S32_LE shifted eight, not sixteen | format: `TestPackSixteenBitsInEveryWiderContainer`, `TestPackEverySixteenBitValueKeepsItsValue`; alsapcm: `TestPlaybackIsBitExactThroughTheEngine` (the fifteen 16-bit S32_LE leaves), `TestPlaybackWidensSixteenBitsIntoTheContainerTheDACTakes` (S32_LE), `TestPlaybackPlaysSixteenBitsOnADACWithoutS16LE`; cmd/bridge: `TestOutputPCMTestToneIsQuietAndSeamless`, `TestOutputPCMTestPlaysSixteenBitsInAWiderFormat`, `TestOutputPCMTestSinkPlaysSixteenBitsInS32LE`, `TestTheNativeReferenceIsOfferedTheBackendsPackings` |
+| C2: S32_LE offered before S16_LE | playback: `TestThePackingsAreTheDesignsTable`; alsapcm: 17 tests, among them `TestPlaybackPrefersTheDepthsOwnContainer`, `TestPlaybackIsBitExactThroughTheEngine`'s 16-bit leaves and every test whose 16-bit content the default fake (S16_LE, S24_3LE, S32_LE) then took in S32_LE, before `TestPlaybackDiscardsBufferedSuccessorsAtASeek` panicked on its own S16_LE-sized slice of what the DAC heard and ended that binary (exit 2); cmd/bridge: `TestTheNativeReferenceIsOfferedTheBackendsPackings` (S32_LE asked first) |
+| C3a: S32_LE's low two bytes the sample again | format: the two widening tests; alsapcm and cmd/bridge: the same as C1 |
+| C3b: S24_3LE's low byte the sample's low byte | format: the two widening tests; alsapcm: `TestPlaybackIsBitExactThroughTheEngine` (the fifteen 16-bit S24_3LE leaves), `TestPlaybackWidensSixteenBitsIntoTheContainerTheDACTakes` (S24_3LE); cmd/bridge: `TestOutputPCMTestToneIsQuietAndSeamless` |
+| C4: S24_LE's high byte sign-extended (the 24-bit mask gone) | format: the two widening tests and `TestPackS24LELow24`; alsapcm: `TestPlaybackIsBitExactThroughTheEngine` (every S24_LE leaf, 16- and 24-bit), `TestPlaybackWidensSixteenBitsIntoTheContainerTheDACTakes` (S24_LE); cmd/bridge: `TestOutputPCMTestToneIsQuietAndSeamless` |
+| C5: the sink's `carries` as before B735 | alsapcm: `TestTheSinkCarriesWhatTheFormatPackagePacks`, the widened leaves of `TestPlaybackIsBitExactThroughTheEngine`, `TestPlaybackWidensSixteenBitsIntoTheContainerTheDACTakes`, `TestPlaybackPlaysSixteenBitsOnADACWithoutS16LE` and `TestProductionNegotiationCannotSelectNative` (a sink's `bad_config` is no transport refusal): the second gate is load-bearing alone |
+| C6: the reference offered its first packing alone | cmd/bridge: `TestTheNativeReferenceIsOfferedTheBackendsPackings`, its 16- and 24-bit rows on a DAC with S32_LE alone |
+| C7: `pcmTestPacks` as before B735 | cmd/bridge: `TestOutputPCMTestPlaysSixteenBitsInAWiderFormat`, `TestOutputPCMTestSinkPlaysSixteenBitsInS32LE` |
+
+After each restore the five files were their committed bytes, and `git
+status` was empty at the end.
+
+**Checks.** On legion0:
+- `make test-fast TMPDIR=<worktree>/.tmp/_b735/gotmp` (a `_` directory, which
+  the build-site census skips): 81 packages ok, 14 with no test files, none
+  failed, in 463 s. The Linux-only packages ran here, not only vetted:
+  alsapcm, alsa, atomicwrite and the engine among them.
+- `go test -race ./internal/player/... ./internal/alsapcm/...`: the twelve
+  packages with tests ok.
+- `make vet`, native, `GOOS=windows`, `GOOS=darwin`, and `GOOS=linux` with
+  `GOARCH=386` and with `GOARCH=arm64`, the Pi's: clean.
+- go1.27.3's gofmt on the changed Go files: clean.
+- The native-integration overlay (`scripts/native-integration-overlay.py`),
+  then `go test -race -tags ts_omit_webclient,ts_omit_debugeventbus -overlay
+  <it> ./cmd/bridge -run '^TestNativeIntegration' -timeout 5m -watchdog 10s`
+  (13 tests) and the same over `./internal/player/playback` (29): ok.
+- The qualification check, `go run -tags
+  ts_omit_webclient,ts_omit_debugeventbus ./scripts/qualification-version
+  -base 1a78b58a -head HEAD`: "qualification version OK: 1a78b58a..HEAD".
+- `make docs-check`: ok (CLAUDE.md 72.3 %, the largest rules file,
+  dlna-upnp.md, 97.0 %, the worst load, player_openhome_test.go's, 63.5 %); in
+  a copy of the tree with the rules patch applied, ok, player.md from 94,737
+  to 95,986 bytes (96.0 %), the worst load 63.8 %.
+- The rules patch: a strict applier (each hunk's context and removed lines
+  byte for byte at the line it states) reproduces the patched file and refuses
+  the patch with one context byte changed, and `git apply --check` takes it.
+  In that copy `TestEveryCitedTestNameExists` passes; with a citation of a
+  test that does not exist planted in its player.md, and another in this
+  record, it fails naming both, so the sweep read the patched files.
+- Not run: `make test` (the whole race suite) and `make build-all`, which the
+  brief did not ask for.
+
+**Owed on hardware.** The owner's Mytek Brooklyn DAC+, by ear, with a test
+build the orchestrator deploys there with the owner's OK: a 16-bit FLAC plays
+at its usual level, clean; `/proc/asound/card5/pcm0p/sub0/hw_params` reads
+`format: S32_LE` at the file's rate while it plays; the journal says "player:
+the DAC is opened" with `format=S32_LE` and `validBits=16`. The failure modes
+to listen for: a wrong shift plays the right waveform far too quietly (eight
+bits instead of sixteen in S32_LE is −48 dB), and a byte-order error is noise.
+And a DSD track straight after a 16-bit one, for the edge above.
+
 ## 2026-11-04 — B728 B2: the DAC profile database
 
 PR B2 of the DSD capability plan (`ops/plan-b728-dsd-capability-design.md`:

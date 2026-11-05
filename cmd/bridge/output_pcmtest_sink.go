@@ -240,7 +240,7 @@ func pcmTestOpenFiles(paths []string, alsaFormat string) ([]pcmTestTrack, error)
 		}
 		tracks = append(tracks, track)
 		if !pcmTestPacks(af, pcm.ValidBits) {
-			return fail(fmt.Errorf("%s has %d-bit samples, which --format %s does not carry: S16_LE takes 16, S24_3LE and S24_LE take 24, S32_LE takes 24 or 32", path, pcm.ValidBits, af))
+			return fail(fmt.Errorf("%s has %d-bit samples, which --format %s does not carry: %s", path, pcm.ValidBits, af, pcmTestCarries))
 		}
 		if pcm.RateHz < alsapcm.MinRateHz || pcm.RateHz > alsapcm.MaxRateHz {
 			return fail(fmt.Errorf("%s is %d Hz, outside the %d to %d Hz the ALSA backend opens", path, pcm.RateHz, alsapcm.MinRateHz, alsapcm.MaxRateHz))

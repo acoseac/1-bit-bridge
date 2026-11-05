@@ -1,7 +1,7 @@
 package qualification
 
 // qualificationVersion changes whenever a guarded implementation changes.
-const qualificationVersion = 36
+const qualificationVersion = 37
 
 // Version binds the harness's reports and records to this implementation
 // (ReadApproval, ReadCandidate); production reads an owner's approval through
