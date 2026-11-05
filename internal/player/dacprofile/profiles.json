@@ -1197,7 +1197,7 @@
       "provenance": [
         "identity: owner capture, Linux, 2026-11-04: 25ce:0025, the card its audio control interface 0, product string Brooklyn DAC+, on bcdDevice 0100",
         "native: owner capture, Linux, 2026-11-04: the playback stream's interface 2, altset 2, lists DSD_U32_BE at frame rates up to 352800, DSD256",
-        "dop: iOS profile mytek.brooklyn.dac.plus, on a device on iOS, the row's log of 2026-06-21: the unit refused DSD256's 705.6 kHz carrier, which it would not negotiate (iOS cd125088); DSD128's carrier reached a DoP lock there, transport evidence that is no listening; on Linux its S32_LE altset stops at 384000, below the DSD256 carrier (owner capture, Linux, 2026-11-04)"
+        "dop: refused DSD256: iOS profile mytek.brooklyn.dac.plus, on a device on iOS, the row's log of 2026-06-21: the unit refused DSD256's 705.6 kHz carrier, which it would not negotiate (iOS cd125088); DSD128's carrier reached a DoP lock there, transport evidence that is no listening; on Linux its S32_LE altset stops at 384000, below the DSD256 carrier (owner capture, Linux, 2026-11-04)"
       ]
     }
   ]

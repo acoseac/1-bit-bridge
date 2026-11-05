@@ -34,9 +34,12 @@
 //   - DoP: the rates a listening heard on a device (never one a negotiation or
 //     a DoP lock reached: those hear nothing), the maker's stated rate and the
 //     rates a device refused, from the iOS registry at a named commit, which
-//     is the only thing imported from it beside its caveats; and the model's
-//     level controls the DoP gain check passes over (AnalogVolumeControls,
-//     UnityAtRawMax), each with its own provenance or evidence.
+//     is the only thing imported from it beside its caveats, each heard and
+//     refused rate credited by a clause of its dop line in evidence's one form
+//     ("heard DSD128: <source>", "refused DSD256: <source>", "silence at
+//     DSD256: <source>"; Lint); and the model's level controls the DoP gain
+//     check passes over (AnalogVolumeControls, UnityAtRawMax), each with its
+//     own provenance or evidence.
 //   - Timing: the DSD silence each hardware run starts with.
 //   - Caveats, codes from a closed list, each with its note.
 //
@@ -120,7 +123,13 @@ type Profile struct {
 	Caveats []Caveat `json:"caveats"`
 	// Provenance is one line a claim: "identity: …", "native: …", "dop: …",
 	// "timing: …" and "caveat <code>: …", each naming its source and its date
-	// or version.
+	// or version. A dop line's clauses (the text after "dop: ", split on
+	// semicolons and trimmed) credit DoP rates only in one form: a marker,
+	// heard, refused or silence at, its rates separated by commas, then a
+	// colon and free text, or the clause's end ("refused DSD256: the unit
+	// would not negotiate its carrier (iOS cd125088)"). A clause that starts
+	// with no marker is free text and evidence of nothing; a marker clause of
+	// another shape, or a rate under two markers, is a problem.
 	Provenance []string `json:"provenance"`
 }
 
@@ -151,15 +160,14 @@ type Native struct {
 type DoP struct {
 	// HeardMaxBitRate is the highest rate a listening on a device heard,
 	// never one a negotiation, a hardware confirmation or a DoP lock reached
-	// (section 1.1: the iOS lock hears nothing back), and a clause of a dop
-	// provenance line (the text between two semicolons) names it and says
-	// heard, a heard the clause does not negate ("not heard" is no hearing);
-	// StatedMaxBitRate is the maker's figure; 0 is none.
+	// (section 1.1: the iOS lock hears nothing back), and a heard clause of a
+	// dop provenance line lists it ("heard DSD128: <source>", the form
+	// Provenance gives); StatedMaxBitRate is the maker's figure; 0 is none.
 	HeardMaxBitRate  int `json:"heardMaxBitRate"`
 	StatedMaxBitRate int `json:"statedMaxBitRate"`
 	// RefusedBitRates are the rates a device refused, or played as silence,
-	// each named, beside refused or silence that the clause does not negate,
-	// in a clause of a dop provenance line.
+	// each listed by a refused or a silence at clause of a dop provenance line
+	// ("refused DSD256: <source>", "silence at DSD256: <source>").
 	RefusedBitRates []int `json:"refusedBitRates"`
 	// AnalogVolumeControls are the controls this model applies after its DoP
 	// decoder, which the DoP gain check passes over.

@@ -120,7 +120,7 @@ decision names. Its USB identity is a placeholder until a capture supplies it (�
         { "code": "dop_noise_in_hidden_mode", "transport": "dop",
           "note": "With PEQ on, this DAC plays DoP as noise, and the bridge cannot see the mode: turn PEQ off, or choose Convert to PCM." }
       ],
-      "provenance": [ "dop: heard clean at DSD64/128/256 with PEQ off on iOS; noise with PEQ on (iOS 2.0.1 report)", "identity: dac inspect capture <date>" ]
+      "provenance": [ "dop: heard DSD64, DSD128, DSD256: clean with PEQ off on iOS; noise with PEQ on (iOS 2.0.1 report)", "identity: dac inspect capture <date>" ]
     }
   ]
 }
@@ -163,7 +163,24 @@ Fields:
   seeded from the registry's resync delays ((iOS) `DACProfile.swift:217-275`) and defaults to 400 ms,
   iOS's DSD resync default ((iOS) `DACProfile.swift:152-183`).
 - **`caveats[].code`** is a closed list (§2.3). Its `note` is display text.
-- **`provenance`** has one line per claim.
+- **`provenance`** has one line per claim, `<claim>: …`, naming its source and its date or version.
+  A `dop` line's evidence is written in one fixed form, since a lint cannot read prose (B2's
+  round 4; round 3 read negation, and the review broke it from both sides):
+  - its clauses are the text after `dop: `, split on `;`, each trimmed;
+  - a clause that starts with a marker, `heard`, `refused` or `silence at` (any case, a word
+    boundary after it), is `<marker> <rate>(, <rate>)*` followed by `:` or the clause's end, as in
+    `heard DSD64, DSD128: <source>`; the free text after the colon is read by nothing, so it may say
+    anything, a negation included (`refused DSD256: no supported altsetting`);
+  - only the rates that list names count: `heard` credits them as heard, `refused` and
+    `silence at` as refused;
+  - a clause that starts with no marker is free text and evidence of nothing
+    (`DSD128's carrier reached a DoP lock`);
+  - a marker clause of any other shape (`heard at DSD128`, `heard DSD64 and DSD128`, a marker with
+    no rates) is a lint error that shows the form, and so is one rate under two markers in a
+    profile's provenance (`heard DSD256; silence at DSD256`).
+
+  `heardMaxBitRate` needs a `heard` clause that lists it, and each of `refusedBitRates` a `refused`
+  or `silence at` clause.
 
 ### 2.2 Keying and matching
 
@@ -256,7 +273,8 @@ does a shared reference ID without a product string. The live altsets still deci
   - the schema check;
   - no overlapping matches;
   - product strings for shared IDs;
-  - provenance for every claim;
+  - provenance for every claim, each heard and refused DoP rate credited by a dop clause in the
+    form §2.1 gives;
   - the closed caveat list;
   - the kernel-derived entries against the pinned tag.
 
@@ -1537,7 +1555,7 @@ rule that permits it.
 | Conversion CPU (DSD256 on a Pi 4) | Xruns | B11's measured gate; DSD256 conversion refused if it misses | none at merge |
 | Conversion quality | Aliasing or a weak stopband | The response from the coefficients; aliasing measured as a differential and the stopband on a steady state (the lessons in `ops/History-rules-jobs.md` under the decimation and `sox stats` bullets); a golden | The filter's documented shape |
 | Profile database errors | A wrong ID or a shared ID preselects the wrong mode | Product strings for shared IDs, captures, provenance, review, lint; first use still applies | A wrong capture that passes review |
-| iOS evidence used on Linux | Kernel quirks, implicit feedback or class compliance differ | Only DoP evidence is imported (DoP decoding is the DAC's, whatever the host); provenance says "heard on iOS"; first use | A DAC that behaves differently under Linux |
+| iOS evidence used on Linux | Kernel quirks, implicit feedback or class compliance differ | Only DoP evidence is imported (DoP decoding is the DAC's, whatever the host); its provenance names the iOS source (`heard DSD128: iOS profile <row> … (iOS <commit>)`); first use | A DAC that behaves differently under Linux |
 | False refusals from the mixer check | DoP refused needlessly by a feature unit placed after DoP detection, a missing dB TLV, an analogue attenuator on an unprofiled DAC, or a feature unit the playback-path parse cannot place | The reason says which; a profile's `analogVolumeControls`; native or convert | Inconvenience only: the check fails closed by design |
 | The cutover strands an owner's record | A version bump before B7 would refuse the record, and the owner's DSD would stop before it was migrated | B1 switches production to the legacy reader (versions 35 to its own) before any bump; B6 migrates before B7 stops reading (§8) | none |
 | A converted successor cut near its boundary | Its onset folded into the predecessor's last 0.4 ms | The join window is held back and recomputed on a cut (§4.7) | A cut too late stops playback at the boundary, as any late cut does |

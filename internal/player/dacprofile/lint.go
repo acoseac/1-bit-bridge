@@ -7,7 +7,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/acoseac/1-bit-bridge/internal/usbid"
@@ -45,36 +44,41 @@ var (
 	reIOSRef    = regexp.MustCompile(`^DACProfile\.swift [a-z0-9]+(?:[.-][a-z0-9]+)+ at iOS [0-9a-f]{7,40}$`)
 	// reNeverSaid are the words never used of DSD on the bridge's player (the
 	// design's section 1.3), with their inflections: no note claims a DAC
-	// decodes DSD.
+	// decodes DSD. It reads caveat notes, never provenance, whose free text
+	// says what was observed, a DoP lock included.
 	reNeverSaid = regexp.MustCompile(`(?i)\b(verif(?:y|ies|ied)|decod(?:e|es|ed|ing)|bit-exact|bit-perfect|lock(?:s|ed|ing)?|seal(?:s|ed)?|qualif(?:y|ies|ied))\b`)
-	// reHeard and reRefusal are what a clause of a dop provenance line says of
-	// a heard rate and of a refused one, beside the rate's name: that it was
-	// heard, a listening, never a negotiation or a DoP lock (section 1.1: the
-	// iOS lock counts the packer's own frames and hears nothing back); and
-	// that a device refused it or played it as silence.
-	reHeard   = regexp.MustCompile(`(?i)\bheard\b`)
-	reRefusal = regexp.MustCompile(`(?i)\b(?:refus\w*|silen\w*)\b`)
-	// reToken is a word, with the marks inside one (DSD256's, 705.6, wasn't,
-	// hardware-confirmed), or one mark between words, which ends a phrase.
-	reToken = regexp.MustCompile(`[\p{L}\p{N}]+(?:['’.\-][\p{L}\p{N}]+)*|[^\s\p{L}\p{N}]`)
+	// reMarker is a dop clause that starts with a marker, in any case, with a
+	// word boundary after it.
+	reMarker = regexp.MustCompile(`^(?i:heard|refused|silence at)\b`)
+	// reEvidence is a marker clause in the form evidence is written in: the
+	// marker, its rates separated by commas, then a colon and anything else,
+	// which nothing reads, or the clause's end.
+	reEvidence = regexp.MustCompile(`^(?i:heard|refused|silence at)\s+(DSD\d+(?:\s*,\s*DSD\d+)*)\s*(?::|$)`)
+	reRateName = regexp.MustCompile(`DSD\d+`)
 )
 
-// negators are the words that negate the word they govern; a word ending in
-// n't (wasn't, didn't, can't), with either apostrophe, is one too.
-var negators = []string{"not", "never", "no", "nor", "neither", "none", "nothing", "without", "cannot"}
-
-// joiners start a phrase of their own, so a negation before one governs
-// another verb: "it would not negotiate and refused DSD256".
-var joiners = []string{"and", "but", "then", "which", "that", "who", "while", "whereas", "because", "so",
-	"although", "though", "when", "where", "after", "before", "until", "unless", "if"}
-
-// negatorReach is how many words before a keyword a negator still governs
-// it from: "did not play it as silence".
-const negatorReach = 4
+// The markers a dop clause starts with to credit the rates it lists: heard, a
+// listening heard them; refused and silence at, a device refused them or
+// played them as silence (the design's section 2.1).
+const (
+	markerHeard   = "heard"
+	markerRefused = "refused"
+	markerSilence = "silence at"
+)
 
 // dsdName is a rate of dsdRates as a claim names it: DSD and the rate's
 // multiple of 44.1 kHz (DSD128).
 func dsdName(rate int) string { return fmt.Sprintf("DSD%d", rate/44100) }
+
+// dsdRateNamed is the rate of dsdRates name names, and whether it names one.
+func dsdRateNamed(name string) (int, bool) {
+	for _, r := range dsdRates {
+		if dsdName(r) == name {
+			return r, true
+		}
+	}
+	return 0, false
+}
 
 // linter collects a database's problems.
 type linter struct{ problems []error }
@@ -322,86 +326,69 @@ func (l *linter) dop(who string, d *DoP) {
 	}
 }
 
-// dopEvidence asks a DoP claim's provenance for the evidence each of its
-// rates is of the kind its field names: for the heard rate, a clause of a dop
-// line (the text between two semicolons) that names the rate and says it was
-// heard, and for each refused rate, one that names it and says a device
-// refused it or played it as silence. The word and the rate share a clause,
-// so a line that tells of one rate's refusal and another's lock is evidence
-// of the refusal alone; and a word the clause negates is none (negated), so
-// "DSD128 was not heard" is no hearing. A negotiation, a hardware
-// confirmation or a DoP lock is evidence of the transport, which no field
-// here holds (the review of #1402). A rate dop refuses as no DSD rate is not
-// asked for again.
+// dopEvidence holds a DoP claim's rates to its provenance, whose evidence is
+// written in one form, since a lint cannot read prose: round 3 read negation,
+// and the review of #1402 broke the reading from both sides. A dop line's
+// clauses are the text after "dop: ", split on semicolons and trimmed. A
+// clause that starts with a marker (heard, refused or silence at, in any
+// case, a word boundary after it) must be the marker, its rates separated by
+// commas, then a colon or the clause's end (reEvidence), and credits those
+// rates alone; what follows the colon is read by nothing, so it may say
+// anything, a negation included. A marker clause of any other shape is a
+// problem that shows the form to write. A clause that starts with no marker
+// is free text and evidence of nothing ("DSD128's carrier reached a DoP
+// lock"): a negotiation, a hardware confirmation or a DoP lock is evidence of
+// the transport, which no field here holds. The heard rate needs a heard
+// clause that lists it, each refused rate a refused or silence at clause, and
+// a rate under two markers in one profile's provenance is a contradiction. A
+// rate dop refuses as no DSD rate is not asked for again.
 func (l *linter) dopEvidence(who string, p *Profile) {
-	says := func(rate int, re *regexp.Regexp) bool {
-		name := regexp.MustCompile(`\b` + dsdName(rate) + `\b`)
-		for _, line := range p.Provenance {
-			if !strings.HasPrefix(line, "dop: ") {
+	markers := map[int][]string{}
+	for _, line := range p.Provenance {
+		text, ok := strings.CutPrefix(line, "dop: ")
+		if !ok {
+			continue
+		}
+		for _, clause := range strings.Split(text, ";") {
+			clause = strings.TrimSpace(clause)
+			m := reMarker.FindString(clause)
+			if m == "" {
 				continue
 			}
-			for _, clause := range strings.Split(line, ";") {
-				if !name.MatchString(clause) {
+			marker := strings.ToLower(m)
+			f := reEvidence.FindStringSubmatch(clause)
+			if f == nil {
+				l.add("%s: the dop clause %q starts with the marker %q and is not in the form evidence is written in, %q: the marker, its rates separated by commas, then a colon and anything else, or the clause's end",
+					who, clause, marker, marker+" DSD64, DSD128: <source>")
+				continue
+			}
+			for _, name := range reRateName.FindAllString(f[1], -1) {
+				rate, ok := dsdRateNamed(name)
+				if !ok {
+					l.add("%s: the dop clause %q lists %s, which is not a DSD rate from DSD64 to DSD512", who, clause, name)
 					continue
 				}
-				for _, m := range re.FindAllStringIndex(clause, -1) {
-					if !negated(clause, m[0], m[1]) {
-						return true
-					}
+				if !slices.Contains(markers[rate], marker) {
+					markers[rate] = append(markers[rate], marker)
 				}
 			}
 		}
-		return false
 	}
-	if h := p.DoP.HeardMaxBitRate; slices.Contains(dsdRates, h) && !says(h, reHeard) {
-		l.add("%s: a heard DoP rate is a listening, and no clause of a dop provenance line names %s and says it was heard: a negotiation, a hardware confirmation or a DoP lock hears nothing (section 1.1)", who, dsdName(h))
+	for _, r := range dsdRates {
+		if ms := markers[r]; len(ms) > 1 {
+			l.add("%s: %s is under two markers in its dop clauses, %q: a profile states one result for a rate", who, dsdName(r), ms)
+		}
+	}
+	if h := p.DoP.HeardMaxBitRate; slices.Contains(dsdRates, h) && !slices.Contains(markers[h], markerHeard) {
+		l.add("%s: a heard DoP rate is a listening, and no dop clause credits %s as heard: write %q in the dop line (a clause that starts with no marker is evidence of nothing, and a negotiation, a hardware confirmation or a DoP lock hears nothing, section 1.1)",
+			who, dsdName(h), markerHeard+" "+dsdName(h)+": <source>")
 	}
 	for _, r := range p.DoP.RefusedBitRates {
-		if slices.Contains(dsdRates, r) && !says(r, reRefusal) {
-			l.add("%s: refused rate %s is one a device refused or played as silence, and no clause of a dop provenance line names it and says refused or silence", who, dsdName(r))
+		if slices.Contains(dsdRates, r) && !slices.Contains(markers[r], markerRefused) && !slices.Contains(markers[r], markerSilence) {
+			l.add("%s: refused rate %s has no dop clause that credits it: write %q, or %q for a rate a device played as silence",
+				who, dsdName(r), markerRefused+" "+dsdName(r)+": <source>", markerSilence+" "+dsdName(r)+": <source>")
 		}
 	}
-}
-
-// negated reports whether the keyword at clause[start:end] is negated: a
-// negator among the negatorReach words before it, back to the mark or the
-// joining word that starts its phrase ("was not heard", "never refused",
-// "without silence", "wasn't heard", "didn't refuse", "did not play it as
-// silence"); or after it, nothing or none ("heard nothing"), or an answer
-// after a colon, an equals sign or a dash ("heard: no"). The negation must
-// govern the keyword, never merely share its clause: "the unit refused
-// DSD256's 705.6 kHz carrier, which it would not negotiate" is a refusal. A
-// negator within reach that governs another word ("not only heard") still
-// reads as the keyword's, which asks the line for other words, never takes
-// a negated one.
-func negated(clause string, start, end int) bool {
-	before := reToken.FindAllString(clause[:start], -1)
-	for i, n := len(before)-1, 0; i >= 0 && n < negatorReach; i, n = i-1, n+1 {
-		w := lowerWord(before[i])
-		if w == "" || slices.Contains(joiners, w) {
-			break
-		}
-		if slices.Contains(negators, w) || strings.HasSuffix(w, "n't") {
-			return true
-		}
-	}
-	after := reToken.FindAllString(clause[end:], 2)
-	switch {
-	case len(after) > 0 && slices.Contains([]string{"nothing", "none"}, lowerWord(after[0])):
-		return true
-	case len(after) == 2 && slices.Contains([]string{":", "=", "-", "–", "—"}, after[0]):
-		return slices.Contains([]string{"no", "not", "none", "never", "nothing"}, lowerWord(after[1]))
-	}
-	return false
-}
-
-// lowerWord is a token as a lower-case word with a plain apostrophe, or ""
-// for a mark.
-func lowerWord(tok string) string {
-	if r, _ := utf8.DecodeRuneInString(tok); !unicode.IsLetter(r) && !unicode.IsDigit(r) {
-		return ""
-	}
-	return strings.ToLower(strings.ReplaceAll(tok, "’", "'"))
 }
 
 // String names a control as interface/name/index.

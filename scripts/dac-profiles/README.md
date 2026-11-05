@@ -70,16 +70,31 @@ A rate a device refused is not compared with the row, which may keep a
 published maximum beside a refusal at or below it (`ifi.generic` keeps DSD256
 while both its measured units refused it); the refusal's evidence is in the
 row's comments, and the database's lint holds it to the profile's own
-provenance: a clause of a dop line (the text between two semicolons) that
-names the rate and says refused or silence. A heard rate is a listening: a row
-whose rate a negotiation, a hardware confirmation or a DoP lock reached gives
-no heard rate (the design's section 1.1: the iOS lock hears nothing back), and
-the lint asks for a clause that names the heard rate and says heard, so a
-line that tells of one rate's refusal and another's lock is evidence of the
-refusal alone. A word the clause negates is no evidence ("DSD128 was not
-heard", "the unit didn't refuse DSD256", "heard: no"), while a negation of
-another verb leaves it one ("the unit refused DSD256's carrier, which it
-would not negotiate"). It prints one line a
+provenance. A heard rate is a listening: a row whose rate a negotiation, a
+hardware confirmation or a DoP lock reached gives no heard rate (the design's
+section 1.1: the iOS lock hears nothing back).
+
+The lint reads a dop line's evidence in one fixed form, and nothing else of
+it. Its clauses are the text after `dop: `, split on `;` and trimmed; a
+clause that starts with a marker, `heard`, `refused` or `silence at` (any
+case, a word boundary after it), is the marker, its rates separated by
+commas, then a colon or the clause's end, and credits those rates alone:
+
+```text
+dop: heard DSD64, DSD128: iOS profile <row>, clean with PEQ off (iOS <commit>)
+dop: refused DSD256: <source>; silence at DSD512: <source>
+```
+
+What follows the colon is free text that nothing reads, so it may say
+anything, a negation included (`refused DSD256: no supported altsetting`). A
+clause that starts with no marker is free text too, and evidence of nothing
+(`DSD128's carrier reached a DoP lock`). A marker clause of any other shape
+(`heard at DSD128`, `heard DSD64 and DSD128`, `heard DSD128 not`, a marker
+with no rates) is a lint error that shows the form, and so is a rate under
+two markers in one profile's provenance (`heard DSD256; silence at DSD256`).
+The heard rate needs a `heard` clause that lists it, and each refused rate a
+`refused` or `silence at` one. `ios-check.py` reads the profiles' DoP fields
+and not these lines. It prints one line a
 profile and exits 1 on a violation; paste its output into the PR. The
 registry's prose is never read, only each row's id and its `maxDSDRate`, and
 only a row's DoP evidence and caveats are imported, never
