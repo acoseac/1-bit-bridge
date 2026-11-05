@@ -74286,3 +74286,154 @@ build lock, with TMPDIR under `.tmp/_b728-b2`, at a79feeee:
   review's `ifi.generic` case and the ceiling on a copy: as above.
 - Not run here: macOS and Windows natively, CI's runner, and any hardware
   (B2's tier is the standard one).
+
+## 2026-11-05 — B728 B2 round 3: negated evidence, the Windows leg, and three of CodeRabbit's comments
+
+The review of #1402 at 94d80518 (round 2 and its rules line, main ebe71366
+in it), to which this branch fast-forwarded: Codex's P2 on the lint,
+CodeRabbit's three functional comments, and the red Windows leg. Each was
+verified first, by a test that fails on 94d80518 for the stated reason,
+then fixed, then controlled. CodeRabbit's two Major comments (SonarCloud's
+complexity numbers for `dacInspect` and its test) are the orchestrator's to
+answer. The rules change ships as `rules-b728-b2-r3.patch` (outside the
+tree), its long form committed here.
+
+**The points.**
+- A negated clause passed as evidence (Codex, `lint.go:325`): confirmed.
+  `dopEvidence` took a clause that names the rate and holds the keyword,
+  so "DSD128 was not heard" read as a hearing. In cb5ce652
+  `TestANegatedWordIsNoEvidence`'s 23 negated wordings (not, never, no,
+  neither and nor, none, nothing, without, cannot, n't contractions with
+  either apostrophe, "heard: no", "heard nothing", for heard, refused and
+  silence) each linted as []. Fixed in 2999526a: a keyword counts only when
+  nothing negates it, a negator among the four words before it, back to the
+  mark or the joining word that starts its phrase, or after it nothing,
+  none or an answer after a colon, an equals sign or a dash. The negation
+  must govern the keyword: five clauses whose negation belongs to another
+  verb lint clean on both sides, the Mytek's seed line among them ("the
+  unit refused DSD256's 705.6 kHz carrier, which it would not negotiate"),
+  and every dop line of the embedded database still reads as its claims.
+  Within reach, a negator of another word ("not only heard") still reads
+  as the keyword's: the lint then asks for other words, and never takes a
+  negated one.
+- The Windows leg (`test (windows-latest)`, and `gate` with it): confirmed
+  in the worktree, with no clone. `profiles.json` checked out again under
+  `core.autocrlf=true`, as windows-latest's checkout is, held 1,204 CRLF in
+  1,204 lines, and `TestTheEmbeddedDatabaseIsWrittenInItsCanonicalForm`
+  failed ("profiles.json is not in its canonical form"). With e0939071's
+  `.gitattributes` line the same checkout holds none and the test passes.
+  It is the one file of the PR compared byte for byte: `qx13.json` is
+  parsed and a substring of one of its lines replaced, which CRLF does not
+  change, and the build-site census reads `kernel-check.sh` with CRLF folded
+  to LF.
+- `readModel` could show one unit's model under another's IDs (CodeRabbit,
+  `output_dac_bind.go:369`): confirmed twice.
+  `alsa.SysfsReader.Qualification` reads the card's attachment, then
+  resolves `cardN/device` again for the strings; in cb5ce652
+  `TestDACInspectShowsNoModelOfAUnitReplacedAsItsStringsWereRead`, standing
+  in for the reader across a replug into the same port, showed the
+  replacement's strings under the GO bar's IDs, and a scratch test outside
+  the tree that flipped `sys/class/sound/card5` between two units under the
+  real reader read one unit's port and device number with the other's
+  product in 20 of 37 readings. The reader is guarded (`internal/alsa/`,
+  the qualification version), and section 8 keeps B2 clear of a bump, so
+  the fix (e19fbeff) is inspect's, after the reader: the card read again
+  once the strings are read (`alsa.SysfsReader.Card`), the strings kept
+  only for the same unit (`binding.SameUnit`) in the same enumeration (the
+  device number). 57b6207c pins the device number's half (the same unit
+  enumerated anew, its firmware updated) and ce99d23a the unit's (another
+  model at the same device number, which a bus gives out again after its
+  127th).
+- The kernel reader could leave a format out (CodeRabbit,
+  `kernel_test.go:290`): confirmed. In an arm with no bcdDevice switch, a
+  format returned outside any altsetting test, or under a test the reader
+  does not read, beside one it reads kept the counts of returns and format
+  returns equal: `TestTheKernelQuirkReaderReadsEachShape`'s two mutations,
+  "the reader takes the file". Fixed in ff303831: every format return of
+  such an arm lies inside an altsetting test the reader made a fact of. The
+  real file is the control that the check refuses no shape today's kernel
+  uses: `kernel-check.sh` at v6.12 reads its 39 facts and 19 vendor-wide
+  rules and passes.
+- A portless unit's model was not shown (CodeRabbit,
+  `output_dac_bind.go:263`): confirmed, the card reaches `readModel`. A USB
+  card whose controller sits under something the port grammar does not
+  name (a virtual machine's virtio) has no port, and the reader refuses it
+  once it has read and checked the strings: `TestDACInspectPrintsAPortlessUnitsModel`,
+  "not read: qualification attachment unknown". Fixed in e19fbeff, for
+  inspect only (`portlessReading`): the reader sets the attachment last,
+  after the strings pass its checks, so strings, a device number and no
+  port are a reading refused for its port alone, kept for a card the
+  inventory holds with no port either, the device number and interface
+  checks and the reading again as any card has. The reader's own refusal
+  stands (the test asks it), since the qualification's evidence needs a
+  port that persists; a portless unit whose device number cannot be read
+  shows no model. Reading the reader's result beside its error rests on
+  that order, which the portless test pins; the alternative, a reader that
+  takes an empty port, is a change in `internal/alsa/` and a qualification
+  bump.
+
+**Negative controls**, by a runner outside the tree: exact, once-only
+replacements, each affected test binary built and each named test run
+alone with `-test.v`, the bytes put back from memory and checked by
+SHA-256; the eight named tests and the CRLF checkout green first, `git
+status` clean after. All 20 went red, 24 runs.
+
+| # | Mutation | Red |
+|---|---|---|
+| N1 | a negated keyword counts | `TestANegatedWordIsNoEvidence` ("not heard: the lint says []", and the rest) |
+| N2 | no negator before the keyword is read | the same |
+| N3 | a contraction in n't is no negator | the same ("wasn't heard", "didn't refuse") |
+| N4 | the typographic apostrophe is not read as one | the same ("wasn’t heard") |
+| N5 | a joining word does not end the negator's reach | the same: "would not negotiate and was refused" lints as a missing refusal |
+| N6 | any negation in the clause negates its keyword (a whole-clause ban) | the same, the Mytek-shaped clause; and the embedded database no longer parses |
+| N7 | a negator reaches three words, not four | the same ("did not play it as silence") |
+| N8 | an answer after a colon does not negate | the same ("heard: no", "refused: none") |
+| N9 | nothing or none after the keyword does not negate | the same ("heard nothing") |
+| R1 to R4 | round 2's evidence rules (no heard evidence, no refusal evidence, no rate's name, a line for a clause), on round 3's `says` | `TestAHeardRateIsAHearingNeverALock`, `TestARefusedRateNamesItsRefusal`, `TestNoEmbeddedDoPLineReadsAsAHearing` |
+| E1 | no `eol=lf` line for profiles.json | the CRLF checkout: 1,204 CRLF, the canonical-form test FAIL |
+| K1 | a format returned outside an altsetting test let through | `TestTheKernelQuirkReaderReadsEachShape` (both mutations taken) |
+| A1 | no reading of the card after its strings | `TestDACInspectShowsNoModelOfAUnitReplacedAsItsStringsWereRead` |
+| A2 | the reading after compares no device number | the same ("the same unit enumerated anew, its firmware updated") |
+| A3 | the reading after compares no unit | the same ("another model at the same device number") |
+| P1 | no portless reading kept | `TestDACInspectPrintsAPortlessUnitsModel` |
+| P2 | a portless reading needs no device number | the same ("a portless unit whose device number cannot be read") |
+
+Two conditions of `portlessReading` have no control, each a second layer:
+its `u.Port == ""` is what the comparison after it enforces for any card
+(no input tells them apart), and its string checks are masked by the device
+number, which the reader sets only after the strings pass.
+
+**The rules patch**, `rules-b728-b2-r3.patch`: the B2 line's Don't gains
+"take a word its clause negates for evidence" (player.md 95,569 to 95,614
+bytes); its blank context line keeps its leading space, `git apply --check`
+takes it, `dropped_donts` finds every Don't in the long form, and
+docs-check passes on a copy with it applied.
+
+**Checks**, on legion0 (Linux, amd64, Go 1.27.3), in one turn of the shared
+build lock, with TMPDIR under `.tmp/_b728-b2`, at 02167338:
+- `go test -count=1` of `./internal/player/dacprofile/`, `./internal/alsa/`
+  and `./cmd/bridge/`: ok (cmd/bridge 305 s); and under `-race`: ok
+  (cmd/bridge 905 s, internal/alsa 1.7 s).
+- `make test-fast`: 82 packages ok, none failed, none cached, 14 with no
+  test files; the Linux-only ones ran (internal/alsa, alsactl, alsapcm,
+  atomicwrite's durable writer, backup's identity paths, the player's
+  binding and hotplug).
+- `make vet` natively, and with `GOOS=windows` and `GOOS=darwin`: clean.
+- go1.27.3's gofmt on cmd, internal and scripts: clean.
+- `make docs-check`: ok as the tree stands (CLAUDE.md 73.6%), and with the
+  patch applied (above).
+- The qualification check with the tags, from main and from ebe71366, the
+  main the PR merged: "qualification version OK", at 36: no guarded path
+  changed.
+- `scripts/dac-profiles/kernel-check.sh`, by its own fetch at v6.12: blob
+  c5fd1803, 39 facts, 19 vendor-wide rules, PASS; `ios-check.py` against
+  the registry at cd125088 and its `--self-test` (11 cases): ok.
+- `profiles.json` checked out under `core.autocrlf=true` at the head: no
+  CRLF, the canonical-form test PASS.
+- Not run here: Windows and macOS natively (the orchestrator's proof and
+  CI's legs), and any hardware (B2's tier is the standard one).
+
+**Commits.** cb5ce652 the red tests; 2999526a the negation; e0939071 the
+attribute; ff303831 the kernel reader; e19fbeff inspect's reading again and
+its portless units; 57b6207c and ce99d23a the reading again's two pins;
+02167338 the long form; this record.
