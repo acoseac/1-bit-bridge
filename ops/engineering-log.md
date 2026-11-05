@@ -74772,3 +74772,115 @@ build lock, with TMPDIR under `.tmp/_b728-b2`, at a5e3a1d2:
 **Commits.** 28385736 the red tests; 1b660056 heard against a refusal;
 fe1531eb the unresolved directory, and the window named; a5e3a1d2 the long
 form; this record.
+
+## 2026-11-05 — B728 B2 round 6: an arm read only whole, the registry's block comments, and the iOS resync delay as timing
+
+The review of #1402 at 98456243 (round 5), which this branch already was, so
+the fast-forward moved nothing; three points. The rules change ships as
+`rules-b728-b2-r6.patch` (outside the tree), its long form committed here.
+
+**A bcdDevice arm read past what it reads** (CodeRabbit, `kernel_test.go`,
+`readArm`): confirmed. The bcdDevice branch read from the switch's opening
+brace to the arm's end, so a format returned before the switch, on another
+altsetting, was no fact while the counts of returns and of format returns
+still agreed, and a second altsetting with a switch of its own had its cases
+read as the first altsetting's. In d3bbb919
+`TestTheKernelQuirkReaderReadsEachShape` gained those two mutations of the
+synthetic file and four of the same class in either shape, a statement the
+reader does not read beside the ones it reads, which changes what they mean:
+a statement inside the switch, a format the switch returns by default beside
+a case (read as that case's alone), a statement beside an altsetting test,
+and an altsetting test under a test the reader does not read. The reader
+took all six. Fixed in 60103980: an arm's statements are one of two shapes,
+each matched whole (`reAltArm`: tests of an altsetting, each returning a
+format, then the arm's break; `reBCDArm`: one altsetting's test holding only
+the switch on the unit's bcdDevice, then the arm's break), the switch holding
+nothing but its cases, format returns, default and breaks (`reBCDToken`), a
+format returned by default refused, and anything else an error. Round 3's
+check that every format return lies in an altsetting test is gone: the whole
+match covers it. v6.12's `quirks.c` (blob c5fd1803) still reads, 39
+device-specific facts and 19 vendor-wide rules as before, and the comparison
+with the database passes both ways (`kernel-check.sh`, PASS).
+
+**ios-check read a block comment** (`ios-check.py`, `strip_comments`):
+confirmed. It blanked line comments alone, and `registry_rows` takes the
+first `maxDSDRate:` after each `id:`, so a block comment naming a higher rate
+before a row's real one raised the row's cap and a violation printed ok, and
+a row a block comment held was read as a row. In d3bbb919 the self-test's
+registry gained such a comment before a row's real rate, a row only a block
+comment holds, a nested comment whose tail, past its inner close, names a
+rate and a row, and a `/*` in a string and in a line comment, which must open
+none, with cases on each; and five shapes the reader must refuse: a row with
+no rate before the next (the old case), a block comment left open, a
+multi-line string, an interpolation and a raw string. At the base it failed
+11 of its 18 cases, the heard and the stated rate past the row's maximum
+behind the comment both printing ok. Fixed in dfce8fd9: block comments are
+blanked as line comments are, nesting as Swift's do, and only outside string
+literals; what the reader does not read is refused, never read past: a block
+comment left open, a string not closed on its line (a multi-line string is
+one), an interpolation, whose nested quotes the scanner would take for the
+string's end, and a raw string. The last three are past the brief's letter,
+under the kernel reader's own rule (a shape the reader does not know is an
+error): each would show the reader a string's text as code. The registry at
+cd125088 holds none of them, no `/*`, `"""`, `#"` or interpolation, and still
+reads, 20 rows, the Mytek ok.
+
+**The iOS resync delay as timing** (`player.md`'s B2 line,
+`dacprofile.go`'s package doc): confirmed. Both said DoP evidence and caveats
+were all that is imported from the iOS registry, while `profiles.json` seeds
+`chord.hugo2`'s `timing.dsdPrefillMs` (700) from its row's DSD resync delay,
+which `TestTheCapturedModelsAreSeededAsTheirEvidenceSays` pins. The value is
+measured evidence and stays. In 92444e5a the package doc, the README, the
+design's draft of the line and its risk table, and the long form allow a DSD
+resync delay as timing, the prefill alone, never a policy beyond it (the long
+form already said "no resync delay but the prefill's seed"); the long form
+and the README also say what this round's two fixes do.
+
+**Negative controls**, by a runner outside the tree, as before: the kernel
+reader's test and the self-test green first, both files restored by SHA-256
+after. All 12 went red.
+
+| # | Mutation | Red |
+|---|---|---|
+| K1 | an arm is read by its altsetting tests, not whole | `TestTheKernelQuirkReaderReadsEachShape`, 5 mutations taken (round 3's two, the format before the switch, the statement beside an altsetting test, the test under another test) |
+| K2 | a bcdDevice arm need not end at its altsetting test's close and its break | the same, 1 (the second altsetting's switch) |
+| K3 | a bcdDevice arm need not start at its altsetting test | the same, 2 (the format before the switch, the second altsetting's switch) |
+| K4 | a statement in the switch beside its cases and returns is let through | the same, 1 |
+| K5 | a format returned by default is taken for the cases before it | the same, 1 |
+| I1 | block comments are not blanked | `ios-check.py --self-test`, 8 failing lines (the rows read; the two maxima behind the comments, the two rows only comments hold; the comment left open) |
+| I2 | block comments do not nest | the same, 3 (the nested row's cap read from the tail, and the row the tail names) |
+| I3 | a block comment left open is blanked to the end | the same, 1 |
+| I4 | a string's text is scanned as code, so its `/*` opens a comment | the same, 6 (the registry does not read: the comment the string opened is left open) |
+| I5 | a string may run past its line | the same, 1 (the multi-line string reads) |
+| I6 | an interpolation is read as an escape | the same, 1 |
+| I7 | a raw string is read | the same, 1 |
+
+**The rules patch**, `rules-b728-b2-r6.patch`: the B2 line's Don't reads
+"import from the iOS registry anything but its DoP evidence, its caveats and
+a DSD resync delay as timing (`dsdPrefillMs`)" (player.md 95,655 to 95,706
+bytes); its blank context line keeps its leading space, `git apply --check`
+takes it, `dropped_donts` finds every Don't in the long form, and docs-check
+passes on a copy with it applied.
+
+**Checks**, on legion0 (Linux, amd64, Go 1.27.3), in one turn of the shared
+build lock, with TMPDIR under `.tmp/_b728-b2`, at 92444e5a:
+- `go test -count=1 ./internal/player/dacprofile/`, and the same under
+  `-race`: ok.
+- `ios-check.py` against the registry at cd125088, ok (20 rows), and its
+  `--self-test`, PASS (18 cases).
+- `kernel-check.sh` by its own fetch at v6.12, blob c5fd1803: 39
+  device-specific facts and 19 vendor-wide rules, PASS.
+- `make test-fast`: 82 packages ok, none failed, 14 with no test files; 31
+  results came from the test cache, packages this round does not touch, and
+  internal/alsactl, the one Linux-only package among them, then ran fresh
+  with `-race -count=1`, ok. cmd/bridge ran (410 s), and its
+  `TestEveryCitedTestNameExists` ran again with this record in the log, ok.
+- `make vet` natively, and with `GOOS=windows` and `GOOS=darwin`: clean.
+- go1.27.3's gofmt on cmd, internal and scripts: clean.
+- `make docs-check`: ok (and with the patch applied, above).
+- The qualification check, from main and from ebe71366: "qualification
+  version OK": no guarded path changed.
+- Not run here: Windows and macOS natively, CI's runner, and any hardware.
+
+**Commits.** d3bbb919 the red tests; 60103980 the kernel reader; dfce8fd9
+ios-check; 92444e5a the docs and the long form; this record.
