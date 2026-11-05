@@ -16,6 +16,10 @@ internal/player/decode/testdata/dsd-goldens/*.dff binary
 # The ALAC goldens are compared sample for sample after decoding; keep git
 # from ever treating one as text.
 internal/player/decode/testdata/alac-goldens/*.m4a binary
+# The DAC profile database is compared byte for byte with its canonical
+# encoding, LF line ends and all; a CRLF checkout (Windows CI) would change
+# every line of it.
+internal/player/dacprofile/profiles.json text eol=lf
 # The installer, its stamp and its test fixtures are POSIX shell scripts: a
 # CRLF checkout would end every line with a carriage return, which sh reads
 # as part of the last word.
