@@ -22,21 +22,27 @@ import (
 // install `bridge init` made on such a host: the host-name seams report the
 // name, and the interface walk one LAN address. `bridge serve` starts twice
 // on it. Each time the certificate it serves covers every host /v1/health
-// sends a phone to, the `.local` one included where the name has a form, and
-// the console's pairing link dials a host it covers (the LAN address where
-// the name has no form), with the library named as init named it, for a
-// reader. Neither start logs the stale-SAN warning, the second presents the
+// sends a phone to, and the console's pairing link dials a host it covers,
+// with the library named as init named it, for a reader. A name with no form
+// is advertised nowhere and pairs at the LAN address. A name with non-ASCII
+// characters takes its IDNA ASCII form, which nothing but the bridge's own
+// mDNS responder answers, so with mDNS off its `.local` endpoint is not
+// listed and it pairs at the LAN address too (B739's second round: the
+// pairing link dialled https://xn--f1ai0a.local, which nothing answered).
+// Neither start logs the stale-SAN warning, the second presents the
 // fingerprint the first did, since an existing pair is loaded and never
-// minted again, and bridge doctor's certificate and pairing lines are quiet.
+// minted again, and bridge doctor's certificate and pairing lines are quiet,
+// the pairing line saying why the QR dials an address and not the name.
 func TestServeOnAHostWhoseNameIsNotASCII(t *testing.T) {
 	for _, tc := range []struct {
 		name, host, library string
-		// local is the host the `.local` endpoint names, "" for none, and
-		// primary the host the pairing link's URL dials.
-		local, primary string
+		// local is the host the `.local` endpoint names, "" for none,
+		// primary the host the pairing link's URL dials, and why what
+		// bridge doctor's pairing-url line says beside it, "" for nothing.
+		local, primary, why string
 	}{
-		{"a Cyrillic name", hostCyrillic, hostCyrillic, "xn--f1ai0a.local", "xn--f1ai0a.local"},
-		{"the test Mac's bytes", hostMacBytes, "ÐÄ¯U", "", hostNameWalkLAN},
+		{"a Cyrillic name, mDNS off", hostCyrillic, hostCyrillic, "", hostNameWalkLAN, "mdns.enabled is false"},
+		{"the test Mac's bytes", hostMacBytes, "ÐÄ¯U", "", hostNameWalkLAN, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Registered before the boots, so the cleanups that stop serve,
@@ -69,8 +75,9 @@ func TestServeOnAHostWhoseNameIsNotASCII(t *testing.T) {
 			if c := findCheck(t, rep, "tls-cert-sans"); c.Status != doctor.OK {
 				t.Errorf("tls-cert-sans: %v %q\n%s", c.Status, c.Summary, c.Hint)
 			}
-			if c := findCheck(t, rep, "pairing-url"); c.Status != doctor.OK || !strings.Contains(c.Summary, tc.primary) {
-				t.Errorf("pairing-url: %v %q, want ok naming %s", c.Status, c.Summary, tc.primary)
+			if c := findCheck(t, rep, "pairing-url"); c.Status != doctor.OK ||
+				!strings.Contains(c.Summary, tc.primary) || !strings.Contains(c.Summary, tc.why) {
+				t.Errorf("pairing-url: %v %q, want ok naming %s and saying %q", c.Status, c.Summary, tc.primary, tc.why)
 			}
 		})
 	}

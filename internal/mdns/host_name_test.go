@@ -18,26 +18,104 @@ import (
 // builds `https://<host>:<port>` from host= and checks the certificate
 // against it. The responder publishes the name in the form the certificate
 // carries: an ASCII name as it is, byte for byte; a name with non-ASCII
-// characters in its IDNA ASCII form; and a name with no valid form (a test
-// Mac's kern.hostname) as no host name, which is localhost.local, as before.
+// characters in its IDNA ASCII form. A name with no valid form (a test Mac's
+// kern.hostname) is no host name, and its host= is left out (B739's second
+// round: it was localhost.local, which no certificate names), so the app
+// takes the record's ips=, which is there, or resolves the service itself.
 func TestTheMDNSHostIsTheNameTheCertificateCarries(t *testing.T) {
 	for _, tc := range []struct {
-		name, host, want string
+		name, host string
+		// want is host='s value, "" for no host= at all.
+		want string
 	}{
 		{"a Cyrillic name", "Жук", "xn--f1ai0a.local"},
-		{"the test Mac's bytes", "Ð\u0091Ä¯U", "localhost.local"},
+		{"the test Mac's bytes", "Ð\u0091Ä¯U", ""},
 		{"mixed case and an underscore", "MacBook-Pro_2", "MacBook-Pro_2.local"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := Config{ProtocolVersion: 1, Port: 7788, Hostname: tc.host}
-			if got := cfg.advertisedHost(); got != tc.want {
-				t.Errorf("advertisedHost = %q, want %q", got, tc.want)
+			txt := buildTXTRecords(cfg, []net.IP{net.ParseIP("192.168.1.20")})
+			var hosts []string
+			for _, s := range txt {
+				if v, ok := strings.CutPrefix(s, "host="); ok {
+					hosts = append(hosts, v)
+				}
 			}
-			if txt := buildTXTRecords(cfg, nil); !slices.Contains(txt, "host="+tc.want) {
-				t.Errorf("the TXT record is %q, want host=%s", txt, tc.want)
+			var want []string
+			if tc.want != "" {
+				want = []string{tc.want}
+			}
+			if !slices.Equal(hosts, want) {
+				t.Errorf("the TXT record %q carries host= %q, want %q", txt, hosts, want)
+			}
+			if !slices.Contains(txt, "ips=192.168.1.20") {
+				t.Errorf("the TXT record %q does not carry ips=192.168.1.20", txt)
 			}
 		})
 	}
+}
+
+// TestAHostWithNoNameIsAnsweredForByANameOfItsOwn is B739's second round, on a
+// live responder. A host whose name has no valid form took localhost.local
+// for its SRV target and host=, which no certificate names, and its responder
+// answered an address question for localhost.local, a name every machine
+// takes for itself, with the bridge's own address, to any device on the LAN
+// that asked. Such a host publishes no host=, and its SRV target is a name
+// made of the first address its records carry, onebit-bridge-127-0-0-1.local
+// for 127.0.0.1, which only this bridge holds on the link: the responder
+// answers an address question for that name, and leaves one for
+// localhost.local unanswered.
+func TestAHostWithNoNameIsAnsweredForByANameOfItsOwn(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mdns live test skipped on windows")
+	}
+	loopback := loopbackInterface(t)
+	const instance, target = "b739-no-host-name", "onebit-bridge-127-0-0-1.local."
+	a, err := advertiseInternal(Config{
+		InstanceName:    instance,
+		Port:            62992,
+		ProtocolVersion: 1,
+		LibraryName:     "B739 Test",
+		Hostname:        "Ð\u0091Ä¯U",
+		InterfaceSource: func() *net.Interface { return loopback },
+	}, func() []net.IP { return []net.IP{net.ParseIP("127.0.0.1")} }, time.Hour, false)
+	if err != nil {
+		t.Skipf("mdns unavailable in this env: %v", err)
+	}
+	defer a.Close()
+
+	q := newLoopbackQuerier(t, loopback)
+	browse := q.ask(t, Service+".local.", dns.TypePTR, func(rr dns.RR) bool {
+		srv, ok := rr.(*dns.SRV)
+		return ok && strings.HasPrefix(srv.Hdr.Name, instance+".")
+	})
+	var got string
+	var txt []string
+	for _, rr := range browse {
+		switch v := rr.(type) {
+		case *dns.SRV:
+			if strings.HasPrefix(v.Hdr.Name, instance+".") {
+				got = v.Target
+			}
+		case *dns.TXT:
+			if strings.HasPrefix(v.Hdr.Name, instance+".") {
+				txt = v.Txt
+			}
+		}
+	}
+	if got != target {
+		t.Errorf("the SRV target is %q, want %q", got, target)
+	}
+	if slices.ContainsFunc(txt, func(s string) bool { return strings.HasPrefix(s, "host=") }) {
+		t.Errorf("the TXT record %q carries a host=", txt)
+	}
+	if rrs := q.askNone(t, "localhost.local.", dns.TypeA); len(rrs) != 0 {
+		t.Errorf("the responder answers for localhost.local: %v", rrs)
+	}
+	q.ask(t, target, dns.TypeA, func(rr dns.RR) bool {
+		a, ok := rr.(*dns.A)
+		return ok && a.Hdr.Name == target && a.A.Equal(net.ParseIP("127.0.0.1"))
+	})
 }
 
 // TestAClientResolvesTheASCIINameThroughTheBridgesResponder is B739's mDNS
@@ -177,4 +255,44 @@ func (q *loopbackQuerier) ask(t *testing.T, name string, qtype uint16, match fun
 	}
 	t.Fatalf("no answer to the %s question for %s came back", dns.TypeToString[qtype], name)
 	return nil
+}
+
+// askNone sends one question for name of type qtype to the mDNS group four
+// times, half a second apart, and returns every record naming name that the
+// responses carried: none for a question the responder must leave
+// unanswered. A response about other names is passed over.
+func (q *loopbackQuerier) askNone(t *testing.T, name string, qtype uint16) []dns.RR {
+	t.Helper()
+	msg := new(dns.Msg)
+	msg.SetQuestion(name, qtype)
+	msg.RecursionDesired = false
+	out, err := msg.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	group := &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: 5353}
+	buf := make([]byte, 65536)
+	var named []dns.RR
+	for range 4 {
+		if _, err := q.conn.WriteToUDP(out, group); err != nil {
+			t.Skipf("no multicast send on loopback here: %v", err)
+		}
+		_ = q.conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+		for {
+			n, _, err := q.conn.ReadFromUDP(buf)
+			if err != nil {
+				break
+			}
+			var resp dns.Msg
+			if resp.Unpack(buf[:n]) != nil {
+				continue
+			}
+			for _, rr := range append(append([]dns.RR(nil), resp.Answer...), resp.Extra...) {
+				if strings.EqualFold(rr.Header().Name, name) {
+					named = append(named, rr)
+				}
+			}
+		}
+	}
+	return named
 }
