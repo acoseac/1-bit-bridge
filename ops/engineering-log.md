@@ -76563,6 +76563,10 @@ before any push. go1.27.3's gofmt
 lists none of the five Go files the round changed; `make docs-check` passes;
 `scripts/qualification-version` 49d438fc..HEAD (main's head as merged) is OK.
 
+**A last gap, closed by the orchestrator:** Codex and the Claude API reviewer each found that the timer's `checkRootWatches` ignored `fds.looks`: firing right after the Create, it found the root's own watch gone and made the very Add the wait avoids, needing only a timer coincidence. It now leaves a root whose look waits to the flush, and still looks at any other root. `TestTheCheckOfTheRootsWatchesLeavesAWaitingLookToTheFlush` was red on 6dc95fa6 ("the check watched … while its Create's look waited for the flush") and passes with `lookWaits`.
+
+**`make test-fast` on the merged head:** 82 of 82 packages on the orchestrator's Mac, on 6dc95fa6 before this last change. On orion the run's only failure was `TestBuildTagsAgree`, the census walking `.tmp` (B740).
+
 **The rules**: `rules-b651-r12.patch` adds to the B651 line's Don't "(on
 kqueue its look waits for the flush a new folder's watch waits for)" after
 its clause on a Create once the root's own watch is gone, with the long form

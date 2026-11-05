@@ -295,7 +295,9 @@ func (wt *Watcher) recheckHeld(ctx context.Context) {
 // that reads as a volume not mounted is held. One that reads as it did was
 // replaced under its watch (unmounted and mounted again between two checks,
 // or moved away and another folder put at its path): what is left of its
-// watches goes, and it is watched again where it is now, with a scan.
+// watches goes, and it is watched again where it is now, with a scan. A root
+// whose Create's look waits for the flush is left to it: fsnotify may still be
+// opening the folder at its path, which is why that look waits.
 func (wt *Watcher) checkRootWatches(ctx context.Context) {
 	if len(wt.rootWatches) == 0 {
 		return
@@ -312,7 +314,7 @@ func (wt *Watcher) checkRootWatches(ctx context.Context) {
 		}
 	}
 	for _, root := range slices.Sorted(maps.Keys(wt.rootWatches)) {
-		if held[wt.rootWatches[root]] {
+		if held[wt.rootWatches[root]] || wt.fds.lookWaits(root) {
 			continue
 		}
 		wt.lookAgain(ctx, root, msgWatchRootRewatched)

@@ -2899,3 +2899,4 @@
   `TestTheRecordRefusesOnlyTheDataDirItNamesWhileItHoldsNeitherFile`,
   `TestTheRecordIsBesideTheFileTheConfigsNameOpens` and
   `TestBothDoctorsFailADataDirItsRecordNamesWhileItsVolumeIsAway`.
+ The timer's check of the roots' own watches leaves a root whose look waits to the flush too, since it would otherwise make the Add the wait avoids (Codex and the Claude API reviewer on round 12; `TestTheCheckOfTheRootsWatchesLeavesAWaitingLookToTheFlush`).

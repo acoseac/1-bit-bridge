@@ -375,6 +375,16 @@ func (f *watchFDs) waitLook(root string) {
 	}
 }
 
+// lookWaits reports whether root's look waits for the flush. A nil account,
+// where fsnotify holds no open file per watched entry, has none waiting.
+func (f *watchFDs) lookWaits(root string) bool {
+	if f == nil {
+		return false
+	}
+	_, waits := f.looks[root]
+	return waits
+}
+
 // waiting reports whether a new folder's watch or a root's look waits for the
 // flush.
 func (f *watchFDs) waiting() bool { return len(f.pending) > 0 || len(f.looks) > 0 }
