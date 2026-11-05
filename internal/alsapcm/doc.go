@@ -10,7 +10,10 @@
 // between tracks. PR 4b2 gave the sink a cut at a track boundary (Cut: the
 // store's tail the kernel has not taken, dropped and never written) and a
 // reopen at the endpoint the binding resolves to now (SinkConfig.Locate),
-// checked by Admit like the open. DSD and DoP are later layers.
+// checked by Admit like the open. DSD and DoP are later layers. B728's B4
+// added the silent probe (Probe): the node opened, checked like an open, one
+// HW_REFINE asked of each candidate and the node closed, nothing committed,
+// a busy node answered at once; and its in-memory cache (ProbeCache).
 //
 // What it will do, and what it refuses:
 //

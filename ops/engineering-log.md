@@ -76540,3 +76540,199 @@ its clause on a Create once the root's own watch is gone, with the long form
 beside it; applied strictly to HEAD's scanner.md it is the edited copy byte
 for byte, the budgets pass (30,599 to 30,671 bytes), and the Don't lists
 match both ways.
+
+## 2026-11-05 — B728 B4: the silent probe, its cache, and the device slot it shares with a Start
+
+B728's B4 (`ops/plan-b728-dsd-capability-design.md`, section 5, with 1.1, 1.2,
+8, 9.1 and B4's row in 11). Worker b728-b4 on legion0 (Ubuntu 26.04,
+linux/amd64, Linux 7.0, go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`), branch
+`feat/b728-b4-silent-probe` from main 3b900afc, the orchestrator's brief with
+the binding notes of Codex, the Claude API reviewer and Argon folded in.
+Commits: the red tests a04bf465, the probe 389c56ff, the carrier's rate
+4ce44b2e, then this record. B4 changes nothing a user sees: nothing calls the
+probe in production until B7 and B5 wire it. The rule goes into
+`.claude/rules/player.md` through a checked patch (`rules-b728-b4.patch`);
+this worker cannot write `.claude/`.
+
+**Red first.** At a04bf465 the probe's API stood in `alsapcm` and the
+backend with stub bodies ("not built yet"), so each new test failed on its
+own assertion: `TestTheProbeRefinesAndNeverCommits` and
+`TestTheProbeLeavesABusyNodeAlone` ("ProbeCandidates lists nothing to ask"),
+`TestTheProbeReadsTheDoPCarriersSignificantBits` ("probe: alsapcm: the silent
+probe is not built yet", each row), `TestNoProbeWhileASessionHoldsTheDevice`
+(each of its six subtests: "the probe answered player backend: the silent
+probe is not built yet; want it not run: session_holds_device", and
+`session_paused`, `release_pending` for theirs), `TestAStartDuringAProbeWaitsForIt`
+and `TestAStartWaitsForAProbeAtMostItsBound` (no probe held the node, the
+watchdog), the playback package's `TestTheProbesGateReadsTheDeviceSlot` ("the
+gate: taken true") and `TestAStartWaitsForTheProbeThatHoldsTheSlot` ("the
+Start did not wait for the probe that holds the slot"), and the cache's, the
+guard's (`TestGuardNodeOpensRefusesEveryOpen`) and the conditions'.
+
+**The probe** (`alsapcm.Probe`, over the `sys` seam as `probe`). It opens the
+endpoint's node as every open does (non-blocking, exclusive, looked at before
+and after), runs PVERSION and INFO as an open checks them, hands the node to
+the check after open (`ProbeConfig.Admit`, the sink's `Admit`: a refusal
+closes it with nothing asked, `wrong_device`), asks one HW_REFINE a
+candidate, and closes the node once on every way out, a panic's included. It
+never reuses `Open`, which commits (HW_PARAMS, then SW_PARAMS and PREPARE);
+the request it refines is the one an open's `setHW` refines first, one
+function the two share now (`exactParams`: RW_INTERLEAVED, the format, the
+STD subformat, two channels, the rate), with `info` and `msbits` zeroed so a
+kernel that left them unfilled reads as no PAUSE and unknown bits, never as
+the request's. Per candidate it reads three things: accepted or refused
+(EINVAL alone refuses; any other errno ends the probe, typed, and leaves that
+candidate and the rest not probed); the refined significant bits (`Msbits`, 0
+unknown, never the format's width); and whether the setup offers PAUSE
+(`Pause`, which sets the tuple's pause method, kernel or silence, section
+7.1). A busy node is answered at once, `busy`, every candidate not probed,
+one open asked: nothing waits, retries or polls, and the holder is left alone.
+`ProbeCandidates` is section 5's set, 23 candidates: DSD_U32_BE, DSD_U32_LE
+and DSD_U16_LE at the one-bit rate over their width for DSD64, DSD128 and
+DSD256; S32_LE at each DoP carrier (the rate over 16); section 4.3's
+conversion targets, 176.4, 88.2 and 44.1 kHz in S24_3LE, S24_LE, S32_LE and
+S16_LE (S32_LE at 176.4 kHz once). DSD512, refused in every mode, is never
+probed. `ProbeResult.DoPCarrier` is S32_LE accepted at a DSD rate's carrier
+with 24 to 32 significant bits, the DoP sink's own rule (`dopBits`, which the
+sink's check now calls too): that the kernel takes the PCM carrier, never
+that the DAC decodes DSD.
+
+**The device slot** (note 1 of the brief). `playback.Backend.Probe` takes the
+backend's slot in the step that finds it free, under the lock `hold` takes it
+for a Start under (`holder`, and now `probing`), and holds it from the
+binding's location to the node's close. A Start that finds the probe holding
+it waits, holding nothing, and takes the slot as the probe ends; the wait is
+armed at `ProbeWait` (1 s, section 5) on `Config.AfterFunc`, and past it the
+Start answers the device busy (`engine.ErrDeviceBusy`, a busy attempt to the
+engine), the probe's node still open; the Start's context and its session's
+release end the wait too. The probe runs on a goroutine the backend counts
+and gives the slot back only once its node is closed, so a probe the kernel
+holds in a call keeps the slot and every Start then answers busy after its
+second, which is the truth. A second probe beside one is refused
+(`probe_running`).
+
+**Every precondition of section 5** (note 2). Before anything is located or
+opened the gate (`reserveProbe`) refuses a release never confirmed
+(`release_unconfirmed`), a session whose Release has come or whose release
+the engine has taken (`release_pending`: the session's life ended, or
+`StartRequest.Released` closed), a paused session (`session_paused`) and one
+that plays or is opening the device (`session_holds_device`); the backend
+cannot see the bound DAC's availability or the snapshot's freshness, so the
+caller says them (`ProbeConditions`, `output_unavailable`, `snapshot_stale`),
+B7 from the watcher's latest snapshot. A paused session holds the slot
+whether or not its pause's release has let the device go: a resume reopens
+the device, and a probe beside a paused session would race that reopen, so
+the gate is stricter than section 5's "a pause still holds it", and a choice
+written while a session is paused is not probed (§5 now says so). The pause
+is read through `pausedFlag`, a lock-free mirror of `paused` written with it,
+since a session takes the backend's lock under its own and never the
+reverse; the release through the session's life and its fence, already
+lock-free.
+
+**The cache** (note 3). `alsapcm.ProbeCache`, in memory and the process's
+alone, keeps each answer under the model's identity (the canonical form of
+B2's key, never a serial or a port), the bcdDevice, the kernel release, the
+unit's enumeration and the exact candidate, as accepted (with its bits and
+pause flag) or refused; anything else is not probed. A lookup under any other
+unit finds nothing, so each of the four lapses it; recording the model under
+another firmware, kernel or enumeration drops the old answers; `Forget`, which
+a choice write calls (section 7.2), drops the model's. A not-probed answer,
+EBUSY's, keeps and changes nothing: never a refusal. B3's durable evidence
+holds neither refusals nor conversion candidates, so nothing here is written.
+In B7, `driver_accepted` reads the cache per tuple, a native tuple by its
+format at the frame rate and a DoP tuple by its carrier (`DoPCarrier`): an
+accepted answer is recorded as that tuple's `driverAcceptedAt` with the kernel
+release in the DSD state's evidence; a refused one takes the tuple out of
+what is offered (section 3.2); a not-probed one leaves it to the stream
+file's altsets. The enumeration is the caller's opaque word; B7 takes it from
+the hotplug feed (its instance and the generation at which the binding last
+found the unit anew), never a devnum written anywhere.
+
+**The guard and the other platforms** (notes 5 and 7). `Probe` asks
+`GuardNodeOpens` first, on Linux and in the stub, which off linux/amd64 and
+linux/arm64 refuses `unsupported_platform`, every candidate not probed, so B5
+and B7 call it from packages every platform builds; the types and the cache
+carry no build tag. `TestGuardNodeOpensRefusesEveryOpen` covers Probe, and
+`TestProbeOffLinuxIsUnsupported` the stub.
+
+**The fake kernel** (note 6). It takes scripted answers to the next opens
+(`openErrs`, each an attempt, EBUSY once and then the node, so a retry shows),
+an exclusive node (an open of an open node is EBUSY, as a one-substream
+device's), altsets (a format taken only at its altset's rates), an exact
+msbits a format (`bits`, where 0 is unknown, which `msbits` cannot say), and a
+nth-refine error; it records each HW_REFINE as asked, beside every request it
+already recorded, and its view counts the opens asked, HW_REFINE and
+HW_PARAMS. HW_REFINE already filled msbits and the info flags (`narrow`), so
+the probe reads them from the refine, as the kernel gives them.
+
+**The real kernel.** legion0 has no DAC, but has an onboard HDA codec (card
+2, ALC257 Analog), closed. `TestTheSilentProbeOnARealDAC` with
+`BRIDGE_PROBE_ENDPOINT=2,0`: "opened 1, closed 1; requests: HW_REFINE 23,
+INFO 1, PVERSION 1"; S16_LE and S32_LE at 44.1 kHz accepted with 16 and 32
+significant bits and PAUSE offered, every other candidate refused (EINVAL),
+the DSD formats and the 88.2 and 176.4 kHz rates among them: Linux 7.0's
+HW_REFINE fills msbits and the info flags, as the probe reads them. That run
+found the draft's `DoPCarrier` calling S32_LE at 44.1 kHz a DoP carrier; it
+reads the rate too now (4ce44b2e), with a row for it in
+`TestTheProbeReadsTheDoPCarriersSignificantBits`. With the node held open by
+another process, the probe answered at once (0.00 s): "open: busy: another
+process has /dev/snd/pcmC2D0p open; the bridge never stops it (EBUSY)", and
+the test failed saying to stop MPD and the bridge.
+
+**Owed on hardware** (note 8, the orchestrator's run). Build the test binary
+for the Pi on any host (`GOOS=linux GOARCH=arm64`, `go test -c -o
+alsapcm.test ./internal/alsapcm`; built here, 4ce44b2e), copy it across, stop
+MPD and the bridge (`sudo systemctl stop mpd` and the bridge's service: with
+MPD holding the DAC the run is a useless "not probed", and the test fails
+saying so), run `BRIDGE_PROBE_ENDPOINT=<card>,0 ./alsapcm.test -test.run
+'^TestTheSilentProbeOnARealDAC$' -test.v`, and start them again. Expected: the
+first line "opened 1, closed 1; requests: HW_REFINE 23, INFO 1, PVERSION 1",
+nothing else sent; then per candidate "accepted, N significant bits, PAUSE
+offered" (or "not offered") or "refused (EINVAL)"; on a DAC whose kernel quirk
+names DSD_U32_BE, that format accepted at its DSD frame rates; the S32_LE
+carriers with their bits, "the DoP carrier of DSD64" (and 128, 256) where 24
+to 32; PASS.
+
+**The version** (the guard). `internal/alsapcm/` is guarded: B735 took 37 on
+main and B3 (#1405) takes 38, so B4 takes 39, and the design's later numbers
+(B7's 38, B11's 39, B12's 40) move up, each guarded PR taking the next free
+one at its merge. `LegacyVersion` stays 35, so no owner re-qualifies. The
+runbook's five pinned lines and its record of version 39, the design's
+section 8 table and B4's row in section 11, and two sentences of section 5
+(the paused slot; the answers kept in the cache, not the DSD state) are
+corrected.
+
+**The negative controls**, each a source edit run against a fresh test
+binary, the original bytes restored from memory (`.tmp/_b728-b4/controls.py`):
+the baseline green in both packages (alsapcm's 21 probe tests, playback's 2),
+every control red in the test that pins it:
+
+| Mutation | Red |
+|---|---|
+| an HW_PARAMS sent after each accepted refine | `TestTheProbeRefinesAndNeverCommits` ("the probe sent HW_PARAMS 12 times", the stream left SETUP), and the backend's probes in `TestNoProbeWhileASessionHoldsTheDevice` and `TestNoProbeWithoutTheBoundDACOrAFreshSnapshot` |
+| a busy node waited on: the open asked again, up to 50 times | `TestTheProbeLeavesABusyNodeAlone` ("got no error, want busy": the second attempt opened), `TestAProbeOfABusyNodeAnswersAtOnce` ("51 opens asked") |
+| a second open | `TestTheProbeRefinesAndNeverCommits` ("2 opens asked, 2 opened, 1 closes") and seven more |
+| the carrier's bits not read (0) | `TestTheProbeReadsTheDoPCarriersSignificantBits`, four rows |
+| the carrier's bits read and not judged | its 20, 16 and unreported rows ("a DoP carrier true") |
+| the pause flag ignored, as false; as true | `TestTheProbeReadsWhetherTheSetupOffersPause`, its PAUSE row; its no-PAUSE row |
+| EBUSY kept as a refusal (the cache takes not probed as refused) | `TestABusyProbeIsNeverCachedAsARefusal`, `TestTheProbeLeavesABusyNodeAlone`, `TestTheProbeCacheKeepsAnAnswerForExactlyItsUnit`, `TestAProbeOfTheModelAnewLapsesWhatWasKeptBefore` |
+| the cache's key without the enumeration; the kernel; the firmware | `TestTheProbeCacheKeepsAnAnswerForExactlyItsUnit`, each one's row, and `TestAProbeOfTheModelAnewLapsesWhatWasKeptBefore`'s for the first two |
+| a lapsed unit's answers kept | `TestAProbeOfTheModelAnewLapsesWhatWasKeptBefore`, each row |
+| a choice write's `Forget` doing nothing | `TestAChoiceWriteForgetsTheModelsAnswers` |
+| the guard skipped | `TestGuardNodeOpensRefusesEveryOpen` (the real open answered ENOENT for card 7, which this host lacks; the guard saw nothing) |
+| a probe while a session plays or opens the device | `TestNoProbeWhileASessionHoldsTheDevice`'s two ("the probe answered nil"; the fake's node closed under the session), `TestTheProbesGateReadsTheDeviceSlot`'s row |
+| a probe during a pause | its two paused subtests, the gate's row |
+| a probe during a pending release | its two release subtests, the gate's two rows |
+| a probe beside a release never confirmed | the gate's row (no rig test reaches that state) |
+| the slot skipped by the probe | `TestAStartDuringAProbeWaitsForIt` and `TestAStartWaitsForAProbeAtMostItsBound` ("a Start asked to open the device while the probe held it"), `TestOneProbeAtATime`, both gate tests |
+| the slot skipped by the Start | the two Start tests, `TestAStartWaitsForTheProbeThatHoldsTheSlot` ("the Start did not wait") |
+| a Start's wait unbounded (no timer armed) | the two Start tests (the engine's own 5 s StartTimeout answered `backend_timeout`), `TestAStartWaitsForTheProbeThatHoldsTheSlot`'s four rows |
+| the bound DAC's unavailability ignored; the stale snapshot ignored | `TestNoProbeWithoutTheBoundDACOrAFreshSnapshot`, each one's row |
+
+After each restore the files were their committed bytes, and `git status`
+showed no Go file changed at the end.
+
+**Follow-ups, for the backlog** (the backlog file is not on legion0): B7 derives
+`ProbeConditions` and `ProbeUnit.Enumeration` from the hotplug snapshot and
+calls `Backend.Probe` at section 5's moments; B9's choice write calls
+`ProbeCache.Forget`, and is not probed while a session is paused.
