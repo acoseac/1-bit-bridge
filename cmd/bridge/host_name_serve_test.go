@@ -107,8 +107,18 @@ type installServe struct {
 // and the console answer.
 func serveInstall(t *testing.T, cfgDir string, pick func() (*net.Interface, error)) installServe {
 	t.Helper()
-	lan, adminLn := holdLoopback(t), holdLoopback(t)
+	adminLn := holdLoopback(t)
 	setConfigKey(t, cfgDir, "adminAddress", "adminAddress: "+adminLn.addr)
+	// On every address, as an install a phone pairs with is: a listener bound
+	// to loopback has no LAN address to pair at (lanPairingURL).
+	lan, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lan.Close() })
+	port := lan.Addr().(*net.TCPAddr).Port
+	everyAddress := lan.Addr().String()
+	setConfigKey(t, cfgDir, "listenAddress", `listenAddress: "`+everyAddress+`"`)
 	ctx, cancel := context.WithCancel(context.Background())
 	stdout, stderr := &safeBuffer{}, &safeBuffer{}
 	done := make(chan int, 1)
@@ -116,16 +126,16 @@ func serveInstall(t *testing.T, cfgDir string, pick func() (*net.Interface, erro
 	go func() {
 		defer close(exited)
 		done <- runServe(ctx, serveOpts{
-			configPath: filepath.Join(cfgDir, "bridge.yaml"), addrOverride: lan.addr,
-			lanListener: lan.ln, adminListener: adminLn.ln, tailscaleCLI: noTailscaleCLI(),
+			configPath: filepath.Join(cfgDir, "bridge.yaml"), addrOverride: everyAddress,
+			lanListener: lan, adminListener: adminLn.ln, tailscaleCLI: noTailscaleCLI(),
 			mdnsPick: pick,
 		}, stdout, stderr)
 	}()
 	drainServeOnCleanup(t, cancel, exited, done, stderr)
-	addr, fingerprint := waitForListening(t, stdout, exited, done, stderr)
+	_, fingerprint := waitForListening(t, stdout, exited, done, stderr)
 	waitForAdminReady(t, adminLn.addr, done, stderr)
 	return installServe{
-		base: "https://" + addr, admin: adminLn.addr, fingerprint: fingerprint, stderr: stderr,
+		base: fmt.Sprintf("https://127.0.0.1:%d", port), admin: adminLn.addr, fingerprint: fingerprint, stderr: stderr,
 		stop: func() {
 			cancel()
 			<-exited
