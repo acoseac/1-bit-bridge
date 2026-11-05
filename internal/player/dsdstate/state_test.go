@@ -1,6 +1,8 @@
 package dsdstate
 
 import (
+	"bytes"
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -26,7 +28,8 @@ func schemaOneState(t *testing.T) State {
 	}
 }
 
-// schemaOne is schemaOneState as its file holds it: schema 1, frozen.
+// schemaOne is schemaOneState as its file holds it, laid out here for its
+// reader: the file holds it compact (asWritten). Schema 1, frozen.
 const schemaOne = `{
   "schemaVersion": 1,
   "defaultMode": "auto",
@@ -119,18 +122,30 @@ const schemaOne = `{
 }
 `
 
+// asWritten is a file laid out for its reader as the writer writes it:
+// compact, nothing between its tokens, and a newline after it.
+func asWritten(t *testing.T, laidOut string) string {
+	t.Helper()
+	var b bytes.Buffer
+	if err := json.Compact(&b, []byte(laidOut)); err != nil {
+		t.Fatal(err)
+	}
+	return b.String() + "\n"
+}
+
 // TestTheStateIsSchemaOneAsWritten freezes schema 1 (the design's section
-// 2.5): a state with one of every field is written as these bytes, every key
-// present, every list [], an absent interface and product null, the DACs in
-// their keys' order and each list in its own; and the bytes read back as the
-// same state, and write again as themselves.
+// 2.5): a state with one of every field is written as these bytes, compact,
+// every key present, every list [], an absent interface and product null, the
+// DACs in their keys' order and each list in its own; and the bytes read back
+// as the same state, and write again as themselves.
 func TestTheStateIsSchemaOneAsWritten(t *testing.T) {
+	want := asWritten(t, schemaOne)
 	b, err := schemaOneState(t).encode()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(b) != schemaOne {
-		t.Fatalf("schema 1 is written as\n%s\nwant\n%s", b, schemaOne)
+	if string(b) != want {
+		t.Fatalf("schema 1 is written as\n%s\nwant\n%s", b, want)
 	}
 	s, err := Decode(b)
 	if err != nil {
@@ -140,7 +155,7 @@ func TestTheStateIsSchemaOneAsWritten(t *testing.T) {
 		t.Fatalf("schema 1 reads back as %+v", s)
 	}
 	again, err := s.encode()
-	if err != nil || string(again) != schemaOne {
+	if err != nil || string(again) != want {
 		t.Fatalf("schema 1 read and written again is\n%s\n%v", again, err)
 	}
 }

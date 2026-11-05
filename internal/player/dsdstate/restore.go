@@ -1,6 +1,7 @@
 package dsdstate
 
 import (
+	"fmt"
 	"path/filepath"
 	"slices"
 	"time"
@@ -18,13 +19,18 @@ import (
 // observation (driverAcceptedAt, kernel, streamingObservedAt), and first
 // use's observedAt, which playback on this box records again, removing an
 // evidence entry left with no observation, and a DAC left holding nothing.
-// Bytes that do not decode as a state are installed as they are, so the
-// next load refuses them, keeps them aside and refuses DSD, as it would have
-// on the box they came from.
-func ForRestore(snapshot []byte) []byte {
+// A state that decodes is never installed as the snapshot's bytes: one the
+// writer cannot write once nothing observed is left, which only a file
+// denser than the writer's own can hold (encode), is the restore's error
+// (ErrTooLarge), and the restore restores nothing (Codex on round 2: the
+// snapshot went in as it was, the old box's observations with it). Bytes that
+// do not decode as a state are installed as they are, so the next load
+// refuses them, keeps them aside and refuses DSD, as it would have on the box
+// they came from: they are no state, and nothing reads what they hold.
+func ForRestore(snapshot []byte) ([]byte, error) {
 	s, err := Decode(snapshot)
 	if err != nil {
-		return slices.Clone(snapshot)
+		return slices.Clone(snapshot), nil
 	}
 	for i := range s.DACs {
 		d := &s.DACs[i]
@@ -38,9 +44,9 @@ func ForRestore(snapshot []byte) []byte {
 	}
 	out, err := s.encode()
 	if err != nil {
-		return slices.Clone(snapshot)
+		return nil, fmt.Errorf("dsdstate: the snapshot's state, with nothing observed, cannot be written: %w", err)
 	}
-	return out
+	return out, nil
 }
 
 // WriteRestored installs at path, the state's file in the data directory
@@ -49,8 +55,12 @@ func ForRestore(snapshot []byte) []byte {
 // and durably, through the writer every write of the state takes
 // (atomicwrite.WriteBytesDurable, under that directory). Its caller holds the
 // data directory's exclusive lock (backup.RestoreWithOptions's does), so no
-// store writes beside it. Where no directory can be synced (Windows) it
-// refuses, writing nothing.
+// store writes beside it. A snapshot ForRestore refuses, and every write
+// where no directory can be synced (Windows), is refused, writing nothing.
 func WriteRestored(path string, snapshot []byte) error {
-	return atomicwrite.WriteBytesDurable(filepath.Dir(path), path, ForRestore(snapshot), tmpPrefix)
+	out, err := ForRestore(snapshot)
+	if err != nil {
+		return err
+	}
+	return atomicwrite.WriteBytesDurable(filepath.Dir(path), path, out, tmpPrefix)
 }

@@ -509,9 +509,17 @@ func Decode(data []byte) (State, error) {
 	return s, nil
 }
 
-// encode is the file s is written as: s normalized (Normalize), checked,
-// indented, and a newline after it, and refused (ErrTooLarge) past the bytes
-// Decode reads, so no write leaves a file the next start refuses.
+// encode is the file s is written as: s normalized, checked, compact,
+// nothing between its tokens, and a newline after it, and refused
+// (ErrTooLarge) past the bytes Decode reads, so no write leaves a file the
+// next start refuses. Compact, the writer's bound and the reader's are on the
+// same bytes: a state read from a file the writer wrote is written again
+// within the bound, and with nothing observed (ForRestore) too, since that
+// only takes away (Codex on round 2: indented, a state the reader took at 787
+// KB was 1.4 MB, which the writer refused). Only a file denser than the
+// writer's own, which no writer of this schema writes (a key the writer
+// writes left out, a character it escapes held as it is), can read and not be
+// written again.
 func (s State) encode() ([]byte, error) {
 	n := s.normalized()
 	if err := n.check(); err != nil {
@@ -530,7 +538,7 @@ func (s State) encode() ([]byte, error) {
 		}
 		f.Warnings = append(f.Warnings, out)
 	}
-	data, err := json.MarshalIndent(f, "", "  ")
+	data, err := json.Marshal(f)
 	if err != nil {
 		return nil, err
 	}

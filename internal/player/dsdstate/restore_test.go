@@ -31,7 +31,11 @@ func TestARestoreKeepsWhatWasChosenAndHeard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := Decode(ForRestore(in))
+	out, err := ForRestore(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := Decode(out)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,8 +47,8 @@ func TestARestoreKeepsWhatWasChosenAndHeard(t *testing.T) {
 	}
 
 	damaged := []byte(`{"schemaVersion": 1, "defaultMode": "au`)
-	if out := ForRestore(damaged); string(out) != string(damaged) {
-		t.Fatalf("a damaged state is restored as %q, want its bytes", out)
+	if out, err := ForRestore(damaged); err != nil || string(out) != string(damaged) {
+		t.Fatalf("a damaged state is restored as %q, %v; want its bytes", out, err)
 	}
 }
 
@@ -84,8 +88,8 @@ func TestARestoreReplacesTheBoxsStateDurably(t *testing.T) {
 	if mode, _, own := got.ChoiceFor(hugo(t)); mode != ModeAuto || own {
 		t.Fatalf("the box's own choice survived the restore: %q (own %v)", mode, own)
 	}
-	if string(ForRestore(snap)) != string(mustRead(t, path)) {
-		t.Fatal("the restored file is not what ForRestore gives")
+	if want, err := ForRestore(snap); err != nil || string(want) != string(mustRead(t, path)) {
+		t.Fatalf("the restored file is not what ForRestore gives: %v", err)
 	}
 }
 

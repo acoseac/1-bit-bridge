@@ -57,8 +57,9 @@ type Report struct {
 
 // ErrNotWritable is a write refused because the state's file is there and
 // could not be read or set aside, so a write would replace what the state
-// could not keep: the file must be moved first. Each write looks again, so
-// the first write after it is moved is made.
+// could not keep: the file must be moved first. Each write looks again until
+// a write of the store's own has landed at the name, so the first write made
+// after it is moved lands, and one not made leaves the store looking.
 var ErrNotWritable = errors.New("dsdstate: the state's file could not be read or set aside, and is not written over until it is moved")
 
 // Store is the state's one writer (the package's doc): it holds the state
@@ -97,9 +98,10 @@ type options struct {
 // cannot be read (a read error, a named pipe or a directory at the name, one
 // past the bound, which cannot be copied whole), or whose bytes cannot be set
 // aside, is left where it is (Unread), the state is Refusing in memory, and
-// no write replaces the file until it is moved; the first write after it is
-// moved is made, on that state. Its only error is an empty data directory:
-// what it found is Report's.
+// no write replaces the file until it is moved; the first write made after
+// it is moved lands, on that state, and until a write lands every write looks
+// again (ErrNotWritable). Its only error is an empty data directory: what it
+// found is Report's.
 func Open(dataDir string) (*Store, error) { return open(dataDir, options{}) }
 
 func open(dataDir string, o options) (*Store, error) {
@@ -242,11 +244,18 @@ func (s *Store) updateLocked(fn func(*State) error) error {
 		// The operator may have moved the entry away since Open: then the
 		// write is made, on the state that refuses, so a choice clears the
 		// refusal with no restart (the Claude API reviewer on #1405). An entry
-		// still there, or one that cannot be looked at, is still refused.
+		// still there, or one that cannot be looked at, is still refused. The
+		// look answers for this write alone: the store stops looking only
+		// once a write of its own has landed at the name (below), so a write
+		// not made leaves an entry put back refused (the Claude API reviewer
+		// on round 2). What remains is the time between this look and the
+		// writer's rename, the change and its encoding and the writer's
+		// staging of the file, its write and fsync: an entry put back inside
+		// it is replaced unread, which only a rename that refuses to replace
+		// would close, and the durable writer has none.
 		if _, err := os.Lstat(s.path); !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("%w: %w", ErrNotWritable, s.blocked)
 		}
-		s.blocked = nil
 	}
 	next := s.state.Clone()
 	if err := fn(&next); err != nil {
@@ -263,7 +272,7 @@ func (s *Store) updateLocked(fn func(*State) error) error {
 	if err := s.write(s.path, data); err != nil {
 		return fmt.Errorf("dsdstate: the state is not written: %w", err)
 	}
-	s.state = next
+	s.state, s.blocked = next, nil
 	return nil
 }
 

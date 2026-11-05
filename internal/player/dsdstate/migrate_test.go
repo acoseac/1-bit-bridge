@@ -211,7 +211,7 @@ func TestAMigratedAcknowledgementListsItsRecordsRates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(b), `"bitRates": [`+"\n"+`            2822400`+"\n") {
+	if !strings.Contains(string(b), `"bitRates":[2822400]`) {
 		t.Fatalf("the file does not list the acknowledgement's one rate:\n%s", b)
 	}
 
@@ -230,7 +230,7 @@ func TestAMigratedAcknowledgementListsItsRecordsRates(t *testing.T) {
 			t.Errorf("a write's acknowledgement does not cover %d", rate)
 		}
 	}
-	file := strings.Replace(string(b), `"bitRates": [`+"\n"+`            2822400`+"\n"+`          ],`, `"bitRates": [],`, 1)
+	file := strings.Replace(string(b), `"bitRates":[2822400],`, `"bitRates":[],`, 1)
 	if file == string(b) {
 		t.Fatalf("the fixture's list was not found to empty:\n%s", b)
 	}
