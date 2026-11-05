@@ -400,7 +400,8 @@ func TestAWriteTheReaderWouldRefuseIsNotMade(t *testing.T) {
 // store sees so at its next write, which is made on the state that refuses,
 // so a choice clears the refusal with no restart (the Claude API reviewer on
 // #1405: the store refused every write until a restart); an entry still
-// there is still refused.
+// there is still refused. Once its own write has landed the store stops
+// looking, and the next write is made over its own file.
 func TestAnUnreadableStateMovedAwayIsWritableAgain(t *testing.T) {
 	durable(t)
 	data := t.TempDir()
@@ -428,6 +429,12 @@ func TestAnUnreadableStateMovedAwayIsWritableAgain(t *testing.T) {
 	}
 	if st := s.State(); st.Unreadable() {
 		t.Fatal("the store still refuses after the choice")
+	}
+	if err := s.Update(chooseNative(t)); err != nil {
+		t.Fatalf("a write over the store's own file = %v: the store kept looking once its own write had landed", err)
+	}
+	if d, _ := fileState(t, data).DAC(goBar(t)); d.Choice == nil || d.Choice.Revision != 2 {
+		t.Fatalf("the second write left %+v, want the choice at revision 2", d.Choice)
 	}
 }
 
