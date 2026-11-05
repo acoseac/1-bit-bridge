@@ -1062,8 +1062,16 @@ func (wt *Watcher) handleEvent(ctx context.Context, ev fsnotify.Event) {
 		// for it at the next change there. The root's tree is watched, and
 		// watching it asked for its scan (B651's tenth round). Which root it
 		// is was decided as every path's is (rootOf), never by a fold of
-		// names alone.
-		if _, watched := wt.rootWatches[root]; itself && watched && ev.Op&fsnotify.Create != 0 {
+		// names alone. That holds only while the root's own watch is still
+		// fsnotify's: kqueue drops a renamed root's watch without a word, and
+		// a Create at its path is then another folder put there, which is
+		// looked at and watched where it is now, or held (B651's eleventh
+		// round, Claude on round 10).
+		if rw, watched := wt.rootWatches[root]; itself && watched && ev.Op&fsnotify.Create != 0 {
+			if _, installed := wt.watchSet()[rw]; installed {
+				return
+			}
+			wt.lookAgain(ctx, root, msgWatchRootRewatched)
 			return
 		}
 	}

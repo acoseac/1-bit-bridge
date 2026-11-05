@@ -592,7 +592,13 @@ func TestANestedRootIsWalkedAsItsFolderListsItOnlyWhereTheFolderTakesBothSpellin
 			if got := w.listedRoot(outer); got != outer {
 				t.Errorf("%s, nested in no root, is walked from %s", outer, got)
 			}
-			w.rootWatches[configured] = want
+			// The nested root watched, its own watch installed, as a resume
+			// leaves it. Where USB is no folder of this host's disk (Linux),
+			// a root the folder does not take for usb has nothing to watch.
+			if err := w.addTree(configured, true); err != nil && c.listed {
+				t.Fatal(err)
+			}
+			w.noteRootWatches([]string{configured})
 			w.handleEvent(context.Background(), fsnotify.Event{Name: disk, Op: fsnotify.Create})
 			armed := armedUnder(w, outer)
 			if c.listed && len(armed) != 0 {
