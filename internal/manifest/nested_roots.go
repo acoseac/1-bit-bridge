@@ -206,21 +206,29 @@ func spelledAs(got, want []string, folds []bool) bool {
 }
 
 // pathElements is a path's elements, cleaned: its volume and leading
-// separator first, as one element ("/" or `C:\`), where it has them.
+// separator first, as one element ("/" or `C:\`), where it has them
+// (volumeElements).
 func pathElements(p string) []string {
 	p = filepath.Clean(p)
 	vol := filepath.VolumeName(p)
-	rest := p[len(vol):]
+	return volumeElements(vol, p[len(vol):], filepath.Separator)
+}
+
+// volumeElements is pathElements over a clean path split into its volume name
+// vol and the rest of it, with the separator sep: apart from the host's path
+// rules, so that a test on any host can hand it Windows' volumes.
+func volumeElements(vol, rest string, sep byte) []string {
+	s := string(sep)
 	var out []string
 	switch {
-	case strings.HasPrefix(rest, string(filepath.Separator)):
-		out = append(out, vol+string(filepath.Separator))
+	case strings.HasPrefix(rest, s):
+		out = append(out, vol+s)
 		rest = rest[1:]
 	case vol != "":
 		out = append(out, vol)
 	}
 	if rest != "" && rest != "." {
-		out = append(out, strings.Split(rest, string(filepath.Separator))...)
+		out = append(out, strings.Split(rest, s)...)
 	}
 	return out
 }
