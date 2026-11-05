@@ -358,7 +358,10 @@ does a shared reference ID without a product string. The live altsets still deci
   `atomicwrite.WriteBytesDurable`, the writer the player's ID reservations use; the data directory
   must already be on storage that outlives a reboot (the reservation bullet in
   `.claude/rules/player.md`). A `noise` answer lost to a crash would otherwise put DoP back. Where no
-  directory can be synced (Windows) every write is refused and nothing is written.
+  directory can be synced (Windows) every write is refused and nothing is written. The file is
+  written compact, nothing between its tokens, and a write whose file would pass the 1 MiB the
+  reader reads is refused (`ErrTooLarge`), the state as it was: the reader's bound and the
+  writer's are on the same bytes.
 - **A file that does not read** is never deleted and never read as the defaults. Its bytes are first
   copied, durably, to `player-dsd.json.bad-<timestamp>` beside it, and the file is then replaced, in
   one rename, by a fresh state, so the name always holds the bad bytes or the fresh state and a crash
@@ -370,9 +373,11 @@ does a shared reference ID without a product string. The live altsets still deci
   then refused at every rate (`dsd_state_unreadable`) until a choice is written again, and PCM plays.
   A replacement that fails leaves the bad bytes at the name and the refusal in memory, and the next
   start tries again. A file that cannot be read, or not whole (a read error, something other than a
-  file, past the 1 MiB bound), or whose bytes cannot be kept aside, stays where it is, refused in
-  memory, and no write replaces it until it is moved. Falling back to the defaults would turn
-  conversion on for a user whose file held `defaultMode: off`. A missing file is not a damaged one:
+  file, past the 1 MiB bound), an entry that leads to no file (a link to nothing), or a file whose
+  bytes cannot be kept aside, stays where it is, refused in memory, and no write replaces it until
+  it is moved: each write looks again, until a write of the store's own lands at the name. Falling
+  back to the defaults would turn conversion on for a user whose file held `defaultMode: off`. A
+  missing file is not a damaged one:
   it means the defaults, nothing is written until the first write, and the migration (§3.6) runs
   again from any legacy key still set.
 - **No serial, port, card number or devnum** is stored. A test reads the file for them.
@@ -384,8 +389,11 @@ does a shared reference ID without a product string. The live altsets still deci
   first-use acknowledgements with their `bitRates`, and listener answers. It drops
   `driverAcceptedAt`, `kernel`, `streamingObservedAt` and first use's `observedAt`, which belong to
   the box they were observed on and which playback records again (§6.4), removing an evidence entry
-  left with nothing, and a DAC left holding nothing. An archived file that does not decode is
-  installed as its bytes, so the next load refuses it. A snapshot without the file leaves the box's
+  left with nothing, and a DAC left holding nothing. A state that decodes is never installed as the
+  snapshot's bytes: one the writer cannot write within the bound once nothing observed is left,
+  which only a file denser than the writer's own holds, fails the restore, which restores nothing.
+  An archived file that does not decode is installed as its bytes, so the next load refuses it. A
+  snapshot without the file leaves the box's
   as it is, as for the console account and the player's identity. `bridge reset-player` keeps the
   file: a choice belongs to the DAC model, not to the player's identity.
 

@@ -357,11 +357,11 @@ func sizedState(t *testing.T, n int) State {
 }
 
 // TestAWriteTheReaderWouldRefuseIsNotMade: a write never leaves a file the
-// next start refuses (Codex on #1405: the structural bounds let a state of
-// 100 DACs with 64 answers each pass at about 1.1 MB, past the 1 MiB the
-// reader reads). A state whose file is exactly the reader's bound is written
-// and read back; one byte past it, the write is refused, and the state and
-// the file stay as they were, as for any write not made.
+// next start refuses (Codex on #1405: the structural bounds let a state
+// through past the 1 MiB the reader reads, 256 DACs of 64 answers each being
+// more than 1.1 MB compact). A state whose file is exactly the reader's bound
+// is written and read back; one byte past it, the write is refused, and the
+// state and the file stay as they were, as for any write not made.
 func TestAWriteTheReaderWouldRefuseIsNotMade(t *testing.T) {
 	durable(t)
 	data := t.TempDir()

@@ -550,10 +550,11 @@ func (s State) encode() ([]byte, error) {
 
 // ErrTooLarge is a write refused because the state's file would be past the
 // bytes its reader reads (1 MiB, Decode's bound), which the next start would
-// refuse (Codex on #1405: the structural bounds let 100 DACs of 64 answers
-// each through at about 1.1 MB). The state stays as it was, as for any write
-// not made; B9 answers it as it answers a write it could not make
-// (persist_failed, nothing changed), so the app keeps the choice it read.
+// refuse (Codex on #1405: the structural bounds let a state past it through,
+// 256 DACs of 64 answers each being more than 1.1 MB compact). The state
+// stays as it was, as for any write not made; B9 answers it as it answers a
+// write it could not make (persist_failed, nothing changed), so the app keeps
+// the choice it read.
 var ErrTooLarge = fmt.Errorf("dsdstate: the state's file would be more than the %d bytes its reader reads", maxFileBytes)
 
 // orNil is v, or nil in an empty list's place: a state in memory holds no

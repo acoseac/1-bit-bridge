@@ -76898,3 +76898,32 @@ state's tests as a linux/386 binary, run natively, ok; `make docs-check`, ok
 (player.md at 97.6% of its budget); the qualification check, "qualification
 version OK: main..HEAD"; and `make build-all`. The tree is clean after. Not
 run here: Windows and macOS natively, CI's runners, and any hardware.
+
+## 2026-11-05 — B728 B3 round 3: two review points on round 2
+
+Both held, red first at 84f885eb. **A size error skipped a restore's
+clean-up** (Codex): a compact snapshot of 120 DACs with 64 answers each,
+787,043 bytes, which the reader takes, is 1,428,227 indented, so
+`ForRestore`'s encode refused it and the restore installed the snapshot as it
+was, the old box's evidence with it. Of the two remedies, the writer writes
+compact: its 1 MiB bound and the reader's are on the same bytes, so a state
+read from a file the writer wrote is written again within it, with nothing
+observed too. `ForRestore` answers an error, never the snapshot's bytes, for a
+state that decodes: what still cannot be written, only a file denser than the
+writer's own (a key it writes left out, a character it escapes held as it
+is), fails the restore, which restores nothing. Bytes that do not decode
+still install as they are, as binding note 5 of the brief requires: no state,
+and the next load sets them aside. **A write not made ended the store's
+looking** (the Claude API reviewer): `blocked` was cleared at the look,
+before `fn`, the encoding and the write. The look now answers for its write
+alone, and `blocked` clears where the durable write has returned and the state
+is committed. The window left runs from the look to the writer's rename (the
+change, its encoding, and the writer's checks, write and fsync of the staged
+file); an entry put back inside it is replaced unread, which only a rename
+that refuses to replace would close. Fixes 28f1c36a; 88046920 adds a second
+write to round 2's writable-again test, which a store that never stops
+looking fails. Negative controls, six, each red: the writer indenting again;
+`ForRestore` answering the snapshot on that error (rerun once, its first form
+leaving `fmt` unused); `WriteRestored` writing past `ForRestore`'s refusal;
+`blocked` cleared at the look; cleared before the write's answer; never
+cleared.
