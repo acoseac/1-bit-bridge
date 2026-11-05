@@ -106,14 +106,14 @@ func TestInitOnAHostWhoseNameIsNotASCII(t *testing.T) {
 }
 
 // TestEveryNameTheBridgeAdvertisesIsOneItCertifies is B739's cross-check, for
-// each host name the brief names. A certificate minted now, from the gather
-// init, serve, bridge cert rotate and bridge doctor share (certSANOptions),
-// names every host the bridge sends a phone to: each endpoint the interface
-// walk and the host's name give /v1/health, the `.local` one among them, and
-// the pairing QR's primary URL. A name with no valid form is advertised
-// nowhere, so the phone is sent to the LAN address instead, never to
-// localhost. And the coverage check bridge doctor and the startup warning
-// make finds nothing missing.
+// each host name B739's entry asks about. A certificate minted now, from the
+// gather init, serve, bridge cert rotate and bridge doctor share
+// (certSANOptions), names every host the bridge sends a phone to: each
+// endpoint the interface walk and the host's name give /v1/health, the
+// `.local` one among them, and the pairing QR's primary URL. A name with no
+// valid form is advertised nowhere, so the phone is sent to the LAN address
+// instead, never to localhost. And the coverage check bridge doctor and the
+// startup warning make finds nothing missing.
 func TestEveryNameTheBridgeAdvertisesIsOneItCertifies(t *testing.T) {
 	lan := "https://" + hostNameWalkLAN + ":7788"
 	for _, tc := range []struct {

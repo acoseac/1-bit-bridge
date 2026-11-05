@@ -6,12 +6,12 @@ import (
 )
 
 // TestEachReportedNameBecomesOneName is backlog B739's table: what ASCII makes
-// of each host name the brief names, and of their neighbours at each bound. A
-// plain ASCII name is returned byte for byte (its case and its underscore
-// kept, so a name that works today is untouched); a name with non-ASCII
-// characters takes its IDNA ASCII form, every label of it 63 bytes at most;
-// and anything else has no valid form and is no host name. Every name taken
-// is taken again unchanged.
+// of each host name B739's entry asks about, and of their neighbours at each
+// bound. A plain ASCII name is returned byte for byte (its case and its
+// underscore kept, so a name that works today is untouched); a name with
+// non-ASCII characters takes its IDNA ASCII form, every label of it 63 bytes
+// at most; and anything else has no valid form and is no host name. Every
+// name taken is taken again unchanged.
 func TestEachReportedNameBecomesOneName(t *testing.T) {
 	label63 := strings.Repeat("a", 63)
 	name253 := strings.Join([]string{label63, label63, label63, strings.Repeat("a", 61)}, ".")
@@ -19,7 +19,7 @@ func TestEachReportedNameBecomesOneName(t *testing.T) {
 		name, reported, want string
 		ok                   bool
 	}{
-		// The names the brief asks about.
+		// The names B739's entry asks about.
 		{"Cyrillic", "Жук", "xn--f1ai0a", true},
 		{"Latin with an umlaut", "müsik", "xn--msik-0ra", true},
 		{"a Windows computer name with Japanese in it", "DESKTOP-日本", "xn--desktop--5y4qg6h", true},

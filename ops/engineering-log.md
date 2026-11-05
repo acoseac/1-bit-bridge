@@ -75167,3 +75167,240 @@ natively, CI's runner, and any hardware.
 **Commits.** 349c1824 the red self-test; 922cdb98 the strings blanked;
 584b4cc8 ProductID's doc; 7065c80e the long form moved; this record, with
 the B737 note.
+
+## 2026-11-05 — B739: a host whose name isn't ASCII can make a TLS certificate
+
+Backlog B739. On a host whose name is not ASCII `bridge init` failed and
+installed nothing: "TLS cert: generate TLS material: create cert: x509:
+"Ð\u0091Ä¯U" cannot be encoded as an IA5String", then "the config was NOT
+changed". A real test Mac shows it (its `kern.hostname` is those bytes), and
+about 210 `cmd/bridge` tests failed there. Worker b739 on legion0 (Ubuntu
+26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`), branch
+`fix/b739-non-ascii-hostname-cert` from main 49d438fc, the orchestrator's
+brief with Codex's, the Claude API reviewer's and Argon's notes folded in.
+Commits: the red tests d583c66f, the fix 3a93e342, the configured-name test
+split eaf59d03, then this record. The rules go into `.claude/rules/auth-tls.md`
+and `wire.md` through a checked patch (`rules-b739.patch`; this worker cannot
+write `.claude/`).
+
+**What happened.** `os.Hostname()` went into the certificate's DNS names as
+the system reported it (`advertise.CertHostname` → `certSANOptions` →
+`tls.mergeDNSNames`/`dnsNames`), and `x509.CreateCertificate` refuses a DNS
+name that is not ASCII (an IA5String). The same raw name went into the
+`.local` endpoint /v1/health publishes (`advertise.Endpoints`), the pairing
+QR's primary (`advertise.PairingHost` → `defaultBridgeURL`) and mDNS's SRV
+target and `host=` (`mdns.Config.advertisedHost`). On Windows `os.Hostname`
+is the computer's DNS host name, which may be Cyrillic or Chinese, so the same
+path. Converting the certificate's name alone would have turned "cannot
+install" into "installs and cannot be dialled": a client checks the
+certificate against the name it dials.
+
+**Red first.** At d583c66f, main's code with the tests, through the existing
+seam (`advertise.SetHostProbeForTest`): `TestInitOnAHostWhoseNameIsNotASCII`
+exits 1 with the field's error for `Жук` and for the Mac's bytes;
+`TestAMintCertifiesTheHostNameInItsASCIIForm` (internal/tls) refuses both;
+`TestTheCertifiedNameAndTheLocalEndpointAreOneForm` (internal/advertise) has
+`CertHostname` and the `.local` endpoint carry the raw names;
+`TestThePairingURLOnAHostWhoseNameIsNotASCII` (internal/admin) dials
+`https://Жук.local:7788`, and `TestAHostWithNoNameToPairAtSaysSo` mints a
+token (201) at `https://Ð\u0091Ä¯U.local:7788` with no LAN address;
+`TestTheMDNSHostIsTheNameTheCertificateCarries` and
+`TestAClientResolvesTheASCIINameThroughTheBridgesResponder` (internal/mdns)
+read the raw name as the SRV target and `host=`, and the live responder
+published `\208\150\209\131\208\186.local.` (Жук's UTF-8) and answered no
+address question for `xn--f1ai0a.local.` The ASCII rows (`MacBook-Pro_2`) and
+a host name that cannot be read (localhost) passed there and still do.
+
+**The fix: one helper, `internal/hostname`'s `ASCII(reported) (string, bool)`.**
+- A name of ASCII alone is returned byte for byte when it is a host name:
+  dot-separated labels of 1 to 63 bytes of letters, digits, hyphens and
+  underscores, 253 bytes at most, one trailing dot at most. idna.Lookup would
+  change both case and underscore (measured: `MacBook-Pro_2` →
+  `macbook-pro_2` with "disallowed rune U+005F"; `MacBook-Pro` →
+  `macbook-pro`), so an ASCII name never goes through it.
+- A name with a byte outside ASCII takes `idna.Lookup.ToASCII`, the profile
+  `normalizeSNIHost` uses, held to the same bounds, which Lookup does not
+  check (measured with x/net v0.62.0: 57 × `ж` encodes to a 63-byte label and
+  58 to a 64-byte one, both without an error; `a..б` comes back `a..xn--90a`
+  and `.Жук` `.xn--f1ai0a` without one; a trailing dot is kept).
+- Anything else has no valid form and is no host name.
+
+Its consumers: `advertise.CertHostname` (then the container rule), the
+`.local` endpoint in `advertise.Endpoints`, `advertise.PairingHost` (now
+`host, unusable, docker`), `mdns.Config.advertisedHost`, and `tls.dnsNames`
+as a second layer for a caller handing `Generate` a name as reported. The
+names an operator configures (`customEndpoints`, through `GatherCertSANDNS`)
+do not go through it. Every caller of `Generate`/`LoadOrGenerate*` with a
+host name was found: init, serve, `bridge cert rotate` and the doctor all mint
+or grade from `certSANOptions`; the rest are tests with fixed ASCII names.
+
+**What each name becomes** (`TestEachReportedNameBecomesOneName`,
+`TestEveryNameTheBridgeAdvertisesIsOneItCertifies`):
+
+| reported | certified and advertised as | the `.local` endpoint | the pairing primary |
+|---|---|---|---|
+| `Жук` | `xn--f1ai0a` | `https://xn--f1ai0a.local:7788` | the same |
+| `müsik` | `xn--msik-0ra` | `https://xn--msik-0ra.local:7788` | the same |
+| `DESKTOP-日本` | `xn--desktop--5y4qg6h` | `https://xn--desktop--5y4qg6h.local:7788` | the same |
+| `Ð\u0091Ä¯U` | no host name (Lookup: "invalid label", U+0091 is a C1 control) | none | the first LAN IPv4 address |
+| `MacBook-Pro_2` | itself, byte for byte | `https://MacBook-Pro_2.local:7788` | the same |
+| `my host` | no host name (a space) | none | the first LAN IPv4 address |
+| 64 × `a`, 58 × `ж` | no host name (a label over 63 bytes) | none | the first LAN IPv4 address |
+
+With no host name the certificate carries localhost and the addresses, and
+mDNS takes `localhost.local`, the fallback it already had for a name that
+cannot be read (which no certificate names: pre-existing, and the TXT
+record's `ips=` carries the addresses the certificate does name).
+
+**mDNS: a client resolves the ASCII form through the bridge.** hashicorp/mdns
+v1.0.7 answers an A or AAAA question whose name equals its `HostName`
+(`zone.go`, `Records`, `case m.HostName`), which `rebuildLocked` sets to
+`advertisedHost() + "."`, and it answers every question by unicast to the
+sender (`server.go`, `sendResponse`). `TestAClientResolvesTheASCIINameThroughTheBridgesResponder`
+stands a responder up on the loopback interface with `Hostname: "Жук"` and
+asks it as a client asks: the browse answers SRV target `xn--f1ai0a.local.`
+and `host=xn--f1ai0a.local`, and the A question for `xn--f1ai0a.local.` is
+answered 127.0.0.1. So the `.local` endpoint of a converted name is kept.
+Residual: with `mdns.enabled: false` nothing publishes the ASCII form (no OS
+responder publishes a punycode name: Avahi and mDNSResponder publish names of
+their own), where an ASCII host's `.local` name usually has the OS's
+responder behind it; named as a follow-up.
+
+**Pairing.** For a name with no valid form `defaultBridgeURL` takes
+`lanPairingURL`: the first `ClassLANv4` endpoint of the walk, which is the
+first /v1/health lists (no IPv4 address is held back, and the class sorts
+first), else the first `customEndpoints` entry a phone can dial, else none,
+which the Devices page, a refused mint (400 `pairing-url`) and the doctor's
+`pairing-url` warning answer with the shared `PairingNeedsEndpoint`. Never
+localhost: that fallback stays for a name that cannot be read (an error or
+""), the same-machine path, unchanged (`TestThePairingURLOnAHostWhoseNameIsNotASCII`'s
+last row). Inside a detected container such a name is no name, and the
+container rule applies.
+
+**The library's default name.** `firstInstallName` reads `installHostname`, a
+seam of its own (advertise's is the certificate's), removes `unicode.IsControl`
+runes, trims as the pairing parser does (`config.TrimLibraryName`), and is
+`DefaultLibraryName` when nothing is left. `Жук` and `DESKTOP-日本` stay as
+they are, the Mac's bytes become `ÐÄ¯U`, control characters alone give
+`1-bit Bridge`. Both init paths (`--yes`, and the prompt, whose offered
+default Enter takes) save it, Load serves it unchanged, and /v1/health and the
+console's pairing link (`name=`) carry it
+(`TestTheDefaultLibraryNameIsTheHostsNameAsItReads`,
+`TestServeOnAHostWhoseNameIsNotASCII`). Finding, not changed: a name the
+operator types (init's `--name`, its prompt, the console's settings PATCH)
+may still hold a control character, since `CheckLibraryName` refuses only bytes
+that are not UTF-8 and names over 256 runes, and `sanitizeInstance` strips C0
+controls and DEL from the Bonjour instance but not C1 ones.
+
+**Existing certificates.** `LoadOrGenerateWithOptions` still loads a pair
+that is there and never mints it again. A certificate minted now covers its
+host: `TestEveryNameTheBridgeAdvertisesIsOneItCertifies` verifies every
+endpoint and the pairing primary against a leaf minted from `certSANOptions`
+(`VerifyHostname`, or the leaf's addresses for an IP) and finds
+`InspectSANCoverage` covered, and `TestServeOnAHostWhoseNameIsNotASCII` starts
+the real serve twice on an install init made with the host reporting `Жук`
+and the Mac's bytes: no "cert SANs are stale" line in either start, the same
+fingerprint, every /v1/health host and the console's pairing link covered by
+the served certificate, and the doctor's `tls-cert-sans` and `pairing-url`
+ok.
+
+**Configured names.** `TestAConfiguredNameTheCertificateCannotCarryStillRefuses`:
+a `customEndpoints` entry `https://café.example:7788` loads, reaches the
+want-set as written, and `bridge cert rotate` exits 1 naming it ("create
+cert: x509: "café.example" cannot be encoded as an IA5String"), with no
+certificate left behind; `TestAConfiguredNameStillRefusesBesideAConvertedHostName`
+is the same on a host named `Жук`. The message names the value already, so it
+is unchanged. Finding: config takes such an entry and every mint then refuses;
+converting it, or refusing it when it is typed, is a follow-up.
+
+**ASCII hosts, as on main.** `TestAnASCIIHostNameIsCertifiedAndAdvertisedAsOnMain`
+pins `MacBook-Pro_2`'s DNS names (`localhost`, `MacBook-Pro_2`,
+`MacBook-Pro_2.local`), addresses, endpoints and pairing primary exactly. It
+and `TestAConfiguredNameTheCertificateCannotCarryStillRefuses` use nothing
+B739 added, and both pass on main's code (a copy of the tree at main, the red
+commit's helpers beside them), where `TestInitOnAHostWhoseNameIsNotASCII`
+fails as the sanity row.
+
+**The Mac, simulated.** No Mac here, so copies of the tree had every
+`os.Hostname` call and value (production and tests, 12 files) answer
+`Ð\u0091Ä¯U`, and `go test` ran cmd/bridge, internal/{admin, advertise, mdns,
+tls, tlsacme, doctor, api, hostname}: main's code failed 202 top-level tests
+(the brief's "about 210"), all in cmd/bridge; the branch, unpatched, as the
+control for the copy, 0; the branch as the Mac, 4 at first: three init tests
+and the doctor's `certSANOptions` check compared with the raw host name. They
+now read the library name's seam (`musicbox`) or compare with
+`hostname.ASCII`'s answer, and the branch as the Mac fails 0. The
+orchestrator's `test-fast` on the real Mac is the check this stands in for.
+
+**Negative controls**, at eaf59d03, each a mutation of the production code
+made by a runner that compiles the test binaries, runs each test alone and
+puts the original bytes back from memory; every one as expected:
+1. The conversion removed (a non-ASCII name returned as reported): red, the
+   helper's table and fuzz seeds, the mint, CertHostname and the `.local`
+   endpoint, both pairing tests, both mDNS tests, and in cmd/bridge init, the
+   cross-check, the two serve starts, the library name (init refuses) and the
+   configured name beside `Жук` (the host's name refuses first); green, the
+   ASCII host and the configured name beside it.
+2. ASCII names sent through Lookup too: red, the table and the fuzz target
+   (its `MacBook-Pro` seed comes back `macbook-pro`), the mint's and
+   endpoint's `MacBook-Pro_2` rows, the pairing and mDNS rows, the ASCII-host
+   test and the cross-check; green, the live mDNS query (`Жук`) and the init,
+   serve and library-name tests of non-ASCII names.
+3. The SAN converted and the `.local` endpoint left raw: red, the one-form
+   test, the cross-check (`Жук.local` does not verify against the leaf) and
+   the serve starts (health's raw `.local`); green, init alone (it checks the
+   certificate), the ASCII host and the configured names.
+   3b, mDNS's host left raw: red, both mDNS tests (the live responder
+   publishes the raw bytes again).
+4. A name with no valid form kept (an ASCII name that is no host name
+   returned as it is): red, the table, the fuzz target (`my host`), and the
+   cross-check (`https://my host.local:7788` is no URL); 4b, the 63-byte
+   bound dropped: red, the table, the fuzz target (a 64-byte label does not
+   pack as a DNS name) and the cross-check's two long-label rows.
+5. Pairing falling back to localhost: red, both pairing tests, the
+   cross-check and the serve start of the Mac's bytes.
+6. Control characters kept in the library name: red, the library-name test
+   and the serve start (`Ð\u0091Ä¯U` in health and the pairing link).
+7. The mint's own layer removed (`tls.dnsNames` takes the name raw): red,
+   the mint's test alone; every cmd/bridge test green, since CertHostname
+   converts. 8, CertHostname's layer removed: red, the one-form test alone;
+   cmd/bridge green, since the mint converts. 7 and 8 together: init, the
+   cross-check, the serve starts, the library name and the converted host's
+   configured name red, the ASCII host green. Each layer is pinned by its own
+   test, and the pair by the whole path.
+Controls 3 and 3b first left the helper's import unused and did not build,
+which is no verdict; they were made again keeping a reference to it, and ran
+as above.
+
+**Checks**, on legion0 (Linux, amd64, go1.27.3), in one turn of the shared
+build lock at eaf59d03 (two test docblocks were reworded after, and their
+files' tests and gofmt run again): `make fmt`, which changed nothing; `make
+vet`, and with `GOOS=windows`, `GOOS=darwin` and `GOOS=linux GOARCH=386`,
+clean; the
+qualification check from main, "qualification version OK: 49d438fc..HEAD";
+`make docs-check`, ok, and again over a copy of the tree with the rules patch
+and this record applied ("CLAUDE.md 73.6%; dlna-upnp.md 97.0%; worst load,
+player_openhome_test.go 64.1%"), where `rules-for.py` gives
+`internal/hostname` to `auth-tls.md`; `make test` (race, `-timeout 30m`): 83
+packages ok, `cmd/bridge` in 983 s and `internal/admin` in 968 s; `make
+build-all`, ok. `go test -race` of internal/{tls, advertise, admin, mdns}
+without a `-timeout` ended in Go's 10-minute default in internal/admin
+(600.04 s, a goroutine dump, no assertion: `TestRestoreThroughTheAPIFollowsTheRootTheFileWasTrashedUnder`
+had run a second, the timeout signature `build-ci-tests.md` names); with
+`-timeout 30m`, as `make test` gives it, the same four under `-race`, ok
+(internal/admin in 895 s). The doc guards (`TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration`) pass over the tree with this record,
+and over a copy with the rules patch applied as well. The fuzz target
+ran 90 s (11.9 million inputs) with nothing found. The ALSA, alsapcm,
+durable-writer and identity tests are Linux's and ran here in `make test`.
+Not run here: macOS and Windows natively (the live mDNS test skips on Windows
+as its neighbours do), CI's runners, and the test Mac.
+
+**Findings, for the backlog** (none filed from here; the backlog file is not
+on legion0): a configured `customEndpoints` entry whose host is not ASCII
+loads and then refuses every mint; with `mdns.enabled: false` the ASCII
+`.local` name of a converted host is advertised and nothing publishes it; a
+typed library name may hold a control character; mDNS's `localhost.local`
+fallback for a host with no name is named by no certificate; and a host whose
+name is literally `localhost` is paired at `https://localhost:7788`, the
+phone's own name (an ASCII name, so unchanged here).
