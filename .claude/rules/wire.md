@@ -446,6 +446,15 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   NWConnection-resolve the Bonjour service to a hostport, which is unreliable;
   the bare-hostname-plus-`.local` form matches the SRV target the cert SANs
   already cover. Never emit `host=.local` — fall back to `localhost.local`.
+- **…and the host's name in the `.local` endpoint, the SRV target and
+  `host=` is `hostname.ASCII`'s answer, the name the certificate carries**
+  (2026-11-05, backlog B739; the rule is under **Auth, pairing, TLS and
+  security posture** in `auth-tls.md`): `xn--f1ai0a.local` for a host named
+  `Жук`, which the bridge's own responder answers an address question for,
+  and none for a name with no valid form, whose SRV target and `host=` take
+  the `localhost.local` fallback of a name that cannot be read, which no
+  certificate names. **Don't build either from the name as the system
+  reported it.**
 - **A container id, the default docker0 address, and a point-to-point ULA
   stay out of the lists a phone dials** (2026-10-13, backlog B189, B199,
   B229). `/v1/health` endpoints and the certificate want-set share one
