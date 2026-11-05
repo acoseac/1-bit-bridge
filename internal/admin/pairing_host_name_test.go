@@ -166,7 +166,9 @@ func twoLANWalk(t *testing.T) {
 // phone can dial (advertise.PairingNeedsEndpoint), as a detected container
 // with none does, and mint no token, rather than offer localhost.
 func TestAHostWithNoNameToPairAtSaysSo(t *testing.T) {
-	srv, _, _ := newTestServer(t)
+	srv, cfg, _ := newTestServer(t)
+	// On every address: a listener on loopback pairs at its own address.
+	cfg.ListenAddress = ":7788"
 	h := srv.Handler()
 	containerProbe(t, "Ð\u0091Ä¯U", false)
 	pairingWalk(t, "203.0.113.7")
