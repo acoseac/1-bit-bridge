@@ -178,6 +178,15 @@ func TestEveryNameTheBridgeAdvertisesIsOneItCertifies(t *testing.T) {
 	}
 }
 
+// TestAConfiguredNameStillRefusesBesideAConvertedHostName is
+// TestAConfiguredNameTheCertificateCannotCarryStillRefuses on a host named
+// Жук: the host's own name now mints in its ASCII form, and the configured
+// endpoint whose host is not ASCII is what refuses the certificate, naming
+// it, as it did beside an ASCII host name on main.
+func TestAConfiguredNameStillRefusesBesideAConvertedHostName(t *testing.T) {
+	assertAConfiguredNameRefuses(t, hostCyrillic)
+}
+
 // urlHost is the host of the URL raw, without its port.
 func urlHost(t *testing.T, raw string) string {
 	t.Helper()

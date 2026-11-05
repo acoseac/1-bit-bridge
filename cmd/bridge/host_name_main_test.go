@@ -77,9 +77,19 @@ func TestAnASCIIHostNameIsCertifiedAndAdvertisedAsOnMain(t *testing.T) {
 // bridge advertises as written, so it still refuses the certificate, as on
 // main: leaving it out would publish an endpoint the certificate does not
 // cover. The refusal names the configured host. This test passes on main's
-// code too.
+// code too; TestAConfiguredNameStillRefusesBesideAConvertedHostName is the
+// same on a host whose own name B739 converts.
 func TestAConfiguredNameTheCertificateCannotCarryStillRefuses(t *testing.T) {
-	reportHostName(t, hostCyrillic)
+	assertAConfiguredNameRefuses(t, "musicbox")
+}
+
+// assertAConfiguredNameRefuses fails unless, on a host named host, a
+// customEndpoints entry whose host is not ASCII loads, reaches the
+// certificate's want-set as written, and makes `bridge cert rotate` refuse,
+// naming it, with no certificate left behind.
+func assertAConfiguredNameRefuses(t *testing.T, host string) {
+	t.Helper()
+	reportHostName(t, host)
 	dir := t.TempDir()
 	cfgPath := writeInstallAt(t, dir, "Artist/Album/01.flac")
 	appendYAML(t, cfgPath, "customEndpoints:\n  - https://café.example:7788\n")
