@@ -418,6 +418,11 @@ func TestDACInspectShowsNoModelOfAUnitReplacedAsItsStringsWereRead(t *testing.T)
 		{"the same unit enumerated anew, its firmware updated", dacPlug(goBar, 5, "20b1", "3009", dacSerial) + "file " + goBar + "/devnum 8\n" +
 			"file " + goBar + "/manufacturer iFi (by AMR)\nfile " + goBar + "/product iFi (by AMR) HD USB Audio\nfile " + goBar + "/bcdDevice 0171\n",
 			alsa.QualificationIdentity{Manufacturer: "iFi (by AMR)", Product: "iFi (by AMR) HD USB Audio", BCDDevice: "0171"}},
+		// A device number comes round again once a bus has given out its
+		// 127, so another model can read at the GO bar's: its IDs tell it.
+		{"another model at the same device number", dacPlug(goBar, 5, "1234", "0d02", "") + "file " + goBar + "/devnum 2\n" +
+			"file " + goBar + "/manufacturer Synthetic Audio\nfile " + goBar + "/product Synthetic DAC\nfile " + goBar + "/bcdDevice 0100\n",
+			alsa.QualificationIdentity{Manufacturer: "Synthetic Audio", Product: "Synthetic DAC", BCDDevice: "0100"}},
 	} {
 		root := dacTree(t)
 		sysfstest.Apply(t, root, "file "+goBar+"/manufacturer iFi (by AMR)\nfile "+goBar+"/product iFi (by AMR) HD USB Audio\nfile "+goBar+"/bcdDevice 0170\n")
