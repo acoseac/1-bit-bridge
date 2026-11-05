@@ -20,6 +20,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/acoseac/1-bit-bridge/internal/hostname"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	hcmdns "github.com/hashicorp/mdns"
 )
@@ -89,7 +90,8 @@ type Config struct {
 
 	// Hostname advertised in the SRV record. If empty, os.Hostname is
 	// used. Trailing dots stripped; ".local." appended for Bonjour
-	// compliance.
+	// compliance. Either is published in the form hostname.ASCII gives
+	// it, the form the certificate carries (advertisedHost).
 	Hostname string
 
 	// ProtocolVersion is advertised in the TXT record as "pv=<N>" so
@@ -614,11 +616,19 @@ func txtIPsValue(ips []net.IP, maxLen int) (value string, dropped int) {
 // uses internally. Kept as a method on Config so the TXT-record
 // builder doesn't have to duplicate the logic.
 //
+// The name is the one the certificate carries and /v1/health's `.local`
+// endpoint names (hostname.ASCII, backlog B739): the app builds
+// `https://<host>:<port>` from host= and checks the certificate against
+// it. A name with non-ASCII characters is published in its IDNA ASCII
+// form, and the responder answers an address question for exactly the
+// name it publishes, so a client dialling that form resolves it here.
+//
 // Always returns a non-empty hostname. Falls back to "localhost" when
-// every other source is blank — `os.Hostname()` returning ("", nil) is
-// rare but documented as possible on minimally-configured Linux
-// containers, and a bare ".local" target would have made clients
-// build URLs like `https://.local:7788` which are invalid.
+// every other source is blank or the name has no valid form, which is no
+// host name — `os.Hostname()` returning ("", nil) is rare but documented
+// as possible on minimally-configured Linux containers, and a bare
+// ".local" target would have made clients build URLs like
+// `https://.local:7788` which are invalid.
 func (cfg Config) advertisedHost() string {
 	host := strings.TrimSuffix(cfg.Hostname, ".")
 	if host == "" {
@@ -626,13 +636,14 @@ func (cfg Config) advertisedHost() string {
 			host = strings.TrimSuffix(h, ".")
 		}
 	}
-	if host == "" {
-		host = "localhost"
+	name, ok := hostname.ASCII(host)
+	if !ok {
+		name = "localhost"
 	}
-	if i := strings.IndexByte(host, '.'); i > 0 {
-		host = host[:i]
+	if i := strings.IndexByte(name, '.'); i > 0 {
+		name = name[:i]
 	}
-	return host + ".local"
+	return name + ".local"
 }
 
 // maxInstanceLen caps the Bonjour instance name, in BYTES: it is one DNS

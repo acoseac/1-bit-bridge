@@ -19,6 +19,8 @@ import (
 	"net"
 	"sort"
 	"strings"
+
+	"github.com/acoseac/1-bit-bridge/internal/hostname"
 )
 
 // Endpoint is one reachable URL for the bridge. Host is the literal
@@ -181,18 +183,21 @@ func Endpoints(p Params) []Endpoint {
 
 	// Hostname resolution for the mDNS `.local` form. Short-label only
 	// — macOS/Linux hostnames may carry an FQDN that doesn't round-trip
-	// through mDNS. A detected container's generated id is left out:
-	// the phone cannot resolve it.
+	// through mDNS. The name is the one the certificate carries and the
+	// bridge's mDNS responder publishes (hostname.ASCII, backlog B739): a
+	// client checks the certificate against the name it dials. A name with
+	// no valid form is left out, and so is a detected container's generated
+	// id: the phone cannot resolve it.
 	host := p.HostOverride
 	if host == "" {
 		host, _ = hostnameFunc()
 	}
-	if host != "" && !OmitContainerHostname(host, inDocker()) {
-		if i := strings.IndexByte(host, '.'); i > 0 {
-			host = host[:i]
+	if name, ok := hostname.ASCII(host); ok && !OmitContainerHostname(name, inDocker()) {
+		if i := strings.IndexByte(name, '.'); i > 0 {
+			name = name[:i]
 		}
 		out = append(out, Endpoint{
-			URL:   fmt.Sprintf("https://%s.local:%d", host, port),
+			URL:   fmt.Sprintf("https://%s.local:%d", name, port),
 			Class: ClassMDNSHost,
 		})
 	}

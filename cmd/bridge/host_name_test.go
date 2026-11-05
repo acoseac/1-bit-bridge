@@ -4,12 +4,20 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+	"unicode"
 
+	"golang.org/x/term"
+
+	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/advertise"
+	"github.com/acoseac/1-bit-bridge/internal/config"
+	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 )
 
 // The host names B739 is about: what the system reports on a host whose
@@ -93,6 +101,176 @@ func TestInitOnAHostWhoseNameIsNotASCII(t *testing.T) {
 					t.Errorf("the certificate does not name %s: %v", ip, leaf.IPAddresses)
 				}
 			}
+		})
+	}
+}
+
+// TestEveryNameTheBridgeAdvertisesIsOneItCertifies is B739's cross-check, for
+// each host name the brief names. A certificate minted now, from the gather
+// init, serve, bridge cert rotate and bridge doctor share (certSANOptions),
+// names every host the bridge sends a phone to: each endpoint the interface
+// walk and the host's name give /v1/health, the `.local` one among them, and
+// the pairing QR's primary URL. A name with no valid form is advertised
+// nowhere, so the phone is sent to the LAN address instead, never to
+// localhost. And the coverage check bridge doctor and the startup warning
+// make finds nothing missing.
+func TestEveryNameTheBridgeAdvertisesIsOneItCertifies(t *testing.T) {
+	lan := "https://" + hostNameWalkLAN + ":7788"
+	for _, tc := range []struct {
+		name, host string
+		// local is the host the `.local` endpoint names, "" for none.
+		local, primary string
+	}{
+		{"a Cyrillic name", hostCyrillic, "xn--f1ai0a.local", "https://xn--f1ai0a.local:7788"},
+		{"Latin with an umlaut", "müsik", "xn--msik-0ra.local", "https://xn--msik-0ra.local:7788"},
+		{"a Windows computer name with Japanese in it", "DESKTOP-日本", "xn--desktop--5y4qg6h.local",
+			"https://xn--desktop--5y4qg6h.local:7788"},
+		{"the test Mac's bytes", hostMacBytes, "", lan},
+		{"mixed case and an underscore", "MacBook-Pro_2", "MacBook-Pro_2.local", "https://MacBook-Pro_2.local:7788"},
+		{"a space", "my host", "", lan},
+		{"a label over 63 bytes", strings.Repeat("a", 64), "", lan},
+		{"a Unicode label over 63 bytes in its ASCII form", strings.Repeat("ж", 58), "", lan},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reportHostName(t, tc.host)
+			cfg := &config.Config{ListenAddress: ":7788"}
+			certPath, keyPath := servertls.DefaultPaths(t.TempDir())
+			if err := servertls.GenerateWithOptions(certPath, keyPath, certSANOptions(cfg)); err != nil {
+				t.Fatalf("the mint refused: %v", err)
+			}
+			leaf := readCertificate(t, certPath)
+
+			var locals []string
+			for _, e := range advertise.Endpoints(advertise.Params{Port: 7788}) {
+				h := urlHost(t, e.URL)
+				if e.Class == advertise.ClassMDNSHost {
+					locals = append(locals, h)
+				}
+				assertCertifies(t, leaf, h)
+			}
+			var want []string
+			if tc.local != "" {
+				want = []string{tc.local}
+			}
+			if !slices.Equal(locals, want) {
+				t.Errorf("the .local endpoints name %q, want %q", locals, want)
+			}
+
+			primary := admin.DialURL(cfg)
+			if primary != tc.primary {
+				t.Errorf("the pairing QR dials %q, want %q", primary, tc.primary)
+			}
+			if h := urlHost(t, primary); h == "localhost" {
+				t.Errorf("the pairing QR sends the phone to itself: %q", primary)
+			} else {
+				assertCertifies(t, leaf, h)
+			}
+
+			cov, err := servertls.InspectSANCoverage(certPath, certSANOptions(cfg))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !cov.Covered() {
+				t.Errorf("the coverage check calls a certificate minted now stale: missing %q and %q",
+					cov.MissingDNS, cov.MissingIPStrings())
+			}
+		})
+	}
+}
+
+// urlHost is the host of the URL raw, without its port.
+func urlHost(t *testing.T, raw string) string {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" {
+		t.Fatalf("%q is no URL a phone can dial: %v", raw, err)
+	}
+	return u.Hostname()
+}
+
+// assertCertifies fails unless leaf passes a client's check for host: one of
+// its addresses for an IP address, its hostname check for a name.
+func assertCertifies(t *testing.T, leaf *x509.Certificate, host string) {
+	t.Helper()
+	if ip := net.ParseIP(host); ip != nil {
+		if !slices.ContainsFunc(leaf.IPAddresses, ip.Equal) {
+			t.Errorf("the bridge sends a phone to %s, which the certificate does not name: %v", host, leaf.IPAddresses)
+		}
+		return
+	}
+	if err := leaf.VerifyHostname(host); err != nil {
+		t.Errorf("the bridge sends a phone to %s, which the certificate does not cover: %v", host, err)
+	}
+}
+
+// reportInstallHostName makes the host-name read firstInstallName makes
+// (installHostname, the library name's own seam) answer host, for the rest of
+// the test.
+func reportInstallHostName(t *testing.T, host string) {
+	t.Helper()
+	prev := installHostname
+	installHostname = func() (string, error) { return host, nil }
+	t.Cleanup(func() { installHostname = prev })
+}
+
+// TestTheDefaultLibraryNameIsTheHostsNameAsItReads is B739's library name. A
+// first install takes the host's name for its library when the run names
+// none, and that name is for a reader: a Cyrillic or Chinese one stays as it
+// is, never in the IDNA ASCII form the certificate takes. Its control
+// characters are removed (a test Mac's kern.hostname holds U+0091, which init
+// printed in its prompt and wrote into the config), and a name that is
+// nothing else is no name, which DefaultLibraryName stands in for. Both init
+// paths take it, --yes and the prompt, where Enter takes it as offered, and
+// config.Load serves what was saved as it was saved.
+func TestTheDefaultLibraryNameIsTheHostsNameAsItReads(t *testing.T) {
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		t.Skip("stdin is a terminal, where init would offer to start the bridge after the run")
+	}
+	for _, tc := range []struct {
+		name, host, want string
+	}{
+		{"a Cyrillic name", hostCyrillic, hostCyrillic},
+		{"a Windows computer name with Japanese in it", "DESKTOP-日本", "DESKTOP-日本"},
+		{"the test Mac's bytes", hostMacBytes, "ÐÄ¯U"},
+		{"control characters alone", "\x01\x1b\u0085", config.DefaultLibraryName},
+		{"mixed case and an underscore", "MacBook-Pro_2", "MacBook-Pro_2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reportHostName(t, tc.host)
+			reportInstallHostName(t, tc.host)
+			if got := firstInstallName(); got != tc.want {
+				t.Fatalf("firstInstallName = %q, want %q", got, tc.want)
+			}
+
+			t.Run("--yes", func(t *testing.T) {
+				cfgDir := filepath.Join(t.TempDir(), "cfg")
+				code, out := loopbackInit(t, cfgDir, testLibrary(t), "")
+				defer logRunOnFailure(t, out)
+				if code != 0 {
+					t.Fatalf("bridge init exited %d", code)
+				}
+				assertSavedLibraryName(t, cfgDir, tc.want)
+			})
+			t.Run("the prompt", func(t *testing.T) {
+				cfgDir := filepath.Join(t.TempDir(), "cfg")
+				var stdout, stderr strings.Builder
+				code := initCmd([]string{"--no-service", "--skip-doctor", "--dir", cfgDir},
+					strings.NewReader(testLibrary(t)+"\n\n"), &stdout, &stderr)
+				out := stripANSI("--- stdout ---\n" + stdout.String() + "\n--- stderr ---\n" + stderr.String())
+				defer logRunOnFailure(t, out)
+				if code != 0 {
+					t.Fatalf("bridge init exited %d", code)
+				}
+				if offer := "Library display name [" + tc.want + "]"; !strings.Contains(out, offer) {
+					t.Errorf("the prompt does not offer %q", offer)
+				}
+				for _, r := range tc.host {
+					if unicode.IsControl(r) && strings.ContainsRune(out, r) {
+						t.Errorf("the run printed the host name's control character %U", r)
+					}
+				}
+				assertSavedLibraryName(t, cfgDir, tc.want)
+			})
 		})
 	}
 }

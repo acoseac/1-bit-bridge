@@ -51,6 +51,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
+	"github.com/acoseac/1-bit-bridge/internal/hostname"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
 
@@ -90,7 +91,9 @@ type GenerateOptions struct {
 	// Hostname is the host's short or fully-qualified hostname, added
 	// to the SAN DNSNames as a convenience for browser-based access
 	// to the admin console. Empty / "localhost" is silently dropped
-	// (localhost is already in the defaults).
+	// (localhost is already in the defaults). It is taken in the form
+	// hostname.ASCII gives it (dnsNames), so a name as the system
+	// reported it mints, and one with no valid form adds nothing.
 	Hostname string
 
 	// ExtraDNSNames is the operator-relevant DNS list — Tailscale
@@ -396,11 +399,19 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-func dnsNames(hostname string) []string {
+// dnsNames is localhost, and the host's name with its `.local` name, in the
+// form hostname.ASCII gives the name, which is the form the bridge
+// advertises it in (backlog B739). x509.CreateCertificate refuses a DNS name
+// that is not ASCII, so a name passed as the system reported it (Cyrillic, a
+// Mac's kern.hostname of other bytes) took the whole mint down with it, and
+// a client checks the certificate against the name it dials. CertHostname
+// gives that form already; this is the second layer, for a caller handing
+// Generate a name as reported. A name with no valid form adds nothing.
+func dnsNames(reported string) []string {
 	names := []string{"localhost"}
-	hostname = strings.TrimSpace(hostname)
-	if hostname != "" && hostname != "localhost" {
-		names = append(names, hostname)
+	name, ok := hostname.ASCII(strings.TrimSpace(reported))
+	if ok && name != "localhost" {
+		names = append(names, name)
 		// `<shortHostname>.local` is the canonical mDNS form the
 		// advertise package emits as `ClassMDNSHost`. Without it in
 		// the SAN list, iOS clients dialing the advertised mDNS URL
@@ -408,7 +419,7 @@ func dnsNames(hostname string) []string {
 		// otherwise accept (Qodo bot review on PR #93). The "short"
 		// form strips any FQDN suffix, matching the same trim
 		// `advertise.Endpoints()` does.
-		short := hostname
+		short := name
 		if i := strings.IndexByte(short, '.'); i > 0 {
 			short = short[:i]
 		}
@@ -416,7 +427,7 @@ func dnsNames(hostname string) []string {
 		// Skip when the hostname is already `.local`-suffixed (macOS
 		// hostnames typically are, e.g. `mac.local`) so we don't
 		// duplicate.
-		if dotLocal != hostname && dotLocal != "localhost" {
+		if dotLocal != name && dotLocal != "localhost" {
 			names = append(names, dotLocal)
 		}
 	}
@@ -426,9 +437,11 @@ func dnsNames(hostname string) []string {
 // mergeDNSNames builds the SAN DNSNames list: defaults (localhost +
 // hostname) plus operator-supplied extras, deduped case-insensitively.
 // Empty / "localhost" entries in extras are dropped silently — already
-// in the defaults.
-func mergeDNSNames(hostname string, extras []string) []string {
-	out := dnsNames(hostname)
+// in the defaults. The extras are names an operator configured and the
+// Tailscale node's, never the host's reported name, and are taken as they
+// are: one the certificate cannot carry still refuses the mint.
+func mergeDNSNames(reported string, extras []string) []string {
+	out := dnsNames(reported)
 	seen := make(map[string]bool, len(out)+len(extras))
 	for _, n := range out {
 		seen[strings.ToLower(n)] = true

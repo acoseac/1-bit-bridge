@@ -7,11 +7,14 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	"github.com/acoseac/1-bit-bridge/internal/hostname"
 )
 
 // PairingNeedsEndpoint is the sentence the pairing page, a refused mint,
-// and bridge doctor share when a detected container has no address a
-// phone can dial.
+// and bridge doctor share when a detected container, or a host whose name
+// has no valid form and that has no LAN address (backlog B739), has no
+// address a phone can dial.
 const PairingNeedsEndpoint = "set BRIDGE_CUSTOM_ENDPOINTS to this host's address"
 
 // containerID is the hostname Docker writes when the operator does not
@@ -236,27 +239,41 @@ func eachUsableAddr(fn func(net.Interface, net.IP)) bool {
 	return true
 }
 
-// CertHostname is the hostname a certificate minted now would carry.
-// A detected container's generated name is omitted, which drops both
-// the bare id and the .local name from the SAN want-set. Any other
-// name is returned as the host reported it.
+// CertHostname is the hostname a certificate minted now would carry: the
+// host's name in the one form every name the bridge advertises takes too
+// (hostname.ASCII, backlog B739), an ASCII name as it is and any other in
+// its IDNA ASCII form. A name with no valid form is omitted, and so is a
+// detected container's generated name, which drops both the bare name and
+// the .local name from the SAN want-set.
 func CertHostname() string {
 	host, err := hostnameFunc()
-	if err != nil || host == "" || OmitContainerHostname(host, inDocker()) {
+	if err != nil {
 		return ""
 	}
-	return host
+	name, ok := hostname.ASCII(host)
+	if !ok || OmitContainerHostname(name, inDocker()) {
+		return ""
+	}
+	return name
 }
 
-// PairingHost is the hostname the pairing QR is built from, and whether
-// the container marker is present. The hostname is returned as reported,
-// including when it is a generated container id. An error yields an
-// empty hostname with the marker still answered.
-func PairingHost() (string, bool) {
-	host, err := hostnameFunc()
-	docker := inDocker()
-	if err != nil {
-		return "", docker
+// PairingHost is the hostname the pairing QR is built from, in the form
+// hostname.ASCII gives it (backlog B739), and whether the container marker
+// is present. A generated container id is returned like any other ASCII
+// name, for the caller to judge. unusable says the host reported a name
+// that has no valid form: host is "" then, as when the name cannot be read,
+// and the caller must not take it for that case, whose fallback is
+// localhost, the phone's own name everywhere but on this host. An error
+// yields an empty hostname with the marker still answered.
+func PairingHost() (host string, unusable, docker bool) {
+	reported, err := hostnameFunc()
+	docker = inDocker()
+	if err != nil || reported == "" {
+		return "", false, docker
 	}
-	return host, docker
+	name, ok := hostname.ASCII(reported)
+	if !ok {
+		return "", true, docker
+	}
+	return name, false, docker
 }

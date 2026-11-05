@@ -18,6 +18,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"golang.org/x/term"
 
@@ -55,14 +56,35 @@ func initDataDirFor(cfgDir string) string {
 	return filepath.Join(cfgDir, "data")
 }
 
+// installHostname is the host-name read firstInstallName makes. It is a seam
+// of its own: advertise's (SetHostProbeForTest) is the read the certificate
+// and every advertisement make, and a library name is not one of those.
+var installHostname = os.Hostname
+
 // firstInstallName is the library name init gives an install that has none
 // to keep, when the run names none: the host's name, or DefaultLibraryName
-// on a host without one.
+// on a host without one. The name is for a reader, so a Cyrillic or Chinese
+// one stays as the system reports it and is never converted, as the
+// certificate's and the advertised names are (hostname.ASCII, backlog B739);
+// only its control characters are removed (a test Mac's kern.hostname holds
+// U+0091), and a name that leaves nothing else is no name.
 func firstInstallName() string {
-	if h, _ := os.Hostname(); h != "" {
-		return h
+	h, _ := installHostname()
+	if name := config.TrimLibraryName(withoutControlCharacters(h)); name != "" {
+		return name
 	}
 	return config.DefaultLibraryName
+}
+
+// withoutControlCharacters is s with every control character removed: the
+// C0 controls, DEL and the C1 controls (unicode.IsControl).
+func withoutControlCharacters(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // initAddresses is the API and admin address a run of `bridge init` writes:
