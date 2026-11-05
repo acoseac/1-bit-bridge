@@ -219,14 +219,24 @@ func (wt *Watcher) dropScansUnder(root string) {
 }
 
 // watchAgain watches root where it is now, held or not, and asks for a scan
-// of it: nothing saw what changed in it while it was not watched. It answers
-// the error of a root whose tree could not be added after all (it went again
-// between the look and the walk, or, on kqueue, took the watcher past its
-// budget, which stops the watcher for good).
+// of it: nothing saw what changed in it while it was not watched. What is
+// held at or under the root's path goes first (releaseRoot): it was opened on
+// what was there then. On kqueue that includes a held root's bare mount
+// point, which fsnotify opened as an entry when it listed the folder above,
+// and fsnotify's Add of the root finds that descriptor by its path and keeps
+// it, on the folder a volume mounted since covers, so nothing made directly
+// in the root was seen while its folders below, opened through the path, were
+// (B651's ninth round, Codex on round 8). fsnotify forgets having seen the
+// path with it, so the next change in the folder above sends a Create for the
+// root, which asks for a scan of that folder. It answers the error of a root
+// whose tree could not be added after all (it went again between the look and
+// the walk, or, on kqueue, took the watcher past its budget, which stops the
+// watcher for good).
 func (wt *Watcher) watchAgain(ctx context.Context, root string) error {
 	if wt.fds != nil && wt.fds.off {
 		return errWatchBudget
 	}
+	wt.releaseRoot(root)
 	wt.aliases = slices.DeleteFunc(wt.aliases, func(a rootAlias) bool { return a.configured == root })
 	if err := wt.addTree(root, true); err != nil {
 		return err
@@ -323,7 +333,6 @@ func (wt *Watcher) lookAgain(ctx context.Context, root, msg string) {
 		wt.holdRoot(root, look)
 		return
 	}
-	wt.releaseRoot(root)
 	if err := wt.watchAgain(ctx, root); err != nil {
 		if wt.fds == nil || !wt.fds.off {
 			wt.holdRoot(root, rootLook{absent: true, reason: rootAbsentUnreachable, err: err})

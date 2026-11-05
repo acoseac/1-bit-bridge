@@ -464,6 +464,61 @@ func TestHoldingANestedRootSpelledInAnotherCaseLetsGoOfTheWatchesUnderIt(t *test
 	}
 }
 
+// TestWatchingAHeldNestedRootAgainLetsGoOfItsEntryWatchFirst: on kqueue the
+// walk of the outer root holds a held nested root's folder open as an entry of
+// the folder above it, and watching the root again lets go of that watch
+// before it watches the root (watchAgain's releaseRoot): fsnotify's Add finds
+// a watch by its path and keeps it, on what was at the path when it was
+// opened, which a volume mounted since covers (B651's ninth round, Codex on
+// round 8; on this host's own kqueue with a real mount,
+// TestTheWatcherWatchesAHeldNestedRootOnTheVolumeMountedOverItsBareFolder).
+// The order is read from kqueue's account, which Linux's inotify stands in
+// for; the watcher's steps run on the test's goroutine with no Run.
+func TestWatchingAHeldNestedRootAgainLetsGoOfItsEntryWatchFirst(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("kqueue's account runs where fsnotify watches through kqueue; Linux's inotify stands in for it here, and ReadDirectoryChangesW is never paired with it")
+	}
+	dir := t.TempDir()
+	outer := filepath.Join(dir, "music")
+	inner := filepath.Join(outer, "usb", "library")
+	writeTracks(t, filepath.Join(outer, "Artist", "Album", "01.flac"), filepath.Join(inner, "Band", "Record", "01.flac"))
+	w, err := NewWatcher(NewScanner([]string{outer, inner}, openStoreIn(t, dir), ""), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		w.cancelAllPending()
+		_ = w.w.Close()
+	})
+	if w.fds == nil {
+		w.fds = newWatchFDs(WatchFDLimits{Process: 1 << 20}, nil)
+	}
+	w.holdRoot(inner, rootLook{absent: true, reason: rootAbsentEmpty, rows: 1})
+	if err := w.addTree(outer, true); err != nil {
+		t.Fatal(err)
+	}
+	if !w.fds.held(inner) || w.fds.listed(inner) {
+		t.Fatalf("premise: the walk of %s holds %s %v and lists it %v, want held as an entry and not listed",
+			outer, inner, w.fds.held(inner), w.fds.listed(inner))
+	}
+	released, listedAtRelease := false, false
+	w.beforeReleaseForTests = func(paths []string) {
+		if slices.Contains(paths, inner) {
+			released, listedAtRelease = true, w.fds.listed(inner)
+		}
+	}
+	w.resumeRoot(context.Background(), inner)
+	if !released {
+		t.Errorf("watching %s again kept the watch the walk of %s opened on its folder", inner, outer)
+	}
+	if listedAtRelease {
+		t.Errorf("watching %s again let go of its entry watch only after watching it", inner)
+	}
+	if !w.fds.listed(inner) {
+		t.Errorf("%s is not watched again", inner)
+	}
+}
+
 // TestANestedRootSpelledInAnotherCaseIsTheVolumesFolderOnlyWhereItFoldsCase is
 // the comparisons on this host's own volume (fsutil.FoldingIn, probed): where
 // it folds case (macOS's default, Windows'), a nested root configured as
