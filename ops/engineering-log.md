@@ -74227,7 +74227,7 @@ reaches"), and a registry read at another commit is refused for both rows.
   later database PR import their DoP evidence and caveats; each needs
   `bridge output dac inspect --json` (now with the strings) beside the
   card's stream file and its amixer state.
-- No backlog entry was written: the backlog file is not on this host.
+- B737: the rebind window round 5 leaves (below).
 
 **Checks**, on legion0 (Linux, amd64, Go 1.27.3), in one turn of the shared
 build lock, with TMPDIR under `.tmp/_b728-b2`, at c67ab94f:
@@ -74884,3 +74884,55 @@ build lock, with TMPDIR under `.tmp/_b728-b2`, at 92444e5a:
 
 **Commits.** d3bbb919 the red tests; 60103980 the kernel reader; dfce8fd9
 ios-check; 92444e5a the docs and the long form; this record.
+
+## 2026-11-05 — B728 B2 round 7: a note's text never read as a field, ProductID's own doc, and the long form under its section
+
+CodeRabbit's last comments on #1402 at a8f0961c (round 6 and its rules
+line), to which this branch fast-forwarded. The rules change ships as
+`rules-b728-b2-r7.patch` (outside the tree).
+
+- **A note's rate read as its row's** (`ios-check.py`): confirmed.
+  `strip_comments` keeps string literals whole, and `registry_rows` takes
+  the first `maxDSDRate:` after each `id:`, so a note naming a rate before
+  its row's own field set the row's cap. In 349c1824 the self-test's
+  published row has its notes line first, the note naming DSD512 above the
+  row's DSD256, with a case for a heard DSD512 against that row: red, the
+  cap read as DSD512 and the violation printing ok. Fixed in 922cdb98:
+  `blank_strings` empties every string literal but the one an id label
+  stands just before (`ID_LABEL`, the label `ROW_ID` reads), before the rows
+  are parsed. The registry at cd125088 reads the same 20 rows at the same
+  rates as before, and the only strings it keeps are its 20 ids. Two
+  controls went red: every literal kept whole (the rows read and the new
+  case), and every literal blanked, an id's too (no row read).
+- **ProductID's doc** (`key.go`): the comment before `VendorID` named both
+  accessors and attached to `VendorID` alone; each has its own (584b4cc8).
+- **The long form under its section** (`ops/History-rules-player.md`): it
+  sat under the B725 heading, because the B2 line had landed at the end of
+  player.md, after B725's section. 7065c80e moves it unchanged to the B728
+  section, after B1, and `verify_moves.py --base HEAD --moves` passes.
+  `rules-b728-b2-r7.patch` moves the line the same way, so the line and its
+  long form sit under one heading: `git apply --check` takes it,
+  `dropped_donts` is empty, and docs-check and `verify_moves.py` pass on a
+  copy with it applied (player.md 95,707 bytes).
+- **Not taken**: CodeRabbit's ask to replace round 5's description of the
+  rebind window with a backlog reference. That rule is for a security
+  weakness, and this is a rare wrong model string in a local diagnostic
+  (the orchestrator's decision), so the paragraph stays; round 1's note
+  that no backlog entry was written now names B737, the entry the
+  orchestrator filed.
+
+**Checks**, on legion0 (Linux, amd64, Go 1.27.3), in one turn of the shared
+build lock, at 7065c80e with the B737 note: `go test -count=1` of
+`./internal/player/dacprofile/` and under `-race`, ok, and its vet, clean;
+`ios-check.py` against the registry at cd125088, ok (20 rows), and its
+`--self-test`, PASS (19 cases); cmd/bridge's
+`TestNoDocblockNamesAnotherDeclaration` and `TestEveryCitedTestNameExists`,
+ok, the second again with this record in the log; go1.27.3's gofmt on cmd,
+internal and scripts, clean; `make docs-check`, ok; `verify_moves.py
+--base a8f0961c --moves`, PASS; the qualification check from main and
+from ebe71366, "qualification version OK". Not run here: Windows and macOS
+natively, CI's runner, and any hardware.
+
+**Commits.** 349c1824 the red self-test; 922cdb98 the strings blanked;
+584b4cc8 ProductID's doc; 7065c80e the long form moved; this record, with
+the B737 note.
