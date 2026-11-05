@@ -73853,6 +73853,146 @@ node test's outcome is predicted:
   it builds there (B718's record found the same).
 - No PROTOCOL.md change: the console's API is not the wire protocol.
 
+## 2026-11-05 — B611: `Pick`'s dedup key can no longer make two different documents one
+
+Backlog B611, from nightly fuzz run 40077306390 (2026-10-24), where
+`FuzzPickIsShuffleInvariant` failed once: "Pick is order-dependent". Worker
+b611 on legion0 (Ubuntu 26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`), branch `fix/b611-lyrics-pick-key` from main ebe71366, the
+orchestrator's brief with Codex's binding notes. Commits: the seed 45251b09,
+the fix 0563cf4e, then this record. The rule goes into `.claude/rules/lyrics.md`'s
+`Pick` bullet through a checked patch (`rules-b611.patch`; this worker cannot
+write `.claude/`), which also corrects that bullet's stale sentence on
+`mergeDuplicate` and counts it among CLAUDE.md's corrected claims, now
+twenty-four (the line, and its long form in `ops/History-Workflow.md`).
+
+**The crasher, and the diagnosis confirmed.** The minimized input is in the
+corpus verbatim, `internal/lyrics/testdata/fuzz/FuzzPickIsShuffleInvariant/f2df0898144cb13b`.
+The run's log was not read here (`gh` needs an approval this headless run
+cannot give), but Go names a corpus file by the first 16 hex digits of its
+content's SHA-256, and this file's begins `f2df0898144cb13b`: these are the
+nightly's bytes. The harness reads it as two candidates, Source `""` with
+Body `"\x00\x000"` and Source `"\x00\x00"` with Body `"0"`, both priority 0,
+format empty, not synced. `Pick` keyed its dedup on
+`string(c.Source) + "\x00" + c.Doc.Body`, which is `"\x00\x00\x000"` for
+both, so the second folded into the first, and `mergeDuplicate`, finding
+synced and format equal, kept the first arrival's Source and Body. Red on
+45251b09, the seed alone: `FuzzPickIsShuffleInvariant/f2df0898144cb13b`
+failed "Pick is order-dependent", the first winner Source `""` with Body
+`"\x00\x000"`, a shuffled one Source `"\x00\x00"` with Body `"0"`. The
+one-byte body cannot outrank the three-byte one in `lessCandidate` (rank 99
+and priority 0 both, then the longer body), so it won only because the other
+had been folded away.
+
+**The fix.** The map is keyed on a comparable struct of Source and Body
+(`docKey`, local to `Pick`), which no byte in either field can make collide.
+The rest of `Pick`, `mergeDuplicate` and `lessCandidate` is unchanged: kept
+apart, the two documents are ordered at the comparator's length step in
+either arrival order, and the seed shows no other undecided tie.
+`TestPickNeverMergesTwoDifferentDocuments` pins the shape as a readable case
+beside the corpus entry, in both arrival orders. The favorites store keys
+its dedup the same way, comparable structs and never NUL-joined strings
+(the "Body decode is strict" bullet of its record, above).
+
+**Whether production can reach it: no.** The joined key is injective
+wherever the Source holds no NUL: its first NUL is then the separator, and
+the key gives back both fields. (Spelled out: two equal Sources make equal
+keys only from equal Bodies; for different Sources, the keys can agree only
+where the shorter is a prefix of the longer and the longer holds a NUL just
+past it, where the shorter's key has its separator. `text` is a prefix of
+`text-lrc` and `atlas` of `atlas-lrc`, and in both the next byte is `-`.)
+`Pick`'s one production caller is `resolveLyrics`
+(internal/manifest/lyrics_extract.go), over the candidates appended by
+`applySidecarLyrics` (`sidecarCandidate`: `sidecar-ttml`, `sidecar-lrc`,
+`sidecar-txt`), `applyEmbeddedLyricsFromTag` (`TextCandidate` for
+`m.Lyrics()` and each USLT, `syltCandidate` for each SYLT: `sylt`) and the
+FLAC raw walk in extractors.go (`TextCandidate`: `text-lrc`, `vorbis-synced`,
+`text`). Each is a constant of `internal/lyrics`, none holds a NUL, and the
+two network sources never reach `Pick` (`UpsertAtlasLyrics` writes them). A
+NUL in a Body, which `Normalize` keeps, collides nothing on its own. Both
+keys therefore merge exactly the same production candidates: no scan
+resolves a different document, no `lyricsTag` changes and no `indexed_at`
+moves. The defect was reachable only from the harness, whose Sources are
+arbitrary bytes, or from a future caller of the exported `Pick` passing a
+Source with a NUL, so the backlog's "the served document can change between
+scans" applies to no library. No `ExtractorVersion` bump, on B181's
+precedent: a change that leaves every stored row as it was takes none.
+
+**The same shape elsewhere in `internal/lyrics/`.** Two other joins of
+strings with a separator, neither a map key:
+- `Tag` hashes `Format`, NUL, `"0"` or `"1"`, NUL, `Language`, NUL, `Body`,
+  and keeps 4 bytes of the SHA-256. The join is ambiguous only where `Format`
+  or `Language` can hold a NUL: with both NUL-free the first three NULs are
+  the separators, and `Body`, last, may hold anything. With a NUL in
+  `Language`, Language `"e\x00n"` with Body `"x"` and Language `"e"` with
+  Body `"n\x00x"` hash one input. Production puts none there: `Format` is
+  `lrc`, `text` or `ttml` (`TextCandidate`, `sidecarCandidate`,
+  `syltCandidate`, the Atlas tier's `documentFrom`), and `Language` is a
+  value of `iso639ToBCP47`'s table or empty (SYLT and USLT go through it;
+  `m.Lyrics()`, Vorbis comments, sidecars and Atlas documents carry none;
+  `mergeDuplicate` takes the smallest non-empty of those). No two different
+  production documents share a hash input, so `Tag`'s only collisions are
+  its 32-bit truncation's, by design (the `waveformTag` shape). Not changed,
+  as the brief's reviewer note decided: a new encoding would re-key every
+  stored lyrics tag, and each track with lyrics would enter every paired
+  device's delta when it is next extracted, which needs its own decision.
+- `TestToLRCTreatsABareCarriageReturnAsAMarker` compares line lists joined
+  with `|`: a test's comparison, not a key, and it cannot pass falsely, since
+  no fixture text or expected line holds a `|` and `ToLRC` writes only the
+  entries' text with `[`, `]`, `<`, `>`, `:`, `.`, digits, spaces and
+  newlines.
+
+The rest are not keys: `ParseSYLT`'s trim of NULs from the language field,
+the rendered LRC lines, and two lookup maps keyed by single literals.
+
+**An earlier crasher.** The B99 record (2026-09-29) says this target
+"reported a real crasher that has not recurred (not investigated here)" in
+the 2026-09-07 nightly, the first after #851 added it. Whether it was this
+shape cannot be told from here.
+
+**Negative control**, on 0563cf4e, by a script that put the joined key back
+(`map[string]int` and `string(c.Source) + "\x00" + c.Doc.Body`, each an
+exact-once replacement), ran the package's tests, and restored the bytes
+from memory:
+
+| Mutation | Result |
+|---|---|
+| the joined key back | red: `FuzzPickIsShuffleInvariant/f2df0898144cb13b` ("Pick is order-dependent", the winners as on 45251b09), and `TestPickNeverMergesTwoDifferentDocuments` in its second arrival order (Source `"\x00\x00"` with Body `"0"` won); every other test green |
+
+After the restore the file's SHA-256 was HEAD's blob's (f6ff5e9e…), the
+package green again, and `git status` empty.
+
+**Checks.** On legion0:
+- `go test ./internal/lyrics/`: ok; under `-race`: ok; `go vet
+  ./internal/lyrics/`: clean.
+- 60 s of `go test -fuzz='^FuzzPickIsShuffleInvariant$' -fuzztime=60s
+  -fuzzminimizetime=1s ./internal/lyrics/` (the brief's command, with the
+  1 s minimize time the fuzz rule asks for): 13,853,396 execs over 16
+  workers, between 210,000 and 292,000 a second throughout, 141 new
+  interesting inputs, no crasher; the corpus directory held the same three
+  files after.
+- `make test-fast TMPDIR=<worktree>/.tmp/_b611/gotmp` (a `_` directory, which
+  the build-site census skips): 81 packages ok, 14 with no test files, none
+  failed; cmd/bridge's citation sweep read this record.
+- `make vet`, native, `GOOS=windows` and `GOOS=darwin`: clean.
+- go1.27.3's gofmt on the changed Go files: clean.
+- `make docs-check`: ok (CLAUDE.md at 72.3 %, the largest rules file,
+  dlna-upnp.md, at 97.0 %, the worst load, player_openhome_test.go's, at
+  63.5 %).
+- The qualification check against main, `go run -tags
+  ts_omit_webclient,ts_omit_debugeventbus ./scripts/qualification-version
+  -base ebe71366 -head HEAD`: "qualification version OK".
+- The rules patch: a strict applier (every hunk's context byte for byte at
+  its stated line) reproduces the three patched files exactly and refuses
+  the patch with one context byte changed, and `git apply --check` takes it.
+  In a copy of the tree with it applied, `make docs-check` is ok with the
+  same figures (lyrics.md from 17,430 to 18,130 bytes), and
+  `TestEveryCitedTestNameExists` passes; with a citation of a test that does
+  not exist planted in the copy's lyrics.md it fails naming that citation,
+  so the sweep read the patched file.
+- Not run: `make test` (the race suite) and `make build-all`, which the brief
+  did not ask for.
+
 ## 2026-11-04 — B651: a volume mounted after the bridge starts is never taken for an empty library or a fresh install
 
 Backlog B651, on `fix/b651-late-mount-guard` from main cde731e2. On a NAS

@@ -45,9 +45,18 @@ no failing test — which is the shape to expect in this area.
   `range m.Raw()`, a Go map, so any pair the comparator leaves equal flips the
   winner between scans → `lyricsTag` re-keys → `indexed_at` bumps → the track
   re-enters every device's delta on every scan. Same rule as the dupe elector,
-  same reason. `mergeDuplicate` picks its surviving base with that same order,
-  not by arrival — the dedup key is only `(Source, Body)`, so a second sighting
-  can still differ in the derived fields.
+  same reason. `mergeDuplicate` picks its surviving base by fields the merge
+  never mutates (synced, then format), never with that order, which reads the
+  `Priority` the merge raises (#851's fuzz finding; this said the opposite
+  until 2026-11-05), and folds the rest order-independently (the larger
+  priority, the smallest non-empty language and sidecar name): the dedup key
+  is only `(Source, Body)`, so a second sighting can still differ in the
+  derived fields. **Key it on a comparable struct of the two, never on one
+  string joining them with a separator** (B611): a separator either field can
+  hold makes two documents one key (Source `""` with Body `"\x00\x000"`, and
+  `"\x00\x00"` with `"0"`, joined by a NUL), and the merge keeps whichever
+  arrived first. No production Source holds a NUL, so no scan met it; the
+  nightly fuzz did. `TestPickNeverMergesTwoDifferentDocuments` pins it.
 - **`m.Lyrics()`'s `Priority: 0` is FABRICATED.** dhowden's
   `metadataID3v2.Lyrics()` returns `m.frames["USLT"].(*Comm).Text` — literally
   the frame the raw walk then re-reports with its real `DescriptorPriority` —
