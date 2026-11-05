@@ -282,9 +282,19 @@ func readArm(stmts string) ([][2]string, error) {
 			pending = nil
 		}
 	} else {
-		for _, m := range reAltReturn.FindAllStringSubmatch(stmts, -1) {
-			n, _ := strconv.Atoi(m[1])
-			facts = append(facts, [2]string{m[2], howAltsetting(n)})
+		alts := reAltReturn.FindAllStringSubmatchIndex(stmts, -1)
+		for _, m := range alts {
+			n, _ := strconv.Atoi(stmts[m[2]:m[3]])
+			facts = append(facts, [2]string{stmts[m[4]:m[5]], howAltsetting(n)})
+		}
+		// Every format the arm returns is one of those facts: one returned
+		// outside an altsetting test, or under a test the reader does not
+		// read, beside one it reads keeps the counts below equal and would be
+		// left out (CodeRabbit on #1402).
+		for _, r := range reReturnFmt.FindAllStringIndex(stmts, -1) {
+			if !slices.ContainsFunc(alts, func(m []int) bool { return m[0] <= r[0] && r[1] <= m[1] }) {
+				return nil, errors.New("a format returned outside an altsetting test")
+			}
 		}
 	}
 	if len(facts) == 0 || len(reReturn.FindAllStringIndex(stmts, -1)) != len(reReturnFmt.FindAllStringIndex(stmts, -1)) {
