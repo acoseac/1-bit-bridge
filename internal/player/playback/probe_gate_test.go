@@ -128,7 +128,8 @@ func receiveWithin[T any](t *testing.T, ch <-chan T, what string) T {
 // design's bound, and past it the Start answers the device busy
 // (engine.ErrDeviceBusy, which the engine records as a busy attempt),
 // holding nothing; its context's end and its session's release end the wait
-// too.
+// too. A Start that gave its wait up no longer counts among the waiters
+// (round 2), so the next probe takes the slot once the first ends.
 func TestAStartWaitsForTheProbeThatHoldsTheSlot(t *testing.T) {
 	type start struct {
 		b     *Backend
@@ -165,6 +166,27 @@ func TestAStartWaitsForTheProbeThatHoldsTheSlot(t *testing.T) {
 		}
 		return st
 	}
+	// gaveUp checks a Start that gave its wait up: it holds nothing, no
+	// longer counts among the waiters (round 2), and so leaves the slot to
+	// the next probe once the one it waited for ends.
+	gaveUp := func(t *testing.T, st start) {
+		t.Helper()
+		st.b.mu.Lock()
+		holder, waiters := st.b.holder, st.b.waiters
+		st.b.mu.Unlock()
+		if holder != nil {
+			t.Error("a Start that gave its wait up took the slot")
+		}
+		if waiters != 0 {
+			t.Errorf("a Start that gave its wait up still counts among the waiters (%d)", waiters)
+		}
+		st.b.endProbe(st.p)
+		if p, why := st.b.reserveProbe(); p == nil {
+			t.Errorf("a probe after the one the Start gave up on was refused %q; want the slot", why)
+		} else {
+			st.b.endProbe(p)
+		}
+	}
 	t.Run("the probe ends", func(t *testing.T) {
 		st := begin(t, context.Background())
 		st.b.endProbe(st.p)
@@ -186,6 +208,7 @@ func TestAStartWaitsForTheProbeThatHoldsTheSlot(t *testing.T) {
 		if st.b.holder != nil || st.b.probing != st.p {
 			t.Error("a Start past the bound took the slot from the probe")
 		}
+		gaveUp(t, st)
 	})
 	t.Run("the Start's context ends", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -194,9 +217,7 @@ func TestAStartWaitsForTheProbeThatHoldsTheSlot(t *testing.T) {
 		if err := receiveWithin(t, st.done, "the Start's hold"); !errors.Is(err, context.Canceled) {
 			t.Fatalf("a Start whose context ended: %v", err)
 		}
-		if st.b.holder != nil {
-			t.Error("a Start whose context ended took the slot")
-		}
+		gaveUp(t, st)
 	})
 	t.Run("the session's release", func(t *testing.T) {
 		st := begin(t, context.Background())
@@ -204,9 +225,7 @@ func TestAStartWaitsForTheProbeThatHoldsTheSlot(t *testing.T) {
 		if err := receiveWithin(t, st.done, "the Start's hold"); !errors.Is(err, errReleased) {
 			t.Fatalf("a Start whose session was released: %v", err)
 		}
-		if st.b.holder != nil {
-			t.Error("a released Start took the slot")
-		}
+		gaveUp(t, st)
 	})
 }
 

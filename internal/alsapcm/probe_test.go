@@ -417,7 +417,8 @@ func TestTheProbesCandidatesAreTheDesigns(t *testing.T) {
 // whose /proc lists none), it keeps no refusal from the run: each refused
 // candidate is not probed, each accepted one stands (the clock only narrows
 // what the kernel takes), and the report says why (Shared). Its own
-// substream is no other. A cache then keeps no refusal of that run.
+// substream, on the subdevice the kernel gave the open, is no other. A cache
+// then keeps no refusal of that run.
 func TestARefusalBesideAnotherOpenSubstreamIsNotKept(t *testing.T) {
 	cands := []ProbeCandidate{{format.DSDU32BE, 88200}, {format.DSDU32BE, 352800}, {format.S32LE, 176400}, {format.S24LE, 44100}}
 	refused := map[ProbeCandidate]bool{{format.DSDU32BE, 352800}: true, {format.S24LE, 44100}: true}
@@ -427,6 +428,7 @@ func TestARefusalBesideAnotherOpenSubstreamIsNotKept(t *testing.T) {
 		shared bool
 	}{
 		{"no other substream open", func(*fakeKernel) {}, false},
+		{"no other open, the probe's own on subdevice 1", func(k *fakeKernel) { k.info.subdevice = 1 }, false},
 		{"another open before the first refine", func(k *fakeKernel) { k.others = [][]string{{"pcm0c/sub0"}, nil} }, true},
 		{"another opened before the close", func(k *fakeKernel) { k.others = [][]string{nil, {"pcm1p/sub0"}} }, true},
 		{"the substreams cannot be read", func(k *fakeKernel) { k.substreamsErr = errors.New("permission denied") }, true},
