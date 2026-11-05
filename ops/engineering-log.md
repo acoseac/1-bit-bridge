@@ -76850,3 +76850,28 @@ after the mint included, which the certificate does not name, where health
 holds such an address back (B457); and a host named
 `localhost` advertises `localhost.local`, which `tls.dnsNames` leaves out of
 the certificate (an ASCII name, so unchanged).
+
+**Evidence**, at 457a88f2 on legion0, each run under the shared build lock.
+Twelve negative controls (exact-once mutations of the production code, the
+original bytes put back from memory), every one as expected: the converted
+`.local` published whatever `Params.MDNS` says (red: the one-form test,
+health, the cross-check, the serve test), the QR at a converted name whatever
+the setting (red: the admin test, the cross-check, the serve test), the
+doctor's reason dropped, health's setting forced on and forced off, a host
+with no name back to `localhost.local`, the target alone `localhost.local`,
+`ips=` left out for a host with no name (each red in the mDNS tests and the
+cross-check), the bound address ignored, the custom endpoint after the walk,
+a loopback bind taken as dialable (red in the admin tests, the last in the
+serve test too), and a want-set that follows the setting (red: the
+cross-check alone, which mints under each setting). The tree was clean after
+them. `make test`, ok (83 packages; cmd/bridge 1013 s, internal/admin 972 s);
+`go test -race -timeout 30m` of internal/{tls, advertise, admin, mdns,
+hostname}, ok (admin 901 s); `make vet` native and for windows, darwin and
+linux/386, ok; `make build-all`, ok; `make docs-check`, ok, on the tree and
+on a copy with `rules-b739-r2.patch` applied, where the doc guards
+(`TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`)
+pass too; the qualification check (`scripts/qualification-version`,
+3b900afc..HEAD), ok. The Mac, simulated again (every `os.Hostname` in 11
+files answering `Ð\u0091Ä¯U`, the nine packages of round 1): 0 failing
+tests. Not run here: macOS and Windows natively, CI's runners and the iOS
+app.
