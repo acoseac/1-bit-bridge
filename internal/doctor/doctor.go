@@ -170,12 +170,14 @@ type Deps struct {
 	// cancellation.
 	CertSANs func(context.Context) servertls.GenerateOptions
 
-	// PairingPrimary is the URL the pairing QR would dial, and whether
-	// that URL is one a phone can use. Nil skips the check: a doctor
-	// run with no readable config has no listen address to build from.
-	// An empty URL is the detected-container case, and the hint is the
-	// sentence the pairing page shows.
-	PairingPrimary func() (string, bool)
+	// PairingPrimary is the URL the pairing QR would dial, "" for none, and
+	// why it is not the host's name when the line should say so, ""
+	// otherwise (admin.PairingPrimary). Nil skips the check: a doctor run
+	// with no readable config has no listen address to build from. An
+	// empty URL is a host with no address a phone can dial (a detected
+	// container, among others), and the hint is the sentence the pairing
+	// page shows.
+	PairingPrimary func() (url, why string)
 
 	// OwnPIDFile, when set, points at the file `bridge serve` writes
 	// when it's running. A port bound by this PID is treated as OK

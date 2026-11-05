@@ -553,10 +553,11 @@ func TestInitPublicRewriteKeepsTheLibraryRootsWhenNoneIsNamed(t *testing.T) {
 // lists a kept name only where a first install would have taken another, so
 // the rewrite of an install named for its host says nothing.
 func TestInitRewriteKeepsTheLibraryNameWhenNoneIsNamed(t *testing.T) {
-	host, err := os.Hostname()
-	if err != nil || host == "" {
-		t.Skipf("premise: this host has a name, which a first install takes (%v)", err)
-	}
+	// A host with a name, which a first install takes (installHostname, the
+	// library name's own read, rather than this machine's: a host whose name
+	// holds a control character is given it without, B739).
+	const host = "musicbox"
+	reportInstallHostName(t, host)
 	for _, posture := range rewritePostures {
 		for _, tc := range []struct {
 			name string
@@ -631,10 +632,9 @@ func TestInitRewriteKeepsTheLibraryNameWhenNoneIsNamed(t *testing.T) {
 // and a rewrite keeps the install's and lists it. config.Load would serve a
 // blank name as DefaultLibraryName, which is neither.
 func TestInitTrimsTheNameItIsGiven(t *testing.T) {
-	host, err := os.Hostname()
-	if err != nil || host == "" {
-		t.Skipf("premise: this host has a name, which a first install takes (%v)", err)
-	}
+	// A host with a name, which a first install takes (installHostname).
+	const host = "musicbox"
+	reportInstallHostName(t, host)
 	for _, tc := range []struct{ sent, want string }{
 		{"  ", host},
 		{" Padded Name ", "Padded Name"},
@@ -710,10 +710,9 @@ func TestInitInteractiveRewriteOffersTheInstallsName(t *testing.T) {
 	if term.IsTerminal(int(os.Stdin.Fd())) {
 		t.Skip("stdin is a terminal, where init would offer to start the bridge after the run")
 	}
-	host, err := os.Hostname()
-	if err != nil || host == "" {
-		t.Skipf("premise: this host has a name, which a first install is offered (%v)", err)
-	}
+	// A host with a name, which a first install is offered (installHostname).
+	const host = "musicbox"
+	reportInstallHostName(t, host)
 	for _, tc := range []struct {
 		name string
 		// first names an install the run rewrites; empty runs a first install.

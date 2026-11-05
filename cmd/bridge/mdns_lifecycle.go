@@ -41,6 +41,11 @@ type mdnsLifecycle struct {
 	nameSource func() string
 	stderr     io.Writer
 	stdout     io.Writer
+	// pick chooses the LAN interface the responder pins itself to; nil is
+	// dlna.PickLANEligibleInterface. A boot test pins it to loopback
+	// (serveOpts.mdnsPick), so a responder it starts answers nothing on the
+	// LAN.
+	pick func() (*net.Interface, error)
 
 	mu         sync.Mutex
 	advertiser *bridgemdns.Advertiser
@@ -91,14 +96,18 @@ func (m *mdnsLifecycle) Set(enabled bool) {
 		// CodeRabbit on PR #307 round-1.
 		// TestMDNSInterfaceSourceIsTheOncePerStreakOne pins that the
 		// source is lanInterfaceSource's, written in the literal.
+		pick := m.pick
+		if pick == nil {
+			pick = func() (*net.Interface, error) {
+				return dlna.PickLANEligibleInterface(dlna.EligibilityOpts{})
+			}
+		}
 		a, err := bridgemdns.Advertise(bridgemdns.Config{
 			InstanceName:    name,
 			Port:            m.port,
 			ProtocolVersion: m.protocolVersion,
 			LibraryName:     name,
-			InterfaceSource: lanInterfaceSource(func() (*net.Interface, error) {
-				return dlna.PickLANEligibleInterface(dlna.EligibilityOpts{})
-			}, m.stderr),
+			InterfaceSource: lanInterfaceSource(pick, m.stderr),
 		})
 		if err != nil {
 			fmt.Fprintf(m.stderr, "mDNS advertise failed (non-fatal): %v\n", err)
