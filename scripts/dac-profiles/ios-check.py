@@ -139,8 +139,9 @@ def check(profiles, rows, commit):
 
 # The self-test's registry: synthetic rows in the shape registry_rows reads,
 # with comments and strings that name a rate or a row and must not be read: a
-# line comment, a block comment, a nested one (Swift's nest), a row a block
-# comment holds, and "/*" in a string and in a line comment, which opens none.
+# line comment, a note naming a higher rate before its row's own, a block
+# comment, a nested one (Swift's nest), a row a block comment holds, and "/*"
+# in a string and in a line comment, which opens none.
 SELF_TEST_REGISTRY = """
 struct DACProfile { let maxDSDRate: DSDRateCapability }
 nonisolated enum DACProfileRegistry {
@@ -148,8 +149,8 @@ nonisolated enum DACProfileRegistry {
         DACProfile(
             id: "fixture.published",
             // a comment naming maxDSDRate: .dsd512, which is never read; nor is its /*
-            maxDSDRate: .dsd256,
-            notes: ["/* a string's, never a comment's", "a note // with maxDSDRate: .dsd64 in it"]
+            notes: ["/* a string's, never a comment's", "a note // with maxDSDRate: .dsd512 in it"],
+            maxDSDRate: .dsd256
         ),
         DACProfile(
             id: "fixture.lowered",
@@ -179,6 +180,7 @@ nonisolated enum DACProfileRegistry {
 SELF_TEST_CASES = [
     ("a published maximum with a refusal at it (ifi.generic's shape)", 0, 11289600, [11289600], "fixture.published", True),
     ("a refusal below the row's maximum", 2822400, 0, [5644800], "fixture.published", True),
+    ("a heard rate above the row's maximum, a note naming a higher one before it", 22579200, 0, [], "fixture.published", False),
     ("a refusal above the row's maximum (the Mytek's shape)", 0, 0, [11289600], "fixture.lowered", True),
     ("a heard rate at the row's maximum", 5644800, 0, [], "fixture.lowered", True),
     ("a heard rate above the row's maximum, a block comment naming a higher one before it", 11289600, 0, [], "fixture.lowered", False),
@@ -198,7 +200,7 @@ SELF_TEST_REFUSED = [
     ("a multi-line string", 'id: "fixture.pcm",\n',
      'id: "fixture.pcm",\n            notes: """\n            maxDSDRate: .dsd512\n            """,\n'),
     ("an interpolation", '"a note // with', '"\\(note) // with'),
-    ("a raw string", '"a note // with maxDSDRate: .dsd64 in it"', '#"a note // with maxDSDRate: .dsd64 in it"#'),
+    ("a raw string", '"a note // with maxDSDRate: .dsd512 in it"', '#"a note // with maxDSDRate: .dsd512 in it"#'),
 ]
 
 
