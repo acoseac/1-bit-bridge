@@ -135,13 +135,17 @@ func RecordToRead(s State, l Legacy) (name string, ask bool) {
 //     migration_record_refused with the reason), owned by the DAC;
 //   - a refusal of identity_mismatch gives the DAC the fallback and keeps the
 //     record for its own model: when the binding later resolves to a DAC the
-//     reader takes the record for, that DAC gets the record's rows. Any other
-//     answer then writes nothing, and the record waits on.
+//     reader takes the record for, that DAC gets the record's rows, over the
+//     fallback a unit of its key got (the comparison reads the PCM device and
+//     the manufacturer string, which the key does not hold), whose warning
+//     they drop. Any other answer then writes nothing, and the record waits
+//     on.
 //
 // Once a part is done no step reads the record again, and a DAC bound
-// afterwards takes the defaults. A DAC that has a choice of its own is never
-// migrated: the part done for it writes nothing for it. A choice the
-// migration writes clears no warning, the one written with it included.
+// afterwards takes the defaults. A DAC that has a choice of its own, the
+// app's or the console's (ownChoice), is never migrated: the part done for
+// it writes nothing for it. A choice the migration writes clears no warning,
+// the one written with it included.
 func Migrate(s State, in Input) (State, Step, error) {
 	if err := in.Legacy.check(); err != nil {
 		return s, Step{}, err
@@ -182,7 +186,7 @@ func Migrate(s State, in Input) (State, Step, error) {
 		return s, Step{}, errors.New("dsdstate: the owner's record was not read for the bound DAC")
 	}
 	key := in.Bound.Key
-	own := next.dacIndex(key) >= 0 && next.DACs[next.dacIndex(key)].Choice != nil
+	own := next.ownChoice(key)
 	switch m.WaitingFor {
 	case WaitingForBoundDAC:
 		switch {
@@ -220,13 +224,39 @@ func Migrate(s State, in Input) (State, Step, error) {
 	return next, step, nil
 }
 
+// ownChoice reports whether key's model has a choice the migration leaves
+// alone: any but the migration's own, at its first revision, which is the
+// fallback a unit of this key got when the reader refused the record for its
+// identity (Codex and the Claude API reviewer on #1405). The model comparison
+// reads fields the key does not hold (the PCM device, the manufacturer
+// string), so the record's own model can be refused as another unit, and its
+// fallback must not keep the record's exact unit from the record's rows. A
+// user's choice is the app's or the console's, so it always wins.
+func (s State) ownChoice(key dacprofile.Key) bool {
+	i := s.dacIndex(key)
+	if i < 0 || s.DACs[i].Choice == nil {
+		return false
+	}
+	c := s.DACs[i].Choice
+	return c.SetBy != ByMigration || c.Revision != 1
+}
+
 // recordRows writes the rows of a record taken for key (Migrate's doc), into
-// an entry with no choice of its own: an answer, an acknowledgement or a
-// confirmation the entry holds already stays.
+// an entry with no choice of its own, or with the migration's fallback,
+// which its choice replaces at the next revision and whose warning it drops
+// (ownChoice): an answer, an acknowledgement or a confirmation the entry
+// holds already stays.
 func (s *State) recordRows(key dacprofile.Key, m Marker, rec Record, at time.Time) {
 	d := s.entry(key)
 	mode := m.DSDMode
-	d.Choice = &Choice{Mode: mode, Revision: 1, SetAt: at, SetBy: ByMigration}
+	revision := uint64(1)
+	if d.Choice != nil {
+		revision = d.Choice.Revision + 1
+	}
+	d.Choice = &Choice{Mode: mode, Revision: revision, SetAt: at, SetBy: ByMigration}
+	s.Warnings = slices.DeleteFunc(s.Warnings, func(w Warning) bool {
+		return w.DAC != nil && w.DAC.Equal(key) && (w.Code == WarningMigrationRecordRefused || w.Code == WarningMigrationRecordMissing)
+	})
 	clean := func(transport string, rates []int) {
 		for _, r := range rates {
 			if !slices.ContainsFunc(d.Listener, func(a Answer) bool {

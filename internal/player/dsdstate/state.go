@@ -510,7 +510,8 @@ func Decode(data []byte) (State, error) {
 }
 
 // encode is the file s is written as: s normalized (Normalize), checked,
-// indented, and a newline after it.
+// indented, and a newline after it, and refused (ErrTooLarge) past the bytes
+// Decode reads, so no write leaves a file the next start refuses.
 func (s State) encode() ([]byte, error) {
 	n := s.normalized()
 	if err := n.check(); err != nil {
@@ -533,8 +534,19 @@ func (s State) encode() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(data)+1 > maxFileBytes {
+		return nil, ErrTooLarge
+	}
 	return append(data, '\n'), nil
 }
+
+// ErrTooLarge is a write refused because the state's file would be past the
+// bytes its reader reads (1 MiB, Decode's bound), which the next start would
+// refuse (Codex on #1405: the structural bounds let 100 DACs of 64 answers
+// each through at about 1.1 MB). The state stays as it was, as for any write
+// not made; B9 answers it as it answers a write it could not make
+// (persist_failed, nothing changed), so the app keeps the choice it read.
+var ErrTooLarge = fmt.Errorf("dsdstate: the state's file would be more than the %d bytes its reader reads", maxFileBytes)
 
 // orNil is v, or nil in an empty list's place: a state in memory holds no
 // empty list, as the file writes none but [], which reads as nil. A first

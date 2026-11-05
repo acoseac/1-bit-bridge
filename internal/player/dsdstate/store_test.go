@@ -384,8 +384,8 @@ func TestAWriteTheReaderWouldRefuseIsNotMade(t *testing.T) {
 	if b, err := sizedState(t, 4096).encode(); err != nil || len(b) != 4096 {
 		t.Fatalf("the sized fixture is %d bytes, %v, want 4096: its size is not the one asked for", len(b), err)
 	}
-	if err := s.Update(func(st *State) error { *st = past.Clone(); return nil }); err == nil {
-		t.Fatal("a write past the reader's bound was made, which the next start refuses")
+	if err := s.Update(func(st *State) error { *st = past.Clone(); return nil }); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("a write past the reader's bound = %v, want ErrTooLarge: it would leave a file the next start refuses", err)
 	}
 	if !reflect.DeepEqual(s.State(), before) {
 		t.Fatal("a refused write changed the store's state")

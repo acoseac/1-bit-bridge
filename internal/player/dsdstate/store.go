@@ -57,7 +57,8 @@ type Report struct {
 
 // ErrNotWritable is a write refused because the state's file is there and
 // could not be read or set aside, so a write would replace what the state
-// could not keep: the file must be moved first.
+// could not keep: the file must be moved first. Each write looks again, so
+// the first write after it is moved is made.
 var ErrNotWritable = errors.New("dsdstate: the state's file could not be read or set aside, and is not written over until it is moved")
 
 // Store is the state's one writer (the package's doc): it holds the state
@@ -83,7 +84,9 @@ type options struct {
 }
 
 // Open reads the state at <dataDir>/player-dsd.json and returns its writer.
-// A missing file is the defaults (Missing), and nothing is written. A file
+// No entry at the name is the defaults (Missing), and nothing is written; an
+// entry that leads to no file, a link to nothing, is no fresh install, and is
+// left unread as below. A file
 // that reads and does not decode (Damaged) has its bytes copied, durably, to
 // player-dsd.json.bad-<timestamp> beside it, never deleted, and is then
 // replaced, in one rename, by a fresh state that refuses DSD (Refusing),
@@ -94,8 +97,9 @@ type options struct {
 // cannot be read (a read error, a named pipe or a directory at the name, one
 // past the bound, which cannot be copied whole), or whose bytes cannot be set
 // aside, is left where it is (Unread), the state is Refusing in memory, and
-// no write replaces the file until it is moved. Its only error is an empty
-// data directory: what it found is Report's.
+// no write replaces the file until it is moved; the first write after it is
+// moved is made, on that state. Its only error is an empty data directory:
+// what it found is Report's.
 func Open(dataDir string) (*Store, error) { return open(dataDir, options{}) }
 
 func open(dataDir string, o options) (*Store, error) {
@@ -114,6 +118,13 @@ func open(dataDir string, o options) (*Store, error) {
 	data, err := readBounded(s.path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
+		// The open follows a link, so a link that leads nowhere answers as no
+		// file does: only an Lstat that finds no entry is a fresh install
+		// (Codex on #1405).
+		if _, lerr := os.Lstat(s.path); !errors.Is(lerr, fs.ErrNotExist) {
+			s.unread(fmt.Errorf("dsdstate: the entry at the state's name leads to no file: %w", errors.Join(err, lerr)), nil)
+			break
+		}
 		s.state, s.report = Defaults(), Report{Outcome: Missing}
 	case err != nil:
 		s.unread(fmt.Errorf("dsdstate: the state cannot be read: %w", err), nil)
@@ -228,7 +239,14 @@ func (s *Store) Update(fn func(*State) error) error {
 
 func (s *Store) updateLocked(fn func(*State) error) error {
 	if s.blocked != nil {
-		return fmt.Errorf("%w: %w", ErrNotWritable, s.blocked)
+		// The operator may have moved the entry away since Open: then the
+		// write is made, on the state that refuses, so a choice clears the
+		// refusal with no restart (the Claude API reviewer on #1405). An entry
+		// still there, or one that cannot be looked at, is still refused.
+		if _, err := os.Lstat(s.path); !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%w: %w", ErrNotWritable, s.blocked)
+		}
+		s.blocked = nil
 	}
 	next := s.state.Clone()
 	if err := fn(&next); err != nil {
