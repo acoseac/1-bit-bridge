@@ -129,7 +129,8 @@ type Profile struct {
 	// colon and free text, or the clause's end ("refused DSD256: the unit
 	// would not negotiate its carrier (iOS cd125088)"). A clause that starts
 	// with no marker is free text and evidence of nothing; a marker clause of
-	// another shape, or a rate under two markers, is a problem.
+	// another shape, or a rate both heard and refused (refused and silence at
+	// are one result), is a problem.
 	Provenance []string `json:"provenance"`
 }
 

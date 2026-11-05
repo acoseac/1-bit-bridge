@@ -340,8 +340,10 @@ func (l *linter) dop(who string, d *DoP) {
 // lock"): a negotiation, a hardware confirmation or a DoP lock is evidence of
 // the transport, which no field here holds. The heard rate needs a heard
 // clause that lists it, each refused rate a refused or silence at clause, and
-// a rate under two markers in one profile's provenance is a contradiction. A
-// rate dop refuses as no DSD rate is not asked for again.
+// a rate both heard and refused in one profile's provenance is a
+// contradiction; refused and silence at are one result, a refusal, which two
+// units may give in two ways ("refused DSD256: unit 1 …; silence at DSD256:
+// unit 2 …"). A rate dop refuses as no DSD rate is not asked for again.
 func (l *linter) dopEvidence(who string, p *Profile) {
 	markers := map[int][]string{}
 	for _, line := range p.Provenance {
@@ -375,8 +377,10 @@ func (l *linter) dopEvidence(who string, p *Profile) {
 		}
 	}
 	for _, r := range dsdRates {
-		if ms := markers[r]; len(ms) > 1 {
-			l.add("%s: %s is under two markers in its dop clauses, %q: a profile states one result for a rate", who, dsdName(r), ms)
+		ms := markers[r]
+		if slices.Contains(ms, markerHeard) && (slices.Contains(ms, markerRefused) || slices.Contains(ms, markerSilence)) {
+			l.add("%s: %s is both heard and refused in its dop clauses (%q): heard is one result, and refused and silence at are the other, which two units may give in two ways",
+				who, dsdName(r), ms)
 		}
 	}
 	if h := p.DoP.HeardMaxBitRate; slices.Contains(dsdRates, h) && !slices.Contains(markers[h], markerHeard) {

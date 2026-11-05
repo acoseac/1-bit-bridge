@@ -90,8 +90,11 @@ anything, a negation included (`refused DSD256: no supported altsetting`). A
 clause that starts with no marker is free text too, and evidence of nothing
 (`DSD128's carrier reached a DoP lock`). A marker clause of any other shape
 (`heard at DSD128`, `heard DSD64 and DSD128`, `heard DSD128 not`, a marker
-with no rates) is a lint error that shows the form, and so is a rate under
-two markers in one profile's provenance (`heard DSD256; silence at DSD256`).
+with no rates) is a lint error that shows the form, and so is a rate both
+heard and refused in one profile's provenance (`heard DSD256; silence at
+DSD256`). `refused` and `silence at` are one result, a refusal, which two
+units may give in two ways (`refused DSD256: unit 1 would not negotiate;
+silence at DSD256: unit 2 played it silent`).
 The heard rate needs a `heard` clause that lists it, and each refused rate a
 `refused` or `silence at` one. `ios-check.py` reads the profiles' DoP fields
 and not these lines. It prints one line a

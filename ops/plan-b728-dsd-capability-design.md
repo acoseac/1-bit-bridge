@@ -176,8 +176,10 @@ Fields:
   - a clause that starts with no marker is free text and evidence of nothing
     (`DSD128's carrier reached a DoP lock`);
   - a marker clause of any other shape (`heard at DSD128`, `heard DSD64 and DSD128`, a marker with
-    no rates) is a lint error that shows the form, and so is one rate under two markers in a
-    profile's provenance (`heard DSD256; silence at DSD256`).
+    no rates) is a lint error that shows the form, and so is one rate both heard and refused in a
+    profile's provenance (`heard DSD256; silence at DSD256`); `refused` and `silence at` are one
+    result, a refusal, which two units may give in two ways (`refused DSD256: unit 1 …; silence at
+    DSD256: unit 2 …`).
 
   `heardMaxBitRate` needs a `heard` clause that lists it, and each of `refusedBitRates` a `refused`
   or `silence at` clause.
