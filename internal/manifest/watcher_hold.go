@@ -342,6 +342,24 @@ func (wt *Watcher) lookAgain(ctx context.Context, root, msg string) {
 	watcherLogger.Info(msg, "root", root)
 }
 
+// lookAgainAfterCreate is the look a Create of root asked for while root's own
+// watch was gone (handleEvent), taken on kqueue once fsnotify has watched the
+// folder now at root's path itself (flushPendingAdds), and only while the
+// handler would still take it: not for a root held since (its events are
+// dropped, and its retry looks at it), nor for one whose own watch is
+// fsnotify's again (something since watched it again).
+func (wt *Watcher) lookAgainAfterCreate(ctx context.Context, root string) {
+	if _, held := wt.held[root]; held {
+		return
+	}
+	if rw, watched := wt.rootWatches[root]; watched {
+		if _, installed := wt.watchSet()[rw]; installed {
+			return
+		}
+	}
+	wt.lookAgain(ctx, root, msgWatchRootRewatched)
+}
+
 // absentRootOf looks at the configured root dir is at or under, when a
 // debounced scan of dir is due, and answers it with what the look found when
 // it reads as a volume not mounted. A dir under no root is left to

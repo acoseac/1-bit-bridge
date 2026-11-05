@@ -199,7 +199,10 @@ func TestANestedRootInAnotherCaseIsWatchedOnceOnAVolumeThatFoldsCase(t *testing.
 // root is looked at again and watched where it is now, and a file written into
 // the new folder is seen (B651's eleventh round, Claude on round 10: round
 // 10's early return left the new folder unwatched until the check of the
-// roots' own watches came round). Runs where fsnotify watches through kqueue.
+// roots' own watches came round). The look comes with nothing else changing
+// in the library: it waits for the flush a new folder's watch waits for, and
+// the loop's quiet timer is what asks for it (B651's twelfth round, Codex on
+// round 11). Runs where fsnotify watches through kqueue.
 func TestAReplacedNestedRootIsWatchedAgainOnItsCreate(t *testing.T) {
 	dir := t.TempDir()
 	outer := filepath.Join(dir, "music")
@@ -219,7 +222,6 @@ func TestAReplacedNestedRootIsWatchedAgainOnItsCreate(t *testing.T) {
 	}
 	w.recheckFirst, w.recheckMax = 20*time.Millisecond, 100*time.Millisecond
 	w.rootCheckEvery, w.reconcileEvery = time.Hour, time.Hour
-	w.immediateFlushForTests = true
 	dropped := make(chan struct{}, 1)
 	w.dropEventForTests = func(ev fsnotify.Event) bool {
 		if ev.Has(fsnotify.Rename) && filepath.Clean(ev.Name) == nested {
@@ -248,27 +250,122 @@ func TestAReplacedNestedRootIsWatchedAgainOnItsCreate(t *testing.T) {
 	if err := os.Rename(filepath.Join(dir, "new"), nested); err != nil {
 		t.Fatal(err)
 	}
-	// Sorts after usb, so the pass over music that lists it sends usb's
-	// Create first.
-	const sync1, sync2 = "zz-sync-1.flac", "zz-sync-2.flac"
-	writeTracks(t, filepath.Join(outer, sync1))
-	watchWaitUntil(t, func() bool {
-		seen, _ := events.both(sync1, "")
-		return seen
-	}, nil, "the watcher never saw the file made in music after the new folder")
-	if lines := rec.Lines(msgWatchRootRewatched); len(lines) == 0 {
-		t.Fatalf("the Create of %s, a root whose watch went, was taken for the root still watched: nothing looked at it again", nested)
-	}
+	watchWaitUntil(t, func() bool { return len(rec.Lines(msgWatchRootRewatched)) > 0 }, nil,
+		"the Create of "+nested+", a root whose watch went, asked for no look at it, with nothing else changing in the library")
 
-	const fresh = "03.flac"
-	writeTracks(t, filepath.Join(nested, "Fresh", "Album", fresh), filepath.Join(outer, sync2))
+	const fresh, sync = "03.flac", "zz-sync.flac"
+	writeTracks(t, filepath.Join(nested, "Fresh", "Album", fresh), filepath.Join(outer, sync))
 	watchWaitUntil(t, func() bool {
 		seen, _ := events.both(fresh, "")
 		return seen
 	}, func() string {
-		if sawFresh, sawSync := events.both(fresh, sync2); sawSync && !sawFresh {
+		if sawFresh, sawSync := events.both(fresh, sync); sawSync && !sawFresh {
 			return "it saw the file made after it in music, so the new folder is not watched"
 		}
 		return ""
 	}, "the watcher saw no event for a file written into the nested root's new folder")
+}
+
+// TestAReplacedRootsCreateLeavesItsLookToTheFlush: on kqueue the Create of a
+// watched root whose own watch is gone adds no watch from its handler.
+// fsnotify watches the folder at the root's path itself right after sending
+// the Create, on its own goroutine, and an Add from the handler races that and
+// can leave a descriptor nothing closes, as a new folder's would (B212). The
+// look waits for the flush a new folder's watch waits for, and the flush
+// watches the root again, records its own watch, asks for its scan and says
+// so; unless, by then, the root is held (its retry looks at it) or its own
+// watch is back (B651's twelfth round, Codex on round 11). The race itself
+// has no seam: fsnotify's goroutine cannot be held between its send and its
+// open, so the handler is driven directly and what it leaves for the flush is
+// checked. Runs where fsnotify watches through kqueue.
+func TestAReplacedRootsCreateLeavesItsLookToTheFlush(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		// meanwhile is what happens to the root between the Create and the
+		// flush.
+		meanwhile func(t *testing.T, w *Watcher, root string)
+		look      bool
+	}{
+		{"nothing since", nil, true},
+		{"its own watch back since", func(t *testing.T, w *Watcher, root string) {
+			// As the check of the roots' own watches has it watched again,
+			// without the look's line.
+			if err := w.watchAgain(context.Background(), root); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"held since", func(t *testing.T, w *Watcher, root string) {
+			w.holdRoot(root, rootLook{absent: true, reason: rootAbsentUnreachable})
+		}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			outer := filepath.Join(dir, "music")
+			nested := filepath.Join(outer, "usb")
+			writeTracks(t, filepath.Join(outer, "Artist", "Album", "01.flac"), filepath.Join(nested, "Band", "Record", "01.flac"))
+			scanner := NewScanner([]string{outer, nested}, openStoreIn(t, dir), "")
+			if _, err := scanner.Scan(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			w, err := NewWatcher(scanner, time.Hour)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				w.cancelAllPending()
+				_ = w.w.Close()
+			})
+			if w.fds == nil {
+				t.Skip("fsnotify does not watch through kqueue on this host, where a Create's handler watches the folder it names")
+			}
+			// Both roots watched, as Run's start leaves them; then the nested
+			// root's own watch goes as kqueue drops a renamed folder's,
+			// without a word to the watcher or its account.
+			for _, root := range []string{outer, nested} {
+				if err := w.addTree(root, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			w.noteRootWatches([]string{outer, nested})
+			if err := w.w.Remove(nested); err != nil {
+				t.Fatal(err)
+			}
+			rec := loggingtest.Record(t)
+
+			w.handleEvent(context.Background(), fsnotify.Event{Name: nested, Op: fsnotify.Create})
+			if _, installed := w.watchSet()[nested]; installed {
+				t.Fatalf("the Create's handler watched %s itself, racing fsnotify's own watch of the folder at its path", nested)
+			}
+			if lines := rec.Lines(msgWatchRootRewatched); len(lines) != 0 {
+				t.Fatalf("the Create's handler looked at %s again: %q", nested, lines)
+			}
+			if c.meanwhile != nil {
+				c.meanwhile(t, w, nested)
+			}
+
+			w.flushPendingAdds(context.Background())
+			lines := rec.Lines(msgWatchRootRewatched)
+			if !c.look {
+				if len(lines) != 0 {
+					t.Errorf("the flush looked at %s again: %q", nested, lines)
+				}
+				return
+			}
+			if _, installed := w.watchSet()[nested]; !installed {
+				t.Fatalf("the flush did not watch %s again", nested)
+			}
+			if got := w.rootWatches[nested]; got != nested {
+				t.Errorf("the flush recorded %s's own watch as %q, want %q", nested, got, nested)
+			}
+			w.mu.Lock()
+			_, scan := w.pending[nested]
+			w.mu.Unlock()
+			if !scan {
+				t.Errorf("the flush asked for no scan of %s", nested)
+			}
+			if len(lines) != 1 {
+				t.Errorf("the flush said %d times that it watched %s again, want once: %q", len(lines), nested, lines)
+			}
+		})
+	}
 }

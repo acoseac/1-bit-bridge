@@ -375,18 +375,18 @@ func (wt *Watcher) loop(ctx context.Context) error {
 			quiet = nil
 			flushAsked = false
 			wt.loopGate.enter()
-			wt.flushPendingAdds()
+			wt.flushPendingAdds(ctx)
 			watcherLogger.Warn("fsnotify error", "err", err)
 		case <-quiet:
 			quiet = nil
 			wt.loopGate.enter()
-			flushAsked = wt.askFlush()
+			flushAsked = wt.askFlush(ctx)
 		case <-reconcile:
 			wt.loopGate.enter()
 			wt.reconcileWatches()
 		}
 		wt.loopGate.leave()
-		if !flushAsked && wt.flushNowForTests() {
+		if !flushAsked && wt.flushNowForTests(ctx) {
 			flushAsked = true
 		}
 		switch {
@@ -394,7 +394,7 @@ func (wt *Watcher) loop(ctx context.Context) error {
 		case wt.fds.off:
 			events, errs, quiet, reconcile = nil, nil, nil, nil
 			holdWake, recheckC, rootCheckC = nil, nil, nil
-		case quiet == nil && !flushAsked && len(wt.fds.pending) > 0:
+		case quiet == nil && !flushAsked && wt.fds.waiting():
 			wait.Reset(wt.deferredAddWait)
 			quiet = wait.C
 		}
@@ -412,10 +412,10 @@ func (wt *Watcher) loop(ctx context.Context) error {
 // Rename of the file replaces it and leaves the folders waiting, because
 // watching them from this event is the race the file exists to avoid.
 func (wt *Watcher) receive(ctx context.Context, ev fsnotify.Event) {
-	if wt.ownFlushEvent(ev) {
+	if wt.ownFlushEvent(ctx, ev) {
 		return
 	}
-	wt.flushPendingAdds()
+	wt.flushPendingAdds(ctx)
 	if drop := wt.dropEventForTests; drop != nil && drop(ev) {
 		return
 	}
@@ -426,7 +426,7 @@ func (wt *Watcher) receive(ctx context.Context, ev fsnotify.Event) {
 // the folders that are waiting. A removal replaces the file. Any other
 // event for it is ignored, so a change of mode does not scan the temp
 // directory.
-func (wt *Watcher) ownFlushEvent(ev fsnotify.Event) bool {
+func (wt *Watcher) ownFlushEvent(ctx context.Context, ev fsnotify.Event) bool {
 	path := wt.signalPath()
 	if path == "" || filepath.Clean(ev.Name) != filepath.Clean(path) {
 		return false
@@ -436,7 +436,7 @@ func (wt *Watcher) ownFlushEvent(ev fsnotify.Event) bool {
 		return true
 	}
 	if ev.Has(fsnotify.Write) {
-		wt.flushPendingAdds()
+		wt.flushPendingAdds(ctx)
 	}
 	return true
 }
@@ -508,18 +508,18 @@ func (wt *Watcher) replaceFlushSignal() {
 // are waiting. It reports whether that write is what will watch them. A
 // file that is gone is replaced first. A write that still does not land
 // watches them here, and the timer may run again.
-func (wt *Watcher) askFlush() bool {
+func (wt *Watcher) askFlush(ctx context.Context) bool {
 	if !wt.flushFileCurrent() {
 		wt.replaceFlushSignal()
 	}
 	if !wt.flushFileCurrent() {
-		wt.flushPendingAdds()
+		wt.flushPendingAdds(ctx)
 		return false
 	}
 	if _, err := wt.flushFile.WriteAt([]byte{1}, 0); err != nil {
 		wt.replaceFlushSignal()
 		if !wt.flushFileCurrent() || writeFlush(wt.flushFile) != nil {
-			wt.flushPendingAdds()
+			wt.flushPendingAdds(ctx)
 			return false
 		}
 	}
@@ -536,12 +536,12 @@ func writeFlush(f *os.File) error {
 // The double-open test sets immediateFlushForTests. Production waits
 // deferredAddWait. It reports whether the signal write is what will watch
 // the folder.
-func (wt *Watcher) flushNowForTests() bool {
-	if !wt.immediateFlushForTests || wt.fds == nil || wt.fds.off || len(wt.fds.pending) == 0 {
+func (wt *Watcher) flushNowForTests(ctx context.Context) bool {
+	if !wt.immediateFlushForTests || wt.fds == nil || wt.fds.off || !wt.fds.waiting() {
 		return false
 	}
 	wt.loopGate.enter()
-	asked := wt.askFlush()
+	asked := wt.askFlush(ctx)
 	wt.loopGate.leave()
 	return asked
 }
@@ -1066,9 +1066,17 @@ func (wt *Watcher) handleEvent(ctx context.Context, ev fsnotify.Event) {
 		// fsnotify's: kqueue drops a renamed root's watch without a word, and
 		// a Create at its path is then another folder put there, which is
 		// looked at and watched where it is now, or held (B651's eleventh
-		// round, Claude on round 10).
+		// round, Claude on round 10). On kqueue the look waits for the flush,
+		// as a new folder's watch does (below): fsnotify watches the folder at
+		// the root's path itself right after sending this event, and the
+		// look's Add would race that (B651's twelfth round, Codex on round
+		// 11).
 		if rw, watched := wt.rootWatches[root]; itself && watched && ev.Op&fsnotify.Create != 0 {
 			if _, installed := wt.watchSet()[rw]; installed {
+				return
+			}
+			if wt.fds != nil {
+				wt.fds.waitLook(root)
 				return
 			}
 			wt.lookAgain(ctx, root, msgWatchRootRewatched)

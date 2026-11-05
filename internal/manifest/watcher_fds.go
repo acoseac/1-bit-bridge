@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"maps"
@@ -210,6 +211,11 @@ type watchFDs struct {
 	// pending holds the new folders that wait for their watch
 	// (flushPendingAdds).
 	pending map[string]struct{}
+	// looks holds the configured roots a Create named while their own watch
+	// was gone, whose look waits as a new folder's watch does: fsnotify
+	// watches the folder now at the root's path itself right after sending
+	// the Create (handleEvent, lookAgainAfterCreate).
+	looks map[string]struct{}
 	// off says the watcher has released its watches for good.
 	off bool
 }
@@ -222,6 +228,7 @@ func newWatchFDs(limits WatchFDLimits, limitErr error) *watchFDs {
 		kids:     make(map[string]map[string]struct{}),
 		tops:     make(map[string]struct{}),
 		pending:  make(map[string]struct{}),
+		looks:    make(map[string]struct{}),
 	}
 }
 
@@ -337,6 +344,7 @@ func (f *watchFDs) forget() {
 	clear(f.kids)
 	clear(f.tops)
 	clear(f.pending)
+	clear(f.looks)
 	f.n = 0
 }
 
@@ -357,6 +365,19 @@ func (f *watchFDs) wait(dir string) {
 		f.pending[filepath.Clean(dir)] = struct{}{}
 	}
 }
+
+// waitLook records a configured root whose look waits, as a new folder's
+// watch does, for fsnotify to have watched the folder now at its path itself
+// (flushPendingAdds).
+func (f *watchFDs) waitLook(root string) {
+	if !f.off {
+		f.looks[root] = struct{}{}
+	}
+}
+
+// waiting reports whether a new folder's watch or a root's look waits for the
+// flush.
+func (f *watchFDs) waiting() bool { return len(f.pending) > 0 || len(f.looks) > 0 }
 
 // plannedWatch is a path asking for a tree's watches makes fsnotify hold:
 // a folder the watcher asks it to watch (watch), or an entry fsnotify opens
@@ -504,16 +525,27 @@ func (wt *Watcher) planWatches(root string, isConfiguredRoot bool) (plan []plann
 // has finished, and it is what calls this. A Remove or Rename of that file
 // replaces it and does not call this; the next write of the new file does.
 // A folder that has gone, or cannot
-// be read, is left to the scan its Create asked for.
-func (wt *Watcher) flushPendingAdds() {
+// be read, is left to the scan its Create asked for. The roots whose look
+// waits are looked at after the folders (lookAgainAfterCreate): a look that
+// watches a root again Adds it, which the handler of the Create that named it
+// must not (B651's twelfth round, Codex on round 11).
+func (wt *Watcher) flushPendingAdds(ctx context.Context) {
 	f := wt.fds
-	if f == nil || f.off || len(f.pending) == 0 {
+	if f == nil || f.off || !f.waiting() {
 		return
 	}
 	dirs := f.pendingInOrder()
 	clear(f.pending)
 	for _, d := range dirs {
 		_ = wt.addTree(d, false)
+		if f.off {
+			return
+		}
+	}
+	roots := slices.Sorted(maps.Keys(f.looks))
+	clear(f.looks)
+	for _, root := range roots {
+		wt.lookAgainAfterCreate(ctx, root)
 		if f.off {
 			return
 		}
