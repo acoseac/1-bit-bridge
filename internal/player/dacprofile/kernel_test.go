@@ -625,6 +625,13 @@ func TestTheKernelQuirkReaderReadsEachShape(t *testing.T) {
 		{"no switch on the ID", "switch (chip->usb_id) {", "switch (chip->other) {"},
 		{"an arm of another shape", "if (fp->altsetting == 3) return SNDRV_PCM_FMTBIT_DSD_U32_BE;", "fp->dsd_dop = true;"},
 		{"an arm returning another way", "if (fp->altsetting == 3) return SNDRV_PCM_FMTBIT_DSD_U32_BE;", "return quirk(fp);"},
+		// A format returned outside any altsetting test, or under a test the
+		// reader does not read, beside one it reads: the counts of returns and
+		// of format returns still agree, and the second format is no fact.
+		{"a format returned on every altsetting beside one returned on one", "if (fp->altsetting == 3) return SNDRV_PCM_FMTBIT_DSD_U32_BE; break;",
+			"if (fp->altsetting == 3) return SNDRV_PCM_FMTBIT_DSD_U32_BE; return SNDRV_PCM_FMTBIT_DSD_U16_LE;"},
+		{"a format returned under a test the reader does not read", "if (fp->altsetting == 3) return SNDRV_PCM_FMTBIT_DSD_U32_BE; break;",
+			"if (fp->altsetting == 3) return SNDRV_PCM_FMTBIT_DSD_U32_BE; if (fp->altsetting == 4 || sample_bytes == 4) return SNDRV_PCM_FMTBIT_DSD_U16_LE; break;"},
 		{"no ITF rule", "QUIRK_FLAG_ITF_USB_DSD_DAC) {", "QUIRK_FLAG_OTHER) {"},
 		{"no DSD_RAW rule", "&& fp->dsd_raw)", "&& fp->other)"},
 		{"no flags table", "quirk_flags_table[] = {", "other_table[] = {"},

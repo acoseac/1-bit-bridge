@@ -216,6 +216,72 @@ func TestNoEmbeddedDoPLineReadsAsAHearing(t *testing.T) {
 	}
 }
 
+// TestANegatedWordIsNoEvidence: a clause that says the rate was not heard,
+// not refused or not silent is the opposite of the evidence its field needs,
+// so a word the clause negates is none: not, never, no, nor, neither, none,
+// nothing, without, cannot and the contractions in n't before it ("was not
+// heard", "didn't refuse", "without silence"), and an answer after it ("heard:
+// no", "heard nothing"). The negation must govern the word, never the clause
+// around it: a clause whose not belongs to another verb is still evidence,
+// as the Mytek's seed line is ("the unit refused DSD256's 705.6 kHz carrier,
+// which it would not negotiate"), and every dop line the embedded database
+// holds still reads as its claims.
+func TestANegatedWordIsNoEvidence(t *testing.T) {
+	dopLine := func(text string) func(p *Profile) {
+		return func(p *Profile) { p.Provenance[2] = "dop: iOS profile fixture.dac, " + text + " (iOS cd125088)" }
+	}
+	runLintCases(t, []lintCase{
+		{"not heard", dopLine("DSD128 was not heard, DSD256 refused"), "DSD128"},
+		{"never heard", dopLine("DSD128 never heard, DSD256 refused"), "DSD128"},
+		{"wasn't heard", dopLine("DSD128 wasn't heard, DSD256 refused"), "DSD128"},
+		{"wasn’t heard, a typographic apostrophe", dopLine("DSD128 wasn’t heard, DSD256 refused"), "DSD128"},
+		{"cannot be heard", dopLine("DSD128 cannot be heard, DSD256 refused"), "DSD128"},
+		{"without being heard", dopLine("DSD128 played without being heard, DSD256 refused"), "DSD128"},
+		{"no rate heard", dopLine("no DSD128 heard, DSD256 refused"), "DSD128"},
+		{"heard: no", dopLine("DSD128 heard: no, DSD256 refused"), "DSD128"},
+		{"heard nothing", dopLine("DSD128 heard nothing, DSD256 refused"), "DSD128"},
+		{"not refused", dopLine("heard at DSD128, DSD256 was not refused"), "DSD256"},
+		{"never refused", dopLine("heard at DSD128, DSD256 never refused"), "DSD256"},
+		{"didn't refuse", dopLine("heard at DSD128, the unit didn't refuse DSD256"), "DSD256"},
+		{"cannot refuse", dopLine("heard at DSD128, the unit cannot refuse DSD256"), "DSD256"},
+		{"no refusal", dopLine("heard at DSD128, no refusal at DSD256"), "DSD256"},
+		{"without refusal", dopLine("heard at DSD128, DSD256 played without refusal"), "DSD256"},
+		{"neither refused nor silent", dopLine("heard at DSD128, DSD256 neither refused nor silent"), "DSD256"},
+		{"refused: none", dopLine("heard at DSD128, DSD256 refused: none"), "DSD256"},
+		{"not played as silence", dopLine("heard at DSD128, DSD256 not played as silence"), "DSD256"},
+		{"did not play it as silence", dopLine("heard at DSD128, DSD256 did not play it as silence"), "DSD256"},
+		{"never silent", dopLine("heard at DSD128, DSD256 never silent"), "DSD256"},
+		{"wasn't silent", dopLine("heard at DSD128, DSD256 wasn't silent"), "DSD256"},
+		{"without silence", dopLine("heard at DSD128, DSD256 played without silence"), "DSD256"},
+		{"no silence", dopLine("heard at DSD128, no silence at DSD256"), "DSD256"},
+	})
+	for _, text := range []string{
+		"heard at DSD128; the unit refused DSD256's 705.6 kHz carrier, which it would not negotiate",
+		"heard at DSD128, DSD256 would not negotiate and was refused",
+		"heard at DSD128 with no click, never at DSD256, which the unit refused",
+		"heard no click at DSD128, DSD256 played as silence, not as noise",
+		"DSD128 was heard, not merely locked; DSD256 refused",
+	} {
+		p := fixtureProfile("fixture.dac", "00d1")
+		dopLine(text)(&p)
+		if problems := fixture(nil, p).Lint(); len(problems) > 0 {
+			t.Errorf("%q, a negation of another word, lints as %v", text, problems)
+		}
+	}
+	db := mustDefault(t)
+	lines := 0
+	for _, p := range db.Profiles {
+		for _, l := range p.Provenance {
+			if strings.HasPrefix(l, "dop: ") {
+				lines++
+			}
+		}
+	}
+	if lines == 0 {
+		t.Fatal("the embedded database holds no dop line, so none was read")
+	}
+}
+
 // TestAnAnalogueControlNeedsItsProvenance: an analogue control a profile
 // lists for the DoP gain check to pass over is named by its interface, name
 // and index and carries a provenance line of its own, dated; the lint refuses
