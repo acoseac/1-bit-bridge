@@ -116,8 +116,9 @@ func TestAConvertedNameIsPairedAtItsLANAddressWithMDNSOff(t *testing.T) {
 // 192.168.2.20 and `listenAddress: 192.168.2.20:7788`, the QR dialled
 // 192.168.1.20, where nothing answers. The address the listener is bound to
 // wins, when a phone can dial it, then a customEndpoints entry a phone can
-// dial, then, only for a listener on every address, the first LAN IPv4 address:
-// a listener bound to loopback, a name or a link-local address isn't there, so
+// dial, then a loopback listener's own address, reached from this machine alone,
+// and only for a listener on every address, the first LAN IPv4 address. A
+// listener bound to any other name or a link-local address isn't there, so
 // without a custom endpoint a phone is told to set one.
 func TestTheLANFallbackIsTheAddressTheListenerIsBoundTo(t *testing.T) {
 	custom := []string{"https://music.example.test:8443"}
@@ -133,9 +134,10 @@ func TestTheLANFallbackIsTheAddressTheListenerIsBoundTo(t *testing.T) {
 		{"on every address", ":7788", nil, "https://192.168.1.20:7788"},
 		{"on every IPv4 address", "0.0.0.0:7788", nil, "https://192.168.1.20:7788"},
 		{"on every IPv6 address", "[::]:7788", nil, "https://192.168.1.20:7788"},
-		{"bound to loopback", "127.0.0.1:7788", nil, ""},
+		{"bound to loopback", "127.0.0.1:7788", nil, "https://127.0.0.1:7788"},
 		{"bound to loopback, beside a custom endpoint", "127.0.0.1:7788", custom, "https://music.example.test:8443"},
-		{"bound to a name", "localhost:7788", nil, ""},
+		{"bound to loopback by name", "localhost:7788", nil, "https://localhost:7788"},
+		{"bound to a name", "music.example.test:7788", nil, ""},
 		{"bound to an IPv6 link-local address", "[fe80::20%en1]:7788", nil, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

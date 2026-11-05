@@ -477,12 +477,14 @@ func PairingPrimary(cfg *config.Config) (dial, why string) {
 //     loopback and not IPv6 link-local (whose zone names this host's
 //     interface). The walk's other addresses are not where it listens;
 //   - else the first customEndpoints entry a phone can dial;
+//   - else, for a listener on loopback, that address, for this machine alone;
 //   - else, for a listener on every address, the first LAN IPv4 address of the
 //     interface walk, which a certificate this bridge mints names;
 //   - else "", which the pairing page, a refused mint and bridge doctor
 //     answer with advertise.PairingNeedsEndpoint.
 //
-// Never localhost, which names the phone itself.
+// Never localhost for a listener a phone could reach, where it names the phone
+// itself.
 //
 // The walk's first LAN IPv4 address is the one /v1/health lists first
 // (Deps.Endpoints, which the QR's urls= reads): health publishes every IPv4
@@ -505,9 +507,13 @@ func lanPairingURL(cfg *config.Config, port string) string {
 	if u := firstDialableCustom(cfg.CustomEndpoints); u != "" {
 		return explicitHTTPSPort(u)
 	}
-	// A listener bound to loopback, a name or a link-local address isn't on
-	// the walk's addresses, so nothing would answer there.
+	// A listener bound to loopback is reached from this machine alone, so its
+	// own address is the one true answer (the same-machine pairing path). Any
+	// other bind isn't on the walk's addresses, so nothing would answer there.
 	if !onEveryAddress {
+		if host, _, err := net.SplitHostPort(cfg.ListenAddress); err == nil && loopbackHostname(host) {
+			return httpsScheme + net.JoinHostPort(strings.Trim(host, "[]"), port)
+		}
 		return ""
 	}
 	p, _ := strconv.Atoi(port)
