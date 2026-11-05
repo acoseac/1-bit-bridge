@@ -1,6 +1,7 @@
 package fsutil
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // foldingVolume stands in for volumes this host may not have, over a real
@@ -156,6 +158,156 @@ func TestFoldingInAnswersAsThisHostsVolumeLooksNamesUp(t *testing.T) {
 	}
 	if got := FoldingIn(dir); got != want {
 		t.Errorf("this host's folder answered %s; a lookup of PROBE beside Probe says %s", got, want)
+	}
+}
+
+// probeFolder is a folder that is on no disk, for the probe's seam: its
+// listing as the probe reads it, the files its names name now (two names of
+// one file, a hard link's, share an id), whether it folds case, which names
+// os.SameFile could not open (Windows answers false then), and what happens to
+// it before each lookup (change, handed the name looked up), so that a test
+// can change it between the probe's lookups.
+type probeFolder struct {
+	listing    []string
+	ids        map[string]int
+	folds      bool
+	cannotOpen map[string]bool
+	change     func(f *probeFolder, name string)
+}
+
+// probeInfo is a probeFolder's lookup: the name it found and its file.
+type probeInfo struct {
+	name string
+	id   int
+}
+
+func (i probeInfo) Name() string         { return i.name }
+func (probeInfo) Size() int64            { return 0 }
+func (probeInfo) Mode() fs.FileMode      { return 0o644 }
+func (probeInfo) ModTime() (t time.Time) { return t }
+func (probeInfo) IsDir() bool            { return false }
+func (probeInfo) Sys() any               { return nil }
+
+// readDir answers the listing, n names of it at most where n > 0, as
+// os.File.ReadDir does: fewer than n only at its end.
+func (f *probeFolder) readDir(_ string, n int) ([]fs.DirEntry, error) {
+	names := f.listing
+	if n > 0 && len(names) > n {
+		names = names[:n]
+	}
+	out := make([]fs.DirEntry, len(names))
+	for i, name := range names {
+		out[i] = fs.FileInfoToDirEntry(probeInfo{name: name})
+	}
+	return out, nil
+}
+
+func (f *probeFolder) lstat(p string) (fs.FileInfo, error) {
+	name := filepath.Base(p)
+	if f.change != nil {
+		f.change(f, name)
+	}
+	if id, ok := f.ids[name]; ok {
+		return probeInfo{name, id}, nil
+	}
+	if f.folds {
+		for n, id := range f.ids {
+			if strings.EqualFold(n, name) {
+				return probeInfo{n, id}, nil
+			}
+		}
+	}
+	return nil, &fs.PathError{Op: "lstat", Path: p, Err: fs.ErrNotExist}
+}
+
+func (f *probeFolder) sameFile(a, b fs.FileInfo) bool {
+	x, y := a.(probeInfo), b.(probeInfo)
+	return !f.cannotOpen[x.name] && !f.cannotOpen[y.name] && x.id == y.id
+}
+
+// caseless is n names with no letter in them, which the probe passes over.
+func caseless(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("%03d", i)
+	}
+	return out
+}
+
+// TestTwoNamesOfOneFileAreNoProofThatAFolderFoldsCase: a lookup of a name in
+// another case that finds the same file proves one entry only where that
+// spelling is no name of its own in the folder: on a case-sensitive volume
+// (ext4, a case-sensitive APFS) a hard link's two names, folder.jpg and
+// FOLDER.JPG, are one file and two entries (B651's ninth round, Codex and
+// Claude on round 8). The whole listing is read for that spelling where the
+// probe's first read was not all of it. A folder that folds lists one
+// spelling alone, and answers so, however long its listing.
+func TestTwoNamesOfOneFileAreNoProofThatAFolderFoldsCase(t *testing.T) {
+	links := map[string]int{"folder.jpg": 1, "FOLDER.JPG": 1}
+	for _, c := range []struct {
+		name string
+		f    *probeFolder
+		want CaseFolding
+	}{
+		{"a hard link's two names", &probeFolder{listing: []string{"folder.jpg", "FOLDER.JPG"}, ids: links}, CaseSensitive},
+		{"the other way round", &probeFolder{listing: []string{"FOLDER.JPG", "folder.jpg"}, ids: links}, CaseSensitive},
+		{"the other name past the first read", &probeFolder{
+			listing: append(append(caseless(foldingProbeEntries-1), "folder.jpg"), append(caseless(10), "FOLDER.JPG")...), ids: links}, CaseSensitive},
+		{"a folder that folds", &probeFolder{listing: []string{"Folder.jpg"}, ids: map[string]int{"Folder.jpg": 1}, folds: true}, CaseInsensitive},
+		{"a folder that folds, past the first read", &probeFolder{
+			listing: append(append(caseless(foldingProbeEntries-1), "Folder.jpg"), caseless(10)...),
+			ids:     map[string]int{"Folder.jpg": 1}, folds: true}, CaseInsensitive},
+	} {
+		if got := foldingIn(c.f, "/music"); got != c.want {
+			t.Errorf("%s: the folder answered %s, want %s", c.name, got, c.want)
+		}
+	}
+}
+
+// TestAnEntryThatChangesBetweenTheLookupsTellsNothing: the probe answers only
+// from lookups that agree with themselves, the entry it probes still the file
+// it first found, and the other spelling's too where it was found; otherwise
+// it asks the next entry (B651's ninth round, Codex and Claude on round 8).
+// An entry removed between the two lookups, or replaced by a save that
+// renames a new file over it, or one os.SameFile cannot open (Windows answers
+// false then), made a folder that folds answer case-sensitive; one renamed to
+// its other spelling between the lookups made a case-sensitive folder answer
+// case-insensitive.
+func TestAnEntryThatChangesBetweenTheLookupsTellsNothing(t *testing.T) {
+	once := func(at string, do func(f *probeFolder)) func(*probeFolder, string) {
+		done := false
+		return func(f *probeFolder, name string) {
+			if name == at && !done {
+				done = true
+				do(f)
+			}
+		}
+	}
+	folding := func() *probeFolder {
+		return &probeFolder{listing: []string{"Album", "Band"}, ids: map[string]int{"Album": 1, "Band": 2}, folds: true}
+	}
+	removed, saved, unopened := folding(), folding(), folding()
+	removed.change = once("ALBUM", func(f *probeFolder) { delete(f.ids, "Album") })
+	saved.change = once("ALBUM", func(f *probeFolder) { f.ids["Album"] = 3 })
+	unopened.cannotOpen = map[string]bool{"Album": true}
+	renamed := &probeFolder{listing: []string{"Album"}, ids: map[string]int{"Album": 1}}
+	renamed.change = once("ALBUM", func(f *probeFolder) {
+		delete(f.ids, "Album")
+		f.ids["ALBUM"] = 1
+	})
+	for _, c := range []struct {
+		name string
+		f    *probeFolder
+		want CaseFolding
+	}{
+		{"an entry removed between the lookups, in a folder that folds", removed, CaseInsensitive},
+		{"an entry a save replaced between the lookups, in a folder that folds", saved, CaseInsensitive},
+		{"an entry os.SameFile cannot open, in a folder that folds", unopened, CaseInsensitive},
+		{"an entry renamed to its other spelling between the lookups, in a case-sensitive folder", renamed, CaseUnknown},
+	} {
+		if got := foldingIn(c.f, "/music"); got != c.want {
+			t.Errorf("%s: the folder answered %s, want %s", c.name, got, c.want)
+		}
 	}
 }
 

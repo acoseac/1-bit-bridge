@@ -2,6 +2,7 @@ package fsutil
 
 import (
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -44,12 +45,18 @@ const foldingProbeEntries = 256
 // folder itself: an entry of its listing whose name holds an ASCII letter is
 // looked up again with the case of those letters swapped (Lstat), and the
 // folder folds case when that finds the same entry, and does not when it finds
-// nothing or another entry. The names in a folder are compared by the volume
-// the folder is on, which is not the volume of the folder's own name where a
-// volume is mounted on it: an exFAT stick mounted on an ext4 folder folds the
-// names in it, while its mount point's name, in the folder above, is compared
-// as ext4 compares (B651's seventh round, Codex on round 6, where the probe
-// looked up the folder's own name in its parent).
+// nothing or another entry. The same file found is one entry only where the
+// swapped spelling is no name of its own in the listing (a hard link's second
+// name, on a case-sensitive volume, is one), read whole for it where the
+// probe's first read was not; and an answer comes only from lookups that agree
+// with themselves, the entry still the file first found, so an entry removed
+// or saved over between the lookups, or one os.SameFile cannot open (Windows),
+// passes the question to the next (B651's ninth round). The names in a folder
+// are compared by the volume the folder is on, which is not the volume of the
+// folder's own name where a volume is mounted on it: an exFAT stick mounted on
+// an ext4 folder folds the names in it, while its mount point's name, in the
+// folder above, is compared as ext4 compares (B651's seventh round, Codex on
+// round 6, where the probe looked up the folder's own name in its parent).
 //
 // It writes nothing. A folder whose listing offers no such name (an empty one,
 // a bare mount point among them, or one whose names hold no letter), and one
@@ -85,8 +92,10 @@ func (osFolding) sameFile(a, b fs.FileInfo) bool { return os.SameFile(a, b) }
 
 // foldingIn is FoldingIn over fsys.
 func foldingIn(fsys foldingFS, dir string) CaseFolding {
-	// A listing cut short by an error still offers what it read.
-	entries, _ := fsys.readDir(dir, foldingProbeEntries)
+	// A listing cut short by an error still offers what it read, and is not
+	// the whole of it; one that ends before the batch is full is.
+	entries, err := fsys.readDir(dir, foldingProbeEntries)
+	whole := err == nil && len(entries) < foldingProbeEntries || errors.Is(err, io.EOF)
 	for _, e := range entries {
 		name := e.Name()
 		swapped, ok := swapASCIICase(name)
@@ -97,19 +106,68 @@ func foldingIn(fsys foldingFS, dir string) CaseFolding {
 		if err != nil {
 			continue // gone since the listing, or not to be read: ask another
 		}
-		other, err := fsys.lstat(filepath.Join(dir, swapped))
+		other, otherErr := fsys.lstat(filepath.Join(dir, swapped))
+		// Only lookups that agree with themselves answer: the entry is still
+		// the file first found, as the other spelling is where it was found.
+		// One removed, or replaced by a save, between the lookups says nothing
+		// of how the folder compares names, and neither does a file
+		// os.SameFile cannot open, which it answers false for on Windows
+		// (B651's ninth round, Codex and Claude on round 8).
+		if !stillFound(fsys, dir, name, mine) {
+			continue
+		}
 		switch {
-		case err == nil:
-			if fsys.sameFile(mine, other) {
-				return CaseInsensitive
+		case otherErr == nil:
+			if !stillFound(fsys, dir, swapped, other) {
+				continue
 			}
-			return CaseSensitive // both spellings there, as two entries
-		case errors.Is(err, fs.ErrNotExist):
+			if !fsys.sameFile(mine, other) {
+				return CaseSensitive // both spellings there, as two entries
+			}
+			// One file under both spellings is one entry unless the other
+			// spelling is a name of its own in the listing, as a hard link's
+			// second name is on a case-sensitive volume.
+			listed, known := listsName(fsys, dir, entries, whole, swapped)
+			switch {
+			case !known:
+				continue
+			case listed:
+				return CaseSensitive
+			}
+			return CaseInsensitive
+		case errors.Is(otherErr, fs.ErrNotExist):
 			return CaseSensitive
 		}
 		// Any other error says nothing of how the folder compares names.
 	}
 	return CaseUnknown
+}
+
+// stillFound reports whether a lookup of name in dir again finds the file
+// first found.
+func stillFound(fsys foldingFS, dir, name string, first fs.FileInfo) bool {
+	again, err := fsys.lstat(filepath.Join(dir, name))
+	return err == nil && fsys.sameFile(first, again)
+}
+
+// listsName reports whether the folder dir's listing holds name, byte for
+// byte, and whether that is known: read from the entries the probe read
+// where they are the whole listing (whole), else from the whole listing read
+// again, and not known where it cannot be read whole.
+func listsName(fsys foldingFS, dir string, read []fs.DirEntry, whole bool, name string) (listed, known bool) {
+	if !whole {
+		all, err := fsys.readDir(dir, -1)
+		if err != nil {
+			return false, false
+		}
+		read = all
+	}
+	for _, e := range read {
+		if e.Name() == name {
+			return true, true
+		}
+	}
+	return false, true
 }
 
 // swapASCIICase is name with the case of its ASCII letters swapped: upper
