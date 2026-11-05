@@ -112,15 +112,39 @@ func (nopResolver) Open(context.Context, engine.Reference) (Content, error) {
 }
 
 // TestThePackingsAreTheDesignsTable pins B470's §1 table and its order: the
-// container as wide as the samples first.
+// container as wide as the samples first, then the wider ones, narrowest
+// first, 16 bits widening since B735; each a packing the format package
+// packs; and Packings hands out the table's order in a slice of the
+// caller's own, none for a depth the player does not play.
 func TestThePackingsAreTheDesignsTable(t *testing.T) {
-	want := map[int][]format.ALSAFormat{16: {format.S16LE}, 24: {format.S243LE, format.S24LE, format.S32LE}, 32: {format.S32LE}}
+	want := map[int][]format.ALSAFormat{
+		16: {format.S16LE, format.S243LE, format.S24LE, format.S32LE},
+		24: {format.S243LE, format.S24LE, format.S32LE},
+		32: {format.S32LE},
+	}
 	if len(packings) != len(want) {
 		t.Fatalf("packings %v", packings)
 	}
 	for bits, fs := range want {
 		if !slices.Equal(packings[bits], fs) {
 			t.Errorf("%d bits: %v, want %v", bits, packings[bits], fs)
+		}
+		for _, f := range packings[bits] {
+			if _, err := format.Pack(make([]byte, 8), []int32{-1}, bits, f); err != nil {
+				t.Errorf("%d bits in %s, which the format package does not pack: %v", bits, f, err)
+			}
+		}
+		got := Packings(bits)
+		if !slices.Equal(got, fs) {
+			t.Errorf("Packings(%d) = %v, want %v", bits, got, fs)
+		}
+		if len(got) > 0 && &got[0] == &packings[bits][0] {
+			t.Errorf("Packings(%d) handed out the table itself", bits)
+		}
+	}
+	for _, bits := range []int{0, 8, 12, 20} {
+		if got := Packings(bits); len(got) != 0 {
+			t.Errorf("Packings(%d) = %v, want none", bits, got)
 		}
 	}
 }

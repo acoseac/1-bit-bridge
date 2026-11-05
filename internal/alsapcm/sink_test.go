@@ -466,8 +466,10 @@ func TestSinkRefusesWhatItCannotPlay(t *testing.T) {
 	}{
 		{"native DSD", func(_ *fakeKernel, c *SinkConfig) { c.Transport.Kind = format.KindNativeDSD }, ReasonBadConfig},
 		{"mono", func(_ *fakeKernel, c *SinkConfig) { c.Transport.Channels = 1 }, ReasonBadConfig},
-		{"16 bits in S24_3LE", func(_ *fakeKernel, c *SinkConfig) { c.Transport.ValidBits = 16 }, ReasonBadConfig},
+		{"24 bits in S16_LE", func(_ *fakeKernel, c *SinkConfig) { c.Transport.Format = format.S16LE }, ReasonBadConfig},
 		{"32 bits in S24_LE", func(_ *fakeKernel, c *SinkConfig) { c.Transport.Format, c.Transport.ValidBits = format.S24LE, 32 }, ReasonBadConfig},
+		{"8 bits in S32_LE", func(_ *fakeKernel, c *SinkConfig) { c.Transport.Format, c.Transport.ValidBits = format.S32LE, 8 }, ReasonBadConfig},
+		{"20 bits in S24_3LE", func(_ *fakeKernel, c *SinkConfig) { c.Transport.ValidBits = 20 }, ReasonBadConfig},
 		{"lookahead too short", func(_ *fakeKernel, c *SinkConfig) { c.Lookahead = 10 * time.Millisecond }, ReasonBadConfig},
 		{"lookahead too long", func(_ *fakeKernel, c *SinkConfig) { c.Lookahead = time.Minute }, ReasonBadConfig},
 		{"release too soon", func(_ *fakeKernel, c *SinkConfig) { c.ReleaseAfter = time.Millisecond }, ReasonBadConfig},
@@ -503,6 +505,42 @@ func TestSinkRefusesWhatItCannotPlay(t *testing.T) {
 		now:  k.now,
 	}); ReasonOf(err) != ReasonCancelled || len(k.opened) != 0 {
 		t.Errorf("a life already over: %v, %d opens; want cancelled before the open", err, len(k.opened))
+	}
+}
+
+// TestTheSinkCarriesWhatTheFormatPackagePacks pins the sink's gate to the
+// packer's (B735): a transport the sink takes is one format.Pack packs, and
+// the reverse, for each format and depth: S16_LE 16 bits; S24_3LE and S24_LE
+// 16 or 24; S32_LE 16, 24 or 32; no other depth. Each the sink takes opens.
+func TestTheSinkCarriesWhatTheFormatPackagePacks(t *testing.T) {
+	want := map[format.ALSAFormat][]int{
+		format.S16LE: {16}, format.S243LE: {16, 24}, format.S24LE: {16, 24}, format.S32LE: {16, 24, 32},
+	}
+	for f, depths := range want {
+		for _, bits := range []int{8, 12, 16, 20, 24, 32} {
+			_, perr := format.Pack(make([]byte, 8), []int32{-1}, bits, f)
+			cfg := sinkConfig()
+			cfg.Transport.Format, cfg.Transport.ValidBits = f, bits
+			_, err := cfg.resolve()
+			if carried := slices.Contains(depths, bits); carries(f, bits) != carried || (err == nil) != carried || (perr == nil) != carried {
+				t.Errorf("%d bits in %s: the sink carries them %v (resolve: %v), the packer packs them %v (%v); want %v",
+					bits, f, carries(f, bits), err, perr == nil, perr, carried)
+			}
+		}
+	}
+	for _, f := range []format.ALSAFormat{format.S243LE, format.S24LE, format.S32LE} {
+		k := newModel(t)
+		k.inspect(func(k *fakeKernel) { k.hw.formats = []uint32{sampleFormats[f].code} })
+		cfg := sinkConfig()
+		cfg.Transport.Format, cfg.Transport.ValidBits = f, 16
+		s := openTestSink(t, k, cfg)
+		if got := s.Transport(); got.Format != f || got.ValidBits != 16 {
+			t.Errorf("a sink opened for 16 bits in %s plays %v", f, got)
+		}
+		if err := s.Close(); err != nil {
+			t.Error(err)
+		}
+		k.checkClosedEach(t)
 	}
 }
 
