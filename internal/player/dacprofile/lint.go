@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/acoseac/1-bit-bridge/internal/usbid"
@@ -53,7 +54,23 @@ var (
 	// that a device refused it or played it as silence.
 	reHeard   = regexp.MustCompile(`(?i)\bheard\b`)
 	reRefusal = regexp.MustCompile(`(?i)\b(?:refus\w*|silen\w*)\b`)
+	// reToken is a word, with the marks inside one (DSD256's, 705.6, wasn't,
+	// hardware-confirmed), or one mark between words, which ends a phrase.
+	reToken = regexp.MustCompile(`[\p{L}\p{N}]+(?:['’.\-][\p{L}\p{N}]+)*|[^\s\p{L}\p{N}]`)
 )
+
+// negators are the words that negate the word they govern; a word ending in
+// n't (wasn't, didn't, can't), with either apostrophe, is one too.
+var negators = []string{"not", "never", "no", "nor", "neither", "none", "nothing", "without", "cannot"}
+
+// joiners start a phrase of their own, so a negation before one governs
+// another verb: "it would not negotiate and refused DSD256".
+var joiners = []string{"and", "but", "then", "which", "that", "who", "while", "whereas", "because", "so",
+	"although", "though", "when", "where", "after", "before", "until", "unless", "if"}
+
+// negatorReach is how many words before a keyword a negator still governs
+// it from: "did not play it as silence".
+const negatorReach = 4
 
 // dsdName is a rate of dsdRates as a claim names it: DSD and the rate's
 // multiple of 44.1 kHz (DSD128).
@@ -311,9 +328,11 @@ func (l *linter) dop(who string, d *DoP) {
 // heard, and for each refused rate, one that names it and says a device
 // refused it or played it as silence. The word and the rate share a clause,
 // so a line that tells of one rate's refusal and another's lock is evidence
-// of the refusal alone. A negotiation, a hardware confirmation or a DoP lock
-// is evidence of the transport, which no field here holds (the review of
-// #1402). A rate dop refuses as no DSD rate is not asked for again.
+// of the refusal alone; and a word the clause negates is none (negated), so
+// "DSD128 was not heard" is no hearing. A negotiation, a hardware
+// confirmation or a DoP lock is evidence of the transport, which no field
+// here holds (the review of #1402). A rate dop refuses as no DSD rate is not
+// asked for again.
 func (l *linter) dopEvidence(who string, p *Profile) {
 	says := func(rate int, re *regexp.Regexp) bool {
 		name := regexp.MustCompile(`\b` + dsdName(rate) + `\b`)
@@ -322,8 +341,13 @@ func (l *linter) dopEvidence(who string, p *Profile) {
 				continue
 			}
 			for _, clause := range strings.Split(line, ";") {
-				if name.MatchString(clause) && re.MatchString(clause) {
-					return true
+				if !name.MatchString(clause) {
+					continue
+				}
+				for _, m := range re.FindAllStringIndex(clause, -1) {
+					if !negated(clause, m[0], m[1]) {
+						return true
+					}
 				}
 			}
 		}
@@ -337,6 +361,47 @@ func (l *linter) dopEvidence(who string, p *Profile) {
 			l.add("%s: refused rate %s is one a device refused or played as silence, and no clause of a dop provenance line names it and says refused or silence", who, dsdName(r))
 		}
 	}
+}
+
+// negated reports whether the keyword at clause[start:end] is negated: a
+// negator among the negatorReach words before it, back to the mark or the
+// joining word that starts its phrase ("was not heard", "never refused",
+// "without silence", "wasn't heard", "didn't refuse", "did not play it as
+// silence"); or after it, nothing or none ("heard nothing"), or an answer
+// after a colon, an equals sign or a dash ("heard: no"). The negation must
+// govern the keyword, never merely share its clause: "the unit refused
+// DSD256's 705.6 kHz carrier, which it would not negotiate" is a refusal. A
+// negator within reach that governs another word ("not only heard") still
+// reads as the keyword's, which asks the line for other words, never takes
+// a negated one.
+func negated(clause string, start, end int) bool {
+	before := reToken.FindAllString(clause[:start], -1)
+	for i, n := len(before)-1, 0; i >= 0 && n < negatorReach; i, n = i-1, n+1 {
+		w := lowerWord(before[i])
+		if w == "" || slices.Contains(joiners, w) {
+			break
+		}
+		if slices.Contains(negators, w) || strings.HasSuffix(w, "n't") {
+			return true
+		}
+	}
+	after := reToken.FindAllString(clause[end:], 2)
+	switch {
+	case len(after) > 0 && slices.Contains([]string{"nothing", "none"}, lowerWord(after[0])):
+		return true
+	case len(after) == 2 && slices.Contains([]string{":", "=", "-", "–", "—"}, after[0]):
+		return slices.Contains([]string{"no", "not", "none", "never", "nothing"}, lowerWord(after[1]))
+	}
+	return false
+}
+
+// lowerWord is a token as a lower-case word with a plain apostrophe, or ""
+// for a mark.
+func lowerWord(tok string) string {
+	if r, _ := utf8.DecodeRuneInString(tok); !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+		return ""
+	}
+	return strings.ToLower(strings.ReplaceAll(tok, "’", "'"))
 }
 
 // String names a control as interface/name/index.

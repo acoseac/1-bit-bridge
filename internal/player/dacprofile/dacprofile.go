@@ -153,12 +153,13 @@ type DoP struct {
 	// never one a negotiation, a hardware confirmation or a DoP lock reached
 	// (section 1.1: the iOS lock hears nothing back), and a clause of a dop
 	// provenance line (the text between two semicolons) names it and says
-	// heard; StatedMaxBitRate is the maker's figure; 0 is none.
+	// heard, a heard the clause does not negate ("not heard" is no hearing);
+	// StatedMaxBitRate is the maker's figure; 0 is none.
 	HeardMaxBitRate  int `json:"heardMaxBitRate"`
 	StatedMaxBitRate int `json:"statedMaxBitRate"`
 	// RefusedBitRates are the rates a device refused, or played as silence,
-	// each named, beside refused or silence, in a clause of a dop provenance
-	// line.
+	// each named, beside refused or silence that the clause does not negate,
+	// in a clause of a dop provenance line.
 	RefusedBitRates []int `json:"refusedBitRates"`
 	// AnalogVolumeControls are the controls this model applies after its DoP
 	// decoder, which the DoP gain check passes over.

@@ -76,7 +76,10 @@ whose rate a negotiation, a hardware confirmation or a DoP lock reached gives
 no heard rate (the design's section 1.1: the iOS lock hears nothing back), and
 the lint asks for a clause that names the heard rate and says heard, so a
 line that tells of one rate's refusal and another's lock is evidence of the
-refusal alone. It prints one line a
+refusal alone. A word the clause negates is no evidence ("DSD128 was not
+heard", "the unit didn't refuse DSD256", "heard: no"), while a negation of
+another verb leaves it one ("the unit refused DSD256's carrier, which it
+would not negotiate"). It prints one line a
 profile and exits 1 on a violation; paste its output into the PR. The
 registry's prose is never read, only each row's id and its `maxDSDRate`, and
 only a row's DoP evidence and caveats are imported, never
