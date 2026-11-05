@@ -77,7 +77,7 @@ func fixtureProfile(id, productID string) Profile {
 		Provenance: []string{
 			"identity: test fixture, 2026-11-04: a placeholder ID no unit carries",
 			"native: owner capture, Linux, 2026-11-04: interface 1's altset 2 lists DSD_U32_BE",
-			"dop: iOS profile fixture.dac, heard at DSD128, DSD256 refused (iOS cd125088)",
+			"dop: heard DSD128: iOS profile fixture.dac (iOS cd125088); refused DSD256: iOS profile fixture.dac (iOS cd125088)",
 			"timing: iOS profile fixture.dac's DSD resync delay, 0.7 s (iOS cd125088)",
 			"caveat transition_clicks: iOS profile fixture.dac, clicks heard at DSD128 and DSD256 (iOS cd125088)",
 		},

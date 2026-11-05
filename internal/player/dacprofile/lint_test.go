@@ -134,26 +134,28 @@ func TestEveryClaimNamesItsProvenance(t *testing.T) {
 
 // TestAHeardRateIsAHearingNeverALock: a heard DoP rate is on-device
 // listening evidence (the design's sections 1.1 and 2.1), so the lint asks a
-// DoP claim with a heard rate for a dop line that names that rate and says
-// it was heard; a line that says the rate was negotiated, confirmed on
-// hardware or reached a DoP lock, which section 1.1 says hears nothing back,
-// is no hearing, and nor is a hearing of another rate. A claim with no heard
+// DoP claim with a heard rate for a dop clause in evidence's form that lists
+// it under heard ("heard DSD128: <source>"); a clause that says the rate was
+// negotiated, confirmed on hardware or reached a DoP lock, which section 1.1
+// says hears nothing back, starts with no marker and is evidence of nothing,
+// and a hearing of another rate is not this one's. A claim with no heard
 // rate, a refusal alone, needs none.
 func TestAHeardRateIsAHearingNeverALock(t *testing.T) {
 	dopLine := func(text string) func(p *Profile) {
-		return func(p *Profile) { p.Provenance[2] = "dop: iOS profile fixture.dac, " + text + " (iOS cd125088)" }
+		return func(p *Profile) {
+			p.Provenance[2] = "dop: " + text + "; refused DSD256: iOS profile fixture.dac (iOS cd125088)"
+		}
 	}
 	runLintCases(t, []lintCase{
-		{"confirmed on hardware", dopLine("DSD128 hardware-confirmed, DSD256 refused"), "heard"},
-		{"a DoP lock", dopLine("DSD128 reached DoP lock, DSD256 refused"), "heard"},
-		{"a negotiation", dopLine("DSD128's carrier negotiated exactly, DSD256 refused"), "heard"},
-		{"a hearing of another rate", dopLine("heard at DSD64, DSD256 refused"), "DSD128"},
-		{"another rate heard and this one's lock, a clause each",
-			dopLine("heard at DSD64; DSD128 reached a DoP lock; DSD256 refused"), "DSD128"},
+		{"confirmed on hardware", dopLine("DSD128 hardware-confirmed"), "heard"},
+		{"a DoP lock", dopLine("DSD128 reached a DoP lock"), "heard"},
+		{"a negotiation", dopLine("DSD128's carrier negotiated exactly"), "heard"},
+		{"a hearing of another rate", dopLine("heard DSD64: iOS profile fixture.dac"), "DSD128"},
+		{"another rate heard and this one's lock, a clause each", dopLine("heard DSD64; DSD128 reached a DoP lock"), "DSD128"},
 	})
 	p := fixtureProfile("fixture.dac", "00d1")
 	p.DoP.HeardMaxBitRate = 0
-	dopLine("DSD256's carrier refused on a device, DSD128 a DoP lock and no hearing")(&p)
+	dopLine("DSD128 a DoP lock and no hearing")(&p)
 	if problems := fixture(nil, p).Lint(); len(problems) > 0 {
 		t.Errorf("a refusal with no heard rate lints as %v", problems)
 	}
@@ -161,22 +163,22 @@ func TestAHeardRateIsAHearingNeverALock(t *testing.T) {
 
 // TestARefusedRateNamesItsRefusal: a refused rate is one a device refused,
 // or played as silence (section 2.1), so the lint asks a DoP claim, for each
-// rate it lists as refused, for a dop line that names that rate and says
-// refused or silence: a refusal of another rate is not its evidence.
+// rate it lists as refused, for a dop clause in evidence's form that lists
+// it under refused or silence at: a refusal of another rate is not its
+// evidence.
 func TestARefusedRateNamesItsRefusal(t *testing.T) {
+	dopLine := func(text string) func(p *Profile) {
+		return func(p *Profile) {
+			p.Provenance[2] = "dop: heard DSD128: iOS profile fixture.dac (iOS cd125088); " + text
+		}
+	}
 	runLintCases(t, []lintCase{
-		{"a line that names no refusal", func(p *Profile) {
-			p.Provenance[2] = "dop: iOS profile fixture.dac, heard at DSD128, DSD256 not (iOS cd125088)"
-		}, "refused"},
-		{"a refusal of another rate", func(p *Profile) {
-			p.Provenance[2] = "dop: iOS profile fixture.dac, heard at DSD128, DSD512 refused (iOS cd125088)"
-		}, "DSD256"},
-		{"another rate refused and this one's lock, a clause each", func(p *Profile) {
-			p.Provenance[2] = "dop: iOS profile fixture.dac, heard at DSD128; DSD512 refused; DSD256 reached a DoP lock (iOS cd125088)"
-		}, "DSD256"},
+		{"a clause that names no refusal", dopLine("DSD256 not"), "refused"},
+		{"a refusal of another rate", dopLine("refused DSD512: iOS profile fixture.dac"), "DSD256"},
+		{"another rate refused and this one's lock, a clause each", dopLine("refused DSD512; DSD256 reached a DoP lock"), "DSD256"},
 	})
 	p := fixtureProfile("fixture.dac", "00d1")
-	p.Provenance[2] = "dop: iOS profile fixture.dac, heard at DSD128, DSD256 played as silence (iOS cd125088)"
+	dopLine("silence at DSD256: iOS profile fixture.dac")(&p)
 	if problems := fixture(nil, p).Lint(); len(problems) > 0 {
 		t.Errorf("a refusal heard as silence lints as %v", problems)
 	}
@@ -204,7 +206,7 @@ func TestNoEmbeddedDoPLineReadsAsAHearing(t *testing.T) {
 			d.HeardMaxBitRate = r
 			q := p
 			q.DoP = &d
-			want := fmt.Sprintf("names DSD%d and says it was heard", r/44100)
+			want := fmt.Sprintf("credits DSD%d as heard", r/44100)
 			if problems := fixture(db.SharedReferenceIDs, q).Lint(); !lintSays(problems, q.ID, want) {
 				t.Errorf("%s given a heard rate of %d lints as %v, want a problem saying %q", q.ID, r, problems, want)
 			}
@@ -216,69 +218,149 @@ func TestNoEmbeddedDoPLineReadsAsAHearing(t *testing.T) {
 	}
 }
 
-// TestANegatedWordIsNoEvidence: a clause that says the rate was not heard,
-// not refused or not silent is the opposite of the evidence its field needs,
-// so a word the clause negates is none: not, never, no, nor, neither, none,
-// nothing, without, cannot and the contractions in n't before it ("was not
-// heard", "didn't refuse", "without silence"), and an answer after it ("heard:
-// no", "heard nothing"). The negation must govern the word, never the clause
-// around it: a clause whose not belongs to another verb is still evidence,
-// as the Mytek's seed line is ("the unit refused DSD256's 705.6 kHz carrier,
-// which it would not negotiate"), and every dop line the embedded database
-// holds still reads as its claims.
-func TestANegatedWordIsNoEvidence(t *testing.T) {
-	dopLine := func(text string) func(p *Profile) {
-		return func(p *Profile) { p.Provenance[2] = "dop: iOS profile fixture.dac, " + text + " (iOS cd125088)" }
-	}
-	runLintCases(t, []lintCase{
-		{"not heard", dopLine("DSD128 was not heard, DSD256 refused"), "DSD128"},
-		{"never heard", dopLine("DSD128 never heard, DSD256 refused"), "DSD128"},
-		{"wasn't heard", dopLine("DSD128 wasn't heard, DSD256 refused"), "DSD128"},
-		{"wasn’t heard, a typographic apostrophe", dopLine("DSD128 wasn’t heard, DSD256 refused"), "DSD128"},
-		{"cannot be heard", dopLine("DSD128 cannot be heard, DSD256 refused"), "DSD128"},
-		{"without being heard", dopLine("DSD128 played without being heard, DSD256 refused"), "DSD128"},
-		{"no rate heard", dopLine("no DSD128 heard, DSD256 refused"), "DSD128"},
-		{"heard: no", dopLine("DSD128 heard: no, DSD256 refused"), "DSD128"},
-		{"heard nothing", dopLine("DSD128 heard nothing, DSD256 refused"), "DSD128"},
-		{"not refused", dopLine("heard at DSD128, DSD256 was not refused"), "DSD256"},
-		{"never refused", dopLine("heard at DSD128, DSD256 never refused"), "DSD256"},
-		{"didn't refuse", dopLine("heard at DSD128, the unit didn't refuse DSD256"), "DSD256"},
-		{"cannot refuse", dopLine("heard at DSD128, the unit cannot refuse DSD256"), "DSD256"},
-		{"no refusal", dopLine("heard at DSD128, no refusal at DSD256"), "DSD256"},
-		{"without refusal", dopLine("heard at DSD128, DSD256 played without refusal"), "DSD256"},
-		{"neither refused nor silent", dopLine("heard at DSD128, DSD256 neither refused nor silent"), "DSD256"},
-		{"refused: none", dopLine("heard at DSD128, DSD256 refused: none"), "DSD256"},
-		{"not played as silence", dopLine("heard at DSD128, DSD256 not played as silence"), "DSD256"},
-		{"did not play it as silence", dopLine("heard at DSD128, DSD256 did not play it as silence"), "DSD256"},
-		{"never silent", dopLine("heard at DSD128, DSD256 never silent"), "DSD256"},
-		{"wasn't silent", dopLine("heard at DSD128, DSD256 wasn't silent"), "DSD256"},
-		{"without silence", dopLine("heard at DSD128, DSD256 played without silence"), "DSD256"},
-		{"no silence", dopLine("heard at DSD128, no silence at DSD256"), "DSD256"},
-	})
-	for _, text := range []string{
-		"heard at DSD128; the unit refused DSD256's 705.6 kHz carrier, which it would not negotiate",
-		"heard at DSD128, DSD256 would not negotiate and was refused",
-		"heard at DSD128 with no click, never at DSD256, which the unit refused",
-		"heard no click at DSD128, DSD256 played as silence, not as noise",
-		"DSD128 was heard, not merely locked; DSD256 refused",
+// TestADopClauseCreditsOnlyTheRatesItsFormLists: a dop line's evidence is
+// written in one form, and only that form counts, since a lint cannot read
+// prose (round 3 read negation, and the review of #1402 broke it from both
+// sides). The line's clauses are the text after "dop: ", split on semicolons
+// and trimmed. A clause that starts with a marker (heard, refused or silence
+// at, in any case, a word boundary after it) is the marker, its rates
+// separated by commas, then a colon or the clause's end; it credits those
+// rates alone, as heard, or as refused (refused and silence at alike), and
+// what follows the colon is read by nothing, so it may negate anything. A
+// marker clause in any other shape is a problem that shows the form; a clause
+// that starts with no marker is free text and evidence of nothing; and a rate
+// under two markers in a profile's provenance is a contradiction. Each case
+// says what the clauses credit by the rates the profile claims and the
+// problem the lint gives, or none: every wording round 2 and round 3 tried,
+// the reviewers' lists that broke round 3's reading, and the form's own.
+func TestADopClauseCreditsOnlyTheRatesItsFormLists(t *testing.T) {
+	const dsd64, dsd128, dsd256 = 2822400, 5644800, 11289600
+	const (
+		form       = "is not in the form"
+		heard128   = "credits DSD128 as heard"
+		heard64    = "credits DSD64 as heard"
+		refused256 = "refused rate DSD256 has no dop clause"
+	)
+	for _, tc := range []struct {
+		name    string
+		text    string // the dop line's clauses, after "dop: "
+		heard   int
+		refused []int
+		want    string // what a problem says, or "" for a profile that lints clean
+	}{
+		// The form, which credits.
+		{"heard, one rate, at the clause's end", "heard DSD128", dsd128, nil, ""},
+		{"heard, its rates by commas, a colon and free text", "heard DSD64, DSD128: clean with PEQ off", dsd128, nil, ""},
+		{"a marker in capitals", "Heard DSD128", dsd128, nil, ""},
+		{"refused", "refused DSD256: the unit would not negotiate its carrier", 0, []int{dsd256}, ""},
+		{"silence at, in capitals", "SILENCE AT DSD256: no audio output", 0, []int{dsd256}, ""},
+		{"spaces around a comma and before the colon", "heard DSD64 ,DSD128 : clean", dsd128, nil, ""},
+		{"free text may negate anything after the colon", "refused DSD256: no supported altsetting", 0, []int{dsd256}, ""},
+		{"one rate under one marker twice", "heard DSD128; heard DSD128: a second unit", dsd128, nil, ""},
+		{"free text beside the form proves nothing and is allowed", "refused DSD256: would not negotiate; DSD128's carrier reached a DoP lock", 0, []int{dsd256}, ""},
+		// The reviewers' "rejected though true", in the form, and as written.
+		{"in the form: refused, no supported altsetting", "refused DSD256: no supported 705.6 kHz altsetting", 0, []int{dsd256}, ""},
+		{"in the form: heard, no clicks or dropouts", "heard DSD128: no clicks or dropouts", dsd128, nil, ""},
+		{"in the form: silence at, no audio output", "silence at DSD256: no audio output", 0, []int{dsd256}, ""},
+		{"as written: DSD256 refused: no supported altsetting", "DSD256 refused: no supported 705.6 kHz altsetting", 0, []int{dsd256}, refused256},
+		{"as written: DSD128 heard: no clicks", "DSD128 heard: no clicks or dropouts", dsd128, nil, heard128},
+		{"as written: DSD256 played as silence", "DSD256 played as silence: no audio output", 0, []int{dsd256}, refused256},
+		// The reviewers' "accepted though false".
+		{"heard at DSD64 but not at DSD128", "heard at DSD64 but not at DSD128", dsd128, nil, form},
+		{"the unit refused DSD512, not DSD256", "the unit refused DSD512, not DSD256", 0, []int{dsd256}, refused256},
+		{`DSD128 was a DoP lock, not "heard"`, `DSD128 was a DoP lock, not "heard"`, dsd128, nil, heard128},
+		{"heard at DSD128, the unit did not play the DSD256 file as silence", "heard at DSD128, the unit did not play the DSD256 file as silence", dsd128, []int{dsd256}, form},
+		{"DSD128 locked yes, heard no", "DSD128 locked yes, heard no", dsd128, nil, heard128},
+		// A marker clause in any other shape.
+		{"heard DSD64 but not at DSD128", "heard DSD64 but not at DSD128", dsd64, nil, form},
+		{"heard DSD128 not", "heard DSD128 not", dsd128, nil, form},
+		{"heard DSD64 and DSD128", "heard DSD64 and DSD128", dsd128, nil, form},
+		{"heard at DSD128", "heard at DSD128", dsd128, nil, form},
+		{"a marker with no rates", "heard", dsd128, nil, form},
+		{"a marker with no rates before its colon", "refused: the unit would not negotiate", 0, []int{dsd256}, form},
+		{"silence at with no rates", "silence at", 0, []int{dsd256}, form},
+		{"a comma with no rate after it", "heard DSD128,", dsd128, nil, form},
+		{"a rate in lower case", "heard dsd128", dsd128, nil, form},
+		{"a rate past DSD512", "heard DSD1024: a rate no claim names", dsd128, nil, "is not a DSD rate"},
+		// Clauses that start with no marker: free text, evidence of nothing.
+		{"a marker run into its rate", "heardDSD128", dsd128, nil, heard128},
+		{"refusal is no marker", "refusal of DSD256", 0, []int{dsd256}, refused256},
+		{"a DoP lock", "DSD128's carrier reached a DoP lock", dsd128, nil, heard128},
+		// A rate under two markers.
+		{"heard and silence at one rate", "heard DSD256; silence at DSD256", dsd256, nil, "under two markers"},
+		{"heard and refused at one rate", "heard DSD128; refused DSD128", dsd128, nil, "under two markers"},
+		{"refused and silence at one rate", "refused DSD256; silence at DSD256", 0, []int{dsd256}, "under two markers"},
+		// Round 3's wordings: the negations it read, which credit nothing now.
+		{"round 3: not heard", "DSD128 was not heard, DSD256 refused", dsd128, nil, heard128},
+		{"round 3: never heard", "DSD128 never heard, DSD256 refused", dsd128, nil, heard128},
+		{"round 3: wasn't heard", "DSD128 wasn't heard, DSD256 refused", dsd128, nil, heard128},
+		{"round 3: wasn’t heard, a typographic apostrophe", "DSD128 wasn’t heard, DSD256 refused", dsd128, nil, heard128},
+		{"round 3: cannot be heard", "DSD128 cannot be heard, DSD256 refused", dsd128, nil, heard128},
+		{"round 3: without being heard", "DSD128 played without being heard, DSD256 refused", dsd128, nil, heard128},
+		{"round 3: no rate heard", "no DSD128 heard, DSD256 refused", dsd128, nil, heard128},
+		{"round 3: heard: no", "DSD128 heard: no, DSD256 refused", dsd128, nil, heard128},
+		{"round 3: heard nothing", "DSD128 heard nothing, DSD256 refused", dsd128, nil, heard128},
+		{"round 3: not refused", "heard at DSD128, DSD256 was not refused", dsd128, []int{dsd256}, form},
+		{"round 3: never refused", "heard at DSD128, DSD256 never refused", dsd128, []int{dsd256}, form},
+		{"round 3: didn't refuse", "heard at DSD128, the unit didn't refuse DSD256", dsd128, []int{dsd256}, form},
+		{"round 3: cannot refuse", "heard at DSD128, the unit cannot refuse DSD256", dsd128, []int{dsd256}, form},
+		{"round 3: no refusal", "heard at DSD128, no refusal at DSD256", dsd128, []int{dsd256}, form},
+		{"round 3: without refusal", "heard at DSD128, DSD256 played without refusal", dsd128, []int{dsd256}, form},
+		{"round 3: neither refused nor silent", "heard at DSD128, DSD256 neither refused nor silent", dsd128, []int{dsd256}, form},
+		{"round 3: refused: none", "heard at DSD128, DSD256 refused: none", dsd128, []int{dsd256}, form},
+		{"round 3: not played as silence", "heard at DSD128, DSD256 not played as silence", dsd128, []int{dsd256}, form},
+		{"round 3: did not play it as silence", "heard at DSD128, DSD256 did not play it as silence", dsd128, []int{dsd256}, form},
+		{"round 3: never silent", "heard at DSD128, DSD256 never silent", dsd128, []int{dsd256}, form},
+		{"round 3: wasn't silent", "heard at DSD128, DSD256 wasn't silent", dsd128, []int{dsd256}, form},
+		{"round 3: without silence", "heard at DSD128, DSD256 played without silence", dsd128, []int{dsd256}, form},
+		{"round 3: no silence", "heard at DSD128, no silence at DSD256", dsd128, []int{dsd256}, form},
+		// Round 3's pins, a negation of another verb, which it took as evidence.
+		{"round 3: which it would not negotiate", "heard at DSD128; the unit refused DSD256's 705.6 kHz carrier, which it would not negotiate", dsd128, []int{dsd256}, form},
+		{"round 3: would not negotiate and was refused", "heard at DSD128, DSD256 would not negotiate and was refused", dsd128, []int{dsd256}, form},
+		{"round 3: never at DSD256, which the unit refused", "heard at DSD128 with no click, never at DSD256, which the unit refused", dsd128, []int{dsd256}, form},
+		{"round 3: heard no click", "heard no click at DSD128, DSD256 played as silence, not as noise", dsd128, []int{dsd256}, form},
+		{"round 3: was heard, not merely locked", "DSD128 was heard, not merely locked; DSD256 refused", dsd128, []int{dsd256}, heard128},
+		// Round 2's wordings.
+		{"round 2: hardware-confirmed", "DSD128 hardware-confirmed, DSD256 refused", dsd128, nil, heard128},
+		{"round 2: reached DoP lock", "DSD128 reached DoP lock, DSD256 refused", dsd128, nil, heard128},
+		{"round 2: negotiated exactly", "DSD128's carrier negotiated exactly, DSD256 refused", dsd128, nil, heard128},
+		{"round 2: heard at another rate", "heard at DSD64, DSD256 refused", dsd128, nil, form},
+		{"round 2: another rate heard, this one's lock", "heard at DSD64; DSD128 reached a DoP lock; DSD256 refused", dsd128, nil, form},
+		{"round 2: carrier refused on a device", "DSD256's carrier refused on a device, DSD128 a DoP lock and no hearing", 0, []int{dsd256}, refused256},
+		{"round 2: DSD256 not", "heard at DSD128, DSD256 not", dsd128, []int{dsd256}, form},
+		{"round 2: another rate refused", "heard at DSD128, DSD512 refused", dsd128, []int{dsd256}, form},
+		{"round 2: another rate refused, this one's lock", "heard at DSD128; DSD512 refused; DSD256 reached a DoP lock", dsd128, []int{dsd256}, form},
+		{"round 2: played as silence", "heard at DSD128, DSD256 played as silence", dsd128, []int{dsd256}, form},
 	} {
 		p := fixtureProfile("fixture.dac", "00d1")
-		dopLine(text)(&p)
-		if problems := fixture(nil, p).Lint(); len(problems) > 0 {
-			t.Errorf("%q, a negation of another word, lints as %v", text, problems)
+		p.DoP.HeardMaxBitRate, p.DoP.RefusedBitRates = tc.heard, append([]int{}, tc.refused...)
+		if tc.heard == 0 && len(tc.refused) == 0 {
+			p.DoP.StatedMaxBitRate = dsd64
+		}
+		p.Provenance[2] = "dop: " + tc.text + "; iOS profile fixture.dac (iOS cd125088)"
+		problems := fixture(nil, p).Lint()
+		switch {
+		case tc.want == "" && len(problems) > 0:
+			t.Errorf("%s: %q lints as %v, want none", tc.name, tc.text, problems)
+		case tc.want != "" && !lintSays(problems, "fixture.dac", tc.want):
+			t.Errorf("%s: %q lints as %v, want a problem saying %q", tc.name, tc.text, problems, tc.want)
 		}
 	}
-	db := mustDefault(t)
-	lines := 0
-	for _, p := range db.Profiles {
-		for _, l := range p.Provenance {
-			if strings.HasPrefix(l, "dop: ") {
-				lines++
-			}
-		}
+
+	// A rate under two markers across two dop lines of one profile.
+	p := fixtureProfile("fixture.dac", "00d1")
+	p.Provenance = append(p.Provenance, "dop: silence at DSD128: a second unit (iOS cd125088)")
+	if problems := fixture(nil, p).Lint(); !lintSays(problems, "fixture.dac", "under two markers") {
+		t.Errorf("heard and silence at for DSD128 on two dop lines lint as %v", problems)
 	}
-	if lines == 0 {
-		t.Fatal("the embedded database holds no dop line, so none was read")
+	// The form's problem shows the form to write.
+	p = fixtureProfile("fixture.dac", "00d1")
+	p.Provenance[2] = "dop: heard at DSD128: iOS profile fixture.dac (iOS cd125088); refused DSD256"
+	if problems := fixture(nil, p).Lint(); !lintSays(problems, "fixture.dac", `"heard DSD64, DSD128: <source>"`) {
+		t.Errorf("a clause out of the form lints as %v, which shows no form to write", problems)
+	}
+	if problems := fixture(nil, p).Lint(); !lintSays(problems, "fixture.dac", `write "heard DSD128: <source>"`) {
+		t.Errorf("a heard rate no clause credits lints as %v, which shows no form to write", problems)
 	}
 }
 
