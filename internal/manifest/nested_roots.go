@@ -52,6 +52,20 @@ func (s *Scanner) foldingIn(dir string) fsutil.CaseFolding {
 // lstat is what a lookup of name finds, for how two spellings compare
 // (os.Lstat), or a test's stand-in for it (lookupHook), which describes the
 // volume foldingHook does.
+//
+// CodeQL's go/path-injection follows a client's path here, and into
+// fsutil.FoldingIn, through ScanSubtree from the console's upload commit and
+// trash. The path is inside a configured root before it gets there: the
+// trash's through fs.Resolver.Resolve, which refuses a .. segment and checks
+// the joined path's prefix, and an upload's as its session's configured root
+// joined with the folders fsutil.Speller found listed there. And
+// caseLook.under looks an element up only while every element before it
+// matched a configured root's, so a lookup reads a folder above a configured
+// root or one inside the root that holds the path, for a name a configured
+// root or the path spells there: never a folder the client names outside the
+// library (B651's eleventh round). A containment check here would refuse the
+// lookups above a root that tell two roots apart, and the repo's own are no
+// barrier CodeQL models (its 2026-09-28 triage, in ops/engineering-log.md).
 func (s *Scanner) lstat(name string) (fs.FileInfo, error) {
 	if h := s.lookupHook; h != nil {
 		return h(name)

@@ -64,9 +64,9 @@ const foldingProbeEntries = 256
 // It writes nothing. A folder whose listing offers no such name (an empty one,
 // a bare mount point among them, or one whose names hold no letter), and one
 // that cannot be read or is not there, answer CaseUnknown, never a guess: a
-// probe that made a name to look up would write into a library root, which
-// B651 forbids, on a volume that may be read-only, and the library watcher
-// would see the write.
+// probe that made a name to look up would write into a library root, or a
+// folder above one, which B651 forbids, on a volume that may be read-only,
+// and the library watcher would see the write.
 func FoldingIn(dir string) CaseFolding { return foldingIn(osFolding{}, dir) }
 
 // foldingFS is what FoldingIn reads: the os package's calls, or a test's
@@ -77,7 +77,12 @@ type foldingFS interface {
 	sameFile(a, b fs.FileInfo) bool
 }
 
-// osFolding is foldingFS over the os package.
+// osFolding is foldingFS over the os package. Its listing and lookups are
+// where CodeQL's go/path-injection follows a client's path into FoldingIn:
+// the scanner asks it only of a folder above a configured root or inside the
+// root that holds the path, and it looks up no name but one the folder's own
+// listing gives, as listed or with its letters' case swapped (manifest's
+// Scanner.lstat says how that path is confined).
 type osFolding struct{}
 
 func (osFolding) readDir(dir string, n int) ([]fs.DirEntry, error) {
