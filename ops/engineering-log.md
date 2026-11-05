@@ -74302,7 +74302,8 @@ tree), its long form committed here.
 - A negated clause passed as evidence (Codex, `lint.go:325`): confirmed.
   `dopEvidence` took a clause that names the rate and holds the keyword,
   so "DSD128 was not heard" read as a hearing. In cb5ce652
-  `TestANegatedWordIsNoEvidence`'s 23 negated wordings (not, never, no,
+  `…ANegatedWordIsNoEvidence`'s 23 negated wordings (round 4 removed the
+  test, its wordings table cases of the fixed form; not, never, no,
   neither and nor, none, nothing, without, cannot, n't contractions with
   either apostrophe, "heard: no", "heard nothing", for heard, refused and
   silence) each linted as []. Fixed in 2999526a: a keyword counts only when
@@ -74380,7 +74381,7 @@ status` clean after. All 20 went red, 24 runs.
 
 | # | Mutation | Red |
 |---|---|---|
-| N1 | a negated keyword counts | `TestANegatedWordIsNoEvidence` ("not heard: the lint says []", and the rest) |
+| N1 | a negated keyword counts | `…ANegatedWordIsNoEvidence` ("not heard: the lint says []", and the rest) |
 | N2 | no negator before the keyword is read | the same |
 | N3 | a contraction in n't is no negator | the same ("wasn't heard", "didn't refuse") |
 | N4 | the typographic apostrophe is not read as one | the same ("wasn’t heard") |
