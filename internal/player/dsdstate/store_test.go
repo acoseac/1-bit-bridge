@@ -430,3 +430,73 @@ func TestAnUnreadableStateMovedAwayIsWritableAgain(t *testing.T) {
 		t.Fatal("the store still refuses after the choice")
 	}
 }
+
+// TestAStoreLooksAgainUntilAWriteOfItsOwnHasLanded: a store whose state
+// could not be read stops looking at the name only once a write of its own
+// has landed there (the Claude API reviewer on round 2: the first look that
+// found the entry gone ended the looking before the write, so a write not
+// made after the operator moved the file, and the file put back, left every
+// later write replacing it unread). After each write that is not made (a
+// change refused, as a stale compare-and-set is; a state the reader would
+// refuse; a write that failed; a change that changes nothing), the entry is
+// put back, and the next write is refused with the entry as it was.
+func TestAStoreLooksAgainUntilAWriteOfItsOwnHasLanded(t *testing.T) {
+	durable(t)
+	stale := errors.New("the revision is stale")
+	full := errors.New("the disk is full")
+	for _, tc := range []struct {
+		name string
+		fn   func(t *testing.T) func(*State) error
+		fail bool
+		want error
+	}{
+		{"a_change_refused", func(*testing.T) func(*State) error { return func(*State) error { return stale } }, false, stale},
+		{"a_state_the_reader_would_refuse", func(t *testing.T) func(*State) error {
+			past := sizedState(t, maxFileBytes+1)
+			return func(st *State) error { *st = past.Clone(); return nil }
+		}, false, ErrTooLarge},
+		{"a_write_that_failed", chooseNative, true, full},
+		{"a_change_that_changes_nothing", func(*testing.T) func(*State) error { return func(*State) error { return nil } }, false, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := t.TempDir()
+			path := filepath.Join(data, FileName)
+			if err := os.WriteFile(path, []byte(strings.Repeat(" ", maxFileBytes+1)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			failing := false
+			s := openAt(t, data, options{write: func(p string, b []byte) error {
+				if failing {
+					return full
+				}
+				return atomicwrite.WriteBytesDurable(data, p, b, tmpPrefix)
+			}})
+			if r := s.Report(); r.Outcome != Unread {
+				t.Fatalf("Open = %+v, want the file left unread", r)
+			}
+			moved := path + ".moved"
+			if err := os.Rename(path, moved); err != nil {
+				t.Fatal(err)
+			}
+			failing = tc.fail
+			if err := s.Update(tc.fn(t)); !errors.Is(err, tc.want) {
+				t.Fatalf("the write after the move = %v, want %v", err, tc.want)
+			}
+			failing = false
+			if err := os.Rename(moved, path); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.Lstat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Update(chooseNative(t)); !errors.Is(err, ErrNotWritable) {
+				t.Fatalf("a write once the entry is back = %v, want ErrNotWritable: the store stopped looking before a write of its own landed", err)
+			}
+			after, err := os.Lstat(path)
+			if err != nil || !os.SameFile(before, after) || after.Size() != before.Size() {
+				t.Fatalf("the entry put back was replaced: %v", err)
+			}
+		})
+	}
+}
