@@ -142,35 +142,38 @@ func TestEveryNameTheBridgeAdvertisesIsOneItCertifies(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			reportHostName(t, tc.host)
-			certPath, keyPath := servertls.DefaultPaths(t.TempDir())
-			on, off := true, false
-			minted := &config.Config{ListenAddress: ":7788"}
-			minted.MDNS.Enabled = &on
-			if err := servertls.GenerateWithOptions(certPath, keyPath, certSANOptions(minted)); err != nil {
-				t.Fatalf("the mint refused: %v", err)
-			}
-			leaf := readCertificate(t, certPath)
-
-			for _, setting := range []struct {
+			settings := []struct {
 				name string
-				mdns *bool
-			}{{"mDNS on", &on}, {"mDNS off", &off}} {
+				mdns bool
+			}{{"mDNS on", true}, {"mDNS off", false}}
+			configured := func(mdns bool) *config.Config {
+				cfg := &config.Config{ListenAddress: ":7788"}
+				cfg.MDNS.Enabled = &mdns
+				return cfg
+			}
+			for _, setting := range settings {
 				t.Run(setting.name, func(t *testing.T) {
-					cfg := &config.Config{ListenAddress: ":7788"}
-					cfg.MDNS.Enabled = setting.mdns
+					cfg := configured(setting.mdns)
+					certPath, keyPath := servertls.DefaultPaths(t.TempDir())
+					if err := servertls.GenerateWithOptions(certPath, keyPath, certSANOptions(cfg)); err != nil {
+						t.Fatalf("the mint refused: %v", err)
+					}
+					leaf := readCertificate(t, certPath)
 					local := tc.local
-					if tc.converted && !*setting.mdns {
+					if tc.converted && !setting.mdns {
 						local = ""
 					}
 					assertEveryHostIsCertified(t, leaf, cfg, tc.host, local, lan)
 
-					cov, err := servertls.InspectSANCoverage(certPath, certSANOptions(cfg))
-					if err != nil {
-						t.Fatal(err)
-					}
-					if !cov.Covered() {
-						t.Errorf("the coverage check calls a certificate minted with mDNS on stale: missing %q and %q",
-							cov.MissingDNS, cov.MissingIPStrings())
+					for _, other := range settings {
+						cov, err := servertls.InspectSANCoverage(certPath, certSANOptions(configured(other.mdns)))
+						if err != nil {
+							t.Fatal(err)
+						}
+						if !cov.Covered() {
+							t.Errorf("the coverage check calls a certificate minted with %s stale with %s: missing %q and %q",
+								setting.name, other.name, cov.MissingDNS, cov.MissingIPStrings())
+						}
 					}
 				})
 			}
