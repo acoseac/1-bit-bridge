@@ -247,7 +247,8 @@ func doctorOutputChecklist(cfg *config.Config, seam func(*api.LocalOutputsConfig
 			},
 			Advertised: func() []string {
 				listen, _ := configuredPort(cfg.ListenAddress)
-				return advertise.URLs(advertise.Params{Port: listen, CustomEndpoints: cfg.CustomEndpoints})
+				return advertise.URLs(advertise.Params{Port: listen, CustomEndpoints: cfg.CustomEndpoints,
+					MDNS: cfg.EffectiveMDNSEnabled()})
 			},
 			Cards:           hostTrees.cards,
 			LoopbackBaseURL: route.BaseURL,

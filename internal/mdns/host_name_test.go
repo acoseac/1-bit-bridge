@@ -55,6 +55,46 @@ func TestTheMDNSHostIsTheNameTheCertificateCarries(t *testing.T) {
 	}
 }
 
+// TestTheSRVTargetIsTheHostsNameOrANameOfItsAddress is B739's second round:
+// RecordsFor, what rebuildLocked publishes. A host with a name has it for its
+// target, with the trailing dot, and as host=. A host with no name has no
+// host=, and a target made of the first IPv4 address its records carry, else
+// of the first IPv6 address in its expanded form (a label within the 63
+// bytes one holds), else onebit-bridge alone; never localhost.local.
+func TestTheSRVTargetIsTheHostsNameOrANameOfItsAddress(t *testing.T) {
+	v4, v6 := net.ParseIP("192.168.1.20"), net.ParseIP("fd00::1")
+	for _, tc := range []struct {
+		name, host string
+		ips        []net.IP
+		target     string
+		// named says host= carries the target's name.
+		named bool
+	}{
+		{"a Cyrillic name", "Жук", []net.IP{v4}, "xn--f1ai0a.local.", true},
+		{"an ASCII name", "MacBook-Pro_2", []net.IP{v4}, "MacBook-Pro_2.local.", true},
+		{"no name, an IPv6 address before an IPv4 one", "Ð\u0091Ä¯U", []net.IP{v6, v4},
+			"onebit-bridge-192-168-1-20.local.", false},
+		{"no name, IPv6 alone", "Ð\u0091Ä¯U", []net.IP{v6},
+			"onebit-bridge-fd00-0000-0000-0000-0000-0000-0000-0001.local.", false},
+		{"no name, no address", "Ð\u0091Ä¯U", nil, "onebit-bridge.local.", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := RecordsFor(Config{ProtocolVersion: 1, Port: 7788, Hostname: tc.host}, tc.ips)
+			if rec.Target != tc.target {
+				t.Errorf("the SRV target is %q, want %q", rec.Target, tc.target)
+			}
+			if label, _, _ := strings.Cut(rec.Target, "."); len(label) > 63 {
+				t.Errorf("the target's label is %d bytes, more than a label holds", len(label))
+			}
+			named := slices.Contains(rec.TXT, "host="+strings.TrimSuffix(tc.target, "."))
+			hasHost := slices.ContainsFunc(rec.TXT, func(s string) bool { return strings.HasPrefix(s, "host=") })
+			if named != tc.named || hasHost != tc.named {
+				t.Errorf("the TXT record %q, want host= the target's name: %t", rec.TXT, tc.named)
+			}
+		})
+	}
+}
+
 // TestAHostWithNoNameIsAnsweredForByANameOfItsOwn is B739's second round, on a
 // live responder. A host whose name has no valid form took localhost.local
 // for its SRV target and host=, which no certificate names, and its responder

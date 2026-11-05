@@ -17,6 +17,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/admin"
 	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	bridgemdns "github.com/acoseac/1-bit-bridge/internal/mdns"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 )
 
@@ -106,75 +107,145 @@ func TestInitOnAHostWhoseNameIsNotASCII(t *testing.T) {
 }
 
 // TestEveryNameTheBridgeAdvertisesIsOneItCertifies is B739's cross-check, for
-// each host name B739's entry asks about. A certificate minted now, from the
-// gather init, serve, bridge cert rotate and bridge doctor share
-// (certSANOptions), names every host the bridge sends a phone to: each
-// endpoint the interface walk and the host's name give /v1/health, the
-// `.local` one among them, and the pairing QR's primary URL. A name with no
-// valid form is advertised nowhere, so the phone is sent to the LAN address
-// instead, never to localhost. And the coverage check bridge doctor and the
-// startup warning make finds nothing missing.
+// each host name B739's entry asks about, with mDNS on and with it off. A
+// certificate minted now, from the gather init, serve, bridge cert rotate and
+// bridge doctor share (certSANOptions), names every host the bridge sends a
+// phone to: each endpoint the interface walk and the host's name give
+// /v1/health, the `.local` one among them, the pairing QR's primary URL, and,
+// while the responder runs, the host= and ips= of its TXT record. A name with
+// no valid form is advertised nowhere: no `.local` endpoint, no host= (B739's
+// second round: it was localhost.local) and an SRV target made of the
+// responder's address, which nothing hands a phone to dial, so the phone is
+// sent to the LAN address instead, never to localhost. A converted name is
+// one only the bridge's responder answers, so with mDNS off it is advertised
+// nowhere either. The want-set is the same either way, so turning mDNS off or
+// on makes no certificate stale: the coverage check bridge doctor and the
+// startup warning make finds nothing missing under either setting.
 func TestEveryNameTheBridgeAdvertisesIsOneItCertifies(t *testing.T) {
 	lan := "https://" + hostNameWalkLAN + ":7788"
 	for _, tc := range []struct {
 		name, host string
-		// local is the host the `.local` endpoint names, "" for none.
-		local, primary string
+		// local is the host the `.local` endpoint and host= name with mDNS
+		// on, "" for none; converted says the name is one only the bridge's
+		// responder answers, which mDNS off advertises nowhere.
+		local     string
+		converted bool
 	}{
-		{"a Cyrillic name", hostCyrillic, "xn--f1ai0a.local", "https://xn--f1ai0a.local:7788"},
-		{"Latin with an umlaut", "müsik", "xn--msik-0ra.local", "https://xn--msik-0ra.local:7788"},
-		{"a Windows computer name with Japanese in it", "DESKTOP-日本", "xn--desktop--5y4qg6h.local",
-			"https://xn--desktop--5y4qg6h.local:7788"},
-		{"the test Mac's bytes", hostMacBytes, "", lan},
-		{"mixed case and an underscore", "MacBook-Pro_2", "MacBook-Pro_2.local", "https://MacBook-Pro_2.local:7788"},
-		{"a space", "my host", "", lan},
-		{"a label over 63 bytes", strings.Repeat("a", 64), "", lan},
-		{"a Unicode label over 63 bytes in its ASCII form", strings.Repeat("ж", 58), "", lan},
+		{"a Cyrillic name", hostCyrillic, "xn--f1ai0a.local", true},
+		{"Latin with an umlaut", "müsik", "xn--msik-0ra.local", true},
+		{"a Windows computer name with Japanese in it", "DESKTOP-日本", "xn--desktop--5y4qg6h.local", true},
+		{"the test Mac's bytes", hostMacBytes, "", false},
+		{"mixed case and an underscore", "MacBook-Pro_2", "MacBook-Pro_2.local", false},
+		{"a space", "my host", "", false},
+		{"a label over 63 bytes", strings.Repeat("a", 64), "", false},
+		{"a Unicode label over 63 bytes in its ASCII form", strings.Repeat("ж", 58), "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			reportHostName(t, tc.host)
-			cfg := &config.Config{ListenAddress: ":7788"}
 			certPath, keyPath := servertls.DefaultPaths(t.TempDir())
-			if err := servertls.GenerateWithOptions(certPath, keyPath, certSANOptions(cfg)); err != nil {
+			on, off := true, false
+			minted := &config.Config{ListenAddress: ":7788"}
+			minted.MDNS.Enabled = &on
+			if err := servertls.GenerateWithOptions(certPath, keyPath, certSANOptions(minted)); err != nil {
 				t.Fatalf("the mint refused: %v", err)
 			}
 			leaf := readCertificate(t, certPath)
 
-			var locals []string
-			for _, e := range advertise.Endpoints(advertise.Params{Port: 7788}) {
-				h := urlHost(t, e.URL)
-				if e.Class == advertise.ClassMDNSHost {
-					locals = append(locals, h)
-				}
-				assertCertifies(t, leaf, h)
-			}
-			var want []string
-			if tc.local != "" {
-				want = []string{tc.local}
-			}
-			if !slices.Equal(locals, want) {
-				t.Errorf("the .local endpoints name %q, want %q", locals, want)
-			}
+			for _, setting := range []struct {
+				name string
+				mdns *bool
+			}{{"mDNS on", &on}, {"mDNS off", &off}} {
+				t.Run(setting.name, func(t *testing.T) {
+					cfg := &config.Config{ListenAddress: ":7788"}
+					cfg.MDNS.Enabled = setting.mdns
+					local := tc.local
+					if tc.converted && !*setting.mdns {
+						local = ""
+					}
+					assertEveryHostIsCertified(t, leaf, cfg, tc.host, local, lan)
 
-			primary := admin.DialURL(cfg)
-			if primary != tc.primary {
-				t.Errorf("the pairing QR dials %q, want %q", primary, tc.primary)
-			}
-			if h := urlHost(t, primary); h == "localhost" {
-				t.Errorf("the pairing QR sends the phone to itself: %q", primary)
-			} else {
-				assertCertifies(t, leaf, h)
-			}
-
-			cov, err := servertls.InspectSANCoverage(certPath, certSANOptions(cfg))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !cov.Covered() {
-				t.Errorf("the coverage check calls a certificate minted now stale: missing %q and %q",
-					cov.MissingDNS, cov.MissingIPStrings())
+					cov, err := servertls.InspectSANCoverage(certPath, certSANOptions(cfg))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !cov.Covered() {
+						t.Errorf("the coverage check calls a certificate minted with mDNS on stale: missing %q and %q",
+							cov.MissingDNS, cov.MissingIPStrings())
+					}
+				})
 			}
 		})
+	}
+}
+
+// assertEveryHostIsCertified fails unless every host the bridge would send a
+// phone to on cfg, on a host that reports the name reported, is one leaf
+// certifies: the endpoints /v1/health lists, whose `.local` one names local
+// alone (none for ""), the pairing QR's primary, which is local's URL, or lan
+// where there is none, and never localhost, and, while cfg has mDNS on, what
+// the responder publishes over the walk's address: host=, which is local, and
+// each address of ips=. The SRV target is host='s name with its dot, or, with
+// no host=, a name of the responder's own made of that address.
+func assertEveryHostIsCertified(t *testing.T, leaf *x509.Certificate, cfg *config.Config, reported, local, lan string) {
+	t.Helper()
+	var locals []string
+	for _, e := range advertise.Endpoints(advertise.Params{Port: 7788, MDNS: cfg.EffectiveMDNSEnabled()}) {
+		h := urlHost(t, e.URL)
+		if e.Class == advertise.ClassMDNSHost {
+			locals = append(locals, h)
+		}
+		assertCertifies(t, leaf, h)
+	}
+	if !slices.Equal(locals, nonEmpty(local)) {
+		t.Errorf("the .local endpoints name %q, want %q", locals, nonEmpty(local))
+	}
+
+	want := lan
+	if local != "" {
+		want = "https://" + local + ":7788"
+	}
+	primary := admin.DialURL(cfg)
+	if primary != want {
+		t.Errorf("the pairing QR dials %q, want %q", primary, want)
+	}
+	if h := urlHost(t, primary); h == "localhost" {
+		t.Errorf("the pairing QR sends the phone to itself: %q", primary)
+	} else {
+		assertCertifies(t, leaf, h)
+	}
+
+	if !cfg.EffectiveMDNSEnabled() {
+		return
+	}
+	// serve's responder reads the host's name itself (Config.Hostname
+	// empty), where the walk's seam cannot reach: it is given here.
+	rec := bridgemdns.RecordsFor(bridgemdns.Config{ProtocolVersion: 1, Port: 7788, Hostname: reported},
+		[]net.IP{net.ParseIP(hostNameWalkLAN)})
+	var hosts, ips []string
+	for _, s := range rec.TXT {
+		if v, ok := strings.CutPrefix(s, "host="); ok {
+			hosts = append(hosts, v)
+			assertCertifies(t, leaf, v)
+		}
+		if v, ok := strings.CutPrefix(s, "ips="); ok {
+			ips = strings.Split(v, ",")
+		}
+	}
+	if !slices.Equal(hosts, nonEmpty(local)) {
+		t.Errorf("the TXT record %q carries host= %q, want %q", rec.TXT, hosts, nonEmpty(local))
+	}
+	if !slices.Equal(ips, []string{hostNameWalkLAN}) {
+		t.Errorf("the TXT record %q carries ips= %q, want %s", rec.TXT, ips, hostNameWalkLAN)
+	}
+	for _, ip := range ips {
+		assertCertifies(t, leaf, ip)
+	}
+	wantTarget := "onebit-bridge-" + strings.ReplaceAll(hostNameWalkLAN, ".", "-") + ".local."
+	if local != "" {
+		wantTarget = local + "."
+	}
+	if rec.Target != wantTarget {
+		t.Errorf("the SRV target is %q, want %q", rec.Target, wantTarget)
 	}
 }
 

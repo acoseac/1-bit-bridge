@@ -257,23 +257,42 @@ func CertHostname() string {
 	return name
 }
 
-// PairingHost is the hostname the pairing QR is built from, in the form
-// hostname.ASCII gives it (backlog B739), and whether the container marker
-// is present. A generated container id is returned like any other ASCII
-// name, for the caller to judge. unusable says the host reported a name
-// that has no valid form: host is "" then, as when the name cannot be read,
-// and the caller must not take it for that case, whose fallback is
-// localhost, the phone's own name everywhere but on this host. An error
-// yields an empty hostname with the marker still answered.
-func PairingHost() (host string, unusable, docker bool) {
+// Host is the host's name as the pairing QR takes it, from one read of the
+// name the system reports (PairingHost).
+type Host struct {
+	// Name is the name in the form hostname.ASCII gives it (backlog B739):
+	// an ASCII name as reported, any other in its IDNA ASCII form; "" when
+	// the name has no valid form or cannot be read. A generated container id
+	// is a Name like any other ASCII name, for the caller to judge.
+	Name string
+	// Unusable says the host reported a name that has no valid form. The
+	// caller must not take it for a name that cannot be read, whose fallback
+	// is localhost, the phone's own name everywhere but on this host.
+	Unusable bool
+	// Converted says Name is the IDNA ASCII form of a name that is not ASCII.
+	// No responder on the LAN but the bridge's own answers that form (the
+	// system's publishes the name as it reported it, or nothing), so its
+	// `.local` name resolves only while the bridge's mDNS is on (B739's
+	// second round).
+	Converted bool
+	// Docker says the container marker is present. A failed read still
+	// answers it.
+	Docker bool
+}
+
+// PairingHost is the host's name the pairing QR is built from, and whether
+// the container marker is present.
+func PairingHost() Host {
 	reported, err := hostnameFunc()
-	docker = inDocker()
+	h := Host{Docker: inDocker()}
 	if err != nil || reported == "" {
-		return "", false, docker
+		return h
 	}
 	name, ok := hostname.ASCII(reported)
 	if !ok {
-		return "", true, docker
+		h.Unusable = true
+		return h
 	}
-	return name, false, docker
+	h.Name, h.Converted = name, name != reported
+	return h
 }

@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -29,6 +30,9 @@ import (
 // mDNS responder answers, so with mDNS off its `.local` endpoint is not
 // listed and it pairs at the LAN address too (B739's second round: the
 // pairing link dialled https://xn--f1ai0a.local, which nothing answered).
+// With mDNS on, the `.local` endpoint is listed and the pairing link dials
+// it: the responder publishes that name (internal/mdns's tests resolve it
+// through one), here pinned to loopback so it answers nothing on the LAN.
 // Neither start logs the stale-SAN warning, the second presents the
 // fingerprint the first did, since an existing pair is loaded and never
 // minted again, and bridge doctor's certificate and pairing lines are quiet,
@@ -36,13 +40,15 @@ import (
 func TestServeOnAHostWhoseNameIsNotASCII(t *testing.T) {
 	for _, tc := range []struct {
 		name, host, library string
+		mdns                bool
 		// local is the host the `.local` endpoint names, "" for none,
 		// primary the host the pairing link's URL dials, and why what
 		// bridge doctor's pairing-url line says beside it, "" for nothing.
 		local, primary, why string
 	}{
-		{"a Cyrillic name, mDNS off", hostCyrillic, hostCyrillic, "", hostNameWalkLAN, "mdns.enabled is false"},
-		{"the test Mac's bytes", hostMacBytes, "ÐÄ¯U", "", hostNameWalkLAN, ""},
+		{"a Cyrillic name, mDNS off", hostCyrillic, hostCyrillic, false, "", hostNameWalkLAN, "mdns.enabled is false"},
+		{"a Cyrillic name, mDNS on", hostCyrillic, hostCyrillic, true, "xn--f1ai0a.local", "xn--f1ai0a.local", ""},
+		{"the test Mac's bytes", hostMacBytes, "ÐÄ¯U", false, "", hostNameWalkLAN, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Registered before the boots, so the cleanups that stop serve,
@@ -54,14 +60,16 @@ func TestServeOnAHostWhoseNameIsNotASCII(t *testing.T) {
 			if code, out := loopbackInit(t, cfgDir, testLibrary(t), ""); code != 0 {
 				t.Fatalf("bridge init exited %d:\n%s", code, out)
 			}
-			// The responder is internal/mdns's to test, on loopback; here it
-			// would advertise the test's host name on the LAN.
-			appendToConfig(t, cfgDir, "mdns:\n  enabled: false\n")
+			appendToConfig(t, cfgDir, fmt.Sprintf("mdns:\n  enabled: %t\n", tc.mdns))
+			var pick func() (*net.Interface, error)
+			if tc.mdns {
+				pick = loopbackPick(t)
+			}
 
-			first := serveInstall(t, cfgDir)
+			first := serveInstall(t, cfgDir, pick)
 			first.assertAdvertisesWhatItCertifies(t, tc.local, tc.primary, tc.library)
 			first.stop()
-			second := serveInstall(t, cfgDir)
+			second := serveInstall(t, cfgDir, pick)
 			second.assertAdvertisesWhatItCertifies(t, tc.local, tc.primary, tc.library)
 			if second.fingerprint != first.fingerprint {
 				t.Errorf("the second start presents %s, the first %s: the pair was minted again",
@@ -94,9 +102,10 @@ type installServe struct {
 }
 
 // serveInstall runs `bridge serve` on the install at cfgDir, on listeners of
-// its own (the config's admin address moved onto the console's), and returns
-// once the API and the console answer.
-func serveInstall(t *testing.T, cfgDir string) installServe {
+// its own (the config's admin address moved onto the console's), its mDNS
+// responder pinned by pick (nil: serve's own pick), and returns once the API
+// and the console answer.
+func serveInstall(t *testing.T, cfgDir string, pick func() (*net.Interface, error)) installServe {
 	t.Helper()
 	lan, adminLn := holdLoopback(t), holdLoopback(t)
 	setConfigKey(t, cfgDir, "adminAddress", "adminAddress: "+adminLn.addr)
@@ -109,6 +118,7 @@ func serveInstall(t *testing.T, cfgDir string) installServe {
 		done <- runServe(ctx, serveOpts{
 			configPath: filepath.Join(cfgDir, "bridge.yaml"), addrOverride: lan.addr,
 			lanListener: lan.ln, adminListener: adminLn.ln, tailscaleCLI: noTailscaleCLI(),
+			mdnsPick: pick,
 		}, stdout, stderr)
 	}()
 	drainServeOnCleanup(t, cancel, exited, done, stderr)
@@ -189,6 +199,25 @@ func (s installServe) servedLeaf(t *testing.T) *x509.Certificate {
 		t.Fatalf("%s presented no certificate", s.base)
 	}
 	return certs[0]
+}
+
+// loopbackPick is a pick that pins the bridge's mDNS responder to the host's
+// loopback interface, so a serve test that leaves mDNS on answers nothing on
+// the LAN. A host with no loopback interface skips the test: its responder
+// would take the LAN's.
+func loopbackPick(t *testing.T) func() (*net.Interface, error) {
+	t.Helper()
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		t.Fatalf("net.Interfaces: %v", err)
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagLoopback != 0 && iface.Flags&net.FlagUp != 0 {
+			return func() (*net.Interface, error) { return &iface, nil }
+		}
+	}
+	t.Skip("no loopback interface to pin the mDNS responder to")
+	return nil
 }
 
 // nonEmpty is s as a list: itself, or nothing for "".
