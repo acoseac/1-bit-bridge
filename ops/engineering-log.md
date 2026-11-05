@@ -74438,3 +74438,116 @@ build lock, with TMPDIR under `.tmp/_b728-b2`, at 02167338:
 attribute; ff303831 the kernel reader; e19fbeff inspect's reading again and
 its portless units; 57b6207c and ce99d23a the reading again's two pins;
 02167338 the long form; this record.
+
+## 2026-11-05 — B728 B2 round 4: a dop line's evidence in one fixed form, and a portless reading tied to its place
+
+The review of #1402 at 4153f229 (round 3 and its rules line), to which this
+branch fast-forwarded. The rules change ships as `rules-b728-b2-r4.patch`
+(outside the tree), its long form committed here.
+
+**The lint stops reading English** (the orchestrator's decision, not a
+finding to verify). Round 3 taught `dopEvidence` to read negation, and Codex
+and the Claude API reviewer broke it from both sides, each round's fix bound
+to invite the next: it rejected true lines (`DSD256 refused: no supported
+705.6 kHz altsetting`, `DSD128 heard: no clicks or dropouts`, `DSD256 played
+as silence: no audio output`) and accepted false ones (`heard at DSD64 but not
+at DSD128` as a hearing of DSD128, `the unit refused DSD512, not DSD256` as
+DSD256's refusal, `DSD128 was a DoP lock, not "heard"`, `heard at DSD128, the
+unit did not play the DSD256 file as silence`, `DSD128 locked yes, heard no`).
+So the prose is made regular, and only the form counts:
+- a dop line's clauses are the text after `dop: `, split on `;`, each
+  trimmed;
+- a clause that starts with a marker, `heard`, `refused` or `silence at`
+  (any case, a word boundary after it), must be `marker rate(, rate)*` and
+  then `:` or the clause's end (`reEvidence`), and credits those rates alone,
+  as heard, or as refused (`refused` and `silence at` alike); the free text
+  after the colon is read by nothing, so it may negate anything;
+- a clause that starts with no marker is free text and evidence of nothing;
+- a marker clause of any other shape, a rate past DSD64 to DSD512, and one
+  rate under two markers in a profile's provenance are problems, which show
+  the form to write ("heard DSD64, DSD128: <source>"; for a rate no clause
+  credits, `write "heard DSD128: <source>"`);
+- `reNeverSaid` stays on caveat notes, never provenance.
+
+`negated`, `negatorReach`, the negators, the joiners and the token reader are
+removed (0f079403). The lines rewritten in the form, every fact and citation
+kept: the Mytek's seed line (`refused DSD256: ` before its old text, which
+follows the colon unread), the QX13 fixture's (`heard DSD64, DSD128, DSD256:
+iOS profile fiio.qx13, with PEQ off (iOS cd125088)`), the fixture profile's,
+and the design's section 2.1 example (`heard DSD64, DSD128, DSD256: clean with
+PEQ off on iOS; noise with PEQ on (iOS 2.0.1 report)`). The form is described
+where the old reading was: `dacprofile.go` (its Provenance and DoP fields and
+package doc), `scripts/dac-profiles/README.md`, and the design's sections 2.1
+(the provenance definition) and 2.4. `ios-check.py` reads the profiles' DoP
+fields and never these lines: its self-test and the registry at cd125088
+still pass. `TestADopClauseCreditsOnlyTheRatesItsFormLists` (eeba5011) holds
+every wording rounds 2 and 3 tried and the reviewers' lists as cases of what
+credits what, beside the form's own (`refused DSD256: no supported altsetting`
+must pass); on 4153f229's reading it was red by logic on the five "accepted
+though false" lines, the must-reject marker clauses (`heard DSD64 but not at
+DSD128`, `heard DSD128 not`, `heard DSD64 and DSD128`, `heard at DSD128`,
+`heard DSD128,`), `refusal of DSD256`, the contradictions and round 3's own
+pins, and by its words alone where round 3 refused too.
+
+**A portless replacement on another bus** (Codex, P2,
+`cmd/bridge/output_dac_bind.go:390-391`): confirmed. Two serialless units of
+one model, each under a controller the port grammar does not name, on two
+buses and enumerated third on each, share the IDs, no serial, no port, the
+interface and the device number, since a bus numbers its devices alone. In
+6dc90748 `TestDACInspectTiesAPortlessReadingToItsPlace` read A as card 4, then
+had B take card 4 (`class/sound/card4` the same name, resolved to B's place):
+`portlessReading`, `binding.SameUnit` and the device number passed, and
+inspect showed "Other Audio Other DAC 0200" under A's card, red; its
+preconditions asserted B read as A's unit and enumeration at another resolved
+directory. `TestDACInspectTakesNoTwoUnknownPlacesForOne` showed a model for a
+card whose directory resolved in neither reading, red. Fixed in ae3ecebc:
+`readModel` takes the card's directory with its links resolved as the
+inventory read it (`binding.Card.Dir`, the reader's `t.resolve` of
+`class/sound/cardN`), and the reading again's must be that directory and not
+empty.
+
+**Negative controls**, by a runner outside the tree, as before: the three
+named tests green first, every file restored by SHA-256 after. All 7 went
+red.
+
+| # | Mutation | Red |
+|---|---|---|
+| F1 | a marker clause that does not match the form is accepted, its rates read wherever they stand | `TestADopClauseCreditsOnlyTheRatesItsFormLists`, 37 failing lines ("heard at DSD64 but not at DSD128 lints as []") |
+| F2 | a clause that starts with no marker credits the rates it names beside a marker's word | the same, 17 ("DSD256 refused: no supported 705.6 kHz altsetting lints as []") |
+| F3 | a rate under two markers is accepted | the same, 4 (the three contradictions, and the one across two dop lines) |
+| F4 | a rate past DSD64 to DSD512 is let through | the same, 1 ("heard DSD1024") |
+| F5 | the clauses are not trimmed | the same, 3 (a marker clause after a semicolon reads as free text) |
+| D1 | the reading again compares the card's link by its unresolved name, `class/sound/cardN` | `TestDACInspectTiesAPortlessReadingToItsPlace` ("Other Audio Other DAC 0200") |
+| D2 | two directories that could not be resolved match | `TestDACInspectTakesNoTwoUnknownPlacesForOne` |
+
+**The rules patch**, `rules-b728-b2-r4.patch`: the B2 line's Don't trades "take
+a word its clause negates for evidence" for "credit a DoP rate from a dop
+clause not in its fixed form (`heard DSD128: <source>`)" (player.md 95,614 to
+95,655 bytes); its blank context line keeps its leading space, `git apply
+--check` takes it, `dropped_donts` finds every Don't in the long form, and
+docs-check passes on a copy with it applied.
+
+**Checks**, on legion0 (Linux, amd64, Go 1.27.3), with TMPDIR under
+`.tmp/_b728-b2`. The gate's first turn, at 2899d15f, failed one test in its
+three test steps, `TestEveryCitedTestNameExists`: round 3's record (above)
+cited the negation test 0f079403 removed. c4a2ab1f elides its `Test` prefix
+there, the rule for a note that must name a test that no longer exists (the
+TRACKED `.md` docs bullet in `History-rules-build-ci-tests.md`), and the test
+steps ran again at the head that carries this record:
+- `go test -count=1` of `./internal/player/dacprofile/`, `./internal/alsa/`
+  and `./cmd/bridge/`, and the same under `-race`: RERUN-PKGS.
+- `make test-fast`: RERUN-FAST.
+- At 2899d15f, the steps the record does not touch: `make vet` natively and
+  with `GOOS=windows` and `GOOS=darwin`, clean; go1.27.3's gofmt on cmd,
+  internal and scripts, clean; `make docs-check`, ok (and with the patch
+  applied, above); the qualification check from main and from ebe71366,
+  "qualification version OK", at 36; `kernel-check.sh` by its own fetch at
+  v6.12, blob c5fd1803, 39 facts, PASS; `ios-check.py` against the registry
+  at cd125088 and its `--self-test`, ok; and `make test-fast`'s other 81
+  packages, ok, the Linux-only ones among them.
+- Not run here: Windows and macOS natively, CI's runner, and any hardware.
+
+**Commits.** eeba5011 the form's red tests; 6dc90748 the place's red tests;
+0f079403 the form, the negation reading removed, the lines rewritten;
+ae3ecebc the place; 2899d15f the long form; c4a2ab1f the elided citation;
+this record.
