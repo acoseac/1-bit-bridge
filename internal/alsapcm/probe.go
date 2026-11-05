@@ -2,6 +2,7 @@ package alsapcm
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
 )
@@ -63,12 +64,15 @@ type ProbeResult struct {
 	Pause bool
 }
 
-// DoPCarrier reports whether r establishes a DoP carrier: S32_LE accepted
-// with 24 to 32 significant bits, what the DoP sink requires of its open
-// (dopBits). It says only that the kernel takes the PCM carrier; nothing in
-// it says the DAC decodes DSD.
+// DoPCarrier reports whether r establishes the DoP carrier of a DSD rate
+// the player plays: S32_LE at that one-bit rate over 16 (176.4 kHz for
+// DSD64, 352.8 for DSD128, 705.6 for DSD256), accepted with 24 to 32
+// significant bits, what the DoP sink requires of its open (dopBits). It
+// says only that the kernel takes the PCM carrier; nothing in it says the
+// DAC decodes DSD.
 func (r ProbeResult) DoPCarrier() bool {
-	return r.Answer == ProbeAccepted && r.Candidate.Format == format.S32LE && dopBits(r.Msbits)
+	return r.Answer == ProbeAccepted && r.Candidate.Format == format.S32LE &&
+		slices.Contains(probeBitRates, r.Candidate.RateHz*16) && dopBits(r.Msbits)
 }
 
 // dopBits reports whether a setup's significant bits carry DoP: 24 to 32,

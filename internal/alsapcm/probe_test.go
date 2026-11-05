@@ -210,9 +210,10 @@ func TestTheProbeLeavesABusyNodeAlone(t *testing.T) {
 // TestTheProbeReadsTheDoPCarriersSignificantBits pins what a probe says of
 // a DoP carrier: the significant bits the kernel's refined setup reports for
 // S32_LE, never the format's width, and a carrier only with 24 to 32 of them
-// (DoPCarrier, the DoP sink's own requirement), accepted, in S32_LE. Bits the
-// kernel did not report are 0, unknown, and no carrier; a refused S32_LE, and
-// another format with 24 bits, are none either.
+// (DoPCarrier, the DoP sink's own requirement), accepted, in S32_LE, at a
+// DSD rate's carrier. Bits the kernel did not report are 0, unknown, and no
+// carrier; a refused S32_LE, another format with 24 bits, and S32_LE at a
+// rate that carries no DSD rate the player plays (44.1 kHz) are none either.
 func TestTheProbeReadsTheDoPCarriersSignificantBits(t *testing.T) {
 	carrier := ProbeCandidate{format.S32LE, 176400}
 	for _, c := range []struct {
@@ -239,11 +240,11 @@ func TestTheProbeReadsTheDoPCarriersSignificantBits(t *testing.T) {
 			}
 		})
 	}
-	t.Run("a carrier refused, and another format", func(t *testing.T) {
+	t.Run("a carrier refused, another format, a rate no DSD rate has", func(t *testing.T) {
 		k := dsdDAC(t)
 		k.hw.bits = map[uint32]uint32{formatS32LE: 24, formatS243LE: 24}
-		refused, other := ProbeCandidate{format.S32LE, 705600}, ProbeCandidate{format.S243LE, 176400}
-		rep, err := probe(k, testEndpoint, ProbeConfig{Candidates: []ProbeCandidate{refused, other}})
+		refused, other, pcm := ProbeCandidate{format.S32LE, 705600}, ProbeCandidate{format.S243LE, 176400}, ProbeCandidate{format.S32LE, 44100}
+		rep, err := probe(k, testEndpoint, ProbeConfig{Candidates: []ProbeCandidate{refused, other, pcm}})
 		if err != nil {
 			t.Fatalf("probe: %v", err)
 		}
@@ -252,6 +253,9 @@ func TestTheProbeReadsTheDoPCarriersSignificantBits(t *testing.T) {
 		}
 		if r := rep.Result(other); r.Answer != ProbeAccepted || r.Msbits != 24 || r.DoPCarrier() {
 			t.Errorf("S24_3LE with 24 bits: %+v, a DoP carrier %v; want accepted and none", r, r.DoPCarrier())
+		}
+		if r := rep.Result(pcm); r.Answer != ProbeAccepted || r.Msbits != 24 || r.DoPCarrier() {
+			t.Errorf("S32_LE at 44.1 kHz with 24 bits: %+v, a DoP carrier %v; want accepted and none", r, r.DoPCarrier())
 		}
 	})
 }

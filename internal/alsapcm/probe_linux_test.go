@@ -53,8 +53,9 @@ const probeEndpointEnv = "BRIDGE_PROBE_ENDPOINT"
 // otherwise. It probes the design's whole set (ProbeCandidates) through the
 // real kernel, recording what was asked of it, and logs one line a
 // candidate: accepted, with the significant bits and whether the setup
-// offers PAUSE (and "a DoP carrier" where S32_LE carries 24 to 32 bits), or
-// refused (EINVAL). It fails unless the node was opened once and closed once
+// offers PAUSE (and "the DoP carrier of DSD64" where S32_LE at 176.4 kHz
+// carries 24 to 32 bits, and so on), or refused (EINVAL). It fails unless
+// the node was opened once and closed once
 // and the kernel was sent PVERSION, INFO and one HW_REFINE a candidate,
 // nothing else: no HW_PARAMS, SW_PARAMS, PREPARE, write or PAUSE.
 //
@@ -110,7 +111,7 @@ func TestTheSilentProbeOnARealDAC(t *testing.T) {
 				pause = "PAUSE offered"
 			}
 			if r.DoPCarrier() {
-				dop = ": a DoP carrier"
+				dop = fmt.Sprintf(": the DoP carrier of DSD%d", r.Candidate.RateHz*16/44100)
 			}
 			bits := strconv.Itoa(r.Msbits) + " significant bits"
 			if r.Msbits == 0 {
