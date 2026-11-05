@@ -2911,6 +2911,12 @@ type BootFile struct {
 	resolved bool
 }
 
+// File is the file the boot read was of, and whether there is one: "" and
+// false for a boot read that resolved the name at none of its reads. Serve
+// keeps the data dir's record beside it (backlog B651), as the holder saves
+// into it: never beside the file the name opens by then.
+func (f BootFile) File() (string, bool) { return f.target, f.resolved }
+
 // LoadFileAt is LoadFile, and the file it read: what serve tells its live
 // config holder with the bytes (RuntimeConfig.RecordFile). The name is
 // resolved just before each read, as a turn of the file's lock resolves it

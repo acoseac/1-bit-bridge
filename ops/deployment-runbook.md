@@ -898,6 +898,57 @@ such a mount, update with the service stopped**, the binary replaced by
 hand. An install there is not stamped installed and its `.bak` stays until
 the data dir is on a filesystem that keeps locks, and the rest goes on.
 
+## A volume that is mounted after the bridge starts (backlog B651)
+
+On a NAS reboot the service manager or Docker can start the bridge before a
+USB, RAID or network volume is mounted, so a path on it is not there (a
+directory on the volume), or reads as the bare mount point, empty. What the
+bridge does about it:
+
+- **A library root on that volume.** The scan spares every row under it, as
+  it has since #74 and #289 (`root unreachable` or `suspected clean-empty
+  mount failure` at Error, on every scan), and a loopback bridge still refuses
+  to start over a root that is not there (exit 2). From the release that
+  carries B651 the library watcher, when it is on, holds such a root rather
+  than watch it: one Warn, `library root reads as a volume that is not
+  mounted; the watcher does not watch it until it reads as it did`, with
+  `reads=unreachable`, `unreadable`, `empty` (and `rows_in_db`) or
+  `uncounted`. It looks at the root again 5 s later, then twice as long each
+  time, 5 min at most, and once the root holds its library again it watches it
+  (`library root reads as it did again; the watcher watches it`, Info) and
+  scans it. A root the index holds nothing of (a fresh install) is watched as
+  it is, and a mount over it hides that watch until the next restart; the
+  periodic scan still indexes it.
+- **The data dir on that volume.** From the second start of that release,
+  serve keeps a record of the data dir it opened its database in, beside the
+  config: `.bridge.yaml.datadir`. A start that finds that data dir holding
+  neither `bridge.db` nor `server.lock` refuses before it makes or writes
+  anything there (no new TLS pair, no empty token store): `serve: the data
+  directory … held this bridge's database, and holds neither bridge.db nor
+  server.lock now: …`, exit 1, and the service manager starts it again (the
+  unit `bridge init` writes restarts it every 2 s; launchd and the Windows
+  service's recovery do the same) until the volume is mounted. `bridge
+  doctor`'s `data-dir` line fails the same state. **A data dir removed or
+  moved on purpose**: remove `.bridge.yaml.datadir` beside the config and
+  start again. Removing `bridge.db*` alone (the local fixture's reset) still
+  starts and makes a new database. A system unit can order the start after
+  the mount instead (`RequiresMountsFor=<mount point>` in a drop-in); a user
+  unit cannot, its manager not seeing the system's mount units.
+- **Docker.** A bind mount made before the host mounted the volume never sees
+  the mount (Docker's default propagation, `rprivate`): for the life of that
+  container the library root reads as the bare mount point, which the scan
+  spares and the watcher holds, and nothing in the container can bring the
+  volume in. Restart the container once the volume is mounted, or start it
+  after the mount. The image keeps `bridge.yaml` and the data dir on one
+  volume (`/data`), so the record is on it too and cannot catch a missing
+  `/data`: keep `/data` on a named volume or the system disk; where it must be
+  on the late volume, bind a directory on that volume with `--mount
+  type=bind,src=…,dst=/data` (in compose, the long syntax with `bind:
+  {create_host_path: false}`), which refuses to start the container while
+  the source is not there, so the restart policy starts it once the volume is
+  mounted. `-v` makes a missing source itself, root's,
+  on the system disk, and the container then sees an empty `/data`.
+
 ## After a deploy: expect iOS syncs to quietly defer
 
 **The v0.1.8 → v0.1.9 upgrade runs TWO one-time backfills, and they compound.**

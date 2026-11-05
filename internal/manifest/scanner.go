@@ -215,6 +215,22 @@ type Scanner struct {
 	// Nil in production.
 	beforeScanLock atomic.Pointer[func()]
 
+	// foldingHook, when set, answers in fsutil.FoldingIn's place for how a
+	// folder compares the names in it (Scanner.foldingIn): a test stands in
+	// for volumes this host does not have, one that folds case, one mounted
+	// inside another, one that cannot tell. Per instance; nil in production.
+	// Read on the scan's goroutine and the watcher's, so a test sets it
+	// before either runs, or between scans.
+	foldingHook func(dir string) fsutil.CaseFolding
+	// lookupHook, when set, answers in os.Lstat's place for what a lookup of
+	// a name in a folder finds when the scanner asks how two spellings
+	// compare (Scanner.lstat: caseLook.sameName and mayBeOneName), so that a
+	// test's stand-in volume answers both questions, how its folders compare
+	// names and what a lookup there finds, and this host's own lookups decide
+	// neither (B651's ninth round). A test sets the two together; per
+	// instance, nil in production, read as foldingHook is.
+	lookupHook func(name string) (fs.FileInfo, error)
+
 	// postScanHook, when set, fires after every successful full Scan —
 	// see SetPostScanHook. atomic.Pointer so the boot-time SetPostScanHook
 	// can't race a startup scan already in flight on another goroutine.
@@ -1010,7 +1026,11 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	for _, root := range roots {
 		rootSentinel := relPath(root, root, multiRoot)
 		linksBefore := len(tallies.dirLinks.rels)
-		observed, err := s.walkRoot(ctx, root, multiRoot, seen, seenFolders, errorSubtrees, playlists, &tallies, paths)
+		// The roots nested in this one that read as not mounted are spared
+		// before the walk, reached by it or not (protectNestedRoots).
+		pass := s.protectNestedRoots(ctx, root, s.nestedRootsUnder(roots, root), multiRoot,
+			[]map[string]struct{}{beforeSet, beforeFolderSet}, errorSubtrees)
+		observed, err := s.walkRoot(ctx, root, pass, multiRoot, seen, seenFolders, errorSubtrees, playlists, &tallies, paths)
 		if err != nil {
 			walkErr = err
 			break
@@ -1335,6 +1355,99 @@ func (s *Scanner) emptyRootMustBeSpared(ctx context.Context, root string, multiR
 		return true
 	}
 	return false
+}
+
+// rootLook is what a look at a configured library root found
+// (Scanner.lookAtRoot): whether it reads as a volume that is not mounted, the
+// way the scan's guards read it, and how.
+type rootLook struct {
+	// absent: the root reads as a volume that is not mounted. reason says
+	// how (the rootAbsent constants), "" when it does not.
+	absent bool
+	reason string
+	// rows is the number of tracks the index holds under the root, when the
+	// look counted them.
+	rows int
+	// err is what showed it: the root's stat or listing, or the count.
+	err error
+}
+
+// The ways a root reads as a volume that is not mounted (rootLook.reason).
+const (
+	// rootAbsentUnreachable: the root cannot be stat'ed through, the scan's
+	// "root unreachable" (walkRoot): not there, a link to nothing.
+	rootAbsentUnreachable = "unreachable"
+	// rootAbsentUnreadable: its listing could not be read, which the scan's
+	// walk records as an errored subtree.
+	rootAbsentUnreadable = "unreadable"
+	// rootAbsentEmpty: it holds no library content while the index holds
+	// tracks under it and no .bridge-allow-empty says it is empty on purpose,
+	// the scan's suspected clean-empty mount (emptyRootMustBeSpared).
+	rootAbsentEmpty = "empty"
+	// rootAbsentUncounted: it holds no library content and the tracks under
+	// it could not be counted, which the scan takes as the clean-empty case.
+	rootAbsentUncounted = "uncounted"
+)
+
+// lookAtRoot reads a configured root as the scan's guards read it, for a
+// caller that must not act on a root whose volume is not mounted: the library
+// watcher, which neither watches such a root nor scans it, and looks again
+// until it reads as it did (B651, watcher_hold.go). It is absent where the
+// full scan would spare every row under it: a root it cannot see (walkRoot's
+// fsutil.WalkableRoot), one whose listing fails, and one that holds no
+// library content (isLibraryEntry) and no .bridge-allow-empty while the index
+// holds tracks under it, or cannot count them (emptyRootMustBeSpared). A root
+// that holds content, the sentinel, or nothing the index knows of (a fresh
+// install) reads as it is. The listing is read a batch at a time, so a root
+// of thousands of folders is answered by its first entries, and it logs
+// nothing: the caller says what it does about the answer.
+func (s *Scanner) lookAtRoot(ctx context.Context, root string) rootLook {
+	walkFrom, err := fsutil.WalkableRoot(root)
+	if err != nil {
+		return rootLook{absent: true, reason: rootAbsentUnreachable, err: err}
+	}
+	holds, err := dirHoldsLibraryContent(walkFrom)
+	if err != nil {
+		return rootLook{absent: true, reason: rootAbsentUnreadable, err: err}
+	}
+	if holds || hasAllowEmptySentinel(root) {
+		return rootLook{}
+	}
+	n, err := s.store.CountTracksUnderRoot(ctx, root, len(s.Roots()) > 1)
+	switch {
+	case err != nil:
+		return rootLook{absent: true, reason: rootAbsentUncounted, err: err}
+	case n == 0:
+		return rootLook{}
+	}
+	return rootLook{absent: true, reason: rootAbsentEmpty, rows: n}
+}
+
+// rootLookBatch is how many entries of a root's listing dirHoldsLibraryContent
+// reads at a time.
+const rootLookBatch = 64
+
+// dirHoldsLibraryContent reports whether the directory dir holds library
+// content (holdsLibraryContent), reading its listing rootLookBatch entries at
+// a time and stopping at the first batch that holds some.
+func dirHoldsLibraryContent(dir string) (bool, error) {
+	f, err := fsutil.OpenDir(dir)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	for {
+		entries, err := f.ReadDir(rootLookBatch)
+		if holdsLibraryContent(dir, entries) {
+			return true, nil
+		}
+		if errors.Is(err, io.EOF) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+	}
 }
 
 // rootLineAttrs is a log line's attributes about a library root: the root,
@@ -2700,36 +2813,31 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("resolve %q: %w", dir, err)
 	}
-	var owningRoot string
-	for _, root := range roots {
-		absRoot, err := filepath.Abs(root)
-		if err != nil {
-			continue
-		}
-		// `filepath.Rel(absRoot, absDir)` returns a relative path
-		// from absRoot to absDir (e.g. "Genre/Artist/Album" or
-		// "."). A path starting with ".." means absDir climbs out
-		// of absRoot — i.e. NOT under it. This is the idiomatic
-		// cross-platform containment check — pre-fix
-		// strings.HasPrefix was byte-exact, which broke on
-		// case-insensitive filesystems where an event for
-		// `/Music/Album/track.flac` could surface against a
-		// configured root path `/music` and false-negative
-		// (Gemini High on PR #79). filepath.Rel routes through
-		// the OS path APIs so platform-native casing semantics
-		// are preserved.
-		rel, err := filepath.Rel(absRoot, absDir)
-		if err != nil {
-			continue
-		}
-		if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			owningRoot = absRoot
-			break
-		}
-	}
+	// The owning root is the deepest configured root that holds absDir
+	// (deepestRootOf), compared element by element: pre-fix strings.HasPrefix
+	// was byte-exact, which broke on case-insensitive filesystems where an
+	// event for `/Music/Album/track.flac` could surface against a configured
+	// root path `/music` and false-negative (Gemini High on PR #79). The
+	// deepest, where roots nest: a folder under a root configured inside
+	// another is that root's, whichever is listed first (B651's fifth round;
+	// nested_roots.go). An element that differs in case alone matches only
+	// where the folder it is looked up in is established to fold case, never
+	// by filepath.Rel, which on Windows folds in a case-sensitive folder too
+	// (B651's sixth and seventh rounds): a nested root configured as USB is
+	// the folder a walk spells usb on a volume that folds case, and on one
+	// that does not, or cannot tell, another folder.
+	_, owningRoot, tail := s.deepestRootOf(roots, absDir)
 	if owningRoot == "" {
 		return 0, fmt.Errorf("dir %q is not under any configured library root", dir)
 	}
+	// The root's own part of absDir in the root's configured spelling, so the
+	// rows this scan writes carry the prefix the root's full scan gives them;
+	// the part below the root stays as it was handed, the walk's own spelling
+	// (B219: no respelling here). It differs from absDir's own in case alone,
+	// and only where that names the same folder: the folder above it folds
+	// case, established, and the two spellings, where both are there, are one
+	// folder, so this never sends the scan into another root's folder.
+	absDir = filepath.Join(owningRoot, tail)
 
 	// A subtree scan OF the root walks the root as Scan does: through it,
 	// when the root is a link to a directory (fsutil.WalkableRoot, the
@@ -2746,7 +2854,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// walked, by this scan or by Scan.
 	walkFrom := absDir
 	atRoot := false
-	if rel, relErr := filepath.Rel(owningRoot, absDir); relErr == nil && rel == "." {
+	if tail == "." {
 		atRoot = true
 		if walkFrom, err = fsutil.WalkableRoot(absDir); err != nil {
 			return 0, fmt.Errorf("library root %q cannot be seen: %w", owningRoot, err)
@@ -2759,6 +2867,21 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// so set membership in `seen`/`seenFolders` is directly
 	// comparable against the snapshot keys.
 	relScope := relPath(owningRoot, absDir, multiRoot)
+	// The roots configured inside the owning root that are, or may be, at or
+	// below the folder this scan walks, which it spares while one reads as not
+	// mounted, reached by the walk or not (protectNestedRoots, after the
+	// snapshots below); and those that may hold the folder in another
+	// spelling, which the owning root took it from only because folding was
+	// not established (holding, below).
+	c := s.caseLook()
+	var nested, holding []nestedRoot
+	for _, n := range s.nestedRootsUnder(roots, owningRoot) {
+		if _, ok := c.under(absDir, n.abs, true); ok {
+			nested = append(nested, n)
+		} else if _, ok := c.under(n.abs, absDir, true); ok {
+			holding = append(holding, n)
+		}
+	}
 
 	// Subtree-scoped "before" snapshots. Smaller than Scan's whole-
 	// library snapshot — one query per scope — and the deletion pass
@@ -2783,6 +2906,18 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	seen := make(map[string]struct{}, len(beforeTrackSet))
 	seenFolders := make(map[string]struct{}, len(beforeFolderSet))
 	errorSubtrees := make(map[string]struct{})
+	pass := s.protectNestedRoots(ctx, owningRoot, nested, multiRoot,
+		[]map[string]struct{}{beforeTrackSet, beforeFolderSet}, errorSubtrees)
+	// A nested root that may hold this folder in another spelling, where
+	// which root it is could not be established (caseLook.sameName counts an
+	// Unknown answer as two folders, what is spared as one): while it reads
+	// as not mounted, this scan reaps nothing (B651's seventh round).
+	for _, n := range holding {
+		if s.lookAtRoot(ctx, n.root).absent {
+			errorSubtrees[relScope] = struct{}{}
+			break
+		}
+	}
 	// The playlist files this walk passes, for the scoped playlist-file
 	// pass after the deletion passes (backlog B431).
 	playlists := make(map[string]playlistSighting)
@@ -2862,6 +2997,12 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 			// descendants, never the explicitly-targeted directory.
 			// Reachable when a configured root is itself dot-named.
 			if abs != walkFrom {
+				// A root nested in this one that reads as not mounted:
+				// walkRoot's decision (protectNestedRoots).
+				if pass.has(abs) {
+					errorSubtrees[relPath(owningRoot, abs, multiRoot)] = struct{}{}
+					return filepath.SkipDir
+				}
 				if !isLibraryEntry(abs, d.Name(), true) {
 					return filepath.SkipDir
 				}
@@ -3234,7 +3375,7 @@ func (s *Scanner) auditSubtreeMiss(ctx context.Context, abs, owningRoot string, 
 // scan that its mount looked empty. A link that dangles (the mount it
 // points into went away) is the unreachable case above, never an
 // empty library.
-func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, seen, seenFolders, errorSubtrees map[string]struct{}, playlists map[string]playlistSighting, tallies *walkTallies, paths chan<- pathInfo) (int, error) {
+func (s *Scanner) walkRoot(ctx context.Context, root string, pass nestedPass, multiRoot bool, seen, seenFolders, errorSubtrees map[string]struct{}, playlists map[string]playlistSighting, tallies *walkTallies, paths chan<- pathInfo) (int, error) {
 	walkFrom, err := fsutil.WalkableRoot(root)
 	if err != nil {
 		scanLogger.Error("root unreachable", rootLineAttrs(root, rootLinkTarget(root), "err", err,
@@ -3293,6 +3434,15 @@ func (s *Scanner) walkRoot(ctx context.Context, root string, multiRoot bool, see
 			// root in multi-root mode, so the guard would never fire
 			// there.
 			if abs != walkFrom {
+				// A root configured inside this one that reads as a volume
+				// not mounted is passed over, and the rows this root holds
+				// under it are spared (recorded before the walk): its bare
+				// mount point is no evidence that the files under it are
+				// gone (protectNestedRoots, B651's fifth and sixth rounds).
+				if pass.has(abs) {
+					errorSubtrees[relPath(root, abs, multiRoot)] = struct{}{}
+					return filepath.SkipDir
+				}
 				if !isLibraryEntry(abs, d.Name(), true) {
 					return filepath.SkipDir
 				}

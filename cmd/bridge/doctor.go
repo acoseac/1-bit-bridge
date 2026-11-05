@@ -339,8 +339,10 @@ func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAcces
 			d.DataDir = cfg.DataDir
 			// Whether serve can prepare that data directory, the player on or
 			// off (B659): what stands on its path, read by the walk serve's
-			// refusal names the entry in its way from.
-			d.DataDirPreparation = doctorDataDir(cfg.DataDir)
+			// refusal names the entry in its way from; and whether serve
+			// refuses it first, as one its record beside the config names
+			// that holds neither its database nor its lock file (B651).
+			d.DataDirPreparation = doctorDataDir(d.ConfigFile.Path, cfg.DataDir)
 			// The cert pair `bridge serve` would load — an explicit
 			// `tlsCertPath` included, which the cert checks used to
 			// ignore in favour of the DataDir defaults and so graded a

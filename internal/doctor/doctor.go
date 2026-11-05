@@ -1243,14 +1243,18 @@ func checkLibraryRoots(_ context.Context, d Deps) Check {
 			empty = append(empty, r)
 		}
 	}
+	// A root on a volume that is not mounted yet reads as missing, or as the
+	// bare mount point, empty (B651): the scan keeps the tracks it indexed
+	// under such a root, and the watcher waits for it, so the hints say to
+	// check the mount before anything is removed.
 	if len(missing)+len(unreadable) > 0 {
 		problems := append(append([]string{}, missing...), unreadable...)
 		return fail(checkNameLibraryRoots, fmt.Sprintf("%d problem(s)", len(problems)),
-			"fix or remove: "+strings.Join(problems, "; "))
+			"fix or remove, after checking that a volume it is on is mounted: "+strings.Join(problems, "; "))
 	}
 	if len(empty) > 0 {
 		return warn(checkNameLibraryRoots, fmt.Sprintf("%d empty root(s)", len(empty)),
-			"empty root (scan will find 0 tracks): "+strings.Join(empty, "; "))
+			"empty root (scan will find 0 tracks; a volume not mounted yet reads so, and the scan keeps the tracks it indexed there): "+strings.Join(empty, "; "))
 	}
 	return ok(checkNameLibraryRoots, fmt.Sprintf("%d root(s) reachable", len(d.LibraryRoots)))
 }
