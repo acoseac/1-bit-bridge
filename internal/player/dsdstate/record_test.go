@@ -194,3 +194,89 @@ func TestTheModelComparisonIsTheDesignsFields(t *testing.T) {
 		}
 	}
 }
+
+// TestTheRecordsOwnModelTakesTheRecordOverItsFallback: the model comparison
+// reads fields the state's key does not hold, so a unit of the record's own
+// key can be refused as another identity (Codex and the Claude API reviewer
+// on #1405): bound at another PCM device, or with another manufacturer
+// string, it gets the fallback's choice, and the record waits. When the
+// record's exact unit is bound, its rows are written over that fallback, the
+// choice's revision moved on, the warning the fallback wrote dropped, and the
+// record's digest kept: the fallback is the migration's own, its first
+// revision, never a choice of the user's that the record must leave alone.
+// Through the real reader and the store.
+func TestTheRecordsOwnModelTakesTheRecordOverItsFallback(t *testing.T) {
+	durable(t)
+	l := Legacy{DSDMode: ModeNative, DSDQualification: "approved.json"}
+	exact := bound(t)
+	for _, tc := range []struct {
+		name  string
+		first func(*Bound)
+	}{
+		{"another_pcm_device", func(b *Bound) { b.Identity.Device = 1 }},
+		{"another_manufacturer_string", func(b *Bound) { b.Identity.Manufacturer = "iFi audio" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recordDir, a := recordFixture(t, recordSpec{})
+			data := t.TempDir()
+			s := openAt(t, data, options{})
+			first := *exact
+			tc.first(&first)
+			if !first.Key.Equal(exact.Key) {
+				t.Fatal("the fixture's first unit is not of the record's key")
+			}
+			if _, err := s.Migrate(recordDir, l, &first); err != nil {
+				t.Fatal(err)
+			}
+			fallback := fileState(t, data)
+			d, _ := fallback.DAC(goBar(t))
+			if d.Choice == nil || d.Choice.SetBy != ByMigration || d.Choice.Revision != 1 || len(fallback.Warnings) != 1 || fallback.MigratedFrom.WaitingFor != WaitingForRecordModel {
+				t.Fatalf("the first unit gave %s: want the fallback's choice, its warning, and the record waiting", show(t, fallback))
+			}
+			if _, err := s.Migrate(recordDir, l, exact); err != nil {
+				t.Fatal(err)
+			}
+			got := fileState(t, data)
+			d, _ = got.DAC(goBar(t))
+			wantChoice := &Choice{Mode: ModeNative, Revision: 2, SetAt: t0, SetBy: ByMigration}
+			if !reflect.DeepEqual(d.Choice, wantChoice) || len(d.Listener) != 1 || len(d.FirstUse) != 1 {
+				t.Fatalf("the record's exact unit, bound after the fallback, holds %s: want the record's rows, the choice at revision 2", show(t, got))
+			}
+			if len(got.Warnings) != 0 {
+				t.Fatalf("the fallback's warning stays beside the record's rows: %+v", got.Warnings)
+			}
+			if got.MigratedFrom.RecordSHA256 != a.SHA256 || got.MigratedFrom.WaitingFor != "" {
+				t.Fatalf("the marker is %+v, want the record's digest and nothing waiting", got.MigratedFrom)
+			}
+		})
+	}
+	t.Run("a_users_choice_in_between", func(t *testing.T) {
+		recordDir, _ := recordFixture(t, recordSpec{})
+		data := t.TempDir()
+		s := openAt(t, data, options{})
+		first := *exact
+		first.Identity.Device = 1
+		if _, err := s.Migrate(recordDir, l, &first); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Update(func(st *State) error {
+			d := st.entry(goBar(t))
+			d.Choice = &Choice{Mode: ModeConvert, Revision: d.Choice.Revision + 1, SetAt: t0, SetBy: ByApp}
+			st.ClearWarningsFor(goBar(t))
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Migrate(recordDir, l, exact); err != nil {
+			t.Fatal(err)
+		}
+		got := fileState(t, data)
+		d, _ := got.DAC(goBar(t))
+		if want := (&Choice{Mode: ModeConvert, Revision: 2, SetAt: t0, SetBy: ByApp}); !reflect.DeepEqual(d.Choice, want) || len(d.Listener) != 0 || len(d.FirstUse) != 0 {
+			t.Fatalf("the user's choice made after the fallback did not win: %s", show(t, got))
+		}
+		if got.MigratedFrom.WaitingFor != "" || got.MigratedFrom.RecordSHA256 != "" {
+			t.Fatalf("the marker is %+v, want the part done with no record migrated", got.MigratedFrom)
+		}
+	})
+}

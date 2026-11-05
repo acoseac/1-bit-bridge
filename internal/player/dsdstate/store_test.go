@@ -340,3 +340,93 @@ func TestWritesSerializeOnTheStore(t *testing.T) {
 		t.Fatalf("after %d writes at once the revision is %+v, want %d", writers, d.Choice, writers)
 	}
 }
+
+// sizedState is a state of one DAC whose file, as encode writes it, is n
+// bytes long: its product string makes up the difference.
+func sizedState(t *testing.T, n int) State {
+	t.Helper()
+	of := func(product string) State {
+		k := newKey(t, 0x20b1, 0x3009, ptr(1), &product)
+		return State{DefaultMode: ModeAuto, DACs: []DAC{{Key: k, Choice: &Choice{Mode: ModeNative, Revision: 1, SetAt: t0, SetBy: ByApp}}}}
+	}
+	b, err := of("x").encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return of(strings.Repeat("x", n-len(b)+1))
+}
+
+// TestAWriteTheReaderWouldRefuseIsNotMade: a write never leaves a file the
+// next start refuses (Codex on #1405: the structural bounds let a state of
+// 100 DACs with 64 answers each pass at about 1.1 MB, past the 1 MiB the
+// reader reads). A state whose file is exactly the reader's bound is written
+// and read back; one byte past it, the write is refused, and the state and
+// the file stay as they were, as for any write not made.
+func TestAWriteTheReaderWouldRefuseIsNotMade(t *testing.T) {
+	durable(t)
+	data := t.TempDir()
+	path := filepath.Join(data, FileName)
+	s := openAt(t, data, options{})
+	at := sizedState(t, maxFileBytes)
+	if err := s.Update(func(st *State) error { *st = at.Clone(); return nil }); err != nil {
+		t.Fatalf("a write of a state at the reader's bound = %v", err)
+	}
+	written, err := os.ReadFile(path)
+	if err != nil || len(written) != maxFileBytes {
+		t.Fatalf("the file at the bound is %d bytes, %v; want %d", len(written), err, maxFileBytes)
+	}
+	reopened := openAt(t, data, options{})
+	if r := reopened.Report(); r.Outcome != Loaded || !reflect.DeepEqual(reopened.State().normalized(), at.normalized()) {
+		t.Fatalf("the state at the bound reads back as %+v", r)
+	}
+	before := s.State()
+	past := sizedState(t, maxFileBytes+1)
+	if b, err := sizedState(t, 4096).encode(); err != nil || len(b) != 4096 {
+		t.Fatalf("the sized fixture is %d bytes, %v, want 4096: its size is not the one asked for", len(b), err)
+	}
+	if err := s.Update(func(st *State) error { *st = past.Clone(); return nil }); err == nil {
+		t.Fatal("a write past the reader's bound was made, which the next start refuses")
+	}
+	if !reflect.DeepEqual(s.State(), before) {
+		t.Fatal("a refused write changed the store's state")
+	}
+	if now, _ := os.ReadFile(path); string(now) != string(written) {
+		t.Fatal("a refused write changed the file")
+	}
+}
+
+// TestAnUnreadableStateMovedAwayIsWritableAgain: a state that could not be
+// read is never written over, and once the operator has moved it away the
+// store sees so at its next write, which is made on the state that refuses,
+// so a choice clears the refusal with no restart (the Claude API reviewer on
+// #1405: the store refused every write until a restart); an entry still
+// there is still refused.
+func TestAnUnreadableStateMovedAwayIsWritableAgain(t *testing.T) {
+	durable(t)
+	data := t.TempDir()
+	path := filepath.Join(data, FileName)
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s := openAt(t, data, options{})
+	for range 2 {
+		if err := s.Update(chooseNative(t)); !errors.Is(err, ErrNotWritable) {
+			t.Fatalf("a write over the entry still there = %v, want ErrNotWritable", err)
+		}
+	}
+	if err := os.Rename(path, path+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Update(chooseNative(t)); err != nil {
+		t.Fatalf("a write once the operator moved the entry away = %v", err)
+	}
+	want := Refusing(t0)
+	want.Warnings = nil
+	want.DACs = []DAC{{Key: goBar(t), Choice: &Choice{Mode: ModeNative, Revision: 1, SetAt: t0, SetBy: ByApp}}}
+	if got := fileState(t, data); !reflect.DeepEqual(got.normalized(), want.normalized()) {
+		t.Fatalf("the state written is %s, want the choice on the state that refuses, its refusal cleared", show(t, got))
+	}
+	if st := s.State(); st.Unreadable() {
+		t.Fatal("the store still refuses after the choice")
+	}
+}
