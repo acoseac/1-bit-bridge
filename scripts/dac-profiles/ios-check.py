@@ -16,7 +16,9 @@ refusal at or below it (ifi.generic does); its evidence is in the row's comments
 database's lint holds it to the profile's own provenance. It prints one line a profile and exits 1
 on a violation, a row or a commit the database names that the file is not, or a file it cannot
 read. Paste its output into the PR. The registry's prose is never read: only each row's id and its
-maxDSDRate. `--self-test` pins the reader and the check on a synthetic registry.
+maxDSDRate, with every comment blanked, line and block (which nest, as Swift's do), outside string
+literals, and what the reader does not read (a block comment left open, a multi-line or raw string,
+an interpolation) refused. `--self-test` pins the reader and the check on a synthetic registry.
 """
 
 import argparse
@@ -32,21 +34,42 @@ SOURCE_REF = re.compile(r"^DACProfile\.swift (?P<row>[a-z0-9]+(?:[.-][a-z0-9]+)+
 ROW_ID = re.compile(r'\bid:\s*"(?P<id>[^"]+)"')
 ROW_RATE = re.compile(r"\bmaxDSDRate:\s*\.(?P<rate>none|dsd64|dsd128|dsd256|dsd512)\b")
 RATES = {"none": 0, "dsd64": 64 * 44100, "dsd128": 128 * 44100, "dsd256": 256 * 44100, "dsd512": 512 * 44100}
+# A string literal as strip_comments reads one: closed on its line, each escape
+# a character and none an interpolation.
+STRING = re.compile(r'"(?:[^"\\\n]|\\[^\n(])*"')
 
 
 def strip_comments(swift):
-    """Blank every // comment, keeping string literals whole, so a row's comments are never read."""
+    """Blank every comment, // and /* */ (which nest, as Swift's do), keeping string literals whole,
+    so a row's comments are never read and a /* in a string or a line comment opens none. What it
+    does not read is refused, never read past: a block comment left open, a string not closed on
+    its line (a multi-line string is one), an interpolation and a raw string."""
     out, i, n = [], 0, len(swift)
     while i < n:
         if swift.startswith("//", i):
             j = swift.find("\n", i)
             i = n if j < 0 else j
+        elif swift.startswith("/*", i):
+            depth, i = 1, i + 2
+            while depth:
+                if i >= n:
+                    raise ValueError("a block comment is left open")
+                if swift.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif swift.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    i += 1
+            out.append(" ")
         elif swift[i] == '"':
-            j = i + 1
-            while j < n and swift[j] != '"' and swift[j] != "\n":
-                j += 2 if swift[j] == "\\" else 1
-            out.append(swift[i:j + 1])
-            i = j + 1
+            m = STRING.match(swift, i)
+            if m is None:
+                raise ValueError("a string this does not read: one not closed on its line (a multi-line string),"
+                                 " or an interpolation")
+            out.append(m.group())
+            i = m.end()
+        elif swift.startswith('#"', i):
+            raise ValueError("a raw string, which this does not read")
         else:
             out.append(swift[i])
             i += 1
