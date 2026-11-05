@@ -544,6 +544,67 @@ func TestHoldingANestedRootSpelledInAnotherCaseLetsGoOfTheWatchesUnderIt(t *test
 	}
 }
 
+// TestANestedRootIsWalkedAsItsFolderListsItOnlyWhereTheFolderTakesBothSpellingsForOne:
+// a nested root configured as music/USB is walked from the path the outer
+// root's walk reaches its folder by, music/usb, only where the folder above
+// takes the two spellings for one name, as which root a path is decides
+// (caseLook.sameName: a folder established to fold case, its lookups finding
+// one entry); where it is case-sensitive, or cannot tell, music/USB is
+// another folder, walked as configured (B651's tenth round, Codex on round
+// 9: kqueue keys a watch by its spelling, so the configured one was a second
+// tree). A Create of usb from the folder above is the watched root's own
+// where the folder takes the spellings for one, and asks for nothing; where
+// it does not, it is a new folder's, and a scan of music is armed. The volume
+// is stood in for through both seams (simVolume), so every host runs this;
+// on this host's own kqueue,
+// TestANestedRootInAnotherCaseIsWatchedOnceOnAVolumeThatFoldsCase.
+func TestANestedRootIsWalkedAsItsFolderListsItOnlyWhereTheFolderTakesBothSpellingsForOne(t *testing.T) {
+	for _, c := range []struct {
+		folding fsutil.CaseFolding
+		listed  bool
+	}{
+		{fsutil.CaseInsensitive, true},
+		{fsutil.CaseSensitive, false},
+		{fsutil.CaseUnknown, false},
+	} {
+		t.Run(c.folding.String(), func(t *testing.T) {
+			dir := t.TempDir()
+			outer := filepath.Join(dir, "music")
+			disk, configured := filepath.Join(outer, "usb"), filepath.Join(outer, "USB")
+			writeTracks(t, filepath.Join(outer, "Artist", "Album", "01.flac"), filepath.Join(disk, "Band", "Record", "01.flac"))
+			scanner := NewScanner([]string{outer, configured}, openStoreIn(t, dir), "")
+			answerFolding(scanner, c.folding)
+			w, err := NewWatcher(scanner, time.Hour)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				w.cancelAllPending()
+				_ = w.w.Close()
+			})
+			want := configured
+			if c.listed {
+				want = disk
+			}
+			if got := w.listedRoot(configured); got != want {
+				t.Errorf("%s is walked from %s, want %s", configured, got, want)
+			}
+			if got := w.listedRoot(outer); got != outer {
+				t.Errorf("%s, nested in no root, is walked from %s", outer, got)
+			}
+			w.rootWatches[configured] = want
+			w.handleEvent(context.Background(), fsnotify.Event{Name: disk, Op: fsnotify.Create})
+			armed := armedUnder(w, outer)
+			if c.listed && len(armed) != 0 {
+				t.Errorf("a Create of %s, the watched root's own folder, armed scans of %q", disk, armed)
+			}
+			if !c.listed && len(armed) == 0 {
+				t.Errorf("a Create of %s, a folder of its own beside %s, armed no scan", disk, configured)
+			}
+		})
+	}
+}
+
 // TestWatchingAHeldNestedRootAgainLetsGoOfItsEntryWatchFirst: on kqueue the
 // walk of the outer root holds a held nested root's folder open as an entry of
 // the folder above it, and watching the root again lets go of that watch

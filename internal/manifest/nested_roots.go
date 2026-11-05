@@ -127,6 +127,32 @@ func (c *caseLook) mayBeOneName(parent, x string) bool {
 	return !holdsSpellingOrContent(parent, x)
 }
 
+// listedName is name as the folder dir lists it, for the path a walk reaches
+// an entry of dir by: name itself where the listing holds it byte for byte,
+// else a listed name the folder takes for it, as which root a path is decides
+// (sameName: a folder established to fold case, the lookups of both finding
+// one entry; a name in another case alone is a candidate, never the answer),
+// else name. A listing that cannot be read leaves name as it is.
+func (c *caseLook) listedName(dir, name string) string {
+	f, err := fsutil.OpenDir(dir)
+	if err != nil {
+		return name
+	}
+	entries, _ := f.ReadDir(-1)
+	_ = f.Close()
+	for _, e := range entries {
+		if e.Name() == name {
+			return name
+		}
+	}
+	for _, e := range entries {
+		if strings.EqualFold(e.Name(), name) && c.sameName(dir, name, e.Name()) {
+			return e.Name()
+		}
+	}
+	return name
+}
+
 // holdsSpellingOrContent reports whether the folder dir holds a spelling of x
 // in another case, or library content (isLibraryEntry), reading its listing
 // rootLookBatch entries at a time; false where it cannot be read.

@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -640,7 +641,7 @@ func (wt *Watcher) addTree(root string, isConfiguredRoot bool) error {
 	pass := wt.heldBelow(root)
 	var base string
 	limitHit := false
-	rootWatch, err := walkWatchTree(root, isConfiguredRoot, func(path string, _ fs.DirEntry, watch bool) error {
+	rootWatch, err := walkWatchTree(wt.walkRootOf(root, isConfiguredRoot), isConfiguredRoot, func(path string, _ fs.DirEntry, watch bool) error {
 		if !watch {
 			return nil
 		}
@@ -882,6 +883,63 @@ func watchWalkStart(root string, isConfiguredRoot bool) (walkFrom, rootWatch str
 	return walkFrom, root, nil
 }
 
+// walkRootOf is where a walk of root starts: a configured root's listedRoot,
+// and a folder that appeared at runtime as it is.
+func (wt *Watcher) walkRootOf(root string, isConfiguredRoot bool) string {
+	if !isConfiguredRoot {
+		return root
+	}
+	return wt.listedRoot(root)
+}
+
+// listedRoot is the path the walk of the root a configured root is nested in
+// reaches the nested root's folder by, which the nested root's own walk starts
+// from: where that walk starts (its own listedRoot, then watchWalkStart), and
+// below it each element as the folder above lists it, where the folder takes
+// the configured spelling for that name (caseLook.listedName). A root nested
+// in none, and one whose own folder is no plain directory (a link, which no
+// walk of another root descends), is as configured; so is any element a
+// folder does not establish as the listed one. fsnotify's kqueue backend and
+// the watcher's account key a watch by its path's spelling, so a nested root
+// configured as music/USB and watched so, where music lists usb, was a second
+// tree beside the one the outer walk watches, from the start, and again after
+// each resume, the next change in music sending a Create for usb (B651's
+// tenth round, Codex on round 9). Events under it are named back under the
+// configured root (noteAlias, configuredName).
+func (wt *Watcher) listedRoot(root string) string {
+	roots := wt.scanner.Roots()
+	return wt.listedRootIn(roots, root, len(roots))
+}
+
+// listedRootIn is listedRoot among roots, following at most depth roots out.
+func (wt *Watcher) listedRootIn(roots []string, root string, depth int) string {
+	if depth <= 0 {
+		return root
+	}
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return root
+	}
+	others := slices.DeleteFunc(slices.Clone(roots), func(r string) bool { return r == root })
+	outer, _, tail := wt.scanner.deepestRootOf(others, abs)
+	if outer == "" || tail == "." {
+		return root
+	}
+	if info, err := wt.scanner.lstat(abs); err != nil || !info.IsDir() {
+		return root
+	}
+	walkFrom, _, err := watchWalkStart(wt.listedRootIn(roots, outer, depth-1), true)
+	if err != nil {
+		return root
+	}
+	c := wt.scanner.caseLook()
+	p := walkFrom
+	for _, e := range strings.Split(tail, string(filepath.Separator)) {
+		p = filepath.Join(p, c.listedName(p, e))
+	}
+	return p
+}
+
 // configuredName is an event's path in the spelling of the configured root it
 // is under: a path under a linked root's resolved directory is renamed onto
 // the root as configured (the longest resolved directory that holds it, should
@@ -996,6 +1054,16 @@ func (wt *Watcher) handleEvent(ctx context.Context, ev fsnotify.Event) {
 		}
 		if itself && ev.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
 			wt.lookAgain(ctx, root, msgWatchRootRewatched)
+			return
+		}
+		// A Create of a root the watcher watches is the folder above naming
+		// it again: fsnotify's kqueue backend forgets having seen a path it
+		// stops watching (a hold's release, a resume's) and sends a Create
+		// for it at the next change there. The root's tree is watched, and
+		// watching it asked for its scan (B651's tenth round). Which root it
+		// is was decided as every path's is (rootOf), never by a fold of
+		// names alone.
+		if _, watched := wt.rootWatches[root]; itself && watched && ev.Op&fsnotify.Create != 0 {
 			return
 		}
 	}

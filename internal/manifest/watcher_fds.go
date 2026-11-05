@@ -464,7 +464,7 @@ func (wt *Watcher) planWatches(root string, isConfiguredRoot bool) (plan []plann
 	pass := wt.heldBelow(root)
 	var base string
 	room, need := f.budget-f.n, 0
-	rootWatch, err = walkWatchTree(root, isConfiguredRoot, func(path string, d fs.DirEntry, watch bool) error {
+	rootWatch, err = walkWatchTree(wt.walkRootOf(root, isConfiguredRoot), isConfiguredRoot, func(path string, d fs.DirEntry, watch bool) error {
 		if !kqueueHoldsEntry(d.Type()) {
 			return nil
 		}
