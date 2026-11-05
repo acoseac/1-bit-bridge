@@ -76732,6 +76732,42 @@ every control red in the test that pins it:
 After each restore the files were their committed bytes, and `git status`
 showed no Go file changed at the end.
 
+**Checks.** On legion0, in one call under the build slot, on 2b74bd5d (the
+controls ran on 4ce44b2e, whose code that commit leaves as it was):
+- `make fmt` (go1.27.3's gofmt): no file changed.
+- `make vet`: native, `GOOS=windows`, `GOOS=darwin`, and `GOOS=linux` with
+  `GOARCH=386` and with `GOARCH=arm64`: clean.
+- `make test TMPDIR=<worktree>/.tmp/_b728-b4/gotmp` (a `_` directory, which
+  the build-site census skips): 82 packages ok, none failed, in 1,755 s. The
+  Linux-only packages ran here, not only vetted: alsapcm, alsa, atomicwrite
+  and the engine among them.
+- `make build-all`: the six targets, `check-build-tags: OK`.
+- `go test -race` over `./internal/alsapcm/`, `./internal/player/playback/`
+  and `./internal/player/qualification/`: ok (30.9, 2.4 and 3.8 s).
+- The native-integration overlay (`scripts/native-integration-overlay.py`),
+  then `go test -race -tags ts_omit_webclient,ts_omit_debugeventbus -overlay
+  <it> ./cmd/bridge -run '^TestNativeIntegration' -timeout 5m -watchdog 10s`
+  (13 tests) and the same over `./internal/player/playback` (29): ok, every
+  test the job names among them. The overlay compiles this package's test
+  files into the package, the new ones included.
+- `alsa-abi` on amd64, with `ALSA_UAPI_HEADER` set to Ubuntu 26.04's
+  `/usr/include/sound/asound.h` (the raw GitHub host is out of reach here),
+  compared as the header of v6.12: 252 facts agree with the Go definitions.
+  Not run on arm64: this host has neither an arm64 machine nor an emulator,
+  and `uapi.go` is unchanged; the gated hardware test does build for
+  linux/arm64.
+- The qualification check, `go run -tags
+  ts_omit_webclient,ts_omit_debugeventbus ./scripts/qualification-version
+  -base 3b900afc -head HEAD`: "qualification version OK: 3b900afc..HEAD".
+- `make docs-check`: ok (CLAUDE.md 74.2 %, the largest rules file,
+  dlna-upnp.md, 97.0 %, the worst load, player_openhome_test.go's, 64.5 %).
+  With the rules patch applied, player.md is 97,234 bytes (97.2 %); with
+  B3's patch applied first and B4's bullet after B3's, 97,860 bytes (97.9 %)
+  and CLAUDE.md 48,264: both under budget, so no entry moved.
+- The rules patch: a strict applier reproduces the patched file, and `git
+  apply --check` takes it. Every test name this branch's lines and the patch
+  cite is defined, and `make test`'s citation sweep passed.
+
 **Follow-ups, for the backlog** (the backlog file is not on legion0): B7 derives
 `ProbeConditions` and `ProbeUnit.Enumeration` from the hotplug snapshot and
 calls `Backend.Probe` at section 5's moments; B9's choice write calls
