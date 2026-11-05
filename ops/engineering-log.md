@@ -76821,4 +76821,16 @@ row for the first); a Start that gave its wait up still counted
 (`TestAStartWaitsForTheProbeThatHoldsTheSlot`'s three rows that give up, the
 assertion 0a98ff3e added). One mutant is equivalent and left out: dropping
 the decrement as the Start takes the slot, which `hold`'s deferred one makes
-up before it returns.
+up before it returns. The checks, in one call under the build slot on
+ee4175e0: `go test -race` over `./internal/alsapcm/` and
+`./internal/player/playback/` ok (31.5 and 2.3 s); `make fmt` changed
+nothing; `make vet` native, `GOOS=windows`, `GOOS=darwin`, and `GOOS=linux`
+with `GOARCH=386` and `GOARCH=arm64`, clean; `make test` 82 packages ok, none
+failed, in 1,730 s, alsapcm, alsa, atomicwrite and the engine run here;
+`make build-all` with `check-build-tags: OK`; the native-integration
+overlay's 13 and 29 tests ok; `alsa-abi` against Ubuntu's asound.h, 252
+facts agreeing; `make docs-check` ok; the qualification check OK, version 39
+standing. The rules patch (`rules-b728-b4-r2.patch`: B4's bullet, its Don't
+extended by the three points) applies strictly and under `git apply
+--check`; with it player.md is 97,450 bytes (97.5 %), and 98,076 (98.1 %)
+with B3's patch applied first, under budget, so no entry moved.
