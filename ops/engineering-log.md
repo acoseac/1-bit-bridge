@@ -76777,3 +76777,76 @@ typed library name may hold a control character; mDNS's `localhost.local`
 fallback for a host with no name is named by no certificate; and a host whose
 name is literally `localhost` is paired at `https://localhost:7788`, the
 phone's own name (an ASCII name, so unchanged here).
+
+## 2026-11-05 — B739 round 2: what's advertised must be reachable and certified
+
+Four points Codex and the Claude API reviewer found on #1406, each verified
+at d26e7d0f (the branch with its rules patch and main's B651 merged) and red
+there first (07da4414); the fix is 0481600e, the cross-check's two-way mint
+d1b572bb. Worker b739 on legion0, as for round 1.
+
+**1. A converted name advertised while nothing answers it.** Only the
+bridge's own responder publishes a punycode name, and with
+`mdns.enabled: false` a host named `Жук` still listed
+`https://xn--f1ai0a.local:7788` in /v1/health, the pairing QR dialled it and
+the doctor's `pairing-url` said ok. `advertise.Params.MDNS` (the live
+config's `EffectiveMDNSEnabled`, in `api.ReachableEndpoints` and the
+doctor's checklist) now gates a converted name's `.local` endpoint;
+`advertise.PairingHost` returns one `Host` (Name, Unusable, Converted,
+Docker) from one read, and `admin.PairingPrimary` sends a converted name
+with mDNS off to `lanPairingURL` (in a detected container, to a dialable
+custom endpoint or none) with a reason the doctor's line prints:
+"pairing QR dials https://192.168.1.20:7788: mdns.enabled is false, and
+only the bridge's own mDNS answers xn--f1ai0a.local, the host's name in its
+ASCII form". The want-set is unchanged, so turning mDNS off or on makes no
+certificate stale (the cross-check mints under each setting and grades under
+both); an ASCII name is untouched in every case. Not fixed, and not as
+small: a responder that fails to start with mDNS on. Serve prints "mDNS
+advertise failed (non-fatal)", keeps the config's word, and health, the QR's
+primary and the doctor still name the converted `.local`, which nothing then
+answers; an app that reads `urls=` falls back to the LAN address, one that
+reads `url=` alone does not. Fixing it needs the serving process's responder
+state in api and admin, which the doctor, another process, cannot see.
+
+**2. A host with no name published as `localhost.local`.** Its SRV target
+and `host=` were `localhost.local`, which no certificate names, and the
+live responder answered an A question for `localhost.local.` with the
+bridge's address (`TestAHostWithNoNameIsAnsweredForByANameOfItsOwn` at
+d26e7d0f: four answers, 127.0.0.1). Now such a host, a name that cannot be
+read included (the same branch), publishes no `host=` and an SRV target
+made of the first IPv4 address its records carry, dots as hyphens
+(`onebit-bridge-192-168-1-20.local.`), else the first IPv6 address expanded,
+colons as hyphens (a 53-byte label), else `onebit-bridge.local.`: no other
+host on the link holds the address, so no other responder answers it, and
+hashicorp/mdns answers address questions for that target alone.
+`mdns.RecordsFor` is what `rebuildLocked` publishes. `ips=` is still
+published there, from the responder's own address set (the pinned
+interface's global-unicast addresses), which the certificate's walk names.
+PROTOCOL.md's `host` row says the key can be absent; the app falls back to
+`ips=` or its own resolve (BridgeDiscoveryManager.swift:236-245, read by
+the reviewer, not on this host).
+
+**3. The LAN fallback ignored the bound address.** `lanPairingURL` now takes
+an IP address in `listenAddress` a phone can dial (not unspecified, loopback
+or IPv6 link-local), then a dialable custom endpoint, then the walk's first
+LAN IPv4 address. A loopback, named or link-local bind takes the next step,
+as a wildcard one does; the red test's loopback rows asked for none and were
+changed with the fix: the serve tests bind loopback and pair at the walk's
+address, and the `.local` primary and /v1/health ignore the bind on every
+path (a finding below).
+
+**4. The cross-check sees all of it.** `TestEveryNameTheBridgeAdvertisesIsOneItCertifies`
+runs every row with mDNS on and off, reads the responder's records
+(`host=`, `ips=`, the SRV target) and certifies each host it names;
+`TestServeOnAHostWhoseNameIsNotASCII` pairs `Жук` at the LAN address with
+mDNS off and at `xn--f1ai0a.local` with mDNS on, the responder pinned to
+loopback (`serveOpts.mdnsPick`).
+
+**Findings, out of these points:** a listener bound to one address
+(loopback included) is still listed at every walk address in /v1/health
+and paired at the host's `.local` name, as on main; mDNS's `ips=` publishes
+every global-unicast address of the pinned interface, an IPv6 one acquired
+after the mint included, which the certificate does not name, where health
+holds such an address back (B457); and a host named
+`localhost` advertises `localhost.local`, which `tls.dnsNames` leaves out of
+the certificate (an ASCII name, so unchanged).
