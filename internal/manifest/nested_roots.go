@@ -216,7 +216,13 @@ func pathElements(p string) []string {
 
 // volumeElements is pathElements over a clean path split into its volume name
 // vol and the rest of it, with the separator sep: apart from the host's path
-// rules, so that a test on any host can hand it Windows' volumes.
+// rules, so that a test on any host can hand it Windows' volumes. A volume
+// longer than a drive letter's two characters, a share's (\\server\share) or
+// one in the \\?\ namespace, names its root with nothing after it, as Go's
+// filepath.Rel takes it: filepath.Clean leaves \\server\share bare while every
+// path below it begins \\server\share\, and a root configured there without
+// its separator held none of them (B651's ninth round, Codex on round 8). C:
+// alone, a drive's current folder, which filepath.Clean spells C:., stays C:.
 func volumeElements(vol, rest string, sep byte) []string {
 	s := string(sep)
 	var out []string
@@ -224,6 +230,8 @@ func volumeElements(vol, rest string, sep byte) []string {
 	case strings.HasPrefix(rest, s):
 		out = append(out, vol+s)
 		rest = rest[1:]
+	case len(vol) > 2 && rest == "":
+		out = append(out, vol+s)
 	case vol != "":
 		out = append(out, vol)
 	}
