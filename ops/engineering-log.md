@@ -75182,3 +75182,147 @@ scanner.md, it leaves the file byte for byte as the edited copy, the budgets
 pass (scanner.md 30,311 to 30,531 bytes), and `mdblocks.dropped_donts` finds
 the long form's Don't whole in the patched line and the line's in the long
 form, while it reports the unpatched line as dropping it.
+
+## 2026-11-05 — B651 round 11: two review findings on round 10, and CodeQL's two path-injection alerts
+
+Round 11, on the same Mac, from the PR's head, f9cee611 (round 10, its rules
+and a merge of main at 1a78b58a). Codex and the Claude API reviewer read
+round 10, and CodeQL flagged two `go/path-injection` sinks on the PR. Both
+findings hold. The alerts are confined, and no code changed for them but
+comments.
+
+**1. Removing only the swapped hard link still answered case-insensitive
+(Codex and Claude).** Real. Round 10's re-read answered case-insensitive
+wherever it held the probed name alone (casefold.go:137–144 on f9cee611). On
+a case-sensitive volume, a file with two names, `folder.jpg` and
+`FOLDER.JPG`, in a folder whose listing the probe's first read cut short (256
+entries or more), is found by both lookups as one file; `FOLDER.JPG` removed
+before the re-read leaves a listing that holds `folder.jpg` alone, which is
+what a folder that folds lists, and the probe answered case-insensitive. A
+re-read without the swapped spelling answers now only once a lookup of that
+spelling still finds the file first found (`stillFound`); one that finds
+nothing, or another file, says the entry changed, and the next entry is
+asked. `TestAListingThatChangedBeforeItsReReadTellsNothing` gained the case
+through the `foldingFS` seam: the relist deletes `FOLDER.JPG` and its id
+alone, and the answer wanted is Unknown. Red on f9cee611 ("the folder
+answered case-insensitive, want unknown"), green after.
+
+**2. A Create of a watched root was dropped though the root's watch was gone
+(Claude).** Real, on this Mac's APFS through kqueue. Round 10 returned early
+on every Create that named a root the watcher had watched (watcher.go:1066 on
+f9cee611), taking it for the folder above naming the root again after a hold
+or a resume. kqueue also drops a renamed folder's watch without a word: where
+a change in the folder and its rename are read as one event, fsnotify drops
+the watch and sends no Rename. A folder then put at the root's path sends the
+same Create, and the early return left it unwatched until the check of the
+roots' own watches came round (`rootWatchCheckEvery`, 30 s). The early return
+holds now only while the root's own watch is still among fsnotify's
+(`rootWatches[root]` in `WatchList`, which holds user watches alone, a
+resume's among them); otherwise the root is looked at again (`lookAgain`) and
+watched where it is now, or held. `TestAReplacedNestedRootIsWatchedAgainOnItsCreate`
+runs it through kqueue, and skips where fsnotify does not watch through
+kqueue: roots `music` and `music/usb`, `usb` moved away with its Rename
+dropped before the watcher sees it (`dropEventForTests`, standing in for the
+event kqueue folds away), another folder renamed in at its path, and a file
+written in `music` after it, whose event orders the Create before the test's
+check. Red against f9cee611's watcher: nothing looked at the root again, and a
+file written into the new folder afterwards was never seen while one written
+in `music` after it was. Round 10's portable test of the watched root's own Create
+recorded a root watch it never installed (`w.rootWatches[configured] =
+want`), which the new check read as gone; it installs the watch now
+(`addTree`, `noteRootWatches`), as a resume leaves it. Round 10's doubling
+fix stands: `TestANestedRootInAnotherCaseIsWatchedOnceOnAVolumeThatFoldsCase`
+passes in both legs, and
+`TestANestedRootIsWalkedAsItsFolderListsItOnlyWhereTheFolderTakesBothSpellingsForOne`
+in all three.
+
+**3. CodeQL's `go/path-injection` at nested_roots.go:59 and casefold.go:89.**
+Confined, not a defect. Both sinks are an `os.Lstat`: `Scanner.lstat`'s
+(nested_roots.go:59 on rounds 9 and 10) and fsutil's `osFolding.lstat`
+(casefold.go:89 on round 9's head, :92 since round 10). The GitHub API that
+gives an alert's flow (the analysis's SARIF, the 2026-09-28 triage's method)
+was not reachable from this worker, so the flows were traced in the code.
+The remote sources that reach the two are the console's upload commit
+(`POST /api/upload/sessions/{sid}/commit`) and trash (`POST
+/api/library/trash`), each through a background `ScanSubtree`. The trash's
+folders reach it through `fs.Resolver.Resolve`
+(`spawnBackgroundSubtreeScanResolved`), which refuses NUL and a raw `..`
+segment, joins onto a configured root and checks the joined path's prefix
+(fs.go:330), after the trash spelled each path from its folders' listings
+(`fsutil.Speller`) and refused a link that resolves outside the root
+(`IsUnderAny`). An upload's reach it as its session's root, the configured
+root the session was found under (`findSession`, which refuses an id holding
+a separator or a dot), joined (`spawnBackgroundSubtreeScan`) with folders
+`spellScanDirs` spelled with `fsutil.Speller`: each element one the folder
+above lists, never `.`, `..` or a separator, and every folder above the last
+a directory, not a link. So the path is inside a configured root when
+`ScanSubtree` has it. `deepestRootOf` compares it with each root through
+`caseLook.under`, which looks an element up (`sameName`: `Scanner.lstat` of
+both spellings, and `fsutil.FoldingIn` of the folder that holds them) only
+while every element before it matched that root's. The folder read is a
+prefix of the path: above the path's own root, a folder that root is in; from
+that root down, the root or a folder in it. The names looked up are a configured root's
+element or the path's own, and FoldingIn's are its listing's, as listed or
+case-swapped. The subtree scan's other comparisons (`nestedRootsUnder`, and
+`under` between the path and each nested root) read prefixes of a configured
+root or of the path alike. A folder above a root is read only where two roots
+spell a folder above one of them in two cases, and a scan of those roots
+reads it without any request (`nestedRootsUnder`, before each walk). No
+client chooses a folder outside the library to be read.
+
+No check was added, against the brief's first option. The repo's
+containment helpers are no barrier CodeQL models: the 2026-09-28 triage
+(above) dismissed alerts raised right after `IsUnderAny` (#90, #119–#121) and
+after `resolveParts`' prefix check (#131, #132). And one at these sinks would
+refuse the lookups above a root that tell two roots apart: with the roots
+`/data/Music` and `/data/music/usb` on a volume that folds case, a path under
+`/data/Music/usb` would go to the outer root, which the B651 line forbids. A
+comment at each sink says where the path is confined, and FoldingIn's
+docblock and the long form, which said every folder the probe is asked about
+is in a library root, name the folders above one too. The comments move both
+alerts' line fingerprints, so they come back under new numbers (as #1055 moved
+#7 and #8). Whether to dismiss them as false positives, naming the barriers
+above, is the orchestrator's decision.
+
+**Negative controls**, each on the round-11 commit it tests, one at a time,
+the file put back from HEAD:
+
+| Control | Red |
+|---|---|
+| 1 the re-lookup of the swapped spelling skipped (`&& false`) | the hard link's other name removed before the re-read: case-insensitive, want unknown |
+| 2a round 10's early return on every Create of a watched root | `TestAReplacedNestedRootIsWatchedAgainOnItsCreate`: nothing looked at the root again |
+| 2b the root looked at again even while its own watch is installed | round 10's portable test, its case-insensitive leg: the watched root's own Create armed a scan of `music/USB` |
+
+Control 2b left round 10's real-disk test green, so the portable test is the
+one that pins the early return.
+
+**Gates**, on this Mac with go1.27.3, through the build lock (one slot here,
+shared with the app's simulator runs), on 71ac9ae8, round 11's three commits:
+`go test` without race of internal/manifest (102 s), internal/fsutil (0.5 s)
+and cmd/bridge (222 s) passed. Under `-race`, internal/manifest in five shards
+(`^(TestA|Fuzz|Example)`, `^Test[B-E]`, `^Test[F-R]`, `^TestS`,
+`^Test[^A-S]`: 220 s, 133 s, 269 s, 365 s, 190 s; 242 + 318 + 402 + 273 + 199
+= 1,434 tests, `go test -list`'s count, each run once by name) and cmd/bridge
+in four (`^(TestA|Fuzz|Example)`, `^Test[B-E]`, `^Test[F-R]`, `^Test[^A-R]`:
+277 s, 108 s, 165 s, 325 s; 230 + 183 + 407 + 363 = 1,183), every shard
+passing; internal/fsutil passed under race. `make test-fast` failed once, in
+`scripts/third-party-licenses` alone: its build-tag census walks the tree on
+disk, `.tmp/` included, and read this round's scratch gate script there (`go
+test -tags $TAGS`) as an unreviewed build site. With the scratch scripts moved
+into a directory named with a leading `_`, which the census passes over, that
+package passed alone, and `make test-fast` then passed whole (81 packages).
+`make vet` was clean native
+(darwin) and for linux, windows and linux/386; go1.27.3's gofmt lists none of
+the six Go files round 11 changed; `make docs-check` passes;
+`scripts/qualification-version` 1a78b58a..HEAD (main's head as merged) is OK.
+
+**The rules**: `rules-b651-r11.patch`, in the worktree's ignored `.tmp/`,
+written with `git diff` from a scratch copy, grows two clauses of the B651
+line's Don't (a Create of a watched root ignored once the root's own watch is
+gone; lookups and a listing read again that do not agree with each other),
+with the long form in `ops/History-rules-scanner.md`. Applied by the strict
+applier to HEAD's scanner.md, it leaves the file byte for byte as the edited
+copy, the budgets pass (scanner.md 30,531 to 30,599 bytes), and
+`mdblocks.dropped_donts` finds the long form's Don't whole in the patched
+line and the line's in the long form, while it reports the unpatched line as
+dropping it.

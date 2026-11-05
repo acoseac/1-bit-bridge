@@ -2607,7 +2607,13 @@
   `usb` was a second tree from the start, and after a resume, which let go of
   the `usb` entry and fsnotify's having seen it, the next change in `music`
   sent a Create for `usb` whose charge and deferred walk took a library that
-  fits once past the budget); and a scan's walk of
+  fits once past the budget), while the root's own watch is still among
+  fsnotify's (`WatchList`, which holds user watches alone, a resume's among
+  them): once kqueue has dropped it without a word, a Create at the root's
+  path is another folder put there, and the root is looked at again
+  (`lookAgain`) and watched where it is now, or held (round 11, Claude on
+  round 10: the Create was dropped, and the folder put there went unwatched
+  until `checkRootWatches` came round); and a scan's walk of
   the outer root, the full scan's and a subtree scan's, passes over a nested
   root that reads as not mounted, its rows under that path spared as a subtree
   the walk could not see (round 5, CodeRabbit and Argon on #1397: the first
@@ -2662,10 +2668,26 @@
   the entry changed since the lookups, so the next is asked, and a probe with
   none left answers Unknown, never case-sensitive (round 10, Codex and Claude
   on round 9: a rename of `Abba` to `ABBA` before the re-read made a folder
-  that folds answer case-sensitive). The probe never writes, where the
-  decisions allowed a temporary name in a writable folder: every folder the
-  scanner asks about is in a library root, the volume may be read-only, and
-  the watcher would see the write (Argon on the seventh round's brief). The
+  that folds answer case-sensitive). A re-read that holds the probed name
+  alone answers case-insensitive only once a lookup of the swapped spelling
+  still finds the file: a hard link's other name removed before the re-read,
+  on a case-sensitive volume, leaves the listing a folder that folds would
+  give, so the next is asked (round 11, Codex and Claude on round 10: the
+  probe answered case-insensitive there). The probe never writes, where the decisions
+  allowed a temporary name in a writable folder: every folder the scanner
+  asks about is in a library root, or above one where two roots spell a
+  folder in two cases, the volume may be read-only, and the watcher would see
+  the write (Argon on the seventh round's brief). Those lookups are where
+  CodeQL's `go/path-injection` follows a client's path, from the console's
+  upload commit and trash through `ScanSubtree`, and they are confined: the
+  path is inside a configured root before it gets there (the trash's through
+  `fs.Resolver.Resolve`, an upload's as its session's configured root joined
+  with the folders `fsutil.Speller` found listed), and `caseLook.under` looks
+  an element up only while every element before it matched a configured
+  root's. A containment check against the roots there would refuse the
+  lookups above a root that tell two roots apart, and give a path to a root
+  that is not the deepest that holds it (round 11; the record traces both
+  alerts). The
   two questions count `CaseUnknown` in opposite directions (Argon on the
   brief). Which root a path is (`caseLook.sameName`: `deepestRootOf`, so
   `rootOf`, the dispatch's look, the scans dropped under a held root, and
@@ -2783,7 +2805,8 @@
   mount point, which a mount since covers), watch a nested root under another
   spelling than the walk of the root it is nested in reaches its folder by
   (kqueue keys a watch by its spelling), take a Create of a watched root for a
-  new folder, keep a scan armed under a root the watcher holds, give a path to
+  new folder, or ignore one once the root's own watch is gone, keep a scan
+  armed under a root the watcher holds, give a path to
   any root but the deepest that holds it (a share's root, spelled with its
   separator or without, holds the paths below it), let a scan walk into or
   reap under a nested root that reads as not mounted (decided before the walk,
@@ -2791,7 +2814,8 @@
   anything but the names in it (not its own name in the folder above, not one
   folder for a whole path, not a write, not one file under two names its
   listing holds, not lookups or a listing read again that do not agree with
-  themselves), fold a case-only difference for which root a path is where its
+  themselves or with each other), fold a case-only difference for which root a
+  path is where its
   folder is not established to fold, a lookup there failed otherwise than for
   a name not being there, or one spelling was found alone, or keep one exact
   for what is spared where its folder may fold (an Unknown answer, a folder
@@ -2847,8 +2871,9 @@
   `TestTwoNamesOfOneFileAreNoProofThatAFolderFoldsCase` and
   `TestAnEntryThatChangesBetweenTheLookupsTellsNothing`,
   `TestAListingThatChangedBeforeItsReReadTellsNothing`,
-  `TestANestedRootInAnotherCaseIsWatchedOnceOnAVolumeThatFoldsCase` (macOS,
-  kqueue), `TestANestedRootIsWalkedAsItsFolderListsItOnlyWhereTheFolderTakesBothSpellingsForOne`,
+  `TestANestedRootInAnotherCaseIsWatchedOnceOnAVolumeThatFoldsCase` and
+  `TestAReplacedNestedRootIsWatchedAgainOnItsCreate` (macOS, kqueue),
+  `TestANestedRootIsWalkedAsItsFolderListsItOnlyWhereTheFolderTakesBothSpellingsForOne`,
   `TestServeRefusesTheDataDirItRecordedThroughALinkOnItsVolumeByItsTarget`,
   `TestServeRefusesTheDataDirItRecordedByItsTargetThroughALinkOnItsVolume`,
   `TestServeRefusesTheDataDirThroughALinkAtItsMountPoint`,
