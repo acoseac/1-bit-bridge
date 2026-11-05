@@ -74695,3 +74695,80 @@ steps ran again at the head that carries this record:
 0f079403 the form, the negation reading removed, the lines rewritten;
 ae3ecebc the place; 2899d15f the long form; c4a2ab1f the elided citation;
 this record.
+
+## 2026-11-05 — B728 B2 round 5: heard against a refusal, an unresolved directory said as that, and the window left
+
+The review of #1402 at a681d3ff (round 4, its rules line, and main
+1a78b58a), to which this branch fast-forwarded; three small points from the
+Claude API reviewer, Codex having none of its own. No rules line changes, so
+no patch this round: the B2 line names none of these, and its long form
+carries them.
+
+- **refused and silence at on one rate are one result** (`lint.go`, the
+  contradiction): confirmed. Round 4 refused any two markers on one rate,
+  its brief's sentence taken literally; but both markers credit
+  `RefusedBitRates` ("refused, or played as silence"), so two units that
+  refused one rate in two ways could not be written. In 28385736
+  `TestADopClauseCreditsOnlyTheRatesItsFormLists` wanted "refused DSD256;
+  silence at DSD256" and the brief's two-unit line (`refused DSD256: unit 1
+  would not negotiate (…); silence at DSD256: unit 2 played it silent (…)`)
+  clean: red ("under two markers"). Fixed in 1b660056: the lint compares the
+  results, a rate both heard and refused (by `refused` or `silence at`) is
+  the contradiction, said as that ("both heard and refused"); heard beside
+  either is still refused. The wording followed in `lint.go`'s and
+  `dacprofile.go`'s comments, the README, the design's section 2.1 and the
+  long form.
+- **An unresolved directory read as a card that changed**
+  (`output_dac_bind.go`): confirmed. In 28385736
+  `TestDACInspectTakesNoTwoUnknownPlacesForOne` wanted "not read: the card's
+  directory could not be resolved" where the inventory's directory, the
+  reading again's, or both are empty, and fails on a missing card 5 rather
+  than passing vacuously: red, "not read: the card changed while it was
+  read" in each case, which a user whose directory never resolves would read
+  on every run. Fixed in fe1531eb: an empty directory in either reading is
+  said as that; two that resolved and differ are still a change.
+- **The strings are tied to a place only through the card before and after
+  the read**: not fixed, the known remaining window. The reader reads the
+  strings through its own resolve of the card's device link, and
+  `alsa.QualificationIdentity` names no directory (Codex, on the brief), so
+  two rebinds within one read (the card to unit B and back to A before the
+  reading again) could still show B's strings under A. Closing it needs the
+  reader to return the directory it read the strings from, a change in
+  guarded `internal/alsa/` and a qualification bump, which section 8 keeps
+  B2 clear of: it waits for the later PR that changes that reader (the
+  absent-product reader the B2 review left to one). `readModel`'s comment
+  and the long form say so.
+
+**Negative controls**, by a runner outside the tree, as before, the two
+named tests green first and both files restored by SHA-256 after: all 5
+went red.
+
+| # | Mutation | Red |
+|---|---|---|
+| C1 | refused and silence at on one rate count as two results again (any two markers) | `TestADopClauseCreditsOnlyTheRatesItsFormLists`, 2 failing lines (the two cases that are one result) |
+| C2 | heard beside a refusal is no contradiction | the same, 3 (heard and silence at, heard and refused, and the one across two dop lines) |
+| C3 | an unresolved directory reads as a card that changed | `TestDACInspectTakesNoTwoUnknownPlacesForOne`, its three cases |
+| C4 | only the inventory's directory is asked whether it resolved | the same, the reading again's case |
+| C5 | only the reading again's directory is asked whether it resolved | the same, the inventory's case |
+
+**Checks**, on legion0 (Linux, amd64, Go 1.27.3), in one turn of the shared
+build lock, with TMPDIR under `.tmp/_b728-b2`, at a5e3a1d2:
+- `go test -count=1` of `./internal/player/dacprofile/` and `./cmd/bridge/`,
+  and the same under `-race`: ok (cmd/bridge 304 s, and 906 s under race).
+- `make test-fast`: 82 packages ok, none failed, 14 with no test files; 28
+  results came from the test cache, packages this round does not touch, and
+  internal/alsactl, the one Linux-only package among them, then ran fresh
+  with `-race -count=1`, ok.
+- `make vet` natively, and with `GOOS=windows` and `GOOS=darwin`: clean.
+- go1.27.3's gofmt on cmd, internal and scripts: clean.
+- `make docs-check`: ok (CLAUDE.md 73.6%; the rules line unchanged).
+- The qualification check, from main and from ebe71366: "qualification
+  version OK", at 36: no guarded path changed.
+- `kernel-check.sh` by its own fetch at v6.12, PASS; `ios-check.py` against
+  the registry at cd125088 and its `--self-test`, ok; `profiles.json`
+  checked out under `core.autocrlf=true`, no CRLF, its test PASS.
+- Not run here: Windows and macOS natively, CI's runner, and any hardware.
+
+**Commits.** 28385736 the red tests; 1b660056 heard against a refusal;
+fe1531eb the unresolved directory, and the window named; a5e3a1d2 the long
+form; this record.
