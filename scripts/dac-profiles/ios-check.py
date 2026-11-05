@@ -114,21 +114,35 @@ def check(profiles, rows, commit):
     return lines, ok
 
 
-# The self-test's registry: three rows, synthetic, in the shape registry_rows
-# reads, with a comment and a string that name a rate and must not be read.
+# The self-test's registry: synthetic rows in the shape registry_rows reads,
+# with comments and strings that name a rate or a row and must not be read: a
+# line comment, a block comment, a nested one (Swift's nest), a row a block
+# comment holds, and "/*" in a string and in a line comment, which opens none.
 SELF_TEST_REGISTRY = """
 struct DACProfile { let maxDSDRate: DSDRateCapability }
 nonisolated enum DACProfileRegistry {
     static let profiles: [DACProfile] = [
         DACProfile(
             id: "fixture.published",
-            // a comment naming maxDSDRate: .dsd512, which is never read
+            // a comment naming maxDSDRate: .dsd512, which is never read; nor is its /*
             maxDSDRate: .dsd256,
-            notes: ["a note // with maxDSDRate: .dsd64 in it"]
+            notes: ["/* a string's, never a comment's", "a note // with maxDSDRate: .dsd64 in it"]
         ),
         DACProfile(
             id: "fixture.lowered",
+            /* was maxDSDRate: .dsd512, before a refusal lowered it */
             maxDSDRate: .dsd128
+        ),
+        /* withdrawn:
+        DACProfile(
+            id: "fixture.withdrawn",
+            maxDSDRate: .dsd512
+        ),
+        */
+        DACProfile(
+            id: "fixture.nested",
+            /* a comment /* holding another */ goes on: maxDSDRate: .dsd512, id: "fixture.inner" */
+            maxDSDRate: .dsd64
         ),
         DACProfile(
             id: "fixture.pcm",
@@ -144,18 +158,37 @@ SELF_TEST_CASES = [
     ("a refusal below the row's maximum", 2822400, 0, [5644800], "fixture.published", True),
     ("a refusal above the row's maximum (the Mytek's shape)", 0, 0, [11289600], "fixture.lowered", True),
     ("a heard rate at the row's maximum", 5644800, 0, [], "fixture.lowered", True),
-    ("a heard rate above the row's maximum", 11289600, 0, [], "fixture.lowered", False),
+    ("a heard rate above the row's maximum, a block comment naming a higher one before it", 11289600, 0, [], "fixture.lowered", False),
     ("a stated rate above the row's maximum", 0, 11289600, [], "fixture.lowered", False),
+    ("a heard rate above the row's maximum, a nested comment naming a higher one before it", 5644800, 0, [], "fixture.nested", False),
     ("a heard rate from a row with no DoP", 2822400, 0, [], "fixture.pcm", False),
     ("a row the registry does not have", 2822400, 0, [], "fixture.absent", False),
+    ("a row only a block comment holds", 2822400, 0, [], "fixture.withdrawn", False),
+    ("a row only a nested comment names", 2822400, 0, [], "fixture.inner", False),
+]
+
+# What the reader does not read, each refused rather than read past: (name,
+# a text of the registry, what replaces it).
+SELF_TEST_REFUSED = [
+    ("a row with no maxDSDRate before the next row", "maxDSDRate: .dsd128", "notes: []"),
+    ("a block comment left open", "maxDSDRate: .none\n", "maxDSDRate: .none /* left open\n"),
+    ("a multi-line string", 'id: "fixture.pcm",\n',
+     'id: "fixture.pcm",\n            notes: """\n            maxDSDRate: .dsd512\n            """,\n'),
+    ("an interpolation", '"a note // with', '"\\(note) // with'),
+    ("a raw string", '"a note // with maxDSDRate: .dsd64 in it"', '#"a note // with maxDSDRate: .dsd64 in it"#'),
 ]
 
 
 def self_test():
     """Pin the registry reader and the check on the synthetic registry: 0 when every case holds."""
     failures = []
-    rows = registry_rows(SELF_TEST_REGISTRY)
-    if rows != {"fixture.published": 256 * 44100, "fixture.lowered": 128 * 44100, "fixture.pcm": 0}:
+    try:
+        rows = registry_rows(SELF_TEST_REGISTRY)
+    except ValueError as e:
+        rows = {}
+        failures.append("the registry does not read: %s" % e)
+    if rows != {"fixture.published": 256 * 44100, "fixture.lowered": 128 * 44100, "fixture.nested": 64 * 44100,
+                "fixture.pcm": 0}:
         failures.append("the registry read as %r" % rows)
     for name, heard, stated, refused, row, want in SELF_TEST_CASES:
         dop = {"heardMaxBitRate": heard, "statedMaxBitRate": stated, "refusedBitRates": refused,
@@ -167,14 +200,19 @@ def self_test():
            "source": {"kind": "ios-registry", "ref": "DACProfile.swift fixture.lowered at iOS cd125088"}}
     if check([{"id": "fixture.profile", "dop": dop}], rows, "cea8bdf6")[1]:
         failures.append("a registry read at another commit than the profile names passes")
-    try:
-        registry_rows(SELF_TEST_REGISTRY.replace("maxDSDRate: .dsd128", "notes: []"))
-        failures.append("a row with no maxDSDRate before the next row reads")
-    except ValueError:
-        pass
+    for name, old, new in SELF_TEST_REFUSED:
+        if old not in SELF_TEST_REGISTRY:
+            failures.append("%s: the registry has no %r" % (name, old))
+            continue
+        try:
+            registry_rows(SELF_TEST_REGISTRY.replace(old, new, 1))
+            failures.append("%s: the registry reads" % name)
+        except ValueError:
+            pass
     for f in failures:
         print("ios-check self-test: FAIL " + f)
-    print("ios-check self-test: %s (%d cases)" % ("FAIL" if failures else "PASS", len(SELF_TEST_CASES) + 3))
+    print("ios-check self-test: %s (%d cases)" % ("FAIL" if failures else "PASS",
+                                                  len(SELF_TEST_CASES) + len(SELF_TEST_REFUSED) + 2))
     return 1 if failures else 0
 
 

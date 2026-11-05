@@ -642,6 +642,25 @@ func TestTheKernelQuirkReaderReadsEachShape(t *testing.T) {
 			"if (fp->altsetting == 3) return SNDRV_PCM_FMTBIT_DSD_U32_BE; return SNDRV_PCM_FMTBIT_DSD_U16_LE;"},
 		{"a format returned under a test the reader does not read", "if (fp->altsetting == 3) return SNDRV_PCM_FMTBIT_DSD_U32_BE; break;",
 			"if (fp->altsetting == 3) return SNDRV_PCM_FMTBIT_DSD_U32_BE; if (fp->altsetting == 4 || sample_bytes == 4) return SNDRV_PCM_FMTBIT_DSD_U16_LE; break;"},
+		// In an arm with a bcdDevice switch, a format returned outside the
+		// switch (before it, on another altsetting), or a second altsetting
+		// with a switch of its own, whose cases would be read as the first
+		// altsetting's (CodeRabbit on #1402's round 5).
+		{"a format returned before the bcdDevice switch", "case USB_ID(0xf003, 0x0001):\n\t\tif (fp->altsetting == 2) {",
+			"case USB_ID(0xf003, 0x0001):\n\t\tif (fp->altsetting == 1) return SNDRV_PCM_FMTBIT_DSD_U16_LE;\n\t\tif (fp->altsetting == 2) {"},
+		{"a second altsetting with a bcdDevice switch of its own", "\t\t\tdefault: break;\n\t\t\t}\n\t\t}\n\t\tbreak;",
+			"\t\t\tdefault: break;\n\t\t\t}\n\t\t}\n\t\tif (fp->altsetting == 3) {\n\t\t\tswitch (le16_to_cpu(chip->dev->descriptor.bcdDevice)) {\n" +
+				"\t\t\tcase 0x104: return SNDRV_PCM_FMTBIT_DSD_U16_LE;\n\t\t\tdefault: break;\n\t\t\t}\n\t\t}\n\t\tbreak;"},
+		// The same class in either shape: a statement the reader does not read
+		// beside the ones it reads, which changes what they mean.
+		{"a statement in the bcdDevice switch the reader does not read", "case 0x101: return SNDRV_PCM_FMTBIT_DSD_U32_LE;",
+			"case 0x101: fp->dsd_bitrev = true; return SNDRV_PCM_FMTBIT_DSD_U32_LE;"},
+		{"a format the bcdDevice switch returns by default", "\t\t\tdefault: break;\n\t\t\t}",
+			"\t\t\tcase 0x104: default: return SNDRV_PCM_FMTBIT_DSD_U16_LE;\n\t\t\t}"},
+		{"a statement beside an altsetting test", "if (fp->altsetting == 3) return SNDRV_PCM_FMTBIT_DSD_U32_BE; break;",
+			"fp->dsd_bitrev = true; if (fp->altsetting == 3) return SNDRV_PCM_FMTBIT_DSD_U32_BE; break;"},
+		{"an altsetting test under a test the reader does not read", "if (fp->altsetting == 3) return SNDRV_PCM_FMTBIT_DSD_U32_BE; break;",
+			"if (sample_bytes == 4) if (fp->altsetting == 3) return SNDRV_PCM_FMTBIT_DSD_U32_BE; break;"},
 		{"no ITF rule", "QUIRK_FLAG_ITF_USB_DSD_DAC) {", "QUIRK_FLAG_OTHER) {"},
 		{"no DSD_RAW rule", "&& fp->dsd_raw)", "&& fp->other)"},
 		{"no flags table", "quirk_flags_table[] = {", "other_table[] = {"},
