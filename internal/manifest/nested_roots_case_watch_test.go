@@ -288,8 +288,7 @@ func TestAReplacedRootsCreateLeavesItsLookToTheFlush(t *testing.T) {
 	}{
 		{"nothing since", nil, true},
 		{"its own watch back since", func(t *testing.T, w *Watcher, root string) {
-			// As the check of the roots' own watches has it watched again,
-			// without the look's line.
+			// As another look has it watched again, without this look's line.
 			if err := w.watchAgain(context.Background(), root); err != nil {
 				t.Fatal(err)
 			}
@@ -367,5 +366,69 @@ func TestAReplacedRootsCreateLeavesItsLookToTheFlush(t *testing.T) {
 				t.Errorf("the flush said %d times that it watched %s again, want once: %q", len(lines), nested, lines)
 			}
 		})
+	}
+}
+
+// TestTheCheckOfTheRootsWatchesLeavesAWaitingLookToTheFlush: the timer's check
+// of the roots' own watches can fire right after a root's Create, while
+// fsnotify may still be opening the folder at the root's path. That Create's
+// look waits for the flush for this reason
+// (TestAReplacedRootsCreateLeavesItsLookToTheFlush), and the check, finding the
+// root's own watch gone, would make the very Add the wait avoids. It leaves
+// that root to the flush, and still looks at another root whose watch went
+// (Codex and the Claude API reviewer on B651's twelfth round).
+func TestTheCheckOfTheRootsWatchesLeavesAWaitingLookToTheFlush(t *testing.T) {
+	dir := t.TempDir()
+	outer := filepath.Join(dir, "music")
+	nested := filepath.Join(outer, "usb")
+	other := filepath.Join(dir, "other")
+	writeTracks(t, filepath.Join(outer, "Artist", "Album", "01.flac"), filepath.Join(nested, "Band", "Record", "01.flac"), filepath.Join(other, "Solo", "Single", "01.flac"))
+	roots := []string{outer, nested, other}
+	scanner := NewScanner(roots, openStoreIn(t, dir), "")
+	if _, err := scanner.Scan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	w, err := NewWatcher(scanner, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		w.cancelAllPending()
+		_ = w.w.Close()
+	})
+	if w.fds == nil {
+		t.Skip("fsnotify does not watch through kqueue on this host, where a Create's handler watches the folder it names")
+	}
+	for _, root := range roots {
+		if err := w.addTree(root, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.noteRootWatches(roots)
+	for _, gone := range []string{nested, other} {
+		if err := w.w.Remove(gone); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := loggingtest.Record(t)
+
+	w.handleEvent(context.Background(), fsnotify.Event{Name: nested, Op: fsnotify.Create})
+	w.checkRootWatches(context.Background())
+	if _, installed := w.watchSet()[nested]; installed {
+		t.Fatalf("the check watched %s while its Create's look waited for the flush, racing fsnotify's own watch of the folder at its path", nested)
+	}
+	if _, installed := w.watchSet()[other]; !installed {
+		t.Errorf("the check did not watch %s again, which no Create named", other)
+	}
+	if lines := rec.Lines(msgWatchRootRewatched); len(lines) != 1 {
+		t.Errorf("after the check, %d lines say a root was watched again, want one, for %s: %q", len(lines), other, lines)
+	}
+
+	w.flushPendingAdds(context.Background())
+	if _, installed := w.watchSet()[nested]; !installed {
+		t.Fatalf("the flush did not watch %s again", nested)
+	}
+	if lines := rec.Lines(msgWatchRootRewatched); len(lines) != 2 {
+		t.Errorf("after the flush, %d lines say a root was watched again, want two: %q", len(lines), lines)
 	}
 }
