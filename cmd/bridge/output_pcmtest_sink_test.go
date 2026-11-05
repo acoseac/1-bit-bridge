@@ -489,6 +489,32 @@ func TestOutputPCMTestSinkPlaysAFileBitExact(t *testing.T) {
 	}
 }
 
+// TestOutputPCMTestSinkPlaysSixteenBitsInS32LE pins B735 in --file: a
+// 16-bit file with --format S32_LE is taken, so a DAC with no S16_LE plays
+// it, through a sink opened for 16 valid bits in S32_LE, each of the file's
+// samples reaching it as its own two bytes with two zero bytes below them.
+func TestOutputPCMTestSinkPlaysSixteenBitsInS32LE(t *testing.T) {
+	h := newSinkHarness(t)
+	h.prepare = openGate
+	path := filepath.Join(t.TempDir(), "a.wav")
+	data := writePCMWAV(t, path, 44100, 16, 4410, 0)
+	r := h.wait(t, h.run(context.Background(), append(fileArgs(t, path), "--format", "S32_LE")...))
+	if r.code != 0 {
+		t.Fatalf("exit %d\nstdout:\n%s\nstderr:\n%s", r.code, r.stdout, r.stderr)
+	}
+	want := alsapcm.Transport{Kind: format.KindPCM, RateHz: 44100, Channels: 2, Format: format.S32LE, ValidBits: 16}
+	if len(h.opened) != 1 || h.opened[0].Transport != want {
+		t.Fatalf("opened %+v, want one sink for %v", h.opened, want)
+	}
+	var wide []byte
+	for i := 0; i+2 <= len(data); i += 2 {
+		wide = append(wide, 0, 0, data[i], data[i+1])
+	}
+	if f := h.sink(0); !bytes.Equal(f.written, wide) {
+		t.Errorf("the sink got %d bytes that are not the file's samples shifted left sixteen, %d bytes", len(f.written), len(wide))
+	}
+}
+
 // TestOutputPCMTestSinkJoinsTwoFilesOfOneTransport pins the gapless join:
 // two files of one transport through one sink, the second's frames
 // straight after the first's, one drain, and the join named where it is.
@@ -1039,6 +1065,8 @@ func TestOutputPCMTestSinkRefusesWhatItCannotPlay(t *testing.T) {
 	dir := t.TempDir()
 	wav := filepath.Join(dir, "a.wav")
 	writePCMWAV(t, wav, 44100, 16, 100, 0)
+	wav24 := filepath.Join(dir, "b.wav")
+	writePCMWAV(t, wav24, 44100, 24, 100, 0)
 	mono := filepath.Join(dir, "mono.wav")
 	writeWAV(t, mono, 44100, 16, 1, 100, 0)
 	slow := filepath.Join(dir, "slow.wav")
@@ -1075,7 +1103,7 @@ func TestOutputPCMTestSinkRefusesWhatItCannotPlay(t *testing.T) {
 		{[]string{"--card", "5", "--device", "0", "--file", wav, "--file", slow, "--ack-full-level"}, 1, "slow.wav is 4000 Hz, outside the 8000 to 1536000 Hz the ALSA backend opens"},
 		{[]string{"--card", "5", "--device", "0", "--file", mp3, "--ack-full-level"}, 1, "refused"},
 		{[]string{"--card", "5", "--device", "0", "--file", filepath.Join(dir, "missing.flac"), "--ack-full-level"}, 1, "missing.flac"},
-		{[]string{"--card", "5", "--device", "0", "--file", wav, "--ack-full-level", "--format", "S32_LE"}, 1, "--format S32_LE does not carry"},
+		{[]string{"--card", "5", "--device", "0", "--file", wav24, "--ack-full-level", "--format", "S16_LE"}, 1, "--format S16_LE does not carry: " + pcmTestCarries},
 	} {
 		h := newSinkHarness(t)
 		// A run wrongly let through drains at once and fails the checks

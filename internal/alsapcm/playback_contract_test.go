@@ -472,7 +472,10 @@ func refusals(t *testing.T) []struct {
 		{name: "a reference the resolver cannot open", ref: "gone", fail: errors.New("open /music/gone.flac: no such file or directory"), want: engine.ReasonMissing},
 		{name: "no frames", ref: "empty", data: wav(48000, 24, nil), want: playback.ReasonEmpty},
 		{name: "a rate the backend does not open", ref: "slow", data: wav(4000, 16, pattern(1, 1000, 16)), want: playback.ReasonRate},
-		{name: "a transport the DAC does not take", ref: "s16", data: wav(48000, 16, pattern(1, 1000, 16)), formats: []format.ALSAFormat{format.S243LE, format.S32LE}, want: playback.ReasonTransport},
+		// 24 bits on a DAC that takes S16_LE alone: no packing narrower than
+		// the samples is offered. (16 bits on a DAC that takes only wider
+		// containers play, widened, since B735.)
+		{name: "a transport the DAC does not take", ref: "s24", data: wav(48000, 24, pattern(1, 1000, 24)), formats: []format.ALSAFormat{format.S16LE}, want: playback.ReasonTransport},
 	}
 }
 

@@ -1096,42 +1096,50 @@ type golden struct {
 }
 
 // unpack reads b back into samples from format f carrying bits valid bits,
-// as the DAC reads them, and fails the test on a byte the packing must have
-// left zero.
+// as the DAC reads them, by arithmetic and apart from the packer: the
+// container's significant bytes are read as a signed value of its width
+// (16 bits in S16_LE, 24 in S24_3LE and S24_LE, 32 in S32_LE), and a
+// container wider than the samples holds them at its top, so that value is
+// the sample times 2 to the bits below it (2^8 for 16 bits in S24_3LE or
+// S24_LE and for 24 in S32_LE, 2^16 for 16 bits in S32_LE), which must
+// divide it exactly. It fails the test on a byte the packing must have left
+// zero: the bits below the sample's, and S24_LE's top byte.
 func unpack(t *testing.T, b []byte, f format.ALSAFormat, bits int) []int32 {
 	t.Helper()
-	var out []int32
+	var width, size int // the container's significant bits, and its bytes
 	switch f {
 	case format.S16LE:
-		for i := 0; i+2 <= len(b); i += 2 {
-			out = append(out, int32(int16(binary.LittleEndian.Uint16(b[i:]))))
-		}
+		width, size = 16, 2
 	case format.S243LE:
-		for i := 0; i+3 <= len(b); i += 3 {
-			v := int32(b[i]) | int32(b[i+1])<<8 | int32(b[i+2])<<16
-			out = append(out, v<<8>>8)
-		}
+		width, size = 24, 3
 	case format.S24LE:
-		for i := 0; i+4 <= len(b); i += 4 {
-			if b[i+3] != 0 {
-				t.Fatalf("S24_LE sample %d has a high byte %#x: the container's top byte is zero", i/4, b[i+3])
-			}
-			v := int32(binary.LittleEndian.Uint32(b[i:]))
-			out = append(out, v<<8>>8)
-		}
+		width, size = 24, 4
 	case format.S32LE:
-		for i := 0; i+4 <= len(b); i += 4 {
-			v := int32(binary.LittleEndian.Uint32(b[i:]))
-			if bits == 24 {
-				if b[i] != 0 {
-					t.Fatalf("S32_LE sample %d carrying 24 bits has a low byte %#x, not zero", i/4, b[i])
-				}
-				v >>= 8
-			}
-			out = append(out, v)
-		}
+		width, size = 32, 4
 	default:
 		t.Fatalf("no unpacking for %s", f)
+	}
+	if (bits != 16 && bits != 24 && bits != 32) || bits > width {
+		t.Fatalf("%s carries no %d-bit samples", f, bits)
+	}
+	scale := int64(1) << (width - bits)
+	var out []int32
+	for i := 0; i+size <= len(b); i += size {
+		if size*8 > width && b[i+size-1] != 0 {
+			t.Fatalf("%s sample %d has a high byte %#x: the container's top byte is zero", f, i/size, b[i+size-1])
+		}
+		var u uint64
+		for j := range width / 8 {
+			u |= uint64(b[i+j]) << (8 * j)
+		}
+		v := int64(u)
+		if u >= 1<<(width-1) {
+			v -= 1 << width
+		}
+		if v%scale != 0 {
+			t.Fatalf("%s sample %d carrying %d bits is %#x: the %d bits below the sample's are not zero", f, i/size, bits, u, width-bits)
+		}
+		out = append(out, int32(v/scale))
 	}
 	return out
 }

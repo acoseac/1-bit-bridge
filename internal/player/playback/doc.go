@@ -26,11 +26,14 @@
 // refused, not started.
 //
 // Samples reach the DAC as the decoder gave them, packed by the format
-// package as B470's §1 table says (packings): 16 bits as S16_LE; 24 bits as
-// S24_3LE, S24_LE (four bytes, the low 24 significant) or S32_LE (shifted
-// left eight, the low byte zero), offered in that order, the one the DAC
-// took kept until Discard; 32 bits as S32_LE. Nothing converts a value: no
-// resampling, no dither, no gain.
+// package as B470's §1 table says (packings): 16 bits as S16_LE, or on a DAC
+// that does not take it S24_3LE or S24_LE (shifted left eight, the low byte
+// zero) or S32_LE (shifted left sixteen, the low two bytes zero), since
+// B735; 24
+// bits as S24_3LE, S24_LE (four bytes, the low 24 significant) or S32_LE
+// (shifted left eight, the low byte zero); each depth's offered in that
+// order, the one the DAC took kept until Discard; 32 bits as S32_LE. Nothing
+// converts a value: no resampling, no dither, no gain.
 //
 // # The contract, term by term
 //

@@ -254,6 +254,56 @@ func TestOutputPCMTestPlaysTheToneAndReports(t *testing.T) {
 	}
 }
 
+// TestOutputPCMTestPlaysSixteenBitsInAWiderFormat pins B735 in the harness:
+// --bits 16 with --format S24_3LE, S24_LE or S32_LE is taken, so a DAC with
+// no S16_LE runs the tone, and the device is asked for that format; with
+// S32_LE every sample written is the S16_LE tone's two bytes with two zero
+// bytes below them. With no --format, 16 bits stay S16_LE.
+func TestOutputPCMTestPlaysSixteenBitsInAWiderFormat(t *testing.T) {
+	for _, f := range []format.ALSAFormat{format.S243LE, format.S24LE, format.S32LE} {
+		if run, code := pcmTestRunFrom(0, 48000, 16, string(f), 10, -30); code != 0 || run.format != f || run.bits != 16 {
+			t.Errorf("--bits 16 --format %s: %+v, exit %d", f, run, code)
+		}
+	}
+	if run, code := pcmTestRunFrom(0, 48000, 16, "", 10, -30); code != 0 || run.format != format.S16LE {
+		t.Errorf("--bits 16 with no --format: %+v, exit %d; want S16_LE", run, code)
+	}
+	if run, code := pcmTestRunFrom(0, 48000, 32, "S24_LE", 10, -30); code != 2 || !strings.Contains(run.problem, pcmTestCarries) {
+		t.Errorf("--bits 32 --format S24_LE: %+v, exit %d; want refused, saying what each format takes", run, code)
+	}
+	p := pcmTestParams48k()
+	p.Format = format.S32LE
+	dev := &fakePCMDevice{params: p}
+	var opens int
+	env := pcmTestEnvWith(dev, nil, &opens)
+	var gotCfg alsapcm.Config
+	open := env.open
+	env.open = func(ep alsapcm.Endpoint, cfg alsapcm.Config) (pcmTestDevice, error) {
+		gotCfg = cfg
+		return open(ep, cfg)
+	}
+	root := pcmTestProcTree(t, strings.Replace(pcmTestKernelHW48k, "S24_3LE", "S32_LE", 1))
+	stdout, stderr, code := runPCMTest(context.Background(), env,
+		"--card", "5", "--device", "0", "--rate", "48000", "--bits", "16", "--format", "S32_LE", "--seconds", "2", "--proc-root", root)
+	if code != 0 {
+		t.Fatalf("exit %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+	}
+	if gotCfg.Format != format.S32LE || !strings.Contains(stdout, "16 valid bits packed as S32_LE") {
+		t.Errorf("opened %+v; stdout:\n%s", gotCfg, stdout)
+	}
+	s16, err := buildPCMTestTone(48000, 16, format.S16LE, -30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var want []byte
+	for i := 0; i+2 <= len(s16.packed); i += 2 {
+		want = append(want, 0, 0, s16.packed[i], s16.packed[i+1])
+	}
+	if want = bytes.Repeat(want, 96000/s16.frames); !bytes.Equal(dev.written, want) {
+		t.Errorf("wrote %d bytes that are not the S16_LE tone's samples shifted left sixteen, %d bytes", len(dev.written), len(want))
+	}
+}
+
 // TestOutputPCMTestCtrlCDropsAndCloses pins the cancel: a signal while a
 // write waits ends the run with the stream dropped and the device closed,
 // once each, and exit 0. The fake says when the write is waiting, so
@@ -423,7 +473,7 @@ func TestOutputPCMTestToneIsQuietAndSeamless(t *testing.T) {
 	for _, c := range []struct {
 		f    format.ALSAFormat
 		bits int
-	}{{format.S16LE, 16}, {format.S243LE, 24}, {format.S24LE, 24}, {format.S32LE, 24}, {format.S32LE, 32}} {
+	}{{format.S16LE, 16}, {format.S243LE, 16}, {format.S24LE, 16}, {format.S32LE, 16}, {format.S243LE, 24}, {format.S24LE, 24}, {format.S32LE, 24}, {format.S32LE, 32}} {
 		for _, rate := range []int{44100, 48000, 352800, 384000} {
 			tone, err := buildPCMTestTone(rate, c.bits, c.f, -30)
 			if err != nil {
@@ -455,27 +505,33 @@ func TestOutputPCMTestToneIsQuietAndSeamless(t *testing.T) {
 }
 
 // unpackPCMTest reads sample i of a packed buffer back to its valid-bit
-// value, independently of the packer.
+// value, independently of the packer: the container's value, divided by 2
+// to the bits below the sample's, which are zero (16 bits sit eight bits up
+// in S24_3LE and S24_LE and sixteen in S32_LE, 24 bits eight in S32_LE), and
+// S24_LE's top byte zero.
 func unpackPCMTest(t *testing.T, b []byte, i int, f format.ALSAFormat, bits int) int64 {
 	t.Helper()
+	var v int64
+	width := 24
 	switch f {
 	case format.S16LE:
-		return int64(int16(binary.LittleEndian.Uint16(b[2*i:])))
+		v, width = int64(int16(binary.LittleEndian.Uint16(b[2*i:]))), 16
 	case format.S243LE:
-		v := int32(b[3*i]) | int32(b[3*i+1])<<8 | int32(b[3*i+2])<<16
-		return int64(v << 8 >> 8)
+		u := int32(b[3*i]) | int32(b[3*i+1])<<8 | int32(b[3*i+2])<<16
+		v = int64(u << 8 >> 8)
 	case format.S24LE:
-		return int64(int32(binary.LittleEndian.Uint32(b[4*i:])<<8) >> 8)
-	case format.S32LE:
-		v := int64(int32(binary.LittleEndian.Uint32(b[4*i:])))
-		if bits == 24 {
-			if v&0xff != 0 {
-				t.Fatalf("S32_LE from 24 bits has a low byte %#x", v&0xff)
-			}
-			return v >> 8
+		if b[4*i+3] != 0 {
+			t.Fatalf("S24_LE sample %d has a high byte %#x", i, b[4*i+3])
 		}
-		return v
+		v = int64(int32(binary.LittleEndian.Uint32(b[4*i:])<<8) >> 8)
+	case format.S32LE:
+		v, width = int64(int32(binary.LittleEndian.Uint32(b[4*i:]))), 32
+	default:
+		t.Fatalf("no unpacker for %s", f)
 	}
-	t.Fatalf("no unpacker for %s", f)
-	return 0
+	scale := int64(1) << (width - bits)
+	if v%scale != 0 {
+		t.Fatalf("%s from %d bits: sample %d is %#x, the %d bits below it not zero", f, bits, i, v, width-bits)
+	}
+	return v / scale
 }

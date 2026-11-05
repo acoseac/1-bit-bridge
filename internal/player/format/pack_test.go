@@ -99,16 +99,108 @@ func TestPackS32LEFrom32(t *testing.T) {
 	}
 }
 
+// TestPackSixteenBitsInEveryWiderContainer pins B735's widening byte by
+// byte: 16-bit samples in S24_3LE and S24_LE shifted left eight, the low
+// byte zero (and S24_LE's high byte zero, for a negative sample too: its
+// sign is bit 23), and in S32_LE shifted left sixteen, the low two bytes
+// zero. -0x1235 is 0xedcb, a negative sample whose two bytes differ, so a
+// byte out of its place or a shift of the wrong size shows.
+func TestPackSixteenBitsInEveryWiderContainer(t *testing.T) {
+	samples := []int32{-32768, -0x1235, -1, 0, 1, 0x1234, 32767}
+	for _, c := range []struct {
+		f    format.ALSAFormat
+		want []byte
+	}{
+		{format.S16LE, []byte{
+			0x00, 0x80, 0xcb, 0xed, 0xff, 0xff, 0x00, 0x00, 0x01, 0x00, 0x34, 0x12, 0xff, 0x7f}},
+		{format.S243LE, []byte{
+			0x00, 0x00, 0x80, 0x00, 0xcb, 0xed, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00,
+			0x00, 0x01, 0x00, 0x00, 0x34, 0x12, 0x00, 0xff, 0x7f}},
+		{format.S24LE, []byte{
+			0x00, 0x00, 0x80, 0x00, 0x00, 0xcb, 0xed, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x01, 0x00, 0x00, 0x00, 0x34, 0x12, 0x00, 0x00, 0xff, 0x7f, 0x00}},
+		{format.S32LE, []byte{
+			0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0xcb, 0xed, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
+			0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x34, 0x12, 0x00, 0x00, 0xff, 0x7f}},
+	} {
+		dst := make([]byte, format.PackedBytes(len(samples), c.f))
+		n, err := format.Pack(dst, samples, 16, c.f)
+		if err != nil {
+			t.Fatalf("%s: %v", c.f, err)
+		}
+		if n != len(c.want) || !bytes.Equal(dst, c.want) {
+			t.Errorf("16 bits in %s: % x, want % x", c.f, dst[:n], c.want)
+		}
+	}
+}
+
+// TestPackEverySixteenBitValueKeepsItsValue packs every 16-bit value in
+// every container that takes 16 bits and reads it back by arithmetic, apart
+// from the packer: the container's signed value is the sample times 2^8 in
+// S24_3LE and S24_LE and times 2^16 in S32_LE, which is the same value at
+// the container's full scale (lossless widening), with every bit below the
+// sample's zero, and S24_LE's top byte zero.
+func TestPackEverySixteenBitValueKeepsItsValue(t *testing.T) {
+	samples := make([]int32, 0, 1<<16)
+	for v := -32768; v <= 32767; v++ {
+		samples = append(samples, int32(v))
+	}
+	for _, f := range []format.ALSAFormat{format.S16LE, format.S243LE, format.S24LE, format.S32LE} {
+		dst := make([]byte, format.PackedBytes(len(samples), f))
+		if _, err := format.Pack(dst, samples, 16, f); err != nil {
+			t.Fatalf("%s: %v", f, err)
+		}
+		for i, s := range samples {
+			var got, want int64
+			switch f {
+			case format.S16LE:
+				got, want = int64(int16(binary.LittleEndian.Uint16(dst[2*i:]))), int64(s)
+			case format.S243LE:
+				b := dst[3*i : 3*i+3]
+				u := int64(b[0]) | int64(b[1])<<8 | int64(b[2])<<16
+				if u >= 1<<23 {
+					u -= 1 << 24
+				}
+				got, want = u, int64(s)*256
+				if b[0] != 0 {
+					t.Fatalf("%s: %d has a low byte %#x", f, s, b[0])
+				}
+			case format.S24LE:
+				b := dst[4*i : 4*i+4]
+				u := int64(b[0]) | int64(b[1])<<8 | int64(b[2])<<16
+				if u >= 1<<23 {
+					u -= 1 << 24
+				}
+				got, want = u, int64(s)*256
+				if b[0] != 0 || b[3] != 0 {
+					t.Fatalf("%s: %d is % x: the low byte and the high byte are zero", f, s, b)
+				}
+			case format.S32LE:
+				b := dst[4*i : 4*i+4]
+				got, want = int64(int32(binary.LittleEndian.Uint32(b))), int64(s)*65536
+				if b[0] != 0 || b[1] != 0 {
+					t.Fatalf("%s: %d is % x: the low two bytes are zero", f, s, b)
+				}
+			}
+			if got != want {
+				t.Fatalf("16 bits in %s: %d packed as %d, want %d", f, s, got, want)
+			}
+		}
+	}
+}
+
 func TestPackRefusesMismatchedBits(t *testing.T) {
 	dst := make([]byte, 16)
-	if _, err := format.Pack(dst, []int32{1}, 24, format.S16LE); err == nil {
-		t.Fatal("expected error packing 24-bit into S16_LE")
-	}
-	if _, err := format.Pack(dst, []int32{1}, 16, format.S243LE); err == nil {
-		t.Fatal("expected error packing 16-bit into S24_3LE")
-	}
-	if _, err := format.Pack(dst, []int32{1}, 16, format.S32LE); err == nil {
-		t.Fatal("expected error packing 16-bit into S32_LE")
+	for _, c := range []struct {
+		bits int
+		f    format.ALSAFormat
+	}{
+		{24, format.S16LE}, {32, format.S16LE}, {32, format.S243LE}, {32, format.S24LE},
+		{8, format.S16LE}, {8, format.S32LE}, {12, format.S24LE}, {20, format.S243LE}, {20, format.S32LE},
+	} {
+		if _, err := format.Pack(dst, []int32{1}, c.bits, c.f); err == nil {
+			t.Errorf("packed %d-bit samples into %s", c.bits, c.f)
+		}
 	}
 }
 

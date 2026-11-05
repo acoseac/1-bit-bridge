@@ -91,7 +91,9 @@ path, and no .asoundrc. It asks for the rate, two channels and the format
 exactly and prints what the kernel committed; anything else is refused, never
 played. It then plays a quiet 1 kHz sine, at most -30 dBFS, on both channels,
 and reports the delay, the writes and any xrun, then drains and closes. Ctrl-C
-stops it at once: the stream is dropped and the device closed.
+stops it at once: the stream is dropped and the device closed. A DAC with no
+S16_LE plays 16 bits with --format S24_3LE, S24_LE or S32_LE: the samples
+shifted to the container's top, the bits below them zero, no value changed.
 
 --sink plays the tone through the streaming sink instead (B470 PR 2b): two
 seconds decoded ahead, the position the kernel establishes, pause and resume,
@@ -140,7 +142,7 @@ func runOutputPCMTest(ctx context.Context, args []string, env outputPCMTestEnv, 
 	device := fs.Int("device", -1, "the PCM device `number` on that card: the D of pcmC<N>D<D>p")
 	rate := fs.Int("rate", 0, "the frame rate to open at, exactly, in `Hz`")
 	bits := fs.Int("bits", 0, "the tone's valid bits: 16, 24 or 32")
-	alsaFormat := fs.String("format", "", "the ALSA `format` to pack them in: S16_LE, S24_3LE, S24_LE or S32_LE (default: S16_LE for 16 bits, S24_3LE for 24, S32_LE for 32)")
+	alsaFormat := fs.String("format", "", "the ALSA `format` to pack them in: S16_LE, S24_3LE, S24_LE or S32_LE (default: S16_LE for 16 bits, S24_3LE for 24, S32_LE for 32; a wider one takes 16 or 24 bits shifted to its top, the bits below zero)")
 	seconds := fs.Int("seconds", 10, "how long to play, 1 to 600")
 	level := fs.Float64("level", pcmTestLoudest, "the tone's peak in `dBFS`, -90 to -30")
 	passive := fs.Bool("passive", false, "open nothing: print the card's /proc/asound files")
@@ -262,7 +264,7 @@ func pcmTestRunFrom(device, rate, bits int, alsaFormat string, seconds int, leve
 		f = map[int]format.ALSAFormat{16: format.S16LE, 24: format.S243LE, 32: format.S32LE}[bits]
 	}
 	if !pcmTestPacks(f, bits) {
-		return bad("--format %s does not carry %d-bit samples: S16_LE takes 16, S24_3LE and S24_LE take 24, S32_LE takes 24 or 32", alsaFormat, bits)
+		return bad("--format %s does not carry %d-bit samples: %s", alsaFormat, bits, pcmTestCarries)
 	}
 	if seconds < 1 || seconds > 600 {
 		return bad("--seconds is 1 to 600, not %d", seconds)
@@ -274,18 +276,23 @@ func pcmTestRunFrom(device, rate, bits int, alsaFormat string, seconds int, leve
 }
 
 // pcmTestPacks reports whether the format package's packer writes bits-bit
-// samples as f.
+// samples as f: a container wider than the samples takes them shifted to
+// its top, the bits below them zero, 16 bits in all four since B735, so a
+// DAC with no S16_LE plays 16 bits with --format S24_3LE, S24_LE or S32_LE.
 func pcmTestPacks(f format.ALSAFormat, bits int) bool {
 	switch f {
 	case format.S16LE:
 		return bits == 16
 	case format.S243LE, format.S24LE:
-		return bits == 24
+		return bits == 16 || bits == 24
 	case format.S32LE:
-		return bits == 24 || bits == 32
+		return bits == 16 || bits == 24 || bits == 32
 	}
 	return false
 }
+
+// pcmTestCarries says what each format carries, for a refusal.
+const pcmTestCarries = "S16_LE takes 16, S24_3LE and S24_LE take 16 or 24, S32_LE takes 16, 24 or 32"
 
 // pcmTestTone is the test tone packed for one run: the frames a 1 kHz sine
 // at the run's rate takes to come back to its first sample exactly, so the
