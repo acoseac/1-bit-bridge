@@ -205,7 +205,8 @@ type Backend struct {
 	// does (Probe): a Start waits for it, at most ProbeWait, and no other
 	// probe starts beside it.
 	probing *probeHold
-	// waiters counts the Starts waiting for that probe to end.
+	// waiters counts the Starts that found a probe holding the slot and
+	// have not taken it yet: a probe is refused while one waits.
 	waiters             int
 	took                map[packKey]format.ALSAFormat
 	overlaps            int
@@ -394,11 +395,22 @@ var errReleased = errors.New("player backend: the session's release came first: 
 // waited for, holding nothing, and the slot taken in the step that finds it
 // free; the wait lasts at most ProbeWait, armed on Config.AfterFunc, and
 // then the device is busy (engine.ErrDeviceBusy), the probe's node still
-// open. ctx's end, and s's release, end the wait too.
+// open. ctx's end, and s's release, end the wait too. While it waits the
+// Start counts among the waiters, whom reserveProbe refuses a probe for, so
+// no second probe takes the slot between the first's end and this Start's
+// taking it (B728 B4 round 2).
 func (b *Backend) hold(ctx context.Context, s *session) error {
 	var expired chan struct{}
 	stop := func() bool { return false }
-	defer func() { stop() }()
+	waiting := false
+	defer func() {
+		stop()
+		if waiting {
+			b.mu.Lock()
+			b.waiters--
+			b.mu.Unlock()
+		}
+	}()
 	for {
 		b.mu.Lock()
 		if b.terminalUnconfirmed {
@@ -407,6 +419,10 @@ func (b *Backend) hold(ctx context.Context, s *session) error {
 		}
 		p := b.probing
 		if p == nil {
+			if waiting {
+				b.waiters--
+				waiting = false
+			}
 			if h := b.holder; h != nil && h != s {
 				b.overlaps++
 				b.log.Error("player backend: a session started while another still held the device", "session", uint64(s.id), "holder", uint64(h.id))
@@ -416,6 +432,10 @@ func (b *Backend) hold(ctx context.Context, s *session) error {
 			b.holder = s
 			b.mu.Unlock()
 			return nil
+		}
+		if !waiting {
+			b.waiters++
+			waiting = true
 		}
 		b.mu.Unlock()
 		if expired == nil {

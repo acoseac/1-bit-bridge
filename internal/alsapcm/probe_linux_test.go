@@ -54,7 +54,9 @@ const probeEndpointEnv = "BRIDGE_PROBE_ENDPOINT"
 // real kernel, recording what was asked of it, and logs one line a
 // candidate: accepted, with the significant bits and whether the setup
 // offers PAUSE (and "the DoP carrier of DSD64" where S32_LE at 176.4 kHz
-// carries 24 to 32 bits, and so on), or refused (EINVAL). It fails unless
+// carries 24 to 32 bits, and so on), or refused (EINVAL), after a line
+// naming any other of the card's substreams found open, beside which no
+// refusal is kept (ProbeReport.Shared). It fails unless
 // the node was opened once and closed once
 // and the kernel was sent PVERSION, INFO and one HW_REFINE a candidate,
 // nothing else: no HW_PARAMS, SW_PARAMS, PREPARE, write or PAUSE.
@@ -103,6 +105,9 @@ func TestTheSilentProbeOnARealDAC(t *testing.T) {
 	}
 	t.Logf("the probe of %s (%q, subdevice %d): opened %d, closed %d; requests: %s",
 		ep, rep.Node.ID, rep.Node.Subdevice, a.opens, a.closes, strings.Join(said, ", "))
+	if len(rep.Shared) > 0 {
+		t.Logf("no refusal of this run is kept, each refused candidate below not probed: %s", strings.Join(rep.Shared, "; "))
+	}
 	for _, r := range rep.Results {
 		switch r.Answer {
 		case ProbeAccepted:

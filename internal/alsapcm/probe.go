@@ -110,7 +110,15 @@ type ProbeReport struct {
 	// Results are the candidates' answers, in the order asked: every one
 	// ProbeNotProbed when the probe asked nothing.
 	Results []ProbeResult
-	// Shared says why the run kept no refusal.
+	// Shared says why the run kept no refusal, each refused candidate
+	// answered not probed, its accepted ones standing: another of the card's
+	// substreams was open before the first refine or before the close (by
+	// its /proc/asound name, "pcm0c/sub0"), or the card's substreams could
+	// not be read, or did not show the probe's own open. A USB device's
+	// interfaces can share a clock, which snd-usb-audio holds to the rate one
+	// of them runs at, so beside another open substream a refine refuses
+	// rates the DAC takes; the clock only narrows what the kernel takes, so
+	// an acceptance stands. Empty for a run that kept its refusals.
 	Shared []string
 }
 
@@ -221,7 +229,10 @@ func (cfg ProbeConfig) resolve(ep Endpoint) ([]uint32, error) {
 // at once (ReasonBusy, every candidate not probed): nothing waits for a busy
 // node, and its holder is left alone. Only EINVAL refuses a candidate; any
 // other error ends the probe, typed, and leaves that candidate and the rest
-// not probed. The report holds what was established whatever the error.
+// not probed. The card's open substreams are read after the check after
+// open and again before the close, and a run beside another of them, or one
+// whose reading cannot tell, keeps no refusal (ProbeReport.Shared). The
+// report holds what was established whatever the error.
 func probe(s sys, ep Endpoint, cfg ProbeConfig) (rep ProbeReport, err error) {
 	rep = notAsked(ep, cfg)
 	if err := ep.validate(); err != nil {
@@ -256,6 +267,28 @@ func probe(s sys, ep Endpoint, cfg ProbeConfig) (rep ProbeReport, err error) {
 				Detail: "the check after open refused the node: nothing was asked of it", Err: err}
 		}
 	}
+	// The card's other substreams, read before the first refine and again
+	// before the close (this defer runs before the release's): beside
+	// another one open, or a reading that cannot tell, the run keeps no
+	// refusal (sharedWith; probe_substreams.go).
+	own := fmt.Sprintf("pcm%dp/sub%d", ep.Device, rep.Node.Subdevice)
+	shared := sharedWith(s, ep.Card, own)
+	defer func() {
+		for _, why := range sharedWith(s, ep.Card, own) {
+			if !slices.Contains(shared, why) {
+				shared = append(shared, why)
+			}
+		}
+		if len(shared) == 0 {
+			return
+		}
+		rep.Shared = shared
+		for i := range rep.Results {
+			if rep.Results[i].Answer == ProbeRefused {
+				rep.Results[i].Answer = ProbeNotProbed
+			}
+		}
+	}()
 	for i, code := range codes {
 		hw := exactParams(code, uint32(cfg.Candidates[i].RateHz))
 		// The kernel fills both in its answer (HW_REFINE resets msbits and

@@ -25,8 +25,9 @@ const (
 	ProbeSnapshotStale ProbeSkip = "snapshot_stale"
 	// ProbeNotLocated: the binding resolves to no unit now.
 	ProbeNotLocated ProbeSkip = "not_located"
-	// ProbeSessionHolds: a session holds the device: it plays, or it is
-	// opening the device.
+	// ProbeSessionHolds: a session holds the device: it plays, it is
+	// opening the device, or its Start waited for a probe and is about to
+	// take the slot.
 	ProbeSessionHolds ProbeSkip = "session_holds_device"
 	// ProbeSessionPaused: a paused session holds the slot, whether or not
 	// its pause's release has let the device go: a resume reopens it.
@@ -150,7 +151,10 @@ func (b *Backend) Probe(ctx context.Context, req ProbeRequest) (alsapcm.ProbeRep
 // slot: one whose release is pending (its Release has come, which ends its
 // life, or the engine has taken it), one paused (a pause holds the slot
 // whether or not its release has let the device go), and one that holds the
-// device otherwise (it plays, or is opening it). The session's state is read
+// device otherwise (it plays, or is opening it); and a Start that found a
+// probe holding the slot and has not taken it yet (hold's waiters), which
+// is about to hold the device, so it takes the slot as the probe ends and no
+// second probe slips in first (round 2). The session's state is read
 // without its lock (its life, its fence, pausedFlag): a session takes the
 // backend's lock under its own, never the reverse.
 func (b *Backend) reserveProbe() (*probeHold, ProbeSkip) {
@@ -162,6 +166,8 @@ func (b *Backend) reserveProbe() (*probeHold, ProbeSkip) {
 		return nil, ProbeReleaseUnconfirmed
 	case b.probing != nil:
 		return nil, ProbeRunning
+	case b.waiters > 0:
+		return nil, ProbeSessionHolds
 	case h != nil && (h.ctx.Err() != nil || h.releaseTaken()):
 		return nil, ProbeReleasePending
 	case h != nil && h.pausedFlag.Load():
