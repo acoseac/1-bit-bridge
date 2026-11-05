@@ -76883,3 +76883,18 @@ kept; the record's choice at the fallback's revision; the writer not asked (a
 user's first choice taken for the fallback); the bound check removed; the
 bound one byte off; a blocked store that never looks again; a blocked store
 unblocked whatever is still there.
+Two of them, first written as `return true` and `return false` in
+`ownChoice`, did not build (its `c` unused) and were run again as `c != nil`
+and `c == nil`, red. They ran at c2a29e49, the unmutated tree green first.
+
+**Checks**, on legion0 (Linux, amd64, Go 1.27.3), at 89adc6c4, in one call
+through the shared build lock: `make fmt`, which rewrote nothing; `make vet`;
+`make test`, race-enabled, with TMPDIR under `.tmp/_b728-b3`: every package
+ok, 83 of them, internal/player/dsdstate (1.9 s) and internal/backup (282 s)
+among them, the Linux-only tests run for real; `go test -race -count=1
+./internal/player/dsdstate/ ./internal/backup/`, ok; `make vet` with
+`GOOS=windows`, `GOOS=darwin` and `GOOS=linux GOARCH=386`, each clean; the
+state's tests as a linux/386 binary, run natively, ok; `make docs-check`, ok
+(player.md at 97.6% of its budget); the qualification check, "qualification
+version OK: main..HEAD"; and `make build-all`. The tree is clean after. Not
+run here: Windows and macOS natively, CI's runners, and any hardware.
