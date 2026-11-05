@@ -229,7 +229,9 @@ func TestNoEmbeddedDoPLineReadsAsAHearing(t *testing.T) {
 // what follows the colon is read by nothing, so it may negate anything. A
 // marker clause in any other shape is a problem that shows the form; a clause
 // that starts with no marker is free text and evidence of nothing; and a rate
-// under two markers in a profile's provenance is a contradiction. Each case
+// both heard and refused in a profile's provenance is a contradiction, while
+// refused and silence at are one result, a refusal, which two units may give
+// in two ways. Each case
 // says what the clauses credit by the rates the profile claims and the
 // problem the lint gives, or none: every wording round 2 and round 3 tried,
 // the reviewers' lists that broke round 3's reading, and the form's own.
@@ -240,6 +242,9 @@ func TestADopClauseCreditsOnlyTheRatesItsFormLists(t *testing.T) {
 		heard128   = "credits DSD128 as heard"
 		heard64    = "credits DSD64 as heard"
 		refused256 = "refused rate DSD256 has no dop clause"
+		// heardAndRefused is a rate a profile's clauses credit as heard and
+		// as refused (refused or silence at), two results for one rate.
+		heardAndRefused = "both heard and refused"
 	)
 	for _, tc := range []struct {
 		name    string
@@ -286,10 +291,12 @@ func TestADopClauseCreditsOnlyTheRatesItsFormLists(t *testing.T) {
 		{"a marker run into its rate", "heardDSD128", dsd128, nil, heard128},
 		{"refusal is no marker", "refusal of DSD256", 0, []int{dsd256}, refused256},
 		{"a DoP lock", "DSD128's carrier reached a DoP lock", dsd128, nil, heard128},
-		// A rate under two markers.
-		{"heard and silence at one rate", "heard DSD256; silence at DSD256", dsd256, nil, "under two markers"},
-		{"heard and refused at one rate", "heard DSD128; refused DSD128", dsd128, nil, "under two markers"},
-		{"refused and silence at one rate", "refused DSD256; silence at DSD256", 0, []int{dsd256}, "under two markers"},
+		// A rate heard and refused; refused and silence at are one result.
+		{"heard and silence at one rate", "heard DSD256; silence at DSD256", dsd256, nil, heardAndRefused},
+		{"heard and refused at one rate", "heard DSD128; refused DSD128", dsd128, nil, heardAndRefused},
+		{"refused and silence at one rate, one result", "refused DSD256; silence at DSD256", 0, []int{dsd256}, ""},
+		{"two units, one refused it and one played it silent",
+			"refused DSD256: unit 1 would not negotiate (iOS cd125088); silence at DSD256: unit 2 played it silent (iOS cd125088)", 0, []int{dsd256}, ""},
 		// Round 3's wordings: the negations it read, which credit nothing now.
 		{"round 3: not heard", "DSD128 was not heard, DSD256 refused", dsd128, nil, heard128},
 		{"round 3: never heard", "DSD128 never heard, DSD256 refused", dsd128, nil, heard128},
@@ -347,10 +354,10 @@ func TestADopClauseCreditsOnlyTheRatesItsFormLists(t *testing.T) {
 		}
 	}
 
-	// A rate under two markers across two dop lines of one profile.
+	// A rate heard and refused across two dop lines of one profile.
 	p := fixtureProfile("fixture.dac", "00d1")
 	p.Provenance = append(p.Provenance, "dop: silence at DSD128: a second unit (iOS cd125088)")
-	if problems := fixture(nil, p).Lint(); !lintSays(problems, "fixture.dac", "under two markers") {
+	if problems := fixture(nil, p).Lint(); !lintSays(problems, "fixture.dac", heardAndRefused) {
 		t.Errorf("heard and silence at for DSD128 on two dop lines lint as %v", problems)
 	}
 	// The form's problem shows the form to write.

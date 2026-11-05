@@ -584,25 +584,43 @@ file `+a+`/bcdDevice 0100
 }
 
 // TestDACInspectTakesNoTwoUnknownPlacesForOne: a card whose directory could
-// not be resolved, in the inventory and read again, is at no place inspect
-// can compare: two empty directories are no match, so it shows no model.
+// not be resolved, in the inventory or read again, is at no place inspect can
+// compare (two empty directories are no match), so it shows no model; and it
+// says the directory could not be resolved, never that the card changed,
+// which a user whose directory never resolves would read on every run and
+// which no run again clears.
 func TestDACInspectTakesNoTwoUnknownPlacesForOne(t *testing.T) {
 	u := alsa.USBIdentity{ID: alsa.USBID{Vendor: 0x20b1, Product: 0x3009}, Port: "platform-xhci-hcd.0/usb2-1:1.0", Interface: 0, DevNum: 2}
-	inv := binding.Inventory{Sysfs: true, CardsComplete: true, Cards: []binding.Card{{Index: 5, ID: "Audio", Name: "iFi (by AMR) HD USB Audio",
-		State: binding.CardUSB, USB: &u}}}
-	read := dacModelReader{
-		descriptors: func(int) (alsa.QualificationIdentity, error) {
-			return alsa.QualificationIdentity{Manufacturer: "iFi (by AMR)", Product: "iFi (by AMR) HD USB Audio", BCDDevice: "0170",
-				Port: u.Port, DevNum: u.DevNum, Interface: u.Interface}, nil
-		},
-		card: func(n int) (alsa.Identity, bool) {
-			again := u
-			return alsa.Identity{Card: n, Kind: alsa.IdentityUSB, Bus: "usb", USB: &again}, true
-		},
-	}
-	for _, c := range dacInspect(dacEnv(), dacConfig(t, ""), inv, read).Cards {
-		if c.Index == 5 && (c.Manufacturer != nil || c.ModelProblem != "not read: the card changed while it was read") {
-			t.Errorf("a card at no place inspect can compare shows a model: %s %q", strOrNull(c.Manufacturer), c.ModelProblem)
+	const place = "devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1/1-1/1-1:1.0/sound/card5"
+	for _, tc := range []struct{ name, inventory, again string }{
+		{"neither directory resolved", "", ""},
+		{"the inventory's directory not resolved", "", place},
+		{"the reading again's directory not resolved", place, ""},
+	} {
+		inv := binding.Inventory{Sysfs: true, CardsComplete: true, Cards: []binding.Card{{Index: 5, ID: "Audio", Name: "iFi (by AMR) HD USB Audio",
+			State: binding.CardUSB, USB: &u, Dir: tc.inventory}}}
+		read := dacModelReader{
+			descriptors: func(int) (alsa.QualificationIdentity, error) {
+				return alsa.QualificationIdentity{Manufacturer: "iFi (by AMR)", Product: "iFi (by AMR) HD USB Audio", BCDDevice: "0170",
+					Port: u.Port, DevNum: u.DevNum, Interface: u.Interface}, nil
+			},
+			card: func(n int) (alsa.Identity, bool) {
+				again := u
+				return alsa.Identity{Card: n, Kind: alsa.IdentityUSB, Bus: "usb", USB: &again, Dir: tc.again}, true
+			},
+		}
+		found := false
+		for _, c := range dacInspect(dacEnv(), dacConfig(t, ""), inv, read).Cards {
+			if c.Index != 5 {
+				continue
+			}
+			found = true
+			if c.Manufacturer != nil || c.ModelProblem != "not read: the card's directory could not be resolved" {
+				t.Errorf("%s: a card at no place inspect can compare shows %s, %q", tc.name, strOrNull(c.Manufacturer), c.ModelProblem)
+			}
+		}
+		if !found {
+			t.Fatalf("%s: no card 5 in the report", tc.name)
 		}
 	}
 }
