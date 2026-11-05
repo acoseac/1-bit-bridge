@@ -17,8 +17,9 @@ database's lint holds it to the profile's own provenance. It prints one line a p
 on a violation, a row or a commit the database names that the file is not, or a file it cannot
 read. Paste its output into the PR. The registry's prose is never read: only each row's id and its
 maxDSDRate, with every comment blanked, line and block (which nest, as Swift's do), outside string
-literals, and what the reader does not read (a block comment left open, a multi-line or raw string,
-an interpolation) refused. `--self-test` pins the reader and the check on a synthetic registry.
+literals, then the contents of every string literal but a row's id (a note's text among them), and
+what the reader does not read (a block comment left open, a multi-line or raw string, an
+interpolation) refused. `--self-test` pins the reader and the check on a synthetic registry.
 """
 
 import argparse
@@ -32,6 +33,9 @@ PROFILES = REPO / "internal" / "player" / "dacprofile" / "profiles.json"
 
 SOURCE_REF = re.compile(r"^DACProfile\.swift (?P<row>[a-z0-9]+(?:[.-][a-z0-9]+)+) at iOS (?P<commit>[0-9a-f]{7,40})$")
 ROW_ID = re.compile(r'\bid:\s*"(?P<id>[^"]+)"')
+# A row id's label, just before its string literal, as ROW_ID reads it: the one
+# string whose text registry_rows reads.
+ID_LABEL = re.compile(r"\bid:\s*\Z")
 ROW_RATE = re.compile(r"\bmaxDSDRate:\s*\.(?P<rate>none|dsd64|dsd128|dsd256|dsd512)\b")
 RATES = {"none": 0, "dsd64": 64 * 44100, "dsd128": 128 * 44100, "dsd256": 256 * 44100, "dsd512": 512 * 44100}
 # A string literal as strip_comments reads one: closed on its line, each escape
@@ -76,9 +80,22 @@ def strip_comments(swift):
     return "".join(out)
 
 
+def blank_strings(code):
+    """Blank the contents of every string literal in code, strip_comments' output, but a row id's
+    (`id: "…"`), so no string's text, a note's included, is read as a field. Its only quotes are
+    string literals', each closed on its line."""
+    out, last = [], 0
+    for m in STRING.finditer(code):
+        out.append(code[last:m.start()])
+        out.append(m.group() if ID_LABEL.search(code, last, m.start()) else '""')
+        last = m.end()
+    out.append(code[last:])
+    return "".join(out)
+
+
 def registry_rows(swift):
     """Each row of the registry's profiles list: its id and maxDSDRate, in one-bit samples a second."""
-    text = strip_comments(swift)
+    text = blank_strings(strip_comments(swift))
     start = text.find("static let profiles: [DACProfile] = [")
     if start < 0:
         raise ValueError("no `static let profiles: [DACProfile] = [` in the registry")

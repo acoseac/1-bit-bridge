@@ -101,9 +101,10 @@ and not these lines. It prints one line a
 profile and exits 1 on a violation; paste its output into the PR. The
 registry's prose is never read, only each row's id and its `maxDSDRate`: its
 comments are blanked, line and block (which nest, as Swift's do), outside
-string literals, and what the reader does not read (a block comment left
-open, a multi-line or raw string, an interpolation) is refused, never read
-past. Only a row's DoP evidence, its caveats and its DSD resync delay, a
+string literals, then the contents of every string literal but a row's id, so
+a note naming a rate before its row's own is never read as the row's, and what
+the reader does not read (a block comment left open, a multi-line or raw
+string, an interpolation) is refused, never read past. Only a row's DoP evidence, its caveats and its DSD resync delay, a
 measured value that seeds the profile's `timing.dsdPrefillMs` ("timing: iOS
 profile chord.hugo2's DSD resync delay, 0.7 s (iOS cd125088)"), are imported,
 never its name patterns, a resync delay as policy, volume topology or notes.
