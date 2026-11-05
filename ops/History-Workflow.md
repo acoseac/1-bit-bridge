@@ -4,7 +4,7 @@
 
 ## Things that have bitten before
 
-**Twenty-three claims in this list have been wrong and been corrected** — the
+**Twenty-four claims in this list have been wrong and been corrected** — the
 WAV/AIFF extractor gap, the `deletedIds` field name, "the bridge has no DLNA
 Search", `manualDescriptionURL` being unimplemented, (2026-09-22)
 "`waveform_path` has the same shape and NO adoption yet", which #954 had
@@ -28,9 +28,11 @@ cover the cap evicts does not come back, a `local-` cover included",
 (2026-10-22) "`resolveOutput` resolves the block's merge keys as
 gopkg.in/yaml.v3 v3.0.1's decoder does", (2026-10-22) "an output
 refusal names the setting, never its value", (2026-10-22) "a block
-yaml.v3 does not decode is one Load refuses", and (2026-10-22) "no
+yaml.v3 does not decode is one Load refuses", (2026-10-22) "no
 refusal, warning or log line of the config path carries any part of a
-value or a key". The first five cost a later session real
+value or a key", and (2026-11-05) "`mergeDuplicate` picks its surviving
+base with that same order [the comparator's], not by arrival". The first
+five cost a later session real
 time; the fourth was written **after** the PR that falsified it, by a session
 that had this very warning in front of it, and the fifth sent `bridge doctor`
 on telling operators to run `bridge analyze --force` — hours of decoding to
@@ -98,6 +100,13 @@ file. The twenty-third promised more than the code did: an entry of a
 managed list this build does not know was printed whole by serve and init,
 and the filesystem's errors name configured paths, which the rule now
 leaves out by the orchestrator's decision.
+The twenty-fourth was never true: the commit that wrote it into CLAUDE.md's
+Lyrics section (b60ee9b6, the docs of the 2026-09-06 LOUPE run) also wrote
+the log entry saying that choosing the base with `lessCandidate` was the
+defect `FuzzPickIsShuffleInvariant` had just found in #851, and that the base
+is chosen by synced, then format. It stood for two months beside
+`mergeDuplicate`'s own docblock, which says the opposite, and B611 found it
+while adding the dedup key's rule to the same bullet.
 (Sections further down keep their own running tally of the same class, which
 reaches higher; this count is of THIS list.) **Check the code before believing
 any doc about it, including this one** — and when you find a stale claim,
