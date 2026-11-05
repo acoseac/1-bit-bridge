@@ -403,45 +403,62 @@ func TestDACInspectShowsNoModelOfAUnitThatChangedWhileRead(t *testing.T) {
 // again) gives the inventory's attachment with its own strings, which the
 // comparison with the inventory passes. inspect reads the card again after
 // the strings and keeps them only for the unit and the enumeration the
-// inventory holds.
+// inventory holds: neither another model's strings nor those of the same
+// unit enumerated anew, its firmware updated, which only its device number
+// tells.
 func TestDACInspectShowsNoModelOfAUnitReplacedAsItsStringsWereRead(t *testing.T) {
-	root := dacTree(t)
 	goBar := dacUSB1 + "/1-1"
-	sysfstest.Apply(t, root, "file "+goBar+"/manufacturer iFi (by AMR)\nfile "+goBar+"/product iFi (by AMR) HD USB Audio\nfile "+goBar+"/bcdDevice 0170\n")
-	obs, ok := addDACTreeFlagsFor(root).observer(dacEnv(), "output dac inspect", io.Discard)
-	if !ok {
-		t.Fatal("no observer")
-	}
-	inv, err := obs.Observe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	card, ok := inv.Card(5)
-	if !ok || card.USB == nil {
-		t.Fatal("no USB card 5 in the GO bar tree")
-	}
-	u := *card.USB
-	// What alsa.SysfsReader.Qualification returns when the card's device link
-	// changes between its reading of the card and its second resolve of
-	// cardN/device, the tree left as the replug left it: another model in the
-	// same port, its card 5 again, enumerated anew.
-	read := func(int) (alsa.QualificationIdentity, error) {
-		sysfstest.Apply(t, root, "unplug "+goBar+"\n"+dacPlug(goBar, 5, "1234", "0d02", "")+"file "+goBar+"/devnum 7\n"+
-			"file "+goBar+"/manufacturer Synthetic Audio\nfile "+goBar+"/product Synthetic DAC\nfile "+goBar+"/bcdDevice 0100\n")
-		return alsa.QualificationIdentity{Manufacturer: "Synthetic Audio", Product: "Synthetic DAC", BCDDevice: "0100",
-			Port: u.Port, DevNum: u.DevNum, Interface: u.Interface}, nil
-	}
-	for _, c := range dacInspect(dacEnv(), dacConfig(t, ""), inv, dacModelReader{descriptors: read, card: obs.Sysfs.Card}).Cards {
-		if c.Index != 5 {
-			continue
+	for _, tc := range []struct {
+		name, replug string
+		strings      alsa.QualificationIdentity
+	}{
+		{"another model", dacPlug(goBar, 5, "1234", "0d02", "") + "file " + goBar + "/devnum 7\n" +
+			"file " + goBar + "/manufacturer Synthetic Audio\nfile " + goBar + "/product Synthetic DAC\nfile " + goBar + "/bcdDevice 0100\n",
+			alsa.QualificationIdentity{Manufacturer: "Synthetic Audio", Product: "Synthetic DAC", BCDDevice: "0100"}},
+		{"the same unit enumerated anew, its firmware updated", dacPlug(goBar, 5, "20b1", "3009", dacSerial) + "file " + goBar + "/devnum 8\n" +
+			"file " + goBar + "/manufacturer iFi (by AMR)\nfile " + goBar + "/product iFi (by AMR) HD USB Audio\nfile " + goBar + "/bcdDevice 0171\n",
+			alsa.QualificationIdentity{Manufacturer: "iFi (by AMR)", Product: "iFi (by AMR) HD USB Audio", BCDDevice: "0171"}},
+	} {
+		root := dacTree(t)
+		sysfstest.Apply(t, root, "file "+goBar+"/manufacturer iFi (by AMR)\nfile "+goBar+"/product iFi (by AMR) HD USB Audio\nfile "+goBar+"/bcdDevice 0170\n")
+		obs, ok := addDACTreeFlagsFor(root).observer(dacEnv(), "output dac inspect", io.Discard)
+		if !ok {
+			t.Fatal("no observer")
 		}
-		if c.Manufacturer != nil || c.Product != nil || c.BCDDevice != nil || c.ModelProblem != "not read: the card changed while it was read" {
-			t.Errorf("inspect shows the strings of the unit that replaced card 5 under the GO bar's IDs: %s %s %s %q",
-				strOrNull(c.Manufacturer), strOrNull(c.Product), strOrNull(c.BCDDevice), c.ModelProblem)
+		inv, err := obs.Observe()
+		if err != nil {
+			t.Fatal(err)
 		}
-		return
+		card, ok := inv.Card(5)
+		if !ok || card.USB == nil {
+			t.Fatal("no USB card 5 in the GO bar tree")
+		}
+		u := *card.USB
+		// What alsa.SysfsReader.Qualification returns when the card's device
+		// link changes between its reading of the card and its second resolve
+		// of cardN/device, the tree left as the replug left it: the unit in the
+		// same port, its card 5 again, enumerated anew.
+		read := func(int) (alsa.QualificationIdentity, error) {
+			sysfstest.Apply(t, root, "unplug "+goBar+"\n"+tc.replug)
+			q := tc.strings
+			q.Port, q.DevNum, q.Interface = u.Port, u.DevNum, u.Interface
+			return q, nil
+		}
+		found := false
+		for _, c := range dacInspect(dacEnv(), dacConfig(t, ""), inv, dacModelReader{descriptors: read, card: obs.Sysfs.Card}).Cards {
+			if c.Index != 5 {
+				continue
+			}
+			found = true
+			if c.Manufacturer != nil || c.Product != nil || c.BCDDevice != nil || c.ModelProblem != "not read: the card changed while it was read" {
+				t.Errorf("%s: inspect shows the strings of the unit that replaced card 5 under the GO bar's: %s %s %s %q", tc.name,
+					strOrNull(c.Manufacturer), strOrNull(c.Product), strOrNull(c.BCDDevice), c.ModelProblem)
+			}
+		}
+		if !found {
+			t.Fatalf("%s: no card 5 in the report", tc.name)
+		}
 	}
-	t.Fatal("no card 5 in the report")
 }
 
 // TestDACInspectPrintsAPortlessUnitsModel: a USB card whose controller sits
