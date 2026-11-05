@@ -74781,3 +74781,152 @@ checks first that the event can come where a seam stands in for the host's
 disk, leaving to that disk no answer the stand-in contradicts, and never calls
 a test that failed after another waited out the deadline broken before it
 fails alone. The long form is in `ops/History-rules-scanner.md`.
+
+## 2026-11-05 — B651 round 9: four review findings on rounds 6 to 8
+
+Round 9, on the same Mac (macOS, APFS that folds case, Homebrew's go1.27.3
+with `GOTOOLCHAIN=local`), from the PR's head, daf6a23c (round 8 and its
+rules). Codex and the Claude API reviewer read rounds 7 and 8 and the round-6
+code under them. Each finding was checked against the code, and by a test on
+daf6a23c, before anything changed; all four hold.
+
+**1. A resumed nested root kept its watch on the folder a mount covers
+(Codex).** Real, on kqueue alone. The startup walk of the outer root passes
+over a held nested root (`heldBelow`), but fsnotify's kqueue backend opens
+every entry of a folder it lists (`watchDirectoryFiles`, `internalWatch`),
+the held root's bare mount point among them. Once the root read as it did,
+`resumeRoot` and `watchAgain` asked fsnotify to watch it, and `AddWith` found
+that descriptor by the path (`watches.byPath`, `alreadyWatching`) and
+registered it again, on the covered folder; the listing it read next went
+through the path, so the root's folders below were watched on the volume and
+the root itself was not. `TestTheWatcherWatchesAHeldNestedRootOnTheVolumeMountedOverItsBareFolder`
+mounts a disk image over the bare folder (hdiutil create and attach, as this
+user, no privileges). Red on daf6a23c in 2.6 s: one open file left on the
+covered folder, and no event for a file made directly under the mounted root
+while one made after it in a folder below came. Not timing: without the early
+stop the run waited its whole 30 s window and the root's event never came, and
+a mount changes nothing above the root, so no `lookAgain` let go of the watch
+first. The rename fixtures could not show it: a folder renamed over the bare
+one drops its last link, kqueue reports NOTE_DELETE on the kept descriptor,
+and fsnotify forgets the path. `watchAgain` lets go of what is held at or
+under the root first now (`releaseRoot`), as `lookAgain` did before calling it
+(its own call removed). fsnotify forgets having seen the path with the
+release, so the next change in the folder above sends a Create for the root,
+which asks for a scan of that folder. `TestWatchingAHeldNestedRootAgainLetsGoOfItsEntryWatchFirst`
+pins the order on kqueue's account, which Linux's inotify stands in for.
+inotify and ReadDirectoryChangesW hold no watch on a folder's entries:
+`InotifyAddWatch` resolves the path when it is called, and fsnotify's Windows
+backend keys a watch by the directory's volume and file index (`getIno`),
+opened by the path at the Add; and a held root's events are dropped before any
+add (`handleEvent`), so neither keeps a watch at its path.
+
+**2. A share root held none of its paths (Codex).** Real, on Windows:
+`filepath.Clean` leaves `\\server\share` bare, so `pathElements` gave it the
+first element `\\server\share` while every path below it begins
+`\\server\share\`, and `caseLook.under` matched none of them, `EqualFold`
+included: a library root at a share's root refused its subtree scans and saw
+none of its nested roots. 0386624a moved the element logic, unchanged, into
+`volumeElements` (the volume, the rest, the separator), with the failing
+tests: `TestAVolumeRootIsOneElementHoweverACleanPathSpellsIt`, on every host,
+red here on its two bare share roots, and `TestAVolumeRootHoldsThePathsBelowIt`
+(Windows only: `pathElements`, `caseLook.under`, `deepestRootOf` and
+`nestedRootsUnder` with share and drive roots), vetted for Windows here.
+dc671149 gives a volume longer than a drive letter's two characters its root's
+element when nothing follows it, as Go's `filepath.Rel` takes such a base
+(path.go:197-199 in go1.27.3); `C:` alone, a drive's current folder, stays
+`C:`. The Windows test is for the orchestrator's Windows host, at both commits.
+
+**3. The folding probe answered wrongly both ways (Codex P2 and Claude).**
+Real. On a case-sensitive volume a hard link's two names (`folder.jpg`,
+`FOLDER.JPG`) are one file, and `FoldingIn` answered case-insensitive; an entry
+removed or saved over between its two lookups, or one `os.SameFile` cannot
+open (Windows answers false then), made a folder that folds answer
+case-sensitive; and one renamed to its other spelling between them made a
+case-sensitive folder answer case-insensitive. One file under both spellings
+is one entry now only where the listing does not hold the swapped spelling
+too, read whole for it where the probe's first read (256 entries) was not; and
+an answer comes only once each name looked up is still the file first found
+(`stillFound`), else the next entry is asked.
+`TestTwoNamesOfOneFileAreNoProofThatAFolderFoldsCase` and
+`TestAnEntryThatChangesBetweenTheLookupsTellsNothing` stand in for the folder
+in memory through the `foldingFS` seam: eight cases red on daf6a23c, green
+after, folding volumes, short and long, still answering so. The stand-in opens
+a lookup by the spelling it was asked for, as Windows' `os.SameFile` does,
+which pins the re-check of the other spelling. Claude's proposal for
+`sameName` was decided with finding 4's seam: one spelling found and the other
+not is an answer a folder that folds that name never gives (a volume may fold
+ASCII case and not another script's), so it keeps the two two now, and
+neither found still leaves it to the folder's answer. Round 8 kept "one there"
+as one because the Linux simulations left their lookups to the disk; none
+does now.
+
+**4. The test pinning round 8's `sameName` skipped on Windows and as root
+(Claude).** Real: its refused leg skipped on `runtime.GOOS == "windows" ||
+os.Geteuid() == 0` (nested_roots_folding_test.go:337 on daf6a23c), since only
+this host's permissions could refuse a lookup. The scanner's lookups for its
+case questions go through `Scanner.lstat` now, which a test's `lookupHook`
+answers; `simVolume`, the one fixture that sets it, sets `foldingHook` with it
+from one description of the volume (how a folder compares names; what a
+lookup finds: the name byte for byte, else, in a folder that folds, the name
+under fold, else nothing, or a refused permission where it says so), and
+`answerFolding` and the mounted fixture install it, so no simulated volume
+leaves a lookup to this host's disk. `TestALookupThatFailsIsNoProofThatTwoSpellingsAreOneRoot`
+runs four legs on every host: a lookup refused (an `*fs.PathError` wrapping
+`syscall.EACCES`), a volume that folds ASCII case alone with `Ωmega` on disk
+and `ωmega` configured (red on round 8's rule, which gave the path to the
+nested root), neither spelling there, and both one folder. `lookAtRoot` still
+reads the disk where a test simulates folding; `mustReadAsNotMounted` checks
+it where a test waits on it.
+
+**Negative controls**, each on the round-9 commit it tests, one at a time,
+every file put back from HEAD:
+
+| Control | Red |
+|---|---|
+| 1a `watcher_hold.go` as on daf6a23c | both finding-1 tests: an open file on the covered folder and no event at the root; the entry watch kept |
+| 2a `volumeElements` without the share-root case | the helper test's two bare share roots |
+| 2b `C:` with nothing after it taken for `C:\` | the helper test's `C:` case |
+| 3-0 `casefold.go` as on daf6a23c | all eight probe cases |
+| 3a one file under two names taken for one entry (no listing check) | the three hard-link cases |
+| 3a′ the listing check reads the first batch alone | the hard link past the first read |
+| 3b no re-check of the probed entry | the four cases that change it between the lookups |
+| 3b′ no re-check of the other spelling | the case where only the other spelling cannot be opened |
+| 4a `sameName` takes any error for one entry (round 7's rule) | the refused leg and the one-spelling leg |
+| 4b one spelling found alone taken for one entry (round 8's rule) | the one-spelling leg |
+| 4c `sameName` looks up with `os.Lstat`, past the seam | the refused leg and the one-spelling leg: this host's disk folds Ω and ω, and refuses nothing |
+
+**Gates**, on this Mac with go1.27.3, through the build lock: `go test`
+without race of internal/manifest (83 s), internal/fsutil (0.5 s) and
+cmd/bridge (217 s) passed. Under `-race`, in shards by name, each inside the
+session's ten-minute foreground limit, internal/manifest ran in five
+(`^(TestA|Fuzz|Example)`, `^Test[B-E]`, `^Test[F-R]`, `^TestS`,
+`^Test[^A-S]`: 195 s, 127 s, 255 s, 333 s, 178 s; 239 + 318 + 402 + 273 +
+199 = 1,431 tests, `go test -list`'s count) and cmd/bridge in four (round
+8's: 250 s, 123 s, 130 s, 304 s; 230 + 301 + 289 + 363 = 1,183), every shard
+passing; internal/fsutil passed under race (2.9 s). `make test-fast` passed
+(81 packages). `make vet` was clean native (darwin) and for linux, windows and
+linux/386, and manifest's and fsutil's test binaries compiled for windows and
+linux (`go test -c`). go1.27.3's gofmt lists none of the ten Go files round 9
+changed; `make docs-check` passes; `scripts/qualification-version`
+ebe71366..HEAD (main's head) is OK.
+
+**The rules**: `rules-b651-r9.patch`, written with `git diff` from scratch
+copies of the two rules files, grows the B651 line's Don't by four (a held root
+watched again over a watch opened at its path before; a share's root, with its
+separator or without, holds the paths below it; a folder's comparison judged
+neither by one file under two names its listing holds nor by lookups that do
+not agree with themselves; one spelling found alone keeps two spellings two),
+with the long form in `ops/History-rules-scanner.md`, and adds to
+`build-ci-tests.md` that a test of what a mount does mounts, and never renames
+a folder over another. `git apply --check` needs an approval this headless
+session cannot give, so the patch was applied by a strict applier instead,
+which reads each hunk for the lines its header counts (an empty line inside a
+hunk an empty context line, as git apply reads it) and requires every context
+and removed line at its line: to HEAD's two files, it left them byte for byte
+as the edited copies, the budgets pass (scanner.md 29,964 to 30,311 bytes,
+build-ci-tests.md 25,504 to 26,118, the worst load 306,003), and
+`mdblocks.dropped_donts` finds the long form's Don't whole in the patched line
+and the line's in the long form, while it reports the unpatched line as
+dropping it. The patch stays in the worktree's ignored `.tmp/`: this session
+may not write outside the worktree from the shell, and the Write tool drops a
+blank context line's leading space.
