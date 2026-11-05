@@ -66,6 +66,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
@@ -101,6 +102,16 @@ const AtlasHarvestFileName = "atlas-harvest.json"
 // Restore reads the copy by the player's own rule and writes it through the
 // identity file's writer, so the box's player is the device it was (Restore).
 const PlayerUUIDFileName = "player-uuid"
+
+// PlayerDSDFileName is the player's DSD state (dsdstate.FileName, B728 B3):
+// each DAC model's choice and what was heard on it. Snapshot copies it as
+// stored, its bytes alone, never loading it through the state's store, whose
+// load writes when the file is damaged; a missing file is skipped, as on
+// every box before serve's player writes one. Restore installs what was
+// chosen and heard and drops what was observed on the old box
+// (dsdstate.WriteRestored), and a snapshot that holds none leaves the box's
+// state as it is.
+const PlayerDSDFileName = dsdstate.FileName
 
 // BackupsDirName is the dir under `dataDir` that holds snapshots.
 const BackupsDirName = "backups"
@@ -157,6 +168,7 @@ type Sources struct {
 	AdminAuth    string // typically `<dataDir>/adminauth.json`; absent on a loopback install
 	AtlasHarvest string // typically `<dataDir>/atlas-harvest.json`; absent until a harvest credential is stored
 	PlayerUUID   string // typically `<dataDir>/player-uuid`; absent until the player has an identity
+	PlayerDSD    string // typically `<dataDir>/player-dsd.json`; absent until serve's player writes its DSD state
 }
 
 // Targets points at where each restored file should land. Mirrors
@@ -172,6 +184,9 @@ type Targets struct {
 	AdminAuth    string
 	AtlasHarvest string
 	PlayerUUID   string
+	// PlayerDSD is written in the data directory that holds it, which the
+	// restore's caller holds the lock of (dsdstate.WriteRestored).
+	PlayerDSD string
 }
 
 // afterIdentityCopy is a test seam, nil in production: Snapshot calls it once
@@ -247,6 +262,7 @@ func Snapshot(ctx context.Context, src Sources) (snapDir string, retErr error) {
 		{src.AdminAuth, AdminAuthFileName},
 		{src.AtlasHarvest, AtlasHarvestFileName},
 		{src.PlayerUUID, PlayerUUIDFileName},
+		{src.PlayerDSD, PlayerDSDFileName},
 	} {
 		if pair.src == "" {
 			continue
@@ -473,6 +489,24 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 			return err
 		}
 	}
+	// The player's DSD state is read before the loop as well, and written
+	// before it, after the identity: so a state the box cannot write durably
+	// (no directory barrier, as on Windows, or a data directory on storage
+	// that does not outlive a reboot) refuses before the database, the token
+	// store, the TLS pair and the config are replaced, as the identity's
+	// reservation does.
+	var dsdState []byte
+	dsdStateRead := false
+	if dst.PlayerDSD != "" && slices.Contains(m.Files, PlayerDSDFileName) {
+		data, err := readSnapshotFile(filepath.Join(snapshotDir, PlayerDSDFileName))
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+		case err != nil:
+			return fmt.Errorf("restore %s: %w; nothing was restored", PlayerDSDFileName, err)
+		default:
+			dsdState, dsdStateRead = data, true
+		}
+	}
 	if opts.beforeWrites != nil {
 		opts.beforeWrites()
 	}
@@ -511,9 +545,16 @@ func RestoreWithOptions(snapshotDir string, dst Targets, opts RestoreOptions) er
 			restored = append(restored, PlayerUUIDFileName+" (with the player's reservation)")
 		}
 	}
+	if dsdStateRead {
+		if err := restorePlayerDSD(dst.PlayerDSD, dsdState, restored); err != nil {
+			return err
+		}
+		restored = append(restored, PlayerDSDFileName)
+	}
 	for i, name := range m.Files {
-		// The reservation is an input only, never a copied snapshot file.
-		if name == PlayerUUIDFileName || name == engine.ReservationFileName {
+		// The reservation is an input only, never a copied snapshot file; the
+		// identity and the DSD state were written before the loop.
+		if name == PlayerUUIDFileName || name == engine.ReservationFileName || name == PlayerDSDFileName {
 			continue
 		}
 		target, ok := mapping[name]
@@ -706,12 +747,32 @@ func (e *partialRestoreError) Unwrap() error { return e.err }
 func unrestoredFrom(names []string, mapping map[string]string) []string {
 	var out []string
 	for _, name := range names {
-		if name == PlayerUUIDFileName || name == engine.ReservationFileName || mapping[name] == "" {
+		if name == PlayerUUIDFileName || name == engine.ReservationFileName || name == PlayerDSDFileName || mapping[name] == "" {
 			continue
 		}
 		out = append(out, name)
 	}
 	return out
+}
+
+// restorePlayerDSD installs the snapshot's DSD state at target, in the data
+// directory that holds it, durably and in place of the box's
+// (dsdstate.WriteRestored), the restore's caller holding that directory's
+// lock. A refusal says what the restore had written by then (restored), and
+// how to restore the rest without the state.
+func restorePlayerDSD(target string, snapshot []byte, restored []string) error {
+	err := fsutil.MkdirAll(filepath.Dir(target), 0o700)
+	if err == nil {
+		err = dsdstate.WriteRestored(target, snapshot)
+	}
+	if err == nil {
+		return nil
+	}
+	done := "nothing was restored"
+	if len(restored) > 0 {
+		done = "restored before it: " + strings.Join(restored, ", ")
+	}
+	return fmt.Errorf("restore %s: %w; %s: run the restore again, or remove %s from a copy of the snapshot to restore the rest and keep this box's DSD state", PlayerDSDFileName, err, done, PlayerDSDFileName)
 }
 
 // PruneResult reports what a Prune call did.

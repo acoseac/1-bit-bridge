@@ -184,8 +184,13 @@ func (c Contact) validate(t Tuple, a Attachment, device, subdevice int, mixer, m
 	if t.Transport == "dop" {
 		schema = 3
 	}
-	if c.SchemaVersion != schema || !version(c.QualificationVersion) {
+	// The schema, then the version asked alone, so its refusal is marked as
+	// one; the message is the condition's as it was.
+	if c.SchemaVersion != schema {
 		return errors.New("contact version mismatch")
+	}
+	if !version(c.QualificationVersion) {
+		return refused(ErrStaleVersion, errors.New("contact version mismatch"))
 	}
 	if c.Device == nil || c.Subdevice == nil || *c.Device != device || *c.Subdevice != subdevice || device < 0 || subdevice < 0 {
 		return errors.New("contact endpoint mismatch or missing")

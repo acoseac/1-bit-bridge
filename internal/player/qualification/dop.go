@@ -70,13 +70,21 @@ func checkDoPExperiments(root string, refs []Evidence, tuple Tuple, id Identity,
 			return e
 		}
 		if !validHash(ref.SHA256) || fmt.Sprintf("%x", sha256.Sum256(b)) != ref.SHA256 {
-			return errors.New("DoP experiment hash mismatch")
+			return refused(ErrHashMismatch, errors.New("DoP experiment hash mismatch"))
 		}
 		var r executedReport
 		if e = json.Unmarshal(b, &r); e != nil {
 			return e
 		}
-		if r.SchemaVersion != 2 || !take.version(r.QualificationVersion) || r.Tuple != tuple || !take.identity(r.Identity, id) || r.ManifestHash != manifest || r.Environment != environment || r.End != "complete" || r.Error != "" || r.Contact == nil || r.Scenario != "level-check" {
+		// The condition's clauses in their order, the version asked alone so
+		// its refusal is marked as one.
+		if r.SchemaVersion != 2 {
+			return errors.New("DoP experiment context mismatch")
+		}
+		if !take.version(r.QualificationVersion) {
+			return refused(ErrStaleVersion, errors.New("DoP experiment context mismatch"))
+		}
+		if r.Tuple != tuple || !take.identity(r.Identity, id) || r.ManifestHash != manifest || r.Environment != environment || r.End != "complete" || r.Error != "" || r.Contact == nil || r.Scenario != "level-check" {
 			return errors.New("DoP experiment context mismatch")
 		}
 		if e = r.DoP.Validate(); e != nil {

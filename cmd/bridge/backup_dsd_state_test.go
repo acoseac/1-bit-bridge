@@ -10,6 +10,8 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/backup"
+	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 )
 
 // dsdStateBeforeTheBackup is a player-dsd.json as the box holds it when the
@@ -148,4 +150,22 @@ func jsonKeyPath(v any, key string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// TestBuildBackupSourcesNamesThePlayersDSDState: every snapshot path (the
+// CLI, serve's ticker, the console) and the restore name the player's DSD
+// state in the data directory, beside the player's identity, or a restored
+// box would lose what was chosen for each DAC.
+func TestBuildBackupSourcesNamesThePlayersDSDState(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{DataDir: filepath.Join(dir, "data")}
+	yamlPath := filepath.Join(dir, "bridge.yaml")
+	src, dst := buildBackupSources(cfg, yamlPath), buildRestoreTargets(cfg, yamlPath)
+	want := filepath.Join(cfg.DataDir, dsdstate.FileName)
+	if src.PlayerDSD != want || dst.PlayerDSD != want {
+		t.Fatalf("player-dsd.json src %q dst %q, want %q", src.PlayerDSD, dst.PlayerDSD, want)
+	}
+	if backup.PlayerDSDFileName != dsdstate.FileName {
+		t.Fatalf("backup names %q, the state %q", backup.PlayerDSDFileName, dsdstate.FileName)
+	}
 }

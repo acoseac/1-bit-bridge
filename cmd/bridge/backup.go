@@ -14,6 +14,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 )
 
@@ -26,8 +27,9 @@ import (
 // out the running process. The other captured files (tokens.json,
 // cert/key, config, adminauth.json when the console has an account,
 // atlas-harvest.json when a harvest credential is stored, player-uuid
-// once the player has an identity, and its matching durable reservation)
-// are read normally — a write race with
+// once the player has an identity, and its matching durable reservation,
+// and the player's DSD state, player-dsd.json, once serve's player writes
+// one) are read normally — a write race with
 // serve is harmless for these because they're mutated rarely and
 // atomically (temp + rename). A restore brings the console account back
 // and signs its sessions out, and gives the player the identity it had with
@@ -215,6 +217,7 @@ func buildBackupSources(cfg *config.Config, configPath string) backup.Sources {
 		AdminAuth:    filepath.Join(cfg.DataDir, adminauth.FileName),
 		AtlasHarvest: harvestStatePath(cfg.DataDir),
 		PlayerUUID:   filepath.Join(cfg.DataDir, config.PlayerUUIDFile),
+		PlayerDSD:    filepath.Join(cfg.DataDir, dsdstate.FileName),
 	}
 }
 
@@ -375,5 +378,6 @@ func buildRestoreTargets(cfg *config.Config, configPath string) backup.Targets {
 		AdminAuth:    filepath.Join(cfg.DataDir, adminauth.FileName),
 		AtlasHarvest: harvestStatePath(cfg.DataDir),
 		PlayerUUID:   filepath.Join(cfg.DataDir, config.PlayerUUIDFile),
+		PlayerDSD:    filepath.Join(cfg.DataDir, dsdstate.FileName),
 	}
 }
