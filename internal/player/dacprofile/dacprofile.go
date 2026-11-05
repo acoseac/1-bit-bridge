@@ -34,13 +34,16 @@
 //   - DoP: the rates a listening heard on a device (never one a negotiation or
 //     a DoP lock reached: those hear nothing), the maker's stated rate and the
 //     rates a device refused, from the iOS registry at a named commit, which
-//     is the only thing imported from it beside its caveats, each heard and
-//     refused rate credited by a clause of its dop line in evidence's one form
-//     ("heard DSD128: <source>", "refused DSD256: <source>", "silence at
-//     DSD256: <source>"; Lint); and the model's level controls the DoP gain
-//     check passes over (AnalogVolumeControls, UnityAtRawMax), each with its
-//     own provenance or evidence.
-//   - Timing: the DSD silence each hardware run starts with.
+//     with its caveats and a DSD resync delay (Timing) is all that is
+//     imported from it, each heard and refused rate credited by a clause of
+//     its dop line in evidence's one form ("heard DSD128: <source>", "refused
+//     DSD256: <source>", "silence at DSD256: <source>"; Lint); and the model's
+//     level controls the DoP gain check passes over (AnalogVolumeControls,
+//     UnityAtRawMax), each with its own provenance or evidence.
+//   - Timing: the DSD silence each hardware run starts with, which a model's
+//     DSD resync delay in the iOS registry, a measured value, may seed
+//     (DSDPrefillMs; "timing: iOS profile <row>'s DSD resync delay, 0.7 s
+//     (iOS <commit>)"), never as a policy beyond that silence.
 //   - Caveats, codes from a closed list, each with its note.
 //
 // Key is a model's identity as a choice and its evidence are keyed and as

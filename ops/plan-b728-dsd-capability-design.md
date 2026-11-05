@@ -1454,8 +1454,9 @@ rule that permits it.
       narrows. A `dacKey` hashes the key's canonical form, five LF-joined lines with `=` before a
       present optional field and `-` for an absent one.** **Don't match a profile by its name, add a
       claim without its provenance, let two profiles match one identity, import from the iOS
-      registry anything but its DoP evidence and caveats, compare keys field by field, or let an
-      absent interface or product hash like a present one.**"
+      registry anything but its DoP evidence, its caveats and a DSD resync delay as timing
+      (`dsdPrefillMs`), compare keys field by field, or let an absent interface or product hash
+      like a present one.**"
     - B3: "**The player's DSD state (`player-dsd.json`) keys each DAC by its model identity, keeps
       a bridge-wide `defaultMode`, records which rates each acknowledgement covers and which
       warnings the app must explain, and makes a write durable before it is answered. A state that
@@ -1557,7 +1558,7 @@ rule that permits it.
 | Conversion CPU (DSD256 on a Pi 4) | Xruns | B11's measured gate; DSD256 conversion refused if it misses | none at merge |
 | Conversion quality | Aliasing or a weak stopband | The response from the coefficients; aliasing measured as a differential and the stopband on a steady state (the lessons in `ops/History-rules-jobs.md` under the decimation and `sox stats` bullets); a golden | The filter's documented shape |
 | Profile database errors | A wrong ID or a shared ID preselects the wrong mode | Product strings for shared IDs, captures, provenance, review, lint; first use still applies | A wrong capture that passes review |
-| iOS evidence used on Linux | Kernel quirks, implicit feedback or class compliance differ | Only DoP evidence is imported (DoP decoding is the DAC's, whatever the host); its provenance names the iOS source (`heard DSD128: iOS profile <row> … (iOS <commit>)`); first use | A DAC that behaves differently under Linux |
+| iOS evidence used on Linux | Kernel quirks, implicit feedback or class compliance differ | Only DoP evidence (DoP decoding is the DAC's, whatever the host), its caveats and a DSD resync delay as the prefill (a measured silence, `timing.dsdPrefillMs`) are imported; its provenance names the iOS source (`heard DSD128: iOS profile <row> … (iOS <commit>)`); first use | A DAC that behaves differently under Linux |
 | False refusals from the mixer check | DoP refused needlessly by a feature unit placed after DoP detection, a missing dB TLV, an analogue attenuator on an unprofiled DAC, or a feature unit the playback-path parse cannot place | The reason says which; a profile's `analogVolumeControls`; native or convert | Inconvenience only: the check fails closed by design |
 | The cutover strands an owner's record | A version bump before B7 would refuse the record, and the owner's DSD would stop before it was migrated | B1 switches production to the legacy reader (versions 35 to its own) before any bump; B6 migrates before B7 stops reading (§8) | none |
 | A converted successor cut near its boundary | Its onset folded into the predecessor's last 0.4 ms | The join window is held back and recomputed on a cut (§4.7) | A cut too late stops playback at the boundary, as any late cut does |
