@@ -75431,4 +75431,20 @@ restoring a Linux snapshot that holds the state refuses until the file is
 removed from a copy of the snapshot, as one holding the player's identity
 already does.
 
-**Checks**: below, once the gate has run.
+**Checks**, on legion0 (Linux, amd64, Go 1.27.3), at 9059f676, in one call
+through the shared build lock: `make fmt`, which rewrote nothing; `make vet`;
+`make test`, race-enabled, with TMPDIR under `.tmp/_b728-b3`: every package
+ok, 83 of them, internal/player/dsdstate (1.5 s) and internal/backup (283 s)
+among them, so the new package and backup ran under `-race`, and the
+Linux-only tests ran for real here (the ALSA readers, alsapcm, the durable
+writer and the identity paths); `make vet` with `GOOS=windows`, `GOOS=darwin`
+and `GOOS=linux GOARCH=386`, each clean; the state's, the qualification's and
+backup's tests as linux/386 binaries, run natively, ok; `make docs-check`, ok,
+and again on a copy of the tree with the rules patch applied (player.md at
+97.6% of its budget); the qualification check, `scripts/qualification-version
+-base main -head HEAD`, "qualification version OK: main..HEAD"; and `make
+build-all`. The rules patch: `git apply --check` takes it, and a strict
+applier of the worker's own gives a file byte-identical to the intended one.
+The negative controls ran at f500838f, the unmutated tree green first. The
+tree is clean after. Not run here: Windows and macOS natively, CI's runners,
+and any hardware.
