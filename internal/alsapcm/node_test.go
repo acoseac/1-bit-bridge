@@ -122,10 +122,10 @@ func TestTheSinkAdmitsEachNodeBeforeAFrame(t *testing.T) {
 	}
 }
 
-// TestGuardNodeOpensRefusesEveryOpen: while a guard is set, Open and
-// OpenSink open nothing and name the node they would have opened, so a
-// test binary that sets one can fail any test that would open the box's
-// DAC.
+// TestGuardNodeOpensRefusesEveryOpen: while a guard is set, Open, OpenSink
+// and Probe (B728 B4) open nothing and name the node they would have opened,
+// so a test binary that sets one can fail any test that would open the box's
+// DAC; a guarded probe answers every candidate not probed.
 func TestGuardNodeOpensRefusesEveryOpen(t *testing.T) {
 	var mu sync.Mutex
 	var seen []string
@@ -143,9 +143,14 @@ func TestGuardNodeOpensRefusesEveryOpen(t *testing.T) {
 	if s != nil || err == nil {
 		t.Fatalf("OpenSink under the guard = %v, %v", s, err)
 	}
+	carrier := ProbeCandidate{Format: format.S32LE, RateHz: 176400}
+	rep, err := Probe(Endpoint{Card: 7, Device: 2}, ProbeConfig{Candidates: []ProbeCandidate{carrier}})
+	if ReasonOf(err) != ReasonPermission || rep.Opened || rep.Result(carrier).Answer != ProbeNotProbed {
+		t.Fatalf("Probe under the guard = %+v, %v; want the guard's refusal, nothing opened, not probed", rep, err)
+	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(seen) != 2 || seen[0] != "/dev/snd/pcmC5D0p" || seen[1] != "/dev/snd/pcmC6D1p" {
+	if len(seen) != 3 || seen[0] != "/dev/snd/pcmC5D0p" || seen[1] != "/dev/snd/pcmC6D1p" || seen[2] != "/dev/snd/pcmC7D2p" {
 		t.Errorf("the guard saw %q", seen)
 	}
 }

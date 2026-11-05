@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
@@ -75,8 +76,10 @@ type session struct {
 	wcancel context.CancelFunc // which a cut that needs the producer ends
 	reqs    []*cutRequest
 
-	paused   bool
-	pauseSeq int
+	paused bool
+	// pausedFlag is paused for a reader that may not take the session's lock.
+	pausedFlag atomic.Bool
+	pauseSeq   int
 	// The pause of a session that holds no device (paused between two
 	// transports, or after the last frames of a sink played out): relStop
 	// stops its release timer, relFired is the timer fired, relSent the
@@ -410,7 +413,7 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	first.from = req.From
 	s.mu.Unlock()
 	defer close(s.startDone)
-	if err := s.b.hold(s); err != nil {
+	if err := s.b.hold(ctx, s); err != nil {
 		return err
 	}
 	cctx, stop := s.bound(ctx)

@@ -1,0 +1,208 @@
+package playback
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/player/engine"
+)
+
+// gateBackend is a backend whose Locator places no unit: its device slot is
+// all these tests drive.
+func gateBackend(t *testing.T, afterFunc func(time.Duration, func()) func() bool) *Backend {
+	t.Helper()
+	b, err := New(Config{Resolver: nopResolver{}, Locator: noUnit{}, AfterFunc: afterFunc})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// TestTheProbesGateReadsTheDeviceSlot pins the gate a probe passes before
+// it opens anything (B728 B4; the design's section 5, "When it runs"), one
+// step under the backend's lock, the lock a Start's hold takes the slot
+// under: a release never confirmed, a probe under way, and a session that
+// holds the slot each refuse it, the session's word saying whether its
+// release is pending (its Release has come, or the engine has taken the
+// release before the call came), it is paused (a pause holds the slot
+// whether or not its release has let the device go), or it holds the device
+// otherwise (it plays, or it is opening the device). A free slot is taken,
+// and the probe's end gives it back and says so.
+func TestTheProbesGateReadsTheDeviceSlot(t *testing.T) {
+	taken := make(chan struct{})
+	close(taken)
+	for _, c := range []struct {
+		name string
+		set  func(b *Backend)
+		want ProbeSkip
+	}{
+		{"a session that plays or opens the device", func(b *Backend) { b.holder = newSession(b, 1) }, ProbeSessionHolds},
+		{"a paused session", func(b *Backend) {
+			s := newSession(b, 1)
+			s.pausedFlag.Store(true)
+			b.holder = s
+		}, ProbeSessionPaused},
+		{"a paused session whose Release has come", func(b *Backend) {
+			s := newSession(b, 1)
+			s.pausedFlag.Store(true)
+			s.cancel()
+			b.holder = s
+		}, ProbeReleasePending},
+		{"a session whose release the engine has taken", func(b *Backend) {
+			s := newSession(b, 1)
+			s.released = taken
+			b.holder = s
+		}, ProbeReleasePending},
+		{"a release never confirmed", func(b *Backend) { b.terminalUnconfirmed = true }, ProbeReleaseUnconfirmed},
+		{"a probe under way", func(b *Backend) { b.probing = &probeHold{done: make(chan struct{})} }, ProbeRunning},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b := gateBackend(t, nil)
+			c.set(b)
+			before := b.probing
+			if p, why := b.reserveProbe(); p != nil || why != c.want || b.probing != before {
+				t.Errorf("the gate: taken %v, %q; want %q and the slot left as it was", p != nil, why, c.want)
+			}
+		})
+	}
+	b := gateBackend(t, nil)
+	p, why := b.reserveProbe()
+	if p == nil || why != "" || b.probing != p {
+		t.Fatalf("a free slot: taken %v, %q; want it taken by the probe", p != nil, why)
+	}
+	b.endProbe(p)
+	if b.probing != nil {
+		t.Error("the probe's end left the slot taken")
+	}
+	select {
+	case <-p.done:
+	default:
+		t.Error("the probe's end does not say it ended")
+	}
+}
+
+// waitTimer stands in for the timer a Start's wait for a probe arms
+// (Config.AfterFunc): armed is closed once it is armed, fire runs its
+// function, and stopped is closed once the wait stops it.
+type waitTimer struct {
+	armed, stopped chan struct{}
+	d              time.Duration
+	fire           func()
+}
+
+func newWaitTimer() *waitTimer {
+	return &waitTimer{armed: make(chan struct{}), stopped: make(chan struct{})}
+}
+
+func (w *waitTimer) afterFunc(d time.Duration, f func()) func() bool {
+	w.d, w.fire = d, f
+	close(w.armed)
+	return func() bool {
+		close(w.stopped)
+		return true
+	}
+}
+
+// receiveWithin waits for ch, at most a minute: a watchdog, never a timing
+// the test depends on.
+func receiveWithin[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(time.Minute):
+		t.Fatalf("waited a minute for %s", what)
+	}
+	var zero T
+	return zero
+}
+
+// TestAStartWaitsForTheProbeThatHoldsTheSlot pins hold's side of the slot
+// (B728 B4): a Start that finds a probe holding it waits, holding nothing,
+// and takes the slot as the probe ends; its wait is armed at ProbeWait, the
+// design's bound, and past it the Start answers the device busy
+// (engine.ErrDeviceBusy, which the engine records as a busy attempt),
+// holding nothing; its context's end and its session's release end the wait
+// too.
+func TestAStartWaitsForTheProbeThatHoldsTheSlot(t *testing.T) {
+	type start struct {
+		b     *Backend
+		s     *session
+		p     *probeHold
+		timer *waitTimer
+		done  chan error
+	}
+	begin := func(t *testing.T, ctx context.Context) start {
+		t.Helper()
+		st := start{timer: newWaitTimer(), done: make(chan error, 1)}
+		st.b = gateBackend(t, st.timer.afterFunc)
+		var why ProbeSkip
+		if st.p, why = st.b.reserveProbe(); st.p == nil {
+			t.Fatalf("the probe could not take a free slot: %q", why)
+		}
+		st.s = newSession(st.b, 1)
+		go func() { st.done <- st.b.hold(ctx, st.s) }()
+		select {
+		case <-st.timer.armed:
+		case err := <-st.done:
+			t.Fatalf("the Start did not wait for the probe that holds the slot: it answered %v", err)
+		case <-time.After(time.Minute):
+			t.Fatal("waited a minute for the Start's wait for the probe to be armed")
+		}
+		if st.timer.d != ProbeWait {
+			t.Errorf("the wait is armed for %v; want ProbeWait, %v", st.timer.d, ProbeWait)
+		}
+		st.b.mu.Lock()
+		holder := st.b.holder
+		st.b.mu.Unlock()
+		if holder != nil {
+			t.Error("the Start took the slot while the probe held it")
+		}
+		return st
+	}
+	t.Run("the probe ends", func(t *testing.T) {
+		st := begin(t, context.Background())
+		st.b.endProbe(st.p)
+		if err := receiveWithin(t, st.done, "the Start's hold"); err != nil {
+			t.Fatalf("the Start after the probe: %v", err)
+		}
+		if st.b.holder != st.s {
+			t.Error("the Start does not hold the slot once the probe ended")
+		}
+		receiveWithin(t, st.timer.stopped, "the wait's timer stopped")
+	})
+	t.Run("the probe outlasts the bound", func(t *testing.T) {
+		st := begin(t, context.Background())
+		st.timer.fire()
+		err := receiveWithin(t, st.done, "the Start's hold")
+		if !errors.Is(err, engine.ErrDeviceBusy) {
+			t.Fatalf("a Start past the probe's bound: %v; want the device busy", err)
+		}
+		if st.b.holder != nil || st.b.probing != st.p {
+			t.Error("a Start past the bound took the slot from the probe")
+		}
+	})
+	t.Run("the Start's context ends", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		st := begin(t, ctx)
+		cancel()
+		if err := receiveWithin(t, st.done, "the Start's hold"); !errors.Is(err, context.Canceled) {
+			t.Fatalf("a Start whose context ended: %v", err)
+		}
+		if st.b.holder != nil {
+			t.Error("a Start whose context ended took the slot")
+		}
+	})
+	t.Run("the session's release", func(t *testing.T) {
+		st := begin(t, context.Background())
+		st.s.cancel()
+		if err := receiveWithin(t, st.done, "the Start's hold"); !errors.Is(err, errReleased) {
+			t.Fatalf("a Start whose session was released: %v", err)
+		}
+		if st.b.holder != nil {
+			t.Error("a released Start took the slot")
+		}
+	})
+}

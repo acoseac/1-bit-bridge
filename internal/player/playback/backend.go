@@ -36,6 +36,8 @@ type Config struct {
 	// OpenNative opens a native DSD or DoP sink for an approved plan; nil is
 	// alsapcm.OpenDSDSink.
 	OpenNative func(ctx context.Context, cfg alsapcm.DSDConfig) (*alsapcm.DSDSink, error)
+	// Probe runs the silent probe (Backend.Probe); nil is alsapcm.Probe.
+	Probe func(ep alsapcm.Endpoint, cfg alsapcm.ProbeConfig) (alsapcm.ProbeReport, error)
 	// Tick is what a session measures its sink's position on: a channel that
 	// ticks and the function that stops it. Nil ticks every MeasureEvery.
 	Tick func() (<-chan time.Time, func())
@@ -186,7 +188,10 @@ type Backend struct {
 	sessions map[engine.SessionID]*session
 	// holder is the session that holds the device or is opening it, until
 	// its release is done: a Start beside it is refused (ErrOverlap).
-	holder              *session
+	holder *session
+	// probing is the silent probe that holds the device slot, nil while none
+	// does (Probe).
+	probing             *probeHold
 	took                map[packKey]format.ALSAFormat
 	overlaps            int
 	terminalUnconfirmed bool
@@ -210,6 +215,9 @@ func New(cfg Config) (*Backend, error) {
 	}
 	if cfg.OpenNative == nil {
 		cfg.OpenNative = alsapcm.OpenDSDSink
+	}
+	if cfg.Probe == nil {
+		cfg.Probe = alsapcm.Probe
 	}
 	if cfg.Tick == nil {
 		cfg.Tick = func() (<-chan time.Time, func()) {
@@ -368,7 +376,7 @@ var errReleased = errors.New("player backend: the session's release came first: 
 
 // hold makes s the session that holds the device, refusing when another
 // does (ErrOverlap).
-func (b *Backend) hold(s *session) error {
+func (b *Backend) hold(_ context.Context, s *session) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.terminalUnconfirmed {

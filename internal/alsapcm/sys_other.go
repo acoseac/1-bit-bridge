@@ -19,6 +19,11 @@ func Open(ep Endpoint, cfg Config) (*Device, error) {
 	}
 }
 
+// Probe refuses as Open does.
+func Probe(ep Endpoint, cfg ProbeConfig) (ProbeReport, error) {
+	return notAsked(ep, cfg), errProbeNotBuilt
+}
+
 // Supported reports whether this build can open an endpoint at all.
 func Supported() bool { return false }
 

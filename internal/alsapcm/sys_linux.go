@@ -30,6 +30,11 @@ func Open(ep Endpoint, cfg Config) (*Device, error) {
 	return open(linuxSys{}, time.Now, ep, cfg)
 }
 
+// Probe is the silent probe of the endpoint's playback node.
+func Probe(ep Endpoint, cfg ProbeConfig) (ProbeReport, error) {
+	return probe(linuxSys{}, ep, cfg)
+}
+
 // Supported reports whether this build can open an endpoint at all.
 func Supported() bool { return true }
 
