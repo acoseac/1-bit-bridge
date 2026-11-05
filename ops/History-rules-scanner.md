@@ -1309,10 +1309,18 @@
   directory order and stops at the exact name), and a Speller remembers
   each folder it spelled, so the folders above a path's last component are
   listed once per batch while the folder holding that component is listed
-  per path. **Don't respell inside `ScanSubtree`**: its
-  deletion scope is a byte range over the spelling it is handed, and the
-  watcher and the rescanner hand it the walk's own. Rows an older build
-  already wrote heal at the next full scan. The rename reap takes the
+  per path. **Don't respell inside `ScanSubtree`**: its deletion scope is a
+  byte range over the spelling it is handed, and the watcher and the rescanner
+  hand it the walk's own. Rows an older build already wrote heal at the next
+  full scan. B651's sixth round puts only the root's own part of the folder a
+  subtree scan is handed in the root's configured spelling, the prefix every
+  row of that root carries (`relPath` names the root by its own name), which
+  differs from the handed part in case alone, and, since the seventh round,
+  only where the folder above it is established to fold case and the two
+  spellings, where both are there, are one folder, so the scan is never sent
+  into another root's folder; the part below the root, which the scope's byte
+  range is over, stays as handed.
+  The rename reap takes the
   case variants and the composition variants (NFC beside NFD, U+0130
   beside I+U+0307) on that scan: `renameFold` composes first, then the
   Unicode lowercase `pathFold` uses (backlog B267, 2026-10-12). A plain
@@ -2525,3 +2533,370 @@
   `TestThePlaylistPassWritesEachWindowBeforeReadingTheNext`,
   `TestThePlaylistFeedAnswersTheSameInAnyBatchSize`,
   `TestPlaylistFolderEvidenceIsWholeOnlyWhenTheWalkSawAllOfIt`.
+
+- **A library root or data dir on a volume mounted after the bridge starts is
+  never taken for an empty library or a fresh install: the scan spares the
+  rows of a root it cannot see or that holds no library content while the
+  index holds its tracks; the library watcher holds such a root
+  (`Scanner.lookAtRoot`, read as the scan's guards read it) and watches it
+  again, with a scan of it, only once a look finds it as it was; and serve
+  refuses, before it makes or writes anything there, a data dir the record
+  beside the config names (`.bridge.yaml.datadir`) that holds neither
+  `bridge.db` nor `server.lock`** (2026-11-04, backlog B651; Codex's and
+  Argon's notes on the brief). On a NAS reboot systemd or Docker can start the
+  bridge before a USB, RAID or network volume is mounted, so a path on it is
+  not there (a directory on the volume) or reads as the bare mount point,
+  empty. **The scan** needed nothing new: walkRoot's upfront
+  `fsutil.WalkableRoot` sentinels a root it cannot see ("root unreachable"),
+  `emptyRootMustBeSpared` one holding no library content while the index
+  holds rows for it and no `.bridge-allow-empty` says it is empty on purpose
+  ("suspected clean-empty mount failure"), and ScanSubtree refuses a root it
+  cannot see and audits the owning root of a subtree that is not there
+  (`auditOwningRootOnSubtreeMiss`); `TestAScanSparesARootBelowAVolumeThatIsNotMountedYet`
+  pins a root below a mount point that is not there. No mount check was
+  added: a Docker bind mount can share its parent's device, a library on the
+  system disk must keep working, a mount boundary can sit above the
+  immediate parent, and a device number does not survive a reboot of a USB
+  or network volume. A mount point that holds library content of its own
+  while the volume is away defeats this guard and the watcher's alike.
+  **The watcher** watched the bare mount point, a directory the mount then
+  hides, so nothing the volume held was ever seen; it logged a root it could
+  not walk at the start once and never looked again; and on Linux it lost
+  every watch on a volume unmounted under it with no event (IN_UNMOUNT,
+  which fsnotify swallows). It now holds a configured root that
+  `Scanner.lookAtRoot` reads as absent (`reads=unreachable`, `unreadable`,
+  `empty` with `rows_in_db`, or `uncounted`): it is not watched, its events
+  are dropped, and no scan is dispatched for it. It is looked at again at the
+  start, before any watch is added (`holdAbsentRoots`); as a debounced scan of
+  a folder under it is due (`absentRootOf`, on the dispatch's goroutine,
+  which hands the root to Run's goroutine without blocking, `askHold`); when
+  an event names the root itself, removed or moved away (`lookAgain`); every
+  `rootWatchCheckEvery` (30 s) for a watched root whose own watch fsnotify no
+  longer holds (`checkRootWatches`), on every platform: inotify drops a
+  volume's watches as it is unmounted, and kqueue the watch of a folder
+  renamed after a change in it and before fsnotify read the change, a root's
+  own included, both without a word (round 2, Codex on #1397: the check was
+  off on kqueue, on the claim that kqueue drops no watch unasked, and the
+  account's reconcile let a dropped root's watches go and watched nothing
+  again); and, while held, `heldRecheckFirst` (5 s) after the hold, then
+  twice as long each time, `heldRecheckMax` (5 min) at most (`recheckHeld`).
+  A hold stops the debounced scans armed under the root (`dropScansUnder`),
+  each of which would look at the root again for nothing and ask for the
+  hold again (round 2, Argon on #1397): the scan of the root once it reads as
+  it did covers them. Library roots may nest (no root add refuses a root
+  inside another, and `Validate` checks a root for being empty alone): a path
+  is the deepest configured root's that holds it, for the watcher's events,
+  looks and dropped scans (`Scanner.rootOf`) and for a subtree scan's owning
+  root (`ScanSubtree`), both through `deepestRootOf`; the watcher's walks pass
+  over a held root nested below the root they walk (`heldBelow`; on kqueue the
+  folder above still opens it, as one of its entries, and watching the root
+  again lets go of that entry watch first, `watchAgain`'s `releaseRoot`:
+  fsnotify's Add of the root found it by its path and kept it, on the folder a
+  volume mounted since covers, so nothing made directly in the root was seen
+  while its folders below were, round 9, Codex on round 8; a real mount, a disk
+  image, shows it, where a folder renamed over the bare one drops its last
+  link, which kqueue reports, and hides it). A root nested in another is
+  walked from the path the outer walk reaches its folder by (`listedRoot`):
+  each element below the outer root as its folder lists it, where the folder
+  takes the configured spelling for that name as which root a path is decides
+  (`caseLook.listedName`, through `sameName`), else as configured, and its
+  events are named back under the configured root through an alias; and a
+  Create of a root the watcher watches asks for nothing (round 10, Codex on
+  round 9: fsnotify's kqueue backend and the account key a watch by its path's
+  spelling, so a nested root configured as `music/USB` where `music` lists
+  `usb` was a second tree from the start, and after a resume, which let go of
+  the `usb` entry and fsnotify's having seen it, the next change in `music`
+  sent a Create for `usb` whose charge and deferred walk took a library that
+  fits once past the budget), while the root's own watch is still among
+  fsnotify's (`WatchList`, which holds user watches alone, a resume's among
+  them): once kqueue has dropped it without a word, a Create at the root's
+  path is another folder put there, and the root is looked at again
+  (`lookAgain`) and watched where it is now, or held (round 11, Claude on
+  round 10: the Create was dropped, and the folder put there went unwatched
+  until `checkRootWatches` came round). On kqueue that look waits for the
+  flush a new folder's watch waits for (`watchFDs.looks`, B212's rule): the
+  look Adds the root, and fsnotify watches the folder at its path itself
+  right after sending the Create, so an Add from the handler races that and
+  can leave a descriptor nothing closes; the flush skips a root held since
+  or whose own watch is back (`lookAgainAfterCreate`), and the quiet timer
+  arms for a waiting look as for a waiting folder (round 12, Codex on round
+  11); and a scan's walk of
+  the outer root, the full scan's and a subtree scan's, passes over a nested
+  root that reads as not mounted, its rows under that path spared as a subtree
+  the walk could not see (round 5, CodeRabbit and Argon on #1397: the first
+  root listed took a nested root's events and scans, the outer root's startup
+  walk watched a held nested root's bare mount point, and a scan of the outer
+  root reaped the rows under it). Round 5 decided that where a walk reached
+  the nested root's folder (`spareNestedRoot`), and an unmount above a nested
+  root (roots `music` and `music/usb/library`, the volume at `music/usb`)
+  takes the folder with it, so no walk reached it and the outer root's scans
+  reaped every row under it at the threshold (round 6, Codex on round 5). Both
+  walks decide before they start now (`protectNestedRoots`): each root nested
+  in the one walked, at or below the folder a subtree scan walks, is looked
+  at, and one that reads as not mounted has its prefix recorded as a subtree
+  the walk could not see, reached or not; a walk that reaches its folder
+  passes over it (`nestedPass`). The watcher needed nothing for it: a held
+  root whose folder went has nothing to watch, and the walk of the folder it
+  comes back in passes over it (`heldBelow`). Every comparison of a path with
+  a root was byte-exact off Windows (round 6, Codex on round 5), so on macOS's
+  default volume a nested root configured as `music/USB`, the folder the
+  volume lists as `usb`, had none of this: it was no nested root to the outer
+  walk, its events and subtree scans went to the outer root, the startup walk
+  watched it while it was held, and its hold left the outer walk's watches on
+  it. Round 6 folded case where one answer said so, the outer root's volume's
+  for every nested root, read by a probe that looked a folder's own name up in
+  the folder above, and took `filepath.Rel` first (round 7, Codex on round 6):
+  a volume that folds case can be mounted inside one that does not, the name
+  of its mount point living on the volume above; the probe answered the
+  platform's default where it could not tell; and Windows' `filepath.Rel`
+  folds case in every folder, a case-sensitive one included, so two roots
+  `USB` and `usb` went to the one listed first. Now a path is compared with a
+  root element by element, exactly first (`caseLook.under`), a volume's root
+  its first element, `C:\` or `\\server\share\`, which a clean path spells
+  with its separator or, for a share, without (`volumeElements`, as Go's
+  `filepath.Rel` takes a share; `C:` alone, a drive's current folder, stays
+  apart; round 9, Codex on round 8: a share root configured without its
+  separator held none of its paths), and an element that differs in case
+  alone is judged by the folder it is looked up in, by the names in that
+  folder (`fsutil.FoldingIn`: an entry with an ASCII letter in its name looked
+  up again with those letters' case swapped, `Lstat` and `os.SameFile`;
+  `CaseSensitive`, `CaseInsensitive`, or `CaseUnknown` where nothing there can
+  tell, never a guess). One file under both spellings is one entry only where
+  the listing, read whole for it where the first read was not, does not hold
+  the swapped spelling as well, as it holds a hard link's second name on a
+  case-sensitive volume; and an answer comes only from lookups that agree with
+  themselves, each name still the file first found, so an entry removed or
+  saved over between the lookups, or one `os.SameFile` cannot open (Windows),
+  passes the question on (round 9, Codex and Claude on round 8: the first
+  answered case-insensitive on ext4, the others case-sensitive on a volume that
+  folds). A listing read again agrees too: it answers case-sensitive only where
+  it holds both spellings and case-insensitive only where it holds the probed
+  one alone, and one that holds the swapped spelling alone, or neither, says
+  the entry changed since the lookups, so the next is asked, and a probe with
+  none left answers Unknown, never case-sensitive (round 10, Codex and Claude
+  on round 9: a rename of `Abba` to `ABBA` before the re-read made a folder
+  that folds answer case-sensitive). A re-read that holds the probed name
+  alone answers case-insensitive only once a lookup of the swapped spelling
+  still finds the file: a hard link's other name removed before the re-read,
+  on a case-sensitive volume, leaves the listing a folder that folds would
+  give, so the next is asked (round 11, Codex and Claude on round 10: the
+  probe answered case-insensitive there). The probe never writes, where the decisions
+  allowed a temporary name in a writable folder: every folder the scanner
+  asks about is in a library root, or above one where two roots spell a
+  folder in two cases, the volume may be read-only, and the watcher would see
+  the write (Argon on the seventh round's brief). Those lookups are where
+  CodeQL's `go/path-injection` follows a client's path, from the console's
+  upload commit and trash through `ScanSubtree`, and they are confined: the
+  path is inside a configured root before it gets there (the trash's through
+  `fs.Resolver.Resolve`, an upload's as its session's configured root joined
+  with the folders `fsutil.Speller` found listed), and `caseLook.under` looks
+  an element up only while every element before it matched a configured
+  root's. A containment check against the roots there would refuse the
+  lookups above a root that tell two roots apart, and give a path to a root
+  that is not the deepest that holds it (round 11; the record traces both
+  alerts). The
+  two questions count `CaseUnknown` in opposite directions (Argon on the
+  brief). Which root a path is (`caseLook.sameName`: `deepestRootOf`, so
+  `rootOf`, the dispatch's look, the scans dropped under a held root, and
+  `ScanSubtree`'s owner and its spelling of the root's own part) folds an
+  element only where its folder is established to fold case and the lookups
+  of the two spellings find one entry, or neither finds anything and the
+  folder's answer decides; a lookup of either that fails otherwise (a
+  permission refused, a transient error) decides nothing (round 8, Codex on
+  round 7: any error counted as one entry, and routed a path to a root it may
+  not be in), and one spelling found alone is an answer a folder that folds
+  that name never gives (round 9, Claude on round 8: a volume may fold ASCII
+  case and not another script's), so both keep the two two. What is spared
+  and passed over (`caseLook.mayBeOneName`, element by element through
+  `spareFolds`: the protection before the walk, which records every spelling
+  of a nested root's prefix the index holds that may be its folder
+  (`protectSpellings`), the walks' pass, `heldBelow`, `releaseRoot` and
+  kqueue's `spellings`) folds an element wherever its folder may fold: one
+  that answers Unknown, one that is not there, and one that answers
+  case-sensitive while it holds neither the element, another spelling of it
+  nor library content, as a mount point a
+  volume left bare does, for such a folder answers for the folder it covers,
+  not for the volume (Codex on round 6). A subtree scan the outer root owns,
+  of a folder an absent nested root may hold in another spelling, spares its
+  whole scope while that root reads as not mounted (`ScanSubtree`'s holding):
+  which root the folder is was not established, and what is spared counts it
+  as the nested root's. A subtree scan puts the root's own part of the folder
+  it is handed in the root's configured spelling, which differs from the
+  handed one only where both name one folder, and keeps the part below as
+  handed (B219's bullet). This host's tests stand in for other volumes through
+  two per-scanner seams, set together from one description of the volume
+  (`simVolume`: `foldingHook` for how a folder compares names, `lookupHook`
+  for what a lookup of a name there finds, `Scanner.lstat`; round 9, Claude on
+  round 8: a lookup left to this host's disk could be refused only by its
+  permissions, which root and Windows do not refuse), and some ask this
+  host's volume itself, which folds case on CI's macOS and Windows legs; a
+  Windows-only test makes a folder case-sensitive where the host allows it,
+  and a macOS one mounts a disk image (hdiutil). A stand-in answers each
+  folder as the volume it stands for compares names, and a test leaves to this
+  host's disk nothing that disk answers otherwise: round 7's watcher test held
+  its nested root only where the disk did not fold case, its configured
+  `LIBRARY` no folder there, and on macOS, where it is the full `library`,
+  no hold came and its wait ran out the package's deadline, starving the
+  tests after it (round 8, Codex on round 7's brief). A test that waits for a
+  hold reads the look first (`mustReadAsNotMounted`). A look is a stat, one
+  batch of 64 entries of the root's listing (`dirHoldsLibraryContent`) and,
+  for a root holding nothing, one count. A root that reads as it did is
+  watched again where it is now, and a scan of it is asked for, since nothing
+  saw what changed meanwhile. Each change is said once: held at Warn with
+  what the look found, and again when that changes, and watched again at
+  Info. A root the index holds nothing of (a fresh install) is watched as it
+  is, and a mount over it hides that watch until the next restart. **The
+  database**: nothing in the data dir can say it was there before, the whole
+  of it may be on the missing volume, and serve may not write bridge.yaml
+  (B506's writers), so serve keeps a record beside the config, in the
+  directory a write of the config lands in (`fsutil.ResolveParent`, as the
+  config's lock), named after it: `.bridge.yaml.datadir`, the data dir's path
+  as JSON, written once the database is open and the lock file is there
+  (`recordServeDataDir`), and only when it does not hold this config's two
+  spellings of the data dir already (below; until round 5, when it named
+  another data dir or none). Serve's check and its write both take the record beside the file its boot
+  read was of (`serveDataDirRecord`, over `config.BootFile.File`), never
+  beside the file the config's name opens by then: round 1 resolved the name
+  again at each, and a link at it repointed after the boot read (a dotfiles
+  restow, a home-manager switch) had serve check another config's record for
+  its data dir and write its data dir into that config's record (round 2,
+  Codex on #1397). A boot read that resolved no file keeps no record, said at
+  Warn; `bridge doctor`, which reads the config once, asks the file the name
+  opens (`dataDirRecordPath`). The record and the config can spell one data
+  dir two ways (through a link, or in another case on a volume that folds
+  case), so the check and the record's write compare them as the directory
+  they name (`fsutil.SamePath`: each resolved through its nearest existing
+  ancestor, folded where the volume answers that it folds case), never as
+  strings; and the refusal and the doctor's line name the data dir as its
+  config gives it, which is what bridge.yaml says, and the record where it is
+  (round 3: CI's macOS and Windows legs, where `/var` is `/private/var` and a
+  temp directory has a short name and a long one, named the record in
+  another spelling than the tests rebuilt). The record holds both spellings
+  of the data dir: as its config gave it and where that led through its
+  links (`fsutil.ResolveLinks`), read while the volume is there, and names a
+  data dir by either (`dataDirRecord.names`): `config.ResolvePath` cleans a
+  path and resolves no link, a spelling through a link on the data dir's own
+  volume resolves to nothing once the volume is away, and a config changed to
+  the other spelling read as naming another data dir, which refuses nothing
+  (round 5, CodeRabbit on #1397; a link at the mount point, outside the
+  volume, still resolves with it away, and was refused before). A record of
+  one spelling, written before round 5, reads as that spelling, with no
+  error, and the next serve that opens its database writes it in both.
+  Before `prepareServeDataDir`, so before the lock, the TLS mint, the token
+  store, `server.pid` and the migrations, serve refuses a data dir the record
+  names that holds neither `bridge.db` nor `server.lock`
+  (`checkServeDataDirRecord`, `*dataDirGoneError`), exit 1, and the service
+  manager starts it again (`Restart=always` with `RestartSec=2`, launchd's
+  KeepAlive, the SCM's recovery actions, a container's restart policy) until
+  the volume is mounted; serve never waits in-process. The bridge removes
+  neither file, and a serve that opened its database took its lock first, so
+  a data dir holding neither is not the one it served from: a database
+  removed on purpose with the lock file kept (the local fixture's
+  `rm bridge.db*` reset) starts as before. A first run has no record, so a
+  fresh install, and `bridge init` (the data dir and its TLS pair, no
+  database and no record), start as before, the first serve writing the
+  record. A data dir removed or moved on purpose is refused with what to do:
+  remove the record. The record is plain file I/O, so Windows behaves alike,
+  a record that does not read names nothing, and a config directory serve
+  cannot write keeps none, said once a start. `bridge doctor`'s data-dir line
+  fails the same state in the refusal's words (cli-serve.md, B659's line).
+  In a container whose config and data dir share one volume (the image's
+  `/data`) the record is on that volume too and cannot catch a missing
+  `/data`; the runbook says to keep `/data` on a named volume or the system
+  disk, or to bind it with `--mount type=bind`, which refuses a source that
+  is not there. **Don't persist a device number or judge a mount by a device
+  or the immediate parent, write into a library root, dispatch a scan for a
+  root that reads as not mounted or watch one before a look finds it as it
+  was, the walk of a root it is nested in included, watch a held root again
+  over a watch opened at its path before (kqueue's entry watch on its bare
+  mount point, which a mount since covers), watch a nested root under another
+  spelling than the walk of the root it is nested in reaches its folder by
+  (kqueue keys a watch by its spelling), take a Create of a watched root for a
+  new folder, or ignore one once the root's own watch is gone (on kqueue its
+  look waits for the flush a new folder's watch waits for), keep a scan
+  armed under a root the watcher holds, give a path to
+  any root but the deepest that holds it (a share's root, spelled with its
+  separator or without, holds the paths below it), let a scan walk into or
+  reap under a nested root that reads as not mounted (decided before the walk,
+  which may never reach its folder), judge how a folder compares names by
+  anything but the names in it (not its own name in the folder above, not one
+  folder for a whole path, not a write, not one file under two names its
+  listing holds, not lookups or a listing read again that do not agree with
+  themselves or with each other), fold a case-only difference for which root a
+  path is where its
+  folder is not established to fold, a lookup there failed otherwise than for
+  a name not being there, or one spelling was found alone, or keep one exact
+  for what is spared where its folder may fold (an Unknown answer, a folder
+  not there, or one that holds neither the name, another spelling of it nor
+  library content), turn the check of the roots' own
+  watches off on kqueue (it drops a renamed root's watch without a word too),
+  keep the record in the data dir or in bridge.yaml, or of one spelling of the
+  data dir alone (it holds the configured one and where it led), check or
+  write serve's record beside any file but the one its boot read was of,
+  refuse a data dir its record does not name or one whose lock file is there
+  (the `rm bridge.db*` reset), or prepare the data dir before the check.**
+  Tests:
+  `TestAScanSparesARootBelowAVolumeThatIsNotMountedYet`,
+  `TestTheWatcherWaitsForAnUnmountedRootAndWatchesWhatIsMountedThere`,
+  `TestTheWatcherDispatchesNoScanForARootWhoseContentWent`,
+  `TestTheWatcherHoldsARootWhoseWatchesWentWithoutAWord`,
+  `TestTheWatcherHoldsARootThatWentAndWatchesWhatComesBack`,
+  `TestTheWatcherDropsTheScansArmedUnderARootItHolds`,
+  `TestTheWatcherLooksAgainAtARootWhoseOwnWatchKqueueDropped`,
+  `TestTheWatcherDispatchesNoScanForARootWhoseOnlyFileWent` (the dispatch's
+  look on Windows too), `TestTheWatcherWatchesNothingOfANestedRootItHolds`,
+  `TestANestedRootsPathsAndEventsAreItsOwn`,
+  `TestAScanUnderANestedRootIsItsOwn`,
+  `TestAScanOfARootSparesANestedRootThatReadsAsNotMounted`,
+  `TestASubtreeScanSparesANestedRootWhoseDirectoryWent`,
+  `TestAFullScanSparesANestedRootWhoseDirectoryWent`,
+  `TestTheWatcherHoldsANestedRootWhoseDirectoryWentAndWatchesItOnceItIsBack`,
+  `TestASubtreeScanSparesANestedRootSpelledInAnotherCaseWhereTheVolumeFoldsCase`,
+  `TestAFullScanSparesANestedRootSpelledInAnotherCaseWhereTheVolumeFoldsCase`,
+  `TestASubtreeScanUnderANestedRootSpelledInAnotherCaseIsItsOwn`,
+  `TestTheWatcherKeepsAHeldRootSpelledInAnotherCaseWhereTheVolumeFoldsCase`,
+  `TestAnEventUnderANestedRootSpelledInAnotherCaseIsItsOwn`,
+  `TestHoldingANestedRootSpelledInAnotherCaseLetsGoOfTheWatchesUnderIt`,
+  `TestANestedRootSpelledInAnotherCaseIsTheVolumesFolderOnlyWhereItFoldsCase`,
+  `TestAFolderUnderAGoneNestedRootSpelledInAnotherCaseIsItsOwnOnlyWhereTheVolumeFoldsCase`,
+  `TestAScanSparesANestedRootOnAVolumeThatFoldsCaseMountedInOneThatDoesNot`,
+  `TestTheWatcherPassesOverAHeldRootOnAVolumeThatFoldsCaseMountedInOneThatDoesNot`,
+  `TestADistinctFolderSpelledLikeAnAbsentNestedRootIsWalkedWhereItsFolderIsCaseSensitive`,
+  `TestASubtreeScanSparesANestedRootInEverySpellingWhereFoldingIsUnknown`,
+  `TestAFullScanSparesANestedRootInEverySpellingWhereFoldingIsUnknown`,
+  `TestASubtreeScanOfAFolderAnAbsentNestedRootMayHoldReapsNothing`,
+  `TestTwoRootsSpelledAlikeStayTwoWhereTheirFolderIsNotEstablishedToFoldCase`,
+  `TestTwoRootsThatAreTwoFoldersStayTwoWhateverTheirFolderAnswers`,
+  `TestTwoRootsSpelledAlikeInACaseSensitiveFolderStayTwo`,
+  `TestALookupThatFailsIsNoProofThatTwoSpellingsAreOneRoot`,
+  `TestTheWatcherWatchesAHeldNestedRootOnTheVolumeMountedOverItsBareFolder`
+  (macOS, a disk image), `TestWatchingAHeldNestedRootAgainLetsGoOfItsEntryWatchFirst`,
+  `TestAVolumeRootIsOneElementHoweverACleanPathSpellsIt`,
+  `TestAVolumeRootHoldsThePathsBelowIt` (Windows),
+  fsutil's `TestFoldingIsJudgedByTheNamesInTheFolderItself`,
+  `TestFoldingIsUnknownWhereTheFolderCannotTell`,
+  `TestFoldingInWritesNothing`,
+  `TestTwoNamesOfOneFileAreNoProofThatAFolderFoldsCase` and
+  `TestAnEntryThatChangesBetweenTheLookupsTellsNothing`,
+  `TestAListingThatChangedBeforeItsReReadTellsNothing`,
+  `TestANestedRootInAnotherCaseIsWatchedOnceOnAVolumeThatFoldsCase` and
+  `TestAReplacedNestedRootIsWatchedAgainOnItsCreate`,
+  `TestAReplacedRootsCreateLeavesItsLookToTheFlush` (macOS, kqueue),
+  `TestANestedRootIsWalkedAsItsFolderListsItOnlyWhereTheFolderTakesBothSpellingsForOne`,
+  `TestServeRefusesTheDataDirItRecordedThroughALinkOnItsVolumeByItsTarget`,
+  `TestServeRefusesTheDataDirItRecordedByItsTargetThroughALinkOnItsVolume`,
+  `TestServeRefusesTheDataDirThroughALinkAtItsMountPoint`,
+  `TestServeWritesARecordOfOneSpellingAgainInBoth`,
+  `TestServeRefusesTheDataDirItServedFromWhileItsVolumeIsAway`,
+  `TestServeRefusesADataDirItsRecordNamesThatHoldsNeitherFile`,
+  `TestServeStartsAgainOverADatabaseRemovedOnPurpose`,
+  `TestServeRecordsItsDataDirBesideTheFileItsBootReadOpened`,
+  `TestServeChecksTheRecordBesideTheFileItsBootReadOpened`,
+  `TestTheRecordNamesItsDataDirInAnySpellingOfIt`, fsutil's
+  `TestSamePathResolvesEachSpellingThroughItsLinks` and
+  `TestSamePathFoldsCaseWhereTheVolumeDoes`,
+  `TestInitAndTheServeAfterItStartAsBefore`,
+  `TestTheRecordRefusesOnlyTheDataDirItNamesWhileItHoldsNeitherFile`,
+  `TestTheRecordIsBesideTheFileTheConfigsNameOpens` and
+  `TestBothDoctorsFailADataDirItsRecordNamesWhileItsVolumeIsAway`.
+ The timer's check of the roots' own watches leaves a root whose look waits to the flush too, since it would otherwise make the Add the wait avoids (Codex and the Claude API reviewer on round 12; `TestTheCheckOfTheRootsWatchesLeavesAWaitingLookToTheFlush`).
