@@ -74930,3 +74930,115 @@ and the line's in the long form, while it reports the unpatched line as
 dropping it. The patch stays in the worktree's ignored `.tmp/`: this session
 may not write outside the worktree from the shell, and the Write tool drops a
 blank context line's leading space.
+
+## 2026-11-05 — B651 round 10: three review findings on round 9
+
+Round 10, on the same Mac, from the PR's head, c6deb78a (round 9 and its
+rules). Codex and the Claude API reviewer read round 9. Each finding was
+checked against the code and a test on c6deb78a before anything changed: the
+first two hold, and the third does not.
+
+**1. The probe's re-read could make a folder that folds answer case-sensitive
+(Codex and Claude).** Real. Where the probe's first read was not the whole
+listing (256 entries or more), it read the listing again for the swapped
+spelling and answered case-sensitive wherever that spelling was listed: an
+entry renamed to its other spelling between the lookups and the re-read
+(`Abba` to `ABBA`, a user or a tagger) left the swapped spelling listed alone,
+and a folder that folds answered case-sensitive, the direction that keeps exact
+what a scan must spare. A hard link's two names removed before the re-read
+made a case-sensitive folder answer case-insensitive. The re-read answers
+case-sensitive now only where it holds both spellings and case-insensitive
+only where it holds the probed one alone (`listsSpellings`); one that holds
+the swapped spelling alone, or neither, says the entry changed, the next entry
+is asked, and a probe with none left answers Unknown, never case-sensitive.
+`TestAListingThatChangedBeforeItsReReadTellsNothing`, through the `foldingFS`
+seam (the in-memory folder renames or removes its entries before the full
+read, `relist`): three cases red on c6deb78a, case-sensitive twice on a folder
+that folds, one with a clean entry after the renamed one and one that spends
+every candidate, and case-insensitive on a case-sensitive one; green after.
+
+**2. A nested root configured in another case was a second watch tree
+(Codex).** Real, and from the start, not only after a resume. fsnotify's
+kqueue backend and the watcher's account key a watch by its path's exact
+spelling (`watches.byPath`, `watchFDs.kids`). A root configured as `music/USB`,
+nested in `music` on a volume that folds case where `music` lists `usb`, was
+walked and watched as configured (`watchWalkStart` gives a plain directory its
+configured path): beside the outer walk's tree under `usb`, a second one under
+`USB`. After a hold and its resume, which let go of the `usb` entry and with
+it fsnotify's having seen the path, the next change in `music` sent a Create
+for `usb`: fsnotify opened `usb` again as an entry (its own lookup by path
+missed `USB`), `accountEvent` charged it, and the deferred `addTree` watched
+the tree a third time. `TestANestedRootInAnotherCaseIsWatchedOnceOnAVolumeThatFoldsCase`,
+on this host's own APFS through kqueue (it skips where the probe does not
+answer that the volume folds, or fsnotify does not watch through kqueue,
+saying so): red on c6deb78a in both legs, `usb`, `Band`, `Record` and
+`01.flac` open twice from the start, and after the resume the watcher stopped
+past a budget the library fits once (`open_files_needed_more_than=10
+budget=10`). A configured root nested in another is walked now from the path
+the outer walk reaches its folder by (`listedRoot`, which both walks of a
+configured root start from, `walkRootOf`): where the outer walk starts, and
+below it each element as its folder lists it, where the folder takes the
+configured spelling for that name as which root a path is decides
+(`caseLook.listedName`, through `sameName`: the probe's folding answer and the
+lookups through the scanner's seams; a fold of names is a candidate, never the
+answer), else as configured. Events under it are named back under the
+configured root through its alias, as a linked root's are. A Create of a root
+the watcher watches is the folder above naming it again, and asks for no walk
+and no scan. The test asserts no entry under `music` is open twice, the
+account charges two open files for the file and the folder made in `music`, a
+budget the library fits once is not spent, and no Create of `usb` reaches the
+handling of a new folder. `TestANestedRootIsWalkedAsItsFolderListsItOnlyWhereTheFolderTakesBothSpellingsForOne`
+is the control through `simVolume` on every host: case-sensitive and Unknown
+folders keep `USB` as configured, and their Create of `usb` arms a scan of
+`music`, a folder of its own. `CountWatchSet`, the count before the walk, still
+counts a nested root's tree beside the outer root's, as it does every nested
+root's, whatever its spelling: a conservative count, which this round leaves.
+
+**3. The mount test's premise could run before the walk (Claude).** Not
+real. `afterHoldForTests` fires inside `holdAbsentRoots` (watcher.go:270 on
+this round's head), before `watchRoots` (:271) walks the outer root, but the
+test reads
+`/dev/fd` after `startWatcher` (nested_roots_mount_test.go:194), which
+returns only once `afterInitialWalkHookForTests` fires (:277), after
+`watchRoots` has returned; and fsnotify opens the bare folder's entry
+synchronously inside that walk's Add (`watchDirectoryFiles`,
+`internalWatch`). With 300 ms injected at the hold, the point named, the
+test passed three runs of three, `startWatcher` waiting for the walk all the
+same. Nothing changed for it.
+
+**Negative controls**, each on the round-10 commit it tests, one at a time,
+every file put back from HEAD:
+
+| Control | Red |
+|---|---|
+| 1a the re-read's probed name ignored (round 9's rule) | all three re-read cases |
+| 1b a re-read holding neither spelling taken for one entry | the hard link removed before the re-read |
+| 2a a nested root walked as configured (`listedRoot` returns it) | both real-disk legs (open twice; the budget spent), and the simulated folding leg |
+| 2b a Create of a watched root handled as a new folder | the resumed leg's recognition, and the simulated folding leg |
+| 2c `listedName` takes a fold of names without `sameName` | none: unreachable, since `listedRoot` looks the root's own folder up through the seam first, which finds nothing where the folder does not fold |
+| 2d a Create recognized by a plain fold of its name with a watched root's path, the reviewers' hazard | the simulated case-sensitive and Unknown legs: their real `usb` folder left unhandled |
+
+**Gates**, on this Mac with go1.27.3, through the build lock: `go test`
+without race of internal/manifest (85 s), internal/fsutil (0.5 s) and
+cmd/bridge (217 s) passed. Under `-race`, internal/manifest in five shards
+(`^(TestA|Fuzz|Example)`, `^Test[B-E]`, `^Test[F-R]`, `^TestS`,
+`^Test[^A-S]`: 237 s, 131 s, 264 s, 353 s, 183 s; 241 + 318 + 402 + 273 + 199
+= 1,433 tests, `go test -list`'s count) and cmd/bridge in four (256 s, 128 s,
+133 s, 318 s; 230 + 301 + 289 + 363 = 1,183), every shard passing;
+internal/fsutil passed under race. Under load, beside the `^TestS` race shard,
+the mount test and the new case-watch test ran twenty times each under
+`-race`, and passed twenty of twenty. `make test-fast` passed (81 packages);
+`make vet` was clean native (darwin) and for linux, windows and linux/386;
+go1.27.3's gofmt lists none of the seven Go files round 10 changed; `make
+docs-check` passes; `scripts/qualification-version` ebe71366..HEAD is OK.
+
+**The rules**: `rules-b651-r10.patch`, in the worktree's ignored `.tmp/`,
+written with `git diff` from a scratch copy, grows the B651 line's Don't by
+three (a nested root watched under another spelling than the outer walk
+reaches its folder by; a Create of a watched root taken for a new folder; a
+listing read again that does not agree with the lookups), with the long form
+in `ops/History-rules-scanner.md`. Applied by the strict applier to HEAD's
+scanner.md, it leaves the file byte for byte as the edited copy, the budgets
+pass (scanner.md 30,311 to 30,531 bytes), and `mdblocks.dropped_donts` finds
+the long form's Don't whole in the patched line and the line's in the long
+form, while it reports the unpatched line as dropping it.

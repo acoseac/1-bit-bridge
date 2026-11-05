@@ -2595,7 +2595,19 @@
   volume mounted since covers, so nothing made directly in the root was seen
   while its folders below were, round 9, Codex on round 8; a real mount, a disk
   image, shows it, where a folder renamed over the bare one drops its last
-  link, which kqueue reports, and hides it); and a scan's walk of
+  link, which kqueue reports, and hides it). A root nested in another is
+  walked from the path the outer walk reaches its folder by (`listedRoot`):
+  each element below the outer root as its folder lists it, where the folder
+  takes the configured spelling for that name as which root a path is decides
+  (`caseLook.listedName`, through `sameName`), else as configured, and its
+  events are named back under the configured root through an alias; and a
+  Create of a root the watcher watches asks for nothing (round 10, Codex on
+  round 9: fsnotify's kqueue backend and the account key a watch by its path's
+  spelling, so a nested root configured as `music/USB` where `music` lists
+  `usb` was a second tree from the start, and after a resume, which let go of
+  the `usb` entry and fsnotify's having seen it, the next change in `music`
+  sent a Create for `usb` whose charge and deferred walk took a library that
+  fits once past the budget); and a scan's walk of
   the outer root, the full scan's and a subtree scan's, passes over a nested
   root that reads as not mounted, its rows under that path spared as a subtree
   the walk could not see (round 5, CodeRabbit and Argon on #1397: the first
@@ -2644,7 +2656,13 @@
   saved over between the lookups, or one `os.SameFile` cannot open (Windows),
   passes the question on (round 9, Codex and Claude on round 8: the first
   answered case-insensitive on ext4, the others case-sensitive on a volume that
-  folds). The probe never writes, where the
+  folds). A listing read again agrees too: it answers case-sensitive only where
+  it holds both spellings and case-insensitive only where it holds the probed
+  one alone, and one that holds the swapped spelling alone, or neither, says
+  the entry changed since the lookups, so the next is asked, and a probe with
+  none left answers Unknown, never case-sensitive (round 10, Codex and Claude
+  on round 9: a rename of `Abba` to `ABBA` before the re-read made a folder
+  that folds answer case-sensitive). The probe never writes, where the
   decisions allowed a temporary name in a writable folder: every folder the
   scanner asks about is in a library root, the volume may be read-only, and
   the watcher would see the write (Argon on the seventh round's brief). The
@@ -2762,20 +2780,23 @@
   root that reads as not mounted or watch one before a look finds it as it
   was, the walk of a root it is nested in included, watch a held root again
   over a watch opened at its path before (kqueue's entry watch on its bare
-  mount point, which a mount since covers), keep a scan armed under a root
-  the watcher holds, give a path to any root but the deepest that holds it (a
-  share's root, spelled with its separator or without, holds the paths below
-  it), let a scan walk into or reap under a nested root that reads as not
-  mounted (decided before the walk, which may never reach its folder), judge
-  how a folder compares names by anything but the names in it (not its own
-  name in the folder above, not one folder for a whole path, not a write, not
-  one file under two names its listing holds, not lookups that do not agree
-  with themselves), fold a case-only difference for which root a path is
-  where its folder is not established to fold, a lookup there failed
-  otherwise than for a name not being there, or one spelling was found alone,
-  or keep one exact for what is spared where its folder may fold (an Unknown
-  answer, a folder not there, or one that holds neither the name, another
-  spelling of it nor library content), turn the check of the roots' own
+  mount point, which a mount since covers), watch a nested root under another
+  spelling than the walk of the root it is nested in reaches its folder by
+  (kqueue keys a watch by its spelling), take a Create of a watched root for a
+  new folder, keep a scan armed under a root the watcher holds, give a path to
+  any root but the deepest that holds it (a share's root, spelled with its
+  separator or without, holds the paths below it), let a scan walk into or
+  reap under a nested root that reads as not mounted (decided before the walk,
+  which may never reach its folder), judge how a folder compares names by
+  anything but the names in it (not its own name in the folder above, not one
+  folder for a whole path, not a write, not one file under two names its
+  listing holds, not lookups or a listing read again that do not agree with
+  themselves), fold a case-only difference for which root a path is where its
+  folder is not established to fold, a lookup there failed otherwise than for
+  a name not being there, or one spelling was found alone, or keep one exact
+  for what is spared where its folder may fold (an Unknown answer, a folder
+  not there, or one that holds neither the name, another spelling of it nor
+  library content), turn the check of the roots' own
   watches off on kqueue (it drops a renamed root's watch without a word too),
   keep the record in the data dir or in bridge.yaml, or of one spelling of the
   data dir alone (it holds the configured one and where it led), check or
@@ -2825,6 +2846,9 @@
   `TestFoldingInWritesNothing`,
   `TestTwoNamesOfOneFileAreNoProofThatAFolderFoldsCase` and
   `TestAnEntryThatChangesBetweenTheLookupsTellsNothing`,
+  `TestAListingThatChangedBeforeItsReReadTellsNothing`,
+  `TestANestedRootInAnotherCaseIsWatchedOnceOnAVolumeThatFoldsCase` (macOS,
+  kqueue), `TestANestedRootIsWalkedAsItsFolderListsItOnlyWhereTheFolderTakesBothSpellingsForOne`,
   `TestServeRefusesTheDataDirItRecordedThroughALinkOnItsVolumeByItsTarget`,
   `TestServeRefusesTheDataDirItRecordedByItsTargetThroughALinkOnItsVolume`,
   `TestServeRefusesTheDataDirThroughALinkAtItsMountPoint`,
