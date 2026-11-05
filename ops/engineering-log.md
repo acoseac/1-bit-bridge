@@ -74535,8 +74535,12 @@ there, the rule for a note that must name a test that no longer exists (the
 TRACKED `.md` docs bullet in `History-rules-build-ci-tests.md`), and the test
 steps ran again at the head that carries this record:
 - `go test -count=1` of `./internal/player/dacprofile/`, `./internal/alsa/`
-  and `./cmd/bridge/`, and the same under `-race`: RERUN-PKGS.
-- `make test-fast`: RERUN-FAST.
+  and `./cmd/bridge/`, and the same under `-race`: ok at 3e6a9a55 (cmd/bridge
+  306 s, and 903 s under race; internal/alsa 1.7 s under race).
+- `make test-fast`, at 3e6a9a55: 82 packages ok, none failed, 14 with no
+  test files; 32 results came from the test cache, packages round 4 does not
+  touch whose inputs had not changed, and internal/alsactl, the one
+  Linux-only package among them, then ran fresh with `-race -count=1`, ok.
 - At 2899d15f, the steps the record does not touch: `make vet` natively and
   with `GOOS=windows` and `GOOS=darwin`, clean; go1.27.3's gofmt on cmd,
   internal and scripts, clean; `make docs-check`, ok (and with the patch
