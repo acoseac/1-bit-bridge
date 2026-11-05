@@ -75354,28 +75354,7 @@ patch applied in a copy of the tree (scanner.md 28,823 bytes, cli-serve.md
 planted in that copy failed; `scripts/qualification-version` cde731e2..HEAD
 is OK at 36.
 
-**Left open** (the backlog file is not on this host; named for the
-orchestrator):
-- A render while a variants dir on a volume of its own is away remakes that
-  dir in the bare mount point (transcode.go:1185) and writes a rendition
-  there; the probe then reads the dir as healthy, and the serve reap, and the
-  watcher below `MassDeleteRefusal`'s floor of 10, delete the rows of
-  renditions that are on the absent volume. A render could refuse to make a
-  missing variants dir that holds renditions by the catalog, as serve now
-  refuses its data dir.
-- The other commands that open the store (`bridge scan`, `upscale`,
-  `analyze`, … through `manifest.OpenStore`, which makes a missing database)
-  make a data dir and a database during an outage, after which serve's check
-  passes; and `bridge init`'s rewrite makes the data dir and mints a pair
-  without asking the record (B664 is init's keep path).
-- A mount point that holds library content of its own while the volume is
-  away defeats the clean-empty guard and the watcher's look alike.
-- A fresh install whose volume is mounted after the bridge starts has its
-  root watched where the mount then hides it, until a restart; and a hard
-  network mount that hangs a stat holds Run's goroutine during a retry, as it
-  holds the watcher's start today.
-- A refusal at every 2 s start writes a line to the log file each time while
-  the volume stays away.
+**Left open:** backlog B727.
 
 ## 2026-11-04 — B651 round 2: the reviews of #1397
 
@@ -75470,19 +75449,7 @@ in `ops/History-rules-scanner.md` with it): no scan kept armed under a held
 root, the check not turned off on kqueue, serve's record beside no file but
 the one its boot read was of.
 
-**Left open** (named for the orchestrator; the backlog file is not on this
-host):
-- The window between a look that finds a root as it was and the walk that
-  watches it (`resumeRoot`, `lookAgain`): a volume unmounted inside it leaves
-  the bare mount point watched and nothing looking again until a restart.
-  Comparing the directory the walk watched with the one the look found, by
-  `os.SameFile` kept for the process's life and never persisted, would close
-  it.
-- Round 1's `TestTheWatcherHoldsARootThatWentAndWatchesWhatComesBack` and
-  `TestTheWatcherDispatchesNoScanForARootWhoseContentWent` rename a watched
-  folder. On Windows, ReadDirectoryChangesW reports no rename of a watched
-  folder itself, and whether NTFS lets a folder be renamed while folders below
-  it are watched was not measured here: CI's Windows leg answers both.
+**Left open:** backlog B727.
 
 ## 2026-11-04 — B651 round 3: the record's path on CI's macOS and Windows legs
 
