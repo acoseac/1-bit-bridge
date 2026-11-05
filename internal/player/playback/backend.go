@@ -85,6 +85,17 @@ type Seams struct {
 	// runs; one refused at its check after open is closed by the sink after
 	// it. It must not call the backend.
 	Fenced func(step string)
+	// StartWoke runs in a Start's wait for the silent probe (hold) once the
+	// probe has ended, before the Start takes the device slot: the window in
+	// which a second probe would take the slot from it (B728 B4 round 2).
+	StartWoke func()
+}
+
+// startWoke is the StartWoke seam.
+func (b *Backend) startWoke() {
+	if sm := b.cfg.Seams; sm != nil && sm.StartWoke != nil {
+		sm.StartWoke()
+	}
 }
 
 // fenced is the Fenced seam.
@@ -193,7 +204,9 @@ type Backend struct {
 	// probing is the silent probe that holds the device slot, nil while none
 	// does (Probe): a Start waits for it, at most ProbeWait, and no other
 	// probe starts beside it.
-	probing             *probeHold
+	probing *probeHold
+	// waiters counts the Starts waiting for that probe to end.
+	waiters             int
 	took                map[packKey]format.ALSAFormat
 	overlaps            int
 	terminalUnconfirmed bool
@@ -412,6 +425,7 @@ func (b *Backend) hold(ctx context.Context, s *session) error {
 		}
 		select {
 		case <-p.done:
+			b.startWoke()
 		case <-expired:
 			return fmt.Errorf("player backend: the device is busy: the silent probe has held it for %v: %w", ProbeWait, engine.ErrDeviceBusy)
 		case <-ctx.Done():

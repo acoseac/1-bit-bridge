@@ -161,6 +161,8 @@ func pollMillis(d time.Duration) int {
 	return int(ms)
 }
 
+func (linuxSys) openSubstreams(int) ([]string, error) { return nil, nil }
+
 func (linuxSys) close(fd int) error {
 	if err := unix.Close(fd); err != nil {
 		return errnoFrom(err)

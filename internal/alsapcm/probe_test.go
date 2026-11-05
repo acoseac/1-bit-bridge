@@ -194,8 +194,8 @@ func TestTheProbeLeavesABusyNodeAlone(t *testing.T) {
 	cache := NewProbeCache()
 	u := ProbeUnit{Model: "dacKey/1\n262a\n9023\n=1\n=Brooklyn DAC+", Firmware: "0102", Kernel: "6.12.47+rpt-rpi-v8", Enumeration: "feed 1, generation 4"}
 	dsd64 := ProbeCandidate{format.DSDU32BE, 88200}
-	cache.Record(u, ProbeReport{Results: []ProbeResult{{Candidate: dsd64, Answer: ProbeAccepted, Msbits: 32, Pause: true}}})
-	cache.Record(u, rep)
+	record(t, cache, u, ProbeReport{Results: []ProbeResult{{Candidate: dsd64, Answer: ProbeAccepted, Msbits: 32, Pause: true}}})
+	record(t, cache, u, rep)
 	for _, c := range cands {
 		want := ProbeResult{Candidate: c, Answer: ProbeNotProbed}
 		if c == dsd64 {
@@ -403,5 +403,74 @@ func TestTheProbesCandidatesAreTheDesigns(t *testing.T) {
 		if ProbeCandidates()[0].RateHz == 1 {
 			t.Error("ProbeCandidates hands out a list a caller can change for the next")
 		}
+	}
+}
+
+// TestARefusalBesideAnotherOpenSubstreamIsNotKept pins a run beside another
+// of the card's substreams (B728 B4 round 2). A USB device's interfaces can
+// share a clock, which snd-usb-audio then holds to the rate one of them runs
+// at, so while another substream is open a refine refuses rates the DAC
+// takes. The probe reads the card's open substreams after its check after
+// open, before the first refine, and again after the last, before the
+// close; when another is open at either read, in either order, or a read
+// cannot be taken or does not show the probe's own substream open (a kernel
+// whose /proc lists none), it keeps no refusal from the run: each refused
+// candidate is not probed, each accepted one stands (the clock only narrows
+// what the kernel takes), and the report says why (Shared). Its own
+// substream is no other. A cache then keeps no refusal of that run.
+func TestARefusalBesideAnotherOpenSubstreamIsNotKept(t *testing.T) {
+	cands := []ProbeCandidate{{format.DSDU32BE, 88200}, {format.DSDU32BE, 352800}, {format.S32LE, 176400}, {format.S24LE, 44100}}
+	refused := map[ProbeCandidate]bool{{format.DSDU32BE, 352800}: true, {format.S24LE, 44100}: true}
+	for _, c := range []struct {
+		name   string
+		set    func(k *fakeKernel)
+		shared bool
+	}{
+		{"no other substream open", func(*fakeKernel) {}, false},
+		{"another open before the first refine", func(k *fakeKernel) { k.others = [][]string{{"pcm0c/sub0"}, nil} }, true},
+		{"another opened before the close", func(k *fakeKernel) { k.others = [][]string{nil, {"pcm1p/sub0"}} }, true},
+		{"the substreams cannot be read", func(k *fakeKernel) { k.substreamsErr = errors.New("permission denied") }, true},
+		{"the reading does not show the probe's own substream", func(k *fakeKernel) { k.hideOwn = true }, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			k := dsdDAC(t)
+			c.set(k)
+			rep, err := probe(k, testEndpoint, ProbeConfig{Candidates: cands})
+			if err != nil {
+				t.Fatalf("probe: %v", err)
+			}
+			k.inspect(func(k *fakeKernel) {
+				want := []fakeRead{{calls: 2}, {calls: 2 + len(cands)}}
+				if !slices.Equal(k.substreamReads, want) {
+					t.Errorf("the card's substreams were read %+v (requests before, closes before); want after INFO and before the first refine, and after the last refine and before the close", k.substreamReads)
+				}
+			})
+			for _, r := range rep.Results {
+				want := ProbeAccepted
+				switch {
+				case refused[r.Candidate] && c.shared:
+					want = ProbeNotProbed
+				case refused[r.Candidate]:
+					want = ProbeRefused
+				}
+				if r.Answer != want {
+					t.Errorf("%s: %s; want %s", r.Candidate, r.Answer, want)
+				}
+			}
+			if (len(rep.Shared) > 0) != c.shared {
+				t.Errorf("the report's Shared: %q; want it to say why exactly when another substream was open or the reading could not tell", rep.Shared)
+			}
+			cache := NewProbeCache()
+			record(t, cache, brooklyn, rep)
+			for cand := range refused {
+				want := ProbeRefused
+				if c.shared {
+					want = ProbeNotProbed
+				}
+				if got := cache.Answer(brooklyn, cand); got.Answer != want {
+					t.Errorf("the cache keeps %s as %s; want %s", cand, got.Answer, want)
+				}
+			}
+		})
 	}
 }

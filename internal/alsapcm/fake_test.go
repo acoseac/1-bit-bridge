@@ -3,6 +3,7 @@ package alsapcm
 import (
 	"context"
 	"flag"
+	"fmt"
 	"slices"
 	"sync"
 	"testing"
@@ -39,6 +40,12 @@ type fakeHW struct {
 // each of its rates.
 type fakeAltset struct {
 	formats, rates []uint32
+}
+
+// fakeRead is one read of the card's open substreams: the requests sent and
+// the closes made before it.
+type fakeRead struct {
+	calls, closes int
 }
 
 // fakeWrite is one scripted answer to WRITEI_FRAMES: take frames of what
@@ -114,9 +121,17 @@ type fakeKernel struct {
 	exclusive bool
 	// refineErrs fails the nth HW_REFINE (from 1) with its error.
 	refineErrs map[int]error
-	version    uint32
-	info       pcmInfo
-	hw         fakeHW
+	// others are the card's other substreams open at each read of its open
+	// substreams, an entry a read, in order, and none past them;
+	// substreamsErr fails every read; hideOwn leaves the node's own
+	// substream out of a read while it is open, as a kernel whose /proc
+	// lists no substream does.
+	others        [][]string
+	substreamsErr error
+	hideOwn       bool
+	version       uint32
+	info          pcmInfo
+	hw            fakeHW
 
 	// Scripts.
 	fail   map[uint32]error   // a request that fails, every time
@@ -178,6 +193,10 @@ type fakeKernel struct {
 	pollWaits  []time.Duration
 	pauses     []uintptr
 	epipes     int // writes answered EPIPE: offered to a stream an xrun stopped
+
+	// substreamReads is each read of the card's open substreams: how many
+	// requests had been sent, and how many closes made, before it.
+	substreamReads []fakeRead
 }
 
 // newFake returns a fake node for card 5 device 0 on hardware that takes
@@ -295,6 +314,30 @@ func (k *fakeKernel) open(path string) (int, error) {
 	k.opens++
 	k.openAt = append(k.openAt, len(k.played))
 	return k.fd, nil
+}
+
+// openSubstreams is the card's /proc/asound as the kernel would list its
+// open substreams: the node's own while it is open (unless hideOwn), and the
+// next entry of others.
+func (k *fakeKernel) openSubstreams(card int) ([]string, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.substreamReads = append(k.substreamReads, fakeRead{calls: len(k.calls), closes: k.closes})
+	if card != int(k.info.card) {
+		k.t.Errorf("the substreams of card %d were read; the node is card %d", card, k.info.card)
+	}
+	if k.substreamsErr != nil {
+		return nil, k.substreamsErr
+	}
+	var open []string
+	if k.isOpen && !k.hideOwn {
+		open = append(open, fmt.Sprintf("pcm%dp/sub%d", k.info.device, k.info.subdevice))
+	}
+	if len(k.others) > 0 {
+		open = append(open, k.others[0]...)
+		k.others = k.others[1:]
+	}
+	return open, nil
 }
 
 func (k *fakeKernel) close(fd int) error {

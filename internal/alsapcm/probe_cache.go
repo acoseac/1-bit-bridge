@@ -48,13 +48,23 @@ func NewProbeCache() *ProbeCache {
 	return &ProbeCache{units: map[ProbeUnit]map[ProbeCandidate]ProbeResult{}}
 }
 
+// ProbeEpoch is a probe's place in its model's history (Begin).
+type ProbeEpoch struct {
+	unit  ProbeUnit
+	epoch uint64
+}
+
+// Begin is what a caller asks before it probes u, and hands Record after.
+func (c *ProbeCache) Begin(u ProbeUnit) ProbeEpoch { return ProbeEpoch{unit: u} }
+
 // Record keeps what rep established for u: each accepted and each refused
 // answer, replacing one kept for the candidate before. A not-probed answer
 // keeps nothing and changes nothing, so a busy node (EBUSY) is never kept as
 // a refusal and leaves an earlier answer for u standing. Whatever was kept
 // for u's model under another firmware, kernel or enumeration has lapsed,
 // and is dropped.
-func (c *ProbeCache) Record(u ProbeUnit, rep ProbeReport) {
+func (c *ProbeCache) Record(e ProbeEpoch, rep ProbeReport) bool {
+	u := e.unit
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for k := range c.units {
@@ -76,6 +86,7 @@ func (c *ProbeCache) Record(u ProbeUnit, rep ProbeReport) {
 		}
 		kept[r.Candidate] = r
 	}
+	return true
 }
 
 // Answer is the answer kept for cand under exactly u, or ProbeNotProbed.

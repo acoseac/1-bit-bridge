@@ -412,3 +412,48 @@ func TestOneProbeAtATime(t *testing.T) {
 		t.Fatalf("the first probe: %+v, %v", ans.rep, ans.err)
 	}
 }
+
+// TestAStartThatWaitedForAProbeTakesTheSlotBeforeTheNextProbe pins, through
+// the engine's Run, the backend and the real sink, the slot's hand from a
+// probe to the Start that waited for it (B728 B4 round 2): a first probe
+// holds the node open in its check after open, a play's Start comes and
+// waits, the first probe ends, and the Start, woken, is held before it takes
+// the slot (the StartWoke seam). A second probe asked then is refused as a
+// session that holds the device, asking for no open, and the Start then
+// opens the device and plays every frame once.
+func TestAStartThatWaitedForAProbeTakesTheSlotBeforeTheNextProbe(t *testing.T) {
+	waits := newProbeWaits()
+	woke, goOn := make(chan struct{}), make(chan struct{})
+	var wokeOnce, goOnce sync.Once
+	letGo := func() { goOnce.Do(func() { close(goOn) }) }
+	r := newRig(t, func(o *rigOptions) {
+		o.afterFunc = waits.afterFunc
+		o.seams = &playback.Seams{StartWoke: func() {
+			wokeOnce.Do(func() { close(woke) })
+			<-goOn
+		}}
+	})
+	// After the rig's, so it runs before the rig's stop, which joins the
+	// Start this holds.
+	t.Cleanup(letGo)
+	r.k.Exclusive()
+	a := pattern(1, 48000, 24)
+	r.files.add("a", wav(48000, 24, a))
+	r.insert("a")
+	probed, letProbeGo := r.probeHeldOpen()
+	played := r.startWaits(waits)
+	letProbeGo()
+	if ans := receiveIn(t, probed, "the first probe's answer"); ans.err != nil || !ans.rep.Opened {
+		t.Fatalf("the first probe: %+v, %v", ans.rep, ans.err)
+	}
+	receiveIn(t, woke, "the Start woken as the first probe ended")
+	r.probeAsksNothing(playback.ProbeSessionHolds)
+	letGo()
+	if err := receiveIn(t, played, "the play after the first probe"); err != nil {
+		t.Fatalf("the Start that waited: %v", err)
+	}
+	if v := r.k.View(); len(v.Opened) != 2 || v.Opens != 2 {
+		t.Errorf("%d opens asked, %d opened; want the first probe's and the Start's", len(v.Opened), v.Opens)
+	}
+	r.heardAll(format.S243LE, 24, a)
+}

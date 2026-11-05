@@ -110,6 +110,8 @@ type ProbeReport struct {
 	// Results are the candidates' answers, in the order asked: every one
 	// ProbeNotProbed when the probe asked nothing.
 	Results []ProbeResult
+	// Shared says why the run kept no refusal.
+	Shared []string
 }
 
 // Result is c's answer in r, ProbeNotProbed when r does not hold it.

@@ -3,6 +3,7 @@ package playback
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,8 +29,9 @@ func gateBackend(t *testing.T, afterFunc func(time.Duration, func()) func() bool
 // release is pending (its Release has come, or the engine has taken the
 // release before the call came), it is paused (a pause holds the slot
 // whether or not its release has let the device go), or it holds the device
-// otherwise (it plays, or it is opening the device). A free slot is taken,
-// and the probe's end gives it back and says so.
+// otherwise (it plays, or it is opening the device); and so does a Start
+// that waited for a probe and has not taken the slot yet (round 2). A free
+// slot is taken, and the probe's end gives it back and says so.
 func TestTheProbesGateReadsTheDeviceSlot(t *testing.T) {
 	taken := make(chan struct{})
 	close(taken)
@@ -57,6 +59,7 @@ func TestTheProbesGateReadsTheDeviceSlot(t *testing.T) {
 		}, ProbeReleasePending},
 		{"a release never confirmed", func(b *Backend) { b.terminalUnconfirmed = true }, ProbeReleaseUnconfirmed},
 		{"a probe under way", func(b *Backend) { b.probing = &probeHold{done: make(chan struct{})} }, ProbeRunning},
+		{"a Start that waited for a probe and has not taken the slot yet", func(b *Backend) { b.waiters = 1 }, ProbeSessionHolds},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			b := gateBackend(t, nil)
@@ -205,4 +208,53 @@ func TestAStartWaitsForTheProbeThatHoldsTheSlot(t *testing.T) {
 			t.Error("a released Start took the slot")
 		}
 	})
+}
+
+// TestAStartThatWaitedTakesTheSlotBeforeAnotherProbe pins the slot's hand
+// from a probe to the Start that waited for it (B728 B4 round 2): two
+// probes in a row, and a Start that came during the first. The first probe
+// ends, and the Start, woken, is held before it takes the slot (the
+// StartWoke seam): a second probe asked then is refused, as a session that
+// holds the device (ProbeSessionHolds), since the waiting Start counts as
+// one, and the Start then takes the slot.
+func TestAStartThatWaitedTakesTheSlotBeforeAnotherProbe(t *testing.T) {
+	timer := newWaitTimer()
+	woke, goOn := make(chan struct{}), make(chan struct{})
+	var wokeOnce, goOnce sync.Once
+	letGo := func() { goOnce.Do(func() { close(goOn) }) }
+	t.Cleanup(letGo)
+	b, err := New(Config{Resolver: nopResolver{}, Locator: noUnit{}, AfterFunc: timer.afterFunc,
+		Seams: &Seams{StartWoke: func() {
+			wokeOnce.Do(func() { close(woke) })
+			<-goOn
+		}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, why := b.reserveProbe()
+	if first == nil {
+		t.Fatalf("the first probe could not take a free slot: %q", why)
+	}
+	s := newSession(b, 1)
+	done := make(chan error, 1)
+	go func() { done <- b.hold(context.Background(), s) }()
+	receiveWithin(t, timer.armed, "the Start's wait for the first probe")
+	b.endProbe(first)
+	receiveWithin(t, woke, "the Start woken as the first probe ended")
+	if second, why := b.reserveProbe(); second != nil {
+		t.Error("a second probe took the slot from the Start that waited for the first")
+		b.endProbe(second)
+	} else if why != ProbeSessionHolds {
+		t.Errorf("the second probe was refused %q; want %q", why, ProbeSessionHolds)
+	}
+	letGo()
+	if err := receiveWithin(t, done, "the Start's hold"); err != nil {
+		t.Fatalf("the Start that waited: %v", err)
+	}
+	b.mu.Lock()
+	holder, waiters := b.holder, b.waiters
+	b.mu.Unlock()
+	if holder != s || waiters != 0 {
+		t.Errorf("after the Start took the slot: it holds it %v, %d Starts still counted waiting", holder == s, waiters)
+	}
 }
