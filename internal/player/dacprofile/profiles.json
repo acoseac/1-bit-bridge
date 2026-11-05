@@ -1,0 +1,1204 @@
+{
+  "schemaVersion": 1,
+  "sharedReferenceIds": [
+    {
+      "vendorId": "0d8c",
+      "productId": "0316",
+      "why": "C-Media's vendor ID with a product ID more than one maker's units ship: the kernel gives it a DSD quirk under one maker's name (Linux kernel sound/usb/quirks.c, v6.12), and another maker's firmware note names it too (the review of PR #1402, 2026-11-04); a profile on it waits for a captured product string"
+    },
+    {
+      "vendorId": "16d0",
+      "productId": "071a",
+      "why": "the Amanero Combo384, a USB interface board DACs of several makers are built on: the kernel's DSD quirk for this ID follows the board's firmware, its bcdDevice, alone (Linux kernel sound/usb/quirks.c, v6.12)"
+    },
+    {
+      "vendorId": "20a0",
+      "productId": "4143",
+      "why": "the WaveIO, a USB interface board other makers' DACs are built on, as its maker describes it (the review of PR #1402, 2026-11-04); the kernel gives the board's altsetting 3 a DSD quirk (Linux kernel sound/usb/quirks.c, v6.12); a profile on it waits for a captured product string"
+    },
+    {
+      "vendorId": "20b1",
+      "productId": "0010",
+      "why": "XMOS's reference product ID, which the owner identified as shared: an iFi unit carries it, with the product string iFi (by AMR) HD USB Audio (owner capture, Linux, 2026-11-04)"
+    }
+  ],
+  "profiles": [
+    {
+      "id": "auralic.altair.g1",
+      "name": "AURALiC Altair G1",
+      "match": [
+        {
+          "vendorId": "1511",
+          "productId": "0062",
+          "interface": null,
+          "product": "ALTAIR G1 USB Audio 2.0",
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 22579200,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "capture",
+          "ref": "owner capture, Linux, 2026-11-04: the playback stream, interface 1, altset 3"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: owner capture, Linux, 2026-11-04: 1511:0062, the card its audio control interface 0, product string ALTAIR G1 USB Audio 2.0, on bcdDevice 06f2",
+        "native: owner capture, Linux, 2026-11-04: the playback stream's interface 1, altset 3, lists DSD_U32_BE at frame rates up to 705600, DSD512 in the 44.1 kHz family"
+      ]
+    },
+    {
+      "id": "chord.hugo2",
+      "name": "Chord Hugo 2",
+      "match": [
+        {
+          "vendorId": "245f",
+          "productId": "0815",
+          "interface": null,
+          "product": "Hugo2",
+          "bcdDevice": null
+        }
+      ],
+      "native": null,
+      "dop": null,
+      "timing": {
+        "dsdPrefillMs": 700,
+        "pcmEntryMs": 0
+      },
+      "caveats": [],
+      "provenance": [
+        "identity: owner capture, Linux, 2026-11-04: 245f:0815, the card its audio control interface 1, product string Hugo2, on bcdDevice 0197",
+        "timing: iOS profile chord.hugo2's DSD resync delay, 0.7 s (iOS cd125088)"
+      ]
+    },
+    {
+      "id": "kernel.0644-8043",
+      "name": "USB audio device 0644:8043",
+      "match": [
+        {
+          "vendorId": "0644",
+          "productId": "8043",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 0644:8043",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on the last altsetting, after the vendor mode switch"
+      ]
+    },
+    {
+      "id": "kernel.0644-8044",
+      "name": "USB audio device 0644:8044",
+      "match": [
+        {
+          "vendorId": "0644",
+          "productId": "8044",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 0644:8044",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on the last altsetting, after the vendor mode switch"
+      ]
+    },
+    {
+      "id": "kernel.0644-804a",
+      "name": "USB audio device 0644:804a",
+      "match": [
+        {
+          "vendorId": "0644",
+          "productId": "804a",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 0644:804a",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on the last altsetting, after the vendor mode switch"
+      ]
+    },
+    {
+      "id": "kernel.0644-806b",
+      "name": "USB audio device 0644:806b",
+      "match": [
+        {
+          "vendorId": "0644",
+          "productId": "806b",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 0644:806b",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on the last altsetting, after the vendor mode switch"
+      ]
+    },
+    {
+      "id": "kernel.10cb-0103",
+      "name": "USB audio device 10cb:0103",
+      "match": [
+        {
+          "vendorId": "10cb",
+          "productId": "0103",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 10cb:0103",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
+      ]
+    },
+    {
+      "id": "kernel.139f-5504",
+      "name": "USB audio device 139f:5504",
+      "match": [
+        {
+          "vendorId": "139f",
+          "productId": "5504",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 139f:5504",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 2"
+      ]
+    },
+    {
+      "id": "kernel.154e-1002",
+      "name": "USB audio device 154e:1002",
+      "match": [
+        {
+          "vendorId": "154e",
+          "productId": "1002",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 154e:1002",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on the last altsetting, after the vendor mode switch"
+      ]
+    },
+    {
+      "id": "kernel.154e-1003",
+      "name": "USB audio device 154e:1003",
+      "match": [
+        {
+          "vendorId": "154e",
+          "productId": "1003",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 154e:1003",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on the last altsetting, after the vendor mode switch"
+      ]
+    },
+    {
+      "id": "kernel.154e-3005",
+      "name": "USB audio device 154e:3005",
+      "match": [
+        {
+          "vendorId": "154e",
+          "productId": "3005",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 154e:3005",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on the last altsetting, after the vendor mode switch"
+      ]
+    },
+    {
+      "id": "kernel.154e-3006",
+      "name": "USB audio device 154e:3006",
+      "match": [
+        {
+          "vendorId": "154e",
+          "productId": "3006",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 154e:3006",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on the last altsetting, after the vendor mode switch"
+      ]
+    },
+    {
+      "id": "kernel.154e-300b",
+      "name": "USB audio device 154e:300b",
+      "match": [
+        {
+          "vendorId": "154e",
+          "productId": "300b",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 154e:300b",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on each altsetting whose descriptor marks raw data"
+      ]
+    },
+    {
+      "id": "kernel.16d0-06b2",
+      "name": "USB audio device 16d0:06b2",
+      "match": [
+        {
+          "vendorId": "16d0",
+          "productId": "06b2",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 16d0:06b2",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
+      ]
+    },
+    {
+      "id": "kernel.16d0-06b4",
+      "name": "USB audio device 16d0:06b4",
+      "match": [
+        {
+          "vendorId": "16d0",
+          "productId": "06b4",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 16d0:06b4",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
+      ]
+    },
+    {
+      "id": "kernel.16d0-0733",
+      "name": "USB audio device 16d0:0733",
+      "match": [
+        {
+          "vendorId": "16d0",
+          "productId": "0733",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 16d0:0733",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
+      ]
+    },
+    {
+      "id": "kernel.16d0-09d8",
+      "name": "USB audio device 16d0:09d8",
+      "match": [
+        {
+          "vendorId": "16d0",
+          "productId": "09d8",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 16d0:09d8",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
+      ]
+    },
+    {
+      "id": "kernel.16d0-09db",
+      "name": "USB audio device 16d0:09db",
+      "match": [
+        {
+          "vendorId": "16d0",
+          "productId": "09db",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 16d0:09db",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
+      ]
+    },
+    {
+      "id": "kernel.16d0-09dd",
+      "name": "USB audio device 16d0:09dd",
+      "match": [
+        {
+          "vendorId": "16d0",
+          "productId": "09dd",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 16d0:09dd",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
+      ]
+    },
+    {
+      "id": "kernel.16d0-0a23",
+      "name": "USB audio device 16d0:0a23",
+      "match": [
+        {
+          "vendorId": "16d0",
+          "productId": "0a23",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 16d0:0a23",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 2"
+      ]
+    },
+    {
+      "id": "kernel.1852-5062",
+      "name": "USB audio device 1852:5062",
+      "match": [
+        {
+          "vendorId": "1852",
+          "productId": "5062",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 1852:5062",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on the last altsetting, after the vendor mode switch"
+      ]
+    },
+    {
+      "id": "kernel.1852-5065",
+      "name": "USB audio device 1852:5065",
+      "match": [
+        {
+          "vendorId": "1852",
+          "productId": "5065",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 1852:5065",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on the last altsetting, after the vendor mode switch"
+      ]
+    },
+    {
+      "id": "kernel.1db5-0003",
+      "name": "USB audio device 1db5:0003",
+      "match": [
+        {
+          "vendorId": "1db5",
+          "productId": "0003",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 1db5:0003",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
+      ]
+    },
+    {
+      "id": "kernel.20b1-3089",
+      "name": "USB audio device 20b1:3089",
+      "match": [
+        {
+          "vendorId": "20b1",
+          "productId": "3089",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 20b1:3089",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 2"
+      ]
+    },
+    {
+      "id": "kernel.21b4-0230",
+      "name": "USB audio device 21b4:0230",
+      "match": [
+        {
+          "vendorId": "21b4",
+          "productId": "0230",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 21b4:0230",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on each altsetting whose descriptor marks raw data"
+      ]
+    },
+    {
+      "id": "kernel.21b4-0232",
+      "name": "USB audio device 21b4:0232",
+      "match": [
+        {
+          "vendorId": "21b4",
+          "productId": "0232",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 21b4:0232",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on each altsetting whose descriptor marks raw data"
+      ]
+    },
+    {
+      "id": "kernel.22e1-ca01",
+      "name": "USB audio device 22e1:ca01",
+      "match": [
+        {
+          "vendorId": "22e1",
+          "productId": "ca01",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 22e1:ca01",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
+      ]
+    },
+    {
+      "id": "kernel.249c-9326",
+      "name": "USB audio device 249c:9326",
+      "match": [
+        {
+          "vendorId": "249c",
+          "productId": "9326",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 249c:9326",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
+      ]
+    },
+    {
+      "id": "kernel.2522-0007",
+      "name": "USB audio device 2522:0007",
+      "match": [
+        {
+          "vendorId": "2522",
+          "productId": "0007",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 2522:0007",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 2"
+      ]
+    },
+    {
+      "id": "kernel.2522-0009",
+      "name": "USB audio device 2522:0009",
+      "match": [
+        {
+          "vendorId": "2522",
+          "productId": "0009",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 2522:0009",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 2"
+      ]
+    },
+    {
+      "id": "kernel.2522-0012",
+      "name": "USB audio device 2522:0012",
+      "match": [
+        {
+          "vendorId": "2522",
+          "productId": "0012",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 2522:0012",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 2"
+      ]
+    },
+    {
+      "id": "kernel.2616-0106",
+      "name": "USB audio device 2616:0106",
+      "match": [
+        {
+          "vendorId": "2616",
+          "productId": "0106",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 2616:0106",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
+      ]
+    },
+    {
+      "id": "kernel.2622-0041",
+      "name": "USB audio device 2622:0041",
+      "match": [
+        {
+          "vendorId": "2622",
+          "productId": "0041",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 2622:0041",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
+      ]
+    },
+    {
+      "id": "kernel.2772-0230",
+      "name": "USB audio device 2772:0230",
+      "match": [
+        {
+          "vendorId": "2772",
+          "productId": "0230",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 2772:0230",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 2"
+      ]
+    },
+    {
+      "id": "kernel.278b-5100",
+      "name": "USB audio device 278b:5100",
+      "match": [
+        {
+          "vendorId": "278b",
+          "productId": "5100",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 278b:5100",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
+      ]
+    },
+    {
+      "id": "kernel.27f7-3002",
+      "name": "USB audio device 27f7:3002",
+      "match": [
+        {
+          "vendorId": "27f7",
+          "productId": "3002",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 27f7:3002",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
+      ]
+    },
+    {
+      "id": "kernel.29a2-0086",
+      "name": "USB audio device 29a2:0086",
+      "match": [
+        {
+          "vendorId": "29a2",
+          "productId": "0086",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 29a2:0086",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
+      ]
+    },
+    {
+      "id": "kernel.6b42-0042",
+      "name": "USB audio device 6b42:0042",
+      "match": [
+        {
+          "vendorId": "6b42",
+          "productId": "0042",
+          "interface": null,
+          "product": null,
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 0,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "kernel-quirk",
+          "ref": "sound/usb/quirks.c at v6.12"
+        }
+      },
+      "dop": null,
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: Linux kernel USB audio DSD quirk list, sound/usb/quirks.c at v6.12: a device-specific quirk for 6b42:0042",
+        "native: Linux kernel sound/usb/quirks.c at v6.12: DSD_U32_BE on altsetting 3"
+      ]
+    },
+    {
+      "id": "mytek.brooklyn.dac.plus",
+      "name": "Mytek Brooklyn DAC+",
+      "match": [
+        {
+          "vendorId": "25ce",
+          "productId": "0025",
+          "interface": null,
+          "product": "Brooklyn DAC+",
+          "bcdDevice": null
+        }
+      ],
+      "native": {
+        "maxBitRate": 11289600,
+        "formats": [
+          "DSD_U32_BE"
+        ],
+        "source": {
+          "kind": "capture",
+          "ref": "owner capture, Linux, 2026-11-04: the playback stream, interface 2, altset 2"
+        }
+      },
+      "dop": {
+        "heardMaxBitRate": 0,
+        "statedMaxBitRate": 0,
+        "refusedBitRates": [
+          11289600
+        ],
+        "analogVolumeControls": [],
+        "unityAtRawMax": [],
+        "source": {
+          "kind": "ios-registry",
+          "ref": "DACProfile.swift mytek.brooklyn.dac.plus at iOS cd125088"
+        }
+      },
+      "timing": null,
+      "caveats": [],
+      "provenance": [
+        "identity: owner capture, Linux, 2026-11-04: 25ce:0025, the card its audio control interface 0, product string Brooklyn DAC+, on bcdDevice 0100",
+        "native: owner capture, Linux, 2026-11-04: the playback stream's interface 2, altset 2, lists DSD_U32_BE at frame rates up to 352800, DSD256",
+        "dop: refused DSD256: iOS profile mytek.brooklyn.dac.plus, on a device on iOS, the row's log of 2026-06-21: the unit refused DSD256's 705.6 kHz carrier, which it would not negotiate (iOS cd125088); DSD128's carrier reached a DoP lock there, transport evidence that is no listening; on Linux its S32_LE altset stops at 384000, below the DSD256 carrier (owner capture, Linux, 2026-11-04)"
+      ]
+    }
+  ]
+}

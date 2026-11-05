@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/netip"
@@ -17,8 +19,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/alsa"
 	"github.com/acoseac/1-bit-bridge/internal/alsa/sysfstest"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/player/binding"
 	"github.com/acoseac/1-bit-bridge/internal/player/lan"
 	"github.com/acoseac/1-bit-bridge/internal/usbid"
 )
@@ -244,6 +248,395 @@ func TestOutputDACInspectWorksWithoutAConfigOrABinding(t *testing.T) {
 		!strings.Contains(out, "player: off (output.player.enabled is not true)") {
 		t.Errorf("no binding: exit %d:\n%s", code, out)
 	}
+}
+
+// TestDACInspectPrintsTheModelIdentity: inspect prints a USB card's model
+// identity beside its IDs and its interface, the manufacturer and product
+// strings and the bcdDevice the DAC profile database keys a model by
+// (internal/player/dacprofile), as the sysfs reader returns them (white space
+// trimmed), as text and as JSON, where every card carries the four keys; a
+// USB card whose strings cannot all be read has the three null and says why;
+// a card that is not USB has none and no problem; and the serial is still
+// printed nowhere.
+func TestDACInspectPrintsTheModelIdentity(t *testing.T) {
+	root := dacTree(t)
+	goBar, hugo := dacUSB1+"/1-1", dacUSB1+"/1-2"
+	sysfstest.Apply(t, root, "file "+goBar+"/manufacturer iFi (by AMR)\n"+
+		"file "+goBar+`/product "iFi (by AMR) HD USB Audio \n"`+"\n"+
+		"file "+goBar+"/bcdDevice 0170\n"+
+		// A Hugo 2 on the bus's second port, card 6 on its interface 1, whose
+		// unit has no manufacturer string.
+		dacPlugOn(hugo, 1, 6, "245f", "0815", "")+
+		"file "+hugo+"/devnum 3\nfile "+hugo+"/product Hugo2\nfile "+hugo+"/bcdDevice 0197\n")
+	args := append([]string{"inspect", "--config", dacConfig(t, "")}, treeFlags(root)...)
+	out, errOut, code := runDAC(t, dacEnv(), args...)
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, errOut)
+	}
+	card := func(n int) string {
+		_, rest, _ := strings.Cut(out, fmt.Sprintf("\ncard %d: ", n))
+		block, _, _ := strings.Cut(rest, "\n\n")
+		return block
+	}
+	if want := "  model:     manufacturer \"iFi (by AMR)\", product \"iFi (by AMR) HD USB Audio\", bcdDevice 0170"; !strings.Contains(card(5), want) {
+		t.Errorf("card 5 lacks %q:\n%s", want, out)
+	}
+	if b := card(6); !strings.Contains(b, "  model:     not read: ") || !strings.Contains(b, "manufacturer") {
+		t.Errorf("card 6 does not say its model was not read, and why:\n%s", out)
+	}
+	if b := card(0); b == "" || strings.Contains(b, "model:") {
+		t.Errorf("the HDMI card shows a model:\n%s", out)
+	}
+	if dacLeaks(out+errOut, dacSerial) {
+		t.Errorf("inspect printed the serial:\n%s", out)
+	}
+
+	out, errOut, code = runDAC(t, dacEnv(), append(args, "--json")...)
+	if code != 0 {
+		t.Fatalf("json: exit %d, stderr %q", code, errOut)
+	}
+	var rep struct {
+		Cards []map[string]json.RawMessage `json:"cards"`
+	}
+	if err := json.Unmarshal([]byte(out), &rep); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, out)
+	}
+	type model struct {
+		Index        int     `json:"index"`
+		Interface    *int    `json:"interface"`
+		USBID        *string `json:"usbId"`
+		Manufacturer *string `json:"manufacturer"`
+		Product      *string `json:"product"`
+		BCDDevice    *string `json:"bcdDevice"`
+		ModelProblem string  `json:"modelProblem"`
+	}
+	got := map[int]model{}
+	for _, raw := range rep.Cards {
+		for _, key := range []string{"manufacturer", "product", "bcdDevice", "modelProblem"} {
+			if _, ok := raw[key]; !ok {
+				t.Errorf("a card has no %q key: %s", key, out)
+			}
+		}
+		b, _ := json.Marshal(raw)
+		var m model
+		if err := json.Unmarshal(b, &m); err != nil {
+			t.Fatal(err)
+		}
+		got[m.Index] = m
+	}
+	str := func(p *string) string {
+		if p == nil {
+			return "null"
+		}
+		return *p
+	}
+	if c := got[5]; str(c.USBID) != "20b1:3009" || c.Interface == nil || *c.Interface != 0 || str(c.Manufacturer) != "iFi (by AMR)" ||
+		str(c.Product) != "iFi (by AMR) HD USB Audio" || str(c.BCDDevice) != "0170" || c.ModelProblem != "" {
+		t.Errorf("card 5: %s %s %s %s %q", str(c.USBID), str(c.Manufacturer), str(c.Product), str(c.BCDDevice), c.ModelProblem)
+	}
+	if c := got[6]; str(c.USBID) != "245f:0815" || c.Manufacturer != nil || c.Product != nil || c.BCDDevice != nil || !strings.Contains(c.ModelProblem, "manufacturer") {
+		t.Errorf("card 6: %s %s %s %s %q", str(c.USBID), str(c.Manufacturer), str(c.Product), str(c.BCDDevice), c.ModelProblem)
+	}
+	if c := got[0]; c.Manufacturer != nil || c.Product != nil || c.BCDDevice != nil || c.ModelProblem != "" {
+		t.Errorf("the HDMI card: %+v", c)
+	}
+	if dacLeaks(out, dacSerial) {
+		t.Errorf("--json printed the serial:\n%s", out)
+	}
+}
+
+// TestDACInspectShowsNoModelOfAUnitThatChangedWhileRead: the model
+// identity is read after the inventory, so inspect keeps it only for the
+// unit the inventory holds, at its port, on its interface and in its
+// enumeration: a second reading that finds another enumeration (a replug
+// between the two), another port or another interface shows no strings,
+// and says so.
+func TestDACInspectShowsNoModelOfAUnitThatChangedWhileRead(t *testing.T) {
+	root := dacTree(t)
+	obs, ok := addDACTreeFlagsFor(root).observer(dacEnv(), "output dac inspect", io.Discard)
+	if !ok {
+		t.Fatal("no observer")
+	}
+	inv, err := obs.Observe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	card, ok := inv.Card(5)
+	if !ok || card.USB == nil {
+		t.Fatal("no USB card 5 in the GO bar tree")
+	}
+	read := func(change func(q *alsa.QualificationIdentity)) dacModelReader {
+		return dacModelReader{descriptors: func(int) (alsa.QualificationIdentity, error) {
+			q := alsa.QualificationIdentity{Manufacturer: "iFi (by AMR)", Product: "iFi (by AMR) HD USB Audio", BCDDevice: "0170",
+				Port: card.USB.Port, DevNum: card.USB.DevNum, Interface: card.USB.Interface}
+			change(&q)
+			return q, nil
+		}, card: obs.Sysfs.Card}
+	}
+	model := func(r dacModelReader) dacCardView {
+		for _, c := range dacInspect(dacEnv(), dacConfig(t, ""), inv, r).Cards {
+			if c.Index == 5 {
+				return c
+			}
+		}
+		t.Fatal("no card 5 in the report")
+		return dacCardView{}
+	}
+	if c := model(read(func(*alsa.QualificationIdentity) {})); c.Product == nil || *c.Product != "iFi (by AMR) HD USB Audio" || c.ModelProblem != "" {
+		t.Fatalf("the unit the inventory holds: %+v", c)
+	}
+	for name, change := range map[string]func(q *alsa.QualificationIdentity){
+		"another enumeration": func(q *alsa.QualificationIdentity) { q.DevNum++ },
+		"another port":        func(q *alsa.QualificationIdentity) { q.Port = "platform-xhci-hcd.0/usb2-2:1.0" },
+		"another interface":   func(q *alsa.QualificationIdentity) { q.Interface++ },
+	} {
+		c := model(read(change))
+		if c.Manufacturer != nil || c.Product != nil || c.BCDDevice != nil || c.ModelProblem != "not read: the card changed while it was read" {
+			t.Errorf("%s: %+v", name, c)
+		}
+	}
+}
+
+// TestDACInspectShowsNoModelOfAUnitReplacedAsItsStringsWereRead: the model
+// reader reads the card's attachment (its port, interface and device number)
+// and then its strings through the card's device link again, so a unit that
+// replaced the card between the two (a replug into the same port, card 5
+// again) gives the inventory's attachment with its own strings, which the
+// comparison with the inventory passes. inspect reads the card again after
+// the strings and keeps them only for the unit and the enumeration the
+// inventory holds: neither another model's strings nor those of the same
+// unit enumerated anew, its firmware updated, which only its device number
+// tells.
+func TestDACInspectShowsNoModelOfAUnitReplacedAsItsStringsWereRead(t *testing.T) {
+	goBar := dacUSB1 + "/1-1"
+	for _, tc := range []struct {
+		name, replug string
+		strings      alsa.QualificationIdentity
+	}{
+		{"another model", dacPlug(goBar, 5, "1234", "0d02", "") + "file " + goBar + "/devnum 7\n" +
+			"file " + goBar + "/manufacturer Synthetic Audio\nfile " + goBar + "/product Synthetic DAC\nfile " + goBar + "/bcdDevice 0100\n",
+			alsa.QualificationIdentity{Manufacturer: "Synthetic Audio", Product: "Synthetic DAC", BCDDevice: "0100"}},
+		{"the same unit enumerated anew, its firmware updated", dacPlug(goBar, 5, "20b1", "3009", dacSerial) + "file " + goBar + "/devnum 8\n" +
+			"file " + goBar + "/manufacturer iFi (by AMR)\nfile " + goBar + "/product iFi (by AMR) HD USB Audio\nfile " + goBar + "/bcdDevice 0171\n",
+			alsa.QualificationIdentity{Manufacturer: "iFi (by AMR)", Product: "iFi (by AMR) HD USB Audio", BCDDevice: "0171"}},
+		// A device number comes round again once a bus has given out its
+		// 127, so another model can read at the GO bar's: its IDs tell it.
+		{"another model at the same device number", dacPlug(goBar, 5, "1234", "0d02", "") + "file " + goBar + "/devnum 2\n" +
+			"file " + goBar + "/manufacturer Synthetic Audio\nfile " + goBar + "/product Synthetic DAC\nfile " + goBar + "/bcdDevice 0100\n",
+			alsa.QualificationIdentity{Manufacturer: "Synthetic Audio", Product: "Synthetic DAC", BCDDevice: "0100"}},
+	} {
+		root := dacTree(t)
+		sysfstest.Apply(t, root, "file "+goBar+"/manufacturer iFi (by AMR)\nfile "+goBar+"/product iFi (by AMR) HD USB Audio\nfile "+goBar+"/bcdDevice 0170\n")
+		obs, ok := addDACTreeFlagsFor(root).observer(dacEnv(), "output dac inspect", io.Discard)
+		if !ok {
+			t.Fatal("no observer")
+		}
+		inv, err := obs.Observe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		card, ok := inv.Card(5)
+		if !ok || card.USB == nil {
+			t.Fatal("no USB card 5 in the GO bar tree")
+		}
+		u := *card.USB
+		// What alsa.SysfsReader.Qualification returns when the card's device
+		// link changes between its reading of the card and its second resolve
+		// of cardN/device, the tree left as the replug left it: the unit in the
+		// same port, its card 5 again, enumerated anew.
+		read := func(int) (alsa.QualificationIdentity, error) {
+			sysfstest.Apply(t, root, "unplug "+goBar+"\n"+tc.replug)
+			q := tc.strings
+			q.Port, q.DevNum, q.Interface = u.Port, u.DevNum, u.Interface
+			return q, nil
+		}
+		found := false
+		for _, c := range dacInspect(dacEnv(), dacConfig(t, ""), inv, dacModelReader{descriptors: read, card: obs.Sysfs.Card}).Cards {
+			if c.Index != 5 {
+				continue
+			}
+			found = true
+			if c.Manufacturer != nil || c.Product != nil || c.BCDDevice != nil || c.ModelProblem != "not read: the card changed while it was read" {
+				t.Errorf("%s: inspect shows the strings of the unit that replaced card 5 under the GO bar's: %s %s %s %q", tc.name,
+					strOrNull(c.Manufacturer), strOrNull(c.Product), strOrNull(c.BCDDevice), c.ModelProblem)
+			}
+		}
+		if !found {
+			t.Fatalf("%s: no card 5 in the report", tc.name)
+		}
+	}
+}
+
+// TestDACInspectPrintsAPortlessUnitsModel: a USB card whose controller sits
+// under something the port grammar does not name (a virtual machine's
+// virtio) has no port, which the DSD qualification's reader refuses, since
+// its evidence needs a port that persists; inspect still prints the unit's
+// model, read through that reader past nothing but its port, for the card the
+// inventory holds without a port, on its interface and in its enumeration,
+// and the reader's refusal stands. A portless unit whose device number cannot
+// be read shows no model.
+func TestDACInspectPrintsAPortlessUnitsModel(t *testing.T) {
+	const unit = "sys/devices/virtio0/xhci-hcd.0/usb1/1-1"
+	tree := `subsys sys/devices/virtio0 virtio
+platform sys/devices/virtio0/xhci-hcd.0
+roothub sys/devices/virtio0/xhci-hcd.0/usb1 speed=480
+usbdev ` + unit + ` vendor=1234 product=0d02 devnum=3
+usbcard 4 ` + unit + `/1-1:1.1
+proccard 4 DAC4 "Synthetic DAC" usb=1234:0d02 pcm=0.0
+file ` + unit + `/manufacturer Synthetic Audio
+file ` + unit + `/product Synthetic DAC
+file ` + unit + `/bcdDevice 0100
+`
+	root := sysfstest.BuildText(t, tree)
+	if _, err := (alsa.SysfsReader{Root: filepath.Join(root, "sys")}).Qualification(4); err == nil {
+		t.Error("the qualification's reader takes a unit with no port")
+	}
+	report := func(root string) (dacCardView, string) {
+		args := append([]string{"inspect", "--config", dacConfig(t, "")}, treeFlags(root)...)
+		out, errOut, code := runDAC(t, dacEnv(), append(args, "--json")...)
+		if code != 0 {
+			t.Fatalf("exit %d, stderr %q", code, errOut)
+		}
+		var rep dacInspectReport
+		if err := json.Unmarshal([]byte(out), &rep); err != nil {
+			t.Fatalf("not JSON: %v\n%s", err, out)
+		}
+		text, _, _ := runDAC(t, dacEnv(), args...)
+		for _, c := range rep.Cards {
+			if c.Index == 4 {
+				return c, text
+			}
+		}
+		t.Fatalf("no card 4 in the report:\n%s", out)
+		return dacCardView{}, ""
+	}
+	c, text := report(root)
+	if c.Port != "" || c.PortProblem == "" || c.Interface == nil || *c.Interface != 1 {
+		t.Fatalf("card 4 is not the portless unit's interface 1: %+v", c)
+	}
+	if strOrNull(c.Manufacturer) != "Synthetic Audio" || strOrNull(c.Product) != "Synthetic DAC" || strOrNull(c.BCDDevice) != "0100" || c.ModelProblem != "" {
+		t.Errorf("the portless unit's model: %s %s %s %q", strOrNull(c.Manufacturer), strOrNull(c.Product), strOrNull(c.BCDDevice), c.ModelProblem)
+	}
+	if !strings.Contains(text, `  model:     manufacturer "Synthetic Audio", product "Synthetic DAC", bcdDevice 0100`) {
+		t.Errorf("the text form has no model line for the portless unit:\n%s", text)
+	}
+
+	noDevNum := sysfstest.BuildText(t, strings.Replace(tree, " devnum=3", "", 1))
+	if c, _ := report(noDevNum); c.Manufacturer != nil || c.Product != nil || c.BCDDevice != nil || !strings.HasPrefix(c.ModelProblem, "not read: ") {
+		t.Errorf("a portless unit whose device number cannot be read: %s %s %s %q", strOrNull(c.Manufacturer), strOrNull(c.Product), strOrNull(c.BCDDevice), c.ModelProblem)
+	}
+}
+
+// TestDACInspectTiesAPortlessReadingToItsPlace: two units of one model with
+// no serial, each under a controller the port grammar does not name, on two
+// buses, enumerated third on each (a bus numbers its devices alone): nothing
+// in their identities tells them apart, no serial, no port, the same
+// interface and device number. The inventory reads A as card 4; A goes and B
+// takes card 4, whose link keeps its name (class/sound/card4) and resolves to
+// B's place. inspect keeps a model only for the card the inventory read at
+// that place, by the card's directory with its links resolved, read again
+// after the strings (Card.Dir), so it shows B's strings nowhere under A's.
+func TestDACInspectTiesAPortlessReadingToItsPlace(t *testing.T) {
+	const a, b = "sys/devices/virtio0/xhci-hcd.0/usb1/1-1", "sys/devices/virtio1/xhci-hcd.1/usb2/2-1"
+	root := sysfstest.BuildText(t, `subsys sys/devices/virtio0 virtio
+platform sys/devices/virtio0/xhci-hcd.0
+roothub sys/devices/virtio0/xhci-hcd.0/usb1 speed=480
+subsys sys/devices/virtio1 virtio
+platform sys/devices/virtio1/xhci-hcd.1
+roothub sys/devices/virtio1/xhci-hcd.1/usb2 speed=480
+usbdev `+a+` vendor=1234 product=0d02 devnum=3
+usbcard 4 `+a+`/1-1:1.1
+proccard 4 DAC4 "Synthetic DAC" usb=1234:0d02 pcm=0.0
+file `+a+`/manufacturer Synthetic Audio
+file `+a+`/product Synthetic DAC
+file `+a+`/bcdDevice 0100
+`)
+	obs, ok := addDACTreeFlagsFor(root).observer(dacEnv(), "output dac inspect", io.Discard)
+	if !ok {
+		t.Fatal("no observer")
+	}
+	inv, err := obs.Observe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, ok := inv.Card(4)
+	if !ok || before.USB == nil || before.USB.Port != "" || before.Dir == "" {
+		t.Fatalf("card 4 is not A, portless, with its place: %+v", before)
+	}
+	sysfstest.Apply(t, root, "unplug "+a+"\nusbdev "+b+" vendor=1234 product=0d02 devnum=3\nusbcard 4 "+b+"/2-1:1.1\n"+
+		"proccard 4 DAC4 \"Synthetic DAC\" usb=1234:0d02 pcm=0.0\n"+
+		"file "+b+"/manufacturer Other Audio\nfile "+b+"/product Other DAC\nfile "+b+"/bcdDevice 0200\n")
+	now, ok := obs.Sysfs.Card(4)
+	if !ok || now.USB == nil || !binding.SameUnit(*now.USB, *before.USB) || now.USB.DevNum != before.USB.DevNum ||
+		now.Dir == "" || now.Dir == before.Dir {
+		t.Fatalf("card 4 is not B, read as A's unit and enumeration at another place: %+v, %+v", now, now.USB)
+	}
+	for _, c := range dacInspect(dacEnv(), dacConfig(t, ""), inv, dacModelReader{descriptors: obs.Sysfs.Qualification, card: obs.Sysfs.Card}).Cards {
+		if c.Index != 4 {
+			continue
+		}
+		if c.Manufacturer != nil || c.Product != nil || c.BCDDevice != nil || c.ModelProblem != "not read: the card changed while it was read" {
+			t.Errorf("inspect shows B's model under A's card 4: %s %s %s %q", strOrNull(c.Manufacturer), strOrNull(c.Product), strOrNull(c.BCDDevice), c.ModelProblem)
+		}
+		return
+	}
+	t.Fatal("no card 4 in the report")
+}
+
+// TestDACInspectTakesNoTwoUnknownPlacesForOne: a card whose directory could
+// not be resolved, in the inventory or read again, is at no place inspect can
+// compare (two empty directories are no match), so it shows no model; and it
+// says the directory could not be resolved, never that the card changed,
+// which a user whose directory never resolves would read on every run and
+// which no run again clears.
+func TestDACInspectTakesNoTwoUnknownPlacesForOne(t *testing.T) {
+	u := alsa.USBIdentity{ID: alsa.USBID{Vendor: 0x20b1, Product: 0x3009}, Port: "platform-xhci-hcd.0/usb2-1:1.0", Interface: 0, DevNum: 2}
+	const place = "devices/platform/axi/1000120000.pcie/1f00200000.usb/xhci-hcd.0/usb1/1-1/1-1:1.0/sound/card5"
+	for _, tc := range []struct{ name, inventory, again string }{
+		{"neither directory resolved", "", ""},
+		{"the inventory's directory not resolved", "", place},
+		{"the reading again's directory not resolved", place, ""},
+	} {
+		inv := binding.Inventory{Sysfs: true, CardsComplete: true, Cards: []binding.Card{{Index: 5, ID: "Audio", Name: "iFi (by AMR) HD USB Audio",
+			State: binding.CardUSB, USB: &u, Dir: tc.inventory}}}
+		read := dacModelReader{
+			descriptors: func(int) (alsa.QualificationIdentity, error) {
+				return alsa.QualificationIdentity{Manufacturer: "iFi (by AMR)", Product: "iFi (by AMR) HD USB Audio", BCDDevice: "0170",
+					Port: u.Port, DevNum: u.DevNum, Interface: u.Interface}, nil
+			},
+			card: func(n int) (alsa.Identity, bool) {
+				again := u
+				return alsa.Identity{Card: n, Kind: alsa.IdentityUSB, Bus: "usb", USB: &again, Dir: tc.again}, true
+			},
+		}
+		found := false
+		for _, c := range dacInspect(dacEnv(), dacConfig(t, ""), inv, read).Cards {
+			if c.Index != 5 {
+				continue
+			}
+			found = true
+			if c.Manufacturer != nil || c.ModelProblem != "not read: the card's directory could not be resolved" {
+				t.Errorf("%s: a card at no place inspect can compare shows %s, %q", tc.name, strOrNull(c.Manufacturer), c.ModelProblem)
+			}
+		}
+		if !found {
+			t.Fatalf("%s: no card 5 in the report", tc.name)
+		}
+	}
+}
+
+// strOrNull is a report's string, or null.
+func strOrNull(p *string) string {
+	if p == nil {
+		return "null"
+	}
+	return *p
+}
+
+// addDACTreeFlagsFor is the tree flags naming root's two trees.
+func addDACTreeFlagsFor(root string) dacTreeFlags {
+	proc, sysfs := filepath.Join(root, "proc"), filepath.Join(root, "sys")
+	return dacTreeFlags{proc: &proc, sysfs: &sysfs}
 }
 
 // TestOutputDACBindWritesTheSerialToTheFileAndPrintsNone: bind writes the
