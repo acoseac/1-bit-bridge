@@ -76927,3 +76927,11 @@ looking fails. Negative controls, six, each red: the writer indenting again;
 leaving `fmt` unused); `WriteRestored` writing past `ForRestore`'s refusal;
 `blocked` cleared at the look; cleared before the write's answer; never
 cleared.
+**Checks**, on legion0 at 27a62dfc, in one call through the shared build lock:
+`make fmt`, which rewrote nothing; `make vet`; `make test`, race-enabled, 83
+packages ok, dsdstate (3.1 s) and backup (281 s) among them, the Linux-only
+tests run for real; `go test -race -count=1 ./internal/player/dsdstate/
+./internal/backup/`, ok; `make vet` with `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`, each clean; dsdstate's tests as a linux/386 binary,
+ok; `make docs-check`, ok (player.md at 97.6%); the qualification check,
+"qualification version OK: main..HEAD". The tree is clean after.
