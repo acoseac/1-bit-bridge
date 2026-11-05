@@ -76772,3 +76772,53 @@ controls ran on 4ce44b2e, whose code that commit leaves as it was):
 `ProbeConditions` and `ProbeUnit.Enumeration` from the hotplug snapshot and
 calls `Backend.Probe` at section 5's moments; B9's choice write calls
 `ProbeCache.Forget`, and is not probed while a session is paused.
+
+**Round 2** (the Claude API reviewer's three points on #1407; Codex found
+none), on c26bba1e, the orchestrator's commit of round 1's rules patch, taken
+by fast-forward. Each point held as stated, read in the code before any test:
+`Record` could not tell a report begun before a `Forget`, and a late `Record`
+for an older enumeration deleted the newer one's answers; a run beside another
+substream on a shared USB clock, which snd-usb-audio holds to the running
+rate, kept its EINVAL refusals until a replug or a restart; and a second probe
+could reserve the slot between `endProbe` and the waiting Start's next look.
+Red at cecf6aa3, each new test failing on its own assertion; the fix 3ec5efab;
+two tests strengthened at 0a98ff3e, for two mutants below that no test would
+have caught.
+(1) Each model has an epoch, read before a probe (`Begin`) and handed to
+`Record`, which keeps nothing once it has moved; `Forget` moves it, and so
+does a probe begun for another unit of the model, which lapses the old unit's
+answers then, not at its `Record`. An older enumeration's late report,
+whichever of the two probes ends first, keeps nothing and drops nothing: its
+epoch predates the newer one's `Begin`, and `Record` never deletes. (2) The
+probe reads the card's open substreams (`/proc/asound/card<N>/pcm*/sub*/status`,
+open unless the first line is `closed`, through the `sys` seam) after the check
+after open and again before the close; beside another, or when the reading
+fails or does not show its own, each refused candidate is not probed, each
+acceptance stands, and `ProbeReport.Shared` says why. On legion0's codec,
+nothing else open: its own substream seen, its refusals kept; with the capture
+node held by another process: `pcm0c/sub0` named, its refusals not probed,
+S16_LE and S32_LE at 44.1 kHz accepted. (3) A Start that finds a probe holding
+the slot counts among the backend's `waiters` until it takes the slot or gives
+up, and `reserveProbe` refuses a probe while one waits
+(`session_holds_device`). The controls (`.tmp/_b728-b4/controls_r2.py`, the
+bytes restored from memory, `git status` clean after): the baseline green;
+round 1's 23 rerun, its cache controls rewritten for the epoch, each red
+again; and 20 new, each red: `Record` ignoring the epoch
+(`TestAChoiceWriteLapsesAProbeAlreadyRunning`,
+`TestALateProbeOfAnOlderEnumerationKeepsAndDropsNothing`), `Forget` not
+moving it (the first), `Begin` not moving it for another unit and a late
+`Record` deleting the newer unit's answers (the second); either substream
+read skipped, a failed reading or the own substream's absence taken for
+nothing else open, the own substream counted as another or named on
+subdevice 0 (the row 0a98ff3e added), the refusals kept, the acceptances
+dropped too, `Shared` unset (`TestARefusalBesideAnotherOpenSubstreamIsNotKept`); the reader taking only
+a RUNNING state, playback alone, one card, or a missing status for an error
+(`TestTheCardsOpenSubstreamsAreReadFromTheirStatus`); `reserveProbe` ignoring
+the waiters and a waiting Start not counted
+(`TestAStartThatWaitedTakesTheSlotBeforeAnotherProbe`,
+`TestAStartThatWaitedForAProbeTakesTheSlotBeforeTheNextProbe`, and the gate's
+row for the first); a Start that gave its wait up still counted
+(`TestAStartWaitsForTheProbeThatHoldsTheSlot`'s three rows that give up, the
+assertion 0a98ff3e added). One mutant is equivalent and left out: dropping
+the decrement as the Start takes the slot, which `hold`'s deferred one makes
+up before it returns.
