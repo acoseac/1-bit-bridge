@@ -163,9 +163,10 @@ func TestFoldingInAnswersAsThisHostsVolumeLooksNamesUp(t *testing.T) {
 
 // probeFolder is a folder that is on no disk, for the probe's seam: its
 // listing as the probe reads it, the files its names name now (two names of
-// one file, a hard link's, share an id), whether it folds case, which names
-// os.SameFile could not open (Windows answers false then), and what happens to
-// it before each lookup (change, handed the name looked up), so that a test
+// one file, a hard link's, share an id), whether it folds case, the spellings
+// os.SameFile could not open a lookup by (on Windows it opens the path the
+// lookup was asked for, and answers false where it cannot), and what happens
+// to it before each lookup (change, handed the name looked up), so that a test
 // can change it between the probe's lookups.
 type probeFolder struct {
 	listing    []string
@@ -175,7 +176,8 @@ type probeFolder struct {
 	change     func(f *probeFolder, name string)
 }
 
-// probeInfo is a probeFolder's lookup: the name it found and its file.
+// probeInfo is a probeFolder's lookup: the spelling it was asked for and the
+// file it found.
 type probeInfo struct {
 	name string
 	id   int
@@ -213,7 +215,7 @@ func (f *probeFolder) lstat(p string) (fs.FileInfo, error) {
 	if f.folds {
 		for n, id := range f.ids {
 			if strings.EqualFold(n, name) {
-				return probeInfo{n, id}, nil
+				return probeInfo{name, id}, nil
 			}
 		}
 	}
@@ -269,10 +271,10 @@ func TestTwoNamesOfOneFileAreNoProofThatAFolderFoldsCase(t *testing.T) {
 // it first found, and the other spelling's too where it was found; otherwise
 // it asks the next entry (B651's ninth round, Codex and Claude on round 8).
 // An entry removed between the two lookups, or replaced by a save that
-// renames a new file over it, or one os.SameFile cannot open (Windows answers
-// false then), made a folder that folds answer case-sensitive; one renamed to
-// its other spelling between the lookups made a case-sensitive folder answer
-// case-insensitive.
+// renames a new file over it, or one os.SameFile cannot open by either
+// spelling (Windows answers false then), made a folder that folds answer
+// case-sensitive; one renamed to its other spelling between the lookups made a
+// case-sensitive folder answer case-insensitive.
 func TestAnEntryThatChangesBetweenTheLookupsTellsNothing(t *testing.T) {
 	once := func(at string, do func(f *probeFolder)) func(*probeFolder, string) {
 		done := false
@@ -286,10 +288,11 @@ func TestAnEntryThatChangesBetweenTheLookupsTellsNothing(t *testing.T) {
 	folding := func() *probeFolder {
 		return &probeFolder{listing: []string{"Album", "Band"}, ids: map[string]int{"Album": 1, "Band": 2}, folds: true}
 	}
-	removed, saved, unopened := folding(), folding(), folding()
+	removed, saved, unopened, otherUnopened := folding(), folding(), folding(), folding()
 	removed.change = once("ALBUM", func(f *probeFolder) { delete(f.ids, "Album") })
 	saved.change = once("ALBUM", func(f *probeFolder) { f.ids["Album"] = 3 })
 	unopened.cannotOpen = map[string]bool{"Album": true}
+	otherUnopened.cannotOpen = map[string]bool{"ALBUM": true}
 	renamed := &probeFolder{listing: []string{"Album"}, ids: map[string]int{"Album": 1}}
 	renamed.change = once("ALBUM", func(f *probeFolder) {
 		delete(f.ids, "Album")
@@ -303,6 +306,7 @@ func TestAnEntryThatChangesBetweenTheLookupsTellsNothing(t *testing.T) {
 		{"an entry removed between the lookups, in a folder that folds", removed, CaseInsensitive},
 		{"an entry a save replaced between the lookups, in a folder that folds", saved, CaseInsensitive},
 		{"an entry os.SameFile cannot open, in a folder that folds", unopened, CaseInsensitive},
+		{"an entry os.SameFile cannot open by its other spelling, in a folder that folds", otherUnopened, CaseInsensitive},
 		{"an entry renamed to its other spelling between the lookups, in a case-sensitive folder", renamed, CaseUnknown},
 	} {
 		if got := foldingIn(c.f, "/music"); got != c.want {
