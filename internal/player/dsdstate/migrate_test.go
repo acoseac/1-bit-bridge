@@ -438,22 +438,31 @@ func TestADACBoundLaterIsTheRecordsOrTakesTheDefaults(t *testing.T) {
 }
 
 // TestTheMigrationNeverOverwritesAChoice: a DAC that has a choice of its own
-// when the migration's part comes to it (a state the app wrote before the
-// legacy keys were set) keeps it whole, with no answer, acknowledgement,
-// confirmation or warning written for it, and the part is done.
+// when the migration's part comes to it (a state the app or the console
+// wrote before the legacy keys were set) keeps it whole, with no answer,
+// acknowledgement, confirmation or warning written for it, and the part is
+// done: a user's first choice, at revision 1 as the migration's fallback is,
+// and a later one alike, since the writer, not the revision, tells them
+// apart (ownChoice).
 func TestTheMigrationNeverOverwritesAChoice(t *testing.T) {
 	gb := goBar(t)
-	own := State{DefaultMode: ModeAuto, DACs: []DAC{{Key: gb, Choice: &Choice{Mode: ModeConvert, Revision: 7, SetAt: t0, SetBy: ByApp}}}}
-	for _, rec := range []Record{takenRecord([]int{DSD64}, []int{DSD128}, ""), missingRecord, refusedRecord(ReasonStaleVersion), refusedRecord(ReasonIdentityMismatch)} {
-		got, _, err := Migrate(own, Input{Legacy: Legacy{DSDMode: ModeAuto, AllowDoP: ptr(true), DSDQualification: "approved.json"}, Bound: bound(t), Record: rec, Now: t0})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if d, _ := got.DAC(gb); !reflect.DeepEqual(d, own.DACs[0]) || len(got.Warnings) != 0 {
-			t.Fatalf("a record %v migrated over the DAC's own choice: %s", rec.Outcome, show(t, got))
-		}
-		if got.MigratedFrom.RecordSHA256 != "" {
-			t.Fatalf("the marker says the record migrated over the DAC's choice: %+v", got.MigratedFrom)
+	for _, choice := range []Choice{
+		{Mode: ModeConvert, Revision: 1, SetAt: t0, SetBy: ByApp},
+		{Mode: ModeOff, Revision: 1, SetAt: t0, SetBy: ByConsole},
+		{Mode: ModeConvert, Revision: 7, SetAt: t0, SetBy: ByApp},
+	} {
+		own := State{DefaultMode: ModeAuto, DACs: []DAC{{Key: gb, Choice: &choice}}}
+		for _, rec := range []Record{takenRecord([]int{DSD64}, []int{DSD128}, ""), missingRecord, refusedRecord(ReasonStaleVersion), refusedRecord(ReasonIdentityMismatch)} {
+			got, _, err := Migrate(own, Input{Legacy: Legacy{DSDMode: ModeAuto, AllowDoP: ptr(true), DSDQualification: "approved.json"}, Bound: bound(t), Record: rec, Now: t0})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d, _ := got.DAC(gb); !reflect.DeepEqual(d, own.DACs[0]) || len(got.Warnings) != 0 {
+				t.Fatalf("a record %v migrated over the DAC's own choice %+v: %s", rec.Outcome, choice, show(t, got))
+			}
+			if got.MigratedFrom.RecordSHA256 != "" {
+				t.Fatalf("the marker says the record migrated over the DAC's choice: %+v", got.MigratedFrom)
+			}
 		}
 	}
 }
