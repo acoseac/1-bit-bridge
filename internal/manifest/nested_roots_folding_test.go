@@ -2,11 +2,8 @@ package manifest
 
 import (
 	"context"
-	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 
@@ -46,18 +43,19 @@ func newMountedNested(t *testing.T) *mountedNested {
 	return n
 }
 
-// answer has the scanner answer for each folder as the volume it is on
-// compares names: the outer root's volume does not fold case, and the one
-// mounted at music/usb does, while mounted says it is there. Whether a folder
-// can tell at all is read from its own listing on this host
-// (fsutil.FoldingIn): one that offers no name to look up, an empty one or a
-// bare mount point among them, answers Unknown on any volume, and one that can
-// answers as its volume compares, never as this host's disk does, which folds
-// case on macOS and Windows where the outer volume stands for one that does
-// not (B651's eighth round: a bare mount point holding an index folder of its
-// own answered there for the host's disk, case-insensitive).
+// answer has the scanner stand in for the two volumes (simVolume, both of its
+// seams): the outer root's volume does not fold case, and the one mounted at
+// music/usb does, while mounted says it is there. Whether a folder can tell
+// at all is read from its own listing on this host (fsutil.FoldingIn): one
+// that offers no name to look up, an empty one or a bare mount point among
+// them, answers Unknown on any volume, and one that can answers as its volume
+// compares, never as this host's disk does, which folds case on macOS and
+// Windows where the outer volume stands for one that does not (B651's eighth
+// round: a bare mount point holding an index folder of its own answered there
+// for the host's disk, case-insensitive). A lookup finds a name in another
+// case in a folder of the volume that folds alone (B651's ninth round).
 func (n *mountedNested) answer(mounted bool) {
-	n.scanner.foldingHook = func(d string) fsutil.CaseFolding {
+	simVolume{folding: func(d string) fsutil.CaseFolding {
 		switch {
 		case fsutil.FoldingIn(d) == fsutil.CaseUnknown:
 			return fsutil.CaseUnknown
@@ -65,7 +63,7 @@ func (n *mountedNested) answer(mounted bool) {
 			return fsutil.CaseInsensitive
 		}
 		return fsutil.CaseSensitive
-	}
+	}}.install(n.scanner)
 }
 
 // mustReadAsNotMounted fails the test at once unless the nested root reads as
@@ -313,54 +311,57 @@ func TestTwoRootsSpelledAlikeStayTwoWhereTheirFolderIsNotEstablishedToFoldCase(t
 
 // TestALookupThatFailsIsNoProofThatTwoSpellingsAreOneRoot: in a folder
 // established to fold case, two spellings of a name that differ in case alone
-// are one entry, for which root a path is, where both are there as one file or
-// where the folder's answer decides it, one or neither being there; a lookup
-// that fails otherwise (a permission refused, a transient error) cannot tell,
-// and they stay two (caseLook.sameName; Codex on round 7). A path the volume
-// spells music/usb/Band stays the outer root's then, never the nested root's
-// configured as music/USB: no scan is routed to a root on a lookup that
-// failed, nor sent into a folder that may be another by the rewrite of the
-// root's own part. The folder's answer is stood in for (answerFolding), as one
-// read before its permissions changed; the lookups are refused by this host's
-// disk, the folder made unsearchable, which neither Windows nor root refuses.
-// The sibling, neither spelling there, runs everywhere: the folder's answer
-// makes the path the nested root's, as before.
+// are one entry, for which root a path is, only where the lookups of both
+// find one file, or neither finds anything and the folder's answer decides.
+// A lookup that fails otherwise, a permission refused or a transient error
+// (Codex on round 7), and one that finds a file where the other finds nothing,
+// which a folder that folds that name never answers (Claude on round 8), keep
+// them two (caseLook.sameName). A path stays the outer root's then, never a
+// nested root's spelled like it: no scan is routed to a root on such lookups,
+// nor sent into a folder that may be another by the rewrite of the root's own
+// part. The volume is stood in for through both seams (simVolume), so every
+// leg runs on every host: a permission refusing lookups, which this host's
+// disk would not do as root or on Windows, and a volume that folds ASCII case
+// and no other, where the folder Ωmega is there and ωmega names nothing,
+// beside one that folds every case, where USB finds the folder usb.
 func TestALookupThatFailsIsNoProofThatTwoSpellingsAreOneRoot(t *testing.T) {
 	for _, c := range []struct {
-		name    string
-		refused bool
+		name string
+		// disk is the folder in music the path asked about is in, made there
+		// unless gone; nested is the nested root's name in music.
+		disk, nested string
+		gone         bool
+		vol          simVolume
+		outer        bool
 	}{
-		{"a lookup refused", true},
-		{"neither spelling there", false},
+		{"a lookup refused", "usb", "USB", false, simVolume{refused: map[string]bool{"music": true}}, true},
+		{"one spelling there and the other not", "Ωmega", "ωmega", false, simVolume{fold: asciiFold}, true},
+		{"neither spelling there", "usb", "USB", true, simVolume{}, false},
+		{"both spellings one folder", "usb", "USB", false, simVolume{}, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if c.refused && (runtime.GOOS == "windows" || os.Geteuid() == 0) {
-				t.Skip("a folder's permissions refuse no lookup to Windows or to root")
-			}
 			dir := t.TempDir()
 			music := filepath.Join(dir, "music")
-			nested := filepath.Join(music, "USB")
-			band := filepath.Join(music, "usb", "Band")
+			path := filepath.Join(music, c.disk, "Band")
 			files := []string{filepath.Join(music, "Artist", "Album", "01.flac")}
-			if c.refused {
-				files = append(files, filepath.Join(band, "Record", "01.flac"))
+			if !c.gone {
+				files = append(files, filepath.Join(path, "Record", "01.flac"))
 			}
 			writeTracks(t, files...)
+			nested := filepath.Join(music, c.nested)
 			scanner := NewScanner([]string{music, nested}, openStoreIn(t, dir), "")
-			answerFolding(scanner, fsutil.CaseInsensitive)
+			v := c.vol
+			v.folding = func(string) fsutil.CaseFolding { return fsutil.CaseInsensitive }
+			if v.refused != nil {
+				v.refused = map[string]bool{music: true}
+			}
+			v.install(scanner)
 			want := nested
-			if c.refused {
-				if err := os.Chmod(music, 0o600); err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() { _ = os.Chmod(music, 0o755) })
-				if _, err := os.Lstat(filepath.Join(music, "usb")); err == nil || errors.Is(err, fs.ErrNotExist) {
-					t.Fatalf("premise: a lookup in %s, made unsearchable, answered %v", music, err)
-				}
+			if c.outer {
 				want = music
 			}
-			if got, _ := scanner.rootOf(band); got != want {
-				t.Errorf("%s is %q's, want %q's", band, got, want)
+			if got, _ := scanner.rootOf(path); got != want {
+				t.Errorf("%s is %q's, want %q's", path, got, want)
 			}
 		})
 	}

@@ -222,6 +222,14 @@ type Scanner struct {
 	// Read on the scan's goroutine and the watcher's, so a test sets it
 	// before either runs, or between scans.
 	foldingHook func(dir string) fsutil.CaseFolding
+	// lookupHook, when set, answers in os.Lstat's place for what a lookup of
+	// a name in a folder finds when the scanner asks how two spellings
+	// compare (Scanner.lstat: caseLook.sameName and mayBeOneName), so that a
+	// test's stand-in volume answers both questions, how its folders compare
+	// names and what a lookup there finds, and this host's own lookups decide
+	// neither (B651's ninth round). A test sets the two together; per
+	// instance, nil in production, read as foldingHook is.
+	lookupHook func(name string) (fs.FileInfo, error)
 
 	// postScanHook, when set, fires after every successful full Scan —
 	// see SetPostScanHook. atomic.Pointer so the boot-time SetPostScanHook

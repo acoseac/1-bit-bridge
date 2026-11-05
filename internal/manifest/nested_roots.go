@@ -32,9 +32,10 @@ import (
 // single folder case-sensitive. The two questions asked count Unknown in
 // opposite ways (Argon on the seventh round's brief). Which root a path is
 // (caseLook.sameName) folds an element only where its folder is established to
-// fold case, and never on a lookup there that failed (B651's eighth round), so
-// two roots spelled alike are never taken for one and a subtree scan is never
-// sent into another root's folder. What a scan spares and a walk passes over
+// fold case, and never on a lookup there that failed (B651's eighth round) or
+// that found one spelling alone (the ninth), so two roots spelled alike are
+// never taken for one and a subtree scan is never sent into another root's
+// folder. What a scan spares and a walk passes over
 // (caseLook.mayBeOneName) folds an element wherever its folder may fold, so the
 // rows of a nested root whose volume went are spared in every spelling the
 // walks may have given them.
@@ -46,6 +47,16 @@ func (s *Scanner) foldingIn(dir string) fsutil.CaseFolding {
 		return h(dir)
 	}
 	return fsutil.FoldingIn(dir)
+}
+
+// lstat is what a lookup of name finds, for how two spellings compare
+// (os.Lstat), or a test's stand-in for it (lookupHook), which describes the
+// volume foldingHook does.
+func (s *Scanner) lstat(name string) (fs.FileInfo, error) {
+	if h := s.lookupHook; h != nil {
+		return h(name)
+	}
+	return os.Lstat(name)
 }
 
 // caseLook compares paths as their folders compare names, for the length of
@@ -74,28 +85,28 @@ func (c *caseLook) folding(dir string) fsutil.CaseFolding {
 
 // sameName reports whether x and y, names that differ in case alone, name one
 // entry of the folder parent, for which root a path is: only where the folder
-// is established to fold case (an Unknown answer keeps them two) and, where
-// both spellings are there, they are one entry. Where one or neither is there,
-// the folder's answer decides. A lookup that fails otherwise (a permission
-// refused, a transient error) cannot tell, and keeps them two: taking them for
-// one on it would route a scan to a root the path may not be in (Codex on
-// round 7).
+// is established to fold case (an Unknown answer keeps them two) and the
+// lookups of both find one file, or neither finds anything and the folder's
+// answer decides. One that finds a file where the other finds nothing is an
+// answer a folder that folds that name never gives (Claude on round 8: a
+// volume may fold ASCII case and not another script's), and a lookup that
+// fails otherwise (a permission refused, a transient error) cannot tell
+// (Codex on round 7): both keep them two, since taking them for one would
+// route a scan to a root the path may not be in. Every lookup here is the
+// scanner's (Scanner.lstat), so a test's stand-in volume answers it.
 func (c *caseLook) sameName(parent, x, y string) bool {
 	if c.folding(parent) != fsutil.CaseInsensitive {
 		return false
 	}
-	fx, errx := os.Lstat(filepath.Join(parent, x))
-	fy, erry := os.Lstat(filepath.Join(parent, y))
-	if errx == nil && erry == nil {
+	fx, errx := c.s.lstat(filepath.Join(parent, x))
+	fy, erry := c.s.lstat(filepath.Join(parent, y))
+	switch {
+	case errx == nil && erry == nil:
 		return os.SameFile(fx, fy)
+	case errors.Is(errx, fs.ErrNotExist) && errors.Is(erry, fs.ErrNotExist):
+		return true
 	}
-	return thereOrNot(errx) && thereOrNot(erry)
-}
-
-// thereOrNot reports whether a lookup's error says the name is there or is
-// not, and nothing else: nil, or not there.
-func thereOrNot(err error) bool {
-	return err == nil || errors.Is(err, fs.ErrNotExist)
+	return false
 }
 
 // mayBeOneName reports whether a name that differs from x in case alone may
@@ -110,7 +121,7 @@ func (c *caseLook) mayBeOneName(parent, x string) bool {
 	if c.folding(parent) != fsutil.CaseSensitive {
 		return true
 	}
-	if _, err := os.Lstat(filepath.Join(parent, x)); err == nil {
+	if _, err := c.s.lstat(filepath.Join(parent, x)); err == nil {
 		return false
 	}
 	return !holdsSpellingOrContent(parent, x)

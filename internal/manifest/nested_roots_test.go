@@ -2,10 +2,13 @@ package manifest
 
 import (
 	"context"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -229,10 +232,87 @@ func newFoldedNested(t *testing.T) *foldedNested {
 // in for macOS's default volume or Windows', which this host's may not be.
 func (n *foldedNested) foldCase() { answerFolding(n.scanner, fsutil.CaseInsensitive) }
 
-// answerFolding has the scanner answer f for how every folder compares names
-// (foldingHook).
+// answerFolding has the scanner stand in for a volume every folder of which
+// answers f for how it compares names (simVolume): CaseInsensitive, a volume
+// that folds case, whose lookups find a name in another case.
 func answerFolding(s *Scanner, f fsutil.CaseFolding) {
-	s.foldingHook = func(string) fsutil.CaseFolding { return f }
+	simVolume{folding: func(string) fsutil.CaseFolding { return f }}.install(s)
+}
+
+// simVolume stands in for the volume a test's tree is on, through both of the
+// scanner's seams at once, so that the two describe one volume (B651's ninth
+// round). foldingHook answers how a folder compares the names in it (folding,
+// the probe's question); lookupHook answers what a lookup of a name in a
+// folder finds (Scanner.lstat, for caseLook.sameName and mayBeOneName): the
+// entry its name spells byte for byte, else, in a folder folding answers
+// CaseInsensitive for, the entry whose name matches it under fold, or, in a
+// folder whose lookups refused names, a permission refused. The entries are
+// the test's tree on this host's disk, read from its listing: this host's own
+// lookups decide nothing, so its disk, which folds case on macOS and Windows,
+// finds no spelling the stand-in would not. A name is looked up in its folder
+// as the folder is spelled, which every fixture spells as the disk does.
+type simVolume struct {
+	folding func(dir string) fsutil.CaseFolding
+	// fold matches two names in a folder that folds case: strings.EqualFold
+	// where nil.
+	fold func(a, b string) bool
+	// refused holds the folders whose lookups a permission refuses.
+	refused map[string]bool
+}
+
+// install has the scanner answer through v, for both questions.
+func (v simVolume) install(s *Scanner) {
+	s.foldingHook = v.folding
+	s.lookupHook = v.lookup
+}
+
+func (v simVolume) lookup(name string) (fs.FileInfo, error) {
+	dir, base := filepath.Dir(name), filepath.Base(name)
+	if v.refused[dir] {
+		return nil, &fs.PathError{Op: "lstat", Path: name, Err: syscall.EACCES}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range entries {
+		if e.Name() == base {
+			return os.Lstat(filepath.Join(dir, e.Name()))
+		}
+	}
+	fold := v.fold
+	if fold == nil {
+		fold = strings.EqualFold
+	}
+	if v.folding(dir) == fsutil.CaseInsensitive {
+		for _, e := range entries {
+			if fold(e.Name(), base) {
+				return os.Lstat(filepath.Join(dir, e.Name()))
+			}
+		}
+	}
+	return nil, &fs.PathError{Op: "lstat", Path: name, Err: fs.ErrNotExist}
+}
+
+// asciiFold matches two names that are the same with the case of their ASCII
+// letters alone folded: a volume that folds ASCII case and no other.
+func asciiFold(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		x, y := a[i], b[i]
+		if 'A' <= x && x <= 'Z' {
+			x += 'a' - 'A'
+		}
+		if 'A' <= y && y <= 'Z' {
+			y += 'a' - 'A'
+		}
+		if x != y {
+			return false
+		}
+	}
+	return true
 }
 
 // takeAway takes the nested root's volume away, leaving its bare mount point
