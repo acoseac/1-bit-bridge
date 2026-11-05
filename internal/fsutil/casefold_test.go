@@ -166,14 +166,16 @@ func TestFoldingInAnswersAsThisHostsVolumeLooksNamesUp(t *testing.T) {
 // one file, a hard link's, share an id), whether it folds case, the spellings
 // os.SameFile could not open a lookup by (on Windows it opens the path the
 // lookup was asked for, and answers false where it cannot), and what happens
-// to it before each lookup (change, handed the name looked up), so that a test
-// can change it between the probe's lookups.
+// to it before each lookup (change, handed the name looked up) and before each
+// read of its whole listing (relist, the probe's re-read), so that a test can
+// change it between the probe's lookups, or between them and the re-read.
 type probeFolder struct {
 	listing    []string
 	ids        map[string]int
 	folds      bool
 	cannotOpen map[string]bool
 	change     func(f *probeFolder, name string)
+	relist     func(f *probeFolder)
 }
 
 // probeInfo is a probeFolder's lookup: the spelling it was asked for and the
@@ -193,6 +195,9 @@ func (probeInfo) Sys() any               { return nil }
 // readDir answers the listing, n names of it at most where n > 0, as
 // os.File.ReadDir does: fewer than n only at its end.
 func (f *probeFolder) readDir(_ string, n int) ([]fs.DirEntry, error) {
+	if n <= 0 && f.relist != nil {
+		f.relist(f)
+	}
 	names := f.listing
 	if n > 0 && len(names) > n {
 		names = names[:n]
@@ -259,6 +264,68 @@ func TestTwoNamesOfOneFileAreNoProofThatAFolderFoldsCase(t *testing.T) {
 		{"a folder that folds, past the first read", &probeFolder{
 			listing: append(append(caseless(foldingProbeEntries-1), "Folder.jpg"), caseless(10)...),
 			ids:     map[string]int{"Folder.jpg": 1}, folds: true}, CaseInsensitive},
+	} {
+		if got := foldingIn(c.f, "/music"); got != c.want {
+			t.Errorf("%s: the folder answered %s, want %s", c.name, got, c.want)
+		}
+	}
+}
+
+// TestAListingThatChangedBeforeItsReReadTellsNothing: where the probe reads
+// the whole listing again for the swapped spelling (its first read was not
+// all of it), it answers case-sensitive only where the re-read holds both
+// spellings, and case-insensitive only where it holds the probed one alone;
+// one that holds the swapped spelling alone, or neither, says the entry
+// changed between the lookups and the re-read, and the next entry is asked,
+// the probe answering Unknown once every one is spent, never case-sensitive
+// (B651's tenth round, Codex and Claude on round 9). A rename of Abba to ABBA
+// on a volume that folds made it answer case-sensitive, the direction that
+// keeps rows a scan must spare exact; the hard link's two names removed on a
+// case-sensitive volume made it answer case-insensitive.
+func TestAListingThatChangedBeforeItsReReadTellsNothing(t *testing.T) {
+	renamed := func(next ...string) *probeFolder {
+		f := &probeFolder{
+			listing: append(append(caseless(foldingProbeEntries-1-len(next)), append([]string{"Abba"}, next...)...), caseless(10)...),
+			ids:     map[string]int{"Abba": 1, "Band": 2},
+			folds:   true,
+		}
+		done := false
+		f.relist = func(f *probeFolder) {
+			if done {
+				return
+			}
+			done = true
+			for i, n := range f.listing {
+				if n == "Abba" {
+					f.listing[i] = "ABBA"
+				}
+			}
+			delete(f.ids, "Abba")
+			f.ids["ABBA"] = 1
+		}
+		return f
+	}
+	removed := &probeFolder{
+		listing: append(append(caseless(foldingProbeEntries-1), "folder.jpg"), append(caseless(10), "FOLDER.JPG")...),
+		ids:     map[string]int{"folder.jpg": 1, "FOLDER.JPG": 1},
+	}
+	removedOnce := false
+	removed.relist = func(f *probeFolder) {
+		if removedOnce {
+			return
+		}
+		removedOnce = true
+		f.listing = slices.DeleteFunc(f.listing, func(n string) bool { return n == "folder.jpg" || n == "FOLDER.JPG" })
+		clear(f.ids)
+	}
+	for _, c := range []struct {
+		name string
+		f    *probeFolder
+		want CaseFolding
+	}{
+		{"an entry renamed to its other spelling before the re-read, in a folder that folds, another entry after it", renamed("Band"), CaseInsensitive},
+		{"an entry renamed to its other spelling before the re-read, in a folder that folds, no other entry", renamed(), CaseUnknown},
+		{"a hard link's two names removed before the re-read, in a case-sensitive folder", removed, CaseUnknown},
 	} {
 		if got := foldingIn(c.f, "/music"); got != c.want {
 			t.Errorf("%s: the folder answered %s, want %s", c.name, got, c.want)
