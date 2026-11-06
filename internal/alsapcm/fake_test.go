@@ -3,6 +3,7 @@ package alsapcm
 import (
 	"context"
 	"flag"
+	"fmt"
 	"slices"
 	"sync"
 	"testing"
@@ -24,6 +25,27 @@ type fakeHW struct {
 	granule uint32
 	msbits  uint32 // 0: the format's width
 	info    uint32
+	// altsets, when set, are what the hardware offers in place of formats
+	// and rates: each a set of formats at a set of rates, as a USB DAC's
+	// streaming altsets are, so a format is taken only at its own altset's
+	// rates (a native DSD format at the DSD rates alone).
+	altsets []fakeAltset
+	// bits, for a format it names, is the significant bits the refined and
+	// the committed setup report for it, exactly: 0 there is a kernel that
+	// reported none, which msbits cannot say (its 0 is the format's width).
+	bits map[uint32]uint32
+}
+
+// fakeAltset is one streaming altset of the hardware: its formats, each at
+// each of its rates.
+type fakeAltset struct {
+	formats, rates []uint32
+}
+
+// fakeRead is one read of the card's open substreams: the requests sent and
+// the closes made before it.
+type fakeRead struct {
+	calls, closes int
 }
 
 // fakeWrite is one scripted answer to WRITEI_FRAMES: take frames of what
@@ -90,9 +112,26 @@ type fakeKernel struct {
 
 	// The node.
 	openErr error
-	version uint32
-	info    pcmInfo
-	hw      fakeHW
+	// openErrs answer the next opens, one an attempt, ahead of openErr: an
+	// error refuses that attempt, nil lets it open.
+	openErrs []error
+	// exclusive refuses an open of the node while it is open with EBUSY, as
+	// the kernel's exclusive open refuses a second open of a device with one
+	// substream.
+	exclusive bool
+	// refineErrs fails the nth HW_REFINE (from 1) with its error.
+	refineErrs map[int]error
+	// others are the card's other substreams open at each read of its open
+	// substreams, an entry a read, in order, and none past them;
+	// substreamsErr fails every read; hideOwn leaves the node's own
+	// substream out of a read while it is open, as a kernel whose /proc
+	// lists no substream does.
+	others        [][]string
+	substreamsErr error
+	hideOwn       bool
+	version       uint32
+	info          pcmInfo
+	hw            fakeHW
 
 	// Scripts.
 	fail   map[uint32]error   // a request that fails, every time
@@ -135,10 +174,12 @@ type fakeKernel struct {
 	statusGate, statusParked chan struct{}
 	pollGate, pollParked     chan struct{}
 
-	// The record.
+	// The record. opened is every open asked for, refused ones included, and
+	// opens the ones that opened.
 	opened     []string
 	openAt     []int // len(played) at each open: where each open's bytes begin
 	opens      int
+	refines    []hwParams // each HW_REFINE as it was asked, before the kernel narrowed it
 	isOpen     bool
 	fd         int
 	closes     int
@@ -152,6 +193,10 @@ type fakeKernel struct {
 	pollWaits  []time.Duration
 	pauses     []uintptr
 	epipes     int // writes answered EPIPE: offered to a stream an xrun stopped
+
+	// substreamReads is each read of the card's open substreams: how many
+	// requests had been sent, and how many closes made, before it.
+	substreamReads []fakeRead
 }
 
 // newFake returns a fake node for card 5 device 0 on hardware that takes
@@ -251,8 +296,17 @@ func (k *fakeKernel) open(path string) (int, error) {
 		k.mu.Lock()
 	}
 	k.opened = append(k.opened, path)
-	if k.openErr != nil {
+	if len(k.openErrs) > 0 {
+		err := k.openErrs[0]
+		k.openErrs = k.openErrs[1:]
+		if err != nil {
+			return -1, err
+		}
+	} else if k.openErr != nil {
 		return -1, k.openErr
+	}
+	if k.exclusive && k.isOpen {
+		return -1, errnoEBUSY
 	}
 	k.fd = 7
 	k.state = stateOpen
@@ -260,6 +314,30 @@ func (k *fakeKernel) open(path string) (int, error) {
 	k.opens++
 	k.openAt = append(k.openAt, len(k.played))
 	return k.fd, nil
+}
+
+// openSubstreams is the card's /proc/asound as the kernel would list its
+// open substreams: the node's own while it is open (unless hideOwn), and the
+// next entry of others.
+func (k *fakeKernel) openSubstreams(card int) ([]string, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.substreamReads = append(k.substreamReads, fakeRead{calls: len(k.calls), closes: k.closes})
+	if card != int(k.info.card) {
+		k.t.Errorf("the substreams of card %d were read; the node is card %d", card, k.info.card)
+	}
+	if k.substreamsErr != nil {
+		return nil, k.substreamsErr
+	}
+	var open []string
+	if k.isOpen && !k.hideOwn {
+		open = append(open, fmt.Sprintf("pcm%dp/sub%d", k.info.device, k.info.subdevice))
+	}
+	if len(k.others) > 0 {
+		open = append(open, k.others[0]...)
+		k.others = k.others[1:]
+	}
+	return open, nil
 }
 
 func (k *fakeKernel) close(fd int) error {
@@ -746,7 +824,12 @@ func (k *fakeKernel) ioctl(fd int, req uint32, arg unsafe.Pointer) error {
 	case ioctlInfo:
 		*(*pcmInfo)(arg) = k.info
 	case ioctlHWRefine:
-		return k.refine((*hwParams)(arg))
+		hw := (*hwParams)(arg)
+		k.refines = append(k.refines, *hw)
+		if err := k.refineErrs[len(k.refines)]; err != nil {
+			return err
+		}
+		return k.refine(hw)
 	case ioctlHWParams:
 		return k.hwParams((*hwParams)(arg))
 	case ioctlHWFree:
@@ -1006,8 +1089,12 @@ func (k *fakeKernel) narrow(p *hwParams) bool {
 		*m = out
 		return len(out.values()) > 0
 	}
+	formats, offered := k.hw.formats, k.hw.rates
+	if len(k.hw.altsets) > 0 {
+		formats, offered = k.altsetsFor(p)
+	}
 	if !keep(hwParamAccess, []uint32{accessRWInterleaved}) ||
-		!keep(hwParamFormat, k.hw.formats) ||
+		!keep(hwParamFormat, formats) ||
 		!keep(hwParamSubformat, []uint32{subformatStd}) {
 		return false
 	}
@@ -1029,7 +1116,7 @@ func (k *fakeKernel) narrow(p *hwParams) bool {
 	}
 	rate := p.intervalOf(hwParamRate)
 	var rates []uint32
-	for _, r := range k.hw.rates {
+	for _, r := range offered {
 		if r >= rate.lo() && r <= rate.hi() {
 			rates = append(rates, r)
 		}
@@ -1052,15 +1139,48 @@ func (k *fakeKernel) narrow(p *hwParams) bool {
 	*p.intervalOf(hwParamPeriods) = interval{min: max(2, bufLo/perHi), max: bufHi / perLo, flags: intervalInteger}
 	p.info = k.hw.info
 	if f, ok := p.maskOf(hwParamFormat).single(); ok {
-		p.msbits = k.hw.msbits
-		if p.msbits == 0 {
-			p.msbits = map[uint32]uint32{formatS16LE: 16, formatS243LE: 24, formatS24LE: 24, formatS32LE: 32}[f]
+		if bits, ok := k.hw.bits[f]; ok {
+			p.msbits = bits
+		} else {
+			p.msbits = k.hw.msbits
+			if p.msbits == 0 {
+				p.msbits = map[uint32]uint32{formatS16LE: 16, formatS243LE: 24, formatS24LE: 24, formatS32LE: 32}[f]
+			}
 		}
 	}
 	if r, ok := rate.exact(); ok {
 		p.rateNum, p.rateDen = r, 1
 	}
 	return true
+}
+
+// altsetsFor is what the altsets offer a request, as snd-usb-audio's format
+// and rate rules narrow it: the formats of each altset that has a rate the
+// request allows, and the rates of each that has a format it allows. One
+// format at one rate is taken only where some altset holds both.
+func (k *fakeKernel) altsetsFor(p *hwParams) (formats, rates []uint32) {
+	asked := p.maskOf(hwParamFormat).values()
+	iv := p.intervalOf(hwParamRate)
+	for _, a := range k.hw.altsets {
+		var fs, rs []uint32
+		for _, f := range a.formats {
+			if slices.Contains(asked, f) {
+				fs = append(fs, f)
+			}
+		}
+		for _, r := range a.rates {
+			if r >= iv.lo() && r <= iv.hi() {
+				rs = append(rs, r)
+			}
+		}
+		if len(fs) == 0 || len(rs) == 0 {
+			continue
+		}
+		formats = append(formats, fs...)
+		rates = append(rates, rs...)
+	}
+	slices.Sort(rates)
+	return formats, slices.Compact(rates)
 }
 
 // hwParams refines p and then chooses one value for each parameter, as

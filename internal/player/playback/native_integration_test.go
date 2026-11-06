@@ -371,7 +371,7 @@ func testNativeReleaseCleanup(t *testing.T, dop bool) {
 			if !fault {
 				t.Fatalf("cleanup fault not delivered: %v", ev.records)
 			}
-			if e = b.hold(newSession(b, 2)); !errors.Is(e, engine.ErrReleaseUnconfirmed) {
+			if e = b.hold(context.Background(), newSession(b, 2)); !errors.Is(e, engine.ErrReleaseUnconfirmed) {
 				t.Fatalf("failed cleanup authorized successor: %v", e)
 			}
 			if k.View().Opens != 1 {
@@ -1063,7 +1063,7 @@ func testNativePlaybackErrorReleases(t *testing.T, dop bool) {
 	if err := b.Wait(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.hold(newSession(b, 2)); err != nil {
+	if err := b.hold(context.Background(), newSession(b, 2)); err != nil {
 		t.Fatalf("successful cleanup refused explicit next play: %v", err)
 	}
 	k.CheckClosedEach(t)

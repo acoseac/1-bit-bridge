@@ -64,6 +64,13 @@
 // engine's contract it never happens, so a defect shows as a refusal a test
 // sees, never as the kernel's busy refusal of the bridge's own second open.
 //
+// The silent probe (Probe, B728 B4) shares that device slot: it takes it in
+// the step that finds no session holding it (none plays, opens, is paused or
+// is being released, and no release was left unconfirmed), holds it from
+// the binding's location to its node's close, and a Start that comes
+// meanwhile waits for it, at most ProbeWait, holding nothing, then answers
+// the device busy. A probe never waits: one the slot refuses opens nothing.
+//
 // Release is confirmed or it is not: Release ends the session's life, so
 // its sinks drop their streams and close their devices; a teardown joins
 // the session's goroutines and a resume's open between two transports, whose

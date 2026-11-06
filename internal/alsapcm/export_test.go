@@ -125,8 +125,10 @@ type KernelView struct {
 	State string
 	// Starved is a writer waiting on the DAC for time none was granted.
 	Starved bool
-	// Writes, Prepares, Pauses and Drains count those requests.
+	// Writes, Prepares, Pauses and Drains count those requests, and Refines
+	// and HWParams HW_REFINE and HW_PARAMS.
 	Writes, Prepares, Pauses, Drains int
+	Refines, HWParams                int
 	// Card is the card the node says it is.
 	Card int
 }
@@ -155,6 +157,10 @@ func (k *fakeKernel) view() KernelView {
 			v.Prepares++
 		case ioctlDrain:
 			v.Drains++
+		case ioctlHWRefine:
+			v.Refines++
+		case ioctlHWParams:
+			v.HWParams++
 		}
 	}
 	v.Pauses = len(k.pauses)
@@ -186,6 +192,17 @@ func (tk *FakeKernel) Await(t *testing.T, what string, cond func(KernelView) boo
 func (tk *FakeKernel) Renumber(card int) {
 	tk.k.inspect(func(k *fakeKernel) { k.info.card = int32(card) })
 }
+
+// Probe runs the silent probe on the fake node, as Probe runs it on a real
+// one: what the player's backend takes as its Config.Probe.
+func (tk *FakeKernel) Probe(ep Endpoint, cfg ProbeConfig) (ProbeReport, error) {
+	return probe(tk.k, ep, cfg)
+}
+
+// Exclusive makes an open of the node while it is open refused with EBUSY,
+// as the kernel's exclusive open refuses a second open of a device with one
+// substream.
+func (tk *FakeKernel) Exclusive() { tk.k.inspect(func(k *fakeKernel) { k.exclusive = true }) }
 
 // Busy makes every open refused with EBUSY, as while MPD holds the device,
 // until it is called with false.

@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
@@ -75,8 +76,13 @@ type session struct {
 	wcancel context.CancelFunc // which a cut that needs the producer ends
 	reqs    []*cutRequest
 
-	paused   bool
-	pauseSeq int
+	paused bool
+	// pausedFlag is paused as a reader that may not take the session's lock
+	// sees it: the probe's gate (Backend.reserveProbe), under the backend's
+	// lock, which a session takes under its own and never the reverse.
+	// Written with paused, under s.mu.
+	pausedFlag atomic.Bool
+	pauseSeq   int
 	// The pause of a session that holds no device (paused between two
 	// transports, or after the last frames of a sink played out): relStop
 	// stops its release timer, relFired is the timer fired, relSent the
@@ -410,7 +416,7 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	first.from = req.From
 	s.mu.Unlock()
 	defer close(s.startDone)
-	if err := s.b.hold(s); err != nil {
+	if err := s.b.hold(ctx, s); err != nil {
 		return err
 	}
 	cctx, stop := s.bound(ctx)
@@ -1083,6 +1089,7 @@ func (s *session) pausedLocked(noDevice bool) error {
 		return errors.New(s.fault.Detail)
 	}
 	s.paused = true
+	s.pausedFlag.Store(true)
 	s.pauseSeq++
 	s.relSent, s.relFired = false, false
 	if noDevice {
@@ -1135,6 +1142,7 @@ func (s *session) unpausedLocked() error {
 		return errors.New(s.fault.Detail)
 	}
 	s.paused = false
+	s.pausedFlag.Store(false)
 	s.relSent, s.relFired = false, false
 	return nil
 }
