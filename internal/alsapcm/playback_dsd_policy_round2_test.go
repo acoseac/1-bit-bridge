@@ -210,9 +210,12 @@ func TestAProbeRecordsNothingOfAUnitSwappedInBeforeItsOpen(t *testing.T) {
 // reportStep): the reporter reads a heard occurrence's set and its observed
 // mark under the session's lock, which reportStep holds from its hold to the
 // sends after it, and reconciliation repoints the set under that lock: run at
-// once, a monitor keeping the occurrence through a change of the set at every
-// tick and the reporter measuring at every tick, -race finds no access of
-// either outside it.
+// once, refreshes keeping the occurrence through a change of the set as fast
+// as they run and the reporter measuring as fast as it takes ticks, -race
+// finds no access of either outside it. Reconciliation wakes the reporter,
+// which orders each write before the next step, so only refreshes this
+// frequent land inside a step for -race to judge (a monitor tick's handoff
+// did not, the reporter's loop moved outside the lock passing).
 func TestReconciliationAndTheReporterTakeOneLock(t *testing.T) {
 	d := newDSDRig(t, playbacktest.ChoiceState(dsdstate.ModeNative))
 	d.files.add("a", dsd(playbacktest.DSD64, 2))
@@ -223,7 +226,7 @@ func TestReconciliationAndTheReporterTakeOneLock(t *testing.T) {
 	before := d.be.Policy().Generation
 	capped := playbacktest.ChoiceState(dsdstate.ModeNative)
 	capped.DACs[0].Choice.MaxBitRate = playbacktest.DSD128
-	const rounds = 100
+	const rounds = 2000
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -235,10 +238,11 @@ func TestReconciliationAndTheReporterTakeOneLock(t *testing.T) {
 				st = capped
 			}
 			d.store.Set(st)
+			d.be.RefreshDSD(true)
 			select {
-			case d.monitor <- time.Time{}:
 			case <-stop:
 				return
+			default:
 			}
 		}
 	}()
@@ -263,10 +267,8 @@ func TestReconciliationAndTheReporterTakeOneLock(t *testing.T) {
 		close(stop)
 		<-finished
 		alsapcm.LogGoroutines(t)
-		t.Fatalf("the monitor and the reporter did not each take %d ticks within %v", rounds, alsapcm.Watchdog())
+		t.Fatalf("the refreshes and the reporter did not each run %d rounds within %v", rounds, alsapcm.Watchdog())
 	}
-	// A barrier: the last tick's refresh is done.
-	d.monitorTick()
 	if g := d.be.Policy().Generation; g <= before {
 		t.Fatalf("the set stayed at generation %d: no change reached reconciliation", g)
 	}
