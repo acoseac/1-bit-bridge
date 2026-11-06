@@ -528,8 +528,9 @@ func (r *Resolver) StoredPath(ctx context.Context, ref engine.Reference) (path s
 
 // check is what an open and a membership check ask of id short of the file:
 // the one path the index holds for it whose row is there (pathsOf), a row of
-// the bridge's own, not an SACD image's virtual track, in a library root
-// configured now. It answers the path resolved onto that root, or why not.
+// the bridge's own, not an SACD image's virtual track, not a WavPack or
+// Monkey's Audio file (ReasonGatedFormat), in a library root configured now.
+// It answers the path resolved onto that root, or why not.
 func (r *Resolver) check(ctx context.Context, id string) (string, error) {
 	path, err := r.pathsOf(ctx, id)
 	if err != nil {
