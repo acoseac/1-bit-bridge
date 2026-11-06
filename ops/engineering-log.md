@@ -79016,3 +79016,144 @@ running here on Linux). `git status --ignored` showed nothing but `.tmp/`
 after each. Not run here: macOS and Windows natively, CI's runners, `make
 build-all` (not among this round's gates), and the iOS app, whose repo is not
 on this host.
+
+## 2026-11-06 — B756 round 3: a missing count elects again, a record alone is no revision
+
+Worker b756b, the same host, toolchain and branch, from the orchestrator's
+review of round 2: three points, after the orchestrator applied round 2's
+rules patch on the pushed branch and merged main there (not into this tree,
+whose base stays 4880f8a4). Commits: 4fc49363 (point 1), ecd86492 (point 3),
+84476b1e (point 2), then the rule's long form and this record. The rule's
+line and the duplicates bullet in `enrichment.md` change through
+`rules-b756b-r3.patch`. `testdata/album-one-year-cases.json` is unchanged.
+
+### Point 1: a missing count did not restamp a subtree scan — confirmed, fixed
+
+Red on 0d9787de, through `ScanSubtree` with the default grace (three scans):
+`TestScanner_ASubtreeScanElectsAgainWhenACopyGoesOrComesBack`, an album in
+two folders whose copy wins every group (a longer tag, the larger files).
+Its copy's file removed and its folder scanned, the copy's row at
+`missing_count` 1, nothing written or deleted: "the subtree scan after the
+copy went: Band/Remastered/08 Track.flac is suppressed, want it served", the
+copy served. And after a full scan elected the original, the copy's file put
+back unchanged (same bytes and mtime) and its folder scanned, the skip gate
+clearing its count: "the subtree scan after the copy came back: Band/Remastered
+(Copy)/08 Track.flac is suppressed, want it served". The review's reading
+holds: since round 2 the election reads the missing count
+(`dupes.Row.Missing`), and the subtree gate opened only on an upsert, a
+settle, a delete, a rename or a stamped row deleted elsewhere. The wait was
+bounded only by the next full scan (`ScanIntervalSec`, 6 h by default), all
+of it with the one playable copy hidden from every client, so the fix is a
+restamp, not a statement of the bound.
+
+`IncrementMissingTracks` reads each row's new count back (`UPDATE … RETURNING
+missing_count`) and reports the rows it counted missing for the first time
+(`MissingTracksPass.NewlyMissing`, the count at 1) beside the rows it
+deleted; `IncrementMissingTracksAndDeleteAtThreshold` is its wrapper, so the
+console's trash, the full scan's pass and the tests call it unchanged.
+`ResetTrackMissingCount` and `ResetTrackMissingCountsUnder` say whether they
+cleared a count (a driver that cannot say answers yes: a pass too many costs
+two streams of the library, one too few hides a copy), and the scanner counts
+those (`missingCleared`, zeroed at each `ScanSubtree`'s start) at the skip
+gate, an unread file and an SACD container's rows. The gate opens on either.
+A row already missing that stays missing moves nothing, so a gone file costs
+one pass when it is first counted and one when it comes back; its reap opens
+the gate as it did. `TestIncrementMissingTracksCountsTheRowsItMakesMissing`
+pins the counts at the store, and the SACD reset's test the cleared answer.
+
+### Point 2: a change in the record alone made a revision — confirmed, fixed
+
+Red on ecd86492: `TestScanner_AChangeInTheRecordAloneIsWrittenWithoutARevision`,
+the review's case (served 2011, a recorded tag of 1950, a re-read giving
+1968), "rows moved: [Band/Remastered/08 … 12]" and each "enriched_at = 0",
+through a full scan and a subtree scan alike;
+`TestScanner_ABumpThatDropsARecordAloneWritesNoRevision`, the same on the
+path a re-read takes when it is not held (a hand-left record of 1999 on a row
+of 2011, dropped by a re-read giving 2011: one row moved and re-enriched);
+and `TestARecordWrittenAloneSurvivesAWriteBackOfAnEarlierRead`, the
+enricher's stamp of a row it read before the bump answering "track changed
+since it was read", since the bump's upsert had moved the version.
+
+The design, and B187. B187's rule is that every `tags_json` writer moves
+`indexed_at`, which is what lets a write-back of an earlier read
+(`MarkEnriched`, `applyReconciledTracks`) compare-and-set on it, and round 2
+rejected a record written with no move for that reason. The review asks for
+exactly that write, so round 3 makes it safe. `markStampIfUnchanged` marks a
+re-read whose bytes differ from its row's only in the record (both marshalled
+with the record taken out compare equal, and the records differ)
+`versionStampOnly` and `yearRecordOnly`, at the stored row's version. The
+stamp leg writes its `tags_json` first, `UPDATE tracks SET tags_json = ? WHERE
+path = ? AND indexed_at = ?`, a write at the version read as a write-back's
+is, and on a miss leaves the row unstamped, so the next scan reads it again.
+`MarkEnriched` is the one write-back that can fall between a scan's read and
+its write (the enricher runs beside the scanner; the passes run inside a
+scan, under the scanner's lock, after the settlement, so the reconciliation
+writer never meets a record written after its read): it reads the row's
+record at its version (`storedYearRecordAt`) and writes that one, never the
+one it read. Nothing a client reads moves: `indexed_at` does not, so no delta
+entry and no `library.changed`; `enriched_at` is not touched; the FTS update
+trigger fires on `tags_json` and its `WHEN` compares the path, title, artist
+and album only, and the playlist feed's generation triggers ignore
+`tags_json` (both read in round 2). Rejected: moving the record into a column
+of its own, where a record-only write would be no `tags_json` write at all
+and B187 would stand untouched. It costs a migration (main, merged into the
+pushed branch, may hold v61 already), every stored reader's `SELECT`, and a
+stat guard so an older binary's rewrite of a changed file cannot leave a
+stale record, which `tags_json` gives for nothing: an older build's rewrite
+drops the key.
+
+`heldRecord`, round 2's case for a row with no record, goes. It kept such a
+row from gaining a record at a bump, the only way then to keep it stamped;
+the row now gains the record of its tag with no revision, and votes its tag
+as a fresh index would (`TestScanner_ABumpOverRowsStoredWithNoRecordOnlyStampsThem`
+expects the records of 1720 and 0 now, with nothing moved and nothing
+re-enriched). The past-the-limit test expects only the three re-reads past
+the limit of two to move (written as their files read, re-enriched, and
+given the album's year by the tail: B188's accepted churn), and the two held
+ones stamped with their records, enrichment kept.
+`TestARecordOnlyStampWritesOnlyTheRowItWasMergedWith` pins the marking (a
+title changed too is no stamp) and the compare-and-set over a row the
+enricher changed since: neither the record nor the stamp is written, and
+the enricher's release id stays.
+
+### Point 3: CodeQL at store.go:3204 — fixed at its cause
+
+The brief names the alert on the PR's diff (thread PRRT_kwDOSKfTNc60oIVa);
+`gh` is refused on this host, so the alert itself was not read here. The line
+is `out := make([]byte, 0, len(raw)+len(taggedYearKey)+len(b)+4)` in
+`appendTaggedYear`, round 2's hand splice of the record into the marshalled
+bytes, which is `go/allocation-size-overflow`'s shape: a capacity computed
+from the length of a value that can be large, here `json.Marshal`'s output.
+The sum cannot overflow an int in practice (a row's `tags_json` past 2^31
+bytes, on a 32-bit build), but the cause is the splice, so it goes:
+`marshalForStorage` marshals `storedTrackWithRecord`, which embeds the Track
+and adds the record as its last field, and encoding/json writes the bytes;
+nothing is computed from a length and nothing is cut.
+`TestTheRecordIsStoredLastAfterTheTracksOwnBytes` pins the layout (the
+Track's own bytes, the record last, `{}` for a tag that gave no year) and
+passes over the old splice too, on a copy of the tree with 4fc49363's
+`store.go` (`.tmp/_b756b/samebytes.py`), so the bytes a row is stored as are
+the same.
+
+### Negative controls
+
+One run on 84476b1e (`.tmp/_b756b/controls5.py`), predicted by name in
+`.tmp/_b756b/controls5.predictions.txt` before it: each mutation's anchor
+found once, the package's test binary built, 19 tests run one at a time, the
+bytes restored from memory; the baseline green, every control built, `git
+status` empty after, and every prediction held, the tests predicted to stay
+green included.
+
+| Mutation | Red |
+|---|---|
+| (r3-1a) the subtree gate without its `NewlyMissing` term | the subtree test's "a copy that goes" half alone |
+| (r3-1b) the subtree gate without its `missingCleared` term | its "a copy that comes back" half alone |
+| (r3-1c) every increment counted as newly missing | `TestIncrementMissingTracksCountsTheRowsItMakesMissing` alone (a pass too many is harmless to the scan test) |
+| (r3-1d) `ResetTrackMissingCount` never reports a cleared count | that test and the "comes back" half |
+| (r3-2a) `markStampIfUnchanged` without its record-only leg | the three red-first tests, the compare-and-set test, the past-the-limit test and the no-record test; green, as predicted: the version-stale, strays', B342's and B188's no-churn tests |
+| (r3-2b) the record write without its version check | the compare-and-set test's "a row changed since" half alone (the record overwritten, the release id gone, the row stamped) |
+| (r3-2c) `MarkEnriched` without carrying the row's record | `TestARecordWrittenAloneSurvivesAWriteBackOfAnEarlierRead` alone ("records its tag as 1950, want 1968") |
+
+A slip, said here: one `go test ./internal/manifest/ ./internal/dupes/` ran
+outside the shared build lock, which the brief asks of every multi-package
+run; it passed, and every gate below ran through the lock.
