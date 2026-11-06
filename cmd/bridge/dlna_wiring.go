@@ -18,6 +18,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/integrity"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
@@ -705,8 +706,12 @@ func (a *manifestLibraryAdapter) rebuild() {
 	// folder tree, FTS search resolution) derives from this one call, so
 	// duplicate suppression reaches DLNA renderers for free — and DLNA
 	// agrees with what /v1/manifest serves, less the SACD virtual tracks
-	// the loop below leaves out (no renderer can play one).
-	tracks, err := a.store.ListServedTracks(ctx, nil)
+	// the loop below leaves out (no renderer can play one). In the view
+	// that declares no gated format (formatgate's zero Set, backlog B489):
+	// a renderer cannot say it plays WavPack or Monkey's Audio, and most
+	// play neither, so the ContentDirectory offers neither, in this one list
+	// every view of it derives from.
+	tracks, err := a.store.ListServedTracks(ctx, nil, formatgate.Set{})
 	if err != nil {
 		a.log.Warn("manifest list failed", slog.String("err", err.Error()))
 		return

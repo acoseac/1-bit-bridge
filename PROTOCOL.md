@@ -172,7 +172,7 @@ Three properties a client MUST respect:
 
 A client that adds the upstream as its own source will then see the same albums twice — once via the bridge's manifest, once directly. That is expected and is the client's to reconcile; the bridge does not suppress either copy.
 
-`scanState.tracksIndexed` counts the bridge's **served** tracks — the same population `/v1/manifest` returns. Since the server-side duplicate filter (bridge v0.1.9, `duplicates.filter`, on by default), copies suppressed as duplicates are excluded here exactly as they are excluded from the manifest and its `total`, so a client comparing this number against its synced library is comparing like with like. This changed the VALUE for libraries containing duplicates, not the field's shape or presence.
+`scanState.tracksIndexed` counts the bridge's **served** tracks — the same population `/v1/manifest` returns. Since the server-side duplicate filter (bridge v0.1.9, `duplicates.filter`, on by default), copies suppressed as duplicates are excluded here exactly as they are excluded from the manifest and its `total`, so a client comparing this number against its synced library is comparing like with like. This changed the VALUE for libraries containing duplicates, not the field's shape or presence. On a bridge that advertises `wavpackApe` it counts the formats the request declares in `X-Bridge-Formats`, as that request's manifest does (Client formats, under `GET /v1/manifest`), and the response varies on that header.
 
 `scanState.pendingDeletions` (additive since v1.2.x, `omitempty`) is the count of tracks + folders rows the scanner has marked missing across recent scans but hasn't yet reached the configured delete threshold for (default 3 consecutive missing scans, configurable via `scanner.deleteAfterMissingScans` in `bridge.yaml`). A non-zero value means the scanner is granting those rows a grace period before reaping — protecting against silent-empty-enumeration failure modes on flaky network mounts (SMB re-auth flap, NFS brownout, libsmb2 timeout returning an empty Readdir). A steadily climbing value indicates a real connectivity problem the operator should investigate. Pre-v1.2.x bridges (created before migration v5) omit the field; iOS and admin UIs treat absence as 0.
 
@@ -273,7 +273,7 @@ Delta deletions (additive, since the deletion-journal batch — `protocolVersion
 - Server-side, every track-DELETE writer journals its reaped paths in the same transaction (a threshold reap, an explicit batch/prefix delete, a clear-missing sweep, a duplicate-suppression transition), and re-adding a path — or a suppressed copy returning to the served set — clears its tombstone.
 
 Pagination semantics:
-- Pages are ordered by track `path` ASC; the cursor is the last path of the previous page.
+- Pages are ordered by track `path` ASC; the cursor is the last path of the previous page, or, for a request that declares formats in `X-Bridge-Formats`, an opaque token naming them and that path (a cursor of other formats is `410` `manifest_cursor_view`: Client formats, below).
 - **First-page-only fields.** `folders` and `total` are sent only on the first page (request has no `cursor`). Subsequent pages omit them to avoid ~250k rows of redundant JSON on a 50k-track library with 5k folders. `libraryRoots` and `generatedAt` are cheap scalars and ship on every page.
 - A short read (fewer rows than `limit`) or empty page means the iteration is done; `nextCursor` is absent.
 - Server enforces an upper bound (5000 today) on `limit` silently — a client requesting more gets capped but not rejected.
@@ -458,6 +458,54 @@ Source-tag multi-value `ARTIST` / `ALBUMARTIST` (FLAC Vorbis arrays, MP4 raw `[]
 
 - `isDSD: true` tracks MUST set `sampleRate` to the DSD rate in Hz (e.g. `2822400` for DSD64, `5644800` for DSD128) and `bitsPerSample: 1`.
 - `duration` is in seconds, regardless of format.
+
+#### WavPack and Monkey's Audio — `WAVPACK`, `WAVPACK-LOSSY`, `WAVPACK-DSD`, `APE` (additive; health key `wavpackApe`)
+
+A bridge that advertises `wavpackApe` in `/v1/health.features` indexes WavPack (`.wv`) and Monkey's Audio (`.ape`) files, and serves their rows **only to a request that declares the format** in `X-Bridge-Formats` (Client formats, below). It decodes neither: the bytes a client downloads are the file's own, and every fact below is read from the file's header and its APEv2 tag (its ID3v1 tag where it has none).
+
+```json
+{ "path": "Music/Artist/Album/01.wv", "codec": "WAVPACK", "sampleRate": 96000, "bitsPerSample": 24, "channels": 2, "isDSD": false, "sampleFormat": "integer",
+  "correction": { "path": "Music/Artist/Album/01.wvc", "size": 8123456, "mtime": "2026-11-06T10:00:00.123456789Z" } }
+```
+
+| `codec` | The file | `bitsPerSample` | `sampleFormat` | `isDSD` |
+|---|---|---|---|---|
+| `"WAVPACK"` | a lossless WavPack stream, or a hybrid one beside its own correction file | the bits the header states (the bytes stored less the bits shifted out; 32 for float) | `"integer"`, or `"float"` for a float stream | `false` |
+| `"WAVPACK-LOSSY"` | a hybrid WavPack stream without its correction file: lossy, as an MP3 is | absent | absent | `false` |
+| `"WAVPACK-DSD"` | WavPack 5's DSD | `1` | absent | `true`, and `sampleRate` is the DSD rate in Hz (`2822400` for DSD64), as for a DSF |
+| `"APE"` | Monkey's Audio | 8, 16, 24 or 32 | `"integer"` below 32 bits; absent at 32, whose kind the header does not establish | `false` |
+
+- `sampleRate`, `channels` and `duration` come from the header, `duration` through the plausibility gate below; it is absent when a WavPack encoder could not write the stream's length.
+- A file whose header the bridge cannot read (one its reference decoder would refuse) is indexed by its name with no `codec` and no format facts, as any file its reader refuses is, and is held back by its extension all the same.
+- **`correction`** (object, `omitempty`) is a hybrid stream's correction file (`.wvc`), on a `"WAVPACK"` row alone: its manifest path (beside the `.wv`, in the same folder, the `.wv`'s name with the extension `.wvc` in any case), its `size`, and its `mtime`, encoded as the track's own `mtime` is. The correction file is a dependency of its row, never a track: no manifest row, tombstone or count names one, and a client fetches it by its path through `/v1/download` (or `/v1/read`), as it fetches the `.wv`. The bridge names one only when its first audio block is a correction block of this stream and its last block ends the file at the stream's last sample; a hybrid stream beside no such file (none, another stream's, one cut short, not WavPack) is `"WAVPACK-LOSSY"` with no `correction`. A correction file that appears, changes or goes changes its row as the `.wv` changing would, though the `.wv` did not change, so a delta sync carries the row's new state.
+- **A `404` for the correction file's path is a refusal of the lossless decode**: the file went after the manifest the client holds was made, and the row becomes `"WAVPACK-LOSSY"` at the scan that sees it gone, which a delta carries. A client must not present the stream decoded without its correction file as lossless: it plays it as the lossy stream it is, or refuses, and its next sync brings the row's new state. A correction file whose size or mtime is not the row's is one the manifest does not describe, and the same holds.
+- `ProtocolVersion` stays `1`: the codecs are new values of an open string, and `correction` is optional.
+
+#### Client formats — `X-Bridge-Formats` (additive; health key `wavpackApe`)
+
+`X-Bridge-Formats` is a request header in which a client declares the formats it plays among those a bridge holds back from the apps that do not: a comma-separated list of tokens, each trimmed of white space and matched without regard to case, a token the bridge does not know ignored, several header lines adding up. The tokens are `wavpack` (`.wv`) and `ape` (`.ape`). A request with no header, or none naming a token the bridge knows, declares none: that is every app from before the tokens existed, and **no row, tombstone or count of those formats reaches it**.
+
+A row is a request's by its **path's extension** (the last path element's part from its last dot, in any case), never by its codec: a `.wv` file whose header the bridge refused (no codec) and a `.wv` file an upstream UPnP server serves are held back alike.
+
+Held to the formats the request declares, each response carrying `Vary: X-Bridge-Formats`:
+
+- `GET /v1/manifest`, full, paged and delta: `tracks`, `total`, `enrichmentProgress.tracksTotal` and `.tracksEnriched` (`lastEnrichedAt`, a freshness stamp, is not), and a delta's `deleted`. `folders` is not: a folder is a directory the scan saw whether or not it holds tracks, so one holding only WavPack files is listed as a folder holding no audio always was.
+- `GET /v1/health`: `scanState.tracksIndexed`, the count of the rows that request's manifest holds.
+- `GET /v1/search`: a track held back is no hit.
+- `GET /v1/smart-playlists`: an item held back is left out of its family and the positions after it close up; a family left with no item is not sent.
+- `GET /v1/playlist-files`: a line naming a track held back is unresolved, as it was for every app before the bridge indexed the format (the track had no row), and the album-folder rule counts only the folder's tracks the request takes. The feed's `version` names the declared formats.
+
+Not held back:
+
+- The filesystem views `/v1/list`, `/v1/stat`, `/v1/read` and `/v1/download`: they answer for a path, and list a `.wv`, `.ape` or `.wvc` file as its directory holds it.
+- `/v1/lyrics`, `/v1/waveform` and `/v1/spectrum`: they answer for a path a client names.
+- The documents a device writes, `/v1/playlists`, `/v1/favorites` and `/v1/history`: the bridge stores and returns what a device sent, a `.wv` path included, so a device that plays neither format reads such an entry and writes it back unchanged, and another device's entry survives it.
+- The artwork and artist-image routes, keyed by an MBID or a version, never a path, and `GET /v1/events`, whose `library.changed` names no path.
+- The DLNA listener's ContentDirectory offers neither format to any renderer: a renderer cannot declare one.
+
+**Paging and deltas.** A manifest page cursor continues only the formats it was made for: a request that declares none gets the last path of its page, as it always did, and one that declares some gets an opaque token naming them. A cursor presented with other formats than its own is `410` `manifest_cursor_view`, and the client starts again from the first page, so a cursor never carries a client past rows its own formats hold and the other formats did not deliver. A playlist-files cursor made for other formats is `410` `playlist_files_stale`, as for any other version. A delta's `since` names no formats, so **a client's first sync that declares formats it did not declare before (an app updated to one that plays them, or a bridge updated to one that indexes them) is a full sync** (paginated, `limit` / `cursor`): the rows of those formats were indexed at times its delta cursor may already be past. A client makes it once per bridge, when it first sees `wavpackApe` and has formats to declare, and every change after it reaches the client by a delta.
+
+- `ProtocolVersion` stays `1`: the header is optional, and a request without it is served what a request was before the bridge indexed these formats.
 
 #### Duration coverage (no new field; every PCM container since ExtractorVersion 11)
 
@@ -1871,7 +1919,7 @@ The bridge regenerates the families on a daily cadence into a server-side cache 
 }
 ```
 
-`slug` is the stable per-family id a client binds a homepage row to. `items` reuse the playlist-backup item shape (`position` + `path` + render-fallback `title`/`artist`); the client resolves `path` to its local library track exactly as it does for a restored backup. Top-level `refreshedAt` is the newest family's generating-run timestamp (UnixNano). Unknown future `kind` values should be tolerated (rendered generically) so older clients survive added families. `404 smart_playlists_not_supported` when the feature is off.
+`slug` is the stable per-family id a client binds a homepage row to. `items` reuse the playlist-backup item shape (`position` + `path` + render-fallback `title`/`artist`); the client resolves `path` to its local library track exactly as it does for a restored backup. On a bridge that advertises `wavpackApe`, an item of a format the request does not declare in `X-Bridge-Formats` is left out of its family and the positions after it close up, a family left with no item is not sent (Client formats, under `GET /v1/manifest`), and the response varies on that header. Top-level `refreshedAt` is the newest family's generating-run timestamp (UnixNano). Unknown future `kind` values should be tolerated (rendered generically) so older clients survive added families. `404 smart_playlists_not_supported` when the feature is off.
 
 Each family MAY carry **`imageHash`** (additive, omitted when absent) — the SHA-256 hex of an operator-uploaded custom cover, served at **`GET /v1/smart-playlist-image/{slug}`** (bearer-authed, `image/jpeg`, `404` when none). The client prefers the custom cover and falls back to its auto-generated mosaic when `imageHash` is absent; treat the hash as an opaque cache key (a re-upload changes it). The same `imageHash` field + a parallel **`GET /v1/playlist-image/{id}`** endpoint are additive on the playlist-backup DTOs (`GET /v1/playlists` summaries + `GET /v1/playlists/{id}`). Operators set/replace/remove covers via the loopback admin API (`POST`/`DELETE /api/smart-playlists/{slug}/cover` and `/api/playlists/{id}/cover`, base64-JSON body). Covers are normalized server-side to ≤600 px JPEG; a deleted playlist's cover is pruned automatically. **Additive — no `ProtocolVersion` bump.**
 
@@ -1885,7 +1933,7 @@ The `.m3u` and `.m3u8` files in the library, as the bridge's index read them. **
 
 **The parse** is the iOS importer's (`PlaylistImport`), held to the table both repos share (`playlist-parse-cases.tsv`): a UTF-8 BOM at the start dropped as bytes; the whole file decoded as UTF-8, else Windows-1252, else ISO-8859-1; lines ending at LF, CR, CRLF, U+0085, U+2028 and U+2029, each trimmed; a blank line, or one starting with `#` (`#EXTM3U`, `#EXTINF`, any directive), is no entry; `\` folded to `/`. The path rule: a drive-letter path (`C:/…`) is not placed; a line starting with `/` is taken from the manifest root; any other line containing `://` (a URL) is not placed; anything else is relative to the playlist's folder. `.` drops, `..` pops, and a `..` with nothing left to pop puts the line outside the manifest root even when later segments come back down. The manifest root is the whole bridge as one share: with several roots it is above the roots' folder names, so a line may climb out of its own root into another. The rule itself neither normalizes Unicode nor folds case.
 
-**Members** are resolved when the feed is asked, against the tracks the bridge holds then, so a track indexed after its playlist file was read is a member with no new read of the file. A placed line names the track at its exact bytes, else the one track whose path matches it with case and Unicode composition folded; when two or more match that way, the line is unresolved. A track the duplicate filter suppresses is served as its group's one served copy; with none, or several (a DSD and a PCM edition each keep one), the line is unresolved. Members are manifest paths, exactly as `GET /v1/manifest` names the tracks.
+**Members** are resolved when the feed is asked, against the tracks the bridge holds then, so a track indexed after its playlist file was read is a member with no new read of the file. A placed line names the track at its exact bytes, else the one track whose path matches it with case and Unicode composition folded; when two or more match that way, the line is unresolved. A track the duplicate filter suppresses is served as its group's one served copy; with none, or several (a DSD and a PCM edition each keep one), the line is unresolved. Members are manifest paths, exactly as `GET /v1/manifest` names the tracks. On a bridge that advertises `wavpackApe`, a line naming a track of a format the request does not declare in `X-Bridge-Formats` is unresolved, as it was before the bridge indexed that format, the album-folder rule below counts only the folder's tracks the request takes, the `version` names the declared formats (Client formats, under `GET /v1/manifest`), and the response varies on that header.
 
 **Album-folder playlists are not listed.** A ripper's per-album playlist only repeats its album, so the bridge leaves it out by the same rule the iOS importer applies to a share (its `AlbumFolderPlaylist.isAlbumPlaylist`). A playlist file's entries are its lines the path rule places; a line the rule drops (a URL, a drive letter, a climb above the root) is no entry. The file is an album playlist, and is not listed, only when all four hold:
 
@@ -2130,7 +2178,7 @@ A code the bridge issues is the unpadded base64url encoding of 32 random bytes: 
 
 Server-side library search over the FTS5 index the bridge already maintains. A client that has not finished (or does not want) a full manifest sync can still find a track.
 
-**It serves the SERVED set.** The index is populated by triggers on the `tracks` table, so it also contains duplicate-suppressed rows — the copies `/v1/manifest` deliberately withholds. Those are joined out here, so a search result can never surface a track the manifest does not.
+**It serves the SERVED set.** The index is populated by triggers on the `tracks` table, so it also contains duplicate-suppressed rows — the copies `/v1/manifest` deliberately withholds. Those are joined out here, so a search result can never surface a track the manifest does not. On a bridge that advertises `wavpackApe`, a track of a format the request does not declare in `X-Bridge-Formats` is no hit either (Client formats, under `GET /v1/manifest`), and the response varies on that header.
 
 **Query semantics.** Input is tokenised on anything that is not a Unicode letter or digit, each surviving token is quoted, and tokens of three runes or more are prefix-expanded. FTS5 operators (`AND`, `OR`, `NOT`, `NEAR`, `*`, `"`, `^`, `:`) therefore have no special meaning — a query containing them is not an error, it simply searches for the words. Ranking is BM25.
 
@@ -2203,7 +2251,8 @@ Errors are JSON, with the exceptions listed under the table:
 |    410 | `waveform_stale`         | `GET /v1/waveform`: the source changed (mtime beyond 2 s, or size) since the waveform was computed |
 |    410 | `waveform_missing_on_disk` | `GET /v1/waveform`: the row exists but the sidecar file is gone |
 |    410 | `spectrum_stale`         | `GET /v1/spectrum`: the source changed since the spectrum was computed |
-|    410 | `playlist_files_stale`   | `GET /v1/playlist-files?after=`: the cursor's version is not the feed's (something a page could show changed since); start again from the first page |
+|    410 | `playlist_files_stale`   | `GET /v1/playlist-files?after=`: the cursor's version is not the feed's (something a page could show changed since, or the request declares other formats in `X-Bridge-Formats`); start again from the first page |
+|    410 | `manifest_cursor_view`   | `GET /v1/manifest?cursor=`: the cursor was made for other formats than the request declares in `X-Bridge-Formats`; start again from the first page |
 |    410 | `lyrics_stale`           | `GET /v1/lyrics`: the lyrics source changed since extraction (a network-tier document never answers it) |
 |    429 | `rate_limited`           | Per-IP pairing rate-limit (a join request or a code redemption), or a per-token `/v1/manifest`, write or search rate-limit tripped |
 |    500 | `internal`               | Server-side failure                               |

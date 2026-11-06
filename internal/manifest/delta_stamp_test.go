@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/dsn"
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // TestNextDeltaStampIsMaxOfTheClockAndOnePastEachWatermarkArm pins the
@@ -151,7 +152,7 @@ func TestADeleteInTheSameNanosecondReachesADelta(t *testing.T) {
 	if deletedAt <= watermark {
 		t.Fatalf("deleted_at %d is not past the watermark %d", deletedAt, watermark)
 	}
-	m, err := BuildManifest(ctx, s, []string{"/lib"}, time.Unix(0, watermark).UTC())
+	m, err := BuildManifest(ctx, s, []string{"/lib"}, time.Unix(0, watermark).UTC(), formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +202,7 @@ func TestAMassOpCoverageStartInTheSameNanosecondIsNotCovered(t *testing.T) {
 	if covered {
 		t.Fatal("a cursor equal to the tombstone the wipe erased reads as covered")
 	}
-	m, err := BuildManifest(ctx, s, []string{"/lib"}, time.Unix(0, watermark).UTC())
+	m, err := BuildManifest(ctx, s, []string{"/lib"}, time.Unix(0, watermark).UTC(), formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -619,7 +620,7 @@ func requireUpsertPastWatermark(t *testing.T, s *Store, path string, watermark i
 	if !trackListed(listed, path) {
 		t.Errorf("ListTracks since the watermark omitted %s", path)
 	}
-	m, err := BuildManifest(ctx, s, []string{"/lib"}, since)
+	m, err := BuildManifest(ctx, s, []string{"/lib"}, since, formatgate.All())
 	if err != nil {
 		t.Fatal(err)
 	}

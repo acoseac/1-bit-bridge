@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // The request side of the playlist-file index (backlog B431): how the feed
@@ -56,7 +58,7 @@ func stampDuplicates(t *testing.T, s *Store, group string, suppressed bool, path
 
 func TestThePlaylistFeedOfAnEmptyIndexIsAnEmptyList(t *testing.T) {
 	s := newFeedStore(t)
-	page, err := s.PlaylistFilesPage(context.Background(), "", "")
+	page, err := s.PlaylistFilesPage(context.Background(), "", "", formatgate.All())
 	if err != nil || page.Files == nil || len(page.Files) != 0 || page.Next != "" || page.Version == "" {
 		t.Fatalf("PlaylistFilesPage = %+v, %v; want one page, an empty, non-nil list, a version", page, err)
 	}
@@ -216,7 +218,7 @@ func TestThePlaylistFeedAnswersTheSameInAnyBatchSize(t *testing.T) {
 	}
 	answer := func(batchBytes int) string {
 		t.Helper()
-		page, err := s.playlistFilesPage(context.Background(), "", "", math.MaxInt, batchBytes)
+		page, err := s.playlistFilesPage(context.Background(), "", "", math.MaxInt, batchBytes, formatgate.All())
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -67,6 +67,7 @@ var wantAllHealthFeatures = []string{
 	"upscaleCompleteEvents",
 	"variantBumpsIndex",
 	"waveform",
+	"wavpackApe",
 }
 
 // newAllFeaturesServer wires EVERY optional surface the feats builder

@@ -22,6 +22,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/dupes"
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 )
@@ -4484,12 +4485,15 @@ func (s *Scanner) RunPeriodic(ctx context.Context, interval func() time.Duration
 // file mtime, which an earlier version of this comment claimed:
 // enrichment, reconciliation, and variant writes all strict-advance
 // indexed_at precisely so incremental iOS syncs surface them.
-func BuildManifest(ctx context.Context, store *Store, roots []string, since time.Time) (*Manifest, error) {
+//
+// Every row, tombstone and count is view's (format_view.go): the formats a
+// client's request declared.
+func BuildManifest(ctx context.Context, store *Store, roots []string, since time.Time, view formatgate.Set) (*Manifest, error) {
 	var sp *time.Time
 	if !since.IsZero() {
 		sp = &since
 	}
-	tracks, err := store.ListServedTracks(ctx, sp)
+	tracks, err := store.ListServedTracks(ctx, sp, view)
 	if err != nil {
 		return nil, err
 	}
@@ -4517,7 +4521,7 @@ func BuildManifest(ctx context.Context, store *Store, roots []string, since time
 	// Delta-only tombstone fields (deletion_journal.go) — parity with
 	// writeManifestGated's since-leg; full manifests never carry either.
 	if !since.IsZero() {
-		deleted, incomplete := deltaDeletionFields(ctx, store, since)
+		deleted, incomplete := deltaDeletionFields(ctx, store, since, view)
 		m.Deleted = deleted
 		m.DeltaIncomplete = incomplete
 	}
@@ -4538,10 +4542,10 @@ func BuildManifest(ctx context.Context, store *Store, roots []string, since time
 	// top-level `total`, so we still need this count — but we now do
 	// it once, here, instead of letting both the manifest builder and
 	// EnrichmentCounts each issue their own `COUNT(*)`.
-	total, terr := store.CountServedTracks(ctx)
+	total, terr := store.CountServedTracks(ctx, view)
 	if terr != nil {
 		logger.Error("CountServedTracks for enrichment-progress", "err", terr)
-	} else if enriched, lastEnrichedAt, perr := store.EnrichmentCounts(ctx); perr == nil {
+	} else if enriched, lastEnrichedAt, perr := store.EnrichmentCounts(ctx, view); perr == nil {
 		m.EnrichmentProgress = &EnrichmentProgress{
 			TracksTotal:    total,
 			TracksEnriched: enriched,
@@ -4576,9 +4580,10 @@ func BuildManifest(ctx context.Context, store *Store, roots []string, since time
 // on iOS, surfacing as a sync error which iOS handles by retrying.
 //
 // since, if non-zero, filters tracks by indexed_at (matches the
-// BuildManifest semantics).
-func WriteManifest(ctx context.Context, w io.Writer, store *Store, roots []string, since time.Time) error {
-	return writeManifestGated(ctx, w, store, roots, since, false)
+// BuildManifest semantics), and view is the formats the client declared
+// (format_view.go).
+func WriteManifest(ctx context.Context, w io.Writer, store *Store, roots []string, since time.Time, view formatgate.Set) error {
+	return writeManifestGated(ctx, w, store, roots, since, view, false)
 }
 
 // writeManifestGated is the gated worker behind the public
@@ -4592,7 +4597,12 @@ func WriteManifest(ctx context.Context, w io.Writer, store *Store, roots []strin
 // mid-stream terminates the scan within at most one row instead of
 // running to EOF. The check returns ctx.Err() which propagates up
 // through `streamErr` and surfaces in the caller's log line.
-func writeManifestGated(ctx context.Context, w io.Writer, store *Store, roots []string, since time.Time, withVariants bool) (err error) {
+//
+// Every row, tombstone and count is view's (format_view.go). The folders
+// block is not: a folder is a directory the walk saw, whether or not it
+// holds tracks, so one holding only files of a format a view does not
+// declare is listed to it as a folder holding no audio always was.
+func writeManifestGated(ctx context.Context, w io.Writer, store *Store, roots []string, since time.Time, view formatgate.Set, withVariants bool) (err error) {
 	// Folders ship ONLY on the full-manifest leg. A delta sync
 	// (`since` set) used to walk + marshal the ENTIRE folders table on
 	// every foreground sync — a per-sync DB query + payload cost on
@@ -4619,9 +4629,9 @@ func writeManifestGated(ctx context.Context, w io.Writer, store *Store, roots []
 	// a client can actually fetch from the stream below. Operator-facing
 	// admin surfaces keep full-store counts instead.
 	var ep *EnrichmentProgress
-	if total, terr := store.CountServedTracks(ctx); terr != nil {
+	if total, terr := store.CountServedTracks(ctx, view); terr != nil {
 		logger.Error("CountServedTracks for enrichment-progress", "err", terr)
-	} else if enriched, lastEnrichedAt, perr := store.EnrichmentCounts(ctx); perr == nil {
+	} else if enriched, lastEnrichedAt, perr := store.EnrichmentCounts(ctx, view); perr == nil {
 		ep = &EnrichmentProgress{
 			TracksTotal:    total,
 			TracksEnriched: enriched,
@@ -4699,7 +4709,7 @@ func writeManifestGated(ctx context.Context, w io.Writer, store *Store, roots []
 	// `]` lands after the last track's `\n` — also valid whitespace.
 	enc := json.NewEncoder(bw)
 	first := true
-	streamErr := store.StreamServedTracks(ctx, sp, func(t *Track) error {
+	streamErr := store.StreamServedTracks(ctx, sp, view, func(t *Track) error {
 		// Cheap per-row cancel check. SQLite's row iteration is
 		// synchronous so this is the natural pulse to honour the
 		// client's deadline / disconnect. Returning the ctx error
@@ -4735,7 +4745,7 @@ func writeManifestGated(ctx context.Context, w io.Writer, store *Store, roots []
 	// and buffered legs cannot drift (the parity test compares both).
 	// Full + paginated legs never emit either field.
 	if !since.IsZero() {
-		deleted, incomplete := deltaDeletionFields(ctx, store, since)
+		deleted, incomplete := deltaDeletionFields(ctx, store, since, view)
 		if len(deleted) > 0 {
 			if err := writeField(`,"deleted":`, deleted); err != nil {
 				return err
@@ -4779,21 +4789,31 @@ func writeManifestGated(ctx context.Context, w io.Writer, store *Store, roots []
 // nil. Old behaviour ("request limit; if exactly limit, assume more")
 // caused an extra round-trip that returned zero rows whenever the
 // track count was an exact multiple of limit.
-func BuildManifestPage(ctx context.Context, store *Store, roots []string, cursor string, limit int) (*Manifest, error) {
-	return buildManifestPageGated(ctx, store, roots, cursor, limit, false)
+//
+// **A cursor continues only the view that made it** (format_view.go):
+// the zero view's is the last path a page held, as it always was, and a
+// declared view's carries the view, so a cursor presented with another
+// view answers ErrCursorOfAnotherView, never a page that skips rows the
+// other view did not deliver.
+func BuildManifestPage(ctx context.Context, store *Store, roots []string, cursor string, limit int, view formatgate.Set) (*Manifest, error) {
+	return buildManifestPageGated(ctx, store, roots, cursor, limit, view, false)
 }
 
 // buildManifestPageGated is the gated worker behind the public
 // BuildManifestPage. Strips Track.Variants when the feature flag
 // is off — see writeManifestGated for the symmetrical contract.
-func buildManifestPageGated(ctx context.Context, store *Store, roots []string, cursor string, limit int, withVariants bool) (*Manifest, error) {
+func buildManifestPageGated(ctx context.Context, store *Store, roots []string, cursor string, limit int, view formatgate.Set, withVariants bool) (*Manifest, error) {
 	if limit <= 0 {
 		limit = 1000
 	}
+	after, err := pagePath(view, cursor)
+	if err != nil {
+		return nil, err
+	}
 	// Over-fetch by one so the last row of the current query tells us
 	// "is there another page" definitively. Served set only — the wire
-	// never carries suppressed duplicates.
-	tracks, err := store.ListServedTracksPage(ctx, cursor, limit+1)
+	// never carries suppressed duplicates — in the client's view.
+	tracks, err := store.ListServedTracksPage(ctx, after, limit+1, view)
 	if err != nil {
 		return nil, err
 	}
@@ -4830,14 +4850,14 @@ func buildManifestPageGated(ctx context.Context, store *Store, roots []string, c
 			return nil, ferr
 		}
 		// Served count, so `total` equals the rows this pagination run
-		// will actually deliver (the served-population rule).
-		total, terr := store.CountServedTracks(ctx)
+		// will actually deliver (the served-population rule), in this view.
+		total, terr := store.CountServedTracks(ctx, view)
 		if terr != nil {
 			return nil, terr
 		}
 		m.Folders = folders
 		m.Total = &total
-		if enriched, lastEnrichedAt, perr := store.EnrichmentCounts(ctx); perr == nil {
+		if enriched, lastEnrichedAt, perr := store.EnrichmentCounts(ctx, view); perr == nil {
 			m.EnrichmentProgress = &EnrichmentProgress{
 				TracksTotal:    total,
 				TracksEnriched: enriched,
@@ -4850,8 +4870,8 @@ func buildManifestPageGated(ctx context.Context, store *Store, roots []string, c
 	if len(tracks) > limit {
 		// Trim the over-fetched row — it becomes the cursor for the
 		// next page. The remaining `limit` rows are what we ship.
-		last := tracks[limit-1].Path
-		m.NextCursor = &last
+		next := pageCursor(view, tracks[limit-1].Path)
+		m.NextCursor = &next
 		m.Tracks = tracks[:limit]
 	} else {
 		// Short read — this is the last page. `NextCursor` stays nil.

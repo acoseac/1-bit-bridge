@@ -2,12 +2,12 @@
 // indexes and serves only to a client that says it plays them (backlog
 // B489): WavPack (.wv) and Monkey's Audio (.ape).
 //
-// The 1-bit app before 2.3 upserts every manifest row it is sent without
-// asking its extension, and AVAudioFile opens neither format, so a library
-// of these files would reach such an app as thousands of tracks that fail.
-// So a catalog surface leaves these rows out unless the request declares
-// the format in X-Bridge-Formats (Parse), and /v1/health advertises the
-// header's support (the wavpackApe feature) so a new app knows to send it.
+// An app from before B489 decodes neither format, and a manifest row it is
+// sent is a track it lists, so a library of these files would reach such an
+// app as tracks that fail to play. So a catalog surface leaves these rows out
+// unless the request declares the format in X-Bridge-Formats (Parse), and
+// /v1/health advertises the header's support (the wavpackApe feature) so a
+// new app knows to send it.
 //
 // A row is gated by its PATH's extension (Of), never by its codec: a file
 // its extractor refused has no codec, a tombstone has no row left to read

@@ -6,6 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // fakeHealthCountsProvider counts TracksIndexed calls and can block inside it,
@@ -18,7 +20,7 @@ type fakeHealthCountsProvider struct {
 	block   chan struct{} // if non-nil, TracksIndexed blocks until it's closed
 }
 
-func (f *fakeHealthCountsProvider) TracksIndexed(context.Context) int {
+func (f *fakeHealthCountsProvider) TracksIndexed(context.Context, formatgate.Set) int {
 	f.calls.Add(1)
 	if f.block != nil {
 		<-f.block
@@ -49,7 +51,7 @@ func TestHealthCountsCache_CollapsesConcurrentFloodToOneFetch(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			tr, pd := c.counts(context.Background(), p)
+			tr, pd := c.counts(context.Background(), p, formatgate.Set{})
 			results[i] = result{tracks: tr, pending: pd}
 		}(i)
 	}
@@ -73,10 +75,10 @@ func TestHealthCountsCache_CollapsesConcurrentFloodToOneFetch(t *testing.T) {
 func TestHealthCountsCache_ServesFromCacheWithinTTL(t *testing.T) {
 	p := &fakeHealthCountsProvider{tracks: 5, pending: 3}
 	c := newHealthCountsCache()
-	if tr, pd := c.counts(context.Background(), p); tr != 5 || pd != 3 {
+	if tr, pd := c.counts(context.Background(), p, formatgate.Set{}); tr != 5 || pd != 3 {
 		t.Fatalf("first call = (%d,%d); want (5,3)", tr, pd)
 	}
-	if tr, pd := c.counts(context.Background(), p); tr != 5 || pd != 3 {
+	if tr, pd := c.counts(context.Background(), p, formatgate.Set{}); tr != 5 || pd != 3 {
 		t.Fatalf("second call = (%d,%d); want (5,3)", tr, pd)
 	}
 	if got := p.calls.Load(); got != 1 {
@@ -87,11 +89,11 @@ func TestHealthCountsCache_ServesFromCacheWithinTTL(t *testing.T) {
 // TestHealthCountsCache_NilSafe covers the &Server{} test-harness path.
 func TestHealthCountsCache_NilSafe(t *testing.T) {
 	var c *healthCountsCache
-	if tr, pd := c.counts(context.Background(), nil); tr != 0 || pd != 0 {
+	if tr, pd := c.counts(context.Background(), nil, formatgate.Set{}); tr != 0 || pd != 0 {
 		t.Errorf("nil cache/provider = (%d,%d); want (0,0)", tr, pd)
 	}
 	live := newHealthCountsCache()
-	if tr, pd := live.counts(context.Background(), nil); tr != 0 || pd != 0 {
+	if tr, pd := live.counts(context.Background(), nil, formatgate.Set{}); tr != 0 || pd != 0 {
 		t.Errorf("nil provider = (%d,%d); want (0,0)", tr, pd)
 	}
 }

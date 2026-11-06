@@ -31,6 +31,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // TrackHit is one row in the SearchTracks result. ParentPath is
@@ -290,7 +292,11 @@ func sortFolderHits(hits []FolderHit) {
 // that is not a Unicode letter or digit and double-quotes each surviving
 // token, so FTS5 operators cannot reach the MATCH. Do not add a second
 // layer.
-func (s *Store) SearchServedTracks(ctx context.Context, query string, limit int) ([]TrackHit, error) {
+//
+// The hits are a client's view's (format_view.go): a track of a format the
+// view does not declare is no hit, as it is no row of that client's
+// manifest.
+func (s *Store) SearchServedTracks(ctx context.Context, query string, limit int, view formatgate.Set) ([]TrackHit, error) {
 	if avail, err := s.SearchAvailable(ctx); err != nil {
 		return nil, err
 	} else if !avail {
@@ -306,7 +312,8 @@ func (s *Store) SearchServedTracks(ctx context.Context, query string, limit int)
 	if limit > searchHardCap {
 		limit = searchHardCap
 	}
-	rows, err := s.db.QueryContext(ctx, servedSearchSQL, matchExpr, limit)
+	args := append([]any{matchExpr}, formatViewArgs(view)...)
+	rows, err := s.db.QueryContext(ctx, servedSearchSQL, append(args, limit)...)
 	if err != nil {
 		return nil, fmt.Errorf("search tracks_fts (served): %w", err)
 	}
@@ -331,7 +338,8 @@ func (s *Store) SearchServedTracks(ctx context.Context, query string, limit int)
 
 // servedSearchSQL is a true const so the query-plan test can assert
 // against the exact statement the production path runs, and so it stays
-// clear of the assembled-query static-analysis rule.
+// clear of the assembled-query static-analysis rule. Binds: the MATCH
+// expression, formatViewArgs, the limit.
 const servedSearchSQL = `
 		SELECT f.path,
 		       COALESCE(f.title, ''),
@@ -341,5 +349,6 @@ const servedSearchSQL = `
 		JOIN tracks t ON t.path = f.path
 		WHERE tracks_fts MATCH ?
 		  AND t.dupe_suppressed = 0
+		  AND ` + formatViewSQLT + `
 		ORDER BY rank
 		LIMIT ?`

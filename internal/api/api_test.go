@@ -16,6 +16,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 	"github.com/acoseac/1-bit-bridge/internal/version"
@@ -55,7 +56,7 @@ type fakeManifestProvider struct {
 	lastSince time.Time
 }
 
-func (f *fakeManifestProvider) WriteManifest(ctx context.Context, w io.Writer, since time.Time) error {
+func (f *fakeManifestProvider) WriteManifest(ctx context.Context, w io.Writer, since time.Time, _ formatgate.Set) error {
 	f.lastSince = since
 	if f.err != nil {
 		return f.err
@@ -65,7 +66,7 @@ func (f *fakeManifestProvider) WriteManifest(ctx context.Context, w io.Writer, s
 	}
 	return json.NewEncoder(w).Encode(f.body)
 }
-func (f *fakeManifestProvider) BuildManifestPage(ctx context.Context, cursor string, limit int) (*ManifestPage, error) {
+func (f *fakeManifestProvider) BuildManifestPage(ctx context.Context, cursor string, limit int, _ formatgate.Set) (*ManifestPage, error) {
 	f.lastPageCursor = cursor
 	f.lastPageLimit = limit
 	if f.pageErr != nil {
@@ -76,10 +77,12 @@ func (f *fakeManifestProvider) BuildManifestPage(ctx context.Context, cursor str
 	}
 	return &manifest.Manifest{}, nil
 }
-func (f *fakeManifestProvider) IsScanning() bool                           { return f.isScanning }
-func (f *fakeManifestProvider) IsScanStalled() bool                        { return f.isScanStalled }
-func (f *fakeManifestProvider) LastFullScan() time.Time                    { return f.lastFullScan }
-func (f *fakeManifestProvider) TracksIndexed(ctx context.Context) int      { return f.tracksIndexed }
+func (f *fakeManifestProvider) IsScanning() bool        { return f.isScanning }
+func (f *fakeManifestProvider) IsScanStalled() bool     { return f.isScanStalled }
+func (f *fakeManifestProvider) LastFullScan() time.Time { return f.lastFullScan }
+func (f *fakeManifestProvider) TracksIndexed(ctx context.Context, _ formatgate.Set) int {
+	return f.tracksIndexed
+}
 func (f *fakeManifestProvider) PendingDeletions(ctx context.Context) int64 { return f.pendingDeletions }
 
 // newTestServer spins up an httptest.Server with the api handler and a

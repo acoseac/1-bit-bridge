@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // Backlog B446: a WAV's ID3 chunk carries its explicit advisory into the
@@ -66,7 +68,7 @@ func advisoryTag(version, enc byte, title string, advisory []byte) []byte {
 func servedTracksByPath(t *testing.T, store *Store, root string) map[string]map[string]any {
 	t.Helper()
 	var buf bytes.Buffer
-	if err := WriteManifest(context.Background(), &buf, store, []string{root}, time.Time{}); err != nil {
+	if err := WriteManifest(context.Background(), &buf, store, []string{root}, time.Time{}, formatgate.All()); err != nil {
 		t.Fatalf("WriteManifest: %v", err)
 	}
 	var mf struct {

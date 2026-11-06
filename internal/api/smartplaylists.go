@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -104,6 +105,10 @@ type smartPlaylistsResponse struct {
 // required, like GET /v1/history). The optional `?local_hour=H` (0..23) is
 // the device's current local hour, used ONLY to title the time-of-day family;
 // the bucket itself is the server's current UTC hour (the same instant).
+//
+// Each family's items are the view the request declared (formats.go): an
+// item of a format the view does not declare is left out and the positions
+// after it close up, and a family the gate leaves with no item is not sent.
 func (s *Server) smartPlaylists(w http.ResponseWriter, r *http.Request) {
 	if !s.smartPlaylistsActive() {
 		writeError(w, http.StatusNotFound, "smart_playlists_not_supported",
@@ -119,13 +124,15 @@ func (s *Server) smartPlaylists(w http.ResponseWriter, r *http.Request) {
 
 	localHour, hasLocal := parseLocalHour(r.URL.Query().Get("local_hour"))
 	nowUTCHour := time.Now().UTC().Hour()
+	view := requestFormats(r)
+	varyOnFormats(w.Header())
 
 	// Operator-uploaded custom covers, keyed by family slug (best-effort).
 	covers := s.coverHashesForScope(r.Context(), manifest.CoverScopeSmartMix)
 
 	resp := smartPlaylistsResponse{Playlists: make([]smartPlaylistDTO, 0, len(rows))}
 	for _, row := range rows {
-		dto, ok := buildSmartPlaylistDTO(row, nowUTCHour, localHour, hasLocal)
+		dto, ok := buildSmartPlaylistDTO(row, nowUTCHour, localHour, hasLocal, view)
 		if !ok {
 			continue // e.g. time-of-day with no habit at the current hour
 		}
@@ -138,11 +145,13 @@ func (s *Server) smartPlaylists(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// buildSmartPlaylistDTO decodes one cached row into its wire shape. The
-// time-of-day family is special-cased: its blob is per-UTC-hour pools, from
-// which we union the window around nowUTCHour and retitle by the local hour.
-// ok=false drops the family from this response (an empty time-of-day window).
-func buildSmartPlaylistDTO(row manifest.StoredSmartPlaylist, nowUTCHour, localHour int, hasLocal bool) (smartPlaylistDTO, bool) {
+// buildSmartPlaylistDTO decodes one cached row into its wire shape, in view.
+// The time-of-day family is special-cased: its blob is per-UTC-hour pools,
+// from which we union the window around nowUTCHour and retitle by the local
+// hour. ok=false drops the family from this response (an empty time-of-day
+// window, or a family whose every item is of a format view does not
+// declare).
+func buildSmartPlaylistDTO(row manifest.StoredSmartPlaylist, nowUTCHour, localHour int, hasLocal bool, view formatgate.Set) (smartPlaylistDTO, bool) {
 	dto := smartPlaylistDTO{
 		Slug: row.Slug, Kind: row.Kind, Title: row.Title,
 		Subtitle: row.Subtitle, RefreshedAt: row.RefreshedAt,
@@ -159,7 +168,7 @@ func buildSmartPlaylistDTO(row manifest.StoredSmartPlaylist, nowUTCHour, localHo
 		if err := json.Unmarshal(row.ItemsJSON, &blob); err != nil {
 			return smartPlaylistDTO{}, false
 		}
-		items := resolveTimeOfDayItems(blob.Hourly, nowUTCHour, timeOfDayWindow, smartPlaylistResponseMaxItems)
+		items := resolveTimeOfDayItems(blob.Hourly, nowUTCHour, timeOfDayWindow, smartPlaylistResponseMaxItems, view)
 		if len(items) == 0 {
 			return smartPlaylistDTO{}, false
 		}
@@ -176,9 +185,15 @@ func buildSmartPlaylistDTO(row manifest.StoredSmartPlaylist, nowUTCHour, localHo
 	}
 	dto.Items = make([]smartPlaylistItemDTO, 0, len(stored))
 	for _, it := range stored {
+		if !view.Takes(it.Path) {
+			continue
+		}
 		dto.Items = append(dto.Items, smartPlaylistItemDTO{
 			Position: len(dto.Items), Path: it.Path, Title: it.Title, Artist: it.Artist,
 		})
+	}
+	if len(stored) > 0 && len(dto.Items) == 0 {
+		return smartPlaylistDTO{}, false
 	}
 	return dto, true
 }
@@ -188,8 +203,9 @@ func buildSmartPlaylistDTO(row manifest.StoredSmartPlaylist, nowUTCHour, localHo
 const timeOfDayKind = "timeOfDay"
 
 // resolveTimeOfDayItems unions the hour pools in [utcHour-window, utcHour+window]
-// (mod 24), center first then outward, deduping by path and capping at max.
-func resolveTimeOfDayItems(hourly map[int][]manifest.SmartPlaylistItem, utcHour, window, maxItems int) []smartPlaylistItemDTO {
+// (mod 24), center first then outward, deduping by path and capping at max,
+// leaving out an item of a format view does not declare.
+func resolveTimeOfDayItems(hourly map[int][]manifest.SmartPlaylistItem, utcHour, window, maxItems int, view formatgate.Set) []smartPlaylistItemDTO {
 	if len(hourly) == 0 {
 		return nil
 	}
@@ -202,7 +218,7 @@ func resolveTimeOfDayItems(hourly map[int][]manifest.SmartPlaylistItem, utcHour,
 	var out []smartPlaylistItemDTO
 	for _, h := range order {
 		for _, it := range hourly[h] {
-			if it.Path == "" || seen[it.Path] {
+			if it.Path == "" || seen[it.Path] || !view.Takes(it.Path) {
 				continue
 			}
 			seen[it.Path] = true

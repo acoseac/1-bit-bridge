@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -53,7 +54,7 @@ func TestResolveTimeOfDayItems_WindowUnionDedupWrap(t *testing.T) {
 		9: {it("c"), it("a")}, // 'a' dup across hours
 	}
 	// center 8 first, then 7, then 9 → a,b,d,c (a deduped)
-	got := resolveTimeOfDayItems(hourly, 8, 1, 100)
+	got := resolveTimeOfDayItems(hourly, 8, 1, 100, formatgate.Set{})
 	want := []string{"a", "b", "d", "c"}
 	if len(got) != len(want) {
 		t.Fatalf("got %d items want %d: %+v", len(got), len(want), got)
@@ -65,18 +66,18 @@ func TestResolveTimeOfDayItems_WindowUnionDedupWrap(t *testing.T) {
 	}
 
 	// cap
-	if capped := resolveTimeOfDayItems(hourly, 8, 1, 2); len(capped) != 2 {
+	if capped := resolveTimeOfDayItems(hourly, 8, 1, 2, formatgate.Set{}); len(capped) != 2 {
 		t.Errorf("cap not applied: got %d", len(capped))
 	}
 
 	// wrap: hour 0, window 1 → visits 0, 23, 1
 	wrap := map[int][]manifest.SmartPlaylistItem{23: {it("late")}, 0: {it("mid")}, 1: {it("early")}}
-	gw := resolveTimeOfDayItems(wrap, 0, 1, 100)
+	gw := resolveTimeOfDayItems(wrap, 0, 1, 100, formatgate.Set{})
 	if len(gw) != 3 || gw[0].Path != "mid" {
 		t.Fatalf("wrap window: %+v", gw)
 	}
 
-	if resolveTimeOfDayItems(nil, 8, 1, 100) != nil {
+	if resolveTimeOfDayItems(nil, 8, 1, 100, formatgate.Set{}) != nil {
 		t.Errorf("empty pools should yield nil")
 	}
 }
@@ -86,7 +87,7 @@ func TestBuildSmartPlaylistDTO_FlatFamily(t *testing.T) {
 	blob := mustMarshal(t, items)
 	row := manifest.StoredSmartPlaylist{Slug: "heavy-rotation", Kind: "heavyRotation", Title: "Heavy Rotation", Subtitle: "sub", RefreshedAt: 99, ItemsJSON: blob}
 
-	dto, ok := buildSmartPlaylistDTO(row, 8, 0, false)
+	dto, ok := buildSmartPlaylistDTO(row, 8, 0, false, formatgate.Set{})
 	if !ok {
 		t.Fatal("flat family should always build")
 	}
@@ -106,7 +107,7 @@ func TestBuildSmartPlaylistDTO_EnergyAndModalRate(t *testing.T) {
 		Slug: "heavy-rotation", Kind: "heavyRotation", Title: "Heavy Rotation",
 		RefreshedAt: 1, ItemsJSON: blob, EnergyJSON: energy, ModalRateHz: 96000,
 	}
-	dto, ok := buildSmartPlaylistDTO(row, 8, 0, false)
+	dto, ok := buildSmartPlaylistDTO(row, 8, 0, false, formatgate.Set{})
 	if !ok {
 		t.Fatal("family should build")
 	}
@@ -120,7 +121,7 @@ func TestBuildSmartPlaylistDTO_EnergyAndModalRate(t *testing.T) {
 	// Malformed energy must not drop the family (decorative, best-effort).
 	bad := row
 	bad.EnergyJSON = []byte("{not json")
-	dto2, ok := buildSmartPlaylistDTO(bad, 8, 0, false)
+	dto2, ok := buildSmartPlaylistDTO(bad, 8, 0, false, formatgate.Set{})
 	if !ok {
 		t.Fatal("malformed energy should not drop the family")
 	}
@@ -139,7 +140,7 @@ func TestBuildSmartPlaylistDTO_TimeOfDay(t *testing.T) {
 	row := manifest.StoredSmartPlaylist{Slug: "time-of-day", Kind: "timeOfDay", Title: "For Right Now", RefreshedAt: 5, ItemsJSON: blob}
 
 	// current UTC hour 8 + local hour 14 → titled "This Afternoon", item present
-	dto, ok := buildSmartPlaylistDTO(row, 8, 14, true)
+	dto, ok := buildSmartPlaylistDTO(row, 8, 14, true, formatgate.Set{})
 	if !ok {
 		t.Fatal("time-of-day with a matching hour should build")
 	}
@@ -151,13 +152,13 @@ func TestBuildSmartPlaylistDTO_TimeOfDay(t *testing.T) {
 	}
 
 	// without local hour, keep the stored title
-	dto2, _ := buildSmartPlaylistDTO(row, 8, 0, false)
+	dto2, _ := buildSmartPlaylistDTO(row, 8, 0, false, formatgate.Set{})
 	if dto2.Title != "For Right Now" {
 		t.Errorf("no-local-hour title = %q want stored", dto2.Title)
 	}
 
 	// current UTC hour 20 (no habit in [19,20,21]) → omitted
-	if _, ok := buildSmartPlaylistDTO(row, 20, 0, false); ok {
+	if _, ok := buildSmartPlaylistDTO(row, 20, 0, false, formatgate.Set{}); ok {
 		t.Error("empty time-of-day window should omit the family")
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -32,20 +33,22 @@ type stubSearcher struct {
 
 // The two ManifestProvider methods /v1/search never calls. Present so
 // the stub satisfies the interface the Server field is typed as.
-func (s *stubSearcher) WriteManifest(context.Context, io.Writer, time.Time) error { return nil }
+func (s *stubSearcher) WriteManifest(context.Context, io.Writer, time.Time, formatgate.Set) error {
+	return nil
+}
 
-func (s *stubSearcher) BuildManifestPage(context.Context, string, int) (*ManifestPage, error) {
+func (s *stubSearcher) BuildManifestPage(context.Context, string, int, formatgate.Set) (*ManifestPage, error) {
 	return &ManifestPage{}, nil
 }
-func (s *stubSearcher) IsScanning() bool                       { return false }
-func (s *stubSearcher) IsScanStalled() bool                    { return false }
-func (s *stubSearcher) LastFullScan() time.Time                { return time.Time{} }
-func (s *stubSearcher) TracksIndexed(context.Context) int      { return 0 }
-func (s *stubSearcher) PendingDeletions(context.Context) int64 { return 0 }
+func (s *stubSearcher) IsScanning() bool                                  { return false }
+func (s *stubSearcher) IsScanStalled() bool                               { return false }
+func (s *stubSearcher) LastFullScan() time.Time                           { return time.Time{} }
+func (s *stubSearcher) TracksIndexed(context.Context, formatgate.Set) int { return 0 }
+func (s *stubSearcher) PendingDeletions(context.Context) int64            { return 0 }
 
 var _ ManifestProvider = (*stubSearcher)(nil)
 
-func (s *stubSearcher) SearchServedTracks(ctx context.Context, q string, limit int) ([]manifest.TrackHit, error) {
+func (s *stubSearcher) SearchServedTracks(ctx context.Context, q string, limit int, _ formatgate.Set) ([]manifest.TrackHit, error) {
 	s.gotQuery, s.gotLimit = q, limit
 	return s.hits, s.err
 }

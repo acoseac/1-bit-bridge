@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"golang.org/x/sync/singleflight"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // healthCountsTTL bounds how long a /v1/health scan-state count snapshot is
@@ -23,7 +25,7 @@ const healthCountsFetchTimeout = 2 * time.Second
 // needs. Narrow interface so tests can inject a call-counting fake without a
 // real store; *manifest.Store (via ManifestProvider) satisfies it.
 type healthCountsProvider interface {
-	TracksIndexed(ctx context.Context) int
+	TracksIndexed(ctx context.Context, view formatgate.Set) int
 	PendingDeletions(ctx context.Context) int64
 }
 
@@ -43,10 +45,12 @@ type healthCountsSnapshot struct {
 // at the expiry boundary onto ONE recompute, and the fetch DETACHES from the
 // caller's ctx (context.WithoutCancel) so a client hang-up mid-count can't
 // cache a synthesized-zero for the callers that joined the flight.
+//
+// One snapshot per view (the formats a request declared, formats.go; there
+// are four, formatgate.Set.Key's), since tracksIndexed counts a view's rows.
 type healthCountsCache struct {
-	mu      sync.Mutex
-	snap    healthCountsSnapshot
-	hasSnap bool
+	mu    sync.Mutex
+	snaps map[string]healthCountsSnapshot
 	// first and sampleFormat are the two library-fact keys whose readiness
 	// a count decides (stickyReady): firstIndexedAt and sampleFormat.
 	first        readyFlag
@@ -64,16 +68,17 @@ type readyFlag struct {
 
 func newHealthCountsCache() *healthCountsCache { return &healthCountsCache{} }
 
-// counts returns the cached (tracksIndexed, pendingDeletions), refreshing on
-// cache miss or staleness. Nil receiver or nil provider returns (0, 0) so
-// test harnesses that construct &Server{} without New() don't panic.
-func (c *healthCountsCache) counts(ctx context.Context, p healthCountsProvider) (int, int64) {
+// counts returns the cached (tracksIndexed, pendingDeletions) of view,
+// refreshing on cache miss or staleness. Nil receiver or nil provider
+// returns (0, 0) so test harnesses that construct &Server{} without New()
+// don't panic.
+func (c *healthCountsCache) counts(ctx context.Context, p healthCountsProvider, view formatgate.Set) (int, int64) {
 	if c == nil || p == nil {
 		return 0, 0
 	}
+	key := view.Key()
 	c.mu.Lock()
-	if c.hasSnap && time.Since(c.snap.fetchedAt) < healthCountsTTL {
-		snap := c.snap
+	if snap, ok := c.snaps[key]; ok && time.Since(snap.fetchedAt) < healthCountsTTL {
 		c.mu.Unlock()
 		return snap.tracksIndexed, snap.pendingDeletions
 	}
@@ -81,12 +86,11 @@ func (c *healthCountsCache) counts(ctx context.Context, p healthCountsProvider) 
 
 	// singleflight collapses concurrent callers onto one fetch; every caller
 	// that arrived during the in-flight window shares the result.
-	v, _, _ := c.group.Do("counts", func() (interface{}, error) {
+	v, _, _ := c.group.Do("counts\x00"+key, func() (interface{}, error) {
 		// Re-check under the lock — a flight that resolved while we were
 		// queued may already have refreshed the snapshot.
 		c.mu.Lock()
-		if c.hasSnap && time.Since(c.snap.fetchedAt) < healthCountsTTL {
-			snap := c.snap
+		if snap, ok := c.snaps[key]; ok && time.Since(snap.fetchedAt) < healthCountsTTL {
 			c.mu.Unlock()
 			return snap, nil
 		}
@@ -97,7 +101,7 @@ func (c *healthCountsCache) counts(ctx context.Context, p healthCountsProvider) 
 		// rest. The two COUNTs are bounded by their own timeout instead.
 		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), healthCountsFetchTimeout)
 		defer cancel()
-		tracks := p.TracksIndexed(fetchCtx)
+		tracks := p.TracksIndexed(fetchCtx, view)
 		pending := p.PendingDeletions(fetchCtx)
 
 		snap := healthCountsSnapshot{
@@ -122,13 +126,15 @@ func (c *healthCountsCache) counts(ctx context.Context, p healthCountsProvider) 
 		// request retries instead of being answered from a cached
 		// failure.
 		if fetchCtx.Err() != nil {
-			if c.hasSnap {
-				return c.snap, nil
+			if old, ok := c.snaps[key]; ok {
+				return old, nil
 			}
 			return snap, nil
 		}
-		c.snap = snap
-		c.hasSnap = true
+		if c.snaps == nil {
+			c.snaps = map[string]healthCountsSnapshot{}
+		}
+		c.snaps[key] = snap
 		return snap, nil
 	})
 	snap := v.(healthCountsSnapshot)

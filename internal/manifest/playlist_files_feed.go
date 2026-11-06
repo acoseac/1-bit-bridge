@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"path"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // PlaylistFile is one playlist file the index serves, as GET
@@ -114,9 +116,9 @@ type resolvedPlaylistFile struct {
 
 // resolvePlaylistBatch resolves one batch of rows, in their order: each
 // file's lines through the path rule, every distinct placed path looked up
-// once (known holds the earlier batches' matches), then each file.
+// once (known holds the earlier batches' matches), then each file, in view.
 func resolvePlaylistBatch(ctx context.Context, tx *sql.Tx, batch []playlistFileRow,
-	known map[string]playlistTrackMatch, folders *playlistFolderTracks) ([]resolvedPlaylistFile, error) {
+	known map[string]playlistTrackMatch, folders *playlistFolderTracks, view formatgate.Set) ([]resolvedPlaylistFile, error) {
 	stored, err := loadPlaylistBatch(ctx, tx, batch)
 	if err != nil {
 		return nil, err
@@ -135,7 +137,7 @@ func resolvePlaylistBatch(ctx context.Context, tx *sql.Tx, batch []playlistFileR
 	}
 	out := make([]resolvedPlaylistFile, 0, len(stored))
 	for i := range stored {
-		r, err := stored[i].resolve(ctx, folders, matches, served)
+		r, err := stored[i].resolve(ctx, folders, matches, served, view)
 		if err != nil {
 			return nil, err
 		}
@@ -161,9 +163,10 @@ func (f *storedPlaylistFile) place(distinct map[string]struct{}) {
 // resolve is f resolved: each placed line that names a served track (or a
 // suppressed one with one served copy) a member, every other line
 // unresolved, and what the entry costs a page (PlaylistFilePageBudget).
-// album reports an album-folder playlist, which no page lists.
+// album reports an album-folder playlist, which no page lists. A track of a
+// format view does not declare is no track of view's (format_view.go).
 func (f *storedPlaylistFile) resolve(ctx context.Context, folders *playlistFolderTracks, matches map[string]playlistTrackMatch,
-	served map[string]string) (resolvedPlaylistFile, error) {
+	served map[string]string, view formatgate.Set) (resolvedPlaylistFile, error) {
 	pf := PlaylistFile{
 		Path: f.path, Name: playlistFileDisplayName(f.path),
 		ModTime: time.Unix(0, f.mtimeNs).UTC(),
@@ -175,7 +178,7 @@ func (f *storedPlaylistFile) resolve(ctx context.Context, folders *playlistFolde
 		r.cost = PlaylistFilePageCost(r.file)
 		return r, nil
 	}
-	lines := resolvedPlaylistLines{members: []string{}, unresolved: []string{}, allExact: true}
+	lines := resolvedPlaylistLines{members: []string{}, unresolved: []string{}, allExact: true, view: view}
 	for _, pl := range f.placed {
 		lines.add(pl, matches, served)
 	}
@@ -196,12 +199,14 @@ func (f *storedPlaylistFile) resolve(ctx context.Context, folders *playlistFolde
 // entries are the placed lines (a line the path rule drops is no entry);
 // named holds the tracks they name at their exact paths, and allExact goes
 // false at the first entry that names none there (unresolved, or found only
-// by the fold).
+// by the fold). A track of a format view does not declare is no track: its
+// line is unresolved, as a line naming nothing is.
 type resolvedPlaylistLines struct {
 	members, unresolved []string
 	entries             int
 	named               []string
 	allExact            bool
+	view                formatgate.Set
 }
 
 // add resolves one line and files it as a member or an unresolved line.
@@ -221,6 +226,7 @@ func (r *resolvedPlaylistLines) member(pl placedPlaylistLine, matches map[string
 	}
 	r.entries++
 	m, hit := matches[pl.path]
+	hit = hit && r.view.Takes(m.path)
 	if hit && m.path == pl.path {
 		r.named = append(r.named, m.path)
 	} else {
@@ -228,7 +234,7 @@ func (r *resolvedPlaylistLines) member(pl placedPlaylistLine, matches map[string
 	}
 	if hit && m.suppressed {
 		copyPath, ok := served[m.groupID]
-		return copyPath, ok
+		return copyPath, ok && r.view.Takes(copyPath)
 	}
 	return m.path, hit
 }
@@ -517,25 +523,30 @@ func isAlbumFolderPlaylist(ctx context.Context, folders *playlistFolderTracks, d
 // playlistFolderTracks reads the tracks under a folder for the album-folder
 // rule, through statements prepared on first use and kept for the request:
 // one for the manifest root, one for any other folder (whose answer holds
-// its subfolders' tracks too; the rule keeps the folder's own).
+// its subfolders' tracks too; the rule keeps the folder's own). It reads the
+// tracks view takes (format_view.go): a folder's track of a format view does
+// not declare is none of view's, as it was none of any app's before the
+// bridge indexed the format.
 type playlistFolderTracks struct {
 	tx          *sql.Tx
+	view        formatgate.Set
 	root, under *sql.Stmt
 }
 
 // query is the tracks under dir, every track at the root for "".
 func (f *playlistFolderTracks) query(ctx context.Context, dir string) (*sql.Rows, error) {
 	if dir == "" {
-		if err := f.prepare(ctx, &f.root, `SELECT path FROM tracks WHERE instr(path, '/') = 0`); err != nil {
+		if err := f.prepare(ctx, &f.root, `SELECT path FROM tracks WHERE instr(path, '/') = 0 AND `+formatViewSQL); err != nil {
 			return nil, err
 		}
-		return f.root.QueryContext(ctx)
+		return f.root.QueryContext(ctx, formatViewArgs(f.view)...)
 	}
 	if err := f.prepare(ctx, &f.under, `SELECT path FROM tracks
-		  WHERE path COLLATE BINARY >= ? || '/' AND path COLLATE BINARY < ? || '0'`); err != nil {
+		  WHERE path COLLATE BINARY >= ? || '/' AND path COLLATE BINARY < ? || '0'
+		    AND `+formatViewSQL); err != nil {
 		return nil, err
 	}
-	return f.under.QueryContext(ctx, dir, dir)
+	return f.under.QueryContext(ctx, append([]any{dir, dir}, formatViewArgs(f.view)...)...)
 }
 
 // prepare prepares query into *stmt unless it is there already.
