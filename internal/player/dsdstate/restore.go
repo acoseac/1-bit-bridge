@@ -56,7 +56,10 @@ func ForRestore(snapshot []byte) ([]byte, error) {
 // (atomicwrite.WriteBytesDurable, under that directory). Its caller holds the
 // data directory's exclusive lock (backup.RestoreWithOptions's does), so no
 // store writes beside it. A snapshot ForRestore refuses, and every write
-// where no directory can be synced (Windows), is refused, writing nothing.
+// where no directory can be synced (Windows), is refused, writing nothing. A
+// barrier that fails once the writer's rename has landed is the writer's
+// error marked atomicwrite.ErrLanded: the box's state is then the
+// snapshot's, and not known to survive a crash.
 func WriteRestored(path string, snapshot []byte) error {
 	out, err := ForRestore(snapshot)
 	if err != nil {

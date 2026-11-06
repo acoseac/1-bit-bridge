@@ -759,7 +759,12 @@ func unrestoredFrom(names []string, mapping map[string]string) []string {
 // directory that holds it, durably and in place of the box's
 // (dsdstate.WriteRestored), the restore's caller holding that directory's
 // lock. A refusal says what the restore had written by then (restored), and
-// how to restore the rest without the state.
+// how to restore the rest without the state. A failure once the state has
+// landed (atomicwrite.ErrLanded: the writer renamed it into place, and the
+// barrier after the rename failed) says the box's state is now the
+// snapshot's, not known to survive a crash, and gives no advice to keep the
+// box's state, which is gone (CodeRabbit on #1405: it said nothing was
+// restored).
 func restorePlayerDSD(target string, snapshot []byte, restored []string) error {
 	err := fsutil.MkdirAll(filepath.Dir(target), 0o700)
 	if err == nil {
@@ -767,6 +772,13 @@ func restorePlayerDSD(target string, snapshot []byte, restored []string) error {
 	}
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, atomicwrite.ErrLanded) {
+		done := "nothing else was restored"
+		if len(restored) > 0 {
+			done = "restored before it: " + strings.Join(restored, ", ") + ", and nothing after it"
+		}
+		return fmt.Errorf("restore %s: %w; this box's DSD state is now the snapshot's, and whether it survives a crash is uncertain; %s: run the restore again once the data directory can be synced", PlayerDSDFileName, err, done)
 	}
 	done := "nothing was restored"
 	if len(restored) > 0 {

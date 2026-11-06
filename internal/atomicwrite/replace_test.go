@@ -293,8 +293,9 @@ func TestReplaceDurable_SaysWhereTheEntryIsKeptWhenItCannotBePutBack(t *testing.
 
 // TestReplaceDurable_ABarrierThatFailsLeavesTheWriteNotDurable: the
 // directory's sync failing once both renames have landed is the write's
-// failure, an ErrBarrierFailed, with the new file in place and the entry
-// aside, as WriteBytesDurable's barrier failure leaves its new bytes.
+// failure, an ErrBarrierFailed marked ErrLanded, with the new file in place
+// and the entry aside, as WriteBytesDurable's barrier failure leaves its new
+// bytes.
 func TestReplaceDurable_ABarrierThatFailsLeavesTheWriteNotDurable(t *testing.T) {
 	root := realTempDir(t)
 	r := &replaceEvents{fail: func(e string) error {
@@ -306,8 +307,8 @@ func TestReplaceDurable_ABarrierThatFailsLeavesTheWriteNotDurable(t *testing.T) 
 	r.install(t)
 	path, aside := filepath.Join(root, "seal.json"), filepath.Join(root, "seal.json.aside")
 	was := obstruction(t, path, "directory")
-	if err := ReplaceDurable(root, path, aside, []byte("fresh"), ".replace-*.tmp"); !errors.Is(err, ErrBarrierFailed) {
-		t.Fatalf("ReplaceDurable over a failed barrier = %v, want ErrBarrierFailed", err)
+	if err := ReplaceDurable(root, path, aside, []byte("fresh"), ".replace-*.tmp"); !errors.Is(err, ErrBarrierFailed) || !errors.Is(err, ErrLanded) {
+		t.Fatalf("ReplaceDurable over a failed barrier = %v, want ErrBarrierFailed, marked ErrLanded", err)
 	}
 	if got := entrySignature(t, path); got != "---------- fresh" {
 		t.Errorf("the destination holds %q", got)

@@ -153,13 +153,16 @@ func TestARestoreThatCannotWriteTheDSDStateDurablyRestoresNothing(t *testing.T) 
 	tokens := filepath.Join(box, "tokens.json")
 	t.Cleanup(atomicwrite.SetSyncDirForTest(nil))
 	err = backup.Restore(snap, backup.Targets{TokensJSON: tokens, PlayerDSD: filepath.Join(box, backup.PlayerDSDFileName)})
-	if !errors.Is(err, atomicwrite.ErrNoDirectoryBarrier) {
-		t.Fatalf("a restore with no directory barrier = %v", err)
+	if !errors.Is(err, atomicwrite.ErrNoDirectoryBarrier) || errors.Is(err, atomicwrite.ErrLanded) {
+		t.Fatalf("a restore with no directory barrier = %v, want its refusal before anything landed", err)
 	}
 	for _, want := range []string{"nothing was restored", "remove " + backup.PlayerDSDFileName + " from a copy of the snapshot"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal %q does not say %q", err, want)
 		}
+	}
+	if strings.Contains(err.Error(), "is now the snapshot's") {
+		t.Errorf("the refusal %q says the box's state changed, before anything was written", err)
 	}
 	entries, _ := os.ReadDir(box)
 	if names := entryNames(entries); len(names) != 0 {
@@ -197,8 +200,8 @@ func TestARestoreWhoseBarrierFailsOnceTheStateLandedSaysItChanged(t *testing.T) 
 	}
 	t.Cleanup(atomicwrite.SetSyncDirForTest(func(string) error { return errors.New("the directory would not sync") }))
 	err = backup.Restore(snap, backup.Targets{TokensJSON: tokens, PlayerDSD: target})
-	if !errors.Is(err, atomicwrite.ErrBarrierFailed) {
-		t.Fatalf("a restore whose barrier fails = %v, want the barrier's failure", err)
+	if !errors.Is(err, atomicwrite.ErrBarrierFailed) || !errors.Is(err, atomicwrite.ErrLanded) {
+		t.Fatalf("a restore whose barrier fails = %v, want the barrier's failure once the state landed", err)
 	}
 	for _, not := range []string{"nothing was restored", "remove " + backup.PlayerDSDFileName + " from a copy of the snapshot", "keep this box's DSD state"} {
 		if strings.Contains(err.Error(), not) {
