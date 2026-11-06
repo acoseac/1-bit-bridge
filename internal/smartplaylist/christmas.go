@@ -11,7 +11,8 @@ import (
 // decided from its genre, its album and its title, never from its artist's
 // name. Noel Gallagher, the band Christmas, Natalie and the rapper Jul are
 // artists, and a name says nothing about the music; the artist is read only
-// to refuse `noel` in an album that is the artist's own name.
+// to refuse a Christmas word that is a name too (noel, natale, craciun,
+// kerst) in an album that is the artist's own name.
 //
 // It is comparison only. christmasFold's output is never stored, hashed,
 // used as a key or put in SQL, and it is not unified with the other folds in
@@ -135,7 +136,7 @@ var christmasAlbumWords = map[string]bool{
 // Gallagher's own album, Mihai Crăciun's).
 var guardedAlbumWords = map[string]bool{"noel": true, "natale": true, "craciun": true, "kerst": true}
 
-// creditWords put a name after them: `noel` after one is a person.
+// creditWords put a name after them: a guarded word after one is a person.
 var creditWords = map[string]bool{"feat": true, "ft": true, "featuring": true, "with": true}
 
 // birthplaceWords are the places `natale` follows when it means native, not
