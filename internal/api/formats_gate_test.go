@@ -141,7 +141,7 @@ func (f *formatsFixture) getWith(t *testing.T, target string, extra map[string]s
 	return resp, body
 }
 
-// manifestPaths decodes a manifest answer and returns its track paths.
+// manifestOf decodes a manifest answer.
 func manifestOf(t *testing.T, body []byte) ManifestPage {
 	t.Helper()
 	var m ManifestPage

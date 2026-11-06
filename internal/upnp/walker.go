@@ -637,14 +637,14 @@ func matchProtocolInfoExt(pi string) string {
 	return ""
 }
 
-// isKnownAudioExt is a tight allowlist of audio extensions the bridge's
-// downstream pipeline already handles bit-exact.
 // isWavPackCorrection reports whether it is a WavPack correction file: its
 // URL's extension is .wvc, or its protocolInfo names one.
 func isWavPackCorrection(it Object) bool {
 	return extFromURL(it.Res) == "wvc" || extFromProtocolInfo(it.ProtocolInfo) == "wvc"
 }
 
+// isKnownAudioExt is a tight allowlist of audio extensions the bridge's
+// downstream pipeline already handles bit-exact.
 func isKnownAudioExt(ext string) bool {
 	switch strings.ToLower(ext) {
 	case "flac", "dsf", "dff", "wav", "aiff", "aif", "aifc", "m4a", "mp3", "mp4", "ogg", "opus":
