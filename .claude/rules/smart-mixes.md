@@ -139,24 +139,31 @@ The record behind each rule is in `ops/engineering-log.md` (backlog B451, 2026-1
   and into `Inputs.Features`, which `signEnergy` reads. A track qualifies
   by `MatchChristmas`, pure, over `christmasFold` (NFKD less its marks,
   lower case, ł ø ß đ æ œ spelled out, punctuation a space, `x-mas` one
-  word): a genre segment equal to a Christmas genre (split on `; `, `;`
-  `/` `,` `\` and the iTunes Store's `:`; `holiday` only paired with a
-  Christmas word), a Christmas word of the album (`noel` not beside an
-  artist named Noel or after a credit), a carol of `christmasTitles` equal
-  to the title less its version suffix, or one of four title words. The
+  word): a genre segment equal to a Christmas genre or beginning with the
+  word `christmas` or `xmas` (split on `; `, `;` `/` `,` `\` and the
+  iTunes Store's `:`; `holiday` only paired with a Christmas word), a
+  Christmas word of the album (`noel`, `natale`, `craciun` and `kerst`,
+  names too, not beside an artist holding the word or after a credit, and
+  `natale` not after a birthplace word such as `terre` or `citta`), a
+  carol of `christmasTitles` equal to the title less its version suffix
+  (what follows the rightmost dash of any style; no title another song
+  shares, so no bare `Silent Night`), or one of four title words. The
   artist's name never qualifies a track, and `jul` and `natal` count only
   as a genre segment. The floor is 15 emitted tracks and 3 albums or 3
   artists among the qualifying tracks, the cap 100, 8 an artist before the
   rest fill in the same order, seeded by the season's year
-  (`season.Year`: 1 to 5 January is the previous December's). It is no
+  (`season.Year`: 1 to 5 January is the previous December's, and it turns
+  on 6 January, a day nothing is served). It is no
   discovery shelf and reads no exclusion. `GET /v1/smart-playlists`
   leaves it out outside `season.InWindow`, read from the server's clock at
   the request (`Server.clockNow`, which the time-of-day hour reads too),
   and counts it toward no `refreshedAt`; the console lists it all year,
-  marked `outOfSeason`. **Don't match artist names, don't filter in SQL
-  before matching, don't filter only at generation (a cache built on 5
-  January would serve it on the 6th, and one built in November would miss
-  1 December), and don't seed its order by the calendar year.** Tests:
+  marked `outOfSeason`. **Don't match artist names, don't count a word
+  that is a name too without its guards, don't put in the carol table a
+  title another song shares, don't filter in SQL before matching, don't
+  filter only at generation (a cache built on 5 January would serve it on
+  the 6th, and one built in November would miss 1 December), and don't
+  seed its order by the calendar year.** Tests:
   `TestMatchChristmasExclusions`,
   `TestEveryChristmasFixtureThroughTheStoresRead`,
   `TestMatchingTrackFeaturesHandsEveryServedRowToItsMatch`,
@@ -164,6 +171,7 @@ The record behind each rule is in `ops/engineering-log.md` (backlog B451, 2026-1
   `TestBuildChristmasTheFloorBySpread`,
   `TestBuildChristmasTheCapSpreadsAndFills`,
   `TestRegenerate_OneSeasonIsOneOrder`,
+  `TestTheSeasonsYearTurnsOnlyAsAWindowCloses`,
   `TestTheChristmasFamilyIsServedOnlyInItsWindow`,
   `TestAChristmasCacheIsServedByTheClockAtTheRequest`,
   `TestTheConsoleMarksTheChristmasMixOutOfSeason`.
