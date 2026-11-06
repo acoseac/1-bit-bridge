@@ -486,6 +486,42 @@ func TestAGainChangeRevokesDoPWithoutConsent(t *testing.T) {
 	}
 }
 
+// TestAGainOffUnityAtTheOpenRefusesDoP (B728 B7; the design's section 3.4):
+// the check after open of a DoP occurrence reads the gain check afresh at
+// the node's card, so a volume that leaves 0 dB between the admission and the
+// open refuses the open before a frame, and nothing it did is recorded.
+func TestAGainOffUnityAtTheOpenRefusesDoP(t *testing.T) {
+	d := newDSDRig(t, playbacktest.ChoiceState(dsdstate.ModeDoP))
+	unit := playbacktest.DACUnit()
+	unit.Descriptors = playbacktest.VolumeDescriptors()
+	d.box.SetUnit(card, unit)
+	d.box.SetMixer(card, playbacktest.VolumeMixer())
+	d.box.SetControls(card, playbacktest.VolumeControls(255)...)
+	d.files.add("a", dsd(playbacktest.DSD64, 0.5))
+	held, release := d.unit.holdNextAdmit()
+	t.Cleanup(release)
+	d.insert("a")
+	go func() { _ = d.eng.Play(bg) }()
+	select {
+	case <-held:
+	case <-time.After(alsapcm.Watchdog()):
+		t.Fatalf("no check after open within %v", alsapcm.Watchdog())
+	}
+	d.box.SetControls(card, playbacktest.VolumeControls(200)...)
+	release()
+	s := d.waitEnded()
+	d.rig.stop()
+	if v := d.k.View(); v.GivenBytes != 0 || v.Opens != 1 {
+		t.Errorf("the DAC was given %d bytes over %d opens; want the one open refused before a frame", v.GivenBytes, v.Opens)
+	}
+	if a := s.LastAttempt(); !a.Failed || !strings.Contains(a.Detail, "DoP refused at the open") || !strings.Contains(a.Detail, "dop_gain_not_unity") {
+		t.Errorf("the start: %+v; want DoP refused at the open for the gain", a)
+	}
+	if n := d.store.Writes(); n != 0 {
+		t.Errorf("a refused node wrote the state %d times: %+v", n, d.store.State())
+	}
+}
+
 // nativeWordsOf is what a DSD_U32_BE DAC is given for content of bits a
 // channel as the DSF file holds it (fill): the prefill's frames of 0x69, then
 // frames of a left and a right 32-bit word, each byte the file's with its
