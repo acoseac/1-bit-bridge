@@ -216,3 +216,16 @@ func SeedFromISOWeek(year, week int) uint64 {
 	_, _ = h.Write(buf[:])
 	return h.Sum64()
 }
+
+// SeedFromSeason returns the Christmas family's seed for a season, named by
+// its year as season.Year names it (the year of the December that opens
+// it), which the regenerator passes in. One season is one order, New Year
+// included; the next season is another.
+func SeedFromSeason(year int) uint64 {
+	h := fnv.New64a()
+	var buf [8]byte
+	putUint64(buf[:], uint64(year))
+	_, _ = h.Write([]byte("christmas season"))
+	_, _ = h.Write(buf[:])
+	return h.Sum64()
+}
