@@ -14,6 +14,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -2957,6 +2958,14 @@ type serveOpts struct {
 	// boot test can make either fail. Nil (the updater's) in production.
 	restoreBackup   func(dst, backupExt string) error
 	saveUpdateState func(dataDir string, st updater.State) error
+	// upscaleTargetBeforeCommit runs in every SetUpscaleTarget of serve's
+	// store, the boot's upscale seed among them, once both keys are written
+	// and before the transaction commits
+	// (manifest.Store.SetUpscaleTargetBeforeCommitForTest). Nil in
+	// production. A boot test holds the seed there to land a stop after its
+	// last statement and before its commit (backlog B662). Per invocation for
+	// tailscaleCLI's reason.
+	upscaleTargetBeforeCommit func(*sql.Tx) error
 }
 
 // adoptHandedListener returns lis when it is nil or when its address is
@@ -3564,6 +3573,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		return 1
 	}
 	defer manifestStore.Close()
+	if opts.upscaleTargetBeforeCommit != nil {
+		manifestStore.SetUpscaleTargetBeforeCommitForTest(opts.upscaleTargetBeforeCommit)
+	}
 	// The database is there now, and the lock file beside it: the record
 	// beside the file the boot read was of names this data dir for the check
 	// at the next start (backlog B651).
@@ -5129,10 +5141,17 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 				if seedErr := manifestStore.SetUpscaleTarget(ctx, rate, bits); seedErr != nil {
 					// A shutdown that lands in the seed stops serve before
 					// it served anything. That is a requested stop, not a
-					// failed start, so it exits as a shutdown does. Only
-					// the seed can: it is the one startup step that runs
-					// on ctx and returns 1.
-					if ctxerr.WithoutCancellation(ctx, seedErr) == nil {
+					// failed start, so it exits as a shutdown does, and a
+					// stop leaves the seed one of two errors: the
+					// cancellation, from its begin or a statement, or
+					// sql.ErrTxDone, from a commit that database/sql's own
+					// rollback of the transaction got to first (backlog
+					// B662; stoppedBeforeServing takes those and nothing
+					// else). The seed is the one start-up database step on
+					// ctx (B662's audit, in ops/engineering-log.md);
+					// disarmEarlyRollback, the other start-up step on ctx
+					// that can exit 1, says its stop itself.
+					if stoppedBeforeServing(ctx, seedErr) {
 						return 0
 					}
 					fmt.Fprintf(stderr, "seed upscale target: %v\n", seedErr)

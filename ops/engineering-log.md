@@ -77608,6 +77608,639 @@ extended by the three points) applies strictly and under `git apply
 --check`; with it player.md is 97,450 bytes (97.5 %), and 98,076 (98.1 %)
 with B3's patch applied first, under budget, so no entry moved.
 
+## 2026-11-06 — B662: a stop at the upscale seed's commit exits as a stop
+
+Backlog B662, from macOS run 41480956932, where
+`TestServeRunsThePlayersWatcherWhileThePlayerIsOn` failed with `serve exit
+code 1; stderr=seed upscale target: sql: transaction has already been
+committed or rolled back` on a PR that did not touch that path (Linux `make
+test` passed). Worker b662 on legion0 (Ubuntu 26.04, linux/amd64, 16 cores,
+go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`), branch `fix/b662-upscale-seed`
+from main d37417ed. Commits: the reproduction 4eaa288c (red), the fix
+4ea87e72, then this record. The rules are two new bullets, in `cli-serve.md`
+after the loops' stop bullet and in `build-ci-tests.md` after the collation
+park's, shipped as a checked patch (`rules-b662.patch`; this worker cannot
+write `.claude/`), with their long forms in `ops/History-rules-cli-serve.md`
+and `ops/History-rules-build-ci-tests.md`.
+
+**What it was: the stop, arriving as another error.** The test boots serve
+and stops it once its hotplug watcher has read once, and the watcher starts
+(`startPlayerHotplug`, main.go:4577 at 4ea87e72) before the upscale block, so
+on a slow host the stop lands while serve still seeds the upscale target on
+its fresh database (main.go:5131-5160). The seed is
+`SetUpscaleTarget(ctx, rate, bits)` (store.go:7418): `BeginTx`, two upserts
+and `tx.Commit()`, every call on serve's own `ctx` (runServe's
+`context.WithCancel` at main.go:3171, which nothing between there and the
+seed reassigns), so no statement runs on another context and nothing uses
+the transaction twice. In go1.27.3's `database/sql/sql.go`, `beginDC` gives
+the transaction `context.WithCancel(ctx)` and starts `Tx.awaitDone`
+(1918-1930), which rolls the transaction back once that context is done;
+`rollback` marks it done before anything else (2332) and waits for a
+statement under way (`closemu`, 2345) before the driver's ROLLBACK. A
+statement on the cancelled context answers `ctx.Err()`: `grabConn` asks the
+context first (2251-2255), and modernc v1.61.0 answers `ctx.Err()` for a
+statement its interrupt goroutine saw cancelled, completed or not
+(stmt.go:109-114). That is #1005's `context canceled`, which the seed's
+`ctxerr.WithoutCancellation` check took for a stop. A cancel that lands after
+the last upsert's driver call has returned leaves the rollback to mark the
+transaction done before the seed reaches `tx.Commit()`, which then finds its
+context done and the transaction done and answers `sql.ErrTxDone` without
+calling the driver's Commit (2296-2301). A statement whose `grabConn` passed
+its context check just before the cancel and found the transaction done just
+after the rollback's mark answers it too (2259-2263). `sql.ErrTxDone` carries
+no cancellation, so the check called it a failed start. Which of the two the
+macOS run met cannot be told from its line: both are the same stop, and the
+same check fixes both.
+
+**Red first.** The window between the last statement and the commit has no
+driver call in it to park in, and parking inside the last INSERT is #1005's
+test, already green: the cancel reaches the statement and comes back as
+`context.Canceled`. A hold inside the driver's last call would not do
+either, since the rollback waits for that call (`closemu`). So 4eaa288c adds
+a hold in the code there, per store and nil in production
+(`Store.upscaleTargetBeforeCommit`, set by
+`SetUpscaleTargetBeforeCommitForTest`, which serve takes from
+`serveOpts.upscaleTargetBeforeCommit` and hands its own store, main.go:3570),
+and a watch on the rollbacks at the driver (`sqlitetest.WatchRollbacks`: a
+rollback hook, `sqlite3_rollback_hook`, installed on every connection in
+`init`). A test holds the seed at its commit, stops serve, waits for a
+rollback on serve's database and for the held transaction to answer
+`sql.ErrTxDone` (a `SELECT 1` on it, which changes nothing while it is still
+open), and only then lets the seed commit. At the store,
+`TestAStopAfterTheUpscaleTargetsLastStatementIsErrTxDoneAtItsCommit` asserts
+`errors.Is(err, sql.ErrTxDone)`, and that the error carries no
+`context.Canceled`, with neither key written on a fresh seed and the first
+target kept over one already set. Through serve,
+`TestAServeStoppedAtItsUpscaleSeedsCommitExitsCleanly` on 4eaa288c: `a serve
+stopped at its upscale seed's commit exited 1, want 0; stderr="seed upscale
+target: sql: transaction has already been committed or rolled back\n"`, the
+CI's line exactly and the whole of serve's stderr.
+
+**The fix (4ea87e72).** `stoppedBeforeServing(ctx, err)`
+(cmd/bridge/serve_startup_stop.go) is the seed's one check, #1005's
+cancellation and the ended transaction together, so the two cannot drift:
+serve's stop context cancelled (`errors.Is(stopCtx.Err(), context.Canceled)`,
+never any `ctx.Err()`), and an error made of that stop's artifacts alone
+(`stopArtifactsOnly`: the cancellation as `ctxerr.WithoutCancellation` reads
+it, or `sql.ErrTxDone`, wrapped or joined, with nothing beside them and no
+wrapper of nothing). Unchanged: `SetUpscaleTarget`'s transaction (only the
+nil hold between its last statement and its commit is new) and its errors,
+since the console's batch submit (handlers_upscale_batch.go:284) takes nil
+for a committed update; and `ctxerr.WithoutCancellation`, which keeps
+reporting a deadline and an unrelated failure during a shutdown, and still
+reports the `sql.ErrTxDone` a loop's commit meets after a stop (its doc's
+measured residual).
+
+**The audit: every start-up database call and transaction runServe
+reaches**, direct or through helpers, read at 4ea87e72, against "does a stop
+landing before or at its commit exit 0" (main.go lines):
+
+| Step | Context | A stop before or at its commit | Verdict |
+|---|---|---|---|
+| `manifest.OpenStore` (3564): the migration ladder, its install-marker record (`disarmBeforeMigrating`), the FTS rebuild's `BEGIN IMMEDIATE`, the FTS probe | `context.Background()` (`migrate`), and no context | cannot reach it; serve goes on to the stop and exits 0 | handled |
+| `manifest.NewScanner` (3632): `GetScanState("last_full_scan")` | `context.Background()`; its error ignored | cannot reach it | handled |
+| `transcode.NewCoordinator` (5114): `RecoverInterruptedBatches`, one UPDATE | `context.Background()` (batch.go:344) | cannot reach it | handled |
+| `GetUpscaleTarget` (5131), one SELECT | serve's | its error is not `ErrUpscaleTargetUnset`, so the seed is skipped and serve exits 0 at its stop | handled |
+| `SetUpscaleTarget` (5135): `BeginTx`, two upserts, `Commit` | serve's | before the begin or in a statement: `context.Canceled`, exit 0 (#1005); after the last statement, at the commit: `sql.ErrTxDone`, exit 1 | fixed (B662) |
+| the same, in a statement's `grabConn` between its context check and its check of the transaction | serve's | `sql.ErrTxDone`, exit 1 | fixed by the same check (read from the code; no hook reaches that window) |
+| `wireAlbumGain` (`albumgain.New`), `admin.New`, and the provider, enricher, pool, ingester and DLNA library constructors | — | no database call | — |
+| every other store call runServe reaches: the scanner, the enricher, the sweepers and the sample-format pass on `scanCtx`, the UPnP ingest, the DLNA listener, the player, the console (its `SetUpscaleTarget` included) | a pass's or a request's | never decides the exit code; a pass's stop follows the loops' rule (`ctxerr.WithoutCancellation`), whose doc names this `sql.ErrTxDone` as its measured residual, one reported line | handled (unchanged) |
+
+Off the database, `disarmEarlyRollback` (3416) is the other start-up step on
+serve's context that can exit 1: 1 when it fails, 0 when the stop ends its
+wait for the install marker's lock (B613 round 4). The seed's comment called
+it "the one startup step that runs on ctx and returns 1", and
+`ops/History-rules-cli-serve.md` said the same since #1005, before B613 added
+that step; both now say what is so.
+
+**Tests.** At the store (internal/manifest/upscale_target_commit_test.go):
+the reproduction above; `TestTheUpscaleTargetsHoldAtItsCommitCommitsWithNothingCancelled`,
+the control that the hold is not what fails the write; and
+`TestAnErrorAtTheUpscaleTargetsCommitRollsBothKeysBack`, an error at the hold
+writes neither key, fresh or over a target already set. The watch
+(internal/sqlitetest): `TestARollbackWatchCountsTheRollbacksOnItsFileAlone`
+(a rollback by DSN and by path, database/sql's own after a cancel, never a
+commit or another file's) and `TestWaitPastAnswersTheWorksEndAndGivesUpAtItsInstant`.
+Through serve (cmd/bridge/serve_cancel_test.go), the reproduction and the
+failures that stay failures, each on the same seed path:
+`TestAServeWhoseUpscaleSeedFindsItsTransactionEndedStillFails` (the same
+`sql.ErrTxDone` from the commit with the stop context live, the transaction
+rolled back at the hold, as one used twice would be: exit 1 and the CI's
+line), `TestAServePastItsDeadlineAtItsUpscaleSeedsCommitStillFails` (serve's
+context ending at a deadline, `context.DeadlineExceeded`, a parent context
+whose deadline the test passes: exit 1 and the same line) and
+`TestAServeWhoseUpscaleSeedFailsAsItIsStoppedStillFails` (an unrelated error
+after the stop and its rollback: exit 1 and that error). The predicate's
+table, `TestAStopEndsAStartUpStepOnlyByItsOwnArtifacts` (cmd/bridge/serve_startup_stop_test.go),
+has 21 rows: each artifact wrapped and joined, a cancel with a cause, an
+error beside either artifact, a deadline's error, another sentinel of
+database/sql, a wrapper of nothing, no error, and the live and expired stop
+contexts.
+
+**Negative controls**, each one mutation applied exactly once to 4ea87e72,
+the test binaries rebuilt, every listed test run alone, and the bytes put
+back from memory (the tree was clean after each):
+
+| # | Mutation | Red | Green |
+|---|---|---|---|
+| N1 | the seed's check back to `ctxerr.WithoutCancellation` alone (the fix reverted) | the reproduction: exit 1, the CI's stderr exactly | the five other serve tests, the table |
+| N2 | `sql.ErrTxDone` taken for a stop whatever the context | the live-context twin and the deadline twin (exit 0), the table's live, expired and joined rows | the reproduction, the unrelated-error twin, #1005's pair |
+| N3 | any `stopCtx.Err()` taken for the stop | the deadline twin (exit 0), the table's expired row | the rest |
+| N4 | any error taken once the stop context is cancelled | the unrelated-error twin (exit 0), seven table rows | the rest |
+| N5 | the ended transaction's half dropped | the reproduction (exit 1, the CI's stderr), five table rows | the rest |
+| N6 | the cancellation's half dropped | #1005's `TestAServeStoppedInItsUpscaleSeedExitsCleanly` (exit 1, `context canceled`), four table rows | the rest |
+| N7 | a join or a wrapper of several taken whatever it holds | four table rows | — |
+| N8 | the wrapper-of-nothing guard dropped | its table row | — |
+| N9 | serve never hands its store the hold | the four serve tests that hold the seed ("never reached its commit") | — |
+| N10 | the rollback hook tells the watch nothing | the serve reproduction, the store's reproduction and the watch's own test ("no transaction rolled back") | — |
+| N11 | the fix reverted and the seed let go at once after the stop, with no wait for the rollback | 1 of 20 runs of the reproduction | 19 of 20: the commit got there first and answered `context.Canceled` |
+
+N11 is the window itself: without the wait for the rollback the race is
+back, and the commit beat the rollback in 19 of 20 runs. (N3's first form
+deleted the predicate's only use of `errors` and did not build; its second
+form is the one in the table.)
+
+**Stress** (build-ci-tests' fallback for a race, about three processes per
+core): the cmd/bridge test binary built with `-race` and make's tags, 48
+processes on the 16 cores at once (a load average of about 63), each running
+the reproduction, #1005's pair, the three twins and
+`TestServeRunsThePlayersWatcherWhileThePlayerIsOn` ten times. At 4ea87e72:
+3,360 runs, none failed (414 s). The same binary with the fix reverted: the
+reproduction failed 480 of 480 runs, each with the CI's stderr exactly, and
+the other six tests passed 480 of 480 each, the test CI failed among them:
+the window did not open by itself in 480 runs on Linux, and the reproduction
+does not depend on its opening.
+
+**Checks**, on legion0, each run under the shared build lock, at 4ea87e72
+with the seed's comment reworded (no code):
+- `go test -race -count=1 -timeout 30m` with make's tags of cmd/bridge,
+  internal/manifest and internal/sqlitetest: ok (966 s, 1,375 s, 2.5 s).
+- `make test-fast` (TMPDIR under `.tmp/_b662`, so the build-site census
+  skips it): ok, 83 of 83 packages (474 s; cmd/bridge 425 s).
+- `make vet` natively and with `GOOS=windows` and `GOOS=darwin`: ok.
+- go1.27.3's gofmt on the nine changed Go files: clean.
+- `make docs-check`: ok as the tree stands (CLAUDE.md 73.6 %, the worst load
+  player_openhome_test.go 64.4 %); and on a copy of the tree with
+  `rules-b662.patch` applied by a strict applier, the four steps of
+  docs-check: ok, cli-serve.md 40,081 bytes (40.1 %), build-ci-tests.md
+  26,819 (26.8 %), the worst load 64.5 %. `git apply --check` takes the
+  patch, and the strict applier refuses it with one context byte changed.
+- `make build-all`: ok (its `-check-build-tags` step OK, and the six
+  targets built).
+
+**For the owner.**
+- The loops' `sql.ErrTxDone` after a stop is still reported, as one Error
+  line where a stop at a loop's commit lands in the same window
+  (ctxerr.go's doc measured it at 0 of 3,000 random cancels). The reason the
+  doc gives for not matching it, error text, holds for `sql: statement is
+  closed` and not for `sql.ErrTxDone`, a sentinel; whether the loops' rule
+  should take it beside a cancelled context, as start-up now does, is a
+  separate change to `ctxerr`'s callers, not made here.
+- The macOS and Windows legs have not run this here; nothing in the change
+  is platform-specific beyond the rollback hook, which modernc builds on
+  every platform it supports.
+
+## 2026-11-06 — B743: a track or disc number written with its total reads as its number (ExtractorVersion 31)
+
+Backlog B743, found by the 0.2.3 Docker upgrade test on 0.2.2 and the
+candidate alike: a FLAC tagged `TRACKNUMBER=1/2` indexed as track 0, so its
+album played out of order. Worker b743 on legion0 (Ubuntu 26.04,
+linux/amd64, AMD Ryzen 9 6900HX, 16 threads, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`), branch `fix/b743-track-number-forms` from main d37417ed, the
+orchestrator's brief. Commits: the fix with its tests 5734d52b, two overflow
+pins 9957eb98, then this record with the rule's long form in
+`ops/History-rules-scanner.md`. Its line in `.claude/rules/scanner.md` goes
+in through a checked patch (`rules-b743.patch`; this worker cannot write
+`.claude/`).
+
+### The defect
+
+dhowden's `metadataVorbis.Track()` and `Disc()` (vorbis.go:239-251 at
+3d75831295e8) are `x, _ := strconv.Atoi(m.c["tracknumber"])`, and the same
+for `discnumber`, `tracktotal` and `disctotal`. `populateFromTagMetadata`
+took `m.Track()` and `m.Disc()` behind its presence gates, so a value that
+is not a whole integer was a present 0: `1/2`, `3 of 12`, ` 3 `. A 0 is a
+missing number to the extractor's filename backfill and to the
+track-number pass, so a file named `05 - x.flac` took its name's number,
+which need not be the tag's, and one with no number in its name kept 0.
+No pass fills a disc number, so that stayed 0.
+
+### The forms
+
+The rule (`leadingTagNumber`), on the value trimmed: an optional sign and
+digits, then nothing, `/` and whatever follows, or whitespace, `of` and
+whatever follows. Every row is in `TestLeadingTagNumberReadsTheFormsTaggersWrite`
+or `TestLeadingTagNumberPastAnInt32`.
+
+| Value | Reads |
+|---|---|
+| `1/2`, `01/12` | 1 |
+| `3/`, ` 3 `, `3 of 10`, `+3/12`, `\t3/12\n`, `3/12/2`, `3/A`, `3 of`, `3\tof 10`, and from round 2 `3 / 12` and `3 OF 10` | 3 |
+| `-3/12`, ` -3 ` | -3 (what an ID3 frame reads `-3/12` as) |
+| `A1`, `1.2`, `2-1`, `3-A`, `2024-01-01`, empty, blank, `0`, `0/12` | 0 |
+| `3of10`, `3 10`, `/5`, `+`, `- 3`, `+ 3/12` | 0 (no tail but the two; `of` is lower case and follows whitespace) |
+| `+3`, `-3`, `007`, `12` | 3, -3, 7, 12 (`strconv.Atoi` reads them whole, as before) |
+| `99999999999999999999`, `-99999999999999999999` | saturated, as before: `math.MaxInt64` / `math.MinInt64`, or the int32 bounds where an int is 32 bits |
+| `4294967296`, `4294967296/2` | 4294967296 where an int is 64 bits; saturated and 0 where it is 32 |
+| `99999999999999999999/2`, ` 99999999999999999999 `, `99999999999999999999 of 2` | 0 |
+
+The brief said an overflowing number before `/2` reads 0 "as today". That
+holds where `strconv.Atoi` meets the `/` first, and not where it meets the
+overflow first: `ParseUint` checks for overflow digit by digit. Measured
+with go1.27.3: on linux/amd64 `99999999999999999999/2` saturates to
+9223372036854775807 (what dhowden stored), while `9999999999999999999/2`,
+past an int64 and inside a uint64, reaches the `/` and reads 0; on
+linux/386 every leading number past 4294967295 saturates to 2147483647
+(`9999999999/2` included). The rule reads every overflowing leading number
+in a form as 0, on both int sizes, so those shapes change from the
+saturated number to 0. A whole value keeps `strconv.Atoi`'s answer,
+saturated where it overflows.
+
+### The audit
+
+Every path into `populateFromTagMetadata`, measured through dhowden and the
+extractor with a throwaway probe (not committed) and then the tests:
+
+- **Vorbis comments**: FLAC (`tag.ReadFrom`), Ogg Vorbis and Opus (dhowden's
+  Ogg reader, `.ogg` and `.oga`), Ogg FLAC (`oggFLACMetadata`, read as a
+  `.flac`). All are `tag.VORBIS` and `strconv.Atoi` of the whole value, so
+  every form above but the whole numbers was 0. Fixed: `numberAsWritten`
+  reads the raw value by the rule.
+- **ID3v2.3 and 2.4** (an MP3; a WAV's `id3 ` and an AIFF's `ID3 ` chunk
+  through `applyEmbeddedID3`; a DSF's tag at its metadata pointer,
+  `readDSFTags`; a DSDIFF `ID3 ` chunk at the root or in PROP, through
+  `applyEmbeddedID3`): dhowden's `parseXofN` splits on `/` and reads the
+  side before it, trimmed, when there are two sides, and the whole value as
+  it stands otherwise. Measured: `1/2` 1, `01/12` 1, `3/` 3, `+3/12` 3,
+  `-3/12` -3, `3 / 12` 3, `\t3/12\n` 3, `+3` 3, `-3` -3, and ` 3 `,
+  `3 of 10` and `1/2/3` 0. Fixed: a 0 is read again by the rule; any other
+  answer stands, since the rule alone would read `3 / 12` as 0, and a
+  saturated overflow stands with it.
+- **ID3v2.2** (`TRK`, `TPA`, the frames iTunes wrote for years): dhowden
+  reads them, but the gates' aliases were `trck`, `tracknumber`, `trkn` and
+  `tpos`, `discnumber`, `disk`, so every such file indexed with neither
+  number, whatever the value. Fixed: `trk` and `tpa` join the gates.
+- **ID3v1**: `ReadID3v1Tags` keeps ID3v1.1's track byte as the raw map's
+  `track`, an int, 0 when the comment's byte 28 is not a NUL. No gate asked
+  for it, so an MP3 tagged with ID3v1.1 alone had no track number. Fixed:
+  `id3v1HasTrack` counts it present above 0 (ID3v1.0's comment runs on
+  there). ID3v1 has no disc.
+- **MP4** `trkn` and `disk`: binary atoms, which dhowden's `readAtomData`
+  stores as ints; no form reaches them. Unchanged. Two comments that said
+  `trkn` surfaces as `*tag.Position`, a type the pinned dhowden does not
+  have, now say what it keeps.
+- **DSF and DFF** are the ID3 paths above. `containerText` (a DSDIFF DIIN,
+  a RIFF LIST/INFO) carries a title, artist, album and genre, no numbering.
+  WavPack and APE are not scanner extensions (`Ext`).
+- **Elsewhere in `internal/`**: the UPnP ingest reads
+  `upnp:originalTrackNumber` with `atoiTrackNumber` (didl.go), which trims
+  and cuts at `/` already, the element being an `xsd:int`; an SACD image's
+  virtual rows are numbered from its TOC; `fillTrackNumberFromFilename` and
+  the track-number pass parse file names. Nothing else assigns
+  `TrackNumber` or `DiscNumber` (a grep of the assignments outside tests).
+- **Raw keys**: the re-read uses the key the accessor read, as that
+  format's map spells it (`tagNumberKeys`: `tracknumber` and `discnumber`,
+  which dhowden lowercases; `TRK`/`TPA`; `TRCK`/`TPOS`), never `stringOf`'s
+  normalised lookup, which would answer a Vorbis comment named `TRCK`. The
+  value types are dhowden's: a Vorbis value and an ID3v2 text frame are
+  strings, ID3v1's `track` an int.
+
+What extraction told apart, it still does: a present empty or invalid value
+is `Some(0)`, an absent one nil, and a tag with no raw map keeps its
+accessors' answers (`TestEveryVorbisReaderReadsTheNumberATaggerWrote`'s
+empty, invalid and absent rows for all four Vorbis readers, the same rows
+for ID3v2, 2.2 and ID3v1, and `TestATagWithNoRawMapKeepsItsAccessorsAnswers`).
+
+### Red first
+
+Before the fix, the tests of 5734d52b against main's `extractors.go`:
+`TestScanner_AFLACNumberedWithItsTotalIndexesItsTrackAndDisc` (a FLAC named
+`Song.flac`, `TRACKNUMBER=3/12`, `DISCNUMBER=2/2`, through a scan) stored
+track 0 and disc 0, both assertions failing; 30 subtests failed (four forms
+in each of the four Vorbis readers; ` 3 `, `3 of 12` and `3/12/2` in
+ID3v2.3 and 2.4; every present ID3v2.2 row, nil; a WAV, AIFF, DSF and DFF
+with `3 of 12` and ` 2 `), and `TestAnID3v11TrackIsRead` read nil. The
+plain, empty, invalid and absent rows, ID3's `3/12` and `3 / 12`, the M4A
+and the no-raw-map case passed. The final tests (9957eb98), run on a copy of
+the tree with main's `extractors.go`: 34 subtests (the four Vorbis overflow
+rows join), those two tests, and the upgrade test, which main fails whole
+(its version is 30, so no seeded row is read again; the full manifest keeps
+0/0, 5/0 and 6/0 and the delta is empty). The two table tests call the new
+helper and were stubbed out of that copy.
+
+### The fix
+
+`numberAsWritten(f, raw, read, keys)`: a Vorbis comment is
+`leadingTagNumber` of its value; an ID3v2 frame is dhowden's answer unless
+that is 0, which `leadingTagNumber` reads again; every other format keeps
+the accessor's answer. `isWholeInteger` decides what `strconv.Atoi` reads
+whole, and `acceptedNumberTail` the two tails. The track gate is
+`hasAnyRawKey(raw, "trck", "tracknumber", "trkn") || id3v1HasTrack(...)`,
+with `trk` for an ID3v2.2 tag alone, and the disc gate likewise with `tpa`
+(both limited to ID3v2.2 in round 2). `ExtractorVersion` 30 → 31,
+its docblock entry v31.
+
+### Rows already indexed
+
+The first scan after the upgrade re-reads every row once (size and mtime
+unchanged, version stale: `reExtractUnchanged`). A row that reads alike is
+byte-identical after `mergePostScanFields` and takes
+`StampExtractorVersionBatch`: `extractor_version` and `missing_count`, no
+`indexed_at`, no `enriched_at`, no `tags_json`. A row whose track number
+moves is held to the scan's tail (`reconciledFieldsDiffer`: the track number
+is one of #1128's four fields), the passes run in memory with every held
+re-read in place, and it is written whole; one whose disc number alone moves
+takes the full upsert at once. The full upsert stamps `indexed_at` past the
+library watermark and zeroes `enriched_at`. A number the file's name gave
+gives way to the tag's: v30 read `4/12` in `05 - Named.flac` as 0 and the
+extractor's backfill made it 5 (the track-number pass does the same for a
+row indexed before that backfill); v31 reads 4, the merge copies a stored
+track number only where the fresh one is nil, and the pass fills only a
+missing one. `TestScanner_V31_ANumberReadAnewJoinsTheDelta_AnUnchangedOneOnlyStamps`
+seeds five rows at the literal version 30, size and mtime unchanged, with
+v30's numbers (0/0, 5/0, 6/0, and two rows that read alike, one of them an
+MP3 whose `8 / 12` dhowden reads as 8); one scan gives the full manifest
+3/2, 4/2, 6/2, 7/2 and 8/2, the delta exactly the three changed rows with
+those numbers, `enriched_at` 0 on them and 1 on the other two, and the scan
+after that moves nothing.
+
+**What the bump costs, measured** (a throwaway test, not committed: 25,000
+synthetic FLACs of about 250 bytes, 100 a folder, on the worktree's disk
+with the store): the index scan 6.70 s; two scans of the unchanged library
+7.17 s and 7.20 s; the bump over rows that read alike 5.35 s, 0 rows in the
+delta; the bump with 2,500 rows whose numbers change 5.74 s, those 2,500
+rows exactly in the delta; the scan after it 7.22 s, 0 rows. On this host
+the bump costs no more than a rescan does. What a real library adds is the
+read: the re-read opens every file and reads its tags once, where an
+unchanged scan compares its stat and skips it, and dhowden reads a FLAC's
+PICTURE blocks whole. So on a 25,000-track library the bump is one read of
+every file's tag blocks and embedded pictures, at the first scan after the
+upgrade, at the speed of the medium, and one enrichment for each row whose
+numbers change (one MusicBrainz release search per album and artist through
+the enricher's caches, at its 1.1 s pace). The rows that read alike cost
+the client nothing.
+
+### Sync
+
+A re-extracted row whose values are unchanged produces no delta entry: it is
+only stamped, and the delta is `indexed_at > since`. The upgrade test pins
+it on the strictest cursor a device can hold (`Store.LibraryWatermark`, the
+one `library.changed` hands out), and the 25,000-row run measured it (0
+rows). So the library does not cross the wire. The one exception is an
+SACD image's virtual rows: `processSACDISO` re-expands a version-stale image
+and hands every virtual row to the full upsert, a leg with no diff-guard
+(the v17 entry, and the SACD read-failure record above, say so), so each
+virtual row moves `indexed_at`, is re-enriched, and crosses twice whatever
+its numbers, as on every bump: two deliveries of every virtual row of every
+SACD image in the library, each a track's JSON like the rows below. This
+change does not touch that leg. A row whose number changes
+is in the next delta with its new `trackNumber` and `discNumber`, fields the
+wire has always carried, so the app re-sorts the album (its order is disc,
+then track); the row comes with `enriched: false`, its MusicBrainz ids and
+artwork kept by the merge. Its enrichment then lands through `MarkEnriched`,
+which moves `indexed_at` again, so the row crosses a second time,
+`enriched: true`. The cost is those two deliveries of each changed row:
+1,067,136 bytes of track JSON for the 2,500 synthetic rows (427 a row,
+49,633 gzipped, the rows being near-identical), more for a row with its ids
+and artwork key. One `library.changed` event ends the scan. How many rows
+of a real library change was not measured. No wire change: `ProtocolVersion`
+stays 1, `PROTOCOL.md` is unchanged, no Mirror-PR. The app's own readers
+(its SMB and on-device sources) were not read: its clone is not on this
+host.
+
+### Negative controls (each on the committed fix, restored after)
+
+A runner applied each mutation once to `extractors.go`, rebuilt the test
+binary, ran the named tests and restored the bytes from memory; the tree
+was clean after.
+
+| Mutation | Red |
+|---|---|
+| NC1: `leadingTagNumber` reverted to `strconv.Atoi`, dhowden's reading | 8 tests, 31 subtests: the two tables, the FLAC scan test, 20 Vorbis rows, 6 ID3v2 rows, the ID3v2.2 `3 of 12` row, the four containers, the upgrade test |
+| NC2: `ExtractorVersion` left at 30 | the upgrade test alone (the FLAC scan test stays green: the bump is what reaches stored rows) |
+| NC3: an ID3v2 frame's 0 not read again | 11 subtests: ` 3 `, `3 of 12`, `3/12/2` in 2.3 and 2.4, ID3v2.2's `3 of 12`, the four containers |
+| NC4: an ID3v2 frame always read by the rule | `3 / 12` and the overflow row in 2.3 and 2.4, and the upgrade test (its MP3's `8 / 12` moves) |
+| NC5: the gates without `trk` and `tpa` | the four present ID3v2.2 rows |
+| NC6: the gate without ID3v1.1's track byte | `TestAnID3v11TrackIsRead` |
+| NC7: a Vorbis value read again only on 0, as an ID3 frame is | the overflow row in each of the four Vorbis readers |
+| NC8: no whole-number branch | `TestLeadingTagNumberPastAnInt32` (an overflow no longer saturates) |
+| NC9: an absent track number counted present | the absent rows (four Vorbis readers, ID3v2, ID3v2.2), ID3v1.0, and two older pins, `TestPopulateFromTag_YearTrackDisc_AbsentReturnsNil` and `TestPopulateFromTag_VorbisAliases_AbsentReturnsNil` |
+| NC10: the no-raw-map branch leaves the track number unset | `TestATagWithNoRawMapKeepsItsAccessorsAnswers` and `TestPopulateFromTag_RawNilFallback` |
+
+Every control built; none stayed green.
+
+### Gates
+
+`make test-fast`, ok (83 packages; cmd/bridge 419 s, internal/manifest
+255 s); `make test TEST_PKGS=./internal/manifest/...`, ok (race, the
+Makefile's tags, 1,338 s); the new tests as linux/386 too (`GOARCH=386`,
+which legion0 executes), where an int is 32 bits, ok; `make vet` native and
+with `GOOS=windows`, `GOOS=darwin`, `GOOS=linux GOARCH=386` and
+`GOOS=linux GOARCH=arm`, ok; gofmt (go1.27.3's) on the changed files, clean;
+`make docs-check`, ok, on the tree and on a copy with `rules-b743.patch`
+applied, which `git apply --check` takes; the qualification check
+(`scripts/qualification-version`, d37417ed..HEAD), ok; `make build-all`,
+ok. Not run here: macOS and Windows natively, CI's runners and the iOS app.
+
+**Round 2 (Codex and the Claude API reviewer on the branch, and the owner on "of"; no further bump, since 31 has not shipped).** Round 1 added `trk` and `tpa` to the presence gates as aliases of every format, so a FLAC holding `TRK=3/12` and `TPA=2/2` and no TRACKNUMBER or DISCNUMBER stored two 0s where main stored none: dhowden and `numberAsWritten` read only the canonical Vorbis keys. They are asked for in an ID3v2.2 tag alone now (`id3v22HasFrame`, by the exact key); the gates' other aliases stay as main has them. A "/" may follow whitespace (`3 / 12`, `3 /12`, `3 /` read 3, as dhowden's ID3 reader always read the first), and "of" is matched in any case (`3 OF 10`, `3 Of 10`), while `1.2`, `2-1`, `3-A`, `2024-01-01`, `3 - 12` and `3of10` still read 0. So the forms table above now has `3 / 12` and `3 OF 10` reading 3, and an ID3v2 frame's non-zero answer differs from the rule's only for an overflow dhowden saturates. Red first, the new rows on a snapshot of 7f67cb48's extractor: six table rows, twelve Vorbis subtests (the spaced slash, `OF`, and the file with only `TRK` and `TPA`, which stored 0/0 for absent numbers, in each of the four readers) and the two ID3v2 `3 OF 12` subtests. Controls on the fix, each red: `trk` and `tpa` back as aliases of every format (the four TRK/TPA-only subtests); the ID3v2.2 gate answering no (the four present ID3v2.2 rows); no whitespace before a "/" (four table rows, four Vorbis subtests); "of" in lower case only (two table rows, six subtests); and round 1's NC4 again, an ID3v2 frame always read by the rule, now red on the two overflow rows alone (the upgrade test's `8 / 12` reads 8 either way). The new tests on linux/386 too; `make test-fast`, ok (83 packages); `make test TEST_PKGS=./internal/manifest/...`, ok (race, 1,339 s); `make vet` on the five targets, ok; gofmt, clean; `make docs-check`, ok, on the tree and with `rules-b743.patch` and then `rules-b743-r2.patch`, the rules line's round-2 wording, applied. The long form in `ops/History-rules-scanner.md` says the same.
+
+## 2026-11-06 — B728 B5: the effective policy, the DoP gain topology and per-occurrence reconciliation
+
+B728's B5 (`ops/plan-b728-dsd-capability-design.md`, sections 1, 3, 9.1 and B5's row in 11).
+Worker b728-b5 on legion0 (Ubuntu 26.04, linux/amd64, Linux 7.0, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`), branch `feat/b728-b5-effective-policy` from main 4c1e44e3, the orchestrator's
+brief with its eight binding notes. B5 changes nothing a user sees: `internal/player/policy` is
+pure and nothing calls it; B7 is the cutover. No guarded path changes (section 8), so
+`qualificationVersion` stays 39. The rule goes into `.claude/rules/player.md` through a checked
+patch (`rules-b728-b5.patch`); this worker cannot write `.claude/`.
+
+**What `Effective` takes and returns.** `policy.Effective(policy.Inputs)` takes values alone: the
+bound unit's `dacprofile.Unit` (its key and bcdDevice), the profile database, the player's DSD
+state, the kernel release, the bound PCM device's playback altsets (its stream file's), the probe
+cache's answers for the unit, and a `policy.Mixer` for the DoP gain check (the sysfs descriptors
+with the active configuration, the control snapshot read with `AllowUnreadable`, and the kernel's
+table of the controls its USB audio driver made of each unit). It reads no file, kernel, clock or
+global. It returns a `Set`: for DSD64, DSD128 and DSD256 a `Plan` (native or DoP with its tuple:
+transport, format, rate, pause, tail and prefill; converted with its target; or refused with
+section 3.2's word and a detail), beside what was established of each transport there (`Native`,
+`DoP`: offered, the rung and its date, acknowledged, rejected, clean, the gain verdict, the
+profile's claims and refusal, the confirmation), the choice that applied, the conversion target,
+and the model and firmware it was computed for. Any other rate is `rate_not_supported`. Health is
+not an input: B7 asks the hotplug snapshot's freshness first, as `readPermission` does, since no
+section 3.2 word refuses a stale reading.
+
+**The order.** (1) A state that does not read (`State.Unreadable`) refuses every rate as
+`dsd_state_unreadable`, asked before `ChoiceFor`, over every choice and every positive input,
+conversion included (note 5: its own test, no seventh row). (2) The choice is the DAC's own or
+defaultMode with no cap, and section 3.2's table decides each rate, the rejection rule outranking
+every positive input. (3) A profile's refused DoP rate outranks its stated maximum and the
+confirmation; only this box's own latest clean answer for DoP at that rate overrides it (note 6's
+decision; §3.2 corrected). B2's lint allows `refusedBitRates` above `statedMaxBitRate`, and the
+seed's Mytek Brooklyn DAC+ refuses DSD256 with nothing heard or stated. The native section holds
+no refused rate: its `maxBitRate` bounds what it reports, never what is offered. (4) Where several
+conditions fail under an explicit mode, the reason is the first of: what the DAC does not offer, a
+listener's rejection, what the gain check cannot see, then what the user can change (§3.2 now
+lists the two orders). (5) `auto` on a DAC that takes no conversion target refuses as
+`conversion_not_offered`, as `convert` does.
+
+**Re-arming first use.** Section 3.2's "not re-armed since by a rejection" has no mark in B3's
+state, and an answer's date (`on`, a day) cannot order it against `acknowledgedAt`. B5 reads the
+acknowledgement as the state holds it, and the re-arm is the answer-writer's: B12's write that
+records a noise or nothing takes the transport's `firstUse` entry away in the same
+`Store.Update` (§3.2 and §6.4 say so). A later acknowledgement under `auto` then re-arms nothing
+the rejection still refuses at its rate.
+
+**The rungs.** Each native or DoP tuple carries its highest rung (`Plan.Evidence`, with its date):
+listener confirmed (the latest answer under the unit's firmware, clean), streaming observed and a
+durable driver acceptance under this firmware (the acceptance under the running kernel alone),
+then the probe's acceptance, then reported. B2 makes a kernel quirk's native claim state no rate
+(`maxBitRate` 0), so it reports none: §1.1's "native from the kernel's DSD quirk" disagreed with
+the merged code, and was corrected. DoP's acceptance is its carrier's alone (`DoPCarrier`), never
+promoted.
+
+**The DoP gain check** (`policy.CheckGain`, section 3.4). The parse (`policy.ParsePlayback`)
+takes the descriptor bytes, the active configuration, and the streaming interface and altsetting
+an altset names (note 7). It finds the configuration by its value and wTotalLength, the
+streaming setting (one, with an isochronous endpoint toward the device), the control interface
+that holds it (audio class 1: its header's list; audio class 2: an interface association),
+follows every output terminal but a USB streaming one upstream through its units' sources, and
+puts on the path every unit that reaches the streaming interface's input terminal. A feature unit
+there is a gain stage when it declares a gain control (volume, bass, mid, treble, graphic
+equalizer; audio class 2's input gain and input gain pad); a selector passes samples; every other
+unit is unverifiable. A topology it cannot follow is refused, never taken for clean: a source
+naming nothing or a clock, an output named as a source, a cycle, an undefined subtype on the way,
+no output reached, a descriptor cut short, ID 0 or a duplicate, no or two control interfaces,
+UAC3. Every altset listing the carrier is checked.
+
+**How a feature unit maps to a visible control** (note 7). The kernel synthesizes names (string
+descriptors, terminal types, quirk maps), and none of the control's identity names its unit, so
+no name and no count over the snapshot can tell a hidden stage from another unit's control. The
+mapping is the kernel's own table, `/proc/asound/card<N>/usbmixer`: under each `Unit:` line, the
+`Control: name=…, index=…` the driver made of that unit. A stage needs a visible MIXER control
+there, an integer or an unreadable one, for each control the driver makes of it (one for each
+gain control on its master, one for each on its channels); fewer, as when the driver skips a
+bogus volume range, makes no control of a gain on the channels but not the first, or a quirk map
+hides the unit, and a table that does not read, are `dop_gain_unverifiable`. Each control the
+table maps to a stage on the path is a level control whatever its name, a capture-marked one
+included: the driver names a stage after the first output terminal it parses, so a stage on a
+playback path and a loopback can be named a capture's. B7 reads the table, bounded, beside the
+descriptors; a box with no usbmixer refuses DoP on any path with a gain stage, failing closed.
+
+**Every level control** (note 4). A MIXER control that is an integer, or that could not be read
+(`internal/alsactl/control_linux.go:57`: its identity, its `ReadError`, `Type` 0, asked before
+any type filter), whose name's direction, the word before its last, is not `Capture`, counts, on
+the whole card. Exemptions are a known DAC's alone and matched exactly (interface, name, index,
+device and subdevice 0): an analogue control is passed over; a raw-maximum control passes only
+reading its rawMax on every channel, its range's maximum still rawMax, on a listed firmware
+(below it `dop_gain_not_unity`; a changed range, an unlisted firmware, an unreadable control
+`dop_gain_unverifiable`). Every other one must read exactly 0 dB on every channel by its TLV:
+`DB_SCALE`, `DB_MINMAX` and its mute variant, `DB_LINEAR` (exact in rationals: 10^(k/2000) is
+rational only for k a multiple of 2000), `DB_RANGE`, or one in a container. alsa-lib's conversion
+truncates to hundredths, so a value just above 0 dB can print 0.00 dB; B5 compares exactly.
+Unverifiable outranks not unity. Switches and enumerations stay allowed, as §3.4 decides.
+
+**Reconciliation** (`policy.Reconcile`, note 8). Per occurrence, from separate inputs: its plan,
+its own frames submitted, written and played, whether it was heard (sticky), whether its output
+retires, and whether its node is the new set's identity. Kept while the set plays its plan and
+its node is the set's; revoked once heard, a frame the kernel's or its output retiring, or while
+its frames sit in a sink on another identity's node (an identity change that leaves the same
+tuple available still revokes); re-planned otherwise. Every revocation, and a re-plan with frames
+in a sink, interrupts what is heard: a user's write needs its interrupt for either.
+
+**For B7.** B7 calls `Effective` at each session, activation, 100 ms tick and supervisor refresh
+in `readPermission`'s place, `CheckGain` at the check after open and on the monitor, and
+`Reconcile` for each occurrence when the set changes, passing the values above. Three things it
+must settle: the sink's and the approval's prefill bound is 500 ms (`DSDConfig.validate`,
+`approval.go`'s tuple check) while B2's lint allows 5,000 ms and the seed's Chord Hugo 2 carries
+700 ms, so its DoP tuple's prefill would be refused at the open; `ReasonRateNotSupported` repeats
+`playback.ReasonRate`'s word, which B7 unifies; and the usbmixer reader, with a capture of the
+owner's DAC as its fixture.
+
+**Red first, the controls and the checks.** Red first through `go test -overlay` with the four
+entry points stubbed (`Effective` returning an empty set, the gain check unity, the parse an empty
+path, `Reconcile` keep): every named test failed on its own assertion, the package's 27 tests with
+them. The negative controls, each an overlay of a mutated copy (the tree's files never written),
+each red: a rejection ordered below a positive input (streaming observed admitting native over a
+noise, `TestARejectionOutranksEveryPositiveInput`); the rejection ignored; the cap ignored
+(`TestAutoConvertsAboveTheCapAndAnExplicitChoiceRefuses`, the table); an absent control as unity
+(`TestAMissingControlIsNotUnity`); level controls restricted to names ending in `Playback Volume`
+(`TestEveryLevelControlCountsWhateverItsName`); a raw-maximum control passing below its maximum
+(`TestARawMaxControlPassesOnlyAtItsRawMaximum`); an acknowledgement covering a rate it does not name
+(`TestAdmissionIsPerRateForAMigratedAcknowledgement`); DoP on an unknown DAC without confirmation
+(`TestNoDoPOnAnUnknownDACWithoutConfirmation`); a profile's refused rate admitted
+(`TestAProfilesRefusedRateOutranksItsStatedMaximumAndAConfirmation`); the unreadable state ignored
+(`TestAStateThatDoesNotReadRefusesEveryRate`); and fourteen more: an unreadable control filtered by
+its type first, capture exclusion by substring, exemptions folded by case, USB streaming outputs
+followed, an unresolved topology taken for clean, other units passed, reconciliation by membership
+alone or by audibility alone, DoP's gain ignored under auto, a rung across firmware, DoP's
+acceptance promoted, unverifiable ordered below not unity, and `DB_LINEAR` read loosely. Eight
+drift controls edited section 3.2's table in the design file (a clause dropped, a clause added, a
+clause reworded, an otherwise cell changed, a cell swapped, a refusal word changed, the cap
+dropped, a row dropped), each red in `TestTheEffectivePolicyTable`, the file's bytes restored and
+checked after. The first gate run failed two sweeps, both this worker's: the docblock sweep
+(`designTable`'s comment on `designRow`, fixed in 9c307fae) and the build-site census, which
+reached a scratch script under `.tmp/` (moved under `.tmp/_b728-b5/`, which the sweeps skip). The
+gate at 9c307fae, in one call under the build slot: `make fmt` changed nothing; `make vet` native,
+`GOOS=windows`, `GOOS=darwin`, `GOOS=linux GOARCH=386` and `GOARCH=arm64`, clean; `go test -race` on
+the package ok; `make test` 86 packages ok, none failed, in 29 minutes, alsa and alsapcm run here;
+`make build-all` with `check-build-tags: OK`; `make docs-check` ok; the qualification check OK from
+4c1e44e3, version 39 standing (no guarded path). The package's tests also pass as linux/386. The
+rules patch (`rules-b728-b5.patch`) moves player.md's largest movable entry's long form, the
+sink's Drop and Drain (the largest, the check after open, cannot move: its Don't alone needs a
+692-byte pointer), to `ops/History-rules-player.md` with `move_entry.py` on a copy of the tree,
+then adds B5's bullet in section 9.1's wording and its long form; it applies under `git apply
+--check`, an independent applier reproduces the copy byte for byte, no block or heading is lost,
+and with it player.md is 96,906 bytes (96.9 %) and every budget holds.
+
+**Round 2: the review's four points** (068ee329, each red first and with a negative control).
+(1) Entity IDs are unique within an audio function alone, so on a unit with two functions the
+usbmixer entries of the other function's unit 10 stood for the path's unit 10, whose own control
+the table did not show. `UnitControl` now carries its block's `ctrlif` (`ControlInterface`, nil
+where the table does not say), `ParsePlayback` returns the control interface it resolved
+(`Path.ControlInterface`), and a stage counts only that block's entries; an entry that does not
+say its function is unverifiable (`TestAnotherAudioFunctionsControlsDoNotStandForThePaths`, over
+two functions numbering their entities alike). (2) This settles B748: every control a feature unit
+declares but mute and audio class 2's read-only underflow and overflow makes it a stage the check
+must see, delay and the switches (automatic gain, bass boost, loudness, the phase inverter)
+included, since a switch that is on rewrites the DoP markers and the DSD bits as a level does. A
+switch is mapped through the table by its selector (each entry's `Info` line, `control=`, now
+`UnitControl.Selector`) and must be a boolean reading off on every channel; one on, unreadable or
+unmapped, or an entry that does not say its selector, is `dop_gain_unverifiable`. Mute alone
+refuses nothing: muted DoP is silence, not altered bits.
+`TestAFeatureUnitsSwitchesAreStagesAndItsMuteIsNot` holds a loudness-only unit (off passes; on,
+unmapped, unreadable, or its table unread, refuses; audio class 1's on refuses too), each switch
+on its master or its channels, and a mute-only unit, muted or not, mapped or not, passing;
+`TestTheParseReadsBothAudioClasses` reads the switches and delay. This
+corrects round 1's "a gain stage when it declares a gain control" and "Switches and enumerations
+stay allowed" above, which now hold only off the path's stages; §3.4's Topology 1, Topology 2 and
+refusal list say exactly this.
+(3) A conversion target's packing kept its altset's bits over an accepted probe's fewer refined
+bits; those now bound it, as the DoP carrier's do (`TestTheConversionTargetIsTheDACsBest`: 16
+accepted under a 24-bit altset target 176.4 kHz at 16 bits; §4.3 says so). (4) `Occurrence`'s
+identity was a boolean the caller computed, so a released pause, whose device is closed, kept its
+frames across a DAC swapped for another model on its port, where its reopen would have played the
+old plan to the new unit. `Occurrence.Opened` is now the identity the occurrence's sink last opened
+(`policy.Identity`: the model's key and the canonical bcdDevice; `Set.Identity` the set's), kept
+across a pause's release; only an occurrence that never had a sink is nil, judged by its plan
+alone (`TestAChangeIsReconciledPerOccurrence`'s swapped model; §3.5 says so). Red first: the new
+fields went in with the logic unchanged, and the five tests named above failed on their own
+assertions, the rest of the package green. Eleven negative controls, each an overlay of a mutated
+copy whose anchor the harness asserts occurs exactly once, each red in its named test: the ctrlif
+ignored, an entry with no function taken, the path's control interface left unset, the switches
+dropped from the stage selectors, a switch not read, only a switch's first channel read, mute made
+a stage, an entry with no selector taken for a loudness, the probe's bits ignored, a released
+pause taken for one with no sink, and the identity ignored. Round 1's 24 controls, their anchors
+moved to round 2's code, are all still red. The gate at 928daa62, in one call under the build
+slot: `make fmt` changed nothing; `make vet` native, `GOOS=windows`, `GOOS=darwin`,
+`GOOS=linux GOARCH=386` and `GOARCH=arm64`, clean; the package's tests under `-race` and as
+linux/386, ok; `make test` 85 packages ok, none failed, in 29 minutes, alsa and alsapcm run here;
+`make build-all` with `check-build-tags: OK`; `make docs-check` ok; the qualification check OK
+from 4c1e44e3. The round-2 rules patch (`rules-b728-b5-r2.patch`) gives B5's line three more
+clauses (another function's block, a switch on or unmapped, a sink of another identity) and its
+long form round 2's mechanisms and tests; it applies over round 1's under `git apply --check`, the
+two applied in turn give the staged files byte for byte, and with both player.md is 97,092 bytes
+(97.1 %), the worst load 311,613, every budget holding.
+
 ## 2026-11-06 — B728 B6: the migration at serve's player start
 
 B728's B6 (`ops/plan-b728-dsd-capability-design.md`, sections 2.5, 3.6, 9.1

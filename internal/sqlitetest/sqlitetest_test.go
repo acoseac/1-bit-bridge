@@ -178,6 +178,114 @@ func TestWaitUnlessAnswersTheWorksEnd(t *testing.T) {
 	})
 }
 
+// TestARollbackWatchCountsTheRollbacksOnItsFileAlone pins what a
+// RollbackWatch counts: a transaction rolled back on a connection to its
+// file, whether by a Rollback or by database/sql once the transaction's
+// context is done, and whether the file was opened by a DSN or by its path;
+// never a commit, and never a rollback on another file.
+func TestARollbackWatchCountsTheRollbacksOnItsFileAlone(t *testing.T) {
+	dir := t.TempDir()
+	watched, other := filepath.Join(dir, "watched.db"), filepath.Join(dir, "other.db")
+	byDSN := openWAL(t, dsn.File(watched, "_pragma=journal_mode(WAL)"))
+	byPath := openWAL(t, watched)
+	elsewhere := openWAL(t, dsn.File(other, "_pragma=journal_mode(WAL)"))
+	for _, db := range []*sql.DB{byDSN, elsewhere} {
+		if _, err := db.Exec(`CREATE TABLE t (n INTEGER)`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := WatchRollbacks(t, watched)
+	write := func(db *sql.DB, ctx context.Context) *sql.Tx {
+		t.Helper()
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO t (n) VALUES (1)`); err != nil {
+			t.Fatal(err)
+		}
+		return tx
+	}
+	steps := []struct {
+		name string
+		end  func()
+		want int
+	}{
+		{"a rollback by DSN", func() { _ = write(byDSN, context.Background()).Rollback() }, 1},
+		{"a commit", func() { _ = write(byDSN, context.Background()).Commit() }, 1},
+		{"a rollback on another file", func() { _ = write(elsewhere, context.Background()).Rollback() }, 1},
+		{"a rollback by path", func() { _ = write(byPath, context.Background()).Rollback() }, 2},
+	}
+	for _, s := range steps {
+		s.end()
+		if got := w.Seen(); got != s.want {
+			t.Fatalf("after %s the watch saw %d rollbacks, want %d", s.name, got, s.want)
+		}
+	}
+
+	// database/sql's own rollback, once the transaction's context is done,
+	// on a goroutine of its own: WaitPast sees it, and the transaction then
+	// answers ErrTxDone.
+	ctx, cancel := context.WithCancel(context.Background())
+	tx := write(byDSN, ctx)
+	cancel()
+	if !w.WaitPast(t, 2, nil) {
+		t.Fatal("WaitPast answered false with nothing stopped")
+	}
+	if _, err := tx.ExecContext(context.Background(), `SELECT 1`); !errors.Is(err, sql.ErrTxDone) {
+		t.Errorf("the transaction whose rollback the watch saw answers %v, want sql.ErrTxDone", err)
+	}
+	if got := w.Seen(); got != 3 {
+		t.Errorf("the watch saw %d rollbacks, want 3", got)
+	}
+}
+
+// TestWaitPastAnswersTheWorksEndAndGivesUpAtItsInstant: WaitPast answers
+// false, without failing, when the work it waits on ends first, and a watch
+// armed with WatchRollbacksUntil gives up at its instant and says so.
+func TestWaitPastAnswersTheWorksEndAndGivesUpAtItsInstant(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "quiet.db")
+	t.Run("the work ended first", func(t *testing.T) {
+		w := WatchRollbacks(t, path)
+		stopped := make(chan struct{})
+		close(stopped)
+		if w.WaitPast(t, 0, stopped) {
+			t.Error("WaitPast answered true with nothing rolled back")
+		}
+	})
+	t.Run("the wait gives up", func(t *testing.T) {
+		rec := &fatalRecorder{TB: t}
+		at := time.Now().Add(200 * time.Millisecond)
+		w := WatchRollbacksUntil(rec, path, at)
+		ended := make(chan struct{})
+		go func() { // rec's Fatalf ends the goroutine calling it
+			defer close(ended)
+			w.WaitPast(rec, 0, nil)
+		}()
+		select {
+		case <-ended:
+		case <-time.After(5 * time.Second):
+			t.Fatal("a watch armed to give up in 200ms was still waiting 5s later")
+		}
+		want := fmt.Sprintf("sqlitetest: no transaction rolled back on %s by %s (0 seen, waiting past 0)", path, at.Format("15:04:05.000"))
+		if rec.fatal != want {
+			t.Errorf("the wait failed with %q, want %q", rec.fatal, want)
+		}
+	})
+}
+
+// openWAL opens a WAL database by name, a DSN or a path, closed when the
+// test ends.
+func openWAL(t *testing.T, name string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
 // fatalRecorder is a testing.TB whose Fatalf records the message and ends
 // the goroutine calling it, as FailNow would, without failing the test that
 // holds it.
