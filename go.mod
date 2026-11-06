@@ -27,7 +27,7 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/libc v1.79.0
 	modernc.org/sqlite v1.61.0
-	tailscale.com v1.104.2
+	tailscale.com v1.104.5
 )
 
 require (
