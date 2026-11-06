@@ -213,11 +213,12 @@ func nestShallower(a, b Row) bool {
 // "DSD and PCM are never cross-suppressed" rule expressed structurally:
 // the sole DSD edition can never lose to a PCM one, or vice versa.
 //
-// A domain is one unit while it holds a copy every client is served, whose
-// winner outranks then makes such a copy (gateUnits). A domain of gated
-// copies alone is one unit per gated format, so a .wv and an .ape of one
-// track are never suppressed against each other: the gate is per format,
-// and a client that declares one of them alone would lose its only copy.
+// A domain is one unit while it holds a copy every client is served whose
+// file the last scan found, which outranks then makes the winner, or copies
+// of one gated format at most (gateUnits). Otherwise it is one unit per
+// format, so a .wv and an .ape of one track are never suppressed against
+// each other: the gate is per format, and a client that declares one of them
+// alone would lose its only copy.
 func planDomainWinners(members []Row) []string {
 	var dsd, pcm []Row
 	for _, m := range members {
@@ -252,20 +253,29 @@ func planDomainWinners(members []Row) []string {
 
 // gateUnits splits one domain into its suppression units by the client
 // format gate (formatgate.Of of each member's path): the whole domain when
-// it holds a copy every client is served, or when its members share one
-// format, and otherwise one unit per gated format, in the order the domain
-// first names each.
+// it holds a copy every client is served whose file the last scan found, or
+// copies of one gated format at most, and otherwise one unit per format, in
+// the order the domain first names each. A copy every client is served whose
+// file is gone (Row.Missing) is then a unit of its own, suppressing nothing:
+// the found gated copies are the only ones any client can play, so a .wv and
+// an .ape beside a gone .flac are no more suppressed against each other than
+// beside no .flac at all (round 3 of backlog B489, the merge of B756).
 func gateUnits(domain []Row) [][]Row {
 	var order []formatgate.Format
 	byFormat := map[formatgate.Format][]Row{}
+	served, gated := false, 0
 	for _, m := range domain {
 		f := formatgate.Of(m.Path)
 		if _, seen := byFormat[f]; !seen {
 			order = append(order, f)
+			if f != formatgate.None {
+				gated++
+			}
 		}
 		byFormat[f] = append(byFormat[f], m)
+		served = served || (f == formatgate.None && !m.Missing)
 	}
-	if _, served := byFormat[formatgate.None]; served || len(order) < 2 {
+	if served || gated < 2 {
 		return [][]Row{domain}
 	}
 	units := make([][]Row, 0, len(order))
