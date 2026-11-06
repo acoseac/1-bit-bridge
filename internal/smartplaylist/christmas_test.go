@@ -95,6 +95,7 @@ var xmasByRule = []xmasCase{
 	{"Song", "A", "Album", `Rock\Weihnachten`, ChristmasByGenre, "a backslash"},
 	{"Song", "A", "Album", "Christmas: Pop", ChristmasByGenre, "the iTunes Store's genre and its kind"},
 	{"Song", "A", "Album", "Holiday: Christmas", ChristmasByGenre, "the iTunes Store's parent genre"},
+	{"Song", "A", "", "Christmas", ChristmasByGenre, "an empty album"},
 	{"Silent Night", "A", "Christmas Album", "Christmas", ChristmasByGenre, "the genre is the first rule that holds"},
 
 	// 2. The album, holding a Christmas word.
@@ -129,6 +130,7 @@ var xmasByRule = []xmasCase{
 	{"Silent Night \u2013 Live at the BBC", "A", "Album", "Pop", ChristmasByTitle, "an en dash"},
 	{"Silent Night - 1957", "A", "Album", "Pop", ChristmasByTitle, "a year"},
 	{"Silent Night - Live (Remastered)", "A", "Album", "Pop", ChristmasByTitle, "a dash suffix behind a parenthetical"},
+	{"Silent Night", "", "", "", ChristmasByTitle, "no artist, album or genre"},
 	{"All I Want for Christmas Is You", "Mariah Carey", "Hits", "Pop", ChristmasByTitle, "the table comes before the title's words"},
 	{"Feliz Navidad", "José Feliciano", "Hits", "Latin", ChristmasByTitle, "the table again"},
 

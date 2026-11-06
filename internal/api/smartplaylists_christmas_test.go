@@ -240,6 +240,42 @@ func TestAChristmasCacheIsServedByTheClockAtTheRequest(t *testing.T) {
 	}
 }
 
+// A library that is nothing but Christmas albums, never played, with
+// analysis off, serves the family in season and nothing out of it.
+func TestAnUnheardLibraryServesTheChristmasFamilyInSeasonAlone(t *testing.T) {
+	ctx := context.Background()
+	mstore := openFeedStore(t)
+	var tracks []*manifest.Track
+	for a, album := range []string{"Kolędy polskie", "Julsånger", "Christmas Chorales"} {
+		for i := 0; i < 6; i++ {
+			tracks = append(tracks, &manifest.Track{
+				Path: fmt.Sprintf("%s/%02d.flac", album, i), Size: 1, ModTime: time.Unix(1, 0),
+				Title: fmt.Sprintf("Track %d", i), Artist: fmt.Sprintf("Performer %d", a), Album: album, Genre: "Christmas",
+			})
+		}
+	}
+	if err := mstore.UpsertTrackBatch(ctx, tracks); err != nil {
+		t.Fatal(err)
+	}
+	built := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := smartplaylistgen.Regenerate(ctx, mstore, smartplaylistgen.DefaultOptions(built.UnixNano(), false)); err != nil {
+		t.Fatal(err)
+	}
+	get, clock := feedServer(t, mstore, false)
+	at := time.Date(2026, 12, 24, 18, 0, 0, 0, time.UTC)
+	clock.Store(&at)
+	feed := get()
+	if n, ok := feed.family("christmas"); !ok || n != 18 || len(feed.Playlists) != 1 || feed.RefreshedAt != built.UnixNano() {
+		t.Fatalf("on 24 December: christmas %v with %d items among %d families, refreshedAt %d; want it alone with all 18",
+			ok, n, len(feed.Playlists), feed.RefreshedAt)
+	}
+	at = time.Date(2027, 1, 7, 9, 0, 0, 0, time.UTC)
+	clock.Store(&at)
+	if feed := get(); len(feed.Playlists) != 0 || feed.RefreshedAt != 0 {
+		t.Fatalf("on 7 January: %d families, refreshedAt %d; want none and 0", len(feed.Playlists), feed.RefreshedAt)
+	}
+}
+
 // A library with no Christmas music serves no Christmas family in season.
 func TestNoChristmasMusicIsNoChristmasFamilyInSeason(t *testing.T) {
 	ctx := context.Background()
