@@ -115,6 +115,14 @@ type Store struct {
 	// transaction open. Tests use it to force an end the driver cannot
 	// finish. Production leaves it nil.
 	immediateOnEnd func(stmt string) error
+
+	// upscaleTargetBeforeCommit, when set, runs in SetUpscaleTarget once
+	// both keys are written and before the transaction commits, with the
+	// transaction. A non-nil error is SetUpscaleTarget's, and the
+	// transaction rolls back. Tests hold the write there, between its last
+	// statement and its commit (SetUpscaleTargetBeforeCommitForTest).
+	// Production leaves it nil.
+	upscaleTargetBeforeCommit func(*sql.Tx) error
 }
 
 // indexedAtAdvanceSQL is the `SET indexed_at = …` expression EVERY
@@ -7432,6 +7440,11 @@ func (s *Store) SetUpscaleTarget(ctx context.Context, rateHz, bits int) error {
 	}
 	if _, err := tx.ExecContext(ctx, upsert, UpscaleTargetBitsKey, strconv.Itoa(bits)); err != nil {
 		return err
+	}
+	if s.upscaleTargetBeforeCommit != nil {
+		if err := s.upscaleTargetBeforeCommit(tx); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }

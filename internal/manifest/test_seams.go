@@ -46,3 +46,16 @@ func WriteDatabaseAtVersionForTest(path string, version int) error {
 func SetBeforeMigrationLockForTest(fn func(dbPath string)) (restore func()) {
 	return setOpenStoreBeforeSQLite(fn)
 }
+
+// SetUpscaleTargetBeforeCommitForTest makes fn run in every SetUpscaleTarget
+// of s once both keys are written and before the transaction commits, under
+// the store's writer lock, with the transaction: a test's hold on the write
+// between its last statement and its commit, where a cancel of the write's
+// context lets database/sql roll the transaction back before Commit is
+// reached (backlog B662). An error fn returns is SetUpscaleTarget's, and the
+// transaction rolls back. On the store it serves, never a package variable:
+// cmd/bridge hands it serve's store through serveOpts. Call it before s is
+// shared; production code never calls it with a non-nil fn.
+func (s *Store) SetUpscaleTargetBeforeCommitForTest(fn func(*sql.Tx) error) {
+	s.upscaleTargetBeforeCommit = fn
+}
