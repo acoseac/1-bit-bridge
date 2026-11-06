@@ -99,12 +99,38 @@ type Seams struct {
 	// probe has ended, before the Start takes the device slot: the window in
 	// which a second probe would take the slot from it (B728 B4 round 2).
 	StartWoke func()
+	// Activating runs in a native or DoP occurrence's activation check
+	// (checkDSDActivation) once its read of the policy has returned, before
+	// the check judges the occurrence: the window in which another refresh
+	// publishes a set, and may reconcile the occurrence under it, which the
+	// check must judge it by (B728 B7 round 4).
+	Activating func()
+	// Published runs in a refresh (refreshDSD) once it has published its set
+	// and before it reconciles the sessions' occurrences against it, under
+	// the refreshes' lock, so it must not call the backend: the window in
+	// which a set is published that no reconciliation has judged an
+	// occurrence by yet (B728 B7 round 4).
+	Published func()
 }
 
 // startWoke is the StartWoke seam.
 func (b *Backend) startWoke() {
 	if sm := b.cfg.Seams; sm != nil && sm.StartWoke != nil {
 		sm.StartWoke()
+	}
+}
+
+// activating is the Activating seam.
+func (b *Backend) activating() {
+	if sm := b.cfg.Seams; sm != nil && sm.Activating != nil {
+		sm.Activating()
+	}
+}
+
+// published is the Published seam.
+func (b *Backend) published() {
+	if sm := b.cfg.Seams; sm != nil && sm.Published != nil {
+		sm.Published()
 	}
 }
 

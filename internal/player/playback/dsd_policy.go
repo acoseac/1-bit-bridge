@@ -452,6 +452,7 @@ func (b *Backend) refreshDSD() *dsdSet {
 	next.gen = cur.gen + 1
 	b.dsd.Store(next)
 	b.logDSDSet(next)
+	b.published()
 	b.reconcileDSD(next)
 	return next
 }
@@ -691,19 +692,32 @@ func (s *session) reconcileDSD(next *dsdSet) {
 
 // checkDSDActivation is a native or DoP occurrence's check as its sink is
 // about to write to the DAC (the design's section 3.5: every activation reads
-// the policy): the policy read afresh, which reconciles a change, and the
-// occurrence still under the set published now, its plan kept. Never a
-// fallback: an occurrence the change did not keep is refused, never played
-// another way.
+// the policy): the policy read afresh, which reconciles a change, then the
+// occurrence judged against the set published now, under the session's lock,
+// by reconciliation's own predicate (policy.Reconcile): under that set, or
+// kept by it, when it counts under it from now on, as reconciliation would
+// have it. A refresh beside the activation can publish a set between the read
+// and the check and reconcile the occurrence under it, or not yet, so the set
+// the read returned is no test: compared with it, a refresh that kept the plan
+// refused the track, and one that took the plan away let the activation write
+// to the DAC (round 4). A refresh that publishes after the check judges the
+// occurrence as reconciliation judges any. Never a fallback: an occurrence
+// the set published now does not keep is refused, never played another way.
 func (s *session) checkDSDActivation(o *occ) error {
-	cur := s.b.refreshDSD()
+	s.b.refreshDSD()
+	s.b.activating()
 	s.mu.Lock()
-	kept := o.admitted == cur && !o.stale && !o.dropped
-	s.mu.Unlock()
-	if !kept {
-		return errors.New("the effective DSD set no longer plays this occurrence's plan")
+	defer s.mu.Unlock()
+	cur := s.b.dsd.Load()
+	switch {
+	case o.stale || o.dropped || o.admitted == nil:
+	case o.admitted == cur:
+		return nil
+	case policy.Reconcile(cur.set, s.occurrenceFactsLocked(o)).Action == policy.Keep:
+		o.admitted = cur
+		return nil
 	}
-	return nil
+	return errors.New("the effective DSD set no longer plays this occurrence's plan")
 }
 
 // checkDSDNode is the check after open of a native or DoP occurrence's node

@@ -3,6 +3,7 @@ package alsapcm_test
 import (
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -203,6 +204,104 @@ func TestRefreshesAcrossTheFirstOpensEndTakeTheSessionsLock(t *testing.T) {
 				if evs := d.rec.events(); c.plays && (count(evs, "audible", 0) != 1 || len(s.Faults()) != 0 || len(s.Skips()) != 0) {
 					t.Fatalf("a plan every refresh kept did not play: %s; faults %+v, skips %+v", kinds(evs), s.Faults(), s.Skips())
 				}
+			}
+		})
+	}
+}
+
+// TestAnActivationJudgesThePlanByTheSetPublishedNow (B728 B7 round 4; CI's
+// test -race, TestRefreshesAcrossTheFirstOpensEndTakeTheSessionsLock): a
+// native or DoP occurrence's activation reads the policy, then judges the
+// occurrence, and a refresh beside it can publish a set between the two,
+// which the Activating seam runs one in. The activation judges the
+// occurrence by reconciliation's predicate against the set published now,
+// under the session's lock: a set that keeps its plan (a cap above its rate)
+// plays it, whether the refresh reconciled it under that set before the check
+// or published the set and waits at the Published seam, before its
+// reconciliation, while the check runs; one that takes the plan away (DSD
+// off), published and not yet reconciled, refuses it, and nothing reaches the
+// DAC. Until round 4 the check compared the occurrence's set with the one its
+// own read returned: a refresh between them that kept the plan refused the
+// track, and one that took it away let the activation write to the DAC.
+func TestAnActivationJudgesThePlanByTheSetPublishedNow(t *testing.T) {
+	capped := playbacktest.ChoiceState(dsdstate.ModeNative)
+	capped.DACs[0].Choice.MaxBitRate, capped.DACs[0].Choice.Revision = playbacktest.DSD128, 2
+	for _, c := range []struct {
+		name string
+		next dsdstate.State
+		// parked: the refresh has published next and waits at the Published
+		// seam, before its reconciliation, while the check runs.
+		parked bool
+		plays  bool
+	}{
+		{"a set that keeps the plan, reconciled before the check", capped, false, true},
+		{"a set that keeps the plan, published and not reconciled yet", capped, true, true},
+		{"a set that takes the plan away, published and not reconciled yet", playbacktest.ChoiceState(dsdstate.ModeOff), true, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var d *dsdRig
+			var activated, armed atomic.Bool
+			var before uint64
+			published, release, refreshed := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			letGo := func() { once.Do(func() { close(release) }) }
+			t.Cleanup(letGo)
+			seams := &playback.Seams{
+				// Under the refreshes' lock: it calls nothing of the backend.
+				Published: func() {
+					if armed.CompareAndSwap(true, false) {
+						close(published)
+						<-release
+					}
+				},
+				Activating: func() {
+					if !activated.CompareAndSwap(false, true) {
+						return
+					}
+					before = d.be.Policy().Generation
+					refresh := func() {
+						defer close(refreshed)
+						d.store.Set(c.next)
+						d.be.RefreshDSD(true)
+					}
+					if !c.parked {
+						refresh()
+						return
+					}
+					armed.Store(true)
+					go refresh()
+					select {
+					case <-published:
+					case <-time.After(alsapcm.Watchdog()):
+						t.Errorf("the refresh beside the activation published nothing within %v", alsapcm.Watchdog())
+					}
+				},
+			}
+			d = newDSDRig(t, playbacktest.ChoiceState(dsdstate.ModeNative), func(o *rigOptions) { o.seams = seams })
+			d.files.add("a", dsd(playbacktest.DSD64, 0.05))
+			d.insert("a")
+			d.k.Free()
+			_ = d.eng.Play(bg)
+			d.waitSnap("the Start's answer", func(s *engine.Snapshot) bool { return s.LastAttempt().Seq > 0 })
+			letGo()
+			awaitHeld(t, "the refresh beside the activation", refreshed)
+			s := d.waitEnded()
+			d.rig.stop()
+			if g := d.be.Policy().Generation; g != before+1 {
+				t.Fatalf("the set published is generation %d, the activation's read %d: the refresh beside it published no set", g, before)
+			}
+			evs := d.rec.events()
+			if c.plays {
+				if a := s.LastAttempt(); a.Failed || count(evs, "audible", 0) != 1 || len(s.Faults()) != 0 || len(s.Skips()) != 0 {
+					t.Errorf("a plan the set published now keeps did not play: attempt %+v; %s; faults %+v, skips %+v", a, kinds(evs), s.Faults(), s.Skips())
+				}
+				return
+			}
+			if a := s.LastAttempt(); !a.Failed || count(evs, "audible", 0) != 0 {
+				t.Errorf("an occurrence the set published now does not keep was activated: attempt %+v; %s", a, kinds(evs))
+			}
+			if v := d.k.View(); v.GivenBytes != 0 {
+				t.Errorf("the DAC was given %d bytes under a set that no longer plays the plan", v.GivenBytes)
 			}
 		})
 	}
