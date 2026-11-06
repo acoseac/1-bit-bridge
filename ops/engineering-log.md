@@ -77719,3 +77719,39 @@ must settle: the sink's and the approval's prefill bound is 500 ms (`DSDConfig.v
 700 ms, so its DoP tuple's prefill would be refused at the open; `ReasonRateNotSupported` repeats
 `playback.ReasonRate`'s word, which B7 unifies; and the usbmixer reader, with a capture of the
 owner's DAC as its fixture.
+
+**Red first, the controls and the checks.** Red first through `go test -overlay` with the four
+entry points stubbed (`Effective` returning an empty set, the gain check unity, the parse an empty
+path, `Reconcile` keep): every named test failed on its own assertion, the package's 27 tests with
+them. The negative controls, each an overlay of a mutated copy (the tree's files never written),
+each red: a rejection ordered below a positive input (streaming observed admitting native over a
+noise, `TestARejectionOutranksEveryPositiveInput`); the rejection ignored; the cap ignored
+(`TestAutoConvertsAboveTheCapAndAnExplicitChoiceRefuses`, the table); an absent control as unity
+(`TestAMissingControlIsNotUnity`); level controls restricted to names ending in `Playback Volume`
+(`TestEveryLevelControlCountsWhateverItsName`); a raw-maximum control passing below its maximum
+(`TestARawMaxControlPassesOnlyAtItsRawMaximum`); an acknowledgement covering a rate it does not name
+(`TestAdmissionIsPerRateForAMigratedAcknowledgement`); DoP on an unknown DAC without confirmation
+(`TestNoDoPOnAnUnknownDACWithoutConfirmation`); a profile's refused rate admitted
+(`TestAProfilesRefusedRateOutranksItsStatedMaximumAndAConfirmation`); the unreadable state ignored
+(`TestAStateThatDoesNotReadRefusesEveryRate`); and fourteen more: an unreadable control filtered by
+its type first, capture exclusion by substring, exemptions folded by case, USB streaming outputs
+followed, an unresolved topology taken for clean, other units passed, reconciliation by membership
+alone or by audibility alone, DoP's gain ignored under auto, a rung across firmware, DoP's
+acceptance promoted, unverifiable ordered below not unity, and `DB_LINEAR` read loosely. Eight
+drift controls edited section 3.2's table in the design file (a clause dropped, a clause added, a
+clause reworded, an otherwise cell changed, a cell swapped, a refusal word changed, the cap
+dropped, a row dropped), each red in `TestTheEffectivePolicyTable`, the file's bytes restored and
+checked after. The first gate run failed two sweeps, both this worker's: the docblock sweep
+(`designTable`'s comment on `designRow`, fixed in 9c307fae) and the build-site census, which
+reached a scratch script under `.tmp/` (moved under `.tmp/_b728-b5/`, which the sweeps skip). The
+gate at 9c307fae, in one call under the build slot: `make fmt` changed nothing; `make vet` native,
+`GOOS=windows`, `GOOS=darwin`, `GOOS=linux GOARCH=386` and `GOARCH=arm64`, clean; `go test -race` on
+the package ok; `make test` 86 packages ok, none failed, in 29 minutes, alsa and alsapcm run here;
+`make build-all` with `check-build-tags: OK`; `make docs-check` ok; the qualification check OK from
+4c1e44e3, version 39 standing (no guarded path). The package's tests also pass as linux/386. The
+rules patch (`rules-b728-b5.patch`) moves player.md's largest movable entry's long form, the
+sink's Drop and Drain (the largest, the check after open, cannot move: its Don't alone needs a
+692-byte pointer), to `ops/History-rules-player.md` with `move_entry.py` on a copy of the tree,
+then adds B5's bullet in section 9.1's wording and its long form; it applies under `git apply
+--check`, an independent applier reproduces the copy byte for byte, no block or heading is lost,
+and with it player.md is 96,906 bytes (96.9 %) and every budget holds.
