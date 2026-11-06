@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/acoseac/1-bit-bridge/internal/player/dacprofile"
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback/playbacktest"
@@ -38,21 +39,24 @@ func TestThePublishedModelNamesNoSerialOrPort(t *testing.T) {
 // TestANativeRateIsUnaffectedByAnUnverifiableDoPGain (B728 B7 round 2): the
 // DoP gain check binds DoP alone: with a feature unit on the playback path and
 // the kernel's table of its controls not read, a migrated native rate plays
-// native and is published, under auto beside a DoP rate and under native
-// alone. Under auto the DoP rate whose gain cannot be verified converts, as
-// the design's section 3.2 has auto do wherever neither transport qualifies,
-// and is refused until the player converts; only an explicit dop names
-// dop_gain_unverifiable (TestAMigratedDoPSetupWithUnverifiableGainRefuses).
+// native and is published, under auto beside a DoP rate, on a DAC the profile
+// database knows and on one it does not, and under native alone. Under auto
+// the DoP rate whose gain cannot be verified converts, as the design's section
+// 3.2 has auto do wherever neither transport qualifies, and is refused until
+// the player converts; only an explicit dop names dop_gain_unverifiable
+// (TestAMigratedDoPSetupWithUnverifiableGainRefuses).
 func TestANativeRateIsUnaffectedByAnUnverifiableDoPGain(t *testing.T) {
+	mixed := playbacktest.MigratedState(dsdstate.ModeAuto, true, []int{playbacktest.DSD64}, []int{playbacktest.DSD128})
 	for _, c := range []struct {
 		name      string
 		st        dsdstate.State
+		profiles  *dacprofile.Database
 		native    []int
 		converted []int
 	}{
-		{"a migrated mixed setup", playbacktest.MigratedState(dsdstate.ModeAuto, true, []int{playbacktest.DSD64}, []int{playbacktest.DSD128}),
-			[]int{playbacktest.DSD64}, []int{playbacktest.DSD128}},
-		{"a migrated native setup", playbacktest.MigratedState(dsdstate.ModeNative, false, []int{playbacktest.DSD64, playbacktest.DSD128}, nil),
+		{"a migrated mixed setup, a DAC the database knows", mixed, playbacktest.KnownProfiles(nil), []int{playbacktest.DSD64}, []int{playbacktest.DSD128}},
+		{"a migrated mixed setup, a DAC the database does not know", mixed, nil, []int{playbacktest.DSD64}, []int{playbacktest.DSD128}},
+		{"a migrated native setup", playbacktest.MigratedState(dsdstate.ModeNative, false, []int{playbacktest.DSD64, playbacktest.DSD128}, nil), nil,
 			[]int{playbacktest.DSD64, playbacktest.DSD128}, nil},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -62,7 +66,7 @@ func TestANativeRateIsUnaffectedByAnUnverifiableDoPGain(t *testing.T) {
 			box.SetUnit(5, unit)
 			box.SetControls(5, playbacktest.VolumeControls(255)...)
 			box.SetMixer(5, []byte("this is not the kernel's table"))
-			b := policyBackend(t, box, playbacktest.NewMemStore(c.st))
+			b := policyBackend(t, box, playbacktest.NewMemStore(c.st), func(p *playback.DSDPolicy) { p.Profiles = c.profiles })
 			for _, rate := range c.native {
 				if plan, _, err := b.AdmitDSDForTest(dsdAt(rate), true); err != nil || plan.Tuple.Transport != "" {
 					t.Errorf("DSD at %d with DoP's gain unverifiable: %+v, %v; want it native", rate, plan, err)
