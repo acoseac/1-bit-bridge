@@ -90,9 +90,29 @@ func (w *probationWatch) waitForCount(t *testing.T, kind probationEventKind, n i
 		select {
 		case <-w.signal:
 		case <-time.After(time.Until(giveUp)):
-			t.Fatalf("the confirmation never did %d %d times; it did %+v", kind, n, w.events())
+			t.Fatalf("the confirmation's %v never came %d time(s); it did %+v", kind, n, w.events())
 		}
 	}
+}
+
+// String names an event's kind in a test's failure, where a number says
+// nothing.
+func (k probationEventKind) String() string {
+	switch k {
+	case probationRound:
+		return "round"
+	case probationWindow:
+		return "window"
+	case probationConfirmed:
+		return "confirmation"
+	case probationNotReady:
+		return "not-ready"
+	case probationUnconfirmed:
+		return "unconfirmed"
+	case probationEnded:
+		return "end"
+	}
+	return fmt.Sprintf("kind %d", int(k))
 }
 
 // count is how many events of kind the confirmation has done.
