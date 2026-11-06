@@ -77456,7 +77456,8 @@ for the Pi on any host (`GOOS=linux GOARCH=arm64`, `go test -c -o
 alsapcm.test ./internal/alsapcm`; built here, 4ce44b2e), copy it across, stop
 MPD and the bridge (`sudo systemctl stop mpd` and the bridge's service: with
 MPD holding the DAC the run is a useless "not probed", and the test fails
-saying so), run `BRIDGE_PROBE_ENDPOINT=<card>,0 ./alsapcm.test -test.run
+saying so), identify the bound playback device (`aplay -l`, usually 0 on a USB
+DAC), run `BRIDGE_PROBE_ENDPOINT=<card>,<device> ./alsapcm.test -test.run
 '^TestTheSilentProbeOnARealDAC$' -test.v`, and start them again. Expected: the
 first line "opened 1, closed 1; requests: HW_REFINE 23, INFO 1, PVERSION 1",
 nothing else sent; then per candidate "accepted, N significant bits, PAUSE

@@ -49,7 +49,8 @@ const probeEndpointEnv = "BRIDGE_PROBE_ENDPOINT"
 // nothing in the bridge calls the probe until B7, so this is its entry
 // point on a real DAC. It runs only when BRIDGE_PROBE_ENDPOINT names a
 // playback endpoint as "<card>,<device>" (the card's index in
-// /proc/asound/cards, and the PCM device, 0 for a USB DAC), and is skipped
+// /proc/asound/cards, and the bound playback device, which aplay -l lists,
+// usually 0 on a USB DAC), and is skipped
 // otherwise. It probes the design's whole set (ProbeCandidates) through the
 // real kernel, recording what was asked of it, and logs one line a
 // candidate: accepted, with the significant bits and whether the setup
@@ -67,7 +68,7 @@ const probeEndpointEnv = "BRIDGE_PROBE_ENDPOINT"
 // and start them again after. Build it for the Pi on any host with
 // GOOS=linux GOARCH=arm64 go test -c -o alsapcm.test ./internal/alsapcm, copy
 // alsapcm.test across, and run it there as
-// BRIDGE_PROBE_ENDPOINT=<card>,0 ./alsapcm.test -test.run
+// BRIDGE_PROBE_ENDPOINT=<card>,<device> ./alsapcm.test -test.run
 // '^TestTheSilentProbeOnARealDAC$' -test.v.
 func TestTheSilentProbeOnARealDAC(t *testing.T) {
 	spec := os.Getenv(probeEndpointEnv)
