@@ -78692,3 +78692,83 @@ package), ok: internal/manifest 1,509 s, internal/api 124 s, internal/admin
 at 59898f08, failed `make test-fast` on the three defects above. Not run
 here: macOS and Windows natively, CI's runners, the race detector over the
 other packages, and the iOS app.
+
+## 2026-11-06 — B489 PR 1, round 2: two reviews, each point red first or refuted with evidence
+
+The orchestrator's round 2 for worker b489b (legion0, go1.27.3,
+`GOTOOLCHAIN=local`, `GOPROXY=off`, branch `feat/b489-wavpack-ape-index`):
+Codex's six points and Claude's six, read as one list. Every point was first
+written as a test against 73b21165, its failure predicted by name in a file
+before the run; the run went as predicted, and the fixes followed. Commits:
+the fixes and their tests eb6ef4ea; this record, the long forms, PROTOCOL.md
+and the round's rules patch next (`rules-b489b-r2.patch`, over the rules
+round 1's patch made on the pushed branch: this worker cannot write
+`.claude/`); then the gates' results. **Main read again**: `main` is
+4880f8a4, `ExtractorVersion` 31 and the ladder's last step v60, as at round
+1, so the branch's 32 and v61 stay the next numbers. Round 2's extraction
+changes ride the branch's one bump to 32: no build that stored a row at 32
+has been released.
+
+### The points
+
+| Point | The claim | Red first (73b21165 and the new test) | What changed |
+|---|---|---|---|
+| Codex P1, `apev2.go` | 1,023 `Artist` items of 64 KiB of `a` and a NUL, inside every cap, are 33.5 million strings | confirmed: `TestManyTinyAPEv2ValuesAllocateWithinTheBound` (64 such items, a 4,195,480-byte `.wv`) allocated 589,147,856 bytes against `wvAPEAllocLimit`'s 34,612,416 | the values a tag's text items keep are capped at `apeTagMaxValues` (64K, `maxVorbisCommentTags`'s count) for all items together, split a value at a time, a text item passed over unread once they are spent, said once (`msgAPETagValuesCapped`); an item's key is normalised once, not once a value. 13,217,432 bytes since, the artist the first 65,536 values joined |
+| Codex P2, `wavpack.go` (flags) | a 24-bit or mono `.wvc` beside a 16-bit stereo `.wv` matches: the flags are not compared, where libwavpack's `match_wvc_header` compares them | confirmed: `TestAHybridWavPacksCorrectionFileDecidesItsCodec`'s new rows of other bits and of other channels were `WAVPACK`, want `WAVPACK-LOSSY` | `correctionMatches` requires the flags equal |
+| Codex P2, `wavpack.go` (no length), and Claude's third | with no usable total (a streamed file, or a first block past index 0) the end is never compared: a `.wvc` cut at a block's end matches | confirmed, both shapes: the rows "cut at a block's end, the length unknown" and "the stream from past its first sample" were `WAVPACK`; the same files whole stay `WAVPACK` | the `.wvc`'s last sample must be the `.wv`'s own, found before its tags (`wvStreamFinal`: an ID3v1 tag, then an APEv2 tag and its header) as `wvFinalIndex` finds the `.wvc`'s, read only for a hybrid stream whose header states no usable length; a `.wv` whose end is not found matches nothing |
+| Codex P2, `wavpack.go` (payload) | a 34-byte file, a header claiming a 36-byte block, `0x0a 0x01` declaring a bitstream that is not there: one second of 16-bit lossless | confirmed: `TestAWavPackFileItsReaderRefusesIsRefused`'s two new rows took the file | the first audio block must lie inside the file (`errWVBlockCut`), and the windowed walk refuses a window read that comes short inside the block |
+| Codex P2, `extractors_wavpack_ape.go` (extended bits) | a non-hybrid stream with INT32 sent bits, or float data sending exponents, zeros or exceptions, and no WVX bitstream is lossless here and lossy to libwavpack | confirmed: `TestAStreamWhoseExtendedBitsAreMissingIsLossy`'s five lossy rows were `WAVPACK` (32-bit integer; float `0x20`, `0x08`, `0x04`, `0x02`); its four lossless rows (the bits carried, no bits sent, the float `0x01` that sends nothing) passed | `wvStream.needsExtended`, read as libwavpack's `unpack_init` counts `lossy_blocks`: INT32_DATA with `ID_INT32_INFO`'s sent bits, or FLOAT_DATA with `ID_FLOAT_INFO`'s flags 0x02, 0x04, 0x08 or 0x20, and no `ID_WVX_BITSTREAM` of more than its 4-byte CRC in the block or the matching correction file's first block: then `WAVPACK-LOSSY`, no correction on the wire; an int32 or float information of any length but 4 is refused, as `read_int32_info` and `read_float_info` refuse it |
+| Codex P2, `ape.go` | a 76-byte file of a descriptor and a header claiming `0xFFFFFFFF` bytes passes with format facts | confirmed: nine new rows of `TestAnAPEFileItsReaderRefusesIsRefused` took the file, the reviewer's 76 bytes first (a 15-second `APE`; an old header of 1,000 frames whose seek table runs past its 544-byte file read 6,680 seconds) | `apeFrames.fits`: what the header says lies ahead of the frames ends inside the file with frame data after it, and the seek table names every frame, FFmpeg's three refusals (none, fewer entries than frames, cut inside it): from 3.98 the descriptor, header, seek table and WAV header the descriptor sizes; before, the old header, its peak level and seek count where its flags say, the WAV header unless `CREATE_WAV_HEADER`, the seek table and, before 3.81, a byte a frame |
+| Claude medium, `correction.go` | a `.wvc` the bridge may not read (`EACCES`) is a look that did not complete: a new `.wv` never gets a row and is re-read at every scan | confirmed for the new file: `TestACorrectionFileTheBridgeMayNotReadIsLossy` (its open refused, its read refused): "the .wv has no row" | the state '?': a refused open or read (`fs.ErrPermission`) is an answer, `WAVPACK-LOSSY` with no correction on the wire, said once a stat (`msgCorrectionUnreadable`), and the skip gate asks again at every scan with an open and a one-byte read (`correctionReadableNow`), so the first scan that may read it matches it; a scan that finds it still refused reads nothing |
+| the same, its matched-row half | a `.wvc` matched and made unreadable later keeps `WAVPACK` and its `correction` for good: a chmod moves no mtime | refused as a code change, taken in the protocol: an open of every matched `.wvc` at every scan would cost every hybrid row a file open a scan to catch a permissions change, and the walk compares size and mtime by rule (`statUnchanged`), never the ctime a chmod moves | PROTOCOL.md: any answer for the correction file's path but the file the row describes (a 404, any other error, another size or mtime) is a refusal of the lossless decode, and this case is named there |
+| Claude medium, `store.go` v61 | "no row before this version is a WavPack file's" is false for routed rows: an upstream `.wv` or `.ape` item was indexed under that name and served to every app; after the upgrade the zero view stops seeing it with no tombstone, and its later tombstone is filtered, so the row stays on old clients for good | confirmed: `TestAnUpgradeOverAGatedRowSendsEveryDeltaCursorToAFullSync`: a routed `.wv` row and a routed `.APE` row, `deltaIncomplete` false from a cursor taken before the upgrade; a store without one was complete, as it should stay | v61's step, past its column, restarts the deletion journal's coverage when the store holds a gated row, in one transaction with the question (`restartCoverageOverGatedPaths`); so does a gated tombstone, which the review did not name: a routed `.wv` deleted before the upgrade whose tombstone a client had not fetched is filtered from the zero view the same way (the test's tombstone row, red with that half dropped, control r10). A store with neither keeps its coverage and its tombstones |
+| Claude low, `output.md` and the signal path's list | the rule says the lossless list holds `WAVPACK` and the code does not, so every lossless WavPack row MPD plays is withheld as `source_codec_unknown` | refuted: `signalpath.losslessCodec` lists `WAVPACK` on main (`signalpath.go` line 654: FLAC, ALAC, WAV, AIFF, WV, WAVPACK, APE, DSF, DFF), and `TestAHybridMPDFetchesThroughTheLoopbackRouteIsLossy`'s "a lossless stream by the loopback route" passed, `format_preserved`, at 73b21165 | nothing |
+| the same, its trap | MPD's WavPack plugin opens the stream's URI with `c` appended; the loopback route serves rows only, so MPD decodes a hybrid lossy while the verdict says lossless | confirmed: "a hybrid by the loopback route" was `format_preserved`, want `withheld` [`source_lossy`]; "a hybrid by its path" (MPD opens the `.wvc` beside the file) passed | `sourceFacts` takes a row with a correction file that MPD fetches by the loopback route as `WAVPACK-LOSSY` (`OutputTrack.Correction`, filled by `outputTrackLookup`); the route's 404 for `<id>c` is pinned (`TestLoopbackRouteServesNoCorrectionFile`). The review's other choice, serving the correction file at the track's URL with `c`, was not taken: the route serves a track's own file by its id alone (`output.md`), and a correction file is no track |
+| Claude low, `health_counts.go` | `pendingDeletions` counts every row, so the zero view hears of gated rows | confirmed: `TestPendingDeletionsAreEachViewsRows`: a `.flac` and a `.wv` gone, pendingDeletions 2 for the three views that do not declare WavPack, want 1; the three that do passed | `Store.PendingDeletions(ctx, view)`: the tracks through `formatViewSQL`, the folders whole, as the manifest's `folders` block is every view's; the health cache already keyed both counts by view |
+| Claude low, `wavpack.go` (sub-blocks) | each sub-block costs a 4-byte `ReadAt`; a block of id-0, length-0 sub-blocks is millions of reads | confirmed: `TestABlockOfManyTinySubBlocksIsReadInAFewReads`, 524,292 reads of a 1,048,728-byte file | the walk reads a 64 KiB window at a time (`wvWindow`), as libwavpack's `read_metadata_buff` walks the block in memory: 18 reads |
+
+### Negative controls
+
+`controls_r2.py` applied each mutation to the committed tree (eb6ef4ea) in
+memory, ran the tests named, and put the bytes back; the predictions were
+written before the run. Every control built and went red as predicted, and
+no sibling predicted to pass failed.
+
+| Control | Mutation | Red, as predicted |
+|---|---|---|
+| r1 | `apeTagMaxValues` = 1 << 40 | `TestManyTinyAPEv2ValuesAllocateWithinTheBound`: 538,292,480 bytes |
+| r2 | the flags out of `correctionMatches` | the rows of other bits and other channels (`WAVPACK`, key '+') |
+| r3 | the no-length arm back to `return true` | the two rows cut at a block's end (the length unknown, past its first sample) |
+| r4 | the first block's fit and the window's short read both allowed | the two new WavPack refusal rows |
+| r5 | `needsExtended` ignored | the five lossy extended-bits rows, the four lossless ones still passing |
+| r6 | `fits` ignored | the nine new APE refusal rows |
+| r7 | `fs.ErrPermission` a look that did not complete | both unreadable rows: no row |
+| r8 | an unreadable file never asked again | both unreadable rows at the scan that may read it: 0 files read, `WAVPACK-LOSSY` |
+| r9 | v61 restarts no coverage | the WavPack row, the Monkey's Audio row and the tombstone; "no gated row" still passing |
+| r10 | the tombstone half of `holdsGatedPathSQL` dropped | the tombstone row alone |
+| r11 | `PendingDeletions` of `formatgate.All()` | the three views that do not declare WavPack: 2, want 1 |
+| r12 | `sourceFacts` without the loopback hybrid | "a hybrid by the loopback route": `format_preserved` |
+| r13 | the loopback route serving `<id>c` as the correction file | `TestLoopbackRouteServesNoCorrectionFile`: 200 with the file's bytes |
+| r14 | `wvBlockWindow` = 4 | `TestABlockOfManyTinySubBlocksIsReadInAFewReads`: 262,148 reads |
+
+### Rules, protocol and long forms
+
+The rules patch (`rules-b489b-r2.patch`, three files, checked with `git
+apply` over round 1's results and the budgets measured over the outcome:
+`output.md` 68.3%, `wire.md` 58.6%, `scanner.md` 33.0%, the worst load 65.2%):
+`scanner.md`'s two B489 lines take round 2's refusals and its fifth state;
+`wire.md`'s gate bullet takes `pendingDeletions` and v61's coverage restart;
+`output.md`'s verdict bullet takes the loopback hybrid. Their long forms in
+`ops/History-rules-scanner.md` carry the measurements above, and the `.wvc`
+entry's note on v61 was corrected (a routed row may be named `.wv`).
+PROTOCOL.md, for the mirror PR: `WAVPACK-LOSSY` covers a stream without the
+extended bits its samples need; a file that ends inside its first block, or
+an APE file whose headers or seek table it does not hold, is refused; a
+correction file matches with the stream's flags and its own last sample, and
+one the bridge may not read is lossy and asked again at every scan; any
+answer for the correction file's path but the file the row describes refuses
+the lossless decode; `pendingDeletions`'s tracks are the request's view's;
+an update over a gated routed row or tombstone restarts the deletion journal
+(`deltaIncomplete`'s list of causes names it); the loopback route serves no
+correction file, and the reading says `source_lossy` for a hybrid MPD
+fetches there. `ProtocolVersion` stays 1.
