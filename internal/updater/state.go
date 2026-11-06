@@ -183,7 +183,58 @@ type State struct {
 	// once its settings loaded (AdmitBoot), lifts it, and a new install's
 	// marker, a fresh one, carries none.
 	MigrationVeto string `json:"migrationVeto,omitempty"`
+
+	// FailedStarts counts the starts of TargetVersion since its install that
+	// have not ended cleanly (backlog B660): serve's admission adds one where
+	// this version is the install's target, in its one write with its record
+	// (AdmitBoot), and the start takes its own back when it ends in serve's
+	// stop, a restart request, or a listener's bind the host refused
+	// (TakeBackFailedStart). So the count includes a start still running, and
+	// a crash, a kill, a panic or an error return leaves its one. At
+	// ProbationFailedStarts, the next start puts the backup back where
+	// CrashRollback allows it. The confirmation clears it (ConfirmInstall), and
+	// a crash rollback's record keeps it, which is what tells that record from
+	// the other rollbacks' (CrashRollbackRecord).
+	FailedStarts int `json:"failedStarts,omitempty"`
+
+	// StoreMigratedBy names the version, other than PreviousVersion, that began
+	// a migration of the store while an install was armed (backlog B660): a
+	// store open with a step pending records it before its first step
+	// (DisarmBeforeMigrating), whether or not DataDirOpenedBy is there, and
+	// refuses the open where it cannot. Begun is changed: a step that failed
+	// may have landed some of its statements with user_version unmoved, so no
+	// crash rollback restores the backup over the store once it is set
+	// (CrashRollback), whether or not the migration finished.
+	StoreMigratedBy string `json:"storeMigratedBy,omitempty"`
+
+	// RollbackRefused says why the last start that asked for a crash rollback
+	// (cmd/bridge's recoverCrashedInstall) left the backup where it is, in
+	// words that name no path, no value and no error's text (backlog B660).
+	// The doctor and the console's Updates panel show it; the start that
+	// finds the rollback's checks hold again clears it, and so does the
+	// confirmation.
+	RollbackRefused string `json:"rollbackRefused,omitempty"`
+
+	// NotReady says a start of TargetVersion did not answer as ready (its API
+	// listener, /v1/health and its store) within ProbationWindow of beginning
+	// to serve, so the install is not confirmed (backlog B660). Recorded once
+	// a start; the next start's admission and the confirmation clear it. Not
+	// ready is not proof of a broken version, so it rolls nothing back.
+	NotReady bool `json:"notReady,omitempty"`
 }
+
+// ProbationWindow is how long one start of an install's version stays up,
+// once it has answered as ready, before the install is confirmed (backlog
+// B660). Measured on the monotonic clock of the process that serves: a box
+// with no clock that keeps time across a power cut boots with a stale date.
+const ProbationWindow = 10 * time.Minute
+
+// ProbationFailedStarts is how many starts of an install's version that did
+// not end cleanly the next start rolls back over (backlog B660): three, so
+// that one power cut or one kill of an out-of-memory host does not, and the
+// fourth start at systemd's RestartSec=2 comes inside its default limit of
+// five starts in ten seconds.
+const ProbationFailedStarts = 3
 
 // stateFileName is the basename under <dataDir>. Constant so tests
 // can hardcode it; callers always go through StatePath.

@@ -2966,6 +2966,16 @@ type serveOpts struct {
 	// last statement and before its commit (backlog B662). Per invocation for
 	// tailscaleCLI's reason.
 	upscaleTargetBeforeCommit func(*sql.Tx) error
+	// probation is a boot test's hold on the confirmation of an install of
+	// this version (serve_probation.go): its timing, what it does, told as
+	// it does it, and a stand-in for its round's store read. Nil in
+	// production. Per invocation for tailscaleCLI's reason.
+	probation *probationSeams
+	// scannerBoot is handed serve's scanner before its periodic loop starts.
+	// Nil in production; a boot test parks a scan on the scanner's own test
+	// hooks (manifest.Scanner.SetAfterExtractHookForTests). Per invocation
+	// for tailscaleCLI's reason.
+	scannerBoot func(*manifest.Scanner)
 }
 
 // adoptHandedListener returns lis when it is nil or when its address is
