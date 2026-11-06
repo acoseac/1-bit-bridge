@@ -207,8 +207,8 @@ func TestAStoreThatWillNotOpenIsAFailedStart(t *testing.T) {
 	if err := os.Symlink("elsewhere.db", manifest.DefaultDBPath(r.dataDir)); err != nil {
 		t.Skipf("no symbolic link can be made here: %v", err)
 	}
-	if code, stderr := r.serve(t, serveOpts{}); code != 1 {
-		t.Fatalf("serve over a store that will not open = %d, want 1; stderr=%s", code, stderr)
+	if code, stderr, served := serveToItsEnd(t, serveOpts{configPath: r.cfg, binaryPath: r.bin}); served || code != 1 {
+		t.Fatalf("serve over a store that will not open = %d (served %v), want 1; stderr=%s", code, served, stderr)
 	}
 	r.requireCount(t, 1, "after a start whose store would not open")
 }

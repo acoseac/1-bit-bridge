@@ -165,9 +165,9 @@ func TestAMigrationWhoseRecordCannotBeWrittenDoesNotRun(t *testing.T) {
 		}
 		return nil
 	}))
-	code, stderr := r.serve(t, serveOpts{})
-	if code != 1 || !strings.Contains(stderr, "began a migration of the store, so no step is run") {
-		t.Fatalf("serve over a migration whose record fails = %d, want 1 at the record; stderr=%s", code, stderr)
+	code, stderr, served := serveToItsEnd(t, serveOpts{configPath: r.cfg, binaryPath: r.bin})
+	if served || code != 1 || !strings.Contains(stderr, "began a migration of the store, so no step is run") {
+		t.Fatalf("serve over a migration whose record fails = %d (served %v), want 1 at the record; stderr=%s", code, served, stderr)
 	}
 	if !armed.Load() {
 		t.Fatal("the migration's record was never written: the test shows nothing")
