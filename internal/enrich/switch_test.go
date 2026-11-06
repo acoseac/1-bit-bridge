@@ -157,13 +157,15 @@ func writeSwitchConfig(t *testing.T) string {
 func yamlQuoted(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 
 // TestASwitchOffStopsAnEnrichmentInFlightAndStampsNothing: turning the
-// switch off cancels the request the enricher is waiting on, within a
-// second, and the pass it belonged to takes the path a shutdown takes: no
-// stamp, no skip counted, no line, the row left at enriched_at = 0, and no
-// request after it (backlog B617).
+// switch off cancels the request the enricher is waiting on, at the next ask
+// of the batch's context (a second apart in production, which enrichgate's
+// tests pin; a millisecond here), and the pass it belonged to takes the path a
+// shutdown takes: no stamp, no skip counted, no line, the row left at
+// enriched_at = 0, and no request after it (backlog B617).
 func TestASwitchOffStopsAnEnrichmentInFlightAndStampsNothing(t *testing.T) {
 	ups := newSwitchUpstreams(t)
 	e, store, _ := switchEnricher(t, ups)
+	e.switchEvery = time.Millisecond
 	seedSwitchTracks(t, store)
 	var on atomic.Bool
 	on.Store(true)
@@ -201,8 +203,8 @@ func TestASwitchOffStopsAnEnrichmentInFlightAndStampsNothing(t *testing.T) {
 	on.Store(false)
 	select {
 	case <-abandoned:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the request held at MusicBrainz was not cancelled within 5s of the switch-off")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the request held at MusicBrainz was not cancelled after the switch-off")
 	}
 	waitFor(t, func() bool { return len(rec.Lines(msgEnrichmentSwitchedOff)) > 0 },
 		"the enricher to say it was switched off")
@@ -372,24 +374,27 @@ func TestAPortraitComesBackAfterDeezerOnAndRetryMissing(t *testing.T) {
 }
 
 // TestDeezerOffAfterASearchSendsNoFetch: Deezer switched off while its
-// search is in flight sends no image request after it: the search, already
-// sent, ends by itself, and the fetch is asked of the switch first (backlog
-// B617).
+// search is held at the fake cuts the search off, at the next ask of its own
+// context (deezerCall; a millisecond here), as errDeezerOff, never as "Deezer
+// has no portrait": no image request follows, nothing is negative-cached and
+// no portrait is written (backlog B617).
 func TestDeezerOffAfterASearchSendsNoFetch(t *testing.T) {
 	ups := newSwitchUpstreams(t)
 	e, _, artworkDir := switchEnricher(t, ups)
+	e.switchEvery = time.Millisecond
 	var deezerOn atomic.Bool
 	deezerOn.Store(true)
 	e.WithDeezerEnabled(deezerOn.Load)
 	searching := make(chan struct{})
-	release := make(chan struct{})
+	cutOff := make(chan struct{})
 	ups.deezer.setHold(func(r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/search/") {
 			return
 		}
 		close(searching)
 		select {
-		case <-release:
+		case <-r.Context().Done():
+			close(cutOff)
 		case <-time.After(10 * time.Second):
 		}
 	})
@@ -409,7 +414,11 @@ func TestDeezerOffAfterASearchSendsNoFetch(t *testing.T) {
 		t.Fatal("Deezer's search was never sent")
 	}
 	deezerOn.Store(false)
-	close(release)
+	select {
+	case <-cutOff:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the Deezer search held at the switch-off was not cut off")
+	}
 	var got result
 	select {
 	case got = <-answered:
@@ -422,49 +431,12 @@ func TestDeezerOffAfterASearchSendsNoFetch(t *testing.T) {
 	if reqs := ups.deezer.requests(); len(reqs) != 1 || !strings.HasPrefix(reqs[0], "GET /search/artist") {
 		t.Errorf("Deezer was asked %v, want the search alone", reqs)
 	}
+	if e.deezerNegCache.Has(switchArtistMBID) {
+		t.Error("the cut-off search was negative-cached")
+	}
 	if fileExists(ArtistImagePath(artworkDir, switchArtistMBID)) {
 		t.Error("a portrait was cached after Deezer was switched off")
 	}
-}
-
-// TestCancelWhenOffCancelsOnceItsSwitchIsOff: the context CancelWhenOff
-// returns ends when its predicate answers false, asked every interval, or
-// when its parent ends; a nil predicate is never off, and one that answers
-// false at the start is cancelled already.
-func TestCancelWhenOffCancelsOnceItsSwitchIsOff(t *testing.T) {
-	const every = 2 * time.Millisecond
-	t.Run("off at the start", func(t *testing.T) {
-		ctx, release := cancelWhenOff(context.Background(), func() bool { return false }, every)
-		defer release()
-		if ctx.Err() == nil {
-			t.Error("a context whose switch is off at the start is not cancelled")
-		}
-	})
-	t.Run("a nil switch", func(t *testing.T) {
-		parent, cancel := context.WithCancel(context.Background())
-		ctx, release := cancelWhenOff(parent, nil, every)
-		defer release()
-		if ctx.Err() != nil {
-			t.Fatal("a nil switch cancelled the context")
-		}
-		cancel()
-		<-ctx.Done()
-	})
-	t.Run("a switch-off", func(t *testing.T) {
-		var on atomic.Bool
-		on.Store(true)
-		ctx, release := cancelWhenOff(context.Background(), on.Load, every)
-		defer release()
-		if ctx.Err() != nil {
-			t.Fatal("cancelled while the switch is on")
-		}
-		on.Store(false)
-		select {
-		case <-ctx.Done():
-		case <-time.After(5 * time.Second):
-			t.Fatal("not cancelled within 5s of the switch-off")
-		}
-	})
 }
 
 // TestTheEnricherSaysWhenItsSwitchesFlip: one Info line at the start for a

@@ -23,6 +23,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
+	"github.com/acoseac/1-bit-bridge/internal/enrichgate"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/lrucache"
@@ -105,6 +106,11 @@ type Enricher struct {
 	// on. See switch.go.
 	enabled       func() bool
 	deezerEnabled func() bool
+	// switchEvery is how far apart the switches' contexts ask them, which
+	// cancels a request on the wire; zero is enrichgate.Interval, a second.
+	// A send and a write ask the switch themselves, whatever this is. A test
+	// seam: a test that sets an hour shows a refusal is the gate's alone.
+	switchEvery time.Duration
 
 	// acoustic is the fingerprint verdict source. Nil (the default) means
 	// acoustic fingerprinting is off, exactly like a nil premiumCovers.
@@ -319,10 +325,12 @@ func (e *Enricher) WithPremiumCovers(f PremiumCoverFetcher) *Enricher {
 //
 // enrich.enabled is asked before each batch: off, the loop asks the store
 // and the upstreams nothing, and asks the switch again after PollInterval,
-// so turning it on takes effect within one. Each batch runs on a context the
-// switch cancels within a second (CancelWhenOff), so turning it off stops
-// the batch under way as a shutdown would, and what the batch was enriching
-// stays at enriched_at = 0 for the turn that follows the switch's.
+// so turning it on takes effect within one. Each batch runs on the switch's
+// context (enrichgate.CancelWhenOff), so turning it off stops the batch under
+// way as a shutdown would: a request after the flip is refused at its send,
+// an answer after it is not taken, one on the wire is cancelled within a
+// second, and what the batch was enriching stays at enriched_at = 0 for the
+// turn that follows the switch's.
 func (e *Enricher) Run(ctx context.Context) {
 	var report switchReport
 	for {
@@ -344,7 +352,7 @@ func (e *Enricher) Run(ctx context.Context) {
 // runBatch enriches one batch on a context the switch cancels, and returns
 // how long Run waits before the next.
 func (e *Enricher) runBatch(ctx context.Context) time.Duration {
-	ctx, release := CancelWhenOff(ctx, e.enabled)
+	ctx, release := enrichgate.CancelWhenOff(ctx, e.enabled, e.switchEvery)
 	defer release()
 	batch, err := e.store.UnenrichedTracks(ctx, e.BatchLimit)
 	if err != nil {
@@ -880,21 +888,20 @@ func (e *Enricher) ensureArtistImageCached(ctx context.Context, mbid, artistName
 		}
 		return true, nil
 	}
-	// enrich.deezerEnabled, asked once a cached file has not answered and
-	// again just before each of the two requests: off, Deezer is asked
-	// nothing more (errDeezerOff). A request already sent ends by itself,
-	// within the client's timeout.
+	// enrich.deezerEnabled, asked once a cached file has not answered: off,
+	// Deezer is asked nothing (errDeezerOff). Each of the two requests then
+	// runs on a context of its own that the switch cancels (deezerCall), and
+	// the client admits it at its send and its answer at its arrival, so a
+	// flip refuses the next request and cuts off one on the wire, as
+	// errDeezerOff, never as "Deezer has no portrait".
 	if !e.deezerOn() {
 		return false, errDeezerOff
 	}
-	if !sleepCtx(ctx, e.DeezerMinInterval) {
-		return false, ctx.Err()
-	}
-	if !e.deezerOn() {
-		return false, errDeezerOff
-	}
-	imgURL, err := e.deezer.SearchArtist(ctx, artistName)
-	if err != nil {
+	var imgURL string
+	if err := e.deezerCall(ctx, func(dctx context.Context) (err error) {
+		imgURL, err = e.deezer.SearchArtist(dctx, artistName)
+		return err
+	}); err != nil {
 		return false, err
 	}
 	if imgURL == "" {
@@ -902,14 +909,11 @@ func (e *Enricher) ensureArtistImageCached(ctx context.Context, mbid, artistName
 	}
 	// Deezer image URLs are on their own CDN; second GET happens after
 	// a second DeezerMinInterval pause.
-	if !sleepCtx(ctx, e.DeezerMinInterval) {
-		return false, ctx.Err()
-	}
-	if !e.deezerOn() {
-		return false, errDeezerOff
-	}
-	data, err := e.deezer.FetchImage(ctx, imgURL)
-	if err != nil {
+	var data []byte
+	if err := e.deezerCall(ctx, func(dctx context.Context) (err error) {
+		data, err = e.deezer.FetchImage(dctx, imgURL)
+		return err
+	}); err != nil {
 		return false, err
 	}
 	// Through the cover writes' primitive (backlog B168), for its two
@@ -1157,6 +1161,9 @@ func acousticSkipReason(e *Enricher, outcome acousticOutcome, fallback string) s
 // is as the other writer left it, still unenriched, and the next batch
 // reads it again, answering mostly from this enricher's caches.
 func (e *Enricher) stampEnriched(ctx context.Context, t *manifest.Track) {
+	if !stampAdmitted(ctx) {
+		return
+	}
 	if err := e.store.MarkEnriched(ctx, t); err != nil {
 		if errors.Is(err, manifest.ErrTrackChanged) {
 			noteChangedWhileEnriched(t)
@@ -1203,6 +1210,9 @@ const msgChangedWhileEnriched = "track changed while it was enriched; the next b
 // reason: the verdict is about tags the row no longer holds, and the next
 // batch reads the row again.
 func (e *Enricher) markSkipped(ctx context.Context, t *manifest.Track, reason, detail string) {
+	if !stampAdmitted(ctx) {
+		return
+	}
 	if err := e.store.MarkEnriched(ctx, t); err != nil {
 		if errors.Is(err, manifest.ErrTrackChanged) {
 			noteChangedWhileEnriched(t)

@@ -33,6 +33,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/enrichgate"
 )
 
 // DefaultMusicBrainzBase is the public MusicBrainz API root. Overridable
@@ -77,11 +79,12 @@ func NewMusicBrainzClient(base, userAgent string, httpClient *http.Client) *Musi
 	}
 	ep := parseBaseEndpoint(base)
 	// The client is a copy that never carries the credential from an https
-	// request onto a hop that is not https (guardRedirects).
+	// request onto a hop that is not https (guardRedirects), and sends only
+	// while enrich.enabled is on (enrichgate.Client, backlog B617).
 	return &MusicBrainzClient{
 		base:        ep,
 		userAgent:   userAgent,
-		http:        guardRedirects(httpClient),
+		http:        guardRedirects(enrichgate.Client(httpClient)),
 		minInterval: minIntervalForBase(ep.root, PublicMBMinInterval, publicMBHosts),
 	}
 }

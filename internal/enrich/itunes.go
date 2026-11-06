@@ -39,6 +39,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/enrichgate"
 )
 
 // DefaultITunesBase is the public iTunes Search API root. Overridable
@@ -73,7 +75,9 @@ func NewITunesClient(base, userAgent string, httpClient *http.Client) *ITunesCli
 		// churn during enrichment passes.
 		httpClient = &http.Client{Timeout: 10 * time.Second, Transport: sharedHTTPTransport}
 	}
-	return &ITunesClient{base: base, userAgent: userAgent, http: httpClient}
+	// A copy that sends only while enrich.enabled is on (enrichgate.Client,
+	// backlog B617), though no production path builds this client.
+	return &ITunesClient{base: base, userAgent: userAgent, http: enrichgate.Client(httpClient)}
 }
 
 // ITunesAlbum is the trimmed-down iTunes album result the enricher

@@ -376,6 +376,10 @@ func (e *Enricher) applyAcousticFallback(ctx context.Context, t *manifest.Track)
 // verdict into a retryable failure. A cancelled context is an ordinary
 // shutdown, not a fault.
 func (e *Enricher) recordAcousticTagVeto(ctx context.Context, t *manifest.Track) {
+	// Asked again at the write, as a stamp is (stampAdmitted, backlog B617).
+	if !stampAdmitted(ctx) {
+		return
+	}
 	if err := e.store.SetAcoustIDTagVeto(ctx, t.Path, t.Size, t.ModTime.UnixNano(), t.Artist); err != nil && ctx.Err() == nil {
 		logger.Warn("fingerprint: record tag veto", "path", t.Path, "err", err)
 	}

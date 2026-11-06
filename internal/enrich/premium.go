@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
+	"github.com/acoseac/1-bit-bridge/internal/enrichgate"
 )
 
 // ErrNoCredential is returned by RefetchPremium when no usable Atlas credential
@@ -72,9 +73,12 @@ func NewAtlasPremiumFetcher(cred AtlasCredentialSource, userAgent string, httpCl
 	}
 	// A copy that never carries the bearer token, or the Basic header a stored
 	// base with user information gets, from an https request onto a hop that
-	// is not https (guardRedirects).
+	// is not https (guardRedirects), and sends only while enrich.enabled is on
+	// (enrichgate.Client, backlog B617): the gate is on the fetcher's own
+	// client, so the harvest's client, which a test may share, and its other
+	// legs and lyrics never see it.
 	return &atlasPremiumFetcher{
-		cred: cred, userAgent: userAgent, http: guardRedirects(httpClient), cacheDir: cacheDir,
+		cred: cred, userAgent: userAgent, http: guardRedirects(enrichgate.Client(httpClient)), cacheDir: cacheDir,
 		reports: newUpstreamReports(),
 	}
 }

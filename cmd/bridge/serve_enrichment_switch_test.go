@@ -112,6 +112,13 @@ type sweepSwitchFixture struct {
 
 func newSweepSwitchFixture(t *testing.T, names ...string) *sweepSwitchFixture {
 	t.Helper()
+	return newSweepSwitchFixtureAnswering(t, switchAcoustIDMatch, names...)
+}
+
+// newSweepSwitchFixtureAnswering is newSweepSwitchFixture over an AcoustID
+// that answers each lookup with answer.
+func newSweepSwitchFixtureAnswering(t *testing.T, answer string, names ...string) *sweepSwitchFixture {
+	t.Helper()
 	ctx := context.Background()
 	root := t.TempDir()
 	store, err := manifest.OpenStore(filepath.Join(t.TempDir(), "bridge.db"))
@@ -135,7 +142,7 @@ func newSweepSwitchFixture(t *testing.T, names ...string) *sweepSwitchFixture {
 	}
 	f := &sweepSwitchFixture{store: store}
 	f.acoustid = newSwitchCounter(t, func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = io.WriteString(w, switchAcoustIDMatch)
+		_, _ = io.WriteString(w, answer)
 	})
 	f.sweeper = &fingerprintSweeper{
 		store:     store,

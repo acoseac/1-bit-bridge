@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/enrichgate"
 )
 
 // DefaultDeezerBase is the public Deezer API root. Overridable in tests
@@ -60,11 +62,12 @@ func NewDeezerClient(base, userAgent string, httpClient *http.Client) *DeezerCli
 	// without this copy a caller passing http.DefaultClient or a client
 	// shared with NewMusicBrainzClient would suddenly see Deezer's
 	// SSRF allowlist constrain redirects across the whole process.
-	clientCopy := *httpClient
+	// enrichgate.DeezerClient is that copy, sending only while
+	// enrich.enabled and enrich.deezerEnabled are on (backlog B617).
 	c := &DeezerClient{
 		base:              base,
 		userAgent:         userAgent,
-		http:              &clientCopy,
+		http:              enrichgate.DeezerClient(httpClient),
 		allowedImageHosts: append([]string(nil), deezerAllowedHosts...),
 	}
 	c.installRedirectGuard()

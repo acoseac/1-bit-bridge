@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/enrichgate"
 )
 
 // DefaultCoverArtBase is the public Cover Art Archive root. Overridable
@@ -61,11 +63,12 @@ func NewCoverArtClient(base, userAgent string, httpClient *http.Client) *CoverAr
 	}
 	ep := parseBaseEndpoint(base)
 	// The client is a copy that never carries the credential from an https
-	// request onto a hop that is not https (guardRedirects).
+	// request onto a hop that is not https (guardRedirects), and sends only
+	// while enrich.enabled is on (enrichgate.Client, backlog B617).
 	return &CoverArtClient{
 		base:        ep,
 		userAgent:   userAgent,
-		http:        guardRedirects(httpClient),
+		http:        guardRedirects(enrichgate.Client(httpClient)),
 		minInterval: minIntervalForBase(ep.root, PublicCAAMinInterval, publicCAAHosts),
 	}
 }

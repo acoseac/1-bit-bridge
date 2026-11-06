@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/enrichgate"
 )
 
 // DefaultBaseURL is the public AcoustID web service root.
@@ -237,13 +239,14 @@ func NewClient(baseURL, apiKey, userAgent string, httpClient *http.Client) *Clie
 	// field on the client, *http.Client instances are routinely shared across
 	// services in Go, and a caller passing http.DefaultClient must not find this
 	// package's origin restriction applied to every redirect in the process. Same
-	// reasoning as enrich.NewDeezerClient's copy.
-	clientCopy := *httpClient
+	// reasoning as enrich.NewDeezerClient's copy. enrichgate.Client is that
+	// copy, and the lookup it sends goes out only while enrich.enabled is on,
+	// where the caller's context carries the switch (backlog B617).
 	c := &Client{
 		base:        baseURL,
 		apiKey:      apiKey,
 		userAgent:   userAgent,
-		http:        &clientCopy,
+		http:        enrichgate.Client(httpClient),
 		minInterval: minIntervalForBase(baseURL),
 	}
 	c.installRedirectGuard()

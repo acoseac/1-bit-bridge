@@ -12,6 +12,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/enrich"
+	"github.com/acoseac/1-bit-bridge/internal/enrichgate"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 )
 
@@ -71,6 +72,11 @@ type fingerprintSweeper struct {
 	// fingerprintDecodeTimeout. A test sets a short one; production leaves
 	// it zero so the bound is not a package variable a test can race.
 	decodeTimeout time.Duration
+	// switchEvery is how far apart a pass's context asks enrich.enabled,
+	// which cancels a lookup on the wire; zero is enrichgate.Interval, a
+	// second. A lookup's send and every write ask the switch themselves,
+	// whatever this is. A test seam, like decodeTimeout.
+	switchEvery time.Duration
 
 	// pacer serialises AcoustID requests across workers. The politeness
 	// contract is per-key, not per-worker, so a pool that paced individually
@@ -154,17 +160,19 @@ const fingerprintTagVetoTTL = 30 * 24 * time.Hour
 // doing something.
 //
 // enrichmentOn is enrich.enabled (backlog B617), which `enabled` asks
-// before a pass too (fingerprintGates). A pass runs on a context it cancels
-// within a second of a switch-off (enrich.CancelWhenOff), the one the
-// enricher's batch runs on, so a sweep under way stops as at a shutdown: the
-// decode is killed, the pacing and a lookup end, and nothing is re-queued.
-// Nil never cancels.
+// before a pass too (fingerprintGates). A pass runs on the switch's context
+// (enrichgate.CancelWhenOff), as the enricher's batch does, so a sweep under
+// way stops as at a shutdown: AcoustID's client refuses a lookup that starts
+// after the flip and an answer that arrives after it, a lookup on the wire
+// is cancelled within a second, the decode is killed, the pacing ends, and
+// what the pass would write asks the switch again at the write (admitted),
+// so nothing is cached, persisted or re-queued. Nil never cancels.
 func runFingerprintSweeper(ctx context.Context, s *fingerprintSweeper, enabled, enrichmentOn func() bool, interval func() time.Duration, nudge, rearm <-chan struct{}, status *sweepStatus[admin.FingerprintSweepCounts]) {
 	runSweepLoop(ctx, status, fingerprintSweeperSettleDelay, interval, nudge, rearm, func(bool) {
 		if enabled != nil && !enabled() {
 			return
 		}
-		passCtx, release := enrich.CancelWhenOff(ctx, enrichmentOn)
+		passCtx, release := enrichgate.CancelWhenOff(ctx, enrichmentOn, s.switchEvery)
 		defer release()
 		status.sweepStarted()
 		status.sweepFinished(s.sweep(passCtx))
@@ -205,6 +213,12 @@ func fingerprintGates(liveCfg func() *config.Config, toolchain *fingerprintToolc
 // switched on while enrich.enabled is off.
 const fingerprintEnrichmentOff = "enrichment_off"
 
+// admitted asks enrich.enabled again just before the sweep writes what a
+// lookup taught it (backlog B617): off, the write is not made, and the
+// pass's context is cancelled so the pass stops there (enrichgate.Admit).
+// The answer was taken while the switch was on, and still meets it off here.
+func admitted(ctx context.Context) bool { return enrichgate.Admit(ctx) == nil }
+
 // sweep runs one pass: collect candidates, fingerprint them, then re-queue
 // whatever resolved. Returns the per-run counts for the admin recorder —
 // nil on failure/cancel so the recorder keeps the last successful
@@ -226,6 +240,7 @@ func (s *fingerprintSweeper) sweep(ctx context.Context) *admin.FingerprintSweepC
 
 	resolved := s.fingerprintAll(ctx, cands)
 	if ctx.Err() != nil {
+		s.forgetUnqueued(resolved)
 		return nil
 	}
 
@@ -235,6 +250,12 @@ func (s *fingerprintSweeper) sweep(ctx context.Context) *admin.FingerprintSweepC
 	// picked up on enriched_at=0 before its verdict existed, miss the cache,
 	// and be re-skipped — burning the sweep for that track.
 	if len(resolved) > 0 {
+		// enrich.enabled, asked again at the write (backlog B617): a pass
+		// whose last answer met the switch off re-queues nothing.
+		if !admitted(ctx) {
+			s.forgetUnqueued(resolved)
+			return nil
+		}
 		n, err := s.store.ResetEnrichedByPaths(ctx, resolved)
 		if err != nil {
 			// A cancelled context here is a normal shutdown, not a fault —
@@ -249,6 +270,19 @@ func (s *fingerprintSweeper) sweep(ctx context.Context) *admin.FingerprintSweepC
 		logger.Info("fingerprint sweep re-queued resolved tracks", "resolved", len(resolved), "requeued", n)
 	}
 	return counts
+}
+
+// forgetUnqueued drops what a stopped pass cached for the files it resolved
+// and did not re-queue (backlog B617). The candidate scan skips a file this
+// cache answers, and only the re-queue hands a verdict to the enricher, so a
+// match kept past the stop held its file out of every later pass in this
+// process: enrichment switched off mid-sweep and on again never applied it.
+// Forgotten, the next pass offers the file again, as after a restart. The
+// provenance (SetAcoustIDMatch) records an acceptance, and stays.
+func (s *fingerprintSweeper) forgetUnqueued(resolved []string) {
+	for _, path := range resolved {
+		s.cache.Forget(path)
+	}
 }
 
 // collectCandidates finds tracks the enricher gave up on that are worth the
@@ -643,7 +677,18 @@ func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) bo
 	}
 	results, err := s.client.Lookup(ctx, fp)
 	if err != nil {
+		// enrich.enabled's refusal, at the send, at the answer or on the
+		// wire (backlog B617): AcoustID was not asked, or what it said was
+		// not taken. No answer, so neither a miss nor an upstream fault:
+		// nothing is cached, persisted or logged, and the file is offered
+		// again once the switch is on. Classified before anything else.
+		if ctx.Err() != nil || errors.Is(err, enrichgate.ErrOff) {
+			return false
+		}
 		if errors.Is(err, acoustid.ErrNoMatch) {
+			if !admitted(ctx) {
+				return false
+			}
 			// AcoustID answered cleanly and knows nothing. A fact about the
 			// audio, so cache it — and persist it, so the next restart does
 			// not buy the same answer with another whole-object read.
@@ -671,7 +716,7 @@ func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) bo
 		s.noteLookupErr(err)
 		// TRANSIENT failures are not cached: the next sweep must retry them,
 		// or a brief outage would permanently mark a whole batch unmatched.
-		if ctx.Err() == nil && !acoustid.IsTransient(err) {
+		if !acoustid.IsTransient(err) && admitted(ctx) {
 			logger.Warn("fingerprint: lookup", "path", c.path, "err", err)
 			s.cache.Set(key, acoustid.Outcome{})
 		}
@@ -680,6 +725,12 @@ func (s *fingerprintSweeper) fingerprintOne(ctx context.Context, c candidate) bo
 
 	in.Results = results
 	decision, reason := acoustid.Accept(in)
+	// What AcoustID answered is written only while enrich.enabled is still
+	// on (backlog B617): the cache, which the enricher reads, and the
+	// provenance below.
+	if !admitted(ctx) {
+		return false
+	}
 	if reason != acoustid.ReasonNone {
 		s.cache.Set(key, acoustid.Outcome{})
 		return false

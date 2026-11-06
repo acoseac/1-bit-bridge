@@ -2,9 +2,8 @@ package enrich
 
 import (
 	"context"
-	"errors"
-	"sync"
-	"time"
+
+	"github.com/acoseac/1-bit-bridge/internal/enrichgate"
 )
 
 // enrich.enabled and enrich.deezerEnabled, as the enricher reads them
@@ -14,70 +13,25 @@ import (
 //
 // Off, the enricher asks MusicBrainz, the Cover Art Archive, Deezer and Atlas
 // nothing: Run asks enabled before each batch and parks without touching the
-// store, and each batch runs on a context CancelWhenOff cancels within a
-// second of a switch-off, so a request held at an upstream is cancelled and
-// the pass reaches stampEnriched / markSkipped on a cancelled context, which
-// record nothing, as at a shutdown. A row waits at enriched_at = 0, and
-// turning the switch on resumes it. deezerEnabled stops the Deezer requests
-// alone (errDeezerOff).
+// store, and each batch runs on enrich.enabled's context
+// (enrichgate.CancelWhenOff). Every client sends through enrichgate's gate, so
+// a request that starts after the flip is refused before it leaves, an
+// answer that arrives after it is not taken, and a request on the wire is
+// cancelled within a second; each refusal cancels the batch's context at
+// once, so the pass stops as at a shutdown, and stampEnriched, markSkipped
+// and the fingerprint veto's write ask the switch again at the write. A row
+// waits at enriched_at = 0, and turning the switch on resumes it.
+// deezerEnabled stops the Deezer requests alone: each runs on a context of
+// its own (enrichgate.CancelWhenDeezerOff), so a Deezer flip cancels a Deezer
+// request and leaves the batch, and MusicBrainz on it, running.
 
-// cancelWhenOffEvery is how far apart CancelWhenOff asks its predicate: a
-// switch-off stops what runs on its context within a second.
-const cancelWhenOffEvery = time.Second
-
-// CancelWhenOff returns a context derived from parent that is cancelled once
-// on answers false, asked at most a second apart, and the function that
-// releases it, which the caller defers. A context whose on answers false at
-// the start is cancelled already. A nil on is never off: only parent ends the
-// context then.
-//
-// The enricher's batch and the fingerprint sweep run on it, so the switch
-// stops a pass the way a shutdown stops one: a request in flight is
-// cancelled, a pacing sleep ends, a decode is killed, and a write the pass
-// reaches on the cancelled context records nothing.
-func CancelWhenOff(parent context.Context, on func() bool) (context.Context, context.CancelFunc) {
-	return cancelWhenOff(parent, on, cancelWhenOffEvery)
-}
-
-// cancelWhenOff is CancelWhenOff asking on every `every`.
-func cancelWhenOff(parent context.Context, on func() bool, every time.Duration) (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithCancel(parent)
-	if on == nil {
-		return ctx, cancel
-	}
-	if !on() {
-		cancel()
-		return ctx, cancel
-	}
-	released := make(chan struct{})
-	exited := make(chan struct{})
-	go func() {
-		defer close(exited)
-		tick := time.NewTicker(every)
-		defer tick.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-released:
-				return
-			case <-tick.C:
-				if !on() {
-					cancel()
-					return
-				}
-			}
-		}
-	}()
-	var once sync.Once
-	return ctx, func() {
-		once.Do(func() {
-			close(released)
-			<-exited
-			cancel()
-		})
-	}
-}
+// errDeezerOff is a Deezer request enrich.deezerEnabled refused or cut off:
+// Deezer was not asked, or its answer was not taken. It is no miss, so
+// neither caller of ensureArtistImageCached puts it in deezerNegCache, which
+// would outlive the switch for the process's life, and neither logs it. The
+// track is stamped with no portrait, which "Retry missing" queues again once
+// Deezer is on.
+var errDeezerOff = enrichgate.ErrDeezerOff
 
 // WithEnabled attaches the live predicate for enrich.enabled. Nil (the
 // default) is on.
@@ -99,12 +53,37 @@ func (e *Enricher) on() bool { return e.enabled == nil || e.enabled() }
 // deezerOn is enrich.deezerEnabled as the predicate answers it now.
 func (e *Enricher) deezerOn() bool { return e.deezerEnabled == nil || e.deezerEnabled() }
 
-// errDeezerOff is ensureArtistImageCached's answer while enrich.deezerEnabled
-// is off: Deezer was not asked. It is no miss, so neither caller puts it in
-// deezerNegCache, which would outlive the switch for the process's life, and
-// neither logs it. The track is stamped with no portrait, which "Retry
-// missing" queues again once Deezer is on.
-var errDeezerOff = errors.New("enrich: Deezer artist portraits are switched off")
+// deezerCall makes one Deezer request, call, after Deezer's pacing, on a
+// context derived from the batch's that enrich.deezerEnabled cancels
+// (enrichgate.CancelWhenDeezerOff), and answers the switch's refusal for a
+// pacing or a request the switch ended: errDeezerOff for Deezer's, which
+// leaves the batch running, or enrichgate.ErrOff for enrich.enabled's, which
+// has cancelled the batch. A request the client refused or whose answer it
+// did not take answers the same refusal through call's error.
+func (e *Enricher) deezerCall(ctx context.Context, call func(context.Context) error) error {
+	dctx, release := enrichgate.CancelWhenDeezerOff(ctx, e.deezerEnabled, e.switchEvery)
+	defer release()
+	if !sleepCtx(dctx, e.DeezerMinInterval) {
+		if r := enrichgate.Refusal(dctx); r != nil {
+			return r
+		}
+		return ctx.Err()
+	}
+	err := call(dctx)
+	if err != nil {
+		if r := enrichgate.Refusal(dctx); r != nil {
+			return r
+		}
+	}
+	return err
+}
+
+// stampAdmitted asks enrich.enabled again just before a write of what the
+// pass learnt, a stamp or a fingerprint veto: off, the write is not made, as
+// at a shutdown, and the batch's context is cancelled so the pass stops
+// there (enrichgate.Admit). An answer taken while the switch was on can still
+// meet it off here.
+func stampAdmitted(ctx context.Context) bool { return enrichgate.Admit(ctx) == nil }
 
 // The Info lines the enricher logs about its switches: one at its start for
 // each that is off, and one at each flip it sees after that.
