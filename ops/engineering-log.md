@@ -80021,3 +80021,17 @@ the builder's result, and the budgets measured over it (`enrichment.md` 34.0%,
 and hung in a player serve test, every one of them comparing a path under a
 TMPDIR that held `..` (`.tmp/_b489b/r3/../gotmp`): the harness's error, not the
 tree's. With the TMPDIR made absolute the same package passed (330 s).
+
+### Gates
+
+On legion0 at 76b771cb, through the shared build lock, against main
+(1a101716): go1.27.3's gofmt on every Go file changed since main, clean;
+`make docs-check`, ok; the qualification check, "qualification version OK:
+1a101716..HEAD"; `make vet` native and with `GOOS=windows`, `GOOS=darwin`,
+`GOOS=linux GOARCH=386` and `GOOS=linux GOARCH=arm`, each clean; `make
+test-fast`, 87 packages ok; `make test TEST_PKGS=` the packages the merge
+touched (race, 30 min a package), ok: internal/dupes 1 s, internal/api
+132 s, internal/manifest 1,592 s, internal/admin 990 s,
+internal/smartplaylist 3 s, its season 1 s, internal/smartplaylistgen 27 s,
+cmd/bridge 1,061 s; `make build-all`, the six targets. Not run here: macOS
+and Windows natively, CI's runners, and the iOS app.
