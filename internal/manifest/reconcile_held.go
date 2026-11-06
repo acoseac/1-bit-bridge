@@ -260,11 +260,12 @@ func (s *Scanner) takeHeldReconciles() []*Track {
 // (mergePostScanFields), and the passes run in memory (runReconcileStepsInMemory)
 // over the library's rows with EVERY held re-read's values in place of its
 // row's: the inputs the tail's passes would read had the scan written those
-// rows as they stand. A re-read then takes the values the passes give it (the
-// year pass's record as heldRecord keeps it): one that marshals as its stored
-// row is stamped (versionStampOnly), any other is written whole, with those
-// values, so the passes after it find nothing left to change. The held values
-// stand in for all the held rows at once, and
+// rows as they stand. A re-read then takes the values the passes give it, the
+// year pass's record of its tag included: one that marshals as its stored row
+// is stamped (versionStampOnly), one that differs from it in that record alone
+// is stamped with the record (yearRecordOnly, no revision), and any other is
+// written whole, with those values, so the passes after it find nothing left
+// to change. The held values stand in for all the held rows at once, and
 // that is what keeps a bump's extractor change from being voted down: a
 // change that reads every track of an album differently leaves no outlier,
 // while one judged against its siblings' stored rows would be voted back to
@@ -302,28 +303,13 @@ func (s *Scanner) settleHeldReconciles(ctx context.Context, routedSet map[string
 		if t, ok := overlay[targets[i].Path]; ok {
 			t.Album, t.AlbumArtist = targets[i].Album, targets[i].AlbumArtist
 			t.Year, t.TrackNumber = targets[i].Year, targets[i].TrackNumber
-			t.taggedYear = heldRecord(targets[i], stored[t.Path])
+			t.taggedYear = targets[i].taggedYear
 		}
 	}
 	written, stamped, rewritten := s.writeHeld(ctx, live, stored)
 	scanLogger.Info("version-stale re-reads written as reconciliation leaves them",
 		"stamped", stamped, "rewritten", rewritten)
 	return written
-}
-
-// heldRecord is the year pass's record (Track.taggedYear) a settled re-read
-// is written with. The passes ran over the re-read's own reading, so where
-// they gave it its album's year they recorded its tag. A row stored with no
-// record, as every row an older bridge wrote is, keeps none when that year is
-// the one it holds: the record is set when the pass moves a row's year
-// (backlog B756), and gained alone it would make the re-read differ from its
-// row, which would then be written whole and its enrichment re-queued for
-// nothing a client sees. Such a row votes its stored year, as it did.
-func heldRecord(settled ReconcileTarget, stored *Track) *yearRecord {
-	if stored != nil && stored.taggedYear == nil && sameIntPtr(settled.Year, stored.Year) {
-		return nil
-	}
-	return settled.taggedYear
 }
 
 // settleHeldUnreconciled writes the scan's held re-reads as they stand, each

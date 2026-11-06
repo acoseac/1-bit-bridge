@@ -392,6 +392,15 @@ type Track struct {
 	// iOS client's next delta sync nor re-queue full re-enrichment.
 	versionStampOnly bool
 
+	// yearRecordOnly is an internal, NON-WIRE marker set with
+	// versionStampOnly by markStampIfUnchanged on a re-extraction that
+	// differs from its stored row in the year pass's record alone
+	// (taggedYear): nothing a client reads changed, so the stamp leg writes
+	// the record beside the stamp, with no indexed_at advance and no
+	// enriched_at reset, and only while the row is still the one it was
+	// merged with (rowVersion) (backlog B756 round 3).
+	yearRecordOnly bool
+
 	// awaitsReconcile is an internal, NON-WIRE marker (the versionStampOnly
 	// shape) set by reExtractUnchanged on a version-stale re-extraction that
 	// differs from its stored row in a field a reconciliation pass writes
@@ -472,23 +481,27 @@ type Track struct {
 	// pass votes on what the tags say rather than on what an earlier scan
 	// wrote. nil when the pass never moved the row, and on every row an
 	// older bridge wrote, which votes its stored year until the pass moves
-	// it (a bump's settlement adds none alone: heldRecord). It lives in
-	// tags_json, under "taggedYear" (marshalForStorage writes it,
-	// decodeStoredTrack reads it), and never on the wire: unexported, so
-	// json.Marshal of a Track does not see it.
+	// it or a bump's held re-read records its tag. It lives in tags_json,
+	// under "taggedYear" (marshalForStorage writes it, decodeStoredTrack
+	// reads it), and never on the wire: unexported, so json.Marshal of a
+	// Track does not see it. A change in it alone is no revision
+	// (yearRecordOnly).
 	taggedYear *yearRecord
 
 	// rowVersion is the version of the row this Track was read from or
 	// written as: the row's indexed_at, which every write of tags_json
-	// advances. Every store reader that returns a Track records the version
-	// it read (GetTrack, LookupTrack, UnenrichedTracks, the list, stream and
-	// page readers, the UPnP baseline), and UpsertTrack and MarkEnriched the
-	// version they wrote. MarkEnriched and the reconciliation writer
-	// (applyReconciledTracks) write back a row they read earlier, whole, so
-	// they write only while the row still has this version (ErrTrackChanged
-	// otherwise), and refuse a Track that has none (hasRowVersion false: one
-	// built by hand, which no read backs). Unexported, never marshaled (the
-	// versionStampOnly shape).
+	// advances but one, the stamp leg's write of a year record alone
+	// (yearRecordOnly), which changes nothing a client reads, is made only
+	// at the version its re-read was merged with, and which MarkEnriched
+	// carries forward. Every store reader that returns a Track records the
+	// version it read (GetTrack, LookupTrack, UnenrichedTracks, the list,
+	// stream and page readers, the UPnP baseline), and UpsertTrack and
+	// MarkEnriched the version they wrote. MarkEnriched and the
+	// reconciliation writer (applyReconciledTracks) write back a row they
+	// read earlier, whole, so they write only while the row still has this
+	// version (ErrTrackChanged otherwise), and refuse a Track that has none
+	// (hasRowVersion false: one built by hand, which no read backs).
+	// Unexported, never marshaled (the versionStampOnly shape).
 	rowVersion    int64
 	hasRowVersion bool
 	// carryFirstIndexedNS is the first-indexed instant an INSERT should

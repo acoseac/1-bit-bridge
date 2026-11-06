@@ -2111,12 +2111,46 @@ func (s *Scanner) reExtractUnchanged(ctx context.Context, pi pathInfo, multiRoot
 // marshals byte-identical to the stored row it was merged with, and leaves it
 // for the full upsert otherwise, a marshal failure included: equality cannot
 // be proved, so it fails open to the upsert.
+//
+// A re-extraction that differs from its row in the year pass's record alone
+// (Track.taggedYear) is stamped too, with yearRecordOnly: nothing a client
+// reads changed, and the stamp leg writes the record beside the stamp, at the
+// version of the row it was merged with (backlog B756 round 3). Until then it
+// took the full upsert, an indexed_at advance and an enrichment reset for a
+// record (an older extractor's reading of 1950 replaced by 1968 under a
+// served 2011, or a record dropped).
 func markStampIfUnchanged(fresh, old *Track) {
 	freshRaw, freshErr := marshalForStorage(fresh)
 	oldRaw, oldErr := marshalForStorage(old)
-	if freshErr == nil && oldErr == nil && bytes.Equal(freshRaw, oldRaw) {
-		fresh.versionStampOnly = true
+	if freshErr != nil || oldErr != nil {
+		return
 	}
+	if bytes.Equal(freshRaw, oldRaw) {
+		fresh.versionStampOnly = true
+		return
+	}
+	if !old.hasRowVersion || sameYearRecord(fresh.taggedYear, old.taggedYear) {
+		return
+	}
+	freshBare, oldBare := *fresh, *old
+	freshBare.taggedYear, oldBare.taggedYear = nil, nil
+	freshRaw, freshErr = marshalForStorage(&freshBare)
+	oldRaw, oldErr = marshalForStorage(&oldBare)
+	if freshErr != nil || oldErr != nil || !bytes.Equal(freshRaw, oldRaw) {
+		return
+	}
+	fresh.versionStampOnly = true
+	fresh.yearRecordOnly = true
+	fresh.rowVersion, fresh.hasRowVersion = old.rowVersion, true
+}
+
+// sameYearRecord reports whether a and b record the same tag: both none, or
+// both a record of the same year (nil for a tag that gave none).
+func sameYearRecord(a, b *yearRecord) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return sameIntPtr(a.year, b.year)
 }
 
 // mergePostScanFields copies the POST-SCAN-owned fields from the stored

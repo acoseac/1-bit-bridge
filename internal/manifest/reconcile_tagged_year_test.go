@@ -413,12 +413,14 @@ func TestTheYearPassNeverWritesTheRecordAlone(t *testing.T) {
 // album's 2011, and stored no record (Track.taggedYear), as it stored none
 // anywhere. A bump re-reads them: the two whose tags read a year differ from
 // their rows and are held, and the passes give each the album's year, which
-// is the year its row holds. Each is only stamped and keeps no record: a row
-// stored with none votes its stored year until the pass moves it, and a
-// record gained alone would write the row whole and re-queue its enrichment
-// for nothing a client sees (B188). Until then the settlement recorded the
-// two tags and wrote both rows whole, through a full scan and a subtree scan
-// alike, at the first bump after the upgrade.
+// is the year its row holds, and the record of its tag. Each is only stamped,
+// the record written beside the stamp with no revision (round 3), so nothing
+// moves and nothing is re-enriched (B188), and each votes its tag from then
+// on; the tag with no year reads as its row (mergeYear) and gains nothing.
+// Round 2's first settlement wrote the two rows whole, through a full scan
+// and a subtree scan alike, at the first bump after the upgrade; its fix
+// (heldRecord) kept them stamped by giving them no record, which round 3's
+// record-only write makes unnecessary.
 func TestScanner_ABumpOverRowsStoredWithNoRecordOnlyStampsThem(t *testing.T) {
 	for _, scope := range []string{"a full scan", "a subtree scan"} {
 		t.Run(scope, func(t *testing.T) {
@@ -449,6 +451,10 @@ func TestScanner_ABumpOverRowsStoredWithNoRecordOnlyStampsThem(t *testing.T) {
 				if v := trackColumn(t, store, rel, "extractor_version"); v != int64(ExtractorVersion) {
 					t.Errorf("%s: extractor_version = %d, want %d", rel, v, ExtractorVersion)
 				}
+			}
+			requireTaggedYear(t, store, rels[3], intptr(1720))
+			requireTaggedYear(t, store, rels[4], intptr(0))
+			for _, rel := range []string{rels[0], rels[1], rels[2], rels[5]} {
 				requireNoTaggedYear(t, store, rel)
 			}
 			settled := indexedAtsOf(t, store, rels)
@@ -465,8 +471,8 @@ func TestScanner_ABumpOverRowsStoredWithNoRecordOnlyStampsThem(t *testing.T) {
 // stored the twelve rows with no record. A bump reads seven files as 2011 and
 // five as 1968, every row differs from its row and is held, and the passes
 // give the album 2011: the five are written at 2011 with a record of their
-// 1968 (heldRecord keeps it, since their year moves), so once the seven are
-// deleted they take 1968, as a fresh index of the five files does.
+// 1968, so once the seven are deleted they take 1968, as a fresh index of
+// the five files does.
 func TestScanner_ABumpThatMovesAnAlbumRecordsTheTagsOfTheRowsItMoves(t *testing.T) {
 	root := t.TempDir()
 	store, sc := newScanFixture(t, root)

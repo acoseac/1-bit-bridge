@@ -403,12 +403,14 @@ func TestScanner_AVersionStaleReReadOfAnAlbumGivenOneYearOnlyStamps(t *testing.T
 // the scan's tail, at most heldLimit of them (maxHeldReconciles, 10,000, in
 // production; it counts only the re-reads that differ from their rows in a
 // field a pass writes, not the library's rows). Held, it is judged with
-// every held re-read in place and written once, whole, as its record moved
-// (1950 to 1968; the served year stays 2011). Past the limit it is written
-// as its file reads (1968, its enrichment re-queued) and the tail gives it
-// the album's year again: it churns once, as every re-read past the limit
-// has since B188. Every row ends at 2011 with the new reading recorded, and
-// nothing is re-queued: the scan after moves nothing.
+// every held re-read in place, given the album's year, which its row holds,
+// and the record of its new reading: the record is its one change, written
+// with the stamp, with no indexed_at advance and no enrichment reset (round
+// 3; until then it was written whole, a revision for a record). Past the
+// limit it is written as its file reads (1968, its enrichment re-queued) and
+// the tail gives it the album's year again: it churns once, as every re-read
+// past the limit has since B188. Every row ends at 2011 with the new reading
+// recorded, and nothing is re-queued: the scan after moves nothing.
 func TestScanner_ReReadsOfAnAlbumGivenOneYearPastTheHoldLimitSettleInOneScan(t *testing.T) {
 	root := t.TempDir()
 	store, sc := newScanFixture(t, root)
@@ -431,12 +433,23 @@ func TestScanner_ReReadsOfAnAlbumGivenOneYearPastTheHoldLimitSettleInOneScan(t *
 		requireTaggedYear(t, store, rel, intptr(1968))
 	}
 	moved := movedRows(t, store, before)
-	if len(moved) != len(rels[7:]) {
-		t.Errorf("rows the bump moved: %v, want the five whose reading changed", moved)
+	if len(moved) != len(rels[7:])-int(sc.heldLimit) {
+		t.Errorf("rows the bump moved: %v, want the three past the hold limit of two alone", moved)
 	}
+	movedSet := map[string]bool{}
 	for _, rel := range moved {
+		movedSet[rel] = true
 		if !minority[rel] {
 			t.Errorf("%s moved: only a re-read whose reading changed differs from its row", rel)
+		}
+	}
+	for _, rel := range rels[7:] {
+		at := enrichedAtOf(t, store, rel)
+		if movedSet[rel] && at != 0 {
+			t.Errorf("%s, past the hold limit, has enriched_at %d, want 0: written as its file reads", rel, at)
+		}
+		if !movedSet[rel] && at != 1 {
+			t.Errorf("%s, held, has enriched_at %d, want 1: its record alone changed", rel, at)
 		}
 	}
 	for _, rel := range rels {
