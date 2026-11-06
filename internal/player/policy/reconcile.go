@@ -21,10 +21,13 @@ type Occurrence struct {
 	// last frame, which today's reconciliation fences as an open output
 	// (authorization.go's reconcilePermission).
 	Retiring bool
-	// Identity reports that the node its output has open is still the
-	// identity the new set was computed for (Set.Key and Set.BCDDevice):
-	// true while it has no output open.
-	Identity bool
+	// Opened is the identity the occurrence's sink last opened, kept across
+	// a pause's release, which closes the device and keeps the sink's frames
+	// for a reopen: a sink that opened another identity than the new set's
+	// (Set.Identity) holds the occurrence on a unit the set was not computed
+	// for. Nil only for an occurrence that has never had a sink, which has
+	// no identity to compare until it opens one.
+	Opened *Identity
 }
 
 // Action is what reconciliation does with an occurrence.
@@ -40,8 +43,8 @@ const (
 	// new set, never skipped for the change.
 	Replan
 	// Revoke: its plan left the set and it was heard, a frame of it is the
-	// kernel's or its output retires, or its output's node is no longer the
-	// set's identity; it stops at once.
+	// kernel's or its output retires, or its frames sit in a sink that
+	// opened another identity than the set's; it stops at once.
 	Revoke
 )
 
@@ -59,18 +62,21 @@ type Verdict struct {
 }
 
 // Reconcile judges o against next, the set that replaces the one o was
-// planned under: kept while next plays o's plan at its rate and o's node is
-// next's identity; revoked once o was heard, a frame of it is the kernel's
-// or its output retires, or when frames of it sit in a sink whose node is
-// not next's identity; re-planned otherwise. An identity change that leaves
-// the same tuple available revokes all the same: the tuple's membership is
-// not the test.
+// planned under: kept while next plays o's plan at its rate and the
+// identity o's sink last opened, if it ever had one, is next's; revoked once
+// o was heard, a frame of it is the kernel's or its output retires, or when
+// frames of it sit in a sink that opened another identity; re-planned
+// otherwise. An identity change that leaves the same tuple available
+// revokes all the same, a released pause's included, whose device is closed
+// and whose reopen would play its frames to the unit that took the port:
+// the tuple's membership is not the test.
 func Reconcile(next Set, o Occurrence) Verdict {
+	valid := o.Opened == nil || o.Opened.Same(next.Identity())
 	reached := o.Audible || o.Written > 0 || o.Played > 0 || o.Retiring
 	switch {
-	case o.Identity && o.Plan.Same(next.At(o.Plan.BitRate).Plan):
+	case valid && o.Plan.Same(next.At(o.Plan.BitRate).Plan):
 		return Verdict{Action: Keep}
-	case reached || !o.Identity && o.Submitted > 0:
+	case reached || !valid && o.Submitted > 0:
 		return Verdict{Action: Revoke, Interrupts: true}
 	}
 	return Verdict{Action: Replan, Interrupts: o.Submitted > 0}

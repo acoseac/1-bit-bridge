@@ -48,7 +48,7 @@ func TestAMissingControlIsNotUnity(t *testing.T) {
 		"the table's control is not the card's": func(m *Mixer) {
 			m.Controls.Controls = []alsactl.Control{integer("PCM Playback Volume", 1, 0, 255, dbMinMaxMute(-12700, 0), 255, 255), switchControl("PCM Playback Switch")}
 		},
-		"the table names none of the unit's": func(m *Mixer) { m.Units = []UnitControl{{Unit: 11, Name: "PCM Playback Volume"}} },
+		"the table names none of the unit's": func(m *Mixer) { m.Units = []UnitControl{entry(0, 11, selVolume, "PCM Playback Volume")} },
 		"the table did not read":             func(m *Mixer) { m.Units, m.UnitsRead = nil, false },
 		"a volume on the channels, none made of it": func(m *Mixer) {
 			m.Descriptors = dac2(uac2IT(2, usbStreaming), uac2FU(10, 2, 0x0f, 0, 0x0c), uac2OT(20, speaker, 10))
@@ -93,7 +93,7 @@ func TestEveryLevelControlCountsWhateverItsName(t *testing.T) {
 	// A control the table makes of the path's gain stage counts, though its
 	// name marks a capture.
 	m = withVolumeUnit(cleanMixer(), volume("PCM Capture Volume", 200), switchControl("PCM Playback Switch"))
-	m.Units = []UnitControl{{Unit: 10, Name: "PCM Capture Volume"}}
+	m.Units = []UnitControl{entry(0, 10, selVolume, "PCM Capture Volume")}
 	wantGain(t, "the path's control named as a capture's, off 0 dB", gainAt(m, nil), ReasonGainNotUnity)
 	// Switches and enumerations are not gains.
 	m = cleanMixer()
@@ -299,4 +299,108 @@ func TestWhatTheCheckCannotReadIsUnverifiable(t *testing.T) {
 	a.Altset = nil
 	wantGain(t, "an altset whose setting did not read", CheckGain(m, []alsa.Altset{a}, nil, bcd), ReasonGainUnverifiable)
 	wantGain(t, "no altset at all", CheckGain(m, nil, nil, bcd), ReasonGainUnverifiable)
+}
+
+// switchUnit is the test DAC's descriptors with feature unit 10 between its
+// input terminal and its speaker, declaring controls: its master's, then its
+// two channels'.
+func switchUnit(controls ...uint32) []byte {
+	return dac2(uac2IT(2, usbStreaming), uac2FU(10, 2, controls...), uac2OT(20, speaker, 10))
+}
+
+// TestAFeatureUnitsSwitchesAreStagesAndItsMuteIsNot settles B748: a feature
+// unit's every declared control but mute and audio class 2's read-only
+// underflow and overflow is a stage the check must see. A switch (automatic
+// gain, bass boost, loudness, the phase inverter) rewrites the DoP markers
+// and the DSD bits while it is on, so it must be mapped through the
+// kernel's table and read off on every channel; on, unmapped, unread, or in
+// an entry that does not say its selector, it is unverifiable. A mute alone
+// refuses nothing: muted DoP is silence, not altered bits.
+func TestAFeatureUnitsSwitchesAreStagesAndItsMuteIsNot(t *testing.T) {
+	loudness := func(units []UnitControl, controls ...alsactl.Control) Mixer {
+		m := cleanMixer()
+		m.Descriptors = switchUnit(0x3<<18, 0, 0)
+		m.Units, m.Controls = units, alsactl.Snapshot{Controls: controls}
+		return m
+	}
+	mapped := []UnitControl{entry(0, 10, selLoudness, "Loudness")}
+	wantGain(t, "loudness off", gainAt(loudness(mapped, boolean("Loudness", 0)), nil), "")
+	wantGain(t, "loudness on", gainAt(loudness(mapped, boolean("Loudness", 1)), nil), ReasonGainUnverifiable)
+	wantGain(t, "loudness unmapped", gainAt(loudness(nil, boolean("Loudness", 0)), nil), ReasonGainUnverifiable)
+	wantGain(t, "loudness in an entry that does not say its selector", gainAt(loudness([]UnitControl{entry(0, 10, 0, "Loudness")}, boolean("Loudness", 0)), nil), ReasonGainUnverifiable)
+	wantGain(t, "loudness unreadable", gainAt(loudness(mapped, unreadable("Loudness", 0)), nil), ReasonGainUnverifiable)
+	unread := loudness(mapped, boolean("Loudness", 0))
+	unread.UnitsRead = false
+	wantGain(t, "the table not read", gainAt(unread, nil), ReasonGainUnverifiable)
+	// Each switch, on the master or on the channels, on one channel of two.
+	for _, c := range []struct {
+		name            string
+		selector        int
+		master, channel uint32
+	}{
+		{"Auto Gain Control", selAutomaticGain, 0x3 << 12, 0},
+		{"Bass Boost", selBassBoost, 0x3 << 16, 0},
+		{"Phase Inverter Control", selPhaseInverter, 0, 0x3 << 24},
+		{"Loudness", selLoudness, 0, 0x1 << 18},
+	} {
+		m := cleanMixer()
+		m.Descriptors = switchUnit(c.master, c.channel, c.channel)
+		m.Units = []UnitControl{entry(0, 10, c.selector, c.name)}
+		values := []int64{0}
+		if c.channel != 0 {
+			values = []int64{0, 0}
+		}
+		m.Controls = alsactl.Snapshot{Controls: []alsactl.Control{boolean(c.name, values...)}}
+		wantGain(t, c.name+" off", gainAt(m, nil), "")
+		values[len(values)-1] = 1
+		m.Controls = alsactl.Snapshot{Controls: []alsactl.Control{boolean(c.name, values...)}}
+		wantGain(t, c.name+" on", gainAt(m, nil), ReasonGainUnverifiable)
+	}
+	// Audio class 1's loudness (D9).
+	m := cleanMixer()
+	m.Descriptors = usbDescriptors(1, ifc(0, 0, 1, 0, 0), uac1Header(1), uac1IT(1, usbStreaming), uac1FU2(2, 1, 0x200, 0, 0), uac1OT(3, speaker, 2),
+		ifc(1, 0, 2, 0, 0), ifc(1, 1, 2, 0, 1), uac1General(1), uac1EpOut())
+	m.Units = []UnitControl{entry(0, 2, selLoudness, "Loudness")}
+	m.Controls = alsactl.Snapshot{Controls: []alsactl.Control{boolean("Loudness", 1)}}
+	wantGain(t, "audio class 1's loudness on", gainAt(m, nil), ReasonGainUnverifiable)
+	// A volume beside the loudness: both seen, each judged its way.
+	vl := cleanMixer()
+	vl.Descriptors = switchUnit(0x0f|0x3<<18, 0, 0)
+	vl.Units = []UnitControl{entry(0, 10, selMute, "PCM Playback Switch"), entry(0, 10, selVolume, "PCM Playback Volume"), entry(0, 10, selLoudness, "Loudness")}
+	vl.Controls = alsactl.Snapshot{Controls: []alsactl.Control{boolean("PCM Playback Switch", 1), volume("PCM Playback Volume", 255), boolean("Loudness", 0)}}
+	wantGain(t, "a volume at 0 dB, loudness off", gainAt(vl, nil), "")
+	vl.Controls.Controls[2] = boolean("Loudness", 1)
+	wantGain(t, "a volume at 0 dB, loudness on", gainAt(vl, nil), ReasonGainUnverifiable)
+	// A mute alone, muted or not, mapped or not.
+	for _, mute := range []struct {
+		name  string
+		units []UnitControl
+		value int64
+	}{
+		{"unmuted", []UnitControl{entry(0, 10, selMute, "PCM Playback Switch")}, 1},
+		{"muted", []UnitControl{entry(0, 10, selMute, "PCM Playback Switch")}, 0},
+		{"unmapped", nil, 1},
+	} {
+		m := cleanMixer()
+		m.Descriptors = switchUnit(0x03, 0x03, 0x03)
+		m.Units = mute.units
+		m.Controls = alsactl.Snapshot{Controls: []alsactl.Control{boolean("PCM Playback Switch", mute.value)}}
+		wantGain(t, "a mute alone, "+mute.name, gainAt(m, nil), "")
+	}
+	// A delay is a level, which has no dB scale to read as unity.
+	d := cleanMixer()
+	d.Descriptors = switchUnit(0x3<<14, 0, 0)
+	d.Units = []UnitControl{entry(0, 10, 8, "Delay Control")}
+	d.Controls = alsactl.Snapshot{Controls: []alsactl.Control{integer("Delay Control", 0, 0, 1000, nil, 0)}}
+	wantGain(t, "a delay at 0", gainAt(d, nil), ReasonGainUnverifiable)
+	// The policy: an explicit dop refuses, auto converts.
+	for _, mode := range []string{"dop", "auto"} {
+		r := newRig(t).everything(mode).withoutNative()
+		r.mixer = loudness(mapped, boolean("Loudness", 1))
+		if mode == "dop" {
+			wantOutcome(t, "dop with the loudness on", r.plan(testRate), OutcomeRefused, ReasonGainUnverifiable)
+		} else {
+			wantOutcome(t, "auto with the loudness on", r.plan(testRate), OutcomeConverted)
+		}
+	}
 }

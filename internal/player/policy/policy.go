@@ -252,6 +252,33 @@ type Set struct {
 	rates      []Rate
 }
 
+// Identity is a unit's identity as a set is computed for it and as a sink
+// opens it: the DAC model's key and its firmware (bcdDevice), never a serial
+// or a port.
+type Identity struct {
+	Key       dacprofile.Key
+	BCDDevice string
+}
+
+// Same reports whether i and o are one identity: the keys by their canonical
+// forms, the firmware by its value, an unread one ("") the same only as
+// another unread one.
+func (i Identity) Same(o Identity) bool {
+	return i.Key.Equal(o.Key) && canonicalBCD(i.BCDDevice) == canonicalBCD(o.BCDDevice)
+}
+
+// Identity is the identity s was computed for.
+func (s Set) Identity() Identity { return Identity{Key: s.Key, BCDDevice: s.BCDDevice} }
+
+// canonicalBCD is a firmware in the state's form, four lowercase
+// hexadecimal digits, or "" for one that does not read.
+func canonicalBCD(s string) string {
+	if v, err := usbid.ParseHex16(s); err == nil {
+		return usbid.Hex16(v)
+	}
+	return ""
+}
+
 // All is the set at every rate it decides, DSD64 to DSD256, in a list of the
 // caller's own.
 func (s Set) All() []Rate { return slices.Clone(s.rates) }
@@ -307,10 +334,7 @@ type reading struct {
 }
 
 func newReading(in Inputs) *reading {
-	rd := &reading{in: in}
-	if v, err := usbid.ParseHex16(in.Unit.BCDDevice); err == nil {
-		rd.bcd = usbid.Hex16(v)
-	}
+	rd := &reading{in: in, bcd: canonicalBCD(in.Unit.BCDDevice)}
 	if in.Profiles != nil {
 		if p, ok := in.Profiles.Match(in.Unit); ok {
 			rd.profile = &p
@@ -654,8 +678,9 @@ func (rd *reading) conversion() *Target {
 
 // pcmTaken reports whether the DAC takes f at rateHz in two channels with
 // at least bits significant: an altset lists it, the probe did not refuse
-// it, and its significant bits, the altset's Bits line, else an accepted
-// probe's refined bits, else the format's own depth, are bits or more.
+// it, and its significant bits are bits or more: the altset's Bits line, or
+// the format's own depth with none, held to an accepted probe's refined bits
+// when they are fewer, as they hold the DoP carrier: what the open commits.
 func (rd *reading) pcmTaken(f format.ALSAFormat, rateHz, bits int) bool {
 	res := rd.answer(alsapcm.ProbeCandidate{Format: f, RateHz: rateHz})
 	if res.Answer == alsapcm.ProbeRefused {
@@ -666,11 +691,11 @@ func (rd *reading) pcmTaken(f format.ALSAFormat, rateHz, bits int) bool {
 			continue
 		}
 		have := pcmDepth(f)
-		switch {
-		case a.Bits != nil:
+		if a.Bits != nil {
 			have = *a.Bits
-		case res.Answer == alsapcm.ProbeAccepted && res.Msbits > 0:
-			have = res.Msbits
+		}
+		if res.Answer == alsapcm.ProbeAccepted && res.Msbits > 0 {
+			have = min(have, res.Msbits)
 		}
 		if have >= bits {
 			return true

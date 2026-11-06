@@ -38,6 +38,16 @@ func dacKey(t *testing.T) dacprofile.Key {
 	return k
 }
 
+// otherModel is another DAC model, one the test DAC's port may hold next.
+func otherModel(t *testing.T) dacprofile.Key {
+	t.Helper()
+	k, err := dacprofile.NewKey(0x1234, 0x9999, ptr(0), ptr("Other DAC"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return k
+}
+
 // The test DAC's playback altsets, on interface 1: S32_LE with 24
 // significant bits (DoP's carriers and a conversion's packing), S24_3LE to
 // 176.4 kHz, and native DSD_U32_BE at DSD64, DSD128 and DSD256's frame rates.
@@ -275,6 +285,17 @@ func uac1OT(id byte, typ uint16, source byte) []byte {
 func uac1FU(id, source byte, controls ...byte) []byte {
 	return append(append([]byte{byte(7 + len(controls)), 0x24, 0x06, id, source, 1}, controls...), 0)
 }
+
+// uac1FU2 is an audio class 1 feature unit with a control size of two
+// bytes, for the controls past the first eight (bass boost 0x100, loudness
+// 0x200).
+func uac1FU2(id, source byte, controls ...uint16) []byte {
+	d := []byte{byte(7 + 2*len(controls)), 0x24, 0x06, id, source, 2}
+	for _, c := range controls {
+		d = binary.LittleEndian.AppendUint16(d, c)
+	}
+	return append(d, 0)
+}
 func uac1General(link byte) []byte { return []byte{7, 0x24, 0x01, link, 1, 1, 0} }
 func uac1EpOut() []byte            { return []byte{9, 0x05, 0x01, 0x09, 0xc8, 0x00, 1, 0, 0} }
 
@@ -314,11 +335,8 @@ func cleanMixer() Mixer {
 	return Mixer{Descriptors: dac2(uac2IT(2, usbStreaming), uac2OT(20, speaker, 2)), Config: 1, ControlsRead: true, UnitsRead: true}
 }
 
-// The control element types (asound.h).
-const (
-	typeBoolean    = 1
-	typeEnumerated = 3
-)
+// typeEnumerated is the enumerated control element type (asound.h).
+const typeEnumerated = 3
 
 // The TLVs, as alsactl reads them: type, length, payload.
 func tlv(kind uint32, words ...int32) []byte {
@@ -398,14 +416,33 @@ func switchControl(name string) alsactl.Control {
 	return alsactl.Control{Interface: ifaceMixer, Name: name, Type: typeBoolean, Access: 1, Count: 1, Values: make([]byte, 8), Info: make([]byte, 128)}
 }
 
+// boolean is a MIXER boolean control with one value a channel, 1 on.
+func boolean(name string, values ...int64) alsactl.Control {
+	c := alsactl.Control{Interface: ifaceMixer, Name: name, Type: typeBoolean, Access: 1, Count: uint32(len(values)), Info: make([]byte, 128)}
+	for _, v := range values {
+		c.Values = binary.LittleEndian.AppendUint64(c.Values, uint64(v))
+	}
+	return c
+}
+
 // withVolumeUnit puts feature unit 10, master mute and volume, between
 // input terminal 2 and the speaker, the kernel's table naming its controls,
 // and the card's controls.
 func withVolumeUnit(m Mixer, controls ...alsactl.Control) Mixer {
 	m.Descriptors = dac2(uac2IT(2, usbStreaming), uac2FU(10, 2, 0x0f, 0, 0), uac2OT(20, speaker, 10))
-	m.Units = []UnitControl{{Unit: 10, Name: "PCM Playback Switch"}, {Unit: 10, Name: "PCM Playback Volume"}}
+	m.Units = []UnitControl{entry(0, 10, selMute, "PCM Playback Switch"), entry(0, 10, selVolume, "PCM Playback Volume")}
 	m.Controls = alsactl.Snapshot{Controls: controls}
 	return m
+}
+
+// selVolume is a feature unit's volume, the selector the tests name most.
+const selVolume = 0x02
+
+// entry is the kernel's mixer table's entry for a control the driver made
+// of selector of unit, in the block of audio control interface ctrlif, at
+// index 0.
+func entry(ctrlif, unit, selector int, name string) UnitControl {
+	return UnitControl{ControlInterface: ptr(ctrlif), Unit: unit, Selector: selector, Name: name}
 }
 
 // gainAt is the gain check of the test DAC's DoP carrier altset on m, for

@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"cmp"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -33,27 +34,39 @@ type Mixer struct {
 	Controls     alsactl.Snapshot
 	ControlsRead bool
 	// Units is the kernel's own table of the controls its USB audio driver
-	// made of each unit (the card's /proc/asound/card<N>/usbmixer: a
-	// "Unit:" line and the "Control: name=…, index=…" line under it, for
-	// each). UnitsRead is false when it did not read.
+	// made of each unit (the card's /proc/asound/card<N>/usbmixer: one
+	// block a mixer, "USB Mixer: … ctrlif=<interface> …", and in it a
+	// "Unit:" line, its "Control: name=…, index=…" line and its "Info: …
+	// control=<selector> …" line for each). UnitsRead is false when it did
+	// not read.
 	Units     []UnitControl
 	UnitsRead bool
 }
 
 // UnitControl is one control the USB audio driver made of a unit, as the
-// kernel's mixer table names it: the unit's ID, and the control's name and
-// index on the card's MIXER interface.
+// kernel's mixer table names it: the audio control interface whose block
+// lists it (an audio function's units are numbered within the function
+// alone), the unit's ID, the class's control selector it was made of, and
+// the control's name and index on the card's MIXER interface.
 type UnitControl struct {
-	Unit  int
-	Name  string
-	Index int
+	// ControlInterface is the block's ctrlif, nil where the table does not
+	// say: then the control cannot be put in a function, and a stage of its
+	// unit's ID is unverifiable.
+	ControlInterface *int
+	Unit             int
+	// Selector is the Info line's control=, 0 where the table does not say:
+	// then the control cannot be told from its unit's others, and the stage
+	// is unverifiable.
+	Selector int
+	Name     string
+	Index    int
 }
 
 // Gain is the DoP gain check's verdict at a rate.
 type Gain struct {
-	// Unity reports that the check passed: the playback path has no gain
-	// stage and the card no level control, or every gain stage is visible
-	// and every level control at unity.
+	// Unity reports that the check passed: the playback path has no stage
+	// and the card no level control, or every stage is visible, its
+	// switches off, and every level control at unity.
 	Unity bool
 	// Reason is dop_gain_unverifiable or dop_gain_not_unity when the check
 	// did not pass, unverifiable outranking not unity, since a stage the
@@ -67,6 +80,7 @@ type Gain struct {
 // SNDRV_CTL_ELEM_IFACE_* and SNDRV_CTL_ELEM_TYPE_*).
 const (
 	ifaceMixer    = 2
+	typeBoolean   = 1
 	typeInteger   = 2
 	typeInteger64 = 6
 )
@@ -83,25 +97,36 @@ var controlInterfaces = map[string]uint32{"CARD": 0, "HWDEP": 1, "MIXER": 2, "PC
 //     the descriptors must give each altset's playback path (ParsePlayback):
 //     a topology that does not resolve is refused, never taken for clean.
 //   - On the path, a selector unit passes samples as they are, and a feature
-//     unit is a gain stage when it declares a gain control (volume, bass,
-//     mid, treble, graphic equalizer, input gain, input gain pad). Every
-//     other unit (a mixer, processing, extension or effect unit, a sample
-//     rate converter) is unverifiable: no control shows what it does to the
-//     samples.
-//   - A gain stage maps to the controls the kernel made of it, by the
-//     kernel's table, never by a name: the driver synthesizes control names
-//     (from string descriptors, terminal types and quirk maps), so a name
-//     alone may not identify a unit. It must have a visible MIXER control,
-//     an integer or one that could not be read, for each control the driver
-//     makes of it, one for each gain control on its master channel and one
-//     for each on its logical channels; a stage with fewer is a gain the
-//     check cannot see, a missing control that never stands for unity.
+//     unit is a stage when it declares any control but mute and audio class
+//     2's read-only underflow and overflow (B748's decision): a level
+//     (volume, bass, mid, treble, graphic equalizer, delay, input gain, input
+//     gain pad) or a switch (automatic gain, bass boost, loudness, the phase
+//     inverter), each of which rewrites the DoP markers and the DSD bits; a
+//     mute alone makes none, since muted DoP is silence, not altered bits.
+//     Every other unit (a mixer, processing, extension or effect unit, a
+//     sample rate converter) is unverifiable: no control shows what it does
+//     to the samples.
+//   - A stage maps to the controls the kernel made of it, by the kernel's
+//     table, never by a name: the driver synthesizes control names (from
+//     string descriptors, terminal types and quirk maps), so a name alone
+//     may not identify a unit. An entry counts only in the block of the
+//     path's audio control interface (ctrlif), since entity IDs are unique
+//     within an audio function alone, and by the control selector it was
+//     made of; an entry for the stage's unit that does not say either is
+//     unverifiable. The stage must have a visible MIXER control for each
+//     control the driver makes of each declared control, one on the master
+//     channel and one on the logical channels together: an integer, or one
+//     that could not be read, for a level; a boolean, or one that could not
+//     be read, for a switch. A stage with fewer is one the check cannot see,
+//     a missing control that never stands for unity.
+//   - Each switch the table maps to a stage must read off on every channel;
+//     on, or not readable as off, it is dop_gain_unverifiable.
 //   - A level control is a MIXER-interface control that is an integer, or
 //     that could not be read, so its type is unknown (asked before any type
 //     filter), whose name does not mark it a capture control (captureNamed),
 //     whatever else its name says; and every control the table maps to a
-//     gain stage on the path, whatever its name. Every level control on the
-//     card counts, not only the path's.
+//     level of a stage on the path, whatever its name. Every level control
+//     on the card counts, not only the path's.
 //   - Each level control must be at unity: on a known DAC, one of its
 //     profile's analogVolumeControls (passed over), or one of its
 //     unityAtRawMax controls at exactly its rawMax on every channel, its
@@ -114,8 +139,8 @@ var controlInterfaces = map[string]uint32{"CARD": 0, "HWDEP": 1, "MIXER": 2, "PC
 //     scale, or a raw-maximum control whose range or firmware changed, is
 //     dop_gain_unverifiable.
 //
-// Switches and enumerations are not gains: a mute is silence, not
-// corruption, and an enumeration that selects a DSP mode is the profile
+// Elsewhere, switches and enumerations are not gains: a mute is silence,
+// not corruption, and an enumeration that selects a DSP mode is the profile
 // caveats' domain. profile is the matched profile, nil for an unknown DAC;
 // bcd the unit's firmware, "" when it did not read.
 func CheckGain(m Mixer, sels []alsa.Altset, profile *dacprofile.Profile, bcd string) Gain {
@@ -192,7 +217,9 @@ func (g *gainCheck) at(sels []alsa.Altset) Gain {
 	if v.unverifiable != "" {
 		return v.gain()
 	}
-	units := map[int]Unit{}
+	// stages are the feature units the paths make stages of, by the audio
+	// control interface of their function and their ID.
+	stages := map[[2]int]Unit{}
 	for _, a := range sels {
 		if a.Interface == nil || a.Altset == nil {
 			v.unknown("a playback altset's interface or alternate setting did not read")
@@ -204,57 +231,31 @@ func (g *gainCheck) at(sels []alsa.Altset) Gain {
 			continue
 		}
 		for _, u := range p.Units {
-			units[u.ID] = u
+			switch u.Kind {
+			case UnitSelector:
+			case UnitFeature:
+				if len(u.Controls) > 0 {
+					stages[[2]int{p.ControlInterface, u.ID}] = u
+				}
+			default:
+				v.unknown("unit %d of audio control interface %d on the playback path is a %s unit, which no control shows the effect of", u.ID, p.ControlInterface, u.Kind)
+			}
 		}
 	}
-	ids := make([]int, 0, len(units))
-	for id := range units {
-		ids = append(ids, id)
+	keys := make([][2]int, 0, len(stages))
+	for k := range stages {
+		keys = append(keys, k)
 	}
-	slices.Sort(ids)
+	slices.SortFunc(keys, func(a, b [2]int) int { return cmp.Or(cmp.Compare(a[0], b[0]), cmp.Compare(a[1], b[1])) })
 	controls := map[controlKey]alsactl.Control{}
 	for _, c := range g.m.Controls.Controls {
 		controls[keyOf(c)] = c
 	}
-	// mapped are the controls the kernel's table makes of a gain stage on
-	// the path: level controls whatever their names.
+	// mapped are the controls the kernel's table makes of a level of a stage
+	// on the path: level controls whatever their names.
 	mapped := map[controlKey]bool{}
-	for _, id := range ids {
-		u := units[id]
-		switch u.Kind {
-		case UnitSelector:
-			continue
-		case UnitFeature:
-		default:
-			v.unknown("unit %d on the playback path is a %s unit, which no control shows the effect of", u.ID, u.Kind)
-			continue
-		}
-		want := u.controls()
-		if want == 0 {
-			continue
-		}
-		if !g.m.UnitsRead {
-			v.unknown("the kernel's table of the controls it made of each unit did not read, so feature unit %d's controls cannot be found", u.ID)
-			continue
-		}
-		have := map[controlKey]bool{}
-		for _, uc := range g.m.Units {
-			if uc.Unit != u.ID || uc.Index < 0 {
-				continue
-			}
-			k := controlKey{iface: ifaceMixer, name: uc.Name, index: uint32(uc.Index)}
-			c, ok := controls[k]
-			if !ok || c.ReadError == "" && c.Type != typeInteger && c.Type != typeInteger64 {
-				continue
-			}
-			have[k] = true
-		}
-		if len(have) < want {
-			v.unknown("feature unit %d on the playback path has %d gain controls and the kernel shows %d visible level controls of it", u.ID, want, len(have))
-		}
-		for k := range have {
-			mapped[k] = true
-		}
+	for _, k := range keys {
+		g.stage(k[0], stages[k], controls, mapped, &v)
 	}
 	for _, c := range g.m.Controls.Controls {
 		if !level(c, mapped[keyOf(c)]) {
@@ -263,6 +264,97 @@ func (g *gainCheck) at(sels []alsa.Altset) Gain {
 		g.judge(c, &v)
 	}
 	return v.gain()
+}
+
+// stage maps feature unit u of the audio function whose control interface
+// is ctrlif to the controls the kernel's table says the driver made of it
+// (CheckGain's doc), and judges what it finds: each switch read off on every
+// channel, each level marked a level control whatever its name. Entries of
+// mute, underflow and overflow change nothing.
+func (g *gainCheck) stage(ctrlif int, u Unit, controls map[controlKey]alsactl.Control, mapped map[controlKey]bool, v *verdict) {
+	if !g.m.UnitsRead {
+		v.unknown("the kernel's table of the controls it made of each unit did not read, so feature unit %d's controls cannot be found", u.ID)
+		return
+	}
+	// found are the visible controls the table makes of the unit, by
+	// selector.
+	found := map[int][]alsactl.Control{}
+	for _, uc := range g.m.Units {
+		if uc.Unit != u.ID {
+			continue
+		}
+		switch {
+		case uc.ControlInterface == nil:
+			v.unknown("the kernel's table does not say which audio function lists unit %d's control %q", u.ID, uc.Name)
+			continue
+		case *uc.ControlInterface != ctrlif:
+			continue
+		case uc.Selector == 0:
+			v.unknown("the kernel's table does not say which control of feature unit %d %q is", u.ID, uc.Name)
+			continue
+		case uc.Index < 0:
+			continue
+		}
+		c, ok := controls[controlKey{iface: ifaceMixer, name: uc.Name, index: uint32(uc.Index)}]
+		if ok && !slices.ContainsFunc(found[uc.Selector], func(f alsactl.Control) bool { return keyOf(f) == keyOf(c) }) {
+			found[uc.Selector] = append(found[uc.Selector], c)
+		}
+	}
+	for _, fc := range u.Controls {
+		have := 0
+		for _, c := range found[fc.Selector] {
+			if fits(fc.Switch(), c) {
+				have++
+			}
+		}
+		if want := fc.controls(); have < want {
+			v.unknown("feature unit %d on the playback path declares control %d %d times, and the kernel shows %d visible controls of it", u.ID, fc.Selector, want, have)
+		}
+	}
+	selectors := make([]int, 0, len(found))
+	for s := range found {
+		selectors = append(selectors, s)
+	}
+	slices.Sort(selectors)
+	for _, s := range selectors {
+		if s == selMute || s == selUnderflow || s == selOverflow {
+			continue
+		}
+		for _, c := range found[s] {
+			if switchSelectors[s] {
+				switchOff(u.ID, c, v)
+			} else {
+				mapped[keyOf(c)] = true
+			}
+		}
+	}
+}
+
+// fits reports whether c can be the control the driver made of a switch (a
+// boolean) or of a level (an integer): either, when it could not be read.
+func fits(isSwitch bool, c alsactl.Control) bool {
+	switch {
+	case c.ReadError != "":
+		return true
+	case isSwitch:
+		return c.Type == typeBoolean
+	}
+	return c.Type == typeInteger || c.Type == typeInteger64
+}
+
+// switchOff adds to v what c, a stage's switch, does: on any channel, or not
+// readable as a boolean, it is a stage the check cannot see through.
+func switchOff(unit int, c alsactl.Control, v *verdict) {
+	if c.ReadError != "" || c.Type != typeBoolean || c.Count == 0 || c.Count > 128 || len(c.Values) != int(c.Count)*8 {
+		v.unknown("feature unit %d's switch %q, index %d, cannot be read as off", unit, c.Name, c.Index)
+		return
+	}
+	for ch := 0; ch < int(c.Count); ch++ {
+		if binary.LittleEndian.Uint64(c.Values[8*ch:]) != 0 {
+			v.unknown("feature unit %d's switch %q, index %d, is on on channel %d, and rewrites the samples", unit, c.Name, c.Index, ch+1)
+			return
+		}
+	}
 }
 
 // level reports whether c is a level control (CheckGain's doc): a MIXER

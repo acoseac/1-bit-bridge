@@ -45,7 +45,7 @@ func TestACaptureOnlyFeatureUnitIsNotOnThePlaybackPath(t *testing.T) {
 	}
 	m := Mixer{Descriptors: desc, Config: 1, ControlsRead: true, UnitsRead: true,
 		Controls: alsactl.Snapshot{Controls: []alsactl.Control{volume("Mic Capture Volume", 10), volume("PCM Capture Volume", 10)}},
-		Units:    []UnitControl{{Unit: 11, Name: "Mic Capture Volume"}, {Unit: 12, Name: "PCM Capture Volume"}}}
+		Units:    []UnitControl{entry(0, 11, selVolume, "Mic Capture Volume"), entry(0, 12, selVolume, "PCM Capture Volume")}}
 	wantGain(t, "capture units' controls off 0 dB", gainAt(m, nil), "")
 	// The capture interface is no playback interface.
 	if _, err := ParsePlayback(desc, Selection{Config: 1, Interface: 2, Altset: 1}); !errors.Is(err, errTopology) {
@@ -79,7 +79,7 @@ func TestEveryPlaybackPathIsFollowed(t *testing.T) {
 	if err != nil || len(other.Units) != 0 || !reflect.DeepEqual(other.Outputs, []int{24}) {
 		t.Errorf("the second interface's path: %+v, %v; want terminal 4 straight to output 24", other, err)
 	}
-	units := []UnitControl{{Unit: 10, Name: "Headphone Playback Volume"}, {Unit: 11, Name: "SPDIF Playback Volume"}, {Unit: 13, Name: "Speaker Playback Volume"}}
+	units := []UnitControl{entry(0, 10, selVolume, "Headphone Playback Volume"), entry(0, 11, selVolume, "SPDIF Playback Volume"), entry(0, 13, selVolume, "Speaker Playback Volume")}
 	at := func(spdifValue int64) Mixer {
 		return Mixer{Descriptors: desc, Config: 1, ControlsRead: true, UnitsRead: true, Units: units,
 			Controls: alsactl.Snapshot{Controls: []alsactl.Control{volume("Headphone Playback Volume", 255), volume("SPDIF Playback Volume", spdifValue), volume("Speaker Playback Volume", 255)}}}
@@ -92,29 +92,95 @@ func TestEveryPlaybackPathIsFollowed(t *testing.T) {
 }
 
 // TestTheParseReadsBothAudioClasses: an audio class 1 function (its header's
-// interface list, its one-byte feature unit controls) and an audio class 2
-// one (its interface association, its two-bit controls) give the gain
-// controls their feature units declare, on the master and on the channels.
+// interface list, its one- or two-byte feature unit controls) and an audio
+// class 2 one (its interface association, its two-bit controls) give the
+// controls their feature units declare that make them stages, on the master
+// and on the channels: every one but mute and audio class 2's read-only
+// underflow and overflow, the switches among them; and the audio control
+// interface the path is in.
 func TestTheParseReadsBothAudioClasses(t *testing.T) {
-	uac1 := usbDescriptors(1, ifc(0, 0, 1, 0, 0), uac1Header(1),
-		uac1IT(1, usbStreaming), uac1FU(2, 1, 0x03, 0x04, 0x04), uac1OT(3, speaker, 2),
-		ifc(1, 0, 2, 0, 0), ifc(1, 1, 2, 0, 1), uac1General(1), uac1EpOut())
-	p := parse(t, uac1)
-	want := []Unit{{ID: 2, Kind: UnitFeature, Gains: []GainControl{{Selector: 2, Master: true}, {Selector: 3, Channels: true}}}}
-	if p.Protocol != 1 || !reflect.DeepEqual(p.Units, want) {
+	uac1 := func(fu []byte) []byte {
+		return usbDescriptors(1, ifc(0, 0, 1, 0, 0), uac1Header(1), uac1IT(1, usbStreaming), fu, uac1OT(3, speaker, 2),
+			ifc(1, 0, 2, 0, 0), ifc(1, 1, 2, 0, 1), uac1General(1), uac1EpOut())
+	}
+	p := parse(t, uac1(uac1FU(2, 1, 0x03, 0x04, 0x04)))
+	want := []Unit{{ID: 2, Kind: UnitFeature, Controls: []FeatureControl{{Selector: 2, Master: true}, {Selector: 3, Channels: true}}}}
+	if p.Protocol != 1 || p.ControlInterface != 0 || !reflect.DeepEqual(p.Units, want) {
 		t.Errorf("audio class 1: %+v, want %+v", p, want)
 	}
-	uac2 := dac2(uac2IT(2, usbStreaming), uac2FU(10, 2, 0x0f, 0x3<<20, 0x1<<22), uac2OT(20, speaker, 10))
-	p = parse(t, uac2)
-	want = []Unit{{ID: 10, Kind: UnitFeature, Gains: []GainControl{{Selector: 2, Master: true}, {Selector: 11, Channels: true}, {Selector: 12, Channels: true}}}}
-	if p.Protocol != 2 || !reflect.DeepEqual(p.Units, want) {
+	// Automatic gain (0x40), delay (0x80), bass boost (0x100) and loudness
+	// (0x200) take two bytes a channel.
+	p = parse(t, uac1(uac1FU2(2, 1, 0x01|0x40|0x80|0x100|0x200, 0, 0)))
+	want = []Unit{{ID: 2, Kind: UnitFeature, Controls: []FeatureControl{{Selector: 7, Master: true}, {Selector: 8, Master: true}, {Selector: 9, Master: true}, {Selector: 10, Master: true}}}}
+	if !reflect.DeepEqual(p.Units, want) {
+		t.Errorf("audio class 1's switches and delay: %+v, want %+v", p.Units, want)
+	}
+	p = parse(t, dac2(uac2IT(2, usbStreaming), uac2FU(10, 2, 0x0f, 0x3<<20, 0x1<<22), uac2OT(20, speaker, 10)))
+	want = []Unit{{ID: 10, Kind: UnitFeature, Controls: []FeatureControl{{Selector: 2, Master: true}, {Selector: 11, Channels: true}, {Selector: 12, Channels: true}}}}
+	if p.Protocol != 2 || p.ControlInterface != 0 || !reflect.DeepEqual(p.Units, want) {
 		t.Errorf("audio class 2: %+v, want %+v", p, want)
 	}
-	// A feature unit with a mute alone declares no gain control.
-	p = parse(t, dac2(uac2IT(2, usbStreaming), uac2FU(10, 2, 0x03, 0x03, 0x03), uac2OT(20, speaker, 10)))
-	if len(p.Units) != 1 || len(p.Units[0].Gains) != 0 {
-		t.Errorf("a mute alone: %+v, want a feature unit with no gain control", p.Units)
+	// Automatic gain (bits 13-12), delay (15-14), bass boost (17-16),
+	// loudness (19-18) and the phase inverter (25-24), on the master and on
+	// a channel.
+	p = parse(t, dac2(uac2IT(2, usbStreaming), uac2FU(10, 2, 0x3<<12|0x3<<14|0x1<<16, 0x3<<18, 0x3<<24), uac2OT(20, speaker, 10)))
+	want = []Unit{{ID: 10, Kind: UnitFeature, Controls: []FeatureControl{{Selector: 7, Master: true}, {Selector: 8, Master: true}, {Selector: 9, Master: true}, {Selector: 10, Channels: true}, {Selector: 13, Channels: true}}}}
+	if !reflect.DeepEqual(p.Units, want) {
+		t.Errorf("audio class 2's switches and delay: %+v, want %+v", p.Units, want)
 	}
+	for _, c := range want[0].Controls {
+		if c.Switch() != (c.Selector != 8) {
+			t.Errorf("selector %d: a switch %v", c.Selector, c.Switch())
+		}
+	}
+	// A feature unit with a mute alone, and audio class 2's read-only
+	// underflow (bits 27-26) and overflow (29-28) beside it, declares no
+	// stage.
+	p = parse(t, dac2(uac2IT(2, usbStreaming), uac2FU(10, 2, 0x03|0x1<<26|0x1<<28, 0x03, 0x03), uac2OT(20, speaker, 10)))
+	if len(p.Units) != 1 || len(p.Units[0].Controls) != 0 {
+		t.Errorf("a mute alone: %+v, want a feature unit with no stage control", p.Units)
+	}
+}
+
+// twoFunctions is a unit with two audio class 2 functions, each a control
+// interface and a streaming interface, numbering their entities alike, so
+// each has a feature unit 10: the first's on its speaker's path (control
+// interface 0, streaming interface 1), the second's on its headphones'
+// (control interface 2, streaming interface 3).
+func twoFunctions() []byte {
+	fn := func(control byte, out uint16) [][]byte {
+		return [][]byte{iad(control, 2), ifc(control, 0, 1, 0x20, 0), uac2Header(), uac2Clock(0x29),
+			uac2IT(2, usbStreaming), uac2FU(10, 2, 0x0f, 0, 0), uac2OT(20, out, 10)}
+	}
+	descs := fn(0, speaker)
+	descs = append(descs, stream2(1, 2)...)
+	descs = append(descs, fn(2, headphones)...)
+	descs = append(descs, stream2(3, 2)...)
+	return usbDescriptors(1, descs...)
+}
+
+// TestAnotherAudioFunctionsControlsDoNotStandForThePaths: entity IDs are
+// unique within an audio function alone, so a stage is mapped through the
+// kernel's table by its function's block (ctrlif) and its unit's ID
+// together: another function's unit of the same ID, its control at 0 dB,
+// does not stand for the path's, whose control the table does not show, and
+// a table entry that does not say its function is unverifiable.
+func TestAnotherAudioFunctionsControlsDoNotStandForThePaths(t *testing.T) {
+	desc := twoFunctions()
+	for _, c := range []struct{ iface, control int }{{1, 0}, {3, 2}} {
+		p, err := ParsePlayback(desc, Selection{Config: 1, Interface: c.iface, Altset: 1})
+		if err != nil || p.ControlInterface != c.control || len(p.Units) != 1 || p.Units[0].ID != 10 {
+			t.Errorf("interface %d: %+v, %v; want feature unit 10 of control interface %d", c.iface, p, err, c.control)
+		}
+	}
+	mixer := func(units ...UnitControl) Mixer {
+		return Mixer{Descriptors: desc, Config: 1, ControlsRead: true, UnitsRead: true, Units: units,
+			Controls: alsactl.Snapshot{Controls: []alsactl.Control{volume("Headphone Playback Volume", 255), volume("PCM Playback Volume", 255)}}}
+	}
+	wantGain(t, "the path's unit's control at 0 dB in its function's block", gainAt(mixer(entry(0, 10, selVolume, "PCM Playback Volume"), entry(2, 10, selVolume, "Headphone Playback Volume")), nil), "")
+	wantGain(t, "the other function's unit 10 alone in the table", gainAt(mixer(entry(2, 10, selVolume, "Headphone Playback Volume")), nil), ReasonGainUnverifiable)
+	unsaid := UnitControl{Unit: 10, Selector: selVolume, Name: "PCM Playback Volume"}
+	wantGain(t, "an entry that does not say its function", gainAt(mixer(unsaid), nil), ReasonGainUnverifiable)
 }
 
 // TestAnUnresolvedTopologyIsRefused: descriptors the parse cannot follow are

@@ -460,6 +460,28 @@ func TestTheConversionTargetIsTheDACsBest(t *testing.T) {
 			}
 		}
 	}
+	// An accepted probe's refined significant bits constrain the target, as
+	// they do the DoP carrier: fewer than the altset's Bits line says, they
+	// decide; unknown (0), they say nothing.
+	for _, c := range []struct {
+		name   string
+		bits   *int
+		msbits int
+		want   Target
+	}{
+		{"an accepted 16 bits under the altset's 24", ptr(24), 16, Target{176400, 16}},
+		{"an accepted 24 bits with no Bits line", nil, 24, Target{176400, 24}},
+		{"an accepted 32 bits over the altset's 24", ptr(24), 32, Target{176400, 24}},
+		{"an accepted refine whose bits are unknown", ptr(24), 0, Target{176400, 24}},
+	} {
+		r := newRig(t).everything(dsdstate.ModeConvert)
+		r.altsets = []alsa.Altset{pcm("S32_LE", c.bits, 176400)}
+		r.probe = map[alsapcm.ProbeCandidate]alsapcm.ProbeResult{}
+		r.answer(format.S32LE, 176400, alsapcm.ProbeAccepted, c.msbits)
+		if s := Effective(r.inputs()); s.Conversion == nil || *s.Conversion != c.want {
+			t.Errorf("%s: target %v, want %v", c.name, s.Conversion, c.want)
+		}
+	}
 }
 
 // TestATupleCarriesItsTiming: a tuple pauses with the kernel's PAUSE where

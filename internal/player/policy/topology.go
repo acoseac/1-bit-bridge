@@ -32,32 +32,37 @@ const (
 type Unit struct {
 	ID   int
 	Kind UnitKind
-	// Gains are a feature unit's gain controls, by the class's control
-	// selector, each where its descriptor declares it.
-	Gains []GainControl
+	// Controls are a feature unit's controls that make it a stage, by the
+	// class's control selector, each where its descriptor declares it: every
+	// control it declares but mute, and audio class 2's read-only underflow
+	// and overflow (B748's decision).
+	Controls []FeatureControl
 }
 
-// GainControl is a gain control a feature unit declares: its selector
-// (volume 2, bass 3, mid 4, treble 5, graphic equalizer 6, and in audio
-// class 2 input gain 11 and input gain pad 12), on the master channel, and
-// on any of the logical channels.
-type GainControl struct {
+// FeatureControl is a control a feature unit declares: its selector, on the
+// master channel, and on any of the logical channels. Volume (2), bass (3),
+// mid (4), treble (5), graphic equalizer (6), delay (8) and, in audio class
+// 2, input gain (11) and input gain pad (12) are levels; automatic gain (7),
+// bass boost (9), loudness (10) and audio class 2's phase inverter (13) are
+// switches (Switch), each of which rewrites the samples while it is on.
+type FeatureControl struct {
 	Selector         int
 	Master, Channels bool
 }
 
-// controls is how many controls the USB audio driver makes of u's gain
-// controls: one for each on the master channel, and one for each on the
-// logical channels together.
-func (u Unit) controls() int {
+// Switch reports whether c is a switch, of which the USB audio driver makes a
+// boolean control.
+func (c FeatureControl) Switch() bool { return switchSelectors[c.Selector] }
+
+// controls is how many controls the USB audio driver makes of c: one on the
+// master channel, and one on the logical channels together.
+func (c FeatureControl) controls() int {
 	n := 0
-	for _, g := range u.Gains {
-		if g.Master {
-			n++
-		}
-		if g.Channels {
-			n++
-		}
+	if c.Master {
+		n++
+	}
+	if c.Channels {
+		n++
 	}
 	return n
 }
@@ -65,6 +70,11 @@ func (u Unit) controls() int {
 // Path is a playback streaming interface's path through its audio function
 // (the design's section 3.4), as the unit's descriptors give it.
 type Path struct {
+	// ControlInterface is the function's audio control interface (its
+	// bInterfaceNumber): entity IDs are unique within a function alone, and
+	// the kernel's mixer table lists each function's units under its own
+	// block (ctrlif=<it>).
+	ControlInterface int
 	// Protocol is the audio class version, 1 or 2.
 	Protocol int
 	// Terminal is the input terminal the streaming interface links to.
@@ -111,11 +121,28 @@ const (
 	uac2RateConvertr = 0x0d
 )
 
-// The gain controls' selectors, and the feature unit controls each class
-// declares.
+// The feature unit's control selectors the check names (USB Audio 1.0 and
+// 2.0, their appendices A): mute, which makes no stage (muted DoP is
+// silence, not altered bits); the switches; and audio class 2's read-only
+// underflow and overflow, which make no stage either.
+const (
+	selMute          = 0x01
+	selAutomaticGain = 0x07
+	selBassBoost     = 0x09
+	selLoudness      = 0x0a
+	selPhaseInverter = 0x0d
+	selUnderflow     = 0x0e
+	selOverflow      = 0x0f
+)
+
+var switchSelectors = map[int]bool{selAutomaticGain: true, selBassBoost: true, selLoudness: true, selPhaseInverter: true}
+
+// The selectors of the controls that make a feature unit a stage, by class:
+// every one the class defines but mute and audio class 2's underflow and
+// overflow.
 var (
-	uac1Gains = []int{2, 3, 4, 5, 6}
-	uac2Gains = []int{2, 3, 4, 5, 6, 11, 12}
+	uac1Stage = []int{2, 3, 4, 5, 6, 7, 8, 9, 10}
+	uac2Stage = []int{2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}
 )
 
 // errTopology prefixes every refusal of the parse: a topology that does not
@@ -172,7 +199,12 @@ func ParsePlayback(desc []byte, sel Selection) (Path, error) {
 	if err != nil {
 		return Path{}, err
 	}
-	return follow(ents, link, protocol)
+	p, err := follow(ents, link, protocol)
+	if err != nil {
+		return Path{}, err
+	}
+	p.ControlInterface = ac.number
+	return p, nil
 }
 
 // alt is one alternate setting of an interface in the configuration: its
@@ -540,31 +572,32 @@ func follow(ents map[int]entity, link, protocol int) (Path, error) {
 		}
 		u := Unit{ID: id, Kind: e.kind}
 		if e.kind == UnitFeature {
-			gains, err := featureGains(e.desc, protocol)
+			controls, err := featureControls(e.desc, protocol)
 			if err != nil {
 				return Path{}, err
 			}
-			u.Gains = gains
+			u.Controls = controls
 		}
 		p.Units = append(p.Units, u)
 	}
 	return p, nil
 }
 
-// featureGains are the gain controls a feature unit's descriptor declares:
-// in audio class 1, bControlSize bytes a channel (the master first), one bit
-// a control; in audio class 2, four bytes a channel, two bits a control,
-// either set declaring it. The bytes after the last channel's are iFeature.
-func featureGains(d []byte, protocol int) ([]GainControl, error) {
+// featureControls are the controls a feature unit's descriptor declares
+// that make it a stage (Unit.Controls): in audio class 1, bControlSize bytes
+// a channel (the master first), one bit a control; in audio class 2, four
+// bytes a channel, two bits a control, either set declaring it. The bytes
+// after the last channel's are iFeature.
+func featureControls(d []byte, protocol int) ([]FeatureControl, error) {
 	id := int(d[3])
 	var body []byte
 	size := 4
-	selectors := uac2Gains
+	selectors := uac2Stage
 	if protocol == 1 {
 		if len(d) < 7 || d[5] == 0 {
 			return nil, unresolved("feature unit %d's control size is cut short or zero", id)
 		}
-		size, body, selectors = int(d[5]), d[6:len(d)-1], uac1Gains
+		size, body, selectors = int(d[5]), d[6:len(d)-1], uac1Stage
 	} else {
 		if len(d) < 10 {
 			return nil, unresolved("feature unit %d is cut short", id)
@@ -586,15 +619,15 @@ func featureGains(d []byte, protocol int) ([]GainControl, error) {
 		}
 		return (m>>(2*(selector-1)))&3 != 0
 	}
-	var gains []GainControl
+	var controls []FeatureControl
 	for _, s := range selectors {
-		g := GainControl{Selector: s, Master: declares(0, s)}
+		c := FeatureControl{Selector: s, Master: declares(0, s)}
 		for ch := 1; ch < len(body)/size; ch++ {
-			g.Channels = g.Channels || declares(ch, s)
+			c.Channels = c.Channels || declares(ch, s)
 		}
-		if g.Master || g.Channels {
-			gains = append(gains, g)
+		if c.Master || c.Channels {
+			controls = append(controls, c)
 		}
 	}
-	return gains, nil
+	return controls, nil
 }
