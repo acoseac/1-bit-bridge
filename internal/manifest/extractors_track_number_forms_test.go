@@ -27,8 +27,9 @@ func TestLeadingTagNumberReadsTheFormsTaggersWrite(t *testing.T) {
 		in   string
 		want int
 	}{
-		// The forms: after trimming, the number alone, "/" and what follows
-		// it, or whitespace, "of" and what follows that.
+		// The forms: after trimming, the number alone; "/", whitespace before
+		// it or none, and what follows it; or whitespace, "of" in any case,
+		// and what follows that.
 		{"1/2", 1},
 		{"01/12", 1},
 		{"3/", 3},
@@ -42,15 +43,21 @@ func TestLeadingTagNumberReadsTheFormsTaggersWrite(t *testing.T) {
 		{"3 of", 3},
 		{"3\tof 10", 3},
 		{" -3 ", -3},
+		{"3 / 12", 3}, // as dhowden's ID3 reader reads it
+		{"3 /12", 3},
+		{"3\t/\t12", 3},
+		{"3 /", 3},
+		{"3 OF 10", 3},
+		{"3 Of 10", 3},
 		// Any other tail reads 0, and so does a value with no number.
 		{"A1", 0},
 		{"1.2", 0},
 		{"2-1", 0},
 		{"3-A", 0},
 		{"2024-01-01", 0},
-		{"3 / 12", 0}, // dhowden's ID3 reader reads 3; numberAsWritten keeps that
+		{"3 - 12", 0},
 		{"3of10", 0},
-		{"3 OF 10", 0},
+		{"3OF10", 0},
 		{"3 10", 0},
 		{"/5", 0},
 		{"+", 0},
@@ -91,6 +98,7 @@ func TestLeadingTagNumberPastAnInt32(t *testing.T) {
 		{"4294967296", 4294967296, math.MaxInt32},
 		{"4294967296/2", 4294967296, 0},
 		{"99999999999999999999/2", 0, 0},
+		{"99999999999999999999 / 2", 0, 0},
 		{" 99999999999999999999 ", 0, 0},
 		{"99999999999999999999 of 2", 0, 0},
 	} {
@@ -139,7 +147,9 @@ func TestScanner_AFLACNumberedWithItsTotalIndexesItsTrackAndDisc(t *testing.T) {
 // each reads a number with its total, a number "of" its total and a padded
 // number. What extraction tells apart stays apart: a value that is present but
 // empty, or holds no number the rule reads, is a present 0, and no TRACKNUMBER
-// or DISCNUMBER at all is absent. The files' names hold no number.
+// or DISCNUMBER at all is absent, comments named as an ID3v2.2 tag names its
+// frames (TRK, TPA) included, since dhowden's Vorbis accessors read neither.
+// The files' names hold no number.
 func TestEveryVorbisReaderReadsTheNumberATaggerWrote(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -153,11 +163,13 @@ func TestEveryVorbisReaderReadsTheNumberATaggerWrote(t *testing.T) {
 		{"a plain number", []string{"TRACKNUMBER=03", "DISCNUMBER=2"}, numberPtr(3), numberPtr(2)},
 		{"a present empty value", []string{"TRACKNUMBER=", "DISCNUMBER="}, numberPtr(0), numberPtr(0)},
 		{"a value holding no number the rule reads", []string{"TRACKNUMBER=A1", "DISCNUMBER=1.2"}, numberPtr(0), numberPtr(0)},
-		{"a number with a space before its total", []string{"TRACKNUMBER=3 / 12", "DISCNUMBER=2 / 2"}, numberPtr(0), numberPtr(0)},
+		{"a number with a space before its total", []string{"TRACKNUMBER=3 / 12", "DISCNUMBER=2 / 2"}, numberPtr(3), numberPtr(2)},
+		{"a number OF its total, in capitals", []string{"TRACKNUMBER=3 OF 12", "DISCNUMBER=2 Of 2"}, numberPtr(3), numberPtr(2)},
 		// dhowden's strconv.Atoi saturates this one, meeting the overflow
 		// before the "/"; the rule reads an overflowing number as 0.
 		{"an overflowing number with its total", []string{"TRACKNUMBER=99999999999999999999/2", "DISCNUMBER=99999999999999999999 of 2"}, numberPtr(0), numberPtr(0)},
 		{"no number", nil, nil, nil},
+		{"an ID3v2.2 tag's frame names alone", []string{"TRK=3/12", "TPA=2/2"}, nil, nil},
 	} {
 		for _, f := range vorbisCommentFormats {
 			t.Run(f.name+"/"+tc.name, func(t *testing.T) {
@@ -189,8 +201,8 @@ func id3v2NumberTag(version byte, frames ...[2]string) []byte {
 // splits the frame on "/" and reads each side with strconv.Atoi, the side
 // trimmed when there are two, so "3/12" and "3 / 12" read 3 there and " 3 "
 // and "3 of 12" read 0. A 0 is read again by the rule a Vorbis comment is read
-// by; any other answer stands, "3 / 12" included, which the rule alone would
-// read as 0.
+// by; any other answer stands. The rule reads each such answer alike but an
+// overflow dhowden saturates, which stands as dhowden gave it.
 func TestAnID3TagsNumberIsDhowdensReadingUnlessThatIsZero(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
@@ -198,6 +210,7 @@ func TestAnID3TagsNumberIsDhowdensReadingUnlessThatIsZero(t *testing.T) {
 		wantT, wantD *int
 	}{
 		{"a number of its total", "3 of 12", "2 of 2", numberPtr(3), numberPtr(2)},
+		{"a number OF its total, in capitals", "3 OF 12", "2 Of 2", numberPtr(3), numberPtr(2)},
 		{"a padded number", " 3 ", " 2 ", numberPtr(3), numberPtr(2)},
 		{"a number with its total and two slashes", "3/12/2", "2/2/1", numberPtr(3), numberPtr(2)},
 		{"a number with its total", "3/12", "2/2", numberPtr(3), numberPtr(2)},

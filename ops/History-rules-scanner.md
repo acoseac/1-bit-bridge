@@ -2043,18 +2043,21 @@
   `TestScanner_V22_AnUnparseableDateJoinsTheDelta_AReadableOneOnlyStamps`).
 
 - **A track or disc number is the leading number of the value the tag
-  writes, followed by nothing, by "/" and what follows, or by whitespace,
-  "of" and what follows; an ID3v2 frame keeps dhowden's answer unless it is
-  0; and the presence gates ask for ID3v2.2's TRK and TPA and ID3v1.1's
+  writes, followed by nothing, by "/" (whitespace before it or none) and
+  what follows, or by whitespace, "of" in any case and what follows; an
+  ID3v2 frame keeps dhowden's answer unless it is 0; and the presence gates
+  ask for ID3v2.2's TRK and TPA in an ID3v2.2 tag alone, and for ID3v1.1's
   track byte** (ExtractorVersion 31, 2026-11-06, backlog B743). dhowden's
   Vorbis reader (FLAC, Ogg Vorbis, Opus, Ogg FLAC) answers `strconv.Atoi`
   of the whole TRACKNUMBER or DISCNUMBER and drops the error, so `1/2`,
   `3 of 12` and ` 3 ` indexed as 0 and the album played out of order (the
   0.2.3 Docker upgrade test, on 0.2.2 and the candidate alike).
   `numberAsWritten` reads a Vorbis value by `leadingTagNumber`: trimmed, an
-  optional sign and digits, then no tail, "/" and anything, or whitespace,
-  "of" and anything. Any other tail (`A1`, `1.2`, `2-1`, `3-A`,
-  `2024-01-01`, `3 / 12`, `3of10`, `3 OF 10`) reads 0, a present 0. A value
+  optional sign and digits, then no tail, "/" (after whitespace or not) and
+  anything, or whitespace, "of" in any case and anything (`3 / 12`,
+  `3 OF 10` read 3, as dhowden's ID3 reader reads the first). Any other
+  tail (`A1`, `1.2`, `2-1`, `3-A`, `2024-01-01`, `3 - 12`, `3of10`) reads
+  0, a present 0. A value
   `strconv.Atoi` reads whole keeps its answer, sign and saturation included;
   a leading number that overflows in any other form reads 0. dhowden
   saturated some of those (`ParseUint` meets the overflow before the "/":
@@ -2063,14 +2066,19 @@
   to 0.
   **An ID3v2 frame keeps dhowden's answer unless it is 0**: its `parseXofN`
   splits on "/" and reads the side before it trimmed, so `3 / 12` is 3
-  there and would be 0 by the rule; only a 0 (` 3 `, `3 of 12`, `3/12/2`)
-  is read again, and a saturated overflow stands. **A re-read uses the key
+  there as by the rule; only a 0 (` 3 `, `3 of 12`, `3/12/2`) is read
+  again, and a saturated overflow, the one answer of dhowden's the rule
+  would not give, stands. **A re-read uses the key
   the accessor read, as that format's map spells it** (`tagNumberKeys`:
   `tracknumber`/`discnumber`, which dhowden lowercases; `TRK`/`TPA` in
   ID3v2.2; `TRCK`/`TPOS` in 2.3 and 2.4), never `stringOf`'s normalised
   lookup, which would answer a Vorbis comment named `TRCK`. **The gates**:
   ID3v2.2's `TRK` and `TPA` were not among their aliases, so such a file
-  indexed with neither number; ID3v1.1's track byte is the raw map's
+  indexed with neither number; they are asked for in an ID3v2.2 tag alone
+  (`id3v22HasFrame`, by the exact key), since as aliases of every format
+  they made a FLAC holding `TRK=3/12` and `TPA=2/2` and no TRACKNUMBER or
+  DISCNUMBER store two 0s where it had stored none (Codex, the branch's
+  round 2); ID3v1.1's track byte is the raw map's
   `track`, an int, and counts only above 0, since ID3v1.0's comment runs
   on there and dhowden writes 0 for none. What extraction tells apart
   stays apart: a present empty or invalid value is `Some(0)`, an absent one
@@ -2081,8 +2089,9 @@
   are not scanner extensions; the UPnP ingest reads
   `upnp:originalTrackNumber` with its own `atoiTrackNumber`, which takes
   "N/M" already. **Don't re-read a raw value under any key but the one the
-  accessor read, replace an ID3v2 answer that is not 0, or count an ID3v1
-  track of 0 as present.** Measured: against main's extractor 34 subtests
+  accessor read, replace an ID3v2 answer that is not 0, count an ID3v1
+  track of 0 as present, or ask for TRK and TPA outside an ID3v2.2 tag.**
+  Measured: against main's extractor 34 subtests
   of the new extraction tests were red, and three tests whole
   (`TestScanner_AFLACNumberedWithItsTotalIndexesItsTrackAndDisc`,
   `TestEveryVorbisReaderReadsTheNumberATaggerWrote`,
@@ -2093,7 +2102,9 @@
   an int's size, `TestLeadingTagNumberPastAnInt32` (run as linux/386 too);
   the upgrade, from rows seeded at the literal version 30, is
   `TestScanner_V31_ANumberReadAnewJoinsTheDelta_AnUnchangedOneOnlyStamps`;
-  `TestATagWithNoRawMapKeepsItsAccessorsAnswers` pins the fallback.
+  `TestATagWithNoRawMapKeepsItsAccessorsAnswers` pins the fallback. Round
+  2's rows (`3 / 12` and `3 OF 10` reading 3, Vorbis comments named `TRK`
+  and `TPA` staying absent) are in the table and the Vorbis and ID3 tests.
 
 - **Explicit content reaches the wire as `explicit`**
   (ExtractorVersion 23). Any signal wins. An MP4 `rtng` of 1 or 4, which

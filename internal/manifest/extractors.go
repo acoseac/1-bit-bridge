@@ -617,13 +617,14 @@ var Ext = map[string]bool{
 // order, and its ID3v2 reader read " 3 " and "3 of 12" as 0. numberAsWritten
 // reads them by leadingTagNumber, and the presence gates now ask for an
 // ID3v2.2 tag's TRK and TPA and an ID3v1.1 tag's track byte, which dhowden
-// reads and the gates left absent. Only a row whose track or disc number
-// changes takes the full-upsert leg (its enrichment re-queued once) and is the
-// iOS delta; one whose track number moves is held to the scan's tail first
-// (#1128's hold), and a number the file's name gave it gives way to the tag's,
-// since the track-number pass fills only a missing one. Every other row
-// re-extracts byte-identical and rides the version-stamp leg; SACD ISO virtual
-// rows re-expand as on every bump. ProtocolVersion stays 1.
+// reads and the gates left absent, each in a tag of that format alone. Only a
+// row whose track or disc number changes takes the full-upsert leg (its
+// enrichment re-queued once) and is the iOS delta; one whose track number
+// moves is held to the scan's tail first (#1128's hold), and a number the
+// file's name gave it gives way to the tag's, since the track-number pass
+// fills only a missing one. Every other row re-extracts byte-identical and
+// rides the version-stamp leg; SACD ISO virtual rows re-expand as on every
+// bump. ProtocolVersion stays 1.
 const ExtractorVersion = 31
 
 // Extract reads as much metadata as it can from the file at absPath and
@@ -1276,13 +1277,16 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 		// " 3 " were 0, and its ID3v2 reader made 0 of " 3 " and
 		// "3 of 12". The gates ask for an ID3v2.2 tag's TRK and TPA and
 		// an ID3v1.1 tag's track byte too, which dhowden reads and the
-		// gates left absent.
-		if hasAnyRawKey(raw, "trck", "trk", "tracknumber", "trkn") || id3v1HasTrack(m.Format(), raw) {
+		// gates left absent, each in a tag of its own format alone: as
+		// aliases of every format, TRK and TPA made a Vorbis comment of
+		// that name a present 0, a number nothing reads.
+		if hasAnyRawKey(raw, "trck", "tracknumber", "trkn") ||
+			id3v22HasFrame(m.Format(), raw, trackNumberKeys) || id3v1HasTrack(m.Format(), raw) {
 			tn, _ := m.Track()
 			tn = numberAsWritten(m.Format(), raw, tn, trackNumberKeys)
 			t.TrackNumber = &tn
 		}
-		if hasAnyRawKey(raw, "tpos", "tpa", "discnumber", "disk") {
+		if hasAnyRawKey(raw, "tpos", "discnumber", "disk") || id3v22HasFrame(m.Format(), raw, discNumberKeys) {
 			d, _ := m.Disc()
 			d = numberAsWritten(m.Format(), raw, d, discNumberKeys)
 			t.DiscNumber = &d
@@ -2317,8 +2321,8 @@ var (
 // again by leadingTagNumber. dhowden reads the side before a "/", trimmed, when
 // the frame holds one "/", and the whole value as it stands otherwise, so
 // "3/12" and "3 / 12" read 3 there and " 3 ", "3 of 12" and "3/12/2" read 0.
-// The rule alone would read "3 / 12" as 0, so an answer that is not 0 stands,
-// an overflow dhowden saturates included.
+// An answer that is not 0 stands: the rule reads each alike but an overflow
+// dhowden saturates, which stands as dhowden gave it.
 //
 // Any other format's is the accessor's: MP4's trkn and disk atoms and ID3v1's
 // track byte are binary, which no form reaches.
@@ -2345,12 +2349,13 @@ func numberAsWritten(f tag.Format, raw map[string]any, read int, keys tagNumberK
 
 // leadingTagNumber reads a track or disc number as taggers write it: the
 // leading number of the value, trimmed, with an optional sign, followed by
-// nothing, by "/" and whatever follows it ("3/12", "3/"), or by whitespace,
-// "of" and whatever follows that ("3 of 12"). Any other tail reads 0: a vinyl
-// side ("A1"), "1.2", "2-1", a date. A value that is a whole number as it
-// stands keeps strconv.Atoi's answer, which is dhowden's, saturated where it
-// overflows an int; a leading number that overflows in any other form reads 0,
-// as a value that holds no number does. A 0 is a present value naming no
+// nothing; by "/", with whitespace before it or none, and whatever follows it
+// ("3/12", "3 / 12", "3/"); or by whitespace, "of" in any case and whatever
+// follows that ("3 of 12", "3 OF 12"). Any other tail reads 0: a vinyl side
+// ("A1"), "1.2", "2-1", a date. A value that is a whole number as it stands
+// keeps strconv.Atoi's answer, which is dhowden's, saturated where it
+// overflows an int; a leading number that overflows in any other form reads
+// 0, as a value that holds no number does. A 0 is a present value naming no
 // number, which the extractor stores as Some(0), as before (backlog B743).
 func leadingTagNumber(s string) int {
 	if isWholeInteger(s) {
@@ -2394,14 +2399,26 @@ func isWholeInteger(s string) bool {
 }
 
 // acceptedNumberTail reports whether tail, what follows a track or disc
-// number, is one leadingTagNumber reads the number before: nothing, "/" and
-// what follows it, or whitespace, "of" and what follows that.
+// number, is one leadingTagNumber reads the number before: nothing; "/",
+// whitespace before it or none, and what follows it; or whitespace, "of" in
+// any case, and what follows that. "of" needs the whitespace ("3of12" reads 0),
+// and a 2-byte prefix that folds to "of" can only be those two ASCII letters.
 func acceptedNumberTail(tail string) bool {
-	if tail == "" || tail[0] == '/' {
+	rest := strings.TrimLeftFunc(tail, unicode.IsSpace)
+	if rest == "" || rest[0] == '/' {
 		return true
 	}
-	rest := strings.TrimLeftFunc(tail, unicode.IsSpace)
-	return len(rest) < len(tail) && strings.HasPrefix(rest, "of")
+	return len(rest) < len(tail) && len(rest) >= 2 && strings.EqualFold(rest[:2], "of")
+}
+
+// id3v22HasFrame reports whether an ID3v2.2 tag holds the frame keys name for
+// it (TRK or TPA), which dhowden keys by those three letters. A tag of any
+// other format answers no: a Vorbis comment or an MP4 freeform of that name is
+// nothing dhowden's accessors read, and counted present it was stored as a 0
+// (backlog B743, round 2).
+func id3v22HasFrame(f tag.Format, raw map[string]any, keys tagNumberKeys) bool {
+	_, ok := raw[keys.id3v22]
+	return f == tag.ID3v2_2 && ok
 }
 
 // id3v1HasTrack reports whether an ID3v1 tag holds a track number: ID3v1.1's
