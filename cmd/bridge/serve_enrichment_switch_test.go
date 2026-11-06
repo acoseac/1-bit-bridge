@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -340,17 +341,18 @@ func serveSwitchMirror(t *testing.T) *switchCounter {
 // tagged tracks, with its MusicBrainz and Cover Art Archive bases at a
 // counting mirror and Deezer's at another (serveOpts.deezerBase). With
 // enrich.enabled false in the file, or BRIDGE_ENRICH_ENABLED=false, neither
-// sees a request through turns of the enricher after the scan; with
-// enrich.deezerEnabled false the enricher asks the mirror and Deezer sees
-// nothing; and with both on, both are asked, so the seams reach the clients
-// (backlog B617).
+// sees a request through turns of the enricher after the scan, the manifest a
+// paired device reads carries no enrichmentProgress, and the portrait of an
+// artist whose track waits for the enricher is 404 no_image where it would be
+// 202 pending (a row seeded before the boot, whose file is gone and which the
+// boot's scan counts missing once); with enrich.deezerEnabled false the
+// enricher asks the mirror and Deezer sees nothing; and with both on, both are
+// asked and the manifest carries the block, so the seams reach the clients
+// and serve hands the switch to the manifest and the artwork routes (backlog
+// B617).
 func TestServeWiresTheEnrichmentGate(t *testing.T) {
 	persistentMedium(t)
-	fill := func(lib string) {
-		for _, name := range []string{"01 One.flac", "02 Two.flac"} {
-			writeHiResFLACFixture(t, filepath.Join(lib, "Artist", "Album", name))
-		}
-	}
+	const waiting = "66666666-6666-4666-8666-666666666666"
 	type leg struct {
 		name      string
 		enrich    string
@@ -366,6 +368,14 @@ func TestServeWiresTheEnrichmentGate(t *testing.T) {
 		t.Run(l.name, func(t *testing.T) {
 			for k, v := range l.env {
 				t.Setenv(k, v)
+			}
+			fill := func(lib string) {
+				for _, name := range []string{"01 One.flac", "02 Two.flac"} {
+					writeHiResFLACFixture(t, filepath.Join(lib, "Artist", "Album", name))
+				}
+				if l.mirrorOff {
+					seedAWaitingArtist(t, filepath.Join(filepath.Dir(lib), "data"), waiting)
+				}
 			}
 			mirror := serveSwitchMirror(t)
 			deezer := newSwitchCounter(t, func(w http.ResponseWriter, _ *http.Request) {
@@ -384,6 +394,15 @@ func TestServeWiresTheEnrichmentGate(t *testing.T) {
 				from := asked.Load()
 				eventually(t, func() bool { return asked.Load() >= from+n }, fmt.Sprintf("%d more turns of the enricher", n))
 			}
+			mint := pairViaAdmin(t, t.Context(), b.console, b.adminBase+"/api/tokens",
+				`{"name":"enrichment switch"}`, http.StatusCreated, b.stderr)
+			token := linkQueryItems(t, mint.PairURL)["token"]
+			if token == "" {
+				t.Fatalf("the console's pairing link carries no token: %s", mint.PairURL)
+			}
+			var m map[string]json.RawMessage
+			getJSON(t, b.phone, b.apiBase+"/v1/manifest", token, &m)
+			_, progress := m["enrichmentProgress"]
 			switch {
 			case l.mirrorOff:
 				turns(5)
@@ -393,19 +412,55 @@ func TestServeWiresTheEnrichmentGate(t *testing.T) {
 				if got := deezer.requests(); len(got) != 0 {
 					t.Errorf("Deezer was asked with enrichment off:\n%s", strings.Join(got, "\n"))
 				}
+				if progress {
+					t.Errorf("the manifest carries enrichmentProgress with enrichment off: %s", m["enrichmentProgress"])
+				}
+				status, body := getBytesWithToken(t, b, "/v1/artist-image/"+waiting, token)
+				if status != http.StatusNotFound || !strings.Contains(string(body), `"no_image"`) {
+					t.Errorf("the waiting artist's portrait answered %d %s with enrichment off, want 404 no_image", status, body)
+				}
 			case l.enrich != "":
 				eventually(t, func() bool { return mirror.asked("GET /ws/2/artist") > 0 }, "the enricher to ask the mirror for the artist")
 				turns(5)
 				if got := deezer.requests(); len(got) != 0 {
 					t.Errorf("Deezer was asked with enrich.deezerEnabled false:\n%s", strings.Join(got, "\n"))
 				}
+				if !progress {
+					t.Error("the manifest carries no enrichmentProgress with enrichment on")
+				}
 			default:
 				eventually(t, func() bool { return deezer.count() > 0 }, "Deezer to be asked for the artist's portrait")
 				if mirror.count() == 0 {
 					t.Error("the mirror was asked nothing with enrichment on")
 				}
+				if !progress {
+					t.Error("the manifest carries no enrichmentProgress with enrichment on")
+				}
 			}
 		})
+	}
+}
+
+// seedAWaitingArtist puts in the store of dataDir, before serve opens it, a
+// track whose artist MBID is artist and which waits for the enricher: its file
+// is not in the library, and the boot's scan counts it missing once, below
+// the default three that delete a row.
+func seedAWaitingArtist(t *testing.T, dataDir, artist string) {
+	t.Helper()
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := manifest.OpenStore(manifest.DefaultDBPath(dataDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := &manifest.Track{Path: "Gone/Album/01.flac", Size: 1, ModTime: time.Unix(1, 0),
+		Artist: "Gone", Album: "Album", ArtistMBID: artist}
+	if err := store.UpsertTrack(context.Background(), row); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
