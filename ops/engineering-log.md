@@ -79157,3 +79157,23 @@ green included.
 A slip, said here: one `go test ./internal/manifest/ ./internal/dupes/` ran
 outside the shared build lock, which the brief asks of every multi-package
 run; it passed, and every gate below ran through the lock.
+
+### Gates
+
+On legion0 at 5e58c52a, in one call through the shared build lock
+(`.tmp/_b756b/gates3r.py`): `make vet` native and with `GOOS=windows`,
+`GOOS=darwin` and `GOOS=linux GOARCH=386`, each clean; go1.27.3's gofmt over
+the 19 Go files the branch changes, clean; `make docs-check`, ok, and again on
+a copy of the tree with the three rules patches applied in turn by a strict
+applier (`git apply --check` takes `rules-b756b-r3.patch` over the two files
+as rounds 1 and 2 leave them); the qualification check, "qualification
+version OK: 4880f8a4..HEAD"; `TestEveryCitedTestNameExists`, ok; `make
+test-fast`, 85 packages ok and none failed, in 461 s (TMPDIR under
+`.tmp/_b756b`; the ALSA, alsapcm, durable-writer and backup identity tests
+running here on Linux); and `make test TEST_PKGS="./internal/manifest/...
+./internal/dupes/... ./internal/api/..."` (race, the Makefile's tags and
+30-minute timeout), ok, in 1,413 s (internal/manifest 1,401 s, internal/api
+109 s, internal/dupes from the test cache, its code and tests unchanged
+since round 2's race run). `git status --ignored` showed nothing but `.tmp/`
+after. Not run here: macOS and Windows natively, CI's runners, `make
+build-all`, and the iOS app, whose repo is not on this host.
