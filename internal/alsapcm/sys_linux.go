@@ -30,6 +30,28 @@ func Open(ep Endpoint, cfg Config) (*Device, error) {
 	return open(linuxSys{}, time.Now, ep, cfg)
 }
 
+// Probe is the silent probe (B728's design, section 5) of the endpoint's
+// playback node: opened as Open opens it, non-blocking and exclusive;
+// PVERSION and INFO; cfg.Admit, the check after open; one HW_REFINE a
+// candidate, asking what an open asks; and the close. It sends no HW_PARAMS,
+// SW_PARAMS, PREPARE, HW_FREE or PAUSE, writes nothing and touches no
+// control, so nothing is committed. A busy node (another process holding
+// it) is answered at once, ReasonBusy, every candidate not probed, and
+// nothing waits for it. It reads the card's open substreams in
+// /proc/asound before its first refine and again before its close, and
+// keeps no refusal from a run beside another of them, whose shared USB
+// clock can refuse rates the DAC takes (ProbeReport.Shared). Like Open, it
+// refuses what GuardNodeOpens guards
+// before anything is opened. Nothing in serve calls it before B728's B7,
+// which calls it through the player's backend (playback.Backend.Probe), the
+// device slot held.
+func Probe(ep Endpoint, cfg ProbeConfig) (ProbeReport, error) {
+	if err := guarded(ep); err != nil {
+		return notAsked(ep, cfg), err
+	}
+	return probe(linuxSys{}, ep, cfg)
+}
+
 // Supported reports whether this build can open an endpoint at all.
 func Supported() bool { return true }
 
@@ -141,6 +163,12 @@ func pollMillis(d time.Duration) int {
 		return math.MaxInt32
 	}
 	return int(ms)
+}
+
+// openSubstreams reads the card's open substreams from the kernel's
+// /proc/asound (openSubstreamsIn).
+func (linuxSys) openSubstreams(card int) ([]string, error) {
+	return openSubstreamsIn(asoundRoot, card)
 }
 
 func (linuxSys) close(fd int) error {

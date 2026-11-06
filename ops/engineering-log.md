@@ -76878,6 +76878,736 @@ app.
 
 **B739, a last point (the orchestrator; Codex and the Claude API reviewer on round 2):** a listener bound to loopback, a name or a link-local address fell through to the walk's first LAN address, where nothing answers. Only a listener on every address takes the walk now; any other takes a dialable custom endpoint or the refusal that asks for one. `TestTheLANFallbackIsTheAddressTheListenerIsBoundTo`'s three rows were red first. Test-fast on the Mac whose real host name has this problem: 83 of 83 packages, no IA5 error, against about 202 failures on main.
 
+## 2026-11-05 — B728 B3: the player's DSD state and the migration's logic
+
+B728's B3 (`ops/plan-b728-dsd-capability-design.md`, sections 2.5 and 3.6, and
+B3's row in section 11), on top of B1 (the legacy reader) and B2 (the DAC
+profile database and its key). Worker b728-b3 on legion0 (Ubuntu 26.04,
+linux/amd64, go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`), branch
+`feat/b728-b3-player-dsd-state` from main 49d438fc, the orchestrator's brief
+with Codex's, the Claude API reviewer's and Argon's binding notes. Commits:
+the red test a47fedaf, the state, the migration and the backup f500838f, this
+record and the design's corrections, then the checks' results. The rule goes
+into `.claude/rules/player.md` through a checked patch
+(`rules-b728-b3.patch`); this worker cannot write `.claude/`. Nothing a user
+sees changes: serve and output play still decide DSD by `readPermission`,
+and B6 wires the migration.
+
+**The package.** `internal/player/dsdstate`: the state's schema and codec
+(`state.go`), its one writer (`store.go`), the migration's pure table
+(`migrate.go`), the read of the owner's record (`record.go`) and the restore
+(`restore.go`). Schema 1 is frozen by `TestTheStateIsSchemaOneAsWritten`'s
+bytes. A DAC is keyed by `dacprofile.Key`, B2's type, written as its four
+fields with `null` for an absent interface or product and compared by the
+canonical form; nothing else keys anything.
+
+**Schema 1's decisions** (binding note 3). `dopConfirmed` is `null` or
+`{bcdDevice, confirmedAt, setBy}`, the firmware it was given under, since
+section 1.2 lapses a confirmation on another. `setBy` is `app`, `console` or
+`migration`. Listener answers moved out of the evidence entries into a list of
+their own, one per transport, rate and bcdDevice, so one answer per tuple
+across formats is the list's key rather than a rule across entries; evidence
+holds observations alone, and an entry with none does not decode. A warning
+has an owner: `dac`, the key of the DAC the migration's part went to, for
+`migration_record_refused` (whose `reason` is the word) and
+`migration_record_missing`; none, the bridge's, for `migrated_off` and
+`state_unreadable`. No `migration_record_*` is the bridge's, so the question
+of what clears one has no case: a choice written for its DAC does.
+`ClearWarningsFor` is the clearing rule B9 will call: that DAC's warnings and
+`state_unreadable`; `migrated_off` stays while `defaultMode: off` applies; the
+migration's own choice clears nothing. `defaultMode` decodes as `auto` or
+`off` alone; a `firstUse` `bitRates` present and empty does not decode, since
+an empty list would read as every rate. `Decode` refuses anything a writer of
+schema 1 would not write, field by field (`TestTheStateRefusesWhatNoWriterWrites`:
+31 shapes).
+
+**`migratedFrom`** (the brief's first point). One digest cannot mark a
+migration that read no record, and one marker cannot say that the bridge's
+part is done while a DAC's part waits. The smallest shape that holds is one
+object: `{from: "keys", dsdMode, allowDoP, dsdQualification, waitingFor,
+recordSHA256}`, the keys as `bridge.yaml` held them at the migration's start
+(raw: `dsdMode` absent where unset, `allowDoP` absent where unset),
+`waitingFor` `bound_dac` or `record_model` while a DAC's part waits, and the
+record's digest once taken; `{from: "state_unreadable"}` in the fresh state
+that replaces a damaged one. Storing the keys keeps a DAC's part bound to what
+the migration took: an operator who removes the keys after Validate's warning
+(B6) loses no part still waiting, and a later edit of them is not read. The
+marker is written whenever the block sets any key, `dsdMode` unset included,
+so "nothing to migrate" never runs again over a later choice; a block that
+sets no key writes nothing, no file included (binding note 11). §2.5 and §3.6
+say so now.
+
+**A second DAC, later** (the brief's second point). A DAC's part goes to one
+DAC, the first the binding resolves to after the migration began: the
+record's rows where the legacy reader takes the record for it, else the
+fallback's. The design does not say that an identity mismatch uses the record
+up, and §3.6's "anything for a particular DAC waits for that DAC" says the
+opposite, so a mismatch gives the bound DAC the fallback's rows (the table's
+"a record the legacy reader refuses": `native` and `dop` keep the operator's
+explicit, never-converted mode with first use pending; `auto` the defaults),
+with `identity_mismatch` owned by it, and the record waits for its own model
+(`waitingFor: record_model`); when that model is bound it gets the record's
+rows. Once a part is done nothing reads the record again (`RecordToRead`),
+and a DAC bound afterwards takes `defaultMode`. A DAC that already has a
+choice of its own when its part comes (a state the app wrote before keys were
+set) is never migrated (`TestTheMigrationNeverOverwritesAChoice`).
+
+**The rows' readings.** Row 4 (`dop` with `allowDoP` and a record) confirms
+DoP only where the record approved a DoP rate, and row 6 (`auto`) the same
+with `allowDoP`: a confirmation with no DoP evidence would stop the app from
+asking for one on a DAC never qualified for DoP. Under `auto` every approved
+tuple is `clean`, DoP's too whatever `allowDoP` says, since what was heard is
+a fact; first use and the confirmation are what keep DoP out with `allowDoP`
+false (binding note 10). A `firstUse` entry is written only for a transport
+the record approved a rate of, so a native-only record under `auto` with
+`allowDoP` leaves DoP unacknowledged and unconfirmed (binding note 9). §3.6's
+rows say so now.
+
+**The reader's errors and the bump** (binding note 6). An `IdentityMatch`
+closure sees the identity alone: it can tell `identity_mismatch`, never
+`stale_version` from `hash_mismatch`, and a missing record from a missing
+report is a filesystem error either way. So the readers now mark the
+refusals they already made with an exported kind: `ErrRecordMissing` (the
+record's own file or the state directory absent), `ErrStaleVersion` (the
+record's version, an unknown record schema, and each piece of evidence's
+version: matrix and lifecycle reports, transition reports, DoP experiments,
+contacts), `ErrHashMismatch` (the body's digest and every evidence digest),
+`ErrIdentityMismatch` (the record's identity, or a unit whose identity is not
+whole); a report of another unit inside a record of this one, and every other
+refusal, have no kind (the record does not read: `unreadable`). Each wraps
+the refusal as it was (`refusal`, `Unwrap() []error`), so every message is
+unchanged and `errors.As` still finds a `*fs.PathError`, which playback's
+`approvalDetail` reads. A condition whose first clause was the version is
+split so the version is asked alone, first, then the rest in their order:
+the same answers in the same order. `internal/player/qualification/` is
+guarded, so qualificationVersion 37 -> 38 (B735 took 37 first), the
+runbook's five mentions and its Version 38 entry; `LegacyVersion` stays 35,
+and §8's table gains B3's row (B3's tier is player now). B1's tests, which pin
+every message, pass unchanged; `TestTheReadersRefusalsAreMarkedByKind` pins
+the kinds. `ReadRecord` gives the reason by `errors.Is`, never by text. An
+unset `dsdQualification` is no record (`migration_record_missing`), as the
+legacy backend refused it ("approval missing").
+
+**The model comparison.** `sameModel` compares §3.5's fields exactly: the
+vendor and product IDs, manufacturer, product, interface, device and
+subdevice. Not `SameIdentity` (the port), and not every field but the port
+(the bcdDevice), since the record's firmware goes with each answer it
+migrates.
+
+**Writes, and the one writer.** `Store.Update` takes the store's lock, applies
+its change to a copy of the state the last write left, and returns only once
+`atomicwrite.WriteBytesDurable` (the reservations' writer, under the data
+directory) has made the file and every directory entry up to the data
+directory durable; only then does the store hold the change, so a refused
+write leaves the state as it was. A later serve's app write (B9's
+compare-and-set inside the update), console write, check answer and playback
+evidence serialize on that lock, and no other process writes the file while
+serve holds the data directory's lock, which restore and reset take too. The
+writer is injectable on the instance, as `mergeReservation` takes one. On
+Windows, where no directory can be synced, every write is refused
+(`ErrNoDirectoryBarrier`) and nothing is written; the player never runs
+there.
+
+**Damage** (binding notes 1 and 2). The bad bytes are copied, durably, to
+`player-dsd.json.bad-<timestamp>` (a free name, the queue's form), then the
+file is replaced in one rename by `Refusing`: `defaultMode: off`, so a DAC
+with no choice refuses with `dsd_off_by_choice` once a choice for another
+clears the refusal, never converted on a guess; `state_unreadable`; and the
+marker `{from: "state_unreadable"}`, so the next start does not migrate DSD
+back on from the legacy record. `ReplaceDurable` is not the tool: it renames
+the entry aside first, and a crash between its two renames leaves the name
+empty, which reads as missing. A replacement that fails holds the refusal in
+memory and the next start tries again; a file that cannot be read or not whole
+(a read error, a named pipe or a directory, past 1 MiB, which cannot be copied
+whole), or whose bytes cannot be kept aside, stays where it is, refused in
+memory, and no write replaces it (`ErrNotWritable`). A missing file is the
+defaults, written by nothing until a write changes something. B5 and B7
+refuse by `State.Unreadable` and `RefusalStateUnreadable`
+(`dsd_state_unreadable`).
+
+**Backup and restore** (binding notes 4 and 5). `Sources.PlayerDSD` and
+`Targets.PlayerDSD` beside the player's identity; the snapshot copies the
+file's bytes through the copy every source takes, never loading it (a load
+of a damaged file writes); a missing file is skipped, as nothing writes one
+before B6. Restore reads the snapshot's copy before its first write and
+writes it right after the identity, before the database, the token store and
+the config, durably (`dsdstate.WriteRestored`, the restore's caller holding
+the data directory's lock), in place of the box's state, never merged:
+`defaultMode`, `migratedFrom` and `warnings` travel, the choices, DoP
+confirmations, acknowledgements with their `bitRates` and listener answers
+travel, and `driverAcceptedAt`, `kernel`, `streamingObservedAt` and first
+use's `observedAt` are dropped, an evidence entry left with nothing removed,
+a DAC left holding nothing removed. An archived file that does not decode is
+installed as its bytes, so the next load refuses. A snapshot without the file
+(every pre-B3 archive) leaves the box's state as it is: the precedent of the
+console account, the harvest state and the player's identity, all optional
+files a restore skips when the snapshot lacks them. Where the state cannot be
+made durable (Windows), a restore of a snapshot holding it refuses before
+anything else is written, and says to remove the file from a copy of the
+snapshot to restore the rest.
+
+**`bridge reset-player`** (the brief's third point). Agreed: a choice and what
+was heard belong to the DAC model, not to the player's identity, which is
+what reset rotates; and the state's marker is what keeps the legacy keys from
+migrating again over the user's later choices, which deleting the state would
+undo. Reset keeps the file byte for byte, `--discard-floor` too
+(`TestResetPlayerKeepsThePlayersDSDState`; red with reset removing it).
+
+**Red first.** `TestABackupCarriesTheChoicesAndRestoreDropsThisBoxsEvidence`
+(cmd/bridge, through the real `bridge backup` and `bridge restore`) is
+written against APIs main has. At a47fedaf, the test alone on main's code, in
+a copy of the tree holding that commit's files: "the snapshot lists [bridge.db
+bridge.yaml], without player-dsd.json". At f500838f it passes. The rest of
+B3's row is new code with nothing on main to fail; the negative controls stand
+in for red.
+
+**Tests** (B3's row and beside it). dsdstate: `TestAWriteIsDurableBeforeItReturns`,
+`TestAWriteWhereNoDirectoryCanBeSyncedIsRefused`,
+`TestADamagedStateRefusesDSDAndIsMovedAside` (four kinds of damage),
+`TestNoMomentLeavesTheStateWithoutItsRefusal`,
+`TestAStateThatCannotBeReadIsKeptAndRefused`,
+`TestAStateFileTheStoreReadsIsItsOwn` (a named pipe, Unix),
+`TestAMissingStateIsTheDefaultsAndWritesNothing`, `TestWritesSerializeOnTheStore`,
+`TestNoDSDStateHoldsASerialOrAPort` (the file's bytes, after two DACs bound
+through `BoundOf` from readings carrying a serial, a port, a card number and
+a devnum each of its own), `TestTheStateIsSchemaOneAsWritten`,
+`TestTheStateRefusesWhatNoWriterWrites`, `TestTheChoiceThatApplies`,
+`TestTheMigrationTable` (every row of §3.6, 16 cases, explicit `off` and
+`dop` with `allowDoP` unset among them), `TestTheBridgesPartIsAtOnceAndADACsWaits`,
+`TestTheMigrationIgnoresThePortAndTakesVersion35` (the wrapper, through the
+real reader and real record files: 35 on another port, 35 under another
+firmware, this build's, 34 and one past this build's, another model, another
+PCM device; and through the store),
+`TestARefusedRecordsReasonIsItsKind`, `TestTheModelComparisonIsTheDesignsFields`,
+`TestAMigratedAcknowledgementListsItsRecordsRates`,
+`TestAMigrationFailureIsAWarningInTheState` (each reason word, a missing
+record and `migrated_off`, read back from the file),
+`TestTheMigrationRunsOnce`, `TestADACBoundLaterIsTheRecordsOrTakesTheDefaults`,
+`TestTheMigrationNeverOverwritesAChoice`,
+`TestAMigrationsChoiceKeepsItsWarningAndAWriteClearsIt`,
+`TestALegacyModeTheReaderNeverTakesIsRefused`,
+`TestARestoreKeepsWhatWasChosenAndHeard`, `TestARestoreReplacesTheBoxsStateDurably`.
+qualification: `TestTheReadersRefusalsAreMarkedByKind`. backup:
+`TestASnapshotCopiesTheDSDStateAsItsBytes`,
+`TestARestoreOfASnapshotWithoutTheDSDStateLeavesTheBoxsAlone`,
+`TestARestoreInstallsADamagedArchivedStateAsItsBytes`,
+`TestARestoreThatCannotWriteTheDSDStateDurablyRestoresNothing`. cmd/bridge:
+`TestABackupCarriesTheChoicesAndRestoreDropsThisBoxsEvidence`,
+`TestBuildBackupSourcesNamesThePlayersDSDState`,
+`TestResetPlayerKeepsThePlayersDSDState`. The durable writer's tests skip
+nothing on Windows: they set the barrier and the medium seams, as the
+engine's do, and `TestAWriteWhereNoDirectoryCanBeSyncedIsRefused` takes the
+barrier away to show what a write does there; the record fixtures skip on
+Windows, where an owner's approval is never trusted (Unix ownership).
+
+**Negative controls**, 31, each an exact-once mutation, each package's test
+binary built and its tests run, the files restored from memory: every one red
+for its own reason, the unmutated tree green first. The
+write returns before the barrier (WriteBytes in WriteBytesDurable's place;
+the write on a goroutine); a damaged file falls back to the defaults; the
+damaged file deleted; the refusal lost after a reopen (the fresh state
+without its warning); the name replaced before the bad bytes are copied; a
+missing file treated as damaged; a port added to the key; a serial, a card
+number and a devnum stored; explicit `off` treated as unset; the
+acknowledgement widened to every rate; the migration passing `SameIdentity`;
+the current-version reader in the legacy one's place; every field but the
+port compared; a failure logged but not stored; the first DAC's mismatch
+using up the record; a re-migration over a later choice (the marker ignored;
+a DAC's own choice not asked); evidence kept through a restore (its three
+observed fields alone, in dsdstate and through bridge backup and restore); a
+restore written without the barrier; a restore that keeps the box's state
+over the snapshot's; a restore of a snapshot without the state that removes
+the box's; a snapshot that loads the state through its store; a snapshot that
+fails on a missing state; reset-player removing the state; a missing report
+taken for a missing record (in dsdstate and in the reader's own test); a
+report's version refusal left unmarked; a marked refusal's message changed
+(B1's message tests red); a refusal's reason read from its text.
+
+**What B5 and B6 call.** B5: `State.Unreadable` and `RefusalStateUnreadable`,
+`State.ChoiceFor`, `State.DAC` (the choice, the confirmation, first use with
+`FirstUse.Covers`, the listener answers, the evidence), `defaultMode`. B6:
+`dsdstate.Open(dataDir)` at serve's player start, logging `Store.Report`;
+`BoundOf(card, qualification descriptors, device, subdevice)` for the DAC the
+binding resolves to; `Store.Migrate(stateDir, Legacy{the raw keys}, bound)`
+at the start (bound nil while none resolves) and again when the binding
+resolves to a DAC, logging each `Step.Warnings` beside its warning;
+`Validate`'s once-per-key warning. B9: `Store.Update`, with
+`ClearWarningsFor`. Backup and restore are wired already.
+
+**Follow-ups, not built.** `.claude/rules/cli-serve.md`, which loads with
+`internal/backup`, has no bullet for the snapshot's new file; the rule is in
+player.md's long form and in `backup.PlayerDSDFileName`'s doc. A Windows box
+restoring a Linux snapshot that holds the state refuses until the file is
+removed from a copy of the snapshot, as one holding the player's identity
+already does.
+
+**Checks**, on legion0 (Linux, amd64, Go 1.27.3), at 9059f676, in one call
+through the shared build lock: `make fmt`, which rewrote nothing; `make vet`;
+`make test`, race-enabled, with TMPDIR under `.tmp/_b728-b3`: every package
+ok, 83 of them, internal/player/dsdstate (1.5 s) and internal/backup (283 s)
+among them, so the new package and backup ran under `-race`, and the
+Linux-only tests ran for real here (the ALSA readers, alsapcm, the durable
+writer and the identity paths); `make vet` with `GOOS=windows`, `GOOS=darwin`
+and `GOOS=linux GOARCH=386`, each clean; the state's, the qualification's and
+backup's tests as linux/386 binaries, run natively, ok; `make docs-check`, ok,
+and again on a copy of the tree with the rules patch applied (player.md at
+97.6% of its budget); the qualification check, `scripts/qualification-version
+-base main -head HEAD`, "qualification version OK: main..HEAD"; and `make
+build-all`. The rules patch: `git apply --check` takes it, and a strict
+applier of the worker's own gives a file byte-identical to the intended one.
+The negative controls ran at f500838f, the unmutated tree green first. The
+tree is clean after. Not run here: Windows and macOS natively, CI's runners,
+and any hardware.
+
+## 2026-11-05 — B728 B3 round 2: four review points on #1405
+
+Worker b728-b3 on legion0, fast-forwarded to the orchestrator's dfa6e602 (the
+branch, its rules patch applied, main merged). Codex and the Claude API
+reviewer found four points on #1405; each was checked on the tree before any
+fix, and each held.
+
+**A link to nothing read as a fresh install.** `readBounded` opens through
+`fsutil.OpenAsFile`, which follows a link, so a dangling link answered
+`fs.ErrNotExist`, Open served the defaults (`Missing`), and the first write
+replaced the link. Now an `Lstat` decides: no entry is `Missing`; an entry
+that leads nowhere is `Unread`, refused, and not written over.
+`TestADanglingLinkIsAnEntryThatDoesNotRead`.
+
+**The fallback used up a record it never applied.** The model comparison
+reads the PCM device and the manufacturer string, which `dacprofile.Key` does
+not hold, so the record's own model can be refused (`identity_mismatch`) as a
+unit of the same key: that unit got the fallback's choice, and when the
+record's unit was bound the migration took the fallback for a choice of the
+DAC's own, wrote nothing, and ended the wait. `ownChoice` is now any choice
+but the migration's at its first revision; `recordRows` replaces the fallback
+at the next revision and drops that key's migration warning; a choice the app
+or the console writes in between, a first one at revision 1 included, still
+wins. `TestTheRecordsOwnModelTakesTheRecordOverItsFallback` (another PCM
+device; another manufacturer string; a user's choice in between) and
+`TestTheMigrationNeverOverwritesAChoice` (the app's and the console's first
+choice, and a later one).
+
+**A write could leave a file the next start refuses.** The structural bounds
+let a state through whose file passes the 1 MiB Open reads (Codex: 100 DACs of
+64 answers, about 1.1 MB); `Update` made it durable and answered nil, and the
+next start left it `Unread`, refusing DSD and every write. `encode` now
+refuses past the bound (`ErrTooLarge`). What is refused is the write that
+would cross it, whole: trimming answers or warnings would drop what the app
+showed. The state stays as it was, and the app sees B9's answer for a write
+not made, 500 `persist_failed`, nothing changed.
+`TestAWriteTheReaderWouldRefuseIsNotMade`: a file of exactly 1 MiB is written
+and reads back; one byte more is refused, the state and the file unchanged.
+
+**An unreadable state stayed unwritable after it was moved.** `blocked` was
+set at Open and never cleared, so every write answered `ErrNotWritable` until
+a restart. A blocked write now looks again: an entry still at the name, or a
+look that fails, is refused; no entry clears the block and the write is made
+on the refusing state, so a choice clears `state_unreadable`.
+`TestAnUnreadableStateMovedAwayIsWritableAgain`.
+
+The design's section 8 and section 11 rows for B4, B7, B11 and B12 now take
+the next free version at their merge (B735 took 37 and B3 takes 38, the
+numbers first planned for B4 and B7), and section 3.6 says the record's model
+takes its rows over the fallback. The rule's line is unchanged; its long form
+says the four behaviours.
+
+Red first at cba3cf46, each test failing on the tree before the fix for its
+point's reason. The fixes are 6de60864, and c2a29e49 extends the guard to a
+user's first choice. **Negative controls**, ten, each red: the `Lstat`
+dropped; any choice taken for the DAC's own; any choice taken for the
+fallback (a user's choice in between overwritten); the fallback's warning
+kept; the record's choice at the fallback's revision; the writer not asked (a
+user's first choice taken for the fallback); the bound check removed; the
+bound one byte off; a blocked store that never looks again; a blocked store
+unblocked whatever is still there.
+Two of them, first written as `return true` and `return false` in
+`ownChoice`, did not build (its `c` unused) and were run again as `c != nil`
+and `c == nil`, red. They ran at c2a29e49, the unmutated tree green first.
+
+**Checks**, on legion0 (Linux, amd64, Go 1.27.3), at 89adc6c4, in one call
+through the shared build lock: `make fmt`, which rewrote nothing; `make vet`;
+`make test`, race-enabled, with TMPDIR under `.tmp/_b728-b3`: every package
+ok, 83 of them, internal/player/dsdstate (1.9 s) and internal/backup (282 s)
+among them, the Linux-only tests run for real; `go test -race -count=1
+./internal/player/dsdstate/ ./internal/backup/`, ok; `make vet` with
+`GOOS=windows`, `GOOS=darwin` and `GOOS=linux GOARCH=386`, each clean; the
+state's tests as a linux/386 binary, run natively, ok; `make docs-check`, ok
+(player.md at 97.6% of its budget); the qualification check, "qualification
+version OK: main..HEAD"; and `make build-all`. The tree is clean after. Not
+run here: Windows and macOS natively, CI's runners, and any hardware.
+
+## 2026-11-05 — B728 B3 round 3: two review points on round 2
+
+Both held, red first at 84f885eb. **A size error skipped a restore's
+clean-up** (Codex): a compact snapshot of 120 DACs with 64 answers each,
+787,043 bytes, which the reader takes, is 1,428,227 indented, so
+`ForRestore`'s encode refused it and the restore installed the snapshot as it
+was, the old box's evidence with it. Of the two remedies, the writer writes
+compact: its 1 MiB bound and the reader's are on the same bytes, so a state
+read from a file the writer wrote is written again within it, with nothing
+observed too. `ForRestore` answers an error, never the snapshot's bytes, for a
+state that decodes: what still cannot be written, only a file denser than the
+writer's own (a key it writes left out, a character it escapes held as it
+is), fails the restore there: the state and every file after it stay
+unrestored, and what the restore did before it stays done, the player's
+identity and reservation and the queue it let go, which the refusal names.
+Bytes that do not decode
+still install as they are, as binding note 5 of the brief requires: no state,
+and the next load sets them aside. **A write not made ended the store's
+looking** (the Claude API reviewer): `blocked` was cleared at the look,
+before `fn`, the encoding and the write. The look now answers for its write
+alone, and `blocked` clears where the durable write has returned and the state
+is committed. The window left runs from the look to the writer's rename (the
+change, its encoding, and the writer's checks, write and fsync of the staged
+file); an entry put back inside it is replaced unread, which only a rename
+that refuses to replace would close. Fixes 28f1c36a; 88046920 adds a second
+write to round 2's writable-again test, which a store that never stops
+looking fails. Negative controls, six, each red: the writer indenting again;
+`ForRestore` answering the snapshot on that error (rerun once, its first form
+leaving `fmt` unused); `WriteRestored` writing past `ForRestore`'s refusal;
+`blocked` cleared at the look; cleared before the write's answer; never
+cleared.
+**Checks**, on legion0 at 27a62dfc, in one call through the shared build lock:
+`make fmt`, which rewrote nothing; `make vet`; `make test`, race-enabled, 83
+packages ok, dsdstate (3.1 s) and backup (281 s) among them, the Linux-only
+tests run for real; `go test -race -count=1 ./internal/player/dsdstate/
+./internal/backup/`, ok; `make vet` with `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`, each clean; dsdstate's tests as a linux/386 binary,
+ok; `make docs-check`, ok (player.md at 97.6%); the qualification check,
+"qualification version OK: main..HEAD". The tree is clean after.
+
+## 2026-11-06 — B728 B3 round 4: a restore's refusal once its state landed
+
+Worker b728-b3 fast-forwarded to the orchestrator's cc46921b (main merged).
+CodeRabbit on #1405: `restorePlayerDSD` said "nothing was restored" and to
+leave `player-dsd.json` out of the snapshot to keep this box's state, for an
+error `WriteBytesDurable` returns after its rename, when the box's state is
+already the snapshot's. It held: red at 8d067780, through
+`atomicwrite.SetSyncDirForTest`. `ErrBarrierFailed` does not tell the two
+apart, though. After the rename, a directory that cannot be opened for its
+sync (EACCES, EMFILE, an overlay's directory above the root) is an error no
+fsync marks. And a strict write's barrier on a directory it created runs
+before the file is staged, an `ErrBarrierFailed` with nothing landed. So the
+writer marks every error once its write has landed with `ErrLanded`, at the
+three places a write lands (the rename, the fallback that finds the bytes
+there, `ReplaceDurable` once both renames are done), never in `durableChain`,
+which also runs after `ReplaceDurable` puts the old entry back. The marker
+reads as the error it wraps, so no message changed. Landed, the restore says
+the box's state is now the snapshot's, that its crash durability is
+uncertain, and to run the restore again once the data directory can be
+synced. Otherwise its refusal and advice stand. The fix is bc7cef59, and the
+rule is in `rules-b728-b3-r4.patch` (config-lifecycle.md, after
+`ReplaceDurable`'s bullet). Negative controls, nine, each red: the restore
+taking no error, or every error, for one that landed; the rename's landing,
+the fallback's barrier, the fallback's fsync and `ReplaceDurable`'s landing
+each unmarked; `ReplaceDurable`'s put-back marked; the barrier before the
+staging marked; the marker hiding what it wraps.
+**Checks**, on legion0 at 2c4cecf6, in one call through the shared build lock:
+`make fmt`, which rewrote nothing; `make vet`; `go test -race -count=1` of
+what the marker reaches, `./internal/atomicwrite/`, `./internal/player/dsdstate/`,
+`./internal/player/engine/`, `./internal/config/`, `./internal/backup/` and
+`./cmd/bridge/`, each ok; `make vet` with `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`, each clean; atomicwrite's and dsdstate's tests as
+linux/386 binaries, ok; `make docs-check`, ok, and again on a copy of the
+tree with the rules patch applied, which `git apply --check` takes; the
+qualification check, "qualification version OK: main..HEAD". The tree is
+clean after.
+
+## 2026-11-05 — B728 B4: the silent probe, its cache, and the device slot it shares with a Start
+
+B728's B4 (`ops/plan-b728-dsd-capability-design.md`, section 5, with 1.1, 1.2,
+8, 9.1 and B4's row in 11). Worker b728-b4 on legion0 (Ubuntu 26.04,
+linux/amd64, Linux 7.0, go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`), branch
+`feat/b728-b4-silent-probe` from main 3b900afc, the orchestrator's brief with
+the binding notes of Codex, the Claude API reviewer and Argon folded in.
+Commits: the red tests a04bf465, the probe 389c56ff, the carrier's rate
+4ce44b2e, then this record. B4 changes nothing a user sees: nothing calls the
+probe in production until B7 and B5 wire it. The rule goes into
+`.claude/rules/player.md` through a checked patch (`rules-b728-b4.patch`);
+this worker cannot write `.claude/`.
+
+**Red first.** At a04bf465 the probe's API stood in `alsapcm` and the
+backend with stub bodies ("not built yet"), so each new test failed on its
+own assertion: `TestTheProbeRefinesAndNeverCommits` and
+`TestTheProbeLeavesABusyNodeAlone` ("ProbeCandidates lists nothing to ask"),
+`TestTheProbeReadsTheDoPCarriersSignificantBits` ("probe: alsapcm: the silent
+probe is not built yet", each row), `TestNoProbeWhileASessionHoldsTheDevice`
+(each of its six subtests: "the probe answered player backend: the silent
+probe is not built yet; want it not run: session_holds_device", and
+`session_paused`, `release_pending` for theirs), `TestAStartDuringAProbeWaitsForIt`
+and `TestAStartWaitsForAProbeAtMostItsBound` (no probe held the node, the
+watchdog), the playback package's `TestTheProbesGateReadsTheDeviceSlot` ("the
+gate: taken true") and `TestAStartWaitsForTheProbeThatHoldsTheSlot` ("the
+Start did not wait for the probe that holds the slot"), and the cache's, the
+guard's (`TestGuardNodeOpensRefusesEveryOpen`) and the conditions'.
+
+**The probe** (`alsapcm.Probe`, over the `sys` seam as `probe`). It opens the
+endpoint's node as every open does (non-blocking, exclusive, looked at before
+and after), runs PVERSION and INFO as an open checks them, hands the node to
+the check after open (`ProbeConfig.Admit`, the sink's `Admit`: a refusal
+closes it with nothing asked, `wrong_device`), asks one HW_REFINE a
+candidate, and closes the node once on every way out, a panic's included. It
+never reuses `Open`, which commits (HW_PARAMS, then SW_PARAMS and PREPARE);
+the request it refines is the one an open's `setHW` refines first, one
+function the two share now (`exactParams`: RW_INTERLEAVED, the format, the
+STD subformat, two channels, the rate), with `info` and `msbits` zeroed so a
+kernel that left them unfilled reads as no PAUSE and unknown bits, never as
+the request's. Per candidate it reads three things: accepted or refused
+(EINVAL alone refuses; any other errno ends the probe, typed, and leaves that
+candidate and the rest not probed); the refined significant bits (`Msbits`, 0
+unknown, never the format's width); and whether the setup offers PAUSE
+(`Pause`, which sets the tuple's pause method, kernel or silence, section
+7.1). A busy node is answered at once, `busy`, every candidate not probed,
+one open asked: nothing waits, retries or polls, and the holder is left alone.
+`ProbeCandidates` is section 5's set, 23 candidates: DSD_U32_BE, DSD_U32_LE
+and DSD_U16_LE at the one-bit rate over their width for DSD64, DSD128 and
+DSD256; S32_LE at each DoP carrier (the rate over 16); section 4.3's
+conversion targets, 176.4, 88.2 and 44.1 kHz in S24_3LE, S24_LE, S32_LE and
+S16_LE (S32_LE at 176.4 kHz once). DSD512, refused in every mode, is never
+probed. `ProbeResult.DoPCarrier` is S32_LE accepted at a DSD rate's carrier
+with 24 to 32 significant bits, the DoP sink's own rule (`dopBits`, which the
+sink's check now calls too): that the kernel takes the PCM carrier, never
+that the DAC decodes DSD.
+
+**The device slot** (note 1 of the brief). `playback.Backend.Probe` takes the
+backend's slot in the step that finds it free, under the lock `hold` takes it
+for a Start under (`holder`, and now `probing`), and holds it from the
+binding's location to the node's close. A Start that finds the probe holding
+it waits, holding nothing, and takes the slot as the probe ends; the wait is
+armed at `ProbeWait` (1 s, section 5) on `Config.AfterFunc`, and past it the
+Start answers the device busy (`engine.ErrDeviceBusy`, a busy attempt to the
+engine), the probe's node still open; the Start's context and its session's
+release end the wait too. The probe runs on a goroutine the backend counts
+and gives the slot back only once its node is closed, so a probe the kernel
+holds in a call keeps the slot and every Start then answers busy after its
+second, which is the truth. A second probe beside one is refused
+(`probe_running`).
+
+**Every precondition of section 5** (note 2). Before anything is located or
+opened the gate (`reserveProbe`) refuses a release never confirmed
+(`release_unconfirmed`), a session whose Release has come or whose release
+the engine has taken (`release_pending`: the session's life ended, or
+`StartRequest.Released` closed), a paused session (`session_paused`) and one
+that plays or is opening the device (`session_holds_device`); the backend
+cannot see the bound DAC's availability or the snapshot's freshness, so the
+caller says them (`ProbeConditions`, `output_unavailable`, `snapshot_stale`),
+B7 from the watcher's latest snapshot. A paused session holds the slot
+whether or not its pause's release has let the device go: a resume reopens
+the device, and a probe beside a paused session would race that reopen, so
+the gate is stricter than section 5's "a pause still holds it", and a choice
+written while a session is paused is not probed (§5 now says so). The pause
+is read through `pausedFlag`, a lock-free mirror of `paused` written with it,
+since a session takes the backend's lock under its own and never the
+reverse; the release through the session's life and its fence, already
+lock-free.
+
+**The cache** (note 3). `alsapcm.ProbeCache`, in memory and the process's
+alone, keeps each answer under the model's identity (the canonical form of
+B2's key, never a serial or a port), the bcdDevice, the kernel release, the
+unit's enumeration and the exact candidate, as accepted (with its bits and
+pause flag) or refused; anything else is not probed. A lookup under any other
+unit finds nothing, so each of the four lapses it; recording the model under
+another firmware, kernel or enumeration drops the old answers; `Forget`, which
+a choice write calls (section 7.2), drops the model's. A not-probed answer,
+EBUSY's, keeps and changes nothing: never a refusal. B3's durable evidence
+holds neither refusals nor conversion candidates, so nothing here is written.
+In B7, `driver_accepted` reads the cache per tuple, a native tuple by its
+format at the frame rate and a DoP tuple by its carrier (`DoPCarrier`): an
+accepted answer is recorded as that tuple's `driverAcceptedAt` with the kernel
+release in the DSD state's evidence; a refused one takes the tuple out of
+what is offered (section 3.2); a not-probed one leaves it to the stream
+file's altsets. The enumeration is the caller's opaque word; B7 takes it from
+the hotplug feed (its instance and the generation at which the binding last
+found the unit anew), never a devnum written anywhere.
+
+**The guard and the other platforms** (notes 5 and 7). `Probe` asks
+`GuardNodeOpens` first, on Linux and in the stub, which off linux/amd64 and
+linux/arm64 refuses `unsupported_platform`, every candidate not probed, so B5
+and B7 call it from packages every platform builds; the types and the cache
+carry no build tag. `TestGuardNodeOpensRefusesEveryOpen` covers Probe, and
+`TestProbeOffLinuxIsUnsupported` the stub.
+
+**The fake kernel** (note 6). It takes scripted answers to the next opens
+(`openErrs`, each an attempt, EBUSY once and then the node, so a retry shows),
+an exclusive node (an open of an open node is EBUSY, as a one-substream
+device's), altsets (a format taken only at its altset's rates), an exact
+msbits a format (`bits`, where 0 is unknown, which `msbits` cannot say), and a
+nth-refine error; it records each HW_REFINE as asked, beside every request it
+already recorded, and its view counts the opens asked, HW_REFINE and
+HW_PARAMS. HW_REFINE already filled msbits and the info flags (`narrow`), so
+the probe reads them from the refine, as the kernel gives them.
+
+**The real kernel.** legion0 has no DAC, but has an onboard HDA codec (card
+2, ALC257 Analog), closed. `TestTheSilentProbeOnARealDAC` with
+`BRIDGE_PROBE_ENDPOINT=2,0`: "opened 1, closed 1; requests: HW_REFINE 23,
+INFO 1, PVERSION 1"; S16_LE and S32_LE at 44.1 kHz accepted with 16 and 32
+significant bits and PAUSE offered, every other candidate refused (EINVAL),
+the DSD formats and the 88.2 and 176.4 kHz rates among them: Linux 7.0's
+HW_REFINE fills msbits and the info flags, as the probe reads them. That run
+found the draft's `DoPCarrier` calling S32_LE at 44.1 kHz a DoP carrier; it
+reads the rate too now (4ce44b2e), with a row for it in
+`TestTheProbeReadsTheDoPCarriersSignificantBits`. With the node held open by
+another process, the probe answered at once (0.00 s): "open: busy: another
+process has /dev/snd/pcmC2D0p open; the bridge never stops it (EBUSY)", and
+the test failed saying to stop MPD and the bridge.
+
+**Owed on hardware** (note 8, the orchestrator's run). Build the test binary
+for the Pi on any host (`GOOS=linux GOARCH=arm64`, `go test -c -o
+alsapcm.test ./internal/alsapcm`; built here, 4ce44b2e), copy it across, stop
+MPD and the bridge (`sudo systemctl stop mpd` and the bridge's service: with
+MPD holding the DAC the run is a useless "not probed", and the test fails
+saying so), identify the bound playback device (`aplay -l`, usually 0 on a USB
+DAC), run `BRIDGE_PROBE_ENDPOINT=<card>,<device> ./alsapcm.test -test.run
+'^TestTheSilentProbeOnARealDAC$' -test.v`, and start them again. Expected: the
+first line "opened 1, closed 1; requests: HW_REFINE 23, INFO 1, PVERSION 1",
+nothing else sent; then per candidate "accepted, N significant bits, PAUSE
+offered" (or "not offered") or "refused (EINVAL)"; on a DAC whose kernel quirk
+names DSD_U32_BE, that format accepted at its DSD frame rates; the S32_LE
+carriers with their bits, "the DoP carrier of DSD64" (and 128, 256) where 24
+to 32; PASS.
+
+**The version** (the guard). `internal/alsapcm/` is guarded: B735 took 37 on
+main and B3 (#1405) takes 38, so B4 takes 39, and the design's later numbers
+(B7's 38, B11's 39, B12's 40) move up, each guarded PR taking the next free
+one at its merge. `LegacyVersion` stays 35, so no owner re-qualifies. The
+runbook's five pinned lines and its record of version 39, the design's
+section 8 table and B4's row in section 11, and two sentences of section 5
+(the paused slot; the answers kept in the cache, not the DSD state) are
+corrected.
+
+**The negative controls**, each a source edit run against a fresh test
+binary, the original bytes restored from memory (`.tmp/_b728-b4/controls.py`):
+the baseline green in both packages (alsapcm's 21 probe tests, playback's 2),
+every control red in the test that pins it:
+
+| Mutation | Red |
+|---|---|
+| an HW_PARAMS sent after each accepted refine | `TestTheProbeRefinesAndNeverCommits` ("the probe sent HW_PARAMS 12 times", the stream left SETUP), and the backend's probes in `TestNoProbeWhileASessionHoldsTheDevice` and `TestNoProbeWithoutTheBoundDACOrAFreshSnapshot` |
+| a busy node waited on: the open asked again, up to 50 times | `TestTheProbeLeavesABusyNodeAlone` ("got no error, want busy": the second attempt opened), `TestAProbeOfABusyNodeAnswersAtOnce` ("51 opens asked") |
+| a second open | `TestTheProbeRefinesAndNeverCommits` ("2 opens asked, 2 opened, 1 closes") and seven more |
+| the carrier's bits not read (0) | `TestTheProbeReadsTheDoPCarriersSignificantBits`, four rows |
+| the carrier's bits read and not judged | its 20, 16 and unreported rows ("a DoP carrier true") |
+| the pause flag ignored, as false; as true | `TestTheProbeReadsWhetherTheSetupOffersPause`, its PAUSE row; its no-PAUSE row |
+| EBUSY kept as a refusal (the cache takes not probed as refused) | `TestABusyProbeIsNeverCachedAsARefusal`, `TestTheProbeLeavesABusyNodeAlone`, `TestTheProbeCacheKeepsAnAnswerForExactlyItsUnit`, `TestAProbeOfTheModelAnewLapsesWhatWasKeptBefore` |
+| the cache's key without the enumeration; the kernel; the firmware | `TestTheProbeCacheKeepsAnAnswerForExactlyItsUnit`, each one's row, and `TestAProbeOfTheModelAnewLapsesWhatWasKeptBefore`'s for the first two |
+| a lapsed unit's answers kept | `TestAProbeOfTheModelAnewLapsesWhatWasKeptBefore`, each row |
+| a choice write's `Forget` doing nothing | `TestAChoiceWriteForgetsTheModelsAnswers` |
+| the guard skipped | `TestGuardNodeOpensRefusesEveryOpen` (the real open answered ENOENT for card 7, which this host lacks; the guard saw nothing) |
+| a probe while a session plays or opens the device | `TestNoProbeWhileASessionHoldsTheDevice`'s two ("the probe answered nil"; the fake's node closed under the session), `TestTheProbesGateReadsTheDeviceSlot`'s row |
+| a probe during a pause | its two paused subtests, the gate's row |
+| a probe during a pending release | its two release subtests, the gate's two rows |
+| a probe beside a release never confirmed | the gate's row (no rig test reaches that state) |
+| the slot skipped by the probe | `TestAStartDuringAProbeWaitsForIt` and `TestAStartWaitsForAProbeAtMostItsBound` ("a Start asked to open the device while the probe held it"), `TestOneProbeAtATime`, both gate tests |
+| the slot skipped by the Start | the two Start tests, `TestAStartWaitsForTheProbeThatHoldsTheSlot` ("the Start did not wait") |
+| a Start's wait unbounded (no timer armed) | the two Start tests (the engine's own 5 s StartTimeout answered `backend_timeout`), `TestAStartWaitsForTheProbeThatHoldsTheSlot`'s four rows |
+| the bound DAC's unavailability ignored; the stale snapshot ignored | `TestNoProbeWithoutTheBoundDACOrAFreshSnapshot`, each one's row |
+
+After each restore the files were their committed bytes, and `git status`
+showed no Go file changed at the end.
+
+**Checks.** On legion0, in one call under the build slot, on 2b74bd5d (the
+controls ran on 4ce44b2e, whose code that commit leaves as it was):
+- `make fmt` (go1.27.3's gofmt): no file changed.
+- `make vet`: native, `GOOS=windows`, `GOOS=darwin`, and `GOOS=linux` with
+  `GOARCH=386` and with `GOARCH=arm64`: clean.
+- `make test TMPDIR=<worktree>/.tmp/_b728-b4/gotmp` (a `_` directory, which
+  the build-site census skips): 82 packages ok, none failed, in 1,755 s. The
+  Linux-only packages ran here, not only vetted: alsapcm, alsa, atomicwrite
+  and the engine among them.
+- `make build-all`: the six targets, `check-build-tags: OK`.
+- `go test -race` over `./internal/alsapcm/`, `./internal/player/playback/`
+  and `./internal/player/qualification/`: ok (30.9, 2.4 and 3.8 s).
+- The native-integration overlay (`scripts/native-integration-overlay.py`),
+  then `go test -race -tags ts_omit_webclient,ts_omit_debugeventbus -overlay
+  <it> ./cmd/bridge -run '^TestNativeIntegration' -timeout 5m -watchdog 10s`
+  (13 tests) and the same over `./internal/player/playback` (29): ok, every
+  test the job names among them. The overlay compiles this package's test
+  files into the package, the new ones included.
+- `alsa-abi` on amd64, with `ALSA_UAPI_HEADER` set to Ubuntu 26.04's
+  `/usr/include/sound/asound.h` (the raw GitHub host is out of reach here),
+  compared as the header of v6.12: 252 facts agree with the Go definitions.
+  Not run on arm64: this host has neither an arm64 machine nor an emulator,
+  and `uapi.go` is unchanged; the gated hardware test does build for
+  linux/arm64.
+- The qualification check, `go run -tags
+  ts_omit_webclient,ts_omit_debugeventbus ./scripts/qualification-version
+  -base 3b900afc -head HEAD`: "qualification version OK: 3b900afc..HEAD".
+- `make docs-check`: ok (CLAUDE.md 74.2 %, the largest rules file,
+  dlna-upnp.md, 97.0 %, the worst load, player_openhome_test.go's, 64.5 %).
+  With the rules patch applied, player.md is 97,234 bytes (97.2 %); with
+  B3's patch applied first and B4's bullet after B3's, 97,860 bytes (97.9 %)
+  and CLAUDE.md 48,264: both under budget, so no entry moved.
+- The rules patch: a strict applier reproduces the patched file, and `git
+  apply --check` takes it. Every test name this branch's lines and the patch
+  cite is defined, and `make test`'s citation sweep passed.
+
+**Follow-ups, for the backlog** (the backlog file is not on legion0): B7 derives
+`ProbeConditions` and `ProbeUnit.Enumeration` from the hotplug snapshot and
+calls `Backend.Probe` at section 5's moments; B9's choice write calls
+`ProbeCache.Forget`, and is not probed while a session is paused.
+
+**Round 2** (the Claude API reviewer's three points on #1407; Codex found
+none), on c26bba1e, the orchestrator's commit of round 1's rules patch, taken
+by fast-forward. Each point held as stated, read in the code before any test:
+`Record` could not tell a report begun before a `Forget`, and a late `Record`
+for an older enumeration deleted the newer one's answers; a run beside another
+substream on a shared USB clock, which snd-usb-audio holds to the running
+rate, kept its EINVAL refusals until a replug or a restart; and a second probe
+could reserve the slot between `endProbe` and the waiting Start's next look.
+Red at cecf6aa3, each new test failing on its own assertion; the fix 3ec5efab;
+two tests strengthened at 0a98ff3e, for two mutants below that no test would
+have caught.
+(1) Each model has an epoch, read before a probe (`Begin`) and handed to
+`Record`, which keeps nothing once it has moved; `Forget` moves it, and so
+does a probe begun for another unit of the model, which lapses the old unit's
+answers then, not at its `Record`. An older enumeration's late report,
+whichever of the two probes ends first, keeps nothing and drops nothing: its
+epoch predates the newer one's `Begin`, and `Record` never deletes. (2) The
+probe reads the card's open substreams (`/proc/asound/card<N>/pcm*/sub*/status`,
+open unless the first line is `closed`, through the `sys` seam) after the check
+after open and again before the close; beside another, or when the reading
+fails or does not show its own, each refused candidate is not probed, each
+acceptance stands, and `ProbeReport.Shared` says why. On legion0's codec,
+nothing else open: its own substream seen, its refusals kept; with the capture
+node held by another process: `pcm0c/sub0` named, its refusals not probed,
+S16_LE and S32_LE at 44.1 kHz accepted. (3) A Start that finds a probe holding
+the slot counts among the backend's `waiters` until it takes the slot or gives
+up, and `reserveProbe` refuses a probe while one waits
+(`session_holds_device`). The controls (`.tmp/_b728-b4/controls_r2.py`, the
+bytes restored from memory, `git status` clean after): the baseline green;
+round 1's 23 rerun, its cache controls rewritten for the epoch, each red
+again; and 20 new, each red: `Record` ignoring the epoch
+(`TestAChoiceWriteLapsesAProbeAlreadyRunning`,
+`TestALateProbeOfAnOlderEnumerationKeepsAndDropsNothing`), `Forget` not
+moving it (the first), `Begin` not moving it for another unit and a late
+`Record` deleting the newer unit's answers (the second); either substream
+read skipped, a failed reading or the own substream's absence taken for
+nothing else open, the own substream counted as another or named on
+subdevice 0 (the row 0a98ff3e added), the refusals kept, the acceptances
+dropped too, `Shared` unset (`TestARefusalBesideAnotherOpenSubstreamIsNotKept`); the reader taking only
+a RUNNING state, playback alone, one card, or a missing status for an error
+(`TestTheCardsOpenSubstreamsAreReadFromTheirStatus`); `reserveProbe` ignoring
+the waiters and a waiting Start not counted
+(`TestAStartThatWaitedTakesTheSlotBeforeAnotherProbe`,
+`TestAStartThatWaitedForAProbeTakesTheSlotBeforeTheNextProbe`, and the gate's
+row for the first); a Start that gave its wait up still counted
+(`TestAStartWaitsForTheProbeThatHoldsTheSlot`'s three rows that give up, the
+assertion 0a98ff3e added). One mutant is equivalent and left out: dropping
+the decrement as the Start takes the slot, which `hold`'s deferred one makes
+up before it returns. The checks, in one call under the build slot on
+ee4175e0: `go test -race` over `./internal/alsapcm/` and
+`./internal/player/playback/` ok (31.5 and 2.3 s); `make fmt` changed
+nothing; `make vet` native, `GOOS=windows`, `GOOS=darwin`, and `GOOS=linux`
+with `GOARCH=386` and `GOARCH=arm64`, clean; `make test` 82 packages ok, none
+failed, in 1,730 s, alsapcm, alsa, atomicwrite and the engine run here;
+`make build-all` with `check-build-tags: OK`; the native-integration
+overlay's 13 and 29 tests ok; `alsa-abi` against Ubuntu's asound.h, 252
+facts agreeing; `make docs-check` ok; the qualification check OK, version 39
+standing. The rules patch (`rules-b728-b4-r2.patch`: B4's bullet, its Don't
+extended by the three points) applies strictly and under `git apply
+--check`; with it player.md is 97,450 bytes (97.5 %), and 98,076 (98.1 %)
+with B3's patch applied first, under budget, so no entry moved.
+
 ## 2026-11-06 — B662: a stop at the upscale seed's commit exits as a stop
 
 Backlog B662, from macOS run 41480956932, where

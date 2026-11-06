@@ -371,15 +371,24 @@ func (d *Device) checkInfo() error {
 	return nil
 }
 
+// exactParams is the request an open refines first: interleaved read-write
+// access, one format, the standard subformat, two channels and one rate,
+// everything else as anyParams allows it. The silent probe asks exactly
+// this of each candidate.
+func exactParams(code, rate uint32) hwParams {
+	hw := anyParams()
+	hw.setMask(hwParamAccess, accessRWInterleaved)
+	hw.setMask(hwParamFormat, code)
+	hw.setMask(hwParamSubformat, subformatStd)
+	hw.setInteger(hwParamChannels, Channels)
+	hw.setInteger(hwParamRate, rate)
+	return hw
+}
+
 // setHW negotiates the hardware parameters: the exact request refined,
 // the geometry aimed, HW_PARAMS, and the committed values read back.
 func (d *Device) setHW(want request) error {
-	hw := anyParams()
-	hw.setMask(hwParamAccess, accessRWInterleaved)
-	hw.setMask(hwParamFormat, want.sample.code)
-	hw.setMask(hwParamSubformat, subformatStd)
-	hw.setInteger(hwParamChannels, Channels)
-	hw.setInteger(hwParamRate, want.rate)
+	hw := exactParams(want.sample.code, want.rate)
 	if err := d.refine(&hw); err != nil {
 		if n, _ := errnoOf(err); n == errnoEINVAL {
 			return d.refuse("hw_refine", ReasonNotSupported, d.offered(want))

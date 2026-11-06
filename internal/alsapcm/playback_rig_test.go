@@ -737,7 +737,7 @@ func newDirectWith(t *testing.T, openSink func(func(context.Context, alsapcm.Sin
 	if openSink != nil {
 		open = openSink(open)
 	}
-	cfg := playback.Config{Resolver: d.files, Locator: d.unit, OpenSink: open,
+	cfg := playback.Config{Resolver: d.files, Locator: d.unit, OpenSink: open, Probe: d.k.Probe,
 		Tick: func() (<-chan time.Time, func()) { return d.ticks, func() {} }}
 	if edit != nil {
 		edit(&cfg)
@@ -862,7 +862,7 @@ func newRig(t *testing.T, opts ...func(*rigOptions)) *rig {
 		seams.Fenced = func(step string) { r.rec.note(func() { r.rec.fenced = append(r.rec.fenced, step) }) }
 	}
 	cfg := playback.Config{
-		Resolver: r.files, Locator: loc, OpenSink: open, AfterFunc: o.afterFunc, Seams: seams, Log: o.log, Installed: o.installed,
+		Resolver: r.files, Locator: loc, OpenSink: open, Probe: r.k.Probe, AfterFunc: o.afterFunc, Seams: seams, Log: o.log, Installed: o.installed,
 		Notify: func(n playback.Note) {
 			if o.notify != nil {
 				o.notify(n)
