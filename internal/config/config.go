@@ -478,7 +478,7 @@ func (u UPnPUpstreamConfig) Validate() error {
 // the console's save of on writes no key. What was fetched before stays and
 // is served: the IDs in the rows, the covers and portraits in the artwork
 // cache. The Atlas harvest and lyrics, the update check and certificate
-// renewal have switches of their own, and these stop none of them.
+// renewal are separate, and these stop none of them.
 //
 // The base URLs point MusicBrainz and the Cover Art Archive at a self-hosted
 // 1-bit-atlas mirror; empty fields fall back to the public services. Set

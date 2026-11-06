@@ -325,13 +325,15 @@ defaults. Empty / unset env = no change.
 | `BRIDGE_ANALYSIS_ENABLED` | `analysis.enabled` | `true`/`false`. Enables waveform / loudness / key-tempo analysis. Same toolchain. |
 | `BRIDGE_FINGERPRINT_ENABLED` | `fingerprint.enabled` | `true`/`false`. Enables the acoustic-fingerprinting fallback for tracks whose tags are too poor to match on text. Needs `ACOUSTID_API_KEY` as well. |
 | `ACOUSTID_API_KEY` | `fingerprint.apiKey` | Free application key from [acoustid.org/new-application](https://acoustid.org/new-application). Secret — keep it out of version control. |
-| `BRIDGE_MUSICBRAINZ_BASE_URL` | `enrich.musicBrainzBaseURL` | Advanced. Point enrichment at a self-hosted Atlas metadata service instead of public MusicBrainz. Set together with the CoverArt override below. |
+| `BRIDGE_ENRICH_ENABLED` | `enrich.enabled` | `true`/`false`, on when unset. `false` stops the background enricher: nothing goes to MusicBrainz, the Cover Art Archive, Deezer or a mirror set below, and acoustic fingerprinting stops with it. Covers, IDs and artist photos already fetched stay, and the bridge still serves them. The Atlas harvest, the update check and certificate renewal are separate, and go on. |
+| `BRIDGE_ENRICH_DEEZER_ENABLED` | `enrich.deezerEnabled` | `true`/`false`, on when unset. `false` stops only the Deezer artist-photo lookups, which no mirror takes over. |
+| `BRIDGE_MUSICBRAINZ_BASE_URL` | `enrich.musicbrainzBaseURL` | Advanced. Point enrichment at a self-hosted Atlas metadata service instead of public MusicBrainz. Set together with the CoverArt override below. The Deezer artist-photo lookups still go to Deezer. |
 | `BRIDGE_COVERART_BASE_URL` | `enrich.coverArtBaseURL` | Advanced. Cover-art source base URL; pair it with the MusicBrainz override above. |
 
-`BRIDGE_DISABLE_HTTP3`, `BRIDGE_UPSCALE_ENABLED`, and
-`BRIDGE_ANALYSIS_ENABLED` are parsed with Go's `strconv.ParseBool`:
+The `true`/`false` variables above are parsed with Go's `strconv.ParseBool`:
 `true`/`false` (also `1`/`0`, `t`/`f`). A value it can't parse — `yes`,
-`on` — is silently ignored, leaving the YAML/default in place.
+`on` — is ignored, with a warning in the log naming the variable, leaving
+the YAML/default in place.
 
 Beyond the config-mapping vars above, the container also honours a few
 non-config env vars: **`TS_AUTHKEY`** (Tailscale `tsnet` headless auth — see
@@ -417,11 +419,12 @@ docker run -d --name 1-bit-bridge --hostname 1-bit-bridge --restart unless-stopp
 ```
 
 Equivalently, set `upscale.enabled: true` / `analysis.enabled: true` in
-`bridge.yaml`, or use the admin console's Settings toggle (restart to
-apply). Env wins over YAML, so `-e BRIDGE_UPSCALE_ENABLED=false` is a
+`bridge.yaml`, or use the admin console's Settings toggle, which applies
+at once. Env wins over YAML, so `-e BRIDGE_UPSCALE_ENABLED=false` is a
 clean kill-switch over a YAML that has it on. Use `true` / `false` — a
-value `strconv.ParseBool` can't decode (`yes`, `on`) is silently
-ignored, so a typo reads as "unchanged," not "off."
+value `strconv.ParseBool` can't decode (`yes`, `on`) is ignored, with a
+warning in the log naming the variable, so a typo reads as "unchanged,"
+not "off."
 
 Verify the toolchain resolved:
 

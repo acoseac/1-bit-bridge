@@ -366,13 +366,15 @@ A client renders a per-track "pending / matched / no-cover" badge purely from th
 
 | `enriched` | `artworkMBID` | State | Meaning |
 |---|---|---|---|
-| `false` (or absent¹) | — | **pending** | still queued for the enricher; a cover may still appear |
+| `false` (or absent¹) | — | **pending** | still queued for the enricher; while enrichment is on, a cover may still appear |
 | `true` | present | **matched** | a cover is cached and served by `/v1/artwork/{mbid}` |
 | `true` | absent | **missing** | enriched, but no cover was found anywhere (MB / CAA / CAA-release-group / iTunes all missed, or there was no MB match) — a persistent coverage gap |
 
 ¹ Absent `enriched` (a pre-v1.1 server) is treated as "fully enriched" per the back-compat rule above, so those tracks resolve to **matched** / **missing** by `artworkMBID` presence — never **pending**. A `local-<sha256>` `artworkMBID` (a curated `cover.jpg` / embedded APIC) is a present value, so it reads as **matched**.
 
 **A transient failure is deliberately indistinguishable from pending.** On an upstream outage the bridge leaves `enriched` at `false` (the `IsTransient` guard) precisely so the row is retried — so a client cannot, and should not try to, tell "still queued" apart from "failed transiently, will retry" from the manifest alone. Both present as **pending** and both self-heal. Operators who want the pending / matched / missing *counts* for the whole library read them from the loopback admin console (`GET /api/enrichment`), which derives the same split server-side.
+
+**While enrichment is off.** An operator can switch the bridge's enrichment off (`enrich.enabled: false`, backlog B617): the enricher then takes no turn and stamps no row, so a row it has not processed stays `enriched: false`, and its **pending** means queued for a turn that comes only once enrichment is on again, not that a cover may still appear. Nothing already fetched is removed or hidden: `enriched`, `artworkMBID`, `artistMBID` and the covers and portraits the bridge cached stay as they are, and are served. A shipped app needs nothing: the wire shape is unchanged, and the rows that waited are processed when enrichment is on again.
 
 #### Manifest-level `enrichmentProgress` (additive, since v1.1)
 
@@ -385,6 +387,8 @@ A client renders a per-track "pending / matched / no-cover" badge purely from th
 iOS uses this to render an "Enrichment in progress (X / Y)…" footer and gates the suppression-of-negative-cache behaviour on a 24h freshness check on `lastEnrichedAt` — a bridge that went idle a week ago shouldn't make the iOS UI claim enrichment is "still happening".
 
 **Pagination behaviour.** `enrichmentProgress` is populated only on the **first page** of a paginated full-manifest response (request has no `cursor`) and on every non-paginated response. Same first-page-only convention as `folders` / `total` — the values are stable across a pagination run, so iOS snapshots them off the first page and ignores any later pages.
+
+**Absent while enrichment is off.** A bridge whose operator has switched enrichment off (`enrich.enabled: false`, backlog B617) omits `enrichmentProgress` from every manifest response, full, paginated first page and `since` delta alike, a delta that carries no row included: no enrichment is in progress, and a block whose `tracksEnriched` stays below `tracksTotal` would read as "Enrichment in progress" for as long as the switch is off. `/v1/manifest` carries no validator, so every sync gets a whole response, and the iOS app assigns the block from a sync's first page, an absent block included: its next sync of either kind clears the footer, with no app change. When enrichment is on again, the block is back on the next response. The per-track `enriched` field is unaffected.
 
 Both fields are additive — `ProtocolVersion` stays at `1`. Pre-v1.1 servers omit them; pre-v1.1 clients ignore them.
 
@@ -1325,6 +1329,8 @@ Serve cached album / artist artwork keyed by MusicBrainz release (or artist) MBI
 
 **Never returned for a `local-<sha256>` artwork MBID.** Those bytes are extracted by the server's library scanner (embedded cover art, or a `cover.jpg` / `folder.jpg` beside the audio file), not fetched from any upstream, so "enrichment complete" carries no information about them — and the scanner restores a missing one on its next pass. A cache miss on a `local-` MBID is therefore always `202`.
 
+**While enrichment is off** (the operator's `enrich.enabled: false`, backlog B617), a miss on a MusicBrainz key answers `404 no_image` where it would answer `202 pending`: the enricher takes no turn while it is off, so a cover or portrait the `202` would promise cannot arrive, and a retry ladder after it buys nothing. Everything else answers as above: bytes already cached are served (`200`), a `local-<sha256>` miss is still `202`, an unknown key is still `not_found`, and a fault in the server's pending probe still fails open to `202`. When enrichment is on again, a key whose tracks still wait answers `202` from the next request, and the iOS app, which asks again for imageless keys at each sync, fills it in with no app change. With only Deezer switched off (`enrich.deezerEnabled: false`), an artist enriched meanwhile gets no portrait, and its key answers `no_image` like any other miss until the operator turns Deezer on and retries the missing portraits.
+
 **Response** (`404 Not Found`, `error: "not_found"`): the image is not cached under the requested key — the MBID (or 16-hex version tag) is unknown: no track in the manifest references it. Since the size ladder, a supported off-tier `size` can no longer produce this for a release whose cover IS cached. Clients SHOULD treat it as terminal *for that key* and render a placeholder rather than re-requesting the same URL.
 
 **Response** (`400 Bad Request`): MBID is not a valid UUID, or `size` parameter is out of range.
@@ -2177,7 +2183,7 @@ Errors are JSON, with the exceptions listed under the table:
 |    403 | `demo_read_only`         | Demo bridge: the four upscale mutations (`POST /v1/upscale`, `POST /v1/upscale/batch`, `DELETE /v1/upscale/batches/{id}`, `DELETE /v1/upscale/variants`), `POST /v1/atlas-ingest`, `DELETE /v1/atlas-harvest/credential`, and `POST /v1/atlas-harvest/credential` while `atlas.harvestBaseUrl` is unset |
 |    403 | `harvest_base_url_not_allowed` | `POST /v1/atlas-harvest/credential` whose `atlasBaseUrl` is not the configured `atlas.harvestBaseUrl`, in any mode |
 |    404 | `not_found`              | Path does not exist in any library root (`/v1/list`, `/v1/stat`, `/v1/read`, `/v1/download`, `/v1/waveform`, `/v1/spectrum`, `/v1/lyrics`, `POST /v1/upscale`); an artwork or artist-image key that no track references; no booklet, custom cover, cached Atlas metadata or playlist for the key; `/v1/booklet` or `/v1/renderers` with the feature off |
-|    404 | `no_image`               | Artwork / artist-image enrichment complete; no image exists upstream (terminal) |
+|    404 | `no_image`               | Artwork / artist-image enrichment complete; no image exists upstream, or enrichment is switched off on the bridge (terminal) |
 |    404 | `variant_not_found`      | `/v1/download?variant=` (or `/v1/read`) names no rendition of the track, or `DELETE /v1/upscale/variants` while upscaling is not active |
 |    404 | `waveform_not_found`     | `GET /v1/waveform`: no waveform cached for the track yet |
 |    404 | `spectrum_not_found`     | `GET /v1/spectrum`: no spectrum for the track yet |

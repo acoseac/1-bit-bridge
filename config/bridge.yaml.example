@@ -166,13 +166,27 @@ libraryName: "My Music Library"
 # autocert:
 #   domain: bridge.example.com
 
-# enrich: override where the background enricher fetches cover art +
-#   MusicBrainz IDs. Both empty by default (public MusicBrainz + Cover Art
-#   Archive). Point them at a self-hosted Atlas mirror
-#   (github.com/acoseac/1-bit-atlas) to keep enrichment on your own network.
-#   Also settable in the admin console (Settings -> General -> Metadata
-#   enrichment) and via BRIDGE_MUSICBRAINZ_BASE_URL / BRIDGE_COVERART_BASE_URL.
+# enrich: the background enricher, which fills in cover art, MusicBrainz IDs
+#   and artist photos. It sends the artist and album names your files carry
+#   to MusicBrainz, the release IDs it finds to the Cover Art Archive, and
+#   artist names to Deezer for photos.
+#   enabled: false stops it, and acoustic fingerprinting with it: nothing goes
+#   to MusicBrainz, the Cover Art Archive, Deezer or a mirror set below.
+#   deezerEnabled: false stops only the Deezer photo lookups. Both are on when
+#   absent and apply at once from the admin console (Settings -> Metadata),
+#   which writes only an off; also BRIDGE_ENRICH_ENABLED /
+#   BRIDGE_ENRICH_DEEZER_ENABLED. Covers, IDs and photos already fetched stay,
+#   and the bridge still serves them. The Atlas harvest (atlas below), the
+#   update check and certificate renewal are separate, and go on.
+#   musicbrainzBaseURL and coverArtBaseURL say where it looks: both empty by
+#   default (public MusicBrainz + Cover Art Archive). Point them at a
+#   self-hosted Atlas mirror (github.com/acoseac/1-bit-atlas) to keep those two
+#   lookups on your own network; the Deezer photo lookups still go to Deezer,
+#   since no mirror takes them over. Also settable in the admin console and via
+#   BRIDGE_MUSICBRAINZ_BASE_URL / BRIDGE_COVERART_BASE_URL.
 # enrich:
+#   enabled: false
+#   deezerEnabled: false
 #   musicbrainzBaseURL: "https://atlas.example.com/ws/2"
 #   coverArtBaseURL: "https://atlas.example.com"
 
@@ -181,8 +195,8 @@ libraryName: "My Music Library"
 #   source): when enabled, the bridge accepts metadata pushed by the 1-bit app
 #   (which holds the Atlas access key — the open-source bridge never does) via
 #   POST /v1/atlas-ingest and serves it back via GET /v1/atlas-meta/* to all
-#   your devices. Also toggleable in the admin console (Settings -> General ->
-#   Metadata enrichment). metaTtlHours is the freshness window (default 720).
+#   your devices. Also toggleable in the admin console (Settings -> Metadata).
+#   metaTtlHours is the freshness window (default 720).
 # atlas:
 #   enabled: true
 #   metaTtlHours: 720
