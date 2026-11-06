@@ -2996,7 +2996,7 @@ func (s *Store) UnenrichedTracks(ctx context.Context, limit int) ([]Track, error
 			return nil, err
 		}
 		var t Track
-		if err := json.Unmarshal(raw, &t); err != nil {
+		if err := decodeStoredTrack(raw, &t); err != nil {
 			return nil, err
 		}
 		t.rowVersion, t.hasRowVersion = version, true
@@ -3176,7 +3176,67 @@ func marshalForStorage(t *Track) ([]byte, error) {
 	clone.DRScore = nil
 	clone.BandwidthHz = nil
 	clone.AudioMD5State = ""
-	return json.Marshal(&clone)
+	if t.taggedYear == nil {
+		return json.Marshal(&clone)
+	}
+	return json.Marshal(storedTrackWithRecord{Track: &clone, TaggedYear: &taggedYearJSON{Year: t.taggedYear.year}})
+}
+
+// taggedYearKey is the tags_json key of the year pass's record
+// (Track.taggedYear). No exported Track field marshals under it.
+const taggedYearKey = "taggedYear"
+
+// taggedYearJSON is a yearRecord as tags_json stores it: an object, so a
+// tag that gave no year (`{}`) is told apart from no record (no key).
+type taggedYearJSON struct {
+	Year *int `json:"year,omitempty"`
+}
+
+// storedTrackWithRecord is a Track as tags_json stores it with the year
+// pass's record: encoding/json writes the embedded Track's fields, in their
+// order, and then the record, last, under taggedYearKey. The record was
+// spliced into the marshalled bytes by hand until round 3 of backlog B756,
+// which a size computed from their length did (CodeQL's
+// go/allocation-size-overflow); the bytes are the same.
+type storedTrackWithRecord struct {
+	*Track
+	TaggedYear *taggedYearJSON `json:"taggedYear"`
+}
+
+// decodeStoredTrack decodes a row's tags_json into t, the year pass's record
+// (Track.taggedYear) included, which json.Unmarshal of a Track cannot see.
+// Every reader of a stored Track decodes through it, so a writer that writes
+// back a Track it read (the enricher's stamp, the reconciliation writer)
+// keeps the record.
+func decodeStoredTrack(raw []byte, t *Track) error {
+	if err := json.Unmarshal(raw, t); err != nil {
+		return err
+	}
+	rec, err := decodeStoredRecord(raw)
+	if err != nil {
+		return err
+	}
+	t.taggedYear = rec
+	return nil
+}
+
+// decodeStoredRecord is the year pass's record a row's tags_json holds, nil
+// for none. It is looked for only in a row that holds its key, so a row
+// without one costs a byte search.
+func decodeStoredRecord(raw []byte) (*yearRecord, error) {
+	if !bytes.Contains(raw, []byte(`"`+taggedYearKey+`"`)) {
+		return nil, nil
+	}
+	var rec struct {
+		TaggedYear *taggedYearJSON `json:"taggedYear"`
+	}
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		return nil, err
+	}
+	if rec.TaggedYear == nil {
+		return nil, nil
+	}
+	return &yearRecord{year: rec.TaggedYear.Year}, nil
 }
 
 // ErrTrackChanged answers a write back of a row that is no longer the row
@@ -3223,8 +3283,9 @@ const markEnrichedSQL = `
 // Holds `s.mu` for the SQL exec so an in-flight enrichment update never
 // races a `UpsertTrackBatch` from the scanner — both are writers and
 // the contract documented on the Store type forbids them from
-// overlapping in SQLite. JSON marshalling stays outside the lock so
-// the critical section is one statement long.
+// overlapping in SQLite. JSON marshalling stays outside the lock, but for
+// the rare row whose year record was written since t was read, so the
+// critical section is the record's read and the one statement.
 func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 	if !t.hasRowVersion {
 		return fmt.Errorf("MarkEnriched %s: %w", t.Path, errTrackNotRead)
@@ -3235,6 +3296,21 @@ func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// The year pass's record is the row's, never t's: a record written alone
+	// since t was read (the stamp leg's yearRecordOnly write, backlog B756
+	// round 3) moved no indexed_at, so the compare-and-set below cannot see
+	// it, and t's copy would put the old record back. A row no longer at t's
+	// version has none to carry; the statement then writes nothing.
+	if carried, ok, err := s.storedYearRecordAt(ctx, t.Path, t.rowVersion); err != nil {
+		return err
+	} else if ok && !sameYearRecord(carried, t.taggedYear) {
+		withRow := *t
+		withRow.taggedYear = carried
+		if raw, err = marshalForStorage(&withRow); err != nil {
+			return err
+		}
+		t.taggedYear = carried
+	}
 	// `indexed_at` MUST bump on every enrichment write — without it,
 	// iOS delta-sync (`WHERE indexed_at > since`) silently drops
 	// enriched rows from incremental manifest fetches. The track was
@@ -3247,7 +3323,8 @@ func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 	// library-wide max, so a same-nanosecond clock (test-injected fakes,
 	// low-res wall clocks, rapid back-to-back enrichment writes) still
 	// produces a strictly-greater indexed_at. That is also what makes
-	// indexed_at a version: every tags_json writer moves it.
+	// indexed_at a version: every tags_json writer moves it, but the stamp
+	// leg's write of a year record alone, which is carried above.
 	//
 	// The v25 format-fact columns are deliberately NOT re-stamped here:
 	// enrichment only adds MBIDs / artwork refs to tags_json — it never
@@ -3265,6 +3342,22 @@ func (s *Store) MarkEnriched(ctx context.Context, t *Track) error {
 	t.rowVersion = wrote
 	s.noteLibrary(ctx)
 	return nil
+}
+
+// storedYearRecordAt is the year pass's record of the row at path while it
+// is at version (Track.rowVersion), and ok false when no row is there at that
+// version. The caller holds s.mu.
+func (s *Store) storedYearRecordAt(ctx context.Context, path string, version int64) (rec *yearRecord, ok bool, err error) {
+	var raw []byte
+	err = s.db.QueryRowContext(ctx, `SELECT tags_json FROM tracks WHERE path = ? AND indexed_at = ?`, path, version).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	rec, err = decodeStoredRecord(raw)
+	return rec, err == nil, err
 }
 
 // enrichmentMissPredicateSQL is the "this row is missing something the enricher
@@ -3421,12 +3514,14 @@ func (s *Store) ApplyAlbumArtistReconciliation(ctx context.Context, changed []Tr
 	return s.applyReconciledTracks(ctx, changed)
 }
 
-// ApplyYearReconciliation persists year-reconciled tracks (the fill-missing
-// pass in reconcileYears). Identical contract to
-// ApplyAlbumArtistReconciliation: rewrites tags_json, strict-advances
-// indexed_at so iOS delta-sync surfaces the change, and leaves enriched_at
-// untouched (reconciliation is a metadata-consistency pass, not
-// re-enrichment).
+// ApplyYearReconciliation persists year-reconciled tracks: the tracks
+// reconcileYears gives their album's one year (a missing year, a
+// composition date, or another recording year rewritten to the album's
+// dominant one), and the strays reconcileYearsByMBID fills. Identical
+// contract to ApplyAlbumArtistReconciliation: rewrites tags_json,
+// strict-advances indexed_at so iOS delta-sync surfaces the change, and
+// leaves enriched_at untouched (reconciliation is a metadata-consistency
+// pass, not re-enrichment).
 func (s *Store) ApplyYearReconciliation(ctx context.Context, changed []Track) (int, error) {
 	return s.applyReconciledTracks(ctx, changed)
 }
@@ -3591,11 +3686,33 @@ func (s *Store) applyReconciledTracks(ctx context.Context, changed []Track) (int
 // bumps are the only indexed_at writes the stamp leg makes, each through
 // bumpIndexedAtByPathSQL.
 //
+// A row marked yearRecordOnly differs from its stored row in the year pass's
+// record alone (markStampIfUnchanged), and its tags_json is written first,
+// with that record, and nothing else: no indexed_at advance, no enriched_at
+// reset, since nothing a client reads changed (backlog B756 round 3). It is
+// written only while the row is still the one its re-read was merged with
+// (t.rowVersion), as a write-back is (B187); a row another writer changed
+// since is left as it is, unstamped, and the next scan reads it again.
+// MarkEnriched carries the record forward, so the enricher's write-back of a
+// read made before this one does not put the old record back.
+//
 // Holds `s.mu` per the writer contract on Store; one transaction with a
 // prepared statement (the applyReconciledTracks template).
 func (s *Store) StampExtractorVersionBatch(ctx context.Context, ts []*Track) error {
 	if len(ts) == 0 {
 		return nil
+	}
+	// The record-only rows' tags_json, marshalled before the lock.
+	recordRaw := make(map[*Track][]byte)
+	for _, t := range ts {
+		if !t.yearRecordOnly {
+			continue
+		}
+		raw, err := marshalForStorage(t)
+		if err != nil {
+			return err
+		}
+		recordRaw[t] = raw
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -3621,9 +3738,29 @@ func (s *Store) StampExtractorVersionBatch(ctx context.Context, ts []*Track) err
 		return err
 	}
 	defer stmt.Close()
+	var recordStmt *sql.Stmt
+	if len(recordRaw) > 0 {
+		recordStmt, err = tx.PrepareContext(ctx, `UPDATE tracks SET tags_json = ? WHERE path = ? AND indexed_at = ?`)
+		if err != nil {
+			return err
+		}
+		defer recordStmt.Close()
+	}
 	now := s.now().UnixNano()
 	var lyricsBumped bool
 	for _, t := range ts {
+		if raw, ok := recordRaw[t]; ok {
+			res, err := recordStmt.ExecContext(ctx, raw, t.Path, t.rowVersion)
+			if err != nil {
+				return err
+			}
+			if n, raErr := res.RowsAffected(); raErr != nil || n == 0 {
+				// The row is not the one the re-read was merged with (or
+				// the driver cannot say): leave it unstamped for the next
+				// scan to read again.
+				continue
+			}
+		}
 		if _, err := stmt.ExecContext(ctx, ExtractorVersion, t.audioMD5, t.folderArtKey,
 			boolToInt(t.extractRefused), t.Path); err != nil {
 			return err
@@ -4485,7 +4622,7 @@ func (s *Store) GetTrackWithStat(ctx context.Context, path string) (*Track, int6
 		return nil, 0, 0, err
 	}
 	var t Track
-	if err := json.Unmarshal(raw, &t); err != nil {
+	if err := decodeStoredTrack(raw, &t); err != nil {
 		return nil, 0, 0, err
 	}
 	t.rowVersion, t.hasRowVersion = version, true
@@ -4527,7 +4664,7 @@ func (s *Store) GetTrack(ctx context.Context, path string) (*Track, error) {
 		return nil, err
 	}
 	var t Track
-	if err := json.Unmarshal(raw, &t); err != nil {
+	if err := decodeStoredTrack(raw, &t); err != nil {
 		return nil, err
 	}
 	t.rowVersion, t.hasRowVersion = version, true
@@ -4639,7 +4776,7 @@ func (s *Store) lookupTrackByLowerCase(ctx context.Context, cleaned string) (*Tr
 		return nil, err
 	}
 	var t Track
-	if err := json.Unmarshal(raw, &t); err != nil {
+	if err := decodeStoredTrack(raw, &t); err != nil {
 		return nil, err
 	}
 	t.rowVersion, t.hasRowVersion = version, true
@@ -5005,7 +5142,7 @@ func scanListedTrack(rows *sql.Rows, t *Track) error {
 		return err
 	}
 	*t = Track{}
-	if err := json.Unmarshal(raw, t); err != nil {
+	if err := decodeStoredTrack(raw, t); err != nil {
 		return err
 	}
 	t.rowVersion, t.hasRowVersion = version, true
@@ -6750,10 +6887,29 @@ func (s *Store) doomedReapSidecarsTx(ctx context.Context, tx *sql.Tx, variantQue
 	return out, nil
 }
 
-// IncrementMissingTracksAndDeleteAtThreshold bumps missing_count on
-// every row whose path is in `missingPaths` AND atomically deletes any
-// row whose new missing_count >= threshold. Returns the number of rows
-// that were deleted.
+// MissingTracksPass is what one pass of IncrementMissingTracks did.
+type MissingTracksPass struct {
+	// Deleted is the number of rows it deleted at the threshold.
+	Deleted int64
+	// NewlyMissing is the number of rows it counted missing for the first
+	// time (missing_count 0 to 1). It is the duplicate election's input
+	// (dupes.Row.Missing: a row the last scan did not find never wins its
+	// group), so a scan that writes and deletes nothing still has to elect
+	// again when it is not 0 (backlog B756 round 3).
+	NewlyMissing int64
+}
+
+// IncrementMissingTracksAndDeleteAtThreshold is IncrementMissingTracks for a
+// caller that needs only the number of rows it deleted.
+func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, missingPaths []string, threshold int) (int64, error) {
+	pass, err := s.IncrementMissingTracks(ctx, missingPaths, threshold)
+	return pass.Deleted, err
+}
+
+// IncrementMissingTracks bumps missing_count on every row whose path is in
+// `missingPaths` AND atomically deletes any row whose new missing_count >=
+// threshold. It returns the number of rows that were deleted, and the number
+// it counted missing for the first time (MissingTracksPass).
 //
 // This is the operational core of the silent-empty-enumeration defence
 // (see migration v5 doc). The scanner identifies tracks that were in
@@ -6809,29 +6965,30 @@ func (s *Store) doomedReapSidecarsTx(ctx context.Context, tx *sql.Tx, variantQue
 // preserve the legacy immediate-delete behaviour when set to 1.
 //
 // Holds `s.mu` per the writer contract on Store.
-func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, missingPaths []string, threshold int) (int64, error) {
+func (s *Store) IncrementMissingTracks(ctx context.Context, missingPaths []string, threshold int) (MissingTracksPass, error) {
 	if len(missingPaths) == 0 || threshold < 1 {
-		return 0, nil
+		return MissingTracksPass{}, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, err
+		return MissingTracksPass{}, err
 	}
 	defer tx.Rollback()
-	stmt, err := tx.PrepareContext(ctx, `UPDATE tracks SET missing_count = missing_count + 1 WHERE path = ?`)
+	// RETURNING the new count tells a row counted missing for the first time
+	// (1) from one already missing.
+	stmt, err := tx.PrepareContext(ctx, `UPDATE tracks SET missing_count = missing_count + 1 WHERE path = ? RETURNING missing_count`)
 	if err != nil {
-		return 0, err
+		return MissingTracksPass{}, err
 	}
 	defer stmt.Close()
+	var newlyMissing int64
 	for _, p := range missingPaths {
-		// ExecContext (not Exec) so a cancelled / timed-out scan stops
-		// the per-row loop instead of running to completion ctx-blind.
-		res, err := stmt.ExecContext(ctx, p)
-		if err != nil {
-			return 0, err
-		}
+		// QueryRowContext (not QueryRow) so a cancelled / timed-out scan
+		// stops the per-row loop instead of running to completion ctx-blind.
+		var count int64
+		err := stmt.QueryRowContext(ctx, p).Scan(&count)
 		// Diagnostic: a missingPaths entry that doesn't match any
 		// row is a scanner / store-state desync. Pre-fix the
 		// silent `_` discard would mask a path-shape drift
@@ -6841,10 +6998,17 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 		// fire its deletion path. Log at warn (the bridge is
 		// still functional; this is operator-actionable
 		// detection of a real bug upstream).
-		if affected, raErr := res.RowsAffected(); raErr == nil && affected == 0 {
+		if errors.Is(err, sql.ErrNoRows) {
 			logger.Warn("IncrementMissingTracks: missing path did not match any row",
 				"path", p,
 			)
+			continue
+		}
+		if err != nil {
+			return MissingTracksPass{}, err
+		}
+		if count == 1 {
+			newlyMissing++
 		}
 	}
 	// The delete is SCOPED to the paths this pass actually observed
@@ -6907,7 +7071,7 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 	if len(valid) > 0 {
 		missingBlob, err := json.Marshal(valid)
 		if err != nil {
-			return 0, err
+			return MissingTracksPass{}, err
 		}
 		// Enumerate the doomed rows' sidecars BEFORE the DELETE — the
 		// CASCADE takes the track_variants / track_analysis rows with the
@@ -6915,7 +7079,7 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 		// Same predicate, same binds; see thresholdReapBatchWhereSQL.
 		sc, err := s.doomedReapSidecarsTx(ctx, tx, reapVariantSidecarsBatchSQL, reapWaveformWhereBatchSQL, threshold, string(missingBlob))
 		if err != nil {
-			return 0, err
+			return MissingTracksPass{}, err
 		}
 		doomedSidecars = append(doomedSidecars, sc...)
 		// Journal the doomed paths BEFORE the DELETE, same predicate +
@@ -6923,11 +7087,11 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 		// learn about the reap on their next sync.
 		if _, err := tx.ExecContext(ctx, journalThresholdReapBatchSQL,
 			s.now().UnixNano(), threshold, string(missingBlob)); err != nil {
-			return 0, err
+			return MissingTracksPass{}, err
 		}
 		res, err := tx.ExecContext(ctx, deleteTracksAtThresholdBatchSQL, threshold, string(missingBlob))
 		if err != nil {
-			return 0, err
+			return MissingTracksPass{}, err
 		}
 		n, raErr := res.RowsAffected()
 		if raErr != nil {
@@ -6942,7 +7106,7 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 	if len(illFormed) > 0 {
 		delStmt, err := tx.PrepareContext(ctx, deleteTracksAtThresholdOneSQL)
 		if err != nil {
-			return 0, err
+			return MissingTracksPass{}, err
 		}
 		defer delStmt.Close()
 		for _, p := range illFormed {
@@ -6952,7 +7116,7 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 			// they would be the one reaped population whose sidecars leak.
 			sc, err := s.doomedReapSidecarsTx(ctx, tx, reapVariantSidecarsOneSQL, reapWaveformWhereOneSQL, p, threshold)
 			if err != nil {
-				return 0, err
+				return MissingTracksPass{}, err
 			}
 			doomedSidecars = append(doomedSidecars, sc...)
 			// Journal (same predicate + binds as the DELETE below). The
@@ -6960,11 +7124,11 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 			// from `tracks` directly, no JSON array involved.
 			if _, err := tx.ExecContext(ctx, journalThresholdReapOneSQL,
 				s.now().UnixNano(), p, threshold); err != nil {
-				return 0, err
+				return MissingTracksPass{}, err
 			}
 			res, err := delStmt.ExecContext(ctx, p, threshold)
 			if err != nil {
-				return 0, err
+				return MissingTracksPass{}, err
 			}
 			// n is 0 when raErr is non-nil, so the accumulation is
 			// the same undercount-and-commit policy as the batch arm.
@@ -6977,7 +7141,7 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, err
+		return MissingTracksPass{}, err
 	}
 	// Files unlinked once, after the single commit and still UNDER s.mu —
 	// the SELECT-sidecars → DELETE-rows → os.Remove-files sequence is
@@ -6988,7 +7152,7 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 	if deleted > 0 {
 		s.noteLibrary(ctx)
 	}
-	return deleted, nil
+	return MissingTracksPass{Deleted: deleted, NewlyMissing: newlyMissing}, nil
 }
 
 // IncrementMissingFoldersAndDeleteAtThreshold is the folders-table sibling
@@ -7177,11 +7341,27 @@ func (s *Store) PendingDeletions(ctx context.Context) (int64, error) {
 // Cheap single-row UPDATE on the PRIMARY KEY index. Missing rows
 // silently no-op (RowsAffected == 0). Holds `s.mu` per the writer
 // contract on Store.
-func (s *Store) ResetTrackMissingCount(ctx context.Context, path string) error {
+//
+// cleared reports that the row was counted missing and is not now: the
+// duplicate election's input changed (dupes.Row.Missing), so a scan that
+// writes nothing else still has to elect again (backlog B756 round 3). A
+// count the driver could not read reports cleared, since one election too
+// many costs a pass and one too few leaves a copy hidden.
+func (s *Store) ResetTrackMissingCount(ctx context.Context, path string) (cleared bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.ExecContext(ctx, `UPDATE tracks SET missing_count = 0 WHERE path = ? AND missing_count != 0`, path)
-	return err
+	res, err := s.db.ExecContext(ctx, `UPDATE tracks SET missing_count = 0 WHERE path = ? AND missing_count != 0`, path)
+	if err != nil {
+		return false, err
+	}
+	return rowsChanged(res), nil
+}
+
+// rowsChanged reports whether a statement changed a row, answering yes when
+// the driver cannot say.
+func rowsChanged(res sql.Result) bool {
+	n, err := res.RowsAffected()
+	return err != nil || n > 0
 }
 
 // ResetTrackMissingCountsUnder sets `missing_count = 0` on every row under
@@ -7196,17 +7376,21 @@ func (s *Store) ResetTrackMissingCount(ctx context.Context, path string) error {
 // container's rows while it was on disk.
 //
 // An empty base is an error, never the whole table. A no-op on rows
-// already at 0. Holds `s.mu` per the writer contract on Store.
-func (s *Store) ResetTrackMissingCountsUnder(ctx context.Context, base string) error {
+// already at 0. Holds `s.mu` per the writer contract on Store. cleared is
+// ResetTrackMissingCount's.
+func (s *Store) ResetTrackMissingCountsUnder(ctx context.Context, base string) (cleared bool, err error) {
 	b, scoped := subtreeRangeBase(base)
 	if !scoped {
-		return errors.New("manifest: ResetTrackMissingCountsUnder needs a prefix")
+		return false, errors.New("manifest: ResetTrackMissingCountsUnder needs a prefix")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.ExecContext(ctx, `UPDATE tracks SET missing_count = 0
+	res, err := s.db.ExecContext(ctx, `UPDATE tracks SET missing_count = 0
 		WHERE path COLLATE BINARY >= ? || '/' AND path COLLATE BINARY < ? || '0' AND missing_count != 0`, b, b)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return rowsChanged(res), nil
 }
 
 // ClearMissingCounts wipes all rows where missing_count > 0 in tracks,

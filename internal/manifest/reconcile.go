@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"runtime"
 	"sort"
 	"strings"
 )
@@ -18,6 +19,10 @@ type ReconcileTarget struct {
 	Year               *int
 	TrackNumber        *int
 	MusicBrainzAlbumID string
+	// taggedYear is the row's Track.taggedYear: what its own tag said, when
+	// the year pass moved its Year. reconcileYears votes with it and writes
+	// it; the other passes carry it as it is.
+	taggedYear *yearRecord
 }
 
 // maxStrayTracksForYearFill bounds the MB-ID cross-folder year fill
@@ -93,42 +98,99 @@ func reconcileAlbumArtists(tracks []ReconcileTarget) []ReconcileTarget {
 	return changed
 }
 
-// reconcileYears finds physical albums — tracks that share a directory AND
-// an album title — and fills a missing year from the group's dominant
-// year. A missing year is an absent one. A year before firstPhonographYear
-// is a composition date, and it is missing too when the same group has a
-// recording year. One untagged track (no year) otherwise splits into its
-// own album row on iOS
-// (album identity = `normalize(albumArtist)|normalize(album)|year`), exactly
-// the field-reported Alphaville "[A] Eternally Yours Bonus-EP" case where a
-// single bonus track lost its year tag.
+// reconcileYears gives each physical album one year. A physical album is a
+// group groupByAlbumKey defines: tracks that share a directory AND an album
+// title. Album identity on iOS is
+// `normalize(albumArtist)|normalize(album)|year`, so a group whose tracks
+// carry two years is two album rows there: the field-reported Alphaville
+// "[A] Eternally Yours Bonus-EP" case, where a single bonus track lost its
+// year tag, and a remaster whose tracks carry the original recording's year
+// beside the release's (1968 and 2011 in one folder, backlog B756).
+//
+// The group's year is yearFill's: the dominant recording year when the
+// group has a year of firstPhonographYear or later, and then every track
+// whose year is not it takes it: a missing year (absent, the year=0 "tag
+// absent" sentinel, or negative), a composition date (a year before
+// firstPhonographYear), and a recording year the vote did not pick. A
+// group with no recording year fills only its missing years, from the
+// dominant present year, and its early years stay.
 //
 // Conservative by design, mirroring reconcileAlbumArtists:
 //   - DIRECTORY-scoped: the same (directory, normalized album) grouping —
-//     NEVER crosses directories (classical box-set + distinct-same-name
-//     protection).
-//   - FILL-MISSING only. Absent (nil) and non-positive (the year=0
-//     "tag absent" sentinel) years are filled. When the group has any
-//     year of firstPhonographYear or later, the dominant year is taken
-//     over those recording years alone, and every earlier year takes it
-//     too. A group with no such year fills only the absent ones from the
-//     dominant present year, and the early years stay. A year of
-//     firstPhonographYear or later is left as tagged, so 1974 beside
-//     2022 stays a split.
+//     NEVER crosses directories. "Greatest Hits" in two folders with two
+//     years stays two albums (two editions), and an album split into CD1
+//     and CD2 folders takes a year per folder.
 //   - DOMINANT existing value, not MusicBrainz — preserve the user's tags.
-//     Composition dates do not vote once a recording year is present.
-//     A tie goes to the larger year.
+//     The most common recording year wins, a tie going to the larger, and
+//     composition dates do not vote once a recording year is present.
+//   - DISAGREEMENT-DRIVEN: a group whose years agree is left untouched (do
+//     no harm), and a lone track can't disagree with itself.
 //
-// Returns only the targets needing a fill (Year set to the dominant value),
-// sorted by path for deterministic output. Pure — no I/O.
+// The vote reads what each row's own tag said (votingYear), never what an
+// earlier scan wrote: the first time the pass moves a row's Year it records
+// the year the row held, which is its tag's (taggedYear), and the vote reads
+// that record wherever a row has one. So a group's year is a function of
+// its rows' tags alone, whatever scans came before (backlog B756 round 2):
+// seven 2011s deleted leave five rows that vote 1968, and an album retagged
+// a file at a time follows its files. A row whose year the vote gives back
+// its tag's is moved back and its record dropped, a lone row and a row with
+// no album title included. A row the record never covered (one a fill
+// before the record existed wrote, or the MBID fill) votes its stored year.
+//
+// Returns only the tracks whose year moves (Year and the record set as
+// they become), sorted by path for deterministic output: a row already at
+// its album's year is never returned, so the record never changes alone.
+// Pure — no I/O.
 func reconcileYears(tracks []ReconcileTarget) []ReconcileTarget {
 	groups := groupByAlbumKey(tracks)
+	grouped := make([]bool, len(tracks))
 	var changed []ReconcileTarget
 	for _, idxs := range groups {
-		changed = append(changed, fillMissingYears(tracks, idxs)...)
+		changed = append(changed, albumYearFixes(tracks, idxs)...)
+		for _, i := range idxs {
+			grouped[i] = true
+		}
+	}
+	// A row with no album title is in no group. One the pass moved (when
+	// its title was another) goes back to what its tag said.
+	for i := range tracks {
+		if grouped[i] || tracks[i].taggedYear == nil {
+			continue
+		}
+		if fix, moved := yearMove(tracks[i], votingYear(tracks[i])); moved {
+			changed = append(changed, fix)
+		}
 	}
 	sort.Slice(changed, func(a, b int) bool { return changed[a].Path < changed[b].Path })
 	return changed
+}
+
+// votingYear is what a row's own tag said its year was: the year pass's
+// record when the pass moved the row, else the row's stored year.
+func votingYear(t ReconcileTarget) *int {
+	if t.taggedYear != nil {
+		return t.taggedYear.year
+	}
+	return t.Year
+}
+
+// yearMove returns t with its Year set to want, and whether that moves it.
+// The first move records the year t held, which is what its tag said; a
+// move back to the recorded year drops the record. A row already at want
+// is left as it is, its record too.
+func yearMove(t ReconcileTarget, want *int) (ReconcileTarget, bool) {
+	if sameIntPtr(t.Year, want) {
+		return t, false
+	}
+	fix := t
+	fix.Year = copyIntPtr(want)
+	switch {
+	case t.taggedYear == nil:
+		fix.taggedYear = &yearRecord{year: copyIntPtr(t.Year)}
+	case sameIntPtr(t.taggedYear.year, want):
+		fix.taggedYear = nil
+	}
+	return fix, true
 }
 
 // firstPhonographYear is the year of Edison's phonograph, the first
@@ -138,10 +200,10 @@ func reconcileYears(tracks []ReconcileTarget) []ReconcileTarget {
 // release carries predates this year.
 const firstPhonographYear = 1877
 
-// yearFill is the year a missing track in the group takes. fillEarly is
-// set when that year is a recording year, so a composition date takes it
-// too. A group with no recording year fills from its present years.
-func yearFill(years []*int) (dominant int, fillEarly bool, ok bool) {
+// yearFill is the group's year: the dominant recording year when the group
+// has one, which sets recording, and every track of the group takes it; else
+// the dominant present year, which only a missing year takes.
+func yearFill(years []*int) (dominant int, recording bool, ok bool) {
 	dominant, ok = dominantYear(yearsThatVote(years))
 	if !ok {
 		return 0, false, false
@@ -169,39 +231,43 @@ func recordingYears(years []*int) []*int {
 	return out
 }
 
-// yearTakesFill reports whether y may take the group's fill year. A nil
-// or non-positive year may. A year before firstPhonographYear may when
-// the group has a recording year. A later year stays as tagged.
-func yearTakesFill(y *int, fillEarly bool) bool {
+// yearTakesFill reports whether a track whose year is y takes its group's
+// year, dominant. A nil or non-positive year does. When dominant is a
+// recording year, every year but dominant does too: a composition date, and
+// a recording year the vote did not pick. A group with no recording year
+// leaves its early years as they are.
+func yearTakesFill(y *int, dominant int, recording bool) bool {
 	if !hasYear(y) {
 		return true
 	}
-	return fillEarly && *y < firstPhonographYear
+	return recording && *y != dominant
 }
 
-// fillMissingYears returns the tracks in one directory-and-album group
-// whose year yearTakesFill says can take the group's fill year.
-func fillMissingYears(tracks []ReconcileTarget, idxs []int) []ReconcileTarget {
-	if len(idxs) < 2 {
-		return nil
-	}
-	years := make([]*int, len(idxs))
+// albumYearFixes returns the tracks in one directory-and-album group whose
+// year moves, each as yearMove leaves it. The group votes on what its rows'
+// tags said (votingYear). A row whose vote yearTakesFill says takes the
+// group's year gets it; every other row gets its own vote back, which moves
+// only a row the pass moved before. So a lone row, a group with no present
+// year and a group whose votes agree return only such rows.
+func albumYearFixes(tracks []ReconcileTarget, idxs []int) []ReconcileTarget {
+	votes := make([]*int, len(idxs))
 	for n, i := range idxs {
-		years[n] = tracks[i].Year
+		votes[n] = votingYear(tracks[i])
 	}
-	dom, fillEarly, ok := yearFill(years)
-	if !ok {
-		return nil
+	var dom int
+	var recording, ok bool
+	if len(idxs) >= 2 {
+		dom, recording, ok = yearFill(votes)
 	}
 	var changed []ReconcileTarget
-	for _, i := range idxs {
-		if !yearTakesFill(tracks[i].Year, fillEarly) {
-			continue
+	for n, i := range idxs {
+		want := votes[n]
+		if ok && yearTakesFill(votes[n], dom, recording) {
+			want = &dom // yearMove copies it
 		}
-		fix := tracks[i]
-		y := dom // fresh per fix; never alias the loop/group value
-		fix.Year = &y
-		changed = append(changed, fix)
+		if fix, moved := yearMove(tracks[i], want); moved {
+			changed = append(changed, fix)
+		}
 	}
 	return changed
 }
@@ -277,10 +343,17 @@ func reconcileAlbumTitles(tracks []ReconcileTarget) []ReconcileTarget {
 }
 
 // reconcileYearsByMBID fills a year-0 STRAY's year from a sibling that shares
-// the same MusicBrainz release id — the CROSS-folder analog of reconcileYears
-// (which only fills within one directory). A few loose tracks that lost their
-// year tag but carry the album's MBID (e.g. a stray bonus track filed in its
-// own folder) borrow the dominant year of the MBID group.
+// the same MusicBrainz release id — the CROSS-folder analog of the missing-year
+// fill in reconcileYears, which works within one directory. A few loose tracks
+// that lost their year tag but carry the album's MBID (e.g. a stray bonus track
+// filed in its own folder) borrow the dominant year of the MBID group.
+//
+// FILL-ONLY: a present year is left as it is, so two folders of one release
+// whose years differ (an album split into CD1 and CD2 folders, each folder
+// given its own year by reconcileYears) stay apart: a named residual (backlog
+// B756). It runs after the directory pass, and the directory pass runs again
+// after it (yearAfterMBIDStep), so strays of one folder that borrow different
+// years from their releases take one year in the same scan.
 //
 // Bounded to STRAYS via maxStrayTracksForYearFill: a large year-0 group under
 // one MBID is a full second copy / distinct edition MusicBrainz happens to
@@ -340,10 +413,10 @@ func reconcileYearsByMBID(tracks []ReconcileTarget) []ReconcileTarget {
 }
 
 // pathBase returns the last path segment (directory or file basename),
-// separator-agnostic (POSIX or Windows) with NO extension stripping — mirrors
-// trackDir's separator handling. A root path returns itself.
+// split on pathSeparators, with NO extension stripping — mirrors trackDir's
+// separator handling. A root path returns itself.
 func pathBase(p string) string {
-	if i := strings.LastIndexAny(p, `/\`); i >= 0 {
+	if i := strings.LastIndexAny(p, pathSeparators); i >= 0 {
 		return p[i+1:]
 	}
 	return p
@@ -426,11 +499,11 @@ func backfillTrackNumbersFromPath(tracks []ReconcileTarget) []ReconcileTarget {
 func hasTrackNumber(n *int) bool { return n != nil && *n > 0 }
 
 // pathStem returns the filename stem of a relative track path: the segment
-// after the last "/" or "\" separator, with its extension removed. Separator-
-// agnostic (matching trackDir) so it works for both POSIX and Windows stored
-// path forms. A leading-dot or extension-less basename is returned as-is.
+// after the last separator (pathSeparators, matching trackDir), with its
+// extension removed. A leading-dot or extension-less basename is returned
+// as-is.
 func pathStem(p string) string {
-	if i := strings.LastIndexAny(p, `/\`); i >= 0 {
+	if i := strings.LastIndexAny(p, pathSeparators); i >= 0 {
 		p = p[i+1:]
 	}
 	if dot := strings.LastIndex(p, "."); dot > 0 {
@@ -473,16 +546,35 @@ func groupByAlbumKey(tracks []ReconcileTarget) map[string][]int {
 	return groups
 }
 
-// trackDir returns the directory portion of a relative track path,
-// treating BOTH "/" and "\" as separators — the scanner stores POSIX
-// paths on Linux/macOS and may store Windows paths on Windows, and the
-// grouping only needs to be self-consistent within one library's paths.
-// Root-level files return "".
+// trackDir returns the directory portion of a relative track path, split on
+// pathSeparators. Root-level files return "".
 func trackDir(p string) string {
-	if i := strings.LastIndexAny(p, `/\`); i >= 0 {
+	return trackDirIn(p, pathSeparators)
+}
+
+// trackDirIn is trackDir over the separators seps.
+func trackDirIn(p, seps string) string {
+	if i := strings.LastIndexAny(p, seps); i >= 0 {
 		return p[:i]
 	}
 	return ""
+}
+
+// pathSeparators separate a stored path's components for the passes'
+// directory grouping. relPath writes every path with "/", on every
+// platform (filepath.ToSlash), so on Linux and macOS a backslash is a
+// character of a name: "Band/Live\01.flac" is a file named "Live\01.flac"
+// in "Band", and splitting it there put it in "Band/Live"'s album, a
+// rewrite across two physical directories (backlog B756 round 2). On
+// Windows no name holds a backslash, so it stays a separator there.
+var pathSeparators = pathSeparatorsFor(runtime.GOOS)
+
+// pathSeparatorsFor is pathSeparators on the platform goos.
+func pathSeparatorsFor(goos string) string {
+	if goos == "windows" {
+		return `/\`
+	}
+	return "/"
 }
 
 // dominantAlbumArtist returns the most-frequent NON-EMPTY value and

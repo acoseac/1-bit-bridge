@@ -7,7 +7,12 @@ import (
 	"time"
 )
 
+// TestBackfillTrackNumbersFromPath reads its Windows-shaped path as Windows
+// does, where a backslash separates (underSeparatorsOf); TestPathStem, whose
+// stem the backfill reads, takes the same path as Linux and macOS do, where a
+// backslash is a character of the name.
 func TestBackfillTrackNumbersFromPath(t *testing.T) {
+	underSeparatorsOf(t, "windows")
 	ip := func(n int) *int { return &n }
 	in := []ReconcileTarget{
 		{Path: "Ornette Coleman/Shape of Jazz/06. Congeniality.flac"},                 // nil → 6
@@ -46,18 +51,29 @@ func TestBackfillTrackNumbersFromPath(t *testing.T) {
 }
 
 func TestPathStem(t *testing.T) {
-	cases := map[string]string{
-		"Artist/Album/06. Title.flac": "06. Title",
-		`Artist\Album\06. Title.flac`: "06. Title", // windows separator
-		"06. Title.flac":              "06. Title", // bare basename
-		"Album/Track.with.dots.mp3":   "Track.with.dots",
-		"no-ext-basename":             "no-ext-basename", // no dot, returned as-is
-		"Album/.hidden":               ".hidden",         // leading-dot preserved (dot > 0 guard)
+	cases := []struct {
+		in, windows, elsewhere string
+	}{
+		{"Artist/Album/06. Title.flac", "06. Title", "06. Title"},
+		{`Artist\Album\06. Title.flac`, "06. Title", `Artist\Album\06. Title`}, // a separator on Windows alone
+		{"06. Title.flac", "06. Title", "06. Title"},                           // bare basename
+		{"Album/Track.with.dots.mp3", "Track.with.dots", "Track.with.dots"},
+		{"no-ext-basename", "no-ext-basename", "no-ext-basename"}, // no dot, returned as-is
+		{"Album/.hidden", ".hidden", ".hidden"},                   // leading-dot preserved (dot > 0 guard)
 	}
-	for in, want := range cases {
-		if got := pathStem(in); got != want {
-			t.Errorf("pathStem(%q) = %q, want %q", in, got, want)
-		}
+	for _, goos := range []string{"windows", "linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			underSeparatorsOf(t, goos)
+			for _, c := range cases {
+				want := c.elsewhere
+				if goos == "windows" {
+					want = c.windows
+				}
+				if got := pathStem(c.in); got != want {
+					t.Errorf("pathStem(%q) = %q, want %q", c.in, got, want)
+				}
+			}
+		})
 	}
 }
 
