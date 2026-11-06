@@ -780,8 +780,9 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 			cfg.Autocert.Email = *publicEmail
 		}
 	}
-	// The TLS pair the install serves, and a loopback install's custom
-	// endpoints. The data dir and the roots are in cfg already.
+	// The TLS pair the install serves, the enrichment switches it writes off,
+	// and a loopback install's custom endpoints. The data dir and the roots
+	// are in cfg already.
 	endpointsKept := keepFromPrior(cfg, prior)
 	// And the output block, in either posture, but for a setting the config
 	// did not load with either (priorOutput).
@@ -920,6 +921,9 @@ func initCmd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		warnKeptEndpointsOnAMovedPort(stderr, prior.ListenAddress, cfg.ListenAddress, cfg.CustomEndpoints)
 	}
 	warnOutputNotKept(stderr, outputNotKept)
+	if prior != nil {
+		warnEnrichNotKept(stderr, prior.Enrich.notKept)
+	}
 
 	if !*publicMode {
 		// Box the fingerprint so it stands out from the surrounding
