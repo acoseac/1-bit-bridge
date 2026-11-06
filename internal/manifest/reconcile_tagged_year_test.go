@@ -423,6 +423,38 @@ func TestScanner_ABumpOverRowsStoredWithNoRecordOnlyStampsThem(t *testing.T) {
 	}
 }
 
+// TestScanner_ABumpThatMovesAnAlbumRecordsTheTagsOfTheRowsItMoves: an older
+// bridge's extractor read every file of the seven-and-five album as 1999 and
+// stored the twelve rows with no record. A bump reads seven files as 2011 and
+// five as 1968, every row differs from its row and is held, and the passes
+// give the album 2011: the five are written at 2011 with a record of their
+// 1968 (heldRecord keeps it, since their year moves), so once the seven are
+// deleted they take 1968, as a fresh index of the five files does.
+func TestScanner_ABumpThatMovesAnAlbumRecordsTheTagsOfTheRowsItMoves(t *testing.T) {
+	root := t.TempDir()
+	store, sc := newScanFixture(t, root)
+	sc.SetDeleteThreshold(1)
+	rels := albumOfDates(t, root, "Band/Remastered", "Remastered", sevenAndFive, nil)
+	scanOnce(t, sc, "index")
+	storeYear(t, store, rels, 1999)
+	rewindAll(t, store)
+
+	scanOnce(t, sc, "the bump")
+	requireAlbumYear(t, store, "after the bump", rels, 2011)
+	for _, rel := range rels[:7] {
+		requireNoTaggedYear(t, store, rel)
+	}
+	for _, rel := range rels[7:] {
+		requireTaggedYear(t, store, rel, intptr(1968))
+	}
+
+	for _, rel := range rels[:7] {
+		removeLibraryFile(t, root, rel)
+	}
+	scanOnce(t, sc, "the scan that reaps the seven")
+	requireAlbumYear(t, store, "once the seven are reaped", rels[7:], 1968)
+}
+
 // TestScanner_ACopyKnownMissingNeverWinsItsGroup is the review's third case:
 // the duplicates test's copy-wins shape, with copies[7]'s file removed just
 // before the first scan after the upgrade. Its row survives the deletion
