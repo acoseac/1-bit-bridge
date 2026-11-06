@@ -851,10 +851,12 @@
 - **Reconciliation is directory-scoped and never crosses directories**, picks
   the dominant EXISTING value (never MusicBrainz — MB's classical credits favour
   performers over composers and would shatter composer-sorted libraries), and
-  **leaves `enriched_at` untouched**. Year reconciliation is FILL-MISSING ONLY;
-  a present-but-different year is left alone. The one pass that crosses
-  folders is the year fill by release id (`reconcileYearsByMBID`), bounded to
-  strays (at most three year-0 tracks under one release); this bullet said
+  **leaves `enriched_at` untouched**. The year pass gives a directory's album
+  one year, its dominant recording year, since 2026-11-06 (backlog B756, the
+  bullet after the next); until then it was FILL-MISSING ONLY and left a
+  present-but-different year alone. The one pass that crosses folders is the
+  year fill by release id (`reconcileYearsByMBID`), bounded to strays (at most
+  three year-0 tracks under one release), and fill-only; this bullet said
   none did until 2026-09-29.
 
 - **A year before the phonograph is a composition date beside a recording
@@ -868,8 +870,10 @@
   every year from 1 through 1876 takes it. A group with no year of 1877
   or later keeps the earlier fill: the dominant present year fills only
   the missing ones, and the early years stay. A year of 1877 or later
-  stays as tagged, so 1974 beside 2022 remains a split. The pass leaves
-  `OriginalYear` unset. Grouping, `dupes.albumID` and
+  stayed as tagged, so 1974 beside 2022 remained a split, until backlog
+  B756 (the next bullet) gave it the dominant recording year too; the
+  composition dates' rule is unchanged. The pass leaves `OriginalYear`
+  unset. Grouping, `dupes.albumID` and
   `reconcileYearsByMBID` stay as they are, and `ProtocolVersion` stays 1.
   Extraction stays as it is and `ExtractorVersion` stays 24: `Scan`'s
   tail already runs the pass over every group (`streamReconcileTargets`),
@@ -877,6 +881,103 @@
   scan. `reExtractUnchanged` holds a re-read the pass would rewrite
   (`TestScanner_APreRecordingYearFilledFromTheAlbumDoesNotChurn`). A
   subtree scan runs no pass, so healing waits for the next full scan.
+
+- **A physical album has one year: every track of a directory's album takes
+  the album's dominant recording year** (2026-11-06, backlog B756). The
+  owner's Albums view showed one album as several: the app's album identity
+  is `normalize(albumArtist)|normalize(album)|year`, and `reconcileYears`
+  left a year of 1877 or later as tagged. Measured on the owner's library
+  (20,916 tracks in 1,991 album folders): 18 folders held two or more
+  recording years under one album title, and every one was a single album
+  shown as two or more (The Beatles (Remastered), 1968 and 2011; Buena Vista
+  Social Club, 1997 and 2021; Billie Holiday's Body and Soul, 1957 and 2011;
+  O, Yeah! Ultimate Aerosmith Hits, 2002 and 2006; Work From Home with
+  Blossom Dearie, 100 tracks, 2009 and 2020), each with one album artist and
+  17 of the 18 with one MusicBrainz release. **The rule**: in a group
+  `groupByAlbumKey` defines (one directory, one album title trimmed and
+  lower-cased), when the group has a recording year, every track whose year
+  is not the dominant one takes it: a missing year (nil, 0 or negative), a
+  composition date, and a recording year the vote did not pick. The vote is
+  `yearFill`'s, unchanged: the most common recording year, a tie going to
+  the larger, composition dates not voting. A group with no recording year
+  behaves as before (its missing years take the dominant present year, its
+  early years stay), a lone track and an untitled one are in no group, and
+  only a track whose year moves is returned: 7 × 2011 beside 5 × 1968 is 5
+  targets, so the 7 get no `indexed_at` bump, no revision and no delta
+  entry. No ceiling: 2011 beside 9999 is 9999 (the owner's library holds no
+  year past 2027). **Directory-scoped, as every pass here is**: the 32 titles
+  the owner's library holds in two or more folders with different years are
+  real editions and stay apart; an album in CD1 and CD2 folders takes a year
+  per folder, and `reconcileYearsByMBID` stays fill-only and after the
+  directory pass, so two disc folders of one release whose dominants differ
+  stay two albums (1 of the owner's 103 disc-folder albums, Nina Simone's
+  Remixed: a named residual). **The year pass runs again after the MBID
+  fill** (`yearAfterMBIDStep`, in the tail and in
+  `runReconcileStepsInMemory` alike): two yearless tracks of one folder with
+  different release ids can borrow different years, which only the next
+  scan's year pass made one; the second run changes nothing in a group the
+  MBID fill did not touch, and costs one more stream of the library
+  (measured on legion0: about 110 ms over 21,901 rows, as each step costs,
+  4.5 ms of it the decision). **The vote reads the stored rows, and that
+  stays**: after 12 × 2011 is stored, retagging 3 files to 1968 votes 9 to
+  3 and the 3 are written back, though a fresh index would see 8 × 1968 and
+  4 × 2011. A tag edit moves an album only when the files it re-read outvote
+  its stored year (a whole-album retag does), and an ExtractorVersion bump,
+  which re-reads every tag and judges the held re-reads with all of them in
+  place, moves it once. No field holds the tagged year (the orchestrator's
+  decision). **A subtree scan runs no pass over a changed file**, so a
+  watcher scan stores a changed minority file's own year until the next
+  full scan (`ScanIntervalSec`, 6 h by default), as the other fills have
+  always waited. Healing it there was rejected: a tagger that rewrites an
+  album one file at a time, each followed by a watcher scan, would have each
+  edit voted back by the rows the retag had not reached yet, and the album
+  would never move; without that vote the rows follow the files, and the
+  next full scan finds the new year. **The held settlement** (B188, the next
+  bullet) settles a version-stale re-read of a rewritten row (its file still
+  says 1968): held, judged with every held re-read in place, and stamped,
+  through full and subtree scans. Past `maxHeldReconciles` (10,000, which
+  counts only the re-reads that differ from their rows in the four fields,
+  not the library's rows) a re-read is written as its file reads,
+  re-enriched, and given the album's year again by the tail: one churn per
+  bump, accepted as B188 accepted it, and nothing is re-queued. **An
+  already-indexed library** gets the rule from the tail of its first full
+  scan after the upgrade (serve's initial scan, at its start), with no
+  ExtractorVersion bump. **Duplicates**: `dupes.KeyFor` leaves the directory
+  out, so a track that takes its album's year can share its key with
+  another folder's copy, as two same-year copies always have: one copy stays
+  served, and the suppressed one reaches a delta client as a tombstone.
+  **What else reads the year**: the stored `tags_json` year is what
+  `/v1/manifest` sends, and a rewritten track that stays served reaches a
+  delta client as every fill does; the console's catalog and the DSD album
+  gain group by the same album identity (the album's id changes, and a
+  rendition rendered for one half keeps its gain until rendered again); the
+  favorites tables are the app's document, and the pass writes nothing there
+  (the app's re-key carries the heart and writes the new tuple back; until
+  then a tuple of the old year names no album here). The Atlas harvest, the
+  enricher, the smart mixes and the FTS index read no year; routed rows are
+  excluded, as from every pass (a rewrite there would be undone by the next
+  walk). The per-track year is lost from the row; `originalYear` is
+  untouched. **Don't cross a directory, and don't let a recording year split
+  a physical album.** **Don't write a track already at its album's year, run
+  the passes over a subtree scan's changed files, or change the vote, its
+  tie, its group key or `testdata/album-one-year-cases.json` on one side
+  alone.** The iOS app's mirror of the rule (`LibraryCompositionYears`, for
+  its SMB and on-device sources) reads a byte-identical copy of the table.
+  `TestAnAlbumTakesOneYear` (the table),
+  `TestScanner_AnAlbumOfTwoRecordingYearsTakesOneAndKeepsIt`,
+  `TestScanner_AnAlbumIndexedBeforeTheRuleTakesOneYearAtTheNextFullScan`,
+  `TestScanner_AChangedFileTakesItsAlbumsYear`,
+  `TestScanner_ARetagOfFewerFilesThanTheStoredYearHoldsIsVotedBack`,
+  `TestScanner_ATagEditThatOutvotesTheStoredYearMovesTheAlbum`,
+  `TestScanner_AVersionStaleReReadOfAnAlbumGivenOneYearOnlyStamps`,
+  `TestScanner_ReReadsOfAnAlbumGivenOneYearPastTheHoldLimitSettleInOneScan`,
+  `TestScanner_ASubtreeScanOfAChangedFileSplitsItsAlbumUntilTheNextFullScan`,
+  `TestScanner_AnAlbumRetaggedOneSubtreeScanAtATimeMovesAtTheNextFullScan`,
+  `TestScanner_StraysOfOneFolderThatBorrowDifferentYearsTakeOneInOneScan`,
+  `TestScanner_DiscFoldersOfOneReleaseKeepAYearEach`,
+  `TestScanner_EditionsInTwoFoldersKeepTheirOwnYears`,
+  `TestScanner_AnotherFoldersCopyOfARewrittenTrackIsSuppressedNotLost` and
+  `TestTheYearPassLeavesTheFavoriteAlbumsAsTheyAre` pin it.
 
 - **A version-stale re-read that a reconciliation pass would rewrite is
   judged by the passes, at the scan's tail, with every such re-read in
