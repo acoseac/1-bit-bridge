@@ -78705,3 +78705,170 @@ DSD128 (the Mytek's profile refuses DoP at DSD256), where the gain check
 passes, and a volume moved off 0 dB stopping it at once; the probe's run at
 the player's start, and again only after a replug; no DSD while the state
 refuses it.
+
+## 2026-11-06 — B728 B7 round 2: the review's points, CI and the bots
+
+Worker b728-b7, `feat/b728-b7-cutover` (PR #1415), commits 85f535e0,
+00e8f89c, 388b35e5, d2e7bfb1, d4de2688 and e7a93fb5, and this record's.
+Each point was run red on the code before its fix, or is shown not to hold;
+each fix has a control (`.tmp/_b728-b7/controls_r2.py`: exact-once
+replacements, the bytes restored from memory in a `finally`, each test from
+a compiled binary; the tree clean after each).
+
+**1. A played-out DoP occurrence revoked its native successor** (holds).
+During a DoP→native transition the drained, closed DoP occurrence stayed in
+the chain until the native one was heard; the volume leaving 0 dB while the
+native node was checked had reconciliation revoke the played-out occurrence
+and with it the session's DSD. Red: `TestAPlayedOutDoPOccurrenceStopsNothingAfterIt`
+(auto as the migration leaves DoP at DSD64 and native at DSD128; the check
+after open of the native node held while the controls change): the successor
+refused `native_revoked`. Fix: `reconcileDSD` does not judge an occurrence
+whose output drained or closed, since nothing of it can reach the DAC again.
+Controls: the skip removed (red); every occurrence whose frames are all in
+its sink left alone (`TestAGainChangeRevokesDoPWithoutConsent` red: a DoP
+occurrence still sounding stops).
+
+**2. The probe's answers attributed to another unit** (holds). `ProbeDSD`
+captured the unit, then `Backend.Probe` located and admitted on its own, a
+port binding's check naming a place. Red: `TestAProbeRecordsNothingOfAUnitSwappedInBeforeItsOpen`
+(the probe's check after open held, another model swapped in): 23
+candidates asked of it, its answers kept in the cache and recorded as the
+captured model's `driver_accepted`. Fix: `ProbeRequest.Check`, asked after
+the binding's check; `ProbeDSD` passes `probedUnit`, the captured unit's
+place and enumeration (`binding.SameUnit`, the device number), model key and
+firmware. Controls: no check (both cases red: another model, the same model
+enumerated anew); the check without the enumeration (the second red).
+
+**3. The serial on the wire** (holds). `readDSD`'s model was the raw sysfs
+strings; serve's `playerModelText` took out the boot binding's serial and
+port, which a binding by model or by port does not hold. Red:
+`TestThePublishedModelNamesNoSerialOrPort` published "Test at
+platform-xhci-hcd.0/usb2-1 Test DAC TESTDAC-0001". Fix: `unitText`, the
+reading's own port path and serial taken out. Control: the model raw (red).
+
+**4. A refresh during the first content read** (holds). The first occurrence
+was admitted as its open began; a refresh while it read its first chunk
+published the next set, which reconciliation skipped (not opened), and the
+activation's pointer comparison refused it. Red:
+`TestAChangeWhileTheFirstOccurrenceReadsItsFirstChunk` (the first read past
+the DSF header stalled): a cap above its rate failed the start ("the effective
+DSD set no longer plays this occurrence's plan"); DSD off opened the node
+before refusing. Fix: `start` readmits it under the session's lock and closes
+its done in that step (`readmitDSDLocked`, as `openSuccessor` does), so a set
+published before that step admits it and one after it judges it. Control:
+the readmission removed (both cases red).
+
+**5. `--report` panics** (does not hold). `playerDSD.resolve` and `retry`
+return at once on a nil receiver (their first lines, serve_player_dsd.go).
+`TestOutputPlayWithAReportRunsPastItsFirstSnapshot` runs `--report` past the
+first snapshot's report and a track heard, and calls both on a nil state;
+a control taking `retry`'s nil check out panics it.
+
+**6. A cwd-relative kernel release** (holds where an env names no trees;
+production's names `hostTrees`). Red: `TestOutputPlayReadsTheHostsTreesWhereNoneIsNamed`
+(a zero env and a working directory holding `sys/kernel/osrelease`): the
+release "a-stray-release", the policy's box and the locator at "". Fix:
+`runOutputPlay` takes `env.trees.or(hostTrees)` once, before anything reads
+the box, as serve does. Control: removed (red).
+
+**7. A forced probe left undone** (holds). Red:
+`TestAProbeTheMigrationForcesOnTheTickRuns` (B6's delayed model read: the
+manufacturer string restored after the first try, the part made on the
+tick): the probe asked once in 150 s. Fix: `dsdPartChanged`, which serve's
+supervisor and output play's watch share, marks the probe due for the next
+tick. Control: the mark removed (red).
+
+**8. Native unaffected had no test** (holds, a gap: the control gating native
+on the DoP gain left playback's and the rig's B7 tests green).
+`TestANativeRateIsUnaffectedByAnUnverifiableDoPGain`: a feature unit and an
+unread table; a migrated mixed setup under auto, on a DAC the profile
+database knows and on one it does not, and a migrated native setup; native
+at its rates, published. The review expected DSD128 under auto to be
+`dop_gain_unverifiable`; the design's section 3.2 has auto convert a rate
+neither transport plays, refused as `dsd_not_in_this_release` until B11, and
+only an explicit dop names `dop_gain_unverifiable`
+(`TestAMigratedDoPSetupWithUnverifiableGainRefuses`). Controls: native gated
+on the gain under native, under auto's known branch and its unknown branch,
+each red (the first auto control survived while the test had no profile
+database: the unknown branch, which it had not touched).
+
+**9. CI's `/dev/snd/pcmC5D0p`** (holds). `TestServesPlayerRefusesWhatItCannotPlayBeforeTheDevice`
+is serve's one boot on the real backend; its player probes the GO bar at
+card 5 once the output is available, through the backend's own prober. Here
+its Play usually held the device first and serve stopped before the next
+tick (five `-race` runs passed); an experiment with a stand-in prober showed
+the probe asked of card 5 device 0. Reproduced red by waiting for the
+probe's line: the guard's report. Fix: the test probes through
+`probeStandIn` (serve's backend with its `Probe` replaced) and reads no
+control node (`noControlNodes`), and waits for the stand-in's ask. Control:
+the stand-in removed (red, the guard's line).
+
+**10. Windows** (holds, a fixture's): `dsdFactsOf` seeds the player's UUID
+through the durable writer, which refuses a platform with no directory fsync.
+Production writes neither on Windows: the player is Linux only
+(`config.PlayerEnabled` refuses it there, output play too), and every write
+of the DSD state (the store's, and restore's `WriteRestored`) goes through
+`WriteBytesDurable`, refused there. Skipped there with that reason, as
+`TestBridgeDSDTupleTransport` already was through `ApprovedWith`. Not run
+here; `make vet` for windows clean.
+
+**11. macOS's race** (holds). Reproduced with `-cpu 1`: twice in 40 the race
+compared nothing. The writer now waits, on a condition, until the reader and
+the admitter have both seen its generation, so every generation is compared,
+and their loops yield. Control: the wait removed (red under `-cpu 1`, one
+generation compared).
+
+**12. Gemini on `reportStep`** (does not hold). `reportStep` holds the
+session's lock from `l.lock()` to the `l.unlock()` before its sends, with no
+unlock between but the early return; `posOf` reads the sink's position
+under it, and the sink takes no session lock; `reconcileDSD` writes under
+the same lock. `TestReconciliationAndTheReporterTakeOneLock` runs refreshes
+that keep the heard occurrence through a change of the set as fast as they
+run, beside the reporter taking ticks as fast: `-race` clean. A control
+moving the reporter's loop outside the lock is a DATA RACE there. A first
+version, driving refreshes by the monitor's ticks, stayed green under that
+control: reconciliation wakes the reporter, which orders each write before
+the next step, so only refreshes that frequent land inside one.
+
+**13. The record's cleanup** (holds): its `p…json` filter also deleted
+`player-dsd.json` and `player-queue.json`. Red with an assertion that serve's
+DSD state stays; the test now removes the record and the reports it names.
+Control: the prefix filter back (red).
+
+**14. This log's sentence on `readMixer`** (holds): corrected in place in
+round 1's record, and in the B7 bullet's long form, which repeated it.
+
+**15, 16. PROTOCOL.md.** The design's section 3.2 has `auto` try DoP once
+native is out at a rate, so the set may publish the other transport: the
+no-fallback sentence now holds of an occurrence (it plays the transport it
+was admitted under or stops), and says what the set publishes. The
+reconciliation paragraph: a re-planned successor is admitted under the new
+set as any entry is (plays, or is refused with the new set's word); a
+session's first occurrence once its content opened and before it reaches the
+DAC, and any occurrence of a releasing session, are stopped rather than
+handed off again; a played-out one is not judged. The iOS mirror copies it.
+
+**Rules** (`rules-b728-b7-r2.patch`, against the pushed branch with round 1's
+patch): player.md's serve-tests bullet (the probe and controls through
+stand-ins), the probe bullet (a node not the unit the probe was begun for; a
+probe a migration's part made due), the B7 bullet (a played-out occurrence
+not judged; an open not ended under a replaced set; no serial or port in a
+USB string), output.md's `hostTrees` bullet (output play), and their long
+forms, the B7 one's no-set sentence and the probe's "nothing in serve calls
+it" corrected. player.md 98,456 bytes (98.5 %); on a copy with both patches,
+`make docs-check` and the cited-test-names guard green.
+
+**Checks**, on legion0 through the shared build lock
+(`.tmp/_b728-b7/gates_r2.py`), on e7a93fb5: `make fmt`, which rewrote
+nothing; `make vet`, and with `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`, each clean; `make test-fast`, 85 packages ok
+(479 s); `go test -race -count=1` of `./internal/player/...`,
+`./cmd/bridge/...` and `./internal/alsapcm/...`, 16 packages ok (1,051 s;
+cmd/bridge 1,029 s, the suite's guard silent); `make docs-check`; the
+qualification check from 0d5cb33b and from main (4880f8a4), each OK: the
+branch's version is 40 and main's 39, and this round changes guarded
+`internal/alsapcm/` tests; the tree clean after.
+
+**Owed.** The iOS mirror of PROTOCOL.md, changed again here. The hardware run
+round 1 listed, and beside it the probe asked again once a migration's part
+for the DAC is made without a replug.
