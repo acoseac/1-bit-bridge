@@ -143,6 +143,14 @@ type Scanner struct {
 	// zero. A test lowers it.
 	heldLimit int64
 
+	// missingCleared counts the rows whose missing count this scan cleared
+	// without writing them (the skip gate, an unread file, an SACD
+	// container's rows: a file the walk saw again). Each changed the
+	// duplicate election's input (dupes.Row.Missing), so ScanSubtree's
+	// restamp gate reads it (backlog B756 round 3); Scan restamps anyway.
+	// A scan's own, under s.mu, and zeroed at the start of each ScanSubtree.
+	missingCleared atomic.Int64
+
 	mu       sync.Mutex
 	scanning atomic.Bool
 	lastFull atomic.Int64 // UnixNano of last successful full scan
@@ -1733,11 +1741,8 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 					// path; without this targeted reset the skip
 					// optimization defeats the resilience contract.
 					// Cheap PRIMARY-KEY UPDATE, no-op when already 0.
-					if err := s.store.ResetTrackMissingCount(ctx, pi.rel); err != nil {
-						if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
-							scanLogger.Warn("reset missing_count on skip", "path", pi.rel, "err", failure)
-						}
-					}
+					cleared, err := s.store.ResetTrackMissingCount(ctx, pi.rel)
+					s.noteMissingCleared(ctx, cleared, err, "reset missing_count on skip", pi.rel)
 					return
 				}
 				// Content-unchanged but version-stale (or the local-art
@@ -1891,11 +1896,8 @@ func (s *Scanner) keepUnread(ctx context.Context, pi pathInfo, hasRow bool, faul
 	// The row is already there, so a case-only twin of this spelling
 	// can be reaped. A new spelling records nothing: it has no row.
 	backed.add(pi.rel)
-	if err := s.store.ResetTrackMissingCount(ctx, pi.rel); err != nil {
-		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
-			scanLogger.Warn("reset missing_count of an unread file", "path", pi.rel, "err", failure)
-		}
-	}
+	cleared, err := s.store.ResetTrackMissingCount(ctx, pi.rel)
+	s.noteMissingCleared(ctx, cleared, err, "reset missing_count of an unread file", pi.rel)
 }
 
 // keepSACDRowsSeen resets the missing count of every virtual row of the SACD
@@ -1912,10 +1914,22 @@ func (s *Scanner) keepUnread(ctx context.Context, pi pathInfo, hasRow bool, faul
 // them. The rows are every row under the container, by byte range
 // (ResetTrackMissingCountsUnder): nothing but its virtual rows can be.
 func (s *Scanner) keepSACDRowsSeen(ctx context.Context, pi pathInfo) {
-	if err := s.store.ResetTrackMissingCountsUnder(ctx, pi.rel); err != nil {
-		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
-			scanLogger.Warn("reset missing_count of an SACD container's rows", "path", pi.rel, "err", failure)
-		}
+	cleared, err := s.store.ResetTrackMissingCountsUnder(ctx, pi.rel)
+	s.noteMissingCleared(ctx, cleared, err, "reset missing_count of an SACD container's rows", pi.rel)
+}
+
+// noteMissingCleared counts a reset that cleared a missing count
+// (missingCleared), and logs its failure as msg, which a shutdown's
+// cancellation silences.
+func (s *Scanner) noteMissingCleared(ctx context.Context, cleared bool, err error, msg, rel string) {
+	if cleared {
+		s.missingCleared.Add(1)
+	}
+	if err == nil {
+		return
+	}
+	if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+		scanLogger.Warn(msg, "path", rel, "err", failure)
 	}
 }
 
@@ -2788,6 +2802,7 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	defer s.resetScanCaches()
 	s.unread.reset()
 	s.artUnread.reset()
+	s.missingCleared.Store(0)
 	// The re-reads a return before the tail (settleSubtreeHeldReconciles)
 	// leaves held are written as they stand.
 	s.takeHeldReconciles()
@@ -3213,7 +3228,8 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// that class of clobber impossible rather than merely fixed.
 	// Scan's rule for rows under a link to a directory (firstMissesUnderDirLinks).
 	linkMisses := s.firstMissesUnderDirLinks(ctx, missingTracks, &tallies.dirLinks)
-	deletedTracks, tracksDelErr := s.store.IncrementMissingTracksAndDeleteAtThreshold(ctx, missingTracks, threshold)
+	tracksPass, tracksDelErr := s.store.IncrementMissingTracks(ctx, missingTracks, threshold)
+	deletedTracks := tracksPass.Deleted
 	if failure := ctxerr.WithoutCancellation(ctx, tracksDelErr); failure != nil {
 		scanLogger.Error("subtree missing-count tracks pass", "err", failure, "missing", len(missingTracks))
 	} else if tracksDelErr == nil {
@@ -3298,9 +3314,20 @@ func (s *Scanner) ScanSubtree(ctx context.Context, dir string) (int, error) {
 	// Non-fatal. A tracks pass the shutdown stopped opens the gate too; the
 	// pass then fails at its first read on the same cancelled context, and
 	// restampDuplicatesNonFatal does not report that.
+	//
+	// A missing count is an input too (dupes.Row.Missing: a row the last
+	// scan did not find never wins its group, backlog B756 round 2), and it
+	// moves without a write or a delete: the pass counts a deleted copy
+	// missing for the first time inside the deletion grace
+	// (tracksPass.NewlyMissing), and the skip gate clears the count of a file
+	// that came back unchanged (missingCleared). Until round 3 neither opened
+	// the gate, so a subtree scan after the winning copy's file went left it
+	// elected and the copy still there suppressed, and one after it came back
+	// left it suppressed, each until a full scan (6 h by default). A row
+	// already missing that stays missing moves nothing, and costs no pass.
 	settled := s.settleSubtreeHeldReconciles(ctx)
 	if committed.Load() > 0 || settled > 0 || deletedTracks > 0 || len(renamed) > 0 || tracksDelErr != nil ||
-		s.stampsBehindDeletions(ctx) {
+		tracksPass.NewlyMissing > 0 || s.missingCleared.Load() > 0 || s.stampsBehindDeletions(ctx) {
 		s.restampDuplicatesNonFatal(ctx)
 	}
 

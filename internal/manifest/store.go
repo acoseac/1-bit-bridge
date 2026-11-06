@@ -6807,10 +6807,29 @@ func (s *Store) doomedReapSidecarsTx(ctx context.Context, tx *sql.Tx, variantQue
 	return out, nil
 }
 
-// IncrementMissingTracksAndDeleteAtThreshold bumps missing_count on
-// every row whose path is in `missingPaths` AND atomically deletes any
-// row whose new missing_count >= threshold. Returns the number of rows
-// that were deleted.
+// MissingTracksPass is what one pass of IncrementMissingTracks did.
+type MissingTracksPass struct {
+	// Deleted is the number of rows it deleted at the threshold.
+	Deleted int64
+	// NewlyMissing is the number of rows it counted missing for the first
+	// time (missing_count 0 to 1). It is the duplicate election's input
+	// (dupes.Row.Missing: a row the last scan did not find never wins its
+	// group), so a scan that writes and deletes nothing still has to elect
+	// again when it is not 0 (backlog B756 round 3).
+	NewlyMissing int64
+}
+
+// IncrementMissingTracksAndDeleteAtThreshold is IncrementMissingTracks for a
+// caller that needs only the number of rows it deleted.
+func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, missingPaths []string, threshold int) (int64, error) {
+	pass, err := s.IncrementMissingTracks(ctx, missingPaths, threshold)
+	return pass.Deleted, err
+}
+
+// IncrementMissingTracks bumps missing_count on every row whose path is in
+// `missingPaths` AND atomically deletes any row whose new missing_count >=
+// threshold. It returns the number of rows that were deleted, and the number
+// it counted missing for the first time (MissingTracksPass).
 //
 // This is the operational core of the silent-empty-enumeration defence
 // (see migration v5 doc). The scanner identifies tracks that were in
@@ -6866,29 +6885,30 @@ func (s *Store) doomedReapSidecarsTx(ctx context.Context, tx *sql.Tx, variantQue
 // preserve the legacy immediate-delete behaviour when set to 1.
 //
 // Holds `s.mu` per the writer contract on Store.
-func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, missingPaths []string, threshold int) (int64, error) {
+func (s *Store) IncrementMissingTracks(ctx context.Context, missingPaths []string, threshold int) (MissingTracksPass, error) {
 	if len(missingPaths) == 0 || threshold < 1 {
-		return 0, nil
+		return MissingTracksPass{}, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, err
+		return MissingTracksPass{}, err
 	}
 	defer tx.Rollback()
-	stmt, err := tx.PrepareContext(ctx, `UPDATE tracks SET missing_count = missing_count + 1 WHERE path = ?`)
+	// RETURNING the new count tells a row counted missing for the first time
+	// (1) from one already missing.
+	stmt, err := tx.PrepareContext(ctx, `UPDATE tracks SET missing_count = missing_count + 1 WHERE path = ? RETURNING missing_count`)
 	if err != nil {
-		return 0, err
+		return MissingTracksPass{}, err
 	}
 	defer stmt.Close()
+	var newlyMissing int64
 	for _, p := range missingPaths {
-		// ExecContext (not Exec) so a cancelled / timed-out scan stops
-		// the per-row loop instead of running to completion ctx-blind.
-		res, err := stmt.ExecContext(ctx, p)
-		if err != nil {
-			return 0, err
-		}
+		// QueryRowContext (not QueryRow) so a cancelled / timed-out scan
+		// stops the per-row loop instead of running to completion ctx-blind.
+		var count int64
+		err := stmt.QueryRowContext(ctx, p).Scan(&count)
 		// Diagnostic: a missingPaths entry that doesn't match any
 		// row is a scanner / store-state desync. Pre-fix the
 		// silent `_` discard would mask a path-shape drift
@@ -6898,10 +6918,17 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 		// fire its deletion path. Log at warn (the bridge is
 		// still functional; this is operator-actionable
 		// detection of a real bug upstream).
-		if affected, raErr := res.RowsAffected(); raErr == nil && affected == 0 {
+		if errors.Is(err, sql.ErrNoRows) {
 			logger.Warn("IncrementMissingTracks: missing path did not match any row",
 				"path", p,
 			)
+			continue
+		}
+		if err != nil {
+			return MissingTracksPass{}, err
+		}
+		if count == 1 {
+			newlyMissing++
 		}
 	}
 	// The delete is SCOPED to the paths this pass actually observed
@@ -6964,7 +6991,7 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 	if len(valid) > 0 {
 		missingBlob, err := json.Marshal(valid)
 		if err != nil {
-			return 0, err
+			return MissingTracksPass{}, err
 		}
 		// Enumerate the doomed rows' sidecars BEFORE the DELETE — the
 		// CASCADE takes the track_variants / track_analysis rows with the
@@ -6972,7 +6999,7 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 		// Same predicate, same binds; see thresholdReapBatchWhereSQL.
 		sc, err := s.doomedReapSidecarsTx(ctx, tx, reapVariantSidecarsBatchSQL, reapWaveformWhereBatchSQL, threshold, string(missingBlob))
 		if err != nil {
-			return 0, err
+			return MissingTracksPass{}, err
 		}
 		doomedSidecars = append(doomedSidecars, sc...)
 		// Journal the doomed paths BEFORE the DELETE, same predicate +
@@ -6980,11 +7007,11 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 		// learn about the reap on their next sync.
 		if _, err := tx.ExecContext(ctx, journalThresholdReapBatchSQL,
 			s.now().UnixNano(), threshold, string(missingBlob)); err != nil {
-			return 0, err
+			return MissingTracksPass{}, err
 		}
 		res, err := tx.ExecContext(ctx, deleteTracksAtThresholdBatchSQL, threshold, string(missingBlob))
 		if err != nil {
-			return 0, err
+			return MissingTracksPass{}, err
 		}
 		n, raErr := res.RowsAffected()
 		if raErr != nil {
@@ -6999,7 +7026,7 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 	if len(illFormed) > 0 {
 		delStmt, err := tx.PrepareContext(ctx, deleteTracksAtThresholdOneSQL)
 		if err != nil {
-			return 0, err
+			return MissingTracksPass{}, err
 		}
 		defer delStmt.Close()
 		for _, p := range illFormed {
@@ -7009,7 +7036,7 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 			// they would be the one reaped population whose sidecars leak.
 			sc, err := s.doomedReapSidecarsTx(ctx, tx, reapVariantSidecarsOneSQL, reapWaveformWhereOneSQL, p, threshold)
 			if err != nil {
-				return 0, err
+				return MissingTracksPass{}, err
 			}
 			doomedSidecars = append(doomedSidecars, sc...)
 			// Journal (same predicate + binds as the DELETE below). The
@@ -7017,11 +7044,11 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 			// from `tracks` directly, no JSON array involved.
 			if _, err := tx.ExecContext(ctx, journalThresholdReapOneSQL,
 				s.now().UnixNano(), p, threshold); err != nil {
-				return 0, err
+				return MissingTracksPass{}, err
 			}
 			res, err := delStmt.ExecContext(ctx, p, threshold)
 			if err != nil {
-				return 0, err
+				return MissingTracksPass{}, err
 			}
 			// n is 0 when raErr is non-nil, so the accumulation is
 			// the same undercount-and-commit policy as the batch arm.
@@ -7034,7 +7061,7 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, err
+		return MissingTracksPass{}, err
 	}
 	// Files unlinked once, after the single commit and still UNDER s.mu —
 	// the SELECT-sidecars → DELETE-rows → os.Remove-files sequence is
@@ -7045,7 +7072,7 @@ func (s *Store) IncrementMissingTracksAndDeleteAtThreshold(ctx context.Context, 
 	if deleted > 0 {
 		s.noteLibrary(ctx)
 	}
-	return deleted, nil
+	return MissingTracksPass{Deleted: deleted, NewlyMissing: newlyMissing}, nil
 }
 
 // IncrementMissingFoldersAndDeleteAtThreshold is the folders-table sibling
@@ -7234,11 +7261,27 @@ func (s *Store) PendingDeletions(ctx context.Context) (int64, error) {
 // Cheap single-row UPDATE on the PRIMARY KEY index. Missing rows
 // silently no-op (RowsAffected == 0). Holds `s.mu` per the writer
 // contract on Store.
-func (s *Store) ResetTrackMissingCount(ctx context.Context, path string) error {
+//
+// cleared reports that the row was counted missing and is not now: the
+// duplicate election's input changed (dupes.Row.Missing), so a scan that
+// writes nothing else still has to elect again (backlog B756 round 3). A
+// count the driver could not read reports cleared, since one election too
+// many costs a pass and one too few leaves a copy hidden.
+func (s *Store) ResetTrackMissingCount(ctx context.Context, path string) (cleared bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.ExecContext(ctx, `UPDATE tracks SET missing_count = 0 WHERE path = ? AND missing_count != 0`, path)
-	return err
+	res, err := s.db.ExecContext(ctx, `UPDATE tracks SET missing_count = 0 WHERE path = ? AND missing_count != 0`, path)
+	if err != nil {
+		return false, err
+	}
+	return rowsChanged(res), nil
+}
+
+// rowsChanged reports whether a statement changed a row, answering yes when
+// the driver cannot say.
+func rowsChanged(res sql.Result) bool {
+	n, err := res.RowsAffected()
+	return err != nil || n > 0
 }
 
 // ResetTrackMissingCountsUnder sets `missing_count = 0` on every row under
@@ -7253,17 +7296,21 @@ func (s *Store) ResetTrackMissingCount(ctx context.Context, path string) error {
 // container's rows while it was on disk.
 //
 // An empty base is an error, never the whole table. A no-op on rows
-// already at 0. Holds `s.mu` per the writer contract on Store.
-func (s *Store) ResetTrackMissingCountsUnder(ctx context.Context, base string) error {
+// already at 0. Holds `s.mu` per the writer contract on Store. cleared is
+// ResetTrackMissingCount's.
+func (s *Store) ResetTrackMissingCountsUnder(ctx context.Context, base string) (cleared bool, err error) {
 	b, scoped := subtreeRangeBase(base)
 	if !scoped {
-		return errors.New("manifest: ResetTrackMissingCountsUnder needs a prefix")
+		return false, errors.New("manifest: ResetTrackMissingCountsUnder needs a prefix")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.ExecContext(ctx, `UPDATE tracks SET missing_count = 0
+	res, err := s.db.ExecContext(ctx, `UPDATE tracks SET missing_count = 0
 		WHERE path COLLATE BINARY >= ? || '/' AND path COLLATE BINARY < ? || '0' AND missing_count != 0`, b, b)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return rowsChanged(res), nil
 }
 
 // ClearMissingCounts wipes all rows where missing_count > 0 in tracks,
