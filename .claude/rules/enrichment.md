@@ -432,9 +432,15 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 - **DSD and PCM are never cross-suppressed**, and `different-audio` (proven
   remasters) never suppresses under any mode. Winner election is a strict total
   order so winners never flap (flapping = `indexed_at` churn).
-- **`outranks` has NO availability term** — so enabling cross-source
-  suppression would suppress a local rip in favour of a copy on an upstream that
-  is powered off half the time. Deciding where availability sits in that ranking
-  IS the product decision; don't flip `includeRouted` without making it.
+- **`outranks`' one availability term is the last scan's: a copy whose file it
+  did not find (`Row.Missing`, `missing_count > 0`) never wins its unit**
+  (2026-11-06, backlog B756 round 2). It comes first in `outranks` and in
+  `nestShallower`, and it is the bridge's own (no part of the key or the tier,
+  which mirror the client), so a suppression never hides the one playable copy
+  while a gone copy's row waits out the deletion grace. **It knows nothing of an
+  upstream's reachability**: enabling cross-source suppression would still
+  suppress a local rip in favour of a copy on an upstream that is powered off
+  half the time. Deciding where that sits in the ranking IS the product
+  decision; don't flip `includeRouted` without making it.
 - Tier names are evidence claims: only `identical-audio` may say "reclaimable";
   `inconclusive` is never suppressed.
