@@ -105,6 +105,10 @@ type Config struct {
 	// runtime.GOOS (playerPlatform): the seam a test of the Linux-only
 	// refusal sets.
 	playerGOOS string
+	// legacyDSD is the start's scope of the legacy DSD keys' warnings
+	// (WarnLegacyDSDKeysIn), nil for a config no start gave one: Clone keeps
+	// it, shared, since it is the start's and not the value's.
+	legacyDSD *LegacyDSDWarnings
 }
 
 // OutputConfig is the bridge reporting the player beside it. MPD is
@@ -3503,7 +3507,9 @@ func (c *Config) NormalizeAndValidateQuiet() error {
 // The one thing it keeps is the process's, never the receiver's: the reason
 // it last logged output.player off for, so that line is written once each
 // time the reason changes, not at every Load and settings save
-// (logPlayerOff).
+// (logPlayerOff). And where a start of bridge serve gave the config its
+// scope, it notes there the legacy DSD keys it warned of, the start's and not
+// the receiver's either (LegacyDSDWarnings).
 func (c *Config) Validate() error {
 	return c.validate(true)
 }
@@ -3527,6 +3533,9 @@ func (c *Config) validate(warn bool) error {
 	if warn {
 		_, why := c.PlayerEnabled(c.playerPlatform())
 		logPlayerOff(why)
+		// The legacy DSD keys still load and are never a refusal (B728); a
+		// start's scope says each once, whichever reader validates.
+		c.legacyDSD.Warn(c.Output.Player)
 	}
 
 	// Retention: a NON-ZERO playback-history window below the longest

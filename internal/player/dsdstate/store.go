@@ -270,7 +270,9 @@ func (s *Store) updateLocked(fn func(*State) error) error {
 		return nil
 	}
 	if err := s.write(s.path, data); err != nil {
-		return fmt.Errorf("dsdstate: the state is not written: %w", err)
+		// Its bytes may be in the file all the same (the doc above): the words
+		// say the write failed, never that nothing was written.
+		return fmt.Errorf("dsdstate: the state's write failed: %w", err)
 	}
 	s.state, s.blocked = next, nil
 	return nil

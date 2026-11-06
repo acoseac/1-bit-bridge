@@ -3,9 +3,10 @@
 // user chose for each DAC model and what was heard and observed on it, kept
 // in <dataDir>/player-dsd.json, schema 1, beside the player's queue, and the
 // logic of the one migration of the legacy keys (dsdMode, allowDoP and
-// dsdQualification) into it. Nothing reads it yet: the effective policy (B5)
-// reads it, serve's player (B6) opens it and runs the migration, and until
-// then the owner's approval record decides DSD as before.
+// dsdQualification) into it. Serve's player opens it at its start and runs
+// the migration (B6; cmd/bridge's playerDSD), and nothing plays by it yet:
+// the effective policy (B5) reads it from the cutover (B7) on, and until then
+// the owner's approval record decides DSD as before.
 //
 // A DAC is keyed by its model, dacprofile.Key (B2's: the vendor and product
 // IDs, the interface and the product string), never by a serial, a port, a
