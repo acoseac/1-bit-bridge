@@ -61,13 +61,23 @@ func isLossy(codec string) bool {
 }
 
 // outranks is the deterministic total order that elects a suppression
-// unit's winner: lossless beats lossy, then bit depth, then sample rate,
-// then size (a bigger file of the same geometry is the less-compressed /
-// better-provenanced rip), then the shallower path, then the shorter
-// path, then lexicographic path — the last three exist purely so the
-// order is TOTAL and the winner is stable across scans (a flapping
-// winner would churn indexed_at and iOS deltas).
+// unit's winner: a file the last scan found beats one it did not (Missing:
+// a winner whose file is gone suppresses the one copy a client can play
+// until the deletion pass reaps its row, three full scans later by
+// default; backlog B756 round 2), then lossless beats lossy, then bit
+// depth, then sample rate, then size (a bigger file of the same geometry is
+// the less-compressed / better-provenanced rip), then the shallower path,
+// then the shorter path, then lexicographic path — the last three exist
+// purely so the order is TOTAL and the winner is stable across scans (a
+// flapping winner would churn indexed_at and iOS deltas). Missing moves
+// only when a file goes or comes back, never on a scan that sees the
+// library as it was, and a walk that could not read a folder spares its
+// rows' counts (the deletion pass's errored subtrees), so a flapping mount
+// does not move it either.
 func outranks(a, b Row) bool {
+	if a.Missing != b.Missing {
+		return !a.Missing
+	}
 	if la, lb := isLossy(a.Codec), isLossy(b.Codec); la != lb {
 		return !la
 	}
@@ -162,9 +172,13 @@ func planNestTwinSuppression(members []Row) []string {
 	return out
 }
 
-// nestShallower orders nest-twins: fewer path segments first, then the
+// nestShallower orders nest-twins: a file the last scan found first, as
+// outranks orders every unit (Missing), then fewer path segments, then the
 // generic rank as the deterministic tail.
 func nestShallower(a, b Row) bool {
+	if a.Missing != b.Missing {
+		return !a.Missing
+	}
 	da, db := len(pathSegments(a.Path)), len(pathSegments(b.Path))
 	if da != db {
 		return da < db
