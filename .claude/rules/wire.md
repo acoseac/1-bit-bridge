@@ -69,7 +69,9 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   argument, so no surface can fall back to an ungated read, and each sends
   `Vary: X-Bridge-Formats`. **Gated**: the manifest full, paged and delta
   (rows, `total`, `enrichmentProgress`'s two counts, a delta's tombstones
-  before its cap), health's `tracksIndexed` (cached per view), search, the
+  before its cap), health's `tracksIndexed` and the tracks its
+  `pendingDeletions` counts (each cached per view; the folders are every
+  view's), search, the
   smart mixes (an item left out, the positions after it closed up, an emptied
   family not sent) and the playlist feed (a gated line unresolved, the album
   rule over the view's tracks, the version naming the view:
@@ -83,12 +85,19 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   zero view's stays the raw path, a declared view's is an opaque token, and
   another view's is `410` `manifest_cursor_view`. A delta's `since` names no
   view, so a client's first sync that declares a format is a full one, which
-  PROTOCOL.md says is the client's to make. `Track.Correction`
+  PROTOCOL.md says is the client's to make. An upgrade over a routed row the
+  gate now holds back, or a tombstone of one (an upstream item whose URL
+  names a `.wv` or `.ape` file, which every app was served), restarts the
+  deletion journal's coverage in v61's step (`restartCoverageOverGatedPaths`,
+  round 2), so every older delta cursor takes the full sync that drops it.
+  `Track.Correction`
   (`correction`, a hybrid stream's correction file: `scanner.md`) is an
   additive pointer, `omitempty`. **Don't gate by codec (a refused row has
-  none, a tombstone no row), give a surface an ungated fallback, filter a
-  document a device writes, or let one view's cursor or ETag answer
-  another.** `TestTheFormatViewSQLIsFormatgatesRule`,
+  none, a tombstone no row), give a surface an ungated fallback, count a
+  gated row in a view's `pendingDeletions`, let an upgrade over a gated
+  routed row leave an older delta cursor complete, filter a document a
+  device writes, or let one view's cursor or ETag answer another.**
+  `TestTheFormatViewSQLIsFormatgatesRule`,
   `TestParseReadsTheHeaderAsTheProtocolSays`,
   `TestTheManifestServesEachViewItsRows`,
   `TestEachViewPagesItsOwnRowsAndACursorContinuesOnlyItsView`,
@@ -99,6 +108,8 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   `TestThePlaylistFilesServeEachViewItsMembers`,
   `TestThePlaylistFeedJudgesTheAlbumRuleInEachView`,
   `TestADevicesDocumentsKeepAWavPackEntryForEveryClient`,
+  `TestPendingDeletionsAreEachViewsRows`,
+  `TestAnUpgradeOverAGatedRowSendsEveryDeltaCursorToAFullSync`,
   `TestTheFilesystemViewsAreNotHeldBack`,
   `TestAnAllWavPackLibraryIsAnHonestEmptyFeedToAClientThatDeclaresNothing` and
   `TestTheGoldenManifestOfEachView` (its goldens in
