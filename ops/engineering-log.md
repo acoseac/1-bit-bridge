@@ -77272,3 +77272,30 @@ tests run for real; `go test -race -count=1 ./internal/player/dsdstate/
 `GOOS=linux GOARCH=386`, each clean; dsdstate's tests as a linux/386 binary,
 ok; `make docs-check`, ok (player.md at 97.6%); the qualification check,
 "qualification version OK: main..HEAD". The tree is clean after.
+
+## 2026-11-06 — B728 B3 round 4: a restore's refusal once its state landed
+
+Worker b728-b3 fast-forwarded to the orchestrator's cc46921b (main merged).
+CodeRabbit on #1405: `restorePlayerDSD` said "nothing was restored" and to
+leave `player-dsd.json` out of the snapshot to keep this box's state, for an
+error `WriteBytesDurable` returns after its rename, when the box's state is
+already the snapshot's. It held: red at 8d067780, through
+`atomicwrite.SetSyncDirForTest`. `ErrBarrierFailed` does not tell the two
+apart, though. After the rename, a directory that cannot be opened for its
+sync (EACCES, EMFILE, an overlay's directory above the root) is an error no
+fsync marks. And a strict write's barrier on a directory it created runs
+before the file is staged, an `ErrBarrierFailed` with nothing landed. So the
+writer marks every error once its write has landed with `ErrLanded`, at the
+three places a write lands (the rename, the fallback that finds the bytes
+there, `ReplaceDurable` once both renames are done), never in `durableChain`,
+which also runs after `ReplaceDurable` puts the old entry back. The marker
+reads as the error it wraps, so no message changed. Landed, the restore says
+the box's state is now the snapshot's, that its crash durability is
+uncertain, and to run the restore again once the data directory can be
+synced. Otherwise its refusal and advice stand. The fix is bc7cef59, and the
+rule is in `rules-b728-b3-r4.patch` (config-lifecycle.md, after
+`ReplaceDurable`'s bullet). Negative controls, nine, each red: the restore
+taking no error, or every error, for one that landed; the rename's landing,
+the fallback's barrier, the fallback's fsync and `ReplaceDurable`'s landing
+each unmarked; `ReplaceDurable`'s put-back marked; the barrier before the
+staging marked; the marker hiding what it wraps.
