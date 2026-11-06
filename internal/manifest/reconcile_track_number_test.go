@@ -8,8 +8,9 @@ import (
 )
 
 // TestBackfillTrackNumbersFromPath reads its Windows-shaped path as Windows
-// does, where a backslash separates (underSeparatorsOf);
-// TestABackslashIsPartOfANameOffWindows reads one as Linux and macOS do.
+// does, where a backslash separates (underSeparatorsOf); TestPathStem, whose
+// stem the backfill reads, takes the same path as Linux and macOS do, where a
+// backslash is a character of the name.
 func TestBackfillTrackNumbersFromPath(t *testing.T) {
 	underSeparatorsOf(t, "windows")
 	ip := func(n int) *int { return &n }
