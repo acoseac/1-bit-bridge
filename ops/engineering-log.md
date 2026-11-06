@@ -78706,6 +78706,8 @@ fixture of the match's tables through the store's real read too),
 `TestRegenerate_TheDemosShape`.
 `internal/api`: `TestTheChristmasFamilyIsServedOnlyInItsWindow`,
 `TestAChristmasCacheIsServedByTheClockAtTheRequest`,
+`TestAnUnheardLibraryServesTheChristmasFamilyInSeasonAlone` (no history,
+analysis off, through `Regenerate` and the real handler),
 `TestNoChristmasMusicIsNoChristmasFamilyInSeason`, `TestTheAPIsChristmasKindIsTheEngines`.
 `internal/admin`: `TestTheConsoleMarksTheChristmasMixOutOfSeason`,
 `TestTheMixViewsWordTheOutOfSeasonMark`, and
