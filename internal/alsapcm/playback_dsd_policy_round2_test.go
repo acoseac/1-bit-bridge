@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/alsa"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
@@ -152,39 +153,56 @@ func TestAChangeWhileTheFirstOccurrenceReadsItsFirstChunk(t *testing.T) {
 // silent probe records what the DAC accepted under the unit it captured (its
 // model, its firmware and its enumeration), so the node it opens must be that
 // unit: another one swapped into the bound place between the capture and the
-// open passes the binding's own check, which names a place, and is asked
-// nothing, and neither the probe's cache nor the player's DSD state holds an
-// answer the captured unit never gave.
+// open, another model or the same one enumerated anew, passes the binding's
+// own check, which names a place, and is asked nothing, and neither the
+// probe's cache nor the player's DSD state holds an answer the captured unit
+// never gave.
 func TestAProbeRecordsNothingOfAUnitSwappedInBeforeItsOpen(t *testing.T) {
-	d := newDSDRig(t, playbacktest.ChoiceState(dsdstate.ModeNative))
-	refines := d.k.View().Refines
-	held, release := d.unit.holdNextAdmit()
-	t.Cleanup(release)
-	done := make(chan bool, 1)
-	go func() { done <- d.be.ProbeDSD(bg, playback.ProbeConditions{Available: true, Fresh: true}) }()
-	awaitHeld(t, "the probe's check after open", held)
-	other := playbacktest.DACUnit()
-	other.USB.ID.Product, other.Product = 0x5679, "Other DAC"
-	d.box.SetUnit(card, other)
-	release()
-	select {
-	case <-done:
-	case <-time.After(alsapcm.Watchdog()):
-		alsapcm.LogGoroutines(t)
-		t.Fatalf("the probe did not answer within %v", alsapcm.Watchdog())
-	}
-	d.rig.stop()
-	if v := d.k.View(); v.Refines != refines {
-		t.Errorf("the probe asked the unit swapped in %d candidates", v.Refines-refines)
-	}
-	if e := playbacktest.Evidence(d.store.State(), dsdstate.TransportNative, "DSD_U32_BE", playbacktest.DSD64); e != nil {
-		t.Errorf("the captured unit's model holds %+v, an answer the unit swapped in gave", e)
-	}
-	captured := alsapcm.ProbeUnit{Model: playbacktest.DACKey().Canonical(), Firmware: playbacktest.DACBCD, Kernel: playbacktest.Kernel, Enumeration: "test/2"}
-	for _, cand := range alsapcm.ProbeCandidates() {
-		if r := d.pol.Probes.Answer(captured, cand); r.Answer != alsapcm.ProbeNotProbed {
-			t.Errorf("the probe's cache holds %+v for the captured unit", r)
-		}
+	for _, c := range []struct {
+		name string
+		unit func() alsa.UnitModel
+	}{
+		{"another model", func() alsa.UnitModel {
+			m := playbacktest.DACUnit()
+			m.USB.ID.Product, m.Product = 0x5679, "Other DAC"
+			return m
+		}},
+		{"the same model enumerated anew", func() alsa.UnitModel {
+			m := playbacktest.DACUnit()
+			m.USB.DevNum = 3
+			return m
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := newDSDRig(t, playbacktest.ChoiceState(dsdstate.ModeNative))
+			refines := d.k.View().Refines
+			held, release := d.unit.holdNextAdmit()
+			t.Cleanup(release)
+			done := make(chan bool, 1)
+			go func() { done <- d.be.ProbeDSD(bg, playback.ProbeConditions{Available: true, Fresh: true}) }()
+			awaitHeld(t, "the probe's check after open", held)
+			d.box.SetUnit(card, c.unit())
+			release()
+			select {
+			case <-done:
+			case <-time.After(alsapcm.Watchdog()):
+				alsapcm.LogGoroutines(t)
+				t.Fatalf("the probe did not answer within %v", alsapcm.Watchdog())
+			}
+			d.rig.stop()
+			if v := d.k.View(); v.Refines != refines {
+				t.Errorf("the probe asked the unit swapped in %d candidates", v.Refines-refines)
+			}
+			if e := playbacktest.Evidence(d.store.State(), dsdstate.TransportNative, "DSD_U32_BE", playbacktest.DSD64); e != nil {
+				t.Errorf("the captured unit's model holds %+v, an answer the unit swapped in gave", e)
+			}
+			captured := alsapcm.ProbeUnit{Model: playbacktest.DACKey().Canonical(), Firmware: playbacktest.DACBCD, Kernel: playbacktest.Kernel, Enumeration: "test/2"}
+			for _, cand := range alsapcm.ProbeCandidates() {
+				if r := d.pol.Probes.Answer(captured, cand); r.Answer != alsapcm.ProbeNotProbed {
+					t.Errorf("the probe's cache holds %+v for the captured unit", r)
+				}
+			}
+		})
 	}
 }
 
