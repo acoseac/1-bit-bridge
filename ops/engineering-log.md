@@ -77299,3 +77299,13 @@ taking no error, or every error, for one that landed; the rename's landing,
 the fallback's barrier, the fallback's fsync and `ReplaceDurable`'s landing
 each unmarked; `ReplaceDurable`'s put-back marked; the barrier before the
 staging marked; the marker hiding what it wraps.
+**Checks**, on legion0 at 2c4cecf6, in one call through the shared build lock:
+`make fmt`, which rewrote nothing; `make vet`; `go test -race -count=1` of
+what the marker reaches, `./internal/atomicwrite/`, `./internal/player/dsdstate/`,
+`./internal/player/engine/`, `./internal/config/`, `./internal/backup/` and
+`./cmd/bridge/`, each ok; `make vet` with `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`, each clean; atomicwrite's and dsdstate's tests as
+linux/386 binaries, ok; `make docs-check`, ok, and again on a copy of the
+tree with the rules patch applied, which `git apply --check` takes; the
+qualification check, "qualification version OK: main..HEAD". The tree is
+clean after.
