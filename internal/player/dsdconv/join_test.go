@@ -206,6 +206,24 @@ func TestAnAbuttingJoinIsZeroPadded(t *testing.T) {
 		t.Fatalf("B's end: %v", err)
 	}
 	eq(t, "B, primed with zeros", got, wantB)
+
+	// A predecessor whose Frames is not a multiple of D, long as it is, does
+	// not hold: there is no window point to continue from, and it ends
+	// zero-padded as it does alone.
+	for _, extra := range []int{1, 8, d64 - 1} {
+		n := 10*h64*d64 + extra
+		un := [2][]byte{randomBits(85, n), randomBits(86, n)}
+		want, _ := reference(t, un, r64, p)
+		c, err := New(stubOf(r64, un), p, Options{Hold: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := drain(t, c, 100)
+		if !errors.Is(err, io.EOF) || c.Holding() {
+			t.Errorf("%d bits past alignment: the held read ended with %v, holding %v; want io.EOF, no hold", extra, err, c.Holding())
+		}
+		eq(t, "an unaligned predecessor", got, want)
+	}
 }
 
 // TestTwoSeventeenBitTracksAtD16Abut: a predecessor whose Frames is not a
