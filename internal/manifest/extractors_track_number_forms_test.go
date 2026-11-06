@@ -153,6 +153,9 @@ func TestEveryVorbisReaderReadsTheNumberATaggerWrote(t *testing.T) {
 		{"a present empty value", []string{"TRACKNUMBER=", "DISCNUMBER="}, numberPtr(0), numberPtr(0)},
 		{"a value holding no number the rule reads", []string{"TRACKNUMBER=A1", "DISCNUMBER=1.2"}, numberPtr(0), numberPtr(0)},
 		{"a number with a space before its total", []string{"TRACKNUMBER=3 / 12", "DISCNUMBER=2 / 2"}, numberPtr(0), numberPtr(0)},
+		// dhowden's strconv.Atoi saturates this one, meeting the overflow
+		// before the "/"; the rule reads an overflowing number as 0.
+		{"an overflowing number with its total", []string{"TRACKNUMBER=99999999999999999999/2", "DISCNUMBER=99999999999999999999 of 2"}, numberPtr(0), numberPtr(0)},
 		{"no number", nil, nil, nil},
 	} {
 		for _, f := range vorbisCommentFormats {
@@ -199,6 +202,8 @@ func TestAnID3TagsNumberIsDhowdensReadingUnlessThatIsZero(t *testing.T) {
 		{"a number with its total", "3/12", "2/2", numberPtr(3), numberPtr(2)},
 		{"a number with its total, spaced", "3 / 12", "2 / 2", numberPtr(3), numberPtr(2)},
 		{"a signed number with its total", "-3/12", "+2/2", numberPtr(-3), numberPtr(2)},
+		// dhowden saturates it, an answer that is not 0, so it stands.
+		{"an overflowing number with its total", "99999999999999999999/2", "99999999999999999999/2", numberPtr(math.MaxInt), numberPtr(math.MaxInt)},
 		{"a present empty value", "", "", numberPtr(0), numberPtr(0)},
 		{"a value holding no number", "A1", "2-1", numberPtr(0), numberPtr(0)},
 	} {
