@@ -2132,7 +2132,14 @@
   **That block must lie inside the file** (`errWVBlockCut`, read as a file cut
   while it is read): round 2 (Codex's review) found a 34-byte file, a header
   claiming a 36-byte block and an `ID_WV_BITSTREAM` the file ends before,
-  indexed as a second of lossless audio. **Its sub-blocks are walked a 64 KiB
+  indexed as a second of lossless audio. **And its bitstreams must be ones
+  the reference decoder opens**: a main or correction bitstream that is empty
+  or of odd length, and an extended one of its 4-byte CRC alone or of odd
+  length, are refused, as `init_wv_bitstream`, `init_wvc_bitstream` and
+  `init_wvx_bitstream` refuse them (the same point by another byte, found in
+  round 2 writing its controls: a block that declares its bitstream empty
+  was a second of lossless audio, and a `.wvc` whose bitstream is empty
+  matched). **Its sub-blocks are walked a 64 KiB
   window at a time** (`wvWindow`), never a read each, as libwavpack's
   `read_metadata_buff` walks them in memory: a block of a megabyte of empty
   sub-blocks cost 524,292 reads (round 2, Claude's review) and costs 18.
@@ -2141,12 +2148,15 @@
   lossy when its integer data sends the bits it shifts out
   (`ID_INT32_INFO`'s sent bits, under INT32_DATA) or its float data sends
   exponents, zeros or exceptions (`ID_FLOAT_INFO`'s flags 0x02, 0x04, 0x08,
-  0x20) and no `ID_WVX_BITSTREAM` carries them past its 4-byte CRC, so such a
+  0x20) and no extended bitstream carries them past its 4-byte CRC, so such a
   stream is `WAVPACK-LOSSY`, with no correction file on the wire, unless its
   block or its matching correction file's first block carries one
-  (`wvStream.needsExtended`); an `ID_INT32_INFO` or `ID_FLOAT_INFO` of any
-  length but 4 is refused, as `read_int32_info` and `read_float_info` refuse
-  it.
+  (`wvStream.needsExtended`): `ID_WVX_BITSTREAM`, or its optional form
+  (0x2c, `ID_OPTIONAL_DATA` with `ID_WVX_BITSTREAM`'s function), which a
+  decoder that does not know it passes over, so it counts and refuses
+  nothing (not seen in a reference file here: no encoder runs on this host);
+  an `ID_INT32_INFO` or `ID_FLOAT_INFO` of any length but 4 is refused, as
+  `read_int32_info` and `read_float_info` refuse it.
   **Monkey's Audio** (`ape.go`): "MAC " at the start or after an ID3v2 tag's
   junk, within 1 MB, as MACLib's `FindDescriptor` looks; versions 3800 to 3990,
   FFmpeg's range; from 3.98 the descriptor and the header, before it the old
@@ -2201,8 +2211,9 @@
   read goes through `openAudioFile`, so a read that did not complete is the
   scanner's unread file (B134) and never a row. **Don't read a header past
   what the reference decoders take, take a first block or an APE header the
-  file does not hold or a seek table that names fewer entries than frames,
-  call a stream lossless without the extended bits its samples need, trust a
+  file does not hold, a bitstream the reference decoder refuses or a seek
+  table that names fewer entries than frames, call a stream lossless without
+  the extended bits its samples need, trust a
   length for an allocation, keep more than `apeTagMaxValues` of a tag's
   values, walk a block's sub-blocks a read each, hand dhowden more than the
   last 128 bytes, give a lossy hybrid or a DSD stream a sample kind, or a
