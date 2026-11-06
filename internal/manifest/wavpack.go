@@ -45,6 +45,7 @@ const (
 	wvFlagHybrid       = 0x8
 	wvFlagFloat        = 0x80
 	wvFlagShiftLSB     = 13
+	wvFlagFinalBlock   = 0x1000                 // the last block of a frame
 	wvFlagShiftMask    = 0x1f << wvFlagShiftLSB // low bits a sample does not use
 	wvFlagSrateLSB     = 23
 	wvFlagSrateMask    = 0xf << wvFlagSrateLSB
@@ -208,20 +209,71 @@ func readWavPackStream(r io.ReaderAt) (wvStream, error) {
 	return s, nil
 }
 
-// readWavPackCorrection reads a correction file's first audio block: its
-// header, and whether it holds a correction bitstream. Its format is the
-// .wv's to state (the encoder writes a non-standard rate into the .wv's
-// block alone), so nothing here is settled.
-func readWavPackCorrection(r io.ReaderAt) (wvStream, error) {
+// wvCorrection is what a bounded look at a correction file finds: its first
+// audio block's header and whether that block holds a correction bitstream,
+// and the block that ends the file (wvFinalIndex).
+type wvCorrection struct {
+	first          wvHeader
+	correctionBits bool
+	// final is the index one past the samples of the block that ends the
+	// file, and finalFound whether a block ends it: a file cut short ends
+	// inside a block, and none does.
+	final      uint64
+	finalFound bool
+}
+
+// readWavPackCorrection reads a correction file of size bytes: its first
+// audio block's header, whether that block holds a correction bitstream, and
+// the block that ends the file. Its format is the .wv's to state (the
+// encoder writes a non-standard rate into the .wv's block alone), so nothing
+// here is settled.
+func readWavPackCorrection(r io.ReaderAt, size int64) (wvCorrection, error) {
 	off, h, err := firstWVAudioBlock(r)
 	if err != nil {
-		return wvStream{}, err
+		return wvCorrection{}, err
 	}
 	f, err := readWVBlock(r, off, h)
 	if err != nil {
-		return wvStream{}, err
+		return wvCorrection{}, err
 	}
-	return wvStream{header: h, correctionBits: f.correctionBits}, nil
+	c := wvCorrection{first: h, correctionBits: f.correctionBits}
+	c.final, c.finalFound, err = wvFinalIndex(r, size)
+	if err != nil {
+		return wvCorrection{}, err
+	}
+	return c, nil
+}
+
+// wvFinalIndex finds the block that ends a file of size bytes and returns
+// the index one past its samples, as the reference decoder's
+// seek_final_index finds a stream's length: it looks at the file's last
+// wvSearchLimit bytes, a window at a time from the end, for a block header
+// whose block ends exactly where the file does and is a final block (the
+// last of its frame). false when there is none: a file cut short ends inside
+// a block, and a file with anything after its last block (a correction file
+// holds no tag) is not one an encoder wrote.
+func wvFinalIndex(r io.ReaderAt, size int64) (uint64, bool, error) {
+	const window = wvSearchWindow
+	buf := make([]byte, window+wvHeaderBytes)
+	floor := max(size-wvSearchLimit, 0)
+	for end := size; end > floor; end -= window {
+		start := max(end-window, floor)
+		n, err := r.ReadAt(buf[:min(int64(len(buf)), size-start)], start)
+		if err != nil && !endOfFile(err) {
+			return 0, false, err
+		}
+		for i := 0; i+wvHeaderBytes <= n && start+int64(i) < end; i++ {
+			if buf[i] != 'w' {
+				continue
+			}
+			h, ok := parseWVHeader(buf[i : i+wvHeaderBytes])
+			if !ok || start+int64(i)+h.size() != size || h.flags&wvFlagFinalBlock == 0 {
+				continue
+			}
+			return h.blockIndex + uint64(h.blockSamples), true, nil
+		}
+	}
+	return 0, false, nil
 }
 
 // firstWVAudioBlock finds the stream's first block with samples, passing
@@ -490,15 +542,22 @@ func (s *wvStream) settle(h wvHeader, f wvBlockFacts) error {
 	return nil
 }
 
-// correctionMatches reports whether wvc, the first audio block of a
-// correction file, is the one the stream wv's lossless reconstruction
-// needs, by a bounded look at its header: a correction bitstream in it, and
-// the same block index, block samples and total samples as the .wv's first
-// audio block, which the encoder writes into both from one header.
-func correctionMatches(wv, wvc wvStream) bool {
-	return wvc.correctionBits &&
-		wvc.header.blockIndex == wv.header.blockIndex &&
-		wvc.header.blockSamples == wv.header.blockSamples &&
-		wvc.header.totalLow == wv.header.totalLow &&
-		wvc.header.totalHigh == wv.header.totalHigh
+// correctionMatches reports whether wvc, a bounded look at a correction file,
+// is the one the stream wv's lossless reconstruction needs: its first audio
+// block holds a correction bitstream, with the same block index, block
+// samples and total samples as the .wv's first audio block (the encoder
+// writes both from one header), and a block ends the file, at the stream's
+// last sample where the .wv's header states its length from its start. A
+// file cut short, or of another stream, is not.
+func correctionMatches(wv wvStream, wvc wvCorrection) bool {
+	h := wvc.first
+	if !wvc.correctionBits || !wvc.finalFound ||
+		h.blockIndex != wv.header.blockIndex || h.blockSamples != wv.header.blockSamples ||
+		h.totalLow != wv.header.totalLow || h.totalHigh != wv.header.totalHigh {
+		return false
+	}
+	if total, ok := wv.header.totalSamples(); ok && wv.header.blockIndex == 0 {
+		return wvc.final == total
+	}
+	return true
 }

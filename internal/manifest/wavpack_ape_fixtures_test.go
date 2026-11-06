@@ -205,21 +205,36 @@ func wvFirstBlock(spec wvSpec, correction bool) wvBlock {
 	return b
 }
 
-// wvFile is a WavPack file of spec: its first block and a second, as an
-// encoder's next block of the same stream.
-func wvFile(spec wvSpec) []byte {
-	first := wvFirstBlock(spec, false)
-	second := first
-	second.blockIndex = uint64(first.blockSamples)
-	return append(first.bytes(), second.bytes()...)
-}
+// wvFile is a WavPack file of spec (wvBlocks).
+func wvFile(spec wvSpec) []byte { return wvBlocks(spec, false) }
 
-// wvcFile is the correction file a hybrid encode of spec writes beside it.
-func wvcFile(spec wvSpec) []byte {
-	first := wvFirstBlock(spec, true)
-	second := first
-	second.blockIndex = uint64(first.blockSamples)
-	return append(first.bytes(), second.bytes()...)
+// wvcFile is the correction file a hybrid encode of spec writes beside it
+// (wvBlocks).
+func wvcFile(spec wvSpec) []byte { return wvBlocks(spec, true) }
+
+// wvBlocks lays out the blocks an encoder writes for spec, each carrying the
+// stream's total: the first, and where the stream is longer than one block,
+// the block that ends it at its last sample. The blocks between are left
+// out, since nothing here decodes them: a reader of a header looks at the
+// first audio block, and at the block that ends the file. A stream whose
+// length the encoder could not write gets a second block after the first.
+func wvBlocks(spec wvSpec, correction bool) []byte {
+	first := wvFirstBlock(spec, correction)
+	out := first.bytes()
+	n := int64(first.blockSamples)
+	switch {
+	case spec.total < 0:
+		next := first
+		next.blockIndex = uint64(n)
+		out = append(out, next.bytes()...)
+	case spec.total > n:
+		last := first
+		s := min(spec.total-n, n)
+		last.blockIndex = uint64(spec.total - s)
+		last.blockSamples = uint32(s)
+		out = append(out, last.bytes()...)
+	}
+	return out
 }
 
 // The APE compression levels and the format flags the fixtures set, as

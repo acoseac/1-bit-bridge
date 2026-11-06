@@ -14,8 +14,9 @@ package manifest
 //     name, which is no correction file, as a directory called cover.jpg is
 //     no cover). The row is WAVPACK-LOSSY.
 //   - a matching file: one whose first audio block is a correction block of
-//     this stream (correctionMatches). The row is WAVPACK, lossless, and
-//     carries the file on the wire (Track.Correction).
+//     this stream and whose last block ends the file at the stream's last
+//     sample (correctionMatches). The row is WAVPACK, lossless, and carries
+//     the file on the wire (Track.Correction).
 //   - an invalid or mismatched file: one there and read whole that is not
 //     (another file's, cut short, not WavPack). The row is WAVPACK-LOSSY with
 //     no correction, and the extraction says so once: the row records the
@@ -53,6 +54,11 @@ import (
 // correctionExt is the correction file's extension, compared without regard
 // to case, as the walk compares an audio file's.
 const correctionExt = ".wvc"
+
+// msgCorrectionMismatch is the line a correction file that is not its
+// stream's (another stream's, cut short, not WavPack) gets, once for each of
+// its stats.
+const msgCorrectionMismatch = "wavpack: the correction file beside a hybrid file does not match it; indexing the file as lossy"
 
 // correctionState is the kind of observation a row records.
 type correctionState byte
@@ -206,7 +212,7 @@ func observeCorrection(absWV string, wv wvStream, ec *ExtractContext) (correctio
 	if err := sameCorrectionStat(f, obs); err != nil {
 		return correctionObservation{}, err
 	}
-	wvc, readErr := readWavPackCorrection(f)
+	wvc, readErr := readWavPackCorrection(f, obs.size)
 	if readErr != nil && isReadFailure(readErr) {
 		return correctionObservation{}, readErr
 	}
@@ -275,8 +281,7 @@ func applyCorrection(t *Track, obs correctionObservation) {
 		}
 		t.Correction = &CorrectionFile{Path: rel, Size: obs.size, ModTime: time.Unix(0, obs.mtimeNS).UTC()}
 	case correctionRejected:
-		scanLogger.Warn("wavpack: the correction file beside a hybrid file is not its own; indexing the file as lossy",
-			"path", t.Path, "correction", obs.name)
+		scanLogger.Warn(msgCorrectionMismatch, "path", t.Path, "correction", obs.name)
 	}
 }
 
