@@ -78542,19 +78542,18 @@ list of passes (`reconciliationMessages`) carry the second run as
 
 ### The residuals, named
 
-- **The vote reads stored rows.** `streamReconcileTargets` reads the
-  database's years. After 12 × 2011 is stored, retagging 3 files to 1968
-  votes 9 to 3 (the 4 files still tagged 2011, and the 5 the pass gave 2011
-  whose files say 1968, against the 3 re-read), so the 3 are written back,
-  though a fresh index sees 8 × 1968 and 4 × 2011 and gives 1968. A tag edit
-  moves an album only when the files it re-read outvote its stored year (a
-  whole-album retag does); an ExtractorVersion bump re-reads every tag,
-  judges the 8 held re-reads with all of them in place, and moves the album
-  once (all 12 rows, the 8 held ones written whole with their enrichment
-  re-queued, the 4 by the tail's pass), and the scan after moves nothing. No
-  field holds the tagged year (the brief's decision).
-  `TestScanner_ARetagOfFewerFilesThanTheStoredYearHoldsIsVotedBack`,
-  `TestScanner_ATagEditThatOutvotesTheStoredYearMovesTheAlbum`.
+- **The vote read stored rows: no longer a residual, replaced in round 2**
+  (the record below). Round 1's vote read the database's years
+  (`streamReconcileTargets`), so after 12 × 2011 was stored, retagging 3
+  files to 1968 voted 9 to 3 and the 3 were written back, though a fresh
+  index sees 8 × 1968 and 4 × 2011 and gives 1968; an album moved only when
+  the files a scan re-read outvoted its stored year, or at an
+  ExtractorVersion bump. The review showed the same history deciding an
+  album whose majority was deleted, and one retagged across two scans. Each
+  row now votes what its tag said, through the year pass's record
+  (`TestScanner_ARetagOfSomeFilesIsJudgedOnTheTags`, round 1's test of this
+  residual, renamed and turned around;
+  `TestScanner_ATagEditThatOutvotesTheStoredYearMovesTheAlbum`).
 - **A subtree scan restores a changed file's own year until the next full
   scan.** A changed file takes the ordinary upsert, and
   `settleSubtreeHeldReconciles` runs no pass over it, so a watcher scan
@@ -78734,3 +78733,260 @@ in 1,398 s (internal/manifest 1,386 s); `make build-all`, ok, its `dist/`
 removed after. `git status --ignored` showed nothing but `.tmp/` after. Not
 run here: macOS and Windows natively, CI's runners, and the iOS app, whose
 repo is not on this host.
+
+## 2026-11-06 — B756 round 2: each row votes its tag, a missing copy never wins
+
+Worker b756b, the same host, toolchain and branch, from the orchestrator's
+review of round 1: five points, each a reviewer's reading of the code, after
+the orchestrator applied round 1's rules patch on the pushed branch. Commits:
+58f47fc8 (points 1, 3, 4 and 5 with their tests), aef75b90 (a bump keeps the
+record of a tag that gave no year), 62cdb78e (a row stored with no record
+keeps none at a bump, found by this round's controls), bb7fa90f (the pin of
+that fix's year condition), then the rule's long form and this record. The
+rule's line and the duplicates bullet in `enrichment.md` change through
+`rules-b756b-r2.patch`. `testdata/album-one-year-cases.json` is unchanged: no
+case's expectation changed, since the table is what a fresh index gives, and
+this round changes what a history gives.
+
+### Point 1: a stored year outvoted the tags it replaced — confirmed, fixed
+
+Both of the review's scenarios were red on round 1 (8a7c50ca's production
+files, with inert stubs so this round's tests compile, `.tmp/_b756b/red2.py`
+on a copy of the tree outside git). Seven files of 2011 and five of 1968,
+the seven deleted: the five stayed at 2011 once the seven were reaped ("once
+the seven are reaped: Band/Remastered/08 Track.flac year 2011, want 1968"),
+the test running the deletion pass's real grace
+(`config.DefaultDeleteAfterMissingScans`), so the tail judged the group
+again after a real deletion and voted the stored years. Track 1, then tracks
+2 to 7, retagged 1968 across two scans: all twelve stayed at 2011 ("after
+the retag of tracks 2 to 7: Band/Remastered/01 Track.flac year 2011, want
+1968"), the second scan's stored rows voting six to six and the tie going to
+2011. A fresh index of the same files gives 1968 in both.
+
+The fix is the review's design. `Track.taggedYear` (unexported, a
+`*yearRecord`) is the year pass's record of what a row's tag said: `yearMove`
+sets it the first time the pass moves a row's year, to the year the row
+held, and drops it when the pass moves the year back to it. `votingYear` is
+the record's year where there is one and the stored year otherwise, and
+`albumYearFixes` votes with it and writes the answer to `Year`. A lone or
+untitled row with a record goes back to its tag. A tag with no year is a
+record of nil, told apart from no record: `tags_json` holds the record as an
+object under `taggedYear`, `{"year":1968}` or `{}`, which `marshalForStorage`
+splices in after `json.Marshal` and `decodeStoredTrack` reads at every
+stored decode (`GetTrack`, `GetTrackWithStat`, `UnenrichedTracks`, the
+case-folding lookup, the listed-row scan the streams and pages share, and
+the UPnP routing list; no package outside `internal/manifest` decodes
+`tags_json` itself). Extraction never sets it, so a changed file's row is
+written afresh and votes its new tag (`TestScanner_AReExtractClearsTheRecord`).
+A version-stale re-read keeps the album's year and the record where its tag
+reads as the record says, a tag with no year included (`mergeYear`;
+`TestANilTagIsRecordedAndRestored` bumps over one), and otherwise keeps its
+own reading and no record, and is held (B188). The MBID fill writes no
+record, so a year it borrowed votes as stored; when the year pass after it
+then moves the row, the record holds the borrowed year, which is what a
+fresh index's MBID fill gives it too.
+
+What reads `tags_json`, and the wire. The record is unexported, so a `Track`
+encodes without it, and `/v1/manifest`, full and delta, decodes each row into
+a `Track` and encodes that: no client sees the key
+(`TestTheTaggedYearIsStoredAndNeverServed` reads the stored bytes, both
+manifests and `json.Marshal`). PROTOCOL.md has a client ignore a field it
+does not know, so a leak would not break the app, but nothing is sent, and
+`ProtocolVersion` stays 1. The other readers (`dupe_refs.go`,
+`catalog_refs.go`, the console's extracts) read named paths, never the
+record. The enricher writes back the whole row it read, and the record with
+it (`TestTheRecordSurvivesTheEnrichersStamp`). A record never changes alone:
+the pass returns a row only when its year moves, so a record moves no
+`indexed_at`, no revision and no delta entry, and the duplicate stamps never
+see it (`TestTheYearPassNeverWritesTheRecordAlone`, over a row whose record
+equals its year, set by hand). A write of the record alone was rejected both
+ways: with no `indexed_at` advance it breaks the premise of B187's
+compare-and-set (every write of `tags_json` advances `indexed_at`, so a
+writer holding an older read can tell), and with one it is a delta entry to
+every paired device for nothing a client sees.
+
+A fresh index and two histories agree on every shape of the shared table
+(`TestAnIncrementalHistoryAgreesWithAFreshIndexOnTheTablesShapes`, in
+memory: every track tagged 2099 and given that year, then retagged to the
+case's years one file a scan; and every track outvoted by three of 2099
+beside it, which a scan then deletes). Round 1's tests of the stored vote
+were turned around: its test of that residual is now
+`TestScanner_ARetagOfSomeFilesIsJudgedOnTheTags` (three of the seven 2011
+files retagged 1968 give the album 1968, as a fresh index does, and a bump
+after moves nothing); `TestScanner_AVersionStaleReReadOfAnAlbumGivenOneYearOnlyStamps`
+finds the five stamped at the merge, with their records, where round 1 held
+them to the tail; and
+`TestScanner_ReReadsOfAnAlbumGivenOneYearPastTheHoldLimitSettleInOneScan`
+seeds a record of 1950 (an older extractor's reading of the DATE that now
+reads 1968), so the five differ from their rows and are held, three past a
+limit of two.
+
+**Found in this round: a row stored with no record churned at the first
+bump.** Control (1b) below makes every stored record unreadable, which is
+how every row an older bridge wrote looks, and under it the B188 and B342
+no-churn tests went red. `TestScanner_ABumpOverRowsStoredWithNoRecordOnlyStampsThem`
+(an album whose composition date, `0000` date and empty date took its 2011,
+the records then removed as an older bridge stores rows) was red on
+aef75b90, through a full scan and a subtree scan alike: "rows the bump
+moved: [Band/Filled/04 Track.flac Band/Filled/05 Track.flac], want none",
+each with `enriched_at` 0. The two re-reads whose tags read a year differ
+from their rows and are held; the settlement's passes give each the album's
+year and the record of its tag; and the record alone made each differ from
+its row, which was then written whole and re-enriched. That is the churn
+B188 exists to prevent, at the first ExtractorVersion bump after the
+upgrade, for every such row a library holds. `heldRecord` (62cdb78e) gives a
+held re-read no record where its row holds none and the passes leave its
+year as the row holds it, so it is stamped and votes its stored year, as it
+did: the review's rule for rows written before it ("legacy rows count as
+stored"). Where the passes move such a row's year it takes the record
+(`TestScanner_ABumpThatMovesAnAlbumRecordsTheTagsOfTheRowsItMoves`: twelve
+rows an older bridge stored at 1999 are read as seven of 2011 and five of
+1968, all twelve are rewritten at 2011, the five with records of 1968, and
+the five take 1968 once the seven are reaped; green before the fix as well,
+it pins the year condition, and control (12b) shows that it does).
+
+What a row with no record still does, named: it votes its stored year until
+the pass moves it. That covers the years an older bridge filled (a
+composition date and a missing year, which a fresh index would not count),
+and a row the pass never moved whose tag an extractor change reads otherwise
+while its album's year stays (the settlement stamps it). When the tail moves
+such a row, its record is the year it held, which for a filled row is not
+its tag, and a later bump that reads the tag otherwise writes the row whole
+once. Each needs an edit after the upgrade (a retag, a deletion, an
+extractor change) before it shows at all.
+
+### Point 2: the DSD album gain within a merged album — confirmed, not built
+
+How a membership change reaches renditions: a render takes its album's boost
+from `internal/albumgain`'s index of the album by `dupes.AlbumIDOf`, which
+the post-scan hook drops (`Resolver.Invalidate`) and the next render
+rebuilds, so every render after the merge guards the merged album. A
+rendition already made keeps the gain it was rendered with: its row records
+`applied_gain_db`, and its settings blob `gainScope` and `trackGainDB`, never
+the album identity or the members the gain was computed over. It stays
+fresh, since a DSD rendition's freshness is its source file's stamp and the
+current DSD schema (`v2`), so neither the auto-optimize sweeper nor `bridge
+optimize` or `bridge render` (whose skip check is the exact current id)
+renders it again. And a re-render under the same id is unsafe: a phone
+applies a rendition's `appliedGainDB`, read from the manifest by id, to the
+bytes of its downloaded copy, which is why `v2` minted new ids and why no
+reaper may come before the app records the gain with its downloaded copy
+(the album gain entry in `jobs.md`). So there is no existing path to
+invalidate or queue through, and building one is a subsystem: each
+rendition's album identity and boost recorded at render time; a staleness
+term comparing them with the album's boost now (the peaks are on record in
+`dsd_peaks`, so the comparison needs no decode); and a rendition id that
+changes with its gain, or the app's record of the gain beside its downloaded
+copy (the album gain plan's M2), before any rendition is replaced. Stopped
+there, as the brief says. The effect: a merged album's renditions keep the
+balance of the half each was rendered with, none clips (each render also
+guards its own peak), and only the merged albums that are DSD and have
+renditions are touched; how many of the owner's 18 are could not be measured
+here.
+
+### Point 3: a year rewrite could suppress the only playable copy — confirmed, fixed
+
+The duplicates test's copy-wins shape, with `copies[7]`'s file removed just
+before the first scan after the upgrade
+(`TestScanner_ACopyKnownMissingNeverWinsItsGroup`). On round 1 the copy's
+row, inside the deletion grace (`missing_count` 1 of 3), won its group on its
+stored size once the rewrite gave the original its key, so the reachable
+original was tombstoned ("Band/Remastered/08 Track.flac, the reachable
+original, is suppressed in favour of a copy whose file is gone"; the delta
+deleted it, and the served set held the gone copy) until the row was reaped,
+two more full scans later: 12 h at the default `ScanIntervalSec`, longer
+under a raised `deleteAfterMissingScans`. The election can exclude a row
+known missing with a small change, so it does: `dupeRefSelect` reads
+`COALESCE(t.missing_count, 0) > 0` into `dupes.Row.Missing`, and `outranks`
+and `nestShallower` put a file the scan found before one it did not, ahead
+of every other term (`TestAFileTheScanFoundOutranksOneItDidNot`, in
+`internal/dupes`, covers both). The term moves only when a file goes or
+comes back: the count is the deletion pass's own, which a walk that could
+not read a folder leaves as it was, so a flapping mount does not move the
+election or churn `indexed_at`. It knows nothing of an upstream's
+reachability: routed rows stay out of the duplicates pass, and the
+2026-08-31 record of the parked cross-source suppression stands. The
+duplicates bullet in `enrichment.md` that said `outranks` has no
+availability term is corrected through the patch.
+
+### Point 4: a literal backslash split a name — confirmed, fixed by platform
+
+On Linux and macOS a backslash is a character of a file name, and the
+passes split on both separators everywhere: `Band/Live\01 Track.flac`, a
+file of `Band`, joined `Band/Live`'s album and took its 1968
+(`TestScanner_ABackslashInANameIsNoFolder` on round 1: "the pass moved
+map[Band/Live\01 Track.flac:1968], want map[]", and through a real scan "the
+file named with a backslash: Band/Live\01 Track.flac year 1968, want 2011").
+Stored paths are slash-separated on every platform (`relPath` writes them
+through `filepath.ToSlash`), so the fix is small: `trackDir`, `pathBase` and
+`pathStem` split on `pathSeparators`, which is "/" but on Windows "/" and
+"\" (`pathSeparatorsFor(runtime.GOOS)`; no Windows name holds a backslash,
+so the split there is as it was). The shared table holds no backslash and is
+unchanged. Round 1's tests that fed Windows-shaped paths on every platform
+(`TestTrackDir`, `TestPathStem`, `TestReconcileAlbumArtistsWindowsPaths`,
+`TestBackfillTrackNumbersFromPath`) run them under Windows' separators
+through a seam (`underSeparatorsOf`), with the POSIX answer beside them.
+Owed to the mirror PR: whether the app's copy splits on a backslash (the iOS
+repo is not on this host).
+
+### Point 5: the table's digest — pinned
+
+`TestTheSharedYearTableIsTheMirroredBytes` pins the table's SHA-256,
+`c1f74e97537468f7d7a0f0b33aa9071797f9b85ae72069469cac433bcef681af` (12,450
+bytes), and fails on a CR byte. `.gitattributes` keeps the file LF (`text
+eol=lf`), so a Windows checkout hashes the same bytes. The iOS mirror pins
+the same digest.
+
+### Red first
+
+On round 1's production code with inert stubs (`.tmp/_b756b/red2.py`): red
+on behaviour were `TestScanner_AnAlbumWhoseMajorityIsDeletedTakesWhatItsTagsSay`,
+`TestScanner_AnAlbumRetaggedAcrossTwoScansFollowsItsFiles`,
+`TestScanner_ARetagOfSomeFilesIsJudgedOnTheTags`,
+`TestAnIncrementalHistoryAgreesWithAFreshIndexOnTheTablesShapes`,
+`TestScanner_ACopyKnownMissingNeverWinsItsGroup`,
+`TestScanner_ABackslashInANameIsNoFolder`, `TestTrackDir`, `TestPathStem`
+and `TestAFileTheScanFoundOutranksOneItDidNot`; red by construction, round 1
+having no record, were `TestANilTagIsRecordedAndRestored`,
+`TestScanner_AReExtractClearsTheRecord`,
+`TestTheTaggedYearIsStoredAndNeverServed`,
+`TestTheRecordSurvivesTheEnrichersStamp`,
+`TestTheYearPassNeverWritesTheRecordAlone` and the record checks of the
+version-stale and past-the-limit tests. Green there, as they should be:
+`TestAnAlbumTakesOneYear` (the table is unchanged),
+`TestTheSharedYearTableIsTheMirroredBytes` (the bytes are round 1's), the
+two Windows-path tests under Windows' separators, and
+`TestScanner_AnAlbumRetaggedOneSubtreeScanAtATimeMovesAtTheNextFullScan` (a
+subtree scan writes the edited row alone either way).
+`TestScanner_ABumpOverRowsStoredWithNoRecordOnlyStampsThem` was red on
+aef75b90, before its fix (above).
+
+### Negative controls
+
+Three runs on the committed code, each through a runner that applies a
+mutation (its anchor found exactly once), builds the test binaries, runs
+each named test alone and restores the bytes from memory: each baseline
+green, every control built, and `git status` empty after each. The first
+run's predictions were made before it but not written down where this record
+can show them; the second and third runs were predicted by name in files
+written before them (`.tmp/_b756b/controls3.predictions.txt` and
+`controls4.predictions.txt`), and every prediction held, the tests predicted
+to stay green included.
+
+| Mutation | Red |
+|---|---|
+| (1a) the vote ignores the record (`votingYear` returns the stored year) | the history test, the deletion and two-scan retag tests, `TestScanner_ARetagOfSomeFilesIsJudgedOnTheTags`, `TestANilTagIsRecordedAndRestored` |
+| (1b) no stored record is read (`decodeStoredTrack`) | 12: every scan test that reads a record back through the store (not the one that reads the stored bytes), and the B188 and B342 no-churn tests and the strays' bump, each moving rows: the shape of every row an older bridge wrote, which led to `heldRecord` |
+| (1c) `mergeYear` without its record branch | `TestANilTagIsRecordedAndRestored` (the bump moves the untagged row) |
+| (1d) a move back to the tag's year keeps the record | the deletion and two-scan retag tests, `TestANilTagIsRecordedAndRestored` |
+| (1e) `marshalForStorage` never writes the record | 9, as predicted: the deletion, two-scan and three-file retag tests, the nil-tag, re-extract, stored-not-served and enricher tests, and the record checks of the version-stale and past-the-limit tests; green, as predicted: `TestTheYearPassNeverWritesTheRecordAlone`, the strays', B342's and B188's no-churn tests (the stamp comparison marshals both sides without the record) and the history test |
+| (1f) `yearMove` records the year it moves to | 10, as predicted: the history test and the nine above, `TestANilTagIsRecordedAndRestored` in memory as well |
+| (12a) `heldRecord` always returns the settled record | `TestScanner_ABumpOverRowsStoredWithNoRecordOnlyStampsThem` alone, both scopes, as predicted |
+| (12b) `heldRecord` without its year condition | `TestScanner_ABumpThatMovesAnAlbumRecordsTheTagsOfTheRowsItMoves` alone, as predicted |
+| (3a) `outranks` without its Missing term | `TestScanner_ACopyKnownMissingNeverWinsItsGroup`, `TestAFileTheScanFoundOutranksOneItDidNot` |
+| (3b) the refs stream never sets `Row.Missing` | `TestScanner_ACopyKnownMissingNeverWinsItsGroup` |
+| (3c) `nestShallower` without its Missing term | `TestAFileTheScanFoundOutranksOneItDidNot` alone (its nest-twin case), as predicted |
+| (3d) the refs stream reads `missing_count > 1` | `TestScanner_ACopyKnownMissingNeverWinsItsGroup` alone, as predicted |
+| (4a) a backslash separates on every platform | `TestScanner_ABackslashInANameIsNoFolder`, `TestTrackDir`, `TestPathStem` |
+| (5a) one space added to the shared table | `TestTheSharedYearTableIsTheMirroredBytes` (the digest 44cc71ee… where c1f74e97… is pinned) |
+| (c) round 1's settlement control, again | the strays' bump, B188's no-churn test and its past-the-limit test; no longer the version-stale test, whose five are stamped at the merge now |
