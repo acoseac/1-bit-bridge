@@ -80030,3 +80030,43 @@ the shared build lock: `make fmt`, nothing rewritten; `make vet`, and with
 test -race -count=1` of `./internal/player/...`, `./cmd/bridge/...` and
 `./internal/alsapcm/...`, 16 packages ok (1,025 s); `make docs-check`; the
 qualification check from 0d5cb33b and from main, each OK; the tree clean.
+
+**Round 4** (commit c02b757c). CI's `test -race (rest)` failed
+`TestRefreshesAcrossTheFirstOpensEndTakeTheSessionsLock`'s "refreshes that keep
+its plan": a `backend_error` fault on the first occurrence, "the effective DSD
+set no longer plays this occurrence's plan". A production defect, not the
+test's: `checkDSDActivation` compared the occurrence's set with the one its own
+`refreshDSD` returned, outside the session's lock, so a refresh beside it (the
+session's own 100 ms monitor, started before the activation, or the
+supervisor's) that published the next set and reconciled the occurrence Keep
+between the two repointed `o.admitted`, and the check refused a plan the set
+published now plays; the other way round, a refresh that had published a set
+taking the plan away and had not yet reconciled the occurrence let the
+activation write to the DAC before its revocation. Both windows are held at
+their exact points by two test seams, `playback.Seams.Activating` (between the
+activation's read and its check) and `Published` (between a refresh's
+publication and its reconciliation, under the refreshes' lock), in
+`TestAnActivationJudgesThePlanByTheSetPublishedNow`: red on the old check in
+its first case (CI's fault, word for word) and its third (8,904 bytes given to
+the DAC, then `native_revoked`). The check now reads the set published now
+under the session's lock and judges the occurrence by `policy.Reconcile`,
+repointing one it keeps; a refresh after it judges the occurrence as
+reconciliation judges any. Controls, each as predicted
+(`.tmp/_b728-b7/predictions-r4.txt`): the old check restored, red in the first
+and third cases; the set published now compared alone, without `Reconcile`, red
+in the second; the kept occurrence not repointed at the check, green, since the
+publishing refresh's reconciliation repoints it after (the repoint is
+consistency, not load-bearing). Stress under -race on legion0 (16 cores), the
+CI test and the new one together: 300 runs at `-cpu 1` and 300 at `-cpu 16`,
+every one passing, no DATA RACE (12,000 sessions of the CI test at each
+setting). The CI test alone, on a binary built with the old check: 0 of 100
+runs failed at `-cpu 1` and 2 of 100 at `-cpu 16`, each with CI's fault, so the
+test finds the defect on this host too and the fix removes it. Rules: the job's
+`rules-b728-b7-r4.patch`, on rounds 1 and 2's, adds the activation to the
+reconciliation entry's Don't list and its long form. Checks, on c02b757c
+through the shared build lock (`.tmp/_b728-b7/gates_r4.py`): `make fmt`,
+nothing rewritten; `make vet`, and with `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`, each clean; `go test -race -count=1` of
+`./internal/player/...`, `./cmd/bridge/...` and `./internal/alsapcm/...`, 16
+packages ok (1,039 s; cmd/bridge 1,021 s); `make docs-check`; the qualification
+check from 0d5cb33b and from main, each OK; the tree clean.
