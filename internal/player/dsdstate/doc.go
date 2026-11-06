@@ -4,9 +4,11 @@
 // in <dataDir>/player-dsd.json, schema 1, beside the player's queue, and the
 // logic of the one migration of the legacy keys (dsdMode, allowDoP and
 // dsdQualification) into it. Serve's player opens it at its start and runs
-// the migration (B6; cmd/bridge's playerDSD), and nothing plays by it yet:
-// the effective policy (B5) reads it from the cutover (B7) on, and until then
-// the owner's approval record decides DSD as before.
+// the migration (B6; cmd/bridge's playerDSD), and bridge output play its own
+// in its state directory; since the cutover (B7) the player plays by it: the
+// effective policy (B5) reads it at every refresh, and playback writes into
+// it what it observed (a driver's acceptance, streaming observed, first use
+// observed). No approval record decides DSD any more.
 //
 // A DAC is keyed by its model, dacprofile.Key (B2's: the vendor and product
 // IDs, the interface and the product string), never by a serial, a port, a

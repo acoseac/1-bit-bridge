@@ -26,6 +26,14 @@ const nativeReleaseBudget = 2 * time.Second
 const nativeCloseMargin = 500 * time.Millisecond
 const nativeLedgerMax = 1024
 
+// MaxDSDPrefill bounds the DSD silence a hardware run starts with
+// (DSDConfig.Prefill): the most a reviewed DAC profile may give
+// (dacprofile.MaxTimingMs), so a profile's resync delay never fails an open
+// at run time (B728 B7: the Chord Hugo 2's is 700 ms, past the 500 ms this
+// bound was). The silence is written a period at a time from the writer's
+// scratch, so a longer one costs time and no memory.
+const MaxDSDPrefill = 5 * time.Second
+
 // DSDConfig is an explicit provisional native transport and lifecycle policy.
 // Check re-reads the harness's descriptor and control snapshot after open and
 // at activation/reopen. It never writes mixer controls.
@@ -135,7 +143,7 @@ func (c DSDConfig) validate() (DSDConfig, error) {
 	if c.Pause != PauseKernel && c.Pause != PauseZeros {
 		return c, errors.New("explicit native pause policy required")
 	}
-	if c.Tail < 0 || c.Tail > 100*time.Millisecond || c.Prefill < 0 || c.Prefill > 500*time.Millisecond {
+	if c.Tail < 0 || c.Tail > 100*time.Millisecond || c.Prefill < 0 || c.Prefill > MaxDSDPrefill {
 		return c, errors.New("native silence policy out of range")
 	}
 	if c.BufferTime == 0 {

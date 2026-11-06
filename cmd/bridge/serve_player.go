@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/acoseac/1-bit-bridge/internal/alsactl"
 	"github.com/acoseac/1-bit-bridge/internal/backup"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
@@ -204,6 +205,11 @@ type servePlayerSeams struct {
 	// the step is for (nil for the start's): a boot test's hold on it
 	// (playerDSD.migrate).
 	migrates func(context.Context, *dsdstate.Bound)
+	// dsdPolicy changes the effective DSD policy the backend is built with
+	// (dsdPolicyFor) before the backend is: a boot test's way to read the
+	// card's controls through a reader of its own, since no test opens a
+	// control node.
+	dsdPolicy func(*playback.DSDPolicy)
 }
 
 // servePlayerBounds are the stop's bounds: how long it waits for the
@@ -468,18 +474,17 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 	if newBackend == nil {
 		newBackend = newServePlayerBackend
 	}
+	// DSD plays by the effective policy (B728 B7): no approval record is read
+	// here, and no Authorization is given.
+	dsd := dsdPolicyFor(p.dsd, w.Feed, player.Device, w.Trees.or(hostTrees), alsactl.Reader{})
+	if p.seams != nil && p.seams.dsdPolicy != nil {
+		p.seams.dsdPolicy(dsd)
+	}
 	be, err := newBackend(playback.Config{
 		Resolver: res,
-		Authorization: &playback.Authorization{StateDir: cfg.DataDir, Record: player.DSDQualification, Mode: player.EffectiveDSDMode(), AllowDoP: player.AllowsDoP(), Sysfs: w.Trees.or(hostTrees).observer().Sysfs, Healthy: func() bool {
-			if w.Feed == nil {
-				return false
-			}
-			snap, ok := w.Feed.Latest()
-			_, stale := snap.Stale()
-			return ok && !stale
-		}},
-		Locator: playback.BindingLocator{Device: player.Device, Observer: w.Trees.or(hostTrees).observer()},
-		Notify:  p.note,
+		DSD:      dsd,
+		Locator:  playback.BindingLocator{Device: player.Device, Observer: w.Trees.or(hostTrees).observer()},
+		Notify:   p.note,
 	})
 	if err != nil {
 		return refuse("the player's backend: " + err.Error())
@@ -491,7 +496,6 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 		ReservePath:  filepath.Join(cfg.DataDir, playerReservationFile),
 		DataDir:      cfg.DataDir,
 		PauseRelease: player.PauseRelease(),
-		DSD:          player.EffectiveDSDMode(),
 	}
 	if p.seams != nil && p.seams.engineConfig != nil {
 		p.seams.engineConfig(&ecfg)
@@ -554,12 +558,28 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 func (p *bridgePlayer) watch(ctx context.Context) {
 	policyTick := time.NewTicker(100 * time.Millisecond)
 	defer policyTick.Stop()
-	refresh := func() {
-		if be, ok := p.be.(*playback.Backend); ok {
-			be.RefreshAuthorization(ctx)
+	// The effective DSD policy's supervisor (B728 B7): its refresh, forced
+	// where an input changed (a snapshot, a migration's part for a DAC) and
+	// otherwise at most once a dsdIdle; and the silent probe, at a snapshot
+	// that resolves the boot binding, at the tick after a migration's part for
+	// a DAC changed the state (dsdPartChanged), and while one is due and the
+	// device slot refused it, at each tick until the slot is free.
+	be, _ := p.be.(*playback.Backend)
+	probePending := false
+	refresh := func(force bool) {
+		if be != nil {
+			be.RefreshDSD(force)
 		}
 	}
-	refresh()
+	probe := func(snap hotplug.Snapshot) {
+		if be != nil {
+			probePending = be.ProbeDSD(ctx, probeConditions(snap, p.device))
+		}
+	}
+	if be != nil {
+		p.dsd.changed = dsdPartChanged(be, &probePending)
+	}
+	refresh(true)
 	run := p.run
 	// The holder's channel is taken before the config is read, so a change
 	// in between still wakes the loop.
@@ -575,14 +595,21 @@ func (p *bridgePlayer) watch(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-policyTick.C:
-			refresh()
+			refresh(false)
 			p.dsd.retry(ctx)
+			if probePending {
+				if snap, ok := p.feed.Latest(); ok {
+					probe(snap)
+				}
+			}
 		case <-run.done:
 			playerLog.Error("player: the engine stopped on its own, which only a panic in it does (logged above): the player is off until bridge serve next starts, and the backend is asked to let go of the device; the release outcome follows")
 			return
 		case snap := <-run.sub.C():
 			p.dsd.resolve(ctx, snap)
 			p.report(snap)
+			refresh(true)
+			probe(snap)
 		case <-cfgChanged:
 			cfgChanged = p.changed()
 			p.follow()
