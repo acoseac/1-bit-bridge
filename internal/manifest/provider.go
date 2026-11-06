@@ -86,6 +86,11 @@ type Provider struct {
 	// HTTP-handler goroutines, so an unsynchronised write would race them.
 	upscaleEnabledFn atomic.Pointer[func() bool]
 
+	// enrichmentEnabledFn is the live predicate for enrich.enabled
+	// (SetEnrichmentEnabledSource), read per manifest fetch: off, no leg
+	// carries an enrichmentProgress block. Nil is on.
+	enrichmentEnabledFn atomic.Pointer[func() bool]
+
 	// last{Count,Pending}ErrLogNS carry the unix-nano timestamp of the most
 	// recent health-probe DB-error log for TracksIndexed / PendingDeletions.
 	// /v1/health is polled frequently, so a persistently-broken DB would
@@ -148,6 +153,27 @@ func (p *Provider) upscaleGate() bool {
 	return p.upscaleEnabled.Load()
 }
 
+// SetEnrichmentEnabledSource attaches the live predicate for enrich.enabled,
+// consulted per manifest fetch: while it answers false, neither the stream
+// (full or since) nor the paginated first page carries enrichmentProgress,
+// which a phone would read as enrichment under way (backlog B617). Nil, the
+// default, is on.
+func (p *Provider) SetEnrichmentEnabledSource(f func() bool) {
+	if f == nil {
+		p.enrichmentEnabledFn.Store(nil)
+		return
+	}
+	p.enrichmentEnabledFn.Store(&f)
+}
+
+// enrichmentGate is enrich.enabled as the live source answers it now.
+func (p *Provider) enrichmentGate() bool {
+	if fn := p.enrichmentEnabledFn.Load(); fn != nil {
+		return (*fn)()
+	}
+	return true
+}
+
 // WriteManifest satisfies api.ManifestProvider for the legacy
 // non-paginated /v1/manifest endpoint. Streams JSON straight to w
 // instead of materialising a full []Track in memory — the previous
@@ -159,14 +185,14 @@ func (p *Provider) upscaleGate() bool {
 // disconnect mid-response (slow network, iOS app backgrounded mid-sync,
 // slow-read DOS) terminates the SQLite scan instead of running to EOF.
 func (p *Provider) WriteManifest(ctx context.Context, w io.Writer, since time.Time) error {
-	return writeManifestGated(ctx, w, p.store, p.scanner.Roots(), since, p.upscaleGate())
+	return writeManifestGated(ctx, w, p.store, p.scanner.Roots(), since, p.upscaleGate(), p.enrichmentGate())
 }
 
 // BuildManifestPage satisfies api.ManifestProvider for the paginated
 // full-manifest path introduced in v1.1. See `BuildManifestPage` in
 // scanner.go for the cursor semantics.
 func (p *Provider) BuildManifestPage(ctx context.Context, cursor string, limit int) (*Manifest, error) {
-	return buildManifestPageGated(ctx, p.store, p.scanner.Roots(), cursor, limit, p.upscaleGate())
+	return buildManifestPageGated(ctx, p.store, p.scanner.Roots(), cursor, limit, p.upscaleGate(), p.enrichmentGate())
 }
 
 // IsScanning satisfies api.ManifestProvider.

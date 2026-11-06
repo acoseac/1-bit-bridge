@@ -4475,6 +4475,12 @@ func (s *Scanner) RunPeriodic(ctx context.Context, interval func() time.Duration
 // enrichment, reconciliation, and variant writes all strict-advance
 // indexed_at precisely so incremental iOS syncs surface them.
 func BuildManifest(ctx context.Context, store *Store, roots []string, since time.Time) (*Manifest, error) {
+	return buildManifest(ctx, store, roots, since, true)
+}
+
+// buildManifest is BuildManifest with enrich.enabled as withProgress: off,
+// the manifest carries no enrichmentProgress block (enrichmentProgressBlock).
+func buildManifest(ctx context.Context, store *Store, roots []string, since time.Time, withProgress bool) (*Manifest, error) {
 	var sp *time.Time
 	if !since.IsZero() {
 		sp = &since
@@ -4528,19 +4534,41 @@ func BuildManifest(ctx context.Context, store *Store, roots []string, since time
 	// top-level `total`, so we still need this count — but we now do
 	// it once, here, instead of letting both the manifest builder and
 	// EnrichmentCounts each issue their own `COUNT(*)`.
-	total, terr := store.CountServedTracks(ctx)
-	if terr != nil {
-		logger.Error("CountServedTracks for enrichment-progress", "err", terr)
-	} else if enriched, lastEnrichedAt, perr := store.EnrichmentCounts(ctx); perr == nil {
-		m.EnrichmentProgress = &EnrichmentProgress{
-			TracksTotal:    total,
-			TracksEnriched: enriched,
-			LastEnrichedAt: lastEnrichedAt,
-		}
-	} else {
-		logger.Error("EnrichmentCounts", "err", perr)
-	}
+	m.EnrichmentProgress = enrichmentProgressBlock(ctx, store, withProgress, nil, "EnrichmentCounts")
 	return m, nil
+}
+
+// enrichmentProgressBlock is the manifest's enrichmentProgress block, as all
+// three builders build it (BuildManifest, the stream, the paginated first
+// page). on is enrich.enabled: off, there is no block, since a client reads
+// one whose tracksEnriched is short of tracksTotal as enrichment under way,
+// and an operator's off is not that (backlog B617). total is the served
+// count the block reports, the paginated first page's own `total`; nil, it
+// is counted here, for the non-paginated legs, which carry no `total`. A
+// count that cannot be read leaves no block and is logged, under what for
+// EnrichmentCounts.
+func enrichmentProgressBlock(ctx context.Context, store *Store, on bool, total *int, what string) *EnrichmentProgress {
+	if !on {
+		return nil
+	}
+	if total == nil {
+		n, err := store.CountServedTracks(ctx)
+		if err != nil {
+			logger.Error("CountServedTracks for enrichment-progress", "err", err)
+			return nil
+		}
+		total = &n
+	}
+	enriched, lastEnrichedAt, err := store.EnrichmentCounts(ctx)
+	if err != nil {
+		logger.Error(what, "err", err)
+		return nil
+	}
+	return &EnrichmentProgress{
+		TracksTotal:    *total,
+		TracksEnriched: enriched,
+		LastEnrichedAt: lastEnrichedAt,
+	}
 }
 
 // WriteManifest streams the legacy non-paginated manifest as JSON
@@ -4568,7 +4596,7 @@ func BuildManifest(ctx context.Context, store *Store, roots []string, since time
 // since, if non-zero, filters tracks by indexed_at (matches the
 // BuildManifest semantics).
 func WriteManifest(ctx context.Context, w io.Writer, store *Store, roots []string, since time.Time) error {
-	return writeManifestGated(ctx, w, store, roots, since, false)
+	return writeManifestGated(ctx, w, store, roots, since, false, true)
 }
 
 // writeManifestGated is the gated worker behind the public
@@ -4576,13 +4604,15 @@ func WriteManifest(ctx context.Context, w io.Writer, store *Store, roots []strin
 // strips Track.Variants before emitting each row; `true` (set by
 // the runtime Provider when `cfg.Upscale.Enabled`) lets variants
 // flow through unchanged. Existing tests continue to call the
-// public WriteManifest unchanged.
+// public WriteManifest unchanged. `withProgress` is enrich.enabled:
+// off, no enrichmentProgress block (enrichmentProgressBlock), on the
+// full leg and the delta leg alike.
 //
 // `ctx` is checked inside the per-row callback so a client disconnect
 // mid-stream terminates the scan within at most one row instead of
 // running to EOF. The check returns ctx.Err() which propagates up
 // through `streamErr` and surfaces in the caller's log line.
-func writeManifestGated(ctx context.Context, w io.Writer, store *Store, roots []string, since time.Time, withVariants bool) (err error) {
+func writeManifestGated(ctx context.Context, w io.Writer, store *Store, roots []string, since time.Time, withVariants, withProgress bool) (err error) {
 	// Folders ship ONLY on the full-manifest leg. A delta sync
 	// (`since` set) used to walk + marshal the ENTIRE folders table on
 	// every foreground sync — a per-sync DB query + payload cost on
@@ -4608,18 +4638,7 @@ func writeManifestGated(ctx context.Context, w io.Writer, store *Store, roots []
 	// served set (dupe_suppressed = 0), so the totals agree with the rows
 	// a client can actually fetch from the stream below. Operator-facing
 	// admin surfaces keep full-store counts instead.
-	var ep *EnrichmentProgress
-	if total, terr := store.CountServedTracks(ctx); terr != nil {
-		logger.Error("CountServedTracks for enrichment-progress", "err", terr)
-	} else if enriched, lastEnrichedAt, perr := store.EnrichmentCounts(ctx); perr == nil {
-		ep = &EnrichmentProgress{
-			TracksTotal:    total,
-			TracksEnriched: enriched,
-			LastEnrichedAt: lastEnrichedAt,
-		}
-	} else {
-		logger.Error("EnrichmentCounts", "err", perr)
-	}
+	ep := enrichmentProgressBlock(ctx, store, withProgress, nil, "EnrichmentCounts")
 
 	basenames := make([]string, len(roots))
 	for i, r := range roots {
@@ -4770,13 +4789,15 @@ func writeManifestGated(ctx context.Context, w io.Writer, store *Store, roots []
 // caused an extra round-trip that returned zero rows whenever the
 // track count was an exact multiple of limit.
 func BuildManifestPage(ctx context.Context, store *Store, roots []string, cursor string, limit int) (*Manifest, error) {
-	return buildManifestPageGated(ctx, store, roots, cursor, limit, false)
+	return buildManifestPageGated(ctx, store, roots, cursor, limit, false, true)
 }
 
 // buildManifestPageGated is the gated worker behind the public
 // BuildManifestPage. Strips Track.Variants when the feature flag
-// is off — see writeManifestGated for the symmetrical contract.
-func buildManifestPageGated(ctx context.Context, store *Store, roots []string, cursor string, limit int, withVariants bool) (*Manifest, error) {
+// is off, and leaves the first page's enrichmentProgress out while
+// enrich.enabled is off (withProgress) — see writeManifestGated for
+// the symmetrical contract.
+func buildManifestPageGated(ctx context.Context, store *Store, roots []string, cursor string, limit int, withVariants, withProgress bool) (*Manifest, error) {
 	if limit <= 0 {
 		limit = 1000
 	}
@@ -4827,15 +4848,7 @@ func buildManifestPageGated(ctx context.Context, store *Store, roots []string, c
 		}
 		m.Folders = folders
 		m.Total = &total
-		if enriched, lastEnrichedAt, perr := store.EnrichmentCounts(ctx); perr == nil {
-			m.EnrichmentProgress = &EnrichmentProgress{
-				TracksTotal:    total,
-				TracksEnriched: enriched,
-				LastEnrichedAt: lastEnrichedAt,
-			}
-		} else {
-			logger.Error("EnrichmentCounts (paginated)", "err", perr)
-		}
+		m.EnrichmentProgress = enrichmentProgressBlock(ctx, store, withProgress, &total, "EnrichmentCounts (paginated)")
 	}
 	if len(tracks) > limit {
 		// Trim the over-fetched row — it becomes the cursor for the
