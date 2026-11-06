@@ -306,12 +306,12 @@ func (w *LegacyDSDWarnings) Warn(p PlayerConfig) {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.warned == nil {
+		w.warned = map[string]bool{}
+	}
 	for _, key := range p.LegacyDSDKeys() {
 		if w.warned[key] {
 			continue
-		}
-		if w.warned == nil {
-			w.warned = map[string]bool{}
 		}
 		w.warned[key] = true
 		validateLogger.Warn(legacyDSDMessage, "key", "output.player."+key)

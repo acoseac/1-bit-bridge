@@ -427,8 +427,15 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 	if w.Feed == nil {
 		return p.fail("serve started no hotplug watcher for the player")
 	}
+	// A stop begun before the supervisor ran ends the start here: the state's
+	// open writes when it finds a damaged file, and nothing of the player's is
+	// written once its stop has begun.
+	if ctx.Err() != nil {
+		p.markReady()
+		return false
+	}
 	p.dsd = openPlayerDSD(cfg.DataDir, player, w.Trees.or(hostTrees), p.seams)
-	p.dsd.migrate(ctx, nil)
+	_ = p.dsd.migrate(ctx, nil)
 	if ctx.Err() != nil {
 		p.markReady()
 		return false
@@ -542,7 +549,8 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 // the engine stops on its own, which only a recovered panic in it makes it
 // do. A snapshot that resolves the boot binding to its DAC first gets the
 // DAC its part of the migration of the legacy DSD keys, while that waits
-// (playerDSD.resolve), and then its report.
+// (playerDSD.resolve), and then its report; a part that could not be made
+// then is asked again at the policy tick (playerDSD.retry), bounded.
 func (p *bridgePlayer) watch(ctx context.Context) {
 	policyTick := time.NewTicker(100 * time.Millisecond)
 	defer policyTick.Stop()
@@ -568,6 +576,7 @@ func (p *bridgePlayer) watch(ctx context.Context) {
 			return
 		case <-policyTick.C:
 			refresh()
+			p.dsd.retry(ctx)
 		case <-run.done:
 			playerLog.Error("player: the engine stopped on its own, which only a panic in it does (logged above): the player is off until bridge serve next starts, and the backend is asked to let go of the device; the release outcome follows")
 			return

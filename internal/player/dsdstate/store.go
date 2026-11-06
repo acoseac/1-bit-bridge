@@ -31,8 +31,10 @@ const (
 	Missing
 	// Damaged: a file read and refused; its bytes are kept beside it
 	// (Report.Aside), and a fresh state that refuses DSD took its place
-	// (Refusing), or, where that write failed (Report.Kept), holds in memory
-	// alone with the bad bytes still at the name.
+	// (Refusing), or, where that write failed before it landed (Report.Kept),
+	// holds in memory alone with the bad bytes still at the name; one that
+	// landed and whose barrier failed (Kept marked atomicwrite.ErrLanded) is at
+	// the name, not known to be durable.
 	Damaged
 	// Unread: a file that could not be read, or could not be set aside: it
 	// stays where it is, the state is Refusing in memory, and no write
@@ -51,7 +53,9 @@ type Report struct {
 	// Aside is where a damaged file's bytes were kept.
 	Aside string
 	// Kept is why a damaged file could not be set aside (Unread) or
-	// replaced (Damaged, its fresh state in memory alone): nil when it was.
+	// replaced (Damaged: its fresh state in memory alone, or, marked
+	// atomicwrite.ErrLanded, in the file and not known to be durable): nil
+	// when it was.
 	Kept error
 }
 
@@ -93,8 +97,10 @@ type options struct {
 // replaced, in one rename, by a fresh state that refuses DSD (Refusing),
 // written durably: so the name holds the bad bytes or the fresh state at
 // every moment, and the refusal survives a restart. Where the replacement
-// fails, the fresh state holds in memory and the next Open tries again; the
-// load never answers the defaults over a file that is there. A file that
+// fails before it lands, the fresh state holds in memory and the next Open
+// tries again; where it lands and the barrier after it fails, the file holds
+// it, not known to be durable, and the next Open loads it. The load never
+// answers the defaults over a file that is there. A file that
 // cannot be read (a read error, a named pipe or a directory at the name, one
 // past the bound, which cannot be copied whole), or whose bytes cannot be set
 // aside, is left where it is (Unread), the state is Refusing in memory, and
@@ -177,7 +183,12 @@ func (s *Store) damaged(data []byte, why error) {
 	if err == nil {
 		err = s.write(s.path, out)
 	}
-	if err != nil {
+	switch {
+	case errors.Is(err, atomicwrite.ErrLanded):
+		// The rename landed and the barrier after it failed: the name holds
+		// the fresh state, which a restart loads, not known to be durable.
+		s.report.Kept = fmt.Errorf("dsdstate: the fresh state is in the file and is not known to be durable: %w", err)
+	case err != nil:
 		s.report.Kept = fmt.Errorf("dsdstate: the fresh state is in memory alone: %w", err)
 	}
 }

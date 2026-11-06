@@ -116,12 +116,13 @@ func stopped(t *testing.T, ps *playerServe) {
 }
 
 // migrationLines are the lines of log a start's migration writes: what it
-// migrated, each warning it recorded, and a step not saved.
+// migrated, each warning it recorded, a step not saved, and a DAC's part
+// asked again or no more.
 func migrationLines(log string) []string {
 	var out []string
 	for _, l := range strings.Split(log, "\n") {
 		if strings.Contains(l, "player: the legacy DSD keys were migrated") || strings.Contains(l, "player: the DSD migration recorded a warning") ||
-			strings.Contains(l, "player: the migration of the legacy DSD keys") {
+			strings.Contains(l, "player: the migration of the legacy DSD keys") || strings.Contains(l, "player: the DSD migration's part") {
 			out = append(out, l)
 		}
 	}
