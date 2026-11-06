@@ -78893,3 +78893,27 @@ fmt`, which rewrote nothing; `make vet`, and with `GOOS=windows`,
 `./internal/alsapcm/...`, 16 packages ok (994 s; cmd/bridge 975 s, the
 suite's guard silent); `make docs-check`; the qualification check from
 0d5cb33b and from main, each OK; the tree clean after.
+
+**Round 3, two more points** (commits 4234662e and 65d4f7a1). CodeRabbit: a
+devnum sysfs could not read is 0, which `UnitModel` still returns and
+`binding.SameUnit` does not compare, so two zeros matched in `ProbeDSD` and in
+`probedUnit`, and a re-enumerated unit's answers could land under the captured
+model and firmware. `ProbeDSD` probes no unit whose device number did not
+read, and `probedUnit` refuses one. Red before: `TestAProbeAsksNothingOfAUnitWhoseEnumerationDoesNotRead`
+(23 candidates asked, the model's `driver_accepted` recorded) and
+`TestTheProbesCheckRefusesAnEnumerationThatDoesNotRead` (the check passed two
+zeros). CodeQL (high): the usbmixer table's control index, read with
+`strconv.Atoi`, was converted to `uint32` with no upper bound, so 2^32 wrapped
+to index 0 and named the volume control at 0 dB, and DoP played
+(`TestAControlIndexPastAUint32LeavesDoPUnverifiable`, red before). The index is
+parsed with `strconv.ParseUint(…, 10, 32)` into a `uint32` field; one past it
+does not read, the table with it, and DoP is refused as
+`dop_gain_unverifiable` (`TestAControlIndexIsAUint32`: 4294967295 reads,
+4294967296 does not). Controls, each red as predicted: `ProbeDSD` without the
+positive device number (its node opened once), `probedUnit` without it, and
+the index parsed to 64 bits (both index tests). Checks, on 65d4f7a1 through
+the shared build lock: `make fmt`, nothing rewritten; `make vet`, and with
+`GOOS=windows`, `GOOS=darwin` and `GOOS=linux GOARCH=386`, each clean; `go
+test -race -count=1` of `./internal/player/...`, `./cmd/bridge/...` and
+`./internal/alsapcm/...`, 16 packages ok (1,025 s); `make docs-check`; the
+qualification check from 0d5cb33b and from main, each OK; the tree clean.
