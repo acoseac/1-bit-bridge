@@ -66,6 +66,33 @@ func TestTheSeasonsYearIsTheDecemberThatOpensIt(t *testing.T) {
 	}
 }
 
+// The season's year turns only as a window closes. Hour by hour across three
+// seasons, every change of year falls on 6 January 00:00 UTC, which no window
+// holds, with the hour before it a window's last: the turn lands on a day
+// nothing is served, where it is harmless, and moves nothing inside a season.
+func TestTheSeasonsYearTurnsOnlyAsAWindowCloses(t *testing.T) {
+	start := time.Date(2025, 11, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2028, 2, 1, 0, 0, 0, 0, time.UTC)
+	turns := 0
+	prev := start
+	for at := start.Add(time.Hour); at.Before(end); at = at.Add(time.Hour) {
+		if Year(at) != Year(prev) {
+			turns++
+			if at.Month() != time.January || at.Day() != 6 || at.Hour() != 0 {
+				t.Errorf("the season's year turned at %s, want 6 January 00:00 UTC", at.Format(time.RFC3339))
+			}
+			if InWindow(at) || !InWindow(prev) {
+				t.Errorf("the year turned at %s (in a window %v, the hour before in one %v); want the first hour after a window",
+					at.Format(time.RFC3339), InWindow(at), InWindow(prev))
+			}
+		}
+		prev = at
+	}
+	if turns != 3 {
+		t.Errorf("the year turned %d times from November 2025 to February 2028, want 3", turns)
+	}
+}
+
 // Every hour of a window names one season, and the season changes nowhere
 // inside it: the year a regeneration seeds the order with never moves while
 // the mix is served.

@@ -96,6 +96,9 @@ var xmasByRule = []xmasCase{
 	{"Song", "A", "Album", "Christmas: Pop", ChristmasByGenre, "the iTunes Store's genre and its kind"},
 	{"Song", "A", "Album", "Holiday: Christmas", ChristmasByGenre, "the iTunes Store's parent genre"},
 	{"Song", "A", "", "Christmas", ChristmasByGenre, "an empty album"},
+	{"Song", "A", "Album", "Christmas Pop", ChristmasByGenre, "a segment whose first word is christmas"},
+	{"Song", "A", "Album", "Xmas Rock", ChristmasByGenre, "a segment whose first word is xmas"},
+	{"Song", "A", "Album", "X-Mas Pop", ChristmasByGenre, "x-mas joined, then its first word"},
 	{"Silent Night", "A", "Christmas Album", "Christmas", ChristmasByGenre, "the genre is the first rule that holds"},
 
 	// 2. The album, holding a Christmas word.
@@ -117,20 +120,30 @@ var xmasByRule = []xmasCase{
 	{"Song", "A", "Kolędy polskie", "Choral", ChristmasByAlbum, "kolędy, the demo's album"},
 	{"Song", "A", "Kolędy i pastorałki", "Choral", ChristmasByAlbum, "kolędy beside a word the ł map folds"},
 	{"Song", "A", "Joululaulut", "Choral", ChristmasByAlbum, "joululaulut"},
+	{"Song", "A", "Villancicos Populares", "Latin", ChristmasByAlbum, "villancicos"},
+	{"Song", "A", "Joulu", "Choral", ChristmasByAlbum, "joulu, Finnish for Christmas"},
+	{"Song", "A", "Danske julesange", "Folk", ChristmasByAlbum, "julesange, Danish"},
+	{"Song", "A", "Norske julesanger", "Folk", ChristmasByAlbum, "julesanger, Norwegian"},
+	{"Song", "A", "Kerst met Ons", "Pop", ChristmasByAlbum, "kerst, Dutch, by an artist that is no Kerst"},
+	{"Song", "A", "Babbo Natale", "Pop", ChristmasByAlbum, "natale after a word that is no birthplace"},
+	{"Silent Night", "Bing Crosby", "Merry Christmas", "Pop", ChristmasByAlbum, "the bare carol on a Christmas album"},
 	{"Song", "Various Artists", "Noël Acadien", "Folk", ChristmasByAlbum, "noel, by an artist that is no Noel"},
 
 	// 3. The title, a carol in the table, less a version suffix.
-	{"Silent Night", "Bing Crosby", "Greatest Hits", "Pop", ChristmasByTitle, "the carol"},
-	{"Silent Night (Live)", "A", "Album", "Pop", ChristmasByTitle, "a parenthetical"},
-	{"Silent Night [2009 Remaster]", "A", "Album", "Pop", ChristmasByTitle, "a bracket"},
-	{"Silent Night (Live) [Remastered]", "A", "Album", "Pop", ChristmasByTitle, "two of them"},
-	{"Silent Night - Live", "A", "Album", "Pop", ChristmasByTitle, "a dash suffix"},
-	{"Silent Night - Remastered 2009", "A", "Album", "Pop", ChristmasByTitle, "remastered"},
-	{"Silent Night - Instrumental", "A", "Album", "Pop", ChristmasByTitle, "instrumental"},
-	{"Silent Night \u2013 Live at the BBC", "A", "Album", "Pop", ChristmasByTitle, "an en dash"},
-	{"Silent Night - 1957", "A", "Album", "Pop", ChristmasByTitle, "a year"},
-	{"Silent Night - Live (Remastered)", "A", "Album", "Pop", ChristmasByTitle, "a dash suffix behind a parenthetical"},
-	{"Silent Night", "", "", "", ChristmasByTitle, "no artist, album or genre"},
+	{"O Holy Night", "Bing Crosby", "Greatest Hits", "Pop", ChristmasByTitle, "the carol"},
+	{"O Holy Night (Live)", "A", "Album", "Pop", ChristmasByTitle, "a parenthetical"},
+	{"O Holy Night [2009 Remaster]", "A", "Album", "Pop", ChristmasByTitle, "a bracket"},
+	{"O Holy Night (Live) [Remastered]", "A", "Album", "Pop", ChristmasByTitle, "two of them"},
+	{"O Holy Night - Live", "A", "Album", "Pop", ChristmasByTitle, "a dash suffix"},
+	{"O Holy Night - Remastered 2009", "A", "Album", "Pop", ChristmasByTitle, "remastered"},
+	{"O Holy Night - Instrumental", "A", "Album", "Pop", ChristmasByTitle, "instrumental"},
+	{"O Holy Night \u2013 Live at the BBC", "A", "Album", "Pop", ChristmasByTitle, "an en dash"},
+	{"O Holy Night - 1957", "A", "Album", "Pop", ChristmasByTitle, "a year"},
+	{"O Holy Night - Live (Remastered)", "A", "Album", "Pop", ChristmasByTitle, "a dash suffix behind a parenthetical"},
+	{"O Holy Night \u2013 Live - Remastered", "A", "Album", "Pop", ChristmasByTitle, "mixed dash styles, a version behind each"},
+	{"O Holy Night - Live \u2013 Remastered", "A", "Album", "Pop", ChristmasByTitle, "the other order"},
+	{"O Holy Night", "", "", "", ChristmasByTitle, "no artist, album or genre"},
+	{"Silent Night, Holy Night", "Bing Crosby", "Greatest Hits", "Pop", ChristmasByTitle, "Silent Night as no other song spells it"},
 	{"All I Want for Christmas Is You", "Mariah Carey", "Hits", "Pop", ChristmasByTitle, "the table comes before the title's words"},
 	{"Feliz Navidad", "José Feliciano", "Hits", "Latin", ChristmasByTitle, "the table again"},
 
@@ -150,7 +163,7 @@ func TestMatchChristmasByEachRule(t *testing.T) { runXmasCases(t, xmasByRule) }
 
 // Every spelling in the carol table qualifies by the title alone.
 var xmasCarolSpellings = []string{
-	"Silent Night", "Silent Night, Holy Night", "Stille Nacht", "Stille Nacht, heilige Nacht",
+	"Silent Night, Holy Night", "Stille Nacht", "Stille Nacht, heilige Nacht",
 	"O Holy Night", "Oh Holy Night", "Cantique de Noël", "Minuit, Chrétiens", "Adeste Fideles",
 	"O Come, All Ye Faithful", "Oh Come All Ye Faithful", "Hark! The Herald Angels Sing",
 	"Away in a Manger", "O Little Town of Bethlehem", "Oh Little Town of Bethlehem",
@@ -192,6 +205,21 @@ var xmasExclusions = []xmasCase{
 	{"Song", "A", "Sessions featuring Noel", "Rock", ChristmasNone, "noel after featuring"},
 	{"Song", "Noël", "Noël", "Pop", ChristmasNone, "a singer named Noël's album named for her (the accepted miss)"},
 
+	// natale, craciun and kerst in an album: a name too, as noel is, and
+	// natale an adjective after a place, French and Italian for native.
+	{"Song", "A", "Terre natale", "Chanson", ChristmasNone, "natale after terre"},
+	{"Song", "A", "Ville natale", "Chanson", ChristmasNone, "natale after ville"},
+	{"Song", "A", "Terra natale", "Folk", ChristmasNone, "natale after terra"},
+	{"Song", "A", "Città natale", "Pop", ChristmasNone, "natale after città"},
+	{"Song", "A", "Paese natale", "Folk", ChristmasNone, "natale after paese"},
+	{"Song", "A", "Casa natale", "Folk", ChristmasNone, "natale after casa"},
+	{"Song", "A", "Sessions feat. Natale", "Pop", ChristmasNone, "natale after a credit"},
+	{"Song", "Johnny Natale", "Johnny Natale Live", "Pop", ChristmasNone, "natale, the artist's name"},
+	{"Song", "Mihai Crăciun", "Mihai Crăciun", "Folk", ChristmasNone, "craciun, the artist's name"},
+	{"Song", "A", "Live with Crăciun", "Folk", ChristmasNone, "craciun after a credit"},
+	{"Song", "Anna Kerst", "Anna Kerst", "Pop", ChristmasNone, "kerst, the artist's name"},
+	{"Song", "A", "Duets feat. Kerst", "Pop", ChristmasNone, "kerst after a credit"},
+
 	// jul and natal count only as a whole genre segment.
 	{"Jul", "Jul", "Jul", "Hip-Hop/Rap", ChristmasNone, "jul in a title and an album, the rapper's genre"},
 	{"Song", "A", "Jul i Skomakergata", "Pop", ChristmasNone, "jul in an album"},
@@ -226,14 +254,19 @@ var xmasExclusions = []xmasCase{
 	{"Silent Nightmare", "A", "Album", "Metal", ChristmasNone, "begins with a carol"},
 	{"Silent Night, Deadly Night", "A", "Album", "Metal", ChristmasNone, "a carol and more"},
 	{"Silent Night - Deadly Night", "A", "Album", "Metal", ChristmasNone, "a dash before what is not a version"},
+	{"Silent Night - Deadly Night \u2013 Live", "A", "Album", "Metal", ChristmasNone, "mixed dash styles: the rightmost ends the title"},
+	{"O Holy Night - Deadly Night \u2013 Live", "A", "Album", "Metal", ChristmasNone, "the same, on a carol the table holds"},
+	{"O Holy Night - Deadly Night \u2014 Remastered", "A", "Album", "Metal", ChristmasNone, "an em dash"},
+	{"Silent Night", "Bon Jovi", "7800° Fahrenheit", "Rock", ChristmasNone, "Bon Jovi's own Silent Night, no carol"},
 	{"Joy to the World", "Three Dog Night", "Naturally", "Rock", ChristmasNone, "Three Dog Night's hit, left out of the table"},
 	{"Xmasque", "A", "Album", "Pop", ChristmasNone, "xmas must be a whole word"},
 
 	// The hyphen joins x-mas; a space does not.
 	{"Song", "A", "Vol. X Más Allá", "Latin", ChristmasNone, "ten, and more"},
 
-	// A genre segment is equal or nothing.
-	{"Song", "A", "Album", "Christmas Pop", ChristmasNone, "a genre that names Christmas inside it is not the segment"},
+	// A genre segment is a Christmas genre, or begins with christmas or xmas.
+	{"Song", "A", "Album", "Pop", ChristmasNone, "bare pop"},
+	{"Song", "A", "Album", "Pop Christmas", ChristmasNone, "christmas, not the segment's first word"},
 
 	// Nothing at all.
 	{"", "", "", "", ChristmasNone, "no tags"},
@@ -250,7 +283,7 @@ var xmasForms = []xmasCase{
 	{"Song", "A", "\u0421hristmas Songs", "Pop", ChristmasNone, "a Cyrillic С is not a C"},
 	{"Song", "A", "Noe\u0308l Acadien", "Folk", ChristmasByAlbum, "a decomposed ë"},
 	{"Song", "A", "Album", "ＣＨＲＩＳＴＭＡＳ", ChristmasByGenre, "fullwidth letters"},
-	{"Ｓｉｌｅｎｔ\u3000Ｎｉｇｈｔ", "A", "Album", "Pop", ChristmasByTitle, "fullwidth, an ideographic space"},
+	{"Ｊｉｎｇｌｅ\u3000Ｂｅｌｌｓ", "A", "Album", "Pop", ChristmasByTitle, "fullwidth, an ideographic space"},
 	{"Adeste \uFB01deles", "A", "Album", "Choral", ChristmasByTitle, "the fi ligature"},
 	{"Song", "A", "KOLĘDY", "Choral", ChristmasByAlbum, "Kolędy, ę through NFKD"},
 	{"BÓG SIĘ RODZI", "A", "Album", "Choral", ChristmasByTitle, "Bóg się rodzi in capitals"},
@@ -270,11 +303,11 @@ func TestMatchChristmasOnAVeryLongTitle(t *testing.T) {
 	if got := MatchChristmas(long, "A", "Album", "Pop"); got != ChristmasNone {
 		t.Errorf("a 1.3 MB title of repeated carols answers %s, want %s", got, ChristmasNone)
 	}
-	nested := "Silent Night" + strings.Repeat(" (Live)", 50_000)
+	nested := "O Holy Night" + strings.Repeat(" (Live)", 50_000)
 	if got := MatchChristmas(nested, "A", "Album", "Pop"); got != ChristmasNone {
 		t.Errorf("a carol under 50,000 parentheticals answers %s, want %s (the strip is bounded)", got, ChristmasNone)
 	}
-	deep := "Silent Night (" + strings.Repeat("(", 50_000) + strings.Repeat(")", 50_000) + ")"
+	deep := "O Holy Night (" + strings.Repeat("(", 50_000) + strings.Repeat(")", 50_000) + ")"
 	if got := MatchChristmas(deep, "A", "Album", "Pop"); got != ChristmasByTitle {
 		t.Errorf("a carol with one deeply nested parenthetical answers %s, want %s", got, ChristmasByTitle)
 	}
@@ -285,7 +318,7 @@ func TestMatchChristmasOnAVeryLongTitle(t *testing.T) {
 	if d := time.Since(start); d > 20*time.Second {
 		t.Errorf("four very long titles took %s", d)
 	}
-	if got := MatchChristmas("Silent Night"+strings.Repeat(" (Live)", maxTitleSuffixes), "A", "Album", "Pop"); got != ChristmasByTitle {
+	if got := MatchChristmas("O Holy Night"+strings.Repeat(" (Live)", maxTitleSuffixes), "A", "Album", "Pop"); got != ChristmasByTitle {
 		t.Errorf("a carol under %d parentheticals answers %s, want %s", maxTitleSuffixes, got, ChristmasByTitle)
 	}
 }
