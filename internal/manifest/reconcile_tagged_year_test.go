@@ -371,6 +371,58 @@ func TestTheYearPassNeverWritesTheRecordAlone(t *testing.T) {
 	requireTaggedYear(t, store, rels[0], intptr(2011))
 }
 
+// TestScanner_ABumpOverRowsStoredWithNoRecordOnlyStampsThem: an older bridge
+// filled a composition date, a year of 0 and a tag with no year to their
+// album's 2011, and stored no record (Track.taggedYear), as it stored none
+// anywhere. A bump re-reads them: the two whose tags read a year differ from
+// their rows and are held, and the passes give each the album's year, which
+// is the year its row holds. Each is only stamped and keeps no record: a row
+// stored with none votes its stored year until the pass moves it, and a
+// record gained alone would write the row whole and re-queue its enrichment
+// for nothing a client sees (B188). Until then the settlement recorded the
+// two tags and wrote both rows whole, through a full scan and a subtree scan
+// alike, at the first bump after the upgrade.
+func TestScanner_ABumpOverRowsStoredWithNoRecordOnlyStampsThem(t *testing.T) {
+	for _, scope := range []string{"a full scan", "a subtree scan"} {
+		t.Run(scope, func(t *testing.T) {
+			root := t.TempDir()
+			store, sc := newScanFixture(t, root)
+			rels := albumOfDates(t, root, "Band/Filled", "Filled", []string{"2011", "2011", "2011", "1720", "0000", ""}, nil)
+			scanOnce(t, sc, "index")
+			requireAlbumYear(t, store, "the index", rels, 2011)
+			if _, err := store.db.Exec(`UPDATE tracks SET tags_json = json_remove(tags_json, '$.taggedYear')`); err != nil {
+				t.Fatal(err)
+			}
+			before := rewindAll(t, store)
+
+			if scope == "a full scan" {
+				scanOnce(t, sc, "the bump")
+			} else {
+				subtreeScanOf(t, sc, root, "Band/Filled")
+			}
+
+			requireAlbumYear(t, store, "after the bump", rels, 2011)
+			if moved := movedRows(t, store, before); len(moved) != 0 {
+				t.Errorf("rows the bump moved: %v, want none", moved)
+			}
+			for _, rel := range rels {
+				if at := enrichedAtOf(t, store, rel); at != 1 {
+					t.Errorf("%s: enriched_at = %d, want 1: the bump re-queued its enrichment", rel, at)
+				}
+				if v := trackColumn(t, store, rel, "extractor_version"); v != int64(ExtractorVersion) {
+					t.Errorf("%s: extractor_version = %d, want %d", rel, v, ExtractorVersion)
+				}
+				requireNoTaggedYear(t, store, rel)
+			}
+			settled := indexedAtsOf(t, store, rels)
+			scanOnce(t, sc, "the scan after the bump")
+			if again := movedRows(t, store, settled); len(again) != 0 {
+				t.Errorf("rows moved again after the bump: %v", again)
+			}
+		})
+	}
+}
+
 // TestScanner_ACopyKnownMissingNeverWinsItsGroup is the review's third case:
 // the duplicates test's copy-wins shape, with copies[7]'s file removed just
 // before the first scan after the upgrade. Its row survives the deletion

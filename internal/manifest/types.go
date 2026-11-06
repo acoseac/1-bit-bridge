@@ -470,10 +470,12 @@ type Track struct {
 	// its year was (backlog B756): set the first time reconcileYears moves
 	// Year to its album's, and dropped when it moves Year back to it, so the
 	// pass votes on what the tags say rather than on what an earlier scan
-	// wrote. nil when the pass never moved the row. It lives in tags_json,
-	// under "taggedYear" (marshalForStorage writes it, decodeStoredTrack
-	// reads it), and never on the wire: unexported, so json.Marshal of a
-	// Track does not see it.
+	// wrote. nil when the pass never moved the row, and on every row an
+	// older bridge wrote, which votes its stored year until the pass moves
+	// it (a bump's settlement adds none alone: heldRecord). It lives in
+	// tags_json, under "taggedYear" (marshalForStorage writes it,
+	// decodeStoredTrack reads it), and never on the wire: unexported, so
+	// json.Marshal of a Track does not see it.
 	taggedYear *yearRecord
 
 	// rowVersion is the version of the row this Track was read from or
