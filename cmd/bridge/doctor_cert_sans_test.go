@@ -10,6 +10,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/advertise"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/doctor"
+	"github.com/acoseac/1-bit-bridge/internal/hostname"
 	servertls "github.com/acoseac/1-bit-bridge/internal/tls"
 )
 
@@ -158,12 +159,22 @@ func assertCertSANOptionsReadsThisHost(t *testing.T) {
 	}
 	if host, _ := os.Hostname(); host != "" {
 		_, statErr := os.Stat("/.dockerenv")
-		if advertise.OmitContainerHostname(host, statErr == nil) {
+		// The name in the form a certificate carries (B739): this host's as
+		// it is when it is a plain ASCII name, its IDNA ASCII form when it is
+		// not, and none when it has no valid form (a test Mac's kern.hostname).
+		name, ok := hostname.ASCII(host)
+		switch {
+		case ok && advertise.OmitContainerHostname(name, statErr == nil):
 			if opts.Hostname != "" {
 				t.Errorf("certSANOptions passed the container hostname %q", host)
 			}
-		} else if opts.Hostname != host {
-			t.Errorf("certSANOptions Hostname = %q, want this host's %q", opts.Hostname, host)
+		case !ok:
+			if opts.Hostname != "" {
+				t.Errorf("certSANOptions Hostname = %q for a host name with no valid form (%q)", opts.Hostname, host)
+			}
+		case opts.Hostname != name:
+			t.Errorf("certSANOptions Hostname = %q, want this host's %q as a certificate carries it, %q",
+				opts.Hostname, host, name)
 		}
 	}
 }

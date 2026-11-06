@@ -445,7 +445,21 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
 - **mDNS TXT records carry `host` + `port`.** Without them iOS must
   NWConnection-resolve the Bonjour service to a hostport, which is unreliable;
   the bare-hostname-plus-`.local` form matches the SRV target the cert SANs
-  already cover. Never emit `host=.local` — fall back to `localhost.local`.
+  already cover. Never emit `host=.local`: a host with no name publishes no
+  `host=` (the next bullet).
+- **…and the host's name in the `.local` endpoint, the SRV target and
+  `host=` is `hostname.ASCII`'s answer, the name the certificate carries**
+  (2026-11-05, backlog B739, two rounds; the rule is under **Auth,
+  pairing, TLS and security posture** in `auth-tls.md`): `xn--f1ai0a.local`
+  for a host named `Жук`, which the bridge's own responder alone answers,
+  so its `.local` endpoint is listed only while `mdns.enabled` is on
+  (`advertise.Params.MDNS`); and none for a name with no valid form or
+  none read, which publishes no `host=` and an SRV target made of its
+  first address (`onebit-bridge-192-168-1-20.local`, `mdns.RecordsFor`),
+  never `localhost.local`, which no certificate names: the client takes
+  `ips=` or resolves the service (PROTOCOL.md's `host` row). **Don't build
+  any of them from the name as the system reported it, or publish
+  `localhost.local`.**
 - **A container id, the default docker0 address, and a point-to-point ULA
   stay out of the lists a phone dials** (2026-10-13, backlog B189, B199,
   B229). `/v1/health` endpoints and the certificate want-set share one

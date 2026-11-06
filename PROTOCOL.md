@@ -24,7 +24,7 @@ The bridge advertises on the local network as `_onebit-bridge._tcp` (DNS-SD / Bo
 | Key | Since | Meaning |
 |---|---|---|
 | `pv` | v1 | Advertised `ProtocolVersion` (decimal). Clients may refuse an incompatible value before attempting a TLS handshake. |
-| `host` | v1 | The `<short-hostname>.local` SRV target; lets the client build `https://<host>:<port>` directly without a separate Bonjour hostport resolution. |
+| `host` | v1 | The `<short-hostname>.local` SRV target; lets the client build `https://<host>:<port>` directly without a separate Bonjour hostport resolution. Omitted when the host has no name a certificate can carry: the SRV target is then a name of the bridge's own, which no certificate names, and the client takes `ips` or resolves the service. |
 | `port` | v1 | TCP port the v1 API listens on (decimal, 1–65535). |
 | `library` | v1 | Operator-set library name (omitted when blank). |
 | `ips` | v1 (additive) | Comma-separated **bare** routable IP literals (IPv6 unbracketed) — the same interface-filtered set the A/AAAA records carry, restricted to **global-unicast** (so **link-local is excluded**: IPv6 `fe80::/10` needs a zone index the client can't map; IPv4 `169.254.0.0/16` is an APIPA fallback). Lets the client race direct connections at discovery time and skip slow/flaky `.local` resolution, falling back to `host` when the key is absent. The client builds `https://<ipv4>:<port>` for IPv4 and the bracketed `https://[<ipv6>]:<port>` for IPv6. Capped to fit the 255-byte TXT-string limit, so a client MUST tolerate a truncated or absent list. |

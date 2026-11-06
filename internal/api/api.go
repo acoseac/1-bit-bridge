@@ -2352,6 +2352,10 @@ func (s *Server) ReachableEndpoints() []advertise.Endpoint {
 	params := advertise.Params{
 		Port:            port,
 		CustomEndpoints: cfg.CustomEndpoints,
+		// The live setting: a converted host name's `.local` endpoint is
+		// listed only while the bridge's responder, the one that answers
+		// it, is meant to run (backlog B739's second round).
+		MDNS: cfg.EffectiveMDNSEnabled(),
 	}
 	if s.certIPs != nil {
 		params.NamedByCert = s.certNames

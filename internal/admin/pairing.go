@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -371,7 +372,16 @@ func publicBridgeURL(cfg *config.Config, port string) (string, bool) {
 }
 
 // defaultBridgeURL is the best-guess URL the admin UI pre-fills in the
-// pairing modal.
+// pairing modal: PairingPrimary's.
+func defaultBridgeURL(cfg *config.Config) string {
+	dial, _ := PairingPrimary(cfg)
+	return dial
+}
+
+// PairingPrimary is the URL the pairing QR dials, the one the admin UI
+// pre-fills in the pairing modal (defaultBridgeURL), and, when it is not the
+// host's name for a reason bridge doctor's pairing-url line should give, that
+// reason; "" otherwise.
 //
 // **Public mode**: the device dials the public endpoint from off-network,
 // so a `<hostname>.local` mDNS default is useless (it only resolves on
@@ -395,35 +405,60 @@ func publicBridgeURL(cfg *config.Config, port string) (string, bool) {
 // port-less dial URL trips the iOS 7788-default bug on shipped builds,
 // which is what `explicitHTTPSPort` is for.
 //
-// **Loopback / LAN mode** (historical): `https://<hostname>.local:<port>`.
+// **Loopback / LAN mode** (historical): `https://<hostname>.local:<port>`,
+// the hostname in the form the certificate carries (advertise.PairingHost:
+// an ASCII name as it is, any other in its IDNA ASCII form, backlog B739).
 // Users on networks where mDNS is flaky override in the modal input.
 // When the hostname cannot be read, and this process is not a detected
 // container, the fallback is https://localhost:<port>, which still works
 // for same-machine simulator pairing.
 //
+// A hostname that has no valid form (a test Mac's kern.hostname holding a
+// control character) is no host name, and localhost would send the phone
+// to itself: such a host is paired at an address of its own instead
+// (lanPairingURL), and with none there is no URL to offer, which the
+// pairing page and a refused mint say as a detected container's do. So is a
+// name hostname.ASCII converted while mdns.enabled is false (B739's second
+// round): no responder on the LAN but the bridge's own answers its IDNA
+// ASCII form, so its `.local` name resolves nowhere, and the reason says so.
+//
 // A detected container whose hostname is the generated id has no such
-// fallback. The console only ever sees a loopback Host, so the request
-// cannot name the published address. With no customEndpoints entry a
-// phone could dial, this returns an empty string and the pairing page
-// says to set BRIDGE_CUSTOM_ENDPOINTS. When that list does hold a
-// non-loopback URL, that URL is the primary.
-func defaultBridgeURL(cfg *config.Config) string {
+// fallback, and neither has one whose converted name nothing answers. The
+// console only ever sees a loopback Host, so the request cannot name the
+// published address. With no customEndpoints entry a phone could dial,
+// this returns an empty string and the pairing page says to set
+// BRIDGE_CUSTOM_ENDPOINTS. When that list does hold a non-loopback URL,
+// that URL is the primary.
+func PairingPrimary(cfg *config.Config) (dial, why string) {
 	_, port, err := net.SplitHostPort(cfg.ListenAddress)
 	if err != nil || port == "" {
 		port = "7788"
 	}
 	if cfg.IsPublic() {
 		if u, ok := publicBridgeURL(cfg, port); ok {
-			return u
+			return u, ""
 		}
 	}
-	host, docker := advertise.PairingHost()
-	if docker && (host == "" || advertise.OmitContainerHostname(host, true)) {
+	h := advertise.PairingHost()
+	unanswered := h.Converted && !cfg.EffectiveMDNSEnabled()
+	if unanswered {
+		local := h.Name
+		if i := strings.IndexByte(local, '.'); i > 0 {
+			local = local[:i]
+		}
+		why = "mdns.enabled is false, and only the bridge's own mDNS answers " + local +
+			".local, the host's name in its ASCII form"
+	}
+	if h.Docker && (h.Name == "" || unanswered || advertise.OmitContainerHostname(h.Name, true)) {
 		if u := firstDialableCustom(cfg.CustomEndpoints); u != "" {
-			return explicitHTTPSPort(u)
+			return explicitHTTPSPort(u), why
 		}
-		return ""
+		return "", why
 	}
+	if h.Unusable || unanswered {
+		return lanPairingURL(cfg, port), why
+	}
+	host := h.Name
 	if host == "" {
 		host = "localhost"
 	}
@@ -431,11 +466,66 @@ func defaultBridgeURL(cfg *config.Config) string {
 	// `mac-mini.local`); Linux hostnames usually don't. Always tacking
 	// on `.local` would be wrong for non-mDNS networks, so only append
 	// if the hostname doesn't already contain a dot.
-	return fmt.Sprintf("https://%s:%s", ensureMDNSHost(host), port)
+	return fmt.Sprintf("https://%s:%s", ensureMDNSHost(host), port), ""
 }
 
-// DialURL is the address the pairing QR would dial. bridge doctor asks
-// it the same question the page does.
+// lanPairingURL is the primary of a host whose name gives a phone nothing
+// to dial (PairingPrimary). In order (B739's second round):
+//
+//   - the address the API listener is bound to, when listenAddress names
+//     one a phone can dial: an IP address that is not unspecified, not
+//     loopback and not IPv6 link-local (whose zone names this host's
+//     interface). The walk's other addresses are not where it listens;
+//   - else the first customEndpoints entry a phone can dial;
+//   - else, for a listener on loopback, that address, for this machine alone;
+//   - else, for a listener on every address, the first LAN IPv4 address of the
+//     interface walk, which a certificate this bridge mints names;
+//   - else "", which the pairing page, a refused mint and bridge doctor
+//     answer with advertise.PairingNeedsEndpoint.
+//
+// Never localhost for a listener a phone could reach, where it names the phone
+// itself.
+//
+// The walk's first LAN IPv4 address is the one /v1/health lists first
+// (Deps.Endpoints, which the QR's urls= reads): health publishes every IPv4
+// address of the walk, holding none back for the certificate (certGated),
+// and sorts that class ahead of the others; bridge doctor, which has no
+// serving process to ask, asks this same function (PairingPrimary).
+func lanPairingURL(cfg *config.Config, port string) string {
+	onEveryAddress := true
+	if host, _, err := net.SplitHostPort(cfg.ListenAddress); err == nil && host != "" {
+		bound, err := netip.ParseAddr(host)
+		onEveryAddress = err == nil && bound.Unmap().IsUnspecified()
+		if err == nil {
+			bound = bound.Unmap()
+			if !bound.IsUnspecified() && !bound.IsLoopback() && bound.Zone() == "" &&
+				!(bound.Is6() && bound.IsLinkLocalUnicast()) {
+				return httpsScheme + net.JoinHostPort(bound.String(), port)
+			}
+		}
+	}
+	if u := firstDialableCustom(cfg.CustomEndpoints); u != "" {
+		return explicitHTTPSPort(u)
+	}
+	// A listener bound to loopback is reached from this machine alone, so its
+	// own address is the one true answer (the same-machine pairing path). Any
+	// other bind isn't on the walk's addresses, so nothing would answer there.
+	if !onEveryAddress {
+		if host, _, err := net.SplitHostPort(cfg.ListenAddress); err == nil && loopbackHostname(host) {
+			return httpsScheme + net.JoinHostPort(strings.Trim(host, "[]"), port)
+		}
+		return ""
+	}
+	p, _ := strconv.Atoi(port)
+	for _, e := range advertise.Endpoints(advertise.Params{Port: p, CustomEndpoints: cfg.CustomEndpoints}) {
+		if e.Class == advertise.ClassLANv4 {
+			return e.URL
+		}
+	}
+	return ""
+}
+
+// DialURL is the address the pairing QR would dial (PairingPrimary's).
 func DialURL(cfg *config.Config) string {
 	return defaultBridgeURL(cfg)
 }
@@ -459,8 +549,10 @@ func firstDialableCustom(list []string) string {
 
 // resolvePairingURL fills an empty URL from the QR primary, then refuses
 // a result a phone on a detected container cannot dial. The refusal is
-// the shared sentence. Outside a container the historical primary is
-// returned as before, localhost fallback included.
+// the shared sentence, which an empty primary gets too: a container with
+// no address to offer, and a host whose name has no valid form and that
+// has no LAN address (defaultBridgeURL). Outside a container the primary
+// is returned as defaultBridgeURL gives it, localhost fallback included.
 func resolvePairingURL(cfg *config.Config, raw string) (string, string) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -469,8 +561,7 @@ func resolvePairingURL(cfg *config.Config, raw string) (string, string) {
 	if raw == "" {
 		return "", advertise.PairingNeedsEndpoint
 	}
-	_, docker := advertise.PairingHost()
-	if docker {
+	if advertise.PairingHost().Docker {
 		h := endpointHost(raw)
 		if h == "" || loopbackHostname(h) || advertise.OmitContainerHostname(h, true) {
 			return "", advertise.PairingNeedsEndpoint
