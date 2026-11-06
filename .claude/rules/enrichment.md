@@ -423,6 +423,55 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   name and bounded by the absolute library roots.
 - **iTunes is a fallback, not a primary source**; artwork cache keys stay
   MB-derived so the wire shape is unchanged.
+- **`enrich.enabled` stops the enricher and `enrich.deezerEnabled` its Deezer
+  lookups alone; both are on when absent, both are live, and only off is
+  ever written** (2026-11-06, backlog B617). Off stops, within a second and
+  with no restart, every MusicBrainz, Cover Art Archive and Deezer request,
+  a mirror's included, and the enricher's Atlas premium lookup:
+  `Enricher.Run` asks `WithEnabled`'s predicate before each batch and parks
+  without touching the store, and runs the batch on `enrich.CancelWhenOff`'s
+  context, asked at most a second apart, so a request under way aborts and
+  `stampEnriched` and `markSkipped` take a shutdown's path (no stamp, no
+  skip count, no line); the first poll after it is on again (15 s) resumes
+  the rows that waited. AcoustID stops with it: `fingerprintGates` degrades
+  `fingerprintReady` with `enrichment_off`, and a sweep in flight runs on
+  the same cancelled-when-off context. With Deezer off,
+  `ensureArtistImageCached` asks after its cached-file checks and before
+  each of its two requests and answers `errDeezerOff`, which neither caller
+  negative-caches or logs; the row stamps without a portrait, Retry
+  missing's artist-image facet is the repair once Deezer is on, and a
+  request already under way ends within its client's 10 s. On the wire
+  while off, a miss on a MusicBrainz key is `404 no_image`
+  (`classifyArtworkMiss` reads pending as false; `local-` keys, probe
+  faults and cached bytes answer as ever), and `enrichmentProgress` is
+  absent from all three manifest builders through one predicate
+  (`Provider.SetEnrichmentEnabledSource`), the `since` leg included. Off
+  stops neither the Atlas harvest and lyrics, their cover refresh included,
+  nor the update check, nor Let's Encrypt. The two retries skip the facets
+  that feed only the enricher ahead of any write and answer
+  `enrichmentOff`, or 409 `enrichment-off` where no other facet can run;
+  `bridge enrichment retry` relays a running bridge's answer and refuses
+  offline before it opens the store; `bridge init --force` keeps each
+  switch written off (`priorEnrich`). **Don't stamp a row while off,
+  delete or hide what was fetched, answer 202 for a turn that won't come,
+  report progress while off, let fingerprints go out with enrichment off,
+  negative-cache an answer Deezer never gave, give `enrichOne` a stop path
+  of its own, or drop an opt-out in a rewrite.**
+  `TestAnEnricherSwitchedOffAsksNoUpstream`,
+  `TestEnrichmentIsOnWhereTheConfigSaysNothing`,
+  `TestASwitchOffStopsAnEnrichmentInFlightAndStampsNothing`,
+  `TestASwitchOnResumesTheQueuedRows`,
+  `TestDeezerOffAsksDeezerNothingAndStillFetchesCovers`,
+  `TestAPortraitComesBackAfterDeezerOnAndRetryMissing`,
+  `TestDeezerOffAfterASearchSendsNoFetch`,
+  `TestAFetchedCoverAndPortraitAreStillServedWhileOff`,
+  `TestFingerprintingStopsWithEnrichment`,
+  `TestASweepInFlightStopsWithEnrichment`,
+  `TestTheHarvestRunsWithEnrichmentOff`,
+  `TestAnImageMissIsTerminalWhileEnrichmentIsOff`,
+  `TestTheManifestOmitsEnrichmentProgressWhileOff`,
+  `TestServeWiresTheEnrichmentGate`, `TestRetryWhileOffResetsNothing` and
+  `TestARewriteKeepsTheEnrichmentOptOuts` pin it.
 
 ## Duplicates and the served set
 
