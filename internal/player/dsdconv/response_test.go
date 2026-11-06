@@ -3,9 +3,9 @@ package dsdconv
 import (
 	"errors"
 	"go/ast"
-	"io/fs"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"math"
 	"math/big"
 	"os"
