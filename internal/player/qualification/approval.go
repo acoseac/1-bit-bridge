@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -95,6 +96,47 @@ func ReadCandidate(stateDir, name string, identity Identity) (Approval, error) {
 	return readApproval(stateDir, name, identity, true, harnessRule)
 }
 
+// The kinds of the readers' refusals (B728 B3): what the migration's warning
+// says of a record the legacy reader refused, its reason word. Each marks a
+// refusal the readers made before, its message unchanged (refused), so
+// errors.Is finds the kind, and every check that read the refusal reads it
+// as before, a filesystem error's errors.As included. A refusal of no kind
+// here is the record not reading as an approval: its file, its decode, its
+// bounds, its policies, its evidence's contents, the edges and the
+// constraints.
+var (
+	// ErrRecordMissing marks a record that does not exist: no state
+	// directory, or no file at the record's name. A report, an experiment or a
+	// transition report the record names that does not exist is no record
+	// missing, and is of no kind here.
+	ErrRecordMissing = errors.New("qualification: the approval record does not exist")
+	// ErrStaleVersion marks a version the reader does not take: the
+	// record's, a schema it does not know, and the version of each piece of
+	// evidence the record holds (each policy's matrix and lifecycle report,
+	// each transition report, each DoP experiment and each experiment's
+	// contact).
+	ErrStaleVersion = errors.New("qualification: a version the reader does not take")
+	// ErrHashMismatch marks a digest that does not match: the record's body's,
+	// or the bytes of a piece of evidence it names.
+	ErrHashMismatch = errors.New("qualification: a digest that does not match")
+	// ErrIdentityMismatch marks a record whose identity is not the unit's as
+	// the reader's comparison compares them, or a unit whose identity is not
+	// whole. A report's identity that does not match is the record not
+	// reading, of no kind here: a record whose own identity matched the unit
+	// holds evidence of another.
+	ErrIdentityMismatch = errors.New("qualification: the approval is not the unit's")
+)
+
+// refusal is a reader's refusal err, marked with its kind: its message is
+// err's alone, and errors.Is and errors.As see both.
+type refusal struct{ kind, err error }
+
+func (r *refusal) Error() string   { return r.err.Error() }
+func (r *refusal) Unwrap() []error { return []error{r.kind, r.err} }
+
+// refused marks err with kind.
+func refused(kind, err error) error { return &refusal{kind: kind, err: err} }
+
 // IdentityMatch is the legacy reader's identity comparison: whether a
 // record's identity, or a report's, is the unit's (live).
 type IdentityMatch func(recorded, live Identity) bool
@@ -136,6 +178,9 @@ var harnessRule = evidenceRule{version: func(v int) bool { return v == Version }
 func readApproval(stateDir, name string, identity Identity, candidate bool, take evidenceRule) (Approval, error) {
 	var a Approval
 	b, err := trustedFile(stateDir, name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return a, refused(ErrRecordMissing, err)
+	}
 	if err != nil {
 		return a, err
 	}
@@ -149,10 +194,10 @@ func readApproval(stateDir, name string, identity Identity, candidate bool, take
 	}
 	body := a.Body
 	if a.SHA256 != Digest(body) {
-		return a, errors.New("approval hash mismatch")
+		return a, refused(ErrHashMismatch, errors.New("approval hash mismatch"))
 	}
 	if !take.version(body.QualificationVersion) {
-		return a, errors.New("stale approval version")
+		return a, refused(ErrStaleVersion, errors.New("stale approval version"))
 	}
 	switch body.SchemaVersion {
 	case 1:
@@ -168,10 +213,10 @@ func readApproval(stateDir, name string, identity Identity, candidate bool, take
 			return a, errors.New("a CLI candidate carries no transitions")
 		}
 	default:
-		return a, errors.New("stale approval version")
+		return a, refused(ErrStaleVersion, errors.New("stale approval version"))
 	}
 	if !take.identity(body.Identity, identity) || !identity.valid() {
-		return a, errors.New("stale approval identity")
+		return a, refused(ErrIdentityMismatch, errors.New("stale approval identity"))
 	}
 	phrase := ApprovalPhrase
 	if candidate {
@@ -210,13 +255,18 @@ func readApproval(stateDir, name string, identity Identity, candidate bool, take
 				return a, err
 			}
 			if !validHash(evidence.SHA256) || evidence.SHA256 != fmt.Sprintf("%x", sha256.Sum256(report)) {
-				return a, errors.New("evidence hash mismatch")
+				return a, refused(ErrHashMismatch, errors.New("evidence hash mismatch"))
 			}
 			var r executedReport
 			if err = json.Unmarshal(report, &r); err != nil {
 				return a, err
 			}
-			if !take.version(r.QualificationVersion) || r.Tuple != t || !take.identity(r.Identity, identity) || r.ManifestHash != body.ManifestHash || r.Environment != body.Environment || r.Scenario != scenario || r.End != "complete" || r.Error != "" || r.Modified || r.BuildSHA == "" || r.BuildSHA == "unverified" || r.PauseReleaseSeconds != 30 || r.PCMTimePolicy != [2]int{} || len(r.Completed) == 0 {
+			// The version is the condition's first clause, asked alone so its
+			// refusal is marked as one.
+			if !take.version(r.QualificationVersion) {
+				return a, refused(ErrStaleVersion, errors.New("report does not execute approved policy"))
+			}
+			if r.Tuple != t || !take.identity(r.Identity, identity) || r.ManifestHash != body.ManifestHash || r.Environment != body.Environment || r.Scenario != scenario || r.End != "complete" || r.Error != "" || r.Modified || r.BuildSHA == "" || r.BuildSHA == "unverified" || r.PauseReleaseSeconds != 30 || r.PCMTimePolicy != [2]int{} || len(r.Completed) == 0 {
 				return a, errors.New("report does not execute approved policy")
 			}
 			if t.Transport == "dop" {
@@ -310,13 +360,18 @@ func checkTransition(stateDir string, ev Evidence, body ApprovalBody, identity I
 		return err
 	}
 	if !validHash(ev.SHA256) || ev.SHA256 != fmt.Sprintf("%x", sha256.Sum256(report)) {
-		return errors.New("evidence hash mismatch")
+		return refused(ErrHashMismatch, errors.New("evidence hash mismatch"))
 	}
 	var r executedReport
 	if err = json.Unmarshal(report, &r); err != nil {
 		return err
 	}
-	if !take.version(r.QualificationVersion) || !take.identity(r.Identity, identity) || r.ManifestHash != body.ManifestHash || r.Environment != body.Environment || r.Scenario != TransitionScenario || r.End != "complete" || r.Error != "" || r.Modified || r.BuildSHA == "" || r.BuildSHA == "unverified" || r.PauseReleaseSeconds != 30 || r.PCMTimePolicy != [2]int{} || len(r.Completed) != 3 || r.NativeCompleted <= 0 {
+	// The version is the condition's first clause, asked alone so its refusal
+	// is marked as one.
+	if !take.version(r.QualificationVersion) {
+		return refused(ErrStaleVersion, errors.New("transition report does not execute approved policies"))
+	}
+	if !take.identity(r.Identity, identity) || r.ManifestHash != body.ManifestHash || r.Environment != body.Environment || r.Scenario != TransitionScenario || r.End != "complete" || r.Error != "" || r.Modified || r.BuildSHA == "" || r.BuildSHA == "unverified" || r.PauseReleaseSeconds != 30 || r.PCMTimePolicy != [2]int{} || len(r.Completed) != 3 || r.NativeCompleted <= 0 {
 		// The scenario plays three fixtures, native, DoP, native, and the runner
 		// writes "complete" only when all three finished and an endpoint played
 		// to its end; the lifecycle report is held to the same completion.

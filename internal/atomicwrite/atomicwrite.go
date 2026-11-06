@@ -99,6 +99,38 @@ var ErrNoDirectoryBarrier = fmt.Errorf("atomicwrite: this platform cannot fsync 
 // directory that would not sync, which errors.As finds.
 var ErrBarrierFailed = errors.New("atomicwrite: the directory barrier failed")
 
+// ErrLanded marks, in what WriteBytesDurable and ReplaceDurable return, an
+// error that came once the write had landed: the name holds the bytes the
+// write was given, by its own rename or as the destination already held
+// them, and what failed is the barrier after it (durableChain), so whether
+// they survive a crash is not known. It is not ErrBarrierFailed's class: a
+// directory there that cannot be opened for its sync is an error after the
+// landing that no fsync marks, and the barrier a write runs on a directory it
+// created before it stages its file is ErrBarrierFailed with nothing landed.
+// Nothing before the landing is marked: a refusal (ErrNoDirectoryBarrier
+// among them), a staging or a rename that failed, and ReplaceDurable's entry
+// put back after its second rename was refused (B728 B3 round 4: a restore
+// told the operator nothing was restored once the box's state was the
+// snapshot's).
+var ErrLanded = errors.New("atomicwrite: the write landed, and is not known to be durable")
+
+// landed marks err, an error that came once a strict write had landed, as
+// ErrLanded; nil stays nil.
+func landed(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &landedError{err: err}
+}
+
+// landedError is an error after a strict write landed: it reads as the error
+// it wraps, and errors.Is matches it to ErrLanded too.
+type landedError struct{ err error }
+
+func (e *landedError) Error() string        { return e.err.Error() }
+func (e *landedError) Unwrap() error        { return e.err }
+func (e *landedError) Is(target error) bool { return target == ErrLanded }
+
 // ErrNotUnderRoot is WriteBytesDurable's and ProbeDurable's refusal of a path
 // that does not lie plainly below the durable root they are given: outside
 // it as written, the path or the root spelled with a ".." element, the path
@@ -933,7 +965,8 @@ func WriteBytes(path string, data []byte, tmpPrefix string) error {
 // (commitDirEntry); here that failure is the write's, because a rename
 // whose entry is not durable can roll back at a crash, and so can a file
 // whose directory's own entry is not. A failure may leave the new bytes in
-// place, so the caller counts the write as not made, never as undone. A
+// place, so the caller counts the write as not made, never as undone; one
+// that came once they were in place is marked ErrLanded, and none before. A
 // rename that fails while the destination already holds the same bytes is
 // taken as WriteBytes takes it, once the destination itself and then every
 // directory from its own up to root are synced.
@@ -1105,11 +1138,13 @@ func writeBytes(path string, data []byte, tmpPrefix string, chain, above []strin
 			case !ours:
 				return err
 			}
+			// The destination holding the write's bytes is the write landed
+			// (ErrLanded): sameAndSynced fails only once it found them there.
 			switch same, syncErr := sameAndSynced(path, data); {
 			case syncErr != nil:
-				return syncErr
+				return landed(syncErr)
 			case same:
-				return durableChain(chain, above)
+				return landed(durableChain(chain, above))
 			}
 			return err
 		}
@@ -1120,7 +1155,7 @@ func writeBytes(path string, data []byte, tmpPrefix string, chain, above []strin
 	}
 	tmpName = "" // rename succeeded — suppress the deferred os.Remove
 	if durable {
-		return durableChain(chain, above)
+		return landed(durableChain(chain, above))
 	}
 	commitDirEntry(path)
 	return nil

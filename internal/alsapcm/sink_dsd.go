@@ -659,7 +659,7 @@ func (s *DSDSink) CleanupResult() error {
 
 // dopPrecision is shared by initial admission and every reopened hardware run.
 func dopPrecision(c DSDConfig, p Params) error {
-	if c.Kind == format.KindDoP && (p.Msbits < 24 || p.Msbits > 32) {
+	if c.Kind == format.KindDoP && !dopBits(p.Msbits) {
 		return errors.New("DoP requires 24..32 significant bits")
 	}
 	return nil

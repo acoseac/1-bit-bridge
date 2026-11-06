@@ -8,11 +8,16 @@ import (
 )
 
 // sys is the kernel as a Device uses it: the open, ioctl, poll and close
-// calls, and nothing else. linuxSys is the real one, on linux/amd64 and
-// linux/arm64; the tests drive a fake kernel through the same four calls.
-// An error from any of them is an errno, errNotALSANode from open, or the
-// context's error from poll.
+// calls, and, for the silent probe alone, the card's open substreams as its
+// /proc/asound says them. linuxSys is the real one, on linux/amd64 and
+// linux/arm64; the tests drive a fake kernel through the same calls. An
+// error from any of them is an errno, errNotALSANode from open, the
+// context's error from poll, or a read's from openSubstreams.
 type sys interface {
+	// openSubstreams names the card's PCM substreams the kernel holds open,
+	// each as its /proc/asound directories name it ("pcm0p/sub0",
+	// "pcm0c/sub0"): one whose status is anything but "closed".
+	openSubstreams(card int) ([]string, error)
 	// open opens a PCM node for playback: read-write, non-blocking (a
 	// node another process holds is EBUSY at once, never a wait),
 	// close-on-exec, and only when it is an ALSA character device.
