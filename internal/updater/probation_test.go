@@ -262,7 +262,7 @@ func TestProbationStatusSaysWhereAnInstallStands(t *testing.T) {
 		{"one start before this one", probationMarker(2), "0.2.4", ProbationWarn, "2 of its starts", "1 of its starts before this one", "", ""},
 		{"at the limit", probationMarker(3), "0.2.4", ProbationFail, "the next start puts 0.2.3 back", "if this one does not either", "", ""},
 		{"a crash rollback refused", refused, "0.2.4", ProbationFail, "the backup is not put back: " + refused.RollbackRefused,
-			"the backup is not put back: " + refused.RollbackRefused, "", ""},
+			"the backup is not put back: " + refused.RollbackRefused, "puts 0.2.3 back", "puts 0.2.3 back"},
 		{"a start that did not answer", notReady, "0.2.4", ProbationFail, "did not answer as ready", "did not answer as ready", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

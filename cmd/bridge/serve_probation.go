@@ -408,12 +408,18 @@ func sleepUnlessStopped(ctx context.Context, d time.Duration) bool {
 	}
 }
 
+// roundGrace is how long past timing.round a round's answer is waited for:
+// its checks run on a context that ends at timing.round, so a check that
+// takes its cancel (the accept loop's, the store's) says why it ended within
+// it, and a call that takes none is a no at the bound.
+const roundGrace = time.Second
+
 // ask runs one round on a goroutine of its own under timing.round, one at a
 // time: ServeHTTP takes no cancel (the health handler's endpoint walk is a
 // singleflight that ignores its caller's context), so a round still out at
-// its bound is a no, no second round starts beside it, its late answer counts
-// for nothing, and serve's stop does not wait for it. A round that panics is
-// a no.
+// its bound (timing.round and roundGrace) is a no, no second round starts
+// beside it, its late answer counts for nothing, and serve's stop does not
+// wait for it. A round that panics is a no.
 func (p *serveProbation) ask(ctx context.Context) error {
 	if p.out != nil {
 		select {
@@ -436,14 +442,14 @@ func (p *serveProbation) ask(ctx context.Context) error {
 		}()
 		answer <- p.ready.round(roundCtx)
 	}()
-	bound := time.NewTimer(p.timing.round)
+	bound := time.NewTimer(p.timing.round + roundGrace)
 	defer bound.Stop()
 	var err error
 	select {
 	case err = <-answer:
 	case <-bound.C:
 		p.out = answer
-		err = fmt.Errorf("a round did not answer within %s", p.timing.round)
+		err = fmt.Errorf("a round did not answer within %s", p.timing.round+roundGrace)
 	case <-ctx.Done():
 		p.out = answer
 		return ctx.Err()

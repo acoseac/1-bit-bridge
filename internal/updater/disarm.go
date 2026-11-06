@@ -328,7 +328,7 @@ func migrationVetoedError(st State, current string) error {
 	if st.RollbackStarted && SameVersion(st.TargetVersion, current) {
 		return fmt.Errorf("%w: a rollback of the install of %s to %s was started and no start has gone on past it, "+
 			"so the store is not migrated: start bridge serve, which finishes the rollback where %s still refuses the settings "+
-			"and confirms the install where it loads them", ErrMigrationVetoed, st.TargetVersion, st.PreviousVersion, st.TargetVersion)
+			"and goes on with the install where it loads them", ErrMigrationVetoed, st.TargetVersion, st.PreviousVersion, st.TargetVersion)
 	}
 	return fmt.Errorf("%w: %s was rolled back on this host, and a command of it still running from its own binary must not "+
 		"migrate the store past the version put back: install %s again once the settings are fixed, or start its bridge serve "+

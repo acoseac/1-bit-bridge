@@ -271,9 +271,15 @@ func ProbationStatus(st State, current string) Probation {
 		p.Level = ProbationWarn
 	}
 	confirmed := fmt.Sprintf("a start of it is confirmed once it has answered as ready and stayed up for %s", ProbationWindow)
+	// A crash rollback refused promises no put-back: the refusal's clause,
+	// added below, says why the backup stays where it is.
+	refused := st.RollbackRefused != ""
 	switch {
 	case n <= 1:
 		p.Says = fmt.Sprintf("%s is on probation since its install: %s", st.TargetVersion, confirmed)
+	case refused:
+		p.Says = fmt.Sprintf("%d of %s's starts since its install have not ended cleanly, one running now among them "+
+			"(a start counts until it stops cleanly)", n, st.TargetVersion)
 	case n < ProbationFailedStarts:
 		p.Says = fmt.Sprintf("%s is on probation since its install, and %d of its starts have not ended cleanly, "+
 			"one running now among them (a start counts until it stops cleanly): once %d have not, the next start puts %s back",
@@ -287,6 +293,8 @@ func ProbationStatus(st State, current string) Probation {
 	case earlier == 0:
 		p.ThisStart = fmt.Sprintf("%s is on probation since its install: this start is confirmed once it has answered as ready "+
 			"and stayed up for %s", st.TargetVersion, ProbationWindow)
+	case refused:
+		p.ThisStart = fmt.Sprintf("%d of %s's starts before this one did not end cleanly", earlier, st.TargetVersion)
 	case earlier < ProbationFailedStarts-1:
 		p.ThisStart = fmt.Sprintf("%s is on probation since its install, and %d of its starts before this one did not end cleanly: "+
 			"once %d have not, the next start puts %s back", st.TargetVersion, earlier, ProbationFailedStarts, back)
@@ -296,10 +304,10 @@ func ProbationStatus(st State, current string) Probation {
 	default:
 		p.ThisStart = fmt.Sprintf("%d of %s's starts before this one did not end cleanly", earlier, st.TargetVersion)
 	}
-	if st.RollbackRefused != "" {
-		refused := fmt.Sprintf("; the backup is not put back: %s", st.RollbackRefused)
-		p.Says += refused
-		p.ThisStart += refused
+	if refused {
+		why := fmt.Sprintf("; the backup is not put back: %s", st.RollbackRefused)
+		p.Says += why
+		p.ThisStart += why
 	}
 	if st.NotReady {
 		notReady := fmt.Sprintf("; a start of it did not answer as ready (its API listener, /v1/health and its store) within %s, "+

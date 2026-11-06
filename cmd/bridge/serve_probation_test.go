@@ -3,13 +3,21 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/supervision"
 	"github.com/acoseac/1-bit-bridge/internal/updater"
 	"github.com/acoseac/1-bit-bridge/internal/version"
@@ -59,23 +67,43 @@ func (w *probationWatch) events() []probationEvent {
 // deadline (serveGiveUpTime).
 func (w *probationWatch) waitFor(t *testing.T, kind probationEventKind) probationEvent {
 	t.Helper()
+	return w.waitForCount(t, kind, 1)
+}
+
+// waitForCount returns the nth event of kind, waiting for it until the test's
+// deadline (serveGiveUpTime), or two minutes in a binary with none.
+func (w *probationWatch) waitForCount(t *testing.T, kind probationEventKind, n int) probationEvent {
+	t.Helper()
 	giveUp := serveGiveUpTime(t)
+	if giveUp.IsZero() {
+		giveUp = time.Now().Add(2 * time.Minute)
+	}
 	for {
+		seen := 0
 		for _, e := range w.events() {
 			if e.kind == kind {
-				return e
+				if seen++; seen == n {
+					return e
+				}
 			}
-		}
-		wait := withinTheTest
-		if !giveUp.IsZero() {
-			wait = time.Until(giveUp)
 		}
 		select {
 		case <-w.signal:
-		case <-time.After(wait):
-			t.Fatalf("the confirmation never did %d; it did %+v", kind, w.events())
+		case <-time.After(time.Until(giveUp)):
+			t.Fatalf("the confirmation never did %d %d times; it did %+v", kind, n, w.events())
 		}
 	}
+}
+
+// count is how many events of kind the confirmation has done.
+func (w *probationWatch) count(kind probationEventKind) int {
+	n := 0
+	for _, e := range w.events() {
+		if e.kind == kind {
+			n++
+		}
+	}
+	return n
 }
 
 // shortProbation is a window a test can wait out, with asks quick enough
@@ -287,12 +315,480 @@ func TestThreeFailedStartsRollBackAnInstallThatMigratedNothing(t *testing.T) {
 // migration began though its admission recorded that it opened the data dir
 // first. Three starts then crash, and the fourth, which the count asks to roll
 // back, refuses, since the backup's version does not read the store past its
-// own migrations: it records why, says so, and goes on serving.
+// own migrations: it records why, says so on its stderr, and goes on serving,
+// and `bridge doctor` and the console's Updates panel say it, failing.
 func TestARollbackIsRefusedAndReportedOnceAMigrationBegan(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	r.withAnOlderStore(t)
 	stopServed(t, r.bootWith(t, serveOpts{}))
-	if st := markerOf(t, r.dataDir); st.StoreMigratedBy != version.ServerVersion || st.DataDirOpenedBy != version.ServerVersion {
+	st := markerOf(t, r.dataDir)
+	if st.StoreMigratedBy != version.ServerVersion || st.DataDirOpenedBy != version.ServerVersion {
 		t.Fatalf("the marker after a start that migrated the store = %+v, want it to record that %s began a migration", st, version.ServerVersion)
 	}
+	if st.FailedStarts != 0 {
+		t.Fatalf("the marker after a start that stopped cleanly = %+v, want its count taken back", st)
+	}
+	for start := 1; start <= updater.ProbationFailedStarts; start++ {
+		r.startThatPanics(t)
+	}
+	binaries := watch(t, r.bin, r.bak)
+	_, seams := newProbationWatch(longProbation)
+	sb, admin := r.bootConsole(t, serveOpts{probation: seams})
+	if said := updaterLines(sb.stderr.String()); !strings.Contains(said, "not rolling back the install") || !strings.Contains(said, "began a migration") {
+		t.Errorf("the fourth start did not say why it kept the install; its updater lines: %q", said)
+	}
+	st = markerOf(t, r.dataDir)
+	if !strings.Contains(st.RollbackRefused, "began a migration") || st.FailedStarts != updater.ProbationFailedStarts+1 || st.Status != "installing" {
+		t.Errorf("the marker as the fourth start serves = %+v, want the refusal recorded and this start counted", st)
+	}
+	if strings.ContainsAny(st.RollbackRefused, `/\`) {
+		t.Errorf("the recorded refusal %q names a path", st.RollbackRefused)
+	}
+	if line := doctorLineOf(t, r.cfg); line == nil || line.Status != "fail" || !strings.Contains(line.Summary, "the backup is not put back") {
+		t.Errorf("bridge doctor's install-probation line = %+v, want a fail saying the backup is not put back", line)
+	}
+	if panel := probationPanel(t, admin); panel.Level != "fail" || !strings.Contains(panel.Says, "the backup is not put back") {
+		t.Errorf("the console's Probation row = %+v, want a fail saying the backup is not put back", panel)
+	}
+	stopServed(t, sb)
+	binaries.requireUnchanged(t)
+}
+
+// longProbation keeps a start on probation for as long as a test runs, its
+// first ready answer quick.
+var longProbation = probationTiming{window: time.Hour, ask: 20 * time.Millisecond, retry: 20 * time.Millisecond, round: 5 * time.Second}
+
+// writeListeners writes r's settings with the API and the console on the
+// addresses given.
+func (r *refusedInstall) writeListeners(t *testing.T, listen, admin string) {
+	t.Helper()
+	body := fmt.Sprintf("libraryRoots:\n  - %s\ndataDir: %s\nlistenAddress: %s\nadminAddress: %s\ndisableHttp3: true\n",
+		filepath.Join(r.dir, "Music"), r.dataDir, listen, admin)
+	if err := os.WriteFile(r.cfg, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// bootConsole boots serve on r's install as bootWith does, with its API and
+// its console on loopback ports the test holds and hands it, and returns the
+// console's base URL once the console answers.
+func (r *refusedInstall) bootConsole(t *testing.T, opts serveOpts) (servedBridge, string) {
+	t.Helper()
+	lan, console := holdLoopback(t), holdLoopback(t)
+	r.writeListeners(t, lan.addr, console.addr)
+	opts.addrOverride, opts.lanListener, opts.adminListener = lan.addr, lan.ln, console.ln
+	sb := r.bootWith(t, opts)
+	waitForAdminReady(t, console.addr, sb.done, sb.stderr)
+	return sb, "http://" + console.addr
+}
+
+// doctorLineOf runs `bridge doctor --json` on the settings at cfg, as an
+// operator beside the bridge would, and returns its install-probation line,
+// nil where it has none.
+func doctorLineOf(t *testing.T, cfg string) *jsonDoctorCheck {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	run(t.Context(), []string{"doctor", "--json", "--config", cfg}, &stdout, &stderr)
+	var report jsonDoctorReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("bridge doctor --json: %v; stdout=%s stderr=%s", err, stdout.String(), stderr.String())
+	}
+	for i := range report.Checks {
+		if report.Checks[i].Name == installProbationCheckName {
+			return &report.Checks[i]
+		}
+	}
+	return nil
+}
+
+// probationRow is the console's Updates panel's Probation row, as GET
+// /api/updates carries it.
+type probationRow struct {
+	Says  string `json:"probation"`
+	Level string `json:"probationLevel"`
+}
+
+func probationPanel(t *testing.T, admin string) probationRow {
+	t.Helper()
+	var row probationRow
+	getJSON(t, &http.Client{Timeout: 30 * time.Second}, admin+"/api/updates", "", &row)
+	return row
+}
+
+// TestAHeldScanDoesNotDelayTheConfirmation: a start whose first scan is
+// parked on the scanner's own seam for the whole window, parked before the
+// window starts and still parked when it ends, is confirmed all the same: a
+// scan, and how far it got, are not readiness's business, so a slow first
+// scan cannot hold an install's confirmation back, and nothing is rolled
+// back. The rounds read the real store beside the parked scan.
+func TestAHeldScanDoesNotDelayTheConfirmation(t *testing.T) {
+	r := newRefusedInstall(t, "")
+	writeHiResFLACFixture(t, filepath.Join(r.dir, "Music", "Artist", "Album", "01.flac"))
+	binaries := watch(t, r.bin, r.bak)
+	parked, released, returned := newOnceCloser(), newOnceCloser(), newOnceCloser()
+	t.Cleanup(released.close)
+	var parkedAtWindow atomic.Bool
+	events, seams := newProbationWatch(shortProbation)
+	observe := seams.observe
+	seams.observe = func(e probationEvent) {
+		switch e.kind {
+		case probationRound:
+			// The window starts at the first ready answer: it waits, on the
+			// confirmation's own goroutine, until the scan is parked, so the
+			// whole window passes beside the parked scan.
+			select {
+			case <-parked.ch:
+			case <-time.After(withinTheTest):
+			}
+		case probationWindow:
+			select {
+			case <-parked.ch:
+				parkedAtWindow.Store(true)
+			default:
+			}
+		}
+		observe(e)
+	}
+	sb := r.bootWith(t, serveOpts{probation: seams, scannerBoot: holdTheFirstExtraction(parked, released, returned)})
+	events.waitFor(t, probationConfirmed)
+	if !parkedAtWindow.Load() {
+		t.Fatal("the scan was not parked as the window started: the test shows nothing")
+	}
+	select {
+	case <-returned.ch:
+		t.Fatal("the scan was let go before the confirmation")
+	default:
+	}
+	if st := markerOf(t, r.dataDir); st.Status != "installed" {
+		t.Errorf("the marker = %+v, want the install confirmed beside a scan held for the whole window", st)
+	}
+	released.close()
+	stopServed(t, sb)
+	binaries.requireUnchanged(t)
+}
+
+// TestAStopDuringAHeldScanIsNotAFailedStart: serve's stop while its first
+// scan is parked, the install still on probation, ends serve cleanly, and
+// the start takes back its count: a stop is no failed start, whatever the
+// scan was doing.
+func TestAStopDuringAHeldScanIsNotAFailedStart(t *testing.T) {
+	r := newRefusedInstall(t, "")
+	writeHiResFLACFixture(t, filepath.Join(r.dir, "Music", "Artist", "Album", "01.flac"))
+	binaries := watch(t, r.bin, r.bak)
+	parked, released, returned := newOnceCloser(), newOnceCloser(), newOnceCloser()
+	t.Cleanup(released.close)
+	_, seams := newProbationWatch(longProbation)
+	sb := r.bootWith(t, serveOpts{probation: seams, scannerBoot: holdTheFirstExtraction(parked, released, returned)})
+	select {
+	case <-parked.ch:
+	case <-time.After(withinTheTest):
+		t.Fatal("the first scan never reached its first file")
+	}
+	if st := markerOf(t, r.dataDir); st.FailedStarts != 1 {
+		t.Fatalf("the marker while the scan is parked = %+v, want this start counted", st)
+	}
+	stopServed(t, sb)
+	select {
+	case <-returned.ch:
+	default:
+		t.Error("serve stopped with its scan still parked")
+	}
+	if st := markerOf(t, r.dataDir); st.FailedStarts != 0 || st.Status != "installing" {
+		t.Errorf("the marker after the stop = %+v, want this start's count taken back, the install still on probation", st)
+	}
+	binaries.requireUnchanged(t)
+}
+
+// holdTheFirstExtraction parks serve's scan at its first extracted file,
+// telling parked, until released or the scan's own end (serve's stop),
+// telling returned once it lets go.
+func holdTheFirstExtraction(parked, released, returned *onceCloser) func(*manifest.Scanner) {
+	return func(sc *manifest.Scanner) {
+		sc.SetAfterExtractHookForTests(func(string) {
+			parked.close()
+			select {
+			case <-sc.InFlightScanDone():
+			case <-released.ch:
+			}
+			returned.close()
+		})
+	}
+}
+
+// TestAStartThatNeverAnswersIsNeverConfirmed: a start whose store never
+// answers a round is not ready, never confirmed, keeps running and rolls
+// nothing back, since not ready is no proof of a broken version: at the
+// window's first lapse it says so once, records NotReady, and the doctor
+// fails on it.
+func TestAStartThatNeverAnswersIsNeverConfirmed(t *testing.T) {
+	r := newRefusedInstall(t, "")
+	binaries := watch(t, r.bin, r.bak)
+	events, seams := newProbationWatch(shortProbation)
+	seams.storeRead = func(context.Context) error { return errors.New("the store is away") }
+	sb := r.bootWith(t, serveOpts{probation: seams})
+	events.waitFor(t, probationNotReady)
+	more := events.count(probationRound) + 3
+	events.waitForCount(t, probationRound, more)
+	st := markerOf(t, r.dataDir)
+	if st.Status != "installing" || !st.NotReady {
+		t.Errorf("the marker past the window = %+v, want the install unconfirmed, NotReady recorded", st)
+	}
+	if n := strings.Count(sb.stderr.String(), "has not answered as ready"); n != 1 {
+		t.Errorf("serve said it has not answered as ready %d times, want once; stderr=%s", n, sb.stderr.String())
+	}
+	if line := doctorLineOf(t, r.cfg); line == nil || line.Status != "fail" || !strings.Contains(line.Summary, "did not answer as ready") {
+		t.Errorf("bridge doctor's install-probation line = %+v, want a fail saying a start did not answer", line)
+	}
+	select {
+	case code := <-sb.done:
+		t.Fatalf("serve exited %d: a start that does not answer keeps running", code)
+	default:
+	}
+	if n := events.count(probationConfirmed); n != 0 {
+		t.Errorf("the install was confirmed %d times by a start that never answered", n)
+	}
+	stopServed(t, sb)
+	binaries.requireUnchanged(t)
+	if st := markerOf(t, r.dataDir); st.Status != "installing" || st.FailedStarts != 0 {
+		t.Errorf("the marker after the stop = %+v, want the install unconfirmed and this start taken back", st)
+	}
+}
+
+// firstRoundOf boots serve on r with seams and the options given, and
+// returns its first round's answer.
+func firstRoundOf(t *testing.T, r *refusedInstall, timing probationTiming, opts serveOpts) (probationEvent, servedBridge) {
+	t.Helper()
+	events, seams := newProbationWatch(timing)
+	if opts.probation != nil {
+		seams.storeRead = opts.probation.storeRead
+	}
+	opts.probation = seams
+	sb := r.bootWith(t, opts)
+	return events.waitFor(t, probationRound), sb
+}
+
+// acceptsNothing is a bound listener whose Accept takes nothing until it is
+// closed: a connect to it completes in the kernel's backlog, and nobody
+// accepts it.
+type acceptsNothing struct {
+	net.Listener
+	once   sync.Once
+	closed chan struct{}
+}
+
+func (l *acceptsNothing) Accept() (net.Conn, error) {
+	<-l.closed
+	return nil, net.ErrClosed
+}
+
+func (l *acceptsNothing) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return l.Listener.Close()
+}
+
+// TestASocketNobodyAcceptsOnIsNotReady: a connect to the API listener's
+// address that the kernel completes while this process's accept loop takes
+// nothing is not a ready answer.
+func TestASocketNobodyAcceptsOnIsNotReady(t *testing.T) {
+	r := newRefusedInstall(t, "")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	nobody := &acceptsNothing{Listener: ln, closed: make(chan struct{})}
+	t.Cleanup(func() { _ = nobody.Close() })
+	round, sb := firstRoundOf(t, r, probationTiming{window: time.Hour, ask: 20 * time.Millisecond, retry: 20 * time.Millisecond,
+		round: 300 * time.Millisecond}, serveOpts{lanListener: nobody, addrOverride: ln.Addr().String()})
+	if round.ready || !strings.Contains(round.why, "accept loop") {
+		t.Errorf("the first round over a listener nobody accepts on = %+v, want not ready, the accept loop named", round)
+	}
+	stopServed(t, sb)
+}
+
+// TestAHealthAnswerOfAnotherVersionIsNotReady: /v1/health answering 200 as
+// another version than this start's is not a ready answer.
+func TestAHealthAnswerOfAnotherVersionIsNotReady(t *testing.T) {
+	r := newRefusedInstall(t, "")
+	round, sb := firstRoundOf(t, r, longProbation, serveOpts{wrapAPIHandler: func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if req.URL.Path == "/v1/health" {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"serverVersion":"9.9.9"}`)
+				return
+			}
+			h.ServeHTTP(w, req)
+		})
+	}})
+	if round.ready || !strings.Contains(round.why, `"9.9.9"`) {
+		t.Errorf("the first round over a health answer of another version = %+v, want not ready, naming it", round)
+	}
+	stopServed(t, sb)
+}
+
+// TestAStoreThatDoesNotAnswerIsNotReady: a store read that does not answer
+// within the round is not a ready answer.
+func TestAStoreThatDoesNotAnswerIsNotReady(t *testing.T) {
+	r := newRefusedInstall(t, "")
+	round, sb := firstRoundOf(t, r, probationTiming{window: time.Hour, ask: 20 * time.Millisecond, retry: 20 * time.Millisecond,
+		round: 300 * time.Millisecond}, serveOpts{probation: &probationSeams{storeRead: func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}}})
+	if round.ready || !strings.Contains(round.why, "the store did not answer") {
+		t.Errorf("the first round over a store that does not answer = %+v, want not ready, the store named", round)
+	}
+	stopServed(t, sb)
+}
+
+// TestAHealthCallThatNeverReturnsIsNotReadyAndDoesNotHoldTheStop: GET
+// /v1/health run in-process takes no cancel, so a call still out at the
+// round's bound is a no, no second round starts beside it, and serve's stop,
+// a clean one, does not wait for it.
+func TestAHealthCallThatNeverReturnsIsNotReadyAndDoesNotHoldTheStop(t *testing.T) {
+	r := newRefusedInstall(t, "")
+	released, entered := newOnceCloser(), newOnceCloser()
+	var returned atomic.Bool
+	t.Cleanup(released.close)
+	events, seams := newProbationWatch(probationTiming{window: time.Hour, ask: 20 * time.Millisecond, retry: 20 * time.Millisecond,
+		round: 200 * time.Millisecond})
+	sb := r.bootWith(t, serveOpts{probation: seams, wrapAPIHandler: func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if req.URL.Path == "/v1/health" {
+				entered.close()
+				<-released.ch
+				returned.Store(true)
+				return
+			}
+			h.ServeHTTP(w, req)
+		})
+	}})
+	first := events.waitFor(t, probationRound)
+	if first.ready || !strings.Contains(first.why, "did not answer within") {
+		t.Errorf("the first round over a health call that never returns = %+v, want not ready at its bound", first)
+	}
+	second := events.waitForCount(t, probationRound, 2)
+	if second.ready || !strings.Contains(second.why, "has not answered yet") {
+		t.Errorf("the second round = %+v, want none started beside the one still out", second)
+	}
+	select {
+	case <-entered.ch:
+	default:
+		t.Fatal("the health call never reached the handler")
+	}
+	sb.stop()
+	select {
+	case code := <-sb.done:
+		if code != 0 {
+			t.Errorf("serve = %d after its stop, want 0; stderr=%s", code, sb.stderr.String())
+		}
+	case <-time.After(withinTheTest):
+		t.Fatalf("serve's stop waited for the health call that never returns; stderr=%s", sb.stderr.String())
+	}
+	if returned.Load() {
+		t.Error("the health call returned before the stop ended: the test shows nothing")
+	}
+	if st := markerOf(t, r.dataDir); st.FailedStarts != 0 {
+		t.Errorf("the marker after a clean stop = %+v, want this start taken back", st)
+	}
+	released.close()
+}
+
+// TestAConfirmationReadsTheMarkerUnderItsLock: the confirmation at the
+// window's end waits for the install marker's lock, then reads the marker
+// again: an install of a newer version recorded while it waited stays as it
+// is, and is not stamped confirmed; nor does the stop after it touch it.
+func TestAConfirmationReadsTheMarkerUnderItsLock(t *testing.T) {
+	r := newRefusedInstall(t, "")
+	events, seams := newProbationWatch(probationTiming{window: time.Second, ask: 20 * time.Millisecond, retry: 20 * time.Millisecond,
+		round: 5 * time.Second})
+	sb := r.bootWith(t, serveOpts{probation: seams})
+	events.waitFor(t, probationWindow)
+	held, waits := holdTheMarkersLock(t, r.dataDir)
+	select {
+	case <-waits:
+	case <-time.After(withinTheTest):
+		t.Fatal("the confirmation never waited for the install marker's lock")
+	}
+	newer := updater.State{Status: "installing", TargetVersion: "9.9.9", PreviousVersion: version.ServerVersion,
+		AttemptedAt: time.Now().UTC().Truncate(time.Second), SwapStarted: true}
+	if err := updater.SaveState(r.dataDir, newer); err != nil {
+		t.Fatal(err)
+	}
+	held.Release()
+	events.waitFor(t, probationEnded)
+	if got := markerOf(t, r.dataDir); got != newer {
+		t.Errorf("the marker after the confirmation = %+v, want the newer install as recorded, %+v", got, newer)
+	}
+	if n := events.count(probationConfirmed); n != 0 {
+		t.Errorf("the install was confirmed %d times over a newer install's marker", n)
+	}
+	stopServed(t, sb)
+	if got := markerOf(t, r.dataDir); got != newer {
+		t.Errorf("the marker after the stop = %+v, want the newer install as recorded", got)
+	}
+}
+
+// holdTheMarkersLock holds dataDir's install marker's lock until the test
+// lets it go or ends, and returns where a waiter's first wait is signalled.
+func holdTheMarkersLock(t *testing.T, dataDir string) (*updater.StateLock, <-chan struct{}) {
+	t.Helper()
+	waits := make(chan struct{}, 1)
+	t.Cleanup(updater.SetStateLockWaitingForTest(func(string) { signalOnce(waits) }))
+	l, err := updater.LockState(t.Context(), dataDir)
+	if err != nil || !l.Held() {
+		t.Fatalf("hold the install marker's lock: %+v, %v", l, err)
+	}
+	t.Cleanup(l.Release)
+	return l, waits
+}
+
+// TestAStopWhileAConfirmationWaitsWritesNothing: a stop that lands while the
+// confirmation waits for the install marker's lock ends it, and serve, with
+// nothing written: the marker byte for byte as it was, since the take-back,
+// given the lock two seconds, finds it held too, and says so.
+func TestAStopWhileAConfirmationWaitsWritesNothing(t *testing.T) {
+	r := newRefusedInstall(t, "")
+	events, seams := newProbationWatch(probationTiming{window: 200 * time.Millisecond, ask: 20 * time.Millisecond,
+		retry: 20 * time.Millisecond, round: 5 * time.Second})
+	sb := r.bootWith(t, serveOpts{probation: seams})
+	events.waitFor(t, probationWindow)
+	held, waits := holdTheMarkersLock(t, r.dataDir)
+	select {
+	case <-waits:
+	case <-time.After(withinTheTest):
+		t.Fatal("the confirmation never waited for the install marker's lock")
+	}
+	marker := watch(t, updater.StatePath(r.dataDir))
+	sb.stop()
+	select {
+	case code := <-sb.done:
+		if code != 0 {
+			t.Errorf("serve = %d after its stop, want 0; stderr=%s", code, sb.stderr.String())
+		}
+	case <-time.After(withinTheTest):
+		t.Fatalf("serve's stop waited for the install marker's lock; stderr=%s", sb.stderr.String())
+	}
+	marker.requireUnchanged(t)
+	if !strings.Contains(sb.stderr.String(), "was not taken back") {
+		t.Errorf("serve did not say its count was left; stderr=%s", sb.stderr.String())
+	}
+	held.Release()
+}
+
+// TestTheDoctorReadsOkBesideAHealthyStartOnProbation: beside a start on
+// probation that has answered, whose own count is the marker's one, `bridge
+// doctor`'s install-probation line is ok, saying the install is on
+// probation.
+func TestTheDoctorReadsOkBesideAHealthyStartOnProbation(t *testing.T) {
+	r := newRefusedInstall(t, "")
+	events, seams := newProbationWatch(longProbation)
+	sb := r.bootWith(t, serveOpts{probation: seams})
+	events.waitFor(t, probationWindow)
+	if st := markerOf(t, r.dataDir); st.FailedStarts != 1 || st.Status != "installing" {
+		t.Fatalf("the marker beside a healthy start = %+v, want this start counted, the install on probation", st)
+	}
+	if line := doctorLineOf(t, r.cfg); line == nil || line.Status != "ok" || !strings.Contains(line.Summary, "on probation") {
+		t.Errorf("bridge doctor's install-probation line = %+v, want ok, on probation", line)
+	}
+	stopServed(t, sb)
 }

@@ -222,8 +222,9 @@ func TestDecideBootAction(t *testing.T) {
 // rollback's record (Status "", RollbackStarted) is its own case, never an
 // install marker and never a hold alone (backlog B613's round 3). The
 // housekeeping runs only once serve got past its settings, so the install's
-// version booting confirms the install, whatever the record's age (an
-// expired one is confirmed, not cleared); the backup's version booting
+// version booting overtakes the rollback, whatever the record's age (an
+// expired one is overtaken, not cleared), and puts the install back on
+// probation (ProbationOverRollback, backlog B660); the backup's version booting
 // means the rollback finished, and keeps the hold; any other version, and a
 // hold with no rollback, does nothing.
 func TestDecideBootActionReadsAnInterruptedRollbackOnItsOwn(t *testing.T) {

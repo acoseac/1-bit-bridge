@@ -205,7 +205,8 @@ func recoverRefusedInstall(ctx context.Context, configPath string, reasons []str
 	}
 	if err := restore(binaryPath, ".bak"); err != nil {
 		// The install marker back as it was, so that a start that gets past
-		// these settings confirms the install as it would have.
+		// these settings goes on with the install as it would have, on
+		// probation until it is confirmed (backlog B660).
 		if perr := save(dataDir, st); perr != nil {
 			noRollback(stderr, st, fmt.Sprintf("could not put the backup back (%v), nor the install marker as it was (%v)", err, perr))
 			return 0, false
