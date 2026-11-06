@@ -2148,7 +2148,8 @@
   `Cover Art (Front)` takes the embedded cover's path, and a folder cover still
   applies; external and locator items are ignored; an APEv1 tag (version 1000,
   whose text is not defined as UTF-8) reads as none. **The fallback is the
-  ID3v1 tag in the last 128 bytes alone** (`tag.ReadID3v1Tags`), read only where
+  ID3v1 tag in the last 128 bytes alone** (`tag.ReadID3v1Tags`, by offset,
+  through a `newDhowdenReadBuffer` page as every dhowden read is), read only where
   the file holds no APEv2 tag: a minute of `FuzzExtractAPE` found a 603-byte
   file allocating 1.35 MB when the whole file went to dhowden, whose dispatcher
   reads an ID3v2 tag ahead of the stream and sizes a buffer by its header (the

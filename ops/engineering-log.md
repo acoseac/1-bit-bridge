@@ -78451,11 +78451,12 @@ states ea4b20dd; the client format gate a76a28ae; what else meets the rows
 689ecbfa; fuzz, allocation in bytes, the file routes and the golden manifests
 a3b02257; the item that alone claims 0xFFFFFFFF 4b3a0b8b; two doc comments on
 the declarations they name 1ef61d18; a 32-bit integer WavPack stream and
-every Monkey's Audio level 8c77ea29; then this record, the rules' long forms
-in `ops/History-rules-{scanner,jobs,dlna-upnp,player,openhome}.md`,
-History-Build.md's fuzz census and PROTOCOL.md's last two additions. The
-rules' lines go in through a checked patch (`rules-b489b.patch`: this worker
-cannot write `.claude/`).
+every Monkey's Audio level 8c77ea29; this record, the rules' long forms in
+`ops/History-rules-{scanner,jobs,dlna-upnp,player,openhome}.md`,
+History-Build.md's fuzz census and PROTOCOL.md's last two additions
+59898f08; the three defects the gate found f3ab3ab6 (below); then the gates'
+results. The rules' lines go in through a checked patch
+(`rules-b489b.patch`: this worker cannot write `.claude/`).
 
 ### What the bridge reads, and what it refuses
 
@@ -78586,9 +78587,10 @@ every checkout, for the iOS mirror's fixtures.
 
 ### Fuzz and allocation
 
-Each target a minute, `-fuzzminimizetime 1s`, four workers, at 4b3a0b8b
-(whose extractors are the branch's): `FuzzExtractWavPack` 440,291 executions,
-`FuzzExtractAPE` 361,449, `FuzzAPEv2` 713,048, no failure. The first minute of
+Each target a minute, `-fuzzminimizetime 1s`, four workers, no failure:
+`FuzzExtractWavPack` 459,329 executions and `FuzzExtractAPE` 480,612 at
+f3ab3ab6, the fallback's last change (440,291 and 361,449 at 4b3a0b8b, before
+it), and `FuzzAPEv2` 713,048 at 4b3a0b8b, the reader unchanged since. The first minute of
 `FuzzExtractAPE`, before the fallback changed, failed at 48 s: a 603-byte file
 allocated 1.35 MB, past the target's bound (a mebibyte and eight bytes a byte
 of input), because the fallback handed the whole file to dhowden, whose
@@ -78599,9 +78601,31 @@ ID3v2 tag in either format is no longer read, which a reference corpus may
 show taggers write. Allocation is measured in bytes,
 `runtime.MemStats.TotalAlloc` before and after (`testing.AllocsPerRun` counts
 allocations, not bytes): files of 4,196 to 4,779 bytes whose every length
-claims 0xFFFFFFFF allocate 66,384 to 75,384 bytes to extract, and the APEv2
+claims 0xFFFFFFFF allocate 66,384 to 79,368 bytes to extract (a file whose
+tag is refused takes the ID3v1 fallback and its 4 KiB page), and the APEv2
 reader alone 96 bytes (a claiming footer) and 368 (a claiming item), the
 least of three runs (`TestAFewKilobytesClaimingFourGibibytesAllocateUnderAMebibyte`).
+
+### What the gate found
+
+`make test-fast` at 59898f08 failed on three defects of this branch, each
+caught by a test that was there before it, and fixed in f3ab3ab6. The ID3v1
+fallback called `tag.ReadID3v1Tags` on a section reader:
+`TestEveryDhowdenReadIsGuarded` knows every dhowden reader the package calls
+and wants each on a `newDhowdenReadBuffer` stream (B117), so the read goes
+through one, and the guard lists the ID3v1 reader with no guard, since it reads
+the last 128 bytes and nothing in them sizes anything. The read-fault matrix
+(B134) still had the WavPack file with an ID3v1 tag down as a reader that
+seeks, which the fallback stopped doing: three tests' seek case found the row
+written; the fallback reads by offset, so that case is skipped as it is for the
+APEv2 rows. And `requireTheLatestSchema` (cmd/bridge) names what the ladder's
+newest step adds, still v60's columns after v61 joined: three updater tests
+failed on it; it names `tracks.correction_key` now, and a merge that
+renumbers v61 renumbers it. Earlier, `TestNoDocblockNamesAnotherDeclaration`
+caught a test helper's doc naming a function that does not exist, and the
+walker's `isKnownAudioExt` had lost its doc comment to the helper inserted
+above it (1ef61d18). The lesson is the rules' own: run the package that holds
+the sweeps after every change, not only the tests of the change.
 
 ### Negative controls (a runner applied each mutation, ran the tests named and restored the bytes from memory)
 
