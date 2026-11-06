@@ -78716,3 +78716,21 @@ after.
 | (d) a disagreeing group's agreeing members returned too | `TestAnAlbumTakesOneYear` (returned, not moved), `TestScanner_AnAlbumIndexedBeforeTheRuleTakesOneYearAtTheNextFullScan` (the 7 in the delta), the duplicates test (the 7 in its delta), the past-the-limit test, `TestReconcileYears`, B342's Ellipses |
 | (e) no second year run after the MBID fill | `TestScanner_StraysOfOneFolderThatBorrowDifferentYearsTakeOneInOneScan` (1990 beside 2000 after one scan; the bump moves a stray) |
 | (f) a subtree scan runs the year pass (the heal rejected above) | `TestScanner_AnAlbumRetaggedOneSubtreeScanAtATimeMovesAtTheNextFullScan` (every row voted back to 2011), `TestScanner_ASubtreeScanOfAChangedFileSplitsItsAlbumUntilTheNextFullScan` |
+
+### Gates
+
+On legion0 at a4b62598, in one call through the shared build lock
+(`.tmp/_b756b/gates.py`): `make vet` native and with `GOOS=windows`,
+`GOOS=darwin` and `GOOS=linux GOARCH=386`, each clean; gofmt (go1.27.3's) on
+the changed Go files, clean; `make docs-check`, ok, and again on a copy of
+the tree with `rules-b756b.patch` applied, which `git apply --check` takes
+and a strict applier reproduces; the qualification check, "qualification
+version OK: 4880f8a4..HEAD" (B756 changes no guarded path); `make test-fast`
+(TMPDIR under `.tmp/_b756b`), 85 packages ok and none failed, in 480 s, the
+ALSA, alsapcm, durable-writer and backup identity tests running here on
+Linux; `make test TEST_PKGS="./internal/manifest/... ./internal/dupes/...
+./internal/api/..."` (race, the Makefile's tags and 30-minute timeout), ok,
+in 1,398 s (internal/manifest 1,386 s); `make build-all`, ok, its `dist/`
+removed after. `git status --ignored` showed nothing but `.tmp/` after. Not
+run here: macOS and Windows natively, CI's runners, and the iOS app, whose
+repo is not on this host.
