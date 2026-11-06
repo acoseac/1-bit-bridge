@@ -78435,3 +78435,295 @@ packages ok and none failed, in 1,744 s; `make build-all`; `go test -race
 `./internal/player/dsdstate/`, each ok; the qualification check,
 "qualification version OK: main..HEAD"; `make docs-check`, ok, and again
 with the round-1 rules patch applied. The tree is clean after.
+
+## 2026-11-06 — B750: a Christmas smart mix, from the library's tags, served 1 December to 5 January
+
+Backlog B750, the owner's request of 2026-11-06: a holiday mix named
+"Christmas" in bridge 0.2.4 (about 28 November), since an additive family
+needs no app release; off for anyone without real Christmas music in the
+library, and gone by itself after the season. Worker b750 on legion0
+(Ubuntu 26.04, linux/amd64, AMD Ryzen 9 6900HX, 16 threads, go1.27.3,
+`GOTOOLCHAIN=local`, `GOPROXY=off`), branch `feat/b750-christmas-mix` from
+main 4880f8a4, the orchestrator's brief, whose design was settled with
+Codex and Argon. Commits: red first 8dc0cd96, the family 664ae4f7, the
+window at response time f23685f5, PROTOCOL.md and the runbook 1c64a552,
+then this record. The rule's bullet in `.claude/rules/smart-mixes.md`, and
+two globs that load it with the handler and the console's mix views, go in
+through a checked patch (`rules-b750.patch`; this worker cannot write
+`.claude/`).
+
+### Why a new input, and red first
+
+Every family's candidates follow a play, a heart or an analysis row
+(`assembleInputs`), so a filter over them could never see the unheard,
+unanalyzed Christmas album the mix is for. The family reads the whole
+served library instead. Red first:
+`TestRegenerate_AnUnheardUnanalyzedChristmasAlbumMakesTheFamily` (a
+16-track album by four performers, `GENRE=Christmas`, no plays, hearts or
+analysis, analysis off) at 8dc0cd96 against main's code: "no christmas
+family ... cached kinds map[]".
+
+### The read and what it costs
+
+`Store.MatchingTrackFeatures` runs `trackFeatureSelect` (so
+`dupe_suppressed = 0`) and hands each row to a match the regenerator gives
+it, keeping only what matches; a read path, no `s.mu`. No text filter and
+no `LIMIT` before the match: SQLite's `LIKE` folds ASCII case alone and
+knows nothing of NFKD. The negative control below put a 30-term `LIKE`
+prefilter in front of the match, and the fixture read lost 35 positive
+fixtures: `Noël Acadien`, `Cantique de Noël`, the genre `Noël`, every
+`Kolędy` and `Crăciun` form, `X-Mas`, `Rock X-Mas`, fullwidth
+`ＣＨＲＩＳＴＭＡＳ` and the fi ligature among them.
+
+Measured with a throwaway probe (a test package in the worker's scratch
+directory, not committed; `…MeasureTheChristmasRead`): 100,000 tracks on
+disk (the worktree's ext4), 1% Christmas by genre, album or title in
+turn, half with a ReplayGain tag, 2,000 analysis rows; medians of 5.
+
+| What | Median |
+|---|---|
+| the read, every row kept | 969 ms |
+| the read, nothing kept | 949 ms |
+| the read with `MatchChristmas` (what `assembleInputs` runs), 1,000 kept | 1.108 s |
+| `MatchChristmas` alone over the 100,000 rows in memory | 142 ms (1.4 µs a row) |
+| a whole `Regenerate`, analysis on, no history (3 families) | 1.717 s |
+| a narrower read (path and the four text tags, no join), the match, then the 1,000 matches hydrated by path | 645 ms |
+
+The same store and a probe that compiles against both trees
+(`…RegenerateOn100k`): a whole `Regenerate` takes 570 ms at main (2
+families) and 1.626 s on the branch (3), so the read adds about 1.06 s a
+regeneration at 100,000 tracks. Acceptable for a pass that runs daily, 120
+s after a start and on the console's Regenerate (synchronous there), so no
+index was proposed and the one-pass read was kept. If a Pi-class host with
+a large library finds it slow, the narrower read is the next step: it
+loses no recall (every served row still reaches the match) and cut the
+read by 42% here, at the cost of a second, chunked query by path and a
+match that sees four fields of a partly filled row. Not an index: an index
+on a computed verdict would need a migration and an `ExtractorVersion`
+bump whenever a list changes.
+
+### The match
+
+`MatchChristmas(title, artist, album, genre)`, pure, in
+`internal/smartplaylist/christmas.go`, over `christmasFold`: NFKD with
+its marks dropped, lower case, `ł ø ß đ æ œ` spelled out, every rune that
+is not a letter or a digit a space. Rules in order, the first that holds:
+a genre segment equal to a Christmas genre (or two words pairing `holiday`
+with one), a Christmas word of the album (`noel` not beside an artist
+holding `noel` as a word or after a credit), a carol of `christmasTitles`
+equal to the title less its trailing version suffixes, one of the title
+words. Comparison only: never stored, hashed, keyed or put in SQL, and not
+unified with the other folds (`matchfold.go` lists them).
+
+What this adds to the brief's lists, each a spelling or a form of what the
+lists name:
+
+- A colon splits a genre too: the iTunes Store writes its genres "Christmas:
+  Pop", "Christmas: Classical", "Holiday: Other". Without it every such
+  file missed by genre.
+- `x-mas` with a hyphen or a dash, inside a word too (`Rock-X-Mas`), is
+  the word `xmas`; with a space it stays two words, so Spanish `X Más`
+  (ten, "more") is not Christmas.
+- An album or title word beginning `christmas` counts as one beginning
+  `weihnacht` does: `Christmastime`, `Christmastide`.
+- `navidades`, the plural, beside `navidad` (album and title).
+- `featuring` beside `feat`, `ft` and `with` before `noel`.
+- The carol table's second spellings: Silent Night, Holy Night; Stille
+  Nacht, heilige Nacht; Oh Holy Night; Oh Come All Ye Faithful; Oh Little
+  Town of Bethlehem; God Rest You Merry Gentlemen; The First Nowell; We
+  Three Kings of Orient Are; Deck the Hall; Santa Claus Is Comin' to Town;
+  Vom Himmel hoch, da komm ich her.
+- A version suffix after ` - ` (or an en or em dash) is one holding a
+  version word (live, vivo, remaster, remastered, instrumental, acoustic,
+  unplugged, version, edit, mix, remix, mono, stereo, demo, take, single,
+  bonus, reprise, karaoke, cappella, acapella, recorded, recording,
+  session, sessions, from, and the credits) or only digits (a year), so
+  `Silent Night - Deadly Night` is not Silent Night. Up to 8 suffixes come
+  off, so a title of a thousand parentheticals costs a few scans.
+
+What the lists, run against the fixtures, do not catch or catch
+unexpectedly, reported and left as the design has it: a genre segment that
+names Christmas inside it (`Christmas Pop`, written with a space) is no
+segment of the list, while the iTunes form `Christmas: Pop` is; `Jingle
+Bell Rock`, `Santa Baby`, `Winter Wonderland` and the other songs outside
+the table and without a title word need their album or genre; `Crăciun
+fericit` as a title misses (`craciun` is a surname, so never a title
+word); a singer named Noël's self-titled album `Noël` misses (the artist
+holds `noel`); a title's parenthetical counts for the title words, so
+`Hallelujah (Christmas Version)` qualifies; and the album words leave out
+`villancicos`, Dutch `kerst`, Finnish `joulu` and Danish and Norwegian
+`julesange` and `julesanger`, which only a genre then catches. A Cyrillic
+`С` in `Сhristmas` is no C, which is right.
+
+`FuzzMatchChristmas` (no panic, the same answer twice, an idempotent fold,
+the artist deciding nothing unless the album holds `noel`, ASCII case
+deciding nothing) found within two seconds that `norm.NFKD` leaves a
+letter composed after an invalid UTF-8 byte: `"\xf3Ǚ"` folded to `ǚ` once
+and to `u` the next time. Invalid UTF-8 is a space before NFKD now (a row
+read back from `tags_json` is valid already), the input is in the corpus,
+and three more minutes of fuzzing (23.6 million inputs) found nothing.
+
+### The floor, the cap, the order, the place
+
+The floor is two rules: 15 emitted tracks (`MinChristmas`), and 3
+distinct albums or 3 distinct artists among the qualifying tracks, each
+named as the diversity caps name them, an empty one naming nothing; the
+artist is the track's, so a Various Artists compilation counts by its
+performers, and a single album by a single artist, a 40-track box set
+included, gets no family. The spread is judged on the qualifying tracks
+rather than the emitted ones, so the cap can never undo the floor. The cap
+(`MaxChristmasItems` 100, `ChristmasPerArtistCap` 8) walks the seeded
+order taking 8 an artist, an empty artist one artist, then fills from the
+tracks it passed over in the same order, so the family holds
+min(qualifying, 100). A zero option is the production value.
+
+The order is the season's: `Inputs.ChristmasSeed` is `SeedFromSeason`
+of `season.Year`, which the regenerator computes, and
+`shuffleFeaturesBySeason` is `shuffleFeaturesByWeek`'s sibling.
+`season.Year` names a season by the December that opens it: 1 December
+through 5 January is that December's year, and from 6 January the coming
+December's. The brief said "in January it's the previous year"; every
+instant the family is served gets the same year either way, and with the
+rollover on 6 January a cache built before the window already holds the
+order the window opens with.
+
+Christmas sits after Favorites and before Drive Mix. On a bridge with no
+history (the demo's) nothing comes before it, so it is the first shelf and
+the app's hero in December; where Daily Mix exists, Daily Mix leads. It is
+no `DiscoveryShelf`, so `recordDiscoveryServed` writes none of its items
+to `smart_playlist_served`, and it calls no `discoveryExclusions`, which
+does not include its items: what the discovery shelves showed takes
+nothing from it, and they may hold its tracks. Its rows go into
+`Inputs.Features` as Favorites' do, so `signEnergy` finds a tag's
+ReplayGain and rate with analysis off; a track with no loudness is the
+midpoint.
+
+### The window, at response time
+
+`season.InWindow`, in a leaf package both layers import (the API imports
+no engine and mirrors the kind as `christmasKind`), is 1 December 00:00:00
+through 5 January 23:59:59.999999999, read in UTC from the instant itself.
+`GET /v1/smart-playlists` reads one injected clock (`Server.clockNow`,
+`time.Now` in production) for the window and the time-of-day hour, and
+skips the family before anything is counted, so the top-level
+`refreshedAt` moves with what is served alone. The family is generated all
+year: a cache built on 20 November serves it at 1 December 00:00 UTC, and
+one built on 5 January does not on the 6th
+(`TestAChristmasCacheIsServedByTheClockAtTheRequest`). A demo bridge
+behaves the same.
+
+Every reader of the cache, out of season:
+
+- `GET /v1/smart-playlists`: leaves it out.
+- `assembleInputs`' hysteresis map (`PreviouslyVisible`): holds `christmas`
+  all year; only On Repeat reads the map, so nothing changes.
+- The console's grid and detail (`GET /api/player/mixes`,
+  `/api/player/mixes/{slug}`) and the inspection list (`GET
+  /api/smart-playlists`): listed and marked `outOfSeason` by
+  `smartMixOutOfSeason`, over the same predicate and a per-server test
+  clock; the grid draws a chip and the detail a line saying when the app
+  shows it. Playback in the console, Regenerate, a cover and Save as
+  playlist all work out of season; a saved copy is an ordinary playlist,
+  which devices then see through the playlist backup all year.
+- No CLI, export or DLNA reader. `bridge backup` copies the database and
+  the cache with it; a restored cache is filtered the same way at response
+  time.
+
+What the bridge can promise, as PROTOCOL.md now says: it stops serving the
+family on 6 January; a client offline or inside its own refresh throttle
+keeps what it last fetched until its next successful refresh, and nothing
+in the family's shape tells a client when it ends. The iOS side was not
+read here: the app's clone is not on legion0 (no `~/dev`, no match for
+`SmartPlaylistService.swift` or `HomeView.swift` under the home
+directory) and `gh` and curl are refused. The brief's reading of the
+client (no key on `refreshedAt`, a 30-minute persisted throttle, an
+unknown kind rendered generically, the per-mix hide by slug) is therefore
+unconfirmed by this worker.
+
+### The demo
+
+The regenerator runs on a demo bridge as on any other (`smartPlaylists`
+defaults on, and nothing in serve gates it on demo mode), and
+`assembleInputs` short-circuits nothing before the new read with analysis
+or history off. On the demo's shape, three Christmas albums tagged
+`GENRE=Christmas` beside keyed classical albums, no history and no hearts,
+the family holds every track of the three, 8 by each performer ahead of
+the rest, and is the first shelf (`TestRegenerate_TheDemosShape`, 30
+tracks by two performers). The runbook's demo section says what the tags
+need.
+
+### Negative controls
+
+Each mutation was applied exact-once, each listed test run alone on a
+fresh test binary, the bytes restored from memory; every listed test
+passed unmutated first, and every one went red under its mutation; the
+tree was clean after.
+
+| Mutation | Red |
+|---|---|
+| the artist read as an album | `TestMatchChristmasExclusions` (Noel Gallagher), `TestEveryChristmasFixtureThroughTheStoresRead` |
+| bare `holiday` a Christmas genre | `TestMatchChristmasExclusions`, `TestNoChristmasMusicIsNoChristmasFamilyInSeason` |
+| the window read at generation only (no handler filter; no family built outside the window) | `TestAChristmasCacheIsServedByTheClockAtTheRequest`, `TestTheChristmasFamilyIsServedOnlyInItsWindow` |
+| a suppressed duplicate counted (the read without `dupe_suppressed = 0`) | `TestRegenerate_ChristmasCountsNoSuppressedDuplicate`, `TestEveryChristmasFixtureThroughTheStoresRead`, `TestMatchingTrackFeaturesHandsEveryServedRowToItsMatch` |
+| a `LIKE` filter before the match | `TestEveryChristmasFixtureThroughTheStoresRead` (35 positives lost, Noël among them), `TestMatchingTrackFeaturesHandsEveryServedRowToItsMatch` |
+| the calendar year as the seed | `TestRegenerate_OneSeasonIsOneOrder` (31 December to 1 January reshuffled) |
+| `season.Year` the calendar's | `TestTheSeasonsYearIsTheDecemberThatOpensIt`, `TestOneWindowIsOneSeason`, `TestRegenerate_OneSeasonIsOneOrder` |
+| the rows kept out of `Features` | `TestRegenerate_ChristmasEnergyFromItsTagsWithAnalysisOff`, `TestRegenerate_ChristmasEnergyFromAnalysis` |
+| christmas a discovery shelf | `TestChristmasStaysOutOfTheDiscoveryExclusion`, `TestRegenerate_ChristmasRecordsNothingServed` |
+| christmas fed into the discovery exclusion | `TestChristmasStaysOutOfTheDiscoveryExclusion` (Wind Down relaxed) |
+| invalid UTF-8 handed to NFKD | `FuzzMatchChristmas` (its corpus) |
+| no spread floor | `TestBuildChristmasTheFloorBySpread`, `TestBuildChristmasTheFourLibraries` |
+| no per-artist cap | `TestBuildChristmasTheCapSpreadsAndFills`, `TestRegenerate_TheDemosShape` |
+| the time-of-day hour from the wall clock | `TestTheChristmasFamilyIsServedOnlyInItsWindow` |
+| the console never marking it | `TestTheConsoleMarksTheChristmasMixOutOfSeason` |
+| `x-mas` not joined | `TestChristmasFold`, `TestMatchChristmasByEachRule` |
+| `noel` after a credit counted | `TestMatchChristmasExclusions` |
+| `noel` beside an artist named Noel counted | `TestMatchChristmasExclusions` |
+| a carol matched by its beginning | `TestMatchChristmasExclusions` (Silent Nightmare) |
+| `jul` counted in an album | `TestMatchChristmasExclusions` |
+| Christmas placed ahead of Favorites | `TestGenerateChristmasSitsAfterFavoritesAndBeforeDriveMix` |
+
+### Tests
+
+`internal/smartplaylist/season`: `TestTheWindowIsTheFirstOfDecemberToTheFifthOfJanuaryInUTC`,
+`TestTheSeasonsYearIsTheDecemberThatOpensIt`, `TestOneWindowIsOneSeason`.
+`internal/smartplaylist`: `TestChristmasFold`, `TestMatchChristmasByEachRule`,
+`TestEveryCarolInTheTableQualifiesByItsTitle`, `TestMatchChristmasExclusions`,
+`TestMatchChristmasAcrossScriptsAndForms`, `TestMatchChristmasOnAVeryLongTitle`,
+`FuzzMatchChristmas`, `TestEveryChristmasFixtureThroughTheStoresRead` (every
+fixture of the match's tables through the store's real read too),
+`TestBuildChristmasTheFloorByEmittedTracks`, `TestBuildChristmasTheFloorBySpread`,
+`TestBuildChristmasTheFourLibraries`, `TestBuildChristmasTheCapSpreadsAndFills`,
+`TestBuildChristmasOrdersBySeasonSeed`, `TestBuildChristmasNeedsNoHistoryHeartsOrAnalysis`,
+`TestGenerateChristmasSitsAfterFavoritesAndBeforeDriveMix`,
+`TestChristmasStaysOutOfTheDiscoveryExclusion`, `TestChristmasEnergyAndRateFromItsOwnTags`.
+`internal/manifest`: `TestMatchingTrackFeaturesHandsEveryServedRowToItsMatch`.
+`internal/smartplaylistgen`: `TestRegenerate_AnUnheardUnanalyzedChristmasAlbumMakesTheFamily`,
+`TestRegenerate_ChristmasCountsNoSuppressedDuplicate`,
+`TestRegenerate_ChristmasEnergyFromItsTagsWithAnalysisOff`,
+`TestRegenerate_ChristmasEnergyFromAnalysis`, `TestRegenerate_NoChristmasMusicNoFamily`,
+`TestRegenerate_OneSeasonIsOneOrder`, `TestRegenerate_ChristmasRecordsNothingServed`,
+`TestRegenerate_TheDemosShape`.
+`internal/api`: `TestTheChristmasFamilyIsServedOnlyInItsWindow`,
+`TestAChristmasCacheIsServedByTheClockAtTheRequest`,
+`TestNoChristmasMusicIsNoChristmasFamilyInSeason`, `TestTheAPIsChristmasKindIsTheEngines`.
+`internal/admin`: `TestTheConsoleMarksTheChristmasMixOutOfSeason`,
+`TestTheMixViewsWordTheOutOfSeasonMark`, and
+`TestThePlayersMixGridDrawsTheOutOfSeasonChip` (under node, which legion0
+lacks, so it ran on no host here).
+
+### Trade-offs
+
+- Recall against precision: genres match a whole segment and titles a
+  closed carol table and four words, so some Christmas music misses (the
+  surprises above) and no artist's name, travel playlist or Hanukkah
+  album gets in.
+- The whole served library is read every regeneration (about 1.1 s at
+  100,000 tracks) rather than a stored verdict, which would need a
+  migration and an `ExtractorVersion` bump whenever a list changes.
+- The window is filtered at response time, so the cache holds the family
+  all year and a stale cache cannot prolong or delay it; the console shows
+  it marked rather than hidden.
+- The season's year turns on 6 January rather than with the calendar.
+- The spread floor is judged on the qualifying tracks, not the emitted
+  ones, so the cap cannot undo it.
