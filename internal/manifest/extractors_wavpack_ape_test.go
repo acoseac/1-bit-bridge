@@ -77,6 +77,8 @@ func TestTheWavPackHeaderStatesItsFormat(t *testing.T) {
 			formatFacts{CodecWavPack, 96000, 24, 1, false, SampleFormatInteger, 3}},
 		{"20 bits in three bytes", wvFile(wvSpec{rate: 48000, bytes: 3, shift: 4, channels: 2, total: 48000}),
 			formatFacts{CodecWavPack, 48000, 20, 2, false, SampleFormatInteger, 1}},
+		{"32-bit integer", wvFile(wvSpec{rate: 48000, bytes: 4, channels: 2, total: 48000}),
+			formatFacts{CodecWavPack, 48000, 32, 2, false, SampleFormatInteger, 1}},
 		{"32-bit float", wvFile(wvSpec{rate: 44100, bytes: 4, float: true, channels: 2, total: 44100}),
 			formatFacts{CodecWavPack, 44100, 32, 2, false, SampleFormatFloat, 1}},
 		{"a rate the table lacks, in ID_SAMPLE_RATE", wvFile(wvSpec{rate: 352800, bytes: 3, channels: 2, total: 352800, customRate: true}),
@@ -240,11 +242,12 @@ func TestTheAPEHeaderStatesItsFormat(t *testing.T) {
 		return apeSpec{version: version, compression: level, formatFlags: flags, channels: 2, rate: 44100,
 			totalFrames: frames, finalFrameBlocks: final}
 	}
-	cases := []struct {
+	type headerCase struct {
 		name string
 		data []byte
 		want formatFacts
-	}{
+	}
+	cases := []headerCase{
 		{"3.99, 16-bit stereo", apeFile(std), formatFacts{CodecAPE, 44100, 16, 2, false, SampleFormatInteger, stdLength}},
 		{"24-bit", with(func(s *apeSpec) { s.bits = 24; s.formatFlags = fxAPEFlag24Bit }),
 			formatFacts{CodecAPE, 44100, 24, 2, false, SampleFormatInteger, stdLength}},
@@ -272,6 +275,20 @@ func TestTheAPEHeaderStatesItsFormat(t *testing.T) {
 			formatFacts{CodecAPE, 44100, 16, 2, false, SampleFormatInteger, stdLength}},
 		{"after junk MACLib scans past", with(func(s *apeSpec) { s.junk = bytes.Repeat([]byte{0x11}, 5000) }),
 			formatFacts{CodecAPE, 44100, 16, 2, false, SampleFormatInteger, stdLength}},
+	}
+	// Each compression level's header, in the layout from 3.98 on and in the
+	// old one: the level changes nothing the header states, and from 3.95 on
+	// the old layout's blocks per frame do not follow from it.
+	for _, l := range []struct {
+		name  string
+		level uint16
+	}{{"Fast", fxAPEFast}, {"Normal", fxAPENormal}, {"High", fxAPEHigh}, {"Extra High", fxAPEExtraHigh}, {"Insane", fxAPEInsane}} {
+		newer := stdAPE()
+		newer.compression = l.level
+		cases = append(cases,
+			headerCase{"3.99 at " + l.name, apeFile(newer), formatFacts{CodecAPE, 44100, 16, 2, false, SampleFormatInteger, stdLength}},
+			headerCase{"3.97 at " + l.name, apeFile(old(3970, l.level, 0, 3, 500)),
+				formatFacts{CodecAPE, 44100, 16, 2, false, SampleFormatInteger, float64(2*73728*4+500) / 44100}})
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

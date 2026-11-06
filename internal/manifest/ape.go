@@ -13,7 +13,7 @@ package manifest
 // (32 bytes from "MAC ") holds the level, the flags, the channels, the rate,
 // the WAV header's and the terminating data's lengths, the frame count and
 // the final frame's blocks; its bits are the flags' (8, 24, else 16), and
-// its blocks per frame follow from the version and the level as every reader
+// its blocks per frame follow from the version and the level as MACLib
 // derives them (9216; 73728 from 3.90, or from 3.80 at Extra High; 73728 x 4
 // from 3.95). The file's length in samples is (frames - 1) x blocks per
 // frame + the final frame's blocks.
