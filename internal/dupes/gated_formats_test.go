@@ -169,3 +169,81 @@ func TestALossyHybridWavPackCopyIsLossy(t *testing.T) {
 		t.Fatal("a copy every client is served must outrank a gated one, lossless or not")
 	}
 }
+
+// gone is r whose file the last scan did not find (Row.Missing).
+func gone(r Row) Row {
+	r.Missing = true
+	return r
+}
+
+// foundTo is what a client with view can play of a group once plan is
+// applied: the members it is served whose file the last scan found, sorted.
+func foundTo(view formatgate.Set, members []Row, suppressed []string) []string {
+	var out []string
+	for _, m := range members {
+		if view.Takes(m.Path) && !m.Missing && !slices.Contains(suppressed, m.Path) {
+			out = append(out, m.Path)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// TestTheGateAndTheMissingTermHoldBesideEachOther: B756's term, a copy whose
+// file the last scan did not find never wins its unit, and B489's, a .wv or
+// an .ape never wins over a copy an app that declares neither can play, hold
+// together (round 3 of backlog B489, the merge of B756). A copy whose file is
+// gone is no copy any client can play, so Missing comes first: a found .wv
+// takes a gone .flac's place, while a found .flac still beats every .wv and
+// .ape. And a domain with no found copy every client is served stays one
+// unit per gated format, a gone copy every client is served a unit of its
+// own, so a .wv and an .ape are not suppressed against each other because a
+// gone .flac sits beside them. In every view, a client that could play a copy
+// of the track before the plan can play one after it.
+func TestTheGateAndTheMissingTermHoldBesideEachOther(t *testing.T) {
+	flac := codecRow("A/x.flac", "FLAC", 44100, 16, 30_000_000)
+	flac2 := codecRow("D/x.flac", "FLAC", 44100, 16, 20_000_000)
+	wv := codecRow("B/x.wv", "WAVPACK", 96000, 24, 90_000_000)
+	wv2 := codecRow("E/x.wv", "WAVPACK", 44100, 16, 40_000_000)
+	ape := codecRow("C/x.ape", "APE", 192000, 24, 120_000_000)
+	cases := []struct {
+		name    string
+		members []Row
+		want    []string // suppressed under FilterHighestQuality
+	}{
+		{"a found FLAC beside a found hi-res WavPack", []Row{flac, wv}, []string{wv.Path}},
+		{"a gone FLAC beside a found WavPack", []Row{gone(flac), wv}, []string{flac.Path}},
+		{"a found FLAC beside a gone WavPack", []Row{flac, gone(wv)}, []string{wv.Path}},
+		{"a gone FLAC beside a gone WavPack", []Row{gone(flac), gone(wv)}, []string{wv.Path}},
+		{"a gone FLAC beside a found WavPack and a found APE", []Row{gone(flac), wv, ape}, nil},
+		{"a gone FLAC, a found FLAC and a WavPack", []Row{gone(flac), flac2, wv}, []string{flac.Path, wv.Path}},
+		{"a gone FLAC beside two found WavPack copies", []Row{gone(flac), wv, wv2}, []string{flac.Path, wv2.Path}},
+	}
+	views := []formatgate.Set{
+		{}, formatgate.SetOf(formatgate.WavPack), formatgate.SetOf(formatgate.APE), formatgate.All(),
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := planFor(t, c.members, FilterHighestQuality)
+			if !slices.Equal(got, c.want) {
+				t.Errorf("suppressed %v, want %v", got, c.want)
+			}
+			for _, view := range views {
+				if len(foundTo(view, c.members, nil)) > 0 && len(foundTo(view, c.members, got)) == 0 {
+					t.Errorf("view %q: could play a copy before suppression and none after (suppressed %v)",
+						view.Key(), got)
+				}
+			}
+		})
+	}
+	// The order itself: Missing, then the gate.
+	if !outranks(wv, gone(flac)) || outranks(gone(flac), wv) {
+		t.Error("a found WavPack copy must outrank a FLAC whose file is gone")
+	}
+	if !outranks(flac, wv) || outranks(wv, flac) {
+		t.Error("a found FLAC must outrank a found WavPack copy")
+	}
+	if !outranks(gone(flac), gone(wv)) {
+		t.Error("between two gone copies the gate still decides")
+	}
+}

@@ -418,6 +418,15 @@ type Track struct {
 	// iOS client's next delta sync nor re-queue full re-enrichment.
 	versionStampOnly bool
 
+	// yearRecordOnly is an internal, NON-WIRE marker set with
+	// versionStampOnly by markStampIfUnchanged on a re-extraction that
+	// differs from its stored row in the year pass's record alone
+	// (taggedYear): nothing a client reads changed, so the stamp leg writes
+	// the record beside the stamp, with no indexed_at advance and no
+	// enriched_at reset, and only while the row is still the one it was
+	// merged with (rowVersion) (backlog B756 round 3).
+	yearRecordOnly bool
+
 	// awaitsReconcile is an internal, NON-WIRE marker (the versionStampOnly
 	// shape) set by reExtractUnchanged on a version-stale re-extraction that
 	// differs from its stored row in a field a reconciliation pass writes
@@ -492,6 +501,19 @@ type Track struct {
 	// unchanged audio file re-extracts it. Never marshaled.
 	folderArtKey string
 
+	// taggedYear is the year pass's record of what this row's own tag said
+	// its year was (backlog B756): set the first time reconcileYears moves
+	// Year to its album's, and dropped when it moves Year back to it, so the
+	// pass votes on what the tags say rather than on what an earlier scan
+	// wrote. nil when the pass never moved the row, and on every row an
+	// older bridge wrote, which votes its stored year until the pass moves
+	// it or a bump's held re-read records its tag. It lives in tags_json,
+	// under "taggedYear" (marshalForStorage writes it, decodeStoredTrack
+	// reads it), and never on the wire: unexported, so json.Marshal of a
+	// Track does not see it. A change in it alone is no revision
+	// (yearRecordOnly).
+	taggedYear *yearRecord
+
 	// correctionKey is what this extraction observed of a hybrid WavPack
 	// file's correction file (correctionObservation.key): "" when the row
 	// depends on none. It travels into the tracks.correction_key column
@@ -502,21 +524,33 @@ type Track struct {
 
 	// rowVersion is the version of the row this Track was read from or
 	// written as: the row's indexed_at, which every write of tags_json
-	// advances. Every store reader that returns a Track records the version
-	// it read (GetTrack, LookupTrack, UnenrichedTracks, the list, stream and
-	// page readers, the UPnP baseline), and UpsertTrack and MarkEnriched the
-	// version they wrote. MarkEnriched and the reconciliation writer
-	// (applyReconciledTracks) write back a row they read earlier, whole, so
-	// they write only while the row still has this version (ErrTrackChanged
-	// otherwise), and refuse a Track that has none (hasRowVersion false: one
-	// built by hand, which no read backs). Unexported, never marshaled (the
-	// versionStampOnly shape).
+	// advances but one, the stamp leg's write of a year record alone
+	// (yearRecordOnly), which changes nothing a client reads, is made only
+	// at the version its re-read was merged with, and which MarkEnriched
+	// carries forward. Every store reader that returns a Track records the
+	// version it read (GetTrack, LookupTrack, UnenrichedTracks, the list,
+	// stream and page readers, the UPnP baseline), and UpsertTrack and
+	// MarkEnriched the version they wrote. MarkEnriched and the
+	// reconciliation writer (applyReconciledTracks) write back a row they
+	// read earlier, whole, so they write only while the row still has this
+	// version (ErrTrackChanged otherwise), and refuse a Track that has none
+	// (hasRowVersion false: one built by hand, which no read backs).
+	// Unexported, never marshaled (the versionStampOnly shape).
 	rowVersion    int64
 	hasRowVersion bool
 	// carryFirstIndexedNS is the first-indexed instant an INSERT should
 	// record, in Unix nanoseconds. Zero means the insert uses the store
 	// clock. An update ignores it. Never marshaled.
 	carryFirstIndexedNS int64
+}
+
+// yearRecord is what a row's own tag said its year was when the year pass
+// first moved the row's Year (Track.taggedYear): year is nil for a tag that
+// gave no year, and 0 for the year=0 "tag absent" sentinel, so the record
+// tells each apart from no record at all. Treated as immutable: a change is
+// a new record.
+type yearRecord struct {
+	year *int
 }
 
 // CorrectionFile is a hybrid WavPack track's correction file on the wire

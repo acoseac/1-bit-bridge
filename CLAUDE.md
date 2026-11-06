@@ -13,7 +13,7 @@ Cross-platform Go companion server for the [1-bit](https://apps.apple.com/us/app
 | Topic | Rules file |
 |---|---|
 | The scanner: the walk, the extractors and tag parsers, the deletion and reconciliation passes, the watcher, the store writes | `scanner.md` |
-| The wire contract: the served set and the client format gate (`X-Bridge-Formats`), optional fields, tombstones, events, query encoding, endpoints and mDNS, `PROTOCOL.md`; the wire-type discipline | `wire.md` |
+| The wire contract: the served set, optional fields, tombstones, events, query encoding, endpoints and mDNS, `PROTOCOL.md`; the wire-type discipline | `wire.md` |
 | Lyrics: embedded, sidecar, and the Atlas network tier | `lyrics.md` |
 | Enrichment (MusicBrainz, Cover Art Archive, Deezer, iTunes, the Atlas harvest), artwork, fingerprinting, duplicates | `enrichment.md` |
 | The job pools (upscale, optimize, analysis), renditions and their staleness, the sidecar, variant and artwork reapers | `jobs.md` |

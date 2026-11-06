@@ -5,10 +5,12 @@ paths:
   - "internal/manifest/smartplaylist*.go"
   - "cmd/bridge/smartplaylists*.go"
   - "internal/admin/handlers_smartplaylists*.go"
+  - "internal/api/smartplaylists*.go"
+  - "internal/admin/handlers_player_collections*.go"
 ---
 # Smart mixes
 
-The smart-mix generator: the families and the harmonic engine (`internal/smartplaylist`), the regenerator and its inputs (`internal/smartplaylistgen`), the store queries and the `smart_playlist_served` table (`internal/manifest/smartplaylist*.go`), the serve-side regeneration loop (`cmd/bridge/smartplaylists.go`) and the console's regenerate handlers. `/v1/smart-playlists` serves the cache; its wire rules are in `wire.md`.
+The smart-mix generator: the families and the harmonic engine (`internal/smartplaylist`), the regenerator and its inputs (`internal/smartplaylistgen`), the store queries and the `smart_playlist_served` table (`internal/manifest/smartplaylist*.go`), the serve-side regeneration loop (`cmd/bridge/smartplaylists.go`) and the console's regenerate handlers. `/v1/smart-playlists` serves the cache; its wire rules are in `wire.md`, and the Christmas family's window, which that handler and the console's mix views apply, is here.
 
 The record behind each rule is in `ops/engineering-log.md` (backlog B451, 2026-10-18).
 
@@ -126,3 +128,50 @@ The record behind each rule is in `ops/engineering-log.md` (backlog B451, 2026-1
   **Don't put Heavy Rotation back in front of Daily Mix.** Tests:
   `TestGenerate_DefaultOrderLeadsWithDailyMix`,
   `TestGenerate_AllFamiliesInOrder`.
+- **The Christmas family is the library's Christmas music by its tags,
+  built all year and served from 1 December to 5 January (UTC) alone,
+  decided at response time** (2026-11-06, backlog B750). Its candidates
+  are every served track, not a pool another family reads, so an unheard,
+  unanalyzed album qualifies: `Store.MatchingTrackFeatures` streams
+  `trackFeatureSelect`'s rows through a match the regenerator gives it,
+  with no text filter or `LIMIT` in the SQL (SQLite's `LIKE` folds ASCII
+  case alone and knows no NFKD), and the rows go into `Inputs.Christmas`
+  and into `Inputs.Features`, which `signEnergy` reads. A track qualifies
+  by `MatchChristmas`, pure, over `christmasFold` (NFKD less its marks,
+  lower case, ł ø ß đ æ œ spelled out, punctuation a space, `x-mas` one
+  word): a genre segment equal to a Christmas genre or beginning with the
+  word `christmas` or `xmas` (split on `; `, `;` `/` `,` `\` and the
+  iTunes Store's `:`; `holiday` only paired with a Christmas word), a
+  Christmas word of the album (`noel`, `natale`, `craciun` and `kerst`,
+  names too, not beside an artist holding the word or after a credit, and
+  `natale` not after a birthplace word such as `terre` or `citta`), a
+  carol of `christmasTitles` equal to the title less its version suffix
+  (what follows the rightmost dash of any style; no title another song
+  shares, so no bare `Silent Night`), or one of four title words. The
+  artist's name never qualifies a track, and `jul` and `natal` count only
+  as a genre segment. The floor is 15 emitted tracks and 3 albums or 3
+  artists among the qualifying tracks, the cap 100, 8 an artist before the
+  rest fill in the same order, seeded by the season's year
+  (`season.Year`: 1 to 5 January is the previous December's, and it turns
+  on 6 January, a day nothing is served). It is no
+  discovery shelf and reads no exclusion. `GET /v1/smart-playlists`
+  leaves it out outside `season.InWindow`, read from the server's clock at
+  the request (`Server.clockNow`, which the time-of-day hour reads too),
+  and counts it toward no `refreshedAt`; the console lists it all year,
+  marked `outOfSeason`. **Don't match artist names, don't count a word
+  that is a name too without its guards, don't put in the carol table a
+  title another song shares, don't filter in SQL before matching, don't
+  filter only at generation (a cache built on 5 January would serve it on
+  the 6th, and one built in November would miss 1 December), and don't
+  seed its order by the calendar year.** Tests:
+  `TestMatchChristmasExclusions`,
+  `TestEveryChristmasFixtureThroughTheStoresRead`,
+  `TestMatchingTrackFeaturesHandsEveryServedRowToItsMatch`,
+  `TestRegenerate_AnUnheardUnanalyzedChristmasAlbumMakesTheFamily`,
+  `TestBuildChristmasTheFloorBySpread`,
+  `TestBuildChristmasTheCapSpreadsAndFills`,
+  `TestRegenerate_OneSeasonIsOneOrder`,
+  `TestTheSeasonsYearTurnsOnlyAsAWindowCloses`,
+  `TestTheChristmasFamilyIsServedOnlyInItsWindow`,
+  `TestAChristmasCacheIsServedByTheClockAtTheRequest`,
+  `TestTheConsoleMarksTheChristmasMixOutOfSeason`.

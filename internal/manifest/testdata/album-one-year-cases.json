@@ -1,0 +1,270 @@
+[
+  {
+    "name": "seven tracks of 2011 and five of 1968 take 2011",
+    "tracks": [
+      {"path": "Band/Remastered/01.flac", "album": "Remastered", "year": 2011},
+      {"path": "Band/Remastered/02.flac", "album": "Remastered", "year": 2011},
+      {"path": "Band/Remastered/03.flac", "album": "Remastered", "year": 2011},
+      {"path": "Band/Remastered/04.flac", "album": "Remastered", "year": 2011},
+      {"path": "Band/Remastered/05.flac", "album": "Remastered", "year": 2011},
+      {"path": "Band/Remastered/06.flac", "album": "Remastered", "year": 2011},
+      {"path": "Band/Remastered/07.flac", "album": "Remastered", "year": 2011},
+      {"path": "Band/Remastered/08.flac", "album": "Remastered", "year": 1968},
+      {"path": "Band/Remastered/09.flac", "album": "Remastered", "year": 1968},
+      {"path": "Band/Remastered/10.flac", "album": "Remastered", "year": 1968},
+      {"path": "Band/Remastered/11.flac", "album": "Remastered", "year": 1968},
+      {"path": "Band/Remastered/12.flac", "album": "Remastered", "year": 1968}
+    ],
+    "expected": [2011, 2011, 2011, 2011, 2011, 2011, 2011, 2011, 2011, 2011, 2011, 2011]
+  },
+  {
+    "name": "the most common of three years wins",
+    "tracks": [
+      {"path": "Band/Live/01.flac", "album": "Live", "year": 2019},
+      {"path": "Band/Live/02.flac", "album": "Live", "year": 2019},
+      {"path": "Band/Live/03.flac", "album": "Live", "year": 2019},
+      {"path": "Band/Live/04.flac", "album": "Live", "year": 2021},
+      {"path": "Band/Live/05.flac", "album": "Live", "year": 2021},
+      {"path": "Band/Live/06.flac", "album": "Live", "year": 1997}
+    ],
+    "expected": [2019, 2019, 2019, 2019, 2019, 2019]
+  },
+  {
+    "name": "a two-track tie goes to the larger year",
+    "tracks": [
+      {"path": "Band/Single/01.flac", "album": "Single", "year": 1968},
+      {"path": "Band/Single/02.flac", "album": "Single", "year": 2011}
+    ],
+    "expected": [2011, 2011]
+  },
+  {
+    "name": "every track a different year takes the largest",
+    "tracks": [
+      {"path": "Choir/Julvisor/01.flac", "album": "Julvisor", "year": 1949},
+      {"path": "Choir/Julvisor/02.flac", "album": "Julvisor", "year": 1950},
+      {"path": "Choir/Julvisor/03.flac", "album": "Julvisor", "year": 1951},
+      {"path": "Choir/Julvisor/04.flac", "album": "Julvisor", "year": 1952},
+      {"path": "Choir/Julvisor/05.flac", "album": "Julvisor", "year": 1953},
+      {"path": "Choir/Julvisor/06.flac", "album": "Julvisor", "year": 1954},
+      {"path": "Choir/Julvisor/07.flac", "album": "Julvisor", "year": 1955},
+      {"path": "Choir/Julvisor/08.flac", "album": "Julvisor", "year": 1956},
+      {"path": "Choir/Julvisor/09.flac", "album": "Julvisor", "year": 1957},
+      {"path": "Choir/Julvisor/10.flac", "album": "Julvisor", "year": 1958},
+      {"path": "Choir/Julvisor/11.flac", "album": "Julvisor", "year": 1959},
+      {"path": "Choir/Julvisor/12.flac", "album": "Julvisor", "year": 1960},
+      {"path": "Choir/Julvisor/13.flac", "album": "Julvisor", "year": 1961},
+      {"path": "Choir/Julvisor/14.flac", "album": "Julvisor", "year": 1962}
+    ],
+    "expected": [1962, 1962, 1962, 1962, 1962, 1962, 1962, 1962, 1962, 1962, 1962, 1962, 1962, 1962]
+  },
+  {
+    "name": "three different years take the largest",
+    "tracks": [
+      {"path": "Band/Three/01.flac", "album": "Three", "year": 1965},
+      {"path": "Band/Three/02.flac", "album": "Three", "year": 1970},
+      {"path": "Band/Three/03.flac", "album": "Three", "year": 1975}
+    ],
+    "expected": [1975, 1975, 1975]
+  },
+  {
+    "name": "a typo beside a real year wins the tie: the vote has no ceiling",
+    "tracks": [
+      {"path": "Band/Typo/01.flac", "album": "Typo", "year": 2011},
+      {"path": "Band/Typo/02.flac", "album": "Typo", "year": 9999}
+    ],
+    "expected": [9999, 9999]
+  },
+  {
+    "name": "a composition date beside two recording years",
+    "tracks": [
+      {"path": "Band/Classics/01.flac", "album": "Classics", "year": 2011},
+      {"path": "Band/Classics/02.flac", "album": "Classics", "year": 2011},
+      {"path": "Band/Classics/03.flac", "album": "Classics", "year": 1968},
+      {"path": "Band/Classics/04.flac", "album": "Classics", "year": 1654}
+    ],
+    "expected": [2011, 2011, 2011, 2011]
+  },
+  {
+    "name": "an absent year beside two recording years",
+    "tracks": [
+      {"path": "Band/Absent/01.flac", "album": "Absent", "year": 2011},
+      {"path": "Band/Absent/02.flac", "album": "Absent", "year": 2011},
+      {"path": "Band/Absent/03.flac", "album": "Absent", "year": 1968},
+      {"path": "Band/Absent/04.flac", "album": "Absent", "year": null}
+    ],
+    "expected": [2011, 2011, 2011, 2011]
+  },
+  {
+    "name": "a year of 0 beside two recording years",
+    "tracks": [
+      {"path": "Band/Zero/01.flac", "album": "Zero", "year": 2011},
+      {"path": "Band/Zero/02.flac", "album": "Zero", "year": 2011},
+      {"path": "Band/Zero/03.flac", "album": "Zero", "year": 1968},
+      {"path": "Band/Zero/04.flac", "album": "Zero", "year": 0}
+    ],
+    "expected": [2011, 2011, 2011, 2011]
+  },
+  {
+    "name": "a negative year beside two recording years",
+    "tracks": [
+      {"path": "Band/Negative/01.flac", "album": "Negative", "year": 2011},
+      {"path": "Band/Negative/02.flac", "album": "Negative", "year": 2011},
+      {"path": "Band/Negative/03.flac", "album": "Negative", "year": 1968},
+      {"path": "Band/Negative/04.flac", "album": "Negative", "year": -1}
+    ],
+    "expected": [2011, 2011, 2011, 2011]
+  },
+  {
+    "name": "composition dates do not vote, so two recording years tie",
+    "tracks": [
+      {"path": "Composer/Suite/01.flac", "album": "Suite", "year": 1654},
+      {"path": "Composer/Suite/02.flac", "album": "Suite", "year": 1654},
+      {"path": "Composer/Suite/03.flac", "album": "Suite", "year": 1654},
+      {"path": "Composer/Suite/04.flac", "album": "Suite", "year": 1968},
+      {"path": "Composer/Suite/05.flac", "album": "Suite", "year": 2011}
+    ],
+    "expected": [2011, 2011, 2011, 2011, 2011]
+  },
+  {
+    "name": "one recording year beside more composition dates",
+    "tracks": [
+      {"path": "Cellist/Recital/01.flac", "album": "Recital", "year": 1654},
+      {"path": "Cellist/Recital/02.flac", "album": "Recital", "year": 1654},
+      {"path": "Cellist/Recital/03.flac", "album": "Recital", "year": 1654},
+      {"path": "Cellist/Recital/04.flac", "album": "Recital", "year": 1654},
+      {"path": "Cellist/Recital/05.flac", "album": "Recital", "year": 1654},
+      {"path": "Cellist/Recital/06.flac", "album": "Recital", "year": 1654},
+      {"path": "Cellist/Recital/07.flac", "album": "Recital", "year": 1654},
+      {"path": "Cellist/Recital/08.flac", "album": "Recital", "year": 2022},
+      {"path": "Cellist/Recital/09.flac", "album": "Recital", "year": 2022},
+      {"path": "Cellist/Recital/10.flac", "album": "Recital", "year": 2022},
+      {"path": "Cellist/Recital/11.flac", "album": "Recital", "year": 2022},
+      {"path": "Cellist/Recital/12.flac", "album": "Recital", "year": 2022}
+    ],
+    "expected": [2022, 2022, 2022, 2022, 2022, 2022, 2022, 2022, 2022, 2022, 2022, 2022]
+  },
+  {
+    "name": "1877 is a recording year and votes",
+    "tracks": [
+      {"path": "Band/Edison/01.flac", "album": "Edison", "year": 1877},
+      {"path": "Band/Edison/02.flac", "album": "Edison", "year": 1877},
+      {"path": "Band/Edison/03.flac", "album": "Edison", "year": 2022}
+    ],
+    "expected": [1877, 1877, 1877]
+  },
+  {
+    "name": "1876 is a composition date and does not vote",
+    "tracks": [
+      {"path": "Band/Before/01.flac", "album": "Before", "year": 1876},
+      {"path": "Band/Before/02.flac", "album": "Before", "year": 1876},
+      {"path": "Band/Before/03.flac", "album": "Before", "year": 2022}
+    ],
+    "expected": [2022, 2022, 2022]
+  },
+  {
+    "name": "with no recording year a missing year takes the dominant early year and the early years stay",
+    "tracks": [
+      {"path": "Composer/Partita/01.flac", "album": "Partita", "year": 1654},
+      {"path": "Composer/Partita/02.flac", "album": "Partita", "year": 1685},
+      {"path": "Composer/Partita/03.flac", "album": "Partita", "year": 1685},
+      {"path": "Composer/Partita/04.flac", "album": "Partita", "year": null}
+    ],
+    "expected": [1654, 1685, 1685, 1685]
+  },
+  {
+    "name": "with no year at all the album is left as it is",
+    "tracks": [
+      {"path": "Band/Undated/01.flac", "album": "Undated", "year": null},
+      {"path": "Band/Undated/02.flac", "album": "Undated", "year": 0},
+      {"path": "Band/Undated/03.flac", "album": "Undated", "year": -1}
+    ],
+    "expected": [null, 0, -1]
+  },
+  {
+    "name": "years that agree are left as they are",
+    "tracks": [
+      {"path": "Band/Agreed/01.flac", "album": "Agreed", "year": 2011},
+      {"path": "Band/Agreed/02.flac", "album": "Agreed", "year": 2011},
+      {"path": "Band/Agreed/03.flac", "album": "Agreed", "year": 2011}
+    ],
+    "expected": [2011, 2011, 2011]
+  },
+  {
+    "name": "a lone track keeps its year",
+    "tracks": [
+      {"path": "Band/Lone/01.flac", "album": "Lone", "year": 1968}
+    ],
+    "expected": [1968]
+  },
+  {
+    "name": "a lone track keeps its absent year",
+    "tracks": [
+      {"path": "Band/Lone Absent/01.flac", "album": "Lone Absent", "year": null}
+    ],
+    "expected": [null]
+  },
+  {
+    "name": "an empty album title groups with nothing",
+    "tracks": [
+      {"path": "Band/Loose/01.flac", "album": "", "year": 2011},
+      {"path": "Band/Loose/02.flac", "album": "   ", "year": 1968},
+      {"path": "Band/Loose/03.flac", "album": "", "year": 2001}
+    ],
+    "expected": [2011, 1968, 2001]
+  },
+  {
+    "name": "case and outer whitespace in the title do not split the album",
+    "tracks": [
+      {"path": "Band/Abbey Road/01.flac", "album": "Abbey Road", "year": 1969},
+      {"path": "Band/Abbey Road/02.flac", "album": "abbey road", "year": 1969},
+      {"path": "Band/Abbey Road/03.flac", "album": " ABBEY ROAD ", "year": 2019}
+    ],
+    "expected": [1969, 1969, 1969]
+  },
+  {
+    "name": "two folders holding one title keep their own years",
+    "tracks": [
+      {"path": "Band/Greatest Hits 1990/01.flac", "album": "Greatest Hits", "year": 1990},
+      {"path": "Band/Greatest Hits 1990/02.flac", "album": "Greatest Hits", "year": 1990},
+      {"path": "Band/Greatest Hits 2004/01.flac", "album": "Greatest Hits", "year": 2004},
+      {"path": "Band/Greatest Hits 2004/02.flac", "album": "Greatest Hits", "year": 2004}
+    ],
+    "expected": [1990, 1990, 2004, 2004]
+  },
+  {
+    "name": "two folders holding one title each take their own year",
+    "tracks": [
+      {"path": "Band/Greatest Hits 1990/01.flac", "album": "Greatest Hits", "year": 1990},
+      {"path": "Band/Greatest Hits 1990/02.flac", "album": "Greatest Hits", "year": 1990},
+      {"path": "Band/Greatest Hits 1990/03.flac", "album": "Greatest Hits", "year": 1985},
+      {"path": "Band/Greatest Hits 2004/01.flac", "album": "Greatest Hits", "year": 2004},
+      {"path": "Band/Greatest Hits 2004/02.flac", "album": "Greatest Hits", "year": 2004},
+      {"path": "Band/Greatest Hits 2004/03.flac", "album": "Greatest Hits", "year": 2001}
+    ],
+    "expected": [1990, 1990, 1990, 2004, 2004, 2004]
+  },
+  {
+    "name": "disc folders of one album take a year each",
+    "tracks": [
+      {"path": "Singer/Remixed/CD1/01.flac", "album": "Remixed", "year": 2005},
+      {"path": "Singer/Remixed/CD1/02.flac", "album": "Remixed", "year": 2005},
+      {"path": "Singer/Remixed/CD1/03.flac", "album": "Remixed", "year": 2006},
+      {"path": "Singer/Remixed/CD2/01.flac", "album": "Remixed", "year": 2006},
+      {"path": "Singer/Remixed/CD2/02.flac", "album": "Remixed", "year": 2006},
+      {"path": "Singer/Remixed/CD2/03.flac", "album": "Remixed", "year": 2005}
+    ],
+    "expected": [2005, 2005, 2005, 2006, 2006, 2006]
+  },
+  {
+    "name": "two albums in one folder take a year each",
+    "tracks": [
+      {"path": "Band/Two Albums/01.flac", "album": "First", "year": 1990},
+      {"path": "Band/Two Albums/02.flac", "album": "Second", "year": 2001},
+      {"path": "Band/Two Albums/03.flac", "album": "First", "year": 1991},
+      {"path": "Band/Two Albums/04.flac", "album": "Second", "year": 2002},
+      {"path": "Band/Two Albums/05.flac", "album": "First", "year": 1990},
+      {"path": "Band/Two Albums/06.flac", "album": "Second", "year": 2002}
+    ],
+    "expected": [1990, 2002, 1990, 2002, 1990, 2002]
+  }
+]

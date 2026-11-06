@@ -78436,6 +78436,1119 @@ packages ok and none failed, in 1,744 s; `make build-all`; `go test -race
 "qualification version OK: main..HEAD"; `make docs-check`, ok, and again
 with the round-1 rules patch applied. The tree is clean after.
 
+## 2026-11-06 — B750: a Christmas smart mix, from the library's tags, served 1 December to 5 January
+
+Backlog B750, the owner's request of 2026-11-06: a holiday mix named
+"Christmas" in bridge 0.2.4 (about 28 November), since an additive family
+needs no app release; off for anyone without real Christmas music in the
+library, and gone by itself after the season. Worker b750 on legion0
+(Ubuntu 26.04, linux/amd64, AMD Ryzen 9 6900HX, 16 threads, go1.27.3,
+`GOTOOLCHAIN=local`, `GOPROXY=off`), branch `feat/b750-christmas-mix` from
+main 4880f8a4, the orchestrator's brief, whose design was settled with
+Codex and Argon. Commits: red first 8dc0cd96, the family 664ae4f7, the
+window at response time f23685f5, PROTOCOL.md and the runbook 1c64a552,
+then this record. The rule's bullet in `.claude/rules/smart-mixes.md`, and
+two globs that load it with the handler and the console's mix views, go in
+through a checked patch (`rules-b750.patch`; this worker cannot write
+`.claude/`).
+
+### Why a new input, and red first
+
+Every family's candidates follow a play, a heart or an analysis row
+(`assembleInputs`), so a filter over them could never see the unheard,
+unanalyzed Christmas album the mix is for. The family reads the whole
+served library instead. Red first:
+`TestRegenerate_AnUnheardUnanalyzedChristmasAlbumMakesTheFamily` (a
+16-track album by four performers, `GENRE=Christmas`, no plays, hearts or
+analysis, analysis off) at 8dc0cd96 against main's code: "no christmas
+family ... cached kinds map[]".
+
+### The read and what it costs
+
+`Store.MatchingTrackFeatures` runs `trackFeatureSelect` (so
+`dupe_suppressed = 0`) and hands each row to a match the regenerator gives
+it, keeping only what matches; a read path, no `s.mu`. No text filter and
+no `LIMIT` before the match: SQLite's `LIKE` folds ASCII case alone and
+knows nothing of NFKD. The negative control below put a 30-term `LIKE`
+prefilter in front of the match, and the fixture read lost 35 positive
+fixtures: `Noël Acadien`, `Cantique de Noël`, the genre `Noël`, every
+`Kolędy` and `Crăciun` form, `X-Mas`, `Rock X-Mas`, fullwidth
+`ＣＨＲＩＳＴＭＡＳ` and the fi ligature among them.
+
+Measured with a throwaway probe (a test package in the worker's scratch
+directory, not committed; `…MeasureTheChristmasRead`): 100,000 tracks on
+disk (the worktree's ext4), 1% Christmas by genre, album or title in
+turn, half with a ReplayGain tag, 2,000 analysis rows; medians of 5.
+
+| What | Median |
+|---|---|
+| the read, every row kept | 969 ms |
+| the read, nothing kept | 949 ms |
+| the read with `MatchChristmas` (what `assembleInputs` runs), 1,000 kept | 1.108 s |
+| `MatchChristmas` alone over the 100,000 rows in memory | 142 ms (1.4 µs a row) |
+| a whole `Regenerate`, analysis on, no history (3 families) | 1.717 s |
+| a narrower read (path and the four text tags, no join), the match, then the 1,000 matches hydrated by path | 645 ms |
+
+The same store and a probe that compiles against both trees
+(`…RegenerateOn100k`): a whole `Regenerate` takes 570 ms at main (2
+families) and 1.626 s on the branch (3), so the read adds about 1.06 s a
+regeneration at 100,000 tracks. Acceptable for a pass that runs daily, 120
+s after a start and on the console's Regenerate (synchronous there), so no
+index was proposed and the one-pass read was kept. If a Pi-class host with
+a large library finds it slow, the narrower read is the next step: it
+loses no recall (every served row still reaches the match) and cut the
+read by 42% here, at the cost of a second, chunked query by path and a
+match that sees four fields of a partly filled row. Not an index: an index
+on a computed verdict would need a migration and an `ExtractorVersion`
+bump whenever a list changes.
+
+### The match
+
+`MatchChristmas(title, artist, album, genre)`, pure, in
+`internal/smartplaylist/christmas.go`, over `christmasFold`: NFKD with
+its marks dropped, lower case, `ł ø ß đ æ œ` spelled out, every rune that
+is not a letter or a digit a space. Rules in order, the first that holds:
+a genre segment equal to a Christmas genre (or two words pairing `holiday`
+with one), a Christmas word of the album (`noel` not beside an artist
+holding `noel` as a word or after a credit), a carol of `christmasTitles`
+equal to the title less its trailing version suffixes, one of the title
+words. Comparison only: never stored, hashed, keyed or put in SQL, and not
+unified with the other folds (`matchfold.go` lists them).
+
+What this adds to the brief's lists, each a spelling or a form of what the
+lists name:
+
+- A colon splits a genre too: the iTunes Store writes its genres "Christmas:
+  Pop", "Christmas: Classical", "Holiday: Other". Without it every such
+  file missed by genre.
+- `x-mas` with a hyphen or a dash, inside a word too (`Rock-X-Mas`), is
+  the word `xmas`; with a space it stays two words, so Spanish `X Más`
+  (ten, "more") is not Christmas.
+- An album or title word beginning `christmas` counts as one beginning
+  `weihnacht` does: `Christmastime`, `Christmastide`.
+- `navidades`, the plural, beside `navidad` (album and title).
+- `featuring` beside `feat`, `ft` and `with` before `noel`.
+- The carol table's second spellings: Silent Night, Holy Night; Stille
+  Nacht, heilige Nacht; Oh Holy Night; Oh Come All Ye Faithful; Oh Little
+  Town of Bethlehem; God Rest You Merry Gentlemen; The First Nowell; We
+  Three Kings of Orient Are; Deck the Hall; Santa Claus Is Comin' to Town;
+  Vom Himmel hoch, da komm ich her.
+- A version suffix after ` - ` (or an en or em dash) is one holding a
+  version word (live, vivo, remaster, remastered, instrumental, acoustic,
+  unplugged, version, edit, mix, remix, mono, stereo, demo, take, single,
+  bonus, reprise, karaoke, cappella, acapella, recorded, recording,
+  session, sessions, from, and the credits) or only digits (a year), so
+  `Silent Night - Deadly Night` is not Silent Night. Up to 8 suffixes come
+  off, so a title of a thousand parentheticals costs a few scans.
+
+What the lists, run against the fixtures, do not catch or catch
+unexpectedly, reported and left as the design has it: a genre segment that
+names Christmas inside it (`Christmas Pop`, written with a space) is no
+segment of the list, while the iTunes form `Christmas: Pop` is; `Jingle
+Bell Rock`, `Santa Baby`, `Winter Wonderland` and the other songs outside
+the table and without a title word need their album or genre; `Crăciun
+fericit` as a title misses (`craciun` is a surname, so never a title
+word); a singer named Noël's self-titled album `Noël` misses (the artist
+holds `noel`); a title's parenthetical counts for the title words, so
+`Hallelujah (Christmas Version)` qualifies; and the album words leave out
+`villancicos`, Dutch `kerst`, Finnish `joulu` and Danish and Norwegian
+`julesange` and `julesanger`, which only a genre then catches. A Cyrillic
+`С` in `Сhristmas` is no C, which is right.
+
+`FuzzMatchChristmas` (no panic, the same answer twice, an idempotent fold,
+the artist deciding nothing unless the album holds `noel`, ASCII case
+deciding nothing) found within two seconds that `norm.NFKD` leaves a
+letter composed after an invalid UTF-8 byte: `"\xf3Ǚ"` folded to `ǚ` once
+and to `u` the next time. Invalid UTF-8 is a space before NFKD now (a row
+read back from `tags_json` is valid already), the input is in the corpus,
+and three more minutes of fuzzing (23.6 million inputs) found nothing.
+
+### The floor, the cap, the order, the place
+
+The floor is two rules: 15 emitted tracks (`MinChristmas`), and 3
+distinct albums or 3 distinct artists among the qualifying tracks, each
+named as the diversity caps name them, an empty one naming nothing; the
+artist is the track's, so a Various Artists compilation counts by its
+performers, and a single album by a single artist, a 40-track box set
+included, gets no family. The spread is judged on the qualifying tracks
+rather than the emitted ones, so the cap can never undo the floor. The cap
+(`MaxChristmasItems` 100, `ChristmasPerArtistCap` 8) walks the seeded
+order taking 8 an artist, an empty artist one artist, then fills from the
+tracks it passed over in the same order, so the family holds
+min(qualifying, 100). A zero option is the production value.
+
+The order is the season's: `Inputs.ChristmasSeed` is `SeedFromSeason`
+of `season.Year`, which the regenerator computes, and
+`shuffleFeaturesBySeason` is `shuffleFeaturesByWeek`'s sibling.
+`season.Year` names a season by the December that opens it: 1 December
+through 5 January is that December's year, and from 6 January the coming
+December's. The brief said "in January it's the previous year"; every
+instant the family is served gets the same year either way, and with the
+rollover on 6 January a cache built before the window already holds the
+order the window opens with.
+
+Christmas sits after Favorites and before Drive Mix. On a bridge with no
+history (the demo's) nothing comes before it, so it is the first shelf and
+the app's hero in December; where Daily Mix exists, Daily Mix leads. It is
+no `DiscoveryShelf`, so `recordDiscoveryServed` writes none of its items
+to `smart_playlist_served`, and it calls no `discoveryExclusions`, which
+does not include its items: what the discovery shelves showed takes
+nothing from it, and they may hold its tracks. Its rows go into
+`Inputs.Features` as Favorites' do, so `signEnergy` finds a tag's
+ReplayGain and rate with analysis off; a track with no loudness is the
+midpoint.
+
+### The window, at response time
+
+`season.InWindow`, in a leaf package both layers import (the API imports
+no engine and mirrors the kind as `christmasKind`), is 1 December 00:00:00
+through 5 January 23:59:59.999999999, read in UTC from the instant itself.
+`GET /v1/smart-playlists` reads one injected clock (`Server.clockNow`,
+`time.Now` in production) for the window and the time-of-day hour, and
+skips the family before anything is counted, so the top-level
+`refreshedAt` moves with what is served alone. The family is generated all
+year: a cache built on 20 November serves it at 1 December 00:00 UTC, and
+one built on 5 January does not on the 6th
+(`TestAChristmasCacheIsServedByTheClockAtTheRequest`). A demo bridge
+behaves the same.
+
+Every reader of the cache, out of season:
+
+- `GET /v1/smart-playlists`: leaves it out.
+- `assembleInputs`' hysteresis map (`PreviouslyVisible`): holds `christmas`
+  all year; only On Repeat reads the map, so nothing changes.
+- The console's grid and detail (`GET /api/player/mixes`,
+  `/api/player/mixes/{slug}`) and the inspection list (`GET
+  /api/smart-playlists`): listed and marked `outOfSeason` by
+  `smartMixOutOfSeason`, over the same predicate and a per-server test
+  clock; the grid draws a chip and the detail a line saying when the app
+  shows it. Playback in the console, Regenerate, a cover and Save as
+  playlist all work out of season; a saved copy is an ordinary playlist,
+  which devices then see through the playlist backup all year.
+- No CLI, export or DLNA reader. `bridge backup` copies the database and
+  the cache with it; a restored cache is filtered the same way at response
+  time.
+
+What the bridge can promise, as PROTOCOL.md now says: it stops serving the
+family on 6 January; a client offline or inside its own refresh throttle
+keeps what it last fetched until its next successful refresh, and nothing
+in the family's shape tells a client when it ends. The iOS side was not
+read here: the app's clone is not on legion0 (no `~/dev`, no match for
+`SmartPlaylistService.swift` or `HomeView.swift` under the home
+directory) and `gh` and curl are refused. The brief's reading of the
+client (no key on `refreshedAt`, a 30-minute persisted throttle, an
+unknown kind rendered generically, the per-mix hide by slug) is therefore
+unconfirmed by this worker.
+
+### The demo
+
+The regenerator runs on a demo bridge as on any other (`smartPlaylists`
+defaults on, and nothing in serve gates it on demo mode), and
+`assembleInputs` short-circuits nothing before the new read with analysis
+or history off. On the demo's shape, three Christmas albums tagged
+`GENRE=Christmas` beside keyed classical albums, no history and no hearts,
+the family holds every track of the three, 8 by each performer ahead of
+the rest, and is the first shelf (`TestRegenerate_TheDemosShape`, 30
+tracks by two performers). The runbook's demo section says what the tags
+need.
+
+### Negative controls
+
+Each mutation was applied exact-once, each listed test run alone on a
+fresh test binary, the bytes restored from memory; every listed test
+passed unmutated first, and every one went red under its mutation; the
+tree was clean after.
+
+| Mutation | Red |
+|---|---|
+| the artist read as an album | `TestMatchChristmasExclusions` (Noel Gallagher), `TestEveryChristmasFixtureThroughTheStoresRead` |
+| bare `holiday` a Christmas genre | `TestMatchChristmasExclusions`, `TestNoChristmasMusicIsNoChristmasFamilyInSeason` |
+| the window read at generation only (no handler filter; no family built outside the window) | `TestAChristmasCacheIsServedByTheClockAtTheRequest`, `TestTheChristmasFamilyIsServedOnlyInItsWindow` |
+| a suppressed duplicate counted (the read without `dupe_suppressed = 0`) | `TestRegenerate_ChristmasCountsNoSuppressedDuplicate`, `TestEveryChristmasFixtureThroughTheStoresRead`, `TestMatchingTrackFeaturesHandsEveryServedRowToItsMatch` |
+| a `LIKE` filter before the match | `TestEveryChristmasFixtureThroughTheStoresRead` (35 positives lost, Noël among them), `TestMatchingTrackFeaturesHandsEveryServedRowToItsMatch` |
+| the calendar year as the seed | `TestRegenerate_OneSeasonIsOneOrder` (31 December to 1 January reshuffled) |
+| `season.Year` the calendar's | `TestTheSeasonsYearIsTheDecemberThatOpensIt`, `TestOneWindowIsOneSeason`, `TestRegenerate_OneSeasonIsOneOrder` |
+| the rows kept out of `Features` | `TestRegenerate_ChristmasEnergyFromItsTagsWithAnalysisOff`, `TestRegenerate_ChristmasEnergyFromAnalysis` |
+| christmas a discovery shelf | `TestChristmasStaysOutOfTheDiscoveryExclusion`, `TestRegenerate_ChristmasRecordsNothingServed` |
+| christmas fed into the discovery exclusion | `TestChristmasStaysOutOfTheDiscoveryExclusion` (Wind Down relaxed) |
+| invalid UTF-8 handed to NFKD | `FuzzMatchChristmas` (its corpus) |
+| no spread floor | `TestBuildChristmasTheFloorBySpread`, `TestBuildChristmasTheFourLibraries` |
+| no per-artist cap | `TestBuildChristmasTheCapSpreadsAndFills`, `TestRegenerate_TheDemosShape` |
+| the time-of-day hour from the wall clock | `TestTheChristmasFamilyIsServedOnlyInItsWindow` |
+| the console never marking it | `TestTheConsoleMarksTheChristmasMixOutOfSeason` |
+| `x-mas` not joined | `TestChristmasFold`, `TestMatchChristmasByEachRule` |
+| `noel` after a credit counted | `TestMatchChristmasExclusions` |
+| `noel` beside an artist named Noel counted | `TestMatchChristmasExclusions` |
+| a carol matched by its beginning | `TestMatchChristmasExclusions` (Silent Nightmare) |
+| `jul` counted in an album | `TestMatchChristmasExclusions` |
+| Christmas placed ahead of Favorites | `TestGenerateChristmasSitsAfterFavoritesAndBeforeDriveMix` |
+
+### Tests
+
+`internal/smartplaylist/season`: `TestTheWindowIsTheFirstOfDecemberToTheFifthOfJanuaryInUTC`,
+`TestTheSeasonsYearIsTheDecemberThatOpensIt`, `TestOneWindowIsOneSeason`.
+`internal/smartplaylist`: `TestChristmasFold`, `TestMatchChristmasByEachRule`,
+`TestEveryCarolInTheTableQualifiesByItsTitle`, `TestMatchChristmasExclusions`,
+`TestMatchChristmasAcrossScriptsAndForms`, `TestMatchChristmasOnAVeryLongTitle`,
+`FuzzMatchChristmas`, `TestEveryChristmasFixtureThroughTheStoresRead` (every
+fixture of the match's tables through the store's real read too),
+`TestBuildChristmasTheFloorByEmittedTracks`, `TestBuildChristmasTheFloorBySpread`,
+`TestBuildChristmasTheFourLibraries`, `TestBuildChristmasTheCapSpreadsAndFills`,
+`TestBuildChristmasOrdersBySeasonSeed`, `TestBuildChristmasNeedsNoHistoryHeartsOrAnalysis`,
+`TestGenerateChristmasSitsAfterFavoritesAndBeforeDriveMix`,
+`TestChristmasStaysOutOfTheDiscoveryExclusion`, `TestChristmasEnergyAndRateFromItsOwnTags`.
+`internal/manifest`: `TestMatchingTrackFeaturesHandsEveryServedRowToItsMatch`.
+`internal/smartplaylistgen`: `TestRegenerate_AnUnheardUnanalyzedChristmasAlbumMakesTheFamily`,
+`TestRegenerate_ChristmasCountsNoSuppressedDuplicate`,
+`TestRegenerate_ChristmasEnergyFromItsTagsWithAnalysisOff`,
+`TestRegenerate_ChristmasEnergyFromAnalysis`, `TestRegenerate_NoChristmasMusicNoFamily`,
+`TestRegenerate_OneSeasonIsOneOrder`, `TestRegenerate_ChristmasRecordsNothingServed`,
+`TestRegenerate_TheDemosShape`.
+`internal/api`: `TestTheChristmasFamilyIsServedOnlyInItsWindow`,
+`TestAChristmasCacheIsServedByTheClockAtTheRequest`,
+`TestAnUnheardLibraryServesTheChristmasFamilyInSeasonAlone` (no history,
+analysis off, through `Regenerate` and the real handler),
+`TestNoChristmasMusicIsNoChristmasFamilyInSeason`, `TestTheAPIsChristmasKindIsTheEngines`.
+`internal/admin`: `TestTheConsoleMarksTheChristmasMixOutOfSeason`,
+`TestTheMixViewsWordTheOutOfSeasonMark`, and
+`TestThePlayersMixGridDrawsTheOutOfSeasonChip` (under node, which legion0
+lacks, so it ran on no host here).
+
+### Trade-offs
+
+- Recall against precision: genres match a whole segment and titles a
+  closed carol table and four words, so some Christmas music misses (the
+  surprises above) and no artist's name, travel playlist or Hanukkah
+  album gets in.
+- The whole served library is read every regeneration (about 1.1 s at
+  100,000 tracks) rather than a stored verdict, which would need a
+  migration and an `ExtractorVersion` bump whenever a list changes.
+- The window is filtered at response time, so the cache holds the family
+  all year and a stale cache cannot prolong or delay it; the console shows
+  it marked rather than hidden.
+- The season's year turns on 6 January rather than with the calendar.
+- The spread floor is judged on the qualifying tracks, not the emitted
+  ones, so the cap cannot undo it.
+
+## 2026-11-06 — B750 round 2: natale and craciun guarded, bare Silent Night out, the rightmost dash
+
+A review of the entry above raised three points about the match and decided
+the word gaps it reported. Each point was confirmed red first: aac1d9d7's
+fixtures failed against 1289bc17's matcher; the fix is 5c680a7f. The rule's
+wording goes in through `rules-b750-r2.patch`, made against
+`smart-mixes.md` as `rules-b750.patch` left it on the pushed branch.
+
+1. **`natale` and `craciun` in an album had no guard.** `christmasAlbum`
+   returned on any `christmasAlbumWords` hit before `noel`'s credit and
+   artist checks, so Terre, Ville, Terra, Città, Paese and Casa natale
+   (French and Italian for a birthplace), `Sessions feat. Natale`, `Johnny
+   Natale Live` by Johnny Natale, `Mihai Crăciun` by Mihai Crăciun and `Live
+   with Crăciun` all answered album, where the same `noel` fixtures were
+   refused. `natale`, `craciun` and the new `kerst` now share `noel`'s branch
+   (`guardedAlbumWords`: no credit word before it, and an artist not holding
+   it), and `natale` is refused right after `terre`, `terra`, `ville`,
+   `citta`, `paese` or `casa` (`birthplaceWords`). `Natale con Noi`, `Crăciun
+   fericit`, `Colinde de Crăciun` and `Babbo Natale` stay positive.
+2. **Bare `Silent Night` admitted another song**: Bon Jovi's `Silent Night`,
+   on *7800° Fahrenheit*, answered title. The table's criterion is a title
+   no other song shares, which is why `Joy to the World` is not on it, and
+   bare `Silent Night` leaves it the same way. `Silent Night, Holy Night`,
+   `Stille Nacht` (and its first line whole), `Cicha noc` and `Stilla natt`
+   stay, and the carol on a Christmas album or in a Christmas genre
+   qualifies by those rules. The other 31 rows were checked against the
+   same criterion and kept, from what is known of them rather than a
+   catalogue (this host has no network). Rule 3's fixtures moved to `O Holy
+   Night`.
+3. **Mixed dash styles bypassed the title exclusion.** `stripTitleSuffix`
+   tried the styles in turn, the ASCII hyphen first, so in `Silent Night -
+   Deadly Night – Live` the hyphen's suffix, `Deadly Night – Live`, held
+   `live` and came off whole. The suffix is now what follows the rightmost
+   dash of any style (`titleDashes`). `O Holy Night - Deadly Night – Live` and
+   its em-dash twin are refused; `O Holy Night – Live - Remastered` and `O
+   Holy Night - Live – Remastered`, a version behind each dash, qualify.
+
+**The word gaps, as decided.** `villancicos`, `joulu`, `julesange` and
+`julesanger` are album words, and `kerst` a guarded one (Dutch for
+Christmas, and a rare surname). A genre segment whose first word is
+`christmas` or `xmas` counts (`Christmas Pop`, `Xmas Rock`, `X-Mas Pop`);
+bare `Pop`, and `Pop Christmas`, do not. `Jingle Bell Rock`, `Santa Baby`
+and `Winter Wonderland` stay out: a Christmas album or genre brings them
+in.
+
+**The season's year turns on 6 January**, the first day after a window, when
+nothing is served, so the seed's move there is harmless, and it moves
+nothing inside a season: `TestTheSeasonsYearTurnsOnlyAsAWindowCloses` walks
+every hour from November 2025 to February 2028 and finds the year turning
+three times, each at 6 January 00:00 UTC, with the hour before it a
+window's last.
+
+`FuzzMatchChristmas`'s artist property allows the artist to decide where
+the album holds any guarded word, not `noel` alone; two more minutes of
+fuzzing (3.6 million inputs) found nothing.
+
+### Controls, predicted by name
+
+Each mutation exact-once on a fresh test binary, the bytes restored from
+memory, every named test passing unmutated first; all eight went as
+predicted, and the tree was clean after.
+
+| Mutation | Predicted red | Predicted green |
+|---|---|---|
+| `natale` and `craciun` back among the unguarded album words | `TestMatchChristmasExclusions`, `TestEveryChristmasFixtureThroughTheStoresRead` | `TestMatchChristmasByEachRule` |
+| `natale` counted after a birthplace word | the same two | `TestMatchChristmasByEachRule` |
+| the artist guard for `noel` alone | the same two | `TestMatchChristmasByEachRule` |
+| the credit guard for `noel` alone | the same two | `TestMatchChristmasByEachRule` |
+| the dash styles taken in turn (round 1's loop) | the same two | `TestMatchChristmasByEachRule` (its mixed-dash titles qualify under the old loop as well) |
+| bare `Silent Night` back in the table | the same two (Bon Jovi) | `TestMatchChristmasByEachRule` |
+| no genre by its first word | `TestMatchChristmasByEachRule`, `TestEveryChristmasFixtureThroughTheStoresRead` | `TestMatchChristmasExclusions` |
+| the season's year turning on 1 February | `TestTheSeasonsYearTurnsOnlyAsAWindowCloses`, `TestTheSeasonsYearIsTheDecemberThatOpensIt` | `TestOneWindowIsOneSeason`, `TestTheWindowIsTheFirstOfDecemberToTheFifthOfJanuaryInUTC` |
+
+Under round 1's dash loop, `Silent Night - Deadly Night – Live` stays
+refused only because bare `Silent Night` has left the table; its `O Holy
+Night` twin is the fixture that pins the dash.
+
+## 2026-11-06 — B756: one physical album has one year
+
+Backlog B756, the owner's report of 2026-11-06: in Albums, one album showed
+as several. Worker b756b on legion0 (Ubuntu 26.04, linux/amd64, go1.27.3,
+`GOTOOLCHAIN=local`, `GOPROXY=off`), branch `fix/b756-album-one-year` from
+main 4880f8a4, the orchestrator's brief. Commits: the fix with its tests
+8094dc89, the rule's long form in `ops/History-rules-scanner.md` 127d9888,
+then this record. The rule's line in `.claude/rules/scanner.md` goes in
+through a checked patch (`rules-b756b.patch`; this worker cannot write
+`.claude/`).
+
+### What the owner hit
+
+The app's album identity is `normalize(albumArtist)|normalize(album)|year`,
+and `reconcileYears` filled only a missing year: a year of 1877 or later
+stayed as tagged ("1974 beside 2022 stays a split", B342's entry). Measured
+by the orchestrator on the owner's library, 20,916 tracks in 1,991 album
+folders: 18 folders hold two or more recording years under one album title,
+and every one is a single album shown as two or more: The Beatles
+(Remastered), 1968 and 2011; Buena Vista Social Club, 1997 and 2021; Billie
+Holiday's Body and Soul, 1957 and 2011; O, Yeah! Ultimate Aerosmith Hits,
+2002 and 2006; Work From Home with Blossom Dearie, 100 tracks, 2009 and
+2020. Each has one album artist, and 17 of the 18 one MusicBrainz release.
+Separately, 32 titles exist in two or more folders with different years:
+real editions, which must stay apart. Of 103 disc-folder albums, 1 (Nina
+Simone's Remixed) has discs whose dominant years differ.
+
+### The rule
+
+In a group `groupByAlbumKey` defines (one directory, one album title
+trimmed and lower-cased), when the group has a recording year, every track
+whose year is not the dominant one takes it: a missing year (nil, 0 or
+negative), a composition date, and a recording year the vote did not pick.
+The vote is `yearFill`'s, unchanged: `dominantYear` over the recording years
+(`yearsThatVote`), the most common, a tie going to the larger. A group with
+no recording year behaves as before: its missing years take the dominant
+present year and its early years stay. `yearTakesFill(y, dominant,
+recording)` is the one changed predicate (`recording && *y != dominant`
+where it was `fillEarly && *y < firstPhonographYear`), and
+`albumYearFixes` (was `fillMissingYears`) returns only the tracks whose year
+moves: 7 × 2011 beside 5 × 1968 is exactly 5 targets, so the 7 get no
+`indexed_at` bump, no revision and no delta entry. No ceiling: 2011 beside
+9999 is 9999, the vote as it is (the owner's library holds no year past
+2027). Extraction is unchanged and `ExtractorVersion` stays 31;
+`ProtocolVersion` stays 1, and `PROTOCOL.md` is unchanged: it speaks of the
+year as a track's field, as the favorites' key and as the DSD album gain's
+grouping ("resolved from the manifest the way the app resolves them"), all
+still true, and never of the reconciliation.
+
+The shared truth table is `internal/manifest/testdata/album-one-year-cases.json`
+(25 cases: two years, three, a two-track tie, every track a different year
+(the demo's old Julvisor shape, 1949 to 1962, and 1965/1970/1975), the typo,
+a composition date, nil, 0 and a negative year beside recording years, the
+1876/1877 boundary in the vote, a group with no recording year, none at
+all, agreeing years, lone tracks, an empty title, case and outer
+whitespace, two folders holding one title with and without inner
+disagreement, disc folders, two albums in one folder).
+`TestAnAlbumTakesOneYear` reads it with unknown fields refused, and checks
+each track's year and that the pass returns exactly the tracks whose year
+moves. The iOS app's mirror (`LibraryCompositionYears`, for its SMB and
+on-device sources) comes as a separate PR from the orchestrator with a
+byte-identical copy. The group key trims and lower-cases only (an inner
+double space is another album); the table holds no such case, so it binds
+neither side there.
+
+The existing tests that pinned the old rule were changed, not added to:
+`TestReconcileYears`' "present-but-different year LEFT ALONE" and "fills
+missing AND leaves present-different alone" (now the minority year moves),
+its tie case (the 2002 takes 2003 too), and
+`TestReconcileYearsTreatsACompositionDateAsMissing`'s two-plausible-years,
+two-recording-years and recording-year-tie (the minority recording years
+move); its two boundary cases now pin who votes (two 1876s beside one 2022
+are 2022, two 1877s beside one 2022 are 1877). The routed-row guard
+(`TestReconciliationPasses_SpareUPnPRoutedRows`) gained a minority recording
+year on both albums: the filesystem one moves, the routed one stays 2001 (a
+rewritten routed year would differ at the next UPnP walk, which re-upserts
+and resets `enriched_at`: the #369 loop).
+
+### The year pass runs again after the MBID fill
+
+`reconcileYearsByMBID` stays fill-only and runs after the directory pass, so
+two yearless tracks of one folder with different release ids can borrow
+different years (1990 and 2000): on main that split never healed, since the
+pass left a present recording year alone, and with the new rule it would
+heal at the next scan's year pass. `yearAfterMBIDStep` runs `reconcileYears`
+again right after the MBID step, in `reconcileSteps`, so the tail and the
+held settlement (`runReconcileStepsInMemory`) both converge in one scan
+(`TestScanner_StraysOfOneFolderThatBorrowDifferentYearsTakeOneInOneScan`,
+whose second half is a version-stale re-read of the two that only stamps).
+It changes nothing in a group the MBID fill did not touch: the first run
+leaves every group as the pass would. Moving the MBID step before the
+directory pass instead was rejected: it fills a folder's missing years from
+other folders' votes before the folder's own, so a folder holding one track
+of 2011 and two yearless tracks of a release whose other folder holds five
+of 1968 would have the two filled 1968 first, and the directory pass would
+then give the folder 1968 over its own 2011: a vote across a directory.
+Cost, measured on legion0 with a throwaway test
+(not committed) over 21,901 synthetic rows in 1,991 folders: every step costs
+about 110 ms, 108 ms of it the stream of the library and 4.5 ms the decision;
+the in-memory replay of all six steps 16 to 18 ms. One more stream per full
+scan (every 6 h by default) is no real cost. The labels and the cancel test's
+list of passes (`reconciliationMessages`) carry the second run as
+"year reconciliation (after mbid)".
+
+### The residuals, named
+
+- **The vote read stored rows: no longer a residual, replaced in round 2**
+  (the record below). Round 1's vote read the database's years
+  (`streamReconcileTargets`), so after 12 × 2011 was stored, retagging 3
+  files to 1968 voted 9 to 3 and the 3 were written back, though a fresh
+  index sees 8 × 1968 and 4 × 2011 and gives 1968; an album moved only when
+  the files a scan re-read outvoted its stored year, or at an
+  ExtractorVersion bump. The review showed the same history deciding an
+  album whose majority was deleted, and one retagged across two scans. Each
+  row now votes what its tag said, through the year pass's record
+  (`TestScanner_ARetagOfSomeFilesIsJudgedOnTheTags`, round 1's test of this
+  residual, renamed and turned around;
+  `TestScanner_ATagEditThatOutvotesTheStoredYearMovesTheAlbum`).
+- **A subtree scan restores a changed file's own year until the next full
+  scan.** A changed file takes the ordinary upsert, and
+  `settleSubtreeHeldReconciles` runs no pass over it, so a watcher scan
+  stores a minority file's 1968 until the next full scan, at most
+  `ScanIntervalSec` (6 h by default) or an operator's scan, as the album-title,
+  album-artist and missing-year fills always waited
+  (`TestScanner_ASubtreeScanOfAChangedFileSplitsItsAlbumUntilTheNextFullScan`).
+  Healing it there is a small change in code (the steps over the subtree's
+  groups) and was rejected for what it does: a tagger that rewrites an album
+  one file at a time, each followed by a watcher scan, would have each edit
+  voted back by the rows the retag had not reached, so the album would never
+  move. Without that vote the rows follow the files and the next full scan
+  finds the new year
+  (`TestScanner_AnAlbumRetaggedOneSubtreeScanAtATimeMovesAtTheNextFullScan`;
+  control (f) below runs the year pass in the subtree tail and turns it red).
+- **Disc folders.** An album in CD1 and CD2 folders takes a year per folder,
+  and the fill-only MBID pass does not join them: 1 of the owner's 103
+  disc-folder albums (`TestScanner_DiscFoldersOfOneReleaseKeepAYearEach`,
+  three tracks a disc sharing one release id).
+- **Past the hold limit.** `maxHeldReconciles` (10,000) counts only the
+  re-reads that differ from their rows in the four fields (`mayHoldAnother`
+  is asked after `reconciledFieldsDiffer`), not the library's 20,916 rows;
+  the owner's 18 groups' minority tracks are far below it. Past it a re-read
+  of a rewritten row is written as its file reads (its enrichment
+  re-queued) and the tail gives it the album's year again: one churn per
+  ExtractorVersion bump, accepted as B188 accepted it, and nothing is
+  re-queued (`TestScanner_ReReadsOfAnAlbumGivenOneYearPastTheHoldLimitSettleInOneScan`:
+  limit 2, five differing re-reads, three moved, the scan after moves
+  nothing). In a subtree scan past the limit the same rows keep the file's
+  year until the next full scan.
+
+### The held settlement, proved
+
+An unchanged second scan takes the skip gate, and a changed file is not a
+version-stale re-read, so the only way in is a stale `extractor_version`
+with size and mtime kept (`rewindAll`). Through a full scan and a subtree
+scan of the album: the five tagged 1968 differ from their rows and are held,
+judged with every held re-read in place, and stamped; the year, `indexed_at`
+and `enriched_at` stay, `extractor_version` advances, and no pass writes a
+row after the settlement (`beforeApplyReconciledHookForTests` sees none):
+`TestScanner_AVersionStaleReReadOfAnAlbumGivenOneYearOnlyStamps`.
+
+### Rows already indexed, and the release upgrade
+
+No ExtractorVersion bump: `Scan`'s tail streams every non-routed row
+(`streamReconcileTargets`) and the year pass rewrites the stored minority
+years at the first full scan after the upgrade
+(`TestScanner_AnAlbumIndexedBeforeTheRuleTakesOneYearAtTheNextFullScan`:
+the five rows set back to 1968 as main stored them; one scan; the delta from
+before it holds exactly the five, at 2011; `enriched_at` and
+`extractor_version` as they were). That scan comes at serve's start:
+`RunPeriodic` runs an initial full scan before its first wait
+(`cmd/bridge/main.go`'s `scanner.RunPeriodic`), so a release upgrade, which
+restarts serve, rewrites them within that scan's tail. Each rewritten row
+moves once (`applyReconciledTracks`: `indexed_at` through
+`indexedAtAdvanceSQL`, `enriched_at` untouched), so a paired device's next
+delta carries it, and the scan ends with one `library.changed`.
+
+### Duplicates
+
+`dupes.KeyFor` leaves the directory out (`clientkey.go`'s `AlbumIDOf`:
+album artist, album, year), so a minority track that takes its album's year
+can now share its key with another folder's copy, as two same-year copies
+always have. Through the real stamping pass (`SetDupePolicy` highest
+quality, the scan's deferred restamp) and the real delta (`BuildManifest`
+since a cursor taken before the scan), from a store set to what main left
+(the five at 1968, restamped):
+`TestScanner_AnotherFoldersCopyOfARewrittenTrackIsSuppressedNotLost`. With
+the rewritten copy outranking (equal size, the shorter path), the five
+rewritten rows are the delta's tracks and the other folder's five copies its
+deletions; with the other folder's copy outranking (a longer tag, so the
+larger file), the delta holds no track and the five rewritten rows are its
+deletions. Either way every one of the twelve titles is served exactly once,
+at 2011, and the store keeps all 24 rows.
+
+### What else reads the year
+
+Surveyed by a read-only agent and checked at the sites named here:
+
+- `/v1/manifest` sends the stored `tags_json` year; a rewritten track that
+  stays served reaches a delta client by its `indexed_at`, as every fill
+  does, and the app regroups it under its one album identity.
+- `catalog_refs.go` (`COALESCE(json_extract(tags_json, '$.year'), 0)`) is a
+  stream, never a stored copy. It feeds the console's catalog
+  (`internal/librarycat`), whose album id hashes `dupes.AlbumIDOf`: the
+  split album becomes one, the 1968 album's id goes away (a browser link to
+  it, or a queue entry's `albumId`, answers 404 `not_found`), and the
+  catalog is rebuilt after the scan (the post-scan nudge invalidates it,
+  `cmd/bridge/player_wiring.go`). It also
+  feeds the DSD album gain (`internal/albumgain`), whose album is the same
+  identity: new renders guard the whole album, and a rendition rendered for
+  one half keeps its baked gain until it is rendered again, which the album
+  gain plan accepts ("existing renditions keep theirs until deliberately
+  re-rendered", D3); a render never clips, since each also guards its own
+  peak.
+- `dupe_refs.go` reads `$.year` into `dupes.Row`, the duplicates above.
+- DLNA serves a track's year as its item's `dc:date`, display only; it has
+  no year container and its update ids are static, so a renderer's cache
+  shows the old date until it browses again.
+- The console's player shows an album's year (the catalog's), never a
+  track's (`playerTrackDTO` has none).
+- Not keyed on year: the enricher (its queries and caches carry no year,
+  and `enriched_at` is untouched, so nothing is re-enriched), the Atlas
+  harvest (MBIDs only), the smart mixes, the FTS index (its update trigger
+  compares the path, title, artist and album only), SACD virtual rows (one
+  TOC year a disc, in a folder of their own), and the UPnP-routed rows
+  (excluded from every pass).
+- **The per-track year is lost from the row**: a minority track's own
+  tagged year is no longer stored, so what a client shows as the track's
+  year is the album's. `OriginalYear` is untouched (no pass writes it). Which
+  of the two years each screen of the app shows was not readable here: the
+  iOS repo is not on this host (owed to the mirror PR).
+
+### Favorites
+
+`favorite_albums (album_artist, album, year)` and its tombstones are the
+app's document: the pass writes nothing there
+(`TestTheYearPassLeavesTheFavoriteAlbumsAsTheyAre`: both halves hearted,
+the document, its revision and its epoch field for field the same after the
+rewrite). The intended outcome is the app's re-key, which carries the heart
+to the album's one year and writes the new tuple back at its next favorites
+sync (`library-carries.md` in the iOS repo; not changed here). Both split
+albums hearted leaves two tuples until that write-back, and the old year's
+tuple names no album meanwhile: the console's player counts it among its
+unresolved albums (`favoriteAlbumID`, which has no year-blind fallback on
+purpose). What a device restoring from the document does with a tuple whose
+year no longer exists could not be read here (the iOS repo is not on this
+host): owed.
+
+### Red first
+
+On a copy of the branch's tree with main's `reconcile.go` and
+`reconcile_held.go` (and a one-line stub, `yearAfterMBIDStep = yearStep`, so
+the routed test compiles): `reconcileYears` on 7 × 2011 and 5 × 1968
+returns nothing, so the five stay 1968 (`TestAnAlbumTakesOneYear`'s first
+case: each of the five "year 1968, want 2011" and "returned false, want
+true"); 16 of the table's 25 cases fail, the 9 green being the shapes main
+already handled (agreeing years, lone tracks, an empty title, a group with no
+recording year or no year at all, one folder's B342 shape, the two editions
+with no inner disagreement, the 1876 boundary); and every new scan fixture
+fails but two, which hold for main as well and pin what the rule must keep
+(`TestScanner_ATagEditThatOutvotesTheStoredYearMovesTheAlbum`,
+`TestScanner_AnAlbumRetaggedOneSubtreeScanAtATimeMovesAtTheNextFullScan`).
+On main the MBID strays stay split for good (1990 after a bump too).
+
+### Negative controls
+
+A runner (`.tmp/_b756b/controls.py`) applied each mutation to the committed
+fix, each anchor found exactly once, built the package's test binary, ran
+24 tests one at a time, and restored the bytes from memory; the baseline
+(no mutation) is green, every control built, and `git status` was empty
+after.
+
+| Mutation | Red |
+|---|---|
+| (a) the year pass groups by album title alone, across directories | `TestAnAlbumTakesOneYear` (the editions, the disc folders), `TestScanner_EditionsInTwoFoldersKeepTheirOwnYears` (the 1990 edition at 2004), `TestScanner_DiscFoldersOfOneReleaseKeepAYearEach`, and the older cross-directory cases of `TestReconcileYears` and B342's other-folder |
+| (b) a tie goes to the smaller year | `TestAnAlbumTakesOneYear` (1968 and 2011 stay 1968), `TestScanner_StraysOfOneFolderThatBorrowDifferentYearsTakeOneInOneScan`, `TestReconcileYears`' tie, B342's recording-year-tie |
+| (c) under a stale stamp, `settleHeldReconciles` replaced by `settleHeldUnreconciled` (full and subtree) | `TestScanner_AVersionStaleReReadOfAnAlbumGivenOneYearOnlyStamps`: the five rewritten rows move twice in one scan (written whole as their files read, `enriched_at` 0, then rewritten by the year pass, which the hook sees); the past-the-limit test (five moved, not three), the strays' bump, and B342's and B188's no-churn tests |
+| (d) a disagreeing group's agreeing members returned too | `TestAnAlbumTakesOneYear` (returned, not moved), `TestScanner_AnAlbumIndexedBeforeTheRuleTakesOneYearAtTheNextFullScan` (the 7 in the delta), the duplicates test (the 7 in its delta), the past-the-limit test, `TestReconcileYears`, B342's Ellipses |
+| (e) no second year run after the MBID fill | `TestScanner_StraysOfOneFolderThatBorrowDifferentYearsTakeOneInOneScan` (1990 beside 2000 after one scan; the bump moves a stray) |
+| (f) a subtree scan runs the year pass (the heal rejected above) | `TestScanner_AnAlbumRetaggedOneSubtreeScanAtATimeMovesAtTheNextFullScan` (every row voted back to 2011), `TestScanner_ASubtreeScanOfAChangedFileSplitsItsAlbumUntilTheNextFullScan` |
+
+### Gates
+
+On legion0 at a4b62598, in one call through the shared build lock
+(`.tmp/_b756b/gates.py`): `make vet` native and with `GOOS=windows`,
+`GOOS=darwin` and `GOOS=linux GOARCH=386`, each clean; gofmt (go1.27.3's) on
+the changed Go files, clean; `make docs-check`, ok, and again on a copy of
+the tree with `rules-b756b.patch` applied, which `git apply --check` takes
+and a strict applier reproduces; the qualification check, "qualification
+version OK: 4880f8a4..HEAD" (B756 changes no guarded path); `make test-fast`
+(TMPDIR under `.tmp/_b756b`), 85 packages ok and none failed, in 480 s, the
+ALSA, alsapcm, durable-writer and backup identity tests running here on
+Linux; `make test TEST_PKGS="./internal/manifest/... ./internal/dupes/...
+./internal/api/..."` (race, the Makefile's tags and 30-minute timeout), ok,
+in 1,398 s (internal/manifest 1,386 s); `make build-all`, ok, its `dist/`
+removed after. `git status --ignored` showed nothing but `.tmp/` after. Not
+run here: macOS and Windows natively, CI's runners, and the iOS app, whose
+repo is not on this host.
+
+## 2026-11-06 — B756 round 2: each row votes its tag, a missing copy never wins
+
+Worker b756b, the same host, toolchain and branch, from the orchestrator's
+review of round 1: five points, each a reviewer's reading of the code, after
+the orchestrator applied round 1's rules patch on the pushed branch. Commits:
+58f47fc8 (points 1, 3, 4 and 5 with their tests), aef75b90 (a bump keeps the
+record of a tag that gave no year), 62cdb78e (a row stored with no record
+keeps none at a bump, found by this round's controls), bb7fa90f (the pin of
+that fix's year condition), then the rule's long form and this record. The
+rule's line and the duplicates bullet in `enrichment.md` change through
+`rules-b756b-r2.patch`. `testdata/album-one-year-cases.json` is unchanged: no
+case's expectation changed, since the table is what a fresh index gives, and
+this round changes what a history gives.
+
+### Point 1: a stored year outvoted the tags it replaced — confirmed, fixed
+
+Both of the review's scenarios were red on round 1 (8a7c50ca's production
+files, with inert stubs so this round's tests compile, `.tmp/_b756b/red2.py`
+on a copy of the tree outside git). Seven files of 2011 and five of 1968,
+the seven deleted: the five stayed at 2011 once the seven were reaped ("once
+the seven are reaped: Band/Remastered/08 Track.flac year 2011, want 1968"),
+the test running the deletion pass's real grace
+(`config.DefaultDeleteAfterMissingScans`), so the tail judged the group
+again after a real deletion and voted the stored years. Track 1, then tracks
+2 to 7, retagged 1968 across two scans: all twelve stayed at 2011 ("after
+the retag of tracks 2 to 7: Band/Remastered/01 Track.flac year 2011, want
+1968"), the second scan's stored rows voting six to six and the tie going to
+2011. A fresh index of the same files gives 1968 in both.
+
+The fix is the review's design. `Track.taggedYear` (unexported, a
+`*yearRecord`) is the year pass's record of what a row's tag said: `yearMove`
+sets it the first time the pass moves a row's year, to the year the row
+held, and drops it when the pass moves the year back to it. `votingYear` is
+the record's year where there is one and the stored year otherwise, and
+`albumYearFixes` votes with it and writes the answer to `Year`. A lone or
+untitled row with a record goes back to its tag. A tag with no year is a
+record of nil, told apart from no record: `tags_json` holds the record as an
+object under `taggedYear`, `{"year":1968}` or `{}`, which `marshalForStorage`
+splices in after `json.Marshal` and `decodeStoredTrack` reads at every
+stored decode (`GetTrack`, `GetTrackWithStat`, `UnenrichedTracks`, the
+case-folding lookup, the listed-row scan the streams and pages share, and
+the UPnP routing list; no package outside `internal/manifest` decodes
+`tags_json` itself). Extraction never sets it, so a changed file's row is
+written afresh and votes its new tag (`TestScanner_AReExtractClearsTheRecord`).
+A version-stale re-read keeps the album's year and the record where its tag
+reads as the record says, a tag with no year included (`mergeYear`;
+`TestANilTagIsRecordedAndRestored` bumps over one), and otherwise keeps its
+own reading and no record, and is held (B188). The MBID fill writes no
+record, so a year it borrowed votes as stored; when the year pass after it
+then moves the row, the record holds the borrowed year, which is what a
+fresh index's MBID fill gives it too.
+
+What reads `tags_json`, and the wire. The record is unexported, so a `Track`
+encodes without it, and `/v1/manifest`, full and delta, decodes each row into
+a `Track` and encodes that: no client sees the key
+(`TestTheTaggedYearIsStoredAndNeverServed` reads the stored bytes, both
+manifests and `json.Marshal`). PROTOCOL.md has a client ignore a field it
+does not know, so a leak would not break the app, but nothing is sent, and
+`ProtocolVersion` stays 1. The other readers (`dupe_refs.go`,
+`catalog_refs.go`, the console's extracts) read named paths, never the
+record. The enricher writes back the whole row it read, and the record with
+it (`TestTheRecordSurvivesTheEnrichersStamp`). A record never changes alone:
+the pass returns a row only when its year moves, so a record moves no
+`indexed_at`, no revision and no delta entry, and the duplicate stamps never
+see it (`TestTheYearPassNeverWritesTheRecordAlone`, over a row whose record
+equals its year, set by hand). A write of the record alone was rejected both
+ways: with no `indexed_at` advance it breaks the premise of B187's
+compare-and-set (every write of `tags_json` advances `indexed_at`, so a
+writer holding an older read can tell), and with one it is a delta entry to
+every paired device for nothing a client sees.
+
+A fresh index and two histories agree on every shape of the shared table
+(`TestAnIncrementalHistoryAgreesWithAFreshIndexOnTheTablesShapes`, in
+memory: every track tagged 2099 and given that year, then retagged to the
+case's years one file a scan; and every track outvoted by three of 2099
+beside it, which a scan then deletes). Round 1's tests of the stored vote
+were turned around: its test of that residual is now
+`TestScanner_ARetagOfSomeFilesIsJudgedOnTheTags` (three of the seven 2011
+files retagged 1968 give the album 1968, as a fresh index does, and a bump
+after moves nothing); `TestScanner_AVersionStaleReReadOfAnAlbumGivenOneYearOnlyStamps`
+finds the five stamped at the merge, with their records, where round 1 held
+them to the tail; and
+`TestScanner_ReReadsOfAnAlbumGivenOneYearPastTheHoldLimitSettleInOneScan`
+seeds a record of 1950 (an older extractor's reading of the DATE that now
+reads 1968), so the five differ from their rows and are held, three past a
+limit of two.
+
+**Found in this round: a row stored with no record churned at the first
+bump.** Control (1b) below makes every stored record unreadable, which is
+how every row an older bridge wrote looks, and under it the B188 and B342
+no-churn tests went red. `TestScanner_ABumpOverRowsStoredWithNoRecordOnlyStampsThem`
+(an album whose composition date, `0000` date and empty date took its 2011,
+the records then removed as an older bridge stores rows) was red on
+aef75b90, through a full scan and a subtree scan alike: "rows the bump
+moved: [Band/Filled/04 Track.flac Band/Filled/05 Track.flac], want none",
+each with `enriched_at` 0. The two re-reads whose tags read a year differ
+from their rows and are held; the settlement's passes give each the album's
+year and the record of its tag; and the record alone made each differ from
+its row, which was then written whole and re-enriched. That is the churn
+B188 exists to prevent, at the first ExtractorVersion bump after the
+upgrade, for every such row a library holds. `heldRecord` (62cdb78e) gives a
+held re-read no record where its row holds none and the passes leave its
+year as the row holds it, so it is stamped and votes its stored year, as it
+did: the review's rule for rows written before it ("legacy rows count as
+stored"). Where the passes move such a row's year it takes the record
+(`TestScanner_ABumpThatMovesAnAlbumRecordsTheTagsOfTheRowsItMoves`: twelve
+rows an older bridge stored at 1999 are read as seven of 2011 and five of
+1968, all twelve are rewritten at 2011, the five with records of 1968, and
+the five take 1968 once the seven are reaped; green before the fix as well,
+it pins the year condition, and control (12b) shows that it does).
+
+What a row with no record still does, named: it votes its stored year until
+the pass moves it. That covers the years an older bridge filled (a
+composition date and a missing year, which a fresh index would not count),
+and a row the pass never moved whose tag an extractor change reads otherwise
+while its album's year stays (the settlement stamps it). When the tail moves
+such a row, its record is the year it held, which for a filled row is not
+its tag, and a later bump that reads the tag otherwise writes the row whole
+once. Each needs an edit after the upgrade (a retag, a deletion, an
+extractor change) before it shows at all.
+
+### Point 2: the DSD album gain within a merged album — confirmed, not built
+
+How a membership change reaches renditions: a render takes its album's boost
+from `internal/albumgain`'s index of the album by `dupes.AlbumIDOf`, which
+the post-scan hook drops (`Resolver.Invalidate`) and the next render
+rebuilds, so every render after the merge guards the merged album. A
+rendition already made keeps the gain it was rendered with: its row records
+`applied_gain_db`, and its settings blob `gainScope` and `trackGainDB`, never
+the album identity or the members the gain was computed over. It stays
+fresh, since a DSD rendition's freshness is its source file's stamp and the
+current DSD schema (`v2`), so neither the auto-optimize sweeper nor `bridge
+optimize` or `bridge render` (whose skip check is the exact current id)
+renders it again. And a re-render under the same id is unsafe: a phone
+applies a rendition's `appliedGainDB`, read from the manifest by id, to the
+bytes of its downloaded copy, which is why `v2` minted new ids and why no
+reaper may come before the app records the gain with its downloaded copy
+(the album gain entry in `jobs.md`). So there is no existing path to
+invalidate or queue through, and building one is a subsystem: each
+rendition's album identity and boost recorded at render time; a staleness
+term comparing them with the album's boost now (the peaks are on record in
+`dsd_peaks`, so the comparison needs no decode); and a rendition id that
+changes with its gain, or the app's record of the gain beside its downloaded
+copy (the album gain plan's M2), before any rendition is replaced. Stopped
+there, as the brief says. The effect: a merged album's renditions keep the
+balance of the half each was rendered with, none clips (each render also
+guards its own peak), and only the merged albums that are DSD and have
+renditions are touched; how many of the owner's 18 are could not be measured
+here.
+
+### Point 3: a year rewrite could suppress the only playable copy — confirmed, fixed
+
+The duplicates test's copy-wins shape, with `copies[7]`'s file removed just
+before the first scan after the upgrade
+(`TestScanner_ACopyKnownMissingNeverWinsItsGroup`). On round 1 the copy's
+row, inside the deletion grace (`missing_count` 1 of 3), won its group on its
+stored size once the rewrite gave the original its key, so the reachable
+original was tombstoned ("Band/Remastered/08 Track.flac, the reachable
+original, is suppressed in favour of a copy whose file is gone"; the delta
+deleted it, and the served set held the gone copy) until the row was reaped,
+two more full scans later: 12 h at the default `ScanIntervalSec`, longer
+under a raised `deleteAfterMissingScans`. The election can exclude a row
+known missing with a small change, so it does: `dupeRefSelect` reads
+`COALESCE(t.missing_count, 0) > 0` into `dupes.Row.Missing`, and `outranks`
+and `nestShallower` put a file the scan found before one it did not, ahead
+of every other term (`TestAFileTheScanFoundOutranksOneItDidNot`, in
+`internal/dupes`, covers both). The term moves only when a file goes or
+comes back: the count is the deletion pass's own, which a walk that could
+not read a folder leaves as it was, so a flapping mount does not move the
+election or churn `indexed_at`. It knows nothing of an upstream's
+reachability: routed rows stay out of the duplicates pass, and the
+2026-08-31 record of the parked cross-source suppression stands. The
+duplicates bullet in `enrichment.md` that said `outranks` has no
+availability term is corrected through the patch.
+
+### Point 4: a literal backslash split a name — confirmed, fixed by platform
+
+On Linux and macOS a backslash is a character of a file name, and the
+passes split on both separators everywhere: `Band/Live\01 Track.flac`, a
+file of `Band`, joined `Band/Live`'s album and took its 1968
+(`TestScanner_ABackslashInANameIsNoFolder` on round 1: "the pass moved
+map[Band/Live\01 Track.flac:1968], want map[]", and through a real scan "the
+file named with a backslash: Band/Live\01 Track.flac year 1968, want 2011").
+Stored paths are slash-separated on every platform (`relPath` writes them
+through `filepath.ToSlash`), so the fix is small: `trackDir`, `pathBase` and
+`pathStem` split on `pathSeparators`, which is "/" but on Windows "/" and
+"\" (`pathSeparatorsFor(runtime.GOOS)`; no Windows name holds a backslash,
+so the split there is as it was). The shared table holds no backslash and is
+unchanged. Round 1's tests that fed Windows-shaped paths on every platform
+(`TestTrackDir`, `TestPathStem`, `TestReconcileAlbumArtistsWindowsPaths`,
+`TestBackfillTrackNumbersFromPath`) run them under Windows' separators
+through a seam (`underSeparatorsOf`), with the POSIX answer beside them.
+Owed to the mirror PR: whether the app's copy splits on a backslash (the iOS
+repo is not on this host).
+
+### Point 5: the table's digest — pinned
+
+`TestTheSharedYearTableIsTheMirroredBytes` pins the table's SHA-256,
+`c1f74e97537468f7d7a0f0b33aa9071797f9b85ae72069469cac433bcef681af` (12,450
+bytes), and fails on a CR byte. `.gitattributes` keeps the file LF (`text
+eol=lf`), so a Windows checkout hashes the same bytes. The iOS mirror pins
+the same digest.
+
+### Red first
+
+On round 1's production code with inert stubs (`.tmp/_b756b/red2.py`): red
+on behaviour were `TestScanner_AnAlbumWhoseMajorityIsDeletedTakesWhatItsTagsSay`,
+`TestScanner_AnAlbumRetaggedAcrossTwoScansFollowsItsFiles`,
+`TestScanner_ARetagOfSomeFilesIsJudgedOnTheTags`,
+`TestAnIncrementalHistoryAgreesWithAFreshIndexOnTheTablesShapes`,
+`TestScanner_ACopyKnownMissingNeverWinsItsGroup`,
+`TestScanner_ABackslashInANameIsNoFolder`, `TestTrackDir`, `TestPathStem`
+and `TestAFileTheScanFoundOutranksOneItDidNot`; red by construction, round 1
+having no record, were `TestANilTagIsRecordedAndRestored`,
+`TestScanner_AReExtractClearsTheRecord`,
+`TestTheTaggedYearIsStoredAndNeverServed`,
+`TestTheRecordSurvivesTheEnrichersStamp`,
+`TestTheYearPassNeverWritesTheRecordAlone` and the record checks of the
+version-stale and past-the-limit tests. Green there, as they should be:
+`TestAnAlbumTakesOneYear` (the table is unchanged),
+`TestTheSharedYearTableIsTheMirroredBytes` (the bytes are round 1's), the
+two Windows-path tests under Windows' separators, and
+`TestScanner_AnAlbumRetaggedOneSubtreeScanAtATimeMovesAtTheNextFullScan` (a
+subtree scan writes the edited row alone either way).
+`TestScanner_ABumpOverRowsStoredWithNoRecordOnlyStampsThem` was red on
+aef75b90, before its fix (above).
+
+### Negative controls
+
+Three runs on the committed code, each through a runner that applies a
+mutation (its anchor found exactly once), builds the test binaries, runs
+each named test alone and restores the bytes from memory: each baseline
+green, every control built, and `git status` empty after each. The first
+run's predictions were made before it but not written down where this record
+can show them; the second and third runs were predicted by name in files
+written before them (`.tmp/_b756b/controls3.predictions.txt` and
+`controls4.predictions.txt`), and every prediction held, the tests predicted
+to stay green included.
+
+| Mutation | Red |
+|---|---|
+| (1a) the vote ignores the record (`votingYear` returns the stored year) | the history test, the deletion and two-scan retag tests, `TestScanner_ARetagOfSomeFilesIsJudgedOnTheTags`, `TestANilTagIsRecordedAndRestored` |
+| (1b) no stored record is read (`decodeStoredTrack`) | 12: every scan test that reads a record back through the store (not the one that reads the stored bytes), and the B188 and B342 no-churn tests and the strays' bump, each moving rows: the shape of every row an older bridge wrote, which led to `heldRecord` |
+| (1c) `mergeYear` without its record branch | `TestANilTagIsRecordedAndRestored` (the bump moves the untagged row) |
+| (1d) a move back to the tag's year keeps the record | the deletion and two-scan retag tests, `TestANilTagIsRecordedAndRestored` |
+| (1e) `marshalForStorage` never writes the record | 9, as predicted: the deletion, two-scan and three-file retag tests, the nil-tag, re-extract, stored-not-served and enricher tests, and the record checks of the version-stale and past-the-limit tests; green, as predicted: `TestTheYearPassNeverWritesTheRecordAlone`, the strays', B342's and B188's no-churn tests (the stamp comparison marshals both sides without the record) and the history test |
+| (1f) `yearMove` records the year it moves to | 10, as predicted: the history test and the nine above, `TestANilTagIsRecordedAndRestored` in memory as well |
+| (12a) `heldRecord` always returns the settled record | `TestScanner_ABumpOverRowsStoredWithNoRecordOnlyStampsThem` alone, both scopes, as predicted |
+| (12b) `heldRecord` without its year condition | `TestScanner_ABumpThatMovesAnAlbumRecordsTheTagsOfTheRowsItMoves` alone, as predicted |
+| (3a) `outranks` without its Missing term | `TestScanner_ACopyKnownMissingNeverWinsItsGroup`, `TestAFileTheScanFoundOutranksOneItDidNot` |
+| (3b) the refs stream never sets `Row.Missing` | `TestScanner_ACopyKnownMissingNeverWinsItsGroup` |
+| (3c) `nestShallower` without its Missing term | `TestAFileTheScanFoundOutranksOneItDidNot` alone (its nest-twin case), as predicted |
+| (3d) the refs stream reads `missing_count > 1` | `TestScanner_ACopyKnownMissingNeverWinsItsGroup` alone, as predicted |
+| (4a) a backslash separates on every platform | `TestScanner_ABackslashInANameIsNoFolder`, `TestTrackDir`, `TestPathStem` |
+| (5a) one space added to the shared table | `TestTheSharedYearTableIsTheMirroredBytes` (the digest 44cc71ee… where c1f74e97… is pinned) |
+| (c) round 1's settlement control, again | the strays' bump, B188's no-churn test and its past-the-limit test; no longer the version-stale test, whose five are stamped at the merge now |
+
+### Gates
+
+On legion0 at ac7e7abf, in one call through the shared build lock
+(`.tmp/_b756b/gates2.py`): `make vet` native and with `GOOS=windows`,
+`GOOS=darwin` and `GOOS=linux GOARCH=386`, each clean; go1.27.3's gofmt over
+the 16 Go files the branch changes, clean; `make docs-check`, ok, and again on
+a copy of the tree with both rules patches applied, each file by a strict
+applier (`git apply --check` takes `rules-b756b-r2.patch` over round 1's
+`scanner.md` and today's `enrichment.md`); the qualification check,
+"qualification version OK: 4880f8a4..HEAD"; `make test
+TEST_PKGS="./internal/manifest/... ./internal/dupes/... ./internal/api/..."`
+(race, the Makefile's tags and 30-minute timeout), ok, in 1,397 s
+(internal/manifest 1,385 s, internal/api 109 s); and `make test-fast`, where
+84 packages were ok and `cmd/bridge` failed one test,
+`TestEveryCitedTestNameExists`, on a test comment of this round that cited a
+test no file defines. 16630a65 fixed the comment (it cites `TestPathStem`):
+the sweep then passed, a ghost citation planted in turn in this file and in
+`ops/History-rules-scanner.md` was reported in each (so the sweep reads both),
+and at 16630a65, through the build lock again, `make vet` was clean and `make
+test-fast` passed, 85 packages ok and none failed, in 455 s (TMPDIR under
+`.tmp/_b756b`; the ALSA, alsapcm, durable-writer and backup identity tests
+running here on Linux). `git status --ignored` showed nothing but `.tmp/`
+after each. Not run here: macOS and Windows natively, CI's runners, `make
+build-all` (not among this round's gates), and the iOS app, whose repo is not
+on this host.
+
+## 2026-11-06 — B756 round 3: a missing count elects again, a record alone is no revision
+
+Worker b756b, the same host, toolchain and branch, from the orchestrator's
+review of round 2: three points, after the orchestrator applied round 2's
+rules patch on the pushed branch and merged main there (not into this tree,
+whose base stays 4880f8a4). Commits: 4fc49363 (point 1), ecd86492 (point 3),
+84476b1e (point 2), then the rule's long form and this record. The rule's
+line and the duplicates bullet in `enrichment.md` change through
+`rules-b756b-r3.patch`. `testdata/album-one-year-cases.json` is unchanged.
+
+### Point 1: a missing count did not restamp a subtree scan — confirmed, fixed
+
+Red on 0d9787de, through `ScanSubtree` with the default grace (three scans):
+`TestScanner_ASubtreeScanElectsAgainWhenACopyGoesOrComesBack`, an album in
+two folders whose copy wins every group (a longer tag, the larger files).
+Its copy's file removed and its folder scanned, the copy's row at
+`missing_count` 1, nothing written or deleted: "the subtree scan after the
+copy went: Band/Remastered/08 Track.flac is suppressed, want it served", the
+copy served. And after a full scan elected the original, the copy's file put
+back unchanged (same bytes and mtime) and its folder scanned, the skip gate
+clearing its count: "the subtree scan after the copy came back: Band/Remastered
+(Copy)/08 Track.flac is suppressed, want it served". The review's reading
+holds: since round 2 the election reads the missing count
+(`dupes.Row.Missing`), and the subtree gate opened only on an upsert, a
+settle, a delete, a rename or a stamped row deleted elsewhere. The wait was
+bounded only by the next full scan (`ScanIntervalSec`, 6 h by default), all
+of it with the one playable copy hidden from every client, so the fix is a
+restamp, not a statement of the bound.
+
+`IncrementMissingTracks` reads each row's new count back (`UPDATE … RETURNING
+missing_count`) and reports the rows it counted missing for the first time
+(`MissingTracksPass.NewlyMissing`, the count at 1) beside the rows it
+deleted; `IncrementMissingTracksAndDeleteAtThreshold` is its wrapper, so the
+console's trash, the full scan's pass and the tests call it unchanged.
+`ResetTrackMissingCount` and `ResetTrackMissingCountsUnder` say whether they
+cleared a count (a driver that cannot say answers yes: a pass too many costs
+two streams of the library, one too few hides a copy), and the scanner counts
+those (`missingCleared`, zeroed at each `ScanSubtree`'s start) at the skip
+gate, an unread file and an SACD container's rows. The gate opens on either.
+A row already missing that stays missing moves nothing, so a gone file costs
+one pass when it is first counted and one when it comes back; its reap opens
+the gate as it did. `TestIncrementMissingTracksCountsTheRowsItMakesMissing`
+pins the counts at the store, and the SACD reset's test the cleared answer.
+
+### Point 2: a change in the record alone made a revision — confirmed, fixed
+
+Red on ecd86492: `TestScanner_AChangeInTheRecordAloneIsWrittenWithoutARevision`,
+the review's case (served 2011, a recorded tag of 1950, a re-read giving
+1968), "rows moved: [Band/Remastered/08 … 12]" and each "enriched_at = 0",
+through a full scan and a subtree scan alike;
+`TestScanner_ABumpThatDropsARecordAloneWritesNoRevision`, the same on the
+path a re-read takes when it is not held (a hand-left record of 1999 on a row
+of 2011, dropped by a re-read giving 2011: one row moved and re-enriched);
+and `TestARecordWrittenAloneSurvivesAWriteBackOfAnEarlierRead`, the
+enricher's stamp of a row it read before the bump answering "track changed
+since it was read", since the bump's upsert had moved the version.
+
+The design, and B187. B187's rule is that every `tags_json` writer moves
+`indexed_at`, which is what lets a write-back of an earlier read
+(`MarkEnriched`, `applyReconciledTracks`) compare-and-set on it, and round 2
+rejected a record written with no move for that reason. The review asks for
+exactly that write, so round 3 makes it safe. `markStampIfUnchanged` marks a
+re-read whose bytes differ from its row's only in the record (both marshalled
+with the record taken out compare equal, and the records differ)
+`versionStampOnly` and `yearRecordOnly`, at the stored row's version. The
+stamp leg writes its `tags_json` first, `UPDATE tracks SET tags_json = ? WHERE
+path = ? AND indexed_at = ?`, a write at the version read as a write-back's
+is, and on a miss leaves the row unstamped, so the next scan reads it again.
+`MarkEnriched` is the one write-back that can fall between a scan's read and
+its write (the enricher runs beside the scanner; the passes run inside a
+scan, under the scanner's lock, after the settlement, so the reconciliation
+writer never meets a record written after its read): it reads the row's
+record at its version (`storedYearRecordAt`) and writes that one, never the
+one it read. Nothing a client reads moves: `indexed_at` does not, so no delta
+entry and no `library.changed`; `enriched_at` is not touched; the FTS update
+trigger fires on `tags_json` and its `WHEN` compares the path, title, artist
+and album only, and the playlist feed's generation triggers ignore
+`tags_json` (both read in round 2). Rejected: moving the record into a column
+of its own, where a record-only write would be no `tags_json` write at all
+and B187 would stand untouched. It costs a migration (main, merged into the
+pushed branch, may hold v61 already), every stored reader's `SELECT`, and a
+stat guard so an older binary's rewrite of a changed file cannot leave a
+stale record, which `tags_json` gives for nothing: an older build's rewrite
+drops the key.
+
+`heldRecord`, round 2's case for a row with no record, goes. It kept such a
+row from gaining a record at a bump, the only way then to keep it stamped;
+the row now gains the record of its tag with no revision, and votes its tag
+as a fresh index would (`TestScanner_ABumpOverRowsStoredWithNoRecordOnlyStampsThem`
+expects the records of 1720 and 0 now, with nothing moved and nothing
+re-enriched). The past-the-limit test expects only the three re-reads past
+the limit of two to move (written as their files read, re-enriched, and
+given the album's year by the tail: B188's accepted churn), and the two held
+ones stamped with their records, enrichment kept.
+`TestARecordOnlyStampWritesOnlyTheRowItWasMergedWith` pins the marking (a
+title changed too is no stamp) and the compare-and-set over a row the
+enricher changed since: neither the record nor the stamp is written, and
+the enricher's release id stays.
+
+### Point 3: CodeQL at store.go:3204 — fixed at its cause
+
+The brief names the alert on the PR's diff (thread PRRT_kwDOSKfTNc60oIVa);
+`gh` is refused on this host, so the alert itself was not read here. The line
+is `out := make([]byte, 0, len(raw)+len(taggedYearKey)+len(b)+4)` in
+`appendTaggedYear`, round 2's hand splice of the record into the marshalled
+bytes, which is `go/allocation-size-overflow`'s shape: a capacity computed
+from the length of a value that can be large, here `json.Marshal`'s output.
+The sum cannot overflow an int in practice (a row's `tags_json` past 2^31
+bytes, on a 32-bit build), but the cause is the splice, so it goes:
+`marshalForStorage` marshals `storedTrackWithRecord`, which embeds the Track
+and adds the record as its last field, and encoding/json writes the bytes;
+nothing is computed from a length and nothing is cut.
+`TestTheRecordIsStoredLastAfterTheTracksOwnBytes` pins the layout (the
+Track's own bytes, the record last, `{}` for a tag that gave no year) and
+passes over the old splice too, on a copy of the tree with 4fc49363's
+`store.go` (`.tmp/_b756b/samebytes.py`), so the bytes a row is stored as are
+the same.
+
+### Negative controls
+
+One run on 84476b1e (`.tmp/_b756b/controls5.py`), predicted by name in
+`.tmp/_b756b/controls5.predictions.txt` before it: each mutation's anchor
+found once, the package's test binary built, 19 tests run one at a time, the
+bytes restored from memory; the baseline green, every control built, `git
+status` empty after, and every prediction held, the tests predicted to stay
+green included.
+
+| Mutation | Red |
+|---|---|
+| (r3-1a) the subtree gate without its `NewlyMissing` term | the subtree test's "a copy that goes" half alone |
+| (r3-1b) the subtree gate without its `missingCleared` term | its "a copy that comes back" half alone |
+| (r3-1c) every increment counted as newly missing | `TestIncrementMissingTracksCountsTheRowsItMakesMissing` alone (a pass too many is harmless to the scan test) |
+| (r3-1d) `ResetTrackMissingCount` never reports a cleared count | that test and the "comes back" half |
+| (r3-2a) `markStampIfUnchanged` without its record-only leg | the three red-first tests, the compare-and-set test, the past-the-limit test and the no-record test; green, as predicted: the version-stale, strays', B342's and B188's no-churn tests |
+| (r3-2b) the record write without its version check | the compare-and-set test's "a row changed since" half alone (the record overwritten, the release id gone, the row stamped) |
+| (r3-2c) `MarkEnriched` without carrying the row's record | `TestARecordWrittenAloneSurvivesAWriteBackOfAnEarlierRead` alone ("records its tag as 1950, want 1968") |
+
+A slip, said here: one `go test ./internal/manifest/ ./internal/dupes/` ran
+outside the shared build lock, which the brief asks of every multi-package
+run; it passed, and every gate below ran through the lock.
+
+### Gates
+
+On legion0 at 5e58c52a, in one call through the shared build lock
+(`.tmp/_b756b/gates3r.py`): `make vet` native and with `GOOS=windows`,
+`GOOS=darwin` and `GOOS=linux GOARCH=386`, each clean; go1.27.3's gofmt over
+the 19 Go files the branch changes, clean; `make docs-check`, ok, and again on
+a copy of the tree with the three rules patches applied in turn by a strict
+applier (`git apply --check` takes `rules-b756b-r3.patch` over the two files
+as rounds 1 and 2 leave them); the qualification check, "qualification
+version OK: 4880f8a4..HEAD"; `TestEveryCitedTestNameExists`, ok; `make
+test-fast`, 85 packages ok and none failed, in 461 s (TMPDIR under
+`.tmp/_b756b`; the ALSA, alsapcm, durable-writer and backup identity tests
+running here on Linux); and `make test TEST_PKGS="./internal/manifest/...
+./internal/dupes/... ./internal/api/..."` (race, the Makefile's tags and
+30-minute timeout), ok, in 1,413 s (internal/manifest 1,401 s, internal/api
+109 s, internal/dupes from the test cache, its code and tests unchanged
+since round 2's race run). `git status --ignored` showed nothing but `.tmp/`
+after. Not run here: macOS and Windows natively, CI's runners, `make
+build-all`, and the iOS app, whose repo is not on this host.
+
 ## 2026-11-06 — B489 PR 1: WavPack and Monkey's Audio indexed and served as they are, behind a client format gate (ExtractorVersion 32)
 
 Backlog B489, PR 1 of 5: the owner's decision of 2026-11-06 ("We can include
@@ -78801,3 +79914,124 @@ bitstream point above was found; nothing in it had failed. Not run here:
 macOS and Windows natively, CI's runners, the race detector over the other
 packages (`internal/admin`, which round 2 does not touch, among them), and
 the iOS app, whose mirror of PROTOCOL.md's changes is owed.
+
+## 2026-11-06 — B489 PR 1, round 3: main merged (B750, B756), the gate beside the missing-count term
+
+The orchestrator's round 3 for worker b489b: main moved by B750 (a Christmas
+smart mix, 8747d29b) and B756 (one physical album has one year, 1a101716,
+whose round 2 added `Row.Missing` to the duplicate election), and this
+branch takes main. `git merge` needs approval on legion0, so the merge was
+made by hand, as the earlier merges there were: the base found with `git log
+--boundary main...HEAD` (4880f8a4); main's 40 files this branch never
+touched taken whole with `git checkout main --pathspec-from-file`; the 11
+files both sides changed merged with `git merge-file -p --diff3` into
+scratch (which prints and writes nothing), 9 conflicts in 5 of them, each
+resolved by what both sides mean and placed; `MERGE_HEAD` written into the
+worktree's git dir; and one merge commit, 33e20b83 (parents 06822ae4 and
+1a101716). Proof before it: every file main alone changed is main's in the
+index but the two of its tests below, every file this branch alone changed
+is this branch's, and nothing else is staged. Commits after: f131aab9 (the
+gate beside the missing-count term), e52bd024 (the Christmas family's
+gate), this record, the gates' results.
+
+**Main read again**: `ExtractorVersion` 31 and the ladder ending at v60, as
+before; B756 bumped neither. So this branch's 32 and v61 stand, and
+`requireTheLatestSchema` still names v61's column. B756's re-read machinery
+(`taggedYear`, `yearRecordOnly`) is written for the next bump, and this
+branch's 32 is that bump: the full suite passes over it.
+
+### The conflicts, and what each side meant
+
+| File | Main | This branch | Resolution |
+|---|---|---|---|
+| `internal/dupes/policy.go` (2) | `Missing` first in `outranks`: a copy whose file the last scan did not find never wins its unit | the gate first: a `.wv` or `.ape` never wins over a copy every client is served | `Missing`, then the gate (below) |
+| `internal/api/smartplaylists.go` (3) | one reading of the clock (`s.now()`) for the hour and `season.InWindow`; the Christmas family skipped out of its window | the request's view (`requestFormats`, `Vary`) for every family's items | both: the window's skip first, then the build in the view; the doc says the Christmas family's items are the view's |
+| `internal/manifest/types.go` (2) | `taggedYear`, `yearRecord` | `correctionKey`, `CorrectionFile` | both, side by side |
+| `.gitattributes` (1) | the album-year table's LF pin | the B489 goldens' | both, main's first |
+| `ops/engineering-log.md` (1) | B750's two entries and B756's three | B489's two | main's first, then B489's |
+
+`store.go`, `scanner.go`, `admin.go`, `api.go`, `PROTOCOL.md` and
+`ops/History-rules-scanner.md` merged without conflict, and were read for
+meaning: the stamp leg carries this branch's `correction_key` beside B756's
+record-only write; every stored-Track read goes through B756's
+`decodeStoredTrack`, and this branch adds no other; `IncrementMissingTracks`
+and `ResetTrackMissingCount`'s new answers have no caller here. Two of main's
+new tests called the served-set readers without the view this branch added
+(`BuildManifest`, `WriteManifest`, `ListServedTracks`); they take
+`formatgate.All()`, as every earlier caller did in round 1. `.claude` takes
+main's rules as they are (`enrichment.md`, `scanner.md`, `smart-mixes.md`);
+nothing of this branch's is applied there.
+
+### The gate beside the missing-count term
+
+Both rules said "first". By what they mean, only one order lets both hold:
+B756's `Missing`, then the gate. A copy whose file is gone is no copy any
+client can play, so a found `.wv` takes a gone `.flac`'s place (an app that
+declares nothing loses a row it could not play, and the apps that declare
+WavPack keep the copy they can), while among found copies a `.flac` still
+beats every `.wv` and `.ape`. With the gate first, a gone `.flac` would win
+and suppress the one playable copy, which is the defect B756 fixed.
+
+That order left one hole in this branch's units, found writing
+`TestTheGateAndTheMissingTermHoldBesideEachOther` (seven groups, every view,
+the property that a client who could play a copy before the plan can play
+one after it), red first at the merge in one case as predicted in a file: a
+gone `.flac` beside a found `.wv` and a found `.ape` made one unit (round 1's
+`gateUnits` asked for any copy every client is served, gone or not), so the
+`.ape` suppressed the `.wv` and an app declaring WavPack alone lost its only
+playable copy. `gateUnits` now asks for a found copy every client is served,
+and splits by format a domain holding copies of two gated formats; a gone
+copy every client is served is then a unit of its own, suppressing nothing,
+and is reaped by the deletion pass as any gone row is. A domain of a gone
+`.flac` and one gated format stays one unit, so its found copy wins, as B756
+wants.
+
+The Christmas family takes the smart mixes' gate by construction (it is built
+through the same item loop after the window's skip), and
+`TestTheChristmasFamilyServesEachViewItsItems` pins it: in its window each
+view's items, positions closed up, a family of held-back tracks alone sent
+only to a view that declares them, and out of its window nothing to any view.
+
+### Negative controls
+
+`controls_r3.py` on e52bd024, each mutation in memory and put back, the
+predictions written before the run:
+
+| Control | Mutation | Red |
+|---|---|---|
+| c1 | the gate before `Missing` | as predicted: "a gone FLAC beside a found WavPack" (the `.wv` suppressed), "beside two found WavPack copies", and the order check |
+| c2 | `gateUnits` counts a gone copy every client is served | as predicted: the three-copy case, suppressed `[A/x.flac B/x.wv]` |
+| c3 | `gateUnits` splits on the formats named, not the gated ones | the two predicted subtests, and one more not predicted: "a gone FLAC beside a gone WavPack" (nothing suppressed where the `.wv` should be), since a domain whose every copy is gone also splits under it |
+| c4 | the Christmas family's items skip the view | as predicted: the four views that leave a format out in the mixed family, the three that do not declare WavPack in the WavPack-alone family; the "both" views and every out-of-season case still passing |
+
+### The rules
+
+`rules-b489b-r3.patch` is over main's rules as this merge holds them, and
+carries B489's rules whole: round 1's patch no longer applies there, since its
+`enrichment.md` hunk anchors on the availability bullet B756 rewrote (round
+1's scanner hunk applies with a one-line offset). Built on a scratch copy:
+round 1's patch with `--reject`, its one rejected hunk's bullet put after
+B756's with round 3's wording (the gate's term after `Missing`, the found copy
+in `gateUnits`, the new test), round 2's patch, and the Christmas family in
+`wire.md`'s gate bullet; checked with `git apply` on a fresh copy, equal to
+the builder's result, and the budgets measured over it (`enrichment.md` 34.0%,
+`scanner.md` 34.1%, `wire.md` 58.7%, the worst load 65.2%).
+
+**A test harness note**: the first `cmd/bridge` run of the merge failed 20 tests
+and hung in a player serve test, every one of them comparing a path under a
+TMPDIR that held `..` (`.tmp/_b489b/r3/../gotmp`): the harness's error, not the
+tree's. With the TMPDIR made absolute the same package passed (330 s).
+
+### Gates
+
+On legion0 at 76b771cb, through the shared build lock, against main
+(1a101716): go1.27.3's gofmt on every Go file changed since main, clean;
+`make docs-check`, ok; the qualification check, "qualification version OK:
+1a101716..HEAD"; `make vet` native and with `GOOS=windows`, `GOOS=darwin`,
+`GOOS=linux GOARCH=386` and `GOOS=linux GOARCH=arm`, each clean; `make
+test-fast`, 87 packages ok; `make test TEST_PKGS=` the packages the merge
+touched (race, 30 min a package), ok: internal/dupes 1 s, internal/api
+132 s, internal/manifest 1,592 s, internal/admin 990 s,
+internal/smartplaylist 3 s, its season 1 s, internal/smartplaylistgen 27 s,
+cmd/bridge 1,061 s; `make build-all`, the six targets. Not run here: macOS
+and Windows natively, CI's runners, and the iOS app.

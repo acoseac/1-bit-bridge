@@ -1,6 +1,9 @@
 # The shared playlist parse-case table is compared byte for byte with the iOS
 # app's copy; a CRLF checkout (Windows CI) would change every row.
 internal/manifest/testdata/playlist-parse-cases.tsv text eol=lf
+# The shared album-year table is pinned by its SHA-256, which the iOS app's
+# copy pins too; a CRLF checkout would change the digest.
+internal/manifest/testdata/album-one-year-cases.json text eol=lf
 # The B489 golden manifests are compared byte for byte with what the bridge
 # serves, and the iOS mirror copies them; a CRLF checkout would change every
 # line.

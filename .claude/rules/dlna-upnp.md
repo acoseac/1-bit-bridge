@@ -1248,8 +1248,6 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
 
 - **The MediaServer's `http.Server` takes `handshakelog.ErrorLog()`, as the loopback route's does** (2026-10-31, B604's second round; Codex on the integrated branch). net/http logs a handler's recovered panic with the address of the renderer it was serving ("http: panic serving <addr>"), and with no `ErrorLog` that line went to the standard logger whole; through handshakelog it keeps the panic and stands `handshakelog.ClientPlaceholder` where the address was. **Don't leave a server's `ErrorLog` nil**: `TestEveryServeHTTPServerRedactsPeerAddresses` (cmd/bridge) finds every `http.Server` in the module, and `TestAMediaServerPanicIsLoggedWithoutItsClient` drives this one's panic over a real connection.
 
-- **The ContentDirectory offers no WavPack or Monkey's Audio track, an upstream such item keeps its format's extension and no codec, and a `.wvc` is no item** (2026-11-06, backlog B489). **Don't let the DLNA adapter read a declared view (a renderer cannot declare one), or give an upstream row a codec its header was never read for.** → History-rules-dlna-upnp.md
-
 
 ## Source discovery (B470 PR 5a2b)
 

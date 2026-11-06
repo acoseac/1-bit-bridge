@@ -174,8 +174,12 @@ func TestResetTrackMissingCountsUnderIsAByteRange(t *testing.T) {
 	if _, err := store.db.Exec(`UPDATE tracks SET missing_count = 2`); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.ResetTrackMissingCountsUnder(ctx, "Music/Album.iso/"); err != nil {
+	cleared, err := store.ResetTrackMissingCountsUnder(ctx, "Music/Album.iso/")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !cleared {
+		t.Error("the reset cleared two counts and says it cleared none")
 	}
 	for _, p := range paths {
 		want := 2
@@ -186,7 +190,10 @@ func TestResetTrackMissingCountsUnderIsAByteRange(t *testing.T) {
 			t.Errorf("%s: missing count %d, want %d", p, got, want)
 		}
 	}
-	if err := store.ResetTrackMissingCountsUnder(ctx, "/"); err == nil {
+	if again, err := store.ResetTrackMissingCountsUnder(ctx, "Music/Album.iso/"); err != nil || again {
+		t.Errorf("a second reset says cleared %v (err %v), want none: the counts are 0 already", again, err)
+	}
+	if _, err := store.ResetTrackMissingCountsUnder(ctx, "/"); err == nil {
 		t.Error("an empty prefix reset rows, want an error")
 	}
 }

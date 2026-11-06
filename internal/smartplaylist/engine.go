@@ -22,6 +22,11 @@ func Generate(in Inputs, opts Options) []GeneratedPlaylist {
 	// Favorites sits high — it is the one family sourced from an EXPLICIT
 	// user signal (hearts), so it outranks the play-derived shelves below it.
 	add(buildFavorites(in, opts))
+	// Christmas sits high, after the shelves a listener returns to daily,
+	// so while it is served (1 December to 5 January; the API leaves it
+	// out of every other response) it is near the top without taking the
+	// hero's place from Daily Mix.
+	add(buildChristmas(in, opts))
 	add(buildDriveMix(in, opts))
 	add(buildOnRepeat(in, opts))
 	add(buildAutoMix(in, opts))

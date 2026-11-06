@@ -170,6 +170,12 @@ type Server struct {
 	bridgeOutput BridgeOutput
 	startedAt    time.Time
 
+	// clockNow is the clock GET /v1/smart-playlists reads (now): the
+	// Christmas family's window and the time-of-day hour are both taken
+	// from one reading of it. Nil is time.Now; a test sets a fixed
+	// instant before the server serves anything.
+	clockNow func() time.Time
+
 	// certIPs are the IP addresses the certificate this bridge minted and
 	// serves names (WithCertifiedAddrs, backlog B457): the interface walk
 	// publishes an IPv6 address only while it is one of them, and an IPv4

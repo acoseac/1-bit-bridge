@@ -66,23 +66,36 @@ func isLossy(codec string) bool {
 }
 
 // outranks is the deterministic total order that elects a suppression
-// unit's winner: a copy every client is served beats one the client
-// format gate holds back (formatgate.Gated: a WavPack or Monkey's Audio
-// file, by its path), then lossless beats lossy, then bit depth, then
-// sample rate, then size (a bigger file of the same geometry is the
-// less-compressed / better-provenanced rip), then the shallower path,
+// unit's winner: a file the last scan found beats one it did not (Missing:
+// a winner whose file is gone suppresses the one copy a client can play
+// until the deletion pass reaps its row, three full scans later by
+// default; backlog B756 round 2), then a copy every client is served beats
+// one the client format gate holds back (formatgate.Gated: a WavPack or
+// Monkey's Audio file, by its path), then lossless beats lossy, then bit
+// depth, then sample rate, then size (a bigger file of the same geometry is
+// the less-compressed / better-provenanced rip), then the shallower path,
 // then the shorter path, then lexicographic path — the last three exist
 // purely so the order is TOTAL and the winner is stable across scans (a
-// flapping winner would churn indexed_at and iOS deltas).
+// flapping winner would churn indexed_at and iOS deltas). Missing moves
+// only when a file goes or comes back, never on a scan that sees the
+// library as it was, and a walk that could not read a folder spares its
+// rows' counts (the deletion pass's errored subtrees), so a flapping mount
+// does not move it either.
 //
-// The gate's term comes first because suppression is server-wide and the
-// gate is per client (backlog B489): an app that declares no gated format
-// is never served a .wv or an .ape, so a gated winner would leave it no
-// copy of the track at all, where an ungated winner is in every client's
-// view. It costs an app that plays both the gated copy's better geometry,
-// which is the owner's choice: no client ever loses the only copy it can
-// play.
+// The gate's term comes before every term but Missing because suppression
+// is server-wide and the gate is per client (backlog B489): an app that
+// declares no gated format is never served a .wv or an .ape, so a gated
+// winner would leave it no copy of the track at all, where an ungated
+// winner is in every client's view. It costs an app that plays both the
+// gated copy's better geometry, which is the owner's choice: no client
+// ever loses the only copy it can play. Missing comes before the gate
+// because a copy whose file is gone is no copy any client can play (B489's
+// merge of B756): a found .wv over a gone .flac costs an app that declares
+// nothing a row it could not play, and keeps the copy the others can.
 func outranks(a, b Row) bool {
+	if a.Missing != b.Missing {
+		return !a.Missing
+	}
 	if ga, gb := formatgate.Gated(a.Path), formatgate.Gated(b.Path); ga != gb {
 		return !ga
 	}
@@ -180,9 +193,13 @@ func planNestTwinSuppression(members []Row) []string {
 	return out
 }
 
-// nestShallower orders nest-twins: fewer path segments first, then the
+// nestShallower orders nest-twins: a file the last scan found first, as
+// outranks orders every unit (Missing), then fewer path segments, then the
 // generic rank as the deterministic tail.
 func nestShallower(a, b Row) bool {
+	if a.Missing != b.Missing {
+		return !a.Missing
+	}
 	da, db := len(pathSegments(a.Path)), len(pathSegments(b.Path))
 	if da != db {
 		return da < db
@@ -196,11 +213,12 @@ func nestShallower(a, b Row) bool {
 // "DSD and PCM are never cross-suppressed" rule expressed structurally:
 // the sole DSD edition can never lose to a PCM one, or vice versa.
 //
-// A domain is one unit while it holds a copy every client is served, whose
-// winner outranks then makes such a copy (gateUnits). A domain of gated
-// copies alone is one unit per gated format, so a .wv and an .ape of one
-// track are never suppressed against each other: the gate is per format,
-// and a client that declares one of them alone would lose its only copy.
+// A domain is one unit while it holds a copy every client is served whose
+// file the last scan found, which outranks then makes the winner, or copies
+// of one gated format at most (gateUnits). Otherwise it is one unit per
+// format, so a .wv and an .ape of one track are never suppressed against
+// each other: the gate is per format, and a client that declares one of them
+// alone would lose its only copy.
 func planDomainWinners(members []Row) []string {
 	var dsd, pcm []Row
 	for _, m := range members {
@@ -235,20 +253,29 @@ func planDomainWinners(members []Row) []string {
 
 // gateUnits splits one domain into its suppression units by the client
 // format gate (formatgate.Of of each member's path): the whole domain when
-// it holds a copy every client is served, or when its members share one
-// format, and otherwise one unit per gated format, in the order the domain
-// first names each.
+// it holds a copy every client is served whose file the last scan found, or
+// copies of one gated format at most, and otherwise one unit per format, in
+// the order the domain first names each. A copy every client is served whose
+// file is gone (Row.Missing) is then a unit of its own, suppressing nothing:
+// the found gated copies are the only ones any client can play, so a .wv and
+// an .ape beside a gone .flac are no more suppressed against each other than
+// beside no .flac at all (round 3 of backlog B489, the merge of B756).
 func gateUnits(domain []Row) [][]Row {
 	var order []formatgate.Format
 	byFormat := map[formatgate.Format][]Row{}
+	served, gated := false, 0
 	for _, m := range domain {
 		f := formatgate.Of(m.Path)
 		if _, seen := byFormat[f]; !seen {
 			order = append(order, f)
+			if f != formatgate.None {
+				gated++
+			}
 		}
 		byFormat[f] = append(byFormat[f], m)
+		served = served || (f == formatgate.None && !m.Missing)
 	}
-	if _, served := byFormat[formatgate.None]; served || len(order) < 2 {
+	if served || gated < 2 {
 		return [][]Row{domain}
 	}
 	units := make([][]Row, 0, len(order))
