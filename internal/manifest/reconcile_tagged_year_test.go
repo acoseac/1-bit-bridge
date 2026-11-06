@@ -317,6 +317,43 @@ func TestTheTaggedYearIsStoredAndNeverServed(t *testing.T) {
 	}
 }
 
+// TestTheRecordIsStoredLastAfterTheTracksOwnBytes: a row with a record is
+// stored as the Track marshals, the record its last key, a tag that gave no
+// year as an empty object, so the bytes are the ones the hand splice of
+// rounds 1 and 2 wrote (round 3 has encoding/json write it,
+// storedTrackWithRecord), and a stored row reads back with its record.
+func TestTheRecordIsStoredLastAfterTheTracksOwnBytes(t *testing.T) {
+	base := &Track{Path: "Band/Album/01 Track.flac", Title: "Track <01> & more", Year: intptr(2011)}
+	plain, err := marshalForStorage(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		rec  *yearRecord
+		tail string
+	}{
+		{&yearRecord{year: intptr(1968)}, `,"taggedYear":{"year":1968}}`},
+		{&yearRecord{}, `,"taggedYear":{}}`},
+	} {
+		withRecord := *base
+		withRecord.taggedYear = c.rec
+		got, err := marshalForStorage(&withRecord)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := string(plain[:len(plain)-1]) + c.tail; string(got) != want {
+			t.Errorf("stored as\n%s\nwant\n%s", got, want)
+		}
+		var back Track
+		if err := decodeStoredTrack(got, &back); err != nil {
+			t.Fatal(err)
+		}
+		if back.taggedYear == nil || !sameIntPtr(back.taggedYear.year, c.rec.year) {
+			t.Errorf("%s reads back with record %+v, want %+v", got, back.taggedYear, c.rec)
+		}
+	}
+}
+
 // TestTheRecordSurvivesTheEnrichersStamp: the enricher writes back a row it
 // read (UnenrichedTracks, MarkEnriched), whole, and the row keeps its record.
 func TestTheRecordSurvivesTheEnrichersStamp(t *testing.T) {

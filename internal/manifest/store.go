@@ -3176,11 +3176,10 @@ func marshalForStorage(t *Track) ([]byte, error) {
 	clone.DRScore = nil
 	clone.BandwidthHz = nil
 	clone.AudioMD5State = ""
-	raw, err := json.Marshal(&clone)
-	if err != nil || t.taggedYear == nil {
-		return raw, err
+	if t.taggedYear == nil {
+		return json.Marshal(&clone)
 	}
-	return appendTaggedYear(raw, t.taggedYear)
+	return json.Marshal(storedTrackWithRecord{Track: &clone, TaggedYear: &taggedYearJSON{Year: t.taggedYear.year}})
 }
 
 // taggedYearKey is the tags_json key of the year pass's record
@@ -3193,19 +3192,15 @@ type taggedYearJSON struct {
 	Year *int `json:"year,omitempty"`
 }
 
-// appendTaggedYear writes rec into raw, a marshalled Track object, as its
-// last key. A Track always marshals at least its path, so raw is never the
-// empty object and the comma is always due.
-func appendTaggedYear(raw []byte, rec *yearRecord) ([]byte, error) {
-	b, err := json.Marshal(taggedYearJSON{Year: rec.year})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]byte, 0, len(raw)+len(taggedYearKey)+len(b)+4)
-	out = append(out, raw[:len(raw)-1]...)
-	out = append(out, `,"`+taggedYearKey+`":`...)
-	out = append(out, b...)
-	return append(out, '}'), nil
+// storedTrackWithRecord is a Track as tags_json stores it with the year
+// pass's record: encoding/json writes the embedded Track's fields, in their
+// order, and then the record, last, under taggedYearKey. The record was
+// spliced into the marshalled bytes by hand until round 3 of backlog B756,
+// which a size computed from their length did (CodeQL's
+// go/allocation-size-overflow); the bytes are the same.
+type storedTrackWithRecord struct {
+	*Track
+	TaggedYear *taggedYearJSON `json:"taggedYear"`
 }
 
 // decodeStoredTrack decodes a row's tags_json into t, the year pass's record
