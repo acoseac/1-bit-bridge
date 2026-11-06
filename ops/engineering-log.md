@@ -77755,3 +77755,43 @@ sink's Drop and Drain (the largest, the check after open, cannot move: its Don't
 then adds B5's bullet in section 9.1's wording and its long form; it applies under `git apply
 --check`, an independent applier reproduces the copy byte for byte, no block or heading is lost,
 and with it player.md is 96,906 bytes (96.9 %) and every budget holds.
+
+**Round 2: the review's four points** (068ee329, each red first and with a negative control).
+(1) Entity IDs are unique within an audio function alone, so on a unit with two functions the
+usbmixer entries of the other function's unit 10 stood for the path's unit 10, whose own control
+the table did not show. `UnitControl` now carries its block's `ctrlif` (`ControlInterface`, nil
+where the table does not say), `ParsePlayback` returns the control interface it resolved
+(`Path.ControlInterface`), and a stage counts only that block's entries; an entry that does not
+say its function is unverifiable (`TestAnotherAudioFunctionsControlsDoNotStandForThePaths`, over
+two functions numbering their entities alike). (2) This settles B748: every control a feature unit
+declares but mute and audio class 2's read-only underflow and overflow makes it a stage the check
+must see, delay and the switches (automatic gain, bass boost, loudness, the phase inverter)
+included, since a switch that is on rewrites the DoP markers and the DSD bits as a level does. A
+switch is mapped through the table by its selector (each entry's `Info` line, `control=`, now
+`UnitControl.Selector`) and must be a boolean reading off on every channel; one on, unreadable or
+unmapped, or an entry that does not say its selector, is `dop_gain_unverifiable`. Mute alone
+refuses nothing: muted DoP is silence, not altered bits.
+`TestAFeatureUnitsSwitchesAreStagesAndItsMuteIsNot` holds a loudness-only unit (off passes; on,
+unmapped, unreadable, or its table unread, refuses; audio class 1's on refuses too), each switch
+on its master or its channels, and a mute-only unit, muted or not, mapped or not, passing;
+`TestTheParseReadsBothAudioClasses` reads the switches and delay. This
+corrects round 1's "a gain stage when it declares a gain control" and "Switches and enumerations
+stay allowed" above, which now hold only off the path's stages; §3.4's Topology 1, Topology 2 and
+refusal list say exactly this.
+(3) A conversion target's packing kept its altset's bits over an accepted probe's fewer refined
+bits; those now bound it, as the DoP carrier's do (`TestTheConversionTargetIsTheDACsBest`: 16
+accepted under a 24-bit altset target 176.4 kHz at 16 bits; §4.3 says so). (4) `Occurrence`'s
+identity was a boolean the caller computed, so a released pause, whose device is closed, kept its
+frames across a DAC swapped for another model on its port, where its reopen would have played the
+old plan to the new unit. `Occurrence.Opened` is now the identity the occurrence's sink last opened
+(`policy.Identity`: the model's key and the canonical bcdDevice; `Set.Identity` the set's), kept
+across a pause's release; only an occurrence that never had a sink is nil, judged by its plan
+alone (`TestAChangeIsReconciledPerOccurrence`'s swapped model; §3.5 says so). Red first: the new
+fields went in with the logic unchanged, and the five tests named above failed on their own
+assertions, the rest of the package green. Eleven negative controls, each an overlay of a mutated
+copy whose anchor the harness asserts occurs exactly once, each red in its named test: the ctrlif
+ignored, an entry with no function taken, the path's control interface left unset, the switches
+dropped from the stage selectors, a switch not read, only a switch's first channel read, mute made
+a stage, an entry with no selector taken for a loudness, the probe's bits ignored, a released
+pause taken for one with no sink, and the identity ignored. Round 1's 24 controls, their anchors
+moved to round 2's code, are all still red.

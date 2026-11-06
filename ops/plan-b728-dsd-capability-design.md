@@ -545,25 +545,35 @@ offer.
   altsetting the stream file names for an altset. The interface's terminal link is its input
   terminal, and every output terminal but a USB streaming one, which returns samples to the host (a
   capture's or a loopback's), is followed upstream through its units' sources: a unit that reaches
-  the input terminal is on the playback path. On it a feature unit is a gain stage when it declares
-  a gain control (volume, bass, mid, treble, graphic equalizer, and audio class 2's input gain and
-  input gain pad); a selector unit passes samples as they are; any other unit (a mixer, processing,
-  extension or effect unit, a sample rate converter) is `dop_gain_unverifiable`, since no control
-  shows what it does to the samples. A topology the parse cannot follow (a source naming nothing or
-  a clock, a cycle, a subtype the class does not define on the way, an input terminal that reaches
-  no output, a descriptor cut short, no control interface or two holding the streaming one, UAC3)
-  is refused, never taken for clean. Every altset that lists the carrier at r is checked, since the
-  kernel chooses among them at the open.
+  the input terminal is on the playback path. On it a feature unit is a stage when it declares any
+  control but mute and audio class 2's read-only underflow and overflow (B748's decision, B5 round
+  2): a level (volume, bass, mid, treble, graphic equalizer, delay, and audio class 2's input gain
+  and input gain pad) or a switch (automatic gain, bass boost, loudness, and audio class 2's phase
+  inverter), each of which rewrites the DoP markers and the DSD bits; a mute alone makes no stage,
+  since muted DoP is silence, not altered bits. A selector unit passes samples as they are; any
+  other unit (a mixer, processing, extension or effect unit, a sample rate converter) is
+  `dop_gain_unverifiable`, since no control shows what it does to the samples. A topology the parse
+  cannot follow (a source naming nothing or a clock, a cycle, a subtype the class does not define
+  on the way, an input terminal that reaches no output, a descriptor cut short, no control
+  interface or two holding the streaming one, UAC3) is refused, never taken for clean. The parse
+  returns the audio control interface it resolved, its function's. Every altset that lists the
+  carrier at r is checked, since the kernel chooses among them at the open.
 
   **How a feature unit maps to its controls** (B5). The kernel synthesizes control names, from
   string descriptors, terminal types and its quirk maps, so a name alone may not identify a unit.
-  The mapping is the kernel's own table: `/proc/asound/card<N>/usbmixer` lists, under each `Unit:`
-  line, the `Control: name=…, index=…` the USB audio driver made of that unit. A gain stage needs a
-  visible MIXER control in it (an integer, or one that cannot be read) for each control the driver
-  makes of the stage: one for each gain control on its master channel, one for each on its logical
-  channels together. A stage with fewer, as one whose volume the driver skips or a quirk map hides,
-  and a table that does not read, are `dop_gain_unverifiable`; each control the table maps to a gain
-  stage on the path is a level control whatever its name, a capture-marked one included.
+  The mapping is the kernel's own table: `/proc/asound/card<N>/usbmixer` holds one block a mixer
+  (`USB Mixer: … ctrlif=<interface> …`), and in it, under each `Unit:` line, the
+  `Control: name=…, index=…` the USB audio driver made of that unit and the `Info: … control=…`
+  line that names the control's selector. Entity IDs are unique within an audio function alone, so
+  an entry counts only in the block of the path's own function (B5 round 2: two functions can each
+  have a unit 10), and by its selector; an entry for a stage's unit that does not say its function
+  or its selector is `dop_gain_unverifiable`. A stage needs a visible MIXER control for each
+  control the driver makes of each control it declares, one on its master channel and one on its
+  logical channels together: an integer, or one that cannot be read, for a level; a boolean, or one
+  that cannot be read, for a switch. A stage with fewer, as one whose volume the driver skips or a
+  quirk map hides, and a table that does not read, are `dop_gain_unverifiable`; each control the
+  table maps to a level of a stage on the path is a level control whatever its name, a
+  capture-marked one included, and each it maps to a switch must read off on every channel.
 
   **Every level control on the card counts**, not only the path's. A name marks a capture control
   when its direction, the word before its last, is `Capture` (ALSA's control-name convention:
@@ -574,11 +584,14 @@ offer.
   exactly, at device and subdevice 0.
 
   DoP passes only in one of two topologies:
-  1. **No gain stage.** The playback path has no feature unit, and the card has no level control.
-     This is the topology today's unconstrained policies require (`authorization.go:161-174`;
-     `internal/player/qualification/approval.go:218-229`).
-  2. **Every gain stage visible and at unity.** Each level control is at unity in one of three
-     ways:
+  1. **No stage.** The playback path has no feature unit that declares a control but mute and audio
+     class 2's read-only underflow and overflow, and the card has no level control. This is the
+     topology today's unconstrained policies require (`authorization.go:161-174`;
+     `internal/player/qualification/approval.go:218-229`), but for a mute-only unit, which they
+     refuse: they refuse any feature unit and any MIXER control, a mute's included.
+  2. **Every stage visible, its switches off, and every level control at unity.** Each switch the
+     table maps to a stage (automatic gain, bass boost, loudness, phase inverter) reads off on
+     every channel. Each level control is at unity in one of three ways:
      - it reads 0 dB on every channel by its dB TLV;
      - it is one of the profile's `analogVolumeControls` (§2.1);
      - it is one of the profile's `unityAtRawMax` controls (§2.1), reads exactly its `rawMax` on
@@ -601,15 +614,21 @@ offer.
       cannot be read;
     - a `unityAtRawMax` control whose range's maximum is no longer `rawMax`, or on a firmware the
       entry does not list;
-    - a feature unit on the playback path with no visible level control;
+    - a stage on the playback path with fewer visible controls than the driver makes of it (a
+      feature unit with no visible level control among them), or none the table maps;
+    - a stage's switch (automatic gain, bass boost, loudness, phase inverter) on on any channel, not
+      mapped through the unit table, or not readable as off (B748);
+    - an entry of the unit table for a stage's unit that does not say its function (`ctrlif`) or
+      its selector;
     - descriptors that cannot be read or parsed.
 
   Where both kinds hold, `dop_gain_unverifiable` outranks `dop_gain_not_unity`: a stage the check
   cannot see refuses whatever the levels read (B5).
 
-  A missing control never stands for unity while the descriptors show a gain stage. Switches and
-  enumerations are not gains, and are allowed: a muted switch is silence, not corruption, and an
-  enumeration that selects a DSP mode is the profile caveats' domain.
+  A missing control never stands for unity while the descriptors show a stage. Elsewhere, switches
+  and enumerations are not gains, and are allowed: a mute, on the path or off it, is silence, not
+  corruption, and an enumeration that selects a DSP mode is the profile caveats' domain; a
+  playback-path feature unit's other switches are stages (above).
 - **The analogue allowlist** (Argon). Some DACs expose an analogue attenuator after their DoP
   decoder, as a `Master Playback Volume` beside a digital `PCM Playback Volume`. Requiring 0 dB on
   it would make the user run the analogue stage at full level, against the first-use guidance. A
@@ -669,13 +688,17 @@ membership and a flag: its plan, its own frames submitted to its sink, written t
 played (the sink's `Submitted`, `Written` and `Played`, from its first frame), whether it was heard
 (sticky: a released pause is still the occurrence heard, though nothing of it is the kernel's any
 more), whether its output retires (today's reconciliation fences a retiring tail as an open
-output, `authorization.go:569-573`), and whether its output's node is still the identity the new set
-was computed for. It is kept while the new set plays its plan and its node is the set's identity;
-revoked once it was heard, a frame of it is the kernel's or its output retires, or while its frames
-sit in a sink on a node that is not the set's identity, so an identity change that leaves the same
-tuple available still revokes; re-planned otherwise. Every revocation, and a re-plan of an
-occurrence with frames in a sink, interrupts what is heard: a user's write needs its `interrupt`
-for either, and a safety change acts without asking.
+output, `authorization.go:569-573`), and the identity (the model's key and the firmware) its sink
+last opened, kept across a pause's release, which closes the device and keeps the frames for a
+reopen; only an occurrence that never had a sink has none (B5 round 2: round 1's identity held
+while no output was open, which passed a released pause, its device closed). It is kept while the
+new set plays its plan and that identity, where it has one, is the set's; revoked once it was
+heard, a frame of it is the kernel's or its output retires, or while its frames sit in a sink that
+opened another identity, so an identity change that leaves the same tuple available still
+revokes, a released pause's included, whose reopen would write its taken-back frames to the unit
+that took the port; re-planned otherwise. Every revocation, and a re-plan of an occurrence with
+frames in a sink, interrupts what is heard: a user's write needs its `interrupt` for either, and a
+safety change acts without asking.
 
 **Kept, unchanged:**
 
@@ -865,6 +888,9 @@ The chain, for 176.4 kHz output:
   - 24 valid bits, in the first packing the table offers (`S24_3LE`, `S24_LE`, `S32_LE`;
     `packing.go:15-19`);
   - 16 bits only for a DAC that takes no 24-bit target.
+  - A packing's significant bits are its altset's `Bits` line (the format's own depth without one),
+    held to an accepted probe's refined bits where those are fewer, as the DoP carrier's are: they
+    are what the open commits (B5 round 2).
 - **Integer ratios only,** so there is no resampler. 176.4 kHz / 24-bit is also the faithful
   rendition's target (`pcm-v2-176400-24`; `internal/transcode/dsd_render.go:20`, `:69-79`).
 - **Why not 352.8 kHz.** Nothing passes the 40 kHz stop that 176.4 kHz cannot carry, and stage 3 at
@@ -1609,15 +1635,15 @@ rule that permits it.
      capabilities × the DAC's choice feeds selection and the published epoch.** `auto` plays native
      first where the kernel offers it, DoP where the profile heard it or the user confirmed it, and
      converts the rest; an explicit `native` or `dop` refuses what it cannot play. DoP needs three
-     things: its carrier with at least 24 significant bits; a gain topology §3.4 passes (no gain
-     stage, or every level control at 0 dB or on the profile's analogue list); and its first use
-     acknowledged. A listener's rejection refuses a transport at a rate in every mode. A native↔DoP
-     edge needs no report in production; the transition scenario is the harness's. **Don't play DoP
-     on a DAC with no DoP claim without the user's confirmation, with a level control off 0 dB,
-     unreadable or missing beside a gain stage, or before its first use was acknowledged; play a
-     transport a listener rejected; fall back to another transport at run time; publish anything
-     but the effective set; join same-carrier PCM and DoP; or put the USB port or serial on the
-     wire.**"
+     things: its carrier with at least 24 significant bits; a gain topology §3.4 passes (no stage,
+     or every stage visible with its switches off and every level control at 0 dB or on the
+     profile's analogue list); and its first use acknowledged. A listener's rejection refuses a
+     transport at a rate in every mode. A native↔DoP edge needs no report in production; the
+     transition scenario is the harness's. **Don't play DoP on a DAC with no DoP claim without the
+     user's confirmation, with a level control off 0 dB, unreadable or missing beside a stage, a
+     stage's switch on or unmapped, or before its first use was acknowledged; play a transport a
+     listener rejected; fall back to another transport at run time; publish anything but the
+     effective set; join same-carrier PCM and DoP; or put the USB port or serial on the wire.**"
 10. **A new section in `.claude/rules/player.md`, "Player DSD by capability and choice (B728)".**
     Each bullet lands with its code:
     - B1: "**Until B7, production reads an approval record only through the legacy reader, which
@@ -1648,14 +1674,18 @@ rule that permits it.
       rejection outranks every positive input.** **Don't word a rung as verified, decoded,
       bit-exact or a lock, count a rung across a bcdDevice change, publish DoP's driver acceptance
       as more than its carrier's, or let an earlier `clean` survive a later `noise`.**"
-    - B7: "**Admission is per rate. DoP plays only where the playback path shows no gain stage,
-      or every level control reads 0 dB by its dB scale, is on the profile's analogue list, or is a
-      raw-maximum control at its raw maximum on a listed firmware. A policy change is reconciled per
-      occurrence (kept, re-planned or revoked), and a user's write revokes only with
-      `interrupt`.** **Don't admit a rate a migrated acknowledgement does not cover, write a
-      control, take a missing control or one with no dB scale for unity unless the profile's
-      evidence says its raw maximum is, keep DoP playing once a control leaves unity, revoke an
-      occurrence the new set still plays, or skip a successor a change re-planned.**"
+    - B7: "**Admission is per rate. DoP plays only where the playback path shows no stage, or
+      every stage's controls are visible in its audio function's block of the kernel's table, its
+      switches read off on every channel, and every level control reads 0 dB by its dB scale, is on
+      the profile's analogue list, or is a raw-maximum control at its raw maximum on a listed
+      firmware. A policy change is reconciled per occurrence (kept, re-planned or revoked), and a
+      user's write revokes only with `interrupt`.** **Don't admit a rate a migrated
+      acknowledgement does not cover, write a control, take a missing control or one with no dB
+      scale for unity unless the profile's evidence says its raw maximum is, count another audio
+      function's entries for the path's, keep DoP playing once a control leaves unity or a switch
+      turns on, revoke an occurrence the new set still plays on the identity its sink last opened,
+      keep one whose sink last opened another, a released pause's included, or skip a successor a
+      change re-planned.**"
     - B10: "**`dsdconv` is linear phase and unity gain, 30 kHz pass / 40 kHz stop at 100 dB or
       more (20 kHz at 44.1 kHz), starts and ends at numeric zero, saturates and counts, and rounds
       24-bit output with no added dither (TPDF at 16 bits).** **Don't add gain the stream was not
