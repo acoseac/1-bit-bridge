@@ -8,11 +8,14 @@ paths:
   - "internal/manifest/playlists*.go"
   - "internal/manifest/favorites*.go"
   - "internal/manifest/playlist_files*.go"
+  - "internal/manifest/format_view*.go"
+  - "internal/manifest/search*.go"
   - "internal/manifest/sync_*.go"
   - "internal/manifest/history*.go"
   - "internal/advertise/**"
   - "internal/mdns/**"
   - "internal/urlquery/**"
+  - "internal/formatgate/**"
   - "internal/admin/query*.go"
   - "internal/admin/pairing*.go"
 ---
@@ -52,6 +55,55 @@ Audited PR-by-PR; verified clean at the time of this section's introduction. Re-
   `ListTracks`/`StreamTracks`, `UnenrichedTracks`, `GetTrack`, `GetTrackWithStat` (the output reading's row), and every admin
   rollup (operator truth). `/v1/list|stat|read|download` are path-keyed and
   unfiltered so stale clients keep working.
+- **A WavPack or Monkey's Audio row reaches only a request that declares its
+  format in `X-Bridge-Formats`, judged by its path's extension, never its
+  codec; `/v1/health.features` says `wavpackApe`** (2026-11-06, backlog B489;
+  `ProtocolVersion` stays 1). The shipped app upserts every manifest row and
+  plays neither format, so a request that declares none, every app before
+  B489, is served what it was before. `internal/formatgate` is the vocabulary
+  (`Parse`: the tokens `wavpack` and `ape`, comma-separated, trimmed, in any
+  case, an unknown one ignored, header lines adding up; `Of`: the last path
+  element's extension), and `formatViewSQL` and `ungatedPathSQLT`
+  (`format_view.go`) are its SQL twins, held to `Of` over every shape of path.
+  Every `/v1` reader of the served set takes the request's view as an
+  argument, so no surface can fall back to an ungated read, and each sends
+  `Vary: X-Bridge-Formats`. **Gated**: the manifest full, paged and delta
+  (rows, `total`, `enrichmentProgress`'s two counts, a delta's tombstones
+  before its cap), health's `tracksIndexed` (cached per view), search, the
+  smart mixes (an item left out, the positions after it closed up, an emptied
+  family not sent) and the playlist feed (a gated line unresolved, the album
+  rule over the view's tracks, the version naming the view:
+  `playlistFeedRulesVersion` 3, so one view's ETag is never another's 304).
+  **Not gated, on purpose**: `folders`; the filesystem views and every
+  path-keyed read; the documents a device writes (playlists, favorites,
+  history), which a client reads and writes back whole, so a filtered read
+  would erase another device's entries; the events; and the DLNA
+  ContentDirectory, which offers neither format to any renderer
+  (`dlna-upnp.md`). A manifest page cursor continues only its own view: the
+  zero view's stays the raw path, a declared view's is an opaque token, and
+  another view's is `410` `manifest_cursor_view`. A delta's `since` names no
+  view, so a client's first sync that declares a format is a full one, which
+  PROTOCOL.md says is the client's to make. `Track.Correction`
+  (`correction`, a hybrid stream's correction file: `scanner.md`) is an
+  additive pointer, `omitempty`. **Don't gate by codec (a refused row has
+  none, a tombstone no row), give a surface an ungated fallback, filter a
+  document a device writes, or let one view's cursor or ETag answer
+  another.** `TestTheFormatViewSQLIsFormatgatesRule`,
+  `TestParseReadsTheHeaderAsTheProtocolSays`,
+  `TestTheManifestServesEachViewItsRows`,
+  `TestEachViewPagesItsOwnRowsAndACursorContinuesOnlyItsView`,
+  `TestAPageCursorContinuesOnlyItsOwnView`,
+  `TestADeltaServesEachViewItsRowsAndTombstones`,
+  `TestTheStreamedManifestIsTheBuiltOneInEveryView`,
+  `TestSearchServesEachViewItsHits`, `TestSmartPlaylistsServeEachViewItsItems`,
+  `TestThePlaylistFilesServeEachViewItsMembers`,
+  `TestThePlaylistFeedJudgesTheAlbumRuleInEachView`,
+  `TestADevicesDocumentsKeepAWavPackEntryForEveryClient`,
+  `TestTheFilesystemViewsAreNotHeldBack`,
+  `TestAnAllWavPackLibraryIsAnHonestEmptyFeedToAClientThatDeclaresNothing` and
+  `TestTheGoldenManifestOfEachView` (its goldens in
+  `internal/manifest/testdata/b489`, written by `BRIDGE_UPDATE_B489_GOLDENS=1`,
+  which the iOS mirror's fixtures copy) pin it.
 - **Optional numeric/bool `Track` fields are pointers.** Non-pointer +
   `omitempty` silently drops zero/false, so iOS decodes `nil` instead of
   `Some(false)`. Same trap with `omitempty time.Time`: Go does NOT drop a zero

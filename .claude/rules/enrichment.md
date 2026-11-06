@@ -423,6 +423,12 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   name and bounded by the absolute library roots.
 - **iTunes is a fallback, not a primary source**; artwork cache keys stay
   MB-derived so the wire shape is unchanged.
+- **WavPack and Monkey's Audio rows are enriched and harvested like any
+  other row** (2026-11-06, backlog B489): the client format gate holds them
+  back at serving (`wire.md`), never at the enricher's work query or the
+  harvest's release set, so an app that declares them receives them
+  enriched. **Don't leave them out of an enrichment or harvest query.**
+  `TestWavPackAndMonkeysAudioRowsTakePartInEnrichment` pins it.
 
 ## Duplicates and the served set
 
@@ -438,3 +444,22 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   IS the product decision; don't flip `includeRouted` without making it.
 - Tier names are evidence claims: only `identical-audio` may say "reclaimable";
   `inconclusive` is never suppressed.
+- **A copy every client is served outranks one the client format gate holds
+  back, before every other term, and a domain of gated copies alone is one
+  suppression unit per gated format** (2026-11-06, backlog B489, the owner's
+  decision in its brief). `dupe_suppressed` is one flag for every client and
+  the gate (`X-Bridge-Formats`, `wire.md`) is per client: a `.wv` winning over
+  a `.flac` of one album would leave an app that declares nothing no copy of
+  it at all. So `outranks` asks `formatgate.Gated` first, which costs an app
+  that plays both formats the gated copy's better geometry and never costs a
+  client its only copy; and `gateUnits` splits a domain that holds no ungated
+  copy by format, so a `.wv` and an `.ape` of one track are never suppressed
+  against each other (a client may declare one alone), while two `.wv` copies
+  are ranked as any same-format pair. `WAVPACK-LOSSY` is in the ranking's
+  lossy set (`lossyCodecs`, `IsLossyCodec`'s mirror,
+  `TestDupesLossyCodecsMirrorIsLossyCodec`). The partition is untouched: this
+  is the bridge's election, not the iOS normalizer's grouping. **Don't let a
+  gated copy win over one every client is served, or suppress one gated
+  format against another.** `TestAGatedCopyNeverWinsOverACopyEveryClientIsServed`,
+  `TestAGatedCopyIsSuppressedAgainstItsOwnFormatAsAnyCopyIs` and
+  `TestALossyHybridWavPackCopyIsLossy` pin it.
