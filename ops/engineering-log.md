@@ -78043,3 +78043,200 @@ applied, which `git apply --check` takes; the qualification check
 ok. Not run here: macOS and Windows natively, CI's runners and the iOS app.
 
 **Round 2 (Codex and the Claude API reviewer on the branch, and the owner on "of"; no further bump, since 31 has not shipped).** Round 1 added `trk` and `tpa` to the presence gates as aliases of every format, so a FLAC holding `TRK=3/12` and `TPA=2/2` and no TRACKNUMBER or DISCNUMBER stored two 0s where main stored none: dhowden and `numberAsWritten` read only the canonical Vorbis keys. They are asked for in an ID3v2.2 tag alone now (`id3v22HasFrame`, by the exact key); the gates' other aliases stay as main has them. A "/" may follow whitespace (`3 / 12`, `3 /12`, `3 /` read 3, as dhowden's ID3 reader always read the first), and "of" is matched in any case (`3 OF 10`, `3 Of 10`), while `1.2`, `2-1`, `3-A`, `2024-01-01`, `3 - 12` and `3of10` still read 0. So the forms table above now has `3 / 12` and `3 OF 10` reading 3, and an ID3v2 frame's non-zero answer differs from the rule's only for an overflow dhowden saturates. Red first, the new rows on a snapshot of 7f67cb48's extractor: six table rows, twelve Vorbis subtests (the spaced slash, `OF`, and the file with only `TRK` and `TPA`, which stored 0/0 for absent numbers, in each of the four readers) and the two ID3v2 `3 OF 12` subtests. Controls on the fix, each red: `trk` and `tpa` back as aliases of every format (the four TRK/TPA-only subtests); the ID3v2.2 gate answering no (the four present ID3v2.2 rows); no whitespace before a "/" (four table rows, four Vorbis subtests); "of" in lower case only (two table rows, six subtests); and round 1's NC4 again, an ID3v2 frame always read by the rule, now red on the two overflow rows alone (the upgrade test's `8 / 12` reads 8 either way). The new tests on linux/386 too; `make test-fast`, ok (83 packages); `make test TEST_PKGS=./internal/manifest/...`, ok (race, 1,339 s); `make vet` on the five targets, ok; gofmt, clean; `make docs-check`, ok, on the tree and with `rules-b743.patch` and then `rules-b743-r2.patch`, the rules line's round-2 wording, applied. The long form in `ops/History-rules-scanner.md` says the same.
+
+## 2026-11-06 — B728 B5: the effective policy, the DoP gain topology and per-occurrence reconciliation
+
+B728's B5 (`ops/plan-b728-dsd-capability-design.md`, sections 1, 3, 9.1 and B5's row in 11).
+Worker b728-b5 on legion0 (Ubuntu 26.04, linux/amd64, Linux 7.0, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`), branch `feat/b728-b5-effective-policy` from main 4c1e44e3, the orchestrator's
+brief with its eight binding notes. B5 changes nothing a user sees: `internal/player/policy` is
+pure and nothing calls it; B7 is the cutover. No guarded path changes (section 8), so
+`qualificationVersion` stays 39. The rule goes into `.claude/rules/player.md` through a checked
+patch (`rules-b728-b5.patch`); this worker cannot write `.claude/`.
+
+**What `Effective` takes and returns.** `policy.Effective(policy.Inputs)` takes values alone: the
+bound unit's `dacprofile.Unit` (its key and bcdDevice), the profile database, the player's DSD
+state, the kernel release, the bound PCM device's playback altsets (its stream file's), the probe
+cache's answers for the unit, and a `policy.Mixer` for the DoP gain check (the sysfs descriptors
+with the active configuration, the control snapshot read with `AllowUnreadable`, and the kernel's
+table of the controls its USB audio driver made of each unit). It reads no file, kernel, clock or
+global. It returns a `Set`: for DSD64, DSD128 and DSD256 a `Plan` (native or DoP with its tuple:
+transport, format, rate, pause, tail and prefill; converted with its target; or refused with
+section 3.2's word and a detail), beside what was established of each transport there (`Native`,
+`DoP`: offered, the rung and its date, acknowledged, rejected, clean, the gain verdict, the
+profile's claims and refusal, the confirmation), the choice that applied, the conversion target,
+and the model and firmware it was computed for. Any other rate is `rate_not_supported`. Health is
+not an input: B7 asks the hotplug snapshot's freshness first, as `readPermission` does, since no
+section 3.2 word refuses a stale reading.
+
+**The order.** (1) A state that does not read (`State.Unreadable`) refuses every rate as
+`dsd_state_unreadable`, asked before `ChoiceFor`, over every choice and every positive input,
+conversion included (note 5: its own test, no seventh row). (2) The choice is the DAC's own or
+defaultMode with no cap, and section 3.2's table decides each rate, the rejection rule outranking
+every positive input. (3) A profile's refused DoP rate outranks its stated maximum and the
+confirmation; only this box's own latest clean answer for DoP at that rate overrides it (note 6's
+decision; §3.2 corrected). B2's lint allows `refusedBitRates` above `statedMaxBitRate`, and the
+seed's Mytek Brooklyn DAC+ refuses DSD256 with nothing heard or stated. The native section holds
+no refused rate: its `maxBitRate` bounds what it reports, never what is offered. (4) Where several
+conditions fail under an explicit mode, the reason is the first of: what the DAC does not offer, a
+listener's rejection, what the gain check cannot see, then what the user can change (§3.2 now
+lists the two orders). (5) `auto` on a DAC that takes no conversion target refuses as
+`conversion_not_offered`, as `convert` does.
+
+**Re-arming first use.** Section 3.2's "not re-armed since by a rejection" has no mark in B3's
+state, and an answer's date (`on`, a day) cannot order it against `acknowledgedAt`. B5 reads the
+acknowledgement as the state holds it, and the re-arm is the answer-writer's: B12's write that
+records a noise or nothing takes the transport's `firstUse` entry away in the same
+`Store.Update` (§3.2 and §6.4 say so). A later acknowledgement under `auto` then re-arms nothing
+the rejection still refuses at its rate.
+
+**The rungs.** Each native or DoP tuple carries its highest rung (`Plan.Evidence`, with its date):
+listener confirmed (the latest answer under the unit's firmware, clean), streaming observed and a
+durable driver acceptance under this firmware (the acceptance under the running kernel alone),
+then the probe's acceptance, then reported. B2 makes a kernel quirk's native claim state no rate
+(`maxBitRate` 0), so it reports none: §1.1's "native from the kernel's DSD quirk" disagreed with
+the merged code, and was corrected. DoP's acceptance is its carrier's alone (`DoPCarrier`), never
+promoted.
+
+**The DoP gain check** (`policy.CheckGain`, section 3.4). The parse (`policy.ParsePlayback`)
+takes the descriptor bytes, the active configuration, and the streaming interface and altsetting
+an altset names (note 7). It finds the configuration by its value and wTotalLength, the
+streaming setting (one, with an isochronous endpoint toward the device), the control interface
+that holds it (audio class 1: its header's list; audio class 2: an interface association),
+follows every output terminal but a USB streaming one upstream through its units' sources, and
+puts on the path every unit that reaches the streaming interface's input terminal. A feature unit
+there is a gain stage when it declares a gain control (volume, bass, mid, treble, graphic
+equalizer; audio class 2's input gain and input gain pad); a selector passes samples; every other
+unit is unverifiable. A topology it cannot follow is refused, never taken for clean: a source
+naming nothing or a clock, an output named as a source, a cycle, an undefined subtype on the way,
+no output reached, a descriptor cut short, ID 0 or a duplicate, no or two control interfaces,
+UAC3. Every altset listing the carrier is checked.
+
+**How a feature unit maps to a visible control** (note 7). The kernel synthesizes names (string
+descriptors, terminal types, quirk maps), and none of the control's identity names its unit, so
+no name and no count over the snapshot can tell a hidden stage from another unit's control. The
+mapping is the kernel's own table, `/proc/asound/card<N>/usbmixer`: under each `Unit:` line, the
+`Control: name=…, index=…` the driver made of that unit. A stage needs a visible MIXER control
+there, an integer or an unreadable one, for each control the driver makes of it (one for each
+gain control on its master, one for each on its channels); fewer, as when the driver skips a
+bogus volume range, makes no control of a gain on the channels but not the first, or a quirk map
+hides the unit, and a table that does not read, are `dop_gain_unverifiable`. Each control the
+table maps to a stage on the path is a level control whatever its name, a capture-marked one
+included: the driver names a stage after the first output terminal it parses, so a stage on a
+playback path and a loopback can be named a capture's. B7 reads the table, bounded, beside the
+descriptors; a box with no usbmixer refuses DoP on any path with a gain stage, failing closed.
+
+**Every level control** (note 4). A MIXER control that is an integer, or that could not be read
+(`internal/alsactl/control_linux.go:57`: its identity, its `ReadError`, `Type` 0, asked before
+any type filter), whose name's direction, the word before its last, is not `Capture`, counts, on
+the whole card. Exemptions are a known DAC's alone and matched exactly (interface, name, index,
+device and subdevice 0): an analogue control is passed over; a raw-maximum control passes only
+reading its rawMax on every channel, its range's maximum still rawMax, on a listed firmware
+(below it `dop_gain_not_unity`; a changed range, an unlisted firmware, an unreadable control
+`dop_gain_unverifiable`). Every other one must read exactly 0 dB on every channel by its TLV:
+`DB_SCALE`, `DB_MINMAX` and its mute variant, `DB_LINEAR` (exact in rationals: 10^(k/2000) is
+rational only for k a multiple of 2000), `DB_RANGE`, or one in a container. alsa-lib's conversion
+truncates to hundredths, so a value just above 0 dB can print 0.00 dB; B5 compares exactly.
+Unverifiable outranks not unity. Switches and enumerations stay allowed, as §3.4 decides.
+
+**Reconciliation** (`policy.Reconcile`, note 8). Per occurrence, from separate inputs: its plan,
+its own frames submitted, written and played, whether it was heard (sticky), whether its output
+retires, and whether its node is the new set's identity. Kept while the set plays its plan and
+its node is the set's; revoked once heard, a frame the kernel's or its output retiring, or while
+its frames sit in a sink on another identity's node (an identity change that leaves the same
+tuple available still revokes); re-planned otherwise. Every revocation, and a re-plan with frames
+in a sink, interrupts what is heard: a user's write needs its interrupt for either.
+
+**For B7.** B7 calls `Effective` at each session, activation, 100 ms tick and supervisor refresh
+in `readPermission`'s place, `CheckGain` at the check after open and on the monitor, and
+`Reconcile` for each occurrence when the set changes, passing the values above. Three things it
+must settle: the sink's and the approval's prefill bound is 500 ms (`DSDConfig.validate`,
+`approval.go`'s tuple check) while B2's lint allows 5,000 ms and the seed's Chord Hugo 2 carries
+700 ms, so its DoP tuple's prefill would be refused at the open; `ReasonRateNotSupported` repeats
+`playback.ReasonRate`'s word, which B7 unifies; and the usbmixer reader, with a capture of the
+owner's DAC as its fixture.
+
+**Red first, the controls and the checks.** Red first through `go test -overlay` with the four
+entry points stubbed (`Effective` returning an empty set, the gain check unity, the parse an empty
+path, `Reconcile` keep): every named test failed on its own assertion, the package's 27 tests with
+them. The negative controls, each an overlay of a mutated copy (the tree's files never written),
+each red: a rejection ordered below a positive input (streaming observed admitting native over a
+noise, `TestARejectionOutranksEveryPositiveInput`); the rejection ignored; the cap ignored
+(`TestAutoConvertsAboveTheCapAndAnExplicitChoiceRefuses`, the table); an absent control as unity
+(`TestAMissingControlIsNotUnity`); level controls restricted to names ending in `Playback Volume`
+(`TestEveryLevelControlCountsWhateverItsName`); a raw-maximum control passing below its maximum
+(`TestARawMaxControlPassesOnlyAtItsRawMaximum`); an acknowledgement covering a rate it does not name
+(`TestAdmissionIsPerRateForAMigratedAcknowledgement`); DoP on an unknown DAC without confirmation
+(`TestNoDoPOnAnUnknownDACWithoutConfirmation`); a profile's refused rate admitted
+(`TestAProfilesRefusedRateOutranksItsStatedMaximumAndAConfirmation`); the unreadable state ignored
+(`TestAStateThatDoesNotReadRefusesEveryRate`); and fourteen more: an unreadable control filtered by
+its type first, capture exclusion by substring, exemptions folded by case, USB streaming outputs
+followed, an unresolved topology taken for clean, other units passed, reconciliation by membership
+alone or by audibility alone, DoP's gain ignored under auto, a rung across firmware, DoP's
+acceptance promoted, unverifiable ordered below not unity, and `DB_LINEAR` read loosely. Eight
+drift controls edited section 3.2's table in the design file (a clause dropped, a clause added, a
+clause reworded, an otherwise cell changed, a cell swapped, a refusal word changed, the cap
+dropped, a row dropped), each red in `TestTheEffectivePolicyTable`, the file's bytes restored and
+checked after. The first gate run failed two sweeps, both this worker's: the docblock sweep
+(`designTable`'s comment on `designRow`, fixed in 9c307fae) and the build-site census, which
+reached a scratch script under `.tmp/` (moved under `.tmp/_b728-b5/`, which the sweeps skip). The
+gate at 9c307fae, in one call under the build slot: `make fmt` changed nothing; `make vet` native,
+`GOOS=windows`, `GOOS=darwin`, `GOOS=linux GOARCH=386` and `GOARCH=arm64`, clean; `go test -race` on
+the package ok; `make test` 86 packages ok, none failed, in 29 minutes, alsa and alsapcm run here;
+`make build-all` with `check-build-tags: OK`; `make docs-check` ok; the qualification check OK from
+4c1e44e3, version 39 standing (no guarded path). The package's tests also pass as linux/386. The
+rules patch (`rules-b728-b5.patch`) moves player.md's largest movable entry's long form, the
+sink's Drop and Drain (the largest, the check after open, cannot move: its Don't alone needs a
+692-byte pointer), to `ops/History-rules-player.md` with `move_entry.py` on a copy of the tree,
+then adds B5's bullet in section 9.1's wording and its long form; it applies under `git apply
+--check`, an independent applier reproduces the copy byte for byte, no block or heading is lost,
+and with it player.md is 96,906 bytes (96.9 %) and every budget holds.
+
+**Round 2: the review's four points** (068ee329, each red first and with a negative control).
+(1) Entity IDs are unique within an audio function alone, so on a unit with two functions the
+usbmixer entries of the other function's unit 10 stood for the path's unit 10, whose own control
+the table did not show. `UnitControl` now carries its block's `ctrlif` (`ControlInterface`, nil
+where the table does not say), `ParsePlayback` returns the control interface it resolved
+(`Path.ControlInterface`), and a stage counts only that block's entries; an entry that does not
+say its function is unverifiable (`TestAnotherAudioFunctionsControlsDoNotStandForThePaths`, over
+two functions numbering their entities alike). (2) This settles B748: every control a feature unit
+declares but mute and audio class 2's read-only underflow and overflow makes it a stage the check
+must see, delay and the switches (automatic gain, bass boost, loudness, the phase inverter)
+included, since a switch that is on rewrites the DoP markers and the DSD bits as a level does. A
+switch is mapped through the table by its selector (each entry's `Info` line, `control=`, now
+`UnitControl.Selector`) and must be a boolean reading off on every channel; one on, unreadable or
+unmapped, or an entry that does not say its selector, is `dop_gain_unverifiable`. Mute alone
+refuses nothing: muted DoP is silence, not altered bits.
+`TestAFeatureUnitsSwitchesAreStagesAndItsMuteIsNot` holds a loudness-only unit (off passes; on,
+unmapped, unreadable, or its table unread, refuses; audio class 1's on refuses too), each switch
+on its master or its channels, and a mute-only unit, muted or not, mapped or not, passing;
+`TestTheParseReadsBothAudioClasses` reads the switches and delay. This
+corrects round 1's "a gain stage when it declares a gain control" and "Switches and enumerations
+stay allowed" above, which now hold only off the path's stages; §3.4's Topology 1, Topology 2 and
+refusal list say exactly this.
+(3) A conversion target's packing kept its altset's bits over an accepted probe's fewer refined
+bits; those now bound it, as the DoP carrier's do (`TestTheConversionTargetIsTheDACsBest`: 16
+accepted under a 24-bit altset target 176.4 kHz at 16 bits; §4.3 says so). (4) `Occurrence`'s
+identity was a boolean the caller computed, so a released pause, whose device is closed, kept its
+frames across a DAC swapped for another model on its port, where its reopen would have played the
+old plan to the new unit. `Occurrence.Opened` is now the identity the occurrence's sink last opened
+(`policy.Identity`: the model's key and the canonical bcdDevice; `Set.Identity` the set's), kept
+across a pause's release; only an occurrence that never had a sink is nil, judged by its plan
+alone (`TestAChangeIsReconciledPerOccurrence`'s swapped model; §3.5 says so). Red first: the new
+fields went in with the logic unchanged, and the five tests named above failed on their own
+assertions, the rest of the package green. Eleven negative controls, each an overlay of a mutated
+copy whose anchor the harness asserts occurs exactly once, each red in its named test: the ctrlif
+ignored, an entry with no function taken, the path's control interface left unset, the switches
+dropped from the stage selectors, a switch not read, only a switch's first channel read, mute made
+a stage, an entry with no selector taken for a loudness, the probe's bits ignored, a released
+pause taken for one with no sink, and the identity ignored. Round 1's 24 controls, their anchors
+moved to round 2's code, are all still red. The gate at 928daa62, in one call under the build
+slot: `make fmt` changed nothing; `make vet` native, `GOOS=windows`, `GOOS=darwin`,
+`GOOS=linux GOARCH=386` and `GOARCH=arm64`, clean; the package's tests under `-race` and as
+linux/386, ok; `make test` 85 packages ok, none failed, in 29 minutes, alsa and alsapcm run here;
+`make build-all` with `check-build-tags: OK`; `make docs-check` ok; the qualification check OK
+from 4c1e44e3. The round-2 rules patch (`rules-b728-b5-r2.patch`) gives B5's line three more
+clauses (another function's block, a switch on or unmapped, a sink of another identity) and its
+long form round 2's mechanisms and tests; it applies over round 1's under `git apply --check`, the
+two applied in turn give the staged files byte for byte, and with both player.md is 97,092 bytes
+(97.1 %), the worst load 311,613, every budget holding.
