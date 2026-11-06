@@ -77248,7 +77248,10 @@ read from a file the writer wrote is written again within it, with nothing
 observed too. `ForRestore` answers an error, never the snapshot's bytes, for a
 state that decodes: what still cannot be written, only a file denser than the
 writer's own (a key it writes left out, a character it escapes held as it
-is), fails the restore, which restores nothing. Bytes that do not decode
+is), fails the restore there: the state and every file after it stay
+unrestored, and what the restore did before it stays done, the player's
+identity and reservation and the queue it let go, which the refusal names.
+Bytes that do not decode
 still install as they are, as binding note 5 of the brief requires: no state,
 and the next load sets them aside. **A write not made ended the store's
 looking** (the Claude API reviewer): `blocked` was cleared at the look,

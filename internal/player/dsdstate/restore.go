@@ -22,7 +22,9 @@ import (
 // A state that decodes is never installed as the snapshot's bytes: one the
 // writer cannot write once nothing observed is left, which only a file
 // denser than the writer's own can hold (encode), is the restore's error
-// (ErrTooLarge), and the restore restores nothing (Codex on round 2: the
+// (ErrTooLarge), and neither it nor any file after it is restored; what the
+// restore did before it stays done, the player's identity and reservation and
+// the queue it let go, and the refusal names them (Codex on round 2: the
 // snapshot went in as it was, the old box's observations with it). Bytes that
 // do not decode as a state are installed as they are, so the next load
 // refuses them, keeps them aside and refuses DSD, as it would have on the box
