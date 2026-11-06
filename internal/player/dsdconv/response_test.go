@@ -1,7 +1,9 @@
 package dsdconv
 
 import (
+	"errors"
 	"go/ast"
+	"io/fs"
 	"go/parser"
 	"go/token"
 	"math"
@@ -212,6 +214,11 @@ func abs64(x int64) int64 {
 // it is formed; its only math functions are the ones IEEE 754 or Go defines
 // exactly; and no other file holds a floating-point type but in a result.
 func TestTheDesignIsTheSameOnEveryArchitecture(t *testing.T) {
+	if _, err := os.Stat("kaiser.go"); errors.Is(err, fs.ErrNotExist) {
+		// A test binary built here and run on another machine (the Pi the
+		// orchestrator compares digests on) has no source beside it.
+		t.Skip("the package's source is not in the working directory")
+	}
 	exact := map[string]bool{"Sqrt": true, "Floor": true, "Round": true, "Abs": true}
 	files, err := filepath.Glob("*.go")
 	if err != nil {
