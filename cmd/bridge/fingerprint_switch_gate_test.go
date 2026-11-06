@@ -2,14 +2,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"go/types"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -59,13 +62,45 @@ func (f *sweepSwitchFixture) verdicts(t *testing.T) (noMatch, matched []string) 
 	return noMatch, matched
 }
 
-// TestAnAcoustIDAnswerAfterTheFlipIsNotKept: a lookup AcoustID answers after
-// enrich.enabled is switched off, before anything else has asked the switch,
-// is not taken: the client's gate refuses the answer and stops the pass, so
-// the next file is not looked up, and nothing is cached, persisted or
-// re-queued, a no-match included, which would have kept the file from every
-// sweep for 30 days. Switched on again, the next pass asks about the same
-// files and keeps what AcoustID says (backlog B617).
+// flipAtBodyEOF is a transport under AcoustID's client that runs at once when
+// it has read the body of an answer to its end: after the client's gate took
+// the answer, before the sweep writes what it says.
+type flipAtBodyEOF struct {
+	base http.RoundTripper
+	at   func()
+}
+
+func (f *flipAtBodyEOF) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := f.base.RoundTrip(req)
+	if err != nil {
+		return resp, err
+	}
+	resp.Body = &bodyEOFHook{ReadCloser: resp.Body, at: f.at}
+	return resp, nil
+}
+
+type bodyEOFHook struct {
+	io.ReadCloser
+	at func()
+}
+
+func (h *bodyEOFHook) Read(p []byte) (int, error) {
+	n, err := h.ReadCloser.Read(p)
+	if errors.Is(err, io.EOF) {
+		h.at()
+	}
+	return n, err
+}
+
+// TestAnAcoustIDAnswerAfterTheFlipIsNotKept: what AcoustID says of a file's
+// first lookup is not kept when enrich.enabled is switched off before the
+// answer arrives, which the client's gate refuses as it arrives, or after
+// the client took it and before the sweep writes it, which the write's own
+// ask of the switch refuses. Either refusal stops the pass, so the next file
+// is not looked up, and nothing is cached, persisted or re-queued, a no-match
+// included, which would have kept the file from every sweep for 30 days.
+// Switched on again, the next pass asks about the same files and keeps what
+// AcoustID says (backlog B617).
 func TestAnAcoustIDAnswerAfterTheFlipIsNotKept(t *testing.T) {
 	for _, tc := range []struct {
 		name, answer string
@@ -74,65 +109,119 @@ func TestAnAcoustIDAnswerAfterTheFlipIsNotKept(t *testing.T) {
 		{name: "a match", answer: switchAcoustIDMatch, match: true},
 		{name: "a no-match", answer: switchAcoustIDNoMatch},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newSweepSwitchFixtureAnswering(t, tc.answer, "a.flac", "b.flac")
-			f.sweeper.switchEvery = time.Hour
-			var on atomic.Bool
-			on.Store(true)
-			holding, release := make(chan struct{}), make(chan struct{})
-			var n atomic.Int64
-			f.acoustid.setHold(func(r *http.Request) {
-				if n.Add(1) != 1 {
-					return
+		for _, when := range []string{"before it arrives", "once it is taken"} {
+			t.Run(tc.name+", the switch off "+when, func(t *testing.T) {
+				f := newSweepSwitchFixtureAnswering(t, tc.answer, "a.flac", "b.flac")
+				f.sweeper.switchEvery = time.Hour
+				var on atomic.Bool
+				on.Store(true)
+				status := &sweepStatus[admin.FingerprintSweepCounts]{}
+				nudge := make(chan struct{}, 1)
+				if when == "before it arrives" {
+					holding, release := make(chan struct{}), make(chan struct{})
+					var n atomic.Int64
+					f.acoustid.setHold(func(r *http.Request) {
+						if n.Add(1) != 1 {
+							return
+						}
+						close(holding)
+						select {
+						case <-release:
+						case <-r.Context().Done():
+						}
+					})
+					runSwitchSweeper(t, f.sweeper, func() bool { return true }, on.Load, nudge, status)
+					select {
+					case <-holding:
+					case <-time.After(10 * time.Second):
+						t.Fatal("the sweep's first lookup never reached AcoustID")
+					}
+					on.Store(false)
+					close(release)
+				} else {
+					var once sync.Once
+					flip := &flipAtBodyEOF{base: f.acoustid.srv.Client().Transport, at: func() { once.Do(func() { on.Store(false) }) }}
+					f.sweeper.client = acoustid.NewClient(f.acoustid.srv.URL, "k", "ua", &http.Client{Transport: flip})
+					runSwitchSweeper(t, f.sweeper, func() bool { return true }, on.Load, nudge, status)
+					eventually(t, func() bool { return !on.Load() }, "the first answer to be read")
 				}
-				close(holding)
-				select {
-				case <-release:
-				case <-r.Context().Done():
+				sweepEnded(t, status)
+
+				if got := f.acoustid.requests(); len(got) != 1 {
+					t.Errorf("AcoustID was asked %d time(s), want the first lookup alone:\n%s", len(got), strings.Join(got, "\n"))
+				}
+				if n := f.sweeper.cache.Len(); n != 0 {
+					t.Errorf("the pass the switch stopped cached %d outcome(s)", n)
+				}
+				if noMatch, matched := f.verdicts(t); len(noMatch)+len(matched) != 0 {
+					t.Errorf("the pass the switch stopped persisted no-match %v and match %v", noMatch, matched)
+				}
+				for _, name := range []string{"a.flac", "b.flac"} {
+					if f.requeued(t, name) {
+						t.Errorf("the pass the switch stopped re-queued %s", name)
+					}
+				}
+
+				on.Store(true)
+				nudge <- struct{}{}
+				if tc.match {
+					eventually(t, func() bool { return f.requeued(t, "a.flac") && f.requeued(t, "b.flac") },
+						"both files to be resolved and re-queued once enrichment is on")
+				} else {
+					eventually(t, func() bool { noMatch, _ := f.verdicts(t); return len(noMatch) == 2 },
+						"both no-matches to be kept once enrichment is on")
+				}
+				if got := f.acoustid.count(); got != 3 {
+					t.Errorf("AcoustID was asked %d time(s), want 3: the refused lookup, then both files again:\n%s",
+						got, strings.Join(f.acoustid.requests(), "\n"))
 				}
 			})
-			status := &sweepStatus[admin.FingerprintSweepCounts]{}
-			nudge := make(chan struct{}, 1)
-			runSwitchSweeper(t, f.sweeper, func() bool { return true }, on.Load, nudge, status)
-			select {
-			case <-holding:
-			case <-time.After(10 * time.Second):
-				t.Fatal("the sweep's first lookup never reached AcoustID")
-			}
-			on.Store(false)
-			close(release)
-			sweepEnded(t, status)
-
-			if got := f.acoustid.requests(); len(got) != 1 {
-				t.Errorf("AcoustID was asked %d time(s), want the held lookup alone:\n%s", len(got), strings.Join(got, "\n"))
-			}
-			if n := f.sweeper.cache.Len(); n != 0 {
-				t.Errorf("the pass the switch stopped cached %d outcome(s)", n)
-			}
-			if noMatch, matched := f.verdicts(t); len(noMatch)+len(matched) != 0 {
-				t.Errorf("the pass the switch stopped persisted no-match %v and match %v", noMatch, matched)
-			}
-			for _, name := range []string{"a.flac", "b.flac"} {
-				if f.requeued(t, name) {
-					t.Errorf("the pass the switch stopped re-queued %s", name)
-				}
-			}
-
-			on.Store(true)
-			nudge <- struct{}{}
-			if tc.match {
-				eventually(t, func() bool { return f.requeued(t, "a.flac") && f.requeued(t, "b.flac") },
-					"both files to be resolved and re-queued once enrichment is on")
-			} else {
-				eventually(t, func() bool { noMatch, _ := f.verdicts(t); return len(noMatch) == 2 },
-					"both no-matches to be kept once enrichment is on")
-			}
-			if got := f.acoustid.count(); got != 3 {
-				t.Errorf("AcoustID was asked %d time(s), want 3: the refused lookup, then both files again:\n%s",
-					got, strings.Join(f.acoustid.requests(), "\n"))
-			}
-		})
+		}
 	}
+}
+
+// TestAReQueueAfterTheFlipIsNotMade: a pass whose answers were all taken
+// and written while enrich.enabled was on, switched off after them with
+// nothing sent since (its second file's decode fails, after the flip), asks
+// the switch again at its re-queue: it re-queues nothing, and forgets the
+// match it cached and did not hand over. Switched on again, the next pass
+// looks the file up again and re-queues it (backlog B617).
+func TestAReQueueAfterTheFlipIsNotMade(t *testing.T) {
+	f := newSweepSwitchFixture(t, "a.flac", "b.flac")
+	f.sweeper.switchEvery = time.Hour
+	var on atomic.Bool
+	on.Store(true)
+	decode := f.sweeper.compute
+	var decodes atomic.Int64
+	f.sweeper.compute = func(ctx context.Context, abs string, length time.Duration) (acoustid.Fingerprint, error) {
+		if decodes.Add(1) == 2 {
+			on.Store(false)
+			return acoustid.Fingerprint{}, errors.New("a decode that fails")
+		}
+		return decode(ctx, abs, length)
+	}
+	status := &sweepStatus[admin.FingerprintSweepCounts]{}
+	nudge := make(chan struct{}, 1)
+	runSwitchSweeper(t, f.sweeper, func() bool { return true }, on.Load, nudge, status)
+	eventually(t, func() bool { return decodes.Load() >= 2 }, "the sweep to decode its second file")
+	sweepEnded(t, status)
+
+	if got := f.acoustid.count(); got != 1 {
+		t.Errorf("AcoustID was asked %d time(s), want the first file's lookup alone", got)
+	}
+	for _, name := range []string{"a.flac", "b.flac"} {
+		if f.requeued(t, name) {
+			t.Errorf("the pass the switch stopped re-queued %s", name)
+		}
+	}
+	if n := f.sweeper.cache.Len(); n != 0 {
+		t.Errorf("the pass the switch stopped left %d outcome(s) cached", n)
+	}
+
+	on.Store(true)
+	nudge <- struct{}{}
+	eventually(t, func() bool { return f.requeued(t, "a.flac") && f.requeued(t, "b.flac") },
+		"both files to be resolved and re-queued once enrichment is on")
 }
 
 // TestALookupAfterTheFlipIsRefusedAtItsSend: enrich.enabled switched off

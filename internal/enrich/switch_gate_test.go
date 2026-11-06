@@ -175,6 +175,75 @@ func TestAnAnswerAfterTheFlipIsNotTaken(t *testing.T) {
 	}
 }
 
+// TestAWriteAfterTheFlipIsNotMade: what the enricher writes of a pass asks
+// enrich.enabled again at the write, since an answer taken while the switch
+// was on can reach its write after the flip with nothing sent in between. Off
+// there, stampEnriched, markSkipped and the fingerprint tag veto write
+// nothing, count nothing and log nothing, and the refusal ends the pass's
+// context; on, each writes (backlog B617).
+func TestAWriteAfterTheFlipIsNotMade(t *testing.T) {
+	type writer struct {
+		write   func(e *Enricher, ctx context.Context, tr *manifest.Track)
+		written func(t *testing.T, e *Enricher, store *manifest.Store, rec *loggingtest.Recorder, path string) bool
+	}
+	stamped := func(t *testing.T, _ *Enricher, store *manifest.Store, _ *loggingtest.Recorder, path string) bool {
+		return !unenrichedPaths(t, store)[path]
+	}
+	writers := map[string]writer{
+		"stampEnriched": {
+			write: func(e *Enricher, ctx context.Context, tr *manifest.Track) { e.stampEnriched(ctx, tr) },
+			written: func(t *testing.T, e *Enricher, store *manifest.Store, rec *loggingtest.Recorder, path string) bool {
+				return stamped(t, e, store, rec, path) || e.Done() != 0
+			},
+		},
+		"markSkipped": {
+			write: func(e *Enricher, ctx context.Context, tr *manifest.Track) {
+				e.markSkipped(ctx, tr, skipReasonNoMBMatch, "no acceptable release candidate")
+			},
+			written: func(t *testing.T, e *Enricher, store *manifest.Store, rec *loggingtest.Recorder, path string) bool {
+				return stamped(t, e, store, rec, path) || e.skipped.Load() != 0 || len(e.SkipReasons()) != 0 ||
+					len(rec.Lines("enrichment skipped")) != 0
+			},
+		},
+		"recordAcousticTagVeto": {
+			write: func(e *Enricher, ctx context.Context, tr *manifest.Track) { e.recordAcousticTagVeto(ctx, tr) },
+			written: func(t *testing.T, _ *Enricher, store *manifest.Store, _ *loggingtest.Recorder, path string) bool {
+				vetoes, err := store.FreshAcoustIDTagVetoes(context.Background(), 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, ok := vetoes[path]
+				return ok
+			},
+		},
+	}
+	for name, w := range writers {
+		for _, on := range []bool{false, true} {
+			state := map[bool]string{false: "off", true: "on"}[on]
+			t.Run(name+" with the switch "+state, func(t *testing.T) {
+				track := switchTracks[1]
+				e, store := gateEnricher(t, newSwitchUpstreams(t), nil, track)
+				rows, err := store.UnenrichedTracks(context.Background(), 10)
+				if err != nil || len(rows) != 1 {
+					t.Fatalf("the row waiting for the enricher: %d, %v", len(rows), err)
+				}
+				s := newGateSwitch()
+				ctx, release := enrichgate.CancelWhenOff(context.Background(), s.get, time.Hour)
+				defer release()
+				s.on.Store(on)
+				rec := loggingtest.Record(t)
+				w.write(e, ctx, &rows[0])
+				if got := w.written(t, e, store, rec, track.Path); got != on {
+					t.Errorf("%s with the switch %s wrote %v, want %v", name, state, got, on)
+				}
+				if refused := enrichgate.Refusal(ctx) == enrichgate.ErrOff; refused == on {
+					t.Errorf("%s with the switch %s: the pass's context ended by the switch is %v, want %v", name, state, refused, !on)
+				}
+			})
+		}
+	}
+}
+
 // flipAtEOF is a transport under the gate that turns its switch off when the
 // body of the first answer whose path starts with prefix has been read to its
 // end: after the gate took that answer, before the enricher's next send.
