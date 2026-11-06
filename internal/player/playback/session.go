@@ -486,19 +486,22 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 	// admitted again under the set published now, in the step that ends the
 	// open, as a successor is (openSuccessor), so the activation's check finds
 	// it under that set and a reconciliation after it judges it (B728 B7, round
-	// 2).
+	// 2). Once its done is closed, reconciliation repoints its set and a
+	// revocation refuses it, under this lock, so what decides the DSD monitor
+	// and the open's refusal is read in that step too (round 3).
 	s.mu.Lock()
 	s.readmitDSDLocked(first)
 	close(first.done)
+	monitor, refused := first.admitted != nil, first.refused
+	if refused != nil {
+		first.dropped = true
+	}
 	s.mu.Unlock()
-	if first.admitted != nil {
+	if monitor {
 		s.startDSDMonitor()
 	}
-	if first.refused != nil {
-		s.mu.Lock()
-		first.dropped = true
-		s.mu.Unlock()
-		u := *first.refused
+	if refused != nil {
+		u := *refused
 		return &u
 	}
 	if first.fromErr != nil {

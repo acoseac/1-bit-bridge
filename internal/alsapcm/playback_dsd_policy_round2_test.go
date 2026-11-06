@@ -149,6 +149,65 @@ func TestAChangeWhileTheFirstOccurrenceReadsItsFirstChunk(t *testing.T) {
 	}
 }
 
+// TestRefreshesAcrossTheFirstOpensEndTakeTheSessionsLock (B728 B7 round 3):
+// once a session's first occurrence's open ends, its done closed,
+// reconciliation repoints its set and a revocation refuses it, both under the
+// session's lock, and Start reads what decides the DSD monitor and the open's
+// refusal in the step that closes it. Refreshes run as the stalled first read
+// is let go, concurrently with the open's end, keeping the plan (a cap above
+// its rate) or taking it away (DSD off), each over a run of fresh sessions:
+// -race finds nothing, and the kept plan plays every time.
+func TestRefreshesAcrossTheFirstOpensEndTakeTheSessionsLock(t *testing.T) {
+	capped := playbacktest.ChoiceState(dsdstate.ModeNative)
+	capped.DACs[0].Choice.MaxBitRate, capped.DACs[0].Choice.Revision = playbacktest.DSD128, 2
+	for _, c := range []struct {
+		name  string
+		other dsdstate.State
+		plays bool
+	}{
+		{"refreshes that keep its plan", capped, true},
+		{"refreshes that take its plan away", playbacktest.ChoiceState(dsdstate.ModeOff), false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			for range 20 {
+				d := newDSDRig(t, playbacktest.ChoiceState(dsdstate.ModeNative))
+				d.files.add("a", dsd(playbacktest.DSD64, 0.05))
+				// The DSF header ends at byte 92: a read past it is the first chunk's.
+				parked, unstall := d.files.stall("a", 92)
+				d.insert("a")
+				go func() { _ = d.eng.Play(bg) }()
+				awaitHeld(t, "the first chunk's read", parked)
+				d.k.Free()
+				stop, refreshed := make(chan struct{}), make(chan struct{})
+				go func() {
+					defer close(refreshed)
+					for i := 0; ; i++ {
+						select {
+						case <-stop:
+							return
+						default:
+						}
+						st := playbacktest.ChoiceState(dsdstate.ModeNative)
+						if i%2 == 0 {
+							st = c.other
+						}
+						d.store.Set(st)
+						d.be.RefreshDSD(true)
+					}
+				}()
+				unstall()
+				s := d.waitEnded()
+				close(stop)
+				<-refreshed
+				d.rig.stop()
+				if evs := d.rec.events(); c.plays && (count(evs, "audible", 0) != 1 || len(s.Faults()) != 0 || len(s.Skips()) != 0) {
+					t.Fatalf("a plan every refresh kept did not play: %s; faults %+v, skips %+v", kinds(evs), s.Faults(), s.Skips())
+				}
+			}
+		})
+	}
+}
+
 // TestAProbeRecordsNothingOfAUnitSwappedInBeforeItsOpen (B728 B7 round 2): the
 // silent probe records what the DAC accepted under the unit it captured (its
 // model, its firmware and its enumeration), so the node it opens must be that
