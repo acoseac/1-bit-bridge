@@ -72,9 +72,11 @@ func TestCollectAnalysisCandidatesSkipsZeroByteSource(t *testing.T) {
 // contract between Store.AnalysisCoverage's SQL buckets (the Jobs
 // page's approximate whole-library tile) and
 // collectAnalysisCandidates' control flow (the sweeper's exact truth):
-// same DSD-by-extension rule, same zero-byte rule, same precedence
-// (DSD before zero-byte). If either side's predicate drifts, this
-// fails before an operator sees disagreeing numbers.
+// same DSD-by-extension rule, same WavPack and Monkey's Audio rule (the
+// client format gate's, backlog B489), same zero-byte rule, same
+// precedence (DSD, then WavPack and Monkey's Audio, before zero-byte).
+// If either side's predicate drifts, this fails before an operator sees
+// disagreeing numbers.
 func TestAnalysisCoverageLockstepWithCollector(t *testing.T) {
 	root := t.TempDir()
 	files := []struct {
@@ -86,6 +88,10 @@ func TestAnalysisCoverageLockstepWithCollector(t *testing.T) {
 		{"disc.dsf", []byte("DSD-nonzero")},
 		{"disc.dff", []byte("FRM8-nonzero")},
 		{"empty.flac", nil},
+		{"pack.wv", []byte("wvpk-nonzero")},
+		{"PACK2.WV", []byte("wvpk-nonzero")},
+		{"monkey.ape", []byte("MAC -nonzero")},
+		{"empty.wv", nil},
 	}
 	for _, f := range files {
 		if err := os.WriteFile(filepath.Join(root, f.name), f.data, 0o644); err != nil {
@@ -119,14 +125,25 @@ func TestAnalysisCoverageLockstepWithCollector(t *testing.T) {
 	if cov.DSDExcluded != res.dsdSkipped {
 		t.Errorf("DSDExcluded = %d, collector dsdSkipped = %d", cov.DSDExcluded, res.dsdSkipped)
 	}
+	if cov.WavPackAPEExcluded != res.wavpackApeSkipped || res.wavpackApeSkipped != 4 {
+		t.Errorf("WavPackAPEExcluded = %d, collector wavpackApeSkipped = %d, want 4 each (the zero-byte .wv among them)",
+			cov.WavPackAPEExcluded, res.wavpackApeSkipped)
+	}
 	if cov.ZeroByteExcluded != res.emptySkipped {
 		t.Errorf("ZeroByteExcluded = %d, collector emptySkipped = %d", cov.ZeroByteExcluded, res.emptySkipped)
 	}
 	// Sanity: the fixture has no missing/routed rows, so eligible ==
 	// candidates + fresh-skipped (all zero analysis rows here).
-	eligible := cov.TotalLocal - cov.DSDExcluded - cov.ZeroByteExcluded
+	eligible := cov.TotalLocal - cov.DSDExcluded - cov.WavPackAPEExcluded - cov.ZeroByteExcluded
 	if eligible != len(res.candidates)+res.skipped {
 		t.Errorf("eligible = %d, collector candidates+skipped = %d", eligible, len(res.candidates)+res.skipped)
+	}
+	// No WavPack or Monkey's Audio file is a candidate, whatever its case.
+	for _, c := range res.candidates {
+		switch c.SourceLibraryRel {
+		case "pack.wv", "PACK2.WV", "monkey.ape", "empty.wv":
+			t.Errorf("%s was enqueued for analysis: the bridge decodes nothing of these", c.SourceLibraryRel)
+		}
 	}
 }
 

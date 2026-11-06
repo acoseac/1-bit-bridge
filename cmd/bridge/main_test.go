@@ -355,6 +355,37 @@ func TestScanRunsAndReports0(t *testing.T) {
 	}
 }
 
+// TestScanSaysHowManyWavPackAndMonkeysAudioFilesItHolds: bridge scan's
+// summary says how many indexed tracks are WavPack or Monkey's Audio files,
+// and which apps list them (backlog B489), counted by the path as the client
+// format gate reads it, a file its extractor refused included; a library
+// with none has no such line.
+func TestScanSaysHowManyWavPackAndMonkeysAudioFilesItHolds(t *testing.T) {
+	cfgPath := writeValidConfig(t)
+	stdout, _, code := runCapture(t, "scan", "--config", cfgPath)
+	// The test's name, in its temporary directory, names the formats too.
+	if code != 0 || strings.Contains(stdout, "of them") {
+		t.Fatalf("an empty library: exit %d, %q", code, stdout)
+	}
+	lib := filepath.Join(filepath.Dir(cfgPath), "Music")
+	for _, name := range []string{"a.wv", "b.APE", "c.flac"} {
+		if err := os.WriteFile(filepath.Join(lib, name), []byte("not audio"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stdout, stderr, code := runCapture(t, "scan", "--config", cfgPath)
+	if code != 0 {
+		t.Fatalf("scan exit %d: %s", code, stderr)
+	}
+	if want := gatedFormatSummary(2); !strings.Contains(stdout, want) {
+		t.Errorf("scan stdout %q does not say %q", stdout, want)
+	}
+	if !strings.Contains(gatedFormatSummary(2), "2 of them are WavPack or Monkey's Audio files") ||
+		!strings.Contains(gatedFormatSummary(1), "1 of them is a WavPack or Monkey's Audio file") {
+		t.Errorf("the summary's words: %q, %q", gatedFormatSummary(2), gatedFormatSummary(1))
+	}
+}
+
 func TestScanMissingConfigReturns2(t *testing.T) {
 	_, stderr, code := runCapture(t, "scan", "--config", "/nonexistent/bridge.yaml")
 	if code != 2 {

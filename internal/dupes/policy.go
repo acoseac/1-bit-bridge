@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"sort"
 	"strings"
+
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
 // FilterMode selects which duplicate tiers the bridge suppresses from
@@ -38,10 +40,13 @@ type Policy struct {
 // package, so calling it directly would be an import cycle; the lockstep
 // test lives on the manifest side (TestDupesLossyCodecsMirrorIsLossyCodec),
 // which is the only package that can see both. The compressed AIFF-C and
-// WAV encodings joined both with ExtractorVersion 21 (backlog B124, B154).
+// WAV encodings joined both with ExtractorVersion 21 (backlog B124, B154),
+// and a hybrid WavPack file with no correction file with ExtractorVersion 32
+// (backlog B489).
 var lossyCodecs = map[string]struct{}{
 	"MP3": {}, "AAC": {}, "OGG": {}, "OPUS": {}, "WMA": {},
 	"ULAW": {}, "ALAW": {}, "IMA4": {}, "ADPCM": {}, "GSM": {}, "MP2": {},
+	"WAVPACK-LOSSY": {},
 }
 
 // LossyCodecNames returns the ranking vocabulary, sorted, for the
@@ -61,13 +66,26 @@ func isLossy(codec string) bool {
 }
 
 // outranks is the deterministic total order that elects a suppression
-// unit's winner: lossless beats lossy, then bit depth, then sample rate,
-// then size (a bigger file of the same geometry is the less-compressed /
-// better-provenanced rip), then the shallower path, then the shorter
-// path, then lexicographic path — the last three exist purely so the
-// order is TOTAL and the winner is stable across scans (a flapping
-// winner would churn indexed_at and iOS deltas).
+// unit's winner: a copy every client is served beats one the client
+// format gate holds back (formatgate.Gated: a WavPack or Monkey's Audio
+// file, by its path), then lossless beats lossy, then bit depth, then
+// sample rate, then size (a bigger file of the same geometry is the
+// less-compressed / better-provenanced rip), then the shallower path,
+// then the shorter path, then lexicographic path — the last three exist
+// purely so the order is TOTAL and the winner is stable across scans (a
+// flapping winner would churn indexed_at and iOS deltas).
+//
+// The gate's term comes first because suppression is server-wide and the
+// gate is per client (backlog B489): an app that declares no gated format
+// is never served a .wv or an .ape, so a gated winner would leave it no
+// copy of the track at all, where an ungated winner is in every client's
+// view. It costs an app that plays both the gated copy's better geometry,
+// which is the owner's choice: no client ever loses the only copy it can
+// play.
 func outranks(a, b Row) bool {
+	if ga, gb := formatgate.Gated(a.Path), formatgate.Gated(b.Path); ga != gb {
+		return !ga
+	}
 	if la, lb := isLossy(a.Codec), isLossy(b.Codec); la != lb {
 		return !la
 	}
@@ -173,10 +191,16 @@ func nestShallower(a, b Row) bool {
 }
 
 // planDomainWinners splits members into DSD and PCM domains and, within
-// each domain holding ≥2 members, suppresses everything but the
+// each suppression unit holding ≥2 members, suppresses everything but the
 // rank-elected winner. A single-member domain is untouched — that is the
 // "DSD and PCM are never cross-suppressed" rule expressed structurally:
 // the sole DSD edition can never lose to a PCM one, or vice versa.
+//
+// A domain is one unit while it holds a copy every client is served, whose
+// winner outranks then makes such a copy (gateUnits). A domain of gated
+// copies alone is one unit per gated format, so a .wv and an .ape of one
+// track are never suppressed against each other: the gate is per format,
+// and a client that declares one of them alone would lose its only copy.
 func planDomainWinners(members []Row) []string {
 	var dsd, pcm []Row
 	for _, m := range members {
@@ -188,23 +212,50 @@ func planDomainWinners(members []Row) []string {
 	}
 	var out []string
 	for _, domain := range [][]Row{dsd, pcm} {
-		if len(domain) < 2 {
-			continue
-		}
-		winner := 0
-		for i := 1; i < len(domain); i++ {
-			if outranks(domain[i], domain[winner]) {
-				winner = i
+		for _, unit := range gateUnits(domain) {
+			if len(unit) < 2 {
+				continue
 			}
-		}
-		for i, m := range domain {
-			if i != winner {
-				out = append(out, m.Path)
+			winner := 0
+			for i := 1; i < len(unit); i++ {
+				if outranks(unit[i], unit[winner]) {
+					winner = i
+				}
+			}
+			for i, m := range unit {
+				if i != winner {
+					out = append(out, m.Path)
+				}
 			}
 		}
 	}
 	sort.Strings(out)
 	return out
+}
+
+// gateUnits splits one domain into its suppression units by the client
+// format gate (formatgate.Of of each member's path): the whole domain when
+// it holds a copy every client is served, or when its members share one
+// format, and otherwise one unit per gated format, in the order the domain
+// first names each.
+func gateUnits(domain []Row) [][]Row {
+	var order []formatgate.Format
+	byFormat := map[formatgate.Format][]Row{}
+	for _, m := range domain {
+		f := formatgate.Of(m.Path)
+		if _, seen := byFormat[f]; !seen {
+			order = append(order, f)
+		}
+		byFormat[f] = append(byFormat[f], m)
+	}
+	if _, served := byFormat[formatgate.None]; served || len(order) < 2 {
+		return [][]Row{domain}
+	}
+	units := make([][]Row, 0, len(order))
+	for _, f := range order {
+		units = append(units, byFormat[f])
+	}
+	return units
 }
 
 // ID is the stable persistence identity for a key: hex SHA-256 over an

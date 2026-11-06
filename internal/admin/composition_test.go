@@ -96,3 +96,47 @@ func TestBuildCompositionEmpty(t *testing.T) {
 		t.Errorf("want all-empty bars, got %+v", got)
 	}
 }
+
+// TestTheCompositionSaysHowManyWavPackAndMonkeysAudioFilesTheLibraryHolds:
+// the dashboard's composition carries the count of indexed WavPack and
+// Monkey's Audio files (backlog B489), by the path as the client format
+// gate reads it, a refused file's row with no codec included, so
+// applyComposition can say they are indexed and which apps list them; the
+// codec bar names their codecs as it names every codec.
+func TestTheCompositionSaysHowManyWavPackAndMonkeysAudioFilesTheLibraryHolds(t *testing.T) {
+	srv, _, _ := newTestServer(t)
+	ctx := t.Context()
+	for _, tr := range []manifest.Track{
+		{Path: "A/01.flac", Size: 1, Codec: "FLAC"},
+		{Path: "A/02.wv", Size: 1, Codec: manifest.CodecWavPack},
+		{Path: "A/03.APE", Size: 1, Codec: manifest.CodecAPE},
+		{Path: "A/04.wv", Size: 1}, // refused: no codec
+	} {
+		tr := tr
+		if err := srv.deps.Manifest.UpsertTrack(ctx, &tr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snap := srv.getCompositionSnapshot()
+	if snap.WavPackAPE != 3 {
+		t.Errorf("wavpackApe = %d, want 3", snap.WavPackAPE)
+	}
+	labels := map[string]int{}
+	for _, b := range snap.Codecs {
+		labels[b.Label] = b.Count
+	}
+	if labels[manifest.CodecWavPack] != 1 || labels[manifest.CodecAPE] != 1 || labels["Unknown"] != 1 {
+		t.Errorf("codec bar %+v, want WAVPACK, APE and Unknown once each", snap.Codecs)
+	}
+	body, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys map[string]any
+	if err := json.Unmarshal(body, &keys); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := keys["wavpackApe"]; !ok {
+		t.Errorf("the frame has no wavpackApe key: %s", body)
+	}
+}

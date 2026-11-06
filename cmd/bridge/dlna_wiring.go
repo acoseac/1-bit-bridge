@@ -218,7 +218,9 @@ func startDLNAIfEnabled(ctx context.Context, w dlnaWiring) (lc *dlnaLifecycle, e
 		telemetry = dlna.NewTelemetryStore(0) // 0 → DefaultTelemetryCapacity
 	}
 
-	library := newManifestLibraryAdapter(store, resolver, cfg.LibraryRoots, dlnaLog)
+	// The view that declares no gated format: a renderer is offered no
+	// WavPack or Monkey's Audio file (backlog B489).
+	library := newManifestLibraryAdapter(store, resolver, cfg.LibraryRoots, formatgate.Set{}, dlnaLog)
 
 	// UPnP-routed file-handler fast-path: when the upnpUpstream feature is
 	// wired AND its SSDP discovery has a host resolver to hand out, the
@@ -575,6 +577,14 @@ type manifestLibraryAdapter struct {
 	store        *manifest.Store
 	resolver     *bridgefs.Resolver
 	libraryRoots []string
+	// view is the client format gate's view the adapter lists (backlog
+	// B489): the ContentDirectory's declares no gated format, since a
+	// renderer cannot say it plays WavPack or Monkey's Audio and most play
+	// neither; the loopback track route's declares every format, since
+	// the MPD beside the bridge is handed a file as it is and decodes it
+	// with its own plugins, and the app that casts a track there is one
+	// that was served it.
+	view formatgate.Set
 	// Resolver-miss tracks backed by an upstream UPnP MediaServer (e.g.
 	// a Chord 2Go's microSD card) are kept in the cache with an empty
 	// `AbsolutePath` sentinel — the dlna file handler's upnp fast-path
@@ -618,12 +628,14 @@ func newManifestLibraryAdapter(
 	store *manifest.Store,
 	resolver *bridgefs.Resolver,
 	libraryRoots []string,
+	view formatgate.Set,
 	log *slog.Logger,
 ) *manifestLibraryAdapter {
 	return &manifestLibraryAdapter{
 		store:        store,
 		resolver:     resolver,
 		libraryRoots: libraryRoots,
+		view:         view,
 		log:          log,
 	}
 }
@@ -706,12 +718,11 @@ func (a *manifestLibraryAdapter) rebuild() {
 	// folder tree, FTS search resolution) derives from this one call, so
 	// duplicate suppression reaches DLNA renderers for free — and DLNA
 	// agrees with what /v1/manifest serves, less the SACD virtual tracks
-	// the loop below leaves out (no renderer can play one). In the view
-	// that declares no gated format (formatgate's zero Set, backlog B489):
-	// a renderer cannot say it plays WavPack or Monkey's Audio, and most
-	// play neither, so the ContentDirectory offers neither, in this one list
-	// every view of it derives from.
-	tracks, err := a.store.ListServedTracks(ctx, nil, formatgate.Set{})
+	// the loop below leaves out (no renderer can play one). In the
+	// adapter's view (a.view, backlog B489): the ContentDirectory's
+	// declares no gated format, so it offers no WavPack or Monkey's Audio
+	// file, in this one list every view of it derives from.
+	tracks, err := a.store.ListServedTracks(ctx, nil, a.view)
 	if err != nil {
 		a.log.Warn("manifest list failed", slog.String("err", err.Error()))
 		return

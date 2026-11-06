@@ -130,6 +130,36 @@ func TestTheFormatViewSQLIsFormatgatesRule(t *testing.T) {
 		}
 	}
 
+	// The bind-free spelling, the zero view's, is formatgate.Gated's negation.
+	var wantUngated []string
+	for _, p := range formatViewPaths {
+		if !formatgate.Gated(p) {
+			wantUngated = append(wantUngated, p)
+		}
+	}
+	slices.Sort(wantUngated)
+	rowsU, err := s.db.QueryContext(ctx, `SELECT t.path FROM tracks t WHERE `+ungatedPathSQLT)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotU []string
+	for rowsU.Next() {
+		var p string
+		if err := rowsU.Scan(&p); err != nil {
+			t.Fatal(err)
+		}
+		gotU = append(gotU, p)
+	}
+	rowsU.Close()
+	slices.Sort(gotU)
+	if !slices.Equal(gotU, wantUngated) {
+		t.Errorf("the bind-free predicate kept %q, want %q", gotU, wantUngated)
+	}
+	// And its count of the rest, the operator surfaces' number.
+	if n, err := s.CountGatedFormatTracks(ctx); err != nil || n != len(formatViewPaths)-len(wantUngated) {
+		t.Errorf("CountGatedFormatTracks = %d (%v), want %d", n, err, len(formatViewPaths)-len(wantUngated))
+	}
+
 	// The tombstones, the same way: every path deleted in one call, beside a
 	// library large enough that the call is a deletion list, never the
 	// journal's mass delete (a quarter of the library), which journals none.
@@ -328,5 +358,51 @@ func TestThePlaylistFeedJudgesTheAlbumRuleInEachView(t *testing.T) {
 	}
 	if _, err := store.PlaylistFilesPage(ctx, first.Version, first.Next, formatgate.SetOf(formatgate.WavPack)); !errors.Is(err, ErrPlaylistFilesChanged) {
 		t.Errorf("a zero-view cursor read declaring WavPack: %v, want ErrPlaylistFilesChanged", err)
+	}
+}
+
+// TestWavPackAndMonkeysAudioRowsTakePartInEnrichment: the client format gate
+// is the serving end's alone (backlog B489). The enricher's work query and
+// the Atlas harvest's release set read every row, a WavPack or Monkey's
+// Audio file's among them, so these files are enriched and their releases
+// harvested like any other; only a view that does not declare their format
+// leaves them out.
+func TestWavPackAndMonkeysAudioRowsTakePartInEnrichment(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	at := time.Unix(1_700_000_000, 0).UTC()
+	const (
+		wvRelease  = "11111111-1111-1111-1111-111111111111"
+		apeRelease = "22222222-2222-2222-2222-222222222222"
+	)
+	rows := []*Track{
+		{Path: "A/01.wv", Size: 1, ModTime: at, Codec: CodecWavPack, ArtworkMBID: wvRelease},
+		{Path: "B/01.ape", Size: 1, ModTime: at, Codec: CodecAPE, ArtworkMBID: apeRelease},
+	}
+	if err := s.UpsertTrackBatch(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	unenriched, err := s.UnenrichedTracks(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, tr := range unenriched {
+		got = append(got, tr.Path)
+	}
+	slices.Sort(got)
+	if !slices.Equal(got, []string{"A/01.wv", "B/01.ape"}) {
+		t.Errorf("the enricher's work query holds %q, want both files", got)
+	}
+	releases, err := s.DistinctReleaseMBIDs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(releases)
+	if !slices.Equal(releases, []string{wvRelease, apeRelease}) {
+		t.Errorf("the harvest's releases are %q, want both", releases)
+	}
+	if n, err := s.CountServedTracks(ctx, formatgate.Set{}); err != nil || n != 0 {
+		t.Errorf("an app that declares nothing is served %d (%v), want 0", n, err)
 	}
 }

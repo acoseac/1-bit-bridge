@@ -19,8 +19,10 @@ package manifest
 // other did not deliver.
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/formatgate"
@@ -36,6 +38,30 @@ const formatViewSQL = `(? OR lower(substr(path, -3)) <> '.wv') AND (? OR lower(s
 // formatViewSQLT is formatViewSQL over t.path, for a query that joins
 // tracks as t to another table with a path column (search's).
 const formatViewSQLT = `(? OR lower(substr(t.path, -3)) <> '.wv') AND (? OR lower(substr(t.path, -4)) <> '.ape')`
+
+// ungatedPathSQLT is true for a row of tracks as t that no gated format
+// names (formatgate.Gated is false): formatViewSQLT for the zero view, with
+// no binds, for a predicate whose binds are fixed already (the upscale
+// eligibility mirror, which leaves a WavPack or Monkey's Audio file out of
+// every rendition).
+const ungatedPathSQLT = `(lower(substr(t.path, -3)) <> '.wv' AND lower(substr(t.path, -4)) <> '.ape')`
+
+// countGatedFormatTracksSQL is CountGatedFormatTracks' query.
+const countGatedFormatTracksSQL = `SELECT COUNT(*) FROM tracks t WHERE NOT ` + ungatedPathSQLT
+
+// CountGatedFormatTracks counts the indexed rows the client format gate
+// holds back from an app that declares no gated format (backlog B489): a
+// WavPack or Monkey's Audio file, by its path as formatgate.Gated reads it,
+// whatever its origin, a suppressed duplicate included. The operator's
+// surfaces say how many are indexed and which apps play them: bridge scan's
+// summary and the dashboard's composition. Read-only, no s.mu.
+func (s *Store) CountGatedFormatTracks(ctx context.Context) (int, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx, countGatedFormatTracksSQL).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count gated-format tracks: %w", err)
+	}
+	return n, nil
+}
 
 // formatViewArgs are the binds of formatViewSQL and formatViewSQLT.
 func formatViewArgs(view formatgate.Set) []any {

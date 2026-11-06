@@ -339,7 +339,7 @@ func TestEverySkipReasonHasALabel(t *testing.T) {
 		block = block[:end]
 	}
 	for _, reason := range []string{
-		"routed_upstream", "dsd_bitstream", "lossy_source", "unknown_format", "no_decoder",
+		"routed_upstream", "wavpack_ape", "dsd_bitstream", "lossy_source", "unknown_format", "no_decoder",
 	} {
 		if !strings.Contains(block, reason+":") {
 			t.Errorf("skip reason %q has no label; it would render as the raw identifier", reason)

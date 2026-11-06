@@ -10480,10 +10480,11 @@ func (s *Store) DeleteAnalysis(ctx context.Context, sourcePath string) error {
 
 // AnalysisCoverage is the whole-library analysed-vs-eligible breakdown
 // backing the admin Jobs page's coverage bar. Eligible = TotalLocal -
-// DSDExcluded - ZeroByteExcluded; the buckets are DISJOINT in the
-// analysis sweeper's own precedence order (DSD before zero-byte,
-// matching collectAnalysisCandidates' control flow in
-// cmd/bridge/analyze.go — pinned by the lockstep test there).
+// DSDExcluded - WavPackAPEExcluded - ZeroByteExcluded; the buckets are
+// DISJOINT in the analysis sweeper's own precedence order (DSD, then
+// WavPack and Monkey's Audio, before zero-byte, matching
+// collectAnalysisCandidates' control flow in cmd/bridge/analyze.go —
+// pinned by the lockstep test there).
 type AnalysisCoverage struct {
 	// TotalLocal counts filesystem-backed tracks only — UPnP-routed
 	// rows never resolve on disk and are never analysed.
@@ -10501,6 +10502,13 @@ type AnalysisCoverage struct {
 	// DSDExcluded: .dsf/.dff sources — sox can't decode 1-bit DSD, so
 	// these are permanently out of scope, not a backlog.
 	DSDExcluded int
+	// WavPackAPEExcluded: WavPack and Monkey's Audio sources, by the path
+	// as the client format gate reads it (formatgate.Gated; backlog B489).
+	// The bridge serves them as they are and decodes nothing of theirs:
+	// no decoder of the analysis pipeline is proven on them, and one that
+	// decodes a hybrid WavPack file without its correction file reads
+	// lossy audio as the file's. Out of scope, not a backlog.
+	WavPackAPEExcluded int
 	// ZeroByteExcluded: zero-byte sources (failed/incomplete uploads)
 	// skipped at collection time. Size is the SCAN-TIME size.
 	ZeroByteExcluded int
@@ -10560,28 +10568,34 @@ func (s *Store) AnalysisCoverage(ctx context.Context, schemaVersion string) (Ana
 	row := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*),
 		       COALESCE(SUM(CASE WHEN lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' THEN 1 ELSE 0 END), 0),
-		       COALESCE(SUM(CASE WHEN t.size = 0 AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff') THEN 1 ELSE 0 END), 0),
+		       COALESCE(SUM(CASE WHEN `+analysisGatedSQL+` THEN 1 ELSE 0 END), 0),
+		       COALESCE(SUM(CASE WHEN t.size = 0 AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' OR `+analysisGatedSQL+`) THEN 1 ELSE 0 END), 0),
 		       COALESCE(SUM(CASE WHEN ta.waveform_tag != '' AND ta.schema_version = ?1
-		                          AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' OR t.size = 0)
+		                          AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' OR `+analysisGatedSQL+` OR t.size = 0)
 		                         THEN 1 ELSE 0 END), 0),
 		       COALESCE(SUM(CASE WHEN ta.waveform_tag != '' AND ta.schema_version != ?1
-		                          AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' OR t.size = 0)
+		                          AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' OR `+analysisGatedSQL+` OR t.size = 0)
 		                          AND NOT `+analysisFailureSuppressedSQL2+`
 		                         THEN 1 ELSE 0 END), 0),
 		       COALESCE(SUM(CASE WHEN `+analysisFailureSuppressedSQL2+`
-		                          AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' OR t.size = 0)
+		                          AND NOT (lower(t.path) LIKE '%.dsf' OR lower(t.path) LIKE '%.dff' OR `+analysisGatedSQL+` OR t.size = 0)
 		                          AND NOT (COALESCE(ta.waveform_tag, '') != '' AND COALESCE(ta.schema_version, '') = ?1)
 		                         THEN 1 ELSE 0 END), 0)
 		FROM tracks t
 		LEFT JOIN track_analysis ta ON ta.source_path = t.path
 		WHERE NOT EXISTS (SELECT 1 FROM upnp_track_routing r WHERE r.source_path = t.path)`,
 		schemaVersion, s.AnalysisFailureCutoff())
-	if err := row.Scan(&c.TotalLocal, &c.DSDExcluded, &c.ZeroByteExcluded,
+	if err := row.Scan(&c.TotalLocal, &c.DSDExcluded, &c.WavPackAPEExcluded, &c.ZeroByteExcluded,
 		&c.AnalysedFresh, &c.AnalysedStale, &c.UnreadableExcluded); err != nil {
 		return AnalysisCoverage{}, err
 	}
 	return c, nil
 }
+
+// analysisGatedSQL is true for a row of tracks as t that is a WavPack or
+// Monkey's Audio file (ungatedPathSQLT's negation, formatgate.Gated), which
+// the analysis sweep never decodes (AnalysisCoverage.WavPackAPEExcluded).
+const analysisGatedSQL = `NOT ` + ungatedPathSQLT
 
 // CountAnalysis returns (rows-with-a-waveform, total waveform bytes)
 // for the analysis stats tile. Mirrors CountVariants' shape; degrades

@@ -79,6 +79,11 @@ var windowsReserved = map[string]bool{
 // NOT consumed — the bridge has no cue-sheet handling — so it round-trips for
 // other players without the UI implying it does something here.
 //
+// ".wvc" is consumed too (backlog B489): a hybrid WavPack file is lossless
+// only with its correction file beside it, which the scanner reads as the
+// row's dependency and never as a track, so an upload of a hybrid album needs
+// both.
+//
 // ".png" is deliberately absent. The local-artwork path is JPEG-only by design
 // (internal/manifest/extractors.go validates both the MIME and the SOI magic),
 // so accepting a PNG cover would silently produce a file that is never used.
@@ -90,6 +95,7 @@ var companionExts = map[string]bool{
 	".ttml": true,
 	".txt":  true,
 	".cue":  true,
+	".wvc":  true,
 }
 
 // AcceptedExt reports whether a filename's extension may be uploaded, and

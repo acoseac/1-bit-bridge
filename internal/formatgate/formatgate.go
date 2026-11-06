@@ -68,6 +68,13 @@ func Of(p string) Format {
 	return None
 }
 
+// Gated reports whether Of(p) is a gated format: a WavPack or Monkey's Audio
+// file, which the bridge serves as it is and decodes nothing of. The
+// consumers that leave these files alone ask it (the duplicates elector, the
+// rendition gates, analysis, the bridge's own player and the DLNA adapter),
+// each for its own reason, given where it asks.
+func Gated(p string) bool { return Of(p) != None }
+
 // Token is the header token that declares f, or "" for None.
 func (f Format) Token() string {
 	switch f {

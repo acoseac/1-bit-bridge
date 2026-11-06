@@ -3,7 +3,8 @@
 // / AIFF / AAC / MP3 / OGG / OPUS / WMA / DSF / DFF; the compressed
 // AIFF-C and WAV encodings ULAW / ALAW / IMA4 / ADPCM / GSM / MP2 and
 // "AIFC", an AIFF-C whose compression the bridge does not know, since
-// ExtractorVersion 21; "" for legacy pre-codec rows and unreadable
+// ExtractorVersion 21; WAVPACK / WAVPACK-LOSSY / WAVPACK-DSD / APE since
+// ExtractorVersion 32; "" for legacy pre-codec rows and unreadable
 // containers) — this file owns the predicates over that vocabulary so
 // consumers can't drift.
 package manifest
@@ -13,7 +14,9 @@ import "strings"
 // IsLossyCodec reports whether codec identifies a LOSSY encode
 // (MP3 / AAC / OGG / OPUS / WMA, and since ExtractorVersion 21 the
 // compressed AIFF-C and WAV encodings: G.711 ULAW / ALAW, IMA4 and
-// ADPCM, GSM, MP2; backlog B124, B154). Case-insensitive and whitespace-
+// ADPCM, GSM, MP2; backlog B124, B154; and since ExtractorVersion 32 a
+// hybrid WavPack file with no correction file beside it, WAVPACK-LOSSY,
+// backlog B489). Case-insensitive and whitespace-
 // tolerant, matching the scanner's stamping conventions. "AIFC" (a
 // compression the bridge does not know) is not in it: the extractor
 // gives such a row no depth, which keeps it out of upscaling anyway.
@@ -37,7 +40,7 @@ import "strings"
 // behavior; the rate/bits geometry gate still protects them).
 func IsLossyCodec(codec string) bool {
 	switch strings.ToUpper(strings.TrimSpace(codec)) {
-	case "MP3", "AAC", "OGG", "OPUS", "WMA", "ULAW", "ALAW", "IMA4", "ADPCM", "GSM", "MP2":
+	case "MP3", "AAC", "OGG", "OPUS", "WMA", "ULAW", "ALAW", "IMA4", "ADPCM", "GSM", "MP2", CodecWavPackLossy:
 		return true
 	}
 	return false

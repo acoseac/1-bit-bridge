@@ -331,13 +331,17 @@ func TestDupesLossyCodecsMirrorIsLossyCodec(t *testing.T) {
 		"FLAC", "ALAC", "WAV", "AIFF", "AIFC", "DSF", "DFF",
 		"MP3", "AAC", "OGG", "OPUS", "WMA",
 		"ULAW", "ALAW", "IMA4", "ADPCM", "GSM", "MP2",
+		CodecWavPack, CodecWavPackLossy, CodecWavPackDSD, CodecAPE,
 	}
 	for _, c := range stamped {
 		if IsLossyCodec(c) && !ranked[c] {
 			t.Errorf("manifest.IsLossyCodec(%q) is true but dupes does not rank it lossy", c)
 		}
 	}
-	for _, c := range []string{"FLAC", "ALAC", "WAV", "AIFF", "AIFC", "DSF", "DFF"} {
+	if !IsLossyCodec(CodecWavPackLossy) {
+		t.Errorf("manifest.IsLossyCodec(%q) is false: a hybrid file with no correction file is lossy", CodecWavPackLossy)
+	}
+	for _, c := range []string{"FLAC", "ALAC", "WAV", "AIFF", "AIFC", "DSF", "DFF", CodecWavPack, CodecWavPackDSD, CodecAPE} {
 		if IsLossyCodec(c) {
 			t.Errorf("sanity: manifest.IsLossyCodec(%q) unexpectedly true", c)
 		}

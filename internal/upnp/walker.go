@@ -370,6 +370,13 @@ func looksLikeAudioItem(it Object) bool {
 	if it.Res == "" {
 		return false
 	}
+	// A WavPack correction file is never a track, here as in the scanner's
+	// walk (backlog B489): it carries the difference a hybrid .wv needs to
+	// be lossless, and nothing plays it alone. A routed .wv is never paired
+	// with one either; it is whatever its own bytes are.
+	if isWavPackCorrection(it) {
+		return false
+	}
 	// class / protocolInfo are overwhelmingly already-lowercase in the
 	// wild, so match the raw string first and only pay the
 	// strings.ToLower allocation on a miss — this runs per item across
@@ -416,6 +423,14 @@ func synthesizeFilename(it Object) string {
 	ext := strings.ToLower(strings.TrimPrefix(extFromURL(it.Res), "."))
 	if ext == "" {
 		ext = extFromProtocolInfo(it.ProtocolInfo)
+	}
+	// A WavPack or Monkey's Audio item takes its format's extension from its
+	// protocolInfo whatever its URL's says (a server that names its files
+	// .dat): the client format gate holds a routed row by its path's
+	// extension alone (formatgate, backlog B489), so an app that plays
+	// neither format is never handed one under another name.
+	if g := extFromProtocolInfo(it.ProtocolInfo); g == "wv" || g == "ape" {
+		ext = g
 	}
 	title := strings.TrimSpace(it.Title)
 	if title == "" {
@@ -591,6 +606,19 @@ func matchProtocolInfoExt(pi string) string {
 	switch {
 	case strings.Contains(pi, "audio/x-flac"), strings.Contains(pi, "audio/flac"):
 		return "flac"
+	case strings.Contains(pi, "wavpack-correction"):
+		// Before WavPack's own, whose names it contains.
+		return "wvc"
+	case strings.Contains(pi, "audio/x-wavpack"), strings.Contains(pi, "audio/wavpack"):
+		// WavPack and Monkey's Audio name their extension so a row the
+		// walk synthesizes from a URL that has none still carries it:
+		// the client format gate holds a routed row by its path's
+		// extension (formatgate, backlog B489), and an upstream row has
+		// no header the bridge parsed to name its format otherwise.
+		return "wv"
+	case strings.Contains(pi, "audio/x-ape"), strings.Contains(pi, "audio/ape"),
+		strings.Contains(pi, "audio/x-monkeys-audio"):
+		return "ape"
 	case strings.Contains(pi, "audio/x-dsf"):
 		return "dsf"
 	case strings.Contains(pi, "audio/x-dff"), strings.Contains(pi, "audio/dsdiff"):
@@ -611,6 +639,12 @@ func matchProtocolInfoExt(pi string) string {
 
 // isKnownAudioExt is a tight allowlist of audio extensions the bridge's
 // downstream pipeline already handles bit-exact.
+// isWavPackCorrection reports whether it is a WavPack correction file: its
+// URL's extension is .wvc, or its protocolInfo names one.
+func isWavPackCorrection(it Object) bool {
+	return extFromURL(it.Res) == "wvc" || extFromProtocolInfo(it.ProtocolInfo) == "wvc"
+}
+
 func isKnownAudioExt(ext string) bool {
 	switch strings.ToLower(ext) {
 	case "flac", "dsf", "dff", "wav", "aiff", "aif", "aifc", "m4a", "mp3", "mp4", "ogg", "opus":

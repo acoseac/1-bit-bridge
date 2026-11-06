@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/transcode"
 )
@@ -98,6 +99,22 @@ var eligibilityMatrix = []eligibilityCase{
 	{name: "mp2-wav", codec: "MP2", ext: ".wav", rate: 44100, bits: 16, isDSD: false},
 	{name: "aifc-unknown-compression", codec: "AIFC", ext: ".aifc", rate: 96000, bits: 16, isDSD: false},
 	{name: "codec-empty-aifc-ext", codec: "", ext: ".aifc", rate: 96000, bits: 24, isDSD: false},
+	// WavPack and Monkey's Audio (backlog B489) are never a rendition's
+	// source. Upscaling refuses them by the path (formatgate.Gated, the
+	// SQL's ungatedPathSQLT); the optimize and pcm allowlists name neither
+	// codec and fall back to no gated extension. Each row carries a PCM
+	// geometry the upscale gate takes from a FLAC, so an upscale mirror
+	// without the path term disagrees on these rows alone; the codec-empty
+	// rows are a file its extractor refused (no codec), in either case,
+	// and the lossy hybrid row also meets the lossy term.
+	{name: "wavpack-cd", codec: "WAVPACK", ext: ".wv", rate: 44100, bits: 16, isDSD: false},
+	{name: "wavpack-hires", codec: "WAVPACK", ext: ".wv", rate: 96000, bits: 24, isDSD: false},
+	{name: "wavpack-lossy-hybrid", codec: "WAVPACK-LOSSY", ext: ".wv", rate: 44100, bits: 16, isDSD: false},
+	{name: "wavpack-dsd64", codec: "WAVPACK-DSD", ext: ".wv", rate: 2822400, bits: 1, isDSD: true},
+	{name: "ape-cd", codec: "APE", ext: ".ape", rate: 44100, bits: 16, isDSD: false},
+	{name: "ape-hires", codec: "APE", ext: ".ape", rate: 96000, bits: 24, isDSD: false},
+	{name: "codec-empty-wv-ext", codec: "", ext: ".WV", rate: 96000, bits: 24, isDSD: false},
+	{name: "codec-empty-ape-ext", codec: "", ext: ".ape", rate: 44100, bits: 16, isDSD: false},
 }
 
 // dsdRenderStates are the three capability states the DSD-aware
@@ -223,7 +240,8 @@ func TestEligibilitySQLAgreesWithPCMRenderEligible(t *testing.T) {
 // must agree with a literal re-statement of Coordinator.Submit's
 // candidate gate (internal/transcode/batch.go): NOT lossy
 // (manifest.IsLossyCodec — the re-statement calls the REAL shared
-// predicate, same as Submit does), known geometry, never downsample
+// predicate, same as Submit does), not a WavPack or Monkey's Audio
+// file (formatgate.Gated, likewise), known geometry, never downsample
 // on either axis, skip exact-at-target. Submit has no DSD arm (real
 // DSD falls out via rate > target), so the re-statement doesn't
 // either; the matrix keeps DSD rows realistic so the SQL's defensive
@@ -240,12 +258,22 @@ func TestEligibilitySQLAgreesWithUpscaleSubmitGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EligibleCountsForFolders: %v", err)
 	}
+	gatedWithGeometry := 0
 	for i, c := range eligibilityMatrix {
-		want := submitGate(c.codec, c.rate, c.bits)
+		want := submitGate(c.trackPath(paths[i]), c.codec, c.rate, c.bits)
 		got := counts[paths[i]].Upscale == 1
 		if got != want {
 			t.Errorf("%s: SQL upscale-eligible=%v, Submit gate=%v — mirrors diverged",
 				c.name, got, want)
 		}
+		if formatgate.Gated(c.trackPath(paths[i])) && !c.isDSD && !manifest.IsLossyCodec(c.codec) &&
+			submitGate("x.flac", c.codec, c.rate, c.bits) {
+			gatedWithGeometry++
+		}
+	}
+	// Vacuity guard: the path term must decide some row on its own, a gated
+	// file whose codec and geometry the gate would take at another path.
+	if gatedWithGeometry == 0 {
+		t.Error("no gated row would be eligible but for its path; the matrix has stopped exercising the path term")
 	}
 }
