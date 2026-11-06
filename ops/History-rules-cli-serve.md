@@ -1642,8 +1642,14 @@ mentions across the four `ops/audit-*.md` files.
   marked `cancelled` (the integrity sweeps; an orphan walk that did not
   finish is `tick cut short`, never `tick complete`). A shutdown during
   `runServe`'s STARTUP is a stop too: the first-run upscale seed, the one
-  startup step that runs on the serve context and exits 1, exits 0 when
-  the shutdown lands in it. **The scanner's final flush DROPS its batch on
+  start-up database step on the serve context, exits 0 when the shutdown
+  lands in it, whether its error is the cancellation or the
+  `sql.ErrTxDone` its commit answers once database/sql's own goroutine has
+  rolled the transaction back (B662, the next bullet;
+  `disarmEarlyRollback`, B613's, is the other start-up step on that
+  context that can exit 1, and says its stop itself; this said "the one
+  startup step that runs on the serve context and exits 1" until then).
+  **The scanner's final flush DROPS its batch on
   a cancel, deliberately**: the skip gate compares each file with its
   STORED row, which the dropped write never touched, so the next scan
   redoes exactly what was dropped. Three traps. A cancellation error from
@@ -1651,7 +1657,10 @@ mentions across the four `ops/audit-*.md` files.
   answers `ctx.Err()` whenever its interrupt fired, a committed statement
   included). database/sql can answer `sql: statement is closed` in place
   of the cancellation (1 in 3,000 measured), which is reported rather than
-  matched by its text. And a context cancelled BEFORE the call can pass a
+  matched by its text, and so can `sql.ErrTxDone`, which a loop reports
+  too, as `ctxerr.WithoutCancellation` does, and a start-up step takes
+  for its stop beside a cancelled stop context (B662). And a context
+  cancelled BEFORE the call can pass a
   test without reaching the site at all: the seed's `GetUpscaleTarget`
   failed on it first and the seed was skipped, so the test was green on
   the unfixed code. Cancel INSIDE the call the test names
@@ -1660,8 +1669,76 @@ mentions across the four `ops/audit-*.md` files.
   there (`mustHaveReachedGitHub`), and give every stopped test a twin
   failing on a LIVE context: without one, the site's "never log" control
   cannot bite, which happened twice here. Joining the tsnet start
-  goroutine was #997's class, not this rule's; #1009 did it (next
-  bullet).
+  goroutine was #997's class, not this rule's; #1009 did it (the bullet
+  after next).
+
+- **A stop that lands in a start-up step on serve's context exits 0 only
+  on that stop's own artifacts: serve's stop context cancelled and an
+  error made of the cancellation and `sql.ErrTxDone` alone, the error a
+  commit answers once database/sql's own goroutine has rolled the
+  transaction back (`stoppedBeforeServing`)** (2026-11-06, backlog B662).
+  macOS run 41480956932 failed `TestServeRunsThePlayersWatcherWhileThePlayerIsOn`
+  with `serve exit code 1; stderr=seed upscale target: sql: transaction
+  has already been committed or rolled back`: the test stops serve once
+  its hotplug watcher has read once, and the watcher starts before the
+  seed, so the stop can land while serve seeds the upscale target on its
+  fresh database. #1005 had taken the seed's `context canceled` for a stop
+  (the bullet above) and nothing else. The seed is
+  `SetUpscaleTarget(ctx, …)`: `BeginTx`, two upserts and `Commit`, all on
+  serve's own context. `BeginTx` gives the transaction a child of it and
+  starts `Tx.awaitDone`, which rolls the transaction back as soon as that
+  child is done, marking it done before anything else. A statement on the
+  cancelled context answers `ctx.Err()` (database/sql's `grabConn` asks the
+  context first, and modernc answers `ctx.Err()` for a statement its
+  interrupt goroutine saw cancelled, one that completed included), which
+  is #1005's case. A cancel that lands after the last statement's driver
+  call has returned, with the rollback's mark before the seed reaches
+  `tx.Commit()`, leaves `Commit` to find its context done and the
+  transaction done, and it answers `sql.ErrTxDone` without calling the
+  driver's Commit (go1.27.3's `sql.go`, `Commit`). A statement whose
+  `grabConn` passed its context check just before the cancel and found the
+  transaction done just after the rollback's mark answers it too. Neither
+  carries the cancellation, so the seed exited 1. Not a transaction used
+  twice, and not a statement on another context: every call of the seed
+  takes serve's own `ctx`, unshadowed from runServe's first line to the
+  seed. **Clean shutdown is a serve-level outcome**: `stoppedBeforeServing`
+  (serve_startup_stop.go) is the seed's one check, the cancellation's case
+  and the ended transaction's together, so the two cannot drift. It asks
+  `errors.Is(stopCtx.Err(), context.Canceled)`, never any `ctx.Err()`, so a
+  deadline stays a failure as `ctxerr.WithoutCancellation` rules, and
+  `stopArtifactsOnly`, which walks the error as `errors.Is` does: the
+  cancellation as `ctxerr.WithoutCancellation` reads it, or `sql.ErrTxDone`,
+  wrapped or joined, and nothing else beside them, so a disk's refusal that
+  arrives after the stop still fails, and so does a wrapper of nothing.
+  **The store still returns the error**: the console's batch submit calls
+  `SetUpscaleTarget` too and takes nil for a committed update. **And
+  `ctxerr.WithoutCancellation` is unchanged**: it keeps reporting a
+  deadline and an unrelated failure during a shutdown, and the
+  `sql.ErrTxDone` a loop's commit meets after a stop stays the measured
+  residual its doc names (one reported line). The transaction code is
+  unchanged; its test seam (`Store.SetUpscaleTargetBeforeCommitForTest`,
+  `serveOpts.upscaleTargetBeforeCommit`) is nil in production. The audit
+  of every start-up database call and transaction `runServe` reaches is
+  in `ops/engineering-log.md` (2026-11-06, B662): the seed is the one on
+  serve's context; the store's open, its migrations, the scanner's
+  `last_full_scan` read and the batch coordinator's recovery run on
+  `context.Background()`, where a stop cannot reach them, and
+  `GetUpscaleTarget`'s stop only skips the seed. The tests hold the seed
+  between its last statement and its commit, stop serve, wait at the
+  driver for database/sql's rollback (`sqlitetest.WatchRollbacks`, the
+  bullet on the store-level hold under **Build, CI, and test
+  discipline**), and only then let it commit:
+  `TestAServeStoppedAtItsUpscaleSeedsCommitExitsCleanly` (red without the
+  fix, exit 1 with exactly the CI's stderr), its twins that stay failures
+  (`TestAServeWhoseUpscaleSeedFindsItsTransactionEndedStillFails`, the
+  same `sql.ErrTxDone` with the stop context live;
+  `TestAServePastItsDeadlineAtItsUpscaleSeedsCommitStillFails`;
+  `TestAServeWhoseUpscaleSeedFailsAsItIsStoppedStillFails`, an unrelated
+  error after the stop) and `TestAStopEndsAStartUpStepOnlyByItsOwnArtifacts`,
+  the predicate's table. **Don't take `sql.ErrTxDone` for a stop on a
+  live context or past a deadline, take any `ctx.Err()` for the stop, let
+  an error beside the stop's artifacts pass, make the store swallow the
+  error, or teach `ctxerr.WithoutCancellation` the rule.**
 
 - **A goroutine serve starts is stopped by a context the TEARDOWN
   cancels, and joined before anything it uses is closed** (#1009).
