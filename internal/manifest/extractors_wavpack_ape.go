@@ -184,13 +184,18 @@ func readAPEFamilyTags(f extractSource, size int64, absPath string, t *Track, ec
 // tag ahead of the stream, which neither format defines, would have it
 // allocate by a length the file need not back (dhowden's readBytes sizes a
 // buffer by an ID3v2 header's length up to 10 MB; FuzzExtractAPE found a
-// 603-byte file allocating 1.3 MB), so it is not read. Then the folder's
-// cover, as for a file whose tags hold none, and the stem's explicit mark for
-// a file with no ID3v1 tag either.
+// 603-byte file allocating 1.3 MB), so it is not read. The 128 bytes are read
+// by offset, as the rest of these files is, so the read makes no seek of the
+// file, and through a dhowdenReadBuffer, as every dhowden read is (backlog
+// B117). Then the folder's cover, as for a file whose tags hold none, and the
+// stem's explicit mark for a file with no ID3v1 tag either.
 func readAPEFamilyID3v1(f extractSource, size int64, absPath string, t *Track, ec *ExtractContext) {
 	var m tag.Metadata
 	if size >= apeID3v1Bytes {
-		if md, err := tag.ReadID3v1Tags(io.NewSectionReader(f, size-apeID3v1Bytes, apeID3v1Bytes)); err == nil {
+		stream, release := newDhowdenReadBuffer(io.NewSectionReader(f, size-apeID3v1Bytes, apeID3v1Bytes))
+		md, err := tag.ReadID3v1Tags(stream)
+		release()
+		if err == nil {
 			m = md
 		}
 	}
