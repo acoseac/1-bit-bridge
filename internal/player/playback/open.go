@@ -28,8 +28,15 @@ const (
 	// ReasonRate is a rate the ALSA backend does not open
 	// (alsapcm.MinRateHz to MaxRateHz), which the decoders take from 1 Hz,
 	// and a DSD rate no transport here carries (DSD512): the effective
-	// policy's word for it, one word (B728 B7 unified the two).
-	ReasonRate engine.Reason = policy.ReasonRateNotSupported
+	// policy's word for it too, policy.ReasonRateNotSupported, one word
+	// (TestEveryDSDRefusalWordIsInTheProtocol holds the two together).
+	ReasonRate engine.Reason = "rate_not_supported"
+	// ReasonDACUnread is DSD refused while no effective set can be computed
+	// (B728 B7): the box's reading of the DAC is stale, a stale snapshot
+	// being no ground for a set (the design's section 3.1), the binding names
+	// no unit now, the unit's identity or its PCM device's stream did not
+	// read, or the set has not been computed yet. PCM plays.
+	ReasonDACUnread engine.Reason = "dsd_dac_unread"
 	// ReasonTransport is content the DAC takes in none of the packings its
 	// depth has, at its rate (packings): the DAC does not play it as it is.
 	ReasonTransport engine.Reason = "transport_not_supported"

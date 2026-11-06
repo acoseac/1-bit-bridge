@@ -12,6 +12,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
+	"github.com/acoseac/1-bit-bridge/internal/player/policy"
 )
 
 // TestEveryDSDRefusalWordIsInTheProtocol (B728 B7): every word the
@@ -68,6 +69,11 @@ func TestEveryDSDRefusalWordIsInTheProtocol(t *testing.T) {
 	})
 	if len(words) < 12 {
 		t.Fatalf("read %d refusal words from the policy: %v", len(words), words)
+	}
+	// One word for a rate no transport here carries, the backend's and the
+	// policy's (B728 B7).
+	if playback.ReasonRate != policy.ReasonRateNotSupported {
+		t.Errorf("the backend's rate refusal %s is not the policy's %s", playback.ReasonRate, policy.ReasonRateNotSupported)
 	}
 	for _, w := range words {
 		if !strings.Contains(paragraph, "`"+w+"`") {

@@ -31,13 +31,6 @@ import (
 // recorded in the state. The approval's admission (Authorization) is the
 // harness's alone.
 
-// ReasonDACUnread is DSD refused while no effective set can be computed:
-// the box's reading of the DAC is stale, a stale snapshot being no ground
-// for a set (the design's section 3.1), the binding names no unit now, or
-// the unit's identity or its PCM device's stream did not read, or the set
-// has not been computed yet. PCM plays.
-const ReasonDACUnread engine.Reason = "dsd_dac_unread"
-
 // dsdTick is how often a session that holds a DSD occurrence reads the
 // policy again, the gain check among it (the design's section 3.4: the 100
 // ms monitor).
