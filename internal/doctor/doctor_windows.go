@@ -15,7 +15,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// isAddrInUse reports whether a listen error is "address already in use".
+// IsAddrInUse reports whether a listen error is "address already in use".
+// Exported for serve's take-back of a start's count (backlog B660).
 //
 // The WSAEADDRINUSE arm is LOAD-BEARING and must not be "simplified" away to
 // the POSIX form. On Windows `syscall.EADDRINUSE` is an INVENTED constant —
@@ -44,8 +45,22 @@ import (
 // The suggested "fix" would not even compile: stdlib syscall on Windows
 // defines only a handful of WSA constants (WSAECONNRESET and friends) and
 // WSAEADDRINUSE is not among them.
-func isAddrInUse(err error) bool {
+func IsAddrInUse(err error) bool {
 	return errors.Is(err, windows.WSAEADDRINUSE) || errors.Is(err, syscall.EADDRINUSE)
+}
+
+// IsBindPermission reports whether a listen error is the host refusing the
+// bind by a permission (backlog B660): WSAEACCES, which Windows returns for a
+// port another process holds exclusively (SO_EXCLUSIVEADDRUSE) or one in an
+// excluded range (Hyper-V's reservations), and which, as WSAEADDRINUSE is
+// for IsAddrInUse, neither syscall.EACCES nor os.ErrPermission matches here:
+// stdlib's Errno.Is maps ErrPermission to ERROR_ACCESS_DENIED, EACCES and
+// EPERM alone. Those three are kept beside it for an error some layer has
+// normalised. The x/sys/windows constant is a syscall.Errno through the
+// alias IsAddrInUse's comment describes.
+func IsBindPermission(err error) bool {
+	return errors.Is(err, windows.WSAEACCES) || errors.Is(err, windows.ERROR_ACCESS_DENIED) ||
+		errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM)
 }
 
 // pidAlive reports whether a process with this PID currently exists.

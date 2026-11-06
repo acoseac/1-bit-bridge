@@ -163,14 +163,38 @@ func TestIsAddrInUseMatchesRealBindConflict(t *testing.T) {
 		conflict.Close()
 		t.Fatal("second bind on an occupied port unexpectedly succeeded")
 	}
-	if !isAddrInUse(err) {
-		t.Fatalf("isAddrInUse(%#v) = false for a REAL bind conflict on %s; "+
+	if !IsAddrInUse(err) {
+		t.Fatalf("IsAddrInUse(%#v) = false for a REAL bind conflict on %s; "+
 			"a genuine port conflict must classify as in-use", err, runtime.GOOS)
 	}
 	// And it must not over-match: an unrelated error is not a port conflict,
 	// or every EACCES on a privileged port would become a hard Fail.
-	if isAddrInUse(errors.New("some unrelated failure")) {
-		t.Error("isAddrInUse matched an unrelated error")
+	if IsAddrInUse(errors.New("some unrelated failure")) {
+		t.Error("IsAddrInUse matched an unrelated error")
+	}
+	// Nor is a port conflict a permission (backlog B660: serve takes back a
+	// start's count for either, and says which).
+	if IsBindPermission(err) {
+		t.Errorf("IsBindPermission(%#v) = true for a bind conflict", err)
+	}
+}
+
+// TestIsBindPermissionMatchesWhatTheHostAnswersARefusedBind: the errno a
+// refused bind carries, wrapped as net.Listen wraps it, reads as a
+// permission, on this platform's spelling (backlog B660); a port conflict and
+// an unrelated error do not. Windows' arm, WSAEACCES, is pinned by its source
+// on every other host (TestTheWindowsBindChecksNameTheWinsockErrnos) and runs
+// here on Windows' CI leg.
+func TestIsBindPermissionMatchesWhatTheHostAnswersARefusedBind(t *testing.T) {
+	refused := &net.OpError{Op: "listen", Net: "tcp", Err: os.NewSyscallError("bind", bindPermissionErrno)}
+	if !IsBindPermission(refused) {
+		t.Errorf("IsBindPermission(%#v) = false for a bind the host refused", refused)
+	}
+	if IsAddrInUse(refused) {
+		t.Errorf("IsAddrInUse(%#v) = true for a bind the host refused", refused)
+	}
+	if IsBindPermission(errors.New("some unrelated failure")) {
+		t.Error("IsBindPermission matched an unrelated error")
 	}
 }
 

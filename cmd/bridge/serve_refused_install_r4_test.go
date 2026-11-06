@@ -412,10 +412,11 @@ func TestAStopWhileServeWaitsForTheMarkersLockEndsTheStartThere(t *testing.T) {
 }
 
 // TestTheBootConfirmsAnInterruptedRollbackOnlyOnTheInstallsOwnRecord: the
-// housekeeping of this version over the early rollback's record confirms the
-// install only where the record names this version as having opened the data
-// dir, which serve's admission writes before the store opens; without it the
-// marker is left as it is, and the line says why (round 4).
+// housekeeping of this version over the early rollback's record puts the
+// install back on probation (backlog B660: confirmed it until B660) only where
+// the record names this version as having opened the data dir, which serve's
+// admission writes before the store opens; without it the marker is left as
+// it is, and the line says why (round 4).
 func TestTheBootConfirmsAnInterruptedRollbackOnlyOnTheInstallsOwnRecord(t *testing.T) {
 	r := newRefusedInstall(t, "")
 	r.marker = rollbackStoppedBeforeItsRename(r.marker)
@@ -426,7 +427,7 @@ func TestTheBootConfirmsAnInterruptedRollbackOnlyOnTheInstallsOwnRecord(t *testi
 		t.Errorf("the housekeeping over a record no admission of this version wrote = nil, want its refusal; stderr=%s", stderr.String())
 	}
 	files.requireUnchanged(t)
-	if !strings.Contains(updaterLines(stderr.String()), "not confirming") {
+	if !strings.Contains(updaterLines(stderr.String()), "not putting the install") {
 		t.Errorf("the housekeeping did not say why it left the record; stderr=%s", stderr.String())
 	}
 
@@ -437,7 +438,7 @@ func TestTheBootConfirmsAnInterruptedRollbackOnlyOnTheInstallsOwnRecord(t *testi
 	if err := bootHousekeeping(t.Context(), &stderr, r.dataDir, r.bin, version.ServerVersion, nil); err != nil {
 		t.Fatalf("the housekeeping over this version's own record = %v; stderr=%s", err, stderr.String())
 	}
-	if st, err := updater.LoadState(r.dataDir); err != nil || st.Status != "installed" {
-		t.Errorf("the marker after the housekeeping over this version's own record = %+v (%v), want the install confirmed", st, err)
+	if st, err := updater.LoadState(r.dataDir); err != nil || st.Status != "installing" || st.RollbackStarted {
+		t.Errorf("the marker after the housekeeping over this version's own record = %+v (%v), want the install back on probation", st, err)
 	}
 }

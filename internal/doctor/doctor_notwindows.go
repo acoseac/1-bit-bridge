@@ -163,13 +163,27 @@ func resolveLsof() string {
 	return ""
 }
 
-// isAddrInUse reports whether a listen error is "address already in use".
+// IsAddrInUse reports whether a listen error is "address already in use".
 // On POSIX the stdlib errno is authoritative; the Windows twin additionally
 // matches WSAEADDRINUSE, which is what the OS actually returns there. Split
 // by build tag rather than checking both constants in one place so neither
-// platform carries a matcher that can never fire on it.
-func isAddrInUse(err error) bool {
+// platform carries a matcher that can never fire on it. Exported for serve,
+// which takes back a start's count of an install's failed starts where a
+// listener's bind was refused this way (backlog B660): a host's trouble,
+// which the backup would meet too.
+func IsAddrInUse(err error) bool {
 	return errors.Is(err, syscall.EADDRINUSE)
+}
+
+// IsBindPermission reports whether a listen error is the host refusing the
+// bind by a permission: EACCES (a port below 1024 without the capability)
+// or EPERM (a security module's refusal). The Windows twin matches
+// WSAEACCES, which the OS returns for a port another process holds
+// exclusively or the system reserved, and which neither syscall.EACCES nor
+// os.ErrPermission matches there. Serve's twin of IsAddrInUse (backlog
+// B660).
+func IsBindPermission(err error) bool {
+	return errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM)
 }
 
 // pidAlive reports whether a process with this PID currently exists.

@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"testing"
 
+	"github.com/acoseac/1-bit-bridge/internal/updater"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
 
@@ -23,12 +26,32 @@ import (
 const (
 	runAsBridgeEnv        = "CMDBRIDGE_TEST_RUN_AS_BRIDGE"
 	runAsBridgeVersionEnv = "CMDBRIDGE_TEST_RUN_AS_BRIDGE_VERSION"
+	// runAsBridgeCheckEnv makes the copy answer a settings check (`serve
+	// --validate-config`) as a backup of another kind would (backlog B660):
+	// "refused" refuses the settings, a reason on its line, exit 78;
+	// "predates" answers as a release from before the check, the flag
+	// package's own words and exit 2; "fails" exits 1, a check that did not
+	// answer. Empty is the code that ships.
+	runAsBridgeCheckEnv = "CMDBRIDGE_TEST_RUN_AS_BRIDGE_CHECK"
 )
 
 // runAsBridge is the re-exec'd test binary's whole run.
 func runAsBridge() int {
 	if v := os.Getenv(runAsBridgeVersionEnv); v != "" {
 		version.ServerVersion = v
+	}
+	if mode := os.Getenv(runAsBridgeCheckEnv); mode != "" && slices.Contains(os.Args[1:], "--"+updater.ConfigCheckFlag) {
+		switch mode {
+		case "refused":
+			fmt.Fprintln(os.Stderr, updater.ConfigRefusedPrefix+"line 3: a setting this version does not take")
+			return updater.ConfigCheckRefusedExit
+		case "predates":
+			fmt.Fprintln(os.Stderr, "flag provided but not defined: -"+updater.ConfigCheckFlag)
+			return 2
+		case "fails":
+			fmt.Fprintln(os.Stderr, "the settings could not be read")
+			return updater.ConfigCheckFailedExit
+		}
 	}
 	return run(context.Background(), os.Args[1:], os.Stdout, os.Stderr)
 }

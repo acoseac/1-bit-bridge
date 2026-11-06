@@ -130,8 +130,9 @@ type InstallOptions struct {
 //     filesystem that keeps none), and ctx's error for a stop in its
 //     wait: nothing armed or swapped (backlog B692).
 //   - ErrInstallPendingRestart, as above, and for the auto-installer
-//     ErrInstallHeldBack (a holdError), when the decision made again
-//     under that lock refuses (decideUnderLock).
+//     ErrInstallHeldBack and ErrInstallAwaitsConfirmation (each a
+//     holdError), when the decision made again under that lock refuses
+//     (decideUnderLock).
 //   - Any download / verify / swap / state-save error returned verbatim
 //     with a wrapped context prefix.
 //
@@ -497,6 +498,11 @@ var (
 	// recorded after the auto-installer's gate read the marker (HeldBack):
 	// nothing was installed.
 	ErrInstallHeldBack = errors.New("the version is held back from the auto-installer")
+	// ErrInstallAwaitsConfirmation means the auto-installer's install found,
+	// under the install marker's lock, that the running version's own install
+	// awaits its confirmation (ProbationHolds; backlog B660): nothing was
+	// installed, so the backup a crash rollback puts back stays.
+	ErrInstallAwaitsConfirmation = errors.New("the running install awaits its confirmation")
 	// ErrMarkerLockUnavailable means an install, a rollback, a hold's record
 	// or a restamp was refused because the install marker's lock
 	// (update-state.lock) could not be held: nothing was written or swapped.
@@ -827,7 +833,10 @@ func (u *Updater) swapAwaitingRestart(dataDir, target string) bool {
 // (swapAwaitingRestart), whichever process made it, so the second install
 // stops before it eats the first one's backup; and for the auto-installer, a
 // hold of target recorded since its gate read the marker refuses too
-// (HeldBack), as the gate would have. The lock is the caller's.
+// (HeldBack), as the gate would have, and so does the running install's
+// probation (ProbationHolds; backlog B660): the swap would replace the backup
+// a crash rollback puts back with the unconfirmed running version. A manual
+// install is not held by it. The lock is the caller's.
 func (u *Updater) decideUnderLock(opts InstallOptions, target string) error {
 	if u.swapAwaitingRestart(opts.DataDir, target) {
 		return fmt.Errorf("%w: %s is already staged on disk", ErrInstallPendingRestart, target)
@@ -835,6 +844,9 @@ func (u *Updater) decideUnderLock(opts InstallOptions, target string) error {
 	if opts.Automatic {
 		if hold := HeldBack(opts.DataDir, opts.ConfigPath, target); hold.Version != "" {
 			return &holdError{sentinel: ErrInstallHeldBack, reason: hold.Reason}
+		}
+		if why := u.probationHolds(opts.DataDir, u.Status().CurrentVersion); why != "" {
+			return &holdError{sentinel: ErrInstallAwaitsConfirmation, reason: why}
 		}
 	}
 	return nil

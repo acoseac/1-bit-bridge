@@ -1552,6 +1552,26 @@ function renderUpdateTile(u) {
       if (dt) dt.hidden = true;
     }
   }
+  // Probation: an install of the running version awaits its confirmation,
+  // which a start that has answered and stayed up makes (backlog B660). The
+  // row says where it stands, in the running start's own words, and its
+  // badge is the level: "on probation", or "warn" or "fail".
+  const probation = document.getElementById("update-probation");
+  if (probation) {
+    if (u?.probation) {
+      const onProbation = u.probationLevel === "ok";
+      const badge = onProbation ? "on probation" : escapeHTML(u.probationLevel ?? "");
+      probation.innerHTML = `<span class="badge ${onProbation ? "idle" : "warn"}">${badge}</span> ${escapeHTML(u.probation)}`;
+      probation.hidden = false;
+      const dt = probation.previousElementSibling;
+      if (dt) dt.hidden = false;
+    } else {
+      probation.hidden = true;
+      probation.innerHTML = "";
+      const dt = probation.previousElementSibling;
+      if (dt) dt.hidden = true;
+    }
+  }
 }
 
 // showUpdateCheckFailure shows why a Check now's request failed (the

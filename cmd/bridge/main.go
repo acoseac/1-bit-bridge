@@ -2137,6 +2137,7 @@ func (a updateInfoAdapter) Status() admin.UpdateStatus {
 	s := a.u.Status()
 	m := a.readMarker()
 	canRollback, rollbackRefusal := a.rollback(m)
+	probation, probationLevel := a.probation(m)
 	return admin.UpdateStatus{
 		CurrentVersion:   s.CurrentVersion,
 		LatestVersion:    s.LatestVersion,
@@ -2149,10 +2150,33 @@ func (a updateInfoAdapter) Status() admin.UpdateStatus {
 		CanInstall:       a.canInstall,
 		CanRollback:      canRollback,
 		RollbackRefusal:  rollbackRefusal,
+		Probation:        probation,
+		ProbationLevel:   probationLevel,
 		DeferredReason:   a.deferredReason(s),
 		RejectedVersion:  m.st.RejectedVersion,
 		RejectedReason:   m.st.RejectedReason,
 	}
+}
+
+// probation is the Updates panel's Probation row, from the marker read m
+// (backlog B660): updater.ProbationStatus's words for the running start,
+// which is this serve and takes itself off the count, and the row's level;
+// nothing where no install of the running version awaits its confirmation,
+// or where the marker cannot be read (the Rollback row says that).
+func (a updateInfoAdapter) probation(m markerRead) (says, level string) {
+	if m.err != nil {
+		return "", ""
+	}
+	p := updater.ProbationStatus(m.st, version.ServerVersion)
+	switch p.Level {
+	case updater.ProbationOK:
+		return p.ThisStart, "ok"
+	case updater.ProbationWarn:
+		return p.ThisStart, "warn"
+	case updater.ProbationFail:
+		return p.ThisStart, "fail"
+	}
+	return "", ""
 }
 
 // deferredReason is the Updates panel's "Held update" line: the
@@ -2247,6 +2271,7 @@ func (a updateInfoAdapter) Install(ctx context.Context, force bool) (admin.Updat
 	// The marker as the install left it, read once, as Status reads it.
 	m := a.readMarker()
 	canRollback, rollbackRefusal := a.rollback(m)
+	probation, probationLevel := a.probation(m)
 	// The same field set Status() returns, deliberately. Install used to drop
 	// CanRollback, DeferredReason and RejectedVersion — so when an install was
 	// DEFERRED (playback sessions in flight, st.DeferredReason =
@@ -2265,6 +2290,8 @@ func (a updateInfoAdapter) Install(ctx context.Context, force bool) (admin.Updat
 		CanInstall:       a.canInstall,
 		CanRollback:      canRollback,
 		RollbackRefusal:  rollbackRefusal,
+		Probation:        probation,
+		ProbationLevel:   probationLevel,
 		DeferredReason:   a.deferredReason(st),
 		RejectedVersion:  m.st.RejectedVersion,
 		RejectedReason:   m.st.RejectedReason,
@@ -2357,21 +2384,28 @@ const backupShutdownWait = 45 * time.Second
 // maybeRollbackOnBoot consults <dataDir>/update-state.json and acts
 // on whatever the previous install attempt's outcome was:
 //
-//   - first boot after a successful install, however late it comes
-//     (backlog B705): stamp installedAt and retain bridge.bak for one
-//     more boot.
-//   - boot after that: delete bridge.bak, and clear the marker once it
-//     is gone; a removal that fails leaves the marker for the next boot.
+//   - a boot of the version installed, however late it comes (backlog
+//     B705): nothing, and no lock asked for. The install is on probation
+//     (backlog B660): this runs before anything listens, so a version
+//     match proves only that the binary started; the start that has
+//     answered as ready and stayed up confirms it (serve_probation.go,
+//     updater.ConfirmInstall), and bridge.bak stays until the boot after
+//     that. Until B660 this stamped installedAt, and a version that
+//     crashed after this point had its .bak removed by its own next start.
+//   - boot after the confirmation: delete bridge.bak, and clear the marker
+//     once it is gone; a removal that fails leaves the marker for the next
+//     boot.
 //   - first boot after a FAILED install (we're not at TargetVersion):
 //     restore bridge.bak and clear the marker. Service manager will
 //     then respawn into the restored old binary on next exit.
-//   - a rollback's record still under way (the early rollback's, of an
-//     install a start stopped before the backup was back, or an
-//     operator's that the process's end stopped before or after its
-//     rename: backlog B692's round 2): confirm the install when its
-//     version boots (its settings loaded, so the rollback is over), and
-//     clear the install, keeping the hold and the veto, when the backup's
-//     version does.
+//   - a rollback's record still under way (the early rollback's or the
+//     crash rollback's, of an install a start stopped before the backup was
+//     back, or an operator's that the process's end stopped before or after
+//     its rename: backlog B692's round 2): put the install back on
+//     probation when its version boots (its settings loaded, and a crash
+//     rollback's record was asked first, before the admission, so the
+//     rollback is over), and clear the install, keeping the hold and the
+//     veto, when the backup's version does.
 //   - everything else: no-op.
 //
 // Each clear keeps a hold recorded beside the install, a veto of a
@@ -2417,10 +2451,13 @@ func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binary
 	}
 	// A marker that asks nothing of this boot asks for no lock: a filesystem
 	// that keeps none, or a lock another process holds, costs a boot with
-	// nothing to do no wait and no line. What a boot acts on is read again
+	// nothing to do no wait and no line. An install of this version on
+	// probation is one (backlog B660). What a boot acts on is read again
 	// under the lock, and decided there.
-	if st, err := updater.LoadState(dataDir); err == nil && updater.DecideBootAction(st, current, time.Now().UTC()) == updater.BootNoop {
-		return nil
+	if st, err := updater.LoadState(dataDir); err == nil {
+		if action := updater.DecideBootAction(st, current, time.Now().UTC()); action == updater.BootNoop || action == updater.BootInstallProbation {
+			return nil
+		}
 	}
 	lock, err := updater.LockState(ctx, dataDir)
 	if err == nil && !lock.Held() {
@@ -2439,22 +2476,15 @@ func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binary
 	}
 	action := updater.DecideBootAction(st, current, time.Now().UTC())
 	switch action {
-	case updater.BootNoop:
+	case updater.BootNoop, updater.BootInstallProbation:
+		// The install of this version on probation, however long after its
+		// install (backlog B705): nothing to write here, since this runs
+		// before anything listens (backlog B660). The start that answers and
+		// stays up confirms it, and .bak stays until the boot after that.
 		return nil
-	case updater.BootInstallSucceeded:
-		// New binary booted, however long after its install (backlog
-		// B705); record installedAt so the NEXT boot knows it can clean
-		// up the .bak. The rest of the marker stays as it is, the record
-		// this boot's admission made that this version opened the data
-		// dir included, so an operator's rollback of the .bak refuses
-		// until that cleanup (updater.RollbackRefusal).
-		st.Status = "installed"
-		st.InstalledAt = time.Now().UTC()
-		if err := updater.SaveState(dataDir, st); err != nil {
-			fmt.Fprintf(stderr, "updater: mark installed: %v\n", err)
-		}
 	case updater.BootCleanupBak:
-		// Second boot after a successful install: clean up. Every clear here
+		// The boot after the install's confirmation (a start that answered
+		// and stayed up, backlog B660): clean up. Every clear here
 		// keeps a hold recorded beside the install (updater.ClearInstall): it
 		// is about another version and the settings (backlog B613). A removal
 		// that fails leaves the marker as it is (backlog B705): the backup is
@@ -2528,8 +2558,8 @@ func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binary
 		}
 	case updater.BootClearAbandoned:
 		// Marker is older than the recency window and this boot is not
-		// of the install's version, whose own boot confirms it at any age
-		// (backlog B705) — no restore so long after, just clean up,
+		// of the install's version, whose own boot puts it on probation at
+		// any age (backlog B705) — no restore so long after, just clean up,
 		// keeping the record of the data dir beside the backup left where
 		// it is (updater.ClearInstall).
 		if err := updater.ClearInstall(dataDir, st); err != nil {
@@ -2537,24 +2567,26 @@ func bootHousekeepingWith(ctx context.Context, stderr io.Writer, dataDir, binary
 		}
 	case updater.BootRollbackOvertaken:
 		// A rollback's record of an install of this version, left by a start
-		// stopped before the backup was back, or by an operator's rollback
+		// stopped before the backup was back (the early rollback's, or the
+		// crash rollback's that this start's own recoverCrashedInstall did not
+		// finish, its checks no longer holding), or by an operator's rollback
 		// stopped before its rename (B692's round 2), and this boot got past
 		// its settings: the rollback will not be finished (the boot's
 		// admission recorded that this version opened the data dir), and the
-		// install is confirmed, however old the record. .bak stays for one
-		// more boot, as after any confirmed install (backlog B613's round 3).
-		// Only on that record (round 4): a record no admission of this
-		// version wrote is left as it is.
-		confirmed, err := updater.ConfirmOverRollback(st, current, time.Now().UTC())
+		// install goes back on probation, however old the record (backlog
+		// B660; confirmed here until B660), its count kept, since it has not
+		// been confirmed. .bak stays until it is. Only on that record (round
+		// 4): a record no admission of this version wrote is left as it is.
+		resumed, err := updater.ProbationOverRollback(st, current)
 		if err != nil {
-			fmt.Fprintf(stderr, "updater: not confirming the install of %s over the rollback begun before this start: %v; "+
+			fmt.Fprintf(stderr, "updater: not putting the install of %s back on probation over the rollback begun before this start: %v; "+
 				"the install marker is left as it is\n", current, err)
 			return err
 		}
 		fmt.Fprintf(stderr, "updater: %s starts on settings it loads, so the rollback to %s begun before this start is not finished: "+
-			"the install is confirmed, and %s.bak is kept until the next start\n", current, st.PreviousVersion, binaryPath)
-		if err := updater.SaveState(dataDir, confirmed); err != nil {
-			fmt.Fprintf(stderr, "updater: mark installed: %v\n", err)
+			"the install is back on probation, and %s.bak is kept until it is confirmed\n", current, st.PreviousVersion, binaryPath)
+		if err := updater.SaveState(dataDir, resumed); err != nil {
+			fmt.Fprintf(stderr, "updater: put the install back on probation: %v\n", err)
 		}
 	case updater.BootRollbackFinished:
 		// That record, and the version the backup held runs: the rollback was
@@ -3416,14 +3448,29 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// outlived its stop keeps the lock past this return (dataDirHold).
 	dataDirLock := newDataDirHold(releaseDataDir)
 	defer dataDirLock.done()
+	// The crash rollback (backlog B660), right after the data dir's lock and
+	// before the admission, so nothing of this start has written: an install
+	// of this version whose starts did not end cleanly
+	// updater.ProbationFailedStarts times is rolled back here where every
+	// check allows it, and otherwise says why and goes on. Only the data
+	// dir's owner puts the backup back.
+	if lockErr == nil {
+		if code, acted := recoverCrashedInstall(ctx, cfg.DataDir, *configPath, opts, stderr); acted {
+			return code
+		}
+	} else {
+		sayCrashRollbackNeedsTheDataDir(cfg.DataDir, stderr)
+	}
 	// Before the first write to the data dir, and so before the store's
 	// migrations: an armed install marker records that this version went on
 	// past its config, so neither the early rollback of a later start nor
 	// the boot rollback puts a backup back over what it writes (backlog
-	// B613). Not starting is the answer when that cannot be recorded. A stop
-	// while it waits for the install marker's lock ends the start there, with
-	// nothing written: a stop's exit (round 4).
-	if err := disarmEarlyRollback(ctx, cfg.DataDir, opts, stderr); err != nil {
+	// B613), and counts this start against the install (backlog B660). Not
+	// starting is the answer when the record cannot be made. A stop while it
+	// waits for the install marker's lock ends the start there, with nothing
+	// written: a stop's exit (round 4).
+	admission, err := disarmEarlyRollback(ctx, cfg.DataDir, opts, stderr)
+	if err != nil {
 		if ctx.Err() != nil && errors.Is(err, ctx.Err()) {
 			fmt.Fprintf(stderr, "serve: stopped before it started, while it waited for the install marker's lock\n")
 			return 0
@@ -3431,6 +3478,27 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		fmt.Fprintf(stderr, "updater: %v; not starting, so that no rollback to the backup can pass over what this version would write\n", err)
 		return 1
 	}
+	// A start counts as failed unless it ends clean (backlog B660): the
+	// admission counted it, and it takes its count back only where it ends in
+	// serve's stop or a restart request with its teardown done, or where a
+	// listener's bind was refused for an address in use or a permission, or
+	// the tailnet listener failed, a host's trouble the backup would meet too.
+	// Every other exit stays counted: an error return, a kill, a panic. A
+	// panic on serve's own goroutine runs these defers with code still 0, and
+	// runServe does not recover, so the take-back reads notAFailedStart, which
+	// exactly those paths set, and never code. Registered here, right after
+	// the admission, so it runs after every teardown and while the data dir's
+	// lock is held. A start that tried to count tries to take back, since the
+	// marker's write publishes before its barrier can fail.
+	notAFailedStart := false
+	if admission.CountTried > 0 {
+		defer func() {
+			if notAFailedStart {
+				takeBackFailedStart(cfg.DataDir, admission.CountTried, stderr)
+			}
+		}()
+	}
+	sayTheAdmissionsCount(admission, stderr)
 	// Adopt pre-floor identities before any live backup can run, even with
 	// playback disabled, under the data dir's lock alone. A pristine box
 	// still gets no player identity here.
@@ -3733,6 +3801,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	defer scanCancel()
 	scanRearm := make(chan struct{}, 1)
 	cadenceRearms = append(cadenceRearms, scanRearm)
+	if opts.scannerBoot != nil {
+		opts.scannerBoot(scanner)
+	}
 	bgWriters.Add(1)
 	go func() {
 		defer bgWriters.Done()
@@ -4036,10 +4107,13 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	binaryPath := servingBinaryPath(opts, stderr)
 
 	// Boot-time rollback housekeeping: read update-state.json and
-	// either confirm the install succeeded (mark installed, retain
-	// .bak for one boot) or restore .bak when the new version
-	// failed to come up cleanly. Failures are logged but
-	// non-fatal — operator can still recover by hand.
+	// restore .bak when the new version failed to come up as itself,
+	// remove .bak the boot after a confirmed install, or leave an install
+	// of this version on probation, which this start confirms once it has
+	// answered as ready and stayed up (backlog B660; serve_probation.go,
+	// started once ServeTLS runs). Nothing listens yet here, so this
+	// confirms nothing. Failures are logged but non-fatal — operator can
+	// still recover by hand.
 	maybeRollbackOnBoot(ctx, stderr, cfg.DataDir, binaryPath)
 
 	// Background updater: polls GitHub Releases on a configurable
@@ -4130,8 +4204,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// On successful auto-install we exit with
 		// supervision.RestartExitCode, and the service manager (launchd
 		// / systemd / SCM) respawns into the new binary. The Phase B
-		// `maybeRollbackOnBoot` housekeeping then verifies
-		// version-match and either confirms or rolls back.
+		// `maybeRollbackOnBoot` housekeeping then verifies version-match
+		// and either puts the install on probation or rolls back, and the
+		// new binary's start that answers and stays up confirms it, or three
+		// that do not end cleanly roll it back where nothing forbids it
+		// (backlog B660).
 		updOpts.AutoInstallRestart = func() {
 			fmt.Fprintln(stdout, "Restarting after auto-install (service manager will respawn).")
 			// Route through the graceful cancellation — the same cancel SIGINT
@@ -5160,8 +5237,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 					// else). The seed is the one start-up database step on
 					// ctx (B662's audit, in ops/engineering-log.md);
 					// disarmEarlyRollback, the other start-up step on ctx
-					// that can exit 1, says its stop itself.
+					// that can exit 1, says its stop itself. A stop is no
+					// failed start of an install (backlog B660).
 					if stoppedBeforeServing(ctx, seedErr) {
+						notAFailedStart = true
 						return 0
 					}
 					fmt.Fprintf(stderr, "seed upscale target: %v\n", seedErr)
@@ -6374,6 +6453,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		lis, err = net.Listen("tcp", cfg.ListenAddress)
 		if err != nil {
 			fmt.Fprintf(stderr, "listen %s: %v\n", cfg.ListenAddress, err)
+			// A port another process holds, or one the host refuses this
+			// user, is the host's trouble, which the backup would meet too:
+			// no failed start of an install (backlog B660). Asked through
+			// doctor's checks, whose Windows arm reads Winsock's errnos.
+			notAFailedStart = bindRefusedByTheHost(err)
 			return 1
 		}
 	}
@@ -6385,6 +6469,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// listener yields *tls.Conn and never sees a local peer, takes
 	// handshakelog.ErrorLog for the redaction alone.
 	lis, httpSrv.ErrorLog = handshakelog.Wrap(lis)
+	// What this process's accept loop takes, which the confirmation of an
+	// install of this version asks of each of its rounds (backlog B660): a
+	// connect alone can land in the kernel's backlog with nobody accepting.
+	accepts := newAcceptWatch(lis)
+	lis = accepts
 
 	// Format string uses bare %s — ServerVersion already carries the
 	// "v" prefix when the Makefile / goreleaser inject it via -ldflags
@@ -6594,6 +6683,28 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		serveErr <- httpSrv.ServeTLS(lis, "", "")
 	}()
 
+	// The confirmation of an install of this version (backlog B660), once
+	// ServeTLS is running and only where the marker awaits it: confirmed
+	// once this start has answered as ready (this process's accept loop,
+	// /v1/health through this handler, this store) and stayed up for
+	// updater.ProbationWindow. Joined through bgWriters on scanCtx; a round
+	// still out at the stop is not waited for (serve_probation.go).
+	if probation := newServeProbation(cfg.DataDir, version.ServerVersion, readiness{
+		accepts: accepts,
+		handler: httpSrv.Handler,
+		current: version.ServerVersion,
+		store: func(ctx context.Context) error {
+			_, err := manifestStore.CountServedTracks(ctx)
+			return err
+		},
+	}, opts.probation, stderr); probation != nil {
+		bgWriters.Add(1)
+		go func() {
+			defer bgWriters.Done()
+			probation.run(scanCtx)
+		}()
+	}
+
 	// Tsnet path: a SECOND http.Server, and HTTP/3 servers, bound to the
 	// embedded tsnet node. tsnet.Server.ListenTLS auto-renews LE certs
 	// in-process; the listener accepts only on the tailnet virtual
@@ -6638,6 +6749,10 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// the main API listener.
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			fmt.Fprintf(stderr, "admin server: %v\n", err)
+			// The console's port held by another process, or refused this
+			// user, is the host's trouble: no failed start of an install
+			// (backlog B660).
+			notAFailedStart = bindRefusedByTheHost(err)
 			// Tear down the main API listener cleanly before exit so
 			// in-flight iOS requests get `http.ErrServerClosed` rather
 			// than a socket RST mid-stream. Without this, a 404 on
@@ -6655,12 +6770,20 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		// operator notices.
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			fmt.Fprintf(stderr, "tsnet listener: %v\n", err)
+			// The tailnet's trouble, which the backup would meet too: no
+			// failed start of an install (backlog B660).
+			notAFailedStart = true
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 			defer cancel()
 			_ = httpSrv.Shutdown(shutdownCtx)
 			return 1
 		}
 	case <-ctx.Done():
+		// Serve's stop, or a restart request, which cancels the same
+		// context: no failed start of an install, whenever it lands, before
+		// the install answered as ready too (backlog B660). A process that
+		// ignores it is killed, and stays counted.
+		notAFailedStart = true
 		fmt.Fprintln(stdout, "\nShutting down...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 		// No defer cancel() here — we need to control the release timing manually

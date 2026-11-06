@@ -343,6 +343,10 @@ func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAcces
 			// refuses it first, as one its record beside the config names
 			// that holds neither its database nor its lock file (B651).
 			d.DataDirPreparation = doctorDataDir(d.ConfigFile.Path, cfg.DataDir)
+			// An install of this version that awaits its confirmation (backlog
+			// B660), from the marker in that data dir, for the CLI and the
+			// console alike.
+			d.InstallProbation = doctorInstallProbation(cfg.DataDir)
 			// The cert pair `bridge serve` would load — an explicit
 			// `tlsCertPath` included, which the cert checks used to
 			// ignore in favour of the DataDir defaults and so graded a

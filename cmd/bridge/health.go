@@ -55,14 +55,7 @@ func healthCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		fmt.Fprintf(stderr, "health: bad listenAddress %q: %v\n", cfg.ListenAddress, err)
 		return 1
 	}
-	// A wildcard bind doesn't listen on a routable host — dial loopback. A
-	// specific bound IP is dialed as-is so the probe follows the operator's
-	// networking intent.
-	switch host {
-	case "", "0.0.0.0", "::":
-		host = "127.0.0.1"
-	}
-	addr := net.JoinHostPort(host, port)
+	addr := net.JoinHostPort(probeHost(host), port)
 
 	d := net.Dialer{Timeout: 3 * time.Second}
 	conn, err := d.DialContext(ctx, "tcp", addr)
@@ -73,4 +66,17 @@ func healthCmd(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	_ = conn.Close()
 	fmt.Fprintln(stdout, "ok")
 	return 0
+}
+
+// probeHost is the host a probe on this host dials for a listener bound at
+// host: a wildcard bind doesn't listen on a routable host, so loopback; a
+// specific bound IP is dialed as-is so the probe follows the operator's
+// networking intent. `bridge health` dials it, and so does serve's readiness
+// probe of its own API listener (acceptWatch.probe; backlog B660).
+func probeHost(host string) string {
+	switch host {
+	case "", "0.0.0.0", "::":
+		return "127.0.0.1"
+	}
+	return host
 }
