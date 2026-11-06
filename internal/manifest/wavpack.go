@@ -65,6 +65,10 @@ const (
 	wvIDChannelInfo  = 0xd
 	wvIDDSDBlock     = 0xe
 	wvIDSampleRate   = 0x27
+	// wvIDWVXNewBitstream is the extended bitstream in its optional form
+	// (ID_OPTIONAL_DATA | ID_WVX_BITSTREAM), which a decoder that does not
+	// know it passes over.
+	wvIDWVXNewBitstream = 0x2c
 
 	// The float flags (ID_FLOAT_INFO's first byte) that send bits the main
 	// bitstream does not carry: FLOAT_SHIFT_SAME, FLOAT_SHIFT_SENT,
@@ -470,9 +474,14 @@ func (w *wvWindow) bytes(pos int64, k int) ([]byte, error) {
 	return w.buf[pos-w.start : pos-w.start+int64(k)], nil
 }
 
-// read takes what one sub-block of function id, dataLen bytes at at, says.
-// ID_INT32_INFO and ID_FLOAT_INFO of any length but 4 are refused, as the
-// reference decoder's read_int32_info and read_float_info refuse them.
+// read takes what one sub-block of function id, dataLen bytes at at, says,
+// refusing what the reference decoder's readers refuse: ID_INT32_INFO and
+// ID_FLOAT_INFO of any length but 4 (read_int32_info, read_float_info), a
+// main or correction bitstream that is empty or of odd length
+// (init_wv_bitstream, init_wvc_bitstream), and an extended bitstream of its
+// 4-byte CRC alone or of odd length (init_wvx_bitstream). Its optional form
+// refuses nothing, since a decoder that does not know it passes over it, and
+// carries extended bits only past its CRC.
 func (f *wvBlockFacts) read(w *wvWindow, id byte, at, dataLen int64) error {
 	switch id {
 	case wvIDSampleRate:
@@ -519,12 +528,22 @@ func (f *wvBlockFacts) read(w *wvWindow, id byte, at, dataLen int64) error {
 		} else {
 			f.floatFlags = b[0]
 		}
-	case wvIDWVBitstream:
-		f.wvBits = true
-	case wvIDWVCBitstream:
-		f.correctionBits = true
+	case wvIDWVBitstream, wvIDWVCBitstream:
+		if dataLen == 0 || dataLen%2 != 0 {
+			return fmt.Errorf("wavpack: a bitstream of %d bytes", dataLen)
+		}
+		if id == wvIDWVBitstream {
+			f.wvBits = true
+		} else {
+			f.correctionBits = true
+		}
 	case wvIDWVXBitstream:
-		f.wvxBits = dataLen > 4
+		if dataLen <= 4 || dataLen%2 != 0 {
+			return fmt.Errorf("wavpack: an extended bitstream of %d bytes", dataLen)
+		}
+		f.wvxBits = true
+	case wvIDWVXNewBitstream:
+		f.wvxBits = f.wvxBits || dataLen > 4
 	}
 	return nil
 }
