@@ -208,6 +208,32 @@ func TestRefreshesAcrossTheFirstOpensEndTakeTheSessionsLock(t *testing.T) {
 	}
 }
 
+// TestAProbeAsksNothingOfAUnitWhoseEnumerationDoesNotRead (B728 B7 round 3):
+// the probe records under the unit it captured at its enumeration, and a
+// device number that did not read (sysfs's devnum, 0) tells no enumeration
+// from another, so it asks such a unit nothing: ProbeDSD answers not pending,
+// opens no node and refines no candidate, and nothing is recorded.
+func TestAProbeAsksNothingOfAUnitWhoseEnumerationDoesNotRead(t *testing.T) {
+	d := newDSDRig(t, playbacktest.ChoiceState(dsdstate.ModeNative))
+	unit := playbacktest.DACUnit()
+	unit.USB.DevNum = 0
+	d.box.SetUnit(card, unit)
+	d.pol.Bound = func() (playback.BoundDAC, bool) {
+		return playback.BoundDAC{Card: card, Identity: unit.USB, Enumeration: "test/0"}, true
+	}
+	before := d.k.View()
+	if d.be.ProbeDSD(bg, playback.ProbeConditions{Available: true, Fresh: true}) {
+		t.Fatal("a probe of a unit whose device number did not read answered pending")
+	}
+	d.rig.stop()
+	if v := d.k.View(); v.Opens != before.Opens || v.Refines != before.Refines {
+		t.Errorf("the probe of a unit whose device number did not read opened its node %d times and asked %d candidates", v.Opens-before.Opens, v.Refines-before.Refines)
+	}
+	if e := playbacktest.Evidence(d.store.State(), dsdstate.TransportNative, "DSD_U32_BE", playbacktest.DSD64); e != nil {
+		t.Errorf("the unit's model holds %+v from a probe of an enumeration that did not read", e)
+	}
+}
+
 // TestAProbeRecordsNothingOfAUnitSwappedInBeforeItsOpen (B728 B7 round 2): the
 // silent probe records what the DAC accepted under the unit it captured (its
 // model, its firmware and its enumeration), so the node it opens must be that

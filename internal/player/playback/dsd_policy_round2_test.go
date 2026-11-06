@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/player/dacprofile"
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
@@ -33,6 +34,46 @@ func TestThePublishedModelNamesNoSerialOrPort(t *testing.T) {
 	p := b.Policy()
 	if strings.Contains(p.Model, "TESTDAC-0001") || strings.Contains(p.Model, unit.USB.Port) || p.Model != "Test at [redacted] Test DAC [redacted]" {
 		t.Errorf("the set publishes the model %q, want the unit's strings with its serial and its port path redacted", p.Model)
+	}
+}
+
+// TestTheProbesCheckRefusesAnEnumerationThatDoesNotRead (B728 B7 round 3):
+// the probe's check of the node it opened requires the unit's device number,
+// read and positive, to be the one it captured: a device number that did not
+// read (0) tells no enumeration from another, so two of them are no
+// enumeration in common, and the node is refused as another unit's.
+func TestTheProbesCheckRefusesAnEnumerationThatDoesNotRead(t *testing.T) {
+	box := playbacktest.NewBox(5)
+	unit := playbacktest.DACUnit()
+	unit.USB.DevNum = 0
+	box.SetUnit(5, unit)
+	node := alsapcm.NodeInfo{Card: 5, Playback: true}
+	if err := playback.ProbedUnitForTest(box, unit, playbacktest.DACKey())(node); alsapcm.ReasonOf(err) != alsapcm.ReasonWrongDevice {
+		t.Errorf("the check of a node whose unit's device number did not read: %v, want it refused as another unit", err)
+	}
+	unit.USB.DevNum = 2
+	box.SetUnit(5, unit)
+	if err := playback.ProbedUnitForTest(box, unit, playbacktest.DACKey())(node); err != nil {
+		t.Errorf("the check of the unit captured, its device number read: %v", err)
+	}
+}
+
+// TestAControlIndexPastAUint32LeavesDoPUnverifiable (B728 B7 round 3; CodeQL):
+// a control index in the kernel's table past what a control's index holds (a
+// uint32) does not read, so the table is taken for unread and DoP through the
+// gain stage is refused as unverifiable, failing closed: read with no bound,
+// 2^32 wrapped to index 0, named the volume control at 0 dB, and DoP played.
+func TestAControlIndexPastAUint32LeavesDoPUnverifiable(t *testing.T) {
+	box := playbacktest.NewBox(5)
+	unit := playbacktest.DACUnit()
+	unit.Descriptors = playbacktest.VolumeDescriptors()
+	box.SetUnit(5, unit)
+	box.SetControls(5, playbacktest.VolumeControls(255)...)
+	table := strings.Replace(string(playbacktest.VolumeMixer()), `name="PCM Playback Volume", index=0`, `name="PCM Playback Volume", index=4294967296`, 1)
+	box.SetMixer(5, []byte(table))
+	b := policyBackend(t, box, playbacktest.NewMemStore(playbacktest.ChoiceState(dsdstate.ModeDoP)))
+	if plan, _, err := b.AdmitDSDForTest(dsdAt(playbacktest.DSD64), true); reasonOf(err) != "dop_gain_unverifiable" {
+		t.Errorf("DoP through a volume whose table index is past a uint32: %+v, %v; want dop_gain_unverifiable", plan, err)
 	}
 }
 

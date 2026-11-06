@@ -911,7 +911,10 @@ func (b *Backend) ProbeDSD(ctx context.Context, cond ProbeConditions) (pending b
 		return false
 	}
 	m, err := p.Box.UnitModel(bd.Card)
-	if err != nil || !binding.SameUnit(m.USB, bd.Identity) || m.USB.DevNum != bd.Identity.DevNum {
+	// A device number that did not read (0) tells no enumeration from another,
+	// so its unit is not probed: its answers would be kept under an
+	// enumeration nothing can tell from the next (round 3).
+	if err != nil || !binding.SameUnit(m.USB, bd.Identity) || m.USB.DevNum <= 0 || m.USB.DevNum != bd.Identity.DevNum {
 		return false
 	}
 	key, err := dsdstate.KeyOf(m.USB, m.Product)
@@ -949,7 +952,9 @@ func (b *Backend) ProbeDSD(ctx context.Context, cond ProbeConditions) (pending b
 // probedUnit is the probe's check of the node it opened (ProbeRequest.Check):
 // the node's card is the unit the probe was begun for, as m read it with key,
 // its model's: the same unit at the same place and enumeration
-// (binding.SameUnit and its DevNum), of the same model and firmware. Its
+// (binding.SameUnit and its DevNum, read: 0 is a device number that did not
+// read, which tells no enumeration from another, so two of them are no
+// enumeration in common; round 3), of the same model and firmware. Its
 // answers are recorded under that unit alone (alsapcm.ProbeUnit, and the
 // model's driver_accepted), so a unit swapped into the bound place between the
 // capture and the open, which the binding's own check passes, is asked nothing
@@ -961,7 +966,7 @@ func probedUnit(box DSDBox, m alsa.UnitModel, key dacprofile.Key) func(alsapcm.N
 			return fmt.Errorf("player backend: the probed node's unit did not read: %w", err)
 		}
 		k, err := dsdstate.KeyOf(now.USB, now.Product)
-		if err != nil || !k.Equal(key) || !binding.SameUnit(now.USB, m.USB) || now.USB.DevNum != m.USB.DevNum || canonicalBCD(now.BCDDevice) != canonicalBCD(m.BCDDevice) {
+		if err != nil || !k.Equal(key) || !binding.SameUnit(now.USB, m.USB) || now.USB.DevNum <= 0 || now.USB.DevNum != m.USB.DevNum || canonicalBCD(now.BCDDevice) != canonicalBCD(m.BCDDevice) {
 			return &alsapcm.Error{Reason: alsapcm.ReasonWrongDevice, Op: "probe", Endpoint: alsapcm.Endpoint{Card: n.Card, Device: n.Device},
 				Detail: "the node opened is not the unit the probe was begun for (its place, enumeration, model or firmware differs)"}
 		}

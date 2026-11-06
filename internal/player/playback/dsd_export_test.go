@@ -1,9 +1,18 @@
 package playback
 
 import (
+	"github.com/acoseac/1-bit-bridge/internal/alsa"
+	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
+	"github.com/acoseac/1-bit-bridge/internal/player/dacprofile"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
 )
+
+// ProbedUnitForTest is the silent probe's check of the node it opened
+// (probedUnit), for the unit m, read with key's model, as ProbeDSD captured it.
+func ProbedUnitForTest(box DSDBox, m alsa.UnitModel, key dacprofile.Key) func(alsapcm.NodeInfo) error {
+	return probedUnit(box, m, key)
+}
 
 // AdmitDSDForTest is the effective policy's admission of DSD content of f
 // (admitDSD), for a session's first occurrence when leading: the plan, the
