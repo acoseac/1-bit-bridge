@@ -40,11 +40,11 @@ func (s *stubSearcher) WriteManifest(context.Context, io.Writer, time.Time, form
 func (s *stubSearcher) BuildManifestPage(context.Context, string, int, formatgate.Set) (*ManifestPage, error) {
 	return &ManifestPage{}, nil
 }
-func (s *stubSearcher) IsScanning() bool                                  { return false }
-func (s *stubSearcher) IsScanStalled() bool                               { return false }
-func (s *stubSearcher) LastFullScan() time.Time                           { return time.Time{} }
-func (s *stubSearcher) TracksIndexed(context.Context, formatgate.Set) int { return 0 }
-func (s *stubSearcher) PendingDeletions(context.Context) int64            { return 0 }
+func (s *stubSearcher) IsScanning() bool                                       { return false }
+func (s *stubSearcher) IsScanStalled() bool                                    { return false }
+func (s *stubSearcher) LastFullScan() time.Time                                { return time.Time{} }
+func (s *stubSearcher) TracksIndexed(context.Context, formatgate.Set) int      { return 0 }
+func (s *stubSearcher) PendingDeletions(context.Context, formatgate.Set) int64 { return 0 }
 
 var _ ManifestProvider = (*stubSearcher)(nil)
 

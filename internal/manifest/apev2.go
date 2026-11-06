@@ -22,7 +22,13 @@ package manifest
 // the item count (apeTagMaxItems), a key, and each value, by what it is read
 // for (apeTextValueMax, lyrics.MaxBodyBytes for lyrics, maxArtworkBytes for
 // the front cover). The items are read one at a time, a value only when it is
-// one this reader keeps, so a tag costs its kept values and no more.
+// one this reader keeps, so a tag costs its kept values and no more. And the
+// values a tag's text items keep are counted, all items together, against
+// apeTagMaxValues, as a FLAC comment block's comments are
+// (maxVorbisCommentTags): a value costs its string headers whatever its
+// length, so a cap on bytes alone bounds nothing for one-byte values (round 2
+// of backlog B489, Codex's review: 1,023 items of 64 KiB of "a" and a NUL
+// were 33.5 million strings).
 
 import (
 	"bytes"
@@ -47,6 +53,12 @@ const (
 	apeTagMaxItems = 1024
 	// apeTextValueMax caps a text value this reader keeps, but lyrics.
 	apeTextValueMax = 64 << 10
+	// apeTagMaxValues caps the values a tag's text items keep, all items
+	// together: a real tag holds tens, and at this count the string headers
+	// a value costs where it is kept (its item, the raw keys, the field it
+	// joins) stay near 3 MB, as maxVorbisCommentTags keeps a FLAC comment
+	// block's.
+	apeTagMaxValues = 64 << 10
 	// apeCoverNameMax bounds the file name a cover item holds before its
 	// NUL and its image.
 	apeCoverNameMax = 1 << 10
@@ -66,10 +78,14 @@ type apeTagItem struct {
 }
 
 // apeTagData is what an APEv2 tag holds that the extraction reads: the text
-// items in the tag's order, and the front cover's image.
+// items in the tag's order, and the front cover's image; and, never read
+// past the tag, the values its items keep (apeTagMaxValues) and whether one
+// was dropped for the cap.
 type apeTagData struct {
-	items []apeTagItem
-	cover []byte
+	items  []apeTagItem
+	cover  []byte
+	values int
+	capped bool
 }
 
 // errAPETagMalformed is a tag whose own lengths do not fit: it is not read,
@@ -212,9 +228,10 @@ func readAPEItemKey(r io.ReaderAt, at, end int64) (string, int64, error) {
 }
 
 // keep reads one item's value when it is one the extraction reads: a text
-// item within its cap, or the front cover within maxArtworkBytes. Every other
-// item (an external locator, another binary, a text value past its cap) is
-// passed over by its length, unread.
+// item within its cap while the tag's values last (keepText), or the front
+// cover within maxArtworkBytes. Every other item (an external locator,
+// another binary, a text value past its cap) is passed over by its length,
+// unread.
 func (tag *apeTagData) keep(r io.ReaderAt, key string, flags uint32, at, n int64, logPath string) error {
 	switch flags & apeItemTypeMask {
 	case apeItemTypeText:
@@ -227,17 +244,7 @@ func (tag *apeTagData) keep(r io.ReaderAt, key string, flags uint32, at, n int64
 				"path", logPath, "key", key, "bytes", n, "cap", limit)
 			return nil
 		}
-		buf := make([]byte, n)
-		if err := readAtExactly(r, buf, at); err != nil {
-			return err
-		}
-		var values []string
-		for _, v := range strings.Split(string(buf), "\x00") {
-			if v = strings.TrimSpace(v); v != "" {
-				values = append(values, v)
-			}
-		}
-		tag.items = append(tag.items, apeTagItem{key: key, values: values})
+		return tag.keepText(r, key, at, n, logPath)
 	case apeItemTypeBinary:
 		if !strings.EqualFold(key, "Cover Art (Front)") || tag.cover != nil {
 			return nil
@@ -258,6 +265,51 @@ func (tag *apeTagData) keep(r io.ReaderAt, key string, flags uint32, at, n int64
 		tag.cover = buf[nul+1:]
 	}
 	return nil
+}
+
+// keepText reads a text item of n bytes at at and keeps its values (split on
+// NUL, each trimmed, the empty dropped) while the tag's count of them is
+// under apeTagMaxValues, splitting a value at a time so a value past the cap
+// costs nothing. Once the count is spent, a text item is passed over unread;
+// the first value the cap drops is said once for the tag.
+func (tag *apeTagData) keepText(r io.ReaderAt, key string, at, n int64, logPath string) error {
+	if tag.values >= apeTagMaxValues {
+		tag.dropped(logPath)
+		return nil
+	}
+	buf := make([]byte, n)
+	if err := readAtExactly(r, buf, at); err != nil {
+		return err
+	}
+	var values []string
+	for rest, more := string(buf), true; more; {
+		var v string
+		v, rest, more = strings.Cut(rest, "\x00")
+		if v = strings.TrimSpace(v); v == "" {
+			continue
+		}
+		if tag.values >= apeTagMaxValues {
+			tag.dropped(logPath)
+			break
+		}
+		values = append(values, v)
+		tag.values++
+	}
+	tag.items = append(tag.items, apeTagItem{key: key, values: values})
+	return nil
+}
+
+// msgAPETagValuesCapped is the line a tag whose values reach apeTagMaxValues
+// gets, once.
+const msgAPETagValuesCapped = "apev2: a tag holding more values than the cap; the rest are not read"
+
+// dropped says, once for the tag, that its values reached apeTagMaxValues
+// and the rest are not read.
+func (tag *apeTagData) dropped(logPath string) {
+	if !tag.capped {
+		tag.capped = true
+		scanLogger.Warn(msgAPETagValuesCapped, "path", logPath, "cap", apeTagMaxValues)
+	}
 }
 
 // apeLyricsKey classifies a lyrics item's key as the FLAC comment walk does

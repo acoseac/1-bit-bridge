@@ -9,6 +9,7 @@ package manifest
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/acoseac/1-bit-bridge/internal/dsn"
 	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
 
@@ -406,3 +408,72 @@ func TestWavPackAndMonkeysAudioRowsTakePartInEnrichment(t *testing.T) {
 		t.Errorf("an app that declares nothing is served %d (%v), want 0", n, err)
 	}
 }
+
+// TestAnUpgradeOverAGatedRowSendsEveryDeltaCursorToAFullSync: a store an
+// older bridge left can hold a row the client format gate now holds back: an
+// upstream server's WavPack or Monkey's Audio item, which the UPnP walk named
+// by its URL's extension and every app was served (round 2, Claude's review).
+// The view that declares nothing stops seeing it with no tombstone, and a
+// tombstone of it later is filtered from that view, so the client would keep
+// it for good; a tombstone of one already in the journal is filtered alike.
+// The migration that brings the gate (v61) restarts the deletion journal's
+// coverage when the store holds such a row or tombstone: every cursor from
+// before it answers deltaIncomplete, and the client's full sync drops the
+// row. A store with neither keeps its coverage and its tombstones.
+func TestAnUpgradeOverAGatedRowSendsEveryDeltaCursorToAFullSync(t *testing.T) {
+	const kept = "Upstream/Album/09 - Gone.flac"
+	for _, c := range []struct {
+		name       string
+		insert     string
+		path       string
+		incomplete bool
+	}{
+		{"a routed WavPack row", tracksRow, "Upstream/Album/01 - Song.wv", true},
+		{"a routed Monkey's Audio row", tracksRow, "Upstream/Album/02 - Song.APE", true},
+		{"a tombstone of a routed WavPack row", tombstoneRow, "Upstream/Album/03 - Song.Wv", true},
+		{"no gated row", tracksRow, "Upstream/Album/04 - Song.flac", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "bridge.db")
+			if err := WriteDatabaseAtVersionForTest(path, 60); err != nil {
+				t.Fatal(err)
+			}
+			db, err := sql.Open("sqlite", dsn.File(path, "_pragma=busy_timeout(5000)"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, row := range []struct{ insert, path string }{{c.insert, c.path}, {tombstoneRow, kept}} {
+				if _, err := db.Exec(row.insert, row.path); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			// The cursor a client holds from the bridge before its upgrade.
+			cursor := time.Now()
+			s, err := OpenStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = s.Close() })
+			if _, incomplete := deltaDeletionFields(ctx, s, cursor, formatgate.Set{}); incomplete != c.incomplete {
+				t.Errorf("a delta from the cursor before the upgrade: deltaIncomplete %v, want %v", incomplete, c.incomplete)
+			}
+			var tombstones int
+			if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM manifest_deletions WHERE path = ?`, kept).Scan(&tombstones); err != nil {
+				t.Fatal(err)
+			}
+			if !c.incomplete && tombstones != 1 {
+				t.Errorf("%d tombstones of %s, want it kept where no gated path restarts the coverage", tombstones, kept)
+			}
+		})
+	}
+}
+
+// The two rows the upgrade test seeds: a track, and a tombstone.
+const (
+	tracksRow    = `INSERT INTO tracks(path, size, mtime_ns, tags_json, indexed_at) VALUES (?, 1, 1, '{}', 1)`
+	tombstoneRow = `INSERT INTO manifest_deletions(path, deleted_at) VALUES (?, 2)`
+)

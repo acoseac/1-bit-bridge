@@ -45,9 +45,15 @@ func extractWavPackWithContext(absPath string, t *Track, ec *ExtractContext) err
 	if err != nil {
 		return err
 	}
-	s, err := readWavPackStream(f)
+	s, err := readWavPackStream(f, info.Size())
 	if err != nil {
 		return err
+	}
+	if s.hybrid && !s.dsd && !s.statesItsLength() {
+		// Its correction file must end where its own audio does.
+		if s.final, s.finalFound, err = wvStreamFinal(f, info.Size()); err != nil {
+			return err
+		}
 	}
 	if err := applyWavPackStream(absPath, t, s, ec); err != nil {
 		return err
@@ -62,7 +68,10 @@ func extractWavPackWithContext(absPath string, t *Track, ec *ExtractContext) err
 // its header states, through plausibleDuration. A hybrid stream's
 // correction file decides between WAVPACK and WAVPACK-LOSSY; an observation
 // of it that did not complete is noted as a read that did not complete, and
-// returned, so nothing of the file is written.
+// returned, so nothing of the file is written. A stream whose samples need
+// an extended bitstream that neither its block nor its correction file's
+// carries is WAVPACK-LOSSY too (wvStream.needsExtended), with no correction
+// file on the wire.
 func applyWavPackStream(absPath string, t *Track, s wvStream, ec *ExtractContext) error {
 	isDSD := s.dsd
 	channels := s.channels
@@ -75,7 +84,7 @@ func applyWavPackStream(absPath string, t *Track, s wvStream, ec *ExtractContext
 			t.BitsPerSample = &bits
 		}
 	} else {
-		lossless := true
+		lossless, extended := true, s.extendedBits
 		if s.hybrid {
 			obs, err := observeCorrection(absPath, s, ec)
 			if err != nil {
@@ -86,6 +95,11 @@ func applyWavPackStream(absPath string, t *Track, s wvStream, ec *ExtractContext
 			}
 			applyCorrection(t, obs)
 			lossless = obs.state == correctionMatched
+			extended = extended || obs.extendedBits
+		}
+		if s.needsExtended && !extended {
+			lossless = false
+			t.Correction = nil
 		}
 		rate := float64(s.rate)
 		t.SampleRate = &rate
@@ -123,7 +137,7 @@ func extractAPEWithContext(absPath string, t *Track, ec *ExtractContext) error {
 	if err != nil {
 		return err
 	}
-	s, err := readAPEHeader(f)
+	s, err := readAPEHeader(f, info.Size())
 	if err != nil {
 		return err
 	}
@@ -319,8 +333,9 @@ func (j *apeJoins) add(it apeTagItem) {
 			j.explicit = it.values[0]
 		}
 	}
+	key := normaliseRawTagKey(it.key)
 	for _, v := range it.values {
-		switch normaliseRawTagKey(it.key) {
+		switch key {
 		case "title":
 			if j.title == "" {
 				j.title = v

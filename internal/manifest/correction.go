@@ -28,6 +28,14 @@ package manifest
 //     none until a scan sees the correction file whole, as an incomplete read
 //     of the audio does (backlog B134).
 //
+// A file there that the bridge is refused leave to open or to read (on a NAS
+// share, one of another owner, mode 0600) is an answer of its own, the
+// unreadable state: it serves no client either, so the row is WAVPACK-LOSSY
+// with no correction on the wire, said once, and the skip gate asks again
+// with an open at every scan, matching the file once it may be read (round 2
+// of backlog B489, Claude's review: it had been an incomplete observation, so
+// a new .wv never got a row and was read again at every scan).
+//
 // The skip gate asks a row that recorded an observation whether it still
 // holds (correctionDrifted): a correction file appearing, vanishing, or
 // changing its size or mtime re-reads the .wv, though the .wv did not change.
@@ -39,6 +47,7 @@ package manifest
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -60,25 +69,33 @@ const correctionExt = ".wvc"
 // its stats.
 const msgCorrectionMismatch = "wavpack: the correction file beside a hybrid file does not match it; indexing the file as lossy"
 
+// msgCorrectionUnreadable is the line a correction file the bridge may not
+// open or read gets, once for each of its stats.
+const msgCorrectionUnreadable = "wavpack: the bridge may not read the correction file beside a hybrid file; indexing the file as lossy"
+
 // correctionState is the kind of observation a row records.
 type correctionState byte
 
 const (
 	// correctionNone: the row depends on no correction file (it is not a
 	// hybrid WavPack stream).
-	correctionNone     correctionState = 0
-	correctionAbsent   correctionState = '-'
-	correctionMatched  correctionState = '+'
-	correctionRejected correctionState = '!'
+	correctionNone       correctionState = 0
+	correctionAbsent     correctionState = '-'
+	correctionMatched    correctionState = '+'
+	correctionRejected   correctionState = '!'
+	correctionUnreadable correctionState = '?'
 )
 
 // correctionObservation is what one look at a .wv's correction file found:
-// its state, and for a file there, its name and stat.
+// its state, and for a file there, its name and stat; and, never recorded,
+// whether a matching file's first block carries an extended bitstream
+// (wvCorrection.extendedBits), which its stat stands for in the key.
 type correctionObservation struct {
-	state   correctionState
-	name    string
-	size    int64
-	mtimeNS int64
+	state        correctionState
+	name         string
+	size         int64
+	mtimeNS      int64
+	extendedBits bool
 }
 
 // key is the observation as the row records it (tracks.correction_key,
@@ -106,7 +123,7 @@ func parseCorrectionKey(key string) (correctionObservation, bool) {
 		return correctionObservation{state: correctionAbsent}, true
 	}
 	state := correctionState(key[0])
-	if state != correctionMatched && state != correctionRejected {
+	if state != correctionMatched && state != correctionRejected && state != correctionUnreadable {
 		return correctionObservation{}, false
 	}
 	parts := strings.SplitN(key[1:], ":", 3)
@@ -202,9 +219,14 @@ func observeCorrection(absWV string, wv wvStream, ec *ExtractContext) (correctio
 		// Gone, or replaced by something else, between its stat and its open:
 		// the look did not complete. Something that is not a file now is that
 		// replacement, never the .wv's own kind (notAFileNow reads the
-		// extraction's error as the audio file's).
+		// extraction's error as the audio file's). An open refused for leave
+		// is an answer: the file there may not be read.
 		if fsutil.NotAFileKind(err) != "" {
 			return correctionObservation{}, errCorrectionReplaced
+		}
+		if errors.Is(err, fs.ErrPermission) {
+			obs.state = correctionUnreadable
+			return obs, nil
 		}
 		return correctionObservation{}, err
 	}
@@ -214,6 +236,10 @@ func observeCorrection(absWV string, wv wvStream, ec *ExtractContext) (correctio
 	}
 	wvc, readErr := readWavPackCorrection(f, obs.size)
 	if readErr != nil && isReadFailure(readErr) {
+		if errors.Is(readErr, fs.ErrPermission) {
+			obs.state = correctionUnreadable
+			return obs, nil
+		}
 		return correctionObservation{}, readErr
 	}
 	if err := sameCorrectionStat(f, obs); err != nil {
@@ -223,9 +249,25 @@ func observeCorrection(absWV string, wv wvStream, ec *ExtractContext) (correctio
 	// decoder takes, a block cut short or malformed. The file is not this
 	// stream's correction file.
 	if readErr == nil && correctionMatches(wv, wvc) {
-		obs.state = correctionMatched
+		obs.state, obs.extendedBits = correctionMatched, wvc.extendedBits
 	}
 	return obs, nil
+}
+
+// correctionReadableNow is the skip gate's question about a correction file
+// the bridge was refused leave to read: may it be opened, and its first byte
+// read, now? Any other answer is no, and the next scan asks again. A file
+// with no first byte reads as readable: what it holds is the extraction's to
+// judge.
+func correctionReadableNow(full string, ec *ExtractContext) bool {
+	f, err := openCorrectionFile(full, ec)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	var b [1]byte
+	_, err = f.ReadAt(b[:], 0)
+	return err == nil || errors.Is(err, io.EOF)
 }
 
 // sameCorrectionStat compares the opened correction file's stat with the one
@@ -282,14 +324,17 @@ func applyCorrection(t *Track, obs correctionObservation) {
 		t.Correction = &CorrectionFile{Path: rel, Size: obs.size, ModTime: time.Unix(0, obs.mtimeNS).UTC()}
 	case correctionRejected:
 		scanLogger.Warn(msgCorrectionMismatch, "path", t.Path, "correction", obs.name)
+	case correctionUnreadable:
+		scanLogger.Warn(msgCorrectionUnreadable, "path", t.Path, "correction", obs.name)
 	}
 }
 
 // correctionDrifted is the skip gate's question for an unchanged .wv about
 // its correction file: has one appeared, vanished, or changed its size or
-// mtime since the row recorded what it saw? A row that depends on none
-// (correctionNone) is never asked; a folder or a file that cannot be seen
-// now answers no, and the next scan asks again.
+// mtime since the row recorded what it saw, or, for one the bridge was
+// refused leave to read, may it be read now (correctionReadableNow)? A row
+// that depends on none (correctionNone) is never asked; a folder or a file
+// that cannot be seen now answers no, and the next scan asks again.
 func correctionDrifted(abs string, st *TrackStat, ec *ExtractContext) bool {
 	if st.CorrectionKey == "" {
 		return false
@@ -305,7 +350,10 @@ func correctionDrifted(abs string, st *TrackStat, ec *ExtractContext) bool {
 	if absent || stored.state == correctionAbsent {
 		return absent != (stored.state == correctionAbsent)
 	}
-	return name != stored.name || !statUnchanged(stored.size, stored.mtimeNS, info)
+	if name != stored.name || !statUnchanged(stored.size, stored.mtimeNS, info) {
+		return true
+	}
+	return stored.state == correctionUnreadable && correctionReadableNow(filepath.Join(filepath.Dir(abs), name), ec)
 }
 
 // String names an observation in a test's failure.

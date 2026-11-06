@@ -26,8 +26,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
+	"github.com/acoseac/1-bit-bridge/internal/logging/loggingtest"
 	"github.com/acoseac/1-bit-bridge/internal/lyrics"
 )
 
@@ -167,6 +169,54 @@ func TestAFewKilobytesClaimingFourGibibytesAllocateUnderAMebibyte(t *testing.T) 
 			}
 			t.Logf("%d bytes read, %d allocated", len(data), least)
 		})
+	}
+}
+
+// TestManyTinyAPEv2ValuesAllocateWithinTheBound: an APEv2 tag whose items each
+// hold thousands of one-byte values (APEv2 separates values with NUL) extracts
+// within wvAPEAllocLimit, measured in bytes: the values a tag keeps are
+// bounded, as a FLAC comment block's tags are (maxVorbisCommentTags), so their
+// string headers and the fields they join never outgrow the bytes the tag
+// holds (round 2, Codex: 1,023 Artist items of 64 KiB of "a\x00" were 33.5
+// million strings, about 1.5 GiB before the join). The least of three
+// extractions is taken, as for the claim files.
+func TestManyTinyAPEv2ValuesAllocateWithinTheBound(t *testing.T) {
+	value := bytes.Repeat([]byte("a\x00"), 32<<10) // 64 KiB: 32,768 values
+	items := make([]apeItem, 64)
+	for i := range items {
+		items[i] = apeItem{key: "Artist", value: value}
+	}
+	data := append(wvFile(stdWavPack()), apeTag(items, true)...)
+	p := filepath.Join(t.TempDir(), "many.wv")
+	if err := os.WriteFile(p, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	least := uint64(1 << 63)
+	var tr Track
+	for range 3 {
+		tr = Track{}
+		before := totalAllocated()
+		if err := ExtractWithContext(p, &tr, &ExtractContext{}); err != nil {
+			t.Fatalf("extract: %v", err)
+		}
+		least = min(least, totalAllocated()-before)
+	}
+	requireWVAPEAllocation(t, "extracting a tag of two million one-byte values", len(data), least)
+	t.Logf("%d bytes extracted, %d allocated", len(data), least)
+
+	// The values kept are the tag's first apeTagMaxValues, joined, and the
+	// cap is said once.
+	rec := loggingtest.Record(t)
+	tr = Track{}
+	if err := ExtractWithContext(p, &tr, &ExtractContext{}); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	if want := strings.Repeat("a; ", apeTagMaxValues-1) + "a"; tr.Artist != want {
+		t.Errorf("artist of %d bytes (%.20q...), want the first %d values joined, %d bytes",
+			len(tr.Artist), tr.Artist, apeTagMaxValues, len(want))
+	}
+	if lines := rec.Lines(msgAPETagValuesCapped); len(lines) != 1 {
+		t.Errorf("cap lines %q, want one", lines)
 	}
 }
 

@@ -128,7 +128,9 @@ func (f *fakeStreamingProvider) IsScanning() bool                               
 func (f *fakeStreamingProvider) IsScanStalled() bool                                     { return false }
 func (f *fakeStreamingProvider) LastFullScan() time.Time                                 { return time.Time{} }
 func (f *fakeStreamingProvider) TracksIndexed(ctx context.Context, _ formatgate.Set) int { return 0 }
-func (f *fakeStreamingProvider) PendingDeletions(ctx context.Context) int64              { return 0 }
+func (f *fakeStreamingProvider) PendingDeletions(ctx context.Context, _ formatgate.Set) int64 {
+	return 0
+}
 
 // TestManifestEmitsGzipWhenAcceptEncodingGzip confirms the handler
 // sets Content-Encoding + Vary AND the body is valid gzip that

@@ -34,6 +34,7 @@ func outputTrackLookup(rows outputRowReader) func(context.Context, string) (api.
 			BitsPerSample: t.BitsPerSample,
 			Channels:      t.Channels,
 			IsDSD:         t.IsDSD,
+			Correction:    t.Correction != nil,
 			Size:          size,
 			MTimeNS:       mtimeNS,
 		}, true, nil
