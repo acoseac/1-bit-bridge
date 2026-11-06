@@ -78729,3 +78729,80 @@ lacks, so it ran on no host here).
 - The season's year turns on 6 January rather than with the calendar.
 - The spread floor is judged on the qualifying tracks, not the emitted
   ones, so the cap cannot undo it.
+
+## 2026-11-06 — B750 round 2: natale and craciun guarded, bare Silent Night out, the rightmost dash
+
+A review of the entry above raised three points about the match and decided
+the word gaps it reported. Each point was confirmed red first: aac1d9d7's
+fixtures failed against 1289bc17's matcher; the fix is 5c680a7f. The rule's
+wording goes in through `rules-b750-r2.patch`, made against
+`smart-mixes.md` as `rules-b750.patch` left it on the pushed branch.
+
+1. **`natale` and `craciun` in an album had no guard.** `christmasAlbum`
+   returned on any `christmasAlbumWords` hit before `noel`'s credit and
+   artist checks, so Terre, Ville, Terra, Città, Paese and Casa natale
+   (French and Italian for a birthplace), `Sessions feat. Natale`, `Johnny
+   Natale Live` by Johnny Natale, `Mihai Crăciun` by Mihai Crăciun and `Live
+   with Crăciun` all answered album, where the same `noel` fixtures were
+   refused. `natale`, `craciun` and the new `kerst` now share `noel`'s branch
+   (`guardedAlbumWords`: no credit word before it, and an artist not holding
+   it), and `natale` is refused right after `terre`, `terra`, `ville`,
+   `citta`, `paese` or `casa` (`birthplaceWords`). `Natale con Noi`, `Crăciun
+   fericit`, `Colinde de Crăciun` and `Babbo Natale` stay positive.
+2. **Bare `Silent Night` admitted another song**: Bon Jovi's `Silent Night`,
+   on *7800° Fahrenheit*, answered title. The table's criterion is a title
+   no other song shares, which is why `Joy to the World` is not on it, and
+   bare `Silent Night` leaves it the same way. `Silent Night, Holy Night`,
+   `Stille Nacht` (and its first line whole), `Cicha noc` and `Stilla natt`
+   stay, and the carol on a Christmas album or in a Christmas genre
+   qualifies by those rules. The other 31 rows were checked against the
+   same criterion and kept, from what is known of them rather than a
+   catalogue (this host has no network). Rule 3's fixtures moved to `O Holy
+   Night`.
+3. **Mixed dash styles bypassed the title exclusion.** `stripTitleSuffix`
+   tried the styles in turn, the ASCII hyphen first, so in `Silent Night -
+   Deadly Night – Live` the hyphen's suffix, `Deadly Night – Live`, held
+   `live` and came off whole. The suffix is now what follows the rightmost
+   dash of any style (`titleDashes`). `O Holy Night - Deadly Night – Live` and
+   its em-dash twin are refused; `O Holy Night – Live - Remastered` and `O
+   Holy Night - Live – Remastered`, a version behind each dash, qualify.
+
+**The word gaps, as decided.** `villancicos`, `joulu`, `julesange` and
+`julesanger` are album words, and `kerst` a guarded one (Dutch for
+Christmas, and a rare surname). A genre segment whose first word is
+`christmas` or `xmas` counts (`Christmas Pop`, `Xmas Rock`, `X-Mas Pop`);
+bare `Pop`, and `Pop Christmas`, do not. `Jingle Bell Rock`, `Santa Baby`
+and `Winter Wonderland` stay out: a Christmas album or genre brings them
+in.
+
+**The season's year turns on 6 January**, the first day after a window, when
+nothing is served, so the seed's move there is harmless, and it moves
+nothing inside a season: `TestTheSeasonsYearTurnsOnlyAsAWindowCloses` walks
+every hour from November 2025 to February 2028 and finds the year turning
+three times, each at 6 January 00:00 UTC, with the hour before it a
+window's last.
+
+`FuzzMatchChristmas`'s artist property allows the artist to decide where
+the album holds any guarded word, not `noel` alone; two more minutes of
+fuzzing (3.6 million inputs) found nothing.
+
+### Controls, predicted by name
+
+Each mutation exact-once on a fresh test binary, the bytes restored from
+memory, every named test passing unmutated first; all eight went as
+predicted, and the tree was clean after.
+
+| Mutation | Predicted red | Predicted green |
+|---|---|---|
+| `natale` and `craciun` back among the unguarded album words | `TestMatchChristmasExclusions`, `TestEveryChristmasFixtureThroughTheStoresRead` | `TestMatchChristmasByEachRule` |
+| `natale` counted after a birthplace word | the same two | `TestMatchChristmasByEachRule` |
+| the artist guard for `noel` alone | the same two | `TestMatchChristmasByEachRule` |
+| the credit guard for `noel` alone | the same two | `TestMatchChristmasByEachRule` |
+| the dash styles taken in turn (round 1's loop) | the same two | `TestMatchChristmasByEachRule` (its mixed-dash titles qualify under the old loop as well) |
+| bare `Silent Night` back in the table | the same two (Bon Jovi) | `TestMatchChristmasByEachRule` |
+| no genre by its first word | `TestMatchChristmasByEachRule`, `TestEveryChristmasFixtureThroughTheStoresRead` | `TestMatchChristmasExclusions` |
+| the season's year turning on 1 February | `TestTheSeasonsYearTurnsOnlyAsAWindowCloses`, `TestTheSeasonsYearIsTheDecemberThatOpensIt` | `TestOneWindowIsOneSeason`, `TestTheWindowIsTheFirstOfDecemberToTheFifthOfJanuaryInUTC` |
+
+Under round 1's dash loop, `Silent Night - Deadly Night – Live` stays
+refused only because bare `Silent Night` has left the table; its `O Holy
+Night` twin is the fixture that pins the dash.
