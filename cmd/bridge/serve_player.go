@@ -16,7 +16,6 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/player/binding"
-	"github.com/acoseac/1-bit-bridge/internal/player/dacprofile"
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
@@ -562,8 +561,9 @@ func (p *bridgePlayer) watch(ctx context.Context) {
 	// The effective DSD policy's supervisor (B728 B7): its refresh, forced
 	// where an input changed (a snapshot, a migration's part for a DAC) and
 	// otherwise at most once a dsdIdle; and the silent probe, at a snapshot
-	// that resolves the boot binding, and while one is due and the device
-	// slot refused it, at each tick until the slot is free.
+	// that resolves the boot binding, at the tick after a migration's part for
+	// a DAC changed the state (dsdPartChanged), and while one is due and the
+	// device slot refused it, at each tick until the slot is free.
 	be, _ := p.be.(*playback.Backend)
 	probePending := false
 	refresh := func(force bool) {
@@ -577,10 +577,7 @@ func (p *bridgePlayer) watch(ctx context.Context) {
 		}
 	}
 	if be != nil {
-		p.dsd.changed = func(key dacprofile.Key) {
-			be.ForgetDSDProbe(key)
-			be.RefreshDSD(true)
-		}
+		p.dsd.changed = dsdPartChanged(be, &probePending)
 	}
 	refresh(true)
 	run := p.run

@@ -36,6 +36,16 @@ import (
 // /v1/outputs gets it from serve's view.
 func dsdFactsOf(t *testing.T, b *playback.Backend) api.BridgeOutputFacts {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		// The element is listed for a player with an identity, which only the
+		// durable writer writes, and that writer refuses a platform with no
+		// directory fsync (atomicwrite): Windows has none. No Windows serve
+		// publishes it: the player is Linux only (config.PlayerEnabled refuses
+		// it there, and output play too), so its identity and its DSD state,
+		// written through that writer as well, are never written there (round
+		// 2; CI's windows leg).
+		t.Skip("the player's identity is written durably, which Windows cannot do, and the player whose element this is runs on Linux alone")
+	}
 	ready := make(chan struct{})
 	close(ready)
 	cfg := playerOutputConfig(t.TempDir(), nil)

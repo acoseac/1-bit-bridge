@@ -79,6 +79,22 @@ func boundFromFeed(feed *hotplug.Feed, boot config.PlayerDevice) func() (playbac
 	}
 }
 
+// dsdPartChanged is what a DAC's part of the migration that changed the
+// player's DSD state does to the backend (playerDSD.changed, B728 B7): the
+// probe's answers for the DAC dropped and a probe made due (ForgetDSDProbe),
+// the policy read again at once, and the supervisor's loop told a probe is
+// due (pending), which it asks at its next tick whichever branch made the
+// part: one made on the tick (playerDSD.retry) has no snapshot behind it to
+// probe at, and an unchanged DAC gives none (round 2). Serve's supervisor
+// and output play's watch share it.
+func dsdPartChanged(be *playback.Backend, pending *bool) func(dacprofile.Key) {
+	return func(key dacprofile.Key) {
+		be.ForgetDSDProbe(key)
+		be.RefreshDSD(true)
+		*pending = true
+	}
+}
+
 // probeConditions is the silent probe's conditions as a snapshot of the
 // watcher's gives them (playback.ProbeConditions): the boot binding resolved
 // to its DAC, available, and the reading fresh.

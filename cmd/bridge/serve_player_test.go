@@ -913,10 +913,15 @@ func TestServesPlayerResolvesATrackFromTheLibraryAtEveryOpen(t *testing.T) {
 // library file that is no audio is refused by its content before any of it
 // plays (unknown_container), and a row whose file is gone by the resolver
 // (missing_file). Neither touches the DAC: this binary fails on any open of
-// a PCM node.
+// a PCM node. Since B728 B7 serve's player probes the bound DAC once its
+// output is available, the probe and the card's controls here through
+// stand-ins (probeStandIn, noControlNodes), which the test waits for: with the
+// backend's own prober it opened the GO bar's node, which CI's guard caught
+// whenever the probe ran before serve stopped (round 2).
 func TestServesPlayerRefusesWhatItCannotPlayBeforeTheDevice(t *testing.T) {
 	needsDirectorySync(t)
-	ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer, files: map[string][]byte{
+	probes := newProbeStandIn()
+	ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer, seams: noControlNodes(), with: func(o *serveOpts) { o.playerBackend = probes.backend }, files: map[string][]byte{
 		"a.flac": []byte("not audio at all, whatever its name says"), "b.flac": []byte("gone"),
 	}})
 	if err := os.Remove(filepath.Join(ps.music, "b.flac")); err != nil {
@@ -938,6 +943,7 @@ func TestServesPlayerRefusesWhatItCannotPlayBeforeTheDevice(t *testing.T) {
 			t.Errorf("entry %d skipped %+v (%v), want %s", id, sk, ok, want)
 		}
 	}
+	probes.await(t, "serve's probe of the bound DAC", 1)
 	if code := ps.stopServe(t); code != 0 {
 		t.Fatalf("exit %d; stderr=%s", code, ps.stderr.String())
 	}

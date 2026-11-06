@@ -114,9 +114,10 @@ func TestServeReadsNoApprovalRecord(t *testing.T) {
 	trees := goBarTrees(t)
 	goBarDSD(t, trees)
 	standIn := newPlayerStandIn()
+	var record qualification.Approval
 	ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer + "    dsdMode: native\n    dsdQualification: approved.json\n", standIn: standIn,
 		before: func(dataDir string) {
-			legacyRecordIn(t, dataDir, goBarLiveIdentity(t, trees), qualification.Version, nativeAt(dsdstate.DSD64), nativeAt(dsdstate.DSD128))
+			record = legacyRecordIn(t, dataDir, goBarLiveIdentity(t, trees), qualification.Version, nativeAt(dsdstate.DSD64), nativeAt(dsdstate.DSD128))
 		},
 		with: func(o *serveOpts) { o.playerTrees = trees }})
 	eng := ps.runningEngine(t)
@@ -131,19 +132,22 @@ func TestServeReadsNoApprovalRecord(t *testing.T) {
 	if got := ratesPublished(before); got != `2822400/"" 5644800/"" ` || before.Reason != "" {
 		t.Fatalf("the migrated owner's set publishes %s(reason %q), want native at DSD64 and DSD128, the record's rates", got, before.Reason)
 	}
-	entries, err := os.ReadDir(ps.dataDir)
-	if err != nil {
-		t.Fatal(err)
+	// The record and the reports it names, and nothing else: serve's own
+	// files (its DSD state, its queue) stay where they are (round 2).
+	gone := []string{"approved.json"}
+	for _, p := range record.Body.Policies {
+		gone = append(gone, p.Matrix.Path, p.Lifecycle.Path)
 	}
-	for _, e := range entries {
-		if e.Name() == "approved.json" || filepath.Ext(e.Name()) == ".json" && bytes.HasPrefix([]byte(e.Name()), []byte("p")) {
-			if err := os.Remove(filepath.Join(ps.dataDir, e.Name())); err != nil {
-				t.Fatal(err)
-			}
+	for _, name := range gone {
+		if err := os.Remove(filepath.Join(ps.dataDir, name)); err != nil {
+			t.Fatal(err)
 		}
 	}
 	if _, err := os.Stat(filepath.Join(ps.dataDir, "approved.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("the record is still there: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(ps.dataDir, dsdstate.FileName)); err != nil {
+		t.Fatalf("the player's DSD state after the record went: %v; the test takes away the record and its reports alone", err)
 	}
 	after := policyBackendOf(t, wired, dopContents{}, &dopOpens{}).Policy()
 	if got := ratesPublished(after); got != ratesPublished(before) || after.Reason != before.Reason {

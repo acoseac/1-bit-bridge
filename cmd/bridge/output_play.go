@@ -23,7 +23,6 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/player/binding"
-	"github.com/acoseac/1-bit-bridge/internal/player/dacprofile"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
@@ -176,6 +175,12 @@ func runOutputPlay(ctx context.Context, args []string, env outputPlayEnv, stdout
 		fmt.Fprintf(stderr, "output play: the bridge's player is Linux only, and this is %s\n", env.goos)
 		return 1
 	}
+	// The box's trees: the env's, or the host's where it names none, as
+	// serve's player reads them (outputTrees.or), for everything the run reads
+	// of the box: the observer, the effective policy's box and the kernel
+	// release, never a path relative to the working directory (B728 B7, round
+	// 2).
+	env.trees = env.trees.or(hostTrees)
 	cfg, path, err := loadCLIConfig(*cfgPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "output play: %v\n", err)
@@ -236,7 +241,7 @@ func runOutputPlay(ctx context.Context, args []string, env outputPlayEnv, stdout
 		// version, its record read in serve's data directory, which its
 		// contact interlock needs; never the effective policy.
 		r.authorization = &playback.Authorization{StateDir: cfg.DataDir, Record: player.DSDQualification, Mode: player.EffectiveDSDMode(), AllowDoP: player.AllowsDoP(), Sysfs: alsa.SysfsReader{Root: env.trees.sysfs}}
-		r.report, err = reports.prepare(r.authorization, env.trees.or(hostTrees))
+		r.report, err = reports.prepare(r.authorization, env.trees)
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
@@ -516,10 +521,7 @@ func (r *playRun) watch(ctx context.Context, svc *hotplug.Service, dev config.Pl
 		}
 	}
 	if b != nil && r.dsdState != nil {
-		r.dsdState.changed = func(key dacprofile.Key) {
-			b.ForgetDSDProbe(key)
-			b.RefreshDSD(true)
-		}
+		r.dsdState.changed = dsdPartChanged(b, &probePending)
 	}
 	done := make(chan struct{})
 	var wg sync.WaitGroup
