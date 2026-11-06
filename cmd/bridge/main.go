@@ -14,6 +14,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -2957,6 +2958,14 @@ type serveOpts struct {
 	// boot test can make either fail. Nil (the updater's) in production.
 	restoreBackup   func(dst, backupExt string) error
 	saveUpdateState func(dataDir string, st updater.State) error
+	// upscaleTargetBeforeCommit runs in every SetUpscaleTarget of serve's
+	// store, the boot's upscale seed among them, once both keys are written
+	// and before the transaction commits
+	// (manifest.Store.SetUpscaleTargetBeforeCommitForTest). Nil in
+	// production. A boot test holds the seed there to land a stop after its
+	// last statement and before its commit (backlog B662). Per invocation for
+	// tailscaleCLI's reason.
+	upscaleTargetBeforeCommit func(*sql.Tx) error
 }
 
 // adoptHandedListener returns lis when it is nil or when its address is
@@ -3558,6 +3567,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		return 1
 	}
 	defer manifestStore.Close()
+	if opts.upscaleTargetBeforeCommit != nil {
+		manifestStore.SetUpscaleTargetBeforeCommitForTest(opts.upscaleTargetBeforeCommit)
+	}
 	// The database is there now, and the lock file beside it: the record
 	// beside the file the boot read was of names this data dir for the check
 	// at the next start (backlog B651).

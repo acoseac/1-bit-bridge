@@ -22,6 +22,15 @@
 //
 // This was backuptest's park, written for VACUUM (#998), until the scanner's
 // cancellation tests needed the same stop inside an UPDATE.
+//
+// It also watches transactions roll back (RollbackWatch). database/sql rolls
+// a transaction back from a goroutine of its own once the transaction's
+// context is done (Tx.awaitDone), whatever the goroutine that runs the
+// transaction is doing, and a test that needs that rollback to have happened
+// before its next step (the commit it beat, backlog B662) waits for it where
+// it happens: at the driver, on a connection to the test's database file. The
+// hook is installed on every connection opened after init, as the collation
+// is, and costs an atomic load per rollback while no watch is armed.
 package sqlitetest
 
 import (
@@ -33,6 +42,8 @@ import (
 	"time"
 
 	"modernc.org/sqlite"
+
+	"github.com/acoseac/1-bit-bridge/internal/dsn"
 )
 
 // Collation is the name an index is ordered under to make the statements
@@ -46,6 +57,9 @@ var armed atomic.Pointer[Park]
 
 func init() {
 	sqlite.MustRegisterCollationUtf8(Collation, compare)
+	// In init for the collation's reason: modernc's Driver.Open reads its
+	// connection hooks without the lock RegisterConnectionHook takes.
+	sqlite.RegisterConnectionHook(hookRollbacks)
 }
 
 // compare orders two keys byte by byte, as SQLite's BINARY collation does,
@@ -212,6 +226,136 @@ func (p *Park) ReleaseUntil(t testing.TB, done <-chan struct{}) int {
 			return released
 		case <-p.giveUp():
 			t.Fatalf("sqlitetest: the statement neither compared again nor finished %s", p.bound)
+		}
+	}
+}
+
+// watching is the RollbackWatch every rollback hook reports to, or nil when
+// none is armed.
+var watching atomic.Pointer[RollbackWatch]
+
+// hookRollbacks gives a connection the driver has just opened a rollback hook
+// (sqlite3_rollback_hook) that tells the armed watch, when the connection's
+// database is the watch's. SQLite calls it once a transaction has rolled back,
+// by a ROLLBACK or by an error that ends the transaction, and not for a
+// statement that rolls back alone or for a connection's close. name is the
+// DSN the connection was opened by; its part before any query names the file.
+func hookRollbacks(conn sqlite.ExecQuerierContext, name string) error {
+	h, ok := conn.(sqlite.HookRegisterer)
+	if !ok {
+		return nil
+	}
+	file, _, _ := strings.Cut(name, "?")
+	h.RegisterRollbackHook(func() {
+		if w := watching.Load(); w != nil && w.names(file) {
+			w.note()
+		}
+	})
+	return nil
+}
+
+// RollbackWatch counts the transactions rolled back at the driver on the
+// connections to one database file, so a test can wait for the rollback
+// database/sql makes on a goroutine of its own when a transaction's context
+// is done. WatchRollbacks or WatchRollbacksUntil arms it; Seen and WaitPast
+// read it. It counts rollbacks on every connection to the file, so the test
+// says which transaction it waits for by what it then finds: a transaction
+// whose rollback it waited for answers sql.ErrTxDone.
+type RollbackWatch struct {
+	// dsnFile and path are the two names a connection may have opened the
+	// file by: a DSN built by dsn.File, up to its query, and the plain path.
+	dsnFile, path string
+
+	mu      sync.Mutex
+	seen    int
+	changed chan struct{} // closed, and replaced, at each rollback
+
+	// giveUp fires when a wait gives up, and bound says when that is, for
+	// the failure.
+	giveUp func() <-chan time.Time
+	bound  string
+}
+
+// WatchRollbacks arms a RollbackWatch on the database file at path whose
+// waits each give up perWaitBound after they begin, and disarms it when the
+// test ends. One at a time: the hook is process-wide, as the Park's
+// collation is.
+func WatchRollbacks(t testing.TB, path string) *RollbackWatch {
+	t.Helper()
+	return watchRollbacks(t, path, func() <-chan time.Time { return time.After(perWaitBound) }, "within 10s")
+}
+
+// WatchRollbacksUntil is WatchRollbacks for a rollback inside work the test
+// does not pace, such as a whole `bridge serve`: every wait gives up at the
+// instant at, and never when at is zero (ArmUntil's reason).
+func WatchRollbacksUntil(t testing.TB, path string, at time.Time) *RollbackWatch {
+	t.Helper()
+	if at.IsZero() {
+		return watchRollbacks(t, path, func() <-chan time.Time { return nil }, "(no deadline)")
+	}
+	return watchRollbacks(t, path, func() <-chan time.Time { return time.After(time.Until(at)) },
+		"by "+at.Format("15:04:05.000"))
+}
+
+func watchRollbacks(t testing.TB, path string, giveUp func() <-chan time.Time, bound string) *RollbackWatch {
+	t.Helper()
+	w := &RollbackWatch{
+		dsnFile: dsn.File(path, ""), path: path,
+		changed: make(chan struct{}), giveUp: giveUp, bound: bound,
+	}
+	if !watching.CompareAndSwap(nil, w) {
+		t.Fatal("sqlitetest: a RollbackWatch is already armed")
+	}
+	t.Cleanup(func() { watching.CompareAndSwap(w, nil) })
+	return w
+}
+
+// names reports whether a connection opened by file, a DSN up to its query,
+// is a connection to the watch's database.
+func (w *RollbackWatch) names(file string) bool {
+	return file == w.dsnFile || file == w.path
+}
+
+// note counts one rollback and wakes every wait.
+func (w *RollbackWatch) note() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.seen++
+	close(w.changed)
+	w.changed = make(chan struct{})
+}
+
+// Seen reports how many transactions have rolled back on the file since the
+// watch was armed. A test reads it before the step that makes the rollback,
+// and waits past it.
+func (w *RollbackWatch) Seen() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.seen
+}
+
+// WaitPast blocks until more than n transactions have rolled back on the file
+// and answers true, or answers false, without failing, if stopped is closed
+// first; a nil stopped never closes. It fails the test if neither comes before
+// the watch's waits give up, so a rollback that never came reads as a failure
+// and not as a hung test binary.
+func (w *RollbackWatch) WaitPast(t testing.TB, n int, stopped <-chan struct{}) bool {
+	t.Helper()
+	giveUp := w.giveUp()
+	for {
+		w.mu.Lock()
+		seen, changed := w.seen, w.changed
+		w.mu.Unlock()
+		if seen > n {
+			return true
+		}
+		select {
+		case <-changed:
+		case <-stopped:
+			return false
+		case <-giveUp:
+			t.Fatalf("sqlitetest: no transaction rolled back on %s %s (%d seen, waiting past %d)", w.path, w.bound, seen, n)
+			return false
 		}
 	}
 }
