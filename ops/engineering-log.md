@@ -77747,3 +77747,58 @@ bullet in section 9.1 item 5's words, its long form in
 `git apply --check`; with it player.md is 98,269 bytes (98.3 %), under
 budget, so no entry moved. CLAUDE.md's `dsdstate` row and the package's doc
 no longer say nothing reads the state.
+
+**Round 2** (2026-11-06; six review points, red first at 068c9cf5, fixed at
+117a1638). (1) Codex: a DAC's part whose descriptors did not read when the
+watcher first resolved the DAC was never asked again but by a new snapshot,
+and `hotplug.Feed` publishes none for a DAC that stays as it was.
+`playerDSD.ask` now asks it again at the supervisor's existing policy tick
+(`retry`, 100 ms), doubling from one tick to at most 300, ten tries (about
+80 s), and then at the watcher's next reading of the DAC or the next start
+(`TestAPendingDACPartIsAskedAgainOnceItsDescriptorsRead`: the manufacturer
+file removed, then put back, the feed's generation unchanged). (2) Codex: a
+stop begun before the supervisor ran still opened the state, and
+`dsdstate.Open` set a damaged file aside and wrote over it; `start` now
+checks the stop before the open (`TestAStopBeforeTheSupervisorRunsOpensNoState`,
+the player's own cancel called from `playerBoot`, before its supervisor is
+scheduled). (3) Codex: a damaged state's replacement whose rename landed and
+whose barrier then failed was said, by serve and by B3's `Report.Kept`, not
+written or in memory alone; both now say it is in the file and not known to
+be durable (`TestALandedReplacementOfADamagedStateIsSaidToBeInTheFile`,
+through serve's open, and dsdstate's
+`TestADamagedStatesReplacementThatLandsIsNotSaidToBeInMemoryAlone`). (4) The
+Claude API reviewer: a DAC's part's failed write was worded for a player
+that is starting, and after one that landed the store's memory still waited,
+so the next snapshot made the part again from that memory, over the file and
+from a record replaced meanwhile. `say` now words each kind of step; a write
+that landed ends the run's steps (`done`) and logs the warnings it wrote; and
+a DAC's part refused before it landed is asked again in this run
+(`TestADACPartsRefusedWriteIsAskedAgainInThisRun`,
+`TestADACPartsLandedWriteIsNotMadeAgainInThisRun`). The start's step refused
+is made again at the next start, as round 1's test shows. (5) The reviewer:
+`TestASecondServeRefusedByTheLockMigratesNothing` could not fail, since its
+seeded marker made the start's step a no-op and, with no descriptors, the
+DAC's part wrote nothing. It now seeds no state for the bridge's part, and a
+readable DAC, its record and a waiting marker for the DAC's, and stops and
+reports a serve that goes on past the lock. (6) The reviewer: the scope
+test's value clause was off on dsdMode's line and never read allowDoP's; it
+now requires each line's own attributes to be the key alone. Gemini: the
+scope's map is made before its loop. No rule's words changed, so there is no
+round-2 rules patch; the binding bullet's long form says the above.
+**Controls** (`.tmp/_b728-b6/controls_r2.py`, each edit found exactly once),
+thirteen red: the tick's retry removed (both retry tests); the check before
+the open removed; serve's landed wording, and B3's `Kept`, in dsdstate's test
+and serve's; `done` never set; the landed DAC part worded as the start's step;
+a landed write's warnings not logged; a refused DAC part not asked again, and
+worded as the start's step; a serve that goes on past the lock (its held
+refusal not returning and the plan's lock gate forced: both subtests); each
+key's own value on its line. One is green, as it should be: that last
+mutation under round 1's assertion, which is why the test changed.
+**Checks**: on legion0 at 117a1638, in one call through the shared build lock:
+`make fmt`, which rewrote nothing; `make vet`, and with `GOOS=windows`,
+`GOOS=darwin` and `GOOS=linux GOARCH=386`, each clean; `make test`, 84
+packages ok and none failed, in 1,744 s; `make build-all`; `go test -race
+-count=1` of `./cmd/bridge/` (967 s), `./internal/config/` and
+`./internal/player/dsdstate/`, each ok; the qualification check,
+"qualification version OK: main..HEAD"; `make docs-check`, ok, and again
+with the round-1 rules patch applied. The tree is clean after.
