@@ -26,7 +26,7 @@ const healthCountsFetchTimeout = 2 * time.Second
 // real store; *manifest.Store (via ManifestProvider) satisfies it.
 type healthCountsProvider interface {
 	TracksIndexed(ctx context.Context, view formatgate.Set) int
-	PendingDeletions(ctx context.Context) int64
+	PendingDeletions(ctx context.Context, view formatgate.Set) int64
 }
 
 type healthCountsSnapshot struct {
@@ -47,7 +47,7 @@ type healthCountsSnapshot struct {
 // cache a synthesized-zero for the callers that joined the flight.
 //
 // One snapshot per view (the formats a request declared, formats.go; there
-// are four, formatgate.Set.Key's), since tracksIndexed counts a view's rows.
+// are four, formatgate.Set.Key's), since both counts are of a view's rows.
 type healthCountsCache struct {
 	mu    sync.Mutex
 	snaps map[string]healthCountsSnapshot
@@ -102,7 +102,7 @@ func (c *healthCountsCache) counts(ctx context.Context, p healthCountsProvider, 
 		fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), healthCountsFetchTimeout)
 		defer cancel()
 		tracks := p.TracksIndexed(fetchCtx, view)
-		pending := p.PendingDeletions(fetchCtx)
+		pending := p.PendingDeletions(fetchCtx, view)
 
 		snap := healthCountsSnapshot{
 			tracksIndexed:    tracks,

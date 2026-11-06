@@ -206,10 +206,11 @@ func (p *Provider) TracksIndexed(ctx context.Context, view formatgate.Set) int {
 
 // PendingDeletions satisfies api.ManifestProvider. Reports the number of
 // tracks + folders rows the scanner has marked as missing this pass but
-// hasn't yet reached the configured delete threshold for. Cheap query —
-// two indexed counts.
-func (p *Provider) PendingDeletions(ctx context.Context) int64 {
-	n, err := p.store.PendingDeletions(ctx)
+// hasn't yet reached the configured delete threshold for, the tracks of
+// the request's view (Store.PendingDeletions). Two counts, each a table
+// scan the health cache bounds.
+func (p *Provider) PendingDeletions(ctx context.Context, view formatgate.Set) int64 {
+	n, err := p.store.PendingDeletions(ctx, view)
 	if err != nil {
 		throttledHealthErr(&p.lastPendingErrLogNS, "health probe: pending deletions failed", err)
 		return 0

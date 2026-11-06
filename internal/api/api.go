@@ -426,9 +426,10 @@ type ManifestProvider interface {
 	// count its manifest's rows make.
 	TracksIndexed(ctx context.Context, view formatgate.Set) int
 	// PendingDeletions returns the total count of rows across tracks
-	// and folders with missing_count > 0 — surfaced on ScanState. May
-	// return 0 for an unwired or pre-v5 store; never errors today.
-	PendingDeletions(ctx context.Context) int64
+	// and folders with missing_count > 0 — surfaced on ScanState — the
+	// tracks of the request's view, as TracksIndexed's. May return 0
+	// for an unwired or pre-v5 store; never errors today.
+	PendingDeletions(ctx context.Context, view formatgate.Set) int64
 }
 
 // MBIDProbe is an optional interface the artwork + artist-image

@@ -20,10 +20,12 @@ package manifest
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/formatgate"
 )
@@ -48,6 +50,45 @@ const ungatedPathSQLT = `(lower(substr(t.path, -3)) <> '.wv' AND lower(substr(t.
 
 // countGatedFormatTracksSQL is CountGatedFormatTracks' query.
 const countGatedFormatTracksSQL = `SELECT COUNT(*) FROM tracks t WHERE NOT ` + ungatedPathSQLT
+
+// holdsGatedPathSQL asks whether a store holds a row or a tombstone the
+// client format gate holds back from the zero view.
+const holdsGatedPathSQL = `SELECT EXISTS (SELECT 1 FROM tracks t WHERE NOT ` + ungatedPathSQLT + `)
+	OR EXISTS (SELECT 1 FROM manifest_deletions t WHERE NOT ` + ungatedPathSQLT + `)`
+
+// restartCoverageOverGatedPaths is v61's post() past its column (round 2 of
+// backlog B489, Claude's review). A store an older bridge left can hold a
+// row the gate now holds back, or a tombstone of one: an upstream server's
+// item whose URL names a WavPack or Monkey's Audio file, which the UPnP walk
+// indexed under that name and every app was served. The zero view stops
+// seeing such a row with no tombstone, and a tombstone of it is filtered from
+// that view (DeletedSince), so an app from before B489 would keep the row for
+// good. Such a store restarts the deletion journal's coverage, in one
+// transaction with the question: every delta cursor from before the upgrade
+// answers deltaIncomplete, and the client's full sync, which the zero view
+// pages without the row, drops it. A store with none keeps its coverage and
+// its tombstones. Run again after a crash before the step's stamp, it
+// restarts the coverage again, which only sends a client that synced in
+// between to one more full sync.
+func restartCoverageOverGatedPaths(db *sql.DB) error {
+	ctx := context.Background()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var gated bool
+	if err := tx.QueryRowContext(ctx, holdsGatedPathSQL).Scan(&gated); err != nil {
+		return fmt.Errorf("look for gated-format rows: %w", err)
+	}
+	if !gated {
+		return nil
+	}
+	if err := resetDeletionJournalCoverageTx(ctx, tx, time.Now().UnixNano()); err != nil {
+		return fmt.Errorf("restart the deletion journal's coverage: %w", err)
+	}
+	return tx.Commit()
+}
 
 // CountGatedFormatTracks counts the indexed rows the client format gate
 // holds back from an app that declares no gated format (backlog B489): a

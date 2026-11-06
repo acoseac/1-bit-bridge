@@ -44,6 +44,7 @@ const (
 	wvFlagMono         = 0x4
 	wvFlagHybrid       = 0x8
 	wvFlagFloat        = 0x80
+	wvFlagInt32        = 0x100 // INT32_DATA: 32-bit integers, extended
 	wvFlagShiftLSB     = 13
 	wvFlagFinalBlock   = 0x1000                 // the last block of a frame
 	wvFlagShiftMask    = 0x1f << wvFlagShiftLSB // low bits a sample does not use
@@ -56,11 +57,20 @@ const (
 	wvIDUnique       = 0x3f
 	wvIDOddSize      = 0x40
 	wvIDLarge        = 0x80
+	wvIDFloatInfo    = 0x8
+	wvIDInt32Info    = 0x9
 	wvIDWVBitstream  = 0xa
 	wvIDWVCBitstream = 0xb
+	wvIDWVXBitstream = 0xc
 	wvIDChannelInfo  = 0xd
 	wvIDDSDBlock     = 0xe
 	wvIDSampleRate   = 0x27
+
+	// The float flags (ID_FLOAT_INFO's first byte) that send bits the main
+	// bitstream does not carry: FLOAT_SHIFT_SAME, FLOAT_SHIFT_SENT,
+	// FLOAT_ZEROS_SENT and FLOAT_EXCEPTIONS, as the reference decoder's
+	// unpack_init counts a block lossy without its extended bitstream.
+	wvFloatSendsExtended = 0x02 | 0x04 | 0x08 | 0x20
 
 	wvMinStreamVersion = 0x402
 	wvMaxStreamVersion = 0x410
@@ -92,6 +102,10 @@ const wvMaxDSDPower = 10
 // the reference decoder would look: not a WavPack file, or one this reader
 // cannot take.
 var errWVNoBlock = errors.New("wavpack: no block header within the search limit")
+
+// errWVBlockCut is a file that ends inside its first audio block, which the
+// reference decoder reads whole before it decodes anything.
+var errWVBlockCut = errors.New("wavpack: the file ends inside its first audio block")
 
 // wvHeader is one block's header.
 type wvHeader struct {
@@ -163,6 +177,20 @@ type wvStream struct {
 	// correctionBits says the block holds an ID_WVC_BITSTREAM: the
 	// correction file's block, which a .wv's never holds.
 	correctionBits bool
+	// needsExtended says the block's samples send bits the main bitstream
+	// does not carry: a 32-bit integer stream's sent bits (ID_INT32_INFO)
+	// or a float stream's exceptions, zeros or shifts (ID_FLOAT_INFO), which
+	// an extended bitstream (ID_WVX_BITSTREAM) carries; extendedBits says the
+	// block holds one. A stream that needs one and holds none decodes lossy,
+	// as the reference decoder's unpack_init counts it (lossy_blocks).
+	needsExtended, extendedBits bool
+	// final is the index one past the samples of the block that ends the
+	// stream's audio, and finalFound whether one does (wvFinalIndex, over the
+	// file's bytes before its tags): read only for a hybrid stream whose
+	// header states no length from its start, whose correction file must end
+	// where it does (wvStreamFinal).
+	final      uint64
+	finalFound bool
 }
 
 // duration is the stream's length in seconds from its header, and false when
@@ -177,24 +205,31 @@ func (s wvStream) duration() (float64, bool) {
 	return float64(total) / float64(s.rate), true
 }
 
-// readWavPackStream finds the stream's first audio block in r and reads what
-// it states. A read that fails comes back as the reader's error, which the
-// extractor's source has already noted when it did not complete; the end of
-// the file is an answer, and a file that ends before what this needs is
-// refused. So is a block the reference decoder's unpack_init refuses: a PCM
-// block with no bitstream (a correction file's, which "can't unpack ...
-// alone", among them), and one flagged both mono and false stereo.
-func readWavPackStream(r io.ReaderAt) (wvStream, error) {
+// readWavPackStream finds the stream's first audio block in r, a file of size
+// bytes, and reads what it states. A read that fails comes back as the
+// reader's error, which the extractor's source has already noted when it did
+// not complete; the end of the file is an answer, and a file that ends before
+// what this needs is refused: the reference decoder reads its first audio
+// block whole, so a file that ends inside it is refused too. So is a block
+// the reference decoder's unpack_init refuses: a PCM block with no bitstream
+// (a correction file's, which "can't unpack ... alone", among them), and one
+// flagged both mono and false stereo.
+func readWavPackStream(r io.ReaderAt, size int64) (wvStream, error) {
 	off, h, err := firstWVAudioBlock(r)
 	if err != nil {
 		return wvStream{}, err
+	}
+	if off+h.size() > size {
+		return wvStream{}, errWVBlockCut
 	}
 	f, err := readWVBlock(r, off, h)
 	if err != nil {
 		return wvStream{}, err
 	}
 	s := wvStream{header: h, hybrid: h.flags&wvFlagHybrid != 0, dsd: h.flags&wvFlagDSD != 0,
-		correctionBits: f.correctionBits}
+		correctionBits: f.correctionBits, extendedBits: f.wvxBits,
+		needsExtended: (h.flags&wvFlagInt32 != 0 && f.int32SentBits != 0) ||
+			(h.flags&wvFlagFloat != 0 && f.floatFlags&wvFloatSendsExtended != 0)}
 	switch {
 	case h.flags&(wvFlagMono|wvFlagFalseStereo) == wvFlagMono|wvFlagFalseStereo:
 		return wvStream{}, errors.New("wavpack: a block flagged both mono and false stereo")
@@ -215,6 +250,10 @@ func readWavPackStream(r io.ReaderAt) (wvStream, error) {
 type wvCorrection struct {
 	first          wvHeader
 	correctionBits bool
+	// extendedBits says the first block holds an extended bitstream
+	// (ID_WVX_BITSTREAM), which a hybrid stream's correction file carries for
+	// samples that need one.
+	extendedBits bool
 	// final is the index one past the samples of the block that ends the
 	// file, and finalFound whether a block ends it: a file cut short ends
 	// inside a block, and none does.
@@ -223,20 +262,24 @@ type wvCorrection struct {
 }
 
 // readWavPackCorrection reads a correction file of size bytes: its first
-// audio block's header, whether that block holds a correction bitstream, and
-// the block that ends the file. Its format is the .wv's to state (the
-// encoder writes a non-standard rate into the .wv's block alone), so nothing
-// here is settled.
+// audio block's header, whether that block holds a correction bitstream and
+// an extended one, and the block that ends the file. Its format is the .wv's
+// to state (the encoder writes a non-standard rate into the .wv's block
+// alone), so nothing here is settled. A file that ends inside its first audio
+// block is refused, as a .wv is.
 func readWavPackCorrection(r io.ReaderAt, size int64) (wvCorrection, error) {
 	off, h, err := firstWVAudioBlock(r)
 	if err != nil {
 		return wvCorrection{}, err
 	}
+	if off+h.size() > size {
+		return wvCorrection{}, errWVBlockCut
+	}
 	f, err := readWVBlock(r, off, h)
 	if err != nil {
 		return wvCorrection{}, err
 	}
-	c := wvCorrection{first: h, correctionBits: f.correctionBits}
+	c := wvCorrection{first: h, correctionBits: f.correctionBits, extendedBits: f.wvxBits}
 	c.final, c.finalFound, err = wvFinalIndex(r, size)
 	if err != nil {
 		return wvCorrection{}, err
@@ -336,33 +379,45 @@ type wvBlockFacts struct {
 	channels       int // 0: no channel layout
 	wvBits         bool
 	correctionBits bool
+	// int32SentBits is ID_INT32_INFO's sent bits and floatFlags
+	// ID_FLOAT_INFO's flags, each 0 where the block holds none; wvxBits says
+	// it holds an extended bitstream, one with bits past its 4-byte CRC.
+	int32SentBits, floatFlags byte
+	wvxBits                   bool
 }
 
-// readWVBlock reads the sub-blocks of the block at off, whose header is h:
-// the rate, the channel layout and DSD's multiplier, and whether a
-// correction bitstream is there, skipping every other by its length. A
-// sub-block that runs past its block is refused, as the reference decoder
-// refuses it; the file ending inside the block ends the walk with what was
-// read.
+// wvBlockWindow is how much of a block a walk of its sub-blocks reads at a
+// time.
+const wvBlockWindow = 64 << 10
+
+// readWVBlock reads the sub-blocks of the block at off, whose header is h and
+// which its caller found whole inside the file: the rate, the channel layout,
+// DSD's multiplier, the int32 and float information, and which bitstreams are
+// there, skipping every other by its length. It reads the block a window at a
+// time (wvWindow), so a block of many small sub-blocks costs a read a window,
+// never one a sub-block. A sub-block that runs past its block is refused, as
+// the reference decoder refuses it, and so is the file ending inside the
+// block, which is the file changing while it is read.
 func readWVBlock(r io.ReaderAt, off int64, h wvHeader) (wvBlockFacts, error) {
 	f := wvBlockFacts{dsdPower: -1}
 	end := off + h.size()
+	w := wvWindow{r: r, end: end, buf: make([]byte, min(int64(wvBlockWindow), h.size()))}
 	for pos := off + wvHeaderBytes; pos < end; {
-		var hdr [4]byte
-		n, err := r.ReadAt(hdr[:], pos)
-		if err != nil && !endOfFile(err) {
+		hdr, err := w.bytes(pos, 2)
+		if err != nil {
 			return wvBlockFacts{}, err
-		}
-		if n < 2 {
-			break
 		}
 		id := hdr[0]
 		words, hdrLen := int64(hdr[1]), int64(2)
 		if id&wvIDLarge != 0 {
-			if n < 4 {
-				break
+			if end-pos < 4 {
+				break // as the reference decoder's read_metadata_buff stops
 			}
-			words, hdrLen = int64(hdr[1])|int64(hdr[2])<<8|int64(hdr[3])<<16, 4
+			large, err := w.bytes(pos, 4)
+			if err != nil {
+				return wvBlockFacts{}, err
+			}
+			words, hdrLen = int64(large[1])|int64(large[2])<<8|int64(large[3])<<16, 4
 		}
 		dataLen := words * 2
 		if id&wvIDOddSize != 0 {
@@ -375,7 +430,7 @@ func readWVBlock(r io.ReaderAt, off int64, h wvHeader) (wvBlockFacts, error) {
 		if dataAt+words*2 > end {
 			return wvBlockFacts{}, errors.New("wavpack: a metadata sub-block runs past its block")
 		}
-		if err := f.read(r, id&wvIDUnique, dataAt, dataLen); err != nil {
+		if err := f.read(&w, id&wvIDUnique, dataAt, dataLen); err != nil {
 			return wvBlockFacts{}, err
 		}
 		pos = dataAt + words*2
@@ -383,81 +438,114 @@ func readWVBlock(r io.ReaderAt, off int64, h wvHeader) (wvBlockFacts, error) {
 	return f, nil
 }
 
+// wvWindow reads a block a window at a time: bytes answers the k bytes at pos
+// from the window it holds, or reads a new window from pos, never past the
+// block's end. Its buffer is the window's, whatever the block claims.
+type wvWindow struct {
+	r     io.ReaderAt
+	end   int64 // the block's end
+	buf   []byte
+	start int64 // the offset of buf's first byte
+	n     int   // the bytes buf holds
+}
+
+// bytes returns the k bytes at pos, k at most the window. The block is the
+// caller's to have found inside the file, so a file that ends inside it is
+// the file cut while it was read (errWVBlockCut).
+func (w *wvWindow) bytes(pos int64, k int) ([]byte, error) {
+	if pos < w.start || pos+int64(k) > w.start+int64(w.n) {
+		want := min(int64(len(w.buf)), w.end-pos)
+		if int64(k) > want {
+			return nil, errors.New("wavpack: a metadata sub-block runs past its block")
+		}
+		n, err := w.r.ReadAt(w.buf[:want], pos)
+		if err != nil && !endOfFile(err) {
+			return nil, err
+		}
+		w.start, w.n = pos, n
+		if int64(n) < want {
+			return nil, errWVBlockCut
+		}
+	}
+	return w.buf[pos-w.start : pos-w.start+int64(k)], nil
+}
+
 // read takes what one sub-block of function id, dataLen bytes at at, says.
-func (f *wvBlockFacts) read(r io.ReaderAt, id byte, at, dataLen int64) error {
+// ID_INT32_INFO and ID_FLOAT_INFO of any length but 4 are refused, as the
+// reference decoder's read_int32_info and read_float_info refuse them.
+func (f *wvBlockFacts) read(w *wvWindow, id byte, at, dataLen int64) error {
 	switch id {
 	case wvIDSampleRate:
-		rate, ok, err := readWVSampleRate(r, at, dataLen)
+		// A length the reference decoder ignores (neither 3 nor 4) says
+		// nothing.
+		if dataLen == 3 || dataLen == 4 {
+			b, err := w.bytes(at, int(dataLen))
+			if err != nil {
+				return err
+			}
+			f.customRate, f.haveRate = wvSampleRateOf(b), true
+		}
+	case wvIDChannelInfo:
+		if dataLen < 1 || dataLen > 7 {
+			return fmt.Errorf("wavpack: a channel layout of %d bytes", dataLen)
+		}
+		b, err := w.bytes(at, int(dataLen))
 		if err != nil {
 			return err
 		}
-		if ok {
-			f.customRate, f.haveRate = rate, true
-		}
-	case wvIDChannelInfo:
-		c, err := readWVChannelInfo(r, at, dataLen)
+		c, err := wvChannelCount(b)
 		if err != nil {
 			return err
 		}
 		f.channels = c
 	case wvIDDSDBlock:
 		if dataLen >= 2 {
-			var p [1]byte
-			n, err := r.ReadAt(p[:], at)
-			if err != nil && !endOfFile(err) {
+			b, err := w.bytes(at, 1)
+			if err != nil {
 				return err
 			}
-			if n == 1 {
-				f.dsdPower = int(p[0])
-			}
+			f.dsdPower = int(b[0])
+		}
+	case wvIDInt32Info, wvIDFloatInfo:
+		if dataLen != 4 {
+			return fmt.Errorf("wavpack: an int32 or float information of %d bytes", dataLen)
+		}
+		b, err := w.bytes(at, 4)
+		if err != nil {
+			return err
+		}
+		if id == wvIDInt32Info {
+			f.int32SentBits = b[0]
+		} else {
+			f.floatFlags = b[0]
 		}
 	case wvIDWVBitstream:
 		f.wvBits = true
 	case wvIDWVCBitstream:
 		f.correctionBits = true
+	case wvIDWVXBitstream:
+		f.wvxBits = dataLen > 4
 	}
 	return nil
 }
 
-// readWVSampleRate reads an ID_SAMPLE_RATE sub-block: 3 bytes of rate, and a
-// fourth whose low 7 bits are the rate's top byte. A length the reference
-// decoder ignores (neither 3 nor 4) says nothing, and false.
-func readWVSampleRate(r io.ReaderAt, at, n int64) (uint32, bool, error) {
-	if n != 3 && n != 4 {
-		return 0, false, nil
-	}
-	var b [4]byte
-	got, err := r.ReadAt(b[:n], at)
-	if err != nil && !endOfFile(err) {
-		return 0, false, err
-	}
-	if int64(got) < n {
-		return 0, false, nil
-	}
+// wvSampleRateOf reads an ID_SAMPLE_RATE sub-block's 3 or 4 bytes: 3 bytes of
+// rate, and a fourth whose low 7 bits are the rate's top byte.
+func wvSampleRateOf(b []byte) uint32 {
 	rate := uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16
-	if n == 4 {
+	if len(b) == 4 {
 		rate |= uint32(b[3]&0x7f) << 24
 	}
-	return rate, true, nil
+	return rate
 }
 
-// readWVChannelInfo reads an ID_CHANNEL_INFO sub-block's channel count, as
-// the reference decoder's read_channel_info does: 1 to 5 bytes, the count
-// and then a channel mask; 6 or 7, a 12-bit count less one, the streams and
-// a wider mask. A count of 0, a length it refuses and a mask naming more
-// channels than the count are an error: the decoder refuses such a file.
-func readWVChannelInfo(r io.ReaderAt, at, n int64) (int, error) {
-	if n < 1 || n > 7 {
-		return 0, fmt.Errorf("wavpack: a channel layout of %d bytes", n)
-	}
-	var b [7]byte
-	got, err := r.ReadAt(b[:n], at)
-	if err != nil && !endOfFile(err) {
-		return 0, err
-	}
-	if int64(got) < n {
-		return 0, errors.New("wavpack: the file ends inside its channel layout")
-	}
+// wvChannelCount reads an ID_CHANNEL_INFO sub-block's channel count from its
+// 1 to 7 bytes, as the reference decoder's read_channel_info does: 1 to 5
+// bytes, the count and then a channel mask; 6 or 7, a 12-bit count less one,
+// the streams and a wider mask. A count of 0 and a mask naming more channels
+// than the count are an error: the decoder refuses such a file.
+func wvChannelCount(b []byte) (int, error) {
+	n := len(b)
 	var count int
 	var mask uint32
 	if n >= 6 {
@@ -472,7 +560,7 @@ func readWVChannelInfo(r io.ReaderAt, at, n int64) (int, error) {
 		}
 	} else {
 		count = int(b[0])
-		for i := int64(1); i < n; i++ {
+		for i := 1; i < n; i++ {
 			mask |= uint32(b[i]) << (8 * uint(i-1))
 		}
 	}
@@ -545,19 +633,68 @@ func (s *wvStream) settle(h wvHeader, f wvBlockFacts) error {
 // correctionMatches reports whether wvc, a bounded look at a correction file,
 // is the one the stream wv's lossless reconstruction needs: its first audio
 // block holds a correction bitstream, with the same block index, block
-// samples and total samples as the .wv's first audio block (the encoder
-// writes both from one header), and a block ends the file, at the stream's
-// last sample where the .wv's header states its length from its start. A
-// file cut short, or of another stream, is not.
+// samples, flags and total samples as the .wv's first audio block (the
+// encoder writes both from one header, and the reference decoder's
+// match_wvc_header takes a correction block only with the stream's own
+// flags), and a block ends the file at the stream's last sample: where the
+// .wv's header states its length from its start, that length; otherwise
+// where the .wv's own last block ends (wv.final, wvStreamFinal), and a .wv
+// whose end that look did not find matches nothing. A file cut short, or of
+// another stream, is not.
 func correctionMatches(wv wvStream, wvc wvCorrection) bool {
 	h := wvc.first
 	if !wvc.correctionBits || !wvc.finalFound ||
 		h.blockIndex != wv.header.blockIndex || h.blockSamples != wv.header.blockSamples ||
+		h.flags != wv.header.flags ||
 		h.totalLow != wv.header.totalLow || h.totalHigh != wv.header.totalHigh {
 		return false
 	}
 	if total, ok := wv.header.totalSamples(); ok && wv.header.blockIndex == 0 {
 		return wvc.final == total
 	}
-	return true
+	return wv.finalFound && wvc.final == wv.final
+}
+
+// statesItsLength reports whether s's header states the stream's length
+// from its first sample: a total the encoder wrote, in a first audio block
+// at index 0.
+func (s wvStream) statesItsLength() bool {
+	_, ok := s.header.totalSamples()
+	return ok && s.header.blockIndex == 0
+}
+
+// wvStreamFinal finds where the stream's audio ends in a .wv of size bytes:
+// the block that ends the file's bytes before its tags (an ID3v1 tag in its
+// last 128 bytes, and an APEv2 tag before that, header and all), as
+// wvFinalIndex finds a correction file's. It reads only for a stream whose
+// header does not state its length (statesItsLength), which is all
+// correctionMatches asks it for.
+func wvStreamFinal(r io.ReaderAt, size int64) (uint64, bool, error) {
+	end := size
+	if end >= apeID3v1Bytes {
+		var id3 [3]byte
+		if err := readAtExactly(r, id3[:], end-apeID3v1Bytes); err != nil {
+			return 0, false, tagReadErr(err)
+		}
+		if string(id3[:]) == "TAG" {
+			end -= apeID3v1Bytes
+		}
+	}
+	if end >= apeTagFrameBytes {
+		var footer [apeTagFrameBytes]byte
+		if err := readAtExactly(r, footer[:], end-apeTagFrameBytes); err != nil {
+			return 0, false, tagReadErr(err)
+		}
+		if string(footer[0:8]) == "APETAGEX" {
+			tagSize := int64(binary.LittleEndian.Uint32(footer[12:16]))
+			if binary.LittleEndian.Uint32(footer[20:24])&apeTagFlagHasHeader != 0 {
+				tagSize += apeTagFrameBytes
+			}
+			if tagSize > end {
+				return 0, false, nil
+			}
+			end -= tagSize
+		}
+	}
+	return wvFinalIndex(r, end)
 }

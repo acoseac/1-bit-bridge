@@ -28,7 +28,7 @@ func (f *fakeHealthCountsProvider) TracksIndexed(context.Context, formatgate.Set
 	return f.tracks
 }
 
-func (f *fakeHealthCountsProvider) PendingDeletions(context.Context) int64 {
+func (f *fakeHealthCountsProvider) PendingDeletions(context.Context, formatgate.Set) int64 {
 	return f.pending
 }
 

@@ -1566,6 +1566,44 @@ func TestAWiderContainerHasTheFormatPreserved(t *testing.T) {
 	}
 }
 
+// TestAHybridMPDFetchesThroughTheLoopbackRouteIsLossy: MPD's WavPack plugin
+// looks for a hybrid stream's correction file at the stream's URI with "c"
+// appended, which the loopback track route does not serve (an id with a "c"
+// after it is no track's), so a WAVPACK row that is lossless only beside its
+// correction file plays there as its lossy stream, and the reading judges its
+// source lossy (source_lossy). From MPD's own music directory MPD opens the
+// file's path with "c" appended, the correction file beside it, and the row
+// is lossless; so is a WAVPACK row with no correction file, from either
+// (round 2, Claude's review).
+func TestAHybridMPDFetchesThroughTheLoopbackRouteIsLossy(t *testing.T) {
+	c := piCaptures[0]
+	const trackID = "0123456789abcdef"
+	for _, x := range []struct {
+		name       string
+		correction bool
+		loopback   bool
+		verdict    string
+		reasons    []string
+	}{
+		{"a hybrid by the loopback route", true, true, signalpath.Withheld, []string{signalpath.SourceLossy}},
+		{"a hybrid by its path", true, false, signalpath.FormatPreserved, nil},
+		{"a lossless stream by the loopback route", false, true, signalpath.FormatPreserved, nil},
+	} {
+		t.Run(x.name, func(t *testing.T) {
+			track := c.track
+			track.Codec, track.Correction = "WAVPACK", x.correction
+			rig := newReadingRig(t, c.name, c.file, track, capturedStatus(t, c.name))
+			if x.loopback {
+				rig.loop[trackID] = [2]string{c.file, filepath.Join(rig.root, filepath.FromSlash(c.file))}
+				rig.mpd.current = replyOf("file", "http://127.0.0.1:7791/dlna/file/"+trackID, "Id", "13")
+			}
+			hs, token, id := rig.serve()
+			_, got, raw := getReading(t, hs, token, id)
+			wantVerdict(t, got, raw, x.verdict, x.reasons...)
+		})
+	}
+}
+
 // TestReadingNamesTheBridgesOwnRow: a song MPD names by database path is
 // the bridge's row when a root's prefix rule and os.SameFile say so, and a
 // song it fetches from the loopback track route is the row its id names.

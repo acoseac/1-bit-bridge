@@ -83,7 +83,9 @@ func (f *fakeManifestProvider) LastFullScan() time.Time { return f.lastFullScan 
 func (f *fakeManifestProvider) TracksIndexed(ctx context.Context, _ formatgate.Set) int {
 	return f.tracksIndexed
 }
-func (f *fakeManifestProvider) PendingDeletions(ctx context.Context) int64 { return f.pendingDeletions }
+func (f *fakeManifestProvider) PendingDeletions(ctx context.Context, _ formatgate.Set) int64 {
+	return f.pendingDeletions
+}
 
 // newTestServer spins up an httptest.Server with the api handler and a
 // populated auth store. Returns the server plus one valid raw token for

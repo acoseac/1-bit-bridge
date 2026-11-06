@@ -130,6 +130,29 @@ func TestAHybridWavPacksCorrectionFileDecidesItsCodec(t *testing.T) {
 	}
 	lossy := want{codec: CodecWavPackLossy, key: '-'}
 	rejected := want{codec: CodecWavPackLossy, key: '!', warned: true}
+	matched := want{CodecWavPack, 16, SampleFormatInteger, hybridWVC, '+', false}
+	// Round 2: the reference decoder takes a correction block only with the
+	// stream's own flags (match_wvc_header), so a correction file of other
+	// bits or channels is another stream's, whatever its indexes say (Codex);
+	// and where the .wv's header states no length, or its first block is past
+	// the stream's first sample, the correction file must end where the .wv's
+	// own last block does (Codex, Claude).
+	bits24, mono := spec, spec
+	bits24.bytes, mono.channels = 3, 1
+	unknown := spec
+	unknown.total = -1
+	// late is spec's stream from its sample 4096 on: two blocks, the first
+	// at index 4096, as a file that starts past the stream's first sample
+	// holds; lateWVC its correction file, whole and cut after one block.
+	late := func(correction bool, blocks int) []byte {
+		var out []byte
+		for i := 1; i <= blocks; i++ {
+			b := wvFirstBlock(spec, correction)
+			b.blockIndex = uint64(i) * 4096
+			out = append(out, b.bytes()...)
+		}
+		return out
+	}
 	cases := []struct {
 		name  string
 		wv    wvSpec
@@ -137,6 +160,12 @@ func TestAHybridWavPacksCorrectionFileDecidesItsCodec(t *testing.T) {
 		dir   string
 		want  want
 	}{
+		{"another stream's of other bits", spec, map[string][]byte{hybridWVC: wvcFile(bits24)}, "", rejected},
+		{"another stream's of other channels", spec, map[string][]byte{hybridWVC: wvcFile(mono)}, "", rejected},
+		{"its own, the length unknown", unknown, map[string][]byte{hybridWVC: wvcFile(unknown)}, "", matched},
+		{"cut at a block's end, the length unknown", unknown, map[string][]byte{hybridWVC: wvFirstBlock(unknown, true).bytes()}, "", rejected},
+		{"its own, the stream from past its first sample", spec, map[string][]byte{hybridWVC: late(true, 2)}, "", matched},
+		{"cut at a block's end, the stream from past its first sample", spec, map[string][]byte{hybridWVC: late(true, 1)}, "", rejected},
 		{"no correction file", spec, nil, "", lossy},
 		{"its own", spec, map[string][]byte{hybridWVC: full}, "",
 			want{CodecWavPack, 16, SampleFormatInteger, hybridWVC, '+', false}},
@@ -155,10 +184,20 @@ func TestAHybridWavPacksCorrectionFileDecidesItsCodec(t *testing.T) {
 		{"beside a DSD stream", dsd, map[string][]byte{hybridWVC: full}, "",
 			want{CodecWavPackDSD, 1, "", "", 0, false}},
 	}
+	// The .wv's audio where a case's spec cannot lay it out.
+	wvData := map[string][]byte{
+		"its own, the stream from past its first sample":              late(false, 2),
+		"cut at a block's end, the stream from past its first sample": late(false, 2),
+	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			f := newArtFixture(t)
-			writeHybrid(t, f, hybridRel, c.wv)
+			if data, ok := wvData[c.name]; ok {
+				writeFixtureFile(t, f.path(hybridRel), append(append([]byte(nil), data...), apeTag([]apeItem{apeText("Title", "Song")}, true)...))
+				setMTime(t, f.path(hybridRel), t0)
+			} else {
+				writeHybrid(t, f, hybridRel, c.wv)
+			}
 			for rel, data := range c.files {
 				writeCorrection(t, f, rel, data, t0.Add(time.Minute))
 			}
@@ -266,12 +305,18 @@ func TestACorrectionFilesChangesReachItsRow(t *testing.T) {
 type failingCorrection struct {
 	*os.File
 	failRead, failStat, replaced bool
-	stats                        int
+	// readErr is what a failed read answers: EIO when 0.
+	readErr syscall.Errno
+	stats   int
 }
 
 func (c *failingCorrection) ReadAt(p []byte, off int64) (int, error) {
 	if c.failRead {
-		return 0, &fs.PathError{Op: "read", Path: c.Name(), Err: syscall.EIO}
+		errno := c.readErr
+		if errno == 0 {
+			errno = syscall.EIO
+		}
+		return 0, &fs.PathError{Op: "read", Path: c.Name(), Err: errno}
 	}
 	return c.File.ReadAt(p, off)
 }
@@ -366,6 +411,62 @@ func TestALookAtACorrectionFileThatDidNotCompleteConcludesNothing(t *testing.T) 
 			f.sc.openCorrection = nil
 			scanOnce(t, f.sc, "readable again")
 			requireCorrection(t, f, hybridRel, CodecWavPack, 16, SampleFormatInteger, hybridWVC)
+		})
+	}
+}
+
+// TestACorrectionFileTheBridgeMayNotReadIsLossy: a correction file the bridge
+// is refused leave to open or to read (on a NAS share, one of another owner,
+// mode 0600) is an answer, never a look that did not complete (round 2,
+// Claude's review): such a file serves no client either, so the .wv is
+// indexed as WAVPACK-LOSSY with no correction on the wire, its key the state
+// '?' and the file's stat. A scan that finds it still refused reads nothing
+// again, and the first that may read it matches it.
+func TestACorrectionFileTheBridgeMayNotReadIsLossy(t *testing.T) {
+	spec := hybridSpec()
+	for _, fault := range []struct {
+		name string
+		open func(abs string) (extractSource, error)
+	}{
+		{"its open refused", func(abs string) (extractSource, error) {
+			return nil, &fs.PathError{Op: "open", Path: abs, Err: syscall.EACCES}
+		}},
+		{"its read refused", openFailingCorrection(func(c *failingCorrection) { c.failRead, c.readErr = true, syscall.EACCES })},
+	} {
+		t.Run(fault.name, func(t *testing.T) {
+			f := newArtFixture(t)
+			writeHybrid(t, f, hybridRel, spec)
+			writeCorrection(t, f, hybridWVC, wvcFile(spec), t0.Add(time.Hour))
+			f.sc.openCorrection = fault.open
+			rec := loggingtest.Record(t)
+			if n := f.scan(t, "index"); n != 1 {
+				t.Fatalf("the index read %d audio files, want 1", n)
+			}
+			if got, _ := f.store.GetTrack(context.Background(), hybridRel); got == nil {
+				t.Fatal("the .wv has no row: a correction file it may not read stopped its index")
+			}
+			requireCorrection(t, f, hybridRel, CodecWavPackLossy, 0, "", "")
+			if got := keyState(correctionKeyOf(t, f.store, hybridRel)); got != '?' {
+				t.Errorf("correction_key state %q, want '?'", got)
+			}
+			if lines := rec.Lines(msgUnreadAudio); len(lines) != 0 {
+				t.Errorf("unread lines %q, want none: the file was read and its correction file answered", lines)
+			}
+			f.requireSettled(t, hybridRel)
+
+			if n := f.scan(t, "still refused"); n != 0 {
+				t.Errorf("the scan read %d audio files, want none while the correction file is still refused", n)
+			}
+			if lines := rec.Lines(msgCorrectionUnreadable); len(lines) != 1 {
+				t.Errorf("unreadable lines %q, want one in all", lines)
+			}
+
+			f.sc.openCorrection = nil
+			if n := f.scan(t, "readable"); n != 1 {
+				t.Errorf("the scan read %d audio files, want the .wv once its correction file may be read", n)
+			}
+			requireCorrection(t, f, hybridRel, CodecWavPack, 16, SampleFormatInteger, hybridWVC)
+			f.requireSettled(t, hybridRel)
 		})
 	}
 }

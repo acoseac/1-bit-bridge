@@ -2639,9 +2639,18 @@ var migrations = []migration{
 		// Track.Correction, inside tags_json.
 		//
 		// '' for every existing row, which is also the key of a row that
-		// depends on no correction file: no row before this version is a
-		// WavPack file's (.wv was not indexed), so nothing is re-read for
+		// depends on no correction file: the walk indexed no .wv before this
+		// version, and a routed row (an upstream server's item, which its
+		// URL may name .wv) is never extracted, so nothing is re-read for
 		// it.
+		//
+		// This version brings the client format gate too, so a store that
+		// holds a routed row or a tombstone the gate now holds back from an
+		// app that declares no format restarts the deletion journal's
+		// coverage, and every delta cursor from before the upgrade takes a
+		// full sync (restartCoverageOverGatedPaths, round 2 of B489: such a
+		// row was served to every app, and would stay on those apps with no
+		// tombstone for good).
 		//
 		// Append-only / idempotent per the ladder contract: the ALTER rides
 		// post(), not `sql` (see the v9 docblock).
@@ -2649,9 +2658,12 @@ var migrations = []migration{
 		name:    "tracks.correction_key (the WavPack correction file a row was extracted against)",
 		sql:     `-- column added idempotently in post(); see Track.correctionKey`,
 		post: func(db *sql.DB) error {
-			return addColumnsIfMissing(db, "tracks",
+			if err := addColumnsIfMissing(db, "tracks",
 				tableColumn{"correction_key", "ALTER TABLE tracks ADD COLUMN correction_key TEXT NOT NULL DEFAULT ''"},
-			)
+			); err != nil {
+				return err
+			}
+			return restartCoverageOverGatedPaths(db)
 		},
 	},
 }
@@ -7211,18 +7223,22 @@ func splitIllFormedUTF8Paths(paths []string) (valid, illFormed []string) {
 
 // PendingDeletions returns the total count of rows across `tracks` and
 // `folders` that have a non-zero missing_count but haven't yet hit the
-// delete threshold. Exposed for the /v1/health ScanState surface and
-// the admin dashboard "X rows pending deletion" hint. Two filtered
-// COUNT(*) scans — there is NO dedicated missing_count index, so the
-// `missing_count > 0` predicate is a table scan; the /v1/health caller
-// TTL-caches the result (healthCountsCache) so an unauthenticated flood
-// can't run these per request. Nil-safe under closed Store (returns 0, nil).
-func (s *Store) PendingDeletions(ctx context.Context) (int64, error) {
+// delete threshold: of the tracks, view's (format_view.go), as the rows
+// its manifest lists (round 2 of backlog B489, Claude's review: a count of
+// the rows a view is never served reached it), and every folder, as its
+// folders block lists every folder. Exposed for the /v1/health ScanState
+// surface. Two filtered COUNT(*) scans — there is NO dedicated
+// missing_count index, so the `missing_count > 0` predicate is a table
+// scan; the /v1/health caller TTL-caches the result per view
+// (healthCountsCache) so an unauthenticated flood can't run these per
+// request. Nil-safe under closed Store (returns 0, nil).
+func (s *Store) PendingDeletions(ctx context.Context, view formatgate.Set) (int64, error) {
 	if s == nil || s.db == nil {
 		return 0, nil
 	}
 	var tracks, folders int64
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tracks WHERE missing_count > 0`).Scan(&tracks); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM tracks WHERE missing_count > 0 AND `+formatViewSQL,
+		formatViewArgs(view)...).Scan(&tracks); err != nil {
 		return 0, err
 	}
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM folders WHERE missing_count > 0`).Scan(&folders); err != nil {

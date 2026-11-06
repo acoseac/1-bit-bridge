@@ -8,6 +8,7 @@ package manifest
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -208,6 +209,20 @@ func TestAWavPackFileItsReaderRefusesIsRefused(t *testing.T) {
 			return data
 		}()},
 		{"a header cut short", wvFile(std)[:20]},
+		// Round 2 (Codex): the reference decoder reads its first audio block
+		// whole, so a file that ends inside it is refused, its bitstream
+		// declared and absent (34 bytes: a header claiming a 36-byte block,
+		// and a bitstream sub-block's 2 bytes of header) or cut short.
+		{"a first block whose bitstream the file ends before", func() []byte {
+			b := wvFirstBlock(std, false)
+			b.subs = [][]byte{wvSub(fxIDWVBitstream, []byte{0xA5, 0xA5})}
+			data := b.bytes()
+			return data[:len(data)-2]
+		}()},
+		{"a first block the file ends inside", func() []byte {
+			data := wvFile(std)
+			return data[:len(data)-40]
+		}()},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -223,6 +238,112 @@ func TestAWavPackFileItsReaderRefusesIsRefused(t *testing.T) {
 			}
 		})
 	}
+}
+
+// withSubBeforeBitstream is spec's first block with flags set and sub, a
+// metadata sub-block, placed ahead of its bitstream, where an encoder writes
+// metadata; extra sub-blocks follow the bitstream, as an encoder writes an
+// extended one.
+func withSubBeforeBitstream(spec wvSpec, flags uint32, sub []byte, extra ...[]byte) []byte {
+	b := wvFirstBlock(spec, false)
+	b.flags |= flags
+	last := len(b.subs) - 1
+	subs := append(append(append([][]byte{}, b.subs[:last]...), sub), b.subs[last])
+	b.subs = append(subs, extra...)
+	return b.bytes()
+}
+
+// withFloatInfo is a float stream's first block whose ID_FLOAT_INFO holds
+// flags, and extra sub-blocks after its bitstream.
+func withFloatInfo(spec wvSpec, flags byte, extra ...[]byte) []byte {
+	b := wvFirstBlock(spec, false)
+	for i, s := range b.subs {
+		if s[0]&0x3f == fxIDFloatInfo {
+			b.subs[i] = wvSub(fxIDFloatInfo, []byte{flags, 0, 0x7f, 0x7f})
+		}
+	}
+	b.subs = append(b.subs, extra...)
+	return b.bytes()
+}
+
+// TestAStreamWhoseExtendedBitsAreMissingIsLossy: a stream that is not hybrid
+// is lossless only when it carries what its samples need beyond the main
+// bitstream. A 32-bit integer stream whose ID_INT32_INFO says it sends bits,
+// and a float stream whose ID_FLOAT_INFO says it sends exceptions, zeros or
+// shifts, keep them in an extended bitstream (ID_WVX_BITSTREAM); without one,
+// the reference decoder counts the block lossy (unpack_init's lossy_blocks),
+// and so does the bridge: WAVPACK-LOSSY, no depth, no sample kind (round 2,
+// Codex). With the extended bitstream, or nothing sent, it is lossless.
+func TestAStreamWhoseExtendedBitsAreMissingIsLossy(t *testing.T) {
+	int32Spec := wvSpec{rate: 48000, bytes: 4, channels: 2, total: 48000}
+	floatSpec := wvSpec{rate: 48000, bytes: 4, float: true, channels: 2, total: 48000}
+	wvx := wvSub(fxIDWVXBitstream, bytes.Repeat([]byte{0x33}, 16))
+	int32Info := func(sent byte) []byte { return wvSub(fxIDInt32Info, []byte{sent, 0, 0, 0}) }
+	lossless := func(kind string) formatFacts {
+		return formatFacts{CodecWavPack, 48000, 32, 2, false, kind, 1}
+	}
+	lossy := formatFacts{CodecWavPackLossy, 48000, 0, 2, false, "", 1}
+	cases := []struct {
+		name string
+		data []byte
+		want formatFacts
+	}{
+		{"32-bit integer sending bits it does not carry", withSubBeforeBitstream(int32Spec, fxWVInt32, int32Info(8)), lossy},
+		{"32-bit integer sending bits its extended bitstream carries", withSubBeforeBitstream(int32Spec, fxWVInt32, int32Info(8), wvx), lossless(SampleFormatInteger)},
+		{"32-bit integer sending no bits", withSubBeforeBitstream(int32Spec, fxWVInt32, int32Info(0)), lossless(SampleFormatInteger)},
+		{"float sending exceptions it does not carry", withFloatInfo(floatSpec, 0x20), lossy},
+		{"float sending zeros it does not carry", withFloatInfo(floatSpec, 0x08), lossy},
+		{"float sending a shift it does not carry", withFloatInfo(floatSpec, 0x04), lossy},
+		{"float sending the same shift, uncarried", withFloatInfo(floatSpec, 0x02), lossy},
+		{"float sending exceptions its extended bitstream carries", withFloatInfo(floatSpec, 0x20, wvx), lossless(SampleFormatFloat)},
+		{"float shifting ones, which sends nothing", withFloatInfo(floatSpec, 0x01), lossless(SampleFormatFloat)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tr, err := extractWVAPE(t, "a.wv", c.data, nil)
+			if err != nil {
+				t.Fatalf("extract: %v", err)
+			}
+			if got := factsOf(tr); got != c.want {
+				t.Errorf("facts\n %+v\nwant\n %+v", got, c.want)
+			}
+		})
+	}
+}
+
+// countingReaderAt counts the reads made of r.
+type countingReaderAt struct {
+	r     io.ReaderAt
+	reads int
+}
+
+func (c *countingReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	c.reads++
+	return c.r.ReadAt(p, off)
+}
+
+// TestABlockOfManyTinySubBlocksIsReadInAFewReads: a block's sub-blocks are
+// walked a window of the file at a time, never with a read each, so a block
+// of a megabyte of empty sub-blocks (an id and a length of 0, two bytes each)
+// costs its windows' reads (round 2, Claude's review: a block of almost
+// 16 MiB of them was 8.4 million reads, on a Pi or a network mount far
+// longer than seconds).
+func TestABlockOfManyTinySubBlocksIsReadInAFewReads(t *testing.T) {
+	b := wvFirstBlock(stdWavPack(), false)
+	b.subs = append([][]byte{make([]byte, 1<<20)}, b.subs...)
+	data := b.bytes()
+	r := &countingReaderAt{r: bytes.NewReader(data)}
+	s, err := readWavPackStream(r, int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.bits != 16 || s.rate != 44100 {
+		t.Fatalf("read %+v", s)
+	}
+	if r.reads > 64 {
+		t.Errorf("%d reads of a %d-byte file, want a few windows' worth", r.reads, len(data))
+	}
+	t.Logf("%d reads of a %d-byte file", r.reads, len(data))
 }
 
 // TestTheAPEHeaderStatesItsFormat reads each layout Monkey's Audio has
@@ -364,6 +485,54 @@ func TestAnAPEFileItsReaderRefusesIsRefused(t *testing.T) {
 		}()},
 		{"a file cut inside its header", apeFile(stdAPE())[:60]},
 		{"no \"MAC \" at all", bytes.Repeat([]byte("not a Monkey's Audio file "), 64)},
+		// Round 2 (Codex): what the headers say lies ahead of the frames (the
+		// header, the seek table, the WAV header) must be in the file, with
+		// frame data after it, and the seek table must name each frame, as
+		// FFmpeg's reader requires. The reviewer's 76 bytes are the descriptor
+		// and the header alone, the header claiming 4 GiB.
+		{"a header claiming 4 GiB, the file ending after it", func() []byte {
+			data := apeFile(stdAPE())[:76]
+			binary.LittleEndian.PutUint32(data[12:16], math.MaxUint32)
+			return data
+		}()},
+		{"a header claiming 4 GiB", func() []byte {
+			data := apeFile(stdAPE())
+			binary.LittleEndian.PutUint32(data[12:16], math.MaxUint32)
+			return data
+		}()},
+		{"a seek table past the file's end", func() []byte {
+			data := apeFile(stdAPE())
+			binary.LittleEndian.PutUint32(data[16:20], 1<<20)
+			return data
+		}()},
+		{"a seek table of fewer entries than frames", func() []byte {
+			data := apeFile(stdAPE())
+			binary.LittleEndian.PutUint32(data[16:20], 9*4)
+			return data
+		}()},
+		{"no seek table", func() []byte {
+			data := apeFile(stdAPE())
+			binary.LittleEndian.PutUint32(data[16:20], 0)
+			return data
+		}()},
+		{"a WAV header past the file's end", func() []byte {
+			data := apeFile(stdAPE())
+			binary.LittleEndian.PutUint32(data[20:24], 1<<20)
+			return data
+		}()},
+		{"no frame data after the headers", apeFile(stdAPE())[:52+24+10*4+44]},
+		{"an old header whose seek table runs past the file's end", func() []byte {
+			s := stdAPE()
+			s.version, s.totalFrames, s.finalFrameBlocks = 3950, 1000, 1
+			return apeFile(s)
+		}()},
+		{"an old header whose seek elements are fewer than its frames", func() []byte {
+			s := stdAPE()
+			s.version, s.formatFlags = 3950, fxAPEFlagSeekElems
+			data := apeFile(s)
+			binary.LittleEndian.PutUint32(data[32:36], s.totalFrames-1)
+			return data
+		}()},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

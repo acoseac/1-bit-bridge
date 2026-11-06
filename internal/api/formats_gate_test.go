@@ -197,6 +197,44 @@ func (v gateView) want() []string {
 	return out
 }
 
+// TestPendingDeletionsAreEachViewsRows: health's pendingDeletions counts the
+// rows a view is served, as tracksIndexed does (round 2, Claude's review:
+// PROTOCOL.md says no count of a format a client does not declare reaches
+// it). A WavPack file gone from the share is no pending deletion to an app
+// that was never served its row.
+func TestPendingDeletionsAreEachViewsRows(t *testing.T) {
+	f := newFormatsFixture(t)
+	gone := []string{"Artist/Album/01 Gate One.flac", "Artist/Album/02 Gate Two.wv"}
+	for _, rel := range gone {
+		if err := os.Remove(filepath.Join(f.lib, filepath.FromSlash(rel))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scanner := manifest.NewScanner([]string{f.lib}, f.store, "")
+	scanner.SetDeleteThreshold(3)
+	if _, err := scanner.Scan(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range gateViews {
+		t.Run(v.name, func(t *testing.T) {
+			want := int64(0)
+			for _, rel := range gone {
+				if v.takes(rel) {
+					want++
+				}
+			}
+			_, body := f.get(t, "/v1/health", v.formats...)
+			var h HealthResponse
+			if err := json.Unmarshal(body, &h); err != nil {
+				t.Fatal(err)
+			}
+			if h.ScanState == nil || h.ScanState.PendingDeletions != want {
+				t.Errorf("pendingDeletions %+v, want %d", h.ScanState, want)
+			}
+		})
+	}
+}
+
 // TestTheManifestServesEachViewItsRows: the full manifest, streamed, holds a
 // view's rows and its counts (enrichmentProgress), its folders are every
 // view's, and it varies on the header; the health count is the view's.

@@ -30,6 +30,7 @@ const (
 	fxWVHybrid       = 0x8
 	fxWVJointStereo  = 0x10
 	fxWVFloat        = 0x80
+	fxWVInt32        = 0x100
 	fxWVInitialBlock = 0x800
 	fxWVFinalBlock   = 0x1000
 	fxWVShiftLSB     = 13
@@ -39,8 +40,10 @@ const (
 	fxIDDecorrTerms  = 0x2
 	fxIDHybridProf   = 0x6
 	fxIDFloatInfo    = 0x8
+	fxIDInt32Info    = 0x9
 	fxIDWVBitstream  = 0xa
 	fxIDWVCBitstream = 0xb
+	fxIDWVXBitstream = 0xc
 	fxIDChannelInfo  = 0xd
 	fxIDDSDBlock     = 0xe
 	fxIDRIFFHeader   = 0x21
