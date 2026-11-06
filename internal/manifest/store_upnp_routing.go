@@ -3,7 +3,6 @@ package manifest
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -378,7 +377,7 @@ func (s *Store) ListUPnPTracksByServer(ctx context.Context, serverUDN string) (m
 			return nil, fmt.Errorf("manifest: scan UPnP track row: %w", err)
 		}
 		var t Track
-		if err := json.Unmarshal(raw, &t); err != nil {
+		if err := decodeStoredTrack(raw, &t); err != nil {
 			return nil, fmt.Errorf("manifest: decode UPnP track row: %w", err)
 		}
 		t.rowVersion, t.hasRowVersion = version, true

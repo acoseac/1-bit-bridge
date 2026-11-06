@@ -15,6 +15,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/smartplaylist"
+	"github.com/acoseac/1-bit-bridge/internal/smartplaylist/season"
 )
 
 // logger records a discovery shelf that dropped the already-shown exclusion
@@ -337,6 +338,23 @@ func assembleInputs(ctx context.Context, store *manifest.Store, opts Options) (s
 		return smartplaylist.Inputs{}, err
 	}
 
+	// Christmas: every served track's tags through the match (B750). Not
+	// gated on AnalysisEnabled, and no pool above can stand in for it:
+	// each follows a play, a heart or an analysis row, so a filter over
+	// them would never see the unheard, unanalyzed Christmas album, which
+	// is the one the family is for. MatchingTrackFeatures says why its SQL
+	// holds no filter.
+	xmasRows, err := store.MatchingTrackFeatures(ctx, func(r *manifest.TrackFeatureRow) bool {
+		return smartplaylist.MatchChristmas(r.Title, r.Artist, r.Album, r.Genre) != smartplaylist.ChristmasNone
+	})
+	if err != nil {
+		return smartplaylist.Inputs{}, err
+	}
+	// The family's order follows the season, not the week or the calendar
+	// year: season.Year names 1 December to 5 January by that December, so
+	// the mix keeps its order across New Year and the next season moves it.
+	christmasSeed := smartplaylist.SeedFromSeason(season.Year(time.Unix(0, now)))
+
 	// Hysteresis: load the prior cache and build the "was visible last
 	// regeneration" map. The regenerator only writes populated families, so
 	// presence in the cache (slug exists) = visible last run. Hysteresis-
@@ -389,7 +407,7 @@ func assembleInputs(ctx context.Context, store *manifest.Store, opts Options) (s
 	if err != nil {
 		return smartplaylist.Inputs{}, err
 	}
-	features := make(map[string]smartplaylist.TrackFeature, len(featRows)+len(pool)+len(quietPool)+len(loudPool))
+	features := make(map[string]smartplaylist.TrackFeature, len(featRows)+len(pool)+len(quietPool)+len(loudPool)+len(xmasRows))
 	for _, r := range featRows {
 		features[r.Path] = toFeature(r)
 	}
@@ -431,6 +449,18 @@ func assembleInputs(ctx context.Context, store *manifest.Store, opts Options) (s
 			features[r.Path] = f
 		}
 	}
+	// Christmas rows come back fully hydrated too, and go into Features the
+	// same way: unifiedFeatures reads only Features and the analyzed pool,
+	// so without this a Christmas track in no other pool would reach
+	// signEnergy as a midpoint with no rate.
+	xmasFeats := make([]smartplaylist.TrackFeature, 0, len(xmasRows))
+	for _, r := range xmasRows {
+		f := toFeature(r)
+		xmasFeats = append(xmasFeats, f)
+		if _, ok := features[r.Path]; !ok {
+			features[r.Path] = f
+		}
+	}
 
 	return smartplaylist.Inputs{
 		HeavyRotation:     toStats(heavy),
@@ -446,6 +476,8 @@ func assembleInputs(ctx context.Context, store *manifest.Store, opts Options) (s
 		QuietSlowPool:     quietPoolFeats,
 		LoudFastPool:      loudPoolFeats,
 		Favorites:         favFeats,
+		Christmas:         xmasFeats,
+		ChristmasSeed:     christmasSeed,
 		PlayedPaths:       toBoolSet(played),
 		Features:          features,
 		PreviouslyVisible: previouslyVisible,

@@ -34,6 +34,11 @@ const (
 	// F4/B2). Explicit taste, not play-derived — the only family whose
 	// source is a deliberate user signal.
 	KindFavorites Kind = "favorites"
+	// Christmas: the library's Christmas music, by its tags alone (B750).
+	// Generated all year and served only from 1 December to 5 January,
+	// UTC: the API leaves it out of every response outside that window
+	// (internal/smartplaylist/season).
+	KindChristmas Kind = "christmas"
 )
 
 // TrackFeature is the metadata + analysis a track contributes to generation.
@@ -146,6 +151,17 @@ type Inputs struct {
 	// so the MinFavorites gate counts only what this bridge can serve).
 	Favorites []TrackFeature
 
+	// Christmas: every served track MatchChristmas accepts, read from the
+	// whole library's tags (the manifest's MatchingTrackFeatures), so a
+	// track needs no play, heart or analysis to be here: an unheard album
+	// is what the family is for. Suppressed duplicates never enter.
+	Christmas []TrackFeature
+
+	// ChristmasSeed orders the Christmas family: SeedFromSeason of the
+	// season's year (season.Year), which the regenerator computes, so one
+	// season keeps one order across New Year and the next season moves it.
+	ChristmasSeed uint64
+
 	// PlayedPaths is the set of paths with any qualifying play (Daily Mix
 	// discovery anti-join).
 	PlayedPaths map[string]bool
@@ -240,6 +256,15 @@ type Options struct {
 	// carries much more of the set than the play-derived families do.
 	MinFavorites      int
 	MaxFavoritesItems int
+
+	// Christmas thresholds. MinChristmas is the floor of emitted tracks,
+	// beside the family's own spread rule (3 albums or 3 artists, which is
+	// not tunable); MaxChristmasItems the cap; ChristmasPerArtistCap how
+	// many tracks one artist takes before the others have had theirs. A
+	// value <= 0 is the production one, as MinFavorites' is.
+	MinChristmas          int
+	MaxChristmasItems     int
+	ChristmasPerArtistCap int
 }
 
 // DefaultOptions returns the tuned production thresholds. These are the
@@ -276,6 +301,11 @@ func DefaultOptions(analysisEnabled bool) Options {
 		// Favorites (explicit curation — low floor, high cap).
 		MinFavorites:      5,
 		MaxFavoritesItems: 100,
+		// Christmas: 15 tracks at least (an 18-minute mix looks broken),
+		// 100 at most, 8 an artist before the others are heard.
+		MinChristmas:          15,
+		MaxChristmasItems:     100,
+		ChristmasPerArtistCap: 8,
 	}
 }
 

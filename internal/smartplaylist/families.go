@@ -602,6 +602,113 @@ func buildFavorites(in Inputs, opts Options) (GeneratedPlaylist, bool) {
 	}, true
 }
 
+// --- Christmas (the library's Christmas music, B750) ---
+
+// christmasSlug is the Christmas family's slug: the key the app's per-mix
+// hide and an operator's cover are stored under.
+const christmasSlug = "christmas"
+
+// buildChristmas orders the library's Christmas tracks (Inputs.Christmas)
+// by the season's seed and spreads them by artist. It reads no history,
+// heart or analysis: a library with one unheard Christmas album and nothing
+// else gets the family. Its window is the API's, at response time
+// (season.InWindow); the family is built all year, so the cache is ready
+// the moment the window opens and no regeneration has to land on 1
+// December.
+//
+// It neither reads nor feeds the discovery shelves' 7-day exclusion: it
+// calls no discoveryExclusions, and it is no DiscoveryShelf, so
+// recordDiscoveryServed writes none of its items to smart_playlist_served.
+// Every other shelf may hold its tracks, and what they showed takes
+// nothing away from it.
+//
+// The floor is two rules: MinChristmas emitted tracks, and 3 distinct
+// albums or 3 distinct artists among the qualifying tracks (the track's
+// artist, so a Various Artists compilation counts by its performers). A
+// single album by a single artist gets no family, even a 40-track box set:
+// that is an album, which can be played as one. The spread is judged on the
+// qualifying tracks and the cap keeps min(qualifying, MaxChristmasItems), so
+// the cap can never undo the floor.
+func buildChristmas(in Inputs, opts Options) (GeneratedPlaylist, bool) {
+	// Zero is the production value (the buildFavorites convention), so a
+	// caller that sets none of these cannot let a 1-track family through.
+	minN := opts.MinChristmas
+	if minN <= 0 {
+		minN = 15
+	}
+	capN := opts.MaxChristmasItems
+	if capN <= 0 {
+		capN = 100
+	}
+	perArtist := opts.ChristmasPerArtistCap
+	if perArtist <= 0 {
+		perArtist = 8
+	}
+	if len(in.Christmas) < minN || !christmasSpread(in.Christmas) {
+		return GeneratedPlaylist{}, false
+	}
+	ordered := spreadByArtist(shuffleFeaturesBySeason(in.Christmas, in.ChristmasSeed), perArtist, capN)
+	items := itemsFromFeatures(ordered, capN)
+	if len(items) < minN {
+		return GeneratedPlaylist{}, false
+	}
+	return GeneratedPlaylist{
+		Slug: christmasSlug, Kind: KindChristmas,
+		Title: "Christmas", Subtitle: "Carols and Christmas albums from your library",
+		Items: items,
+	}, true
+}
+
+// christmasSpread reports whether feats come from 3 distinct albums or 3
+// distinct artists, each named as the diversity caps name them (case and
+// surrounding space aside). An empty album or artist names nothing.
+func christmasSpread(feats []TrackFeature) bool {
+	albums := map[string]struct{}{}
+	artists := map[string]struct{}{}
+	for _, f := range feats {
+		if k := diversityKey(f.Album); k != "" {
+			albums[k] = struct{}{}
+		}
+		if k := diversityKey(f.Artist); k != "" {
+			artists[k] = struct{}{}
+		}
+		if len(albums) >= 3 || len(artists) >= 3 {
+			return true
+		}
+	}
+	return false
+}
+
+// spreadByArtist walks ordered taking at most perArtist tracks of each
+// artist, then fills from the tracks it passed over, in the same order, up
+// to capN. The cap spreads and never starves: the result holds
+// min(len(ordered), capN) tracks however few artists there are. An empty
+// artist is one artist here, so untagged tracks spread like the rest.
+func spreadByArtist(ordered []TrackFeature, perArtist, capN int) []TrackFeature {
+	out := make([]TrackFeature, 0, min(len(ordered), capN))
+	var later []TrackFeature
+	taken := map[string]int{}
+	for _, f := range ordered {
+		if len(out) >= capN {
+			break
+		}
+		k := diversityKey(f.Artist)
+		if taken[k] >= perArtist {
+			later = append(later, f)
+			continue
+		}
+		taken[k]++
+		out = append(out, f)
+	}
+	for _, f := range later {
+		if len(out) >= capN {
+			break
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
 // --- On Repeat (per-day repeat behaviour, with hysteresis) ---
 
 // onRepeatSlug is the cache-cached slug for the On Repeat family AND the key
@@ -857,6 +964,15 @@ func shuffleFeaturesByWeek(pool []TrackFeature, seed uint64) []TrackFeature {
 		out[i] = pool[s.index]
 	}
 	return out
+}
+
+// shuffleFeaturesBySeason is shuffleFeaturesByWeek's sibling for the one
+// family that turns over by the season rather than the week: the same
+// stable order by (seed, path), seeded with Inputs.ChristmasSeed. A sibling
+// rather than a parameter of the weekly one, so no caller of that one can
+// be handed a season's seed or the reverse.
+func shuffleFeaturesBySeason(pool []TrackFeature, seasonSeed uint64) []TrackFeature {
+	return shuffleFeaturesByWeek(pool, seasonSeed)
 }
 
 // hashSeedPath produces a 64-bit shuffle score from (seed, path) via INLINED
