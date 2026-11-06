@@ -76877,3 +76877,195 @@ tests. Not run here: macOS and Windows natively, CI's runners and the iOS
 app.
 
 **B739, a last point (the orchestrator; Codex and the Claude API reviewer on round 2):** a listener bound to loopback, a name or a link-local address fell through to the walk's first LAN address, where nothing answers. Only a listener on every address takes the walk now; any other takes a dialable custom endpoint or the refusal that asks for one. `TestTheLANFallbackIsTheAddressTheListenerIsBoundTo`'s three rows were red first. Test-fast on the Mac whose real host name has this problem: 83 of 83 packages, no IA5 error, against about 202 failures on main.
+
+## 2026-11-06 — B662: a stop at the upscale seed's commit exits as a stop
+
+Backlog B662, from macOS run 41480956932, where
+`TestServeRunsThePlayersWatcherWhileThePlayerIsOn` failed with `serve exit
+code 1; stderr=seed upscale target: sql: transaction has already been
+committed or rolled back` on a PR that did not touch that path (Linux `make
+test` passed). Worker b662 on legion0 (Ubuntu 26.04, linux/amd64, 16 cores,
+go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`), branch `fix/b662-upscale-seed`
+from main d37417ed. Commits: the reproduction 4eaa288c (red), the fix
+4ea87e72, then this record. The rules are two new bullets, in `cli-serve.md`
+after the loops' stop bullet and in `build-ci-tests.md` after the collation
+park's, shipped as a checked patch (`rules-b662.patch`; this worker cannot
+write `.claude/`), with their long forms in `ops/History-rules-cli-serve.md`
+and `ops/History-rules-build-ci-tests.md`.
+
+**What it was: the stop, arriving as another error.** The test boots serve
+and stops it once its hotplug watcher has read once, and the watcher starts
+(`startPlayerHotplug`, main.go:4577 at 4ea87e72) before the upscale block, so
+on a slow host the stop lands while serve still seeds the upscale target on
+its fresh database (main.go:5131-5160). The seed is
+`SetUpscaleTarget(ctx, rate, bits)` (store.go:7418): `BeginTx`, two upserts
+and `tx.Commit()`, every call on serve's own `ctx` (runServe's
+`context.WithCancel` at main.go:3171, which nothing between there and the
+seed reassigns), so no statement runs on another context and nothing uses
+the transaction twice. In go1.27.3's `database/sql/sql.go`, `beginDC` gives
+the transaction `context.WithCancel(ctx)` and starts `Tx.awaitDone`
+(1918-1930), which rolls the transaction back once that context is done;
+`rollback` marks it done before anything else (2332) and waits for a
+statement under way (`closemu`, 2345) before the driver's ROLLBACK. A
+statement on the cancelled context answers `ctx.Err()`: `grabConn` asks the
+context first (2251-2255), and modernc v1.61.0 answers `ctx.Err()` for a
+statement its interrupt goroutine saw cancelled, completed or not
+(stmt.go:109-114). That is #1005's `context canceled`, which the seed's
+`ctxerr.WithoutCancellation` check took for a stop. A cancel that lands after
+the last upsert's driver call has returned leaves the rollback to mark the
+transaction done before the seed reaches `tx.Commit()`, which then finds its
+context done and the transaction done and answers `sql.ErrTxDone` without
+calling the driver's Commit (2296-2301). A statement whose `grabConn` passed
+its context check just before the cancel and found the transaction done just
+after the rollback's mark answers it too (2259-2263). `sql.ErrTxDone` carries
+no cancellation, so the check called it a failed start. Which of the two the
+macOS run met cannot be told from its line: both are the same stop, and the
+same check fixes both.
+
+**Red first.** The window between the last statement and the commit has no
+driver call in it to park in, and parking inside the last INSERT is #1005's
+test, already green: the cancel reaches the statement and comes back as
+`context.Canceled`. A hold inside the driver's last call would not do
+either, since the rollback waits for that call (`closemu`). So 4eaa288c adds
+a hold in the code there, per store and nil in production
+(`Store.upscaleTargetBeforeCommit`, set by
+`SetUpscaleTargetBeforeCommitForTest`, which serve takes from
+`serveOpts.upscaleTargetBeforeCommit` and hands its own store, main.go:3570),
+and a watch on the rollbacks at the driver (`sqlitetest.WatchRollbacks`: a
+rollback hook, `sqlite3_rollback_hook`, installed on every connection in
+`init`). A test holds the seed at its commit, stops serve, waits for a
+rollback on serve's database and for the held transaction to answer
+`sql.ErrTxDone` (a `SELECT 1` on it, which changes nothing while it is still
+open), and only then lets the seed commit. At the store,
+`TestAStopAfterTheUpscaleTargetsLastStatementIsErrTxDoneAtItsCommit` asserts
+`errors.Is(err, sql.ErrTxDone)`, and that the error carries no
+`context.Canceled`, with neither key written on a fresh seed and the first
+target kept over one already set. Through serve,
+`TestAServeStoppedAtItsUpscaleSeedsCommitExitsCleanly` on 4eaa288c: `a serve
+stopped at its upscale seed's commit exited 1, want 0; stderr="seed upscale
+target: sql: transaction has already been committed or rolled back\n"`, the
+CI's line exactly and the whole of serve's stderr.
+
+**The fix (4ea87e72).** `stoppedBeforeServing(ctx, err)`
+(cmd/bridge/serve_startup_stop.go) is the seed's one check, #1005's
+cancellation and the ended transaction together, so the two cannot drift:
+serve's stop context cancelled (`errors.Is(stopCtx.Err(), context.Canceled)`,
+never any `ctx.Err()`), and an error made of that stop's artifacts alone
+(`stopArtifactsOnly`: the cancellation as `ctxerr.WithoutCancellation` reads
+it, or `sql.ErrTxDone`, wrapped or joined, with nothing beside them and no
+wrapper of nothing). Unchanged: `SetUpscaleTarget`'s transaction (only the
+nil hold between its last statement and its commit is new) and its errors,
+since the console's batch submit (handlers_upscale_batch.go:284) takes nil
+for a committed update; and `ctxerr.WithoutCancellation`, which keeps
+reporting a deadline and an unrelated failure during a shutdown, and still
+reports the `sql.ErrTxDone` a loop's commit meets after a stop (its doc's
+measured residual).
+
+**The audit: every start-up database call and transaction runServe
+reaches**, direct or through helpers, read at 4ea87e72, against "does a stop
+landing before or at its commit exit 0" (main.go lines):
+
+| Step | Context | A stop before or at its commit | Verdict |
+|---|---|---|---|
+| `manifest.OpenStore` (3564): the migration ladder, its install-marker record (`disarmBeforeMigrating`), the FTS rebuild's `BEGIN IMMEDIATE`, the FTS probe | `context.Background()` (`migrate`), and no context | cannot reach it; serve goes on to the stop and exits 0 | handled |
+| `manifest.NewScanner` (3632): `GetScanState("last_full_scan")` | `context.Background()`; its error ignored | cannot reach it | handled |
+| `transcode.NewCoordinator` (5114): `RecoverInterruptedBatches`, one UPDATE | `context.Background()` (batch.go:344) | cannot reach it | handled |
+| `GetUpscaleTarget` (5131), one SELECT | serve's | its error is not `ErrUpscaleTargetUnset`, so the seed is skipped and serve exits 0 at its stop | handled |
+| `SetUpscaleTarget` (5135): `BeginTx`, two upserts, `Commit` | serve's | before the begin or in a statement: `context.Canceled`, exit 0 (#1005); after the last statement, at the commit: `sql.ErrTxDone`, exit 1 | fixed (B662) |
+| the same, in a statement's `grabConn` between its context check and its check of the transaction | serve's | `sql.ErrTxDone`, exit 1 | fixed by the same check (read from the code; no hook reaches that window) |
+| `wireAlbumGain` (`albumgain.New`), `admin.New`, and the provider, enricher, pool, ingester and DLNA library constructors | — | no database call | — |
+| every other store call runServe reaches: the scanner, the enricher, the sweepers and the sample-format pass on `scanCtx`, the UPnP ingest, the DLNA listener, the player, the console (its `SetUpscaleTarget` included) | a pass's or a request's | never decides the exit code; a pass's stop follows the loops' rule (`ctxerr.WithoutCancellation`), whose doc names this `sql.ErrTxDone` as its measured residual, one reported line | handled (unchanged) |
+
+Off the database, `disarmEarlyRollback` (3416) is the other start-up step on
+serve's context that can exit 1: 1 when it fails, 0 when the stop ends its
+wait for the install marker's lock (B613 round 4). The seed's comment called
+it "the one startup step that runs on ctx and returns 1", and
+`ops/History-rules-cli-serve.md` said the same since #1005, before B613 added
+that step; both now say what is so.
+
+**Tests.** At the store (internal/manifest/upscale_target_commit_test.go):
+the reproduction above; `TestTheUpscaleTargetsHoldAtItsCommitCommitsWithNothingCancelled`,
+the control that the hold is not what fails the write; and
+`TestAnErrorAtTheUpscaleTargetsCommitRollsBothKeysBack`, an error at the hold
+writes neither key, fresh or over a target already set. The watch
+(internal/sqlitetest): `TestARollbackWatchCountsTheRollbacksOnItsFileAlone`
+(a rollback by DSN and by path, database/sql's own after a cancel, never a
+commit or another file's) and `TestWaitPastAnswersTheWorksEndAndGivesUpAtItsInstant`.
+Through serve (cmd/bridge/serve_cancel_test.go), the reproduction and the
+failures that stay failures, each on the same seed path:
+`TestAServeWhoseUpscaleSeedFindsItsTransactionEndedStillFails` (the same
+`sql.ErrTxDone` from the commit with the stop context live, the transaction
+rolled back at the hold, as one used twice would be: exit 1 and the CI's
+line), `TestAServePastItsDeadlineAtItsUpscaleSeedsCommitStillFails` (serve's
+context ending at a deadline, `context.DeadlineExceeded`, a parent context
+whose deadline the test passes: exit 1 and the same line) and
+`TestAServeWhoseUpscaleSeedFailsAsItIsStoppedStillFails` (an unrelated error
+after the stop and its rollback: exit 1 and that error). The predicate's
+table, `TestAStopEndsAStartUpStepOnlyByItsOwnArtifacts` (cmd/bridge/serve_startup_stop_test.go),
+has 21 rows: each artifact wrapped and joined, a cancel with a cause, an
+error beside either artifact, a deadline's error, another sentinel of
+database/sql, a wrapper of nothing, no error, and the live and expired stop
+contexts.
+
+**Negative controls**, each one mutation applied exactly once to 4ea87e72,
+the test binaries rebuilt, every listed test run alone, and the bytes put
+back from memory (the tree was clean after each):
+
+| # | Mutation | Red | Green |
+|---|---|---|---|
+| N1 | the seed's check back to `ctxerr.WithoutCancellation` alone (the fix reverted) | the reproduction: exit 1, the CI's stderr exactly | the five other serve tests, the table |
+| N2 | `sql.ErrTxDone` taken for a stop whatever the context | the live-context twin and the deadline twin (exit 0), the table's live, expired and joined rows | the reproduction, the unrelated-error twin, #1005's pair |
+| N3 | any `stopCtx.Err()` taken for the stop | the deadline twin (exit 0), the table's expired row | the rest |
+| N4 | any error taken once the stop context is cancelled | the unrelated-error twin (exit 0), seven table rows | the rest |
+| N5 | the ended transaction's half dropped | the reproduction (exit 1, the CI's stderr), five table rows | the rest |
+| N6 | the cancellation's half dropped | #1005's `TestAServeStoppedInItsUpscaleSeedExitsCleanly` (exit 1, `context canceled`), four table rows | the rest |
+| N7 | a join or a wrapper of several taken whatever it holds | four table rows | — |
+| N8 | the wrapper-of-nothing guard dropped | its table row | — |
+| N9 | serve never hands its store the hold | the four serve tests that hold the seed ("never reached its commit") | — |
+| N10 | the rollback hook tells the watch nothing | the serve reproduction, the store's reproduction and the watch's own test ("no transaction rolled back") | — |
+| N11 | the fix reverted and the seed let go at once after the stop, with no wait for the rollback | 1 of 20 runs of the reproduction | 19 of 20: the commit got there first and answered `context.Canceled` |
+
+N11 is the window itself: without the wait for the rollback the race is
+back, and the commit beat the rollback in 19 of 20 runs. (N3's first form
+deleted the predicate's only use of `errors` and did not build; its second
+form is the one in the table.)
+
+**Stress** (build-ci-tests' fallback for a race, about three processes per
+core): the cmd/bridge test binary built with `-race` and make's tags, 48
+processes on the 16 cores at once (a load average of about 63), each running
+the reproduction, #1005's pair, the three twins and
+`TestServeRunsThePlayersWatcherWhileThePlayerIsOn` ten times. At 4ea87e72:
+3,360 runs, none failed (414 s). The same binary with the fix reverted: the
+reproduction failed 480 of 480 runs, each with the CI's stderr exactly, and
+the other six tests passed 480 of 480 each, the test CI failed among them:
+the window did not open by itself in 480 runs on Linux, and the reproduction
+does not depend on its opening.
+
+**Checks**, on legion0, each run under the shared build lock, at 4ea87e72
+with the seed's comment reworded (no code):
+- `go test -race -count=1 -timeout 30m` with make's tags of cmd/bridge,
+  internal/manifest and internal/sqlitetest: ok (966 s, 1,375 s, 2.5 s).
+- `make test-fast` (TMPDIR under `.tmp/_b662`, so the build-site census
+  skips it): ok, 83 of 83 packages (474 s; cmd/bridge 425 s).
+- `make vet` natively and with `GOOS=windows` and `GOOS=darwin`: ok.
+- go1.27.3's gofmt on the nine changed Go files: clean.
+- `make docs-check`: ok as the tree stands (CLAUDE.md 73.6 %, the worst load
+  player_openhome_test.go 64.4 %); and on a copy of the tree with
+  `rules-b662.patch` applied by a strict applier, the four steps of
+  docs-check: ok, cli-serve.md 40,081 bytes (40.1 %), build-ci-tests.md
+  26,819 (26.8 %), the worst load 64.5 %. `git apply --check` takes the
+  patch, and the strict applier refuses it with one context byte changed.
+- `make build-all`: ok (its `-check-build-tags` step OK, and the six
+  targets built).
+
+**For the owner.**
+- The loops' `sql.ErrTxDone` after a stop is still reported, as one Error
+  line where a stop at a loop's commit lands in the same window
+  (ctxerr.go's doc measured it at 0 of 3,000 random cancels). The reason the
+  doc gives for not matching it, error text, holds for `sql: statement is
+  closed` and not for `sql.ErrTxDone`, a sentinel; whether the loops' rule
+  should take it beside a cancelled context, as start-up now does, is a
+  separate change to `ctxerr`'s callers, not made here.
+- The macOS and Windows legs have not run this here; nothing in the change
+  is platform-specific beyond the rollback hook, which modernc builds on
+  every platform it supports.

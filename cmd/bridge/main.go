@@ -5138,13 +5138,13 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 					// failed start, so it exits as a shutdown does, and a
 					// stop leaves the seed one of two errors: the
 					// cancellation, from its begin or a statement, or
-					// sql.ErrTxDone, from a commit database/sql's own
-					// rollback of the transaction reached first (backlog
-					// B662; stoppedBeforeServing says which). The seed is
-					// the one start-up database step on ctx (B662's audit,
-					// in ops/engineering-log.md); disarmEarlyRollback, the
-					// other start-up step on ctx that can exit 1, says its
-					// stop itself.
+					// sql.ErrTxDone, from a commit that database/sql's own
+					// rollback of the transaction got to first (backlog
+					// B662; stoppedBeforeServing takes those and nothing
+					// else). The seed is the one start-up database step on
+					// ctx (B662's audit, in ops/engineering-log.md);
+					// disarmEarlyRollback, the other start-up step on ctx
+					// that can exit 1, says its stop itself.
 					if stoppedBeforeServing(ctx, seedErr) {
 						return 0
 					}

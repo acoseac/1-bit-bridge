@@ -530,6 +530,47 @@
   Windows leg whose boot took longer, and its release loop's 10 s also
   bounded serve's whole teardown).
 
+- **…and the window between a transaction's last statement and its commit
+  is held at a seam of the store's there, and the rollback a stop makes is
+  waited for at the driver, until the transaction answers `sql.ErrTxDone`;
+  a park inside the last statement reproduces the cancellation instead**
+  (2026-11-06, backlog B662). A cancel that reaches a statement parked in
+  the collation comes back from it as `ctx.Err()`: modernc's interrupt
+  goroutine sees the context end, and the driver then answers `ctx.Err()`
+  for the statement, completed or not. So the seed test above, parked in
+  its INSERT, was green while serve still exited 1 for a stop after the
+  seed's last statement, which database/sql answers at the commit with
+  `sql.ErrTxDone` once `Tx.awaitDone`, a goroutine of its own, has rolled
+  the transaction back. Holding that window takes a hold in the code
+  between the statement and the commit, since no driver call lies between
+  them: `SetUpscaleTarget`'s `upscaleTargetBeforeCommit`, a per-store field
+  (`SetUpscaleTargetBeforeCommitForTest`, which serve gets through
+  `serveOpts.upscaleTargetBeforeCommit`), nil in production. A hold INSIDE
+  the driver's last call would not do: database/sql's rollback waits for
+  the statement under way (`closemu`), so it cannot fire before that call
+  returns. The rollback is waited for where it happens: `sqlitetest`
+  installs a rollback hook (`sqlite3_rollback_hook`) on every connection
+  in `init` (modernc's `Driver.Open` reads its hook list without a lock),
+  and `WatchRollbacks` (`WatchRollbacksUntil` for a serve) counts the
+  rollbacks on the connections to one database file, named by its DSN or
+  its path. A rollback hook says only that some transaction on the file
+  rolled back, so the test then asks the held transaction itself: a
+  statement on it answers `sql.ErrTxDone` once its rollback has marked it
+  done, and a probe of a transaction still open runs a `SELECT 1`, which
+  changes nothing, before the wait goes on past the next rollback. In a
+  serve the seed holds the store's writer lock, so no other write
+  transaction is open to roll back meanwhile. Only then is the hold let
+  go. The rollback's hook fires after its mark, so the commit finds the
+  transaction done every time (`TestAServeStoppedAtItsUpscaleSeedsCommitExitsCleanly`,
+  red on every run without the fix; with the stop and no wait for the
+  rollback, the race is back). `TestARollbackWatchCountsTheRollbacksOnItsFileAlone`,
+  `TestWaitPastAnswersTheWorksEndAndGivesUpAtItsInstant` and
+  `TestAStopAfterTheUpscaleTargetsLastStatementIsErrTxDoneAtItsCommit`
+  pin the watch and the store's half. **Don't stand a park inside the last
+  statement in for a stop after it, release the hold before the rollback
+  has come, or take a rollback on the file for the held transaction's
+  without asking the transaction.**
+
 - **A test handler that holds a request until the client gives up must
   DRAIN a POST's body first** (#1003). net/http notices a client hanging up
   only once the request body is consumed, so a POST held unread sits out the
