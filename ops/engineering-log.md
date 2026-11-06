@@ -78872,3 +78872,24 @@ branch's version is 40 and main's 39, and this round changes guarded
 **Owed.** The iOS mirror of PROTOCOL.md, changed again here. The hardware run
 round 1 listed, and beside it the probe asked again once a migration's part
 for the DAC is made without a replug.
+
+**Round 3** (commit 0b2ac814). Once `first.done` closed, `start` read
+`first.admitted` (whether to start the DSD monitor) and `first.refused` after
+its unlock, while reconciliation repoints the one (Keep) and `Revoke` sets the
+other, both under the session's lock. Both are now read in the critical
+section that closes done, `first.dropped` set there too.
+`TestRefreshesAcrossTheFirstOpensEndTakeTheSessionsLock` runs refreshes,
+keeping the plan (a cap above its rate) or taking it away (DSD off),
+concurrently with the stalled first read's release, over twenty fresh
+sessions each: -race clean, the kept plan playing every time. Control: round
+2's unlocked reads restored, red under -race in three runs of three, a DATA
+RACE between `Revoke`'s write and the refusal's read; the monitor's read,
+between the unlock and `startDSDMonitor`'s own lock, has a window this test's
+scheduling does not reach, and is fixed in the same statement. Checks, on
+0b2ac814 through the shared build lock (`.tmp/_b728-b7/gates_r3.py`): `make
+fmt`, which rewrote nothing; `make vet`, and with `GOOS=windows`,
+`GOOS=darwin` and `GOOS=linux GOARCH=386`, each clean; `go test -race
+-count=1` of `./internal/player/...`, `./cmd/bridge/...` and
+`./internal/alsapcm/...`, 16 packages ok (994 s; cmd/bridge 975 s, the
+suite's guard silent); `make docs-check`; the qualification check from
+0d5cb33b and from main, each OK; the tree clean after.
