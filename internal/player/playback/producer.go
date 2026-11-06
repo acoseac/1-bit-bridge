@@ -93,6 +93,11 @@ func (s *session) next() step {
 	}
 	if w := s.writing; w != nil {
 		if !w.dropped {
+			if w.stale {
+				// Being handed off again (B728 B7): the engine's replacement
+				// drops it, and wakes the producer.
+				return step{kind: stepWait}
+			}
 			return step{kind: stepWrite, o: w}
 		}
 		s.writing = nil
@@ -112,6 +117,9 @@ func (s *session) next() step {
 	if !o.opened() {
 		return step{kind: stepWait, wait: o.done}
 	}
+	if o.stale {
+		return step{kind: stepWait}
+	}
 	// One answer decides a join, Prepared's and this: Transport.Join, which
 	// tells same-carrier PCM from DoP by kind, valid bits, logical rate and
 	// packing version, never by format and rate alone; a DSD successor
@@ -122,6 +130,14 @@ func (s *session) next() step {
 			o.dropped = true
 			wake(s.wakeR)
 			return step{kind: stepFinish}
+		}
+		if o.admitted != nil && o.admitted != s.b.dsd.Load() {
+			// A gapless DSD successor joins only under the set published now,
+			// asked with no file read or lock on the audio path (B728 B7): one
+			// admitted under a set a refresh has replaced waits for that
+			// refresh's reconciliation, which keeps it under the new set or
+			// hands it off again, and wakes the producer.
+			return step{kind: stepWait}
 		}
 		if o.plan != nil && o.permission != nil {
 			s.mu.Unlock()

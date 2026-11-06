@@ -35,6 +35,12 @@ func (v *events) Details(s SessionID, o OccurrenceID, d Details) {
 // the release's deadline is late whichever reaches the owner first (ackAt).
 func (v *events) Released(s SessionID) { v.e.post(evReleased{s: s, at: v.e.clk.Now()}) }
 
+// Replan takes a backend's request to hand an occurrence off again
+// (ReplanEvents).
+func (v *events) Replan(s SessionID, o OccurrenceID, why string) {
+	v.e.post(evReplan{s: s, o: o, why: why})
+}
+
 // The messages the owner handles besides commands: backend events, call
 // results, timers, the reservation writes and the writer's reports.
 type (
@@ -68,6 +74,11 @@ type (
 		s SessionID
 		o OccurrenceID
 		d Details
+	}
+	evReplan struct {
+		s   SessionID
+		o   OccurrenceID
+		why string
 	}
 	evFinished       struct{ s SessionID }
 	evDeviceReleased struct{ s SessionID }
@@ -167,6 +178,9 @@ func (e *Engine) handle(m any) {
 		if !e.ordinaryRetiring(m.s, NativeEvent{Kind: "fault", Fault: m.f}) {
 			e.onFault(m.s, m.f)
 		}
+	case evReplan:
+		what = "replan"
+		e.onReplan(m.s, m.o, m.why)
 	case evFinished:
 		what = "finished"
 		e.onFinished(m.s)

@@ -16,13 +16,15 @@
 //     observed on this box.
 //
 // Effective is pure: its inputs are values, and it reads no file, kernel,
-// clock or global. Nothing calls it yet. B7, the cutover, gathers the inputs
-// through bounded adapters (the stream file, the probe cache, the sysfs
-// descriptors attribute, alsactl.Reader with AllowUnreadable, the card's
-// usbmixer table, the store's state) at every session, activation, 100 ms
-// tick and supervisor refresh, as readPermission is read today, and replaces
-// readPermission with it; it asks the hotplug snapshot's freshness first, as
-// readPermission does, since a stale reading is no ground for a set.
+// clock or global. Since B7, the cutover, the player's backend
+// (internal/player/playback's Config.DSD) gathers them through bounded
+// adapters (the stream file, the probe cache, the sysfs descriptors
+// attribute, alsactl.Reader with AllowUnreadable, the card's usbmixer table,
+// ParseUSBMixer, the store's state) at a session's first DSD occurrence,
+// every activation, a DSD session's 100 ms monitor and the supervisor's
+// refresh, and publishes and admits by one set; it asks the hotplug
+// snapshot's freshness first, since a stale reading is no ground for a set.
+// No approval record is read.
 //
 // The order Effective decides in:
 //  1. A state that does not read (dsdstate.State.Unreadable) refuses every

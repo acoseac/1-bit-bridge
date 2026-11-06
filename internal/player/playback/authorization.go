@@ -21,7 +21,11 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/player/qualification"
 )
 
-// Authorization configures local owner approval. It never accepts a candidate.
+// Authorization configures local owner approval, the harness's admission
+// since B728's cutover (B7): the candidate backend, the transition backend
+// and bridge output play's report read the owner's record through it, at the
+// harness's version (qualification.ReadApproval). Production reads no record
+// (Config.DSD). It never accepts a candidate but in the candidate backend.
 type Authorization struct {
 	StateDir, Record, Mode string
 	// AllowDoP is output.player.allowDoP: under dsdMode dop or auto it lets
@@ -140,19 +144,16 @@ func (b *Backend) readPermission(ctx context.Context) (*permission, error) {
 	if e != nil {
 		return nil, e
 	}
-	// Production (serve and output play, New) reads the owner's record through
-	// the legacy reader, from qualification.LegacyVersion to this build's
-	// Version and every identity field compared, until B728's cutover, so no
-	// version bump before it strands a record; the harness's backends take the
-	// current version alone.
-	readerApproval := func(stateDir, name string, id qualification.Identity) (qualification.Approval, error) {
-		return qualification.ReadLegacyApproval(stateDir, name, id, qualification.SameIdentity)
-	}
-	switch {
-	case b.cliCandidate:
+	// The approval's admission is the harness's alone since B728's cutover
+	// (B7): production (serve, bridge output play) passes Config.DSD and reads
+	// no record. A backend built with an Authorization reads the owner's
+	// approved record at the harness's version (qualification.ReadApproval),
+	// the candidate backend a candidate; the legacy reader, which takes
+	// versions from LegacyVersion to this build's, is the migration's alone
+	// (dsdstate.ReadRecord).
+	readerApproval := qualification.ReadApproval
+	if b.cliCandidate {
 		readerApproval = qualification.ReadCandidate
-	case b.transitions != nil:
-		readerApproval = qualification.ReadApproval
 	}
 	record, e := readerApproval(a.StateDir, a.Record, id)
 	if e != nil {
@@ -315,7 +316,7 @@ func implemented(p qualification.ApprovedPolicy) bool {
 // set is asked.
 func (p *permission) selectNative(f format.NativeDSD) (engine.NativePlan, error) {
 	if p == nil || p.revoked.Load() {
-		return productionNativeAdmission(f)
+		return noNativeAdmission(f)
 	}
 	if !nativeLogicalRate(f.BitRateHz) {
 		return engine.NativePlan{}, &engine.Unplayable{Reason: ReasonRate, Detail: "DSD64, DSD128 and DSD256 only: no native or DoP transport here carries this DSD rate"}
@@ -341,7 +342,7 @@ func (p *permission) selectNative(f format.NativeDSD) (engine.NativePlan, error)
 // record's own.
 func (p *permission) selectTransition(ref engine.Reference, f format.NativeDSD, plans *TransitionPlans) (engine.NativePlan, error) {
 	if p == nil || p.revoked.Load() {
-		return productionNativeAdmission(f)
+		return noNativeAdmission(f)
 	}
 	id, ok := plans.Policies[ref.String()]
 	if !ok {
@@ -410,6 +411,13 @@ func (b *Backend) Policy() PlayerPolicy {
 	return b.copyPolicyLocked()
 }
 func (b *Backend) copyPolicyLocked() PlayerPolicy {
+	if b.cfg.DSD != nil {
+		// Production (B728 B7): the effective set published now, the one
+		// selection admits by, with the bound unit's model and firmware and no
+		// record's revision or date, since none is read.
+		d := b.dsd.Load()
+		return PlayerPolicy{BootID: b.policy.BootID, Generation: d.gen, Reason: d.reason(), Tuples: d.tuples(), Model: d.model, BCDDevice: d.bcd()}
+	}
 	p := b.policy
 	p.Tuples = slices.Clone(p.Tuples)
 	for i := range p.Tuples {
@@ -484,7 +492,9 @@ func (s *session) monitorPermission() {
 }
 
 // RefreshAuthorization publishes changes from a supervisor's periodic health
-// check. It revokes old occurrences before publishing a replacement epoch.
+// check, for a backend built with the harness's Authorization: it revokes old
+// occurrences before publishing a replacement epoch. Production's refresh is
+// RefreshDSD.
 func (b *Backend) RefreshAuthorization(ctx context.Context) {
 	if b.cfg.Authorization == nil || b.cfg.Authorization.Mode == "off" || b.cfg.Authorization.Mode == "" {
 		return
@@ -517,7 +527,8 @@ func (b *Backend) RefreshAuthorization(ctx context.Context) {
 }
 
 // NewQualificationBackend is the CLI-only integrated candidate constructor.
-// Serve and output-play use New, which only accepts owner-approved records.
+// Serve and output play use New with the effective DSD policy (Config.DSD),
+// which reads no record (B728 B7).
 func NewQualificationBackend(cfg Config) (*Backend, error) {
 	if cfg.Authorization == nil {
 		return nil, errors.New("candidate record required")
@@ -543,7 +554,7 @@ type TransitionPlans struct {
 // approved native↔DoP transition scenario: it reads only an owner-approved
 // record (qualification.ReadApproval, never a candidate) and admits each
 // occurrence under the approved policy plans names for its reference.
-// Serve and output-play use New.
+// Serve and output play use New with Config.DSD.
 func NewTransitionQualificationBackend(cfg Config, plans TransitionPlans) (*Backend, error) {
 	if cfg.Authorization == nil || len(plans.Policies) == 0 {
 		return nil, errors.New("approved record and transition plans required")

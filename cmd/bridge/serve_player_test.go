@@ -693,8 +693,9 @@ func (p *logPark) WithGroup(string) slog.Handler      { return p }
 // the engine takes (1 s to 10 min, of the config's hour); each refusal
 // leaves it off with its reason, and adds nothing: no goroutine of the
 // player's, no backend built, no player file. A started player hands every
-// session the boot snapshot's pause release and DSD mode unchanged: the
-// default 30 s, and 600, the engine's last. A player turned on in the live
+// session the boot snapshot's pause release unchanged, the default 30 s, and
+// 600, the engine's last, and no DSD mode: since B728's cutover (B7) the
+// backend decides DSD by its effective policy. A player turned on in the live
 // config while serve runs starts at the next start, never in this one.
 func TestServeStartsThePlayerOnlyWhenEveryGateHolds(t *testing.T) {
 	needsDirectorySync(t)
@@ -763,8 +764,8 @@ func TestServeStartsThePlayerOnlyWhenEveryGateHolds(t *testing.T) {
 			standIn.mu.Lock()
 			opts := standIn.starts[0].Options
 			standIn.mu.Unlock()
-			if opts.PauseRelease != tc.release || opts.DSD != "off" {
-				t.Errorf("the session's options %+v, want a pause release of %v and DSD off", opts, tc.release)
+			if opts.PauseRelease != tc.release || opts.DSD != "" {
+				t.Errorf("the session's options %+v, want a pause release of %v and no DSD mode", opts, tc.release)
 			}
 			if code := ps.stopServe(t); code != 0 {
 				t.Fatalf("exit %d; stderr=%s", code, ps.stderr.String())
@@ -912,10 +913,15 @@ func TestServesPlayerResolvesATrackFromTheLibraryAtEveryOpen(t *testing.T) {
 // library file that is no audio is refused by its content before any of it
 // plays (unknown_container), and a row whose file is gone by the resolver
 // (missing_file). Neither touches the DAC: this binary fails on any open of
-// a PCM node.
+// a PCM node. Since B728 B7 serve's player probes the bound DAC once its
+// output is available, the probe and the card's controls here through
+// stand-ins (probeStandIn, noControlNodes), which the test waits for: with the
+// backend's own prober it opened the GO bar's node, which CI's guard caught
+// whenever the probe ran before serve stopped (round 2).
 func TestServesPlayerRefusesWhatItCannotPlayBeforeTheDevice(t *testing.T) {
 	needsDirectorySync(t)
-	ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer, files: map[string][]byte{
+	probes := newProbeStandIn()
+	ps := bootPlayerServe(t, playerServeCase{player: goBarPlayer, seams: noControlNodes(), with: func(o *serveOpts) { o.playerBackend = probes.backend }, files: map[string][]byte{
 		"a.flac": []byte("not audio at all, whatever its name says"), "b.flac": []byte("gone"),
 	}})
 	if err := os.Remove(filepath.Join(ps.music, "b.flac")); err != nil {
@@ -937,6 +943,7 @@ func TestServesPlayerRefusesWhatItCannotPlayBeforeTheDevice(t *testing.T) {
 			t.Errorf("entry %d skipped %+v (%v), want %s", id, sk, ok, want)
 		}
 	}
+	probes.await(t, "serve's probe of the bound DAC", 1)
 	if code := ps.stopServe(t); code != 0 {
 		t.Fatalf("exit %d; stderr=%s", code, ps.stderr.String())
 	}

@@ -26,8 +26,10 @@ var controlInterfaces = []string{"CARD", "HWDEP", "MIXER", "PCM", "RAWMIDI", "TI
 // controlNameMax is the size of ALSA's control name field (snd_ctl_elem_id).
 const controlNameMax = 44
 
-// maxTimingMs bounds a timing a profile gives.
-const maxTimingMs = 5000
+// MaxTimingMs bounds a timing a profile gives, in milliseconds: the DSD
+// sink takes a prefill of up to as much (alsapcm.MaxDSDPrefill), so a
+// profile's never fails an open.
+const MaxTimingMs = 5000
 
 // The measurement methods a raw-maximum entry's evidence may name.
 const (
@@ -455,8 +457,8 @@ func (l *linter) timing(who string, t *Timing) {
 		name string
 		ms   int
 	}{{"dsdPrefillMs", t.DSDPrefillMs}, {"pcmEntryMs", t.PCMEntryMs}} {
-		if v.ms < 0 || v.ms > maxTimingMs {
-			l.add("%s: the timing's %s is 0 to %d ms", who, v.name, maxTimingMs)
+		if v.ms < 0 || v.ms > MaxTimingMs {
+			l.add("%s: the timing's %s is 0 to %d ms", who, v.name, MaxTimingMs)
 		}
 	}
 }

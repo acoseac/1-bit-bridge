@@ -395,6 +395,12 @@ func (t *sysfsTree) list(rel string) (names []string, more bool, err error) {
 // descriptor's (openRegular), so a FIFO swapped in after the look is
 // refused, never read.
 func (t *sysfsTree) attr(dir, name string) ([]byte, error) {
+	return t.attrCapped(dir, name, int64(t.lim.file))
+}
+
+// attrCapped is attr bounded at limit bytes rather than the tree's: the
+// descriptors attribute is longer than any other a reading takes.
+func (t *sysfsTree) attrCapped(dir, name string, limit int64) ([]byte, error) {
 	if t.stopped() {
 		return nil, errStopped
 	}
@@ -414,7 +420,7 @@ func (t *sysfsTree) attr(dir, name string) ([]byte, error) {
 		return nil, err
 	}
 	defer f.Close()
-	return readAllCapped(f, int64(t.lim.file))
+	return readAllCapped(f, limit)
 }
 
 // gone reports whether dir, a directory resolve returned, is no longer in

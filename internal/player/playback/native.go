@@ -14,10 +14,12 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
 )
 
-// productionNativeAdmission refuses before locating or opening hardware. The
-// only accepting implementations in this phase are in _test.go / the overlay.
-func productionNativeAdmission(format.NativeDSD) (engine.NativePlan, error) {
-	return engine.NativePlan{}, &engine.Unplayable{Reason: ReasonDSD, Detail: "native DSD requires an owner-approved plan; production admission is disabled"}
+// noNativeAdmission refuses before locating or opening hardware: the
+// harness's admission with no approval that reads, or one revoked.
+// Production admits by the effective DSD policy (Config.DSD, B728 B7), and
+// the other accepting implementations are in _test.go and the overlay.
+func noNativeAdmission(format.NativeDSD) (engine.NativePlan, error) {
+	return engine.NativePlan{}, &engine.Unplayable{Reason: ReasonDSD, Detail: "native DSD here needs an owner-approved plan, and this backend holds none"}
 }
 
 func (b *Backend) openNativeContent(ctx context.Context, o *occ, d decode.DSDDecoder) {
@@ -30,6 +32,9 @@ func (b *Backend) openNativeContent(ctx context.Context, o *occ, d decode.DSDDec
 	admit := b.nativeAdmission
 	switch {
 	case admit != nil:
+	case b.cfg.DSD != nil:
+		// Production (B728 B7): the effective DSD policy's set, never a record.
+		admit = func(f format.NativeDSD) (engine.NativePlan, error) { return b.admitDSD(o, f) }
 	case o.permission == nil && o.dsdRefusal != nil:
 		u := *o.dsdRefusal
 		o.refused = &u
@@ -176,6 +181,9 @@ func (n *nativeStream) Position() alsapcm.Position {
 func (s *session) openNativeOutput(ctx context.Context, o *occ) (*output, error) {
 	s.mu.Lock()
 	revoked := s.nativeRevoked
+	// The set it was admitted under and its plan there, which a refresh's
+	// reconciliation repoints under the session's lock (B728 B7).
+	admitted, policyPlan := o.admitted, o.policyPlan
 	s.mu.Unlock()
 	if revoked {
 		return nil, errors.New("DSD permission revoked")
@@ -187,7 +195,7 @@ func (s *session) openNativeOutput(ctx context.Context, o *occ) (*output, error)
 	if err != nil {
 		return nil, err
 	}
-	out := &output{occurrence: o.id, plan: o.plan, s: s, transport: o.transport, unit: u, policyID: o.plan.PolicyID, permission: o.permission}
+	out := &output{occurrence: o.id, plan: o.plan, s: s, transport: o.transport, unit: u, policyID: o.plan.PolicyID, permission: o.permission, admitted: admitted}
 	pause := alsapcm.PauseKernel
 	if o.plan.Pause == "silence" {
 		pause = alsapcm.PauseZeros
@@ -213,6 +221,12 @@ func (s *session) openNativeOutput(ctx context.Context, o *occ) (*output, error)
 	if err != nil {
 		cancel()
 		return nil, err
+	}
+	// The open committed exactly the plan's format, rate and channels
+	// (alsapcm's open refuses any other) and passed the check after open: the
+	// tuple's driver_accepted, recorded off the audio path (B728 B7).
+	if admitted != nil {
+		s.b.noteDriverAccepted(admitted, policyPlan)
 	}
 	out.native = sink
 	out.adapter = &nativeStream{DSDSink: sink, life: s.ctx}
@@ -248,6 +262,15 @@ func (s *session) activateOutput(ctx context.Context, o *occ, out *output) error
 	}
 	if o.permission != nil {
 		if err := s.b.checkPermission(ctx, o.permission, nil, edgeKey(o.transport, o.plan)); err != nil {
+			return err
+		}
+	}
+	if out.admitted != nil {
+		// Every activation reads the effective policy again (B728 B7): an
+		// occurrence its change did not keep is refused, never played another
+		// way.
+		if err := s.checkDSDActivation(o); err != nil {
+			out.native.Revoke()
 			return err
 		}
 	}
@@ -293,7 +316,9 @@ func (s *session) writeNativeChunk(o *occ) bool {
 			s.mu.Unlock()
 			return false
 		}
-		if o.dropped || s.writing != o {
+		if o.dropped || o.stale || s.writing != o {
+			// A stale occurrence is being handed off again (B728 B7): nothing
+			// more of it goes to the sink, and the producer waits.
 			s.mu.Unlock()
 			return true
 		}

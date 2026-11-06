@@ -45,12 +45,11 @@ type SessionOptions struct {
 	// PauseRelease is how long a pause holds the device before the backend
 	// releases it (pauseReleaseSeconds).
 	PauseRelease time.Duration
-	// DSD is the configured DSD mode. The bridge's backend plays DSD content
-	// only under an owner-approved policy its effective set takes for the
-	// mode and allowDoP (B470 2d.2), and refuses it otherwise before any of
-	// it plays with a reason it names: dsd_not_in_this_release
-	// (playback.ReasonDSD) while the mode is off, ReasonDSDOff being no
-	// backend's here.
+	// DSD is a DSD mode the engine passes in from its Config, which decides
+	// nothing: the bridge's backend plays DSD content by the player's
+	// effective DSD policy (B728 B7), never by a mode a session is given,
+	// and refuses it otherwise before any of it plays with the reason the
+	// policy names; ReasonDSDOff is no backend's here.
 	DSD string
 }
 
@@ -153,6 +152,25 @@ type Details struct {
 // (Snapshot.Track).
 type DetailsEvents interface {
 	Details(s SessionID, o OccurrenceID, d Details)
+}
+
+// ReplanEvents is an Events that takes a backend's request to hand an
+// occurrence off again (B728 B7): an addition, which Events' other
+// implementers need not make. The bridge's backend asks it when the plan an
+// occurrence was admitted under has left the player's effective DSD set and
+// no frame of it is the kernel's yet (policy.Reconcile's Replan), so the
+// occurrence plays under the new set and is never skipped for the change.
+// The engine takes it as it takes an edit after hand-off: a successor not
+// yet submitted is replaced by a new Prepare, a new occurrence of the same
+// entry, and a submitted one is cut first (Cut, then Prepare); a Cut that
+// answers false keeps the occurrence, which stops playback once it is heard
+// (ReasonRemovedAudible), as an edit's does. A session's first occurrence,
+// one heard, one the session no longer holds and a session not current are
+// passed over: the backend revokes those itself. why says, for a log line,
+// why the occurrence is handed off again. The engine's own Events implements
+// it.
+type ReplanEvents interface {
+	Replan(s SessionID, o OccurrenceID, why string)
 }
 
 // Fault is a failure after content played: an xrun, a disconnect, a device

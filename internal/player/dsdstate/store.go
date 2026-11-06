@@ -66,6 +66,17 @@ type Report struct {
 // after it is moved lands, and one not made leaves the store looking.
 var ErrNotWritable = errors.New("dsdstate: the state's file could not be read or set aside, and is not written over until it is moved")
 
+// ErrLandedNotHeld is a write refused because an earlier write of this
+// store reached the state's file and is not known to be durable
+// (atomicwrite.ErrLanded): the file holds that write's state and the store
+// does not, since a write that fails leaves the store's state as it was
+// (Update), so a write made now, from the store's state, would undo the one
+// that landed. Every later write of the store is refused, whoever makes it
+// (the migration's, playback's evidence, a choice), until the next Open
+// reads the file (B728 B7: B6 fenced the migration alone, and an evidence
+// write after a landed migration step wrote over it).
+var ErrLandedNotHeld = errors.New("dsdstate: an earlier write reached the state's file and is not known to be durable, and the store does not hold it: no write is made until the next start reads the file")
+
 // Store is the state's one writer (the package's doc): it holds the state
 // the last write left, and makes each write durable before it answers.
 type Store struct {
@@ -76,7 +87,11 @@ type Store struct {
 	mu      sync.Mutex
 	state   State
 	blocked error
-	report  Report
+	// landed is the write that reached the file and is not known to be
+	// durable, whose state the store does not hold: it refuses every write
+	// after it (ErrLandedNotHeld).
+	landed error
+	report Report
 }
 
 // options are a test's seams, on the store they serve.
@@ -244,13 +259,29 @@ func (s *Store) State() State {
 // leaves the state as it was writes nothing, so a fresh install with nothing
 // to write has no file. Writes are serialized on the lock, each on the state
 // the last one left: a compare-and-set (B9's revision) compares inside fn.
+// Once a write has landed and is not known to be durable, the file holds a
+// state the store does not, and every write after it is refused
+// (ErrLandedNotHeld) until the next Open reads the file: no write is made
+// from a state that would undo one in the file.
 func (s *Store) Update(fn func(*State) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.updateLocked(fn)
 }
 
+// Landed is the write that reached the state's file and is not known to be
+// durable, which the store does not hold and which fences every later write
+// (ErrLandedNotHeld): nil while there is none.
+func (s *Store) Landed() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.landed
+}
+
 func (s *Store) updateLocked(fn func(*State) error) error {
+	if s.landed != nil {
+		return ErrLandedNotHeld
+	}
 	if s.blocked != nil {
 		// The operator may have moved the entry away since Open: then the
 		// write is made, on the state that refuses, so a choice clears the
@@ -282,7 +313,12 @@ func (s *Store) updateLocked(fn func(*State) error) error {
 	}
 	if err := s.write(s.path, data); err != nil {
 		// Its bytes may be in the file all the same (the doc above): the words
-		// say the write failed, never that nothing was written.
+		// say the write failed, never that nothing was written. One that
+		// landed is in the file, which then holds a state the store does not:
+		// every later write is refused (the fence, ErrLandedNotHeld).
+		if errors.Is(err, atomicwrite.ErrLanded) {
+			s.landed = err
+		}
 		return fmt.Errorf("dsdstate: the state's write failed: %w", err)
 	}
 	s.state, s.blocked = next, nil

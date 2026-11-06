@@ -46,8 +46,8 @@ func (a *probeAuditSys) ioctlValue(fd int, req uint32, arg uintptr) error {
 const probeEndpointEnv = "BRIDGE_PROBE_ENDPOINT"
 
 // TestTheSilentProbeOnARealDAC is the silent probe's hardware run (B728 B4):
-// nothing in the bridge calls the probe until B7, so this is its entry
-// point on a real DAC. It runs only when BRIDGE_PROBE_ENDPOINT names a
+// its entry point on a real DAC apart from serve's player, which runs it once
+// the binding resolves since B7 (playback.Backend.ProbeDSD). It runs only when BRIDGE_PROBE_ENDPOINT names a
 // playback endpoint as "<card>,<device>" (the card's index in
 // /proc/asound/cards, and the bound playback device, which aplay -l lists,
 // usually 0 on a USB DAC), and is skipped

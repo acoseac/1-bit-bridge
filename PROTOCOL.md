@@ -951,7 +951,7 @@ When none holds, `state` is the transport's: `playing` (a track that is starting
 
 **`libraryScope`** is `self`: the player plays this bridge's own tracks, the ones it would not refuse as `not_indexed` (no row of the library's index has it), `routed` (an upstream server's track), `outside_library` (a file outside every library root configured now) or `unknown_container` (a WavPack or Monkey's Audio file, by its path, the reason the player's decoders give content they cannot open: it decodes neither, and `codecs` below names neither). An OpenHome controller queues one by the URI the player's Source takes in an Insert, `http://<host>:<port>/dlna/file/<id>`: a host this bridge advertises, the DLNA listener's port, and the track's DLNA id (B470 PR 5a4); an Insert of a track the player refuses is answered `600`.
 
-**`fixedVolume`** is `true` while the player has no volume control (`output.player.mixer` none, the one this release takes): the DAC receives the file's own level. **`dsdMode`** is `off` (default), `native`, `auto` or `dop`, and **`allowDoP`** is the configured boolean, both as the player took them at boot. These settings alone grant no DSD permission. Native playback requires a fresh matching owner-approved record, and DoP playback an approved DoP policy in it with `dsdMode` `dop` or `auto` and `allowDoP` true. No mode converts DSD to PCM: DoP carries the DSD bits unchanged in a PCM word.
+**`fixedVolume`** is `true` while the player has no volume control (`output.player.mixer` none, the one this release takes): the DAC receives the file's own level. **`dsdMode`** is `off` (default), `native`, `auto` or `dop`, and **`allowDoP`** is the configured boolean, both as the boot config holds them (`output.player.dsdMode`, `output.player.allowDoP`). Since the bridge's DSD cutover they grant nothing and decide nothing: the bridge migrates them once into the player's DSD state, and the player plays DSD by its effective policy, whose set `dsdPlayback` publishes. No tuple converts DSD to PCM: DoP carries the DSD bits unchanged in a PCM word, and a rate the policy would convert is refused until the player converts DSD itself.
 
 **`codecs`** are the containers the player plays in this release: `flac`, `wav`, `aiff` and `alac` (ALAC in an M4A). A client matches a track by its `codec` in `/v1/manifest`:
 
@@ -1003,19 +1003,21 @@ backend boot; `policyGeneration` is monotonic within that boot. `policyId` and
 
 A tuple's `transport` is `dop` for a DoP policy, DSD carried unchanged in S32_LE
 PCM words at the DoP carrier (`bitRate` / 16 Hz, `format` `S32_LE`), and absent for
-native DSD: absent never means DoP. `model`, `bcdDevice` and `qualifiedOn` are the
-owner qualification the epoch's approved record states: the DAC's manufacturer and
-product strings, its USB descriptor firmware code, and the owner's qualification date
-(`YYYY-MM-DD`, an approval of schema 2 alone). They never carry the DAC's USB port
-path or serial number, and every occurrence of the bound unit's port or serial in a
-USB string is replaced with `[redacted]`.
+native DSD: absent never means DoP. `model` and `bcdDevice` are the bound DAC the
+set was computed for: its manufacturer and product strings and its USB descriptor
+firmware code. `qualifiedOn` and `qualificationRevision` were an owner-approved
+record's (its qualification date, `YYYY-MM-DD`, and its revision); since the DSD
+cutover this bridge reads no record and sends neither, and a client reads their
+absence as it always has. None of them carries the DAC's USB port path or serial
+number, and every occurrence of the bound unit's port or serial in a USB string is
+replaced with `[redacted]`.
 
 On `playback`, `transport` is `dop` for a DoP occurrence, `pcm` for a PCM one, and
 absent for native DSD. `packingVersion` is the DSD packer's version (1), absent for
 PCM. `observedAt` is when the backend last observed the occurrence's sink (installed,
-released, reopened or revoked), an RFC 3339 UTC time. `qualificationRevision` is the
-approved record's revision the occurrence was admitted under, absent for PCM; it may
-differ from the current epoch's after a promotion.
+released, reopened or revoked), an RFC 3339 UTC time. `qualificationRevision` was
+the approved record's revision the occurrence was admitted under; since the DSD
+cutover this bridge sends none.
 
 The current token vocabularies are exact and case-sensitive:
 
@@ -1033,32 +1035,52 @@ The current token vocabularies are exact and case-sensitive:
 Format sources are `format.DSDU32BE`, `format.DSDU32LE`, `format.DSDU16LE`
 (`internal/player/format/dsd_pack.go`) and `format.S16LE`, `format.S243LE`,
 `format.S24LE`, `format.S32LE` (`internal/player/format/pack.go`), selected by
-`playback.packings` and the effective set (`playback.effective`). Pause tokens are literal
-constants in `qualification.readApproval` (`internal/player/qualification/approval.go`);
-`kernel` uses ALSA PAUSE and `silence` writes DSD silence. Playback state tokens
+`playback.packings` and the effective DSD set (`policy.Effective`,
+`internal/player/policy/policy.go`; the engineering harness's approval admission
+selects from `playback.effective`). Pause tokens are the policy's constants
+`policy.PauseKernel` and `policy.PauseSilence` (`internal/player/policy/policy.go`),
+the same words the harness's approval reader takes (`qualification.readApproval`,
+`internal/player/qualification/approval.go`); `kernel` uses ALSA PAUSE and `silence`
+writes DSD silence. Playback state tokens
 are literal constants in `playback.Facts`, `observeOccurrence`, `observeNote`
 (`internal/player/playback/live.go`) and `Backend.Revoke` (`native.go`), not
 named enum constants. Transport tokens are `playback.TransportDoP` and
 `playback.TransportPCM` (`internal/player/playback/edges.go`); a tuple names
 `dop` alone, and a native DSD tuple or occurrence names no transport.
-`dsdPlayback.reason` is free text for display only, not a closed token contract
-(the backend initializes and publishes it in `backend.go` and `authorization.go`).
-It is distinct from the baseline `bridge.reason` table above.
+`dsdPlayback.reason` is for display only, not a closed token contract, and it is
+distinct from the baseline `bridge.reason` table above. Since the DSD cutover it is
+sent only while no rate plays, and it is then the word the effective policy refuses
+the lowest rate with (`internal/player/policy/policy.go`,
+`internal/player/playback/dsd_policy.go`): `dsd_off_by_choice`, `native_not_offered`,
+`dop_not_offered`, `dop_gain_not_unity`, `dop_gain_unverifiable`,
+`dop_confirmation_required`, `dsd_rate_above_choice`, `first_use_pending`,
+`listener_rejected`, `conversion_not_offered`, `dsd_state_unreadable`,
+`rate_not_supported`, `dsd_not_in_this_release` (a rate the policy would convert to
+PCM, which the player does not do yet), or `dsd_dac_unread` (no set could be
+computed: the bridge has no fresh reading of the bound DAC). An engineering harness's
+backend sends its approval's words instead. The field has always been free text, so a
+client that follows this section shows a word it does not know as text, or nothing,
+and decides nothing by it: eligibility comes from `tuples` alone.
 **A client must treat an unknown token as unknown, never as a known one; in
 particular it must not infer eligibility from an unknown format or pause.**
 
 The tuple array is the effective exact set, not a Cartesian product, and the
-player selects from that same set. It is ordered by rate (DSD64, DSD128, DSD256) and,
-within a rate, by selection order. Under `dsdMode` `native` a rate holds native
-policies, DSD_U32_BE first, then DSD_U32_LE, then DSD_U16_LE; under `dop`, the DoP
-policies, and only while `allowDoP` is true; under `auto`, a rate holds its native
-policies, or a DoP policy only where the record holds no native policy for that rate. A native policy whose
-mixer constraints no longer hold leaves its rate empty: DoP is never published or
-played in its place. With `allowDoP` false under `dop` or `auto`, a rate whose only
-approved transport is DoP is empty and `reason` says `dop_not_allowed`; PCM plays.
-Missing, stale, revoked, off or filtered-empty authorization gives the original PCM
-codecs and ProtocolInfo bytes. GET only copies cached policy, performing no hardware
-probes.
+player selects from that same set: at most one tuple a rate, ordered by rate (DSD64,
+DSD128, DSD256). Since the DSD cutover the set is the player's effective DSD policy
+for the bound DAC, from the DAC's choice in the player's DSD state (or the bridge's
+default for a DAC with none), the bridge's database of DAC models, what the kernel
+and a silent probe establish of the DAC now, and for DoP a check that every gain
+stage on the DAC's playback path is visible and at unity. A rate plays native DSD,
+in the first format the DAC offers of `DSD_U32_BE`, `DSD_U32_LE`, `DSD_U16_LE`, or
+DoP, or publishes no tuple; a rate the policy would convert to PCM publishes none
+until the player converts DSD itself. A change of the set never moves an occurrence
+to another transport: an occurrence plays the transport it was admitted under or
+stops (below). The set itself publishes what the policy plays at each rate now: a
+rate whose transport a change took away (a gain stage leaving unity takes DoP away)
+holds no tuple, or, under `auto` only, the other transport where that one qualifies
+by itself, its own first use included, as `auto` tries DoP once native is out at a
+rate. With no rate playing the player gives the original PCM codecs and ProtocolInfo
+bytes. GET only copies the published set, performing no hardware probes.
 
 `playback` is the latest current occurrence's observation. Released/revoked
 retain the last observation; capability tuples never substitute for it. Its
@@ -1067,9 +1089,9 @@ is DSD bits/s; `rateHz` is the actual ALSA word rate. PCM `logicalRate` is alway
 present and zero; PCM `policyId` is omitted when empty. These observations do
 not grant permission for another occurrence.
 
-Revocation publishes a PCM-only policy epoch, discards prepared DSD and Immediate-stops active or retiring DSD. A session playing PCM with only prepared DSD keeps playing PCM. Recovery never autoplays. Replacing or deleting the approval revokes old permissions, including identical replacement bytes. Every new session and activation verifies ownership/mode, body and report hashes, version, identity and semantic mixer constraints.
+A change of the set publishes it at the next `policyGeneration` and is reconciled per occurrence: one the new set still plays, on the DAC it was opened on, plays on; one prepared and not yet at the DAC is handed off again and admitted under the new set as any entry is, so it plays if the new set plays its rate and is refused with the new set's word if not; one heard, or whose DSD reached the DAC, is Immediate-stopped, and so is one whose DAC is not the one the new set was computed for (another model, or another firmware). Two are stopped where they would be handed off again: a session's first DSD occurrence once its content has opened and before any of it reaches the DAC, and any occurrence of a session being released. One that has played out, its output drained or closed, is not judged. A session playing PCM with only prepared DSD keeps playing PCM. Recovery never autoplays. A session's first DSD occurrence, every activation, a 100 ms monitor while a session plays DSD and the bridge's own refresh read the policy again, and every device opened for DSD must be the DAC the set was computed for.
 
-| Track evidence, in this bridge's own library | DSD eligibility (also requires exact approved stereo/rate tuple) |
+| Track evidence, in this bridge's own library | DSD eligibility (also requires a stereo tuple of the published set at its rate) |
 |---|---|
 | DSF, validated fmt with known stereo/rate | Eligible |
 | DFF, `raw`, no conflicting DST evidence | Eligible |
@@ -1077,7 +1099,7 @@ Revocation publishes a PCM-only policy epoch, discards prepared DSD and Immediat
 | DFF, `unsupported`, DST or malformed properties | Refuse |
 | Missing/invalid/non-stereo channel facts | Refuse |
 
-The bridge independently inspects content at its open and refuses invalid DSF/DFF, missing tuples or invalid approval before hardware writes. Directional transition approval includes both endpoint tuples and complete policies; an unapproved natural or navigation edge refuses the incoming hardware open, even when both endpoints are approved. An edge between a native and a DoP policy is approved only by the owner's transition report, in the approved record's `Transitions`. Same-carrier PCM and DoP never join: the device is closed and reopened between them. The outgoing occurrence follows its own release.
+The bridge independently inspects content at its open and refuses invalid DSF/DFF, or a rate the set does not play, before hardware writes. An edge between occurrences of different transports (native DSD, DoP, PCM) is a drain, a close and a reopen, an honest gap; the owner-approved transition reports of the engineering harness are no part of the player since the DSD cutover. Same-carrier PCM and DoP never join: the device is closed and reopened between them. The outgoing occurrence follows its own release.
 
 **iOS I1–I3 companion PRs remain pending:** stored Track migration, QueueItem propagation, and checking the entire insertion window before DeleteAll/Insert belong to iOS. Bridge Insert cannot inspect a controller's future window. These bridge changes do not claim zero controller mutations or completion of that cross-repository gate; mirror this contract and its fixtures in those PRs.
 

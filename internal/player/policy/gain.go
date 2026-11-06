@@ -59,7 +59,8 @@ type UnitControl struct {
 	// is unverifiable.
 	Selector int
 	Name     string
-	Index    int
+	// Index is the control's index, as the card's controls hold it.
+	Index uint32
 }
 
 // Gain is the DoP gain check's verdict at a rate.
@@ -292,10 +293,8 @@ func (g *gainCheck) stage(ctrlif int, u Unit, controls map[controlKey]alsactl.Co
 		case uc.Selector == 0:
 			v.unknown("the kernel's table does not say which control of feature unit %d %q is", u.ID, uc.Name)
 			continue
-		case uc.Index < 0:
-			continue
 		}
-		c, ok := controls[controlKey{iface: ifaceMixer, name: uc.Name, index: uint32(uc.Index)}]
+		c, ok := controls[controlKey{iface: ifaceMixer, name: uc.Name, index: uc.Index}]
 		if ok && !slices.ContainsFunc(found[uc.Selector], func(f alsactl.Control) bool { return keyOf(f) == keyOf(c) }) {
 			found[uc.Selector] = append(found[uc.Selector], c)
 		}
