@@ -26,7 +26,7 @@ require (
 	gonum.org/v1/gonum v0.17.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/libc v1.79.0
-	modernc.org/sqlite v1.61.0
+	modernc.org/sqlite v1.61.1
 	tailscale.com v1.104.2
 )
 
