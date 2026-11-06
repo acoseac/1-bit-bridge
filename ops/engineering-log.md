@@ -77607,3 +77607,115 @@ standing. The rules patch (`rules-b728-b4-r2.patch`: B4's bullet, its Don't
 extended by the three points) applies strictly and under `git apply
 --check`; with it player.md is 97,450 bytes (97.5 %), and 98,076 (98.1 %)
 with B3's patch applied first, under budget, so no entry moved.
+
+## 2026-11-06 — B728 B5: the effective policy, the DoP gain topology and per-occurrence reconciliation
+
+B728's B5 (`ops/plan-b728-dsd-capability-design.md`, sections 1, 3, 9.1 and B5's row in 11).
+Worker b728-b5 on legion0 (Ubuntu 26.04, linux/amd64, Linux 7.0, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`), branch `feat/b728-b5-effective-policy` from main 4c1e44e3, the orchestrator's
+brief with its eight binding notes. B5 changes nothing a user sees: `internal/player/policy` is
+pure and nothing calls it; B7 is the cutover. No guarded path changes (section 8), so
+`qualificationVersion` stays 39. The rule goes into `.claude/rules/player.md` through a checked
+patch (`rules-b728-b5.patch`); this worker cannot write `.claude/`.
+
+**What `Effective` takes and returns.** `policy.Effective(policy.Inputs)` takes values alone: the
+bound unit's `dacprofile.Unit` (its key and bcdDevice), the profile database, the player's DSD
+state, the kernel release, the bound PCM device's playback altsets (its stream file's), the probe
+cache's answers for the unit, and a `policy.Mixer` for the DoP gain check (the sysfs descriptors
+with the active configuration, the control snapshot read with `AllowUnreadable`, and the kernel's
+table of the controls its USB audio driver made of each unit). It reads no file, kernel, clock or
+global. It returns a `Set`: for DSD64, DSD128 and DSD256 a `Plan` (native or DoP with its tuple:
+transport, format, rate, pause, tail and prefill; converted with its target; or refused with
+section 3.2's word and a detail), beside what was established of each transport there (`Native`,
+`DoP`: offered, the rung and its date, acknowledged, rejected, clean, the gain verdict, the
+profile's claims and refusal, the confirmation), the choice that applied, the conversion target,
+and the model and firmware it was computed for. Any other rate is `rate_not_supported`. Health is
+not an input: B7 asks the hotplug snapshot's freshness first, as `readPermission` does, since no
+section 3.2 word refuses a stale reading.
+
+**The order.** (1) A state that does not read (`State.Unreadable`) refuses every rate as
+`dsd_state_unreadable`, asked before `ChoiceFor`, over every choice and every positive input,
+conversion included (note 5: its own test, no seventh row). (2) The choice is the DAC's own or
+defaultMode with no cap, and section 3.2's table decides each rate, the rejection rule outranking
+every positive input. (3) A profile's refused DoP rate outranks its stated maximum and the
+confirmation; only this box's own latest clean answer for DoP at that rate overrides it (note 6's
+decision; §3.2 corrected). B2's lint allows `refusedBitRates` above `statedMaxBitRate`, and the
+seed's Mytek Brooklyn DAC+ refuses DSD256 with nothing heard or stated. The native section holds
+no refused rate: its `maxBitRate` bounds what it reports, never what is offered. (4) Where several
+conditions fail under an explicit mode, the reason is the first of: what the DAC does not offer, a
+listener's rejection, what the gain check cannot see, then what the user can change (§3.2 now
+lists the two orders). (5) `auto` on a DAC that takes no conversion target refuses as
+`conversion_not_offered`, as `convert` does.
+
+**Re-arming first use.** Section 3.2's "not re-armed since by a rejection" has no mark in B3's
+state, and an answer's date (`on`, a day) cannot order it against `acknowledgedAt`. B5 reads the
+acknowledgement as the state holds it, and the re-arm is the answer-writer's: B12's write that
+records a noise or nothing takes the transport's `firstUse` entry away in the same
+`Store.Update` (§3.2 and §6.4 say so). A later acknowledgement under `auto` then re-arms nothing
+the rejection still refuses at its rate.
+
+**The rungs.** Each native or DoP tuple carries its highest rung (`Plan.Evidence`, with its date):
+listener confirmed (the latest answer under the unit's firmware, clean), streaming observed and a
+durable driver acceptance under this firmware (the acceptance under the running kernel alone),
+then the probe's acceptance, then reported. B2 makes a kernel quirk's native claim state no rate
+(`maxBitRate` 0), so it reports none: §1.1's "native from the kernel's DSD quirk" disagreed with
+the merged code, and was corrected. DoP's acceptance is its carrier's alone (`DoPCarrier`), never
+promoted.
+
+**The DoP gain check** (`policy.CheckGain`, section 3.4). The parse (`policy.ParsePlayback`)
+takes the descriptor bytes, the active configuration, and the streaming interface and altsetting
+an altset names (note 7). It finds the configuration by its value and wTotalLength, the
+streaming setting (one, with an isochronous endpoint toward the device), the control interface
+that holds it (audio class 1: its header's list; audio class 2: an interface association),
+follows every output terminal but a USB streaming one upstream through its units' sources, and
+puts on the path every unit that reaches the streaming interface's input terminal. A feature unit
+there is a gain stage when it declares a gain control (volume, bass, mid, treble, graphic
+equalizer; audio class 2's input gain and input gain pad); a selector passes samples; every other
+unit is unverifiable. A topology it cannot follow is refused, never taken for clean: a source
+naming nothing or a clock, an output named as a source, a cycle, an undefined subtype on the way,
+no output reached, a descriptor cut short, ID 0 or a duplicate, no or two control interfaces,
+UAC3. Every altset listing the carrier is checked.
+
+**How a feature unit maps to a visible control** (note 7). The kernel synthesizes names (string
+descriptors, terminal types, quirk maps), and none of the control's identity names its unit, so
+no name and no count over the snapshot can tell a hidden stage from another unit's control. The
+mapping is the kernel's own table, `/proc/asound/card<N>/usbmixer`: under each `Unit:` line, the
+`Control: name=…, index=…` the driver made of that unit. A stage needs a visible MIXER control
+there, an integer or an unreadable one, for each control the driver makes of it (one for each
+gain control on its master, one for each on its channels); fewer, as when the driver skips a
+bogus volume range, makes no control of a gain on the channels but not the first, or a quirk map
+hides the unit, and a table that does not read, are `dop_gain_unverifiable`. Each control the
+table maps to a stage on the path is a level control whatever its name, a capture-marked one
+included: the driver names a stage after the first output terminal it parses, so a stage on a
+playback path and a loopback can be named a capture's. B7 reads the table, bounded, beside the
+descriptors; a box with no usbmixer refuses DoP on any path with a gain stage, failing closed.
+
+**Every level control** (note 4). A MIXER control that is an integer, or that could not be read
+(`internal/alsactl/control_linux.go:57`: its identity, its `ReadError`, `Type` 0, asked before
+any type filter), whose name's direction, the word before its last, is not `Capture`, counts, on
+the whole card. Exemptions are a known DAC's alone and matched exactly (interface, name, index,
+device and subdevice 0): an analogue control is passed over; a raw-maximum control passes only
+reading its rawMax on every channel, its range's maximum still rawMax, on a listed firmware
+(below it `dop_gain_not_unity`; a changed range, an unlisted firmware, an unreadable control
+`dop_gain_unverifiable`). Every other one must read exactly 0 dB on every channel by its TLV:
+`DB_SCALE`, `DB_MINMAX` and its mute variant, `DB_LINEAR` (exact in rationals: 10^(k/2000) is
+rational only for k a multiple of 2000), `DB_RANGE`, or one in a container. alsa-lib's conversion
+truncates to hundredths, so a value just above 0 dB can print 0.00 dB; B5 compares exactly.
+Unverifiable outranks not unity. Switches and enumerations stay allowed, as §3.4 decides.
+
+**Reconciliation** (`policy.Reconcile`, note 8). Per occurrence, from separate inputs: its plan,
+its own frames submitted, written and played, whether it was heard (sticky), whether its output
+retires, and whether its node is the new set's identity. Kept while the set plays its plan and
+its node is the set's; revoked once heard, a frame the kernel's or its output retiring, or while
+its frames sit in a sink on another identity's node (an identity change that leaves the same
+tuple available still revokes); re-planned otherwise. Every revocation, and a re-plan with frames
+in a sink, interrupts what is heard: a user's write needs its interrupt for either.
+
+**For B7.** B7 calls `Effective` at each session, activation, 100 ms tick and supervisor refresh
+in `readPermission`'s place, `CheckGain` at the check after open and on the monitor, and
+`Reconcile` for each occurrence when the set changes, passing the values above. Three things it
+must settle: the sink's and the approval's prefill bound is 500 ms (`DSDConfig.validate`,
+`approval.go`'s tuple check) while B2's lint allows 5,000 ms and the seed's Chord Hugo 2 carries
+700 ms, so its DoP tuple's prefill would be refused at the open; `ReasonRateNotSupported` repeats
+`playback.ReasonRate`'s word, which B7 unifies; and the usbmixer reader, with a capture of the
+owner's DAC as its fixture.

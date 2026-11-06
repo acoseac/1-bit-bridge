@@ -47,14 +47,16 @@ Evidence is held per DAC model identity (§2.2), transport (`native` or `dop`) a
 
 | Rung (wire word) | What establishes it | What it says | What it does not say |
 |---|---|---|---|
-| `reported` | The profile database (§2) names the transport at that rate for this identity: DoP from the iOS registry's evidence, native from the kernel's DSD quirk for the device | Someone characterized this model somewhere else | Anything about this box, this unit, its firmware mode or its settings |
+| `reported` | The profile database (§2) names the transport at that rate for this identity: DoP from the iOS registry's evidence (a heard or stated maximum at or above the rate, not a refused rate), native from a captured stream file's claim up to its maximum, in the tuple's format. A kernel quirk's native claim states no rate (`maxBitRate` 0, B2): it makes the model known and reports no rate (B5) | Someone characterized this model somewhere else | Anything about this box, this unit, its firmware mode or its settings |
 | `driver_accepted` | The silent probe's `HW_REFINE` (§5), or a real open whose `HW_PARAMS` committed exactly the format, rate and channels asked (`internal/alsapcm/device.go:374-399`, read back at `:461-500`) | The kernel's driver takes that exact format at that rate on this endpoint. For DoP: only that it takes the PCM carrier, S32_LE at rate ÷ 16 with at least 24 significant bits | That the DAC decodes it. For DoP it says nothing about DSD at all |
 | `streaming_observed` | An occurrence of that tuple played until the kernel established 5 s of its content played (`Position.Played`), with no xrun, fault or unconfirmed release | The transport ran on this box at that rate without a fault | That the DAC made music of it. On iOS the DoP "lock" counts the packer's own frames and hears nothing back ((iOS) `PlayerService.swift:28786-28799`). The feedback endpoint measures frame rate, not interpretation (`internal/alsa/stream.go:41-55`) |
 | `listener_confirmed` | A person answered "clean" to the optional chime (§6) for this transport, rate, identity and firmware, and no later answer replaced it (§1.2) | A listener heard the chime as a chime, on a date | Bit-exactness, or anything about other rates, modes or firmware |
 
 `driver_accepted`, `streaming_observed` and `listener_confirmed` order what has been established on
 this box. `reported` stands apart as the database's claim. A tuple publishes its highest rung. A
-DAC nobody has characterized or probed publishes none, and the member is absent.
+DAC nobody has characterized or probed publishes none, and the member is absent. A durable
+`driver_accepted` counts under the running kernel alone, and every rung above `reported` under the
+unit's current bcdDevice alone (§1.2; B5's `policy.Effective` computes the rung beside each plan).
 
 ### 1.2 Keys and lapses
 
@@ -407,10 +409,20 @@ does a shared reference ID without a product string. The live altsets still deci
   - the bound PCM device's playback altsets, from its stream file (`internal/alsa/stream.go:57-81`,
     `internal/alsa/capabilities.go:28-86`);
   - the probe's answers (§5);
-  - for DoP, the card's playback volume controls (§3.4).
+  - for DoP, the unit's USB descriptors, the card's controls and the kernel's table of the
+    controls its USB audio driver made of each unit (§3.4).
 - **The DAC's state:** its choice, DoP confirmation, first use and evidence (§2.5).
 - **Health:** the hotplug snapshot is fresh. This is today's `Healthy`
-  (`cmd/bridge/serve_player.go:448-455`).
+  (`cmd/bridge/serve_player.go:448-455`). B7 asks it before computing the set, as
+  `readPermission` asks it today: a stale snapshot is no ground for a set, and no word of §3.2
+  refuses it.
+
+B5's `policy.Effective` takes all of these but health as values (`policy.Inputs`): the unit's
+`dacprofile.Unit`, the profile database, the state, the kernel release, the stream file's
+playback altsets, the probe cache's answers for the unit, and the DoP gain check's `policy.Mixer`
+(the descriptors with the active configuration, the control snapshot read with
+`AllowUnreadable`, the unit table). It reads no file, kernel, clock or global; B7's bounded
+adapters read them before each call.
 
 ### 3.2 The rule, per DSD rate
 
@@ -423,15 +435,28 @@ Definitions, for a rate r:
   today's order `DSD_U32_BE`, `DSD_U32_LE`, `DSD_U16_LE` (`authorization.go:229`), and the probe
   under this identity and kernel did not refuse it.
 - **DoP carrier offered:** S32_LE at r ÷ 16 with at least 24 significant bits, the packer's
-  requirement (`ops/b470-native-qualification.md:355-359`), and not refused by the probe.
+  requirement (`ops/b470-native-qualification.md:355-359`), and not refused by the probe. An
+  accepted carrier's significant bits are the refined setup's, 24 to 32
+  (`alsapcm.ProbeResult.DoPCarrier`, B4); one not probed takes the altset's `Bits` line.
 - **DoP gain at unity:** §3.4.
 - **Acknowledged at r:** first use of the transport acknowledged under the current bcdDevice by an
   entry that covers r, and not re-armed since by a rejection (§6). A write's acknowledgement covers
   every rate; a migrated one covers only the rates its record approved (§2.5, §3.6). So an owner who
-  approved DSD64 alone gets no DSD128 until the app acknowledges again.
+  approved DSD64 alone gets no DSD128 until the app acknowledges again. The write that records a
+  rejection re-arms first use by taking the transport's acknowledgement away in the same write
+  (§6.4), so the policy reads the acknowledgement as the state holds it (B5): B3's state keeps no
+  other mark of a re-arm, and an answer's date (`on`) cannot order it against an acknowledgement.
 - **No rejection:** the latest listener answer for that transport at r under this bcdDevice is not
   `noise` or `nothing` (§1.2). A rejection outranks every positive input: a profile claim, a driver
   acceptance, streaming observed, and an earlier `clean`.
+- **A profile's refused rate** (B5's decision): a rate in the profile's `dop.refusedBitRates`
+  (§2.1), which B2's lint allows beside a higher `statedMaxBitRate` (it refuses only a refused rate
+  at or below the heard one), outranks the stated maximum and the user's confirmation: at that rate
+  neither counts, so `auto` converts it and an explicit `dop` refuses it as `dop_not_offered`. Only
+  this box's own latest listener answer for DoP at r, `clean`, overrides it, as a migrated owner
+  approval of that rate on this unit gives; a rejection there does not. The profile's native
+  section holds no refused rate (its `maxBitRate` bounds what it reports, never what is offered),
+  so nothing of the kind applies to native.
 - **Conversion offered:** the DAC takes a target of §4.3.
 
 The choice is the DAC's own, or the state's `defaultMode` for a DAC with none (§2.5).
@@ -445,6 +470,17 @@ The choice is the DAC's own, or the state's `defaultMode` for a DAC with none (�
 | `convert` | never | never | converted (refused as `conversion_not_offered` if the DAC takes no target) |
 | `off` | never | never | refused: `dsd_off_by_choice` |
 
+- **A state that does not read** refuses every rate as `dsd_state_unreadable` before the table is
+  read, over every choice and every positive input, conversion included (§2.5): B5 asks
+  `dsdstate.State.Unreadable` before `ChoiceFor`. It is no row of the table.
+- **Where several conditions fail** under an explicit `native` or `dop`, the reason is the first in
+  this order (B5): what the DAC does not offer, then a listener's rejection, then what the gain
+  check cannot see, then what the user can change. For native: `native_not_offered`,
+  `listener_rejected`, `dsd_rate_above_choice`, `first_use_pending`. For DoP: `dop_not_offered` (a
+  profile's refused rate included), `listener_rejected`, `dop_gain_unverifiable`,
+  `dop_gain_not_unity`, `dop_confirmation_required`, `dsd_rate_above_choice`, `first_use_pending`.
+- **`auto` on a DAC that takes no conversion target** refuses a rate neither transport plays as
+  `conversion_not_offered`, as `convert` does.
 - **`auto` means no explicit choice.** It is the preselection the decision asks for. The app shows
   the mode it resolves to, and the user may keep it.
 - **After a rejection under `auto`,** that transport is out at that rate. `auto` tries the next one
@@ -489,8 +525,12 @@ offer.
   (`internal/config/player.go:121-123`). A write would set a level the user did not choose, for
   every later PCM track too, and the DAC's own volume may be the only one the user has.
 - **So: detect, and refuse, failing closed.** The backend reads the bound card's controls through
-  `alsactl.Reader` (bounded and read-only; `internal/alsactl/control.go:58-113`) and its descriptors
-  through `QualificationGain` (`internal/alsa/qualification_gain.go:9-58`). It does so:
+  `alsactl.Reader` (bounded and read-only; `internal/alsactl/control.go:58-113`), with
+  `AllowUnreadable`, and its descriptors, which `QualificationGain` reads today
+  (`internal/alsa/qualification_gain.go:9-58`, a device-wide boolean in a guarded path that stays the
+  harness's): B7's bounded adapters read the unit's sysfs `descriptors` attribute and the kernel's
+  table of the controls its USB audio driver made of each unit (`/proc/asound/card<N>/usbmixer`),
+  and B5's pure check takes them as values. It does so:
   - before a DoP occurrence is admitted;
   - at the check after its open;
   - on the 100 ms monitor while it plays (today's tick, `authorization.go:457-474`).
@@ -499,6 +539,39 @@ offer.
   streaming interface's input terminal and its output terminal. Today's scan counts any feature
   unit on the device. A "level control" below is a MIXER-interface integer control whose name does
   not mark it as a capture control, whatever else its name says, not only `… Playback Volume`.
+
+  **The parse** (B5, `policy.ParsePlayback`) takes the descriptor bytes, the unit's active
+  configuration (the card interface's sysfs name carries it) and the streaming interface and
+  altsetting the stream file names for an altset. The interface's terminal link is its input
+  terminal, and every output terminal but a USB streaming one, which returns samples to the host (a
+  capture's or a loopback's), is followed upstream through its units' sources: a unit that reaches
+  the input terminal is on the playback path. On it a feature unit is a gain stage when it declares
+  a gain control (volume, bass, mid, treble, graphic equalizer, and audio class 2's input gain and
+  input gain pad); a selector unit passes samples as they are; any other unit (a mixer, processing,
+  extension or effect unit, a sample rate converter) is `dop_gain_unverifiable`, since no control
+  shows what it does to the samples. A topology the parse cannot follow (a source naming nothing or
+  a clock, a cycle, a subtype the class does not define on the way, an input terminal that reaches
+  no output, a descriptor cut short, no control interface or two holding the streaming one, UAC3)
+  is refused, never taken for clean. Every altset that lists the carrier at r is checked, since the
+  kernel chooses among them at the open.
+
+  **How a feature unit maps to its controls** (B5). The kernel synthesizes control names, from
+  string descriptors, terminal types and its quirk maps, so a name alone may not identify a unit.
+  The mapping is the kernel's own table: `/proc/asound/card<N>/usbmixer` lists, under each `Unit:`
+  line, the `Control: name=…, index=…` the USB audio driver made of that unit. A gain stage needs a
+  visible MIXER control in it (an integer, or one that cannot be read) for each control the driver
+  makes of the stage: one for each gain control on its master channel, one for each on its logical
+  channels together. A stage with fewer, as one whose volume the driver skips or a quirk map hides,
+  and a table that does not read, are `dop_gain_unverifiable`; each control the table maps to a gain
+  stage on the path is a level control whatever its name, a capture-marked one included.
+
+  **Every level control on the card counts**, not only the path's. A name marks a capture control
+  when its direction, the word before its last, is `Capture` (ALSA's control-name convention:
+  `Mic Capture Volume`, `Line Bypass Capture Volume`). A control that could not be read keeps its
+  identity and has no type (`internal/alsactl/control_linux.go:57`), so it is a level control asked
+  before any type filter, and fails the check; its identity still excludes a capture control and
+  exempts a listed analogue one. A profile's control is matched by its interface, name and index
+  exactly, at device and subdevice 0.
 
   DoP passes only in one of two topologies:
   1. **No gain stage.** The playback path has no feature unit, and the card has no level control.
@@ -514,7 +587,11 @@ offer.
 
      If the playback path has a feature unit with a volume control, at least one level control
      exists. The TLV is `Control.TLV` (`internal/alsactl/control.go:26`); B5 parses `DB_SCALE`,
-     `DB_MINMAX` (with its mute variant), `DB_LINEAR` and `DB_RANGE`.
+     `DB_MINMAX` (with its mute variant), `DB_LINEAR` and `DB_RANGE`, or one of those in a
+     container, and reads 0 dB exactly, in exact arithmetic over what alsa-lib's conversion
+     computes: alsa-lib truncates to hundredths of a dB, so a value just above 0 dB can print as
+     0.00 dB, which B5 does not take. A mute position is not unity, and a value no part of a
+     `DB_RANGE` holds cannot be read as unity.
 
   Anything else refuses:
   - a level control off 0 dB, or a `unityAtRawMax` control below its `rawMax`, refuses as
@@ -526,6 +603,9 @@ offer.
       entry does not list;
     - a feature unit on the playback path with no visible level control;
     - descriptors that cannot be read or parsed.
+
+  Where both kinds hold, `dop_gain_unverifiable` outranks `dop_gain_not_unity`: a stage the check
+  cannot see refuses whatever the levels read (B5).
 
   A missing control never stands for unity while the descriptors show a gain stage. Switches and
   enumerations are not gains, and are allowed: a muted switch is silence, not corruption, and an
@@ -583,6 +663,19 @@ re-plan one whose frames are already in a sink. Without `interrupt` it changes n
 that changes only an unused rate cap revokes nothing, and asks nothing. A safety change revokes
 without asking: the gain leaving 0 dB, the identity changing, the DAC leaving, or the state
 becoming unreadable.
+
+**B5's predicate** (`policy.Reconcile`) reads each occurrence's inputs apart, never a tuple's
+membership and a flag: its plan, its own frames submitted to its sink, written to the kernel and
+played (the sink's `Submitted`, `Written` and `Played`, from its first frame), whether it was heard
+(sticky: a released pause is still the occurrence heard, though nothing of it is the kernel's any
+more), whether its output retires (today's reconciliation fences a retiring tail as an open
+output, `authorization.go:569-573`), and whether its output's node is still the identity the new set
+was computed for. It is kept while the new set plays its plan and its node is the set's identity;
+revoked once it was heard, a frame of it is the kernel's or its output retires, or while its frames
+sit in a sink on a node that is not the set's identity, so an identity change that leaves the same
+tuple available still revokes; re-planned otherwise. Every revocation, and a re-plan of an
+occurrence with frames in a sink, interrupts what is heard: a user's write needs its `interrupt`
+for either, and a safety change acts without asking.
 
 **Kept, unchanged:**
 
@@ -1086,7 +1179,7 @@ release.
 | First use acknowledged | `firstUse[transport].acknowledgedAt`, with the bcdDevice and, for a migration, the `bitRates` it covers (§2.5) |
 | 5 s of content played without a fault | `evidence.streamingObservedAt`; first use `observedAt` |
 | The chime completes and the answer is clean | `listener: {answer: clean, on}` for the transport, rate and bcdDevice, replacing any earlier answer |
-| The chime completes and the answer is noise or nothing | `listener: {answer: noise or nothing, on}`, replacing an earlier `clean`. That transport is refused at that rate in every mode, and its first use re-arms (§3.2), until a write chooses that mode again |
+| The chime completes and the answer is noise or nothing | `listener: {answer: noise or nothing, on}`, replacing an earlier `clean`. That transport is refused at that rate in every mode, and its first use re-arms (§3.2), until a write chooses that mode again. The re-arm is this write's: it takes the transport's `firstUse` entry away in the same `Store.Update`, which the policy reads as it stands (B5) |
 | The chime is stopped or fails | nothing but the check's own state; an answer to it is refused (`check_not_answerable`) |
 
 Never recorded: who answered, beyond `app` or `console`; a device token; a serial; a port.
