@@ -78990,3 +78990,29 @@ to stay green included.
 | (4a) a backslash separates on every platform | `TestScanner_ABackslashInANameIsNoFolder`, `TestTrackDir`, `TestPathStem` |
 | (5a) one space added to the shared table | `TestTheSharedYearTableIsTheMirroredBytes` (the digest 44cc71ee… where c1f74e97… is pinned) |
 | (c) round 1's settlement control, again | the strays' bump, B188's no-churn test and its past-the-limit test; no longer the version-stale test, whose five are stamped at the merge now |
+
+### Gates
+
+On legion0 at ac7e7abf, in one call through the shared build lock
+(`.tmp/_b756b/gates2.py`): `make vet` native and with `GOOS=windows`,
+`GOOS=darwin` and `GOOS=linux GOARCH=386`, each clean; go1.27.3's gofmt over
+the 16 Go files the branch changes, clean; `make docs-check`, ok, and again on
+a copy of the tree with both rules patches applied, each file by a strict
+applier (`git apply --check` takes `rules-b756b-r2.patch` over round 1's
+`scanner.md` and today's `enrichment.md`); the qualification check,
+"qualification version OK: 4880f8a4..HEAD"; `make test
+TEST_PKGS="./internal/manifest/... ./internal/dupes/... ./internal/api/..."`
+(race, the Makefile's tags and 30-minute timeout), ok, in 1,397 s
+(internal/manifest 1,385 s, internal/api 109 s); and `make test-fast`, where
+84 packages were ok and `cmd/bridge` failed one test,
+`TestEveryCitedTestNameExists`, on a test comment of this round that cited a
+test no file defines. 16630a65 fixed the comment (it cites `TestPathStem`):
+the sweep then passed, a ghost citation planted in turn in this file and in
+`ops/History-rules-scanner.md` was reported in each (so the sweep reads both),
+and at 16630a65, through the build lock again, `make vet` was clean and `make
+test-fast` passed, 85 packages ok and none failed, in 455 s (TMPDIR under
+`.tmp/_b756b`; the ALSA, alsapcm, durable-writer and backup identity tests
+running here on Linux). `git status --ignored` showed nothing but `.tmp/`
+after each. Not run here: macOS and Windows natively, CI's runners, `make
+build-all` (not among this round's gates), and the iOS app, whose repo is not
+on this host.
