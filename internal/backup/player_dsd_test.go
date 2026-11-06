@@ -167,6 +167,61 @@ func TestARestoreThatCannotWriteTheDSDStateDurablyRestoresNothing(t *testing.T) 
 	}
 }
 
+// TestARestoreWhoseBarrierFailsOnceTheStateLandedSaysItChanged: the durable
+// writer renames the snapshot's state into the box's place and then syncs
+// the directory, so a barrier that fails there fails the restore after the
+// box's state has become the snapshot's (CodeRabbit on #1405: the refusal
+// said nothing was restored, and to keep this box's DSD state by leaving the
+// file out of the snapshot, which by then was no longer there). The refusal
+// says the state changed and that whether it survives a crash is uncertain,
+// and gives that advice only where nothing was written; nothing after the
+// state is restored.
+func TestARestoreWhoseBarrierFailsOnceTheStateLandedSaysItChanged(t *testing.T) {
+	t.Cleanup(atomicwrite.SetMediumForTest(func(string) error { return nil }))
+	live := t.TempDir()
+	src := primeLiveState(t, live)
+	src.PlayerDSD = filepath.Join(live, backup.PlayerDSDFileName)
+	if err := os.WriteFile(src.PlayerDSD, []byte(aDSDState), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := backup.Snapshot(t.Context(), src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	box := t.TempDir()
+	tokens := filepath.Join(box, "tokens.json")
+	target := filepath.Join(box, backup.PlayerDSDFileName)
+	const boxState = `{"schemaVersion": 1, "defaultMode": "off", "dacs": [], "migratedFrom": {"from": "state_unreadable"}, "warnings": [{"code": "state_unreadable", "at": "2026-11-04T09:00:00Z"}]}`
+	if err := os.WriteFile(target, []byte(boxState), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(atomicwrite.SetSyncDirForTest(func(string) error { return errors.New("the directory would not sync") }))
+	err = backup.Restore(snap, backup.Targets{TokensJSON: tokens, PlayerDSD: target})
+	if !errors.Is(err, atomicwrite.ErrBarrierFailed) {
+		t.Fatalf("a restore whose barrier fails = %v, want the barrier's failure", err)
+	}
+	for _, not := range []string{"nothing was restored", "remove " + backup.PlayerDSDFileName + " from a copy of the snapshot", "keep this box's DSD state"} {
+		if strings.Contains(err.Error(), not) {
+			t.Errorf("the refusal %q says %q, after the box's state was replaced", err, not)
+		}
+	}
+	for _, want := range []string{"is now the snapshot's", "whether it survives a crash is uncertain"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal %q does not say %q", err, want)
+		}
+	}
+	installed, err := dsdstate.ForRestore([]byte(aDSDState))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := readBytes(t, target); string(got) != string(installed) {
+		t.Fatalf("the box's state is %q, want the snapshot's, which the refusal says it is", got)
+	}
+	if pathExists(t, tokens) {
+		t.Fatal("the restore went on past a state it could not make durable")
+	}
+}
+
 func entryNames(entries []os.DirEntry) []string {
 	var out []string
 	for _, e := range entries {
