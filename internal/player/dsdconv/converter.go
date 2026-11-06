@@ -35,6 +35,9 @@ var (
 	// errUndecided is the engine's when it needs a byte past a held
 	// occurrence that nobody said the end of: never past ReadFrames.
 	errUndecided = errors.New("dsdconv: the window was computed before its successor was named")
+	// errLost is the engine's when the chain counts bytes its input has none
+	// of left: a state no snapshot of the whole chain makes.
+	errLost = errors.New("dsdconv: the input has no bytes where the chain expects them")
 )
 
 // chunkBytes is what a converter asks its source for at a time, per
@@ -635,6 +638,12 @@ func (e *engine) fill(ctx context.Context, need int64) error {
 		room := len(e.line[0]) - e.hi
 		if left := e.inEnd - have; int64(room) > left {
 			room = int(left)
+		}
+		if e.cur.pulled >= e.cur.total {
+			// The chain counts bytes its cursor has none of left, which a
+			// snapshot that holds the whole state never makes: fail rather
+			// than read nothing for ever on the producer's goroutine.
+			return errLost
 		}
 		n, err := e.cur.pull(ctx, e.line[0][e.hi:e.hi+room], e.line[1][e.hi:e.hi+room])
 		e.hi += n
