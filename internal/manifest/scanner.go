@@ -286,6 +286,13 @@ type Scanner struct {
 	// says. Nil in production. Set it before Scan, never while one runs.
 	readArt folderArtReader
 
+	// openCorrection, when set, opens a hybrid WavPack file's correction
+	// file in place of fsutil.OpenAsFile (openCorrectionFile), the way
+	// openAudio opens an audio file: a TEST seam, per scanner, through which
+	// a test fails a correction file's read where it says. Nil in
+	// production. Set it before Scan, never while one runs.
+	openCorrection func(abs string) (extractSource, error)
+
 	// readPlaylist, when set, reads a playlist file in place of
 	// readPlaylistFile (scanner_playlist_files.go): a TEST seam, per
 	// scanner, like readArt, through which a test fails a read no file on
@@ -1622,6 +1629,7 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 		LibraryRootDirs: rootDirs,
 		openAudio:       s.openAudio,
 		readArt:         s.readArt,
+		openCorrection:  s.openCorrection,
 	}
 	for pi := range paths {
 		if ctx.Err() != nil {
@@ -1713,8 +1721,7 @@ func (s *Scanner) runScanWorker(ctx context.Context, paths <-chan pathInfo, writ
 			// for the re-enrichment wave) and temporarily strip every
 			// enricher-owned field. Only a genuinely CHANGED row (or one
 			// whose merged re-extract differs) takes the full path.
-			if existing != nil && existing.Size == pi.info.Size() &&
-				existing.MTimeNS == pi.info.ModTime().UnixNano() {
+			if existing != nil && statUnchanged(existing.Size, existing.MTimeNS, pi.info) {
 				if s.rowIsCurrent(pi, existing, ec) {
 					// The row is already there. A case-only twin of
 					// this spelling can be reaped: the file was read
@@ -1926,7 +1933,9 @@ func (s *Scanner) keepSACDRowsSeen(ctx context.Context, pi pathInfo) {
 // file can change what it is given, and each of those questions, asked of a
 // refused row, said yes and re-read the file on every scan, forever
 // (backlog B145). For any other row, no when its local-art cache file is
-// missing, its lyrics sidecar changed or its folder's cover did.
+// missing, its lyrics sidecar changed, its folder's cover did, or, for a
+// hybrid WavPack file, its correction file did (correctionDrifted, backlog
+// B489).
 func (s *Scanner) rowIsCurrent(pi pathInfo, existing *TrackStat, ec *ExtractContext) bool {
 	if existing.ExtractorVersion < ExtractorVersion {
 		return false
@@ -1936,7 +1945,8 @@ func (s *Scanner) rowIsCurrent(pi pathInfo, existing *TrackStat, ec *ExtractCont
 	}
 	return !s.needsLocalArtworkRecovery(existing.ArtworkMBID) &&
 		!sidecarLyricsDrifted(pi.abs, existing, ec) &&
-		!s.folderArtDrifted(pi.abs, pi.rel, existing, ec)
+		!s.folderArtDrifted(pi.abs, pi.rel, existing, ec) &&
+		!correctionDrifted(pi.abs, existing, ec)
 }
 
 // noteUnsettledArt counts, for the scan's one line (msgUnreadFolderArt),

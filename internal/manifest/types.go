@@ -59,15 +59,20 @@ type Track struct {
 	// re-introduce the iOS PR #371 "M4A 32-bit" Now Playing chip
 	// regression. Every extractor site that writes this field is gated by
 	// `canSetBitsPerSample(t.Codec)`, an allowlist of the lossless
-	// names (FLAC, ALAC, DSF, DFF, WAV, AIFF), and the WAV and AIFF
-	// walkers write it only for linear PCM.
+	// names (FLAC, ALAC, DSF, DFF, WAV, AIFF, WAVPACK, WAVPACK-DSD, APE), and
+	// the WAV and AIFF walkers write it only for linear PCM. A hybrid
+	// WavPack file without its correction file is WAVPACK-LOSSY, which the
+	// list leaves out.
 	BitsPerSample *int  `json:"bitsPerSample,omitempty"` // 1 for DSD, 16/24/32 for PCM
 	IsDSD         *bool `json:"isDSD,omitempty"`
 	// SampleFormat says whether a PCM track's samples are integers
 	// (SampleFormatInteger) or floating point (SampleFormatFloat), as the
 	// file's own header states it: a WAV's format code, or its extensible
 	// header's subformat GUID; an AIFF, which is integer; an AIFF-C's
-	// compression type; and FLAC and ALAC, which are integer-only. Empty, so
+	// compression type; FLAC and ALAC, which are integer-only; a lossless
+	// WavPack stream's float flag; and a Monkey's Audio file of 8 to 24 bits,
+	// which is integer (a 32-bit one may be either, and states no kind
+	// here). Empty, so
 	// absent on the wire, wherever the header states neither: a DSD row, a
 	// lossy codec, a compressed WAV or AIFF-C, a code or GUID the bridge
 	// does not know, a header it could not read, a UPnP-routed row (no
@@ -175,6 +180,13 @@ type Track struct {
 	//                       "AIFC" (backlog B124, B154)
 	//   - "MP3", "OGG"     — set from `tag.FileType()` for those formats
 	//                       where dhowden's detection IS reliable
+	//   - "WAVPACK", "WAVPACK-LOSSY", "WAVPACK-DSD", "APE" — since
+	//                       ExtractorVersion 32 (backlog B489), from a .wv's
+	//                       block header (WAVPACK-LOSSY a hybrid stream with
+	//                       no correction file that matches it, lossy for
+	//                       every purpose; WAVPACK-DSD WavPack 5's DSD) and
+	//                       an .ape's
+	//                       (wavpack.go, ape.go)
 	//   - "" (empty)       — unknown / undetected; iOS falls back to
 	//                       extension-derived codec name.
 	// `omitempty` so pre-v1.2 clients see no field at all on the wire.
@@ -199,11 +211,25 @@ type Track struct {
 	// DFFCompressionEvidence is raw, missing or unsupported; absence is missing.
 	DFFCompressionEvidence string `json:"dffCompressionEvidence,omitempty"`
 
+	// Correction is the WavPack correction file (.wvc) a hybrid .wv's
+	// lossless decode needs, beside it in its folder (backlog B489): its
+	// library-relative path, size and mtime (in Track's own `mtime` unit and
+	// format), present exactly when the row's Codec is "WAVPACK" from a
+	// hybrid stream whose correction file matched it. A hybrid .wv without
+	// one is "WAVPACK-LOSSY" and carries none; a .wv that is not hybrid
+	// needs none. The file is a dependency, never a track: a client fetches
+	// it by its path as it fetches the .wv, and a path that has gone since
+	// the manifest it read answers 404, which the client takes as a
+	// refusal of the lossless decode (PROTOCOL.md). Additive + omitempty;
+	// ProtocolVersion stays 1.
+	Correction *CorrectionFile `json:"correction,omitempty"`
+
 	// Channels is the audio channel count (DSDIFF `CHNL` numChannels;
 	// 2 = stereo, 5/6 = multichannel SACD layouts). Pointer + omitempty
 	// per the numeric-field convention (absent ≠ 0). The DFF extractor
 	// populates it, and since ExtractorVersion 25 an Ogg FLAC, Vorbis or
-	// Opus row does too. A native FLAC and the other formats leave it nil,
+	// Opus row does too, and since ExtractorVersion 32 a WavPack or Monkey's
+	// Audio row. A native FLAC and the other formats leave it nil,
 	// and the DLNA `<res nrAudioChannels>` builder keeps its default-to-2
 	// behaviour when the field is absent.
 	// Wire-additive; iOS deliberately does NOT decode it yet (no
@@ -466,6 +492,14 @@ type Track struct {
 	// unchanged audio file re-extracts it. Never marshaled.
 	folderArtKey string
 
+	// correctionKey is what this extraction observed of a hybrid WavPack
+	// file's correction file (correctionObservation.key): "" when the row
+	// depends on none. It travels into the tracks.correction_key column
+	// (v61) on both write legs, like folderArtKey, and the skip gate
+	// compares it with what the folder holds now (correctionDrifted). Never
+	// marshaled.
+	correctionKey string
+
 	// rowVersion is the version of the row this Track was read from or
 	// written as: the row's indexed_at, which every write of tags_json
 	// advances. Every store reader that returns a Track records the version
@@ -483,6 +517,16 @@ type Track struct {
 	// record, in Unix nanoseconds. Zero means the insert uses the store
 	// clock. An update ignores it. Never marshaled.
 	carryFirstIndexedNS int64
+}
+
+// CorrectionFile is a hybrid WavPack track's correction file on the wire
+// (Track.Correction): the path a client fetches it by (beside the .wv, in
+// the same folder), its size, and its mtime, encoded as Track's own `mtime`
+// is.
+type CorrectionFile struct {
+	Path    string    `json:"path"`
+	Size    int64     `json:"size"`
+	ModTime time.Time `json:"mtime"`
 }
 
 // Variant is one cached alternate rendering of a Track's source. The

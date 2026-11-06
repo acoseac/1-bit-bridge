@@ -59,7 +59,10 @@ const maxArtworkBytes = 25 * 1024 * 1024 // 25 MiB
 // FLAC, ALAC (extractALACBitDepth), DSF and DFF assign it, and the WAV
 // and AIFF walkers do for linear PCM alone: since ExtractorVersion 21
 // they name a compressed AIFF-C or WAV by its encoding, which is not on
-// this list (backlog B124, B154). The allowlist is structural insurance
+// this list (backlog B124, B154). Since ExtractorVersion 32 WavPack
+// (WAVPACK, WAVPACK-DSD) and Monkey's Audio (APE) assign it too; a hybrid
+// WavPack stream without its correction file is WAVPACK-LOSSY, which is
+// not on the list (backlog B489). The allowlist is structural insurance
 // against a future addition with an unknown codec slipping through.
 //
 // Case-folded via strings.EqualFold so the gate works regardless
@@ -71,7 +74,10 @@ func canSetBitsPerSample(codec string) bool {
 		strings.EqualFold(codec, "DSF"),
 		strings.EqualFold(codec, "DFF"),
 		strings.EqualFold(codec, "WAV"),
-		strings.EqualFold(codec, "AIFF"):
+		strings.EqualFold(codec, "AIFF"),
+		strings.EqualFold(codec, CodecWavPack),
+		strings.EqualFold(codec, CodecWavPackDSD),
+		strings.EqualFold(codec, CodecAPE):
 		return true
 	}
 	return false
@@ -145,6 +151,12 @@ type ExtractContext struct {
 	// seam; nil in production.
 	readArt folderArtReader
 
+	// openCorrection, when set, opens a hybrid WavPack file's correction
+	// file in place of fsutil.OpenAsFile (openCorrectionFile). The scan
+	// worker copies it from Scanner.openCorrection, a TEST seam; nil in
+	// production.
+	openCorrection func(abs string) (extractSource, error)
+
 	// reads records the reads of the audio file that did not complete. Set
 	// by ExtractWithContext, on its own copy of the context, for one call.
 	reads *readFaults
@@ -184,6 +196,8 @@ var Ext = map[string]bool{
 	".aif":  true,
 	".aiff": true,
 	".aifc": true, // AIFC = compressed-AIFF FORM type; same chunk-walker shape, accepted by extractAIFFWithContext
+	".wv":   true, // WavPack; its correction file (.wvc) is a dependency of its row, never a track (correction.go)
+	".ape":  true, // Monkey's Audio
 }
 
 // ExtractorVersion stamps every scanned track row (the `extractor_version`
@@ -625,7 +639,18 @@ var Ext = map[string]bool{
 // fills only a missing one. Every other row re-extracts byte-identical and
 // rides the version-stamp leg; SACD ISO virtual rows re-expand as on every
 // bump. ProtocolVersion stays 1.
-const ExtractorVersion = 31
+//
+// v32 — WavPack (.wv) and Monkey's Audio (.ape) are indexed, decoding nothing
+// (backlog B489): the format from each file's own header (wavpack.go, ape.go),
+// the tags from its APEv2 tag (apev2.go), dhowden's ID3v1 read only where it
+// has none, and a hybrid WavPack stream's correction file (.wvc), a dependency
+// of its row, never a track (correction.go): codecs WAVPACK, WAVPACK-LOSSY,
+// WAVPACK-DSD and APE. No existing row changes: a file of another format
+// re-extracts byte-identical and rides the version-stamp leg; SACD ISO virtual
+// rows re-expand as on every bump. What a client that does not declare the
+// formats sees is unchanged (X-Bridge-Formats, PROTOCOL.md). ProtocolVersion
+// stays 1.
+const ExtractorVersion = 32
 
 // Extract reads as much metadata as it can from the file at absPath and
 // fills in the Track at t. Path, Size, ModTime on t MUST already be set by
@@ -929,6 +954,10 @@ func extractByFormat(absPath string, t *Track, ec *ExtractContext) error {
 		return extractAIFFWithContext(absPath, t, ec)
 	case ".wav":
 		return extractWAVWithContext(absPath, t, ec)
+	case ".wv":
+		return extractWavPackWithContext(absPath, t, ec)
+	case ".ape":
+		return extractAPEWithContext(absPath, t, ec)
 	case ".m4a", ".mp4", ".m4b", ".m4p":
 		return extractMP4WithContext(absPath, t, ec)
 	case ".mp3":
@@ -3576,11 +3605,22 @@ func applyDFFStamps(t *Track, absPath string, prop dffPropInfo,
 // so that the row keeps the art it had and a later scan reads the cover
 // again (backlog B141).
 func extractLocalArtwork(absPath string, t *Track, m tag.Metadata, ec *ExtractContext) {
+	// dhowden's Picture() returns nil for ID3v1 (no image support) and
+	// for any other format whose parser didn't surface a picture frame —
+	// both safe to skip.
+	var pic *tag.Picture
+	if m != nil {
+		pic = m.Picture()
+	}
+	extractLocalArtworkPicture(absPath, t, pic, ec)
+}
+
+// extractLocalArtworkPicture is extractLocalArtwork for an embedded picture
+// read by other means than dhowden's (an APEv2 tag's front cover, apev2.go),
+// or none: the same checks, then the same folder-level fallback.
+func extractLocalArtworkPicture(absPath string, t *Track, pic *tag.Picture, ec *ExtractContext) {
 	t.localArt = localArtSettled
-	// 1) Embedded picture, when the dhowden Metadata is available
-	//    and carries one. dhowden's Picture() returns nil for ID3v1
-	//    (no image support) and for any other format whose parser
-	//    didn't surface a picture frame — both safe to skip.
+	// 1) Embedded picture, when the file carries one.
 	//
 	//    Accepted by MAGIC BYTES, not MIME: JPEG (SOI) and PNG
 	//    (signature) both pass; everything else is skipped + warned.
@@ -3592,27 +3632,25 @@ func extractLocalArtwork(absPath string, t *Track, m tag.Metadata, ec *ExtractCo
 	//    wrongly reject the PNG-cover population the ExtractorVersion
 	//    3→4 re-extract exists to backfill. MIME still rides the log
 	//    line for diagnosis.
-	if m != nil {
-		if pic := m.Picture(); pic != nil {
-			switch {
-			case len(pic.Data) > maxArtworkBytes:
-				scanLogger.Warn("embedded artwork too large; skipping",
-					"path", absPath, "bytes", len(pic.Data), "cap", maxArtworkBytes)
-			case len(pic.Data) == 0:
-				// nothing to stamp
-			case !looksLikeLocalArtCandidate(pic.Data):
-				scanLogger.Warn("embedded artwork is neither JPEG nor PNG; skipping",
-					"path", absPath, "mime", pic.MIMEType)
-			default:
-				mbid, err := stampLocalArtworkCached(pic.Data, ec.ArtworkCacheDir)
-				if err == nil {
-					t.ArtworkMBID = mbid
-					return
-				}
-				if errors.Is(err, errLocalArtworkCacheWrite) {
-					logArtworkCacheWrite(err)
-					t.localArtWriteFailed = true
-				}
+	if pic != nil {
+		switch {
+		case len(pic.Data) > maxArtworkBytes:
+			scanLogger.Warn("embedded artwork too large; skipping",
+				"path", absPath, "bytes", len(pic.Data), "cap", maxArtworkBytes)
+		case len(pic.Data) == 0:
+			// nothing to stamp
+		case !looksLikeLocalArtCandidate(pic.Data):
+			scanLogger.Warn("embedded artwork is neither JPEG nor PNG; skipping",
+				"path", absPath, "mime", pic.MIMEType)
+		default:
+			mbid, err := stampLocalArtworkCached(pic.Data, ec.ArtworkCacheDir)
+			if err == nil {
+				t.ArtworkMBID = mbid
+				return
+			}
+			if errors.Is(err, errLocalArtworkCacheWrite) {
+				logArtworkCacheWrite(err)
+				t.localArtWriteFailed = true
 			}
 		}
 	}

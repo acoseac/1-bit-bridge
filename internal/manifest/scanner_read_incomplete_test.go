@@ -44,6 +44,10 @@ type readFaultFormat struct {
 	name  string
 	file  string
 	write func(t *testing.T, path, version string)
+	// readsAtOffsets is an extractor that reads its file by offset alone
+	// (ReadAt), so it makes no seek for a seek fault to fail: the WavPack and
+	// Monkey's Audio readers over an APEv2 tag (backlog B489).
+	readsAtOffsets bool
 }
 
 // writeFixtureBytes writes data to path.
@@ -92,6 +96,18 @@ var readFaultFormats = []readFaultFormat{
 	}},
 	{name: "DFF (ID3 chunk)", file: "10.dff", write: func(t *testing.T, p, version string) {
 		writeFixtureBytes(t, p, dffWithChunks(t, 2822400, dffChunk("ID3 ", buildID3v2_3(map[string]string{"title": version}))))
+	}},
+	// The WavPack and Monkey's Audio readers and their APEv2 tag (backlog
+	// B489), and dhowden's ID3v1 read, which stands in where a file has no
+	// APEv2 tag and seeks.
+	{name: "WavPack", file: "11.wv", readsAtOffsets: true, write: func(t *testing.T, p, version string) {
+		writeWavPack(t, p, stdWavPack(), []apeItem{apeText("Title", version)})
+	}},
+	{name: "Monkey's Audio", file: "12.ape", readsAtOffsets: true, write: func(t *testing.T, p, version string) {
+		writeAPE(t, p, stdAPE(), []apeItem{apeText("Title", version)})
+	}},
+	{name: "WavPack (ID3v1)", file: "13.wv", write: func(t *testing.T, p, version string) {
+		writeFixtureBytes(t, p, append(wvFile(stdWavPack()), id3v1Tag(version, "Artist")...))
 	}},
 }
 
@@ -243,6 +259,9 @@ type readFaultCase struct {
 func forEachReadFault(t *testing.T, body func(t *testing.T, c readFaultCase)) {
 	for _, format := range readFaultFormats {
 		for _, fault := range audioFaults {
+			if fault.seek != nil && format.readsAtOffsets {
+				continue // it makes no seek for the fault to fail
+			}
 			t.Run(format.name+"/"+fault.name, func(t *testing.T) {
 				f := newLinkedFixture(t)
 				body(t, readFaultCase{f: f, format: format, fault: fault,
