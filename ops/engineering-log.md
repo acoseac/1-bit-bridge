@@ -78435,3 +78435,242 @@ packages ok and none failed, in 1,744 s; `make build-all`; `go test -race
 `./internal/player/dsdstate/`, each ok; the qualification check,
 "qualification version OK: main..HEAD"; `make docs-check`, ok, and again
 with the round-1 rules patch applied. The tree is clean after.
+
+## 2026-11-06 — B617: enrichment gets an off switch, and says what it stops
+
+Backlog B617, from the site's privacy review of 2026-10-31: the bridge sends
+the artist and album names a library's files carry to MusicBrainz, the
+release IDs it finds to the Cover Art Archive and artist names to Deezer, and
+nothing turned that off; a self-hosted mirror redirects the first two and
+never Deezer, though `config.go` said a mirror keeps "enrichment on your own
+network". Worker b617 (Ubuntu 26.04, linux/amd64, go1.27.3,
+`GOTOOLCHAIN=local`, `GOPROXY=off`), branch `feat/b617-enrichment-off` from
+main 4880f8a4, the orchestrator's brief. Commits: red first 4dc53b9c, the
+switch and the enricher's gate 4009e834, the wire b195f7cc, serve's wiring
+and fingerprinting b8a8c92d, the console 030dbf7a, the CLI's retry a1076ba2,
+the rewrite f337a7f0, the docs and `PROTOCOL.md` a19ad6f7, the serve test's
+manifest and artwork legs e1a71eb4, then this record.
+The rule's line in `.claude/rules/enrichment.md` goes in through a checked
+patch (`rules-b617.patch`; this worker cannot write `.claude/`).
+
+### The design, and what it trades
+
+- **Two keys, both on when absent.** `enrich.enabled` stops the enricher
+  wherever it points, a mirror included; `enrich.deezerEnabled` stops Deezer
+  alone, the one lookup a mirror cannot take over. No switch per service for
+  the other two: the Cover Art Archive is asked for the release IDs
+  MusicBrainz answers, and both have a mirror. Both are `*bool` read through
+  `EffectiveEnabled` and `EffectiveDeezerEnabled`, nil on, as the smart mixes'
+  switch. The default is today's behaviour exactly, pinned against main's
+  own requests (below). The environment names derive from the struct
+  (`BRIDGE_ENRICH_ENABLED`, `BRIDGE_ENRICH_DEEZER_ENABLED`), read through the
+  real `Load`. The console writes only off: a save of on clears the key, so
+  the file goes back to one an older binary loads.
+- **Always construct, never stop.** The clients and the goroutine stay; the
+  enricher asks `WithEnabled`'s predicate, a closure over the live holder,
+  before each batch, and parks without touching the store while it is off.
+  Each batch runs on `enrich.CancelWhenOff`'s context, which asks the
+  predicate every second and is cancelled when it answers off, so a request
+  held at an upstream aborts and `stampEnriched` and `markSkipped` take the
+  path a shutdown takes: no stamp, no skip count, no line. A second stop path
+  in `enrichOne` was the alternative and was not taken: the shutdown's path
+  is the one already proven to record nothing. `CancelWhenOff` takes the
+  predicate the gates share, a plain `func() bool`, so neither the enricher
+  nor the sweep imports the config or follows the holder's `Changed`
+  channel, which would answer sooner; asked once a second, it costs one load
+  of the live config's pointer a second while a batch runs, and that second
+  is the switch's promise: off stops within it. Turned on, the next poll
+  (15 s) resumes. One Info line at a boot where it is off, and one at each
+  flip.
+- **Off never stamps, and nothing fetched is touched.** A row the enricher
+  has not processed stays at `enriched_at = 0`, so turning it on resumes the
+  backlog with nothing lost; a row whose art needs no network (`local-`)
+  waits with the rest, since off means the enricher takes no turn. The IDs in
+  `tags_json`, the covers and portraits in the artwork cache and the cached
+  verdicts stay and are served; the cap's eviction runs as ever.
+- **Deezer off is a narrower promise.** `ensureArtistImageCached` asks the
+  predicate after its cached-file checks and before each of its two requests
+  and answers `errDeezerOff`, which neither caller negative-caches (the cache
+  lives as long as the process, and would outlive the switch) or logs. The
+  row stamps without a portrait: holding it back would re-run the whole
+  `enrichOne` for every row while Deezer is off, covers and IDs included. The
+  repair is "Retry missing", whose artist-image facet re-queues each
+  portrait-less row once Deezer is on. A Deezer request already sent when the
+  switch goes off ends by itself, within the client's 10 s: the name has left
+  by then, and cancelling it would need a second context for little. The
+  console's hint does not say "within a second" for it.
+- **Fingerprints stop too.** A fingerprint's answer feeds the enricher alone,
+  so `fingerprintGates` (serve's `fingerprintReady` and the Jobs card's
+  reason) asks `enrich.enabled` first and says `enrichment_off`, and a sweep
+  runs on the same cancelled-when-off context: the decode is killed, the
+  pacing and a lookup end, and nothing is re-queued.
+- **What off does not stop.** The Atlas harvest and lyrics, their cover
+  refresh included (`atlasCoverRefetcher`, their own opt-ins, which never ask
+  the three); the update check, which has a cadence and no switch; Let's
+  Encrypt. The config's doc, the hints, the example and the docs say so, and
+  none of them is called "off". The config's doc and the settings hint first
+  said the update check had a switch of its own; it does not, and both were
+  corrected in a19ad6f7.
+- **On the wire, additive.** While off, a miss on a MusicBrainz key is
+  terminal: `classifyArtworkMiss` reads pending as false, so `/v1/artwork`
+  and `/v1/artist-image` answer `404 no_image` where they answered `202
+  pending` for a turn that would not come. `local-` keys, probe faults and
+  bytes on disk answer as before. The iOS app asks again for imageless keys
+  at every sync, so the 404 is not sticky: on again, the next request
+  answers 202. `enrichmentProgress` is absent while off from all three
+  builders through one predicate (`Provider.SetEnrichmentEnabledSource`), the
+  `since` leg included, a delta with no row too, so an operator's off never
+  reads as "Enrichment in progress" on a phone. No field, no
+  `ProtocolVersion` bump; `PROTOCOL.md` says it at each place.
+- **The console** has the two switches at the top of the Enrichment tab, both
+  `live` in the matrix; the enrichment card and the Jobs card say Off with a
+  link where they said what is queued, with no ETA, through `off` on
+  `enrichmentResponse` and `jobsEnrichment`. Where the environment sets a
+  switch, GET shows the value the environment set at the last start, and a
+  console save writes the live config, environment values included, into the
+  file: as for every `BRIDGE_*` leaf before this change, which the hints
+  state for these two ("it sets this switch at every start").
+- **Retry while off** runs what can run. The facets that feed only the
+  enricher (the resets, the artist-image facet, the fingerprint clear) are
+  skipped ahead of any write, the harvest's and the scoped route's booklets
+  run, and the answer says `enrichmentOff`; where nothing else can run, 409
+  `enrichment-off`, before the path is read or the rate guard stamped. With
+  Deezer off the artist-image facet is skipped (`deezerOff`). The button is
+  offered only for gaps a facet that can run fills, which also stops it
+  counting bios and descriptions where the harvest does not run, the facet
+  that fills them. `bridge enrichment retry` relays a running bridge's
+  answer whatever its own environment says, and offline refuses before it
+  opens the store, since the harvest has no offline facet.
+- **A rewrite keeps the opt-outs.** `bridge init --force` keeps each switch
+  the file writes off, for the reason it keeps `output.mpd: off`, and lists
+  it among what it kept. `priorEnrich` reads each switch on its own and never
+  fails the file's decode: one that does not read is named after the save,
+  by its line and never its value. The file is read, not the environment.
+  `TestPriorInstallTagsAreConfigs` now checks exported fields alone: an
+  unexported one is no key the decoder reads. One follow-up is named in the
+  report as B617.
+
+### Red first
+
+4dc53b9c, over stubs that change nothing: `TestTheOffSwitchLoads` failed
+because a config writing either key did not load ("that key is not a field of
+type config.EnrichConfig") and the environment set nothing, and
+`TestAnEnricherSwitchedOffAsksNoUpstream` because an enricher handed a gate
+answering off sent 3 requests and listed the store's unenriched tracks.
+
+### Main's requests
+
+Before the change, the switch fixture's enricher (two seeded tracks, fake
+MusicBrainz, Cover Art Archive, Deezer and Atlas) was run on main three times
+and sent the same eight requests each time: two to MusicBrainz (a release
+search, an artist search), two to the Cover Art Archive and two to Atlas
+(each release's cover), two to Deezer (the artist search and the picture).
+`TestEnrichmentIsOnWhereTheConfigSaysNothing` loads a config that says
+nothing through `Load`, wires the gates as serve does, and requires exactly
+those requests, service by service in that order; a load-and-save through
+`config.Edit` writes neither key.
+
+### The tests
+
+- `internal/config`: `TestTheOffSwitchLoads` (the file, the environment, the
+  environment over the file).
+- `internal/enrich`: `TestAnEnricherSwitchedOffAsksNoUpstream`,
+  `TestEnrichmentIsOnWhereTheConfigSaysNothing`,
+  `TestASwitchOffStopsAnEnrichmentInFlightAndStampsNothing` (a MusicBrainz
+  request held at the fake is abandoned within 5 s of the flip, no stamp, no
+  skip count, no further request),
+  `TestASwitchOnResumesTheQueuedRows`,
+  `TestDeezerOffAsksDeezerNothingAndStillFetchesCovers`,
+  `TestAPortraitComesBackAfterDeezerOnAndRetryMissing` (one enricher through
+  off, on and the retry, on the text path and the fingerprint path),
+  `TestDeezerOffAfterASearchSendsNoFetch` (a flip during a held search),
+  `TestCancelWhenOffCancelsOnceItsSwitchIsOff`,
+  `TestTheEnricherSaysWhenItsSwitchesFlip`. No test sleeps a fixed time in
+  place of an event: the fakes hold a request on a seam, and the tests wait
+  for what they assert, under a deadline.
+- `internal/api`: `TestAnImageMissIsTerminalWhileEnrichmentIsOff` (through
+  the real routes: 404 off, 202 for `local-` and on a probe fault, 202 on
+  again), `TestAFetchedCoverAndPortraitAreStillServedWhileOff`.
+- `internal/manifest`: `TestTheManifestOmitsEnrichmentProgressWhileOff` (the
+  stream, a `since` delta with rows and one without, the paginated first page,
+  the buffered build, each present again when on).
+- `cmd/bridge`: `TestFingerprintingStopsWithEnrichment`,
+  `TestASweepInFlightStopsWithEnrichment` (a held fpcalc, a held lookup),
+  `TestServeWiresTheEnrichmentGate` (`runServe` with `enrich.enabled: false`,
+  with `BRIDGE_ENRICH_ENABLED=false`, with `enrich.deezerEnabled: false` and
+  with both on, the mirror bases at a counting server and Deezer's base
+  through a `serveOpts` seam; with enrichment off a paired device's
+  `/v1/manifest` has no `enrichmentProgress` and the portrait of an artist
+  whose track waits answers `404 no_image`, from a row seeded before the
+  boot whose file is gone, which the boot's scan counts missing once: a serve
+  that handed the switch to the enricher alone passed every package test
+  until e1a71eb4), `TestTheHarvestRunsWithEnrichmentOff` (a pending premium
+  cover is refetched, a submit and a poll run, the mirror sees nothing),
+  `TestTheCLIRetryWhileOff`, `TestTheCLIRetrySaysWhatTheRunningBridgeSkipped`,
+  `TestARewriteKeepsTheEnrichmentOptOuts`.
+- `internal/admin`: `TestTheEnrichmentSwitchesSaveLiveAndWriteOnlyOff` (the
+  real PATCH: `live`, the file holds false, no key after on, a managed field
+  refused whole), `TestRetryWhileOffResetsNothing`,
+  `TestTheScopedRetryKeepsItsBookletsWhileOff`,
+  `TestRetryWithDeezerOffSkipsTheArtistImageFacet`,
+  `TestTheEnrichmentCardsSayOffWhereTheSwitchIs`,
+  `TestTheSettingsPayloadSendsBothEnrichmentSwitchesAsTheirCheckboxes` (the
+  payload's two expressions, read from `app.js`'s source), and
+  `TestRetryMissingIsOfferedOnlyForWhatCanRunAndSaysWhatRan`, which runs the
+  shipped functions under node and skips without it.
+
+The console's JavaScript was not driven here: the host has no node and no
+browser. The payload is pinned by the source test above; the button's two
+functions run under node where node is installed.
+
+### Negative controls (each on the committed tree, restored after)
+
+A runner applied each mutation once, ran the package's B617 tests and put the
+file's bytes back from memory; the predictions were written down first, and
+the tree was clean after. (a) to (j) and (g2) ran on a19ad6f7, (g3) and
+(g4) on e1a71eb4, whose serve test is (g) and (g2)'s with two more checks.
+
+| Mutation | Predicted | Red |
+|---|---|---|
+| (a) the gate asked per batch only (no `CancelWhenOff`) | the in-flight test | it alone ("the request held at MusicBrainz was not cancelled within 5s") |
+| (b) off stamps the unenriched rows | the resume test | it, the off test and the in-flight test (rows stamped while off) |
+| (c) the pending probe not gated | the image-miss test | it (202 with Retry-After for both keys) |
+| (d) the paginated builder always builds the block | the manifest test | its paginated leg |
+| (e) `fingerprintReady` not asking `enrich.enabled` | the fingerprint test | it (ready, and the card active, with enrichment off) |
+| (f) a nil pointer read as off | the on-by-default test | it |
+| (g) serve not giving the enricher `WithEnabled` | the serve wiring test | its three legs and the harvest test (the enricher's turns never asked) |
+| (g2) serve's predicate asked and its answer ignored | the serve wiring test | its two enrichment-off legs (the mirror and Deezer asked), the harvest test; the Deezer leg green |
+| (g3) serve not handing the provider the switch | the serve wiring test | its two enrichment-off legs (`enrichmentProgress` served) |
+| (g4) serve not handing the API the switch | the serve wiring test | its two enrichment-off legs (the waiting portrait 202) |
+| (h) the rewrite keeping no switch | the rewrite test | four of its subtests |
+| (i) `errDeezerOff` negative-cached on the text path | the portrait test | it, and the Deezer-off test ("negative-cached although Deezer was never asked") |
+| (i2) the same on the fingerprint path | the portrait test | it |
+| (j) the sweep's gate asked before a pass only | the sweep test | both its subtests ("not stopped within 5s of the switch-off") |
+
+Every control built; none stayed green; each prediction held.
+
+### Gates
+
+On e1a71eb4: gofmt (go1.27.3's) over the 33 Go files the branch changes,
+clean; `make docs-check`, ok, on the tree and on a copy with
+`rules-b617.patch` applied, which `git apply --check` takes; the
+qualification check (`scripts/qualification-version`, 4880f8a4..HEAD), ok.
+Through the build lock: `make vet` native and with `GOOS=windows`,
+`GOOS=darwin`, `GOOS=linux GOARCH=386` and `GOOS=linux GOARCH=arm`, ok;
+`make test-fast`, ok, 85 packages, the Linux-only ones (ALSA, alsapcm, the
+durable writer, the identity) among them, run rather than vetted (cmd/bridge 458 s,
+internal/admin 253 s, internal/manifest 264 s); `make test` over
+`./internal/enrich/... ./internal/config/... ./internal/api/...
+./internal/admin/... ./internal/manifest/... ./cmd/bridge/...` (race, the
+Makefile's tags and `-timeout 30m`), ok (internal/admin 1,024 s,
+internal/manifest 1,495 s, cmd/bridge 1,156 s); `make build-all`, ok. Not
+run here: macOS and Windows natively, CI's runners, the console in a
+browser, and the iOS app.
+
+### Not done here
+
+The iOS app's side of the two wire changes is the brief's reading of the app
+(`LibraryScanner.swift`, `BridgeSourceClient.swift`); its clone is not on this
+host, so what a sync that delivers no row does there was not read again. The
+privacy pages are the owner's follow-up and are unchanged. `PROTOCOL.md`'s
+iOS mirror copies the file.
