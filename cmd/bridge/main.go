@@ -2064,9 +2064,10 @@ const fingerprintToolchainTTL = 30 * time.Second
 // bounded degraded-reason key when it cannot.
 //
 // The reason is one of a closed set of keys ("fpcalc_missing" or
-// "no_api_key", "" when ready) that the admin Jobs card renders its
-// remediation copy from, the same bounded-key discipline as the enricher's
-// skip reasons. Both prerequisites are checked here rather than at
+// "no_api_key", "" when ready; fingerprintGates answers "enrichment_off"
+// ahead of this probe) that the admin Jobs card renders its remediation
+// copy from, the same bounded-key discipline as the enricher's skip
+// reasons. Both prerequisites are checked here rather than at
 // config-validation time: Validate() is a pure predicate, and a host with
 // BRIDGE_FINGERPRINT_ENABLED set but no key still has to boot. The verdict
 // is always "inactive", never "disabling": every consumer reads it live, so
@@ -2966,6 +2967,25 @@ type serveOpts struct {
 	// last statement and before its commit (backlog B662). Per invocation for
 	// tailscaleCLI's reason.
 	upscaleTargetBeforeCommit func(*sql.Tx) error
+	// deezerBase stands in for the public Deezer API root the enricher's
+	// portrait lookups go to; empty (the public service) in production. A
+	// boot test points it at a server that counts what it is asked
+	// (backlog B617). Per invocation for tailscaleCLI's reason.
+	deezerBase string
+	// enricherPoll shortens the enricher's PollInterval, how long it waits
+	// before it asks enrich.enabled again while that is off; zero is the
+	// enricher's own. enricherAsked is told each answer the enricher's gate
+	// gives it. Both nil and zero in production; a boot test counts the
+	// enricher's turns with them, a wait it can make for an event (backlog
+	// B617).
+	enricherPoll  time.Duration
+	enricherAsked func(on bool)
+	// harvestHTTP is the client the Atlas harvest and the premium cover
+	// fetch it shares with the enricher make their requests through; nil
+	// (their own) in production. A boot test hands the client of a TLS
+	// Atlas of its own (backlog B617). Per invocation for tailscaleCLI's
+	// reason.
+	harvestHTTP *http.Client
 }
 
 // adoptHandedListener returns lis when it is nil or when its address is
@@ -3833,7 +3853,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	)
 	// Upstream metadata/cover-art roots are configurable (default public
 	// MusicBrainz / Cover Art Archive). Point cfg.Enrich.* at a self-hosted
-	// 1-bit-atlas mirror to keep enrichment on your own network.
+	// 1-bit-atlas mirror to keep those two lookups on your own network; the
+	// Deezer portrait lookups go to Deezer whatever the mirror, and stop
+	// only with enrich.deezerEnabled.
 	// Live base URLs: the operator can repoint enrichment at (or away
 	// from) a self-hosted Atlas mirror without a restart. The politeness
 	// pacing re-derives from the same live value inside the clients —
@@ -3843,7 +3865,18 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 		WithLiveBase(func() string { return liveCfg().Enrich.MusicBrainzBaseURL })
 	caaClient := enrich.NewCoverArtClient(cfg.Enrich.CoverArtBaseURL, userAgent, nil).
 		WithLiveBase(func() string { return liveCfg().Enrich.CoverArtBaseURL })
-	deezerClient := enrich.NewDeezerClient("", userAgent, nil)
+	// opts.deezerBase is empty, the public service, everywhere but a boot
+	// test.
+	deezerClient := enrich.NewDeezerClient(opts.deezerBase, userAgent, nil)
+	// enrich.enabled and enrich.deezerEnabled, read live (backlog B617). The
+	// clients and the enricher's goroutine are built and started on every
+	// bridge ("always construct, never stop"), and these two closures are the
+	// gates: the enricher asks them, the fingerprint gate and its sweep ask
+	// the first, and so do the artwork misses and the manifest's
+	// enrichmentProgress, so a console save, or an environment value at the
+	// next start, turns the lookups off everywhere at once, with no restart.
+	enrichmentOn := func() bool { return liveCfg().Enrich.EffectiveEnabled() }
+	deezerOn := func() bool { return liveCfg().Enrich.EffectiveDeezerEnabled() }
 	// Phase-H harvest credential store, opened early so the enricher can wire
 	// the Phase-B authenticated premium-cover fetcher BEFORE its worker
 	// goroutine starts (avoids a field-write/read race). The same store is
@@ -3866,6 +3899,18 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// side `<mbid>-*` files cohabit one directory.
 	enricher := enrich.NewEnricher(manifestStore, mbClient, caaClient, deezerClient, artworkDir)
 	enricher.CoverSize = cfg.Enrich.EffectiveCoverSize()
+	enricherOn := enrichmentOn
+	if opts.enricherAsked != nil {
+		enricherOn = func() bool {
+			on := enrichmentOn()
+			opts.enricherAsked(on)
+			return on
+		}
+	}
+	enricher.WithEnabled(enricherOn).WithDeezerEnabled(deezerOn)
+	if opts.enricherPoll > 0 {
+		enricher.PollInterval = opts.enricherPoll
+	}
 	// Phase B: when the harvest credential store is available, fetch the
 	// cross-source premium canonical (Qobuz/Tidal) from Atlas ahead of CAA,
 	// caching it under the MBID path /v1/artwork already serves — premium
@@ -3873,7 +3918,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// store at request time (never baked into the open-source binary).
 	var premiumCovers enrich.PremiumCoverFetcher
 	if harvestState != nil {
-		premiumCovers = enrich.NewAtlasPremiumFetcher(harvestState, userAgent, nil, artworkDir)
+		premiumCovers = enrich.NewAtlasPremiumFetcher(harvestState, userAgent, opts.harvestHTTP, artworkDir)
 		enricher.WithPremiumCovers(premiumCovers)
 	}
 	// Acoustic fingerprinting: the cache is constructed here and attached
@@ -3898,26 +3943,11 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// whether to work, the enricher asks it whether to consult a verdict,
 	// and the admin card asks it what to report. One closure, deliberately
 	// — three copies of the same three gates is how a card comes to claim
-	// "active" while every sweep short-circuits.
-	fingerprintReady := func() bool {
-		live := liveCfg()
-		if !live.Fingerprint.Enabled {
-			return false
-		}
-		ok, _ := fingerprintToolchain.ready(live.Fingerprint.ResolvedAPIKey() != "")
-		return ok
-	}
-	// fingerprintDegradedReason is "" when the feature is off (not
-	// degraded, just off) or ready; otherwise the bounded key the Jobs
-	// card renders.
-	fingerprintDegradedReason := func() string {
-		live := liveCfg()
-		if !live.Fingerprint.Enabled {
-			return ""
-		}
-		_, reason := fingerprintToolchain.ready(live.Fingerprint.ResolvedAPIKey() != "")
-		return reason
-	}
+	// "active" while every sweep short-circuits. fingerprintDegradedReason
+	// is "" when the feature is off (not degraded, just off) or ready;
+	// otherwise the bounded key the Jobs card renders. Both ask
+	// enrich.enabled too (fingerprintGates).
+	fingerprintReady, fingerprintDegradedReason := fingerprintGates(liveCfg, fingerprintToolchain)
 	enricher.WithAcousticFallback(acousticLookupAdapter{cache: fingerprintCache}).
 		WithAcousticEnabled(fingerprintReady)
 	bgWriters.Add(1)
@@ -4272,6 +4302,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	// emitting) variants against a value /v1/health had already moved
 	// past.
 	provider.SetUpscaleEnabledSource(upscaleActiveFn)
+	// The same for enrich.enabled: no enrichmentProgress block while it is
+	// off, on every leg of /v1/manifest.
+	provider.SetEnrichmentEnabledSource(enrichmentOn)
 
 	// Analysis feature gate: analysisActiveFn above, the same shape as
 	// upscale (the flag AND a usable sox, read live; analysis decodes
@@ -4308,6 +4341,9 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	apiSrv := api.New(cfg, store, provider, fingerprint).
 		WithArtworkDirs(artworkDirBridge(artworkDir)).
 		WithMBIDProbe(provider).
+		// A miss that waits for the enricher is terminal while
+		// enrich.enabled is off: no 202 for a turn that is not coming.
+		WithEnrichmentEnabled(enrichmentOn).
 		WithUpdater(updAdapter).
 		WithSessionTracker(sessions).
 		WithPairing(pairingStore).
@@ -4495,6 +4531,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 			// partial (e.g. a hybrid root add/remove runs WipeFilesystemTracks +
 			// rescan), so GCing against it would delete + re-fetch live booklets.
 			ScanInProgress: scanner.IsScanning,
+			HTTP:           opts.harvestHTTP,
 		}
 		// PDF booklet check + fetch loops (v1.8) ride the same harvest
 		// credential. The cache dir failing to create degrades to
@@ -4992,7 +5029,7 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	bgWriters.Add(1)
 	go func() {
 		defer bgWriters.Done()
-		runFingerprintSweeper(scanCtx, sweeper, fingerprintReady,
+		runFingerprintSweeper(scanCtx, sweeper, fingerprintReady, enrichmentOn,
 			liveInterval(func(c *config.Config) time.Duration {
 				return c.Fingerprint.EffectiveSweepInterval()
 			}),

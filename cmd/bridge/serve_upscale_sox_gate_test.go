@@ -139,11 +139,19 @@ func withoutSoxOnPath(t *testing.T) {
 }
 
 // writeHiResFLACFixture writes a FLAC file the scanner indexes as 96 kHz,
-// 24-bit stereo, five seconds long: a STREAMINFO block and a Vorbis
-// comment, and no audio frames, since nothing here decodes it. Bytes by
-// hand rather than through mewkiz/flac, whose top-level constructors leak
-// the file handle (TestNoLeakyFlacConstructors).
+// 24-bit stereo, five seconds long, by Artist, on Album, titled after its
+// file (writeFLACFixture).
 func writeHiResFLACFixture(t *testing.T, path string) {
+	t.Helper()
+	writeFLACFixture(t, path, "ARTIST=Artist", "ALBUM=Album", "TITLE="+strings.TrimSuffix(filepath.Base(path), ".flac"))
+}
+
+// writeFLACFixture writes a FLAC file the scanner indexes as 96 kHz, 24-bit
+// stereo, five seconds long, with comments as its Vorbis comments: a
+// STREAMINFO block and a Vorbis comment, and no audio frames, since nothing
+// here decodes it. Bytes by hand rather than through mewkiz/flac, whose
+// top-level constructors leak the file handle (TestNoLeakyFlacConstructors).
+func writeFLACFixture(t *testing.T, path string, comments ...string) {
 	t.Helper()
 	const rate, bits, channels = 96000, 24, 2
 	var buf bytes.Buffer
@@ -167,7 +175,6 @@ func writeHiResFLACFixture(t *testing.T, path string) {
 		vc.WriteString(s)
 	}
 	putString("1-bit-bridge test fixture")
-	comments := []string{"ARTIST=Artist", "ALBUM=Album", "TITLE=" + strings.TrimSuffix(filepath.Base(path), ".flac")}
 	_ = binary.Write(&vc, binary.LittleEndian, uint32(len(comments)))
 	for _, c := range comments {
 		putString(c)

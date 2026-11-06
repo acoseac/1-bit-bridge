@@ -9,6 +9,7 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/acoustid"
 	"github.com/acoseac/1-bit-bridge/internal/admin"
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/ctxerr"
 	"github.com/acoseac/1-bit-bridge/internal/enrich"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -151,15 +152,58 @@ const fingerprintTagVetoTTL = 30 * 24 * time.Hour
 // fingerprint sweep" timestamp on the Jobs card for work that never ran,
 // which is worse than the card looking stale: it says the feature is
 // doing something.
-func runFingerprintSweeper(ctx context.Context, s *fingerprintSweeper, enabled func() bool, interval func() time.Duration, nudge, rearm <-chan struct{}, status *sweepStatus[admin.FingerprintSweepCounts]) {
+//
+// enrichmentOn is enrich.enabled (backlog B617), which `enabled` asks
+// before a pass too (fingerprintGates). A pass runs on a context it cancels
+// within a second of a switch-off (enrich.CancelWhenOff), the one the
+// enricher's batch runs on, so a sweep under way stops as at a shutdown: the
+// decode is killed, the pacing and a lookup end, and nothing is re-queued.
+// Nil never cancels.
+func runFingerprintSweeper(ctx context.Context, s *fingerprintSweeper, enabled, enrichmentOn func() bool, interval func() time.Duration, nudge, rearm <-chan struct{}, status *sweepStatus[admin.FingerprintSweepCounts]) {
 	runSweepLoop(ctx, status, fingerprintSweeperSettleDelay, interval, nudge, rearm, func(bool) {
 		if enabled != nil && !enabled() {
 			return
 		}
+		passCtx, release := enrich.CancelWhenOff(ctx, enrichmentOn)
+		defer release()
 		status.sweepStarted()
-		status.sweepFinished(s.sweep(ctx))
+		status.sweepFinished(s.sweep(passCtx))
 	})
 }
+
+// fingerprintGates are fingerprinting's live gate and the reason the Jobs
+// card gives for a switched-on feature that does not run, both over the live
+// config and the shared toolchain probe (runServe's fingerprintReady and
+// fingerprintDegradedReason). enrich.enabled is asked before the toolchain:
+// a fingerprint's answer feeds nothing but the enricher, so with enrichment
+// off no fingerprint goes to AcoustID and no row is re-queued for a turn it
+// would not get, and the card says why, "enrichment_off" (backlog B617).
+func fingerprintGates(liveCfg func() *config.Config, toolchain *fingerprintToolchainCache) (ready func() bool, degraded func() string) {
+	ready = func() bool {
+		live := liveCfg()
+		if !live.Fingerprint.Enabled || !live.Enrich.EffectiveEnabled() {
+			return false
+		}
+		ok, _ := toolchain.ready(live.Fingerprint.ResolvedAPIKey() != "")
+		return ok
+	}
+	degraded = func() string {
+		live := liveCfg()
+		switch {
+		case !live.Fingerprint.Enabled:
+			return ""
+		case !live.Enrich.EffectiveEnabled():
+			return fingerprintEnrichmentOff
+		}
+		_, reason := toolchain.ready(live.Fingerprint.ResolvedAPIKey() != "")
+		return reason
+	}
+	return ready, degraded
+}
+
+// fingerprintEnrichmentOff is the degraded reason of a fingerprint feature
+// switched on while enrich.enabled is off.
+const fingerprintEnrichmentOff = "enrichment_off"
 
 // sweep runs one pass: collect candidates, fingerprint them, then re-queue
 // whatever resolved. Returns the per-run counts for the admin recorder —
