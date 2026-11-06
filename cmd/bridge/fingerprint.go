@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/acoustid"
+	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/version"
 )
@@ -30,13 +31,16 @@ import (
 //     decides whether the feature is worth enabling there at all.
 //
 // It reads files directly rather than going through the config and the library
-// resolver, so it needs no bridge config and can be pointed at anything.
+// resolver, so it needs no bridge config and can be pointed at anything. The
+// one thing it reads of a bridge's settings is enrich.enabled, before a run
+// that would send a fingerprint to AcoustID (fingerprintSwitch).
 //
 // NOTHING here writes: not the manifest, not the artwork cache, not a single
 // MBID. The gate's verdict is printed, never applied.
 //
-// Exit codes: 0 the run completed, 1 the run could not start (no key, no
-// fpcalc, unwritable output), 2 usage error, 130 interrupted mid-batch
+// Exit codes: 0 the run completed, 1 the run could not start (enrichment
+// switched off for a lookup, no key, no fpcalc, unwritable output), 2 usage
+// error, 130 interrupted mid-batch
 // (POSIX 128+SIGINT) so a script can tell an interrupted run from a complete
 // one — matching `bridge analyze`.
 //
@@ -62,7 +66,10 @@ func fingerprintCmd(ctx context.Context, args []string, stdout, stderr io.Writer
 	if len(paths) == 0 {
 		fmt.Fprint(stderr, "usage: bridge fingerprint [flags] <file>...\n\n"+
 			"Fingerprints one or more audio files and reports what AcoustID knows\n"+
-			"about them, plus the acceptance gate's verdict. Writes nothing.\n\n")
+			"about them, plus the acceptance gate's verdict. Writes nothing. With\n"+
+			"enrichment switched off (BRIDGE_ENRICH_ENABLED, or enrich.enabled in the\n"+
+			"bridge.yaml found here or in the platform's config directory), only\n"+
+			"--no-lookup runs.\n\n")
 		fs.PrintDefaults()
 		return 2
 	}
@@ -145,9 +152,28 @@ func lastDidLookup(reports []fingerprintReport) bool {
 // prepareFingerprintRun resolves the API key, checks the toolchain, and builds
 // the client. Returns a non-zero exit code when the run cannot proceed;
 // a nil client means --no-lookup (fingerprint without contacting AcoustID).
+//
+// A run that would look up asks enrich.enabled first, before the key, the
+// probe or any decode (backlog B617): off, it sends nothing and exits 1.
+// --no-lookup sends nothing, so it asks nothing.
 func prepareFingerprintRun(ctx context.Context, key string, noLookup bool,
 	stderr io.Writer) (acoustid.Info, *acoustid.Client, int) {
 
+	if !noLookup {
+		on, source, err := fingerprintSwitch()
+		if err != nil {
+			fmt.Fprintf(stderr, "The config at %s does not load (%v),\n"+
+				"so whether enrichment is switched off (enrich.enabled) cannot be told, and no\n"+
+				"fingerprint is sent to AcoustID. Fix it, or pass --no-lookup to fingerprint\n"+
+				"without contacting AcoustID.\n", source, err)
+			return acoustid.Info{}, nil, 1
+		}
+		if !on {
+			fmt.Fprintf(stderr, "Enrichment is switched off (%s), so no fingerprint is sent to AcoustID.\n"+
+				"Pass --no-lookup to fingerprint without contacting AcoustID.\n", source)
+			return acoustid.Info{}, nil, 1
+		}
+	}
 	if key == "" {
 		key = os.Getenv("ACOUSTID_API_KEY")
 	}
@@ -176,6 +202,30 @@ func prepareFingerprintRun(ctx context.Context, key string, noLookup bool,
 	userAgent := fmt.Sprintf("1-bit-bridge/%s (+https://github.com/acoseac/1-bit-bridge)",
 		version.ServerVersion)
 	return info, acoustid.NewClient("", key, userAgent, nil), 0
+}
+
+// fingerprintSwitch is enrich.enabled as `bridge fingerprint` reads it, once,
+// at its start: BRIDGE_ENRICH_ENABLED where it says on or off, read as serve
+// reads it (config.EnrichEnabledFromEnv); else the config at the default
+// path (resolveConfigPath: ./bridge.yaml, then the platform's), the command
+// having no --config of its own; else on, the default. source names what
+// decided it. A config that is there and does not load is an error: whether
+// the operator switched enrichment off cannot be told from it, and a lookup
+// would send what they may have asked to stop. A console flip governs a
+// running serve, not a command already started.
+func fingerprintSwitch() (on bool, source string, err error) {
+	if on, set := config.EnrichEnabledFromEnv(); set {
+		return on, "BRIDGE_ENRICH_ENABLED", nil
+	}
+	path, found := resolveConfigPath("")
+	if !found {
+		return true, "", nil
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		return false, path, err
+	}
+	return cfg.Enrich.EffectiveEnabled(), "enrich.enabled in " + path, nil
 }
 
 // fingerprintReport is the per-file result. CLI-only — this is a diagnostic
