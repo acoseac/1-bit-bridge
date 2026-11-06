@@ -37,8 +37,9 @@ func legacyKeyLines(log, key string) []string {
 
 // TestLegacyDSDKeysStillLoadAndAreWarnedOnce (B728 B6): a block of the three
 // legacy keys loads on every path that reads the config (serve, the console's
-// settings and its Player page, bridge output dac inspect, bridge doctor),
-// refused by none, and within one start each key is warned of once, in words
+// settings and its Player page, bridge output dac inspect, bridge doctor, and
+// the strict check serve --validate-config makes for an updater), refused by
+// none, and within one start each key is warned of once, in words
 // that say it stays in effect until the cutover and claim no migration made,
 // however many of those readers validate the config: the scope is the
 // start's, and a reader outside it warns of nothing.
@@ -91,6 +92,13 @@ func TestLegacyDSDKeysStillLoadAndAreWarnedOnce(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("bridge doctor printed no config-file line: %s", so.String())
+	}
+	// The strict check of the settings an updater runs a candidate with
+	// (serve --validate-config) takes them too.
+	so.Reset()
+	se.Reset()
+	if code := checkServeConfig(cs.configPath, "", &so, &se); code != 0 {
+		t.Errorf("serve --validate-config refused the legacy keys: exit %d: %s", code, se.String())
 	}
 	stopped(t, cs.playerServe)
 	all := log.all()
