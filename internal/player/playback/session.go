@@ -481,7 +481,16 @@ func (s *session) start(ctx context.Context, req engine.StartRequest) (err error
 		s.monitorPermission()
 	}
 	s.b.open(cctx, first)
+	// Admitted under a set a refresh may have replaced while its first chunk
+	// was read, which no reconciliation reaches while the open is under way:
+	// admitted again under the set published now, in the step that ends the
+	// open, as a successor is (openSuccessor), so the activation's check finds
+	// it under that set and a reconciliation after it judges it (B728 B7, round
+	// 2).
+	s.mu.Lock()
+	s.readmitDSDLocked(first)
 	close(first.done)
+	s.mu.Unlock()
 	if first.admitted != nil {
 		s.startDSDMonitor()
 	}

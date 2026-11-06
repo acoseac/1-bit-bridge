@@ -3,6 +3,7 @@ package playback_test
 import (
 	"context"
 	"errors"
+	"runtime"
 	"slices"
 	"sync"
 	"testing"
@@ -99,65 +100,106 @@ func TestSelectionAndPublicationReadOneSet(t *testing.T) {
 		t.Errorf("a session's first occurrence admitted %+v under generation %d (%v), the publication %+v; want DoP under the next, published", plan, gen, err, p)
 	}
 
-	// The race: a writer alternates the choice and refreshes, while readers
-	// admit successors and read the publication; every admission's plan is
-	// the tuple its generation was published with.
-	var mu sync.Mutex
-	published := map[uint64]string{}
-	var admitted []struct {
-		gen uint64
-		id  string
-	}
+	// The race: a writer alternates the choice and refreshes, while a reader
+	// reads the publication and an admitter admits successors, each on a
+	// goroutine of its own and without pause, through the writer's next write
+	// and refresh too; every admission's plan is the tuple its generation was
+	// published with. The writer goes on to its next write only once the reader
+	// and the admitter have both seen the generation its refresh published (a
+	// condition, never a time), so every generation is read and admitted under,
+	// whatever the scheduler runs first: left to it, one processor ran the
+	// reader's loop to its end before the writer's first refresh, and the race
+	// compared nothing (macOS's CI, and -cpu 1 here, round 2).
+	const rounds = 100
+	var (
+		mu        sync.Mutex
+		seen      = sync.NewCond(&mu)
+		published = map[uint64]string{}
+		admitted  []struct {
+			gen uint64
+			id  string
+		}
+		read, under uint64 // the latest generation the reader read, and the admitter admitted under
+		done        bool
+	)
 	var wg sync.WaitGroup
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
-		for i := range 200 {
+		for i := range rounds {
 			mode := dsdstate.ModeNative
 			if i%2 == 1 {
 				mode = dsdstate.ModeDoP
 			}
 			store.Set(playbacktest.ChoiceState(mode))
 			b.RefreshDSD(true)
+			gen := b.Policy().Generation
+			mu.Lock()
+			for read < gen || under < gen {
+				seen.Wait()
+			}
+			mu.Unlock()
 		}
+		mu.Lock()
+		done = true
+		mu.Unlock()
 	}()
 	go func() {
 		defer wg.Done()
-		for range 400 {
+		for {
 			p := b.Policy()
 			mu.Lock()
 			published[p.Generation] = p.Tuples[0].PolicyID
+			read = max(read, p.Generation)
+			seen.Broadcast()
+			stop := done
 			mu.Unlock()
+			if stop {
+				return
+			}
+			// On one processor the writer runs only when this loop yields.
+			runtime.Gosched()
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		for range 400 {
+		for {
 			plan, gen, err := b.AdmitDSDForTest(dsdAt(playbacktest.DSD64), false)
+			mu.Lock()
 			if err != nil {
+				// The writer waits for no admission more.
+				under = ^uint64(0)
+				seen.Broadcast()
+				mu.Unlock()
 				t.Errorf("a successor refused under generation %d: %v", gen, err)
 				return
 			}
-			mu.Lock()
 			admitted = append(admitted, struct {
 				gen uint64
 				id  string
 			}{gen, plan.PolicyID})
+			under = max(under, gen)
+			seen.Broadcast()
+			stop := done
 			mu.Unlock()
+			if stop {
+				return
+			}
+			runtime.Gosched()
 		}
 	}()
 	wg.Wait()
-	checked := 0
+	checked := map[uint64]bool{}
 	for _, a := range admitted {
 		if id, ok := published[a.gen]; ok {
-			checked++
+			checked[a.gen] = true
 			if id != a.id {
 				t.Errorf("generation %d was published with %s and admitted %s", a.gen, id, a.id)
 			}
 		}
 	}
-	if checked == 0 {
-		t.Error("no admission's generation was published while the readers read: the race compared nothing")
+	if len(checked) < rounds {
+		t.Errorf("the race compared %d generations, want every one of the %d the writer published", len(checked), rounds)
 	}
 }
 

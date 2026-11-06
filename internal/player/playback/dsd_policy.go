@@ -339,6 +339,19 @@ func canonicalBCD(s string) string {
 	return ""
 }
 
+// unitText is a USB string of the unit u as the set publishes it
+// (PROTOCOL.md's dsdPlayback.model): every occurrence of u's own port path and
+// serial replaced with [redacted], as the dac element's labels have them
+// taken out. The unit's own, from the reading, whatever the binding names: a
+// binding by model or by port names neither, and a product string may carry
+// the serial (round 2).
+func unitText(s string, u alsa.USBIdentity) string {
+	if u.Port != "" {
+		s = strings.ReplaceAll(s, u.Port, "[redacted]")
+	}
+	return u.Serial.Redact(s)
+}
+
 // readMixer is what the DoP gain check reads of card, whose unit m is: its
 // descriptors and configuration, the kernel's table of its controls, and the
 // card's controls, each marked read only when it was.
@@ -407,7 +420,7 @@ func (b *Backend) readDSD() *dsdSet {
 		}
 	}
 	d := &dsdSet{computed: true, card: bd.Card, device: bd.Device, subdevice: bd.Subdevice, enumeration: bd.Enumeration,
-		model: strings.TrimSpace(strings.TrimSpace(m.Manufacturer) + " " + strings.TrimSpace(m.Product))}
+		model: unitText(strings.TrimSpace(strings.TrimSpace(m.Manufacturer)+" "+strings.TrimSpace(m.Product)), m.USB)}
 	if p.Profiles != nil {
 		if prof, ok := p.Profiles.Match(unit); ok {
 			d.profile = &prof
@@ -514,10 +527,14 @@ func (b *Backend) dsdStale() bool {
 	return b.dsdRead.IsZero() || b.dsdNow().Sub(b.dsdRead) >= dsdTick
 }
 
-// readmitDSD admits o again under the set published now, when it was
-// admitted under an older one and its open has not finished (openSuccessor,
-// before its Prepared is reported, so nothing the engine holds changes): no
-// reconciliation reaches an occurrence still opening. s.mu is held.
+// readmitDSDLocked admits o again under the set published now, when it was
+// admitted under an older one and its open has not finished: a successor's
+// (openSuccessor, before its Prepared is reported, so nothing the engine
+// holds changes) and a session's first occurrence's (start, before anything
+// is located or opened; round 2). No reconciliation reaches an occurrence
+// still opening, so the step that ends its open admits it again, under s.mu,
+// and closes its done in that step: a refresh published before it is the one
+// it is admitted under, and one published after it judges it. s.mu is held.
 func (s *session) readmitDSDLocked(o *occ) {
 	cur := s.b.dsd.Load()
 	if o.admitted == nil || o.admitted == cur || o.refused != nil {
@@ -617,10 +634,15 @@ func (s *session) occurrenceFactsLocked(o *occ) policy.Occurrence {
 // (policy.Reconcile): one next still plays on its identity is kept and
 // counts under next from now on; one to re-plan is held back from the sink
 // (stale) and the engine is asked to hand it off again (ReplanEvents), the
-// path an edit after hand-off takes, so it plays under next and is never
-// skipped for the change, a session's first occurrence and one a session
-// being released holds excepted, which are revoked; one to revoke stops the
-// session's DSD at once (Revoke). A change of the set never asks a user's
+// path an edit after hand-off takes, so it is admitted under next as any
+// hand-off is, a session's first occurrence and one a session being released
+// holds excepted, which are revoked; one to revoke stops the session's DSD at
+// once (Revoke). An occurrence whose sink has played everything it was given
+// (drained) or is closed sounds no more, and nothing of it can reach the DAC
+// again, so no change of the set can make it unsafe: it is not judged, which
+// would revoke the session's DSD and with it a successor the set still plays
+// in a sink of its own (a DoP occurrence played out, the native one after it
+// filling its prefill; round 2). A change of the set never asks a user's
 // consent here: the safety changes (the gain leaving unity, the identity
 // changing, the DAC leaving, the state no longer reading) act at once, and
 // B7 makes no other; B9's write asks first with the same predicate.
@@ -630,6 +652,9 @@ func (s *session) reconcileDSD(next *dsdSet) {
 	s.mu.Lock()
 	for _, o := range s.chain {
 		if !o.opened() || o.admitted == nil || o.dropped || o.plan == nil || o.admitted == next {
+			continue
+		}
+		if out := o.out; out != nil && (out.drained || out.closed) {
 			continue
 		}
 		v := policy.Reconcile(next.set, s.occurrenceFactsLocked(o))
@@ -873,7 +898,9 @@ type dsdProbe struct {
 // (MPD's), or found no unit, is done for that unit. Its answers are kept
 // (alsapcm.ProbeCache), each accepted native format and DoP carrier recorded
 // as the tuple's driver_accepted under the kernel, and the policy read
-// again. cond is the watcher's view of the bound DAC.
+// again, all under the unit it captured before the probe, which the node it
+// opens must be (probedUnit): another unit there is asked nothing. cond is
+// the watcher's view of the bound DAC.
 func (b *Backend) ProbeDSD(ctx context.Context, cond ProbeConditions) (pending bool) {
 	p := b.cfg.DSD
 	if p == nil || p.Probes == nil || p.Bound == nil || p.Box == nil {
@@ -899,7 +926,7 @@ func (b *Backend) ProbeDSD(ctx context.Context, cond ProbeConditions) (pending b
 		return false
 	}
 	epoch := p.Probes.Begin(unit)
-	rep, err := b.Probe(ctx, ProbeRequest{Conditions: cond, Candidates: alsapcm.ProbeCandidates()})
+	rep, err := b.Probe(ctx, ProbeRequest{Conditions: cond, Candidates: alsapcm.ProbeCandidates(), Check: probedUnit(p.Box, m, key)})
 	var skipped *ProbeSkipped
 	if errors.As(err, &skipped) && slices.Contains(probeSlotSkips, skipped.Reason) {
 		return true
@@ -917,6 +944,29 @@ func (b *Backend) ProbeDSD(ctx context.Context, cond ProbeConditions) (pending b
 	b.dsdLog().Info("player: the silent probe asked the bound DAC", "opened", rep.Opened, "err", errorText(err))
 	b.refreshDSD()
 	return false
+}
+
+// probedUnit is the probe's check of the node it opened (ProbeRequest.Check):
+// the node's card is the unit the probe was begun for, as m read it with key,
+// its model's: the same unit at the same place and enumeration
+// (binding.SameUnit and its DevNum), of the same model and firmware. Its
+// answers are recorded under that unit alone (alsapcm.ProbeUnit, and the
+// model's driver_accepted), so a unit swapped into the bound place between the
+// capture and the open, which the binding's own check passes, is asked nothing
+// (round 2).
+func probedUnit(box DSDBox, m alsa.UnitModel, key dacprofile.Key) func(alsapcm.NodeInfo) error {
+	return func(n alsapcm.NodeInfo) error {
+		now, err := box.UnitModel(n.Card)
+		if err != nil {
+			return fmt.Errorf("player backend: the probed node's unit did not read: %w", err)
+		}
+		k, err := dsdstate.KeyOf(now.USB, now.Product)
+		if err != nil || !k.Equal(key) || !binding.SameUnit(now.USB, m.USB) || now.USB.DevNum != m.USB.DevNum || canonicalBCD(now.BCDDevice) != canonicalBCD(m.BCDDevice) {
+			return &alsapcm.Error{Reason: alsapcm.ReasonWrongDevice, Op: "probe", Endpoint: alsapcm.Endpoint{Card: n.Card, Device: n.Device},
+				Detail: "the node opened is not the unit the probe was begun for (its place, enumeration, model or firmware differs)"}
+		}
+		return nil
+	}
 }
 
 // noteProbed records what a probe accepted as driver_accepted (the design's
