@@ -423,6 +423,12 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   name and bounded by the absolute library roots.
 - **iTunes is a fallback, not a primary source**; artwork cache keys stay
   MB-derived so the wire shape is unchanged.
+- **WavPack and Monkey's Audio rows are enriched and harvested like any
+  other row** (2026-11-06, backlog B489): the client format gate holds them
+  back at serving (`wire.md`), never at the enricher's work query or the
+  harvest's release set, so an app that declares them receives them
+  enriched. **Don't leave them out of an enrichment or harvest query.**
+  `TestWavPackAndMonkeysAudioRowsTakePartInEnrichment` pins it.
 
 ## Duplicates and the served set
 
@@ -446,3 +452,30 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   decision; don't flip `includeRouted` without making it.
 - Tier names are evidence claims: only `identical-audio` may say "reclaimable";
   `inconclusive` is never suppressed.
+- **A copy every client is served that the last scan found outranks one the
+  client format gate holds back, before every other term but `Row.Missing`,
+  and a domain with no such copy that holds two gated formats is one
+  suppression unit per format** (2026-11-06, backlog B489, the owner's
+  decision in its brief; round 3, the merge of B756). `dupe_suppressed` is
+  one flag for every client and the gate (`X-Bridge-Formats`, `wire.md`) is
+  per client: a `.wv` winning over a `.flac` of one album would leave an app
+  that declares nothing no copy of it at all. So `outranks` asks
+  `formatgate.Gated` right after `Missing` (the bullet above), which costs an
+  app that plays both formats the gated copy's better geometry and never
+  costs a client its only copy; `Missing` comes first because a copy whose
+  file is gone is no copy any client can play, so a found `.wv` takes a gone
+  `.flac`'s place. And `gateUnits` splits by format a domain that holds no
+  found ungated copy and copies of two gated formats (a gone ungated copy a
+  unit of its own, suppressing nothing), so a `.wv` and an `.ape` of one
+  track are never suppressed against each other (a client may declare one
+  alone), while two `.wv` copies are ranked as any same-format pair.
+  `WAVPACK-LOSSY` is in the ranking's lossy set (`lossyCodecs`,
+  `IsLossyCodec`'s mirror, `TestDupesLossyCodecsMirrorIsLossyCodec`). The
+  partition is untouched: this is the bridge's election, not the iOS
+  normalizer's grouping. **Don't let a gated copy win over a found one every
+  client is served, put the gate's term before `Missing`, or suppress one
+  gated format against another.**
+  `TestAGatedCopyNeverWinsOverACopyEveryClientIsServed`,
+  `TestTheGateAndTheMissingTermHoldBesideEachOther`,
+  `TestAGatedCopyIsSuppressedAgainstItsOwnFormatAsAnyCopyIs` and
+  `TestALossyHybridWavPackCopyIsLossy` pin it.
