@@ -3421,12 +3421,14 @@ func (s *Store) ApplyAlbumArtistReconciliation(ctx context.Context, changed []Tr
 	return s.applyReconciledTracks(ctx, changed)
 }
 
-// ApplyYearReconciliation persists year-reconciled tracks (the fill-missing
-// pass in reconcileYears). Identical contract to
-// ApplyAlbumArtistReconciliation: rewrites tags_json, strict-advances
-// indexed_at so iOS delta-sync surfaces the change, and leaves enriched_at
-// untouched (reconciliation is a metadata-consistency pass, not
-// re-enrichment).
+// ApplyYearReconciliation persists year-reconciled tracks: the tracks
+// reconcileYears gives their album's one year (a missing year, a
+// composition date, or another recording year rewritten to the album's
+// dominant one), and the strays reconcileYearsByMBID fills. Identical
+// contract to ApplyAlbumArtistReconciliation: rewrites tags_json,
+// strict-advances indexed_at so iOS delta-sync surfaces the change, and
+// leaves enriched_at untouched (reconciliation is a metadata-consistency
+// pass, not re-enrichment).
 func (s *Store) ApplyYearReconciliation(ctx context.Context, changed []Track) (int, error) {
 	return s.applyReconciledTracks(ctx, changed)
 }

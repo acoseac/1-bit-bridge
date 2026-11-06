@@ -93,39 +93,45 @@ func reconcileAlbumArtists(tracks []ReconcileTarget) []ReconcileTarget {
 	return changed
 }
 
-// reconcileYears finds physical albums — tracks that share a directory AND
-// an album title — and fills a missing year from the group's dominant
-// year. A missing year is an absent one. A year before firstPhonographYear
-// is a composition date, and it is missing too when the same group has a
-// recording year. One untagged track (no year) otherwise splits into its
-// own album row on iOS
-// (album identity = `normalize(albumArtist)|normalize(album)|year`), exactly
-// the field-reported Alphaville "[A] Eternally Yours Bonus-EP" case where a
-// single bonus track lost its year tag.
+// reconcileYears gives each physical album one year. A physical album is a
+// group groupByAlbumKey defines: tracks that share a directory AND an album
+// title. Album identity on iOS is
+// `normalize(albumArtist)|normalize(album)|year`, so a group whose tracks
+// carry two years is two album rows there: the field-reported Alphaville
+// "[A] Eternally Yours Bonus-EP" case, where a single bonus track lost its
+// year tag, and a remaster whose tracks carry the original recording's year
+// beside the release's (1968 and 2011 in one folder, backlog B756).
+//
+// The group's year is yearFill's: the dominant recording year when the
+// group has a year of firstPhonographYear or later, and then every track
+// whose year is not it takes it: a missing year (absent, the year=0 "tag
+// absent" sentinel, or negative), a composition date (a year before
+// firstPhonographYear), and a recording year the vote did not pick. A
+// group with no recording year fills only its missing years, from the
+// dominant present year, and its early years stay.
 //
 // Conservative by design, mirroring reconcileAlbumArtists:
 //   - DIRECTORY-scoped: the same (directory, normalized album) grouping —
-//     NEVER crosses directories (classical box-set + distinct-same-name
-//     protection).
-//   - FILL-MISSING only. Absent (nil) and non-positive (the year=0
-//     "tag absent" sentinel) years are filled. When the group has any
-//     year of firstPhonographYear or later, the dominant year is taken
-//     over those recording years alone, and every earlier year takes it
-//     too. A group with no such year fills only the absent ones from the
-//     dominant present year, and the early years stay. A year of
-//     firstPhonographYear or later is left as tagged, so 1974 beside
-//     2022 stays a split.
+//     NEVER crosses directories. "Greatest Hits" in two folders with two
+//     years stays two albums (two editions), and an album split into CD1
+//     and CD2 folders takes a year per folder.
 //   - DOMINANT existing value, not MusicBrainz — preserve the user's tags.
-//     Composition dates do not vote once a recording year is present.
-//     A tie goes to the larger year.
+//     The most common recording year wins, a tie going to the larger, and
+//     composition dates do not vote once a recording year is present.
+//   - DISAGREEMENT-DRIVEN: a group whose years agree is left untouched (do
+//     no harm), and a lone track can't disagree with itself.
 //
-// Returns only the targets needing a fill (Year set to the dominant value),
-// sorted by path for deterministic output. Pure — no I/O.
+// The vote reads the years it is given, which at a scan's tail are the
+// rows as stored (streamReconcileTargets), not the files' tags: a group
+// stored at one year moves only when the files a scan re-read outvote it.
+//
+// Returns only the tracks whose year differs from their group's (Year set
+// to it), sorted by path for deterministic output. Pure — no I/O.
 func reconcileYears(tracks []ReconcileTarget) []ReconcileTarget {
 	groups := groupByAlbumKey(tracks)
 	var changed []ReconcileTarget
 	for _, idxs := range groups {
-		changed = append(changed, fillMissingYears(tracks, idxs)...)
+		changed = append(changed, albumYearFixes(tracks, idxs)...)
 	}
 	sort.Slice(changed, func(a, b int) bool { return changed[a].Path < changed[b].Path })
 	return changed
@@ -138,10 +144,10 @@ func reconcileYears(tracks []ReconcileTarget) []ReconcileTarget {
 // release carries predates this year.
 const firstPhonographYear = 1877
 
-// yearFill is the year a missing track in the group takes. fillEarly is
-// set when that year is a recording year, so a composition date takes it
-// too. A group with no recording year fills from its present years.
-func yearFill(years []*int) (dominant int, fillEarly bool, ok bool) {
+// yearFill is the group's year: the dominant recording year when the group
+// has one, which sets recording, and every track of the group takes it; else
+// the dominant present year, which only a missing year takes.
+func yearFill(years []*int) (dominant int, recording bool, ok bool) {
 	dominant, ok = dominantYear(yearsThatVote(years))
 	if !ok {
 		return 0, false, false
@@ -169,19 +175,23 @@ func recordingYears(years []*int) []*int {
 	return out
 }
 
-// yearTakesFill reports whether y may take the group's fill year. A nil
-// or non-positive year may. A year before firstPhonographYear may when
-// the group has a recording year. A later year stays as tagged.
-func yearTakesFill(y *int, fillEarly bool) bool {
+// yearTakesFill reports whether a track whose year is y takes its group's
+// year, dominant. A nil or non-positive year does. When dominant is a
+// recording year, every year but dominant does too: a composition date, and
+// a recording year the vote did not pick. A group with no recording year
+// leaves its early years as they are.
+func yearTakesFill(y *int, dominant int, recording bool) bool {
 	if !hasYear(y) {
 		return true
 	}
-	return fillEarly && *y < firstPhonographYear
+	return recording && *y != dominant
 }
 
-// fillMissingYears returns the tracks in one directory-and-album group
-// whose year yearTakesFill says can take the group's fill year.
-func fillMissingYears(tracks []ReconcileTarget, idxs []int) []ReconcileTarget {
+// albumYearFixes returns the tracks in one directory-and-album group whose
+// year yearTakesFill says takes the group's year, each with Year set to it:
+// none for a lone track, a group with no present year, or one whose years
+// agree.
+func albumYearFixes(tracks []ReconcileTarget, idxs []int) []ReconcileTarget {
 	if len(idxs) < 2 {
 		return nil
 	}
@@ -189,13 +199,13 @@ func fillMissingYears(tracks []ReconcileTarget, idxs []int) []ReconcileTarget {
 	for n, i := range idxs {
 		years[n] = tracks[i].Year
 	}
-	dom, fillEarly, ok := yearFill(years)
+	dom, recording, ok := yearFill(years)
 	if !ok {
 		return nil
 	}
 	var changed []ReconcileTarget
 	for _, i := range idxs {
-		if !yearTakesFill(tracks[i].Year, fillEarly) {
+		if !yearTakesFill(tracks[i].Year, dom, recording) {
 			continue
 		}
 		fix := tracks[i]
@@ -277,10 +287,17 @@ func reconcileAlbumTitles(tracks []ReconcileTarget) []ReconcileTarget {
 }
 
 // reconcileYearsByMBID fills a year-0 STRAY's year from a sibling that shares
-// the same MusicBrainz release id — the CROSS-folder analog of reconcileYears
-// (which only fills within one directory). A few loose tracks that lost their
-// year tag but carry the album's MBID (e.g. a stray bonus track filed in its
-// own folder) borrow the dominant year of the MBID group.
+// the same MusicBrainz release id — the CROSS-folder analog of the missing-year
+// fill in reconcileYears, which works within one directory. A few loose tracks
+// that lost their year tag but carry the album's MBID (e.g. a stray bonus track
+// filed in its own folder) borrow the dominant year of the MBID group.
+//
+// FILL-ONLY: a present year is left as it is, so two folders of one release
+// whose years differ (an album split into CD1 and CD2 folders, each folder
+// given its own year by reconcileYears) stay apart: a named residual (backlog
+// B756). It runs after the directory pass, and the directory pass runs again
+// after it (yearAfterMBIDStep), so strays of one folder that borrow different
+// years from their releases take one year in the same scan.
 //
 // Bounded to STRAYS via maxStrayTracksForYearFill: a large year-0 group under
 // one MBID is a full second copy / distinct edition MusicBrainz happens to

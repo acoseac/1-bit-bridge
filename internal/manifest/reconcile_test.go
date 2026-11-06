@@ -235,23 +235,23 @@ func TestReconcileYears(t *testing.T) {
 			want: map[string]int{"A/EP/2.flac": 2023},
 		},
 		{
-			name: "present-but-different year LEFT ALONE (no overwrite)",
+			name: "a minority recording year takes the album's (B756)",
 			in: []ReconcileTarget{
 				mk("A/Alb/1.flac", "Alb", yp(2023)),
 				mk("A/Alb/2.flac", "Alb", yp(2023)),
 				mk("A/Alb/3.flac", "Alb", yp(1999)),
 			},
-			want: map[string]int{},
+			want: map[string]int{"A/Alb/3.flac": 2023},
 		},
 		{
-			name: "fills missing AND leaves present-different alone",
+			name: "fills missing AND rewrites a minority year",
 			in: []ReconcileTarget{
 				mk("A/Alb/1.flac", "Alb", yp(2023)),
 				mk("A/Alb/2.flac", "Alb", yp(2023)),
 				mk("A/Alb/3.flac", "Alb", nil),
 				mk("A/Alb/4.flac", "Alb", yp(1999)),
 			},
-			want: map[string]int{"A/Alb/3.flac": 2023},
+			want: map[string]int{"A/Alb/3.flac": 2023, "A/Alb/4.flac": 2023},
 		},
 		{
 			name: "cross-directory NOT reconciled",
@@ -276,7 +276,7 @@ func TestReconcileYears(t *testing.T) {
 				mk("A/Alb/2.flac", "Alb", yp(2003)),
 				mk("A/Alb/3.flac", "Alb", nil),
 			},
-			want: map[string]int{"A/Alb/3.flac": 2003},
+			want: map[string]int{"A/Alb/1.flac": 2003, "A/Alb/3.flac": 2003},
 		},
 		{
 			name: "lone track untouched",
@@ -358,7 +358,8 @@ func requireYear(t *testing.T, tracks []ReconcileTarget, path string, want int, 
 // same folder's album has any recording year, the pass fills every
 // composition date from the dominant recording year, and composition
 // dates do not vote. A folder with no recording year keeps its early
-// years. A year of 1877 or later is left as it was tagged.
+// years. Since backlog B756 a recording year the vote did not pick takes
+// the dominant one too, so 1974 beside 2022 is one album at 2022.
 func TestReconcileYearsTreatsACompositionDateAsMissing(t *testing.T) {
 	t.Run("ellipses", func(t *testing.T) {
 		// Seven tracks tagged 2022 and five tagged 1654, the second copy
@@ -381,21 +382,26 @@ func TestReconcileYearsTreatsACompositionDateAsMissing(t *testing.T) {
 
 	t.Run("two-plausible-years", func(t *testing.T) {
 		tracks := compositionAlbum("Band/Album", "Album", 1974, 2022, 2022)
-		requireYear(t, tracks, tracks[0].Path, 1974, false)
+		requireYear(t, tracks, tracks[0].Path, 2022, true)
 		requireYear(t, tracks, tracks[1].Path, 2022, false)
 		requireYear(t, tracks, tracks[2].Path, 2022, false)
 	})
 
+	// The boundary decides who votes. Two 1876s are composition dates and
+	// do not vote, so the one 2022 wins; two 1877s are recording years
+	// and outvote it.
 	t.Run("boundary-1876", func(t *testing.T) {
-		tracks := compositionAlbum("Band/Album", "Album", 1876, 2022)
+		tracks := compositionAlbum("Band/Album", "Album", 1876, 1876, 2022)
 		requireYear(t, tracks, tracks[0].Path, 2022, true)
-		requireYear(t, tracks, tracks[1].Path, 2022, false)
+		requireYear(t, tracks, tracks[1].Path, 2022, true)
+		requireYear(t, tracks, tracks[2].Path, 2022, false)
 	})
 
 	t.Run("boundary-1877", func(t *testing.T) {
-		tracks := compositionAlbum("Band/Album", "Album", 1877, 2022)
+		tracks := compositionAlbum("Band/Album", "Album", 1877, 1877, 2022)
 		requireYear(t, tracks, tracks[0].Path, 1877, false)
-		requireYear(t, tracks, tracks[1].Path, 2022, false)
+		requireYear(t, tracks, tracks[1].Path, 1877, false)
+		requireYear(t, tracks, tracks[2].Path, 1877, true)
 	})
 
 	t.Run("other-folder", func(t *testing.T) {
@@ -429,36 +435,23 @@ func TestReconcileYearsTreatsACompositionDateAsMissing(t *testing.T) {
 	})
 
 	t.Run("two-recording-years", func(t *testing.T) {
-		// 2019 ×3, 2021 ×2, 1720 ×4. The composition dates take the
-		// dominant recording year, 2019, and the 2021s stay.
+		// 2019 ×3, 2021 ×2, 1720 ×4. The composition dates do not vote,
+		// so 2019 wins, and the 2021s and the 1720s take it.
 		tracks := compositionAlbum("Band/Album", "Album",
 			2019, 2019, 2019, 2021, 2021, 1720, 1720, 1720, 1720)
 		for _, tr := range tracks {
-			want, changed := 2019, false
-			if tr.Year != nil && *tr.Year == 2021 {
-				want = 2021
-			}
-			if tr.Year != nil && *tr.Year == 1720 {
-				changed = true
-			}
-			requireYear(t, tracks, tr.Path, want, changed)
+			requireYear(t, tracks, tr.Path, 2019, *tr.Year != 2019)
 		}
 	})
 
 	t.Run("recording-year-tie", func(t *testing.T) {
 		// 2018 and 2020 are tied, so the larger recording year wins.
-		// The three composition dates take 2020 and do not vote.
+		// The three composition dates take 2020 and do not vote, and the
+		// 2018s take it too.
 		tracks := compositionAlbum("Band/Album", "Album",
 			2018, 2018, 2020, 2020, 1685, 1685, 1685)
 		for _, tr := range tracks {
-			want, changed := 2020, false
-			if tr.Year != nil && *tr.Year == 2018 {
-				want = 2018
-			}
-			if tr.Year != nil && *tr.Year == 1685 {
-				changed = true
-			}
-			requireYear(t, tracks, tr.Path, want, changed)
+			requireYear(t, tracks, tr.Path, 2020, *tr.Year != 2020)
 		}
 	})
 }

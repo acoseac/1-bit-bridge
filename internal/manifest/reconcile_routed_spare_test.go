@@ -71,10 +71,13 @@ func TestReconciliationPasses_SpareUPnPRoutedRows(t *testing.T) {
 	}
 
 	// Routed album: AlbumArtist disagreement + a missing year on the minority
-	// track — a candidate for both reconcileAlbumArtists and reconcileYears.
+	// track — a candidate for both reconcileAlbumArtists and reconcileYears —
+	// and a minority recording year, which reconcileYears rewrites since
+	// backlog B756.
 	seedRoutedAlbumTrack(t, store, &Track{Path: "2go/Aspiration/Live/01.flac", Album: "Live", AlbumArtist: "Aspiration", Year: yp(2005)})
 	seedRoutedAlbumTrack(t, store, &Track{Path: "2go/Aspiration/Live/02.flac", Album: "Live", AlbumArtist: "Aspiration", Year: yp(2005)})
 	seedRoutedAlbumTrack(t, store, &Track{Path: "2go/Aspiration/Live/03. Take.flac", Album: "Live", AlbumArtist: "Peter Asplund; Aspiration"})
+	seedRoutedAlbumTrack(t, store, &Track{Path: "2go/Aspiration/Live/04.flac", Album: "Live", AlbumArtist: "Aspiration", Year: yp(2001)})
 
 	// Filesystem album with the SAME disagreement — positive control that the
 	// passes still DO their job on non-routed rows (so the test can't pass by
@@ -83,6 +86,7 @@ func TestReconciliationPasses_SpareUPnPRoutedRows(t *testing.T) {
 		{Path: "Aspiration/Live/01.flac", Album: "Live", AlbumArtist: "Aspiration", Year: yp(2005)},
 		{Path: "Aspiration/Live/02.flac", Album: "Live", AlbumArtist: "Aspiration", Year: yp(2005)},
 		{Path: "Aspiration/Live/03. Take.flac", Album: "Live", AlbumArtist: "Peter Asplund; Aspiration"},
+		{Path: "Aspiration/Live/04.flac", Album: "Live", AlbumArtist: "Aspiration", Year: yp(2001)},
 	}
 	for _, tr := range fs {
 		tr.Size, tr.ModTime, tr.Title, tr.Artist = 10, time.Unix(100, 0), "x", "x"
@@ -109,24 +113,35 @@ func TestReconciliationPasses_SpareUPnPRoutedRows(t *testing.T) {
 		t.Errorf("routed AlbumArtist = %q, want SPARED %q", got, "Peter Asplund; Aspiration")
 	}
 
-	// Year fill pass: FS missing year filled from siblings; routed stays missing.
+	// Year pass: FS missing year filled from siblings and the minority
+	// recording year given the album's; routed stays missing and 2001.
 	if _, err := s.runReconcileStep(ctx, routedSet, yearStep); err != nil {
 		t.Fatalf("yearStep: %v", err)
 	}
 	if got := yearOf("Aspiration/Live/03. Take.flac"); got == nil || *got != 2005 {
 		t.Errorf("fs missing year = %v, want filled 2005", got)
 	}
+	if got := yearOf("Aspiration/Live/04.flac"); got == nil || *got != 2005 {
+		t.Errorf("fs minority year = %v, want the album's 2005", got)
+	}
 	if got := yearOf("2go/Aspiration/Live/03. Take.flac"); got != nil {
 		t.Errorf("routed year = %v, want SPARED (nil)", *got)
 	}
+	if got := yearOf("2go/Aspiration/Live/04.flac"); got == nil || *got != 2001 {
+		t.Errorf("routed minority year = %v, want SPARED (2001)", got)
+	}
 
-	// AlbumTitle + YearByMBID passes use the same routedExclusionSet guard;
-	// run them and re-confirm the routed row is still untouched end-to-end.
+	// AlbumTitle + YearByMBID passes, and the year pass's second run, use the
+	// same routedExclusionSet guard; run them and re-confirm the routed row is
+	// still untouched end-to-end.
 	if _, err := s.runReconcileStep(ctx, routedSet, albumTitleStep); err != nil {
 		t.Fatalf("albumTitleStep: %v", err)
 	}
 	if _, err := s.runReconcileStep(ctx, routedSet, yearByMBIDStep); err != nil {
 		t.Fatalf("yearByMBIDStep: %v", err)
+	}
+	if _, err := s.runReconcileStep(ctx, routedSet, yearAfterMBIDStep); err != nil {
+		t.Fatalf("yearAfterMBIDStep: %v", err)
 	}
 
 	// TrackNumber pass: FS missing track number filled from the filename's
@@ -146,5 +161,8 @@ func TestReconciliationPasses_SpareUPnPRoutedRows(t *testing.T) {
 	}
 	if got := yearOf("2go/Aspiration/Live/03. Take.flac"); got != nil {
 		t.Errorf("after all passes, routed year = %v, want SPARED (nil)", *got)
+	}
+	if got := yearOf("2go/Aspiration/Live/04.flac"); got == nil || *got != 2001 {
+		t.Errorf("after all passes, routed minority year = %v, want SPARED (2001)", got)
 	}
 }

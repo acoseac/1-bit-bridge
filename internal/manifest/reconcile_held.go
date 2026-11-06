@@ -54,12 +54,13 @@ var albumArtistStep = reconcileStep{
 	apply:  (*Store).ApplyAlbumArtistReconciliation,
 }
 
-// yearStep fills a MISSING album year from the album's dominant year
-// (reconcileYears), so a single untagged track doesn't split off into its own
-// album row on iOS. Fill-missing only: a present year is left alone.
+// yearStep gives each physical album one year (reconcileYears): when a
+// directory's album has a recording year, every track whose year is not the
+// dominant one takes it, so neither an untagged track nor a track carrying
+// another recording year splits off into an album row of its own on iOS.
 var yearStep = reconcileStep{
 	label:  "year reconciliation",
-	fixed:  "year reconciliation filled missing album years",
+	fixed:  "year reconciliation gave each album one year",
 	decide: reconcileYears,
 	take:   func(dst *ReconcileTarget, c ReconcileTarget) { dst.Year = c.Year },
 	set:    func(t *Track, c ReconcileTarget) { t.Year = c.Year },
@@ -69,11 +70,25 @@ var yearStep = reconcileStep{
 // yearByMBIDStep fills a year-0 stray (a few loose tracks in their own
 // folder) from a same-MBID sibling (reconcileYearsByMBID), bounded to genuine
 // strays so it cannot merge two full copies or editions. It complements the
-// within-folder year pass before it.
+// within-folder year pass before it, and leaves every present year alone.
 var yearByMBIDStep = reconcileStep{
 	label:  "year reconciliation (mbid)",
 	fixed:  "year reconciliation (mbid) filled stray years",
 	decide: reconcileYearsByMBID,
+	take:   func(dst *ReconcileTarget, c ReconcileTarget) { dst.Year = c.Year },
+	set:    func(t *Track, c ReconcileTarget) { t.Year = c.Year },
+	apply:  (*Store).ApplyYearReconciliation,
+}
+
+// yearAfterMBIDStep is the year pass again, after the MBID fill: two strays of
+// one folder that borrow different years from their release ids take the
+// folder's one year in the same scan, where only the next scan's year pass
+// gave it to them (backlog B756). It changes nothing in a group the MBID fill
+// did not touch: yearStep leaves every group as the pass would leave it.
+var yearAfterMBIDStep = reconcileStep{
+	label:  "year reconciliation (after mbid)",
+	fixed:  "year reconciliation (after mbid) gave each album one year",
+	decide: reconcileYears,
 	take:   func(dst *ReconcileTarget, c ReconcileTarget) { dst.Year = c.Year },
 	set:    func(t *Track, c ReconcileTarget) { t.Year = c.Year },
 	apply:  (*Store).ApplyYearReconciliation,
@@ -93,9 +108,10 @@ var trackNumberStep = reconcileStep{
 }
 
 // reconcileSteps are the reconciliation passes in the order the scan's tail
-// runs them, and settleHeldReconciles replays them. One list, so the two
-// cannot come to disagree about the order.
-var reconcileSteps = []reconcileStep{albumTitleStep, albumArtistStep, yearStep, yearByMBIDStep, trackNumberStep}
+// runs them, and settleHeldReconciles replays them: five passes, the year
+// pass run again after the MBID fill. One list, so the two cannot come to
+// disagree about the order.
+var reconcileSteps = []reconcileStep{albumTitleStep, albumArtistStep, yearStep, yearByMBIDStep, yearAfterMBIDStep, trackNumberStep}
 
 // reconcileTargetOf is t's projection for the passes: every field any of
 // them reads. The integers are copied, never shared: StreamTracks reuses one

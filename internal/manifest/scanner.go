@@ -1256,9 +1256,9 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 		return count, nil
 	}
 	// Compute the UPnP-routed exclusion set ONCE for the five reconciliation
-	// passes below — they all skip routed rows, and recomputing it per-pass
-	// re-queried the DB + re-allocated a ~15k-entry map five times (Gemini
-	// PR #511). Fail closed: a fetch error skips ALL reconciliation this scan
+	// passes below (the year pass runs twice) — they all skip routed rows,
+	// and recomputing it per-pass re-queried the DB + re-allocated a
+	// ~15k-entry map five times (Gemini PR #511). Fail closed: a fetch error skips ALL reconciliation this scan
 	// (each pass would otherwise abort identically), logged non-fatal; the next
 	// scan retries. See routedExclusionSet for the full rationale + contract.
 	routedSet, rsErr := s.routedExclusionSet(ctx)
@@ -1283,9 +1283,10 @@ func (s *Scanner) Scan(ctx context.Context) (int, error) {
 	// rows as written.
 	count += s.settleHeldReconciles(ctx, routedSet)
 	// The reconciliation passes, in order (reconcileSteps: album title, album
-	// artist, year, year by MBID, track number), each reading what the one
-	// before it wrote. DB-only, enriched_at untouched. Non-fatal: a
-	// reconciliation error must not fail an otherwise-successful scan.
+	// artist, year, year by MBID, year again, track number), each reading
+	// what the one before it wrote. DB-only, enriched_at untouched.
+	// Non-fatal: a reconciliation error must not fail an otherwise-successful
+	// scan.
 	for _, step := range reconcileSteps {
 		if n, rErr := s.runReconcileStep(ctx, routedSet, step); rErr != nil {
 			reportReconciliation(ctx, step.label, rErr)
@@ -1509,8 +1510,9 @@ func countRowsUnderDirLinks(ctx context.Context, store *Store, links []string) a
 // reportReconciliation logs a reconciliation pass that failed. One the
 // shutdown stopped is not reported: its transaction rolled back, and the
 // passes after it fail the same way on the same cancelled context, so a
-// shutdown during the tail would otherwise put up to five failures in the
-// journal for passes that failed at nothing. The next scan reconciles.
+// shutdown during the tail would otherwise put up to six failures (five
+// passes, the year pass run twice) in the journal for passes that failed at
+// nothing. The next scan reconciles.
 func reportReconciliation(ctx context.Context, pass string, err error) {
 	if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
 		scanLogger.Error(pass, "err", failure)
@@ -2115,11 +2117,11 @@ func markStampIfUnchanged(fresh, old *Track) {
 // (Genre, Composer, DiscNumber, …): those are extractor-owned, and
 // copying old values for them would mask the very extractor changes an
 // ExtractorVersion bump exists to apply. The passes also REWRITE values a
-// file sets (a folder-name album, a minority album artist, a year of 0),
-// which no copy-where-empty rule can keep without masking the same
-// changes: a re-read still differing in one of those fields after this
-// merge is judged by the passes themselves, at the scan's tail
-// (reExtractUnchanged holds it, settleHeldReconciles writes it).
+// file sets (a folder-name album, a minority album artist, a year of 0, a
+// minority year in an album), which no copy-where-empty rule can keep
+// without masking the same changes: a re-read still differing in one of
+// those fields after this merge is judged by the passes themselves, at the
+// scan's tail (reExtractUnchanged holds it, settleHeldReconciles writes it).
 //
 // Fresh-non-zero WINS: a re-extract that now finds a `local-` cover
 // overrides a stored CAA UUID (the curated-art-outranks-remote
