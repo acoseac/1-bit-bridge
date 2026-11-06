@@ -56,6 +56,12 @@ type playerCollectionDTO struct {
 	// first, for the tile mosaic. Empty when nothing in the collection
 	// resolves to a local album with artwork.
 	Covers []playerCoverRefDTO `json:"covers,omitempty"`
+	// OutOfSeason, smart mixes only, marks a family the 1-bit app is not
+	// shown now: the Christmas family outside 1 December to 5 January, UTC,
+	// which GET /v1/smart-playlists leaves out (smartMixOutOfSeason). The
+	// console still lists it, marked, so an operator can see it, regenerate
+	// it or give it a cover before its season.
+	OutOfSeason bool `json:"outOfSeason,omitempty"`
 }
 
 // playerCoverRefDTO is the pair coverURL() needs, named to match
@@ -248,14 +254,16 @@ func (s *Server) apiPlayerMixes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	covers := s.coverSet(r, manifest.CoverScopeSmartMix)
+	now := s.now()
 	out := make([]playerCollectionDTO, 0, len(rows))
 	for _, m := range rows {
 		_, hasCover := covers[strings.ToLower(m.Slug)]
 		out = append(out, playerCollectionDTO{
 			ID: m.Slug, Name: m.Title, Kind: m.Kind, Subtitle: m.Subtitle,
-			Count:    smartPlaylistItemCount(m),
-			HasCover: hasCover,
-			Covers:   mosaicFor(cat, smartMixHeadPaths(m, mosaicScanDepth)),
+			Count:       smartPlaylistItemCount(m),
+			HasCover:    hasCover,
+			Covers:      mosaicFor(cat, smartMixHeadPaths(m, mosaicScanDepth)),
+			OutOfSeason: smartMixOutOfSeason(m.Kind, now),
 		})
 	}
 	writeJSON(w, http.StatusOK, playerMixesResponse{
@@ -320,6 +328,7 @@ func (s *Server) apiPlayerMixDetail(w http.ResponseWriter, r *http.Request) {
 		Collection: playerCollectionDTO{
 			ID: row.Slug, Name: row.Title, Kind: row.Kind, Subtitle: row.Subtitle,
 			Count: len(views), HasCover: hasCover, Covers: mosaicFor(cat, paths),
+			OutOfSeason: smartMixOutOfSeason(row.Kind, s.now()),
 		},
 		Tracks:     tracks,
 		Unresolved: len(views) - len(tracks),

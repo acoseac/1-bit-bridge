@@ -14,6 +14,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
 	"github.com/acoseac/1-bit-bridge/internal/smartplaylist"
+	"github.com/acoseac/1-bit-bridge/internal/smartplaylist/season"
 	"github.com/acoseac/1-bit-bridge/internal/smartplaylistgen"
 )
 
@@ -25,6 +26,27 @@ type smartPlaylistSummaryRow struct {
 	Position    int    `json:"position"`
 	RefreshedAt int64  `json:"refreshedAt"`
 	ItemCount   int    `json:"itemCount"`
+	// OutOfSeason marks a family the 1-bit app is not shown now
+	// (smartMixOutOfSeason), as the player's mix views do.
+	OutOfSeason bool `json:"outOfSeason,omitempty"`
+}
+
+// smartMixOutOfSeason reports whether a cached family is one GET
+// /v1/smart-playlists leaves out at now: the Christmas family outside its
+// window, 1 December to 5 January, UTC (season.InWindow, the API's own
+// predicate). The family is generated all year, so the console lists it
+// all year and says so.
+func smartMixOutOfSeason(kind string, now time.Time) bool {
+	return kind == string(smartplaylist.KindChristmas) && !season.InWindow(now)
+}
+
+// now is the clock the smart mixes' views read: a test's (testNow) when set,
+// else time.Now.
+func (s *Server) now() time.Time {
+	if s.testNow != nil {
+		return s.testNow()
+	}
+	return time.Now()
 }
 
 // apiSmartPlaylistsList handles GET /api/smart-playlists — loopback inspection
@@ -36,12 +58,14 @@ func (s *Server) apiSmartPlaylistsList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
+	now := s.now()
 	out := make([]smartPlaylistSummaryRow, 0, len(rows))
 	for _, row := range rows {
 		out = append(out, smartPlaylistSummaryRow{
 			Slug: row.Slug, Kind: row.Kind, Title: row.Title,
 			Position: row.Position, RefreshedAt: row.RefreshedAt,
-			ItemCount: smartPlaylistItemCount(row),
+			ItemCount:   smartPlaylistItemCount(row),
+			OutOfSeason: smartMixOutOfSeason(row.Kind, now),
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"playlists": out})
