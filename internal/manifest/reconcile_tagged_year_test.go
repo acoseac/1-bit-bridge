@@ -241,6 +241,16 @@ func TestANilTagIsRecordedAndRestored(t *testing.T) {
 		requireTaggedYear(t, store, rels[1], nil)
 		requireNoTaggedYear(t, store, rels[0])
 
+		// A bump re-reads the untagged file, whose tag still gives no year:
+		// it keeps the album's year and its record (mergeYear), so it is only
+		// stamped.
+		before := rewindAll(t, store)
+		scanOnce(t, sc, "a bump over the untagged track")
+		if moved := movedRows(t, store, before); len(moved) != 0 {
+			t.Errorf("the bump moved %v, want none", moved)
+		}
+		requireTaggedYear(t, store, rels[1], nil)
+
 		removeLibraryFile(t, root, rels[0])
 		scanOnce(t, sc, "the scan that reaps the dated track")
 		if y := readTrack(t, store, rels[1]).Year; y != nil {
