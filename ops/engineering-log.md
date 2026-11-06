@@ -78779,3 +78779,25 @@ an update over a gated routed row or tombstone restarts the deletion journal
 (`deltaIncomplete`'s list of causes names it); the loopback route serves no
 correction file, and the reading says `source_lossy` for a hybrid MPD
 fetches there. `ProtocolVersion` stays 1.
+
+### Gates
+
+On legion0 at 80f8b41a, each run that builds or tests many packages through
+the shared build lock: go1.27.3's gofmt on every Go file the branch changed
+since 4880f8a4, clean; `make docs-check`, ok, and `rules-b489b-r2.patch`
+applied over round 1's results with the budgets measured over the outcome
+(above); the qualification check (`scripts/qualification-version -base
+4880f8a4 -head HEAD`), "qualification version OK: 4880f8a4..HEAD"; `make
+vet` native and with `GOOS=windows`, `GOOS=darwin`, `GOOS=linux GOARCH=386`
+and `GOOS=linux GOARCH=arm`, each clean; `make test-fast`, 86 packages ok
+and none failed (cmd/bridge 447 s, internal/manifest 276 s; the Linux-only
+`internal/alsapcm` and `internal/atomicwrite` run here); `make test
+TEST_PKGS="./internal/manifest/... ./internal/api/... ./internal/dlna/...
+./cmd/bridge/..."` (race, the Makefile's tags, 30 min a package), ok:
+internal/manifest 1,500 s, internal/api 124 s, internal/dlna 43 s,
+internal/dlna/discovery 3 s, cmd/bridge 1,033 s; `make build-all`, the six
+targets. A first run at 6d38cbc5 was stopped after its vets passed, when the
+bitstream point above was found; nothing in it had failed. Not run here:
+macOS and Windows natively, CI's runners, the race detector over the other
+packages (`internal/admin`, which round 2 does not touch, among them), and
+the iOS app, whose mirror of PROTOCOL.md's changes is owed.
