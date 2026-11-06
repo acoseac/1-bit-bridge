@@ -95,8 +95,10 @@ type jobsAnalysis struct {
 }
 
 // jobsEnrichment — gates only; live pending/matched/missing counts ride
-// the existing SSE `enrichment` event.
+// the existing SSE `enrichment` event. Off is enrich.enabled off (backlog
+// B617), which the card's badge reads.
 type jobsEnrichment struct {
+	Off           bool `json:"off"`
 	HarvestActive bool `json:"harvestActive"`
 }
 
@@ -266,12 +268,12 @@ func (s *Server) getJobsSnapshot(ctx context.Context) jobsSnapshotResponse {
 		}
 	}
 
-	// Enrichment (always-on worker; the card links to Settings for the
-	// source picker and shows live counts from the SSE event).
-	// HarvestActive is CONFIG-derived — the HarvestForceSubmit closure
-	// is wired unconditionally (it returns false when the client isn't
-	// running), so closure presence is not a signal here.
-	resp.Enrichment.HarvestActive = cfg.Atlas.Enabled && cfg.Atlas.HarvestEnabled
+	// Enrichment: the worker runs on every bridge, gated live by
+	// enrich.enabled (backlog B617); the card links to Settings for the
+	// switches and the source picker, and shows live counts from the SSE
+	// event. Both fields are CONFIG-derived (enrichmentStateOf).
+	st := enrichmentStateOf(cfg)
+	resp.Enrichment.Off, resp.Enrichment.HarvestActive = !st.on, st.harvestActive
 
 	// Network lyrics tier. The counts are only READ when the feature is on:
 	// they cost a full scan, and a bridge that never enabled this should not

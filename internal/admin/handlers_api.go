@@ -393,10 +393,15 @@ type settingsResponse struct {
 	// (cfg.LibraryWatch.Enabled, default false). Restart-required: the
 	// watcher goroutine is spawned once at `bridge serve` startup.
 	LibraryWatchEnabled bool `json:"libraryWatchEnabled"`
+	// EnrichEnabled and EnrichDeezerEnabled are enrich.enabled and
+	// enrich.deezerEnabled, RESOLVED (absent is on), as the live config
+	// holds them, an environment value at the last start included (backlog
+	// B617). Live.
+	EnrichEnabled       bool `json:"enrichEnabled"`
+	EnrichDeezerEnabled bool `json:"enrichDeezerEnabled"`
 	// Enrich upstream base-URL overrides (from the `enrich` config block).
 	// Empty = public MusicBrainz / Cover Art Archive defaults; point both at
-	// a self-hosted Atlas mirror to keep enrichment on-network.
-	// Restart-required.
+	// a self-hosted Atlas mirror to keep those two lookups on-network. Live.
 	EnrichMusicBrainzBaseURL string `json:"enrichMusicBrainzBaseURL"`
 	EnrichCoverArtBaseURL    string `json:"enrichCoverArtBaseURL"`
 	// AtlasEnabled is the rich-tier Atlas metadata opt-in (bios / descriptions
@@ -1104,6 +1109,14 @@ type enrichmentResponse struct {
 	// already cached on the bridge's disk. Nil (omitted) on bridges
 	// without the booklet wiring or when none are available yet.
 	Booklets *bookletCounts `json:"booklets,omitempty"`
+	// Off, DeezerOff and HarvestActive are the switches the card's Retry
+	// missing answers to (enrichmentState, backlog B617), config-derived
+	// like Source: Off is enrich.enabled off, and the card says "Off" with
+	// the switch's place where it would say what is queued; DeezerOff is
+	// enrich.deezerEnabled off; HarvestActive is the Atlas harvest running.
+	Off           bool `json:"off,omitempty"`
+	DeezerOff     bool `json:"deezerOff,omitempty"`
+	HarvestActive bool `json:"harvestActive,omitempty"`
 }
 
 // bookletCounts is the available/cached pair for the booklet stat row.
@@ -1208,6 +1221,8 @@ func (s *Server) freshEnrichmentSnapshot(ctx context.Context) enrichmentResponse
 func (s *Server) decorateEnrichment(snap enrichmentResponse) enrichmentResponse {
 	if cfg := s.deps.CfgHolder.Load(); cfg != nil {
 		snap.Source, _ = deriveEnrichSource(cfg.Enrich.MusicBrainzBaseURL, cfg.Enrich.CoverArtBaseURL)
+		st := enrichmentStateOf(cfg)
+		snap.Off, snap.DeezerOff, snap.HarvestActive = !st.on, !st.deezerOn, st.harvestActive
 	}
 	meta := s.getEnrichmentMetaSnapshot()
 	snap.ArtistImages = meta.ArtistImages
@@ -1406,9 +1421,14 @@ const enrichRetryMinInterval = 60 * time.Second
 // all caught up" sitting under a button you just pressed reads as the button
 // having done nothing.
 type enrichmentRetryResponse struct {
-	ResetTracks        int64               `json:"resetTracks"`
-	HarvestResubmitted bool                `json:"harvestResubmitted"`
-	Enrichment         *enrichmentResponse `json:"enrichment,omitempty"`
+	ResetTracks        int64 `json:"resetTracks"`
+	HarvestResubmitted bool  `json:"harvestResubmitted"`
+	// EnrichmentOff says the retry ran none of the facets that feed the
+	// enricher, enrich.enabled being off; DeezerOff that it re-queued no
+	// row for its portrait, enrich.deezerEnabled being off (backlog B617).
+	EnrichmentOff bool                `json:"enrichmentOff,omitempty"`
+	DeezerOff     bool                `json:"deezerOff,omitempty"`
+	Enrichment    *enrichmentResponse `json:"enrichment,omitempty"`
 }
 
 // apiEnrichmentRetry handles POST /api/enrichment/retry — the dashboard's
@@ -1423,9 +1443,23 @@ type enrichmentRetryResponse struct {
 //  3. Bios / album descriptions are NOT enricher-owned (they arrive via the
 //     Atlas harvest results), so their retry is a forced full re-submit on
 //     the harvest client's next tick (HarvestForceSubmit, nil-safe).
+//
+// The facets that feed only the enricher (1, 2 and the fingerprint clear)
+// run only while it runs (backlog B617): a re-queue that would wait for a
+// turn the enricher does not take while enrich.enabled is off is the
+// dishonest answer, so they are skipped and the answer says so
+// (enrichmentOff), and with no other facet that can run the retry is
+// refused, 409, before anything is written or the rate guard is stamped.
+// With enrich.deezerEnabled off, facet 2 is skipped too (deezerOff): it would
+// re-run each portrait-less row and stamp it again with no portrait.
 func (s *Server) apiEnrichmentRetry(w http.ResponseWriter, r *http.Request) {
 	if s.deps.Manifest == nil {
 		writeError(w, http.StatusServiceUnavailable, "not-wired", "manifest store not available")
+		return
+	}
+	st := enrichmentStateOf(s.deps.CfgHolder.Load())
+	if !st.on && !st.harvestActive {
+		writeError(w, http.StatusConflict, errCodeEnrichmentOff, errMsgEnrichmentOffRetry)
 		return
 	}
 	s.enrichRetryMu.Lock()
@@ -1440,25 +1474,31 @@ func (s *Server) apiEnrichmentRetry(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), enrichmentDBTimeout)
 	defer cancel()
-	reset, err := s.deps.Manifest.ResetEnrichedMisses(ctx)
-	if err != nil {
-		// The reset failed — nothing was re-queued — so don't hold the 60s
-		// rate-guard against the operator's next click; the reset is idempotent.
-		s.enrichRetryMu.Lock()
-		s.enrichRetryAt = time.Time{}
-		s.enrichRetryMu.Unlock()
-		writeError(w, http.StatusInternalServerError, "reset-failed", err.Error())
-		return
+	var reset int64
+	if st.on {
+		n, err := s.deps.Manifest.ResetEnrichedMisses(ctx)
+		if err != nil {
+			// The reset failed — nothing was re-queued — so don't hold the 60s
+			// rate-guard against the operator's next click; the reset is idempotent.
+			s.enrichRetryMu.Lock()
+			s.enrichRetryAt = time.Time{}
+			s.enrichRetryMu.Unlock()
+			writeError(w, http.StatusInternalServerError, "reset-failed", err.Error())
+			return
+		}
+		reset = n
+		// Facet 2: artist image gaps (extracted helper — see its doc).
+		if st.artistImagesOn() {
+			reset += s.resetArtistImageGaps(ctx)
+		}
+		// Facet 3: fingerprint suppression markers — files AcoustID declined, and
+		// files whose answer the enricher vetoed against their own tags. Without
+		// this the button would silently exclude both, which is the objection that
+		// kept those verdicts in memory in the first place — "Retry missing" has to
+		// mean try again. Deliberately not added to `reset`, which counts rows
+		// re-queued for the ENRICHER; these re-enter the fingerprint sweep instead.
+		s.clearFingerprintSuppression(ctx, "enrichment retry", "")
 	}
-	// Facet 2: artist image gaps (extracted helper — see its doc).
-	reset += s.resetArtistImageGaps(ctx)
-	// Facet 3: fingerprint suppression markers — files AcoustID declined, and
-	// files whose answer the enricher vetoed against their own tags. Without
-	// this the button would silently exclude both, which is the objection that
-	// kept those verdicts in memory in the first place — "Retry missing" has to
-	// mean try again. Deliberately not added to `reset`, which counts rows
-	// re-queued for the ENRICHER; these re-enter the fingerprint sweep instead.
-	s.clearFingerprintSuppression(ctx, "enrichment retry", "")
 	resubmitted := false
 	if s.deps.HarvestForceSubmit != nil {
 		resubmitted = s.deps.HarvestForceSubmit()
@@ -1472,7 +1512,8 @@ func (s *Server) apiEnrichmentRetry(w http.ResponseWriter, r *http.Request) {
 	// re-populate the very fields it enumerates, so a stale entry would
 	// keep listing tracks that are already back in the queue.
 	s.libMetaInvalidateUnder("")
-	logger.Info("enrichment retry triggered", "resetTracks", reset, "harvestResubmitted", resubmitted)
+	logger.Info("enrichment retry triggered", "resetTracks", reset, "harvestResubmitted", resubmitted,
+		"enrichmentOff", !st.on, "deezerOff", st.on && !st.deezerOn)
 	// Hand the card its new numbers with the ack. The enrichment SSE event
 	// rides the 30s slow ticker, so without this the panel shows the pre-retry
 	// counts for up to half a minute after the click. Read direct rather than
@@ -1482,6 +1523,8 @@ func (s *Server) apiEnrichmentRetry(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, enrichmentRetryResponse{
 		ResetTracks:        reset,
 		HarvestResubmitted: resubmitted,
+		EnrichmentOff:      !st.on,
+		DeezerOff:          st.on && !st.deezerOn,
 		Enrichment:         &fresh,
 	})
 }
@@ -2265,6 +2308,8 @@ func settingsResponseFromConfig(cfg *config.Config, isSupervised bool) settingsR
 		AutoOptimizeMaxPerSweep:  cfg.Upscale.AutoOptimize.EffectiveMaxPerSweep(),
 		AutoOptimizeMinFreeBytes: cfg.Upscale.AutoOptimize.EffectiveMinFreeBytes(),
 		LibraryWatchEnabled:      cfg.LibraryWatch.Enabled,
+		EnrichEnabled:            cfg.Enrich.EffectiveEnabled(),
+		EnrichDeezerEnabled:      cfg.Enrich.EffectiveDeezerEnabled(),
 		EnrichMusicBrainzBaseURL: cfg.Enrich.MusicBrainzBaseURL,
 		EnrichCoverArtBaseURL:    cfg.Enrich.CoverArtBaseURL,
 		AtlasEnabled:             cfg.Atlas.Enabled,
@@ -2434,8 +2479,15 @@ type settingsPatch struct {
 	// Restart-required: the watcher goroutine is spawned once at
 	// `bridge serve` startup (same startup-wired shape as UpscaleEnabled).
 	LibraryWatchEnabled *bool `json:"libraryWatchEnabled,omitempty"`
-	// Enrich upstream base-URL overrides. Restart-required: the enricher's
-	// MB / Cover Art clients are constructed once at `bridge serve` startup.
+	// EnrichEnabled and EnrichDeezerEnabled set enrich.enabled and
+	// enrich.deezerEnabled (backlog B617). Live: the enricher, the
+	// fingerprint gate, the artwork misses and the manifest read them per
+	// use. Only off is written; on clears the key, so the file stays one an
+	// older binary loads.
+	EnrichEnabled       *bool `json:"enrichEnabled,omitempty"`
+	EnrichDeezerEnabled *bool `json:"enrichDeezerEnabled,omitempty"`
+	// Enrich upstream base-URL overrides. Live: both clients read the base
+	// per use (WithLiveBase), their pacing re-derived from it.
 	// Config.Validate normalizes (trailing slash) + validates (absolute
 	// http/https) these before save.
 	EnrichMusicBrainzBaseURL *string `json:"enrichMusicBrainzBaseURL,omitempty"`
@@ -2941,10 +2993,34 @@ func (s *Server) apiSettingsPatch(w http.ResponseWriter, r *http.Request) {
 				report.unchanged("libraryWatchEnabled")
 			}
 		}
+		// enrich.enabled and enrich.deezerEnabled (backlog B617), compared
+		// against the RESOLVED value, since absent is on. HOT: the enricher,
+		// the fingerprint gate, the artwork misses and the manifest read both
+		// through serve's live closures, so a switch-off stops the enricher's
+		// batch under way within a second (and Deezer's next request), and a
+		// switch-on resumes at the enricher's next poll. Only off is written:
+		// on clears the key, so the file goes back to what an older binary
+		// loads.
+		if p.EnrichEnabled != nil {
+			if *p.EnrichEnabled != next.Enrich.EffectiveEnabled() {
+				next.Enrich.Enabled = enrichSwitchValue(*p.EnrichEnabled)
+				report.live("enrichEnabled")
+			} else {
+				report.unchanged("enrichEnabled")
+			}
+		}
+		if p.EnrichDeezerEnabled != nil {
+			if *p.EnrichDeezerEnabled != next.Enrich.EffectiveDeezerEnabled() {
+				next.Enrich.DeezerEnabled = enrichSwitchValue(*p.EnrichDeezerEnabled)
+				report.live("enrichDeezerEnabled")
+			} else {
+				report.unchanged("enrichDeezerEnabled")
+			}
+		}
 		// Enrich upstream base URLs (#406's config). Trim to match
 		// normalizeBaseURL so a re-submit of the stored value doesn't spuriously
-		// flag a restart; Config.Validate() below does the authoritative
-		// normalize + http(s) validation. Restart-required (clients wired once).
+		// flag a change; Config.Validate() below does the authoritative
+		// normalize + http(s) validation.
 		applyEnrichBase := func(field string, in *string, dst *string) {
 			if in == nil {
 				return

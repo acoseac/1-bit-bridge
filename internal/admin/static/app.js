@@ -302,8 +302,7 @@ function initStats() {
       enrichRetryBtn.textContent = "Retrying…";
       try {
         const r = await API.post("/api/enrichment/retry");
-        enrichRetryBtn.textContent =
-          r?.resetTracks > 0 ? `Re-queued ${r.resetTracks}` : "Re-checked";
+        enrichRetryBtn.textContent = retryAnswerText(r);
         // Repaint from the snapshot the handler computed post-reset. The
         // enrichment SSE event rides the 30s slow ticker, so without this the
         // panel keeps showing "0 tracks in the queue · all caught up" for up
@@ -618,6 +617,16 @@ function applyEnrichment(e) {
   setText("enrich-matched", e.matched ?? 0);
   setText("enrich-missing", e.missing ?? 0);
 
+  // enrich.enabled off (backlog B617): the Pending row says "Off" and where
+  // to turn it on, never a queue or an ETA the enricher will not keep.
+  const off = e.off === true;
+  const pendingRow = document.getElementById("enrich-pending-dd");
+  const offRow = document.getElementById("enrich-off-dd");
+  if (pendingRow && offRow) {
+    pendingRow.hidden = off;
+    offRow.hidden = !off;
+  }
+
   const last = document.getElementById("enrich-last");
   if (last) {
     last.textContent = e.lastEnrichedAt
@@ -626,7 +635,7 @@ function applyEnrichment(e) {
   }
 
   const etaEl = document.getElementById("enrich-eta");
-  if (etaEl) etaEl.textContent = formatEnrichEta(pending, e.etaSecondsEstimate);
+  if (etaEl) etaEl.textContent = off ? "" : formatEnrichEta(pending, e.etaSecondsEstimate);
 
   // Source row — config-derived label, hidden on frames that omit it.
   const srcDt = document.getElementById("enrich-source-dt");
@@ -655,16 +664,10 @@ function applyEnrichment(e) {
     if (show) bkDd.textContent = `${bk.available} available · ${bk.cached} cached`;
   }
 
-  // Reveal "Retry missing" only when some facet actually has gaps.
+  // Reveal "Retry missing" only when a facet that can run has gaps
+  // (enrichmentRetryOffers).
   const retryBtn = document.getElementById("enrich-retry");
-  if (retryBtn) {
-    const anyMissing =
-      (e.missing ?? 0) > 0 ||
-      (e.artistImages?.missing ?? 0) > 0 ||
-      (e.artistBios?.missing ?? 0) > 0 ||
-      (e.albumDescriptions?.missing ?? 0) > 0;
-    retryBtn.hidden = !anyMissing;
-  }
+  if (retryBtn) retryBtn.hidden = !enrichmentRetryOffers(e);
 
   // "Which tracks?" is gated on `missing` ALONE, not the same anyMissing
   // test as Retry. The endpoint enumerates the three per-track enricher
@@ -675,6 +678,33 @@ function applyEnrichment(e) {
   if (missesBtn) missesBtn.hidden = (e.missing ?? 0) <= 0;
 
   renderCoverageBar(e.matched ?? 0, e.missing ?? 0);
+}
+
+// enrichmentRetryOffers says whether "Retry missing" has a facet it can run
+// with gaps to fill (backlog B617): a control the server will refuse or skip
+// must not look live. It reads the server's own enrichmentState, sent on the
+// enrichment payload: the enricher's facets (`missing`, and `artistImages`
+// while Deezer is on too) count only while enrichment is on, and bios and
+// descriptions only while the Atlas harvest runs.
+function enrichmentRetryOffers(e) {
+  const enricher = e.off !== true;
+  const portraits = enricher && e.deezerOff !== true;
+  const harvest = e.harvestActive === true;
+  return (enricher && (e.missing ?? 0) > 0) ||
+    (portraits && (e.artistImages?.missing ?? 0) > 0) ||
+    (harvest && ((e.artistBios?.missing ?? 0) > 0 || (e.albumDescriptions?.missing ?? 0) > 0));
+}
+
+// retryAnswerText words what a "Retry missing" did, from the facets its
+// answer says ran (backlog B617): with enrichment off only the Atlas
+// harvest's re-submit can have run, and with Deezer off no row was queued
+// again for its portrait.
+function retryAnswerText(r) {
+  if (r?.enrichmentOff) {
+    return r.harvestResubmitted ? "Atlas re-submitted; enrichment is off" : "Enrichment is off";
+  }
+  const queued = r?.resetTracks > 0 ? `Re-queued ${r.resetTracks}` : "Re-checked";
+  return r?.deezerOff ? `${queued}; Deezer is off, no artist photos` : queued;
 }
 
 // Human labels for enrichmentResponse.source (deriveEnrichSource values).
@@ -4648,10 +4678,14 @@ function buildSettingsPayload(form, fd, enrichBases) {
     // off, so a blank box must send nothing rather than coerce to 0.
     retentionPlaybackHistoryDays: numOrUndef(fd.get("retentionPlaybackHistoryDays")),
     retentionDeviceRegistrationDays: numOrUndef(fd.get("retentionDeviceRegistrationDays")),
+    // enrich.enabled and enrich.deezerEnabled (backlog B617). Live; the
+    // server writes only off, so a save with both on leaves no key.
+    enrichEnabled: fd.get("enrichEnabled") === "on",
+    enrichDeezerEnabled: fd.get("enrichDeezerEnabled") === "on",
     // Enrich upstream base URLs, resolved from the source picker above
     // (blank = public MusicBrainz / Cover Art defaults; atlas = derived
     // <url>/ws/2 + <url>; custom = the raw Advanced fields). Server
-    // validates + normalizes; restart-required.
+    // validates + normalizes; live.
     enrichMusicBrainzBaseURL: enrichBases.mb,
     enrichCoverArtBaseURL: enrichBases.ca,
     // Rich-tier Atlas metadata opt-in (bios/descriptions via the app
@@ -5733,9 +5767,12 @@ function initJobs() {
       try {
         const r = await API.post("/api/enrichment/retry");
         if (r?.enrichment) applyEnrichment(r.enrichment);
-        retry.textContent = "Re-queued";
+        retry.textContent = retryAnswerText(r);
       } catch (err) {
-        retry.textContent = err.message.includes("rate_limited") ? "Try again in a minute" : "Retry failed";
+        // The refusal's code, never its prose: the 429's message says "wait
+        // a minute" and names no code.
+        if (err.code === "enrichment-off") retry.textContent = "Enrichment is off";
+        else retry.textContent = err.code === "rate_limited" ? "Try again in a minute" : "Retry failed";
       }
       setTimeout(() => { retry.textContent = "Retry missing"; setDisabled(retry, false); }, 4000);
     });
@@ -5797,9 +5834,21 @@ function mountJobTrays() {
 
   attachFeatureTray(head("enrichment-panel"), {
     title: "Enrichment",
-    blurb: "Covers, artist and release IDs are always fetched. This adds the " +
-      "rich tier — biographies and release descriptions — from your own Atlas.",
+    blurb: "Covers, artist and release IDs are looked up while enrichment is on. " +
+      "Atlas adds the rich tier — biographies and release descriptions — from your own mirror.",
     rows: [
+      {
+        field: "enrichEnabled", type: "switch",
+        label: "Look up covers, artist and release IDs",
+        hint: "Off, nothing goes to MusicBrainz, the Cover Art Archive, Deezer or a " +
+          "mirror, and fingerprinting stops; what was fetched stays and is served.",
+      },
+      {
+        field: "enrichDeezerEnabled", type: "switch",
+        label: "Artist photos from Deezer",
+        hint: "Off, an artist enriched meanwhile gets no photo until this is on " +
+          "again and Retry missing fetches it.",
+      },
       {
         field: "atlasEnabled", type: "switch", restart: true,
         label: "Atlas biographies and descriptions",
@@ -5830,9 +5879,9 @@ function mountJobTrays() {
     rows: [
       {
         field: "fingerprintEnabled", type: "switch", label: "Fingerprint unmatched tracks",
-        hint: "Needs fpcalc on the bridge host and a free AcoustID application " +
-          "key; without either the card says which is missing, and it starts once " +
-          "both are there, with no restart.",
+        hint: "Needs enrichment on, fpcalc on the bridge host and a free AcoustID " +
+          "application key; without one of them the card says which, and it starts " +
+          "once all are there, with no restart.",
       },
     ],
     link: { href: "/settings?tab=enrichment", text: "Fingerprint settings →" },
@@ -6093,6 +6142,9 @@ const JOB_DEGRADED_LABELS = {
   sox_missing: "sox is not installed on the bridge host, or has no FLAC support",
   fpcalc_missing: "fpcalc is not installed on the bridge host",
   no_api_key: "no AcoustID API key configured (ACOUSTID_API_KEY)",
+  // fingerprintGates sends this while enrich.enabled is off (backlog B617):
+  // a fingerprint's answer feeds the enricher alone.
+  enrichment_off: "enrichment is switched off (Settings → Enrichment), and fingerprints only feed it",
 };
 
 // jobDegradedLabel words a card's degraded key, the key itself when the
@@ -6133,7 +6185,10 @@ function renderJobCards(j) {
     ? "on — new files indexed within seconds"
     : "off — changes land on the next periodic scan");
 
-  // Enrichment extras (counts ride the SSE enrichment frame).
+  // Enrichment: its switch, enrich.enabled (backlog B617), and the harvest;
+  // the counts ride the SSE enrichment frame.
+  if (j.enrichment?.off) setBadge("job-enrich-state", "idle", "off");
+  else setBadge("job-enrich-state", "running", "on");
   setText("job-harvest-state", j.enrichment?.harvestActive
     ? "active — bios, descriptions & premium covers"
     : "off");
