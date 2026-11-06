@@ -153,6 +153,15 @@ func TestAHybridWavPacksCorrectionFileDecidesItsCodec(t *testing.T) {
 		}
 		return out
 	}
+	// emptyWVC is spec's correction file whose first block declares its
+	// correction bitstream empty, which the reference decoder refuses
+	// (init_wvc_bitstream).
+	emptyWVC := func() []byte {
+		first := wvFirstBlock(spec, true)
+		n := len(first.bytes())
+		first.subs = [][]byte{wvSub(fxIDWVCBitstream, nil)}
+		return append(first.bytes(), full[n:]...)
+	}()
 	cases := []struct {
 		name  string
 		wv    wvSpec
@@ -166,6 +175,7 @@ func TestAHybridWavPacksCorrectionFileDecidesItsCodec(t *testing.T) {
 		{"cut at a block's end, the length unknown", unknown, map[string][]byte{hybridWVC: wvFirstBlock(unknown, true).bytes()}, "", rejected},
 		{"its own, the stream from past its first sample", spec, map[string][]byte{hybridWVC: late(true, 2)}, "", matched},
 		{"cut at a block's end, the stream from past its first sample", spec, map[string][]byte{hybridWVC: late(true, 1)}, "", rejected},
+		{"its own, its correction bitstream empty", spec, map[string][]byte{hybridWVC: emptyWVC}, "", rejected},
 		{"no correction file", spec, nil, "", lossy},
 		{"its own", spec, map[string][]byte{hybridWVC: full}, "",
 			want{CodecWavPack, 16, SampleFormatInteger, hybridWVC, '+', false}},

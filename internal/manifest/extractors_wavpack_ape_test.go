@@ -164,6 +164,7 @@ func withWVFlags(spec wvSpec, flags uint32) []byte {
 func TestAWavPackFileItsReaderRefusesIsRefused(t *testing.T) {
 	std := stdWavPack()
 	zeroRate := wvSpec{rate: 0, bytes: 2, channels: 2, total: 44100, customRate: true}
+	int32Spec := wvSpec{rate: 48000, bytes: 4, channels: 2, total: 48000}
 	cases := []struct {
 		name string
 		data []byte
@@ -223,6 +224,24 @@ func TestAWavPackFileItsReaderRefusesIsRefused(t *testing.T) {
 			data := wvFile(std)
 			return data[:len(data)-40]
 		}()},
+		// And the same defect by another byte: a bitstream the block declares
+		// empty or of odd length, and an extended bitstream of its CRC alone
+		// or of odd length, are refused, as init_wv_bitstream and
+		// init_wvx_bitstream refuse them.
+		{"a first block whose bitstream is empty", func() []byte {
+			b := wvFirstBlock(std, false)
+			b.subs[len(b.subs)-1] = wvSub(fxIDWVBitstream, nil)
+			return b.bytes()
+		}()},
+		{"a first block whose bitstream is of odd length", func() []byte {
+			b := wvFirstBlock(std, false)
+			b.subs[len(b.subs)-1] = wvSub(fxIDWVBitstream, bytes.Repeat([]byte{0xA5}, 95))
+			return b.bytes()
+		}()},
+		{"an extended bitstream of its CRC alone", withSubBeforeBitstream(int32Spec, fxWVInt32,
+			wvSub(fxIDInt32Info, []byte{8, 0, 0, 0}), wvSub(fxIDWVXBitstream, []byte{1, 2, 3, 4}))},
+		{"an extended bitstream of odd length", withSubBeforeBitstream(int32Spec, fxWVInt32,
+			wvSub(fxIDInt32Info, []byte{8, 0, 0, 0}), wvSub(fxIDWVXBitstream, bytes.Repeat([]byte{0x33}, 15)))},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -278,6 +297,9 @@ func TestAStreamWhoseExtendedBitsAreMissingIsLossy(t *testing.T) {
 	int32Spec := wvSpec{rate: 48000, bytes: 4, channels: 2, total: 48000}
 	floatSpec := wvSpec{rate: 48000, bytes: 4, float: true, channels: 2, total: 48000}
 	wvx := wvSub(fxIDWVXBitstream, bytes.Repeat([]byte{0x33}, 16))
+	// The optional form of the extended bitstream, which a decoder that does
+	// not know it passes over.
+	wvxNew := wvSub(fxIDWVXNew, bytes.Repeat([]byte{0x33}, 16))
 	int32Info := func(sent byte) []byte { return wvSub(fxIDInt32Info, []byte{sent, 0, 0, 0}) }
 	lossless := func(kind string) formatFacts {
 		return formatFacts{CodecWavPack, 48000, 32, 2, false, kind, 1}
@@ -297,6 +319,9 @@ func TestAStreamWhoseExtendedBitsAreMissingIsLossy(t *testing.T) {
 		{"float sending the same shift, uncarried", withFloatInfo(floatSpec, 0x02), lossy},
 		{"float sending exceptions its extended bitstream carries", withFloatInfo(floatSpec, 0x20, wvx), lossless(SampleFormatFloat)},
 		{"float shifting ones, which sends nothing", withFloatInfo(floatSpec, 0x01), lossless(SampleFormatFloat)},
+		{"32-bit integer sending bits the optional extended bitstream carries", withSubBeforeBitstream(int32Spec, fxWVInt32, int32Info(8), wvxNew), lossless(SampleFormatInteger)},
+		{"float sending exceptions the optional extended bitstream carries", withFloatInfo(floatSpec, 0x20, wvxNew), lossless(SampleFormatFloat)},
+		{"float sending exceptions, an optional extended bitstream of its CRC alone", withFloatInfo(floatSpec, 0x20, wvSub(fxIDWVXNew, []byte{1, 2, 3, 4})), lossy},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

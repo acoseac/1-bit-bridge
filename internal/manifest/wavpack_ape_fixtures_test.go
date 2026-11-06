@@ -48,6 +48,9 @@ const (
 	fxIDDSDBlock     = 0xe
 	fxIDRIFFHeader   = 0x21
 	fxIDSampleRate   = 0x27
+	// fxIDWVXNew is the optional extended bitstream (ID_OPTIONAL_DATA |
+	// ID_WVX_BITSTREAM).
+	fxIDWVXNew = 0x2c
 )
 
 // fxWVRateIndex is the header's sample-rate index of rate (WavPack's table),
