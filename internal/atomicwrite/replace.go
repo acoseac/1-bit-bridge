@@ -28,7 +28,8 @@ import (
 // lose what path records keeps a second record of it, durable before the
 // call (the player's discard seal, backup.sealPlayerMarker). A barrier that
 // fails once both renames have landed leaves data in place and the write not
-// counted durable, as WriteBytesDurable's does.
+// counted durable, as WriteBytesDurable's does, and is marked ErrLanded; one
+// that fails once the entry is back in place is not.
 //
 // aside must name a file in path's directory, as written, other than path's
 // own name (ErrNotUnderRoot): an entry renamed out of that directory leaves
@@ -84,7 +85,7 @@ func ReplaceDurable(root, path, aside string, data []byte, tmpPrefix string) err
 		}
 		return err
 	}
-	return durableChain(chain, above)
+	return landed(durableChain(chain, above))
 }
 
 // stageDurable writes data to a file beside path, whose name tmpPrefix

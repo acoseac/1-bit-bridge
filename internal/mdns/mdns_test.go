@@ -109,18 +109,27 @@ func TestBuildTXTRecordsIncludesHostAndPort(t *testing.T) {
 // the same first-label + ".local" derivation Advertise uses for the
 // SRV record, so iOS lands on a name the bridge actually serves. The
 // derived host comes through `os.Hostname` here; the only check we
-// can make portably is that the record has the `.local` suffix.
+// can make portably is that the record has the `.local` suffix and is
+// the SRV target, or, on a host whose name has no valid form (B739), that
+// there is no host= at all.
 func TestBuildTXTRecordsHostFromOSWhenBlank(t *testing.T) {
-	got := buildTXTRecords(Config{ProtocolVersion: 1, Port: 7788}, nil)
+	cfg := Config{ProtocolVersion: 1, Port: 7788}
+	host, named := cfg.advertisedHost()
+	got := buildTXTRecords(cfg, nil)
 	for _, r := range got {
 		if strings.HasPrefix(r, "host=") {
-			if !strings.HasSuffix(r, ".local") {
-				t.Errorf("host TXT should end with .local: %q", r)
+			if !named {
+				t.Errorf("a host with no name published %q", r)
+			}
+			if !strings.HasSuffix(r, ".local") || r != "host="+host || srvTarget(cfg, nil) != host+"." {
+				t.Errorf("host TXT %q should be the SRV target %q, ending with .local", r, srvTarget(cfg, nil))
 			}
 			return
 		}
 	}
-	t.Error("no host= record in TXT")
+	if named {
+		t.Error("no host= record in TXT")
+	}
 }
 
 func TestTxtIPsValue_FiltersLinkLocalAndJoins(t *testing.T) {
@@ -229,20 +238,30 @@ func TestAdvertisedHostNeverBareLocal(t *testing.T) {
 	// the test, but we can check that the empty-Hostname path always
 	// produces a non-bare result and that the FQDN trimming still
 	// fires.
-	got := Config{Hostname: ""}.advertisedHost()
-	if got == ".local" {
-		t.Errorf("advertisedHost() returned bare .local, would build invalid URLs")
-	}
-	if !strings.HasSuffix(got, ".local") {
-		t.Errorf("advertisedHost() should always end in .local, got %q", got)
+	// A host with no name has no host= and a target of its own
+	// (TestAHostWithNoNameIsAnsweredForByANameOfItsOwn), so only a name
+	// is held to the suffix.
+	if got, named := (Config{Hostname: ""}).advertisedHost(); named {
+		if got == ".local" {
+			t.Errorf("advertisedHost() returned bare .local, would build invalid URLs")
+		}
+		if !strings.HasSuffix(got, ".local") {
+			t.Errorf("advertisedHost() should always end in .local, got %q", got)
+		}
 	}
 	// FQDN reduces to first label.
-	if got := (Config{Hostname: "mac.corp.example.com"}).advertisedHost(); got != "mac.local" {
+	if got, _ := (Config{Hostname: "mac.corp.example.com"}).advertisedHost(); got != "mac.local" {
 		t.Errorf("advertisedHost(mac.corp.example.com) = %q, want mac.local", got)
 	}
 	// Trailing dot stripped.
-	if got := (Config{Hostname: "host."}).advertisedHost(); got != "host.local" {
+	if got, _ := (Config{Hostname: "host."}).advertisedHost(); got != "host.local" {
 		t.Errorf("advertisedHost(host.) = %q, want host.local", got)
+	}
+	// No target is ever bare, a name or not.
+	for _, ips := range [][]net.IP{nil, {net.ParseIP("192.168.1.20")}, {net.ParseIP("fd00::1")}} {
+		if got := srvTarget(Config{Hostname: "Ð\u0091Ä¯U"}, ips); got == ".local." || !strings.HasSuffix(got, ".local.") {
+			t.Errorf("srvTarget over %v = %q", ips, got)
+		}
 	}
 }
 

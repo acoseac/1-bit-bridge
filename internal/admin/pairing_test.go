@@ -258,11 +258,14 @@ func TestDefaultBridgeURLPublicModeFallsBackToCustomEndpoint(t *testing.T) {
 
 func TestDefaultBridgeURLLoopbackUsesMDNS(t *testing.T) {
 	// Loopback mode keeps the historical `https://<host>.local:<port>`
-	// shape (exact host depends on os.Hostname, so assert the envelope).
+	// shape, for a host named as the probe says rather than this machine
+	// (one whose name has no valid form is paired at a LAN address, B739:
+	// TestThePairingURLOnAHostWhoseNameIsNotASCII).
+	containerProbe(t, "musicbox", false)
 	cfg := &config.Config{ListenAddress: "0.0.0.0:7788"}
 	got := defaultBridgeURL(cfg)
-	if !strings.HasPrefix(got, "https://") || !strings.HasSuffix(got, ":7788") {
-		t.Errorf("loopback default URL = %q, want https://<host>:7788", got)
+	if got != "https://musicbox.local:7788" {
+		t.Errorf("loopback default URL = %q, want https://musicbox.local:7788", got)
 	}
 	if strings.Contains(got, "bridge.ars.md") {
 		t.Errorf("loopback default URL leaked a public domain: %q", got)

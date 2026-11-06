@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/acoseac/1-bit-bridge/internal/hostname"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	hcmdns "github.com/hashicorp/mdns"
 )
@@ -89,7 +91,10 @@ type Config struct {
 
 	// Hostname advertised in the SRV record. If empty, os.Hostname is
 	// used. Trailing dots stripped; ".local." appended for Bonjour
-	// compliance.
+	// compliance. Either is published in the form hostname.ASCII gives
+	// it, the form the certificate carries (advertisedHost). A host with
+	// no name (none valid, or none read) publishes no host= and an SRV
+	// target made of its address (srvTarget).
 	Hostname string
 
 	// ProtocolVersion is advertised in the TXT record as "pv=<N>" so
@@ -274,17 +279,13 @@ func (a *Advertiser) rebuildLocked(adv advertisement) error {
 	if instance == "" {
 		instance = "1-bit Bridge"
 	}
-	// SRV target needs the trailing dot — `cfg.advertisedHost()`
-	// returns the bare ".local" form (matching what iOS reads from
-	// the TXT record), so we re-append it here.
-	host := a.cfg.advertisedHost() + "."
+	// The SRV target and the TXT record are RecordsFor's, from the same
+	// interface-narrowed set the A/AAAA records use, so the `ips=` hint
+	// matches what the client would resolve anyway. The target carries the
+	// trailing dot; host= the same name without it, as iOS reads it.
+	rec := RecordsFor(a.cfg, adv.ips)
 
-	// Build the TXT record from the same interface-narrowed set the
-	// A/AAAA records use, so the `ips=` hint matches what the client
-	// would resolve anyway.
-	info := buildTXTRecords(a.cfg, adv.ips)
-
-	svc, err := hcmdns.NewMDNSService(instance, Service, "", host, a.cfg.Port, adv.ips, info)
+	svc, err := hcmdns.NewMDNSService(instance, Service, "", rec.Target, a.cfg.Port, adv.ips, rec.TXT)
 	if err != nil {
 		return fmt.Errorf("mdns: NewMDNSService: %w", err)
 	}
@@ -497,8 +498,13 @@ func (a *Advertiser) Close() error {
 // race direct `https://<ip>:<port>` connections at discovery time and
 // skip slow/flaky `.local` resolution, falling back to `host` when
 // absent. See txtIPsValue for the filter + size cap.
+//
+// A host with no name (advertisedHost) publishes no `host`: its SRV
+// target is a name made of its address, which no certificate names, so
+// the client takes `ips`, or resolves the service itself (backlog B739's
+// second round; it was localhost.local, which no certificate names either).
 func buildTXTRecords(cfg Config, ips []net.IP) []string {
-	hostBare := strings.TrimSuffix(cfg.advertisedHost(), ".")
+	out := []string{fmt.Sprintf("pv=%d", cfg.ProtocolVersion)}
 	// host= and library= are free-text (operator-controlled for the
 	// library name; hostname-derived for host) and were previously
 	// appended UNCAPPED. hashicorp/mdns's NewMDNSService does NOT validate
@@ -506,15 +512,14 @@ func buildTXTRecords(cfg Config, ips []net.IP) []string {
 	// (reporting success) and then fails SILENTLY inside per-query
 	// response encoding — killing LAN discovery with no startup signal.
 	// Cap + log both here, matching the ips= field's pattern.
-	hostVal, hostDropped := cappedTXTValue(hostBare, maxTXTValueLen)
-	if hostDropped > 0 {
-		logger.Info("mdns: host= TXT truncated to fit", "dropped", hostDropped)
+	if host, named := cfg.advertisedHost(); named {
+		hostVal, hostDropped := cappedTXTValue(host, maxTXTValueLen)
+		if hostDropped > 0 {
+			logger.Info("mdns: host= TXT truncated to fit", "dropped", hostDropped)
+		}
+		out = append(out, "host="+hostVal)
 	}
-	out := []string{
-		fmt.Sprintf("pv=%d", cfg.ProtocolVersion),
-		"host=" + hostVal,
-		fmt.Sprintf("port=%d", cfg.Port),
-	}
+	out = append(out, fmt.Sprintf("port=%d", cfg.Port))
 	if cfg.LibraryName != "" {
 		libVal, libDropped := cappedTXTValue(cfg.LibraryName, maxTXTValueLen)
 		if libDropped > 0 {
@@ -608,31 +613,91 @@ func txtIPsValue(ips []net.IP, maxLen int) (value string, dropped int) {
 	return b.String(), dropped
 }
 
-// advertisedHost returns the hostname that the SRV record will use,
-// re-deriving it from `cfg.Hostname` (or os.Hostname when blank) and
+// Records is what a responder publishes for its Config on a host whose
+// advertised addresses are the ones given (RecordsFor): the SRV target,
+// fully qualified, which is the name its A and AAAA answers carry, and
+// the TXT record's strings, in DNS presentation format.
+type Records struct {
+	Target string
+	TXT    []string
+}
+
+// RecordsFor returns the records a responder publishes for cfg over ips.
+// rebuildLocked publishes exactly these.
+func RecordsFor(cfg Config, ips []net.IP) Records {
+	return Records{Target: srvTarget(cfg, ips), TXT: buildTXTRecords(cfg, ips)}
+}
+
+// srvTarget is the SRV target, fully qualified: the host's name the
+// certificate carries (advertisedHost), or, for a host with no name, a
+// name made of the first address its records carry (addressName). Never
+// localhost.local (backlog B739's second round): the responder answers an
+// address question for exactly its target, so it answered one for
+// localhost.local, a name every machine takes for itself, with the
+// bridge's address, to any device on the LAN that asked.
+func srvTarget(cfg Config, ips []net.IP) string {
+	if host, named := cfg.advertisedHost(); named {
+		return host + "."
+	}
+	return addressName(ips) + ".local."
+}
+
+// addressName is the SRV target's label for a host with no name:
+// onebit-bridge and the first IPv4 address of ips, its dots as hyphens
+// (onebit-bridge-192-168-1-20); else the first IPv6 address in its
+// expanded form, its colons as hyphens; else onebit-bridge alone. No other
+// host on the link holds the address, so no other responder answers the
+// name.
+func addressName(ips []net.IP) string {
+	const label = "onebit-bridge"
+	for _, ip := range ips {
+		if ip4 := ip.To4(); ip4 != nil {
+			return label + "-" + strings.ReplaceAll(ip4.String(), ".", "-")
+		}
+	}
+	for _, ip := range ips {
+		if a, ok := netip.AddrFromSlice(ip); ok && a.Is6() {
+			return label + "-" + strings.ReplaceAll(a.StringExpanded(), ":", "-")
+		}
+	}
+	return label
+}
+
+// advertisedHost returns the hostname that the SRV record and host= will
+// use, re-deriving it from `cfg.Hostname` (or os.Hostname when blank) and
 // applying the same first-label + ".local." normalization Advertise
 // uses internally. Kept as a method on Config so the TXT-record
 // builder doesn't have to duplicate the logic.
 //
-// Always returns a non-empty hostname. Falls back to "localhost" when
-// every other source is blank — `os.Hostname()` returning ("", nil) is
-// rare but documented as possible on minimally-configured Linux
-// containers, and a bare ".local" target would have made clients
-// build URLs like `https://.local:7788` which are invalid.
-func (cfg Config) advertisedHost() string {
-	host := strings.TrimSuffix(cfg.Hostname, ".")
+// The name is the one the certificate carries and /v1/health's `.local`
+// endpoint names (hostname.ASCII, backlog B739): the app builds
+// `https://<host>:<port>` from host= and checks the certificate against
+// it. A name with non-ASCII characters is published in its IDNA ASCII
+// form, and the responder answers an address question for exactly the
+// name it publishes, so a client dialling that form resolves it here.
+//
+// named is false when the host has no name: one with no valid form, or one
+// that cannot be read (`os.Hostname()` returning ("", nil) is rare but
+// documented as possible on minimally-configured Linux containers). Such a
+// host publishes no host= and an SRV target of its own (srvTarget), never
+// a bare ".local", which would have made clients build URLs like
+// `https://.local:7788` which are invalid, and no longer localhost.local,
+// which no certificate names (B739's second round).
+func (cfg Config) advertisedHost() (host string, named bool) {
+	host = strings.TrimSuffix(cfg.Hostname, ".")
 	if host == "" {
 		if h, err := os.Hostname(); err == nil {
 			host = strings.TrimSuffix(h, ".")
 		}
 	}
-	if host == "" {
-		host = "localhost"
+	name, ok := hostname.ASCII(host)
+	if !ok {
+		return "", false
 	}
-	if i := strings.IndexByte(host, '.'); i > 0 {
-		host = host[:i]
+	if i := strings.IndexByte(name, '.'); i > 0 {
+		name = name[:i]
 	}
-	return host + ".local"
+	return name + ".local", true
 }
 
 // maxInstanceLen caps the Bonjour instance name, in BYTES: it is one DNS

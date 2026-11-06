@@ -76541,6 +76541,778 @@ beside it; applied strictly to HEAD's scanner.md it is the edited copy byte
 for byte, the budgets pass (30,599 to 30,671 bytes), and the Don't lists
 match both ways.
 
+## 2026-11-05 — B739: a host whose name isn't ASCII can make a TLS certificate
+
+Backlog B739. On a host whose name is not ASCII `bridge init` failed and
+installed nothing: "TLS cert: generate TLS material: create cert: x509:
+"Ð\u0091Ä¯U" cannot be encoded as an IA5String", then "the config was NOT
+changed". A real test Mac shows it (its `kern.hostname` is those bytes), and
+about 210 `cmd/bridge` tests failed there. Worker b739 on legion0 (Ubuntu
+26.04, linux/amd64, go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`), branch
+`fix/b739-non-ascii-hostname-cert` from main 49d438fc, the orchestrator's
+brief with Codex's, the Claude API reviewer's and Argon's notes folded in.
+Commits: the red tests d583c66f, the fix 3a93e342, the configured-name test
+split eaf59d03, then this record. The rules go into `.claude/rules/auth-tls.md`
+and `wire.md` through a checked patch (`rules-b739.patch`; this worker cannot
+write `.claude/`).
+
+**What happened.** `os.Hostname()` went into the certificate's DNS names as
+the system reported it (`advertise.CertHostname` → `certSANOptions` →
+`tls.mergeDNSNames`/`dnsNames`), and `x509.CreateCertificate` refuses a DNS
+name that is not ASCII (an IA5String). The same raw name went into the
+`.local` endpoint /v1/health publishes (`advertise.Endpoints`), the pairing
+QR's primary (`advertise.PairingHost` → `defaultBridgeURL`) and mDNS's SRV
+target and `host=` (`mdns.Config.advertisedHost`). On Windows `os.Hostname`
+is the computer's DNS host name, which may be Cyrillic or Chinese, so the same
+path. Converting the certificate's name alone would have turned "cannot
+install" into "installs and cannot be dialled": a client checks the
+certificate against the name it dials.
+
+**Red first.** At d583c66f, main's code with the tests, through the existing
+seam (`advertise.SetHostProbeForTest`): `TestInitOnAHostWhoseNameIsNotASCII`
+exits 1 with the field's error for `Жук` and for the Mac's bytes;
+`TestAMintCertifiesTheHostNameInItsASCIIForm` (internal/tls) refuses both;
+`TestTheCertifiedNameAndTheLocalEndpointAreOneForm` (internal/advertise) has
+`CertHostname` and the `.local` endpoint carry the raw names;
+`TestThePairingURLOnAHostWhoseNameIsNotASCII` (internal/admin) dials
+`https://Жук.local:7788`, and `TestAHostWithNoNameToPairAtSaysSo` mints a
+token (201) at `https://Ð\u0091Ä¯U.local:7788` with no LAN address;
+`TestTheMDNSHostIsTheNameTheCertificateCarries` and
+`TestAClientResolvesTheASCIINameThroughTheBridgesResponder` (internal/mdns)
+read the raw name as the SRV target and `host=`, and the live responder
+published `\208\150\209\131\208\186.local.` (Жук's UTF-8) and answered no
+address question for `xn--f1ai0a.local.` The ASCII rows (`MacBook-Pro_2`) and
+a host name that cannot be read (localhost) passed there and still do.
+
+**The fix: one helper, `internal/hostname`'s `ASCII(reported) (string, bool)`.**
+- A name of ASCII alone is returned byte for byte when it is a host name:
+  dot-separated labels of 1 to 63 bytes of letters, digits, hyphens and
+  underscores, 253 bytes at most, one trailing dot at most. idna.Lookup would
+  change both case and underscore (measured: `MacBook-Pro_2` →
+  `macbook-pro_2` with "disallowed rune U+005F"; `MacBook-Pro` →
+  `macbook-pro`), so an ASCII name never goes through it.
+- A name with a byte outside ASCII takes `idna.Lookup.ToASCII`, the profile
+  `normalizeSNIHost` uses, held to the same bounds, which Lookup does not
+  check (measured with x/net v0.62.0: 57 × `ж` encodes to a 63-byte label and
+  58 to a 64-byte one, both without an error; `a..б` comes back `a..xn--90a`
+  and `.Жук` `.xn--f1ai0a` without one; a trailing dot is kept).
+- Anything else has no valid form and is no host name.
+
+Its consumers: `advertise.CertHostname` (then the container rule), the
+`.local` endpoint in `advertise.Endpoints`, `advertise.PairingHost` (now
+`host, unusable, docker`), `mdns.Config.advertisedHost`, and `tls.dnsNames`
+as a second layer for a caller handing `Generate` a name as reported. The
+names an operator configures (`customEndpoints`, through `GatherCertSANDNS`)
+do not go through it. Every caller of `Generate`/`LoadOrGenerate*` with a
+host name was found: init, serve, `bridge cert rotate` and the doctor all mint
+or grade from `certSANOptions`; the rest are tests with fixed ASCII names.
+
+**What each name becomes** (`TestEachReportedNameBecomesOneName`,
+`TestEveryNameTheBridgeAdvertisesIsOneItCertifies`):
+
+| reported | certified and advertised as | the `.local` endpoint | the pairing primary |
+|---|---|---|---|
+| `Жук` | `xn--f1ai0a` | `https://xn--f1ai0a.local:7788` | the same |
+| `müsik` | `xn--msik-0ra` | `https://xn--msik-0ra.local:7788` | the same |
+| `DESKTOP-日本` | `xn--desktop--5y4qg6h` | `https://xn--desktop--5y4qg6h.local:7788` | the same |
+| `Ð\u0091Ä¯U` | no host name (Lookup: "invalid label", U+0091 is a C1 control) | none | the first LAN IPv4 address |
+| `MacBook-Pro_2` | itself, byte for byte | `https://MacBook-Pro_2.local:7788` | the same |
+| `my host` | no host name (a space) | none | the first LAN IPv4 address |
+| 64 × `a`, 58 × `ж` | no host name (a label over 63 bytes) | none | the first LAN IPv4 address |
+
+With no host name the certificate carries localhost and the addresses, and
+mDNS takes `localhost.local`, the fallback it already had for a name that
+cannot be read (which no certificate names: pre-existing, and the TXT
+record's `ips=` carries the addresses the certificate does name).
+
+**mDNS: a client resolves the ASCII form through the bridge.** hashicorp/mdns
+v1.0.7 answers an A or AAAA question whose name equals its `HostName`
+(`zone.go`, `Records`, `case m.HostName`), which `rebuildLocked` sets to
+`advertisedHost() + "."`, and it answers every question by unicast to the
+sender (`server.go`, `sendResponse`). `TestAClientResolvesTheASCIINameThroughTheBridgesResponder`
+stands a responder up on the loopback interface with `Hostname: "Жук"` and
+asks it as a client asks: the browse answers SRV target `xn--f1ai0a.local.`
+and `host=xn--f1ai0a.local`, and the A question for `xn--f1ai0a.local.` is
+answered 127.0.0.1. So the `.local` endpoint of a converted name is kept.
+Residual: with `mdns.enabled: false` nothing publishes the ASCII form (no OS
+responder publishes a punycode name: Avahi and mDNSResponder publish names of
+their own), where an ASCII host's `.local` name usually has the OS's
+responder behind it; named as a follow-up.
+
+**Pairing.** For a name with no valid form `defaultBridgeURL` takes
+`lanPairingURL`: the first `ClassLANv4` endpoint of the walk, which is the
+first /v1/health lists (no IPv4 address is held back, and the class sorts
+first), else the first `customEndpoints` entry a phone can dial, else none,
+which the Devices page, a refused mint (400 `pairing-url`) and the doctor's
+`pairing-url` warning answer with the shared `PairingNeedsEndpoint`. Never
+localhost: that fallback stays for a name that cannot be read (an error or
+""), the same-machine path, unchanged (`TestThePairingURLOnAHostWhoseNameIsNotASCII`'s
+last row). Inside a detected container such a name is no name, and the
+container rule applies.
+
+**The library's default name.** `firstInstallName` reads `installHostname`, a
+seam of its own (advertise's is the certificate's), removes `unicode.IsControl`
+runes, trims as the pairing parser does (`config.TrimLibraryName`), and is
+`DefaultLibraryName` when nothing is left. `Жук` and `DESKTOP-日本` stay as
+they are, the Mac's bytes become `ÐÄ¯U`, control characters alone give
+`1-bit Bridge`. Both init paths (`--yes`, and the prompt, whose offered
+default Enter takes) save it, Load serves it unchanged, and /v1/health and the
+console's pairing link (`name=`) carry it
+(`TestTheDefaultLibraryNameIsTheHostsNameAsItReads`,
+`TestServeOnAHostWhoseNameIsNotASCII`). Finding, not changed: a name the
+operator types (init's `--name`, its prompt, the console's settings PATCH)
+may still hold a control character, since `CheckLibraryName` refuses only bytes
+that are not UTF-8 and names over 256 runes, and `sanitizeInstance` strips C0
+controls and DEL from the Bonjour instance but not C1 ones.
+
+**Existing certificates.** `LoadOrGenerateWithOptions` still loads a pair
+that is there and never mints it again. A certificate minted now covers its
+host: `TestEveryNameTheBridgeAdvertisesIsOneItCertifies` verifies every
+endpoint and the pairing primary against a leaf minted from `certSANOptions`
+(`VerifyHostname`, or the leaf's addresses for an IP) and finds
+`InspectSANCoverage` covered, and `TestServeOnAHostWhoseNameIsNotASCII` starts
+the real serve twice on an install init made with the host reporting `Жук`
+and the Mac's bytes: no "cert SANs are stale" line in either start, the same
+fingerprint, every /v1/health host and the console's pairing link covered by
+the served certificate, and the doctor's `tls-cert-sans` and `pairing-url`
+ok.
+
+**Configured names.** `TestAConfiguredNameTheCertificateCannotCarryStillRefuses`:
+a `customEndpoints` entry `https://café.example:7788` loads, reaches the
+want-set as written, and `bridge cert rotate` exits 1 naming it ("create
+cert: x509: "café.example" cannot be encoded as an IA5String"), with no
+certificate left behind; `TestAConfiguredNameStillRefusesBesideAConvertedHostName`
+is the same on a host named `Жук`. The message names the value already, so it
+is unchanged. Finding: config takes such an entry and every mint then refuses;
+converting it, or refusing it when it is typed, is a follow-up.
+
+**ASCII hosts, as on main.** `TestAnASCIIHostNameIsCertifiedAndAdvertisedAsOnMain`
+pins `MacBook-Pro_2`'s DNS names (`localhost`, `MacBook-Pro_2`,
+`MacBook-Pro_2.local`), addresses, endpoints and pairing primary exactly. It
+and `TestAConfiguredNameTheCertificateCannotCarryStillRefuses` use nothing
+B739 added, and both pass on main's code (a copy of the tree at main, the red
+commit's helpers beside them), where `TestInitOnAHostWhoseNameIsNotASCII`
+fails as the sanity row.
+
+**The Mac, simulated.** No Mac here, so copies of the tree had every
+`os.Hostname` call and value (production and tests, 12 files) answer
+`Ð\u0091Ä¯U`, and `go test` ran cmd/bridge, internal/{admin, advertise, mdns,
+tls, tlsacme, doctor, api, hostname}: main's code failed 202 top-level tests
+(the brief's "about 210"), all in cmd/bridge; the branch, unpatched, as the
+control for the copy, 0; the branch as the Mac, 4 at first: three init tests
+and the doctor's `certSANOptions` check compared with the raw host name. They
+now read the library name's seam (`musicbox`) or compare with
+`hostname.ASCII`'s answer, and the branch as the Mac fails 0. The
+orchestrator's `test-fast` on the real Mac is the check this stands in for.
+
+**Negative controls**, at eaf59d03, each a mutation of the production code
+made by a runner that compiles the test binaries, runs each test alone and
+puts the original bytes back from memory; every one as expected:
+1. The conversion removed (a non-ASCII name returned as reported): red, the
+   helper's table and fuzz seeds, the mint, CertHostname and the `.local`
+   endpoint, both pairing tests, both mDNS tests, and in cmd/bridge init, the
+   cross-check, the two serve starts, the library name (init refuses) and the
+   configured name beside `Жук` (the host's name refuses first); green, the
+   ASCII host and the configured name beside it.
+2. ASCII names sent through Lookup too: red, the table and the fuzz target
+   (its `MacBook-Pro` seed comes back `macbook-pro`), the mint's and
+   endpoint's `MacBook-Pro_2` rows, the pairing and mDNS rows, the ASCII-host
+   test and the cross-check; green, the live mDNS query (`Жук`) and the init,
+   serve and library-name tests of non-ASCII names.
+3. The SAN converted and the `.local` endpoint left raw: red, the one-form
+   test, the cross-check (`Жук.local` does not verify against the leaf) and
+   the serve starts (health's raw `.local`); green, init alone (it checks the
+   certificate), the ASCII host and the configured names.
+   3b, mDNS's host left raw: red, both mDNS tests (the live responder
+   publishes the raw bytes again).
+4. A name with no valid form kept (an ASCII name that is no host name
+   returned as it is): red, the table, the fuzz target (`my host`), and the
+   cross-check (`https://my host.local:7788` is no URL); 4b, the 63-byte
+   bound dropped: red, the table, the fuzz target (a 64-byte label does not
+   pack as a DNS name) and the cross-check's two long-label rows.
+5. Pairing falling back to localhost: red, both pairing tests, the
+   cross-check and the serve start of the Mac's bytes.
+6. Control characters kept in the library name: red, the library-name test
+   and the serve start (`Ð\u0091Ä¯U` in health and the pairing link).
+7. The mint's own layer removed (`tls.dnsNames` takes the name raw): red,
+   the mint's test alone; every cmd/bridge test green, since CertHostname
+   converts. 8, CertHostname's layer removed: red, the one-form test alone;
+   cmd/bridge green, since the mint converts. 7 and 8 together: init, the
+   cross-check, the serve starts, the library name and the converted host's
+   configured name red, the ASCII host green. Each layer is pinned by its own
+   test, and the pair by the whole path.
+Controls 3 and 3b first left the helper's import unused and did not build,
+which is no verdict; they were made again keeping a reference to it, and ran
+as above.
+
+**Checks**, on legion0 (Linux, amd64, go1.27.3), in one turn of the shared
+build lock at eaf59d03 (two test docblocks were reworded after, and their
+files' tests and gofmt run again): `make fmt`, which changed nothing; `make
+vet`, and with `GOOS=windows`, `GOOS=darwin` and `GOOS=linux GOARCH=386`,
+clean; the
+qualification check from main, "qualification version OK: 49d438fc..HEAD";
+`make docs-check`, ok, and again over a copy of the tree with the rules patch
+and this record applied ("CLAUDE.md 73.6%; dlna-upnp.md 97.0%; worst load,
+player_openhome_test.go 64.1%"), where `rules-for.py` gives
+`internal/hostname` to `auth-tls.md`; `make test` (race, `-timeout 30m`): 83
+packages ok, `cmd/bridge` in 983 s and `internal/admin` in 968 s; `make
+build-all`, ok. `go test -race` of internal/{tls, advertise, admin, mdns}
+without a `-timeout` ended in Go's 10-minute default in internal/admin
+(600.04 s, a goroutine dump, no assertion: `TestRestoreThroughTheAPIFollowsTheRootTheFileWasTrashedUnder`
+had run a second, the timeout signature `build-ci-tests.md` names); with
+`-timeout 30m`, as `make test` gives it, the same four under `-race`, ok
+(internal/admin in 895 s). The doc guards (`TestEveryCitedTestNameExists`,
+`TestNoDocblockNamesAnotherDeclaration`) pass over the tree with this record,
+and over a copy with the rules patch applied as well. The fuzz target
+ran 90 s (11.9 million inputs) with nothing found. The ALSA, alsapcm,
+durable-writer and identity tests are Linux's and ran here in `make test`.
+Not run here: macOS and Windows natively (the live mDNS test skips on Windows
+as its neighbours do), CI's runners, and the test Mac.
+
+**Findings, for the backlog** (none filed from here; the backlog file is not
+on legion0): a configured `customEndpoints` entry whose host is not ASCII
+loads and then refuses every mint; with `mdns.enabled: false` the ASCII
+`.local` name of a converted host is advertised and nothing publishes it; a
+typed library name may hold a control character; mDNS's `localhost.local`
+fallback for a host with no name is named by no certificate; and a host whose
+name is literally `localhost` is paired at `https://localhost:7788`, the
+phone's own name (an ASCII name, so unchanged here).
+
+## 2026-11-05 — B739 round 2: what's advertised must be reachable and certified
+
+Four points Codex and the Claude API reviewer found on #1406, each verified
+at d26e7d0f (the branch with its rules patch and main's B651 merged) and red
+there first (07da4414); the fix is 0481600e, the cross-check's two-way mint
+d1b572bb. Worker b739 on legion0, as for round 1.
+
+**1. A converted name advertised while nothing answers it.** Only the
+bridge's own responder publishes a punycode name, and with
+`mdns.enabled: false` a host named `Жук` still listed
+`https://xn--f1ai0a.local:7788` in /v1/health, the pairing QR dialled it and
+the doctor's `pairing-url` said ok. `advertise.Params.MDNS` (the live
+config's `EffectiveMDNSEnabled`, in `api.ReachableEndpoints` and the
+doctor's checklist) now gates a converted name's `.local` endpoint;
+`advertise.PairingHost` returns one `Host` (Name, Unusable, Converted,
+Docker) from one read, and `admin.PairingPrimary` sends a converted name
+with mDNS off to `lanPairingURL` (in a detected container, to a dialable
+custom endpoint or none) with a reason the doctor's line prints:
+"pairing QR dials https://192.168.1.20:7788: mdns.enabled is false, and
+only the bridge's own mDNS answers xn--f1ai0a.local, the host's name in its
+ASCII form". The want-set is unchanged, so turning mDNS off or on makes no
+certificate stale (the cross-check mints under each setting and grades under
+both); an ASCII name is untouched in every case. Not fixed, and not as
+small: a responder that fails to start with mDNS on. Serve prints "mDNS
+advertise failed (non-fatal)", keeps the config's word, and health, the QR's
+primary and the doctor still name the converted `.local`, which nothing then
+answers; an app that reads `urls=` falls back to the LAN address, one that
+reads `url=` alone does not. Fixing it needs the serving process's responder
+state in api and admin, which the doctor, another process, cannot see.
+
+**2. A host with no name published as `localhost.local`.** Its SRV target
+and `host=` were `localhost.local`, which no certificate names, and the
+live responder answered an A question for `localhost.local.` with the
+bridge's address (`TestAHostWithNoNameIsAnsweredForByANameOfItsOwn` at
+d26e7d0f: four answers, 127.0.0.1). Now such a host, a name that cannot be
+read included (the same branch), publishes no `host=` and an SRV target
+made of the first IPv4 address its records carry, dots as hyphens
+(`onebit-bridge-192-168-1-20.local.`), else the first IPv6 address expanded,
+colons as hyphens (a 53-byte label), else `onebit-bridge.local.`: no other
+host on the link holds the address, so no other responder answers it, and
+hashicorp/mdns answers address questions for that target alone.
+`mdns.RecordsFor` is what `rebuildLocked` publishes. `ips=` is still
+published there, from the responder's own address set (the pinned
+interface's global-unicast addresses), which the certificate's walk names.
+PROTOCOL.md's `host` row says the key can be absent; the app falls back to
+`ips=` or its own resolve (BridgeDiscoveryManager.swift:236-245, read by
+the reviewer, not on this host).
+
+**3. The LAN fallback ignored the bound address.** `lanPairingURL` now takes
+an IP address in `listenAddress` a phone can dial (not unspecified, loopback
+or IPv6 link-local), then a dialable custom endpoint, then the walk's first
+LAN IPv4 address. A loopback, named or link-local bind takes the next step,
+as a wildcard one does; the red test's loopback rows asked for none and were
+changed with the fix: the serve tests bind loopback and pair at the walk's
+address, and the `.local` primary and /v1/health ignore the bind on every
+path (a finding below).
+
+**4. The cross-check sees all of it.** `TestEveryNameTheBridgeAdvertisesIsOneItCertifies`
+runs every row with mDNS on and off, reads the responder's records
+(`host=`, `ips=`, the SRV target) and certifies each host it names;
+`TestServeOnAHostWhoseNameIsNotASCII` pairs `Жук` at the LAN address with
+mDNS off and at `xn--f1ai0a.local` with mDNS on, the responder pinned to
+loopback (`serveOpts.mdnsPick`).
+
+**Findings, out of these points:** a listener bound to one address
+(loopback included) is still listed at every walk address in /v1/health
+and paired at the host's `.local` name, as on main; mDNS's `ips=` publishes
+every global-unicast address of the pinned interface, an IPv6 one acquired
+after the mint included, which the certificate does not name, where health
+holds such an address back (B457); and a host named
+`localhost` advertises `localhost.local`, which `tls.dnsNames` leaves out of
+the certificate (an ASCII name, so unchanged).
+
+**Evidence**, at 457a88f2 on legion0, each run under the shared build lock.
+Twelve negative controls (exact-once mutations of the production code, the
+original bytes put back from memory), every one as expected: the converted
+`.local` published whatever `Params.MDNS` says (red: the one-form test,
+health, the cross-check, the serve test), the QR at a converted name whatever
+the setting (red: the admin test, the cross-check, the serve test), the
+doctor's reason dropped, health's setting forced on and forced off, a host
+with no name back to `localhost.local`, the target alone `localhost.local`,
+`ips=` left out for a host with no name (each red in the mDNS tests and the
+cross-check), the bound address ignored, the custom endpoint after the walk,
+a loopback bind taken as dialable (red in the admin tests, the last in the
+serve test too), and a want-set that follows the setting (red: the
+cross-check alone, which mints under each setting). The tree was clean after
+them. `make test`, ok (83 packages; cmd/bridge 1013 s, internal/admin 972 s);
+`go test -race -timeout 30m` of internal/{tls, advertise, admin, mdns,
+hostname}, ok (admin 901 s); `make vet` native and for windows, darwin and
+linux/386, ok; `make build-all`, ok; `make docs-check`, ok, on the tree and
+on a copy with `rules-b739-r2.patch` applied, where the doc guards
+(`TestEveryCitedTestNameExists`, `TestNoDocblockNamesAnotherDeclaration`)
+pass too; the qualification check (`scripts/qualification-version`,
+3b900afc..HEAD), ok. The Mac, simulated again (every `os.Hostname` in 11
+files answering `Ð\u0091Ä¯U`, the nine packages of round 1): 0 failing
+tests. Not run here: macOS and Windows natively, CI's runners and the iOS
+app.
+
+**B739, a last point (the orchestrator; Codex and the Claude API reviewer on round 2):** a listener bound to loopback, a name or a link-local address fell through to the walk's first LAN address, where nothing answers. Only a listener on every address takes the walk now; any other takes a dialable custom endpoint or the refusal that asks for one. `TestTheLANFallbackIsTheAddressTheListenerIsBoundTo`'s three rows were red first. Test-fast on the Mac whose real host name has this problem: 83 of 83 packages, no IA5 error, against about 202 failures on main.
+
+## 2026-11-05 — B728 B3: the player's DSD state and the migration's logic
+
+B728's B3 (`ops/plan-b728-dsd-capability-design.md`, sections 2.5 and 3.6, and
+B3's row in section 11), on top of B1 (the legacy reader) and B2 (the DAC
+profile database and its key). Worker b728-b3 on legion0 (Ubuntu 26.04,
+linux/amd64, go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`), branch
+`feat/b728-b3-player-dsd-state` from main 49d438fc, the orchestrator's brief
+with Codex's, the Claude API reviewer's and Argon's binding notes. Commits:
+the red test a47fedaf, the state, the migration and the backup f500838f, this
+record and the design's corrections, then the checks' results. The rule goes
+into `.claude/rules/player.md` through a checked patch
+(`rules-b728-b3.patch`); this worker cannot write `.claude/`. Nothing a user
+sees changes: serve and output play still decide DSD by `readPermission`,
+and B6 wires the migration.
+
+**The package.** `internal/player/dsdstate`: the state's schema and codec
+(`state.go`), its one writer (`store.go`), the migration's pure table
+(`migrate.go`), the read of the owner's record (`record.go`) and the restore
+(`restore.go`). Schema 1 is frozen by `TestTheStateIsSchemaOneAsWritten`'s
+bytes. A DAC is keyed by `dacprofile.Key`, B2's type, written as its four
+fields with `null` for an absent interface or product and compared by the
+canonical form; nothing else keys anything.
+
+**Schema 1's decisions** (binding note 3). `dopConfirmed` is `null` or
+`{bcdDevice, confirmedAt, setBy}`, the firmware it was given under, since
+section 1.2 lapses a confirmation on another. `setBy` is `app`, `console` or
+`migration`. Listener answers moved out of the evidence entries into a list of
+their own, one per transport, rate and bcdDevice, so one answer per tuple
+across formats is the list's key rather than a rule across entries; evidence
+holds observations alone, and an entry with none does not decode. A warning
+has an owner: `dac`, the key of the DAC the migration's part went to, for
+`migration_record_refused` (whose `reason` is the word) and
+`migration_record_missing`; none, the bridge's, for `migrated_off` and
+`state_unreadable`. No `migration_record_*` is the bridge's, so the question
+of what clears one has no case: a choice written for its DAC does.
+`ClearWarningsFor` is the clearing rule B9 will call: that DAC's warnings and
+`state_unreadable`; `migrated_off` stays while `defaultMode: off` applies; the
+migration's own choice clears nothing. `defaultMode` decodes as `auto` or
+`off` alone; a `firstUse` `bitRates` present and empty does not decode, since
+an empty list would read as every rate. `Decode` refuses anything a writer of
+schema 1 would not write, field by field (`TestTheStateRefusesWhatNoWriterWrites`:
+31 shapes).
+
+**`migratedFrom`** (the brief's first point). One digest cannot mark a
+migration that read no record, and one marker cannot say that the bridge's
+part is done while a DAC's part waits. The smallest shape that holds is one
+object: `{from: "keys", dsdMode, allowDoP, dsdQualification, waitingFor,
+recordSHA256}`, the keys as `bridge.yaml` held them at the migration's start
+(raw: `dsdMode` absent where unset, `allowDoP` absent where unset),
+`waitingFor` `bound_dac` or `record_model` while a DAC's part waits, and the
+record's digest once taken; `{from: "state_unreadable"}` in the fresh state
+that replaces a damaged one. Storing the keys keeps a DAC's part bound to what
+the migration took: an operator who removes the keys after Validate's warning
+(B6) loses no part still waiting, and a later edit of them is not read. The
+marker is written whenever the block sets any key, `dsdMode` unset included,
+so "nothing to migrate" never runs again over a later choice; a block that
+sets no key writes nothing, no file included (binding note 11). §2.5 and §3.6
+say so now.
+
+**A second DAC, later** (the brief's second point). A DAC's part goes to one
+DAC, the first the binding resolves to after the migration began: the
+record's rows where the legacy reader takes the record for it, else the
+fallback's. The design does not say that an identity mismatch uses the record
+up, and §3.6's "anything for a particular DAC waits for that DAC" says the
+opposite, so a mismatch gives the bound DAC the fallback's rows (the table's
+"a record the legacy reader refuses": `native` and `dop` keep the operator's
+explicit, never-converted mode with first use pending; `auto` the defaults),
+with `identity_mismatch` owned by it, and the record waits for its own model
+(`waitingFor: record_model`); when that model is bound it gets the record's
+rows. Once a part is done nothing reads the record again (`RecordToRead`),
+and a DAC bound afterwards takes `defaultMode`. A DAC that already has a
+choice of its own when its part comes (a state the app wrote before keys were
+set) is never migrated (`TestTheMigrationNeverOverwritesAChoice`).
+
+**The rows' readings.** Row 4 (`dop` with `allowDoP` and a record) confirms
+DoP only where the record approved a DoP rate, and row 6 (`auto`) the same
+with `allowDoP`: a confirmation with no DoP evidence would stop the app from
+asking for one on a DAC never qualified for DoP. Under `auto` every approved
+tuple is `clean`, DoP's too whatever `allowDoP` says, since what was heard is
+a fact; first use and the confirmation are what keep DoP out with `allowDoP`
+false (binding note 10). A `firstUse` entry is written only for a transport
+the record approved a rate of, so a native-only record under `auto` with
+`allowDoP` leaves DoP unacknowledged and unconfirmed (binding note 9). §3.6's
+rows say so now.
+
+**The reader's errors and the bump** (binding note 6). An `IdentityMatch`
+closure sees the identity alone: it can tell `identity_mismatch`, never
+`stale_version` from `hash_mismatch`, and a missing record from a missing
+report is a filesystem error either way. So the readers now mark the
+refusals they already made with an exported kind: `ErrRecordMissing` (the
+record's own file or the state directory absent), `ErrStaleVersion` (the
+record's version, an unknown record schema, and each piece of evidence's
+version: matrix and lifecycle reports, transition reports, DoP experiments,
+contacts), `ErrHashMismatch` (the body's digest and every evidence digest),
+`ErrIdentityMismatch` (the record's identity, or a unit whose identity is not
+whole); a report of another unit inside a record of this one, and every other
+refusal, have no kind (the record does not read: `unreadable`). Each wraps
+the refusal as it was (`refusal`, `Unwrap() []error`), so every message is
+unchanged and `errors.As` still finds a `*fs.PathError`, which playback's
+`approvalDetail` reads. A condition whose first clause was the version is
+split so the version is asked alone, first, then the rest in their order:
+the same answers in the same order. `internal/player/qualification/` is
+guarded, so qualificationVersion 37 -> 38 (B735 took 37 first), the
+runbook's five mentions and its Version 38 entry; `LegacyVersion` stays 35,
+and §8's table gains B3's row (B3's tier is player now). B1's tests, which pin
+every message, pass unchanged; `TestTheReadersRefusalsAreMarkedByKind` pins
+the kinds. `ReadRecord` gives the reason by `errors.Is`, never by text. An
+unset `dsdQualification` is no record (`migration_record_missing`), as the
+legacy backend refused it ("approval missing").
+
+**The model comparison.** `sameModel` compares §3.5's fields exactly: the
+vendor and product IDs, manufacturer, product, interface, device and
+subdevice. Not `SameIdentity` (the port), and not every field but the port
+(the bcdDevice), since the record's firmware goes with each answer it
+migrates.
+
+**Writes, and the one writer.** `Store.Update` takes the store's lock, applies
+its change to a copy of the state the last write left, and returns only once
+`atomicwrite.WriteBytesDurable` (the reservations' writer, under the data
+directory) has made the file and every directory entry up to the data
+directory durable; only then does the store hold the change, so a refused
+write leaves the state as it was. A later serve's app write (B9's
+compare-and-set inside the update), console write, check answer and playback
+evidence serialize on that lock, and no other process writes the file while
+serve holds the data directory's lock, which restore and reset take too. The
+writer is injectable on the instance, as `mergeReservation` takes one. On
+Windows, where no directory can be synced, every write is refused
+(`ErrNoDirectoryBarrier`) and nothing is written; the player never runs
+there.
+
+**Damage** (binding notes 1 and 2). The bad bytes are copied, durably, to
+`player-dsd.json.bad-<timestamp>` (a free name, the queue's form), then the
+file is replaced in one rename by `Refusing`: `defaultMode: off`, so a DAC
+with no choice refuses with `dsd_off_by_choice` once a choice for another
+clears the refusal, never converted on a guess; `state_unreadable`; and the
+marker `{from: "state_unreadable"}`, so the next start does not migrate DSD
+back on from the legacy record. `ReplaceDurable` is not the tool: it renames
+the entry aside first, and a crash between its two renames leaves the name
+empty, which reads as missing. A replacement that fails holds the refusal in
+memory and the next start tries again; a file that cannot be read or not whole
+(a read error, a named pipe or a directory, past 1 MiB, which cannot be copied
+whole), or whose bytes cannot be kept aside, stays where it is, refused in
+memory, and no write replaces it (`ErrNotWritable`). A missing file is the
+defaults, written by nothing until a write changes something. B5 and B7
+refuse by `State.Unreadable` and `RefusalStateUnreadable`
+(`dsd_state_unreadable`).
+
+**Backup and restore** (binding notes 4 and 5). `Sources.PlayerDSD` and
+`Targets.PlayerDSD` beside the player's identity; the snapshot copies the
+file's bytes through the copy every source takes, never loading it (a load
+of a damaged file writes); a missing file is skipped, as nothing writes one
+before B6. Restore reads the snapshot's copy before its first write and
+writes it right after the identity, before the database, the token store and
+the config, durably (`dsdstate.WriteRestored`, the restore's caller holding
+the data directory's lock), in place of the box's state, never merged:
+`defaultMode`, `migratedFrom` and `warnings` travel, the choices, DoP
+confirmations, acknowledgements with their `bitRates` and listener answers
+travel, and `driverAcceptedAt`, `kernel`, `streamingObservedAt` and first
+use's `observedAt` are dropped, an evidence entry left with nothing removed,
+a DAC left holding nothing removed. An archived file that does not decode is
+installed as its bytes, so the next load refuses. A snapshot without the file
+(every pre-B3 archive) leaves the box's state as it is: the precedent of the
+console account, the harvest state and the player's identity, all optional
+files a restore skips when the snapshot lacks them. Where the state cannot be
+made durable (Windows), a restore of a snapshot holding it refuses before
+anything else is written, and says to remove the file from a copy of the
+snapshot to restore the rest.
+
+**`bridge reset-player`** (the brief's third point). Agreed: a choice and what
+was heard belong to the DAC model, not to the player's identity, which is
+what reset rotates; and the state's marker is what keeps the legacy keys from
+migrating again over the user's later choices, which deleting the state would
+undo. Reset keeps the file byte for byte, `--discard-floor` too
+(`TestResetPlayerKeepsThePlayersDSDState`; red with reset removing it).
+
+**Red first.** `TestABackupCarriesTheChoicesAndRestoreDropsThisBoxsEvidence`
+(cmd/bridge, through the real `bridge backup` and `bridge restore`) is
+written against APIs main has. At a47fedaf, the test alone on main's code, in
+a copy of the tree holding that commit's files: "the snapshot lists [bridge.db
+bridge.yaml], without player-dsd.json". At f500838f it passes. The rest of
+B3's row is new code with nothing on main to fail; the negative controls stand
+in for red.
+
+**Tests** (B3's row and beside it). dsdstate: `TestAWriteIsDurableBeforeItReturns`,
+`TestAWriteWhereNoDirectoryCanBeSyncedIsRefused`,
+`TestADamagedStateRefusesDSDAndIsMovedAside` (four kinds of damage),
+`TestNoMomentLeavesTheStateWithoutItsRefusal`,
+`TestAStateThatCannotBeReadIsKeptAndRefused`,
+`TestAStateFileTheStoreReadsIsItsOwn` (a named pipe, Unix),
+`TestAMissingStateIsTheDefaultsAndWritesNothing`, `TestWritesSerializeOnTheStore`,
+`TestNoDSDStateHoldsASerialOrAPort` (the file's bytes, after two DACs bound
+through `BoundOf` from readings carrying a serial, a port, a card number and
+a devnum each of its own), `TestTheStateIsSchemaOneAsWritten`,
+`TestTheStateRefusesWhatNoWriterWrites`, `TestTheChoiceThatApplies`,
+`TestTheMigrationTable` (every row of §3.6, 16 cases, explicit `off` and
+`dop` with `allowDoP` unset among them), `TestTheBridgesPartIsAtOnceAndADACsWaits`,
+`TestTheMigrationIgnoresThePortAndTakesVersion35` (the wrapper, through the
+real reader and real record files: 35 on another port, 35 under another
+firmware, this build's, 34 and one past this build's, another model, another
+PCM device; and through the store),
+`TestARefusedRecordsReasonIsItsKind`, `TestTheModelComparisonIsTheDesignsFields`,
+`TestAMigratedAcknowledgementListsItsRecordsRates`,
+`TestAMigrationFailureIsAWarningInTheState` (each reason word, a missing
+record and `migrated_off`, read back from the file),
+`TestTheMigrationRunsOnce`, `TestADACBoundLaterIsTheRecordsOrTakesTheDefaults`,
+`TestTheMigrationNeverOverwritesAChoice`,
+`TestAMigrationsChoiceKeepsItsWarningAndAWriteClearsIt`,
+`TestALegacyModeTheReaderNeverTakesIsRefused`,
+`TestARestoreKeepsWhatWasChosenAndHeard`, `TestARestoreReplacesTheBoxsStateDurably`.
+qualification: `TestTheReadersRefusalsAreMarkedByKind`. backup:
+`TestASnapshotCopiesTheDSDStateAsItsBytes`,
+`TestARestoreOfASnapshotWithoutTheDSDStateLeavesTheBoxsAlone`,
+`TestARestoreInstallsADamagedArchivedStateAsItsBytes`,
+`TestARestoreThatCannotWriteTheDSDStateDurablyRestoresNothing`. cmd/bridge:
+`TestABackupCarriesTheChoicesAndRestoreDropsThisBoxsEvidence`,
+`TestBuildBackupSourcesNamesThePlayersDSDState`,
+`TestResetPlayerKeepsThePlayersDSDState`. The durable writer's tests skip
+nothing on Windows: they set the barrier and the medium seams, as the
+engine's do, and `TestAWriteWhereNoDirectoryCanBeSyncedIsRefused` takes the
+barrier away to show what a write does there; the record fixtures skip on
+Windows, where an owner's approval is never trusted (Unix ownership).
+
+**Negative controls**, 31, each an exact-once mutation, each package's test
+binary built and its tests run, the files restored from memory: every one red
+for its own reason, the unmutated tree green first. The
+write returns before the barrier (WriteBytes in WriteBytesDurable's place;
+the write on a goroutine); a damaged file falls back to the defaults; the
+damaged file deleted; the refusal lost after a reopen (the fresh state
+without its warning); the name replaced before the bad bytes are copied; a
+missing file treated as damaged; a port added to the key; a serial, a card
+number and a devnum stored; explicit `off` treated as unset; the
+acknowledgement widened to every rate; the migration passing `SameIdentity`;
+the current-version reader in the legacy one's place; every field but the
+port compared; a failure logged but not stored; the first DAC's mismatch
+using up the record; a re-migration over a later choice (the marker ignored;
+a DAC's own choice not asked); evidence kept through a restore (its three
+observed fields alone, in dsdstate and through bridge backup and restore); a
+restore written without the barrier; a restore that keeps the box's state
+over the snapshot's; a restore of a snapshot without the state that removes
+the box's; a snapshot that loads the state through its store; a snapshot that
+fails on a missing state; reset-player removing the state; a missing report
+taken for a missing record (in dsdstate and in the reader's own test); a
+report's version refusal left unmarked; a marked refusal's message changed
+(B1's message tests red); a refusal's reason read from its text.
+
+**What B5 and B6 call.** B5: `State.Unreadable` and `RefusalStateUnreadable`,
+`State.ChoiceFor`, `State.DAC` (the choice, the confirmation, first use with
+`FirstUse.Covers`, the listener answers, the evidence), `defaultMode`. B6:
+`dsdstate.Open(dataDir)` at serve's player start, logging `Store.Report`;
+`BoundOf(card, qualification descriptors, device, subdevice)` for the DAC the
+binding resolves to; `Store.Migrate(stateDir, Legacy{the raw keys}, bound)`
+at the start (bound nil while none resolves) and again when the binding
+resolves to a DAC, logging each `Step.Warnings` beside its warning;
+`Validate`'s once-per-key warning. B9: `Store.Update`, with
+`ClearWarningsFor`. Backup and restore are wired already.
+
+**Follow-ups, not built.** `.claude/rules/cli-serve.md`, which loads with
+`internal/backup`, has no bullet for the snapshot's new file; the rule is in
+player.md's long form and in `backup.PlayerDSDFileName`'s doc. A Windows box
+restoring a Linux snapshot that holds the state refuses until the file is
+removed from a copy of the snapshot, as one holding the player's identity
+already does.
+
+**Checks**, on legion0 (Linux, amd64, Go 1.27.3), at 9059f676, in one call
+through the shared build lock: `make fmt`, which rewrote nothing; `make vet`;
+`make test`, race-enabled, with TMPDIR under `.tmp/_b728-b3`: every package
+ok, 83 of them, internal/player/dsdstate (1.5 s) and internal/backup (283 s)
+among them, so the new package and backup ran under `-race`, and the
+Linux-only tests ran for real here (the ALSA readers, alsapcm, the durable
+writer and the identity paths); `make vet` with `GOOS=windows`, `GOOS=darwin`
+and `GOOS=linux GOARCH=386`, each clean; the state's, the qualification's and
+backup's tests as linux/386 binaries, run natively, ok; `make docs-check`, ok,
+and again on a copy of the tree with the rules patch applied (player.md at
+97.6% of its budget); the qualification check, `scripts/qualification-version
+-base main -head HEAD`, "qualification version OK: main..HEAD"; and `make
+build-all`. The rules patch: `git apply --check` takes it, and a strict
+applier of the worker's own gives a file byte-identical to the intended one.
+The negative controls ran at f500838f, the unmutated tree green first. The
+tree is clean after. Not run here: Windows and macOS natively, CI's runners,
+and any hardware.
+
+## 2026-11-05 — B728 B3 round 2: four review points on #1405
+
+Worker b728-b3 on legion0, fast-forwarded to the orchestrator's dfa6e602 (the
+branch, its rules patch applied, main merged). Codex and the Claude API
+reviewer found four points on #1405; each was checked on the tree before any
+fix, and each held.
+
+**A link to nothing read as a fresh install.** `readBounded` opens through
+`fsutil.OpenAsFile`, which follows a link, so a dangling link answered
+`fs.ErrNotExist`, Open served the defaults (`Missing`), and the first write
+replaced the link. Now an `Lstat` decides: no entry is `Missing`; an entry
+that leads nowhere is `Unread`, refused, and not written over.
+`TestADanglingLinkIsAnEntryThatDoesNotRead`.
+
+**The fallback used up a record it never applied.** The model comparison
+reads the PCM device and the manufacturer string, which `dacprofile.Key` does
+not hold, so the record's own model can be refused (`identity_mismatch`) as a
+unit of the same key: that unit got the fallback's choice, and when the
+record's unit was bound the migration took the fallback for a choice of the
+DAC's own, wrote nothing, and ended the wait. `ownChoice` is now any choice
+but the migration's at its first revision; `recordRows` replaces the fallback
+at the next revision and drops that key's migration warning; a choice the app
+or the console writes in between, a first one at revision 1 included, still
+wins. `TestTheRecordsOwnModelTakesTheRecordOverItsFallback` (another PCM
+device; another manufacturer string; a user's choice in between) and
+`TestTheMigrationNeverOverwritesAChoice` (the app's and the console's first
+choice, and a later one).
+
+**A write could leave a file the next start refuses.** The structural bounds
+let a state through whose file passes the 1 MiB Open reads (Codex: 100 DACs of
+64 answers, about 1.1 MB); `Update` made it durable and answered nil, and the
+next start left it `Unread`, refusing DSD and every write. `encode` now
+refuses past the bound (`ErrTooLarge`). What is refused is the write that
+would cross it, whole: trimming answers or warnings would drop what the app
+showed. The state stays as it was, and the app sees B9's answer for a write
+not made, 500 `persist_failed`, nothing changed.
+`TestAWriteTheReaderWouldRefuseIsNotMade`: a file of exactly 1 MiB is written
+and reads back; one byte more is refused, the state and the file unchanged.
+
+**An unreadable state stayed unwritable after it was moved.** `blocked` was
+set at Open and never cleared, so every write answered `ErrNotWritable` until
+a restart. A blocked write now looks again: an entry still at the name, or a
+look that fails, is refused; no entry clears the block and the write is made
+on the refusing state, so a choice clears `state_unreadable`.
+`TestAnUnreadableStateMovedAwayIsWritableAgain`.
+
+The design's section 8 and section 11 rows for B4, B7, B11 and B12 now take
+the next free version at their merge (B735 took 37 and B3 takes 38, the
+numbers first planned for B4 and B7), and section 3.6 says the record's model
+takes its rows over the fallback. The rule's line is unchanged; its long form
+says the four behaviours.
+
+Red first at cba3cf46, each test failing on the tree before the fix for its
+point's reason. The fixes are 6de60864, and c2a29e49 extends the guard to a
+user's first choice. **Negative controls**, ten, each red: the `Lstat`
+dropped; any choice taken for the DAC's own; any choice taken for the
+fallback (a user's choice in between overwritten); the fallback's warning
+kept; the record's choice at the fallback's revision; the writer not asked (a
+user's first choice taken for the fallback); the bound check removed; the
+bound one byte off; a blocked store that never looks again; a blocked store
+unblocked whatever is still there.
+Two of them, first written as `return true` and `return false` in
+`ownChoice`, did not build (its `c` unused) and were run again as `c != nil`
+and `c == nil`, red. They ran at c2a29e49, the unmutated tree green first.
+
+**Checks**, on legion0 (Linux, amd64, Go 1.27.3), at 89adc6c4, in one call
+through the shared build lock: `make fmt`, which rewrote nothing; `make vet`;
+`make test`, race-enabled, with TMPDIR under `.tmp/_b728-b3`: every package
+ok, 83 of them, internal/player/dsdstate (1.9 s) and internal/backup (282 s)
+among them, the Linux-only tests run for real; `go test -race -count=1
+./internal/player/dsdstate/ ./internal/backup/`, ok; `make vet` with
+`GOOS=windows`, `GOOS=darwin` and `GOOS=linux GOARCH=386`, each clean; the
+state's tests as a linux/386 binary, run natively, ok; `make docs-check`, ok
+(player.md at 97.6% of its budget); the qualification check, "qualification
+version OK: main..HEAD"; and `make build-all`. The tree is clean after. Not
+run here: Windows and macOS natively, CI's runners, and any hardware.
+
+## 2026-11-05 — B728 B3 round 3: two review points on round 2
+
+Both held, red first at 84f885eb. **A size error skipped a restore's
+clean-up** (Codex): a compact snapshot of 120 DACs with 64 answers each,
+787,043 bytes, which the reader takes, is 1,428,227 indented, so
+`ForRestore`'s encode refused it and the restore installed the snapshot as it
+was, the old box's evidence with it. Of the two remedies, the writer writes
+compact: its 1 MiB bound and the reader's are on the same bytes, so a state
+read from a file the writer wrote is written again within it, with nothing
+observed too. `ForRestore` answers an error, never the snapshot's bytes, for a
+state that decodes: what still cannot be written, only a file denser than the
+writer's own (a key it writes left out, a character it escapes held as it
+is), fails the restore there: the state and every file after it stay
+unrestored, and what the restore did before it stays done, the player's
+identity and reservation and the queue it let go, which the refusal names.
+Bytes that do not decode
+still install as they are, as binding note 5 of the brief requires: no state,
+and the next load sets them aside. **A write not made ended the store's
+looking** (the Claude API reviewer): `blocked` was cleared at the look,
+before `fn`, the encoding and the write. The look now answers for its write
+alone, and `blocked` clears where the durable write has returned and the state
+is committed. The window left runs from the look to the writer's rename (the
+change, its encoding, and the writer's checks, write and fsync of the staged
+file); an entry put back inside it is replaced unread, which only a rename
+that refuses to replace would close. Fixes 28f1c36a; 88046920 adds a second
+write to round 2's writable-again test, which a store that never stops
+looking fails. Negative controls, six, each red: the writer indenting again;
+`ForRestore` answering the snapshot on that error (rerun once, its first form
+leaving `fmt` unused); `WriteRestored` writing past `ForRestore`'s refusal;
+`blocked` cleared at the look; cleared before the write's answer; never
+cleared.
+**Checks**, on legion0 at 27a62dfc, in one call through the shared build lock:
+`make fmt`, which rewrote nothing; `make vet`; `make test`, race-enabled, 83
+packages ok, dsdstate (3.1 s) and backup (281 s) among them, the Linux-only
+tests run for real; `go test -race -count=1 ./internal/player/dsdstate/
+./internal/backup/`, ok; `make vet` with `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`, each clean; dsdstate's tests as a linux/386 binary,
+ok; `make docs-check`, ok (player.md at 97.6%); the qualification check,
+"qualification version OK: main..HEAD". The tree is clean after.
+
+## 2026-11-06 — B728 B3 round 4: a restore's refusal once its state landed
+
+Worker b728-b3 fast-forwarded to the orchestrator's cc46921b (main merged).
+CodeRabbit on #1405: `restorePlayerDSD` said "nothing was restored" and to
+leave `player-dsd.json` out of the snapshot to keep this box's state, for an
+error `WriteBytesDurable` returns after its rename, when the box's state is
+already the snapshot's. It held: red at 8d067780, through
+`atomicwrite.SetSyncDirForTest`. `ErrBarrierFailed` does not tell the two
+apart, though. After the rename, a directory that cannot be opened for its
+sync (EACCES, EMFILE, an overlay's directory above the root) is an error no
+fsync marks. And a strict write's barrier on a directory it created runs
+before the file is staged, an `ErrBarrierFailed` with nothing landed. So the
+writer marks every error once its write has landed with `ErrLanded`, at the
+three places a write lands (the rename, the fallback that finds the bytes
+there, `ReplaceDurable` once both renames are done), never in `durableChain`,
+which also runs after `ReplaceDurable` puts the old entry back. The marker
+reads as the error it wraps, so no message changed. Landed, the restore says
+the box's state is now the snapshot's, that its crash durability is
+uncertain, and to run the restore again once the data directory can be
+synced. Otherwise its refusal and advice stand. The fix is bc7cef59, and the
+rule is in `rules-b728-b3-r4.patch` (config-lifecycle.md, after
+`ReplaceDurable`'s bullet). Negative controls, nine, each red: the restore
+taking no error, or every error, for one that landed; the rename's landing,
+the fallback's barrier, the fallback's fsync and `ReplaceDurable`'s landing
+each unmarked; `ReplaceDurable`'s put-back marked; the barrier before the
+staging marked; the marker hiding what it wraps.
+**Checks**, on legion0 at 2c4cecf6, in one call through the shared build lock:
+`make fmt`, which rewrote nothing; `make vet`; `go test -race -count=1` of
+what the marker reaches, `./internal/atomicwrite/`, `./internal/player/dsdstate/`,
+`./internal/player/engine/`, `./internal/config/`, `./internal/backup/` and
+`./cmd/bridge/`, each ok; `make vet` with `GOOS=windows`, `GOOS=darwin` and
+`GOOS=linux GOARCH=386`, each clean; atomicwrite's and dsdstate's tests as
+linux/386 binaries, ok; `make docs-check`, ok, and again on a copy of the
+tree with the rules patch applied, which `git apply --check` takes; the
+qualification check, "qualification version OK: main..HEAD". The tree is
+clean after.
+
 ## 2026-11-05 — B728 B4: the silent probe, its cache, and the device slot it shares with a Start
 
 B728's B4 (`ops/plan-b728-dsd-capability-design.md`, section 5, with 1.1, 1.2,

@@ -356,9 +356,8 @@ func buildDoctorDepsWith(cfgPath string, absentIsPreSetup bool, dacHost dacAcces
 			d.CertSANs = func(context.Context) servertls.GenerateOptions {
 				return certSANOptions(cfg)
 			}
-			d.PairingPrimary = func() (string, bool) {
-				u := admin.DialURL(cfg)
-				return u, u != ""
+			d.PairingPrimary = func() (string, string) {
+				return admin.PairingPrimary(cfg)
 			}
 			d.LibraryRoots = cfg.LibraryRoots
 			// A player box's checklist, from a one-shot outputs builder it

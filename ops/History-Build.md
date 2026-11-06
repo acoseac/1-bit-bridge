@@ -11,8 +11,8 @@
   rotation: one-target-per-night by day-of-year would give each target five minutes a
   MONTH. A crasher fails that matrix leg and uploads `testdata/fuzz/**` as an artifact —
   deliberately not auto-committed, since a corpus commit from CI is noise while a crasher
-  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. **66** targets across **eighteen** packages —
-  `internal/{manifest,fs,dlna,dlna/discovery,upnp,enrich,dupes,lyrics,upload,atlasharvest,handshakelog,alsa,mpd,mpd/conf,player/decode,player/hotplug,player/openhome,player/trackref}` —
+  deserves a human-reviewed PR. Locally, `make test` still runs seed corpora only. **67** targets across **nineteen** packages —
+  `internal/{manifest,fs,dlna,dlna/discovery,upnp,enrich,dupes,lyrics,upload,atlasharvest,handshakelog,alsa,mpd,mpd/conf,player/decode,player/hotplug,player/openhome,player/trackref,hostname}` —
   and `atlasharvest`'s `FuzzMatchRelease` lives in
   `lyrics_test.go` rather than a `fuzz_*_test.go` file, so a census that
   greps only the latter undercounts. (This entry said 37 across nine until
@@ -38,7 +38,8 @@
   across eighteen without it: B470 PR 5a1 (#1329) had added `FuzzSSDPDispatch`,
   `FuzzParseDatagramMeta` and `FuzzParseWSAPktinfo` there, and PR 5a4 (#1347) `FuzzParse`
   in `internal/player/trackref`, all uncounted; and 65 until 2026-11-02, when backlog B616
-  added `FuzzParseCredentials` in `internal/player/hotplug`.) They cover
+  added `FuzzParseCredentials` in `internal/player/hotplug`; and 66 until 2026-11-05, when
+  backlog B739 added `FuzzASCIIGivesANameEveryConsumerTakes` in `internal/hostname`.) They cover
   the five untrusted-input surfaces: the audio extractors (whole-file + the pure
   chunk-body parsers + the SACD ISO reader), the LAN-facing UNAUTHENTICATED parsers (SSDP /
   SOAP / DIDL / device description), `fs.Resolver`, the web-upload path validation
@@ -56,9 +57,11 @@
   unauthenticated like DLNA's, and the track reference an Insert names
   (`internal/player/trackref`); and the SSDP subsystem's dispatch (`internal/dlna`), whose
   input is a datagram from the LAN, and the control data its listener reads beside each
-  datagram, which the kernel writes and no network peer can supply (backlog B610).
-  **Count them by file:name pair** to get 66 targets. A function-name-only
-  census (`grep -h '^func Fuzz' | sort -u`) reports 65, because
+  datagram, which the kernel writes and no network peer can supply (backlog B610); and the
+  host name the system reports (`internal/hostname`, backlog B739), which `scutil` and
+  `hostname` set to any bytes, and which reaches the certificate and every advertisement.
+  **Count them by file:name pair** to get 67 targets. A function-name-only
+  census (`grep -h '^func Fuzz' | sort -u`) reports 66, because
   `FuzzNormalize` exists in both `internal/dupes` and `internal/lyrics`. Without `-fuzz` they run their seed
   corpora as ordinary tests, so the normal suite absorbs them for free. To actually fuzz:
   `go test ./internal/fs/ -run XXX -fuzz FuzzResolveContainment -fuzztime 60s -fuzzminimizetime 1s`
@@ -68,7 +71,7 @@
   run still says `PASS` — so the failure mode is a target that looks like it ran and did not.
   Measured on `FuzzFoldForMatch`: `-fuzztime 60s` alone executes **19,003** inputs and then
   sits at 0/sec for 43 seconds; adding `-fuzzminimizetime 1s` executes **1,302,362** in half
-  the wall clock. Forty-seven carry PROPERTY assertions worth keeping green rather than merely
+  the wall clock. Forty-eight carry PROPERTY assertions worth keeping green rather than merely
   not-crashing: `FuzzResolveContainment` (a successful `Resolve` must land inside a root —
   asymmetric, so only a real escape fails it), `FuzzFoldForMatch` (the documented
   `foldNameNoArticle == stripLeadingArticle∘foldName` identity `pickBestArtist` depends on),
@@ -136,14 +139,18 @@
   they report is a value the metadata can hold, an IPv4 destination and a positive index,
   with nothing left in a field not reported) and `FuzzParseDatagramMetaIsXNetsParse` (the
   parser's answer is x/net's wherever x/net's parse returns, and neither where it panics;
-  all four under `dlna-upnp.md`). This said "Four" until 2026-09-28, while eight more were added beside
+  all four under `dlna-upnp.md`), and `FuzzASCIIGivesANameEveryConsumerTakes` (a name
+  `hostname.ASCII` takes is an ASCII host name, an ASCII one byte for byte, taken again
+  unchanged, and with its `.local` name one a certificate mints and verifies for, a URL's
+  host reads back as and a DNS record packs; under `auth-tls.md`). This said "Four" until 2026-09-28, while eight more were added beside
   them, then "Twelve" and "Thirteen" that same day, as two more joined, "Fourteen" until
   2026-09-29, "Twenty-two" until later that day, "Twenty-three" until later still,
   "Twenty-four" until backlog B117, "Twenty-five" until 2026-10-19, one short since
   B246, "Thirty-one" until later that day, "Thirty-three" until 2026-10-23, seven short
   by then and the eighth added that day (B470 PR 5a2a's census), "Forty-one" until
   2026-10-31, four short by then and the fifth added that day (B610's census), and
-  "Forty-six" until 2026-11-02, when B616 added the forty-seventh: **count them
+  "Forty-six" until 2026-11-02, when B616 added the forty-seventh, and "Forty-seven" until
+  2026-11-05, when B739 added the forty-eighth: **count them
   by the assertions in each `f.Fuzz` body**, not from this list. **A crash found by the extractor
   targets is a REAL defect, not a nicety** — `runScanWorker`'s per-iteration `recover()` means
   a panicking file is skipped, so it silently never reaches the manifest, and a throw (out of

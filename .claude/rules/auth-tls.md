@@ -24,6 +24,7 @@ paths:
   - "cmd/bridge/cert*.go"
   - "cmd/bridge/token*.go"
   - "internal/advertise/**"
+  - "internal/hostname/**"
   - "internal/baseurl/**"
 ---
 # Auth, pairing, TLS and security posture
@@ -557,6 +558,97 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   `TestTheDevicesPageSaysToSetCustomEndpoints`,
   `TestPairingURLWarnsWhenTheContainerHasNoDialAddress`,
   `TestAContainerHostnameLeavesTheWantSetAndTheDoctor`.)
+- **A host name the system reports reaches a certificate or an
+  advertisement only through `hostname.ASCII`, so what the bridge
+  advertises is what it certifies** (2026-11-05, backlog B739, two
+  rounds). On a host whose name is not ASCII, `bridge init` failed and
+  installed nothing:
+  `create cert: x509: "Ð\u0091Ä¯U" cannot be encoded as an IA5String` on
+  a test Mac whose kern.hostname is those bytes, and a Windows computer
+  name in Cyrillic or Chinese takes the same path, since
+  `x509.CreateCertificate` refuses a DNS name that is not ASCII. Fixing the
+  certificate alone would have turned "cannot install" into "installs and
+  cannot be dialled": a client checks the certificate against the name it
+  dials. So one helper decides the name and every consumer takes its
+  answer: the want-set (`advertise.CertHostname`, which `certSANOptions`
+  hands init, serve, `bridge cert rotate` and the doctor), the mint as a
+  second layer (`tls.dnsNames`, for a caller handing `Generate` a name as
+  reported), the `.local` endpoint (`advertise.Endpoints`), the pairing
+  QR's primary (`advertise.PairingHost`, `defaultBridgeURL`) and mDNS's SRV
+  target and `host=` (`mdns.Config.advertisedHost`). **A plain ASCII name
+  is returned byte for byte** when it is a host name (labels of 1 to 63
+  bytes of letters, digits, hyphens and underscores, 253 bytes at most,
+  one trailing dot at most): idna.Lookup lowercases a name and refuses an
+  underscore, so an ASCII name never goes through it, and `MacBook-Pro_2`
+  certifies and advertises exactly what it did
+  (`TestAnASCIIHostNameIsCertifiedAndAdvertisedAsOnMain`, which passes on
+  main's code too). **A name with a byte outside ASCII takes
+  `idna.Lookup.ToASCII`, held to the same bounds**, which Lookup does not
+  check: `Жук` is `xn--f1ai0a`, `müsik` `xn--msik-0ra`, `DESKTOP-日本`
+  `xn--desktop--5y4qg6h`. The bridge's own responder answers an address
+  question for exactly the name it publishes, so a client resolves
+  `xn--f1ai0a.local` through it
+  (`TestAClientResolvesTheASCIINameThroughTheBridgesResponder`, live over
+  loopback). **Anything else has no valid form and is no host name**: a
+  control character (the Mac's U+0091), a space or other punctuation,
+  bytes that are not UTF-8, an empty label, a label over 63 bytes in
+  either form, an underscore beside a non-ASCII character. The certificate
+  then carries localhost and the addresses, the `.local` endpoint is left
+  out, mDNS publishes no `host=` and an SRV target made of its first
+  address, `onebit-bridge-192-168-1-20.local` (`mdns.RecordsFor`), as for a
+  name that cannot be read (round 2: it was `localhost.local`, which no
+  certificate names, and the responder answered an address question for
+  it with the bridge's address), and **the pairing QR takes the address
+  the listener is bound to**, when `listenAddress` names one a phone can
+  dial (not unspecified, loopback or IPv6 link-local: `lanPairingURL`),
+  else a dialable `customEndpoints` entry, else the first LAN IPv4 address
+  of the interface walk (the one /v1/health lists first: it holds no IPv4
+  address back), else none, which the pairing page, a refused mint and
+  the doctor's `pairing-url` answer with `PairingNeedsEndpoint`: **never
+  localhost**, which stays the fallback for a name that cannot be read
+  alone, the same-machine path. **A converted name is answered by the
+  bridge's own responder alone** (round 2: no responder on the LAN
+  publishes a punycode name), so while `mdns.enabled` is false its
+  `.local` endpoint is left out (`advertise.Params.MDNS`, which
+  /v1/health sets from the live config), the QR takes the same fallback
+  (in a detected container a dialable custom endpoint or none), and the
+  doctor's `pairing-url` says why (`admin.PairingPrimary`'s reason). The
+  want-set keeps the name, so turning mDNS off or on makes no certificate
+  stale, and an ASCII name is advertised and paired at as on main
+  whatever the setting. **A configured
+  name (`customEndpoints`, the public domain) never goes through the
+  helper**: one the certificate cannot carry still refuses the mint, naming
+  it (`TestAConfiguredNameTheCertificateCannotCarryStillRefuses`, which
+  passes on main's code too), since leaving it out would advertise an
+  endpoint the certificate does not cover. A pair that is there is loaded
+  and never minted again (the sticky-cert bullet above); one minted now
+  covers its host, so the startup warning and `tls-cert-sans` stay quiet.
+  The library's default name is not a certified name: `firstInstallName`
+  reads the host through a seam of its own (`installHostname`), keeps a
+  Unicode name readable, removes its control characters, and is
+  `DefaultLibraryName` when nothing else is left. **Don't put a host name
+  the system reported into a certificate, an endpoint, a pairing URL or an
+  mDNS record but through `hostname.ASCII`, run an ASCII name through
+  idna.Lookup, take a name with no valid form for one that cannot be read
+  (whose fallback is localhost), advertise or pair at a converted name
+  while mDNS is off, make the want-set follow the mDNS setting, publish
+  `localhost.local` for a host with no name, offer a walk address before
+  the listener's own or a custom endpoint, send a configured name through
+  the helper, or convert the library's name.**
+  (`TestEachReportedNameBecomesOneName`,
+  `FuzzASCIIGivesANameEveryConsumerTakes`,
+  `TestEveryNameTheBridgeAdvertisesIsOneItCertifies`,
+  `TestServeOnAHostWhoseNameIsNotASCII`,
+  `TestInitOnAHostWhoseNameIsNotASCII`,
+  `TestThePairingURLOnAHostWhoseNameIsNotASCII`,
+  `TestAHostWithNoNameToPairAtSaysSo`,
+  `TestTheDefaultLibraryNameIsTheHostsNameAsItReads`,
+  `TestAConvertedNameIsPairedAtItsLANAddressWithMDNSOff`,
+  `TestTheLANFallbackIsTheAddressTheListenerIsBoundTo`,
+  `TestHealthAdvertisesAConvertedNameOnlyWhileMDNSIsOn`,
+  `TestThePairingURLLineSaysWhyItIsNotTheHostsName`,
+  `TestTheSRVTargetIsTheHostsNameOrANameOfItsAddress`,
+  `TestAHostWithNoNameIsAnsweredForByANameOfItsOwn`.)
 - **The pairing QR advertises the SERVED cert**, resolved by SNI —
   `FingerprintForServerName` mirrors `Get`'s routing rather than delegating, so
   **every freshness and validity gate in `Get` must be restated there**; losing

@@ -140,8 +140,8 @@ func CertGatedIPs(cfg CertSANConfig) []net.IP {
 }
 
 // GatherCertSANDNS returns the operator-relevant DNS hostname set the
-// cert SAN list should cover, on top of `localhost` + `os.Hostname`
-// which the cert template adds unconditionally.
+// cert SAN list should cover, on top of `localhost` and the host's own
+// name (CertHostname), which the cert template adds.
 //
 // Sources:
 //
@@ -150,7 +150,11 @@ func CertGatedIPs(cfg CertSANConfig) []net.IP {
 //     → `my-bridge.example.com`). IP-literal entries route to
 //     `GatherCertSANIPs` via `net.ParseIP` instead.
 //
-// Hostnames are deduped case-insensitively.
+// Hostnames are deduped case-insensitively. They are names an operator
+// configured, never the host's reported one, so none goes through
+// hostname.ASCII (backlog B739): a configured name the certificate cannot
+// carry refuses the mint, naming it, rather than be left out of a
+// certificate whose endpoint is still advertised.
 func GatherCertSANDNS(cfg CertSANConfig) []string {
 	var out []string
 	seen := make(map[string]bool)

@@ -19,6 +19,8 @@ import (
 	"net"
 	"sort"
 	"strings"
+
+	"github.com/acoseac/1-bit-bridge/internal/hostname"
 )
 
 // Endpoint is one reachable URL for the bridge. Host is the literal
@@ -123,6 +125,14 @@ type Params struct {
 	HostOverride    string   // pass "" to use os.Hostname()
 	CustomEndpoints []string // pass nil/empty to skip
 
+	// MDNS says the bridge's own mDNS responder is on: the config's
+	// mdns.enabled (cfg.EffectiveMDNSEnabled). A host name that is not ASCII
+	// is published in its IDNA ASCII form, which no responder on the LAN but
+	// the bridge's answers (backlog B739's second round), so its `.local`
+	// endpoint is published only while this is set. An ASCII name's is
+	// published either way: the system's own responder answers it.
+	MDNS bool
+
 	// NamedByCert, when set, says whether the certificate the bridge
 	// serves names an address (backlog B457). An IPv6 address of the
 	// interface walk it does not name is not published: a client that
@@ -181,18 +191,23 @@ func Endpoints(p Params) []Endpoint {
 
 	// Hostname resolution for the mDNS `.local` form. Short-label only
 	// — macOS/Linux hostnames may carry an FQDN that doesn't round-trip
-	// through mDNS. A detected container's generated id is left out:
-	// the phone cannot resolve it.
+	// through mDNS. The name is the one the certificate carries and the
+	// bridge's mDNS responder publishes (hostname.ASCII, backlog B739): a
+	// client checks the certificate against the name it dials. A name with
+	// no valid form is left out, and so is a detected container's generated
+	// id: the phone cannot resolve it. So is a name hostname.ASCII converted
+	// while the bridge's responder is off (Params.MDNS): it alone answers
+	// the converted form.
 	host := p.HostOverride
 	if host == "" {
 		host, _ = hostnameFunc()
 	}
-	if host != "" && !OmitContainerHostname(host, inDocker()) {
-		if i := strings.IndexByte(host, '.'); i > 0 {
-			host = host[:i]
+	if name, ok := hostname.ASCII(host); ok && (p.MDNS || name == host) && !OmitContainerHostname(name, inDocker()) {
+		if i := strings.IndexByte(name, '.'); i > 0 {
+			name = name[:i]
 		}
 		out = append(out, Endpoint{
-			URL:   fmt.Sprintf("https://%s.local:%d", host, port),
+			URL:   fmt.Sprintf("https://%s.local:%d", name, port),
 			Class: ClassMDNSHost,
 		})
 	}
