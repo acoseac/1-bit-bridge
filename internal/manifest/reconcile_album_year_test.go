@@ -319,8 +319,9 @@ func TestScanner_ARetagOfSomeFilesIsJudgedOnTheTags(t *testing.T) {
 }
 
 // TestScanner_ATagEditThatOutvotesTheStoredYearMovesTheAlbum: the seven 2011
-// files retagged 1968 outvote the five rows stored at 2011, and the album
-// moves to 1968; a whole-album retag moves it again.
+// files retagged 1968 outvote the year all twelve rows are stored at, 2011
+// (the five rows the pass moved vote their records of 1968, the seven their
+// new tags), and the album moves to 1968; a whole-album retag moves it again.
 func TestScanner_ATagEditThatOutvotesTheStoredYearMovesTheAlbum(t *testing.T) {
 	root := t.TempDir()
 	store, sc := newScanFixture(t, root)
