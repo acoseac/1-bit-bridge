@@ -324,8 +324,9 @@ func TestMatchChristmasOnAVeryLongTitle(t *testing.T) {
 }
 
 // The match never panics, is the same twice, folds idempotently, never
-// changes with an artist's name unless the album holds noel, and never with
-// the case of an ASCII letter.
+// changes with an artist's name unless the album holds a word that is a name
+// too (noel, natale, craciun, kerst), and never with the case of an ASCII
+// letter.
 func FuzzMatchChristmas(f *testing.F) {
 	seeds := [][4]string{
 		{"Silent Night (Live)", "Bing Crosby", "Hits", "Pop"},
@@ -355,9 +356,14 @@ func FuzzMatchChristmas(f *testing.F) {
 				t.Fatalf("christmasFold(%q) = %q, and folding it again gives %q", s, once, christmasFold(once))
 			}
 		}
-		if !hasWord(christmasFold(album), "noel") {
+		guarded := false
+		for _, w := range strings.Fields(christmasFold(album)) {
+			guarded = guarded || guardedAlbumWords[w]
+		}
+		if !guarded {
 			if other := MatchChristmas(title, "", album, genre); other != got {
-				t.Fatalf("the artist %q decided the match (%s, %s with none) for an album without noel", artist, got, other)
+				t.Fatalf("the artist %q decided the match (%s, %s with none) for an album holding no guarded word",
+					artist, got, other)
 			}
 		}
 		up := func(s string) string {

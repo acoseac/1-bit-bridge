@@ -58,16 +58,20 @@ func (r ChristmasRule) String() string {
 //
 //  1. Genre: one segment of the genre, split where the scanner joins a
 //     multi-valued genre ("; ") and on ; / , \ and :, equals a Christmas
-//     genre (christmasGenres), or is two words pairing `holiday` with one.
-//     Bare `holiday` never counts: it is Hanukkah, Thanksgiving and a travel
+//     genre (christmasGenres), begins with the word `christmas` or `xmas`
+//     (`Christmas Pop`), or is two words pairing `holiday` with one. Bare
+//     `holiday` never counts: it is Hanukkah, Thanksgiving and a travel
 //     playlist as often.
 //  2. Album: the album holds a Christmas word as a whole word
 //     (christmasAlbumWords, or one beginning `christmas` or `weihnacht`),
-//     where `noel` does not count when the artist holds `noel` as a word or
-//     the word before it is a credit (feat, ft, featuring, with).
+//     where a word that is a name too (guardedAlbumWords: `noel`, `natale`,
+//     `craciun`, `kerst`) does not count when the artist holds it as a word
+//     or the word before it is a credit (feat, ft, featuring, with), and
+//     `natale` does not count after a place (birthplaceWords: Terre natale
+//     and Città natale are a birthplace).
 //  3. Title: the title, less trailing version suffixes (a parenthetical, a
 //     bracket, ` - Live` and the like), equals a carol in christmasTitles.
-//     Equals, never begins with: Silent Nightmare is not Silent Night.
+//     Equals, never begins with: O Holy Nightmare is not O Holy Night.
 //  4. Title word: the title holds `xmas`, `navidad`, `navidades`, or a word
 //     beginning `christmas` or `weihnacht`.
 //
@@ -113,27 +117,46 @@ var christmasGenres = map[string]bool{
 }
 
 // christmasAlbumWords are the words an album qualifies a track by, folded,
-// besides those beginning `christmas` or `weihnacht` and `noel` (which
-// christmasAlbum judges with the artist). `jul` and `natal` are not here:
-// they are words of other things in an album's name.
+// besides those beginning `christmas` or `weihnacht` and the guarded ones
+// (guardedAlbumWords), which christmasAlbum judges with the artist and the
+// word before. Each names Christmas music outright. `jul` and `natal` are
+// not here: they are words of other things in an album's name.
 var christmasAlbumWords = map[string]bool{
-	"xmas": true, "navidad": true, "navidades": true, "natale": true,
-	"craciun": true, "colinde": true, "julvisor": true, "julsanger": true,
-	"kerstmis": true, "koledy": true, "joululaulut": true,
+	"xmas": true, "navidad": true, "navidades": true, "villancicos": true,
+	"colinde": true, "julvisor": true, "julsanger": true, "julesange": true,
+	"julesanger": true, "kerstmis": true, "koledy": true, "joulu": true,
+	"joululaulut": true,
 }
+
+// guardedAlbumWords are Christmas words that are names too: noel a first
+// name, natale, craciun and kerst surnames (natale French and Italian for
+// native as well). One counts only where it cannot be a person: not after a
+// credit word, and not when the artist holds it as a word (Noel
+// Gallagher's own album, Mihai Crăciun's).
+var guardedAlbumWords = map[string]bool{"noel": true, "natale": true, "craciun": true, "kerst": true}
 
 // creditWords put a name after them: `noel` after one is a person.
 var creditWords = map[string]bool{"feat": true, "ft": true, "featuring": true, "with": true}
 
+// birthplaceWords are the places `natale` follows when it means native, not
+// Christmas: French terre and ville, Italian terra, città, paese and casa.
+var birthplaceWords = map[string]bool{
+	"terre": true, "terra": true, "ville": true, "citta": true, "paese": true, "casa": true,
+}
+
 // christmasTitles are the carols a title qualifies a track by alone, as
-// they are written; christmasTitleSet holds them folded. Each is a song no
-// other song shares a title with. "Joy to the World" is not here: Three Dog
-// Night's hit has that title, and nothing in the tags tells the two apart.
-// The list is the design's (B750), and the second column of a row its
-// common spellings, which the fold alone does not join: "Oh" for "O", "You"
-// for "Ye", "Nowell", the carol's whole first line, a dropped g.
+// they are written, folded into one set. Each is a title no other song
+// shares. "Joy to the World" is not here: Three Dog Night's hit has that
+// title, and nothing in the tags tells the two apart. Nor is bare "Silent
+// Night", for the same reason (Bon Jovi's, on 7800° Fahrenheit, is another
+// song): the carol keeps its own spellings ("Silent Night, Holy Night",
+// Stille Nacht, Cicha noc, Stilla natt), and on a Christmas album or in a
+// Christmas genre it qualifies by those rules. The list is the design's
+// (B750), and the later spellings in a row its common ones, which the fold
+// alone does not join: "Oh" for "O", "You" for "Ye", "Nowell", the carol's
+// whole first line, a dropped g.
 var christmasTitles = foldTitleTable([][]string{
-	{"Silent Night", "Silent Night, Holy Night"},
+	{"Silent Night, Holy Night"},
 	{"Stille Nacht", "Stille Nacht, heilige Nacht"},
 	{"O Holy Night", "Oh Holy Night"},
 	{"Cantique de Noël"},
@@ -179,8 +202,8 @@ func foldTitleTable(rows [][]string) map[string]bool {
 }
 
 // titleVersionWords make a trailing " - …" a version of the song rather than
-// part of its title: Silent Night - Live and Silent Night - 2009 Remaster are
-// Silent Night, Silent Night - Deadly Night is not.
+// part of its title: O Holy Night - Live and O Holy Night - 2009 Remaster are
+// O Holy Night, O Holy Night - Deadly Night is not.
 var titleVersionWords = map[string]bool{
 	"live": true, "vivo": true, "remaster": true, "remastered": true,
 	"instrumental": true, "acoustic": true, "unplugged": true, "version": true,
@@ -193,7 +216,7 @@ var titleVersionWords = map[string]bool{
 
 // maxTitleSuffixes bounds the suffixes stripTitleSuffixes takes off, so a
 // title made of a thousand parentheticals costs a few scans, not a thousand.
-// A real title carries two or three ("Silent Night (Live) [2009 Remaster]").
+// A real title carries two or three ("O Holy Night (Live) [2009 Remaster]").
 const maxTitleSuffixes = 8
 
 func christmasGenre(genre string) bool {
@@ -203,6 +226,11 @@ func christmasGenre(genre string) bool {
 			return true
 		}
 		a, b, two := strings.Cut(g, " ")
+		// A segment that begins with the word christmas or xmas names
+		// Christmas music whatever its kind: Christmas Pop, Xmas Rock.
+		if a == "christmas" || a == "xmas" {
+			return true
+		}
 		if !two || strings.Contains(b, " ") {
 			continue
 		}
@@ -238,11 +266,14 @@ func christmasAlbum(album, artist string) bool {
 		switch {
 		case christmasAlbumWords[w], strings.HasPrefix(w, "christmas"), strings.HasPrefix(w, "weihnacht"):
 			return true
-		case w == "noel":
+		case guardedAlbumWords[w]:
 			if i > 0 && creditWords[words[i-1]] {
-				continue // "Live with Noel Gallagher"
+				continue // "Live with Noel Gallagher", "Sessions feat. Natale"
 			}
-			if hasWord(christmasFold(artist), "noel") {
+			if w == "natale" && i > 0 && birthplaceWords[words[i-1]] {
+				continue // "Terre natale", "Città natale": a birthplace
+			}
+			if hasWord(christmasFold(artist), w) {
 				continue // the artist's own name, as an album title
 			}
 			return true
@@ -294,14 +325,25 @@ func stripTitleSuffix(t string) string {
 	if i := trailingGroupStart(t); i > 0 {
 		return strings.TrimSpace(t[:i])
 	}
-	for _, dash := range []string{" - ", " – ", " — "} {
-		i := strings.LastIndex(t, dash)
-		if i > 0 && versionSuffix(t[i+len(dash):]) {
-			return strings.TrimSpace(t[:i])
+	// The suffix is what follows the rightmost dash of any style. Taking the
+	// styles in turn let an ASCII hyphen before an en dash claim both
+	// suffixes: "O Holy Night - Deadly Night – Live" lost "Deadly Night"
+	// with its "Live" and matched the carol.
+	at, width := -1, 0
+	for _, dash := range titleDashes {
+		if i := strings.LastIndex(t, dash); i > at {
+			at, width = i, len(dash)
 		}
+	}
+	if at > 0 && versionSuffix(t[at+width:]) {
+		return strings.TrimSpace(t[:at])
 	}
 	return t
 }
+
+// titleDashes are the spaced dashes a version suffix follows: a hyphen, an
+// en dash and an em dash.
+var titleDashes = []string{" - ", " – ", " — "}
 
 // trailingGroupStart is the index of the bracket that opens the
 // parenthetical or bracket a title ends with, or -1. Bytewise: no byte of a
