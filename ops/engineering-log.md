@@ -76877,3 +76877,244 @@ tests. Not run here: macOS and Windows natively, CI's runners and the iOS
 app.
 
 **B739, a last point (the orchestrator; Codex and the Claude API reviewer on round 2):** a listener bound to loopback, a name or a link-local address fell through to the walk's first LAN address, where nothing answers. Only a listener on every address takes the walk now; any other takes a dialable custom endpoint or the refusal that asks for one. `TestTheLANFallbackIsTheAddressTheListenerIsBoundTo`'s three rows were red first. Test-fast on the Mac whose real host name has this problem: 83 of 83 packages, no IA5 error, against about 202 failures on main.
+
+## 2026-11-06 — B743: a track or disc number written with its total reads as its number (ExtractorVersion 31)
+
+Backlog B743, found by the 0.2.3 Docker upgrade test on 0.2.2 and the
+candidate alike: a FLAC tagged `TRACKNUMBER=1/2` indexed as track 0, so its
+album played out of order. Worker b743 on legion0 (Ubuntu 26.04,
+linux/amd64, AMD Ryzen 9 6900HX, 16 threads, go1.27.3, `GOTOOLCHAIN=local`,
+`GOPROXY=off`), branch `fix/b743-track-number-forms` from main d37417ed, the
+orchestrator's brief. Commits: the fix with its tests 5734d52b, two overflow
+pins 9957eb98, then this record with the rule's long form in
+`ops/History-rules-scanner.md`. Its line in `.claude/rules/scanner.md` goes
+in through a checked patch (`rules-b743.patch`; this worker cannot write
+`.claude/`).
+
+### The defect
+
+dhowden's `metadataVorbis.Track()` and `Disc()` (vorbis.go:239-251 at
+3d75831295e8) are `x, _ := strconv.Atoi(m.c["tracknumber"])`, and the same
+for `discnumber`, `tracktotal` and `disctotal`. `populateFromTagMetadata`
+took `m.Track()` and `m.Disc()` behind its presence gates, so a value that
+is not a whole integer was a present 0: `1/2`, `3 of 12`, ` 3 `. A 0 is a
+missing number to the extractor's filename backfill and to the
+track-number pass, so a file named `05 - x.flac` took its name's number,
+which need not be the tag's, and one with no number in its name kept 0.
+No pass fills a disc number, so that stayed 0.
+
+### The forms
+
+The rule (`leadingTagNumber`), on the value trimmed: an optional sign and
+digits, then nothing, `/` and whatever follows, or whitespace, `of` and
+whatever follows. Every row is in `TestLeadingTagNumberReadsTheFormsTaggersWrite`
+or `TestLeadingTagNumberPastAnInt32`.
+
+| Value | Reads |
+|---|---|
+| `1/2`, `01/12` | 1 |
+| `3/`, ` 3 `, `3 of 10`, `+3/12`, `\t3/12\n`, `3/12/2`, `3/A`, `3 of`, `3\tof 10` | 3 |
+| `-3/12`, ` -3 ` | -3 (what an ID3 frame reads `-3/12` as) |
+| `A1`, `1.2`, `2-1`, `3-A`, `2024-01-01`, empty, blank, `0`, `0/12` | 0 |
+| `3 / 12`, `3of10`, `3 OF 10`, `3 10`, `/5`, `+`, `- 3`, `+ 3/12` | 0 (no tail but the two; `of` is lower case and follows whitespace) |
+| `+3`, `-3`, `007`, `12` | 3, -3, 7, 12 (`strconv.Atoi` reads them whole, as before) |
+| `99999999999999999999`, `-99999999999999999999` | saturated, as before: `math.MaxInt64` / `math.MinInt64`, or the int32 bounds where an int is 32 bits |
+| `4294967296`, `4294967296/2` | 4294967296 where an int is 64 bits; saturated and 0 where it is 32 |
+| `99999999999999999999/2`, ` 99999999999999999999 `, `99999999999999999999 of 2` | 0 |
+
+The brief said an overflowing number before `/2` reads 0 "as today". That
+holds where `strconv.Atoi` meets the `/` first, and not where it meets the
+overflow first: `ParseUint` checks for overflow digit by digit. Measured
+with go1.27.3: on linux/amd64 `99999999999999999999/2` saturates to
+9223372036854775807 (what dhowden stored), while `9999999999999999999/2`,
+past an int64 and inside a uint64, reaches the `/` and reads 0; on
+linux/386 every leading number past 4294967295 saturates to 2147483647
+(`9999999999/2` included). The rule reads every overflowing leading number
+in a form as 0, on both int sizes, so those shapes change from the
+saturated number to 0. A whole value keeps `strconv.Atoi`'s answer,
+saturated where it overflows.
+
+### The audit
+
+Every path into `populateFromTagMetadata`, measured through dhowden and the
+extractor with a throwaway probe (not committed) and then the tests:
+
+- **Vorbis comments**: FLAC (`tag.ReadFrom`), Ogg Vorbis and Opus (dhowden's
+  Ogg reader, `.ogg` and `.oga`), Ogg FLAC (`oggFLACMetadata`, read as a
+  `.flac`). All are `tag.VORBIS` and `strconv.Atoi` of the whole value, so
+  every form above but the whole numbers was 0. Fixed: `numberAsWritten`
+  reads the raw value by the rule.
+- **ID3v2.3 and 2.4** (an MP3; a WAV's `id3 ` and an AIFF's `ID3 ` chunk
+  through `applyEmbeddedID3`; a DSF's tag at its metadata pointer,
+  `readDSFTags`; a DSDIFF `ID3 ` chunk at the root or in PROP, through
+  `applyEmbeddedID3`): dhowden's `parseXofN` splits on `/` and reads the
+  side before it, trimmed, when there are two sides, and the whole value as
+  it stands otherwise. Measured: `1/2` 1, `01/12` 1, `3/` 3, `+3/12` 3,
+  `-3/12` -3, `3 / 12` 3, `\t3/12\n` 3, `+3` 3, `-3` -3, and ` 3 `,
+  `3 of 10` and `1/2/3` 0. Fixed: a 0 is read again by the rule; any other
+  answer stands, since the rule alone would read `3 / 12` as 0, and a
+  saturated overflow stands with it.
+- **ID3v2.2** (`TRK`, `TPA`, the frames iTunes wrote for years): dhowden
+  reads them, but the gates' aliases were `trck`, `tracknumber`, `trkn` and
+  `tpos`, `discnumber`, `disk`, so every such file indexed with neither
+  number, whatever the value. Fixed: `trk` and `tpa` join the gates.
+- **ID3v1**: `ReadID3v1Tags` keeps ID3v1.1's track byte as the raw map's
+  `track`, an int, 0 when the comment's byte 28 is not a NUL. No gate asked
+  for it, so an MP3 tagged with ID3v1.1 alone had no track number. Fixed:
+  `id3v1HasTrack` counts it present above 0 (ID3v1.0's comment runs on
+  there). ID3v1 has no disc.
+- **MP4** `trkn` and `disk`: binary atoms, which dhowden's `readAtomData`
+  stores as ints; no form reaches them. Unchanged. Two comments that said
+  `trkn` surfaces as `*tag.Position`, a type the pinned dhowden does not
+  have, now say what it keeps.
+- **DSF and DFF** are the ID3 paths above. `containerText` (a DSDIFF DIIN,
+  a RIFF LIST/INFO) carries a title, artist, album and genre, no numbering.
+  WavPack and APE are not scanner extensions (`Ext`).
+- **Elsewhere in `internal/`**: the UPnP ingest reads
+  `upnp:originalTrackNumber` with `atoiTrackNumber` (didl.go), which trims
+  and cuts at `/` already, the element being an `xsd:int`; an SACD image's
+  virtual rows are numbered from its TOC; `fillTrackNumberFromFilename` and
+  the track-number pass parse file names. Nothing else assigns
+  `TrackNumber` or `DiscNumber` (a grep of the assignments outside tests).
+- **Raw keys**: the re-read uses the key the accessor read, as that
+  format's map spells it (`tagNumberKeys`: `tracknumber` and `discnumber`,
+  which dhowden lowercases; `TRK`/`TPA`; `TRCK`/`TPOS`), never `stringOf`'s
+  normalised lookup, which would answer a Vorbis comment named `TRCK`. The
+  value types are dhowden's: a Vorbis value and an ID3v2 text frame are
+  strings, ID3v1's `track` an int.
+
+What extraction told apart, it still does: a present empty or invalid value
+is `Some(0)`, an absent one nil, and a tag with no raw map keeps its
+accessors' answers (`TestEveryVorbisReaderReadsTheNumberATaggerWrote`'s
+empty, invalid and absent rows for all four Vorbis readers, the same rows
+for ID3v2, 2.2 and ID3v1, and `TestATagWithNoRawMapKeepsItsAccessorsAnswers`).
+
+### Red first
+
+Before the fix, the tests of 5734d52b against main's `extractors.go`:
+`TestScanner_AFLACNumberedWithItsTotalIndexesItsTrackAndDisc` (a FLAC named
+`Song.flac`, `TRACKNUMBER=3/12`, `DISCNUMBER=2/2`, through a scan) stored
+track 0 and disc 0, both assertions failing; 30 subtests failed (four forms
+in each of the four Vorbis readers; ` 3 `, `3 of 12` and `3/12/2` in
+ID3v2.3 and 2.4; every present ID3v2.2 row, nil; a WAV, AIFF, DSF and DFF
+with `3 of 12` and ` 2 `), and `TestAnID3v11TrackIsRead` read nil. The
+plain, empty, invalid and absent rows, ID3's `3/12` and `3 / 12`, the M4A
+and the no-raw-map case passed. The final tests (9957eb98), run on a copy of
+the tree with main's `extractors.go`: 34 subtests (the four Vorbis overflow
+rows join), those two tests, and the upgrade test, which main fails whole
+(its version is 30, so no seeded row is read again; the full manifest keeps
+0/0, 5/0 and 6/0 and the delta is empty). The two table tests call the new
+helper and were stubbed out of that copy.
+
+### The fix
+
+`numberAsWritten(f, raw, read, keys)`: a Vorbis comment is
+`leadingTagNumber` of its value; an ID3v2 frame is dhowden's answer unless
+that is 0, which `leadingTagNumber` reads again; every other format keeps
+the accessor's answer. `isWholeInteger` decides what `strconv.Atoi` reads
+whole, and `acceptedNumberTail` the two tails. The track gate is
+`hasAnyRawKey(raw, "trck", "trk", "tracknumber", "trkn") ||
+id3v1HasTrack(...)`, the disc gate adds `tpa`. `ExtractorVersion` 30 → 31,
+its docblock entry v31.
+
+### Rows already indexed
+
+The first scan after the upgrade re-reads every row once (size and mtime
+unchanged, version stale: `reExtractUnchanged`). A row that reads alike is
+byte-identical after `mergePostScanFields` and takes
+`StampExtractorVersionBatch`: `extractor_version` and `missing_count`, no
+`indexed_at`, no `enriched_at`, no `tags_json`. A row whose track number
+moves is held to the scan's tail (`reconciledFieldsDiffer`: the track number
+is one of #1128's four fields), the passes run in memory with every held
+re-read in place, and it is written whole; one whose disc number alone moves
+takes the full upsert at once. The full upsert stamps `indexed_at` past the
+library watermark and zeroes `enriched_at`. A number the file's name gave
+gives way to the tag's: v30 read `4/12` in `05 - Named.flac` as 0 and the
+extractor's backfill made it 5 (the track-number pass does the same for a
+row indexed before that backfill); v31 reads 4, the merge copies a stored
+track number only where the fresh one is nil, and the pass fills only a
+missing one. `TestScanner_V31_ANumberReadAnewJoinsTheDelta_AnUnchangedOneOnlyStamps`
+seeds five rows at the literal version 30, size and mtime unchanged, with
+v30's numbers (0/0, 5/0, 6/0, and two rows that read alike, one of them an
+MP3 whose `8 / 12` dhowden reads as 8); one scan gives the full manifest
+3/2, 4/2, 6/2, 7/2 and 8/2, the delta exactly the three changed rows with
+those numbers, `enriched_at` 0 on them and 1 on the other two, and the scan
+after that moves nothing.
+
+**What the bump costs, measured** (a throwaway test, not committed: 25,000
+synthetic FLACs of about 250 bytes, 100 a folder, on the worktree's disk
+with the store): the index scan 6.70 s; two scans of the unchanged library
+7.17 s and 7.20 s; the bump over rows that read alike 5.35 s, 0 rows in the
+delta; the bump with 2,500 rows whose numbers change 5.74 s, those 2,500
+rows exactly in the delta; the scan after it 7.22 s, 0 rows. On this host
+the bump costs no more than a rescan does. What a real library adds is the
+read: the re-read opens every file and reads its tags once, where an
+unchanged scan compares its stat and skips it, and dhowden reads a FLAC's
+PICTURE blocks whole. So on a 25,000-track library the bump is one read of
+every file's tag blocks and embedded pictures, at the first scan after the
+upgrade, at the speed of the medium, and one enrichment for each row whose
+numbers change (one MusicBrainz release search per album and artist through
+the enricher's caches, at its 1.1 s pace). The rows that read alike cost
+the client nothing.
+
+### Sync
+
+A re-extracted row whose values are unchanged produces no delta entry: it is
+only stamped, and the delta is `indexed_at > since`. The upgrade test pins
+it on the strictest cursor a device can hold (`Store.LibraryWatermark`, the
+one `library.changed` hands out), and the 25,000-row run measured it (0
+rows). So the library does not cross the wire. The one exception is an
+SACD image's virtual rows: `processSACDISO` re-expands a version-stale image
+and hands every virtual row to the full upsert, a leg with no diff-guard
+(the v17 entry, and the SACD read-failure record above, say so), so each
+virtual row moves `indexed_at`, is re-enriched, and crosses twice whatever
+its numbers, as on every bump: two deliveries of every virtual row of every
+SACD image in the library, each a track's JSON like the rows below. This
+change does not touch that leg. A row whose number changes
+is in the next delta with its new `trackNumber` and `discNumber`, fields the
+wire has always carried, so the app re-sorts the album (its order is disc,
+then track); the row comes with `enriched: false`, its MusicBrainz ids and
+artwork kept by the merge. Its enrichment then lands through `MarkEnriched`,
+which moves `indexed_at` again, so the row crosses a second time,
+`enriched: true`. The cost is those two deliveries of each changed row:
+1,067,136 bytes of track JSON for the 2,500 synthetic rows (427 a row,
+49,633 gzipped, the rows being near-identical), more for a row with its ids
+and artwork key. One `library.changed` event ends the scan. How many rows
+of a real library change was not measured. No wire change: `ProtocolVersion`
+stays 1, `PROTOCOL.md` is unchanged, no Mirror-PR. The app's own readers
+(its SMB and on-device sources) were not read: its clone is not on this
+host.
+
+### Negative controls (each on the committed fix, restored after)
+
+A runner applied each mutation once to `extractors.go`, rebuilt the test
+binary, ran the named tests and restored the bytes from memory; the tree
+was clean after.
+
+| Mutation | Red |
+|---|---|
+| NC1: `leadingTagNumber` reverted to `strconv.Atoi`, dhowden's reading | 8 tests, 31 subtests: the two tables, the FLAC scan test, 20 Vorbis rows, 6 ID3v2 rows, the ID3v2.2 `3 of 12` row, the four containers, the upgrade test |
+| NC2: `ExtractorVersion` left at 30 | the upgrade test alone (the FLAC scan test stays green: the bump is what reaches stored rows) |
+| NC3: an ID3v2 frame's 0 not read again | 11 subtests: ` 3 `, `3 of 12`, `3/12/2` in 2.3 and 2.4, ID3v2.2's `3 of 12`, the four containers |
+| NC4: an ID3v2 frame always read by the rule | `3 / 12` and the overflow row in 2.3 and 2.4, and the upgrade test (its MP3's `8 / 12` moves) |
+| NC5: the gates without `trk` and `tpa` | the four present ID3v2.2 rows |
+| NC6: the gate without ID3v1.1's track byte | `TestAnID3v11TrackIsRead` |
+| NC7: a Vorbis value read again only on 0, as an ID3 frame is | the overflow row in each of the four Vorbis readers |
+| NC8: no whole-number branch | `TestLeadingTagNumberPastAnInt32` (an overflow no longer saturates) |
+| NC9: an absent track number counted present | the absent rows (four Vorbis readers, ID3v2, ID3v2.2), ID3v1.0, and two older pins, `TestPopulateFromTag_YearTrackDisc_AbsentReturnsNil` and `TestPopulateFromTag_VorbisAliases_AbsentReturnsNil` |
+| NC10: the no-raw-map branch leaves the track number unset | `TestATagWithNoRawMapKeepsItsAccessorsAnswers` and `TestPopulateFromTag_RawNilFallback` |
+
+Every control built; none stayed green.
+
+### Gates
+
+`make test-fast`, ok (83 packages; cmd/bridge 419 s, internal/manifest
+255 s); `make test TEST_PKGS=./internal/manifest/...`, ok (race, the
+Makefile's tags, 1,338 s); the new tests as linux/386 too (`GOARCH=386`,
+which legion0 executes), where an int is 32 bits, ok; `make vet` native and
+with `GOOS=windows`, `GOOS=darwin`, `GOOS=linux GOARCH=386` and
+`GOOS=linux GOARCH=arm`, ok; gofmt (go1.27.3's) on the changed files, clean;
+`make docs-check`, ok, on the tree and on a copy with `rules-b743.patch`
+applied, which `git apply --check` takes; the qualification check
+(`scripts/qualification-version`, d37417ed..HEAD), ok; `make build-all`,
+ok. Not run here: macOS and Windows natively, CI's runners and the iOS app.

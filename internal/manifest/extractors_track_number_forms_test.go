@@ -77,8 +77,9 @@ func TestLeadingTagNumberReadsTheFormsTaggersWrite(t *testing.T) {
 // linux/386 and linux/arm). A whole number keeps strconv.Atoi's answer,
 // saturated where it overflows, as dhowden's Vorbis reader gave it; a leading
 // number that overflows in any other form reads 0. (dhowden's own
-// strconv.Atoi of "99999999999999999999/2" saturates too: ParseUint meets the
-// overflow before the "/". So that one value changes, from the saturated
+// strconv.Atoi of "99999999999999999999/2" saturates too, ParseUint meeting
+// the overflow before the "/", and where an int is 32 bits so does any
+// leading number past 4294967295: those values change from the saturated
 // number to 0.)
 func TestLeadingTagNumberPastAnInt32(t *testing.T) {
 	for _, c := range []struct {
@@ -169,9 +170,9 @@ func TestEveryVorbisReaderReadsTheNumberATaggerWrote(t *testing.T) {
 // id3v2NumberTag is an ID3v2 tag of version (2, 3 or 4) holding a title and
 // frames, each an id and its text, then 16 bytes of padding. dhowden reads a
 // frame only while its offset, which counts the 10-byte header, is short of the
-// tag's size, which does not: the last 10 bytes of a tag's frames are never
-// read, and a version 2.2 frame of 10 bytes or fewer at the very end is lost.
-// Real tags end in padding.
+// tag's size, which does not, so a frame that starts in the last 10 bytes of
+// the tag is never read: a version 2.2 frame of 10 bytes or fewer at the very
+// end. Real tags end in padding.
 func id3v2NumberTag(version byte, frames ...[2]string) []byte {
 	title := "TIT2"
 	if version == 2 {
