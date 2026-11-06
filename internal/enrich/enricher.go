@@ -100,6 +100,10 @@ type Enricher struct {
 	// enrichment (the default).
 	premiumCovers PremiumCoverFetcher
 
+	// enabled is the predicate WithEnabled attaches. Run does not ask it
+	// yet.
+	enabled func() bool
+
 	// acoustic is the fingerprint verdict source. Nil (the default) means
 	// acoustic fingerprinting is off, exactly like a nil premiumCovers.
 	acoustic AcousticLookup
@@ -304,6 +308,13 @@ func (e *Enricher) WithITunes(itc *ITunesClient) *Enricher {
 // the receiver for fluent setup.
 func (e *Enricher) WithPremiumCovers(f PremiumCoverFetcher) *Enricher {
 	e.premiumCovers = f
+	return e
+}
+
+// WithEnabled attaches the live predicate for enrich.enabled. Run does not
+// ask it yet.
+func (e *Enricher) WithEnabled(f func() bool) *Enricher {
+	e.enabled = f
 	return e
 }
 

@@ -508,6 +508,14 @@ func (e EnrichConfig) EffectiveCoverSize() int {
 	return e.CoverSize
 }
 
+// EffectiveEnabled says whether the enricher runs. No setting turns it off
+// yet, so it is on for every config.
+func (e EnrichConfig) EffectiveEnabled() bool { return true }
+
+// EffectiveDeezerEnabled says whether the enricher asks Deezer for artist
+// portraits. No setting turns it off yet, so it is on for every config.
+func (e EnrichConfig) EffectiveDeezerEnabled() bool { return true }
+
 // LibraryConfig governs operations that MUTATE library content.
 //
 // AllowDelete is its own gate, deliberately NOT folded into upload.enabled:
