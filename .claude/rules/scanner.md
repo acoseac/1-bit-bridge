@@ -86,6 +86,7 @@ lost my library."
 - **The five post-scan reconciliation passes all exclude UPnP-routed rows, from ONE routed set computed at the reconciliation head** → History-rules-scanner.md
 - **Reconciliation is directory-scoped and never crosses directories** → History-rules-scanner.md
 - **A year before the phonograph is a composition date beside a recording year** (2026-10-13, backlog B342) → History-rules-scanner.md
+- **A physical album has one year: every track of a directory's album takes the album's dominant recording year** (2026-11-06, backlog B756) **Don't cross a directory, and don't let a recording year split a physical album.** **Don't write a track already at its album's year, run the passes over a subtree scan's changed files, or change the vote, its tie, its group key or `testdata/album-one-year-cases.json` on one side alone.** → History-rules-scanner.md
 - **A version-stale re-read that a reconciliation pass would rewrite is judged by the passes, at the scan's tail, with every such re-read in place** (2026-09-29, backlog B188) → History-rules-scanner.md
 - **`Scan`'s duplicate-restamp tail runs from a `defer`, and `ScanSubtree` has
   the same tail.** Three exits reach `return count, nil` *after* the deletion
