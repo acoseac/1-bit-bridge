@@ -846,41 +846,86 @@ func (s *Store) AnalyzedTrackFeatures(ctx context.Context, genre string, weekSee
 	return scanTrackFeatures(rows)
 }
 
+// MatchingTrackFeatures reads every served track's features
+// (trackFeatureSelect, so dupe_suppressed = 0) and returns the rows match
+// accepts, in the order the table gives them. Each row is handed to match
+// as it is read and kept only when match says so, so a library is read once
+// and held only as far as it matches. It backs the Christmas family (B750),
+// whose candidates are the whole library: a track needs no play, heart or
+// analysis to be one.
+//
+// The SQL holds no text filter and no LIMIT ahead of match, deliberately:
+// SQLite's LIKE folds ASCII case alone and knows nothing of NFKD, so Noël,
+// KOLĘDY and a decomposed accent would be rows a filter there loses and
+// the match accepts, and a limit would cut a library at its first rows.
+// match must not call into the store; it runs while the read is open. Read
+// path — no s.mu.
+func (s *Store) MatchingTrackFeatures(ctx context.Context, match func(*TrackFeatureRow) bool) ([]TrackFeatureRow, error) {
+	if match == nil {
+		return nil, errors.New("manifest: MatchingTrackFeatures needs a match")
+	}
+	rows, err := s.db.QueryContext(ctx, trackFeatureSelect)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TrackFeatureRow
+	for rows.Next() {
+		r, err := scanTrackFeatureRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		if match(&r) {
+			out = append(out, r)
+		}
+	}
+	return out, rows.Err()
+}
+
 // scanTrackFeatures consumes (and closes) rows shaped by trackFeatureSelect.
 func scanTrackFeatures(rows *sql.Rows) ([]TrackFeatureRow, error) {
 	defer rows.Close()
 	var out []TrackFeatureRow
 	for rows.Next() {
-		var r TrackFeatureRow
-		var dur, rg sql.NullFloat64
-		var bpm, keyRoot, sampleRate sql.NullInt64
-		if err := rows.Scan(&r.Path, &r.Title, &r.Artist, &r.Album, &r.Genre,
-			&dur, &bpm, &keyRoot, &r.KeyMode, &rg, &sampleRate); err != nil {
+		r, err := scanTrackFeatureRow(rows)
+		if err != nil {
 			return nil, err
-		}
-		if dur.Valid {
-			v := dur.Float64
-			r.Duration = &v
-		}
-		if bpm.Valid {
-			v := int(bpm.Int64)
-			r.BPM = &v
-		}
-		if keyRoot.Valid {
-			v := int(keyRoot.Int64)
-			r.KeyRoot = &v
-		}
-		if rg.Valid {
-			v := rg.Float64
-			r.ReplayGainTrackDB = &v
-		}
-		if sampleRate.Valid {
-			v := int(sampleRate.Int64)
-			r.SampleRate = &v
 		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// scanTrackFeatureRow scans the row rows is on, shaped by trackFeatureSelect.
+func scanTrackFeatureRow(rows *sql.Rows) (TrackFeatureRow, error) {
+	var r TrackFeatureRow
+	var dur, rg sql.NullFloat64
+	var bpm, keyRoot, sampleRate sql.NullInt64
+	if err := rows.Scan(&r.Path, &r.Title, &r.Artist, &r.Album, &r.Genre,
+		&dur, &bpm, &keyRoot, &r.KeyMode, &rg, &sampleRate); err != nil {
+		return TrackFeatureRow{}, err
+	}
+	if dur.Valid {
+		v := dur.Float64
+		r.Duration = &v
+	}
+	if bpm.Valid {
+		v := int(bpm.Int64)
+		r.BPM = &v
+	}
+	if keyRoot.Valid {
+		v := int(keyRoot.Int64)
+		r.KeyRoot = &v
+	}
+	if rg.Valid {
+		v := rg.Float64
+		r.ReplayGainTrackDB = &v
+	}
+	if sampleRate.Valid {
+		v := int(sampleRate.Int64)
+		r.SampleRate = &v
+	}
+	return r, nil
 }
 
 // --- small local helpers ---
