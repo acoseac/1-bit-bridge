@@ -77643,10 +77643,10 @@ or `TestLeadingTagNumberPastAnInt32`.
 | Value | Reads |
 |---|---|
 | `1/2`, `01/12` | 1 |
-| `3/`, ` 3 `, `3 of 10`, `+3/12`, `\t3/12\n`, `3/12/2`, `3/A`, `3 of`, `3\tof 10` | 3 |
+| `3/`, ` 3 `, `3 of 10`, `+3/12`, `\t3/12\n`, `3/12/2`, `3/A`, `3 of`, `3\tof 10`, and from round 2 `3 / 12` and `3 OF 10` | 3 |
 | `-3/12`, ` -3 ` | -3 (what an ID3 frame reads `-3/12` as) |
 | `A1`, `1.2`, `2-1`, `3-A`, `2024-01-01`, empty, blank, `0`, `0/12` | 0 |
-| `3 / 12`, `3of10`, `3 OF 10`, `3 10`, `/5`, `+`, `- 3`, `+ 3/12` | 0 (no tail but the two; `of` is lower case and follows whitespace) |
+| `3of10`, `3 10`, `/5`, `+`, `- 3`, `+ 3/12` | 0 (no tail but the two; `of` is lower case and follows whitespace) |
 | `+3`, `-3`, `007`, `12` | 3, -3, 7, 12 (`strconv.Atoi` reads them whole, as before) |
 | `99999999999999999999`, `-99999999999999999999` | saturated, as before: `math.MaxInt64` / `math.MinInt64`, or the int32 bounds where an int is 32 bits |
 | `4294967296`, `4294967296/2` | 4294967296 where an int is 64 bits; saturated and 0 where it is 32 |
@@ -77743,8 +77743,9 @@ helper and were stubbed out of that copy.
 that is 0, which `leadingTagNumber` reads again; every other format keeps
 the accessor's answer. `isWholeInteger` decides what `strconv.Atoi` reads
 whole, and `acceptedNumberTail` the two tails. The track gate is
-`hasAnyRawKey(raw, "trck", "trk", "tracknumber", "trkn") ||
-id3v1HasTrack(...)`, the disc gate adds `tpa`. `ExtractorVersion` 30 → 31,
+`hasAnyRawKey(raw, "trck", "tracknumber", "trkn") || id3v1HasTrack(...)`,
+with `trk` for an ID3v2.2 tag alone, and the disc gate likewise with `tpa`
+(both limited to ID3v2.2 in round 2). `ExtractorVersion` 30 → 31,
 its docblock entry v31.
 
 ### Rows already indexed
