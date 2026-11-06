@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -53,7 +54,9 @@ type formatsFixture struct {
 	lib   string
 }
 
-func newFormatsFixture(t *testing.T) *formatsFixture {
+// newFormatsFixture builds the fixture; each option is applied to the server
+// before it serves anything (a test's clock, say).
+func newFormatsFixture(t *testing.T, options ...func(*Server)) *formatsFixture {
 	t.Helper()
 	dir := t.TempDir()
 	lib := filepath.Join(dir, "Music")
@@ -91,6 +94,9 @@ func newFormatsFixture(t *testing.T) *formatsFixture {
 		WithDeviceRegistrar(store).
 		WithPlaylistStore(store).
 		WithFavoritesStore(store)
+	for _, option := range options {
+		option(srv)
+	}
 	hs := httptest.NewServer(srv.Handler())
 	t.Cleanup(hs.Close)
 	return &formatsFixture{store: store, hs: hs, token: raw, lib: lib}
@@ -494,6 +500,96 @@ func TestSmartPlaylistsServeEachViewItsItems(t *testing.T) {
 			_, sent := got["wavpack-only"]
 			if wantSent := v.takes("Artist/Album/02 Gate Two.wv"); sent != wantSent {
 				t.Errorf("the family of WavPack tracks alone sent %v, want %v", sent, wantSent)
+			}
+		})
+	}
+}
+
+// TestTheChristmasFamilyServesEachViewItsItems: B750's Christmas family takes
+// the gate every family takes (round 3 of backlog B489, the merge of B750).
+// In its window an item a view does not declare is left out and the
+// positions close up, and a Christmas family of held-back tracks alone is
+// sent only to a view that declares them; out of its window it is sent to no
+// view, whatever the view declares.
+func TestTheChristmasFamilyServesEachViewItsItems(t *testing.T) {
+	clock := &atomic.Pointer[time.Time]{}
+	f := newFormatsFixture(t, func(s *Server) { s.clockNow = func() time.Time { return *clock.Load() } })
+	christmas := func(paths ...string) {
+		t.Helper()
+		var its []manifest.SmartPlaylistItem
+		for i, p := range paths {
+			its = append(its, manifest.SmartPlaylistItem{Position: i, Path: p})
+		}
+		raw, err := json.Marshal(its)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.store.ReplaceSmartPlaylists(context.Background(), []manifest.StoredSmartPlaylist{
+			{Slug: "christmas", Kind: "christmas", Title: "Christmas", Position: 0, RefreshedAt: 1, ItemsJSON: raw},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	served := func(t *testing.T, v gateView) ([]string, bool) {
+		t.Helper()
+		resp, body := f.get(t, "/v1/smart-playlists", v.formats...)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status %d: %s", resp.StatusCode, body)
+		}
+		requireVaryOnFormats(t, "smart playlists", resp)
+		var sp smartPlaylistsResponse
+		if err := json.Unmarshal(body, &sp); err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range sp.Playlists {
+			if p.Kind != christmasKind {
+				continue
+			}
+			var paths []string
+			for i, it := range p.Items {
+				if it.Position != i {
+					t.Errorf("item %d at position %d, want the positions closed up", i, it.Position)
+				}
+				paths = append(paths, it.Path)
+			}
+			return paths, true
+		}
+		return nil, false
+	}
+
+	inSeason := time.Date(2026, 12, 24, 18, 0, 0, 0, time.UTC)
+	clock.Store(&inSeason)
+	mixed := []string{"Artist/Album/02 Gate Two.wv", "Artist/Album/01 Gate One.flac", "Artist/Album/03 Gate Three.ape", "Other/05 Gate Five.mp3"}
+	christmas(mixed...)
+	for _, v := range gateViews {
+		t.Run("in season, mixed/"+v.name, func(t *testing.T) {
+			var want []string
+			for _, p := range mixed {
+				if v.takes(p) {
+					want = append(want, p)
+				}
+			}
+			if got, sent := served(t, v); !sent || !slices.Equal(got, want) {
+				t.Errorf("christmas sent %v with %q, want %q", sent, got, want)
+			}
+		})
+	}
+	christmas("Artist/Album/02 Gate Two.wv", "Artist/Album/04 Gate Four.WV")
+	for _, v := range gateViews {
+		t.Run("in season, WavPack alone/"+v.name, func(t *testing.T) {
+			want := v.takes("Artist/Album/02 Gate Two.wv")
+			if _, sent := served(t, v); sent != want {
+				t.Errorf("a Christmas family of WavPack tracks alone sent %v, want %v", sent, want)
+			}
+		})
+	}
+	outOfSeason := time.Date(2027, 1, 6, 0, 0, 0, 0, time.UTC)
+	clock.Store(&outOfSeason)
+	christmas(mixed...)
+	for _, v := range gateViews {
+		t.Run("out of season/"+v.name, func(t *testing.T) {
+			if _, sent := served(t, v); sent {
+				t.Error("the Christmas family was sent on 6 January")
 			}
 		})
 	}
