@@ -78435,3 +78435,336 @@ packages ok and none failed, in 1,744 s; `make build-all`; `go test -race
 `./internal/player/dsdstate/`, each ok; the qualification check,
 "qualification version OK: main..HEAD"; `make docs-check`, ok, and again
 with the round-1 rules patch applied. The tree is clean after.
+
+## 2026-11-06 — B660: an install counts as healthy only once it has answered and stayed up
+
+Backlog B660, from the self-healing study of 2026-11-02 (read from the code:
+the updater took a version match for success), Argon's rule beside it (never
+roll the binary back past a schema change; stop and say so instead) and
+B613's "Not here" (`ops/History-rules-config-lifecycle.md`). The scenario is
+B198's; nobody reported it, and the owner wanted it covered by design.
+Worker b660 on the Linux worker host (Ubuntu 26.04, linux/amd64, 16 cores,
+go1.27.3, `GOTOOLCHAIN=local`, `GOPROXY=off`), branch
+`fix/b660-install-probation` from main 4880f8a4. Commits: the reproduction
+99568a9d (red), the change 9177e87a, the tests through serve 08f92121, two
+test fixes 27d245d3 and 5b5c363e, the Windows test build eeaabd5e (the
+checks below), then this record. The rule is a new bullet
+in `config-lifecycle.md` with corrections to B613's, B692's round 2's and
+B705's lines there, to two lines of `cli-serve.md` and one of `scanner.md`,
+shipped as a checked patch (`rules-b660.patch`; this worker cannot write
+`.claude/`), with the long forms in `ops/History-rules-config-lifecycle.md`
+(the new section, and B613's, its rounds 3 and 4, B692's round 2 and B705's
+where each said a start confirms the install) and
+`ops/History-rules-cli-serve.md` (#1009's).
+
+**What it was** (4880f8a4). `DecideBootAction` (state.go:477) answered
+`BootInstallSucceeded` for the target at any age, main.go:2444-2455 stamped
+`installed`, and the next start of any version removed `.bak`
+(state.go:495, main.go:2456-2472). The housekeeping ran at main.go:4033,
+after the store opened (:3570) and before anything listened (`ServeTLS` at
+:6584), so the stamp said nothing about serving: under `Restart=always`
+(`RestartSec=2`, systemd.service.tmpl:10-11) a new binary that stamped and
+then crashed had `.bak` deleted by its second start, about two seconds
+later, after `bridge update` had promised (update.go:158) a rollback "if the
+new bridge fails to come up at version X within 6h0m0s of restart", which
+only a version mismatch triggered. Nothing rolled a version back once it got
+past its settings: the admission's `DataDirOpenedBy` (disarm.go:105) refused
+all three rollbacks (`EarlyRollback`, configcheck.go:473; `BootInstallFailed`,
+main.go:2487; `RollbackRefusal`, state.go:546) without saying whether the
+store changed, and a migration under serve left no record of its own
+(`ArmsDataDirRecord`, configcheck.go:489, false once the admission had
+recorded). The ladder is not one transaction (store.go:2895-2908: a step's
+SQL, its `post`, then `PRAGMA user_version`), and an older binary over a
+newer store skips every step (:2891-2894).
+
+**What changed** (the long form is the History section):
+- The marker stays `installing` until confirmed; a version match at boot is
+  `BootInstallProbation`, which writes nothing and takes no lock.
+- Serve confirms it (`serveProbation`, `updater.ConfirmInstall` under the
+  marker's lock, the marker read again) once a round of this process's own
+  answers has said yes and `updater.ProbationWindow` (10 minutes, monotonic)
+  has passed: a connect its accept loop took (`acceptWatch`), `GET
+  /v1/health` in process at this version, a store read; a round bounded at
+  5 s with a second's grace, one at a time, never waited for at the stop.
+- Each start counts itself at its admission (`FailedStarts`) and takes the
+  count back only where it ends cleanly (a stop, a restart request, a bind
+  refused for an address in use or a permission, the tailnet listener), by a
+  flag, never `code`.
+- At three (`updater.ProbationFailedStarts`) the next start, before its
+  admission, puts `.bak` back (`recoverCrashedInstall`: `CrashRollback`, the
+  backup's version, its settings check) or records why not
+  (`RollbackRefused`).
+- Every migrating store open records `StoreMigratedBy` before its first
+  step, after the admission too, and refuses where it cannot.
+- The auto-installer waits on the running version's unconfirmed install for
+  at most twice the window; `ProbationStatus` gives the stderr lines, `bridge
+  doctor`'s `install-probation` and the console's Probation row.
+
+**The numbers.** The window is 10 minutes from the first ready answer,
+asked every 5 s before it, once at its end and every 30 s after a no; the
+take-back gives the lock 2 s; the auto-installer waits at most 20 minutes of
+uptime. Three failed starts: one power cut or OOM kill does not roll back,
+and at `RestartSec=2` the fourth start comes inside systemd's default start
+limit (5 in 10 s). The ladder's top by release (0.1.7 23, 0.1.8 26, 0.1.9
+41, 0.2.0 44, 0.2.1 50, 0.2.2 60, 0.2.3 60) moved in 6 of the last 7 (all
+but 0.2.3), and an install of a release that moves it migrates at its first
+store open, which takes it out of the crash rollback's reach.
+
+**Trade-offs, named.**
+- Begun is changed: once a migration step has begun, by serve or any
+  command, the crash rollback refuses for good, whatever `user_version`
+  says, and says why. With the ladder moving in 6 of 7 releases, a crash loop
+  after a release's first store open usually gets its backup kept and a
+  report (`bridge doctor` fails, the panel says it), not a rollback; the way
+  back is the operator's (a snapshot from before the update, with `.bak`).
+- The count has no clock and no cause: three starts that end uncleanly for
+  any reason (a power cut, an OOM kill, `kill -9`, a service manager's
+  SIGKILL after its stop timeout) before a start is confirmed roll a working
+  install back. A confirmation needs one start up for 10 minutes; a host that
+  restarts the bridge more often than that never confirms, and is counted.
+- Not ready is never proof: a start that serves but never answers is not
+  confirmed, keeps running, says so once and records `NotReady`; nothing
+  rolls it back, and the auto-installer stops waiting on it after 20 minutes.
+- A take-back that cannot hold the marker's lock within 2 s leaves its count,
+  which errs toward a rollback; the confirmation clears it.
+- What the target wrote without a migration goes back under the backup
+  unchecked (the History section lists each file and what the backup does
+  with it); none of it stops the backup starting, so none is a refusal.
+- A backup that predates the settings check is put back with a warning,
+  unchecked, as the early rollback does.
+- A crash before the admission is not counted: the settings check before the
+  swap saw the candidate run, and a start refused for its settings has the
+  early rollback. That is the boundary.
+- A manual install is not held by the probation, and its `.bak` is the
+  unconfirmed version it replaced.
+- Each readiness round logs one `path=/v1/health` access line; a start that
+  answers at once logs two.
+- Where the filesystem keeps no locks, an install is counted, never
+  confirmed and never rolled back.
+
+**Red first** on 99568a9d (the marker's four fields and serve's seams added
+inert), each failing as main behaves:
+`TestACrashAfterTheFirstBootKeepsTheBackup`: `the marker after the
+housekeeping of start 1 = {Status:installed … InstalledAt:2026-11-06
+18:55:54.245749627 +0000 UTC …}, want the install still on probation:
+nothing listened yet`, the second housekeeping's marker cleared, and `the
+backup after the housekeeping of start 2: lstat …/bin/bridge.bak: no such
+file or directory`; `TestAnInstallIsConfirmedOnlyOnceItAnsweredAndStayedUp`:
+`the marker once serve listens = {Status:installed …}, want the install on
+probation, this start counted`;
+`TestThreeFailedStartsRollBackAnInstallThatMigratedNothing`: `the fourth
+start = 0 (served true), want 75 before it served`;
+`TestARollbackIsRefusedAndReportedOnceAMigrationBegan`: `the marker after a
+start that migrated the store = {Status:installed … StoreMigratedBy: …},
+want it to record that 0.0.1 began a migration`.
+
+**Tests.** internal/updater: `TestCrashRollbackDecidesOnTheMarkerAlone` (19
+cases, each refusal's words, none naming a path),
+`TestTheCrashRollbacksRecordKeepsWhatTellsItFromTheOthers`,
+`TestTheCrashRecordIsWhatAnOlderUpdaterReadsAsARollbackDone` (the record as
+0.2.3's `State` reads it and 0.2.3's decision over it, both frozen from its
+tag; and the upgrade: 0.2.3's own install marker, with none of the new
+fields, on probation here and counted at its admission),
+`TestProbationStatusSaysWhereAnInstallStands`,
+`TestTheAdmissionCountsTheStartsOfTheInstallsVersion`,
+`TestAMigrationRecordsThatItBeganThoughTheDataDirIsRecorded`,
+`TestTheConfirmationStampsOnlyAnInstallThatAwaitsIt`,
+`TestAConfirmationThatWaitsReadsTheMarkerAgain` (an ended context with the
+lock free among its cases), `TestATakeBackWritesOnlyTheCountItsStartWrote`,
+`TestTheAutoInstallerWaitsForTheRunningInstallsProbation`,
+`TestTheAutoInstallerDoesNotWaitWhereTheBackupCannotBePutBack`,
+`TestTheAutoInstallerDoesNotWaitForAnInstallThatNeverAnswered` and
+`TestAnAutomaticInstallOverAStagedVersionLeavesTheStagedOneAsTheBackup`, with
+`TestDecideBootAction`'s probation rows. internal/doctor:
+`TestIsBindPermissionMatchesWhatTheHostAnswersARefusedBind` and the source
+pin of the Windows arms, `TestTheWindowsBindChecksNameTheWinsockErrnos`.
+internal/admin: `TestTheSettingsPageSaysWhereAnInstallOnProbationStands` and
+`TestTheUpdatesPanelScriptSaysWhereAnInstallOnProbationStands`. Through the
+real serve (cmd/bridge, a real store, a stand-in `.bak` that is the test
+binary run as the bridge of another version, the existing seams and a
+short window through `serveOpts.probation`, waited on through its events):
+the red four above; readiness:
+`TestAHeldScanDoesNotDelayTheConfirmation`,
+`TestAStopDuringAHeldScanIsNotAFailedStart`,
+`TestAStartThatNeverAnswersIsNeverConfirmed`,
+`TestASocketNobodyAcceptsOnIsNotReady`,
+`TestAHealthAnswerOfAnotherVersionIsNotReady`,
+`TestAStoreThatDoesNotAnswerIsNotReady`,
+`TestAHealthCallThatNeverReturnsIsNotReadyAndDoesNotHoldTheStop`,
+`TestAConfirmationReadsTheMarkerUnderItsLock`,
+`TestAStopWhileAConfirmationWaitsWritesNothing`,
+`TestTheDoctorReadsOkBesideAHealthyStartOnProbation`; the count:
+`TestAStopIsNotAFailedStart`, `TestARestartRequestIsNotAFailedStart`,
+`TestARestartIntoANewerInstallLeavesItsMarker`,
+`TestAStopAfterConfirmationWritesNothing`,
+`TestAPortAnotherProcessHoldsIsNotAFailedStart` (the API's and the
+console's, and an address the host does not have, which stays counted),
+`TestAStoreThatWillNotOpenIsAFailedStart`, `TestAPanicInServeIsAFailedStart`,
+`TestACountPublishedBeforeItsBarrierFailedIsTakenBack` (the count's own
+barrier failing after its rename); the rollback:
+`TestAMigrationThatFailsStillRefusesTheRollback` (a step that adds its
+columns and fails at its index, `user_version` unmoved),
+`TestACommandsMigrationRefusesTheRollbackToo` (`bridge doctor`'s open),
+`TestAMigrationWhoseRecordCannotBeWrittenDoesNotRun`,
+`TestABackupThatRefusesTheSettingsIsNotPutBack`,
+`TestABackupThatCannotAnswerIsNotPutBack`,
+`TestABackupOfAnotherVersionIsNotPutBack`,
+`TestAnAutomaticInstallOverAStagedVersionCannotRollBackPastIt`,
+`TestNoBackupIsPutBackWhereThereIsNone`,
+`TestABackupThatPredatesTheCheckIsPutBack`, `TestACrashRollbackNeedsBothLocks`
+(the data dir's lock failing, a filesystem that keeps none for it, and none
+for the marker's), `TestATransientRefusalAtTheFourthStartRollsBackAtTheFifth`,
+`TestAStartFinishesACrashRollbackStoppedBeforeItsRename`,
+`TestARollbackOvertakenGoesBackOnProbation` and
+`TestAnOperatorsRecordIsNotFinishedByTheCrashRollback`.
+
+**The existing tests that stamped at the first boot**, each changed to the
+confirmation and keeping what it pins:
+- `TestDecideBootAction` (state_test.go): the target's rows answer
+  `BootInstallProbation` for `BootInstallSucceeded`; every other branch as it
+  was.
+- `TestDecideBootActionReadsAnInterruptedRollbackOnItsOwn`: its doc (the
+  target overtakes the record and puts the install on probation); its rows
+  unchanged.
+- `TestTheConfirmationOverARollbackKeepsWhatIsNotItsOwn` and
+  `TestTheConfirmationNeedsTheInstallsOwnRecordOfTheDataDir`: through
+  `ProbationOverRollback` for `ConfirmOverRollback`, the marker `installing`
+  with its count kept rather than `installed`; still the rollback's mark, the
+  hold and the veto of this version gone and the rest kept, and still only
+  on the install's own admission's record.
+- `TestALateFirstBootOfTheInstalledVersionConfirmsTheInstall`
+  (late_boot_test.go): its version-match rows answer `BootInstallProbation`
+  at any age; still the version asked before the window.
+- `TestDeferredRestartRefreshesInstallRecency` (autoinstall_test.go): the
+  boot after the restamp is `BootInstallProbation`; the restamp itself as
+  before.
+- `TestALateFirstStartOfTheInstalledVersionCompletesItsInstall`
+  (serve_late_boot_test.go): the start 30 hours late is on probation once it
+  listens, and confirmed after a short window before its stop; the record,
+  the refused Roll back and the next start's cleanup as before.
+- `TestATargetWhoseSettingsAreFixedConfirmsAnInterruptedRollback`
+  (serve_refused_install_r3_test.go): back on probation once the start
+  listens (the mark, the hold and the veto gone), confirmed after the
+  window, then the next boot's cleanup.
+- `TestTheBootConfirmsAnInterruptedRollbackOnlyOnTheInstallsOwnRecord`
+  (serve_refused_install_r4_test.go): the line `not putting the install … back
+  on probation` for `not confirming`, and `installing` for `installed`.
+- `TestAManualRollbackStoppedBeforeItsRenameKeepsTheStoreFromASecondRollback`
+  (update_marker_lock_r2_test.go): the restart's marker `installing` for
+  `installed`; the second rollback still refused.
+- `TestAManualRollbackThatHoldsTheMarkersLockFirstLeavesTheBootNothingToDo`
+  (update_marker_lock_test.go): the housekeeping of an install on probation
+  asks for no lock, so the wait it pinned moved to the confirmation, which
+  waits for the rollback's lock and then does nothing over its record.
+- `TestTheConsoleOffersRollBackOnlyWhereTheRollbackWouldRun`
+  (update_rollback_offer_test.go): the marker after the start `installing`
+  for `installed`; the refusal and the panel's row as before.
+- `TestSettingsUpdateRowsRenderOnceAndKeepDTAdjacency` (internal/admin): the
+  Probation row is a fourth conditional row in every case.
+
+**Negative controls**, each one mutation applied exactly once (each replaced
+string's count asserted), the test binaries rebuilt with make's tags, the
+listed tests run, the bytes put back from memory and compared (the tree was
+clean after each). Predicted in a file before the first ran; every outcome
+as predicted:
+
+| | Mutation | Red | Green |
+|---|---|---|---|
+| (a) | the housekeeping stamps `installed` at a version match again | `TestACrashAfterTheFirstBootKeepsTheBackup` (installed at the first housekeeping, `.bak` gone at the second), `TestAnInstallIsConfirmedOnlyOnceItAnsweredAndStayedUp` | `TestThreeFailedStartsRollBackAnInstallThatMigratedNothing` |
+| (b) | readiness also waits for the scan (the store read refuses while one is in flight) | `TestAHeldScanDoesNotDelayTheConfirmation` (every round `a scan is under way`, no confirmation) | `TestAnInstallIsConfirmedOnlyOnceItAnsweredAndStayedUp` |
+| (c) | serve's stop branch no longer marks the start clean | `TestAStopIsNotAFailedStart` (both: once it serves, while it starts), `TestARestartRequestIsNotAFailedStart` | `TestAPortAnotherProcessHoldsIsNotAFailedStart` |
+| (d) | the take-back reads `code == 0` | `TestAPanicInServeIsAFailedStart` (taken back after a panic), `TestAPortAnotherProcessHoldsIsNotAFailedStart` (the API's, the console's) | `TestAStopIsNotAFailedStart`, `TestAStoreThatWillNotOpenIsAFailedStart` |
+| (e) | `StoreMigratedBy` written only where `DataDirOpenedBy` is empty | `TestARollbackIsRefusedAndReportedOnceAMigrationBegan`, `TestAMigrationThatFailsStillRefusesTheRollback`, `TestAMigrationRecordsThatItBeganThoughTheDataDirIsRecorded` (3 of 8 cases) | `TestACommandsMigrationRefusesTheRollbackToo` (a command's open comes before any admission) |
+| (f) | no `CheckConfig` (the backup taken as loading the settings) | `TestABackupThatRefusesTheSettingsIsNotPutBack` and `TestABackupThatCannotAnswerIsNotPutBack` (exit 75 before serving), `TestABackupThatPredatesTheCheckIsPutBack` (no warning) | `TestThreeFailedStartsRollBackAnInstallThatMigratedNothing` |
+| (g) | the bind's check not asked at all (both sites) | `TestAPortAnotherProcessHoldsIsNotAFailedStart` (the API's, the console's; the absent address green) | `TestAStopIsNotAFailedStart` |
+| (h) | the confirmation decides on its read before the lock | `TestAConfirmationReadsTheMarkerUnderItsLock` (the newer install's marker stamped over), `TestAConfirmationThatWaitsReadsTheMarkerAgain` | `TestAnInstallIsConfirmedOnlyOnceItAnsweredAndStayedUp` |
+| (i) | `==` for the limit | `TestATransientRefusalAtTheFourthStartRollsBackAtTheFifth` (the fifth start served), `TestCrashRollbackDecidesOnTheMarkerAlone` ("past the limit") | `TestThreeFailedStartsRollBackAnInstallThatMigratedNothing` |
+| (j) | the store's open ignores its record's failure | `TestAMigrationWhoseRecordCannotBeWrittenDoesNotRun` (served), internal/manifest's `TestAStoreOpenThatCannotRecordItsMigrationMigratesNothing` | `TestARollbackIsRefusedAndReportedOnceAMigrationBegan` |
+| (k) | a blind decrement at the take-back | `TestAStopAfterConfirmationWritesNothing`, `TestARestartIntoANewerInstallLeavesItsMarker`, `TestATakeBackWritesOnlyTheCountItsStartWrote` (3 of 6) | `TestAStopIsNotAFailedStart` |
+| (l) | the probe's own connect taken for one the accept loop took | `TestASocketNobodyAcceptsOnIsNotReady` (the first round ready) | `TestAnInstallIsConfirmedOnlyOnceItAnsweredAndStayedUp` |
+
+(g) covers the bind's check being asked; the Windows arms of the check
+(Winsock's errnos) cannot run here and are held on every other host by a
+source pin, `TestTheWindowsBindChecksNameTheWinsockErrnos`. Two tests that
+ran `r.serve`, which waits for serve to return, would have hung rather than
+failed under (j) and its kin; they run serve with `serveToItsEnd` now
+(27d245d3), and (b)'s failure printed event kinds as numbers, which
+5b5c363e names.
+
+**By hand, with two real builds.** 0.2.3 built from its tag's tree (`git
+archive 0ddb8c72`; its go.mod and go.sum are this tree's) as the previous
+version, and this tree as 0.2.4-b660, both with make's tags and
+`-ldflags -X …ServerVersion=`, in a scratch directory, loopback listeners,
+mDNS off. Each run: 0.2.3 serves the data dir first and stops, then the
+install is laid out as `bridge update` leaves it (0.2.3 as `bridge.bak`, the
+new binary in place, an `installing` marker naming both).
+- Run 1: three starts of 0.2.4-b660, each killed with SIGKILL once it
+  listened: the marker read `failedStarts` 1, 2, 3, `dataDirOpenedBy`
+  0.2.4-b660, no `storeMigratedBy` (both ladders end at 60); the second and
+  third said `updater: 0.2.4-b660 is on probation since its install, and 1 of
+  its starts before this one did not end cleanly: once 3 have not, the next
+  start puts 0.2.3 back` and `updater: 2 of 0.2.4-b660's starts before this
+  one did not end cleanly: if this one does not either, the next start puts
+  0.2.3 back`. The fourth exited 75 before serving: `updater: 3 starts of
+  0.2.4-b660 since its install did not end cleanly, so the install is rolled
+  back: 0.2.3 is back at /…/bin/bridge and 0.2.4-b660 is held back from the
+  auto-installer; exiting for the service manager to start 0.2.3 (where
+  nothing starts it, run bridge serve again)`; `bin/bridge version` then
+  answered `1-bit-bridge 0.2.3 (protocol v1)`, `.bak` was gone, and the
+  marker was the record (`rollbackStarted`, `rejectedVersion` and
+  `migrationVeto` 0.2.4-b660, `failedStarts` 3). The next start, the real
+  0.2.3 on what 0.2.4-b660 wrote, served (listening), and its housekeeping
+  finished the record as a rollback done: the install cleared, the hold, the
+  veto, `dataDirOpenedBy` and `previousVersion` kept, `failedStarts` dropped
+  as a field it does not know; its stop exited 0.
+- Run 2: a start of 0.2.4-b660 left up. On probation once it listened
+  (`failedStarts` 1), and `bridge doctor` beside it said `ok | 0.2.4-b660 is
+  on probation since its install: a start of it is confirmed once it has
+  answered as ready and stayed up for 10m0s`. Its first round answered 5 s
+  after it listened, at 19:59:07 (one `path=/v1/health` access line), and at
+  20:09:07: `updater: 0.2.4-b660 has answered as ready and stayed up for
+  10m0s, so its install is confirmed: the backup of 0.2.3 is removed at the
+  next start`, the marker `installed` with `installedAt` 20:09:07, the count
+  cleared, `dataDirOpenedBy` kept. Its stop (SIGTERM) exited 0 and left the
+  marker byte for byte; the next start removed `.bak`, and the marker with
+  it, and its stop exited 0.
+The Windows path (the crash rollback's rename of the running exe aside,
+B202's) has been vetted only by cross-compiling and by
+`rollback_running_windows_test.go`, not run on Windows.
+
+**Checks**, on the Linux worker host, every `make` and multi-package run
+under the shared build lock, at 5b5c363e unless said:
+- `make test-fast` (TMPDIR under `.tmp/_b660`, so the build-site census
+  skips it): ok, 85 packages and 14 without tests (cmd/bridge 476 s); the
+  Linux-only packages ran (internal/alsa, internal/alsapcm,
+  internal/atomicwrite, internal/backup and the player's).
+- `go test -race -count=1 -timeout 30m` with make's tags over
+  internal/updater, internal/manifest, internal/doctor, internal/admin and
+  cmd/bridge: ok (27 s, 1,435 s, 7 s, 965 s, 1,150 s).
+- `make vet` natively and with `GOOS=darwin`: ok. With `GOOS=windows` it
+  failed: `internal/updater/probation_test.go:602:19: undefined:
+  makeAutoInstallUpdater`, three auto-installer tests in a file that builds
+  everywhere calling a helper declared for every platform but Windows.
+  eeaabd5e moves them beside it, under `!windows`; then internal/updater's
+  tests ran again natively (ok), and `make vet` natively, with
+  `GOOS=windows` and with `GOOS=linux GOARCH=386` (CI's portability vet):
+  ok.
+- `make build-all`: ok (its `-check-build-tags` step OK, and the six
+  targets built).
+- The qualification check (`scripts/qualification-version -base 4880f8a4
+  -head HEAD`): `qualification version OK`; nothing it guards changed.
+- go1.27.3's gofmt on the changed Go files: clean.
+- `make docs-check`: ok as the tree stands (CLAUDE.md 77.5 %, the worst load
+  player_openhome_test.go 65.1 %); and with `rules-b660.patch` applied to a
+  copy of the rules files, the budgets measured by check-doc-budgets.py's own
+  `measure` and `problems` over this tree's tracked files: ok,
+  config-lifecycle.md 96,900 bytes (96.9 %), cli-serve.md 40,809,
+  scanner.md 31,533, the worst load 313,678 bytes (65.3 %). `git apply
+  --check` takes the patch.
+
+**For the owner.**
+- PROTOCOL.md's Updates paragraph still says the next boot confirms the
+  install or restores `.bak`. It changes with the iOS mirror, not here.
+- The 1-bit.app updater page is owed at release (the orchestrator's).
+- What B660 leaves uncovered is filed under backlog B660 until each item has
+  an id of its own.

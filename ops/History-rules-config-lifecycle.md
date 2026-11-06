@@ -1370,7 +1370,7 @@ to nothing is still not there. The record is in `ops/engineering-log.md`,
 
 ## A candidate's settings check, and the early rollback of an install whose version refuses the settings (backlog B613, 2026-11-02)
 
-- **A candidate is checked against this bridge's settings before its swap, and an install whose version refuses them at its first start is rolled back before serve writes anything** (2026-11-02, backlog B613, five rounds): 0.2.2 refuses a fraction or a leading zero in a whole-number setting (B528, B533), 0.2.1's updater swapped without asking, and the new serve exited 2 at the load, before the boot rollback, under `Restart=always`. Install stages the verified candidate beside the binary and runs `<candidate> serve --validate-config --config <the settings the bridge loaded>` (`updater.CheckConfig`: 30 s, stdin empty, 64 KiB of each output): 0 swaps; 78 refuses, one `config refused: ` line a reason, naming the line and no path (`config.RefusedError.Reasons`), and the version is recorded as rejected with its reason and a digest of the settings (the file's bytes and every BRIDGE_ variable, on Windows whatever its name's case, `updater.ConfigDigest`), which holds it from the auto-installer while the digest is unchanged, a newer version and a manual install checking again; a 2 carrying the flag package's refusal of the flag is a candidate that predates the check, held from the auto-installer for every setting and installed by hand with a warning; for anything else (a timeout, a cancellation, a candidate that will not start, another code), nothing is swapped, installed or recorded. The check is serve's own load (`checkServeConfig`: the boot read, Load, `serveConfigRefusal`), which writes, opens and binds nothing, and never a root's reach (`CheckLibraryRootsAccessible` is the host's, and the user's who runs it). Serve, refusing its settings (a `config.RefusedError`, or `serveConfigRefusal`, every one of them before the data dir's lock), reads the data dir from the dataDir key, the default, BRIDGE_DATA_DIR and the settings' directory alone (`config.DataDirOf`), and puts the backup back only for a recent `installing` marker of this version over another, or its own record of one (`State.RollbackStarted`), swapped, under which no other version has opened the data dir, with the data dir's lock its own and the backup a regular file whose `version` names the marker's PreviousVersion (`updater.EarlyRollback`, `updater.ProbeVersion`, a version check and not a proof of the bytes); it records the hold durably before the rename, in the form the restored binary's boot keeps, Status "" beside the install it undoes (`updater.RollbackRecord`; 0.2.1's and 0.2.2's boot clears an install marker it cannot finish), so a start of this version that finds it with the backup not back finishes the rollback; a hold it cannot record leaves the install as it is, and a rename that fails puts the install marker back; then it exits 75 (`supervision.RestartExitCode`), which systemd, launchd and the SCM's recovery all restart; otherwise it refuses as before, saying why when the marker is this version's. Before its first write, serve records in an armed marker that it opened the data dir (`State.DataDirOpenedBy`, `updater.AdmitBoot`; a marker it cannot read is removed) and refuses to start when it cannot, and every store open with a migration step pending does the same before the step, whichever command opens the store (`updater.DisarmBeforeMigrating`, `manifest.OpenStore` refusing); BootInstallFailed leaves the backup where a version other than the backup's opened the data dir, and every clear at boot keeps a hold, and a veto of a rolled-back version's store migrations, recorded beside the install (`updater.ClearInstall`); and a directory barrier that fails is the marker's write's error (`SaveState`, `ClearStateDurably`), but where the filesystem cannot fsync a directory (the next bullet). **Don't swap a candidate whose check did not answer 0, take a failed or stopped check for a refusal or a 2 for "predates" without the flag package's words, record a refusal against no digest or a predates hold against one, change the flag, the codes or the prefix (every later release answers this updater), let the check write, open a store, bind or ask a root's reach, name a path in a reason, find the marker's data dir by anything but Load's rules for that key, restore without the lock, the marker's proof and the backup's version, or before the hold is recorded durably, restore after another version opened the data dir, migrate the store before recording that this version opened it, drop a recorded hold or veto at boot, ignore the marker's directory barrier, write the settings, or exit 0 after a restore.** `TestAnInstallWhoseCandidateRefusesTheSettingsSwapsNothing`, `TestAnAutomaticInstallHoldsARefusedVersionBackUntilTheSettingsChange`, `TestAnAutomaticInstallHoldsBackACandidateThatPredatesTheCheck`, `TestACheckThatFailsSwapsNothingAndRecordsNothing`, `TestCheckConfigReadsTheCandidatesAnswerByItsExitCode`, `TestTheSettingsCheckRefusesWhatServeRefuses`, `TestTheUpdaterReadsWhatThisBridgesSettingsCheckSays`, `TestDataDirOfIsTheDataDirLoadGives`, `TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings`, `TestServeLeavesAnInstallItCannotProveAsItIs`, `TestServeDisarmsTheEarlyRollbackBeforeItsFirstStoreAccess`, `TestTheBootRollbackLeavesABackupOnceAnotherVersionOpenedTheDataDir`, `TestEveryInstallTheBridgeStartsNamesItsSettings`, `TestTheHoldIsRecordedBeforeTheBackupIsPutBack`, `TestServeLeavesTheBackupWhereItCannotRecordTheHold`, `TestAStartFinishesARollbackStoppedBeforeItsRename`, `TestACommandThatMigratesTheStoreDisarmsTheEarlyRollback`, `TestAStoreOpenThatMigratesRecordsItInAnArmedInstallMarker`, `TestTheBootKeepsARecordedHoldWhereItClearsAnInstall`, `TestSaveStateReportsADirectoryBarrierThatFails` and `TestTheSettingsDigestReadsTheBridgeVariablesAsThePlatformNamesThem` pin it.
+- **A candidate is checked against this bridge's settings before its swap, and an install whose version refuses them at its first start is rolled back before serve writes anything** (2026-11-02, backlog B613, five rounds): 0.2.2 refuses a fraction or a leading zero in a whole-number setting (B528, B533), 0.2.1's updater swapped without asking, and the new serve exited 2 at the load, before the boot rollback, under `Restart=always`. Install stages the verified candidate beside the binary and runs `<candidate> serve --validate-config --config <the settings the bridge loaded>` (`updater.CheckConfig`: 30 s, stdin empty, 64 KiB of each output): 0 swaps; 78 refuses, one `config refused: ` line a reason, naming the line and no path (`config.RefusedError.Reasons`), and the version is recorded as rejected with its reason and a digest of the settings (the file's bytes and every BRIDGE_ variable, on Windows whatever its name's case, `updater.ConfigDigest`), which holds it from the auto-installer while the digest is unchanged, a newer version and a manual install checking again; a 2 carrying the flag package's refusal of the flag is a candidate that predates the check, held from the auto-installer for every setting and installed by hand with a warning; for anything else (a timeout, a cancellation, a candidate that will not start, another code), nothing is swapped, installed or recorded. The check is serve's own load (`checkServeConfig`: the boot read, Load, `serveConfigRefusal`), which writes, opens and binds nothing, and never a root's reach (`CheckLibraryRootsAccessible` is the host's, and the user's who runs it). Serve, refusing its settings (a `config.RefusedError`, or `serveConfigRefusal`, every one of them before the data dir's lock), reads the data dir from the dataDir key, the default, BRIDGE_DATA_DIR and the settings' directory alone (`config.DataDirOf`), and puts the backup back only for a recent `installing` marker of this version over another, or its own record of one (`State.RollbackStarted`), swapped, under which no other version has opened the data dir, with the data dir's lock its own and the backup a regular file whose `version` names the marker's PreviousVersion (`updater.EarlyRollback`, `updater.ProbeVersion`, a version check and not a proof of the bytes); it records the hold durably before the rename, in the form the restored binary's boot keeps, Status "" beside the install it undoes (`updater.RollbackRecord`; 0.2.1's and 0.2.2's boot clears an install marker it cannot finish), so a start of this version that finds it with the backup not back finishes the rollback; a hold it cannot record leaves the install as it is, and a rename that fails puts the install marker back; then it exits 75 (`supervision.RestartExitCode`), which systemd, launchd and the SCM's recovery all restart; otherwise it refuses as before, saying why when the marker is this version's. Before its first write, serve records in an armed marker that it opened the data dir (`State.DataDirOpenedBy`, `updater.AdmitBoot`; a marker it cannot read is removed) and refuses to start when it cannot, and every store open with a migration step pending does the same before the step, whichever command opens the store (`updater.DisarmBeforeMigrating`, `manifest.OpenStore` refusing); BootInstallFailed leaves the backup where a version other than the backup's opened the data dir, and every clear at boot keeps a hold, and a veto of a rolled-back version's store migrations, recorded beside the install (`updater.ClearInstall`); and a directory barrier that fails is the marker's write's error (`SaveState`, `ClearStateDurably`), but where the filesystem cannot fsync a directory (the next bullet). **Don't swap a candidate whose check did not answer 0, take a failed or stopped check for a refusal or a 2 for "predates" without the flag package's words, record a refusal against no digest or a predates hold against one, change the flag, the codes or the prefix (every later release answers this updater), let the check write, open a store, bind or ask a root's reach, name a path in a reason, find the marker's data dir by anything but Load's rules for that key, restore without the lock, the marker's proof and the backup's version, or before the hold is recorded durably, restore after another version opened the data dir (but the crash rollback, which asks instead that no migration of the store began: the B660 bullet below), migrate the store before recording that this version opened it and that it began a migration (`State.StoreMigratedBy`, B660), drop a recorded hold or veto at boot, ignore the marker's directory barrier, write the settings, or exit 0 after a restore.** `TestAnInstallWhoseCandidateRefusesTheSettingsSwapsNothing`, `TestAnAutomaticInstallHoldsARefusedVersionBackUntilTheSettingsChange`, `TestAnAutomaticInstallHoldsBackACandidateThatPredatesTheCheck`, `TestACheckThatFailsSwapsNothingAndRecordsNothing`, `TestCheckConfigReadsTheCandidatesAnswerByItsExitCode`, `TestTheSettingsCheckRefusesWhatServeRefuses`, `TestTheUpdaterReadsWhatThisBridgesSettingsCheckSays`, `TestDataDirOfIsTheDataDirLoadGives`, `TestServeRollsBackAnInstallWhoseVersionRefusesItsSettings`, `TestServeLeavesAnInstallItCannotProveAsItIs`, `TestServeDisarmsTheEarlyRollbackBeforeItsFirstStoreAccess`, `TestTheBootRollbackLeavesABackupOnceAnotherVersionOpenedTheDataDir`, `TestEveryInstallTheBridgeStartsNamesItsSettings`, `TestTheHoldIsRecordedBeforeTheBackupIsPutBack`, `TestServeLeavesTheBackupWhereItCannotRecordTheHold`, `TestAStartFinishesARollbackStoppedBeforeItsRename`, `TestACommandThatMigratesTheStoreDisarmsTheEarlyRollback`, `TestAStoreOpenThatMigratesRecordsItInAnArmedInstallMarker`, `TestTheBootKeepsARecordedHoldWhereItClearsAnInstall`, `TestSaveStateReportsADirectoryBarrierThatFails` and `TestTheSettingsDigestReadsTheBridgeVariablesAsThePlatformNamesThem` pin it.
 
 *The defect.* 0.2.2 refuses at load a whole-number setting written as a
 fraction (`21600.5`) or with a leading zero (`060`), which only a hand edit
@@ -1490,7 +1490,9 @@ back if the second rename fails (`replaceRunningBinary`,
 `TestRollbackReplaceRestoresDstWhenTheSecondRenameFails`), the SCM stop
 skipped since this process is the service. A rename that fails puts the
 install marker back as it was, so a start that gets past the settings
-confirms the install as it would have. It says so in a line that names
+confirms the install as it would have (since B660, takes the install up as
+it would have, on probation until a start of it has answered and stayed up:
+B660's section). It says so in a line that names
 both versions, and exits 75: systemd's `Restart=always` restarts any exit,
 launchd's KeepAlive restarts an unsuccessful one, and the SCM's recovery
 actions answer a service-specific exit code (B201's rule); one restart,
@@ -1584,9 +1586,10 @@ without (Argon; it would need release-built test binaries, not taken here).
 
 *Not here.* An install counted healthy only after readiness and a
 probation, rather than at a matching version (B198's scenario, filed
-separately): `DecideBootAction`'s success rule is left as it is, and the
-early rollback asks about an install that could not start, which that
-work does not need to change. Native Windows (the SCM, a mapped image, a
+separately, and done in B660 on 2026-11-06, its section below): B613 left
+`DecideBootAction`'s success rule as it was, and B660 changes it
+(`BootInstallProbation`) without touching the early rollback, which asks
+about an install that could not start. Native Windows (the SCM, a mapped image, a
 `.bak` run by CreateProcess under its own name) is cross-vetted only. A
 crash during a check leaves a `.bridge-check-*` beside the binary, as one
 during a swap leaves a `.bridge-swap-*`. The record is in
@@ -1706,13 +1709,15 @@ case, before any window: the target booting is `BootRollbackOvertaken`,
 confirmed however old the record (`ConfirmOverRollback`: installed now,
 `RollbackStarted` cleared, the hold cleared only where it holds this
 version back, the install and the data dir's record kept, so the next boot
-removes `.bak`); the backup's version booting is `BootRollbackFinished`
+removes `.bak`; since B660 `ProbationOverRollback`, which puts the install
+back on probation instead, its count of failed starts kept, and `.bak` is
+removed only at the boot after its confirmation); the backup's version booting is `BootRollbackFinished`
 (the rollback done: the install cleared, the hold kept, nothing restored,
 never `BootInstallFailed`); any other version, and a hold with no
 rollback, is `BootNoop`. A start of the target still refused finishes the
 rollback only on `EarlyRollback`'s proof (recent, swapped, the backup's
 version, no version recorded over it). An expired interrupted rollback is
-confirmed when the target starts on settings it loads (as an `installing`
+confirmed (since B660, put back on probation) when the target starts on settings it loads (as an `installing`
 marker past the window is since B705, which until then cleared one as
 abandoned), clears
 its install when the backup's version starts, and is left as it is, with
@@ -1841,7 +1846,10 @@ opened the data dir, so a record without that line is one no admission of
 the target wrote, and no proof the rollback is over. It confirms now only
 where `DataDirOpenedBy` names the install's version and the version
 confirming is that one, and otherwise returns an error with the marker as it
-was, which the housekeeping leaves as it is, naming why.
+was, which the housekeeping leaves as it is, naming why. (B660 renamed it
+`ProbationOverRollback`: on the same condition it puts the install back on
+probation rather than confirming it, and the line says `not putting the
+install of … back on probation`.)
 
 *A store genuinely older* (P3). The restart fixture set `user_version`
 back on a store this build had made, so v60's columns and index were there
@@ -2154,7 +2162,7 @@ for a swap or a rename that fails still carry the binary's path from
 
 ## An operator's rollback under way until its rename, and the stops in the updater's lock waits (backlog B692's round 2, 2026-11-03)
 
-- **…and an operator's rollback stays under way until its rename has landed, and a stop in the updater's lock waits is a stop: the rollback's record carries `RollbackStarted` where the marker names the install, and `Rollback` clears it only after the rename, so a rollback the process's end stops between the two is finished by the version that runs next, by B613's rule for a rollback's record: on the target still in place, its commands' migrations refuse under the veto and its serve admission records `DataDirOpenedBy` and lifts the veto in one write, after which every rollback refuses and its housekeeping confirms the install (`BootRollbackOvertaken`); on the previous version, the backup back, its housekeeping ends the record as a rollback done (`BootRollbackFinished`); a stop while the restamp waits or writes requests no restart, and one while a hold's record waits is the install's answer, the context's error** (2026-11-03, backlog B692's round 2). **Don't clear the under-way mark before the rename has landed, lift a veto at the target's admission without recording that it opened the data dir, request a restart after a stop, or answer a stop with a refusal.** `TestARollbackStoppedBeforeItsRenameStaysAnInstallTheTargetsStartResolves`, `TestARollbackStoppedAfterItsRenameIsFinishedByTheVersionThatRuns`, `TestARollbackClearsItsRecordOnceItsRenameHasLanded`, `TestAManualRollbackStoppedBeforeItsRenameKeepsTheStoreFromASecondRollback`, `TestAManualRollbackStoppedAfterItsRenameIsFinishedByThePreviousVersionsBoot`, `TestAStopWhileTheRestampWaitsRequestsNoRestart` (its write's stop since round 3) and `TestAStopWhileTheHoldWaitsIsTheInstallsAnswer` pin it. → History-rules-config-lifecycle.md
+- **…and an operator's rollback stays under way until its rename has landed, and a stop in the updater's lock waits is a stop: the rollback's record carries `RollbackStarted` where the marker names the install, and `Rollback` clears it only after the rename, so a rollback the process's end stops between the two is finished by the version that runs next, by B613's rule for a rollback's record: on the target still in place, its commands' migrations refuse under the veto and its serve admission records `DataDirOpenedBy` and lifts the veto in one write, after which every rollback refuses but the crash rollback, which needs no migration of the store begun (B660), and its housekeeping puts the install back on probation (`BootRollbackOvertaken`, `ProbationOverRollback`; until B660 it confirmed the install); on the previous version, the backup back, its housekeeping ends the record as a rollback done (`BootRollbackFinished`); a stop while the restamp waits or writes requests no restart, and one while a hold's record waits is the install's answer, the context's error** (2026-11-03, backlog B692's round 2). **Don't clear the under-way mark before the rename has landed, lift a veto at the target's admission without recording that it opened the data dir, request a restart after a stop, or answer a stop with a refusal.** `TestARollbackStoppedBeforeItsRenameStaysAnInstallTheTargetsStartResolves`, `TestARollbackStoppedAfterItsRenameIsFinishedByTheVersionThatRuns`, `TestARollbackClearsItsRecordOnceItsRenameHasLanded`, `TestAManualRollbackStoppedBeforeItsRenameKeepsTheStoreFromASecondRollback`, `TestAManualRollbackStoppedAfterItsRenameIsFinishedByThePreviousVersionsBoot`, `TestAStopWhileTheRestampWaitsRequestsNoRestart` (its write's stop since round 3) and `TestAStopWhileTheHoldWaitsIsTheInstallsAnswer` pin it. → History-rules-config-lifecycle.md
 
 *The defect* (Codex on #1387, P1). Round 1's record (`OperatorRollbackRecord`)
 cleared Status and `RollbackStarted` before the rename. A rollback the
@@ -2186,10 +2194,14 @@ is the install still (`InstallArmed`), so
 - the target's serve admission, the one start that shows the target in
   place and its settings loading, records that it opened the data dir and
   lifts the veto in the same write (`AdmitBoot`), after which its store
-  migrates and every rollback refuses (`RollbackRefusal`);
+  migrates and every rollback refuses (`RollbackRefusal`; since B660 the
+  crash rollback alone goes on over that record, and only where no
+  migration of the store began);
 - its housekeeping confirms the install on that record
   (`BootRollbackOvertaken`, `ConfirmOverRollback`), `.bak` kept for one
-  more boot, as after any confirmed install;
+  more boot, as after any confirmed install (since B660 it puts the install
+  back on probation, `ProbationOverRollback`, and `.bak` stays until a
+  start of it is confirmed);
 - a second manual rollback after that admission refuses.
 Argon's first option, the veto kept through the target's admission, was not
 taken: with a migration step pending the target's serve could not open its
@@ -2204,7 +2216,8 @@ as a rollback done (`BootRollbackFinished`: the install cleared, the hold
 and the veto kept), its admission writes nothing, and a command of the
 target meanwhile still refuses to migrate. Where the target runs instead (a
 serve of it started from its image before the rename, B613's round 4
-residual), its admission records and its housekeeping confirms, as above.
+residual), its admission records and its housekeeping confirms (since B660,
+puts the install back on probation), as above.
 
 *Stops are stops* (Codex, the two P2s). `refreshInstallAttemptedAt` returned
 nothing, so a stop while the restamp waited for the lock, or before an
@@ -2253,7 +2266,7 @@ taken out, red on that subtest alone (the log's round-3 entry).
 
 ## A late first boot of the installed version completes its install (backlog B705, 2026-11-03)
 
-- **The version installed is confirmed at its first boot however late it comes, and no clear at boot drops the record that a version other than the backup's opened the data dir while `.bak` may stand: `DecideBootAction` asks the version before the window (any other version: the window, then `SwapStarted`, then `BootInstallFailed`); `ClearInstall` keeps `DataDirOpenedBy` and `PreviousVersion` where `RollbackRefusal` refuses on them; a removal of `.bak` that fails leaves the marker for the next boot, and one that lands drops the record** (2026-11-03, backlog B705). **Don't read the window before the version, drop the record in a clear that leaves `.bak`, clear the marker after a removal that failed, or keep the record once `.bak` is gone.** `TestALateFirstBootOfTheInstalledVersionConfirmsTheInstall`, `TestAClearAtBootKeepsTheRecordARollbackRefusesOn`, `TestDeferredRestartRefreshesInstallRecency`, `TestALateFirstStartOfTheInstalledVersionCompletesItsInstall`, `TestAFailedRemovalOfTheBackupLeavesTheInstallForTheNextStart`, `TestAStartOfAnotherVersionKeepsTheRecordOfALateStartThatDied`, `TestTheBootKeepsARecordedHoldWhereItClearsAnInstall` and `TestTheBootRollbackLeavesABackupOnceAnotherVersionOpenedTheDataDir` pin it. → History-rules-config-lifecycle.md
+- **The version installed is taken up at its first boot however late it comes (on probation since B660, confirmed once a start of it has answered and stayed up), and no clear at boot drops the record that a version other than the backup's opened the data dir while `.bak` may stand: `DecideBootAction` asks the version before the window (any other version: the window, then `SwapStarted`, then `BootInstallFailed`); `ClearInstall` keeps `DataDirOpenedBy` and `PreviousVersion` where `RollbackRefusal` refuses on them; a removal of `.bak` that fails leaves the marker for the next boot, and one that lands drops the record** (2026-11-03, backlog B705). **Don't read the window before the version, drop the record in a clear that leaves `.bak`, clear the marker after a removal that failed, or keep the record once `.bak` is gone.** `TestALateFirstBootOfTheInstalledVersionConfirmsTheInstall`, `TestAClearAtBootKeepsTheRecordARollbackRefusesOn`, `TestDeferredRestartRefreshesInstallRecency`, `TestALateFirstStartOfTheInstalledVersionCompletesItsInstall`, `TestAFailedRemovalOfTheBackupLeavesTheInstallForTheNextStart`, `TestAStartOfAnotherVersionKeepsTheRecordOfALateStartThatDied`, `TestTheBootKeepsARecordedHoldWhereItClearsAnInstall` and `TestTheBootRollbackLeavesABackupOnceAnotherVersionOpenedTheDataDir` pin it. → History-rules-config-lifecycle.md
 
 *The defect* (found while verifying a review finding on B692, read from
 the code; this section's tests reproduce it). `DecideBootAction`'s
@@ -2281,7 +2294,9 @@ record (`Status ""`, B613's round 3) already read the install's version
 booting as the install working, however old the record.
 
 *The reorder.* The version first: the install's version booting is
-`BootInstallSucceeded` whatever the marker's age, and before `SwapStarted`
+`BootInstallSucceeded` (since B660 `BootInstallProbation`, which writes
+nothing: the confirmation is `ConfirmInstall`'s, once a start has answered
+and stayed up, B660's section) whatever the marker's age, and before `SwapStarted`
 as it already was (a marker an updater before `SwapStarted` wrote); any
 other version keeps the window (abandoned past it, swapped or not), then
 `SwapStarted` (Windows' SCM-stop window, `BootClearNotSwapped`), then
@@ -2292,7 +2307,11 @@ they stand. The success write keeps the rest of the marker, its record
 included; `RollbackRefusal` refuses on it while the status is `installed`;
 and the boot after it removes `.bak` (`BootCleanupBak`) as after any
 confirmed install. A success write that fails leaves the marker
-`installing`, and the next boot, of any age now, confirms it again.
+`installing`, and the next boot, of any age now, confirms it again. (Since
+B660 a matching version is probation, not success, at any age: the boot
+writes nothing, and the write that stamps `installed`, keeping the rest of
+the marker, is the confirmation's, asked again at its next round where it
+fails.)
 
 *The record, wherever `.bak` stays* (the brief's binding goal, Codex's
 note: the manual rollback's refusal holds whenever `.bak` remains and a
@@ -2375,7 +2394,9 @@ where the rollback would run, and says why not. `swapAwaitingRestart` still
 expires at the window outside the process that swapped, as before: the
 window bounds what a boot puts back, and the refusal expires with it.
 PROTOCOL.md's Updates paragraph says the next boot confirms the install or
-restores `.bak`, which is now true at any age: no change there. The record
+restores `.bak`, which is now true at any age: no change there. (Since B660
+the boot no longer confirms it, and that paragraph is out of date; it
+changes with the iOS mirror, B660's section.) The record
 is in `ops/engineering-log.md`, 2026-11-03, B705.
 
 ## The console's Roll back offered only where the rollback would run (backlog B707, 2026-11-04)
@@ -2466,6 +2487,245 @@ fix. `TestTheUpdatesPanelShowsRollBackOrWhyNot` runs the shipped
 `renderUpdateTile` under node and skips without it. Six negative controls,
 each observed exactly as predicted (the log's entry has the table). The
 record is in `ops/engineering-log.md`, 2026-11-04, B707.
+
+## An install counted healthy only once it has answered and stayed up (backlog B660, 2026-11-06)
+
+- **An install counts as healthy only once one start of its version has answered as ready and stayed up for `updater.ProbationWindow`, and three of its starts that did not end cleanly roll it back at the next start, before it writes anything, unless a migration of the store has begun or the backup cannot be shown to run here** (2026-11-06, backlog B660). **Don't confirm on a version match, don't let a scan, a root or a certificate decide readiness, don't count a stop or a port another process holds, don't roll back once a migration step has begun or where the backup refuses the settings, and don't compare `user_version` to excuse a failed step.** → History-rules-config-lifecycle.md
+
+*The defect* (the self-healing study of 2026-11-02, read from the code;
+B613's "Not here" above; B198's scenario). `DecideBootAction` answered
+`BootInstallSucceeded` for the target at any age, and the housekeeping
+stamped `installed` after the store opened and before anything listened, so
+the stamp said nothing about serving, and the next start of any version
+removed `.bak`. Under `Restart=always` (`RestartSec=2`) a new binary that
+stamped and then crashed had its `.bak` deleted by its own second start,
+about two seconds later, after `bridge update` had promised a rollback "if
+the new bridge fails to come up at version X within 6h0m0s of restart",
+which only a version mismatch triggered. And nothing rolled a version back
+once it got past its settings: serve's admission records `DataDirOpenedBy`
+before its first write, and that one record refuses the early rollback, the
+boot rollback and the operator's, without saying whether the store changed.
+Nobody had reported it; the owner wanted it covered by design.
+
+*The confirmation.* The marker stays `installing` until it is confirmed:
+not a new status, since `InstallArmed`, the admission, the migration's
+record and the rollbacks' records key on it, and the backup's version,
+whatever it is, reads it as before. The version match keeps its place ahead
+of the window and `SwapStarted` (B705) and answers `BootInstallProbation`,
+which writes nothing and takes no lock (the housekeeping's fast path).
+Serve's confirmation (`serveProbation`, cmd/bridge/serve_probation.go)
+starts once `ServeTLS` runs, only where the marker awaits this version's
+confirmation, joined through `bgWriters` on `scanCtx`. It asks every 5 s
+until the first ready answer, which starts the window (10 minutes, on the
+monotonic clock: timers and `time.Since`, since a box with no RTC boots with
+a stale date), asks once more at the window's end, and every 30 s after a
+no. `updater.ConfirmInstall` takes the install marker's lock through
+`lockMarkerForUpdate` on the confirmation's context, which serve's stop
+ends (held, and the context asked again after the take, since `LockState`
+takes a free lock on an ended context),
+reads the marker again, and stamps only an `installing` marker of this
+version: `installed`, `InstalledAt`, and `FailedStarts`, `RollbackRefused`
+and `NotReady` cleared. Any other marker stays as it is (an install of a
+newer version recorded while it waited). A lock it cannot hold is one line,
+asked again at the next round; where the filesystem keeps no locks no
+install is confirmed, as the housekeeping confirmed none there before.
+`BootRollbackOvertaken` puts the install back on probation
+(`ProbationOverRollback`), its count kept, rather than stamping it.
+
+*Ready* is three answers in one round, each of this process: a connect to
+the API listener's bound address (a wildcard dialled on loopback,
+`probeHost`, as `bridge health` dials) that this process's accept loop took,
+read from `acceptWatch`, the listener as serve hands it to `ServeTLS`, which
+keeps the remote address of each connection it accepts while a probe is
+under way, matched with the probe's own local address (a connect alone
+completes in the kernel's backlog with nobody accepting); `GET /v1/health`
+run in process through `httpSrv.Handler`, the handler every listener serves,
+into a recorder of its own (`healthRecorder`: no `net/http/httptest` outside
+tests), answering 200 with `serverVersion` this version; and a store read
+(`CountServedTracks`). A round runs on a goroutine of its own, its checks on
+a context that ends at 5 s, and the round is waited for a second past that
+(`roundGrace`), so a check that takes its cancel says why it ended, and a
+call that takes none (the in-process `ServeHTTP`, whose endpoint walk is a
+singleflight that ignores its caller's context) is a no at the bound: no
+second round starts beside it, its late answer counts for nothing, and the
+stop does not wait for it (cli-serve.md's goroutine bullet names it). Not
+ready's business: a scan or how far it got, enrichment, the library roots,
+a TLS handshake (`health.go`'s reason: an expired or rotated certificate
+reads as dead, and a restart cannot fix that), the tailnet, the player,
+DLNA. So a slow first scan cannot hold the confirmation back, and a no
+never rolls anything back: a start that never answers is never confirmed
+and keeps running; at the window's first lapse it says so once, naming the
+answer that was missing, and records `NotReady`, which the next admission
+and the confirmation clear. Each round logs one `path=/v1/health` access
+line.
+
+*The count.* The admission adds one to `FailedStarts` where this version is
+the install's target (`DisarmResult.Counted`, `CountTried`), in its one
+write with the record where it makes one. Where the count is all it has to
+write, the barrier still runs first and still refuses, and the count's own
+write failing, or its lock not taken, is a line (`CountMissed`), never a
+refusal: a missed count errs toward not rolling back. A crash before the
+admission is not counted: a candidate that never runs is what the settings
+check before the swap sees, and a start refused for its settings has the
+early rollback. The take-back is registered right after the admission, so
+it runs after every teardown and holds the data dir's lock, and it reads a
+local flag (`notAFailedStart`) that exactly the clean ends set: serve's stop
+(the `ctx.Done` branch, and `stoppedBeforeServing`), a restart request
+(which cancels the same context), a bind refused for an address in use or a
+permission, the API's or the console's (`doctor.IsAddrInUse` and
+`IsBindPermission`, exported, the Windows arms reading Winsock's
+`WSAEADDRINUSE` and `WSAEACCES`, since `syscall.EADDRINUSE` alone is always
+false there), and the tailnet listener's failure: a host's trouble, which
+the backup would meet too. Never `code`: `runServe` does not recover, and a
+panic on serve's goroutine runs the defers with `code` still 0. It gives the
+marker's lock 2 s (`takeBackWait`), goes on where the filesystem keeps none,
+as a disarm does, and writes only where the marker is still an armed
+install of this version holding the count this start wrote (`FailedStarts
+== CountTried`): a stop after the confirmation and a restart into a newer
+install touch nothing, and no earlier start's count goes with this one. A
+start that tried to count tries to take back, since `SaveState` publishes
+before its barrier can fail. A take-back that does not land leaves one
+count, which the confirmation clears.
+
+*The crash rollback.* `updater.ProbationFailedStarts` is 3, so one power cut
+or OOM kill does not roll back, and the fourth start at `RestartSec=2` comes
+inside systemd's default start limit (5 in 10 s). `recoverCrashedInstall`
+(cmd/bridge/serve_crashed_install.go) runs after the data dir's lock, only
+where it is this process's, and before the admission, so nothing of the
+start has written. It follows the early rollback step for step: the marker's
+lock held from its read through the rename (never without it; refused where
+the filesystem keeps none), the marker read again under it, then three
+checks in this order, the first starting no process, so that a migrated
+store does not run the backup at every start: `updater.CrashRollback`
+(pure: armed for this version, the count at the limit or past it,
+`SwapStarted`, a `PreviousVersion` that is another version, no
+`StoreMigratedBy`, `DataDirOpenedBy` empty or this version; no recency
+window, since the count has no clock and an install first started the next
+day deserves the same, B705); `.bak` a regular file whose `ProbeVersion` is
+`PreviousVersion`; and `CheckConfig(.bak, the settings)`, valid or
+`ConfigCheckUnsupported` going on, refused or failed refusing, so that a
+rollback does not trade one crash loop for another over a key the new
+version saved. A backup that predates the check cannot say whether it loads
+the settings: it is put back with a warning, and one that refuses them stops
+at its load, before its own early rollback if it has one, and the settings
+are what to fix. Then `CrashRollbackRecord` durably (status "",
+`RollbackStarted`, the version held back with a reason naming the failed
+starts and no digest, since this is no fault of the settings, its
+migrations vetoed, `DataDirOpenedBy` and the count kept, `RollbackRefused`
+cleared), `RollbackBinary`, the marker put back with a reason where the
+rename fails, and exit 75; where nothing restarts it, the line tells the
+operator to run `bridge serve` again. A refusal is said on stderr (the line
+may name the backup's path, as the early rollback's do) and recorded in
+`RollbackRefused` in words with no path, value or error text, and serve goes
+on, since this start may be the one that works: it counts itself, so every
+later start that does not end cleanly asks again, and a refusal that passes
+(a settings check that did not answer) is no lasting one. A start that finds
+the record with its rename not landed asks all three again before its
+admission and finishes; only where it refuses does it go on, and
+`BootRollbackOvertaken` then puts the install back on probation. The count
+is what tells that record from the other two: the early rollback's record
+carries none by design, and an operator's rollback refuses once a start has
+been admitted. The version put back ends the record as a rollback done
+(`BootRollbackFinished`, in 0.2.3 already, which a literal fixture of
+0.2.3's marker and decision pins) and keeps the hold, so the auto-installer
+waits for a newer release and a manual install still takes the held
+version.
+
+*Begun is changed.* `DisarmBeforeMigrating` writes `StoreMigratedBy` before
+the first step wherever an install is armed and this version is not the
+backup's, whether or not `DataDirOpenedBy` is there: before B660
+`ArmsDataDirRecord` was false once the admission had recorded, so a
+migration under serve left no record of its own. A record it cannot write
+(its save, its barrier, its lock) refuses the open, as the admission
+refuses: no step runs unrecorded. It is asked once, before the first step.
+`user_version` is not compared to find that nothing landed: the ladder is
+not one transaction (a step's SQL, its `post` and `PRAGMA user_version` are
+separate statements), so a step can fail with statements landed and
+`user_version` unmoved, and an older binary over a newer store does not
+refuse it, but skips every step. This is the design's plainest cost: the
+ladder's top moved in 6 of the last 7 releases (0.1.7 23, 0.1.8 26, 0.1.9
+41, 0.2.0 44, 0.2.1 50, 0.2.2 60, 0.2.3 60), so an install of such a release
+that crash-loops after its first store open gets its backup kept and a
+report, not a rollback.
+
+*What the target wrote without a migration* goes back under the backup with
+no check, and none of it stops the backup starting, so none is a refusal in
+`CrashRollback`: `tokens.json`, the console's account and its login tickets
+and the harvest state are JSON the backup reads with lenient decoders,
+dropping a field it does not know at its next write, and so is the install
+marker; the player's DSD state (`dsdstate`'s schema check) and its queue
+refuse a field they do not know, which turns the player off with a reason,
+never serve; a row the target extracted above the backup's
+`ExtractorVersion` is served as indexed until its file changes, since the
+skip gate's `stored >= current` passes it; any other row the target wrote
+(a scan's, the enricher's, a playlist, a favorite) is a row of the schema
+both versions share, which the backup reads as its own; the settings are
+what `CheckConfig` asks.
+
+*The other three rollbacks keep `DataDirOpenedBy`.* The early rollback, the
+boot's and the operator's (the console's Roll back included) refuse on it as
+before: a record `ClearInstall` kept from before B660 has no
+`StoreMigratedBy` to read, so its absence proves nothing there. The crash
+rollback is the one exception, because it asks what they cannot: whether a
+migration began, which every migrating open records since B660.
+
+*The auto-installer waits* while the backup still guards something: at its
+gate in `maybeAutoInstall`, past its pending-restart path, and again under
+the lock in `decideUnderLock`, as the hold is (`ErrInstallAwaitsConfirmation`,
+a deferred reason), while the marker is an unconfirmed install of the running
+version with no `StoreMigratedBy` and the process has been up for less than
+twice the window (`Options.Uptime`, monotonic). A swap then would replace
+the last version known to run here with one not yet shown to. Past that
+bound an install that never answered does not wait on itself, since a newer
+release may be its fix; where a migration began the backup cannot be put
+back anyway, so nothing is held. A manual install is not held, and its
+`.bak` is the unconfirmed version. A manual install staged and not started,
+then an automatic one over it, keeps the behaviour from before: `.bak` is
+then the staged release, not `PreviousVersion`, so the crash rollback
+refuses it at its second check.
+
+*The report* has one source, `updater.ProbationStatus`, in words that name
+no path or value: `Says`, the count as the marker holds it (the running start
+counts itself until its take-back, so a healthy install on probation reads
+1), for `bridge doctor`'s `install-probation` line, one builder for the CLI
+and the console's doctor (none where no install awaits; ok at 1, warn from
+2, fail at the limit, beside a refused rollback, or with `NotReady`; a
+marker that cannot be read is a warn, not checked), the surface that works
+while serve cannot start; and `ThisStart`, the running start taken off the
+count, for serve's stderr (a line per start with a count before it, and one
+for every refusal) and the console's Updates panel, a Probation row beside
+the Rollback row. Beside a refused rollback it promises no put-back.
+
+*Replaced, not only added*: `bridge update`'s promise (it says what is
+checked now: answered, up for 10 minutes, the backup put back after three
+failed starts unless a migration of the store began), `State`'s lifecycle
+doc, `EarlyRollback`'s, the migration veto's refusal, `maybeRollbackOnBoot`'s
+and the comments at the housekeeping's call and the auto-installer's
+restart, the runbook's B613, B692 and B705 paragraphs and its paragraph for
+B660, B613's "Not here" above, and the long forms of B613's rounds 3 and 4,
+B692's round 2 and B705 here, each where it said a start confirms the
+install. PROTOCOL.md's Updates paragraph still says the next boot confirms
+the install or restores `.bak`; that sentence changes with the iOS mirror,
+not here.
+
+*Tests.* Red first on 99568a9d, the marker's fields and serve's seams added
+inert: `TestACrashAfterTheFirstBootKeepsTheBackup` (the housekeeping stamped
+`installed` with nothing listening, and the next removed `.bak`),
+`TestAnInstallIsConfirmedOnlyOnceItAnsweredAndStayedUp` (installed once serve
+listened), `TestThreeFailedStartsRollBackAnInstallThatMigratedNothing` (the
+fourth start served, 0, and put nothing back) and
+`TestARollbackIsRefusedAndReportedOnceAMigrationBegan` (no migration
+recorded). The pure tables in internal/updater, and through the real serve
+the readiness, the count, the crash rollback and its refusals, a
+migration's record, the confirmation's lock, the doctor's line and the
+panel's row; the six existing tests that stamped at the first boot follow
+the confirmation now and keep what each pins. Twelve negative controls,
+each observed as predicted, and a by-hand run with two real builds: the
+log's entry has them.
+
+*Left.* What B660 leaves uncovered is filed under backlog B660 until each
+item has an id of its own. The record is in `ops/engineering-log.md`,
+2026-11-06, B660.
 
 ## Config, settings and process lifecycle
 
