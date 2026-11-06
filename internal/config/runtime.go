@@ -243,7 +243,11 @@ func (r *RuntimeConfig) UpdateChecked(path string, fn func(next *Config, check f
 	if err := fn(next, check); err != nil {
 		return err
 	}
-	written, err := filedSwitches(next, before, found).save(l, nil)
+	// The snapshot, with the two opt-outs as the file is to hold them; the
+	// live values are what is published.
+	saved := *next
+	filedSwitches(&saved, before, found)
+	written, err := saved.save(l, nil)
 	if err != nil {
 		return changedOutside(path, err)
 	}
@@ -252,17 +256,19 @@ func (r *RuntimeConfig) UpdateChecked(path string, fn func(next *Config, check f
 	return nil
 }
 
-// filedSwitches is what an Update saves of next, whose two opt-outs
-// (switchEnvPaths: enrich.enabled, enrich.deezerEnabled) are the live
-// values, BRIDGE_ENRICH_ENABLED's or BRIDGE_ENRICH_DEEZER_ENABLED's where
-// set (backlog B617). A switch the update left as it was in before, the
-// snapshot it cloned, is written as the file holds it (file, the bytes the
-// turn read), so a save of any other setting writes no variable's value into
-// the file, and a start without the variable finds what the operator chose;
-// a switch the update changed is written as the change, off as false and on
-// as no key. The snapshot published is next, the live values. Other
-// variables are written as they are (B761).
-func filedSwitches(next, before *Config, file []byte) *Config {
+// filedSwitches sets, in saved, a copy of an Update's next, the two opt-outs
+// (switchEnvPaths: enrich.enabled, enrich.deezerEnabled) as the file is to
+// hold them, where next holds the live values, BRIDGE_ENRICH_ENABLED's or
+// BRIDGE_ENRICH_DEEZER_ENABLED's where set (backlog B617). A switch the
+// update left as it was in before, the snapshot it cloned, is written as the
+// file holds it (file, the bytes the turn read), so a save of any other
+// setting writes no variable's value into the file, and a start without the
+// variable finds what the operator chose; a switch the update changed is
+// written as the change, off as false and on as no key. The snapshot
+// published is next, the live values. Other variables are written as they
+// are (B761). Only these two fields of saved are set: what is saved is the
+// snapshot the holder compared with the turn's bytes.
+func filedSwitches(saved, before *Config, file []byte) {
 	var own struct {
 		Enrich struct {
 			Enabled       *bool `yaml:"enabled"`
@@ -273,12 +279,10 @@ func filedSwitches(next, before *Config, file []byte) *Config {
 		// The bytes loaded once (the holder's own read or write, or a file
 		// it was told nothing of); one that does not decode keeps what the
 		// update holds.
-		return next
+		return
 	}
-	out := *next
-	out.Enrich.Enabled = filedSwitch(next.Enrich.EffectiveEnabled(), before.Enrich.EffectiveEnabled(), own.Enrich.Enabled)
-	out.Enrich.DeezerEnabled = filedSwitch(next.Enrich.EffectiveDeezerEnabled(), before.Enrich.EffectiveDeezerEnabled(), own.Enrich.DeezerEnabled)
-	return &out
+	saved.Enrich.Enabled = filedSwitch(saved.Enrich.EffectiveEnabled(), before.Enrich.EffectiveEnabled(), own.Enrich.Enabled)
+	saved.Enrich.DeezerEnabled = filedSwitch(saved.Enrich.EffectiveDeezerEnabled(), before.Enrich.EffectiveDeezerEnabled(), own.Enrich.DeezerEnabled)
 }
 
 // filedSwitch is one opt-out as an Update writes it: the file's own value

@@ -221,7 +221,7 @@ func fingerprintSwitch() (on bool, source string, err error) {
 	if !found {
 		return true, "", nil
 	}
-	cfg, err := config.Load(path)
+	cfg, _, err := loadCLIConfig(path)
 	if err != nil {
 		return false, path, err
 	}
