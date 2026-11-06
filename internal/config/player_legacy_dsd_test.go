@@ -1,6 +1,8 @@
 package config
 
 import (
+	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 
@@ -91,10 +93,29 @@ func TestAStartsScopeWarnsOfEachLegacyKeyOnce(t *testing.T) {
 	start := &LegacyDSDWarnings{}
 	cfg.WarnLegacyDSDKeysIn(start)
 	lines(t, 3)
-	for i, key := range []string{"dsdMode", "dsdQualification", "allowDoP"} {
-		if got := rec.Failures(legacyDSDMessage)[i]; !strings.Contains(got, "key=output.player."+key) || strings.Contains(got, "approved.json") || strings.Contains(got, "dop") && !strings.Contains(got, "dsdMode") {
-			t.Errorf("line %d is %q, want the key %s named and no value", i+1, got, key)
+	// Each line holds the key it warns of and nothing else of its own, so no
+	// value of the key's reaches it, whatever the value: beside the config
+	// logger's component, the key attribute alone.
+	var named []string
+	for _, r := range rec.Records() {
+		if r.Message != legacyDSDMessage {
+			continue
 		}
+		var own []slog.Attr
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key != "component" || a.Value.String() != "config" {
+				own = append(own, a)
+			}
+			return true
+		})
+		if len(own) != 1 || own[0].Key != "key" {
+			t.Errorf("a legacy-key line holds %v beside its component, want the key attribute alone", own)
+			continue
+		}
+		named = append(named, own[0].Value.String())
+	}
+	if want := []string{"output.player.dsdMode", "output.player.dsdQualification", "output.player.allowDoP"}; !slices.Equal(named, want) {
+		t.Errorf("the lines name %v, want %v, each once", named, want)
 	}
 	next := Clone(cfg)
 	next.LibraryName = "Study"

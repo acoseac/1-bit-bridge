@@ -15,7 +15,6 @@ import (
 
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
-	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
 	"github.com/acoseac/1-bit-bridge/internal/player/qualification"
 )
 
@@ -167,47 +166,98 @@ func TestAPlayerBlockWithLegacyKeysNeverTurnsThePlayerOff(t *testing.T) {
 	}
 }
 
-// TestASecondServeRefusedByTheLockMigratesNothing (B728 B6): the state lives
-// in the data directory, under its lock, and the migration runs only in the
-// serve that holds it: a serve the lock refuses migrates nothing and warns of
-// no key, the state left byte for byte as it was.
+// TestASecondServeRefusedByTheLockMigratesNothing (B728 B6; round 2, the
+// Claude API reviewer): the state lives in the data directory, under its
+// lock, and the migration runs only in the serve that holds it. A serve the
+// lock refuses migrates nothing and warns of no key: with no state at all, an
+// explicit off it would migrate leaves no file; with a part for a DAC
+// waiting, the DAC there to be read and its owner's record beside it, the
+// state stays byte for byte as it was. Were that serve to go on past the
+// lock, its player's start would make the first and its DAC's part the
+// second (the test then stops it and says so).
 func TestASecondServeRefusedByTheLockMigratesNothing(t *testing.T) {
 	needsDirectorySync(t)
 	persistentMedium(t)
-	root := t.TempDir()
-	music, dataDir := filepath.Join(root, "Music"), filepath.Join(root, "data")
-	for _, d := range []string{music, dataDir} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			t.Fatal(err)
+	for _, dacPart := range []bool{false, true} {
+		name := "no state, an explicit off"
+		if dacPart {
+			name = "a DAC's part waiting"
 		}
-	}
-	// A state a first start left, its part for a DAC waiting.
-	store, err := dsdstate.Open(dataDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Migrate(dataDir, dsdstate.Legacy{DSDMode: "native"}, nil); err != nil {
-		t.Fatal(err)
-	}
-	before := readBytes(t, filepath.Join(dataDir, dsdstate.FileName))
-	holdDataDirLock(t, dataDir)
-	configPath := filepath.Join(root, "bridge.yaml")
-	text := "libraryRoots:\n  - " + music + "\ndataDir: " + dataDir + "\nadminAddress: 127.0.0.1:0\noutput:\n  mpd: off\n  player:\n" + goBarPlayer + "    dsdMode: off\n"
-	if err := os.WriteFile(configPath, []byte(text), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	log := watchLog(t)
-	var stderr bytes.Buffer
-	code := runServe(context.Background(), serveOpts{configPath: configPath, addrOverride: "127.0.0.1:0", playerGOOS: "linux", playerTrees: goBarTrees(t),
-		hotplugSource: func(context.Context) hotplug.Source { return hotplug.PollingSource(hearsNothing) }, playerBackend: newPlayerStandIn().build}, io.Discard, &stderr)
-	if code != 1 || !strings.Contains(stderr.String(), "stop it first") {
-		t.Fatalf("a serve beside one that holds the data dir exited %d: %s", code, stderr.String())
-	}
-	if after := readBytes(t, filepath.Join(dataDir, dsdstate.FileName)); !bytes.Equal(before, after) {
-		t.Errorf("a serve the lock refused changed the state:\n%s\n%s", before, after)
-	}
-	if lines := migrationLines(log.all()); len(lines) != 0 || len(legacyKeyLines(log.all(), "dsdMode")) != 0 {
-		t.Errorf("a serve the lock refused migrated or warned: %s", log.all())
+		t.Run(name, func(t *testing.T) {
+			box := newDSDBox(t)
+			root := t.TempDir()
+			music, dataDir := filepath.Join(root, "Music"), filepath.Join(root, "data")
+			for _, d := range []string{music, dataDir} {
+				if err := os.MkdirAll(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			keys := "    dsdMode: off\n"
+			statePath := filepath.Join(dataDir, dsdstate.FileName)
+			var before []byte
+			if dacPart {
+				keys = "    dsdMode: native\n    dsdQualification: approved.json\n"
+				legacyRecordIn(t, dataDir, goBarLiveIdentity(t, box.trees), qualification.Version, nativeAt(dsdstate.DSD64))
+				store, err := dsdstate.Open(dataDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := store.Migrate(dataDir, dsdstate.Legacy{DSDMode: "native", DSDQualification: "approved.json"}, nil); err != nil {
+					t.Fatal(err)
+				}
+				before = readBytes(t, statePath)
+			}
+			holdDataDirLock(t, dataDir)
+			configPath := filepath.Join(root, "bridge.yaml")
+			text := "libraryRoots:\n  - " + music + "\ndataDir: " + dataDir + "\nadminAddress: 127.0.0.1:0\noutput:\n  mpd: off\n  player:\n" + goBarPlayer + keys
+			if err := os.WriteFile(configPath, []byte(text), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			log := watchLog(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			went := make(chan *bridgePlayer, 1)
+			opts := serveOpts{configPath: configPath, addrOverride: "127.0.0.1:0", playerGOOS: "linux", tailscaleCLI: noTailscaleCLI(),
+				playerBackend: newPlayerStandIn().build, playerBoot: func(p *bridgePlayer) { went <- p }}
+			box.with(&opts)
+			stderr := &safeBuffer{}
+			done := make(chan int, 1)
+			go func() { done <- runServe(ctx, opts, io.Discard, stderr) }()
+			select {
+			case code := <-done:
+				if code != 1 || !strings.Contains(stderr.String(), "stop it first") {
+					t.Errorf("a serve beside one that holds the data dir exited %d: %s", code, stderr.String())
+				}
+			case p := <-went:
+				// It went on past the lock: let its player make what it would,
+				// then stop it.
+				if p.plan.start {
+					select {
+					case <-p.ready:
+					case <-serveGiveUp(t):
+					}
+					if p.eng != nil {
+						availableOutput(t, p.eng)
+					}
+				}
+				cancel()
+				<-done
+				t.Errorf("a serve beside one that holds the data dir went on past the lock to decide its player")
+			case <-serveGiveUp(t):
+				cancel()
+				t.Fatalf("a serve beside one that holds the data dir neither refused nor went on; stderr=%s", stderr.String())
+			}
+			if dacPart {
+				if after := readBytes(t, statePath); !bytes.Equal(before, after) {
+					t.Errorf("a serve the lock refused changed the state:\n%s\n%s", before, after)
+				}
+			} else if _, err := os.Lstat(statePath); err == nil {
+				t.Errorf("a serve the lock refused wrote the state: %s", readBytes(t, statePath))
+			}
+			if lines := migrationLines(log.all()); len(lines) != 0 || len(legacyKeyLines(log.all(), "dsdMode")) != 0 {
+				t.Errorf("a serve the lock refused migrated or warned: %s", log.all())
+			}
+		})
 	}
 }
 
