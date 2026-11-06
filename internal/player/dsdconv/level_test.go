@@ -94,35 +94,60 @@ func equal32(a, b []int32) bool {
 
 // TestDelayLinesStartAtNumericZero: the delay lines start at numeric zero,
 // silence in the filter's arithmetic, never at zero bits, which are -1.0, a
-// full-scale offset (B728 §4.2). DSD silence, 0x69, primed so, settles to
-// the stopband's level, and its first frames are no click: at 24 bits the
-// first frames and the rest stay under -100 dBFS; at 16 bits, under 2 LSB,
-// the dither's own floor. Zero bits would put the first frames near
-// -6 dBFS.
+// full-scale offset (B728 §4.2), and the tail is flushed with numeric zeros.
+// DSD silence, 0x69, primed so, settles to the stopband's level: under
+// -100 dBFS at 24 bits, and at 16 bits under 2 LSB, the dither's own. Its
+// first and last frames are no click: they are the pattern's own switch-on
+// and switch-off, within 2 dB of what one filter at the one-bit rate with
+// 160 dB of stopband makes of the same bits, and under -80 dBFS, where zero
+// bits put the first frames at -6 dBFS. Measured on 2026-11-06 at 176.4 kHz:
+// the first frames peak at 418, 54 and 7 LSB at DSD64, DSD128 and DSD256
+// (the reference's 382, 52 and 7), the settled frames at 4, 1 and 1.
 func TestDelayLinesStartAtNumericZero(t *testing.T) {
 	for _, rate := range dsdRates {
 		silence := repeatByte(0x69, rate/20)
 		for _, p := range allPlans {
 			out, _ := convert(t, [2][]byte{silence, silence}, rate, p, 4096)
 			h, _ := p.Window(rate)
-			bar := math.Pow(10, -100.0/20) * float64(int64(1)<<(p.ValidBits-1))
-			if p.ValidBits == 16 {
-				bar = 2
+			k := len(out) / 2
+			full := float64(int64(1) << (p.ValidBits - 1))
+			ref := deepReference(silence, rate, p, 0, k)
+			peak := func(xs func(int) float64, from, to int) float64 {
+				m := 0.0
+				for i := from; i < to; i++ {
+					m = math.Max(m, math.Abs(xs(i)))
+				}
+				return m
 			}
-			first, rest := 0.0, 0.0
-			for i, v := range out {
-				a := math.Abs(float64(v))
-				if i/2 < 2*h {
-					first = math.Max(first, a)
-				} else {
-					rest = math.Max(rest, a)
+			ours := func(i int) float64 { return float64(out[2*i]) }
+			theirs := func(i int) float64 { return ref[i] * full }
+			start, mid, end := peak(ours, 0, 2*h), peak(ours, 2*h, k-2*h), peak(ours, k-2*h, k)
+			refStart, refEnd := peak(theirs, 0, 2*h), peak(theirs, k-2*h, k)
+			quiet, click := math.Pow(10, -100.0/20)*full, math.Pow(10, -80.0/20)*full
+			if p.ValidBits == 16 {
+				quiet = 2
+			}
+			t.Logf("%s → %s: the first %d frames peak at %.0f LSB (%.1f dBFS; the reference's %.0f), the settled ones at %.0f, the last at %.0f (%.0f)",
+				rateName(rate), p, 2*h, start, dbfs(start/full), refStart, mid, end, refEnd)
+			if mid > quiet {
+				t.Errorf("%s %s: DSD silence settles at %.0f LSB, over %.1f", rateName(rate), p, mid, quiet)
+			}
+			for _, edge := range []struct {
+				name     string
+				got, ref float64
+			}{{"first", start, refStart}, {"last", end, refEnd}} {
+				if edge.got > click || edge.got > edge.ref*math.Pow(10, 2.0/20)+2 {
+					t.Errorf("%s %s: DSD silence's %s frames reach %.0f LSB; the bar is %.0f, and the reference's %.0f", rateName(rate), p, edge.name, edge.got, click, edge.ref)
 				}
 			}
-			full := float64(int64(1) << (p.ValidBits - 1))
-			t.Logf("%s → %s: the first %d frames peak at %.1f LSB (%.1f dBFS), the rest at %.1f LSB", rateName(rate), p, 2*h, first, dbfs(first/full), rest)
-			if first > bar || rest > bar {
-				t.Errorf("%s %s: DSD silence reads %.1f LSB in its first %d frames and %.1f after, over %.1f", rateName(rate), p, first, 2*h, rest, bar)
-			}
+		}
+		// What the test guards against: zero bits before the stream.
+		p := Plan{176400, 24}
+		h, _ := p.Window(rate)
+		zeros := concat(repeatByte(0, 64*h*(rate/p.RateHz)), silence)
+		out, _ := convert(t, [2][]byte{zeros, zeros}, rate, p, 4096)
+		if at := dbfs(math.Abs(float64(out[2*64*h])) / (1 << 23)); at < -10 {
+			t.Errorf("%s: after zero bits DSD silence's first frame reads %.1f dBFS, no offset: the test cannot see what it guards", rateName(rate), at)
 		}
 	}
 }
@@ -220,10 +245,20 @@ func welchBands(xs []float64, n, nb int) []float64 {
 // at every target rate: 50 kHz, the generator's alias probe, and a tone
 // that folds into the band at the plan's last decimation if its stopband
 // fails (160 kHz to 16.4 kHz at 176.4 kHz, 70 kHz to 18.2 kHz at 88.2 kHz,
-// 26 kHz to 18.1 kHz at 44.1 kHz). The bars are transcode's: 1.0 dB over
-// the reference in peak and in energy, and an in-band peak under -80 dBFS.
+// 26 kHz to 18.1 kHz at 44.1 kHz). The bars are transcode's 1.0 dB over
+// the reference in peak and in energy, and a coarse in-band pin.
+//
+// The differential sees a fold only above the fixture's own floor, and at
+// DSD256 the 5th-order loop's in-band floor lies under what the mask lets
+// through: measured on 2026-11-06, the 160 kHz probe folds to 16.4 kHz at
+// -137.7 dBFS there, 125.7 dB under the probe and inside the mask's 100,
+// over a fixture that peaks at -153.0 dBFS in band. So an excess over the
+// reference fails only where it also passes the mask's allowance, 100 dB
+// under the probes (-112 dBFS): at DSD64 and DSD128 the floor hides
+// anything under it and the differential reads +0.01 dB at most.
 func TestAliasingIsADifferential(t *testing.T) {
 	fold := map[int]float64{176400: 160000, 88200: 70000, 44100: 26000}
+	allow := dbfs(0.25) - 100 // each probe is 0.25 of full scale
 	for _, rate := range dsdRates {
 		for _, p := range []Plan{{176400, 24}, {88200, 24}, {44100, 24}} {
 			bits := ciff(rate*3/10, tones(rate, 0.5, 50000, fold[p.RateHz]))
@@ -240,13 +275,17 @@ func TestAliasingIsADifferential(t *testing.T) {
 			refE := bandEnergyDB(refMags, binHz, 20, 20000)
 			t.Logf("%s → %s: converter peak %.2f dBFS at %.0f Hz, energy %.2f dB | reference peak %.2f dBFS, energy %.2f dB | delta peak %+.2f dB, energy %+.2f dB",
 				rateName(rate), p, shipPk, shipHz, shipE, refPk, refE, shipPk-refPk, shipE-refE)
-			if d := shipPk - refPk; d > 1.0 {
-				t.Errorf("%s %s: the in-band peak is %+.2f dB over the reference: a tone folded down", rateName(rate), p, d)
+			if d := shipPk - refPk; d > 1.0 && shipPk > allow {
+				t.Errorf("%s %s: the in-band peak is %+.2f dB over the reference, at %.2f dBFS: a tone folded down", rateName(rate), p, d, shipPk)
 			}
-			if d := shipE - refE; d > 1.0 {
-				t.Errorf("%s %s: the in-band energy is %+.2f dB over the reference: a broadband fold", rateName(rate), p, d)
+			if d := shipE - refE; d > 1.0 && shipE > allow {
+				t.Errorf("%s %s: the in-band energy is %+.2f dB over the reference, at %.2f dB: a broadband fold", rateName(rate), p, d, shipE)
 			}
-			if shipPk > -80 {
+			// A coarse pin, should the reference lose its filter too: with no
+			// anti-alias filter the fold tone lands in band near -12 dBFS. Not
+			// transcode's -80, since two probes load DSD64's loop and raise its
+			// own floor near 20 kHz to -76.7 dBFS, the reference's as much.
+			if shipPk > -60 {
 				t.Errorf("%s %s: the in-band peak is %.2f dBFS at %.0f Hz: the anti-alias filter looks absent", rateName(rate), p, shipPk, shipHz)
 			}
 		}
@@ -308,7 +347,7 @@ func deepReference(bits []byte, rate int, p Plan, from, n int) []float64 {
 	packed := planeOf(bits, false)
 	out := make([]float64, n)
 	for k := 0; k < n; k++ {
-		start := ((from+k)*d - c) / 8 // the byte the window starts in
+		start := int(floorDiv(int64((from+k)*d-c), 8)) // the byte the window starts in
 		var v float64
 		for j := 0; j < tables; j++ {
 			if idx := start + j; idx >= 0 && idx < len(packed) {

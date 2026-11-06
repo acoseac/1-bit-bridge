@@ -115,9 +115,10 @@ func TestTheResponseMeetsItsMask(t *testing.T) {
 
 // TestNoSumCanOverflow bounds every value the integer chain forms, from the
 // coefficients: a stage-1 table entry fits an int32, and stage 3's sum, the
-// largest, stays under 2^62 for any bits at all (each stage's output is at
-// most its taps' absolute sum times its input's bound), leaving room for
-// the dither and the rounding.
+// largest, stays under 2^63 for any bits at all (each stage's output is at
+// most its taps' absolute sum times its input's bound) with room for the
+// dither (under 2^45) and the rounding's addend (under 2^45). The bound is
+// about 4.6 x 2^60 under the 44.1 kHz plans, whose stage 3 is longest.
 func TestNoSumCanOverflow(t *testing.T) {
 	abs := func(taps []int64) *big.Int {
 		s := new(big.Int)
@@ -126,7 +127,7 @@ func TestNoSumCanOverflow(t *testing.T) {
 		}
 		return s
 	}
-	limit := new(big.Int).Lsh(big.NewInt(1), 62)
+	limit := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 63), new(big.Int).Lsh(big.NewInt(1), 46))
 	for _, rate := range dsdRates {
 		for _, p := range allPlans {
 			g, err := geometryFor(rate, p)
@@ -144,7 +145,7 @@ func TestNoSumCanOverflow(t *testing.T) {
 			s2.Add(s2, big.NewInt(1)) // the rounding
 			s3 := new(big.Int).Mul(abs(g.g3), s2)
 			if s3.Cmp(limit) >= 0 {
-				t.Errorf("%s %s: stage 3's sum can reach %v, past 2^62", rateName(rate), p, s3)
+				t.Errorf("%s %s: stage 3's sum can reach %v, past 2^63 less the dither's and the rounding's room", rateName(rate), p, s3)
 			}
 		}
 	}

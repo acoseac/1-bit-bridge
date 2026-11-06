@@ -42,29 +42,71 @@ type Plan struct {
 var ErrPlan = errors.New("dsdconv: not a conversion plan")
 
 // Plans is every plan, in the order a DAC's best is chosen: 176.4, 88.2 and
-// 44.1 kHz at 24 bits, then the same at 16.
-func Plans() []Plan { return nil }
+// 44.1 kHz at 24 bits, then the same at 16. The rates are the 44.1 kHz
+// family's, whose ratios to every DSD rate are integers, so there is no
+// resampler; 352.8 kHz is not one (the owner's cap, B728 §4.3).
+func Plans() []Plan {
+	return []Plan{{176400, 24}, {88200, 24}, {44100, 24}, {176400, 16}, {88200, 16}, {44100, 16}}
+}
 
 // Validate refuses a plan that is not one of Plans.
-func (p Plan) Validate() error { return ErrPlan }
+func (p Plan) Validate() error {
+	for _, q := range Plans() {
+		if p == q {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: %s", ErrPlan, p)
+}
 
-// PassbandHz is the plan's passband edge: 30 kHz, or 20 kHz at 44.1 kHz.
-func (p Plan) PassbandHz() int { return 0 }
+// PassbandHz is the plan's passband edge: 30 kHz, or 20 kHz at 44.1 kHz,
+// the compact tier's band; 0 for a plan that is none.
+func (p Plan) PassbandHz() int {
+	switch {
+	case p.Validate() != nil:
+		return 0
+	case p.RateHz == 44100:
+		return 20000
+	}
+	return 30000
+}
 
 // StopbandHz is where the plan's stopband begins, at least 100 dB down:
-// 40 kHz, or 22.05 kHz at 44.1 kHz.
-func (p Plan) StopbandHz() int { return 0 }
+// 40 kHz, or 22.05 kHz, its Nyquist, at 44.1 kHz; 0 for a plan that is
+// none.
+func (p Plan) StopbandHz() int {
+	switch {
+	case p.Validate() != nil:
+		return 0
+	case p.RateHz == 44100:
+		return 22050
+	}
+	return 40000
+}
 
 // Dither is the plan's dither word: DitherNone at 24 bits, which round half
-// to even, and DitherTPDF at 16.
-func (p Plan) Dither() string { return "" }
+// to even, and DitherTPDF at 16; "" for a plan that is none.
+func (p Plan) Dither() string {
+	switch {
+	case p.Validate() != nil:
+		return ""
+	case p.ValidBits == 16:
+		return DitherTPDF
+	}
+	return DitherNone
+}
 
-// Filter is the plan's filter, FilterName.
-func (p Plan) Filter() string { return "" }
+// Filter is the plan's filter, FilterName; "" for a plan that is none.
+func (p Plan) Filter() string {
+	if p.Validate() != nil {
+		return ""
+	}
+	return FilterName
+}
 
 // GainDB is the plan's gain, 0: unity, with no gain a stream was not
 // measured for (B728 §4.4).
-func (p Plan) GainDB() float64 { return -1 }
+func (p Plan) GainDB() float64 { return 0 }
 
 // String names the plan as rate/bits, 176400/24.
 func (p Plan) String() string { return fmt.Sprintf("%d/%d", p.RateHz, p.ValidBits) }
@@ -72,12 +114,25 @@ func (p Plan) String() string { return fmt.Sprintf("%d/%d", p.RateHz, p.ValidBit
 // Decimation is D, the total ratio from a DSD rate to the plan's rate: 16
 // for DSD64 to 176.4 kHz. A rate the converter does not take is a
 // *RateError.
-func (p Plan) Decimation(bitRateHz int) (int, error) { return 0, ErrPlan }
+func (p Plan) Decimation(bitRateHz int) (int, error) {
+	g, err := geometryFor(bitRateHz, p)
+	if err != nil {
+		return 0, err
+	}
+	return g.d, nil
+}
 
 // Window is H, the composite filter's half-length in output frames at a DSD
 // rate: the frames before a continuous join that depend on the successor's
-// first bits (B728 §4.7). It is read from the chain's taps, never typed.
-func (p Plan) Window(bitRateHz int) (int, error) { return 0, ErrPlan }
+// first bits (B728 §4.7). It is read from the chain's taps, never typed:
+// 72 at 176.4 kHz, 36 at 88.2 and 78 at 44.1, at every DSD rate.
+func (p Plan) Window(bitRateHz int) (int, error) {
+	g, err := geometryFor(bitRateHz, p)
+	if err != nil {
+		return 0, err
+	}
+	return g.h, nil
+}
 
 // RateError refuses a DSD rate the converter does not take: DSD512, which
 // B728 §3.2 refuses in every mode, and any rate but DSD64, DSD128 and
