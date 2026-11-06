@@ -4474,13 +4474,11 @@ func (s *Scanner) RunPeriodic(ctx context.Context, interval func() time.Duration
 // file mtime, which an earlier version of this comment claimed:
 // enrichment, reconciliation, and variant writes all strict-advance
 // indexed_at precisely so incremental iOS syncs surface them.
+//
+// Nothing in production calls it: the wire's manifest is the Provider's
+// (WriteManifest, BuildManifestPage), which alone asks enrich.enabled before
+// it builds the enrichmentProgress block. This one always carries it.
 func BuildManifest(ctx context.Context, store *Store, roots []string, since time.Time) (*Manifest, error) {
-	return buildManifest(ctx, store, roots, since, true)
-}
-
-// buildManifest is BuildManifest with enrich.enabled as withProgress: off,
-// the manifest carries no enrichmentProgress block (enrichmentProgressBlock).
-func buildManifest(ctx context.Context, store *Store, roots []string, since time.Time, withProgress bool) (*Manifest, error) {
 	var sp *time.Time
 	if !since.IsZero() {
 		sp = &since
@@ -4534,15 +4532,17 @@ func buildManifest(ctx context.Context, store *Store, roots []string, since time
 	// top-level `total`, so we still need this count — but we now do
 	// it once, here, instead of letting both the manifest builder and
 	// EnrichmentCounts each issue their own `COUNT(*)`.
-	m.EnrichmentProgress = enrichmentProgressBlock(ctx, store, withProgress, nil, "EnrichmentCounts")
+	m.EnrichmentProgress = enrichmentProgressBlock(ctx, store, true, nil, "EnrichmentCounts")
 	return m, nil
 }
 
 // enrichmentProgressBlock is the manifest's enrichmentProgress block, as all
 // three builders build it (BuildManifest, the stream, the paginated first
-// page). on is enrich.enabled: off, there is no block, since a client reads
-// one whose tracksEnriched is short of tracksTotal as enrichment under way,
-// and an operator's off is not that (backlog B617). total is the served
+// page). on is enrich.enabled, which the Provider's two builders, the wire's,
+// ask (BuildManifest, which no production path calls, passes true): off,
+// there is no block, since a client reads one whose tracksEnriched is short
+// of tracksTotal as enrichment under way, and an operator's off is not that
+// (backlog B617). total is the served
 // count the block reports, the paginated first page's own `total`; nil, it
 // is counted here, for the non-paginated legs, which carry no `total`. A
 // count that cannot be read leaves no block and is logged, under what for

@@ -12,10 +12,10 @@ import (
 // TestTheManifestOmitsEnrichmentProgressWhileOff: while enrich.enabled is
 // off, no leg of /v1/manifest carries the enrichmentProgress block, which a
 // phone reads as enrichment under way: not the stream's full leg, not a
-// since delta, with rows or with none, not the paginated first page, and not
-// the buffered build; and each carries it again once the switch is on
-// (backlog B617). The legs go through one helper, enrichmentProgressBlock,
-// and the Provider's live source answers for the two the wire serves.
+// since delta, with rows or with none, and not the paginated first page; and
+// each carries it again once the switch is on (backlog B617). The legs are
+// the Provider's, the only builders production calls, and its live source
+// answers for both through one helper, enrichmentProgressBlock.
 func TestTheManifestOmitsEnrichmentProgressWhileOff(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
@@ -66,9 +66,6 @@ func TestTheManifestOmitsEnrichmentProgressWhileOff(t *testing.T) {
 		{"a since delta with no row", func(t *testing.T) map[string]json.RawMessage { return stream(time.Now().Add(time.Hour))(t) }},
 		{"the paginated first page", func(t *testing.T) map[string]json.RawMessage {
 			return built(p.BuildManifestPage(ctx, "", 10))(t)
-		}},
-		{"the buffered build", func(t *testing.T) map[string]json.RawMessage {
-			return built(buildManifest(ctx, s, roots, time.Time{}, on.Load()))(t)
 		}},
 	}
 	for _, leg := range legs {
