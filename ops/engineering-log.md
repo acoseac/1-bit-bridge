@@ -78435,3 +78435,267 @@ packages ok and none failed, in 1,744 s; `make build-all`; `go test -race
 `./internal/player/dsdstate/`, each ok; the qualification check,
 "qualification version OK: main..HEAD"; `make docs-check`, ok, and again
 with the round-1 rules patch applied. The tree is clean after.
+
+## 2026-11-06 — B728 B7: the cutover
+
+B728's B7 (`ops/plan-b728-dsd-capability-design.md`, sections 3.1, 3.4, 3.5,
+6.2, 9.1 items 6, 9, 10 and 14, and B7's row in 11), worker b728-b7 on
+`feat/b728-b7-cutover` from main 0d5cb33b, commits ceb8e67b, fe621791 and
+8467b07a.
+Serve and `bridge output play` decide DSD by the player's effective policy
+(B5's `policy.Effective`) over the player's DSD state (B3, migrated by B6),
+the profile database (B2), and what the box establishes of the bound DAC
+now, the silent probe (B4) among it, and read no approval record or
+candidate. `playback.Config.DSD` (a `*playback.DSDPolicy`) is production's
+admission; `Config.Authorization`, the approval's, is the harness's alone
+(the candidate and transition backends, `output play --report`), at the
+harness's version, and `New` refuses the two together.
+
+**One set.** `internal/player/playback/dsd_policy.go`. The backend keeps one
+effective set (`dsdSet`) behind an atomic pointer: what a DSD occurrence is
+admitted by (`admitDSD`, `selectFor`: the plan at the content's rate, or the
+rate's refusal by the policy's word) and what `GET /v1/outputs` publishes
+(`Policy`), under a generation that moves only when the set publishes or
+admits another way (`same`: the card and endpoint, the identity, each rate's
+plan and refusal; evidence moves none, B8 publishing it). A refresh
+(`refreshDSD`, one at a time under `dsdMu`, so generations publish in the
+order their readings were taken) runs at a session's first occurrence, at
+any DSD admission whose set was read more than 100 ms before (`dsdStale`:
+found red-first, a PCM session's prepared DSD successor admitted by the
+never-computed boot set), at each native activation (`checkDSDActivation`),
+on a 100 ms monitor started once a session holds DSD (`startDSDMonitor`),
+and at the supervisor's refresh (`RefreshDSD`, forced by a watcher snapshot,
+a state write or a probe's answers, else once a second). `readDSD` reads the
+bound DAC only from a fresh, available watcher snapshot of the boot binding
+(`boundFromFeed`), and its card only while the card is that unit at that
+enumeration, the reads (the unit's model and descriptors,
+`alsa.SysfsReader.UnitModel`, 256 KiB at most; its PCM device's playback
+altsets; its usbmixer table, `policy.ParseUSBMixer`, the kernel's
+`snd_usb_mixer_proc_read` format at the alsa-abi tag; its controls through
+`alsactl.Reader` with `AllowUnreadable`) bracketed by a second look at the
+unit; what does not read is no set, every rate refused as `dsd_dac_unread`.
+A rate the set converts is refused as `dsd_not_in_this_release` until B11.
+
+**Reconciliation.** A new set is judged for every DSD occurrence of every
+session (`policy.Reconcile` over `occurrenceFactsLocked`): Keep repoints it;
+Replan marks it stale, which the producer holds back from the sink (and a
+gapless DSD successor joins only under the set published now, an atomic
+load), and asks the engine to hand it off again through a new optional
+interface, `engine.ReplanEvents` (`Replan`): the engine takes it as an edit
+after hand-off, a successor not submitted replaced by a Prepare, a submitted
+one cut first, a Cut too late stopping playback when it is heard
+(`ReasonRemovedAudible`), as an edit's does; a session's first occurrence
+and one a releasing session holds are revoked instead; Revoke stops the
+session's DSD at once (`Backend.Revoke`). The rig's events and output
+play's pass `Replan` on.
+
+**The check after open.** `checkDSDNode`, at the open and every reopen: the
+node's unit keys to the set's `policy.Identity` (the model's key and the
+firmware, never the port), else `wrong_device` before a frame; for DoP the
+gain check read afresh at the node's card (`policy.CheckGain` over
+`policy.DoPAltsets`); the identity it opened is what reconciliation compares.
+
+**Evidence.** On a goroutine of the backend's, never the audio path
+(`recordDSD`, one `Store.Update`, an unchanged state writing nothing): a real
+open's `driver_accepted` of the exact tuple under the running kernel
+(`noteDriverAccepted`, after the open answered, `kernelRelease` reading
+`/proc/sys/kernel/osrelease` through the trees); the tuple's
+`streaming_observed` and its transport's first use `observedAt` once an
+occurrence heard played 5 s of its own content, the kernel establishing it,
+with no fault and no failed decode in the session (`noteStreamingObserved`,
+from the reporter's step); each native format and DoP carrier the probe
+accepted (`noteProbed`). `dsdstate.Store` fences every write once one landed
+without its barrier (`ErrLandedNotHeld`, `Store.Landed`; B6's migration had
+fenced only its own steps), and the backend says it once.
+
+**The probe.** `ProbeDSD`: due at the player's start once the output is
+available, when the unit's model, firmware, kernel or enumeration changes,
+and after a choice is written (`ForgetDSDProbe`, which serve calls when the
+migration changed a DAC's state), never on a timer. One the device slot
+refuses (a session that plays, opens, is paused or releasing; a release
+unconfirmed; another probe) opens nothing, waits for nothing and stays due:
+serve's supervisor asks again at its next 100 ms tick, so it runs once the
+slot is free, B4's preconditions unchanged. One that ran, met a busy node or
+found no unit is done for that unit.
+
+**The answers the brief asked for.** (1) Each kind of user: an owner whose
+record B6 migrated keeps native or DoP at the record's rates with no new
+prompt, the timing now the policy's (the probe's pause, a 100 ms tail, the
+profile's prefill or 400 ms) and the native format the first the DAC offers
+in the player's order; but DoP through a gain stage whose level cannot be
+read is refused (`dop_gain_unverifiable`, `TestAMigratedDoPSetupWithUnverifiableGainRefuses`);
+a rate the record did not approve waits for first use (`first_use_pending`)
+until B9's write; an owner whose record was refused or missing has the
+fallback (native or dop, nothing acknowledged: `first_use_pending`,
+`dop_confirmation_required`); an explicit off, or dop without allowDoP, is
+`dsd_off_by_choice`; a new install, unknown DAC or known, converts under
+auto and is refused as `dsd_not_in_this_release` until B11 or B9; PCM is
+unchanged, and a session that plays PCM alone reads nothing of the policy
+(`TestPCMOnlyPlaysAsItDidAndReadsNoBox`); `output play` plays by its own
+migrated state. (2) One set per occurrence, no run-time fallback, the opened
+node the set's identity, an unused cap revoking nothing. (3) The gain check
+at the open and on the monitor, a change revoking DoP with no consent. (4)
+Mixed access, the probe above. (5) The render path: nothing on it reads a
+file or takes a lock but the session's; the producer's checks are an atomic
+load and fields under its own lock. (6) Qualification version 40 (guarded
+`native.go`, `edges.go`, `sink_dsd.go`, `internal/alsa/` and the
+qualification package's docs): every earlier harness evidence is stale to
+the harness, as at every bump; `LegacyVersion` stays 35 and is the
+migration's alone, so an owner's record still migrates. (7) player.md: the
+content refusal's long form moved out first (`move_entry.py --line 136`).
+(8) The wire within today's shape: `dsdPlayback.reason` only when no rate
+plays, the lowest rate's word (`TestThePublishedReasonIsTheLowestRatesWordOnlyWhenNoRatePlays`);
+PROTOCOL.md lists the words (`TestEveryDSDRefusalWordIsInTheProtocol`);
+`qualifiedOn` and `qualificationRevision` are not sent; `model` and
+`bcdDevice` are the bound unit's; the field was always free text, so the
+shipped app shows an unknown word as text and grants nothing by it; the iOS
+mirror of PROTOCOL.md is owed. (9) `output play` keeps its own state
+directory and migration, reading the record in serve's data directory and
+never serve's state (`TestOutputPlayKeepsItsOwnDSDState`, beside a serve
+holding its lock and its own state, and beside one that never migrated).
+(10) The fence covers every write (`TestALandedMigrationFencesWhatPlaybackRecords`:
+the migration's write lands and its barrier fails; a real open's and the
+probe's records are refused, the file keeps what landed, said once). (11)
+`TestServeReadsNoApprovalRecord` removes the record and its reports after the
+migration and the set is the same; B6's first-start, delayed-DAC and
+deleted-state tests stay green.
+
+**Beside it.** `alsapcm.MaxDSDPrefill` is 5 s (B5's note: the Hugo 2's
+700 ms profile prefill was past the DSD sink's 500 ms bound;
+`TestEveryPrefillAProfileMayGiveTheSinkTakes`, `dacprofile.MaxTimingMs`
+exported). The config's legacy keys' docs and the start's warning say they
+decide nothing since the cutover. Serve's engine passes no DSD mode
+(`SessionOptions.DSD` decides nothing). `productionNativeAdmission` is
+`noNativeAdmission`, the harness's refusal. The protocol token guard reads
+the policy's pause words and native formats beside the approval's. The
+first `make test` failed in `internal/player/openhome` alone: its fault
+table's guard (`TestEveryEngineReasonHasItsFault`) parses `playback/open.go`'s
+Reason constants as literals, and ceb8e67b had made `ReasonRate` the
+policy's constant; 8467b07a gives it its literal again, held to the policy's
+word by `TestEveryDSDRefusalWordIsInTheProtocol`, and moves
+`ReasonDACUnread` beside the other refusals there, so the guard maps it too.
+
+**Tests**, new: `TestSelectionAndPublicationReadOneSet` (also under a race
+of refreshes and admissions), `TestAConvertedRateIsRefusedUntilThePlayerConverts`,
+`TestAnUnknownDACsDSDStaysRefused`, `TestAMigratedChoiceRefusesARateItsRecordDidNotApprove`,
+`TestAMigratedDoPSetupWithUnverifiableGainRefuses`,
+`TestThePublishedReasonIsTheLowestRatesWordOnlyWhenNoRatePlays`,
+`TestAStateThatDoesNotReadRefusesEveryRate`, `TestNoSetComesFromAReadingThatIsNotFresh`
+and `TestEveryDSDRefusalWordIsInTheProtocol` in playback; through the
+engine's Run, the backend and the real native and DoP sinks over the fake
+kernel, `TestDriverAcceptedComesFromARealOpen`,
+`TestStreamingObservedNeedsFiveSecondsWithoutAFault` (5.1 s, 4.9 s, a decode
+failed before its 5 s played out),
+`TestTheOpenedNodeMustBeTheIdentityThePolicyWasComputedFor` (another model,
+another firmware), `TestAnUnusedRateCapChangeRevokesNothing`,
+`TestAChangedChoiceReplansThePreparedSuccessorAndSkipsNothing`,
+`TestNoTransportFallsBackAtRunTime`, `TestAGainChangeRevokesDoPWithoutConsent`,
+`TestAGainOffUnityAtTheOpenRefusesDoP`, `TestAMigratedOwnerSetupPlaysAsBefore`
+(native, its DAC given exactly the content's native words, and DoP),
+`TestPCMOnlyPlaysAsItDidAndReadsNoBox`, `TestAProbeDueWhileTheDeviceIsHeldWaits`
+and `TestALandedMigrationFencesWhatPlaybackRecords` in alsapcm (a 1 ms
+profile prefill, which the kernel's buffer holds, lets a native start answer
+with no DAC time, so a test fills the sink before it grants exact play);
+`TestAReplanHandsTheSuccessorOffAgainAndSkipsNothing` in the engine;
+`TestServeReadsNoApprovalRecord`, `TestOutputPlayKeepsItsOwnDSDState` and
+`TestOutputsPublishTheEffectiveSet` in cmd/bridge; the usbmixer parser's,
+`UnitModel`'s and the fence's own. Rewritten for the cutover, their claims
+B7's: `TestServeOutputPlayAllowDoP` (the keys reach the backend through the
+migration alone: dop without allowDoP `dsd_off_by_choice`, auto without it
+`dsd_not_in_this_release`, with it DoP), `TestAnExplicitOffSurvivesAsTheDefault`,
+`TestAMigratedApprovalCoversOnlyItsRates`, `TestAVersion35RecordOnAnotherPortMigrates`
+(its rates now play), `TestDoPCandidateRefusedByServeAndOutputPlay` (through
+the real wiring), `TestNativeProductionConstructorsRefuse`,
+`TestLegacyDSDKeysStillLoadAndAreWarnedOnce`'s words,
+`TestServeStartsThePlayerOnlyWhenEveryGateHolds`'s DSD mode, and the overlay's
+`TestNativeIntegrationApprovedConstructor` (`legacy_version` is refused now).
+B1's two production tests are retired, cited elided:
+`…ProductionStillPlaysAVersion35RecordAfterTheBump` and
+`…ProductionRefusesARecordNewerThanThisBuild` became
+`TestTheApprovalAdmissionTakesTheHarnesssVersionAlone` and
+`TestProductionConfiguresNoApprovalBesideItsPolicy`.
+
+**Red first.** The new tests use `Config.DSD` and the policy fixtures
+(`playbacktest/policy.go`), which main does not have, so red was established
+on this tree, each mechanism reverted by one exact-once edit
+(`.tmp/_b728-b7/controls.py`: the bytes restored from memory in a `finally`,
+each test run alone from a compiled binary); C0 is main's own wiring. One
+red came first by itself: the PCM session's DSD successor refused as
+`dsd_dac_unread` (above, `dsdStale`).
+
+**Negative controls**, on fe621791, eighteen red: C0 readPermission
+consulted, serve wiring the approval admission as main did
+(`TestServeReadsNoApprovalRecord`, `TestAMigratedApprovalCoversOnlyItsRates`);
+C1 a fallback to DoP when the native open fails (`TestNoTransportFallsBackAtRunTime`);
+C2 a stale set after a change, a refresh reconciling nothing
+(`TestAChangedChoiceReplansThePreparedSuccessorAndSkipsNothing`,
+`TestAGainChangeRevokesDoPWithoutConsent`); C3 DoP kept through a gain change
+(`TestAGainChangeRevokesDoPWithoutConsent`); C4 the monitor never started
+(the same); C5 streaming_observed early, at 4 s (its 4.9 s case); C6
+streaming_observed beside a failed decode (its decode case); C7 a converted
+rate played (`TestAConvertedRateIsRefusedUntilThePlayerConverts`,
+`TestAnUnknownDACsDSDStaysRefused`); C8 the opened node's identity unchecked
+(`TestTheOpenedNodeMustBeTheIdentityThePolicyWasComputedFor`, both cases:
+the activation's refresh refuses as a second layer, after the open recorded
+a driver acceptance for the wrong unit); C9 the DoP gain check at the open
+skipped (`TestAGainOffUnityAtTheOpenRefusesDoP`); C10 an unused cap revoking
+(`TestAnUnusedRateCapChangeRevokesNothing`); C11 a re-plan revoked
+(`TestAChangedChoiceReplansThePreparedSuccessorAndSkipsNothing`); C12
+driver_accepted recorded before the open answers (its refused case); C13 the
+landed fence removed (`TestALandedMigrationFencesWhatPlaybackRecords`); C14 a
+PCM session reading the policy (`TestPCMOnlyPlaysAsItDidAndReadsNoBox`); C15
+selection reading the state beside the published set
+(`TestSelectionAndPublicationReadOneSet`); C16 a migrated acknowledgement
+widened (`TestAMigratedChoiceRefusesARateItsRecordDidNotApprove`); C17 the
+engine ignoring a re-plan (`TestAReplanHandsTheSuccessorOffAgainAndSkipsNothing`).
+The tree was clean after each.
+
+**Checks**, on legion0, each run in one call through the shared build lock
+(`.tmp/_b728-b7/gates.py`). On 8467b07a: `make fmt`, which rewrote nothing;
+`make vet`, and with `GOOS=windows`, `GOOS=darwin` and `GOOS=linux
+GOARCH=386`, each clean; `make build-all`; `go test -race -count=1` of
+`./cmd/bridge/` (977 s), `./internal/player/playback/`, `./internal/alsapcm/`,
+`./internal/player/engine/`, `./internal/player/policy/`,
+`./internal/player/dsdstate/`, `./internal/alsa/`, `./internal/api/`,
+`./internal/config/`, `./internal/player/qualification/` and
+`./internal/player/dacprofile/`, each ok, the ALSA, alsapcm, durable-writer and
+identity tests running here on Linux; both native-integration overlays (13
+`TestNativeIntegration` passes in cmd/bridge, the six CI names among them, and
+29 in playback, the four among them); `scripts/alsa-abi/check.sh` on amd64
+against Ubuntu's `/usr/include/sound/asound.h`, compared as v6.12's (curl is
+denied here), `TestUAPIMatchesTheKernelHeader` over 252 facts; `make
+docs-check`; the qualification check, "qualification version OK:
+0d5cb33b..HEAD"; the tree clean after. `make test`: on fe621791, 84 packages
+ok and `internal/player/openhome` failed (above, fixed in 8467b07a); on
+8467b07a, 84 ok and `scripts/install-test` failed, one subtest of
+`TestTheInstallerSaysWhatLetsThePlayerOpenTheDAC` ("sudo: Text file busy":
+a stub one parallel test wrote, executed while another's fork held it open,
+code this change does not touch, which passed in the run before); again on
+8467b07a, alone, 85 packages ok and none failed, in 1,737 s, the tree clean
+after.
+The rules patch: `make docs-check` ok on a copy of the tree with it applied
+(CLAUDE.md 78.1 %, player.md 98.0 %, the worst load 65.3 %), and the
+cited-test-names guard green there.
+
+The rules patch (`rules-b728-b7.patch`; `.claude/rules/player.md`, CLAUDE.md,
+`ops/History-rules-player.md`, `ops/History-b470-native.md`): the content
+refusal's long form moved out first (`move_entry.py --line 136`, 97,286 to
+95,976 bytes), then section 9.1 item 6's words for it, item 9's for the
+native hand-off, owner approval and DoP bullets, B1's bullet past tense, and
+item 10's B7 bullet, the DoP topology, with B7's Don'ts; their long forms say
+what B7 changed beside 2c.2's, 2c.2b's and 2d.2's records; CLAUDE.md's rows
+for format, alsapcm, playback, dacprofile, dsdstate and policy no longer say
+the policy is uncalled or that production plays only under approval. With it
+player.md is 97,984 bytes (98.0 %); it applies under `git apply --check`.
+
+**Owed.** The iOS mirror of PROTOCOL.md (`docs/BridgeProtocol.md`, byte for
+byte). The hardware run on the Pi with the Mytek Brooklyn DAC+, on a box
+whose owner's record B6 migrated: serve plays native DSD at the record's
+rates with no prompt, `player-dsd.json` gaining the tuple's
+`driverAcceptedAt` under the running kernel and, after 5 s, its
+`streamingObservedAt` and native's first use `observedAt`; native DSD64 to
+DSD256 by the policy; DoP where the migrated record approved it, at DSD64 and
+DSD128 (the Mytek's profile refuses DoP at DSD256), where the gain check
+passes, and a volume moved off 0 dB stopping it at once; the probe's run at
+the player's start, and again only after a replug; no DSD while the state
+refuses it.
