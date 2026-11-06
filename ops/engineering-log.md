@@ -78671,3 +78671,24 @@ rule, the first declaring sync, the `410` row, `unknown_container` in
 the app does with a playlist, favorite or history entry naming a `.wv` it
 cannot resolve; its first declaring sync being a full one; its golden
 fixtures copied from `testdata/b489`.
+
+### Gates
+
+On legion0 at 41120312, each run that builds or tests many packages through
+the shared build lock: go1.27.3's gofmt on the branch's changed Go files,
+clean; `make docs-check`, ok, and `rules-b489b.patch` taken by `git apply
+--check` with the budgets measured over its results (`player.md` 97.4%,
+`dlna-upnp.md` 97.3%, the worst load 65.2%); the qualification check
+(`scripts/qualification-version -base 4880f8a4 -head HEAD`), "qualification
+version OK: 4880f8a4..HEAD", since nothing it guards was touched; `make vet`
+native and with `GOOS=windows`, `GOOS=darwin`, `GOOS=linux GOARCH=386` and
+`GOOS=linux GOARCH=arm`, each clean; `make test-fast`, 86 packages ok and
+none failed (cmd/bridge 446 s, internal/manifest 266 s; the Linux-only
+packages, `internal/alsapcm` and `internal/atomicwrite` among them, run here);
+`make test TEST_PKGS="./internal/manifest/... ./internal/api/...
+./internal/admin/... ./cmd/bridge/..."` (race, the Makefile's tags, 30 min a
+package), ok: internal/manifest 1,509 s, internal/api 124 s, internal/admin
+987 s, cmd/bridge 1,063 s; `make build-all`, the six targets. The first run,
+at 59898f08, failed `make test-fast` on the three defects above. Not run
+here: macOS and Windows natively, CI's runners, the race detector over the
+other packages, and the iOS app.
