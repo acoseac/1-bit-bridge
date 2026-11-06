@@ -79914,3 +79914,110 @@ bitstream point above was found; nothing in it had failed. Not run here:
 macOS and Windows natively, CI's runners, the race detector over the other
 packages (`internal/admin`, which round 2 does not touch, among them), and
 the iOS app, whose mirror of PROTOCOL.md's changes is owed.
+
+## 2026-11-06 — B489 PR 1, round 3: main merged (B750, B756), the gate beside the missing-count term
+
+The orchestrator's round 3 for worker b489b: main moved by B750 (a Christmas
+smart mix, 8747d29b) and B756 (one physical album has one year, 1a101716,
+whose round 2 added `Row.Missing` to the duplicate election), and this
+branch takes main. `git merge` needs approval on legion0, so the merge was
+made by hand, as the earlier merges there were: the base found with `git log
+--boundary main...HEAD` (4880f8a4); main's 40 files this branch never
+touched taken whole with `git checkout main --pathspec-from-file`; the 11
+files both sides changed merged with `git merge-file -p --diff3` into
+scratch (which prints and writes nothing), 9 conflicts in 5 of them, each
+resolved by what both sides mean and placed; `MERGE_HEAD` written into the
+worktree's git dir; and one merge commit, 33e20b83 (parents 06822ae4 and
+1a101716). Proof before it: every file main alone changed is main's in the
+index but the two of its tests below, every file this branch alone changed
+is this branch's, and nothing else is staged. Commits after: f131aab9 (the
+gate beside the missing-count term), e52bd024 (the Christmas family's
+gate), this record, the gates' results.
+
+**Main read again**: `ExtractorVersion` 31 and the ladder ending at v60, as
+before; B756 bumped neither. So this branch's 32 and v61 stand, and
+`requireTheLatestSchema` still names v61's column. B756's re-read machinery
+(`taggedYear`, `yearRecordOnly`) is written for the next bump, and this
+branch's 32 is that bump: the full suite passes over it.
+
+### The conflicts, and what each side meant
+
+| File | Main | This branch | Resolution |
+|---|---|---|---|
+| `internal/dupes/policy.go` (2) | `Missing` first in `outranks`: a copy whose file the last scan did not find never wins its unit | the gate first: a `.wv` or `.ape` never wins over a copy every client is served | `Missing`, then the gate (below) |
+| `internal/api/smartplaylists.go` (3) | one reading of the clock (`s.now()`) for the hour and `season.InWindow`; the Christmas family skipped out of its window | the request's view (`requestFormats`, `Vary`) for every family's items | both: the window's skip first, then the build in the view; the doc says the Christmas family's items are the view's |
+| `internal/manifest/types.go` (2) | `taggedYear`, `yearRecord` | `correctionKey`, `CorrectionFile` | both, side by side |
+| `.gitattributes` (1) | the album-year table's LF pin | the B489 goldens' | both, main's first |
+| `ops/engineering-log.md` (1) | B750's two entries and B756's three | B489's two | main's first, then B489's |
+
+`store.go`, `scanner.go`, `admin.go`, `api.go`, `PROTOCOL.md` and
+`ops/History-rules-scanner.md` merged without conflict, and were read for
+meaning: the stamp leg carries this branch's `correction_key` beside B756's
+record-only write; every stored-Track read goes through B756's
+`decodeStoredTrack`, and this branch adds no other; `IncrementMissingTracks`
+and `ResetTrackMissingCount`'s new answers have no caller here. Two of main's
+new tests called the served-set readers without the view this branch added
+(`BuildManifest`, `WriteManifest`, `ListServedTracks`); they take
+`formatgate.All()`, as every earlier caller did in round 1. `.claude` takes
+main's rules as they are (`enrichment.md`, `scanner.md`, `smart-mixes.md`);
+nothing of this branch's is applied there.
+
+### The gate beside the missing-count term
+
+Both rules said "first". By what they mean, only one order lets both hold:
+B756's `Missing`, then the gate. A copy whose file is gone is no copy any
+client can play, so a found `.wv` takes a gone `.flac`'s place (an app that
+declares nothing loses a row it could not play, and the apps that declare
+WavPack keep the copy they can), while among found copies a `.flac` still
+beats every `.wv` and `.ape`. With the gate first, a gone `.flac` would win
+and suppress the one playable copy, which is the defect B756 fixed.
+
+That order left one hole in this branch's units, found writing
+`TestTheGateAndTheMissingTermHoldBesideEachOther` (seven groups, every view,
+the property that a client who could play a copy before the plan can play
+one after it), red first at the merge in one case as predicted in a file: a
+gone `.flac` beside a found `.wv` and a found `.ape` made one unit (round 1's
+`gateUnits` asked for any copy every client is served, gone or not), so the
+`.ape` suppressed the `.wv` and an app declaring WavPack alone lost its only
+playable copy. `gateUnits` now asks for a found copy every client is served,
+and splits by format a domain holding copies of two gated formats; a gone
+copy every client is served is then a unit of its own, suppressing nothing,
+and is reaped by the deletion pass as any gone row is. A domain of a gone
+`.flac` and one gated format stays one unit, so its found copy wins, as B756
+wants.
+
+The Christmas family takes the smart mixes' gate by construction (it is built
+through the same item loop after the window's skip), and
+`TestTheChristmasFamilyServesEachViewItsItems` pins it: in its window each
+view's items, positions closed up, a family of held-back tracks alone sent
+only to a view that declares them, and out of its window nothing to any view.
+
+### Negative controls
+
+`controls_r3.py` on e52bd024, each mutation in memory and put back, the
+predictions written before the run:
+
+| Control | Mutation | Red |
+|---|---|---|
+| c1 | the gate before `Missing` | as predicted: "a gone FLAC beside a found WavPack" (the `.wv` suppressed), "beside two found WavPack copies", and the order check |
+| c2 | `gateUnits` counts a gone copy every client is served | as predicted: the three-copy case, suppressed `[A/x.flac B/x.wv]` |
+| c3 | `gateUnits` splits on the formats named, not the gated ones | the two predicted subtests, and one more not predicted: "a gone FLAC beside a gone WavPack" (nothing suppressed where the `.wv` should be), since a domain whose every copy is gone also splits under it |
+| c4 | the Christmas family's items skip the view | as predicted: the four views that leave a format out in the mixed family, the three that do not declare WavPack in the WavPack-alone family; the "both" views and every out-of-season case still passing |
+
+### The rules
+
+`rules-b489b-r3.patch` is over main's rules as this merge holds them, and
+carries B489's rules whole: round 1's patch no longer applies there, since its
+`enrichment.md` hunk anchors on the availability bullet B756 rewrote (round
+1's scanner hunk applies with a one-line offset). Built on a scratch copy:
+round 1's patch with `--reject`, its one rejected hunk's bullet put after
+B756's with round 3's wording (the gate's term after `Missing`, the found copy
+in `gateUnits`, the new test), round 2's patch, and the Christmas family in
+`wire.md`'s gate bullet; checked with `git apply` on a fresh copy, equal to
+the builder's result, and the budgets measured over it (`enrichment.md` 34.0%,
+`scanner.md` 34.1%, `wire.md` 58.7%, the worst load 65.2%).
+
+**A test harness note**: the first `cmd/bridge` run of the merge failed 20 tests
+and hung in a player serve test, every one of them comparing a path under a
+TMPDIR that held `..` (`.tmp/_b489b/r3/../gotmp`): the harness's error, not the
+tree's. With the TMPDIR made absolute the same package passed (330 s).
