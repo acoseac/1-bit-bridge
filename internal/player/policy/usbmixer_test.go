@@ -80,6 +80,22 @@ func TestAUSBMixerTableThatDoesNotReadIsAnError(t *testing.T) {
 	}
 }
 
+// TestAControlIndexIsAUint32 (B728 B7 round 3; CodeQL): a Control line's
+// index is read as a control's index is held, a uint32: 4294967295 reads,
+// and 4294967296 does not, which makes the table one that does not read (the
+// check then fails closed) rather than an index wrapped onto another
+// control's.
+func TestAControlIndexIsAUint32(t *testing.T) {
+	head := "USB Mixer: usb_id=0x1, ctrlif=0, ctlerr=0\n  Unit: 10\n    Control: name=\"PCM Playback Volume\", index="
+	got, err := ParseUSBMixer([]byte(head + "4294967295\n"))
+	if err != nil || len(got) != 1 || got[0].Index != 4294967295 {
+		t.Errorf("index 4294967295: %+v, %v; want it read", got, err)
+	}
+	if got, err := ParseUSBMixer([]byte(head + "4294967296\n")); err == nil {
+		t.Errorf("index 4294967296: %+v, want the table refused", got)
+	}
+}
+
 // TestAParsedTableMapsAStageToItsControls (B728 B7): the table the reader
 // parses is the one the gain check maps a stage by: the test DAC's volume
 // unit, its mute and volume in the parsed table, passes at 0 dB and fails

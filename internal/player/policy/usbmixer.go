@@ -116,8 +116,11 @@ func field(s, key string) (string, bool) {
 
 // controlLine reads a Control line's rest, name="<name>", index=<index>: the
 // name runs to the last `", index=` on the line, so a name holding a comma or
-// a quote reads whole.
-func controlLine(s string) (string, int, error) {
+// a quote reads whole. The index is read as a control's is held, a uint32: one
+// past it does not read, which makes the table one that does not read, where
+// the check fails closed, and is never wrapped onto another control's index
+// (round 3; CodeQL).
+func controlLine(s string) (string, uint32, error) {
 	if !strings.HasPrefix(s, `name="`) {
 		return "", 0, errors.New("a Control line names no control")
 	}
@@ -126,9 +129,9 @@ func controlLine(s string) (string, int, error) {
 	if i < 0 {
 		return "", 0, errors.New("a Control line gives no index")
 	}
-	index, err := strconv.Atoi(strings.TrimSpace(rest[i+len(`", index=`):]))
-	if err != nil || index < 0 {
+	index, err := strconv.ParseUint(strings.TrimSpace(rest[i+len(`", index=`):]), 10, 32)
+	if err != nil {
 		return "", 0, errors.New("a Control line's index does not read")
 	}
-	return rest[:i], index, nil
+	return rest[:i], uint32(index), nil
 }
