@@ -66,11 +66,19 @@ func claimAll(b []byte, offsets ...int) []byte {
 // claimingTag is an APEv2 tag one item long whose footer claims a tag and an
 // item count of 0xFFFFFFFF and whose item claims a value of 0xFFFFFFFF bytes.
 func claimingTag() []byte {
+	footer := len(claimingItemTag()) - 32
+	return claimAll(claimingItemTag(), footer+12, footer+16)
+}
+
+// claimingItemTag is an APEv2 tag whose footer is true and whose one item, a
+// text item, claims a value of 0xFFFFFFFF bytes: what the item's own bounds
+// (the bytes before the footer, and a text value's cap) are for, where
+// claimingTag is stopped by the footer's.
+func claimingItemTag() []byte {
 	tag := apeTag([]apeItem{apeText("Title", "claims everything")}, true)
 	// The item's value length is the first field after the header.
 	binary.LittleEndian.PutUint32(tag[32:], 0xFFFFFFFF)
-	footer := len(tag) - 32
-	return claimAll(tag, footer+12, footer+16)
+	return tag
 }
 
 // wvClaims are WavPack files of a few kilobytes whose lengths claim
@@ -83,11 +91,12 @@ func wvClaims() map[string][]byte {
 	large := wvBlock{blockSamples: 4096, totalSamples: 44100, flags: 0x1800 | 1 | 9<<23, crc: 1,
 		subs: [][]byte{{0x80 | 0x21, 0xFF, 0xFF, 0xFF}, bytes.Repeat([]byte{0}, 64)}}
 	return map[string][]byte{
-		"ckSize":       append(claimAll(base, 4), pad...),
-		"total":        append(claimAll(base, 12), pad...),
-		"blockSamples": append(claimAll(base, 20), pad...),
-		"a sub-block":  append(large.bytes(), pad...),
-		"its tag":      append(append(base, pad...), claimingTag()...),
+		"ckSize":         append(claimAll(base, 4), pad...),
+		"total":          append(claimAll(base, 12), pad...),
+		"blockSamples":   append(claimAll(base, 20), pad...),
+		"a sub-block":    append(large.bytes(), pad...),
+		"its tag":        append(append(base, pad...), claimingTag()...),
+		"its tag's item": append(append(base, pad...), claimingItemTag()...),
 	}
 }
 
@@ -107,6 +116,7 @@ func apeClaims() map[string][]byte {
 		"the header's counts":      append(claimAll(newer, 52+4, 52+8, 52+12), pad...),
 		"the old header's frames":  append(claimAll(older, 24, 28, 32+4), pad...),
 		"its tag":                  append(append(newer, pad...), claimingTag()...),
+		"its tag's item":           append(append(newer, pad...), claimingItemTag()...),
 	}
 }
 
@@ -143,19 +153,21 @@ func TestAFewKilobytesClaimingFourGibibytesAllocateUnderAMebibyte(t *testing.T) 
 	for name, data := range apeClaims() {
 		t.Run("ape "+name, func(t *testing.T) { check(t, ".ape", data) })
 	}
-	t.Run("the APEv2 reader alone", func(t *testing.T) {
-		data := append(bytes.Repeat([]byte{0}, 4096), claimingTag()...)
-		least := uint64(1 << 63)
-		for range 3 {
-			before := totalAllocated()
-			_, _, _ = readAPEv2(bytes.NewReader(data), int64(len(data)), "claims")
-			least = min(least, totalAllocated()-before)
-		}
-		if least >= 1<<20 {
-			t.Errorf("reading the tag allocated %d bytes, want under a mebibyte", least)
-		}
-		t.Logf("%d bytes read, %d allocated", len(data), least)
-	})
+	for name, tag := range map[string][]byte{"its footer": claimingTag(), "its item": claimingItemTag()} {
+		t.Run("the APEv2 reader alone, "+name, func(t *testing.T) {
+			data := append(bytes.Repeat([]byte{0}, 4096), tag...)
+			least := uint64(1 << 63)
+			for range 3 {
+				before := totalAllocated()
+				_, _, _ = readAPEv2(bytes.NewReader(data), int64(len(data)), "claims")
+				least = min(least, totalAllocated()-before)
+			}
+			if least >= 1<<20 {
+				t.Errorf("reading the tag allocated %d bytes, want under a mebibyte", least)
+			}
+			t.Logf("%d bytes read, %d allocated", len(data), least)
+		})
+	}
 }
 
 // FuzzExtractWavPack extracts a WavPack file and, when withWVC is set, a
@@ -316,6 +328,7 @@ func FuzzAPEv2(f *testing.F) {
 	f.Add(apeTag(items, false))
 	f.Add(append(apeTag(items, true), id3v1Tag("t", "a")...))
 	f.Add(claimingTag())
+	f.Add(claimingItemTag())
 	v1 := apeTag(items[:2], false)
 	binary.LittleEndian.PutUint32(v1[len(v1)-32+8:], 1000)
 	f.Add(v1)
