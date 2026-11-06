@@ -466,6 +466,16 @@ type Track struct {
 	// unchanged audio file re-extracts it. Never marshaled.
 	folderArtKey string
 
+	// taggedYear is the year pass's record of what this row's own tag said
+	// its year was (backlog B756): set the first time reconcileYears moves
+	// Year to its album's, and dropped when it moves Year back to it, so the
+	// pass votes on what the tags say rather than on what an earlier scan
+	// wrote. nil when the pass never moved the row. It lives in tags_json,
+	// under "taggedYear" (marshalForStorage writes it, decodeStoredTrack
+	// reads it), and never on the wire: unexported, so json.Marshal of a
+	// Track does not see it.
+	taggedYear *yearRecord
+
 	// rowVersion is the version of the row this Track was read from or
 	// written as: the row's indexed_at, which every write of tags_json
 	// advances. Every store reader that returns a Track records the version
@@ -483,6 +493,15 @@ type Track struct {
 	// record, in Unix nanoseconds. Zero means the insert uses the store
 	// clock. An update ignores it. Never marshaled.
 	carryFirstIndexedNS int64
+}
+
+// yearRecord is what a row's own tag said its year was when the year pass
+// first moved the row's Year (Track.taggedYear): year is nil for a tag that
+// gave no year, and 0 for the year=0 "tag absent" sentinel, so the record
+// tells each apart from no record at all. Treated as immutable: a change is
+// a new record.
+type yearRecord struct {
+	year *int
 }
 
 // Variant is one cached alternate rendering of a Track's source. The

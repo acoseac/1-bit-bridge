@@ -2113,7 +2113,8 @@ func markStampIfUnchanged(fresh, old *Track) {
 // fallback (applyAcousticFallback stamps MusicBrainzTrackID from the
 // AcoustID recording id and commits through the same MarkEnriched), and
 // the applyReconciledTracks passes (Album / AlbumArtist / Year /
-// TrackNumber). Do NOT pad it with fields no post-scan writer touches
+// TrackNumber, and the year pass's record of what a tag said,
+// taggedYear: mergeYear). Do NOT pad it with fields no post-scan writer touches
 // (Genre, Composer, DiscNumber, …): those are extractor-owned, and
 // copying old values for them would mask the very extractor changes an
 // ExtractorVersion bump exists to apply. The passes also REWRITE values a
@@ -2190,11 +2191,30 @@ func mergePostScanFields(fresh, old *Track) {
 	if fresh.AlbumArtist == "" {
 		fresh.AlbumArtist = old.AlbumArtist
 	}
-	if fresh.Year == nil {
-		fresh.Year = old.Year
-	}
+	mergeYear(fresh, old)
 	if fresh.TrackNumber == nil {
 		fresh.TrackNumber = old.TrackNumber
+	}
+}
+
+// mergeYear is mergePostScanFields' rule for the year. A row the year pass
+// moved holds the album's year and a record of what its tag said
+// (Track.taggedYear, backlog B756): a re-read whose tag still reads so keeps
+// both, so an ExtractorVersion bump stamps it, a tag that gave no year
+// included; one whose tag now reads otherwise keeps its own reading and no
+// record, and the passes judge it with that reading in place (the hold). A
+// row the pass never moved keeps a stored year only where the fresh one is
+// nil, as it always has.
+func mergeYear(fresh, old *Track) {
+	if old.taggedYear != nil {
+		if sameIntPtr(fresh.Year, old.taggedYear.year) {
+			fresh.Year = old.Year
+			fresh.taggedYear = old.taggedYear
+		}
+		return
+	}
+	if fresh.Year == nil {
+		fresh.Year = old.Year
 	}
 }
 

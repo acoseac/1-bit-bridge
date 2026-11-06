@@ -42,25 +42,7 @@ type albumOneYearCase struct {
 // tracks whose year that moves: a track already at its album's year gets no
 // write, so no indexed_at bump, no revision and no delta entry.
 func TestAnAlbumTakesOneYear(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("testdata", "album-one-year-cases.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
-	var cases []albumOneYearCase
-	if err := dec.Decode(&cases); err != nil {
-		t.Fatalf("the table does not decode: %v", err)
-	}
-	if len(cases) == 0 {
-		t.Fatal("the table holds no case")
-	}
-	names := map[string]bool{}
-	for _, c := range cases {
-		if names[c.Name] {
-			t.Fatalf("two cases are named %q", c.Name)
-		}
-		names[c.Name] = true
+	for _, c := range readAlbumOneYearCases(t) {
 		t.Run(c.Name, func(t *testing.T) {
 			if len(c.Expected) != len(c.Tracks) {
 				t.Fatalf("%d expected years for %d tracks", len(c.Expected), len(c.Tracks))
@@ -99,6 +81,37 @@ func TestAnAlbumTakesOneYear(t *testing.T) {
 			}
 		})
 	}
+}
+
+// readAlbumOneYearCases decodes testdata/album-one-year-cases.json, unknown
+// fields refused, and fails the test on an empty table or two cases of one
+// name.
+func readAlbumOneYearCases(t *testing.T) []albumOneYearCase {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("testdata", "album-one-year-cases.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var cases []albumOneYearCase
+	if err := dec.Decode(&cases); err != nil {
+		t.Fatalf("the table does not decode: %v", err)
+	}
+	if len(cases) == 0 {
+		t.Fatal("the table holds no case")
+	}
+	names := map[string]bool{}
+	for _, c := range cases {
+		if names[c.Name] {
+			t.Fatalf("two cases are named %q", c.Name)
+		}
+		names[c.Name] = true
+		if len(c.Expected) != len(c.Tracks) {
+			t.Fatalf("%s: %d expected years for %d tracks", c.Name, len(c.Expected), len(c.Tracks))
+		}
+	}
+	return cases
 }
 
 // sevenAndFive are the dates of the album the owner hit, in track order:
@@ -167,12 +180,12 @@ func indexedAtsOf(t *testing.T, store *Store, rels []string) map[string]int64 {
 }
 
 // storeYear writes year into each row's tags_json as a bridge before B756
-// stored it, moving nothing else: the stored state the next full scan's tail
-// reads.
+// stored it, with no record of a tag (Track.taggedYear), moving nothing
+// else: the stored state the next full scan's tail reads.
 func storeYear(t *testing.T, store *Store, rels []string, year int) {
 	t.Helper()
 	for _, rel := range rels {
-		if _, err := store.db.Exec(`UPDATE tracks SET tags_json = json_set(tags_json, '$.year', ?) WHERE path = ?`, year, rel); err != nil {
+		if _, err := store.db.Exec(`UPDATE tracks SET tags_json = json_remove(json_set(tags_json, '$.year', ?), '$.taggedYear') WHERE path = ?`, year, rel); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -272,17 +285,15 @@ func TestScanner_AChangedFileTakesItsAlbumsYear(t *testing.T) {
 	requireAlbumYear(t, store, "the rescan", rels, 2011)
 }
 
-// TestScanner_ARetagOfFewerFilesThanTheStoredYearHoldsIsVotedBack is the
-// residual the vote's input leaves. The pass votes on the rows as stored, not
-// on the files' tags. With the album stored at 2011, three of the seven 2011
-// files are retagged 1968, so the files say 8 × 1968 and 4 × 2011, while the
-// stored rows vote 9 × 2011 (the four files still so tagged, and the five the
-// pass gave 2011 whose files say 1968) against the three re-read: the three
-// are rewritten back. A fresh index of the same files votes on their tags
-// and gives 1968. An ExtractorVersion bump re-reads every tag, judges the
-// re-reads with all of them in place, and moves the album once; the scan
-// after it moves nothing.
-func TestScanner_ARetagOfFewerFilesThanTheStoredYearHoldsIsVotedBack(t *testing.T) {
+// TestScanner_ARetagOfSomeFilesIsJudgedOnTheTags: the pass votes on what
+// each row's tag said, the year pass's record where it moved a row
+// (Track.taggedYear), never on what an earlier scan wrote. With the album
+// stored at 2011, three of the seven 2011 files are retagged 1968, so the
+// files say 8 × 1968 and 4 × 2011: the scan gives the album 1968, as a fresh
+// index of the same files does. Until round 2 the stored rows voted 9 × 2011
+// against the three re-read and wrote the three back, for good. An
+// ExtractorVersion bump then re-reads every tag and moves nothing.
+func TestScanner_ARetagOfSomeFilesIsJudgedOnTheTags(t *testing.T) {
 	root := t.TempDir()
 	store, sc := newScanFixture(t, root)
 	const dir, album = "Band/Remastered", "Remastered"
@@ -293,7 +304,7 @@ func TestScanner_ARetagOfFewerFilesThanTheStoredYearHoldsIsVotedBack(t *testing.
 		writeAlbumTrack(t, root, dir, album, n, "", "1968", nil)
 	}
 	scanOnce(t, sc, "the retag")
-	requireAlbumYear(t, store, "after the retag", rels, 2011)
+	requireAlbumYear(t, store, "after the retag", rels, 1968)
 
 	fresh, freshScanner := newScanFixture(t, root)
 	scanOnce(t, freshScanner, "a fresh index")
@@ -302,13 +313,8 @@ func TestScanner_ARetagOfFewerFilesThanTheStoredYearHoldsIsVotedBack(t *testing.
 	before := rewindAll(t, store)
 	scanOnce(t, sc, "the bump")
 	requireAlbumYear(t, store, "after the bump", rels, 1968)
-	if moved := movedRows(t, store, before); len(moved) != len(rels) {
-		t.Errorf("rows the bump moved: %v, want all %d: the album moves to 1968 once", moved, len(rels))
-	}
-	settled := indexedAtsOf(t, store, rels)
-	scanOnce(t, sc, "the scan after the bump")
-	if moved := movedRows(t, store, settled); len(moved) != 0 {
-		t.Errorf("rows moved again after the bump: %v", moved)
+	if moved := movedRows(t, store, before); len(moved) != 0 {
+		t.Errorf("rows the bump moved: %v, want none", moved)
 	}
 }
 
@@ -335,15 +341,18 @@ func TestScanner_ATagEditThatOutvotesTheStoredYearMovesTheAlbum(t *testing.T) {
 	requireAlbumYear(t, store, "after the retag of the whole album", rels, 1999)
 }
 
-// TestScanner_AVersionStaleReReadOfAnAlbumGivenOneYearOnlyStamps proves the
-// held settlement (backlog B188) on the rewritten album. An unchanged scan
-// takes the skip gate and a changed file is not a version-stale re-read, so
-// the one way in is a stale extractor_version with size and mtime kept: each
-// file is read again, the five tagged 1968 differ from their rows (2011) and
-// are held, and the passes judge them with every held re-read in place, which
-// gives them 2011 again. Every row is only stamped: its year, indexed_at and
-// enriched_at stay, its extractor_version advances, and no pass after the
-// settlement writes a row, through a full scan and a subtree scan alike.
+// TestScanner_AVersionStaleReReadOfAnAlbumGivenOneYearOnlyStamps: a bump over
+// the rewritten album. An unchanged scan takes the skip gate and a changed
+// file is not a version-stale re-read, so the one way in is a stale
+// extractor_version with size and mtime kept: each file is read again, and
+// the five tagged 1968 read as their records say (mergeYear), so each keeps
+// the album's year and its record, as a re-read of a row the pass never
+// moved keeps its stored values. Every row is only stamped: its year, its
+// record, indexed_at and enriched_at stay, its extractor_version advances,
+// and no pass writes a row, through a full scan and a subtree scan alike.
+// (Until round 2 the five were held to the scan's tail and judged there,
+// the B188 settlement, which is what a re-read whose reading changed still
+// takes: TestScanner_ReReadsOfAnAlbumGivenOneYearPastTheHoldLimitSettleInOneScan.)
 func TestScanner_AVersionStaleReReadOfAnAlbumGivenOneYearOnlyStamps(t *testing.T) {
 	for _, scope := range []string{"a full scan", "a subtree scan"} {
 		t.Run(scope, func(t *testing.T) {
@@ -378,40 +387,55 @@ func TestScanner_AVersionStaleReReadOfAnAlbumGivenOneYearOnlyStamps(t *testing.T
 					t.Errorf("%s: extractor_version = %d, want %d", rel, v, ExtractorVersion)
 				}
 			}
+			for _, rel := range rels[7:] {
+				requireTaggedYear(t, store, rel, intptr(1968))
+			}
 		})
 	}
 }
 
 // TestScanner_ReReadsOfAnAlbumGivenOneYearPastTheHoldLimitSettleInOneScan: a
-// scan holds at most heldLimit re-reads (maxHeldReconciles, 10,000, in
+// bump whose extractor reads a moved row's tag otherwise than its record
+// says (the record is set to 1950 here, as an older extractor might have
+// read the DATE that now reads 1968). Such a re-read keeps its own reading
+// and no record (mergeYear), differs from its row's year, and is held to
+// the scan's tail, at most heldLimit of them (maxHeldReconciles, 10,000, in
 // production; it counts only the re-reads that differ from their rows in a
-// field a pass writes, not the library's rows). Past it a re-read of a
-// rewritten row is written as its file reads (1968, its enrichment
-// re-queued), and the tail gives it the album's year again: it churns once,
-// as every re-read past the limit has since B188. Nothing is re-queued: the
-// scan after moves nothing.
+// field a pass writes, not the library's rows). Held, it is judged with
+// every held re-read in place and written once, whole, as its record moved
+// (1950 to 1968; the served year stays 2011). Past the limit it is written
+// as its file reads (1968, its enrichment re-queued) and the tail gives it
+// the album's year again: it churns once, as every re-read past the limit
+// has since B188. Every row ends at 2011 with the new reading recorded, and
+// nothing is re-queued: the scan after moves nothing.
 func TestScanner_ReReadsOfAnAlbumGivenOneYearPastTheHoldLimitSettleInOneScan(t *testing.T) {
 	root := t.TempDir()
 	store, sc := newScanFixture(t, root)
 	rels := albumOfDates(t, root, "Band/Remastered", "Remastered", sevenAndFive, nil)
 	scanOnce(t, sc, "index")
 	sc.heldLimit = 2
+	for _, rel := range rels[7:] {
+		if _, err := store.db.Exec(`UPDATE tracks SET tags_json = json_set(tags_json, '$.taggedYear', json('{"year":1950}')) WHERE path = ?`, rel); err != nil {
+			t.Fatal(err)
+		}
+	}
 	before := rewindAll(t, store)
 
 	scanOnce(t, sc, "the bump")
 
 	requireAlbumYear(t, store, "after the bump", rels, 2011)
-	moved := movedRows(t, store, before)
-	if len(moved) != 3 {
-		t.Errorf("rows the bump moved: %v, want the three re-reads past the limit of two", moved)
-	}
 	minority := map[string]bool{}
 	for _, rel := range rels[7:] {
 		minority[rel] = true
+		requireTaggedYear(t, store, rel, intptr(1968))
+	}
+	moved := movedRows(t, store, before)
+	if len(moved) != len(rels[7:]) {
+		t.Errorf("rows the bump moved: %v, want the five whose reading changed", moved)
 	}
 	for _, rel := range moved {
 		if !minority[rel] {
-			t.Errorf("%s moved: only a re-read that differs from its row can pass the limit", rel)
+			t.Errorf("%s moved: only a re-read whose reading changed differs from its row", rel)
 		}
 	}
 	for _, rel := range rels {
@@ -427,11 +451,11 @@ func TestScanner_ReReadsOfAnAlbumGivenOneYearPastTheHoldLimitSettleInOneScan(t *
 }
 
 // TestScanner_ASubtreeScanOfAChangedFileSplitsItsAlbumUntilTheNextFullScan
-// is a named residual. A changed file takes the ordinary upsert, and a
-// subtree scan runs no reconciliation pass, so the watcher's scan stores the
-// file's own year until the next full scan (ScanIntervalSec, 6 h by
-// default) gives it the album's again, as the album-title, album-artist and
-// missing-year fills have always waited.
+// is a named residual, kept (round 2). A changed file takes the ordinary
+// upsert, and a subtree scan runs no reconciliation pass, so the watcher's
+// scan stores the file's own year until the next full scan
+// (ScanIntervalSec, 6 h by default) gives it the album's again, as the
+// album-title, album-artist and missing-year fills have always waited.
 func TestScanner_ASubtreeScanOfAChangedFileSplitsItsAlbumUntilTheNextFullScan(t *testing.T) {
 	root := t.TempDir()
 	store, sc := newScanFixture(t, root)
@@ -453,12 +477,15 @@ func TestScanner_ASubtreeScanOfAChangedFileSplitsItsAlbumUntilTheNextFullScan(t 
 }
 
 // TestScanner_AnAlbumRetaggedOneSubtreeScanAtATimeMovesAtTheNextFullScan is
-// why the subtree scan does not heal that split. A tagger rewrites an album's
-// date one file at a time and the watcher's subtree scan follows each file. A
-// vote at each of those scans would weigh each edit against the stored rows
-// the retag had not reached yet and write it back, so the album would never
-// move. Without one, the rows follow the files, and the next full scan finds
-// the album at its new year.
+// what the subtree scan's running no pass costs and spares. A tagger
+// rewrites an album's date one file at a time and the watcher's subtree scan
+// follows each file: each scan writes the edited file's row and no other, so
+// the album is split while the retag runs and the next full scan finds it at
+// its new year, with nothing left to move. A vote at each of those scans
+// would follow the tags too (each row votes what its tag said), but would
+// write each edit back to the old year until the retag passed half, and
+// then move every row of the album: rows rewritten mid-retag that the full
+// scan's one vote spares.
 func TestScanner_AnAlbumRetaggedOneSubtreeScanAtATimeMovesAtTheNextFullScan(t *testing.T) {
 	root := t.TempDir()
 	store, sc := newScanFixture(t, root)
@@ -467,12 +494,20 @@ func TestScanner_AnAlbumRetaggedOneSubtreeScanAtATimeMovesAtTheNextFullScan(t *t
 	scanOnce(t, sc, "index")
 
 	for n := 1; n <= len(rels); n++ {
+		before := indexedAtsOf(t, store, rels)
 		writeAlbumTrack(t, root, dir, album, n, "", "1999", nil)
 		subtreeScanOf(t, sc, root, dir)
+		if moved := movedRows(t, store, before); !reflect.DeepEqual(moved, []string{rels[n-1]}) {
+			t.Errorf("the subtree scan after editing track %d moved %v, want its row alone", n, moved)
+		}
 	}
 	requireAlbumYear(t, store, "after the retag", rels, 1999)
+	settled := indexedAtsOf(t, store, rels)
 	scanOnce(t, sc, "the next full scan")
 	requireAlbumYear(t, store, "the next full scan", rels, 1999)
+	if moved := movedRows(t, store, settled); len(moved) != 0 {
+		t.Errorf("the next full scan moved %v, want nothing", moved)
+	}
 }
 
 // TestScanner_StraysOfOneFolderThatBorrowDifferentYearsTakeOneInOneScan: two

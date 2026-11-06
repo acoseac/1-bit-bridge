@@ -2996,7 +2996,7 @@ func (s *Store) UnenrichedTracks(ctx context.Context, limit int) ([]Track, error
 			return nil, err
 		}
 		var t Track
-		if err := json.Unmarshal(raw, &t); err != nil {
+		if err := decodeStoredTrack(raw, &t); err != nil {
 			return nil, err
 		}
 		t.rowVersion, t.hasRowVersion = version, true
@@ -3176,7 +3176,62 @@ func marshalForStorage(t *Track) ([]byte, error) {
 	clone.DRScore = nil
 	clone.BandwidthHz = nil
 	clone.AudioMD5State = ""
-	return json.Marshal(&clone)
+	raw, err := json.Marshal(&clone)
+	if err != nil || t.taggedYear == nil {
+		return raw, err
+	}
+	return appendTaggedYear(raw, t.taggedYear)
+}
+
+// taggedYearKey is the tags_json key of the year pass's record
+// (Track.taggedYear). No exported Track field marshals under it.
+const taggedYearKey = "taggedYear"
+
+// taggedYearJSON is a yearRecord as tags_json stores it: an object, so a
+// tag that gave no year (`{}`) is told apart from no record (no key).
+type taggedYearJSON struct {
+	Year *int `json:"year,omitempty"`
+}
+
+// appendTaggedYear writes rec into raw, a marshalled Track object, as its
+// last key. A Track always marshals at least its path, so raw is never the
+// empty object and the comma is always due.
+func appendTaggedYear(raw []byte, rec *yearRecord) ([]byte, error) {
+	b, err := json.Marshal(taggedYearJSON{Year: rec.year})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 0, len(raw)+len(taggedYearKey)+len(b)+4)
+	out = append(out, raw[:len(raw)-1]...)
+	out = append(out, `,"`+taggedYearKey+`":`...)
+	out = append(out, b...)
+	return append(out, '}'), nil
+}
+
+// decodeStoredTrack decodes a row's tags_json into t, the year pass's record
+// (Track.taggedYear) included, which json.Unmarshal of a Track cannot see.
+// Every reader of a stored Track decodes through it, so a writer that writes
+// back a Track it read (the enricher's stamp, the reconciliation writer)
+// keeps the record. The record is looked for only in a row that holds its
+// key, so a row without one costs a byte search.
+func decodeStoredTrack(raw []byte, t *Track) error {
+	if err := json.Unmarshal(raw, t); err != nil {
+		return err
+	}
+	t.taggedYear = nil
+	if !bytes.Contains(raw, []byte(`"`+taggedYearKey+`"`)) {
+		return nil
+	}
+	var rec struct {
+		TaggedYear *taggedYearJSON `json:"taggedYear"`
+	}
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		return err
+	}
+	if rec.TaggedYear != nil {
+		t.taggedYear = &yearRecord{year: rec.TaggedYear.Year}
+	}
+	return nil
 }
 
 // ErrTrackChanged answers a write back of a row that is no longer the row
@@ -4487,7 +4542,7 @@ func (s *Store) GetTrackWithStat(ctx context.Context, path string) (*Track, int6
 		return nil, 0, 0, err
 	}
 	var t Track
-	if err := json.Unmarshal(raw, &t); err != nil {
+	if err := decodeStoredTrack(raw, &t); err != nil {
 		return nil, 0, 0, err
 	}
 	t.rowVersion, t.hasRowVersion = version, true
@@ -4529,7 +4584,7 @@ func (s *Store) GetTrack(ctx context.Context, path string) (*Track, error) {
 		return nil, err
 	}
 	var t Track
-	if err := json.Unmarshal(raw, &t); err != nil {
+	if err := decodeStoredTrack(raw, &t); err != nil {
 		return nil, err
 	}
 	t.rowVersion, t.hasRowVersion = version, true
@@ -4641,7 +4696,7 @@ func (s *Store) lookupTrackByLowerCase(ctx context.Context, cleaned string) (*Tr
 		return nil, err
 	}
 	var t Track
-	if err := json.Unmarshal(raw, &t); err != nil {
+	if err := decodeStoredTrack(raw, &t); err != nil {
 		return nil, err
 	}
 	t.rowVersion, t.hasRowVersion = version, true
@@ -5007,7 +5062,7 @@ func scanListedTrack(rows *sql.Rows, t *Track) error {
 		return err
 	}
 	*t = Track{}
-	if err := json.Unmarshal(raw, t); err != nil {
+	if err := decodeStoredTrack(raw, t); err != nil {
 		return err
 	}
 	t.rowVersion, t.hasRowVersion = version, true

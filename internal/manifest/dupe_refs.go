@@ -35,6 +35,11 @@ import (
 //     instead (dupes.Row deliberately has no pointer fields: the struct is
 //     reused across callback invocations, so a *int would be a retain
 //     hazard).
+//
+// The missing count is read as dupes.Row.Missing, so a row whose file the
+// last scan did not find never wins its group's election (backlog B756 round
+// 2): the count is the deletion pass's own, which a walk that could not read
+// a folder leaves as it was.
 const dupeRefSelect = `
 	SELECT t.path,
 	       COALESCE(json_extract(t.tags_json, '$.title'),       ''),
@@ -53,7 +58,8 @@ const dupeRefSelect = `
 	       t.audio_md5,
 	       t.dupe_group_id,
 	       t.dupe_tier,
-	       t.dupe_suppressed
+	       t.dupe_suppressed,
+	       COALESCE(t.missing_count, 0) > 0
 	  FROM tracks t`
 
 // StreamTrackDupeRefsUnderPrefix walks every track under prefix ("" =
@@ -107,17 +113,19 @@ func (s *Store) StreamTrackDupeRefsUnderPrefix(ctx context.Context, prefix strin
 		track      sql.NullInt64
 		isDSD      int
 		suppressed int
+		missing    int
 	)
 	for rows.Next() {
 		ref = dupes.Row{}
 		st = DupeStampState{}
-		disc, track, isDSD, suppressed = sql.NullInt64{}, sql.NullInt64{}, 0, 0
+		disc, track, isDSD, suppressed, missing = sql.NullInt64{}, sql.NullInt64{}, 0, 0, 0
 		if err := rows.Scan(&ref.Path, &ref.Title, &ref.Album, &ref.AlbumArtist,
 			&ref.Artist, &ref.Year, &disc, &track, &ref.Size, &ref.Duration,
 			&ref.SampleRate, &ref.BitsPerSample, &isDSD, &ref.Codec,
-			&ref.AudioMD5, &st.GroupID, &st.Tier, &suppressed); err != nil {
+			&ref.AudioMD5, &st.GroupID, &st.Tier, &suppressed, &missing); err != nil {
 			return err
 		}
+		ref.Missing = missing != 0
 		if disc.Valid {
 			ref.Disc = int(disc.Int64)
 			ref.DiscTagged = true

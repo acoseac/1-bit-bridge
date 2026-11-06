@@ -62,9 +62,20 @@ var yearStep = reconcileStep{
 	label:  "year reconciliation",
 	fixed:  "year reconciliation gave each album one year",
 	decide: reconcileYears,
-	take:   func(dst *ReconcileTarget, c ReconcileTarget) { dst.Year = c.Year },
-	set:    func(t *Track, c ReconcileTarget) { t.Year = c.Year },
+	take:   takeAlbumYear,
+	set:    setAlbumYear,
 	apply:  (*Store).ApplyYearReconciliation,
+}
+
+// takeAlbumYear copies the year pass's answer onto a target: the year and the
+// record of what the tag said (reconcileYears writes the two together).
+func takeAlbumYear(dst *ReconcileTarget, c ReconcileTarget) {
+	dst.Year, dst.taggedYear = c.Year, c.taggedYear
+}
+
+// setAlbumYear is takeAlbumYear onto the Track the writer writes.
+func setAlbumYear(t *Track, c ReconcileTarget) {
+	t.Year, t.taggedYear = c.Year, c.taggedYear
 }
 
 // yearByMBIDStep fills a year-0 stray (a few loose tracks in their own
@@ -89,8 +100,8 @@ var yearAfterMBIDStep = reconcileStep{
 	label:  "year reconciliation (after mbid)",
 	fixed:  "year reconciliation (after mbid) gave each album one year",
 	decide: reconcileYears,
-	take:   func(dst *ReconcileTarget, c ReconcileTarget) { dst.Year = c.Year },
-	set:    func(t *Track, c ReconcileTarget) { t.Year = c.Year },
+	take:   takeAlbumYear,
+	set:    setAlbumYear,
 	apply:  (*Store).ApplyYearReconciliation,
 }
 
@@ -124,7 +135,16 @@ func reconcileTargetOf(t *Track) ReconcileTarget {
 		Year:               copyIntPtr(t.Year),
 		TrackNumber:        copyIntPtr(t.TrackNumber),
 		MusicBrainzAlbumID: t.MusicBrainzAlbumID,
+		taggedYear:         copyYearRecord(t.taggedYear),
 	}
+}
+
+// copyYearRecord returns a copy of rec, or nil.
+func copyYearRecord(rec *yearRecord) *yearRecord {
+	if rec == nil {
+		return nil
+	}
+	return &yearRecord{year: copyIntPtr(rec.year)}
 }
 
 // copyIntPtr returns a pointer to a copy of *p, or nil.
@@ -281,6 +301,7 @@ func (s *Scanner) settleHeldReconciles(ctx context.Context, routedSet map[string
 		if t, ok := overlay[targets[i].Path]; ok {
 			t.Album, t.AlbumArtist = targets[i].Album, targets[i].AlbumArtist
 			t.Year, t.TrackNumber = targets[i].Year, targets[i].TrackNumber
+			t.taggedYear = targets[i].taggedYear
 		}
 	}
 	written, stamped, rewritten := s.writeHeld(ctx, live, stored)

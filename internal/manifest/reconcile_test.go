@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"fmt"
+	"runtime"
 	"testing"
 
 	"github.com/acoseac/1-bit-bridge/internal/dupes"
@@ -135,7 +136,20 @@ func TestReconcileAlbumArtists(t *testing.T) {
 	}
 }
 
+// underSeparatorsOf has the passes split paths as they do on goos for the
+// rest of the test. The package's tests do not run in parallel, and nothing
+// the test starts outlives it, so the variable has no other reader meanwhile.
+func underSeparatorsOf(t *testing.T, goos string) {
+	t.Helper()
+	saved := pathSeparators
+	pathSeparators = pathSeparatorsFor(goos)
+	t.Cleanup(func() { pathSeparators = saved })
+}
+
+// TestReconcileAlbumArtistsWindowsPaths: a Windows library's paths, as the
+// passes read them on Windows, where a backslash separates.
 func TestReconcileAlbumArtistsWindowsPaths(t *testing.T) {
+	underSeparatorsOf(t, "windows")
 	in := []ReconcileTarget{
 		{Path: `A\Alb\1.flac`, Album: "Alb", AlbumArtist: "X"},
 		{Path: `A\Alb\2.flac`, Album: "Alb", AlbumArtist: "X"},
@@ -175,16 +189,34 @@ func TestDominantAlbumArtist(t *testing.T) {
 	}
 }
 
+// TestTrackDir: "/" separates a stored path's components everywhere, and a
+// backslash only on Windows; on Linux and macOS it is a character of a name
+// (backlog B756 round 2).
 func TestTrackDir(t *testing.T) {
-	cases := map[string]string{
-		"A/B/c.flac": "A/B",
-		`A\B\c.flac`: `A\B`,
-		"c.flac":     "",
-		"A/c.flac":   "A",
+	cases := []struct {
+		in, windows, elsewhere string
+	}{
+		{"A/B/c.flac", "A/B", "A/B"},
+		{`A\B\c.flac`, `A\B`, ""},
+		{`Band/Live\01.flac`, "Band/Live", "Band"},
+		{"c.flac", "", ""},
+		{"A/c.flac", "A", "A"},
 	}
-	for in, want := range cases {
-		if got := trackDir(in); got != want {
-			t.Errorf("trackDir(%q) = %q, want %q", in, got, want)
+	for _, c := range cases {
+		if got := trackDirIn(c.in, pathSeparatorsFor("windows")); got != c.windows {
+			t.Errorf("on Windows trackDir(%q) = %q, want %q", c.in, got, c.windows)
+		}
+		for _, goos := range []string{"linux", "darwin"} {
+			if got := trackDirIn(c.in, pathSeparatorsFor(goos)); got != c.elsewhere {
+				t.Errorf("on %s trackDir(%q) = %q, want %q", goos, c.in, got, c.elsewhere)
+			}
+		}
+		want := c.elsewhere
+		if runtime.GOOS == "windows" {
+			want = c.windows
+		}
+		if got := trackDir(c.in); got != want {
+			t.Errorf("trackDir(%q) = %q on this platform, want %q", c.in, got, want)
 		}
 	}
 }
