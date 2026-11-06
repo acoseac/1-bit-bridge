@@ -1,0 +1,5 @@
+go test fuzz v1
+string("0")
+string("\xf3Ǚ")
+string("0")
+string("0")
