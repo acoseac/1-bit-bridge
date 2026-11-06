@@ -567,3 +567,39 @@ func TestAnAPEv2LyricsItemIsALyricsDocument(t *testing.T) {
 		t.Fatalf("lyrics %+v, want the tag's synced document", tr.lyrics)
 	}
 }
+
+// TestTheFallbackIsTheID3v1TagAlone: a WavPack or Monkey's Audio file with no
+// APEv2 tag is read for the ID3v1 tag in its last 128 bytes, the one other tag
+// these formats define, and never for an ID3v2 tag ahead of its stream, which
+// neither defines: handed to dhowden, such a tag's header has it size a buffer
+// by a length the file need not back (FuzzExtractAPE's input in
+// testdata/fuzz/FuzzExtractAPE, a 603-byte file that allocated 1.3 MB). With
+// neither tag, the path's guess stands.
+func TestTheFallbackIsTheID3v1TagAlone(t *testing.T) {
+	ahead := buildID3v2_3(map[string]string{"title": "Ahead Of The Stream", "artist": "Nobody"})
+	ape := stdAPE()
+	ape.junk = ahead
+	wv := append(append([]byte(nil), ahead...), wvFile(stdWavPack())...)
+	for _, tc := range []struct {
+		name string
+		data []byte
+	}{
+		{"x.ape", apeFile(ape)},
+		{"x.wv", wv},
+	} {
+		tr, err := extractWVAPE(t, tc.name, append(append([]byte(nil), tc.data...), id3v1Tag("Behind The Stream", "Somebody")...), nil)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if tr.Title != "Behind The Stream" || tr.Artist != "Somebody" {
+			t.Errorf("%s with both tags: %q by %q, want the ID3v1 tag's", tc.name, tr.Title, tr.Artist)
+		}
+		tr, err = extractWVAPE(t, tc.name, tc.data, nil)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if tr.Title == "Ahead Of The Stream" || tr.Artist == "Nobody" {
+			t.Errorf("%s: the ID3v2 tag ahead of the stream was read: %q by %q", tc.name, tr.Title, tr.Artist)
+		}
+	}
+}

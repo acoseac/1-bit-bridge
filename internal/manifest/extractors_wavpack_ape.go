@@ -153,20 +153,17 @@ func extractAPEWithContext(absPath string, t *Track, ec *ExtractContext) error {
 }
 
 // readAPEFamilyTags reads the tags of a WavPack or Monkey's Audio file of
-// size bytes from f: its APEv2 tag, or where it has none, what dhowden reads
-// (the ID3v1 tag at its end); then the cover, the tag's front cover ahead of
-// the folder's. A read of the tag that did not complete returns, noted by f,
-// so the extraction's caller discards what was read.
+// size bytes from f: its APEv2 tag, or where it has none, its ID3v1 tag
+// (readAPEFamilyID3v1); then the cover, the tag's front cover ahead of the
+// folder's. A read of the tag that did not complete returns, noted by f, so
+// the extraction's caller discards what was read.
 func readAPEFamilyTags(f extractSource, size int64, absPath string, t *Track, ec *ExtractContext) {
 	apeTags, found, err := readAPEv2(f, size, trackLogPath(absPath, t))
 	if err != nil {
 		return
 	}
 	if !found {
-		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			return
-		}
-		_ = readDhowdenTags(f, absPath, t, ec)
+		readAPEFamilyID3v1(f, size, absPath, t, ec)
 		return
 	}
 	applyAPEv2Tags(apeTags, t)
@@ -176,6 +173,34 @@ func readAPEFamilyTags(f extractSource, size int64, absPath string, t *Track, ec
 			pic = &tag.Picture{Type: "Cover (front)", Data: apeTags.cover}
 		}
 		extractLocalArtworkPicture(absPath, t, pic, ec)
+	}
+}
+
+// readAPEFamilyID3v1 is the fallback for a WavPack or Monkey's Audio file
+// with no APEv2 tag: the ID3v1 tag in its last 128 bytes, the one other tag
+// either format defines, read by dhowden's ID3v1 reader from those bytes
+// alone, which is what dhowden's dispatcher reads for a stream that opens
+// with "wvpk" or "MAC ". Nothing else of the file reaches dhowden: an ID3v2
+// tag ahead of the stream, which neither format defines, would have it
+// allocate by a length the file need not back (dhowden's readBytes sizes a
+// buffer by an ID3v2 header's length up to 10 MB; FuzzExtractAPE found a
+// 603-byte file allocating 1.3 MB), so it is not read. Then the folder's
+// cover, as for a file whose tags hold none, and the stem's explicit mark for
+// a file with no ID3v1 tag either.
+func readAPEFamilyID3v1(f extractSource, size int64, absPath string, t *Track, ec *ExtractContext) {
+	var m tag.Metadata
+	if size >= apeID3v1Bytes {
+		if md, err := tag.ReadID3v1Tags(io.NewSectionReader(f, size-apeID3v1Bytes, apeID3v1Bytes)); err == nil {
+			m = md
+		}
+	}
+	if m == nil {
+		applyStemExplicitMark(t)
+	} else {
+		populateFromTagMetadata(m, t)
+	}
+	if ec != nil && ec.ArtworkCacheDir != "" {
+		extractLocalArtwork(absPath, t, nil, ec)
 	}
 }
 
