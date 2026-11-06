@@ -96,8 +96,8 @@ type probeHold struct{ done chan struct{} }
 // probe runs on a goroutine the backend counts, and gives the slot back only
 // once its node is closed: when ctx ends first Probe answers ctx's error, and
 // a probe the kernel holds in a call keeps the slot until the kernel lets it
-// go. Nothing calls it on a timer, and nothing in serve calls it before
-// B728's B7.
+// go. Nothing calls it on a timer: since B728's B7 the effective policy's
+// ProbeDSD calls it, when a probe is due.
 func (b *Backend) Probe(ctx context.Context, req ProbeRequest) (alsapcm.ProbeReport, error) {
 	skip := func(why ProbeSkip, err error) (alsapcm.ProbeReport, error) {
 		return notProbed(req.Candidates), &ProbeSkipped{Reason: why, Err: err}

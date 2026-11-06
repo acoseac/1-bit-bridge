@@ -427,6 +427,9 @@ type recorder struct {
 	// fenced is the steps the backend refused for a session released
 	// (playback.Seams.Fenced), in order.
 	fenced []string
+	// native is the rig's native option: each session's events pass its
+	// native events on (nativeRecEvents).
+	native bool
 }
 
 // heldCall is a call the engine made, held short of the backend: held is
@@ -650,6 +653,39 @@ func (v *recEvents) Details(s engine.SessionID, o engine.OccurrenceID, d engine.
 	}
 }
 
+// Replan records the backend's request to hand o off again and passes it on
+// to the engine (engine.ReplanEvents, B728 B7).
+func (v *recEvents) Replan(s engine.SessionID, o engine.OccurrenceID, why string) {
+	h := v.add(event{kind: "replan", s: s, o: o})
+	if re, ok := v.next.(engine.ReplanEvents); ok {
+		re.Replan(s, o, why)
+	}
+	h.wait()
+}
+
+// nativeRecEvents is recEvents passing the native events on to the engine
+// too, as the engine's own Events takes them in serve: a native plan, the
+// accounting of a release and the occurrence an output plays now.
+type nativeRecEvents struct{ *recEvents }
+
+func (v nativeRecEvents) NativePlan(s engine.SessionID, o engine.OccurrenceID, p engine.NativePlan) {
+	if pe, ok := v.next.(engine.NativePlanEvents); ok {
+		pe.NativePlan(s, o, p)
+	}
+}
+
+func (v nativeRecEvents) Retiring(t engine.ReleaseToken, n engine.NativeEvent) {
+	if re, ok := v.next.(engine.NativeReleaseEvents); ok {
+		re.Retiring(t, n)
+	}
+}
+
+func (v nativeRecEvents) CurrentOccurrence(s engine.SessionID, o engine.OccurrenceID, p *engine.NativePlan) {
+	if ce, ok := v.next.(engine.CurrentOccurrenceEvents); ok {
+		ce.CurrentOccurrence(s, o, p)
+	}
+}
+
 // tee is the backend as the engine sees it: every call recorded, and every
 // session's events through the recorder.
 type tee struct {
@@ -659,7 +695,11 @@ type tee struct {
 
 func (b tee) Start(ctx context.Context, req engine.StartRequest) error {
 	b.r.take(&b.r.start)
-	req.Events = &recEvents{r: b.r, next: req.Events}
+	if b.r.native {
+		req.Events = nativeRecEvents{&recEvents{r: b.r, next: req.Events}}
+	} else {
+		req.Events = &recEvents{r: b.r, next: req.Events}
+	}
 	err := b.Backend.Start(ctx, req)
 	b.r.note(func() {
 		b.r.calls = append(b.r.calls, call{kind: "start", s: req.Session, err: err, first: req.First.ID, at: req.From})
@@ -826,6 +866,12 @@ type rigOptions struct {
 	installed func(playback.Note)
 	// onTick, when set, runs as a reporter takes its tick, at its start.
 	onTick func()
+	// edit, when set, changes the backend's Config before it is built, the
+	// rig's fake kernel at hand (B728 B7: the effective DSD policy).
+	edit func(r *rig, cfg *playback.Config)
+	// native passes the native events a session reports on to the engine
+	// (nativeRecEvents), as serve's engine takes them.
+	native bool
 }
 
 // newRig starts an engine with the backend over a fresh fake kernel, and
@@ -884,6 +930,10 @@ func newRig(t *testing.T, opts ...func(*rigOptions)) *rig {
 			return r.ticks, func() {}
 		}
 	}
+	if o.edit != nil {
+		o.edit(r, &cfg)
+	}
+	r.rec.native = o.native
 	be, err := playback.New(cfg)
 	if err != nil {
 		t.Fatal(err)

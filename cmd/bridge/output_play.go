@@ -18,10 +18,12 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/acoseac/1-bit-bridge/internal/alsa"
+	"github.com/acoseac/1-bit-bridge/internal/alsactl"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/player/binding"
+	"github.com/acoseac/1-bit-bridge/internal/player/dacprofile"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
@@ -65,6 +67,10 @@ type outputPlayEnv struct {
 	// directory: the user's cache directory, on storage that outlives a
 	// reboot as the engine requires, where /tmp may be a tmpfs.
 	stateParent func() (string, error)
+	// controls reads the bound card's controls for the DoP gain check (B728
+	// B7): the zero Reader opens the card's control node, which a test never
+	// does.
+	controls alsactl.Reader
 }
 
 // outputPlayCmd implements `bridge output play` on this host.
@@ -89,8 +95,10 @@ The bridge player's engine and backend, by hand (B470 PR 4b2's hardware gate).
 It resolves the configured binding, output.player.device, to its DAC on this
 box's trees, runs the hotplug watcher, and plays the files in order through
 the player's engine and backend: integer FLAC, WAV, AIFF, AIFC and ALAC, plus
-DSF/raw DFF only with fresh matching owner approval. The bound DAC opens
-exclusively. Floating-point, lossy, DoP and unapproved DSD are refused.
+DSF and raw DFF as the player's effective DSD policy plays them, native or
+DoP (B728). The bound DAC opens exclusively. Floating-point and lossy content
+is refused, and so is DSD the policy does not play, a rate it would convert
+to PCM included, until the player converts.
 
 Files play at their own level: the bridge never lowers a sample (no software
 volume). Use headphones, with the DAC's or the amplifier's own volume set low.
@@ -106,7 +114,11 @@ drive the engine: space pauses or resumes, n next, p previous, s stop, d
 deletes the entry after the playing one (an edit after hand-off), m enters or
 leaves maintenance, q quits (a bounded shutdown). Ctrl-C quits too.
 
-It reads approval in bridge serve's data directory; the engine's queue and
+It keeps a DSD state of its own, migrated at each start from the config's
+legacy DSD keys and the owner's record they name, which it reads in bridge
+serve's data directory, and it never opens serve's own DSD state; with
+--report, the harness's approval admission reads that record at this build's
+qualification version instead. The DSD state, the engine's queue and its
 reservation files go in --state-dir, or in a new directory of its own under
 the user's cache directory, removed at exit, and a --state-dir that is
 serve's data directory, lies inside it or holds it, through a link or
@@ -216,12 +228,27 @@ func runOutputPlay(ctx context.Context, args []string, env outputPlayEnv, stdout
 	}
 	defer cleanup()
 	out := &playOut{w: stdout, now: env.now}
-	r := &playRun{authorization: &playback.Authorization{StateDir: cfg.DataDir, Record: player.DSDQualification, Mode: player.EffectiveDSDMode(), AllowDoP: player.AllowsDoP(), Sysfs: alsa.SysfsReader{Root: env.trees.sysfs}}, env: env, out: out, stderr: stderr, files: files, keys: *keys, release: release, dsd: player.EffectiveDSDMode(),
+	r := &playRun{env: env, out: out, stderr: stderr, files: files, keys: *keys, release: release,
 		observer: binding.Observer{Proc: alsa.Reader{ProcRoot: env.trees.proc}, Sysfs: alsa.SysfsReader{Root: env.trees.sysfs}}}
-	r.report, err = reports.prepare(r.authorization, env.trees.or(hostTrees))
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+	if reports.report != "" {
+		// The harness's production report (ops/b470-native-qualification.md):
+		// the owner's approval admission at this build's qualification
+		// version, its record read in serve's data directory, which its
+		// contact interlock needs; never the effective policy.
+		r.authorization = &playback.Authorization{StateDir: cfg.DataDir, Record: player.DSDQualification, Mode: player.EffectiveDSDMode(), AllowDoP: player.AllowsDoP(), Sysfs: alsa.SysfsReader{Root: env.trees.sysfs}}
+		r.report, err = reports.prepare(r.authorization, env.trees.or(hostTrees))
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+	} else {
+		// The effective DSD policy (B728 B7), over a DSD state of the run's
+		// own in its state directory, migrated there from the config's legacy
+		// keys and the record they name, read in serve's data directory: serve's
+		// own state is never opened, so serve stays its one writer.
+		r.dsdState = openPlayerDSD(dir, player, env.trees, nil)
+		r.dsdState.recordDir = cfg.DataDir
+		_ = r.dsdState.migrate(ctx, nil)
 	}
 	if !on {
 		out.line("output.player.enabled is false in %s: this harness plays all the same, and bridge serve runs no player", path)
@@ -329,7 +356,11 @@ func playResolve(p string) (string, error) {
 
 // playRun is one run of the harness.
 type playRun struct {
+	// authorization is the harness's approval admission, its report's alone
+	// (--report); dsdState the run's own DSD state, which the effective
+	// policy reads otherwise (B728 B7).
 	authorization *playback.Authorization
+	dsdState      *playerDSD
 	report        *playReport
 	env           outputPlayEnv
 	out           *playOut
@@ -337,7 +368,6 @@ type playRun struct {
 	files         []string
 	keys          bool
 	release       time.Duration
-	dsd           string
 	observer      binding.Observer
 
 	eng  *engine.Engine
@@ -410,12 +440,25 @@ func (r *playRun) noteOcc(o engine.Occurrence) {
 // --keys), q, or Ctrl-C; then a bounded shutdown.
 func (r *playRun) run(ctx context.Context, dir string, dev config.PlayerDevice) int {
 	r.occs = map[engine.OccurrenceID]occName{}
-	be, err := r.env.backend(playback.Config{
-		Resolver:      playFiles(r.files),
-		Authorization: r.authorization,
-		Locator:       playback.BindingLocator{Device: dev, Observer: r.observer},
-		Notify:        func(n playback.Note) { r.report.note(n); r.note(n) },
+	// The watcher first, so the effective policy reads the bound DAC from its
+	// feed; it runs once the engine does (watch).
+	svc := hotplug.NewService(hotplug.Config{
+		Settings:   func() hotplug.Settings { return hotplug.Settings{Enabled: true, Device: dev} },
+		Observe:    r.observer.ObserveContext,
+		OpenSource: r.env.openSource,
 	})
+	cfg := playback.Config{
+		Resolver: playFiles(r.files),
+		Locator:  playback.BindingLocator{Device: dev, Observer: r.observer},
+		Notify:   func(n playback.Note) { r.report.note(n); r.note(n) },
+	}
+	if r.authorization != nil {
+		cfg.Authorization = r.authorization
+		r.authorization.Healthy = func() bool { snap, ok := svc.Feed().Latest(); _, stale := snap.Stale(); return ok && !stale }
+	} else {
+		cfg.DSD = dsdPolicyFor(r.dsdState, svc.Feed(), dev, r.env.trees, r.env.controls)
+	}
+	be, err := r.env.backend(cfg)
 	if err != nil {
 		fmt.Fprintf(r.stderr, "output play: %v\n", err)
 		return 1
@@ -429,7 +472,7 @@ func (r *playRun) run(ctx context.Context, dir string, dev config.PlayerDevice) 
 		return 1
 	}
 	eng, err := engine.New(engine.Config{Backend: playTee{playBackend: be, r: r}, QueuePath: filepath.Join(dir, "queue.json"),
-		PlayerUUID: id.String(), DataDir: dir, PauseRelease: r.release, DSD: r.dsd})
+		PlayerUUID: id.String(), DataDir: dir, PauseRelease: r.release})
 	if err != nil {
 		fmt.Fprintf(r.stderr, "output play: %v\n", err)
 		return 1
@@ -441,27 +484,43 @@ func (r *playRun) run(ctx context.Context, dir string, dev config.PlayerDevice) 
 		defer close(engineDone)
 		_ = eng.Run(runCtx)
 	}()
-	watcherDone := r.watch(runCtx, dev)
+	watcherDone := r.watch(runCtx, svc, dev)
 	code := r.play(ctx)
 	stopRun()
 	r.shutdown(engineDone, watcherDone)
 	return code
 }
 
-// watch runs the hotplug watcher on the box's trees, with the player forced
-// on (the harness plays whatever output.player.enabled says), and reports
-// each generation it publishes to the engine through a Reporter, printing
-// each report.
-func (r *playRun) watch(ctx context.Context, dev config.PlayerDevice) <-chan struct{} {
-	svc := hotplug.NewService(hotplug.Config{
-		Settings:   func() hotplug.Settings { return hotplug.Settings{Enabled: true, Device: dev} },
-		Observe:    r.observer.ObserveContext,
-		OpenSource: r.env.openSource,
-	})
-	if r.authorization != nil {
-		r.authorization.Healthy = func() bool { snap, ok := svc.Feed().Latest(); _, stale := snap.Stale(); return ok && !stale }
-	}
+// watch runs the hotplug watcher svc on the box's trees, with the player
+// forced on (the harness plays whatever output.player.enabled says), and
+// reports each generation it publishes to the engine through a Reporter,
+// printing each report; beside it, as serve's supervisor does, the run's DSD
+// migration's part for the DAC, the effective policy's refresh and the
+// silent probe (B728 B7), or the harness's approval refresh with --report.
+func (r *playRun) watch(ctx context.Context, svc *hotplug.Service, dev config.PlayerDevice) <-chan struct{} {
 	sub := svc.Feed().Subscribe()
+	b, _ := r.be.(*playback.Backend)
+	probePending := false
+	refresh := func(force bool) {
+		switch {
+		case b == nil:
+		case r.authorization != nil:
+			b.RefreshAuthorization(ctx)
+		default:
+			b.RefreshDSD(force)
+		}
+	}
+	probe := func(snap hotplug.Snapshot) {
+		if b != nil && r.authorization == nil {
+			probePending = b.ProbeDSD(ctx, probeConditions(snap, dev))
+		}
+	}
+	if b != nil && r.dsdState != nil {
+		r.dsdState.changed = func(key dacprofile.Key) {
+			b.ForgetDSDProbe(key)
+			b.RefreshDSD(true)
+		}
+	}
 	done := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -480,10 +539,15 @@ func (r *playRun) watch(ctx context.Context, dev config.PlayerDevice) <-chan str
 			case <-ctx.Done():
 				return
 			case <-tick.C:
-				if b, ok := r.be.(*playback.Backend); ok {
-					b.RefreshAuthorization(ctx)
+				refresh(false)
+				r.dsdState.retry(ctx)
+				if probePending {
+					if snap, ok := svc.Feed().Latest(); ok {
+						probe(snap)
+					}
 				}
 			case snap := <-sub.C():
+				r.dsdState.resolve(ctx, snap)
 				rp, ok := rep.Report(snap)
 				if !ok {
 					continue
@@ -500,6 +564,8 @@ func (r *playRun) watch(ctx context.Context, dev config.PlayerDevice) <-chan str
 				if err := r.eng.ReportOutput(ctx, rp); engine.ReasonOf(err) == engine.ReasonClosed {
 					return
 				}
+				refresh(true)
+				probe(snap)
 			}
 		}
 	}()

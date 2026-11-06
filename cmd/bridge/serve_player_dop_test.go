@@ -17,13 +17,13 @@ import (
 	"time"
 
 	"github.com/acoseac/1-bit-bridge/internal/alsa"
-	"github.com/acoseac/1-bit-bridge/internal/alsactl"
 	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/api"
 	"github.com/acoseac/1-bit-bridge/internal/auth"
 	"github.com/acoseac/1-bit-bridge/internal/config"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
+	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
 	"github.com/acoseac/1-bit-bridge/internal/player/playback"
@@ -283,6 +283,19 @@ func goBarIdentityFiles(t *testing.T, trees outputTrees) {
 // (dop64) for it, with its synthetic reports.
 func dopRecordIn(t *testing.T, dir string, trees outputTrees) {
 	t.Helper()
+	dopRecordAs(t, dir, trees, qualification.ApprovalPhrase)
+}
+
+// dopCandidateIn is dopRecordIn with the CLI candidate the harness writes in
+// the approved record's place: its confirmation is no owner's approval.
+func dopCandidateIn(t *testing.T, dir string, trees outputTrees) {
+	t.Helper()
+	dopRecordAs(t, dir, trees, "CLI candidate; not approved")
+}
+
+// dopRecordAs is dopRecordIn with the record's confirmation given.
+func dopRecordAs(t *testing.T, dir string, trees outputTrees, confirmation string) {
+	t.Helper()
 	approvaltest.SecureDir(t, dir)
 	goBarIdentityFiles(t, trees)
 	qi, e := (alsa.SysfsReader{Root: trees.sysfs}).Qualification(5)
@@ -293,18 +306,23 @@ func dopRecordIn(t *testing.T, dir string, trees outputTrees) {
 		identity: qualification.Identity{Vendor: "20b1", ProductID: "3009", Manufacturer: qi.Manufacturer, Product: qi.Product, BCDDevice: qi.BCDDevice, Port: qi.Port, Interface: qi.Interface}}
 	q.reportsOn("fake-kernel")
 	dop := q.policy("dop64", q.dopTuple(), nil)
-	q.record("approved.json", qualification.ApprovalPhrase, 1, []qualification.ApprovedPolicy{dop}, nil, nil)
-	if _, e := qualification.ReadApproval(dir, "approved.json", q.identity); e != nil {
-		t.Fatal("the DoP record does not read:", e)
+	q.record("approved.json", confirmation, 1, []qualification.ApprovedPolicy{dop}, nil, nil)
+	if _, e := qualification.ReadApproval(dir, "approved.json", q.identity); (e == nil) != (confirmation == qualification.ApprovalPhrase) {
+		t.Fatal("the DoP record reads as an approval:", e == nil, e)
 	}
 }
 
-// TestServeOutputPlayAllowDoP: serve's and output play's wiring pass dsdMode
-// and allowDoP from the config into the authorization (B470 R10), and the
-// real backend built on what they wired publishes and plays the approved
-// DoP policy only with allowDoP: under dop or auto with allowDoP false the
-// config loads, the epoch is PCM-only with its reason, DSD is refused as
-// dop_not_allowed before the DAC is opened, and PCM still reaches the DAC.
+// TestServeOutputPlayAllowDoP: serve's and output play's wiring build the
+// backend with the effective DSD policy and no approval admission (B728 B7),
+// and dsdMode and allowDoP reach it only through the migration of the
+// player's DSD state (B6) from an owner's record of one DoP policy at DSD64:
+// under dop with allowDoP false the migration's defaultMode off refuses DSD
+// as dsd_off_by_choice; under auto with allowDoP false the record gives its
+// answer and no acknowledgement, so the GO bar's DSD converts and is refused
+// as dsd_not_in_this_release until the player converts (B11); either way
+// before the DAC is opened, nothing published, and PCM still reaches the
+// DAC. With allowDoP the record's DoP rate publishes and opens DoP, from the
+// policy over the box, the gain check passing a card with no gain stage.
 func TestServeOutputPlayAllowDoP(t *testing.T) {
 	needsDirectorySync(t)
 	persistentMedium(t)
@@ -315,9 +333,10 @@ func TestServeOutputPlayAllowDoP(t *testing.T) {
 	content := dopContents{"dsd": dsd, "pcm": qualifyWAV(44100)}
 	for _, path := range []string{"serve", "output_play"} {
 		for _, tc := range []struct {
-			mode  string
-			allow bool
-		}{{"dop", false}, {"auto", false}, {"dop", true}, {"auto", true}} {
+			mode    string
+			allow   bool
+			refusal engine.Reason
+		}{{"dop", false, "dsd_off_by_choice"}, {"auto", false, playback.ReasonDSD}, {"dop", true, ""}, {"auto", true, ""}} {
 			t.Run(fmt.Sprintf("%s/%s_allowDoP_%t", path, tc.mode, tc.allow), func(t *testing.T) {
 				var wired playback.Config
 				switch path {
@@ -328,42 +347,29 @@ func TestServeOutputPlayAllowDoP(t *testing.T) {
 					wired, quit = outputPlayWiredPlayback(t, tc.mode, tc.allow)
 					defer quit()
 				}
-				a := wired.Authorization
-				if a == nil || a.Mode != tc.mode || a.AllowDoP != tc.allow || a.Record != "approved.json" {
-					t.Fatalf("the wiring's authorization %+v, want dsdMode %s and allowDoP %t from the config", a, tc.mode, tc.allow)
-				}
-				// The wired authorization as it is, but for its control reader,
-				// which reads the host's control nodes: the box has none.
-				auth := *a
-				auth.Controls = alsactl.Reader{Open: func(int) (alsactl.Device, error) { return qualifyNoControls{}, nil }}
 				opens := &dopOpens{}
-				b, err := playback.New(playback.Config{Authorization: &auth, Locator: wired.Locator, Resolver: content, OpenSink: opens.openSink, OpenNative: opens.openNative})
-				if err != nil {
-					t.Fatal(err)
-				}
-				b.RefreshAuthorization(context.Background())
+				b := policyBackendOf(t, wired, content, opens)
 				pol := b.Policy()
-				err = startOn(t, b, 1, "dsd")
+				err := startOn(t, b, 1, "dsd")
 				native, _ := opens.counts()
-				if !tc.allow {
-					if len(pol.Tuples) != 0 || pol.Reason != "dop_not_allowed" {
-						t.Fatalf("allowDoP false published %+v (reason %q), want a PCM-only epoch for dop_not_allowed", pol.Tuples, pol.Reason)
+				if tc.refusal != "" {
+					if len(pol.Tuples) != 0 || pol.Reason != string(tc.refusal) {
+						t.Fatalf("allowDoP false published %+v (reason %q), want nothing playing for %s", pol.Tuples, pol.Reason, tc.refusal)
 					}
-					var u *engine.Unplayable
-					if !errors.As(err, &u) || u.Reason != "dop_not_allowed" || len(native) != 0 {
-						t.Fatalf("DSD with allowDoP false: %v, %d native opens; want dop_not_allowed and none", err, len(native))
+					if unplayable(err) != tc.refusal || len(native) != 0 {
+						t.Fatalf("DSD with allowDoP false: %v, %d DSD opens; want %s and none", err, len(native), tc.refusal)
 					}
 					_ = startOn(t, b, 2, "pcm")
 					if _, pcm := opens.counts(); len(pcm) != 1 || pcm[0].Transport.Kind != format.KindPCM {
-						t.Fatalf("PCM under the PCM-only epoch asked %d PCM opens, want PCM to reach the DAC", len(pcm))
+						t.Fatalf("PCM beside DSD refused asked %d PCM opens, want PCM to reach the DAC", len(pcm))
 					}
 					return
 				}
-				if len(pol.Tuples) != 1 || pol.Tuples[0].Tuple.Transport != "dop" || pol.Tuples[0].PolicyID != "dop64" {
-					t.Fatalf("allowDoP true published %+v (reason %q), want the approved DoP policy", pol.Tuples, pol.Reason)
+				if len(pol.Tuples) != 1 || pol.Tuples[0].Tuple.Transport != "dop" || pol.Tuples[0].Tuple.BitRate != 2822400 {
+					t.Fatalf("allowDoP true published %+v (reason %q), want DoP at DSD64, the record's rate", pol.Tuples, pol.Reason)
 				}
 				if len(native) != 1 || native[0].Kind != format.KindDoP || native[0].Format != format.S32LE {
-					t.Fatalf("DSD with allowDoP true opened %+v (%v), want the approved DoP sink", native, err)
+					t.Fatalf("DSD with allowDoP true opened %+v (%v), want the DoP sink", native, err)
 				}
 			})
 		}
@@ -372,12 +378,20 @@ func TestServeOutputPlayAllowDoP(t *testing.T) {
 
 // serveWiredPlayback is the backend config serve's player wires on a config
 // of mode and allowDoP whose approved record is a DoP policy's, its watcher
-// fed the GO bar's box.
+// fed the GO bar's box, once the migration has run: before the engine hears
+// of the output.
 func serveWiredPlayback(t *testing.T, mode string, allow bool) playback.Config {
+	t.Helper()
+	return serveWiredWith(t, mode, allow, dopRecordIn)
+}
+
+// serveWiredWith is serveWiredPlayback with the record record writes.
+func serveWiredWith(t *testing.T, mode string, allow bool, record func(*testing.T, string, outputTrees)) playback.Config {
 	t.Helper()
 	trees := goBarTrees(t)
 	dataDir := t.TempDir()
-	dopRecordIn(t, dataDir, trees)
+	record(t, dataDir, trees)
+	goBarDSD(t, trees)
 	cfg := playerOutputConfig(dataDir, func(p *config.PlayerConfig) {
 		p.DSDMode, p.DSDQualification = mode, "approved.json"
 		p.AllowDoP = &allow
@@ -399,6 +413,10 @@ func serveWiredPlayback(t *testing.T, mode string, allow bool) playback.Config {
 	case <-serveGiveUp(t):
 		t.Fatal("serve's player did not decide its start")
 	}
+	if p.eng == nil {
+		t.Fatalf("serve's player did not start: %s", p.failed)
+	}
+	availableOutput(t, p.eng)
 	standIn.mu.Lock()
 	defer standIn.mu.Unlock()
 	if !standIn.built {
@@ -409,84 +427,62 @@ func serveWiredPlayback(t *testing.T, mode string, allow bool) playback.Config {
 
 // outputPlayWiredPlayback is the backend config output play wires on a
 // config of mode and allowDoP whose approved record is a DoP policy's,
-// read while the run plays; quit ends the run.
+// read while the run plays, its migration run; quit ends the run.
 func outputPlayWiredPlayback(t *testing.T, mode string, allow bool) (playback.Config, func()) {
 	t.Helper()
+	return outputPlayWiredWith(t, mode, allow, dopRecordIn)
+}
+
+// outputPlayWiredWith is outputPlayWiredPlayback with the record record
+// writes.
+func outputPlayWiredWith(t *testing.T, mode string, allow bool, record func(*testing.T, string, outputTrees)) (playback.Config, func()) {
+	t.Helper()
 	c := newPlayCase(t, goBarPlayer+fmt.Sprintf("    dsdMode: %s\n    allowDoP: %t\n    dsdQualification: approved.json\n", mode, allow))
-	dopRecordIn(t, c.dataDir, c.trees)
-	c.standIn.hold = true
-	pr, pw := io.Pipe()
-	c.stdin = pr
-	env := c.env("linux")
-	var mu sync.Mutex
-	var wired playback.Config
-	env.backend = func(cfg playback.Config) (playBackend, error) {
-		mu.Lock()
-		wired = cfg
-		mu.Unlock()
-		c.standIn.notify = cfg.Notify
-		return c.standIn, nil
-	}
-	stdout, stderr := newPlayBuf(), newPlayBuf()
-	done := make(chan int, 1)
-	go func() {
-		done <- runOutputPlay(context.Background(), append([]string{"--config", c.configPath, "--keys"}, c.files...), env, stdout, stderr)
-	}()
-	stdout.waitFor(t, "a.flac) is audible")
-	mu.Lock()
-	defer mu.Unlock()
-	return wired, func() {
-		_, _ = pw.Write([]byte("q"))
-		select {
-		case <-done:
-		case <-time.After(playWatch):
-			t.Errorf("output play did not end after q:\n%s\n%s", stdout.String(), stderr.String())
-		}
-		_ = pw.Close()
-	}
+	record(t, c.dataDir, c.trees)
+	goBarDSD(t, c.trees)
+	return playWired(t, c)
 }
 
 // TestDoPCandidateRefusedByServeAndOutputPlay: a CLI candidate in the
 // approved record's place is no permission to serve or to output play,
-// whatever dsdMode and allowDoP say: DSD is refused as the approval being
-// unavailable, before the DAC is opened, and nothing is published.
+// whatever dsdMode and allowDoP say. Since the cutover (B728 B7) neither reads
+// a record to admit DSD, and the migration refuses the candidate as no owner's
+// approval, leaving the GO bar the fallback, DoP chosen with nothing
+// confirmed or acknowledged, and a warning: DSD is refused as
+// dop_confirmation_required before the DAC is opened, and nothing is
+// published.
 func TestDoPCandidateRefusedByServeAndOutputPlay(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the engine keeps its IDs durable with a directory fsync, which Windows has not: the player runs on Linux")
-	}
+	needsDirectorySync(t)
 	persistentMedium(t)
 	data, err := os.ReadFile(filepath.Join("..", "..", "internal", "player", "decode", "testdata", "dsd-goldens", "dsd64.dff"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, mode := range []string{"serve", "output_play"} {
-		t.Run(mode, func(t *testing.T) {
-			build := newServePlayerBackend
-			if mode == "output_play" {
-				build = newOutputPlayBackend
+	for _, path := range []string{"serve", "output_play"} {
+		t.Run(path, func(t *testing.T) {
+			var wired playback.Config
+			switch path {
+			case "serve":
+				wired = serveWiredWith(t, "dop", true, dopCandidateIn)
+			default:
+				var quit func()
+				wired, quit = outputPlayWiredWith(t, "dop", true, dopCandidateIn)
+				defer quit()
+			}
+			st := wiredPolicyOf(t, wired).Store.State()
+			if len(st.Warnings) != 1 || st.Warnings[0].Code != dsdstate.WarningMigrationRecordRefused {
+				t.Errorf("the migration's warnings %+v, want the candidate refused", st.Warnings)
 			}
 			opens := &dopOpens{}
-			b := playbacktest.ApprovedWith(t, "candidate", playbacktest.Options{Mode: "dop", AllowDoP: true}, func(cfg playback.Config) (*playback.Backend, error) {
-				cfg.Resolver = refusedNativeResolver(data)
-				cfg.OpenSink, cfg.OpenNative = opens.openSink, opens.openNative
-				x, e := build(cfg)
-				if e != nil {
-					return nil, e
-				}
-				return x.(*playback.Backend), nil
-			})
-			eng, err := playOneOnEngine(t, b, "dsd", "candidate refusal engine")
-			if err == nil {
-				t.Fatal("a candidate record played DSD")
-			}
-			for _, skip := range eng.Snapshot().Skips() {
-				if skip.Reason != "dsd_approval_unavailable" {
-					t.Fatalf("a candidate record refused DSD as %+v, want dsd_approval_unavailable", skip)
-				}
-			}
+			b := policyBackendOf(t, wired, dopContents{"dsd": data}, opens)
+			pol := b.Policy()
+			err := startOn(t, b, 1, "dsd")
 			native, pcm := opens.counts()
-			if len(native) != 0 || len(pcm) != 0 || len(b.Policy().Tuples) != 0 || len(eng.Snapshot().Skips()) != 1 {
-				t.Fatalf("a candidate record: %d native and %d PCM opens, %d tuples, skips %+v", len(native), len(pcm), len(b.Policy().Tuples), eng.Snapshot().Skips())
+			if unplayable(err) != "dop_confirmation_required" || len(native) != 0 || len(pcm) != 0 {
+				t.Fatalf("DSD under a candidate: %v, %d DSD and %d PCM opens; want dop_confirmation_required and none", err, len(native), len(pcm))
+			}
+			if len(pol.Tuples) != 0 || pol.Reason != "dop_confirmation_required" {
+				t.Fatalf("a candidate published %+v (reason %q), want nothing", pol.Tuples, pol.Reason)
 			}
 		})
 	}

@@ -1345,7 +1345,9 @@ func TestNativeIntegrationApprovedConstructor(t *testing.T) {
 			cfg.Resolver = nativeFiles{"a": nativeDSF(t, 31)}
 			switch mode {
 			case "legacy_version":
-				// An owner's record of LegacyVersion plays after a bump (B728 B1).
+				// An owner's record of LegacyVersion: since the cutover (B728
+				// B7) the harness's admission reads its own version alone, and
+				// the migration is the legacy reader's one caller.
 				recordAtVersion(t, cfg.Authorization, &record, qualification.LegacyVersion)
 			case "newer_version":
 				// A record past this build's version, which it cannot vouch for.
@@ -1387,7 +1389,7 @@ func TestNativeIntegrationApprovedConstructor(t *testing.T) {
 			ref, _ := engine.NewReference("a")
 			ev := &nativeEvents{done: make(chan struct{})}
 			e = b.Start(ctx, engine.StartRequest{Session: 1, First: engine.Occurrence{ID: 1, Ref: ref}, Events: ev})
-			plays := mode == "valid" || mode == "legacy_version"
+			plays := mode == "valid"
 			if (e == nil) != plays {
 				t.Fatalf("start=%v", e)
 			}

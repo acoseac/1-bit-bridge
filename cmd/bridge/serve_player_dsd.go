@@ -3,23 +3,123 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"path/filepath"
+	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/alsa"
+	"github.com/acoseac/1-bit-bridge/internal/alsactl"
+	"github.com/acoseac/1-bit-bridge/internal/alsapcm"
 	"github.com/acoseac/1-bit-bridge/internal/atomicwrite"
 	"github.com/acoseac/1-bit-bridge/internal/config"
+	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/player/binding"
 	"github.com/acoseac/1-bit-bridge/internal/player/dacprofile"
 	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
+	"github.com/acoseac/1-bit-bridge/internal/player/playback"
 	"github.com/acoseac/1-bit-bridge/internal/usbid"
 )
+
+// The player's DSD in serve and bridge output play since B728's cutover
+// (B7): the backend admits DSD by the effective DSD policy over the player's
+// DSD state (playerDSD's store), the profile database and what the box
+// establishes of the bound DAC now (dsdPolicyFor), and reads no approval
+// record: dsdQualification is read once, by the migration, and never again.
+
+// kernelReleaseBytes bounds the kernel release read (uname -r).
+const kernelReleaseBytes = 256
+
+// kernelRelease is the running kernel's release, read from the proc tree
+// the player reads (sys/kernel/osrelease), bounded and opened as a file
+// alone; "" when it does not read, under which no driver acceptance is
+// recorded or counted.
+func kernelRelease(trees outputTrees) string {
+	f, _, err := fsutil.OpenAsFile(filepath.Join(trees.proc, "sys", "kernel", "osrelease"))
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+	b, err := io.ReadAll(io.LimitReader(f, kernelReleaseBytes+1))
+	if err != nil || len(b) > kernelReleaseBytes {
+		return ""
+	}
+	v := strings.TrimSpace(string(b))
+	if strings.ContainsFunc(v, func(r rune) bool { return r < ' ' || r == 0x7f }) {
+		return ""
+	}
+	return v
+}
+
+// boundFromFeed is the DAC the boot binding resolves to now, from the
+// watcher's latest snapshot when it is of the boot binding, not stale, and
+// available (playback.DSDPolicy.Bound): a stale reading is no ground for a
+// set (the design's section 3.1). The enumeration is the feed's instance and
+// the unit's port and device number, which a replug changes, kept in memory
+// alone.
+func boundFromFeed(feed *hotplug.Feed, boot config.PlayerDevice) func() (playback.BoundDAC, bool) {
+	return func() (playback.BoundDAC, bool) {
+		if feed == nil {
+			return playback.BoundDAC{}, false
+		}
+		snap, ok := feed.Latest()
+		if !ok || !snap.Valid() || !hotplug.SameBinding(snap.Binding(), boot) {
+			return playback.BoundDAC{}, false
+		}
+		if _, stale := snap.Stale(); stale {
+			return playback.BoundDAC{}, false
+		}
+		r := snap.Resolution()
+		if r.State != binding.StateAvailable {
+			return playback.BoundDAC{}, false
+		}
+		return playback.BoundDAC{Card: r.Card, Device: r.Endpoint.Device, Subdevice: r.Endpoint.Subdevice, Identity: r.Identity,
+			Enumeration: fmt.Sprintf("%s/%s/%d", snap.Instance(), r.Identity.Port, r.Identity.DevNum)}, true
+	}
+}
+
+// probeConditions is the silent probe's conditions as a snapshot of the
+// watcher's gives them (playback.ProbeConditions): the boot binding resolved
+// to its DAC, available, and the reading fresh.
+func probeConditions(snap hotplug.Snapshot, boot config.PlayerDevice) playback.ProbeConditions {
+	if !snap.Valid() || !hotplug.SameBinding(snap.Binding(), boot) {
+		return playback.ProbeConditions{}
+	}
+	_, stale := snap.Stale()
+	return playback.ProbeConditions{Available: snap.Resolution().State == binding.StateAvailable, Fresh: !stale}
+}
+
+// dsdPolicyFor is the effective DSD policy the player's backend admits DSD
+// by (B728 B7): d's store, the reviewed profile database embedded in the
+// binary, the running kernel's release, the boot binding's DAC as the
+// watcher's feed resolves it, and the box read through trees, the card's
+// controls through controls. A store that did not open refuses DSD at every
+// rate; a profile database that does not load knows no DAC, which the log
+// says.
+func dsdPolicyFor(d *playerDSD, feed *hotplug.Feed, boot config.PlayerDevice, trees outputTrees, controls alsactl.Reader) *playback.DSDPolicy {
+	p := &playback.DSDPolicy{Kernel: kernelRelease(trees), Bound: boundFromFeed(feed, boot), Probes: alsapcm.NewProbeCache(), Log: playerLog,
+		Box: playback.HostBox{Sysfs: alsa.SysfsReader{Root: trees.sysfs}, Proc: alsa.Reader{ProcRoot: trees.proc}, Controls: controls}}
+	if d != nil && d.store != nil {
+		p.Store = d.store
+	}
+	db, err := dacprofile.Default()
+	if err != nil {
+		playerLog.Warn("player: the DAC profile database does not load: the player knows no DAC by its profile", "err", err)
+	} else {
+		p.Profiles = db
+	}
+	return p
+}
 
 // playerDSD is serve's player's DSD state (B728 B6; the design's sections 2.5
 // and 3.6): the one dsdstate.Store the player's supervisor opens, at the
 // player's start, and the migration of the legacy keys (dsdMode, allowDoP,
-// dsdQualification) into it. Production still authorizes DSD from the keys,
-// through the legacy reader, until the cutover (B7): nothing plays by the
-// state yet.
+// dsdQualification) into it. Since the cutover (B7) the player plays DSD by
+// the effective policy over this state (dsdPolicyFor), and the keys and the
+// owner's record are read by the migration alone. bridge output play keeps
+// one of its own in its own state directory, reading the record named in
+// serve's data directory and never serve's state (recordDir).
 //
 // It is the supervisor's alone, and every step it makes runs on the
 // supervisor's goroutine: the store's open and the part of the bridge's at
@@ -48,7 +148,12 @@ import (
 // included (dsdstate.RecordToRead), never the ones read now.
 type playerDSD struct {
 	dataDir string
-	legacy  dsdstate.Legacy
+	// recordDir is the directory the owner's record dsdQualification names
+	// is read from (dsdstate.Store.Migrate's stateDir): serve's data
+	// directory, which is dataDir in serve, and bridge output play's reading
+	// of it beside a state of its own.
+	recordDir string
+	legacy    dsdstate.Legacy
 	// boot is the binding the player started with: the DAC a part of a DAC's
 	// goes to is the one it resolves to.
 	boot  config.PlayerDevice
@@ -65,8 +170,13 @@ type playerDSD struct {
 	// to be durable, which the store does not hold in memory (dsdstate's
 	// Store.Update), so a step now would be made from the state as it was
 	// before that write, over the file that holds it; the next start goes on
-	// from the file.
+	// from the file. The store fences every writer alike since B7
+	// (dsdstate.ErrLandedNotHeld), the migration's and playback's evidence.
 	done bool
+	// changed, when set, is told of a DAC's part that changed the state, the
+	// DAC's key: the player's backend probes the DAC anew and reads its
+	// policy again, as after a choice written for it (B728 B7).
+	changed func(dacprofile.Key)
 }
 
 // The bounds of asking again a part for a DAC that could not be made (ask):
@@ -96,7 +206,7 @@ func legacyDSD(p config.PlayerConfig) dsdstate.Legacy {
 // file that read or no file: a damaged file set aside, or one left unread,
 // over which nothing is migrated.
 func openPlayerDSD(dataDir string, player config.PlayerConfig, trees outputTrees, seams *servePlayerSeams) *playerDSD {
-	d := &playerDSD{dataDir: dataDir, legacy: legacyDSD(player), boot: player.Device, sysfs: trees.observer().Sysfs, seams: seams}
+	d := &playerDSD{dataDir: dataDir, recordDir: dataDir, legacy: legacyDSD(player), boot: player.Device, sysfs: trees.observer().Sysfs, seams: seams}
 	store, err := dsdstate.Open(dataDir)
 	if err != nil {
 		playerLog.Warn("player: the player's DSD state is not opened, and nothing is migrated into it", "err", err)
@@ -141,11 +251,14 @@ func (d *playerDSD) migrate(ctx context.Context, bound *dsdstate.Bound) error {
 	if ctx.Err() != nil {
 		return nil
 	}
-	step, err := d.store.Migrate(d.dataDir, d.legacy, bound)
-	if errors.Is(err, atomicwrite.ErrLanded) {
+	step, err := d.store.Migrate(d.recordDir, d.legacy, bound)
+	if errors.Is(err, atomicwrite.ErrLanded) || errors.Is(err, dsdstate.ErrLandedNotHeld) {
 		d.done = true
 	}
 	d.say(step, err, bound)
+	if err == nil && step.Changed && bound != nil && d.changed != nil {
+		d.changed(bound.Key)
+	}
 	return err
 }
 
@@ -163,6 +276,12 @@ func (d *playerDSD) migrate(ctx context.Context, bound *dsdstate.Bound) error {
 func (d *playerDSD) say(step dsdstate.Step, err error, bound *dsdstate.Bound) {
 	landed := errors.Is(err, atomicwrite.ErrLanded)
 	switch {
+	case errors.Is(err, dsdstate.ErrLandedNotHeld):
+		// The store's fence (B7): an earlier write, the migration's or
+		// playback's, landed and is not known to be durable, and no write is
+		// made from the state the store holds.
+		playerLog.Warn("player: the DSD migration makes no step more in this run: an earlier write of the player's DSD state reached its file and is not known to be durable, which the store does not hold; the next start goes on from what the file holds then")
+		return
 	case err != nil && !landed && bound != nil:
 		return
 	case err != nil && !landed:
@@ -286,7 +405,7 @@ func (d *playerDSD) ask(ctx context.Context, r binding.Resolution) {
 	bound, err := d.boundOf(r)
 	read := err == nil
 	if read {
-		if err = d.migrate(ctx, &bound); err == nil || errors.Is(err, atomicwrite.ErrLanded) || ctx.Err() != nil {
+		if err = d.migrate(ctx, &bound); err == nil || errors.Is(err, atomicwrite.ErrLanded) || errors.Is(err, dsdstate.ErrLandedNotHeld) || ctx.Err() != nil {
 			return
 		}
 	}

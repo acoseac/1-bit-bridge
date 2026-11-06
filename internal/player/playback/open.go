@@ -10,6 +10,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/player/decode"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
+	"github.com/acoseac/1-bit-bridge/internal/player/policy"
 )
 
 // The reasons the backend refuses an occurrence before any of its content
@@ -18,13 +19,17 @@ import (
 // and the rest) and engine.ReasonMissing for content the resolver could not
 // open.
 const (
-	// ReasonDSD is DSD content while DSD is not configured: dsdMode off, or
-	// no authorization. Under a DSD mode the effective set's refusals name
-	// why (authorization.go, B470 2d.2); DSD is never converted.
+	// ReasonDSD is DSD content a backend plays no way: one built with no
+	// DSD admission (no Config.DSD and no harness Authorization), and, until
+	// the player converts (B728 B11), a rate the effective policy converts to
+	// PCM (B7). The effective set's other refusals name why
+	// (internal/player/policy's words); the harness's approval its own.
 	ReasonDSD engine.Reason = "dsd_not_in_this_release"
 	// ReasonRate is a rate the ALSA backend does not open
-	// (alsapcm.MinRateHz to MaxRateHz), which the decoders take from 1 Hz.
-	ReasonRate engine.Reason = "rate_not_supported"
+	// (alsapcm.MinRateHz to MaxRateHz), which the decoders take from 1 Hz,
+	// and a DSD rate no transport here carries (DSD512): the effective
+	// policy's word for it, one word (B728 B7 unified the two).
+	ReasonRate engine.Reason = policy.ReasonRateNotSupported
 	// ReasonTransport is content the DAC takes in none of the packings its
 	// depth has, at its rate (packings): the DAC does not play it as it is.
 	ReasonTransport engine.Reason = "transport_not_supported"
@@ -49,7 +54,21 @@ type occ struct {
 	permission *permission
 	// dsdRefusal is the session's DSD refusal while its approval did not
 	// read: DSD content of the occurrence is refused with it.
-	dsdRefusal  *engine.Unplayable
+	dsdRefusal *engine.Unplayable
+	// admitted and policyPlan are the effective DSD set a native or DoP
+	// occurrence was admitted under and its plan there (B728 B7): what the
+	// check after open compares the opened node with, what its activation and
+	// reconciliation judge it by; nil for PCM and for the harness's
+	// admission. admitted is repointed to each set reconciliation keeps it
+	// under, under the session's lock. leading is a session's first
+	// occurrence, whose admission reads the policy afresh; stale is one
+	// reconciliation is handing off again, which the producer holds back from
+	// the sink; and observed is one whose streaming_observed was recorded.
+	admitted    *dsdSet
+	policyPlan  policy.Plan
+	leading     bool
+	stale       bool
+	observed    bool
 	reservation *engine.OccurrenceReservation
 	id          engine.OccurrenceID
 	entry       uint32

@@ -24,15 +24,15 @@ type Bound struct {
 // card (alsa.SysfsReader.Card and Qualification) and the PCM endpoint the
 // binding names on it (device, subdevice): the key of its model, the USB
 // vendor and product IDs, the interface the card is and its product string,
-// and the identity the legacy reader compares, built as production's
-// readPermission builds it. A serial, a card number and a device number go
+// and the identity the legacy reader compares, built as the harness's
+// readPermission builds it (production's until B728's cutover, B7). A
+// serial, a card number and a device number go
 // into neither, and the port into the identity alone.
 func BoundOf(card alsa.Identity, q alsa.QualificationIdentity, device, subdevice int) (Bound, error) {
 	if card.Kind != alsa.IdentityUSB || card.USB == nil {
 		return Bound{}, errors.New("dsdstate: the card is not a USB unit whose identity was read")
 	}
-	iface, product := card.USB.Interface, q.Product
-	key, err := dacprofile.NewKey(card.USB.ID.Vendor, card.USB.ID.Product, &iface, &product)
+	key, err := KeyOf(*card.USB, q.Product)
 	if err != nil {
 		return Bound{}, err
 	}
@@ -41,6 +41,20 @@ func BoundOf(card alsa.Identity, q alsa.QualificationIdentity, device, subdevice
 		Manufacturer: q.Manufacturer, Product: q.Product, BCDDevice: q.BCDDevice, Port: q.Port,
 		Interface: q.Interface, Device: device, Subdevice: subdevice,
 	}}, nil
+}
+
+// KeyOf is the key the state keys a card's DAC model by (the design's
+// section 2.2): its unit's vendor and product IDs, the interface the card is,
+// and product, the unit's product string, absent where it is "". The
+// migration's DAC (BoundOf) and the effective policy's (B7) are keyed by it
+// alike, so the choice one writes is the choice the other reads.
+func KeyOf(usb alsa.USBIdentity, product string) (dacprofile.Key, error) {
+	iface := usb.Interface
+	var p *string
+	if product != "" {
+		p = &product
+	}
+	return dacprofile.NewKey(usb.ID.Vendor, usb.ID.Product, &iface, p)
 }
 
 // sameModel is the migration's identity comparison (the design's section

@@ -73188,7 +73188,7 @@ found missing (a nil comparison; the exported harness checks' version);
 this record.
 
 **Red first** (71cd5e19, on 0aedd16a):
-- `TestProductionStillPlaysAVersion35RecordAfterTheBump`: "production
+- `…ProductionStillPlaysAVersion35RecordAfterTheBump`: "production
   refused an owner's record of version 35 after the bump to 36: stale
   approval version", the design's red. In the playback overlay,
   `TestNativeIntegrationApprovedConstructor/legacy_version`: "unplayable:
@@ -73222,7 +73222,7 @@ would turn red: fd0afd6b and 9dfbaffa added them before the runs.
 
 | # | Mutation | Red |
 |---|---|---|
-| C1 | production back on `ReadApproval` | `TestProductionStillPlaysAVersion35RecordAfterTheBump` ("stale approval version"); the overlay's `TestNativeIntegrationApprovedConstructor/legacy_version` |
+| C1 | production back on `ReadApproval` | `…ProductionStillPlaysAVersion35RecordAfterTheBump` ("stale approval version"); the overlay's `TestNativeIntegrationApprovedConstructor/legacy_version` |
 | C2 | the transition backend on the legacy reader | `TestTheHarnessBackendsReadOnlyTheCurrentVersion/transition` (read, `<nil>`) |
 | C3 | the candidate backend on the legacy reader | `TestTheHarnessBackendsReadOnlyTheCurrentVersion/candidate` ("owner approval incomplete") |
 | C4 | the floor `v > LegacyVersion` | the rows at 35 of the three kinds and each report below 35; the production test |
@@ -73410,7 +73410,7 @@ versions from 35 to the build's own").
 - `TestTheLegacyReaderRefusesAVersionNewerThanThisBuild`: the record, a
   matrix, lifecycle or transition report, an experiment and a contact at
   37, each in a record otherwise valid at 36, all six read ("got <nil>").
-- `TestProductionRefusesARecordNewerThanThisBuild/version_37`: "1 tuples
+- `…ProductionRefusesARecordNewerThanThisBuild/version_37`: "1 tuples
   published"; its rows at 35 and 36 green. In the playback overlay,
   `TestNativeIntegrationApprovedConstructor/newer_version`: "start=<nil>".
 - `TestAChangeOutsideTheDSDBytePathNeedsNoBump`, which no longer lists
@@ -73423,8 +73423,8 @@ red:
 | # | Mutation | Red |
 |---|---|---|
 | G1 to G9 | each of the nine new paths dropped from `GuardedPaths`, one at a time | its own row of `TestQualificationDependencyGate` ("dependency changed without version bump"), and no other |
-| U1 | the upper bound removed (`LegacyVersion <= v`) | all six rows of `TestTheLegacyReaderRefusesAVersionNewerThanThisBuild`; the rows at 37 of `TestTheLegacyReaderRefusesBelowVersion35`; `TestProductionRefusesARecordNewerThanThisBuild/version_37`; the overlay's `newer_version` |
-| U2 | the bound one short (`v < Version`) | the rows at 36 of `TestTheLegacyReaderRefusesBelowVersion35`; `TestProductionRefusesARecordNewerThanThisBuild/version_36` |
+| U1 | the upper bound removed (`LegacyVersion <= v`) | all six rows of `TestTheLegacyReaderRefusesAVersionNewerThanThisBuild`; the rows at 37 of `TestTheLegacyReaderRefusesBelowVersion35`; `…ProductionRefusesARecordNewerThanThisBuild/version_37`; the overlay's `newer_version` |
+| U2 | the bound one short (`v < Version`) | the rows at 36 of `TestTheLegacyReaderRefusesBelowVersion35`; `…ProductionRefusesARecordNewerThanThisBuild/version_36` |
 
 **Checks**, on legion0 through the shared build lock with TMPDIR under
 `.tmp/_b728-b1`, at b1fff479:
@@ -74127,7 +74127,7 @@ guarded, their tests included: `qualificationVersion` 36 to 37, the runbook's
 five mentions (`TestQualificationRunbookVersion`) and its "Version 37 covers
 backlog B735" entry. `LegacyVersion` stays 35, so production still reads an
 owner's approval of versions 35 to 37 through `ReadLegacyApproval`
-(`TestProductionStillPlaysAVersion35RecordAfterTheBump` and the legacy tests,
+(`…ProductionStillPlaysAVersion35RecordAfterTheBump` and the legacy tests,
 which take the versions as parameters, pass at 37): no owner re-qualifies,
 while the harness's own evidence of version 36 (contacts, matrix and
 lifecycle reports, candidates) is stale to the harness, as at every bump.

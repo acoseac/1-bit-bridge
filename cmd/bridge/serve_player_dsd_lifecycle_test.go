@@ -39,7 +39,7 @@ func legacyKeyLines(log, key string) []string {
 // settings and its Player page, bridge output dac inspect, bridge doctor, and
 // the strict check serve --validate-config makes for an updater), refused by
 // none, and within one start each key is warned of once, in words
-// that say it stays in effect until the cutover and claim no migration made,
+// that say it decides nothing itself since the cutover and claim no migration made,
 // however many of those readers validate the config: the scope is the
 // start's, and a reader outside it warns of nothing.
 func TestLegacyDSDKeysStillLoadAndAreWarnedOnce(t *testing.T) {
@@ -107,8 +107,8 @@ func TestLegacyDSDKeysStillLoadAndAreWarnedOnce(t *testing.T) {
 			t.Errorf("output.player.%s was warned of %d times in one start, want once:\n%s", key, len(lines), strings.Join(lines, "\n"))
 			continue
 		}
-		if l := lines[0]; !strings.Contains(l, "stays in effect until the player's DSD cutover") || strings.Contains(l, "approved.json") || strings.Contains(l, "was migrated") {
-			t.Errorf("the warning of %s: %s; want the transitional words, no value", key, l)
+		if l := lines[0]; !strings.Contains(l, "since the player's DSD cutover it decides nothing itself") || strings.Contains(l, "approved.json") || strings.Contains(l, "was migrated") {
+			t.Errorf("the warning of %s: %s; want the cutover's words, no value", key, l)
 		}
 	}
 }

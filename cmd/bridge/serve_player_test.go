@@ -693,8 +693,9 @@ func (p *logPark) WithGroup(string) slog.Handler      { return p }
 // the engine takes (1 s to 10 min, of the config's hour); each refusal
 // leaves it off with its reason, and adds nothing: no goroutine of the
 // player's, no backend built, no player file. A started player hands every
-// session the boot snapshot's pause release and DSD mode unchanged: the
-// default 30 s, and 600, the engine's last. A player turned on in the live
+// session the boot snapshot's pause release unchanged, the default 30 s, and
+// 600, the engine's last, and no DSD mode: since B728's cutover (B7) the
+// backend decides DSD by its effective policy. A player turned on in the live
 // config while serve runs starts at the next start, never in this one.
 func TestServeStartsThePlayerOnlyWhenEveryGateHolds(t *testing.T) {
 	needsDirectorySync(t)
@@ -763,8 +764,8 @@ func TestServeStartsThePlayerOnlyWhenEveryGateHolds(t *testing.T) {
 			standIn.mu.Lock()
 			opts := standIn.starts[0].Options
 			standIn.mu.Unlock()
-			if opts.PauseRelease != tc.release || opts.DSD != "off" {
-				t.Errorf("the session's options %+v, want a pause release of %v and DSD off", opts, tc.release)
+			if opts.PauseRelease != tc.release || opts.DSD != "" {
+				t.Errorf("the session's options %+v, want a pause release of %v and no DSD mode", opts, tc.release)
 			}
 			if code := ps.stopServe(t); code != 0 {
 				t.Fatalf("exit %d; stderr=%s", code, ps.stderr.String())

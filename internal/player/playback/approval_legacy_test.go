@@ -44,45 +44,19 @@ func recordAtVersion(t *testing.T, a *Authorization, record *qualification.Appro
 	saveApprovedFixture(t, a, *record)
 }
 
-// TestProductionStillPlaysAVersion35RecordAfterTheBump: after a bump past
-// qualification.LegacyVersion, an owner's record of that version, its
-// reports with it, still plays in production (B728 B1): serve's and output
-// play's backend (New) reads it, publishes its tuple, admits a session's
-// check of it and selects its policy for DSD64, as before the bump.
-func TestProductionStillPlaysAVersion35RecordAfterTheBump(t *testing.T) {
+// TestTheApprovalAdmissionTakesTheHarnesssVersionAlone (B728 B7): since the
+// cutover the approval's admission (a backend built with an Authorization)
+// is the harness's, and reads an owner's record through ReadApproval, at
+// this build's Version alone: a record of qualification.LegacyVersion,
+// which production played through the legacy reader until B7, and one of
+// Version+1 are refused with the version's refusal and publish no tuple, and
+// one of Version reads and publishes its policy. Production reads no record
+// at all (TestServeReadsNoApprovalRecord); the legacy reader is the
+// migration's alone.
+func TestTheApprovalAdmissionTakesTheHarnesssVersionAlone(t *testing.T) {
 	if qualification.Version <= qualification.LegacyVersion {
 		t.Fatalf("qualificationVersion %d is not past LegacyVersion %d: no bump, so this proves nothing", qualification.Version, qualification.LegacyVersion)
 	}
-	cfg, record := approvedBackendFixture(t)
-	cfg.Resolver = edgeContent(nil)
-	recordAtVersion(t, cfg.Authorization, &record, qualification.LegacyVersion)
-	b, e := New(cfg)
-	if e != nil {
-		t.Fatal(e)
-	}
-	token, e := b.readPermission(context.Background())
-	if e != nil {
-		t.Fatalf("production refused an owner's record of version %d after the bump to %d: %v", qualification.LegacyVersion, qualification.Version, e)
-	}
-	b.RefreshAuthorization(context.Background())
-	if p := b.Policy(); len(p.Tuples) != 1 || p.Tuples[0].PolicyID != "p64" || p.Revision != "r1" || p.Reason != "" {
-		t.Fatalf("published %+v; want the record's DSD64 policy", p)
-	}
-	if e = b.checkPermission(context.Background(), token, nil, qualification.NativeKey(record.Body.Policies[0])); e != nil {
-		t.Fatalf("a session's check refused the record: %v", e)
-	}
-	plan, e := token.selectNative(format.NativeDSD{BitRateHz: 2822400, Channels: 2})
-	if e != nil || plan.PolicyID != "p64" {
-		t.Fatalf("DSD64 selected %+v, %v; want the record's policy", plan, e)
-	}
-}
-
-// TestProductionRefusesARecordNewerThanThisBuild: production's read (New)
-// plays an owner's record of qualification.LegacyVersion and one of this
-// build's Version, and refuses one of Version+1 with the version's refusal,
-// publishing no tuple: a newer bridge's evidence, written before a
-// downgrade, that this code cannot vouch for (B728 B1, round 2).
-func TestProductionRefusesARecordNewerThanThisBuild(t *testing.T) {
 	for _, v := range []int{qualification.LegacyVersion, qualification.Version, qualification.Version + 1} {
 		t.Run(fmt.Sprintf("version_%d", v), func(t *testing.T) {
 			cfg, record := approvedBackendFixture(t)
@@ -92,19 +66,35 @@ func TestProductionRefusesARecordNewerThanThisBuild(t *testing.T) {
 			if e != nil {
 				t.Fatal(e)
 			}
-			_, e = b.readPermission(context.Background())
+			token, e := b.readPermission(context.Background())
 			b.RefreshAuthorization(context.Background())
-			tuples := len(b.Policy().Tuples)
-			if v <= qualification.Version {
-				if e != nil || tuples != 1 {
-					t.Fatalf("a record of version %d: %v, %d tuples published; want it read and its tuple published", v, e, tuples)
+			p := b.Policy()
+			if v == qualification.Version {
+				if e != nil || len(p.Tuples) != 1 || p.Tuples[0].PolicyID != "p64" {
+					t.Fatalf("a record of version %d: %v, published %+v; want it read and its DSD64 policy published", v, e, p)
+				}
+				if plan, e := token.selectNative(format.NativeDSD{BitRateHz: 2822400, Channels: 2}); e != nil || plan.PolicyID != "p64" {
+					t.Fatalf("DSD64 selected %+v, %v; want the record's policy", plan, e)
 				}
 				return
 			}
-			if e == nil || e.Error() != "stale approval version" || tuples != 0 {
-				t.Fatalf("a record of version %d, past this build's %d: %v, %d tuples published; want the refusal \"stale approval version\" and none", v, qualification.Version, e, tuples)
+			if e == nil || e.Error() != "stale approval version" || len(p.Tuples) != 0 {
+				t.Fatalf("a record of version %d under the harness's admission at %d: %v, %d tuples published; want the refusal \"stale approval version\" and none", v, qualification.Version, e, len(p.Tuples))
 			}
 		})
+	}
+}
+
+// TestProductionConfiguresNoApprovalBesideItsPolicy (B728 B7): a backend
+// takes the effective DSD policy (Config.DSD, production's) or the
+// harness's approval admission (Config.Authorization), never both, so no
+// production backend can read a record beside its policy.
+func TestProductionConfiguresNoApprovalBesideItsPolicy(t *testing.T) {
+	cfg, _ := approvedBackendFixture(t)
+	cfg.Resolver = edgeContent(nil)
+	cfg.DSD = &DSDPolicy{}
+	if _, err := New(cfg); err == nil {
+		t.Fatal("New took a config with the effective DSD policy and an approval admission")
 	}
 }
 
@@ -112,7 +102,7 @@ func TestProductionRefusesARecordNewerThanThisBuild(t *testing.T) {
 // transition backends (NewQualificationBackend,
 // NewTransitionQualificationBackend) read through ReadCandidate and
 // ReadApproval, which take the current version alone, so a record of
-// qualification.LegacyVersion, which production plays, grants them
+// qualification.LegacyVersion, which the migration takes, grants them
 // nothing, and the same record at the current version reads (B728 B1).
 func TestTheHarnessBackendsReadOnlyTheCurrentVersion(t *testing.T) {
 	for _, name := range []string{"candidate", "transition"} {
