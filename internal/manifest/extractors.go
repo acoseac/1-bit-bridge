@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 
 	tag "github.com/dhowden/tag"
 	"github.com/mewkiz/flac/meta"
@@ -607,7 +608,23 @@ var Ext = map[string]bool{
 // file once. A later change to what the kind reads is a bump like any other:
 // the stamp leg records the kind a re-read finds (writeSampleFormatTx).
 // v30 preserves the first parsed DFF PROP format facts across duplicate PROP.
-const ExtractorVersion = 30
+//
+// v31 — a track or disc number written with its total, "of" its total or
+// padded reads as its number (backlog B743, found by the 0.2.3 Docker upgrade
+// test on 0.2.2 and the candidate alike). dhowden's Vorbis reader (FLAC, Ogg
+// Vorbis, Opus, Ogg FLAC) is strconv.Atoi of the whole value with the error
+// dropped, so TRACKNUMBER=1/2 indexed as track 0 and its album played out of
+// order, and its ID3v2 reader read " 3 " and "3 of 12" as 0. numberAsWritten
+// reads them by leadingTagNumber, and the presence gates now ask for an
+// ID3v2.2 tag's TRK and TPA and an ID3v1.1 tag's track byte, which dhowden
+// reads and the gates left absent. Only a row whose track or disc number
+// changes takes the full-upsert leg (its enrichment re-queued once) and is the
+// iOS delta; one whose track number moves is held to the scan's tail first
+// (#1128's hold), and a number the file's name gave it gives way to the tag's,
+// since the track-number pass fills only a missing one. Every other row
+// re-extracts byte-identical and rides the version-stamp leg; SACD ISO virtual
+// rows re-expand as on every bump. ProtocolVersion stays 1.
+const ExtractorVersion = 31
 
 // Extract reads as much metadata as it can from the file at absPath and
 // fills in the Track at t. Path, Size, ModTime on t MUST already be set by
@@ -1219,13 +1236,15 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 	// observable from the wire.
 	if raw := m.Raw(); raw != nil {
 		// CodeRabbit Major on PR #226: `stringOf` returns `ok=false`
-		// when the key IS present but the underlying `m.Raw()` value
-		// type isn't one of `string` / `[]string` / `int` (e.g. MP4's
-		// `trkn` atom surfaces as `*tag.Position` via dhowden,
-		// `[]byte`, etc.). Using stringOf-based presence here would
-		// silently drop `Year` / `TrackNumber` / `DiscNumber` even
-		// though the dhowden accessor would happily parse the value.
-		// `hasAnyRawKey` is key-only — value shape is irrelevant.
+		// when the key IS present but its value is empty once trimmed,
+		// or of a type it does not decode (an ID3v2 frame dhowden keeps
+		// as `[]byte`, say). Using stringOf-based presence here would
+		// drop `Year` / `TrackNumber` / `DiscNumber` for a tag that is
+		// present. `hasAnyRawKey` is key-only — value shape is
+		// irrelevant. (This named MP4's `trkn` as the case, surfacing
+		// as `*tag.Position`, until backlog B743: the dhowden pinned
+		// here has no such type and keeps `trkn` as an int, the atom's
+		// low byte.)
 		if hasAnyRawKey(raw, yearTagAliases...) {
 			y := m.Year()
 			// dhowden's `Year()` returns 0 for an ISO-8601 date value like
@@ -1251,12 +1270,21 @@ func populateFromTagMetadata(m tag.Metadata, t *Track) {
 			}
 			t.Year = &y
 		}
-		if hasAnyRawKey(raw, "trck", "tracknumber", "trkn") {
+		// A track or disc number is the one the tag writes, read by
+		// numberAsWritten (backlog B743): dhowden's Vorbis reader is
+		// strconv.Atoi of the whole value, so "3/12", "3 of 12" and
+		// " 3 " were 0, and its ID3v2 reader made 0 of " 3 " and
+		// "3 of 12". The gates ask for an ID3v2.2 tag's TRK and TPA and
+		// an ID3v1.1 tag's track byte too, which dhowden reads and the
+		// gates left absent.
+		if hasAnyRawKey(raw, "trck", "trk", "tracknumber", "trkn") || id3v1HasTrack(m.Format(), raw) {
 			tn, _ := m.Track()
+			tn = numberAsWritten(m.Format(), raw, tn, trackNumberKeys)
 			t.TrackNumber = &tn
 		}
-		if hasAnyRawKey(raw, "tpos", "discnumber", "disk") {
+		if hasAnyRawKey(raw, "tpos", "tpa", "discnumber", "disk") {
 			d, _ := m.Disc()
+			d = numberAsWritten(m.Format(), raw, d, discNumberKeys)
 			t.DiscNumber = &d
 		}
 	} else {
@@ -2151,13 +2179,13 @@ func normaliseRawTagKey(k string) string {
 // Major on PR #226): the `populateFromTagMetadata` presence gates for
 // `Year` / `TrackNumber` / `DiscNumber` need to know whether the
 // underlying ID3v2 / Vorbis / MP4 tag was actually present, not
-// whether stringOf can decode its value. dhowden surfaces MP4's
-// `trkn` atom as `*tag.Position` (NOT a string / []string / int), so
-// a stringOf-based gate would treat a tagged MP4 with explicit track
-// number as "absent" and drop `t.TrackNumber` — even though
-// `m.Track()` would parse it correctly. The same risk applies to any
-// future raw value shape dhowden emits (e.g. `[]byte` for binary
-// frames).
+// whether stringOf can decode its value. stringOf answers absent for a
+// value that is empty once trimmed (a present `TRACKNUMBER=` is a
+// present 0) and for a shape it does not decode (`[]byte` for a binary
+// frame), so a stringOf-based gate would drop a number the file
+// carries. This said MP4's `trkn` atom surfaces as `*tag.Position`
+// until backlog B743: the dhowden pinned here has no such type and
+// keeps `trkn` as an int, the atom's low byte, which stringOf decodes.
 //
 // Aliases are passed in their normalised lowercase form to match
 // what `normaliseRawTagKey` produces.
@@ -2262,6 +2290,127 @@ func parseYearPrefix(s string) (int, error) {
 		return 0, fmt.Errorf("year out of range: %d", y)
 	}
 	return y, nil
+}
+
+// tagNumberKeys name the raw value dhowden's Track or Disc accessor reads, by
+// the tag's format, in the case that format's raw map keeps it: a Vorbis
+// comment's name lowercased (dhowden lowercases every name it stores), an
+// ID3v2.2 frame's three letters, an ID3v2.3 or 2.4 frame's four. A normalised
+// lookup (stringOf) would answer another key than the accessor read: a Vorbis
+// comment named TRCK, say.
+type tagNumberKeys struct{ vorbis, id3v22, id3v2 string }
+
+var (
+	trackNumberKeys = tagNumberKeys{vorbis: "tracknumber", id3v22: "TRK", id3v2: "TRCK"}
+	discNumberKeys  = tagNumberKeys{vorbis: "discnumber", id3v22: "TPA", id3v2: "TPOS"}
+)
+
+// numberAsWritten is the track or disc number a tag of format f writes, given
+// read, the answer of dhowden's accessor (backlog B743).
+//
+// A Vorbis comment's (FLAC, Ogg Vorbis, Opus, Ogg FLAC) is leadingTagNumber of
+// its value. The accessor is strconv.Atoi of the whole value with the error
+// dropped, which leadingTagNumber keeps for a value that is a whole number and
+// replaces for every other.
+//
+// An ID3v2 frame's is the accessor's answer unless that is 0, which is read
+// again by leadingTagNumber. dhowden reads the side before a "/", trimmed, when
+// the frame holds one "/", and the whole value as it stands otherwise, so
+// "3/12" and "3 / 12" read 3 there and " 3 ", "3 of 12" and "3/12/2" read 0.
+// The rule alone would read "3 / 12" as 0, so an answer that is not 0 stands,
+// an overflow dhowden saturates included.
+//
+// Any other format's is the accessor's: MP4's trkn and disk atoms and ID3v1's
+// track byte are binary, which no form reaches.
+func numberAsWritten(f tag.Format, raw map[string]any, read int, keys tagNumberKeys) int {
+	var key string
+	switch f {
+	case tag.VORBIS:
+		if s, ok := raw[keys.vorbis].(string); ok {
+			return leadingTagNumber(s)
+		}
+		return read
+	case tag.ID3v2_2:
+		key = keys.id3v22
+	case tag.ID3v2_3, tag.ID3v2_4:
+		key = keys.id3v2
+	default:
+		return read
+	}
+	if s, ok := raw[key].(string); ok && read == 0 {
+		return leadingTagNumber(s)
+	}
+	return read
+}
+
+// leadingTagNumber reads a track or disc number as taggers write it: the
+// leading number of the value, trimmed, with an optional sign, followed by
+// nothing, by "/" and whatever follows it ("3/12", "3/"), or by whitespace,
+// "of" and whatever follows that ("3 of 12"). Any other tail reads 0: a vinyl
+// side ("A1"), "1.2", "2-1", a date. A value that is a whole number as it
+// stands keeps strconv.Atoi's answer, which is dhowden's, saturated where it
+// overflows an int; a leading number that overflows in any other form reads 0,
+// as a value that holds no number does. A 0 is a present value naming no
+// number, which the extractor stores as Some(0), as before (backlog B743).
+func leadingTagNumber(s string) int {
+	if isWholeInteger(s) {
+		n, _ := strconv.Atoi(s) // saturated on overflow, as dhowden's is
+		return n
+	}
+	s = strings.TrimSpace(s)
+	end := 0
+	if end < len(s) && (s[end] == '+' || s[end] == '-') {
+		end++
+	}
+	digits := end
+	for end < len(s) && s[end] >= '0' && s[end] <= '9' {
+		end++
+	}
+	if end == digits || !acceptedNumberTail(s[end:]) {
+		return 0
+	}
+	n, err := strconv.Atoi(s[:end])
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// isWholeInteger reports whether s is an optional sign and one or more ASCII
+// digits, the values strconv.Atoi reads whole.
+func isWholeInteger(s string) bool {
+	if s != "" && (s[0] == '+' || s[0] == '-') {
+		s = s[1:]
+	}
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// acceptedNumberTail reports whether tail, what follows a track or disc
+// number, is one leadingTagNumber reads the number before: nothing, "/" and
+// what follows it, or whitespace, "of" and what follows that.
+func acceptedNumberTail(tail string) bool {
+	if tail == "" || tail[0] == '/' {
+		return true
+	}
+	rest := strings.TrimLeftFunc(tail, unicode.IsSpace)
+	return len(rest) < len(tail) && strings.HasPrefix(rest, "of")
+}
+
+// id3v1HasTrack reports whether an ID3v1 tag holds a track number: ID3v1.1's
+// last comment byte, which dhowden reads into the raw map's "track" (an int)
+// when the byte before it is a NUL. 0 is no track: ID3v1.0's comment runs on
+// there, and dhowden writes 0 for a tag that names none (backlog B743).
+func id3v1HasTrack(f tag.Format, raw map[string]any) bool {
+	n, ok := raw["track"].(int)
+	return f == tag.ID3v1 && ok && n > 0
 }
 
 // extractFLACFormat reads STREAMINFO from a FLAC file and fills sample
