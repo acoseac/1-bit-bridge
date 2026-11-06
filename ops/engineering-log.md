@@ -77794,4 +77794,13 @@ ignored, an entry with no function taken, the path's control interface left unse
 dropped from the stage selectors, a switch not read, only a switch's first channel read, mute made
 a stage, an entry with no selector taken for a loudness, the probe's bits ignored, a released
 pause taken for one with no sink, and the identity ignored. Round 1's 24 controls, their anchors
-moved to round 2's code, are all still red.
+moved to round 2's code, are all still red. The gate at 928daa62, in one call under the build
+slot: `make fmt` changed nothing; `make vet` native, `GOOS=windows`, `GOOS=darwin`,
+`GOOS=linux GOARCH=386` and `GOARCH=arm64`, clean; the package's tests under `-race` and as
+linux/386, ok; `make test` 85 packages ok, none failed, in 29 minutes, alsa and alsapcm run here;
+`make build-all` with `check-build-tags: OK`; `make docs-check` ok; the qualification check OK
+from 4c1e44e3. The round-2 rules patch (`rules-b728-b5-r2.patch`) gives B5's line three more
+clauses (another function's block, a switch on or unmapped, a sink of another identity) and its
+long form round 2's mechanisms and tests; it applies over round 1's under `git apply --check`, the
+two applied in turn give the staged files byte for byte, and with both player.md is 97,092 bytes
+(97.1 %), the worst load 311,613, every budget holding.

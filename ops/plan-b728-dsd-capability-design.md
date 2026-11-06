@@ -1673,7 +1673,10 @@ rule that permits it.
       confirmed, and no word claims that a DAC decodes DSD. The latest listener answer stands, and a
       rejection outranks every positive input.** **Don't word a rung as verified, decoded,
       bit-exact or a lock, count a rung across a bcdDevice change, publish DoP's driver acceptance
-      as more than its carrier's, or let an earlier `clean` survive a later `noise`.**"
+      as more than its carrier's, let an earlier `clean` survive a later `noise`, map a stage
+      through another audio function's usbmixer block, pass one whose switch is on or unmapped, or
+      keep frames a sink that opened another identity holds, a released pause's included.**" (B5
+      round 2 added its last three clauses.)
     - B7: "**Admission is per rate. DoP plays only where the playback path shows no stage, or
       every stage's controls are visible in its audio function's block of the kernel's table, its
       switches read off on every channel, and every level control reads 0 dB by its dB scale, is on
@@ -1681,10 +1684,10 @@ rule that permits it.
       firmware. A policy change is reconciled per occurrence (kept, re-planned or revoked), and a
       user's write revokes only with `interrupt`.** **Don't admit a rate a migrated
       acknowledgement does not cover, write a control, take a missing control or one with no dB
-      scale for unity unless the profile's evidence says its raw maximum is, count another audio
-      function's entries for the path's, keep DoP playing once a control leaves unity or a switch
-      turns on, revoke an occurrence the new set still plays on the identity its sink last opened,
-      keep one whose sink last opened another, a released pause's included, or skip a successor a
+      scale for unity unless the profile's evidence says its raw maximum is, read the kernel's
+      table without each block's ctrlif and each entry's selector, keep DoP playing once a control
+      leaves unity or a switch turns on, give an occurrence any identity but the one its sink last
+      opened, revoke an occurrence the new set still plays on that identity, or skip a successor a
       change re-planned.**"
     - B10: "**`dsdconv` is linear phase and unity gain, 30 kHz pass / 40 kHz stop at 100 dB or
       more (20 kHz at 44.1 kHz), starts and ends at numeric zero, saturates and counts, and rounds
