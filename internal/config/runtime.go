@@ -344,6 +344,14 @@ func Clone(cfg *Config) *Config {
 		v := *cfg.SmartPlaylists.Enabled
 		out.SmartPlaylists.Enabled = &v
 	}
+	if cfg.Enrich.Enabled != nil {
+		v := *cfg.Enrich.Enabled
+		out.Enrich.Enabled = &v
+	}
+	if cfg.Enrich.DeezerEnabled != nil {
+		v := *cfg.Enrich.DeezerEnabled
+		out.Enrich.DeezerEnabled = &v
+	}
 	if cfg.Output.LoopbackPort != nil {
 		v := *cfg.Output.LoopbackPort
 		out.Output.LoopbackPort = &v

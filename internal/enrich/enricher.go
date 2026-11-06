@@ -100,9 +100,11 @@ type Enricher struct {
 	// enrichment (the default).
 	premiumCovers PremiumCoverFetcher
 
-	// enabled is the predicate WithEnabled attaches. Run does not ask it
-	// yet.
-	enabled func() bool
+	// enabled and deezerEnabled are the live predicates for enrich.enabled
+	// and enrich.deezerEnabled (WithEnabled, WithDeezerEnabled); nil means
+	// on. See switch.go.
+	enabled       func() bool
+	deezerEnabled func() bool
 
 	// acoustic is the fingerprint verdict source. Nil (the default) means
 	// acoustic fingerprinting is off, exactly like a nil premiumCovers.
@@ -311,58 +313,67 @@ func (e *Enricher) WithPremiumCovers(f PremiumCoverFetcher) *Enricher {
 	return e
 }
 
-// WithEnabled attaches the live predicate for enrich.enabled. Run does not
-// ask it yet.
-func (e *Enricher) WithEnabled(f func() bool) *Enricher {
-	e.enabled = f
-	return e
-}
-
 // Run loops until ctx is done, pulling un-enriched tracks and processing
 // them in waves. Errors on individual tracks are logged but don't stop
 // the loop.
+//
+// enrich.enabled is asked before each batch: off, the loop asks the store
+// and the upstreams nothing, and asks the switch again after PollInterval,
+// so turning it on takes effect within one. Each batch runs on a context the
+// switch cancels within a second (CancelWhenOff), so turning it off stops
+// the batch under way as a shutdown would, and what the batch was enriching
+// stays at enriched_at = 0 for the turn that follows the switch's.
 func (e *Enricher) Run(ctx context.Context) {
+	var report switchReport
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		batch, err := e.store.UnenrichedTracks(ctx, e.BatchLimit)
-		if err != nil {
-			// A listing the shutdown stopped is not a failed one.
-			if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
-				logger.Error("list unenriched", "err", failure)
-			}
-			if !sleepCtx(ctx, e.PollInterval) {
-				return
-			}
-			continue
+		on := e.on()
+		report.note(on, e.deezerOn())
+		pause := e.PollInterval
+		if on {
+			pause = e.runBatch(ctx)
 		}
-		if len(batch) == 0 {
-			if !sleepCtx(ctx, e.PollInterval) {
-				return
-			}
-			continue
-		}
-		for i := range batch {
-			if ctx.Err() != nil {
-				return
-			}
-			e.enrichOne(ctx, &batch[i])
-		}
-		// Unconditional breather between batches.
-		//
-		// The MB/CAA pacers are NOT a substitute: they only sleep when a
-		// network call is actually made, so a batch whose rows all resolve
-		// from the LRU caches (or bail on an early check) completes in
-		// milliseconds and immediately re-queries UnenrichedTracks. At the
-		// old fixed 1.1s MB pace that was invisible; against a self-hosted
-		// mirror at SelfHostedMinInterval it is not, and a batch that keeps
-		// failing WITHOUT stamping enriched_at (the transient-error path)
-		// would spin the DB as fast as the loop can turn.
-		if !sleepCtx(ctx, interBatchPause) {
+		if !sleepCtx(ctx, pause) {
 			return
 		}
 	}
+}
+
+// runBatch enriches one batch on a context the switch cancels, and returns
+// how long Run waits before the next.
+func (e *Enricher) runBatch(ctx context.Context) time.Duration {
+	ctx, release := CancelWhenOff(ctx, e.enabled)
+	defer release()
+	batch, err := e.store.UnenrichedTracks(ctx, e.BatchLimit)
+	if err != nil {
+		// A listing the shutdown or the switch stopped is not a failed one.
+		if failure := ctxerr.WithoutCancellation(ctx, err); failure != nil {
+			logger.Error("list unenriched", "err", failure)
+		}
+		return e.PollInterval
+	}
+	if len(batch) == 0 {
+		return e.PollInterval
+	}
+	for i := range batch {
+		if ctx.Err() != nil {
+			break
+		}
+		e.enrichOne(ctx, &batch[i])
+	}
+	// Unconditional breather between batches.
+	//
+	// The MB/CAA pacers are NOT a substitute: they only sleep when a
+	// network call is actually made, so a batch whose rows all resolve
+	// from the LRU caches (or bail on an early check) completes in
+	// milliseconds and immediately re-queries UnenrichedTracks. At the
+	// old fixed 1.1s MB pace that was invisible; against a self-hosted
+	// mirror at SelfHostedMinInterval it is not, and a batch that keeps
+	// failing WITHOUT stamping enriched_at (the transient-error path)
+	// would spin the DB as fast as the loop can turn.
+	return interBatchPause
 }
 
 // interBatchPause is the floor on how often Run may re-poll the store. Small
@@ -798,6 +809,10 @@ func (e *Enricher) resolveArtist(ctx context.Context, t *manifest.Track) error {
 		return nil
 	}
 	found, err := e.ensureArtistImageCached(ctx, artistMBID, imageName)
+	if errors.Is(err, errDeezerOff) {
+		// Deezer was not asked: no miss to cache, nothing to log.
+		return nil
+	}
 	if err != nil {
 		// Skip the Error log when the failure is just shutdown cancellation
 		// (ensureArtistImageCached returns ctx.Err() from its pacing
@@ -865,8 +880,18 @@ func (e *Enricher) ensureArtistImageCached(ctx context.Context, mbid, artistName
 		}
 		return true, nil
 	}
+	// enrich.deezerEnabled, asked once a cached file has not answered and
+	// again just before each of the two requests: off, Deezer is asked
+	// nothing more (errDeezerOff). A request already sent ends by itself,
+	// within the client's timeout.
+	if !e.deezerOn() {
+		return false, errDeezerOff
+	}
 	if !sleepCtx(ctx, e.DeezerMinInterval) {
 		return false, ctx.Err()
+	}
+	if !e.deezerOn() {
+		return false, errDeezerOff
 	}
 	imgURL, err := e.deezer.SearchArtist(ctx, artistName)
 	if err != nil {
@@ -879,6 +904,9 @@ func (e *Enricher) ensureArtistImageCached(ctx context.Context, mbid, artistName
 	// a second DeezerMinInterval pause.
 	if !sleepCtx(ctx, e.DeezerMinInterval) {
 		return false, ctx.Err()
+	}
+	if !e.deezerOn() {
+		return false, errDeezerOff
 	}
 	data, err := e.deezer.FetchImage(ctx, imgURL)
 	if err != nil {

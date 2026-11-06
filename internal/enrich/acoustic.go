@@ -2,6 +2,7 @@ package enrich
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/acoseac/1-bit-bridge/internal/manifest"
@@ -465,6 +466,10 @@ func (e *Enricher) fetchRecoveredArtistImage(ctx context.Context, t *manifest.Tr
 		return
 	}
 	found, err := e.ensureArtistImageCached(ctx, t.ArtistMBID, m.ArtistName)
+	if errors.Is(err, errDeezerOff) {
+		// Deezer was not asked: no miss to cache, nothing to log.
+		return
+	}
 	if err != nil {
 		if ctx.Err() == nil {
 			e.logUpstream(upstreamDeezer, "artist image", err, "mbid", t.ArtistMBID)
