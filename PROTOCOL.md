@@ -1023,11 +1023,14 @@ and a silent probe establish of the DAC now, and for DoP a check that every gain
 stage on the DAC's playback path is visible and at unity. A rate plays native DSD,
 in the first format the DAC offers of `DSD_U32_BE`, `DSD_U32_LE`, `DSD_U16_LE`, or
 DoP, or publishes no tuple; a rate the policy would convert to PCM publishes none
-until the player converts DSD itself. A change that takes a transport away at a
-rate, a gain stage leaving unity among them, leaves that rate empty at once: another
-transport is never published or played in its place. With no rate playing the
-player gives the original PCM codecs and ProtocolInfo bytes. GET only copies the
-published set, performing no hardware probes.
+until the player converts DSD itself. A change of the set never moves an occurrence
+to another transport: an occurrence plays the transport it was admitted under or
+stops (below). The set itself publishes what the policy plays at each rate now: a
+rate whose transport a change took away (a gain stage leaving unity takes DoP away)
+holds no tuple, or, under `auto` only, the other transport where that one qualifies
+by itself, its own first use included, as `auto` tries DoP once native is out at a
+rate. With no rate playing the player gives the original PCM codecs and ProtocolInfo
+bytes. GET only copies the published set, performing no hardware probes.
 
 `playback` is the latest current occurrence's observation. Released/revoked
 retain the last observation; capability tuples never substitute for it. Its
@@ -1036,7 +1039,7 @@ is DSD bits/s; `rateHz` is the actual ALSA word rate. PCM `logicalRate` is alway
 present and zero; PCM `policyId` is omitted when empty. These observations do
 not grant permission for another occurrence.
 
-A change of the set publishes it at the next `policyGeneration` and is reconciled per occurrence: one the new set still plays, on the DAC it was opened on, plays on; one prepared and not yet at the DAC is handed off again and plays under the new set, never skipped for the change; one heard, or whose DSD reached the DAC, is Immediate-stopped, and so is one whose DAC is not the one the new set was computed for (another model, or another firmware). A session playing PCM with only prepared DSD keeps playing PCM. Recovery never autoplays. A session's first DSD occurrence, every activation, a 100 ms monitor while a session plays DSD and the bridge's own refresh read the policy again, and every device opened for DSD must be the DAC the set was computed for.
+A change of the set publishes it at the next `policyGeneration` and is reconciled per occurrence: one the new set still plays, on the DAC it was opened on, plays on; one prepared and not yet at the DAC is handed off again and admitted under the new set as any entry is, so it plays if the new set plays its rate and is refused with the new set's word if not; one heard, or whose DSD reached the DAC, is Immediate-stopped, and so is one whose DAC is not the one the new set was computed for (another model, or another firmware). Two are stopped where they would be handed off again: a session's first DSD occurrence once its content has opened and before any of it reaches the DAC, and any occurrence of a session being released. One that has played out, its output drained or closed, is not judged. A session playing PCM with only prepared DSD keeps playing PCM. Recovery never autoplays. A session's first DSD occurrence, every activation, a 100 ms monitor while a session plays DSD and the bridge's own refresh read the policy again, and every device opened for DSD must be the DAC the set was computed for.
 
 | Track evidence, in this bridge's own library | DSD eligibility (also requires a stereo tuple of the published set at its rate) |
 |---|---|

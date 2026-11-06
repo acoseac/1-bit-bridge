@@ -78473,8 +78473,14 @@ enumeration, the reads (the unit's model and descriptors,
 altsets; its usbmixer table, `policy.ParseUSBMixer`, the kernel's
 `snd_usb_mixer_proc_read` format at the alsa-abi tag; its controls through
 `alsactl.Reader` with `AllowUnreadable`) bracketed by a second look at the
-unit; what does not read is no set, every rate refused as `dsd_dac_unread`.
-A rate the set converts is refused as `dsd_not_in_this_release` until B11.
+unit. The unit's model or its stream file not reading is no set, every rate
+refused as `dsd_dac_unread`; the DoP gain check's own inputs (the
+descriptors, the controls, the usbmixer table) not reading leave the set
+computed, `readMixer` handing them on as not read, and the gain check fails
+closed for DoP alone (`dop_gain_unverifiable` under an explicit dop; auto
+converts that rate), native unaffected (corrected in round 2: this record
+said no set; CodeRabbit). A rate the set converts is refused as
+`dsd_not_in_this_release` until B11.
 
 **Reconciliation.** A new set is judged for every DSD occurrence of every
 session (`policy.Reconcile` over `occurrenceFactsLocked`): Keep repoints it;
