@@ -77607,3 +77607,143 @@ standing. The rules patch (`rules-b728-b4-r2.patch`: B4's bullet, its Don't
 extended by the three points) applies strictly and under `git apply
 --check`; with it player.md is 97,450 bytes (97.5 %), and 98,076 (98.1 %)
 with B3's patch applied first, under budget, so no entry moved.
+
+## 2026-11-06 — B728 B6: the migration at serve's player start
+
+B728's B6 (`ops/plan-b728-dsd-capability-design.md`, sections 2.5, 3.6, 9.1
+item 5 and B6's row in 11), worker b728-b6 on `feat/b728-b6-migration` from
+main 4c1e44e3. B3's pure migration (`dsdstate.Migrate`, `Store.Migrate`) is
+wired into serve's player; production still authorizes DSD from the legacy
+keys through the legacy reader until B7 (`serve_player.go`'s
+`playback.Authorization`), so what plays did not change.
+
+**Where it runs.** On the player's supervisor goroutine, which already ran
+the player's start so that stalled storage cannot hold library serving
+(`cmd/bridge/serve_player_dsd.go`, `playerDSD`): `dsdstate.Open` and the
+part of the bridge's first in `bridgePlayer.start`, before the player's
+identity, backend and engine; the part of a DAC's in `watch`, at a watcher
+snapshot that resolves the boot binding to its DAC, available, before that
+snapshot's report reaches the engine, so the output is never available on a
+DAC whose part is still to be made (and a DAC the watcher finds after the
+start gets its part then). Serve took the data directory's lock before any
+of it, and the supervisor holds a share of `dataDirHold` until it returns.
+No step takes bridge.yaml's lock or writes the config: the keys are the boot
+snapshot's. Each step looks at the player's context first, so none starts
+once the stop has begun; a write under way finishes, since nothing
+interrupts the durable writer, and the share of the lock outlives it. A
+serve the lock refuses returns before any of it, and off Linux no player
+starts. Serve asks the store only while a step can change something
+(`steps`: no marker and a key set, or a part for a DAC waiting), so a state
+that did not read, whose marker no migration runs over, logs nothing more
+than what `Open` found.
+
+**Pending.** B3's marker says what waits (`bound_dac`, `record_model`).
+While it waits, each snapshot of the boot binding that resolves its DAC asks
+the part again, the DAC's identity and descriptors read again from the box
+and taken only while they are of the unit and enumeration the snapshot
+resolved (`boundOf`). A later start resolves with the keys the marker
+captured at the first start, never the ones bridge.yaml holds then: B3's
+`RecordToRead` and `Migrate` read the marker once it exists, and a test
+drops every key between the two starts and gets the captured `native`.
+
+**Failures.** A record refused or missing is B3's warning in the state, the
+migration done (but `identity_mismatch`, which waits for the record's own
+model), and serve logs a Warn line for each warning a step wrote: "player:
+the DSD migration recorded a warning in the player's DSD state", with the
+code, the reason and the DAC by its IDs and product string. A write that
+fails is one Warn line and the player starts all the same: "the migration of
+the legacy DSD keys was not saved, and the player starts without it: the
+next start goes on from what the state's file holds then", or, where the
+rename landed and the barrier after it failed (`atomicwrite.ErrLanded`),
+"…reached the state's file and is not known to be durable…". Neither claims
+the state as it was or a durable write, since `Store.Update` may leave a
+failed write's bytes in the file; B3's own error said "the state is not
+written", false for a write that landed, and now says "the state's write
+failed". The two tests: a write the medium check refuses before anything is
+created (no file; the next start migrates), and one whose barrier fails once
+the file is there (the next start reads the migration and writes and says
+nothing).
+
+**Config.** The legacy keys stay in `playerKeys`, and no validation refuses
+them. Each is warned of once per start: `config.LegacyDSDWarnings`, a scope
+runServe makes once its data directory's lock is decided and hands its boot
+snapshot (`Config.WarnLegacyDSDKeysIn`) before the live holder is built from
+it; every clone keeps the pointer, so the console's settings save and its
+Player page's writes validate through it and add nothing, and a config
+loaded outside a start (bridge doctor, `bridge output`, `serve
+--validate-config`) warns of none. Nothing of it is the process's: two
+starts in one process each warn once. The line: "output.player: a legacy DSD
+key is set; it stays in effect until the player's DSD cutover, and the
+player's start migrates it once into the player's DSD state", the key as an
+attribute and never its value. The words of section 3.6 changed:
+`PlayerConfig`'s doc and its three fields', `EffectiveDSDMode`'s comment,
+`Problem`'s dsdMode refusal (no longer "the player never converts DSD to
+PCM") and `neverSettings`' reason (no longer "the player never … converts");
+`dsdtopcm` and `dsd2pcm` stay refused by name. `bridge doctor` is unchanged:
+none of its lines reads the state, so it says the same with the state absent
+and mid-write (a staged file beside it), and it writes nothing in the data
+directory and takes no lock there.
+
+**Tests.** Red first at 8569119b, through a real serve start and the state
+read back through `dsdstate.Decode`: `TestAnExplicitOffSurvivesAsTheDefault`
+and `TestAMigratedApprovalCoversOnlyItsRates` failed "serve's player
+persisted no DSD state" (an unset dsdMode passed: nothing to migrate). The
+second also checks the legacy reader's verdict unchanged: the backend over
+the authorization serve wired publishes the record's DSD64 tuple. Then
+`TestAVersion35RecordOnAnotherPortMigrates` (production's reader refuses it,
+by its port), `TestARefusedRecordLeavesAWarning` (a stale version, a tampered
+body, a record that does not parse, none at its name, none named),
+`TestARefusedStateWriteLeavesAWarnLineAndThePlayerStarts`,
+`TestTheMigrationRunsOnceAndAgainAfterTheStateIsDeleted` (a key flipped and
+the record replaced: the state byte for byte as it was and no line of the
+migration's; deleted, the new input migrates),
+`TestAMigrationWaitingForTheDACIsResolvedWhenItArrives`,
+`TestAMigrationWaitingForTheDACIsResolvedAtALaterStartWithTheKeysItCaptured`,
+`TestARecordOfAnotherUnitWaitsForItsOwnModel` (the same run and a later
+start), `TestLegacyDSDKeysStillLoadAndAreWarnedOnce`,
+`TestAPlayerBlockWithLegacyKeysNeverTurnsThePlayerOff`,
+`TestASecondServeRefusedByTheLockMigratesNothing`,
+`TestACancelDuringTheMigrationIsARequestedStop` (at the start's step and at a
+DAC's part: exit 0, the file absent or byte for byte its prior content, no
+staged file once `settled` closes, the lock free),
+`TestAStalledMigrationDoesNotHoldUpTheLibrary` and
+`TestBridgeDoctorReadsNothingOfThePlayersDSDState` in cmd/bridge; the
+config's `TestTheLegacyDSDKeysAreTheOnesTheBlockSets`,
+`TestALegacyDSDBlockKeepsThePlayerOn`, `TestAStartsScopeWarnsOfEachLegacyKeyOnce`
+and `TestTheConfigWordsSayNoKeyConverts`.
+
+**Negative controls** (`.tmp/_b728-b6/controls.py`: exact-once
+replacements, the bytes restored from memory in a `finally`, each test alone
+from a compiled binary), on 38494d6b, twelve red: the migration running at
+every start (serve's step gate and B3's marker check both removed:
+`TestTheMigrationRunsOnceAndAgainAfterTheStateIsDeleted`); an acknowledgement
+widened to the transport (B3's `BitRates` dropped: the DSD64 and the
+version-35 tests); a failure with no warning written into the state (the
+refused-record and explicit-off tests), and with no Warn line beside it; a
+legacy key warned twice (the scope keeping nothing: the serve test and the
+config's own); the player turned off by a legacy key (`allowDoP` dropped from
+`playerKeys`: the serve test and the config's own); an unset dsdMode taken
+for an explicit off (`EffectiveDSDMode` in place of the raw field); a step
+that starts once the stop has begun; the DAC's part never asked from the
+watcher's snapshots (the DSD64 test and both pending tests); and the failed
+write's words claiming the state as it was. One more is green, as it should
+be: serve's step gate alone removed, B3's marker check standing, so the
+migration still runs once (two layers).
+
+**Checks**, on legion0 at 41931135, in one call through the shared build lock
+(`.tmp/_b728-b6/gates.py`): `make fmt`, which rewrote nothing; `make vet`, and
+with `GOOS=windows`, `GOOS=darwin` and `GOOS=linux GOARCH=386`, each clean;
+`make test` (TMPDIR under `.tmp/_b728-b6`), 84 packages ok and none failed,
+in 1,772 s, the ALSA, alsapcm, durable-writer and identity tests running here
+on Linux; `make build-all`; `go test -race -count=1` of `./cmd/bridge/` (965
+s), `./internal/config/` and `./internal/player/dsdstate/`, each ok; the
+qualification check, "qualification version OK: main..HEAD" (B6 changes no
+guarded path, so it takes no version); `make docs-check`, ok, and again on a
+copy of the tree with the rules patch applied. The tree is clean after.
+
+The rules patch (`rules-b728-b6.patch`: the Don't of player.md's binding
+bullet in section 9.1 item 5's words, its long form in
+`ops/History-rules-player.md` with B6's detail) applies strictly and under
+`git apply --check`; with it player.md is 98,269 bytes (98.3 %), under
+budget, so no entry moved. CLAUDE.md's `dsdstate` row and the package's doc
+no longer say nothing reads the state.
