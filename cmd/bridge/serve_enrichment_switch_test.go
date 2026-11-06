@@ -471,12 +471,31 @@ func seedAWaitingArtist(t *testing.T, dataDir, artist string) {
 	}
 }
 
+// harvestPendingCovers reads the pending premium covers, with their attempt
+// counts, from the harvest state file serve keeps in dataDir.
+func harvestPendingCovers(t *testing.T, dataDir string) map[string]int {
+	t.Helper()
+	raw, err := os.ReadFile(harvestStatePath(dataDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st atlasharvest.State
+	if err := json.Unmarshal(raw, &st); err != nil {
+		t.Fatal(err)
+	}
+	return st.PendingCovers
+}
+
 // TestTheHarvestRunsWithEnrichmentOff: enrich.enabled stops the enricher's
-// lookups and nothing of the Atlas harvest, its own opt-in to a service the
-// operator chose. Booted with enrichment off and the harvest on, serve's
-// harvest submits the library's release, polls for results and refetches a
-// pending premium cover from Atlas, while the enrichment mirror is asked
-// nothing (backlog B617).
+// lookups and, of the Atlas harvest, the premium cover fetches alone: the
+// harvest is its own opt-in to a service the operator chose, and its premium
+// covers are enrichment's artwork. Booted with enrichment off and the harvest
+// and its lyrics tier on, serve's harvest submits the library's release, polls
+// for results through more ticks than the attempts that drop a pending cover,
+// and asks Atlas for the track's lyrics, while Atlas is asked for no premium
+// cover, the pending one keeps its attempt count of zero, and the enrichment
+// mirror is asked nothing. Switched on from the console, the next ticks fetch
+// the premium cover and settle it (backlog B617).
 func TestTheHarvestRunsWithEnrichmentOff(t *testing.T) {
 	persistentMedium(t)
 	const release = "77777777-7777-4777-8777-777777777777"
@@ -489,6 +508,7 @@ func TestTheHarvestRunsWithEnrichmentOff(t *testing.T) {
 			_, _ = io.WriteString(w, `{"results":[],"nextCursor":0}`)
 		case strings.HasPrefix(r.URL.Path, "/release/"+release+"/front-"):
 			w.Header().Set("Content-Type", "image/jpeg")
+			w.Header().Set("X-Atlas-Asset-Source", "tidal")
 			_, _ = w.Write([]byte{0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10})
 		default:
 			http.NotFound(w, r)
@@ -534,23 +554,44 @@ func TestTheHarvestRunsWithEnrichmentOff(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	yaml := "atlas:\n  enabled: true\n  harvestEnabled: true\n" +
+	yaml := "atlas:\n  enabled: true\n  harvestEnabled: true\n  lyricsEnabled: true\n" +
 		"enrich:\n  enabled: false\n  musicbrainzBaseURL: " + mirror.srv.URL + "/ws/2\n  coverArtBaseURL: " + mirror.srv.URL + "/caa\n"
 	var asked atomic.Int64
-	b := startConsoleBridge(t, yaml, fill, func(o *serveOpts) {
+	var dataDir string
+	b := startConsoleBridge(t, yaml, func(lib string) {
+		dataDir = filepath.Join(filepath.Dir(lib), "data")
+		fill(lib)
+	}, func(o *serveOpts) {
 		o.harvestHTTP = atlas.srv.Client()
+		o.harvestPoll = 20 * time.Millisecond
 		o.enricherPoll = 20 * time.Millisecond
 		o.enricherAsked = func(bool) { asked.Add(1) }
 	})
+	waitForTracksIndexed(t, b.console, b.adminBase, 1, b.stderr)
+	// Eight ticks, past the six attempts that drop a pending cover a miss
+	// at a time: each tick polls once.
+	from := atlas.asked("GET /v1/atlas/harvest/results")
 	eventually(t, func() bool {
 		return atlas.asked("POST /v1/atlas/harvest/submit") > 0 &&
-			atlas.asked("GET /v1/atlas/harvest/results") > 0 &&
-			atlas.asked("GET /release/"+release+"/front-") > 0
-	}, "the harvest to submit, poll and refetch the pending cover")
-	waitForTracksIndexed(t, b.console, b.adminBase, 1, b.stderr)
-	from := asked.Load()
-	eventually(t, func() bool { return asked.Load() >= from+5 }, "five turns of the enricher")
+			atlas.asked("GET /v1/atlas/harvest/results") >= from+8 &&
+			atlas.asked("GET /v1/atlas/re") > 0
+	}, "the harvest to submit, poll through eight ticks and ask for the track's lyrics")
+	if n := atlas.asked("GET /release/" + release + "/front-"); n != 0 {
+		t.Errorf("Atlas was asked for the premium cover %d time(s) with enrichment off", n)
+	}
+	if got := harvestPendingCovers(t, dataDir); len(got) != 1 || got[release] != 0 {
+		t.Errorf("the pending covers after eight ticks with enrichment off = %v, want %s at 0 attempts", got, release)
+	}
+	turns := asked.Load()
+	eventually(t, func() bool { return asked.Load() >= turns+5 }, "five turns of the enricher")
 	if got := mirror.requests(); len(got) != 0 {
 		t.Errorf("the enrichment mirror was asked with enrichment off:\n%s", strings.Join(got, "\n"))
 	}
+
+	if code, body := patchSettings(t, b, `{"enrichEnabled":true}`); code != http.StatusOK {
+		t.Fatalf("switching enrichment on from the console answered %d %s", code, body)
+	}
+	eventually(t, func() bool {
+		return atlas.asked("GET /release/"+release+"/front-") > 0 && len(harvestPendingCovers(t, dataDir)) == 0
+	}, "the premium cover to be fetched and settled once enrichment is on")
 }

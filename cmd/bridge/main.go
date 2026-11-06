@@ -52,6 +52,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
 	"github.com/acoseac/1-bit-bridge/internal/dupes"
 	"github.com/acoseac/1-bit-bridge/internal/enrich"
+	"github.com/acoseac/1-bit-bridge/internal/enrichgate"
 	bridgefs "github.com/acoseac/1-bit-bridge/internal/fs"
 	"github.com/acoseac/1-bit-bridge/internal/fsutil"
 	"github.com/acoseac/1-bit-bridge/internal/handshakelog"
@@ -352,16 +353,30 @@ func (b bookletDiskStore) RemoveBooklet(mbid string) error {
 // reverse-resolved one. coverSize is the configured `enrich.coverSize`
 // (default 1200) — the same tier the enricher caches; /v1/artwork's size
 // ladder serves whichever tier exists for any requested size.
+//
+// enrichmentOn is enrich.enabled, read live (backlog B617): off, no premium
+// cover is asked of Atlas, and the sweep is told so (ErrCoversPaused), which
+// leaves the pending covers and their attempts as they are. Each fetch runs
+// on the switch's context (enrichgate.CancelWhenOff), so the premium
+// fetcher's own client refuses a request that starts after the flip and an
+// answer that arrives after it, and cuts one on the wire off within
+// switchEvery (a second when zero; a test seam); a miss that meets the switch
+// off is no miss either. A cover written while on is kept. Nil is on.
 type atlasCoverRefetcher struct {
-	premium    enrich.PremiumCoverFetcher
-	artworkDir string
-	store      *manifest.Store
-	coverSize  int
+	premium      enrich.PremiumCoverFetcher
+	artworkDir   string
+	store        *manifest.Store
+	coverSize    int
+	enrichmentOn func() bool
+	switchEvery  time.Duration
 }
 
 func (a atlasCoverRefetcher) RefetchPremium(ctx context.Context, releaseMBID string) (bool, error) {
 	if a.premium == nil {
 		return false, atlasharvest.ErrNoCredential
+	}
+	if a.enrichmentOn != nil && !a.enrichmentOn() {
+		return false, atlasharvest.ErrCoversPaused
 	}
 	// FIRST LAYER. releaseMBID comes off the Atlas harvest RESULTS page
 	// (atlasharvest pollResults -> AddPendingCovers -> this sweep), so it
@@ -394,7 +409,16 @@ func (a atlasCoverRefetcher) RefetchPremium(ctx context.Context, releaseMBID str
 		size = enrich.DefaultCoverSize
 	}
 	path := enrich.ArtworkCachePath(a.artworkDir, releaseMBID, size)
-	got, err := a.premium.RefetchPremium(ctx, path, releaseMBID, size)
+	fetchCtx, release := enrichgate.CancelWhenOff(ctx, a.enrichmentOn, a.switchEvery)
+	got, err := a.premium.RefetchPremium(fetchCtx, path, releaseMBID, size)
+	// Asked again once the fetch has answered: the switch refused its
+	// request, its answer or the read of it, or meets what it learnt off. No
+	// answer to count, so no miss and no failure.
+	paused := !got && enrichgate.Admit(fetchCtx) != nil
+	release()
+	if paused {
+		return false, atlasharvest.ErrCoversPaused
+	}
 	if errors.Is(err, enrich.ErrNoCredential) {
 		// Translate the enrich-layer sentinel to the harvest client's contract
 		// sentinel (this adapter is the bridge between the two packages).
@@ -2986,6 +3010,10 @@ type serveOpts struct {
 	// Atlas of its own (backlog B617). Per invocation for tailscaleCLI's
 	// reason.
 	harvestHTTP *http.Client
+	// harvestPoll shortens the Atlas harvest's tick, PollInterval; zero is
+	// its own (a minute). A boot test runs ticks enough to show what a
+	// switch-off leaves of the pending covers with it (backlog B617).
+	harvestPoll time.Duration
 }
 
 // adoptHandedListener returns lis when it is nil or when its address is
@@ -4524,14 +4552,18 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 			// their cached covers to premium once Atlas resolves them. Reuses
 			// the enricher's authenticated premium fetcher (premiumCovers is
 			// non-nil whenever harvestState is, both gated on atlas.enabled).
-			Refetcher: atlasCoverRefetcher{premium: premiumCovers, artworkDir: artworkDir, store: manifestStore, coverSize: cfg.Enrich.EffectiveCoverSize()},
-			Log:       logging.Component("atlasharvest"),
+			// enrich.enabled stops the premium cover fetches alone (backlog
+			// B617): the rest of the harvest is its own opt-in.
+			Refetcher: atlasCoverRefetcher{premium: premiumCovers, artworkDir: artworkDir, store: manifestStore,
+				coverSize: cfg.Enrich.EffectiveCoverSize(), enrichmentOn: enrichmentOn},
+			Log: logging.Component("atlasharvest"),
 			// Skip the booklet orphan-GC while a library (re)scan is in flight
 			// (B46): mid-rescan the album-release-MBID universe is transiently
 			// partial (e.g. a hybrid root add/remove runs WipeFilesystemTracks +
 			// rescan), so GCing against it would delete + re-fetch live booklets.
 			ScanInProgress: scanner.IsScanning,
 			HTTP:           opts.harvestHTTP,
+			PollInterval:   opts.harvestPoll,
 		}
 		// PDF booklet check + fetch loops (v1.8) ride the same harvest
 		// credential. The cache dir failing to create degrades to

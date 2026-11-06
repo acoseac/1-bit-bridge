@@ -471,14 +471,16 @@ func (u UPnPUpstreamConfig) Validate() error {
 //
 // enabled is the off switch for all of it (backlog B617): false, and the
 // enricher asks none of the three, nor a mirror set below, nor Atlas for a
-// premium cover, and acoustic fingerprinting stops with it, since its
-// answers feed nothing else. deezerEnabled stops the Deezer portrait lookups
-// alone, the one lookup a mirror cannot redirect. Both are on when absent,
-// both apply while the bridge runs, and only an explicit false is written:
-// the console's save of on writes no key. What was fetched before stays and
-// is served: the IDs in the rows, the covers and portraits in the artwork
-// cache. The Atlas harvest and lyrics, the update check and certificate
-// renewal are separate, and these stop none of them.
+// premium cover, the Atlas harvest's premium covers included, and acoustic
+// fingerprinting stops with it, since its answers feed nothing else.
+// deezerEnabled stops the Deezer portrait lookups alone, the one lookup a
+// mirror cannot redirect. Both are on when absent, both apply while the
+// bridge runs, and only an explicit false is written: the console's save of
+// on writes no key. What was fetched before stays and is served: the IDs in
+// the rows, the covers and portraits in the artwork cache. The rest of the
+// Atlas harvest (which still submits the library's artist and release IDs)
+// and its lyrics tier, the update check and certificate renewal are separate,
+// and these stop none of them.
 //
 // The base URLs point MusicBrainz and the Cover Art Archive at a self-hosted
 // 1-bit-atlas mirror; empty fields fall back to the public services. Set
