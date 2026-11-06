@@ -437,7 +437,9 @@ Moved verbatim from CLAUDE.md on 2026-10-18, under the section titles it had the
   (2026-11-06, backlog B756 round 2). It comes first in `outranks` and in
   `nestShallower`, and it is the bridge's own (no part of the key or the tier,
   which mirror the client), so a suppression never hides the one playable copy
-  while a gone copy's row waits out the deletion grace. **It knows nothing of an
+  while a gone copy's row waits out the deletion grace. Every scan that moves a
+  missing count across zero elects again, a subtree scan included (round 3: its
+  gate opened only on a write or a delete). **It knows nothing of an
   upstream's reachability**: enabling cross-source suppression would still
   suppress a local rip in favour of a copy on an upstream that is powered off
   half the time. Deciding where that sits in the ranking IS the product
