@@ -17,12 +17,14 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/player/format"
 )
 
-// designTable is section 3.2's table as the design file holds it: each row's
-// choice, its native and DoP cells, and its otherwise cell.
+// designRow is one row of section 3.2's table: its choice, its native and
+// DoP cells, and its otherwise cell.
 type designRow struct {
 	choice, native, dop, otherwise string
 }
 
+// designTable is section 3.2's table as the design file holds it, the rows
+// under its header.
 func designTable(t *testing.T) []designRow {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join("..", "..", "..", "ops", "plan-b728-dsd-capability-design.md"))
