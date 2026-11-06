@@ -3432,6 +3432,12 @@ func runServe(ctx context.Context, opts serveOpts, stdout, stderr io.Writer) (co
 	if playerStateErr != nil {
 		playerLog.Warn("player: not started", "reason", playerStateErr.Error())
 	}
+	// The legacy DSD keys still load, and are warned of once in this start
+	// (B728 B6): the scope is this start's, handed to the boot snapshot before
+	// the live holder is built from it, so every reader of the config here,
+	// the console's settings and Player page saves among them, shares it. A
+	// serve the lock refused returned above, having warned of nothing.
+	cfg.WarnLegacyDSDKeysIn(&config.LegacyDSDWarnings{})
 
 	// Resolve TLS material (default: dataDir/server.{crt,key}; overridable
 	// via cfg.TLSCertPath / cfg.TLSKeyPath), through the helper `bridge init`

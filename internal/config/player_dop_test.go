@@ -13,7 +13,7 @@ import (
 // through such a transform. The same block without it is not refused for
 // one.
 func TestADoPBlockTakesNoSampleTransform(t *testing.T) {
-	const why = "never resamples, converts, normalizes or mixes in software"
+	const why = "no player setting resamples, converts, normalizes or mixes in software"
 	dop := "  player:\n    enabled: true\n    dsdMode: dop\n    allowDoP: true\n"
 	for _, key := range []string{"softwareVolume", "volume", "replayGain", "resample", "forceRate", "normalization", "dither", "crossfade", "dsdToPCM"} {
 		t.Run(key, func(t *testing.T) {

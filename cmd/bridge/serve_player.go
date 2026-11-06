@@ -15,6 +15,7 @@ import (
 	"github.com/acoseac/1-bit-bridge/internal/dlna"
 	"github.com/acoseac/1-bit-bridge/internal/logging"
 	"github.com/acoseac/1-bit-bridge/internal/player/binding"
+	"github.com/acoseac/1-bit-bridge/internal/player/dsdstate"
 	"github.com/acoseac/1-bit-bridge/internal/player/engine"
 	"github.com/acoseac/1-bit-bridge/internal/player/hotplug"
 	"github.com/acoseac/1-bit-bridge/internal/player/library"
@@ -198,6 +199,11 @@ type servePlayerSeams struct {
 	// store wraps the library index the player's resolver reads: a boot
 	// test's hold on the index's build ahead of the first lookup.
 	store func(library.Store) library.Store
+	// migrates runs before each step of the DSD state's migration, on the
+	// supervisor, with the player's context, which its stop ends, and the DAC
+	// the step is for (nil for the start's): a boot test's hold on it
+	// (playerDSD.migrate).
+	migrates func(context.Context, *dsdstate.Bound)
 }
 
 // servePlayerBounds are the stop's bounds: how long it waits for the
@@ -266,13 +272,15 @@ type bridgePlayer struct {
 	failed string
 
 	// The supervisor's alone: the engine as it runs, the live config it
-	// follows, what it tells the engine of the output, and the OpenHome
-	// surface, when the opt-in starts it.
+	// follows, what it tells the engine of the output, the OpenHome surface,
+	// when the opt-in starts it, and the player's DSD state with the
+	// migration of the legacy keys (B728 B6).
 	run     *playerRun
 	live    func() hotplug.Settings
 	changed func() <-chan struct{}
 	out     playerOutput
 	surface *openhome.Surface
+	dsd     *playerDSD
 
 	mu            sync.Mutex
 	closing       bool
@@ -404,9 +412,13 @@ func (p *bridgePlayer) fail(why string) bool {
 	return false
 }
 
-// start makes the player's identity under the data directory's lock, builds
-// the resolver, the backend and the engine, and runs the engine; it reports
-// whether the player runs. A player refused once its identity is made
+// start opens the player's DSD state and migrates the legacy keys' part of
+// the bridge's into it (playerDSD), makes the player's identity under the
+// data directory's lock, builds the resolver, the backend and the engine,
+// and runs the engine; it reports whether the player runs. A stop during the
+// migration ends the start there, a requested stop, the player never run. A
+// migration that is not saved, or a state that does not read, stops nothing:
+// the player starts all the same. A player refused once its identity is made
 // leaves none this start made: the engine is what refuses storage it cannot
 // keep IDs on (an overlay that does not outlive a reboot, a directory that
 // cannot be synced), where an identity made now would outlive the refusal.
@@ -414,6 +426,19 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 	cfg, player := w.Cfg, w.Cfg.Output.Player
 	if w.Feed == nil {
 		return p.fail("serve started no hotplug watcher for the player")
+	}
+	// A stop begun before the supervisor ran ends the start here: the state's
+	// open writes when it finds a damaged file, and nothing of the player's is
+	// written once its stop has begun.
+	if ctx.Err() != nil {
+		p.markReady()
+		return false
+	}
+	p.dsd = openPlayerDSD(cfg.DataDir, player, w.Trees.or(hostTrees), p.seams)
+	_ = p.dsd.migrate(ctx, nil)
+	if ctx.Err() != nil {
+		p.markReady()
+		return false
 	}
 	id, made, err := backup.EnsurePlayerUUID(cfg.DataDir)
 	if err != nil {
@@ -522,7 +547,10 @@ func (p *bridgePlayer) start(ctx context.Context, w servePlayerWiring) bool {
 // watch reports the output to the engine as the watcher publishes it and as
 // the live config changes, and logs what the engine does, until ctx ends or
 // the engine stops on its own, which only a recovered panic in it makes it
-// do.
+// do. A snapshot that resolves the boot binding to its DAC first gets the
+// DAC its part of the migration of the legacy DSD keys, while that waits
+// (playerDSD.resolve), and then its report; a part that could not be made
+// then is asked again at the policy tick (playerDSD.retry), bounded.
 func (p *bridgePlayer) watch(ctx context.Context) {
 	policyTick := time.NewTicker(100 * time.Millisecond)
 	defer policyTick.Stop()
@@ -548,10 +576,12 @@ func (p *bridgePlayer) watch(ctx context.Context) {
 			return
 		case <-policyTick.C:
 			refresh()
+			p.dsd.retry(ctx)
 		case <-run.done:
 			playerLog.Error("player: the engine stopped on its own, which only a panic in it does (logged above): the player is off until bridge serve next starts, and the backend is asked to let go of the device; the release outcome follows")
 			return
 		case snap := <-run.sub.C():
+			p.dsd.resolve(ctx, snap)
 			p.report(snap)
 		case <-cfgChanged:
 			cfgChanged = p.changed()

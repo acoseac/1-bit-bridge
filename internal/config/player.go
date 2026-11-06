@@ -83,9 +83,18 @@ func logPlayerOff(why error) {
 // PlayerConfig is output.player: the bridge as a player of its own indexed
 // files through one DAC it opens exclusively (B470). It is off by default,
 // it runs on Linux only and never on a public bridge, and one configured
-// player is all there is. There is no resampling, forced-rate, software
-// mixer, normalization or DSD-to-PCM setting, and there never will be: the
-// player sends the DAC the file's samples or refuses the file.
+// player is all there is. No setting here changes samples: there is no
+// resampling, forced-rate, software mixer, normalization or DSD-to-PCM
+// setting, and a PCM file's samples reach the DAC as the file holds them.
+// What the player does with DSD is each DAC's choice, which the player's DSD
+// state keeps (<dataDir>/player-dsd.json, B728), never a key here.
+//
+// dsdMode, allowDoP and dsdQualification are the legacy DSD keys (B728):
+// still taken, since the reader refuses a key it does not know and an unread
+// block turns the player off, and still in effect until the player's DSD
+// cutover, which the player authorizes DSD by through the owner's record
+// until then; serve's player migrates them once into its DSD state at its
+// start (LegacyDSDKeys, LegacyDSDWarnings).
 //
 // A block that does not read, or reads and is refused (Problem), turns the
 // player off with a logged reason and stops nothing else: MPD, the library
@@ -107,16 +116,19 @@ type PlayerConfig struct {
 	PauseReleaseSeconds *int `yaml:"pauseReleaseSeconds,omitempty"`
 	// Device is the binding: which DAC the player opens.
 	Device PlayerDevice `yaml:"device,omitempty"`
-	// DSDMode is auto, native, dop or off (default). Every mode but off plays
-	// DSD only under a local owner-approved policy: native its native ones,
-	// dop its DoP ones, auto native first and DoP only at a rate the record
-	// holds no native policy for (B470 2d.2). DSD is never converted.
+	// DSDMode is auto, native, dop or off, a legacy key (the type's doc):
+	// "" where unset, which EffectiveDSDMode reads as off, and which the
+	// migration tells from an explicit off. Until the cutover every mode but
+	// off plays DSD only under a local owner-approved policy: native its
+	// native ones, dop its DoP ones, auto native first and DoP only at a rate
+	// the record holds no native policy for (B470 2d.2).
 	DSDMode string `yaml:"dsdMode,omitempty"`
-	// DSDQualification names an owner-approved record within the bridge state directory.
+	// DSDQualification names an owner-approved record within the bridge
+	// state directory, a legacy key.
 	DSDQualification string `yaml:"dsdQualification,omitempty"`
-	// AllowDoP lets dop and auto play an approved DoP policy. Nil is false:
-	// the block still loads, and DoP-only DSD is refused as dop_not_allowed
-	// while PCM plays.
+	// AllowDoP lets dop and auto play an approved DoP policy, a legacy key.
+	// Nil is false: the block still loads, and DoP-only DSD is refused as
+	// dop_not_allowed while PCM plays.
 	AllowDoP *bool `yaml:"allowDoP,omitempty"`
 	// Mixer is the hardware volume control, and this release takes type
 	// none alone: the output is fixed.
@@ -217,8 +229,12 @@ func (p PlayerConfig) PauseRelease() time.Duration {
 	return time.Duration(*p.PauseReleaseSeconds) * time.Second
 }
 
-// EffectiveDSDMode is dsdMode, off when it is not set. Under off the engine
-// (PR 4b) refuses a DSD track: there is no DSD-to-PCM setting.
+// EffectiveDSDMode is dsdMode, off when it is not set: what the player
+// authorizes DSD by until the cutover, under which an unset and an explicit
+// off alike refuse a DSD track. It maps the two together, so the migration
+// reads DSDMode itself, where "" is unset and "off" was written (B728: an
+// explicit off becomes the DSD state's defaultMode off, and an unset key
+// migrates nothing).
 func (p PlayerConfig) EffectiveDSDMode() string {
 	if p.DSDMode == "" {
 		return "off"
@@ -243,6 +259,72 @@ func (p PlayerConfig) EffectiveOpenHomePort() int {
 
 // AllowsDoP reports allowDoP, false when it is not set.
 func (p PlayerConfig) AllowsDoP() bool { return p.AllowDoP != nil && *p.AllowDoP }
+
+// LegacyDSDKeys are the legacy DSD keys the block sets (the type's doc), by
+// name, in the order the block lists its keys: nil for none. A key written
+// with no value ("" or null) is not set.
+func (p PlayerConfig) LegacyDSDKeys() []string {
+	var keys []string
+	if p.DSDMode != "" {
+		keys = append(keys, "dsdMode")
+	}
+	if p.DSDQualification != "" {
+		keys = append(keys, "dsdQualification")
+	}
+	if p.AllowDoP != nil {
+		keys = append(keys, "allowDoP")
+	}
+	return keys
+}
+
+// legacyDSDMessage is the warning a start of bridge serve logs once for each
+// legacy DSD key its config sets (LegacyDSDWarnings), the key an attribute and
+// its value never: transitional words, true until the cutover, which claim no
+// migration made (the player's start says what it migrated).
+const legacyDSDMessage = "output.player: a legacy DSD key is set; it stays in effect until the player's DSD cutover, " +
+	"and the player's start migrates it once into the player's DSD state"
+
+// LegacyDSDWarnings is one start's warnings of the legacy DSD keys (B728 B6):
+// in it each key the config sets is warned once (legacyDSDMessage), however
+// many readers of the config the start has. bridge serve makes one at each
+// start and hands it to its boot snapshot (Config.WarnLegacyDSDKeysIn), and
+// every clone of that config, the live holder's and the clones its console
+// saves validate, keeps it, so Validate on any of them warns nothing more. A
+// config loaded without one warns nothing. It is a value of its start's, never
+// the process's, so two starts in one process (the launcher menu, the tests)
+// each warn once. The zero value is ready; a nil one warns nothing.
+type LegacyDSDWarnings struct {
+	mu     sync.Mutex
+	warned map[string]bool
+}
+
+// Warn logs legacyDSDMessage for each legacy DSD key p sets that this scope
+// has not warned of yet.
+func (w *LegacyDSDWarnings) Warn(p PlayerConfig) {
+	if w == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.warned == nil {
+		w.warned = map[string]bool{}
+	}
+	for _, key := range p.LegacyDSDKeys() {
+		if w.warned[key] {
+			continue
+		}
+		w.warned[key] = true
+		validateLogger.Warn(legacyDSDMessage, "key", "output.player."+key)
+	}
+}
+
+// WarnLegacyDSDKeysIn gives c the start's scope of the legacy DSD keys'
+// warnings, which every clone of c keeps and Validate warns through, and warns
+// now of the keys c sets: Load ran its Validate before the scope was given.
+func (c *Config) WarnLegacyDSDKeysIn(w *LegacyDSDWarnings) {
+	c.legacyDSD = w
+	w.Warn(c.Output.Player)
+}
 
 // EffectiveMixer is mixer.type, none when it is not set.
 func (p PlayerConfig) EffectiveMixer() string {
@@ -424,7 +506,7 @@ func (p PlayerConfig) Problem() error {
 	switch p.DSDMode {
 	case "", "off", "auto", "native", "dop":
 	default:
-		return errors.New(at + "dsdMode: that value is not a DSD mode (auto, native, dop or off); the player never converts DSD to PCM")
+		return errors.New(at + "dsdMode: that value is not a DSD mode (auto, native, dop or off): this legacy key takes no other, and no setting here converts DSD to PCM")
 	}
 
 	switch p.Mixer.Type {
@@ -679,9 +761,11 @@ func orList(keys []string) string {
 
 // neverSettings are the keys every part of the block refuses by name, with
 // why: what an operator who comes from MPD's or a DAC's settings looks for.
-// Matched without regard to case.
-var neverSettings = keysWithReason("the player never resamples, converts, normalizes or mixes in software: every sample "+
-	"reaches the DAC as the file holds it",
+// Matched without regard to case. No config key converts or resamples, so
+// dsdtopcm and dsd2pcm stay refused with the rest (B728): what the player
+// does with DSD is each DAC's choice in the player's DSD state.
+var neverSettings = keysWithReason("no player setting resamples, converts, normalizes or mixes in software: a PCM file's samples "+
+	"reach the DAC as the file holds them, and what the player does with DSD is each DAC's choice in the player's DSD state, never a key here",
 	"resample", "resampler", "resampling", "samplerate", "rate", "forcerate", "upsample", "upsampling", "softwarevolume",
 	"softvolume", "softvol", "softwaremixer", "volume", "normalize", "normalization", "volumenormalization", "replaygain",
 	"dither", "crossfade", "dsdtopcm", "dsd2pcm")
